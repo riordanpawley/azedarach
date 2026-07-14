@@ -37,6 +37,7 @@ This directory primarily contains **developer/internal documentation**.
 - [25-configurable-views.md](25-configurable-views.md)
 - [25-cross-project-user-database.md](25-cross-project-user-database.md)
 - [25-rootless-orchestrator-contracts.md](25-rootless-orchestrator-contracts.md)
+- [26-team-collaboration-architecture.md](26-team-collaboration-architecture.md)
 - [26-test-wait-audit.md](26-test-wait-audit.md) — inventory and policy for test waits over 500 ms
 - [26-test-timing-profiles.md](26-test-timing-profiles.md)
 - [27-go-cache-protocol.md](27-go-cache-protocol.md) — bounded worktree-aware Go cache ownership, validation, and maintenance

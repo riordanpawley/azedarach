@@ -55,7 +55,7 @@ Az's orchestration loop is graph-first:
 5. Watch progress with `az orchestrate watch`.
 6. Use mailbox or native session messages for coordination.
 7. Treat `in_review` as "ready for orchestrator validation", not blocked.
-8. Integrate accepted workers through `az issue close --id <worker>`.
+8. Accept and close reviewed workers through `az orchestrate review accept --root <root> --issue <worker>`.
 9. Run `az orchestrate complete-check --root <root>` before finishing.
 
 The key architectural choice is daemon authority. The daemon owns lifecycle and
@@ -100,7 +100,7 @@ flowchart TD
     M --> N{Accepted?}
     N -- no --> O[az orchestrate message with repair guidance]
     O --> K
-    N -- yes --> P[az issue close --id worker]
+    N -- yes --> P[az orchestrate review accept]
     P --> D
     I --> Q{Pass?}
     Q -- no --> D
@@ -161,7 +161,7 @@ flowchart TD
     H --> I{Review accepted?}
     I -- no --> J[Repair worker or live nudge]
     J --> F
-    I -- yes --> K[az issue close --id worker]
+    I -- yes --> K[az orchestrate review accept]
     K --> L[Root complete-check]
     L --> M[Final review and integration]
 ```
@@ -516,7 +516,7 @@ Long term:
 - Do not make `in_review` mean blocked.
 - Do not auto-delegate sub-orchestrators in v1.
 - Do not make cloud agents required for normal local workflow.
-- Do not bypass `az issue close --id <worker>` for accepted worker integration.
+- Use `az orchestrate review accept --root <root> --issue <worker>` for the reviewer decision so trusted acceptance and the delegated close transaction remain one auditable operation.
 
 ## References
 

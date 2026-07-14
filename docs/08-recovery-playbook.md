@@ -119,9 +119,18 @@ upgraded issue schema.
 
 ## Orchestration Integrate Safety Gate
 
-Accepted worker completion should normally use `az issue close --id <issue-id>`.
-That command owns the merge, records stopped session state before tmux cleanup,
-removes the worktree, and closes the issue as one authoritative flow.
+Accepted review completion should normally use
+`az orchestrate review accept --root <root> --issue <issue-id>`. The review
+decision records trusted acceptance and delegates merge, stopped-session state,
+tmux cleanup, worktree removal, and terminal close to the authoritative close
+flow before reporting success.
+
+If authoritative close fails after acceptance, repair the reported close
+precondition and retry with the same intent key. The accepted reviewer decision
+remains authoritative while the operational failure is recorded separately;
+the retry resumes close without duplicating acceptance. A ticket reopened after
+a successful close is not considered complete from historical evidence: retrying
+the same intent closes its current state again.
 
 When evaluating `az orchestrate integrate --issue <issue-id>`, treat it as an
 inspection and repair command, not the normal merge authority. Merge/close
@@ -145,10 +154,20 @@ If merge guidance is blocked, recover with:
 4. Re-run `az orchestrate integrate --issue <issue-id>`.
 
 Use `az branch merge --source <issue-id> --target <ancestor-issue-id|base>` only for manual conflict or close-repair. Use `--source <ancestor> --target <descendant>` when materializing accepted ancestor work into a follow-on worktree; the current worktree is never an implicit target. Root-to-base merges require durable human acceptance recorded on the root issue.
+
 recovery. When it targets a branch that is already checked out in another Git
 worktree, the merge runs in that attached worktree. This avoids Git's
 single-checkout guard for branches while keeping the target branch as the merge
 authority.
+
+Resolve orchestration reviews through the daemon-backed decision command. Run
+`az orchestrate review accept --root <root> --issue <review>` only after the
+evidence is accepted; it records trusted acceptance and completes authoritative
+integration, cleanup, and terminal close before returning success. Use
+`az orchestrate review return --root <root> --issue <review> --finding "..."`
+for unresolved work. If a decision partially fails, retry it with the same
+reported `--intent-key`; do not present dependent results while the accepted
+review ticket remains non-terminal.
 
 ## Project Orchestrator Recovery
 

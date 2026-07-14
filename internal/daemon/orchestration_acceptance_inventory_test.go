@@ -29,6 +29,7 @@ func TestProjectOrchestrationEndToEndAcceptanceInventory(t *testing.T) {
 		{"human-answer-resolution", TestInteractionStructuredProposalCanBeHumanEditedAndAtomicallyResolved},
 		{"review-return", TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings},
 		{"review-close-authority", TestReviewAcceptSurfacesAuthoritativeCloseFailureAndKeepsReviewState},
+		{"review-close-before-dependent-completion", TestReviewAcceptClosesMultipleInternalReviewsBeforeDependentCompletion},
 		{"quiescence-grace-pause-wake", runProjectOrchestratorLifecycleAcceptance},
 		{"restart-action-replay", TestProjectOrchestratorLoopMultiDaemonReplayDoesNotDuplicateCheckpointAction},
 		{"advisor-cross-daemon-race", TestAdvisorRecoveryCleansRuntimeWhenTerminalRequestWinsCrossDaemonRace},
