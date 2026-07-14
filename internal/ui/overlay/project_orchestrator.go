@@ -52,6 +52,10 @@ func (o *ProjectOrchestratorOverlay) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if o.action != nil {
 				return o, o.action("attach")
 			}
+		case "x":
+			if o.action != nil {
+				return o, o.action("stop")
+			}
 		}
 	}
 	return o, nil
@@ -65,7 +69,7 @@ func (o *ProjectOrchestratorOverlay) View() string {
 		fmt.Sprintf("ready %d  review %d", o.details.Ready, o.details.Review),
 		fmt.Sprintf("waiting-human %d  owned-elsewhere %d", o.details.WaitingHuman, o.details.OwnedElsewhere),
 		"",
-		"s start   a/Enter attach   Esc close",
+		"s start   a/Enter attach   x stop   Esc close",
 	}
 	return lipgloss.NewStyle().Width(inner).Height(max(1, h-2)).Render(strings.Join(lines, "\n"))
 }

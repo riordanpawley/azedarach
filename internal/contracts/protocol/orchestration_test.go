@@ -11,7 +11,7 @@ func TestProtocolV48PreservesCombinedOrchestrationViewProjectionAndLearningContr
 	if CurrentVersion != 48 {
 		t.Fatalf("protocol version = %d, want 48", CurrentVersion)
 	}
-	if CommandOrchestratorSessionStart == "" || CommandOrchestratorSessionAttach == "" || CommandOrchestratorSessionStatus == "" || EventOrchestrationLoopUpdated == "" || EventBoardViewChanged == "" {
+	if CommandOrchestratorSessionStart == "" || CommandOrchestratorSessionAttach == "" || CommandOrchestratorSessionStop == "" || CommandOrchestratorSessionStatus == "" || EventOrchestrationLoopUpdated == "" || EventBoardViewChanged == "" {
 		t.Fatal("combined orchestration and board-view protocol contracts must remain registered")
 	}
 
@@ -63,5 +63,18 @@ func TestProtocolV48PreservesCombinedOrchestrationViewProjectionAndLearningContr
 		if _, ok := shape[key]; !ok {
 			t.Fatalf("combined intent omitted %q: %s", key, encoded)
 		}
+	}
+
+	stopRequest := OrchestratorSessionRequest{Scope: domain.ProjectOrchestrationScope(), ExpectedSessionID: "az-orchestrator-project"}
+	encoded, err = json.Marshal(stopRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shape = map[string]json.RawMessage{}
+	if err := json.Unmarshal(encoded, &shape); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := shape["expected_session_id"]; !ok {
+		t.Fatalf("orchestrator stop precondition omitted from request: %s", encoded)
 	}
 }

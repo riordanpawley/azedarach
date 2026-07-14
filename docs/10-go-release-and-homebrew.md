@@ -20,8 +20,9 @@ This repository now ships the Go implementation as the canonical `az` CLI.
 2. Verify installed binaries:
    - `az --version`
    - `azd --version`
-3. If an older manual symlink exists, refresh links with local helper:
-   - `just build-link-run -- --no-run`
+3. If an older worktree-targeting symlink exists, migrate it to the stable,
+   paired generation layout with the local helper:
+   - `just build-install-run --no-run`
 
 ## Release Commands
 

@@ -152,6 +152,24 @@ func TestOrchestratorSessionAttachIsDeclarativeCLICommand(t *testing.T) {
 	}
 }
 
+func TestOrchestratorSessionStopUsesTypedDaemonCommand(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	var gotCommand string
+	deps := &Dependencies{DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		gotCommand = req.Command
+		return responseWithJSON(req, protocol.OrchestratorSessionResult{Scope: domain.ProjectOrchestrationScope(), SessionID: "az-orchestrator-project", Disposition: "stopped-forced", Lifecycle: domain.OrchestratorPaused, Forced: true}), nil
+	}})}
+	output := captureStdout(t, func() error { return OrchestratorSessionCommand(deps, "stop", OrchestratorSessionOptions{}) })
+	if gotCommand != protocol.CommandOrchestratorSessionStop {
+		t.Fatalf("command = %q", gotCommand)
+	}
+	for _, want := range []string{"Disposition: stopped-forced", "State: paused", "Live: false", "Forced cleanup: true"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q: %s", want, output)
+		}
+	}
+}
+
 func TestProjectOrchestrationWatchKeyIgnoresGenerationTime(t *testing.T) {
 	first := protocol.OrchestrationSnapshot{Scope: domain.ProjectOrchestrationScope(), Revision: 7, GeneratedAt: time.Now()}
 	second := first
@@ -204,5 +222,13 @@ func TestParseOrchestratorSessionArgsUsesFlagsBeforePositionals(t *testing.T) {
 	}
 	if _, err := ParseOrchestratorSessionArgs("start", []string{"az-root"}); err == nil {
 		t.Fatal("expected positional argument rejection")
+	}
+}
+
+func TestRootlessAgentHookUsesExplicitOrchestratorSessionID(t *testing.T) {
+	t.Setenv("AZEDARACH_SESSION_ID", "azedarach-orchestrator-project")
+	t.Setenv("TMUX_PANE", "%7")
+	if got := agentHookSessionID("project", ""); got != "azedarach-orchestrator-project" {
+		t.Fatalf("session id = %q", got)
 	}
 }

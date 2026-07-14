@@ -2158,7 +2158,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	recordPhase("runtime_projection_repair", phaseStartedAt, false)
 
 	phaseStartedAt = time.Now()
-	task, err := issueClient.UpdateWithRuntime(ctx, projectID, taskID, closeStatus)
+	task, err := issueClient.CloseWithRuntime(ctx, projectID, taskID, closeStatus)
 	if err != nil {
 		recordPhase("status_write", phaseStartedAt, false)
 		return result, taskClosePostIntegrationPhaseError(taskID, "status_write", integration, err)

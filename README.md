@@ -25,7 +25,7 @@ This repository ships the Go implementation as the canonical runtime:
 Build, link, and run:
 
 ```bash
-just build-link-run
+just build-install-run
 ```
 
 This also starts or reuses a local Jaeger container named `azedarach-jaeger`
@@ -43,14 +43,14 @@ different volume, `AZEDARACH_JAEGER_MEMORY=none` to disable the container memory
 limit, or `AZEDARACH_JAEGER_STORAGE=memory` with
 `AZEDARACH_JAEGER_MAX_TRACES=20000` for throwaway in-memory traces. If the
 existing `azedarach-jaeger` container was OOM-killed or was created with older
-storage settings, `just build-link-run` recreates it with the current defaults.
+storage settings, `just build-install-run` recreates it with the current defaults.
 Badger retains traces by TTL; it does not guarantee keeping all error traces
 after expiry.
 
 Build and link without starting interactive TUI:
 
 ```bash
-just build-link-run -- --no-run
+just build-install-run --no-run
 ```
 
 Then verify:
@@ -292,7 +292,7 @@ flowchart TD
 This list is intentionally non-exhaustive. Run `just --list` for all available tasks.
 
 ```bash
-just build         # build bin/az + bin/azd
+just build         # build isolated .tmp/az-test/az + azd validation binaries
 just run           # restart daemon + run az
 just test          # go test -v ./...
 just type-check    # go build ./...
@@ -301,6 +301,15 @@ just git-config-lock
 just git-config-unlock
 just git-config-status
 ```
+
+Ordinary `build` and `clean` recipes preserve `bin/az` and `bin/azd`. The
+explicit `just build-install-run` workflow builds a private paired generation,
+serializes installers, and commits both commands through one atomic generation
+switch in the selected stable user bin directory (an existing global command
+directory, Homebrew's bin, or `~/.local/bin`). The public command links resolve
+only within that stable install directory, never back into a Git worktree, and
+linked worktrees are rejected before building. `just install` is intentionally
+disabled because an az-only install can create a protocol-incompatible pair.
 
 Direct Go entrypoint examples:
 

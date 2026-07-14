@@ -93,12 +93,19 @@ SQLite and subprocess contention transferring work into the daemon and Git
 packages on high-core hosts while retaining package-level parallel execution.
 
 `just test` is deliberately the cold profile, rather than a second `go test
-./...` path. `just merge-gate` performs three non-overlapping responsibilities:
+./...` path. `just merge-gate` performs four non-overlapping responsibilities:
 
-1. `just build` verifies the production commands compile.
+1. `just build` verifies the production commands compile into worktree-local
+   `.tmp/az-test` binaries without mutating user-global installed runtime assets.
 2. `just test` runs ordinary semantic coverage exactly once and preserves the
    complete JSON failure stream.
-3. `just check-boundaries` runs static dependency/drift checks and the small
+3. `just test-build-contract` executes the real `build` and `clean` recipes in
+   an isolated fixture and verifies they preserve existing `bin/az` and
+   `bin/azd` link targets. It also verifies `build-install-run` rejects linked
+   worktrees before mutation, rolls back a failed link migration, serializes
+   concurrent installers, and commits `az` plus `azd` through one atomic
+   generation switch. The stable public links never target the repository.
+4. `just check-boundaries` runs static dependency/drift checks and the small
    boundary profile. It no longer reruns all CLI, TUI, daemon, and client tests
    after the cold suite.
 

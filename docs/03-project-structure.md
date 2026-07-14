@@ -108,7 +108,8 @@ azedarach/
 ```just
 # justfile
 build:
-	go build -o bin/az ./cmd/az
+	go build -o .tmp/az-test/az ./cmd/az
+	go build -o .tmp/az-test/azd ./cmd/azd
 
 run:
 	go run ./cmd/az
@@ -124,7 +125,11 @@ type-check:
 	go build ./...
 
 install:
-	go install ./cmd/az
+	@echo "Use build-install-run for a paired az/azd install" >&2
+	@exit 1
+
+build-install-run:
+	./scripts/build-install-run.sh
 
 lint:
 	golangci-lint run ./...

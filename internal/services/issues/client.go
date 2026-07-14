@@ -2445,7 +2445,7 @@ func (c *Client) Ready(ctx context.Context) ([]domain.Task, error) {
 func (c *Client) Update(ctx context.Context, id string, status domain.Status) error {
 	return c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
-			return c.updateLocked(ctx, id, status)
+			return c.updateLocked(ctx, id, status, false)
 		})
 	})
 }
@@ -2497,7 +2497,7 @@ func (c *Client) RepairReadyIdleEngagement(ctx context.Context, id string) (bool
 	return repaired, err
 }
 
-func (c *Client) updateLocked(ctx context.Context, id string, status domain.Status) error {
+func (c *Client) updateLocked(ctx context.Context, id string, status domain.Status, releaseExecutionLease bool) error {
 	db, err := c.dbHandle()
 	if err != nil {
 		return err
@@ -2557,6 +2557,27 @@ func (c *Client) updateLocked(ctx context.Context, id string, status domain.Stat
 			return c.wrapError("update", id, fmt.Errorf("%w: cannot close parent issue with %d open child issue(s)", domain.ErrConflict, openChildCount))
 		}
 	}
+	if releaseExecutionLease {
+		res, err := tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases WHERE issue_id = ? AND purpose = ?`, id, domain.CoordinationLeaseExecution)
+		if err != nil {
+			return c.wrapError("update", id, fmt.Errorf("release execution lease before terminal status write: %w", err))
+		}
+		released, err := res.RowsAffected()
+		if err != nil {
+			return c.wrapError("update", id, fmt.Errorf("inspect execution lease release before terminal status write: %w", err))
+		}
+		if released > 0 {
+			if err := c.appendIssueObservationEvent(ctx, tx, id, domain.IssueEventIssueOwnershipChanged, map[string]any{
+				"action":      "released",
+				"released_by": "task.close",
+				"forced":      true,
+				"purpose":     domain.CoordinationLeaseExecution,
+				"reason":      "terminal_close",
+			}); err != nil {
+				return c.wrapError("update", id, err)
+			}
+		}
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	var closedAt *string
 	if nextState.Workflow() == domain.IssueWorkflowClosed {
@@ -2605,6 +2626,26 @@ func (c *Client) updateLocked(ctx context.Context, id string, status domain.Stat
 // UpdateWithRuntime changes an issue status and returns the changed issue.
 func (c *Client) UpdateWithRuntime(ctx context.Context, projectID, id string, status domain.Status) (domain.Task, error) {
 	if err := c.Update(ctx, id, status); err != nil {
+		return domain.Task{}, err
+	}
+	return c.GetWithRuntime(ctx, projectID, id)
+}
+
+// CloseWithRuntime atomically releases the execution lease before writing a
+// terminal issue state, then returns the changed issue with runtime projection.
+func (c *Client) CloseWithRuntime(ctx context.Context, projectID, id string, status domain.Status) (domain.Task, error) {
+	nextState, err := issueStateFromStatus(status)
+	if err != nil {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), err)
+	}
+	if nextState.Workflow() != domain.IssueWorkflowClosed {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), fmt.Errorf("status %s is not terminal", status))
+	}
+	if err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			return c.updateLocked(ctx, id, status, true)
+		})
+	}); err != nil {
 		return domain.Task{}, err
 	}
 	return c.GetWithRuntime(ctx, projectID, id)

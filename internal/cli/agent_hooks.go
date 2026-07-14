@@ -210,9 +210,6 @@ func ingestAgentHookRuntimeSignalBestEffort(ctx context.Context, deps *Dependenc
 			}
 		}
 	}
-	if issueID == "" {
-		signal.SessionID = ""
-	}
 	_, err := deps.DaemonClient.RuntimeSignalIngest(ctx, signal)
 	return err
 }
@@ -244,6 +241,9 @@ func agentProcessExitStatus(payload map[string]any) *int {
 }
 
 func agentHookSessionID(projectID, issueID string) string {
+	if explicit := strings.TrimSpace(os.Getenv("AZEDARACH_SESSION_ID")); explicit != "" && strings.TrimSpace(issueID) == "" {
+		return explicit
+	}
 	sessionID := naming.CanonicalSessionID(projectID, strings.TrimSpace(issueID))
 	paneID := sanitizeAgentSessionIDPart(os.Getenv("TMUX_PANE"))
 	if paneID == "" {

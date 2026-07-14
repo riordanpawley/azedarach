@@ -1,4 +1,4 @@
-name: Install Link Smoke
+name: Install Smoke
 
 on:
   pull_request:
@@ -8,7 +8,7 @@ on:
 
 jobs:
   smoke:
-    name: ${{ matrix.os }} install/link
+    name: ${{ matrix.os }} install
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -27,12 +27,16 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build + link binaries without launching TUI
+      - name: Build + install standalone binaries without launching TUI
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
-          AZ_LINK_DIR="$RUNNER_TEMP/bin" ./scripts/build-link-run.sh --no-run
+          AZ_INSTALL_DIR="$RUNNER_TEMP/bin" ./scripts/build-install-run.sh --no-run
           test -x "$RUNNER_TEMP/bin/az"
           test -x "$RUNNER_TEMP/bin/azd"
+          test -L "$RUNNER_TEMP/bin/az"
+          test -L "$RUNNER_TEMP/bin/azd"
+          test "$(readlink "$RUNNER_TEMP/bin/az")" = ".azedarach-current/az"
+          test "$(readlink "$RUNNER_TEMP/bin/azd")" = ".azedarach-current/azd"
 
       - name: Smoke commands
         run: |

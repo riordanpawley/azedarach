@@ -3148,7 +3148,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 		if suppress, _ := ctx.Value(rootedOrchestratorRecoveryContextKey{}).(bool); suppress {
 			break
 		}
-		if !orchestratorSessionProjection(session) || !sessionProjectionCanRecreateTmuxSession(session) {
+		if !orchestratorSessionProjection(session) {
 			continue
 		}
 		isProjectScope := strings.TrimSpace(session.ScopeID) == string(domain.OrchestrationScopeProject)
@@ -3169,8 +3169,45 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 			}
 		}
 		canonicalSessionID := d.orchestratorSessionID(projectID, scope)
-		if _, live := liveTmuxNames[strings.TrimSpace(canonicalSessionID)]; live {
+		runtimeSessionID := strings.TrimSpace(session.ID)
+		if runtimeSessionID == "" {
+			runtimeSessionID = canonicalSessionID
+		}
+		_, canonicalLive := liveTmuxNames[strings.TrimSpace(canonicalSessionID)]
+		_, projectedLive := liveTmuxNames[runtimeSessionID]
+		if daemonstate.NormalizeSessionState(session.State) == daemonstate.SessionStateStopped {
+			if _, err := d.pauseEndedOrchestratorSession(ctx, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, runtimeSessionID); err != nil {
+				return result, fmt.Errorf("align stopped orchestrator lease %s: %w", session.ScopeID, err)
+			}
+			if canonicalLive || projectedLive {
+				cleanupSessionID := runtimeSessionID
+				if !projectedLive && canonicalLive {
+					cleanupSessionID = canonicalSessionID
+				}
+				if err := d.tmux.KillSession(ctx, cleanupSessionID); err != nil {
+					return result, fmt.Errorf("clean stopped orchestrator %s: %w", session.ScopeID, err)
+				}
+				if err := d.persistStoppedOrchestratorSessionProjection(ctx, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, scope, cleanupSessionID, daemonstate.SessionStateStopped); err != nil {
+					return result, err
+				}
+				result.AlignedDaemonSessions++
+			}
 			continue
+		}
+		if !sessionProjectionCanRecreateTmuxSession(session) {
+			continue
+		}
+		if canonicalLive || projectedLive {
+			continue
+		}
+		if daemonstate.NormalizeSessionState(session.ObservedState) == daemonstate.SessionStateStopped {
+			paused, pauseErr := d.pauseEndedOrchestratorSession(ctx, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, session.ID)
+			if pauseErr != nil {
+				return result, fmt.Errorf("repair ended orchestrator %s: %w", session.ScopeID, pauseErr)
+			}
+			if paused {
+				continue
+			}
 		}
 		body, marshalErr := json.Marshal(protocol.OrchestratorSessionRequest{Scope: scope})
 		if marshalErr != nil {

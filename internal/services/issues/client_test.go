@@ -2336,6 +2336,61 @@ func TestClient_UpdateWithRuntimeReturnsChangedTask(t *testing.T) {
 	assert.Equal(t, "Runtime replacement notes", task.Notes)
 }
 
+func TestClientCloseWithRuntimeAtomicallyReleasesExecutionLeaseBeforeTerminalWrite(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-close-runtime"
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Atomically close leased issue",
+		Type:     domain.TypeBug,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	require.NoError(t, err)
+	_, err = client.ClaimOwnershipWithRuntime(ctx, projectID, taskID, OwnershipClaimParams{
+		OwnerID:   "worker-a",
+		OwnerKind: "agent",
+		Purpose:   domain.CoordinationLeaseExecution,
+	})
+	require.NoError(t, err)
+
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `CREATE TRIGGER fail_terminal_close
+		BEFORE UPDATE ON issues
+		WHEN NEW.lifecycle_state = 'closed'
+		BEGIN
+			SELECT RAISE(ABORT, 'injected terminal status write failure');
+		END`)
+	require.NoError(t, err)
+
+	_, err = client.CloseWithRuntime(ctx, projectID, taskID, domain.StatusDone)
+	require.ErrorContains(t, err, "injected terminal status write failure")
+	afterFailure, err := client.GetWithRuntime(ctx, projectID, taskID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusInReview, afterFailure.Status)
+	require.NotNil(t, afterFailure.Ownership, "failed terminal transaction must roll back execution lease release")
+	assert.Equal(t, "worker-a", afterFailure.Ownership.OwnerID)
+
+	_, err = db.ExecContext(ctx, `DROP TRIGGER fail_terminal_close`)
+	require.NoError(t, err)
+	closed, err := client.CloseWithRuntime(ctx, projectID, taskID, domain.StatusDone)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusDone, closed.Status)
+	assert.Nil(t, closed.Ownership)
+	assert.Empty(t, closed.CoordinationLeases)
+
+	var releaseEventID, statusEventID int64
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT id FROM issue_observation_events
+		WHERE issue_id = ? AND event_type = ? AND json_extract(payload_json, '$.reason') = 'terminal_close'`,
+		taskID, domain.IssueEventIssueOwnershipChanged).Scan(&releaseEventID))
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT MAX(id) FROM issue_observation_events
+		WHERE issue_id = ? AND event_type = ?`, taskID, domain.IssueEventIssueStatusChanged).Scan(&statusEventID))
+	assert.Less(t, releaseEventID, statusEventID, "lease release event must precede terminal status event")
+}
+
 func TestClient_AppendNotes(t *testing.T) {
 	parallelIssueStoreTest(t)
 	ctx := context.Background()

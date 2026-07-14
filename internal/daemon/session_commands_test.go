@@ -1399,6 +1399,7 @@ type sessionStartTmuxRunner struct {
 	sendKeysErr          error
 	sendKeysErrOnCall    int
 	captureOutput        string
+	onSendKeys           func(string, string)
 }
 
 func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
@@ -1506,6 +1507,9 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 		if len(args) >= 4 {
 			r.sendKeysTargets = append(r.sendKeysTargets, args[2])
 			r.sendKeysPayloads = append(r.sendKeysPayloads, args[3])
+			if r.onSendKeys != nil {
+				r.onSendKeys(args[2], args[3])
+			}
 		}
 		if r.sendKeysErr != nil && (r.sendKeysErrOnCall == 0 || r.sendKeysCalls == r.sendKeysErrOnCall) {
 			return "", r.sendKeysErr
