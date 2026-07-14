@@ -59,6 +59,8 @@ const (
 	maxGitStatusRefreshFailureBackoff       = 5 * time.Minute
 
 	defaultRuntimeProjectionCoalesceWindow = 25 * time.Millisecond
+	defaultTmuxObservationInterval         = 2 * time.Second
+	defaultTmuxObservationTimeout          = 5 * time.Second
 )
 
 // Config configures daemon runtime wiring.
@@ -86,6 +88,8 @@ type Config struct {
 	IdleTimeout                time.Duration
 	RuntimeReconcileInterval   time.Duration
 	RuntimeReconcileTimeout    time.Duration
+	TmuxObservationInterval    time.Duration
+	TmuxObservationTimeout     time.Duration
 	scheduledScriptRunner      scheduledScriptCommandRunner
 }
 
@@ -193,7 +197,6 @@ type Daemon struct {
 	worktreeStateLastRefresh             map[string]time.Time
 	taskListRuntimeRefreshMu             sync.Mutex
 	taskListRuntimeLastRefresh           map[string]time.Time
-	taskListRuntimeRefreshes             map[string]*taskListRuntimeRefresh
 	taskListSnapshotCacheMu              sync.Mutex
 	taskListSnapshotCache                map[string]taskListSnapshotCacheEntry
 	taskListSnapshotLoadMu               sync.Mutex
@@ -219,6 +222,9 @@ type Daemon struct {
 	watchClients                         map[string]watchClientObservation
 	terminalFailureProbeMu               sync.Mutex
 	terminalFailureProbes                map[string]terminalFailureProbeState
+	tmuxObservationWG                    sync.WaitGroup
+	tmuxObservationCursorMu              sync.Mutex
+	tmuxObservationCursor                int
 	reviewReadyRecoveryMu                sync.Mutex
 	reviewReadyRecoveryCursor            map[string]int64
 	reviewReadyRecoveryBeforeLoad        func()
@@ -366,7 +372,6 @@ func New(cfg Config) *Daemon {
 		worktreeStateRefreshing:            map[string]bool{},
 		worktreeStateLastRefresh:           map[string]time.Time{},
 		taskListRuntimeLastRefresh:         map[string]time.Time{},
-		taskListRuntimeRefreshes:           map[string]*taskListRuntimeRefresh{},
 		taskListSnapshotCache:              map[string]taskListSnapshotCacheEntry{},
 		issueAutoArchiveLastRun:            map[string]time.Time{},
 		taskGraphReadinessLoads:            map[string]*taskGraphReadinessLoad{},
@@ -696,15 +701,18 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return nil
 	}
 	d.startRuntimeReconcileWorker(serveCtx)
+	d.startTmuxObservationWorker(serveCtx)
 	d.startLinearSyncWorker(serveCtx)
 	d.startScheduledScriptWorker(serveCtx)
 	d.startIssueAutoArchiveWorker(serveCtx)
 	d.startGlobalProjectionRepairWorker(serveCtx)
 	d.cfg.Logger.Info("daemon startup phase", "phase", "startup_ready", "duration_ms", time.Since(startedAt).Milliseconds())
 	err = <-serveErrCh
+	cancelServe()
 	if ctx.Err() != nil {
 		<-shutdownDone
 	}
+	d.tmuxObservationWG.Wait()
 	return err
 }
 
@@ -1835,6 +1843,16 @@ func (d *Daemon) publishSessionProjectionEvent(ctx context.Context, projectID st
 	return rev
 }
 
+func (d *Daemon) publishObservedSessionProjectionEvent(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session, observation domain.ExternalObservationProvenance) uint64 {
+	projectID = d.canonicalProjectID(projectID)
+	if d.runtimeProjectionCoalescer != nil {
+		return d.runtimeProjectionCoalescer.ScheduleObservedSession(ctx, projectID, meta, session, observation)
+	}
+	rev := d.nextRevision(projectID)
+	d.publishObservedSessionProjectionEventAtRevision(ctx, projectID, meta, session, rev, observation)
+	return rev
+}
+
 func (d *Daemon) publishWorktreeProjectionEvent(ctx context.Context, projectID, issueID, worktree string) uint64 {
 	projectID = d.canonicalProjectID(projectID)
 	rev := d.nextRevision(projectID)
@@ -1850,6 +1868,14 @@ func (d *Daemon) publishGitStatusProjectionEvent(ctx context.Context, projectID,
 }
 
 func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session, rev uint64) {
+	d.publishSessionProjectionEventWithObservationAtRevision(ctx, projectID, meta, session, rev, nil)
+}
+
+func (d *Daemon) publishObservedSessionProjectionEventAtRevision(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session, rev uint64, observation domain.ExternalObservationProvenance) {
+	d.publishSessionProjectionEventWithObservationAtRevision(ctx, projectID, meta, session, rev, &observation)
+}
+
+func (d *Daemon) publishSessionProjectionEventWithObservationAtRevision(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session, rev uint64, observation *domain.ExternalObservationProvenance) {
 	projectID = d.canonicalProjectID(projectID)
 	if d.hub == nil {
 		return
@@ -1866,7 +1892,7 @@ func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, pr
 		encodedRuntime := buildRuntimeProjectionEventBody(projectID, rev, runtime)
 		runtimeBody = &encodedRuntime
 	}
-	body, err := json.Marshal(protocol.SessionProjectionEventBody{
+	eventBody := protocol.SessionProjectionEventBody{
 		ProjectID: naming.ProjectID(projectID),
 		Revision:  rev,
 		Session: protocol.SessionProjection{
@@ -1879,7 +1905,14 @@ func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, pr
 			UpdatedAt: session.UpdatedAt,
 		},
 		Runtime: runtimeBody,
-	})
+	}
+	if observation != nil {
+		eventBody.Observation = &protocol.ExternalObservationProvenance{
+			Authority: observation.Authority, Product: observation.Product, Disposition: string(observation.Disposition), ObservedAt: observation.ObservedAt,
+			CanonicalEventAdmitted: observation.CanonicalEventAdmitted, SemanticSequenceAdvanced: observation.SemanticSequenceAdvanced,
+		}
+	}
+	body, err := json.Marshal(eventBody)
 	if err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("marshal session projection event body failed", "project_id", projectID, "session_id", session.ID, "error", err)

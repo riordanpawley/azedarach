@@ -1431,6 +1431,13 @@ func TestReviewAcceptConvergesStaleBusyHookAtIdlePromptAndReplaysIdempotently(t 
 	}
 	d.git = git.NewClient(runner, slog.Default())
 	d.worktreeAdapter = &worktreeServiceAdapter{manager: git.NewWorktreeManager(runner, repoDir, slog.Default()), logger: slog.Default()}
+	projected, err := runtimeStore.ListSessionStates(ctx, "project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.observeTerminalFailureProbes(ctx, "project", projected, "project", sessionDisplayActivityByIssueKeyFromSessions(projected, "project")); err != nil {
+		t.Fatalf("seed asynchronous idle-prompt observation: %v", err)
+	}
 	request := protocol.OrchestrationIntentRequest{
 		Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept,
 		IntentKey: "accept-stale-busy-idle-prompt", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir,

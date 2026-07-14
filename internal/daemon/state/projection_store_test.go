@@ -1360,6 +1360,29 @@ func TestRuntimeStateStorePhysicalObservationConstraints(t *testing.T) {
 	}
 }
 
+func TestRuntimeStateStoreTmuxAttachmentObservationIsOptionalAndPreservedAcrossHooks(t *testing.T) {
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	now := time.Now().UTC()
+	seed := Session{ID: "az-root", IssueID: "root", Role: SessionRoleWorker, ScopeKind: SessionScopeIssue, ScopeID: "root", State: SessionStateRunning, ObservedState: SessionStateRunning, UpdatedAt: now.Add(-time.Minute)}
+	if err := store.UpsertSessionState(ctx, "p", seed); err != nil {
+		t.Fatal(err)
+	}
+	attached := 2
+	startedAt := now.Add(-time.Hour)
+	if _, applied, err := store.ApplyPhysicalSessionObservation(ctx, PhysicalSessionObservation{ProjectID: "p", SessionID: seed.ID, ObservedState: SessionStateRunning, UpdatedAt: now, TmuxAttachedCount: &attached, StartedAt: &startedAt}); err != nil || !applied {
+		t.Fatalf("apply tmux attachment observation: applied=%v err=%v", applied, err)
+	}
+	if _, applied, err := store.ApplyPhysicalSessionObservation(ctx, PhysicalSessionObservation{ProjectID: "p", SessionID: seed.ID, ObservedState: SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: now.Add(time.Second)}); err != nil || !applied {
+		t.Fatalf("apply hook observation: applied=%v err=%v", applied, err)
+	}
+	got, found, err := store.GetSessionState(ctx, "p", seed.ID)
+	if err != nil || !found || got.TmuxAttachedCount != attached || got.StartedAt == nil || !got.StartedAt.Equal(startedAt) || got.Activity != "busy" {
+		t.Fatalf("session=%+v found=%v err=%v", got, found, err)
+	}
+}
+
 func TestRuntimeStateStoreUntypedSharedRuntimeMutationFailsClosed(t *testing.T) {
 	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
 	t.Cleanup(func() { _ = store.Close() })

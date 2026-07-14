@@ -73,6 +73,14 @@ type PhysicalSessionObservation struct {
 	ActivitySource  string
 	UpdatedAt       time.Time
 	ObservedVersion int64
+	// TmuxAttachedCount is present only for tmux inventory observations. Hook
+	// observations leave it nil so they cannot erase independently observed
+	// attachment state.
+	TmuxAttachedCount *int
+	// StartedAt is present only when tmux inventory supplies the authoritative
+	// physical session creation time. It replaces any command-time estimate;
+	// other observation sources leave it nil and preserve the tmux value.
+	StartedAt *time.Time
 }
 
 // ApplyPhysicalSessionObservation atomically records a monotonic physical
@@ -135,11 +143,19 @@ func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context,
 				freshness = observation.UpdatedAt
 			}
 			targetTable := sessionStorageTableForID(intent.ID)
-			if _, err := tx.ExecContext(ctx, `UPDATE `+targetTable+`
-				SET observed_state=?, activity=?, activity_source=?, updated_at=?
-				WHERE project_id=? AND logical_id=?`, observation.ObservedState,
-				observation.Activity, observation.ActivitySource, freshness.Format(time.RFC3339Nano),
-				observation.ProjectID, logicalSessionIntentID(intent)); err != nil {
+			setClause := "observed_state=?, activity=?, activity_source=?, updated_at=?"
+			args := []any{observation.ObservedState, observation.Activity, observation.ActivitySource, freshness.Format(time.RFC3339Nano)}
+			if observation.TmuxAttachedCount != nil {
+				setClause += ", tmux_attached_count=?"
+				args = append(args, *observation.TmuxAttachedCount)
+			}
+			if observation.StartedAt != nil {
+				setClause += ", started_at=?"
+				args = append(args, observation.StartedAt.Format(time.RFC3339Nano))
+			}
+			args = append(args, observation.ProjectID, logicalSessionIntentID(intent))
+			if _, err := tx.ExecContext(ctx, `UPDATE `+targetTable+` SET `+setClause+`
+				WHERE project_id=? AND logical_id=?`, args...); err != nil {
 				return fmt.Errorf("fan physical session observation into logical intent %s: %w", logicalSessionIntentID(intent), err)
 			}
 		}
@@ -254,6 +270,13 @@ func normalizePhysicalSessionObservation(observation PhysicalSessionObservation)
 	}
 	if observation.ObservedState == SessionStateStopped && (observation.Activity != "" || observation.ActivitySource != "") {
 		return observation, fmt.Errorf("physical session observation: stopped runtime cannot retain activity")
+	}
+	if observation.TmuxAttachedCount != nil && *observation.TmuxAttachedCount < 0 {
+		return observation, fmt.Errorf("physical session observation: tmux attachment count cannot be negative")
+	}
+	if observation.StartedAt != nil {
+		startedAt := observation.StartedAt.UTC()
+		observation.StartedAt = &startedAt
 	}
 	if observation.UpdatedAt.IsZero() {
 		observation.UpdatedAt = time.Now().UTC()
