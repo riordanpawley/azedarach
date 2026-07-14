@@ -3,7 +3,9 @@ package daemon
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -96,6 +98,215 @@ func TestProjectReadMaterializerBootstrapReplayEmptyAdvanceAndRestart(t *testing
 	if checksumJSON(restartedTasks) != checksumJSON(afterEmpty) || restartedMeta.DeliveryCursor != afterEmptyMeta.DeliveryCursor || restartedMeta.SemanticChecksum != afterEmptyMeta.SemanticChecksum {
 		t.Fatalf("restart mismatch tasks=%+v source=%+v want source=%+v", restartedTasks, restartedMeta, afterEmptyMeta)
 	}
+}
+
+func TestProjectReadMaterializerHistoricalNonzeroCursorRestartRetainsLegacyOverlay(t *testing.T) {
+	ctx := context.Background()
+	client, repoDir := newTestIssueClient(t)
+	legacyID, err := client.Create(ctx, issues.CreateTaskParams{Title: "before projection bridge", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CloseDB(); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys=OFF; DROP TABLE projection_consumer_cursors; DROP TABLE projection_deltas; DROP TABLE projection_streams; DELETE FROM schema_migrations WHERE id='0047_projection_delta_authority'`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	upgraded := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = upgraded.CloseDB() })
+	if err := upgraded.OpenProjectionDeltaStore(); err != nil {
+		t.Fatal(err)
+	}
+	postBridgeID, err := upgraded.Create(ctx, issues.CreateTaskParams{Title: "after projection bridge", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := NewProjectionDeltaAuthority(upgraded)
+	d := &Daemon{}
+	bootstrap := func() (*projectReadMaterializer, []domain.Task, protocol.MaterializedSnapshotMetadata) {
+		materializer := newProjectReadMaterializer("project", authority, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) { return tasks, nil })
+		d.configureProjectReadMaterializer(materializer, protocol.DefaultProjectID, upgraded)
+		if err := materializer.bootstrap(ctx); err != nil {
+			t.Fatal(err)
+		}
+		tasks, metadata := materializer.snapshot()
+		return materializer, tasks, metadata
+	}
+	_, beforeRestart, beforeMetadata := bootstrap()
+	if beforeMetadata.DeliveryCursor == 0 || len(beforeRestart) != 2 {
+		t.Fatalf("historical bootstrap = %+v metadata=%+v", beforeRestart, beforeMetadata)
+	}
+	ids := taskIDsFromTasks(beforeRestart)
+	sort.Strings(ids)
+	wantIDs := []string{legacyID, postBridgeID}
+	sort.Strings(wantIDs)
+	if !reflect.DeepEqual(ids, wantIDs) {
+		t.Fatalf("historical bootstrap IDs = %v, want %v", ids, wantIDs)
+	}
+	if !materializedSourceHasAuthority(beforeMetadata.SourceVector, "legacy_bootstrap_export") {
+		t.Fatalf("historical bootstrap source = %+v, want durable legacy overlay", beforeMetadata.SourceVector)
+	}
+	_, afterRestart, afterMetadata := bootstrap()
+	if checksumJSON(afterRestart) != checksumJSON(beforeRestart) || afterMetadata.DeliveryCursor != beforeMetadata.DeliveryCursor || afterMetadata.IssueChecksum != beforeMetadata.IssueChecksum {
+		t.Fatalf("historical restart diverged: before=%+v/%+v after=%+v/%+v", beforeRestart, beforeMetadata, afterRestart, afterMetadata)
+	}
+}
+
+func TestProjectReadMaterializerApplyIsKeyedAtProductionSize(t *testing.T) {
+	const taskCount = 5000
+	materializer, target, batch, hydrated := productionMaterializerDelta(t, taskCount, 1)
+	before := materializer.snapshotMetadata()
+	if err := materializer.apply(context.Background(), batch); err != nil {
+		t.Fatal(err)
+	}
+	tasks, after := materializer.snapshot()
+	if got := hydrated.Load(); got != 1 {
+		t.Fatalf("hydrated task count = %d, want 1 affected key", got)
+	}
+	if len(tasks) != taskCount || after.DeliveryCursor != before.DeliveryCursor+1 || after.IssueChecksum == before.IssueChecksum {
+		t.Fatalf("keyed production apply tasks=%d before=%+v after=%+v", len(tasks), before, after)
+	}
+	updated, ok := findDaemonTaskByID(tasks, target.ID.String())
+	if !ok || updated.Status != domain.StatusInProgress {
+		t.Fatalf("target after keyed apply = %+v, found=%t", updated, ok)
+	}
+	hydrated.Store(0)
+	if err := materializer.refreshRuntime(context.Background(), []string{target.ID.String()}); err != nil {
+		t.Fatal(err)
+	}
+	if got := hydrated.Load(); got != 1 {
+		t.Fatalf("runtime refresh hydrated task count = %d, want 1 affected key", got)
+	}
+	deleteBatch := protocol.ProjectionDeltaBatch{
+		SchemaVersion: protocol.ProjectionDeltaSchemaVersion, ProjectID: "project", AfterCursor: after.DeliveryCursor, HeadCursor: after.DeliveryCursor + 1, DeliveryToCursor: after.DeliveryCursor + 1,
+		DeliveryContract: protocol.ProjectionDeliveryContract, DeliveryCursorTransitional: true, Projector: issueProjectionProjector(), Health: "healthy",
+		Deltas: []protocol.ProjectionDelta{{Cursor: after.DeliveryCursor + 1, Kind: protocol.ProjectionKind(domain.ProjectionKindIssue), Key: target.ID.String(), Operation: protocol.ProjectionDeltaDelete, Source: protocol.ProjectionSourceRange{Authority: "load", SourceFrom: fmt.Sprint(after.DeliveryCursor + 1), SourceTo: fmt.Sprint(after.DeliveryCursor + 1), Transitional: true}}},
+	}
+	protocol.FinalizeProjectionDeltaBatch(&deleteBatch)
+	if err := materializer.apply(context.Background(), deleteBatch); err != nil {
+		t.Fatal(err)
+	}
+	tasks, deletedMetadata := materializer.snapshot()
+	if _, ok := findDaemonTaskByID(tasks, target.ID.String()); ok || len(tasks) != taskCount-1 {
+		t.Fatalf("keyed delete retained target or wrong count: found=%t tasks=%d", ok, len(tasks))
+	}
+	materializer.mu.RLock()
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(materializer.canonical, materializer.tasks)
+	materializer.mu.RUnlock()
+	if deletedMetadata.IssueChecksum != issueKeys.sum() || deletedMetadata.RuntimeChecksum != runtimeKeys.sum() {
+		t.Fatalf("keyed delete checkpoints diverged: metadata=%+v issue=%s runtime=%s", deletedMetadata, issueKeys.sum(), runtimeKeys.sum())
+	}
+}
+
+func TestProjectReadMaterializerEmptyObservationRefreshesOnlyAffectedIssue(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestIssueClient(t)
+	targetID, err := client.Create(ctx, issues.CreateTaskParams{Title: "human findings", Type: domain.TypeInvestigation, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Create(ctx, issues.CreateTaskParams{Title: "unaffected", Type: domain.TypeTask}); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{issues: client}
+	var hydrated atomic.Int64
+	materializer := newProjectReadMaterializer(protocol.DefaultProjectID, NewProjectionDeltaAuthority(client), func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		hydrated.Add(int64(len(tasks)))
+		tasks, hydrateErr := client.HydrateRuntime(hydrateCtx, protocol.DefaultProjectID, tasks)
+		if hydrateErr != nil {
+			return nil, hydrateErr
+		}
+		return d.enrichTasksWithSessionState(hydrateCtx, protocol.DefaultProjectID, tasks), nil
+	})
+	d.configureProjectReadMaterializer(materializer, protocol.DefaultProjectID, client)
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	before, beforeMetadata := materializer.snapshot()
+	target, ok := findDaemonTaskByID(before, targetID)
+	if !ok || !target.IssueFacts().WaitingHuman {
+		t.Fatalf("target before acceptance = %+v, found=%t", target, ok)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, targetID, issues.IssueObservationEventParams{Type: domain.IssueEventHumanInputProvided, Source: "human", Payload: map[string]any{"investigation_findings_accepted": true}}); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := NewProjectionDeltaAuthority(client).List(ctx, protocol.DefaultProjectID, beforeMetadata.DeliveryCursor, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batch.Deltas) != 0 || len(batch.EmptyAdvances) != 1 {
+		t.Fatalf("acceptance batch = %+v", batch)
+	}
+	hydrated.Store(0)
+	if err := materializer.apply(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := materializer.snapshot()
+	target, ok = findDaemonTaskByID(after, targetID)
+	if !ok || target.IssueFacts().WaitingHuman || hydrated.Load() != 1 {
+		t.Fatalf("target after keyed acceptance = %+v found=%t hydrated=%d", target, ok, hydrated.Load())
+	}
+}
+
+func materializedSourceHasAuthority(sources []protocol.ProjectionSourceRange, authority string) bool {
+	for _, source := range sources {
+		if source.Authority == authority {
+			return true
+		}
+	}
+	return false
+}
+
+func productionMaterializerDelta(t testing.TB, taskCount int, cursor uint64) (*projectReadMaterializer, domain.Task, protocol.ProjectionDeltaBatch, *atomic.Int64) {
+	t.Helper()
+	now := time.Date(2026, time.July, 15, 1, 0, 0, 0, time.UTC)
+	canonical := make(map[string]domain.Task, taskCount)
+	for i := 0; i < taskCount; i++ {
+		issueID := fmt.Sprintf("load-%05d", i)
+		canonical[issueID] = domain.Task{ID: naming.IssueID(issueID), Title: "production load", Type: domain.TypeTask, Status: domain.StatusOpen, CreatedAt: now, UpdatedAt: now}
+	}
+	target := canonical["load-02500"]
+	var hydrated atomic.Int64
+	materializer := newProjectReadMaterializer("project", nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		hydrated.Add(int64(len(tasks)))
+		return tasks, nil
+	})
+	hydratedTasks := make(map[string]domain.Task, len(canonical))
+	for issueID, task := range canonical {
+		hydratedTasks[issueID] = task
+	}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, hydratedTasks)
+	materializer.replaceBootstrap(canonical, hydratedTasks, materializedMetadata(cursor, cursor+1, issueProjectionProjector(), nil, issueKeys.sum(), runtimeKeys.sum(), "healthy"), issueKeys, runtimeKeys)
+	hydrated.Store(0)
+	target.Status = domain.StatusInProgress
+	target.UpdatedAt = now.Add(time.Second)
+	return materializer, target, productionMaterializerBatch(t, target, cursor), &hydrated
+}
+
+func productionMaterializerBatch(t testing.TB, target domain.Task, cursor uint64) protocol.ProjectionDeltaBatch {
+	t.Helper()
+	payload, err := json.Marshal(domain.IssueProjectionDeltaPayload{SchemaVersion: domain.IssueProjectionDeltaSchemaVersion, IssueID: target.ID.String(), Issue: &target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := protocol.ProjectionDeltaBatch{
+		SchemaVersion: protocol.ProjectionDeltaSchemaVersion, ProjectID: "project", AfterCursor: cursor, HeadCursor: cursor + 1, DeliveryToCursor: cursor + 1,
+		DeliveryContract: protocol.ProjectionDeliveryContract, DeliveryCursorTransitional: true, Projector: issueProjectionProjector(), Health: "healthy",
+		Deltas: []protocol.ProjectionDelta{{Cursor: cursor + 1, Kind: protocol.ProjectionKind(domain.ProjectionKindIssue), Key: target.ID.String(), Operation: protocol.ProjectionDeltaUpsert, Payload: payload, Source: protocol.ProjectionSourceRange{Authority: "load", SourceFrom: fmt.Sprint(cursor + 1), SourceTo: fmt.Sprint(cursor + 1), Transitional: true}}},
+	}
+	protocol.FinalizeProjectionDeltaBatch(&batch)
+	return batch
 }
 
 func TestProjectReadMaterializerWatchBlocksAndWakesAcrossClients(t *testing.T) {
@@ -204,7 +415,7 @@ func TestProjectReadMaterializerSerializesRuntimeRefreshWithDeltaApply(t *testin
 		t.Fatal(err)
 	}
 	refreshDone := make(chan error, 1)
-	go func() { refreshDone <- materializer.refreshRuntime(ctx) }()
+	go func() { refreshDone <- materializer.refreshRuntime(ctx, []string{issueID}) }()
 	<-refreshEntered
 	applyDone := make(chan error, 1)
 	go func() { applyDone <- materializer.apply(ctx, batch) }()
@@ -279,8 +490,10 @@ func TestSyncUserProjectionMaterializedIssuesPropagatesBoundedCurrentState(t *te
 	materialized.Session = &domain.Session{IssueID: "issue", State: domain.SessionBusy, Activity: "working", UpdatedAt: now.Add(time.Second)}
 	materialized.HasTmuxSession = true
 	reader := newProjectReadMaterializer("p", nil, nil)
-	reader.tasks[canonical.ID.String()] = materialized
-	reader.metadata = protocol.MaterializedSnapshotMetadata{Health: "healthy"}
+	canonicalByID := map[string]domain.Task{canonical.ID.String(): canonical}
+	materializedByID := map[string]domain.Task{canonical.ID.String(): materialized}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonicalByID, materializedByID)
+	reader.replaceBootstrap(canonicalByID, materializedByID, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
 	d := &Daemon{cfg: Config{}, userStore: store, materializers: map[string]*projectReadMaterializer{"p": reader}}
 	if err := d.syncUserProjectionMaterializedIssues(ctx, "p", []string{"issue"}); err != nil {
 		t.Fatal(err)

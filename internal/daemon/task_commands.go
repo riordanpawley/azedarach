@@ -3833,15 +3833,11 @@ func (d *Daemon) closeCleanDescendantsBeforeParent(ctx context.Context, projectI
 }
 
 func (d *Daemon) loadTaskClosePreflightDomainTasks(ctx context.Context, projectID, taskID string) ([]domain.Task, error) {
-	issueClient := d.issueClientForProject(projectID)
-	if issueClient == nil {
-		return nil, fmt.Errorf("issue store unavailable")
-	}
-	tasks, err := issueClient.ListParentChildSubtreeWithRuntime(ctx, projectID, taskID)
+	tasks, _, err := d.projectReadSnapshot(projectID)
 	if err != nil {
 		return nil, err
 	}
-	return d.enrichTasksWithSessionState(ctx, projectID, tasks), nil
+	return materializedParentChildClosure(tasks, taskID), nil
 }
 
 func (d *Daemon) investigationAcceptance(ctx context.Context, projectID string, task domain.Task) (domain.InvestigationAcceptance, error) {
@@ -5221,6 +5217,9 @@ func (d *Daemon) taskGraphReadinessCacheExpiry(projectID, rootIssueID, actorID s
 }
 
 func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectID, rootIssueID string) ([]domain.Task, error) {
+	// Explicit compatibility exception: production starts project materializers
+	// before serving commands. This direct indexed read exists only for embedded
+	// and migration-isolation tests that deliberately disable that startup path.
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")
@@ -5268,15 +5267,11 @@ func (result *taskGraphReadinessResult) applySessionStartProgress(progressByIssu
 }
 
 func (d *Daemon) loadTaskGraphDomainTasks(ctx context.Context, projectID string) ([]domain.Task, error) {
-	issueClient := d.issueClientForProject(projectID)
-	if issueClient == nil {
-		return nil, fmt.Errorf("issue store unavailable")
-	}
-	tasks, err := issueClient.ListSummariesWithRuntimeDependencies(ctx, projectID)
+	tasks, _, err := d.projectReadSnapshot(projectID)
 	if err != nil {
 		return nil, err
 	}
-	return d.enrichTasksWithSessionState(ctx, projectID, tasks), nil
+	return tasks, nil
 }
 
 func daemonTaskGraphIndexes(rootIssueID string, tasks []domain.Task) (naming.IssueID, map[naming.IssueID]domain.Task, map[naming.IssueID][]naming.IssueID, error) {

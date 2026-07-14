@@ -306,8 +306,10 @@ func TestRuntimeProjectionWriterSnapshotReplacementRefreshesRemovedIssueKeys(t *
 		tasks[0].HasWorktree = len(worktrees) > 0
 		return tasks, nil
 	})
-	materializer.tasks[issueID] = projected
-	materializer.metadata = protocol.MaterializedSnapshotMetadata{Health: "healthy"}
+	canonicalByID := map[string]domain.Task{issueID: canonical}
+	projectedByID := map[string]domain.Task{issueID: projected}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonicalByID, projectedByID)
+	materializer.replaceBootstrap(canonicalByID, projectedByID, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
 	d := &Daemon{
 		cfg: Config{RepoDir: "."}, userStore: rootStore,
 		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{".": runtimeStore},

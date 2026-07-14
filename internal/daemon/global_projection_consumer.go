@@ -234,51 +234,18 @@ func (d *Daemon) runUserProjectionConsumer(ctx context.Context, project appconfi
 func (d *Daemon) hydrateUserProjectionChanges(ctx context.Context, projectID string, client *issues.Client, batch protocol.ProjectionDeltaBatch, changes []userstore.ProjectDeltaChange) ([]userstore.ProjectDeltaChange, error) {
 	wanted := make(map[string]struct{}, len(changes)+len(batch.EmptyAdvances))
 	byID := make(map[string]userstore.ProjectDeltaChange, len(changes)+len(batch.EmptyAdvances))
-	observationPositions := make(map[int64]struct{}, len(batch.EmptyAdvances))
-	var firstObservation, lastObservation int64
 	for _, change := range changes {
 		byID[change.IssueID] = change
 		if !change.Delete {
 			wanted[change.IssueID] = struct{}{}
 		}
 	}
-	for _, advance := range batch.EmptyAdvances {
-		if advance.Source.Authority != "legacy_issue_observation" {
-			continue
-		}
-		position, err := strconv.ParseInt(strings.TrimSpace(advance.Source.SourceTo), 10, 64)
-		if err != nil || position <= 0 {
-			return nil, fmt.Errorf("decode issue observation source position %q", advance.Source.SourceTo)
-		}
-		observationPositions[position] = struct{}{}
-		if firstObservation == 0 || position < firstObservation {
-			firstObservation = position
-		}
-		if position > lastObservation {
-			lastObservation = position
-		}
+	affected, err := projectionBatchAffectedIssueIDs(ctx, client, batch)
+	if err != nil {
+		return nil, err
 	}
-	if len(observationPositions) > 0 {
-		span := lastObservation - firstObservation + 1
-		if span > 5000 {
-			return nil, fmt.Errorf("issue observation source span %d exceeds bounded lookup", span)
-		}
-		events, err := client.ListProjectIssueObservationEvents(ctx, firstObservation-1, int(span))
-		if err != nil {
-			return nil, fmt.Errorf("resolve issue observation sources %d..%d: %w", firstObservation, lastObservation, err)
-		}
-		for _, event := range events {
-			if _, ok := observationPositions[event.ID]; !ok {
-				continue
-			}
-			delete(observationPositions, event.ID)
-			if issueID := event.IssueID.String(); issueID != "" {
-				wanted[issueID] = struct{}{}
-			}
-		}
-		if len(observationPositions) > 0 {
-			return nil, fmt.Errorf("%d issue observation source positions unavailable", len(observationPositions))
-		}
+	for _, issueID := range affected {
+		wanted[issueID] = struct{}{}
 	}
 	if len(wanted) == 0 {
 		return changes, nil
@@ -313,6 +280,63 @@ func (d *Daemon) hydrateUserProjectionChanges(ctx context.Context, projectID str
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].IssueID < result[j].IssueID })
 	return result, nil
+}
+
+func projectionBatchAffectedIssueIDs(ctx context.Context, client *issues.Client, batch protocol.ProjectionDeltaBatch) ([]string, error) {
+	wanted := make(map[string]struct{}, len(batch.Deltas)+len(batch.EmptyAdvances))
+	for _, delta := range batch.Deltas {
+		if delta.Operation != protocol.ProjectionDeltaDelete {
+			wanted[strings.TrimSpace(delta.Key)] = struct{}{}
+		}
+	}
+	observationPositions := make(map[int64]struct{}, len(batch.EmptyAdvances))
+	var firstObservation, lastObservation int64
+	for _, advance := range batch.EmptyAdvances {
+		if advance.Source.Authority != "legacy_issue_observation" {
+			continue
+		}
+		position, err := strconv.ParseInt(strings.TrimSpace(advance.Source.SourceTo), 10, 64)
+		if err != nil || position <= 0 {
+			return nil, fmt.Errorf("decode issue observation source position %q", advance.Source.SourceTo)
+		}
+		observationPositions[position] = struct{}{}
+		if firstObservation == 0 || position < firstObservation {
+			firstObservation = position
+		}
+		if position > lastObservation {
+			lastObservation = position
+		}
+	}
+	if len(observationPositions) > 0 {
+		span := lastObservation - firstObservation + 1
+		if span > 5000 {
+			return nil, fmt.Errorf("issue observation source span %d exceeds bounded lookup", span)
+		}
+		events, err := client.ListProjectIssueObservationEvents(ctx, firstObservation-1, int(span))
+		if err != nil {
+			return nil, fmt.Errorf("resolve issue observation sources %d..%d: %w", firstObservation, lastObservation, err)
+		}
+		for _, event := range events {
+			if _, ok := observationPositions[event.ID]; !ok {
+				continue
+			}
+			delete(observationPositions, event.ID)
+			if issueID := strings.TrimSpace(event.IssueID.String()); issueID != "" {
+				wanted[issueID] = struct{}{}
+			}
+		}
+		if len(observationPositions) > 0 {
+			return nil, fmt.Errorf("%d issue observation source positions unavailable", len(observationPositions))
+		}
+	}
+	ids := make([]string, 0, len(wanted))
+	for issueID := range wanted {
+		if issueID != "" {
+			ids = append(ids, issueID)
+		}
+	}
+	sort.Strings(ids)
+	return ids, nil
 }
 
 func decodeUserProjectionChanges(batch protocol.ProjectionDeltaBatch) ([]userstore.ProjectDeltaChange, error) {

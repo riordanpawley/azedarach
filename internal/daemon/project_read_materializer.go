@@ -26,20 +26,64 @@ const projectReadMaterializerBatchSize = 500
 // is the upstream transitional delivery position; it is not an authority
 // revision and is never written back to the project database.
 type projectReadMaterializer struct {
-	mu        sync.RWMutex
-	updateMu  sync.Mutex
-	projectID string
-	authority *ProjectionDeltaAuthority
-	hydrate   func(context.Context, []domain.Task) ([]domain.Task, error)
-	tasks     map[string]domain.Task
-	worktrees map[string]git.Worktree
-	metadata  protocol.MaterializedSnapshotMetadata
-	cancel    context.CancelFunc
-	done      chan struct{}
+	mu          sync.RWMutex
+	updateMu    sync.Mutex
+	projectID   string
+	authority   *ProjectionDeltaAuthority
+	hydrate     func(context.Context, []domain.Task) ([]domain.Task, error)
+	affected    func(context.Context, protocol.ProjectionDeltaBatch) ([]string, error)
+	legacy      func(context.Context) ([]domain.Task, error)
+	canonical   map[string]domain.Task
+	tasks       map[string]domain.Task
+	worktrees   map[string]git.Worktree
+	metadata    protocol.MaterializedSnapshotMetadata
+	issueKeys   keyedCheckpoint
+	runtimeKeys keyedCheckpoint
+	cancel      context.CancelFunc
+	done        chan struct{}
+}
+
+type keyedCheckpoint struct {
+	digest [sha256.Size]byte
+	count  int
+}
+
+func (c *keyedCheckpoint) add(namespace, key string, value any) {
+	entry := checksumEntry(namespace, key, value)
+	for i := range c.digest {
+		c.digest[i] ^= entry[i]
+	}
+	c.count++
+}
+
+func (c *keyedCheckpoint) remove(namespace, key string, value any) {
+	entry := checksumEntry(namespace, key, value)
+	for i := range c.digest {
+		c.digest[i] ^= entry[i]
+	}
+	c.count--
+}
+
+func (c keyedCheckpoint) sum() string {
+	raw, _ := json.Marshal(struct {
+		Digest string `json:"digest"`
+		Count  int    `json:"count"`
+	}{hex.EncodeToString(c.digest[:]), c.count})
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+func checksumEntry(namespace, key string, value any) [sha256.Size]byte {
+	raw, _ := json.Marshal(struct {
+		Namespace string `json:"namespace"`
+		Key       string `json:"key"`
+		Value     any    `json:"value"`
+	}{namespace, key, value})
+	return sha256.Sum256(raw)
 }
 
 func newProjectReadMaterializer(projectID string, authority *ProjectionDeltaAuthority, hydrate func(context.Context, []domain.Task) ([]domain.Task, error)) *projectReadMaterializer {
-	return &projectReadMaterializer{projectID: strings.TrimSpace(projectID), authority: authority, hydrate: hydrate, tasks: map[string]domain.Task{}, worktrees: map[string]git.Worktree{}}
+	return &projectReadMaterializer{projectID: strings.TrimSpace(projectID), authority: authority, hydrate: hydrate, canonical: map[string]domain.Task{}, tasks: map[string]domain.Task{}, worktrees: map[string]git.Worktree{}}
 }
 
 func (m *projectReadMaterializer) bootstrap(ctx context.Context) error {
@@ -66,35 +110,30 @@ func (m *projectReadMaterializer) bootstrap(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	hydrated, runtimeChecksum, err := m.hydrateTasks(ctx, canonical)
+	sources := append([]protocol.ProjectionSourceRange(nil), snapshot.SourceVector...)
+	if m.legacy != nil {
+		exported, exportErr := m.legacy(ctx)
+		if exportErr != nil {
+			return fmt.Errorf("read durable legacy bootstrap overlay: %w", exportErr)
+		}
+		// The immutable 0047 delivery bridge has no genesis backfill, so its
+		// snapshot cannot declare the complete current key set for historical
+		// databases. The durable full export is the exact bootstrap value set;
+		// the verified snapshot contributes only cursor/source checkpointing.
+		canonical = make(map[string]domain.Task, len(exported))
+		for _, task := range exported {
+			task = domain.CanonicalIssueProjectionTask(task)
+			canonical[task.ID.String()] = task
+		}
+		sources = append(sources, protocol.ProjectionSourceRange{Authority: "legacy_bootstrap_export", SourceFrom: "full-export", SourceTo: "full-export", Transitional: true})
+	}
+	hydrated, _, err := m.hydrateTasks(ctx, canonical)
 	if err != nil {
 		return fmt.Errorf("hydrate projection bootstrap: %w", err)
 	}
-	metadata := materializedMetadata(snapshot.Cursor, snapshot.HeadCursor, snapshot.Projector, snapshot.SourceVector, snapshot.SemanticChecksum, runtimeChecksum, snapshot.Health)
-	m.replace(hydrated, metadata)
-	return nil
-}
-
-func (m *projectReadMaterializer) bootstrapLegacyExport(ctx context.Context, exported []domain.Task) error {
-	m.updateMu.Lock()
-	defer m.updateMu.Unlock()
-	base := m.snapshotMetadata()
-	canonical := make(map[string]domain.Task, len(exported))
-	canonicalValues := make([]domain.Task, 0, len(exported))
-	for _, task := range exported {
-		task = domain.CanonicalIssueProjectionTask(task)
-		canonical[task.ID.String()] = task
-		canonicalValues = append(canonicalValues, task)
-	}
-	sortTasksDeterministically(canonicalValues)
-	hydrated, runtimeChecksum, err := m.hydrateTasks(ctx, canonical)
-	if err != nil {
-		return err
-	}
-	sources := append([]protocol.ProjectionSourceRange(nil), base.SourceVector...)
-	sources = append(sources, protocol.ProjectionSourceRange{Authority: "legacy_bootstrap_export", SourceFrom: "full-export", SourceTo: "full-export", Transitional: true})
-	metadata := materializedMetadata(base.DeliveryCursor, base.DeliveryHead, issueProjectionProjector(), sources, checksumJSON(canonicalValues), runtimeChecksum, "healthy")
-	m.replace(hydrated, metadata)
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, hydrated)
+	metadata := materializedMetadata(snapshot.Cursor, snapshot.HeadCursor, snapshot.Projector, sources, issueKeys.sum(), runtimeKeys.sum(), snapshot.Health)
+	m.replaceBootstrap(canonical, hydrated, metadata, issueKeys, runtimeKeys)
 	return nil
 }
 
@@ -141,18 +180,27 @@ func (m *projectReadMaterializer) apply(ctx context.Context, batch protocol.Proj
 	if err := protocol.VerifyProjectionDeltaBatch(batch, expected, issueProjectionProjector()); err != nil {
 		return err
 	}
-	m.mu.RLock()
-	canonical := make(map[string]domain.Task, len(m.tasks))
-	for id, task := range m.tasks {
-		canonical[id] = domain.CanonicalIssueProjectionTask(task)
+	affected := make(map[string]struct{}, len(batch.Deltas)+len(batch.EmptyAdvances))
+	if m.affected != nil {
+		ids, err := m.affected(ctx, batch)
+		if err != nil {
+			return fmt.Errorf("resolve affected projection keys: %w", err)
+		}
+		for _, issueID := range ids {
+			if issueID = strings.TrimSpace(issueID); issueID != "" {
+				affected[issueID] = struct{}{}
+			}
+		}
 	}
-	m.mu.RUnlock()
+	canonical := make(map[string]domain.Task, len(affected)+len(batch.Deltas))
+	deleted := make(map[string]struct{}, len(batch.Deltas))
 	for _, delta := range batch.Deltas {
 		if delta.Kind != protocol.ProjectionKind(domain.ProjectionKindIssue) {
 			return &protocol.ProjectionVerificationError{Kind: protocol.ProjectionVerificationIncompatible, Message: "unknown projection kind " + string(delta.Kind)}
 		}
 		if delta.Operation == protocol.ProjectionDeltaDelete {
-			delete(canonical, delta.Key)
+			deleted[delta.Key] = struct{}{}
+			delete(affected, delta.Key)
 			continue
 		}
 		var payload domain.IssueProjectionDeltaPayload
@@ -163,34 +211,50 @@ func (m *projectReadMaterializer) apply(ctx context.Context, batch protocol.Proj
 			return &protocol.ProjectionVerificationError{Kind: protocol.ProjectionVerificationIncompatible, Message: "invalid complete issue value for " + delta.Key}
 		}
 		canonical[delta.Key] = domain.CanonicalIssueProjectionTask(*payload.Issue)
+		affected[delta.Key] = struct{}{}
 	}
-	hydrated, runtimeChecksum, err := m.hydrateTasks(ctx, canonical)
+	m.mu.RLock()
+	for issueID := range affected {
+		if _, exists := canonical[issueID]; exists {
+			continue
+		}
+		if current, exists := m.canonical[issueID]; exists {
+			canonical[issueID] = current
+		}
+	}
+	m.mu.RUnlock()
+	hydrated, _, err := m.hydrateTasks(ctx, canonical)
 	if err != nil {
 		return err
 	}
-	declared, err := m.authority.Snapshot(ctx, protocol.DefaultProjectID, batch.DeliveryToCursor)
-	if err != nil {
-		return fmt.Errorf("read declared materializer snapshot: %w", err)
-	}
-	if err := protocol.VerifyProjectionSnapshot(declared, issueProjectionProjector()); err != nil {
-		return fmt.Errorf("verify declared materializer snapshot: %w", err)
-	}
-	sources, issueChecksum := declared.SourceVector, declared.SemanticChecksum
-	previous := m.snapshotMetadata()
-	for _, source := range previous.SourceVector {
-		if source.Authority == "legacy_bootstrap_export" {
-			sources = append(append([]protocol.ProjectionSourceRange(nil), declared.SourceVector...), source)
-			values := make([]domain.Task, 0, len(canonical))
-			for _, task := range canonical {
-				values = append(values, task)
-			}
-			sortTasksDeterministically(values)
-			issueChecksum = checksumJSON(values)
-			break
+	m.mu.Lock()
+	issueKeys, runtimeKeys := m.issueKeys, m.runtimeKeys
+	for issueID := range deleted {
+		if current, exists := m.canonical[issueID]; exists {
+			issueKeys.remove("issue", issueID, current)
+			delete(m.canonical, issueID)
+		}
+		if current, exists := m.tasks[issueID]; exists {
+			runtimeKeys.remove("task-runtime", issueID, current)
+			delete(m.tasks, issueID)
 		}
 	}
-	metadata := materializedMetadata(declared.Cursor, declared.HeadCursor, declared.Projector, sources, issueChecksum, runtimeChecksum, declared.Health)
-	m.replace(hydrated, metadata)
+	for issueID, task := range hydrated {
+		if current, exists := m.canonical[issueID]; exists {
+			issueKeys.remove("issue", issueID, current)
+		}
+		if current, exists := m.tasks[issueID]; exists {
+			runtimeKeys.remove("task-runtime", issueID, current)
+		}
+		issueKeys.add("issue", issueID, canonical[issueID])
+		runtimeKeys.add("task-runtime", issueID, task)
+		m.canonical[issueID] = canonical[issueID]
+		m.tasks[issueID] = task
+	}
+	m.issueKeys, m.runtimeKeys = issueKeys, runtimeKeys
+	sources := mergeRootProjectionSources(m.metadata.SourceVector, batch.SourceVector)
+	m.metadata = materializedMetadata(batch.DeliveryToCursor, batch.HeadCursor, batch.Projector, sources, issueKeys.sum(), runtimeKeys.sum(), batch.Health)
+	m.mu.Unlock()
 	return nil
 }
 
@@ -227,16 +291,38 @@ func (m *projectReadMaterializer) hydrateTasks(ctx context.Context, canonical ma
 	}
 	out := make(map[string]domain.Task, len(tasks))
 	for _, task := range tasks {
-		out[task.ID.String()] = task
+		issueID := task.ID.String()
+		if _, expected := canonical[issueID]; !expected {
+			return nil, "", fmt.Errorf("runtime hydration returned unexpected issue %s", issueID)
+		}
+		out[issueID] = task
+	}
+	if len(out) != len(canonical) {
+		return nil, "", fmt.Errorf("runtime hydration returned %d issues, want %d", len(out), len(canonical))
 	}
 	return out, checksumJSON(tasks), nil
 }
 
-func (m *projectReadMaterializer) replace(tasks map[string]domain.Task, metadata protocol.MaterializedSnapshotMetadata) {
+func checkpointMaterializedTasks(canonical, hydrated map[string]domain.Task) (keyedCheckpoint, keyedCheckpoint) {
+	var issueKeys, runtimeKeys keyedCheckpoint
+	for issueID, task := range canonical {
+		issueKeys.add("issue", issueID, task)
+	}
+	for issueID, task := range hydrated {
+		runtimeKeys.add("task-runtime", issueID, task)
+	}
+	return issueKeys, runtimeKeys
+}
+
+func (m *projectReadMaterializer) replaceBootstrap(canonical, tasks map[string]domain.Task, metadata protocol.MaterializedSnapshotMetadata, issueKeys, runtimeKeys keyedCheckpoint) {
 	m.mu.Lock()
-	metadata.RuntimeChecksum = runtimeMaterializationChecksum(tasks, m.worktrees)
+	for issueID, worktree := range m.worktrees {
+		runtimeKeys.add("worktree", issueID, worktree)
+	}
+	metadata.IssueChecksum = issueKeys.sum()
+	metadata.RuntimeChecksum = runtimeKeys.sum()
 	metadata.SemanticChecksum = joinedMaterializedChecksum(metadata)
-	m.tasks, m.metadata = tasks, metadata
+	m.canonical, m.tasks, m.metadata, m.issueKeys, m.runtimeKeys = canonical, tasks, metadata, issueKeys, runtimeKeys
 	m.mu.Unlock()
 }
 
@@ -263,23 +349,59 @@ func (m *projectReadMaterializer) snapshot() ([]domain.Task, protocol.Materializ
 	return cloneTasks(tasks), cloneMaterializedMetadata(m.metadata)
 }
 
-func (m *projectReadMaterializer) refreshRuntime(ctx context.Context) error {
+func (m *projectReadMaterializer) snapshotIssues(issueIDs map[string]struct{}) ([]domain.Task, protocol.MaterializedSnapshotMetadata) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	tasks := make([]domain.Task, 0, len(issueIDs))
+	for issueID := range issueIDs {
+		if task, exists := m.tasks[issueID]; exists {
+			tasks = append(tasks, task)
+		}
+	}
+	sortTasksDeterministically(tasks)
+	return cloneTasks(tasks), cloneMaterializedMetadata(m.metadata)
+}
+
+func (m *projectReadMaterializer) refreshRuntime(ctx context.Context, issueIDs []string) error {
 	m.updateMu.Lock()
 	defer m.updateMu.Unlock()
-	m.mu.RLock()
-	canonical := make(map[string]domain.Task, len(m.tasks))
-	for id, task := range m.tasks {
-		canonical[id] = domain.CanonicalIssueProjectionTask(task)
+	wanted := make(map[string]struct{}, len(issueIDs))
+	for _, issueID := range issueIDs {
+		if issueID = strings.TrimSpace(issueID); issueID != "" {
+			wanted[issueID] = struct{}{}
+		}
 	}
-	metadata := cloneMaterializedMetadata(m.metadata)
+	if len(wanted) == 0 {
+		return nil
+	}
+	m.mu.RLock()
+	canonical := make(map[string]domain.Task, len(wanted))
+	for issueID := range wanted {
+		if task, exists := m.canonical[issueID]; exists {
+			canonical[issueID] = task
+		}
+	}
 	m.mu.RUnlock()
-	hydrated, runtimeChecksum, err := m.hydrateTasks(ctx, canonical)
+	if len(canonical) == 0 {
+		return nil
+	}
+	hydrated, _, err := m.hydrateTasks(ctx, canonical)
 	if err != nil {
 		return err
 	}
-	metadata.RuntimeChecksum = runtimeChecksum
-	metadata.SemanticChecksum = joinedMaterializedChecksum(metadata)
-	m.replace(hydrated, metadata)
+	m.mu.Lock()
+	runtimeKeys := m.runtimeKeys
+	for issueID, task := range hydrated {
+		if current, exists := m.tasks[issueID]; exists {
+			runtimeKeys.remove("task-runtime", issueID, current)
+		}
+		runtimeKeys.add("task-runtime", issueID, task)
+		m.tasks[issueID] = task
+	}
+	m.runtimeKeys = runtimeKeys
+	m.metadata.RuntimeChecksum = runtimeKeys.sum()
+	m.metadata.SemanticChecksum = joinedMaterializedChecksum(m.metadata)
+	m.mu.Unlock()
 	return nil
 }
 
@@ -287,22 +409,39 @@ func (m *projectReadMaterializer) replaceWorktrees(worktrees map[string]git.Work
 	m.updateMu.Lock()
 	defer m.updateMu.Unlock()
 	m.mu.Lock()
+	runtimeKeys := m.runtimeKeys
+	for issueID, worktree := range m.worktrees {
+		runtimeKeys.remove("worktree", issueID, worktree)
+	}
+	for issueID, worktree := range worktrees {
+		runtimeKeys.add("worktree", issueID, worktree)
+	}
 	m.worktrees = worktrees
-	m.metadata.RuntimeChecksum = runtimeMaterializationChecksum(m.tasks, worktrees)
+	m.runtimeKeys = runtimeKeys
+	m.metadata.RuntimeChecksum = runtimeKeys.sum()
 	m.metadata.SemanticChecksum = joinedMaterializedChecksum(m.metadata)
 	m.mu.Unlock()
 }
 
-func runtimeMaterializationChecksum(tasksByID map[string]domain.Task, worktrees map[string]git.Worktree) string {
-	tasks := make([]domain.Task, 0, len(tasksByID))
-	for _, task := range tasksByID {
-		tasks = append(tasks, task)
+func (m *projectReadMaterializer) replaceWorktreesForIssues(worktrees map[string]*git.Worktree) {
+	m.updateMu.Lock()
+	defer m.updateMu.Unlock()
+	m.mu.Lock()
+	runtimeKeys := m.runtimeKeys
+	for issueID, worktree := range worktrees {
+		if current, exists := m.worktrees[issueID]; exists {
+			runtimeKeys.remove("worktree", issueID, current)
+			delete(m.worktrees, issueID)
+		}
+		if worktree != nil {
+			runtimeKeys.add("worktree", issueID, *worktree)
+			m.worktrees[issueID] = *worktree
+		}
 	}
-	sortTasksDeterministically(tasks)
-	return checksumJSON(struct {
-		Tasks     []domain.Task
-		Worktrees map[string]git.Worktree
-	}{tasks, worktrees})
+	m.runtimeKeys = runtimeKeys
+	m.metadata.RuntimeChecksum = runtimeKeys.sum()
+	m.metadata.SemanticChecksum = joinedMaterializedChecksum(m.metadata)
+	m.mu.Unlock()
 }
 
 func (m *projectReadMaterializer) snapshotWorktrees() map[string]git.Worktree {
@@ -390,19 +529,9 @@ func (d *Daemon) ensureProjectReadMaterializer(ctx context.Context, projectID st
 		}
 		return d.enrichTasksWithSessionState(hydrateCtx, projectID, hydrated), nil
 	})
+	d.configureProjectReadMaterializer(materializer, projectID, client)
 	if err := materializer.bootstrap(ctx); err != nil {
 		return nil, fmt.Errorf("bootstrap project %s: %w", projectID, err)
-	}
-	if tasks, metadata := materializer.snapshot(); metadata.DeliveryCursor == 0 && len(tasks) == 0 {
-		exported, exportErr := client.ListWithRuntimeArchiveMode(ctx, projectID, issues.ArchiveInclude)
-		if exportErr != nil {
-			return nil, fmt.Errorf("bootstrap legacy full export for project %s: %w", projectID, exportErr)
-		}
-		if len(exported) > 0 {
-			if err := materializer.bootstrapLegacyExport(ctx, exported); err != nil {
-				return nil, fmt.Errorf("materialize legacy full export for project %s: %w", projectID, err)
-			}
-		}
 	}
 	if err := d.refreshProjectReadWorktrees(ctx, projectID, materializer); err != nil {
 		return nil, fmt.Errorf("hydrate project %s worktree materialization: %w", projectID, err)
@@ -517,6 +646,7 @@ func (d *Daemon) projectReadSnapshot(projectID string) ([]domain.Task, protocol.
 			}
 			return d.enrichTasksWithSessionState(hydrateCtx, projectID, hydrated), nil
 		})
+		d.configureProjectReadMaterializer(candidate, projectID, client)
 		if err := candidate.bootstrap(context.Background()); err != nil {
 			return nil, protocol.MaterializedSnapshotMetadata{}, fmt.Errorf("bootstrap embedded project read materialization for %s: %w", projectID, err)
 		}
@@ -533,6 +663,18 @@ func (d *Daemon) projectReadSnapshot(projectID string) ([]domain.Task, protocol.
 	return tasks, metadata, nil
 }
 
+func (d *Daemon) configureProjectReadMaterializer(materializer *projectReadMaterializer, projectID string, client *issues.Client) {
+	if materializer == nil || client == nil {
+		return
+	}
+	materializer.legacy = func(ctx context.Context) ([]domain.Task, error) {
+		return client.ListWithRuntimeArchiveMode(ctx, projectID, issues.ArchiveInclude)
+	}
+	materializer.affected = func(ctx context.Context, batch protocol.ProjectionDeltaBatch) ([]string, error) {
+		return projectionBatchAffectedIssueIDs(ctx, client, batch)
+	}
+}
+
 func (d *Daemon) refreshProjectReadRuntime(ctx context.Context, projectID string, issueIDs ...string) {
 	projectID = d.canonicalProjectID(projectID)
 	d.materializersMu.RLock()
@@ -541,15 +683,46 @@ func (d *Daemon) refreshProjectReadRuntime(ctx context.Context, projectID string
 	if materializer == nil {
 		return
 	}
-	if err := materializer.refreshRuntime(ctx); err != nil && d.cfg.Logger != nil {
+	issueIDs = uniqueStrings(issueIDs)
+	if err := materializer.refreshRuntime(ctx, issueIDs); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Warn("refresh project read runtime materialization", "project_id", projectID, "error", err)
 	}
-	if err := d.refreshProjectReadWorktrees(ctx, projectID, materializer); err != nil && d.cfg.Logger != nil {
+	if err := d.refreshProjectReadWorktreesForIssues(ctx, projectID, materializer, issueIDs); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Warn("refresh project read worktree materialization", "project_id", projectID, "error", err)
 	}
 	if err := d.syncUserProjectionMaterializedIssues(ctx, projectID, issueIDs); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Warn("apply keyed user projection materialization", "project_id", projectID, "issue_ids", issueIDs, "error", err)
 	}
+}
+
+func (d *Daemon) refreshProjectReadWorktreesForIssues(ctx context.Context, projectID string, materializer *projectReadMaterializer, issueIDs []string) error {
+	if materializer == nil || len(issueIDs) == 0 {
+		return nil
+	}
+	store := d.worktreeRuntimeStateStoreIfConfigured(projectID)
+	worktrees := make(map[string]*git.Worktree, len(issueIDs))
+	for _, issueID := range issueIDs {
+		issueID = strings.TrimSpace(issueID)
+		if issueID == "" {
+			continue
+		}
+		if store == nil {
+			worktrees[issueID] = nil
+			continue
+		}
+		row, found, err := store.GetWorktreeStateByIssueID(ctx, projectID, issueID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			worktrees[issueID] = nil
+			continue
+		}
+		worktree := git.Worktree{IssueID: issueID, Path: strings.TrimSpace(row.Path), Branch: strings.TrimSpace(row.Branch)}
+		worktrees[issueID] = &worktree
+	}
+	materializer.replaceWorktreesForIssues(worktrees)
+	return nil
 }
 
 func (d *Daemon) syncUserProjectionMaterializedIssues(ctx context.Context, projectID string, issueIDs []string) error {
@@ -565,9 +738,13 @@ func (d *Daemon) syncUserProjectionMaterializedIssues(ctx context.Context, proje
 	if len(wanted) == 0 {
 		return nil
 	}
-	tasks, _, err := d.projectReadSnapshot(projectID)
-	if err != nil {
-		return err
+	materializer := d.activeProjectReadMaterializer(projectID)
+	if materializer == nil {
+		return nil
+	}
+	tasks, metadata := materializer.snapshotIssues(wanted)
+	if !strings.HasPrefix(metadata.Health, "healthy") {
+		return fmt.Errorf("project read materialization unhealthy: %s", metadata.Health)
 	}
 	changes := make([]userstore.ProjectDeltaChange, 0, len(wanted))
 	for i := range tasks {

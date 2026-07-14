@@ -256,13 +256,14 @@ func (d *Daemon) recoverReviewReadyMailboxEvents(ctx context.Context, req protoc
 			return existing, nil
 		}
 	}
-	tasks, err := issueClient.ListParentChildSubtreeWithRuntime(ctx, projectID, rootIssueID)
+	materialized, _, err := d.projectReadSnapshot(projectID)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
 			return existing, nil
 		}
 		return nil, fmt.Errorf("load rooted issue scope: %w", err)
 	}
+	tasks := materializedParentChildClosure(materialized, rootIssueID)
 	inScope := make(map[string]struct{}, len(tasks))
 	for _, task := range tasks {
 		inScope[task.ID.String()] = struct{}{}

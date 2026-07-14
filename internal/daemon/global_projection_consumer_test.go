@@ -245,6 +245,26 @@ func TestRoutineProjectionPathsDoNotReintroduceLegacyFullRefreshScheduling(t *te
 	}
 }
 
+func TestProductionInvariantReadersDoNotBypassProjectMaterializer(t *testing.T) {
+	for path, forbidden := range map[string][]string{
+		"orchestration_lifecycle.go": {"ListParentChildSubtreeWithRuntime", "ListWithRuntime(ctx"},
+		"task_bulk_cleanup.go":       {"ListWithRuntime(ctx"},
+		"context_risk_commands.go":   {"GetWithDependencyContextRuntime", "ListParentChildSubtreeWithRuntime"},
+		"mail_commands.go":           {"ListParentChildSubtreeWithRuntime"},
+		"task_commands.go":           {"ListParentChildSubtreeWithRuntime"},
+	} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, symbol := range forbidden {
+			if strings.Contains(string(raw), symbol) {
+				t.Fatalf("%s bypasses project materializer through %q", path, symbol)
+			}
+		}
+	}
+}
+
 func TestEnsureUserProjectionConsumersCancelsRemovedProject(t *testing.T) {
 	consumerCtx, consumerCancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
