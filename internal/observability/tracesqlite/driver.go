@@ -5,12 +5,45 @@ import (
 	"database/sql"
 	sqldriver "database/sql/driver"
 	"strings"
+	"sync/atomic"
 
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	sqlite "modernc.org/sqlite"
 )
 
 const DriverName = "azedarach-sqlite"
+
+type queryCounterContextKey struct{}
+
+// QueryCounter counts SQLite query executions issued with a context carrying
+// the counter. It is intended for bounded-query regression tests and focused
+// diagnostics; production callers pay only one context lookup per query.
+type QueryCounter struct {
+	count atomic.Uint64
+}
+
+func (c *QueryCounter) Count() uint64 {
+	if c == nil {
+		return 0
+	}
+	return c.count.Load()
+}
+
+func WithQueryCounter(ctx context.Context, counter *QueryCounter) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if counter == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, queryCounterContextKey{}, counter)
+}
+
+func countQuery(ctx context.Context) {
+	if counter, _ := ctx.Value(queryCounterContextKey{}).(*QueryCounter); counter != nil {
+		counter.count.Add(1)
+	}
+}
 
 func init() {
 	sql.Register(DriverName, Driver{})
@@ -108,6 +141,7 @@ func (c tracedConn) ExecContext(ctx context.Context, query string, args []sqldri
 }
 
 func (c tracedConn) QueryContext(ctx context.Context, query string, args []sqldriver.NamedValue) (sqldriver.Rows, error) {
+	countQuery(ctx)
 	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "sqlite.query",
 		"dependency.name", "sqlite",
 		"dependency.operation", sqlOperation(query),
@@ -222,6 +256,7 @@ func (s tracedStmt) ExecContext(ctx context.Context, args []sqldriver.NamedValue
 }
 
 func (s tracedStmt) QueryContext(ctx context.Context, args []sqldriver.NamedValue) (sqldriver.Rows, error) {
+	countQuery(ctx)
 	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "sqlite.stmt_query",
 		"dependency.name", "sqlite",
 		"dependency.operation", s.operation,

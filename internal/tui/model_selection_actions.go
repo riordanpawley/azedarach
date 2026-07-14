@@ -436,19 +436,33 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		}
 		task, _, ok := m.taskAndSessionByID(targetID)
 		if !ok || task == nil {
-			m.addToast(Toast{
-				Level:   ToastWarning,
-				Message: fmt.Sprintf("Related task %s is not loaded", strings.TrimSpace(targetID)),
-				Expires: time.Now().Add(5 * time.Second),
-			})
-			return m, nil
+			if workspace, workspaceOK := m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); workspaceOK {
+				if contextualTask, found := workspace.TaskByID(targetID); found {
+					task = &contextualTask
+					ok = true
+				}
+			}
+			if !ok || task == nil {
+				m.addToast(Toast{
+					Level:   ToastWarning,
+					Message: fmt.Sprintf("Related task %s is not loaded", strings.TrimSpace(targetID)),
+					Expires: time.Now().Add(5 * time.Second),
+				})
+				return m, nil
+			}
 		}
 		columns := m.buildColumns()
 		m.nav.JumpToTaskByID(columns, task.ID.String())
 		m.ensureCursorVisible(columns)
 		if workspace, ok := m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); ok {
 			workspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
-			workspace.SyncTask(*task, m.tasks, m.pendingMutationForTask(task.ID.String()))
+			relatedTasks := m.tasks
+			if _, _, onBoard := m.taskAndSessionByID(task.ID.String()); !onBoard {
+				// Keep the existing workspace snapshot until task.get refreshes the
+				// newly selected off-board issue.
+				relatedTasks = workspace.ContextTasks()
+			}
+			workspace.SyncTask(*task, relatedTasks, m.pendingMutationForTask(task.ID.String()))
 		}
 		if m.daemonClient == nil {
 			return m, nil

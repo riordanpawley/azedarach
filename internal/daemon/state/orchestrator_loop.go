@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
-	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 // OrchestratorLoopCheckpoint is the durable recovery point for one steward
@@ -67,7 +66,7 @@ func (s *RuntimeStateStore) AdvanceOrchestratorLoopCheckpoint(ctx context.Contex
 		checkpoint.UpdatedAt = time.Now().UTC()
 	}
 	var advanced bool
-	err = sqliteutil.WithWriteLock(s.dbPath, func() error {
+	err = s.withWriteLock(ctx, func() error {
 		db, dbErr := s.dbHandle()
 		if dbErr != nil {
 			return dbErr
@@ -116,7 +115,7 @@ func (s *RuntimeStateStore) CompleteOrchestratorLoopAction(ctx context.Context, 
 		return false, fmt.Errorf("complete orchestrator loop action requires a keyed terminal status")
 	}
 	var completed bool
-	err = sqliteutil.WithWriteLock(s.dbPath, func() error {
+	err = s.withWriteLock(ctx, func() error {
 		db, dbErr := s.dbHandle()
 		if dbErr != nil {
 			return dbErr

@@ -7,12 +7,12 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
-func TestProtocolV42PreservesCombinedOrchestrationViewProjectionAndLearningContracts(t *testing.T) {
-	if CurrentVersion != 44 {
-		t.Fatalf("protocol version = %d, want 44", CurrentVersion)
+func TestProtocolV48PreservesCombinedOrchestrationViewProjectionAndLearningContracts(t *testing.T) {
+	if CurrentVersion != 48 {
+		t.Fatalf("protocol version = %d, want 48", CurrentVersion)
 	}
-	if CommandOrchestratorSessionStart == "" || CommandOrchestratorSessionAttach == "" || CommandOrchestratorSessionStatus == "" || EventOrchestrationLoopUpdated == "" {
-		t.Fatal("combined orchestration session and loop commands must remain registered")
+	if CommandOrchestratorSessionStart == "" || CommandOrchestratorSessionAttach == "" || CommandOrchestratorSessionStatus == "" || EventOrchestrationLoopUpdated == "" || EventBoardViewChanged == "" {
+		t.Fatal("combined orchestration and board-view protocol contracts must remain registered")
 	}
 
 	snapshot := OrchestrationSnapshot{

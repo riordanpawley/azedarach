@@ -3026,6 +3026,7 @@ func TestTaskClosePreflightEnforcesInvestigationDispositionAcceptance(t *testing
 	tests := []struct {
 		name       string
 		events     []issues.IssueObservationEventParams
+		newEpoch   bool
 		wantReason string
 	}{
 		{name: "human facing remains gated", wantReason: "human-facing investigation lacks explicit issue-specific findings acceptance"},
@@ -3038,6 +3039,13 @@ func TestTaskClosePreflightEnforcesInvestigationDispositionAcceptance(t *testing
 			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
 			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-return", Payload: map[string]any{"outcome": "returned", "actor_id": "reviewer"}},
 		}, wantReason: "unresolved returned findings"},
+		{name: "new review epoch rejects stale human acceptance", events: []issues.IssueObservationEventParams{
+			{Type: domain.IssueEventHumanInputProvided, Source: "human", Payload: map[string]any{"investigation_findings_accepted": true}},
+		}, newEpoch: true, wantReason: "human-facing investigation lacks explicit issue-specific findings acceptance"},
+		{name: "new review epoch rejects stale internal acceptance", events: []issues.IssueObservationEventParams{
+			{Type: domain.IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}},
+			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
+		}, newEpoch: true, wantReason: "internal review lacks durable accepted reviewer outcome"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3048,6 +3056,14 @@ func TestTaskClosePreflightEnforcesInvestigationDispositionAcceptance(t *testing
 			for _, event := range tt.events {
 				if _, err := issuesClient.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
 					t.Fatalf("append event: %v", err)
+				}
+			}
+			if tt.newEpoch {
+				if err := issuesClient.Update(ctx, issueID, domain.StatusOpen); err != nil {
+					t.Fatalf("reopen investigation: %v", err)
+				}
+				if err := issuesClient.Update(ctx, issueID, domain.StatusInReview); err != nil {
+					t.Fatalf("start new review epoch: %v", err)
 				}
 			}
 			_, err = d.validateTaskClosePreflight(ctx, projectID, issueID, taskClosePreflightOptions{}, protocol.RequestEnvelope{})
@@ -6926,6 +6942,16 @@ func TestTaskCloseCommandForceRemovesDirtyAlreadyIntegratedWorktree(t *testing.T
 	}); err != nil {
 		t.Fatalf("seed worktree projection: %v", err)
 	}
+	cacheRoot := filepath.Join(repoDir, ".azedarach", "go")
+	for _, kind := range []string{"normal", "race", "coverage"} {
+		entry := filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+taskID, "entry")
+		if err := os.MkdirAll(filepath.Dir(entry), 0o755); err != nil {
+			t.Fatalf("seed %s cache: %v", kind, err)
+		}
+		if err := os.WriteFile(entry, []byte("cache"), 0o644); err != nil {
+			t.Fatalf("write %s cache: %v", kind, err)
+		}
+	}
 
 	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
 	commands := make([]string, 0, 12)
@@ -7076,6 +7102,12 @@ func TestTaskCloseCommandForceRemovesDirtyAlreadyIntegratedWorktree(t *testing.T
 	record := waitForRuntimeState(t, d.operationRuntime, result.WorktreeCleanupOperationID, daemonops.StateDone)
 	if record.Kind != taskDeferredWorktreeCleanupOperationKind {
 		t.Fatalf("cleanup operation kind = %s, want %s", record.Kind, taskDeferredWorktreeCleanupOperationKind)
+	}
+	for _, kind := range []string{"normal", "race", "coverage"} {
+		_, err := os.Stat(filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+taskID))
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s cache remains after deferred close cleanup: %v", kind, err)
+		}
 	}
 }
 
@@ -7304,6 +7336,16 @@ func TestRecoverInterruptedDeferredWorktreeCleanupRemovesClosedIssueWorktree(t *
 		t.Fatalf("mkdir source worktree: %v", err)
 	}
 	sourceBranch := "riordan/" + taskID + "/recover-deferred-cleanup"
+	cacheRoot := filepath.Join(repoDir, ".azedarach", "go")
+	for _, kind := range []string{"normal", "race", "coverage"} {
+		entry := filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+taskID, "entry")
+		if err := os.MkdirAll(filepath.Dir(entry), 0o755); err != nil {
+			t.Fatalf("seed %s cache: %v", kind, err)
+		}
+		if err := os.WriteFile(entry, []byte("cache"), 0o644); err != nil {
+			t.Fatalf("write %s cache: %v", kind, err)
+		}
+	}
 	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
 	commands := make([]string, 0, 8)
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
@@ -7354,6 +7396,12 @@ func TestRecoverInterruptedDeferredWorktreeCleanupRemovesClosedIssueWorktree(t *
 	}
 	if !strings.Contains(joined, "branch -D "+sourceBranch) {
 		t.Fatalf("commands missing branch cleanup:\n%s", joined)
+	}
+	for _, kind := range []string{"normal", "race", "coverage"} {
+		_, err := os.Stat(filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+taskID))
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s cache remains after interrupted recovery cleanup: %v", kind, err)
+		}
 	}
 }
 
@@ -9635,6 +9683,45 @@ func TestTaskIntegrationReadinessRequiresCompleteWorkerEvidencePacket(t *testing
 	}
 }
 
+func TestTaskIntegrationReadinessSkipsReviewReadyReplayNotification(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-worker-evidence-replay"
+	repoDir := t.TempDir()
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeTask, Status: domain.StatusInReview, ParentID: &parentID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := []daemonMailEvent{
+		{
+			Seq: 1, ParentIssue: parentID, IssueID: childID, Type: "worker-integration-ready", CreatedAt: time.Now().UTC(),
+			Body: `{"schema":"worker_evidence.v1","summary":"Ready","commands_run":["go test ./internal/daemon"],"key_assertions":["replay notification cannot mask evidence"],"files_changed":["internal/daemon/task_commands.go"],"review":{"status":"clean","findings":[]},"risks":["none"]}`,
+		},
+		{
+			Seq: 2, ParentIssue: parentID, IssueID: childID, Type: "worker-integration-ready", From: "daemon-observation-replay", Body: `{"summary":"issue is review-ready"}`, CreatedAt: time.Now().UTC(),
+			Payload: map[string]interface{}{"publication": reviewReadyReplayPublication, "publication_key": "project:42"},
+		},
+	}
+	for _, event := range events {
+		if err := appendMailboxEvent(repoDir, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, revision: map[string]uint64{projectID: 1}}
+	result, err := d.taskIntegrationReadiness(ctx, projectID, childID, repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Ready || result.EvidenceEventSeq != 1 || result.EvidencePacket == nil {
+		t.Fatalf("result = %+v, want earlier structured evidence selected", result)
+	}
+}
+
 func TestTaskIntegrationReadinessAcceptsIssueRecordWorkerEvidence(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-worker-issue-evidence-ready"
@@ -9752,6 +9839,50 @@ func TestHandleTaskEventAppendPublishesTaskUpdate(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for task update event")
+	}
+}
+
+func TestHandleTaskEventAppendRejectsCallerForgedAuthorityEvents(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-task-event-authority-spoof"
+	repoDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "reject event spoof", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: logger}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, revision: map[string]uint64{projectID: 1}}
+
+	for _, eventType := range []domain.IssueObservationEventType{domain.IssueEventIssueStatusChanged, domain.IssueEventReviewCompleted, domain.IssueEventReviewCloseFailed} {
+		resp, err := d.command(ctx, protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       naming.RequestID("task-event-authority-spoof-" + string(eventType)),
+			Kind:            protocol.EnvelopeKindCommand,
+			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+			Command:         "task.event.append",
+			Body: mustJSON(t, map[string]any{
+				"task_id":        taskID,
+				"event_type":     string(eventType),
+				"source":         "issue-store",
+				"source_command": "review-accept",
+				"payload":        map[string]any{"to_status": "in_review", "outcome": "integration_failed", "actor_id": "attacker"},
+			}),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest || !strings.Contains(resp.Error.Message, "authority-only") {
+			t.Fatalf("event type %s response = %+v, want authority-only invalid request", eventType, resp)
+		}
+	}
+	events, err := issuesClient.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventIssueStatusChanged, domain.IssueEventReviewCompleted, domain.IssueEventReviewCloseFailed}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("forged authority events persisted: %+v", events)
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 )
 
 func TestRunWritesCompleteArtifactsBeforeReturningTestFailure(t *testing.T) {
+	configureTestCacheFamily(t)
 	module := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(module, "go.mod"), []byte("module example.test/failures\n\ngo 1.24.2\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(module, "failure_test.go"), []byte(`package failures
@@ -48,6 +49,7 @@ func TestSecond(t *testing.T) { t.Error("second sentinel") }
 }
 
 func TestRunForcesIsolatedHomeConfigAndDatabaseRoots(t *testing.T) {
+	configureTestCacheFamily(t)
 	originalHome := t.TempDir()
 	registered := filepath.Join(t.TempDir(), "registered")
 	require.NoError(t, os.MkdirAll(filepath.Join(originalHome, ".config", "azedarach"), 0o755))
@@ -94,6 +96,45 @@ func TestEnvironment(t *testing.T) {
 	profile := Profile{Name: "fixture", Packages: []string{"./..."}, GoTestArgs: []string{"-json", "-count=1"}}
 
 	measurement, err := Run(context.Background(), RunOptions{Profile: profile, Baseline: baseline, OutputDir: output, WorkingDir: module, CheckBudgets: true})
-	require.NoError(t, err, "failures: %+v", measurement.Failures)
+	diagnostics, _ := os.ReadFile(measurement.StderrPath)
+	rawDiagnostics, _ := os.ReadFile(measurement.RawJSONPath)
+	require.NoError(t, err, "failures: %+v; stderr: %s; raw: %s", measurement.Failures, diagnostics, rawDiagnostics)
 	assert.Zero(t, measurement.ExitCode)
+}
+
+func configureTestCacheFamily(t *testing.T) {
+	t.Helper()
+	t.Setenv("AZEDARACH_GO_CACHE_OWNER", "issue-test")
+	t.Setenv("AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES", "104857600")
+	t.Setenv("AZEDARACH_GO_CACHE_HARD_LIMIT_BYTES", "209715200")
+}
+
+func TestRunWritesMachineReadableArtifactsWhenBuildCacheHardLimitRefuses(t *testing.T) {
+	module := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(module, "go.mod"), []byte("module example.test/refusal\n\ngo 1.24.2\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(module, "refusal_test.go"), []byte("package refusal\nimport \"testing\"\nfunc TestMustNotRun(t *testing.T) { t.Fatal(\"command ran\") }\n"), 0o644))
+	cacheRoot := filepath.Join(module, ".azedarach", "go")
+	t.Setenv("AZEDARACH_GO_CACHE_ROOT", cacheRoot)
+	t.Setenv("AZEDARACH_GO_CACHE_OWNER", "issue-dhc")
+	t.Setenv("AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES", "4")
+	t.Setenv("AZEDARACH_GO_CACHE_HARD_LIMIT_BYTES", "8")
+	cachePath := filepath.Join(cacheRoot, "caches", "v1", "normal", "issue-dhc")
+	require.NoError(t, os.MkdirAll(cachePath, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cachePath, "oversized"), []byte("0123456789"), 0o644))
+
+	output := filepath.Join(t.TempDir(), "artifacts")
+	baseline := Baseline{RecordedAt: "2026-07-13"}
+	profile := Profile{Name: "fixture", Packages: []string{"./..."}, GoTestArgs: []string{"-json", "-count=1"}}
+
+	measurement, err := Run(context.Background(), RunOptions{Profile: profile, Baseline: baseline, OutputDir: output, WorkingDir: module, CheckBudgets: true})
+	require.ErrorContains(t, err, "above hard limit")
+	assert.Equal(t, "refused-hard-limit", measurement.BuildCache.Decision)
+	assert.Equal(t, 1, measurement.ExitCode)
+	for _, name := range []string{"events.jsonl", "stderr.txt", "report.json", "report.md"} {
+		_, statErr := os.Stat(filepath.Join(output, name))
+		require.NoError(t, statErr, name)
+	}
+	raw, readErr := os.ReadFile(filepath.Join(output, "events.jsonl"))
+	require.NoError(t, readErr)
+	assert.Empty(t, raw, "refused validation must not execute go test")
 }

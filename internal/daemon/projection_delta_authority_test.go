@@ -30,7 +30,7 @@ type projectionFirstRequestServer struct {
 
 func (s *projectionFirstRequestServer) Serve(ctx context.Context) error {
 	body, _ := json.Marshal(protocol.ProjectionDeltaReadRequest{ProjectID: "projection-startup", Limit: 10})
-	response, _ := s.daemon.command(ctx, protocol.RequestEnvelope{Command: protocol.CommandProjectionDeltaList, RequestID: "first-request", Meta: protocol.Metadata{ProjectID: "projection-startup"}, Body: body})
+	response, _ := s.daemon.command(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, Command: protocol.CommandProjectionDeltaList, RequestID: "first-request", Meta: protocol.Metadata{ProjectID: "projection-startup"}, Body: body})
 	s.result <- response
 	s.cancel()
 	<-ctx.Done()
@@ -70,7 +70,7 @@ func TestProjectionDeltaCommandsReadActiveIssueMutation(t *testing.T) {
 		issueClientsByProject: map[string]*issues.Client{projectID: client},
 	}
 	body, _ := json.Marshal(protocol.ProjectionDeltaReadRequest{ProjectID: naming.ProjectID(projectID), Limit: 10})
-	resp, err := d.command(ctx, protocol.RequestEnvelope{Command: protocol.CommandProjectionDeltaList, RequestID: "delta-list", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body})
+	resp, err := d.command(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, Command: protocol.CommandProjectionDeltaList, RequestID: "delta-list", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body})
 	if err != nil || !resp.OK {
 		t.Fatalf("list response=%+v transport=%v", resp.Error, err)
 	}
@@ -88,7 +88,7 @@ func TestProjectionDeltaCommandsReadActiveIssueMutation(t *testing.T) {
 		t.Fatalf("verify projection batch: %v", err)
 	}
 	snapshotBody, _ := json.Marshal(protocol.ProjectionSnapshotRequest{ProjectID: naming.ProjectID(projectID), Cursor: 1})
-	snapshotResp, err := d.command(ctx, protocol.RequestEnvelope{Command: protocol.CommandProjectionSnapshot, RequestID: "delta-snapshot", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: snapshotBody})
+	snapshotResp, err := d.command(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, Command: protocol.CommandProjectionSnapshot, RequestID: "delta-snapshot", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: snapshotBody})
 	if err != nil || !snapshotResp.OK {
 		t.Fatalf("snapshot response=%+v transport=%v", snapshotResp.Error, err)
 	}
@@ -101,6 +101,25 @@ func TestProjectionDeltaCommandsReadActiveIssueMutation(t *testing.T) {
 	}
 	if err := protocol.VerifyProjectionSnapshot(snapshot, issueProjectionProjector()); err != nil {
 		t.Fatalf("verify projection snapshot: %v", err)
+	}
+}
+
+func TestProjectionDeltaCommandsRejectOldAndNewEnvelopeVersions(t *testing.T) {
+	d := &Daemon{cfg: Config{Logger: slog.Default()}}
+	for _, tc := range []struct {
+		name    string
+		version protocol.Version
+		code    protocol.ErrorCode
+	}{
+		{name: "old", version: protocol.ProjectionDeltaProtocolVersion - 1, code: protocol.ErrorCodeUpgradeRequired},
+		{name: "new", version: protocol.CurrentVersion + 1, code: protocol.ErrorCodeIncompatible},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response, err := d.handleProjectionDeltaRead(context.Background(), protocol.RequestEnvelope{ProtocolVersion: tc.version, Command: protocol.CommandProjectionDeltaList})
+			if err != nil || response.Error == nil || response.Error.Code != tc.code {
+				t.Fatalf("response=%+v err=%v, want %s", response, err, tc.code)
+			}
+		})
 	}
 }
 

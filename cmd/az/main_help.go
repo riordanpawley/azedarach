@@ -174,8 +174,10 @@ func printHelpForPath(path []string) bool {
 		fmt.Println("Usage: az decision revisit --id <old-id> (--new <existing-id> | --title <text> --rationale <text>) [--context <text>] [--note <text>] [--json]")
 	case "decision sync":
 		fmt.Println("Usage: az decision sync [--check] [--project-dir <dir>] [--json]")
+		fmt.Println("Explicitly reconcile the target worktree's docs/decisions with the shared store, removing obsolete rename/delete artifacts.")
 	case "decision import":
 		fmt.Println("Usage: az decision import [--check] [--force] [--project-dir <dir>] [--json]")
+		fmt.Println("Import clean Markdown changes; conflicting non-empty fields are reported and skipped unless --force is explicit.")
 	case "decision link":
 		printDecisionLinkUsage()
 	case "decision link list":
@@ -384,7 +386,7 @@ func printHelpForPath(path []string) bool {
 	case "observe":
 		fmt.Println(observeUsage)
 	case "orchestrate":
-		fmt.Println("Usage: az orchestrate <status|start|group|watch|observe|prompt|message|capture|complete-check|integrate|close-session> [arguments]")
+		fmt.Println("Usage: az orchestrate <status|start|group|watch|observe|review|prompt|message|capture|complete-check|integrate|close-session> [arguments]")
 	case "orchestrator-session":
 		fmt.Println(orchestratorSessionUsage)
 	case "orchestrator-session start", "orchestrator-session attach", "orchestrator-session status":
@@ -399,6 +401,8 @@ func printHelpForPath(path []string) bool {
 		fmt.Println(orchestrateWatchUsage)
 	case "orchestrate observe":
 		fmt.Println(orchestrateObserveUsage)
+	case "orchestrate review", "orchestrate review accept", "orchestrate review return":
+		fmt.Println(orchestrateReviewUsage)
 	case "orchestrate prompt":
 		fmt.Println(orchestratePromptUsage)
 	case "orchestrate message":
@@ -497,6 +501,7 @@ const (
 	observeUsage                  = "Usage: az observe [--root <issue-id>] [--project <project-id>] [--json]"
 	orchestrateStatusUsage        = "Usage: az orchestrate status [--root <issue-id>] [--project <project-id>] [--since <seq>] [--limit <n>] [--json] [--summary|--full]"
 	orchestrateStartUsage         = "Usage: az orchestrate start [--root <issue-id>] [--project <project-id>] [--limit <n>] [--issue <issue-id> ...] [--override-board-health] [--json]"
+	orchestrateReviewUsage        = "Usage: az orchestrate review <accept|return> --issue <issue-id> [--issue <issue-id> ...] [--root <issue-id>] [--project <project-id>] [--intent-key <key>] [--finding <text> ...] [--severity <level>] [--restart-worker] [--json]"
 	orchestrateGroupUsage         = "Usage: az orchestrate group --root <issue-id> --nested <issue-id> --issue <issue-id> ... [--project <project-id>] [--json]"
 	orchestrateWatchUsage         = "Usage: az orchestrate watch [--root <issue-id>] [--project <project-id>] [--since <seq>] [--jsonl] [--once] [--verbose|--full]"
 	orchestrateObserveUsage       = "Usage: az orchestrate observe --root <issue-id> [--project <project-id>] [--json]"

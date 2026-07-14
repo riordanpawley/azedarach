@@ -61,6 +61,18 @@ func TestRuntimeStateStoreSessionRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRuntimeStateStoreBoundsConnectionPool(t *testing.T) {
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	db, err := store.dbHandle()
+	if err != nil {
+		t.Fatalf("dbHandle: %v", err)
+	}
+	if got := db.Stats().MaxOpenConnections; got != runtimeStateMaxOpenConns {
+		t.Fatalf("MaxOpenConnections = %d, want %d", got, runtimeStateMaxOpenConns)
+	}
+}
+
 func TestRuntimeStateStoreClearsSessionActivityForStoppedRows(t *testing.T) {
 	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
 	t.Cleanup(func() {

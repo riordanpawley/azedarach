@@ -13,13 +13,14 @@ const (
 )
 
 const (
-	daemonInvariantSessionStartConflict   daemonInvariantID = "session.start_conflict"
-	daemonInvariantSessionAttachTarget    daemonInvariantID = "session.attach_target"
-	daemonInvariantSessionLifecycleTarget daemonInvariantID = "session.lifecycle_target"
-	daemonInvariantSessionStopTargets     daemonInvariantID = "session.stop_targets"
-	daemonInvariantSessionReconcile       daemonInvariantID = "session.reconcile"
-	daemonInvariantSessionIssueLifecycle  daemonInvariantID = "session.issue_lifecycle_runtime"
-	daemonInvariantAdvisorSingleton       daemonInvariantID = "session.advisor_singleton"
+	daemonInvariantSessionStartConflict    daemonInvariantID = "session.start_conflict"
+	daemonInvariantSessionAttachTarget     daemonInvariantID = "session.attach_target"
+	daemonInvariantSessionLifecycleTarget  daemonInvariantID = "session.lifecycle_target"
+	daemonInvariantSessionStopTargets      daemonInvariantID = "session.stop_targets"
+	daemonInvariantSessionReconcile        daemonInvariantID = "session.reconcile"
+	daemonInvariantSessionIssueLifecycle   daemonInvariantID = "session.issue_lifecycle_runtime"
+	daemonInvariantSessionActivityConverge daemonInvariantID = "session.activity_convergence"
+	daemonInvariantAdvisorSingleton        daemonInvariantID = "session.advisor_singleton"
 
 	daemonInvariantTaskListFreshness    daemonInvariantID = "task.list_freshness"
 	daemonInvariantTaskClose            daemonInvariantID = "task.close"
@@ -59,6 +60,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantSessionStopTargets:      daemonInvariantSourceTmux,
 	daemonInvariantSessionReconcile:        daemonInvariantSourceHybrid,
 	daemonInvariantSessionIssueLifecycle:   daemonInvariantSourceHybrid,
+	daemonInvariantSessionActivityConverge: daemonInvariantSourceHybrid,
 	daemonInvariantTaskListFreshness:       daemonInvariantSourceProjection,
 	daemonInvariantTaskClose:               daemonInvariantSourceHybrid,
 	daemonInvariantTaskClosePreflight:      daemonInvariantSourceHybrid,

@@ -203,10 +203,14 @@ type Daemon struct {
 	orchestrationSnapshotCache         map[string]orchestrationSnapshotCacheEntry
 	orchestrationSnapshotLoads         map[string]*orchestrationSnapshotLoad
 	orchestrationSnapshotBuild         orchestrationSnapshotBuilder
+	reviewLeaseReleasedBeforeClose     func(context.Context, string, string) error
 	watchClientsMu                     sync.Mutex
 	watchClients                       map[string]watchClientObservation
 	terminalFailureProbeMu             sync.Mutex
 	terminalFailureProbes              map[string]terminalFailureProbeState
+	reviewReadyRecoveryMu              sync.Mutex
+	reviewReadyRecoveryCursor          map[string]int64
+	reviewReadyRecoveryBeforeLoad      func()
 
 	revMu    sync.Mutex
 	revision map[string]uint64
@@ -1399,8 +1403,11 @@ func (d *Daemon) recoverInterruptedDeferredWorktreeCleanup(ctx context.Context, 
 			ErrorMessage: err.Error(),
 		}, true
 	}
-	if removedWorktree != nil {
-		_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(removedWorktree.Path))
+	if cleanupErr := finalizeDeletedWorktree(cleanupCtx, projectID, taskID, manager, removedWorktree, d.runtimeProjectionStateWriter()); cleanupErr != nil {
+		return interruptedOperationRecovery{
+			State:        daemonops.StateFailed,
+			ErrorMessage: cleanupErr.Error(),
+		}, true
 	}
 	payload, _ := json.Marshal(deferredTaskWorktreeCleanupResult{
 		ProjectID: projectID,

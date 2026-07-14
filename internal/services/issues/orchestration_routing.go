@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
-	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 type OrchestrationRouteResult struct {
@@ -35,11 +34,9 @@ func (c *Client) RouteOrchestrationCandidate(ctx context.Context, projectID, act
 	var created bool
 	err := c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
-			return sqliteutil.WithWriteLock(c.dbPath, func() error {
-				var err error
-				interaction, created, err = c.routeOrchestrationCandidateLocked(ctx, actorID, &route)
-				return err
-			})
+			var err error
+			interaction, created, err = c.routeOrchestrationCandidateLocked(ctx, actorID, &route)
+			return err
 		})
 	})
 	if err != nil {

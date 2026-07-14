@@ -99,7 +99,7 @@ Evidence And Coordination
 - Before accepting repeated-locality work, inspect `az ticket context-risk --since 14d <ticket-id>`; treat low risk as advisory and require structured diagnosis/invariant/consumer/test evidence for high risk.
 - Capture reusable discoveries with `az learn add`; use `az decision` for durable architecture/product choices and link them to tickets or requirements.
 - When the implementation design changes, update the ticket's durable design field and keep child-level detail on the relevant child ticket.
-- Pre-commit hooks may sync decision markdown. Run `az decision sync --check` before scoped commits when unrelated decision drift would be harmful.
+- Pre-commit hooks never export or stage decision markdown. Use `az decision import --check` before exporting teammates' Git changes, then run explicit `az decision sync --check` / `az decision sync` and stage `docs/decisions` intentionally.
 
 {{ if .LearningSection }}{{ .LearningSection }}
 

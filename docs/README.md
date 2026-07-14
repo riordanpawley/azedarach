@@ -37,8 +37,11 @@ This directory primarily contains **developer/internal documentation**.
 - [25-configurable-views.md](25-configurable-views.md)
 - [25-cross-project-user-database.md](25-cross-project-user-database.md)
 - [25-rootless-orchestrator-contracts.md](25-rootless-orchestrator-contracts.md)
+- [26-team-collaboration-architecture.md](26-team-collaboration-architecture.md)
 - [26-test-wait-audit.md](26-test-wait-audit.md) — inventory and policy for test waits over 500 ms
 - [26-test-timing-profiles.md](26-test-timing-profiles.md)
+- [27-go-cache-protocol.md](27-go-cache-protocol.md) — bounded worktree-aware Go cache ownership, validation, and maintenance
+- [28-decision-markdown-sync.md](28-decision-markdown-sync.md) — worktree-safe decision store/export authority and recovery workflow
 - [adr/1-daemon-ownership-adr.md](adr/1-daemon-ownership-adr.md)
 - [adr/2-daemon-owned-async-notices.md](adr/2-daemon-owned-async-notices.md)
 
@@ -56,12 +59,13 @@ This directory primarily contains **developer/internal documentation**.
 - `session.start` conflict / `session.attach` target / `session.pause` and `session.resume` lifecycle targets / `session.stop` targets: `tmux`.
 - `session.recover` reconciliation: `hybrid` (projection intent + tmux runtime).
 - `session.issue_lifecycle_runtime`: `hybrid` (refreshed factored issue state + live tmux; ready+idle is repaired to working, while backlog/terminal/archived divergence is preserved for explicit reconciliation).
+- `session.activity_convergence`: `hybrid` (refreshed durable activity/runtime projections + bounded live tmux prompt probe; newer hook evidence wins races).
 - `session.advisor_singleton`: `hybrid` (refreshed interaction/session-role projection + tmux runtime); reconcile recreates missing discussion runtimes, resumes paused projections, removes terminal/orphan reservations, and project removal runs daemon cleanup before unregistering the project.
 - `task.close`, `task.close_preflight`, `task.delete`, `task.delete_preflight`, `task.graph_readiness`, and `task.complete_check`: `hybrid` (durable issue graph/v2 lifecycle and investigation disposition/acceptance evidence projection + live runtime attachment state). Missing investigation disposition remains human-facing; declared internal reviews require accepted reviewer evidence with no later returned findings.
 - `orchestration.project_candidates`: `projection` (bounded durable lifecycle/graph, ownership, session activity, and interaction candidate projection).
 - `orchestration.project_review`: `projection` (durable issue/review/ownership, mailbox/observation evidence, and worktree projections; accepted outcomes delegate integration and cleanup to hybrid `task.close`).
 - `orchestration.claim_start`: `hybrid` (durable ownership/start-attempt projection plus daemon session-start operation/runtime compensation).
-- `orchestration.project_loop`: `projection` (durable issue-observation cursor and loop checkpoint refreshed before deterministic review-first action replay).
+- `orchestration.project_loop`: `projection` (durable issue-observation cursor and loop checkpoint refreshed before deterministic non-blocking start/review action replay; queued reviews remain visible without globally stalling unrelated starts).
 - `projection.delta_stream`: `projection` (durable project delta ledger and version history; cursor replay and snapshot reads never reconcile or poll tmux).
 - `task.review_handoff`: `projection` (durable issue v2 lifecycle/review projection + session activity projection; active issue self-handoff remains allowed).
 - `task.integration_readiness` and `task.context_risk_closeout`: `projection` (durable issue projection + mailbox/observation evidence).

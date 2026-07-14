@@ -21,6 +21,12 @@ type InteractionResolution struct {
 
 // CreateInteraction persists a new durable decision request.
 func (c *Client) CreateInteraction(ctx context.Context, request domain.InteractionRequest) error {
+	return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		return c.createInteractionLocked(lockCtx, request)
+	})
+}
+
+func (c *Client) createInteractionLocked(ctx context.Context, request domain.InteractionRequest) error {
 	if err := request.Validate(); err != nil {
 		return fmt.Errorf("validate interaction: %w", err)
 	}
@@ -50,6 +56,12 @@ func (c *Client) CreateInteraction(ctx context.Context, request domain.Interacti
 
 // UpdateInteraction applies an optimistic-revision replacement.
 func (c *Client) UpdateInteraction(ctx context.Context, request domain.InteractionRequest, expectedRevision int64) error {
+	return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		return c.updateInteractionLocked(lockCtx, request, expectedRevision)
+	})
+}
+
+func (c *Client) updateInteractionLocked(ctx context.Context, request domain.InteractionRequest, expectedRevision int64) error {
 	if expectedRevision < 1 || request.Revision != expectedRevision+1 {
 		return fmt.Errorf("%w: expected replacement revision %d", domain.ErrStaleInteractionRevision, expectedRevision+1)
 	}
@@ -105,6 +117,12 @@ func (c *Client) UpdateInteraction(ctx context.Context, request domain.Interacti
 // UpdateInteractionMetadata persists an orthogonal lifecycle audit mutation
 // without changing the request's decision state.
 func (c *Client) UpdateInteractionMetadata(ctx context.Context, request domain.InteractionRequest, expectedRevision int64) error {
+	return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		return c.updateInteractionMetadataLocked(lockCtx, request, expectedRevision)
+	})
+}
+
+func (c *Client) updateInteractionMetadataLocked(ctx context.Context, request domain.InteractionRequest, expectedRevision int64) error {
 	if expectedRevision < 1 || request.Revision != expectedRevision+1 {
 		return fmt.Errorf("%w: expected replacement revision %d", domain.ErrStaleInteractionRevision, expectedRevision+1)
 	}

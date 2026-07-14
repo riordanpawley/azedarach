@@ -111,6 +111,9 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 		return result, errors.Join(errs...)
 	}
 
+	if _, err := d.reconcileStaleBusySessionActivity(ctx, result.ProjectID.String(), nil); err != nil {
+		errs = append(errs, fmt.Errorf("converge stale busy session activity: %w", err))
+	}
 	if err := d.materializeSessionActivityEvidence(ctx, protocol.Metadata{ProjectID: result.ProjectID}, result.ProjectID.String(), nil); err != nil {
 		errs = append(errs, fmt.Errorf("materialize session activity evidence: %w", err))
 	}
@@ -177,6 +180,9 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 		if err := d.reconcileInteractionStaleness(ctx, result.ProjectID.String()); err != nil {
 			errs = append(errs, fmt.Errorf("reconcile interaction staleness: %w", err))
 		}
+	}
+	if _, err := d.reconcileStaleBusySessionActivity(ctx, result.ProjectID.String(), issueIDs); err != nil {
+		errs = append(errs, fmt.Errorf("converge stale busy session activity: %w", err))
 	}
 	if err := d.materializeSessionActivityEvidence(ctx, protocol.Metadata{ProjectID: result.ProjectID}, result.ProjectID.String(), issueIDs); err != nil {
 		errs = append(errs, fmt.Errorf("materialize session activity evidence: %w", err))

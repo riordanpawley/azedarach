@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -114,6 +115,68 @@ func projectOrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOpt
 	}
 	if len(result.Failed) > 0 {
 		return fmt.Errorf("orchestrate start completed with failures")
+	}
+	return nil
+}
+
+func OrchestrateReviewCommand(deps *Dependencies, opts OrchestrateReviewOptions) error {
+	restoreProject := applyOrchestrationProjectOverride(deps, opts.Project)
+	defer restoreProject()
+	scope, err := resolveCLIOrchestrationScope(opts.RootIssueID)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sessionStartCommandTimeout)
+	defer cancel()
+	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
+		return err
+	}
+	kind := protocol.OrchestrationIntentReviewAccept
+	if opts.Action == "return" {
+		kind = protocol.OrchestrationIntentReviewReturn
+	}
+	intentKey := strings.TrimSpace(opts.IntentKey)
+	if intentKey == "" {
+		intentKey = fmt.Sprintf("cli-review:%d", time.Now().UTC().UnixNano())
+	}
+	findings := make([]protocol.OrchestrationReviewFinding, 0, len(opts.Findings))
+	for _, finding := range opts.Findings {
+		findings = append(findings, protocol.OrchestrationReviewFinding{Severity: opts.Severity, Finding: finding})
+	}
+	request := protocol.OrchestrationIntentRequest{
+		Scope: scope, Kind: kind, IntentKey: intentKey, ActorID: orchestrateOwnerID(),
+		IssueIDs: opts.IssueIDs, RepoDir: deps.RepoDir, Findings: findings, RestartWorker: opts.RestartWorker,
+	}
+	result, err := deps.DaemonClient.ApplyOrchestrationIntent(ctx, request)
+	if err != nil {
+		return fmt.Errorf("review %s intent %s: %w", opts.Action, intentKey, err)
+	}
+	if opts.JSON {
+		if err := printJSON(result); err != nil {
+			return err
+		}
+	} else {
+		fmt.Printf("Review %s intent: %s\n", opts.Action, result.IntentKey)
+		for _, id := range result.Closed {
+			fmt.Printf("- accepted and closed: %s\n", id)
+		}
+		for _, id := range result.Returned {
+			fmt.Printf("- findings returned: %s\n", id)
+		}
+		for _, id := range sortedKeys(result.Skipped) {
+			fmt.Printf("- skipped %s: %s\n", id, result.Skipped[id])
+		}
+		for _, id := range sortedKeys(result.Failed) {
+			fmt.Printf("- failed %s: %s\n", id, result.Failed[id])
+		}
+		if len(result.Pending) > 0 {
+			for _, pending := range result.Pending {
+				fmt.Printf("- pending %s: operation=%s state=%s\n", pending.IssueID, pending.OperationID, pending.OperationState)
+			}
+		}
+	}
+	if len(result.Failed) > 0 || len(result.Pending) > 0 || len(result.Skipped) > 0 {
+		return fmt.Errorf("review %s incomplete; retry the same decision with --intent-key %s", opts.Action, result.IntentKey)
 	}
 	return nil
 }

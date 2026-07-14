@@ -264,9 +264,11 @@ func (s LearningTargetState) Valid() bool {
 func (c *Client) CreateLearning(ctx context.Context, params CreateLearningParams) (Learning, error) {
 	var learning Learning
 	err := c.retrySQLiteBusy(ctx, func() error {
-		var err error
-		learning, err = c.createLearningOnce(ctx, params)
-		return err
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			var err error
+			learning, err = c.createLearningOnce(lockCtx, params)
+			return err
+		})
 	})
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)
@@ -545,9 +547,11 @@ func (c *Client) DoctorLearnings(ctx context.Context, params LearningMaintenance
 func (c *Client) GCLearnings(ctx context.Context, params LearningGCParams) (LearningGCReport, error) {
 	var report LearningGCReport
 	err := c.retrySQLiteBusy(ctx, func() error {
-		var err error
-		report, err = c.gcLearningsOnce(ctx, params)
-		return err
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			var err error
+			report, err = c.gcLearningsOnce(lockCtx, params)
+			return err
+		})
 	})
 	if err == nil && params.Confirm {
 		c.maybeMaintainSQLiteWAL(ctx)
@@ -767,9 +771,11 @@ func learningRecencyScore(updatedAt time.Time) int {
 func (c *Client) UpdateLearningStatus(ctx context.Context, selector string, status LearningStatus, note string) (Learning, error) {
 	var learning Learning
 	err := c.retrySQLiteBusy(ctx, func() error {
-		var err error
-		learning, err = c.updateLearningStatusOnce(ctx, selector, status, note)
-		return err
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			var err error
+			learning, err = c.updateLearningStatusOnce(lockCtx, selector, status, note)
+			return err
+		})
 	})
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)
@@ -816,9 +822,11 @@ func (c *Client) updateLearningStatusOnce(ctx context.Context, selector string, 
 func (c *Client) BulkReviewLearnings(ctx context.Context, params BulkReviewLearningsParams) ([]Learning, error) {
 	var learnings []Learning
 	err := c.retrySQLiteBusy(ctx, func() error {
-		var err error
-		learnings, err = c.bulkReviewLearningsOnce(ctx, params)
-		return err
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			var err error
+			learnings, err = c.bulkReviewLearningsOnce(lockCtx, params)
+			return err
+		})
 	})
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)
@@ -897,9 +905,11 @@ func (c *Client) bulkReviewLearningsOnce(ctx context.Context, params BulkReviewL
 func (c *Client) DemoteLearning(ctx context.Context, selector string, note string) (Learning, error) {
 	var learning Learning
 	err := c.retrySQLiteBusy(ctx, func() error {
-		var err error
-		learning, err = c.demoteLearningOnce(ctx, selector, note)
-		return err
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			var err error
+			learning, err = c.demoteLearningOnce(lockCtx, selector, note)
+			return err
+		})
 	})
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)
@@ -1035,9 +1045,11 @@ func (c *Client) RetireLearningTarget(ctx context.Context, selector string, note
 func (c *Client) UpdateLearningTargetState(ctx context.Context, selector string, params UpdateLearningTargetStateParams) (Learning, error) {
 	var learning Learning
 	err := c.retrySQLiteBusy(ctx, func() error {
-		var err error
-		learning, err = c.updateLearningTargetStateOnce(ctx, selector, params)
-		return err
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			var err error
+			learning, err = c.updateLearningTargetStateOnce(lockCtx, selector, params)
+			return err
+		})
 	})
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)
@@ -1110,9 +1122,11 @@ func (c *Client) updateLearningTargetStateOnce(ctx context.Context, selector str
 func (c *Client) RelateLearning(ctx context.Context, params RelateLearningParams) (LearningRelation, error) {
 	var relation LearningRelation
 	err := c.retrySQLiteBusy(ctx, func() error {
-		var err error
-		relation, err = c.relateLearningOnce(ctx, params)
-		return err
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			var err error
+			relation, err = c.relateLearningOnce(lockCtx, params)
+			return err
+		})
 	})
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)

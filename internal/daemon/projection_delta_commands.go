@@ -10,6 +10,9 @@ import (
 )
 
 func (d *Daemon) handleProjectionDeltaRead(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	if response, incompatible := d.projectionDeltaProtocolResponse(req); incompatible {
+		return response, nil
+	}
 	var body protocol.ProjectionDeltaReadRequest
 	if err := decodeOptionalJSON(req.Body, &body); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid projection delta request: %v", err)), nil
@@ -38,6 +41,9 @@ func (d *Daemon) handleProjectionDeltaRead(ctx context.Context, req protocol.Req
 }
 
 func (d *Daemon) handleProjectionSnapshot(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	if response, incompatible := d.projectionDeltaProtocolResponse(req); incompatible {
+		return response, nil
+	}
 	var body protocol.ProjectionSnapshotRequest
 	if err := decodeOptionalJSON(req.Body, &body); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid projection snapshot request: %v", err)), nil
@@ -57,6 +63,19 @@ func (d *Daemon) handleProjectionSnapshot(ctx context.Context, req protocol.Requ
 	snapshot.ProjectID = naming.ProjectID(projectID)
 	protocol.FinalizeProjectionSnapshot(&snapshot)
 	return d.marshalBoardResponse(req, snapshot)
+}
+
+func (d *Daemon) projectionDeltaProtocolResponse(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, bool) {
+	if protocol.SupportsProjectionDeltaCommands(req.ProtocolVersion) {
+		return protocol.ResponseEnvelope{}, false
+	}
+	code := protocol.ErrorCodeUpgradeRequired
+	message := fmt.Sprintf("projection delivery commands require protocol version %d", protocol.ProjectionDeltaProtocolVersion)
+	if req.ProtocolVersion > protocol.CurrentVersion {
+		code = protocol.ErrorCodeIncompatible
+		message = fmt.Sprintf("projection delivery request protocol version %d is newer than daemon version %d", req.ProtocolVersion, protocol.CurrentVersion)
+	}
+	return d.errorResponse(req, code, message), true
 }
 
 func (d *Daemon) projectionDeltaErrorResponse(req protocol.RequestEnvelope, err error) protocol.ResponseEnvelope {

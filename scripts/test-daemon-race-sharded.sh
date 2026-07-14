@@ -96,6 +96,23 @@ fi
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
+# Race instrumentation must never populate the normal development namespace.
+common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
+cache_root="${AZEDARACH_GO_CACHE_ROOT:-$(dirname "$common_dir")/.azedarach/go}"
+cache_owner="${AZEDARACH_GO_CACHE_OWNER:-}"
+if [ -z "$cache_owner" ]; then
+	branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+	cache_owner="$(printf '%s' "$branch" | awk -F/ 'NF >= 3 { print "issue-" $2 }')"
+	cache_owner="${cache_owner:-main}"
+fi
+GOCACHE="$cache_root/caches/v1/race/$cache_owner"
+export GOCACHE
+case " ${GOFLAGS:-} " in
+	*" -trimpath "*) ;;
+	*) GOFLAGS="${GOFLAGS:+$GOFLAGS }-trimpath"; export GOFLAGS ;;
+esac
+mkdir -p "$GOCACHE"
+
 shard_count="${AZEDARACH_DAEMON_RACE_SHARDS:-4}"
 case "$shard_count" in
 	*[!0-9]*|'') echo "daemon race shard count must be a positive integer" >&2; exit 2 ;;

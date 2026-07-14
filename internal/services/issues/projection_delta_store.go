@@ -13,7 +13,6 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/riordanpawley/azedarach/internal/domain"
-	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 const (
@@ -46,22 +45,20 @@ func (c *Client) CommitProjectionEmptyAdvance(ctx context.Context, advance Proje
 	var committed domain.ProjectionDelta
 	err := c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
-			return sqliteutil.WithWriteLock(c.dbPath, func() error {
-				db, err := c.dbHandle()
-				if err != nil {
-					return err
-				}
-				tx, err := db.BeginTx(ctx, nil)
-				if err != nil {
-					return err
-				}
-				defer tx.Rollback()
-				committed, err = appendProjectionEmptyAdvance(ctx, tx, advance)
-				if err != nil {
-					return err
-				}
-				return tx.Commit()
-			})
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback()
+			committed, err = appendProjectionEmptyAdvance(ctx, tx, advance)
+			if err != nil {
+				return err
+			}
+			return tx.Commit()
 		})
 	})
 	return committed, err
@@ -102,44 +99,42 @@ func (c *Client) CommitProjectionDelta(ctx context.Context, params ProjectionDel
 	var committed domain.ProjectionDelta
 	err = c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
-			return sqliteutil.WithWriteLock(c.dbPath, func() error {
-				db, err := c.dbHandle()
-				if err != nil {
-					return err
-				}
-				tx, err := db.BeginTx(ctx, nil)
-				if err != nil {
-					return fmt.Errorf("begin projection delta commit: %w", err)
-				}
-				defer tx.Rollback()
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				return fmt.Errorf("begin projection delta commit: %w", err)
+			}
+			defer tx.Rollback()
 
-				existing, found, err := findProjectionDeltaByIdempotencyKey(ctx, tx, params.ProjectID, params.IdempotencyKey)
-				if err != nil {
-					return err
+			existing, found, err := findProjectionDeltaByIdempotencyKey(ctx, tx, params.ProjectID, params.IdempotencyKey)
+			if err != nil {
+				return err
+			}
+			if found {
+				if !projectionDeltaMatches(existing, params) {
+					return fmt.Errorf("projection idempotency key %q reused with different semantics: %w", params.IdempotencyKey, domain.ErrConflict)
 				}
-				if found {
-					if !projectionDeltaMatches(existing, params) {
-						return fmt.Errorf("projection idempotency key %q reused with different semantics: %w", params.IdempotencyKey, domain.ErrConflict)
-					}
-					committed = existing
-					return nil
-				}
-
-				if mutate != nil {
-					if err := mutate(ctx, tx); err != nil {
-						return fmt.Errorf("apply authoritative mutation: %w", err)
-					}
-				}
-				appended, err := appendProjectionDelta(ctx, tx, params)
-				if err != nil {
-					return err
-				}
-				if err := tx.Commit(); err != nil {
-					return fmt.Errorf("commit projection delta: %w", err)
-				}
-				committed = appended
+				committed = existing
 				return nil
-			})
+			}
+
+			if mutate != nil {
+				if err := mutate(ctx, tx); err != nil {
+					return fmt.Errorf("apply authoritative mutation: %w", err)
+				}
+			}
+			appended, err := appendProjectionDelta(ctx, tx, params)
+			if err != nil {
+				return err
+			}
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("commit projection delta: %w", err)
+			}
+			committed = appended
+			return nil
 		})
 	})
 	return committed, err
@@ -431,45 +426,43 @@ func (c *Client) AdvanceProjectionConsumerCursor(ctx context.Context, projectID,
 	}
 	return c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
-			return sqliteutil.WithWriteLock(c.dbPath, func() error {
-				db, err := c.dbHandle()
-				if err != nil {
-					return err
-				}
-				tx, err := db.BeginTx(ctx, nil)
-				if err != nil {
-					return err
-				}
-				defer tx.Rollback()
-				now := time.Now().UTC().Format(time.RFC3339Nano)
-				if _, err := tx.ExecContext(ctx, `INSERT INTO projection_streams(project_id,head_cursor,updated_at) VALUES(?,0,?) ON CONFLICT(project_id) DO NOTHING`, projectID, now); err != nil {
-					return err
-				}
-				if _, err := tx.ExecContext(ctx, `INSERT INTO projection_consumer_cursors(project_id,consumer,cursor,updated_at) VALUES(?,?,0,?) ON CONFLICT(project_id,consumer) DO NOTHING`, projectID, consumer, now); err != nil {
-					return err
-				}
-				var current, head uint64
-				if err := tx.QueryRowContext(ctx, `SELECT c.cursor,s.head_cursor FROM projection_consumer_cursors c JOIN projection_streams s USING(project_id) WHERE c.project_id=? AND c.consumer=?`, projectID, consumer).Scan(&current, &head); err != nil {
-					return err
-				}
-				if current != expected {
-					return &domain.ProjectionGapError{ProjectID: projectID, Expected: current, Actual: expected}
-				}
-				if next > head {
-					return &domain.ProjectionGapError{ProjectID: projectID, Expected: head, Actual: next}
-				}
-				var count uint64
-				if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM projection_deltas WHERE project_id=? AND cursor>? AND cursor<=?`, projectID, expected, next).Scan(&count); err != nil {
-					return err
-				}
-				if count != next-expected {
-					return &domain.ProjectionGapError{ProjectID: projectID, Expected: next - expected, Actual: count}
-				}
-				if _, err := tx.ExecContext(ctx, `UPDATE projection_consumer_cursors SET cursor=?,updated_at=? WHERE project_id=? AND consumer=? AND cursor=?`, next, now, projectID, consumer, expected); err != nil {
-					return err
-				}
-				return tx.Commit()
-			})
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback()
+			now := time.Now().UTC().Format(time.RFC3339Nano)
+			if _, err := tx.ExecContext(ctx, `INSERT INTO projection_streams(project_id,head_cursor,updated_at) VALUES(?,0,?) ON CONFLICT(project_id) DO NOTHING`, projectID, now); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO projection_consumer_cursors(project_id,consumer,cursor,updated_at) VALUES(?,?,0,?) ON CONFLICT(project_id,consumer) DO NOTHING`, projectID, consumer, now); err != nil {
+				return err
+			}
+			var current, head uint64
+			if err := tx.QueryRowContext(ctx, `SELECT c.cursor,s.head_cursor FROM projection_consumer_cursors c JOIN projection_streams s USING(project_id) WHERE c.project_id=? AND c.consumer=?`, projectID, consumer).Scan(&current, &head); err != nil {
+				return err
+			}
+			if current != expected {
+				return &domain.ProjectionGapError{ProjectID: projectID, Expected: current, Actual: expected}
+			}
+			if next > head {
+				return &domain.ProjectionGapError{ProjectID: projectID, Expected: head, Actual: next}
+			}
+			var count uint64
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM projection_deltas WHERE project_id=? AND cursor>? AND cursor<=?`, projectID, expected, next).Scan(&count); err != nil {
+				return err
+			}
+			if count != next-expected {
+				return &domain.ProjectionGapError{ProjectID: projectID, Expected: next - expected, Actual: count}
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE projection_consumer_cursors SET cursor=?,updated_at=? WHERE project_id=? AND consumer=? AND cursor=?`, next, now, projectID, consumer, expected); err != nil {
+				return err
+			}
+			return tx.Commit()
 		})
 	})
 }

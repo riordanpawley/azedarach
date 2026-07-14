@@ -1068,7 +1068,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		boardTask, ok := m.applySingleTaskWorkspaceRefresh(msg.taskID, msg.task)
 		if !ok {
-			return m, nil
+			boardTask = msg.task
 		}
 
 		if !msg.lastCheckedAt.IsZero() && msg.freshness.Valid() {
@@ -1076,7 +1076,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			currentWorkspace.SyncSnapshotFreshness(m.taskSnapshotCheckedAt, m.taskSnapshotFreshness)
 		}
-		currentWorkspace.SyncFullTask(msg.task, m.tasks, m.pendingMutationForTask(boardTask.ID.String()))
+		workspaceTasks := mergeTaskWorkspaceContext(msg.tasks, m.tasks)
+		currentWorkspace.SyncFullTask(msg.task, workspaceTasks, m.pendingMutationForTask(boardTask.ID.String()))
 		if msg.decisionErr != nil {
 			if m.logger != nil {
 				m.logger.Debug("task workspace decision link refresh failed", "task_id", msg.taskID, "error", msg.decisionErr)
@@ -2204,6 +2205,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func mergeTaskWorkspaceContext(detailTasks, boardTasks []domain.Task) []domain.Task {
+	merged := make([]domain.Task, 0, len(detailTasks)+len(boardTasks))
+	seen := make(map[string]struct{}, len(detailTasks)+len(boardTasks))
+	appendTasks := func(tasks []domain.Task) {
+		for _, task := range tasks {
+			key := taskIDKey(task.ID.String())
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			merged = append(merged, task)
+		}
+	}
+	appendTasks(detailTasks)
+	appendTasks(boardTasks)
+	return merged
 }
 
 type daemonStreamEventResult struct {

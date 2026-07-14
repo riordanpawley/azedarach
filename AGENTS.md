@@ -174,6 +174,7 @@ fd "filename" -t f internal cmd
    - advisor-session singleton/recovery/cleanup per interaction request -> `hybrid` (refreshed durable request/session-role projection + live tmux runtime; terminal requests and project removal clean advisor resources)
    - session recovery/reconcile -> `hybrid`
    - `session.issue_lifecycle_runtime` live managed-session lifecycle gate -> `hybrid` (refresh durable factored issue disposition/engagement/visibility projection, then compare with live tmux; repair ready+idle to working, reject backlog/terminal/archived divergence without destroying runtime)
+   - `session.activity_convergence` stale busy/hooks recovery -> `hybrid` (refresh durable session activity and runtime projections, then compare with a bounded live tmux pane probe; newer durable hook evidence wins races)
    - `task.close`/`task.close_preflight`/`task.delete`/`task.delete_preflight`/`task.graph_readiness`/`task.complete_check` durable lifecycle, investigation disposition/acceptance, and orchestration checks -> `hybrid` (read v2 issue lifecycle and evidence projection first, then compare with live runtime)
    - `task.review_handoff` external busy-equivalent session activity gate before moving to `in_review` -> `projection` (durable issue v2 lifecycle/review projection + session activity projection; active issue self-handoff remains allowed)
    - `task.integration_readiness` worker evidence gate and `task.context_risk_closeout` repeated-local-failure gate -> `projection` (durable issue projection + mailbox/observation evidence)
@@ -182,7 +183,7 @@ fd "filename" -t f internal cmd
    - `orchestration.project_candidates` bounded project candidate classification -> `projection` (durable issue graph/lifecycle, ownership, session activity, and interaction projections)
    - `orchestration.project_review` review queue, reviewer lease, structured evidence, and outcome gate -> `projection` (durable issue/review/ownership, mailbox/observation evidence, and worktree projections; accepted close delegates to the existing hybrid `task.close` invariant)
    - `orchestration.claim_start` bounded worker-wave claim/start and compensation -> `hybrid` (durable ownership/start-attempt projection + daemon session-start operation/runtime)
-   - `orchestration.project_loop` durable watch cursor, deterministic action replay, and review-first scheduling -> `projection` (durable issue observation stream + orchestration checkpoint refreshed before each loop decision)
+   - `orchestration.project_loop` durable watch cursor, deterministic action replay, and non-blocking start/review scheduling -> `projection` (durable issue observation stream + orchestration checkpoint refreshed before each loop decision; queued review stays visible without globally suppressing unrelated starts)
    - `issue_resources.lifecycle` issue resource desired-state gate -> `projection` (durable issue status + runtime attachment projection)
    - `interaction.waiting_human` decision-waiting and pickup exclusion gate -> `projection` (durable interaction request projection refreshed before evaluation)
    - `investigation.waiting_human` human-findings authority gate -> `projection` (durable investigation disposition and issue-specific acceptance/review evidence refreshed before evaluation)
@@ -263,7 +264,9 @@ If any are missing, keep issue state `in_progress` or `open`.
 ## Environment Rules
 
 - `.envrc` stores one shared direnv/nix-direnv layout per repository under `${XDG_CACHE_HOME:-$HOME/.cache}/direnv/layouts`, keyed by the canonical Git common directory, so linked worktrees reuse the warm profile without gaining checkout-local `.direnv` state. Run `nix-direnv-reload` after changing `flake.nix` or `flake.lock`.
-- `.envrc` exports shared repo-family `GOCACHE`/`GOPATH` under the primary repo's `.azedarach/go/` so linked worktrees do not duplicate multi-GB Go caches. If Git common-dir detection fails, it falls back to the current checkout's `.azedarach/go/`. Use `AZEDARACH_GO_CACHE_ROOT`, `AZEDARACH_GOCACHE`, or `AZEDARACH_GOPATH` for explicit local overrides.
+- `.envrc` keeps `GOPATH` and module downloads shared under the primary repo's `.azedarach/go/path`, but assigns build output to `.azedarach/go/caches/v1/<normal|race|coverage>/<main|issue-ID>`. It exports `-trimpath` through `GOFLAGS`; `AZEDARACH_GO_CACHE_ROOT` and `AZEDARACH_GOCACHE` may only restate their derived daemon-authoritative locations and are rejected when they redirect outside the project layout. `AZEDARACH_GOPATH` remains an explicit local module-download override.
+- Managed validation serializes on the repository-family Go cache lock and defaults to a 10 GiB soft warning plus a 28 GiB hard refusal. Override bytes with `AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES` and `AZEDARACH_GO_CACHE_HARD_LIMIT_BYTES`; opt into selected-namespace maintenance with `AZEDARACH_GO_CACHE_AUTO_MAINTAIN=1`.
+- Use `just go-cache-inventory` before legacy cleanup. `just go-cache-clean-legacy --confirm` uses supported Go cleanup for legacy build caches; add `--include-gopath-modcache` only to remove the legacy module download cache. It never removes legacy GOPATH binaries or other user files.
 - After `direnv allow`, use normal `go ...` commands from repo root without per-command env prefixes.
 
 ## Git Safety Rules

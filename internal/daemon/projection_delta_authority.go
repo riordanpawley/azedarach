@@ -2,9 +2,6 @@ package daemon
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -56,11 +53,13 @@ func (a *ProjectionDeltaAuthority) Snapshot(ctx context.Context, projectID strin
 	for _, source := range snapshot.Sources {
 		sources = append(sources, protocolProjectionSource(source))
 	}
-	return protocol.ProjectionSnapshot{
+	result := protocol.ProjectionSnapshot{
 		SchemaVersion: protocol.ProjectionDeltaSchemaVersion, ProjectID: naming.ProjectID(snapshot.ProjectID), Cursor: snapshot.Cursor, HeadCursor: snapshot.Head, Values: values,
 		DeliveryContract: domain.ProjectionDeliveryContract, DeliveryCursorTransitional: true, Projector: issueProjectionProjector(), SourceVector: sources,
-		SemanticChecksum: projectionValuesChecksum(values), Health: "healthy", AvailableDeliveryFrom: 0, AvailableDeliveryTo: snapshot.Head, LastGoodDeliveryCursor: snapshot.Cursor,
-	}, nil
+		Health: "healthy", AvailableDeliveryFrom: 0, AvailableDeliveryTo: snapshot.Head, LastGoodDeliveryCursor: snapshot.Cursor,
+	}
+	protocol.FinalizeProjectionSnapshot(&result)
+	return result, nil
 }
 
 func ProjectionDeltaErrorEnvelope(err error) *protocol.ErrorEnvelope {
@@ -96,12 +95,9 @@ func projectionDeltaBatch(projectID string, after, head uint64, deltas []domain.
 			continue
 		}
 		source := protocolProjectionSource(delta.Source)
-		out.Deltas = append(out.Deltas, protocol.ProjectionDelta{ProjectID: naming.ProjectID(delta.ProjectID), Cursor: delta.Cursor, Kind: protocol.ProjectionKind(delta.Kind), Key: delta.Key, QualifiedKey: projectionQualifiedKey(delta.ProjectID, delta.Kind, delta.Key), Operation: protocol.ProjectionDeltaOperation(delta.Operation), IdempotencyKey: delta.IdempotencyKey, Payload: delta.Payload, CommittedAt: delta.CommittedAt, Source: source, SemanticChecksum: projectionDeltaSemanticChecksum(delta)})
+		out.Deltas = append(out.Deltas, protocol.ProjectionDelta{ProjectID: naming.ProjectID(delta.ProjectID), Cursor: delta.Cursor, Kind: protocol.ProjectionKind(delta.Kind), Key: delta.Key, QualifiedKey: projectionQualifiedKey(delta.ProjectID, delta.Kind, delta.Key), Operation: protocol.ProjectionDeltaOperation(delta.Operation), IdempotencyKey: delta.IdempotencyKey, Payload: delta.Payload, CommittedAt: delta.CommittedAt, Source: source})
 	}
-	for _, source := range domain.MergeProjectionSourceRanges(deltas) {
-		out.SourceVector = append(out.SourceVector, protocolProjectionSource(source))
-	}
-	out.SemanticChecksum = projectionProtocolDeltasChecksum(out.Deltas)
+	protocol.FinalizeProjectionDeltaBatch(&out)
 	return out
 }
 
@@ -115,30 +111,4 @@ func projectionQualifiedKey(projectID string, kind domain.ProjectionKind, key st
 
 func protocolProjectionSource(source domain.ProjectionSourceRange) protocol.ProjectionSourceRange {
 	return protocol.ProjectionSourceRange{Authority: source.Authority, SourceFrom: source.SourceFrom, SourceTo: source.SourceTo, TerminalHash: source.TerminalHash, Transitional: source.Transitional}
-}
-
-func projectionDeltaSemanticChecksum(delta domain.ProjectionDelta) string {
-	return checksumJSON(struct {
-		ProjectID string                          `json:"project_id"`
-		Kind      domain.ProjectionKind           `json:"kind"`
-		Key       string                          `json:"key"`
-		Operation domain.ProjectionDeltaOperation `json:"operation"`
-		Payload   json.RawMessage                 `json:"payload"`
-	}{delta.ProjectID, delta.Kind, delta.Key, delta.Operation, delta.Payload})
-}
-
-func projectionProtocolDeltasChecksum(deltas []protocol.ProjectionDelta) string {
-	checksums := make([]string, 0, len(deltas))
-	for _, delta := range deltas {
-		checksums = append(checksums, delta.SemanticChecksum)
-	}
-	return checksumJSON(checksums)
-}
-
-func projectionValuesChecksum(values []protocol.ProjectionValue) string { return checksumJSON(values) }
-
-func checksumJSON(value any) string {
-	raw, _ := json.Marshal(value)
-	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:])
 }

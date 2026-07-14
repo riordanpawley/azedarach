@@ -12,7 +12,6 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
-	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 // ExternalRef records the durable mapping between a local issue and an issue in
@@ -60,12 +59,10 @@ type ExternalSyncState struct {
 func (c *Client) UpsertSyncedTask(ctx context.Context, task domain.Task) (bool, error) {
 	var changed bool
 	err := c.retrySQLiteBusy(ctx, func() error {
-		return c.withMutationLock(ctx, func(ctx context.Context) error {
-			return sqliteutil.WithWriteLock(c.dbPath, func() error {
-				var err error
-				changed, err = c.upsertSyncedTaskOnce(ctx, task)
-				return err
-			})
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			var err error
+			changed, err = c.upsertSyncedTaskOnce(lockCtx, task)
+			return err
 		})
 	})
 	if err == nil {
@@ -201,7 +198,9 @@ func syncedTaskAuthorityHash(task domain.Task, state issueStateWriteValues) (str
 
 func (c *Client) UpsertExternalRef(ctx context.Context, ref ExternalRef) error {
 	err := c.retrySQLiteBusy(ctx, func() error {
-		return c.upsertExternalRefOnce(ctx, ref)
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			return c.upsertExternalRefOnce(lockCtx, ref)
+		})
 	})
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)
@@ -451,7 +450,9 @@ func (c *Client) GetExternalSyncState(ctx context.Context, provider, projectID s
 
 func (c *Client) UpsertExternalSyncState(ctx context.Context, state ExternalSyncState) error {
 	err := c.retrySQLiteBusy(ctx, func() error {
-		return c.upsertExternalSyncStateOnce(ctx, state)
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			return c.upsertExternalSyncStateOnce(lockCtx, state)
+		})
 	})
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)
@@ -491,7 +492,9 @@ func (c *Client) upsertExternalSyncStateOnce(ctx context.Context, state External
 
 func (c *Client) RecordSyncConflict(ctx context.Context, conflict SyncConflict) error {
 	err := c.retrySQLiteBusy(ctx, func() error {
-		return c.recordSyncConflictOnce(ctx, conflict)
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			return c.recordSyncConflictOnce(lockCtx, conflict)
+		})
 	})
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)

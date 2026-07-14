@@ -16,7 +16,7 @@ Use this skill for an integration-owner session, not for a worker's local pre-co
    - List review-ready work with `az issue list --status in_review --limit 50 --json` or, for a known graph, `az orchestrate status --root <root> --json --summary`.
    - Prefer issues with structured `worker_evidence.v1` closeout, no unresolved blockers, and a clear parent/root.
 
-2. Inspect one issue at a time.
+2. Build a bounded review batch.
    - Run `az issue get <issue-id>`.
    - Read recent evidence with `az issue events <issue-id> --type evidence.submitted --limit 5 --json`.
    - Run `az issue context-risk <issue-id> --since 14d`; treat `none` and `fyi` as advisory, investigate or record risk evidence for higher levels.
@@ -25,8 +25,12 @@ Use this skill for an integration-owner session, not for a worker's local pre-co
    - Investigation-like issues require explicit, issue-specific human acceptance before integration, terminal close, cancellation, session stop, or worktree cleanup. A request to run an integration sweep, an issue being `in_review`, reviewer agreement with the findings, or the absence of a diff is not human acceptance.
    - For these issues, summarize the findings and link or identify every artifact and the relevant Agent Band/session location for the human. Preserve the issue, session, and worktree in review/waiting-human state, and record `review.recorded` evidence that human review is pending. Do not infer that an investigation produced nothing merely because it has no code diff.
 
-3. Review the submitted work.
-   - Inspect the diff and nearby code before deciding. Use the repo's normal Git and test commands from the issue worktree or integration target.
+3. Delegate non-trivial review inspection.
+   - Launch a fresh ephemeral review subagent for each selected issue, bounded by the available subagent slots. Distinct issues may be reviewed concurrently; never assign the same issue to multiple delegates.
+   - Give each delegate the issue ID, acceptance context, `worker_evidence.v1`, context-risk result, exact issue worktree, diff base, and relevant repository instructions.
+   - Keep delegates read-only. They may inspect the diff and nearby code and run non-mutating validation, but they must not edit files, mutate issue/session state, send findings, accept or return a review, integrate, or close work.
+   - Require a structured result with `verdict` (`clean` or `findings`), findings containing severity/file/line/impact/suggested fix/validation, commands run, and residual risks. A delegate that lacks enough evidence must return a finding rather than guessing clean.
+   - The owning orchestrator validates each returned packet and remains solely responsible for durable review-return, review-accept, integration, and close operations. Perform an orchestrator-side spot check when context risk is high or the packet conflicts with submitted evidence; do not repeat the full diff review in the orchestrator context by default.
    - Validate enough to accept or reject the closeout. Prefer focused tests first; run broader checks when the blast radius justifies it.
    - Do not use `in_review` to mean blocked. If a dependency blocks integration, add or preserve a `blocks` edge and record blocker evidence.
 

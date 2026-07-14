@@ -21,6 +21,10 @@ func TestRootlessOrchestrateParsersAcceptProjectScope(t *testing.T) {
 		{"start", func(args []string) error { _, err := ParseOrchestrateStartArgs(args); return err }},
 		{"watch", func(args []string) error { _, err := ParseOrchestrateWatchArgs(args); return err }},
 		{"complete-check", func(args []string) error { _, err := ParseOrchestrateCompleteCheckArgs(args); return err }},
+		{"review accept", func(args []string) error {
+			_, err := ParseOrchestrateReviewArgs("accept", []string{"--issue", "az-review"})
+			return err
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -28,6 +32,89 @@ func TestRootlessOrchestrateParsersAcceptProjectScope(t *testing.T) {
 				t.Fatalf("rootless parse: %v", err)
 			}
 		})
+	}
+}
+
+func TestParseOrchestrateReviewArgsEnforcesDecisionShape(t *testing.T) {
+	accept, err := ParseOrchestrateReviewArgs("accept", []string{"--root", "az-root", "--issue", "az-2", "--issue", "az-1", "--issue", "az-2", "--intent-key", "accept-1", "--json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accept.Action != "accept" || accept.RootIssueID != "az-root" || accept.IntentKey != "accept-1" || !accept.JSON || len(accept.IssueIDs) != 2 || accept.IssueIDs[0] != "az-1" {
+		t.Fatalf("accept options = %+v", accept)
+	}
+	returned, err := ParseOrchestrateReviewArgs("return", []string{"--issue", "az-2", "--finding", "fix race", "--finding", "add regression", "--severity", "medium", "--restart-worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if returned.Action != "return" || len(returned.Findings) != 2 || returned.Severity != "medium" || !returned.RestartWorker {
+		t.Fatalf("return options = %+v", returned)
+	}
+	for _, tt := range []struct {
+		action string
+		args   []string
+	}{
+		{"accept", nil},
+		{"accept", []string{"--issue", "az-1", "--finding", "not allowed"}},
+		{"return", []string{"--issue", "az-1"}},
+		{"return", []string{"--issue", "az-1", "--issue", "az-2", "--finding", "shared ambiguity"}},
+		{"unknown", []string{"--issue", "az-1"}},
+	} {
+		if _, err := ParseOrchestrateReviewArgs(tt.action, tt.args); err == nil {
+			t.Fatalf("ParseOrchestrateReviewArgs(%q, %v) succeeded", tt.action, tt.args)
+		}
+	}
+}
+
+func TestOrchestrateReviewAcceptUsesDaemonIntentAndReportsAuthoritativeClose(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	var got protocol.OrchestrationIntentRequest
+	deps := &Dependencies{
+		RepoDir:   "/repo",
+		ProjectID: "project",
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{passOrchestrationIntent: true, commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != protocol.CommandOrchestrationIntent {
+				t.Fatalf("command = %q", req.Command)
+			}
+			if err := json.Unmarshal(req.Body, &got); err != nil {
+				t.Fatal(err)
+			}
+			return responseWithJSON(req, protocol.OrchestrationIntentResult{Scope: got.Scope, Kind: got.Kind, IntentKey: got.IntentKey, Requested: got.IssueIDs, Closed: got.IssueIDs}), nil
+		}}).WithProjectID("project"),
+	}
+	output := captureStdout(t, func() error {
+		return OrchestrateReviewCommand(deps, OrchestrateReviewOptions{Action: "accept", IntentKey: "accept-batch-1", IssueIDs: []string{"az-1", "az-2"}})
+	})
+	if got.Kind != protocol.OrchestrationIntentReviewAccept || got.IntentKey != "accept-batch-1" || got.ActorID == "" || got.RepoDir != "/repo" || len(got.IssueIDs) != 2 {
+		t.Fatalf("intent = %+v", got)
+	}
+	for _, want := range []string{"Review accept intent: accept-batch-1", "accepted and closed: az-1", "accepted and closed: az-2"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q: %s", want, output)
+		}
+	}
+}
+
+func TestOrchestrateReviewFailurePreservesIntentKeyForRetry(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "")
+	deps := &Dependencies{
+		RepoDir: "/repo",
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{passOrchestrationIntent: true, commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			var got protocol.OrchestrationIntentRequest
+			if err := json.Unmarshal(req.Body, &got); err != nil {
+				t.Fatal(err)
+			}
+			return responseWithJSON(req, protocol.OrchestrationIntentResult{Scope: got.Scope, Kind: got.Kind, IntentKey: got.IntentKey, Requested: got.IssueIDs, Failed: map[string]string{"az-1": "authoritative close: conflict"}}), nil
+		}}),
+	}
+	output, err := captureStdoutAllowError(t, func() error {
+		return OrchestrateReviewCommand(deps, OrchestrateReviewOptions{Action: "accept", IntentKey: "accept-retry-1", IssueIDs: []string{"az-1"}})
+	})
+	if err == nil || !strings.Contains(err.Error(), "retry the same decision with --intent-key accept-retry-1") {
+		t.Fatalf("error = %v", err)
+	}
+	if !strings.Contains(output, "failed az-1: authoritative close: conflict") {
+		t.Fatalf("output = %s", output)
 	}
 }
 

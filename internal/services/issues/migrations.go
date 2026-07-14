@@ -17,6 +17,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/sqlitemigration"
+	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 //go:embed migrations/*.sql
@@ -566,7 +567,11 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := repairIssueIDAllocationSchema(ctx, db); err != nil {
 		return fmt.Errorf("repair issue id allocation schema: %w", err)
 	}
-	if err := c.seedAllBuiltInBoardViews(ctx, db); err != nil {
+	if err := c.retrySQLiteBusy(ctx, func() error {
+		return sqliteutil.WithWriteLock(c.dbPath, func() error {
+			return c.seedAllBuiltInBoardViews(ctx, db)
+		})
+	}); err != nil {
 		return fmt.Errorf("seed built-in board views: %w", err)
 	}
 	return sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifactAuthority, migrationArtifacts)

@@ -30,10 +30,14 @@ func (e *ProjectionVerificationError) Error() string { return string(e.Kind) + "
 
 const (
 	ProjectionDeltaSchemaVersion = 1
-	ProjectionDeliveryContract   = "transitional-projection-delivery-v1"
-	CommandProjectionDeltaList   = "projection.delta.list"
-	CommandProjectionDeltaWatch  = "projection.delta.watch"
-	CommandProjectionSnapshot    = "projection.snapshot"
+	// ProjectionDeltaProtocolVersion is the first envelope version that exposes
+	// the projection delivery commands. Keeping this claim explicit prevents a
+	// same-version client and daemon from disagreeing about command support.
+	ProjectionDeltaProtocolVersion Version = 48
+	ProjectionDeliveryContract             = "transitional-projection-delivery-v1"
+	CommandProjectionDeltaList             = "projection.delta.list"
+	CommandProjectionDeltaWatch            = "projection.delta.watch"
+	CommandProjectionSnapshot              = "projection.snapshot"
 )
 
 // ProjectionSourceRange describes provenance, never an Azedarach-owned total
@@ -66,6 +70,12 @@ type ProjectionDeltaReadRequest struct {
 
 type ProjectionDeltaOperation string
 type ProjectionKind string
+
+// SupportsProjectionDeltaCommands reports whether an envelope version can
+// name the projection delivery commands introduced at version 48.
+func SupportsProjectionDeltaCommands(version Version) bool {
+	return version >= ProjectionDeltaProtocolVersion && version <= CurrentVersion
+}
 
 const (
 	ProjectionDeltaUpsert ProjectionDeltaOperation = "upsert"
@@ -182,7 +192,7 @@ func VerifyProjectionDeltaBatch(batch ProjectionDeltaBatch, expectedAfter uint64
 	if batch.DeliveryToCursor != expected-1 || batch.DeliveryToCursor > batch.HeadCursor {
 		return &ProjectionVerificationError{Kind: ProjectionVerificationGap, Message: fmt.Sprintf("delivery_to=%d covered_to=%d head=%d", batch.DeliveryToCursor, expected-1, batch.HeadCursor)}
 	}
-	if got := projectionChecksumJSON(checksums); got != batch.SemanticChecksum {
+	if got := projectionDeltaBatchChecksum(checksums, batch.EmptyAdvances, batch.SourceVector); got != batch.SemanticChecksum {
 		return &ProjectionVerificationError{Kind: ProjectionVerificationHashMismatch, Message: "batch semantic checksum"}
 	}
 	return nil
@@ -192,8 +202,12 @@ func VerifyProjectionSnapshot(snapshot ProjectionSnapshot, expectedProjector Pro
 	if snapshot.DeliveryContract != ProjectionDeliveryContract || !snapshot.DeliveryCursorTransitional || snapshot.Projector != expectedProjector {
 		return &ProjectionVerificationError{Kind: ProjectionVerificationIncompatible, Message: "snapshot delivery contract or projector"}
 	}
-	if got := projectionChecksumJSON(snapshot.Values); got != snapshot.SemanticChecksum {
-		return &ProjectionVerificationError{Kind: ProjectionVerificationHashMismatch, Message: "snapshot semantic checksum"}
+	canonicalSources := canonicalProjectionSourceVector(snapshot.SourceVector)
+	if !reflect.DeepEqual(canonicalSources, snapshot.SourceVector) {
+		return &ProjectionVerificationError{Kind: ProjectionVerificationHashMismatch, Message: "snapshot source vector"}
+	}
+	if got := projectionSnapshotChecksum(snapshot.Values, canonicalSources); got != snapshot.SemanticChecksum {
+		return &ProjectionVerificationError{Kind: ProjectionVerificationHashMismatch, Message: "snapshot semantic checksum or source vector"}
 	}
 	for _, value := range snapshot.Values {
 		if value.QualifiedKey != projectionQualifiedKey(snapshot.ProjectID, value.Kind, value.Key) {
@@ -204,19 +218,6 @@ func VerifyProjectionSnapshot(snapshot ProjectionSnapshot, expectedProjector Pro
 }
 
 func mergeProjectionSources(deltas []ProjectionDelta, advances []ProjectionEmptyAdvance) []ProjectionSourceRange {
-	byAuthority := map[string]ProjectionSourceRange{}
-	appendSource := func(source ProjectionSourceRange) {
-		current, found := byAuthority[source.Authority]
-		if !found {
-			byAuthority[source.Authority] = source
-			return
-		}
-		current.SourceTo = source.SourceTo
-		if source.TerminalHash != "" {
-			current.TerminalHash = source.TerminalHash
-		}
-		byAuthority[source.Authority] = current
-	}
 	type positionedSource struct {
 		cursor uint64
 		source ProjectionSourceRange
@@ -229,8 +230,29 @@ func mergeProjectionSources(deltas []ProjectionDelta, advances []ProjectionEmpty
 		positions = append(positions, positionedSource{advance.DeliveryCursor, advance.Source})
 	}
 	sort.Slice(positions, func(i, j int) bool { return positions[i].cursor < positions[j].cursor })
+	sources := make([]ProjectionSourceRange, 0, len(positions))
 	for _, position := range positions {
-		appendSource(position.source)
+		sources = append(sources, position.source)
+	}
+	return canonicalProjectionSourceVector(sources)
+}
+
+// canonicalProjectionSourceVector is the single source-range derivation used
+// by batch and snapshot checks. Input order declares each authority's range;
+// output authority order is deterministic for checksumming.
+func canonicalProjectionSourceVector(sources []ProjectionSourceRange) []ProjectionSourceRange {
+	byAuthority := map[string]ProjectionSourceRange{}
+	for _, source := range sources {
+		current, found := byAuthority[source.Authority]
+		if !found {
+			byAuthority[source.Authority] = source
+			continue
+		}
+		current.SourceTo = source.SourceTo
+		if source.TerminalHash != "" {
+			current.TerminalHash = source.TerminalHash
+		}
+		byAuthority[source.Authority] = current
 	}
 	authorities := make([]string, 0, len(byAuthority))
 	for authority := range byAuthority {
@@ -258,7 +280,8 @@ func FinalizeProjectionDeltaBatch(batch *ProjectionDeltaBatch) {
 		delta.SemanticChecksum = projectionDeltaChecksum(*delta)
 		checksums = append(checksums, delta.SemanticChecksum)
 	}
-	batch.SemanticChecksum = projectionChecksumJSON(checksums)
+	batch.SourceVector = mergeProjectionSources(batch.Deltas, batch.EmptyAdvances)
+	batch.SemanticChecksum = projectionDeltaBatchChecksum(checksums, batch.EmptyAdvances, batch.SourceVector)
 }
 
 func FinalizeProjectionSnapshot(snapshot *ProjectionSnapshot) {
@@ -269,7 +292,8 @@ func FinalizeProjectionSnapshot(snapshot *ProjectionSnapshot) {
 		value := &snapshot.Values[index]
 		value.QualifiedKey = projectionQualifiedKey(snapshot.ProjectID, value.Kind, value.Key)
 	}
-	snapshot.SemanticChecksum = projectionChecksumJSON(snapshot.Values)
+	snapshot.SourceVector = canonicalProjectionSourceVector(snapshot.SourceVector)
+	snapshot.SemanticChecksum = projectionSnapshotChecksum(snapshot.Values, snapshot.SourceVector)
 }
 
 func projectionQualifiedKey(projectID naming.ProjectID, kind ProjectionKind, key string) string {
@@ -283,7 +307,23 @@ func projectionDeltaChecksum(delta ProjectionDelta) string {
 		Key       string                   `json:"key"`
 		Operation ProjectionDeltaOperation `json:"operation"`
 		Payload   json.RawMessage          `json:"payload"`
-	}{delta.ProjectID.String(), delta.Kind, delta.Key, delta.Operation, delta.Payload})
+		Source    ProjectionSourceRange    `json:"source"`
+	}{delta.ProjectID.String(), delta.Kind, delta.Key, delta.Operation, delta.Payload, delta.Source})
+}
+
+func projectionDeltaBatchChecksum(checksums []string, advances []ProjectionEmptyAdvance, sources []ProjectionSourceRange) string {
+	return projectionChecksumJSON(struct {
+		DeltaChecksums []string                 `json:"delta_checksums"`
+		EmptyAdvances  []ProjectionEmptyAdvance `json:"empty_advances"`
+		SourceVector   []ProjectionSourceRange  `json:"source_vector"`
+	}{checksums, advances, sources})
+}
+
+func projectionSnapshotChecksum(values []ProjectionValue, sources []ProjectionSourceRange) string {
+	return projectionChecksumJSON(struct {
+		Values       []ProjectionValue       `json:"values"`
+		SourceVector []ProjectionSourceRange `json:"source_vector"`
+	}{values, sources})
 }
 
 func projectionChecksumJSON(value any) string {
