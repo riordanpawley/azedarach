@@ -7,7 +7,6 @@ build-link-run:
 
 build:
     mkdir -p .tmp/az-test
-    rm -f bin/az bin/azd
     SHA="$(git rev-parse HEAD 2>/dev/null || echo unknown)"; \
     LDFLAGS="-X github.com/riordanpawley/azedarach/internal/buildinfo.Version=dev -X github.com/riordanpawley/azedarach/internal/buildinfo.GitCommit=$SHA"; \
     go build -ldflags "$LDFLAGS" -o .tmp/az-test/az ./cmd/az
@@ -56,9 +55,13 @@ test-race:
 test-boundary:
     just test-timing boundary
 
+test-build-contract:
+    ./scripts/test-build-artifact-isolation.sh
+
 merge-gate:
     just build
     just test
+    just test-build-contract
     just check-boundaries
 
 # Aggregate daemon race validation has a larger budget than focused race tests.
@@ -86,7 +89,7 @@ type-check:
     go build ./...
 
 clean:
-    rm -rf bin/ .tmp/az-test/ coverage.out coverage.html
+    rm -rf .tmp/az-test/ .tmp/az-install/ coverage.out coverage.html
 
 install:
     go install ./cmd/az

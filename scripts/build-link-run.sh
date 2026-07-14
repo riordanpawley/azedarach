@@ -10,13 +10,29 @@ fi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-mkdir -p bin
+git_dir="$(git rev-parse --git-dir)"
+git_common_dir="$(git rev-parse --git-common-dir)"
+if [[ "$git_dir" != "$git_common_dir" ]]; then
+  echo "Refusing build-link-run from a linked worktree: $repo_root" >&2
+  echo "Run it from the primary Azedarach worktree because it mutates user-global runtime assets." >&2
+  exit 1
+fi
+
+build_dir="$repo_root/.tmp/az-install"
+mkdir -p "$build_dir"
 sha="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 ldflags="-X github.com/riordanpawley/azedarach/internal/buildinfo.Version=dev -X github.com/riordanpawley/azedarach/internal/buildinfo.GitCommit=${sha}"
-go build -ldflags "$ldflags" -o bin/az ./cmd/az
-go build -ldflags "$ldflags" -o bin/azd ./cmd/azd
+go build -ldflags "$ldflags" -o "$build_dir/az" ./cmd/az
+go build -ldflags "$ldflags" -o "$build_dir/azd" ./cmd/azd
 
-choose_link_dir() {
+choose_install_dir() {
+  if [ -n "${AZ_INSTALL_DIR:-}" ]; then
+    mkdir -p "$AZ_INSTALL_DIR"
+    echo "$AZ_INSTALL_DIR"
+    return 0
+  fi
+
+  # Backward compatibility for existing automation and local commands.
   if [ -n "${AZ_LINK_DIR:-}" ]; then
     mkdir -p "$AZ_LINK_DIR"
     echo "$AZ_LINK_DIR"
@@ -26,7 +42,7 @@ choose_link_dir() {
   if command -v az >/dev/null 2>&1; then
     local current_dir
     current_dir="$(dirname "$(command -v az)")"
-    # Skip repo-local bin to avoid "linking" to the same local build path.
+    # Skip repo-local bin so the installed command does not depend on a worktree.
     if [ "$current_dir" != "$repo_root/bin" ] && [ -w "$current_dir" ]; then
       echo "$current_dir"
       return 0
@@ -46,20 +62,21 @@ choose_link_dir() {
   echo "$HOME/.local/bin"
 }
 
-link_dir="$(choose_link_dir)"
-link_binary() {
+install_dir="$(choose_install_dir)"
+install_binary() {
   local src="$1"
   local dst="$2"
+  local tmp
 
-  if [[ -e "$dst" && "$src" -ef "$dst" ]]; then
-    return 0
+  tmp="$(mktemp "${dst}.tmp.XXXXXX")"
+  if ! cp "$src" "$tmp" || ! chmod 0755 "$tmp" || ! mv -f "$tmp" "$dst"; then
+    rm -f "$tmp"
+    return 1
   fi
-
-  ln -sf "$src" "$dst"
 }
 
-link_binary "$repo_root/bin/az" "$link_dir/az"
-link_binary "$repo_root/bin/azd" "$link_dir/azd"
+install_binary "$build_dir/az" "$install_dir/az"
+install_binary "$build_dir/azd" "$install_dir/azd"
 
 choose_container_engine() {
   if command -v docker >/dev/null 2>&1; then
@@ -303,8 +320,8 @@ ensure_jaeger() {
   publish_jaeger_env "$engine" "$name" || true
 }
 
-echo "Linked az -> $link_dir/az"
-echo "Linked azd -> $link_dir/azd"
+echo "Installed az -> $install_dir/az"
+echo "Installed azd -> $install_dir/azd"
 echo "Global az resolves to: $(command -v az || true)"
 if [[ "$no_run" -eq 1 ]]; then
   echo "Skipping run (--no-run)"
@@ -312,9 +329,9 @@ if [[ "$no_run" -eq 1 ]]; then
 fi
 ensure_jaeger
 if [ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]; then
-  AZEDARACH_DAEMON_SCOPE=worktree "$link_dir/az" daemon restart
+  AZEDARACH_DAEMON_SCOPE=worktree "$install_dir/az" daemon restart
 else
-  "$link_dir/az" daemon restart
+  "$install_dir/az" daemon restart
 fi
 echo "Running az..."
-exec "$link_dir/az"
+exec "$install_dir/az"

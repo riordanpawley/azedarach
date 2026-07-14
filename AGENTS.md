@@ -259,6 +259,13 @@ If any are missing, keep issue state `in_progress` or `open`.
 8. If logs show `daemon version mismatch persisted after replacement`, assume a worktree binary has interacted with the shared production daemon. Stop and fix the isolation path or guidance; do not keep retrying replacement/restart commands.
 9. Do not bump protocol/version only to force restarts; bump versions only for contract changes.
 10. Keep CLI docs/help/examples with flags before positional arguments.
+11. Ordinary validation and orchestration may run `just build`; it must remain
+    isolated to `.tmp/az-test` and must not create, replace, or delete
+    `bin/az`/`bin/azd`. Automated agents and project orchestration must not run
+    `just build-link-run` unless the user explicitly requests a production
+    rebuild/relink from the primary worktree, because that recipe intentionally
+    atomically installs standalone user-global runtime assets and rejects linked
+    worktrees. Installed commands must never link back into any Git worktree.
 
 ## Environment Rules
 
