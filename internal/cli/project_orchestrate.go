@@ -18,17 +18,6 @@ func resolveCLIOrchestrationScope(explicitRoot string) (domain.OrchestrationScop
 	return domain.ResolveOrchestrationScope(explicitRoot, os.Getenv("AZEDARACH_ISSUE_ID"))
 }
 
-func applyOrchestrationProjectOverride(deps *Dependencies, project string) func() {
-	project = normalizeIssueProject(project)
-	if project == "" {
-		return func() {}
-	}
-	if _, ok := findSessionProjectCandidate(deps, project); ok {
-		return applyExplicitSessionProjectOverride(deps, project)
-	}
-	return applyIssueProjectOverride(deps, project)
-}
-
 func orchestrationSnapshot(ctx context.Context, deps *Dependencies, scope domain.OrchestrationScope, limit int, cursor int64) (protocol.OrchestrationSnapshot, error) {
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return protocol.OrchestrationSnapshot{}, err
@@ -132,7 +121,10 @@ func newCLIOrchestrationStartIntentKey() (string, error) {
 }
 
 func OrchestrateReviewCommand(deps *Dependencies, opts OrchestrateReviewOptions) error {
-	restoreProject := applyOrchestrationProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 	scope, err := resolveCLIOrchestrationScope(opts.RootIssueID)
 	if err != nil {

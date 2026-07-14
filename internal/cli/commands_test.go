@@ -72,6 +72,30 @@ func openSQLiteDB(t *testing.T, dbPath string) *sql.DB {
 	return db
 }
 
+func registerCLIProjects(t *testing.T, names ...string) map[string]string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	registry := &config.ProjectsRegistry{}
+	routes := make(map[string]string, len(names))
+	for _, name := range names {
+		path := filepath.Join(home, name)
+		route, err := config.ProjectIDForRoot(path)
+		if err != nil {
+			t.Fatalf("derive project ID for %s: %v", name, err)
+		}
+		registry.Projects = append(registry.Projects, config.Project{ID: route, Name: name, Path: path})
+		routes[name] = route
+	}
+	if len(names) > 0 {
+		registry.DefaultProject = names[0]
+	}
+	if err := config.SaveProjectsRegistry(registry); err != nil {
+		t.Fatalf("save project registry: %v", err)
+	}
+	return routes
+}
+
 func ptrToString(v string) *string {
 	return &v
 }
@@ -130,6 +154,290 @@ func TestParsePRArgsListRejectsTargetSelectors(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("error = %q, want substring %q", err.Error(), tt.want)
+			}
+		})
+	}
+}
+
+func TestPRCommandExplicitProjectRoutesEveryVerbToRegisteredRepository(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoA := filepath.Join(home, "default-repo")
+	repoB := filepath.Join(home, "selected-repo")
+	projectA, err := config.ProjectIDForRoot(repoA)
+	if err != nil {
+		t.Fatalf("default project id: %v", err)
+	}
+	projectB, err := config.ProjectIDForRoot(repoB)
+	if err != nil {
+		t.Fatalf("selected project id: %v", err)
+	}
+	defaultConfig := config.DefaultConfig()
+	defaultConfig.Git.BaseBranch = "trunk"
+	if err := config.SaveConfig(defaultConfig, filepath.Join(repoA, ".azedarach", "config.json")); err != nil {
+		t.Fatalf("save default config: %v", err)
+	}
+	selectedConfig := config.DefaultConfig()
+	selectedConfig.Git.BaseBranch = "release"
+	if err := config.SaveConfig(selectedConfig, filepath.Join(repoB, ".azedarach", "config.json")); err != nil {
+		t.Fatalf("save selected config: %v", err)
+	}
+	if err := config.SaveProjectsRegistry(&config.ProjectsRegistry{
+		DefaultProject: "Default",
+		Projects: []config.Project{
+			{ID: projectA, Name: "Default", Path: repoA},
+			{ID: "selected-id", Name: "Selected", Path: repoB},
+		},
+	}); err != nil {
+		t.Fatalf("save projects registry: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		opts PROptions
+	}{
+		{name: "list", opts: PROptions{Command: "list", Project: "Selected", State: "all", Limit: 20, JSON: true}},
+		{name: "status", opts: PROptions{Command: "status", Project: "selected-id", Number: 12, JSON: true}},
+		{name: "checks", opts: PROptions{Command: "checks", Project: "selected-repo", Branch: "feature", JSON: true}},
+		{name: "open", opts: PROptions{Command: "open", Project: "Selected", Branch: "feature", JSON: true}},
+		{name: "create", opts: PROptions{Command: "create", Project: projectB, IssueID: "dha", Branch: "feature", Title: "Fix routing", Body: "Body", JSON: true}},
+		{name: "merge", opts: PROptions{Command: "merge", Project: "Selected", Number: 12, Strategy: "squash", Confirm: true, JSON: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var routedProjects []string
+			var createBaseBranch string
+			transport := &fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				routedProjects = append(routedProjects, req.Meta.ProjectID.String())
+				switch req.Command {
+				case daemonclient.CommandPRList:
+					return responseWithJSON(req, daemonclient.PullRequestListResult{State: "all"}), nil
+				case daemonclient.CommandPRGet:
+					return responseWithJSON(req, daemonclient.PullRequestGetResult{PullRequest: prservice.PRInfo{Number: 12, Branch: "feature", BaseRef: "main"}}), nil
+				case daemonclient.CommandPRChecks:
+					return responseWithJSON(req, daemonclient.PullRequestChecksResult{Ref: "feature", ChecksStatus: "passing"}), nil
+				case daemonclient.CommandPROpen:
+					return responseWithJSON(req, map[string]string{"branch": "feature"}), nil
+				case daemonclient.CommandPRCreate:
+					var body struct {
+						BaseBranch string `json:"base_branch"`
+					}
+					if err := json.Unmarshal(req.Body, &body); err != nil {
+						t.Fatalf("decode PR create: %v", err)
+					}
+					createBaseBranch = body.BaseBranch
+					return responseWithJSON(req, daemonclient.CreatePullRequestResult{IssueID: "dha", PullRequest: prservice.PRInfo{Number: 12, Branch: "feature"}}), nil
+				case daemonclient.CommandPRMerge:
+					return responseWithJSON(req, daemonclient.PullRequestMergeResult{Number: 12, Strategy: "squash"}), nil
+				default:
+					t.Fatalf("unexpected command: %s", req.Command)
+					return protocol.ResponseEnvelope{}, nil
+				}
+			}}
+			deps := &Dependencies{
+				Config:       defaultConfig,
+				DaemonClient: daemonclient.New(transport).WithProjectID(projectA),
+				Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+				ProjectID:    projectA,
+				RepoDir:      repoA,
+			}
+			output := captureStdout(t, func() error { return PRCommand(deps, tt.opts) })
+			if len(routedProjects) == 0 {
+				t.Fatal("PR command sent no daemon requests")
+			}
+			for _, got := range routedProjects {
+				if got != projectB {
+					t.Fatalf("routed project = %q, want %q (all routes: %v)", got, projectB, routedProjects)
+				}
+			}
+			if !strings.Contains(output, `"project_id": "`+projectB+`"`) || !strings.Contains(output, `"repository": "`+repoB+`"`) {
+				t.Fatalf("JSON output missing resolved routing:\n%s", output)
+			}
+			if deps.ProjectID != projectA {
+				t.Fatalf("dependency project after command = %q, want restored %q", deps.ProjectID, projectA)
+			}
+			if tt.name == "create" && createBaseBranch != "release" {
+				t.Fatalf("create base branch = %q, want selected project config release", createBaseBranch)
+			}
+			if deps.Config != defaultConfig {
+				t.Fatal("dependency config was not restored")
+			}
+		})
+	}
+}
+
+func TestPRCommandInvalidExplicitProjectFailsClosed(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var commands int
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			commands++
+			return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected PR request: %s", req.Command)
+		}}).WithProjectID("default-project"),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "default-project",
+		RepoDir:   "/default/repo",
+	}
+	err := PRCommand(deps, PROptions{Command: "merge", Project: "missing", Number: 12, Confirm: true})
+	if !errors.Is(err, config.ErrProjectNotFound) {
+		t.Fatalf("error = %v, want project-not-found type", err)
+	}
+	if !strings.Contains(err.Error(), "refusing repository fallback") {
+		t.Fatalf("error = %q, want actionable fallback refusal", err)
+	}
+	if commands != 0 {
+		t.Fatalf("daemon commands = %d, want zero", commands)
+	}
+}
+
+func TestApplyExplicitProjectOverrideCanonicalizesAndRestoresCommandContext(t *testing.T) {
+	routes := registerCLIProjects(t, "Default", "Selected")
+	selectedRepo := filepath.Join(os.Getenv("HOME"), "Selected")
+	var routedProject string
+	transport := &fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		routedProject = req.Meta.ProjectID.String()
+		return responseWithJSON(req, map[string]any{}), nil
+	}}
+	deps := &Dependencies{
+		ProjectID:      routes["Default"],
+		RepoDir:        filepath.Join(os.Getenv("HOME"), "Default"),
+		RuntimeRepoDir: "/runtime/default",
+		DaemonClient:   daemonclient.New(transport).WithProjectID(routes["Default"]),
+	}
+
+	restore, err := applyExplicitProjectOverride(deps, "Selected")
+	if err != nil {
+		t.Fatalf("apply explicit project: %v", err)
+	}
+	if deps.ProjectID != routes["Selected"] || deps.RepoDir != selectedRepo {
+		t.Fatalf("routed dependencies = project %q repo %q, want %q %q", deps.ProjectID, deps.RepoDir, routes["Selected"], selectedRepo)
+	}
+	_, err = deps.DaemonClient.Command(context.Background(), protocol.RequestEnvelope{Command: daemonclient.CommandTaskList})
+	if err != nil {
+		t.Fatalf("send routed command: %v", err)
+	}
+	if routedProject != routes["Selected"] {
+		t.Fatalf("daemon metadata project = %q, want %q", routedProject, routes["Selected"])
+	}
+
+	restore()
+	if deps.ProjectID != routes["Default"] || deps.RepoDir != filepath.Join(os.Getenv("HOME"), "Default") || deps.RuntimeRepoDir != "/runtime/default" {
+		t.Fatalf("restored dependencies = project %q repo %q runtime %q", deps.ProjectID, deps.RepoDir, deps.RuntimeRepoDir)
+	}
+}
+
+func TestApplyExplicitProjectOverrideUnknownProjectFailsWithoutMutation(t *testing.T) {
+	routes := registerCLIProjects(t, "Default")
+	deps := &Dependencies{ProjectID: routes["Default"], RepoDir: "/default", RuntimeRepoDir: "/runtime/default"}
+	restore, err := applyExplicitProjectOverride(deps, "missing")
+	if !errors.Is(err, config.ErrProjectNotFound) {
+		t.Fatalf("error = %v, want project-not-found type", err)
+	}
+	if restore != nil {
+		t.Fatal("restore function returned for rejected project")
+	}
+	if deps.ProjectID != routes["Default"] || deps.RepoDir != "/default" || deps.RuntimeRepoDir != "/runtime/default" {
+		t.Fatalf("dependencies mutated on failure: %+v", deps)
+	}
+	if _, err := applyExplicitProjectOverride(nil, "Default"); err == nil {
+		t.Fatal("nil dependencies accepted")
+	}
+}
+
+func TestExplicitProjectEntryPointsRejectUnknownProjectBeforeDaemon(t *testing.T) {
+	routes := registerCLIProjects(t, "Default")
+	for _, tc := range []struct {
+		name string
+		call func(*Dependencies) error
+	}{
+		{name: "session start", call: func(d *Dependencies) error {
+			return StartCommandWithOptions(d, "issue-1", SessionCommandOptions{Project: "missing"})
+		}},
+		{name: "worktree create", call: func(d *Dependencies) error {
+			return WorktreeCreateCommand(d, WorktreeCreateOptions{IssueID: "issue-1", Project: "missing"})
+		}},
+		{name: "worktree delete", call: func(d *Dependencies) error {
+			return WorktreeDeleteCommand(d, WorktreeDeleteOptions{IssueID: "issue-1", Project: "missing"})
+		}},
+		{name: "session capture", call: func(d *Dependencies) error {
+			return SessionCaptureCommand(d, SessionCaptureOptions{IssueID: "issue-1", Project: "missing"})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := 0
+			deps := &Dependencies{
+				Config: config.DefaultConfig(), ProjectID: routes["Default"], RepoDir: "/default", RuntimeRepoDir: "/runtime/default",
+				DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+					requests++
+					return protocol.ResponseEnvelope{}, nil
+				}}).WithProjectID(routes["Default"]),
+				Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			}
+			err := tc.call(deps)
+			if !errors.Is(err, config.ErrProjectNotFound) {
+				t.Fatalf("error = %v, want project-not-found", err)
+			}
+			if requests != 0 {
+				t.Fatalf("daemon requests = %d, want zero", requests)
+			}
+			if deps.ProjectID != routes["Default"] || deps.RepoDir != "/default" || deps.RuntimeRepoDir != "/runtime/default" {
+				t.Fatalf("dependencies mutated: project=%q repo=%q runtime=%q", deps.ProjectID, deps.RepoDir, deps.RuntimeRepoDir)
+			}
+		})
+	}
+}
+
+func TestPRCommandProjectPrecedenceWithoutExplicitSelection(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	currentRepo := filepath.Join(home, "current")
+	defaultRepo := filepath.Join(home, "configured-default")
+	currentID, _ := config.ProjectIDForRoot(currentRepo)
+	defaultID, _ := config.ProjectIDForRoot(defaultRepo)
+	if err := config.SaveProjectsRegistry(&config.ProjectsRegistry{
+		DefaultProject: "Default",
+		Projects: []config.Project{
+			{ID: currentID, Name: "Current", Path: currentRepo},
+			{ID: defaultID, Name: "Default", Path: defaultRepo},
+		},
+	}); err != nil {
+		t.Fatalf("save projects registry: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		projectID string
+		repoDir   string
+		wantID    string
+		wantRepo  string
+	}{
+		{name: "current project beats configured default", projectID: currentID, repoDir: currentRepo, wantID: currentID, wantRepo: currentRepo},
+		{name: "configured default used without current context", wantID: defaultID, wantRepo: defaultRepo},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var routedProject string
+			deps := &Dependencies{
+				Config: config.DefaultConfig(),
+				DaemonClient: daemonclient.New(&fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+					routedProject = req.Meta.ProjectID.String()
+					return responseWithJSON(req, daemonclient.PullRequestListResult{State: "open"}), nil
+				}}).WithProjectID(tt.projectID),
+				Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+				ProjectID: tt.projectID,
+				RepoDir:   tt.repoDir,
+			}
+			output := captureStdout(t, func() error {
+				return PRCommand(deps, PROptions{Command: "list", State: "open", Limit: 20})
+			})
+			if routedProject != tt.wantID {
+				t.Fatalf("routed project = %q, want %q", routedProject, tt.wantID)
+			}
+			for _, want := range []string{"Project:", tt.wantID, "Repository: " + tt.wantRepo} {
+				if !strings.Contains(output, want) {
+					t.Fatalf("human output missing %q:\n%s", want, output)
+				}
 			}
 		})
 	}
@@ -9236,6 +9544,7 @@ func TestIssueCreateCommandDeferredIgnoresAutoParentFromIssueID(t *testing.T) {
 }
 
 func TestIssueCreateCommandCrossProjectSkipsImplicitAutoParentAndCreatedFrom(t *testing.T) {
+	routes := registerCLIProjects(t, "chefy", "azedarach")
 	var requests []protocol.RequestEnvelope
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
@@ -9276,9 +9585,9 @@ func TestIssueCreateCommandCrossProjectSkipsImplicitAutoParentAndCreatedFrom(t *
 					Body:            payload,
 				}, nil
 			},
-		}).WithProjectID("chefy"),
+		}).WithProjectID(routes["chefy"]),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
-		ProjectID: "chefy",
+		ProjectID: routes["chefy"],
 	}
 
 	output := captureStdout(t, func() error {
@@ -9303,8 +9612,8 @@ func TestIssueCreateCommandCrossProjectSkipsImplicitAutoParentAndCreatedFrom(t *
 	if requests[1].Command != daemonclient.CommandTaskCreate {
 		t.Fatalf("requests[1].Command = %q, want %q", requests[1].Command, daemonclient.CommandTaskCreate)
 	}
-	if requests[1].Meta.ProjectID.String() != "azedarach" {
-		t.Fatalf("request project = %q, want azedarach", requests[1].Meta.ProjectID)
+	if requests[1].Meta.ProjectID.String() != routes["azedarach"] {
+		t.Fatalf("request project = %q, want %s", requests[1].Meta.ProjectID, routes["azedarach"])
 	}
 	var createReq daemonclient.TaskCreateParams
 	if err := json.Unmarshal(requests[1].Body, &createReq); err != nil {
@@ -9313,7 +9622,7 @@ func TestIssueCreateCommandCrossProjectSkipsImplicitAutoParentAndCreatedFrom(t *
 	if createReq.ParentID != nil {
 		t.Fatalf("create parent = %+v, want nil", createReq.ParentID)
 	}
-	if !strings.Contains(output, "Created issue: azedarach:cnd") {
+	if !strings.Contains(output, "Created issue: "+routes["azedarach"]+":cnd") {
 		t.Fatalf("output missing project-qualified created issue: %q", output)
 	}
 	if strings.Contains(output, "created-from") || strings.Contains(output, "parent:") {
@@ -9322,6 +9631,7 @@ func TestIssueCreateCommandCrossProjectSkipsImplicitAutoParentAndCreatedFrom(t *
 }
 
 func TestIssueCreateCommandCrossProjectKeepsExplicitParent(t *testing.T) {
+	routes := registerCLIProjects(t, "chefy", "azedarach")
 	var requests []protocol.RequestEnvelope
 	var createReq daemonclient.TaskCreateParams
 	deps := &Dependencies{
@@ -9369,9 +9679,9 @@ func TestIssueCreateCommandCrossProjectKeepsExplicitParent(t *testing.T) {
 					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
 				}
 			},
-		}).WithProjectID("chefy"),
+		}).WithProjectID(routes["chefy"]),
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
-		ProjectID: "chefy",
+		ProjectID: routes["chefy"],
 	}
 
 	parentID := "az-parent"
@@ -9390,13 +9700,13 @@ func TestIssueCreateCommandCrossProjectKeepsExplicitParent(t *testing.T) {
 	if len(requests) != 4 {
 		t.Fatalf("request count = %d, want 4", len(requests))
 	}
-	if requests[0].Meta.ProjectID.String() != "azedarach" || requests[2].Meta.ProjectID.String() != "azedarach" {
-		t.Fatalf("request projects = %q, %q; want azedarach", requests[0].Meta.ProjectID, requests[2].Meta.ProjectID)
+	if requests[0].Meta.ProjectID.String() != routes["azedarach"] || requests[2].Meta.ProjectID.String() != routes["azedarach"] {
+		t.Fatalf("request projects = %q, %q; want %s", requests[0].Meta.ProjectID, requests[2].Meta.ProjectID, routes["azedarach"])
 	}
 	if createReq.ParentID == nil || *createReq.ParentID != "az-parent" {
 		t.Fatalf("create parent = %+v, want az-parent", createReq.ParentID)
 	}
-	if !strings.Contains(output, "Created issue: azedarach:az-child (parent: az-parent, explicit --parent) [created-from: az-parent]") {
+	if !strings.Contains(output, "Created issue: "+routes["azedarach"]+":az-child (parent: az-parent, explicit --parent) [created-from: az-parent]") {
 		t.Fatalf("output missing explicit parent message: %q", output)
 	}
 }
@@ -11665,6 +11975,7 @@ func TestIssueDependencyCommandsUseDaemonTaskCommands(t *testing.T) {
 }
 
 func TestIssueDependencyAddCommandCarriesProjectQualifiedEndpointMetadata(t *testing.T) {
+	routes := registerCLIProjects(t, "chefy")
 	var gotReq protocol.RequestEnvelope
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
@@ -11693,8 +12004,8 @@ func TestIssueDependencyAddCommandCarriesProjectQualifiedEndpointMetadata(t *tes
 		return IssueDependencyAddCommand(deps, opts)
 	})
 
-	if gotReq.Meta.ProjectID.String() != "chefy" {
-		t.Fatalf("request project = %q, want chefy", gotReq.Meta.ProjectID)
+	if gotReq.Meta.ProjectID.String() != routes["chefy"] {
+		t.Fatalf("request project = %q, want %s", gotReq.Meta.ProjectID, routes["chefy"])
 	}
 	var body daemonclient.TaskDependencyParams
 	if err := json.Unmarshal(gotReq.Body, &body); err != nil {

@@ -56,11 +56,12 @@ func TestFormatGlobalViewScope(t *testing.T) {
 }
 
 func TestBoardViewCommandUsesTypedDaemonClient(t *testing.T) {
+	routes := registerCLIProjects(t, "proj-board")
 	updatedAt := time.Date(2026, time.July, 9, 12, 0, 0, 0, time.UTC)
 	transport := &fakeDaemonTransport{
 		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-			if req.Meta.ProjectID != naming.ProjectID("proj-board") {
-				t.Fatalf("project id = %q, want proj-board", req.Meta.ProjectID)
+			if req.Meta.ProjectID != naming.ProjectID(routes["proj-board"]) {
+				t.Fatalf("project id = %q, want %s", req.Meta.ProjectID, routes["proj-board"])
 			}
 			switch req.Command {
 			case protocol.CommandBoardViewList:
@@ -101,7 +102,7 @@ func TestBoardViewCommandUsesTypedDaemonClient(t *testing.T) {
 			}
 		},
 	}
-	deps := &Dependencies{DaemonClient: daemonclient.New(transport).WithProjectID("proj-board")}
+	deps := &Dependencies{DaemonClient: daemonclient.New(transport).WithProjectID(routes["proj-board"]), ProjectID: routes["proj-board"]}
 
 	if err := BoardViewCommand(deps, BoardViewOptions{Command: "list", Project: "proj-board"}); err != nil {
 		t.Fatalf("list error: %v", err)
@@ -111,6 +112,19 @@ func TestBoardViewCommandUsesTypedDaemonClient(t *testing.T) {
 	}
 	if err := BoardViewCommand(deps, BoardViewOptions{Command: "delete", Project: "proj-board", ViewID: "activity", Confirm: true}); err != nil {
 		t.Fatalf("delete error: %v", err)
+	}
+}
+
+func TestBoardViewCommandNormalizesGlobalProjectSentinel(t *testing.T) {
+	transport := &fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		if req.Meta.ProjectID != "global" {
+			t.Fatalf("project id = %q, want global", req.Meta.ProjectID)
+		}
+		return responseWithJSON(req, protocol.BoardViewListResponseBody{ProjectID: "global"}), nil
+	}}
+	deps := &Dependencies{DaemonClient: daemonclient.New(transport).WithProjectID("default"), ProjectID: "default"}
+	if err := BoardViewCommand(deps, BoardViewOptions{Command: "list", Project: " global ", JSON: true}); err != nil {
+		t.Fatalf("global list: %v", err)
 	}
 }
 
