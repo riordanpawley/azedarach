@@ -1233,6 +1233,67 @@ func TestRecoverIntegrationJournalRejectsUnknownVersionWithoutMutation(t *testin
 	}
 }
 
+func TestRealProcessProfileRecoverIntegrationJournalRetainsTrackedEditsForV1AndV2(t *testing.T) {
+	for _, version := range []int{integrationJournalVersionV1, integrationJournalVersionV2} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			repo := initDivergedRepo(t)
+			client := NewClient(NewExecRunner(repo), slog.Default())
+			ctx := context.Background()
+			targetHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+			tree := runClientTestGitOutput(t, repo, "merge-tree", "--write-tree", targetHead, "feature")
+			desiredHead := runClientTestGitOutput(t, repo, "commit-tree", tree, "-p", targetHead, "-p", "feature", "-m", "unapplied merge")
+			scratch := filepath.Join(t.TempDir(), "scratch-must-remain")
+			if err := os.Mkdir(scratch, 0o755); err != nil {
+				t.Fatalf("mkdir scratch: %v", err)
+			}
+			scratchMarker := filepath.Join(scratch, "marker")
+			if err := os.WriteFile(scratchMarker, []byte("retain scratch\n"), 0o644); err != nil {
+				t.Fatalf("write scratch marker: %v", err)
+			}
+			if err := client.writeIntegrationJournal(ctx, repo, integrationJournal{
+				Version:         version,
+				TargetWorktree:  repo,
+				TargetHead:      targetHead,
+				DesiredHead:     desiredHead,
+				ScratchWorktree: scratch,
+				StartedAt:       time.Now().UTC(),
+			}); err != nil {
+				t.Fatalf("writeIntegrationJournal() error = %v", err)
+			}
+			journalPath, err := client.integrationJournalPath(ctx, repo)
+			if err != nil {
+				t.Fatalf("integrationJournalPath() error = %v", err)
+			}
+			journalBefore, err := os.ReadFile(journalPath)
+			if err != nil {
+				t.Fatalf("read journal before recovery: %v", err)
+			}
+			trackedPath := filepath.Join(repo, "main.txt")
+			trackedBytes := []byte("user tracked edit\n")
+			if err := os.WriteFile(trackedPath, trackedBytes, 0o644); err != nil {
+				t.Fatalf("write tracked edit: %v", err)
+			}
+
+			err = client.RecoverIntegrationJournal(ctx, repo)
+			if err == nil || !strings.Contains(err.Error(), "target has tracked edits before integration recovery") {
+				t.Fatalf("RecoverIntegrationJournal() error = %v, want tracked-edit refusal", err)
+			}
+			if head := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); head != targetHead {
+				t.Fatalf("HEAD = %s, want unchanged %s", head, targetHead)
+			}
+			if got, err := os.ReadFile(trackedPath); err != nil || !bytes.Equal(got, trackedBytes) {
+				t.Fatalf("tracked bytes = %q, %v; want preserved %q", got, err, trackedBytes)
+			}
+			if got, err := os.ReadFile(journalPath); err != nil || !bytes.Equal(got, journalBefore) {
+				t.Fatalf("journal bytes changed: %v", err)
+			}
+			if got, err := os.ReadFile(scratchMarker); err != nil || string(got) != "retain scratch\n" {
+				t.Fatalf("scratch marker = %q, %v; want retained", got, err)
+			}
+		})
+	}
+}
+
 func TestMergeCleanlyTransactionalRecoversDirtyFinalApplyAndRemovesJournal(t *testing.T) {
 	repo := t.TempDir()
 	if err := os.Mkdir(filepath.Join(repo, ".git"), 0o755); err != nil {

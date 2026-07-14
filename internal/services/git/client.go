@@ -111,6 +111,11 @@ type MergeResult struct {
 
 type CandidateValidationStatus = domain.IntegrationCandidateValidationStatus
 
+// CandidateValidationAttempt identifies the exact reconciled commit evaluated
+// by a repository integration gate. Canonical is true only after that same OID
+// has been applied to the target worktree successfully.
+type CandidateValidationAttempt = domain.IntegrationCandidateValidationAttempt
+
 const (
 	CandidateValidationRunning    = domain.IntegrationCandidateValidationRunning
 	CandidateValidationPassed     = domain.IntegrationCandidateValidationPassed
@@ -118,11 +123,6 @@ const (
 	CandidateValidationCancelled  = domain.IntegrationCandidateValidationCancelled
 	CandidateValidationSuperseded = domain.IntegrationCandidateValidationSuperseded
 )
-
-// CandidateValidationAttempt identifies the exact reconciled commit evaluated
-// by a repository integration gate. Canonical is true only after that same OID
-// has been applied to the target worktree successfully.
-type CandidateValidationAttempt = domain.IntegrationCandidateValidationAttempt
 
 type candidateValidationObserverKey struct{}
 
@@ -1563,6 +1563,18 @@ func gitStatusDirty(status *GitStatus) bool {
 		len(status.Added) > 0 ||
 		len(status.Deleted) > 0 ||
 		len(status.Untracked) > 0 ||
+		len(status.Staged) > 0 ||
+		len(status.Conflicted) > 0
+}
+
+func gitStatusHasTrackedChanges(status *GitStatus) bool {
+	if status == nil {
+		return false
+	}
+	return status.HasConflicts ||
+		len(status.Modified) > 0 ||
+		len(status.Added) > 0 ||
+		len(status.Deleted) > 0 ||
 		len(status.Staged) > 0 ||
 		len(status.Conflicted) > 0
 }

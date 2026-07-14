@@ -440,6 +440,13 @@ func (c *Client) RecoverIntegrationJournal(ctx context.Context, worktree string)
 	if journal.Version == integrationJournalVersion && normalizeWorktreeLockKey(journal.TargetWorktree) != normalizeWorktreeLockKey(worktree) {
 		return fmt.Errorf("integration journal target %s does not match recovery target %s", journal.TargetWorktree, worktree)
 	}
+	targetStatus, err := c.Status(ctx, worktree)
+	if err != nil {
+		return fmt.Errorf("inspect target before integration recovery: %w", err)
+	}
+	if gitStatusHasTrackedChanges(targetStatus) {
+		return fmt.Errorf("target has tracked edits before integration recovery; journal and scratch retained: %s", gitStatusSummary(targetStatus))
+	}
 
 	currentHead, err := c.revParseVerify(ctx, worktree, "HEAD")
 	if err != nil {
