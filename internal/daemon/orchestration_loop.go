@@ -27,8 +27,8 @@ type projectOrchestratorLoopResult struct {
 
 // runProjectOrchestratorLoopStep composes the projection-backed orchestration
 // authorities into one recoverable daemon step. Review judgment remains an
-// explicit orchestrator decision; seeing an actionable review is itself a
-// durable action that suppresses all new starts until the review is resolved.
+// explicit orchestrator decision. Runnable work may start alongside queued
+// review so review inspection can be delegated without stalling the project.
 func (d *Daemon) runProjectOrchestratorLoopStep(ctx context.Context, lease daemonstate.OrchestratorScopeLease, now time.Time) (projectOrchestratorLoopResult, error) {
 	if lease.Identity.Scope.Kind != domain.OrchestrationScopeProject {
 		return projectOrchestratorLoopResult{}, nil
@@ -74,10 +74,8 @@ func (d *Daemon) runProjectOrchestratorLoopStep(ctx context.Context, lease daemo
 		// The prior daemon advanced the cursor before applying the action. Reuse
 		// that exact key and leave newer events for the following loop step.
 		nextCursor, actionKey, actionKind = checkpoint.WatchCursor, checkpoint.LastActionKey, "start"
-	} else if reviewID := firstActionableReview(snapshot.ReviewQueue); reviewID != "" {
-		actionKind, actionStatus = "review", "pending:"+reviewID
-	} else if projectOrchestratorSnapshotActionable(snapshot) {
-		actionKind = "start"
+	} else {
+		actionKind, actionStatus = projectOrchestratorNextAction(snapshot)
 	}
 	if actionKind == "start" {
 		if !replaying {
@@ -119,6 +117,22 @@ func (d *Daemon) runProjectOrchestratorLoopStep(ctx context.Context, lease daemo
 		d.hub.Publish(protocol.EventEnvelope{ProtocolVersion: protocol.CurrentVersion, ProjectID: naming.ProjectID(lease.Identity.ProjectID), Revision: d.nextRevision(lease.Identity.ProjectID), Event: protocol.EventOrchestrationLoopUpdated, Kind: protocol.EnvelopeKindEvent, EmittedAt: now, Body: body})
 	}
 	return projectOrchestratorLoopResult{Cursor: nextCursor, ActionKey: actionKey, ActionKind: actionKind, ActionStatus: actionStatus, Advanced: advanced}, nil
+}
+
+func projectOrchestratorNextAction(snapshot protocol.OrchestrationSnapshot) (string, string) {
+	reviewID := firstActionableReview(snapshot.ReviewQueue)
+	startActionable := projectOrchestratorSnapshotActionable(snapshot)
+	startCapacity := snapshot.Constraints.AgentCapacity <= 0 || snapshot.Capacity.TotalCountingCapacityCount < snapshot.Constraints.AgentCapacity
+	if startActionable && (reviewID == "" || startCapacity) {
+		return "start", "idle"
+	}
+	if reviewID != "" {
+		return "review", "pending:" + reviewID
+	}
+	if startActionable {
+		return "start", "idle"
+	}
+	return "observe", "idle"
 }
 
 func projectOrchestratorSnapshotActionable(snapshot protocol.OrchestrationSnapshot) bool {

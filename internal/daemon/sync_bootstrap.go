@@ -122,12 +122,16 @@ func (d *Daemon) defaultSyncBootstrap(ctx context.Context) error {
 }
 
 func (d *Daemon) bootstrapProjectStores(ctx context.Context, projectID string) error {
+	projectID = d.canonicalProjectID(projectID)
 	client := d.issueClientForProject(projectID)
 	if client == nil {
 		return errors.New("issue store unavailable")
 	}
 	if _, err := client.DBStats(); err != nil {
 		return fmt.Errorf("open issue store %s: %w", protocol.NormalizeProjectID(projectID), err)
+	}
+	if err := client.EnsureBoardViews(ctx, projectID); err != nil {
+		return fmt.Errorf("initialize board views %s: %w", protocol.NormalizeProjectID(projectID), err)
 	}
 	runtimeStore := d.runtimeStateStoreForProject(projectID)
 	if runtimeStore == nil {

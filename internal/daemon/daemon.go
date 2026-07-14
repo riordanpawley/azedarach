@@ -67,6 +67,7 @@ type Config struct {
 	SocketPath                 string
 	LockPath                   string
 	ScopedRuntime              bool
+	ManagedGenerationBinDir    string
 	BaseBranch                 string
 	GitWorkflowMode            string
 	CLITool                    string
@@ -97,103 +98,111 @@ type Daemon struct {
 	router *daemonhandlers.Dispatcher
 	apply  *daemonhandlers.ApplyHandler
 
-	issues                             *issues.Client
-	userStore                          *userstore.Store
-	userStoreRefreshMu                 sync.Mutex
-	userStoreRefreshPending            map[string]bool
-	userStoreRefreshDirty              map[string]bool
-	userStoreRefreshWG                 sync.WaitGroup
-	userStoreRefreshStopping           bool
-	userStoreRefreshCtx                context.Context
-	userStoreRefreshCancel             context.CancelFunc
-	issueClientsMu                     sync.Mutex
-	issueClientsByProject              map[string]*issues.Client
-	issueClientsByRoot                 map[string]*issues.Client
-	projectIssueStoreHealthMu          sync.Mutex
-	projectIssueStoreHealthByProject   map[string]projectIssueStoreHealthState
-	projectConfigMu                    sync.Mutex
-	baseBranchByProject                map[string]string
-	baseBranchByRoot                   map[string]string
-	workflowModeByProject              map[string]string
-	workflowModeByRoot                 map[string]string
-	cliToolByProject                   map[string]string
-	cliToolByRoot                      map[string]string
-	sessionShellByProject              map[string]string
-	sessionShellByRoot                 map[string]string
-	codexAppServerByProject            map[string]bool
-	codexAppServerByRoot               map[string]bool
-	sessionSyncInitCommandsByProject   map[string][]string
-	sessionSyncInitCommandsByRoot      map[string][]string
-	sessionAsyncInitCommandsByProject  map[string][]string
-	sessionAsyncInitCommandsByRoot     map[string][]string
-	worktreeInitCommandsByProject      map[string][]string
-	worktreeInitCommandsByRoot         map[string][]string
-	worktreeAsyncInitCommandsByProject map[string][]string
-	worktreeAsyncInitCommandsByRoot    map[string][]string
-	issueResourcesByProject            map[string]appconfig.IssueResourcesConfig
-	issueResourcesByRoot               map[string]appconfig.IssueResourcesConfig
-	issueAutoArchiveByProject          map[string]appconfig.IssueAutoArchiveConfig
-	issueAutoArchiveByRoot             map[string]appconfig.IssueAutoArchiveConfig
-	scheduledScriptsByProject          map[string]appconfig.ScheduledScriptsConfig
-	scheduledScriptsByRoot             map[string]appconfig.ScheduledScriptsConfig
-	orchestrationByProject             map[string]appconfig.OrchestrationConfig
-	orchestrationByRoot                map[string]appconfig.OrchestrationConfig
-	worktreeManagersMu                 sync.Mutex
-	worktreeManagersByProject          map[string]*git.WorktreeManager
-	worktreeManagersByRoot             map[string]*git.WorktreeManager
-	runtimeStoresMu                    sync.Mutex
-	runtimeStoresByProject             map[string]*daemonstate.RuntimeStateStore
-	runtimeStoresByRoot                map[string]*daemonstate.RuntimeStateStore
-	hookLogMu                          sync.Mutex
-	hookLogByProject                   map[string][]protocol.HookLogEvent
-	uiStateMu                          sync.RWMutex
-	uiState                            map[string]string
-	tmux                               *tmux.Client
-	git                                *git.Client
-	gitStatusAdapter                   *gitServiceAdapter
-	gitHandler                         *daemonhandlers.GitHandler
-	worktreeHandler                    *daemonhandlers.WorktreeHandler
-	worktreeAdapter                    *worktreeServiceAdapter
-	session                            *daemonhandlers.SessionHandler
-	sessionStore                       *daemonstate.Store
-	runtimeProjectionWriter            runtimeProjectionWriter
-	sessionLongRunning                 SessionLongRunningExecutor
-	sessionResumeWait                  func(context.Context, time.Duration) error
-	sessionShellRun                    func(context.Context, string, string, string, []string) ([]byte, error)
-	runtimeReconciler                  runtimeReconciler
-	runtimeReconcileQueue              *reconcileQueue[protocol.RuntimeReconcileResponseBody]
-	gitStatusRefreshQueue              *reconcileQueue[*git.GitStatus]
-	runtimeReconcileThrottle           *reconcileThrottle
-	worktreeGitProbeThrottle           *reconcileThrottle
-	queueMu                            sync.Mutex
-	operationRuntime                   *operationRuntime
-	noticeService                      *daemonnotices.Service
-	runtimeProjectionCoalescer         *runtimeProjectionEventCoalescer
-	scheduledScripts                   *scheduledScriptManager
-	issueAutoArchive                   *issueAutoArchiveWorker
-	issueAutoArchiveLastRun            map[string]time.Time
-	sessionStopMu                      sync.Mutex
-	sessionStopPending                 map[string]int
-	sessionStateRefreshMu              sync.Mutex
-	sessionStateRefreshing             map[string]bool
-	sessionStateLastRefresh            map[string]time.Time
-	worktreeStateRefreshMu             sync.Mutex
-	worktreeStateRefreshing            map[string]bool
-	worktreeStateLastRefresh           map[string]time.Time
-	taskListRuntimeRefreshMu           sync.Mutex
-	taskListRuntimeLastRefresh         map[string]time.Time
-	taskListRuntimeRefreshes           map[string]*taskListRuntimeRefresh
-	taskListSnapshotCacheMu            sync.Mutex
-	taskListSnapshotCache              map[string]taskListSnapshotCacheEntry
-	taskListSnapshotLoadMu             sync.Mutex
-	taskListSnapshotLoads              map[string]*taskListSnapshotLoad
-	taskGraphReadinessMu               sync.Mutex
-	taskGraphReadinessLoads            map[string]*taskGraphReadinessLoad
-	orchestrationMu                    sync.Mutex
-	watchClientsMu                     sync.Mutex
-	watchClients                       map[string]watchClientObservation
-	terminalFailureProbeMu             sync.Mutex
-	terminalFailureProbes              map[string]terminalFailureProbeState
+	issues                               *issues.Client
+	userStore                            *userstore.Store
+	userStoreRefreshMu                   sync.Mutex
+	userStoreRefreshPending              map[string]bool
+	userStoreRefreshDirty                map[string]bool
+	userStoreRefreshWG                   sync.WaitGroup
+	userStoreRefreshStopping             bool
+	userStoreRefreshCtx                  context.Context
+	userStoreRefreshCancel               context.CancelFunc
+	issueClientsMu                       sync.Mutex
+	issueClientsByProject                map[string]*issues.Client
+	issueClientsByRoot                   map[string]*issues.Client
+	projectIssueStoreHealthMu            sync.Mutex
+	projectIssueStoreHealthByProject     map[string]projectIssueStoreHealthState
+	projectConfigMu                      sync.Mutex
+	baseBranchByProject                  map[string]string
+	baseBranchByRoot                     map[string]string
+	workflowModeByProject                map[string]string
+	workflowModeByRoot                   map[string]string
+	cliToolByProject                     map[string]string
+	cliToolByRoot                        map[string]string
+	sessionShellByProject                map[string]string
+	sessionShellByRoot                   map[string]string
+	codexAppServerByProject              map[string]bool
+	codexAppServerByRoot                 map[string]bool
+	sessionSyncInitCommandsByProject     map[string][]string
+	sessionSyncInitCommandsByRoot        map[string][]string
+	sessionAsyncInitCommandsByProject    map[string][]string
+	sessionAsyncInitCommandsByRoot       map[string][]string
+	worktreeInitCommandsByProject        map[string][]string
+	worktreeInitCommandsByRoot           map[string][]string
+	worktreeAsyncInitCommandsByProject   map[string][]string
+	worktreeAsyncInitCommandsByRoot      map[string][]string
+	issueResourcesByProject              map[string]appconfig.IssueResourcesConfig
+	issueResourcesByRoot                 map[string]appconfig.IssueResourcesConfig
+	issueAutoArchiveByProject            map[string]appconfig.IssueAutoArchiveConfig
+	issueAutoArchiveByRoot               map[string]appconfig.IssueAutoArchiveConfig
+	scheduledScriptsByProject            map[string]appconfig.ScheduledScriptsConfig
+	scheduledScriptsByRoot               map[string]appconfig.ScheduledScriptsConfig
+	orchestrationByProject               map[string]appconfig.OrchestrationConfig
+	orchestrationByRoot                  map[string]appconfig.OrchestrationConfig
+	worktreeManagersMu                   sync.Mutex
+	worktreeManagersByProject            map[string]*git.WorktreeManager
+	worktreeManagersByRoot               map[string]*git.WorktreeManager
+	runtimeStoresMu                      sync.Mutex
+	runtimeStoresByProject               map[string]*daemonstate.RuntimeStateStore
+	runtimeStoresByRoot                  map[string]*daemonstate.RuntimeStateStore
+	hookLogMu                            sync.Mutex
+	hookLogByProject                     map[string][]protocol.HookLogEvent
+	uiStateMu                            sync.RWMutex
+	uiState                              map[string]string
+	tmux                                 *tmux.Client
+	git                                  *git.Client
+	gitStatusAdapter                     *gitServiceAdapter
+	gitHandler                           *daemonhandlers.GitHandler
+	worktreeHandler                      *daemonhandlers.WorktreeHandler
+	worktreeAdapter                      *worktreeServiceAdapter
+	session                              *daemonhandlers.SessionHandler
+	sessionStore                         *daemonstate.Store
+	runtimeProjectionWriter              runtimeProjectionWriter
+	sessionLongRunning                   SessionLongRunningExecutor
+	sessionResumeWait                    func(context.Context, time.Duration) error
+	sessionShellRun                      func(context.Context, string, string, string, []string) ([]byte, error)
+	runtimeReconciler                    runtimeReconciler
+	runtimeReconcileQueue                *reconcileQueue[protocol.RuntimeReconcileResponseBody]
+	gitStatusRefreshQueue                *reconcileQueue[*git.GitStatus]
+	runtimeReconcileThrottle             *reconcileThrottle
+	worktreeGitProbeThrottle             *reconcileThrottle
+	queueMu                              sync.Mutex
+	operationRuntime                     *operationRuntime
+	noticeService                        *daemonnotices.Service
+	runtimeProjectionCoalescer           *runtimeProjectionEventCoalescer
+	scheduledScripts                     *scheduledScriptManager
+	issueAutoArchive                     *issueAutoArchiveWorker
+	issueAutoArchiveLastRun              map[string]time.Time
+	sessionStopMu                        sync.Mutex
+	sessionStopPending                   map[string]int
+	orchestratorStopGracePeriod          time.Duration
+	orchestratorStopPollInterval         time.Duration
+	orchestratorStopAfterIntentPersisted func()
+	sessionStateRefreshMu                sync.Mutex
+	sessionStateRefreshing               map[string]bool
+	sessionStateLastRefresh              map[string]time.Time
+	worktreeStateRefreshMu               sync.Mutex
+	worktreeStateRefreshing              map[string]bool
+	worktreeStateLastRefresh             map[string]time.Time
+	taskListRuntimeRefreshMu             sync.Mutex
+	taskListRuntimeLastRefresh           map[string]time.Time
+	taskListRuntimeRefreshes             map[string]*taskListRuntimeRefresh
+	taskListSnapshotCacheMu              sync.Mutex
+	taskListSnapshotCache                map[string]taskListSnapshotCacheEntry
+	taskListSnapshotLoadMu               sync.Mutex
+	taskListSnapshotLoads                map[string]*taskListSnapshotLoad
+	taskGraphReadinessMu                 sync.Mutex
+	taskGraphReadinessLoads              map[string]*taskGraphReadinessLoad
+	orchestrationMu                      sync.Mutex
+	reviewLeaseReleasedBeforeClose       func(context.Context, string, string) error
+	watchClientsMu                       sync.Mutex
+	watchClients                         map[string]watchClientObservation
+	terminalFailureProbeMu               sync.Mutex
+	terminalFailureProbes                map[string]terminalFailureProbeState
+	reviewReadyRecoveryMu                sync.Mutex
+	reviewReadyRecoveryCursor            map[string]int64
+	reviewReadyRecoveryBeforeLoad        func()
+	deferredCleanupOperationManager      deferredCleanupOperationManager
 
 	revMu    sync.Mutex
 	revision map[string]uint64
@@ -245,6 +254,11 @@ func New(cfg Config) *Daemon {
 	}
 	if cfg.LockPath == "" {
 		cfg.LockPath = appconfig.GlobalDaemonLockPath()
+	}
+	if cfg.ScopedRuntime {
+		cfg.ManagedGenerationBinDir = ""
+	} else if strings.TrimSpace(cfg.ManagedGenerationBinDir) != "" {
+		cfg.ManagedGenerationBinDir = filepath.Clean(cfg.ManagedGenerationBinDir)
 	}
 
 	tmuxRunner := &tmux.ExecRunner{}
@@ -430,6 +444,7 @@ func New(cfg Config) *Daemon {
 		taskBulkCleanup:         d.handleTaskBulkCleanup,
 		globalProjectionRebuild: d.handleGlobalProjectionRebuild,
 		onMutationSuccess:       d.enqueueUserProjectionRefresh,
+		onTerminal:              d.reconcileOrchestrationStartOperation,
 		recoverInterrupted:      d.recoverInterruptedOperation,
 		noticeService:           noticeService,
 	})
@@ -523,6 +538,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.cfg.Logger.Info("daemon startup phase", "phase", "lock_acquire", "duration_ms", time.Since(startedAt).Milliseconds())
 	serveCtx, cancelServe := context.WithCancel(context.Background())
 	defer cancelServe()
+	d.startSessionLaunchArtifactCleanup(serveCtx)
 	shutdownDone := make(chan struct{})
 	shutdownStop := make(chan struct{})
 	shutdownReqCh := d.shutdownRequestChannel()
@@ -859,7 +875,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleOrchestrationSnapshot(ctx, req)
 	case protocol.CommandOrchestrationIntent:
 		return d.handleOrchestrationIntent(ctx, req)
-	case protocol.CommandOrchestratorSessionStart, protocol.CommandOrchestratorSessionAttach, protocol.CommandOrchestratorSessionStatus:
+	case protocol.CommandOrchestratorSessionStart, protocol.CommandOrchestratorSessionAttach, protocol.CommandOrchestratorSessionStop, protocol.CommandOrchestratorSessionStatus:
 		return d.handleOrchestratorSession(ctx, req)
 	case "task.complete_check":
 		return d.handleTaskCompleteCheck(ctx, req)
@@ -1377,8 +1393,11 @@ func (d *Daemon) recoverInterruptedDeferredWorktreeCleanup(ctx context.Context, 
 			ErrorMessage: err.Error(),
 		}, true
 	}
-	if removedWorktree != nil {
-		_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(removedWorktree.Path))
+	if cleanupErr := finalizeDeletedWorktree(cleanupCtx, projectID, taskID, manager, removedWorktree, d.runtimeProjectionStateWriter()); cleanupErr != nil {
+		return interruptedOperationRecovery{
+			State:        daemonops.StateFailed,
+			ErrorMessage: cleanupErr.Error(),
+		}, true
 	}
 	payload, _ := json.Marshal(deferredTaskWorktreeCleanupResult{
 		ProjectID: projectID,
@@ -1772,14 +1791,18 @@ func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, pr
 	if d.hub == nil {
 		return
 	}
-	runtime := d.runtimeProjectionForEvent(ctx, projectID, session.IssueID, "", nil)
-	if strings.TrimSpace(session.ID) != "" {
-		sessionRuntime := buildRuntimeProjection(projectID, &session, nil)
-		runtime.IssueID = sessionRuntime.IssueID
-		runtime.Session = sessionRuntime.Session
+	var runtimeBody *protocol.RuntimeProjectionEventBody
+	if strings.TrimSpace(session.IssueID) != "" {
+		runtime := d.runtimeProjectionForEvent(ctx, projectID, session.IssueID, "", nil)
+		if strings.TrimSpace(session.ID) != "" {
+			sessionRuntime := buildRuntimeProjection(projectID, &session, nil)
+			runtime.IssueID = sessionRuntime.IssueID
+			runtime.Session = sessionRuntime.Session
+		}
+		applyRuntimeSessionCounts(&runtime, d.sessionProjectionCountsForIssue(ctx, projectID, session.IssueID))
+		encodedRuntime := buildRuntimeProjectionEventBody(projectID, rev, runtime)
+		runtimeBody = &encodedRuntime
 	}
-	applyRuntimeSessionCounts(&runtime, d.sessionProjectionCountsForIssue(ctx, projectID, session.IssueID))
-	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
 	body, err := json.Marshal(protocol.SessionProjectionEventBody{
 		ProjectID: naming.ProjectID(projectID),
 		Revision:  rev,
@@ -1792,7 +1815,7 @@ func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, pr
 			State:     protocol.SessionLifecycleState(session.State),
 			UpdatedAt: session.UpdatedAt,
 		},
-		Runtime: &runtimeBody,
+		Runtime: runtimeBody,
 	})
 	if err != nil {
 		if d.cfg.Logger != nil {

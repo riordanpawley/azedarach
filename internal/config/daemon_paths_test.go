@@ -232,6 +232,66 @@ func TestValidateSharedDaemonExecutableAllowsScopedSocket(t *testing.T) {
 	}
 }
 
+func TestManagedGenerationBinDirRequiresCoherentExecutablePair(t *testing.T) {
+	installDir := t.TempDir()
+	generationDir := filepath.Join(installDir, ".azedarach-generations", "generation.current")
+	if err := os.MkdirAll(generationDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, binary := range []string{"az", "azd"} {
+		if err := os.WriteFile(filepath.Join(generationDir, binary), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publicAzd := filepath.Join(installDir, "azd")
+	if err := os.Symlink(filepath.Join(".azedarach-generations", "generation.current", "azd"), publicAzd); err != nil {
+		t.Fatal(err)
+	}
+
+	resolvedGenerationDir, err := filepath.EvalSymlinks(generationDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := ManagedGenerationBinDir(publicAzd, "azd"); !ok || got != resolvedGenerationDir {
+		t.Fatalf("ManagedGenerationBinDir() = %q, %t, want %q, true", got, ok, resolvedGenerationDir)
+	}
+	if err := os.Chmod(filepath.Join(generationDir, "az"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := ManagedGenerationBinDir(publicAzd, "azd"); ok || got != "" {
+		t.Fatalf("ManagedGenerationBinDir() with partial pair = %q, %t, want empty, false", got, ok)
+	}
+	if got, ok := ManagedGenerationBinDir(filepath.Join(installDir, "bin", "azd"), "azd"); ok || got != "" {
+		t.Fatalf("ManagedGenerationBinDir() with unmanaged path = %q, %t, want empty, false", got, ok)
+	}
+}
+
+func TestPrependPathEntryDeduplicatesManagedGeneration(t *testing.T) {
+	managed := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.current")
+	stale := filepath.Join(t.TempDir(), "repo", "bin")
+	got := PrependPathEntry(strings.Join([]string{stale, managed, stale, managed}, string(os.PathListSeparator)), managed)
+	want := strings.Join([]string{managed, stale, stale}, string(os.PathListSeparator))
+	if got != want {
+		t.Fatalf("PrependPathEntry() = %q, want %q", got, want)
+	}
+}
+
+func TestPrependPathEntryDeduplicatesSymlinkedFilesystemIdentity(t *testing.T) {
+	realDir := filepath.Join(t.TempDir(), "generation.current")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasDir := filepath.Join(t.TempDir(), "generation.alias")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Fatal(err)
+	}
+	got := PrependPathEntry(aliasDir+string(os.PathListSeparator)+"/usr/bin", realDir)
+	want := realDir + string(os.PathListSeparator) + "/usr/bin"
+	if got != want {
+		t.Fatalf("PrependPathEntry() = %q, want %q", got, want)
+	}
+}
+
 func TestDaemonPathsUseScopedWhenEnabledInAzedarachDevelopmentWorktree(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "xdg-runtime"))
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")

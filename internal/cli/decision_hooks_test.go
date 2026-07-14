@@ -10,198 +10,85 @@ import (
 	"github.com/riordanpawley/azedarach/internal/config"
 )
 
-func TestBuiltInDecisionCommandsForHook(t *testing.T) {
-	cases := []struct {
-		hook                     string
-		preCommitMergeInProgress bool
-		expected                 []string
-	}{
-		{hook: "pre-commit", expected: []string{"az decision sync"}},
-		{hook: "pre-commit", preCommitMergeInProgress: true, expected: nil},
-		{hook: "post-merge", expected: []string{"az decision import"}},
-		{hook: "post-checkout", expected: []string{"az decision import"}},
-		{hook: "post-rewrite", expected: []string{"az decision import"}},
-		{hook: "post-commit", expected: nil},
-		{hook: "unknown-hook", expected: nil},
-		{hook: "", expected: nil},
-	}
-	for _, tc := range cases {
-		t.Run(tc.hook, func(t *testing.T) {
-			got := builtInDecisionCommandsForHook(tc.hook, "/repo path", tc.preCommitMergeInProgress)
-			if tc.expected != nil {
-				for i := range tc.expected {
-					tc.expected[i] += " --project-dir '/repo path'"
-				}
-			}
-			if !equalStringSlice(got, tc.expected) {
-				t.Errorf("builtInDecisionCommandsForHook(%q, %v) = %v, want %v", tc.hook, tc.preCommitMergeInProgress, got, tc.expected)
-			}
-		})
-	}
-}
-
-func TestGitHooksRunCommandRunsBuiltInDecisionSyncAndRestageOutsideMerge(t *testing.T) {
+func TestGitHooksPreCommitDoesNotAlterConcurrentWorktreeCommit(t *testing.T) {
 	isolateNestedGitEnvironment(t)
-	projectDir := t.TempDir()
-	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
+	baseDir := t.TempDir()
+	if err := runGitCommandIsolated(baseDir, "init"); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
-
-	fakeBin := t.TempDir()
-	fakeAz := filepath.Join(fakeBin, "az")
-	if err := os.WriteFile(fakeAz, []byte("#!/bin/sh\nif [ \"$1\" = decision ] && [ \"$2\" = sync ]; then mkdir -p docs/decisions && printf synced > docs/decisions/generated.md; fi\n"), 0o755); err != nil {
-		t.Fatalf("write fake az: %v", err)
+	if err := runGitCommandIsolated(baseDir, "config", "user.name", "Test User"); err != nil {
+		t.Fatalf("git config user.name: %v", err)
 	}
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	cfg := config.DefaultConfig()
-	if err := GitHooksRunCommand(&Dependencies{RepoDir: projectDir, Config: cfg}, GitHooksRunOptions{ProjectDir: projectDir}); err != nil {
-		t.Fatalf("GitHooksRunCommand error: %v", err)
+	if err := runGitCommandIsolated(baseDir, "config", "user.email", "test@example.com"); err != nil {
+		t.Fatalf("git config user.email: %v", err)
 	}
-
-	statusCmd := exec.Command("git", "-C", projectDir, "status", "--porcelain", "--", "docs/decisions/generated.md")
-	statusCmd.Env = gitExecEnvWithoutRoutingVars()
-	out, err := statusCmd.Output()
-	if err != nil {
-		t.Fatalf("git status generated decision: %v", err)
-	}
-	if got := strings.TrimSpace(string(out)); got != "A  docs/decisions/generated.md" {
-		t.Fatalf("generated decision git status = %q, want staged add", got)
-	}
-}
-
-func TestGitHooksRunCommandSkipsBuiltInDecisionSyncAndRestageWhenEnvSet(t *testing.T) {
-	isolateNestedGitEnvironment(t)
-	projectDir := t.TempDir()
-	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
-		t.Fatalf("git init: %v", err)
-	}
-
-	fakeBin := t.TempDir()
-	fakeAz := filepath.Join(fakeBin, "az")
-	if err := os.WriteFile(fakeAz, []byte("#!/bin/sh\nif [ \"$1\" = decision ] && [ \"$2\" = sync ]; then mkdir -p docs/decisions && printf synced > docs/decisions/generated.md; fi\n"), 0o755); err != nil {
-		t.Fatalf("write fake az: %v", err)
-	}
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("AZEDARACH_SKIP_DECISION_SYNC", "1")
-
-	decisionPath := filepath.Join(projectDir, "docs", "decisions", "existing.md")
+	decisionPath := filepath.Join(baseDir, "docs", "decisions", "dec-1-original.md")
 	if err := os.MkdirAll(filepath.Dir(decisionPath), 0o755); err != nil {
 		t.Fatalf("mkdir decisions: %v", err)
 	}
-	if err := os.WriteFile(decisionPath, []byte("existing\n"), 0o644); err != nil {
-		t.Fatalf("write existing decision: %v", err)
+	if err := os.WriteFile(decisionPath, []byte("# dec-1: Original\n"), 0o644); err != nil {
+		t.Fatalf("write decision: %v", err)
 	}
-
-	cfg := config.DefaultConfig()
-	if err := GitHooksRunCommand(&Dependencies{RepoDir: projectDir, Config: cfg}, GitHooksRunOptions{ProjectDir: projectDir}); err != nil {
-		t.Fatalf("GitHooksRunCommand error: %v", err)
-	}
-
-	if _, err := os.Stat(filepath.Join(projectDir, "docs", "decisions", "generated.md")); !os.IsNotExist(err) {
-		t.Fatalf("generated decision err = %v, want not exist", err)
-	}
-
-	statusCmd := exec.Command("git", "-C", projectDir, "status", "--porcelain", "--", "docs/decisions/existing.md")
-	statusCmd.Env = gitExecEnvWithoutRoutingVars()
-	out, err := statusCmd.Output()
-	if err != nil {
-		t.Fatalf("git status existing decision: %v", err)
-	}
-	if got := strings.TrimSpace(string(out)); got != "?? docs/decisions/existing.md" {
-		t.Fatalf("existing decision git status = %q, want untracked", got)
-	}
-}
-
-func TestGitHooksHookCommandDecisionSyncSkipDoesNotDisableImportHooks(t *testing.T) {
-	isolateNestedGitEnvironment(t)
-	projectDir := t.TempDir()
-	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
-		t.Fatalf("git init: %v", err)
-	}
-
-	fakeBin := t.TempDir()
-	fakeAz := filepath.Join(fakeBin, "az")
-	if err := os.WriteFile(fakeAz, []byte("#!/bin/sh\nif [ \"$1\" = decision ] && [ \"$2\" = import ]; then printf imported > .decision-import-ran; fi\n"), 0o755); err != nil {
-		t.Fatalf("write fake az: %v", err)
-	}
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("AZEDARACH_SKIP_DECISION_SYNC", "1")
-
-	cfg := config.DefaultConfig()
-	if err := GitHooksHookCommand(&Dependencies{RepoDir: projectDir, Config: cfg}, GitHooksHookOptions{ProjectDir: projectDir, Hook: "post-merge"}); err != nil {
-		t.Fatalf("GitHooksHookCommand error: %v", err)
-	}
-
-	if _, err := os.Stat(filepath.Join(projectDir, ".decision-import-ran")); err != nil {
-		t.Fatalf("decision import hook did not run: %v", err)
-	}
-}
-
-func TestGitHooksRunCommandRestagesDecisionsIntoHookIndex(t *testing.T) {
-	isolateNestedGitEnvironment(t)
-	projectDir := t.TempDir()
-	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
-		t.Fatalf("git init: %v", err)
-	}
-	if err := runGitCommandIsolated(projectDir, "config", "user.name", "Test User"); err != nil {
-		t.Fatalf("git config user.name: %v", err)
-	}
-	if err := runGitCommandIsolated(projectDir, "config", "user.email", "test@example.com"); err != nil {
-		t.Fatalf("git config user.email: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(projectDir, "README.md"), []byte("seed\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(baseDir, "README.md"), []byte("seed\n"), 0o644); err != nil {
 		t.Fatalf("write seed: %v", err)
 	}
-	if err := runGitCommandIsolated(projectDir, "add", "README.md"); err != nil {
+	if err := runGitCommandIsolated(baseDir, "add", "."); err != nil {
 		t.Fatalf("git add seed: %v", err)
 	}
-	if err := runGitCommandIsolated(projectDir, "commit", "-m", "seed"); err != nil {
+	if err := runGitCommandIsolated(baseDir, "commit", "-m", "seed"); err != nil {
 		t.Fatalf("git commit seed: %v", err)
 	}
 
-	hookIndex := filepath.Join(t.TempDir(), "hook-index")
-	readTree := exec.Command("git", "-C", projectDir, "read-tree", "HEAD")
-	readTree.Env = append(gitExecEnvWithoutRoutingVars(), "GIT_INDEX_FILE="+hookIndex)
-	if err := readTree.Run(); err != nil {
-		t.Fatalf("seed hook index: %v", err)
+	worktreeA := filepath.Join(t.TempDir(), "worktree-a")
+	worktreeB := filepath.Join(t.TempDir(), "worktree-b")
+	if err := runGitCommandIsolated(baseDir, "worktree", "add", worktreeA, "-b", "decision-a"); err != nil {
+		t.Fatalf("git worktree add A: %v", err)
+	}
+	if err := runGitCommandIsolated(baseDir, "worktree", "add", worktreeB, "-b", "commit-b"); err != nil {
+		t.Fatalf("git worktree add B: %v", err)
 	}
 
+	// Model a decision mutation from worktree A in the shared store. If B's
+	// pre-commit invokes decision sync, the fake command exposes the leak by
+	// rewriting B's decision markdown and recording the invocation.
+	sharedStore := filepath.Join(t.TempDir(), "shared-decision-store")
+	if err := os.WriteFile(sharedStore, []byte("decision changed from worktree A\n"), 0o644); err != nil {
+		t.Fatalf("write shared decision mutation: %v", err)
+	}
 	fakeBin := t.TempDir()
 	fakeAz := filepath.Join(fakeBin, "az")
-	if err := os.WriteFile(fakeAz, []byte("#!/bin/sh\nif [ \"$1\" = decision ] && [ \"$2\" = sync ]; then mkdir -p docs/decisions && printf synced > docs/decisions/generated.md; fi\n"), 0o755); err != nil {
+	callLog := filepath.Join(t.TempDir(), "az-calls")
+	script := "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$*\" >> \"$AZ_CALL_LOG\"\nif [ \"$1\" = decision ] && [ \"$2\" = sync ]; then cp \"$SHARED_STORE\" docs/decisions/dec-1-original.md; fi\n"
+	if err := os.WriteFile(fakeAz, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake az: %v", err)
 	}
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("GIT_INDEX_FILE", hookIndex)
+	t.Setenv("AZ_CALL_LOG", callLog)
+	t.Setenv("SHARED_STORE", sharedStore)
 
-	cfg := config.DefaultConfig()
-	if err := GitHooksRunCommand(&Dependencies{RepoDir: projectDir, Config: cfg}, GitHooksRunOptions{ProjectDir: projectDir}); err != nil {
-		t.Fatalf("GitHooksRunCommand error: %v", err)
+	if err := os.WriteFile(filepath.Join(worktreeB, "README.md"), []byte("worktree B change\n"), 0o644); err != nil {
+		t.Fatalf("write B change: %v", err)
 	}
-
-	hookIndexFiles := exec.Command("git", "-C", projectDir, "ls-files", "--stage", "--", "docs/decisions/generated.md")
-	hookIndexFiles.Env = append(gitExecEnvWithoutRoutingVars(), "GIT_INDEX_FILE="+hookIndex)
-	out, err := hookIndexFiles.Output()
-	if err != nil {
-		t.Fatalf("git ls-files hook index: %v", err)
+	if err := runGitCommandIsolated(worktreeB, "add", "README.md"); err != nil {
+		t.Fatalf("stage B change: %v", err)
 	}
-	if strings.TrimSpace(string(out)) == "" {
-		t.Fatal("generated decision was not staged in hook index")
+	before := gitCommandOutput(t, worktreeB, "diff", "--cached", "--binary")
+	if err := GitHooksHookCommand(&Dependencies{RepoDir: worktreeB, Config: config.DefaultConfig()}, GitHooksHookOptions{ProjectDir: worktreeB, Hook: "pre-commit"}); err != nil {
+		t.Fatalf("pre-commit hook: %v", err)
 	}
-
-	realIndexFiles := exec.Command("git", "-C", projectDir, "ls-files", "--stage", "--", "docs/decisions/generated.md")
-	realIndexFiles.Env = gitExecEnvWithoutRoutingVars()
-	out, err = realIndexFiles.Output()
-	if err != nil {
-		t.Fatalf("git ls-files real index: %v", err)
+	after := gitCommandOutput(t, worktreeB, "diff", "--cached", "--binary")
+	if before != after {
+		t.Fatalf("staged commit changed after concurrent decision mutation\nbefore:\n%s\nafter:\n%s", before, after)
 	}
-	if strings.TrimSpace(string(out)) != "" {
-		t.Fatalf("generated decision staged in real index = %q, want hook index only", strings.TrimSpace(string(out)))
+	if got := strings.TrimSpace(gitCommandOutput(t, worktreeB, "status", "--porcelain", "--", "docs/decisions")); got != "" {
+		t.Fatalf("worktree B decision markdown became dirty: %q", got)
+	}
+	if _, err := os.Stat(callLog); !os.IsNotExist(err) {
+		t.Fatalf("pre-commit invoked az decision command; call log err=%v", err)
 	}
 }
 
-func TestGitHooksRunCommandUsesCurrentWorktreeForImplicitProjectDir(t *testing.T) {
+func TestGitHooksDoNotImplicitlyTransferDecisionsFromAnyRevision(t *testing.T) {
 	isolateNestedGitEnvironment(t)
 	baseDir := t.TempDir()
 	if err := runGitCommandIsolated(baseDir, "init"); err != nil {
@@ -223,168 +110,35 @@ func TestGitHooksRunCommandUsesCurrentWorktreeForImplicitProjectDir(t *testing.T
 		t.Fatalf("git commit seed: %v", err)
 	}
 
-	worktreeDir := filepath.Join(t.TempDir(), "linked-worktree")
-	if err := runGitCommandIsolated(baseDir, "worktree", "add", worktreeDir, "-b", "hook-worktree"); err != nil {
-		t.Fatalf("git worktree add: %v", err)
+	worktreeA := filepath.Join(t.TempDir(), "worktree-a")
+	worktreeB := filepath.Join(t.TempDir(), "worktree-b")
+	if err := runGitCommandIsolated(baseDir, "worktree", "add", worktreeA, "-b", "revision-a"); err != nil {
+		t.Fatalf("git worktree add A: %v", err)
 	}
-
-	hookIndex := filepath.Join(t.TempDir(), "hook-index")
-	readTree := exec.Command("git", "-C", worktreeDir, "read-tree", "HEAD")
-	readTree.Env = append(gitExecEnvWithoutRoutingVars(), "GIT_INDEX_FILE="+hookIndex)
-	if err := readTree.Run(); err != nil {
-		t.Fatalf("seed hook index: %v", err)
+	if err := runGitCommandIsolated(baseDir, "worktree", "add", worktreeB, "-b", "revision-b"); err != nil {
+		t.Fatalf("git worktree add B: %v", err)
 	}
 
 	fakeBin := t.TempDir()
 	fakeAz := filepath.Join(fakeBin, "az")
-	fakeAzScript := `#!/bin/sh
-set -eu
-if [ "$1" = decision ] && [ "$2" = sync ]; then
-	project=""
-	shift 2
-	while [ "$#" -gt 0 ]; do
-		if [ "$1" = "--project-dir" ]; then
-			shift
-			project="$1"
-		fi
-		shift || true
-	done
-	if [ -z "$project" ]; then
-		project="$(pwd)"
-	fi
-	mkdir -p "$project/docs/decisions"
-	printf '%s\n' "$project" > "$project/docs/decisions/generated.md"
-fi
-`
-	if err := os.WriteFile(fakeAz, []byte(fakeAzScript), 0o755); err != nil {
+	callLog := filepath.Join(t.TempDir(), "az-calls")
+	if err := os.WriteFile(fakeAz, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$AZ_CALL_LOG\"\n"), 0o755); err != nil {
 		t.Fatalf("write fake az: %v", err)
 	}
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("GIT_INDEX_FILE", hookIndex)
+	t.Setenv("AZ_CALL_LOG", callLog)
 
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(worktreeDir); err != nil {
-		t.Fatalf("chdir worktree: %v", err)
-	}
-	defer func() {
-		if chdirErr := os.Chdir(wd); chdirErr != nil {
-			t.Fatalf("restore cwd: %v", chdirErr)
+	for _, worktree := range []string{worktreeA, worktreeB} {
+		for _, hook := range []string{"pre-commit", "post-checkout", "post-merge", "post-rewrite"} {
+			if err := GitHooksHookCommand(&Dependencies{RepoDir: worktree, Config: config.DefaultConfig()}, GitHooksHookOptions{ProjectDir: worktree, Hook: hook}); err != nil {
+				t.Fatalf("GitHooksHookCommand(%s, %s): %v", worktree, hook, err)
+			}
 		}
-	}()
-
-	cfg := config.DefaultConfig()
-	if err := GitHooksRunCommand(&Dependencies{RepoDir: baseDir, Config: cfg}, GitHooksRunOptions{}); err != nil {
-		t.Fatalf("GitHooksRunCommand error: %v", err)
 	}
 
-	worktreeDecisionPath := filepath.Join(worktreeDir, "docs", "decisions", "generated.md")
-	data, err := os.ReadFile(worktreeDecisionPath)
-	if err != nil {
-		t.Fatalf("read worktree generated decision: %v", err)
-	}
-	wantWorktree, err := filepath.EvalSymlinks(worktreeDir)
-	if err != nil {
-		wantWorktree = worktreeDir
-	}
-	if got := strings.TrimSpace(string(data)); got != wantWorktree {
-		t.Fatalf("generated decision content = %q, want worktree project dir %q", got, wantWorktree)
-	}
-	if _, err := os.Stat(filepath.Join(baseDir, "docs", "decisions", "generated.md")); !os.IsNotExist(err) {
-		t.Fatalf("base checkout generated decision err = %v, want not exist", err)
-	}
-
-	hookIndexBlob := exec.Command("git", "-C", worktreeDir, "show", ":docs/decisions/generated.md")
-	hookIndexBlob.Env = append(gitExecEnvWithoutRoutingVars(), "GIT_INDEX_FILE="+hookIndex)
-	out, err := hookIndexBlob.Output()
-	if err != nil {
-		t.Fatalf("git show generated decision from hook index: %v", err)
-	}
-	if got := strings.TrimSpace(string(out)); got != wantWorktree {
-		t.Fatalf("hook index generated decision = %q, want %q", got, wantWorktree)
-	}
-}
-
-func TestGitHooksRunCommandSkipsBuiltInDecisionSyncAndRestageDuringMerge(t *testing.T) {
-	isolateNestedGitEnvironment(t)
-	projectDir := t.TempDir()
-	if err := runGitCommandIsolated(projectDir, "init"); err != nil {
-		t.Fatalf("git init: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(projectDir, "README.md"), []byte("seed\n"), 0o644); err != nil {
-		t.Fatalf("write seed: %v", err)
-	}
-	if err := runGitCommandIsolated(projectDir, "add", "README.md"); err != nil {
-		t.Fatalf("git add seed: %v", err)
-	}
-	if err := runGitCommandIsolated(projectDir, "-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-m", "seed"); err != nil {
-		t.Fatalf("git commit seed: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(projectDir, ".git", "MERGE_HEAD"), []byte(strings.Repeat("0", 40)+"\n"), 0o644); err != nil {
-		t.Fatalf("write MERGE_HEAD: %v", err)
-	}
-
-	fakeBin := t.TempDir()
-	fakeAz := filepath.Join(fakeBin, "az")
-	if err := os.WriteFile(fakeAz, []byte("#!/bin/sh\nif [ \"$1\" = decision ] && [ \"$2\" = sync ]; then printf ran > .decision-sync-ran; fi\n"), 0o755); err != nil {
-		t.Fatalf("write fake az: %v", err)
-	}
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	decisionPath := filepath.Join(projectDir, "docs", "decisions", "generated.md")
-	if err := os.MkdirAll(filepath.Dir(decisionPath), 0o755); err != nil {
-		t.Fatalf("mkdir decisions: %v", err)
-	}
-	if err := os.WriteFile(decisionPath, []byte("generated\n"), 0o644); err != nil {
-		t.Fatalf("write generated decision: %v", err)
-	}
-
-	cfg := config.DefaultConfig()
-	cfg.GitHooks.Commands["pre-commit"] = []string{"mkdir -p docs/spec && printf ok > docs/spec/.configured-ran"}
-	if err := GitHooksRunCommand(&Dependencies{RepoDir: projectDir, Config: cfg}, GitHooksRunOptions{ProjectDir: projectDir}); err != nil {
-		t.Fatalf("GitHooksRunCommand error: %v", err)
-	}
-
-	if _, err := os.Stat(filepath.Join(projectDir, ".decision-sync-ran")); !os.IsNotExist(err) {
-		t.Fatalf("built-in decision sync marker err = %v, want not exist", err)
-	}
-	if _, err := os.Stat(filepath.Join(projectDir, "docs", "spec", ".configured-ran")); err != nil {
-		t.Fatalf("configured pre-commit command did not run: %v", err)
-	}
-
-	statusCmd := exec.Command("git", "-C", projectDir, "status", "--porcelain", "--", "docs/decisions/generated.md")
-	statusCmd.Env = gitExecEnvWithoutRoutingVars()
-	out, err := statusCmd.Output()
-	if err != nil {
-		t.Fatalf("git status generated decision: %v", err)
-	}
-	if got := strings.TrimSpace(string(out)); got != "?? docs/decisions/generated.md" {
-		t.Fatalf("generated decision git status = %q, want untracked", got)
-	}
-}
-
-func TestGitHooksRunCommandNestedRepositoriesIgnoreFullOuterGitEnvironment(t *testing.T) {
-	localVars := gitLocalEnvironmentVariableNames(t)
-	poisoned := make(map[string]string, len(localVars)+5)
-	for _, key := range localVars {
-		poisoned[key] = "outer-hook-value"
-	}
-	poisoned["GIT_CONFIG_KEY_0"] = "core.worktree"
-	poisoned["GIT_CONFIG_VALUE_0"] = "/outer/worktree"
-	poisoned["GIT_QUARANTINE_PATH"] = "/outer/quarantine"
-	poisoned["GIT_REFLOG_ACTION"] = "outer merge hook"
-	poisoned["AZEDARACH_SKIP_DECISION_SYNC"] = "1"
-
-	cmd := exec.Command(os.Args[0],
-		"-test.run", "^TestGitHooksRunCommand(RunsBuiltInDecisionSyncAndRestageOutsideMerge|RestagesDecisionsIntoHookIndex|UsesCurrentWorktreeForImplicitProjectDir)$",
-		"-test.count=1",
-	)
-	cmd.Env = gitEnvironmentWithOverrides(poisoned)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("decision hook tests under full outer Git environment: %v\n%s", err, output)
+	if _, err := os.Stat(callLog); !os.IsNotExist(err) {
+		data, _ := os.ReadFile(callLog)
+		t.Fatalf("Git hooks invoked implicit az commands: %q (stat err=%v)", strings.TrimSpace(string(data)), err)
 	}
 }
 
@@ -394,7 +148,6 @@ func isolateNestedGitEnvironment(t *testing.T) {
 	for _, key := range gitLocalEnvironmentVariableNames(t) {
 		keys[key] = struct{}{}
 	}
-	keys["AZEDARACH_SKIP_DECISION_SYNC"] = struct{}{}
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
 		if strings.HasPrefix(key, "GIT_") {
@@ -445,34 +198,15 @@ func gitEnvironmentWithOverrides(overrides map[string]string) []string {
 	return env
 }
 
-func TestGitMergeInProgressReadsWorktreeGitDirPointer(t *testing.T) {
-	projectDir := t.TempDir()
-	gitDir := filepath.Join(t.TempDir(), "worktrees", "feature")
-	if err := os.MkdirAll(gitDir, 0o755); err != nil {
-		t.Fatalf("mkdir git dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(projectDir, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o644); err != nil {
-		t.Fatalf("write .git pointer: %v", err)
-	}
-
-	merge, err := gitMergeInProgress(projectDir)
+func gitCommandOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = gitExecEnvWithoutRoutingVars()
+	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("gitMergeInProgress without MERGE_HEAD error: %v", err)
+		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
 	}
-	if merge {
-		t.Fatal("gitMergeInProgress without MERGE_HEAD = true, want false")
-	}
-
-	if err := os.WriteFile(filepath.Join(gitDir, "MERGE_HEAD"), []byte(strings.Repeat("0", 40)+"\n"), 0o644); err != nil {
-		t.Fatalf("write MERGE_HEAD: %v", err)
-	}
-	merge, err = gitMergeInProgress(projectDir)
-	if err != nil {
-		t.Fatalf("gitMergeInProgress with MERGE_HEAD error: %v", err)
-	}
-	if !merge {
-		t.Fatal("gitMergeInProgress with MERGE_HEAD = false, want true")
-	}
+	return string(out)
 }
 
 func equalStringSlice(a, b []string) bool {

@@ -11,7 +11,6 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
-	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 var (
@@ -63,6 +62,7 @@ type OrchestratorLeaseAcquireResult struct {
 type SessionRuntimeProbe func(context.Context, string) (bool, error)
 
 type OrchestratorScopeLeaseStore interface {
+	WithOrchestratorScopeTransition(context.Context, domain.OrchestratorIdentity, func(context.Context) error) error
 	GetOrchestratorScopeLease(context.Context, domain.OrchestratorIdentity) (OrchestratorScopeLease, bool, error)
 	ListOrchestratorScopeLeases(context.Context, string) ([]OrchestratorScopeLease, error)
 	AcquireOrchestratorScopeLease(context.Context, domain.OrchestratorIdentity, string, SessionRuntimeProbe) (OrchestratorLeaseAcquireResult, error)
@@ -125,63 +125,111 @@ func (a *OrchestratorLeaseAuthority) Acquire(ctx context.Context, identity domai
 	if err != nil {
 		return OrchestratorLeaseAcquireResult{}, err
 	}
-	if err := a.Refresh(ctx, identity.ProjectID); err != nil {
-		return OrchestratorLeaseAcquireResult{}, err
-	}
-	result, err := a.store.AcquireOrchestratorScopeLease(ctx, identity, sessionID, probe)
-	if refreshErr := a.Refresh(ctx, identity.ProjectID); refreshErr != nil && err == nil {
-		return OrchestratorLeaseAcquireResult{}, refreshErr
-	}
+	var result OrchestratorLeaseAcquireResult
+	err = a.store.WithOrchestratorScopeTransition(ctx, identity, func(lockCtx context.Context) error {
+		if refreshErr := a.Refresh(lockCtx, identity.ProjectID); refreshErr != nil {
+			return refreshErr
+		}
+		var acquireErr error
+		result, acquireErr = a.store.AcquireOrchestratorScopeLease(lockCtx, identity, sessionID, probe)
+		if refreshErr := a.Refresh(lockCtx, identity.ProjectID); refreshErr != nil && acquireErr == nil {
+			return refreshErr
+		}
+		return acquireErr
+	})
 	return result, err
 }
 
 func (a *OrchestratorLeaseAuthority) SetLifecycle(ctx context.Context, identity domain.OrchestratorIdentity, sessionID string, lifecycle domain.OrchestratorLifecycle) (OrchestratorScopeLease, error) {
-	lease, err := a.store.SetOrchestratorScopeLeaseLifecycle(ctx, identity, sessionID, lifecycle)
-	if refreshErr := a.Refresh(ctx, identity.ProjectID); refreshErr != nil && err == nil {
-		return OrchestratorScopeLease{}, refreshErr
+	identity, err := normalizeOrchestratorIdentity(identity)
+	if err != nil {
+		return OrchestratorScopeLease{}, err
 	}
+	var lease OrchestratorScopeLease
+	err = a.store.WithOrchestratorScopeTransition(ctx, identity, func(lockCtx context.Context) error {
+		var setErr error
+		lease, setErr = a.store.SetOrchestratorScopeLeaseLifecycle(lockCtx, identity, sessionID, lifecycle)
+		if refreshErr := a.Refresh(lockCtx, identity.ProjectID); refreshErr != nil && setErr == nil {
+			return refreshErr
+		}
+		return setErr
+	})
 	return lease, err
 }
 
 func (a *OrchestratorLeaseAuthority) Evaluate(ctx context.Context, identity domain.OrchestratorIdentity, sessionID string, now time.Time, facts domain.OrchestratorLifecycleFacts, policy domain.OrchestratorLifecyclePolicy) (OrchestratorScopeLease, error) {
-	if err := a.Refresh(ctx, identity.ProjectID); err != nil {
+	identity, err := normalizeOrchestratorIdentity(identity)
+	if err != nil {
 		return OrchestratorScopeLease{}, err
 	}
-	lease, err := a.store.EvaluateOrchestratorScopeLease(ctx, identity, sessionID, now, facts, policy)
-	if refreshErr := a.Refresh(ctx, identity.ProjectID); refreshErr != nil && err == nil {
-		return OrchestratorScopeLease{}, refreshErr
-	}
+	var lease OrchestratorScopeLease
+	err = a.store.WithOrchestratorScopeTransition(ctx, identity, func(lockCtx context.Context) error {
+		if refreshErr := a.Refresh(lockCtx, identity.ProjectID); refreshErr != nil {
+			return refreshErr
+		}
+		var evaluateErr error
+		lease, evaluateErr = a.store.EvaluateOrchestratorScopeLease(lockCtx, identity, sessionID, now, facts, policy)
+		if refreshErr := a.Refresh(lockCtx, identity.ProjectID); refreshErr != nil && evaluateErr == nil {
+			return refreshErr
+		}
+		return evaluateErr
+	})
 	return lease, err
 }
 
 func (a *OrchestratorLeaseAuthority) Wake(ctx context.Context, identity domain.OrchestratorIdentity, now time.Time, reason domain.OrchestratorWakeReason, policy domain.OrchestratorLifecyclePolicy) (OrchestratorScopeLease, bool, error) {
-	if err := a.Refresh(ctx, identity.ProjectID); err != nil {
+	identity, err := normalizeOrchestratorIdentity(identity)
+	if err != nil {
 		return OrchestratorScopeLease{}, false, err
 	}
-	lease, changed, err := a.store.WakeOrchestratorScopeLease(ctx, identity, now, reason, policy)
-	if refreshErr := a.Refresh(ctx, identity.ProjectID); refreshErr != nil && err == nil {
-		return OrchestratorScopeLease{}, false, refreshErr
-	}
+	var lease OrchestratorScopeLease
+	var changed bool
+	err = a.store.WithOrchestratorScopeTransition(ctx, identity, func(lockCtx context.Context) error {
+		if refreshErr := a.Refresh(lockCtx, identity.ProjectID); refreshErr != nil {
+			return refreshErr
+		}
+		var wakeErr error
+		lease, changed, wakeErr = a.store.WakeOrchestratorScopeLease(lockCtx, identity, now, reason, policy)
+		if refreshErr := a.Refresh(lockCtx, identity.ProjectID); refreshErr != nil && wakeErr == nil {
+			return refreshErr
+		}
+		return wakeErr
+	})
 	return lease, changed, err
 }
 
 func (a *OrchestratorLeaseAuthority) AdvanceCursor(ctx context.Context, identity domain.OrchestratorIdentity, cursor int64) (OrchestratorScopeLease, error) {
-	if err := a.Refresh(ctx, identity.ProjectID); err != nil {
+	identity, err := normalizeOrchestratorIdentity(identity)
+	if err != nil {
 		return OrchestratorScopeLease{}, err
 	}
-	lease, err := a.store.AdvanceOrchestratorScopeCursor(ctx, identity, cursor)
-	if refreshErr := a.Refresh(ctx, identity.ProjectID); refreshErr != nil && err == nil {
-		return OrchestratorScopeLease{}, refreshErr
-	}
+	var lease OrchestratorScopeLease
+	err = a.store.WithOrchestratorScopeTransition(ctx, identity, func(lockCtx context.Context) error {
+		if refreshErr := a.Refresh(lockCtx, identity.ProjectID); refreshErr != nil {
+			return refreshErr
+		}
+		var advanceErr error
+		lease, advanceErr = a.store.AdvanceOrchestratorScopeCursor(lockCtx, identity, cursor)
+		if refreshErr := a.Refresh(lockCtx, identity.ProjectID); refreshErr != nil && advanceErr == nil {
+			return refreshErr
+		}
+		return advanceErr
+	})
 	return lease, err
 }
 
 func (a *OrchestratorLeaseAuthority) Release(ctx context.Context, identity domain.OrchestratorIdentity, sessionID string) error {
-	err := a.store.ReleaseOrchestratorScopeLease(ctx, identity, sessionID)
-	if refreshErr := a.Refresh(ctx, identity.ProjectID); refreshErr != nil && err == nil {
-		return refreshErr
+	identity, err := normalizeOrchestratorIdentity(identity)
+	if err != nil {
+		return err
 	}
-	return err
+	return a.store.WithOrchestratorScopeTransition(ctx, identity, func(lockCtx context.Context) error {
+		releaseErr := a.store.ReleaseOrchestratorScopeLease(lockCtx, identity, sessionID)
+		if refreshErr := a.Refresh(lockCtx, identity.ProjectID); refreshErr != nil && releaseErr == nil {
+			return refreshErr
+		}
+		return releaseErr
+	})
 }
 
 func orchestratorScopeCacheKey(identity domain.OrchestratorIdentity) string {
@@ -247,7 +295,7 @@ func (s *RuntimeStateStore) AcquireOrchestratorScopeLease(ctx context.Context, i
 	if probe == nil {
 		return result, fmt.Errorf("acquire orchestrator scope lease: runtime probe is required")
 	}
-	err = sqliteutil.WithWriteLock(s.dbPath, func() error {
+	err = s.withWriteLock(ctx, func() error {
 		existing, found, loadErr := s.GetOrchestratorScopeLease(ctx, identity)
 		if loadErr != nil {
 			return loadErr
@@ -295,7 +343,7 @@ func (s *RuntimeStateStore) SetOrchestratorScopeLeaseLifecycle(ctx context.Conte
 	if err != nil {
 		return lease, err
 	}
-	err = sqliteutil.WithWriteLock(s.dbPath, func() error {
+	err = s.withWriteLock(ctx, func() error {
 		current, found, loadErr := s.GetOrchestratorScopeLease(ctx, identity)
 		if loadErr != nil {
 			return loadErr
@@ -322,7 +370,7 @@ func (s *RuntimeStateStore) EvaluateOrchestratorScopeLease(ctx context.Context, 
 		return lease, err
 	}
 	now = now.UTC()
-	err = sqliteutil.WithWriteLock(s.dbPath, func() error {
+	err = s.withWriteLock(ctx, func() error {
 		current, found, loadErr := s.GetOrchestratorScopeLease(ctx, identity)
 		if loadErr != nil {
 			return loadErr
@@ -362,7 +410,7 @@ func (s *RuntimeStateStore) WakeOrchestratorScopeLease(ctx context.Context, iden
 		return lease, false, err
 	}
 	now = now.UTC()
-	err = sqliteutil.WithWriteLock(s.dbPath, func() error {
+	err = s.withWriteLock(ctx, func() error {
 		current, found, loadErr := s.GetOrchestratorScopeLease(ctx, identity)
 		if loadErr != nil {
 			return loadErr
@@ -393,7 +441,7 @@ func (s *RuntimeStateStore) AdvanceOrchestratorScopeCursor(ctx context.Context, 
 	if cursor < 0 {
 		return lease, fmt.Errorf("orchestrator cursor cannot be negative")
 	}
-	err = sqliteutil.WithWriteLock(s.dbPath, func() error {
+	err = s.withWriteLock(ctx, func() error {
 		current, found, loadErr := s.GetOrchestratorScopeLease(ctx, identity)
 		if loadErr != nil {
 			return loadErr
@@ -419,7 +467,7 @@ func (s *RuntimeStateStore) ReleaseOrchestratorScopeLease(ctx context.Context, i
 	if err != nil {
 		return err
 	}
-	return sqliteutil.WithWriteLock(s.dbPath, func() error {
+	return s.withWriteLock(ctx, func() error {
 		current, found, loadErr := s.GetOrchestratorScopeLease(ctx, identity)
 		if loadErr != nil {
 			return loadErr

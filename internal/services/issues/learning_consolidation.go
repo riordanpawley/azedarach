@@ -50,9 +50,11 @@ func (c *Client) SuggestLearningConsolidations(ctx context.Context, projectID st
 	}
 	var out []LearningSuggestion
 	err := c.retrySQLiteBusy(ctx, func() error {
-		var err error
-		out, err = c.suggestLearningConsolidationsOnce(ctx, projectID)
-		return err
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			var err error
+			out, err = c.suggestLearningConsolidationsOnce(lockCtx, projectID)
+			return err
+		})
 	})
 	if err == nil {
 		c.maybeMaintainSQLiteWAL(ctx)
@@ -271,6 +273,16 @@ func (c *Client) ConfirmLearningConsolidation(ctx context.Context, p ConfirmLear
 }
 
 func (c *Client) resolveLearningSuggestion(ctx context.Context, id, canonical, note string, confirm bool, summary ...string) (LearningSuggestion, error) {
+	var out LearningSuggestion
+	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		var err error
+		out, err = c.resolveLearningSuggestionLocked(lockCtx, id, canonical, note, confirm, summary...)
+		return err
+	})
+	return out, err
+}
+
+func (c *Client) resolveLearningSuggestionLocked(ctx context.Context, id, canonical, note string, confirm bool, summary ...string) (LearningSuggestion, error) {
 	id = strings.TrimSpace(id)
 	canonical = strings.TrimSpace(canonical)
 	note = strings.TrimSpace(note)

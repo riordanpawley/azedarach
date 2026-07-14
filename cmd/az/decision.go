@@ -638,7 +638,11 @@ func runDecisionRPC(cfg *config.Config, projectDir, command string, body any, ou
 func decisionRequestRepoDir(projectDir string) (string, error) {
 	projectDir = strings.TrimSpace(projectDir)
 	if projectDir == "" {
-		return "", nil
+		worktreeRoot, err := config.ResolveWorktreeRoot("")
+		if err != nil {
+			return "", fmt.Errorf("resolve decision markdown worktree root: %w", err)
+		}
+		return worktreeRoot, nil
 	}
 	abs, err := filepath.Abs(projectDir)
 	if err != nil {
@@ -914,8 +918,8 @@ func printDecisionUsage() {
 	fmt.Println("  update   Update fields on an existing decision")
 	fmt.Println("  delete   Soft-delete a decision (requires --confirm)")
 	fmt.Println("  revisit  Replace an older decision with a new one (creates the revises link)")
-	fmt.Println("  sync     Write docs/decisions/dec-NNN-<slug>.md from the store (use --check for drift)")
-	fmt.Println("  import   Read docs/decisions/*.md back into the store (use --check to inspect plan; --force to override conflicts)")
+	fmt.Println("  sync     Explicitly reconcile docs/decisions with the store, including renames/deletes (use --check for drift)")
+	fmt.Println("  import   Read docs/decisions/*.md into the store without overwriting conflicts unless --force is used")
 	fmt.Println("  link     Manage decision-to-issue/requirement/decision links")
 	fmt.Println("")
 	fmt.Println("Grammar:")
@@ -934,6 +938,8 @@ func printDecisionUsage() {
 	fmt.Println("  az decision list --issue cgn")
 	fmt.Println("  az decision get --id dec-1 --with-links")
 	fmt.Println("  az decision revisit --id dec-1 --title \"Move to Postgres\" --rationale \"Multi-process write contention; sqlite no longer fits\"")
+	fmt.Println("  az decision import --check && az decision sync --check")
+	fmt.Println("  az decision sync && git add docs/decisions")
 }
 
 func printDecisionLinkUsage() {

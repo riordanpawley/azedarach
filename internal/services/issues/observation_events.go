@@ -10,7 +10,6 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
-	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 const defaultIssueObservationEventLimit = 500
@@ -27,9 +26,25 @@ type IssueObservationEventParams struct {
 }
 
 type IssueObservationEventListOptions struct {
-	Types       []domain.IssueObservationEventType
-	Limit       int
-	NewestFirst bool
+	Types         []domain.IssueObservationEventType
+	Limit         int
+	NewestFirst   bool
+	NewestIDFirst bool
+}
+
+type LatestIssueObservationEventOptions struct {
+	IssueIDs                []string
+	Type                    domain.IssueObservationEventType
+	Source                  string
+	SourceCommands          []string
+	CommandOutcomePairs     []IssueObservationCommandOutcomePair
+	RequiredPayloadTextKeys []string
+	CurrentReviewEpoch      bool
+}
+
+type IssueObservationCommandOutcomePair struct {
+	SourceCommand string
+	Outcomes      []string
 }
 
 // ListProjectIssueObservationEvents returns the durable project event stream
@@ -78,34 +93,32 @@ func (c *Client) AppendIssueObservationEvent(ctx context.Context, issueID string
 	var eventID int64
 	err := c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
-			return sqliteutil.WithWriteLock(c.dbPath, func() error {
-				db, err := c.dbHandle()
-				if err != nil {
-					return err
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				return c.wrapError("append-observation-event", issueID, err)
+			}
+			defer func() {
+				if tx != nil {
+					_ = tx.Rollback()
 				}
-				tx, err := db.BeginTx(ctx, nil)
-				if err != nil {
-					return c.wrapError("append-observation-event", issueID, err)
-				}
-				defer func() {
-					if tx != nil {
-						_ = tx.Rollback()
-					}
-				}()
-				if err := c.requireIssueExists(ctx, tx, issueID, "append-observation-event"); err != nil {
-					return err
-				}
-				id, err := c.insertIssueObservationEvent(ctx, tx, issueID, params)
-				if err != nil {
-					return c.wrapError("append-observation-event", issueID, err)
-				}
-				if err := tx.Commit(); err != nil {
-					return c.wrapError("append-observation-event", issueID, err)
-				}
-				tx = nil
-				eventID = id
-				return nil
-			})
+			}()
+			if err := c.requireIssueExists(ctx, tx, issueID, "append-observation-event"); err != nil {
+				return err
+			}
+			id, err := c.insertIssueObservationEvent(ctx, tx, issueID, params)
+			if err != nil {
+				return c.wrapError("append-observation-event", issueID, err)
+			}
+			if err := tx.Commit(); err != nil {
+				return c.wrapError("append-observation-event", issueID, err)
+			}
+			tx = nil
+			eventID = id
+			return nil
 		})
 	})
 	if err != nil {
@@ -157,7 +170,9 @@ func (c *Client) ListIssueObservationEvents(ctx context.Context, issueID string,
 	}
 	args = append(args, limit)
 	orderBy := "id ASC"
-	if opts.NewestFirst {
+	if opts.NewestIDFirst {
+		orderBy = "id DESC"
+	} else if opts.NewestFirst {
 		orderBy = "observed_at DESC, id DESC"
 	}
 	rows, err := db.QueryContext(ctx, `
@@ -181,6 +196,187 @@ func (c *Client) ListIssueObservationEvents(ctx context.Context, issueID string,
 	}
 	if err := rows.Err(); err != nil {
 		return nil, c.wrapError("list-observation-events", issueID, err)
+	}
+	return events, nil
+}
+
+// ListIssueReviewReadyObservationEvents returns the complete typed event set
+// used to reduce review-ready publications and acceptance evidence. It is
+// intentionally uncapped: callers require one authoritative decision across
+// the issue's full durable history.
+func (c *Client) ListIssueReviewReadyObservationEvents(ctx context.Context, issueID string) ([]domain.IssueObservationEvent, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return nil, c.wrapError("list-review-ready-observation-events", "", errors.New("issue id is required"))
+	}
+	exists, err := c.issueIDExistsIncludingDeleted(ctx, db, issueID)
+	if err != nil {
+		return nil, c.wrapError("list-review-ready-observation-events", issueID, err)
+	}
+	if !exists {
+		return nil, c.wrapError("list-review-ready-observation-events", issueID, domain.ErrNotFound)
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+		FROM issue_observation_events
+		WHERE issue_id = ?
+		  AND (
+			event_type = ?
+			OR LOWER(REPLACE(REPLACE(TRIM(event_type), '_', '.'), '-', '.')) IN (?, ?, ?, ?)
+		  )
+		ORDER BY observed_at ASC, id ASC
+	`, issueID,
+		string(domain.IssueEventIssueStatusChanged),
+		string(domain.IssueEventEvidenceSubmitted),
+		"worker.integration.ready",
+		"worker.ready",
+		"worker.complete",
+	)
+	if err != nil {
+		return nil, c.wrapError("list-review-ready-observation-events", issueID, err)
+	}
+	defer rows.Close()
+	events := make([]domain.IssueObservationEvent, 0, 16)
+	for rows.Next() {
+		event, scanErr := scanIssueObservationEvent(rows)
+		if scanErr != nil {
+			return nil, c.wrapError("list-review-ready-observation-events", issueID, scanErr)
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, c.wrapError("list-review-ready-observation-events", issueID, err)
+	}
+	return events, nil
+}
+
+// ListLatestIssueObservationEventsByIssue returns at most one matching event
+// per issue in one SQLite query. Callers retain authority for interpreting the
+// candidate; filters only keep the persistent read bounded and indexable.
+func (c *Client) ListLatestIssueObservationEventsByIssue(ctx context.Context, opts LatestIssueObservationEventOptions) (map[string]domain.IssueObservationEvent, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	eventType := strings.TrimSpace(string(opts.Type))
+	if eventType == "" {
+		return nil, c.wrapError("list-latest-observation-events-by-issue", "", errors.New("event type is required"))
+	}
+	issueIDs := make([]string, 0, len(opts.IssueIDs))
+	seenIssueIDs := make(map[string]struct{}, len(opts.IssueIDs))
+	for _, issueID := range opts.IssueIDs {
+		issueID = strings.TrimSpace(issueID)
+		if issueID == "" {
+			continue
+		}
+		if _, exists := seenIssueIDs[issueID]; exists {
+			continue
+		}
+		seenIssueIDs[issueID] = struct{}{}
+		issueIDs = append(issueIDs, issueID)
+	}
+	if len(issueIDs) == 0 {
+		return map[string]domain.IssueObservationEvent{}, nil
+	}
+	issueIDsJSON, err := json.Marshal(issueIDs)
+	if err != nil {
+		return nil, c.wrapError("list-latest-observation-events-by-issue", "", err)
+	}
+	clauses := []string{"event_type = ?"}
+	args := []any{string(issueIDsJSON), eventType}
+	if source := strings.TrimSpace(opts.Source); source != "" {
+		clauses = append(clauses, "TRIM(source) = ?")
+		args = append(args, source)
+	}
+	commands := make([]string, 0, len(opts.SourceCommands))
+	for _, command := range opts.SourceCommands {
+		if command = strings.TrimSpace(command); command != "" {
+			commands = append(commands, command)
+		}
+	}
+	if len(commands) > 0 {
+		clauses = append(clauses, "TRIM(source_command) IN ("+strings.TrimSuffix(strings.Repeat("?,", len(commands)), ",")+")")
+		for _, command := range commands {
+			args = append(args, command)
+		}
+	}
+	pairClauses := make([]string, 0, len(opts.CommandOutcomePairs))
+	for _, pair := range opts.CommandOutcomePairs {
+		command := strings.TrimSpace(pair.SourceCommand)
+		outcomes := make([]string, 0, len(pair.Outcomes))
+		for _, outcome := range pair.Outcomes {
+			if outcome = strings.TrimSpace(outcome); outcome != "" {
+				outcomes = append(outcomes, outcome)
+			}
+		}
+		if command == "" || len(outcomes) == 0 {
+			continue
+		}
+		pairClauses = append(pairClauses, "(TRIM(events.source_command) = ? AND TRIM(CAST(json_extract(events.payload_json, '$.outcome') AS TEXT)) IN ("+strings.TrimSuffix(strings.Repeat("?,", len(outcomes)), ",")+"))")
+		args = append(args, command)
+		for _, outcome := range outcomes {
+			args = append(args, outcome)
+		}
+	}
+	if len(pairClauses) > 0 {
+		clauses = append(clauses, "("+strings.Join(pairClauses, " OR ")+")")
+	}
+	for _, key := range opts.RequiredPayloadTextKeys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		path := `$."` + strings.ReplaceAll(key, `"`, `\"`) + `"`
+		clauses = append(clauses, "json_type(payload_json, ?) = 'text' AND NULLIF(TRIM(CAST(json_extract(payload_json, ?) AS TEXT)), '') IS NOT NULL")
+		args = append(args, path, path)
+	}
+	if opts.CurrentReviewEpoch {
+		clauses = append(clauses, `NOT EXISTS (
+			SELECT 1
+			FROM issue_observation_events AS epoch
+			WHERE epoch.issue_id = events.issue_id
+			  AND epoch.id > events.id
+			  AND epoch.event_type = ?
+			  AND TRIM(epoch.source) = 'issue-store'
+			  AND LOWER(TRIM(CAST(json_extract(epoch.payload_json, '$.to_status') AS TEXT))) = ?
+		)`)
+		args = append(args, string(domain.IssueEventIssueStatusChanged), string(domain.StatusInReview))
+	}
+	rows, err := db.QueryContext(ctx, `
+		WITH candidate_issues(issue_id) AS (
+			SELECT DISTINCT TRIM(CAST(value AS TEXT))
+			FROM json_each(?)
+			WHERE type = 'text' AND TRIM(CAST(value AS TEXT)) <> ''
+		), ranked AS (
+			SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json,
+				ROW_NUMBER() OVER (PARTITION BY issue_id ORDER BY id DESC) AS event_rank
+			FROM issue_observation_events AS events
+			JOIN candidate_issues USING (issue_id)
+			WHERE `+strings.Join(clauses, " AND ")+`
+		)
+		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+		FROM ranked
+		WHERE event_rank = 1
+		ORDER BY issue_id ASC
+	`, args...)
+	if err != nil {
+		return nil, c.wrapError("list-latest-observation-events-by-issue", "", err)
+	}
+	defer rows.Close()
+	events := make(map[string]domain.IssueObservationEvent)
+	for rows.Next() {
+		event, scanErr := scanIssueObservationEvent(rows)
+		if scanErr != nil {
+			return nil, c.wrapError("list-latest-observation-events-by-issue", "", scanErr)
+		}
+		events[event.IssueID.String()] = event
+	}
+	if err := rows.Err(); err != nil {
+		return nil, c.wrapError("list-latest-observation-events-by-issue", "", err)
 	}
 	return events, nil
 }
@@ -209,7 +405,7 @@ func (c *Client) InvestigationAcceptances(ctx context.Context, tasks []domain.Ta
 	if len(ids) == 0 {
 		return map[string]domain.InvestigationAcceptance{}, nil
 	}
-	args := make([]any, 0, len(ids)+3)
+	args := make([]any, 0, len(ids)+4)
 	for _, id := range ids {
 		args = append(args, id)
 	}
@@ -217,12 +413,13 @@ func (c *Client) InvestigationAcceptances(ctx context.Context, tasks []domain.Ta
 		string(domain.IssueEventInvestigationDisposition),
 		string(domain.IssueEventReviewCompleted),
 		string(domain.IssueEventHumanInputProvided),
+		string(domain.IssueEventIssueStatusChanged),
 	)
 	rows, err := db.QueryContext(ctx, `
 		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
 		FROM issue_observation_events
 		WHERE issue_id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")+`)
-		  AND event_type IN (?,?,?)
+		  AND event_type IN (?,?,?,?)
 		ORDER BY id ASC
 	`, args...)
 	if err != nil {

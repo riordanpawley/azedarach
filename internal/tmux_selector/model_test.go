@@ -2939,7 +2939,7 @@ func TestModelHidesEntriesWithoutTmuxSession(t *testing.T) {
 	}
 }
 
-func TestModelXKillsSelectedSessionAndRefreshes(t *testing.T) {
+func TestModelXStopsSelectedSessionAndRefreshes(t *testing.T) {
 	entries := []InventoryEntry{
 		{SessionID: "az-one", IssueID: "one", TaskTitle: "One", HasTmuxSession: true},
 		{SessionID: "az-two", IssueID: "two", TaskTitle: "Two", HasTmuxSession: true},
@@ -2978,8 +2978,8 @@ func TestModelXKillsSelectedSessionAndRefreshes(t *testing.T) {
 	if !model.loading {
 		t.Fatalf("model should re-enter loading state after kill, got loading=%v", model.loading)
 	}
-	if !strings.Contains(model.status, "killed az-two") {
-		t.Fatalf("status = %q, want killed az-two announcement", model.status)
+	if !strings.Contains(model.status, "stopped az-two") {
+		t.Fatalf("status = %q, want stopped az-two announcement", model.status)
 	}
 }
 
@@ -3033,12 +3033,12 @@ func TestModelXSurfacesKillerError(t *testing.T) {
 	if refresh != nil {
 		t.Fatalf("error path should not trigger refresh, got cmd=%v", refresh)
 	}
-	if !strings.Contains(model.status, "kill az-one failed") {
+	if !strings.Contains(model.status, "stop az-one failed") {
 		t.Fatalf("status = %q, want failure note", model.status)
 	}
 }
 
-func TestModelFooterAdvertisesKillBinding(t *testing.T) {
+func TestModelFooterAdvertisesStopBinding(t *testing.T) {
 	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: []InventoryEntry{{SessionID: "az-one", IssueID: "one", TaskTitle: "One", HasTmuxSession: true}}}})
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
 	model = updated.(Model)
@@ -3047,8 +3047,8 @@ func TestModelFooterAdvertisesKillBinding(t *testing.T) {
 	if cmd != nil {
 		t.Fatalf("snapshot update returned command")
 	}
-	if got := ansi.Strip(model.View()); !strings.Contains(got, "x: kill") {
-		t.Fatalf("view missing kill binding hint:\n%s", got)
+	if got := ansi.Strip(model.View()); !strings.Contains(got, "x: stop") {
+		t.Fatalf("view missing stop binding hint:\n%s", got)
 	}
 }
 

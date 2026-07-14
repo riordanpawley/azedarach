@@ -133,6 +133,53 @@ func ParseWorkerEvidencePacketBody(body string) (WorkerEvidencePacket, WorkerEvi
 	return packet, result
 }
 
+// IsWorkerEvidenceEventType reports whether an issue observation event is a
+// durable worker-evidence submission. The hyphenated spellings are retained
+// for compatibility with workers that recorded mailbox event names directly.
+func IsWorkerEvidenceEventType(eventType IssueObservationEventType) bool {
+	normalized := strings.NewReplacer("_", ".", "-", ".").Replace(strings.ToLower(strings.TrimSpace(string(eventType))))
+	switch normalized {
+	case string(IssueEventEvidenceSubmitted), "worker.integration.ready", "worker.ready", "worker.complete":
+		return true
+	default:
+		return false
+	}
+}
+
+// ParseWorkerEvidenceIssueEvent applies the canonical worker_evidence.v1
+// parser to durable issue-event storage. It accepts both the direct canonical
+// payload and the legacy {"worker_evidence": {...}} envelope.
+func ParseWorkerEvidenceIssueEvent(event IssueObservationEvent) (WorkerEvidencePacket, WorkerEvidenceParseResult) {
+	result := WorkerEvidenceParseResult{Storage: "issue_event_payload_json_v1"}
+	if !IsWorkerEvidenceEventType(event.Type) {
+		return WorkerEvidencePacket{}, result
+	}
+	body, err := json.Marshal(event.Payload)
+	if err != nil {
+		result.Found = true
+		result.Invalid = []string{fmt.Sprintf("marshal issue event payload: %v", err)}
+		result.Diagnostics = []WorkerEvidenceDiagnostic{{Path: "", Message: result.Invalid[0]}}
+		return WorkerEvidencePacket{}, result
+	}
+	packet, result := ParseWorkerEvidencePacketBody(string(body))
+	result.Storage = "issue_event_payload_json_v1"
+	return packet, result
+}
+
+// WorkerEvidencePacketPayload returns the canonical direct issue-event storage
+// shape for a parsed packet.
+func WorkerEvidencePacketPayload(packet WorkerEvidencePacket) (map[string]any, error) {
+	body, err := json.Marshal(packet)
+	if err != nil {
+		return nil, fmt.Errorf("marshal worker evidence packet: %w", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode worker evidence payload: %w", err)
+	}
+	return payload, nil
+}
+
 func ValidateWorkerEvidencePacketBody(body string, fix bool) WorkerEvidenceValidationResult {
 	packet, parsed := ParseWorkerEvidencePacketBody(body)
 	result := WorkerEvidenceValidationResult{

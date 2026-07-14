@@ -16,6 +16,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/sqlitemigration"
+	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 //go:embed migrations/*.sql
@@ -421,15 +422,15 @@ func migrateIssueSessionLogicalIdentity(ctx context.Context, tx *sql.Tx) error {
 }
 
 const (
-	migrationArtifactAuthority        sqlitemigration.Authority = "project.issues"
-	issueStateModelV2MigrationID                                = "0029_issue_state_model_v2"
-	issueStateModelVersionMetaKey                               = "issue:state_model_version"
-	issueStateModelV2CutoverMarkerKey                           = "issue:state_model_v2_cutover"
-	issueStateModelV2Version                                    = "2"
-	boardViewsMigrationID                                       = "0031_board_views"
-	humanAuthorityProjectionMigrationID = "0047_human_authority_projection_revision"
-	contextualLearningMigrationID                               = "0039_contextual_learning_activation"
-	legacyContextualLearningMigration                           = "0038_contextual_learning_activation"
+	migrationArtifactAuthority          sqlitemigration.Authority = "project.issues"
+	issueStateModelV2MigrationID                                  = "0029_issue_state_model_v2"
+	issueStateModelVersionMetaKey                                 = "issue:state_model_version"
+	issueStateModelV2CutoverMarkerKey                             = "issue:state_model_v2_cutover"
+	issueStateModelV2Version                                      = "2"
+	boardViewsMigrationID                                         = "0031_board_views"
+	humanAuthorityProjectionMigrationID                           = "0047_human_authority_projection_revision"
+	contextualLearningMigrationID                                 = "0039_contextual_learning_activation"
+	legacyContextualLearningMigration                             = "0038_contextual_learning_activation"
 )
 
 type issueStateModelV2CutoverMarker struct {
@@ -555,7 +556,11 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := repairIssueIDAllocationSchema(ctx, db); err != nil {
 		return fmt.Errorf("repair issue id allocation schema: %w", err)
 	}
-	if err := c.seedBuiltInBoardViews(ctx, db, "default"); err != nil {
+	if err := c.retrySQLiteBusy(ctx, func() error {
+		return sqliteutil.WithWriteLock(c.dbPath, func() error {
+			return c.seedBuiltInBoardViews(ctx, db, "default")
+		})
+	}); err != nil {
 		return fmt.Errorf("seed built-in board views: %w", err)
 	}
 	return sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifactAuthority, migrationArtifacts)

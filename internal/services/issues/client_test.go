@@ -32,13 +32,14 @@ func TestClientSQLiteBusyPolicyDefaultsAndOverrides(t *testing.T) {
 	defaultClient := NewClientAtPath(filepath.Join(t.TempDir(), "default.db"), nil)
 	t.Cleanup(func() { require.NoError(t, defaultClient.CloseDB()) })
 	assert.Equal(t, 5*time.Second, defaultClient.sqliteBusyTimeout)
+	assert.Equal(t, 5*time.Second, defaultClient.sqliteBusyRetryBudget)
 	assert.Equal(t, 100*time.Millisecond, defaultClient.sqliteBusyRetryDelay)
 	require.NotNil(t, defaultClient.sqliteBusyWait)
 	defaultDB, err := defaultClient.dbHandle()
 	require.NoError(t, err)
 	var defaultBusyTimeout int
 	require.NoError(t, defaultDB.QueryRow(`PRAGMA busy_timeout`).Scan(&defaultBusyTimeout))
-	assert.Equal(t, 5000, defaultBusyTimeout)
+	assert.Equal(t, 100, defaultBusyTimeout)
 
 	configured := NewClientAtPath(
 		filepath.Join(t.TempDir(), "configured.db"),
@@ -47,6 +48,7 @@ func TestClientSQLiteBusyPolicyDefaultsAndOverrides(t *testing.T) {
 	)
 	t.Cleanup(func() { require.NoError(t, configured.CloseDB()) })
 	assert.Equal(t, 2*time.Millisecond, configured.sqliteBusyTimeout)
+	assert.Equal(t, 2*time.Millisecond, configured.sqliteBusyRetryBudget)
 	assert.Equal(t, 3*time.Millisecond, configured.sqliteBusyRetryDelay)
 	configuredDB, err := configured.dbHandle()
 	require.NoError(t, err)
@@ -2325,6 +2327,149 @@ func TestClient_UpdateWithRuntimeReturnsChangedTask(t *testing.T) {
 	assert.Equal(t, "Runtime replacement notes", task.Notes)
 }
 
+func TestClientCloseWithRuntimeAtomicallyReleasesExecutionLeaseBeforeTerminalWrite(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-close-runtime"
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Atomically close leased issue",
+		Type:     domain.TypeBug,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	require.NoError(t, err)
+	_, err = client.ClaimOwnershipWithRuntime(ctx, projectID, taskID, OwnershipClaimParams{
+		OwnerID:   "worker-a",
+		OwnerKind: "agent",
+		Purpose:   domain.CoordinationLeaseExecution,
+	})
+	require.NoError(t, err)
+
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `CREATE TRIGGER fail_terminal_close
+		BEFORE UPDATE ON issues
+		WHEN NEW.lifecycle_state = 'closed'
+		BEGIN
+			SELECT RAISE(ABORT, 'injected terminal status write failure');
+		END`)
+	require.NoError(t, err)
+
+	_, err = client.CloseWithRuntime(ctx, projectID, taskID, domain.StatusDone)
+	require.ErrorContains(t, err, "injected terminal status write failure")
+	afterFailure, err := client.GetWithRuntime(ctx, projectID, taskID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusInReview, afterFailure.Status)
+	require.NotNil(t, afterFailure.Ownership, "failed terminal transaction must roll back execution lease release")
+	assert.Equal(t, "worker-a", afterFailure.Ownership.OwnerID)
+
+	_, err = db.ExecContext(ctx, `DROP TRIGGER fail_terminal_close`)
+	require.NoError(t, err)
+	closed, err := client.CloseWithRuntime(ctx, projectID, taskID, domain.StatusDone)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusDone, closed.Status)
+	assert.Nil(t, closed.Ownership)
+	assert.Empty(t, closed.CoordinationLeases)
+
+	var releaseEventID, statusEventID int64
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT id FROM issue_observation_events
+		WHERE issue_id = ? AND event_type = ? AND json_extract(payload_json, '$.reason') = 'terminal_close'`,
+		taskID, domain.IssueEventIssueOwnershipChanged).Scan(&releaseEventID))
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT MAX(id) FROM issue_observation_events
+		WHERE issue_id = ? AND event_type = ?`, taskID, domain.IssueEventIssueStatusChanged).Scan(&statusEventID))
+	assert.Less(t, releaseEventID, statusEventID, "lease release event must precede terminal status event")
+}
+
+func TestClientUpdateDetailsReopensAtomicallyAndIdempotently(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-reopen-runtime"
+
+	taskID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Reopen terminal issue",
+		Type:     domain.TypeBug,
+		Priority: domain.P1,
+		Status:   domain.StatusInReview,
+	})
+	require.NoError(t, err)
+	_, err = client.ClaimOwnershipWithRuntime(ctx, projectID, taskID, OwnershipClaimParams{
+		OwnerID:   "worker-a",
+		OwnerKind: "agent",
+		Purpose:   domain.CoordinationLeaseExecution,
+	})
+	require.NoError(t, err)
+	closed, err := client.CloseWithRuntime(ctx, projectID, taskID, domain.StatusDone)
+	require.NoError(t, err)
+	assert.Nil(t, closed.Ownership)
+	assert.Empty(t, closed.CoordinationLeases)
+
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	var closedAt sql.NullString
+	var closedOutcome, visibility string
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT closed_at, closed_outcome, visibility FROM issues WHERE id = ?`, taskID).Scan(&closedAt, &closedOutcome, &visibility))
+	require.True(t, closedAt.Valid)
+	assert.Equal(t, string(domain.IssueCloseCompleted), closedOutcome)
+	assert.Equal(t, string(domain.IssueVisibilityLive), visibility)
+
+	_, err = db.ExecContext(ctx, `CREATE TRIGGER fail_reopen
+		BEFORE INSERT ON issue_observation_events
+		WHEN NEW.event_type = 'issue.status_changed'
+			AND json_extract(NEW.payload_json, '$.from_status') = 'closed'
+			AND json_extract(NEW.payload_json, '$.to_status') = 'open'
+		BEGIN
+			SELECT RAISE(ABORT, 'injected reopen failure');
+		END`)
+	require.NoError(t, err)
+	openLifecycle := domain.IssueWorkflowOpen
+	update := UpdateTaskParams{
+		Title:     "Reopen terminal issue",
+		Type:      domain.TypeBug,
+		Priority:  domain.P1,
+		Lifecycle: &openLifecycle,
+	}
+	require.ErrorContains(t, client.UpdateDetails(ctx, taskID, update), "injected reopen failure")
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT closed_at, closed_outcome FROM issues WHERE id = ?`, taskID).Scan(&closedAt, &closedOutcome))
+	require.True(t, closedAt.Valid, "failed reopen must preserve terminal timestamp")
+	assert.Equal(t, string(domain.IssueCloseCompleted), closedOutcome)
+	var reopenEvents int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_observation_events
+		WHERE issue_id = ? AND event_type = ?
+		AND json_extract(payload_json, '$.from_status') = ?
+		AND json_extract(payload_json, '$.to_status') = ?`,
+		taskID, domain.IssueEventIssueStatusChanged, domain.StatusDone, domain.StatusOpen).Scan(&reopenEvents))
+	assert.Zero(t, reopenEvents, "failed reopen must roll back lifecycle history")
+
+	_, err = db.ExecContext(ctx, `DROP TRIGGER fail_reopen`)
+	require.NoError(t, err)
+	reopened, err := client.UpdateDetailsWithRuntime(ctx, projectID, taskID, update)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusOpen, reopened.Status)
+	assert.Equal(t, domain.IssueWorkflowOpen, reopened.State.Workflow())
+	assert.Nil(t, reopened.Ownership, "reopen must not recreate terminally released ownership")
+	assert.Empty(t, reopened.CoordinationLeases)
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT closed_at, closed_outcome FROM issues WHERE id = ?`, taskID).Scan(&closedAt, &closedOutcome))
+	assert.False(t, closedAt.Valid)
+	assert.Equal(t, string(domain.IssueCloseNone), closedOutcome)
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_observation_events
+		WHERE issue_id = ? AND event_type = ?
+		AND json_extract(payload_json, '$.from_status') = ?
+		AND json_extract(payload_json, '$.to_status') = ?`,
+		taskID, domain.IssueEventIssueStatusChanged, domain.StatusDone, domain.StatusOpen).Scan(&reopenEvents))
+	assert.Equal(t, 1, reopenEvents)
+
+	require.NoError(t, client.UpdateDetails(ctx, taskID, update), "idempotent reopen retry must succeed")
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_observation_events
+		WHERE issue_id = ? AND event_type = ?
+		AND json_extract(payload_json, '$.from_status') = ?
+		AND json_extract(payload_json, '$.to_status') = ?`,
+		taskID, domain.IssueEventIssueStatusChanged, domain.StatusDone, domain.StatusOpen).Scan(&reopenEvents))
+	assert.Equal(t, 1, reopenEvents, "idempotent retry must not duplicate lifecycle history")
+}
+
 func TestClient_AppendNotes(t *testing.T) {
 	parallelIssueStoreTest(t)
 	ctx := context.Background()
@@ -2552,6 +2697,78 @@ func TestClient_AppendIssueObservationEventRecordsSourceMetadata(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, filtered, 1)
 	assert.Equal(t, event.ID, filtered[0].ID)
+}
+
+func TestClient_ReviewLeaseFenceIsScopedToCurrentReviewRequestEpochAcrossClients(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "issues.db")
+	reviewer := newTestClientAtPath(t, path, slog.Default())
+	competitor := newTestClientAtPath(t, path, slog.Default())
+	t.Cleanup(func() {
+		require.NoError(t, reviewer.CloseDB())
+		require.NoError(t, competitor.CloseDB())
+	})
+	issueID, err := reviewer.Create(ctx, CreateTaskParams{Title: "cross-daemon accepted review", Type: domain.TypeTask, Status: domain.StatusInReview})
+	require.NoError(t, err)
+	_, err = competitor.GetWithRuntime(ctx, "project", issueID)
+	require.NoError(t, err)
+	_, err = reviewer.ClaimOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer-a", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview})
+	require.NoError(t, err)
+	_, err = reviewer.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{
+		Type:          domain.IssueEventReviewCompleted,
+		Source:        "daemon-orchestration",
+		SourceCommand: "review-accept",
+		Payload:       map[string]any{"outcome": "accepted", "actor_id": "reviewer-a"},
+	})
+	require.NoError(t, err)
+	_, err = reviewer.ReleaseOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer-a", Purpose: domain.CoordinationLeaseReview})
+	require.NoError(t, err)
+
+	_, err = competitor.ClaimOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer-b", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview})
+	require.ErrorIs(t, err, domain.ErrConflict)
+	assert.Contains(t, err.Error(), "durable accepted review is awaiting authoritative close")
+	_, err = reviewer.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{
+		Type:          domain.IssueEventIssueStatusChanged,
+		Source:        "az issue record",
+		SourceCommand: "az issue record",
+		Payload:       map[string]any{"to_status": "in_review"},
+	})
+	require.NoError(t, err)
+	_, err = competitor.ClaimOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer-b", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview})
+	require.ErrorIs(t, err, domain.ErrConflict)
+	assert.Contains(t, err.Error(), "durable accepted review is awaiting authoritative close")
+
+	require.NoError(t, reviewer.Update(ctx, issueID, domain.StatusDone))
+	require.NoError(t, reviewer.Update(ctx, issueID, domain.StatusOpen))
+	require.NoError(t, reviewer.Update(ctx, issueID, domain.StatusInReview))
+	lease, err := competitor.ClaimOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer-b", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview})
+	require.NoError(t, err)
+	require.Len(t, lease.CoordinationLeases, 1)
+	assert.Equal(t, domain.CoordinationLeaseReview, lease.CoordinationLeases[0].Purpose)
+
+	_, err = reviewer.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{
+		Type:          domain.IssueEventReviewCompleted,
+		Source:        "daemon-orchestration",
+		SourceCommand: "review-accept",
+		Payload:       map[string]any{"outcome": "accepted", "actor_id": "reviewer-b"},
+	})
+	require.NoError(t, err)
+	_, err = competitor.ReleaseOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer-b", Purpose: domain.CoordinationLeaseReview})
+	require.NoError(t, err)
+	_, err = reviewer.ClaimOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer-a", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview})
+	require.ErrorIs(t, err, domain.ErrConflict)
+
+	_, err = reviewer.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{
+		Type:          domain.IssueEventReviewCompleted,
+		Source:        "daemon-orchestration",
+		SourceCommand: "review-accept",
+		Payload:       map[string]any{"outcome": "integration_failed", "actor_id": "reviewer-b"},
+	})
+	require.NoError(t, err)
+	lease, err = reviewer.ClaimOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer-a", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview})
+	require.NoError(t, err)
+	require.Len(t, lease.CoordinationLeases, 1)
+	assert.Equal(t, domain.CoordinationLeaseReview, lease.CoordinationLeases[0].Purpose)
 }
 
 func TestClient_ListIssueObservationEventsNewestFirst(t *testing.T) {
@@ -5048,6 +5265,94 @@ func TestClient_CreateRetriesAfterSQLiteBusyTimeout(t *testing.T) {
 	case <-opCtx.Done():
 		t.Fatal("create did not complete after retrying past busy timeout")
 	}
+	var created int
+	require.NoError(t, client.db.QueryRow(`SELECT COUNT(*) FROM issues WHERE title = 'retry-after-busy'`).Scan(&created))
+	assert.Equal(t, 1, created, "transaction retry must not replay the create side effect")
+}
+
+func TestClient_CreateBusyRetryIsBoundedWithoutCallerDeadline(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t, WithSQLiteBusyPolicy(10*time.Millisecond, time.Millisecond))
+	_, err := client.Create(ctx, CreateTaskParams{
+		Title:    "warmup",
+		Type:     domain.TypeTask,
+		Priority: domain.P3,
+	})
+	require.NoError(t, err)
+
+	lockDB, err := sql.Open("sqlite", "file:"+client.dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lockDB.Close() })
+	require.NoError(t, func() error {
+		_, err := lockDB.Exec(`BEGIN IMMEDIATE`)
+		return err
+	}())
+
+	done := make(chan error, 1)
+	go func() {
+		_, createErr := client.Create(ctx, CreateTaskParams{
+			Title:    "bounded-busy-retry",
+			Type:     domain.TypeTask,
+			Priority: domain.P3,
+		})
+		done <- createErr
+	}()
+
+	select {
+	case createErr := <-done:
+		require.Error(t, createErr)
+		assert.True(t, IsSQLiteBusy(createErr), "error = %v, want preserved SQLite busy error", createErr)
+	case <-time.After(250 * time.Millisecond):
+		_, _ = lockDB.Exec(`ROLLBACK`)
+		createErr := <-done
+		t.Fatalf("Create exceeded configured busy policy without caller deadline; eventual error = %v", createErr)
+	}
+	_, _ = lockDB.Exec(`ROLLBACK`)
+}
+
+func TestClient_CreateBusyRetryStopsAtEarlierCallerDeadline(t *testing.T) {
+	client := newTestClient(t, WithSQLiteBusyPolicy(time.Second, 10*time.Millisecond))
+	_, err := client.Create(context.Background(), CreateTaskParams{Title: "warmup", Type: domain.TypeTask, Priority: domain.P3})
+	require.NoError(t, err)
+	lockDB, err := sql.Open("sqlite", "file:"+client.dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lockDB.Close() })
+	_, err = lockDB.Exec(`BEGIN IMMEDIATE`)
+	require.NoError(t, err)
+	defer func() { _, _ = lockDB.Exec(`ROLLBACK`) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err = client.Create(ctx, CreateTaskParams{Title: "cancelled-busy-retry", Type: domain.TypeTask, Priority: domain.P3})
+	require.Error(t, err)
+	assert.True(t, IsSQLiteBusy(err), "error = %v, want preserved SQLite busy error", err)
+	assert.Less(t, time.Since(started), 500*time.Millisecond)
+}
+
+func TestIsSQLiteBusyRecognizesBusySnapshotExtendedCode(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	issueID, err := client.Create(ctx, CreateTaskParams{Title: "snapshot target", Type: domain.TypeTask, Priority: domain.P3})
+	require.NoError(t, err)
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	reader, err := db.Conn(ctx)
+	require.NoError(t, err)
+	defer reader.Close()
+	writer, err := db.Conn(ctx)
+	require.NoError(t, err)
+	defer writer.Close()
+	_, err = reader.ExecContext(ctx, `BEGIN`)
+	require.NoError(t, err)
+	defer func() { _, _ = reader.ExecContext(context.Background(), `ROLLBACK`) }()
+	var title string
+	require.NoError(t, reader.QueryRowContext(ctx, `SELECT title FROM issues WHERE id = ?`, issueID).Scan(&title))
+	_, err = writer.ExecContext(ctx, `UPDATE issues SET notes = 'writer committed' WHERE id = ?`, issueID)
+	require.NoError(t, err)
+	_, err = reader.ExecContext(ctx, `UPDATE issues SET notes = 'stale snapshot' WHERE id = ?`, issueID)
+	require.Error(t, err)
+	assert.True(t, IsSQLiteBusy(err), "error = %v, want SQLITE_BUSY_SNAPSHOT classification", err)
 }
 
 func TestClient_UpdateRetriesAfterSQLiteBusyTimeout(t *testing.T) {
@@ -5398,6 +5703,7 @@ func newBusyRetryTestClient(t *testing.T) (*Client, <-chan struct{}, chan struct
 	releaseRetry := make(chan struct{})
 	client := newTestClient(t,
 		WithSQLiteBusyPolicy(time.Millisecond, time.Hour),
+		withSQLiteBusyRetryBudget(5*time.Second),
 		withSQLiteBusyWait(func(ctx context.Context, _ time.Duration) error {
 			select {
 			case retryStarted <- struct{}{}:

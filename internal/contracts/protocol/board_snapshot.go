@@ -17,7 +17,25 @@ const (
 	CommandBoardViewSave       = "board.view.save"
 	CommandBoardViewDelete     = "board.view.delete"
 	CommandBoardViewSelect     = "board.view.select"
+	EventBoardViewChanged      = "board.view.changed"
 	BoardSnapshotSchemaVersion = 5
+)
+
+// BoardViewChangedEventBody invalidates client board projections after a
+// persisted view definition or selection changes.
+type BoardViewChangedEventBody struct {
+	ProjectID naming.ProjectID `json:"project_id" msgpack:"project_id"`
+	ViewID    string           `json:"view_id" msgpack:"view_id"`
+	Change    BoardViewChange  `json:"change" msgpack:"change"`
+	UpdatedAt time.Time        `json:"updated_at" msgpack:"updated_at"`
+}
+
+type BoardViewChange string
+
+const (
+	BoardViewChangeSaved    BoardViewChange = "saved"
+	BoardViewChangeSelected BoardViewChange = "selected"
+	BoardViewChangeDeleted  BoardViewChange = "deleted"
 )
 
 // BoardSnapshotPayload is the daemon/client contract for board view snapshots.

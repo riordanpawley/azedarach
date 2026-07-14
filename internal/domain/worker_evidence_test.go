@@ -51,6 +51,21 @@ func TestParseWorkerEvidencePacketBodyValidEnvelope(t *testing.T) {
 	}
 }
 
+func TestParseWorkerEvidenceIssueEventAcceptsLegacyNestedIntegrationReady(t *testing.T) {
+	event := IssueObservationEvent{
+		Type: "worker-integration-ready",
+		Payload: map[string]any{"worker_evidence": map[string]any{
+			"schema": WorkerEvidenceSchemaV1, "summary": "Ready", "commands_run": []string{"just test"},
+			"key_assertions": []string{"tests pass"}, "files_changed": []string{"internal/domain/worker_evidence.go"},
+			"review": map[string]any{"status": "clean", "findings": []string{}}, "risks": []string{"none"},
+		}},
+	}
+	packet, result := ParseWorkerEvidenceIssueEvent(event)
+	if !result.Complete || result.Storage != "issue_event_payload_json_v1" || packet.Summary != "Ready" {
+		t.Fatalf("packet=%+v result=%+v, want canonical complete issue-event evidence", packet, result)
+	}
+}
+
 func TestParseWorkerEvidencePacketBodyReportsIncompletePacket(t *testing.T) {
 	body := `{
 		"schema": "worker_evidence.v1",

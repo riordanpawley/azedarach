@@ -42,9 +42,18 @@ requests, and render the returned snapshot. They must not reproduce those
 policies or call git, tmux, issue-store, or session authority directly when a
 daemon command exists.
 
+Non-trivial review inspection is delegated to fresh, read-only ephemeral review
+agents in bounded parallel batches. A delegate receives the issue contract,
+worker evidence, context risk, exact worktree, and diff base, then returns a
+structured clean-or-findings verdict. It cannot mutate code or durable state.
+The owning orchestrator alone validates that packet and executes review return,
+acceptance, integration, and close. Queued reviews remain visible and important,
+but do not globally suppress unrelated runnable starts while managed capacity is
+available.
+
 The supported operator surfaces are:
 
-- `az orchestrator-session start|attach|status [--root <issue>]`
+- `az orchestrator-session start|attach|stop|status [--root <issue>] [--project <project>]`
 - `az orchestrate status|start|watch|complete-check [--root <issue>]`
 - `az interaction list|get|discuss|answer|resolve|withdraw`
 - the TUI project overview for project-level start, attach, status, and health
@@ -55,6 +64,18 @@ The supported operator surfaces are:
 and returns its tmux target. The CLI may then exec the user's terminal attach;
 the daemon handler must never perform a blocking terminal attach.
 
+`stop` is also exact-scope and daemon-authoritative. It first records paused
+lease intent without releasing the durable scope or cursor, then requests agent
+exit, closes the residual shell, and falls back to bounded tmux cleanup. Missing
+and already-stopped scopes are idempotent results. Session-end hooks and hybrid
+reconciliation repair interrupted exits to paused plus stopped runtime intent,
+while status reports stale runtime without mutating lifecycle, so reconcile
+cannot recreate a deliberately stopped orchestrator. A paused lease paired with
+that exact stopped session intent is an operator pause and is excluded from
+automatic lifecycle wake/evaluation until an explicit start records running
+intent again; complete-grace pauses without stopped intent keep their existing
+event-driven wake behavior.
+
 ## End-to-end acceptance matrix
 
 The combined acceptance suite deliberately exercises production authority
@@ -63,10 +84,10 @@ paths rather than transitional adapters:
 | Contract | Executable evidence |
 | --- | --- |
 | Exact-scope singleton start, attach, stale-runtime recovery | `TestProjectOrchestratorSessionStartAttachesExactScopeSingleton` |
-| Bounded project scheduling and stable ordering | `TestOrchestrationCandidateOrderingIsStable`, `TestProjectOrchestratorLoopPrioritizesReviewAndPersistsCursor` |
-| Foreign ownership exclusion and claim races | `TestProjectOrchestrationSnapshotRefreshesCrossProcessOwnership`, `TestProjectStartIntentCannotBypassActionableReview` |
+| Bounded project scheduling and stable ordering | `TestOrchestrationCandidateOrderingIsStable`, `TestProjectOrchestratorLoopPrioritizesReviewAndPersistsCursor`, `TestProjectOrchestratorSnapshotKeepsStartsActionableAlongsideReview`, `TestProjectStartIntentDoesNotGloballyBlockOnActionableReview` |
+| Foreign ownership exclusion and claim races | `TestProjectOrchestrationSnapshotRefreshesCrossProcessOwnership`, `TestProjectReviewQueueRefreshesCrossProcessReviewLease` |
 | Human request, advisor discussion, edited/direct answer, atomic resolution | `TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifecycle`, `TestInteractionStructuredProposalCanBeHumanEditedAndAtomicallyResolved` |
-| Review return and authoritative accepted close | `TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings`, `TestReviewAcceptSurfacesAuthoritativeCloseFailureAndKeepsReviewState` |
+| Review return and authoritative accepted close | `TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings`, `TestReviewAcceptSurfacesAuthoritativeCloseFailureAndKeepsReviewState`, `TestReviewAcceptClosesMultipleInternalReviewsBeforeDependentCompletion` |
 | Quiescent, complete-grace, pause, and wake | `TestProjectOrchestrationEndToEndAcceptanceInventory` executes the production lease authority across quiescence, persisted grace, pause, relevant-change wake, debounced duplicate wake, and grace reset; focused state regressions are `TestOrchestratorLifecycleGracePersistsAcrossRestartAndResets` and `TestOrchestratorWakeIsDurablyDebouncedAcrossStores` |
 | Restart and durable cursor/action replay | `TestProjectOrchestratorActionKeyIsRestartStableAndStateSensitive`, `TestOrchestratorLoopCheckpointSurvivesRestartAndUsesCursorCAS` |
 | Multi-daemon stale-cache/race behavior | `TestOrchestratorLeaseAuthorityRefreshesStaleCacheBeforeAcquire`, `TestProjectOrchestratorLoopMultiDaemonReplayDoesNotDuplicateCheckpointAction`, `TestAdvisorRecoveryCleansRuntimeWhenTerminalRequestWinsCrossDaemonRace` |
@@ -96,7 +117,8 @@ go test ./internal/daemon/state -run 'TestOrchestrator(LifecycleGracePersistsAcr
    attach the project scope. (Use `--root <issue>` for rooted scope.)
    A repeated start must return the same live exact-scope session.
 5. Observe one bounded scheduling/review cycle. Confirm foreign-owned work is
-   excluded, review is prioritized, and Waiting Human work is not started.
+   excluded, review inspection is delegated, unrelated runnable work can start,
+   and Waiting Human work is not started.
 6. Exercise one disposable interaction through discuss and human resolution;
    confirm the accepted answer wakes evaluation without directly starting work.
 7. Leave the singleton running through quiescence and complete-grace. Confirm it

@@ -3025,6 +3025,7 @@ func TestTaskClosePreflightEnforcesInvestigationDispositionAcceptance(t *testing
 	tests := []struct {
 		name       string
 		events     []issues.IssueObservationEventParams
+		newEpoch   bool
 		wantReason string
 	}{
 		{name: "human facing remains gated", wantReason: "human-facing investigation lacks explicit issue-specific findings acceptance"},
@@ -3037,6 +3038,13 @@ func TestTaskClosePreflightEnforcesInvestigationDispositionAcceptance(t *testing
 			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
 			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-return", Payload: map[string]any{"outcome": "returned", "actor_id": "reviewer"}},
 		}, wantReason: "unresolved returned findings"},
+		{name: "new review epoch rejects stale human acceptance", events: []issues.IssueObservationEventParams{
+			{Type: domain.IssueEventHumanInputProvided, Source: "human", Payload: map[string]any{"investigation_findings_accepted": true}},
+		}, newEpoch: true, wantReason: "human-facing investigation lacks explicit issue-specific findings acceptance"},
+		{name: "new review epoch rejects stale internal acceptance", events: []issues.IssueObservationEventParams{
+			{Type: domain.IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}},
+			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
+		}, newEpoch: true, wantReason: "internal review lacks durable accepted reviewer outcome"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3047,6 +3055,14 @@ func TestTaskClosePreflightEnforcesInvestigationDispositionAcceptance(t *testing
 			for _, event := range tt.events {
 				if _, err := issuesClient.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
 					t.Fatalf("append event: %v", err)
+				}
+			}
+			if tt.newEpoch {
+				if err := issuesClient.Update(ctx, issueID, domain.StatusOpen); err != nil {
+					t.Fatalf("reopen investigation: %v", err)
+				}
+				if err := issuesClient.Update(ctx, issueID, domain.StatusInReview); err != nil {
+					t.Fatalf("start new review epoch: %v", err)
 				}
 			}
 			_, err = d.validateTaskClosePreflight(ctx, projectID, issueID, taskClosePreflightOptions{}, protocol.RequestEnvelope{})
@@ -3419,6 +3435,71 @@ func TestTaskCloseCommandUpdatesStatusThroughDaemon(t *testing.T) {
 	}
 	if task.Status != domain.StatusDone {
 		t.Fatalf("task status = %s, want done", task.Status)
+	}
+}
+
+func TestTaskCloseCommandReleasesExecutionLeaseBeforeTerminalStatusWrite(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-task-close-execution-lease"
+	repoDir := t.TempDir()
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:    "Close leased issue",
+		Type:     domain.TypeBug,
+		Priority: domain.P2,
+		Status:   domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := issuesClient.ClaimOwnershipWithRuntime(ctx, projectID, taskID, issues.OwnershipClaimParams{
+		OwnerID:   "worker-a",
+		OwnerKind: "agent",
+		Purpose:   domain.CoordinationLeaseExecution,
+	}); err != nil {
+		t.Fatalf("claim execution lease: %v", err)
+	}
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: slog.Default()},
+		hub: publish.NewHub(16, 8, slog.Default()),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		revision: map[string]uint64{},
+	}
+	body, err := json.Marshal(taskCloseRequest{TaskID: taskID})
+	if err != nil {
+		t.Fatalf("marshal close request: %v", err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-execution-lease",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.close",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskClose error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("handleTaskClose response = %+v, want success without manual lease release", resp)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get closed task: %v", err)
+	}
+	if task.Status != domain.StatusDone {
+		t.Fatalf("task status = %s, want %s", task.Status, domain.StatusDone)
+	}
+	if task.Ownership != nil || len(task.CoordinationLeases) != 0 {
+		t.Fatalf("closed task leases = %+v ownership = %+v, want none", task.CoordinationLeases, task.Ownership)
 	}
 }
 
@@ -4878,7 +4959,7 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	issuesDBPath := filepath.Join(t.TempDir(), "issues.db")
 	issuesClient := newMigratedIssueClientAtPath(t, issuesDBPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
-	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
 
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
@@ -4889,6 +4970,13 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("create task: %v", err)
+	}
+	if _, err := issuesClient.ClaimOwnershipWithRuntime(ctx, projectID, taskID, issues.OwnershipClaimParams{
+		OwnerID:   "worker-a",
+		OwnerKind: "agent",
+		Purpose:   domain.CoordinationLeaseExecution,
+	}); err != nil {
+		t.Fatalf("claim execution lease: %v", err)
 	}
 	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
 	sourceBranch := "riordan/" + taskID + "/integrate"
@@ -4914,6 +5002,10 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 			return "", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
 			return filepath.Join(repoDir, ".git"), nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == sourceBranch+"^{commit}":
+			return "source-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "main^{commit}":
+			return "merged-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
 			return "target-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
@@ -5038,7 +5130,7 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 		t.Fatalf("handleTaskClose error: %v", err)
 	}
 	if !resp.OK {
-		t.Fatalf("handleTaskClose response = %+v", resp)
+		t.Fatalf("handleTaskClose response = %+v error=%q", resp, responseErrorMessage(resp))
 	}
 	if mergeBudget < domain.IntegrationMergeTimeout-time.Second || mergeBudget > domain.IntegrationMergeTimeout {
 		t.Fatalf("daemon close merge budget = %v, want close to %v with cleanup reserve retained", mergeBudget, domain.IntegrationMergeTimeout)
@@ -5047,7 +5139,7 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	if err := json.Unmarshal(resp.Body, &result); err != nil {
 		t.Fatalf("unmarshal close result: %v", err)
 	}
-	if !result.IntegrationRequested || !result.Integrated || result.IntegratedSourceBranch != sourceBranch || result.IntegratedTargetBranch != "main" {
+	if !result.IntegrationRequested || !result.Integrated || !result.WorktreeRemoved || result.IntegratedSourceBranch != sourceBranch || result.IntegratedTargetBranch != "main" {
 		t.Fatalf("close integration result = %+v", result)
 	}
 	hookPhase, ok := taskClosePhaseByName(result.Phases, "githook.commit-msg")
@@ -5066,6 +5158,9 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	}
 	if closed.Status != domain.StatusDone {
 		t.Fatalf("task status = %s, want %s", closed.Status, domain.StatusDone)
+	}
+	if closed.Ownership != nil || len(closed.CoordinationLeases) != 0 {
+		t.Fatalf("closed task leases = %+v ownership = %+v, want none", closed.CoordinationLeases, closed.Ownership)
 	}
 	joined := strings.Join(commands, "\n")
 	for _, want := range []string{
@@ -5139,6 +5234,10 @@ func TestTaskCloseCommandIntegrationIgnoresDuplicateIssueTargetWorktreeFromOther
 			return "", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
 			return filepath.Join(repoDir, ".git"), nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == sourceBranch+"^{commit}":
+			return "source-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "main^{commit}":
+			return "merged-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
 			return "target-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
@@ -5243,7 +5342,7 @@ func TestTaskCloseCommandIntegrationIgnoresDuplicateIssueTargetWorktreeFromOther
 	}
 }
 
-func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *testing.T) {
+func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	projectID := "proj-close-integrate-cleanup-fail-retry"
@@ -5273,6 +5372,11 @@ func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *te
 		t.Fatalf("open projection db: %v", err)
 	}
 	defer projectionDB.Close()
+	lockConn, err := projectionDB.Conn(ctx)
+	if err != nil {
+		t.Fatalf("open cleanup lock connection: %v", err)
+	}
+	defer lockConn.Close()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := projectionDB.ExecContext(ctx, `
 		INSERT INTO daemon_worktree_projections (project_id, issue_id, path, branch, updated_at)
@@ -5292,19 +5396,31 @@ func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *te
 	var scratchWorktree string
 	sourceUniqueReads := 0
 	removeAttempts := 0
+	branchRemoved := false
+	cleanupLocked := false
+	var cancelFirst context.CancelFunc
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		commands = append(commands, strings.Join(args, " "))
 		joined := strings.Join(args, " ")
 		switch {
 		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
-			if removeAttempts >= 2 {
+			if removeAttempts >= 1 {
 				return fmt.Sprintf("worktree %s\nbranch refs/heads/main\n\n", repoDir), nil
 			}
 			return fmt.Sprintf("worktree %s\nbranch refs/heads/main\n\nworktree %s\nbranch refs/heads/%s\n\n", repoDir, sourceWorktree, sourceBranch), nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "status" && removeAttempts > 0:
+			return "", fmt.Errorf("cannot change to %s: no such file or directory", sourceWorktree)
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
 			return "", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
 			return filepath.Join(repoDir, ".git"), nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == sourceBranch+"^{commit}":
+			if branchRemoved {
+				return "", fmt.Errorf("unknown revision %s", sourceBranch)
+			}
+			return "source-sha", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "main^{commit}":
+			return "merged-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
 			return "target-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
@@ -5320,7 +5436,14 @@ func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *te
 			if sourceUniqueReads == 1 {
 				return "1", nil
 			}
-			return "0", nil
+			return "", fmt.Errorf("fatal: ambiguous argument %s: unknown revision", sourceBranch)
+		case len(args) >= 6 && args[0] == "-C" && args[1] == repoDir && args[2] == "branch" && args[3] == "--list":
+			if branchRemoved {
+				return "", nil
+			}
+			return sourceBranch, nil
+		case len(args) >= 7 && args[0] == "-C" && args[1] == repoDir && args[2] == "log":
+			return "merged-sha\x00" + taskID + ": integrated cleanup retry\n", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "rev-list":
 			return "0", nil
 		case len(args) >= 6 && args[0] == "-C" && args[2] == "merge-tree":
@@ -5345,9 +5468,6 @@ func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *te
 				return "", fmt.Errorf("unexpected worktree remove path: %s", removedPath)
 			}
 			removeAttempts++
-			if removeAttempts == 1 {
-				return "fatal: '" + sourceWorktree + "' contains modified or untracked files, use --force to delete it", fmt.Errorf("worktree remove blocked by local changes")
-			}
 			if err := os.RemoveAll(sourceWorktree); err != nil {
 				return "", err
 			}
@@ -5358,14 +5478,22 @@ func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *te
 				return "", fmt.Errorf("unexpected worktree remove path: %s", removedPath)
 			}
 			removeAttempts++
-			if removeAttempts == 1 {
-				return "fatal: '" + sourceWorktree + "' contains modified or untracked files, use --force to delete it", fmt.Errorf("worktree remove blocked by local changes")
-			}
 			if err := os.RemoveAll(sourceWorktree); err != nil {
 				return "", err
 			}
 			return "", nil
 		case len(args) >= 3 && args[0] == "branch" && args[1] == "-D":
+			if branchRemoved {
+				return "", nil
+			}
+			branchRemoved = true
+			if _, err := lockConn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+				return "", fmt.Errorf("lock projection cleanup: %w", err)
+			}
+			cleanupLocked = true
+			if cancelFirst != nil {
+				cancelFirst()
+			}
 			return "", nil
 		default:
 			return "", fmt.Errorf("unexpected git args: %s", joined)
@@ -5417,7 +5545,10 @@ func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *te
 	if err != nil {
 		t.Fatalf("marshal task close request: %v", err)
 	}
-	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+	firstCtx, cancel := context.WithTimeout(ctx, 6*time.Minute)
+	cancelFirst = cancel
+	defer cancelFirst()
+	resp, err := d.handleTaskClose(firstCtx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-close-integrated-cleanup-fail",
 		Kind:            protocol.EnvelopeKindCommand,
@@ -5431,7 +5562,7 @@ func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *te
 	if resp.OK || resp.Error == nil {
 		t.Fatalf("first handleTaskClose response = %+v, want cleanup failure", resp)
 	}
-	for _, want := range []string{"Integration already completed", sourceBranch, "landed on main", "cleanup/status remains", "Next:"} {
+	for _, want := range []string{"phase runtime_projection_repair", "Integration already completed", sourceBranch, "landed on main", "cleanup/status remains", "Next:"} {
 		if !strings.Contains(resp.Error.Message, want) {
 			t.Fatalf("first close error = %q, missing %q", resp.Error.Message, want)
 		}
@@ -5443,6 +5574,28 @@ func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *te
 	if task.Status != domain.StatusInReview {
 		t.Fatalf("task status after failed close = %s, want %s", task.Status, domain.StatusInReview)
 	}
+	receipts, err := issuesClient.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{
+		Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted},
+	})
+	if err != nil {
+		t.Fatalf("list exact integration receipts: %v", err)
+	}
+	if len(receipts) != 1 || observationPayloadString(receipts[0].Payload, "source_oid") != "source-sha" || observationPayloadString(receipts[0].Payload, "target_oid") != "merged-sha" {
+		t.Fatalf("exact integration receipts = %+v, want one source-sha/merged-sha receipt before destructive cleanup", receipts)
+	}
+	if _, err := os.Stat(sourceWorktree); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("source worktree after failed close stat error = %v, want removed path", err)
+	}
+	if !cleanupLocked {
+		t.Fatal("first close did not hold the projection cleanup lock")
+	}
+	if _, err := lockConn.ExecContext(ctx, `ROLLBACK`); err != nil {
+		t.Fatalf("release projection cleanup lock: %v", err)
+	}
+	if err := lockConn.Close(); err != nil {
+		t.Fatalf("close projection cleanup lock connection: %v", err)
+	}
+	cleanupLocked = false
 
 	resp, err = d.handleTaskClose(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
@@ -5482,8 +5635,8 @@ func TestTaskCloseCommandReportsIntegratedCleanupFailureAndRetrySkipsMerge(t *te
 	if sourceUniqueReads != 2 {
 		t.Fatalf("main..source containment reads = %d, want first merge check plus retry no-op check", sourceUniqueReads)
 	}
-	if removeAttempts != 2 {
-		t.Fatalf("worktree remove attempts = %d, want failed first cleanup and successful retry", removeAttempts)
+	if removeAttempts != 1 {
+		t.Fatalf("worktree remove attempts = %d, want physical cleanup only on the first close", removeAttempts)
 	}
 }
 
@@ -5499,6 +5652,159 @@ func TestTaskClosePostIntegrationPhaseErrorTreatsNoChangesAsIntegratedEvidence(t
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, missing %q", err.Error(), want)
 		}
+	}
+}
+
+func TestTaskCloseIntegrationReceiptAcceptsConventionalCommitOnRealTarget(t *testing.T) {
+	repoDir := t.TempDir()
+	runDaemonTestGit(t, repoDir, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repoDir, "config", "user.name", "Azedarach Test")
+	runDaemonTestGit(t, repoDir, "config", "user.email", "azedarach@example.com")
+	if err := os.WriteFile(filepath.Join(repoDir, "tracked.txt"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	runDaemonTestGit(t, repoDir, "add", "tracked.txt")
+	runDaemonTestGit(t, repoDir, "commit", "-q", "-m", "chore: seed")
+	sourceBranch := "riordan/djb/conventional"
+	runDaemonTestGit(t, repoDir, "checkout", "-q", "-b", sourceBranch)
+	if err := os.WriteFile(filepath.Join(repoDir, "tracked.txt"), []byte("integrated\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	runDaemonTestGit(t, repoDir, "commit", "-q", "-am", "fix(djb): tolerate cleanup retry")
+	sourceOID := runDaemonTestGitOutput(t, repoDir, "rev-parse", "HEAD")
+	runDaemonTestGit(t, repoDir, "checkout", "-q", "main")
+	runDaemonTestGit(t, repoDir, "merge", "-q", "--ff-only", sourceBranch)
+	targetOID := runDaemonTestGitOutput(t, repoDir, "rev-parse", "main")
+	runDaemonTestGit(t, repoDir, "branch", "-D", sourceBranch)
+
+	receipt := taskCloseIntegrationReceipt{
+		ProjectID:    "proj-real",
+		SourceBranch: sourceBranch,
+		TargetBranch: "main",
+		SourceOID:    sourceOID,
+		TargetOID:    targetOID,
+	}
+	client := git.NewClient(git.NewExecRunner(repoDir), slog.Default())
+	if err := verifyTaskCloseIntegrationReceipt(context.Background(), client, repoDir, receipt, "proj-real", sourceBranch, "main"); err != nil {
+		t.Fatalf("verify exact conventional-commit receipt: %v", err)
+	}
+}
+
+func TestTaskCloseIntegrationReceiptRejectsOlderSubjectEvidenceForDeletedUnintegratedTip(t *testing.T) {
+	repoDir := t.TempDir()
+	runDaemonTestGit(t, repoDir, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repoDir, "config", "user.name", "Azedarach Test")
+	runDaemonTestGit(t, repoDir, "config", "user.email", "azedarach@example.com")
+	if err := os.WriteFile(filepath.Join(repoDir, "tracked.txt"), []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("write old evidence: %v", err)
+	}
+	runDaemonTestGit(t, repoDir, "add", "tracked.txt")
+	runDaemonTestGit(t, repoDir, "commit", "-q", "-m", "djb: older integrated work")
+	sourceBranch := "riordan/djb/unintegrated"
+	runDaemonTestGit(t, repoDir, "checkout", "-q", "-b", sourceBranch)
+	if err := os.WriteFile(filepath.Join(repoDir, "tracked.txt"), []byte("new unintegrated\n"), 0o644); err != nil {
+		t.Fatalf("write unintegrated source: %v", err)
+	}
+	runDaemonTestGit(t, repoDir, "commit", "-q", "-am", "fix(djb): newer unintegrated work")
+	deletedSourceOID := runDaemonTestGitOutput(t, repoDir, "rev-parse", "HEAD")
+	runDaemonTestGit(t, repoDir, "checkout", "-q", "main")
+	runDaemonTestGit(t, repoDir, "branch", "-D", sourceBranch)
+
+	client := git.NewClient(git.NewExecRunner(repoDir), slog.Default())
+	older, err := client.IssueEvidenceCommits(context.Background(), repoDir, "main", "djb")
+	if err != nil || len(older) == 0 {
+		t.Fatalf("precondition older issue subject evidence = %+v, err=%v", older, err)
+	}
+	receipt := taskCloseIntegrationReceipt{
+		ProjectID:    "proj-real",
+		SourceBranch: sourceBranch,
+		TargetBranch: "main",
+		SourceOID:    deletedSourceOID,
+		TargetOID:    runDaemonTestGitOutput(t, repoDir, "rev-parse", "main"),
+	}
+	err = verifyTaskCloseIntegrationReceipt(context.Background(), client, repoDir, receipt, "proj-real", sourceBranch, "main")
+	if err == nil || !strings.Contains(err.Error(), "recorded source OID is not reachable from main") {
+		t.Fatalf("verify deleted unintegrated tip error = %v, want exact source reachability refusal", err)
+	}
+}
+
+func TestTaskCloseExactReceiptAcceptsAndRepairsMissingProjectionIdempotentlyInRealRepo(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	runDaemonTestGit(t, repoDir, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repoDir, "config", "user.name", "Azedarach Test")
+	runDaemonTestGit(t, repoDir, "config", "user.email", "azedarach@example.com")
+	if err := os.WriteFile(filepath.Join(repoDir, "tracked.txt"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	runDaemonTestGit(t, repoDir, "add", "tracked.txt")
+	runDaemonTestGit(t, repoDir, "commit", "-q", "-m", "chore: seed")
+
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	issuesClient := newMigratedIssueClientAtPath(t, dbPath, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	projectID := "proj-real-repair"
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Repair exact receipt retry", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	sourceBranch := "riordan/" + taskID + "/exact-receipt"
+	runDaemonTestGit(t, repoDir, "checkout", "-q", "-b", sourceBranch)
+	if err := os.WriteFile(filepath.Join(repoDir, "tracked.txt"), []byte("integrated\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	runDaemonTestGit(t, repoDir, "commit", "-q", "-am", "fix("+taskID+"): exact receipt")
+	sourceOID := runDaemonTestGitOutput(t, repoDir, "rev-parse", "HEAD")
+	runDaemonTestGit(t, repoDir, "checkout", "-q", "main")
+	runDaemonTestGit(t, repoDir, "merge", "-q", "--ff-only", sourceBranch)
+	targetOID := runDaemonTestGitOutput(t, repoDir, "rev-parse", "main")
+	runDaemonTestGit(t, repoDir, "branch", "-D", sourceBranch)
+	missingWorktree := filepath.Join(t.TempDir(), "removed-worktree")
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID, IssueID: taskID, Path: missingWorktree, Branch: sourceBranch, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed stale worktree projection: %v", err)
+	}
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close", SourceCommand: "integrate-before-close",
+		Payload: map[string]any{"project_id": projectID, "source_branch": sourceBranch, "target_branch": "main", "source_oid": sourceOID, "target_oid": targetOID},
+	}); err != nil {
+		t.Fatalf("seed exact integration receipt: %v", err)
+	}
+
+	runner := git.NewExecRunner(repoDir)
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg:                       Config{RepoDir: repoDir, BaseBranch: "main", Logger: logger},
+		git:                       git.NewClient(runner, logger),
+		issueClientsByProject:     map[string]*issues.Client{projectID: issuesClient},
+		runtimeStoresByProject:    map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager},
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject:           func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore { return runtimeStore },
+		logger:                      logger,
+	}
+	receipt, found, err := d.latestTaskCloseIntegrationReceipt(ctx, projectID, taskID, sourceBranch, "main")
+	if err != nil || !found {
+		t.Fatalf("load exact integration receipt found=%v err=%v", found, err)
+	}
+	if err := verifyTaskCloseIntegrationReceipt(ctx, d.git, repoDir, receipt, projectID, sourceBranch, "main"); err != nil {
+		t.Fatalf("verify exact integration receipt: %v", err)
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := d.repairStaleRuntimeProjections(ctx, projectID, taskID); err != nil {
+			t.Fatalf("repair stale projection attempt %d: %v", attempt, err)
+		}
+	}
+	if _, found, err := runtimeStore.GetWorktreeStateByIssueID(ctx, projectID, taskID); err != nil || found {
+		t.Fatalf("worktree projection after idempotent repair found=%v err=%v", found, err)
 	}
 }
 
@@ -5626,7 +5932,7 @@ func TestTaskCloseIntegrationRetriesRepeatedlyWhenTargetHeadMovesAfterScratchVal
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -5770,7 +6076,7 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -5881,7 +6187,7 @@ func TestTaskCloseIntegrationOriginBaseSkipsLocalMergeWhenRemoteTreeMatches(t *t
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6001,7 +6307,7 @@ func TestTaskCloseIntegrationOriginBaseAllowsRemoteAheadWhenSourceContained(t *t
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6019,6 +6325,62 @@ func TestTaskCloseIntegrationOriginBaseAllowsRemoteAheadWhenSourceContained(t *t
 		if strings.Contains(joined, forbidden) {
 			t.Fatalf("origin close attempted local mutation %q:\n%s", forbidden, joined)
 		}
+	}
+}
+
+func TestTaskCloseIntegrationOriginBaseRetryUsesExactReceiptAfterSourceRemoval(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	projectID := "proj-origin-retry"
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Retry removed origin worktree", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	sourceBranch := "riordan/" + taskID + "/origin-retry"
+	receipt := taskCloseIntegrationReceipt{
+		ProjectID: projectID, SourceBranch: sourceBranch, TargetBranch: "origin/preview", SourceOID: "source-oid", TargetOID: "target-oid",
+	}
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close", SourceCommand: "integrate-before-close",
+		Payload: map[string]any{"project_id": receipt.ProjectID, "source_branch": receipt.SourceBranch, "target_branch": receipt.TargetBranch, "source_oid": receipt.SourceOID, "target_oid": receipt.TargetOID},
+	}); err != nil {
+		t.Fatalf("seed integration receipt: %v", err)
+	}
+
+	fetched := false
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch {
+		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "fetch" && args[3] == "origin":
+			fetched = true
+			return "", nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == sourceBranch+"^{commit}":
+			return "", fmt.Errorf("unknown revision")
+		case len(args) >= 6 && args[0] == "-C" && args[1] == repoDir && args[2] == "merge-base" && args[3] == "--is-ancestor" && (args[4] == receipt.SourceOID || args[4] == receipt.TargetOID) && args[5] == receipt.TargetBranch:
+			return "", nil
+		case len(args) >= 3 && args[0] == "-C" && args[2] == "status":
+			t.Fatalf("origin retry read removed source status: %s", strings.Join(args, " "))
+		default:
+			return "", fmt.Errorf("unexpected git command: %s", strings.Join(args, " "))
+		}
+		return "", nil
+	}}
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "preview", GitWorkflowMode: "origin", Logger: logger},
+		git: git.NewClient(runner, logger), issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+	}
+	result, err := d.integrateTaskBeforeCloseOriginBase(ctx, projectID, taskID, git.Worktree{
+		IssueID: taskID, Path: filepath.Join(repoDir, "removed-worktree"), Branch: sourceBranch,
+	}, repoDir, "preview", true)
+	if err != nil {
+		t.Fatalf("origin retry exact receipt error: %v", err)
+	}
+	if !fetched || !result.NoChanges || result.SourceOID != receipt.SourceOID || result.TargetOID != receipt.TargetOID {
+		t.Fatalf("origin retry result = %+v fetched=%v, want exact receipt no-op", result, fetched)
 	}
 }
 
@@ -6119,7 +6481,7 @@ func TestTaskCloseIntegrationOriginBaseRefusesLocalMergeWhenRemoteDiffRemains(t 
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
 	if err == nil {
 		t.Fatalf("integrateTaskBeforeClose error = nil, result = %+v; want origin-mode refusal", result)
 	}
@@ -6202,6 +6564,8 @@ func TestTaskCloseCommandKeepsTargetCleanWhenScratchMergeDirties(t *testing.T) {
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		commands = append(commands, strings.Join(args, " "))
 		switch {
+		case len(args) >= 5 && args[0] == "-C" && args[2] == "rev-parse" && args[3] == "--verify" && strings.HasSuffix(args[4], "^{commit}"):
+			return "test-oid-" + strings.TrimSuffix(args[4], "^{commit}"), nil
 		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
 			return worktreeListOutput, nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "status":
@@ -6925,6 +7289,16 @@ func TestTaskCloseCommandForceRemovesDirtyAlreadyIntegratedWorktree(t *testing.T
 	}); err != nil {
 		t.Fatalf("seed worktree projection: %v", err)
 	}
+	cacheRoot := filepath.Join(repoDir, ".azedarach", "go")
+	for _, kind := range []string{"normal", "race", "coverage"} {
+		entry := filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+taskID, "entry")
+		if err := os.MkdirAll(filepath.Dir(entry), 0o755); err != nil {
+			t.Fatalf("seed %s cache: %v", kind, err)
+		}
+		if err := os.WriteFile(entry, []byte("cache"), 0o644); err != nil {
+			t.Fatalf("write %s cache: %v", kind, err)
+		}
+	}
 
 	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
 	commands := make([]string, 0, 12)
@@ -7075,6 +7449,106 @@ func TestTaskCloseCommandForceRemovesDirtyAlreadyIntegratedWorktree(t *testing.T
 	record := waitForRuntimeState(t, d.operationRuntime, result.WorktreeCleanupOperationID, daemonops.StateDone)
 	if record.Kind != taskDeferredWorktreeCleanupOperationKind {
 		t.Fatalf("cleanup operation kind = %s, want %s", record.Kind, taskDeferredWorktreeCleanupOperationKind)
+	}
+	for _, kind := range []string{"normal", "race", "coverage"} {
+		_, err := os.Stat(filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+taskID))
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s cache remains after deferred close cleanup: %v", kind, err)
+		}
+	}
+}
+
+type fakeDeferredCleanupOperationManager struct {
+	listFn   func(context.Context, daemonops.Query) ([]daemonops.Record, error)
+	getFn    func(context.Context, string) (daemonops.Record, error)
+	cancelFn func(context.Context, string, string) (daemonops.Record, error)
+}
+
+func (f fakeDeferredCleanupOperationManager) List(ctx context.Context, query daemonops.Query) ([]daemonops.Record, error) {
+	return f.listFn(ctx, query)
+}
+
+func (f fakeDeferredCleanupOperationManager) Get(ctx context.Context, id string) (daemonops.Record, error) {
+	if f.getFn == nil {
+		return daemonops.Record{}, daemonops.ErrNotFound
+	}
+	return f.getFn(ctx, id)
+}
+
+func (f fakeDeferredCleanupOperationManager) Cancel(ctx context.Context, id, reason string) (daemonops.Record, error) {
+	if f.cancelFn == nil {
+		return daemonops.Record{}, daemonops.ErrNotFound
+	}
+	return f.cancelFn(ctx, id, reason)
+}
+
+func TestTaskUpdateDetailsFailsClosedWhenDeferredCleanupBarrierFails(t *testing.T) {
+	tests := []struct {
+		name    string
+		manager fakeDeferredCleanupOperationManager
+		wantErr string
+	}{
+		{
+			name: "list failure",
+			manager: fakeDeferredCleanupOperationManager{listFn: func(context.Context, daemonops.Query) ([]daemonops.Record, error) {
+				return nil, errors.New("injected cleanup list failure")
+			}},
+			wantErr: "list deferred worktree cleanup before lifecycle change: injected cleanup list failure",
+		},
+		{
+			name: "cancel failure",
+			manager: fakeDeferredCleanupOperationManager{
+				listFn: func(context.Context, daemonops.Query) ([]daemonops.Record, error) {
+					return []daemonops.Record{{ID: "cleanup-1", State: daemonops.StateQueued, ResourceKeys: []string{"issue:project:a", "worktree:/tmp/a", "branch:issue/a"}}}, nil
+				},
+				cancelFn: func(context.Context, string, string) (daemonops.Record, error) {
+					return daemonops.Record{}, errors.New("injected cleanup cancel failure")
+				},
+			},
+			wantErr: "cancel deferred worktree cleanup cleanup-1 before lifecycle change: injected cleanup cancel failure",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			projectID := "project"
+			issuesClient := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+			t.Cleanup(func() { _ = issuesClient.CloseDB() })
+			taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+				Title: "closed issue", Type: domain.TypeBug, Priority: domain.P2, Status: domain.StatusDone,
+			})
+			if err != nil {
+				t.Fatalf("create closed issue: %v", err)
+			}
+			d := &Daemon{
+				cfg:                             Config{Logger: slog.Default()},
+				issueClientsByProject:           map[string]*issues.Client{projectID: issuesClient},
+				deferredCleanupOperationManager: tt.manager,
+			}
+			openLifecycle := domain.IssueWorkflowOpen
+			body, err := json.Marshal(map[string]any{
+				"task_id": taskID, "title": "closed issue", "type": domain.TypeBug, "priority": domain.P2, "lifecycle_state": openLifecycle,
+			})
+			if err != nil {
+				t.Fatalf("marshal update: %v", err)
+			}
+			resp, err := d.handleTaskUpdateDetails(ctx, protocol.RequestEnvelope{
+				Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body,
+			})
+			if err != nil {
+				t.Fatalf("handle update: %v", err)
+			}
+			if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, tt.wantErr) {
+				t.Fatalf("response = %+v, want error containing %q", resp, tt.wantErr)
+			}
+			task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+			if err != nil {
+				t.Fatalf("get closed issue: %v", err)
+			}
+			if task.Status != domain.StatusDone || task.State.Workflow() != domain.IssueWorkflowClosed {
+				t.Fatalf("issue status=%s workflow=%s, want closed", task.Status, task.State.Workflow())
+			}
+		})
 	}
 }
 
@@ -7235,41 +7709,104 @@ func TestTaskCloseDeferredWorktreeCleanupCancelledWhenIssueReopens(t *testing.T)
 	if queued.Kind != taskDeferredWorktreeCleanupOperationKind {
 		t.Fatalf("queued operation kind = %s, want %s", queued.Kind, taskDeferredWorktreeCleanupOperationKind)
 	}
+	db, err := sql.Open("sqlite", filepath.Join(repoDir, ".azedarach", "azedarach.db"))
+	if err != nil {
+		t.Fatalf("open issue database: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, `CREATE TRIGGER fail_reopen_history
+		BEFORE INSERT ON issue_observation_events
+		WHEN NEW.event_type = 'issue.status_changed'
+			AND json_extract(NEW.payload_json, '$.from_status') = 'closed'
+			AND json_extract(NEW.payload_json, '$.to_status') = 'open'
+		BEGIN
+			SELECT RAISE(ABORT, 'injected reopen history failure');
+		END`); err != nil {
+		t.Fatalf("create reopen failure trigger: %v", err)
+	}
 
+	openLifecycle := domain.IssueWorkflowOpen
 	updateBody, err := json.Marshal(map[string]any{
-		"task_id": taskID,
-		"status":  domain.StatusInReview,
+		"task_id":         taskID,
+		"title":           "Reopen before deferred cleanup",
+		"type":            domain.TypeBug,
+		"priority":        domain.P2,
+		"lifecycle_state": openLifecycle,
 	})
 	if err != nil {
 		t.Fatalf("marshal update request: %v", err)
 	}
-	updateResp, err := d.handleTaskUpdateStatus(ctx, protocol.RequestEnvelope{
+	updateResp, err := d.handleTaskUpdateDetails(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-reopen-after-close",
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-		Command:         "task.update_status",
+		Command:         "task.update_details",
 		Body:            updateBody,
 	})
 	if err != nil {
-		t.Fatalf("handleTaskUpdateStatus error: %v", err)
+		t.Fatalf("handleTaskUpdateDetails error: %v", err)
 	}
-	if !updateResp.OK {
-		if updateResp.Error != nil {
-			t.Fatalf("handleTaskUpdateStatus error = %s", updateResp.Error.Message)
-		}
-		t.Fatalf("handleTaskUpdateStatus response = %+v", updateResp)
+	if updateResp.OK || updateResp.Error == nil || !strings.Contains(updateResp.Error.Message, "injected reopen history failure") {
+		t.Fatalf("failed reopen response = %+v, want injected history failure", updateResp)
+	}
+	failedReopen, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get issue after failed reopen: %v", err)
+	}
+	if failedReopen.Status != domain.StatusDone {
+		t.Fatalf("issue status after failed reopen = %s, want closed", failedReopen.Status)
 	}
 	cancelled := waitForRuntimeState(t, d.operationRuntime, closeResult.WorktreeCleanupOperationID, daemonops.StateCancelled)
 	if cancelled.ErrorMessage == "" {
 		t.Fatalf("cancelled cleanup error message empty")
 	}
+	activeCleanup, err := d.operationRuntime.manager.List(ctx, daemonops.Query{
+		ProjectID: normalizedProjectID(projectID), IssueID: taskID, Kind: taskDeferredWorktreeCleanupOperationKind,
+		States: []daemonops.State{daemonops.StateQueued, daemonops.StateRunning},
+	})
+	if err != nil {
+		t.Fatalf("list compensated cleanup: %v", err)
+	}
+	if len(activeCleanup) != 1 || activeCleanup[0].ID == closeResult.WorktreeCleanupOperationID {
+		t.Fatalf("compensated cleanup = %+v, want one requeued operation", activeCleanup)
+	}
+	compensatedCleanupID := activeCleanup[0].ID
+	if _, err := db.ExecContext(ctx, `DROP TRIGGER fail_reopen_history`); err != nil {
+		t.Fatalf("drop reopen failure trigger: %v", err)
+	}
+
+	updateResp, err = d.handleTaskUpdateDetails(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-reopen-after-close-retry",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.update_details",
+		Body:            updateBody,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskUpdateDetails retry error: %v", err)
+	}
+	if !updateResp.OK {
+		if updateResp.Error != nil {
+			t.Fatalf("handleTaskUpdateDetails error = %s", updateResp.Error.Message)
+		}
+		t.Fatalf("handleTaskUpdateDetails response = %+v", updateResp)
+	}
+	_ = waitForRuntimeState(t, d.operationRuntime, compensatedCleanupID, daemonops.StateCancelled)
 	restored, found, err := runtimeStore.GetWorktreeStateByIssueID(ctx, projectID, taskID)
 	if err != nil {
 		t.Fatalf("read restored worktree projection: %v", err)
 	}
 	if !found || restored.Path != sourceWorktree || restored.Branch != sourceBranch {
 		t.Fatalf("restored projection = %+v found=%v, want %s %s", restored, found, sourceWorktree, sourceBranch)
+	}
+	reopened, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get reopened issue: %v", err)
+	}
+	if reopened.Status != domain.StatusOpen || reopened.State.Workflow() != domain.IssueWorkflowOpen {
+		t.Fatalf("reopened issue status=%s workflow=%s, want open", reopened.Status, reopened.State.Workflow())
 	}
 	if strings.Contains(strings.Join(commands, "\n"), "worktree remove") {
 		t.Fatalf("cleanup should not remove worktree after reopen, commands:\n%s", strings.Join(commands, "\n"))
@@ -7303,6 +7840,16 @@ func TestRecoverInterruptedDeferredWorktreeCleanupRemovesClosedIssueWorktree(t *
 		t.Fatalf("mkdir source worktree: %v", err)
 	}
 	sourceBranch := "riordan/" + taskID + "/recover-deferred-cleanup"
+	cacheRoot := filepath.Join(repoDir, ".azedarach", "go")
+	for _, kind := range []string{"normal", "race", "coverage"} {
+		entry := filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+taskID, "entry")
+		if err := os.MkdirAll(filepath.Dir(entry), 0o755); err != nil {
+			t.Fatalf("seed %s cache: %v", kind, err)
+		}
+		if err := os.WriteFile(entry, []byte("cache"), 0o644); err != nil {
+			t.Fatalf("write %s cache: %v", kind, err)
+		}
+	}
 	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
 	commands := make([]string, 0, 8)
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
@@ -7353,6 +7900,12 @@ func TestRecoverInterruptedDeferredWorktreeCleanupRemovesClosedIssueWorktree(t *
 	}
 	if !strings.Contains(joined, "branch -D "+sourceBranch) {
 		t.Fatalf("commands missing branch cleanup:\n%s", joined)
+	}
+	for _, kind := range []string{"normal", "race", "coverage"} {
+		_, err := os.Stat(filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+taskID))
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s cache remains after interrupted recovery cleanup: %v", kind, err)
+		}
 	}
 }
 
@@ -9519,6 +10072,45 @@ func TestTaskIntegrationReadinessRequiresCompleteWorkerEvidencePacket(t *testing
 	}
 }
 
+func TestTaskIntegrationReadinessSkipsReviewReadyReplayNotification(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-worker-evidence-replay"
+	repoDir := t.TempDir()
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeTask, Status: domain.StatusInReview, ParentID: &parentID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := []daemonMailEvent{
+		{
+			Seq: 1, ParentIssue: parentID, IssueID: childID, Type: "worker-integration-ready", CreatedAt: time.Now().UTC(),
+			Body: `{"schema":"worker_evidence.v1","summary":"Ready","commands_run":["go test ./internal/daemon"],"key_assertions":["replay notification cannot mask evidence"],"files_changed":["internal/daemon/task_commands.go"],"review":{"status":"clean","findings":[]},"risks":["none"]}`,
+		},
+		{
+			Seq: 2, ParentIssue: parentID, IssueID: childID, Type: "worker-integration-ready", From: "daemon-observation-replay", Body: `{"summary":"issue is review-ready"}`, CreatedAt: time.Now().UTC(),
+			Payload: map[string]interface{}{"publication": reviewReadyReplayPublication, "publication_key": "project:42"},
+		},
+	}
+	for _, event := range events {
+		if err := appendMailboxEvent(repoDir, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, revision: map[string]uint64{projectID: 1}}
+	result, err := d.taskIntegrationReadiness(ctx, projectID, childID, repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Ready || result.EvidenceEventSeq != 1 || result.EvidencePacket == nil {
+		t.Fatalf("result = %+v, want earlier structured evidence selected", result)
+	}
+}
+
 func TestTaskIntegrationReadinessAcceptsIssueRecordWorkerEvidence(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-worker-issue-evidence-ready"
@@ -9636,6 +10228,104 @@ func TestHandleTaskEventAppendPublishesTaskUpdate(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for task update event")
+	}
+}
+
+func TestHandleTaskEventAppendCanonicalizesIntegrationReadyEvidence(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-task-event-worker-evidence"
+	repoDir := t.TempDir()
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	taskID, err := client.Create(ctx, issues.CreateTaskParams{Title: "worker", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := mustWorkerEvidencePayload(t)
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, hub: publish.NewHub(16, 8, slog.Default()), issueClientsByProject: map[string]*issues.Client{projectID: client}, revision: map[string]uint64{projectID: 1}}
+	resp, err := d.handleTaskEventAppend(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: mustJSON(t, map[string]any{
+		"task_id": taskID, "event_type": "worker-integration-ready", "payload": map[string]any{"worker_evidence": packet},
+	})})
+	if err != nil || !resp.OK {
+		t.Fatalf("response=%+v err=%v", resp, err)
+	}
+	events, err := client.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{"worker-integration-ready"}})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("events=%+v err=%v", events, err)
+	}
+	if _, nested := events[0].Payload["worker_evidence"]; nested {
+		t.Fatalf("payload=%+v, want canonical direct storage", events[0].Payload)
+	}
+	if parsed, validation := domain.ParseWorkerEvidenceIssueEvent(events[0]); !validation.Complete || parsed.Schema != domain.WorkerEvidenceSchemaV1 {
+		t.Fatalf("parsed=%+v validation=%+v", parsed, validation)
+	}
+}
+
+func TestHandleTaskEventAppendRejectsIncompleteIntegrationReadyEvidence(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-task-event-worker-evidence-invalid"
+	repoDir := t.TempDir()
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	taskID, err := client.Create(ctx, issues.CreateTaskParams{Title: "worker", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{projectID: client}}
+	resp, err := d.handleTaskEventAppend(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: mustJSON(t, map[string]any{
+		"task_id": taskID, "event_type": "worker-integration-ready", "payload": map[string]any{"schema": domain.WorkerEvidenceSchemaV1, "summary": "not complete"},
+	})})
+	if err != nil || resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "commands_run") {
+		t.Fatalf("response=%+v err=%v, want packet diagnostics", resp, err)
+	}
+	events, err := client.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{"worker-integration-ready"}})
+	if err != nil || len(events) != 0 {
+		t.Fatalf("events=%+v err=%v, want invalid readiness rejected before storage", events, err)
+	}
+}
+
+func TestHandleTaskEventAppendRejectsCallerForgedAuthorityEvents(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-task-event-authority-spoof"
+	repoDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	issuesClient := newMigratedIssueClient(t, repoDir, logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "reject event spoof", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: logger}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, revision: map[string]uint64{projectID: 1}}
+
+	authorityEvents := []domain.IssueObservationEventType{domain.IssueEventIssueStatusChanged, domain.IssueEventReviewCompleted, domain.IssueEventReviewCloseFailed, domain.IssueEventTaskIntegrationCompleted}
+	for _, eventType := range authorityEvents {
+		resp, err := d.command(ctx, protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       naming.RequestID("task-event-authority-spoof-" + string(eventType)),
+			Kind:            protocol.EnvelopeKindCommand,
+			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+			Command:         "task.event.append",
+			Body: mustJSON(t, map[string]any{
+				"task_id":        taskID,
+				"event_type":     string(eventType),
+				"source":         "issue-store",
+				"source_command": "review-accept",
+				"payload":        map[string]any{"to_status": "in_review", "outcome": "integration_failed", "actor_id": "attacker"},
+			}),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest || !strings.Contains(resp.Error.Message, "authority-only") {
+			t.Fatalf("event type %s response = %+v, want authority-only invalid request", eventType, resp)
+		}
+	}
+	events, err := issuesClient.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{Types: authorityEvents})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("forged authority events persisted: %+v", events)
 	}
 }
 

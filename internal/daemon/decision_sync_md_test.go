@@ -1,12 +1,216 @@
 package daemon
 
 import (
+	"bytes"
+	"context"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
+
+func TestDecisionSyncImportExplicitRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	sourceClient, sourceRepo := newTestIssueClient(t)
+	sourceService := newTestIssueDecisionService(sourceClient, sourceRepo)
+	created, err := sourceClient.RecordDecision(ctx, issues.RecordDecisionParams{
+		Title:     "Exchange explicitly",
+		Rationale: "Decision Markdown crosses Git only after an explicit export.",
+	})
+	if err != nil {
+		t.Fatalf("record source decision: %v", err)
+	}
+	syncResult, err := sourceService.SyncMD(ctx, protocol.DecisionSyncMDRequestBody{RepoDir: sourceRepo})
+	if err != nil {
+		t.Fatalf("explicit sync: %v", err)
+	}
+	if !syncResult.Changed || len(syncResult.Files) != 1 {
+		t.Fatalf("sync result = %+v, want one exported file", syncResult)
+	}
+
+	targetClient, targetRepo := newTestIssueClient(t)
+	targetService := newTestIssueDecisionService(targetClient, targetRepo)
+	checkResult, err := targetService.ImportMD(ctx, protocol.DecisionImportMDRequestBody{Check: true, RepoDir: sourceRepo})
+	if err != nil {
+		t.Fatalf("explicit import check: %v", err)
+	}
+	if len(checkResult.Files) != 1 || !checkResult.Files[0].NewRecord || checkResult.Imported != 0 {
+		t.Fatalf("import check result = %+v, want one planned new record", checkResult)
+	}
+	importResult, err := targetService.ImportMD(ctx, protocol.DecisionImportMDRequestBody{RepoDir: sourceRepo})
+	if err != nil {
+		t.Fatalf("explicit import: %v", err)
+	}
+	if importResult.Imported != 1 || importResult.Conflicts != 0 {
+		t.Fatalf("import result = %+v, want one clean import", importResult)
+	}
+	imported, err := targetClient.GetDecision(ctx, created.LocalID)
+	if err != nil {
+		t.Fatalf("get imported decision: %v", err)
+	}
+	if imported.Title != created.Title || imported.Rationale != created.Rationale {
+		t.Fatalf("imported decision = %+v, want title/rationale from %+v", imported, created)
+	}
+}
+
+func newTestIssueDecisionService(client *issues.Client, repoDir string) issueDecisionService {
+	return issueDecisionService{daemon: &Daemon{
+		cfg:    Config{RepoDir: repoDir},
+		issues: client,
+		issueClientsByProject: map[string]*issues.Client{
+			protocol.DefaultProjectID: client,
+		},
+		issueClientsByRoot: map[string]*issues.Client{
+			repoDir: client,
+		},
+	}}
+}
+
+func TestReconcileDecisionMarkdownFullSyncRenamesAndDeletes(t *testing.T) {
+	repoDir := t.TempDir()
+	targetDir := filepath.Join(repoDir, decisionMDSubdir)
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatalf("mkdir decisions: %v", err)
+	}
+
+	now := time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)
+	oldDecision := issues.Decision{LocalID: "dec-1", Title: "Old title", CreatedAt: now, UpdatedAt: now}
+	newDecision := issues.Decision{LocalID: "dec-1", Title: "New title", CreatedAt: now, UpdatedAt: now}
+	addedDecision := issues.Decision{LocalID: "dec-3", Title: "Added", CreatedAt: now, UpdatedAt: now}
+	deletedDecision := issues.Decision{LocalID: "dec-2", Title: "Deleted", CreatedAt: now, UpdatedAt: now}
+
+	write := func(name string, body []byte) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(targetDir, name), body, 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	write(decisionMDFilename(oldDecision), []byte("partially edited malformed decision\n"))
+	write("dec-1-duplicate.md", renderDecisionMarkdown(oldDecision, nil, nil))
+	write(decisionMDFilename(deletedDecision), renderDecisionMarkdown(deletedDecision, nil, nil))
+	write("notes.md", []byte("human notes; not a decision export\n"))
+
+	exports := []decisionMDExport{
+		{Decision: newDecision, Body: renderDecisionMarkdown(newDecision, nil, nil)},
+		{Decision: addedDecision, Body: renderDecisionMarkdown(addedDecision, nil, nil)},
+	}
+	wantChanged := []string{
+		"docs/decisions/dec-1-duplicate.md",
+		"docs/decisions/dec-1-new-title.md",
+		"docs/decisions/dec-1-old-title.md",
+		"docs/decisions/dec-2-deleted.md",
+		"docs/decisions/dec-3-added.md",
+	}
+
+	checked, err := reconcileDecisionMarkdown(repoDir, exports, true)
+	if err != nil {
+		t.Fatalf("check reconciliation: %v", err)
+	}
+	if !reflect.DeepEqual(checked, wantChanged) {
+		t.Fatalf("check changes = %v, want %v", checked, wantChanged)
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, decisionMDFilename(oldDecision))); err != nil {
+		t.Fatalf("check mode mutated old path: %v", err)
+	}
+
+	changed, err := reconcileDecisionMarkdown(repoDir, exports, false)
+	if err != nil {
+		t.Fatalf("apply reconciliation: %v", err)
+	}
+	if !reflect.DeepEqual(changed, wantChanged) {
+		t.Fatalf("apply changes = %v, want %v", changed, wantChanged)
+	}
+	for _, obsolete := range []string{decisionMDFilename(oldDecision), "dec-1-duplicate.md", decisionMDFilename(deletedDecision)} {
+		if _, err := os.Stat(filepath.Join(targetDir, obsolete)); !os.IsNotExist(err) {
+			t.Fatalf("obsolete %s still exists: %v", obsolete, err)
+		}
+	}
+	for _, live := range []issues.Decision{newDecision, addedDecision} {
+		body, err := os.ReadFile(filepath.Join(targetDir, decisionMDFilename(live)))
+		if err != nil {
+			t.Fatalf("read canonical %s: %v", live.LocalID, err)
+		}
+		if got, want := string(body), string(renderDecisionMarkdown(live, nil, nil)); got != want {
+			t.Fatalf("canonical %s content mismatch\ngot:\n%s\nwant:\n%s", live.LocalID, got, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "notes.md")); err != nil {
+		t.Fatalf("non-decision markdown was removed: %v", err)
+	}
+
+	unchanged, err := reconcileDecisionMarkdown(repoDir, exports, false)
+	if err != nil {
+		t.Fatalf("idempotent reconciliation: %v", err)
+	}
+	if len(unchanged) != 0 {
+		t.Fatalf("idempotent changes = %v, want none", unchanged)
+	}
+}
+
+func TestReconcileDecisionMarkdownEquivalentWorktreesProduceIdenticalRenames(t *testing.T) {
+	now := time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)
+	oldDecision := issues.Decision{LocalID: "dec-13", Title: "One signed semantic event sequence and derived views", CreatedAt: now, UpdatedAt: now}
+	newDecision := issues.Decision{LocalID: "dec-13", Title: "One signed semantic event sequence per authority", CreatedAt: now, UpdatedAt: now}
+	exports := []decisionMDExport{{
+		Decision: newDecision,
+		Body:     renderDecisionMarkdown(newDecision, nil, nil),
+	}}
+
+	reconcile := func(repoDir string) ([]string, []byte) {
+		t.Helper()
+		targetDir := filepath.Join(repoDir, decisionMDSubdir)
+		if err := os.MkdirAll(targetDir, 0o755); err != nil {
+			t.Fatalf("mkdir decisions: %v", err)
+		}
+		oldPath := filepath.Join(targetDir, decisionMDFilename(oldDecision))
+		if err := os.WriteFile(oldPath, renderDecisionMarkdown(oldDecision, nil, nil), 0o644); err != nil {
+			t.Fatalf("write old decision: %v", err)
+		}
+		changed, err := reconcileDecisionMarkdown(repoDir, exports, false)
+		if err != nil {
+			t.Fatalf("reconcile decision markdown: %v", err)
+		}
+		body, err := os.ReadFile(filepath.Join(targetDir, decisionMDFilename(newDecision)))
+		if err != nil {
+			t.Fatalf("read canonical decision: %v", err)
+		}
+		return changed, body
+	}
+
+	changesA, bodyA := reconcile(t.TempDir())
+	changesB, bodyB := reconcile(t.TempDir())
+	if !reflect.DeepEqual(changesA, changesB) {
+		t.Fatalf("equivalent worktree changes differ: A=%v B=%v", changesA, changesB)
+	}
+	if !bytes.Equal(bodyA, bodyB) {
+		t.Fatalf("equivalent worktree exports differ:\nA:\n%s\nB:\n%s", bodyA, bodyB)
+	}
+	wantChanges := []string{
+		"docs/decisions/dec-13-one-signed-semantic-event-sequence-and-derived-vie.md",
+		"docs/decisions/dec-13-one-signed-semantic-event-sequence-per-authority.md",
+	}
+	if !reflect.DeepEqual(changesA, wantChanges) {
+		t.Fatalf("rename set = %v, want %v", changesA, wantChanges)
+	}
+}
+
+func TestIsDecisionMDFilename(t *testing.T) {
+	for _, name := range []string{"dec-1.md", "dec-42-title.md"} {
+		if !isDecisionMDFilename(name) {
+			t.Errorf("isDecisionMDFilename(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"notes.md", "dec-x-title.md", "dec-.md", "dec-1.txt"} {
+		if isDecisionMDFilename(name) {
+			t.Errorf("isDecisionMDFilename(%q) = true, want false", name)
+		}
+	}
+}
 
 func TestSlugifyDecisionTitle(t *testing.T) {
 	cases := map[string]string{

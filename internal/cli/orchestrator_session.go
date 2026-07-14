@@ -56,6 +56,8 @@ func OrchestratorSessionCommand(deps *Dependencies, command string, opts Orchest
 		result, err = deps.DaemonClient.StartOrchestratorSession(ctx, request)
 	case "attach":
 		result, err = deps.DaemonClient.AttachOrchestratorSession(ctx, request)
+	case "stop":
+		result, err = deps.DaemonClient.StopOrchestratorSession(ctx, request)
 	case "status":
 		result, err = deps.DaemonClient.OrchestratorSessionStatus(ctx, request)
 	default:
@@ -80,5 +82,8 @@ func OrchestratorSessionCommand(deps *Dependencies, command string, opts Orchest
 		fmt.Printf("State: %s\n", result.Lifecycle)
 	}
 	fmt.Printf("Live: %t\n", result.Live)
+	if result.Forced {
+		fmt.Println("Forced cleanup: true")
+	}
 	return nil
 }

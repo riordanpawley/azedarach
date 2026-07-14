@@ -2,12 +2,21 @@
 default:
     @just --list
 
-build-link-run:
-    ./scripts/build-link-run.sh
+build-install-run *ARGS:
+    ./scripts/build-install-run.sh {{ARGS}}
+
+jaeger-inventory:
+    ./scripts/jaeger-local.sh inventory
+
+jaeger-cleanup *ARGS:
+    ./scripts/jaeger-local.sh cleanup {{ARGS}}
+
+# Backward-compatible alias. Prefer build-install-run in new automation/docs.
+build-link-run *ARGS:
+    ./scripts/build-install-run.sh {{ARGS}}
 
 build:
     mkdir -p .tmp/az-test
-    rm -f bin/az bin/azd
     SHA="$(git rev-parse HEAD 2>/dev/null || echo unknown)"; \
     LDFLAGS="-X github.com/riordanpawley/azedarach/internal/buildinfo.Version=dev -X github.com/riordanpawley/azedarach/internal/buildinfo.GitCommit=$SHA"; \
     go build -ldflags "$LDFLAGS" -o .tmp/az-test/az ./cmd/az
@@ -56,28 +65,53 @@ test-race:
 test-boundary:
     just test-timing boundary
 
+test-build-contract:
+    ./scripts/test-build-artifact-isolation.sh
+
+test-jaeger-contract:
+    ./scripts/test-jaeger-local.sh
+
+# Requires a healthy local Docker/Podman engine and the pinned Jaeger image.
+test-jaeger-workload:
+    ./scripts/test-jaeger-workload.sh
+
 merge-gate:
     just build
     just test
+    just test-build-contract
+    just test-jaeger-contract
     just check-boundaries
 
 # Aggregate daemon race validation has a larger budget than focused race tests.
 # The timeout remains inside `go test` so genuine hangs emit goroutine stacks.
 test-race-daemon:
-    ./scripts/test-daemon-race-sharded.sh
+    go run ./cmd/go-cache run --kind race -- ./scripts/test-daemon-race-sharded.sh
 
 test-coverage:
-    go test -coverprofile=coverage.out ./...
+    go run ./cmd/go-cache run --kind coverage -- go test -coverprofile=coverage.out ./...
     go tool cover -html=coverage.out -o coverage.html
+
+go-cache-inventory:
+    go run ./cmd/go-cache inventory
+
+go-cache-maintain:
+    go run ./cmd/go-cache maintain
+
+go-cache-clean-owner ISSUE:
+    go run ./cmd/go-cache cleanup-owner --issue {{ISSUE}} --confirm
+
+go-cache-clean-legacy *ARGS:
+    go run ./cmd/go-cache cleanup-legacy {{ARGS}}
 
 type-check:
     go build ./...
 
 clean:
-    rm -rf bin/ .tmp/az-test/ coverage.out coverage.html
+    rm -rf .tmp/az-test/ .tmp/cli-smoke/ coverage.out coverage.html
 
 install:
-    go install ./cmd/az
+    @echo "Refusing unpaired install: run 'just build-install-run --no-run' from the primary worktree" >&2
+    @exit 1
 
 lint:
     golangci-lint run ./...

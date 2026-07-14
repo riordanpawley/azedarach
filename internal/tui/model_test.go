@@ -1472,171 +1472,6 @@ func TestCtrlGClosesOverlayBeforeDismissingToast(t *testing.T) {
 	}
 }
 
-func TestResolveDaemonBinaryForRepo(t *testing.T) {
-	t.Run("prefers azd sibling of invoked az command", func(t *testing.T) {
-		repoDir := t.TempDir()
-		azBinDir := t.TempDir()
-		azPath := filepath.Join(azBinDir, "az")
-		azdPath := filepath.Join(azBinDir, "azd")
-		if err := os.WriteFile(azPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
-			t.Fatalf("write az fixture: %v", err)
-		}
-		if err := os.WriteFile(azdPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
-			t.Fatalf("write azd fixture: %v", err)
-		}
-
-		origProcessArgs := processArgs
-		origLookupPath := lookupPath
-		t.Cleanup(func() {
-			processArgs = origProcessArgs
-			lookupPath = origLookupPath
-		})
-
-		processArgs = func() []string { return []string{"az"} }
-		lookupPath = func(file string) (string, error) {
-			if file == "az" {
-				return azPath, nil
-			}
-			return "", fmt.Errorf("not found: %s", file)
-		}
-
-		if got := resolveDaemonBinaryForRepo(repoDir); got != azdPath {
-			t.Fatalf("expected %q, got %q", azdPath, got)
-		}
-	})
-
-	t.Run("prefers azd sibling of running az executable", func(t *testing.T) {
-		repoDir := t.TempDir()
-		execDir := t.TempDir()
-		azPath := filepath.Join(execDir, "az")
-		azdPath := filepath.Join(execDir, "azd")
-		if err := os.WriteFile(azPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
-			t.Fatalf("write az fixture: %v", err)
-		}
-		if err := os.WriteFile(azdPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
-			t.Fatalf("write azd fixture: %v", err)
-		}
-
-		origExecutablePath := executablePath
-		origProcessArgs := processArgs
-		origLookupPath := lookupPath
-		t.Cleanup(func() { executablePath = origExecutablePath })
-		t.Cleanup(func() { processArgs = origProcessArgs })
-		t.Cleanup(func() { lookupPath = origLookupPath })
-		processArgs = func() []string { return []string{"az"} }
-		lookupPath = func(file string) (string, error) { return "", fmt.Errorf("not found: %s", file) }
-		executablePath = func() (string, error) { return azPath, nil }
-
-		if got := resolveDaemonBinaryForRepo(repoDir); got != azdPath {
-			t.Fatalf("expected %q, got %q", azdPath, got)
-		}
-	})
-
-	t.Run("falls back to repo local bin azd when executable sibling missing", func(t *testing.T) {
-		repoDir := t.TempDir()
-		binDir := filepath.Join(repoDir, "bin")
-		if err := os.MkdirAll(binDir, 0o755); err != nil {
-			t.Fatalf("mkdir bin dir: %v", err)
-		}
-		azdPath := filepath.Join(binDir, "azd")
-		if err := os.WriteFile(azdPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
-			t.Fatalf("write azd binary fixture: %v", err)
-		}
-
-		origExecutablePath := executablePath
-		origProcessArgs := processArgs
-		origLookupPath := lookupPath
-		t.Cleanup(func() { executablePath = origExecutablePath })
-		t.Cleanup(func() { processArgs = origProcessArgs })
-		t.Cleanup(func() { lookupPath = origLookupPath })
-		processArgs = func() []string { return []string{"az"} }
-		lookupPath = func(file string) (string, error) { return "", fmt.Errorf("not found: %s", file) }
-		executablePath = func() (string, error) { return filepath.Join(t.TempDir(), "az"), nil }
-
-		if got := resolveDaemonBinaryForRepo(repoDir); got != azdPath {
-			t.Fatalf("expected %q, got %q", azdPath, got)
-		}
-	})
-
-	t.Run("falls back to nested go-bubbletea bin azd from monorepo root", func(t *testing.T) {
-		repoDir := t.TempDir()
-		nestedBin := filepath.Join(repoDir, "go-bubbletea", "bin")
-		if err := os.MkdirAll(nestedBin, 0o755); err != nil {
-			t.Fatalf("mkdir nested bin dir: %v", err)
-		}
-		azdPath := filepath.Join(nestedBin, "azd")
-		if err := os.WriteFile(azdPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
-			t.Fatalf("write nested azd fixture: %v", err)
-		}
-
-		origExecutablePath := executablePath
-		origProcessArgs := processArgs
-		origLookupPath := lookupPath
-		origWorkingDir := workingDir
-		t.Cleanup(func() { executablePath = origExecutablePath })
-		t.Cleanup(func() { processArgs = origProcessArgs })
-		t.Cleanup(func() { lookupPath = origLookupPath })
-		t.Cleanup(func() { workingDir = origWorkingDir })
-		processArgs = func() []string { return []string{"az"} }
-		lookupPath = func(file string) (string, error) { return "", fmt.Errorf("not found: %s", file) }
-		executablePath = func() (string, error) { return filepath.Join(t.TempDir(), "az"), nil }
-		workingDir = func() (string, error) { return t.TempDir(), nil }
-
-		if got := resolveDaemonBinaryForRepo(repoDir); got != azdPath {
-			t.Fatalf("expected %q, got %q", azdPath, got)
-		}
-	})
-
-	t.Run("returns empty when neither source has azd", func(t *testing.T) {
-		repoDir := t.TempDir()
-		origExecutablePath := executablePath
-		origProcessArgs := processArgs
-		origLookupPath := lookupPath
-		origWorkingDir := workingDir
-		t.Cleanup(func() { executablePath = origExecutablePath })
-		t.Cleanup(func() { processArgs = origProcessArgs })
-		t.Cleanup(func() { lookupPath = origLookupPath })
-		t.Cleanup(func() { workingDir = origWorkingDir })
-		processArgs = func() []string { return []string{"az"} }
-		lookupPath = func(file string) (string, error) { return "", fmt.Errorf("not found: %s", file) }
-		executablePath = func() (string, error) { return filepath.Join(t.TempDir(), "az"), nil }
-		workingDir = func() (string, error) { return t.TempDir(), nil }
-
-		if got := resolveDaemonBinaryForRepo(repoDir); got != "" {
-			t.Fatalf("expected empty path, got %q", got)
-		}
-	})
-
-	t.Run("falls back to cwd bin azd for just run workflows", func(t *testing.T) {
-		repoDir := t.TempDir()
-		cwd := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(cwd, "bin"), 0o755); err != nil {
-			t.Fatalf("mkdir cwd bin: %v", err)
-		}
-		cwdAzd := filepath.Join(cwd, "bin", "azd")
-		if err := os.WriteFile(cwdAzd, []byte("#!/bin/sh\n"), 0o755); err != nil {
-			t.Fatalf("write cwd azd fixture: %v", err)
-		}
-
-		origExecutablePath := executablePath
-		origProcessArgs := processArgs
-		origLookupPath := lookupPath
-		origWorkingDir := workingDir
-		t.Cleanup(func() { executablePath = origExecutablePath })
-		t.Cleanup(func() { processArgs = origProcessArgs })
-		t.Cleanup(func() { lookupPath = origLookupPath })
-		t.Cleanup(func() { workingDir = origWorkingDir })
-		processArgs = func() []string { return []string{"az"} }
-		lookupPath = func(file string) (string, error) { return "", fmt.Errorf("not found: %s", file) }
-		executablePath = func() (string, error) { return filepath.Join(t.TempDir(), "az"), nil }
-		workingDir = func() (string, error) { return cwd, nil }
-
-		if got := resolveDaemonBinaryForRepo(repoDir); got != cwdAzd {
-			t.Fatalf("expected %q, got %q", cwdAzd, got)
-		}
-	})
-}
-
 func TestView_CanonicalProfiles(t *testing.T) {
 	profiles := []testprofile.Profile{
 		testprofile.Smoke,
@@ -4206,6 +4041,86 @@ func TestTaskWorkspaceGraphNavigationOpensRelatedTask(t *testing.T) {
 	}
 }
 
+func TestTaskWorkspaceGraphNavigationOpensAndRefreshesOffBoardRelatedTask(t *testing.T) {
+	m := newTestModel()
+	currentID := naming.IssueID("az-current")
+	relatedID := naming.IssueID("az-related")
+	current := domain.Task{
+		ID:     currentID,
+		Title:  "Current task",
+		Status: domain.StatusOpen,
+		Dependencies: []domain.Dependency{
+			{ID: relatedID, Type: domain.DependencyRelatedTo},
+		},
+	}
+	related := domain.Task{ID: relatedID, Title: "Related off-board task", Status: domain.StatusInProgress}
+	m.tasks = []domain.Task{current}
+	m.nav.SelectTask(currentID.String(), 0)
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(current, []domain.Task{current, related}, nil, 120, 30))
+
+	updated, _ := m.handleSelection(overlay.SelectionMsg{
+		Key:   "task_workspace_open_task",
+		Value: relatedID.String(),
+	})
+	next := updated.(Model)
+	workspace, ok := next.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("expected task workspace to remain open, got %T", next.overlayStack.Current())
+	}
+	if got := workspace.TaskID(); got != relatedID.String() {
+		t.Fatalf("workspace task ID = %q, want off-board relation %q", got, relatedID)
+	}
+	if view := workspace.View(); !strings.Contains(view, "Related off-board task") || !strings.Contains(view, "Current task") {
+		t.Fatalf("workspace lost off-board task or graph context during navigation, got %q", view)
+	}
+
+	refreshedRelated := related
+	refreshedRelated.Title = "Related off-board task refreshed"
+	refreshedRelated.Description = "Full off-board details"
+	updated, _ = next.Update(refreshTaskWorkspaceResultMsg{
+		taskID:  relatedID.String(),
+		hasTask: true,
+		task:    refreshedRelated,
+		tasks:   []domain.Task{refreshedRelated, current},
+	})
+	next = updated.(Model)
+	workspace = next.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	view := workspace.View()
+	if !strings.Contains(view, "Related off-board task refreshed") || !strings.Contains(view, "Full off-board details") {
+		t.Fatalf("workspace did not apply full refresh for off-board relation, got %q", view)
+	}
+	if len(next.tasks) != 1 || next.tasks[0].ID != currentID {
+		t.Fatalf("off-board navigation changed board projection state: %+v", next.tasks)
+	}
+}
+
+func TestTaskWorkspaceRefreshPreservesDeeperBoardGraphContext(t *testing.T) {
+	m := newTestModel()
+	rootID := naming.IssueID("az-root")
+	childID := naming.IssueID("az-child")
+	grandchildID := naming.IssueID("az-grandchild")
+	root := domain.Task{ID: rootID, Title: "Root", Status: domain.StatusOpen}
+	child := domain.Task{ID: childID, Title: "Child", Status: domain.StatusOpen, ParentID: &rootID}
+	grandchild := domain.Task{ID: grandchildID, Title: "Grandchild", Status: domain.StatusOpen, ParentID: &childID}
+	m.tasks = []domain.Task{root, child, grandchild}
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(root, m.tasks, nil, 120, 30))
+
+	refreshedRoot := root
+	refreshedRoot.Title = "Root refreshed"
+	updated, _ := m.Update(refreshTaskWorkspaceResultMsg{
+		taskID:  rootID.String(),
+		hasTask: true,
+		task:    refreshedRoot,
+		tasks:   []domain.Task{refreshedRoot, child},
+	})
+	next := updated.(Model)
+	workspace := next.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	view := workspace.View()
+	if !strings.Contains(view, "Root refreshed") || !strings.Contains(view, "Grandchild") {
+		t.Fatalf("workspace refresh discarded deeper graph context already loaded by the board: %q", view)
+	}
+}
+
 func TestTaskWorkspaceGraphNavigationRefreshPreservesGraphFocus(t *testing.T) {
 	m := newTestModel()
 	parentID := naming.IssueID("az-parent")
@@ -4244,6 +4159,7 @@ func TestTaskWorkspaceGraphNavigationRefreshPreservesGraphFocus(t *testing.T) {
 		taskID:  childID.String(),
 		hasTask: true,
 		task:    refreshedChild,
+		tasks:   next.tasks,
 	})
 	next = updated.(Model)
 
@@ -8344,6 +8260,23 @@ func TestLoadProjectOrchestratorSnapshotCmd(t *testing.T) {
 
 	if cmd := m.loadProjectOrchestratorSnapshotCmd(); cmd == nil {
 		t.Fatal("snapshot refresh must not depend on a legacy mode")
+	}
+}
+
+func TestProjectOrchestratorStopActionUsesProjectTarget(t *testing.T) {
+	m := newTestModel()
+	var gotAction string
+	m.projectOrchestratorActionRunner = func(_ context.Context, target projectOrchestratorTarget, action string, request protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
+		gotAction = action
+		if target.ProjectID != "project-stop" || request.Scope.Kind != domain.OrchestrationScopeProject {
+			t.Fatalf("target=%+v request=%+v", target, request)
+		}
+		return protocol.OrchestratorSessionResult{Scope: request.Scope, Disposition: "stopped", Lifecycle: domain.OrchestratorPaused}, nil
+	}
+	cmd := m.projectOrchestratorActionCmd(projectOrchestratorSnapshot{ProjectID: "project-stop", Path: t.TempDir()}, "stop")
+	msg, ok := cmd().(projectOrchestratorActionMsg)
+	if !ok || msg.err != nil || msg.result.Disposition != "stopped" || gotAction != "stop" {
+		t.Fatalf("message=%+v action=%q", msg, gotAction)
 	}
 }
 

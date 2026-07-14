@@ -171,18 +171,18 @@ type DecisionLinkRemoveResponseBody struct {
 	Removed    bool               `json:"removed" msgpack:"removed"`
 }
 
-// DecisionSyncMDRequestBody asks the daemon to write decision records to
-// markdown files under docs/decisions/. RepoDir optionally overrides the
-// project root as the markdown target, which lets hooks sync the active
-// worktree while retaining the durable daemon store. When Check is true the
-// daemon computes what would change without writing anything.
+// DecisionSyncMDRequestBody asks the daemon to reconcile decision records to
+// markdown files under docs/decisions/, including obsolete rename and deletion
+// artifacts. RepoDir optionally overrides the project root as the explicit
+// markdown target while retaining the durable daemon store. When Check is true
+// the daemon computes what would change without writing anything.
 type DecisionSyncMDRequestBody struct {
 	Check   bool   `json:"check,omitempty" msgpack:"check,omitempty"`
 	RepoDir string `json:"repo_dir,omitempty" msgpack:"repo_dir,omitempty"`
 }
 
 // DecisionSyncMDResponseBody reports the outcome of the sync. Files is the
-// list of paths that were written (or would be written, in --check mode).
+// list of paths that were written or removed (or would change in --check mode).
 type DecisionSyncMDResponseBody struct {
 	Check   bool     `json:"check" msgpack:"check"`
 	Changed bool     `json:"changed" msgpack:"changed"`

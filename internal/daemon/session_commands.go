@@ -124,6 +124,11 @@ const (
 	sessionCaptureMaxLines            = 1000
 	codexLaunchPromptArgMaxBytes      = 24 * 1024
 	codexLaunchCommandArgMaxBytes     = 16 * 1024
+	sessionLaunchArtifactDirName      = "session-launch"
+	sessionLaunchArtifactPrefix       = "launch-"
+	sessionLaunchArtifactMaxAge       = time.Hour
+	sessionLaunchArtifactCleanupLimit = 64
+	sessionLaunchArtifactCleanupEvery = 5 * time.Minute
 )
 
 func reportSessionStartProgress(ctx context.Context, phase, message string, percent int) {
@@ -856,7 +861,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		if rollbackIssueLifecycle && (err != nil || !resp.OK) {
 			if worktreeProjectionPersisted && !startedWorktreeReused && startedWorktreePath != "" {
 				d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID)
-				_ = d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, startedWorktreePath, startedWorktreeReused)
+				_ = d.cleanupNewWorktreeAfterInitFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, startedWorktreePath, startedWorktreeReused)
 			}
 			d.rollbackSessionStartIssueLifecycle(ctx, issueClient, cmd.IssueID, originalIssueStatus)
 		}
@@ -878,7 +883,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			reportSessionStartProgress(ctx, "worktree_preflight", fmt.Sprintf("running worktree init commands for %s", initCtx.IssueID), 20)
 		}
 		if err := d.runWorktreeSyncInitCommands(ctx, initCtx); err != nil {
-			cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, initCtx.IssueID, initCtx.WorktreePath, false)
+			cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, initCtx.ProjectID, worktreeManager, initCtx.IssueID, initCtx.WorktreePath, false)
 			return fmt.Errorf("%w%s", err, cleanupNote)
 		}
 		d.startWorktreeAsyncInitCommands(initCtx)
@@ -905,7 +910,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			reusedWorktree = true
 			worktreeSetupWarning = fmt.Sprintf("Worktree setup warning: worktree already existed for %s; reused existing worktree at %s without running worktree init commands.", cmd.IssueID, worktree.Path)
 		} else if materializedWorktree, recoverErr := worktreeManager.Get(ctx, cmd.IssueID); recoverErr == nil {
-			cleanupNote := d.cleanupWorktreeAfterCreateFailure(ctx, worktreeManager, cmd.IssueID, materializedWorktree.Path)
+			cleanupNote := d.cleanupWorktreeAfterCreateFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, materializedWorktree.Path)
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("git worktree create failed after materializing worktree",
 					"project_id", cmd.ProjectID,
@@ -943,7 +948,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			ParentIssueID:      baseBranchAncestorIssueID,
 			ParentWorktreePath: ensuredAncestors.AncestorWorktreePath,
 		}); err != nil {
-			cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
+			cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("worktree init failed for %s: %v%s", cmd.IssueID, err, cleanupNote)), nil
 		}
 		d.startWorktreeAsyncInitCommands(worktreeInitContext{
@@ -959,18 +964,18 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	resourcePrep, err := d.runIssueResourcePrepareCommands(ctx, cmd.ProjectID, resourceCtx)
 	if err != nil {
 		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
-		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
+		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue resource prepare failed for %s: %v%s%s", cmd.IssueID, err, cleanupNote, worktreeCleanupNote)), nil
 	}
 	if _, err := d.runIssueResourceReconcileCommand(ctx, cmd.ProjectID, resourceCtx, "present"); err != nil {
 		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
-		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
+		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue resource reconcile present failed for %s: %v%s%s", cmd.IssueID, err, cleanupNote, worktreeCleanupNote)), nil
 	}
 	imagePaths, imageErr := d.prepareSessionStartImagePaths(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, cmd.ImagePaths)
 	if imageErr != nil {
 		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
-		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
+		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare session images failed for %s: %v%s%s", cmd.IssueID, imageErr, cleanupNote, worktreeCleanupNote)), nil
 	}
 	cmd.ImagePaths = imagePaths
@@ -997,7 +1002,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	projectionWriter := d.runtimeProjectionStateWriter()
 	if err := projectionWriter.PersistWorktreeProjection(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, worktree.Branch); err != nil {
 		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
-		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
+		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist worktree runtime projection for %s: %v%s%s", cmd.IssueID, err, cleanupNote, worktreeCleanupNote)), nil
 	}
 	worktreeProjectionPersisted = true
@@ -1011,8 +1016,10 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare session init marker: %v%s", markerErr, cleanupNote)), nil
 		}
 	}
-	postLaunchPrompt := ""
 	launchCommand := ""
+	launchScriptPath := ""
+	launchScriptHandedOff := false
+	promptHandoff := sessionPromptHandoff{}
 	initialPromptBytes := 0
 	if cmd.StartWork {
 		initialPrompt := strings.TrimSpace(cmd.Prompt)
@@ -1024,24 +1031,37 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			initialPrompt = buildStartWorkPrompt(cmd.IssueID, task.Type.String(), task.Title, parentIssueID != "", parentIssueID)
 		}
 		initialPromptBytes = len(initialPrompt)
-		launchPrompt := initialPrompt
-		if d.sessionLaunchNeedsPostLaunchPrompt(cmd.ProjectID, initialPrompt) {
-			launchPrompt = ""
-			postLaunchPrompt = initialPrompt
+		var promptErr error
+		promptHandoff, promptErr = prepareSessionPromptHandoff(d.sessionLaunchArtifactDir(), initialPrompt)
+		if promptErr != nil {
+			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare session prompt handoff: %v%s", promptErr, cleanupNote)), nil
 		}
-		launchCommand = d.buildSessionLaunchCommandWithInitReadyPathAndEnv(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, launchPrompt, sessionInitMarker.RelativePath, sessionLaunchStartupExportCommands(d.runtimeConfigForProject(cmd.ProjectID), resourceCtx))
-		if launchPrompt != "" && d.sessionLaunchCommandNeedsPostLaunchPrompt(cmd.ProjectID, launchCommand) {
-			launchPrompt = ""
-			postLaunchPrompt = initialPrompt
-			launchCommand = d.buildSessionLaunchCommandWithInitReadyPathAndEnv(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, launchPrompt, sessionInitMarker.RelativePath, sessionLaunchStartupExportCommands(d.runtimeConfigForProject(cmd.ProjectID), resourceCtx))
+		launchShell, launchPayload := d.buildSessionLaunchScriptPayloadWithInitReadyPathAndEnv(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, sessionInitMarker.RelativePath, d.sessionLaunchStartupExportCommands(d.runtimeConfigForProject(cmd.ProjectID), resourceCtx), promptHandoff)
+		var launchScriptErr error
+		launchScriptPath, launchCommand, launchScriptErr = prepareSessionLaunchScript(d.sessionLaunchArtifactDir(), launchShell, launchPayload)
+		if launchScriptErr != nil {
+			promptHandoff.remove()
+			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare session launch script: %v%s", launchScriptErr, cleanupNote)), nil
 		}
+		defer func() {
+			if launchScriptHandedOff {
+				return
+			}
+			promptHandoff.remove()
+			if removeErr := os.Remove(launchScriptPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) && d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("remove transient session launch script", "path", launchScriptPath, "error", removeErr)
+			}
+		}()
 	}
 	reportSessionStartProgress(ctx, "tmux_launch", "creating tmux session", 70)
 	if cmd.StartWork {
-		if err := d.tmux.NewSessionWithCommand(ctx, cmd.SessionID, worktree.Path, launchCommand); err != nil {
+		if err := d.tmux.NewSessionWithCommandAndEnvironment(ctx, cmd.SessionID, worktree.Path, launchCommand, d.sessionManagedEnvironment()); err != nil {
 			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, sessionStartLaunchFailureMessage("tmux_launch", cmd, worktree.Path, launchCommand, true, err, cleanupNote)), nil
 		}
+		launchScriptHandedOff = true
 		if err := d.setSessionContextEnv(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID); err != nil {
 			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("set session context env: %v%s", err, cleanupNote)), nil
@@ -1065,7 +1085,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			)
 		}
 	} else {
-		if err := d.tmux.NewSession(ctx, cmd.SessionID, worktree.Path); err != nil {
+		if err := d.tmux.NewSessionWithEnvironment(ctx, cmd.SessionID, worktree.Path, d.sessionManagedEnvironment()); err != nil {
 			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, sessionStartLaunchFailureMessage("tmux_launch", cmd, worktree.Path, "", false, err, cleanupNote)), nil
 		}
@@ -1078,6 +1098,12 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("export issue resource env: %v%s", err, cleanupNote)), nil
 		}
 		reportSessionStartProgress(ctx, "tmux_launch", "tmux session created without agent launch", 90)
+	}
+	if cmd.StartWork && sessionInitMarker.AbsolutePath != "" {
+		if err := d.waitForSessionInitReady(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, sessionInitMarker); err != nil {
+			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
+		}
 	}
 	initialActivity, initialActivitySource := initialSessionStartActivity(cmd.StartWork)
 	if err := d.applySessionLifecycleTransitionWithActivity(
@@ -1110,21 +1136,6 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		}
 	}
 	rollbackIssueLifecycle = false
-	if cmd.StartWork && sessionInitMarker.AbsolutePath != "" {
-		if err := d.waitForSessionInitReady(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, sessionInitMarker); err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-		}
-	}
-	if cmd.StartWork && strings.TrimSpace(postLaunchPrompt) != "" {
-		reportSessionStartProgress(ctx, "agent_prompt", "agent launched; delivering initial prompt", 95)
-		if err := d.waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-		}
-		if err := d.tmux.PasteTextAndSubmit(ctx, cmd.SessionID, postLaunchPrompt); err != nil {
-			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
-		}
-	}
 	worktreeLine := fmt.Sprintf("Worktree created: %s", worktree.Path)
 	if reusedWorktree {
 		worktreeLine = fmt.Sprintf("Worktree reused: %s", worktree.Path)
@@ -1759,6 +1770,12 @@ func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.Reque
 			result.Sessions = append(result.Sessions, item)
 			continue
 		}
+		if err := d.setSessionManagedPathEnv(ctx, target.SessionID); err != nil {
+			item.Error = err.Error()
+			result.Failed++
+			result.Sessions = append(result.Sessions, item)
+			continue
+		}
 		resumeCommand := d.buildSessionResumeCommand(target.ProjectID, target.IssueID, target.SessionID, body.Yolo, body.ImagePaths)
 		if err := d.tmux.SendKeys(ctx, target.SessionID, resumeCommand); err != nil {
 			item.Error = err.Error()
@@ -2035,7 +2052,10 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 	}
 	targetPane := sessionName + ":" + sessionConflictWindowName
 	launchCommand := d.buildSessionLaunchCommand(projectID, issueIDString, canonicalSessionID, body.Yolo, body.ImagePaths, launchPrompt)
-	reusedWindow, err := d.tmux.EnsureWindowWithCommand(ctx, sessionName, sessionConflictWindowName, worktreePath, launchCommand)
+	if err := d.setSessionManagedPathEnv(ctx, sessionName); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("set conflict session PATH: %v", err)), nil
+	}
+	reusedWindow, err := d.tmux.EnsureWindowWithCommandAndEnvironment(ctx, sessionName, sessionConflictWindowName, worktreePath, launchCommand, d.sessionManagedEnvironment())
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("launch conflict resolver window: %v", err)), nil
 	}
@@ -2101,13 +2121,13 @@ func (d *Daemon) ensureConflictWorktree(ctx context.Context, projectID, issueID,
 			return "", "", false, createErr
 		}
 		if materializedWorktree, recoverErr := worktreeManager.Get(ctx, issueID); recoverErr == nil {
-			cleanupNote := d.cleanupWorktreeAfterCreateFailure(ctx, worktreeManager, issueID, materializedWorktree.Path)
+			cleanupNote := d.cleanupWorktreeAfterCreateFailure(ctx, projectID, worktreeManager, issueID, materializedWorktree.Path)
 			return "", "", false, fmt.Errorf("worktree create failed for %s: %w%s", issueID, createErr, cleanupNote)
 		}
 		return "", "", false, createErr
 	}
 	if err := d.ensureSessionStartWorktreeClean(ctx, worktreeManager, issueID, worktree.Path); err != nil {
-		cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, issueID, worktree.Path, false)
+		cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, projectID, worktreeManager, issueID, worktree.Path, false)
 		return "", "", false, fmt.Errorf("%w%s", err, cleanupNote)
 	}
 	initCtx := worktreeInitContext{
@@ -2116,7 +2136,7 @@ func (d *Daemon) ensureConflictWorktree(ctx context.Context, projectID, issueID,
 		WorktreePath: worktree.Path,
 	}
 	if err := d.runWorktreeSyncInitCommands(ctx, initCtx); err != nil {
-		cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, worktreeManager, issueID, worktree.Path, false)
+		cleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, projectID, worktreeManager, issueID, worktree.Path, false)
 		return "", "", false, fmt.Errorf("worktree init failed for %s: %w%s", issueID, err, cleanupNote)
 	}
 	d.startWorktreeAsyncInitCommands(initCtx)
@@ -2150,14 +2170,15 @@ func (d *Daemon) ensureSessionStartWorktreeClean(ctx context.Context, worktreeMa
 	return fmt.Errorf("refusing to start session for issue %s: worktree %s is not clean before init (%s). Inspect with 'git -C %s status --porcelain' and 'git -C %s ls-files -d', then repair the checkout or remove the worktree and retry", issueID, worktreePath, detail, worktreePath, worktreePath)
 }
 
-func (d *Daemon) cleanupNewWorktreeAfterInitFailure(ctx context.Context, worktreeManager *git.WorktreeManager, issueID, worktreePath string, reusedWorktree bool) string {
+func (d *Daemon) cleanupNewWorktreeAfterInitFailure(ctx context.Context, projectID string, worktreeManager *git.WorktreeManager, issueID, worktreePath string, reusedWorktree bool) string {
 	if reusedWorktree || worktreeManager == nil {
 		return ""
 	}
-	if _, err := worktreeManager.DeleteWithOptions(ctx, issueID, git.WorktreeDeleteOptions{
+	removedWorktree, err := worktreeManager.DeleteWithOptions(ctx, issueID, git.WorktreeDeleteOptions{
 		Force:         true,
 		BranchCleanup: git.WorktreeBranchCleanupRequired,
-	}); err != nil {
+	})
+	if err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("failed to cleanup worktree after init failure",
 				"issue_id", issueID,
@@ -2166,6 +2187,9 @@ func (d *Daemon) cleanupNewWorktreeAfterInitFailure(ctx context.Context, worktre
 			)
 		}
 		return fmt.Sprintf(" (cleanup failed for worktree %s: %v)", worktreePath, err)
+	}
+	if err := finalizeDeletedWorktree(ctx, projectID, issueID, worktreeManager, removedWorktree, d.runtimeProjectionStateWriter()); err != nil {
+		return fmt.Sprintf(" (cleaned up worktree %s; %v)", worktreePath, err)
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("cleaned up worktree after init failure",
@@ -2176,14 +2200,15 @@ func (d *Daemon) cleanupNewWorktreeAfterInitFailure(ctx context.Context, worktre
 	return fmt.Sprintf(" (cleaned up worktree %s)", worktreePath)
 }
 
-func (d *Daemon) cleanupWorktreeAfterCreateFailure(ctx context.Context, worktreeManager *git.WorktreeManager, issueID, worktreePath string) string {
+func (d *Daemon) cleanupWorktreeAfterCreateFailure(ctx context.Context, projectID string, worktreeManager *git.WorktreeManager, issueID, worktreePath string) string {
 	if worktreeManager == nil {
 		return ""
 	}
-	if _, err := worktreeManager.DeleteWithOptions(ctx, issueID, git.WorktreeDeleteOptions{
+	removedWorktree, err := worktreeManager.DeleteWithOptions(ctx, issueID, git.WorktreeDeleteOptions{
 		Force:         true,
 		BranchCleanup: git.WorktreeBranchCleanupRequired,
-	}); err != nil {
+	})
+	if err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("failed to rollback worktree after create failure",
 				"issue_id", issueID,
@@ -2192,6 +2217,9 @@ func (d *Daemon) cleanupWorktreeAfterCreateFailure(ctx context.Context, worktree
 			)
 		}
 		return fmt.Sprintf(" (rollback failed for worktree %s: %v)", worktreePath, err)
+	}
+	if err := finalizeDeletedWorktree(ctx, projectID, issueID, worktreeManager, removedWorktree, d.runtimeProjectionStateWriter()); err != nil {
+		return fmt.Sprintf(" (rolled back worktree %s; %v)", worktreePath, err)
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("rolled back worktree after create failure",
@@ -2218,7 +2246,7 @@ func (d *Daemon) ensureConflictSession(ctx context.Context, projectID, issueID, 
 	if d.tmux == nil {
 		return "", false, errors.New("tmux service unavailable")
 	}
-	if err := d.tmux.NewSession(ctx, canonicalSessionID, worktreePath); err != nil {
+	if err := d.tmux.NewSessionWithEnvironment(ctx, canonicalSessionID, worktreePath, d.sessionManagedEnvironment()); err != nil {
 		return "", false, err
 	}
 	return canonicalSessionID, false, nil
@@ -3140,7 +3168,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 		if suppress, _ := ctx.Value(rootedOrchestratorRecoveryContextKey{}).(bool); suppress {
 			break
 		}
-		if !orchestratorSessionProjection(session) || !sessionProjectionCanRecreateTmuxSession(session) {
+		if !orchestratorSessionProjection(session) {
 			continue
 		}
 		isProjectScope := strings.TrimSpace(session.ScopeID) == string(domain.OrchestrationScopeProject)
@@ -3161,8 +3189,45 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 			}
 		}
 		canonicalSessionID := d.orchestratorSessionID(projectID, scope)
-		if _, live := liveTmuxNames[strings.TrimSpace(canonicalSessionID)]; live {
+		runtimeSessionID := strings.TrimSpace(session.ID)
+		if runtimeSessionID == "" {
+			runtimeSessionID = canonicalSessionID
+		}
+		_, canonicalLive := liveTmuxNames[strings.TrimSpace(canonicalSessionID)]
+		_, projectedLive := liveTmuxNames[runtimeSessionID]
+		if daemonstate.NormalizeSessionState(session.State) == daemonstate.SessionStateStopped {
+			if _, err := d.pauseEndedOrchestratorSession(ctx, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, runtimeSessionID); err != nil {
+				return result, fmt.Errorf("align stopped orchestrator lease %s: %w", session.ScopeID, err)
+			}
+			if canonicalLive || projectedLive {
+				cleanupSessionID := runtimeSessionID
+				if !projectedLive && canonicalLive {
+					cleanupSessionID = canonicalSessionID
+				}
+				if err := d.tmux.KillSession(ctx, cleanupSessionID); err != nil {
+					return result, fmt.Errorf("clean stopped orchestrator %s: %w", session.ScopeID, err)
+				}
+				if err := d.persistStoppedOrchestratorSessionProjection(ctx, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, scope, cleanupSessionID, daemonstate.SessionStateStopped); err != nil {
+					return result, err
+				}
+				result.AlignedDaemonSessions++
+			}
 			continue
+		}
+		if !sessionProjectionCanRecreateTmuxSession(session) {
+			continue
+		}
+		if canonicalLive || projectedLive {
+			continue
+		}
+		if daemonstate.NormalizeSessionState(session.ObservedState) == daemonstate.SessionStateStopped {
+			paused, pauseErr := d.pauseEndedOrchestratorSession(ctx, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, session.ID)
+			if pauseErr != nil {
+				return result, fmt.Errorf("repair ended orchestrator %s: %w", session.ScopeID, pauseErr)
+			}
+			if paused {
+				continue
+			}
 		}
 		body, marshalErr := json.Marshal(protocol.OrchestratorSessionRequest{Scope: scope})
 		if marshalErr != nil {
@@ -3377,7 +3442,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 			continue
 		}
 		canonicalSessionID := naming.CanonicalSessionID(namingScope, issueID)
-		if newErr := d.tmux.NewSession(ctx, canonicalSessionID, wt.Path); newErr != nil {
+		if newErr := d.tmux.NewSessionWithEnvironment(ctx, canonicalSessionID, wt.Path, d.sessionManagedEnvironment()); newErr != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("session reconciliation failed to recreate tmux session",
 					"project_id", projectID,
@@ -3385,6 +3450,18 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 					"session_id", canonicalSessionID,
 					"worktree", wt.Path,
 					"error", newErr,
+				)
+			}
+			continue
+		}
+		if envErr := d.setSessionContextEnv(ctx, projectID, issueID, canonicalSessionID); envErr != nil {
+			_ = d.tmux.KillSession(ctx, canonicalSessionID)
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("session reconciliation failed to install session environment",
+					"project_id", projectID,
+					"issue_id", issueID,
+					"session_id", canonicalSessionID,
+					"error", envErr,
 				)
 			}
 			continue
@@ -4418,6 +4495,31 @@ func (d *Daemon) buildSessionLaunchCommand(projectID, issueID, sessionID string,
 	return d.buildSessionLaunchCommandWithInitReadyPath(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt, "")
 }
 
+func prepareSessionLaunchScript(artifactDir, shell, launchPayload string) (string, string, error) {
+	if err := ensureSessionLaunchArtifactDir(artifactDir); err != nil {
+		return "", "", err
+	}
+	file, err := os.CreateTemp(artifactDir, sessionLaunchArtifactPrefix+"*.sh")
+	if err != nil {
+		return "", "", err
+	}
+	path := file.Name()
+	cleanup := func() {
+		_ = file.Close()
+		_ = os.Remove(path)
+	}
+	script := "#!/bin/sh\nrm -f -- \"$0\"\n" + launchPayload + "\n"
+	if _, err := file.WriteString(script); err != nil {
+		cleanup()
+		return "", "", err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", "", err
+	}
+	return path, "exec " + singleQuoteForShell(shell) + " -i " + singleQuoteForShell(filepath.ToSlash(path)), nil
+}
+
 func (d *Daemon) buildSessionResumeCommand(projectID, issueID, sessionID string, yolo bool, imagePaths []string) string {
 	projectCfg := d.runtimeConfigForProject(projectID)
 	tool := strings.TrimSpace(projectCfg.CLITool)
@@ -4425,7 +4527,7 @@ func (d *Daemon) buildSessionResumeCommand(projectID, issueID, sessionID string,
 		tool = "claude"
 	}
 	if strings.EqualFold(tool, "claude") {
-		return d.buildClaudeContinueCommand(projectID, issueID, yolo, sessionRestartContinuePrompt)
+		return d.withSessionManagedPathCommand(d.buildClaudeContinueCommand(projectID, issueID, yolo, sessionRestartContinuePrompt))
 	}
 	if !strings.EqualFold(tool, "codex") {
 		return d.buildSessionLaunchCommand(projectID, issueID, sessionID, yolo, imagePaths, sessionRestartContinuePrompt)
@@ -4454,9 +4556,9 @@ func (d *Daemon) buildSessionResumeCommand(projectID, issueID, sessionID string,
 	parts = append(parts, "--last")
 	command := strings.Join(parts, " ")
 	if projectCfg.CodexAppServer {
-		return codexAppServerSupervisedCommand(tool, command, command)
+		command = codexAppServerSupervisedCommand(tool, command, command)
 	}
-	return command
+	return d.withSessionManagedPathCommand(command)
 }
 
 func (d *Daemon) sessionRestartNeedsPostLaunchPrompt(projectID string) bool {
@@ -4467,11 +4569,6 @@ func (d *Daemon) sessionRestartNeedsPostLaunchPrompt(projectID string) bool {
 func (d *Daemon) sessionLaunchNeedsPostLaunchPrompt(projectID, prompt string) bool {
 	tool := strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool)
 	return strings.EqualFold(tool, "codex") && !codexLaunchPromptArgAllowed(prompt)
-}
-
-func (d *Daemon) sessionLaunchCommandNeedsPostLaunchPrompt(projectID, launchCommand string) bool {
-	tool := strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool)
-	return strings.EqualFold(tool, "codex") && len(launchCommand) > codexLaunchCommandArgMaxBytes
 }
 
 func codexLaunchPromptArgAllowed(prompt string) bool {
@@ -4503,9 +4600,25 @@ func (d *Daemon) buildSessionLaunchCommandWithInitReadyPath(projectID, issueID, 
 }
 
 func (d *Daemon) buildSessionLaunchCommandWithInitReadyPathAndEnv(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt, initReadyPath string, startupEnvCommands []string) string {
+	return d.buildSessionLaunchCommandWithInitReadyPathAndEnvPolicy(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt, initReadyPath, startupEnvCommands, false)
+}
+
+func (d *Daemon) buildSessionLaunchScriptPayloadWithInitReadyPathAndEnv(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initReadyPath string, startupEnvCommands []string, promptHandoff sessionPromptHandoff) (string, string) {
+	return d.buildSessionLaunchComponentsWithInitReadyPathAndEnvPolicy(projectID, issueID, sessionID, yolo, imagePaths, promptHandoff.bootstrapPrompt(), initReadyPath, startupEnvCommands, false)
+}
+
+func (d *Daemon) buildSessionLaunchCommandWithInitReadyPathAndEnvPolicy(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt, initReadyPath string, startupEnvCommands []string, allowLargePrompt bool) string {
+	shell, inner := d.buildSessionLaunchComponentsWithInitReadyPathAndEnvPolicy(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt, initReadyPath, startupEnvCommands, allowLargePrompt)
+	return fmt.Sprintf("%s -i -c %s", shell, singleQuoteForShell(inner))
+}
+
+func (d *Daemon) buildSessionLaunchComponentsWithInitReadyPathAndEnvPolicy(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt, initReadyPath string, startupEnvCommands []string, allowLargePrompt bool) (string, string) {
 	projectCfg := d.runtimeConfigForProject(projectID)
-	toolCommand := d.buildCLIToolCommand(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt)
+	toolCommand := d.buildCLIToolCommandWithPromptPolicy(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt, allowLargePrompt)
 	commands := make([]string, 0, len(startupEnvCommands)+len(projectCfg.SessionSyncInitCommands)+3)
+	if pathExport := d.sessionManagedPathExportCommand(); pathExport != "" {
+		commands = append(commands, pathExport)
+	}
 	for _, envCommand := range startupEnvCommands {
 		trimmed := strings.TrimSpace(envCommand)
 		if trimmed != "" {
@@ -4532,7 +4645,7 @@ func (d *Daemon) buildSessionLaunchCommandWithInitReadyPathAndEnv(projectID, iss
 	}
 	inner := strings.Join(commands, "; ")
 	inner = inner + "; " + sessionAgentProcessExitCommand(projectCfg.CLITool) + "; exec " + shell
-	return fmt.Sprintf("%s -i -c %s", shell, singleQuoteForShell(inner))
+	return shell, inner
 }
 
 func sessionAgentProcessExitCommand(tool string) string {
@@ -4734,12 +4847,13 @@ func sessionLaunchContextExportCommand(projectID, issueID, sessionID string) str
 	return "export " + strings.Join(assignments, " ")
 }
 
-func sessionLaunchStartupExportCommands(projectCfg daemonProjectRuntimeConfig, resourceCtx issueResourceLifecycleContext) []string {
+func (d *Daemon) sessionLaunchStartupExportCommands(projectCfg daemonProjectRuntimeConfig, resourceCtx issueResourceLifecycleContext) []string {
+	commands := make([]string, 0, 1)
 	assignments := issueResourceShellExports(projectCfg.IssueResources, resourceCtx)
-	if len(assignments) == 0 {
-		return nil
+	if len(assignments) > 0 {
+		commands = append(commands, "export "+strings.Join(assignments, " "))
 	}
-	return []string{"export " + strings.Join(assignments, " ")}
+	return commands
 }
 
 func buildSessionAsyncInitCommands(asyncInitCommands []string, issueID, sessionID string) []string {
@@ -5064,8 +5178,15 @@ func (d *Daemon) exportSessionContextEnv(ctx context.Context, projectID, issueID
 	if err := d.setSessionContextEnv(ctx, projectID, issueID, sessionID); err != nil {
 		return err
 	}
-	if exportCommand := sessionLaunchContextExportCommand(projectID, issueID, sessionID); exportCommand != "" {
-		if err := d.tmux.SendKeys(ctx, sessionID, exportCommand); err != nil {
+	exportCommands := make([]string, 0, 2)
+	if pathExport := d.sessionManagedPathExportCommand(); pathExport != "" {
+		exportCommands = append(exportCommands, pathExport)
+	}
+	if contextExport := sessionLaunchContextExportCommand(projectID, issueID, sessionID); contextExport != "" {
+		exportCommands = append(exportCommands, contextExport)
+	}
+	if len(exportCommands) > 0 {
+		if err := d.tmux.SendKeys(ctx, sessionID, strings.Join(exportCommands, "; ")); err != nil {
 			return err
 		}
 	}
@@ -5073,6 +5194,9 @@ func (d *Daemon) exportSessionContextEnv(ctx context.Context, projectID, issueID
 }
 
 func (d *Daemon) setSessionContextEnv(ctx context.Context, projectID, issueID, sessionID string) error {
+	if err := d.setSessionManagedPathEnv(ctx, sessionID); err != nil {
+		return err
+	}
 	for _, assignment := range sessionLaunchContextEnvAssignments(projectID, issueID, sessionID) {
 		if assignment.Value == "" {
 			continue
@@ -5082,6 +5206,47 @@ func (d *Daemon) setSessionContextEnv(ctx context.Context, projectID, issueID, s
 		}
 	}
 	return nil
+}
+
+func (d *Daemon) setSessionManagedPathEnv(ctx context.Context, sessionID string) error {
+	if managedPath := d.sessionManagedPathValue(); managedPath != "" {
+		return d.tmux.SetEnvironment(ctx, sessionID, "PATH", managedPath)
+	}
+	return nil
+}
+
+func (d *Daemon) sessionManagedEnvironment() map[string]string {
+	if managedPath := d.sessionManagedPathValue(); managedPath != "" {
+		return map[string]string{"PATH": managedPath}
+	}
+	return nil
+}
+
+func (d *Daemon) withSessionManagedPathCommand(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return ""
+	}
+	if pathExport := d.sessionManagedPathExportCommand(); pathExport != "" {
+		return pathExport + "; " + command
+	}
+	return command
+}
+
+func (d *Daemon) sessionManagedPathExportCommand() string {
+	binDir := strings.TrimSpace(d.cfg.ManagedGenerationBinDir)
+	if binDir == "" || d.cfg.ScopedRuntime {
+		return ""
+	}
+	return "export PATH=" + singleQuoteForShell(binDir) + ":\"$PATH\""
+}
+
+func (d *Daemon) sessionManagedPathValue() string {
+	binDir := strings.TrimSpace(d.cfg.ManagedGenerationBinDir)
+	if binDir == "" || d.cfg.ScopedRuntime {
+		return ""
+	}
+	return appconfig.PrependPathEntry(os.Getenv("PATH"), binDir)
 }
 
 func issueResourcesConfigured(cfg appconfig.IssueResourcesConfig) bool {
@@ -5313,6 +5478,10 @@ func worktreeInitCommandEnv(initCtx worktreeInitContext, phase string) []string 
 }
 
 func (d *Daemon) buildCLIToolCommand(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt string) string {
+	return d.buildCLIToolCommandWithPromptPolicy(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt, false)
+}
+
+func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt string, allowLargePrompt bool) string {
 	projectCfg := d.runtimeConfigForProject(projectID)
 	tool := strings.TrimSpace(projectCfg.CLITool)
 	if tool == "" {
@@ -5355,7 +5524,7 @@ func (d *Daemon) buildCLIToolCommand(projectID, issueID, sessionID string, yolo 
 		promptArg := `"$` + initialPromptShellVariable + `"`
 		switch strings.ToLower(tool) {
 		case "codex":
-			if !codexLaunchPromptArgAllowed(initialPrompt) {
+			if !allowLargePrompt && !codexLaunchPromptArgAllowed(initialPrompt) {
 				return strings.Join(parts, " ")
 			}
 			parts = append(parts, "--", promptArg)
@@ -5455,7 +5624,9 @@ func buildStartWorkPrompt(issueID, issueType, title string, orchestratedWorker b
 		safeTitle,
 	)
 	if strings.EqualFold(safeIssueType, string(domain.TypeEpic)) {
-		return base + "\n\nRole: orchestrator\n- Use `az orchestrate status --root <issue-id>` for readiness snapshots including active worker activity (`busy|idle|waiting|no-agent|unknown`).\n- Use `az orchestrate watch --root <issue-id> --since <seq> --jsonl` for continuous observe-only mailbox/runnable/activity updates; start it in another pane/session and leave it running while workers are active. Remain in this active turn/loop and continuously consume its events; starting sessions and a background watch is not a completed handoff to the human.\n- Do not use `--once` for orchestration monitoring; reserve it for diagnostic single polls.\n- Trust hook-backed `activity=busy|idle|waiting` for worker idleness checks and treat `activity=no-agent` as an intentional session-only shell. If activity is `unknown`, inspect hooks with `az ai status --target=auto`; run `az ai install --target=auto` only when hooks are missing, outdated, or not installed. Use `az orchestrate capture --issue <worker-issue>` only when watch/status look stale, failed, or contradictory, or when you need a sparse progress spot-check. Do not poll panes on a fixed interval.\n- Start this root's direct runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`, then immediately ensure the continuous watch is running.\n- Nested epic/root rule: if a runnable child is itself an epic/root that should self-orchestrate, start that child's own orchestrator session with `az orchestrator-session start --root <child-root>` and let that session run `az prime` and manage `az orchestrate start --root <child-root>`; supervise that nested orchestrator as a direct child while it owns its descendant workers, and do not launch or take over those descendants unless the user explicitly asks to flatten orchestration.\n- Send running-worker nudges with `az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\"`; workers reporting to this active parent orchestrator/watch should use `az mail send --parent <issue-id> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`; non-orchestrated progress, follow-ups, validation, risks, or completion evidence should use `az issue record` instead. Bare `az mail send` is durable mailbox-only.\n- React to progress, blocked, and integration-ready evidence; review and integrate accepted children/epics, advance newly unblocked work, and repeat status/start/watch/review while graph work remains.\n- Worker integration evidence should be a structured JSON `worker_evidence.v1` packet with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`; use `az issue record --type evidence.submitted --data '<json>'` when mailbox delivery is irrelevant, and use `worker-integration-ready` mail only for active parent coordination. Omit `artifact_links` unless needed, and when present use objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array. Run `az evidence validate --body '<json>'` before recording or sending, `az evidence validate --fix --body '<json>'` for repairable schema aliases, or `az evidence validate --template` for the canonical template.\n- Treat blocked work as graph state from unresolved `blocks` dependencies or active worker-blocked mailbox evidence, not as an issue status.\n- Treat `in_review` workers as ready for orchestrator validation; inspect evidence, run parent checks, then close accepted worker issues with `az issue close --id <issue-id>`.\n- Parent/tracker completion includes child lifecycle cleanup: close accepted completed children with `az issue close --id <child-issue>`, and leave any child `open` or `in_progress` only with an explicit blocker, dependency, or remaining-scope rationale.\n- Use `az orchestrate integrate --issue <issue-id>` for worker result inspection or repair guidance, not as the normal merge authority.\n- Use `az orchestrate close-session --issue <issue-id>` only for exceptional session cleanup when a worker must be stopped without closing the issue; never use it for ordinary review handoff.\n- Keep orchestration centralized inside each root session; delegate explicit nested epic/root issues to their own orchestrator sessions rather than flattening their children into this session.\n- Continue the parent loop until `az orchestrate complete-check --root <issue-id>` and final validation pass; only then set the root `in_review` and hand it to the human while keeping its tmux session/worktree alive. Close/integrate the root only after explicit human acceptance."
+		base += "\n\nReview closeout contract: resolve accepted review tickets with `az orchestrate review accept --root <root-issue> --issue <review-issue>` so trusted acceptance and authoritative terminal close finish before dependent results are used or presented. Return unresolved findings with `az orchestrate review return --root <root-issue> --issue <review-issue> --finding \"...\"`. Reuse the reported `--intent-key` when retrying the same decision. Pending, returned, and human-gated reviews remain non-terminal."
+		base += "\nThis review contract supersedes generic manual-close wording below for review decisions; `az issue close` remains only a repair/manual-close path, not reviewer acceptance authority."
+		return base + "\n\nRole: orchestrator\n- Use `az orchestrate status --root <issue-id>` for readiness snapshots including active worker activity (`busy|idle|waiting|no-agent|unknown`).\n- Use `az orchestrate watch --root <issue-id> --since <seq> --jsonl` for continuous observe-only mailbox/runnable/activity updates; start it in another pane/session and leave it running while workers are active. Remain in this active turn/loop and continuously consume its events; starting sessions and a background watch is not a completed handoff to the human.\n- Do not use `--once` for orchestration monitoring; reserve it for diagnostic single polls.\n- Trust hook-backed `activity=busy|idle|waiting` for worker idleness checks and treat `activity=no-agent` as an intentional session-only shell. If activity is `unknown`, inspect hooks with `az ai status --target=auto`; run `az ai install --target=auto` only when hooks are missing, outdated, or not installed. Use `az orchestrate capture --issue <worker-issue>` only when watch/status look stale, failed, or contradictory, or when you need a sparse progress spot-check. Do not poll panes on a fixed interval.\n- Start this root's direct runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`, then immediately ensure the continuous watch is running. Queued reviews do not block unrelated starts when managed agent capacity remains.\n- Nested epic/root rule: if a runnable child is itself an epic/root that should self-orchestrate, start that child's own orchestrator session with `az orchestrator-session start --root <child-root>` and let that session run `az prime` and manage `az orchestrate start --root <child-root>`; supervise that nested orchestrator as a direct child while it owns its descendant workers, and do not launch or take over those descendants unless the user explicitly asks to flatten orchestration.\n- Send running-worker nudges with `az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\"`; workers reporting to this active parent orchestrator/watch should use `az mail send --parent <issue-id> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`; non-orchestrated progress, follow-ups, validation, risks, or completion evidence should use `az issue record` instead. Bare `az mail send` is durable mailbox-only.\n- React to progress, blocked, and integration-ready evidence; review and integrate accepted children/epics, advance newly unblocked work, and repeat status/start/watch/review while graph work remains.\n- Worker integration evidence should be a structured JSON `worker_evidence.v1` packet with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`; use `az issue record --type evidence.submitted --data '<json>'` when mailbox delivery is irrelevant, and use `worker-integration-ready` mail only for active parent coordination. Omit `artifact_links` unless needed, and when present use objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array. Run `az evidence validate --body '<json>'` before recording or sending, `az evidence validate --fix --body '<json>'` for repairable schema aliases, or `az evidence validate --template` for the canonical template.\n- Delegate every non-trivial diff inspection to a fresh ephemeral review subagent; use bounded parallel delegates for distinct review-ready issues. Give each delegate the issue acceptance context, worker evidence, context risk, exact worktree, and diff base. Delegates are read-only: they must not edit, mutate issue/session state, send findings, accept/return reviews, integrate, or close. Require a structured clean-or-findings verdict with commands and risks. Validate the packet and spot-check high-risk or contradictory results; keep durable review-return, review-accept, integration, and close authority in this orchestrator.\n- Treat blocked work as graph state from unresolved `blocks` dependencies or active worker-blocked mailbox evidence, not as an issue status.\n- Treat `in_review` workers as ready for orchestrator validation; inspect evidence, delegate diff review, run parent checks, then close accepted worker issues with `az issue close --id <issue-id>`.\n- Parent/tracker completion includes child lifecycle cleanup: close accepted completed children with `az issue close --id <child-issue>`, and leave any child `open` or `in_progress` only with an explicit blocker, dependency, or remaining-scope rationale.\n- Use `az orchestrate integrate --issue <issue-id>` for worker result inspection or repair guidance, not as the normal merge authority.\n- Use `az orchestrate close-session --issue <issue-id>` only for exceptional session cleanup when a worker must be stopped without closing the issue; never use it for ordinary review handoff.\n- Keep orchestration authority centralized inside each root session while delegating read-only review inspection; delegate explicit nested epic/root issues to their own orchestrator sessions rather than flattening their children into this session.\n- Continue the parent loop until `az orchestrate complete-check --root <issue-id>` and final validation pass; only then set the root `in_review` and hand it to the human while keeping its tmux session/worktree alive. Close/integrate the root only after explicit human acceptance."
 	}
 	if !orchestratedWorker {
 		return base + "\n\nRole: contributor\n- Focus only on this issue scope unless the user explicitly expands it.\n- Keep issue status current; record progress, follow-ups, validation, blockers, review facts, risks, and closeout evidence with `az issue record`; keep notes as terse human audit scratchpad only.\n- Use `in_progress` while actively working and `in_review` when complete and awaiting review/integration. Review handoff is non-terminal: preserve the tmux session and worktree; do not stop or close them while waiting for human feedback.\n- Use `closed` only after explicit acceptance/integration and `cancelled` only for a terminal non-integrated outcome.\n- Represent blocked work with dependency edges and issue record evidence, not by using `in_review`."

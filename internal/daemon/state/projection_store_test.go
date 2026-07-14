@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"reflect"
@@ -13,6 +15,98 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+type codedSQLiteTestError struct {
+	code int
+}
+
+func (e codedSQLiteTestError) Error() string { return "sqlite contention" }
+func (e codedSQLiteTestError) Code() int     { return e.code }
+
+func TestRetrySQLiteWriteRetriesBusyAndLocked(t *testing.T) {
+	tests := []struct {
+		name string
+		code int
+	}{
+		{name: "busy snapshot", code: 517},
+		{name: "locked", code: 6},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			attempts := 0
+			waits := 0
+			err := retrySQLiteWrite(
+				context.Background(),
+				time.Second,
+				time.Millisecond,
+				func(context.Context, time.Duration) error {
+					waits++
+					return nil
+				},
+				func() error {
+					attempts++
+					if attempts == 1 {
+						return fmt.Errorf("wrapped: %w", codedSQLiteTestError{code: tt.code})
+					}
+					return nil
+				},
+			)
+			if err != nil {
+				t.Fatalf("retrySQLiteWrite: %v", err)
+			}
+			if attempts != 2 || waits != 1 {
+				t.Fatalf("attempts=%d waits=%d, want attempts=2 waits=1", attempts, waits)
+			}
+		})
+	}
+}
+
+func TestRetrySQLiteWriteDoesNotRetryPermanentFailure(t *testing.T) {
+	want := errors.New("constraint failed")
+	attempts := 0
+	err := retrySQLiteWrite(
+		context.Background(),
+		time.Second,
+		time.Millisecond,
+		func(context.Context, time.Duration) error {
+			t.Fatal("wait called for permanent failure")
+			return nil
+		},
+		func() error {
+			attempts++
+			return want
+		},
+	)
+	if !errors.Is(err, want) {
+		t.Fatalf("retrySQLiteWrite error = %v, want %v", err, want)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
+func TestRetrySQLiteWriteReturnsContentionAfterBudgetExhaustion(t *testing.T) {
+	want := codedSQLiteTestError{code: 517}
+	attempts := 0
+	err := retrySQLiteWrite(
+		context.Background(),
+		time.Second,
+		time.Millisecond,
+		func(context.Context, time.Duration) error {
+			return context.DeadlineExceeded
+		},
+		func() error {
+			attempts++
+			return want
+		},
+	)
+	if !errors.Is(err, want) {
+		t.Fatalf("retrySQLiteWrite error = %v, want last contention %v", err, want)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 before injected exhaustion", attempts)
+	}
+}
 
 func TestRuntimeStateStoreSessionRoundTrip(t *testing.T) {
 	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
@@ -58,6 +152,18 @@ func TestRuntimeStateStoreSessionRoundTrip(t *testing.T) {
 	}
 	if len(sessions) != 0 {
 		t.Fatalf("sessions after delete = %d, want 0", len(sessions))
+	}
+}
+
+func TestRuntimeStateStoreBoundsConnectionPool(t *testing.T) {
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	db, err := store.dbHandle()
+	if err != nil {
+		t.Fatalf("dbHandle: %v", err)
+	}
+	if got := db.Stats().MaxOpenConnections; got != runtimeStateMaxOpenConns {
+		t.Fatalf("MaxOpenConnections = %d, want %d", got, runtimeStateMaxOpenConns)
 	}
 }
 

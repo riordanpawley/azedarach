@@ -174,6 +174,7 @@ fd "filename" -t f internal cmd
    - advisor-session singleton/recovery/cleanup per interaction request -> `hybrid` (refreshed durable request/session-role projection + live tmux runtime; terminal requests and project removal clean advisor resources)
    - session recovery/reconcile -> `hybrid`
    - `session.issue_lifecycle_runtime` live managed-session lifecycle gate -> `hybrid` (refresh durable factored issue disposition/engagement/visibility projection, then compare with live tmux; repair ready+idle to working, reject backlog/terminal/archived divergence without destroying runtime)
+   - `session.activity_convergence` stale busy/hooks recovery -> `hybrid` (refresh durable session activity and runtime projections, then compare with a bounded live tmux pane probe; newer durable hook evidence wins races)
    - `task.close`/`task.close_preflight`/`task.delete`/`task.delete_preflight`/`task.graph_readiness`/`task.complete_check` durable lifecycle, investigation disposition/acceptance, and orchestration checks -> `hybrid` (read v2 issue lifecycle and evidence projection first, then compare with live runtime)
    - `task.review_handoff` external busy-equivalent session activity gate before moving to `in_review` -> `projection` (durable issue v2 lifecycle/review projection + session activity projection; active issue self-handoff remains allowed)
    - `task.integration_readiness` worker evidence gate and `task.context_risk_closeout` repeated-local-failure gate -> `projection` (durable issue projection + mailbox/observation evidence)
@@ -182,7 +183,7 @@ fd "filename" -t f internal cmd
    - `orchestration.project_candidates` bounded project candidate classification -> `projection` (durable issue graph/lifecycle, ownership, session activity, and interaction projections)
    - `orchestration.project_review` review queue, reviewer lease, structured evidence, and outcome gate -> `projection` (durable issue/review/ownership, mailbox/observation evidence, and worktree projections; accepted close delegates to the existing hybrid `task.close` invariant)
    - `orchestration.claim_start` bounded worker-wave claim/start and compensation -> `hybrid` (durable ownership/start-attempt projection + daemon session-start operation/runtime)
-   - `orchestration.project_loop` durable watch cursor, deterministic action replay, and review-first scheduling -> `projection` (durable issue observation stream + orchestration checkpoint refreshed before each loop decision)
+   - `orchestration.project_loop` durable watch cursor, deterministic action replay, and non-blocking start/review scheduling -> `projection` (durable issue observation stream + orchestration checkpoint refreshed before each loop decision; queued review stays visible without globally suppressing unrelated starts)
    - `issue_resources.lifecycle` issue resource desired-state gate -> `projection` (durable issue status + runtime attachment projection)
    - `interaction.waiting_human` decision-waiting and pickup exclusion gate -> `projection` (durable interaction request projection refreshed before evaluation)
    - `investigation.waiting_human` human-findings authority gate -> `projection` (durable investigation disposition and issue-specific acceptance/review evidence refreshed before evaluation)
@@ -252,17 +253,38 @@ If any are missing, keep issue state `in_progress` or `open`.
 2. Treat the installed/root `az` and `azd` binaries as production runtime assets. Worktree validation must not replace, overwrite, restart, or intentionally version-mismatch the production daemon.
 3. Normal issue work must use one global daemon and one authority path. Linked worktree CLI commands must use the user-global daemon socket/lock by default; they must not autostart a worktree-scoped daemon for ordinary `az issue`, `az session`, `az branch`, or similar workflow commands.
 4. Use `AZEDARACH_DAEMON_SCOPE=worktree` only when intentionally testing daemon/runtime behavior from an Azedarach development worktree. In that explicit mode, `go run ./cmd/az ...` may autostart a worktree-scoped daemon using the worktree-scoped socket/lock and the same worktree's `go run ./cmd/azd` source fallback when no worktree-local `bin/azd` exists.
-5. For validation in a worktree, prefer `go run ./cmd/az ...` from that worktree. If a compiled binary is needed, build to a worktree-local scratch path such as `.tmp/az-test/az` or `./bin/az`, and run that exact path.
+5. For validation in a worktree, prefer `go run ./cmd/az ...` from that worktree. If a compiled binary is needed, build to a worktree-local scratch path such as `.tmp/az-test/az`, and run that exact path. Do not use `bin/az`, which is a production runtime path in the primary worktree.
 6. Do not copy worktree-built `az`/`azd` into `/Users/riordan/prog/azedarach/bin`, `/usr/local/bin`, Homebrew paths, or any shared PATH location unless the user explicitly asks for a production install/deploy.
 7. Do not run `az daemon restart`, `az daemon stop`, or `az daemon start` from a linked worktree as a validation shortcut. Use a worktree-scoped daemon path (`AZEDARACH_DAEMON_SCOPE=worktree go run ./cmd/az daemon restart`) only when the test specifically requires a live daemon restart. From the main repo, `az daemon restart` is allowed only when validating the production/root daemon path.
 8. If logs show `daemon version mismatch persisted after replacement`, assume a worktree binary has interacted with the shared production daemon. Stop and fix the isolation path or guidance; do not keep retrying replacement/restart commands.
 9. Do not bump protocol/version only to force restarts; bump versions only for contract changes.
 10. Keep CLI docs/help/examples with flags before positional arguments.
+11. Ordinary validation and orchestration may run `just build`; it must remain
+    isolated to `.tmp/az-test` and must not create, replace, or delete
+    `bin/az`/`bin/azd`. Automated agents and project orchestration must not run
+    `just build-install-run` unless the user explicitly requests a production
+    rebuild/relink from the primary worktree, because that recipe intentionally
+    installs a serialized, atomically switched `az`/`azd` generation and rejects
+    linked worktrees. Installed command links must resolve only inside the stable
+    install directory and never back into any Git worktree.
+12. Repository direnv setup must not prepend primary- or linked-worktree
+    `bin/` directories. It must prefer one version-identical installed sibling
+    `az`/`azd` pair. Global daemon launch/replacement resolves `azd` beside the
+    running `az` only when its resolved identity is
+    `.azedarach-generations/generation.*/az`, and fails closed when managed
+    identity or its sibling is unavailable. Canonical primary-repo `bin/`
+    binaries are not trusted production assets; bare PATH, repo-local binary,
+    and source fallback are reserved for explicit worktree-scoped development.
+    Successful install generations remain retained until an explicit
+    lifetime-aware maintenance contract can prove they are no longer needed by
+    long-lived clients.
 
 ## Environment Rules
 
 - `.envrc` stores one shared direnv/nix-direnv layout per repository under `${XDG_CACHE_HOME:-$HOME/.cache}/direnv/layouts`, keyed by the canonical Git common directory, so linked worktrees reuse the warm profile without gaining checkout-local `.direnv` state. Run `nix-direnv-reload` after changing `flake.nix` or `flake.lock`.
-- `.envrc` exports shared repo-family `GOCACHE`/`GOPATH` under the primary repo's `.azedarach/go/` so linked worktrees do not duplicate multi-GB Go caches. If Git common-dir detection fails, it falls back to the current checkout's `.azedarach/go/`. Use `AZEDARACH_GO_CACHE_ROOT`, `AZEDARACH_GOCACHE`, or `AZEDARACH_GOPATH` for explicit local overrides.
+- `.envrc` keeps `GOPATH` and module downloads shared under the primary repo's `.azedarach/go/path`, but assigns build output to `.azedarach/go/caches/v1/<normal|race|coverage>/<main|issue-ID>`. It exports `-trimpath` through `GOFLAGS`; `AZEDARACH_GO_CACHE_ROOT` and `AZEDARACH_GOCACHE` may only restate their derived daemon-authoritative locations and are rejected when they redirect outside the project layout. `AZEDARACH_GOPATH` remains an explicit local module-download override.
+- Managed validation serializes on the repository-family Go cache lock and defaults to a 10 GiB soft warning plus a 28 GiB hard refusal. Override bytes with `AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES` and `AZEDARACH_GO_CACHE_HARD_LIMIT_BYTES`; opt into selected-namespace maintenance with `AZEDARACH_GO_CACHE_AUTO_MAINTAIN=1`.
+- Use `just go-cache-inventory` before legacy cleanup. `just go-cache-clean-legacy --confirm` uses supported Go cleanup for legacy build caches; add `--include-gopath-modcache` only to remove the legacy module download cache. It never removes legacy GOPATH binaries or other user files.
 - After `direnv allow`, use normal `go ...` commands from repo root without per-command env prefixes.
 
 ## Git Safety Rules

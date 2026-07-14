@@ -1114,6 +1114,46 @@ func TestWorktreeServiceAdapterCreateMaterializesMissingAncestorChain(t *testing
 	}
 }
 
+func TestWorktreeServiceAdapterCreateInitRollbackCleansCache(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	runner := &recordingWorktreeCreateRunner{repoDir: repoDir}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	issueID := "az-cache-rollback"
+	cacheRoot := filepath.Join(repoDir, ".azedarach", "go")
+	adapter := &worktreeServiceAdapter{
+		manager: manager,
+		logger:  logger,
+		runWorktreeSyncInit: func(_ context.Context, initCtx worktreeInitContext) error {
+			for _, kind := range []string{"normal", "race", "coverage"} {
+				entry := filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+initCtx.IssueID, "entry")
+				if err := os.MkdirAll(filepath.Dir(entry), 0o755); err != nil {
+					return err
+				}
+				if err := os.WriteFile(entry, []byte("cache"), 0o644); err != nil {
+					return err
+				}
+			}
+			return errors.New("init sentinel")
+		},
+	}
+
+	_, _, err := adapter.Create(ctx, "proj", issueID, "main")
+	if err == nil || !strings.Contains(err.Error(), "init sentinel") {
+		t.Fatalf("Create error = %v, want primary init sentinel", err)
+	}
+	if !strings.Contains(err.Error(), "removed failed worktree") {
+		t.Fatalf("Create error = %v, want rollback evidence", err)
+	}
+	for _, kind := range []string{"normal", "race", "coverage"} {
+		_, statErr := os.Stat(filepath.Join(cacheRoot, "caches", "v1", kind, "issue-"+issueID))
+		if !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("%s cache remains after init rollback: %v", kind, statErr)
+		}
+	}
+}
+
 func ptrIssueID(id string) *naming.IssueID {
 	issueID := naming.IssueID(id)
 	return &issueID
@@ -1190,6 +1230,85 @@ branch refs/heads/` + branchName + `
 	}
 	if strings.Join(runner.commands, "\n") != strings.Join(wantCommands, "\n") {
 		t.Fatalf("commands = %v, want %v", runner.commands, wantCommands)
+	}
+}
+
+func TestWorktreeServiceAdapterDeleteFinalizesProjectionWhenCacheCleanupFails(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	repoDir := t.TempDir()
+	worktreePath := filepath.Join(t.TempDir(), "repo-bvx")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach", "go"), 0o755); err != nil {
+		t.Fatalf("mkdir cache root: %v", err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(repoDir, ".azedarach", "go", "caches")); err != nil {
+		t.Fatalf("symlink cache layout: %v", err)
+	}
+	runner := &staticWorktreeListRunner{
+		output: `worktree ` + repoDir + `
+HEAD abc123
+branch refs/heads/main
+
+worktree ` + worktreePath + `
+HEAD def456
+branch refs/heads/riordan/bvx/worktree-delete
+`,
+	}
+	writer := &recordingRuntimeProjectionWriter{}
+	adapter := &worktreeServiceAdapter{
+		manager:                 git.NewWorktreeManager(runner, repoDir, logger),
+		runtimeProjectionWriter: writer,
+		logger:                  logger,
+	}
+
+	removed, _, err := adapter.Delete(ctx, "proj", "bvx", daemonhandlers.WorktreeRemoveOptions{})
+	if removed == nil {
+		t.Fatal("Delete removed worktree = nil")
+	}
+	if err == nil || !strings.Contains(err.Error(), "worktree deleted; Go cache cleanup remains pending") {
+		t.Fatalf("Delete error = %v, want pending cache cleanup", err)
+	}
+	if got := writer.snapshot(); strings.Join(got, "\n") != "worktree.delete+publish" {
+		t.Fatalf("projection writer calls = %v, want worktree.delete+publish", got)
+	}
+}
+
+func TestFinalizeDeletedWorktreeCleanupUsesAuthoritativeRootDespiteOverride(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	canonicalRepo, err := filepath.EvalSymlinks(repoDir)
+	if err != nil {
+		t.Fatalf("canonicalize repo: %v", err)
+	}
+	issueID := "az-root"
+	authoritativeRoot := filepath.Join(canonicalRepo, ".azedarach", "go")
+	authoritativeEntry := filepath.Join(authoritativeRoot, "caches", "v1", "normal", "issue-"+issueID, "entry")
+	if err := os.MkdirAll(filepath.Dir(authoritativeEntry), 0o755); err != nil {
+		t.Fatalf("seed authoritative cache: %v", err)
+	}
+	if err := os.WriteFile(authoritativeEntry, []byte("cache"), 0o644); err != nil {
+		t.Fatalf("write authoritative cache: %v", err)
+	}
+	customRoot := t.TempDir()
+	customEntry := filepath.Join(customRoot, "caches", "v1", "normal", "issue-"+issueID, "keep")
+	if err := os.MkdirAll(filepath.Dir(customEntry), 0o755); err != nil {
+		t.Fatalf("seed rejected custom cache: %v", err)
+	}
+	if err := os.WriteFile(customEntry, []byte("outside"), 0o644); err != nil {
+		t.Fatalf("write rejected custom cache: %v", err)
+	}
+	t.Setenv("AZEDARACH_GO_CACHE_ROOT", customRoot)
+	manager := git.NewWorktreeManager(&staticWorktreeListRunner{}, canonicalRepo, slog.Default())
+
+	if err := finalizeDeletedWorktree(ctx, "proj", issueID, manager, nil, nil); err != nil {
+		t.Fatalf("finalizeDeletedWorktree error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(authoritativeEntry)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("authoritative cache remains: %v", err)
+	}
+	data, err := os.ReadFile(customEntry)
+	if err != nil || string(data) != "outside" {
+		t.Fatalf("rejected custom cache changed: data=%q err=%v", data, err)
 	}
 }
 

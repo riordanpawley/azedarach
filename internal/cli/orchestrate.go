@@ -77,6 +77,18 @@ type OrchestrateCompleteCheckOptions struct {
 	JSON        bool
 }
 
+type OrchestrateReviewOptions struct {
+	Project       string
+	RootIssueID   string
+	Action        string
+	IntentKey     string
+	IssueIDs      []string
+	Severity      string
+	Findings      []string
+	RestartWorker bool
+	JSON          bool
+}
+
 type OrchestratePromptOptions struct {
 	Project      string
 	RootIssueID  string
@@ -274,6 +286,19 @@ type orchestrateStartAdvice struct {
 	WatchCommand     string `json:"watch_command,omitempty"`
 	StatusCommand    string `json:"status_command,omitempty"`
 	WatchInstruction string `json:"watch_instruction,omitempty"`
+}
+
+type orchestrateStartLaunchError struct {
+	IssueID string
+	Field   string
+}
+
+func (e *orchestrateStartLaunchError) Error() string {
+	issueID := strings.TrimSpace(e.IssueID)
+	if issueID == "" {
+		issueID = "<unknown>"
+	}
+	return fmt.Sprintf("invalid orchestration launch for %s: missing %s", issueID, e.Field)
 }
 
 type orchestrateWatchFrame struct {
@@ -661,6 +686,67 @@ func ParseOrchestrateCompleteCheckArgs(args []string) (OrchestrateCompleteCheckO
 		return OrchestrateCompleteCheckOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
+	return opts, nil
+}
+
+func ParseOrchestrateReviewArgs(action string, args []string) (OrchestrateReviewOptions, error) {
+	opts := OrchestrateReviewOptions{Action: strings.ToLower(strings.TrimSpace(action)), Severity: "high"}
+	if opts.Action != "accept" && opts.Action != "return" {
+		return OrchestrateReviewOptions{}, fmt.Errorf("review action must be accept or return")
+	}
+	fs := flag.NewFlagSet("orchestrate review "+opts.Action, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	addIssueProjectFlag(fs, &opts.Project)
+	fs.StringVar(&opts.RootIssueID, "root", "", "root issue id")
+	fs.StringVar(&opts.IntentKey, "intent-key", "", "stable key to reuse when retrying the same review decision")
+	fs.Func("issue", "review issue id (repeatable for accept)", func(value string) error {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return fmt.Errorf("issue id cannot be empty")
+		}
+		opts.IssueIDs = append(opts.IssueIDs, trimmed)
+		return nil
+	})
+	fs.StringVar(&opts.Severity, "severity", "high", "severity applied to returned findings")
+	fs.Func("finding", "actionable finding text (repeatable for return)", func(value string) error {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return fmt.Errorf("finding cannot be empty")
+		}
+		opts.Findings = append(opts.Findings, trimmed)
+		return nil
+	})
+	fs.BoolVar(&opts.RestartWorker, "restart-worker", false, "restart an inactive owned worker after returning findings")
+	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
+	if err := fs.Parse(args); err != nil {
+		return OrchestrateReviewOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return OrchestrateReviewOptions{}, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
+	}
+	opts.Project = normalizeIssueProject(opts.Project)
+	opts.RootIssueID = strings.TrimSpace(opts.RootIssueID)
+	opts.IntentKey = strings.TrimSpace(opts.IntentKey)
+	opts.IssueIDs = dedupeSortedStrings(opts.IssueIDs)
+	opts.Severity = strings.ToLower(strings.TrimSpace(opts.Severity))
+	if len(opts.IssueIDs) == 0 {
+		return OrchestrateReviewOptions{}, fmt.Errorf("at least one --issue is required")
+	}
+	if opts.Action == "accept" {
+		if len(opts.Findings) > 0 || opts.RestartWorker {
+			return OrchestrateReviewOptions{}, fmt.Errorf("review accept cannot include --finding or --restart-worker")
+		}
+		return opts, nil
+	}
+	if len(opts.IssueIDs) != 1 {
+		return OrchestrateReviewOptions{}, fmt.Errorf("review return requires exactly one --issue")
+	}
+	if len(opts.Findings) == 0 {
+		return OrchestrateReviewOptions{}, fmt.Errorf("review return requires at least one --finding")
+	}
+	if opts.Severity == "" {
+		return OrchestrateReviewOptions{}, fmt.Errorf("severity cannot be empty")
+	}
 	return opts, nil
 }
 
@@ -1239,8 +1325,8 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 		NestedRoots: nestedRootIDs,
 		Started:     make([]string, 0, len(applied.Launched)),
 		Launched:    make([]orchestrateStartLaunch, 0, len(applied.Launched)),
-		Skipped:     applied.Skipped,
-		Failed:      applied.Failed,
+		Skipped:     cloneOrchestrateStartDetails(applied.Skipped),
+		Failed:      cloneOrchestrateStartDetails(applied.Failed),
 		Warnings:    orchestrateStartWarnings(ctx, deps, ready, len(applied.Launched)),
 		Advice: orchestrateStartAdvice{
 			WatchCommand:     fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", opts.RootIssueID),
@@ -1253,6 +1339,9 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 		launch := orchestrateStartLaunch{IssueID: daemonLaunch.IssueID, SessionID: daemonLaunch.SessionID, OperationID: daemonLaunch.OperationID, OperationState: daemonLaunch.OperationState}
 		emitOrchestrateStartProgressWithLaunch(opts, "submitted", launch)
 		issueID := launch.IssueID
+		if strings.TrimSpace(issueID) == "" {
+			return orchestrateStartResult{}, &orchestrateStartLaunchError{Field: "issue_id"}
+		}
 		launch, pending, err := waitForOrchestrateStartLaunch(deps, opts, launch)
 		if err != nil {
 			result.Failed[issueID] = err.Error()
@@ -1274,6 +1363,14 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	return result, nil
 }
 
+func cloneOrchestrateStartDetails(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
 func orchestrateOwnerID() string {
 	if ownerID := defaultIssueOwnerID(); ownerID != "" {
 		return ownerID
@@ -1284,7 +1381,7 @@ func orchestrateOwnerID() string {
 func waitForOrchestrateStartLaunch(deps *Dependencies, opts OrchestrateStartOptions, launch orchestrateStartLaunch) (orchestrateStartLaunch, *orchestrateStartPending, error) {
 	operationID := strings.TrimSpace(launch.OperationID)
 	if operationID == "" {
-		return launch, nil, nil
+		return launch, nil, &orchestrateStartLaunchError{IssueID: launch.IssueID, Field: "operation_id"}
 	}
 
 	timeout := orchestrateStartWaitTimeout

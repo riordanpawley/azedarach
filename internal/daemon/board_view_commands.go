@@ -142,6 +142,7 @@ func (d *Daemon) handleBoardViewSave(ctx context.Context, req protocol.RequestEn
 		return resp, err
 	}
 	resp.Revision = d.nextRevision(projectID)
+	d.publishBoardViewChanged(req, projectID, string(record.View.ID), protocol.BoardViewChangeSaved, resp.Revision)
 	return resp, nil
 }
 
@@ -178,6 +179,7 @@ func (d *Daemon) handleBoardViewDelete(ctx context.Context, req protocol.Request
 	}
 	resp := d.successResponse(req)
 	resp.Revision = d.nextRevision(projectID)
+	d.publishBoardViewChanged(req, projectID, viewID, protocol.BoardViewChangeDeleted, resp.Revision)
 	return resp, nil
 }
 
@@ -230,7 +232,39 @@ func (d *Daemon) handleBoardViewSelect(ctx context.Context, req protocol.Request
 		return resp, err
 	}
 	resp.Revision = d.nextRevision(projectID)
+	d.publishBoardViewChanged(req, projectID, viewID, protocol.BoardViewChangeSelected, resp.Revision)
 	return resp, nil
+}
+
+func (d *Daemon) publishBoardViewChanged(req protocol.RequestEnvelope, projectID, viewID string, change protocol.BoardViewChange, revision uint64) {
+	if d.hub == nil {
+		return
+	}
+	updatedAt := time.Now().UTC()
+	body, err := json.Marshal(protocol.BoardViewChangedEventBody{
+		ProjectID: naming.ProjectID(projectID),
+		ViewID:    viewID,
+		Change:    change,
+		UpdatedAt: updatedAt,
+	})
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("marshal board view event body failed", "project_id", projectID, "view_id", viewID, "change", change, "revision", revision, "error", err)
+		}
+		return
+	}
+	meta := req.Meta
+	meta.ProjectID = naming.ProjectID(projectID)
+	d.hub.Publish(protocol.EventEnvelope{
+		ProtocolVersion: req.ProtocolVersion,
+		ProjectID:       naming.ProjectID(projectID),
+		Meta:            meta,
+		Revision:        revision,
+		Event:           protocol.EventBoardViewChanged,
+		Kind:            protocol.EnvelopeKindEvent,
+		EmittedAt:       updatedAt,
+		Body:            body,
+	})
 }
 
 func (d *Daemon) boardViewRecord(ctx context.Context, projectID, viewID string) (domain.BoardViewRecord, error) {
