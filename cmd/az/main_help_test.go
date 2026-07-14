@@ -252,6 +252,7 @@ func TestMaybePrintCommandHelpCoversRoutedCommandSurface(t *testing.T) {
 		{"orchestrator-session"},
 		{"orchestrator-session", "start"},
 		{"orchestrator-session", "attach"},
+		{"orchestrator-session", "stop"},
 		{"orchestrator-session", "status"},
 		{"daemon"},
 		{"daemon", "start"},

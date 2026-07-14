@@ -174,6 +174,8 @@ type Daemon struct {
 	issueAutoArchiveLastRun            map[string]time.Time
 	sessionStopMu                      sync.Mutex
 	sessionStopPending                 map[string]int
+	orchestratorStopGracePeriod        time.Duration
+	orchestratorStopPollInterval       time.Duration
 	sessionStateRefreshMu              sync.Mutex
 	sessionStateRefreshing             map[string]bool
 	sessionStateLastRefresh            map[string]time.Time
@@ -847,7 +849,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleOrchestrationSnapshot(ctx, req)
 	case protocol.CommandOrchestrationIntent:
 		return d.handleOrchestrationIntent(ctx, req)
-	case protocol.CommandOrchestratorSessionStart, protocol.CommandOrchestratorSessionAttach, protocol.CommandOrchestratorSessionStatus:
+	case protocol.CommandOrchestratorSessionStart, protocol.CommandOrchestratorSessionAttach, protocol.CommandOrchestratorSessionStop, protocol.CommandOrchestratorSessionStatus:
 		return d.handleOrchestratorSession(ctx, req)
 	case "task.complete_check":
 		return d.handleTaskCompleteCheck(ctx, req)
@@ -1760,14 +1762,18 @@ func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, pr
 	if d.hub == nil {
 		return
 	}
-	runtime := d.runtimeProjectionForEvent(ctx, projectID, session.IssueID, "", nil)
-	if strings.TrimSpace(session.ID) != "" {
-		sessionRuntime := buildRuntimeProjection(projectID, &session, nil)
-		runtime.IssueID = sessionRuntime.IssueID
-		runtime.Session = sessionRuntime.Session
+	var runtimeBody *protocol.RuntimeProjectionEventBody
+	if strings.TrimSpace(session.IssueID) != "" {
+		runtime := d.runtimeProjectionForEvent(ctx, projectID, session.IssueID, "", nil)
+		if strings.TrimSpace(session.ID) != "" {
+			sessionRuntime := buildRuntimeProjection(projectID, &session, nil)
+			runtime.IssueID = sessionRuntime.IssueID
+			runtime.Session = sessionRuntime.Session
+		}
+		applyRuntimeSessionCounts(&runtime, d.sessionProjectionCountsForIssue(ctx, projectID, session.IssueID))
+		encodedRuntime := buildRuntimeProjectionEventBody(projectID, rev, runtime)
+		runtimeBody = &encodedRuntime
 	}
-	applyRuntimeSessionCounts(&runtime, d.sessionProjectionCountsForIssue(ctx, projectID, session.IssueID))
-	runtimeBody := buildRuntimeProjectionEventBody(projectID, rev, runtime)
 	body, err := json.Marshal(protocol.SessionProjectionEventBody{
 		ProjectID: naming.ProjectID(projectID),
 		Revision:  rev,
@@ -1780,7 +1786,7 @@ func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, pr
 			State:     protocol.SessionLifecycleState(session.State),
 			UpdatedAt: session.UpdatedAt,
 		},
-		Runtime: &runtimeBody,
+		Runtime: runtimeBody,
 	})
 	if err != nil {
 		if d.cfg.Logger != nil {

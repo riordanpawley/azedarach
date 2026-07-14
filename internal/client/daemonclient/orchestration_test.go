@@ -21,6 +21,9 @@ func TestTypedOrchestratorSessionCommands(t *testing.T) {
 		{"attach", protocol.CommandOrchestratorSessionAttach, func(c *Client, r protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
 			return c.AttachOrchestratorSession(context.Background(), r)
 		}},
+		{"stop", protocol.CommandOrchestratorSessionStop, func(c *Client, r protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
+			return c.StopOrchestratorSession(context.Background(), r)
+		}},
 		{"status", protocol.CommandOrchestratorSessionStatus, func(c *Client, r protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
 			return c.OrchestratorSessionStatus(context.Background(), r)
 		}},

@@ -387,7 +387,7 @@ func printHelpForPath(path []string) bool {
 		fmt.Println("Usage: az orchestrate <status|start|group|watch|observe|prompt|message|capture|complete-check|integrate|close-session> [arguments]")
 	case "orchestrator-session":
 		fmt.Println(orchestratorSessionUsage)
-	case "orchestrator-session start", "orchestrator-session attach", "orchestrator-session status":
+	case "orchestrator-session start", "orchestrator-session attach", "orchestrator-session stop", "orchestrator-session status":
 		fmt.Println(orchestratorSessionUsage)
 	case "orchestrate status":
 		fmt.Println(orchestrateStatusUsage)
@@ -504,7 +504,7 @@ const (
 	orchestrateMessageUsage       = "Usage: az orchestrate message --root <issue-id> --issue <issue-id> --body <text> [--type <event-type>] [--force-self-delivery] [--project <project-id>] [--json]"
 	orchestrateCaptureUsage       = "Usage: az orchestrate capture --issue <issue-id> [--project <project-id>] [--lines N] [--raw] [--json]"
 	orchestrateCompleteCheckUsage = "Usage: az orchestrate complete-check [--root <issue-id>] [--project <project-id>] [--json]"
-	orchestratorSessionUsage      = "Usage: az orchestrator-session <start|attach|status> [--root <issue-id>] [--project <project-id>] [--json]"
+	orchestratorSessionUsage      = "Usage: az orchestrator-session <start|attach|stop|status> [--root <issue-id>] [--project <project-id>] [--json]"
 	orchestrateIntegrateUsage     = "Usage: az orchestrate integrate --issue <issue-id> [--apply] [--project <project-id>] [--json]"
 	orchestrateCloseSessionUsage  = "Usage: az orchestrate close-session --issue <issue-id> [--project <project-id>] [--json]"
 )

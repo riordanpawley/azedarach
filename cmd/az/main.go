@@ -86,17 +86,17 @@ func main() {
 	switch command {
 	case "orchestrator-session":
 		if len(commandArgs) == 0 {
-			fmt.Fprintln(os.Stderr, "Usage: az orchestrator-session <start|attach|status> [--root <issue-id>] [--project <project-id>] [--json]")
+			fmt.Fprintln(os.Stderr, "Usage: az orchestrator-session <start|attach|stop|status> [--root <issue-id>] [--project <project-id>] [--json]")
 			os.Exit(1)
 		}
 		subcommand := commandArgs[0]
-		if subcommand != "start" && subcommand != "attach" && subcommand != "status" {
+		if subcommand != "start" && subcommand != "attach" && subcommand != "stop" && subcommand != "status" {
 			fmt.Fprintf(os.Stderr, "Unknown orchestrator-session command: %s\n", subcommand)
 			os.Exit(1)
 		}
 		opts, err := cli.ParseOrchestratorSessionArgs(subcommand, commandArgs[1:])
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "Usage: az orchestrator-session <start|attach|status> [--root <issue-id>] [--project <project-id>] [--json]")
+			fmt.Fprintln(os.Stderr, "Usage: az orchestrator-session <start|attach|stop|status> [--root <issue-id>] [--project <project-id>] [--json]")
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}

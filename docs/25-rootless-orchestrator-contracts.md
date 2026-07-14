@@ -44,7 +44,7 @@ daemon command exists.
 
 The supported operator surfaces are:
 
-- `az orchestrator-session start|attach|status [--root <issue>]`
+- `az orchestrator-session start|attach|stop|status [--root <issue>] [--project <project>]`
 - `az orchestrate status|start|watch|complete-check [--root <issue>]`
 - `az interaction list|get|discuss|answer|resolve|withdraw`
 - the TUI project overview for project-level start, attach, status, and health
@@ -54,6 +54,18 @@ The supported operator surfaces are:
 `attach` is declarative: the daemon resumes or recovers the exact-scope session
 and returns its tmux target. The CLI may then exec the user's terminal attach;
 the daemon handler must never perform a blocking terminal attach.
+
+`stop` is also exact-scope and daemon-authoritative. It first records paused
+lease intent without releasing the durable scope or cursor, then requests agent
+exit, closes the residual shell, and falls back to bounded tmux cleanup. Missing
+and already-stopped scopes are idempotent results. Session-end hooks and hybrid
+reconciliation repair interrupted exits to paused plus stopped runtime intent,
+while status reports stale runtime without mutating lifecycle, so reconcile
+cannot recreate a deliberately stopped orchestrator. A paused lease paired with
+that exact stopped session intent is an operator pause and is excluded from
+automatic lifecycle wake/evaluation until an explicit start records running
+intent again; complete-grace pauses without stopped intent keep their existing
+event-driven wake behavior.
 
 ## End-to-end acceptance matrix
 

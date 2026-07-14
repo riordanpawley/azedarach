@@ -31,6 +31,13 @@ func (d *Daemon) reconcileOrchestratorLifecycles(ctx context.Context, projectID 
 		return fmt.Errorf("refresh orchestrator lifecycle projection: %w", err)
 	}
 	for _, lease := range leases {
+		explicitlyStopped, err := orchestratorLeaseHasStoppedSessionIntent(ctx, store, lease)
+		if err != nil {
+			return err
+		}
+		if lease.Lifecycle == domain.OrchestratorPaused && explicitlyStopped {
+			continue
+		}
 		facts, latestChange, err := d.orchestratorLifecycleFacts(ctx, lease, projectID)
 		if err != nil {
 			return err
@@ -57,6 +64,15 @@ func (d *Daemon) reconcileOrchestratorLifecycles(ctx context.Context, projectID 
 		}
 	}
 	return nil
+}
+
+func orchestratorLeaseHasStoppedSessionIntent(ctx context.Context, store *daemonstate.RuntimeStateStore, lease daemonstate.OrchestratorScopeLease) (bool, error) {
+	scopeID := orchestrationScopeID(lease.Identity.Scope)
+	session, found, err := store.GetSessionIntent(ctx, lease.Identity.ProjectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, scopeID)
+	if err != nil {
+		return false, fmt.Errorf("refresh orchestrator stop intent for %s: %w", scopeID, err)
+	}
+	return found && session.ID == lease.SessionID && daemonstate.NormalizeSessionState(session.State) == daemonstate.SessionStateStopped, nil
 }
 
 func (d *Daemon) enforceRootedOrchestratorContinuation(ctx context.Context, authority *daemonstate.OrchestratorLeaseAuthority, lease daemonstate.OrchestratorScopeLease, projectID string, now time.Time, policy domain.OrchestratorLifecyclePolicy) error {
@@ -139,6 +155,13 @@ func (d *Daemon) wakePausedOrchestratorsForRecovery(ctx context.Context, project
 			continue
 		}
 		if lease.Lifecycle != domain.OrchestratorPaused {
+			continue
+		}
+		explicitlyStopped, err := orchestratorLeaseHasStoppedSessionIntent(ctx, store, lease)
+		if err != nil {
+			return err
+		}
+		if explicitlyStopped {
 			continue
 		}
 		if _, _, err := authority.Wake(ctx, lease.Identity, now, domain.OrchestratorWakeRecovery, policy); err != nil {
