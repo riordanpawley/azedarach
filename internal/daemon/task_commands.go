@@ -84,12 +84,6 @@ type taskListSnapshotLoad struct {
 	err    error
 }
 
-type taskListRuntimeRefresh struct {
-	done      chan struct{}
-	runtimeAt time.Time
-	err       error
-}
-
 type taskListSnapshotLoadResult struct {
 	Revision      uint64
 	LastCheckedAt time.Time
@@ -609,51 +603,15 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 	}, nil
 }
 
-func (d *Daemon) refreshTaskListSessionRuntimeState(ctx context.Context, projectID string) (time.Time, bool, error) {
-	if d == nil || d.tmux == nil || d.sessionRuntimeStateStoreIfConfigured(projectID) == nil {
+func (d *Daemon) refreshTaskListSessionRuntimeState(_ context.Context, projectID string) (time.Time, bool, error) {
+	if d == nil {
 		return time.Time{}, false, nil
 	}
 	projectID = d.canonicalProjectID(projectID)
-	now := timeNow().UTC()
-
 	d.taskListRuntimeRefreshMu.Lock()
-	if d.taskListRuntimeLastRefresh == nil {
-		d.taskListRuntimeLastRefresh = map[string]time.Time{}
-	}
-	if d.taskListRuntimeRefreshes == nil {
-		d.taskListRuntimeRefreshes = map[string]*taskListRuntimeRefresh{}
-	}
 	lastRefresh := d.taskListRuntimeLastRefresh[projectID]
-	if !lastRefresh.IsZero() && now.Sub(lastRefresh) < taskListRuntimeRefreshTTL {
-		d.taskListRuntimeRefreshMu.Unlock()
-		return lastRefresh, false, nil
-	}
-	if refresh := d.taskListRuntimeRefreshes[projectID]; refresh != nil {
-		d.taskListRuntimeRefreshMu.Unlock()
-		select {
-		case <-ctx.Done():
-			return time.Time{}, false, ctx.Err()
-		case <-refresh.done:
-			return refresh.runtimeAt, false, refresh.err
-		}
-	}
-	refresh := &taskListRuntimeRefresh{done: make(chan struct{})}
-	d.taskListRuntimeRefreshes[projectID] = refresh
 	d.taskListRuntimeRefreshMu.Unlock()
-
-	refresh.runtimeAt = now
-	refresh.err = d.refreshExistingSessionRuntimeState(ctx, projectID)
-
-	d.taskListRuntimeRefreshMu.Lock()
-	d.taskListRuntimeLastRefresh[projectID] = now
-	delete(d.taskListRuntimeRefreshes, projectID)
-	close(refresh.done)
-	d.taskListRuntimeRefreshMu.Unlock()
-
-	if refresh.err != nil {
-		return now, true, refresh.err
-	}
-	return now, true, nil
+	return lastRefresh, false, nil
 }
 
 func cloneTaskListSnapshotLoadResult(result taskListSnapshotLoadResult) taskListSnapshotLoadResult {
@@ -734,23 +692,6 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 			d.cfg.Logger.Warn("daemon task get failed", "project_id", projectID, "task_id", taskID, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
 		}
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-	}
-	contextTaskIDs := taskIDsFromTasks(tasks)
-	refreshSessionStartedAt := time.Now()
-	if err := d.refreshIssueSessionRuntimeState(ctx, projectID, contextTaskIDs); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("task get session runtime refresh failed", "project_id", projectID, "task_id", taskID, "context_task_count", len(contextTaskIDs), "error", err)
-	}
-	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.issue_session_refresh", refreshSessionStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "context_task_count", len(contextTaskIDs))
-	if len(contextTaskIDs) > 0 {
-		queryStartedAt = time.Now()
-		tasks, err = issueClient.GetWithDependencyContextRuntimeArchiveMode(ctx, projectID, taskID, issues.ArchiveMode(archiveMode))
-		latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.issue_store_get_dependency_context_runtime_after_session_refresh", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID)
-		if err != nil {
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Warn("daemon task get reload after session refresh failed", "project_id", projectID, "task_id", taskID, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
-			}
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-		}
 	}
 	freshnessStartedAt := time.Now()
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
@@ -837,20 +778,6 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 				d.refreshIssueWorktreeState(ctx, projectID, taskID)
 			}
 			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get_many.direct_dependent_worktree_refresh", worktreeRefreshStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(contextTaskIDs))
-		}
-		refreshSessionStartedAt := time.Now()
-		if err := d.refreshIssueSessionRuntimeState(ctx, projectID, contextTaskIDs); err != nil && d.cfg.Logger != nil {
-			d.cfg.Logger.Debug("task get-many session runtime refresh failed", "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(contextTaskIDs), "error", err)
-		}
-		latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get_many.issue_session_refresh", refreshSessionStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(contextTaskIDs))
-	}
-	if !cmd.MetadataOnly && len(contextTaskIDs) > 0 {
-		tasks, err = issueClient.GetManyWithDependencyContextRuntime(ctx, projectID, taskIDs, contextOptions...)
-		if err != nil {
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Warn("daemon task get-many reload after session refresh failed", "project_id", projectID, "task_count", len(taskIDs), "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
-			}
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 		}
 	}
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
@@ -4867,9 +4794,6 @@ func (result *taskGraphReadinessResult) applySessionStartProgress(progressByIssu
 }
 
 func (d *Daemon) loadTaskGraphDomainTasks(ctx context.Context, projectID string) ([]domain.Task, error) {
-	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("task graph session runtime refresh failed", "project_id", projectID, "error", err)
-	}
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")

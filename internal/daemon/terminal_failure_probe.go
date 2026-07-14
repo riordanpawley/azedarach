@@ -31,13 +31,13 @@ type terminalFailureProbeState struct {
 // eight trailing lines from stale hook-backed busy sessions and caches
 // observations to avoid pane polling or any AI/model request.
 func (d *Daemon) applyTerminalFailureProbes(
-	ctx context.Context,
+	_ context.Context,
 	projectID string,
 	sessions []state.Session,
 	namingScope string,
 	activityByKey map[string]sessionDisplayActivity,
 ) map[string]sessionDisplayActivity {
-	if d.tmux == nil || len(sessions) == 0 || len(activityByKey) == 0 {
+	if len(sessions) == 0 || len(activityByKey) == 0 {
 		return activityByKey
 	}
 	now := timeNow().UTC()
@@ -51,15 +51,43 @@ func (d *Daemon) applyTerminalFailureProbes(
 			continue
 		}
 		probeKey := projectID + "\x00" + session.ID
-		cached, useCached, shouldProbe := d.cachedTerminalFailureProbe(probeKey, activity.UpdatedAt, now)
+		cached, useCached, _ := d.cachedTerminalFailureProbeReadOnly(probeKey, activity.UpdatedAt, now)
 		if useCached {
 			activityByKey[issueKey] = sessionDisplayActivity{Activity: "error", Source: "terminal", UpdatedAt: cached.lastProbe}
 			continue
 		}
-		if !shouldProbe {
+	}
+	return activityByKey
+}
+
+// observeTerminalFailureProbes performs the bounded external pane read owned by
+// the asynchronous observer. Read handlers call applyTerminalFailureProbes,
+// which only projects this cache and never reaches tmux.
+func (d *Daemon) observeTerminalFailureProbes(
+	ctx context.Context,
+	projectID string,
+	sessions []state.Session,
+	namingScope string,
+	activityByKey map[string]sessionDisplayActivity,
+) {
+	if d.tmux == nil || len(sessions) == 0 || len(activityByKey) == 0 {
+		return
+	}
+	now := timeNow().UTC()
+	sessionByKey := sessionProjectionAggregateByIssueKey(sessions, namingScope)
+	for issueKey, activity := range activityByKey {
+		if activity.Activity != "busy" || activity.Source != "hooks" || activity.UpdatedAt.IsZero() || now.Sub(activity.UpdatedAt) < terminalFailureProbeStaleAfter {
 			continue
 		}
-
+		session, ok := sessionByKey[issueKey]
+		if !ok || session.ID == "" {
+			continue
+		}
+		probeKey := projectID + "\x00" + session.ID
+		_, cached, shouldProbe := d.cachedTerminalFailureProbe(probeKey, activity.UpdatedAt, now)
+		if cached || !shouldProbe {
+			continue
+		}
 		output, err := d.tmux.CapturePane(ctx, session.ID, terminalFailureProbeLines)
 		if err != nil {
 			if d.cfg.Logger != nil {
@@ -69,14 +97,20 @@ func (d *Daemon) applyTerminalFailureProbes(
 		}
 		reason, detected := domain.ClassifyAgentTerminalOutput(output)
 		fingerprint := sha256.Sum256([]byte(output))
-		if d.recordTerminalFailureProbe(probeKey, activity.UpdatedAt, now, fingerprint, reason, detected) {
-			activityByKey[issueKey] = sessionDisplayActivity{Activity: "error", Source: "terminal", UpdatedAt: now}
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Warn("agent terminal failure detected from sparse pane probe", "project_id", projectID, "session_id", session.ID, "reason", reason)
-			}
+		if d.recordTerminalFailureProbe(probeKey, activity.UpdatedAt, now, fingerprint, reason, detected) && d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("agent terminal failure detected from asynchronous sparse pane probe", "project_id", projectID, "session_id", session.ID, "reason", reason)
 		}
 	}
-	return activityByKey
+}
+
+func (d *Daemon) cachedTerminalFailureProbeReadOnly(key string, hookAt, now time.Time) (terminalFailureProbeState, bool, bool) {
+	d.terminalFailureProbeMu.Lock()
+	defer d.terminalFailureProbeMu.Unlock()
+	probe := d.terminalFailureProbes[key]
+	if probe.detected && !hookAt.After(probe.detectedHookAt) {
+		return probe, true, false
+	}
+	return probe, false, !now.Before(probe.nextProbe)
 }
 
 func (d *Daemon) cachedTerminalFailureProbe(key string, hookAt, now time.Time) (terminalFailureProbeState, bool, bool) {

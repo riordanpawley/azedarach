@@ -7456,6 +7456,9 @@ func TestSessionStatusIgnoresStaleProjectionWhenTmuxHasNoSession(t *testing.T) {
 			projectID: issuesClient,
 		},
 	}
+	if err := daemon.observeTmuxProject(ctx, projectID, newTmuxRuntimeLiveness(nil, nil), domain.CurrentTmuxObservationProvenance(time.Now().UTC().Add(time.Second))); err != nil {
+		t.Fatalf("apply asynchronous missing-session observation: %v", err)
+	}
 
 	resp, err := daemon.handleSessionStatus(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
@@ -7482,6 +7485,9 @@ func TestSessionStatusIgnoresStaleProjectionWhenTmuxHasNoSession(t *testing.T) {
 	}
 	if !strings.Contains(payload.Output, "No active sessions") {
 		t.Fatalf("status output = %q, want no active sessions", payload.Output)
+	}
+	if got := tmuxRunner.listSessionCallCount(); got != 0 {
+		t.Fatalf("session.status tmux inventory calls = %d, want 0", got)
 	}
 }
 

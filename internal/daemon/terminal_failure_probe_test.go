@@ -48,6 +48,11 @@ func TestEnrichTasksWithSessionStateAppliesTerminalFailureProbe(t *testing.T) {
 		tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore(),
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
 	}
+	projected, err := runtimeStore.ListSessionStates(context.Background(), projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.observeTerminalFailureProbes(context.Background(), projectID, projected, projectID, sessionDisplayActivityByIssueKeyFromSessions(projected, projectID))
 
 	tasks := d.enrichTasksWithSessionState(context.Background(), projectID, []domain.Task{{
 		ID: naming.IssueID(issueID), Title: "Hook-silent capacity", Status: domain.StatusInProgress,
@@ -96,6 +101,7 @@ func TestApplyTerminalFailureProbesClassifiesHookSilentCapacityScreen(t *testing
 	sessions := []daemonstate.Session{{ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning}}
 	activity := map[string]sessionDisplayActivity{sessionKey(issueID): {Activity: "busy", Source: "hooks", UpdatedAt: now.Add(-time.Minute)}}
 
+	d.observeTerminalFailureProbes(context.Background(), projectID, sessions, projectID, activity)
 	got := d.applyTerminalFailureProbes(context.Background(), projectID, sessions, projectID, activity)
 	if got[sessionKey(issueID)].Activity != "error" || got[sessionKey(issueID)].Source != "terminal" {
 		t.Fatalf("activity = %+v, want terminal error", got[sessionKey(issueID)])
@@ -108,6 +114,7 @@ func TestApplyTerminalFailureProbesClassifiesHookSilentCapacityScreen(t *testing
 		t.Fatalf("capture args = %v, want bounded 8-line tail", args)
 	}
 
+	d.tmux = nil
 	got = d.applyTerminalFailureProbes(context.Background(), projectID, sessions, projectID, map[string]sessionDisplayActivity{
 		sessionKey(issueID): {Activity: "busy", Source: "hooks", UpdatedAt: now.Add(-time.Minute)},
 	})
@@ -132,6 +139,7 @@ func TestApplyTerminalFailureProbesSkipsFreshAndOrdinaryActivity(t *testing.T) {
 		t.Fatalf("fresh activity = %+v, calls = %d; want busy without capture", got[sessionKey(issueID)], runner.callCount())
 	}
 	stale := map[string]sessionDisplayActivity{sessionKey(issueID): {Activity: "busy", Source: "hooks", UpdatedAt: now.Add(-time.Minute)}}
+	d.observeTerminalFailureProbes(context.Background(), projectID, sessions, projectID, stale)
 	if got := d.applyTerminalFailureProbes(context.Background(), projectID, sessions, projectID, stale); got[sessionKey(issueID)].Activity != "busy" || runner.callCount() != 1 {
 		t.Fatalf("ordinary stale activity = %+v, calls = %d; want busy after one capture", got[sessionKey(issueID)], runner.callCount())
 	}
@@ -151,15 +159,19 @@ func TestApplyTerminalFailureProbesNewHookSupersedesHandledScreen(t *testing.T) 
 	projectID, issueID := "proj", "dae"
 	sessions := []daemonstate.Session{{ID: naming.CanonicalSessionID(projectID, issueID), IssueID: issueID, State: daemonstate.SessionStateRunning}}
 	oldHookAt := now.Add(-time.Minute)
-	d.applyTerminalFailureProbes(context.Background(), projectID, sessions, projectID, map[string]sessionDisplayActivity{
+	oldActivity := map[string]sessionDisplayActivity{
 		sessionKey(issueID): {Activity: "busy", Source: "hooks", UpdatedAt: oldHookAt},
-	})
+	}
+	d.observeTerminalFailureProbes(context.Background(), projectID, sessions, projectID, oldActivity)
+	d.applyTerminalFailureProbes(context.Background(), projectID, sessions, projectID, oldActivity)
 
 	newHookAt := now.Add(20 * time.Second)
 	now = now.Add(40 * time.Second)
-	got := d.applyTerminalFailureProbes(context.Background(), projectID, sessions, projectID, map[string]sessionDisplayActivity{
+	newActivity := map[string]sessionDisplayActivity{
 		sessionKey(issueID): {Activity: "busy", Source: "hooks", UpdatedAt: newHookAt},
-	})
+	}
+	d.observeTerminalFailureProbes(context.Background(), projectID, sessions, projectID, newActivity)
+	got := d.applyTerminalFailureProbes(context.Background(), projectID, sessions, projectID, newActivity)
 	if got[sessionKey(issueID)].Activity != "busy" {
 		t.Fatalf("activity after newer hook = %+v, want busy", got[sessionKey(issueID)])
 	}

@@ -82,6 +82,7 @@ This directory primarily contains **developer/internal documentation**.
 - `orchestration.project_completion`: `hybrid` (refreshed issue/review/interaction/session projections compared with live tmux runtime).
 - `orchestration.parent_continuation`: `hybrid` (durable rooted lease/cursor + refreshed direct nested-root, interaction, completion, and session projections compared with live tmux before a wake prompt is delivered).
 - `runtime.reconcile` includes `invariant_sources` debug output reflecting the active source-policy matrix.
+- `external.tmux_observation` is a daemon-owned `tmux` source: bounded inventory and sparse pane observation publish coalesced current-state projection changes; snapshot/watch readers never poll tmux and routine observations never become semantic history.
 - Treat this as the required cross-daemon safety contract for session/worktree/runtime invariants.
 
 ## Spec Records

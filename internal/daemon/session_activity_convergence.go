@@ -101,9 +101,12 @@ func (d *Daemon) reconcileStaleBusySessionActivity(ctx context.Context, projectI
 		if !applied {
 			continue
 		}
-		writer := d.runtimeProjectionStateWriter()
+		provenance := domain.CurrentTmuxObservationProvenance(now)
+		if err := domain.ValidateCurrentExternalObservation(provenance, domain.ExternalObservationProductSessionRuntime); err != nil {
+			return converged, err
+		}
 		for _, changedSession := range changed {
-			writer.PublishSessionProjectionEvent(ctx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, changedSession)
+			d.publishObservedSessionProjectionEvent(ctx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, changedSession, provenance)
 		}
 		converged++
 		if d.cfg.Logger != nil {

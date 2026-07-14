@@ -51,6 +51,7 @@ const (
 	daemonInvariantOrchestrationClaimStart daemonInvariantID = "orchestration.claim_start"
 	daemonInvariantOrchestrationLoop       daemonInvariantID = "orchestration.project_loop"
 	daemonInvariantProjectionDeltaStream   daemonInvariantID = "projection.delta_stream"
+	daemonInvariantTmuxObservation         daemonInvariantID = "external.tmux_observation"
 )
 
 var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
@@ -90,6 +91,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantOrchestrationClaimStart: daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationLoop:       daemonInvariantSourceProjection,
 	daemonInvariantProjectionDeltaStream:   daemonInvariantSourceProjection,
+	daemonInvariantTmuxObservation:         daemonInvariantSourceTmux,
 }
 
 func sourceForInvariant(id daemonInvariantID) daemonInvariantSource {
