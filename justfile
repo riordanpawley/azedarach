@@ -5,6 +5,12 @@ default:
 build-install-run *ARGS:
     ./scripts/build-install-run.sh {{ARGS}}
 
+jaeger-inventory:
+    ./scripts/jaeger-local.sh inventory
+
+jaeger-cleanup *ARGS:
+    ./scripts/jaeger-local.sh cleanup {{ARGS}}
+
 # Backward-compatible alias. Prefer build-install-run in new automation/docs.
 build-link-run *ARGS:
     ./scripts/build-install-run.sh {{ARGS}}
@@ -62,10 +68,18 @@ test-boundary:
 test-build-contract:
     ./scripts/test-build-artifact-isolation.sh
 
+test-jaeger-contract:
+    ./scripts/test-jaeger-local.sh
+
+# Requires a healthy local Docker/Podman engine and the pinned Jaeger image.
+test-jaeger-workload:
+    ./scripts/test-jaeger-workload.sh
+
 merge-gate:
     just build
     just test
     just test-build-contract
+    just test-jaeger-contract
     just check-boundaries
 
 # Aggregate daemon race validation has a larger budget than focused race tests.

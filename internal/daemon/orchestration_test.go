@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -367,6 +368,103 @@ func TestClaimAndSubmitStartCompensatesInvalidLaunchResult(t *testing.T) {
 	if len(pending) != 0 {
 		t.Fatalf("failed launch left pending start attempts: %+v", pending)
 	}
+}
+
+func TestClaimAndSubmitStartUsesFreshOperationForNewIntentAfterCompensation(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	client := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Worker", Status: domain.StatusOpen, Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	operationByDedupe := map[string]string{}
+	submittedPayloads := map[string]json.RawMessage{}
+	submitCalls := 0
+	authority := daemonOrchestrationAuthority{
+		daemon: &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}},
+		submitStart: func(_ context.Context, req protocol.RequestEnvelope) protocol.ResponseEnvelope {
+			submitCalls++
+			var body protocol.OperationSubmitRequestBody
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatalf("decode operation submit: %v", err)
+			}
+			operationID := operationByDedupe[body.DedupeKey]
+			created := operationID == ""
+			if created {
+				operationID = fmt.Sprintf("op-%d", len(operationByDedupe)+1)
+				operationByDedupe[body.DedupeKey] = operationID
+				submittedPayloads[operationID] = append(json.RawMessage(nil), body.Payload...)
+			}
+			encoded, err := json.Marshal(protocol.OperationSubmitResponseBody{Created: created, Operation: protocol.OperationRecord{
+				OperationID: naming.OperationID(operationID), ProjectID: "project", IssueID: naming.IssueID(issueID),
+				Kind: "session.start", DedupeKey: body.DedupeKey, State: protocol.OperationStateQueued,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, OK: true, Body: encoded}
+		},
+	}
+
+	firstRequest := protocol.OrchestrationIntentRequest{IntentKey: "operator-attempt-1", ActorID: "orchestrator", RepoDir: t.TempDir()}
+	first, err := authority.claimAndSubmitStartWithPrompt(ctx, "project", firstRequest, issueID, "obsolete prompt")
+	if err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	if err := client.CloseDB(); err != nil {
+		t.Fatalf("close issue store before restart replay: %v", err)
+	}
+	client = newMigratedIssueClientAtPath(t, dbPath, slog.Default())
+	authority.daemon.issueClientsByProject["project"] = client
+
+	replayed, err := authority.claimAndSubmitStartWithPrompt(ctx, "project", firstRequest, issueID, "ignored replay payload")
+	if err != nil {
+		t.Fatalf("same live intent after restart: %v", err)
+	}
+	if replayed.OperationID != first.OperationID {
+		t.Fatalf("same live intent operation = %s, want %s", replayed.OperationID, first.OperationID)
+	}
+	authority.daemon.reconcileOrchestrationStartOperation(ctx, daemonops.Record{
+		ID: first.OperationID, ProjectID: "project", IssueID: issueID, Kind: "session.start",
+		DedupeKey: operationDedupeKeyForTest(t, submittedPayloads, first.OperationID, operationByDedupe), State: daemonops.StateFailed,
+		ErrorMessage: "obsolete launch failed",
+	})
+
+	secondRequest := protocol.OrchestrationIntentRequest{IntentKey: "operator-attempt-2", ActorID: "orchestrator", RepoDir: firstRequest.RepoDir}
+	second, err := authority.claimAndSubmitStartWithPrompt(ctx, "project", secondRequest, issueID, "current prompt")
+	if err != nil {
+		t.Fatalf("retry with fresh intent: %v", err)
+	}
+	if second.OperationID == first.OperationID {
+		t.Fatalf("fresh intent replayed compensated operation %s", second.OperationID)
+	}
+	if submitCalls != 3 || len(operationByDedupe) != 2 {
+		t.Fatalf("submit calls=%d operation dedupe entries=%d, want one replay and two distinct attempts", submitCalls, len(operationByDedupe))
+	}
+	var payload sessionCommandBody
+	if err := json.Unmarshal(submittedPayloads[second.OperationID], &payload); err != nil {
+		t.Fatalf("decode retry payload: %v", err)
+	}
+	if payload.Prompt != "current prompt" {
+		t.Fatalf("retry prompt = %q, want current payload", payload.Prompt)
+	}
+}
+
+func operationDedupeKeyForTest(t *testing.T, payloads map[string]json.RawMessage, operationID string, operations map[string]string) string {
+	t.Helper()
+	if _, ok := payloads[operationID]; !ok {
+		t.Fatalf("missing submitted payload for operation %s", operationID)
+	}
+	for dedupeKey, id := range operations {
+		if id == operationID {
+			return dedupeKey
+		}
+	}
+	t.Fatalf("missing dedupe key for operation %s", operationID)
+	return ""
 }
 
 func TestTerminalSessionStartFailureCompensatesOrchestrationClaim(t *testing.T) {

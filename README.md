@@ -28,24 +28,42 @@ Build, link, and run:
 just build-install-run
 ```
 
-This also starts or reuses a local Jaeger container named `azedarach-jaeger`
-for OTLP traces. It prefers `localhost:4318` and `http://localhost:16686`,
-falls back to available localhost ports when those are occupied, and exports
-the discovered OTLP endpoint to the launched daemon and TUI. Set
-`AZEDARACH_SKIP_JAEGER=1` to skip that startup step.
+This also starts or reuses pinned Jaeger v2.19.0 in a local container named
+`azedarach-jaeger`. It prefers OTLP on `localhost:4318` and the UI on
+`localhost:16686`. If those ports or the primary store are unavailable, one
+four-hour, in-memory fallback uses dynamic localhost ports; subsequent runs
+reuse it instead of creating more stores. A detached expiry worker removes the
+fallback at its TTL and invalidates only that fallback's immutable endpoint
+record, so a concurrently recovered primary endpoint is preserved. The discovered OTLP endpoint is
+exported to the launched daemon and TUI. Set `AZEDARACH_SKIP_JAEGER=1` to skip
+startup.
 
-Jaeger starts with recoverable local Badger storage by default
-(`AZEDARACH_JAEGER_STORAGE=badger`) on the named volume
-`azedarach-jaeger-data`, with a container memory limit
-(`AZEDARACH_JAEGER_MEMORY=1g`) and a retention TTL
-(`AZEDARACH_JAEGER_BADGER_TTL=72h`). Set `AZEDARACH_JAEGER_VOLUME` to choose a
-different volume, `AZEDARACH_JAEGER_MEMORY=none` to disable the container memory
-limit, or `AZEDARACH_JAEGER_STORAGE=memory` with
-`AZEDARACH_JAEGER_MAX_TRACES=20000` for throwaway in-memory traces. If the
-existing `azedarach-jaeger` container was OOM-killed or was created with older
-storage settings, `just build-install-run` recreates it with the current defaults.
-Badger retains traces by TTL; it does not guarantee keeping all error traces
-after expiry.
+The default backend is bounded, throwaway memory storage
+(`AZEDARACH_JAEGER_STORAGE=memory`, `AZEDARACH_JAEGER_MAX_TRACES=2000`) with a
+1 GiB container limit and a 768 MiB ingestion limiter. For explicitly durable
+local traces, set `AZEDARACH_JAEGER_STORAGE=badger`; it reuses the single named
+volume `azedarach-jaeger-data` with a 24-hour TTL. Override that store with
+`AZEDARACH_JAEGER_VOLUME`, but do not select a legacy fallback volume unless
+you intend to preserve it. An OOM-killed primary is left intact for manual
+recovery while startup routes new traces to the ephemeral fallback; it is not
+blindly reattached to the store that caused the failure.
+
+Inventory managed fallbacks and inactive legacy PID volumes before cleanup:
+
+```bash
+just jaeger-inventory
+just jaeger-cleanup --confirm
+```
+
+Cleanup never removes the selected primary store, a volume attached to any
+container, or an unrelated volume. When querying Jaeger, start with a 15-minute
+window and at most 10 traces, filter by service and operation, and widen one
+dimension at a time. A result limit bounds trace count, not spans per trace;
+export an important trace by ID before experimenting with broader searches.
+Maintainers with a healthy local container engine can exercise the configured
+memory budget with `just test-jaeger-workload`; it ingests and queries a
+15,000-span trace in an isolated ephemeral collector and fails if the collector
+exits or is OOM-killed.
 
 Build and link without starting interactive TUI:
 
