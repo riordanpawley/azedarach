@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -100,6 +101,83 @@ func TestMailWatchRecoversReviewReadyResubmissionsExactlyOnce(t *testing.T) {
 	}
 	if len(watched) != 1 || watched[0].Seq != 2 || watched[0].IssueID.String() != child {
 		t.Fatalf("watched = %+v, want watch-only consumer to receive resubmission", watched)
+	}
+}
+
+func TestMailSendProjectsStewardshipEventsWithoutProjectMailboxReads(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	root, err := client.Create(ctx, issues.CreateTaskParams{Title: "root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := client.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInProgress, ParentID: &root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+	evidenceBody, err := json.Marshal(mustWorkerEvidencePayload(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []protocol.MailSendCommandBody{
+		{RepoDir: repoDir, ParentIssue: root, IssueID: naming.IssueID(child), Type: "worker-progress", From: "worker", To: "orchestrator", Body: "progress"},
+		{RepoDir: repoDir, ParentIssue: root, IssueID: naming.IssueID(child), Type: "worker-blocked", From: "worker", To: "orchestrator", Body: "blocked"},
+		{RepoDir: repoDir, ParentIssue: root, IssueID: naming.IssueID(child), Type: "worker-integration-ready", From: "worker", To: "orchestrator", Body: string(evidenceBody)},
+	} {
+		resp, handleErr := d.handleMailSend(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: "project"}, Body: mustMarshal(t, event)})
+		if handleErr != nil || !resp.OK {
+			t.Fatalf("mail send %s: resp=%+v err=%v", event.Type, resp, handleErr)
+		}
+	}
+	for i := range 60 {
+		if _, err := client.AppendIssueObservationEvent(ctx, child, issues.IssueObservationEventParams{
+			Type: domain.IssueEventIssueDetailsChanged, ObservedAt: time.Now().UTC().Add(time.Duration(i) * time.Millisecond), Source: "noise", Payload: map[string]any{"index": i},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rootedScope, err := domain.RootedOrchestrationScope(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rooted, err := (daemonOrchestrationAuthority{daemon: d}).Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: rootedScope, ActorID: "orchestrator", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mailboxReads := 0
+	d.taskGraphMailboxRead = func(string, string) ([]daemonMailEvent, error) {
+		mailboxReads++
+		return nil, fmt.Errorf("project scope must not read mailbox files")
+	}
+	project, err := (daemonOrchestrationAuthority{daemon: d}).Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mailboxReads != 0 {
+		t.Fatalf("project mailbox reads = %d, want 0", mailboxReads)
+	}
+	if len(rooted.RecentEvents) != 3 || len(project.RecentEvents) != 3 {
+		t.Fatalf("rooted=%+v project=%+v, want three stewardship events despite noise", rooted.RecentEvents, project.RecentEvents)
+	}
+	for i := range rooted.RecentEvents {
+		rootedEvent, projectEvent := rooted.RecentEvents[i], project.RecentEvents[i]
+		rootedPayloadJSON, rootedErr := json.Marshal(rootedEvent.Payload)
+		projectPayloadJSON, projectErr := json.Marshal(projectEvent.Payload)
+		var rootedPayload, projectPayload any
+		if rootedErr == nil {
+			rootedErr = json.Unmarshal(rootedPayloadJSON, &rootedPayload)
+		}
+		if projectErr == nil {
+			projectErr = json.Unmarshal(projectPayloadJSON, &projectPayload)
+		}
+		rootedEvent.Payload, projectEvent.Payload = nil, nil
+		if rootedErr != nil || projectErr != nil || !reflect.DeepEqual(projectEvent, rootedEvent) || !reflect.DeepEqual(projectPayload, rootedPayload) {
+			t.Fatalf("event %d mismatch:\nrooted=%+v\nproject=%+v", i, rooted.RecentEvents[i], project.RecentEvents[i])
+		}
 	}
 }
 
@@ -206,7 +284,7 @@ func TestMailConcurrentSendDoesNotWaitForReviewReadyReplayLoad(t *testing.T) {
 	})
 	sendDone := make(chan protocol.ResponseEnvelope, 1)
 	go func() {
-		resp, _ := d.handleMailSend(ctx, protocol.RequestEnvelope{Body: sendBody})
+		resp, _ := d.handleMailSend(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: "project"}, Body: sendBody})
 		sendDone <- resp
 	}()
 	select {

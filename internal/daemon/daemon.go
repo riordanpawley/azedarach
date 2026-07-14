@@ -199,7 +199,7 @@ type Daemon struct {
 	orchestrationProjectionExported      func()
 	taskGraphOperationList               func(context.Context, daemonops.Query) ([]daemonops.Record, error)
 	taskGraphUnresolvedInteractionIDs    func(context.Context, string) (map[string]struct{}, error)
-	taskGraphObservationEvents           func(context.Context, string, []string) map[string][]domain.IssueObservationEvent
+	taskGraphObservationEvents           func(context.Context, string, []string) issues.ProjectIssueObservationCapture
 	taskGraphWorktrees                   func(context.Context, string) ([]git.Worktree, error)
 	taskGraphMailboxRead                 func(string, string) ([]daemonMailEvent, error)
 	reviewLeaseReleasedBeforeClose       func(context.Context, string, string) error

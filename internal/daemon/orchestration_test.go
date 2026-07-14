@@ -970,15 +970,16 @@ func TestProjectOrchestrationSnapshotCapturesAuxiliaryReadinessInputsOnce(t *tes
 		interactionReads++
 		return nil, nil
 	}
-	d.taskGraphObservationEvents = func(_ context.Context, _ string, issueIDs []string) map[string][]domain.IssueObservationEvent {
+	d.taskGraphObservationEvents = func(_ context.Context, _ string, issueIDs []string) issues.ProjectIssueObservationCapture {
 		observationReads++
 		if len(issueIDs) == 0 {
-			return nil
+			return issues.ProjectIssueObservationCapture{}
 		}
 		issueID := naming.IssueID(issueIDs[0])
-		return map[string][]domain.IssueObservationEvent{
+		events := map[string][]domain.IssueObservationEvent{
 			issueID.String(): {{ID: 77, IssueID: issueID, Type: domain.IssueEventProgressRecorded, ObservedAt: time.Date(2026, 7, 10, 4, 0, 0, 0, time.UTC), Source: "worker", Payload: map[string]any{"body": "still working"}}},
 		}
+		return issues.ProjectIssueObservationCapture{RecentByIssue: events, StewardshipByIssue: events}
 	}
 	d.taskGraphWorktrees = func(context.Context, string) ([]gitservice.Worktree, error) {
 		worktreeReads++
@@ -1014,6 +1015,57 @@ func TestProjectOrchestrationSnapshotCapturesAuxiliaryReadinessInputsOnce(t *tes
 			t.Fatalf("limit %d recent durable events = %+v", limit, snapshot.RecentEvents)
 		}
 	}
+}
+
+func TestContainmentCaptureSurfacesIncompleteBoundedRefGraph(t *testing.T) {
+	root, closed, active := naming.IssueID("root"), naming.IssueID("closed"), naming.IssueID("active")
+	tasks := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusOpen},
+		{ID: closed, ParentID: &root, Type: domain.TypeTask, Status: domain.StatusDone},
+		{ID: active, ParentID: &root, Type: domain.TypeTask, Status: domain.StatusOpen},
+	}
+	runner := &snapshotBoundedGitRunner{}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, git: gitservice.NewClient(runner, slog.Default())}
+	risks := d.captureTaskGraphContainmentRisks(context.Background(), "project", tasks, []string{root.String()}, []gitservice.Worktree{
+		{IssueID: root.String(), Path: "/repo", Branch: "root"},
+		{IssueID: active.String(), Path: "/repo", Branch: "short-active"},
+	})[root.String()]
+	if len(risks) != 1 || risks[0].Classification != "containment_evidence_incomplete" || risks[0].IssueID != active.String() {
+		t.Fatalf("risks = %+v, want explicit incomplete containment risk", risks)
+	}
+	d.git = gitservice.NewClient(snapshotErrorGitRunner{}, slog.Default())
+	risks = d.captureTaskGraphContainmentRisks(context.Background(), "project", tasks, []string{root.String()}, []gitservice.Worktree{
+		{IssueID: root.String(), Path: "/repo", Branch: "root"},
+		{IssueID: active.String(), Path: "/repo", Branch: "short-active"},
+	})[root.String()]
+	if len(risks) != 1 || risks[0].Classification != "containment_evidence_incomplete" || !strings.Contains(risks[0].Message, "graph capture failed") {
+		t.Fatalf("capture failure risks = %+v, want explicit unknown result", risks)
+	}
+}
+
+type snapshotBoundedGitRunner struct{}
+
+type snapshotErrorGitRunner struct{}
+
+func (snapshotErrorGitRunner) Run(context.Context, ...string) (string, error) {
+	return "", fmt.Errorf("git unavailable")
+}
+
+func (*snapshotBoundedGitRunner) Run(_ context.Context, _ ...string) (string, error) {
+	var out strings.Builder
+	for i := range 5000 {
+		hash := fmt.Sprintf("%040x", 5000-i)
+		parent := strings.Repeat("f", 40)
+		if i+1 < 5000 {
+			parent = fmt.Sprintf("%040x", 5000-i-1)
+		}
+		decoration := ""
+		if i == 0 {
+			decoration = "refs/heads/root"
+		}
+		fmt.Fprintf(&out, "\x1e%s\x00%s\x00%s\x00root history %d\n\nroot.txt\n", hash, parent, decoration, i)
+	}
+	return out.String(), nil
 }
 
 type snapshotCountingGitRunner struct {

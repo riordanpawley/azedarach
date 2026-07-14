@@ -47,6 +47,11 @@ type IssueObservationCommandOutcomePair struct {
 	Outcomes      []string
 }
 
+type ProjectIssueObservationCapture struct {
+	RecentByIssue      map[string][]domain.IssueObservationEvent
+	StewardshipByIssue map[string][]domain.IssueObservationEvent
+}
+
 // ListProjectIssueObservationEvents returns the durable project event stream
 // after a cursor. Each issues.Client is already scoped to one project database,
 // so the global event id is a stable project watch cursor across daemon restarts.
@@ -131,6 +136,29 @@ func (c *Client) AppendIssueObservationEvent(ctx context.Context, issueID string
 	return event, nil
 }
 
+// IssueObservationMailEventExists supports idempotent filesystem-mail mirroring
+// while the caller holds the mailbox's per-parent serialization lock.
+func (c *Client) IssueObservationMailEventExists(ctx context.Context, issueID string, eventType domain.IssueObservationEventType, parentIssue string, sequence int64) (bool, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return false, err
+	}
+	var exists bool
+	err = db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM issue_observation_events
+			WHERE issue_id = ? AND event_type = ?
+			  AND json_extract(payload_json, '$.mail_event.parent_issue') = ?
+			  AND CAST(json_extract(payload_json, '$.mail_event.seq') AS INTEGER) = ?
+		)
+	`, strings.TrimSpace(issueID), strings.TrimSpace(string(eventType)), strings.TrimSpace(parentIssue), sequence).Scan(&exists)
+	if err != nil {
+		return false, c.wrapError("find-mail-observation-event", issueID, err)
+	}
+	return exists, nil
+}
+
 func (c *Client) ListIssueObservationEvents(ctx context.Context, issueID string, opts IssueObservationEventListOptions) ([]domain.IssueObservationEvent, error) {
 	db, err := c.dbHandle()
 	if err != nil {
@@ -203,12 +231,23 @@ func (c *Client) ListIssueObservationEvents(ctx context.Context, issueID string,
 // ListIssueObservationEventsForIssues returns the newest bounded event slice
 // for every requested issue with one SQLite query.
 func (c *Client) ListIssueObservationEventsForIssues(ctx context.Context, issueIDs []string, perIssueLimit int) (map[string][]domain.IssueObservationEvent, error) {
+	capture, err := c.CaptureProjectIssueObservationEvents(ctx, issueIDs, perIssueLimit, 0)
+	return capture.RecentByIssue, err
+}
+
+// CaptureProjectIssueObservationEvents returns one bounded snapshot of recent
+// issue evidence plus stewardship events. Stewardship classification happens
+// before its per-issue limit so unrelated lifecycle noise cannot evict mail.
+func (c *Client) CaptureProjectIssueObservationEvents(ctx context.Context, issueIDs []string, perIssueLimit, stewardshipPerIssueLimit int) (ProjectIssueObservationCapture, error) {
 	db, err := c.dbHandle()
 	if err != nil {
-		return nil, err
+		return ProjectIssueObservationCapture{}, err
 	}
 	issueIDs = uniqueIssueIDStrings(issueIDs)
-	out := make(map[string][]domain.IssueObservationEvent, len(issueIDs))
+	out := ProjectIssueObservationCapture{
+		RecentByIssue:      make(map[string][]domain.IssueObservationEvent, len(issueIDs)),
+		StewardshipByIssue: make(map[string][]domain.IssueObservationEvent, len(issueIDs)),
+	}
 	if len(issueIDs) == 0 {
 		return out, nil
 	}
@@ -218,40 +257,76 @@ func (c *Client) ListIssueObservationEventsForIssues(ctx context.Context, issueI
 	if perIssueLimit > 5000 {
 		perIssueLimit = 5000
 	}
+	if stewardshipPerIssueLimit <= 0 {
+		stewardshipPerIssueLimit = perIssueLimit
+	}
+	if stewardshipPerIssueLimit > 5000 {
+		stewardshipPerIssueLimit = 5000
+	}
 	issueIDsJSON, err := json.Marshal(issueIDs)
 	if err != nil {
-		return nil, c.wrapError("list-project-observation-events", "", err)
+		return ProjectIssueObservationCapture{}, c.wrapError("list-project-observation-events", "", err)
+	}
+	stewardshipTypesJSON, err := json.Marshal([]string{
+		string(domain.IssueEventProgressRecorded), string(domain.IssueEventBlockerReported), string(domain.IssueEventEvidenceSubmitted),
+		"worker-progress", "worker.progress", "worker-blocked", "worker.blocked",
+		"worker-integration-ready", "worker.integration.ready", "worker-ready", "worker.ready", "worker-complete", "worker.complete",
+	})
+	if err != nil {
+		return ProjectIssueObservationCapture{}, c.wrapError("list-project-observation-events", "", err)
 	}
 	rows, err := db.QueryContext(ctx, `
 		WITH candidate_issues(issue_id) AS (
 			SELECT DISTINCT TRIM(CAST(value AS TEXT))
 			FROM json_each(?)
 			WHERE type = 'text' AND TRIM(CAST(value AS TEXT)) <> ''
-		), ranked AS (
+		), stewardship_types(event_type) AS (
+			SELECT DISTINCT TRIM(CAST(value AS TEXT))
+			FROM json_each(?)
+			WHERE type = 'text' AND TRIM(CAST(value AS TEXT)) <> ''
+		), classified AS (
 			SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json,
-				ROW_NUMBER() OVER (PARTITION BY issue_id ORDER BY observed_at DESC, id DESC) AS issue_rank
+				CASE WHEN event_type IN (SELECT event_type FROM stewardship_types) THEN 1 ELSE 0 END AS stewardship
 			FROM issue_observation_events
 			JOIN candidate_issues USING (issue_id)
+		), ranked AS (
+			SELECT *,
+				ROW_NUMBER() OVER (PARTITION BY issue_id ORDER BY observed_at DESC, id DESC) AS issue_rank,
+				ROW_NUMBER() OVER (PARTITION BY issue_id, stewardship ORDER BY observed_at DESC, id DESC) AS class_rank
+			FROM classified
 		)
-		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json,
+			issue_rank, stewardship, class_rank
 		FROM ranked
-		WHERE issue_rank <= ?
-		ORDER BY issue_id ASC, issue_rank ASC
-	`, string(issueIDsJSON), perIssueLimit)
+		WHERE issue_rank <= ? OR (stewardship = 1 AND class_rank <= ?)
+		ORDER BY issue_id ASC, observed_at DESC, id DESC
+	`, string(issueIDsJSON), string(stewardshipTypesJSON), perIssueLimit, stewardshipPerIssueLimit)
 	if err != nil {
-		return nil, c.wrapError("list-project-observation-events", "", err)
+		return ProjectIssueObservationCapture{}, c.wrapError("list-project-observation-events", "", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		event, scanErr := scanIssueObservationEvent(rows)
+		var event domain.IssueObservationEvent
+		var issueID, eventType, observedRaw, payloadRaw string
+		var issueRank, stewardship, classRank int
+		scanErr := rows.Scan(&event.ID, &issueID, &eventType, &observedRaw, &event.Source, &event.SourceCommand, &event.OperationID, &event.SessionID, &event.WorktreePath, &payloadRaw, &issueRank, &stewardship, &classRank)
 		if scanErr != nil {
-			return nil, c.wrapError("list-project-observation-events", "", scanErr)
+			return ProjectIssueObservationCapture{}, c.wrapError("list-project-observation-events", "", scanErr)
 		}
-		issueID := event.IssueID.String()
-		out[issueID] = append(out[issueID], event)
+		event, scanErr = decodeIssueObservationEvent(event, issueID, eventType, observedRaw, payloadRaw)
+		if scanErr != nil {
+			return ProjectIssueObservationCapture{}, c.wrapError("list-project-observation-events", "", scanErr)
+		}
+		key := event.IssueID.String()
+		if issueRank <= perIssueLimit {
+			out.RecentByIssue[key] = append(out.RecentByIssue[key], event)
+		}
+		if stewardship == 1 && classRank <= stewardshipPerIssueLimit {
+			out.StewardshipByIssue[key] = append(out.StewardshipByIssue[key], event)
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, c.wrapError("list-project-observation-events", "", err)
+		return ProjectIssueObservationCapture{}, c.wrapError("list-project-observation-events", "", err)
 	}
 	return out, nil
 }
@@ -620,6 +695,10 @@ func scanIssueObservationEvent(scanner issueObservationEventScanner) (domain.Iss
 	); err != nil {
 		return domain.IssueObservationEvent{}, err
 	}
+	return decodeIssueObservationEvent(event, issueID, eventType, observedRaw, payloadRaw)
+}
+
+func decodeIssueObservationEvent(event domain.IssueObservationEvent, issueID, eventType, observedRaw, payloadRaw string) (domain.IssueObservationEvent, error) {
 	parsedIssueID, err := naming.ParseIssueID(issueID)
 	if err != nil {
 		return domain.IssueObservationEvent{}, fmt.Errorf("parse issue id %q: %w", issueID, err)

@@ -109,6 +109,7 @@ type RefGraphSnapshot struct {
 	Order     []string
 	Truncated bool
 	reachable map[string]map[string]struct{}
+	complete  map[string]bool
 }
 
 type RefGraphCommit struct {
@@ -1165,11 +1166,25 @@ func (c *Client) SnapshotRefGraph(ctx context.Context, worktree string, refs []s
 		}
 	}
 	snapshot.reachable = make(map[string]map[string]struct{}, len(refs))
+	snapshot.complete = make(map[string]bool, len(refs))
 	for _, ref := range refs {
 		snapshot.reachable[ref] = snapshot.reachableFrom(snapshot.Tips[ref])
+		snapshot.complete[ref] = snapshot.Tips[ref] != ""
+		for hash := range snapshot.reachable[ref] {
+			if _, captured := snapshot.Commits[hash]; !captured {
+				snapshot.complete[ref] = false
+				break
+			}
+		}
 	}
 	snapshot.Truncated = len(snapshot.Order) >= maxRefGraphSnapshotCommits
 	return snapshot, nil
+}
+
+// RefComplete reports whether the captured graph contains the ref tip and all
+// of its reachable parents. False means containment negatives are unknown.
+func (s RefGraphSnapshot) RefComplete(ref string) bool {
+	return s.complete[strings.TrimSpace(ref)]
 }
 
 func (s RefGraphSnapshot) Contains(ref, hash string) bool {
@@ -1227,6 +1242,9 @@ func (s RefGraphSnapshot) IssueEvidenceByIssue(ref string, issueIDs []string) ma
 	return out
 }
 
+// ChangedFilesExclusive returns a conservative touched-file union for commits
+// reachable only from headRef. Files changed and later reverted remain present
+// so overlap diagnostics prefer false positives over hidden collision risk.
 func (s RefGraphSnapshot) ChangedFilesExclusive(baseRef, headRef string) []string {
 	out := make([]string, 0)
 	for _, hash := range s.Order {

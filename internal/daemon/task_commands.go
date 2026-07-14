@@ -4945,6 +4945,7 @@ type taskGraphReadinessContext struct {
 	failedStartsByIssue    map[string]taskGraphStartFailure
 	containmentRisksByRoot map[string][]taskContainmentRisk
 	issueEventsByIssue     map[string][]domain.IssueObservationEvent
+	stewardshipByIssue     map[string][]domain.IssueObservationEvent
 	mailEventsByRoot       map[string]map[string][]daemonMailEvent
 	initCommandsConfigured bool
 }
@@ -4956,6 +4957,7 @@ func (d *Daemon) captureTaskGraphReadinessContext(ctx context.Context, projectID
 		waitingIssues:          cloneStringStructMap(waitingIssues),
 		containmentRisksByRoot: make(map[string][]taskContainmentRisk, len(roots)),
 		issueEventsByIssue:     make(map[string][]domain.IssueObservationEvent, len(tasks)),
+		stewardshipByIssue:     make(map[string][]domain.IssueObservationEvent, len(tasks)),
 		mailEventsByRoot:       make(map[string]map[string][]daemonMailEvent, len(roots)),
 		initCommandsConfigured: len(d.runtimeConfigForProject(projectID).SessionSyncInitCommands) > 0,
 	}
@@ -4985,14 +4987,21 @@ func (d *Daemon) captureTaskGraphReadinessContext(ctx context.Context, projectID
 	}
 	taskIDs := taskIDsFromTasks(tasks)
 	if d.taskGraphObservationEvents != nil {
-		captured.issueEventsByIssue = d.taskGraphObservationEvents(ctx, projectID, taskIDs)
+		observationCapture := d.taskGraphObservationEvents(ctx, projectID, taskIDs)
+		captured.issueEventsByIssue = observationCapture.RecentByIssue
+		captured.stewardshipByIssue = observationCapture.StewardshipByIssue
 	} else if issueClient := d.issueClientForProject(projectID); issueClient != nil {
-		captured.issueEventsByIssue, err = issueClient.ListIssueObservationEventsForIssues(ctx, taskIDs, 50)
+		observationCapture, captureErr := issueClient.CaptureProjectIssueObservationEvents(ctx, taskIDs, 50, 20)
+		err = captureErr
 		if err != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("readiness context observation capture failed", "project_id", projectID, "issue_count", len(taskIDs), "error", err)
 			}
 			captured.issueEventsByIssue = nil
+			captured.stewardshipByIssue = nil
+		} else {
+			captured.issueEventsByIssue = observationCapture.RecentByIssue
+			captured.stewardshipByIssue = observationCapture.StewardshipByIssue
 		}
 	}
 	return captured, nil
@@ -5359,10 +5368,27 @@ func (d *Daemon) captureTaskGraphContainmentRisks(ctx context.Context, projectID
 	if len(inputs) == 0 {
 		return out
 	}
+	appendIncomplete := func(input rootInputs, active git.Worktree, refs []string, detail string) {
+		message := fmt.Sprintf("containment evidence is incomplete for ref(s) %s; absence of closed-child evidence is unknown", strings.Join(refs, ", "))
+		if strings.TrimSpace(detail) != "" {
+			message += ": " + detail
+		}
+		out[input.rootID.String()] = append(out[input.rootID.String()], taskContainmentRisk{
+			IssueID: active.IssueID, ActiveBranch: active.Branch, RootIssueID: input.rootID.String(), RootBranch: input.rootWorktree.Branch,
+			Classification:   "containment_evidence_incomplete",
+			Message:          message,
+			SuggestedCommand: fmt.Sprintf("inspect or refresh containment for %s and %s before relying on a negative result", input.rootWorktree.Branch, active.Branch),
+		})
+	}
 	graph, err := d.git.SnapshotRefGraph(ctx, worktreePath, refs)
 	if err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("capture containment ref graph failed", "project_id", projectID, "root_count", len(inputs), "error", err)
+		}
+		for _, input := range inputs {
+			for _, active := range input.active {
+				appendIncomplete(input, active, []string{input.rootWorktree.Branch, active.Branch}, "graph capture failed")
+			}
 		}
 		return out
 	}
@@ -5372,6 +5398,21 @@ func (d *Daemon) captureTaskGraphContainmentRisks(ctx context.Context, projectID
 	for _, input := range inputs {
 		rootRef := input.rootWorktree.Branch
 		seen := make(map[string]struct{})
+		rootComplete := graph.RefComplete(rootRef)
+		for _, active := range input.active {
+			activeComplete := graph.RefComplete(active.Branch)
+			if rootComplete && activeComplete {
+				continue
+			}
+			incompleteRefs := make([]string, 0, 2)
+			if !rootComplete {
+				incompleteRefs = append(incompleteRefs, rootRef)
+			}
+			if !activeComplete {
+				incompleteRefs = append(incompleteRefs, active.Branch)
+			}
+			appendIncomplete(input, active, incompleteRefs, "")
+		}
 		closedIssueIDs := make([]string, 0, len(input.closed))
 		for _, closedID := range input.closed {
 			closedIssueIDs = append(closedIssueIDs, closedID.String())

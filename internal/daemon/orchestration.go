@@ -410,7 +410,7 @@ func (a daemonOrchestrationAuthority) buildSnapshot(ctx context.Context, project
 	if err != nil {
 		return protocol.OrchestrationSnapshot{}, fmt.Errorf("capture project readiness context: %w", err)
 	}
-	snapshot.RecentEvents = projectRecentObservationEvents(tasks, readinessContext.issueEventsByIssue)
+	snapshot.RecentEvents = projectRecentObservationEvents(tasks, readinessContext.stewardshipByIssue)
 	for _, rootTask := range roots {
 		root := rootTask.ID.String()
 		snapshot.Roots = append(snapshot.Roots, root)
@@ -481,6 +481,10 @@ func projectRecentObservationEvents(tasks []domain.Task, eventsByIssue map[strin
 			continue
 		}
 		for _, event := range events {
+			if projected, ok := projectedMailEvent(event); ok {
+				recent = append(recent, projected)
+				continue
+			}
 			eventType, visible := projectStewardshipEventType(event.Type)
 			if !visible {
 				continue
@@ -517,6 +521,22 @@ func projectRecentObservationEvents(tasks []domain.Task, eventsByIssue map[strin
 		recent = recent[len(recent)-recentLimit:]
 	}
 	return recent
+}
+
+func projectedMailEvent(event domain.IssueObservationEvent) (protocol.MailEvent, bool) {
+	raw, ok := event.Payload["mail_event"]
+	if !ok {
+		return protocol.MailEvent{}, false
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return protocol.MailEvent{}, false
+	}
+	var projected protocol.MailEvent
+	if err := json.Unmarshal(encoded, &projected); err != nil || projected.Seq <= 0 || strings.TrimSpace(projected.ParentIssue) == "" || strings.TrimSpace(projected.Type) == "" {
+		return protocol.MailEvent{}, false
+	}
+	return projected, true
 }
 
 func projectStewardshipEventType(eventType domain.IssueObservationEventType) (string, bool) {

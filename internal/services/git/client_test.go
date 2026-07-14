@@ -2589,3 +2589,54 @@ func TestSnapshotRefGraphKeepsValidRefsWhenProjectionContainsMissingBranch(t *te
 		t.Fatalf("tips = %+v, want valid main and ignored missing branch", snapshot.Tips)
 	}
 }
+
+func TestSnapshotRefGraphMarksUnevenRefsIncompleteAtGlobalBound(t *testing.T) {
+	runner := &mockRunner{runFunc: func(_ context.Context, _ ...string) (string, error) {
+		var out strings.Builder
+		for i := range maxRefGraphSnapshotCommits {
+			hash := fmt.Sprintf("%040x", maxRefGraphSnapshotCommits-i)
+			parent := ""
+			if i+1 < maxRefGraphSnapshotCommits {
+				parent = fmt.Sprintf("%040x", maxRefGraphSnapshotCommits-i-1)
+			} else {
+				parent = strings.Repeat("f", 40)
+			}
+			decoration := ""
+			if i == 0 {
+				decoration = "refs/heads/root"
+			}
+			fmt.Fprintf(&out, "\x1e%s\x00%s\x00%s\x00root history %d\n\nroot.txt\n", hash, parent, decoration, i)
+		}
+		return out.String(), nil
+	}}
+	snapshot, err := NewClient(runner, slog.Default()).SnapshotRefGraph(context.Background(), "/repo", []string{"root", "short-active"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Truncated {
+		t.Fatal("snapshot must report the shared graph bound")
+	}
+	if snapshot.RefComplete("root") || snapshot.RefComplete("short-active") {
+		t.Fatalf("completeness root=%t active=%t, want both incomplete", snapshot.RefComplete("root"), snapshot.RefComplete("short-active"))
+	}
+}
+
+func TestRefGraphChangedFilesExclusiveConservativelyIncludesRevertedFiles(t *testing.T) {
+	base, first, revert := strings.Repeat("0", 39)+"1", strings.Repeat("0", 39)+"2", strings.Repeat("0", 39)+"3"
+	snapshot := RefGraphSnapshot{
+		Tips: map[string]string{"root": base, "active": revert},
+		Commits: map[string]RefGraphCommit{
+			base:   {Hash: base},
+			first:  {Hash: first, Parents: []string{base}, ChangedFiles: []string{"reverted.txt"}},
+			revert: {Hash: revert, Parents: []string{first}, ChangedFiles: []string{"reverted.txt"}},
+		},
+		Order: []string{revert, first, base},
+	}
+	snapshot.reachable = map[string]map[string]struct{}{
+		"root":   snapshot.reachableFrom(base),
+		"active": snapshot.reachableFrom(revert),
+	}
+	if files := snapshot.ChangedFilesExclusive("root", "active"); len(files) != 1 || files[0] != "reverted.txt" {
+		t.Fatalf("exclusive touched files = %v, want conservative reverted-file inclusion", files)
+	}
+}

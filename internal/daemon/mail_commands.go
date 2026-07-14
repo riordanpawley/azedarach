@@ -16,6 +16,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"golang.org/x/sys/unix"
 )
 
@@ -31,7 +32,7 @@ type daemonMailEvent struct {
 	Payload     map[string]interface{} `json:"payload,omitempty"`
 }
 
-func (d *Daemon) handleMailSend(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+func (d *Daemon) handleMailSend(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	var cmd protocol.MailSendCommandBody
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -82,6 +83,9 @@ func (d *Daemon) handleMailSend(_ context.Context, req protocol.RequestEnvelope)
 		Body:        cmd.Body,
 		CreatedAt:   time.Now().UTC(),
 	}
+	if err := d.projectMailEvent(ctx, d.projectID(req.Meta), repoDir, event); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("project mailbox event: %v", err)), nil
+	}
 	if err := appendMailboxEvent(repoDir, event); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -102,6 +106,44 @@ func (d *Daemon) handleMailSend(_ context.Context, req protocol.RequestEnvelope)
 		)
 	}
 	return resp, nil
+}
+
+func (d *Daemon) projectMailEvent(ctx context.Context, projectID, repoDir string, event daemonMailEvent) error {
+	if strings.TrimSpace(event.IssueID) == "" {
+		return nil
+	}
+	projectedType, stewardship := projectStewardshipEventType(domain.IssueObservationEventType(event.Type))
+	if !stewardship {
+		return nil
+	}
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return nil
+	}
+	eventType := domain.IssueObservationEventType(projectedType)
+	exists, err := issueClient.IssueObservationMailEventExists(ctx, event.IssueID, eventType, event.ParentIssue, event.Seq)
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	projected := mailEventToProtocol(event)
+	_, err = issueClient.AppendIssueObservationEvent(ctx, event.IssueID, issues.IssueObservationEventParams{
+		Type:          eventType,
+		ObservedAt:    event.CreatedAt,
+		Source:        strings.TrimSpace(event.From),
+		SourceCommand: "mail.send",
+		WorktreePath:  strings.TrimSpace(repoDir),
+		Payload:       map[string]any{"mail_event": projected},
+	})
+	if errors.Is(err, domain.ErrNotFound) {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("mail event issue projection skipped for unknown issue", "project_id", projectID, "parent_issue", event.ParentIssue, "issue_id", event.IssueID, "type", event.Type)
+		}
+		return nil
+	}
+	return err
 }
 
 func (d *Daemon) handleMailList(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

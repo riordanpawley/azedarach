@@ -8964,8 +8964,6 @@ func TestTaskGraphReadinessReportsStaleChildBranchContainmentRisk(t *testing.T) 
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	issuesClient := newMigratedIssueClientAtPath(t, dbPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
-	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, logger)
-	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 
 	rootIDRaw, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
 	if err != nil {
@@ -9006,17 +9004,6 @@ func TestTaskGraphReadinessReportsStaleChildBranchContainmentRisk(t *testing.T) 
 	}
 	runDaemonTestGit(t, repoDir, "commit", "-am", closedID.String()+": generate typed materializer rpc")
 	evidenceCommit := runDaemonTestGitOutput(t, repoDir, "rev-parse", "HEAD")
-	activeWorktree := filepath.Join(t.TempDir(), "active-worktree")
-	runDaemonTestGit(t, repoDir, "worktree", "add", "-q", activeWorktree, activeBranch)
-
-	for _, state := range []daemonstate.WorktreeState{
-		{ProjectID: projectID, IssueID: rootID.String(), Path: repoDir, Branch: rootBranch, UpdatedAt: time.Now().UTC()},
-		{ProjectID: projectID, IssueID: activeID.String(), Path: activeWorktree, Branch: activeBranch, UpdatedAt: time.Now().UTC()},
-	} {
-		if err := runtimeStateStore.UpsertWorktreeState(ctx, state); err != nil {
-			t.Fatalf("seed worktree state: %v", err)
-		}
-	}
 
 	d := &Daemon{
 		cfg: Config{RepoDir: repoDir, Logger: logger},
@@ -9024,14 +9011,12 @@ func TestTaskGraphReadinessReportsStaleChildBranchContainmentRisk(t *testing.T) 
 		issueClientsByProject: map[string]*issues.Client{
 			projectID: issuesClient,
 		},
-		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
-			repoDir: runtimeStateStore,
-		},
-		worktreeAdapter: &worktreeServiceAdapter{
-			manager:           git.NewWorktreeManager(git.NewExecRunner(repoDir), repoDir, logger),
-			runtimeStateStore: runtimeStateStore,
-			logger:            logger,
-		},
+	}
+	d.taskGraphWorktrees = func(context.Context, string) ([]git.Worktree, error) {
+		return []git.Worktree{
+			{IssueID: rootID.String(), Path: repoDir, Branch: rootBranch},
+			{IssueID: activeID.String(), Path: repoDir, Branch: activeBranch},
+		}, nil
 	}
 
 	ready, err := d.taskGraphReadiness(ctx, projectID, rootID.String())
