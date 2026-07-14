@@ -4919,7 +4919,7 @@ func (d *Daemon) buildTaskGraphReadinessForActor(ctx context.Context, projectID,
 	if err != nil {
 		return taskGraphReadinessResult{}, fmt.Errorf("refresh interaction readiness projection: %w", err)
 	}
-	readinessContext, err := d.captureTaskGraphReadinessContext(ctx, projectID, tasks, []string{rootIssueID}, waitingIssues)
+	readinessContext, err := d.captureTaskGraphReadinessContext(ctx, projectID, tasks, []string{rootIssueID}, waitingIssues, true)
 	if err != nil {
 		return taskGraphReadinessResult{}, err
 	}
@@ -4949,7 +4949,7 @@ type taskGraphReadinessContext struct {
 	initCommandsConfigured bool
 }
 
-func (d *Daemon) captureTaskGraphReadinessContext(ctx context.Context, projectID string, tasks []domain.Task, roots []string, waitingIssues map[string]struct{}) (taskGraphReadinessContext, error) {
+func (d *Daemon) captureTaskGraphReadinessContext(ctx context.Context, projectID string, tasks []domain.Task, roots []string, waitingIssues map[string]struct{}, includeMailbox bool) (taskGraphReadinessContext, error) {
 	var err error
 	captured := taskGraphReadinessContext{
 		capturedAt:             time.Now().UTC(),
@@ -4966,26 +4966,34 @@ func (d *Daemon) captureTaskGraphReadinessContext(ctx context.Context, projectID
 	captured.startProgressByIssue = d.sessionStartProgressByIssueAt(ctx, projectID, captured.capturedAt)
 	captured.failedStartsByIssue = d.failedSessionStartByIssue(ctx, projectID)
 	var worktrees []git.Worktree
-	if d != nil && d.worktreeAdapter != nil {
+	if d != nil && d.taskGraphWorktrees != nil {
+		worktrees, err = d.taskGraphWorktrees(ctx, projectID)
+	} else if d != nil && d.worktreeAdapter != nil {
 		worktrees, err = d.worktreeAdapter.List(ctx, projectID)
+	}
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("readiness context worktree list failed", "project_id", projectID, "error", err)
+		}
+		worktrees = nil
+	}
+	captured.containmentRisksByRoot = d.captureTaskGraphContainmentRisks(ctx, projectID, tasks, roots, worktrees)
+	if includeMailbox {
+		for _, rootIssueID := range uniqueNonEmpty(roots) {
+			captured.mailEventsByRoot[rootIssueID] = d.workerObservationMailboxEvents(rootIssueID)
+		}
+	}
+	taskIDs := taskIDsFromTasks(tasks)
+	if d.taskGraphObservationEvents != nil {
+		captured.issueEventsByIssue = d.taskGraphObservationEvents(ctx, projectID, taskIDs)
+	} else if issueClient := d.issueClientForProject(projectID); issueClient != nil {
+		captured.issueEventsByIssue, err = issueClient.ListIssueObservationEventsForIssues(ctx, taskIDs, 50)
 		if err != nil {
 			if d.cfg.Logger != nil {
-				d.cfg.Logger.Debug("readiness context worktree list failed", "project_id", projectID, "error", err)
+				d.cfg.Logger.Debug("readiness context observation capture failed", "project_id", projectID, "issue_count", len(taskIDs), "error", err)
 			}
-			worktrees = nil
+			captured.issueEventsByIssue = nil
 		}
-	}
-	for _, rootIssueID := range uniqueNonEmpty(roots) {
-		rootID, byID, children, indexErr := daemonTaskGraphIndexes(rootIssueID, tasks)
-		if indexErr != nil {
-			continue
-		}
-		captured.containmentRisksByRoot[rootIssueID] = d.daemonTaskGraphContainmentRisks(ctx, projectID, rootID, byID, children, worktrees)
-		captured.mailEventsByRoot[rootIssueID] = d.workerObservationMailboxEvents(rootIssueID)
-	}
-	for _, task := range tasks {
-		issueID := task.ID.String()
-		captured.issueEventsByIssue[issueID] = d.workerObservationIssueEvents(ctx, projectID, issueID)
 	}
 	return captured, nil
 }
@@ -5301,159 +5309,113 @@ func daemonTaskStaleCloseableEvidence(task domain.Task) []string {
 	return evidence
 }
 
-func (d *Daemon) daemonTaskGraphContainmentRisks(
-	ctx context.Context,
-	projectID string,
-	rootID naming.IssueID,
-	byID map[naming.IssueID]domain.Task,
-	children map[naming.IssueID][]naming.IssueID,
-	worktrees []git.Worktree,
-) []taskContainmentRisk {
+func (d *Daemon) captureTaskGraphContainmentRisks(ctx context.Context, projectID string, tasks []domain.Task, roots []string, worktrees []git.Worktree) map[string][]taskContainmentRisk {
+	out := make(map[string][]taskContainmentRisk, len(roots))
 	if d == nil || d.git == nil || len(worktrees) == 0 {
-		return nil
+		return out
 	}
-	rootWorktree, ok := daemonWorktreeForIssue(worktrees, rootID.String())
-	if !ok || strings.TrimSpace(rootWorktree.Path) == "" || strings.TrimSpace(rootWorktree.Branch) == "" {
-		return nil
+	type rootInputs struct {
+		rootID       naming.IssueID
+		rootWorktree git.Worktree
+		active       []git.Worktree
+		closed       []naming.IssueID
 	}
-
-	descendants := daemonTaskGraphDescendants(rootID, children)
-	activeWorktrees := make([]git.Worktree, 0, 4)
-	closedChildIDs := make([]naming.IssueID, 0, 4)
-	for _, id := range descendants {
-		task := byID[id]
-		if task.ID.IsZero() || task.Type == domain.TypeEpic {
-			continue
-		}
-		if task.IssueClosed() {
-			closedChildIDs = append(closedChildIDs, id)
-			continue
-		}
-		if worktree, ok := daemonWorktreeForIssue(worktrees, id.String()); ok && strings.TrimSpace(worktree.Branch) != "" {
-			activeWorktrees = append(activeWorktrees, worktree)
-		}
-	}
-	if len(activeWorktrees) == 0 || len(closedChildIDs) == 0 {
-		return nil
-	}
-
-	type activeBranchEvidence struct {
-		worktree    git.Worktree
-		changedFile map[string]struct{}
-	}
-	active := make([]activeBranchEvidence, 0, len(activeWorktrees))
-	for _, worktree := range activeWorktrees {
-		files, err := d.git.ChangedFilesBetweenRefs(ctx, rootWorktree.Path, rootWorktree.Branch, worktree.Branch)
-		if err != nil && d.cfg.Logger != nil {
-			d.cfg.Logger.Debug("containment risk active branch changed-file probe failed",
-				"project_id", projectID,
-				"root_issue_id", rootID.String(),
-				"active_issue_id", worktree.IssueID,
-				"root_branch", rootWorktree.Branch,
-				"active_branch", worktree.Branch,
-				"error", err,
-			)
-		}
-		active = append(active, activeBranchEvidence{
-			worktree:    worktree,
-			changedFile: stringStructSet(files),
-		})
-	}
-
-	seen := make(map[string]struct{})
-	risks := make([]taskContainmentRisk, 0)
-	for _, closedID := range closedChildIDs {
-		commits, err := d.git.IssueEvidenceCommits(ctx, rootWorktree.Path, rootWorktree.Branch, closedID.String())
+	inputs := make([]rootInputs, 0, len(roots))
+	refs := make([]string, 0, len(roots)*2)
+	worktreePath := ""
+	for _, rootIssueID := range uniqueNonEmpty(roots) {
+		rootID, byID, children, err := daemonTaskGraphIndexes(rootIssueID, tasks)
 		if err != nil {
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Debug("containment risk closed child evidence lookup failed",
-					"project_id", projectID,
-					"root_issue_id", rootID.String(),
-					"closed_child_issue_id", closedID.String(),
-					"root_branch", rootWorktree.Branch,
-					"error", err,
-				)
-			}
 			continue
 		}
-		for _, commit := range commits {
-			rootContains, err := d.git.CommitContainedInRef(ctx, rootWorktree.Path, commit.Hash, rootWorktree.Branch)
-			if err != nil {
-				if d.cfg.Logger != nil {
-					d.cfg.Logger.Debug("containment risk root containment probe failed",
-						"project_id", projectID,
-						"root_issue_id", rootID.String(),
-						"closed_child_issue_id", closedID.String(),
-						"commit", commit.Hash,
-						"root_branch", rootWorktree.Branch,
-						"error", err,
-					)
-				}
+		rootWorktree, ok := daemonWorktreeForIssue(worktrees, rootIssueID)
+		if !ok || strings.TrimSpace(rootWorktree.Path) == "" || strings.TrimSpace(rootWorktree.Branch) == "" {
+			continue
+		}
+		input := rootInputs{rootID: rootID, rootWorktree: rootWorktree}
+		for _, id := range daemonTaskGraphDescendants(rootID, children) {
+			task := byID[id]
+			if task.ID.IsZero() || task.Type == domain.TypeEpic {
 				continue
 			}
-			changedFiles, _ := d.git.CommitChangedFiles(ctx, rootWorktree.Path, commit.Hash)
-			changedFiles = uniqueNonEmpty(changedFiles)
-			for _, item := range active {
-				activeContains, err := d.git.CommitContainedInRef(ctx, rootWorktree.Path, commit.Hash, item.worktree.Branch)
-				if err != nil {
-					if d.cfg.Logger != nil {
-						d.cfg.Logger.Debug("containment risk active containment probe failed",
-							"project_id", projectID,
-							"root_issue_id", rootID.String(),
-							"active_issue_id", item.worktree.IssueID,
-							"closed_child_issue_id", closedID.String(),
-							"commit", commit.Hash,
-							"active_branch", item.worktree.Branch,
-							"error", err,
-						)
-					}
-					continue
-				}
-				if rootContains && activeContains {
-					continue
-				}
-				key := item.worktree.IssueID + "\x00" + closedID.String() + "\x00" + commit.Hash
-				if _, ok := seen[key]; ok {
-					continue
-				}
-				seen[key] = struct{}{}
-				classification := "parent_evidence_missing"
-				message := fmt.Sprintf("closed child evidence %s from %s is not contained in parent branch %s", shortCommitHash(commit.Hash), closedID.String(), rootWorktree.Branch)
-				suggested := fmt.Sprintf("inspect integration evidence for %s before continuing", closedID.String())
-				if rootContains && !activeContains {
-					classification = "stale_child_branch"
-					message = fmt.Sprintf("stale child branch: parent branch %s contains closed child evidence %s from %s, but active branch %s for %s does not", rootWorktree.Branch, shortCommitHash(commit.Hash), closedID.String(), item.worktree.Branch, item.worktree.IssueID)
-					suggested = fmt.Sprintf("merge or rebase %s into %s before continuing, or record explicit supersession evidence", rootWorktree.Branch, item.worktree.Branch)
-				}
-				risks = append(risks, taskContainmentRisk{
-					IssueID:                item.worktree.IssueID,
-					ActiveBranch:           item.worktree.Branch,
-					RootIssueID:            rootID.String(),
-					RootBranch:             rootWorktree.Branch,
-					ClosedChildIssueID:     closedID.String(),
-					EvidenceCommit:         commit.Hash,
-					EvidenceSubject:        commit.Subject,
-					RootContainsEvidence:   rootContains,
-					ActiveContainsEvidence: activeContains,
-					Classification:         classification,
-					Message:                message,
-					ChangedFiles:           changedFiles,
-					OverlapFiles:           overlapStrings(changedFiles, item.changedFile),
-					SuggestedCommand:       suggested,
-				})
+			if task.IssueClosed() {
+				input.closed = append(input.closed, id)
+			} else if worktree, found := daemonWorktreeForIssue(worktrees, id.String()); found && strings.TrimSpace(worktree.Branch) != "" {
+				input.active = append(input.active, worktree)
 			}
 		}
+		if len(input.active) == 0 || len(input.closed) == 0 {
+			continue
+		}
+		if worktreePath == "" {
+			worktreePath = rootWorktree.Path
+		}
+		refs = append(refs, rootWorktree.Branch)
+		for _, active := range input.active {
+			refs = append(refs, active.Branch)
+		}
+		inputs = append(inputs, input)
 	}
-	sort.SliceStable(risks, func(i, j int) bool {
-		if risks[i].IssueID != risks[j].IssueID {
-			return risks[i].IssueID < risks[j].IssueID
+	if len(inputs) == 0 {
+		return out
+	}
+	graph, err := d.git.SnapshotRefGraph(ctx, worktreePath, refs)
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("capture containment ref graph failed", "project_id", projectID, "root_count", len(inputs), "error", err)
 		}
-		if risks[i].ClosedChildIssueID != risks[j].ClosedChildIssueID {
-			return risks[i].ClosedChildIssueID < risks[j].ClosedChildIssueID
+		return out
+	}
+	if graph.Truncated && d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("containment ref graph reached snapshot bound", "project_id", projectID)
+	}
+	for _, input := range inputs {
+		rootRef := input.rootWorktree.Branch
+		seen := make(map[string]struct{})
+		closedIssueIDs := make([]string, 0, len(input.closed))
+		for _, closedID := range input.closed {
+			closedIssueIDs = append(closedIssueIDs, closedID.String())
 		}
-		return risks[i].EvidenceCommit < risks[j].EvidenceCommit
-	})
-	return risks
+		evidenceByIssue := graph.IssueEvidenceByIssue(rootRef, closedIssueIDs)
+		activeFilesByBranch := make(map[string]map[string]struct{}, len(input.active))
+		for _, active := range input.active {
+			activeFilesByBranch[active.Branch] = stringStructSet(graph.ChangedFilesExclusive(rootRef, active.Branch))
+		}
+		for _, closedID := range input.closed {
+			for _, commit := range evidenceByIssue[closedID.String()] {
+				changedFiles := graph.Commits[commit.Hash].ChangedFiles
+				for _, active := range input.active {
+					if graph.Contains(active.Branch, commit.Hash) {
+						continue
+					}
+					key := active.IssueID + "\x00" + closedID.String() + "\x00" + commit.Hash
+					if _, exists := seen[key]; exists {
+						continue
+					}
+					seen[key] = struct{}{}
+					out[input.rootID.String()] = append(out[input.rootID.String()], taskContainmentRisk{
+						IssueID: active.IssueID, ActiveBranch: active.Branch, RootIssueID: input.rootID.String(), RootBranch: rootRef,
+						ClosedChildIssueID: closedID.String(), EvidenceCommit: commit.Hash, EvidenceSubject: commit.Subject,
+						RootContainsEvidence: true, ActiveContainsEvidence: false, Classification: "stale_child_branch",
+						Message:      fmt.Sprintf("stale child branch: parent branch %s contains closed child evidence %s from %s, but active branch %s for %s does not", rootRef, shortCommitHash(commit.Hash), closedID.String(), active.Branch, active.IssueID),
+						ChangedFiles: changedFiles, OverlapFiles: overlapStrings(changedFiles, activeFilesByBranch[active.Branch]),
+						SuggestedCommand: fmt.Sprintf("merge or rebase %s into %s before continuing, or record explicit supersession evidence", rootRef, active.Branch),
+					})
+				}
+			}
+		}
+		sort.SliceStable(out[input.rootID.String()], func(i, j int) bool {
+			left, right := out[input.rootID.String()][i], out[input.rootID.String()][j]
+			if left.IssueID != right.IssueID {
+				return left.IssueID < right.IssueID
+			}
+			if left.ClosedChildIssueID != right.ClosedChildIssueID {
+				return left.ClosedChildIssueID < right.ClosedChildIssueID
+			}
+			return left.EvidenceCommit < right.EvidenceCommit
+		})
+	}
+	return out
 }
 
 func stringStructSet(values []string) map[string]struct{} {
@@ -6191,7 +6153,7 @@ func (d *Daemon) workerObservationMailboxEvents(rootIssueID string) map[string][
 	if d == nil || strings.TrimSpace(d.cfg.RepoDir) == "" || strings.TrimSpace(rootIssueID) == "" {
 		return nil
 	}
-	events, err := readMailboxEvents(d.cfg.RepoDir, rootIssueID)
+	events, err := d.readTaskGraphMailbox(d.cfg.RepoDir, rootIssueID)
 	if err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("worker observation mailbox read failed", "root_issue_id", rootIssueID, "error", err)
@@ -6209,22 +6171,11 @@ func (d *Daemon) workerObservationMailboxEvents(rootIssueID string) map[string][
 	return out
 }
 
-func (d *Daemon) workerObservationIssueEvents(ctx context.Context, projectID, issueID string) []domain.IssueObservationEvent {
-	issueClient := d.issueClientForProject(projectID)
-	if issueClient == nil {
-		return nil
+func (d *Daemon) readTaskGraphMailbox(repoDir, rootIssueID string) ([]daemonMailEvent, error) {
+	if d != nil && d.taskGraphMailboxRead != nil {
+		return d.taskGraphMailboxRead(repoDir, rootIssueID)
 	}
-	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{
-		Limit:       50,
-		NewestFirst: true,
-	})
-	if err != nil {
-		if d.cfg.Logger != nil {
-			d.cfg.Logger.Debug("worker observation issue events read failed", "project_id", projectID, "issue_id", issueID, "error", err)
-		}
-		return nil
-	}
-	return events
+	return readMailboxEvents(repoDir, rootIssueID)
 }
 
 func (d *Daemon) taskGraphPendingSessionStarts(ctx context.Context, projectID string) (map[string]taskGraphPendingStart, error) {

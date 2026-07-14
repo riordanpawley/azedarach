@@ -24,6 +24,7 @@ import (
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	gitservice "github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
@@ -628,22 +629,31 @@ func TestOrchestrationScopeCommandsKeepRootAuthorityExplicit(t *testing.T) {
 	}
 }
 
-func TestProjectStewardshipContextCollectsRecentRootMailboxEvents(t *testing.T) {
-	repoDir := t.TempDir()
+func TestProjectRecentEventsComeFromDurableObservations(t *testing.T) {
 	created := time.Date(2026, 7, 10, 4, 0, 0, 0, time.UTC)
-	for _, event := range []daemonMailEvent{
-		{Seq: 1, ParentIssue: "az-a", IssueID: "az-worker-a", Type: "worker-progress", Body: "a", CreatedAt: created},
-		{Seq: 1, ParentIssue: "az-b", IssueID: "az-worker-b", Type: "worker-integration-ready", Body: "b", CreatedAt: created.Add(time.Second)},
-	} {
-		if err := appendMailboxEvent(repoDir, event); err != nil {
-			t.Fatal(err)
-		}
+	rootA, rootB := naming.IssueID("az-a"), naming.IssueID("az-b")
+	workerA, workerB := naming.IssueID("az-worker-a"), naming.IssueID("az-worker-b")
+	tasks := []domain.Task{
+		{ID: rootA},
+		{ID: workerA, ParentID: &rootA},
+		{ID: rootB},
+		{ID: workerB, ParentID: &rootB},
 	}
-	snapshot := protocol.OrchestrationSnapshot{Scope: domain.ProjectOrchestrationScope(), Roots: []string{"az-a", "az-b"}}
-	authority := daemonOrchestrationAuthority{daemon: &Daemon{cfg: Config{RepoDir: repoDir}}}
-	authority.enrichStewardshipContext(context.Background(), protocol.DefaultProjectID, &snapshot)
-	if len(snapshot.RecentEvents) != 2 || snapshot.RecentEvents[0].ParentIssue != "az-a" || snapshot.RecentEvents[1].ParentIssue != "az-b" {
-		t.Fatalf("recent events = %+v", snapshot.RecentEvents)
+	events := projectRecentObservationEvents(tasks, map[string][]domain.IssueObservationEvent{
+		workerB.String(): {{ID: 12, IssueID: workerB, Type: domain.IssueEventEvidenceSubmitted, ObservedAt: created.Add(time.Second), Source: "worker-b", Payload: map[string]any{"summary": "b"}}},
+		workerA.String(): {
+			{ID: 10, IssueID: workerA, Type: domain.IssueEventIssueCreated, ObservedAt: created.Add(-time.Second), Source: "store"},
+			{ID: 11, IssueID: workerA, Type: domain.IssueEventProgressRecorded, ObservedAt: created, Source: "worker-a", Payload: map[string]any{"body": "a"}},
+		},
+	})
+	if len(events) != 2 {
+		t.Fatalf("recent events = %+v", events)
+	}
+	if events[0].Seq != 11 || events[0].ParentIssue != rootA.String() || events[0].IssueID != workerA || events[0].Type != "worker-progress" || events[0].From != "worker-a" || events[0].Body != "a" {
+		t.Fatalf("first recent event = %+v", events[0])
+	}
+	if events[1].Seq != 12 || events[1].ParentIssue != rootB.String() || events[1].IssueID != workerB || events[1].Type != "worker-integration-ready" || events[1].From != "worker-b" || events[1].Body != `{"summary":"b"}` {
+		t.Fatalf("second recent event = %+v", events[1])
 	}
 }
 
@@ -926,14 +936,32 @@ func TestProjectOrchestrationSnapshotCapturesAuxiliaryReadinessInputsOnce(t *tes
 	ctx := context.Background()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
+	worktrees := make([]gitservice.Worktree, 0, 100)
+	gitSubjects := make(map[string]string, 100)
 	for i := range 50 {
-		if _, err := client.Create(ctx, issues.CreateTaskParams{Title: fmt.Sprintf("Root %02d", i), Description: "Executable", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen}); err != nil {
+		rootID, err := client.Create(ctx, issues.CreateTaskParams{Title: fmt.Sprintf("Root %02d", i), Description: "Coordinate", Acceptance: "Children done", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusOpen})
+		if err != nil {
 			t.Fatal(err)
 		}
+		closedID, err := client.Create(ctx, issues.CreateTaskParams{Title: fmt.Sprintf("Closed %02d", i), Description: "Integrated", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusDone, ParentID: &rootID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		activeID, err := client.Create(ctx, issues.CreateTaskParams{Title: fmt.Sprintf("Active %02d", i), Description: "Working", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen, ParentID: &rootID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rootBranch, activeBranch := "root/"+rootID, "active/"+activeID
+		worktrees = append(worktrees,
+			gitservice.Worktree{IssueID: rootID, Path: "/repo", Branch: rootBranch},
+			gitservice.Worktree{IssueID: activeID, Path: "/repo", Branch: activeBranch},
+		)
+		gitSubjects[rootBranch] = closedID + ": integrated evidence"
+		gitSubjects[activeBranch] = activeID + ": active work"
 	}
-	operationReads := 0
-	interactionReads := 0
-	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	operationReads, interactionReads, observationReads, worktreeReads, mailboxReads := 0, 0, 0, 0, 0
+	gitRunner := &snapshotCountingGitRunner{subjects: gitSubjects}
+	d := &Daemon{cfg: Config{RepoDir: t.TempDir(), Logger: slog.Default()}, git: gitservice.NewClient(gitRunner, slog.Default()), issueClientsByProject: map[string]*issues.Client{"proj": client}}
 	d.taskGraphOperationList = func(context.Context, daemonops.Query) ([]daemonops.Record, error) {
 		operationReads++
 		return nil, nil
@@ -942,14 +970,33 @@ func TestProjectOrchestrationSnapshotCapturesAuxiliaryReadinessInputsOnce(t *tes
 		interactionReads++
 		return nil, nil
 	}
-	for _, limit := range []int{1, 50} {
-		operationReads, interactionReads = 0, 0
+	d.taskGraphObservationEvents = func(_ context.Context, _ string, issueIDs []string) map[string][]domain.IssueObservationEvent {
+		observationReads++
+		if len(issueIDs) == 0 {
+			return nil
+		}
+		issueID := naming.IssueID(issueIDs[0])
+		return map[string][]domain.IssueObservationEvent{
+			issueID.String(): {{ID: 77, IssueID: issueID, Type: domain.IssueEventProgressRecorded, ObservedAt: time.Date(2026, 7, 10, 4, 0, 0, 0, time.UTC), Source: "worker", Payload: map[string]any{"body": "still working"}}},
+		}
+	}
+	d.taskGraphWorktrees = func(context.Context, string) ([]gitservice.Worktree, error) {
+		worktreeReads++
+		return worktrees, nil
+	}
+	d.taskGraphMailboxRead = func(string, string) ([]daemonMailEvent, error) {
+		mailboxReads++
+		return nil, nil
+	}
+	for _, tc := range []struct{ limit, roots int }{{2, 1}, {100, 50}} {
+		limit := tc.limit
+		operationReads, interactionReads, observationReads, worktreeReads, mailboxReads, gitRunner.calls = 0, 0, 0, 0, 0, 0
 		snapshot, err := (daemonOrchestrationAuthority{daemon: d}).Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: limit})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(snapshot.Roots) != limit {
-			t.Fatalf("limit %d roots = %d", limit, len(snapshot.Roots))
+		if len(snapshot.Roots) != tc.roots {
+			t.Fatalf("limit %d roots = %d, want %d", limit, len(snapshot.Roots), tc.roots)
 		}
 		if operationReads != 3 {
 			t.Fatalf("limit %d operation reads = %d, want three snapshot-wide maps", limit, operationReads)
@@ -957,7 +1004,38 @@ func TestProjectOrchestrationSnapshotCapturesAuxiliaryReadinessInputsOnce(t *tes
 		if interactionReads != 0 {
 			t.Fatalf("limit %d auxiliary interaction reads = %d, want exported interaction map only", limit, interactionReads)
 		}
+		if observationReads != 1 || worktreeReads != 1 || gitRunner.calls != 1 {
+			t.Fatalf("limit %d project captures = observations:%d worktrees:%d git:%d, want one each", limit, observationReads, worktreeReads, gitRunner.calls)
+		}
+		if mailboxReads != 0 {
+			t.Fatalf("limit %d mailbox file reads = %d, want durable observation projection only", limit, mailboxReads)
+		}
+		if len(snapshot.RecentEvents) != 1 || snapshot.RecentEvents[0].Seq != 77 || snapshot.RecentEvents[0].Type != "worker-progress" || snapshot.RecentEvents[0].Body != "still working" {
+			t.Fatalf("limit %d recent durable events = %+v", limit, snapshot.RecentEvents)
+		}
 	}
+}
+
+type snapshotCountingGitRunner struct {
+	calls    int
+	subjects map[string]string
+}
+
+func (r *snapshotCountingGitRunner) Run(_ context.Context, args ...string) (string, error) {
+	r.calls++
+	baseHash := fmt.Sprintf("%040x", 1)
+	var out strings.Builder
+	index := 2
+	for _, arg := range args {
+		if _, ok := r.subjects[arg]; !ok {
+			continue
+		}
+		hash := fmt.Sprintf("%040x", index)
+		index++
+		fmt.Fprintf(&out, "\x1e%s\x00%s\x00refs/heads/%s\x00%s\n\nshared.go\n", hash, baseHash, arg, r.subjects[arg])
+	}
+	fmt.Fprintf(&out, "\x1e%s\x00\x00\x00base\n", baseHash)
+	return out.String(), nil
 }
 
 func TestProjectOrchestrationRealBuilderRemainsCoherentDuringProjectionChurn(t *testing.T) {

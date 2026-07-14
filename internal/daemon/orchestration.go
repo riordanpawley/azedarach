@@ -406,10 +406,11 @@ func (a daemonOrchestrationAuthority) buildSnapshot(ctx context.Context, project
 	for _, rootTask := range roots {
 		rootIDs = append(rootIDs, rootTask.ID.String())
 	}
-	readinessContext, err := a.daemon.captureTaskGraphReadinessContext(ctx, projectID, tasks, rootIDs, projection.UnresolvedInteractionIDs)
+	readinessContext, err := a.daemon.captureTaskGraphReadinessContext(ctx, projectID, tasks, rootIDs, projection.UnresolvedInteractionIDs, false)
 	if err != nil {
 		return protocol.OrchestrationSnapshot{}, fmt.Errorf("capture project readiness context: %w", err)
 	}
+	snapshot.RecentEvents = projectRecentObservationEvents(tasks, readinessContext.issueEventsByIssue)
 	for _, rootTask := range roots {
 		root := rootTask.ID.String()
 		snapshot.Roots = append(snapshot.Roots, root)
@@ -432,6 +433,115 @@ func (a daemonOrchestrationAuthority) buildSnapshot(ctx context.Context, project
 	sortOrchestrationSnapshot(&snapshot, tasksByID)
 	snapshot.Completion = projectOrchestrationCompletion(snapshot)
 	return snapshot, nil
+}
+
+func projectRecentObservationEvents(tasks []domain.Task, eventsByIssue map[string][]domain.IssueObservationEvent) []protocol.MailEvent {
+	if len(eventsByIssue) == 0 {
+		return nil
+	}
+	tasksByID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		tasksByID[task.ID.String()] = task
+	}
+	rootByIssue := make(map[string]string, len(tasks))
+	rootForIssue := func(issueID string) string {
+		if root := rootByIssue[issueID]; root != "" {
+			return root
+		}
+		path := make([]string, 0, 4)
+		seen := make(map[string]struct{}, 4)
+		current := issueID
+		for current != "" {
+			if root := rootByIssue[current]; root != "" {
+				current = root
+				break
+			}
+			if _, cycle := seen[current]; cycle {
+				current = issueID
+				break
+			}
+			seen[current] = struct{}{}
+			path = append(path, current)
+			task, ok := tasksByID[current]
+			if !ok || task.ParentID == nil || task.ParentID.IsZero() {
+				break
+			}
+			current = task.ParentID.String()
+		}
+		for _, id := range path {
+			rootByIssue[id] = current
+		}
+		return current
+	}
+
+	recent := make([]protocol.MailEvent, 0, 20)
+	for issueID, events := range eventsByIssue {
+		parentIssue := rootForIssue(issueID)
+		if parentIssue == "" {
+			continue
+		}
+		for _, event := range events {
+			eventType, visible := projectStewardshipEventType(event.Type)
+			if !visible {
+				continue
+			}
+			payload := event.Payload
+			recent = append(recent, protocol.MailEvent{
+				Seq:         event.ID,
+				ParentIssue: parentIssue,
+				IssueID:     event.IssueID,
+				Type:        eventType,
+				From:        event.Source,
+				Body:        observationEventMailBody(event),
+				CreatedAt:   event.ObservedAt.UTC().Format(time.RFC3339Nano),
+				Payload:     payload,
+			})
+		}
+	}
+	sort.SliceStable(recent, func(i, j int) bool {
+		leftAt, leftErr := time.Parse(time.RFC3339Nano, recent[i].CreatedAt)
+		rightAt, rightErr := time.Parse(time.RFC3339Nano, recent[j].CreatedAt)
+		if leftErr == nil && rightErr == nil && !leftAt.Equal(rightAt) {
+			return leftAt.Before(rightAt)
+		}
+		if recent[i].Seq != recent[j].Seq {
+			return recent[i].Seq < recent[j].Seq
+		}
+		if recent[i].ParentIssue != recent[j].ParentIssue {
+			return recent[i].ParentIssue < recent[j].ParentIssue
+		}
+		return recent[i].IssueID.String() < recent[j].IssueID.String()
+	})
+	const recentLimit = 20
+	if len(recent) > recentLimit {
+		recent = recent[len(recent)-recentLimit:]
+	}
+	return recent
+}
+
+func projectStewardshipEventType(eventType domain.IssueObservationEventType) (string, bool) {
+	normalized := strings.NewReplacer("_", ".", "-", ".").Replace(strings.ToLower(strings.TrimSpace(string(eventType))))
+	switch normalized {
+	case string(domain.IssueEventProgressRecorded), "worker.progress":
+		return "worker-progress", true
+	case string(domain.IssueEventBlockerReported), "worker.blocked":
+		return "worker-blocked", true
+	default:
+		if domain.IsWorkerEvidenceEventType(eventType) {
+			return "worker-integration-ready", true
+		}
+		return "", false
+	}
+}
+
+func observationEventMailBody(event domain.IssueObservationEvent) string {
+	if body, ok := event.Payload["body"].(string); ok && strings.TrimSpace(body) != "" {
+		return body
+	}
+	if encoded, err := json.Marshal(event.Payload); err == nil && string(encoded) != "null" {
+		return string(encoded)
+	}
+	return string(event.Type)
 }
 
 func deriveOrchestrationProjectionFacts(tasks []domain.Task, waiting map[string]struct{}, acceptances map[string]domain.InvestigationAcceptance) []domain.Task {
@@ -513,14 +623,11 @@ func (a daemonOrchestrationAuthority) enrichStewardshipContext(ctx context.Conte
 		}
 	}
 	repoDir := strings.TrimSpace(a.daemon.resolveRepoDirForProject(projectID))
-	if repoDir != "" {
-		parents := append([]string(nil), snapshot.Roots...)
-		if snapshot.Scope.Kind == domain.OrchestrationScopeRooted {
-			parents = []string{snapshot.Scope.RootIssueID.String()}
-		}
+	if repoDir != "" && snapshot.Scope.Kind == domain.OrchestrationScopeRooted {
+		parents := []string{snapshot.Scope.RootIssueID.String()}
 		var recent []daemonMailEvent
 		for _, parent := range parents {
-			if events, err := readMailboxEvents(repoDir, parent); err == nil {
+			if events, err := a.daemon.readTaskGraphMailbox(repoDir, parent); err == nil {
 				recent = append(recent, events...)
 			}
 		}

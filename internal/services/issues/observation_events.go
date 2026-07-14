@@ -200,6 +200,62 @@ func (c *Client) ListIssueObservationEvents(ctx context.Context, issueID string,
 	return events, nil
 }
 
+// ListIssueObservationEventsForIssues returns the newest bounded event slice
+// for every requested issue with one SQLite query.
+func (c *Client) ListIssueObservationEventsForIssues(ctx context.Context, issueIDs []string, perIssueLimit int) (map[string][]domain.IssueObservationEvent, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	issueIDs = uniqueIssueIDStrings(issueIDs)
+	out := make(map[string][]domain.IssueObservationEvent, len(issueIDs))
+	if len(issueIDs) == 0 {
+		return out, nil
+	}
+	if perIssueLimit <= 0 {
+		perIssueLimit = defaultIssueObservationEventLimit
+	}
+	if perIssueLimit > 5000 {
+		perIssueLimit = 5000
+	}
+	issueIDsJSON, err := json.Marshal(issueIDs)
+	if err != nil {
+		return nil, c.wrapError("list-project-observation-events", "", err)
+	}
+	rows, err := db.QueryContext(ctx, `
+		WITH candidate_issues(issue_id) AS (
+			SELECT DISTINCT TRIM(CAST(value AS TEXT))
+			FROM json_each(?)
+			WHERE type = 'text' AND TRIM(CAST(value AS TEXT)) <> ''
+		), ranked AS (
+			SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json,
+				ROW_NUMBER() OVER (PARTITION BY issue_id ORDER BY observed_at DESC, id DESC) AS issue_rank
+			FROM issue_observation_events
+			JOIN candidate_issues USING (issue_id)
+		)
+		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+		FROM ranked
+		WHERE issue_rank <= ?
+		ORDER BY issue_id ASC, issue_rank ASC
+	`, string(issueIDsJSON), perIssueLimit)
+	if err != nil {
+		return nil, c.wrapError("list-project-observation-events", "", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		event, scanErr := scanIssueObservationEvent(rows)
+		if scanErr != nil {
+			return nil, c.wrapError("list-project-observation-events", "", scanErr)
+		}
+		issueID := event.IssueID.String()
+		out[issueID] = append(out[issueID], event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, c.wrapError("list-project-observation-events", "", err)
+	}
+	return out, nil
+}
+
 // ListIssueReviewReadyObservationEvents returns the complete typed event set
 // used to reduce review-ready publications and acceptance evidence. It is
 // intentionally uncapped: callers require one authoritative decision across
