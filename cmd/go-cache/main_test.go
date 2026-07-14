@@ -17,6 +17,8 @@ func TestRunManagedSelectsInstrumentNamespace(t *testing.T) {
 	canonicalRepo, err := filepath.EvalSymlinks(repo)
 	require.NoError(t, err)
 	root := filepath.Join(canonicalRepo, ".azedarach", "go")
+	t.Setenv("AZEDARACH_GO_CACHE_ROOT", root)
+	t.Setenv("AZEDARACH_GOCACHE", "")
 	t.Setenv("AZEDARACH_GO_CACHE_OWNER", "issue-dhc")
 	t.Setenv("AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES", "1024")
 	t.Setenv("AZEDARACH_GO_CACHE_HARD_LIMIT_BYTES", "2048")
@@ -32,6 +34,10 @@ func TestRunManagedSelectsInstrumentNamespace(t *testing.T) {
 func TestRunManagedRejectsUnknownKindAndMissingCommand(t *testing.T) {
 	repo := initCommandTestRepo(t)
 	t.Chdir(repo)
+	canonicalRepo, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	t.Setenv("AZEDARACH_GO_CACHE_ROOT", filepath.Join(canonicalRepo, ".azedarach", "go"))
+	t.Setenv("AZEDARACH_GOCACHE", "")
 	assert.ErrorContains(t, runManaged(context.Background(), []string{"--kind", "instrumented", "--", "true"}), "unsupported")
 	assert.ErrorContains(t, runManaged(context.Background(), []string{"--kind", "normal"}), "requires")
 }

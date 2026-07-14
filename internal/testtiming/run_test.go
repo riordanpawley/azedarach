@@ -104,6 +104,10 @@ func TestEnvironment(t *testing.T) {
 
 func configureTestCacheFamily(t *testing.T) {
 	t.Helper()
+	// These tests run go commands against temporary modules. Do not inherit the
+	// calling worktree's daemon-authoritative cache namespace into that module.
+	t.Setenv("AZEDARACH_GO_CACHE_ROOT", "")
+	t.Setenv("AZEDARACH_GOCACHE", "")
 	t.Setenv("AZEDARACH_GO_CACHE_OWNER", "issue-test")
 	t.Setenv("AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES", "104857600")
 	t.Setenv("AZEDARACH_GO_CACHE_HARD_LIMIT_BYTES", "209715200")
