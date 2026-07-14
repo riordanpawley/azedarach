@@ -763,6 +763,39 @@ func TestClient_SetEnvironment(t *testing.T) {
 	}
 }
 
+func TestClient_EnvironmentValue(t *testing.T) {
+	tests := []struct {
+		name      string
+		output    string
+		runErr    error
+		want      string
+		wantFound bool
+		wantErr   bool
+	}{
+		{name: "present", output: "OTHER=value\nBOOT_NONCE=nonce-1\n", want: "nonce-1", wantFound: true},
+		{name: "removed", output: "-BOOT_NONCE\n"},
+		{name: "absent", output: "OTHER=value\n"},
+		{name: "session error", runErr: errors.New("missing session"), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &recordingOutputRunner{outputs: []string{tt.output}, err: tt.runErr}
+			client := NewClient(runner, slog.Default())
+			got, found, err := client.EnvironmentValue(context.Background(), "az-root", "BOOT_NONCE")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error = %v, wantErr %t", err, tt.wantErr)
+			}
+			if got != tt.want || found != tt.wantFound {
+				t.Fatalf("value = %q found=%t, want %q found=%t", got, found, tt.want, tt.wantFound)
+			}
+			wantCommands := [][]string{{"show-environment", "-t", "az-root"}}
+			if !reflect.DeepEqual(runner.commands, wantCommands) {
+				t.Fatalf("commands = %+v, want %+v", runner.commands, wantCommands)
+			}
+		})
+	}
+}
+
 func TestClient_ErrorWrapping(t *testing.T) {
 	t.Run("new-session error contains session name", func(t *testing.T) {
 		runner := &mockRunner{err: errors.New("cmd failed")}

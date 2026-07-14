@@ -70,10 +70,13 @@ orchestrator-only prompt whose first commands are `az prime`, rooted status,
 and rooted watch, and does not report startup success until the complete
 file-backed prompt has been acknowledged. An atomic worktree-local receipt
 binds that acknowledgement to the exact project, root, session, prompt hash,
-and bootstrap contract version. Starting an already-live rooted session repairs
-a missing, corrupt, or obsolete receipt by re-delivering the full prompt before
-the session is accepted; the rooted session must never receive worker or
-contributor authority merely because the root ticket is not typed as an epic.
+bootstrap contract version, and a cryptographically random nonce installed in
+that live tmux session's environment. Starting an already-live rooted session
+repairs a missing, corrupt, obsolete, or runtime-incarnation-mismatched receipt
+by re-delivering the full prompt before the session is accepted; deterministic
+session ID reuse after stop or runtime loss cannot inherit bootstrap trust. The
+rooted session must never receive worker or contributor authority merely because
+the root ticket is not typed as an epic.
 
 `stop` is also exact-scope and daemon-authoritative. It first records paused
 lease intent without releasing the durable scope or cursor, then requests agent

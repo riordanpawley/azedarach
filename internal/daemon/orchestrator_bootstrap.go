@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,15 +16,18 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
-const rootedOrchestratorBootstrapVersion = "rooted-orchestrator-v1"
+const rootedOrchestratorBootstrapVersion = "rooted-orchestrator-v2"
+
+const rootedOrchestratorBootstrapNonceEnvironment = "AZEDARACH_ROOTED_ORCHESTRATOR_BOOT_NONCE"
 
 type rootedOrchestratorBootstrapReceipt struct {
-	Version    string    `json:"version"`
-	ProjectID  string    `json:"project_id"`
-	RootID     string    `json:"root_id"`
-	SessionID  string    `json:"session_id"`
-	PromptHash string    `json:"prompt_sha256"`
-	ReceivedAt time.Time `json:"received_at"`
+	Version      string    `json:"version"`
+	ProjectID    string    `json:"project_id"`
+	RootID       string    `json:"root_id"`
+	SessionID    string    `json:"session_id"`
+	RuntimeNonce string    `json:"runtime_nonce"`
+	PromptHash   string    `json:"prompt_sha256"`
+	ReceivedAt   time.Time `json:"received_at"`
 }
 
 func (d *Daemon) rootedOrchestratorBootstrapPrompt(ctx context.Context, projectID string, scope domain.OrchestrationScope) (string, error) {
@@ -51,9 +55,24 @@ func (d *Daemon) ensureRootedOrchestratorBootstrap(ctx context.Context, projectI
 		SessionID:  sessionID,
 		PromptHash: rootedOrchestratorPromptHash(prompt),
 	}
-	if receiptMatchesRootedOrchestratorBootstrap(receiptPath, want) {
-		return "verified", nil
+	if !launchedHere {
+		runtimeNonce, found, nonceErr := d.tmux.EnvironmentValue(ctx, sessionID, rootedOrchestratorBootstrapNonceEnvironment)
+		if nonceErr != nil {
+			return "", fmt.Errorf("read rooted orchestrator runtime nonce: %w", nonceErr)
+		}
+		want.RuntimeNonce = runtimeNonce
+		if found && receiptMatchesRootedOrchestratorBootstrap(receiptPath, want) {
+			return "verified", nil
+		}
 	}
+	runtimeNonce, err := newRootedOrchestratorRuntimeNonce()
+	if err != nil {
+		return "", err
+	}
+	if err := d.tmux.SetEnvironment(ctx, sessionID, rootedOrchestratorBootstrapNonceEnvironment, runtimeNonce); err != nil {
+		return "", fmt.Errorf("set rooted orchestrator runtime nonce: %w", err)
+	}
+	want.RuntimeNonce = runtimeNonce
 	if !launchedHere {
 		handoff, handoffErr := prepareSessionPromptHandoff(d.sessionLaunchArtifactDir(), prompt)
 		if handoffErr != nil {
@@ -94,6 +113,14 @@ func rootedOrchestratorPromptHash(prompt string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func newRootedOrchestratorRuntimeNonce() (string, error) {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", fmt.Errorf("generate rooted orchestrator runtime nonce: %w", err)
+	}
+	return hex.EncodeToString(nonce[:]), nil
+}
+
 func receiptMatchesRootedOrchestratorBootstrap(path string, want rootedOrchestratorBootstrapReceipt) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -107,6 +134,8 @@ func receiptMatchesRootedOrchestratorBootstrap(path string, want rootedOrchestra
 		got.ProjectID == want.ProjectID &&
 		got.RootID == want.RootID &&
 		got.SessionID == want.SessionID &&
+		got.RuntimeNonce != "" &&
+		got.RuntimeNonce == want.RuntimeNonce &&
 		got.PromptHash == want.PromptHash &&
 		!got.ReceivedAt.IsZero()
 }

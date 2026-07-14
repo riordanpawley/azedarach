@@ -1389,30 +1389,31 @@ func TestSessionRestartActiveIntentOnlyForRunningWork(t *testing.T) {
 }
 
 type sessionStartTmuxRunner struct {
-	sessions             map[string]bool
-	sessionsWithoutPanes map[string]bool
-	panes                map[string][]string
-	windows              map[string]map[string]bool
-	commands             [][]string
-	inputPayloads        []string
-	env                  map[string]map[string]string
-	sendKeysCalls        int
-	sendKeysTargets      []string
-	sendKeysPayloads     []string
-	newSessionErr        error
-	onNewSession         func(string)
-	maxNewSessionCommand int
-	launchScriptPaths    map[string]string
-	launchScriptContents map[string]string
-	launchScriptModes    map[string]os.FileMode
-	launchPromptPaths    map[string]string
-	launchPromptContents map[string]string
-	launchPromptModes    map[string]os.FileMode
-	launchArtifactModes  map[string]os.FileMode
-	sendKeysErr          error
-	sendKeysErrOnCall    int
-	captureOutput        string
-	onSendKeys           func(string, string)
+	sessions              map[string]bool
+	sessionsWithoutPanes  map[string]bool
+	panes                 map[string][]string
+	windows               map[string]map[string]bool
+	commands              [][]string
+	inputPayloads         []string
+	handoffPromptContents []string
+	env                   map[string]map[string]string
+	sendKeysCalls         int
+	sendKeysTargets       []string
+	sendKeysPayloads      []string
+	newSessionErr         error
+	onNewSession          func(string)
+	maxNewSessionCommand  int
+	launchScriptPaths     map[string]string
+	launchScriptContents  map[string]string
+	launchScriptModes     map[string]os.FileMode
+	launchPromptPaths     map[string]string
+	launchPromptContents  map[string]string
+	launchPromptModes     map[string]os.FileMode
+	launchArtifactModes   map[string]os.FileMode
+	sendKeysErr           error
+	sendKeysErrOnCall     int
+	captureOutput         string
+	onSendKeys            func(string, string)
 }
 
 func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
@@ -1485,6 +1486,9 @@ func (r *sessionStartTmuxRunner) RunWithInput(_ context.Context, input string, a
 	const promptSuffix = ". Delete that file immediately after reading it."
 	if strings.HasPrefix(input, promptPrefix) && strings.HasSuffix(input, promptSuffix) {
 		path := strings.TrimSuffix(strings.TrimPrefix(input, promptPrefix), promptSuffix)
+		if prompt, err := os.ReadFile(filepath.FromSlash(path)); err == nil {
+			r.handoffPromptContents = append(r.handoffPromptContents, string(prompt))
+		}
 		_ = os.Remove(filepath.FromSlash(path))
 	}
 	return "", nil
@@ -1591,6 +1595,7 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 		}
 		delete(r.sessions, args[2])
 		delete(r.windows, args[2])
+		delete(r.env, args[2])
 		return "", nil
 	case "list-windows":
 		if len(args) < 3 {
@@ -1638,6 +1643,15 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 		}
 		r.env[session][key] = value
 		return "", nil
+	case "show-environment":
+		if len(args) < 3 {
+			return "", errors.New("missing show-environment args")
+		}
+		lines := make([]string, 0, len(r.env[args[2]]))
+		for key, value := range r.env[args[2]] {
+			lines = append(lines, key+"="+value)
+		}
+		return strings.Join(lines, "\n"), nil
 	case "list-sessions":
 		names := make([]string, 0, len(r.sessions))
 		for name := range r.sessions {

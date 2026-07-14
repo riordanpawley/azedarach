@@ -263,8 +263,11 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if err := json.Unmarshal(receiptData, &receipt); err != nil {
 		t.Fatal(err)
 	}
-	if receipt.Version != rootedOrchestratorBootstrapVersion || receipt.ProjectID != projectID || receipt.RootID != rootID || receipt.SessionID != started.SessionID || receipt.PromptHash != rootedOrchestratorPromptHash(prompt) || receipt.ReceivedAt.IsZero() {
+	if receipt.Version != rootedOrchestratorBootstrapVersion || receipt.ProjectID != projectID || receipt.RootID != rootID || receipt.SessionID != started.SessionID || receipt.RuntimeNonce == "" || receipt.PromptHash != rootedOrchestratorPromptHash(prompt) || receipt.ReceivedAt.IsZero() {
 		t.Fatalf("bootstrap receipt = %+v", receipt)
+	}
+	if got := tmuxRunner.env[started.SessionID][rootedOrchestratorBootstrapNonceEnvironment]; got != receipt.RuntimeNonce {
+		t.Fatalf("runtime nonce = %q, receipt = %q", got, receipt.RuntimeNonce)
 	}
 	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
 	if err != nil {
@@ -274,10 +277,18 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if err != nil || !found || lease.SessionID != started.SessionID || lease.Lifecycle != domain.OrchestratorWorking || lease.AcquiredAt.After(receipt.ReceivedAt) {
 		t.Fatalf("rooted lease = %+v found=%t err=%v receipt=%+v", lease, found, err, receipt)
 	}
+	inputsBefore := len(tmuxRunner.inputPayloads)
+	response, err = d.handleOrchestratorSession(ctx, request)
+	if err != nil || response.Error != nil {
+		t.Fatalf("verify same rooted runtime: response=%+v err=%v", response.Error, err)
+	}
+	if len(tmuxRunner.inputPayloads) != inputsBefore {
+		t.Fatalf("same rooted runtime was re-prompted: inputs=%d, want %d", len(tmuxRunner.inputPayloads), inputsBefore)
+	}
 	if err := os.Remove(receiptPath); err != nil {
 		t.Fatal(err)
 	}
-	inputsBefore := len(tmuxRunner.inputPayloads)
+	inputsBefore = len(tmuxRunner.inputPayloads)
 	response, err = d.handleOrchestratorSession(ctx, request)
 	if err != nil || response.Error != nil {
 		t.Fatalf("repair rooted bootstrap: response=%+v err=%v", response.Error, err)
@@ -294,6 +305,55 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	}
 	if _, err := os.Stat(receiptPath); err != nil {
 		t.Fatalf("repaired bootstrap receipt: %v", err)
+	}
+	repairedData, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var repairedReceipt rootedOrchestratorBootstrapReceipt
+	if err := json.Unmarshal(repairedData, &repairedReceipt); err != nil {
+		t.Fatal(err)
+	}
+	if repairedReceipt.RuntimeNonce == "" || repairedReceipt.RuntimeNonce == receipt.RuntimeNonce {
+		t.Fatalf("repaired runtime nonce = %q, original = %q", repairedReceipt.RuntimeNonce, receipt.RuntimeNonce)
+	}
+
+	// Lose the rooted tmux incarnation while retaining its receipt, then reuse
+	// the deterministic session ID for an ordinary task runtime. The stale
+	// receipt must not suppress rooted role repair on the next start.
+	delete(tmuxRunner.sessions, started.SessionID)
+	delete(tmuxRunner.env, started.SessionID)
+	if _, err := daemonstate.NewOrchestratorLeaseAuthority(runtimeStore).SetLifecycle(ctx, identity, started.SessionID, domain.OrchestratorPaused); err != nil {
+		t.Fatal(err)
+	}
+	tmuxRunner.sessions[started.SessionID] = true
+	tmuxRunner.launchPromptContents[started.SessionID] = "Role: contributor"
+	inputsBefore = len(tmuxRunner.inputPayloads)
+	handoffsBefore := len(tmuxRunner.handoffPromptContents)
+	response, err = d.handleOrchestratorSession(ctx, request)
+	if err != nil || response.Error != nil {
+		t.Fatalf("repair reused ordinary runtime: response=%+v err=%v", response.Error, err)
+	}
+	if len(tmuxRunner.inputPayloads) != inputsBefore+1 || len(tmuxRunner.handoffPromptContents) != handoffsBefore+1 {
+		t.Fatalf("ordinary runtime repair delivery inputs=%d handoffs=%d", len(tmuxRunner.inputPayloads)-inputsBefore, len(tmuxRunner.handoffPromptContents)-handoffsBefore)
+	}
+	repairPrompt := tmuxRunner.handoffPromptContents[len(tmuxRunner.handoffPromptContents)-1]
+	if !strings.Contains(repairPrompt, "Role: orchestrator") || strings.Contains(repairPrompt, "Role: contributor") || strings.Contains(repairPrompt, "Role: worker") {
+		t.Fatalf("ordinary runtime repair prompt = %q", repairPrompt)
+	}
+	incarnationData, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var incarnationReceipt rootedOrchestratorBootstrapReceipt
+	if err := json.Unmarshal(incarnationData, &incarnationReceipt); err != nil {
+		t.Fatal(err)
+	}
+	if incarnationReceipt.RuntimeNonce == "" || incarnationReceipt.RuntimeNonce == repairedReceipt.RuntimeNonce {
+		t.Fatalf("reused runtime nonce = %q, stale receipt nonce = %q", incarnationReceipt.RuntimeNonce, repairedReceipt.RuntimeNonce)
+	}
+	if got := tmuxRunner.env[started.SessionID][rootedOrchestratorBootstrapNonceEnvironment]; got != incarnationReceipt.RuntimeNonce {
+		t.Fatalf("reused runtime nonce = %q, receipt = %q", got, incarnationReceipt.RuntimeNonce)
 	}
 }
 
