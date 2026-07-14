@@ -124,6 +124,10 @@ const (
 	sessionCaptureMaxLines            = 1000
 	codexLaunchPromptArgMaxBytes      = 24 * 1024
 	codexLaunchCommandArgMaxBytes     = 16 * 1024
+	sessionLaunchArtifactPrefix       = "azedarach-session-launch-"
+	sessionLaunchArtifactMaxAge       = time.Hour
+	sessionLaunchArtifactCleanupLimit = 64
+	sessionLaunchArtifactCleanupEvery = 5 * time.Minute
 )
 
 func reportSessionStartProgress(ctx context.Context, phase, message string, percent int) {
@@ -1014,6 +1018,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	launchCommand := ""
 	launchScriptPath := ""
 	launchScriptHandedOff := false
+	postLaunchPrompt := ""
 	initialPromptBytes := 0
 	if cmd.StartWork {
 		initialPrompt := strings.TrimSpace(cmd.Prompt)
@@ -1025,9 +1030,10 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			initialPrompt = buildStartWorkPrompt(cmd.IssueID, task.Type.String(), task.Title, parentIssueID != "", parentIssueID)
 		}
 		initialPromptBytes = len(initialPrompt)
-		launchCommand = d.buildSessionLaunchScriptCommandWithInitReadyPathAndEnv(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, initialPrompt, sessionInitMarker.RelativePath, d.sessionLaunchStartupExportCommands(d.runtimeConfigForProject(cmd.ProjectID), resourceCtx))
+		postLaunchPrompt = initialPrompt
+		launchShell, launchPayload := d.buildSessionLaunchScriptPayloadWithInitReadyPathAndEnv(cmd.ProjectID, cmd.IssueID, cmd.SessionID, cmd.Yolo, cmd.ImagePaths, sessionInitMarker.RelativePath, d.sessionLaunchStartupExportCommands(d.runtimeConfigForProject(cmd.ProjectID), resourceCtx))
 		var launchScriptErr error
-		launchScriptPath, launchCommand, launchScriptErr = prepareSessionLaunchScript(launchCommand)
+		launchScriptPath, launchCommand, launchScriptErr = prepareSessionLaunchScript(launchShell, launchPayload)
 		if launchScriptErr != nil {
 			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare session launch script: %v%s", launchScriptErr, cleanupNote)), nil
@@ -1085,6 +1091,23 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		}
 		reportSessionStartProgress(ctx, "tmux_launch", "tmux session created without agent launch", 90)
 	}
+	if cmd.StartWork && sessionInitMarker.AbsolutePath != "" {
+		if err := d.waitForSessionInitReady(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, sessionInitMarker); err != nil {
+			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
+		}
+	}
+	if cmd.StartWork && postLaunchPrompt != "" {
+		reportSessionStartProgress(ctx, "agent_prompt", "agent launched; delivering initial prompt", 95)
+		if err := d.waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
+			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
+		}
+		if err := d.tmux.PasteTextAndSubmit(ctx, cmd.SessionID, postLaunchPrompt); err != nil {
+			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
+		}
+	}
 	initialActivity, initialActivitySource := initialSessionStartActivity(cmd.StartWork)
 	if err := d.applySessionLifecycleTransitionWithActivity(
 		ctx,
@@ -1116,11 +1139,6 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		}
 	}
 	rollbackIssueLifecycle = false
-	if cmd.StartWork && sessionInitMarker.AbsolutePath != "" {
-		if err := d.waitForSessionInitReady(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, sessionInitMarker); err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-		}
-	}
 	worktreeLine := fmt.Sprintf("Worktree created: %s", worktree.Path)
 	if reusedWorktree {
 		worktreeLine = fmt.Sprintf("Worktree reused: %s", worktree.Path)
@@ -4480,8 +4498,10 @@ func (d *Daemon) buildSessionLaunchCommand(projectID, issueID, sessionID string,
 	return d.buildSessionLaunchCommandWithInitReadyPath(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt, "")
 }
 
-func prepareSessionLaunchScript(launchCommand string) (string, string, error) {
-	file, err := os.CreateTemp("", "azedarach-session-launch-*.sh")
+func prepareSessionLaunchScript(shell, launchPayload string) (string, string, error) {
+	tempDir := os.TempDir()
+	cleanupStaleSessionLaunchScripts(tempDir, time.Now())
+	file, err := os.CreateTemp(tempDir, sessionLaunchArtifactPrefix+"*.sh")
 	if err != nil {
 		return "", "", err
 	}
@@ -4490,7 +4510,7 @@ func prepareSessionLaunchScript(launchCommand string) (string, string, error) {
 		_ = file.Close()
 		_ = os.Remove(path)
 	}
-	script := "#!/bin/sh\nrm -f -- \"$0\"\nexec " + launchCommand + "\n"
+	script := "#!/bin/sh\nrm -f -- \"$0\"\n" + launchPayload + "\n"
 	if _, err := file.WriteString(script); err != nil {
 		cleanup()
 		return "", "", err
@@ -4499,7 +4519,46 @@ func prepareSessionLaunchScript(launchCommand string) (string, string, error) {
 		_ = os.Remove(path)
 		return "", "", err
 	}
-	return path, "exec /bin/sh " + singleQuoteForShell(filepath.ToSlash(path)), nil
+	return path, "exec " + singleQuoteForShell(shell) + " -i " + singleQuoteForShell(filepath.ToSlash(path)), nil
+}
+
+func cleanupStaleSessionLaunchScripts(tempDir string, now time.Time) int {
+	matches, _ := filepath.Glob(filepath.Join(tempDir, sessionLaunchArtifactPrefix+"*.sh"))
+	removed := 0
+	for _, path := range matches {
+		if removed >= sessionLaunchArtifactCleanupLimit {
+			return removed
+		}
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || now.Sub(info.ModTime()) < sessionLaunchArtifactMaxAge {
+			continue
+		}
+		if err := os.Remove(path); err == nil || errors.Is(err, os.ErrNotExist) {
+			removed++
+		}
+	}
+	return removed
+}
+
+func (d *Daemon) startSessionLaunchArtifactCleanup(ctx context.Context) {
+	cleanup := func() {
+		if removed := cleanupStaleSessionLaunchScripts(os.TempDir(), time.Now()); removed > 0 && d.cfg.Logger != nil {
+			d.cfg.Logger.Info("removed stale session launch artifacts", "count", removed)
+		}
+	}
+	cleanup()
+	go func() {
+		ticker := time.NewTicker(sessionLaunchArtifactCleanupEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				cleanup()
+			}
+		}
+	}()
 }
 
 func (d *Daemon) buildSessionResumeCommand(projectID, issueID, sessionID string, yolo bool, imagePaths []string) string {
@@ -4585,11 +4644,16 @@ func (d *Daemon) buildSessionLaunchCommandWithInitReadyPathAndEnv(projectID, iss
 	return d.buildSessionLaunchCommandWithInitReadyPathAndEnvPolicy(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt, initReadyPath, startupEnvCommands, false)
 }
 
-func (d *Daemon) buildSessionLaunchScriptCommandWithInitReadyPathAndEnv(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt, initReadyPath string, startupEnvCommands []string) string {
-	return d.buildSessionLaunchCommandWithInitReadyPathAndEnvPolicy(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt, initReadyPath, startupEnvCommands, true)
+func (d *Daemon) buildSessionLaunchScriptPayloadWithInitReadyPathAndEnv(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initReadyPath string, startupEnvCommands []string) (string, string) {
+	return d.buildSessionLaunchComponentsWithInitReadyPathAndEnvPolicy(projectID, issueID, sessionID, yolo, imagePaths, "", initReadyPath, startupEnvCommands, false)
 }
 
 func (d *Daemon) buildSessionLaunchCommandWithInitReadyPathAndEnvPolicy(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt, initReadyPath string, startupEnvCommands []string, allowLargePrompt bool) string {
+	shell, inner := d.buildSessionLaunchComponentsWithInitReadyPathAndEnvPolicy(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt, initReadyPath, startupEnvCommands, allowLargePrompt)
+	return fmt.Sprintf("%s -i -c %s", shell, singleQuoteForShell(inner))
+}
+
+func (d *Daemon) buildSessionLaunchComponentsWithInitReadyPathAndEnvPolicy(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt, initReadyPath string, startupEnvCommands []string, allowLargePrompt bool) (string, string) {
 	projectCfg := d.runtimeConfigForProject(projectID)
 	toolCommand := d.buildCLIToolCommandWithPromptPolicy(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt, allowLargePrompt)
 	commands := make([]string, 0, len(startupEnvCommands)+len(projectCfg.SessionSyncInitCommands)+3)
@@ -4622,7 +4686,7 @@ func (d *Daemon) buildSessionLaunchCommandWithInitReadyPathAndEnvPolicy(projectI
 	}
 	inner := strings.Join(commands, "; ")
 	inner = inner + "; " + sessionAgentProcessExitCommand(projectCfg.CLITool) + "; exec " + shell
-	return fmt.Sprintf("%s -i -c %s", shell, singleQuoteForShell(inner))
+	return shell, inner
 }
 
 func sessionAgentProcessExitCommand(tool string) string {

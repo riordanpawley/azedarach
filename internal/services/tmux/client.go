@@ -272,12 +272,12 @@ func (c *Client) PasteTextAndSubmit(ctx context.Context, name string, text strin
 	c.logger.Debug("pasting text to tmux session", "name", name, "bytes", len(text))
 
 	bufferName := "azedarach-message-" + safeTmuxBufferSuffix(name)
-	if inputRunner, ok := c.runner.(InputCommandRunner); ok {
-		if _, err := inputRunner.RunWithInput(ctx, text, "load-buffer", "-b", bufferName, "-"); err != nil {
-			return &domain.TmuxError{Op: "load-buffer", Session: name, Err: err}
-		}
-	} else if _, err := c.runner.Run(ctx, "set-buffer", "-b", bufferName, text); err != nil {
-		return &domain.TmuxError{Op: "set-buffer", Session: name, Err: err}
+	inputRunner, ok := c.runner.(InputCommandRunner)
+	if !ok {
+		return &domain.TmuxError{Op: "load-buffer", Session: name, Err: errors.New("tmux runner does not support stdin payloads")}
+	}
+	if _, err := inputRunner.RunWithInput(ctx, text, "load-buffer", "-b", bufferName, "-"); err != nil {
+		return &domain.TmuxError{Op: "load-buffer", Session: name, Err: err}
 	}
 	if _, err := c.runner.Run(ctx, "paste-buffer", "-dp", "-b", bufferName, "-t", name); err != nil {
 		return &domain.TmuxError{Op: "paste-buffer", Session: name, Err: err}

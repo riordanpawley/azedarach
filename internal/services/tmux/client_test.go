@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -425,6 +426,18 @@ func TestClient_PasteTextAndSubmit(t *testing.T) {
 		{"send-keys", "-t", "az-42", "Enter"},
 	}, runner.commands)
 	assert.Equal(t, []string{"line one\nline two"}, runner.inputs)
+}
+
+func TestClient_PasteTextAndSubmitRejectsArgvFallback(t *testing.T) {
+	client := NewClient(&mockRunner{}, slog.Default())
+
+	err := client.PasteTextAndSubmit(context.Background(), "az-42", strings.Repeat("secret context", 1024))
+
+	require.Error(t, err)
+	var tmuxErr *domain.TmuxError
+	assert.ErrorAs(t, err, &tmuxErr)
+	assert.Equal(t, "load-buffer", tmuxErr.Op)
+	assert.Contains(t, err.Error(), "does not support stdin payloads")
 }
 
 func TestClient_PasteTextAndSubmitDelayRespectsContext(t *testing.T) {

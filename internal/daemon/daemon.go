@@ -526,6 +526,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.cfg.Logger.Info("daemon startup phase", "phase", "lock_acquire", "duration_ms", time.Since(startedAt).Milliseconds())
 	serveCtx, cancelServe := context.WithCancel(context.Background())
 	defer cancelServe()
+	d.startSessionLaunchArtifactCleanup(serveCtx)
 	shutdownDone := make(chan struct{})
 	shutdownStop := make(chan struct{})
 	shutdownReqCh := d.shutdownRequestChannel()
