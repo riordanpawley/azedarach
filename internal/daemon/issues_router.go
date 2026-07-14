@@ -177,6 +177,61 @@ func (d *Daemon) canonicalProjectID(projectID string) string {
 	return projectID
 }
 
+// openProjectionDeltaStores establishes the explicit initialization boundary
+// for every issue store the global daemon can route before IPC starts serving.
+// Projection reads stay pure: they never lazily migrate or seed a store on the
+// first request for a registered project.
+func (d *Daemon) openProjectionDeltaStores(ctx context.Context) error {
+	if d == nil {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	registry, err := appconfig.LoadProjectsRegistry()
+	if err != nil {
+		return fmt.Errorf("load registered projects for projection delta startup: %w", err)
+	}
+
+	type routedStore struct {
+		projectID string
+		client    *issues.Client
+	}
+	stores := []routedStore{{projectID: protocol.DefaultProjectID, client: d.issues}}
+	for _, project := range registry.Projects {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		projectID := strings.TrimSpace(project.ID)
+		if projectID == "" {
+			projectID = strings.TrimSpace(project.Name)
+		}
+		if projectID == "" {
+			return fmt.Errorf("registered project at %q has no routable identity", project.Path)
+		}
+		client := d.issueClientForProject(projectID)
+		if client == nil {
+			return fmt.Errorf("registered project %q issue store unavailable", projectID)
+		}
+		stores = append(stores, routedStore{projectID: projectID, client: client})
+	}
+
+	seen := make(map[*issues.Client]struct{}, len(stores))
+	for _, store := range stores {
+		if store.client == nil {
+			continue
+		}
+		if _, ok := seen[store.client]; ok {
+			continue
+		}
+		seen[store.client] = struct{}{}
+		if err := store.client.OpenProjectionDeltaStore(); err != nil {
+			return fmt.Errorf("open projection delta store for project %q: %w", store.projectID, err)
+		}
+	}
+	return nil
+}
+
 func (d *Daemon) closeIssueClients() {
 	if d == nil {
 		return

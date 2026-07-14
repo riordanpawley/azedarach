@@ -611,13 +611,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return nil
 	}
-	if d.issues != nil {
-		projectionStartedAt := time.Now()
-		if err := d.issues.OpenProjectionDeltaStore(); err != nil {
-			return fmt.Errorf("open projection delta store before IPC serve: %w", err)
-		}
-		d.cfg.Logger.Info("daemon startup phase", "phase", "projection_delta_store_open", "duration_ms", time.Since(projectionStartedAt).Milliseconds())
+	projectionStartedAt := time.Now()
+	if err := d.openProjectionDeltaStores(ctx); err != nil {
+		return fmt.Errorf("open projection delta stores before IPC serve: %w", err)
 	}
+	d.cfg.Logger.Info("daemon startup phase", "phase", "projection_delta_stores_open", "duration_ms", time.Since(projectionStartedAt).Milliseconds())
 
 	serveErrCh := make(chan error, 1)
 	go func() {

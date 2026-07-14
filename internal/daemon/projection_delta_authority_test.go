@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -23,18 +24,80 @@ import (
 )
 
 type projectionFirstRequestServer struct {
-	daemon *Daemon
-	cancel context.CancelFunc
-	result chan protocol.ResponseEnvelope
+	daemon    *Daemon
+	cancel    context.CancelFunc
+	result    chan protocol.ResponseEnvelope
+	projectID string
 }
 
 func (s *projectionFirstRequestServer) Serve(ctx context.Context) error {
-	body, _ := json.Marshal(protocol.ProjectionDeltaReadRequest{ProjectID: "projection-startup", Limit: 10})
-	response, _ := s.daemon.command(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, Command: protocol.CommandProjectionDeltaList, RequestID: "first-request", Meta: protocol.Metadata{ProjectID: "projection-startup"}, Body: body})
+	projectID := s.projectID
+	if projectID == "" {
+		projectID = "projection-startup"
+	}
+	body, _ := json.Marshal(protocol.ProjectionDeltaReadRequest{ProjectID: naming.ProjectID(projectID), Limit: 10})
+	response, _ := s.daemon.command(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, Command: protocol.CommandProjectionDeltaList, RequestID: "first-request", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body})
 	s.result <- response
 	s.cancel()
 	<-ctx.Done()
 	return nil
+}
+
+func TestProjectionDeltaRegisteredProjectOpensBeforeFirstRequest(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	baseRepo := t.TempDir()
+	registeredRepo := t.TempDir()
+	const projectID = "registered-projection"
+	if err := appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{Projects: []appconfig.Project{{ID: projectID, Name: "Registered projection", Path: registeredRepo}}}); err != nil {
+		t.Fatal(err)
+	}
+	registeredDB := filepath.Join(registeredRepo, ".azedarach", "azedarach.db")
+	canonicalProjectID, err := appconfig.ProjectIDForRoot(registeredRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(registeredDB); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("registered project was mutated before daemon startup: %v", err)
+	}
+
+	primary := issues.NewClient(baseRepo, slog.Default())
+	if _, err := primary.Create(context.Background(), issues.CreateTaskParams{Title: "primary routing sentinel", Type: domain.TypeTask}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	server := &projectionFirstRequestServer{cancel: cancel, result: make(chan protocol.ResponseEnvelope, 1), projectID: projectID}
+	d := &Daemon{
+		cfg:                   Config{RepoDir: baseRepo, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		lock:                  bootstrapRecordingLock{},
+		issues:                primary,
+		issueClientsByProject: map[string]*issues.Client{},
+		issueClientsByRoot:    map[string]*issues.Client{daemonStoreRootKey(baseRepo): primary},
+		serve:                 server,
+	}
+	server.daemon = d
+	errCh := make(chan error, 1)
+	go func() { errCh <- d.Run(ctx) }()
+	select {
+	case response := <-server.result:
+		if !response.OK {
+			t.Fatalf("registered-project first projection read failed: %+v", response.Error)
+		}
+		var batch protocol.ProjectionDeltaBatch
+		if err := json.Unmarshal(response.Body, &batch); err != nil {
+			t.Fatal(err)
+		}
+		if batch.ProjectID.String() != protocol.NormalizeProjectID(canonicalProjectID) || batch.HeadCursor != 0 || len(batch.Deltas) != 0 {
+			t.Fatalf("registered-project first response routed to wrong store: %+v", batch)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("daemon did not serve registered-project first projection request")
+	}
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(registeredDB); err != nil {
+		t.Fatalf("startup did not open registered projection store: %v", err)
+	}
 }
 
 func TestProjectionDeltaErrorEnvelopePreservesTypedRetrySemantics(t *testing.T) {
@@ -229,6 +292,52 @@ func TestProjectionDeltaDaemonStartupValidationFailurePreventsServe(t *testing.T
 	}
 	if events := recorder.snapshot(); len(events) != 0 {
 		t.Fatalf("IPC served before schema validation: %v", events)
+	}
+}
+
+func TestProjectionDeltaRegisteredProjectValidationFailurePreventsServe(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	baseRepo := t.TempDir()
+	registeredRepo := t.TempDir()
+	const projectID = "registered-drift"
+	if err := appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{Projects: []appconfig.Project{{ID: projectID, Name: "Registered drift", Path: registeredRepo}}}); err != nil {
+		t.Fatal(err)
+	}
+	registeredPath := filepath.Join(registeredRepo, ".azedarach", "azedarach.db")
+	seed := issues.NewClientAtPath(registeredPath, slog.Default())
+	if err := seed.OpenProjectionDeltaStore(); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.CloseDB(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(registeredPath)+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP INDEX idx_projection_deltas_key_history; CREATE INDEX idx_projection_deltas_key_history ON projection_deltas(project_id,kind,key,cursor ASC)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := &bootstrapRecorder{}
+	primary := issues.NewClient(baseRepo, slog.Default())
+	d := &Daemon{
+		cfg:                   Config{RepoDir: baseRepo, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		lock:                  bootstrapRecordingLock{},
+		issues:                primary,
+		issueClientsByProject: map[string]*issues.Client{},
+		issueClientsByRoot:    map[string]*issues.Client{daemonStoreRootKey(baseRepo): primary},
+		serve:                 &bootstrapRecordingServer{recorder: recorder},
+	}
+	err = d.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), projectID) || !strings.Contains(err.Error(), "projection delta") {
+		t.Fatalf("startup error=%v, want registered project projection validation failure", err)
+	}
+	if events := recorder.snapshot(); len(events) != 0 {
+		t.Fatalf("IPC served before registered schema validation: %v", events)
 	}
 }
 
