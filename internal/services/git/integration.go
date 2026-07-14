@@ -106,6 +106,12 @@ func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mergeCleanupTimeout)
 		defer cancel()
+		if _, retained, err := c.existingIntegrationJournalPath(worktree); err != nil || retained {
+			if c.logger != nil {
+				c.logger.Warn("preserving scratch integration worktree owned by durable journal", "path", scratchPath, "journal_retained", retained, "error", err)
+			}
+			return
+		}
 		if scratchAdded {
 			if err := c.removeWorktree(cleanupCtx, worktree, scratchPath); err != nil && c.logger != nil {
 				c.logger.Warn("failed to remove scratch integration worktree with git", "path", scratchPath, "error", err)
@@ -383,8 +389,8 @@ func (c *Client) applyValidatedScratchMerge(ctx context.Context, worktree, scrat
 				return fmt.Errorf("persist canonical candidate validation receipt: %w", err)
 			}
 		}
-		if err := c.removeIntegrationJournal(ctx, worktree); err != nil && c.logger != nil {
-			c.logger.Warn("failed to remove transactional merge journal", "worktree", worktree, "error", err)
+		if err := c.removeIntegrationJournal(ctx, worktree); err != nil {
+			return fmt.Errorf("remove completed transactional merge journal; scratch retained: %w", err)
 		}
 		setCandidateValidationDisposition(ctx, result, desiredHead, CandidateValidationPassed, true, "candidate validation passed and the exact candidate was applied")
 		out = result
@@ -485,13 +491,13 @@ func (c *Client) RecoverIntegrationJournal(ctx context.Context, worktree string)
 			return fmt.Errorf("persist recovered canonical candidate validation receipt: %w", err)
 		}
 	}
-	if provenScratch != "" {
-		if err := c.removeWorktree(ctx, worktree, provenScratch); err != nil {
-			return fmt.Errorf("remove proven scratch integration worktree; journal retained: %w", err)
-		}
+	if err := c.removeIntegrationJournalAtPath(journalPath); err != nil {
+		return fmt.Errorf("remove recovered integration journal; scratch retained: %w", err)
 	}
-	if err := removeIntegrationJournalPath(journalPath); err != nil {
-		return err
+	if provenScratch != "" {
+		if err := c.removeWorktree(ctx, worktree, provenScratch); err != nil && c.logger != nil {
+			c.logger.Warn("failed to remove proven scratch after durable recovery completed", "path", provenScratch, "error", err)
+		}
 	}
 	if c.logger != nil {
 		c.logger.Warn("recovered interrupted transactional integration",
@@ -706,7 +712,14 @@ func (c *Client) removeIntegrationJournal(ctx context.Context, worktree string) 
 	if err != nil {
 		return err
 	}
-	return removeIntegrationJournalPath(path)
+	return c.removeIntegrationJournalAtPath(path)
+}
+
+func (c *Client) removeIntegrationJournalAtPath(path string) error {
+	if c.removeJournal == nil {
+		return removeIntegrationJournalPath(path)
+	}
+	return c.removeJournal(path)
 }
 
 func removeIntegrationJournalPath(path string) error {

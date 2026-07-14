@@ -87,6 +87,19 @@ func initDivergedRepo(t *testing.T) string {
 	return repo
 }
 
+func installPassingIntegrationGate(t *testing.T, repo string) {
+	t.Helper()
+	scriptsDir := filepath.Join(repo, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write integration gate: %v", err)
+	}
+	runClientTestGit(t, repo, "add", "scripts/git-merge-rebase-gate.sh")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "add integration gate")
+}
+
 func runClientTestGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 
@@ -1164,6 +1177,159 @@ func TestRealProcessProfileRecoverIntegrationJournalCompletesInterruptedFinalRes
 	}
 	if attempt, found, err := client.CanonicalIntegrationValidation(ctx, repo, targetHead); err != nil || found {
 		t.Fatalf("validation for noncandidate target = (%+v, %t, %v), want no mismatched receipt", attempt, found, err)
+	}
+}
+
+func TestRealProcessProfileMergeCleanlyTransactionalPreservesJournalScratchAcrossPostResetFailures(t *testing.T) {
+	for _, failure := range []string{"status", "receipt"} {
+		t.Run(failure, func(t *testing.T) {
+			repo := initDivergedRepo(t)
+			installPassingIntegrationGate(t, repo)
+			baseRunner := NewExecRunner(repo)
+			targetStatusReads := 0
+			runner := &rawMockRunner{runFunc: func(ctx context.Context, args ...string) (string, error) {
+				if failure == "status" && clientTestArgsForWorktree(args, repo, "status", "--porcelain") {
+					targetStatusReads++
+					if targetStatusReads == 3 {
+						return "", fmt.Errorf("injected post-reset status failure")
+					}
+				}
+				return baseRunner.Run(ctx, args...)
+			}}
+			client := NewClient(runner, slog.Default())
+			var receiptObstacle string
+			if failure == "receipt" {
+				receiptObstacle = filepath.Join(repo, ".git", "azedarach", integrationReceiptName(repo))
+				if err := os.MkdirAll(receiptObstacle, 0o755); err != nil {
+					t.Fatalf("create receipt failure obstacle: %v", err)
+				}
+			}
+
+			result, err := client.MergeCleanlyTransactional(context.Background(), repo, "feature")
+			if err == nil {
+				t.Fatalf("MergeCleanlyTransactional() = (%+v, nil), want injected %s failure", result, failure)
+			}
+			if !strings.Contains(err.Error(), failure) {
+				t.Fatalf("MergeCleanlyTransactional() error = %v, want %s detail", err, failure)
+			}
+			journal, journalPath, found, readErr := client.readIntegrationJournal(context.Background(), repo)
+			if readErr != nil || !found {
+				t.Fatalf("readIntegrationJournal() = (%+v, %q, %t, %v), want retained journal", journal, journalPath, found, readErr)
+			}
+			if _, statErr := os.Stat(journal.ScratchWorktree); statErr != nil {
+				t.Fatalf("retained scratch stat error = %v", statErr)
+			}
+			if head := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); head != journal.DesiredHead {
+				t.Fatalf("HEAD after injected failure = %s, want applied candidate %s", head, journal.DesiredHead)
+			}
+			if failure == "receipt" {
+				if err := os.Remove(receiptObstacle); err != nil {
+					t.Fatalf("remove receipt failure obstacle: %v", err)
+				}
+			}
+
+			recoveryClient := NewClient(NewExecRunner(repo), slog.Default())
+			if err := recoveryClient.RecoverIntegrationJournal(context.Background(), repo); err != nil {
+				t.Fatalf("RecoverIntegrationJournal() retry error = %v", err)
+			}
+			if _, statErr := os.Stat(journalPath); !os.IsNotExist(statErr) {
+				t.Fatalf("journal after retry stat error = %v, want removed", statErr)
+			}
+			if _, statErr := os.Stat(journal.ScratchWorktree); !os.IsNotExist(statErr) {
+				t.Fatalf("scratch after retry stat error = %v, want removed", statErr)
+			}
+			for path, want := range map[string]string{"main.txt": "main\n", "feature.txt": "feature\n"} {
+				got, readErr := os.ReadFile(filepath.Join(repo, path))
+				if readErr != nil || string(got) != want {
+					t.Fatalf("%s after retry = %q, %v; want %q", path, got, readErr, want)
+				}
+			}
+			if status, statusErr := recoveryClient.Status(context.Background(), repo); statusErr != nil || status.HasChanges {
+				t.Fatalf("target status after retry = (%+v, %v), want clean", status, statusErr)
+			}
+			attempt, canonical, receiptErr := recoveryClient.CanonicalIntegrationValidation(context.Background(), repo, journal.DesiredHead)
+			if receiptErr != nil || !canonical || !attempt.Canonical {
+				t.Fatalf("canonical receipt after retry = (%+v, %t, %v), want exact canonical proof", attempt, canonical, receiptErr)
+			}
+		})
+	}
+}
+
+func TestRealProcessProfileRecoverIntegrationJournalRetriesDeleteBeforeScratchCleanup(t *testing.T) {
+	repo := initDivergedRepo(t)
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	ctx := context.Background()
+	targetHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+	tree := runClientTestGitOutput(t, repo, "merge-tree", "--write-tree", targetHead, "feature")
+	desiredHead := runClientTestGitOutput(t, repo, "commit-tree", tree, "-p", targetHead, "-p", "feature", "-m", "scratch merge")
+	scratch, err := os.MkdirTemp("", "azedarach-integration-")
+	if err != nil {
+		t.Fatalf("create scratch path: %v", err)
+	}
+	if err := os.Remove(scratch); err != nil {
+		t.Fatalf("prepare scratch worktree: %v", err)
+	}
+	runClientTestGit(t, repo, "worktree", "add", "--detach", scratch, desiredHead)
+	t.Cleanup(func() {
+		cmd := exec.Command("git", "worktree", "remove", "--force", scratch)
+		cmd.Dir = repo
+		_ = cmd.Run()
+		_ = os.RemoveAll(scratch)
+	})
+	journal := integrationJournal{
+		Version: integrationJournalVersion, TargetWorktree: repo, TargetHead: targetHead, DesiredHead: desiredHead,
+		ScratchWorktree: scratch,
+		Validation:      CandidateValidationAttempt{CandidateHead: desiredHead, Status: CandidateValidationPassed},
+		StartedAt:       time.Now().UTC(),
+	}
+	if err := client.writeIntegrationJournal(ctx, repo, journal); err != nil {
+		t.Fatalf("writeIntegrationJournal() error = %v", err)
+	}
+	runClientTestGit(t, repo, "reset", "--hard", desiredHead)
+	journalPath, err := client.integrationJournalPath(ctx, repo)
+	if err != nil {
+		t.Fatalf("integrationJournalPath() error = %v", err)
+	}
+	deleteAttempts := 0
+	client.removeJournal = func(path string) error {
+		deleteAttempts++
+		if deleteAttempts == 1 {
+			return fmt.Errorf("injected journal delete failure")
+		}
+		return removeIntegrationJournalPath(path)
+	}
+
+	err = client.RecoverIntegrationJournal(ctx, repo)
+	if err == nil || !strings.Contains(err.Error(), "injected journal delete failure") {
+		t.Fatalf("first RecoverIntegrationJournal() error = %v, want injected delete failure", err)
+	}
+	if _, statErr := os.Stat(journalPath); statErr != nil {
+		t.Fatalf("journal after failed delete stat error = %v, want retained", statErr)
+	}
+	if _, statErr := os.Stat(scratch); statErr != nil {
+		t.Fatalf("scratch after failed journal delete stat error = %v, want retained", statErr)
+	}
+	if err := client.RecoverIntegrationJournal(ctx, repo); err != nil {
+		t.Fatalf("second RecoverIntegrationJournal() error = %v", err)
+	}
+	if _, statErr := os.Stat(journalPath); !os.IsNotExist(statErr) {
+		t.Fatalf("journal after retry stat error = %v, want removed", statErr)
+	}
+	if _, statErr := os.Stat(scratch); !os.IsNotExist(statErr) {
+		t.Fatalf("scratch after retry stat error = %v, want removed", statErr)
+	}
+	if deleteAttempts != 2 {
+		t.Fatalf("journal delete attempts = %d, want one failed attempt and one retry", deleteAttempts)
+	}
+	for path, want := range map[string]string{"main.txt": "main\n", "feature.txt": "feature\n"} {
+		got, readErr := os.ReadFile(filepath.Join(repo, path))
+		if readErr != nil || string(got) != want {
+			t.Fatalf("%s after delete retry = %q, %v; want %q", path, got, readErr, want)
+		}
+	}
+	attempt, canonical, receiptErr := client.CanonicalIntegrationValidation(ctx, repo, desiredHead)
+	if receiptErr != nil || !canonical || !attempt.Canonical {
+		t.Fatalf("canonical receipt after delete retry = (%+v, %t, %v), want exact canonical proof", attempt, canonical, receiptErr)
 	}
 }
 
