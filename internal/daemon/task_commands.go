@@ -96,6 +96,7 @@ type taskListSnapshotLoadResult struct {
 	Freshness     protocol.TaskListFreshness
 	RuntimeAt     time.Time
 	SummariesOnly bool
+	Source        protocol.MaterializedSnapshotMetadata
 	Tasks         []domain.Task
 }
 
@@ -196,18 +197,20 @@ type taskDeletePreflightResult struct {
 }
 
 type taskGraphReadinessResult struct {
-	RootIssueID            string                          `json:"root_issue_id"`
-	Capacity               taskGraphCapacitySummary        `json:"capacity"`
-	Runnable               []string                        `json:"runnable"`
-	NestedRoots            []taskGraphNestedRoot           `json:"nested_roots,omitempty"`
-	Pending                []taskGraphPendingStart         `json:"pending,omitempty"`
-	Active                 []string                        `json:"active,omitempty"`
-	ActiveSessions         []taskGraphActiveSession        `json:"active_sessions,omitempty"`
-	SessionStartProgress   []taskGraphSessionStartProgress `json:"session_start_progress,omitempty"`
-	StaleCloseableChildren []taskStaleCloseableCandidate   `json:"stale_closeable_children,omitempty"`
-	ContainmentRisks       []taskContainmentRisk           `json:"containment_risks,omitempty"`
-	WorkerObservations     []domain.WorkerObservation      `json:"worker_observations,omitempty"`
-	Blocked                map[string]string               `json:"blocked"`
+	Revision               uint64                                `json:"revision,omitempty"`
+	Source                 protocol.MaterializedSnapshotMetadata `json:"source,omitempty"`
+	RootIssueID            string                                `json:"root_issue_id"`
+	Capacity               taskGraphCapacitySummary              `json:"capacity"`
+	Runnable               []string                              `json:"runnable"`
+	NestedRoots            []taskGraphNestedRoot                 `json:"nested_roots,omitempty"`
+	Pending                []taskGraphPendingStart               `json:"pending,omitempty"`
+	Active                 []string                              `json:"active,omitempty"`
+	ActiveSessions         []taskGraphActiveSession              `json:"active_sessions,omitempty"`
+	SessionStartProgress   []taskGraphSessionStartProgress       `json:"session_start_progress,omitempty"`
+	StaleCloseableChildren []taskStaleCloseableCandidate         `json:"stale_closeable_children,omitempty"`
+	ContainmentRisks       []taskContainmentRisk                 `json:"containment_risks,omitempty"`
+	WorkerObservations     []domain.WorkerObservation            `json:"worker_observations,omitempty"`
+	Blocked                map[string]string                     `json:"blocked"`
 	scopeIssueIDs          []string
 	cacheExpiresAt         time.Time
 }
@@ -362,6 +365,7 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 		return d.errorResponse(req, projectIssueStoreHealthErrorCode(err), err.Error()), nil
 	}
 	payload := buildTaskListSnapshotPayload(projectID, result.Revision, result.LastCheckedAt, result.Freshness, result.Tasks, result.SummariesOnly)
+	payload.Source = result.Source
 	marshalStartedAt := time.Now()
 	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.list.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(result.Tasks), "cache_hit", false, "shared_load", shared, "query", query != "")
 	body, err := json.Marshal(payload)
@@ -531,50 +535,73 @@ func contextDeadlineRemainingMillis(ctx context.Context) int64 {
 }
 
 func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string, query string, includeDependencies bool, archiveMode protocol.ArchiveMode) (taskListSnapshotLoadResult, error) {
+	if !d.materializedReadsEnabled() {
+		return d.buildLegacyTaskListSnapshot(ctx, req, projectID, query, includeDependencies, archiveMode)
+	}
+	_ = ctx
+	_ = req
+	tasks, source, err := d.projectReadSnapshot(projectID)
+	if err != nil {
+		return taskListSnapshotLoadResult{}, err
+	}
+	query = strings.TrimSpace(query)
+	filtered := tasks[:0]
+	lastCheckedAt := time.Unix(0, 0).UTC()
+	for _, task := range tasks {
+		archived := task.State.IsArchived()
+		if (archiveMode == protocol.ArchiveModeExclude && archived) || (archiveMode == protocol.ArchiveModeOnly && !archived) {
+			continue
+		}
+		if query != "" && !domain.TaskMatchesContentQuery(task, query) {
+			continue
+		}
+		lastCheckedAt = laterTime(lastCheckedAt, laterTime(task.UpdatedAt, task.RuntimeUpdatedAt))
+		if query == "" {
+			task.Description, task.Notes, task.Design, task.Acceptance = "", "", "", ""
+			if !includeDependencies {
+				task.Dependencies = nil
+			}
+		}
+		filtered = append(filtered, task)
+	}
+	tasks = filtered
+	summariesOnly := query == ""
+	revision := d.currentRevision(projectID)
+	return taskListSnapshotLoadResult{
+		Revision:      revision,
+		LastCheckedAt: lastCheckedAt,
+		Freshness:     protocol.TaskListFreshnessFresh,
+		SummariesOnly: summariesOnly,
+		Source:        source,
+		Tasks:         tasks,
+	}, nil
+}
+
+func (d *Daemon) buildLegacyTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID, query string, includeDependencies bool, archiveMode protocol.ArchiveMode) (taskListSnapshotLoadResult, error) {
+	_ = req
 	if err, unhealthy := d.projectIssueStoreHealthError(projectID); unhealthy {
 		return taskListSnapshotLoadResult{}, err
 	}
 	query = strings.TrimSpace(query)
-	if !archiveMode.Valid() {
-		archiveMode = protocol.ArchiveModeExclude
-	}
-	refreshStartedAt := time.Now()
-	var (
-		runtimeAt        time.Time
-		runtimeRefreshed bool
-		refreshErr       error
-	)
+	var runtimeAt time.Time
+	var refreshErr error
 	if query == "" {
-		runtimeAt, runtimeRefreshed, refreshErr = d.refreshTaskListSessionRuntimeState(ctx, projectID)
-		if refreshErr != nil && d.cfg.Logger != nil {
-			d.cfg.Logger.Debug("task list session runtime projection refresh failed", "project_id", projectID, "error", refreshErr)
-		}
+		runtimeAt, _, refreshErr = d.refreshTaskListSessionRuntimeState(ctx, projectID)
 		d.triggerWorktreeStateRefresh(projectID)
 	} else {
 		runtimeAt, _ = d.taskListSnapshotFreshness(ctx, projectID)
-	}
-	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.list.runtime_refresh", refreshStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "session_runtime_refreshed", runtimeRefreshed, "query", query != "", "skipped_for_query", query != "", "error", refreshErr)
-	if d.cfg.Logger != nil {
-		d.cfg.Logger.Info("daemon task list requested", "project_id", projectID, "query", query != "")
 	}
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return taskListSnapshotLoadResult{}, errors.New("issue store unavailable")
 	}
-	queryStartedAt := time.Now()
-	var (
-		tasks         []domain.Task
-		summariesOnly bool
-		err           error
-	)
-	if query == "" {
-		if includeDependencies {
-			tasks, err = issueClient.ListSummariesWithRuntimeDependenciesArchiveMode(ctx, projectID, issues.ArchiveMode(archiveMode))
-		} else {
-			tasks, err = issueClient.ListSummariesWithRuntimeArchiveMode(ctx, projectID, issues.ArchiveMode(archiveMode))
-		}
-		summariesOnly = true
-		latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.list.issue_store_list_summaries_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "include_dependencies", includeDependencies)
+	var tasks []domain.Task
+	var err error
+	summariesOnly := query == ""
+	if query == "" && includeDependencies {
+		tasks, err = issueClient.ListSummariesWithRuntimeDependenciesArchiveMode(ctx, projectID, issues.ArchiveMode(archiveMode))
+	} else if query == "" {
+		tasks, err = issueClient.ListSummariesWithRuntimeArchiveMode(ctx, projectID, issues.ArchiveMode(archiveMode))
 	} else {
 		tasks, err = issueClient.SearchWithRuntimeArchiveMode(ctx, projectID, query, issues.ArchiveMode(archiveMode))
 	}
@@ -582,11 +609,7 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 		return taskListSnapshotLoadResult{}, d.recordProjectIssueStoreFailure(projectID, err)
 	}
 	d.clearProjectIssueStoreHealth(projectID)
-	if query != "" {
-		latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.list.issue_store_search_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(tasks))
-	}
 	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
-	freshnessStartedAt := time.Now()
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
 	if query == "" && refreshErr == nil && !runtimeAt.IsZero() {
 		lastCheckedAt = laterTime(lastCheckedAt, runtimeAt)
@@ -594,19 +617,11 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 			freshness = protocol.TaskListFreshnessFresh
 		}
 	}
-	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.list.snapshot_freshness", freshnessStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "freshness", freshness)
 	revision := d.currentRevision(projectID)
 	if query == "" && !includeDependencies && archiveMode == protocol.ArchiveModeExclude {
 		d.storeTaskListSnapshotCacheWithRuntimeAt(projectID, revision, lastCheckedAt, freshness, runtimeAt, tasks, summariesOnly)
 	}
-	return taskListSnapshotLoadResult{
-		Revision:      revision,
-		LastCheckedAt: lastCheckedAt,
-		Freshness:     freshness,
-		RuntimeAt:     runtimeAt,
-		SummariesOnly: summariesOnly,
-		Tasks:         tasks,
-	}, nil
+	return taskListSnapshotLoadResult{Revision: revision, LastCheckedAt: lastCheckedAt, Freshness: freshness, RuntimeAt: runtimeAt, SummariesOnly: summariesOnly, Tasks: tasks}, nil
 }
 
 func (d *Daemon) refreshTaskListSessionRuntimeState(ctx context.Context, projectID string) (time.Time, bool, error) {
@@ -679,6 +694,33 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 	archiveMode, err := protocol.NormalizeArchiveMode(cmd.Archived)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
+	}
+	if d.materializedReadsEnabled() {
+		materialized, source, err := d.projectReadSnapshot(projectID)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
+		}
+		tasks := materializedTaskContext(materialized, []string{taskID}, true, false, true, false, archiveMode)
+		found := false
+		for _, task := range tasks {
+			if task.ID.String() == taskID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue not found: %s", taskID)), nil
+		}
+		lastCheckedAt := materializedLastCheckedAt(tasks)
+		payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), lastCheckedAt, protocol.TaskListFreshnessFresh, tasks, false)
+		payload.Source = source
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		resp := d.successResponse(req)
+		resp.Body, resp.Revision = body, payload.SnapshotRevision
+		return resp, nil
 	}
 	cacheStartedAt := time.Now()
 	if archiveMode == protocol.ArchiveModeExclude {
@@ -787,6 +829,22 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 	taskIDs := uniqueTrimmedTaskIDs(cmd.TaskIDs)
 	if len(taskIDs) == 0 {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "task_ids is required"), nil
+	}
+	if d.materializedReadsEnabled() {
+		materialized, source, err := d.projectReadSnapshot(projectID)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
+		}
+		tasks := materializedTaskContext(materialized, taskIDs, !cmd.MetadataOnly, cmd.IncludeAncestors, !cmd.ExcludeDependents, cmd.DirectDependents, protocol.ArchiveModeExclude)
+		payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), materializedLastCheckedAt(tasks), protocol.TaskListFreshnessFresh, tasks, false)
+		payload.Source = source
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		resp := d.successResponse(req)
+		resp.Body, resp.Revision = body, payload.SnapshotRevision
+		return resp, nil
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task get-many requested", "project_id", projectID, "task_count", len(taskIDs))
@@ -4009,6 +4067,8 @@ func (d *Daemon) handleTaskGraphReadiness(ctx context.Context, req protocol.Requ
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
+	result.Revision = d.currentRevision(projectID)
+	finalizeTaskGraphReadinessSource(&result)
 	marshalStartedAt := time.Now()
 	body, err := json.Marshal(result)
 	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.marshal_result", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "root_issue_id", cmd.TaskID, "runnable_count", len(result.Runnable), "active_count", len(result.Active))
@@ -4017,7 +4077,7 @@ func (d *Daemon) handleTaskGraphReadiness(ctx context.Context, req protocol.Requ
 	}
 	resp := d.successResponse(req)
 	resp.Body = body
-	resp.Revision = d.currentRevision(projectID)
+	resp.Revision = result.Revision
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task graph readiness completed",
 			"project_id", projectID,
@@ -4611,8 +4671,10 @@ func (d *Daemon) taskGraphReadinessForActor(ctx context.Context, projectID, root
 		}
 		if cached, ok := d.taskGraphReadinessCache[cacheKey]; ok && cached.revision == revision && (cached.expiresAt.IsZero() || time.Now().Before(cached.expiresAt)) {
 			d.taskGraphReadinessMu.Unlock()
-			if err := d.validateTaskGraphRuntime(ctx, projectID, cached.result.scopeIssueIDs, revision); err != nil && d.cfg.Logger != nil {
-				d.cfg.Logger.Debug("validate cached graph readiness runtime", "project_id", projectID, "root_issue_id", rootIssueID, "error", err)
+			if !d.materializedReadsEnabled() {
+				if err := d.validateTaskGraphRuntime(ctx, projectID, cached.result.scopeIssueIDs, revision); err != nil && d.cfg.Logger != nil {
+					d.cfg.Logger.Debug("validate cached graph readiness runtime", "project_id", projectID, "root_issue_id", rootIssueID, "error", err)
+				}
 			}
 			if d.currentRevision(projectID) != revision {
 				continue
@@ -4719,7 +4781,18 @@ func (d *Daemon) validateTaskGraphRuntime(ctx context.Context, projectID string,
 }
 
 func (d *Daemon) buildTaskGraphReadinessForActor(ctx context.Context, projectID, rootIssueID, actorID string) (taskGraphReadinessResult, error) {
-	tasks, err := d.loadTaskGraphReadinessDomainTasks(ctx, projectID, rootIssueID)
+	var (
+		tasks  []domain.Task
+		source protocol.MaterializedSnapshotMetadata
+		err    error
+	)
+	if d.materializedReadsEnabled() {
+		var materialized []domain.Task
+		materialized, source, err = d.projectReadSnapshot(projectID)
+		tasks = materializedParentChildClosure(materialized, rootIssueID)
+	} else {
+		tasks, err = d.loadTaskGraphReadinessDomainTasks(ctx, projectID, rootIssueID)
+	}
 	if err != nil {
 		return taskGraphReadinessResult{}, fmt.Errorf("inspect issue graph readiness: %w", err)
 	}
@@ -4733,10 +4806,13 @@ func (d *Daemon) buildTaskGraphReadinessForActor(ctx context.Context, projectID,
 		return taskGraphReadinessResult{}, err
 	}
 	ready.scopeIssueIDs = taskIDsFromTasks(tasks)
+	ready.Source = source
 	ready.cacheExpiresAt = taskGraphReadinessOwnershipExpiry(tasks, now)
-	waitingIssues, err := d.issueClientForProject(projectID).UnresolvedInteractionIssueIDs(ctx)
-	if err != nil {
-		return taskGraphReadinessResult{}, fmt.Errorf("refresh interaction readiness projection: %w", err)
+	waitingIssues := make(map[string]struct{})
+	for _, task := range tasks {
+		if task.IssueFacts().WaitingHuman {
+			waitingIssues[task.ID.String()] = struct{}{}
+		}
 	}
 	if len(waitingIssues) > 0 {
 		runnable := ready.Runnable[:0]
@@ -4767,6 +4843,16 @@ func (d *Daemon) buildTaskGraphReadinessForActor(ctx context.Context, projectID,
 	ready.WorkerObservations = d.daemonTaskGraphWorkerObservations(ctx, projectID, rootID, byID, children, ready)
 	ready.Capacity = daemonTaskGraphCapacitySummary(ready)
 	return ready, nil
+}
+
+func finalizeTaskGraphReadinessSource(result *taskGraphReadinessResult) {
+	if result == nil || result.Source.IssueChecksum == "" {
+		return
+	}
+	normalized := *result
+	normalized.Revision = 0
+	normalized.Source.SemanticChecksum = ""
+	result.Source.SemanticChecksum = checksumJSON(normalized)
 }
 
 func taskGraphReadinessOwnershipExpiry(tasks []domain.Task, now time.Time) time.Time {
@@ -4802,42 +4888,20 @@ func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectI
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")
 	}
-	loadStartedAt := time.Now()
 	tasks, err := issueClient.ListGraphReadinessWithRuntime(ctx, projectID, rootIssueID)
-	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.issue_store_list_graph_readiness_with_runtime", loadStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "task_count", len(tasks))
 	if err != nil {
 		return nil, err
 	}
 	contextTaskIDs := taskIDsFromTasks(tasks)
-	canRefreshSessionRuntime := d != nil && d.tmux != nil && d.sessionRuntimeStateStoreIfConfigured(projectID) != nil
-	if canRefreshSessionRuntime && len(contextTaskIDs) > 0 {
-		refreshStartedAt := time.Now()
-		if err := d.validateTaskGraphRuntime(ctx, projectID, contextTaskIDs, d.currentRevision(projectID)); err != nil {
-			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.scoped_session_runtime_refresh", refreshStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "context_task_count", len(contextTaskIDs), "error", err)
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Debug("task graph scoped session runtime refresh failed", "project_id", projectID, "root_issue_id", rootIssueID, "context_task_count", len(contextTaskIDs), "error", err)
-			}
-		} else {
-			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.scoped_session_runtime_refresh", refreshStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "context_task_count", len(contextTaskIDs))
-			reloadStartedAt := time.Now()
+	if d.tmux != nil && d.sessionRuntimeStateStoreIfConfigured(projectID) != nil && len(contextTaskIDs) > 0 {
+		if err := d.validateTaskGraphRuntime(ctx, projectID, contextTaskIDs, d.currentRevision(projectID)); err == nil {
 			tasks, err = issueClient.ListGraphReadinessWithRuntime(ctx, projectID, rootIssueID)
-			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.issue_store_reload_after_runtime_refresh", reloadStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "task_count", len(tasks))
 			if err != nil {
 				return nil, err
 			}
 		}
 	}
-	if d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("task graph readiness loaded root-scoped tasks",
-			"project_id", projectID,
-			"root_issue_id", rootIssueID,
-			"task_count", len(tasks),
-		)
-	}
-	enrichStartedAt := time.Now()
-	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
-	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.enrich_session_state", enrichStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "task_count", len(tasks))
-	return tasks, nil
+	return d.enrichTasksWithSessionState(ctx, projectID, tasks), nil
 }
 
 func (result *taskGraphReadinessResult) applySessionStartProgress(progressByIssue map[string]taskGraphSessionStartProgress) {
@@ -4867,9 +4931,6 @@ func (result *taskGraphReadinessResult) applySessionStartProgress(progressByIssu
 }
 
 func (d *Daemon) loadTaskGraphDomainTasks(ctx context.Context, projectID string) ([]domain.Task, error) {
-	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("task graph session runtime refresh failed", "project_id", projectID, "error", err)
-	}
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")

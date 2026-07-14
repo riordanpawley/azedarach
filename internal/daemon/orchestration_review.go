@@ -100,7 +100,9 @@ func (a daemonOrchestrationAuthority) reviewQueue(ctx context.Context, projectID
 	}
 
 	worktrees := map[string]git.Worktree{}
-	if manager := a.daemon.worktreeManagerForProject(projectID); manager != nil {
+	if a.daemon.materializedReadsEnabled() {
+		worktrees = a.daemon.projectReadWorktrees(projectID)
+	} else if manager := a.daemon.worktreeManagerForProject(projectID); manager != nil {
 		if listed, err := manager.List(ctx); err == nil {
 			for _, worktree := range listed {
 				worktrees[strings.TrimSpace(worktree.IssueID)] = worktree
@@ -194,7 +196,11 @@ func (a daemonOrchestrationAuthority) reviewInspection(ctx context.Context, proj
 		inspection.WorktreePath = strings.TrimSpace(worktree.Path)
 		inspection.Branch = strings.TrimSpace(worktree.Branch)
 		inspection.BaseBranch = a.daemon.runtimeDiffBaseBranchForIssue(task.ID.String(), a.daemon.baseBranchForProject(projectID), tasks, worktrees)
-		if a.daemon.git != nil && inspection.WorktreePath != "" {
+		if a.daemon.materializedReadsEnabled() {
+			if task.GitAdditions != 0 || task.GitDeletions != 0 {
+				inspection.DiffStat = fmt.Sprintf("%d additions, %d deletions", task.GitAdditions, task.GitDeletions)
+			}
+		} else if a.daemon.git != nil && inspection.WorktreePath != "" {
 			if stat, err := a.daemon.git.DiffStat(ctx, inspection.WorktreePath, inspection.BaseBranch); err != nil {
 				inspection.Reasons = append(inspection.Reasons, "inspect-diff: "+err.Error())
 			} else {

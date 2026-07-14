@@ -5272,6 +5272,7 @@ func applyRuntimeOverlay(task *domain.Task, runtime domain.Task) {
 	task.GitDeletions = runtime.GitDeletions
 	task.RuntimeUpdatedAt = runtime.RuntimeUpdatedAt
 	task.Ownership = cloneIssueOwnership(runtime.Ownership)
+	task.CoordinationLeases = append([]domain.CoordinationLease(nil), runtime.CoordinationLeases...)
 	task.PullRequest = clonePullRequest(runtime.PullRequest)
 	if strings.TrimSpace(runtime.Origin) != "" {
 		task.Origin = runtime.Origin
@@ -5281,6 +5282,7 @@ func applyRuntimeOverlay(task *domain.Task, runtime domain.Task) {
 func cloneTaskForRuntimeOverlay(task domain.Task) domain.Task {
 	task.Session = cloneDomainSession(task.Session)
 	task.Ownership = cloneIssueOwnership(task.Ownership)
+	task.CoordinationLeases = append([]domain.CoordinationLease(nil), task.CoordinationLeases...)
 	task.Dependencies = append([]domain.Dependency(nil), task.Dependencies...)
 	task.Implementations = append([]string(nil), task.Implementations...)
 	task.Labels = append([]string(nil), task.Labels...)

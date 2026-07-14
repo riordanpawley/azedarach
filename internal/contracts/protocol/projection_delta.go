@@ -57,6 +57,23 @@ type ProjectionProjector struct {
 	Checksum      string `json:"checksum" msgpack:"checksum"`
 }
 
+// MaterializedSnapshotMetadata identifies the derived inputs used to build a
+// task or orchestration snapshot. DeliveryCursor is a transitional projector
+// position, never a daemon authority revision. RuntimeChecksum identifies the
+// independently sourced session/worktree observation projection joined into
+// the result, so consumers do not infer a cross-authority total order.
+type MaterializedSnapshotMetadata struct {
+	DeliveryCursor             uint64                  `json:"delivery_cursor" msgpack:"delivery_cursor"`
+	DeliveryHead               uint64                  `json:"delivery_head" msgpack:"delivery_head"`
+	DeliveryCursorTransitional bool                    `json:"delivery_cursor_transitional" msgpack:"delivery_cursor_transitional"`
+	Projector                  ProjectionProjector     `json:"projector" msgpack:"projector"`
+	SourceVector               []ProjectionSourceRange `json:"source_vector" msgpack:"source_vector"`
+	IssueChecksum              string                  `json:"issue_checksum" msgpack:"issue_checksum"`
+	RuntimeChecksum            string                  `json:"runtime_checksum" msgpack:"runtime_checksum"`
+	SemanticChecksum           string                  `json:"semantic_checksum" msgpack:"semantic_checksum"`
+	Health                     string                  `json:"health" msgpack:"health"`
+}
+
 type ProjectionEmptyAdvance struct {
 	DeliveryCursor uint64                `json:"delivery_cursor" msgpack:"delivery_cursor"`
 	Source         ProjectionSourceRange `json:"source" msgpack:"source"`

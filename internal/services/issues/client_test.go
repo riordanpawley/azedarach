@@ -1017,7 +1017,6 @@ func TestClient_ListWithRuntimeReturnsJoinedProjectionFields(t *testing.T) {
 	assert.Equal(t, 3, got.GitDeletions)
 	assert.Equal(t, 2, got.GitAheadCount)
 	assert.Equal(t, 1, got.GitBehindCount)
-
 	one, err := client.GetWithRuntime(ctx, projectID, taskID)
 	require.NoError(t, err)
 	assert.Equal(t, got.ID, one.ID)
@@ -1145,7 +1144,6 @@ func TestClient_ListWithRuntimeReadsSessionObservations(t *testing.T) {
 		Status:   domain.StatusInProgress,
 	})
 	require.NoError(t, err)
-
 	db, err := sql.Open("sqlite", client.dbPath)
 	require.NoError(t, err)
 	defer db.Close()
@@ -1353,6 +1351,8 @@ func TestClient_HydrateRuntimePreservesDurableFieldsAndOverlaysProjection(t *tes
 		Status:   domain.StatusOpen,
 	})
 	require.NoError(t, err)
+	_, err = client.ClaimOwnershipWithRuntime(ctx, projectID, taskID, OwnershipClaimParams{OwnerID: "reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseExecution})
+	require.NoError(t, err)
 
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(client.dbPath, slog.Default())
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -1413,6 +1413,8 @@ func TestClient_HydrateRuntimePreservesDurableFieldsAndOverlaysProjection(t *tes
 	assert.Equal(t, 3, got.GitDeletions)
 	assert.Equal(t, 2, got.GitAheadCount)
 	assert.Equal(t, 1, got.GitBehindCount)
+	require.Len(t, got.CoordinationLeases, 1)
+	assert.Equal(t, "reviewer", got.CoordinationLeases[0].OwnerID)
 	assert.Truef(t, got.RuntimeUpdatedAt.Equal(updatedAt), "runtime updated_at = %v, want %v", got.RuntimeUpdatedAt, updatedAt)
 
 	hydrated[0].Dependencies[0].Type = domain.DependencyRelatedTo

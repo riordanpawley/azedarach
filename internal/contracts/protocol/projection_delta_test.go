@@ -73,19 +73,19 @@ func TestVerifyProjectionSnapshotBindsCanonicalSourceVector(t *testing.T) {
 }
 
 func TestProjectionDeltaProtocolVersionClaimAndCompatibility(t *testing.T) {
-	if CurrentVersion != ProjectionDeltaProtocolVersion {
-		t.Fatalf("projection protocol claim=%d current=%d, want 48", ProjectionDeltaProtocolVersion, CurrentVersion)
+	if ProjectionDeltaProtocolVersion != 48 {
+		t.Fatalf("projection protocol first version=%d, want 48", ProjectionDeltaProtocolVersion)
 	}
-	if CurrentVersion != 48 {
-		t.Fatalf("current protocol version=%d, want 48", CurrentVersion)
+	if CurrentVersion != 49 {
+		t.Fatalf("current protocol version=%d, want 49", CurrentVersion)
 	}
-	if SupportsProjectionDeltaCommands(47) || !SupportsProjectionDeltaCommands(48) || SupportsProjectionDeltaCommands(49) {
-		t.Fatal("projection command support window does not match the v48 claim")
+	if SupportsProjectionDeltaCommands(47) || !SupportsProjectionDeltaCommands(48) || !SupportsProjectionDeltaCommands(49) || SupportsProjectionDeltaCommands(50) {
+		t.Fatal("projection command support window does not span v48-v49")
 	}
-	if ack := NegotiateHello(Hello{ProtocolVersion: 47}, "daemon-v48"); !ack.Accepted || ack.DaemonProtocolVersion != 48 {
-		t.Fatalf("v47 compatibility handshake=%+v", ack)
+	if ack := NegotiateHello(Hello{ProtocolVersion: 48}, "daemon-v49"); !ack.Accepted || ack.DaemonProtocolVersion != 49 {
+		t.Fatalf("v48 compatibility handshake=%+v", ack)
 	}
-	if ack := NegotiateHello(Hello{ProtocolVersion: 49}, "daemon-v48"); ack.Accepted || ack.ErrorCode != ErrorCodeIncompatible {
-		t.Fatalf("v49 compatibility handshake=%+v", ack)
+	if ack := NegotiateHello(Hello{ProtocolVersion: 50}, "daemon-v49"); ack.Accepted || ack.ErrorCode != ErrorCodeIncompatible {
+		t.Fatalf("v50 compatibility handshake=%+v", ack)
 	}
 }

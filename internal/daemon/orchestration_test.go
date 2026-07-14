@@ -257,6 +257,28 @@ func TestMergeOrchestrationSnapshotOrdersProjectResultsDeterministically(t *test
 	}
 }
 
+func TestFinalizeOrchestrationSnapshotSourceCoversSemanticResultOnly(t *testing.T) {
+	first := protocol.OrchestrationSnapshot{
+		GeneratedAt: time.Now().UTC(),
+		Revision:    7,
+		Source:      protocol.MaterializedSnapshotMetadata{IssueChecksum: "issues", RuntimeChecksum: "runtime"},
+		Runnable:    []string{"az-1"},
+	}
+	second := first
+	second.GeneratedAt = first.GeneratedAt.Add(time.Minute)
+	second.Revision = 99
+	finalizeOrchestrationSnapshotSource(&first)
+	finalizeOrchestrationSnapshotSource(&second)
+	if first.Source.SemanticChecksum == "" || first.Source.SemanticChecksum != second.Source.SemanticChecksum {
+		t.Fatalf("normalized checksums differ: %q/%q", first.Source.SemanticChecksum, second.Source.SemanticChecksum)
+	}
+	second.Interactions = []domain.InteractionRequest{{ID: "interaction-1"}}
+	finalizeOrchestrationSnapshotSource(&second)
+	if first.Source.SemanticChecksum == second.Source.SemanticChecksum {
+		t.Fatal("interaction projection did not change orchestration semantic checksum")
+	}
+}
+
 func TestHybridActiveSessionCountRejectsProjectionTmuxDivergence(t *testing.T) {
 	identity, err := domain.NewOrchestratorIdentity("project", domain.ProjectOrchestrationScope())
 	if err != nil {

@@ -102,11 +102,11 @@ type Daemon struct {
 	userStoreRefreshMu                   sync.Mutex
 	userStoreRefreshPending              map[string]bool
 	userStoreRefreshDirty                map[string]bool
-	userStoreRefreshActive             map[string]bool
-	userStoreRefreshInterval           time.Duration
-	userStoreRefreshProjectFn          func(context.Context, string) error
-	userStoreProjectLockHook           func(string, bool)
-	userStoreProjectRefreshLocks       sync.Map
+	userStoreRefreshActive               map[string]bool
+	userStoreRefreshInterval             time.Duration
+	userStoreRefreshProjectFn            func(context.Context, string) error
+	userStoreProjectLockHook             func(string, bool)
+	userStoreProjectRefreshLocks         sync.Map
 	userStoreRefreshWG                   sync.WaitGroup
 	userStoreRefreshStopping             bool
 	userStoreRefreshCtx                  context.Context
@@ -197,15 +197,20 @@ type Daemon struct {
 	taskListSnapshotLoads                map[string]*taskListSnapshotLoad
 	taskGraphReadinessMu                 sync.Mutex
 	taskGraphReadinessLoads              map[string]*taskGraphReadinessLoad
-	taskGraphReadinessCache            map[string]taskGraphReadinessCacheEntry
-	taskGraphRuntimeValidationMu       sync.Mutex
-	taskGraphRuntimeValidations        map[string]taskGraphRuntimeValidationEntry
-	taskGraphRuntimeValidationLoads    map[string]*taskGraphRuntimeValidationLoad
+	taskGraphReadinessCache              map[string]taskGraphReadinessCacheEntry
+	taskGraphRuntimeValidationMu         sync.Mutex
+	taskGraphRuntimeValidations          map[string]taskGraphRuntimeValidationEntry
+	taskGraphRuntimeValidationLoads      map[string]*taskGraphRuntimeValidationLoad
 	orchestrationMu                      sync.Mutex
-	orchestrationSnapshotMu            sync.Mutex
-	orchestrationSnapshotCache         map[string]orchestrationSnapshotCacheEntry
-	orchestrationSnapshotLoads         map[string]*orchestrationSnapshotLoad
-	orchestrationSnapshotBuild         orchestrationSnapshotBuilder
+	orchestrationSnapshotMu              sync.Mutex
+	orchestrationSnapshotCache           map[string]orchestrationSnapshotCacheEntry
+	orchestrationSnapshotLoads           map[string]*orchestrationSnapshotLoad
+	orchestrationSnapshotBuild           orchestrationSnapshotBuilder
+	materializersMu                      sync.RWMutex
+	materializersInitMu                  sync.Mutex
+	materializers                        map[string]*projectReadMaterializer
+	materializersStarted                 bool
+	materializersContext                 context.Context
 	reviewLeaseReleasedBeforeClose       func(context.Context, string, string) error
 	watchClientsMu                       sync.Mutex
 	watchClients                         map[string]watchClientObservation
@@ -361,6 +366,7 @@ func New(cfg Config) *Daemon {
 		taskGraphRuntimeValidationLoads:    map[string]*taskGraphRuntimeValidationLoad{},
 		orchestrationSnapshotCache:         map[string]orchestrationSnapshotCacheEntry{},
 		orchestrationSnapshotLoads:         map[string]*orchestrationSnapshotLoad{},
+		materializers:                      map[string]*projectReadMaterializer{},
 		revision:                           map[string]uint64{},
 		userStoreRefreshPending:            map[string]bool{},
 		userStoreRefreshDirty:              map[string]bool{},
@@ -614,6 +620,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	projectionStartedAt := time.Now()
 	if err := d.openProjectionDeltaStores(ctx); err != nil {
 		return fmt.Errorf("open projection delta stores before IPC serve: %w", err)
+	}
+	if err := d.startProjectReadMaterializers(serveCtx); err != nil {
+		return fmt.Errorf("start project read materializers before IPC serve: %w", err)
 	}
 	d.cfg.Logger.Info("daemon startup phase", "phase", "projection_delta_stores_open", "duration_ms", time.Since(projectionStartedAt).Milliseconds())
 
