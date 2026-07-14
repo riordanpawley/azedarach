@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -826,7 +827,7 @@ func (a daemonOrchestrationAuthority) claimAndSubmitStartWithPrompt(ctx context.
 	if issueClient == nil {
 		return protocol.OrchestrationLaunch{}, fmt.Errorf("issue store unavailable")
 	}
-	dedupeKey := "session.start:" + issueID
+	dedupeKey := orchestrationStartDedupeKey(issueID, request.IntentKey)
 	attempt, err := issueClient.BeginOrchestrationStart(ctx, projectID, issueID, request.IntentKey, request.ActorID, dedupeKey)
 	if err != nil {
 		return protocol.OrchestrationLaunch{}, fmt.Errorf("claim orchestration start: %w", err)
@@ -895,6 +896,11 @@ func (a daemonOrchestrationAuthority) claimAndSubmitStartWithPrompt(ctx context.
 	}
 	completed = true
 	return protocol.OrchestrationLaunch{IssueID: issueID, SessionID: sessionID, OperationID: submitted.Operation.OperationID.String(), OperationState: string(submitted.Operation.State)}, nil
+}
+
+func orchestrationStartDedupeKey(issueID, intentKey string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(intentKey)))
+	return fmt.Sprintf("session.start:%s:%x", strings.TrimSpace(issueID), digest)
 }
 
 func (a daemonOrchestrationAuthority) compensateStartFailure(ctx context.Context, issueClient *issues.Client, attempt issues.OrchestrationStartAttempt, cause error) error {
