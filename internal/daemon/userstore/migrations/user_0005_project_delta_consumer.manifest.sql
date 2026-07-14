@@ -1,0 +1,5 @@
+-- Go-assisted migration manifest.
+-- Schema: adds one durable delta cursor/hash/source/projector vector component to each root-user project row.
+-- Data: existing projects retain their last-good projection with an uninitialized component and are bootstrapped on the next daemon start.
+-- Validation: required columns and the pinned artifact checksum are verified before the ledger write in the migration transaction.
+-- Ledger: records user_0005_project_delta_consumer exactly once without changing project-authority databases.

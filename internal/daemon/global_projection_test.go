@@ -208,7 +208,7 @@ func TestScheduledUserProjectionDirtyCooldownReportsStaleHealth(t *testing.T) {
 	d.stopUserProjectionWorkers()
 }
 
-func TestPeriodicUserProjectionRepairSharesMutationSchedule(t *testing.T) {
+func TestPeriodicUserProjectionRepairDoesNotScheduleRoutineFullExport(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := t.TempDir()
 	if err := appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{Projects: []appconfig.Project{{ID: "p", Name: "P", Path: root}}}); err != nil {
@@ -258,11 +258,8 @@ func TestPeriodicUserProjectionRepairSharesMutationSchedule(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(starts) != 2 || maxInFlight != 1 {
-		t.Fatalf("repair/mutation starts=%v max_in_flight=%d, want two serialized passes", starts, maxInFlight)
-	}
-	if gap := starts[1].Sub(starts[0]); gap < interval {
-		t.Fatalf("repair replay gap=%s, want at least %s", gap, interval)
+	if len(starts) != 1 || maxInFlight != 1 {
+		t.Fatalf("repair/mutation starts=%v max_in_flight=%d, want only the already queued legacy refresh", starts, maxInFlight)
 	}
 }
 

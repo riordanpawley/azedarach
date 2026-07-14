@@ -51,6 +51,14 @@ func (d *Daemon) enqueueUserProjectionRefresh(projectID string) {
 		return
 	}
 	projectID = d.canonicalProjectID(projectID)
+	d.enqueueLegacyUserProjectionRefresh(projectID)
+}
+
+func (d *Daemon) enqueueLegacyUserProjectionRefresh(projectID string) {
+	if d == nil || d.userStore == nil || d.cfg.ScopedRuntime {
+		return
+	}
+	projectID = d.canonicalProjectID(projectID)
 	d.userStoreRefreshMu.Lock()
 	if d.userStoreRefreshPending == nil {
 		d.userStoreRefreshPending = map[string]bool{}
@@ -136,6 +144,30 @@ func (d *Daemon) enqueueUserProjectionRefresh(projectID string) {
 	}()
 }
 
+func (d *Daemon) hasUserProjectionConsumer(projectID string) bool {
+	projectID = d.canonicalProjectID(projectID)
+	d.userProjectionConsumerMu.Lock()
+	defer d.userProjectionConsumerMu.Unlock()
+	_, ok := d.userProjectionConsumers[projectID]
+	return ok
+}
+
+// commandCoveredByIssueProjectionDelta is deliberately narrower than the
+// mutation registry. Runtime, ownership, interaction, Git, and worktree facts
+// retain the bounded legacy refresh until their typed sibling delta producers
+// land and the final cutover removes that adapter.
+func commandCoveredByIssueProjectionDelta(command string) bool {
+	switch command {
+	case "task.create", "task.update_details", "task.append_notes",
+		"task.delete", "task.archive", "task.unarchive",
+		"task.dependency.add", "task.dependency.remove",
+		commandSyncRun:
+		return true
+	default:
+		return false
+	}
+}
+
 func (d *Daemon) finishUserProjectionRefreshWorker(projectID string) {
 	d.userStoreRefreshMu.Lock()
 	delete(d.userStoreRefreshPending, projectID)
@@ -164,6 +196,11 @@ func (d *Daemon) startGlobalProjectionRepairWorker(ctx context.Context) {
 	}
 	d.userStoreRefreshWG.Add(1)
 	d.userStoreRefreshMu.Unlock()
+	if registry, err := appconfig.LoadProjectsRegistry(); err == nil {
+		d.ensureUserProjectionConsumers(ctx, registry.Projects)
+	} else if d.cfg.Logger != nil {
+		d.cfg.Logger.Warn("start user projection consumers", "error", err)
+	}
 	go func() {
 		defer d.userStoreRefreshWG.Done()
 		ticker := time.NewTicker(globalProjectionRepairInterval)
@@ -174,7 +211,13 @@ func (d *Daemon) startGlobalProjectionRepairWorker(ctx context.Context) {
 				return
 			case <-ticker.C:
 				repairCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-				err := d.scheduleUserProjectionRepair(repairCtx)
+				registry, err := appconfig.LoadProjectsRegistry()
+				if err == nil {
+					d.ensureUserProjectionConsumers(repairCtx, registry.Projects)
+					err = d.reconcileUserProjectionProjects(repairCtx, registry.Projects)
+				} else {
+					err = fmt.Errorf("load project registry: %w", err)
+				}
 				cancel()
 				if err != nil && d.cfg.Logger != nil {
 					d.cfg.Logger.Warn("periodic user projection repair completed partially", "error", err)
@@ -192,9 +235,12 @@ func (d *Daemon) scheduleUserProjectionRepair(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("load project registry: %w", err)
 	}
-	projects := make([]userstore.CatalogProject, 0, len(registry.Projects))
-	ids := make([]string, 0, len(registry.Projects))
-	for _, project := range registry.Projects {
+	return d.reconcileUserProjectionProjects(ctx, registry.Projects)
+}
+
+func (d *Daemon) reconcileUserProjectionProjects(ctx context.Context, registered []appconfig.Project) error {
+	projects := make([]userstore.CatalogProject, 0, len(registered))
+	for _, project := range registered {
 		projectID := protocol.NormalizeProjectID(appconfig.RegisteredProjectID(project))
 		if projectID == "" {
 			continue
@@ -204,13 +250,9 @@ func (d *Daemon) scheduleUserProjectionRepair(ctx context.Context) error {
 			root = filepath.Clean(project.Path)
 		}
 		projects = append(projects, userstore.CatalogProject{ProjectID: projectID, Name: project.Name, Path: root, DBPath: filepath.Join(root, ".azedarach", "azedarach.db")})
-		ids = append(ids, projectID)
 	}
 	if err := d.userStore.ReconcileProjects(ctx, projects); err != nil {
 		return fmt.Errorf("reconcile user projection catalog: %w", err)
-	}
-	for _, projectID := range ids {
-		d.enqueueUserProjectionRefresh(projectID)
 	}
 	return nil
 }
@@ -244,6 +286,50 @@ func (d *Daemon) refreshUserProject(ctx context.Context, wantedProjectID string)
 		return d.refreshRegisteredUserProject(ctx, project)
 	}
 	return fmt.Errorf("registered project %s not found", wantedProjectID)
+}
+
+// bootstrapUserProjection initializes projects that have never published a
+// verified delta component. Existing components are resumed by the blocking
+// consumers from their durable per-project cursors instead of being replaced
+// by a routine startup export.
+func (d *Daemon) bootstrapUserProjection(ctx context.Context) error {
+	if d == nil || d.userStore == nil {
+		return nil
+	}
+	registry, err := appconfig.LoadProjectsRegistry()
+	if err != nil {
+		return fmt.Errorf("load project registry: %w", err)
+	}
+	projects := make([]userstore.CatalogProject, 0, len(registry.Projects))
+	for _, project := range registry.Projects {
+		projectID := protocol.NormalizeProjectID(appconfig.RegisteredProjectID(project))
+		if projectID == "" {
+			continue
+		}
+		root, resolveErr := appconfig.ResolveProjectRoot(project.Path)
+		if resolveErr != nil {
+			root = filepath.Clean(project.Path)
+		}
+		projects = append(projects, userstore.CatalogProject{ProjectID: projectID, Name: project.Name, Path: root, DBPath: filepath.Join(root, ".azedarach", "azedarach.db")})
+	}
+	if err := d.userStore.ReconcileProjects(ctx, projects); err != nil {
+		return fmt.Errorf("reconcile user projection bootstrap catalog: %w", err)
+	}
+	var firstErr error
+	for _, project := range registry.Projects {
+		projectID := protocol.NormalizeProjectID(appconfig.RegisteredProjectID(project))
+		if projectID == "" {
+			continue
+		}
+		state, stateErr := d.userStore.ProjectDeltaState(ctx, projectID)
+		if stateErr == nil && state.Initialized && state.Projector == issueProjectionProjector() {
+			continue
+		}
+		if refreshErr := d.refreshRegisteredUserProject(ctx, project); refreshErr != nil && firstErr == nil {
+			firstErr = refreshErr
+		}
+	}
+	return firstErr
 }
 
 func (d *Daemon) refreshUserProjection(ctx context.Context) error {
@@ -310,12 +396,26 @@ func (d *Daemon) exportProjectToUserProjection(ctx context.Context, projectID, n
 	if client == nil {
 		return fmt.Errorf("issue store unavailable")
 	}
-	export, err := client.ExportProjection(ctx, projectID)
-	if err != nil {
-		return err
+	for attempt := 0; attempt < 4; attempt++ {
+		before, err := d.projectDeltaHead(ctx, projectID, client)
+		if err != nil {
+			return fmt.Errorf("read project delta head before export: %w", err)
+		}
+		export, err := client.ExportProjection(ctx, projectID)
+		if err != nil {
+			return err
+		}
+		deltaState, err := d.projectDeltaSnapshotState(ctx, projectID, client)
+		if err != nil {
+			return fmt.Errorf("read project delta bootstrap snapshot: %w", err)
+		}
+		if before != deltaState.Cursor {
+			continue
+		}
+		export.Tasks = d.enrichTasksWithSessionState(ctx, projectID, export.Tasks)
+		return d.userStore.ReplaceProject(ctx, userstore.ProjectInput{ProjectID: projectID, Name: name, Path: root, DBPath: dbPath, SchemaVersion: export.SchemaVersion, SchemaFingerprint: export.SchemaFingerprint, Checkpoint: export.Checkpoint, RefreshGeneration: generation, Tasks: export.Tasks, Delta: &deltaState})
 	}
-	export.Tasks = d.enrichTasksWithSessionState(ctx, projectID, export.Tasks)
-	return d.userStore.ReplaceProject(ctx, userstore.ProjectInput{ProjectID: projectID, Name: name, Path: root, DBPath: dbPath, SchemaVersion: export.SchemaVersion, SchemaFingerprint: export.SchemaFingerprint, Checkpoint: export.Checkpoint, RefreshGeneration: generation, Tasks: export.Tasks})
+	return fmt.Errorf("project authority changed throughout verified export: %w", domain.ErrProjectionRetryable)
 }
 
 func (d *Daemon) handleGlobalSnapshot(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

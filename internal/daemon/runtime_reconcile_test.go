@@ -55,6 +55,9 @@ func TestRuntimeReconcileReadsCrossProjectProjectionHealthWithoutRefreshing(t *t
 		userStore:             store,
 		issueClientsByProject: map[string]*issues.Client{projectID: issueClient},
 	}
+	if err = d.openProjectionDeltaStores(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if err = d.refreshUserProject(context.Background(), projectID); err != nil {
 		t.Fatal(err)
 	}

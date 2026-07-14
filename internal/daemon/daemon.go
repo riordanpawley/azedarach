@@ -102,15 +102,17 @@ type Daemon struct {
 	userStoreRefreshMu                   sync.Mutex
 	userStoreRefreshPending              map[string]bool
 	userStoreRefreshDirty                map[string]bool
-	userStoreRefreshActive             map[string]bool
-	userStoreRefreshInterval           time.Duration
-	userStoreRefreshProjectFn          func(context.Context, string) error
-	userStoreProjectLockHook           func(string, bool)
-	userStoreProjectRefreshLocks       sync.Map
+	userStoreRefreshActive               map[string]bool
+	userStoreRefreshInterval             time.Duration
+	userStoreRefreshProjectFn            func(context.Context, string) error
+	userStoreProjectLockHook             func(string, bool)
+	userStoreProjectRefreshLocks         sync.Map
 	userStoreRefreshWG                   sync.WaitGroup
 	userStoreRefreshStopping             bool
 	userStoreRefreshCtx                  context.Context
 	userStoreRefreshCancel               context.CancelFunc
+	userProjectionConsumerMu             sync.Mutex
+	userProjectionConsumers              map[string]*userProjectionConsumerHandle
 	issueClientsMu                       sync.Mutex
 	issueClientsByProject                map[string]*issues.Client
 	issueClientsByRoot                   map[string]*issues.Client
@@ -197,15 +199,15 @@ type Daemon struct {
 	taskListSnapshotLoads                map[string]*taskListSnapshotLoad
 	taskGraphReadinessMu                 sync.Mutex
 	taskGraphReadinessLoads              map[string]*taskGraphReadinessLoad
-	taskGraphReadinessCache            map[string]taskGraphReadinessCacheEntry
-	taskGraphRuntimeValidationMu       sync.Mutex
-	taskGraphRuntimeValidations        map[string]taskGraphRuntimeValidationEntry
-	taskGraphRuntimeValidationLoads    map[string]*taskGraphRuntimeValidationLoad
+	taskGraphReadinessCache              map[string]taskGraphReadinessCacheEntry
+	taskGraphRuntimeValidationMu         sync.Mutex
+	taskGraphRuntimeValidations          map[string]taskGraphRuntimeValidationEntry
+	taskGraphRuntimeValidationLoads      map[string]*taskGraphRuntimeValidationLoad
 	orchestrationMu                      sync.Mutex
-	orchestrationSnapshotMu            sync.Mutex
-	orchestrationSnapshotCache         map[string]orchestrationSnapshotCacheEntry
-	orchestrationSnapshotLoads         map[string]*orchestrationSnapshotLoad
-	orchestrationSnapshotBuild         orchestrationSnapshotBuilder
+	orchestrationSnapshotMu              sync.Mutex
+	orchestrationSnapshotCache           map[string]orchestrationSnapshotCacheEntry
+	orchestrationSnapshotLoads           map[string]*orchestrationSnapshotLoad
+	orchestrationSnapshotBuild           orchestrationSnapshotBuilder
 	reviewLeaseReleasedBeforeClose       func(context.Context, string, string) error
 	watchClientsMu                       sync.Mutex
 	watchClients                         map[string]watchClientObservation
@@ -365,6 +367,7 @@ func New(cfg Config) *Daemon {
 		userStoreRefreshPending:            map[string]bool{},
 		userStoreRefreshDirty:              map[string]bool{},
 		userStoreRefreshActive:             map[string]bool{},
+		userProjectionConsumers:            map[string]*userProjectionConsumerHandle{},
 		shutdownReqCh:                      make(chan struct{}),
 	}
 	if !cfg.ScopedRuntime && strings.TrimSpace(os.Getenv("AZEDARACH_DISABLE_USER_DB")) != "1" {
@@ -786,7 +789,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	defer d.endCommand()
 	if commandMutatesProjectProjection(req.Command) {
 		defer func() {
-			if err == nil && resp.OK {
+			if err == nil && resp.OK && (!commandCoveredByIssueProjectionDelta(req.Command) || !d.hasUserProjectionConsumer(projectID)) {
 				d.enqueueUserProjectionRefresh(projectID)
 			}
 		}()
