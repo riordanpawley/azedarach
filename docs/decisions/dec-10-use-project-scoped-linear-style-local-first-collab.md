@@ -1,15 +1,15 @@
 # dec-10: Use project-scoped Linear-style local-first collaboration
 
 - Created: 2026-07-12
-- Updated: 2026-07-13
+- Updated: 2026-07-14
 
 ## Rationale
 
-Use a complete local SQLite projection plus a durable pending-command outbox on every client. In team mode, one self-hosted single-active project service backed by SQLite WAL validates commands and assigns canonical order; clients never become peer authorities for guarded operations. Ordinary content commands may be queued offline, while guarded commands require current server validation. Detailed canonical event, cursor, projection, replay, signing, and recovery mechanics are owned by blocking investigation dgv rather than this product-level decision.
+Use a complete local SQLite projection plus a durable pending-command outbox on every client. In team mode, one self-hosted single-active project service backed by SQLite WAL validates commands and assigns canonical order; clients never become peer authorities for guarded operations. Ordinary content commands may be queued offline, while guarded commands require current server validation. Detailed canonical event, cursor, projection, replay, signing, and recovery mechanics are owned by companion investigation dgv rather than this product-level decision.
 
 ## Context
 
-Azedarach is primarily an AI context and durable history manager for a small developer team. Users want Linear-like instantaneous local reads and offline content work, but lifecycle, graph, review, integration, and execution invariants need one online ordering and validation authority.
+Azedarach is primarily an AI context and durable history manager for a small developer team. Users want Linear-like instantaneous local reads and offline content work, but lifecycle, graph, review, integration, and membership invariants need one online ordering and validation authority. Execution and orchestration remain local and outside collaboration v1 under dec-16.
 
 ## Consequences
 

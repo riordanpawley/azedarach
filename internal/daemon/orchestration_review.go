@@ -206,7 +206,7 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 			result.Closed = append(result.Closed, issueID)
 			continue
 		case "accepted_pending":
-			if err := a.closeAcceptedReview(ctx, projectID, request, issueID, &result); err != nil {
+			if _, err := a.releaseAndCloseAcceptedReview(ctx, projectID, request, issueID, &result); err != nil {
 				result.Failed[issueID] = err.Error()
 			}
 			continue
@@ -414,14 +414,18 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 	if err := a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "accepted", ""); err != nil {
 		return false, err
 	}
+	return a.releaseAndCloseAcceptedReview(ctx, projectID, request, inspection.IssueID, result)
+}
+
+func (a daemonOrchestrationAuthority) releaseAndCloseAcceptedReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, result *protocol.OrchestrationIntentResult) (bool, error) {
 	issueClient := a.daemon.issueClientForProject(projectID)
 	if issueClient == nil {
 		return false, fmt.Errorf("issue store unavailable")
 	}
-	if _, err := issueClient.ReleaseOwnershipWithRuntime(ctx, projectID, inspection.IssueID, issues.OwnershipClaimParams{OwnerID: request.ActorID, Purpose: domain.CoordinationLeaseReview}); err != nil {
+	if _, err := issueClient.ReleaseOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: request.ActorID, Purpose: domain.CoordinationLeaseReview}); err != nil {
 		return false, fmt.Errorf("release review lease before authoritative close: %w", err)
 	}
-	return true, a.closeAcceptedReview(ctx, projectID, request, inspection.IssueID, result)
+	return true, a.closeAcceptedReview(ctx, projectID, request, issueID, result)
 }
 
 func (a daemonOrchestrationAuthority) closeAcceptedReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, result *protocol.OrchestrationIntentResult) error {

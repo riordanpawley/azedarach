@@ -12,10 +12,8 @@ import (
 	"strings"
 	"time"
 
-	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
-	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -2415,6 +2413,9 @@ func (d *Daemon) submitDeferredTaskWorktreeCleanup(ctx context.Context, projectI
 		})
 		if err != nil {
 			if errors.Is(err, git.ErrWorktreeNotFound) {
+				if cleanupErr := finalizeDeletedWorktree(runCtx, projectID, taskID, manager, nil, d.runtimeProjectionStateWriter()); cleanupErr != nil {
+					return nil, cleanupErr
+				}
 				return json.Marshal(deferredTaskWorktreeCleanupResult{
 					ProjectID: projectID,
 					TaskID:    taskID,
@@ -2422,8 +2423,8 @@ func (d *Daemon) submitDeferredTaskWorktreeCleanup(ctx context.Context, projectI
 			}
 			return nil, err
 		}
-		if removedWorktree != nil {
-			_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(removedWorktree.Path))
+		if cleanupErr := finalizeDeletedWorktree(runCtx, projectID, taskID, manager, removedWorktree, d.runtimeProjectionStateWriter()); cleanupErr != nil {
+			return nil, cleanupErr
 		}
 		return json.Marshal(deferredTaskWorktreeCleanupResult{
 			ProjectID: projectID,

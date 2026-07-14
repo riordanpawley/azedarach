@@ -90,17 +90,18 @@ func TrustedReviewOutcome(event IssueObservationEvent) (ReviewOutcome, bool) {
 	if event.Type != IssueEventReviewCompleted || strings.TrimSpace(event.Source) != "daemon-orchestration" {
 		return "", false
 	}
-	switch strings.TrimSpace(event.SourceCommand) {
-	case "review-accept", "review-return":
-		if strings.TrimSpace(stringValue(event.Payload["actor_id"])) == "" {
-			return "", false
-		}
-	default:
+	command := strings.TrimSpace(event.SourceCommand)
+	if command != "review-accept" && command != "review-return" {
+		return "", false
+	}
+	if strings.TrimSpace(stringValue(event.Payload["actor_id"])) == "" {
 		return "", false
 	}
 	outcome := ReviewOutcome(strings.TrimSpace(stringValue(event.Payload["outcome"])))
-	switch outcome {
-	case ReviewOutcomeAccepted, ReviewOutcomeReturned, ReviewOutcomeIntegrationFailed:
+	switch {
+	case command == "review-accept" && (outcome == ReviewOutcomeAccepted || outcome == ReviewOutcomeIntegrationFailed):
+		return outcome, true
+	case command == "review-return" && outcome == ReviewOutcomeReturned:
 		return outcome, true
 	default:
 		return "", false

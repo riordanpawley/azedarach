@@ -64,11 +64,23 @@ merge-gate:
 # Aggregate daemon race validation has a larger budget than focused race tests.
 # The timeout remains inside `go test` so genuine hangs emit goroutine stacks.
 test-race-daemon:
-    ./scripts/test-daemon-race-sharded.sh
+    go run ./cmd/go-cache run --kind race -- ./scripts/test-daemon-race-sharded.sh
 
 test-coverage:
-    go test -coverprofile=coverage.out ./...
+    go run ./cmd/go-cache run --kind coverage -- go test -coverprofile=coverage.out ./...
     go tool cover -html=coverage.out -o coverage.html
+
+go-cache-inventory:
+    go run ./cmd/go-cache inventory
+
+go-cache-maintain:
+    go run ./cmd/go-cache maintain
+
+go-cache-clean-owner ISSUE:
+    go run ./cmd/go-cache cleanup-owner --issue {{ISSUE}} --confirm
+
+go-cache-clean-legacy *ARGS:
+    go run ./cmd/go-cache cleanup-legacy {{ARGS}}
 
 type-check:
     go build ./...
