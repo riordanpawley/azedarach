@@ -123,9 +123,21 @@ public_links_are_managed() {
 
 migrate_public_links() {
   local generations_dir="$1"
-  local previous_generation rollback_dir
+  local previous_generation rollback_dir prior_control_target
   previous_generation="$(mktemp -d "$generations_dir/generation.previous.XXXXXX")"
   rollback_dir="$(mktemp -d "$install_dir/.azedarach-rollback.XXXXXX")"
+
+  if [[ -e "$install_dir/.azedarach-current" || -L "$install_dir/.azedarach-current" ]]; then
+    if [[ ! -L "$install_dir/.azedarach-current" ]]; then
+      echo "Refusing to replace non-symlink install control path: $install_dir/.azedarach-current" >&2
+      rm -rf "$rollback_dir" "$previous_generation"
+      return 1
+    fi
+    if [[ -x "$install_dir/.azedarach-current/az" &&
+          -x "$install_dir/.azedarach-current/azd" ]]; then
+      cp -P "$install_dir/.azedarach-current" "$rollback_dir/.azedarach-current"
+    fi
+  fi
 
   for binary in az azd; do
     if [[ -e "$install_dir/$binary" || -L "$install_dir/$binary" ]]; then
@@ -146,6 +158,15 @@ migrate_public_links() {
         mv -f "$rollback_dir/$binary" "$install_dir/$binary"
       fi
     done
+    if [[ -L "$rollback_dir/.azedarach-current" ]]; then
+      prior_control_target="$(readlink "$rollback_dir/.azedarach-current")"
+      if ! atomic_symlink "$prior_control_target" "$install_dir/.azedarach-current"; then
+        rm -rf "$rollback_dir"
+        return 1
+      fi
+    else
+      rm -f "$install_dir/.azedarach-current"
+    fi
     rm -rf "$rollback_dir" "$previous_generation"
     return 1
   fi

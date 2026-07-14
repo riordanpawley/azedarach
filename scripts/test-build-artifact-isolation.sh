@@ -135,6 +135,67 @@ fi
 grep -q "requested azd build failure" "$fixture/build-failure.stderr"
 cmp "$fixture/failure-az.before" "$fixture/failure-bin/az"
 cmp "$fixture/failure-azd.before" "$fixture/failure-bin/azd"
+test ! -e "$fixture/failure-bin/.azedarach-current"
+test ! -L "$fixture/failure-bin/.azedarach-current"
+
+mkdir -p "$fixture/partial-bin/.azedarach-generations/generation.old"
+printf 'partial old az\n' >"$fixture/partial-bin/.azedarach-generations/generation.old/az"
+printf 'partial old azd\n' >"$fixture/partial-bin/.azedarach-generations/generation.old/azd"
+chmod +x "$fixture/partial-bin/.azedarach-generations/generation.old/az" \
+  "$fixture/partial-bin/.azedarach-generations/generation.old/azd"
+ln -s .azedarach-generations/generation.old "$fixture/partial-bin/.azedarach-current"
+ln -s .azedarach-current/az "$fixture/partial-bin/az"
+cp "$fixture/partial-bin/.azedarach-generations/generation.old/azd" "$fixture/partial-bin/azd"
+cp -L "$fixture/partial-bin/az" "$fixture/partial-az.before"
+cp "$fixture/partial-bin/azd" "$fixture/partial-azd.before"
+
+if FAKE_GIT_MODE=primary FAKE_MV_FAIL_AZD_LINK=1 \
+  FAKE_MV_FAIL_ONCE_FILE="$fixture/partial-azd-link-failed" \
+  AZ_INSTALL_DIR="$fixture/partial-bin" PATH="$fixture/fake-bin:$PATH" \
+  "$fixture/scripts/build-link-run.sh" --no-run \
+  >"$fixture/partial-failure.stdout" 2>"$fixture/partial-failure.stderr"; then
+  echo "build-link-run unexpectedly succeeded from a partially managed state" >&2
+  exit 1
+fi
+grep -q "requested azd link install failure" "$fixture/partial-failure.stderr"
+test -x "$fixture/partial-bin/az"
+test -x "$fixture/partial-bin/azd"
+cmp "$fixture/partial-az.before" "$fixture/partial-bin/az"
+cmp "$fixture/partial-azd.before" "$fixture/partial-bin/azd"
+test "$(readlink "$fixture/partial-bin/az")" = ".azedarach-current/az"
+test ! -L "$fixture/partial-bin/azd"
+test "$(readlink "$fixture/partial-bin/.azedarach-current")" = ".azedarach-generations/generation.old"
+test -x "$fixture/partial-bin/.azedarach-current/az"
+test -x "$fixture/partial-bin/.azedarach-current/azd"
+partial_generation_count="$(find "$fixture/partial-bin/.azedarach-generations" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+test "$partial_generation_count" -eq 1
+while IFS= read -r link; do
+  test -e "$link"
+done < <(find "$fixture/partial-bin" -type l)
+
+mkdir -p "$fixture/interrupted-bin"
+printf 'interrupted old az\n' >"$fixture/interrupted-bin/az"
+printf 'interrupted old azd\n' >"$fixture/interrupted-bin/azd"
+chmod +x "$fixture/interrupted-bin/az" "$fixture/interrupted-bin/azd"
+ln -s .azedarach-generations/missing "$fixture/interrupted-bin/.azedarach-current"
+cp "$fixture/interrupted-bin/az" "$fixture/interrupted-az.before"
+cp "$fixture/interrupted-bin/azd" "$fixture/interrupted-azd.before"
+
+if FAKE_GIT_MODE=primary FAKE_MV_FAIL_AZD_LINK=1 \
+  FAKE_MV_FAIL_ONCE_FILE="$fixture/interrupted-azd-link-failed" \
+  AZ_INSTALL_DIR="$fixture/interrupted-bin" PATH="$fixture/fake-bin:$PATH" \
+  "$fixture/scripts/build-link-run.sh" --no-run \
+  >"$fixture/interrupted-failure.stdout" 2>"$fixture/interrupted-failure.stderr"; then
+  echo "build-link-run unexpectedly succeeded from an interrupted control-link state" >&2
+  exit 1
+fi
+grep -q "requested azd link install failure" "$fixture/interrupted-failure.stderr"
+test -x "$fixture/interrupted-bin/az"
+test -x "$fixture/interrupted-bin/azd"
+cmp "$fixture/interrupted-az.before" "$fixture/interrupted-bin/az"
+cmp "$fixture/interrupted-azd.before" "$fixture/interrupted-bin/azd"
+test ! -e "$fixture/interrupted-bin/.azedarach-current"
+test ! -L "$fixture/interrupted-bin/.azedarach-current"
 
 if FAKE_GIT_MODE=primary FAKE_MV_FAIL_AZD_LINK=1 \
   FAKE_MV_FAIL_ONCE_FILE="$fixture/azd-link-failed" \
@@ -147,6 +208,8 @@ fi
 grep -q "requested azd link install failure" "$fixture/install-failure.stderr"
 cmp "$fixture/failure-az.before" "$fixture/failure-bin/az"
 cmp "$fixture/failure-azd.before" "$fixture/failure-bin/azd"
+test ! -e "$fixture/failure-bin/.azedarach-current"
+test ! -L "$fixture/failure-bin/.azedarach-current"
 
 mkdir -p "$fixture/global-bin"
 ln -s "$fixture/bin/az" "$fixture/global-bin/az"
