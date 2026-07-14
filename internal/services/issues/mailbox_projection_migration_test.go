@@ -6,12 +6,31 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/stretchr/testify/require"
 )
+
+func TestMailboxObservationProjectionMigrationArtifactDescribesGoAssistedContract(t *testing.T) {
+	manifest, err := loadMigrationSQL("migrations/0048_mailbox_observation_projection_cutover.sql")
+	require.NoError(t, err)
+	for _, required := range []string{
+		"Schema effects:",
+		"Data effects (transactional SQL phase):",
+		"Go-assisted data completion:",
+		"source_command=mailbox.cutover",
+		"issue ID + event type + mail_event parent + sequence",
+		"Failure rolls back both",
+		"Validation effects:",
+		"Ledger effects:",
+		"pinned artifact checksum",
+	} {
+		require.Truef(t, strings.Contains(manifest, required), "migration manifest missing %q", required)
+	}
+}
 
 func TestMailboxObservationProjectionCutoverUpgradesRetriesAndReopensIdempotently(t *testing.T) {
 	ctx := context.Background()
@@ -89,7 +108,7 @@ func TestMailboxObservationProjectionMigrationUpgradesPreviousFixtureAndRejectsD
 	require.NoError(t, err)
 	var checksum string
 	require.NoError(t, db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, mailboxObservationProjectionCutoverMigrationID).Scan(&checksum))
-	require.Equal(t, "990941df000ed1814efbff5261f79c4cf4fb0761b0d7ec60891d7817d292f403", checksum)
+	require.Equal(t, "281f07694377b64c8ad2930add9238b7f397c49f4d0af0a402f804aeac367379", checksum)
 	require.NoError(t, upgraded.CloseDB())
 
 	raw, err = sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath))

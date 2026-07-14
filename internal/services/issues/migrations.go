@@ -138,7 +138,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "0046_repair_issue_state_runtime_constraints", Path: "migrations/0046_repair_issue_state_runtime_constraints.manifest.sql", Checksum: "6420b559de666287450e274b283b2e481c1472e3b02914f3023019975216e20d"},
 	{ID: humanAuthorityProjectionMigrationID, Path: "migrations/0047_human_authority_projection_revision.sql", Checksum: "ac3a48512b2e6e9c018d58a68db24a2465e9d172139d22f8378f69677073a0ab"},
 	{ID: "0048_decision_propagation_outbox", Path: "migrations/0048_decision_propagation_outbox.sql", Checksum: "a12c44ba35156d71fbcd88a9d78e4cdb234e75e7e4aef5f896c8b1182ada858d"},
-	{ID: mailboxObservationProjectionCutoverMigrationID, Path: "migrations/0048_mailbox_observation_projection_cutover.sql", Checksum: "990941df000ed1814efbff5261f79c4cf4fb0761b0d7ec60891d7817d292f403"},
+	{ID: mailboxObservationProjectionCutoverMigrationID, Path: "migrations/0048_mailbox_observation_projection_cutover.sql", Checksum: "281f07694377b64c8ad2930add9238b7f397c49f4d0af0a402f804aeac367379"},
 }
 
 func validateMigrationRegistry() error {
