@@ -159,6 +159,20 @@ FAKE_EXPIRES_AT="$expired" jaeger_expire_fallback fake_engine azedarach-jaeger-f
 [[ -e "$primary_record" ]]
 grep -qx 'localhost:4318' "$AZEDARACH_JAEGER_ENDPOINT_FILE"
 
+# An old owner cannot remove a replacement container that reused the name but
+# carries a different expiry identity.
+: >"$calls"
+old_expires="$((now - 1))"
+replacement_expires="$((now + 3600))"
+old_record="$(jaeger_write_endpoint_state localhost:34318 "$old_expires" old-owner)"
+FAKE_EXPIRES_AT="$replacement_expires" jaeger_expire_fallback \
+  fake_engine azedarach-jaeger-fallback "$old_expires" "$old_record"
+if grep -q '^rm -f azedarach-jaeger-fallback ' "$calls"; then
+  echo "old expiry owner removed a replacement fallback" >&2
+  exit 1
+fi
+[[ ! -e "$old_record" ]]
+
 # Initialization failure is failure-atomic: no collector, endpoint, or slot is
 # left behind when the child cannot publish readiness.
 export AZEDARACH_JAEGER_DISABLE_EXPIRY_WORKER=0
@@ -207,21 +221,80 @@ grep -q '^rm -f azedarach-jaeger-fallback ' "$calls"
 [[ ! -e "$AZEDARACH_JAEGER_ENDPOINT_FILE" ]]
 rm -f "${AZEDARACH_JAEGER_ENDPOINT_FILE}.workers"
 
-# Re-publishing one fallback generation keeps one ready expiry owner.
-JAEGER_PUBLISHED_ENDPOINT_RECORD="$(jaeger_write_endpoint_state localhost:34318 "$JAEGER_PUBLISHED_EXPIRES_AT" azedarach-jaeger-fallback)"
+# Stateful reuse relinks the established owner's immutable endpoint generation.
+# It must not replace the collector or owner, and the original deadline wins.
+: >"$calls"
+export FAKE_FALLBACK=1 FAKE_EXPIRES_AT="$(( $(date +%s) + 3 ))"
+jaeger_publish_env "$fake_engine_executable" azedarach-jaeger-fallback >/dev/null
 jaeger_schedule_published_expiry "$fake_engine_executable" azedarach-jaeger-fallback
 worker_ready_file="$(find "${AZEDARACH_JAEGER_ENDPOINT_FILE}.workers" -name ready -type f)"
 worker_pid="$(sed -n '1p' "$worker_ready_file")"
-jaeger_schedule_published_expiry "$fake_engine_executable" azedarach-jaeger-fallback
+worker_record="$(sed -n '7p' "$worker_ready_file")"
+original_expires="$JAEGER_PUBLISHED_EXPIRES_AT"
+: >"$calls"
+jaeger_reuse_fallback "$fake_engine_executable" azedarach-jaeger >/dev/null
 [[ "$(find "${AZEDARACH_JAEGER_ENDPOINT_FILE}.workers" -name ready -type f | wc -l | tr -d ' ')" == "1" ]]
 [[ "$(sed -n '1p' "$worker_ready_file")" == "$worker_pid" ]]
-kill "$worker_pid" 2>/dev/null || true
-wait "$worker_pid" 2>/dev/null || true
-for attempt in 1 2 3 4 5 6 7 8 9 10; do
-  [[ ! -d "$(dirname "$worker_ready_file")" ]] && break
-  sleep 0.05
-done
-jaeger_clear_worker_slot "$(dirname "$worker_ready_file")"
+[[ "$JAEGER_PUBLISHED_ENDPOINT_RECORD" == "$worker_record" ]]
+[[ "$JAEGER_PUBLISHED_EXPIRES_AT" == "$original_expires" ]]
+if grep -Eq '^(rm -f|run) ' "$calls"; then
+  echo "live fallback reuse replaced the collector" >&2
+  exit 1
+fi
+sleep 4
+grep -q '^rm -f azedarach-jaeger-fallback ' "$calls"
+[[ ! -e "$worker_record" && ! -e "$AZEDARACH_JAEGER_ENDPOINT_FILE" ]]
+unset FAKE_FALLBACK
+
+# A required generation handoff disarms the established owner before stopping
+# it. If the successor cannot initialize, the new endpoint and collector are
+# removed rather than leaving an unowned fallback.
+: >"$calls"
+export FAKE_EXPIRES_AT="$(( $(date +%s) + 60 ))"
+JAEGER_PUBLISHED_EXPIRES_AT="$FAKE_EXPIRES_AT"
+JAEGER_PUBLISHED_ENDPOINT_RECORD="$(jaeger_write_endpoint_state localhost:34318 "$JAEGER_PUBLISHED_EXPIRES_AT" first-generation)"
+jaeger_schedule_published_expiry "$fake_engine_executable" azedarach-jaeger-fallback
+handoff_slot="$(find "${AZEDARACH_JAEGER_ENDPOINT_FILE}.workers" -name ready -type f | xargs dirname)"
+handoff_pid="$(sed -n '1p' "$handoff_slot/ready")"
+JAEGER_PUBLISHED_ENDPOINT_RECORD="$(jaeger_write_endpoint_state localhost:34318 "$JAEGER_PUBLISHED_EXPIRES_AT" successor-generation)"
+export AZEDARACH_JAEGER_EXPIRY_WORKER_FAIL_INIT=1
+if jaeger_schedule_published_expiry "$fake_engine_executable" azedarach-jaeger-fallback; then
+  echo "failed successor unexpectedly retained expiry ownership" >&2
+  exit 1
+fi
+if kill -0 "$handoff_pid" 2>/dev/null; then
+  echo "established expiry owner survived generation handoff" >&2
+  exit 1
+fi
+grep -q '^rm -f azedarach-jaeger-fallback ' "$calls"
+[[ ! -e "$JAEGER_PUBLISHED_ENDPOINT_RECORD" && ! -e "$AZEDARACH_JAEGER_ENDPOINT_FILE" ]]
+unset AZEDARACH_JAEGER_EXPIRY_WORKER_FAIL_INIT
+
+# A stale ready record cannot substitute an unrelated reused PID. The unrelated
+# process survives, while a new nonce/start-bound owner takes the abandoned slot.
+export FAKE_EXPIRES_AT="$(( $(date +%s) + 60 ))"
+JAEGER_PUBLISHED_EXPIRES_AT="$FAKE_EXPIRES_AT"
+JAEGER_PUBLISHED_ENDPOINT_RECORD="$(jaeger_write_endpoint_state localhost:34318 "$JAEGER_PUBLISHED_EXPIRES_AT" azedarach-jaeger-fallback)"
+worker_key="$(printf '%s' "${fake_engine_executable}:azedarach-jaeger-fallback:${JAEGER_PUBLISHED_EXPIRES_AT}" | cksum | awk '{print $1}')"
+stale_slot="${AZEDARACH_JAEGER_ENDPOINT_FILE}.workers/${worker_key}"
+mkdir "$stale_slot"
+sleep 30 &
+unrelated_pid=$!
+unrelated_start="$(ps -p "$unrelated_pid" -o lstart= | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+  "$unrelated_pid" "$unrelated_start" stale-nonce "$fake_engine_executable" \
+  azedarach-jaeger-fallback "$JAEGER_PUBLISHED_EXPIRES_AT" \
+  "$JAEGER_PUBLISHED_ENDPOINT_RECORD" "$stale_slot" >"$stale_slot/ready"
+jaeger_schedule_published_expiry "$fake_engine_executable" azedarach-jaeger-fallback
+kill -0 "$unrelated_pid"
+replacement_pid="$(sed -n '1p' "$stale_slot/ready")"
+[[ "$replacement_pid" != "$unrelated_pid" ]]
+kill "$replacement_pid" 2>/dev/null || true
+wait "$replacement_pid" 2>/dev/null || true
+kill "$unrelated_pid" 2>/dev/null || true
+wait "$unrelated_pid" 2>/dev/null || true
+sleep 0.1
+jaeger_clear_worker_slot "$stale_slot" || true
 
 # An abandoned pre-readiness slot is reclaimed instead of suppressing expiry.
 JAEGER_PUBLISHED_ENDPOINT_RECORD="$(jaeger_write_endpoint_state localhost:34318 "$JAEGER_PUBLISHED_EXPIRES_AT" azedarach-jaeger-fallback)"
