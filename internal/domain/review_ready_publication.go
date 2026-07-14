@@ -14,26 +14,49 @@ type ReviewReadyPublication struct {
 	Validation  WorkerEvidenceParseResult
 }
 
+// ReviewReadyEvidenceReduction is the authoritative reduction of one issue's
+// review-status and worker-evidence observations. Publications and acceptance
+// consume the same latest-evidence ordering decision.
+type ReviewReadyEvidenceReduction struct {
+	Publications   []ReviewReadyPublication
+	LatestEvidence *ReviewReadyPublication
+}
+
 // DeriveReviewReadyPublications reduces an issue's ordered observation stream
 // to exactly one publication per review-ready episode. Integration-ready
 // evidence immediately before an in_review transition is retained as the
 // source; evidence immediately after the transition is part of the same
 // episode and cannot create a duplicate publication.
 func DeriveReviewReadyPublications(events []IssueObservationEvent) []ReviewReadyPublication {
+	return ReduceReviewReadyEvidence(events).Publications
+}
+
+// ReduceReviewReadyEvidence orders observations by their durable authority
+// time, with the database ID breaking timestamp ties, then derives both replay
+// publications and the latest packet inspected by review acceptance.
+func ReduceReviewReadyEvidence(events []IssueObservationEvent) ReviewReadyEvidenceReduction {
 	ordered := append([]IssueObservationEvent(nil), events...)
-	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].ObservedAt.Equal(ordered[j].ObservedAt) {
+			return ordered[i].ID < ordered[j].ID
+		}
+		return ordered[i].ObservedAt.Before(ordered[j].ObservedAt)
+	})
 
 	inReview := false
 	episodePublished := false
 	var pendingEvidence *IssueObservationEvent
 	publications := make([]ReviewReadyPublication, 0)
+	var latestEvidence *ReviewReadyPublication
 	for i := range ordered {
 		event := ordered[i]
 		packet, validation := ParseWorkerEvidenceIssueEvent(event)
 		if IsWorkerEvidenceEventType(event.Type) {
+			candidate := ReviewReadyPublication{SourceEvent: event, Evidence: packet, Validation: validation}
+			latestEvidence = &candidate
 			if inReview {
 				if validation.Complete && !episodePublished {
-					publications = append(publications, ReviewReadyPublication{SourceEvent: event, Evidence: packet, Validation: validation})
+					publications = append(publications, candidate)
 					episodePublished = true
 				}
 			} else if validation.Complete {
@@ -67,7 +90,7 @@ func DeriveReviewReadyPublications(events []IssueObservationEvent) []ReviewReady
 		}
 		pendingEvidence = nil
 	}
-	return publications
+	return ReviewReadyEvidenceReduction{Publications: publications, LatestEvidence: latestEvidence}
 }
 
 // IsReviewRequestTransition reports whether an observation starts a durable

@@ -200,6 +200,60 @@ func (c *Client) ListIssueObservationEvents(ctx context.Context, issueID string,
 	return events, nil
 }
 
+// ListIssueReviewReadyObservationEvents returns the complete typed event set
+// used to reduce review-ready publications and acceptance evidence. It is
+// intentionally uncapped: callers require one authoritative decision across
+// the issue's full durable history.
+func (c *Client) ListIssueReviewReadyObservationEvents(ctx context.Context, issueID string) ([]domain.IssueObservationEvent, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return nil, c.wrapError("list-review-ready-observation-events", "", errors.New("issue id is required"))
+	}
+	exists, err := c.issueIDExistsIncludingDeleted(ctx, db, issueID)
+	if err != nil {
+		return nil, c.wrapError("list-review-ready-observation-events", issueID, err)
+	}
+	if !exists {
+		return nil, c.wrapError("list-review-ready-observation-events", issueID, domain.ErrNotFound)
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+		FROM issue_observation_events
+		WHERE issue_id = ?
+		  AND (
+			event_type = ?
+			OR LOWER(REPLACE(REPLACE(TRIM(event_type), '_', '.'), '-', '.')) IN (?, ?, ?, ?)
+		  )
+		ORDER BY observed_at ASC, id ASC
+	`, issueID,
+		string(domain.IssueEventIssueStatusChanged),
+		string(domain.IssueEventEvidenceSubmitted),
+		"worker.integration.ready",
+		"worker.ready",
+		"worker.complete",
+	)
+	if err != nil {
+		return nil, c.wrapError("list-review-ready-observation-events", issueID, err)
+	}
+	defer rows.Close()
+	events := make([]domain.IssueObservationEvent, 0, 16)
+	for rows.Next() {
+		event, scanErr := scanIssueObservationEvent(rows)
+		if scanErr != nil {
+			return nil, c.wrapError("list-review-ready-observation-events", issueID, scanErr)
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, c.wrapError("list-review-ready-observation-events", issueID, err)
+	}
+	return events, nil
+}
+
 // ListLatestIssueObservationEventsByIssue returns at most one matching event
 // per issue in one SQLite query. Callers retain authority for interpreting the
 // candidate; filters only keep the persistent read bounded and indexable.

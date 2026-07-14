@@ -251,7 +251,6 @@ func (d *Daemon) recoverReviewReadyMailboxEvents(ctx context.Context, req protoc
 	for _, task := range tasks {
 		inScope[task.ID.String()] = struct{}{}
 	}
-
 	byIssue := make(map[string][]domain.IssueObservationEvent, len(inScope))
 	afterID := int64(0)
 	for {
@@ -263,7 +262,10 @@ func (d *Daemon) recoverReviewReadyMailboxEvents(ctx context.Context, req protoc
 			break
 		}
 		for _, event := range batch {
-			if _, ok := inScope[event.IssueID.String()]; ok {
+			if _, ok := inScope[event.IssueID.String()]; !ok {
+				continue
+			}
+			if event.Type == domain.IssueEventIssueStatusChanged || domain.IsWorkerEvidenceEventType(event.Type) {
 				byIssue[event.IssueID.String()] = append(byIssue[event.IssueID.String()], event)
 			}
 		}
@@ -276,7 +278,7 @@ func (d *Daemon) recoverReviewReadyMailboxEvents(ctx context.Context, req protoc
 	candidates := make([]daemonMailEvent, 0)
 	for _, task := range tasks {
 		issueID := task.ID.String()
-		for _, publication := range domain.DeriveReviewReadyPublications(byIssue[issueID]) {
+		for _, publication := range domain.ReduceReviewReadyEvidence(byIssue[issueID]).Publications {
 			source := publication.SourceEvent
 			key := fmt.Sprintf("%s:%d", projectID, source.ID)
 			body, marshalErr := json.Marshal(publication.Evidence)

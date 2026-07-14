@@ -4372,9 +4372,17 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 		}, nil
 	}
 
-	issueEvents := d.workerObservationIssueEvents(ctx, projectID, task.ID.String())
-	if evt := latestWorkerEvidenceIssueEvent(issueEvents); evt != nil {
-		packet, validation := workerEvidencePacketFromIssueEvent(*evt)
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return taskIntegrationReadinessResult{}, fmt.Errorf("inspect issue integration readiness: issue store unavailable")
+	}
+	reviewEvents, err := issueClient.ListIssueReviewReadyObservationEvents(ctx, task.ID.String())
+	if err != nil {
+		return taskIntegrationReadinessResult{}, fmt.Errorf("inspect issue integration evidence: %w", err)
+	}
+	if evidence := domain.ReduceReviewReadyEvidence(reviewEvents).LatestEvidence; evidence != nil {
+		evt := evidence.SourceEvent
+		packet, validation := evidence.Evidence, evidence.Validation
 		if validation.Complete {
 			return taskIntegrationReadinessResult{
 				IssueID:         task.ID.String(),
@@ -6027,25 +6035,6 @@ func workerObservationEvidenceEvents(events []domain.IssueObservationEvent) []do
 		out = out[:5]
 	}
 	return out
-}
-
-func latestWorkerEvidenceIssueEvent(events []domain.IssueObservationEvent) *domain.IssueObservationEvent {
-	var latest *domain.IssueObservationEvent
-	for i := range events {
-		if !domain.IsWorkerEvidenceEventType(events[i].Type) {
-			continue
-		}
-		if latest == nil ||
-			(!events[i].ObservedAt.IsZero() && events[i].ObservedAt.After(latest.ObservedAt)) ||
-			(events[i].ObservedAt.Equal(latest.ObservedAt) && events[i].ID > latest.ID) {
-			latest = &events[i]
-		}
-	}
-	return latest
-}
-
-func workerEvidencePacketFromIssueEvent(evt domain.IssueObservationEvent) (domain.WorkerEvidencePacket, domain.WorkerEvidenceParseResult) {
-	return domain.ParseWorkerEvidenceIssueEvent(evt)
 }
 
 func truncateObservationSummary(value string) string {

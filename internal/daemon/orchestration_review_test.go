@@ -1088,6 +1088,13 @@ func TestReviewAcceptUsesReplayedTicketIntegrationReadyEvidenceIdempotently(t *t
 	}); err != nil {
 		t.Fatal(err)
 	}
+	for i := 0; i < 75; i++ {
+		if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+			Type: domain.IssueEventProgressRecorded, Source: "test", Payload: map[string]any{"summary": fmt.Sprintf("unrelated event %d", i)},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := client.Update(ctx, issueID, domain.StatusInReview); err != nil {
 		t.Fatal(err)
 	}
@@ -1120,6 +1127,67 @@ func TestReviewAcceptUsesReplayedTicketIntegrationReadyEvidenceIdempotently(t *t
 	}
 	if len(events) != 1 || events[0].Payload["outcome"] != "accepted" {
 		t.Fatalf("review events=%+v, want one durable acceptance", events)
+	}
+}
+
+func TestReviewReplayAndAcceptShareObservedAtEvidenceOrdering(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	rootID, err := client.Create(ctx, issues.CreateTaskParams{Title: "root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "worker", Description: "Executable", Acceptance: "validated", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: "worker", OwnerKind: "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, time.July, 14, 10, 0, 0, 0, time.UTC)
+	malformed, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: "worker-integration-ready", ObservedAt: base.Add(2 * time.Second), Source: "legacy", Payload: map[string]any{"schema": domain.WorkerEvidenceSchemaV1, "summary": "latest by authority time but incomplete"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventEvidenceSubmitted, ObservedAt: base.Add(time.Second), Source: "legacy", Payload: mustWorkerEvidencePayload(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventIssueStatusChanged, ObservedAt: base.Add(3 * time.Second), Source: "issue-store", Payload: map[string]any{"from_status": "in_progress", "to_status": "in_review"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusInReview); err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	mail, err := d.readMailboxEventsWithReviewReadyRecovery(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: "project"}}, repoDir, rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mail) != 0 {
+		t.Fatalf("replay=%+v, want no readiness for latest incomplete evidence", mail)
+	}
+	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "reject-authoritatively-latest-incomplete", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failure := result.Failed[issueID]; !strings.Contains(failure, "requires complete worker_evidence") {
+		t.Fatalf("result=%+v, want acceptance to reject the same incomplete evidence", result)
+	}
+	readiness, err := d.taskIntegrationReadiness(ctx, "project", issueID, repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readiness.EvidenceEventID != malformed.ID || !readiness.EvidenceIncomplete {
+		t.Fatalf("readiness=%+v, want malformed event %d selected", readiness, malformed.ID)
 	}
 }
 
