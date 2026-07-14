@@ -37,6 +37,11 @@ sha="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 ldflags="-X github.com/riordanpawley/azedarach/internal/buildinfo.Version=dev -X github.com/riordanpawley/azedarach/internal/buildinfo.GitCommit=${sha}"
 go build -ldflags "$ldflags" -o "$build_dir/az" ./cmd/az
 go build -ldflags "$ldflags" -o "$build_dir/azd" ./cmd/azd
+atomic_replace_bin="${AZEDARACH_ATOMIC_REPLACE_BIN:-}"
+if [[ -z "$atomic_replace_bin" ]]; then
+  atomic_replace_bin="$build_dir/atomic-replace"
+  go build -o "$atomic_replace_bin" ./cmd/atomic-replace
+fi
 
 choose_install_dir() {
   if [ -n "${AZ_INSTALL_DIR:-}" ]; then
@@ -92,22 +97,20 @@ acquire_install_lock() {
   lock_owned=1
 }
 
+atomic_replace() {
+  local source="$1"
+  local destination="$2"
+  "$atomic_replace_bin" "$source" "$destination"
+}
+
 atomic_symlink() {
   local target="$1"
   local destination="$2"
   local temporary
-  local -a mv_args
   temporary="$(mktemp "${destination}.tmp.XXXXXX")"
   rm -f "$temporary"
   ln -s "$target" "$temporary"
-  # GNU mv needs -T and BSD mv needs -h to replace a symlink-to-directory
-  # instead of moving the temporary link through it.
-  if mv --help 2>&1 | grep -q -- '--no-target-directory'; then
-    mv_args=(-fT)
-  else
-    mv_args=(-fh)
-  fi
-  if ! mv "${mv_args[@]}" "$temporary" "$destination"; then
+  if ! atomic_replace "$temporary" "$destination"; then
     rm -f "$temporary"
     return 1
   fi
@@ -123,19 +126,14 @@ public_links_are_managed() {
 
 migrate_public_links() {
   local generations_dir="$1"
-  local previous_generation rollback_dir prior_control_target
+  local previous_generation binary
   previous_generation="$(mktemp -d "$generations_dir/generation.previous.XXXXXX")"
-  rollback_dir="$(mktemp -d "$install_dir/.azedarach-rollback.XXXXXX")"
 
   if [[ -e "$install_dir/.azedarach-current" || -L "$install_dir/.azedarach-current" ]]; then
     if [[ ! -L "$install_dir/.azedarach-current" ]]; then
       echo "Refusing to replace non-symlink install control path: $install_dir/.azedarach-current" >&2
-      rm -rf "$rollback_dir" "$previous_generation"
+      rm -rf "$previous_generation"
       return 1
-    fi
-    if [[ -x "$install_dir/.azedarach-current/az" &&
-          -x "$install_dir/.azedarach-current/azd" ]]; then
-      cp -P "$install_dir/.azedarach-current" "$rollback_dir/.azedarach-current"
     fi
   fi
 
@@ -143,34 +141,24 @@ migrate_public_links() {
     if [[ -e "$install_dir/$binary" || -L "$install_dir/$binary" ]]; then
       cp -L "$install_dir/$binary" "$previous_generation/$binary"
       chmod 0755 "$previous_generation/$binary"
-      cp -P "$install_dir/$binary" "$rollback_dir/$binary"
     fi
   done
 
   atomic_symlink ".azedarach-generations/$(basename "$previous_generation")" \
     "$install_dir/.azedarach-current"
 
-  if ! atomic_symlink ".azedarach-current/az" "$install_dir/az" ||
-    ! atomic_symlink ".azedarach-current/azd" "$install_dir/azd"; then
-    for binary in az azd; do
-      rm -f "$install_dir/$binary"
-      if [[ -e "$rollback_dir/$binary" || -L "$rollback_dir/$binary" ]]; then
-        mv -f "$rollback_dir/$binary" "$install_dir/$binary"
-      fi
-    done
-    if [[ -L "$rollback_dir/.azedarach-current" ]]; then
-      prior_control_target="$(readlink "$rollback_dir/.azedarach-current")"
-      if ! atomic_symlink "$prior_control_target" "$install_dir/.azedarach-current"; then
-        rm -rf "$rollback_dir"
-        return 1
-      fi
-    else
-      rm -f "$install_dir/.azedarach-current"
+  for binary in az azd; do
+    if [[ -L "$install_dir/$binary" ]] &&
+      [[ "$(readlink "$install_dir/$binary")" == ".azedarach-current/$binary" ]]; then
+      continue
     fi
-    rm -rf "$rollback_dir" "$previous_generation"
-    return 1
-  fi
-  rm -rf "$rollback_dir"
+    if ! atomic_symlink ".azedarach-current/$binary" "$install_dir/$binary"; then
+      # Keep earlier entries committed forward through the copied old pair.
+      # Rewriting them during recovery creates an availability gap on Darwin;
+      # the next install safely resumes any entries that remain unmanaged.
+      return 1
+    fi
+  done
 }
 
 acquire_install_lock

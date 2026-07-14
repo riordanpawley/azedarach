@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/azedarach-build-contract.XXXXXX")"
 trap 'rm -rf "$fixture"' EXIT
 
-mkdir -p "$fixture/bin" "$fixture/fake-bin"
+mkdir -p "$fixture/bin" "$fixture/fake-bin" "$fixture/real-bin"
 cp "$repo_root/justfile" "$fixture/justfile"
 mkdir -p "$fixture/scripts"
 cp "$repo_root/scripts/build-link-run.sh" "$fixture/scripts/build-link-run.sh"
@@ -40,20 +40,31 @@ printf 'scratch build %s\n' "${FAKE_GO_MARKER:-default}" >"$output"
 EOF
 chmod +x "$fixture/fake-bin/go"
 
-cat >"$fixture/fake-bin/mv" <<'EOF'
+(
+  cd "$repo_root"
+  go build -o "$fixture/real-bin/atomic-replace" ./cmd/atomic-replace
+)
+
+cat >"$fixture/fake-bin/atomic-replace" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-destination="${*: -1}"
-if [[ "${FAKE_MV_FAIL_AZD_LINK:-0}" == "1" && "$destination" == */azd &&
-      ! -e "${FAKE_MV_FAIL_ONCE_FILE:?}" ]]; then
-  : >"$FAKE_MV_FAIL_ONCE_FILE"
-  echo "stub mv: requested azd link install failure" >&2
+destination="$2"
+if [[ "${FAKE_REPLACE_FAIL_AZD_LINK:-0}" == "1" && "$destination" == */azd &&
+      ! -e "${FAKE_REPLACE_FAIL_ONCE_FILE:?}" ]]; then
+  : >"$FAKE_REPLACE_FAIL_ONCE_FILE"
+  if [[ "${FAKE_REPLACE_DELAY_FAILURE:-0}" == "1" ]]; then
+    : >"${FAKE_REPLACE_FAILURE_MARKER:?}"
+    sleep 0.4
+  fi
+  echo "stub atomic-replace: requested azd link install failure" >&2
   exit 1
 fi
-exec /bin/mv "$@"
+exec "${REAL_ATOMIC_REPLACE_BIN:?}" "$@"
 EOF
-chmod +x "$fixture/fake-bin/mv"
+chmod +x "$fixture/fake-bin/atomic-replace"
+export AZEDARACH_ATOMIC_REPLACE_BIN="$fixture/fake-bin/atomic-replace"
+export REAL_ATOMIC_REPLACE_BIN="$fixture/real-bin/atomic-replace"
 
 cat >"$fixture/fake-bin/cp" <<'EOF'
 #!/usr/bin/env bash
@@ -138,25 +149,66 @@ cmp "$fixture/failure-azd.before" "$fixture/failure-bin/azd"
 test ! -e "$fixture/failure-bin/.azedarach-current"
 test ! -L "$fixture/failure-bin/.azedarach-current"
 
+mkdir -p "$fixture/invalid-control-bin"
+printf 'invalid control old az\n' >"$fixture/invalid-control-bin/az"
+printf 'invalid control old azd\n' >"$fixture/invalid-control-bin/azd"
+printf 'not a symlink\n' >"$fixture/invalid-control-bin/.azedarach-current"
+cp "$fixture/invalid-control-bin/az" "$fixture/invalid-control-az.before"
+cp "$fixture/invalid-control-bin/azd" "$fixture/invalid-control-azd.before"
+if FAKE_GIT_MODE=primary AZ_INSTALL_DIR="$fixture/invalid-control-bin" \
+  PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/build-link-run.sh" --no-run \
+  >"$fixture/invalid-control.stdout" 2>"$fixture/invalid-control.stderr"; then
+  echo "build-link-run unexpectedly replaced a non-symlink control path" >&2
+  exit 1
+fi
+grep -q "Refusing to replace non-symlink install control path" "$fixture/invalid-control.stderr"
+cmp "$fixture/invalid-control-az.before" "$fixture/invalid-control-bin/az"
+cmp "$fixture/invalid-control-azd.before" "$fixture/invalid-control-bin/azd"
+grep -q "not a symlink" "$fixture/invalid-control-bin/.azedarach-current"
+
 mkdir -p "$fixture/partial-bin/.azedarach-generations/generation.old"
 printf 'partial old az\n' >"$fixture/partial-bin/.azedarach-generations/generation.old/az"
 printf 'partial old azd\n' >"$fixture/partial-bin/.azedarach-generations/generation.old/azd"
 chmod +x "$fixture/partial-bin/.azedarach-generations/generation.old/az" \
   "$fixture/partial-bin/.azedarach-generations/generation.old/azd"
 ln -s .azedarach-generations/generation.old "$fixture/partial-bin/.azedarach-current"
-ln -s .azedarach-current/az "$fixture/partial-bin/az"
+cp "$fixture/partial-bin/.azedarach-generations/generation.old/az" "$fixture/partial-bin/az"
 cp "$fixture/partial-bin/.azedarach-generations/generation.old/azd" "$fixture/partial-bin/azd"
 cp -L "$fixture/partial-bin/az" "$fixture/partial-az.before"
 cp "$fixture/partial-bin/azd" "$fixture/partial-azd.before"
 
-if FAKE_GIT_MODE=primary FAKE_MV_FAIL_AZD_LINK=1 \
-  FAKE_MV_FAIL_ONCE_FILE="$fixture/partial-azd-link-failed" \
+FAKE_GIT_MODE=primary FAKE_REPLACE_FAIL_AZD_LINK=1 FAKE_REPLACE_DELAY_FAILURE=1 \
+  FAKE_REPLACE_FAIL_ONCE_FILE="$fixture/partial-azd-link-failed" \
+  FAKE_REPLACE_FAILURE_MARKER="$fixture/partial-rollback-started" \
   AZ_INSTALL_DIR="$fixture/partial-bin" PATH="$fixture/fake-bin:$PATH" \
   "$fixture/scripts/build-link-run.sh" --no-run \
-  >"$fixture/partial-failure.stdout" 2>"$fixture/partial-failure.stderr"; then
+  >"$fixture/partial-failure.stdout" 2>"$fixture/partial-failure.stderr" &
+partial_installer_pid=$!
+while [[ ! -e "$fixture/partial-rollback-started" ]] &&
+  kill -0 "$partial_installer_pid" 2>/dev/null; do
+  sleep 0.005
+done
+test -e "$fixture/partial-rollback-started"
+partial_observer_failed=0
+while kill -0 "$partial_installer_pid" 2>/dev/null; do
+  if [[ ! -x "$fixture/partial-bin/az" || ! -x "$fixture/partial-bin/azd" ]]; then
+    partial_observer_failed=1
+    {
+      echo "rollback observer saw an unavailable command"
+      ls -la "$fixture/partial-bin"
+      find "$fixture/partial-bin/.azedarach-generations" -maxdepth 2 -type f -o -type l
+      printf 'az -> %s\n' "$(readlink "$fixture/partial-bin/az" 2>/dev/null || echo '<not-link>')"
+      printf 'azd -> %s\n' "$(readlink "$fixture/partial-bin/azd" 2>/dev/null || echo '<not-link>')"
+      printf 'current -> %s\n' "$(readlink "$fixture/partial-bin/.azedarach-current" 2>/dev/null || echo '<not-link>')"
+    } >&2
+    break
+  fi
+done
+if wait "$partial_installer_pid"; then
   echo "build-link-run unexpectedly succeeded from a partially managed state" >&2
   exit 1
 fi
+test "$partial_observer_failed" -eq 0
 grep -q "requested azd link install failure" "$fixture/partial-failure.stderr"
 test -x "$fixture/partial-bin/az"
 test -x "$fixture/partial-bin/azd"
@@ -164,11 +216,14 @@ cmp "$fixture/partial-az.before" "$fixture/partial-bin/az"
 cmp "$fixture/partial-azd.before" "$fixture/partial-bin/azd"
 test "$(readlink "$fixture/partial-bin/az")" = ".azedarach-current/az"
 test ! -L "$fixture/partial-bin/azd"
-test "$(readlink "$fixture/partial-bin/.azedarach-current")" = ".azedarach-generations/generation.old"
+case "$(readlink "$fixture/partial-bin/.azedarach-current")" in
+  .azedarach-generations/generation.previous.*) ;;
+  *) echo "rollback control link does not target retained previous generation" >&2; exit 1 ;;
+esac
 test -x "$fixture/partial-bin/.azedarach-current/az"
 test -x "$fixture/partial-bin/.azedarach-current/azd"
 partial_generation_count="$(find "$fixture/partial-bin/.azedarach-generations" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
-test "$partial_generation_count" -eq 1
+test "$partial_generation_count" -eq 2
 while IFS= read -r link; do
   test -e "$link"
 done < <(find "$fixture/partial-bin" -type l)
@@ -181,8 +236,8 @@ ln -s .azedarach-generations/missing "$fixture/interrupted-bin/.azedarach-curren
 cp "$fixture/interrupted-bin/az" "$fixture/interrupted-az.before"
 cp "$fixture/interrupted-bin/azd" "$fixture/interrupted-azd.before"
 
-if FAKE_GIT_MODE=primary FAKE_MV_FAIL_AZD_LINK=1 \
-  FAKE_MV_FAIL_ONCE_FILE="$fixture/interrupted-azd-link-failed" \
+if FAKE_GIT_MODE=primary FAKE_REPLACE_FAIL_AZD_LINK=1 \
+  FAKE_REPLACE_FAIL_ONCE_FILE="$fixture/interrupted-azd-link-failed" \
   AZ_INSTALL_DIR="$fixture/interrupted-bin" PATH="$fixture/fake-bin:$PATH" \
   "$fixture/scripts/build-link-run.sh" --no-run \
   >"$fixture/interrupted-failure.stdout" 2>"$fixture/interrupted-failure.stderr"; then
@@ -194,11 +249,12 @@ test -x "$fixture/interrupted-bin/az"
 test -x "$fixture/interrupted-bin/azd"
 cmp "$fixture/interrupted-az.before" "$fixture/interrupted-bin/az"
 cmp "$fixture/interrupted-azd.before" "$fixture/interrupted-bin/azd"
-test ! -e "$fixture/interrupted-bin/.azedarach-current"
-test ! -L "$fixture/interrupted-bin/.azedarach-current"
+test -L "$fixture/interrupted-bin/.azedarach-current"
+test -x "$fixture/interrupted-bin/.azedarach-current/az"
+test -x "$fixture/interrupted-bin/.azedarach-current/azd"
 
-if FAKE_GIT_MODE=primary FAKE_MV_FAIL_AZD_LINK=1 \
-  FAKE_MV_FAIL_ONCE_FILE="$fixture/azd-link-failed" \
+if FAKE_GIT_MODE=primary FAKE_REPLACE_FAIL_AZD_LINK=1 \
+  FAKE_REPLACE_FAIL_ONCE_FILE="$fixture/azd-link-failed" \
   AZ_INSTALL_DIR="$fixture/failure-bin" PATH="$fixture/fake-bin:$PATH" \
   "$fixture/scripts/build-link-run.sh" --no-run \
   >"$fixture/install-failure.stdout" 2>"$fixture/install-failure.stderr"; then
@@ -208,8 +264,9 @@ fi
 grep -q "requested azd link install failure" "$fixture/install-failure.stderr"
 cmp "$fixture/failure-az.before" "$fixture/failure-bin/az"
 cmp "$fixture/failure-azd.before" "$fixture/failure-bin/azd"
-test ! -e "$fixture/failure-bin/.azedarach-current"
-test ! -L "$fixture/failure-bin/.azedarach-current"
+test -L "$fixture/failure-bin/.azedarach-current"
+test -x "$fixture/failure-bin/.azedarach-current/az"
+test -x "$fixture/failure-bin/.azedarach-current/azd"
 
 mkdir -p "$fixture/global-bin"
 ln -s "$fixture/bin/az" "$fixture/global-bin/az"
