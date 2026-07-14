@@ -85,29 +85,43 @@ jaeger_endpoint_file() {
 }
 
 jaeger_endpoint_lock_acquire() {
-  local target lock control ready release helper attempt owner_pid="${BASHPID:-$$}"
+  local target lock control ready release helper attempt perl_bin="${AZEDARACH_JAEGER_PERL:-perl}"
   target="$(jaeger_endpoint_file)" || return 1
   mkdir -p "$(dirname "$target")" || return 1
   lock="${target}.state-lock"
-  control="${lock}.control.${owner_pid}.${RANDOM}"
+  control="$(mktemp -d "${lock}.control.XXXXXX")" || return 1
   ready="${control}/ready"
   release="${control}/release"
-  command -v perl >/dev/null 2>&1 || return 1
+  if ! perl_bin="$(command -v "$perl_bin" 2>/dev/null)" || [[ -z "$perl_bin" ]]; then
+    echo "Warning: Perl with Fcntl flock support is required for managed Jaeger endpoint locking" >&2
+    rmdir "$control" 2>/dev/null || true
+    return 1
+  fi
+  if ! "$perl_bin" -MFcntl=:flock -e 'exit 0' >/dev/null 2>&1; then
+    echo "Warning: Perl Fcntl flock support is unavailable; refusing managed Jaeger endpoint mutation" >&2
+    rmdir "$control" 2>/dev/null || true
+    return 1
+  fi
   umask 077
-  mkdir "$control" || return 1
-  perl -MFcntl=:flock -e '
+  "$perl_bin" -MFcntl=:flock -e '
     use strict;
     use warnings;
-    my ($lock, $ready, $release, $parent) = @ARGV;
+    my ($lock, $ready, $release, $control) = @ARGV;
+    my $parent = getppid();
     open my $fh, ">>", $lock or exit 2;
     flock($fh, LOCK_EX) or exit 3;
     open my $signal, ">", $ready or exit 4;
     close $signal;
     while (!-e $release) {
-      exit 5 unless kill 0, $parent;
+      unless (kill 0, $parent) {
+        unlink $ready;
+        unlink $release;
+        rmdir $control;
+        exit 0;
+      }
       select undef, undef, undef, 0.05;
     }
-  ' "$lock" "$ready" "$release" "$owner_pid" &
+  ' "$lock" "$ready" "$release" "$control" &
   helper=$!
   for attempt in {1..200}; do
     if [[ -e "$ready" ]] && kill -0 "$helper" 2>/dev/null; then

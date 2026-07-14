@@ -162,6 +162,62 @@ jaeger_endpoint_lock_release
 wait "$blocked_pid"
 [[ -e "$(sed -n '1p' "$tmp/blocked record")" ]]
 
+# macOS /bin/bash 3.2 does not expose BASHPID and keeps $$ equal to the
+# long-lived parent in subshells. The Perl holder captures getppid() itself, so
+# killing the actual spawning shell releases flock and unblocks the contender.
+bash32_endpoint="$tmp/bash 3.2 endpoint"
+bash32_ready="$tmp/bash 3.2 lock ready"
+JAEGER_SCRIPT="$repo_root/scripts/jaeger-local.sh" \
+  AZEDARACH_JAEGER_ENDPOINT_FILE="$bash32_endpoint" \
+  LOCK_READY="$bash32_ready" \
+  /bin/bash -c '
+    set -euo pipefail
+    source "$JAEGER_SCRIPT"
+    jaeger_endpoint_lock_acquire
+    : >"$LOCK_READY"
+    while :; do sleep 1; done
+  ' &
+bash32_owner=$!
+for attempt in {1..200}; do
+  [[ -e "$bash32_ready" ]] && break
+  sleep 0.05
+done
+[[ -e "$bash32_ready" ]]
+(
+  AZEDARACH_JAEGER_ENDPOINT_FILE="$bash32_endpoint" \
+    jaeger_write_endpoint_state localhost:4318 0 bash32-contender >"$tmp/bash 3.2 record"
+  : >"$tmp/bash 3.2 done"
+) &
+bash32_contender=$!
+sleep 0.2
+[[ ! -e "$tmp/bash 3.2 done" ]]
+kill -9 "$bash32_owner"
+wait "$bash32_owner" 2>/dev/null || true
+for attempt in {1..200}; do
+  [[ -e "$tmp/bash 3.2 done" ]] && break
+  sleep 0.05
+done
+wait "$bash32_contender"
+[[ -e "$(sed -n '1p' "$tmp/bash 3.2 record")" ]]
+if find "$tmp" -maxdepth 1 -name 'bash 3.2 endpoint.state-lock.control.*' -print -quit | grep -q .; then
+  echo "dead Bash 3.2 lock owner left a helper control directory" >&2
+  exit 1
+fi
+
+# The advisory lock dependency is explicit and endpoint mutation fails closed
+# with a useful diagnostic when Perl/Fcntl cannot be launched.
+missing_perl_endpoint="$tmp/missing perl endpoint"
+if missing_perl_output="$(
+  AZEDARACH_JAEGER_ENDPOINT_FILE="$missing_perl_endpoint" \
+    AZEDARACH_JAEGER_PERL="$tmp/missing-perl" \
+    jaeger_write_endpoint_state localhost:4318 0 missing-perl 2>&1
+)"; then
+  echo "endpoint publication unexpectedly succeeded without Perl" >&2
+  exit 1
+fi
+grep -q 'Perl with Fcntl flock support is required' <<<"$missing_perl_output"
+[[ ! -e "$missing_perl_endpoint" && ! -L "$missing_perl_endpoint" ]]
+
 # Clearing the active generation removes both its immutable record and the
 # public symlink, rather than leaving a dangling endpoint path.
 active_record="$(jaeger_write_endpoint_state localhost:34318 "$((now + 3600))" active-clear)"
