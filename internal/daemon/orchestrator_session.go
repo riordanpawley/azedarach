@@ -63,6 +63,13 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 	result := protocol.OrchestratorSessionResult{Scope: body.Scope, SessionID: sessionID}
 	switch req.Command {
 	case protocol.CommandOrchestratorSessionStart:
+		rootedPrompt := ""
+		if body.Scope.Kind == domain.OrchestrationScopeRooted {
+			rootedPrompt, err = d.rootedOrchestratorBootstrapPrompt(ctx, projectID, body.Scope)
+			if err != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+			}
+		}
 		acquired, acquireErr := authority.Acquire(ctx, identity, sessionID, d.tmux.HasSession)
 		if acquireErr != nil {
 			return d.errorResponse(req, protocol.ErrorCodeConflict, acquireErr.Error()), nil
@@ -104,7 +111,7 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 				result.Disposition = string(daemonstate.OrchestratorLeaseRecoveredStale)
 			}
 			if body.Scope.Kind == domain.OrchestrationScopeRooted {
-				startBody, _ := json.Marshal(sessionCommandBody{ProjectID: projectID, SessionID: acquired.Lease.SessionID})
+				startBody, _ := json.Marshal(sessionCommandBody{ProjectID: projectID, IssueID: body.Scope.RootIssueID.String(), SessionID: acquired.Lease.SessionID, Prompt: rootedPrompt})
 				startReq := req
 				startReq.Command, startReq.Body = "session.start", startBody
 				startResp, startErr := d.handleSessionStartDirect(ctx, startReq)
@@ -145,6 +152,22 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 					}
 					return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("set project orchestrator session context: %v", err)), nil
 				}
+			}
+		}
+		if body.Scope.Kind == domain.OrchestrationScopeRooted {
+			bootstrapDisposition, bootstrapErr := d.ensureRootedOrchestratorBootstrap(ctx, projectID, body.Scope, acquired.Lease.SessionID, rootedPrompt, launchedHere)
+			err = bootstrapErr
+			if err != nil {
+				if launchedHere {
+					_ = d.tmux.KillSession(ctx, acquired.Lease.SessionID)
+					pauseOrReleaseLease()
+				} else {
+					restoreLeaseAfterProbeFailure()
+				}
+				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+			}
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Info("rooted orchestrator bootstrap confirmed", "project_id", projectID, "root_id", body.Scope.RootIssueID, "session_id", acquired.Lease.SessionID, "disposition", bootstrapDisposition)
 			}
 		}
 		if err := d.persistOrchestratorSessionProjection(ctx, req.Meta, projectID, body.Scope, acquired.Lease.SessionID); err != nil {

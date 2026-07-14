@@ -15,11 +15,13 @@ import (
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
@@ -172,6 +174,126 @@ func TestProjectOrchestratorSessionStartAttachesExactScopeSingleton(t *testing.T
 	}
 	if projection.State != daemonstate.SessionStateRunning || projection.ObservedState != daemonstate.SessionStateRunning {
 		t.Fatalf("projection lifecycle = %+v", projection)
+	}
+}
+
+func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Coordinate a rooted migration without implementing it",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+rootID)
+	worktreeRunner := &worktreeCreateRunner{worktreePath: worktreePath, branchName: "test/" + rootID}
+	manager := git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default())
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	tmuxRunner := newSessionStartTmuxRunner()
+	d := &Daemon{
+		cfg:                       Config{RepoDir: repoDir, BaseBranch: "main", CLITool: "codex", SessionShell: "zsh", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issues:                    issuesClient,
+		tmux:                      tmux.NewClient(tmuxRunner, slog.Default()),
+		session:                   daemonhandlers.NewSessionHandler(daemonstate.NewStore()),
+		sessionStore:              daemonstate.NewStore(),
+		runtimeStoresByRoot:       map[string]*daemonstate.RuntimeStateStore{repoDir: runtimeStore},
+		runtimeStoresByProject:    map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+		worktreeManagersByRoot:    map[string]*git.WorktreeManager{repoDir: manager},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager},
+		revision:                  map[string]uint64{},
+	}
+	scope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(protocol.OrchestratorSessionRequest{Scope: scope})
+	request := protocol.RequestEnvelope{Command: protocol.CommandOrchestratorSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body}
+	response, err := d.handleOrchestratorSession(ctx, request)
+	if err != nil || response.Error != nil {
+		t.Fatalf("start rooted orchestrator: response=%+v err=%v", response.Error, err)
+	}
+	var started protocol.OrchestratorSessionResult
+	if err := json.Unmarshal(response.Body, &started); err != nil {
+		t.Fatal(err)
+	}
+	if !started.Live {
+		t.Fatalf("started = %+v", started)
+	}
+	prompt := tmuxRunner.launchPromptContents[started.SessionID]
+	for _, want := range []string{
+		"Role: orchestrator",
+		"Rooted startup contract (root " + rootID + ")",
+		"`az prime`",
+		"az orchestrate status --root " + rootID,
+		"az orchestrate watch --root " + rootID + " --since 0 --jsonl",
+		"never implement the root's worker scope",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("rooted prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "Role: contributor") || strings.Contains(prompt, "Role: worker") {
+		t.Fatalf("rooted prompt contains worker role:\n%s", prompt)
+	}
+	projection, found, err := runtimeStore.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, rootID)
+	if err != nil || !found || projection.Role != daemonstate.SessionRoleOrchestrator || projection.ScopeKind != daemonstate.SessionScopeOrchestration || projection.ScopeID != rootID {
+		t.Fatalf("rooted projection = %+v found=%t err=%v", projection, found, err)
+	}
+	receiptPath, err := d.rootedOrchestratorBootstrapReceiptPath(ctx, projectID, scope, started.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(receiptPath); err != nil {
+		t.Fatalf("bootstrap receipt: %v", err)
+	}
+	receiptData, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt rootedOrchestratorBootstrapReceipt
+	if err := json.Unmarshal(receiptData, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Version != rootedOrchestratorBootstrapVersion || receipt.ProjectID != projectID || receipt.RootID != rootID || receipt.SessionID != started.SessionID || receipt.PromptHash != rootedOrchestratorPromptHash(prompt) || receipt.ReceivedAt.IsZero() {
+		t.Fatalf("bootstrap receipt = %+v", receipt)
+	}
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(runtimeStore).Get(ctx, identity)
+	if err != nil || !found || lease.SessionID != started.SessionID || lease.Lifecycle != domain.OrchestratorWorking || lease.AcquiredAt.After(receipt.ReceivedAt) {
+		t.Fatalf("rooted lease = %+v found=%t err=%v receipt=%+v", lease, found, err, receipt)
+	}
+	if err := os.Remove(receiptPath); err != nil {
+		t.Fatal(err)
+	}
+	inputsBefore := len(tmuxRunner.inputPayloads)
+	response, err = d.handleOrchestratorSession(ctx, request)
+	if err != nil || response.Error != nil {
+		t.Fatalf("repair rooted bootstrap: response=%+v err=%v", response.Error, err)
+	}
+	var repaired protocol.OrchestratorSessionResult
+	if err := json.Unmarshal(response.Body, &repaired); err != nil {
+		t.Fatal(err)
+	}
+	if repaired.Disposition != string(daemonstate.OrchestratorLeaseAttached) {
+		t.Fatalf("repaired = %+v", repaired)
+	}
+	if len(tmuxRunner.inputPayloads) != inputsBefore+1 || !strings.Contains(tmuxRunner.inputPayloads[len(tmuxRunner.inputPayloads)-1], sessionLaunchArtifactPrefix) {
+		t.Fatalf("bootstrap repair delivery = %+v", tmuxRunner.inputPayloads[inputsBefore:])
+	}
+	if _, err := os.Stat(receiptPath); err != nil {
+		t.Fatalf("repaired bootstrap receipt: %v", err)
 	}
 }
 

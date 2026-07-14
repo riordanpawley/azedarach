@@ -1481,7 +1481,35 @@ func tmuxCommandEnvironmentValue(command []string, key string) (string, bool) {
 func (r *sessionStartTmuxRunner) RunWithInput(_ context.Context, input string, args ...string) (string, error) {
 	r.commands = append(r.commands, append([]string(nil), args...))
 	r.inputPayloads = append(r.inputPayloads, input)
+	const promptPrefix = "Read and follow the complete worker instructions in "
+	const promptSuffix = ". Delete that file immediately after reading it."
+	if strings.HasPrefix(input, promptPrefix) && strings.HasSuffix(input, promptSuffix) {
+		path := strings.TrimSuffix(strings.TrimPrefix(input, promptPrefix), promptSuffix)
+		_ = os.Remove(filepath.FromSlash(path))
+	}
 	return "", nil
+}
+
+func TestWaitForSessionPromptHandoffConsumedRejectsPartialDelivery(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "launch.prompt")
+	if err := os.WriteFile(path, []byte("complete rooted role"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := waitForSessionPromptHandoffConsumed(ctx, sessionPromptHandoff{PromptPath: path})
+	if err == nil || !strings.Contains(err.Error(), "was not consumed") {
+		t.Fatalf("wait error = %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("partial handoff was removed: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForSessionPromptHandoffConsumed(context.Background(), sessionPromptHandoff{PromptPath: path}); err != nil {
+		t.Fatalf("consumed handoff: %v", err)
+	}
 }
 
 func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string, error) {

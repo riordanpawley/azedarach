@@ -17,6 +17,8 @@ type sessionPromptHandoff struct {
 	PromptPath string
 }
 
+const sessionPromptHandoffPollInterval = 100 * time.Millisecond
+
 func (d *Daemon) sessionLaunchArtifactDir() string {
 	base := ""
 	if lockPath := strings.TrimSpace(d.cfg.LockPath); lockPath != "" {
@@ -93,6 +95,43 @@ func (h sessionPromptHandoff) bootstrapPrompt() string {
 		return ""
 	}
 	return "Read and follow the complete worker instructions in " + filepath.ToSlash(h.PromptPath) + ". Delete that file immediately after reading it."
+}
+
+// waitForSessionPromptHandoffConsumed treats removal of the owner-only prompt
+// file as the agent's acknowledgement that it received the complete prompt.
+// Startup must not report success while only the short bootstrap instruction
+// has been delivered.
+func waitForSessionPromptHandoffConsumed(ctx context.Context, handoff sessionPromptHandoff) error {
+	path := strings.TrimSpace(handoff.PromptPath)
+	if path == "" {
+		return nil
+	}
+	consumed := func() (bool, error) {
+		_, err := os.Stat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return true, nil
+		}
+		return false, err
+	}
+	if done, err := consumed(); done || err != nil {
+		return err
+	}
+	ticker := time.NewTicker(sessionPromptHandoffPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("prompt handoff %s was not consumed: %w", filepath.Base(path), ctx.Err())
+		case <-ticker.C:
+			done, err := consumed()
+			if err != nil {
+				return fmt.Errorf("inspect prompt handoff %s: %w", filepath.Base(path), err)
+			}
+			if done {
+				return nil
+			}
+		}
+	}
 }
 
 type sessionLaunchArtifactCleaner struct {

@@ -64,6 +64,17 @@ The supported operator surfaces are:
 and returns its tmux target. The CLI may then exec the user's terminal attach;
 the daemon handler must never perform a blocking terminal attach.
 
+Rooted startup is scope-authoritative rather than ticket-type-derived. The
+daemon acquires the rooted lease before agent launch, supplies an explicit
+orchestrator-only prompt whose first commands are `az prime`, rooted status,
+and rooted watch, and does not report startup success until the complete
+file-backed prompt has been acknowledged. An atomic worktree-local receipt
+binds that acknowledgement to the exact project, root, session, prompt hash,
+and bootstrap contract version. Starting an already-live rooted session repairs
+a missing, corrupt, or obsolete receipt by re-delivering the full prompt before
+the session is accepted; the rooted session must never receive worker or
+contributor authority merely because the root ticket is not typed as an epic.
+
 `stop` is also exact-scope and daemon-authoritative. It first records paused
 lease intent without releasing the durable scope or cursor, then requests agent
 exit, closes the residual shell, and falls back to bounded tmux cleanup. Missing
@@ -84,6 +95,7 @@ paths rather than transitional adapters:
 | Contract | Executable evidence |
 | --- | --- |
 | Exact-scope singleton start, attach, stale-runtime recovery | `TestProjectOrchestratorSessionStartAttachesExactScopeSingleton` |
+| Rooted role bootstrap, first action, and attached-session repair | `TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap` |
 | Bounded project scheduling and stable ordering | `TestOrchestrationCandidateOrderingIsStable`, `TestProjectOrchestratorLoopPrioritizesReviewAndPersistsCursor`, `TestProjectOrchestratorSnapshotKeepsStartsActionableAlongsideReview`, `TestProjectStartIntentDoesNotGloballyBlockOnActionableReview` |
 | Foreign ownership exclusion and claim races | `TestProjectOrchestrationSnapshotRefreshesCrossProcessOwnership`, `TestProjectReviewQueueRefreshesCrossProcessReviewLease` |
 | Human request, advisor discussion, edited/direct answer, atomic resolution | `TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifecycle`, `TestInteractionStructuredProposalCanBeHumanEditedAndAtomicallyResolved` |
@@ -100,7 +112,7 @@ partial package run or future refactor from silently dropping a required leg.
 Run the focused acceptance gate with:
 
 ```bash
-go test ./internal/daemon -run 'TestProject(OrchestrationEndToEndAcceptanceInventory|OrchestratorSessionStartAttachesExactScopeSingleton|OrchestratorLoopPrioritizesReviewAndPersistsCursor|OrchestrationSnapshotRefreshesCrossProcessOwnership)|TestInteraction(DiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifecycle|StructuredProposalCanBeHumanEditedAndAtomicallyResolved)|TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings|TestOrchestrator(LifecycleGracePersistsAcrossRestartAndResets|WakeIsDurablyDebouncedAcrossStores|LeaseAuthorityRefreshesStaleCacheBeforeAcquire)' -count=1
+go test ./internal/daemon -run 'TestProject(OrchestrationEndToEndAcceptanceInventory|OrchestratorSessionStartAttachesExactScopeSingleton|OrchestratorLoopPrioritizesReviewAndPersistsCursor|OrchestrationSnapshotRefreshesCrossProcessOwnership)|TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap|TestInteraction(DiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifecycle|StructuredProposalCanBeHumanEditedAndAtomicallyResolved)|TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings|TestOrchestrator(LifecycleGracePersistsAcrossRestartAndResets|WakeIsDurablyDebouncedAcrossStores|LeaseAuthorityRefreshesStaleCacheBeforeAcquire)' -count=1
 go test ./internal/daemon/state -run 'TestOrchestrator(LifecycleGracePersistsAcrossRestartAndResets|WakeIsDurablyDebouncedAcrossStores)' -count=1
 ```
 
