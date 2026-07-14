@@ -158,6 +158,38 @@ func RegisteredProjectID(project Project) string {
 	return strings.TrimSpace(id)
 }
 
+// ProjectDisplayName returns the registered human-facing project name for a
+// typed project route. Path and route ID remain the authority for operations;
+// this value is presentation-only.
+func ProjectDisplayName(registry *ProjectsRegistry, projectID, projectPath string) string {
+	projectID = strings.TrimSpace(projectID)
+	projectPath = filepath.Clean(strings.TrimSpace(projectPath))
+	if registry != nil {
+		for _, project := range registry.Projects {
+			if projectID != "" && RegisteredProjectID(project) == projectID {
+				return strings.TrimSpace(project.Name)
+			}
+			registeredPath := filepath.Clean(strings.TrimSpace(project.Path))
+			if projectPath != "." && registeredPath != "." && (projectPath == registeredPath || strings.HasPrefix(projectPath, registeredPath+string(filepath.Separator))) {
+				return strings.TrimSpace(project.Name)
+			}
+		}
+	}
+	if projectPath != "." {
+		if name := strings.TrimSpace(filepath.Base(projectPath)); name != "" && name != "." {
+			return name
+		}
+	}
+	if projectID != "" {
+		parts := strings.SplitN(projectID, "-", 2)
+		if len(parts) == 2 && len(parts[0]) == 12 && strings.TrimSpace(parts[1]) != "" {
+			return parts[1]
+		}
+		return projectID
+	}
+	return "project"
+}
+
 // Remove removes a project from the registry
 func (r *ProjectsRegistry) Remove(name string) error {
 	if name == "" {

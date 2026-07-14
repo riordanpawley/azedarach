@@ -794,6 +794,25 @@ func TestParseAzedarachSessionNameDecodesEscapedIssueID(t *testing.T) {
 	}
 }
 
+func TestSessionScopeDisplayLabelDistinguishesOrchestratorScopes(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry InventoryEntry
+		want  string
+	}{
+		{name: "project", entry: InventoryEntry{SessionRole: "orchestrator", SessionScopeID: "project"}, want: "project orchestrator"},
+		{name: "rooted", entry: InventoryEntry{SessionRole: "orchestrator", SessionScopeID: "dhh"}, want: "rooted orchestrator"},
+		{name: "worker", entry: InventoryEntry{SessionRole: "worker", SessionScopeID: "dhh"}, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sessionScopeDisplayLabel(tt.entry); got != tt.want {
+				t.Fatalf("scope label = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestModelOpenDetailSupportsOAndSpaceKeysWithoutOpenIssueCommand(t *testing.T) {
 	for _, tt := range []struct {
 		name string

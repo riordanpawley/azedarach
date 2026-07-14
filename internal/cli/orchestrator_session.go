@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 )
 
@@ -66,6 +67,13 @@ func OrchestratorSessionCommand(deps *Dependencies, command string, opts Orchest
 	if opts.JSON {
 		return printJSON(result)
 	}
+	registry, _ := config.LoadProjectsRegistry()
+	projectName := config.ProjectDisplayName(registry, deps.ProjectID, deps.RepoDir)
+	fmt.Printf("Project: %s", projectName)
+	if strings.TrimSpace(deps.ProjectID) != "" && deps.ProjectID != projectName {
+		fmt.Printf(" (%s)", deps.ProjectID)
+	}
+	fmt.Println()
 	fmt.Printf("Orchestrator session: %s\n", result.SessionID)
 	fmt.Printf("Scope: %s", result.Scope.Kind)
 	if result.Scope.RootIssueID != "" {

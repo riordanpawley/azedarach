@@ -26,14 +26,16 @@ type daemonStopCall struct {
 }
 
 type daemonKillerState struct {
-	stopCalls             []daemonStopCall
-	stopErr               error
-	orchestratorStatus    protocol.OrchestratorSessionResult
-	orchestratorStatusErr error
-	orchestratorScopes    []domain.OrchestrationScope
-	orchestratorStopCalls []domain.OrchestrationScope
-	orchestratorExpected  []string
-	orchestratorStopErr   error
+	stopCalls                []daemonStopCall
+	stopErr                  error
+	orchestratorStatus       protocol.OrchestratorSessionResult
+	orchestratorStatusErr    error
+	orchestratorProjects     []string
+	orchestratorScopes       []domain.OrchestrationScope
+	orchestratorStopCalls    []domain.OrchestrationScope
+	orchestratorStopProjects []string
+	orchestratorExpected     []string
+	orchestratorStopErr      error
 }
 
 func newTestDaemonKiller(t *testing.T) (*DaemonKiller, *fakeTmuxKiller, *daemonKillerState) {
@@ -45,12 +47,14 @@ func newTestDaemonKiller(t *testing.T) (*DaemonKiller, *fakeTmuxKiller, *daemonK
 		state.stopCalls = append(state.stopCalls, daemonStopCall{socketPath: socket, projectID: projectID, issueID: issueID})
 		return state.stopErr
 	}
-	killer.daemonOrchestratorStatus = func(_ context.Context, _, _ string, scope domain.OrchestrationScope) (protocol.OrchestratorSessionResult, error) {
+	killer.daemonOrchestratorStatus = func(_ context.Context, _, projectID string, scope domain.OrchestrationScope) (protocol.OrchestratorSessionResult, error) {
+		state.orchestratorProjects = append(state.orchestratorProjects, projectID)
 		state.orchestratorScopes = append(state.orchestratorScopes, scope)
 		return state.orchestratorStatus, state.orchestratorStatusErr
 	}
-	killer.daemonOrchestratorStop = func(_ context.Context, _, _ string, scope domain.OrchestrationScope, expectedSessionID string) error {
+	killer.daemonOrchestratorStop = func(_ context.Context, _, projectID string, scope domain.OrchestrationScope, expectedSessionID string) error {
 		state.orchestratorStopCalls = append(state.orchestratorStopCalls, scope)
+		state.orchestratorStopProjects = append(state.orchestratorStopProjects, projectID)
 		state.orchestratorExpected = append(state.orchestratorExpected, expectedSessionID)
 		return state.orchestratorStopErr
 	}
@@ -102,6 +106,44 @@ func TestDaemonKillerFallsBackToTmuxForLiteralAzSession(t *testing.T) {
 	}
 }
 
+func TestDaemonKillerProjectOrchestratorUsesCanonicalProjectAndExactSession(t *testing.T) {
+	killer, tmux, state := newTestDaemonKiller(t)
+	projectPath := t.TempDir()
+	projectID := projectIDForPath(projectPath)
+	entry := InventoryEntry{
+		SessionID:        "az-orchestrator-project",
+		ProjectID:        projectID,
+		ProjectName:      "Azedarach",
+		ProjectPath:      projectPath,
+		SessionRole:      "orchestrator",
+		SessionScopeKind: "orchestration",
+		SessionScopeID:   "project",
+	}
+	state.orchestratorStatus = protocol.OrchestratorSessionResult{SessionID: entry.SessionID, Live: true}
+
+	if err := killer.KillSession(context.Background(), entry); err != nil {
+		t.Fatalf("kill returned error: %v", err)
+	}
+	if len(state.orchestratorProjects) != 1 || state.orchestratorProjects[0] != projectID {
+		t.Fatalf("orchestrator status projects = %v, want canonical project %q", state.orchestratorProjects, projectID)
+	}
+	if len(state.orchestratorScopes) != 1 || state.orchestratorScopes[0].Kind != domain.OrchestrationScopeProject {
+		t.Fatalf("orchestrator status scopes = %+v, want project", state.orchestratorScopes)
+	}
+	if len(state.orchestratorStopProjects) != 1 || state.orchestratorStopProjects[0] != projectID {
+		t.Fatalf("orchestrator stop projects = %v, want canonical project %q", state.orchestratorStopProjects, projectID)
+	}
+	if len(state.orchestratorStopCalls) != 1 || state.orchestratorStopCalls[0].Kind != domain.OrchestrationScopeProject {
+		t.Fatalf("orchestrator stop scopes = %+v, want project", state.orchestratorStopCalls)
+	}
+	if len(state.orchestratorExpected) != 1 || state.orchestratorExpected[0] != entry.SessionID {
+		t.Fatalf("expected session preconditions = %v, want exact session %q", state.orchestratorExpected, entry.SessionID)
+	}
+	if len(state.stopCalls) != 0 || len(tmux.killed) != 0 {
+		t.Fatalf("ordinary stop calls = %+v, tmux kills = %v; want neither", state.stopCalls, tmux.killed)
+	}
+}
+
 func TestDaemonKillerFallsBackToTmuxWhenProjectMissing(t *testing.T) {
 	killer, tmux, state := newTestDaemonKiller(t)
 	entry := InventoryEntry{
@@ -147,25 +189,6 @@ func TestDaemonKillerSurfacesDaemonError(t *testing.T) {
 	err := killer.KillSession(context.Background(), entry)
 	if err == nil {
 		t.Fatal("expected error from daemon stop to surface")
-	}
-}
-
-func TestDaemonKillerRoutesProjectOrchestratorThroughDaemonAuthority(t *testing.T) {
-	killer, tmux, state := newTestDaemonKiller(t)
-	entry := InventoryEntry{SessionID: "aa-orchestrator-project", ProjectID: "aa", ProjectPath: "/tmp/aa-project"}
-	state.orchestratorStatus = protocol.OrchestratorSessionResult{SessionID: entry.SessionID, Live: true}
-
-	if err := killer.KillSession(context.Background(), entry); err != nil {
-		t.Fatalf("stop project orchestrator: %v", err)
-	}
-	if len(state.orchestratorStopCalls) != 1 || state.orchestratorStopCalls[0].Kind != domain.OrchestrationScopeProject {
-		t.Fatalf("orchestrator stop scopes = %+v, want project", state.orchestratorStopCalls)
-	}
-	if len(state.orchestratorExpected) != 1 || state.orchestratorExpected[0] != entry.SessionID {
-		t.Fatalf("expected session preconditions = %+v, want %q", state.orchestratorExpected, entry.SessionID)
-	}
-	if len(state.stopCalls) != 0 || len(tmux.killed) != 0 {
-		t.Fatalf("ordinary stop calls = %+v, tmux kills = %+v; want neither", state.stopCalls, tmux.killed)
 	}
 }
 
