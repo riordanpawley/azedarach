@@ -456,6 +456,11 @@ not choose:
 - workflow reducer/runtime design, timers, compensations, or replay mechanics;
 - authority fork, key-loss, or recovery cryptographic implementation.
 
+DDA is the required upstream product-policy input and closes before DGV. DGV
+therefore has a blocking dependency on DDA. Final product-to-mechanics
+traceability is owned by DGV child `did` and is completed before DGV acceptance;
+it is not a gate on DDA integration.
+
 The accepted product policies align with current DGV/DHQ findings as follows:
 
 | Product policy | EventStorm/DGV consequence |
@@ -502,5 +507,6 @@ The following may be investigated later but are not implied roadmap promises:
 - [x] Solo publication, deployment, backup, restore, upgrade, and retirement are explicit.
 - [x] EventStorm-ready actors, timelines, invariants, failures, recovery, and read models are present.
 - [x] DDA product policy is separated from DGV event-source mechanics.
-- [ ] Final traceability review against accepted DGV findings is recorded in child `did`.
-- [ ] Human explicitly accepts this final investigation artifact and disposition.
+- [x] Human accepted the complete DDA product-policy recommendation set.
+- [x] DDA is the blocking upstream input to DGV, not the downstream consumer.
+- [ ] DGV child `did` records final product-to-mechanics traceability before DGV closes.
