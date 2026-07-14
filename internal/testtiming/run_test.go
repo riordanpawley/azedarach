@@ -51,7 +51,7 @@ func TestSecond(t *testing.T) { t.Error("second sentinel") }
 func TestWriteValidationLeaseEvidenceFileIncludesOverlapAndLeaseIdentity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lease.json")
 	t.Setenv("AZEDARACH_VALIDATION_EVIDENCE_FILE", path)
-	measurement := Measurement{ValidationLease: ValidationLeaseEvidence{Held: true, RequestID: "req-1", Class: "aggregate", Profile: "cold"}, ProcessLoad: ProcessLoadEvidence{OverlapDetected: true, MaxExternalGoProcesses: 2}}
+	measurement := Measurement{ValidationLease: ValidationLeaseEvidence{Held: true, RequestID: "req-1", Class: "aggregate", Profile: "cold", SourceRevision: "abc123"}, ProcessLoad: ProcessLoadEvidence{OverlapDetected: true, MaxExternalGoProcesses: 2}}
 	require.NoError(t, writeValidationLeaseEvidenceFile(measurement, ".tmp/test-timing/cold"))
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)

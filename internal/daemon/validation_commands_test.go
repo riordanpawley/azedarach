@@ -3,7 +3,9 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -48,5 +50,27 @@ func TestValidationCommandRoutesDurableAggregateQueue(t *testing.T) {
 	}
 	if len(status.Snapshot.Active) != 1 || len(status.Snapshot.Queued) != 1 {
 		t.Fatalf("snapshot = %+v, want one owner and one waiter", status.Snapshot)
+	}
+}
+
+func TestValidationCommandRejectsSpoofedNestedAuthorization(t *testing.T) {
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir()})
+	t.Cleanup(func() { _ = runtime.Close() })
+	d := &Daemon{operationRuntime: runtime, revision: map[string]uint64{"project": 1}}
+	ctx := context.Background()
+	_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "owner", LeaseToken: "secret", ProjectID: "project", IssueID: "dkg", Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "abc123", TTL: time.Minute}, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(protocol.ValidationAuthorizeNestedRequest{RequestID: "owner", LeaseToken: "spoof", Class: domain.ValidationClassShared})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := d.handleValidationCommand(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "rpc-nested", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandValidationNested, Meta: protocol.Metadata{ProjectID: "project"}, Body: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.OK || !strings.Contains(resp.Error.Message, "lease token rejected") {
+		t.Fatalf("response = %+v, want rejected spoofed nested authorization", resp)
 	}
 }

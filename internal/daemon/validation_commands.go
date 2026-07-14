@@ -43,6 +43,16 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 			return d.errorResponse(req, protocol.ErrorCodeConflict, err.Error()), nil
 		}
 		return d.validationSuccessResponse(req, protocol.ValidationRequestResponse{Request: result})
+	case protocol.CommandValidationNested:
+		var body protocol.ValidationAuthorizeNestedRequest
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("decode nested validation authorization: %v", err)), nil
+		}
+		result, err := store.AuthorizeNestedValidation(ctx, domain.ValidationNestedAuthorization{RequestID: strings.TrimSpace(body.RequestID), LeaseToken: strings.TrimSpace(body.LeaseToken), Class: body.Class}, now, defaultValidationLeaseTTL)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeConflict, err.Error()), nil
+		}
+		return d.validationSuccessResponse(req, protocol.ValidationRequestResponse{Request: result})
 	case protocol.CommandValidationFinish:
 		var body protocol.ValidationFinishRequest
 		if err := json.Unmarshal(req.Body, &body); err != nil {

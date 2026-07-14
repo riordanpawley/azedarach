@@ -70,6 +70,45 @@ func (s *SQLiteStore) HeartbeatValidation(ctx context.Context, requestID, leaseT
 	return s.transitionValidation(ctx, requestID, leaseToken, now, ttl, "heartbeat", "")
 }
 
+func (s *SQLiteStore) AuthorizeNestedValidation(ctx context.Context, authorization domain.ValidationNestedAuthorization, now time.Time, ttl time.Duration) (domain.ValidationRequest, error) {
+	if err := authorization.Validate(); err != nil {
+		return domain.ValidationRequest{}, err
+	}
+	db, err := s.dbHandle()
+	if err != nil {
+		return domain.ValidationRequest{}, err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.ValidationRequest{}, fmt.Errorf("begin nested validation authorization: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	current, err := getValidationRequestTx(ctx, tx, authorization.RequestID)
+	if err != nil {
+		return domain.ValidationRequest{}, err
+	}
+	if err := authenticateValidationRequestTx(ctx, tx, authorization.RequestID, authorization.LeaseToken); err != nil {
+		return domain.ValidationRequest{}, err
+	}
+	if err := expireAndReconcileValidationTx(ctx, tx, current.ProjectID, now.UTC(), ttl); err != nil {
+		return domain.ValidationRequest{}, err
+	}
+	current, err = getValidationRequestTx(ctx, tx, authorization.RequestID)
+	if err != nil {
+		return domain.ValidationRequest{}, err
+	}
+	if current.State != domain.ValidationRequestActive {
+		return domain.ValidationRequest{}, fmt.Errorf("validation request %s is not active", authorization.RequestID)
+	}
+	if current.Class != domain.ValidationClassAggregate && current.Class != authorization.Class {
+		return domain.ValidationRequest{}, fmt.Errorf("nested %s validation cannot join active %s request", authorization.Class, current.Class)
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.ValidationRequest{}, fmt.Errorf("commit nested validation authorization: %w", err)
+	}
+	return current, nil
+}
+
 func (s *SQLiteStore) FinishValidation(ctx context.Context, requestID, leaseToken string, state domain.ValidationRequestState, outcome string, evidence domain.ValidationEvidence, now time.Time, ttl time.Duration) (domain.ValidationRequest, error) {
 	if state != domain.ValidationRequestCompleted && state != domain.ValidationRequestCancelled && state != domain.ValidationRequestFailed {
 		return domain.ValidationRequest{}, fmt.Errorf("unsupported terminal validation state %q", state)
@@ -113,7 +152,7 @@ func (s *SQLiteStore) transitionValidation(ctx context.Context, requestID, lease
 		if len(evidence) > 0 {
 			validationEvidence = evidence[0]
 		}
-		if validationEvidence.Present && (validationEvidence.RequestID != current.RequestID || validationEvidence.Class != current.Class || validationEvidence.Profile != current.Profile || !validationEvidence.Held) {
+		if validationEvidence.Present && (validationEvidence.RequestID != current.RequestID || validationEvidence.Class != current.Class || validationEvidence.Profile != current.Profile || validationEvidence.SourceRevision != current.SourceRevision || !validationEvidence.Held) {
 			return domain.ValidationRequest{}, fmt.Errorf("validation evidence identity does not match held request %s", current.RequestID)
 		}
 		evidenceJSON, marshalErr := json.Marshal(validationEvidence)

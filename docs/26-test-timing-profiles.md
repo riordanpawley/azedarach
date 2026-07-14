@@ -12,6 +12,17 @@ sequence. Nested managed validators join that live lease; other validators
 remain queued, so no compile-before-lock window can consume the canonical
 timing budget. Inspect the owner and queue with `just validation-status` or
 stream changes without compiling Go code with `just validation-watch`.
+Raw Go diagnostics are not an exception: run them through
+`./scripts/with-machine-validation-lease --class shared --profile diagnostic -- go ...`.
+An aggregate request waits for already-running unleased Go processes to
+quiesce, then samples the complete outer build/test/contract/boundary command;
+Go work that appears after admission invalidates the aggregate result.
+Nested recipes must prove membership through the outer wrapper's inherited
+kernel authorization descriptor; a public request id or status snapshot never
+admits work. Wrapper death stops renewal and its supervised command tree.
+Integration readiness accepts aggregate proof only when the daemon request,
+machine evidence, worker packet, and clean candidate `HEAD` all name the same
+source revision.
 
 The runner establishes the mandatory database-isolation boundary before any
 test binary starts. It snapshots the configured root-user database, the current
@@ -37,6 +48,9 @@ just test
 
 # Developer-selected package/test
 just test-timing focused --package ./internal/cli --run TestCommand
+
+# Raw diagnostic command (still daemon-admitted)
+./scripts/with-machine-validation-lease --class shared --profile diagnostic -- go test -timeout 30s ./internal/daemon -run TestName
 
 # Complete profiles
 just test-timing cold

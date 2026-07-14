@@ -53,11 +53,28 @@ type ValidationEvidence struct {
 	RequestID           string          `json:"request_id,omitempty"`
 	Class               ValidationClass `json:"class,omitempty"`
 	Profile             string          `json:"profile,omitempty"`
+	SourceRevision      string          `json:"source_revision,omitempty"`
 	Present             bool            `json:"present"`
 	ReportPath          string          `json:"report_path,omitempty"`
 	ReportPaths         []string        `json:"report_paths,omitempty"`
 	OverlapDetected     bool            `json:"overlap_detected"`
 	ExternalGoProcesses int             `json:"external_go_processes"`
+}
+
+type ValidationNestedAuthorization struct {
+	RequestID  string
+	LeaseToken string
+	Class      ValidationClass
+}
+
+func (a ValidationNestedAuthorization) Validate() error {
+	if strings.TrimSpace(a.RequestID) == "" || strings.TrimSpace(a.LeaseToken) == "" {
+		return fmt.Errorf("nested validation authorization requires request id and lease token")
+	}
+	if !a.Class.Valid() {
+		return fmt.Errorf("unsupported nested validation class %q", a.Class)
+	}
+	return nil
 }
 
 type ValidationSnapshot struct {

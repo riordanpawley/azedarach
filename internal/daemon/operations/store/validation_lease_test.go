@@ -182,7 +182,7 @@ func TestLatestAggregateValidationRetainsMachineEvidence(t *testing.T) {
 	now := time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC)
 	_, err := store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "aggregate", LeaseToken: testValidationToken, ProjectID: "project", IssueID: "dkg", Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "abc123", TTL: time.Minute}, now)
 	require.NoError(t, err)
-	want := domain.ValidationEvidence{Held: true, RequestID: "aggregate", Class: domain.ValidationClassAggregate, Profile: "cold", Present: true, ReportPath: ".tmp/report.json", OverlapDetected: true, ExternalGoProcesses: 3}
+	want := domain.ValidationEvidence{Held: true, RequestID: "aggregate", Class: domain.ValidationClassAggregate, Profile: "cold", SourceRevision: "abc123", Present: true, ReportPath: ".tmp/report.json", OverlapDetected: true, ExternalGoProcesses: 3}
 	_, err = store.FinishValidation(ctx, "aggregate", testValidationToken, domain.ValidationRequestCompleted, "passed", want, now.Add(time.Second), time.Minute)
 	require.NoError(t, err)
 	got, err := store.LatestAggregateValidation(ctx, "project", "dkg", now.Add(time.Second), time.Minute)
@@ -198,7 +198,7 @@ func TestValidationLeaseRejectsSpoofedMachineEvidenceIdentity(t *testing.T) {
 	now := time.Now().UTC()
 	_, err := store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "aggregate", LeaseToken: testValidationToken, ProjectID: "project", IssueID: "dkg", Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "abc123", TTL: time.Minute}, now)
 	require.NoError(t, err)
-	_, err = store.FinishValidation(ctx, "aggregate", testValidationToken, domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{Held: true, RequestID: "different", Class: domain.ValidationClassAggregate, Profile: "cold", Present: true}, now.Add(time.Second), time.Minute)
+	_, err = store.FinishValidation(ctx, "aggregate", testValidationToken, domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{Held: true, RequestID: "different", Class: domain.ValidationClassAggregate, Profile: "cold", SourceRevision: "abc123", Present: true}, now.Add(time.Second), time.Minute)
 	require.ErrorContains(t, err, "evidence identity does not match")
 }
 
@@ -215,6 +215,34 @@ func TestValidationLeaseRejectsHeartbeatAndFinishWithWrongFencingToken(t *testin
 	require.ErrorContains(t, err, "lease token rejected")
 	_, err = store.FinishValidation(ctx, "aggregate", "wrong", domain.ValidationRequestCancelled, "stolen", domain.ValidationEvidence{}, now.Add(time.Second), time.Minute)
 	require.ErrorContains(t, err, "lease token rejected")
+}
+
+func TestValidationLeaseAuthorizesNestedOnlyWithFencingTokenAndCompatibleClass(t *testing.T) {
+	ctx := context.Background()
+	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	_, err := store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "shared", LeaseToken: testValidationToken, ProjectID: "project", IssueID: "dkg", Class: domain.ValidationClassShared, Profile: "focused", Command: "go test ./internal/domain", SourceRevision: "abc123", TTL: time.Minute}, now)
+	require.NoError(t, err)
+
+	_, err = store.AuthorizeNestedValidation(ctx, domain.ValidationNestedAuthorization{RequestID: "shared", LeaseToken: "wrong", Class: domain.ValidationClassShared}, now, time.Minute)
+	require.ErrorContains(t, err, "lease token rejected")
+	_, err = store.AuthorizeNestedValidation(ctx, domain.ValidationNestedAuthorization{RequestID: "shared", LeaseToken: testValidationToken, Class: domain.ValidationClassAggregate}, now, time.Minute)
+	require.ErrorContains(t, err, "cannot join active shared")
+	request, err := store.AuthorizeNestedValidation(ctx, domain.ValidationNestedAuthorization{RequestID: "shared", LeaseToken: testValidationToken, Class: domain.ValidationClassShared}, now, time.Minute)
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationRequestActive, request.State)
+}
+
+func TestValidationLeaseRejectsEvidenceFromDifferentSourceRevision(t *testing.T) {
+	ctx := context.Background()
+	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	_, err := store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "aggregate", LeaseToken: testValidationToken, ProjectID: "project", IssueID: "dkg", Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", TTL: time.Minute}, now)
+	require.NoError(t, err)
+	_, err = store.FinishValidation(ctx, "aggregate", testValidationToken, domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{Held: true, RequestID: "aggregate", Class: domain.ValidationClassAggregate, Profile: "cold", SourceRevision: "candidate-b", Present: true}, now.Add(time.Second), time.Minute)
+	require.ErrorContains(t, err, "evidence identity does not match")
 }
 
 func validationRequestIDs(requests []domain.ValidationRequest) []string {

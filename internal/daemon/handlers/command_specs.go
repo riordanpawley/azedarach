@@ -190,6 +190,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandRuntimeSignalIngest:     {Command: protocol.CommandRuntimeSignalIngest, RequiresProjectID: true},
 	protocol.CommandValidationAcquire:       {Command: protocol.CommandValidationAcquire, RequiresProjectID: true},
 	protocol.CommandValidationHeartbeat:     {Command: protocol.CommandValidationHeartbeat, RequiresProjectID: true},
+	protocol.CommandValidationNested:        {Command: protocol.CommandValidationNested, RequiresProjectID: true},
 	protocol.CommandValidationFinish:        {Command: protocol.CommandValidationFinish, RequiresProjectID: true},
 	protocol.CommandValidationStatus:        {Command: protocol.CommandValidationStatus, RequiresProjectID: true},
 	protocol.CommandUIOpenTaskWorkspace:     {Command: protocol.CommandUIOpenTaskWorkspace, RequiresProjectID: true},

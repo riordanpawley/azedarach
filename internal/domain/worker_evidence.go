@@ -305,6 +305,9 @@ func validateWorkerEvidencePacket(packet WorkerEvidencePacket, fields map[string
 		if !evidence.Held || strings.TrimSpace(evidence.RequestID) == "" {
 			invalid = append(invalid, "aggregate_validation must identify a held daemon validation request")
 		}
+		if strings.TrimSpace(evidence.SourceRevision) == "" {
+			invalid = append(invalid, "aggregate_validation.source_revision is required")
+		}
 		if !evidence.Present {
 			invalid = append(invalid, "aggregate_validation must include machine-load evidence")
 		}

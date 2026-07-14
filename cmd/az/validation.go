@@ -65,6 +65,18 @@ func runValidationCommand(cfg *config.Config, args []string) error {
 			_, err := deps.DaemonClient.ValidationHeartbeat(context.Background(), protocol.ValidationHeartbeatRequest{RequestID: *requestID, LeaseToken: *leaseToken, TTLSeconds: *ttl})
 			return err
 		})
+	case "authorize-nested":
+		flags := flag.NewFlagSet("validation authorize-nested", flag.ContinueOnError)
+		requestID := flags.String("request", "", "request id")
+		leaseToken := flags.String("token", os.Getenv("AZEDARACH_VALIDATION_LEASE_TOKEN"), "secret lease fencing token")
+		class := flags.String("class", "shared", "aggregate, shared, or safe")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			_, err := deps.DaemonClient.ValidationAuthorizeNested(context.Background(), protocol.ValidationAuthorizeNestedRequest{RequestID: *requestID, LeaseToken: *leaseToken, Class: domain.ValidationClass(*class)})
+			return err
+		})
 	case "finish":
 		flags := flag.NewFlagSet("validation finish", flag.ContinueOnError)
 		requestID := flags.String("request", "", "request id")
@@ -146,9 +158,10 @@ func printValidationValue(value any, asJSON bool) error {
 }
 
 func printValidationUsage() {
-	fmt.Println(strings.TrimSpace(`Usage: az validation <acquire|heartbeat|finish|status|watch> [flags]
+	fmt.Println(strings.TrimSpace(`Usage: az validation <acquire|heartbeat|authorize-nested|finish|status|watch> [flags]
   acquire --request <id> --token <secret> --issue <id> --class aggregate|shared|safe --profile <name> --command <text> --revision <sha> [--wait] [--json]
   heartbeat --request <id> --token <secret> [--ttl 30]
+  authorize-nested --request <id> --token <secret> --class aggregate|shared|safe
   finish --request <id> --token <secret> --state completed|cancelled|failed [--outcome text] [--evidence-json object] [--json]
   status [--json]
   watch [--interval 1s] [--json]`))
