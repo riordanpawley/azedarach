@@ -8726,6 +8726,75 @@ func TestTaskGraphReadinessExcludesBacklogLeafDespiteOpenCompatibilityStatus(t *
 	}
 }
 
+func TestTaskGraphReadinessBacklogRootContainsOpenDescendants(t *testing.T) {
+	root := naming.IssueID("paused-root")
+	direct := naming.IssueID("open-direct")
+	nested := naming.IssueID("open-nested")
+	nestedChild := naming.IssueID("open-nested-child")
+	backlog, err := domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflowBacklog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusOpen, State: backlog},
+		{ID: direct, Title: "Direct", Description: "Executable", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &root},
+		{ID: nested, Title: "Nested", Type: domain.TypeEpic, Status: domain.StatusOpen, ParentID: &root},
+		{ID: nestedChild, Title: "Nested child", Description: "Executable", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &nested},
+	}
+	rootID, byID, children, err := daemonTaskGraphIndexes(root.String(), tasks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Runnable) != 0 || result.Blocked[direct.String()] != "lifecycle-backlog" {
+		t.Fatalf("readiness = %+v, want direct child contained by backlog root", result)
+	}
+	if len(result.NestedRoots) != 1 || result.NestedRoots[0].Status != "not_counting_capacity" || result.NestedRoots[0].Classification != string(domain.OrchestrationCandidateBacklog) || !slices.Contains(result.NestedRoots[0].ExclusionReasons, "lifecycle-backlog") || result.Blocked[nested.String()] != "lifecycle-backlog" {
+		t.Fatalf("nested roots = %+v, want inherited backlog containment", result.NestedRoots)
+	}
+	if result.Capacity.DirectRunnableCount != 0 || result.Capacity.NestedStartableCount != 0 || result.Capacity.TotalCountingCapacityCount != 0 {
+		t.Fatalf("capacity = %+v, want no backlog-contained start capacity", result.Capacity)
+	}
+}
+
+func TestTaskGraphReadinessRefreshesBacklogRootContainmentAcrossDaemonClients(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "issues.db")
+	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
+	writer := newMigratedIssueClientAtPath(t, path, slog.Default())
+	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
+	rootID, err := reader.Create(ctx, issues.CreateTaskParams{Title: "Active root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := reader.Create(ctx, issues.CreateTaskParams{Title: "Open child", Description: "Executable", Acceptance: "Worker completes scoped change", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}}
+	before, err := d.taskGraphReadiness(ctx, "proj", rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(before.Runnable, []string{childID}) {
+		t.Fatalf("before runnable = %v, want open child", before.Runnable)
+	}
+	backlog := domain.IssueWorkflowBacklog
+	if err := writer.UpdateDetails(ctx, rootID, issues.UpdateTaskParams{Title: "Active root", Type: domain.TypeEpic, Priority: domain.P2, Lifecycle: &backlog}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := d.taskGraphReadiness(ctx, "proj", rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Runnable) != 0 || after.Blocked[childID] != "lifecycle-backlog" {
+		t.Fatalf("after readiness = %+v, want refreshed backlog-root containment", after)
+	}
+}
+
 func TestTaskGraphReadinessRefreshesNestedRootLifecycleAcrossDaemonClients(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")

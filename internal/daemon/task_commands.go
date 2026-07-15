@@ -5326,6 +5326,7 @@ func daemonTaskGraphReadinessFromIndexesWithCompletionEvidence(rootID naming.Iss
 }
 
 func daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID, actorID string, now time.Time, completionEvidence map[string]taskDurableCompletionEvidence) (taskGraphReadinessResult, error) {
+	rootBacklog := byID[rootID].IssueFacts().LifecycleState == domain.IssueWorkflowBacklog
 	leafIDs := daemonTaskGraphDirectWorkerLeafIDs(rootID, byID, children)
 	leaves := make([]string, 0, len(leafIDs))
 	for _, id := range leafIDs {
@@ -5343,6 +5344,16 @@ func daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID na
 		Active:      make([]string, 0),
 		Blocked:     make(map[string]string),
 	}
+	if rootBacklog {
+		for i := range result.NestedRoots {
+			result.Blocked[result.NestedRoots[i].IssueID] = "lifecycle-backlog"
+			result.NestedRoots[i].Status = "not_counting_capacity"
+			result.NestedRoots[i].Classification = string(domain.OrchestrationCandidateBacklog)
+			result.NestedRoots[i].ExclusionReasons = uniqueNonEmpty(append(result.NestedRoots[i].ExclusionReasons, "lifecycle-backlog"))
+			result.NestedRoots[i].FallbackPolicy = "preserve_issue_lifecycle"
+			result.NestedRoots[i].Advice = fmt.Sprintf("nested root %s is contained by backlog root %s", result.NestedRoots[i].IssueID, rootID.String())
+		}
+	}
 	result.StaleCloseableChildren = daemonTaskGraphStaleCloseableCandidatesWithEvidence(rootID, byID, children, completionEvidence)
 	for _, idRaw := range leaves {
 		id, parseErr := naming.ParseIssueID(idRaw)
@@ -5355,6 +5366,10 @@ func daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID na
 		}
 		if daemonCloseGuardTaskHasSession(task) {
 			result.Active = append(result.Active, idRaw)
+			continue
+		}
+		if rootBacklog && id != rootID {
+			result.Blocked[idRaw] = "lifecycle-backlog"
 			continue
 		}
 		blockers := daemonTaskGraphUnresolvedBlockers(task, byID)

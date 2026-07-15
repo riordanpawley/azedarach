@@ -181,13 +181,19 @@ func TestBootstrapRecoveryResumesReplacedRootedOrchestratorOnceWithDurableCursor
 }
 
 func TestRootedOrchestratorContinuationSuppressesCompleteAndHumanWait(t *testing.T) {
-	nested := protocol.OrchestrationSnapshot{NestedRoots: []protocol.OrchestrationNestedRoot{{IssueID: "nested"}}}
+	nested := protocol.OrchestrationSnapshot{NestedRoots: []protocol.OrchestrationNestedRoot{{IssueID: "nested", Status: "startable"}}}
 	if rootedOrchestratorContinuationRequired(true, nested) {
 		t.Fatal("complete-check pass still requires continuation")
 	}
 	nested.Interactions = []domain.InteractionRequest{{ID: "human-acceptance"}}
 	if rootedOrchestratorContinuationRequired(false, nested) {
 		t.Fatal("unresolved human acceptance still requires continuation")
+	}
+	nested.Interactions = nil
+	nested.NestedRoots[0].Status = "not_counting_capacity"
+	nested.NestedRoots[0].ExclusionReasons = []string{"lifecycle-backlog"}
+	if rootedOrchestratorContinuationRequired(false, nested) {
+		t.Fatal("non-actionable backlog-contained nested root still requires continuation")
 	}
 }
 
@@ -761,7 +767,7 @@ func TestOrchestrationBoardHealthDiagnosesUnsafeProject(t *testing.T) {
 	missing := domain.Task{ID: "missing-child", Status: domain.StatusOpen, ParentID: issueIDPtr("absent")}
 	malformedOwner := domain.Task{ID: "owned", Status: domain.StatusOpen, Ownership: &domain.IssueOwnership{OwnerKind: "agent"}}
 	tasks := []domain.Task{parent, missing, malformedOwner}
-	health := orchestrationBoardHealth(tasks, map[string]domain.Task{"parent": parent, "missing-child": missing, "owned": malformedOwner}, 2, 2)
+	health := orchestrationBoardHealth(tasks, map[string]domain.Task{"parent": parent, "missing-child": missing, "owned": malformedOwner}, 3, 2, 2)
 	if health.Healthy {
 		t.Fatal("unsafe board reported healthy")
 	}
@@ -773,6 +779,42 @@ func TestOrchestrationBoardHealthDiagnosesUnsafeProject(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("diagnostics %q missing %q", joined, want)
 		}
+	}
+}
+
+func TestOrchestrationBoardHealthUsesCanonicalOpenCountForThreshold(t *testing.T) {
+	backlog, err := domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflowBacklog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := make([]domain.Task, 0, 102)
+	byID := make(map[string]domain.Task, 102)
+	for i := 0; i < 101; i++ {
+		id := fmt.Sprintf("backlog-%03d", i)
+		task := domain.Task{ID: naming.IssueID(id), Status: domain.StatusOpen, State: backlog}
+		tasks = append(tasks, task)
+		byID[id] = task
+	}
+	open := domain.Task{ID: "open", Status: domain.StatusOpen}
+	tasks = append(tasks, open)
+	byID[open.ID.String()] = open
+
+	health := orchestrationBoardHealth(tasks, byID, 1, 200, 100)
+	if !health.Healthy || health.OpenIssueCount != 1 {
+		t.Fatalf("health = %+v, want healthy canonical open count 1 despite backlog context", health)
+	}
+	for _, diagnostic := range health.Diagnostics {
+		if strings.Contains(diagnostic, "open issue count") {
+			t.Fatalf("health diagnostics = %v, want no threshold diagnostic", health.Diagnostics)
+		}
+	}
+
+	health = orchestrationBoardHealth(tasks, byID, 101, 200, 100)
+	if health.Healthy || health.OpenIssueCount != 101 {
+		t.Fatalf("health = %+v, want canonical threshold refusal at 101", health)
+	}
+	if got := strings.Join(health.Diagnostics, "\n"); !strings.Contains(got, "open issue count 101 exceeds refusal threshold 100") {
+		t.Fatalf("health diagnostics = %q, want exact canonical count", got)
 	}
 }
 
@@ -958,6 +1000,66 @@ func TestProjectOrchestrationStartNeverTouchesExplicitBacklogIssue(t *testing.T)
 	}
 	if task.State.Workflow() != domain.IssueWorkflowBacklog || task.Ownership != nil || task.HasTmuxSession {
 		t.Fatalf("backlog task mutated by start: %+v", task)
+	}
+}
+
+func TestProjectOrchestrationBacklogRootContainsOpenChild(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	rootID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Paused root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Open child", Description: "Executable", Acceptance: "Worker completes scoped change", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nestedID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Open nested root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Create(ctx, issues.CreateTaskParams{Title: "Nested child", Description: "Executable", Acceptance: "Worker completes scoped change", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen, ParentID: &nestedID}); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	authority := daemonOrchestrationAuthority{daemon: d}
+	snapshot, err := authority.Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "steward", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Runnable) != 0 || snapshot.Blocked[childID] != "lifecycle-backlog" {
+		t.Fatalf("snapshot = %+v, want child contained by backlog root", snapshot)
+	}
+	if got := candidateClass(snapshot.Candidates, childID); got != string(domain.OrchestrationCandidateBlocked) {
+		t.Fatalf("child class = %q, want blocked", got)
+	}
+	if len(snapshot.NestedRoots) != 1 || snapshot.NestedRoots[0].IssueID != nestedID || snapshot.NestedRoots[0].Status != "not_counting_capacity" {
+		t.Fatalf("nested roots = %+v, want contained nested root", snapshot.NestedRoots)
+	}
+	result, err := authority.Apply(ctx, "proj", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentStart, IntentKey: "backlog-root-child", ActorID: "steward", IssueIDs: []string{childID, nestedID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Skipped[childID]; got != "lifecycle-backlog" {
+		t.Fatalf("skipped[%s] = %q, want lifecycle-backlog", childID, got)
+	}
+	if got := result.Skipped[nestedID]; got != "lifecycle-backlog" {
+		t.Fatalf("skipped[%s] = %q, want lifecycle-backlog", nestedID, got)
+	}
+	child, err := client.GetWithRuntime(ctx, "proj", childID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.State.Workflow() != domain.IssueWorkflowOpen || child.Ownership != nil || child.HasTmuxSession {
+		t.Fatalf("contained child mutated by project start: %+v", child)
+	}
+	nested, err := client.GetWithRuntime(ctx, "proj", nestedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nested.State.Workflow() != domain.IssueWorkflowOpen || nested.Ownership != nil || nested.HasTmuxSession {
+		t.Fatalf("contained nested root mutated by project start: %+v", nested)
 	}
 }
 

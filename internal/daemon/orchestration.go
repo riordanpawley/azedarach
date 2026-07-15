@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -142,12 +143,23 @@ func applyOrchestratorContinuationProjection(snapshot *protocol.OrchestrationSna
 }
 
 func rootedOrchestratorContinuationRequired(completeCheckPassed bool, snapshot protocol.OrchestrationSnapshot) bool {
-	return !completeCheckPassed && len(snapshot.Interactions) == 0 && len(snapshot.NestedRoots) > 0
+	if completeCheckPassed || len(snapshot.Interactions) > 0 {
+		return false
+	}
+	for _, nested := range snapshot.NestedRoots {
+		if !slices.Contains(nested.ExclusionReasons, "lifecycle-backlog") {
+			return true
+		}
+	}
+	return false
 }
 
 func orchestratorContinuationPrompt(lease daemonstate.OrchestratorScopeLease, nested []protocol.OrchestrationNestedRoot) string {
 	ids := make([]string, 0, len(nested))
 	for _, item := range nested {
+		if slices.Contains(item.ExclusionReasons, "lifecycle-backlog") {
+			continue
+		}
 		if id := strings.TrimSpace(item.IssueID); id != "" {
 			ids = append(ids, id)
 		}
@@ -277,10 +289,18 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		return protocol.OrchestrationSnapshot{}, fmt.Errorf("load project orchestration projection: %w", err)
 	}
 	tasks = a.daemon.enrichTasksWithSessionState(ctx, projectID, tasks)
-	if err := a.enrichPendingDecisions(ctx, projectID, issueClient, &snapshot, tasks); err != nil {
+	// Review inventory is an independent, non-actionable projection. Keep it
+	// outside the canonical Open candidate LIMIT so review-requested work stays
+	// visible without consuming or crowding start capacity.
+	projectTasks, err := issueClient.ListSummariesWithRuntimeDependencies(ctx, projectID)
+	if err != nil {
+		return protocol.OrchestrationSnapshot{}, fmt.Errorf("load project review projection: %w", err)
+	}
+	projectTasks = a.daemon.enrichTasksWithSessionState(ctx, projectID, projectTasks)
+	if err := a.enrichPendingDecisions(ctx, projectID, issueClient, &snapshot, mergeOrchestrationProjectionTasks(tasks, projectTasks)); err != nil {
 		return protocol.OrchestrationSnapshot{}, err
 	}
-	snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, tasks)
+	snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, projectTasks)
 	if err != nil {
 		return protocol.OrchestrationSnapshot{}, err
 	}
@@ -292,18 +312,11 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 			roots = append(roots, task)
 		}
 	}
-	snapshot.Health = orchestrationBoardHealth(tasks, tasksByID, limit, a.openIssueLimit())
 	openIssueCount, err := issueClient.CountOpenOrchestrationIssues(ctx)
 	if err != nil {
 		return protocol.OrchestrationSnapshot{}, fmt.Errorf("count project orchestration issues: %w", err)
 	}
-	snapshot.Health.OpenIssueCount = openIssueCount
-	if openIssueCount > snapshot.Health.OpenIssueLimit {
-		snapshot.Health.Diagnostics = append(snapshot.Health.Diagnostics, fmt.Sprintf("open issue count %d exceeds refusal threshold %d", openIssueCount, snapshot.Health.OpenIssueLimit))
-		sort.Strings(snapshot.Health.Diagnostics)
-		snapshot.Health.Diagnostics = uniqueStrings(snapshot.Health.Diagnostics)
-		snapshot.Health.Healthy = false
-	}
+	snapshot.Health = orchestrationBoardHealth(tasks, tasksByID, openIssueCount, limit, a.openIssueLimit())
 	for _, task := range tasks {
 		if task.Status == domain.StatusDone {
 			continue
@@ -336,7 +349,7 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		}
 		mergeOrchestrationSnapshot(&snapshot, part)
 	}
-	if globalActive := orchestrationGlobalActiveCount(tasks); globalActive > snapshot.Capacity.TotalCountingCapacityCount {
+	if globalActive := orchestrationGlobalActiveCount(projectTasks); globalActive > snapshot.Capacity.TotalCountingCapacityCount {
 		snapshot.Capacity.TotalCountingCapacityCount = globalActive
 	}
 	explainOrchestrationCandidates(&snapshot)
@@ -344,6 +357,25 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	sortOrchestrationSnapshot(&snapshot, tasksByID)
 	snapshot.Completion = projectOrchestrationCompletion(snapshot)
 	return snapshot, nil
+}
+
+func mergeOrchestrationProjectionTasks(primary, supplemental []domain.Task) []domain.Task {
+	merged := make([]domain.Task, 0, len(primary)+len(supplemental))
+	seen := make(map[string]struct{}, len(primary)+len(supplemental))
+	for _, tasks := range [][]domain.Task{primary, supplemental} {
+		for _, task := range tasks {
+			id := strings.TrimSpace(task.ID.String())
+			if id == "" {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			merged = append(merged, task)
+		}
+	}
+	return merged
 }
 
 func (a daemonOrchestrationAuthority) enrichPendingDecisions(ctx context.Context, projectID string, issueClient *issues.Client, snapshot *protocol.OrchestrationSnapshot, tasks []domain.Task) error {
@@ -786,13 +818,12 @@ func (a daemonOrchestrationAuthority) openIssueLimit() int {
 	return defaultOrchestrationOpenIssueLimit
 }
 
-func orchestrationBoardHealth(tasks []domain.Task, byID map[string]domain.Task, inspectLimit, openLimit int) protocol.OrchestrationHealth {
-	health := protocol.OrchestrationHealth{Healthy: true, InspectLimit: inspectLimit, OpenIssueLimit: openLimit}
+func orchestrationBoardHealth(tasks []domain.Task, byID map[string]domain.Task, canonicalOpenCount, inspectLimit, openLimit int) protocol.OrchestrationHealth {
+	health := protocol.OrchestrationHealth{Healthy: true, OpenIssueCount: canonicalOpenCount, InspectLimit: inspectLimit, OpenIssueLimit: openLimit}
 	for _, task := range tasks {
 		if task.Status == domain.StatusDone {
 			continue
 		}
-		health.OpenIssueCount++
 		id := task.ID.String()
 		if task.ParentID != nil && !task.ParentID.IsZero() {
 			parent := task.ParentID.String()
@@ -876,14 +907,14 @@ func uniqueStrings(values []string) []string {
 }
 
 func orchestrationSkipReason(issueID string, nestedRoots, active map[string]struct{}, blocked map[string]string) string {
+	if reason := blocked[issueID]; reason != "" {
+		return reason
+	}
 	if _, ok := nestedRoots[issueID]; ok {
 		return fmt.Sprintf("nested-root-start-orchestrator-session: az orchestrator-session start --root %s", issueID)
 	}
 	if _, ok := active[issueID]; ok {
 		return "session-already-running"
-	}
-	if reason := blocked[issueID]; reason != "" {
-		return reason
 	}
 	return "not-runnable"
 }
