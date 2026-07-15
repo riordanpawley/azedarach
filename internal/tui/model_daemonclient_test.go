@@ -4362,7 +4362,7 @@ func TestDaemonAttachFlowPropagatesRuntimeProjectionAcrossGitWorktreeSessionAndA
 			board.Cursor{Column: 0, Task: 0},
 			map[string]bool{},
 			model.runtimeSignalsForBoard(),
-			board.BuildChildProgress([]domain.Task{task}),
+			nil,
 			nil,
 			false,
 			nil,
@@ -11481,6 +11481,34 @@ func TestBoardViewChangedEventRefreshesBoardSnapshot(t *testing.T) {
 		ProjectID: naming.ProjectID(m.daemonProjectID()),
 		Revision:  5,
 		Event:     protocol.EventBoardViewChanged,
+	}, false)
+	if result.key != daemonStreamCommandIssuesRefresh {
+		t.Fatalf("command key = %q, want %q", result.key, daemonStreamCommandIssuesRefresh)
+	}
+	if m.daemonRevision != 5 {
+		t.Fatalf("daemon revision = %d, want 5", m.daemonRevision)
+	}
+}
+
+func TestTaskMutationEventRefreshesAuthoritativeBoardProjection(t *testing.T) {
+	m := newTestModel()
+	m.daemonRevision = 4
+	updatedTask := domain.Task{ID: "az-1", Title: "Updated", Status: domain.StatusDone, Priority: domain.P2, Type: domain.TypeTask}
+	body, err := json.Marshal(protocol.TaskEventBody{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		TaskID:    updatedTask.ID,
+		Task:      &updatedTask,
+		UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := m.applyDaemonStreamEvent(protocol.EventEnvelope{
+		ProjectID: naming.ProjectID(m.daemonProjectID()),
+		Revision:  5,
+		Event:     protocol.EventTaskUpdated,
+		Body:      body,
 	}, false)
 	if result.key != daemonStreamCommandIssuesRefresh {
 		t.Fatalf("command key = %q, want %q", result.key, daemonStreamCommandIssuesRefresh)

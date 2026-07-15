@@ -27,6 +27,9 @@ func TestApplyGlobalBoardSnapshotScopesDuplicateIssueIDs(t *testing.T) {
 		},
 		Projection: protocol.GlobalViewProjection{
 			View: view,
+			ChildProgress: []protocol.GlobalViewChildProgress{{
+				ParentID: protocol.ScopedIssueID{ProjectID: "alpha", IssueID: "ddm"}, Done: 3, Total: 4,
+			}},
 			Groups: []protocol.GlobalViewProjectedGroup{{GroupID: group, TaskIDs: []protocol.ScopedIssueID{
 				{ProjectID: "alpha", IssueID: "ddm"}, {ProjectID: "beta", IssueID: "ddm"},
 			}}},
@@ -50,6 +53,9 @@ func TestApplyGlobalBoardSnapshotScopesDuplicateIssueIDs(t *testing.T) {
 	}
 	if got := m.tasks[0].Dependencies[0].ID.String(); got != "alpha::dep" {
 		t.Fatalf("scoped dependency = %q", got)
+	}
+	if got := m.boardProjection.ChildProgress; len(got) != 1 || got[0].ParentID != "alpha::ddm" || got[0].Done != 3 || got[0].Total != 4 {
+		t.Fatalf("scoped child progress = %+v", got)
 	}
 }
 

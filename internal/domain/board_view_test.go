@@ -124,6 +124,41 @@ func TestTreeProjectionPromotesChildWhenParentIsFiltered(t *testing.T) {
 	}
 }
 
+func TestBoardProjectionChildProgressIncludesTasksOmittedByView(t *testing.T) {
+	parentID := Task{ID: "parent"}.ID
+	backlogState, err := NewIssueState(IssueStateParts{Workflow: IssueWorkflowBacklog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := []Task{
+		{ID: parentID, Status: StatusOpen},
+		{ID: "done-1", Status: StatusDone, ParentID: &parentID},
+		{ID: "done-2", Status: StatusDone, ParentID: &parentID},
+		{ID: "done-3", Status: StatusDone, ParentID: &parentID},
+		{ID: "backlog", Status: StatusOpen, State: backlogState, ParentID: &parentID},
+	}
+
+	views := []BoardView{DefaultBoardView(), CloseoutBoardView()}
+	for _, view := range views {
+		t.Run(string(view.ID), func(t *testing.T) {
+			projection, err := ProjectTasksByBoardView(view, tasks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(projection.OrderedTasks()) >= len(tasks) {
+				t.Fatalf("view %s did not omit any task", view.ID)
+			}
+			if len(projection.ChildProgress) != 1 {
+				t.Fatalf("child progress = %+v, want one parent aggregate", projection.ChildProgress)
+			}
+			got := projection.ChildProgress[0]
+			if got.ParentID != parentID || got.Done != 3 || got.Total != 4 {
+				t.Fatalf("child progress = %+v, want parent=parent done=3 total=4", got)
+			}
+		})
+	}
+}
+
 func TestBoardViewAllowsCustomGroupIDs(t *testing.T) {
 	view := DefaultBoardView()
 	view.Columns[0].ID = "needs_attention"

@@ -122,13 +122,14 @@ type taskClosePreflightRequest struct {
 }
 
 type taskCloseRequest struct {
-	TaskID               string `json:"task_id"`
-	ForceWorktree        bool   `json:"force_worktree,omitempty"`
-	IgnoreAhead          bool   `json:"ignore_ahead,omitempty"`
-	IntegrateBeforeClose bool   `json:"integrate_before_close,omitempty"`
-	CloseCleanChildren   bool   `json:"close_clean_children,omitempty"`
-	AllowActiveSession   bool   `json:"allow_active_session,omitempty"`
-	CloseOutcome         string `json:"closed_outcome,omitempty"`
+	TaskID                    string `json:"task_id"`
+	ForceWorktree             bool   `json:"force_worktree,omitempty"`
+	IgnoreAhead               bool   `json:"ignore_ahead,omitempty"`
+	IntegrateBeforeClose      bool   `json:"integrate_before_close,omitempty"`
+	CloseCleanChildren        bool   `json:"close_clean_children,omitempty"`
+	AllowActiveSession        bool   `json:"allow_active_session,omitempty"`
+	CloseOutcome              string `json:"closed_outcome,omitempty"`
+	PromoteBacklogBeforeClose bool   `json:"-"`
 }
 
 type taskStatusUpdateOptions struct {
@@ -2099,6 +2100,23 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 			return result, fmt.Errorf("phase preflight_after_child_close for issue %s: %w", taskID, err)
 		}
 	}
+	if cmd.PromoteBacklogBeforeClose && guard.Task.IssueFacts().LifecycleState == domain.IssueWorkflowBacklog {
+		phaseStartedAt = time.Now()
+		openLifecycle := domain.IssueWorkflowOpen
+		guard.Task, err = issueClient.UpdateDetailsWithRuntime(ctx, projectID, guard.Task.ID.String(), issues.UpdateTaskParams{
+			Title:       guard.Task.Title,
+			Description: guard.Task.Description,
+			Type:        guard.Task.Type,
+			Priority:    guard.Task.Priority,
+			Lifecycle:   &openLifecycle,
+		})
+		recordPhase("promote_backlog_child", phaseStartedAt, false)
+		if err != nil {
+			return result, fmt.Errorf("phase promote_backlog_child for issue %s: %w", taskID, err)
+		}
+		revision := d.nextRevision(projectID)
+		d.publishTaskEvent(req, protocol.EventTaskUpdated, revision, taskEventBodyFromTask(projectID, guard.Task))
+	}
 
 	phaseStartedAt = time.Now()
 	integrationCtx, cancelIntegration, integrationBudgetErr := taskCloseIntegrationContext(ctx)
@@ -3843,12 +3861,13 @@ func (d *Daemon) closeCleanDescendantsBeforeParent(ctx context.Context, projectI
 			continue
 		}
 		childResult, err := d.closeTask(ctx, projectID, taskCloseRequest{
-			TaskID:               child.ID.String(),
-			ForceWorktree:        false,
-			IgnoreAhead:          false,
-			IntegrateBeforeClose: false,
-			CloseCleanChildren:   true,
-			CloseOutcome:         cmd.CloseOutcome,
+			TaskID:                    child.ID.String(),
+			ForceWorktree:             false,
+			IgnoreAhead:               false,
+			IntegrateBeforeClose:      false,
+			CloseCleanChildren:        true,
+			CloseOutcome:              cmd.CloseOutcome,
+			PromoteBacklogBeforeClose: cmd.CloseOutcome != string(domain.IssueCloseCancelled),
 		}, req)
 		if err != nil {
 			return closed, fmt.Errorf("close clean child %s: %w", child.ID.String(), err)

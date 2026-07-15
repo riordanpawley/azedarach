@@ -3922,6 +3922,63 @@ func TestTaskCloseCanAutoCloseCleanUnresolvedChildren(t *testing.T) {
 	}
 }
 
+func TestTaskCloseCanAutoCloseCleanBacklogDescendants(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-task-close-clean-backlog-descendants"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Backlog child", Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog, ParentID: &parentID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grandchildID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Backlog grandchild", Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog, ParentID: &childID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, hub: publish.NewHub(16, 8, slog.Default()),
+		issueClientsByProject:  map[string]*issues.Client{projectID: issuesClient},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store}, revision: map[string]uint64{},
+	}
+	body, err := json.Marshal(taskCloseRequest{TaskID: parentID, CloseCleanChildren: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "req-close-clean-backlog-descendants", Kind: protocol.EnvelopeKindCommand, Command: "task.close", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.OK {
+		t.Fatalf("handleTaskClose response = %+v", resp)
+	}
+	var result taskCloseResult
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatal(err)
+	}
+	for _, issueID := range []string{childID, grandchildID} {
+		if !slices.Contains(result.AutoClosedChildren, issueID) {
+			t.Fatalf("auto closed children = %v, missing %s", result.AutoClosedChildren, issueID)
+		}
+		task, err := issuesClient.GetWithRuntime(ctx, projectID, issueID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if task.Status != domain.StatusDone {
+			t.Fatalf("%s status = %s, want done", issueID, task.Status)
+		}
+	}
+}
+
 func TestTaskCloseCleanChildrenDoesNotForceDirtyChildWorktree(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
@@ -3936,7 +3993,7 @@ func TestTaskCloseCleanChildrenDoesNotForceDirtyChildWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create parent: %v", err)
 	}
-	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Child", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &parentID})
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Child", Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog, ParentID: &parentID})
 	if err != nil {
 		t.Fatalf("create child: %v", err)
 	}
@@ -4013,6 +4070,9 @@ func TestTaskCloseCleanChildrenDoesNotForceDirtyChildWorktree(t *testing.T) {
 	}
 	if child.Status != domain.StatusOpen {
 		t.Fatalf("child status = %s, want %s", child.Status, domain.StatusOpen)
+	}
+	if child.IssueFacts().LifecycleState != domain.IssueWorkflowBacklog {
+		t.Fatalf("child lifecycle = %s, want backlog", child.IssueFacts().LifecycleState)
 	}
 }
 

@@ -132,6 +132,29 @@ func TestProjectGlobalViewLeavesHydratedOutOfViewTaskOutOfOrdering(t *testing.T)
 	}
 }
 
+func TestProjectGlobalViewScopesProgressForChildrenOmittedByView(t *testing.T) {
+	parentID := naming.IssueID("parent")
+	backlogState, err := domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflowBacklog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection, err := projectGlobalView(domain.DefaultBoardView(), []protocol.GlobalProjectSnapshot{{ProjectID: "alpha", Tasks: []domain.Task{
+		{ID: parentID, Status: domain.StatusOpen},
+		{ID: "done", Status: domain.StatusDone, ParentID: &parentID},
+		{ID: "backlog", Status: domain.StatusOpen, State: backlogState, ParentID: &parentID},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.ChildProgress) != 1 {
+		t.Fatalf("child progress = %+v", projection.ChildProgress)
+	}
+	got := projection.ChildProgress[0]
+	if got.ParentID.ProjectID != "alpha" || got.ParentID.IssueID != parentID || got.Done != 1 || got.Total != 2 {
+		t.Fatalf("child progress = %+v, want alpha::parent 1/2", got)
+	}
+}
+
 func TestProjectGlobalTreeViewPreservesBranchesAcrossProjects(t *testing.T) {
 	now := time.Now().UTC()
 	alphaRoot := naming.IssueID("alpha-root")

@@ -251,6 +251,20 @@ func TestBuildColumnsUsesConfiguredBoardSnapshotColumns(t *testing.T) {
 	}
 }
 
+func TestBoardRendersAuthoritativeChildProgressWhenChildIsOmitted(t *testing.T) {
+	m := newTestModel()
+	parent := domain.Task{ID: "az-parent", Title: "Parent", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeTask}
+	m.tasks = []domain.Task{parent}
+	m.boardView = domain.DefaultBoardView()
+	m.boardColumns = []domain.BoardViewColumnSnapshot{{Definition: m.boardView.Columns[0], Tasks: []domain.Task{parent}}}
+	m.boardProjection = domain.BoardViewProjection{ChildProgress: []domain.BoardChildProgress{{ParentID: parent.ID, Done: 3, Total: 4}}}
+
+	got := ansi.Strip(m.renderBoardView())
+	if !strings.Contains(got, "[3/4]") {
+		t.Fatalf("board did not render authoritative child progress:\n%s", got)
+	}
+}
+
 func TestBuildColumnsHonorsConfiguredHiddenEmptyColumns(t *testing.T) {
 	m := newTestModel()
 	view := domain.OrchestrationBoardView()
@@ -7784,7 +7798,7 @@ func TestRuntimeSignalsForBoardHidesWorktreeOperationFailureWithoutWorktree(t *t
 			board.Cursor{Column: 0, Task: 0},
 			map[string]bool{},
 			m.runtimeSignalsForBoard(),
-			board.BuildChildProgress([]domain.Task{task}),
+			nil,
 			nil,
 			false,
 			nil,

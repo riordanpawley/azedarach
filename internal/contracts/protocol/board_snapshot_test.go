@@ -6,9 +6,10 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
-func TestBoardSnapshotV4UsesSingleProjectionRepresentation(t *testing.T) {
+func TestBoardSnapshotUsesSingleProjectionRepresentation(t *testing.T) {
 	view := domain.DefaultBoardView()
 	projection, err := domain.ProjectTasksByBoardView(view, []domain.Task{{ID: "az-1", Title: "One", Status: domain.StatusOpen}})
 	if err != nil {
@@ -53,3 +54,32 @@ func TestBoardSnapshotProjectionRejectsUnknownMembership(t *testing.T) {
 		t.Fatal("Validate error = nil")
 	}
 }
+
+func TestBoardSnapshotRoundTripsAuthoritativeChildProgress(t *testing.T) {
+	view := domain.DefaultBoardView()
+	projection, err := domain.ProjectTasksByBoardView(view, []domain.Task{
+		{ID: "parent", Status: domain.StatusOpen},
+		{ID: "child", Status: domain.StatusDone, ParentID: ptrIssueID("parent")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := BoardSnapshotPayload{
+		SchemaVersion: BoardSnapshotSchemaVersion, ProtocolVersion: CurrentVersion,
+		ProjectID: "project", LastCheckedAt: time.Now().UTC(), Freshness: TaskListFreshnessFresh,
+		Projection: BoardViewProjectionFromDomain(projection),
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeBoardSnapshotPayload(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decoded.Projection.ChildProgress; len(got) != 1 || got[0].ParentID != "parent" || got[0].Done != 1 || got[0].Total != 1 {
+		t.Fatalf("child progress = %+v", got)
+	}
+}
+
+func ptrIssueID(id naming.IssueID) *naming.IssueID { return &id }

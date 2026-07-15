@@ -115,11 +115,18 @@ type GlobalViewProjectedGroup struct {
 	TaskIDs []ScopedIssueID      `json:"task_ids"`
 }
 
+type GlobalViewChildProgress struct {
+	ParentID ScopedIssueID `json:"parent_id"`
+	Done     int           `json:"done"`
+	Total    int           `json:"total"`
+}
+
 type GlobalViewProjection struct {
-	View         domain.BoardView           `json:"view"`
-	Groups       []GlobalViewProjectedGroup `json:"groups"`
-	Items        []GlobalViewProjectedItem  `json:"items"`
-	KnownTaskIDs []ScopedIssueID            `json:"known_task_ids"`
+	View          domain.BoardView           `json:"view"`
+	Groups        []GlobalViewProjectedGroup `json:"groups"`
+	Items         []GlobalViewProjectedItem  `json:"items"`
+	KnownTaskIDs  []ScopedIssueID            `json:"known_task_ids"`
+	ChildProgress []GlobalViewChildProgress  `json:"child_progress,omitempty"`
 }
 
 type GlobalProjectSnapshot struct {

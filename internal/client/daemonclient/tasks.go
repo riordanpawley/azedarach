@@ -949,8 +949,9 @@ func (c *Client) decodeBoardSnapshotResponse(resp protocol.ResponseEnvelope) (Ta
 
 func boardSnapshotProjectionToDomain(payload protocol.BoardSnapshotPayload) domain.BoardViewProjection {
 	projection := domain.BoardViewProjection{
-		View:         payload.Projection.View,
-		KnownTaskIDs: append([]naming.IssueID(nil), payload.Projection.KnownTaskIDs...),
+		View:          payload.Projection.View,
+		KnownTaskIDs:  append([]naming.IssueID(nil), payload.Projection.KnownTaskIDs...),
+		ChildProgress: append([]domain.BoardChildProgress(nil), payload.Projection.ChildProgress...),
 	}
 	for _, group := range payload.Projection.Groups {
 		projection.Groups = append(projection.Groups, domain.BoardViewProjectedGroup{GroupID: group.GroupID, TaskIDs: append([]naming.IssueID(nil), group.TaskIDs...)})
