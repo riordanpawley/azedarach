@@ -575,12 +575,99 @@ func TestProjectOrchestrationApplyAutomaticallyBacklogsPrematureCandidate(t *tes
 	}
 }
 
+func TestProjectOrchestrationSnapshotIncludesOnlyLiveUnparentedRoots(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	rootID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Root", Description: "Root scope", Acceptance: "Root done", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Child", Description: "Child scope", Acceptance: "Child done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Closed root", Type: domain.TypeTask, Status: domain.StatusDone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "steward", Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Candidates) != 1 || snapshot.Candidates[0].IssueID != rootID {
+		t.Fatalf("project candidates = %+v, want only root %s (child %s and closed root %s excluded)", snapshot.Candidates, rootID, childID, closedID)
+	}
+	for _, issueID := range append(append([]string(nil), snapshot.Runnable...), snapshot.Active...) {
+		if issueID == childID || issueID == closedID {
+			t.Fatalf("project actionable IDs contain out-of-scope issue %s: runnable=%v active=%v", issueID, snapshot.Runnable, snapshot.Active)
+		}
+	}
+	for _, review := range snapshot.ReviewQueue {
+		if review.IssueID == childID || review.IssueID == closedID {
+			t.Fatalf("project review queue contains out-of-scope issue: %+v", snapshot.ReviewQueue)
+		}
+	}
+}
+
+func TestProjectOrchestrationRejectsDirectStartOfParentedTicket(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	rootID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Child", Description: "Child scope", Acceptance: "Child done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	result, err := d.orchestrationAuthority().Apply(ctx, "proj", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentStart, IntentKey: "reject-child", ActorID: "steward", IssueIDs: []string{childID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Skipped[childID] != "outside-project-root-candidate-scope" || len(result.Started) != 0 {
+		t.Fatalf("direct child start result = %+v", result)
+	}
+}
+
+func TestProjectOrchestrationExplicitIssueRoutesOnlyRequestedRoot(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	requestedID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Requested thin root", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelatedID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Unrelated thin root", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	result, err := d.orchestrationAuthority().Apply(ctx, "proj", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentStart, IntentKey: "explicit-root", ActorID: "steward", IssueIDs: []string{requestedID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Routed) != 1 || result.Routed[0].IssueID != requestedID {
+		t.Fatalf("routed = %+v, want only requested root %s", result.Routed, requestedID)
+	}
+	unrelated, err := client.GetWithRuntime(ctx, "proj", unrelatedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unrelated.State.Workflow() != domain.IssueWorkflowOpen {
+		t.Fatalf("unrelated root workflow = %s, want open", unrelated.State.Workflow())
+	}
+}
+
 func TestProjectCandidateRoutesDoNotAutomaticallyRouteOwnedPrematureWork(t *testing.T) {
 	snapshot := protocol.OrchestrationSnapshot{Candidates: []protocol.OrchestrationCandidate{{
 		IssueID: "foreign", Classification: string(domain.OrchestrationCandidateOwnedElsewhere),
 		Executability: domain.IssueExecutabilityAssessment{Disposition: domain.IssuePremature, Reasons: []string{"missing-scope"}},
 	}}}
-	if routes := projectCandidateRoutes(snapshot, nil); len(routes) != 0 {
+	if routes := projectCandidateRoutes(snapshot, nil, nil); len(routes) != 0 {
 		t.Fatalf("owned candidate routes = %+v", routes)
 	}
 }
