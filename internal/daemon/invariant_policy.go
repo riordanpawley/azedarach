@@ -90,7 +90,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantInteractionStaleness:    daemonInvariantSourceProjection,
 	daemonInvariantDecisionMDTransfer:      daemonInvariantSourceHybrid,
 	daemonInvariantDecisionPropagation:     daemonInvariantSourceHybrid,
-	daemonInvariantOrchestrationReview:     daemonInvariantSourceProjection,
+	daemonInvariantOrchestrationReview:     daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationClaimStart: daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationLoop:       daemonInvariantSourceProjection,
 	daemonInvariantValidationCapacity:      daemonInvariantSourceProjection,
