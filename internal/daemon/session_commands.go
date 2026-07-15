@@ -2035,25 +2035,14 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 	if prompt == "" {
 		prompt = buildConflictResolutionPrompt(issueIDString, conflictFiles)
 	}
-	launchPrompt := prompt
-	postLaunchPrompt := ""
-	if d.sessionLaunchNeedsPostLaunchPrompt(projectID, prompt) {
-		launchPrompt = ""
-		postLaunchPrompt = prompt
+	artifact, artifactErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: projectID, IssueID: issueIDString, SessionID: canonicalSessionID, Yolo: body.Yolo, ImagePaths: body.ImagePaths, Prompt: prompt})
+	if artifactErr != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare conflict resolver launch artifact: %v", artifactErr)), nil
 	}
-	targetPane := sessionName + ":" + sessionConflictWindowName
-	launchCommand := d.buildSessionLaunchCommand(projectID, issueIDString, canonicalSessionID, body.Yolo, body.ImagePaths, launchPrompt)
-	reusedWindow, err := d.tmux.EnsureWindowWithCommandAndEnvironment(ctx, sessionName, sessionConflictWindowName, worktreePath, launchCommand, nil)
+	reusedWindow, err := d.tmux.EnsureWindowWithCommandAndEnvironment(ctx, sessionName, sessionConflictWindowName, worktreePath, artifact.Command, nil)
 	if err != nil {
+		artifact.remove()
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("launch conflict resolver window: %v", err)), nil
-	}
-	if strings.TrimSpace(postLaunchPrompt) != "" {
-		if err := d.waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-		}
-		if err := d.tmux.PasteTextAndSubmit(ctx, targetPane, postLaunchPrompt); err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-		}
 	}
 	resp := d.successResponse(req)
 	out := protocol.SessionResolveConflictResponseBody{
@@ -4479,10 +4468,6 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 	return nil
 }
 
-func (d *Daemon) buildSessionLaunchCommand(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt string) string {
-	return d.buildSessionLaunchCommandWithInitReadyPath(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt, "")
-}
-
 func prepareSessionLaunchScript(artifactDir, shell, launchPayload string) (string, string, error) {
 	if err := ensureSessionLaunchArtifactDir(artifactDir); err != nil {
 		return "", "", err
@@ -4508,18 +4493,9 @@ func prepareSessionLaunchScript(artifactDir, shell, launchPayload string) (strin
 	return path, "exec " + singleQuoteForShell(shell) + " -i " + singleQuoteForShell(filepath.ToSlash(path)), nil
 }
 
-func (d *Daemon) buildSessionResumeCommand(projectID, issueID, sessionID string, yolo bool, imagePaths []string) string {
+func (d *Daemon) buildCodexResumeCommand(projectID, issueID string, yolo bool, imagePaths []string) string {
 	projectCfg := d.runtimeConfigForProject(projectID)
 	tool := strings.TrimSpace(projectCfg.CLITool)
-	if tool == "" {
-		tool = "claude"
-	}
-	if strings.EqualFold(tool, "claude") {
-		return d.buildClaudeContinueCommand(projectID, issueID, yolo, sessionRestartContinuePrompt)
-	}
-	if !strings.EqualFold(tool, "codex") {
-		return d.buildSessionLaunchCommand(projectID, issueID, sessionID, yolo, imagePaths, sessionRestartContinuePrompt)
-	}
 
 	parts := []string{
 		fmt.Sprintf(`AZEDARACH_ISSUE_ID="%s"`, escapeForShellDoubleQuotes(issueID)),
@@ -4554,11 +4530,6 @@ func (d *Daemon) sessionRestartNeedsPostLaunchPrompt(projectID string) bool {
 	return strings.EqualFold(tool, "codex")
 }
 
-func (d *Daemon) sessionLaunchNeedsPostLaunchPrompt(projectID, prompt string) bool {
-	tool := strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool)
-	return strings.EqualFold(tool, "codex") && !codexLaunchPromptArgAllowed(prompt)
-}
-
 func codexLaunchPromptArgAllowed(prompt string) bool {
 	return len(prompt) <= codexLaunchPromptArgMaxBytes
 }
@@ -4583,16 +4554,25 @@ func (d *Daemon) buildClaudeContinueCommand(projectID, issueID string, yolo bool
 	return strings.Join(parts, " ")
 }
 
-func (d *Daemon) buildSessionLaunchCommandWithInitReadyPath(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt, initReadyPath string) string {
-	return d.buildSessionLaunchCommandWithInitReadyPathAndEnv(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt, initReadyPath, nil)
+func (d *Daemon) buildOpenCodeContinueCommand(projectID, issueID, prompt string) string {
+	tool := strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool)
+	if tool == "" {
+		tool = "opencode"
+	}
+	parts := []string{fmt.Sprintf(`AZEDARACH_ISSUE_ID="%s"`, escapeForShellDoubleQuotes(issueID)), tool, "--continue"}
+	if strings.TrimSpace(prompt) != "" {
+		parts = append(parts, "--prompt", `"`+escapeForShellDoubleQuotes(prompt)+`"`)
+	}
+	return strings.Join(parts, " ")
 }
 
-func (d *Daemon) buildSessionLaunchCommandWithInitReadyPathAndEnv(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt, initReadyPath string, startupEnvCommands []string) string {
-	return d.buildSessionLaunchCommandWithInitReadyPathAndEnvPolicy(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt, initReadyPath, startupEnvCommands, false)
-}
-
-func (d *Daemon) buildSessionLaunchScriptPayloadWithInitReadyPathAndEnv(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initReadyPath string, startupEnvCommands []string, promptHandoff sessionPromptHandoff) (string, string) {
-	return d.buildSessionLaunchComponentsWithInitReadyPathAndEnvPolicy(projectID, issueID, sessionID, yolo, imagePaths, promptHandoff.bootstrapPrompt(), initReadyPath, startupEnvCommands, false)
+func (d *Daemon) buildConfiguredToolContinueCommand(projectID, issueID, prompt string) string {
+	tool := strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool)
+	parts := []string{fmt.Sprintf(`AZEDARACH_ISSUE_ID="%s"`, escapeForShellDoubleQuotes(issueID)), tool, "--continue"}
+	if strings.TrimSpace(prompt) != "" {
+		parts = append(parts, `"`+escapeForShellDoubleQuotes(prompt)+`"`)
+	}
+	return strings.Join(parts, " ")
 }
 
 func (d *Daemon) buildSessionLaunchArtifactPayload(spec sessionLaunchSpec, promptHandoff sessionPromptHandoff) (string, string) {
@@ -4605,24 +4585,21 @@ func (d *Daemon) buildSessionLaunchArtifactPayload(spec sessionLaunchSpec, promp
 		var command string
 		switch strings.ToLower(tool) {
 		case "codex":
-			command = d.buildSessionResumeCommand(spec.ProjectID, spec.IssueID, spec.SessionID, spec.Yolo, spec.ImagePaths)
+			command = d.buildCodexResumeCommand(spec.ProjectID, spec.IssueID, spec.Yolo, spec.ImagePaths)
 		case "claude":
 			command = d.buildClaudeContinueCommand(spec.ProjectID, spec.IssueID, spec.Yolo, promptHandoff.bootstrapPrompt())
+		case "opencode":
+			command = d.buildOpenCodeContinueCommand(spec.ProjectID, spec.IssueID, promptHandoff.bootstrapPrompt())
 		default:
-			command = d.buildCLIToolCommandWithPromptPolicy(spec.ProjectID, spec.IssueID, spec.SessionID, spec.Yolo, spec.ImagePaths, promptHandoff.bootstrapPrompt(), false)
+			command = d.buildConfiguredToolContinueCommand(spec.ProjectID, spec.IssueID, promptHandoff.bootstrapPrompt())
 		}
 		shell := strings.TrimSpace(projectCfg.SessionShell)
 		if shell == "" {
 			shell = appconfig.DefaultSessionShell()
 		}
-		return shell, command + "; " + sessionAgentProcessExitCommand(tool) + "; exec " + shell
+		return shell, command + "; " + sessionAgentProcessExitCommand(tool) + "; exec " + singleQuoteForShell(shell)
 	}
 	return d.buildSessionLaunchComponentsWithInitReadyPathAndEnvPolicy(spec.ProjectID, spec.IssueID, spec.SessionID, spec.Yolo, spec.ImagePaths, promptHandoff.bootstrapPrompt(), spec.InitReadyPath, spec.StartupEnvCommands, false)
-}
-
-func (d *Daemon) buildSessionLaunchCommandWithInitReadyPathAndEnvPolicy(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt, initReadyPath string, startupEnvCommands []string, allowLargePrompt bool) string {
-	shell, inner := d.buildSessionLaunchComponentsWithInitReadyPathAndEnvPolicy(projectID, issueID, sessionID, yolo, imagePaths, initialPrompt, initReadyPath, startupEnvCommands, allowLargePrompt)
-	return fmt.Sprintf("%s -i -c %s", shell, singleQuoteForShell(inner))
 }
 
 func (d *Daemon) buildSessionLaunchComponentsWithInitReadyPathAndEnvPolicy(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt, initReadyPath string, startupEnvCommands []string, allowLargePrompt bool) (string, string) {
@@ -4654,7 +4631,7 @@ func (d *Daemon) buildSessionLaunchComponentsWithInitReadyPathAndEnvPolicy(proje
 		shell = appconfig.DefaultSessionShell()
 	}
 	inner := strings.Join(commands, "; ")
-	inner = inner + "; " + sessionAgentProcessExitCommand(projectCfg.CLITool) + "; exec " + shell
+	inner = inner + "; " + sessionAgentProcessExitCommand(projectCfg.CLITool) + "; exec " + singleQuoteForShell(shell)
 	return shell, inner
 }
 
@@ -5478,7 +5455,7 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 		switch strings.ToLower(tool) {
 		case "codex":
 			parts = append(parts, "--dangerously-bypass-approvals-and-sandbox")
-		default:
+		case "claude":
 			parts = append(parts, "--dangerously-skip-permissions")
 		}
 	}

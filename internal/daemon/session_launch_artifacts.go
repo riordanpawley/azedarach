@@ -28,15 +28,18 @@ const (
 // path. Tool-specific argument selection happens before the artifact is
 // written; tmux only ever receives the bounded artifact command.
 type sessionLaunchSpec struct {
-	Mode               sessionLaunchMode
-	ProjectID          string
-	IssueID            string
-	SessionID          string
-	Yolo               bool
-	ImagePaths         []string
-	Prompt             string
-	InitReadyPath      string
-	StartupEnvCommands []string
+	Mode                sessionLaunchMode
+	ProjectID           string
+	IssueID             string
+	SessionID           string
+	Yolo                bool
+	ImagePaths          []string
+	Prompt              string
+	InitReadyPath       string
+	StartupEnvCommands  []string
+	CommandPayload      string
+	Shell               string
+	SanitizeEnvironment bool
 }
 
 type sessionLaunchArtifact struct {
@@ -67,10 +70,19 @@ func (d *Daemon) prepareSessionLaunchArtifact(spec sessionLaunchSpec) (sessionLa
 		}
 	}
 	shell, payload := d.buildSessionLaunchArtifactPayload(spec, handoff)
+	if strings.TrimSpace(spec.CommandPayload) != "" {
+		payload = spec.CommandPayload
+	}
+	if strings.TrimSpace(spec.Shell) != "" {
+		shell = spec.Shell
+	}
 	path, command, err := prepareSessionLaunchScript(d.sessionLaunchArtifactDir(), shell, payload)
 	if err != nil {
 		handoff.remove()
 		return sessionLaunchArtifact{}, err
+	}
+	if spec.SanitizeEnvironment {
+		command = "exec " + singleQuoteForShell(advisorEnvExecutable) + " -u BASH_ENV -u ENV -u ZDOTDIR -u ZSH_ENV -u FISH_CONFIG_DIR " + singleQuoteForShell(advisorShellExecutable) + " " + singleQuoteForShell(filepath.ToSlash(path))
 	}
 	return sessionLaunchArtifact{Command: command, ScriptPath: path, PromptHandoff: handoff}, nil
 }

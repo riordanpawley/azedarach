@@ -222,6 +222,13 @@ func TestProjectOrchestratorLaunchUsesInheritedAzForInitialHookAndBackgroundComm
 		t.Fatal(err)
 	}
 	launchCommand := requireNewSessionLaunchCommand(t, runner, result.SessionID)
+	// The tmux fixture removes one-shot artifacts to model successful handoff;
+	// recreate its captured bytes for this real-process assertion.
+	artifactCopy := filepath.Join(t.TempDir(), "orchestrator-launch.sh")
+	if err := os.WriteFile(artifactCopy, []byte(runner.launchScriptContents[result.SessionID]), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	launchCommand = strings.Replace(launchCommand, runner.launchScriptPaths[result.SessionID], artifactCopy, 1)
 	cmd := exec.Command("/bin/sh", "-c", launchCommand)
 	cmd.Env = append(os.Environ(), "PATH="+managedDir+string(os.PathListSeparator)+staleDir+string(os.PathListSeparator)+toolDir+":/usr/bin:/bin", "TRACE="+tracePath)
 	cmd.Stdin = strings.NewReader("exit\n")

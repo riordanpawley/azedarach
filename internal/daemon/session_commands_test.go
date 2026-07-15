@@ -4073,18 +4073,8 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 	if !tmuxRunner.windows[sessionID][sessionConflictWindowName] {
 		t.Fatalf("expected conflict window to be created in session %q", sessionID)
 	}
-	if tmuxRunner.sendKeysCalls != 1 || len(tmuxRunner.inputPayloads) != 1 {
-		t.Fatalf("post-launch prompt transport: send-keys=%d inputs=%d, want one literal paste and submit", tmuxRunner.sendKeysCalls, len(tmuxRunner.inputPayloads))
-	}
-	targetPane := sessionID + ":" + sessionConflictWindowName
-	if gotTarget := tmuxRunner.sendKeysTargets[0]; gotTarget != targetPane {
-		t.Fatalf("post-launch submit target = %q, want %q", gotTarget, targetPane)
-	}
-	if gotKey := tmuxRunner.sendKeysPayloads[0]; gotKey != "Enter" {
-		t.Fatalf("post-launch submit payload = %q, want Enter", gotKey)
-	}
-	if got := tmuxRunner.inputPayloads[0]; got != largePrompt {
-		t.Fatalf("post-launch prompt was not preserved: got %d bytes, want %d", len(got), len(largePrompt))
+	if tmuxRunner.sendKeysCalls != 0 || len(tmuxRunner.inputPayloads) != 0 {
+		t.Fatalf("conflict launch bypassed artifact transport: send-keys=%d inputs=%d", tmuxRunner.sendKeysCalls, len(tmuxRunner.inputPayloads))
 	}
 	var launchCommand string
 	for _, command := range tmuxRunner.commands {
@@ -4101,10 +4091,16 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 		strings.Contains(launchCommand, "main.go") {
 		t.Fatalf("launch command contains raw conflict prompt text: %s", launchCommand)
 	}
-	if !strings.Contains(launchCommand, `AZEDARACH_ISSUE_ID="`+issueID+`" codex`) ||
-		strings.Contains(launchCommand, initialPromptShellVariable) ||
-		!strings.Contains(launchCommand, "--dangerously-bypass-approvals-and-sandbox") {
-		t.Fatalf("launch command missing bounded codex launch shape or yolo flag: %s", launchCommand)
+	quoted := strings.Split(launchCommand, "'")
+	if len(quoted) < 4 {
+		t.Fatalf("conflict launch does not use bounded artifact: %s", launchCommand)
+	}
+	artifactBody, err := os.ReadFile(quoted[len(quoted)-2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(artifactBody), `AZEDARACH_ISSUE_ID="`+issueID+`" codex`) || !strings.Contains(string(artifactBody), "--dangerously-bypass-approvals-and-sandbox") {
+		t.Fatalf("artifact missing codex launch shape or yolo flag: %s", artifactBody)
 	}
 	if strings.Contains(launchCommand, "export PATH=") || strings.Contains(launchCommand, managedDir) {
 		t.Fatalf("conflict launch command injects managed PATH: %s", launchCommand)
@@ -8698,7 +8694,7 @@ func TestBuildSessionLaunchCommandReportsAgentProcessExitBeforeFallbackShell(t *
 	wrapper := sessionAgentProcessExitCommand("codex")
 	if !strings.Contains(command, "__azedarach_agent_exit_status=$?") ||
 		!strings.Contains(command, "az ai hook run --agent=codex session_end") ||
-		!strings.Contains(command, "|| true; exec zsh") {
+		!strings.Contains(command, "|| true; exec '") {
 		t.Fatalf("launch command = %q, want process-exit wrapper %q before fallback shell", command, wrapper)
 	}
 }
@@ -9525,7 +9521,7 @@ func TestBuildSessionLaunchCommandAddsDangerousSkipPermissionsFromConfigAcrossTo
 	}{
 		{name: "claude", tool: "claude", want: "--dangerously-skip-permissions"},
 		{name: "codex", tool: "codex", want: "--dangerously-bypass-approvals-and-sandbox"},
-		{name: "opencode", tool: "opencode", want: "--dangerously-skip-permissions"},
+		{name: "opencode", tool: "opencode", want: "opencode"},
 	}
 
 	for _, tt := range tests {
@@ -9557,9 +9553,9 @@ func TestSessionLaunchArtifactAdaptersCoverConfiguredTools(t *testing.T) {
 		{tool: "codex", mode: sessionLaunchInitial, want: []string{"codex", "--dangerously-bypass-approvals-and-sandbox"}},
 		{tool: "codex", mode: sessionLaunchResume, want: []string{"codex", "resume", "--last"}},
 		{tool: "opencode", mode: sessionLaunchInitial, want: []string{"opencode", "--prompt"}},
-		{tool: "opencode", mode: sessionLaunchResume, want: []string{"opencode", "--prompt"}},
+		{tool: "opencode", mode: sessionLaunchResume, want: []string{"opencode", "--continue", "--prompt"}},
 		{tool: "my-agent", mode: sessionLaunchInitial, want: []string{"my-agent"}},
-		{tool: "my-agent", mode: sessionLaunchResume, want: []string{"my-agent"}},
+		{tool: "my-agent", mode: sessionLaunchResume, want: []string{"my-agent", "--continue"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.tool+"/"+string(tt.mode), func(t *testing.T) {
@@ -9580,6 +9576,9 @@ func TestSessionLaunchArtifactAdaptersCoverConfiguredTools(t *testing.T) {
 			}
 			if strings.Contains(string(body), ".azedarach-generations") || strings.Contains(string(body), "export PATH=") {
 				t.Fatalf("artifact injects PATH policy: %s", body)
+			}
+			if tt.tool == "my-agent" && strings.Contains(string(body), "dangerously-skip-permissions") {
+				t.Fatalf("configured tool inherited Claude permission flag: %s", body)
 			}
 		})
 	}
@@ -9628,6 +9627,77 @@ func TestSessionLaunchArtifactPicksUpStableLinkSwitchWithoutEnvironmentReload(t 
 	}
 	if string(got) != "v1\nv2\n" {
 		t.Fatalf("trace = %q, want stable link switch without PATH reload", got)
+	}
+}
+
+func TestSessionLaunchResumeAdaptersExecuteContinuationSemantics(t *testing.T) {
+	tests := []struct {
+		tool string
+		want string
+	}{
+		{tool: "codex", want: "resume"},
+		{tool: "claude", want: "--continue"},
+		{tool: "opencode", want: "--continue --prompt"},
+		{tool: "configured-agent", want: "--continue"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.tool, func(t *testing.T) {
+			binDir := t.TempDir()
+			trace := filepath.Join(t.TempDir(), "trace")
+			toolPath := filepath.Join(binDir, tt.tool)
+			if err := os.WriteFile(toolPath, []byte("#!/bin/sh\nprintf '%s' \"$*\" > \"$TRACE\"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			d := &Daemon{cfg: Config{RepoDir: t.TempDir(), CLITool: tt.tool, SessionShell: "/bin/sh", DangerouslySkipPermissions: true}}
+			artifact, err := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchResume, ProjectID: protocol.DefaultProjectID, IssueID: "dky", SessionID: "az-dky", Prompt: "continue"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(artifact.remove)
+			cmd := exec.Command("/bin/sh", "-c", artifact.Command)
+			cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+"/usr/bin:/bin", "TRACE="+trace)
+			cmd.Stdin = strings.NewReader("exit\n")
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("execute resume artifact: %v\n%s", err, out)
+			}
+			got, err := os.ReadFile(trace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(got), tt.want) {
+				t.Fatalf("executed args = %q, want continuation %q", got, tt.want)
+			}
+			if tt.tool == "configured-agent" && strings.Contains(string(got), "dangerously") {
+				t.Fatalf("configured adapter inherited provider permission flag: %q", got)
+			}
+		})
+	}
+}
+
+func TestSessionLaunchArtifactQuotesConfiguredShellEverywhere(t *testing.T) {
+	base := t.TempDir()
+	shellDir := filepath.Join(base, "shell dir")
+	if err := os.MkdirAll(shellDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shellPath := filepath.Join(shellDir, "sh;safe")
+	if err := os.Symlink("/bin/sh", shellPath); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "configured-agent"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: base, CLITool: "configured-agent", SessionShell: shellPath}}
+	artifact, err := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: protocol.DefaultProjectID, IssueID: "dky", SessionID: "az-dky"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sh", "-c", artifact.Command)
+	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+"/usr/bin:/bin")
+	cmd.Stdin = strings.NewReader("exit\n")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("execute artifact through metacharacter shell path: %v\n%s", err, out)
 	}
 }
 
