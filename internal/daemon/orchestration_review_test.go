@@ -1153,7 +1153,11 @@ func TestReviewAcceptUsesReplayedTicketIntegrationReadyEvidenceIdempotently(t *t
 	if _, validation := domain.ParseWorkerEvidencePacketBody(mail[0].Body); !validation.Complete {
 		t.Fatalf("replayed body=%s validation=%+v", mail[0].Body, validation)
 	}
-	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-replayed-ticket-evidence", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
+	rootedScope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := protocol.OrchestrationIntentRequest{Scope: rootedScope, Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-replayed-ticket-evidence", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
 	first, err := d.orchestrationAuthority().Apply(ctx, "project", request)
 	if err != nil {
 		t.Fatal(err)
@@ -1221,7 +1225,11 @@ func TestReviewReplayAndAcceptShareObservedAtEvidenceOrdering(t *testing.T) {
 	if len(mail) != 0 {
 		t.Fatalf("replay=%+v, want no readiness for latest incomplete evidence", mail)
 	}
-	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "reject-authoritatively-latest-incomplete", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
+	rootedScope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := protocol.OrchestrationIntentRequest{Scope: rootedScope, Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "reject-authoritatively-latest-incomplete", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
 	result, err := d.orchestrationAuthority().Apply(ctx, "project", request)
 	if err != nil {
 		t.Fatal(err)

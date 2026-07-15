@@ -735,6 +735,9 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 			}) {
 				return false, fmt.Errorf("accepted review candidate rejected: %s", strings.Join(inspection.Reasons, "; "))
 			}
+			if len(inspection.Reasons) > 0 {
+				return false, fmt.Errorf("accepted review requires complete worker_evidence.v1 or a declared internal_review investigation with a durable accepted/ratified review artifact: %s", strings.Join(inspection.Reasons, "; "))
+			}
 			return false, fmt.Errorf("accepted review requires complete worker_evidence.v1 or a declared internal_review investigation with a durable accepted/ratified review artifact")
 		}
 	}

@@ -439,9 +439,10 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	}
 
 	// Project orchestration consumes the daemon's materialized projection only.
-	// Its actionable window is live, unparented, canonical lifecycle Open roots
-	// before LIMIT. Dependencies remain readiness context only; review and
-	// decision inventory are independently scoped to all live project roots.
+	// Its actionable window is live, unparented, canonical lifecycle Open roots.
+	// LIMIT bounds runnable inspection, while roots with projected live sessions
+	// remain visible independently. Dependencies remain readiness context only;
+	// review and decision inventory are independently scoped to all live roots.
 	projectTasks := materializedTasks
 	projectRoots := projectOrchestrationRootTasks(projectTasks)
 	candidateRoots := projectOrchestrationCandidateRoots(projectRoots, limit)
@@ -513,14 +514,29 @@ func materializedProjectOrchestrationContext(tasks []domain.Task, limit int) []d
 
 func projectOrchestrationCandidateRoots(roots []domain.Task, limit int) []domain.Task {
 	open := make([]domain.Task, 0, len(roots))
+	active := make([]domain.Task, 0, len(roots))
 	for _, task := range roots {
 		if task.IssueFacts().LifecycleState == domain.IssueWorkflowOpen {
 			open = append(open, task)
 		}
+		if task.HasTmuxSession {
+			active = append(active, task)
+		}
 	}
 	sort.SliceStable(open, func(i, j int) bool { return orchestrationTaskLess(open[i], open[j]) })
+	sort.SliceStable(active, func(i, j int) bool { return orchestrationTaskLess(active[i], active[j]) })
 	if limit > 0 && len(open) > limit {
 		open = open[:limit]
+	}
+	selected := make(map[string]struct{}, len(open)+len(active))
+	for _, task := range open {
+		selected[task.ID.String()] = struct{}{}
+	}
+	for _, task := range active {
+		if _, ok := selected[task.ID.String()]; ok {
+			continue
+		}
+		open = append(open, task)
 	}
 	return open
 }

@@ -4689,7 +4689,11 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 			PendingDecisions: pendingDecisions,
 		}, nil
 	}
-	events, err := readMailboxEvents(repoDir, parentIssueID)
+	mailboxRepoDir := strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID))
+	if mailboxRepoDir == "" {
+		return taskIntegrationReadinessResult{}, fmt.Errorf("resolve authoritative project mailbox root for %s", projectID)
+	}
+	events, err := readMailboxEvents(mailboxRepoDir, parentIssueID)
 	if err != nil {
 		return taskIntegrationReadinessResult{}, fmt.Errorf("list mailbox events for %s: %w", parentIssueID, err)
 	}
@@ -4727,6 +4731,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 				ContextRisk:            contextRisk,
 				Reasons:                reasons,
 				EvidenceEventSeq:       evt.Seq,
+				EvidenceSource:         "mailbox",
 				EvidenceIncomplete:     true,
 				EvidenceMissingFields:  validation.Missing,
 				EvidenceInvalidReasons: validation.Invalid,
@@ -4761,10 +4766,10 @@ func validateWorkerAggregateRequest(validation *domain.WorkerEvidenceParseResult
 	}
 	var problem string
 	if packet.AggregateValidation == nil {
-		if latest == nil {
-			return
-		}
-		problem = "aggregate_validation is required for integration readiness"
+		// The daemon projection is the authority for aggregate validation. Older
+		// and issue-recorded worker packets do not have to duplicate that proof;
+		// when they do, the identity and revision are still checked below.
+		return
 	} else if latest == nil {
 		problem = fmt.Sprintf("aggregate_validation request %s is not present in the daemon validation projection", packet.AggregateValidation.RequestID)
 	} else if packet.AggregateValidation.RequestID != latest.RequestID {
