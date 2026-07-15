@@ -165,8 +165,9 @@ if ($supervisor == 0) {
         setpgid(0, 0);
         delete $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN};
         # Candidate daemon/routing overrides belong to the wrapper control
-        # plane, never to the payload. Preserve the caller's ordinary runtime
-        # environment, including XDG_RUNTIME_DIR, unchanged.
+        # plane, never to the payload. Route any candidate runtime through the
+        # wrapper-owned private directory and expose the same path as the
+        # mandatory cleanup handle.
         delete @ENV{qw(
             AZEDARACH_DAEMON_BIN
             AZEDARACH_DAEMON_SCOPE
