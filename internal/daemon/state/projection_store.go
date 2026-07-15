@@ -577,11 +577,21 @@ func (s *RuntimeStateStore) ListLegacyPhysicalObservationCandidates(ctx context.
 
 // RuntimeStateStore persists daemon-owned session/worktree state in sqlite.
 type RuntimeStateStore struct {
-	dbPath string
-	logger *slog.Logger
+	dbPath               string
+	logger               *slog.Logger
+	runtimeLivenessProbe func(context.Context, string) (bool, error)
 
 	mu sync.Mutex
 	db *sql.DB
+}
+
+// RuntimeStateStoreOption configures runtime-store reconciliation boundaries.
+type RuntimeStateStoreOption func(*RuntimeStateStore)
+
+// WithRuntimeLivenessProbe supplies the live runtime authority required before
+// startup may prune terminal projections whose issue authority is absent.
+func WithRuntimeLivenessProbe(probe func(context.Context, string) (bool, error)) RuntimeStateStoreOption {
+	return func(store *RuntimeStateStore) { store.runtimeLivenessProbe = probe }
 }
 
 type sqliteWriteAttemptHookKey struct{}
@@ -651,7 +661,7 @@ var (
 const runtimeStateMaxOpenConns = 2
 
 // NewRuntimeStateStore returns a sqlite-backed daemon runtime-state store rooted at the repo db path.
-func NewRuntimeStateStore(repoDir string, logger *slog.Logger) *RuntimeStateStore {
+func NewRuntimeStateStore(repoDir string, logger *slog.Logger, options ...RuntimeStateStoreOption) *RuntimeStateStore {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -660,15 +670,23 @@ func NewRuntimeStateStore(repoDir string, logger *slog.Logger) *RuntimeStateStor
 		logger.Warn("failed to resolve runtime state db path", "repo_dir", repoDir, "error", err)
 		dbPath = filepath.Join(repoDir, ".azedarach", "azedarach.db")
 	}
-	return &RuntimeStateStore{dbPath: dbPath, logger: logger}
+	store := &RuntimeStateStore{dbPath: dbPath, logger: logger}
+	for _, option := range options {
+		option(store)
+	}
+	return store
 }
 
 // NewRuntimeStateStoreAtPath returns a sqlite-backed daemon runtime-state store at dbPath.
-func NewRuntimeStateStoreAtPath(dbPath string, logger *slog.Logger) *RuntimeStateStore {
+func NewRuntimeStateStoreAtPath(dbPath string, logger *slog.Logger, options ...RuntimeStateStoreOption) *RuntimeStateStore {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &RuntimeStateStore{dbPath: dbPath, logger: logger}
+	store := &RuntimeStateStore{dbPath: dbPath, logger: logger}
+	for _, option := range options {
+		option(store)
+	}
+	return store
 }
 
 func resolveRuntimeStateDBPath(repoDir string) (string, error) {
@@ -2314,7 +2332,7 @@ func (s *RuntimeStateStore) dbHandle() (*sql.DB, error) {
 	db.SetConnMaxLifetime(0)
 	db.SetConnMaxIdleTime(0)
 	if err := sqliteutil.WithWriteLock(s.dbPath, func() error {
-		return ensureRuntimeStateSchema(context.Background(), db)
+		return ensureRuntimeStateSchema(context.Background(), db, s.runtimeLivenessProbe)
 	}); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -2436,7 +2454,7 @@ func isSQLiteWriteContention(err error) bool {
 	return false
 }
 
-func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
+func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB, runtimeLivenessProbe func(context.Context, string) (bool, error)) error {
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS ` + physicalSessionObservationTable + ` (
 			project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
@@ -2642,7 +2660,7 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 	if err := migrateSessionObservations(ctx, db); err != nil {
 		return err
 	}
-	if err := ensureRuntimeSessionProductConstraints(ctx, db); err != nil {
+	if err := ensureRuntimeSessionProductConstraints(ctx, db, runtimeLivenessProbe); err != nil {
 		return err
 	}
 	if err := ensureSessionActivityEvidenceSourceKey(ctx, db); err != nil {
@@ -3018,7 +3036,7 @@ func ensureRuntimeLogicalSessionIdentitySchema(ctx context.Context, db *sql.DB) 
 	return nil
 }
 
-func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB) error {
+func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB, runtimeLivenessProbe func(context.Context, string) (bool, error)) error {
 	var issuesTableCount int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='issues'`).Scan(&issuesTableCount); err != nil {
 		return fmt.Errorf("inspect relational issue authority: %w", err)
@@ -3037,6 +3055,13 @@ func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB) err
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='interaction_requests'`).Scan(&interactionTableCount); err != nil {
 		return fmt.Errorf("inspect relational interaction authority: %w", err)
 	}
+	type orphanKey struct{ table, projectID, sessionID, issueID string }
+	var terminalOrphans []orphanKey
+	type livenessResult struct {
+		live bool
+		err  error
+	}
+	livenessBySession := make(map[string]livenessResult)
 	for _, table := range []string{sessionStateTable, sessionObservationTable} {
 		if _, err := db.ExecContext(ctx, `UPDATE `+table+` SET state=CASE WHEN state='attached' THEN 'running' ELSE state END, observed_state=CASE WHEN observed_state='attached' THEN 'running' ELSE observed_state END WHERE state='attached' OR observed_state='attached'`); err != nil {
 			return fmt.Errorf("normalize %s legacy attached state: %w", table, err)
@@ -3044,14 +3069,14 @@ func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB) err
 		if _, err := db.ExecContext(ctx, `UPDATE `+table+` SET scope_id=issue_id WHERE role='worker' AND scope_kind='issue' AND trim(scope_id)=''`); err != nil {
 			return fmt.Errorf("backfill %s worker scope identity: %w", table, err)
 		}
-		rows, err := db.QueryContext(ctx, `SELECT session_id,issue_id,role,scope_kind,scope_id,state,COALESCE(observed_state,''),tmux_attached_count FROM `+table)
+		rows, err := db.QueryContext(ctx, `SELECT project_id,session_id,issue_id,role,scope_kind,scope_id,state,COALESCE(observed_state,''),tmux_attached_count FROM `+table)
 		if err != nil {
 			return fmt.Errorf("validate %s session products: %w", table, err)
 		}
 		for rows.Next() {
 			var session Session
-			var role, scopeKind, state, observed string
-			if err := rows.Scan(&session.ID, &session.IssueID, &role, &scopeKind, &session.ScopeID, &state, &observed, &session.TmuxAttachedCount); err != nil {
+			var projectID, role, scopeKind, state, observed string
+			if err := rows.Scan(&projectID, &session.ID, &session.IssueID, &role, &scopeKind, &session.ScopeID, &state, &observed, &session.TmuxAttachedCount); err != nil {
 				_ = rows.Close()
 				return fmt.Errorf("scan %s session product: %w", table, err)
 			}
@@ -3068,8 +3093,27 @@ func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB) err
 					return fmt.Errorf("inspect historical runtime authority %s/%s issue: %w", table, session.ID, err)
 				}
 				if count != 1 && !legacyRootIssueProjection {
-					_ = rows.Close()
-					return fmt.Errorf("invalid historical runtime authority %s/%s: issue does not exist", table, session.ID)
+					terminal := session.State == SessionStateStopped && session.ObservedState == SessionStateStopped && session.TmuxAttachedCount == 0
+					if !terminal || runtimeLivenessProbe == nil {
+						_ = rows.Close()
+						return fmt.Errorf("invalid historical runtime authority %s/%s: issue does not exist; live runtime is unverified, run daemon runtime reconcile after restoring issue authority or stop the session explicitly", table, session.ID)
+					}
+					probeID := strings.TrimSpace(strings.SplitN(session.ID, ".pane-", 2)[0])
+					result, probed := livenessBySession[probeID]
+					if !probed {
+						result.live, result.err = runtimeLivenessProbe(ctx, probeID)
+						livenessBySession[probeID] = result
+					}
+					live, probeErr := result.live, result.err
+					if probeErr != nil || live {
+						_ = rows.Close()
+						if probeErr != nil {
+							return fmt.Errorf("classify missing-issue runtime authority %s/%s: live runtime probe failed: %w", table, session.ID, probeErr)
+						}
+						return fmt.Errorf("invalid historical runtime authority %s/%s: issue does not exist but runtime %s is live; restore issue authority or stop the session explicitly", table, session.ID, probeID)
+					}
+					terminalOrphans = append(terminalOrphans, orphanKey{table: table, projectID: projectID, sessionID: session.ID, issueID: session.IssueID})
+					continue
 				}
 			}
 			if interactionTableCount > 0 && session.Role == SessionRoleAdvisor {
@@ -3121,6 +3165,11 @@ func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB) err
 			if _, err := db.ExecContext(ctx, trigger); err != nil {
 				return fmt.Errorf("create %s session product trigger: %w", table, err)
 			}
+		}
+	}
+	for _, orphan := range terminalOrphans {
+		if _, err := db.ExecContext(ctx, `DELETE FROM `+orphan.table+` WHERE project_id=? AND session_id=? AND issue_id=?`, orphan.projectID, orphan.sessionID, orphan.issueID); err != nil {
+			return fmt.Errorf("prune terminal missing-issue runtime authority %s/%s: %w", orphan.table, orphan.sessionID, err)
 		}
 	}
 	return nil

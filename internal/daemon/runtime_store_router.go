@@ -46,7 +46,11 @@ func (d *Daemon) runtimeStateStoreForProject(projectID string) *daemonstate.Runt
 		return store
 	}
 
-	store := daemonstate.NewRuntimeStateStore(repoDir, d.cfg.Logger)
+	var options []daemonstate.RuntimeStateStoreOption
+	if d.tmux != nil {
+		options = append(options, daemonstate.WithRuntimeLivenessProbe(d.tmux.HasSession))
+	}
+	store := daemonstate.NewRuntimeStateStore(repoDir, d.cfg.Logger, options...)
 	d.runtimeStoresByRoot[repoKey] = store
 	d.runtimeStoresByProject[projectID] = store
 	return store

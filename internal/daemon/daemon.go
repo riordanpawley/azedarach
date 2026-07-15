@@ -281,11 +281,13 @@ func New(cfg Config) *Daemon {
 		cfg.LockPath = appconfig.GlobalDaemonLockPath()
 	}
 	tmuxRunner := &tmux.ExecRunner{}
+	tmuxClient := tmux.NewClient(tmuxRunner, cfg.Logger)
 	gitRunner := git.NewExecRunner(cfg.RepoDir)
 	gitClient := git.NewClient(gitRunner, cfg.Logger)
-	runtimeStateStore := daemonstate.NewRuntimeStateStore(runtimeRepoDir, cfg.Logger)
+	runtimeLiveness := daemonstate.WithRuntimeLivenessProbe(tmuxClient.HasSession)
+	runtimeStateStore := daemonstate.NewRuntimeStateStore(runtimeRepoDir, cfg.Logger, runtimeLiveness)
 	if cfg.ScopedRuntime {
-		runtimeStateStore = daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(runtimeRepoDir, ".azedarach", "azedarach.db"), cfg.Logger)
+		runtimeStateStore = daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(runtimeRepoDir, ".azedarach", "azedarach.db"), cfg.Logger, runtimeLiveness)
 	}
 	runtimeReconcileQueue := newReconcileQueue[protocol.RuntimeReconcileResponseBody](reconcileQueueConfig{
 		Name:    "runtime_reconcile",
@@ -350,7 +352,7 @@ func New(cfg Config) *Daemon {
 		runtimeStoresByRoot:                map[string]*daemonstate.RuntimeStateStore{},
 		hookLogByProject:                   map[string][]protocol.HookLogEvent{},
 		uiState:                            map[string]string{},
-		tmux:                               tmux.NewClient(tmuxRunner, cfg.Logger),
+		tmux:                               tmuxClient,
 		git:                                gitClient,
 		gitStatusAdapter:                   gitService,
 		session:                            sessionHandler,

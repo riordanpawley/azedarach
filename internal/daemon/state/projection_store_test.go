@@ -1523,6 +1523,116 @@ func TestRuntimeStateStoreOpensRootShapeWithDuplicateArchivedLogicalSessions(t *
 	}
 }
 
+func TestRuntimeStateStoreReopensWithMissingIssueRuntimeProjection(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := func(table string) string {
+		return `CREATE TABLE ` + table + `(project_id TEXT NOT NULL,session_id TEXT NOT NULL,issue_id TEXT NOT NULL,role TEXT NOT NULL,scope_kind TEXT NOT NULL,scope_id TEXT NOT NULL,state TEXT NOT NULL,observed_state TEXT,activity TEXT,activity_source TEXT,tmux_attached_count INTEGER NOT NULL DEFAULT 0,started_at TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(project_id,session_id));`
+	}
+	if _, err := db.Exec(`CREATE TABLE issues(id TEXT PRIMARY KEY,visibility TEXT NOT NULL);` + schema(sessionStateTable) + schema(sessionObservationTable) + `
+		INSERT INTO daemon_session_projections VALUES
+		('old-chefy','ch-dkx','dkx','worker','issue','dkx','stopped','stopped','','',0,NULL,'2026-07-09T03:22:36Z'),
+		('chefy','ch-dkx','dkx','worker','issue','dkx','stopped','stopped','','',0,NULL,'2026-07-15T00:27:33Z');
+		INSERT INTO daemon_session_observations VALUES
+		('chefy','ch-dkx.pane-1700','dkx','worker','issue','dkx','stopped','stopped','','',0,NULL,'2026-07-09T03:22:36Z'),
+		('chefy','ch-dkx.pane-2034','dkx','worker','issue','dkx','stopped','stopped','','',0,NULL,'2026-07-09T03:22:36Z');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	probeCount := 0
+	store := NewRuntimeStateStoreAtPath(dbPath, slog.Default(), WithRuntimeLivenessProbe(func(context.Context, string) (bool, error) {
+		probeCount++
+		return false, nil
+	}))
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.ListSessionStates(context.Background(), "chefy"); err != nil {
+		t.Fatalf("reopen with inactive missing-issue projection: %v", err)
+	}
+	if probeCount != 1 {
+		t.Fatalf("liveness probes=%d want one consistent ch-dkx classification", probeCount)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ListSessionStates(context.Background(), "chefy"); err != nil {
+		t.Fatalf("second reopen after missing-issue repair: %v", err)
+	}
+	handle, err := store.dbHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{sessionStateTable, sessionObservationTable} {
+		var count int
+		if err := handle.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE issue_id='dkx'`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("%s orphan rows=%d want 0", table, count)
+		}
+	}
+}
+
+func TestRuntimeStateStoreFailsClosedForUnverifiableMissingIssueRuntime(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := func(table string) string {
+		return `CREATE TABLE ` + table + `(project_id TEXT NOT NULL,session_id TEXT NOT NULL,issue_id TEXT NOT NULL,role TEXT NOT NULL,scope_kind TEXT NOT NULL,scope_id TEXT NOT NULL,state TEXT NOT NULL,observed_state TEXT,activity TEXT,activity_source TEXT,tmux_attached_count INTEGER NOT NULL DEFAULT 0,started_at TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(project_id,session_id));`
+	}
+	if _, err := db.Exec(`CREATE TABLE issues(id TEXT PRIMARY KEY,visibility TEXT NOT NULL);` + schema(sessionStateTable) + schema(sessionObservationTable) + `
+		INSERT INTO daemon_session_projections VALUES
+		('chefy','ch-live','live','worker','issue','live','running','running','busy','hooks',0,NULL,'2026-07-15T00:00:00Z');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.ListSessionStates(context.Background(), "chefy"); err == nil || !strings.Contains(err.Error(), "ch-live: issue does not exist") {
+		t.Fatalf("live missing-issue error=%v", err)
+	}
+}
+
+func TestRuntimeStateStoreFailsClosedForLiveMissingIssueRuntime(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := func(table string) string {
+		return `CREATE TABLE ` + table + `(project_id TEXT NOT NULL,session_id TEXT NOT NULL,issue_id TEXT NOT NULL,role TEXT NOT NULL,scope_kind TEXT NOT NULL,scope_id TEXT NOT NULL,state TEXT NOT NULL,observed_state TEXT,activity TEXT,activity_source TEXT,tmux_attached_count INTEGER NOT NULL DEFAULT 0,started_at TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(project_id,session_id));`
+	}
+	if _, err := db.Exec(`CREATE TABLE issues(id TEXT PRIMARY KEY,visibility TEXT NOT NULL);` + schema(sessionStateTable) + schema(sessionObservationTable) + `
+		INSERT INTO daemon_session_observations VALUES
+		('chefy','ch-dkx.pane-1700','dkx','worker','issue','dkx','stopped','stopped','','',0,NULL,'2026-07-09T03:22:36Z');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var probed string
+	store := NewRuntimeStateStoreAtPath(dbPath, slog.Default(), WithRuntimeLivenessProbe(func(_ context.Context, sessionID string) (bool, error) {
+		probed = sessionID
+		return true, nil
+	}))
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.ListSessionStates(context.Background(), "chefy"); err == nil || !strings.Contains(err.Error(), "runtime ch-dkx is live") {
+		t.Fatalf("live terminal orphan error=%v", err)
+	}
+	if probed != "ch-dkx" {
+		t.Fatalf("liveness probe session=%q want ch-dkx", probed)
+	}
+}
+
 func TestRuntimeStateStorePaneMigrationReplacesStaleObservationMetadata(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "runtime.db")
 	db, err := sql.Open("sqlite", dbPath)
