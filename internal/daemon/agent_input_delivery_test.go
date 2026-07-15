@@ -24,6 +24,12 @@ type recordingAuthoritativeReceiver struct {
 	sink            func(string)
 }
 
+type refusingAuthoritativeReceiver struct{ outcome string }
+
+func (r refusingAuthoritativeReceiver) DeliverAgentInput(context.Context, authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
+	return authoritativeAgentInputAcknowledgement{}, nativeAgentInputRefusalError{outcome: r.outcome}
+}
+
 func (r *recordingAuthoritativeReceiver) DeliverAgentInput(_ context.Context, request authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -78,6 +84,28 @@ func TestAgentInputDeliveryFailsClosedWithoutAuthoritativeReceiver(t *testing.T)
 	result, err = restarted.Deliver(context.Background(), request)
 	if err != nil || result.Outcome != domain.AgentInputWaitingNotReady {
 		t.Fatalf("restart result=%+v err=%v", result, err)
+	}
+}
+
+func TestAgentInputDeliveryMapsNativeClientRefusals(t *testing.T) {
+	tests := []struct {
+		outcome string
+		want    domain.AgentInputDeliveryOutcome
+	}{
+		{outcome: "composer_nonempty", want: domain.AgentInputWaitingInputNonempty},
+		{outcome: "human_attached", want: domain.AgentInputWaitingHumanAttached},
+		{outcome: "not_ready", want: domain.AgentInputWaitingNotReady},
+		{outcome: "stale_incarnation", want: domain.AgentInputRejectedStaleTarget},
+	}
+	for _, test := range tests {
+		t.Run(test.outcome, func(t *testing.T) {
+			runtimeStore, client, request := agentInputFixture(t)
+			service := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, refusingAuthoritativeReceiver{outcome: test.outcome}, "one")
+			result, err := service.Deliver(context.Background(), request)
+			if err != nil || result.Outcome != test.want {
+				t.Fatalf("result=%+v err=%v, want %s", result, err, test.want)
+			}
+		})
 	}
 }
 

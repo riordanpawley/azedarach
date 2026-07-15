@@ -154,6 +154,7 @@ type Daemon struct {
 	uiState                              map[string]string
 	tmux                                 *tmux.Client
 	agentInput                           *agentInputDeliveryService
+	nativeAgentInput                     *nativeAgentInputAuthority
 	git                                  *git.Client
 	gitStatusAdapter                     *gitServiceAdapter
 	gitHandler                           *daemonhandlers.GitHandler
@@ -352,7 +353,8 @@ func New(cfg Config) *Daemon {
 		userStoreRefreshDirty:              map[string]bool{},
 		shutdownReqCh:                      make(chan struct{}),
 	}
-	d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, nil, fmt.Sprintf("daemon:%d:%p", os.Getpid(), d))
+	d.nativeAgentInput = newNativeAgentInputAuthority()
+	d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, d.nativeAgentInput, fmt.Sprintf("daemon:%d:%p", os.Getpid(), d))
 	if !cfg.ScopedRuntime && strings.TrimSpace(os.Getenv("AZEDARACH_DISABLE_USER_DB")) != "1" {
 		if store, err := userstore.Open(userstore.DefaultPath()); err != nil {
 			cfg.Logger.Warn("initialize user cross-project projection", "error", err)
@@ -613,6 +615,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	go func() {
 		serveErrCh <- d.serve.Serve(serveCtx)
 	}()
+	nativeAgentInputErrCh := make(chan error, 1)
+	go func() {
+		nativeAgentInputErrCh <- d.nativeAgentInput.Serve(serveCtx, nativeAgentInputSocketPath(d.cfg.SocketPath))
+	}()
 	d.cfg.Logger.Info("daemon startup phase", "phase", "ipc_serve_start", "duration_ms", time.Since(startedAt).Milliseconds())
 	waitForShutdown := func() {
 		if ctx.Err() != nil {
@@ -630,6 +636,18 @@ func (d *Daemon) Run(ctx context.Context) error {
 				return fmt.Errorf("daemon server exited during %s: %w", phase, err)
 			}
 			return fmt.Errorf("daemon server exited during %s", phase)
+		default:
+		}
+		select {
+		case err := <-nativeAgentInputErrCh:
+			if ctx.Err() != nil {
+				waitForShutdown()
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("native agent input authority exited during %s: %w", phase, err)
+			}
+			return fmt.Errorf("native agent input authority exited during %s", phase)
 		default:
 			return nil
 		}
@@ -675,7 +693,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.startIssueAutoArchiveWorker(serveCtx)
 	d.startGlobalProjectionRepairWorker(serveCtx)
 	d.cfg.Logger.Info("daemon startup phase", "phase", "startup_ready", "duration_ms", time.Since(startedAt).Milliseconds())
-	err = <-serveErrCh
+	select {
+	case err = <-serveErrCh:
+	case err = <-nativeAgentInputErrCh:
+		if err != nil {
+			err = fmt.Errorf("native agent input authority exited: %w", err)
+		} else {
+			err = errors.New("native agent input authority exited")
+		}
+	}
 	if ctx.Err() != nil {
 		<-shutdownDone
 	}

@@ -4854,7 +4854,10 @@ func sessionLaunchContextExportCommand(projectID, issueID, sessionID string) str
 }
 
 func (d *Daemon) sessionLaunchStartupExportCommands(projectCfg daemonProjectRuntimeConfig, resourceCtx issueResourceLifecycleContext) []string {
-	commands := make([]string, 0, 1)
+	commands := make([]string, 0, 2)
+	if socketPath := strings.TrimSpace(d.cfg.SocketPath); socketPath != "" {
+		commands = append(commands, "export AZEDARACH_AGENT_INPUT_SOCKET="+singleQuoteForShell(nativeAgentInputSocketPath(socketPath)))
+	}
 	assignments := issueResourceShellExports(projectCfg.IssueResources, resourceCtx)
 	if len(assignments) > 0 {
 		commands = append(commands, "export "+strings.Join(assignments, " "))
@@ -5202,6 +5205,11 @@ func (d *Daemon) setSessionContextEnv(ctx context.Context, projectID, issueID, s
 			continue
 		}
 		if err := d.tmux.SetEnvironment(ctx, sessionID, assignment.Key, assignment.Value); err != nil {
+			return err
+		}
+	}
+	if socketPath := strings.TrimSpace(d.cfg.SocketPath); socketPath != "" {
+		if err := d.tmux.SetEnvironment(ctx, sessionID, "AZEDARACH_AGENT_INPUT_SOCKET", nativeAgentInputSocketPath(socketPath)); err != nil {
 			return err
 		}
 	}
