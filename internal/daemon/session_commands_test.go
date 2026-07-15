@@ -849,7 +849,7 @@ func TestRuntimeReconcileIssuesSummarizesSharedTmuxSnapshotFailure(t *testing.T)
 
 func immediateSessionResumeWait(context.Context, time.Duration) error { return nil }
 
-func TestSessionRestartAllRestartsBusySessionsByDefault(t *testing.T) {
+func TestSessionRestartAllRefusesSessionsWithoutManagedIdentity(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	managedDir := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.current")
@@ -918,52 +918,12 @@ func TestSessionRestartAllRestartsBusySessionsByDefault(t *testing.T) {
 	if result.Restarted != 0 || result.Skipped != 2 || result.Failed != 0 || result.Sessions[0].Outcome != "no_agent" {
 		t.Fatalf("result = %+v, want typed no-agent refusals", result)
 	}
-	return
-	if tmuxRunner.sendKeysCalls != 5 {
-		t.Fatalf("send-keys calls = %d, want C-c/resume for idle and C-c/resume/continuation submit for busy", tmuxRunner.sendKeysCalls)
-	}
-	if got := tmuxRunner.sendKeysTargets; !reflect.DeepEqual(got, []string{idleSession, idleSession, busySession, busySession, busySession}) {
-		t.Fatalf("sendKeysTargets = %+v, want idle interrupt/resume and busy interrupt/resume/submit", got)
-	}
-	artifactCommand := tmuxRunner.sendKeysPayloads[1]
-	quoted := strings.Split(artifactCommand, "'")
-	if len(quoted) < 4 {
-		t.Fatalf("resume command = %q, want bounded launch artifact command", artifactCommand)
-	}
-	artifactBody, err := os.ReadFile(quoted[len(quoted)-2])
-	if err != nil {
-		t.Fatalf("read restart launch artifact: %v", err)
-	}
-	if got := string(artifactBody); !strings.Contains(got, "codex resume") || !strings.Contains(got, "--last") || strings.Contains(got, "Continue your prior task") {
-		t.Fatalf("resume artifact = %q, want codex resume --last without positional continuation prompt", got)
-	}
-	for _, sessionID := range []string{idleSession, busySession} {
-		if got := tmuxRunner.env[sessionID]["PATH"]; got != "" {
-			t.Fatalf("restart session %s injected PATH = %q", sessionID, got)
-		}
-	}
-	if strings.Contains(string(artifactBody), managedDir) || strings.Contains(string(artifactBody), "export PATH=") {
-		t.Fatalf("resume artifact injects managed PATH: %q", artifactBody)
-	}
-	if len(result.Sessions) != 2 || result.Sessions[0].ActiveIntent || !result.Sessions[1].ActiveIntent {
-		t.Fatalf("session active intent = %+v, want idle=false busy=true", result.Sessions)
-	}
-	foundContinuationPrompt := false
-	for _, payload := range tmuxRunner.inputPayloads {
-		if strings.Contains(payload, "Continue your prior task") {
-			foundContinuationPrompt = true
-			break
-		}
-	}
-	if !foundContinuationPrompt {
-		t.Fatalf("missing continuation prompt paste in tmux commands: %+v", tmuxRunner.commands)
-	}
-	if want := []time.Duration{250 * time.Millisecond, 250 * time.Millisecond, sessionRestartContinuePromptDelay}; !reflect.DeepEqual(resumeWaits, want) {
-		t.Fatalf("resume waits = %v, want %v", resumeWaits, want)
+	if tmuxRunner.sendKeysCalls != 0 {
+		t.Fatalf("send-keys calls = %d, want exact restart to fail closed before terminal input", tmuxRunner.sendKeysCalls)
 	}
 }
 
-func TestSessionRestartAllForceBusyIncludesBusySessionsAndConfiguredFlags(t *testing.T) {
+func TestSessionRestartAllForceBusyStillRequiresManagedIdentity(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)
@@ -1036,18 +996,12 @@ func TestSessionRestartAllForceBusyIncludesBusySessionsAndConfiguredFlags(t *tes
 	if result.Restarted != 0 || result.Skipped != 2 || result.Failed != 0 || result.Sessions[0].Outcome != "no_agent" {
 		t.Fatalf("result = %+v, want typed no-agent refusals", result)
 	}
-	return
-	if tmuxRunner.sendKeysCalls != 6 {
-		t.Fatalf("send-keys calls = %d, want C-c, resume, and continuation submit for two sessions", tmuxRunner.sendKeysCalls)
-	}
-	for _, payload := range tmuxRunner.sendKeysPayloads {
-		if strings.Contains(payload, "codex resume") && !strings.Contains(payload, "--dangerously-bypass-approvals-and-sandbox") {
-			t.Fatalf("resume command missing configured bypass flag: %q", payload)
-		}
+	if tmuxRunner.sendKeysCalls != 0 {
+		t.Fatalf("send-keys calls = %d, want no legacy terminal input", tmuxRunner.sendKeysCalls)
 	}
 }
 
-func TestSessionRestartAllDiscoversKnownProjectSessionsAndReportsPartialFailures(t *testing.T) {
+func TestSessionRestartAllDiscoversKnownProjectSessionsAndReportsNoAgent(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repoA := filepath.Join(root, "qaalpha")
@@ -1143,20 +1097,12 @@ func TestSessionRestartAllDiscoversKnownProjectSessionsAndReportsPartialFailures
 	if result.Restarted != 0 || result.Skipped != 2 || result.Failed != 0 {
 		t.Fatalf("result = %+v, want two typed no-agent refusals", result)
 	}
-	return
 	seenProjects := map[string]bool{}
-	seenFailures := 0
 	for _, session := range result.Sessions {
 		seenProjects[session.ProjectID.String()] = true
-		if strings.TrimSpace(session.Error) != "" {
-			seenFailures++
-		}
 	}
 	if !seenProjects[projectA] || !seenProjects[projectB] {
 		t.Fatalf("session projects = %+v, want %s and %s", seenProjects, projectA, projectB)
-	}
-	if seenFailures != 1 {
-		t.Fatalf("failed session count from items = %d, want 1", seenFailures)
 	}
 }
 
@@ -1230,7 +1176,7 @@ func TestSessionRestartAllSkipsTmuxSessionWithoutLivePane(t *testing.T) {
 	}
 }
 
-func TestSessionRestartAllRestartsNoAgentPaneWithoutContinuePrompt(t *testing.T) {
+func TestSessionRestartAllClassifiesShellOnlyWithoutTerminalInput(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)
@@ -1291,15 +1237,14 @@ func TestSessionRestartAllRestartsNoAgentPaneWithoutContinuePrompt(t *testing.T)
 	if result.Restarted != 0 || result.Skipped != 1 || result.Failed != 0 || result.Sessions[0].Outcome != "shell_only" {
 		t.Fatalf("result = %+v, want typed shell-only refusal", result)
 	}
-	return
 	if len(result.Sessions) != 1 || !result.Sessions[0].TmuxReady || result.Sessions[0].ActiveIntent {
 		t.Fatalf("session result = %+v, want tmux_ready=true and active_intent=false", result.Sessions)
 	}
 	if result.Sessions[0].ActivitySource != "session" {
 		t.Fatalf("activity source = %q, want session", result.Sessions[0].ActivitySource)
 	}
-	if tmuxRunner.sendKeysCalls != 2 {
-		t.Fatalf("send-keys calls = %d, want C-c and resume without continuation submit", tmuxRunner.sendKeysCalls)
+	if tmuxRunner.sendKeysCalls != 0 {
+		t.Fatalf("send-keys calls = %d, want no legacy terminal input", tmuxRunner.sendKeysCalls)
 	}
 	for _, payload := range tmuxRunner.inputPayloads {
 		if strings.Contains(payload, "Continue your prior task") {
@@ -1308,7 +1253,7 @@ func TestSessionRestartAllRestartsNoAgentPaneWithoutContinuePrompt(t *testing.T)
 	}
 }
 
-func TestSessionRestartAllForceBusyAllowsSessionSourcedAgent(t *testing.T) {
+func TestSessionRestartAllClassifiesSessionSourcedBusyWithoutIdentity(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)
@@ -1369,12 +1314,11 @@ func TestSessionRestartAllForceBusyAllowsSessionSourcedAgent(t *testing.T) {
 	if result.Restarted != 0 || result.Skipped != 1 || result.Failed != 0 || result.Sessions[0].Outcome != "no_agent" {
 		t.Fatalf("result = %+v, want typed no-agent refusal", result)
 	}
-	return
 	if len(result.Sessions) != 1 || !result.Sessions[0].TmuxReady || !result.Sessions[0].ActiveIntent || result.Sessions[0].ActivitySource != "session" {
 		t.Fatalf("session result = %+v, want session-sourced active intent with tmux pane", result.Sessions)
 	}
-	if tmuxRunner.sendKeysCalls != 3 {
-		t.Fatalf("send-keys calls = %d, want C-c, resume, and continuation submit", tmuxRunner.sendKeysCalls)
+	if tmuxRunner.sendKeysCalls != 0 {
+		t.Fatalf("send-keys calls = %d, want no legacy terminal input", tmuxRunner.sendKeysCalls)
 	}
 }
 

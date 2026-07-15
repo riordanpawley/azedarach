@@ -4,23 +4,71 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
-const sessionRestartObservationTimeout = 8 * time.Second
+const (
+	sessionRestartPreflightTimeout   = 2 * time.Second
+	sessionRestartPrepareTimeout     = 3 * time.Second
+	sessionRestartReplaceTimeout     = 3 * time.Second
+	sessionRestartObservationTimeout = 8 * time.Second
+)
 
 type sessionRestartExecution struct {
 	done chan struct{}
 	item protocol.SessionRestartAllItem
 }
 
+type sessionRestartRecoveryPlan struct {
+	ProjectID          string                           `json:"project_id"`
+	SessionID          string                           `json:"session_id"`
+	IssueID            string                           `json:"issue_id,omitempty"`
+	Activity           string                           `json:"activity"`
+	Old                daemonstate.ManagedAgentIdentity `json:"old"`
+	PlannedIncarnation string                           `json:"planned_incarnation"`
+	Stage              string                           `json:"stage"`
+}
+
+type restartStageResult[T any] struct {
+	value T
+	err   error
+}
+
 func restartStage(name, status, message string, timeout time.Duration) protocol.SessionRestartStage {
 	return protocol.SessionRestartStage{Name: name, Status: status, Message: message, TimeoutMS: timeout.Milliseconds()}
+}
+
+func runRestartStage[T any](ctx context.Context, timeout time.Duration, fn func(context.Context) (T, error)) (T, error, bool) {
+	var zero T
+	stageCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ch := make(chan restartStageResult[T], 1)
+	go func() { value, err := fn(stageCtx); ch <- restartStageResult[T]{value: value, err: err} }()
+	select {
+	case result := <-ch:
+		return result.value, result.err, false
+	case <-stageCtx.Done():
+		return zero, stageCtx.Err(), errors.Is(stageCtx.Err(), context.DeadlineExceeded)
+	}
+}
+
+func appendRestartStageFailure(item *protocol.SessionRestartAllItem, name string, timeout time.Duration, err error, timedOut bool) {
+	status := "failed"
+	if timedOut {
+		status = "timeout"
+	}
+	item.Outcome = "partial_failure"
+	item.Error = err.Error()
+	item.Stages = append(item.Stages, restartStage(name, status, item.Error, timeout))
 }
 
 func (d *Daemon) restartManagedAgentPane(ctx context.Context, target sessionRestartAllTarget, body protocol.SessionRestartAllRequestBody, item protocol.SessionRestartAllItem) protocol.SessionRestartAllItem {
@@ -29,9 +77,11 @@ func (d *Daemon) restartManagedAgentPane(ctx context.Context, target sessionRest
 		item.Outcome, item.Error = "partial_failure", "managed identity store unavailable"
 		return item
 	}
-	identities, err := store.ListManagedAgentIdentities(ctx, target.ProjectID, target.SessionID)
+	identities, err, timedOut := runRestartStage(ctx, sessionRestartPreflightTimeout, func(stageCtx context.Context) ([]daemonstate.ManagedAgentIdentity, error) {
+		return store.ListManagedAgentIdentities(stageCtx, target.ProjectID, target.SessionID)
+	})
 	if err != nil {
-		item.Outcome, item.Error = "partial_failure", err.Error()
+		appendRestartStageFailure(&item, "identity", sessionRestartPreflightTimeout, err, timedOut)
 		return item
 	}
 	if len(identities) == 0 {
@@ -40,7 +90,7 @@ func (d *Daemon) restartManagedAgentPane(ctx context.Context, target sessionRest
 			item.Outcome = "shell_only"
 		}
 		item.Reason, item.Skipped = "no_managed_agent_identity", true
-		item.Stages = append(item.Stages, restartStage("preflight", "refused", item.Reason, 0))
+		item.Stages = append(item.Stages, restartStage("identity", "refused", item.Reason, sessionRestartPreflightTimeout))
 		return item
 	}
 	old := identities[0]
@@ -78,10 +128,9 @@ func (d *Daemon) restartManagedAgentPane(ctx context.Context, target sessionRest
 		d.sessionRestartMu.Unlock()
 	}()
 
-	item.Stages = append(item.Stages, restartStage("preflight", "running", "refresh durable identity and compare live pane", 0))
-	panes, err := d.tmux.ListPaneInfos(ctx)
+	panes, err, timedOut := runRestartStage(ctx, sessionRestartPreflightTimeout, func(stageCtx context.Context) ([]tmux.PaneInfo, error) { return d.tmux.ListPaneInfos(stageCtx) })
 	if err != nil {
-		item.Outcome, item.Error = "partial_failure", err.Error()
+		appendRestartStageFailure(&item, "preflight", sessionRestartPreflightTimeout, err, timedOut)
 		return item
 	}
 	matched := false
@@ -93,86 +142,140 @@ func (d *Daemon) restartManagedAgentPane(ctx context.Context, target sessionRest
 	}
 	if !matched {
 		item.Outcome, item.Reason, item.Skipped = "crashed", "managed_agent_identity_not_live", true
-		item.Stages[len(item.Stages)-1].Status = "refused"
+		item.Stages = append(item.Stages, restartStage("preflight", "refused", item.Reason, sessionRestartPreflightTimeout))
 		return item
 	}
-	item.Stages[len(item.Stages)-1].Status = "complete"
+	item.Stages = append(item.Stages, restartStage("preflight", "complete", "durable identity matches live pane", sessionRestartPreflightTimeout))
 	if strings.EqualFold(target.Activity, "busy") && !body.ForceBusy {
 		item.Outcome, item.Reason, item.Skipped = "busy", "busy_requires_force", true
-		item.Stages = append(item.Stages, restartStage("busy_gate", "refused", item.Reason, 0))
+		item.Stages = append(item.Stages, restartStage("busy_gate", "refused", item.Reason, sessionRestartPreflightTimeout))
 		return item
 	}
-	item.Stages = append(item.Stages, restartStage("busy_gate", "complete", target.Activity, 0))
+	item.Stages = append(item.Stages, restartStage("busy_gate", "complete", target.Activity, sessionRestartPreflightTimeout))
 
 	incarnation, err := newRestartIncarnation()
 	if err != nil {
 		item.Outcome, item.Error = "partial_failure", err.Error()
 		return item
 	}
-	artifact, err := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchResume, ProjectID: target.ProjectID, IssueID: target.IssueID, SessionID: target.SessionID, Yolo: body.Yolo, ImagePaths: body.ImagePaths, Prompt: sessionRestartContinuePrompt, LogicalPaneID: old.LogicalPaneID, AgentIncarnation: incarnation})
-	if err != nil {
-		item.Outcome, item.Error = "partial_failure", err.Error()
+	plan := sessionRestartRecoveryPlan{ProjectID: target.ProjectID, SessionID: target.SessionID, IssueID: target.IssueID, Activity: target.Activity, Old: old, PlannedIncarnation: incarnation, Stage: "prepare"}
+	if err := reportSessionRestartProgress(ctx, plan); err != nil {
+		appendRestartStageFailure(&item, "persist_prepare", sessionRestartPreflightTimeout, err, false)
 		return item
 	}
-	item.Stages = append(item.Stages, restartStage("prepare", "complete", "canonical launch artifact prepared", 0))
+	type preparedRestart struct {
+		artifact sessionLaunchArtifact
+		worktree string
+	}
+	prepared, err, timedOut := runRestartStage(ctx, sessionRestartPrepareTimeout, func(stageCtx context.Context) (preparedRestart, error) {
+		artifact, prepareErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchResume, ProjectID: target.ProjectID, IssueID: target.IssueID, SessionID: target.SessionID, Yolo: body.Yolo, ImagePaths: body.ImagePaths, Prompt: sessionRestartContinuePrompt, LogicalPaneID: old.LogicalPaneID, AgentIncarnation: incarnation})
+		if prepareErr != nil {
+			return preparedRestart{}, prepareErr
+		}
+		worktree := d.cfg.RepoDir
+		if worktreeStore := d.worktreeRuntimeStateStoreIfConfigured(target.ProjectID); worktreeStore != nil && strings.TrimSpace(target.IssueID) != "" {
+			if projected, found, projectErr := worktreeStore.GetWorktreeStateByIssueID(stageCtx, target.ProjectID, target.IssueID); projectErr != nil {
+				artifact.remove()
+				return preparedRestart{}, projectErr
+			} else if found && strings.TrimSpace(projected.Path) != "" {
+				worktree = projected.Path
+			}
+		}
+		if stageCtx.Err() != nil {
+			artifact.remove()
+			return preparedRestart{}, stageCtx.Err()
+		}
+		return preparedRestart{artifact: artifact, worktree: worktree}, nil
+	})
+	if err != nil {
+		appendRestartStageFailure(&item, "prepare", sessionRestartPrepareTimeout, err, timedOut)
+		return item
+	}
+	item.Stages = append(item.Stages, restartStage("prepare", "complete", "canonical launch artifact and worktree prepared", sessionRestartPrepareTimeout))
 	paneTarget := strings.TrimSpace(old.TmuxPaneID)
 	if !strings.HasPrefix(paneTarget, "%") {
 		paneTarget = "%" + paneTarget
 	}
-	worktree := d.cfg.RepoDir
-	if worktreeStore := d.worktreeRuntimeStateStoreIfConfigured(target.ProjectID); worktreeStore != nil && strings.TrimSpace(target.IssueID) != "" {
-		if projected, found, projectErr := worktreeStore.GetWorktreeStateByIssueID(ctx, target.ProjectID, target.IssueID); projectErr == nil && found && strings.TrimSpace(projected.Path) != "" {
-			worktree = projected.Path
-		}
-	}
-	if err := d.tmux.RespawnPane(ctx, paneTarget, worktree, artifact.Command); err != nil {
-		artifact.remove()
-		item.Outcome, item.Error = "partial_failure", err.Error()
+	plan.Stage = "replace"
+	if err := reportSessionRestartProgress(ctx, plan); err != nil {
+		prepared.artifact.remove()
+		appendRestartStageFailure(&item, "persist_replace", sessionRestartPreflightTimeout, err, false)
 		return item
 	}
-	item.Stages = append(item.Stages, restartStage("replace", "complete", "old pane process terminated and replacement launched", 0))
+	_, err, timedOut = runRestartStage(ctx, sessionRestartReplaceTimeout, func(stageCtx context.Context) (struct{}, error) {
+		return struct{}{}, d.tmux.RespawnPane(stageCtx, paneTarget, prepared.worktree, prepared.artifact.Command)
+	})
+	if err != nil {
+		prepared.artifact.remove()
+		appendRestartStageFailure(&item, "replace", sessionRestartReplaceTimeout, err, timedOut)
+		return item
+	}
+	item.Stages = append(item.Stages, restartStage("replace", "complete", "old pane process terminated and replacement launched", sessionRestartReplaceTimeout))
+	plan.Stage = "observe"
+	if err := reportSessionRestartProgress(ctx, plan); err != nil {
+		appendRestartStageFailure(&item, "persist_observe", sessionRestartPreflightTimeout, err, false)
+		return item
+	}
 
-	deadline := time.NewTimer(sessionRestartObservationTimeout)
-	defer deadline.Stop()
+	observeCtx, cancel := context.WithTimeout(ctx, sessionRestartObservationTimeout)
+	defer cancel()
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-ctx.Done():
-			item.Outcome, item.Error = "partial_failure", ctx.Err().Error()
-			return item
-		case <-deadline.C:
-			item.Outcome, item.Error = "partial_failure", "replacement hook incarnation was not observed before timeout"
-			item.Stages = append(item.Stages, restartStage("observe", "timeout", item.Error, sessionRestartObservationTimeout))
+		case <-observeCtx.Done():
+			appendRestartStageFailure(&item, "observe", sessionRestartObservationTimeout, observeCtx.Err(), errors.Is(observeCtx.Err(), context.DeadlineExceeded))
 			return item
 		case <-ticker.C:
-			current, found, loadErr := store.GetManagedAgentIdentity(ctx, target.ProjectID, target.SessionID, old.LogicalPaneID)
+			current, found, loadErr := store.GetManagedAgentIdentity(observeCtx, target.ProjectID, target.SessionID, old.LogicalPaneID)
 			if loadErr != nil {
-				item.Outcome, item.Error = "partial_failure", loadErr.Error()
+				appendRestartStageFailure(&item, "observe", sessionRestartObservationTimeout, loadErr, false)
 				return item
 			}
 			liveReplacement := false
 			if found {
-				if livePanes, liveErr := d.tmux.ListPaneInfos(ctx); liveErr == nil {
-					for _, pane := range livePanes {
-						if pane.SessionName == target.SessionID && sanitizeRuntimePaneID(pane.PaneID) == sanitizeRuntimePaneID(current.TmuxPaneID) && pane.PanePID == current.PanePID {
-							liveReplacement = true
-							break
-						}
-					}
+				if livePanes, liveErr := d.tmux.ListPaneInfos(observeCtx); liveErr == nil {
+					liveReplacement = managedRestartIdentityLive(target.SessionID, current, livePanes)
 				}
 			}
-			if found && liveReplacement && current.AgentIncarnation == incarnation && current.PanePID != old.PanePID && (current.TmuxPaneID != old.TmuxPaneID || current.PanePID != old.PanePID) {
+			if found && liveReplacement && current.AgentIncarnation == incarnation && current.PanePID != old.PanePID {
 				item.NewIdentity = restartProtocolIdentity(current)
 				item.Restarted = true
 				item.Outcome = restartSuccessOutcome(target.Activity)
-				item.Stages = append(item.Stages, restartStage("observe", "complete", "distinct pane process and hook incarnation acknowledged", sessionRestartObservationTimeout), restartStage("publish", "complete", "restart result published", 0))
+				item.Stages = append(item.Stages, restartStage("observe", "complete", "distinct pane process and hook incarnation acknowledged", sessionRestartObservationTimeout), restartStage("publish", "complete", "restart result published", sessionRestartPreflightTimeout))
+				plan.Stage = "publish"
+				_ = reportSessionRestartProgress(ctx, plan)
 				return item
 			}
 		}
 	}
 }
 
+func reportSessionRestartProgress(ctx context.Context, plan sessionRestartRecoveryPlan) error {
+	body, err := json.Marshal(plan)
+	if err != nil {
+		return err
+	}
+	return daemonops.ReportProgress(ctx, daemonops.Progress{Phase: "session.restart_all." + plan.Stage, Message: string(body), Current: 1, Total: 1, Unit: "pane"})
+}
+func managedRestartIdentityLive(sessionID string, identity daemonstate.ManagedAgentIdentity, panes []tmux.PaneInfo) bool {
+	for _, pane := range panes {
+		if pane.SessionName == sessionID && sanitizeRuntimePaneID(pane.PaneID) == sanitizeRuntimePaneID(identity.TmuxPaneID) && pane.PanePID == identity.PanePID {
+			return true
+		}
+	}
+	return false
+}
+func decodeSessionRestartRecoveryPlan(record daemonops.Record) (sessionRestartRecoveryPlan, bool) {
+	if record.Progress == nil || !strings.HasPrefix(record.Progress.Phase, "session.restart_all.") {
+		return sessionRestartRecoveryPlan{}, false
+	}
+	var plan sessionRestartRecoveryPlan
+	if json.Unmarshal([]byte(record.Progress.Message), &plan) != nil || plan.ProjectID == "" || plan.SessionID == "" || plan.PlannedIncarnation == "" {
+		return sessionRestartRecoveryPlan{}, false
+	}
+	return plan, true
+}
 func restartProtocolIdentity(i daemonstate.ManagedAgentIdentity) *protocol.ManagedAgentIdentity {
 	return &protocol.ManagedAgentIdentity{LogicalPaneID: i.LogicalPaneID, TmuxPaneID: i.TmuxPaneID, PanePID: i.PanePID, AgentIncarnation: i.AgentIncarnation}
 }
