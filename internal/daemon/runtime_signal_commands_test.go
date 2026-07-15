@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -97,6 +98,50 @@ func TestRuntimeSignalIngestGitHookPersistsFastProjectionAndQueuesEnrichment(t *
 	if len(events) != 1 || events[0].Source != "githooks.hook" || events[0].Hook != "post-commit" {
 		t.Fatalf("hook log events = %+v", events)
 	}
+}
+
+func TestManagedAgentSignalIdentityRejectsStaleAndReusedIncarnations(t *testing.T) {
+	repoDir := initRuntimeSignalGitRepo(t)
+	runner := &managedIdentityTmuxRunner{session: "az-1", pane: "%12", pid: 100}
+	d := New(Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	d.tmux = tmux.NewClient(runner, slog.Default())
+	t.Cleanup(d.closeRuntimeStateStores)
+	ctx := context.Background()
+	start := protocol.RuntimeSignalIngestCommandBody{TmuxPane: "%12", LogicalPaneID: "agent", AgentIncarnation: "old", Event: "session_start"}
+	accepted, _, err := d.validateManagedAgentSignalIdentity(ctx, "p", "az-1.pane-12", start)
+	if err != nil || !accepted {
+		t.Fatalf("bind initial identity accepted=%v err=%v", accepted, err)
+	}
+	runner.pid = 200
+	start.AgentIncarnation = "new"
+	accepted, _, err = d.validateManagedAgentSignalIdentity(ctx, "p", "az-1.pane-12", start)
+	if err != nil || !accepted {
+		t.Fatalf("bind replacement identity accepted=%v err=%v", accepted, err)
+	}
+	stale := start
+	stale.AgentIncarnation = "old"
+	stale.PanePID = 100
+	stale.Event = "idle_prompt"
+	accepted, message, err := d.validateManagedAgentSignalIdentity(ctx, "p", "az-1.pane-12", stale)
+	if err != nil {
+		t.Fatalf("validate stale identity: %v", err)
+	}
+	if accepted || !strings.Contains(message, "stale or reused") {
+		t.Fatalf("stale identity accepted=%v message=%q", accepted, message)
+	}
+}
+
+type managedIdentityTmuxRunner struct {
+	session string
+	pane    string
+	pid     int
+}
+
+func (r *managedIdentityTmuxRunner) Run(_ context.Context, args ...string) (string, error) {
+	if len(args) > 0 && args[0] == "list-panes" {
+		return fmt.Sprintf("%s\t%s\t%d\n", r.session, r.pane, r.pid), nil
+	}
+	return "", nil
 }
 
 func TestRuntimeSignalIngestAgentHookPersistsActivityAndHookLog(t *testing.T) {

@@ -66,6 +66,7 @@ test-boundary:
 
 test-build-contract:
     ./scripts/with-machine-validation-lease --class shared --profile build-contract -- ./scripts/test-build-artifact-isolation.sh
+    ./scripts/with-machine-validation-lease --class shared --profile go-admission-contract -- ./scripts/test-go-validation-admission.sh
 
 test-jaeger-contract:
     ./scripts/test-jaeger-local.sh

@@ -41,6 +41,7 @@ import (
 type fakeDaemonTransport struct {
 	handshakeFn             func(context.Context, protocol.Hello) (protocol.HelloAck, error)
 	commandFn               func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	subscribeFn             func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error)
 	passOrchestrationIntent bool
 	lastGraphReadiness      daemonclient.TaskGraphReadiness
 }
@@ -983,7 +984,10 @@ func (f *fakeDaemonTransport) emulateOrchestrationIntent(ctx context.Context, re
 	return responseWithJSON(req, result), nil
 }
 
-func (f *fakeDaemonTransport) Subscribe(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
+func (f *fakeDaemonTransport) Subscribe(ctx context.Context, projectID string, revision uint64) (<-chan protocol.EventEnvelope, error) {
+	if f.subscribeFn != nil {
+		return f.subscribeFn(ctx, projectID, revision)
+	}
 	return nil, errors.New("not implemented")
 }
 

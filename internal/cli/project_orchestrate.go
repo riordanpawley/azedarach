@@ -23,9 +23,11 @@ func orchestrationSnapshot(ctx context.Context, deps *Dependencies, scope domain
 		return protocol.OrchestrationSnapshot{}, err
 	}
 	return deps.DaemonClient.OrchestrationSnapshot(ctx, protocol.OrchestrationSnapshotRequest{
-		Scope: scope, ActorID: orchestrateOwnerID(), Limit: limit, ObservedCursor: cursor,
+		Scope: scope, ActorID: orchestrateOwnerID(), Limit: limit, ObservedCursor: cursor, RepoDir: deps.RepoDir,
 	})
 }
+
+const projectOrchestrationWatchMinPollInterval = time.Second
 
 func projectOrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions, scope domain.OrchestrationScope) error {
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
@@ -191,9 +193,11 @@ func projectOrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOpt
 	var previous string
 	cursor := opts.SinceSeq
 	for {
-		ctx, cancel := context.WithTimeout(watchCtx, daemonCommandTimeout)
-		snapshot, err := orchestrationSnapshot(ctx, deps, scope, 0, cursor)
-		cancel()
+		snapshot, err := watchDaemonCommandContext(watchCtx, deps, func(segmentCtx context.Context) (protocol.OrchestrationSnapshot, error) {
+			ctx, cancel := context.WithTimeout(segmentCtx, daemonCommandTimeout)
+			defer cancel()
+			return orchestrationSnapshot(ctx, deps, scope, 0, cursor)
+		})
 		if err != nil {
 			if isWatchContextDone(watchCtx, err) {
 				return nil
@@ -222,10 +226,32 @@ func projectOrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOpt
 		if opts.Once {
 			return nil
 		}
-		if err := sleepWatchPoll(watchCtx, opts.PollInterval); err != nil {
+		events, err := deps.DaemonClient.Subscribe(watchCtx, opts.Project, snapshot.Revision)
+		if err != nil {
+			if isWatchContextDone(watchCtx, err) {
+				return nil
+			}
+			return err
+		}
+		select {
+		case <-watchCtx.Done():
 			return nil
+		case event, ok := <-events:
+			if !ok {
+				continue
+			}
+			if int64(event.Revision) > cursor {
+				cursor = int64(event.Revision)
+			}
 		}
 	}
+}
+
+func projectOrchestrationWatchPollInterval(requested time.Duration) time.Duration {
+	if requested < projectOrchestrationWatchMinPollInterval {
+		return projectOrchestrationWatchMinPollInterval
+	}
+	return requested
 }
 
 func projectOrchestrationWatchKey(snapshot protocol.OrchestrationSnapshot) (string, error) {

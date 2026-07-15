@@ -15,6 +15,8 @@ func TestRunManagedSelectsInstrumentNamespace(t *testing.T) {
 	repo := initCommandTestRepo(t)
 	t.Chdir(repo)
 	root := configureCommandTestCacheFamily(t, repo)
+	t.Setenv("AZEDARACH_GO_CACHE_ROOT", root)
+	t.Setenv("AZEDARACH_GOCACHE", "")
 	t.Setenv("AZEDARACH_GO_CACHE_OWNER", "issue-dhc")
 	t.Setenv("AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES", "1024")
 	t.Setenv("AZEDARACH_GO_CACHE_HARD_LIMIT_BYTES", "2048")

@@ -7,93 +7,19 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
-	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	"github.com/riordanpawley/azedarach/internal/daemon/userstore"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
-func commandMutatesProjectProjection(command string) bool {
-	switch command {
-	case "task.event.append", "task.create", "task.close", protocol.CommandTaskBulkCleanup,
-		"task.ownership.claim", "task.ownership.release", "task.update_status", "task.update_details",
-		"task.append_notes", "task.delete", "task.archive", "task.unarchive",
-		"task.dependency.add", "task.dependency.remove", protocol.CommandTaskBulkApply,
-		"session.start", "session.attach", "session.pause", "session.resume", "session.stop",
-		daemonhandlers.CommandSessionMessage, protocol.CommandSessionResolveConflict,
-		protocol.CommandSessionRestartAll, "session.recover", protocol.CommandRuntimeReconcile,
-		protocol.CommandRuntimeReconcileIssue, commandSyncRun,
-		protocol.CommandInteractionCreate, protocol.CommandInteractionDiscuss,
-		protocol.CommandInteractionPropose, protocol.CommandInteractionAnswer,
-		protocol.CommandInteractionResolve, protocol.CommandInteractionWithdraw,
-		protocol.CommandInteractionSupersede, protocol.CommandInteractionRecover,
-		protocol.CommandOrchestrationIntent, protocol.CommandOrchestratorSessionStart,
-		protocol.CommandOrchestratorSessionAttach, protocol.CommandOrchestratorSessionStop,
-		daemonhandlers.CommandWorktreeCreate, daemonhandlers.CommandWorktreeRemove,
-		daemonhandlers.CommandWorktreeCleanupOrphaned,
-		daemonhandlers.CommandGitFetch, daemonhandlers.CommandGitPullBase,
-		daemonhandlers.CommandGitPush, daemonhandlers.CommandGitMerge,
-		daemonhandlers.CommandGitCheckout, daemonhandlers.CommandGitAbortMerge,
-		daemonhandlers.CommandGitDiscardChanges, daemonhandlers.CommandGitCheckpoint:
-		return true
-	default:
-		return false
-	}
-}
-
-func (d *Daemon) enqueueUserProjectionRefresh(projectID string) {
-	if d == nil || d.userStore == nil || d.cfg.ScopedRuntime {
-		return
-	}
-	projectID = d.canonicalProjectID(projectID)
-	d.userStoreRefreshMu.Lock()
-	if d.userStoreRefreshStopping {
-		d.userStoreRefreshMu.Unlock()
-		return
-	}
-	if d.userStoreRefreshPending[projectID] {
-		d.userStoreRefreshDirty[projectID] = true
-		d.userStoreRefreshMu.Unlock()
-		return
-	}
-	d.userStoreRefreshPending[projectID] = true
-	d.userStoreRefreshWG.Add(1)
-	workerCtx := d.userStoreRefreshCtx
-	if workerCtx == nil {
-		workerCtx = context.Background()
-	}
-	d.userStoreRefreshMu.Unlock()
-	go func() {
-		defer d.userStoreRefreshWG.Done()
-		for {
-			d.userStoreRefreshMu.Lock()
-			d.userStoreRefreshDirty[projectID] = false
-			d.userStoreRefreshMu.Unlock()
-			ctx, cancel := context.WithTimeout(workerCtx, 30*time.Second)
-			err := d.refreshUserProject(ctx, projectID)
-			cancel()
-			if err != nil && d.cfg.Logger != nil {
-				d.cfg.Logger.Warn("refresh user cross-project projection after mutation", "project_id", projectID, "error", err)
-			}
-			d.userStoreRefreshMu.Lock()
-			dirty := d.userStoreRefreshDirty[projectID]
-			if !dirty {
-				delete(d.userStoreRefreshPending, projectID)
-				delete(d.userStoreRefreshDirty, projectID)
-			}
-			d.userStoreRefreshMu.Unlock()
-			if !dirty {
-				return
-			}
-		}
-	}()
-}
-
-const globalProjectionRepairInterval = 2 * time.Minute
+const (
+	globalProjectionRepairInterval = 2 * time.Minute
+)
 
 func (d *Daemon) startGlobalProjectionRepairWorker(ctx context.Context) {
 	if d == nil || d.userStore == nil || d.cfg.ScopedRuntime {
@@ -110,6 +36,11 @@ func (d *Daemon) startGlobalProjectionRepairWorker(ctx context.Context) {
 	}
 	d.userStoreRefreshWG.Add(1)
 	d.userStoreRefreshMu.Unlock()
+	if registry, err := appconfig.LoadProjectsRegistry(); err == nil {
+		d.ensureUserProjectionConsumers(ctx, registry.Projects)
+	} else if d.cfg.Logger != nil {
+		d.cfg.Logger.Warn("start user projection consumers", "error", err)
+	}
 	go func() {
 		defer d.userStoreRefreshWG.Done()
 		ticker := time.NewTicker(globalProjectionRepairInterval)
@@ -120,7 +51,13 @@ func (d *Daemon) startGlobalProjectionRepairWorker(ctx context.Context) {
 				return
 			case <-ticker.C:
 				repairCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-				err := d.refreshUserProjection(repairCtx)
+				registry, err := appconfig.LoadProjectsRegistry()
+				if err == nil {
+					d.ensureUserProjectionConsumers(repairCtx, registry.Projects)
+					err = d.reconcileUserProjectionProjects(repairCtx, registry.Projects)
+				} else {
+					err = fmt.Errorf("load project registry: %w", err)
+				}
 				cancel()
 				if err != nil && d.cfg.Logger != nil {
 					d.cfg.Logger.Warn("periodic user projection repair completed partially", "error", err)
@@ -128,6 +65,36 @@ func (d *Daemon) startGlobalProjectionRepairWorker(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+func (d *Daemon) scheduleUserProjectionRepair(ctx context.Context) error {
+	if d == nil || d.userStore == nil {
+		return nil
+	}
+	registry, err := appconfig.LoadProjectsRegistry()
+	if err != nil {
+		return fmt.Errorf("load project registry: %w", err)
+	}
+	return d.reconcileUserProjectionProjects(ctx, registry.Projects)
+}
+
+func (d *Daemon) reconcileUserProjectionProjects(ctx context.Context, registered []appconfig.Project) error {
+	projects := make([]userstore.CatalogProject, 0, len(registered))
+	for _, project := range registered {
+		projectID := protocol.NormalizeProjectID(appconfig.RegisteredProjectID(project))
+		if projectID == "" {
+			continue
+		}
+		root, resolveErr := appconfig.ResolveProjectRoot(project.Path)
+		if resolveErr != nil {
+			root = filepath.Clean(project.Path)
+		}
+		projects = append(projects, userstore.CatalogProject{ProjectID: projectID, Name: project.Name, Path: root, DBPath: filepath.Join(root, ".azedarach", "azedarach.db")})
+	}
+	if err := d.userStore.ReconcileProjects(ctx, projects); err != nil {
+		return fmt.Errorf("reconcile user projection catalog: %w", err)
+	}
+	return nil
 }
 
 func (d *Daemon) stopUserProjectionWorkers() {
@@ -141,6 +108,7 @@ func (d *Daemon) stopUserProjectionWorkers() {
 	}
 	d.userStoreRefreshMu.Unlock()
 	d.userStoreRefreshWG.Wait()
+	d.stopAllProjectReadMaterializers(context.Background())
 }
 
 func (d *Daemon) refreshUserProject(ctx context.Context, wantedProjectID string) error {
@@ -152,34 +120,57 @@ func (d *Daemon) refreshUserProject(ctx context.Context, wantedProjectID string)
 		return err
 	}
 	for _, project := range registry.Projects {
-		id := appconfig.RegisteredProjectID(project)
-		id = protocol.NormalizeProjectID(id)
+		id := protocol.NormalizeProjectID(appconfig.RegisteredProjectID(project))
 		if id == "" || id != wantedProjectID {
 			continue
 		}
-		root, e := appconfig.ResolveProjectRoot(project.Path)
-		if e != nil {
-			root = filepath.Clean(project.Path)
-			dbPath := filepath.Join(root, ".azedarach", "azedarach.db")
-			generation, beginErr := d.userStore.BeginProjectRefresh(ctx, userstore.CatalogProject{ProjectID: id, Name: project.Name, Path: root, DBPath: dbPath})
-			if beginErr != nil {
-				return beginErr
-			}
-			_ = d.userStore.MarkUnavailableGeneration(ctx, id, project.Name, root, dbPath, generation, e)
-			return e
-		}
-		dbPath := filepath.Join(root, ".azedarach", "azedarach.db")
-		generation, e := d.userStore.BeginProjectRefresh(ctx, userstore.CatalogProject{ProjectID: id, Name: project.Name, Path: root, DBPath: dbPath})
-		if e != nil {
-			return e
-		}
-		e = d.exportProjectToUserProjection(ctx, id, project.Name, root, dbPath, generation)
-		if e != nil {
-			_ = d.userStore.MarkUnavailableGeneration(ctx, id, project.Name, root, dbPath, generation, e)
-		}
-		return e
+		return d.refreshRegisteredUserProject(ctx, project)
 	}
 	return fmt.Errorf("registered project %s not found", wantedProjectID)
+}
+
+// bootstrapUserProjection initializes projects that have never published a
+// verified delta component. Existing components are resumed by the blocking
+// consumers from their durable per-project cursors instead of being replaced
+// by a routine startup export.
+func (d *Daemon) bootstrapUserProjection(ctx context.Context) error {
+	if d == nil || d.userStore == nil {
+		return nil
+	}
+	registry, err := appconfig.LoadProjectsRegistry()
+	if err != nil {
+		return fmt.Errorf("load project registry: %w", err)
+	}
+	projects := make([]userstore.CatalogProject, 0, len(registry.Projects))
+	for _, project := range registry.Projects {
+		projectID := protocol.NormalizeProjectID(appconfig.RegisteredProjectID(project))
+		if projectID == "" {
+			continue
+		}
+		root, resolveErr := appconfig.ResolveProjectRoot(project.Path)
+		if resolveErr != nil {
+			root = filepath.Clean(project.Path)
+		}
+		projects = append(projects, userstore.CatalogProject{ProjectID: projectID, Name: project.Name, Path: root, DBPath: filepath.Join(root, ".azedarach", "azedarach.db")})
+	}
+	if err := d.userStore.ReconcileProjects(ctx, projects); err != nil {
+		return fmt.Errorf("reconcile user projection bootstrap catalog: %w", err)
+	}
+	var firstErr error
+	for _, project := range registry.Projects {
+		projectID := protocol.NormalizeProjectID(appconfig.RegisteredProjectID(project))
+		if projectID == "" {
+			continue
+		}
+		state, stateErr := d.userStore.ProjectDeltaState(ctx, projectID)
+		if stateErr == nil && state.Initialized && state.Projector == issueProjectionProjector() {
+			continue
+		}
+		if refreshErr := d.refreshRegisteredUserProject(ctx, project); refreshErr != nil && firstErr == nil {
+			firstErr = refreshErr
+		}
+	}
+	return firstErr
 }
 
 func (d *Daemon) refreshUserProjection(ctx context.Context) error {
@@ -193,41 +184,13 @@ func (d *Daemon) refreshUserProjection(ctx context.Context) error {
 	ids := make([]string, 0, len(registry.Projects))
 	var firstErr error
 	for _, project := range registry.Projects {
-		projectID := appconfig.RegisteredProjectID(project)
-		projectID = protocol.NormalizeProjectID(projectID)
+		projectID := protocol.NormalizeProjectID(appconfig.RegisteredProjectID(project))
 		if projectID == "" {
 			continue
 		}
 		ids = append(ids, projectID)
-		root, resolveErr := appconfig.ResolveProjectRoot(project.Path)
-		if resolveErr != nil {
-			root = filepath.Clean(project.Path)
-			dbPath := filepath.Join(root, ".azedarach", "azedarach.db")
-			generation, generationErr := d.userStore.BeginProjectRefresh(ctx, userstore.CatalogProject{ProjectID: projectID, Name: project.Name, Path: root, DBPath: dbPath})
-			if generationErr == nil {
-				_ = d.userStore.MarkUnavailableGeneration(ctx, projectID, project.Name, root, dbPath, generation, resolveErr)
-			} else if firstErr == nil {
-				firstErr = generationErr
-			}
-			if firstErr == nil {
-				firstErr = resolveErr
-			}
-			continue
-		}
-		dbPath := filepath.Join(root, ".azedarach", "azedarach.db")
-		generation, generationErr := d.userStore.BeginProjectRefresh(ctx, userstore.CatalogProject{ProjectID: projectID, Name: project.Name, Path: root, DBPath: dbPath})
-		if generationErr != nil {
-			if firstErr == nil {
-				firstErr = generationErr
-			}
-			continue
-		}
-		err = d.exportProjectToUserProjection(ctx, projectID, project.Name, root, dbPath, generation)
-		if err != nil {
-			_ = d.userStore.MarkUnavailableGeneration(ctx, projectID, project.Name, root, dbPath, generation, err)
-			if firstErr == nil {
-				firstErr = err
-			}
+		if refreshErr := d.refreshRegisteredUserProject(ctx, project); refreshErr != nil && firstErr == nil {
+			firstErr = refreshErr
 		}
 	}
 	if err := d.userStore.ReconcileCatalog(ctx, ids); err != nil {
@@ -236,17 +199,64 @@ func (d *Daemon) refreshUserProjection(ctx context.Context) error {
 	return firstErr
 }
 
+func (d *Daemon) refreshRegisteredUserProject(ctx context.Context, project appconfig.Project) error {
+	projectID := protocol.NormalizeProjectID(appconfig.RegisteredProjectID(project))
+	if projectID == "" {
+		return nil
+	}
+	lock, _ := d.userStoreProjectRefreshLocks.LoadOrStore(projectID, &sync.Mutex{})
+	projectLock := lock.(*sync.Mutex)
+	projectLock.Lock()
+	defer projectLock.Unlock()
+	if d.userStoreProjectLockHook != nil {
+		d.userStoreProjectLockHook(projectID, true)
+		defer d.userStoreProjectLockHook(projectID, false)
+	}
+
+	root, resolveErr := appconfig.ResolveProjectRoot(project.Path)
+	if resolveErr != nil {
+		root = filepath.Clean(project.Path)
+	}
+	dbPath := filepath.Join(root, ".azedarach", "azedarach.db")
+	generation, err := d.userStore.BeginProjectRefresh(ctx, userstore.CatalogProject{ProjectID: projectID, Name: project.Name, Path: root, DBPath: dbPath})
+	if err != nil {
+		return err
+	}
+	if resolveErr != nil {
+		_ = d.userStore.MarkUnavailableGeneration(ctx, projectID, project.Name, root, dbPath, generation, resolveErr)
+		return resolveErr
+	}
+	if err = d.exportProjectToUserProjection(ctx, projectID, project.Name, root, dbPath, generation); err != nil {
+		_ = d.userStore.MarkUnavailableGeneration(ctx, projectID, project.Name, root, dbPath, generation, err)
+	}
+	return err
+}
+
 func (d *Daemon) exportProjectToUserProjection(ctx context.Context, projectID, name, root, dbPath string, generation uint64) error {
 	client := d.issueClientForProject(projectID)
 	if client == nil {
 		return fmt.Errorf("issue store unavailable")
 	}
-	export, err := client.ExportProjection(ctx, projectID)
-	if err != nil {
-		return err
+	for attempt := 0; attempt < 4; attempt++ {
+		before, err := d.projectDeltaHead(ctx, projectID, client)
+		if err != nil {
+			return fmt.Errorf("read project delta head before export: %w", err)
+		}
+		export, err := client.ExportProjection(ctx, projectID)
+		if err != nil {
+			return err
+		}
+		deltaState, err := d.projectDeltaSnapshotState(ctx, projectID, client)
+		if err != nil {
+			return fmt.Errorf("read project delta bootstrap snapshot: %w", err)
+		}
+		if before != deltaState.Cursor {
+			continue
+		}
+		export.Tasks = d.enrichTasksWithSessionState(ctx, projectID, export.Tasks)
+		return d.userStore.ReplaceProject(ctx, userstore.ProjectInput{ProjectID: projectID, Name: name, Path: root, DBPath: dbPath, SchemaVersion: export.SchemaVersion, SchemaFingerprint: export.SchemaFingerprint, Checkpoint: export.Checkpoint, RefreshGeneration: generation, Tasks: export.Tasks, Delta: &deltaState})
 	}
-	export.Tasks = d.enrichTasksWithSessionState(ctx, projectID, export.Tasks)
-	return d.userStore.ReplaceProject(ctx, userstore.ProjectInput{ProjectID: projectID, Name: name, Path: root, DBPath: dbPath, SchemaVersion: export.SchemaVersion, SchemaFingerprint: export.SchemaFingerprint, Checkpoint: export.Checkpoint, RefreshGeneration: generation, Tasks: export.Tasks})
+	return fmt.Errorf("project authority changed throughout verified export: %w", domain.ErrProjectionRetryable)
 }
 
 func (d *Daemon) handleGlobalSnapshot(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -259,9 +269,6 @@ func (d *Daemon) handleGlobalSnapshot(ctx context.Context, req protocol.RequestE
 	}
 	if body.Consumer != "" && !body.Consumer.Valid() {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid global view consumer %q", body.Consumer)), nil
-	}
-	if err := d.reconcileUserProjectCatalog(ctx); err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("reconcile user project catalog: %v", err)), nil
 	}
 	if err := body.Scope.Validate(); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
@@ -315,26 +322,6 @@ func augmentGlobalProjectionKnownTasks(known []protocol.ScopedIssueID, projects 
 		}
 	}
 	return known
-}
-
-func (d *Daemon) reconcileUserProjectCatalog(ctx context.Context) error {
-	registry, err := appconfig.LoadProjectsRegistry()
-	if err != nil {
-		return err
-	}
-	projects := make([]userstore.CatalogProject, 0, len(registry.Projects))
-	for _, project := range registry.Projects {
-		id := protocol.NormalizeProjectID(appconfig.RegisteredProjectID(project))
-		if id == "" {
-			continue
-		}
-		root, rootErr := appconfig.ResolveProjectRoot(project.Path)
-		if rootErr != nil {
-			root = filepath.Clean(project.Path)
-		}
-		projects = append(projects, userstore.CatalogProject{ProjectID: id, Name: project.Name, Path: root, DBPath: filepath.Join(root, ".azedarach", "azedarach.db")})
-	}
-	return d.userStore.ReconcileProjects(ctx, projects)
 }
 
 func filterGlobalProjects(projects []protocol.GlobalProjectSnapshot, scope protocol.GlobalViewScope) []protocol.GlobalProjectSnapshot {

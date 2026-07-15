@@ -18,46 +18,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
-func TestStopUserProjectionWorkersWaitsAndRejectsNewWork(t *testing.T) {
-	d := &Daemon{
-		userStoreRefreshPending: map[string]bool{},
-		userStoreRefreshDirty:   map[string]bool{},
-	}
-	workerStarted := make(chan struct{})
-	releaseWorker := make(chan struct{})
-	d.userStoreRefreshMu.Lock()
-	d.userStoreRefreshWG.Add(1)
-	d.userStoreRefreshMu.Unlock()
-	go func() {
-		defer d.userStoreRefreshWG.Done()
-		close(workerStarted)
-		<-releaseWorker
-	}()
-	<-workerStarted
-	stopped := make(chan struct{})
-	go func() {
-		d.stopUserProjectionWorkers()
-		close(stopped)
-	}()
-	select {
-	case <-stopped:
-		t.Fatal("projection shutdown returned before active worker completed")
-	case <-time.After(20 * time.Millisecond):
-	}
-	d.userStoreRefreshMu.Lock()
-	if !d.userStoreRefreshStopping {
-		d.userStoreRefreshMu.Unlock()
-		t.Fatal("projection shutdown did not reject new workers")
-	}
-	d.userStoreRefreshMu.Unlock()
-	close(releaseWorker)
-	select {
-	case <-stopped:
-	case <-time.After(time.Second):
-		t.Fatal("projection shutdown did not finish after active worker completed")
-	}
-}
-
 func TestGlobalSnapshotScopeExcludesUnavailableProjectFromPartialHealth(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	p1, p2 := t.TempDir(), t.TempDir()
@@ -97,6 +57,41 @@ func TestGlobalSnapshotScopeExcludesUnavailableProjectFromPartialHealth(t *testi
 	}
 	if snapshot.Partial || len(snapshot.Projects) != 1 || snapshot.Projects[0].ProjectID != "p1" {
 		t.Fatalf("scoped snapshot = %+v, want only healthy p1", snapshot)
+	}
+}
+
+func TestGlobalSnapshotDoesNotReconcileProjectCatalog(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	if err := appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{Projects: []appconfig.Project{{ID: "p1", Name: "P1", Path: root}}}); err != nil {
+		t.Fatal(err)
+	}
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err = store.ReplaceProject(context.Background(), userstore.ProjectInput{ProjectID: "p1", Name: "P1", Path: root, DBPath: filepath.Join(root, ".azedarach", "azedarach.db")}); err != nil {
+		t.Fatal(err)
+	}
+	if err = appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{}); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Daemon{userStore: store}
+	resp, err := d.handleGlobalSnapshot(context.Background(), protocol.RequestEnvelope{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.OK {
+		t.Fatalf("response error: %+v", resp.Error)
+	}
+	snapshot, err := store.Snapshot(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Projects) != 1 || !snapshot.Projects[0].Registered {
+		t.Fatalf("global snapshot mutated catalog registration: %+v", snapshot.Projects)
 	}
 }
 
