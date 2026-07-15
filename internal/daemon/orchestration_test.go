@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -259,6 +262,28 @@ func TestMergeOrchestrationSnapshotOrdersProjectResultsDeterministically(t *test
 	}
 	if dst.Blocked["x"] != "dependency" || dst.Capacity.DirectRunnableCount != 1 || dst.Capacity.DirectActiveCount != 1 {
 		t.Fatalf("merged project snapshot = %+v", dst)
+	}
+}
+
+func TestFinalizeOrchestrationSnapshotSourceCoversSemanticResultOnly(t *testing.T) {
+	first := protocol.OrchestrationSnapshot{
+		GeneratedAt: time.Now().UTC(),
+		Revision:    7,
+		Source:      protocol.MaterializedSnapshotMetadata{IssueChecksum: "issues", RuntimeChecksum: "runtime"},
+		Runnable:    []string{"az-1"},
+	}
+	second := first
+	second.GeneratedAt = first.GeneratedAt.Add(time.Minute)
+	second.Revision = 99
+	finalizeOrchestrationSnapshotSource(&first)
+	finalizeOrchestrationSnapshotSource(&second)
+	if first.Source.SemanticChecksum == "" || first.Source.SemanticChecksum != second.Source.SemanticChecksum {
+		t.Fatalf("normalized checksums differ: %q/%q", first.Source.SemanticChecksum, second.Source.SemanticChecksum)
+	}
+	second.Interactions = []domain.InteractionRequest{{ID: "interaction-1"}}
+	finalizeOrchestrationSnapshotSource(&second)
+	if first.Source.SemanticChecksum == second.Source.SemanticChecksum {
+		t.Fatal("interaction projection did not change orchestration semantic checksum")
 	}
 }
 
@@ -637,6 +662,290 @@ func TestOrchestrationAuthorityInterfaceStaysDeep(t *testing.T) {
 	var _ orchestrationAuthority = daemonOrchestrationAuthority{}
 }
 
+func TestOrchestrationSnapshotCacheCoalescesDuplicateRevision(t *testing.T) {
+	projectID := "project"
+	scope, err := domain.RootedOrchestrationScope("az-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{revision: map[string]uint64{projectID: 7}}
+	request := protocol.OrchestrationSnapshotRequest{Scope: scope, ActorID: "agent-a", Limit: 12}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var mu sync.Mutex
+	builds := 0
+	build := func(context.Context, string, protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		mu.Lock()
+		builds++
+		call := builds
+		mu.Unlock()
+		if call == 1 {
+			close(entered)
+			<-release
+		}
+		return protocol.OrchestrationSnapshot{Scope: scope, Runnable: []string{"az-child"}, Blocked: map[string]string{}}, nil
+	}
+
+	type result struct {
+		snapshot protocol.OrchestrationSnapshot
+		stable   bool
+		err      error
+	}
+	results := make(chan result, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			snapshot, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build)
+			results <- result{snapshot: snapshot, stable: stable, err: err}
+		}()
+		if i == 0 {
+			<-entered
+		}
+	}
+	close(release)
+	for range 2 {
+		got := <-results
+		if got.err != nil || !got.stable || len(got.snapshot.Runnable) != 1 {
+			t.Fatalf("concurrent result = %+v", got)
+		}
+	}
+
+	if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable {
+		t.Fatalf("cached load stable=%v err=%v", stable, err)
+	}
+	mu.Lock()
+	if builds != 1 {
+		t.Fatalf("snapshot builds at one revision = %d, want 1", builds)
+	}
+	mu.Unlock()
+
+	d.nextRevision(projectID)
+	if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable {
+		t.Fatalf("load after revision change stable=%v err=%v", stable, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if builds != 2 {
+		t.Fatalf("snapshot builds after revision change = %d, want 2", builds)
+	}
+}
+
+func TestRootedOrchestrationSnapshotCacheHonorsReadinessSemanticExpiry(t *testing.T) {
+	projectID := "project"
+	rootID := "az-root"
+	scope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{
+		revision:                map[string]uint64{projectID: 7},
+		taskGraphReadinessCache: map[string]taskGraphReadinessCacheEntry{},
+	}
+	request := protocol.OrchestrationSnapshotRequest{Scope: scope, ActorID: "agent-a"}
+	builds := 0
+	build := func(context.Context, string, protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		builds++
+		expiresAt := time.Now().Add(time.Minute)
+		if builds == 1 {
+			expiresAt = time.Now().Add(-time.Second)
+		}
+		d.taskGraphReadinessCache[taskGraphReadinessLoadKey(projectID, rootID, request.ActorID)] = taskGraphReadinessCacheEntry{
+			revision:  7,
+			expiresAt: expiresAt,
+		}
+		return protocol.OrchestrationSnapshot{Scope: scope, Runnable: []string{"az-child"}, Blocked: map[string]string{}}, nil
+	}
+
+	if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable {
+		t.Fatalf("initial snapshot stable=%v err=%v", stable, err)
+	}
+	if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable {
+		t.Fatalf("snapshot after semantic expiry stable=%v err=%v", stable, err)
+	}
+	if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable {
+		t.Fatalf("cached snapshot after refresh stable=%v err=%v", stable, err)
+	}
+	if builds != 2 {
+		t.Fatalf("snapshot builds = %d, want expired entry rebuilt once", builds)
+	}
+}
+
+func TestOrchestrationSnapshotCacheRecoversFromRevisionChurn(t *testing.T) {
+	projectID := "project"
+	scope, err := domain.RootedOrchestrationScope("az-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{revision: map[string]uint64{projectID: 1}}
+	request := protocol.OrchestrationSnapshotRequest{Scope: scope}
+	builds := 0
+	build := func(context.Context, string, protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		builds++
+		if builds == 1 {
+			d.nextRevision(projectID)
+		}
+		return protocol.OrchestrationSnapshot{Scope: scope, Blocked: map[string]string{}}, nil
+	}
+
+	if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || stable {
+		t.Fatalf("churning load stable=%v err=%v, want unstable without conflict loop", stable, err)
+	}
+	if _, revision, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable || revision != 2 {
+		t.Fatalf("recovery load revision=%d stable=%v err=%v", revision, stable, err)
+	}
+	if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable {
+		t.Fatalf("cached recovery stable=%v err=%v", stable, err)
+	}
+	if builds != 2 {
+		t.Fatalf("snapshot builds = %d, want one churned build plus one stable build", builds)
+	}
+}
+
+func TestOrchestrationSnapshotHandlerReturnsPromptConflictDuringContinuousChurn(t *testing.T) {
+	const projectID = "project"
+	d := &Daemon{revision: map[string]uint64{projectID: 1}}
+	builds := 0
+	d.orchestrationSnapshotBuild = func(_ context.Context, gotProjectID string, request protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		builds++
+		d.nextRevision(gotProjectID)
+		return protocol.OrchestrationSnapshot{Scope: request.Scope, Blocked: map[string]string{}}, nil
+	}
+	body, err := json.Marshal(protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	resp, err := d.handleOrchestrationSnapshot(context.Background(), protocol.RequestEnvelope{
+		Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body,
+	})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeConflict {
+		t.Fatalf("response = %+v, want projection conflict", resp)
+	}
+	if builds != 1 {
+		t.Fatalf("snapshot builds = %d, want one prompt attempt", builds)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("continuous churn conflict took %s, want <= 100ms", elapsed)
+	}
+}
+
+func TestOrchestrationSnapshotCacheIncludesCanonicalEffectiveRepoDir(t *testing.T) {
+	projectID := "project"
+	firstRepo := t.TempDir()
+	secondRepo := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "repo-alias")
+	if err := os.Symlink(firstRepo, alias); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{revision: map[string]uint64{projectID: 1}}
+	request := protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), RepoDir: firstRepo}
+	builds := 0
+	var builtRepoDirs []string
+	build := func(_ context.Context, _ string, request protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		builds++
+		builtRepoDirs = append(builtRepoDirs, request.RepoDir)
+		return protocol.OrchestrationSnapshot{Scope: request.Scope, Blocked: map[string]string{}}, nil
+	}
+	for _, repoDir := range []string{firstRepo, alias, secondRepo} {
+		request.RepoDir = repoDir
+		if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable {
+			t.Fatalf("load repo %q stable=%v err=%v", repoDir, stable, err)
+		}
+	}
+	if builds != 2 {
+		t.Fatalf("snapshot builds = %d, want alias reuse plus distinct-repo rebuild", builds)
+	}
+	wantFirst, err := filepath.EvalSymlinks(firstRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSecond, err := filepath.EvalSymlinks(secondRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(builtRepoDirs) != 2 || builtRepoDirs[0] != filepath.Clean(wantFirst) || builtRepoDirs[1] != filepath.Clean(wantSecond) {
+		t.Fatalf("canonical build repo dirs = %v", builtRepoDirs)
+	}
+}
+
+func TestOrchestrationProjectSnapshotCacheReusesRevision(t *testing.T) {
+	projectID := "project"
+	d := &Daemon{revision: map[string]uint64{projectID: 3}}
+	request := protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), Limit: 50}
+	builds := 0
+	build := func(context.Context, string, protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		builds++
+		return protocol.OrchestrationSnapshot{Scope: request.Scope, Blocked: map[string]string{}}, nil
+	}
+	for range 2 {
+		if _, revision, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable || revision != 3 {
+			t.Fatalf("project snapshot revision=%d stable=%v err=%v", revision, stable, err)
+		}
+	}
+	if builds != 1 {
+		t.Fatalf("project snapshot builds = %d, want 1 at unchanged revision", builds)
+	}
+}
+
+func TestOrchestrationSnapshotCacheConcurrentReadP95Budget(t *testing.T) {
+	const (
+		readers    = 5
+		iterations = 20
+		p95Budget  = 25 * time.Millisecond
+	)
+	projectID := "project"
+	scope, err := domain.RootedOrchestrationScope("az-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{revision: map[string]uint64{projectID: 1}}
+	request := protocol.OrchestrationSnapshotRequest{Scope: scope, ActorID: "agent-a"}
+	builds := 0
+	build := func(context.Context, string, protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		builds++
+		return protocol.OrchestrationSnapshot{Scope: scope, Runnable: []string{"az-child"}, Blocked: map[string]string{}}, nil
+	}
+	if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable {
+		t.Fatalf("warm cache stable=%v err=%v", stable, err)
+	}
+
+	durations := make(chan time.Duration, readers*iterations)
+	var wg sync.WaitGroup
+	for range readers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range iterations {
+				started := time.Now()
+				_, _, _, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build)
+				if err != nil {
+					t.Errorf("cached snapshot: %v", err)
+					return
+				}
+				durations <- time.Since(started)
+			}
+		}()
+	}
+	wg.Wait()
+	close(durations)
+	measured := make([]time.Duration, 0, readers*iterations)
+	for duration := range durations {
+		measured = append(measured, duration)
+	}
+	sort.Slice(measured, func(i, j int) bool { return measured[i] < measured[j] })
+	p95 := measured[(len(measured)*95+99)/100-1]
+	if p95 > p95Budget {
+		t.Fatalf("cached concurrent read p95 = %s, budget %s", p95, p95Budget)
+	}
+	if builds != 1 {
+		t.Fatalf("snapshot builds = %d, want one warm build across concurrent reads", builds)
+	}
+	t.Logf("cached concurrent read p95=%s budget=%s samples=%d readers=%d", p95, p95Budget, len(measured), readers)
+}
+
 func TestResolveOrchestratorSessionUsesDurableLeaseScope(t *testing.T) {
 	projectID := "project"
 	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
@@ -815,6 +1124,45 @@ func TestOrchestrationBoardHealthUsesCanonicalOpenCountForThreshold(t *testing.T
 	}
 	if got := strings.Join(health.Diagnostics, "\n"); !strings.Contains(got, "open issue count 101 exceeds refusal threshold 100") {
 		t.Fatalf("health diagnostics = %q, want exact canonical count", got)
+	}
+}
+
+func TestMaterializedProjectOrchestrationContextLimitsCanonicalOpenBeforeBacklogContext(t *testing.T) {
+	backlog, err := domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflowBacklog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	tasks := make([]domain.Task, 0, 201)
+	for i := 0; i < 189; i++ {
+		id := fmt.Sprintf("backlog-%03d", i)
+		tasks = append(tasks, domain.Task{ID: naming.IssueID(id), Status: domain.StatusOpen, State: backlog, Priority: domain.P0, UpdatedAt: old})
+	}
+	for i := 0; i < 12; i++ {
+		id := fmt.Sprintf("open-%02d", i)
+		task := domain.Task{ID: naming.IssueID(id), Status: domain.StatusOpen, Priority: domain.P1, UpdatedAt: old.Add(time.Duration(i) * time.Minute)}
+		if i == 0 {
+			task.ParentID = issueIDPtr("backlog-000")
+		}
+		tasks = append(tasks, task)
+	}
+
+	context := materializedProjectOrchestrationContext(tasks, 5)
+	openIDs := make([]string, 0, 5)
+	backlogIDs := make([]string, 0, 1)
+	for _, task := range context {
+		switch task.IssueFacts().LifecycleState {
+		case domain.IssueWorkflowOpen:
+			openIDs = append(openIDs, task.ID.String())
+		case domain.IssueWorkflowBacklog:
+			backlogIDs = append(backlogIDs, task.ID.String())
+		}
+	}
+	if want := []string{"open-00", "open-01", "open-02", "open-03", "open-04"}; !reflect.DeepEqual(openIDs, want) {
+		t.Fatalf("open context = %v, want canonical bounded window %v", openIDs, want)
+	}
+	if want := []string{"backlog-000"}; !reflect.DeepEqual(backlogIDs, want) {
+		t.Fatalf("backlog context = %v, want only selected candidate ancestor %v", backlogIDs, want)
 	}
 }
 
@@ -1060,6 +1408,38 @@ func TestProjectOrchestrationBacklogRootContainsOpenChild(t *testing.T) {
 	}
 	if nested.State.Workflow() != domain.IssueWorkflowOpen || nested.Ownership != nil || nested.HasTmuxSession {
 		t.Fatalf("contained nested root mutated by project start: %+v", nested)
+	}
+}
+
+func TestProjectOrchestrationContextRootsCannotCrowdBacklogContainment(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	contextRootID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Active dependency context", Type: domain.TypeEpic, Priority: domain.P0, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backlogRootID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Paused root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Selected open child", Description: "Executable", Acceptance: "Worker completes scoped change", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen, ParentID: &backlogRootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.AddDependency(ctx, childID, contextRootID, string(domain.DependencyBlocks)); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := (daemonOrchestrationAuthority{daemon: &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}}).Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "steward", Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(snapshot.Roots, contextRootID) || !slices.Contains(snapshot.Roots, backlogRootID) {
+		t.Fatalf("roots = %v, want dependency context and selected candidate ancestor despite actionable limit", snapshot.Roots)
+	}
+	if snapshot.Blocked[childID] != "lifecycle-backlog" || candidateClass(snapshot.Candidates, childID) != string(domain.OrchestrationCandidateBlocked) {
+		t.Fatalf("snapshot = %+v, want backlog containment after all bounded-context roots are assessed", snapshot)
 	}
 }
 

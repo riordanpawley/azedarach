@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -187,19 +188,32 @@ func ingestAgentHookRuntimeSignalBestEffort(ctx context.Context, deps *Dependenc
 	}
 	issueID := strings.TrimSpace(hookCtx.IssueID)
 	signal := protocol.RuntimeSignalIngestCommandBody{
-		Source:    protocol.RuntimeSignalSourceAgentHook,
-		Kind:      protocol.RuntimeSignalKindAgentActivityChanged,
-		ProjectID: projectID,
-		IssueID:   issueID,
-		SessionID: agentHookSessionID(projectID, issueID),
-		Worktree:  strings.TrimSpace(hookCtx.ProjectDir),
-		TmuxPane:  strings.TrimSpace(os.Getenv("TMUX_PANE")),
-		Agent:     string(hookCtx.Agent),
-		Hook:      event,
-		Event:     event,
-		Log:       shouldAppendHookLogEvent(event),
-		Message:   fmt.Sprintf("%s hook: %s", hookCtx.Agent, event),
-		Payload:   hookCtx.Payload,
+		Source:           protocol.RuntimeSignalSourceAgentHook,
+		Kind:             protocol.RuntimeSignalKindAgentActivityChanged,
+		ProjectID:        projectID,
+		IssueID:          issueID,
+		SessionID:        agentHookSessionID(projectID, issueID),
+		Worktree:         strings.TrimSpace(hookCtx.ProjectDir),
+		TmuxPane:         strings.TrimSpace(os.Getenv("TMUX_PANE")),
+		AgentIncarnation: agentHookIncarnation(hookCtx.Payload),
+		Agent:            string(hookCtx.Agent),
+		Hook:             event,
+		Event:            event,
+		Log:              shouldAppendHookLogEvent(event),
+		Message:          fmt.Sprintf("%s hook: %s", hookCtx.Agent, event),
+		Payload:          hookCtx.Payload,
+	}
+	if explicit := strings.TrimSpace(os.Getenv("AZEDARACH_AGENT_INCARNATION")); explicit != "" {
+		signal.AgentIncarnation = explicit
+	}
+	if signal.AgentIncarnation != "" {
+		signal.LogicalPaneID = strings.TrimSpace(os.Getenv("AZEDARACH_LOGICAL_PANE_ID"))
+		if signal.LogicalPaneID == "" {
+			signal.LogicalPaneID = "agent"
+		}
+		if panePID, err := strconv.Atoi(strings.TrimSpace(os.Getenv("AZEDARACH_PANE_PID"))); err == nil && panePID > 0 {
+			signal.PanePID = panePID
+		}
 	}
 	if event == hookEventSessionEnd {
 		signal.ExitStatus = agentProcessExitStatus(hookCtx.Payload)
@@ -212,6 +226,15 @@ func ingestAgentHookRuntimeSignalBestEffort(ctx context.Context, deps *Dependenc
 	}
 	_, err := deps.DaemonClient.RuntimeSignalIngest(ctx, signal)
 	return err
+}
+
+func agentHookIncarnation(payload map[string]any) string {
+	for _, key := range []string{"session_id", "conversation_id", "thread_id", "thread-id"} {
+		if value, ok := payload[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func agentProcessExitStatus(payload map[string]any) *int {

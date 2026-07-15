@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1232,7 +1233,7 @@ func TestHandleTaskUnarchiveRejectsArchivedParentWithoutFlag(t *testing.T) {
 	}
 }
 
-func TestHandleTaskListRefreshesMissingTmuxSessionBeforeReportingActive(t *testing.T) {
+func TestHandleTaskListConsumesAsynchronousMissingTmuxObservation(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	repoDir := t.TempDir()
@@ -1283,6 +1284,9 @@ func TestHandleTaskListRefreshesMissingTmuxSessionBeforeReportingActive(t *testi
 		revision: map[string]uint64{projectID: 1},
 	}
 	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
+	if err := d.observeTmuxProject(ctx, projectID, newTmuxRuntimeLiveness(nil, nil), domain.CurrentTmuxObservationProvenance(time.Now().UTC().Add(time.Second))); err != nil {
+		t.Fatalf("observe missing tmux session: %v", err)
+	}
 
 	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
@@ -1391,8 +1395,8 @@ func TestHandleTaskListThrottlesSessionRuntimeRefresh(t *testing.T) {
 	} else if !resp.OK {
 		t.Fatalf("first task.list response = %+v", resp.Error)
 	}
-	if got := tmuxRunner.listSessionCallCount(); got != 1 {
-		t.Fatalf("tmux list-sessions calls after first task.list = %d, want 1", got)
+	if got := tmuxRunner.listSessionCallCount(); got != 0 {
+		t.Fatalf("tmux list-sessions calls after first task.list = %d, want 0", got)
 	}
 
 	now = now.Add(time.Second)
@@ -1402,8 +1406,8 @@ func TestHandleTaskListThrottlesSessionRuntimeRefresh(t *testing.T) {
 	} else if !resp.OK {
 		t.Fatalf("second task.list response = %+v", resp.Error)
 	}
-	if got := tmuxRunner.listSessionCallCount(); got != 1 {
-		t.Fatalf("tmux list-sessions calls after throttled task.list = %d, want 1", got)
+	if got := tmuxRunner.listSessionCallCount(); got != 0 {
+		t.Fatalf("tmux list-sessions calls after second task.list = %d, want 0", got)
 	}
 
 	now = now.Add(taskListRuntimeRefreshTTL + time.Millisecond)
@@ -1413,101 +1417,17 @@ func TestHandleTaskListThrottlesSessionRuntimeRefresh(t *testing.T) {
 	} else if !resp.OK {
 		t.Fatalf("third task.list response = %+v", resp.Error)
 	}
-	if got := tmuxRunner.listSessionCallCount(); got != 2 {
-		t.Fatalf("tmux list-sessions calls after throttle expiry = %d, want 2", got)
+	if got := tmuxRunner.listSessionCallCount(); got != 0 {
+		t.Fatalf("tmux list-sessions calls after observation age expiry = %d, want 0", got)
 	}
 }
 
-func TestTaskListSessionRuntimeRefreshSharesInFlightRefresh(t *testing.T) {
-	originalNow := timeNow
+func TestTaskListSessionRuntimeRefreshReadsObserverFreshnessOnly(t *testing.T) {
 	now := time.Date(2026, time.July, 7, 3, 45, 0, 0, time.UTC)
-	timeNow = func() time.Time { return now }
-	t.Cleanup(func() { timeNow = originalNow })
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	const (
-		projectID = "proj-task-list-refresh-shared"
-		issueID   = "az-1"
-	)
-	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
-	t.Cleanup(func() { _ = runtimeStateStore.Close() })
-	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
-		ID:            naming.CanonicalSessionID(projectID, issueID),
-		IssueID:       issueID,
-		State:         daemonstate.SessionStateAttached,
-		ObservedState: daemonstate.SessionStateAttached,
-		UpdatedAt:     now,
-	}); err != nil {
-		t.Fatalf("seed projected session: %v", err)
-	}
-
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	tmuxRunner := &testTmuxRunner{
-		sessions:            map[string]bool{},
-		listSessionsEntered: entered,
-		listSessionsRelease: release,
-		killEntered:         make(chan struct{}),
-		killRelease:         make(chan struct{}),
-	}
-	d := &Daemon{
-		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
-		sessionStore: daemonstate.NewStore(),
-		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
-		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
-			".": runtimeStateStore,
-		},
-		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
-			projectID: runtimeStateStore,
-		},
-	}
-	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
-
-	type result struct {
-		runtimeAt time.Time
-		refreshed bool
-		err       error
-	}
-	firstCh := make(chan result, 1)
-	go func() {
-		runtimeAt, refreshed, err := d.refreshTaskListSessionRuntimeState(ctx, projectID)
-		firstCh <- result{runtimeAt: runtimeAt, refreshed: refreshed, err: err}
-	}()
-
-	select {
-	case <-entered:
-	case <-ctx.Done():
-		t.Fatalf("timed out waiting for first refresh to enter tmux: %v", ctx.Err())
-	}
-
-	secondCh := make(chan result, 1)
-	go func() {
-		runtimeAt, refreshed, err := d.refreshTaskListSessionRuntimeState(ctx, projectID)
-		secondCh <- result{runtimeAt: runtimeAt, refreshed: refreshed, err: err}
-	}()
-	close(release)
-
-	first := <-firstCh
-	if first.err != nil {
-		t.Fatalf("first refresh error: %v", first.err)
-	}
-	if !first.refreshed {
-		t.Fatal("first refresh refreshed = false, want true")
-	}
-	second := <-secondCh
-	if second.err != nil {
-		t.Fatalf("second refresh error: %v", second.err)
-	}
-	if second.refreshed {
-		t.Fatal("second refresh refreshed = true, want shared in-flight result")
-	}
-	if !second.runtimeAt.Equal(first.runtimeAt) {
-		t.Fatalf("second runtimeAt = %v, want shared %v", second.runtimeAt, first.runtimeAt)
-	}
-	if got := tmuxRunner.listSessionCallCount(); got != 1 {
-		t.Fatalf("tmux list-sessions calls = %d, want one shared refresh", got)
+	d := &Daemon{taskListRuntimeLastRefresh: map[string]time.Time{"proj": now}}
+	runtimeAt, refreshed, err := d.refreshTaskListSessionRuntimeState(context.Background(), "proj")
+	if err != nil || refreshed || !runtimeAt.Equal(now) {
+		t.Fatalf("runtime freshness = %v refreshed=%v err=%v, want observer time without refresh", runtimeAt, refreshed, err)
 	}
 }
 
@@ -1682,6 +1602,7 @@ func TestHandleTaskListKeepsFreshResponseWhenRuntimeRefreshSkipsUnchangedRows(t 
 		},
 	}
 	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
+	d.taskListRuntimeLastRefresh = map[string]time.Time{projectID: now}
 
 	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
@@ -8774,7 +8695,17 @@ func TestTaskGraphReadinessRefreshesBacklogRootContainmentAcrossDaemonClients(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}}
+	materializerCtx, cancelMaterializer := context.WithCancel(ctx)
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}, hub: publish.NewHub(16, 8, slog.Default()), revision: map[string]uint64{}}
+	if err := d.startProjectReadMaterializers(materializerCtx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cancelMaterializer()
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+		defer cancelShutdown()
+		d.stopAllProjectReadMaterializers(shutdownCtx)
+	})
 	before, err := d.taskGraphReadiness(ctx, "proj", rootID)
 	if err != nil {
 		t.Fatal(err)
@@ -8786,6 +8717,7 @@ func TestTaskGraphReadinessRefreshesBacklogRootContainmentAcrossDaemonClients(t 
 	if err := writer.UpdateDetails(ctx, rootID, issues.UpdateTaskParams{Title: "Active root", Type: domain.TypeEpic, Priority: domain.P2, Lifecycle: &backlog}); err != nil {
 		t.Fatal(err)
 	}
+	waitForProjectMaterializerRevision(t, d, "proj", 1)
 	after, err := d.taskGraphReadiness(ctx, "proj", rootID)
 	if err != nil {
 		t.Fatal(err)
@@ -8812,7 +8744,17 @@ func TestTaskGraphReadinessRefreshesNestedRootLifecycleAcrossDaemonClients(t *te
 	if _, err := reader.Create(ctx, issues.CreateTaskParams{Title: "ADA child", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &nestedID}); err != nil {
 		t.Fatal(err)
 	}
-	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}}
+	materializerCtx, cancelMaterializer := context.WithCancel(ctx)
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}, hub: publish.NewHub(16, 8, slog.Default()), revision: map[string]uint64{}}
+	if err := d.startProjectReadMaterializers(materializerCtx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cancelMaterializer()
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+		defer cancelShutdown()
+		d.stopAllProjectReadMaterializers(shutdownCtx)
+	})
 	before, err := d.taskGraphReadiness(ctx, "proj", rootID)
 	if err != nil {
 		t.Fatal(err)
@@ -8824,6 +8766,7 @@ func TestTaskGraphReadinessRefreshesNestedRootLifecycleAcrossDaemonClients(t *te
 	if err := writer.UpdateDetails(ctx, nestedID, issues.UpdateTaskParams{Title: "ADA", Type: domain.TypeEpic, Priority: domain.P2, Lifecycle: &backlog}); err != nil {
 		t.Fatal(err)
 	}
+	waitForProjectMaterializerRevision(t, d, "proj", 1)
 	after, err := d.taskGraphReadiness(ctx, "proj", rootID)
 	if err != nil {
 		t.Fatal(err)
@@ -8831,6 +8774,18 @@ func TestTaskGraphReadinessRefreshesNestedRootLifecycleAcrossDaemonClients(t *te
 	if len(after.NestedRoots) != 1 || after.NestedRoots[0].Status != "not_counting_capacity" || !slices.Contains(after.NestedRoots[0].ExclusionReasons, "lifecycle-backlog") {
 		t.Fatalf("after nested roots = %+v, want refreshed lifecycle-backlog exclusion", after.NestedRoots)
 	}
+}
+
+func waitForProjectMaterializerRevision(t *testing.T, d *Daemon, projectID string, minimum uint64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if d.currentRevision(projectID) >= minimum {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("project materializer revision = %d, want at least %d", d.currentRevision(projectID), minimum)
 }
 
 func TestTaskGraphReadinessLoadsRootScopedTasksWithLargeUnrelatedProject(t *testing.T) {
@@ -9028,7 +8983,7 @@ func TestTaskGraphReadinessRefreshesOnlyRootScopedSessions(t *testing.T) {
 	}
 }
 
-func TestTaskGraphReadinessSharesConcurrentRootLoad(t *testing.T) {
+func TestTaskGraphRuntimeValidationCoalescesMultiWatchAndTUIP95(t *testing.T) {
 	projectID := "proj-graph-shared-load"
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	issuesClient := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
@@ -9139,6 +9094,119 @@ func TestTaskGraphReadinessSharesConcurrentRootLoad(t *testing.T) {
 	}
 	if len(second.ready.Active) != 1 || second.ready.Active[0] != childID {
 		t.Fatalf("second active = %v, want [%s]", second.ready.Active, childID)
+	}
+
+	third, err := d.taskGraphReadiness(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("cached readiness error: %v", err)
+	}
+	if len(third.Active) != 1 || third.Active[0] != childID {
+		t.Fatalf("cached active = %v, want [%s]", third.Active, childID)
+	}
+	if got := tmuxRunner.listSessionCallCount(); got != 1 {
+		t.Fatalf("tmux list-sessions calls after sequential duplicate = %d, want cached hybrid runtime observation", got)
+	}
+
+	d.nextRevision(projectID)
+	if _, err := d.taskGraphReadiness(ctx, projectID, rootID); err != nil {
+		t.Fatalf("readiness after revision change: %v", err)
+	}
+	if got := tmuxRunner.listSessionCallCount(); got != 2 {
+		t.Fatalf("tmux list-sessions calls after revision change = %d, want cache invalidation", got)
+	}
+
+	rootedScope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := protocol.OrchestrationSnapshotRequest{Scope: rootedScope}
+	build := func(_ context.Context, _ string, request protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		return protocol.OrchestrationSnapshot{Scope: request.Scope, Active: []string{childID}, Blocked: map[string]string{}}, nil
+	}
+	if _, _, stable, err := d.loadOrchestrationSnapshot(ctx, projectID, request, build); err != nil || !stable {
+		t.Fatalf("warm orchestration snapshot stable=%v err=%v", stable, err)
+	}
+
+	const (
+		watchers   = 5
+		iterations = 20
+		p95Budget  = 25 * time.Millisecond
+	)
+	durations := make([]time.Duration, 0, (watchers+1)*iterations)
+	for range iterations {
+		d.taskGraphRuntimeValidationMu.Lock()
+		d.taskGraphRuntimeValidations = map[string]taskGraphRuntimeValidationEntry{}
+		d.taskGraphRuntimeValidationMu.Unlock()
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		tmuxRunner.mu.Lock()
+		tmuxRunner.listSessionsEntered = entered
+		tmuxRunner.listSessionsRelease = release
+		tmuxRunner.mu.Unlock()
+
+		type timedResult struct {
+			duration time.Duration
+			err      error
+		}
+		results := make(chan timedResult, watchers+1)
+		go func() {
+			started := time.Now()
+			_, err := d.taskGraphReadiness(ctx, projectID, rootID)
+			results <- timedResult{duration: time.Since(started), err: err}
+		}()
+		select {
+		case <-entered:
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for coalesced runtime validation: %v", ctx.Err())
+		}
+		for range watchers - 1 {
+			go func() {
+				started := time.Now()
+				_, err := d.taskGraphReadiness(ctx, projectID, rootID)
+				results <- timedResult{duration: time.Since(started), err: err}
+			}()
+		}
+		go func() {
+			started := time.Now()
+			_, _, _, err := d.loadOrchestrationSnapshot(ctx, projectID, request, build)
+			results <- timedResult{duration: time.Since(started), err: err}
+		}()
+		close(release)
+		for range watchers + 1 {
+			result := <-results
+			if result.err != nil {
+				t.Fatalf("multi-watch/TUI cached read: %v", result.err)
+			}
+			durations = append(durations, result.duration)
+		}
+	}
+	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+	p95 := durations[(len(durations)*95+99)/100-1]
+	if p95 > p95Budget {
+		t.Fatalf("multi-watch plus TUI hybrid p95 = %s, budget %s", p95, p95Budget)
+	}
+	wantRuntimeCalls := 2 + iterations
+	if got := tmuxRunner.listSessionCallCount(); got != wantRuntimeCalls {
+		t.Fatalf("list-sessions calls = %d, want %d (one per forced observation, not per reader)", got, wantRuntimeCalls)
+	}
+	if got := tmuxRunner.listPaneCallCount(); got != wantRuntimeCalls {
+		t.Fatalf("list-panes calls = %d, want %d (one per forced observation, not per reader)", got, wantRuntimeCalls)
+	}
+	t.Logf("multi-watch plus TUI hybrid p95=%s budget=%s samples=%d runtime_validations=%d", p95, p95Budget, len(durations), iterations)
+}
+
+func TestTaskGraphReadinessOwnershipExpiryBoundsCache(t *testing.T) {
+	now := time.Date(2026, time.July, 13, 5, 30, 0, 0, time.UTC)
+	early := now.Add(2 * time.Second)
+	late := now.Add(time.Minute)
+	expired := now.Add(-time.Second)
+	tasks := []domain.Task{
+		{Ownership: &domain.IssueOwnership{ExpiresAt: &late}},
+		{Ownership: &domain.IssueOwnership{ExpiresAt: &early}},
+		{Ownership: &domain.IssueOwnership{ExpiresAt: &expired}},
+	}
+	if got := taskGraphReadinessOwnershipExpiry(tasks, now); !got.Equal(early) {
+		t.Fatalf("cache expiry = %s, want earliest active ownership expiry %s", got, early)
 	}
 }
 
@@ -10009,7 +10077,16 @@ func TestTaskGraphReadinessMarksFailedNestedRootStartAsBlockedCapacity(t *testin
 		t.Fatalf("create nested child: %v", err)
 	}
 
-	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir, nextRevision: sequentialRevision()})
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: logger},
+		hub: publish.NewHub(16, 8, logger),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{},
+	}
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir, hub: d.hub, nextRevision: d.nextRevision})
+	d.operationRuntime = runtime
 	if _, err := runtime.manager.Submit(ctx, daemonops.SubmitRequest{
 		ID:           "op-nested-start",
 		ProjectID:    projectID,
@@ -10023,13 +10100,6 @@ func TestTaskGraphReadinessMarksFailedNestedRootStartAsBlockedCapacity(t *testin
 	}
 	_ = waitForRuntimeState(t, runtime, "op-nested-start", daemonops.StateFailed)
 
-	d := &Daemon{
-		cfg:              Config{RepoDir: repoDir, Logger: logger},
-		operationRuntime: runtime,
-		issueClientsByProject: map[string]*issues.Client{
-			projectID: issuesClient,
-		},
-	}
 	ready, err := d.taskGraphReadiness(ctx, projectID, rootID)
 	if err != nil {
 		t.Fatalf("taskGraphReadiness error: %v", err)
@@ -13555,6 +13625,9 @@ func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testin
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
 		revision:               map[string]uint64{projectID: initialRevision},
 	}
+	if err := d.observeTmuxProject(ctx, projectID, newTmuxRuntimeLiveness([]tmux.SessionInfo{{Name: firstSessionID}, {Name: secondSessionID}}, nil), domain.CurrentTmuxObservationProvenance(timeNow())); err != nil {
+		t.Fatalf("apply asynchronous tmux observation: %v", err)
+	}
 
 	body, err := json.Marshal(map[string][]string{
 		"task_ids": []string{secondID, "az-missing", firstID},
@@ -14318,7 +14391,6 @@ func TestHandleTaskGetEnqueuesOnlyRequestedIssueWorktreeRefreshAsync(t *testing.
 			projectID: store,
 		},
 	}
-
 	reqBody, err := json.Marshal(map[string]string{"task_id": targetID})
 	if err != nil {
 		t.Fatalf("marshal task get request: %v", err)
@@ -14490,6 +14562,9 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueSession(t *testing.T) {
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
 			projectID: store,
 		},
+	}
+	if err := d.observeTmuxProject(ctx, projectID, newTmuxRuntimeLiveness([]tmux.SessionInfo{{Name: targetSessionID}, {Name: contextSessionID}}, nil), domain.CurrentTmuxObservationProvenance(time.Now().UTC())); err != nil {
+		t.Fatalf("apply asynchronous tmux observation: %v", err)
 	}
 
 	reqBody, err := json.Marshal(map[string]string{"task_id": targetID})

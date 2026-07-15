@@ -56,6 +56,7 @@ type OrchestrationSnapshot struct {
 	Lifecycle              domain.OrchestratorLifecycle              `json:"lifecycle,omitempty"`
 	Scope                  domain.OrchestrationScope                 `json:"scope"`
 	Revision               uint64                                    `json:"revision"`
+	Source                 MaterializedSnapshotMetadata `json:"source"`
 	GeneratedAt            time.Time                                 `json:"generated_at"`
 	Roots                  []string                                  `json:"roots,omitempty"`
 	Capacity               OrchestrationCapacity                     `json:"capacity"`

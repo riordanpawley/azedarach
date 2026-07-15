@@ -232,7 +232,6 @@ func TestOrchestrateWatchCommandExitsWhenParentReparentedBeforePolling(t *testin
 	}
 	watchParentPollInterval = time.Millisecond
 
-	var mailWatchCalls int32
 	deps := &Dependencies{
 		RepoDir: "/repo",
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
@@ -245,13 +244,13 @@ func TestOrchestrateWatchCommandExitsWhenParentReparentedBeforePolling(t *testin
 					}), nil
 				case protocol.CommandMailList:
 					return responseWithJSON(req, []protocol.MailEvent{}), nil
-				case protocol.CommandMailWatch:
-					atomic.AddInt32(&mailWatchCalls, 1)
-					return responseWithJSON(req, []protocol.MailEvent{}), nil
 				default:
 					t.Fatalf("unexpected daemon command: %s", req.Command)
 					return protocol.ResponseEnvelope{}, nil
 				}
+			},
+			subscribeFn: func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
+				return make(chan protocol.EventEnvelope), nil
 			},
 		}),
 	}
@@ -264,9 +263,6 @@ func TestOrchestrateWatchCommandExitsWhenParentReparentedBeforePolling(t *testin
 	})
 	if err != nil {
 		t.Fatalf("OrchestrateWatchCommand error = %v", err)
-	}
-	if got := atomic.LoadInt32(&mailWatchCalls); got != 0 {
-		t.Fatalf("mail.watch calls after parent disappearance = %d, want 0", got)
 	}
 }
 
