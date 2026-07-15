@@ -17,12 +17,13 @@ import (
 )
 
 type RunOptions struct {
-	Profile      Profile
-	Baseline     Baseline
-	OutputDir    string
-	WorkingDir   string
-	CheckBudgets bool
-	Now          func() time.Time
+	Profile                   Profile
+	Baseline                  Baseline
+	OutputDir                 string
+	WorkingDir                string
+	CheckBudgets              bool
+	PublishValidationEvidence bool
+	Now                       func() time.Time
 }
 
 func Run(ctx context.Context, opts RunOptions) (Measurement, error) {
@@ -83,8 +84,10 @@ func writeRefusalArtifacts(opts RunOptions, telemetry gocache.Telemetry, refusal
 	if err := writeArtifacts(opts.OutputDir, measurement); err != nil {
 		return measurement, errors.Join(refusal, err)
 	}
-	if err := writeValidationLeaseEvidenceFile(measurement, opts.OutputDir); err != nil {
-		return measurement, errors.Join(refusal, err)
+	if opts.PublishValidationEvidence {
+		if err := writeValidationLeaseEvidenceFile(measurement, opts.OutputDir); err != nil {
+			return measurement, errors.Join(refusal, err)
+		}
 	}
 	return measurement, refusal
 }
@@ -153,8 +156,10 @@ func runLocked(ctx context.Context, opts RunOptions, cacheConfig gocache.Config,
 	if err := writeArtifacts(opts.OutputDir, m); err != nil {
 		return m, err
 	}
-	if err := writeValidationLeaseEvidenceFile(m, opts.OutputDir); err != nil {
-		return m, err
+	if opts.PublishValidationEvidence {
+		if err := writeValidationLeaseEvidenceFile(m, opts.OutputDir); err != nil {
+			return m, err
+		}
 	}
 	var outcomes []error
 	if cacheErr != nil {
