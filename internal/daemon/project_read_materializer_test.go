@@ -347,6 +347,60 @@ func TestProjectReadMaterializerEmptyObservationRefreshesOnlyAffectedIssue(t *te
 	}
 }
 
+func TestProjectReadMaterializerRuntimeHydrationFailureReturnsTicketData(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestIssueClient(t)
+	id, err := client.Create(ctx, issues.CreateTaskParams{Title: "ticket survives degraded runtime", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{
+		cfg:           Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issues:        client,
+		materializers: map[string]*projectReadMaterializer{},
+		projectReadRuntimeHydrate: func(context.Context, string, []domain.Task) ([]domain.Task, error) {
+			return nil, errors.New("injected runtime hydration failure")
+		},
+	}
+	materializer, err := d.ensureProjectReadMaterializer(ctx, protocol.DefaultProjectID, client)
+	if err != nil {
+		t.Fatalf("bootstrap degraded runtime materializer: %v", err)
+	}
+	tasks, _ := materializer.snapshot()
+	got, ok := findDaemonTaskByID(tasks, id)
+	if !ok || got.Title != "ticket survives degraded runtime" {
+		t.Fatalf("degraded ticket = %+v found=%t", got, ok)
+	}
+}
+
+func TestProjectReadMaterializerWorktreeFailureDoesNotAbortBootstrap(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestIssueClient(t)
+	id, err := client.Create(ctx, issues.CreateTaskParams{Title: "ticket survives degraded worktrees", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{
+		cfg:           Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issues:        client,
+		materializers: map[string]*projectReadMaterializer{},
+		projectReadWorktreeRefresh: func(context.Context, string, *projectReadMaterializer) error {
+			return errors.New("injected worktree enrichment failure")
+		},
+	}
+	materializer, err := d.ensureProjectReadMaterializer(ctx, protocol.DefaultProjectID, client)
+	if err != nil {
+		t.Fatalf("bootstrap degraded worktree materializer: %v", err)
+	}
+	tasks, _ := materializer.snapshot()
+	if got, ok := findDaemonTaskByID(tasks, id); !ok || got.Title != "ticket survives degraded worktrees" {
+		t.Fatalf("degraded ticket = %+v found=%t", got, ok)
+	}
+	if worktrees := materializer.snapshotWorktrees(); len(worktrees) != 0 {
+		t.Fatalf("degraded worktrees = %+v want empty", worktrees)
+	}
+}
+
 func materializedSourceHasAuthority(sources []protocol.ProjectionSourceRange, authority string) bool {
 	for _, source := range sources {
 		if source.Authority == authority {

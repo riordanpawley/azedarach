@@ -215,6 +215,8 @@ type Daemon struct {
 	materializers                        map[string]*projectReadMaterializer
 	materializersStarted                 bool
 	materializersContext                 context.Context
+	projectReadRuntimeHydrate            func(context.Context, string, []domain.Task) ([]domain.Task, error)
+	projectReadWorktreeRefresh           func(context.Context, string, *projectReadMaterializer) error
 	reviewLeaseReleasedBeforeClose       func(context.Context, string, string) error
 	watchClientsMu                       sync.Mutex
 	watchClients                         map[string]watchClientObservation

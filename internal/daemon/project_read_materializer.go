@@ -553,7 +553,7 @@ func (d *Daemon) ensureProjectReadMaterializer(ctx context.Context, projectID st
 	if err := materializer.bootstrap(ctx); err != nil {
 		return nil, fmt.Errorf("bootstrap project %s: %w", projectID, err)
 	}
-	if err := d.refreshProjectReadWorktrees(ctx, projectID, materializer); err != nil {
+	if err := d.refreshProjectReadWorktreesForBootstrap(ctx, projectID, materializer); err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.WarnContext(ctx, "project read materializer continuing without runtime worktree enrichment", "project_id", projectID, "error", err)
 		}
@@ -683,7 +683,13 @@ func (d *Daemon) projectReadSnapshot(projectID string) ([]domain.Task, protocol.
 }
 
 func (d *Daemon) hydrateProjectReadTasks(ctx context.Context, projectID string, client *issues.Client, tasks []domain.Task) []domain.Task {
-	hydrated, err := client.HydrateRuntime(ctx, projectID, tasks)
+	hydrate := client.HydrateRuntime
+	if d.projectReadRuntimeHydrate != nil {
+		hydrate = func(ctx context.Context, projectID string, tasks []domain.Task) ([]domain.Task, error) {
+			return d.projectReadRuntimeHydrate(ctx, projectID, tasks)
+		}
+	}
+	hydrated, err := hydrate(ctx, projectID, tasks)
 	if err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.WarnContext(ctx, "project read materializer continuing without runtime session enrichment", "project_id", projectID, "error", err)
@@ -691,6 +697,13 @@ func (d *Daemon) hydrateProjectReadTasks(ctx context.Context, projectID string, 
 		return tasks
 	}
 	return d.enrichTasksWithSessionState(ctx, projectID, hydrated)
+}
+
+func (d *Daemon) refreshProjectReadWorktreesForBootstrap(ctx context.Context, projectID string, materializer *projectReadMaterializer) error {
+	if d.projectReadWorktreeRefresh != nil {
+		return d.projectReadWorktreeRefresh(ctx, projectID, materializer)
+	}
+	return d.refreshProjectReadWorktrees(ctx, projectID, materializer)
 }
 
 func (d *Daemon) configureProjectReadMaterializer(materializer *projectReadMaterializer, projectID string, client *issues.Client) {
