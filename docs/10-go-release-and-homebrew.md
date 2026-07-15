@@ -48,6 +48,17 @@ with temporary databases or private online-backup clones. Candidate processes
 must not open production databases, projections, sockets, locks, or the global
 daemon, and must never act as the validation control plane.
 
+The validation wrapper keeps two explicit, non-interchangeable channels. The
+installed production client (`AZEDARACH_VALIDATION_CONTROL_AZ_BIN`, with the
+legacy `AZEDARACH_VALIDATION_AZ_BIN` name accepted for control only) performs
+lease acquire, heartbeat, nested authorization, and finish with candidate
+daemon routing removed. An explicitly worktree-scoped run must separately pin
+`AZEDARACH_VALIDATION_CLEANUP_AZ_BIN` to the candidate-compatible cleanup
+client; that client receives scoped routing but no production lease token or
+request authority. Candidate daemon stop and private runtime removal complete
+before the production finish RPC. Any cleanup error is written into terminal
+evidence and forces a failed outcome even when the payload already failed.
+
 After that candidate is integrated into `main`, production deployment remains
 an explicit operator action from the primary worktree:
 
