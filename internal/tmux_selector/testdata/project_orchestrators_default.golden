@@ -1,0 +1,18 @@
+╭───────────────────────────────────────────────────────╮  ╭───────────────────────────────────────────────────────╮
+│ 0  P0  ▶az-orchestrator-project ◐ wait  T           … │  │ 1  P0  ch-orchestrator-project ◐ wait  T            … │
+│ Azedarach project orchestrator                        │  │ Chefy project orchestrator                            │
+│ project orchestrator  tmux az-orchestrator-project    │  │ project orchestrator  tmux ch-orchestrator-project    │
+│ Azedarach                                             │  │ Chefy                                                 │
+╰───────────────────────────────────────────────────────╯  ╰───────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+[ Cards ]   Tree   Tab: tab  h/j/k/l: move  Pg: page  q/Esc: close  x: stop  /: search  gw: labels  Enter: drill  a: sw…

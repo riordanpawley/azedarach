@@ -121,6 +121,7 @@ type Daemon struct {
 	issueClientsMu                       sync.Mutex
 	issueClientsByProject                map[string]*issues.Client
 	issueClientsByRoot                   map[string]*issues.Client
+	decisionPropagationMu                sync.Mutex
 	projectIssueStoreHealthMu            sync.Mutex
 	projectIssueStoreHealthByProject     map[string]projectIssueStoreHealthState
 	projectConfigMu                      sync.Mutex
@@ -228,6 +229,7 @@ type Daemon struct {
 	reviewReadyRecoveryMu                sync.Mutex
 	reviewReadyRecoveryCursor            map[string]int64
 	reviewReadyRecoveryBeforeLoad        func()
+	decisionTransferBeforeRevalidation   func(string, decisionMDTransferTarget)
 	deferredCleanupOperationManager      deferredCleanupOperationManager
 
 	revMu    sync.Mutex
@@ -312,12 +314,10 @@ func New(cfg Config) *Daemon {
 		baseBranch:         cfg.BaseBranch,
 		workflowMode:       cfg.GitWorkflowMode,
 	}
-	prWorkflow := pr.NewPRWorkflow(&pr.ExecRunner{}, cfg.Logger)
 	devServerManager := devserver.NewManager(devserver.NewPortAllocator(3000), cfg.Logger)
 	sessionStore := daemonstate.NewStore()
 	issuesClient := issues.NewClient(cfg.RepoDir, cfg.Logger)
 	sessionHandler := daemonhandlers.NewSessionHandler(sessionStore)
-	prHandler := daemonhandlers.NewPRHandler(prWorkflow, gitService, issuesClient)
 	devServerHandler := daemonhandlers.NewDevServerHandler(devServerManager)
 	specService := issueSpecService{daemon: nil}
 
@@ -425,6 +425,20 @@ func New(cfg Config) *Daemon {
 	d.runtimeProjectionCoalescer = newRuntimeProjectionEventCoalescer(d, defaultRuntimeProjectionCoalesceWindow)
 	d.scheduledScripts = newScheduledScriptManager(d, cfg.Logger, cfg.scheduledScriptRunner)
 	d.issueAutoArchive = newIssueAutoArchiveWorker(d, cfg.Logger)
+	prHandler := daemonhandlers.NewProjectPRHandler(gitService, func(_ context.Context, projectID string) (daemonhandlers.PRProjectResources, error) {
+		repoDir := d.resolveRepoDirForProjectExact(projectID)
+		if repoDir == "" {
+			return daemonhandlers.PRProjectResources{}, fmt.Errorf("unknown project %q for PR command; refusing repository fallback", projectID)
+		}
+		issueRefs := d.issueClientForProject(projectID)
+		if issueRefs == nil {
+			return daemonhandlers.PRProjectResources{}, fmt.Errorf("project %q has no issue store for PR command; refusing project fallback", projectID)
+		}
+		return daemonhandlers.PRProjectResources{
+			Workflow:  pr.NewPRWorkflow(pr.NewExecRunner(repoDir), cfg.Logger),
+			IssueRefs: issueRefs,
+		}, nil
+	})
 	gitService.runtimeProjectionWriter = d.runtimeProjectionStateWriter()
 	gitService.runtimeStateStoreForProject = func(projectID string) *daemonstate.RuntimeStateStore {
 		return d.worktreeRuntimeStateStore(projectID)
@@ -700,8 +714,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 		waitForShutdown()
 		return nil
 	}
+	d.reconcileAllDecisionPropagationOutboxes(ctx)
 	d.startRuntimeReconcileWorker(serveCtx)
 	d.startTmuxObservationWorker(serveCtx)
+	d.startDecisionPropagationReconcileWorker(serveCtx)
 	d.startLinearSyncWorker(serveCtx)
 	d.startScheduledScriptWorker(serveCtx)
 	d.startIssueAutoArchiveWorker(serveCtx)
@@ -851,6 +867,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleHookLogList(ctx, req)
 	case protocol.CommandRuntimeSignalIngest:
 		return d.handleRuntimeSignalIngest(ctx, req)
+	case protocol.CommandValidationAcquire, protocol.CommandValidationHeartbeat, protocol.CommandValidationNested, protocol.CommandValidationFinish, protocol.CommandValidationStatus:
+		return d.handleValidationCommand(ctx, req)
 	case protocol.CommandUIOpenTaskWorkspace, protocol.CommandUIOpenTaskDrillDown:
 		return d.handleUIIssueCommand(ctx, req)
 	case protocol.CommandUIStateGet:

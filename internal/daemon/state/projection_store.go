@@ -91,7 +91,9 @@ type PhysicalSessionObservation struct {
 func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context, observation PhysicalSessionObservation) ([]Session, bool, error) {
 	var changed []Session
 	var applied bool
-	err := s.withWriteLock(ctx, func() error {
+	err := s.withRetryingWriteLock(ctx, "apply_physical_session_observation", func(writeCtx context.Context) error {
+		changed = nil
+		applied = false
 		db, err := s.dbHandle()
 		if err != nil {
 			return err
@@ -100,13 +102,13 @@ func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context,
 		if err != nil {
 			return err
 		}
-		tx, err := db.BeginTx(ctx, nil)
+		tx, err := db.BeginTx(writeCtx, nil)
 		if err != nil {
 			return fmt.Errorf("begin physical session observation fan-out: %w", err)
 		}
 		defer func() { _ = tx.Rollback() }()
 
-		result, err := tx.ExecContext(ctx, `INSERT INTO `+physicalSessionObservationTable+`
+		result, err := tx.ExecContext(writeCtx, `INSERT INTO `+physicalSessionObservationTable+`
 			(project_id,session_id,observed_state,activity,activity_source,updated_at,observed_version)
 			VALUES(?,?,?,?,?,?,?)
 			ON CONFLICT(project_id,session_id) DO UPDATE SET
@@ -133,7 +135,7 @@ func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context,
 			return nil
 		}
 
-		linked, err := listSessionIntentsByPhysicalIDTx(ctx, tx, observation.ProjectID, observation.SessionID)
+		linked, err := listSessionIntentsByPhysicalIDTx(writeCtx, tx, observation.ProjectID, observation.SessionID)
 		if err != nil {
 			return err
 		}
@@ -154,12 +156,12 @@ func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context,
 				args = append(args, observation.StartedAt.Format(time.RFC3339Nano))
 			}
 			args = append(args, observation.ProjectID, logicalSessionIntentID(intent))
-			if _, err := tx.ExecContext(ctx, `UPDATE `+targetTable+` SET `+setClause+`
+			if _, err := tx.ExecContext(writeCtx, `UPDATE `+targetTable+` SET `+setClause+`
 				WHERE project_id=? AND logical_id=?`, args...); err != nil {
 				return fmt.Errorf("fan physical session observation into logical intent %s: %w", logicalSessionIntentID(intent), err)
 			}
 		}
-		changed, err = listSessionIntentsByPhysicalIDTx(ctx, tx, observation.ProjectID, observation.SessionID)
+		changed, err = listSessionIntentsByPhysicalIDTx(writeCtx, tx, observation.ProjectID, observation.SessionID)
 		if err != nil {
 			return err
 		}
@@ -177,7 +179,9 @@ func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context,
 func (s *RuntimeStateStore) ApplyWorkerSessionCompensation(ctx context.Context, projectID, sessionID, issueID string, desiredState, observedState SessionState, activity, activitySource string, updatedAt time.Time) ([]Session, SessionState, error) {
 	var changed []Session
 	effectiveState := NormalizeSessionState(desiredState)
-	err := s.withWriteLock(ctx, func() error {
+	err := s.withRetryingWriteLock(ctx, "apply_worker_session_compensation", func(writeCtx context.Context) error {
+		changed = nil
+		effectiveState = NormalizeSessionState(desiredState)
 		db, err := s.dbHandle()
 		if err != nil {
 			return err
@@ -193,12 +197,12 @@ func (s *RuntimeStateStore) ApplyWorkerSessionCompensation(ctx context.Context, 
 		if !validSessionProductState(desiredState, false) {
 			return fmt.Errorf("session compensation: invalid desired state %q", desiredState)
 		}
-		tx, err := db.BeginTx(ctx, nil)
+		tx, err := db.BeginTx(writeCtx, nil)
 		if err != nil {
 			return fmt.Errorf("begin session compensation: %w", err)
 		}
 		defer func() { _ = tx.Rollback() }()
-		result, err := tx.ExecContext(ctx, `INSERT INTO `+physicalSessionObservationTable+`
+		result, err := tx.ExecContext(writeCtx, `INSERT INTO `+physicalSessionObservationTable+`
 			(project_id,session_id,observed_state,activity,activity_source,updated_at,observed_version)
 			VALUES(?,?,?,?,?,?,?)
 			ON CONFLICT(project_id,session_id) DO UPDATE SET observed_state=excluded.observed_state,activity=excluded.activity,
@@ -215,7 +219,7 @@ func (s *RuntimeStateStore) ApplyWorkerSessionCompensation(ctx context.Context, 
 		}
 		if affected == 0 {
 			var state, updated string
-			if err := tx.QueryRowContext(ctx, `SELECT observed_state,activity,activity_source,updated_at,observed_version FROM `+physicalSessionObservationTable+` WHERE project_id=? AND session_id=?`, observation.ProjectID, observation.SessionID).
+			if err := tx.QueryRowContext(writeCtx, `SELECT observed_state,activity,activity_source,updated_at,observed_version FROM `+physicalSessionObservationTable+` WHERE project_id=? AND session_id=?`, observation.ProjectID, observation.SessionID).
 				Scan(&state, &observation.Activity, &observation.ActivitySource, &updated, &observation.ObservedVersion); err != nil {
 				return fmt.Errorf("load winning compensated physical observation: %w", err)
 			}
@@ -227,7 +231,7 @@ func (s *RuntimeStateStore) ApplyWorkerSessionCompensation(ctx context.Context, 
 			effectiveState = observation.ObservedState
 		}
 		logicalID := logicalSessionIntentID(Session{Role: SessionRoleWorker, ScopeKind: SessionScopeIssue, ScopeID: strings.TrimSpace(issueID)})
-		result, err = tx.ExecContext(ctx, `UPDATE `+sessionStateTable+` SET state=?,updated_at=? WHERE project_id=? AND logical_id=?`,
+		result, err = tx.ExecContext(writeCtx, `UPDATE `+sessionStateTable+` SET state=?,updated_at=? WHERE project_id=? AND logical_id=?`,
 			effectiveState, observation.UpdatedAt.Format(time.RFC3339Nano), observation.ProjectID, logicalID)
 		if err != nil {
 			return fmt.Errorf("update compensated desired session: %w", err)
@@ -235,19 +239,19 @@ func (s *RuntimeStateStore) ApplyWorkerSessionCompensation(ctx context.Context, 
 		if affected, err := result.RowsAffected(); err != nil || affected != 1 {
 			return fmt.Errorf("update compensated desired session: affected=%d err=%v", affected, err)
 		}
-		linked, err := listSessionIntentsByPhysicalIDTx(ctx, tx, observation.ProjectID, observation.SessionID)
+		linked, err := listSessionIntentsByPhysicalIDTx(writeCtx, tx, observation.ProjectID, observation.SessionID)
 		if err != nil {
 			return err
 		}
 		for _, intent := range linked {
 			table := sessionStorageTableForID(intent.ID)
-			if _, err := tx.ExecContext(ctx, `UPDATE `+table+` SET observed_state=?,activity=?,activity_source=?,updated_at=? WHERE project_id=? AND logical_id=?`,
+			if _, err := tx.ExecContext(writeCtx, `UPDATE `+table+` SET observed_state=?,activity=?,activity_source=?,updated_at=? WHERE project_id=? AND logical_id=?`,
 				observation.ObservedState, observation.Activity, observation.ActivitySource, observation.UpdatedAt.Format(time.RFC3339Nano),
 				observation.ProjectID, logicalSessionIntentID(intent)); err != nil {
 				return fmt.Errorf("fan compensated physical observation: %w", err)
 			}
 		}
-		changed, err = listSessionIntentsByPhysicalIDTx(ctx, tx, observation.ProjectID, observation.SessionID)
+		changed, err = listSessionIntentsByPhysicalIDTx(writeCtx, tx, observation.ProjectID, observation.SessionID)
 		if err != nil {
 			return err
 		}
@@ -432,6 +436,19 @@ type RuntimeStateStore struct {
 	db *sql.DB
 }
 
+type sqliteWriteAttemptHookKey struct{}
+
+// WithSQLiteWriteAttemptHookForTest returns a context that injects failures
+// immediately before named runtime projection write attempts. It exists only
+// for deterministic active-path contention tests; production callers must not
+// use it to alter persistence behavior.
+func WithSQLiteWriteAttemptHookForTest(ctx context.Context, hook func(operation string, attempt int) error) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, sqliteWriteAttemptHookKey{}, hook)
+}
+
 // SessionStateReader loads persisted session state rows for a project.
 type SessionStateReader interface {
 	ListSessionStates(context.Context, string) ([]Session, error)
@@ -539,10 +556,8 @@ func (s *RuntimeStateStore) Close() error {
 }
 
 func (s *RuntimeStateStore) UpsertSessionState(ctx context.Context, projectID string, session Session) error {
-	return s.withWriteLock(ctx, func() error {
-		return retrySQLiteWrite(ctx, runtimeSQLiteRetryBudget, runtimeSQLiteRetryDelay, waitSQLiteWriteRetry, func() error {
-			return s.upsertSessionStateLocked(ctx, projectID, session)
-		})
+	return s.withRetryingWriteLock(ctx, "upsert_session_state", func(writeCtx context.Context) error {
+		return s.upsertSessionStateLocked(writeCtx, projectID, session)
 	})
 }
 
@@ -726,13 +741,13 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 }
 
 func (s *RuntimeStateStore) DeleteSessionState(ctx context.Context, projectID, sessionID string) error {
-	return s.withWriteLock(ctx, func() error {
-		return s.deleteSessionStateLocked(ctx, projectID, sessionID)
+	return s.withRetryingWriteLock(ctx, "delete_session_state", func(writeCtx context.Context) error {
+		return s.deleteSessionStateLocked(writeCtx, projectID, sessionID)
 	})
 }
 
 func (s *RuntimeStateStore) DeleteSessionIntentState(ctx context.Context, projectID string, session Session) error {
-	return s.withWriteLock(ctx, func() error {
+	return s.withRetryingWriteLock(ctx, "delete_session_intent_state", func(writeCtx context.Context) error {
 		db, err := s.dbHandle()
 		if err != nil {
 			return err
@@ -744,7 +759,7 @@ func (s *RuntimeStateStore) DeleteSessionIntentState(ctx context.Context, projec
 			return nil
 		}
 		for _, table := range []string{sessionStateTable, sessionObservationTable} {
-			if _, err := db.ExecContext(ctx, `DELETE FROM `+table+` WHERE project_id=? AND logical_id=?`, projectID, logicalID); err != nil {
+			if _, err := db.ExecContext(writeCtx, `DELETE FROM `+table+` WHERE project_id=? AND logical_id=?`, projectID, logicalID); err != nil {
 				return fmt.Errorf("delete logical session intent %s/%s: %w", projectID, logicalID, err)
 			}
 		}
@@ -778,8 +793,8 @@ func (s *RuntimeStateStore) deleteSessionStateLocked(ctx context.Context, projec
 }
 
 func (s *RuntimeStateStore) UpsertSessionActivityEvidence(ctx context.Context, evidence SessionActivityEvidence) error {
-	return s.withWriteLock(ctx, func() error {
-		return s.upsertSessionActivityEvidenceLocked(ctx, evidence)
+	return s.withRetryingWriteLock(ctx, "upsert_session_activity_evidence", func(writeCtx context.Context) error {
+		return s.upsertSessionActivityEvidenceLocked(writeCtx, evidence)
 	})
 }
 
@@ -1074,8 +1089,8 @@ func scanSessionActivityEvidence(scanner sessionActivityEvidenceScanner) (Sessio
 }
 
 func (s *RuntimeStateStore) ReplaceSessionStates(ctx context.Context, projectID string, sessions []Session) error {
-	return s.withWriteLock(ctx, func() error {
-		return s.replaceSessionStatesLocked(ctx, projectID, sessions)
+	return s.withRetryingWriteLock(ctx, "replace_session_states", func(writeCtx context.Context) error {
+		return s.replaceSessionStatesLocked(writeCtx, projectID, sessions)
 	})
 }
 
@@ -1708,10 +1723,8 @@ func (s *RuntimeStateStore) ListProjectIDs(ctx context.Context) ([]string, error
 }
 
 func (s *RuntimeStateStore) UpsertWorktreeState(ctx context.Context, worktreeState WorktreeState) error {
-	return s.withWriteLock(ctx, func() error {
-		return retrySQLiteWrite(ctx, runtimeSQLiteRetryBudget, runtimeSQLiteRetryDelay, waitSQLiteWriteRetry, func() error {
-			return s.upsertWorktreeStateLocked(ctx, worktreeState)
-		})
+	return s.withRetryingWriteLock(ctx, "upsert_worktree_state", func(writeCtx context.Context) error {
+		return s.upsertWorktreeStateLocked(writeCtx, worktreeState)
 	})
 }
 
@@ -1753,8 +1766,8 @@ func (s *RuntimeStateStore) upsertWorktreeStateLocked(ctx context.Context, workt
 }
 
 func (s *RuntimeStateStore) DeleteWorktreeState(ctx context.Context, projectID, issueID string) error {
-	return s.withWriteLock(ctx, func() error {
-		return s.deleteWorktreeStateLocked(ctx, projectID, issueID)
+	return s.withRetryingWriteLock(ctx, "delete_worktree_state", func(writeCtx context.Context) error {
+		return s.deleteWorktreeStateLocked(writeCtx, projectID, issueID)
 	})
 }
 
@@ -1778,8 +1791,8 @@ func (s *RuntimeStateStore) deleteWorktreeStateLocked(ctx context.Context, proje
 }
 
 func (s *RuntimeStateStore) ReplaceWorktreeStates(ctx context.Context, projectID string, worktreeStates []WorktreeState) error {
-	return s.withWriteLock(ctx, func() error {
-		return s.replaceWorktreeStatesLocked(ctx, projectID, worktreeStates)
+	return s.withRetryingWriteLock(ctx, "replace_worktree_states", func(writeCtx context.Context) error {
+		return s.replaceWorktreeStatesLocked(writeCtx, projectID, worktreeStates)
 	})
 }
 
@@ -2043,8 +2056,8 @@ func (s *RuntimeStateStore) GetWorktreeStateByIssueID(ctx context.Context, proje
 }
 
 func (s *RuntimeStateStore) UpsertWorktreeStateGitStatus(ctx context.Context, projectID, issueID string, statusRaw json.RawMessage, updatedAt time.Time) error {
-	return s.withWriteLock(ctx, func() error {
-		return s.upsertWorktreeStateGitStatusLocked(ctx, projectID, issueID, statusRaw, updatedAt)
+	return s.withRetryingWriteLock(ctx, "upsert_worktree_git_status", func(writeCtx context.Context) error {
+		return s.upsertWorktreeStateGitStatusLocked(writeCtx, projectID, issueID, statusRaw, updatedAt)
 	})
 }
 
@@ -2171,36 +2184,78 @@ func (s *RuntimeStateStore) withWriteLock(ctx context.Context, fn func() error) 
 	})
 }
 
+func (s *RuntimeStateStore) withRetryingWriteLock(ctx context.Context, operation string, fn func(context.Context) error) error {
+	if _, err := s.dbHandle(); err != nil {
+		return err
+	}
+	return sqliteutil.WithWriteLockContext(ctx, s.dbPath, func(lockCtx context.Context) error {
+		attempts := 0
+		err := retrySQLiteWrite(lockCtx, runtimeSQLiteRetryBudget, runtimeSQLiteRetryDelay, func(waitCtx context.Context, delay time.Duration) error {
+			if s.logger != nil {
+				log := s.logger.DebugContext
+				if attempts == 1 {
+					log = s.logger.WarnContext
+				}
+				log(ctx, "runtime projection write contention; retrying",
+					"event", "runtime_projection.write.retrying",
+					"operation", operation,
+					"attempt", attempts,
+					"retry_delay", delay,
+					"error_class", "dependency",
+					"error_code", "sqlite_busy_or_locked",
+					"error_retryable", true,
+					"error_boundary", "dependency",
+				)
+			}
+			return waitSQLiteWriteRetry(waitCtx, delay)
+		}, func(attemptCtx context.Context) error {
+			attempts++
+			if hook, _ := attemptCtx.Value(sqliteWriteAttemptHookKey{}).(func(string, int) error); hook != nil {
+				if err := hook(operation, attempts); err != nil {
+					return err
+				}
+			}
+			return fn(attemptCtx)
+		})
+		if err != nil && isSQLiteWriteContention(err) {
+			attemptNoun := "attempts"
+			if attempts == 1 {
+				attemptNoun = "attempt"
+			}
+			return fmt.Errorf("runtime projection write %s exhausted after %d %s: %w", operation, attempts, attemptNoun, err)
+		}
+		if err != nil {
+			return fmt.Errorf("runtime projection write %s failed on attempt %d: %w", operation, attempts, err)
+		}
+		return nil
+	})
+}
+
 func retrySQLiteWrite(
 	ctx context.Context,
 	budget time.Duration,
 	delay time.Duration,
 	wait func(context.Context, time.Duration) error,
-	fn func() error,
+	fn func(context.Context) error,
 ) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	retryCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	var lastErr error
 	for {
 		if retryCtx.Err() != nil {
-			if lastErr != nil {
-				return lastErr
-			}
 			return retryCtx.Err()
 		}
-		err := fn()
+		err := fn(retryCtx)
 		if err == nil {
 			return nil
 		}
 		if !isSQLiteWriteContention(err) {
 			return err
 		}
-		lastErr = err
 		if err := wait(retryCtx, delay); err != nil {
-			return lastErr
+			return err
 		}
 	}
 }

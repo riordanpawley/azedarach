@@ -36,7 +36,11 @@ type InventoryEntry struct {
 	Priority              domain.Priority
 	Type                  domain.TaskType
 	ProjectID             string
+	ProjectName           string
 	ProjectPath           string
+	SessionRole           string
+	SessionScopeKind      string
+	SessionScopeID        string
 	Worktree              string
 	Activity              string
 	ActivitySource        string
@@ -1029,16 +1033,17 @@ func (m Model) renderTreeRow(row sessionTreeRow, entry InventoryEntry, labels ma
 	}
 	issueStatus := issueStatusLabel(entry)
 	metaParts := []string{}
+	if scope := sessionScopeDisplayLabel(entry); scope != "" {
+		metaParts = append(metaParts, m.styles.StatusInfo.Render(scope))
+	}
 	if entry.SessionID != "" {
 		metaParts = append(metaParts, renderTmuxSessionMeta(entry, m.styles))
 	}
 	if updated := formatEntryUpdatedAge(entry, time.Now()); updated != "" {
 		metaParts = append(metaParts, m.styles.StatusHint.Render("updated "+updated))
 	}
-	if entry.ProjectPath != "" {
-		metaParts = append(metaParts, m.styles.StatusHint.Render(entry.ProjectPath))
-	} else if entry.ProjectID != "" {
-		metaParts = append(metaParts, m.styles.StatusHint.Render(entry.ProjectID))
+	if project := entryProjectDisplayName(entry); project != "" {
+		metaParts = append(metaParts, m.styles.StatusHint.Render(project))
 	}
 	meta := ""
 	if len(metaParts) > 0 {
@@ -2448,8 +2453,11 @@ func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style
 		GitAdditions:          row.GitAdditions,
 		GitDeletions:          row.GitDeletions,
 	}
-	project := firstNonEmpty(row.ProjectPath, row.ProjectID)
+	project := entryProjectDisplayName(row)
 	metaParts := []string{}
+	if scope := sessionScopeDisplayLabel(row); scope != "" {
+		metaParts = append(metaParts, s.StatusInfo.Render(scope))
+	}
 	if issueStatus := issueStatusLabel(row); issueStatus != "" {
 		metaParts = append(metaParts, renderIssueMeta(issueStatus))
 	}
@@ -2477,6 +2485,23 @@ func RenderSessionRow(row SessionRow, selected bool, width int, _ lipgloss.Style
 		return card
 	}
 	return insertCardMetaLines(card, metaParts, origin, s)
+}
+
+func entryProjectDisplayName(entry InventoryEntry) string {
+	if strings.TrimSpace(entry.SessionRole) == string(protocol.SessionRoleOrchestrator) {
+		return firstNonEmpty(entry.ProjectName, entry.ProjectPath, entry.ProjectID)
+	}
+	return firstNonEmpty(entry.ProjectPath, entry.ProjectID, entry.ProjectName)
+}
+
+func sessionScopeDisplayLabel(entry InventoryEntry) string {
+	if strings.TrimSpace(entry.SessionRole) != string(protocol.SessionRoleOrchestrator) {
+		return ""
+	}
+	if strings.TrimSpace(entry.SessionScopeID) == "project" {
+		return "project orchestrator"
+	}
+	return "rooted orchestrator"
 }
 
 func insertCardMetaLines(card string, parts []string, origin string, s *styles.Styles) string {

@@ -64,8 +64,19 @@ choose_install_dir() {
   fi
 
   if command -v az >/dev/null 2>&1; then
-    local current_dir
+    local current_dir current_generation current_parent managed_install_dir
     current_dir="$(dirname "$(command -v az)")"
+    current_generation="$(basename "$current_dir")"
+    current_parent="$(dirname "$current_dir")"
+    if [[ "$(basename "$current_parent")" == ".azedarach-generations" &&
+          "$current_generation" == generation.?* &&
+          -x "$current_dir/az" && -x "$current_dir/azd" ]]; then
+      managed_install_dir="$(dirname "$current_parent")"
+      if [[ -w "$managed_install_dir" ]]; then
+        echo "$managed_install_dir"
+        return 0
+      fi
+    fi
     # Skip repo-local bin so the installed command does not depend on a worktree.
     if [ "$current_dir" != "$repo_root/bin" ] && [ -w "$current_dir" ]; then
       echo "$current_dir"
@@ -120,6 +131,25 @@ atomic_symlink() {
     rm -f "$temporary"
     return 1
   fi
+}
+
+resolve_executable() {
+  local target="$1"
+  local link directory hops=0
+  while [[ -L "$target" ]]; do
+    hops=$((hops + 1))
+    if ((hops > 40)); then
+      return 1
+    fi
+    link="$(readlink "$target")" || return 1
+    if [[ "$link" = /* ]]; then
+      target="$link"
+    else
+      target="$(dirname "$target")/$link"
+    fi
+  done
+  directory="$(CDPATH= cd -P -- "$(dirname "$target")" 2>/dev/null && pwd)" || return 1
+  printf '%s/%s\n' "$directory" "$(basename "$target")"
 }
 
 public_links_are_managed() {
@@ -181,9 +211,19 @@ fi
 
 candidate_generation="$new_generation"
 new_generation=""
+candidate_generation_resolved="$(CDPATH= cd -P -- "$candidate_generation" && pwd)"
 if ! atomic_symlink ".azedarach-generations/$(basename "$candidate_generation")" \
   "$install_dir/.azedarach-current"; then
   rm -rf "$candidate_generation"
+  exit 1
+fi
+installed_az="$(resolve_executable "$install_dir/az" 2>/dev/null || true)"
+installed_azd="$(resolve_executable "$install_dir/azd" 2>/dev/null || true)"
+if [[ "$installed_az" != "$candidate_generation_resolved/az" ||
+      "$installed_azd" != "$candidate_generation_resolved/azd" ]]; then
+  echo "Installed control links did not resolve to the published coherent generation" >&2
+  echo "az=$installed_az" >&2
+  echo "azd=$installed_azd" >&2
   exit 1
 fi
 # Successful immutable generations are retained. A long-lived az/watch process
@@ -198,7 +238,46 @@ lock_dir=""
 
 echo "Installed az -> $install_dir/az"
 echo "Installed azd -> $install_dir/azd"
-echo "Global az resolves to: $(command -v az || true)"
+caller_az="$(command -v az 2>/dev/null || true)"
+caller_azd="$(command -v azd 2>/dev/null || true)"
+caller_az_target="$(resolve_executable "$caller_az" 2>/dev/null || true)"
+caller_azd_target="$(resolve_executable "$caller_azd" 2>/dev/null || true)"
+active_az_target="$(resolve_executable "$install_dir/az" 2>/dev/null || true)"
+active_azd_target="$(resolve_executable "$install_dir/azd" 2>/dev/null || true)"
+active_generation="$(dirname "$active_az_target")"
+active_generation_name="$(basename "$active_generation")"
+if [[ "$(basename "$(dirname "$active_generation")")" != ".azedarach-generations" ||
+      "$active_generation_name" != generation.?* ||
+      "$active_az_target" != "$active_generation/az" ||
+      "$active_azd_target" != "$active_generation/azd" ||
+      ! -x "$active_az_target" || ! -x "$active_azd_target" ]]; then
+  echo "Active install control links no longer resolve to one coherent managed generation." >&2
+  echo "az=$active_az_target" >&2
+  echo "azd=$active_azd_target" >&2
+  exit 1
+fi
+caller_generation="$(dirname "$caller_az_target")"
+caller_generation_name="$(basename "$caller_generation")"
+caller_is_managed=0
+if [[ "$(basename "$(dirname "$caller_generation")")" == ".azedarach-generations" &&
+      "$caller_generation_name" == generation.?* &&
+      "$caller_az_target" == "$caller_generation/az" &&
+      "$caller_azd_target" == "$caller_generation/azd" ]]; then
+  caller_is_managed=1
+fi
+if [[ "$caller_az_target" == "$active_az_target" &&
+      "$caller_azd_target" == "$active_azd_target" ]]; then
+  echo "Caller az/azd resolve to installed generation: $active_generation"
+elif [[ "$caller_is_managed" -eq 1 ]]; then
+  echo "Caller uses retained managed generation $caller_generation; active install is $active_generation." >&2
+  echo "Reload the repository environment (for example: direnv reload) before running further bare az commands." >&2
+else
+  echo "Installed coherent az/azd generation, but the caller shell remains shadowed." >&2
+  echo "caller az=${caller_az:-<not found>} -> ${caller_az_target:-<unresolved>}" >&2
+  echo "caller azd=${caller_azd:-<not found>} -> ${caller_azd_target:-<unresolved>}" >&2
+  echo "Reload the repository environment (for example: direnv reload), verify bare az and azd, then rerun this command." >&2
+  exit 1
+fi
 if [[ "$no_run" -eq 1 ]]; then
   echo "Skipping run (--no-run)"
   exit 0

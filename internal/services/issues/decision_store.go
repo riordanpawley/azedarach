@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -48,11 +49,12 @@ const (
 	DecisionRelationAppliesTo DecisionRelation = "applies-to"
 	DecisionRelationRevises   DecisionRelation = "revises"
 	DecisionRelationInforms   DecisionRelation = "informs"
+	DecisionRelationGoverns   DecisionRelation = "governs"
 )
 
 func ValidDecisionRelation(r DecisionRelation) bool {
 	switch r {
-	case DecisionRelationAppliesTo, DecisionRelationRevises, DecisionRelationInforms:
+	case DecisionRelationAppliesTo, DecisionRelationRevises, DecisionRelationInforms, DecisionRelationGoverns:
 		return true
 	}
 	return false
@@ -114,6 +116,19 @@ type UpdateDecisionParams struct {
 	Context      *string
 	Consequences *string
 }
+
+// DecisionOwnerSnapshot describes the active issue-link ownership of a
+// decision at one durable read point. Exactly one active issue link establishes
+// an owner; zero or multiple active issue links leave OwnerIssueID empty.
+type DecisionOwnerSnapshot struct {
+	IssueIDs     []string
+	OwnerIssueID string
+}
+
+// ErrDecisionOwnerMismatch indicates that a conditional decision mutation was
+// rejected because the decision's exact durable active owner differed from the
+// caller's expected owner.
+var ErrDecisionOwnerMismatch = errors.New("decision owner mismatch")
 
 type DecisionFilter struct {
 	LocalIDs       []string
@@ -413,16 +428,109 @@ func decisionListQuery(filter DecisionFilter) (string, []any, bool) {
 }
 
 func (c *Client) UpdateDecision(ctx context.Context, selector string, params UpdateDecisionParams) (Decision, error) {
+	return c.UpdateDecisionWithPropagation(ctx, selector, params, DecisionPropagationIntent{})
+}
+
+func (c *Client) UpdateDecisionWithPropagation(ctx context.Context, selector string, params UpdateDecisionParams, intent DecisionPropagationIntent) (Decision, error) {
 	var out Decision
 	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
 		var err error
-		out, err = c.updateDecisionLocked(lockCtx, selector, params)
+		out, err = c.updateDecisionLocked(lockCtx, selector, params, intent)
 		return err
 	})
 	return out, err
 }
 
-func (c *Client) updateDecisionLocked(ctx context.Context, selector string, params UpdateDecisionParams) (Decision, error) {
+// UpdateDecisionForOwner verifies the decision's exact active issue-link owner
+// and applies params in the same transaction. Empty params perform an atomic
+// ownership verification without writing or auditing an update.
+func (c *Client) UpdateDecisionForOwner(ctx context.Context, selector, expectedOwner string, params UpdateDecisionParams) (Decision, DecisionOwnerSnapshot, error) {
+	var out Decision
+	var owner DecisionOwnerSnapshot
+	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		var err error
+		out, owner, err = c.updateDecisionForOwnerLocked(lockCtx, selector, expectedOwner, params)
+		return err
+	})
+	return out, owner, err
+}
+
+func (c *Client) updateDecisionForOwnerLocked(ctx context.Context, selector, expectedOwner string, params UpdateDecisionParams) (Decision, DecisionOwnerSnapshot, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return Decision{}, DecisionOwnerSnapshot{}, err
+	}
+	selector = strings.TrimSpace(selector)
+	expectedOwner = strings.TrimSpace(expectedOwner)
+	if selector == "" {
+		return Decision{}, DecisionOwnerSnapshot{}, c.wrapError("update-decision-for-owner", selector, errors.New("decision id is required"))
+	}
+	if expectedOwner == "" {
+		return Decision{}, DecisionOwnerSnapshot{}, c.wrapError("update-decision-for-owner", selector, errors.New("expected decision owner is required"))
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return Decision{}, DecisionOwnerSnapshot{}, c.wrapError("update-decision-for-owner", selector, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	before, err := c.lookupDecisionByLocalID(ctx, tx, selector, false)
+	if err != nil {
+		return Decision{}, DecisionOwnerSnapshot{}, c.wrapError("update-decision-for-owner", selector, err)
+	}
+	links, err := c.listDecisionLinksForDecisionRow(ctx, tx, before.rowID, false)
+	if err != nil {
+		return Decision{}, DecisionOwnerSnapshot{}, c.wrapError("update-decision-for-owner", before.LocalID, err)
+	}
+	owner := decisionOwnerSnapshot(links)
+	if owner.OwnerIssueID != expectedOwner {
+		return Decision{}, owner, c.wrapError("update-decision-for-owner", before.LocalID, fmt.Errorf("%w: expected %q, active issue links %v", ErrDecisionOwnerMismatch, expectedOwner, owner.IssueIDs))
+	}
+
+	if decisionUpdateParamsEmpty(params) {
+		if err := tx.Commit(); err != nil {
+			return Decision{}, owner, c.wrapError("update-decision-for-owner", before.LocalID, err)
+		}
+		return before.Decision, owner, nil
+	}
+
+	after, err := c.applyDecisionUpdateTx(ctx, tx, before, params)
+	if err != nil {
+		return Decision{}, owner, c.wrapError("update-decision-for-owner", before.LocalID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Decision{}, owner, c.wrapError("update-decision-for-owner", before.LocalID, err)
+	}
+	return after, owner, nil
+}
+
+func decisionOwnerSnapshot(links []decisionLinkRecord) DecisionOwnerSnapshot {
+	seen := make(map[string]struct{})
+	for _, link := range links {
+		if link.TargetKind != DecisionTargetIssue {
+			continue
+		}
+		if issueID := strings.TrimSpace(link.TargetID); issueID != "" {
+			seen[issueID] = struct{}{}
+		}
+	}
+	owner := DecisionOwnerSnapshot{IssueIDs: make([]string, 0, len(seen))}
+	for issueID := range seen {
+		owner.IssueIDs = append(owner.IssueIDs, issueID)
+	}
+	sort.Strings(owner.IssueIDs)
+	if len(owner.IssueIDs) == 1 {
+		owner.OwnerIssueID = owner.IssueIDs[0]
+	}
+	return owner
+}
+
+func decisionUpdateParamsEmpty(params UpdateDecisionParams) bool {
+	return params.Title == nil && params.Rationale == nil && params.Context == nil && params.Consequences == nil
+}
+
+func (c *Client) updateDecisionLocked(ctx context.Context, selector string, params UpdateDecisionParams, intent DecisionPropagationIntent) (Decision, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return Decision{}, err
@@ -446,27 +554,14 @@ func (c *Client) updateDecisionLocked(ctx context.Context, selector string, para
 	if err != nil {
 		return Decision{}, c.wrapError("update-decision", selector, err)
 	}
-	after, err := applyDecisionUpdate(before.Decision, params)
+	if err := c.validateDecisionPropagationAuthority(ctx, tx, before.LocalID, intent); err != nil {
+		return Decision{}, c.wrapError("update-decision", before.LocalID, err)
+	}
+	after, revision, err := c.applyDecisionUpdateTxWithRevision(ctx, tx, before, params)
 	if err != nil {
 		return Decision{}, c.wrapError("update-decision", before.LocalID, err)
 	}
-
-	after.UpdatedAt = time.Now().UTC()
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE decisions
-		SET title = ?, rationale = ?, context = ?, consequences = ?, updated_at = ?
-		WHERE id = ?
-	`,
-		after.Title,
-		nullableString(after.Rationale),
-		nullableString(after.Context),
-		nullableString(after.Consequences),
-		formatTimestamp(after.UpdatedAt),
-		before.rowID,
-	); err != nil {
-		return Decision{}, c.wrapError("update-decision", before.LocalID, classifySQLiteConstraint(err))
-	}
-	if err := c.insertDecisionAuditRow(ctx, tx, decisionEntityKind, before.LocalID, decisionOpUpdate, before.Decision, after); err != nil {
+	if err := c.insertDecisionPropagationOutbox(ctx, tx, before.LocalID, revision, intent); err != nil {
 		return Decision{}, c.wrapError("update-decision", before.LocalID, err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -476,13 +571,42 @@ func (c *Client) updateDecisionLocked(ctx context.Context, selector string, para
 	return after, nil
 }
 
+func (c *Client) applyDecisionUpdateTx(ctx context.Context, tx *sql.Tx, before decisionRecord, params UpdateDecisionParams) (Decision, error) {
+	after, _, err := c.applyDecisionUpdateTxWithRevision(ctx, tx, before, params)
+	return after, err
+}
+
+func (c *Client) applyDecisionUpdateTxWithRevision(ctx context.Context, tx *sql.Tx, before decisionRecord, params UpdateDecisionParams) (Decision, int64, error) {
+	after, err := applyDecisionUpdate(before.Decision, params)
+	if err != nil {
+		return Decision{}, 0, err
+	}
+	after.UpdatedAt = time.Now().UTC()
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE decisions
+		SET title = ?, rationale = ?, context = ?, consequences = ?, updated_at = ?
+		WHERE id = ?
+	`, after.Title, nullableString(after.Rationale), nullableString(after.Context), nullableString(after.Consequences), formatTimestamp(after.UpdatedAt), before.rowID); err != nil {
+		return Decision{}, 0, classifySQLiteConstraint(err)
+	}
+	revision, err := c.insertDecisionAuditRowID(ctx, tx, decisionEntityKind, before.LocalID, decisionOpUpdate, before.Decision, after)
+	if err != nil {
+		return Decision{}, 0, err
+	}
+	return after, revision, nil
+}
+
 func (c *Client) DeleteDecision(ctx context.Context, selector string) error {
+	return c.DeleteDecisionWithPropagation(ctx, selector, DecisionPropagationIntent{})
+}
+
+func (c *Client) DeleteDecisionWithPropagation(ctx context.Context, selector string, intent DecisionPropagationIntent) error {
 	return c.withMutationLock(ctx, func(lockCtx context.Context) error {
-		return c.deleteDecisionLocked(lockCtx, selector)
+		return c.deleteDecisionLocked(lockCtx, selector, intent)
 	})
 }
 
-func (c *Client) deleteDecisionLocked(ctx context.Context, selector string) error {
+func (c *Client) deleteDecisionLocked(ctx context.Context, selector string, intent DecisionPropagationIntent) error {
 	db, err := c.dbHandle()
 	if err != nil {
 		return err
@@ -505,6 +629,9 @@ func (c *Client) deleteDecisionLocked(ctx context.Context, selector string) erro
 	decision, err := c.lookupDecisionByLocalID(ctx, tx, selector, false)
 	if err != nil {
 		return c.wrapError("delete-decision", selector, err)
+	}
+	if err := c.validateDecisionPropagationAuthority(ctx, tx, decision.LocalID, intent); err != nil {
+		return c.wrapError("delete-decision", decision.LocalID, err)
 	}
 	links, err := c.listDecisionLinksForDecisionRow(ctx, tx, decision.rowID, false)
 	if err != nil {
@@ -537,7 +664,11 @@ func (c *Client) deleteDecisionLocked(ctx context.Context, selector string) erro
 	`, formatTimestamp(now), formatTimestamp(now), decision.rowID); err != nil {
 		return c.wrapError("delete-decision", decision.LocalID, err)
 	}
-	if err := c.insertDecisionAuditRow(ctx, tx, decisionEntityKind, decision.LocalID, decisionOpDelete, decision.Decision, afterDecision); err != nil {
+	revision, err := c.insertDecisionAuditRowID(ctx, tx, decisionEntityKind, decision.LocalID, decisionOpDelete, decision.Decision, afterDecision)
+	if err != nil {
+		return c.wrapError("delete-decision", decision.LocalID, err)
+	}
+	if err := c.insertDecisionPropagationOutbox(ctx, tx, decision.LocalID, revision, intent); err != nil {
 		return c.wrapError("delete-decision", decision.LocalID, err)
 	}
 
@@ -549,16 +680,20 @@ func (c *Client) deleteDecisionLocked(ctx context.Context, selector string) erro
 }
 
 func (c *Client) AddDecisionLink(ctx context.Context, params AddDecisionLinkParams) (DecisionLink, error) {
+	return c.AddDecisionLinkWithPropagation(ctx, params, DecisionPropagationIntent{})
+}
+
+func (c *Client) AddDecisionLinkWithPropagation(ctx context.Context, params AddDecisionLinkParams, intent DecisionPropagationIntent) (DecisionLink, error) {
 	var out DecisionLink
 	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
 		var err error
-		out, err = c.addDecisionLinkLocked(lockCtx, params)
+		out, err = c.addDecisionLinkLocked(lockCtx, params, intent)
 		return err
 	})
 	return out, err
 }
 
-func (c *Client) addDecisionLinkLocked(ctx context.Context, params AddDecisionLinkParams) (DecisionLink, error) {
+func (c *Client) addDecisionLinkLocked(ctx context.Context, params AddDecisionLinkParams, intent DecisionPropagationIntent) (DecisionLink, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return DecisionLink{}, err
@@ -581,6 +716,9 @@ func (c *Client) addDecisionLinkLocked(ctx context.Context, params AddDecisionLi
 	decision, err := c.lookupDecisionByLocalID(ctx, tx, normalized.DecisionID, false)
 	if err != nil {
 		return DecisionLink{}, c.wrapError("add-decision-link", normalized.DecisionID, err)
+	}
+	if err := c.validateDecisionPropagationAuthority(ctx, tx, decision.LocalID, intent); err != nil {
+		return DecisionLink{}, c.wrapError("add-decision-link", decision.LocalID, err)
 	}
 	if err := ensureDecisionLinkTargetExists(ctx, tx, normalized.TargetKind, normalized.TargetID); err != nil {
 		return DecisionLink{}, c.wrapError("add-decision-link", normalized.DecisionID, err)
@@ -637,7 +775,11 @@ func (c *Client) addDecisionLinkLocked(ctx context.Context, params AddDecisionLi
 		}
 	}
 
-	if err := c.insertDecisionAuditRow(ctx, tx, decisionLinkEntityKind, link.ID, operation, before, link); err != nil {
+	revision, err := c.insertDecisionAuditRowID(ctx, tx, decisionLinkEntityKind, link.ID, operation, before, link)
+	if err != nil {
+		return DecisionLink{}, c.wrapError("add-decision-link", normalized.DecisionID, err)
+	}
+	if err := c.insertDecisionPropagationOutbox(ctx, tx, decision.LocalID, revision, intent); err != nil {
 		return DecisionLink{}, c.wrapError("add-decision-link", normalized.DecisionID, err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -648,12 +790,16 @@ func (c *Client) addDecisionLinkLocked(ctx context.Context, params AddDecisionLi
 }
 
 func (c *Client) RemoveDecisionLink(ctx context.Context, decisionSelector string, targetKind DecisionTargetKind, targetID string) error {
+	return c.RemoveDecisionLinkWithPropagation(ctx, decisionSelector, targetKind, targetID, DecisionPropagationIntent{})
+}
+
+func (c *Client) RemoveDecisionLinkWithPropagation(ctx context.Context, decisionSelector string, targetKind DecisionTargetKind, targetID string, intent DecisionPropagationIntent) error {
 	return c.withMutationLock(ctx, func(lockCtx context.Context) error {
-		return c.removeDecisionLinkLocked(lockCtx, decisionSelector, targetKind, targetID)
+		return c.removeDecisionLinkLocked(lockCtx, decisionSelector, targetKind, targetID, intent)
 	})
 }
 
-func (c *Client) removeDecisionLinkLocked(ctx context.Context, decisionSelector string, targetKind DecisionTargetKind, targetID string) error {
+func (c *Client) removeDecisionLinkLocked(ctx context.Context, decisionSelector string, targetKind DecisionTargetKind, targetID string, intent DecisionPropagationIntent) error {
 	db, err := c.dbHandle()
 	if err != nil {
 		return err
@@ -681,6 +827,9 @@ func (c *Client) removeDecisionLinkLocked(ctx context.Context, decisionSelector 
 	if err != nil {
 		return c.wrapError("remove-decision-link", decisionSelector, err)
 	}
+	if err := c.validateDecisionPropagationAuthority(ctx, tx, decision.LocalID, intent); err != nil {
+		return c.wrapError("remove-decision-link", decision.LocalID, err)
+	}
 	link, err := c.lookupDecisionLink(ctx, tx, decision.rowID, targetKind, targetID, false)
 	if err != nil {
 		return c.wrapError("remove-decision-link", decisionSelector, err)
@@ -696,7 +845,11 @@ func (c *Client) removeDecisionLinkLocked(ctx context.Context, decisionSelector 
 	`, formatTimestamp(now), formatTimestamp(now), link.rowID); err != nil {
 		return c.wrapError("remove-decision-link", decisionSelector, err)
 	}
-	if err := c.insertDecisionAuditRow(ctx, tx, decisionLinkEntityKind, link.DecisionLink.ID, decisionOpDelete, link.DecisionLink, after); err != nil {
+	revision, err := c.insertDecisionAuditRowID(ctx, tx, decisionLinkEntityKind, link.DecisionLink.ID, decisionOpDelete, link.DecisionLink, after)
+	if err != nil {
+		return c.wrapError("remove-decision-link", decisionSelector, err)
+	}
+	if err := c.insertDecisionPropagationOutbox(ctx, tx, decision.LocalID, revision, intent); err != nil {
 		return c.wrapError("remove-decision-link", decisionSelector, err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -762,6 +915,154 @@ func (c *Client) ListDecisionLinks(ctx context.Context, filter DecisionLinkFilte
 		return nil, c.wrapError("list-decision-links", "", err)
 	}
 	return out, nil
+}
+
+// DecisionRevision returns the monotonic audit-log revision covering both the
+// decision row and any of its links. The audit ID is durable across daemon
+// restarts and advances for every semantic mutation without a second counter.
+func (c *Client) DecisionRevision(ctx context.Context, decisionID string) (int64, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return 0, err
+	}
+	revision, err := decisionRevision(ctx, db, decisionID)
+	if err != nil {
+		return 0, c.wrapError("decision-revision", strings.TrimSpace(decisionID), err)
+	}
+	return revision, nil
+}
+
+// IssueObservationRevision is the durable project-scope watermark used while
+// deriving decision fanout. Issue hierarchy and lifecycle changes append to
+// this stream, so a changed watermark invalidates a scope captured by another
+// daemon before the decision mutation commits.
+func (c *Client) IssueObservationRevision(ctx context.Context) (int64, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return 0, err
+	}
+	return issueObservationRevision(ctx, db)
+}
+
+// DecisionAuditRevision covers every decision and decision-link mutation.
+// Fanout can recursively inherit scope through revises links, so validating
+// only the directly mutated decision cannot prove that derived scope is fresh.
+func (c *Client) DecisionAuditRevision(ctx context.Context) (int64, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return 0, err
+	}
+	return decisionAuditRevision(ctx, db)
+}
+
+// SpecAuditRevision covers requirement ownership and spec-link mutations,
+// both of which contribute issues to a requirement-targeted decision scope.
+func (c *Client) SpecAuditRevision(ctx context.Context) (int64, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return 0, err
+	}
+	return specAuditRevision(ctx, db)
+}
+
+func decisionAuditRevision(ctx context.Context, queryer sqlRequirementQueryer) (int64, error) {
+	return maxAuditRevision(ctx, queryer, `SELECT MAX(id) FROM decision_audit_log`)
+}
+
+func specAuditRevision(ctx context.Context, queryer sqlRequirementQueryer) (int64, error) {
+	return maxAuditRevision(ctx, queryer, `SELECT MAX(id) FROM spec_audit_log`)
+}
+
+func maxAuditRevision(ctx context.Context, queryer sqlRequirementQueryer, query string) (int64, error) {
+	var revision sql.NullInt64
+	if err := queryer.QueryRowContext(ctx, query).Scan(&revision); err != nil {
+		return 0, err
+	}
+	if !revision.Valid {
+		return 0, nil
+	}
+	return revision.Int64, nil
+}
+
+func issueObservationRevision(ctx context.Context, queryer sqlRequirementQueryer) (int64, error) {
+	var revision sql.NullInt64
+	if err := queryer.QueryRowContext(ctx, `SELECT MAX(id) FROM issue_observation_events`).Scan(&revision); err != nil {
+		return 0, err
+	}
+	if !revision.Valid {
+		return 0, nil
+	}
+	return revision.Int64, nil
+}
+
+func decisionRevision(ctx context.Context, queryer sqlRequirementQueryer, decisionID string) (int64, error) {
+	decisionID = strings.TrimSpace(decisionID)
+	if decisionID == "" {
+		return 0, errors.New("decision id is required")
+	}
+	var revision sql.NullInt64
+	err := queryer.QueryRowContext(ctx, `
+		SELECT MAX(id)
+		FROM decision_audit_log
+		WHERE (entity_type = ? AND entity_id = ?)
+		   OR (
+			entity_type = ? AND (entity_id = ? OR entity_id LIKE ?)
+			AND (
+				json_extract(after_json, '$.relation') IN (?, ?)
+				OR json_extract(before_json, '$.relation') IN (?, ?)
+			)
+		   )
+	`, decisionEntityKind, decisionID, decisionLinkEntityKind, decisionID, decisionID+":%",
+		string(DecisionRelationGoverns), string(DecisionRelationRevises), string(DecisionRelationGoverns), string(DecisionRelationRevises)).Scan(&revision)
+	if err != nil {
+		return 0, err
+	}
+	if !revision.Valid || revision.Int64 <= 0 {
+		return 0, domain.ErrNotFound
+	}
+	return revision.Int64, nil
+}
+
+func (c *Client) validateDecisionPropagationRevision(ctx context.Context, queryer sqlRequirementQueryer, decisionID string, expected int64) error {
+	if expected <= 0 {
+		return nil
+	}
+	current, err := decisionRevision(ctx, queryer, decisionID)
+	if err != nil {
+		return err
+	}
+	if current != expected {
+		return fmt.Errorf("%w: decision %s expected revision %d, current revision %d", ErrDecisionPropagationRevisionChanged, decisionID, expected, current)
+	}
+	return nil
+}
+
+func (c *Client) validateDecisionPropagationAuthority(ctx context.Context, queryer sqlRequirementQueryer, decisionID string, intent DecisionPropagationIntent) error {
+	if intent.ExpectedRevision <= 0 {
+		return nil
+	}
+	if err := c.validateDecisionPropagationRevision(ctx, queryer, decisionID, intent.ExpectedRevision); err != nil {
+		return err
+	}
+	checks := []struct {
+		name     string
+		expected int64
+		read     func(context.Context, sqlRequirementQueryer) (int64, error)
+	}{
+		{name: "decision audit", expected: intent.ExpectedDecisionAuditRevision, read: decisionAuditRevision},
+		{name: "spec audit", expected: intent.ExpectedSpecAuditRevision, read: specAuditRevision},
+		{name: "issue observation", expected: intent.ExpectedObservationRevision, read: issueObservationRevision},
+	}
+	for _, check := range checks {
+		current, err := check.read(ctx, queryer)
+		if err != nil {
+			return err
+		}
+		if current != check.expected {
+			return fmt.Errorf("%w: decision %s expected %s revision %d, current revision %d", ErrDecisionPropagationRevisionChanged, decisionID, check.name, check.expected, current)
+		}
+	}
+	return nil
 }
 
 func (c *Client) lookupDecisionByLocalID(ctx context.Context, queryer sqlRequirementQueryer, selector string, includeDeleted bool) (decisionRecord, error) {
@@ -1089,19 +1390,27 @@ func decisionLinkID(decisionLocalID string, kind DecisionTargetKind, targetID st
 }
 
 func (c *Client) insertDecisionAuditRow(ctx context.Context, execer sqlRequirementExecer, entityType, entityID, operation string, before, after any) error {
+	_, err := c.insertDecisionAuditRowID(ctx, execer, entityType, entityID, operation, before, after)
+	return err
+}
+
+func (c *Client) insertDecisionAuditRowID(ctx context.Context, execer sqlRequirementExecer, entityType, entityID, operation string, before, after any) (int64, error) {
 	beforeJSON, err := marshalAuditSnapshot(before)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	afterJSON, err := marshalAuditSnapshot(after)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	_, err = execer.ExecContext(ctx, `
+	result, err := execer.ExecContext(ctx, `
 		INSERT INTO decision_audit_log (
 			entity_type, entity_id, operation, actor_source,
 			before_json, after_json, created_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?)
 	`, entityType, entityID, operation, specAuditActorSource(ctx), string(beforeJSON), string(afterJSON), formatTimestamp(time.Now().UTC()))
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
 }

@@ -33,12 +33,28 @@ az decision import --check
 az decision import
 ```
 
-Then inspect the full store-to-Markdown reconciliation and apply it deliberately:
+Then inspect the issue-scoped store-to-Markdown reconciliation and apply it deliberately:
 
 ```bash
 az decision sync --check
 az decision sync
 git add docs/decisions
+```
+
+In an issue worktree, sync/import resolve the live worktree issue and HEAD,
+then transfer only decisions with exactly one active issue-provenance link whose
+target is that issue. Foreign, unowned, or multiply-linked files are reported
+with their decision, owner, and issue IDs and left
+byte-for-byte untouched. `--force` overrides field conflicts; it never overrides
+the worktree ownership boundary.
+
+Full-project transfer is intentionally root-only and requires an explicit flag:
+
+```bash
+az decision import --all --check
+az decision import --all
+az decision sync --all --check
+az decision sync --all
 ```
 
 Without `--project-dir`, both commands resolve the nearest Git worktree root
@@ -48,7 +64,8 @@ therefore operates on that linked worktree, not the nested directory or the
 registered root checkout. `--project-dir` selects that exact directory
 explicitly; it is made absolute but is not promoted to a Git root.
 
-`az decision sync` is a full reconciliation. It writes the canonical
+`az decision sync --all` is a full reconciliation. Issue-worktree sync applies
+the same rename/delete rules only to decisions linked to that issue. It writes the canonical
 `<decision-id>-<title-slug>.md` file for every live decision, removes old paths
 after title changes and duplicate parseable exports for the same ID, and removes
 exports for deleted decisions. Files using the reserved `dec-N[-slug].md`
@@ -64,3 +81,11 @@ store or Markdown, rerun the check, and import. Use `--force` only when the
 reviewed Markdown version is intentionally authoritative. After the store is
 correct, run `az decision sync --check`, apply the sync, review the Git diff,
 and stage the decision directory explicitly.
+
+For a contaminated worktree, first run `az decision import --check` and
+`az decision sync --check`. The provenance report identifies foreign decision
+files without modifying them. Transfer each file through its owning issue
+worktree (or review it at the registered root with `--all`) before removing it
+from the contaminated worktree. Do not use `--force` to cross issue scope and
+do not delete an unowned artifact until its owning worktree or root transfer is
+confirmed.

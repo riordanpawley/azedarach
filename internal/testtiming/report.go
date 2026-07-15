@@ -16,6 +16,8 @@ func WriteMarkdown(w io.Writer, m Measurement) error {
 	write("- Test-result cache: %s\n", m.TestResultCacheMode)
 	write("- Build cache: `%s` (%s); before %d bytes/%d files; after %d bytes/%d files; delta %d bytes/%d files; family %d bytes; decision `%s`\n", m.BuildCache.Namespace, m.BuildCache.Policy, m.BuildCache.Before.Bytes, m.BuildCache.Before.Files, m.BuildCache.After.Bytes, m.BuildCache.After.Files, m.BuildCache.DeltaBytes, m.BuildCache.DeltaFiles, m.BuildCache.FamilyBytes, m.BuildCache.Decision)
 	write("- Resource measurement: `%s` (direct `go` command process; descendant test-binary resources are not aggregated)\n", m.ResourceMethod)
+	write("- Concurrent Go-process load: max `%d` total / `%d` external across `%d` samples (`%s`); overlap `%t`\n", m.ProcessLoad.MaxGoProcesses, m.ProcessLoad.MaxExternalGoProcesses, m.ProcessLoad.Samples, m.ProcessLoad.Method, m.ProcessLoad.OverlapDetected)
+	write("- Validation lease: held `%t`; request `%s`; class `%s`; profile `%s`\n", m.ValidationLease.Held, m.ValidationLease.RequestID, m.ValidationLease.Class, m.ValidationLease.Profile)
 	write("- Result: exit %d; %.2fs wall; %.2fs user CPU; %.2fs system CPU; %.1f MiB peak RSS\n", m.ExitCode, m.WallSeconds, m.UserCPUSeconds, m.SystemCPUSeconds, float64(m.PeakRSSBytes)/(1024*1024))
 	write("- Events: %d packages; %d tests; %d failures; %d invalid lines\n", len(m.Packages), len(m.Tests), len(m.Failures), m.InvalidEvents)
 	write("- Raw events: `%s`; stderr: `%s`\n", filepath.ToSlash(m.RawJSONPath), filepath.ToSlash(m.StderrPath))
@@ -69,6 +71,15 @@ func WriteMarkdown(w io.Writer, m Measurement) error {
 	}
 	for _, v := range m.Comparison.Violations {
 		write("- %s `%s`: %.2fs > %.2fs (%s)\n", v.Kind, v.Name, v.ActualSeconds, v.BudgetSeconds, v.BudgetSource)
+	}
+	if len(m.Comparison.Violations) > 0 {
+		write("\n## Peak concurrent Go processes\n\n")
+		if len(m.ProcessLoad.PeakProcesses) == 0 {
+			write("No matching process snapshot was available.\n")
+		}
+		for _, process := range m.ProcessLoad.PeakProcesses {
+			write("- pid `%d`, parent `%d`: `%s`\n", process.PID, process.Parent, process.Command)
+		}
 	}
 	return report.err
 }

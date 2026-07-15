@@ -44,9 +44,15 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = validateHumanAuthorityProjectionRevisionTriggers(ctx, db); err != nil {
 				t.Fatal(err)
 			}
+			if err = validateDecisionPropagationOutboxSchema(ctx, db); err != nil {
+				t.Fatal(err)
+			}
 			var checksum string
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, humanAuthorityProjectionMigrationID).Scan(&checksum); err != nil || checksum != "ac3a48512b2e6e9c018d58a68db24a2465e9d172139d22f8378f69677073a0ab" {
 				t.Fatalf("checksum=%q err=%v", checksum, err)
+			}
+			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, decisionPropagationOutboxMigrationID).Scan(&checksum); err != nil || checksum != "a12c44ba35156d71fbcd88a9d78e4cdb234e75e7e4aef5f896c8b1182ada858d" {
+				t.Fatalf("decision outbox checksum=%q err=%v", checksum, err)
 			}
 			projectIDs := []string{"default"}
 			if rows, queryErr := db.Query(`SELECT DISTINCT project_id FROM board_views`); queryErr == nil {

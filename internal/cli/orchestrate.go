@@ -859,7 +859,10 @@ func ParseOrchestrateMessageArgs(args []string) (OrchestrateMessageOptions, erro
 }
 
 func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions) error {
-	restoreProject := applyOrchestrationProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 	scope, err := resolveCLIOrchestrationScope(opts.RootIssueID)
 	if err != nil {
@@ -1055,7 +1058,10 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 }
 
 func OrchestrateObserveCommand(deps *Dependencies, opts OrchestrateObserveOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	result, err := buildOrchestrateObserveForRoot(deps, opts.RootIssueID)
@@ -1070,12 +1076,14 @@ func OrchestrateObserveCommand(deps *Dependencies, opts OrchestrateObserveOption
 }
 
 func ObserveCommand(deps *Dependencies, opts ObserveOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	var (
 		result orchestrateObserveResult
-		err    error
 	)
 	if strings.TrimSpace(opts.RootIssueID) != "" {
 		result, err = buildOrchestrateObserveForRoot(deps, opts.RootIssueID)
@@ -1093,7 +1101,10 @@ func ObserveCommand(deps *Dependencies, opts ObserveOptions) error {
 }
 
 func OrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOptions) error {
-	restoreProject := applyOrchestrationProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 	scope, err := resolveCLIOrchestrationScope(opts.RootIssueID)
 	if err != nil {
@@ -1119,7 +1130,10 @@ func OrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOptions) e
 }
 
 func OrchestrateGroupCommand(deps *Dependencies, opts OrchestrateGroupOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	result, err := orchestrateGroup(deps, opts)
@@ -1995,7 +2009,10 @@ func printOrchestrateStartResult(result orchestrateStartResult) {
 }
 
 func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) error {
-	restoreProject := applyOrchestrationProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 	scope, err := resolveCLIOrchestrationScope(opts.RootIssueID)
 	if err != nil {
@@ -2254,7 +2271,10 @@ func shouldContinueOrchestrateWatchAfterError(err error) bool {
 }
 
 func OrchestrateCompleteCheckCommand(deps *Dependencies, opts OrchestrateCompleteCheckOptions) error {
-	restoreProject := applyOrchestrationProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 	scope, err := resolveCLIOrchestrationScope(opts.RootIssueID)
 	if err != nil {
@@ -2314,7 +2334,10 @@ func OrchestrateCompleteCheckCommand(deps *Dependencies, opts OrchestrateComplet
 }
 
 func OrchestratePromptCommand(deps *Dependencies, opts OrchestratePromptOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
@@ -2358,7 +2381,10 @@ func OrchestratePromptCommand(deps *Dependencies, opts OrchestratePromptOptions)
 }
 
 func OrchestrateIntegrateCommand(deps *Dependencies, opts OrchestrateIntegrateOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), orchestrateIntegrateCommandTimeout(opts.Apply))
@@ -2579,7 +2605,10 @@ func orchestrateIntegrationRecovery(issueID, projectID, reason string) []string 
 }
 
 func OrchestrateCloseSessionCommand(deps *Dependencies, opts OrchestrateCloseSessionOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)
@@ -2603,7 +2632,10 @@ func OrchestrateCloseSessionCommand(deps *Dependencies, opts OrchestrateCloseSes
 }
 
 func OrchestrateMessageCommand(deps *Dependencies, opts OrchestrateMessageOptions) error {
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonCommandTimeout)

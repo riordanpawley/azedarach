@@ -320,6 +320,8 @@ type taskIntegrationReadinessResult struct {
 	EvidenceIncomplete     bool                           `json:"evidence_incomplete,omitempty"`
 	EvidenceMissingFields  []string                       `json:"evidence_missing_fields,omitempty"`
 	EvidenceInvalidReasons []string                       `json:"evidence_invalid_reasons,omitempty"`
+	PendingDecisions       []domain.PendingDecisionChange `json:"pending_decisions,omitempty"`
+	AggregateValidation    *domain.ValidationRequest      `json:"aggregate_validation,omitempty"`
 }
 
 type taskMergeBaseTargetResult struct {
@@ -1495,7 +1497,7 @@ func runtimeWorktreeIssueEligible(issueID string, taskByIssue map[string]domain.
 	if !ok {
 		return true
 	}
-	if task.IssueClosed() {
+	if task.IssueClosed() || task.State.IsArchived() {
 		return false
 	}
 	seen := map[string]struct{}{strings.ToLower(issueID): {}}
@@ -1509,7 +1511,7 @@ func runtimeWorktreeIssueEligible(issueID string, taskByIssue map[string]domain.
 		if !ok {
 			return true
 		}
-		if parent.IssueClosed() {
+		if parent.IssueClosed() || parent.State.IsArchived() {
 			return false
 		}
 		parentID = domain.TaskParentIssueID(parent)
@@ -3493,6 +3495,9 @@ func (d *Daemon) updateTaskStatusExcludingClose(ctx context.Context, projectID, 
 	}
 	var cascaded []domain.Task
 	if status == domain.StatusInReview {
+		if err := d.validateTaskDecisionAcknowledgementsForReview(ctx, projectID, taskID); err != nil {
+			return domain.Task{}, nil, err
+		}
 		if err := d.validateTaskActivityForReview(ctx, projectID, taskID, reviewHandoffAllowsBusy(opts, taskID)); err != nil {
 			return domain.Task{}, nil, err
 		}
@@ -3507,6 +3512,28 @@ func (d *Daemon) updateTaskStatusExcludingClose(ctx context.Context, projectID, 
 		return domain.Task{}, nil, err
 	}
 	return task, cascaded, nil
+}
+
+func (d *Daemon) validateTaskDecisionAcknowledgementsForReview(ctx context.Context, projectID, taskID string) error {
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return fmt.Errorf("issue store unavailable")
+	}
+	if !usesProjectionSource(d.sourceForTaskInvariant(taskInvariantReviewHandoff)) {
+		return fmt.Errorf("unsupported review handoff invariant source: %s", d.sourceForTaskInvariant(taskInvariantReviewHandoff))
+	}
+	if err := d.reconcileDecisionPropagationOutbox(ctx, projectID); err != nil {
+		return fmt.Errorf("reconcile material decisions before moving %s to in_review: %w", taskID, err)
+	}
+	events, err := issueClient.ListIssueDecisionObservationEvents(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("inspect material decisions before moving %s to in_review: %w", taskID, err)
+	}
+	pending := domain.ReducePendingDecisionChanges(events)
+	if len(pending) == 0 {
+		return nil
+	}
+	return fmt.Errorf("cannot move issue %s to in_review: %s", taskID, strings.Join(pendingDecisionReadinessReasons(pending), "; "))
 }
 
 func reviewHandoffActiveIssue(meta protocol.Metadata, taskID string) string {
@@ -3595,6 +3622,9 @@ func (d *Daemon) validateOrCascadeChildrenForReview(ctx context.Context, project
 	}
 	updated := make([]domain.Task, 0)
 	for _, childID := range daemonReviewGuardChildIDsToCascade(task.ID, tasks) {
+		if err := d.validateTaskDecisionAcknowledgementsForReview(ctx, projectID, childID.String()); err != nil {
+			return nil, fmt.Errorf("cascade child %s to in_review before moving %s: %w", childID.String(), taskID, err)
+		}
 		if err := d.validateTaskActivityForReview(ctx, projectID, childID.String(), reviewHandoffAllowsBusy(opts, childID.String())); err != nil {
 			return nil, fmt.Errorf("cascade child %s to in_review before moving %s: %w", childID.String(), taskID, err)
 		}
@@ -4488,6 +4518,66 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 	if issueClient == nil {
 		return taskIntegrationReadinessResult{}, fmt.Errorf("inspect issue integration readiness: issue store unavailable")
 	}
+	var latestAggregate *domain.ValidationRequest
+	if d.operationRuntime != nil {
+		validationStore, storeErr := d.validationProjectionStore()
+		if storeErr != nil {
+			return taskIntegrationReadinessResult{}, fmt.Errorf("inspect aggregate validation projection: %w", storeErr)
+		}
+		aggregate, aggregateErr := validationStore.LatestAggregateValidation(ctx, projectID, task.ID.String(), time.Now().UTC(), defaultValidationLeaseTTL)
+		if aggregateErr != nil {
+			return taskIntegrationReadinessResult{}, fmt.Errorf("inspect aggregate validation evidence: %w", aggregateErr)
+		}
+		if aggregate == nil {
+			return taskIntegrationReadinessResult{IssueID: task.ID.String(), ParentIssueID: parentIssueID, Ready: false, ContextRisk: contextRisk, Reasons: []string{"no aggregate validation is present in the daemon validation projection"}}, nil
+		}
+		if aggregate.State != domain.ValidationRequestCompleted || !aggregate.Evidence.Present || aggregate.Evidence.OverlapDetected || aggregate.Evidence.SourceRevision != aggregate.SourceRevision {
+			reasons := []string{fmt.Sprintf("aggregate validation %s is not valid integration evidence", aggregate.RequestID)}
+			if aggregate.State != domain.ValidationRequestCompleted {
+				reasons = append(reasons, fmt.Sprintf("aggregate validation outcome is %s", aggregate.State))
+			}
+			if !aggregate.Evidence.Present {
+				reasons = append(reasons, "aggregate validation did not record machine-load evidence")
+			}
+			if aggregate.Evidence.OverlapDetected {
+				reasons = append(reasons, fmt.Sprintf("aggregate validation overlapped %d external Go processes", aggregate.Evidence.ExternalGoProcesses))
+			}
+			if aggregate.Evidence.SourceRevision != aggregate.SourceRevision {
+				reasons = append(reasons, fmt.Sprintf("aggregate validation evidence revision %q does not match candidate revision %q", aggregate.Evidence.SourceRevision, aggregate.SourceRevision))
+			}
+			return taskIntegrationReadinessResult{IssueID: task.ID.String(), ParentIssueID: parentIssueID, Ready: false, ContextRisk: contextRisk, Reasons: reasons, AggregateValidation: aggregate}, nil
+		}
+		if strings.TrimSpace(repoDir) == "" {
+			return taskIntegrationReadinessResult{IssueID: task.ID.String(), ParentIssueID: parentIssueID, Ready: false, ContextRisk: contextRisk, Reasons: []string{"candidate worktree is required to bind aggregate validation to the exact revision"}, AggregateValidation: aggregate}, nil
+		}
+		if d.git == nil {
+			return taskIntegrationReadinessResult{IssueID: task.ID.String(), ParentIssueID: parentIssueID, Ready: false, ContextRisk: contextRisk, Reasons: []string{"Git authority is unavailable for exact aggregate validation revision binding"}, AggregateValidation: aggregate}, nil
+		}
+		candidateRevision, revisionErr := d.git.HeadRevision(ctx, repoDir)
+		if revisionErr != nil {
+			return taskIntegrationReadinessResult{IssueID: task.ID.String(), ParentIssueID: parentIssueID, Ready: false, ContextRisk: contextRisk, Reasons: []string{fmt.Sprintf("resolve exact candidate revision: %v", revisionErr)}, AggregateValidation: aggregate}, nil
+		}
+		if candidateRevision != aggregate.SourceRevision {
+			return taskIntegrationReadinessResult{IssueID: task.ID.String(), ParentIssueID: parentIssueID, Ready: false, ContextRisk: contextRisk, Reasons: []string{fmt.Sprintf("aggregate validation revision %s does not match exact candidate revision %s", aggregate.SourceRevision, candidateRevision)}, AggregateValidation: aggregate}, nil
+		}
+		candidateStatus, statusErr := d.git.Status(ctx, repoDir)
+		if statusErr != nil {
+			return taskIntegrationReadinessResult{IssueID: task.ID.String(), ParentIssueID: parentIssueID, Ready: false, ContextRisk: contextRisk, Reasons: []string{fmt.Sprintf("inspect exact candidate tree: %v", statusErr)}, AggregateValidation: aggregate}, nil
+		}
+		if candidateStatus.HasChanges {
+			return taskIntegrationReadinessResult{IssueID: task.ID.String(), ParentIssueID: parentIssueID, Ready: false, ContextRisk: contextRisk, Reasons: []string{"aggregate validation does not bind the current dirty candidate tree to an exact revision"}, AggregateValidation: aggregate}, nil
+		}
+		latestAggregate = aggregate
+	}
+	if err := d.reconcileDecisionPropagationOutbox(ctx, projectID); err != nil {
+		return taskIntegrationReadinessResult{}, fmt.Errorf("reconcile issue decision propagation: %w", err)
+	}
+	decisionEvents, err := issueClient.ListIssueDecisionObservationEvents(ctx, task.ID.String())
+	if err != nil {
+		return taskIntegrationReadinessResult{}, fmt.Errorf("inspect issue decision acknowledgements: %w", err)
+	}
+	pendingDecisions := domain.ReducePendingDecisionChanges(decisionEvents)
+	decisionReasons := pendingDecisionReadinessReasons(pendingDecisions)
 	reviewEvents, err := issueClient.ListIssueReviewReadyObservationEvents(ctx, task.ID.String())
 	if err != nil {
 		return taskIntegrationReadinessResult{}, fmt.Errorf("inspect issue integration evidence: %w", err)
@@ -4495,18 +4585,21 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 	if evidence := domain.ReduceReviewReadyEvidence(reviewEvents).LatestEvidence; evidence != nil {
 		evt := evidence.SourceEvent
 		packet, validation := evidence.Evidence, evidence.Validation
+		validateWorkerAggregateRequest(&validation, packet, latestAggregate)
 		if validation.Complete {
 			return taskIntegrationReadinessResult{
-				IssueID:         task.ID.String(),
-				ParentIssueID:   parentIssueID,
-				Ready:           true,
-				ContextRisk:     contextRisk,
-				EvidenceEventID: evt.ID,
-				EvidenceSource:  "issue_event",
-				EvidencePacket:  &packet,
+				IssueID:          task.ID.String(),
+				ParentIssueID:    parentIssueID,
+				Ready:            len(pendingDecisions) == 0,
+				ContextRisk:      contextRisk,
+				Reasons:          decisionReasons,
+				PendingDecisions: pendingDecisions,
+				EvidenceEventID:  evt.ID,
+				EvidenceSource:   "issue_event",
+				EvidencePacket:   &packet,
 			}, nil
 		}
-		reasons := []string{fmt.Sprintf("issue %s is not closed", task.ID.String())}
+		reasons := append([]string{fmt.Sprintf("issue %s is not closed", task.ID.String())}, decisionReasons...)
 		if validation.Found {
 			reasons = append(reasons, fmt.Sprintf("worker evidence packet in issue event %d is incomplete", evt.ID))
 		} else {
@@ -4524,6 +4617,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 			EvidenceIncomplete:     true,
 			EvidenceMissingFields:  validation.Missing,
 			EvidenceInvalidReasons: validation.Invalid,
+			PendingDecisions:       pendingDecisions,
 		}, nil
 	}
 
@@ -4534,10 +4628,11 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 			ParentIssueID: parentIssueID,
 			Ready:         false,
 			ContextRisk:   contextRisk,
-			Reasons: []string{
+			Reasons: append([]string{
 				fmt.Sprintf("issue %s is not closed", task.ID.String()),
 				"repo_dir is required to inspect worker-integration-ready mailbox evidence when no issue evidence.submitted record exists",
-			},
+			}, decisionReasons...),
+			PendingDecisions: pendingDecisions,
 		}, nil
 	}
 	events, err := readMailboxEvents(repoDir, parentIssueID)
@@ -4551,17 +4646,20 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 				continue
 			}
 			packet, validation := domain.ParseWorkerEvidencePacketBody(evt.Body)
+			validateWorkerAggregateRequest(&validation, packet, latestAggregate)
 			if validation.Complete {
 				return taskIntegrationReadinessResult{
 					IssueID:          task.ID.String(),
 					ParentIssueID:    parentIssueID,
-					Ready:            true,
+					Ready:            len(pendingDecisions) == 0,
 					ContextRisk:      contextRisk,
+					Reasons:          decisionReasons,
+					PendingDecisions: pendingDecisions,
 					EvidenceEventSeq: evt.Seq,
 					EvidencePacket:   &packet,
 				}, nil
 			}
-			reasons := []string{fmt.Sprintf("issue %s is not closed", task.ID.String())}
+			reasons := append([]string{fmt.Sprintf("issue %s is not closed", task.ID.String())}, decisionReasons...)
 			if validation.Found {
 				reasons = append(reasons, fmt.Sprintf("worker evidence packet in mailbox event seq %d is incomplete", evt.Seq))
 			} else {
@@ -4578,6 +4676,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 				EvidenceIncomplete:     true,
 				EvidenceMissingFields:  validation.Missing,
 				EvidenceInvalidReasons: validation.Invalid,
+				PendingDecisions:       pendingDecisions,
 			}, nil
 		}
 	}
@@ -4586,11 +4685,43 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 		ParentIssueID: parentIssueID,
 		Ready:         false,
 		ContextRisk:   contextRisk,
-		Reasons: []string{
+		Reasons: append([]string{
 			fmt.Sprintf("issue %s is not closed", task.ID.String()),
 			fmt.Sprintf("no worker-integration-ready mailbox event found under parent %s for %s", parentIssueID, task.ID.String()),
-		},
+		}, decisionReasons...),
+		PendingDecisions: pendingDecisions,
 	}, nil
+}
+
+func pendingDecisionReadinessReasons(pending []domain.PendingDecisionChange) []string {
+	reasons := make([]string, 0, len(pending))
+	for _, change := range pending {
+		reasons = append(reasons, fmt.Sprintf("stale material decision %s revision %d is unacknowledged; %s", change.DecisionID, change.Revision, change.RequiredAction))
+	}
+	return reasons
+}
+
+func validateWorkerAggregateRequest(validation *domain.WorkerEvidenceParseResult, packet domain.WorkerEvidencePacket, latest *domain.ValidationRequest) {
+	if validation == nil {
+		return
+	}
+	var problem string
+	if packet.AggregateValidation == nil {
+		if latest == nil {
+			return
+		}
+		problem = "aggregate_validation is required for integration readiness"
+	} else if latest == nil {
+		problem = fmt.Sprintf("aggregate_validation request %s is not present in the daemon validation projection", packet.AggregateValidation.RequestID)
+	} else if packet.AggregateValidation.RequestID != latest.RequestID {
+		problem = fmt.Sprintf("aggregate_validation request %s does not match latest daemon request %s", packet.AggregateValidation.RequestID, latest.RequestID)
+	} else if packet.AggregateValidation.SourceRevision != latest.SourceRevision {
+		problem = fmt.Sprintf("aggregate_validation source revision %q does not match candidate revision %q", packet.AggregateValidation.SourceRevision, latest.SourceRevision)
+	}
+	if problem != "" {
+		validation.Invalid = append(validation.Invalid, problem)
+		validation.Complete = false
+	}
 }
 
 func daemonWorkerIntegrationReadyMailType(eventType string) bool {

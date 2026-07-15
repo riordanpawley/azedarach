@@ -724,14 +724,15 @@ func runLearnSupersedeRPC(cfg *config.Config, opts learnSupersedeOpts) error {
 }
 
 func runLearnDoctorRPC(cfg *config.Config, opts learnDoctorOpts) error {
-	req := protocol.LearnDoctorRequestBody{
-		ProjectID:              opts.ProjectID,
-		CandidateOlderThanDays: opts.CandidateOlderThanDays,
-		InactiveOlderThanDays:  opts.InactiveOlderThanDays,
-		Limit:                  opts.Limit,
-	}
 	var out protocol.LearnDoctorResponseBody
-	if err := runLearnRPC(cfg, protocol.CommandLearnDoctor, req, &out); err != nil {
+	if err := runLearnProjectRPC(cfg, opts.ProjectID, protocol.CommandLearnDoctor, func(projectID string) any {
+		return protocol.LearnDoctorRequestBody{
+			ProjectID:              projectID,
+			CandidateOlderThanDays: opts.CandidateOlderThanDays,
+			InactiveOlderThanDays:  opts.InactiveOlderThanDays,
+			Limit:                  opts.Limit,
+		}
+	}, &out); err != nil {
 		return err
 	}
 	if opts.JSON {
@@ -742,15 +743,16 @@ func runLearnDoctorRPC(cfg *config.Config, opts learnDoctorOpts) error {
 }
 
 func runLearnGCRPC(cfg *config.Config, opts learnGCOpts) error {
-	req := protocol.LearnGCRequestBody{
-		ProjectID:              opts.ProjectID,
-		CandidateOlderThanDays: opts.CandidateOlderThanDays,
-		InactiveOlderThanDays:  opts.InactiveOlderThanDays,
-		Limit:                  opts.Limit,
-		Confirm:                opts.Confirm,
-	}
 	var out protocol.LearnGCResponseBody
-	if err := runLearnRPC(cfg, protocol.CommandLearnGC, req, &out); err != nil {
+	if err := runLearnProjectRPC(cfg, opts.ProjectID, protocol.CommandLearnGC, func(projectID string) any {
+		return protocol.LearnGCRequestBody{
+			ProjectID:              projectID,
+			CandidateOlderThanDays: opts.CandidateOlderThanDays,
+			InactiveOlderThanDays:  opts.InactiveOlderThanDays,
+			Limit:                  opts.Limit,
+			Confirm:                opts.Confirm,
+		}
+	}, &out); err != nil {
 		return err
 	}
 	if opts.JSON {
@@ -897,39 +899,52 @@ func learningScope(learning protocol.Learning) string {
 }
 
 func runLearnRPC(cfg *config.Config, command string, body any, out any) error {
+	return runLearnProjectRPC(cfg, "", command, func(string) any { return body }, out)
+}
+
+func runLearnProjectRPC(cfg *config.Config, explicitProject string, command string, body func(string) any, out any) error {
 	return runCommand(cfg, func(deps *cli.Dependencies) error {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		payload, err := json.Marshal(body)
-		if err != nil {
-			return fmt.Errorf("marshal %s request: %w", command, err)
-		}
-		resp, err := deps.DaemonClient.Command(ctx, protocol.RequestEnvelope{
-			ProtocolVersion: protocol.CurrentVersion,
-			RequestID:       naming.RequestID(fmt.Sprintf("%s-%d", command, time.Now().UnixNano())),
-			Kind:            protocol.EnvelopeKindCommand,
-			Command:         command,
-			SentAt:          time.Now().UTC(),
-			Body:            payload,
-			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(deps.ProjectID)},
-		})
-		if err != nil {
-			return err
-		}
-		if !resp.OK {
-			if resp.Error == nil {
-				return fmt.Errorf("%s failed", command)
-			}
-			return fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
-		}
-		if out == nil || len(resp.Body) == 0 {
-			return nil
-		}
-		if err := json.Unmarshal(resp.Body, out); err != nil {
-			return fmt.Errorf("decode %s response: %w", command, err)
-		}
-		return nil
+		return runLearnProjectRPCWithDeps(deps, explicitProject, command, body, out)
 	})
+}
+
+func runLearnProjectRPCWithDeps(deps *cli.Dependencies, explicitProject string, command string, body func(string) any, out any) error {
+	restore, err := cli.ApplyExplicitProjectOverride(deps, explicitProject)
+	if err != nil {
+		return err
+	}
+	defer restore()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	payload, err := json.Marshal(body(deps.ProjectID))
+	if err != nil {
+		return fmt.Errorf("marshal %s request: %w", command, err)
+	}
+	resp, err := deps.DaemonClient.Command(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       naming.RequestID(fmt.Sprintf("%s-%d", command, time.Now().UnixNano())),
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         command,
+		SentAt:          time.Now().UTC(),
+		Body:            payload,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(deps.ProjectID)},
+	})
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		if resp.Error == nil {
+			return fmt.Errorf("%s failed", command)
+		}
+		return fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+	}
+	if out == nil || len(resp.Body) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(resp.Body, out); err != nil {
+		return fmt.Errorf("decode %s response: %w", command, err)
+	}
+	return nil
 }
 
 func parseLearnAddArgs(args []string) (learnAddOpts, error) {

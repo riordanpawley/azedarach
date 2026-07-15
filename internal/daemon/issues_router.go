@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -74,6 +75,74 @@ func (d *Daemon) issueClientForProject(projectID string) *issues.Client {
 		d.issues = client
 	}
 	return client
+}
+
+// issueClientForExistingProjectStore resolves a registry project without
+// creating its root, .azedarach directory, or database. It is reserved for
+// background discovery paths where a stale registry entry must remain
+// unavailable rather than being revived as a blank project.
+func (d *Daemon) issueClientForExistingProjectStore(projectID string) (*issues.Client, error) {
+	if d == nil {
+		return nil, fmt.Errorf("issue store unavailable")
+	}
+	projectID = protocol.NormalizeProjectID(projectID)
+	if err, unhealthy := d.projectIssueStoreHealthError(projectID); unhealthy {
+		return nil, err
+	}
+
+	d.issueClientsMu.Lock()
+	repoDir, exact := d.resolveRepoDirForProjectExactLocked(projectID)
+	d.issueClientsMu.Unlock()
+	if !exact || strings.TrimSpace(repoDir) == "" {
+		return nil, d.recordProjectIssueStoreUnavailable(projectID, fmt.Errorf("registered project root unavailable"))
+	}
+	repoDir = filepath.Clean(repoDir)
+	info, err := os.Stat(repoDir)
+	if err != nil {
+		return nil, d.recordProjectIssueStoreUnavailable(projectID, fmt.Errorf("registered project root %s unavailable: %w", repoDir, err))
+	}
+	if !info.IsDir() {
+		return nil, d.recordProjectIssueStoreUnavailable(projectID, fmt.Errorf("registered project root %s is not a directory", repoDir))
+	}
+	dbPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
+	dbInfo, err := os.Stat(dbPath)
+	if err != nil {
+		return nil, d.recordProjectIssueStoreUnavailable(projectID, fmt.Errorf("registered project issue store %s unavailable: %w", dbPath, err))
+	}
+	if !dbInfo.Mode().IsRegular() {
+		return nil, d.recordProjectIssueStoreUnavailable(projectID, fmt.Errorf("registered project issue store %s is not a regular file", dbPath))
+	}
+
+	canonicalProjectID := projectID
+	if hashProjectID, hashErr := appconfig.ProjectIDForRoot(repoDir); hashErr == nil {
+		canonicalProjectID = protocol.NormalizeProjectID(hashProjectID)
+	}
+	repoKey := daemonStoreRootKey(repoDir)
+	d.issueClientsMu.Lock()
+	defer d.issueClientsMu.Unlock()
+	if d.issueClientsByProject == nil {
+		d.issueClientsByProject = make(map[string]*issues.Client)
+	}
+	if d.issueClientsByRoot == nil {
+		d.issueClientsByRoot = make(map[string]*issues.Client)
+	}
+	if client := d.issueClientsByProject[projectID]; client != nil {
+		return client, nil
+	}
+	if client := d.issueClientsByProject[canonicalProjectID]; client != nil {
+		d.issueClientsByProject[projectID] = client
+		return client, nil
+	}
+	if client := d.issueClientsByRoot[repoKey]; client != nil {
+		d.issueClientsByProject[projectID] = client
+		d.issueClientsByProject[canonicalProjectID] = client
+		return client, nil
+	}
+	client := issues.NewClientAtPath(dbPath, d.cfg.Logger, issues.WithExistingDatabaseOnly())
+	d.issueClientsByRoot[repoKey] = client
+	d.issueClientsByProject[projectID] = client
+	d.issueClientsByProject[canonicalProjectID] = client
+	return client, nil
 }
 
 func (d *Daemon) resolveRepoDirForProjectLocked(projectID string) string {

@@ -5,11 +5,24 @@ import (
 	"errors"
 	"log/slog"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestExecRunnerScopesCommandToRepository(t *testing.T) {
+	repoDir := t.TempDir()
+	out, err := NewExecRunner(repoDir).Run(context.Background(), "pwd")
+	require.NoError(t, err)
+	want, err := filepath.EvalSymlinks(repoDir)
+	require.NoError(t, err)
+	got, err := filepath.EvalSymlinks(strings.TrimSpace(string(out)))
+	require.NoError(t, err)
+	require.Equal(t, filepath.Clean(want), filepath.Clean(got))
+}
 
 // mockRunner implements CommandRunner for testing
 type mockRunner struct {

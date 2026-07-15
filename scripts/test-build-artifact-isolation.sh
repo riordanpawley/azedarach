@@ -9,6 +9,7 @@ mkdir -p "$fixture/bin" "$fixture/fake-bin" "$fixture/real-bin"
 cp "$repo_root/justfile" "$fixture/justfile"
 mkdir -p "$fixture/scripts"
 cp "$repo_root/scripts/build-install-run.sh" "$fixture/scripts/build-install-run.sh"
+cp "$repo_root/scripts/with-machine-validation-lease" "$fixture/scripts/with-machine-validation-lease"
 printf 'production az sentinel\n' >"$fixture/bin/az"
 printf 'production azd sentinel\n' >"$fixture/bin/azd"
 cp "$fixture/bin/az" "$fixture/az.before"
@@ -55,6 +56,244 @@ EOF_SCRIPT
 chmod +x "$output"
 EOF
 chmod +x "$fixture/fake-bin/go"
+
+cat >"$fixture/fake-bin/az" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "validation" && "${2:-}" == "acquire" ]]; then
+  request=""
+  while (($# > 0)); do
+    if [[ "$1" == "--request" ]]; then
+      request="$2"
+      break
+    fi
+    shift
+  done
+  token="${AZEDARACH_VALIDATION_LEASE_TOKEN:-}"
+  if [[ -n "$token" && "$request" == *"${token:0:12}"* ]]; then
+    echo "stub az: public request id leaked lease-token material" >&2
+    exit 1
+  fi
+  state=active
+  if [[ -n "${FAKE_AZ_QUEUE_ONCE_FILE:-}" && ! -e "$FAKE_AZ_QUEUE_ONCE_FILE" ]]; then
+    : >"$FAKE_AZ_QUEUE_ONCE_FILE"
+    state=queued
+  fi
+  printf '{"request":{"request_id":"%s","state":"%s"}}\n' "$request" "$state"
+  exit 0
+fi
+if [[ "${1:-}" == "validation" && "${2:-}" == "status" ]]; then
+  printf '{"active":[{"request_id":"%s","class":"%s","profile":"%s"}],"queued":[],"revision":1}\n' \
+    "${AZEDARACH_VALIDATION_REQUEST_ID:-fixture}" "${AZEDARACH_VALIDATION_CLASS:-shared}" "${AZEDARACH_VALIDATION_PROFILE:-fixture}"
+  exit 0
+fi
+if [[ "${1:-}" == "validation" && "${2:-}" == "authorize-nested" ]]; then
+  for arg in "$@"; do
+    if [[ -n "${AZEDARACH_VALIDATION_LEASE_TOKEN:-}" && "$arg" == "$AZEDARACH_VALIDATION_LEASE_TOKEN" ]]; then
+      echo "stub az: nested authorization leaked lease token in argv" >&2
+      exit 1
+    fi
+  done
+  requested_class=""
+  while (($# > 0)); do
+    if [[ "$1" == "--class" ]]; then
+      requested_class="$2"
+      break
+    fi
+    shift
+  done
+  if [[ -z "${AZEDARACH_VALIDATION_LEASE_TOKEN:-}" ]]; then
+    echo "stub az: nested authorization missing lease token" >&2
+    exit 1
+  fi
+  if [[ "${AZEDARACH_VALIDATION_CLASS:-}" != "aggregate" &&
+        "$requested_class" != "${AZEDARACH_VALIDATION_CLASS:-}" ]]; then
+    echo "stub az: nested $requested_class validation cannot join active ${AZEDARACH_VALIDATION_CLASS:-} request" >&2
+    exit 1
+  fi
+  exit 0
+fi
+if [[ "${1:-}" == "validation" && "${2:-}" == "heartbeat" ]]; then
+  if [[ -n "${FAKE_AZ_HEARTBEAT_BLOCK_FILE:-}" ]]; then
+    : >"$FAKE_AZ_HEARTBEAT_BLOCK_FILE"
+    sleep 30
+  fi
+  exit 0
+fi
+if [[ "${1:-}" == "validation" && "${2:-}" == "finish" ]]; then
+  exit 0
+fi
+echo "stub az: unsupported arguments: $*" >&2
+exit 1
+EOF
+chmod +x "$fixture/fake-bin/az"
+
+cat >"$fixture/fake-bin/validation-git" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "rev-parse" && "${2:-}" == "HEAD" ]]; then
+  printf 'fixture-sha\n'
+  exit 0
+fi
+if [[ "${1:-}" == "status" && "${2:-}" == "--porcelain" ]]; then
+  exit 0
+fi
+echo "stub validation git: unsupported arguments: $*" >&2
+exit 1
+EOF
+chmod +x "$fixture/fake-bin/validation-git"
+export AZEDARACH_VALIDATION_GIT_BIN="$fixture/fake-bin/validation-git"
+
+env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
+  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  AZEDARACH_TICKET_ID=fixture \
+  FAKE_AZ_QUEUE_ONCE_FILE="$fixture/queued-once" \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --profile token-isolation -- \
+  sh -c 'test -z "${AZEDARACH_VALIDATION_LEASE_TOKEN:-}"'
+test -e "$fixture/queued-once"
+
+env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
+  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  AZEDARACH_TICKET_ID=fixture \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --profile outer -- \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --profile nested -- \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --profile nested-deep -- true
+if env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
+  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  AZEDARACH_TICKET_ID=fixture \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --profile outer -- \
+  "$fixture/scripts/with-machine-validation-lease" --class aggregate --profile nested -- true \
+  >"$fixture/nested-upgrade.stdout" 2>"$fixture/nested-upgrade.stderr"; then
+  echo "nested aggregate unexpectedly joined a shared validation request" >&2
+  exit 1
+fi
+grep -q "daemon rejected nested validation authorization" "$fixture/nested-upgrade.stderr"
+
+# A public request id and status are not a nested capability.
+if env -u AZEDARACH_VALIDATION_NESTED_FD -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  AZEDARACH_VALIDATION_REQUEST_ID=spoofed-public-id \
+  AZEDARACH_VALIDATION_CLASS=aggregate \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --profile spoof -- true \
+  >"$fixture/nested-spoof.stdout" 2>"$fixture/nested-spoof.stderr"; then
+  echo "public validation request id unexpectedly authorized nested work" >&2
+  exit 1
+fi
+grep -q "requires an inherited authorization capability" "$fixture/nested-spoof.stderr"
+
+# Killing the wrapper must reap both the heartbeat and the executed command.
+env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
+  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" AZEDARACH_TICKET_ID=fixture \
+  AZEDARACH_VALIDATION_HEARTBEAT_INTERVAL_SECONDS=0.05 \
+  FAKE_AZ_HEARTBEAT_BLOCK_FILE="$fixture/heartbeat-blocked" \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --profile parent-death -- \
+  sh -c 'echo $$ >"$1"; exec sleep 30' sh "$fixture/orphan-command.pid" &
+wrapper_pid=$!
+for _ in {1..100}; do
+  [[ -s "$fixture/orphan-command.pid" && -e "$fixture/heartbeat-blocked" ]] && break
+  sleep 0.02
+done
+test -s "$fixture/orphan-command.pid"
+test -e "$fixture/heartbeat-blocked"
+wrapper_children="$(pgrep -P "$wrapper_pid")"
+test "$(printf '%s\n' "$wrapper_children" | sed '/^$/d' | wc -l | tr -d ' ')" -ge 2
+heartbeat_pid="$(printf '%s\n' "$wrapper_children" | head -1)"
+heartbeat_rpc="$(pgrep -P "$heartbeat_pid")"
+test -n "$heartbeat_rpc"
+orphan_command_pid="$(cat "$fixture/orphan-command.pid")"
+kill -KILL "$wrapper_pid"
+wait "$wrapper_pid" 2>/dev/null || true
+for _ in {1..100}; do
+  descendants_alive=0
+  for descendant in $wrapper_children $heartbeat_rpc $orphan_command_pid; do
+    kill -0 "$descendant" 2>/dev/null && descendants_alive=1
+  done
+  if [[ "$descendants_alive" -eq 0 ]]; then
+    break
+  fi
+  sleep 0.03
+done
+for descendant in $wrapper_children $heartbeat_rpc $orphan_command_pid; do
+  if kill -0 "$descendant" 2>/dev/null; then
+    echo "wrapper SIGKILL left validation descendant $descendant alive" >&2
+    exit 1
+  fi
+done
+
+# Aggregate admission observes raw, unleased Go-shaped work before payload
+# startup and waits for a stable quiescent window.
+cat >"$fixture/raw-overlap.go" <<'EOF'
+package main
+
+import "time"
+
+func main() { time.Sleep(time.Second) }
+EOF
+go build -o "$fixture/fake-bin/raw-overlap.test" "$fixture/raw-overlap.go"
+"$fixture/fake-bin/raw-overlap.test" &
+raw_go_pid=$!
+cat >"$fixture/fake-bin/validation-ps" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+stat="$(/bin/ps -p "${RAW_GO_PID:?}" -o stat= 2>/dev/null || true)"
+if [[ -n "$stat" && "$stat" != Z* ]]; then
+  printf '%s 1 %s %s\n' "$RAW_GO_PID" "$stat" "${RAW_GO_COMMAND:?}"
+fi
+EOF
+chmod +x "$fixture/fake-bin/validation-ps"
+raw_started="$(date +%s)"
+env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
+  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" AZEDARACH_TICKET_ID=fixture \
+  AZEDARACH_VALIDATION_PS_BIN="$fixture/fake-bin/validation-ps" \
+  RAW_GO_PID="$raw_go_pid" RAW_GO_COMMAND="$fixture/fake-bin/raw-overlap.test" \
+  "$fixture/scripts/with-machine-validation-lease" --class aggregate --profile raw-go-overlap -- \
+  sh -c 'date +%s >"$1"' sh "$fixture/raw-overlap-command.started"
+wait "$raw_go_pid"
+test "$(cat "$fixture/raw-overlap-command.started")" -gt "$raw_started"
+
+# Raw Go-shaped work that starts after aggregate admission invalidates the
+# complete outer gate, including stages outside test-timing.
+cat >"$fixture/fake-bin/validation-ps-dynamic" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ -s "${RAW_GO_PID_FILE:?}" ]] || exit 0
+pid="$(cat "$RAW_GO_PID_FILE")"
+stat="$(/bin/ps -p "$pid" -o stat= 2>/dev/null || true)"
+if [[ -n "$stat" && "$stat" != Z* ]]; then
+  printf '%s 1 %s %s\n' "$pid" "$stat" "${RAW_GO_COMMAND:?}"
+fi
+EOF
+chmod +x "$fixture/fake-bin/validation-ps-dynamic"
+env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
+  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" AZEDARACH_TICKET_ID=fixture \
+  AZEDARACH_VALIDATION_PS_BIN="$fixture/fake-bin/validation-ps-dynamic" \
+  RAW_GO_PID_FILE="$fixture/raw-during-gate.pid" \
+  RAW_GO_COMMAND="$fixture/fake-bin/raw-overlap.test" \
+  "$fixture/scripts/with-machine-validation-lease" --class aggregate --profile whole-gate-overlap -- \
+  sh -c 'touch "$1"; sleep 2' sh "$fixture/whole-gate.started" \
+  >"$fixture/whole-gate.stdout" 2>"$fixture/whole-gate.stderr" &
+whole_gate_pid=$!
+for _ in {1..100}; do
+  [[ -e "$fixture/whole-gate.started" ]] && break
+  sleep 0.02
+done
+test -e "$fixture/whole-gate.started"
+"$fixture/fake-bin/raw-overlap.test" &
+raw_during_gate_pid=$!
+printf '%s\n' "$raw_during_gate_pid" >"$fixture/raw-during-gate.pid"
+if wait "$whole_gate_pid"; then
+  echo "aggregate validation unexpectedly accepted raw Go overlap" >&2
+  exit 1
+fi
+wait "$raw_during_gate_pid"
+grep -q "aggregate validation overlapped" "$fixture/whole-gate.stderr"
 
 (
   cd "$repo_root"
@@ -111,22 +350,25 @@ if [[ "${1:-}" == "rev-parse" && "${2:-}" == "HEAD" ]]; then
 fi
 if [[ "${1:-}" == "rev-parse" && "${2:-}" == "--git-dir" ]]; then
   if [[ "${FAKE_GIT_MODE:-linked}" == "primary" ]]; then
-    printf '/fixture/repo/.git\n'
+    printf '%s/.git\n' "${FAKE_GIT_COMMON_ROOT:?}"
   else
-    printf '/fixture/repo/.git/worktrees/test\n'
+    printf '%s/.git/worktrees/test\n' "${FAKE_GIT_COMMON_ROOT:?}"
   fi
   exit 0
 fi
-if [[ "${1:-}" == "rev-parse" && "${2:-}" == "--git-common-dir" ]]; then
-  printf '/fixture/repo/.git\n'
+if [[ "${1:-}" == "rev-parse" && ( "${2:-}" == "--git-common-dir" || "${3:-}" == "--git-common-dir" ) ]]; then
+  printf '%s/.git\n' "${FAKE_GIT_COMMON_ROOT:?}"
   exit 0
 fi
 echo "stub git: unsupported arguments: $*" >&2
 exit 1
 EOF
 chmod +x "$fixture/fake-bin/git"
+export FAKE_GIT_COMMON_ROOT="$fixture"
 
-PATH="$fixture/fake-bin:$PATH" just --justfile "$fixture/justfile" --working-directory "$fixture" build
+AZEDARACH_GO_CACHE_ROOT= AZEDARACH_VALIDATION_LEASE_ID= AZEDARACH_VALIDATION_LEASE_ROOT= \
+  PATH="$fixture/fake-bin:$PATH" \
+  just --justfile "$fixture/justfile" --working-directory "$fixture" build
 
 cmp "$fixture/az.before" "$fixture/bin/az"
 cmp "$fixture/azd.before" "$fixture/bin/azd"
@@ -301,7 +543,7 @@ mkdir -p "$fixture/global-bin"
 ln -s "$fixture/bin/az" "$fixture/global-bin/az"
 ln -s "$fixture/bin/azd" "$fixture/global-bin/azd"
 FAKE_GIT_MODE=primary AZ_INSTALL_DIR="$fixture/global-bin" \
-  PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/build-install-run.sh" --no-run \
+  PATH="$fixture/global-bin:$fixture/fake-bin:$PATH" "$fixture/scripts/build-install-run.sh" --no-run \
   >"$fixture/build-install-run-install.stdout" 2>"$fixture/build-install-run-install.stderr"
 grep -q "Installed az -> $fixture/global-bin/az" "$fixture/build-install-run-install.stdout"
 grep -q "Installed azd -> $fixture/global-bin/azd" "$fixture/build-install-run-install.stdout"
@@ -322,14 +564,38 @@ test -x "$first_installed_generation/azd"
 test "$("$first_installed_generation/az" version)" = "dev (default)"
 test "$("$first_installed_generation/azd" version)" = "dev (default)"
 
+FAKE_GIT_MODE=primary FAKE_GO_MARKER=managed-path-default \
+  PATH="$first_installed_generation:$fixture/fake-bin:$PATH" \
+  "$fixture/scripts/build-install-run.sh" --no-run \
+  >"$fixture/managed-path-default.stdout" 2>"$fixture/managed-path-default.stderr"
+grep -q "Caller uses retained managed generation" "$fixture/managed-path-default.stderr"
+test "$("$fixture/global-bin/az" version)" = "dev (managed-path-default)"
+test "$("$fixture/global-bin/azd" version)" = "dev (managed-path-default)"
+test ! -e "$first_installed_generation/.azedarach-generations"
+
+mkdir -p "$fixture/shadow-bin"
+cp -L "$fixture/global-bin/az" "$fixture/shadow-bin/az"
+cp -L "$fixture/global-bin/azd" "$fixture/shadow-bin/azd"
+if FAKE_GIT_MODE=primary FAKE_GO_MARKER=shadow-diagnostic AZ_INSTALL_DIR="$fixture/global-bin" \
+  PATH="$fixture/shadow-bin:$fixture/fake-bin:$fixture/global-bin:$PATH" \
+  "$fixture/scripts/build-install-run.sh" --no-run \
+  >"$fixture/shadow-diagnostic.stdout" 2>"$fixture/shadow-diagnostic.stderr"; then
+  echo "build-install-run unexpectedly reported success for a shadowed caller shell" >&2
+  exit 1
+fi
+grep -q "caller shell remains shadowed" "$fixture/shadow-diagnostic.stderr"
+grep -q "direnv reload" "$fixture/shadow-diagnostic.stderr"
+test "$("$fixture/global-bin/az" version)" = "dev (shadow-diagnostic)"
+test "$("$fixture/global-bin/azd" version)" = "dev (shadow-diagnostic)"
+
 FAKE_GIT_MODE=primary FAKE_GO_MARKER=first FAKE_CP_ASSERT_SERIAL=1 \
   FAKE_CP_GUARD="$fixture/install-critical-section" AZ_INSTALL_DIR="$fixture/global-bin" \
-  PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/build-install-run.sh" --no-run \
+  PATH="$fixture/global-bin:$fixture/fake-bin:$PATH" "$fixture/scripts/build-install-run.sh" --no-run \
   >"$fixture/concurrent-first.stdout" 2>"$fixture/concurrent-first.stderr" &
 first_pid=$!
 FAKE_GIT_MODE=primary FAKE_GO_MARKER=second FAKE_CP_ASSERT_SERIAL=1 \
   FAKE_CP_GUARD="$fixture/install-critical-section" AZ_INSTALL_DIR="$fixture/global-bin" \
-  PATH="$fixture/fake-bin:$PATH" "$fixture/scripts/build-install-run.sh" --no-run \
+  PATH="$fixture/global-bin:$fixture/fake-bin:$PATH" "$fixture/scripts/build-install-run.sh" --no-run \
   >"$fixture/concurrent-second.stdout" 2>"$fixture/concurrent-second.stderr" &
 second_pid=$!
 wait "$first_pid"
