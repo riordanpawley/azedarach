@@ -10691,15 +10691,16 @@ func TestTaskIntegrationReadinessRejectsUnleasedAggregateEvidencePacket(t *testi
 	}
 }
 
-func TestTaskIntegrationReadinessRequiresAggregatePacketAndExactCandidateRevision(t *testing.T) {
+func TestTaskIntegrationReadinessBindsAuthoritativeAggregateToExactCandidateRevision(t *testing.T) {
 	for _, tc := range []struct {
 		name              string
 		candidateRevision string
 		includeAggregate  bool
 		dirtyCandidate    bool
+		wantReady         bool
 		wantReason        string
 	}{
-		{name: "missing packet proof", candidateRevision: "abc123", wantReason: "aggregate_validation is required"},
+		{name: "authoritative aggregate need not be duplicated in packet", candidateRevision: "abc123", wantReady: true},
 		{name: "candidate advanced after gate", candidateRevision: "def456", includeAggregate: true, wantReason: "does not match exact candidate revision"},
 		{name: "candidate is dirty after gate", candidateRevision: "abc123", includeAggregate: true, dirtyCandidate: true, wantReason: "dirty candidate tree"},
 	} {
@@ -10749,10 +10750,45 @@ func TestTaskIntegrationReadinessRequiresAggregatePacketAndExactCandidateRevisio
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result.Ready || !strings.Contains(strings.Join(result.Reasons, "\n"), tc.wantReason) {
+			if tc.wantReady {
+				if !result.Ready || result.EvidencePacket == nil || result.EvidenceSource != "issue_event" {
+					t.Fatalf("result = %+v, want structurally complete issue evidence bound by authoritative aggregate", result)
+				}
+			} else if result.Ready || !strings.Contains(strings.Join(result.Reasons, "\n"), tc.wantReason) {
 				t.Fatalf("result = %+v, want rejection containing %q", result, tc.wantReason)
 			}
 		})
+	}
+}
+
+func TestTaskIntegrationReadinessReadsMailboxFromProjectRootForIssueWorktreeCandidate(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-worker-evidence-project-mailbox"
+	projectRoot := t.TempDir()
+	candidateWorktree := t.TempDir()
+	issuesClient := newMigratedIssueClient(t, projectRoot, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeTask, Status: domain.StatusInReview, ParentID: &parentID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := appendMailboxEvent(projectRoot, daemonMailEvent{
+		Seq: 1, ParentIssue: parentID, IssueID: childID, Type: "worker-integration-ready", CreatedAt: time.Now().UTC(),
+		Body: `{"schema":"worker_evidence.v1","summary":"Ready from issue worktree.","commands_run":["just test"],"key_assertions":["authoritative project mailbox replayed"],"files_changed":["internal/daemon/task_commands.go"],"review":{"status":"clean","findings":[]},"risks":["none"]}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: projectRoot, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, revision: map[string]uint64{projectID: 1}}
+	result, err := d.taskIntegrationReadiness(ctx, projectID, childID, candidateWorktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Ready || result.EvidenceEventSeq != 1 || result.EvidencePacket == nil {
+		t.Fatalf("result = %+v, want project-root mailbox evidence independent of candidate path %s", result, candidateWorktree)
 	}
 }
 
@@ -11118,7 +11154,7 @@ func TestTaskIntegrationReadinessReportsIncompleteWorkerEvidencePacket(t *testin
 	if err != nil {
 		t.Fatalf("taskIntegrationReadiness error: %v", err)
 	}
-	if result.Ready || !result.EvidenceIncomplete || result.EvidenceEventSeq != 1 {
+	if result.Ready || !result.EvidenceIncomplete || result.EvidenceEventSeq != 1 || result.EvidenceSource != "mailbox" {
 		t.Fatalf("result = %+v, want incomplete evidence", result)
 	}
 	reasons := strings.Join(result.Reasons, "\n")
