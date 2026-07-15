@@ -416,6 +416,9 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 				return nativeCodexStartTurn(ctx, rpc, threadID, cwd, delivery.envelope.Payload, opts.Yolo, messageID)
 			})
 			active = active || newlyActive
+			if response.Outcome == "not_ready" && clientState.Pending[delivery.envelope.IntentKey+"\x00"+incarnation] != "" {
+				fmt.Fprintln(os.Stderr, "\nCodex submission state is ambiguous; automatic retry is disabled. Inspect the Codex thread and explicitly recover or discard the pending inbox intent.")
+			}
 			if newlyActive {
 				signalActivity("user_prompt_submit")
 			}

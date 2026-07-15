@@ -26,15 +26,19 @@ client must atomically:
 1. Verify the registered incarnation is still current.
 2. Prove its tool-owned composer is empty.
 3. Exclude attached human input through native turn submission.
-4. Submit the payload exactly once for the intent/incarnation pair.
+4. Submit the payload at most once for the intent/incarnation pair.
 5. Return the same non-empty acknowledgement token on every retry.
 
 The response echoes `project_id`, `intent_key`, `agent_incarnation`, and
 `lease_token`, and reports one outcome: `accepted`, `composer_nonempty`,
 `human_attached`, `stale_incarnation`, or `not_ready`. Only an exact `accepted`
-response with a non-empty acknowledgement advances the durable intent to
-delivered. Disconnects, timeouts, malformed responses, and refusal outcomes
-leave it queued (or mark an explicitly stale incarnation).
+response with a non-empty acknowledgement advances the durable inbox intent to
+delivered. Durable inbox acceptance is exactly-once, but Codex submission is
+at-most-once: after a crash where `turn/start` may have been accepted, the
+pending intent remains queued and is never automatically resubmitted. The
+client surfaces an explicit recovery action to inspect the thread and recover
+or discard the intent. Disconnects, timeouts, malformed responses, and refusal
+outcomes leave it queued (or mark an explicitly stale incarnation).
 
 Frames are newline-delimited JSON, protocol version 1, with a 4 MiB maximum.
 The socket is mode `0600`; protocol peers are trusted components running as the
