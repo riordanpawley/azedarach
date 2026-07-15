@@ -56,7 +56,9 @@ type codexRPCClient struct {
 	requests      chan codexRPCMessage
 	droppedEvents atomic.Uint64
 	disconnected  atomic.Bool
-	done          chan error
+	done          chan struct{}
+	termMu        sync.RWMutex
+	terminalErr   error
 }
 
 func startCodexRPC(ctx context.Context) (*codexRPCClient, error) {
@@ -73,7 +75,7 @@ func startCodexRPC(ctx context.Context) (*codexRPCClient, error) {
 	if err := command.Start(); err != nil {
 		return nil, err
 	}
-	c := &codexRPCClient{command: command, stdin: stdin, waits: map[string]chan codexRPCMessage{}, events: make(chan codexRPCMessage, 128), requests: make(chan codexRPCMessage, 32), done: make(chan error, 1)}
+	c := &codexRPCClient{command: command, stdin: stdin, waits: map[string]chan codexRPCMessage{}, events: make(chan codexRPCMessage, 128), requests: make(chan codexRPCMessage, 32), done: make(chan struct{})}
 	go c.read(stdout)
 	return c, nil
 }
@@ -122,7 +124,10 @@ func (c *codexRPCClient) read(reader io.Reader) {
 		err = io.EOF
 	}
 	c.disconnected.Store(true)
-	c.done <- err
+	c.termMu.Lock()
+	c.terminalErr = err
+	close(c.done)
+	c.termMu.Unlock()
 }
 
 func (c *codexRPCClient) sendRPCError(id json.RawMessage, code int, message string) error {
@@ -134,6 +139,11 @@ func (c *codexRPCClient) sendRPCResult(id json.RawMessage, result any) error {
 }
 
 func (c *codexRPCClient) send(value any) error {
+	if c.disconnected.Load() {
+		c.termMu.RLock()
+		defer c.termMu.RUnlock()
+		return c.terminalErr
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return json.NewEncoder(c.stdin).Encode(value)
@@ -163,11 +173,10 @@ func (c *codexRPCClient) call(ctx context.Context, method string, params any, re
 			return json.Unmarshal(message.Result, result)
 		}
 		return nil
-	case err := <-c.done:
-		if err == nil {
-			return errors.New("Codex app-server disconnected")
-		}
-		return err
+	case <-c.done:
+		c.termMu.RLock()
+		defer c.termMu.RUnlock()
+		return c.terminalErr
 	}
 }
 
@@ -320,7 +329,10 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 		select {
 		case <-ctx.Done():
 			return nil
-		case err := <-rpc.done:
+		case <-rpc.done:
+			rpc.termMu.RLock()
+			err := rpc.terminalErr
+			rpc.termMu.RUnlock()
 			return fmt.Errorf("Codex app-server disconnected: %w", err)
 		case event := <-rpc.events:
 			if dropped := rpc.droppedEvents.Swap(0); dropped > 0 {
@@ -445,9 +457,22 @@ func RecoverNativeCodexIntent(cwd, sessionID, intentKey, action, threadID string
 		return errors.New("recovery requires session and intent")
 	}
 	path := filepath.Join(cwd, ".azedarach", "native-agent-input", sessionID+".json")
-	state, err := loadNativeCodexState(path, true)
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("read recovery state: %w", err)
+	}
+	var state nativeCodexState
+	if err := json.Unmarshal(raw, &state); err != nil || state.Incarnation == "" || state.ThreadID == "" {
+		return errors.New("recovery state is missing or corrupt")
+	}
+	if state.Pending == nil {
+		state.Pending = map[string]string{}
+	}
+	if state.Accepted == nil {
+		state.Accepted = map[string]string{}
+	}
+	if state.Resolved == nil {
+		state.Resolved = map[string]string{}
 	}
 	key := intentKey + "\x00" + state.Incarnation
 	if state.Pending[key] == "" {

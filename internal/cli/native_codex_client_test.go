@@ -65,7 +65,7 @@ func TestAcceptNativeCodexDeliveryPersistsPendingBeforeSubmitFailure(t *testing.
 }
 
 func TestCodexRPCPreservesStringAndNumericServerRequestIDs(t *testing.T) {
-	c := &codexRPCClient{waits: map[string]chan codexRPCMessage{}, requests: make(chan codexRPCMessage, 2), events: make(chan codexRPCMessage, 2), done: make(chan error, 1)}
+	c := &codexRPCClient{waits: map[string]chan codexRPCMessage{}, requests: make(chan codexRPCMessage, 2), events: make(chan codexRPCMessage, 2), done: make(chan struct{})}
 	done := make(chan struct{})
 	go func() {
 		c.read(strings.NewReader("{\"id\":\"request-string\",\"method\":\"item/permissions/requestApproval\",\"params\":{}}\n{\"id\":7,\"method\":\"mcpServer/elicitation/request\",\"params\":{}}\n"))
