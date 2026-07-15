@@ -8913,6 +8913,7 @@ func TestSessionLaunchAtomicallyBootstrapsSlowAgentsAcrossToolsAndStartModes(t *
 	for _, tool := range []string{"codex", "claude", "opencode", "codex-app-server"} {
 		for _, mode := range []string{"direct", "orchestrated"} {
 			t.Run(tool+"/"+mode, func(t *testing.T) {
+				t.Parallel()
 				tempDir := t.TempDir()
 				readPath := filepath.Join(tempDir, "read-prompt")
 				argvPath := filepath.Join(tempDir, "agent-argv")
@@ -8927,8 +8928,8 @@ func TestSessionLaunchAtomicallyBootstrapsSlowAgentsAcrossToolsAndStartModes(t *
 				agentName := strings.TrimSuffix(tool, "-app-server")
 				agent := "#!/bin/sh\n" +
 					"printf '%s\\n' \"$@\" >> \"$AGENT_ARGV_PATH\"\n" +
-					"if [ \"${1:-} ${2:-} ${3:-}\" = 'app-server daemon start' ]; then sleep 0.75; exit 0; fi\n" +
-					"sleep 0.75\n" +
+					"if [ \"${1:-} ${2:-} ${3:-}\" = 'app-server daemon start' ]; then sleep 0.05; exit 0; fi\n" +
+					"sleep 0.05\n" +
 					"last=; for arg do last=$arg; done\n" +
 					"prompt_path=${last#* in }; prompt_path=${prompt_path%. Delete*}\n" +
 					"cat \"$prompt_path\" > \"$READ_PATH\" || exit 66\n" +
@@ -8940,10 +8941,6 @@ func TestSessionLaunchAtomicallyBootstrapsSlowAgentsAcrossToolsAndStartModes(t *
 				if err := os.WriteFile(filepath.Join(tempDir, "az"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 					t.Fatal(err)
 				}
-				t.Setenv("PATH", tempDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-				t.Setenv("READ_PATH", readPath)
-				t.Setenv("AGENT_ARGV_PATH", argvPath)
-
 				prompt := "direct request"
 				if mode == "orchestrated" {
 					prompt = buildStartWorkPrompt("az-42", string(domain.TypeTask), "Slow worker", true, "az-root")
@@ -8954,13 +8951,19 @@ func TestSessionLaunchAtomicallyBootstrapsSlowAgentsAcrossToolsAndStartModes(t *
 				}
 				t.Cleanup(handoff.remove)
 				d := &Daemon{cfg: Config{CLITool: agentName, CodexAppServer: tool == "codex-app-server", SessionShell: shellPath}}
-				launchShell, launchPayload := d.buildSessionLaunchScriptPayloadWithInitReadyPathAndEnv(protocol.DefaultProjectID, "az-42", "az-42", false, nil, "", nil, handoff)
+				startupEnv := []string{
+					"export PATH=" + singleQuoteForShell(tempDir+string(os.PathListSeparator)+os.Getenv("PATH")),
+					"export READ_PATH=" + singleQuoteForShell(readPath),
+					"export AGENT_ARGV_PATH=" + singleQuoteForShell(argvPath),
+				}
+				launchShell, launchPayload := d.buildSessionLaunchScriptPayloadWithInitReadyPathAndEnv(protocol.DefaultProjectID, "az-42", "az-42", false, nil, "", startupEnv, handoff)
 				scriptPath, tmuxCommand, err := prepareSessionLaunchScript(tempDir, launchShell, launchPayload)
 				if err != nil {
 					t.Fatal(err)
 				}
 				t.Cleanup(func() { _ = os.Remove(scriptPath) })
-				output, err := exec.Command("/bin/sh", "-c", tmuxCommand).CombinedOutput()
+				command := exec.Command("/bin/sh", "-c", tmuxCommand)
+				output, err := command.CombinedOutput()
 				if err != nil {
 					t.Fatalf("execute slow %s %s launch: %v (%s)", tool, mode, err, output)
 				}
