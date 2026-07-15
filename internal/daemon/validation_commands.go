@@ -99,6 +99,13 @@ func (d *Daemon) validationReviewAssignment(ctx context.Context, projectID strin
 	if reviewerID == "" {
 		return "", 0, fmt.Errorf("review-assigned aggregate validation requires reviewer identity")
 	}
+	reviewLease := coordinationLease(task, domain.CoordinationLeaseReview)
+	if reviewLease == nil || reviewLease.IsExpired(time.Now().UTC()) {
+		return "", 0, fmt.Errorf("review-assigned aggregate validation requires an active durable review lease")
+	}
+	if !strings.EqualFold(strings.TrimSpace(reviewLease.OwnerID), reviewerID) {
+		return "", 0, fmt.Errorf("review-assigned aggregate validation reviewer %s does not own review lease held by %s", reviewerID, reviewLease.OwnerID)
+	}
 	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventIssueStatusChanged}, NewestIDFirst: true})
 	if err != nil {
 		return "", 0, err
