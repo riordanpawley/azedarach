@@ -26,9 +26,12 @@ import (
 // NativeCodexClientOptions configures the Azedarach-owned Codex app-server
 // client. This client, rather than the stock TUI, owns the human composer.
 type NativeCodexClientOptions struct {
-	Prompt string
-	Resume bool
-	Yolo   bool
+	Prompt        string
+	Resume        bool
+	Yolo          bool
+	RecoverIntent string
+	RecoverAction string
+	RecoverThread string
 }
 
 type codexRPCMessage struct {
@@ -52,6 +55,7 @@ type codexRPCClient struct {
 	events        chan codexRPCMessage
 	requests      chan codexRPCMessage
 	droppedEvents atomic.Uint64
+	disconnected  atomic.Bool
 	done          chan error
 }
 
@@ -117,6 +121,7 @@ func (c *codexRPCClient) read(reader io.Reader) {
 	if err == nil {
 		err = io.EOF
 	}
+	c.disconnected.Store(true)
 	c.done <- err
 }
 
@@ -159,6 +164,9 @@ func (c *codexRPCClient) call(ctx context.Context, method string, params any, re
 		}
 		return nil
 	case err := <-c.done:
+		if err == nil {
+			return errors.New("Codex app-server disconnected")
+		}
 		return err
 	}
 }
@@ -226,6 +234,9 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
+	}
+	if opts.RecoverIntent != "" {
+		return RecoverNativeCodexIntent(cwd, strings.TrimSpace(os.Getenv("AZEDARACH_SESSION_ID")), opts.RecoverIntent, opts.RecoverAction, opts.RecoverThread)
 	}
 	projectID := strings.TrimSpace(deps.ProjectID)
 	if projectID == "" {
@@ -427,6 +438,42 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 	}
 }
 
+// RecoverNativeCodexIntent resolves an ambiguous pending submission without
+// contacting Codex. The caller must inspect the exact bound thread first.
+func RecoverNativeCodexIntent(cwd, sessionID, intentKey, action, threadID string) error {
+	if sessionID == "" || intentKey == "" {
+		return errors.New("recovery requires session and intent")
+	}
+	path := filepath.Join(cwd, ".azedarach", "native-agent-input", sessionID+".json")
+	state, err := loadNativeCodexState(path, true)
+	if err != nil {
+		return err
+	}
+	key := intentKey + "\x00" + state.Incarnation
+	if state.Pending[key] == "" {
+		return errors.New("intent is not pending for this incarnation")
+	}
+	if threadID == "" || threadID != state.ThreadID {
+		return errors.New("recovery requires exact persisted Codex thread")
+	}
+	switch action {
+	case "discard":
+		delete(state.Pending, key)
+		state.Resolved[key] = "discarded"
+	case "delivered":
+		ack, err := randomNativeCodexToken()
+		if err != nil {
+			return err
+		}
+		state.Accepted[key] = ack
+		state.Resolved[key] = ack
+		delete(state.Pending, key)
+	default:
+		return errors.New("recovery action must be delivered or discard")
+	}
+	return saveNativeCodexState(path, state)
+}
+
 func boundedCodexEvent(raw json.RawMessage, limit int) string {
 	if len(raw) > limit {
 		raw = raw[:limit]
@@ -443,6 +490,17 @@ func acceptNativeCodexDelivery(envelope nativeCodexEnvelope, composer []byte, ac
 	}
 	if state.Pending == nil {
 		state.Pending = map[string]string{}
+	}
+	if state.Resolved == nil {
+		state.Resolved = map[string]string{}
+	}
+	if resolution := state.Resolved[key]; resolution != "" {
+		if resolution == "discarded" {
+			response.Outcome = "discarded"
+		} else {
+			response.Outcome, response.AcknowledgementToken = "accepted", resolution
+		}
+		return response, false
 	}
 	if ack := state.Accepted[key]; ack != "" {
 		response.Outcome, response.AcknowledgementToken = "accepted", ack
@@ -492,7 +550,7 @@ func nativeCodexThread(ctx context.Context, rpc *codexRPCClient, cwd string, res
 		if err := rpc.call(ctx, "thread/resume", map[string]any{"threadId": state.ThreadID}, &resumed); err != nil {
 			return "", fmt.Errorf("resume exact Codex thread %s: %w", state.ThreadID, err)
 		}
-		if resumed.Thread.ID == "" {
+		if resumed.Thread.ID == "" || resumed.Thread.ID != state.ThreadID {
 			return "", errors.New("Codex resumed thread omitted id")
 		}
 		return resumed.Thread.ID, nil
@@ -593,6 +651,7 @@ type nativeCodexState struct {
 	ThreadID    string            `json:"thread_id"`
 	Accepted    map[string]string `json:"accepted"`
 	Pending     map[string]string `json:"pending"`
+	Resolved    map[string]string `json:"resolved"`
 }
 
 func loadNativeCodexState(path string, resume bool) (nativeCodexState, error) {
@@ -607,6 +666,9 @@ func loadNativeCodexState(path string, resume bool) (nativeCodexState, error) {
 				if state.Pending == nil {
 					state.Pending = map[string]string{}
 				}
+				if state.Resolved == nil {
+					state.Resolved = map[string]string{}
+				}
 				return state, nil
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -617,7 +679,7 @@ func loadNativeCodexState(path string, resume bool) (nativeCodexState, error) {
 	if err != nil {
 		return nativeCodexState{}, err
 	}
-	state := nativeCodexState{Incarnation: incarnation, Accepted: map[string]string{}, Pending: map[string]string{}}
+	state := nativeCodexState{Incarnation: incarnation, Accepted: map[string]string{}, Pending: map[string]string{}, Resolved: map[string]string{}}
 	return state, saveNativeCodexState(path, state)
 }
 
