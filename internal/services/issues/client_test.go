@@ -4346,6 +4346,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0046_repair_issue_state_runtime_constraints",
 		"0047_human_authority_projection_revision",
 		"0048_decision_propagation_outbox",
+		"0049_managed_agent_incarnations",
 	}, got)
 }
 

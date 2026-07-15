@@ -50,6 +50,16 @@ type SessionProjection struct {
 	UpdatedAt time.Time             `json:"updated_at" msgpack:"updated_at"`
 }
 
+// ManagedAgentIdentity is the wire representation of the exact managed pane
+// and process incarnation. LogicalPaneID remains stable across restarts;
+// TmuxPaneID, PanePID, and AgentIncarnation fence stale observations.
+type ManagedAgentIdentity struct {
+	LogicalPaneID    string `json:"logical_pane_id" msgpack:"logical_pane_id"`
+	TmuxPaneID       string `json:"tmux_pane_id" msgpack:"tmux_pane_id"`
+	PanePID          int    `json:"pane_pid" msgpack:"pane_pid"`
+	AgentIncarnation string `json:"agent_incarnation" msgpack:"agent_incarnation"`
+}
+
 type SessionProjectionEventBody struct {
 	ProjectID naming.ProjectID            `json:"project_id" msgpack:"project_id"`
 	Revision  uint64                      `json:"revision" msgpack:"revision"`
