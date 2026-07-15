@@ -263,7 +263,7 @@ sub authorize_nested {
     my $response = {ok => JSON::PP::false, nonce => $nonce, error => 'invalid nested validation authorization request'};
     if ($request && ($request->{request_id} || '') eq $held_request) {
         local $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN} = $token;
-        my $ok = eval { capture($az_path, 'validation', 'authorize-nested', '--request', $held_request, '--class', ($request->{class} || '')); 1 };
+        my $ok = eval { capture($az_path, 'validation', 'authorize-nested', '--request', $held_request, '--token', $token, '--class', ($request->{class} || '')); 1 };
         if ($ok) {
             $response = {ok => JSON::PP::true, nonce => $nonce, class => $ENV{AZEDARACH_VALIDATION_CLASS}, profile => $ENV{AZEDARACH_VALIDATION_PROFILE}, source_revision => $ENV{AZEDARACH_VALIDATION_SOURCE_REVISION}};
         } else {
