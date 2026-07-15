@@ -89,6 +89,12 @@ if [[ "${1:-}" == "validation" && "${2:-}" == "status" ]]; then
   exit 0
 fi
 if [[ "${1:-}" == "validation" && "${2:-}" == "authorize-nested" ]]; then
+  for arg in "$@"; do
+    if [[ -n "${AZEDARACH_VALIDATION_LEASE_TOKEN:-}" && "$arg" == "$AZEDARACH_VALIDATION_LEASE_TOKEN" ]]; then
+      echo "stub az: nested authorization leaked lease token in argv" >&2
+      exit 1
+    fi
+  done
   requested_class=""
   while (($# > 0)); do
     if [[ "$1" == "--class" ]]; then
