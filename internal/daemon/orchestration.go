@@ -374,6 +374,7 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	if limit <= 0 {
 		limit = a.inspectLimit()
 	}
+	request.Limit = limit
 	snapshot := protocol.OrchestrationSnapshot{
 		Scope: identity.Scope, GeneratedAt: time.Now().UTC(), Blocked: map[string]string{},
 		Constraints: protocol.OrchestrationConstraints{

@@ -678,6 +678,14 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 		if !found {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue not found: %s", taskID)), nil
 		}
+		if err := d.refreshFiniteWorktreeGitFacts(ctx, projectID, taskIDsFromTasks(tasks)); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("refresh issue worktree git facts: %v", err)), nil
+		}
+		materialized, source, err = d.projectReadSnapshot(projectID)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
+		}
+		tasks = materializedTaskContext(materialized, []string{taskID}, true, false, true, false, archiveMode)
 		lastCheckedAt := materializedLastCheckedAt(tasks)
 		payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), lastCheckedAt, protocol.TaskListFreshnessFresh, tasks, false)
 		payload.Source = source
@@ -786,6 +794,16 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 			return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
 		}
 		tasks := materializedTaskContext(materialized, taskIDs, !cmd.MetadataOnly, cmd.IncludeAncestors, !cmd.ExcludeDependents, cmd.DirectDependents, protocol.ArchiveModeExclude)
+		if !cmd.MetadataOnly {
+			if err := d.refreshFiniteWorktreeGitFacts(ctx, projectID, taskIDsFromTasks(tasks)); err != nil {
+				return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("refresh issue worktree git facts: %v", err)), nil
+			}
+			materialized, source, err = d.projectReadSnapshot(projectID)
+			if err != nil {
+				return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
+			}
+			tasks = materializedTaskContext(materialized, taskIDs, true, cmd.IncludeAncestors, !cmd.ExcludeDependents, cmd.DirectDependents, protocol.ArchiveModeExclude)
+		}
 		payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), materializedLastCheckedAt(tasks), protocol.TaskListFreshnessFresh, tasks, false)
 		payload.Source = source
 		body, err := json.Marshal(payload)
@@ -1584,7 +1602,14 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 			continue
 		}
 		branch := strings.TrimSpace(wt.Branch)
-		d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktreePath, branch)
+		projection, found, projectionErr := d.worktreeRuntimeStateStore(projectID).GetWorktreeStateByIssueID(ctx, projectID, issueID)
+		if projectionErr != nil {
+			errs = append(errs, fmt.Errorf("%s: load worktree projection: %w", issueID, projectionErr))
+			continue
+		}
+		if !found || strings.TrimSpace(projection.Path) != worktreePath || strings.TrimSpace(projection.Branch) != branch {
+			d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktreePath, branch)
+		}
 		refreshed++
 
 		if d.git == nil {
@@ -1613,6 +1638,20 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 		}
 	}
 	return refreshed, errors.Join(errs...)
+}
+
+// refreshFiniteWorktreeGitFacts synchronously converges the bounded issue set
+// from Git into the durable runtime projection, then refreshes the in-memory
+// read model before a finite ticket or orchestration response is assembled.
+func (d *Daemon) refreshFiniteWorktreeGitFacts(ctx context.Context, projectID string, issueIDs []string) error {
+	issueIDs = normalizeRuntimeReconcileIssueIDs(issueIDs)
+	if len(issueIDs) == 0 {
+		return nil
+	}
+	if _, err := d.refreshWorktreeRuntimeStateForIssues(ctx, projectID, issueIDs); err != nil {
+		return err
+	}
+	return d.refreshProjectReadRuntimeForIssues(ctx, projectID, issueIDs)
 }
 
 func (d *Daemon) runtimeDiffBaseBranchForIssue(
