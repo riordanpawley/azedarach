@@ -290,23 +290,15 @@ func reconcileValidationQueueTx(ctx context.Context, tx *sql.Tx, projectID strin
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_validation_requests WHERE project_id=? AND state='active' AND class='shared'`, projectID).Scan(&activeShared); err != nil {
 			return err
 		}
-		if activeShared != 0 {
-			return nil
+		if activeShared == 0 {
+			_, err = tx.ExecContext(ctx, `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE sequence=? AND state='queued'`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), firstSequence)
+			return err
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE sequence=? AND state='queued'`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), firstSequence)
-		return err
 	}
-	var nextAggregate sql.NullInt64
-	if err := tx.QueryRowContext(ctx, `SELECT MIN(sequence) FROM daemon_validation_requests WHERE project_id=? AND state='queued' AND class='aggregate'`, projectID).Scan(&nextAggregate); err != nil {
-		return err
-	}
-	query := `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE project_id=? AND state='queued' AND class='shared'`
-	args := []any{now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), projectID}
-	if nextAggregate.Valid {
-		query += ` AND sequence < ?`
-		args = append(args, nextAggregate.Int64)
-	}
-	_, err = tx.ExecContext(ctx, query, args...)
+	// A queued aggregate expresses future exclusivity, not current ownership.
+	// Keep admitting focused work until the aggregate can actually acquire the
+	// machine; only an active aggregate blocks shared validators.
+	_, err = tx.ExecContext(ctx, `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE project_id=? AND state='queued' AND class='shared'`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), projectID)
 	return err
 }
 
