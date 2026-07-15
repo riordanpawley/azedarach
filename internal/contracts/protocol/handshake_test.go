@@ -22,27 +22,18 @@ func TestNegotiateHelloCompatibilityMatrix(t *testing.T) {
 			wantErrorCode: ErrorCodeInvalidRequest,
 		},
 		{
+			name:          "previous installed generation rejected before payload exchange",
+			clientVersion: CurrentVersion - 1,
+			wantAccepted:  false,
+			wantErrorCode: ErrorCodeUpgradeRequired,
+		},
+		{
 			name:           "forward-incompatible requests restart retry",
 			clientVersion:  MaxSupportedVersion + 1,
 			wantAccepted:   false,
 			wantErrorCode:  ErrorCodeIncompatible,
 			wantRetryAfter: true,
 		},
-	}
-
-	if MinSupportedVersion > 1 {
-		tests = append(tests, struct {
-			name           string
-			clientVersion  Version
-			wantAccepted   bool
-			wantErrorCode  ErrorCode
-			wantRetryAfter bool
-		}{
-			name:          "backward-incompatible rejected",
-			clientVersion: MinSupportedVersion - 1,
-			wantAccepted:  false,
-			wantErrorCode: ErrorCodeUpgradeRequired,
-		})
 	}
 
 	for _, tc := range tests {

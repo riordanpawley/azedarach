@@ -95,6 +95,29 @@ func TestCommandLogsFailure(t *testing.T) {
 	}
 }
 
+func TestCommandRejectsStaleClientProtocolWithRefreshPath(t *testing.T) {
+	d := &Daemon{}
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion - 1,
+		RequestID:       "req-stale-client",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.list",
+	}
+
+	resp, err := d.command(context.Background(), req)
+	if err != nil {
+		t.Fatalf("command returned error: %v", err)
+	}
+	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeUpgradeRequired {
+		t.Fatalf("response = %+v, want upgrade-required error", resp)
+	}
+	for _, want := range []string{"stale long-lived client", "stable installed az control link", "restart any session"} {
+		if !strings.Contains(resp.Error.Message, want) {
+			t.Fatalf("error message = %q, want %q", resp.Error.Message, want)
+		}
+	}
+}
+
 func TestCommandDaemonShutdownRequestsRuntimeStop(t *testing.T) {
 	d := &Daemon{}
 	body, err := json.Marshal(protocol.DaemonShutdownCommandBody{Reason: "manual-restart"})
