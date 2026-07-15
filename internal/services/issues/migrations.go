@@ -84,6 +84,7 @@ var orderedMigrations = []migration{
 	{id: projectionDeltaAuthorityMigrationID, path: "migrations/0047_projection_delta_authority.sql", apply: applyProjectionDeltaAuthorityMigration},
 	{id: humanAuthorityProjectionMigrationID, path: "migrations/0047_human_authority_projection_revision.sql"},
 	{id: "0048_decision_propagation_outbox", path: "migrations/0048_decision_propagation_outbox.sql"},
+	{id: "0049_managed_agent_incarnations", path: "migrations/0049_managed_agent_incarnations.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -140,6 +141,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: projectionDeltaAuthorityMigrationID, Path: "migrations/0047_projection_delta_authority.sql", Checksum: projectionDeltaAuthorityChecksum},
 	{ID: humanAuthorityProjectionMigrationID, Path: "migrations/0047_human_authority_projection_revision.sql", Checksum: "ac3a48512b2e6e9c018d58a68db24a2465e9d172139d22f8378f69677073a0ab"},
 	{ID: "0048_decision_propagation_outbox", Path: "migrations/0048_decision_propagation_outbox.sql", Checksum: "a12c44ba35156d71fbcd88a9d78e4cdb234e75e7e4aef5f896c8b1182ada858d"},
+	{ID: "0049_managed_agent_incarnations", Path: "migrations/0049_managed_agent_incarnations.sql", Checksum: "8364ceb9fad589df3f73c1fe0f0462c22b127510f1745e62fcc11e24757fe08d"},
 }
 
 func validateMigrationRegistry() error {
@@ -433,8 +435,8 @@ const (
 	issueStateModelV2CutoverMarkerKey                              = "issue:state_model_v2_cutover"
 	issueStateModelV2Version                                       = "2"
 	boardViewsMigrationID                                          = "0031_board_views"
-	projectionDeltaAuthorityMigrationID                           = "0047_projection_delta_authority"
-	projectionDeltaAuthorityChecksum                              = "9f7bed54f9694c608c7ce081c4007539eb46ce67adc9127d5649a1dbb49b6c5a"
+	projectionDeltaAuthorityMigrationID                            = "0047_projection_delta_authority"
+	projectionDeltaAuthorityChecksum                               = "9f7bed54f9694c608c7ce081c4007539eb46ce67adc9127d5649a1dbb49b6c5a"
 	humanAuthorityProjectionMigrationID                            = "0047_human_authority_projection_revision"
 	decisionPropagationOutboxMigrationID                           = "0048_decision_propagation_outbox"
 	contextualLearningMigrationID                                  = "0039_contextual_learning_activation"
@@ -561,6 +563,15 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	}
 	if err := validateProjectionDeltaAuthoritySchema(ctx, db); err != nil {
 		return fmt.Errorf("validate projection delta authority schema: %w", err)
+	}
+	managedIdentityApplied, err := isMigrationApplied(ctx, db, "0049_managed_agent_incarnations")
+	if err != nil {
+		return fmt.Errorf("check managed agent identity migration: %w", err)
+	}
+	if managedIdentityApplied {
+		if err := validateManagedAgentIdentitySchema(ctx, db); err != nil {
+			return err
+		}
 	}
 
 	canonicalApplied, err := isMigrationApplied(ctx, db, "0045_issue_state_runtime_constraints")
@@ -907,6 +918,43 @@ func validateProjectionDeltaAuthoritySchema(ctx context.Context, db projectionDe
 
 func normalizeProjectionDDL(ddl string) string {
 	return strings.ToLower(strings.Join(strings.Fields(ddl), " "))
+}
+
+func validateManagedAgentIdentitySchema(ctx context.Context, db *sql.DB) error {
+	var tableSQL string
+	if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='daemon_managed_agent_incarnations'`).Scan(&tableSQL); err != nil {
+		return fmt.Errorf("inspect managed agent identity table: %w", err)
+	}
+	normalizedTable := strings.NewReplacer(" ", "", "\n", "", "\t", "", "\r", "").Replace(strings.ToLower(tableSQL))
+	for _, fragment := range []string{"pane_pidintegernotnullcheck(pane_pid>0)", "primarykey(project_id,session_id,logical_pane_id)"} {
+		if !strings.Contains(normalizedTable, fragment) {
+			return fmt.Errorf("managed agent identity schema drifted: missing constraint %s", fragment)
+		}
+	}
+	for _, column := range []string{"project_id", "session_id", "logical_pane_id", "tmux_pane_id", "pane_pid", "agent_incarnation", "observed_at", "updated_at"} {
+		exists, err := columnExistsDB(ctx, db, "daemon_managed_agent_incarnations", column)
+		if err != nil {
+			return fmt.Errorf("inspect managed agent identity column %s: %w", column, err)
+		}
+		if !exists {
+			return fmt.Errorf("managed agent identity schema drifted: missing column %s", column)
+		}
+	}
+	var indexSQL string
+	err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_daemon_managed_agent_physical_incarnation'`).Scan(&indexSQL)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("managed agent identity schema drifted: missing index idx_daemon_managed_agent_physical_incarnation")
+	}
+	if err != nil {
+		return fmt.Errorf("inspect managed agent identity index: %w", err)
+	}
+	normalized := strings.ToLower(strings.Join(strings.Fields(indexSQL), " "))
+	for _, fragment := range []string{"unique index", "(project_id, tmux_pane_id, pane_pid, agent_incarnation)"} {
+		if !strings.Contains(normalized, fragment) {
+			return fmt.Errorf("managed agent identity schema drifted: index idx_daemon_managed_agent_physical_incarnation has unexpected definition")
+		}
+	}
+	return nil
 }
 
 func repairIssueIDAllocationSchema(ctx context.Context, db *sql.DB) error {
