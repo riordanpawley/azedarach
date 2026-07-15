@@ -90,7 +90,7 @@ func TestEnvrcDoesNotSelectAzRuntime(t *testing.T) {
 	pathBefore := first + ":" + second + ":/usr/bin:/bin"
 	result := filepath.Join(checkout, "result")
 	script := `set -eu
-nix() { :; }; use() { :; }; dotenv() { :; }; source_env_if_exists() { :; }
+nix() { :; }; use() { :; }; dotenv() { :; }; source_env_if_exists() { :; }; PATH_add() { PATH="$1:$PATH"; }
 cd "$CHECKOUT"
 before="$PATH"
 . ./.envrc >/dev/null
@@ -109,7 +109,9 @@ command -v azd >"$RESULT.azd"
 	require.NoError(t, err)
 	after, err := os.ReadFile(result + ".after")
 	require.NoError(t, err)
-	assert.Equal(t, strings.TrimSpace(string(before)), strings.TrimSpace(string(after)))
+	canonicalCheckout, err := filepath.EvalSymlinks(checkout)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(canonicalCheckout, "scripts", "validation-bin")+":"+strings.TrimSpace(string(before)), strings.TrimSpace(string(after)))
 	gotAz, err := os.ReadFile(result + ".az")
 	require.NoError(t, err)
 	gotAzd, err := os.ReadFile(result + ".azd")

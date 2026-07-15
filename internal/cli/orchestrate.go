@@ -392,15 +392,17 @@ type orchestrateWorkerEvidenceSummary struct {
 }
 
 type orchestrateNestedRoot struct {
-	IssueID        string                    `json:"issue_id"`
-	Status         string                    `json:"status"`
-	IssueStatus    string                    `json:"issue_status,omitempty"`
-	Type           string                    `json:"type"`
-	ChildCount     int                       `json:"child_count"`
-	ActiveSession  *orchestrateActiveSession `json:"active_session,omitempty"`
-	StartFailure   *orchestrateStartFailure  `json:"start_failure,omitempty"`
-	FallbackPolicy string                    `json:"fallback_policy,omitempty"`
-	Advice         string                    `json:"advice,omitempty"`
+	IssueID          string                    `json:"issue_id"`
+	Status           string                    `json:"status"`
+	IssueStatus      string                    `json:"issue_status,omitempty"`
+	Classification   string                    `json:"classification,omitempty"`
+	ExclusionReasons []string                  `json:"exclusion_reasons,omitempty"`
+	Type             string                    `json:"type"`
+	ChildCount       int                       `json:"child_count"`
+	ActiveSession    *orchestrateActiveSession `json:"active_session,omitempty"`
+	StartFailure     *orchestrateStartFailure  `json:"start_failure,omitempty"`
+	FallbackPolicy   string                    `json:"fallback_policy,omitempty"`
+	Advice           string                    `json:"advice,omitempty"`
 }
 
 type orchestrateStartFailure struct {
@@ -952,6 +954,12 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		fmt.Println("Nested roots:")
 		for _, nested := range result.NestedRoots {
 			fmt.Printf("- %s status=%s issue_status=%s type=%s children=%d", nested.IssueID, nested.Status, nested.IssueStatus, nested.Type, nested.ChildCount)
+			if nested.Classification != "" {
+				fmt.Printf(" classification=%s", nested.Classification)
+			}
+			if len(nested.ExclusionReasons) > 0 {
+				fmt.Printf(" exclusions=%s", strings.Join(nested.ExclusionReasons, ","))
+			}
 			if nested.FallbackPolicy != "" {
 				fmt.Printf(" fallback=%s", nested.FallbackPolicy)
 			}
@@ -1157,7 +1165,7 @@ func OrchestrateGroupCommand(deps *Dependencies, opts OrchestrateGroupOptions) e
 	}
 	if result.NestedRoot != nil {
 		nested := result.NestedRoot
-		fmt.Printf("Nested root: %s status=%s issue_status=%s children=%d fallback=%s\n", nested.IssueID, nested.Status, nested.IssueStatus, nested.ChildCount, nested.FallbackPolicy)
+		fmt.Printf("Nested root: %s status=%s issue_status=%s classification=%s exclusions=%s children=%d fallback=%s\n", nested.IssueID, nested.Status, nested.IssueStatus, nested.Classification, strings.Join(nested.ExclusionReasons, ","), nested.ChildCount, nested.FallbackPolicy)
 		if nested.Advice != "" {
 			fmt.Printf("Next: %s\n", nested.Advice)
 		}
@@ -1504,15 +1512,17 @@ func orchestrateNestedRootsFromDaemon(nested []daemonclient.TaskNestedRoot) []or
 			}
 		}
 		out = append(out, orchestrateNestedRoot{
-			IssueID:        item.IssueID,
-			Status:         item.Status,
-			IssueStatus:    item.IssueStatus,
-			Type:           item.Type,
-			ChildCount:     item.ChildCount,
-			ActiveSession:  active,
-			StartFailure:   failure,
-			FallbackPolicy: item.FallbackPolicy,
-			Advice:         item.Advice,
+			IssueID:          item.IssueID,
+			Status:           item.Status,
+			IssueStatus:      item.IssueStatus,
+			Classification:   item.Classification,
+			ExclusionReasons: append([]string(nil), item.ExclusionReasons...),
+			Type:             item.Type,
+			ChildCount:       item.ChildCount,
+			ActiveSession:    active,
+			StartFailure:     failure,
+			FallbackPolicy:   item.FallbackPolicy,
+			Advice:           item.Advice,
 		})
 	}
 	return out
@@ -3038,6 +3048,12 @@ func emitOrchestrateWatchFrame(frame orchestrateWatchFrame, jsonl bool, compact 
 		fmt.Println("nested roots:")
 		for _, nested := range frame.NestedRoots {
 			fmt.Printf("- %s status=%s issue_status=%s type=%s children=%d", nested.IssueID, nested.Status, nested.IssueStatus, nested.Type, nested.ChildCount)
+			if nested.Classification != "" {
+				fmt.Printf(" classification=%s", nested.Classification)
+			}
+			if len(nested.ExclusionReasons) > 0 {
+				fmt.Printf(" exclusions=%s", strings.Join(nested.ExclusionReasons, ","))
+			}
 			if nested.FallbackPolicy != "" {
 				fmt.Printf(" fallback=%s", nested.FallbackPolicy)
 			}
