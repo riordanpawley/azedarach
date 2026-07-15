@@ -111,8 +111,12 @@ func newScopedValidationFixture(t *testing.T, stopFails, global bool) scopedVali
 	t.Helper()
 	root := t.TempDir()
 	shim := filepath.Join(root, "az")
+	daemonShim := filepath.Join(root, "azd")
 	script := fmt.Sprintf("#!/bin/sh\nexec %q -test.run '^TestScopedValidationFakeAZProcess$' -- \"$@\"\n", os.Args[0])
 	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(os.Args[0], daemonShim); err != nil {
 		t.Fatal(err)
 	}
 	scope := "worktree"
@@ -133,6 +137,7 @@ func newScopedValidationFixture(t *testing.T, stopFails, global bool) scopedVali
 		"AZEDARACH_DAEMON_SCOPE_SOURCE=",
 		"AZEDARACH_SCOPED_VALIDATION_READY="+filepath.Join(root, "ready"),
 		"AZEDARACH_SCOPED_VALIDATION_PID="+filepath.Join(root, "pid"),
+		"AZEDARACH_SCOPED_VALIDATION_DAEMON_BIN="+daemonShim,
 		"AZEDARACH_SCOPED_VALIDATION_STOP_LOG="+filepath.Join(root, "stop.log"),
 		"AZEDARACH_SCOPED_VALIDATION_RUNTIME="+filepath.Join(root, "runtime"),
 	)
@@ -220,7 +225,7 @@ func startScopedValidationTestDaemon() error {
 			return err
 		}
 	}
-	cmd := exec.Command(os.Args[0], "-test.run", "^TestScopedValidationDaemonProcess$")
+	cmd := exec.Command(os.Getenv("AZEDARACH_SCOPED_VALIDATION_DAEMON_BIN"), "-test.run", "^TestScopedValidationDaemonProcess$")
 	cmd.Env = append(os.Environ(), scopedValidationHelperEnv+"=daemon")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
