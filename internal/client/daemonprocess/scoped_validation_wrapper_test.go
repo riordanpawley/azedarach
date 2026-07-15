@@ -51,8 +51,7 @@ func TestRealProcessProfileScopedValidationWrapperReapsDaemon(t *testing.T) {
 		wantExit      int
 		wantReaped    bool
 	}{
-		{name: "success", payload: []string{"/bin/sh", "-c", "exit 0"}, wantExit: 0, wantReaped: true},
-		{name: "protocol-skewed heartbeat survives cleanup", payload: []string{"/bin/sh", "-c", "sleep 2"}, wantExit: 0, wantReaped: true, wantHeartbeat: true, slowCleanup: true},
+		{name: "success with protocol-skewed heartbeat during cleanup", payload: []string{"/bin/sh", "-c", "exit 0"}, wantExit: 0, wantReaped: true, wantHeartbeat: true, slowCleanup: true},
 		{name: "payload failure", payload: []string{"/bin/sh", "-c", "exit 23"}, wantExit: 23, wantReaped: true},
 		{name: "termination signal", payload: []string{"/bin/sh", "-c", "touch \"$AZEDARACH_SCOPED_VALIDATION_PAYLOAD_READY\"; while :; do sleep 1; done"}, signal: syscall.SIGTERM, wantExit: 143, wantReaped: true},
 		{name: "cleanup failure after success is durable", payload: []string{"/bin/sh", "-c", "exit 0"}, stopFails: true, wantExit: 78},
@@ -180,7 +179,7 @@ func newScopedValidationFixture(t *testing.T, stopFails, global, slowCleanup boo
 		"AZEDARACH_VALIDATION_CLEANUP_AZ_BIN="+cleanupShim,
 		"AZEDARACH_DAEMON_SCOPE="+scope,
 		"AZEDARACH_DAEMON_SCOPE_SOURCE=",
-		"AZEDARACH_VALIDATION_HEARTBEAT_INTERVAL_SECONDS=1",
+		"AZEDARACH_VALIDATION_HEARTBEAT_INTERVAL_SECONDS=0.1",
 		"AZEDARACH_SCOPED_VALIDATION_READY="+filepath.Join(root, "ready"),
 		"AZEDARACH_SCOPED_VALIDATION_PID="+filepath.Join(root, "pid"),
 		"AZEDARACH_SCOPED_VALIDATION_DAEMON_BIN="+daemonShim,
@@ -342,8 +341,15 @@ func startScopedValidationTestDaemon() error {
 
 func stopScopedValidationTestDaemon() int {
 	if os.Getenv("AZEDARACH_SCOPED_VALIDATION_SLOW_STOP") == "1" {
-		_ = appendLine(os.Getenv("AZEDARACH_SCOPED_VALIDATION_ORDER_LOG"), "stop-begin")
-		time.Sleep(1500 * time.Millisecond)
+		orderLog := os.Getenv("AZEDARACH_SCOPED_VALIDATION_ORDER_LOG")
+		_ = appendLine(orderLog, "stop-begin")
+		deadline := time.Now().Add(2 * time.Second)
+		for !strings.Contains(string(readFileBestEffort(orderLog)), "stop-begin\nheartbeat\n") && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if !strings.Contains(string(readFileBestEffort(orderLog)), "stop-begin\nheartbeat\n") {
+			return 18
+		}
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(readFileBestEffort(os.Getenv("AZEDARACH_SCOPED_VALIDATION_PID")))))
 	if err != nil {
