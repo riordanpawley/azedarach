@@ -140,7 +140,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: humanAuthorityProjectionMigrationID, Path: "migrations/0047_human_authority_projection_revision.sql", Checksum: "ac3a48512b2e6e9c018d58a68db24a2465e9d172139d22f8378f69677073a0ab"},
 	{ID: "0048_decision_propagation_outbox", Path: "migrations/0048_decision_propagation_outbox.sql", Checksum: "a12c44ba35156d71fbcd88a9d78e4cdb234e75e7e4aef5f896c8b1182ada858d"},
 	{ID: "0049_managed_agent_incarnations", Path: "migrations/0049_managed_agent_incarnations.sql", Checksum: "8364ceb9fad589df3f73c1fe0f0462c22b127510f1745e62fcc11e24757fe08d"},
-	{ID: "0050_agent_input_delivery", Path: "migrations/0050_agent_input_delivery.sql", Checksum: "4bb09bc757a9e7604a675fa3f8c0d62eb03f809ba5350418b506bd72296b8af1"},
+	{ID: "0050_agent_input_delivery", Path: "migrations/0050_agent_input_delivery.sql", Checksum: "bff72cedf01fe0dfc990b73df9430a96ef8c180f2c81a588c9222f4057b8f62a"},
 }
 
 func validateMigrationRegistry() error {
@@ -170,7 +170,7 @@ func applyIssueStateRuntimeConstraintsRepairMigration(ctx context.Context, db *s
 	return nil
 }
 
-func columnExistsDB(ctx context.Context, db *sql.DB, table, column string) (bool, error) {
+func columnExistsDB(ctx context.Context, db sqlIssueQueryer, table, column string) (bool, error) {
 	rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
 	if err != nil {
 		return false, err
@@ -484,7 +484,21 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("repair spec schema: %w", err)
 	}
 
-	for _, m := range orderedMigrations {
+	migrations := orderedMigrations
+	if c.migrationCeiling != "" {
+		ceiling := -1
+		for i, migration := range orderedMigrations {
+			if migration.id == c.migrationCeiling {
+				ceiling = i
+				break
+			}
+		}
+		if ceiling < 0 {
+			return fmt.Errorf("migration ceiling %s is not registered", c.migrationCeiling)
+		}
+		migrations = orderedMigrations[:ceiling+1]
+	}
+	for _, m := range migrations {
 		applied, err := isMigrationApplied(ctx, db, m.id)
 		if err != nil {
 			return fmt.Errorf("check migration %s: %w", m.id, err)
@@ -644,7 +658,7 @@ func validateManagedAgentIdentitySchema(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func validateAgentInputDeliverySchema(ctx context.Context, db *sql.DB) error {
+func validateAgentInputDeliverySchema(ctx context.Context, db sqlIssueQueryer) error {
 	var tableSQL string
 	if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_input_delivery_intents'`).Scan(&tableSQL); err != nil {
 		return fmt.Errorf("inspect agent input delivery table: %w", err)
@@ -1230,6 +1244,9 @@ func (c *Client) applyAgentInputDeliveryMigration(ctx context.Context, db *sql.D
 		if err := c.agentInputMigrationFailureHook("after_schema"); err != nil {
 			return fmt.Errorf("migration %s rolled back: %w", id, err)
 		}
+	}
+	if err := validateAgentInputDeliverySchema(ctx, tx); err != nil {
+		return fmt.Errorf("validate migration %s: %w", id, err)
 	}
 	if err := recordAppliedMigration(ctx, tx, id); err != nil {
 		return fmt.Errorf("record migration %s: %w", id, err)

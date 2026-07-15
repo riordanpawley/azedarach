@@ -1,3 +1,21 @@
+-- Migration 0050 manifest
+--
+-- Schema effects:
+--   Create agent_input_delivery_intents and its pending/incarnation indexes.
+-- Data effects:
+--   None. Existing issue, session, decision, and runtime rows are not read,
+--   rewritten, backfilled, or deleted; the new intent table starts empty.
+-- Validation effects:
+--   The Go-assisted runner executes this artifact transactionally and validates
+--   the table SQL, required columns, constraints, and both indexes before the
+--   transaction may write its ledger row or commit. Every later startup repeats
+--   the same schema validation when the ledger records this migration applied.
+-- Ledger effects:
+--   After schema validation, the runner records exactly one
+--   schema_migrations row for 0050_agent_input_delivery with this artifact's
+--   pinned SHA-256 checksum. Schema, validation, and ledger mutation roll back
+--   together on any failure.
+
 CREATE TABLE agent_input_delivery_intents (
   project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
   intent_key TEXT NOT NULL CHECK (trim(intent_key) <> ''),

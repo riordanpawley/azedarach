@@ -29,11 +29,13 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var beforeIssues, beforeCustom int
+			var beforeIssues, beforeCustom, beforeMigrations, beforeAgentInput int
 			if err = beforeDB.QueryRow(`SELECT COUNT(*) FROM issues`).Scan(&beforeIssues); err != nil {
 				t.Fatal(err)
 			}
 			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM board_views WHERE built_in=0`).Scan(&beforeCustom)
+			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&beforeMigrations)
+			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&beforeAgentInput)
 			_ = beforeDB.Close()
 
 			client := NewClientAtPath(path, slog.Default())
@@ -47,12 +49,18 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = validateDecisionPropagationOutboxSchema(ctx, db); err != nil {
 				t.Fatal(err)
 			}
+			if err = validateAgentInputDeliverySchema(ctx, db); err != nil {
+				t.Fatal(err)
+			}
 			var checksum string
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, humanAuthorityProjectionMigrationID).Scan(&checksum); err != nil || checksum != "ac3a48512b2e6e9c018d58a68db24a2465e9d172139d22f8378f69677073a0ab" {
 				t.Fatalf("checksum=%q err=%v", checksum, err)
 			}
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, decisionPropagationOutboxMigrationID).Scan(&checksum); err != nil || checksum != "a12c44ba35156d71fbcd88a9d78e4cdb234e75e7e4aef5f896c8b1182ada858d" {
 				t.Fatalf("decision outbox checksum=%q err=%v", checksum, err)
+			}
+			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&checksum); err != nil || checksum != "bff72cedf01fe0dfc990b73df9430a96ef8c180f2c81a588c9222f4057b8f62a" {
+				t.Fatalf("agent input checksum=%q err=%v", checksum, err)
 			}
 			projectIDs := []string{"default"}
 			if rows, queryErr := db.Query(`SELECT DISTINCT project_id FROM board_views`); queryErr == nil {
@@ -77,16 +85,32 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if _, err = client.ExportProjection(ctx, projectIDs[0]); err != nil {
 				t.Fatal(err)
 			}
-			var afterIssues, afterCustom int
+			if _, err = client.List(ctx); err != nil {
+				t.Fatal(err)
+			}
+			var afterIssues, afterCustom, afterMigrations, afterAgentInput, intentRows int
 			if err = db.QueryRow(`SELECT COUNT(*) FROM issues`).Scan(&afterIssues); err != nil {
 				t.Fatal(err)
 			}
 			if err = db.QueryRow(`SELECT COUNT(*) FROM board_views WHERE built_in=0`).Scan(&afterCustom); err != nil {
 				t.Fatal(err)
 			}
+			if err = db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&afterMigrations); err != nil {
+				t.Fatal(err)
+			}
+			if err = db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&afterAgentInput); err != nil {
+				t.Fatal(err)
+			}
+			if err = db.QueryRow(`SELECT COUNT(*) FROM agent_input_delivery_intents`).Scan(&intentRows); err != nil {
+				t.Fatal(err)
+			}
 			if beforeIssues != afterIssues || beforeCustom != afterCustom {
 				t.Fatalf("row preservation issues=%d/%d custom_views=%d/%d", beforeIssues, afterIssues, beforeCustom, afterCustom)
 			}
+			if afterAgentInput != 1 || intentRows != 0 || afterMigrations != beforeMigrations+(1-beforeAgentInput) {
+				t.Fatalf("migration summary before=%d/0050:%d after=%d/0050:%d intent_rows=%d", beforeMigrations, beforeAgentInput, afterMigrations, afterAgentInput, intentRows)
+			}
+			t.Logf("real clone summary path=%s issues=%d custom_views=%d migrations=%d->%d agent_input_marker=%d->%d intent_rows=%d", path, afterIssues, afterCustom, beforeMigrations, afterMigrations, beforeAgentInput, afterAgentInput, intentRows)
 			if err = client.CloseDB(); err != nil {
 				t.Fatal(err)
 			}
