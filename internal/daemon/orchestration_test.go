@@ -1248,6 +1248,39 @@ func TestMaterializedProjectOrchestrationContextLimitsCanonicalOpenBeforeBacklog
 	}
 }
 
+func TestProjectOrchestrationCandidateRootsRetainsActiveRootsBeyondLimit(t *testing.T) {
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	roots := make([]domain.Task, 0, 8)
+	for i := 0; i < 5; i++ {
+		roots = append(roots, domain.Task{ID: naming.IssueID(fmt.Sprintf("runnable-%d", i)), Status: domain.StatusOpen, Priority: domain.P1, UpdatedAt: old.Add(time.Duration(i) * time.Minute)})
+	}
+	for i := 0; i < 3; i++ {
+		roots = append(roots, domain.Task{ID: naming.IssueID(fmt.Sprintf("active-%d", i)), Status: domain.StatusInProgress, Priority: domain.P4, UpdatedAt: old.Add(time.Duration(10+i) * time.Minute), HasTmuxSession: true})
+	}
+
+	selected := projectOrchestrationCandidateRoots(roots, 2)
+	got := make([]string, 0, len(selected))
+	for _, task := range selected {
+		got = append(got, task.ID.String())
+	}
+	if want := []string{"runnable-0", "runnable-1", "active-0", "active-1", "active-2"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("selected roots = %v, want bounded runnable roots plus every active root %v", got, want)
+	}
+
+	snapshot := protocol.OrchestrationSnapshot{
+		Runnable:       []string{"runnable-0", "runnable-1"},
+		Active:         []string{"active-0", "active-1", "active-2"},
+		ActiveSessions: []protocol.OrchestrationSession{{IssueID: "active-0"}, {IssueID: "active-1"}, {IssueID: "active-2"}},
+	}
+	constrainProjectOrchestrationSnapshotToRoots(&snapshot, selected)
+	if snapshot.Capacity.DirectRunnableCount != 2 || snapshot.Capacity.DirectActiveCount != 3 {
+		t.Fatalf("capacity = %+v, want runnable=2 active=3", snapshot.Capacity)
+	}
+	if len(snapshot.Active) != 3 || len(snapshot.ActiveSessions) != 3 {
+		t.Fatalf("active inventory = %v sessions=%+v, want all three roots", snapshot.Active, snapshot.ActiveSessions)
+	}
+}
+
 func TestOrchestrationCandidateOrderingIsStable(t *testing.T) {
 	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	tasks := map[string]domain.Task{
