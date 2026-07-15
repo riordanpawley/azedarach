@@ -4,6 +4,7 @@ use warnings;
 use Fcntl qw(F_GETFD F_SETFD FD_CLOEXEC);
 use File::Basename qw(basename);
 use File::Temp qw(tempfile);
+use File::Path qw(remove_tree);
 use IO::Select;
 use JSON::PP qw(decode_json encode_json);
 use POSIX qw(:sys_wait_h setpgid);
@@ -25,14 +26,59 @@ while (@ARGV && $ARGV[0] ne '--') {
 }
 shift @ARGV if @ARGV && $ARGV[0] eq '--';
 die "unsupported validation class $class\n" unless $class eq 'aggregate' || $class eq 'shared' || $class eq 'safe';
-my $az = $ENV{AZEDARACH_VALIDATION_AZ_BIN} || 'az';
+my $control_az = $ENV{AZEDARACH_VALIDATION_CONTROL_AZ_BIN}
+    || $ENV{AZEDARACH_VALIDATION_AZ_BIN}
+    || 'az';
+my $cleanup_az = $ENV{AZEDARACH_VALIDATION_CLEANUP_AZ_BIN} || '';
 my $git = $ENV{AZEDARACH_VALIDATION_GIT_BIN} || 'git';
+my $daemon_scope = lc($ENV{AZEDARACH_DAEMON_SCOPE} || '');
+my $daemon_scope_source = lc($ENV{AZEDARACH_DAEMON_SCOPE_SOURCE} || '');
+my $cleanup_scoped_daemon = ($daemon_scope eq 'worktree' || $daemon_scope eq 'scoped' || $daemon_scope eq 'local')
+    && $daemon_scope_source ne 'just-run'
+    && $mode eq 'run'
+    && !$ENV{AZEDARACH_VALIDATION_REQUEST_ID};
+my $scoped_cleanup_owner_pid = $$;
+my $scoped_cleanup_done = 0;
+if ($cleanup_scoped_daemon && $cleanup_az eq '') {
+    $scoped_cleanup_done = 1;
+    die "worktree-scoped validation requires AZEDARACH_VALIDATION_CLEANUP_AZ_BIN\n";
+}
+my $stop_scoped_daemon = sub {
+    return 1 unless $$ == $scoped_cleanup_owner_pid && $cleanup_scoped_daemon && !$scoped_cleanup_done;
+    $scoped_cleanup_done = 1;
+    local %ENV = %ENV;
+    clear_control_authority_environment();
+    my $stop_status = system($cleanup_az, 'daemon', 'stop');
+    if ($stop_status != 0) {
+        my $detail = $stop_status == -1 ? $! : 'exit ' . wait_status_code($stop_status);
+        warn "worktree-scoped validation daemon cleanup failed: $detail\n";
+        return 0;
+    }
+    return 1;
+};
+
+# The outer run-mode wrapper owns explicitly worktree-scoped daemons. Register
+# cleanup before the first daemon request so acquire errors and handled signals
+# cannot leave a detached azd behind.
+END {
+    if ($$ == $scoped_cleanup_owner_pid && $cleanup_scoped_daemon && !$scoped_cleanup_done) {
+        my $original_status = $?;
+        $original_status = 70 if !$stop_scoped_daemon->() && $original_status == 0;
+        $? = $original_status;
+    }
+}
+my %preflight_signal_exit = (HUP => 129, INT => 130, TERM => 143);
+$SIG{TERM} = sub { exit $preflight_signal_exit{TERM} };
+$SIG{INT} = sub { exit $preflight_signal_exit{INT} };
+$SIG{HUP} = sub { exit $preflight_signal_exit{HUP} };
 
 if ($mode eq 'status') {
-    exec $az, 'validation', 'status', '--json' or die "exec validation status: $!\n";
+    clear_candidate_routing_environment();
+    exec $control_az, 'validation', 'status', '--json' or die "exec validation status: $!\n";
 }
 if ($mode eq 'watch') {
-    exec $az, 'validation', 'watch', '--json', '--interval', $interval . 's' or die "exec validation watch: $!\n";
+    clear_candidate_routing_environment();
+    exec $control_az, 'validation', 'watch', '--json', '--interval', $interval . 's' or die "exec validation watch: $!\n";
 }
 die "usage: with-machine-validation-lease [--status|--watch] | --class aggregate|shared|safe --profile name -- command [args]\n" unless @ARGV;
 
@@ -71,11 +117,11 @@ my $lease_token = random_token();
 my $request_id = sprintf('%s-%d-%d-%s', $issue, $$, int(time() * 1_000_000), substr(random_token(), 0, 12));
 $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN} = $lease_token;
 my $command_text = join(' ', @ARGV);
-my @acquire = ($az, 'validation', 'acquire', '--request', $request_id, '--issue', $issue,
+my @acquire = ($control_az, 'validation', 'acquire', '--request', $request_id, '--issue', $issue,
     '--class', $class, '--profile', $profile, '--command', $command_text,
     '--revision', $revision, '--ttl', '30', '--json');
 while (1) {
-    my $decoded = eval { decode_json(capture(@acquire)) };
+    my $decoded = eval { decode_json(control_capture(@acquire)) };
     die "validation acquire returned invalid JSON\n" unless $decoded && $decoded->{request}{state};
     last if $decoded->{request}{state} eq 'active';
     die "validation request became $decoded->{request}{state} while waiting\n" unless $decoded->{request}{state} eq 'queued';
@@ -88,6 +134,11 @@ $ENV{AZEDARACH_VALIDATION_SOURCE_REVISION} = $revision;
 my ($evidence_fh, $evidence_file) = tempfile('azedarach-validation-evidence-XXXXXX', TMPDIR => 1, UNLINK => 0);
 close $evidence_fh;
 $ENV{AZEDARACH_VALIDATION_EVIDENCE_FILE} = $evidence_file;
+my ($runtime_fh, $candidate_runtime) = tempfile('azedarach-validation-runtime-XXXXXX', TMPDIR => 1, UNLINK => 1);
+close $runtime_fh;
+unlink $candidate_runtime or die "remove validation runtime placeholder: $!\n";
+mkdir $candidate_runtime, 0700 or die "create private validation runtime: $!\n";
+$ENV{AZEDARACH_VALIDATION_CANDIDATE_RUNTIME} = $candidate_runtime;
 
 my $wrapper_pid = $$;
 my $heartbeat = fork();
@@ -101,7 +152,8 @@ if ($heartbeat == 0) {
         my $renewal = fork();
         exit 1 unless defined $renewal;
         if ($renewal == 0) {
-            exec $az, 'validation', 'heartbeat', '--request', $request_id, '--ttl', '30'
+            clear_candidate_routing_environment();
+            exec $control_az, 'validation', 'heartbeat', '--request', $request_id, '--ttl', '30'
                 or exit 127;
         }
         my $renewal_status;
@@ -158,6 +210,20 @@ if ($supervisor == 0) {
     if ($payload == 0) {
         setpgid(0, 0);
         delete $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN};
+        # Control and cleanup client routing belongs to the wrapper supervisors,
+        # never to the payload. Route candidate runtime assets through the
+        # wrapper-owned private directory and expose the same path as the
+        # mandatory cleanup handle.
+        delete @ENV{qw(
+            AZEDARACH_DAEMON_BIN
+            AZEDARACH_DAEMON_SCOPE
+            AZEDARACH_DAEMON_SCOPE_SOURCE
+            AZEDARACH_VALIDATION_CONTROL_AZ_BIN
+            AZEDARACH_VALIDATION_AZ_BIN
+            AZEDARACH_VALIDATION_CLEANUP_AZ_BIN
+        )};
+        $ENV{XDG_RUNTIME_DIR} = $ENV{AZEDARACH_VALIDATION_CANDIDATE_RUNTIME};
+        $ENV{AZEDARACH_VALIDATION_CLEANUP_HANDLE} = $ENV{AZEDARACH_VALIDATION_CANDIDATE_RUNTIME};
         $ENV{AZEDARACH_VALIDATION_NESTED_FD} = fileno($broker_child);
         exec @ARGV or die "exec validation command $ARGV[0]: $!\n";
     }
@@ -206,7 +272,7 @@ while (1) {
         }
         $broker_buffer .= $chunk;
         while ($broker_buffer =~ s/^(.*?\n)//) {
-            authorize_nested($broker_parent, $1, $az, $request_id, $lease_token);
+            authorize_nested($broker_parent, $1, $control_az, $request_id, $lease_token);
         }
     }
     if ($class eq 'aggregate' && time() >= $next_sample) {
@@ -222,9 +288,22 @@ while (1) {
     }
 }
 close $broker_parent;
-kill 'TERM', $heartbeat;
-waitpid($heartbeat, 0);
 my $exit_code = wait_status_code($status);
+my $payload_exit_code = $exit_code;
+my $cleanup_error = '';
+if (!$stop_scoped_daemon->()) {
+    $cleanup_error = 'worktree-scoped daemon stop failed';
+}
+my $cleanup_errors;
+my $runtime_cleanup_exception = '';
+eval { remove_tree($candidate_runtime, {error => \$cleanup_errors}); 1 }
+    or $runtime_cleanup_exception = $@ || 'candidate runtime cleanup failed';
+my $runtime_cleanup_error = join('; ', map { %$_ } @$cleanup_errors) if $cleanup_errors && @$cleanup_errors;
+$cleanup_error = join('; ', grep { $_ ne '' } ($cleanup_error, $runtime_cleanup_exception, $runtime_cleanup_error || ''));
+if ($cleanup_error ne '') {
+    warn "candidate validation cleanup failed: $cleanup_error\n";
+    $exit_code = 78;
+}
 if ($class eq 'aggregate') {
     my $finished_revision = eval { my $value = capture($git, 'rev-parse', 'HEAD'); $value =~ s/\s+\z//; $value };
     if (!$finished_revision || $finished_revision ne $revision) {
@@ -238,23 +317,29 @@ merge_whole_gate_evidence($evidence_file, {
     profile => $profile, source_revision => $revision, present => JSON::PP::true,
     overlap_detected => $overlap_detected ? JSON::PP::true : JSON::PP::false,
     external_go_processes => $max_external_go,
+    cleanup_succeeded => $cleanup_error eq '' ? JSON::PP::true : JSON::PP::false,
+    cleanup_error => $cleanup_error,
+    payload_exit_code => $payload_exit_code,
 });
 if ($class eq 'aggregate' && $overlap_detected && $exit_code == 0) {
     warn "aggregate validation overlapped $max_external_go unleased Go process(es)\n";
     $exit_code = 75;
 }
 my $terminal = $interrupted ? 'cancelled' : ($exit_code == 0 ? 'completed' : 'failed');
-my @finish = ($az, 'validation', 'finish', '--request', $request_id, '--state', $terminal, '--outcome', "exit $exit_code");
+kill 'TERM', $heartbeat;
+waitpid($heartbeat, 0);
+my @finish = ($control_az, 'validation', 'finish', '--request', $request_id, '--state', $terminal, '--outcome', "exit $exit_code");
 if (-s $evidence_file) {
     open my $final_evidence, '<', $evidence_file or die "open validation evidence: $!\n";
     local $/;
     push @finish, '--evidence-json', (<$final_evidence> // '');
     close $final_evidence;
 }
-my $finish_failed = !eval { capture(@finish); 1 };
+my $finish_failed = !eval { control_capture(@finish); 1 };
 warn "validation finish failed for $request_id\n" if $finish_failed;
 unlink $evidence_file if -e $evidence_file;
-exit(($finish_failed && $exit_code == 0) ? 70 : $exit_code);
+my $final_exit = ($finish_failed && $exit_code == 0) ? 70 : $exit_code;
+exit($final_exit);
 
 sub authorize_nested {
     my ($broker, $line, $az_path, $held_request, $token) = @_;
@@ -263,7 +348,7 @@ sub authorize_nested {
     my $response = {ok => JSON::PP::false, nonce => $nonce, error => 'invalid nested validation authorization request'};
     if ($request && ($request->{request_id} || '') eq $held_request) {
         local $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN} = $token;
-        my $ok = eval { capture($az_path, 'validation', 'authorize-nested', '--request', $held_request, '--class', ($request->{class} || '')); 1 };
+        my $ok = eval { control_capture($az_path, 'validation', 'authorize-nested', '--request', $held_request, '--class', ($request->{class} || '')); 1 };
         if ($ok) {
             $response = {ok => JSON::PP::true, nonce => $nonce, class => $ENV{AZEDARACH_VALIDATION_CLASS}, profile => $ENV{AZEDARACH_VALIDATION_PROFILE}, source_revision => $ENV{AZEDARACH_VALIDATION_SOURCE_REVISION}};
         } else {
@@ -335,6 +420,38 @@ sub capture {
     close $fh;
     die "validation command failed\n" if $? != 0;
     return $output;
+}
+
+sub control_capture {
+    my (@command) = @_;
+    local %ENV = %ENV;
+    clear_candidate_routing_environment();
+    return capture(@command);
+}
+
+sub clear_candidate_routing_environment {
+    delete @ENV{qw(
+        AZEDARACH_DAEMON_BIN
+        AZEDARACH_DAEMON_SCOPE
+        AZEDARACH_DAEMON_SCOPE_SOURCE
+        AZEDARACH_VALIDATION_CLEANUP_AZ_BIN
+        AZEDARACH_VALIDATION_CANDIDATE_RUNTIME
+        AZEDARACH_VALIDATION_CLEANUP_HANDLE
+    )};
+}
+
+sub clear_control_authority_environment {
+    delete @ENV{qw(
+        AZEDARACH_VALIDATION_CONTROL_AZ_BIN
+        AZEDARACH_VALIDATION_AZ_BIN
+        AZEDARACH_VALIDATION_LEASE_TOKEN
+        AZEDARACH_VALIDATION_REQUEST_ID
+        AZEDARACH_VALIDATION_NESTED_FD
+        AZEDARACH_VALIDATION_EVIDENCE_FILE
+        AZEDARACH_VALIDATION_CLASS
+        AZEDARACH_VALIDATION_PROFILE
+        AZEDARACH_VALIDATION_SOURCE_REVISION
+    )};
 }
 
 sub wait_status_code {
