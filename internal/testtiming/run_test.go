@@ -17,6 +17,8 @@ import (
 
 func TestRunWritesCompleteArtifactsBeforeReturningTestFailure(t *testing.T) {
 	module := t.TempDir()
+	outerEvidence := filepath.Join(t.TempDir(), "outer-validation-evidence.json")
+	t.Setenv("AZEDARACH_VALIDATION_EVIDENCE_FILE", outerEvidence)
 	configureTestCacheFamily(t, module)
 	require.NoError(t, os.WriteFile(filepath.Join(module, "go.mod"), []byte("module example.test/failures\n\ngo 1.24.2\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(module, "failure_test.go"), []byte(`package failures
@@ -39,6 +41,7 @@ func TestSecond(t *testing.T) { t.Error("second sentinel") }
 		_, statErr := os.Stat(filepath.Join(output, name))
 		require.NoError(t, statErr, name)
 	}
+	assert.NoFileExists(t, outerEvidence, "library runs must not publish into an enclosing validation lease")
 	raw, err := os.ReadFile(filepath.Join(output, "events.jsonl"))
 	require.NoError(t, err)
 	assert.Contains(t, string(raw), "first sentinel")
