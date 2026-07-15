@@ -60,10 +60,10 @@ type Measurement struct {
 }
 
 type ValidationLeaseEvidence struct {
-	Held      bool   `json:"held"`
-	RequestID string `json:"request_id,omitempty"`
-	Class     string `json:"class,omitempty"`
-	Profile   string `json:"profile,omitempty"`
+	Held           bool   `json:"held"`
+	RequestID      string `json:"request_id,omitempty"`
+	Class          string `json:"class,omitempty"`
+	Profile        string `json:"profile,omitempty"`
 	SourceRevision string `json:"source_revision,omitempty"`
 }
 
