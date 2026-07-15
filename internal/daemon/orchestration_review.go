@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -178,7 +179,13 @@ func (a daemonOrchestrationAuthority) reviewInspection(ctx context.Context, proj
 			inspection.Reasons = append(inspection.Reasons, "review-owned-by-"+lease.OwnerID)
 		}
 	}
-	readiness, err := a.daemon.taskIntegrationReadiness(ctx, projectID, task.ID.String(), repoDir)
+	candidatePath := ""
+	if candidate, ok := worktrees[task.ID.String()]; ok {
+		candidatePath = strings.TrimSpace(candidate.Path)
+	} else {
+		inspection.Reasons = append(inspection.Reasons, "inspect-candidate: candidate_projection_missing: issue has no durable worktree projection")
+	}
+	readiness, err := a.daemon.taskIntegrationReadiness(ctx, projectID, task.ID.String(), candidatePath)
 	if err != nil {
 		inspection.Reasons = append(inspection.Reasons, "inspect-evidence: "+err.Error())
 	} else {
@@ -671,8 +678,32 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 			return false, fmt.Errorf("inspect review evidence: %w", err)
 		}
 		if !domain.HasInternalReviewArtifact(task, events) {
+			if slices.ContainsFunc(inspection.Reasons, func(reason string) bool {
+				return strings.Contains(reason, "candidate worktree is required to bind aggregate validation")
+			}) {
+				return false, fmt.Errorf("accepted review candidate rejected: %s", strings.Join(inspection.Reasons, "; "))
+			}
 			return false, fmt.Errorf("accepted review requires complete worker_evidence.v1 or a declared internal_review investigation with a durable accepted/ratified review artifact")
 		}
+	}
+	if inspection.Evidence != nil && inspection.Evidence.AggregateValidation != nil {
+		// Snapshot inspection can race with a checkout mutation. Resolve the durable
+		// issue-worktree identity again and re-run exact revision/cleanliness binding
+		// immediately before recording the trusted acceptance decision.
+		candidatePath, err := a.daemon.exactReviewCandidateWorktree(ctx, projectID, inspection.IssueID)
+		if err != nil {
+			return false, fmt.Errorf("accepted review candidate rejected: %w", err)
+		}
+		refreshed, err := a.daemon.taskIntegrationReadiness(ctx, projectID, inspection.IssueID, candidatePath)
+		if err != nil {
+			return false, fmt.Errorf("revalidate accepted review candidate: %w", err)
+		}
+		if !refreshed.Ready {
+			return false, fmt.Errorf("accepted review candidate is not integration-ready: %s", strings.Join(refreshed.Reasons, "; "))
+		}
+		inspection.Evidence = refreshed.EvidencePacket
+		inspection.ContextRisk = refreshed.ContextRisk
+		inspection.PendingDecisions = refreshed.PendingDecisions
 	}
 	if inspection.ContextRisk != nil && domain.IssueContextRiskRequiresStructuredCloseout(*inspection.ContextRisk) {
 		return false, fmt.Errorf("accepted review requires structured high-context-risk closeout evidence")
@@ -682,6 +713,49 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 	}
 	integrateBeforeClose := inspection.Evidence != nil || strings.TrimSpace(inspection.WorktreePath) != ""
 	return a.releaseAndCloseAcceptedReview(ctx, projectID, request, inspection.IssueID, integrateBeforeClose, result)
+}
+
+// exactReviewCandidateWorktree implements the hybrid project-review invariant:
+// first read the durable issue-worktree projection, then compare that identity
+// with Git's live worktree registry. The primary checkout is never a fallback.
+func (d *Daemon) exactReviewCandidateWorktree(ctx context.Context, projectID, issueID string) (string, error) {
+	if d == nil || d.worktreeAdapter == nil {
+		return "", fmt.Errorf("candidate_worktree_unavailable: worktree projection authority is unavailable")
+	}
+	projected, found, err := d.worktreeAdapter.projectedWorktreeForIssue(ctx, projectID, issueID)
+	if err != nil {
+		return "", fmt.Errorf("candidate_projection_read_failed: %w", err)
+	}
+	if !found || strings.TrimSpace(projected.Path) == "" {
+		return "", fmt.Errorf("candidate_projection_missing: issue %s has no durable worktree projection", issueID)
+	}
+	manager := d.worktreeAdapter.managerFor(projectID)
+	if manager == nil {
+		return "", fmt.Errorf("candidate_live_registry_unavailable: worktree manager is unavailable")
+	}
+	live, err := manager.List(ctx)
+	if err != nil {
+		return "", fmt.Errorf("candidate_live_registry_failed: %w", err)
+	}
+	projectedPath := filepath.Clean(strings.TrimSpace(projected.Path))
+	projectedBranch := strings.TrimSpace(projected.Branch)
+	for _, worktree := range live {
+		livePath := filepath.Clean(strings.TrimSpace(worktree.Path))
+		if livePath == projectedPath && !naming.IssueIDsEqual(worktree.IssueID, issueID) {
+			return "", fmt.Errorf("candidate_path_reused: projected path %s now belongs to issue %s", projectedPath, worktree.IssueID)
+		}
+		if !naming.IssueIDsEqual(worktree.IssueID, issueID) {
+			continue
+		}
+		if livePath != projectedPath {
+			return "", fmt.Errorf("candidate_path_mismatch: projected path %s does not match live path %s", projectedPath, livePath)
+		}
+		if projectedBranch == "" || strings.TrimSpace(worktree.Branch) != projectedBranch {
+			return "", fmt.Errorf("candidate_branch_mismatch: projected branch %q does not match live branch %q", projectedBranch, strings.TrimSpace(worktree.Branch))
+		}
+		return projectedPath, nil
+	}
+	return "", fmt.Errorf("candidate_projection_stale: projected worktree %s for issue %s is absent from the live Git worktree registry", projectedPath, issueID)
 }
 
 func (a daemonOrchestrationAuthority) releaseAndCloseAcceptedReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, integrateBeforeClose bool, result *protocol.OrchestrationIntentResult) (bool, error) {

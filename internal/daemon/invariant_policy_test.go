@@ -37,7 +37,7 @@ func TestInvariantSourceMatrixIncludesExpectedRuntimeInvariants(t *testing.T) {
 		daemonInvariantOrchestrationCompletion: daemonInvariantSourceHybrid,
 		daemonInvariantOrchestrationCandidates: daemonInvariantSourceProjection,
 		daemonInvariantOrchestrationParentWake: daemonInvariantSourceHybrid,
-		daemonInvariantOrchestrationReview:     daemonInvariantSourceProjection,
+		daemonInvariantOrchestrationReview:     daemonInvariantSourceHybrid,
 		daemonInvariantOrchestrationClaimStart: daemonInvariantSourceHybrid,
 		daemonInvariantOrchestrationLoop:       daemonInvariantSourceProjection,
 		daemonInvariantValidationCapacity:      daemonInvariantSourceProjection,
