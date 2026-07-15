@@ -1697,6 +1697,21 @@ func TestLauncherStopRemovesCanonicalScopedRuntimeAssets(t *testing.T) {
 	}
 }
 
+func TestLauncherStopTreatsAbsentCanonicalScopedRuntimeAsClean(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	repoDir := newLauncherTestWorktree(t)
+	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
+	launcher.shutdownViaSocket = func(context.Context, string) error { return nil }
+
+	if err := launcher.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if _, err := os.Stat(config.ScopedDaemonRuntimeDir(repoDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("absent scoped runtime was unexpectedly created: %v", err)
+	}
+}
+
 func TestLauncherStopWaitsForGracefulScopedProcessExit(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")

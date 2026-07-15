@@ -439,6 +439,13 @@ func (l *Launcher) cleanupScopedRuntimeAssets() error {
 		// are eligible for automatic removal.
 		return nil
 	}
+	if info, err := os.Lstat(runtimeDir); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect scoped daemon runtime: %w", err)
+	} else if !info.IsDir() {
+		return fmt.Errorf("scoped daemon runtime is not a directory: %s", runtimeDir)
+	}
 
 	startLockPath := wantLock + ".start"
 	startLock, err := os.OpenFile(startLockPath, os.O_CREATE|os.O_RDWR, 0o644)
