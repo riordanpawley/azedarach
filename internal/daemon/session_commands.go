@@ -2385,8 +2385,27 @@ func (d *Daemon) handleSessionMessage(ctx context.Context, req protocol.RequestE
 	if !exists {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("session not found in tmux: %s", cmd.IssueID)), nil
 	}
-	if err := d.tmux.PasteTextAndSubmit(ctx, cmd.SessionID, cmd.Message); err != nil {
+	target, found, err := d.currentAgentInputTarget(ctx, cmd.ProjectID, cmd.SessionID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("resolve session message target: %v", err)), nil
+	}
+	if !found || d.agentInputService() == nil {
+		return d.errorResponse(req, protocol.ErrorCodeConflict, "session message queued: managed agent identity unavailable"), nil
+	}
+	messageKind := domain.AgentInputMessageSessionMessage
+	if req.Meta.ClientActor == "daemon-decision" {
+		messageKind = domain.AgentInputMessageDecisionChange
+	}
+	result, err := d.agentInputService().Deliver(ctx, domain.AgentInputDeliveryRequest{
+		ProjectID: cmd.ProjectID, SessionID: cmd.SessionID, Target: target,
+		Tool: d.runtimeConfigForProject(cmd.ProjectID).CLITool, Kind: messageKind,
+		Payload: cmd.Message, IntentKey: req.RequestID.String(), ExpiresAt: time.Now().Add(5 * time.Minute),
+	})
+	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("send session message: %v", err)), nil
+	}
+	if result.Outcome != domain.AgentInputDelivered {
+		return d.errorResponse(req, protocol.ErrorCodeConflict, fmt.Sprintf("session message queued: %s", result.Outcome)), nil
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session message sent",

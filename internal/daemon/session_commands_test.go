@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1421,6 +1422,7 @@ type sessionStartTmuxRunner struct {
 	sendKeysErr          error
 	sendKeysErrOnCall    int
 	captureOutput        string
+	currentCommand       string
 	onSendKeys           func(string, string)
 }
 
@@ -1447,6 +1449,25 @@ func attachIsolatedRuntimeStore(t *testing.T, d *Daemon, projectID string) {
 	t.Cleanup(func() { _ = store.Close() })
 	d.runtimeStoresByRoot = map[string]*daemonstate.RuntimeStateStore{d.cfg.RepoDir: store}
 	d.runtimeStoresByProject = map[string]*daemonstate.RuntimeStateStore{projectID: store}
+}
+
+func seedReadyAgentInput(t *testing.T, d *Daemon, runner *sessionStartTmuxRunner, projectID, sessionID string) {
+	t.Helper()
+	projectID = d.canonicalProjectID(projectID)
+	runner.currentCommand = strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool)
+	if runner.currentCommand == "" {
+		runner.currentCommand = "claude"
+	}
+	store := d.sessionRuntimeStateStore(projectID)
+	now := time.Now().UTC()
+	if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: "1", PanePID: 123, AgentIncarnation: "test-incarnation", ObservedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ApplyPhysicalSessionObservation(context.Background(), daemonstate.PhysicalSessionObservation{ProjectID: projectID, SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: now, ObservedVersion: now.UnixNano()}); err != nil {
+		t.Fatal(err)
+	}
+	runner.captureOutput = ">\n"
+	d.agentInput = newAgentInputDeliveryService(d.tmux, d.sessionRuntimeStateStoreIfConfigured)
 }
 
 func requireNewSessionLaunchCommand(t *testing.T, runner *sessionStartTmuxRunner, sessionID string) string {
@@ -1634,7 +1655,12 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 				panes = []string{"%1"}
 			}
 			for _, pane := range panes {
-				lines = append(lines, name+"\t"+pane)
+				if slices.Contains(args, "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}\t#{session_attached}") {
+					currentCommand := runnerCommand(r.currentCommand)
+					lines = append(lines, name+"\t"+pane+"\t123\t"+currentCommand+"\t0")
+				} else {
+					lines = append(lines, name+"\t"+pane+"\t123")
+				}
 			}
 		}
 		return strings.Join(lines, "\n"), nil
@@ -1643,6 +1669,13 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 	default:
 		return "", nil
 	}
+}
+
+func runnerCommand(command string) string {
+	if strings.TrimSpace(command) == "" {
+		return "codex"
+	}
+	return strings.TrimSpace(command)
 }
 
 type failingRuntimeProjectionWriter struct {
@@ -9335,7 +9368,7 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 func TestSessionMessagePastesTextAndSubmitsActiveIssueSession(t *testing.T) {
 	projectID := protocol.DefaultProjectID
 	issueID := naming.IssueID("az-42")
-	repoDir := "/repo"
+	repoDir := t.TempDir()
 	sessionID := naming.CanonicalSessionIDForIssue(repoDir, issueID).String()
 	tmuxRunner := newSessionStartTmuxRunner()
 	tmuxRunner.sessions[sessionID] = true
@@ -9343,6 +9376,7 @@ func TestSessionMessagePastesTextAndSubmitsActiveIssueSession(t *testing.T) {
 		cfg:  Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
 		tmux: tmux.NewClient(tmuxRunner, slog.New(slog.NewTextHandler(io.Discard, nil))),
 	}
+	seedReadyAgentInput(t, daemon, tmuxRunner, projectID, sessionID)
 	body, err := json.Marshal(sessionCommandBody{
 		ProjectID: projectID,
 		SessionID: issueID.String(),
@@ -9364,13 +9398,19 @@ func TestSessionMessagePastesTextAndSubmitsActiveIssueSession(t *testing.T) {
 		t.Fatalf("handleSessionMessage error = %v", err)
 	}
 	if !resp.OK {
+		if resp.Error != nil {
+			t.Fatalf("response not OK: %+v", *resp.Error)
+		}
 		t.Fatalf("response not OK: %+v", resp)
 	}
 	wantCommands := [][]string{
 		{"has-session", "-t", sessionID},
-		{"load-buffer", "-b", "azedarach-message-" + sessionID, "-"},
-		{"paste-buffer", "-dp", "-b", "azedarach-message-" + sessionID, "-t", sessionID},
-		{"send-keys", "-t", sessionID, "Enter"},
+		{"list-panes", "-a", "-F", "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}\t#{session_attached}"},
+		{"capture-pane", "-t", "1", "-p", "-S", "-12"},
+		{"list-panes", "-a", "-F", "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}\t#{session_attached}"},
+		{"capture-pane", "-t", "1", "-p", "-S", "-12"},
+		{"load-buffer", "-b", "azedarach-agent-input-1", "-"},
+		{"paste-buffer", "-dp", "-b", "azedarach-agent-input-1", "-t", "1", ";", "send-keys", "-t", "1", "Enter"},
 	}
 	if !reflect.DeepEqual(tmuxRunner.commands, wantCommands) {
 		t.Fatalf("tmux commands = %#v, want %#v", tmuxRunner.commands, wantCommands)

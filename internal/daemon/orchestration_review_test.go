@@ -210,6 +210,7 @@ func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T
 	d.tmux = tmux.NewClient(tmuxRunner, slog.Default())
 	canonicalSessionID := naming.CanonicalSessionIDForIssue(d.sessionNamingScope("project"), naming.IssueID(issueID)).String()
 	tmuxRunner.sessions[canonicalSessionID] = true
+	seedReadyAgentInput(t, d, tmuxRunner, "project", canonicalSessionID)
 
 	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{
 		Scope:         domain.ProjectOrchestrationScope(),
@@ -312,6 +313,7 @@ func TestReviewReturnReplayConvergesAfterReviewLeaseReleaseFailure(t *testing.T)
 	d.tmux = tmux.NewClient(tmuxRunner, slog.Default())
 	canonicalSessionID := naming.CanonicalSessionIDForIssue(d.sessionNamingScope("project"), naming.IssueID(issueID)).String()
 	tmuxRunner.sessions[canonicalSessionID] = true
+	seedReadyAgentInput(t, d, tmuxRunner, "project", canonicalSessionID)
 	authority := daemonOrchestrationAuthority{daemon: d}
 	releaseCalls := 0
 	authority.releaseReviewLease = func(ctx context.Context, projectID, issueID, actorID string) error {

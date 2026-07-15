@@ -127,8 +127,25 @@ func (d *Daemon) enforceRootedOrchestratorContinuation(ctx context.Context, auth
 		return nil
 	}
 	applyOrchestratorContinuationProjection(&snapshot, woken)
-	if err := d.tmux.PasteTextAndSubmit(ctx, woken.SessionID, snapshot.ContinuationContract); err != nil {
+	target, found, err := d.currentAgentInputTarget(ctx, projectID, woken.SessionID)
+	if err != nil {
+		return fmt.Errorf("resolve parent orchestrator continuation target: %w", err)
+	}
+	if !found || d.agentInputService() == nil {
+		return nil // durable wake remains pending for a later reconciliation
+	}
+	result, err := d.agentInputService().Deliver(ctx, domain.AgentInputDeliveryRequest{
+		ProjectID: projectID, SessionID: woken.SessionID, Target: target,
+		Tool: d.runtimeConfigForProject(projectID).CLITool, Kind: domain.AgentInputMessageOrchestratorWake,
+		Payload:   snapshot.ContinuationContract,
+		IntentKey: fmt.Sprintf("orchestrator-wake:%s:%s:%d", woken.Identity.Scope.Kind, woken.Identity.Scope.RootIssueID, woken.Cursor),
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	})
+	if err != nil {
 		return fmt.Errorf("deliver parent orchestrator continuation wake: %w", err)
+	}
+	if result.Outcome != domain.AgentInputDelivered {
+		return nil // fail closed; durable wake is retried by reconciliation
 	}
 	return nil
 }

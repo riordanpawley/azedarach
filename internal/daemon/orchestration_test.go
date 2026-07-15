@@ -82,6 +82,7 @@ func TestRootedOrchestratorIdleWakeCarriesDurableCursorAndDirectNestedRoots(t *t
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
 		tmux:                   tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil))),
 	}
+	seedReadyAgentInput(t, d, runner, projectID, parentSession)
 	if err := d.reconcileOrchestratorLifecycles(ctx, projectID, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
@@ -162,6 +163,7 @@ func TestBootstrapRecoveryResumesReplacedRootedOrchestratorOnceWithDurableCursor
 	d.issueClientsByProject = map[string]*issues.Client{projectID: issueClient}
 	d.runtimeStoresByProject = map[string]*daemonstate.RuntimeStateStore{projectID: storeB}
 	d.tmux = tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	seedReadyAgentInput(t, d, runner, projectID, "replacement-session")
 	d.syncBootstrapFn = func(context.Context) error { return nil }
 	if err := d.bootstrapSyncOrchestrator(ctx); err != nil {
 		t.Fatal(err)
