@@ -865,15 +865,11 @@ func (d *Daemon) handleTaskEvents(ctx context.Context, req protocol.RequestEnvel
 	if issueClient == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
 	}
-	var cmd struct {
-		TaskID string   `json:"task_id"`
-		Types  []string `json:"event_types,omitempty"`
-		Limit  int      `json:"limit,omitempty"`
-	}
+	var cmd protocol.TaskEventsRequest
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
-	taskID := strings.TrimSpace(cmd.TaskID)
+	taskID := strings.TrimSpace(string(cmd.TaskID))
 	if taskID == "" {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "task id is required"), nil
 	}
@@ -884,19 +880,45 @@ func (d *Daemon) handleTaskEvents(ctx context.Context, req protocol.RequestEnvel
 			eventTypes = append(eventTypes, domain.IssueObservationEventType(rawType))
 		}
 	}
-	events, err := issueClient.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{
-		Types: eventTypes,
-		Limit: cmd.Limit,
+	payloadEquals := make([]issues.IssueObservationEventPayloadFilter, 0, len(cmd.PayloadEquals))
+	for _, filter := range cmd.PayloadEquals {
+		payloadEquals = append(payloadEquals, issues.IssueObservationEventPayloadFilter{Key: filter.Key, Value: filter.Value})
+	}
+	page, err := issueClient.QueryIssueObservationEvents(ctx, taskID, issues.IssueObservationEventQuery{
+		Types:         eventTypes,
+		Order:         issues.IssueObservationEventOrder(strings.TrimSpace(cmd.Order)),
+		Limit:         cmd.Limit,
+		AfterID:       cmd.AfterID,
+		BeforeID:      cmd.BeforeID,
+		Source:        cmd.Source,
+		SourceCommand: cmd.SourceCommand,
+		OperationID:   cmd.OperationID,
+		SessionID:     cmd.SessionID,
+		WorktreePath:  cmd.WorktreePath,
+		ObservedSince: cmd.ObservedSince,
+		ObservedUntil: cmd.ObservedUntil,
+		Query:         cmd.Query,
+		PayloadEquals: payloadEquals,
 	})
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue not found: %s", taskID)), nil
 		}
+		if errors.Is(err, issues.ErrInvalidIssueObservationEventQuery) {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
+		}
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	body, err := json.Marshal(struct {
-		Events []domain.IssueObservationEvent `json:"events"`
-	}{Events: events})
+	body, err := json.Marshal(protocol.TaskEventsPage{
+		Events:       page.Events,
+		Order:        string(page.Order),
+		Limit:        page.Limit,
+		HasMore:      page.HasMore,
+		FirstID:      page.FirstID,
+		LastID:       page.LastID,
+		NextAfterID:  page.NextAfterID,
+		NextBeforeID: page.NextBeforeID,
+	})
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}

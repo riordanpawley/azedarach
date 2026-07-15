@@ -206,7 +206,7 @@ func TestWorkerEvidenceRejectsUnleasedOrOverlappedAggregateValidation(t *testing
 		evidence string
 		complete bool
 	}{
-		{name: "leased clean", evidence: `{"held":true,"request_id":"req-1","class":"aggregate","profile":"cold","present":true,"overlap_detected":false,"external_go_processes":0}`, complete: true},
+		{name: "leased clean", evidence: `{"held":true,"request_id":"req-1","class":"aggregate","profile":"cold","source_revision":"candidate-oid","present":true,"overlap_detected":false,"external_go_processes":0}`, complete: true},
 		{name: "unleased", evidence: `{"held":false,"class":"aggregate","present":true,"overlap_detected":false}`, complete: false},
 		{name: "overlapped", evidence: `{"held":true,"request_id":"req-2","class":"aggregate","present":true,"overlap_detected":true,"external_go_processes":2}`, complete: false},
 	}
