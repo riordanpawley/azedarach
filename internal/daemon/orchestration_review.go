@@ -406,9 +406,11 @@ func (a daemonOrchestrationAuthority) activeValidationReviewReturn(ctx context.C
 		return protocol.OrchestrationReview{}, false, err
 	}
 	var reviewRequestedAt time.Time
+	var reviewEpochEventID int64
 	for _, event := range events {
 		if domain.IsReviewRequestTransition(event) && event.ObservedAt.After(reviewRequestedAt) {
 			reviewRequestedAt = event.ObservedAt
+			reviewEpochEventID = event.ID
 		}
 	}
 	if reviewRequestedAt.IsZero() {
@@ -423,7 +425,17 @@ func (a daemonOrchestrationAuthority) activeValidationReviewReturn(ctx context.C
 		return protocol.OrchestrationReview{}, false, err
 	}
 	failedGate := gate != nil && (gate.State == domain.ValidationRequestFailed || (gate.State == domain.ValidationRequestCompleted && !strings.EqualFold(strings.TrimSpace(gate.Outcome), "passed")))
-	if gate == nil || gate.QueuedAt.Before(reviewRequestedAt) || !failedGate {
+	if gate == nil || !failedGate || gate.ReviewEpochEventID != reviewEpochEventID {
+		return protocol.OrchestrationReview{}, false, nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(gate.ReviewerID), strings.TrimSpace(request.ActorID)) {
+		return protocol.OrchestrationReview{}, false, nil
+	}
+	if a.daemon.git == nil || strings.TrimSpace(request.RepoDir) == "" {
+		return protocol.OrchestrationReview{}, false, nil
+	}
+	candidateRevision, err := a.daemon.git.HeadRevision(ctx, request.RepoDir)
+	if err != nil || candidateRevision != strings.TrimSpace(gate.SourceRevision) {
 		return protocol.OrchestrationReview{}, false, nil
 	}
 

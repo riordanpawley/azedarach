@@ -31,13 +31,14 @@ func runValidationCommand(cfg *config.Config, args []string) error {
 		profile := flags.String("profile", "", "validation profile")
 		command := flags.String("command", "", "command description")
 		revision := flags.String("revision", "", "source revision")
+		reviewer := flags.String("reviewer", validationReviewerID(), "reviewer identity for a review-assigned aggregate gate")
 		ttl := flags.Int("ttl", 30, "heartbeat expiry seconds")
 		wait := flags.Bool("wait", false, "wait until active")
 		jsonOutput := flags.Bool("json", false, "emit JSON")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		request := protocol.ValidationAcquireRequest{RequestID: *requestID, LeaseToken: *leaseToken, IssueID: *issueID, Class: domain.ValidationClass(*class), Profile: *profile, Command: *command, SourceRevision: *revision, TTLSeconds: *ttl}
+		request := protocol.ValidationAcquireRequest{RequestID: *requestID, LeaseToken: *leaseToken, IssueID: *issueID, Class: domain.ValidationClass(*class), Profile: *profile, Command: *command, SourceRevision: *revision, ReviewerID: *reviewer, TTLSeconds: *ttl}
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
 			for {
 				result, err := deps.DaemonClient.ValidationAcquire(context.Background(), request)
@@ -135,6 +136,15 @@ func runValidationCommand(cfg *config.Config, args []string) error {
 	default:
 		return fmt.Errorf("unknown validation command %q", args[0])
 	}
+}
+
+func validationReviewerID() string {
+	for _, name := range []string{"AZEDARACH_AUDIT_ACTOR", "USER", "LOGNAME"} {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func printValidationValue(value any, asJSON bool) error {
