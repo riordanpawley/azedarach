@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -86,6 +87,59 @@ func (c *Client) ListProjectIssueObservationEvents(ctx context.Context, afterID 
 	}
 	if err := rows.Err(); err != nil {
 		return nil, c.wrapError("list-project-observation-events", "", err)
+	}
+	return events, nil
+}
+
+// GetProjectIssueObservationEventsByIDs resolves exact durable source
+// positions without scanning the history between sparse positions.
+func (c *Client) GetProjectIssueObservationEventsByIDs(ctx context.Context, ids []int64) ([]domain.IssueObservationEvent, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	wanted := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if id > 0 {
+			wanted[id] = struct{}{}
+		}
+	}
+	ordered := make([]int64, 0, len(wanted))
+	for id := range wanted {
+		ordered = append(ordered, id)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
+	const observationIDBatchSize = 400
+	events := make([]domain.IssueObservationEvent, 0, len(ordered))
+	for start := 0; start < len(ordered); start += observationIDBatchSize {
+		end := min(start+observationIDBatchSize, len(ordered))
+		args := make([]any, 0, end-start)
+		for _, id := range ordered[start:end] {
+			args = append(args, id)
+		}
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")
+		rows, queryErr := db.QueryContext(ctx, `
+			SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+			FROM issue_observation_events
+			WHERE id IN (`+placeholders+`)
+			ORDER BY id ASC
+		`, args...)
+		if queryErr != nil {
+			return nil, c.wrapError("get-project-observation-events-by-id", "", queryErr)
+		}
+		for rows.Next() {
+			event, scanErr := scanIssueObservationEvent(rows)
+			if scanErr != nil {
+				_ = rows.Close()
+				return nil, c.wrapError("get-project-observation-events-by-id", "", scanErr)
+			}
+			events = append(events, event)
+		}
+		rowsErr := rows.Err()
+		_ = rows.Close()
+		if rowsErr != nil {
+			return nil, c.wrapError("get-project-observation-events-by-id", "", rowsErr)
+		}
 	}
 	return events, nil
 }

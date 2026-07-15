@@ -290,7 +290,6 @@ func projectionBatchAffectedIssueIDs(ctx context.Context, client *issues.Client,
 		}
 	}
 	observationPositions := make(map[int64]struct{}, len(batch.EmptyAdvances))
-	var firstObservation, lastObservation int64
 	for _, advance := range batch.EmptyAdvances {
 		if advance.Source.Authority != "legacy_issue_observation" {
 			continue
@@ -300,21 +299,15 @@ func projectionBatchAffectedIssueIDs(ctx context.Context, client *issues.Client,
 			return nil, fmt.Errorf("decode issue observation source position %q", advance.Source.SourceTo)
 		}
 		observationPositions[position] = struct{}{}
-		if firstObservation == 0 || position < firstObservation {
-			firstObservation = position
-		}
-		if position > lastObservation {
-			lastObservation = position
-		}
 	}
 	if len(observationPositions) > 0 {
-		span := lastObservation - firstObservation + 1
-		if span > 5000 {
-			return nil, fmt.Errorf("issue observation source span %d exceeds bounded lookup", span)
+		positions := make([]int64, 0, len(observationPositions))
+		for position := range observationPositions {
+			positions = append(positions, position)
 		}
-		events, err := client.ListProjectIssueObservationEvents(ctx, firstObservation-1, int(span))
+		events, err := client.GetProjectIssueObservationEventsByIDs(ctx, positions)
 		if err != nil {
-			return nil, fmt.Errorf("resolve issue observation sources %d..%d: %w", firstObservation, lastObservation, err)
+			return nil, fmt.Errorf("resolve %d keyed issue observation sources: %w", len(positions), err)
 		}
 		for _, event := range events {
 			if _, ok := observationPositions[event.ID]; !ok {
