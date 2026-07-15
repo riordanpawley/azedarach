@@ -145,18 +145,27 @@ func (m *projectReadMaterializer) run(ctx context.Context, advanced func(protoco
 			if ctx.Err() != nil || errors.Is(err, domain.ErrProjectionCanceled) {
 				return
 			}
-			if bootstrapErr := m.bootstrap(ctx); bootstrapErr != nil {
-				m.markUnhealthy(bootstrapErr)
-				return
+			var gap *domain.ProjectionGapError
+			if errors.As(err, &gap) {
+				if bootstrapErr := m.bootstrap(ctx); bootstrapErr == nil {
+					if advanced != nil {
+						advanced(m.snapshotMetadata())
+					}
+					continue
+				}
 			}
+			m.markUnhealthy(fmt.Errorf("watch projection deltas: %w", err))
 			if advanced != nil {
 				advanced(m.snapshotMetadata())
+			}
+			if !waitProjectionConsumerRetry(ctx) {
+				return
 			}
 			continue
 		}
 		if err := m.apply(ctx, batch); err != nil {
 			var verification *protocol.ProjectionVerificationError
-			if errors.As(err, &verification) && (verification.Kind == protocol.ProjectionVerificationGap || verification.Kind == protocol.ProjectionVerificationOverlap) {
+			if errors.As(err, &verification) && projectionVerificationRequiresRecovery(verification.Kind) {
 				if bootstrapErr := m.bootstrap(ctx); bootstrapErr == nil {
 					if advanced != nil {
 						advanced(m.snapshotMetadata())
@@ -165,11 +174,26 @@ func (m *projectReadMaterializer) run(ctx context.Context, advanced func(protoco
 				}
 			}
 			m.markUnhealthy(err)
-			return
+			if advanced != nil {
+				advanced(m.snapshotMetadata())
+			}
+			if !waitProjectionConsumerRetry(ctx) {
+				return
+			}
+			continue
 		}
 		if advanced != nil {
 			advanced(m.snapshotMetadata())
 		}
+	}
+}
+
+func projectionVerificationRequiresRecovery(kind protocol.ProjectionVerificationErrorKind) bool {
+	switch kind {
+	case protocol.ProjectionVerificationGap, protocol.ProjectionVerificationOverlap, protocol.ProjectionVerificationIncompatible:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -328,7 +352,7 @@ func (m *projectReadMaterializer) replaceBootstrap(canonical, tasks map[string]d
 
 func (m *projectReadMaterializer) markUnhealthy(err error) {
 	m.mu.Lock()
-	m.metadata.Health = "unhealthy: " + err.Error()
+	m.metadata.Health = "stale: " + err.Error()
 	m.mu.Unlock()
 }
 

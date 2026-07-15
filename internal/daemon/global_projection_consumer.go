@@ -125,10 +125,14 @@ func (d *Daemon) runUserProjectionConsumer(ctx context.Context, project appconfi
 	}()
 	for ctx.Err() == nil {
 		state, err := d.userStore.ProjectDeltaState(ctx, projectID)
-		if err != nil || !state.Initialized || state.Projector != issueProjectionProjector() {
-			if err == nil {
-				err = fmt.Errorf("project delta component is uninitialized or incompatible")
+		if err != nil {
+			if !d.retryUnavailableUserProjection(ctx, projectID, fmt.Errorf("read project delta state: %w", err)) {
+				return
 			}
+			continue
+		}
+		if !state.Initialized || state.Projector != issueProjectionProjector() {
+			err = &protocol.ProjectionVerificationError{Kind: protocol.ProjectionVerificationIncompatible, Message: "project delta component is uninitialized or incompatible"}
 			if recoverErr := d.recoverUserProjectionConsumer(ctx, project, err); recoverErr != nil {
 				d.logUserProjectionConsumerError(projectID, recoverErr)
 				if !waitProjectionConsumerRetry(ctx) {
@@ -139,7 +143,7 @@ func (d *Daemon) runUserProjectionConsumer(ctx context.Context, project appconfi
 		}
 		client := d.issueClientForProject(projectID)
 		if client == nil {
-			if !d.retryUnavailableUserProjection(ctx, project, errors.New("issue store unavailable")) {
+			if !d.retryUnavailableUserProjection(ctx, projectID, errors.New("issue store unavailable")) {
 				return
 			}
 			continue
@@ -168,23 +172,30 @@ func (d *Daemon) runUserProjectionConsumer(ctx context.Context, project appconfi
 				}
 				continue
 			}
-			if !d.retryUnavailableUserProjection(ctx, project, err) {
+			if !d.retryUnavailableUserProjection(ctx, projectID, err) {
 				return
 			}
 			continue
 		}
 		remapProjectionDeltaBatch(&batch, projectID)
 		if err := protocol.VerifyProjectionDeltaBatch(batch, state.Cursor, issueProjectionProjector()); err != nil {
-			if recoverErr := d.recoverUserProjectionConsumer(ctx, project, err); recoverErr != nil {
-				d.logUserProjectionConsumerError(projectID, recoverErr)
-				if !waitProjectionConsumerRetry(ctx) {
-					return
+			var verification *protocol.ProjectionVerificationError
+			if errors.As(err, &verification) && projectionVerificationRequiresRecovery(verification.Kind) {
+				if recoverErr := d.recoverUserProjectionConsumer(ctx, project, err); recoverErr != nil {
+					d.logUserProjectionConsumerError(projectID, recoverErr)
+					if !waitProjectionConsumerRetry(ctx) {
+						return
+					}
 				}
+			} else if !d.retryUnavailableUserProjection(ctx, projectID, err) {
+				return
 			}
 			continue
 		}
 		changes, err := decodeUserProjectionChanges(batch)
 		if err != nil {
+			// A verified envelope whose payload cannot be decoded by the declared
+			// projector is an explicit projector incompatibility, not availability.
 			if recoverErr := d.recoverUserProjectionConsumer(ctx, project, err); recoverErr != nil {
 				d.logUserProjectionConsumerError(projectID, recoverErr)
 				if !waitProjectionConsumerRetry(ctx) {
@@ -195,11 +206,8 @@ func (d *Daemon) runUserProjectionConsumer(ctx context.Context, project appconfi
 		}
 		changes, err = d.hydrateUserProjectionChanges(ctx, projectID, client, batch, changes)
 		if err != nil {
-			if recoverErr := d.recoverUserProjectionConsumer(ctx, project, err); recoverErr != nil {
-				d.logUserProjectionConsumerError(projectID, recoverErr)
-				if !waitProjectionConsumerRetry(ctx) {
-					return
-				}
+			if !d.retryUnavailableUserProjection(ctx, projectID, err) {
+				return
 			}
 			continue
 		}
@@ -221,11 +229,8 @@ func (d *Daemon) runUserProjectionConsumer(ctx context.Context, project appconfi
 			continue
 		}
 		if applyErr != nil {
-			if recoverErr := d.recoverUserProjectionConsumer(ctx, project, applyErr); recoverErr != nil {
-				d.logUserProjectionConsumerError(projectID, recoverErr)
-				if !waitProjectionConsumerRetry(ctx) {
-					return
-				}
+			if !d.retryUnavailableUserProjection(ctx, projectID, applyErr) {
+				return
 			}
 		}
 	}
@@ -336,29 +341,29 @@ func decodeUserProjectionChanges(batch protocol.ProjectionDeltaBatch) ([]usersto
 	changes := make([]userstore.ProjectDeltaChange, 0, len(batch.Deltas))
 	for _, delta := range batch.Deltas {
 		if delta.Kind != protocol.ProjectionKind(domain.ProjectionKindIssue) {
-			return nil, fmt.Errorf("unsupported root projection delta kind %q", delta.Kind)
+			return nil, &protocol.ProjectionVerificationError{Kind: protocol.ProjectionVerificationIncompatible, Message: fmt.Sprintf("unsupported root projection delta kind %q", delta.Kind)}
 		}
 		var payload domain.IssueProjectionDeltaPayload
 		if err := json.Unmarshal(delta.Payload, &payload); err != nil {
-			return nil, fmt.Errorf("decode issue delta %s: %w", delta.Key, err)
+			return nil, &protocol.ProjectionVerificationError{Kind: protocol.ProjectionVerificationIncompatible, Message: fmt.Sprintf("decode issue delta %s: %v", delta.Key, err)}
 		}
 		if payload.SchemaVersion != domain.IssueProjectionDeltaSchemaVersion || strings.TrimSpace(payload.IssueID) != delta.Key {
-			return nil, fmt.Errorf("issue delta %s payload identity/schema mismatch", delta.Key)
+			return nil, &protocol.ProjectionVerificationError{Kind: protocol.ProjectionVerificationIncompatible, Message: fmt.Sprintf("issue delta %s payload identity/schema mismatch", delta.Key)}
 		}
 		change := userstore.ProjectDeltaChange{IssueID: delta.Key}
 		switch delta.Operation {
 		case protocol.ProjectionDeltaDelete:
 			if !payload.Deleted || payload.Issue != nil {
-				return nil, fmt.Errorf("issue delta %s has invalid tombstone", delta.Key)
+				return nil, &protocol.ProjectionVerificationError{Kind: protocol.ProjectionVerificationIncompatible, Message: fmt.Sprintf("issue delta %s has invalid tombstone", delta.Key)}
 			}
 			change.Delete = true
 		case protocol.ProjectionDeltaUpsert:
 			if payload.Deleted || payload.Issue == nil || payload.Issue.ID.String() != delta.Key {
-				return nil, fmt.Errorf("issue delta %s has invalid complete value", delta.Key)
+				return nil, &protocol.ProjectionVerificationError{Kind: protocol.ProjectionVerificationIncompatible, Message: fmt.Sprintf("issue delta %s has invalid complete value", delta.Key)}
 			}
 			change.Issue = payload.Issue
 		default:
-			return nil, fmt.Errorf("issue delta %s has unsupported operation %q", delta.Key, delta.Operation)
+			return nil, &protocol.ProjectionVerificationError{Kind: protocol.ProjectionVerificationIncompatible, Message: fmt.Sprintf("issue delta %s has unsupported operation %q", delta.Key, delta.Operation)}
 		}
 		changes = append(changes, change)
 	}
@@ -444,16 +449,13 @@ func (d *Daemon) recoverUserProjectionConsumer(ctx context.Context, project appc
 	return d.refreshRegisteredUserProject(ctx, project)
 }
 
-func (d *Daemon) retryUnavailableUserProjection(ctx context.Context, project appconfig.Project, cause error) bool {
-	projectID := protocol.NormalizeProjectID(appconfig.RegisteredProjectID(project))
+func (d *Daemon) retryUnavailableUserProjection(ctx context.Context, projectID string, cause error) bool {
+	projectID = protocol.NormalizeProjectID(projectID)
+	if d != nil && d.userStore != nil {
+		_ = d.userStore.MarkProjectDeltaStale(ctx, projectID, cause)
+	}
 	d.logUserProjectionConsumerError(projectID, cause)
-	if !waitProjectionConsumerRetry(ctx) {
-		return false
-	}
-	if err := d.recoverUserProjectionConsumer(ctx, project, cause); err != nil {
-		d.logUserProjectionConsumerError(projectID, err)
-	}
-	return ctx.Err() == nil
+	return waitProjectionConsumerRetry(ctx)
 }
 
 func waitProjectionConsumerRetry(ctx context.Context) bool {

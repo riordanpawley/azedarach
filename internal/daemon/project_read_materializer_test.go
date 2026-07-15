@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,6 +23,93 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	_ "modernc.org/sqlite"
 )
+
+type watchErrorProjectionStore struct {
+	projectionDeltaStore
+	watch func(context.Context, string, uint64, int) ([]domain.ProjectionDelta, uint64, error)
+}
+
+func (s watchErrorProjectionStore) WatchProjectionDeltas(ctx context.Context, projectID string, after uint64, limit int) ([]domain.ProjectionDelta, uint64, error) {
+	return s.watch(ctx, projectID, after, limit)
+}
+
+func TestProjectReadMaterializerTransientWatchErrorRetainsLastGoodWithoutLegacyExport(t *testing.T) {
+	client, _ := newTestIssueClient(t)
+	ctx := context.Background()
+	created, err := client.Create(ctx, issues.CreateTaskParams{Title: "last good", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var watchCalls, legacyExports atomic.Int32
+	store := watchErrorProjectionStore{projectionDeltaStore: client, watch: func(context.Context, string, uint64, int) ([]domain.ProjectionDelta, uint64, error) {
+		watchCalls.Add(1)
+		return nil, 0, fmt.Errorf("%w: transient watch", domain.ErrProjectionRetryable)
+	}}
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(store), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) { return tasks, nil })
+	materializer.legacy = func(ctx context.Context) ([]domain.Task, error) {
+		legacyExports.Add(1)
+		return client.ListWithRuntimeArchiveMode(ctx, protocol.DefaultProjectID, issues.ArchiveInclude)
+	}
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	before, beforeMeta := materializer.snapshot()
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		materializer.run(runCtx, nil)
+		close(done)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for watchCalls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	after, afterMeta := materializer.snapshot()
+	if watchCalls.Load() == 0 || legacyExports.Load() != 1 {
+		t.Fatalf("watch calls=%d legacy exports=%d, want transient retry without re-export", watchCalls.Load(), legacyExports.Load())
+	}
+	if len(after) != 1 || after[0].ID.String() != created || checksumJSON(after) != checksumJSON(before) || afterMeta.DeliveryCursor != beforeMeta.DeliveryCursor || !strings.HasPrefix(afterMeta.Health, "stale:") {
+		t.Fatalf("transient watch changed last-good materialization: before=%+v/%+v after=%+v/%+v", before, beforeMeta, after, afterMeta)
+	}
+	cancel()
+	<-done
+}
+
+func TestProjectReadMaterializerGapWatchPerformsVerifiedBootstrapRecovery(t *testing.T) {
+	client, _ := newTestIssueClient(t)
+	ctx := context.Background()
+	if _, err := client.Create(ctx, issues.CreateTaskParams{Title: "recover", Type: domain.TypeTask}); err != nil {
+		t.Fatal(err)
+	}
+	var watchCalls, legacyExports atomic.Int32
+	store := watchErrorProjectionStore{projectionDeltaStore: client, watch: func(context.Context, string, uint64, int) ([]domain.ProjectionDelta, uint64, error) {
+		watchCalls.Add(1)
+		return nil, 0, &domain.ProjectionGapError{ProjectID: "project", Expected: 1, Actual: 2}
+	}}
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(store), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) { return tasks, nil })
+	materializer.legacy = func(ctx context.Context) ([]domain.Task, error) {
+		legacyExports.Add(1)
+		return client.ListWithRuntimeArchiveMode(ctx, protocol.DefaultProjectID, issues.ArchiveInclude)
+	}
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		materializer.run(runCtx, nil)
+		close(done)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for legacyExports.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if legacyExports.Load() < 2 {
+		t.Fatalf("verified gap recovery exports=%d watch calls=%d, want bootstrap recovery", legacyExports.Load(), watchCalls.Load())
+	}
+	cancel()
+	<-done
+}
 
 func TestProjectReadMaterializerBootstrapReplayEmptyAdvanceAndRestart(t *testing.T) {
 	client, _ := newTestIssueClient(t)

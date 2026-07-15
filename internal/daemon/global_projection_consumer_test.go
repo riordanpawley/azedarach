@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -185,6 +187,60 @@ func TestUserProjectionConsumerGapRecoversOnlyAffectedProjectFromVerifiedSnapsho
 	}
 	cancel()
 	d.stopUserProjectionWorkers()
+}
+
+func TestUserProjectionTransientFailuresRetainLastGoodWithoutFullReplacement(t *testing.T) {
+	home, root := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	projectID, err := appconfig.ProjectIDForRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := userstore.Open(filepath.Join(home, ".azedarach", "azedarach.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	task := domain.Task{ID: "last-good", Title: "last good", Type: domain.TypeTask, Status: domain.StatusOpen, UpdatedAt: time.Now().UTC()}
+	state := userstore.ProjectDeltaState{ProjectID: projectID, Cursor: 41, Hash: "last-good-vector", Initialized: true, Projector: issueProjectionProjector()}
+	if err := store.ReplaceProject(context.Background(), userstore.ProjectInput{ProjectID: projectID, Name: "P", Path: root, DBPath: filepath.Join(root, ".azedarach", "azedarach.db"), Tasks: []domain.Task{task}, Delta: &state}); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, userStore: store}
+	var fullReplacements atomic.Int32
+	d.userStoreProjectLockHook = func(_ string, entering bool) {
+		if entering {
+			fullReplacements.Add(1)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "client unavailable", err: errors.New("issue store unavailable")},
+		{name: "transient watch", err: fmt.Errorf("%w: watch", domain.ErrProjectionRetryable)},
+		{name: "hydration", err: errors.New("hydrate keyed changes")},
+		{name: "apply", err: errors.New("apply project delta")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+			defer cancel()
+			if d.retryUnavailableUserProjection(ctx, projectID, tc.err) {
+				t.Fatal("retry unexpectedly continued after context deadline")
+			}
+			snapshot, err := store.Snapshot(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotState, err := store.ProjectDeltaState(context.Background(), projectID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fullReplacements.Load() != 0 || len(snapshot.Projects) != 1 || len(snapshot.Projects[0].Tasks) != 1 || snapshot.Projects[0].Tasks[0].ID != task.ID || gotState.Cursor != state.Cursor || gotState.Hash != state.Hash {
+				t.Fatalf("%s replaced last-good projection: replacements=%d snapshot=%+v state=%+v", tc.name, fullReplacements.Load(), snapshot, gotState)
+			}
+		})
+	}
 }
 
 func TestUserProjectionConsumerHydratesAffectedIssueForEmptyObservationAdvance(t *testing.T) {
