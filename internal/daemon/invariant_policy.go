@@ -52,6 +52,7 @@ const (
 	daemonInvariantOrchestrationReview     daemonInvariantID = "orchestration.project_review"
 	daemonInvariantOrchestrationClaimStart daemonInvariantID = "orchestration.claim_start"
 	daemonInvariantOrchestrationLoop       daemonInvariantID = "orchestration.project_loop"
+	daemonInvariantValidationCapacity      daemonInvariantID = "validation.machine_capacity"
 )
 
 var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
@@ -92,6 +93,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantOrchestrationReview:     daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationClaimStart: daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationLoop:       daemonInvariantSourceProjection,
+	daemonInvariantValidationCapacity:      daemonInvariantSourceProjection,
 }
 
 func sourceForInvariant(id daemonInvariantID) daemonInvariantSource {

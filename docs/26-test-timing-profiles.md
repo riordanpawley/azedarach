@@ -5,6 +5,25 @@ complete `go test -json` stream even when tests fail, then emits deterministic
 package/test duration tables, every failure identity and output, baseline
 deltas, and budget violations.
 
+Every documented build/test entrypoint first acquires the repository-family
+daemon-owned machine-validation queue before invoking `go`. The `aggregate` class spans the
+entire `just merge-gate` build, cold suite, artifact contracts, and boundary
+sequence. Nested managed validators join that live lease; other validators
+remain queued, so no compile-before-lock window can consume the canonical
+timing budget. Inspect the owner and queue with `just validation-status` or
+stream changes without compiling Go code with `just validation-watch`.
+Raw Go diagnostics are not an exception: run them through
+`./scripts/with-machine-validation-lease --class shared --profile diagnostic -- go ...`.
+An aggregate request waits for already-running unleased Go processes to
+quiesce, then samples the complete outer build/test/contract/boundary command;
+Go work that appears after admission invalidates the aggregate result.
+Nested recipes must prove membership through the outer wrapper's inherited
+kernel authorization descriptor; a public request id or status snapshot never
+admits work. Wrapper death stops renewal and its supervised command tree.
+Integration readiness accepts aggregate proof only when the daemon request,
+machine evidence, worker packet, and clean candidate `HEAD` all name the same
+source revision.
+
 The runner establishes the mandatory database-isolation boundary before any
 test binary starts. It snapshots the configured root-user database, the current
 project database, and every registered project database into a pre-open refusal
@@ -30,6 +49,9 @@ just test
 # Developer-selected package/test
 just test-timing focused --package ./internal/cli --run TestCommand
 
+# Raw diagnostic command (still daemon-admitted)
+./scripts/with-machine-validation-lease --class shared --profile diagnostic -- go test -timeout 30s ./internal/daemon -run TestName
+
 # Complete profiles
 just test-timing cold
 just test-timing cached
@@ -48,6 +70,12 @@ Artifacts are written beneath `.tmp/test-timing/<profile>-<UTC timestamp>/`:
 - `stderr.txt` preserves command diagnostics that are not JSON events.
 - `report.json` is the versioned machine-readable measurement and comparison.
 - `report.md` is the same result rendered for review, sorted slowest first.
+
+Reports sample the host process tree during the run and separate the validator's
+own Go compiler, linker, vet, and test processes from external Go load. The
+daemon retains this overlap evidence with the completed aggregate request, and
+integration readiness rejects aggregate results with missing or overlapping
+machine-load evidence.
 
 Cached packages are marked with `cached: true` in `report.json` and `(cached)`
 in the Markdown result column; their replayed individual-test rows are marked the

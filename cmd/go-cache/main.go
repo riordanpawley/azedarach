@@ -90,8 +90,7 @@ func runManaged(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return gocache.WithExclusiveLock(ctx, cfg, func() error {
-		telemetry, err := gocache.Prepare(ctx, cfg, os.Getenv("AZEDARACH_GO_CACHE_AUTO_MAINTAIN") == "1")
+	return gocache.WithValidationLock(ctx, cfg, os.Getenv("AZEDARACH_GO_CACHE_AUTO_MAINTAIN") == "1", func(telemetry gocache.Telemetry, err error) error {
 		if err != nil {
 			emitTelemetry(telemetry)
 			return err
