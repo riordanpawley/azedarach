@@ -26,6 +26,7 @@ const (
 	defaultOrchestrationAgentCapacity  = 12
 	defaultOrchestrationOpenIssueLimit = 100
 	orchestrationSnapshotCacheTTL      = 10 * time.Second
+	orchestrationReviewDeliveryTimeout = 5 * time.Second
 )
 
 // orchestrationAuthority is the deliberately small daemon boundary for all
@@ -36,10 +37,11 @@ type orchestrationAuthority interface {
 }
 
 type daemonOrchestrationAuthority struct {
-	daemon             *Daemon
-	submitStart        func(context.Context, protocol.RequestEnvelope) protocol.ResponseEnvelope
-	lookupOperation    func(context.Context, string) (protocol.OperationRecord, error)
-	releaseReviewLease func(context.Context, string, string, string) error
+	daemon                *Daemon
+	submitStart           func(context.Context, protocol.RequestEnvelope) protocol.ResponseEnvelope
+	lookupOperation       func(context.Context, string) (protocol.OperationRecord, error)
+	releaseReviewLease    func(context.Context, string, string, string) error
+	reviewDeliveryTimeout time.Duration
 }
 
 type invalidOrchestrationLaunchError struct {

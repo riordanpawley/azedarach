@@ -344,6 +344,140 @@ func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T
 	}
 }
 
+func TestReviewReturnAcceptsFailedAggregateGateFromCurrentReviewEpochAfterWorkerMovesActive(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker-a")
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = runtime.Close() })
+	now := time.Now().UTC()
+	_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "review-gate", LeaseToken: "secret", ProjectID: "project", IssueID: issueID, Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", TTL: time.Minute}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusInProgress); err != nil {
+		t.Fatal(err)
+	}
+	_, err = runtime.store.FinishValidation(ctx, "review-gate", "secret", domain.ValidationRequestFailed, "failed", domain.ValidationEvidence{Held: true, RequestID: "review-gate", Class: domain.ValidationClassAggregate, Profile: "cold", SourceRevision: "candidate-a", Present: true}, now.Add(time.Second), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.operationRuntime = runtime
+	d.tmux = tmux.NewClient(tmuxRunner, slog.Default())
+	tmuxRunner.sessions[naming.CanonicalSessionIDForIssue(d.sessionNamingScope("project"), naming.IssueID(issueID)).String()] = true
+	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "failed-review-gate", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "gate found a regression"}}}
+
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Returned) != 1 || result.Returned[0] != issueID || len(result.Failed) != 0 || len(result.Skipped) != 0 {
+		t.Fatalf("result = %+v, want formal returned outcome", result)
+	}
+	replayed, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil || len(replayed.Returned) != 1 || len(tmuxRunner.inputPayloads) != 1 {
+		t.Fatalf("replay = %+v err=%v prompts=%d, want idempotent return", replayed, err, len(tmuxRunner.inputPayloads))
+	}
+}
+
+func TestReviewReturnBoundsBlockedLiveDeliveryAndPublishesFailure(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker-a")
+	runner := newSessionStartTmuxRunner()
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.tmux = tmux.NewClient(runner, slog.Default())
+	runner.sessions[naming.CanonicalSessionIDForIssue(d.sessionNamingScope("project"), naming.IssueID(issueID)).String()] = true
+	runner.onRunWithInput = func(runCtx context.Context, _ string, _ []string) (string, error) {
+		<-runCtx.Done()
+		return "", runCtx.Err()
+	}
+	authority := daemonOrchestrationAuthority{daemon: d, reviewDeliveryTimeout: 25 * time.Millisecond}
+	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "review-return-blocked-delivery", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "delivery must be bounded"}}}
+
+	started := time.Now()
+	result, err := authority.Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("review return elapsed %s, want bounded delivery", elapsed)
+	}
+	failure := result.Failed[issueID]
+	if !strings.Contains(failure, "stage=live_delivery") || !strings.Contains(failure, "target="+issueID) || !strings.Contains(failure, context.DeadlineExceeded.Error()) {
+		t.Fatalf("result = %+v, want stage, target, and timeout failure", result)
+	}
+	mail, err := readMailboxEvents(repoDir, issueID)
+	if err != nil || len(mail) != 1 {
+		t.Fatalf("mail events = %+v err=%v, want durable findings before delivery", mail, err)
+	}
+	reviewEvents, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reviewEvents) != 1 || reviewEvents[0].Payload["outcome"] != "delivery_failed" || !strings.Contains(fmt.Sprint(reviewEvents[0].Payload["failure"]), "stage=live_delivery target="+issueID) {
+		t.Fatalf("review events = %+v, want durable stage-aware delivery failure", reviewEvents)
+	}
+
+	runner.onRunWithInput = func(context.Context, string, []string) (string, error) {
+		return "", errors.New("delivery path unavailable")
+	}
+	replayed, err := authority.Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayFailure := replayed.Failed[issueID]; !strings.Contains(replayFailure, "stage=live_delivery") || !strings.Contains(replayFailure, "target="+issueID) || !strings.Contains(replayFailure, "delivery path unavailable") {
+		t.Fatalf("replayed result = %+v, want stage-aware unavailable-path failure", replayed)
+	}
+	replayedMail, err := readMailboxEvents(repoDir, issueID)
+	if err != nil || len(replayedMail) != 1 {
+		t.Fatalf("replayed mail events = %+v err=%v, want idempotent durable finding", replayedMail, err)
+	}
+}
+
+func TestReviewReturnRejectsFailedAggregateGateFromPriorReviewEpoch(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker-a")
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = runtime.Close() })
+	now := time.Now().UTC()
+	_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "stale-review-gate", LeaseToken: "secret", ProjectID: "project", IssueID: issueID, Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", TTL: time.Minute}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runtime.store.FinishValidation(ctx, "stale-review-gate", "secret", domain.ValidationRequestFailed, "failed", domain.ValidationEvidence{}, now.Add(time.Second), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusInProgress); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusInReview); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusInProgress); err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.operationRuntime = runtime
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "stale-gate-return", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "stale finding"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Skipped[issueID] != "not-review-ready" || len(result.Returned) != 0 {
+		t.Fatalf("result = %+v, want stale epoch rejected", result)
+	}
+}
+
 func TestReviewReturnReplayConvergesAfterReviewLeaseReleaseFailure(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
