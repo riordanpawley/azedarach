@@ -459,7 +459,11 @@ func RecoverNativeCodexIntent(cwd, sessionID, intentKey, action, threadID string
 	switch action {
 	case "discard":
 		delete(state.Pending, key)
-		state.Resolved[key] = "discarded"
+		ack, err := randomNativeCodexToken()
+		if err != nil {
+			return err
+		}
+		state.Resolved[key] = "discarded:" + ack
 	case "delivered":
 		ack, err := randomNativeCodexToken()
 		if err != nil {
@@ -495,11 +499,10 @@ func acceptNativeCodexDelivery(envelope nativeCodexEnvelope, composer []byte, ac
 		state.Resolved = map[string]string{}
 	}
 	if resolution := state.Resolved[key]; resolution != "" {
-		if resolution == "discarded" {
-			response.Outcome = "discarded"
-		} else {
-			response.Outcome, response.AcknowledgementToken = "accepted", resolution
+		if strings.HasPrefix(resolution, "discarded:") {
+			resolution = strings.TrimPrefix(resolution, "discarded:")
 		}
+		response.Outcome, response.AcknowledgementToken = "accepted", resolution
 		return response, false
 	}
 	if ack := state.Accepted[key]; ack != "" {
