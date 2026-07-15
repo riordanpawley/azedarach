@@ -33,9 +33,10 @@ my $cleanup_scoped_daemon = ($daemon_scope eq 'worktree' || $daemon_scope eq 'sc
     && $daemon_scope_source ne 'just-run'
     && $mode eq 'run'
     && !$ENV{AZEDARACH_VALIDATION_REQUEST_ID};
+my $scoped_cleanup_owner_pid = $$;
 my $scoped_cleanup_done = 0;
 my $stop_scoped_daemon = sub {
-    return 1 unless $cleanup_scoped_daemon && !$scoped_cleanup_done;
+    return 1 unless $$ == $scoped_cleanup_owner_pid && $cleanup_scoped_daemon && !$scoped_cleanup_done;
     $scoped_cleanup_done = 1;
     my $stop_status = system($az, 'daemon', 'stop');
     if ($stop_status != 0) {
@@ -50,7 +51,7 @@ my $stop_scoped_daemon = sub {
 # cleanup before the first daemon request so acquire errors and handled signals
 # cannot leave a detached azd behind.
 END {
-    if ($cleanup_scoped_daemon && !$scoped_cleanup_done) {
+    if ($$ == $scoped_cleanup_owner_pid && $cleanup_scoped_daemon && !$scoped_cleanup_done) {
         my $original_status = $?;
         $original_status = 70 if !$stop_scoped_daemon->() && $original_status == 0;
         $? = $original_status;

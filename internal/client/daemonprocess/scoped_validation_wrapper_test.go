@@ -119,7 +119,14 @@ func newScopedValidationFixture(t *testing.T, stopFails, global bool) scopedVali
 	if global {
 		scope = "global"
 	}
-	env := append(os.Environ(),
+	env := append(withoutEnvironment(os.Environ(),
+		"AZEDARACH_VALIDATION_REQUEST_ID",
+		"AZEDARACH_VALIDATION_NESTED_FD",
+		"AZEDARACH_VALIDATION_LEASE_TOKEN",
+		"AZEDARACH_VALIDATION_CLASS",
+		"AZEDARACH_VALIDATION_PROFILE",
+		"AZEDARACH_VALIDATION_SOURCE_REVISION",
+	),
 		scopedValidationHelperEnv+"=az",
 		"AZEDARACH_VALIDATION_AZ_BIN="+shim,
 		"AZEDARACH_DAEMON_SCOPE="+scope,
@@ -140,6 +147,23 @@ func newScopedValidationFixture(t *testing.T, stopFails, global bool) scopedVali
 		runtimeDir: filepath.Join(root, "runtime"),
 		env:        env,
 	}
+}
+
+func withoutEnvironment(environment []string, names ...string) []string {
+	filtered := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		keep := true
+		for _, name := range names {
+			if strings.HasPrefix(entry, name+"=") {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
 }
 
 func (f scopedValidationFixture) wrapperCommand(payload ...string) *exec.Cmd {
