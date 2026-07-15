@@ -41,6 +41,7 @@ import (
 type fakeDaemonTransport struct {
 	handshakeFn             func(context.Context, protocol.Hello) (protocol.HelloAck, error)
 	commandFn               func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	subscribeFn             func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error)
 	passOrchestrationIntent bool
 	lastGraphReadiness      daemonclient.TaskGraphReadiness
 }
@@ -59,6 +60,15 @@ func TestRenderPrimeOrchestrationSectionExplainsRuntimeContinuationGuard(t *test
 	for _, want := range []string{"Runtime persistence guard: wake-required", "direct nested root active", "consume the durable cursor and continue", "cursor=17", "Validation capacity: active=1 queued=1 revision=4"} {
 		if !strings.Contains(section, want) {
 			t.Fatalf("prime orchestration section missing %q:\n%s", want, section)
+		}
+	}
+}
+
+func TestRenderPrimeProjectOrchestrationSectionStatesRootOwnershipBoundary(t *testing.T) {
+	section := renderPrimeOrchestrationSection(protocol.OrchestrationSnapshot{Scope: domain.ProjectOrchestrationScope()})
+	for _, want := range []string{"unparented roots", "Rooted orchestrators exclusively own descendants"} {
+		if !strings.Contains(section, want) {
+			t.Fatalf("project primer missing %q:\n%s", want, section)
 		}
 	}
 }
@@ -983,7 +993,10 @@ func (f *fakeDaemonTransport) emulateOrchestrationIntent(ctx context.Context, re
 	return responseWithJSON(req, result), nil
 }
 
-func (f *fakeDaemonTransport) Subscribe(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
+func (f *fakeDaemonTransport) Subscribe(ctx context.Context, projectID string, revision uint64) (<-chan protocol.EventEnvelope, error) {
+	if f.subscribeFn != nil {
+		return f.subscribeFn(ctx, projectID, revision)
+	}
 	return nil, errors.New("not implemented")
 }
 

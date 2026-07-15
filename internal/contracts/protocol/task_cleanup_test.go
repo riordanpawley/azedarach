@@ -11,8 +11,8 @@ func TestTaskBulkCleanupProtocolRoundTripPreservesTimeoutDetails(t *testing.T) {
 	want := TaskBulkCleanupResult{
 		Action: "cancelled",
 		Items: []TaskBulkCleanupItem{{
-			TaskID: "az-1",
-			Action: "cancelled",
+			TaskID:  "az-1",
+			Action:  "cancelled",
 			Success: true,
 			Result: &TaskCloseResult{
 				TaskID: "az-1",

@@ -65,6 +65,48 @@ func TestRetrySQLiteWriteRetriesBusyAndLocked(t *testing.T) {
 	}
 }
 
+func TestRuntimeStateStoreManagedAgentIdentityRejectsStaleAcrossStores(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	first := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	second := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = first.Close(); _ = second.Close() })
+	old := ManagedAgentIdentity{ProjectID: "p", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old", ObservedAt: time.Unix(100, 0)}
+	if err := first.UpsertManagedAgentIdentity(ctx, old); err != nil {
+		t.Fatalf("upsert old identity: %v", err)
+	}
+	current := old
+	current.PanePID = 200
+	current.AgentIncarnation = "new"
+	current.ObservedAt = time.Unix(200, 0)
+	if err := second.UpsertManagedAgentIdentity(ctx, current); err != nil {
+		t.Fatalf("upsert current identity: %v", err)
+	}
+	matched, err := first.MatchManagedAgentIdentity(ctx, old)
+	if err != nil {
+		t.Fatalf("match stale identity: %v", err)
+	}
+	if matched {
+		t.Fatal("stale daemon matched superseded process incarnation")
+	}
+	matched, err = first.MatchManagedAgentIdentity(ctx, current)
+	if err != nil || !matched {
+		t.Fatalf("current identity match = %v, err=%v", matched, err)
+	}
+	listed, err := second.ListManagedAgentIdentities(ctx, "p", "az-1")
+	if err != nil || len(listed) != 1 || listed[0].LogicalPaneID != "agent" {
+		t.Fatalf("listed identities = %+v err=%v", listed, err)
+	}
+	old.ObservedAt = time.Unix(150, 0)
+	if err := first.UpsertManagedAgentIdentity(ctx, old); !errors.Is(err, ErrStaleManagedAgentIdentity) {
+		t.Fatalf("replay stale identity error = %v, want ErrStaleManagedAgentIdentity", err)
+	}
+	got, found, err := second.GetManagedAgentIdentity(ctx, "p", "az-1", "agent")
+	if err != nil || !found || got.PanePID != 200 || got.AgentIncarnation != "new" {
+		t.Fatalf("identity after stale replay = %+v found=%v err=%v", got, found, err)
+	}
+}
+
 func TestRetrySQLiteWriteDoesNotRetryPermanentFailure(t *testing.T) {
 	want := errors.New("constraint failed")
 	attempts := 0
@@ -741,6 +783,72 @@ func TestRuntimeStateStoreSeparatesSessionIntentAndObservations(t *testing.T) {
 	}
 	if parentCount != 1 || observationCount != 1 {
 		t.Fatalf("physical rows parent=%d observation=%d, want 1/1", parentCount, observationCount)
+	}
+}
+
+func TestRuntimeStateStoreListsSessionStatesByIssueIDs(t *testing.T) {
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx := context.Background()
+	now := time.Date(2026, time.July, 13, 5, 0, 0, 0, time.UTC)
+	for _, session := range []Session{
+		{ID: "target-intent", IssueID: "det", State: SessionStateRunning, UpdatedAt: now},
+		{ID: "target-intent.pane-1", IssueID: "det", State: SessionStateRunning, UpdatedAt: now.Add(time.Second)},
+		{ID: "historical", IssueID: "old", State: SessionStateStopped, UpdatedAt: now.Add(-time.Hour)},
+	} {
+		if err := store.UpsertSessionState(ctx, "project", session); err != nil {
+			t.Fatalf("seed %s: %v", session.ID, err)
+		}
+	}
+
+	sessions, err := store.ListSessionStatesByIssueIDs(ctx, "project", []string{"det"})
+	if err != nil {
+		t.Fatalf("ListSessionStatesByIssueIDs: %v", err)
+	}
+	if got, want := len(sessions), 2; got != want {
+		t.Fatalf("scoped sessions = %d, want %d: %+v", got, want, sessions)
+	}
+	for _, session := range sessions {
+		if session.IssueID != "det" {
+			t.Fatalf("scoped query returned unrelated session: %+v", session)
+		}
+	}
+
+	db, err := sql.Open("sqlite", store.dbPath)
+	if err != nil {
+		t.Fatalf("open query-plan db: %v", err)
+	}
+	defer db.Close()
+	rows, err := db.QueryContext(ctx, `
+		EXPLAIN QUERY PLAN
+		SELECT session_id
+		FROM (`+sessionProjectionUnionSQL()+`)
+		WHERE project_id = ? AND issue_id IN (?)
+	`, "project", "det")
+	if err != nil {
+		t.Fatalf("explain scoped session query: %v", err)
+	}
+	defer rows.Close()
+	var plan strings.Builder
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatalf("scan query plan: %v", err)
+		}
+		plan.WriteString(detail)
+		plan.WriteByte('\n')
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate query plan: %v", err)
+	}
+	for _, table := range []string{sessionStateTable, sessionObservationTable} {
+		tablePlan := "SEARCH " + table + " USING "
+		if !strings.Contains(plan.String(), tablePlan+"INDEX") &&
+			!strings.Contains(plan.String(), tablePlan+"COVERING INDEX") {
+			t.Fatalf("scoped query plan does not use issue index for %s:\n%s", table, plan.String())
+		}
 	}
 }
 
@@ -1756,6 +1864,29 @@ func TestRuntimeStateStorePhysicalObservationConstraints(t *testing.T) {
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO daemon_physical_session_observations(project_id,session_id,observed_state,activity,activity_source,updated_at) VALUES('p','bad','stopped','busy','hooks',?)`, time.Now().UTC().Format(time.RFC3339Nano)); err == nil {
 		t.Fatal("direct SQL accepted stopped physical observation with activity")
+	}
+}
+
+func TestRuntimeStateStoreTmuxAttachmentObservationIsOptionalAndPreservedAcrossHooks(t *testing.T) {
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	now := time.Now().UTC()
+	seed := Session{ID: "az-root", IssueID: "root", Role: SessionRoleWorker, ScopeKind: SessionScopeIssue, ScopeID: "root", State: SessionStateRunning, ObservedState: SessionStateRunning, UpdatedAt: now.Add(-time.Minute)}
+	if err := store.UpsertSessionState(ctx, "p", seed); err != nil {
+		t.Fatal(err)
+	}
+	attached := 2
+	startedAt := now.Add(-time.Hour)
+	if _, applied, err := store.ApplyPhysicalSessionObservation(ctx, PhysicalSessionObservation{ProjectID: "p", SessionID: seed.ID, ObservedState: SessionStateRunning, UpdatedAt: now, TmuxAttachedCount: &attached, StartedAt: &startedAt}); err != nil || !applied {
+		t.Fatalf("apply tmux attachment observation: applied=%v err=%v", applied, err)
+	}
+	if _, applied, err := store.ApplyPhysicalSessionObservation(ctx, PhysicalSessionObservation{ProjectID: "p", SessionID: seed.ID, ObservedState: SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: now.Add(time.Second)}); err != nil || !applied {
+		t.Fatalf("apply hook observation: applied=%v err=%v", applied, err)
+	}
+	got, found, err := store.GetSessionState(ctx, "p", seed.ID)
+	if err != nil || !found || got.TmuxAttachedCount != attached || got.StartedAt == nil || !got.StartedAt.Equal(startedAt) || got.Activity != "busy" {
+		t.Fatalf("session=%+v found=%v err=%v", got, found, err)
 	}
 }
 

@@ -9348,6 +9348,9 @@ func renderPrimeOrchestrationSection(snapshot protocol.OrchestrationSnapshot) st
 		scope = "rooted:" + snapshot.Scope.RootIssueID.String()
 	}
 	fmt.Fprintf(&b, "Daemon orchestration context (role=orchestrator scope=%s lifecycle=%s revision=%d cursor=%d):\n", scope, snapshot.Lifecycle, snapshot.Revision, snapshot.Cursor)
+	if snapshot.Scope.Kind == domain.OrchestrationScopeProject {
+		b.WriteString("- Ownership boundary: project scope lists and acts on live unparented roots only. Rooted orchestrators exclusively own descendants.\n")
+	}
 	if snapshot.ContinuationRequired {
 		fmt.Fprintf(&b, "- Runtime persistence guard: wake-required (%s). Durable continuation: %s\n", snapshot.ContinuationReason, snapshot.ContinuationContract)
 	} else if snapshot.Scope.Kind == domain.OrchestrationScopeRooted {

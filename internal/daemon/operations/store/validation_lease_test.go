@@ -38,7 +38,7 @@ func TestValidationLeaseSerializesAggregateAndPreservesSharedConcurrency(t *test
 	assert.Equal(t, domain.ValidationRequestActive, acquire(storeA, "shared-a", domain.ValidationClassShared).State)
 	assert.Equal(t, domain.ValidationRequestActive, acquire(storeB, "shared-b", domain.ValidationClassShared).State)
 	assert.Equal(t, domain.ValidationRequestQueued, acquire(storeA, "aggregate", domain.ValidationClassAggregate).State)
-	assert.Equal(t, domain.ValidationRequestQueued, acquire(storeB, "shared-late", domain.ValidationClassShared).State, "later shared work must not starve queued aggregate")
+	assert.Equal(t, domain.ValidationRequestActive, acquire(storeB, "shared-late", domain.ValidationClassShared).State, "queued aggregate must not convoy later focused work")
 	assert.Equal(t, domain.ValidationRequestActive, acquire(storeB, "safe", domain.ValidationClassSafe).State)
 
 	_, err := storeA.FinishValidation(ctx, "shared-a", testValidationToken, domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{}, now.Add(time.Second), ttl)
@@ -47,14 +47,14 @@ func TestValidationLeaseSerializesAggregateAndPreservesSharedConcurrency(t *test
 	require.NoError(t, err)
 	snapshot, err := storeA.ValidationSnapshot(ctx, "project", now.Add(2*time.Second), ttl)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"aggregate", "safe"}, validationRequestIDs(snapshot.Active))
-	assert.Equal(t, []string{"shared-late"}, validationRequestIDs(snapshot.Queued))
+	assert.Equal(t, []string{"shared-late", "safe"}, validationRequestIDs(snapshot.Active))
+	assert.Equal(t, []string{"aggregate"}, validationRequestIDs(snapshot.Queued))
 
-	_, err = storeA.FinishValidation(ctx, "aggregate", testValidationToken, domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{}, now.Add(3*time.Second), ttl)
+	_, err = storeB.FinishValidation(ctx, "shared-late", testValidationToken, domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{}, now.Add(3*time.Second), ttl)
 	require.NoError(t, err)
 	snapshot, err = storeB.ValidationSnapshot(ctx, "project", now.Add(3*time.Second), ttl)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"shared-late", "safe"}, validationRequestIDs(snapshot.Active))
+	assert.Equal(t, []string{"aggregate", "safe"}, validationRequestIDs(snapshot.Active))
 }
 
 func TestValidationLeaseConcurrentDaemonsActivateExactlyOneAggregate(t *testing.T) {

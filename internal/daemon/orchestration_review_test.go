@@ -169,6 +169,49 @@ func TestReviewIntentValidationRejectsNonActionableOrConflictingOutcomes(t *test
 	}
 }
 
+func TestExactReviewCandidateWorktreeBindsProjectionToLiveIdentity(t *testing.T) {
+	ctx := context.Background()
+	projectID, issueID := "project", "dlc"
+	storePath := filepath.Join(t.TempDir(), "runtime.db")
+	store := daemonstate.NewRuntimeStateStoreAtPath(storePath, slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	writer := daemonstate.NewRuntimeStateStoreAtPath(storePath, slog.Default())
+	t.Cleanup(func() { _ = writer.Close() })
+	projectedPath := t.TempDir()
+	if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{ProjectID: projectID, IssueID: issueID, Path: projectedPath, Branch: "riordan/dlc/review-candidate", UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &staticWorktreeListRunner{output: fmt.Sprintf("worktree %s\nHEAD deadbeef\nbranch refs/heads/riordan/dlc/review-candidate\n\n", projectedPath)}
+	d := &Daemon{worktreeAdapter: &worktreeServiceAdapter{manager: git.NewWorktreeManager(runner, t.TempDir(), slog.Default()), runtimeStateStore: store}}
+
+	path, err := d.exactReviewCandidateWorktree(ctx, projectID, issueID)
+	if err != nil || path != filepath.Clean(projectedPath) {
+		t.Fatalf("exact candidate path=%q err=%v", path, err)
+	}
+
+	// A second daemon's durable projection update must be observed before the
+	// live comparison; stale in-memory worktree identity is not authoritative.
+	if err := writer.UpsertWorktreeState(ctx, daemonstate.WorktreeState{ProjectID: projectID, IssueID: issueID, Path: t.TempDir(), Branch: "riordan/dlc/review-candidate", UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.exactReviewCandidateWorktree(ctx, projectID, issueID); err == nil || !strings.Contains(err.Error(), "candidate_path_mismatch") {
+		t.Fatalf("cross-daemon projection refresh error=%v, want typed candidate_path_mismatch diagnostic", err)
+	}
+	if err := writer.UpsertWorktreeState(ctx, daemonstate.WorktreeState{ProjectID: projectID, IssueID: issueID, Path: projectedPath, Branch: "riordan/dlc/review-candidate", UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+
+	runner.output = fmt.Sprintf("worktree %s\nHEAD deadbeef\nbranch refs/heads/riordan/other/reused\n\n", projectedPath)
+	if _, err := d.exactReviewCandidateWorktree(ctx, projectID, issueID); err == nil || !strings.Contains(err.Error(), "candidate_path_reused") {
+		t.Fatalf("reused path error=%v, want typed candidate_path_reused diagnostic", err)
+	}
+
+	runner.output = ""
+	if _, err := d.exactReviewCandidateWorktree(ctx, projectID, issueID); err == nil || !strings.Contains(err.Error(), "candidate_projection_stale") {
+		t.Fatalf("stale projection error=%v, want typed candidate_projection_stale diagnostic", err)
+	}
+}
+
 func TestProjectReviewQueueRefreshesCrossProcessReviewLease(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
@@ -966,7 +1009,11 @@ func TestReviewAcceptClosesMultipleInternalReviewsBeforeDependentCompletion(t *t
 		ids = append(ids, id)
 	}
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
-	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-review-batch", ActorID: "orchestrator", IssueIDs: ids, RepoDir: repoDir}
+	rootedScope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := protocol.OrchestrationIntentRequest{Scope: rootedScope, Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-review-batch", ActorID: "orchestrator", IssueIDs: ids, RepoDir: repoDir}
 	authority := daemonOrchestrationAuthority{daemon: d}
 	if err := authority.recordReviewOutcome(ctx, "project", ids[0], request, "accepted", ""); err != nil {
 		t.Fatal(err)
@@ -1106,7 +1153,11 @@ func TestReviewAcceptUsesReplayedTicketIntegrationReadyEvidenceIdempotently(t *t
 	if _, validation := domain.ParseWorkerEvidencePacketBody(mail[0].Body); !validation.Complete {
 		t.Fatalf("replayed body=%s validation=%+v", mail[0].Body, validation)
 	}
-	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-replayed-ticket-evidence", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
+	rootedScope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := protocol.OrchestrationIntentRequest{Scope: rootedScope, Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-replayed-ticket-evidence", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
 	first, err := d.orchestrationAuthority().Apply(ctx, "project", request)
 	if err != nil {
 		t.Fatal(err)
@@ -1174,7 +1225,11 @@ func TestReviewReplayAndAcceptShareObservedAtEvidenceOrdering(t *testing.T) {
 	if len(mail) != 0 {
 		t.Fatalf("replay=%+v, want no readiness for latest incomplete evidence", mail)
 	}
-	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "reject-authoritatively-latest-incomplete", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
+	rootedScope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := protocol.OrchestrationIntentRequest{Scope: rootedScope, Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "reject-authoritatively-latest-incomplete", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir}
 	result, err := d.orchestrationAuthority().Apply(ctx, "project", request)
 	if err != nil {
 		t.Fatal(err)
@@ -1431,6 +1486,13 @@ func TestReviewAcceptConvergesStaleBusyHookAtIdlePromptAndReplaysIdempotently(t 
 	}
 	d.git = git.NewClient(runner, slog.Default())
 	d.worktreeAdapter = &worktreeServiceAdapter{manager: git.NewWorktreeManager(runner, repoDir, slog.Default()), logger: slog.Default()}
+	projected, err := runtimeStore.ListSessionStates(ctx, "project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.observeTerminalFailureProbes(ctx, "project", projected, "project", sessionDisplayActivityByIssueKeyFromSessions(projected, "project")); err != nil {
+		t.Fatalf("seed asynchronous idle-prompt observation: %v", err)
+	}
 	request := protocol.OrchestrationIntentRequest{
 		Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept,
 		IntentKey: "accept-stale-busy-idle-prompt", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir,

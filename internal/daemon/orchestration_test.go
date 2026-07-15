@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -181,13 +183,19 @@ func TestBootstrapRecoveryResumesReplacedRootedOrchestratorOnceWithDurableCursor
 }
 
 func TestRootedOrchestratorContinuationSuppressesCompleteAndHumanWait(t *testing.T) {
-	nested := protocol.OrchestrationSnapshot{NestedRoots: []protocol.OrchestrationNestedRoot{{IssueID: "nested"}}}
+	nested := protocol.OrchestrationSnapshot{NestedRoots: []protocol.OrchestrationNestedRoot{{IssueID: "nested", Status: "startable"}}}
 	if rootedOrchestratorContinuationRequired(true, nested) {
 		t.Fatal("complete-check pass still requires continuation")
 	}
 	nested.Interactions = []domain.InteractionRequest{{ID: "human-acceptance"}}
 	if rootedOrchestratorContinuationRequired(false, nested) {
 		t.Fatal("unresolved human acceptance still requires continuation")
+	}
+	nested.Interactions = nil
+	nested.NestedRoots[0].Status = "not_counting_capacity"
+	nested.NestedRoots[0].ExclusionReasons = []string{"lifecycle-backlog"}
+	if rootedOrchestratorContinuationRequired(false, nested) {
+		t.Fatal("non-actionable backlog-contained nested root still requires continuation")
 	}
 }
 
@@ -253,6 +261,28 @@ func TestMergeOrchestrationSnapshotOrdersProjectResultsDeterministically(t *test
 	}
 	if dst.Blocked["x"] != "dependency" || dst.Capacity.DirectRunnableCount != 1 || dst.Capacity.DirectActiveCount != 1 {
 		t.Fatalf("merged project snapshot = %+v", dst)
+	}
+}
+
+func TestFinalizeOrchestrationSnapshotSourceCoversSemanticResultOnly(t *testing.T) {
+	first := protocol.OrchestrationSnapshot{
+		GeneratedAt: time.Now().UTC(),
+		Revision:    7,
+		Source:      protocol.MaterializedSnapshotMetadata{IssueChecksum: "issues", RuntimeChecksum: "runtime"},
+		Runnable:    []string{"az-1"},
+	}
+	second := first
+	second.GeneratedAt = first.GeneratedAt.Add(time.Minute)
+	second.Revision = 99
+	finalizeOrchestrationSnapshotSource(&first)
+	finalizeOrchestrationSnapshotSource(&second)
+	if first.Source.SemanticChecksum == "" || first.Source.SemanticChecksum != second.Source.SemanticChecksum {
+		t.Fatalf("normalized checksums differ: %q/%q", first.Source.SemanticChecksum, second.Source.SemanticChecksum)
+	}
+	second.Interactions = []domain.InteractionRequest{{ID: "interaction-1"}}
+	finalizeOrchestrationSnapshotSource(&second)
+	if first.Source.SemanticChecksum == second.Source.SemanticChecksum {
+		t.Fatal("interaction projection did not change orchestration semantic checksum")
 	}
 }
 
@@ -551,12 +581,99 @@ func TestProjectOrchestrationApplyAutomaticallyBacklogsPrematureCandidate(t *tes
 	}
 }
 
+func TestProjectOrchestrationSnapshotIncludesOnlyLiveUnparentedRoots(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	rootID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Root", Description: "Root scope", Acceptance: "Root done", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Child", Description: "Child scope", Acceptance: "Child done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Closed root", Type: domain.TypeTask, Status: domain.StatusDone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "steward", Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Candidates) != 1 || snapshot.Candidates[0].IssueID != rootID {
+		t.Fatalf("project candidates = %+v, want only root %s (child %s and closed root %s excluded)", snapshot.Candidates, rootID, childID, closedID)
+	}
+	for _, issueID := range append(append([]string(nil), snapshot.Runnable...), snapshot.Active...) {
+		if issueID == childID || issueID == closedID {
+			t.Fatalf("project actionable IDs contain out-of-scope issue %s: runnable=%v active=%v", issueID, snapshot.Runnable, snapshot.Active)
+		}
+	}
+	for _, review := range snapshot.ReviewQueue {
+		if review.IssueID == childID || review.IssueID == closedID {
+			t.Fatalf("project review queue contains out-of-scope issue: %+v", snapshot.ReviewQueue)
+		}
+	}
+}
+
+func TestProjectOrchestrationRejectsDirectStartOfParentedTicket(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	rootID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Child", Description: "Child scope", Acceptance: "Child done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	result, err := d.orchestrationAuthority().Apply(ctx, "proj", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentStart, IntentKey: "reject-child", ActorID: "steward", IssueIDs: []string{childID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Skipped[childID] != "outside-project-root-candidate-scope" || len(result.Started) != 0 {
+		t.Fatalf("direct child start result = %+v", result)
+	}
+}
+
+func TestProjectOrchestrationExplicitIssueRoutesOnlyRequestedRoot(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	requestedID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Requested thin root", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelatedID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Unrelated thin root", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	result, err := d.orchestrationAuthority().Apply(ctx, "proj", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentStart, IntentKey: "explicit-root", ActorID: "steward", IssueIDs: []string{requestedID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Routed) != 1 || result.Routed[0].IssueID != requestedID {
+		t.Fatalf("routed = %+v, want only requested root %s", result.Routed, requestedID)
+	}
+	unrelated, err := client.GetWithRuntime(ctx, "proj", unrelatedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unrelated.State.Workflow() != domain.IssueWorkflowOpen {
+		t.Fatalf("unrelated root workflow = %s, want open", unrelated.State.Workflow())
+	}
+}
+
 func TestProjectCandidateRoutesDoNotAutomaticallyRouteOwnedPrematureWork(t *testing.T) {
 	snapshot := protocol.OrchestrationSnapshot{Candidates: []protocol.OrchestrationCandidate{{
 		IssueID: "foreign", Classification: string(domain.OrchestrationCandidateOwnedElsewhere),
 		Executability: domain.IssueExecutabilityAssessment{Disposition: domain.IssuePremature, Reasons: []string{"missing-scope"}},
 	}}}
-	if routes := projectCandidateRoutes(snapshot, nil); len(routes) != 0 {
+	if routes := projectCandidateRoutes(snapshot, nil, nil); len(routes) != 0 {
 		t.Fatalf("owned candidate routes = %+v", routes)
 	}
 }
@@ -629,6 +746,290 @@ func TestRootedOrchestrationRejectsProjectCandidateRoutes(t *testing.T) {
 
 func TestOrchestrationAuthorityInterfaceStaysDeep(t *testing.T) {
 	var _ orchestrationAuthority = daemonOrchestrationAuthority{}
+}
+
+func TestOrchestrationSnapshotCacheCoalescesDuplicateRevision(t *testing.T) {
+	projectID := "project"
+	scope, err := domain.RootedOrchestrationScope("az-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{revision: map[string]uint64{projectID: 7}}
+	request := protocol.OrchestrationSnapshotRequest{Scope: scope, ActorID: "agent-a", Limit: 12}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var mu sync.Mutex
+	builds := 0
+	build := func(context.Context, string, protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		mu.Lock()
+		builds++
+		call := builds
+		mu.Unlock()
+		if call == 1 {
+			close(entered)
+			<-release
+		}
+		return protocol.OrchestrationSnapshot{Scope: scope, Runnable: []string{"az-child"}, Blocked: map[string]string{}}, nil
+	}
+
+	type result struct {
+		snapshot protocol.OrchestrationSnapshot
+		stable   bool
+		err      error
+	}
+	results := make(chan result, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			snapshot, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build)
+			results <- result{snapshot: snapshot, stable: stable, err: err}
+		}()
+		if i == 0 {
+			<-entered
+		}
+	}
+	close(release)
+	for range 2 {
+		got := <-results
+		if got.err != nil || !got.stable || len(got.snapshot.Runnable) != 1 {
+			t.Fatalf("concurrent result = %+v", got)
+		}
+	}
+
+	if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable {
+		t.Fatalf("cached load stable=%v err=%v", stable, err)
+	}
+	mu.Lock()
+	if builds != 1 {
+		t.Fatalf("snapshot builds at one revision = %d, want 1", builds)
+	}
+	mu.Unlock()
+
+	d.nextRevision(projectID)
+	if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable {
+		t.Fatalf("load after revision change stable=%v err=%v", stable, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if builds != 2 {
+		t.Fatalf("snapshot builds after revision change = %d, want 2", builds)
+	}
+}
+
+func TestRootedOrchestrationSnapshotCacheHonorsReadinessSemanticExpiry(t *testing.T) {
+	projectID := "project"
+	rootID := "az-root"
+	scope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{
+		revision:                map[string]uint64{projectID: 7},
+		taskGraphReadinessCache: map[string]taskGraphReadinessCacheEntry{},
+	}
+	request := protocol.OrchestrationSnapshotRequest{Scope: scope, ActorID: "agent-a"}
+	builds := 0
+	build := func(context.Context, string, protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		builds++
+		expiresAt := time.Now().Add(time.Minute)
+		if builds == 1 {
+			expiresAt = time.Now().Add(-time.Second)
+		}
+		d.taskGraphReadinessCache[taskGraphReadinessLoadKey(projectID, rootID, request.ActorID)] = taskGraphReadinessCacheEntry{
+			revision:  7,
+			expiresAt: expiresAt,
+		}
+		return protocol.OrchestrationSnapshot{Scope: scope, Runnable: []string{"az-child"}, Blocked: map[string]string{}}, nil
+	}
+
+	if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable {
+		t.Fatalf("initial snapshot stable=%v err=%v", stable, err)
+	}
+	if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable {
+		t.Fatalf("snapshot after semantic expiry stable=%v err=%v", stable, err)
+	}
+	if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable {
+		t.Fatalf("cached snapshot after refresh stable=%v err=%v", stable, err)
+	}
+	if builds != 2 {
+		t.Fatalf("snapshot builds = %d, want expired entry rebuilt once", builds)
+	}
+}
+
+func TestOrchestrationSnapshotCacheRecoversFromRevisionChurn(t *testing.T) {
+	projectID := "project"
+	scope, err := domain.RootedOrchestrationScope("az-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{revision: map[string]uint64{projectID: 1}}
+	request := protocol.OrchestrationSnapshotRequest{Scope: scope}
+	builds := 0
+	build := func(context.Context, string, protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		builds++
+		if builds == 1 {
+			d.nextRevision(projectID)
+		}
+		return protocol.OrchestrationSnapshot{Scope: scope, Blocked: map[string]string{}}, nil
+	}
+
+	if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || stable {
+		t.Fatalf("churning load stable=%v err=%v, want unstable without conflict loop", stable, err)
+	}
+	if _, revision, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable || revision != 2 {
+		t.Fatalf("recovery load revision=%d stable=%v err=%v", revision, stable, err)
+	}
+	if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable {
+		t.Fatalf("cached recovery stable=%v err=%v", stable, err)
+	}
+	if builds != 2 {
+		t.Fatalf("snapshot builds = %d, want one churned build plus one stable build", builds)
+	}
+}
+
+func TestOrchestrationSnapshotHandlerReturnsPromptConflictDuringContinuousChurn(t *testing.T) {
+	const projectID = "project"
+	d := &Daemon{revision: map[string]uint64{projectID: 1}}
+	builds := 0
+	d.orchestrationSnapshotBuild = func(_ context.Context, gotProjectID string, request protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		builds++
+		d.nextRevision(gotProjectID)
+		return protocol.OrchestrationSnapshot{Scope: request.Scope, Blocked: map[string]string{}}, nil
+	}
+	body, err := json.Marshal(protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	resp, err := d.handleOrchestrationSnapshot(context.Background(), protocol.RequestEnvelope{
+		Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body,
+	})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeConflict {
+		t.Fatalf("response = %+v, want projection conflict", resp)
+	}
+	if builds != 1 {
+		t.Fatalf("snapshot builds = %d, want one prompt attempt", builds)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("continuous churn conflict took %s, want <= 100ms", elapsed)
+	}
+}
+
+func TestOrchestrationSnapshotCacheIncludesCanonicalEffectiveRepoDir(t *testing.T) {
+	projectID := "project"
+	firstRepo := t.TempDir()
+	secondRepo := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "repo-alias")
+	if err := os.Symlink(firstRepo, alias); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{revision: map[string]uint64{projectID: 1}}
+	request := protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), RepoDir: firstRepo}
+	builds := 0
+	var builtRepoDirs []string
+	build := func(_ context.Context, _ string, request protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		builds++
+		builtRepoDirs = append(builtRepoDirs, request.RepoDir)
+		return protocol.OrchestrationSnapshot{Scope: request.Scope, Blocked: map[string]string{}}, nil
+	}
+	for _, repoDir := range []string{firstRepo, alias, secondRepo} {
+		request.RepoDir = repoDir
+		if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable {
+			t.Fatalf("load repo %q stable=%v err=%v", repoDir, stable, err)
+		}
+	}
+	if builds != 2 {
+		t.Fatalf("snapshot builds = %d, want alias reuse plus distinct-repo rebuild", builds)
+	}
+	wantFirst, err := filepath.EvalSymlinks(firstRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSecond, err := filepath.EvalSymlinks(secondRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(builtRepoDirs) != 2 || builtRepoDirs[0] != filepath.Clean(wantFirst) || builtRepoDirs[1] != filepath.Clean(wantSecond) {
+		t.Fatalf("canonical build repo dirs = %v", builtRepoDirs)
+	}
+}
+
+func TestOrchestrationProjectSnapshotCacheReusesRevision(t *testing.T) {
+	projectID := "project"
+	d := &Daemon{revision: map[string]uint64{projectID: 3}}
+	request := protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), Limit: 50}
+	builds := 0
+	build := func(context.Context, string, protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		builds++
+		return protocol.OrchestrationSnapshot{Scope: request.Scope, Blocked: map[string]string{}}, nil
+	}
+	for range 2 {
+		if _, revision, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable || revision != 3 {
+			t.Fatalf("project snapshot revision=%d stable=%v err=%v", revision, stable, err)
+		}
+	}
+	if builds != 1 {
+		t.Fatalf("project snapshot builds = %d, want 1 at unchanged revision", builds)
+	}
+}
+
+func TestOrchestrationSnapshotCacheConcurrentReadP95Budget(t *testing.T) {
+	const (
+		readers    = 5
+		iterations = 20
+		p95Budget  = 25 * time.Millisecond
+	)
+	projectID := "project"
+	scope, err := domain.RootedOrchestrationScope("az-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{revision: map[string]uint64{projectID: 1}}
+	request := protocol.OrchestrationSnapshotRequest{Scope: scope, ActorID: "agent-a"}
+	builds := 0
+	build := func(context.Context, string, protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		builds++
+		return protocol.OrchestrationSnapshot{Scope: scope, Runnable: []string{"az-child"}, Blocked: map[string]string{}}, nil
+	}
+	if _, _, stable, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build); err != nil || !stable {
+		t.Fatalf("warm cache stable=%v err=%v", stable, err)
+	}
+
+	durations := make(chan time.Duration, readers*iterations)
+	var wg sync.WaitGroup
+	for range readers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range iterations {
+				started := time.Now()
+				_, _, _, err := d.loadOrchestrationSnapshot(context.Background(), projectID, request, build)
+				if err != nil {
+					t.Errorf("cached snapshot: %v", err)
+					return
+				}
+				durations <- time.Since(started)
+			}
+		}()
+	}
+	wg.Wait()
+	close(durations)
+	measured := make([]time.Duration, 0, readers*iterations)
+	for duration := range durations {
+		measured = append(measured, duration)
+	}
+	sort.Slice(measured, func(i, j int) bool { return measured[i] < measured[j] })
+	p95 := measured[(len(measured)*95+99)/100-1]
+	if p95 > p95Budget {
+		t.Fatalf("cached concurrent read p95 = %s, budget %s", p95, p95Budget)
+	}
+	if builds != 1 {
+		t.Fatalf("snapshot builds = %d, want one warm build across concurrent reads", builds)
+	}
+	t.Logf("cached concurrent read p95=%s budget=%s samples=%d readers=%d", p95, p95Budget, len(measured), readers)
 }
 
 func TestResolveOrchestratorSessionUsesDurableLeaseScope(t *testing.T) {
@@ -761,7 +1162,7 @@ func TestOrchestrationBoardHealthDiagnosesUnsafeProject(t *testing.T) {
 	missing := domain.Task{ID: "missing-child", Status: domain.StatusOpen, ParentID: issueIDPtr("absent")}
 	malformedOwner := domain.Task{ID: "owned", Status: domain.StatusOpen, Ownership: &domain.IssueOwnership{OwnerKind: "agent"}}
 	tasks := []domain.Task{parent, missing, malformedOwner}
-	health := orchestrationBoardHealth(tasks, map[string]domain.Task{"parent": parent, "missing-child": missing, "owned": malformedOwner}, 2, 2)
+	health := orchestrationBoardHealth(tasks, map[string]domain.Task{"parent": parent, "missing-child": missing, "owned": malformedOwner}, 3, 2, 2)
 	if health.Healthy {
 		t.Fatal("unsafe board reported healthy")
 	}
@@ -773,6 +1174,110 @@ func TestOrchestrationBoardHealthDiagnosesUnsafeProject(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("diagnostics %q missing %q", joined, want)
 		}
+	}
+}
+
+func TestOrchestrationBoardHealthUsesCanonicalOpenCountForThreshold(t *testing.T) {
+	backlog, err := domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflowBacklog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := make([]domain.Task, 0, 102)
+	byID := make(map[string]domain.Task, 102)
+	for i := 0; i < 101; i++ {
+		id := fmt.Sprintf("backlog-%03d", i)
+		task := domain.Task{ID: naming.IssueID(id), Status: domain.StatusOpen, State: backlog}
+		tasks = append(tasks, task)
+		byID[id] = task
+	}
+	open := domain.Task{ID: "open", Status: domain.StatusOpen}
+	tasks = append(tasks, open)
+	byID[open.ID.String()] = open
+
+	health := orchestrationBoardHealth(tasks, byID, 1, 200, 100)
+	if !health.Healthy || health.OpenIssueCount != 1 {
+		t.Fatalf("health = %+v, want healthy canonical open count 1 despite backlog context", health)
+	}
+	for _, diagnostic := range health.Diagnostics {
+		if strings.Contains(diagnostic, "open issue count") {
+			t.Fatalf("health diagnostics = %v, want no threshold diagnostic", health.Diagnostics)
+		}
+	}
+
+	health = orchestrationBoardHealth(tasks, byID, 101, 200, 100)
+	if health.Healthy || health.OpenIssueCount != 101 {
+		t.Fatalf("health = %+v, want canonical threshold refusal at 101", health)
+	}
+	if got := strings.Join(health.Diagnostics, "\n"); !strings.Contains(got, "open issue count 101 exceeds refusal threshold 100") {
+		t.Fatalf("health diagnostics = %q, want exact canonical count", got)
+	}
+}
+
+func TestMaterializedProjectOrchestrationContextLimitsCanonicalOpenBeforeBacklogContext(t *testing.T) {
+	backlog, err := domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflowBacklog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	tasks := make([]domain.Task, 0, 201)
+	for i := 0; i < 189; i++ {
+		id := fmt.Sprintf("backlog-%03d", i)
+		tasks = append(tasks, domain.Task{ID: naming.IssueID(id), Status: domain.StatusOpen, State: backlog, Priority: domain.P0, UpdatedAt: old})
+	}
+	for i := 0; i < 12; i++ {
+		id := fmt.Sprintf("open-%02d", i)
+		tasks = append(tasks, domain.Task{ID: naming.IssueID(id), Status: domain.StatusOpen, Priority: domain.P1, UpdatedAt: old.Add(time.Duration(i) * time.Minute)})
+	}
+
+	context := materializedProjectOrchestrationContext(tasks, 5)
+	openIDs := make([]string, 0, 5)
+	backlogIDs := make([]string, 0, 1)
+	for _, task := range context {
+		switch task.IssueFacts().LifecycleState {
+		case domain.IssueWorkflowOpen:
+			openIDs = append(openIDs, task.ID.String())
+		case domain.IssueWorkflowBacklog:
+			backlogIDs = append(backlogIDs, task.ID.String())
+		}
+	}
+	if want := []string{"open-00", "open-01", "open-02", "open-03", "open-04"}; !reflect.DeepEqual(openIDs, want) {
+		t.Fatalf("open context = %v, want canonical bounded window %v", openIDs, want)
+	}
+	if len(backlogIDs) != 0 {
+		t.Fatalf("backlog context = %v, want backlog outside the root candidate window", backlogIDs)
+	}
+}
+
+func TestProjectOrchestrationCandidateRootsRetainsActiveRootsBeyondLimit(t *testing.T) {
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	roots := make([]domain.Task, 0, 8)
+	for i := 0; i < 5; i++ {
+		roots = append(roots, domain.Task{ID: naming.IssueID(fmt.Sprintf("runnable-%d", i)), Status: domain.StatusOpen, Priority: domain.P1, UpdatedAt: old.Add(time.Duration(i) * time.Minute)})
+	}
+	for i := 0; i < 3; i++ {
+		roots = append(roots, domain.Task{ID: naming.IssueID(fmt.Sprintf("active-%d", i)), Status: domain.StatusInProgress, Priority: domain.P4, UpdatedAt: old.Add(time.Duration(10+i) * time.Minute), HasTmuxSession: true})
+	}
+
+	selected := projectOrchestrationCandidateRoots(roots, 2)
+	got := make([]string, 0, len(selected))
+	for _, task := range selected {
+		got = append(got, task.ID.String())
+	}
+	if want := []string{"runnable-0", "runnable-1", "active-0", "active-1", "active-2"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("selected roots = %v, want bounded runnable roots plus every active root %v", got, want)
+	}
+
+	snapshot := protocol.OrchestrationSnapshot{
+		Runnable:       []string{"runnable-0", "runnable-1"},
+		Active:         []string{"active-0", "active-1", "active-2"},
+		ActiveSessions: []protocol.OrchestrationSession{{IssueID: "active-0"}, {IssueID: "active-1"}, {IssueID: "active-2"}},
+	}
+	constrainProjectOrchestrationSnapshotToRoots(&snapshot, selected)
+	if snapshot.Capacity.DirectRunnableCount != 2 || snapshot.Capacity.DirectActiveCount != 3 {
+		t.Fatalf("capacity = %+v, want runnable=2 active=3", snapshot.Capacity)
+	}
+	if len(snapshot.Active) != 3 || len(snapshot.ActiveSessions) != 3 {
+		t.Fatalf("active inventory = %v sessions=%+v, want all three roots", snapshot.Active, snapshot.ActiveSessions)
 	}
 }
 
@@ -876,6 +1381,9 @@ func TestProjectOrchestrationSnapshotRefreshesCrossProcessOwnership(t *testing.T
 	if before.ValidationCapacity == nil || len(before.ValidationCapacity.Active) != 1 {
 		t.Fatalf("validation capacity = %+v, want active focused validation", before.ValidationCapacity)
 	}
+	if before.Health.OpenIssueCount != 1 {
+		t.Fatalf("before open issue count = %d, want 1", before.Health.OpenIssueCount)
+	}
 	_, err = writer.ClaimOwnershipWithRuntime(ctx, "proj", id, issues.OwnershipClaimParams{OwnerID: "other", OwnerKind: "agent"})
 	if err != nil {
 		t.Fatal(err)
@@ -886,6 +1394,170 @@ func TestProjectOrchestrationSnapshotRefreshesCrossProcessOwnership(t *testing.T
 	}
 	if got := candidateClass(after.Candidates, id); got != string(domain.OrchestrationCandidateOwnedElsewhere) {
 		t.Fatalf("after class = %q, want owned-elsewhere", got)
+	}
+}
+
+func TestProjectOrchestrationSnapshotRefreshesCrossProcessBacklogLifecycle(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "issues.db")
+	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
+	writer := newMigratedIssueClientAtPath(t, path, slog.Default())
+	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
+	id, err := reader.Create(ctx, issues.CreateTaskParams{Title: "Candidate", Description: "Executable", Acceptance: "Worker completes the scoped change", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}}
+	authority := daemonOrchestrationAuthority{daemon: d}
+	before, err := authority.Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := candidateClass(before.Candidates, id); got != "runnable" {
+		t.Fatalf("before class = %q, want runnable", got)
+	}
+	backlog := domain.IssueWorkflowBacklog
+	acceptance := "Worker completes the scoped change"
+	if err := writer.UpdateDetails(ctx, id, issues.UpdateTaskParams{Title: "Candidate", Description: "Executable", Acceptance: &acceptance, Type: domain.TypeTask, Priority: domain.P1, Lifecycle: &backlog}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := authority.Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := candidateClass(after.Candidates, id); got != "" {
+		t.Fatalf("after class = %q, want backlog outside actionable candidate window", got)
+	}
+	if after.Health.OpenIssueCount != 0 {
+		t.Fatalf("after open issue count = %d, want backlog excluded", after.Health.OpenIssueCount)
+	}
+	for _, candidate := range after.Candidates {
+		if candidate.IssueID == id {
+			t.Fatalf("after candidate = %+v, want backlog visible only outside actionable candidates", candidate)
+		}
+	}
+}
+
+func TestProjectOrchestrationStartNeverTouchesExplicitBacklogIssue(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	id, err := client.Create(ctx, issues.CreateTaskParams{Title: "Paused candidate", Description: "Executable", Acceptance: "Worker completes the scoped change", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	result, err := (daemonOrchestrationAuthority{daemon: d}).Apply(ctx, "proj", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentStart, IntentKey: "backlog-explicit", ActorID: "steward", IssueIDs: []string{id}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Skipped[id]; got != "outside-project-root-candidate-scope" {
+		t.Fatalf("skipped[%s] = %q, want backlog outside project root candidate scope", id, got)
+	}
+	if len(result.Started) != 0 || len(result.Launched) != 0 || len(result.Pending) != 0 {
+		t.Fatalf("backlog start result = %+v, want no start side effects", result)
+	}
+	task, err := client.GetWithRuntime(ctx, "proj", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.State.Workflow() != domain.IssueWorkflowBacklog || task.Ownership != nil || task.HasTmuxSession {
+		t.Fatalf("backlog task mutated by start: %+v", task)
+	}
+}
+
+func TestProjectOrchestrationBacklogRootDoesNotExposeOpenChildren(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	rootID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Paused root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Open child", Description: "Executable", Acceptance: "Worker completes scoped change", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nestedID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Open nested root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Create(ctx, issues.CreateTaskParams{Title: "Nested child", Description: "Executable", Acceptance: "Worker completes scoped change", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen, ParentID: &nestedID}); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	authority := daemonOrchestrationAuthority{daemon: d}
+	snapshot, err := authority.Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "steward", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Roots) != 0 || len(snapshot.Runnable) != 0 {
+		t.Fatalf("snapshot = %+v, want backlog root and its children outside project actions", snapshot)
+	}
+	if got := candidateClass(snapshot.Candidates, childID); got != "" {
+		t.Fatalf("child class = %q, want parented child outside project candidates", got)
+	}
+	if len(snapshot.NestedRoots) != 0 {
+		t.Fatalf("nested roots = %+v, want parented nested root outside project actions", snapshot.NestedRoots)
+	}
+	result, err := authority.Apply(ctx, "proj", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentStart, IntentKey: "backlog-root-child", ActorID: "steward", IssueIDs: []string{childID, nestedID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Skipped[childID]; got != "outside-project-root-candidate-scope" {
+		t.Fatalf("skipped[%s] = %q, want root-scope exclusion", childID, got)
+	}
+	if got := result.Skipped[nestedID]; got != "outside-project-root-candidate-scope" {
+		t.Fatalf("skipped[%s] = %q, want root-scope exclusion", nestedID, got)
+	}
+	child, err := client.GetWithRuntime(ctx, "proj", childID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.State.Workflow() != domain.IssueWorkflowOpen || child.Ownership != nil || child.HasTmuxSession {
+		t.Fatalf("contained child mutated by project start: %+v", child)
+	}
+	nested, err := client.GetWithRuntime(ctx, "proj", nestedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nested.State.Workflow() != domain.IssueWorkflowOpen || nested.Ownership != nil || nested.HasTmuxSession {
+		t.Fatalf("contained nested root mutated by project start: %+v", nested)
+	}
+}
+
+func TestProjectOrchestrationRootScopeDoesNotPromoteOpenChildFromContext(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	contextRootID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Active dependency context", Type: domain.TypeEpic, Priority: domain.P0, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backlogRootID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Paused root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Selected open child", Description: "Executable", Acceptance: "Worker completes scoped change", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen, ParentID: &backlogRootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.AddDependency(ctx, childID, contextRootID, string(domain.DependencyBlocks)); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := (daemonOrchestrationAuthority{daemon: &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}}).Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "steward", Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Roots) != 0 || len(snapshot.Runnable) != 0 {
+		t.Fatalf("snapshot roots=%v runnable=%v, want no project actions for active/backlog roots or parented child", snapshot.Roots, snapshot.Runnable)
+	}
+	if candidateClass(snapshot.Candidates, childID) != "" {
+		t.Fatalf("snapshot = %+v, want parented child excluded from project candidates", snapshot)
+	}
+	if snapshot.Health.OpenIssueCount != 1 {
+		t.Fatalf("open issue count = %d, want canonical board inventory to retain the open child", snapshot.Health.OpenIssueCount)
 	}
 }
 

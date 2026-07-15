@@ -31,6 +31,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "user_0002_normalized_projection", Path: "migrations/user_0002_normalized_projection.manifest.sql", Checksum: "15a9ef67dd84425a0d29ab62f7107755134799567b6671b477782467496c5434"},
 	{ID: "user_0003_canonical_issue_state_repair", Path: "migrations/user_0003_canonical_issue_state_repair.manifest.sql", Checksum: "981bf427d53fe031296d27659293494c48c63f8865333a08340a0fe542c4883f"},
 	{ID: "user_0004_canonical_archive_state_repair", Path: "migrations/user_0004_canonical_archive_state_repair.manifest.sql", Checksum: "302f16948cea6ddef8ea11e3a6fac09f9234817e9d3e29d9b9b516f707e83941"},
+	{ID: "user_0005_project_delta_consumer", Path: "migrations/user_0005_project_delta_consumer.manifest.sql", Checksum: "3462d998e1abfb9ef02f22b964934bbcd7b6e2c9e25e233a2d9d89002f6cc863"},
 }
 
 var migrationRegistrations = []sqlitemigration.Artifact{
@@ -38,6 +39,7 @@ var migrationRegistrations = []sqlitemigration.Artifact{
 	{ID: "user_0002_normalized_projection", Path: "migrations/user_0002_normalized_projection.manifest.sql"},
 	{ID: "user_0003_canonical_issue_state_repair", Path: "migrations/user_0003_canonical_issue_state_repair.manifest.sql"},
 	{ID: "user_0004_canonical_archive_state_repair", Path: "migrations/user_0004_canonical_archive_state_repair.manifest.sql"},
+	{ID: "user_0005_project_delta_consumer", Path: "migrations/user_0005_project_delta_consumer.manifest.sql"},
 }
 
 const projectionVersion = 2
@@ -146,7 +148,10 @@ CREATE TABLE IF NOT EXISTS projects (
  project_id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL, db_path TEXT NOT NULL,
  schema_version INTEGER NOT NULL DEFAULT 0, projection_version INTEGER NOT NULL,
  schema_fingerprint TEXT NOT NULL DEFAULT '',
- checkpoint INTEGER NOT NULL DEFAULT 0, refresh_generation INTEGER NOT NULL DEFAULT 0, freshness TEXT NOT NULL, refreshed_at TEXT, last_attempt_at TEXT, last_error TEXT NOT NULL DEFAULT '', registered INTEGER NOT NULL DEFAULT 1
+ checkpoint INTEGER NOT NULL DEFAULT 0, refresh_generation INTEGER NOT NULL DEFAULT 0,
+ delta_cursor INTEGER NOT NULL DEFAULT 0, delta_hash TEXT NOT NULL DEFAULT '', delta_source_vector_json BLOB NOT NULL DEFAULT '[]',
+ delta_projector_id TEXT NOT NULL DEFAULT '', delta_projector_schema INTEGER NOT NULL DEFAULT 0, delta_projector_build TEXT NOT NULL DEFAULT '', delta_projector_checksum TEXT NOT NULL DEFAULT '',
+ freshness TEXT NOT NULL, refreshed_at TEXT, last_attempt_at TEXT, last_error TEXT NOT NULL DEFAULT '', registered INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS project_issue_projection (
  project_id TEXT NOT NULL, issue_id TEXT NOT NULL, title TEXT NOT NULL,
@@ -217,6 +222,22 @@ CREATE TABLE IF NOT EXISTS user_view_selections (
 	if err := s.ensureColumn(ctx, tx, "projects", "schema_fingerprint", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	for _, column := range []struct{ name, declaration string }{
+		{"delta_cursor", "INTEGER NOT NULL DEFAULT 0"},
+		{"delta_hash", "TEXT NOT NULL DEFAULT ''"},
+		{"delta_source_vector_json", "BLOB NOT NULL DEFAULT '[]'"},
+		{"delta_projector_id", "TEXT NOT NULL DEFAULT ''"},
+		{"delta_projector_schema", "INTEGER NOT NULL DEFAULT 0"},
+		{"delta_projector_build", "TEXT NOT NULL DEFAULT ''"},
+		{"delta_projector_checksum", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := s.ensureColumn(ctx, tx, "projects", column.name, column.declaration); err != nil {
+			return fmt.Errorf("migrate project delta consumer column %s: %w", column.name, err)
+		}
+	}
+	if err := validateProjectDeltaConsumerSchema(ctx, tx); err != nil {
+		return err
+	}
 	if err := s.migrateLegacyTaskJSON(ctx, tx); err != nil {
 		return err
 	}
@@ -230,6 +251,9 @@ CREATE TABLE IF NOT EXISTS user_view_selections (
 		if err := recordAppliedUserMigration(ctx, tx, id); err != nil {
 			return err
 		}
+	}
+	if err := recordAppliedUserMigration(ctx, tx, "user_0005_project_delta_consumer"); err != nil {
+		return err
 	}
 	if s.migrationBeforeCommit != nil {
 		if err := s.migrationBeforeCommit(); err != nil {
@@ -275,6 +299,54 @@ func (s *Store) ensureColumn(ctx context.Context, db migrationDB, table, column,
 	}
 	_, err = db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+column+` `+declaration)
 	return err
+}
+
+func validateProjectDeltaConsumerSchema(ctx context.Context, db queryer) error {
+	type columnContract struct {
+		typeName     string
+		notNull      int
+		defaultValue string
+	}
+	want := map[string]columnContract{
+		"delta_cursor":             {"INTEGER", 1, "0"},
+		"delta_hash":               {"TEXT", 1, "''"},
+		"delta_source_vector_json": {"BLOB", 1, "'[]'"},
+		"delta_projector_id":       {"TEXT", 1, "''"},
+		"delta_projector_schema":   {"INTEGER", 1, "0"},
+		"delta_projector_build":    {"TEXT", 1, "''"},
+		"delta_projector_checksum": {"TEXT", 1, "''"},
+	}
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(projects)`)
+	if err != nil {
+		return fmt.Errorf("inspect project delta consumer schema: %w", err)
+	}
+	defer rows.Close()
+	seen := map[string]bool{}
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, typeName string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typeName, &notNull, &defaultValue, &primaryKey); err != nil {
+			return fmt.Errorf("scan project delta consumer schema: %w", err)
+		}
+		contract, ok := want[name]
+		if !ok {
+			continue
+		}
+		seen[name] = true
+		if strings.ToUpper(typeName) != contract.typeName || notNull != contract.notNull || !defaultValue.Valid || defaultValue.String != contract.defaultValue {
+			return fmt.Errorf("project delta consumer column %s drift: type=%s not_null=%d default=%q", name, typeName, notNull, defaultValue.String)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate project delta consumer schema: %w", err)
+	}
+	for name := range want {
+		if !seen[name] {
+			return fmt.Errorf("project delta consumer column %s is missing", name)
+		}
+	}
+	return nil
 }
 
 func (s *Store) migrateLegacyTaskJSON(ctx context.Context, tx *sql.Tx) error {
@@ -659,6 +731,7 @@ type ProjectInput struct {
 	Checkpoint                    uint64
 	RefreshGeneration             uint64
 	Tasks                         []domain.Task
+	Delta                         *ProjectDeltaState
 }
 
 // BeginProjectRefresh reserves the next durable publication generation before
@@ -708,6 +781,16 @@ func (s *Store) replaceProject(ctx context.Context, in ProjectInput) error {
 	if _, err = tx.ExecContext(ctx, `INSERT INTO projects(project_id,name,path,db_path,schema_version,schema_fingerprint,projection_version,checkpoint,freshness,refreshed_at,last_attempt_at,last_error,registered)
 VALUES(?,?,?,?,?,?,?,?,'fresh',?,?,'',1) ON CONFLICT(project_id) DO UPDATE SET name=excluded.name,path=excluded.path,db_path=excluded.db_path,schema_version=excluded.schema_version,schema_fingerprint=excluded.schema_fingerprint,projection_version=excluded.projection_version,checkpoint=excluded.checkpoint,freshness='fresh',refreshed_at=excluded.refreshed_at,last_attempt_at=excluded.last_attempt_at,last_error='',registered=1`, in.ProjectID, in.Name, in.Path, in.DBPath, in.SchemaVersion, in.SchemaFingerprint, projectionVersion, in.Checkpoint, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
 		return err
+	}
+	if in.Delta != nil {
+		sourceVector, marshalErr := json.Marshal(in.Delta.SourceVector)
+		if marshalErr != nil {
+			return fmt.Errorf("encode project delta source vector: %w", marshalErr)
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE projects SET delta_cursor=?,delta_hash=?,delta_source_vector_json=?,delta_projector_id=?,delta_projector_schema=?,delta_projector_build=?,delta_projector_checksum=? WHERE project_id=?`,
+			in.Delta.Cursor, in.Delta.Hash, sourceVector, in.Delta.Projector.ID, in.Delta.Projector.SchemaVersion, in.Delta.Projector.Build, in.Delta.Projector.Checksum, in.ProjectID); err != nil {
+			return fmt.Errorf("publish project delta bootstrap state: %w", err)
+		}
 	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM project_issue_projection WHERE project_id=?`, in.ProjectID); err != nil {
 		return err
@@ -1000,7 +1083,7 @@ func (s *Store) SnapshotForScopedViewWithTasks(ctx context.Context, query string
 		return out, fmt.Errorf("begin global snapshot: %w", err)
 	}
 	defer tx.Rollback()
-	q := `SELECT project_id,name,path,db_path,schema_version,schema_fingerprint,projection_version,checkpoint,freshness,refreshed_at,last_attempt_at,last_error,registered FROM projects`
+	q := `SELECT project_id,name,path,db_path,schema_version,schema_fingerprint,projection_version,checkpoint,delta_cursor,delta_hash,delta_source_vector_json,delta_projector_id,delta_projector_schema,delta_projector_build,delta_projector_checksum,freshness,refreshed_at,last_attempt_at,last_error,registered FROM projects`
 	args := []any{}
 	ids := scopeProjectIDs(scope)
 	if len(ids) > 0 {
@@ -1021,7 +1104,13 @@ func (s *Store) SnapshotForScopedViewWithTasks(ctx context.Context, query string
 	for rows.Next() {
 		var p protocol.GlobalProjectSnapshot
 		var refreshed, attempted sql.NullString
-		if err = rows.Scan(&p.ProjectID, &p.Name, &p.Path, &p.DBPath, &p.SchemaVersion, &p.SchemaFingerprint, &p.ProjectionVersion, &p.Checkpoint, &p.Freshness, &refreshed, &attempted, &p.LastError, &p.Registered); err != nil {
+		var deltaSources []byte
+		if err = rows.Scan(&p.ProjectID, &p.Name, &p.Path, &p.DBPath, &p.SchemaVersion, &p.SchemaFingerprint, &p.ProjectionVersion, &p.Checkpoint,
+			&p.DeltaCursor, &p.DeltaHash, &deltaSources, &p.DeltaProjector.ID, &p.DeltaProjector.SchemaVersion, &p.DeltaProjector.Build, &p.DeltaProjector.Checksum,
+			&p.Freshness, &refreshed, &attempted, &p.LastError, &p.Registered); err != nil {
+			return out, err
+		}
+		if err = decodeJSON(deltaSources, &p.DeltaSourceVector); err != nil {
 			return out, err
 		}
 		if attempted.Valid {
@@ -1034,7 +1123,7 @@ func (s *Store) SnapshotForScopedViewWithTasks(ctx context.Context, query string
 				p.LastRefreshedAt = &t
 			}
 		}
-		if p.Registered && p.Freshness == protocol.GlobalProjectionFreshnessFresh && p.LastRefreshedAt != nil && s.maxProjectionAge > 0 && now.Sub(*p.LastRefreshedAt) > s.maxProjectionAge {
+		if p.Registered && p.DeltaProjector.ID == "" && p.Freshness == protocol.GlobalProjectionFreshnessFresh && p.LastRefreshedAt != nil && s.maxProjectionAge > 0 && now.Sub(*p.LastRefreshedAt) > s.maxProjectionAge {
 			p.Freshness = protocol.GlobalProjectionFreshnessStale
 		}
 		if p.Freshness != protocol.GlobalProjectionFreshnessFresh {
@@ -1053,7 +1142,7 @@ func (s *Store) SnapshotForScopedViewWithTasks(ctx context.Context, query string
 	}
 	for i := range projects {
 		if projects[i].Registered {
-			projects[i].Tasks, err = s.tasks(ctx, tx, projects[i].ProjectID, query, view, hydratedIssueIDs(hydrate, projects[i].ProjectID))
+			projects[i].Tasks, err = s.tasks(ctx, tx, projects[i].ProjectID, query, view, hydratedIssueIDs(hydrate, projects[i].ProjectID), nil)
 			if err != nil {
 				return out, err
 			}
@@ -1131,7 +1220,7 @@ func hydratedIssueIDs(ids []protocol.ScopedIssueID, projectID string) []string {
 	return out
 }
 
-func (s *Store) tasks(ctx context.Context, db queryer, projectID, query string, view *domain.BoardView, hydrate []string) ([]domain.Task, error) {
+func (s *Store) tasks(ctx context.Context, db queryer, projectID, query string, view *domain.BoardView, hydrate, only []string) ([]domain.Task, error) {
 	q := `SELECT i.issue_id,i.title,i.description,i.notes,i.design,i.acceptance,i.assignee,i.labels_json,i.estimate,i.implementations_json,
 i.status,i.lifecycle,i.review_state,i.closed_outcome,i.archive_state,i.waiting_human,i.waiting_human_source,i.waiting_human_reason,i.waiting_ai,
 i.priority,i.issue_type,i.parent_issue_id,i.has_tmux_session,i.origin,i.pr_number,i.pr_remote_key,i.pr_display_key,i.pr_url,i.pr_state,i.pr_draft,i.pr_checks_status,
@@ -1143,6 +1232,12 @@ LEFT JOIN project_session_projection s ON s.project_id=i.project_id AND s.issue_
 LEFT JOIN project_worktree_projection w ON w.project_id=i.project_id AND w.issue_id=i.issue_id
 WHERE i.project_id=?`
 	args := []any{projectID}
+	if len(only) > 0 {
+		q += ` AND i.issue_id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(only)), ",") + `)`
+		for _, issueID := range only {
+			args = append(args, issueID)
+		}
+	}
 	q += ` AND (`
 	candidateClauses := make([]string, 0, 2)
 	if strings.TrimSpace(query) != "" {

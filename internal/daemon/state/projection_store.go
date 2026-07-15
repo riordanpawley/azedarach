@@ -26,6 +26,7 @@ const (
 	sessionObservationTable         = "daemon_session_observations"
 	sessionActivityTable            = "daemon_session_activity_evidence"
 	physicalSessionObservationTable = "daemon_physical_session_observations"
+	managedAgentIdentityTable       = "daemon_managed_agent_incarnations"
 	worktreeStateTable              = "daemon_worktree_projections"
 	orchestratorLeaseTable          = "daemon_orchestrator_scope_leases"
 	advisorSessionTable             = "daemon_advisor_sessions"
@@ -35,6 +36,8 @@ const (
 	runtimeSQLiteRetryBudget        = 5 * time.Second
 	runtimeSQLiteRetryDelay         = 100 * time.Millisecond
 )
+
+var ErrStaleManagedAgentIdentity = errors.New("stale managed agent identity")
 
 // WorktreeState captures durable daemon worktree state stored in sqlite.
 type WorktreeState struct {
@@ -73,6 +76,159 @@ type PhysicalSessionObservation struct {
 	ActivitySource  string
 	UpdatedAt       time.Time
 	ObservedVersion int64
+	// TmuxAttachedCount is present only for tmux inventory observations. Hook
+	// observations leave it nil so they cannot erase independently observed
+	// attachment state.
+	TmuxAttachedCount *int
+	// StartedAt is present only when tmux inventory supplies the authoritative
+	// physical session creation time. It replaces any command-time estimate;
+	// other observation sources leave it nil and preserve the tmux value.
+	StartedAt *time.Time
+}
+
+// ManagedAgentIdentity is the durable binding between one stable logical agent
+// pane and the exact tmux/agent processes currently occupying it.
+type ManagedAgentIdentity struct {
+	ProjectID        string
+	SessionID        string
+	LogicalPaneID    string
+	TmuxPaneID       string
+	PanePID          int
+	AgentIncarnation string
+	ObservedAt       time.Time
+	UpdatedAt        time.Time
+}
+
+// UpsertManagedAgentIdentity installs a new authoritative incarnation. Callers
+// must use MatchManagedAgentIdentity for hook/ack observations so stale writers
+// cannot replace the current binding.
+func (s *RuntimeStateStore) UpsertManagedAgentIdentity(ctx context.Context, identity ManagedAgentIdentity) error {
+	return s.withRetryingWriteLock(ctx, "upsert_managed_agent_identity", func(writeCtx context.Context) error {
+		db, err := s.dbHandle()
+		if err != nil {
+			return err
+		}
+		identity, err = normalizeManagedAgentIdentity(identity)
+		if err != nil {
+			return err
+		}
+		result, err := db.ExecContext(writeCtx, `INSERT INTO `+managedAgentIdentityTable+`
+			(project_id,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,observed_at,updated_at)
+			VALUES(?,?,?,?,?,?,?,?)
+			ON CONFLICT(project_id,session_id,logical_pane_id) DO UPDATE SET
+				tmux_pane_id=excluded.tmux_pane_id,pane_pid=excluded.pane_pid,
+				agent_incarnation=excluded.agent_incarnation,observed_at=excluded.observed_at,updated_at=excluded.updated_at
+			WHERE excluded.observed_at > `+managedAgentIdentityTable+`.observed_at`,
+			identity.ProjectID, identity.SessionID, identity.LogicalPaneID, identity.TmuxPaneID,
+			identity.PanePID, identity.AgentIncarnation, identity.ObservedAt.Format(time.RFC3339Nano), identity.UpdatedAt.Format(time.RFC3339Nano))
+		if err != nil {
+			return fmt.Errorf("upsert managed agent identity %s/%s/%s: %w", identity.ProjectID, identity.SessionID, identity.LogicalPaneID, err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("inspect managed agent identity upsert: %w", err)
+		}
+		if affected == 0 {
+			current, found, loadErr := s.GetManagedAgentIdentity(writeCtx, identity.ProjectID, identity.SessionID, identity.LogicalPaneID)
+			if loadErr != nil {
+				return loadErr
+			}
+			if found && current.TmuxPaneID == identity.TmuxPaneID && current.PanePID == identity.PanePID && current.AgentIncarnation == identity.AgentIncarnation {
+				return nil
+			}
+			return fmt.Errorf("%w: %s/%s/%s", ErrStaleManagedAgentIdentity, identity.ProjectID, identity.SessionID, identity.LogicalPaneID)
+		}
+		return nil
+	})
+}
+
+func normalizeManagedAgentIdentity(identity ManagedAgentIdentity) (ManagedAgentIdentity, error) {
+	identity.ProjectID = normalizedProjectID(identity.ProjectID)
+	identity.SessionID = strings.TrimSpace(identity.SessionID)
+	identity.LogicalPaneID = strings.TrimSpace(identity.LogicalPaneID)
+	identity.TmuxPaneID = strings.TrimSpace(identity.TmuxPaneID)
+	identity.AgentIncarnation = strings.TrimSpace(identity.AgentIncarnation)
+	if identity.ProjectID == "" || identity.SessionID == "" || identity.LogicalPaneID == "" || identity.TmuxPaneID == "" || identity.AgentIncarnation == "" || identity.PanePID <= 0 {
+		return identity, fmt.Errorf("managed agent identity requires project, session, logical pane, tmux pane, positive pane pid, and agent incarnation")
+	}
+	if identity.ObservedAt.IsZero() {
+		identity.ObservedAt = time.Now().UTC()
+	}
+	identity.ObservedAt = identity.ObservedAt.UTC()
+	if identity.UpdatedAt.IsZero() {
+		identity.UpdatedAt = identity.ObservedAt
+	}
+	identity.UpdatedAt = identity.UpdatedAt.UTC()
+	return identity, nil
+}
+
+func (s *RuntimeStateStore) GetManagedAgentIdentity(ctx context.Context, projectID, sessionID, logicalPaneID string) (ManagedAgentIdentity, bool, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return ManagedAgentIdentity{}, false, err
+	}
+	var identity ManagedAgentIdentity
+	var observedAt, updatedAt string
+	err = db.QueryRowContext(ctx, `SELECT project_id,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,observed_at,updated_at
+		FROM `+managedAgentIdentityTable+` WHERE project_id=? AND session_id=? AND logical_pane_id=?`,
+		normalizedProjectID(projectID), strings.TrimSpace(sessionID), strings.TrimSpace(logicalPaneID)).Scan(
+		&identity.ProjectID, &identity.SessionID, &identity.LogicalPaneID, &identity.TmuxPaneID, &identity.PanePID,
+		&identity.AgentIncarnation, &observedAt, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ManagedAgentIdentity{}, false, nil
+	}
+	if err != nil {
+		return ManagedAgentIdentity{}, false, fmt.Errorf("get managed agent identity: %w", err)
+	}
+	identity.ObservedAt, err = parseRuntimeStateTime(observedAt)
+	if err != nil {
+		return ManagedAgentIdentity{}, false, err
+	}
+	identity.UpdatedAt, err = parseRuntimeStateTime(updatedAt)
+	return identity, true, err
+}
+
+func (s *RuntimeStateStore) ListManagedAgentIdentities(ctx context.Context, projectID, sessionID string) ([]ManagedAgentIdentity, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT project_id,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,observed_at,updated_at
+		FROM `+managedAgentIdentityTable+` WHERE project_id=? AND session_id=? ORDER BY logical_pane_id`, normalizedProjectID(projectID), strings.TrimSpace(sessionID))
+	if err != nil {
+		return nil, fmt.Errorf("list managed agent identities: %w", err)
+	}
+	defer rows.Close()
+	var identities []ManagedAgentIdentity
+	for rows.Next() {
+		var identity ManagedAgentIdentity
+		var observedAt, updatedAt string
+		if err := rows.Scan(&identity.ProjectID, &identity.SessionID, &identity.LogicalPaneID, &identity.TmuxPaneID, &identity.PanePID, &identity.AgentIncarnation, &observedAt, &updatedAt); err != nil {
+			return nil, fmt.Errorf("scan managed agent identity: %w", err)
+		}
+		identity.ObservedAt, err = parseRuntimeStateTime(observedAt)
+		if err != nil {
+			return nil, err
+		}
+		identity.UpdatedAt, err = parseRuntimeStateTime(updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		identities = append(identities, identity)
+	}
+	return identities, rows.Err()
+}
+
+func (s *RuntimeStateStore) MatchManagedAgentIdentity(ctx context.Context, candidate ManagedAgentIdentity) (bool, error) {
+	candidate, err := normalizeManagedAgentIdentity(candidate)
+	if err != nil {
+		return false, err
+	}
+	current, found, err := s.GetManagedAgentIdentity(ctx, candidate.ProjectID, candidate.SessionID, candidate.LogicalPaneID)
+	if err != nil || !found {
+		return false, err
+	}
+	return current.TmuxPaneID == candidate.TmuxPaneID && current.PanePID == candidate.PanePID && current.AgentIncarnation == candidate.AgentIncarnation, nil
 }
 
 // ApplyPhysicalSessionObservation atomically records a monotonic physical
@@ -137,11 +293,19 @@ func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context,
 				freshness = observation.UpdatedAt
 			}
 			targetTable := sessionStorageTableForID(intent.ID)
-			if _, err := tx.ExecContext(writeCtx, `UPDATE `+targetTable+`
-				SET observed_state=?, activity=?, activity_source=?, updated_at=?
-				WHERE project_id=? AND logical_id=?`, observation.ObservedState,
-				observation.Activity, observation.ActivitySource, freshness.Format(time.RFC3339Nano),
-				observation.ProjectID, logicalSessionIntentID(intent)); err != nil {
+			setClause := "observed_state=?, activity=?, activity_source=?, updated_at=?"
+			args := []any{observation.ObservedState, observation.Activity, observation.ActivitySource, freshness.Format(time.RFC3339Nano)}
+			if observation.TmuxAttachedCount != nil {
+				setClause += ", tmux_attached_count=?"
+				args = append(args, *observation.TmuxAttachedCount)
+			}
+			if observation.StartedAt != nil {
+				setClause += ", started_at=?"
+				args = append(args, observation.StartedAt.Format(time.RFC3339Nano))
+			}
+			args = append(args, observation.ProjectID, logicalSessionIntentID(intent))
+			if _, err := tx.ExecContext(writeCtx, `UPDATE `+targetTable+` SET `+setClause+`
+				WHERE project_id=? AND logical_id=?`, args...); err != nil {
 				return fmt.Errorf("fan physical session observation into logical intent %s: %w", logicalSessionIntentID(intent), err)
 			}
 		}
@@ -258,6 +422,13 @@ func normalizePhysicalSessionObservation(observation PhysicalSessionObservation)
 	}
 	if observation.ObservedState == SessionStateStopped && (observation.Activity != "" || observation.ActivitySource != "") {
 		return observation, fmt.Errorf("physical session observation: stopped runtime cannot retain activity")
+	}
+	if observation.TmuxAttachedCount != nil && *observation.TmuxAttachedCount < 0 {
+		return observation, fmt.Errorf("physical session observation: tmux attachment count cannot be negative")
+	}
+	if observation.StartedAt != nil {
+		startedAt := observation.StartedAt.UTC()
+		observation.StartedAt = &startedAt
 	}
 	if observation.UpdatedAt.IsZero() {
 		observation.UpdatedAt = time.Now().UTC()
@@ -429,6 +600,7 @@ func WithSQLiteWriteAttemptHookForTest(ctx context.Context, hook func(operation 
 // SessionStateReader loads persisted session state rows for a project.
 type SessionStateReader interface {
 	ListSessionStates(context.Context, string) ([]Session, error)
+	ListSessionStatesByIssueIDs(context.Context, string, []string) ([]Session, error)
 	ListSessionIntentStates(context.Context, string) ([]Session, error)
 	GetSessionState(context.Context, string, string) (Session, bool, error)
 	GetSessionIntent(context.Context, string, SessionRole, SessionScopeKind, string) (Session, bool, error)
@@ -1310,11 +1482,40 @@ func sessionProjectionUnionSQL() string {
 }
 
 func (s *RuntimeStateStore) ListSessionStates(ctx context.Context, projectID string) ([]Session, error) {
-	return s.listSessionStatesFromQuery(ctx, projectID, sessionProjectionUnionSQL())
+	return s.listSessionStatesFromQuery(ctx, projectID, sessionProjectionUnionSQL(), "", nil)
+}
+
+// ListSessionStatesByIssueIDs loads only runtime rows in the requested issue
+// scope. The physical tables' project/issue indexes keep historical rows
+// outside the graph from being scanned and materialized.
+func (s *RuntimeStateStore) ListSessionStatesByIssueIDs(ctx context.Context, projectID string, issueIDs []string) ([]Session, error) {
+	unique := make([]string, 0, len(issueIDs))
+	seen := make(map[string]struct{}, len(issueIDs))
+	for _, issueID := range issueIDs {
+		issueID = strings.TrimSpace(issueID)
+		if issueID == "" {
+			continue
+		}
+		if _, ok := seen[issueID]; ok {
+			continue
+		}
+		seen[issueID] = struct{}{}
+		unique = append(unique, issueID)
+	}
+	if len(unique) == 0 {
+		return []Session{}, nil
+	}
+	sort.Strings(unique)
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(unique)), ",")
+	args := make([]any, 0, len(unique))
+	for _, issueID := range unique {
+		args = append(args, issueID)
+	}
+	return s.listSessionStatesFromQuery(ctx, projectID, sessionProjectionUnionSQL(), "AND issue_id IN ("+placeholders+")", args)
 }
 
 func (s *RuntimeStateStore) ListSessionIntentStates(ctx context.Context, projectID string) ([]Session, error) {
-	return s.listSessionStatesFromQuery(ctx, projectID, `
+	sourceQuery := `
 		SELECT
 			project_id,
 			session_id,
@@ -1329,15 +1530,17 @@ func (s *RuntimeStateStore) ListSessionIntentStates(ctx context.Context, project
 			tmux_attached_count,
 			started_at,
 			updated_at
-		FROM `+sessionStateTable)
+		FROM ` + sessionStateTable
+	return s.listSessionStatesFromQuery(ctx, projectID, sourceQuery, "", nil)
 }
 
-func (s *RuntimeStateStore) listSessionStatesFromQuery(ctx context.Context, projectID, sourceQuery string) ([]Session, error) {
+func (s *RuntimeStateStore) listSessionStatesFromQuery(ctx context.Context, projectID, sourceQuery, filterSQL string, filterArgs []any) ([]Session, error) {
 	db, err := s.dbHandle()
 	if err != nil {
 		return nil, err
 	}
 	projectID = normalizedProjectID(projectID)
+	queryArgs := append([]any{projectID}, filterArgs...)
 	rows, err := db.QueryContext(ctx, `
 		SELECT
 			session_id,
@@ -1353,9 +1556,9 @@ func (s *RuntimeStateStore) listSessionStatesFromQuery(ctx context.Context, proj
 			COALESCE(started_at, ''),
 			updated_at
 		FROM (`+sourceQuery+`)
-		WHERE project_id = ?
+		WHERE project_id = ? `+filterSQL+`
 		ORDER BY updated_at DESC, session_id ASC
-	`, projectID)
+	`, queryArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("list session state rows %s: %w", projectID, err)
 	}
@@ -2246,6 +2449,19 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 			PRIMARY KEY(project_id, session_id),
 			CHECK (observed_state <> 'stopped' OR (activity = '' AND activity_source = ''))
 		)`,
+		`CREATE TABLE IF NOT EXISTS ` + managedAgentIdentityTable + ` (
+			project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
+			session_id TEXT NOT NULL CHECK (trim(session_id) <> ''),
+			logical_pane_id TEXT NOT NULL CHECK (trim(logical_pane_id) <> ''),
+			tmux_pane_id TEXT NOT NULL CHECK (trim(tmux_pane_id) <> ''),
+			pane_pid INTEGER NOT NULL CHECK (pane_pid > 0),
+			agent_incarnation TEXT NOT NULL CHECK (trim(agent_incarnation) <> ''),
+			observed_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY(project_id, session_id, logical_pane_id)
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_daemon_managed_agent_physical_incarnation
+			ON ` + managedAgentIdentityTable + ` (project_id, tmux_pane_id, pane_pid, agent_incarnation)`,
 		`CREATE TABLE IF NOT EXISTS ` + sessionStateTable + ` (
 			project_id TEXT NOT NULL,
 			logical_id TEXT GENERATED ALWAYS AS (role||':'||scope_kind||':'||scope_id||CASE WHEN instr(session_id,'.pane-')>0 THEN ':pane:'||session_id ELSE '' END) STORED,
