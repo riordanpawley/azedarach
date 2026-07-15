@@ -154,6 +154,18 @@ env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
   sh -c 'test -z "${AZEDARACH_VALIDATION_LEASE_TOKEN:-}"'
 test -e "$fixture/queued-once"
 
+runtime_probe="$fixture/runtime-probe"
+XDG_RUNTIME_DIR="$fixture/ordinary-runtime" \
+AZEDARACH_DAEMON_SCOPE=validation-bootstrap \
+AZEDARACH_VALIDATION_BOOTSTRAP_XDG_WAS_SET=1 \
+AZEDARACH_VALIDATION_BOOTSTRAP_ORIGINAL_XDG_RUNTIME_DIR="$fixture/forged-runtime" \
+AZEDARACH_VALIDATION_BOOTSTRAP_ID=forged \
+AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+AZEDARACH_TICKET_ID=fixture \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --profile runtime-preservation -- \
+  sh -c 'printf "%s" "$XDG_RUNTIME_DIR" >"$0"' "$runtime_probe"
+test "$(cat "$runtime_probe")" = "$fixture/ordinary-runtime"
+
 env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
   -u AZEDARACH_VALIDATION_LEASE_TOKEN \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
@@ -584,7 +596,7 @@ if FAKE_GIT_MODE=primary FAKE_GO_MARKER=shadow-diagnostic AZ_INSTALL_DIR="$fixtu
   exit 1
 fi
 grep -q "caller shell remains shadowed" "$fixture/shadow-diagnostic.stderr"
-grep -q "direnv reload" "$fixture/shadow-diagnostic.stderr"
+grep -q "stable installed /opt/homebrew/bin/az control link" "$fixture/shadow-diagnostic.stderr"
 test "$("$fixture/global-bin/az" version)" = "dev (shadow-diagnostic)"
 test "$("$fixture/global-bin/azd" version)" = "dev (shadow-diagnostic)"
 

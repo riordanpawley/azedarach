@@ -20,31 +20,43 @@ This repository now ships the Go implementation as the canonical `az` CLI.
 2. Verify installed binaries:
    - `az --version`
    - `azd --version`
-   - The two version strings must match. After `direnv reload` in an Azedarach
-     repository or linked worktree, `command -v az` and `command -v azd` must
-     resolve inside the same active immutable `.azedarach-generations/generation.*`
-     directory rather than the repository's preserved `bin/`, a scratch pair,
-     or an older generation. Environment activation identifies the installer-owned
-     `.azedarach-current` control links and prepends their immutable generation.
-     It preserves inherited package-manager, repository, and scratch directories
-     so unrelated tools in those directories remain available.
-     Global daemon pairing trusts only a client whose resolved executable is
-     inside `.azedarach-generations/generation.*`; primary-repo `bin/` binaries
-     remain development artifacts.
+   - The two version strings must match. Global PATH resolves the stable
+     installer-owned `/opt/homebrew/bin/az` control link; `build-install-run`
+     atomically switches that link. Direnv does not select, prepend, or watch
+     Azedarach runtime generations. Each running `az` resolves its matching
+     sibling `azd` internally; repository and scratch binaries are never part
+     of the production control path.
    - Successful immutable generations are retained across later installs so
      long-lived clients keep access to their paired daemon. Do not manually
      remove generation directories while clients from them may still run.
 3. If an older worktree-targeting symlink exists, migrate it to the stable,
    paired generation layout with the local helper:
    - `just build-install-run --no-run`
-   - If the helper publishes the pair but reports that the caller remains
-     shadowed, reload direnv, verify both `command -v` results, and rerun it. The
-     non-success result is intentional: daemon replacement is withheld until
-     the invoking shell resolves the newly published coherent generation.
+   - The helper publishes the pair and atomically switches the stable control
+     link; no direnv reload is required.
    - A caller already running from a retained managed generation is safe but
      may become older than the newly published generation. The helper reports
      that distinction and asks for a reload without misclassifying it as an
      unmanaged shadowing failure.
+
+## Validation Boundary
+
+The installed production `az` and global daemon own the repository-family lease
+queue, validation admission, and durable evidence. Exact-source candidate
+executables are payloads only: they run inside a private socket/runtime/cache
+with temporary databases or private online-backup clones. Candidate processes
+must not open production databases, projections, sockets, locks, or the global
+daemon, and must never act as the validation control plane.
+
+After that candidate is integrated into `main`, production deployment remains
+an explicit operator action from the primary worktree:
+
+1. Run `just build-install-run --no-run` from the primary worktree.
+2. Verify the stable control link and matching `az`/`azd` sibling resolution.
+3. Restart the global daemon only as an explicit production deployment action.
+
+This isolated candidate execution is not a production install path and does not
+make deployment implicit.
 
 ## Release Commands
 

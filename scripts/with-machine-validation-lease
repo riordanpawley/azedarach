@@ -158,6 +158,15 @@ if ($supervisor == 0) {
     if ($payload == 0) {
         setpgid(0, 0);
         delete $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN};
+        # Candidate daemon/routing overrides belong to the wrapper control
+        # plane, never to the payload. Preserve the caller's ordinary runtime
+        # environment, including XDG_RUNTIME_DIR, unchanged.
+        delete @ENV{qw(
+            AZEDARACH_DAEMON_BIN
+            AZEDARACH_DAEMON_SCOPE
+            AZEDARACH_DAEMON_SCOPE_SOURCE
+            AZEDARACH_VALIDATION_AZ_BIN
+        )};
         $ENV{AZEDARACH_VALIDATION_NESTED_FD} = fileno($broker_child);
         exec @ARGV or die "exec validation command $ARGV[0]: $!\n";
     }
