@@ -438,25 +438,23 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	}
 
 	// Project orchestration consumes the daemon's materialized projection only.
-	// The actionable window is canonical lifecycle Open before LIMIT; ancestors
-	// and dependencies are retained solely as readiness context. Review,
-	// decision, and active-capacity inventory remain independent and unbounded.
+	// Its actionable window is live, unparented, canonical lifecycle Open roots
+	// before LIMIT. Dependencies remain readiness context only; review and
+	// decision inventory are independently scoped to all live project roots.
 	projectTasks := materializedTasks
-	tasks := materializedProjectOrchestrationContext(projectTasks, limit)
-	if err := a.enrichPendingDecisions(ctx, projectID, issueClient, &snapshot, projectTasks); err != nil {
+	projectRoots := projectOrchestrationRootTasks(projectTasks)
+	candidateRoots := projectOrchestrationCandidateRoots(projectRoots, limit)
+	tasks := materializedProjectOrchestrationContextForCandidates(projectTasks, candidateRoots)
+	if err := a.enrichPendingDecisions(ctx, projectID, issueClient, &snapshot, projectRoots); err != nil {
 		return protocol.OrchestrationSnapshot{}, err
 	}
-	snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, projectTasks)
+	snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, projectRoots)
 	if err != nil {
 		return protocol.OrchestrationSnapshot{}, err
 	}
-	roots := make([]domain.Task, 0)
 	tasksByID := make(map[string]domain.Task, len(tasks))
 	for _, task := range tasks {
 		tasksByID[task.ID.String()] = task
-		if (task.ParentID == nil || task.ParentID.IsZero()) && task.Status != domain.StatusDone {
-			roots = append(roots, task)
-		}
 	}
 	projectTasksByID := make(map[string]domain.Task, len(projectTasks))
 	for _, task := range projectTasks {
@@ -464,24 +462,15 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	}
 	openIssueCount := canonicalOpenIssueCount(projectTasks)
 	snapshot.Health = orchestrationBoardHealth(projectTasks, projectTasksByID, openIssueCount, limit, a.openIssueLimit())
-	for _, task := range tasks {
-		// Context-only ancestors and dependencies must remain visible to
-		// readiness without consuming the actionable candidate window.
-		if task.IssueFacts().LifecycleState != domain.IssueWorkflowOpen {
-			continue
-		}
+	for _, task := range candidateRoots {
 		snapshot.Candidates = append(snapshot.Candidates, orchestrationCandidateForTask(task, request.ActorID, snapshot.GeneratedAt, snapshot.Health.Diagnostics))
 	}
 	sort.SliceStable(snapshot.Candidates, func(i, j int) bool {
 		left, right := snapshot.Candidates[i], snapshot.Candidates[j]
 		return orchestrationCandidateLess(left, right, tasksByID)
 	})
-	if len(snapshot.Candidates) > limit {
-		snapshot.Candidates = snapshot.Candidates[:limit]
-	}
 	snapshot.Health.InspectedCount = len(snapshot.Candidates)
-	sort.SliceStable(roots, func(i, j int) bool { return orchestrationTaskLess(roots[i], roots[j]) })
-	for _, rootTask := range roots {
+	for _, rootTask := range candidateRoots {
 		root := rootTask.ID.String()
 		snapshot.Roots = append(snapshot.Roots, root)
 		ready, err := a.daemon.taskGraphReadinessForActor(ctx, projectID, root, request.ActorID)
@@ -495,6 +484,7 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		}
 		mergeOrchestrationSnapshot(&snapshot, part)
 	}
+	constrainProjectOrchestrationSnapshotToRoots(&snapshot, candidateRoots)
 	if globalActive := orchestrationGlobalActiveCount(projectTasks); globalActive > snapshot.Capacity.TotalCountingCapacityCount {
 		snapshot.Capacity.TotalCountingCapacityCount = globalActive
 	}
@@ -517,14 +507,12 @@ func canonicalOpenIssueCount(tasks []domain.Task) int {
 }
 
 func materializedProjectOrchestrationContext(tasks []domain.Task, limit int) []domain.Task {
-	byID := make(map[string]domain.Task, len(tasks))
-	open := make([]domain.Task, 0, len(tasks))
-	for _, task := range tasks {
-		id := strings.TrimSpace(task.ID.String())
-		if id == "" {
-			continue
-		}
-		byID[id] = task
+	return materializedProjectOrchestrationContextForCandidates(tasks, projectOrchestrationCandidateRoots(projectOrchestrationRootTasks(tasks), limit))
+}
+
+func projectOrchestrationCandidateRoots(roots []domain.Task, limit int) []domain.Task {
+	open := make([]domain.Task, 0, len(roots))
+	for _, task := range roots {
 		if task.IssueFacts().LifecycleState == domain.IssueWorkflowOpen {
 			open = append(open, task)
 		}
@@ -533,24 +521,22 @@ func materializedProjectOrchestrationContext(tasks []domain.Task, limit int) []d
 	if limit > 0 && len(open) > limit {
 		open = open[:limit]
 	}
-	selected := make(map[string]struct{}, len(open)*2)
-	for _, candidate := range open {
+	return open
+}
+
+func materializedProjectOrchestrationContextForCandidates(tasks, candidates []domain.Task) []domain.Task {
+	byID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		id := strings.TrimSpace(task.ID.String())
+		if id == "" {
+			continue
+		}
+		byID[id] = task
+	}
+	selected := make(map[string]struct{}, len(candidates)*2)
+	for _, candidate := range candidates {
 		candidateID := candidate.ID.String()
 		selected[candidateID] = struct{}{}
-		seenParents := make(map[string]struct{})
-		for current := candidate; current.ParentID != nil && !current.ParentID.IsZero(); {
-			parentID := current.ParentID.String()
-			if _, exists := seenParents[parentID]; exists {
-				break
-			}
-			seenParents[parentID] = struct{}{}
-			parent, ok := byID[parentID]
-			if !ok {
-				break
-			}
-			selected[parentID] = struct{}{}
-			current = parent
-		}
 		for _, dependency := range candidate.Dependencies {
 			if dependencyID := strings.TrimSpace(dependency.ID.String()); dependencyID != "" {
 				if _, ok := byID[dependencyID]; ok {
@@ -566,6 +552,71 @@ func materializedProjectOrchestrationContext(tasks []domain.Task, limit int) []d
 		}
 	}
 	return context
+}
+
+func constrainProjectOrchestrationSnapshotToRoots(snapshot *protocol.OrchestrationSnapshot, roots []domain.Task) {
+	rootIDs := make(map[string]bool, len(roots))
+	for _, root := range roots {
+		rootIDs[root.ID.String()] = true
+	}
+	filterIDs := func(ids []string) []string {
+		out := ids[:0]
+		for _, id := range ids {
+			if rootIDs[strings.TrimSpace(id)] {
+				out = append(out, id)
+			}
+		}
+		return out
+	}
+	snapshot.Runnable = filterIDs(snapshot.Runnable)
+	snapshot.Active = filterIDs(snapshot.Active)
+	snapshot.Capacity.DirectRunnableCount = len(snapshot.Runnable)
+	snapshot.Capacity.DirectActiveCount = len(snapshot.Active)
+
+	activeSessions := snapshot.ActiveSessions[:0]
+	for _, session := range snapshot.ActiveSessions {
+		if rootIDs[strings.TrimSpace(session.IssueID)] {
+			activeSessions = append(activeSessions, session)
+		}
+	}
+	snapshot.ActiveSessions = activeSessions
+
+	pending := snapshot.Pending[:0]
+	for _, start := range snapshot.Pending {
+		if rootIDs[strings.TrimSpace(start.IssueID)] {
+			pending = append(pending, start)
+		}
+	}
+	snapshot.Pending = pending
+
+	nestedRoots := snapshot.NestedRoots[:0]
+	for _, nested := range snapshot.NestedRoots {
+		if rootIDs[strings.TrimSpace(nested.IssueID)] {
+			nestedRoots = append(nestedRoots, nested)
+		}
+	}
+	snapshot.NestedRoots = nestedRoots
+
+	for issueID := range snapshot.Blocked {
+		if !rootIDs[strings.TrimSpace(issueID)] {
+			delete(snapshot.Blocked, issueID)
+		}
+	}
+}
+
+func projectOrchestrationRootTasks(tasks []domain.Task) []domain.Task {
+	roots := make([]domain.Task, 0, len(tasks))
+	for _, task := range tasks {
+		if task.ParentID != nil && !task.ParentID.IsZero() {
+			continue
+		}
+		state, err := task.IssueState()
+		if err != nil || state.IsClosed() || state.IsArchived() {
+			continue
+		}
+		roots = append(roots, task)
+	}
+	return roots
 }
 
 func finalizeOrchestrationSnapshotSource(snapshot *protocol.OrchestrationSnapshot) {
@@ -800,6 +851,10 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 		}
 	}
 	runnable := make(map[string]struct{}, len(snapshot.Runnable))
+	candidates := make(map[string]struct{}, len(snapshot.Candidates))
+	for _, candidate := range snapshot.Candidates {
+		candidates[candidate.IssueID] = struct{}{}
+	}
 	active := make(map[string]struct{}, len(snapshot.Active))
 	nestedRoots := make(map[string]struct{}, len(snapshot.NestedRoots))
 	for _, id := range snapshot.Runnable {
@@ -828,12 +883,18 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 		for _, candidate := range snapshot.Candidates {
 			candidateIDs[candidate.IssueID] = true
 		}
+		explicitlyRequested := make(map[string]bool, len(request.IssueIDs))
+		for _, issueID := range request.IssueIDs {
+			explicitlyRequested[strings.TrimSpace(issueID)] = true
+		}
 		for _, route := range request.Routes {
 			if issueID := strings.TrimSpace(route.IssueID); !candidateIDs[issueID] {
 				result.Failed[issueID] = "route candidate: issue is outside the bounded project candidate snapshot"
+			} else if len(explicitlyRequested) > 0 && !explicitlyRequested[issueID] {
+				result.Failed[issueID] = "route candidate: issue is outside the explicit issue selection"
 			}
 		}
-		for _, route := range projectCandidateRoutes(snapshot, request.Routes) {
+		for _, route := range projectCandidateRoutes(snapshot, request.Routes, request.IssueIDs) {
 			issueID := strings.TrimSpace(route.IssueID)
 			routedIssues[issueID] = struct{}{}
 			routed, err := issueClient.RouteOrchestrationCandidate(ctx, projectID, request.ActorID, route)
@@ -869,6 +930,12 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	}
 	started := 0
 	for _, issueID := range requested {
+		if request.Scope.Kind == domain.OrchestrationScopeProject {
+			if _, ok := candidates[issueID]; !ok {
+				result.Skipped[issueID] = "outside-project-root-candidate-scope"
+				continue
+			}
+		}
 		if _, routed := routedIssues[issueID]; routed {
 			if _, failed := result.Failed[issueID]; failed {
 				result.Skipped[issueID] = "candidate-route-failed"
@@ -904,15 +971,25 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	return result, nil
 }
 
-func projectCandidateRoutes(snapshot protocol.OrchestrationSnapshot, explicit []domain.OrchestrationCandidateRoute) []domain.OrchestrationCandidateRoute {
+func projectCandidateRoutes(snapshot protocol.OrchestrationSnapshot, explicit []domain.OrchestrationCandidateRoute, requested []string) []domain.OrchestrationCandidateRoute {
+	allowed := make(map[string]bool, len(requested))
+	for _, issueID := range requested {
+		allowed[strings.TrimSpace(issueID)] = true
+	}
 	byIssue := make(map[string]domain.OrchestrationCandidateRoute, len(explicit))
 	for _, route := range explicit {
-		byIssue[strings.TrimSpace(route.IssueID)] = route
+		issueID := strings.TrimSpace(route.IssueID)
+		if len(allowed) == 0 || allowed[issueID] {
+			byIssue[issueID] = route
+		}
 	}
 	ordered := make([]domain.OrchestrationCandidateRoute, 0, len(snapshot.Candidates)+len(explicit))
 	seen := make(map[string]bool)
 	for _, candidate := range snapshot.Candidates {
 		issueID := strings.TrimSpace(candidate.IssueID)
+		if len(allowed) > 0 && !allowed[issueID] {
+			continue
+		}
 		if route, ok := byIssue[issueID]; ok {
 			ordered, seen[issueID] = append(ordered, route), true
 			continue

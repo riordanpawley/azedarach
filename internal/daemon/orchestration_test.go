@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -582,12 +581,99 @@ func TestProjectOrchestrationApplyAutomaticallyBacklogsPrematureCandidate(t *tes
 	}
 }
 
+func TestProjectOrchestrationSnapshotIncludesOnlyLiveUnparentedRoots(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	rootID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Root", Description: "Root scope", Acceptance: "Root done", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Child", Description: "Child scope", Acceptance: "Child done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Closed root", Type: domain.TypeTask, Status: domain.StatusDone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "steward", Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Candidates) != 1 || snapshot.Candidates[0].IssueID != rootID {
+		t.Fatalf("project candidates = %+v, want only root %s (child %s and closed root %s excluded)", snapshot.Candidates, rootID, childID, closedID)
+	}
+	for _, issueID := range append(append([]string(nil), snapshot.Runnable...), snapshot.Active...) {
+		if issueID == childID || issueID == closedID {
+			t.Fatalf("project actionable IDs contain out-of-scope issue %s: runnable=%v active=%v", issueID, snapshot.Runnable, snapshot.Active)
+		}
+	}
+	for _, review := range snapshot.ReviewQueue {
+		if review.IssueID == childID || review.IssueID == closedID {
+			t.Fatalf("project review queue contains out-of-scope issue: %+v", snapshot.ReviewQueue)
+		}
+	}
+}
+
+func TestProjectOrchestrationRejectsDirectStartOfParentedTicket(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	rootID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Child", Description: "Child scope", Acceptance: "Child done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	result, err := d.orchestrationAuthority().Apply(ctx, "proj", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentStart, IntentKey: "reject-child", ActorID: "steward", IssueIDs: []string{childID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Skipped[childID] != "outside-project-root-candidate-scope" || len(result.Started) != 0 {
+		t.Fatalf("direct child start result = %+v", result)
+	}
+}
+
+func TestProjectOrchestrationExplicitIssueRoutesOnlyRequestedRoot(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	requestedID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Requested thin root", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelatedID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Unrelated thin root", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	result, err := d.orchestrationAuthority().Apply(ctx, "proj", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentStart, IntentKey: "explicit-root", ActorID: "steward", IssueIDs: []string{requestedID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Routed) != 1 || result.Routed[0].IssueID != requestedID {
+		t.Fatalf("routed = %+v, want only requested root %s", result.Routed, requestedID)
+	}
+	unrelated, err := client.GetWithRuntime(ctx, "proj", unrelatedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unrelated.State.Workflow() != domain.IssueWorkflowOpen {
+		t.Fatalf("unrelated root workflow = %s, want open", unrelated.State.Workflow())
+	}
+}
+
 func TestProjectCandidateRoutesDoNotAutomaticallyRouteOwnedPrematureWork(t *testing.T) {
 	snapshot := protocol.OrchestrationSnapshot{Candidates: []protocol.OrchestrationCandidate{{
 		IssueID: "foreign", Classification: string(domain.OrchestrationCandidateOwnedElsewhere),
 		Executability: domain.IssueExecutabilityAssessment{Disposition: domain.IssuePremature, Reasons: []string{"missing-scope"}},
 	}}}
-	if routes := projectCandidateRoutes(snapshot, nil); len(routes) != 0 {
+	if routes := projectCandidateRoutes(snapshot, nil, nil); len(routes) != 0 {
 		t.Fatalf("owned candidate routes = %+v", routes)
 	}
 }
@@ -1140,11 +1226,7 @@ func TestMaterializedProjectOrchestrationContextLimitsCanonicalOpenBeforeBacklog
 	}
 	for i := 0; i < 12; i++ {
 		id := fmt.Sprintf("open-%02d", i)
-		task := domain.Task{ID: naming.IssueID(id), Status: domain.StatusOpen, Priority: domain.P1, UpdatedAt: old.Add(time.Duration(i) * time.Minute)}
-		if i == 0 {
-			task.ParentID = issueIDPtr("backlog-000")
-		}
-		tasks = append(tasks, task)
+		tasks = append(tasks, domain.Task{ID: naming.IssueID(id), Status: domain.StatusOpen, Priority: domain.P1, UpdatedAt: old.Add(time.Duration(i) * time.Minute)})
 	}
 
 	context := materializedProjectOrchestrationContext(tasks, 5)
@@ -1161,8 +1243,8 @@ func TestMaterializedProjectOrchestrationContextLimitsCanonicalOpenBeforeBacklog
 	if want := []string{"open-00", "open-01", "open-02", "open-03", "open-04"}; !reflect.DeepEqual(openIDs, want) {
 		t.Fatalf("open context = %v, want canonical bounded window %v", openIDs, want)
 	}
-	if want := []string{"backlog-000"}; !reflect.DeepEqual(backlogIDs, want) {
-		t.Fatalf("backlog context = %v, want only selected candidate ancestor %v", backlogIDs, want)
+	if len(backlogIDs) != 0 {
+		t.Fatalf("backlog context = %v, want backlog outside the root candidate window", backlogIDs)
 	}
 }
 
@@ -1336,8 +1418,8 @@ func TestProjectOrchestrationStartNeverTouchesExplicitBacklogIssue(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := result.Skipped[id]; got != "not-runnable" {
-		t.Fatalf("skipped[%s] = %q, want backlog absent from runnable project window", id, got)
+	if got := result.Skipped[id]; got != "outside-project-root-candidate-scope" {
+		t.Fatalf("skipped[%s] = %q, want backlog outside project root candidate scope", id, got)
 	}
 	if len(result.Started) != 0 || len(result.Launched) != 0 || len(result.Pending) != 0 {
 		t.Fatalf("backlog start result = %+v, want no start side effects", result)
@@ -1351,7 +1433,7 @@ func TestProjectOrchestrationStartNeverTouchesExplicitBacklogIssue(t *testing.T)
 	}
 }
 
-func TestProjectOrchestrationBacklogRootContainsOpenChild(t *testing.T) {
+func TestProjectOrchestrationBacklogRootDoesNotExposeOpenChildren(t *testing.T) {
 	ctx := context.Background()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
@@ -1376,24 +1458,24 @@ func TestProjectOrchestrationBacklogRootContainsOpenChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Runnable) != 0 || snapshot.Blocked[childID] != "lifecycle-backlog" {
-		t.Fatalf("snapshot = %+v, want child contained by backlog root", snapshot)
+	if len(snapshot.Roots) != 0 || len(snapshot.Runnable) != 0 {
+		t.Fatalf("snapshot = %+v, want backlog root and its children outside project actions", snapshot)
 	}
-	if got := candidateClass(snapshot.Candidates, childID); got != string(domain.OrchestrationCandidateBlocked) {
-		t.Fatalf("child class = %q, want blocked", got)
+	if got := candidateClass(snapshot.Candidates, childID); got != "" {
+		t.Fatalf("child class = %q, want parented child outside project candidates", got)
 	}
-	if len(snapshot.NestedRoots) != 1 || snapshot.NestedRoots[0].IssueID != nestedID || snapshot.NestedRoots[0].Status != "not_counting_capacity" {
-		t.Fatalf("nested roots = %+v, want contained nested root", snapshot.NestedRoots)
+	if len(snapshot.NestedRoots) != 0 {
+		t.Fatalf("nested roots = %+v, want parented nested root outside project actions", snapshot.NestedRoots)
 	}
 	result, err := authority.Apply(ctx, "proj", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentStart, IntentKey: "backlog-root-child", ActorID: "steward", IssueIDs: []string{childID, nestedID}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := result.Skipped[childID]; got != "lifecycle-backlog" {
-		t.Fatalf("skipped[%s] = %q, want lifecycle-backlog", childID, got)
+	if got := result.Skipped[childID]; got != "outside-project-root-candidate-scope" {
+		t.Fatalf("skipped[%s] = %q, want root-scope exclusion", childID, got)
 	}
-	if got := result.Skipped[nestedID]; got != "lifecycle-backlog" {
-		t.Fatalf("skipped[%s] = %q, want lifecycle-backlog", nestedID, got)
+	if got := result.Skipped[nestedID]; got != "outside-project-root-candidate-scope" {
+		t.Fatalf("skipped[%s] = %q, want root-scope exclusion", nestedID, got)
 	}
 	child, err := client.GetWithRuntime(ctx, "proj", childID)
 	if err != nil {
@@ -1411,7 +1493,7 @@ func TestProjectOrchestrationBacklogRootContainsOpenChild(t *testing.T) {
 	}
 }
 
-func TestProjectOrchestrationContextRootsCannotCrowdBacklogContainment(t *testing.T) {
+func TestProjectOrchestrationRootScopeDoesNotPromoteOpenChildFromContext(t *testing.T) {
 	ctx := context.Background()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
@@ -1435,11 +1517,14 @@ func TestProjectOrchestrationContextRootsCannotCrowdBacklogContainment(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(snapshot.Roots, contextRootID) || !slices.Contains(snapshot.Roots, backlogRootID) {
-		t.Fatalf("roots = %v, want dependency context and selected candidate ancestor despite actionable limit", snapshot.Roots)
+	if len(snapshot.Roots) != 0 || len(snapshot.Runnable) != 0 {
+		t.Fatalf("snapshot roots=%v runnable=%v, want no project actions for active/backlog roots or parented child", snapshot.Roots, snapshot.Runnable)
 	}
-	if snapshot.Blocked[childID] != "lifecycle-backlog" || candidateClass(snapshot.Candidates, childID) != string(domain.OrchestrationCandidateBlocked) {
-		t.Fatalf("snapshot = %+v, want backlog containment after all bounded-context roots are assessed", snapshot)
+	if candidateClass(snapshot.Candidates, childID) != "" {
+		t.Fatalf("snapshot = %+v, want parented child excluded from project candidates", snapshot)
+	}
+	if snapshot.Health.OpenIssueCount != 1 {
+		t.Fatalf("open issue count = %d, want canonical board inventory to retain the open child", snapshot.Health.OpenIssueCount)
 	}
 }
 

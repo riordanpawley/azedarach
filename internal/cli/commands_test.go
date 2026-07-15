@@ -64,6 +64,15 @@ func TestRenderPrimeOrchestrationSectionExplainsRuntimeContinuationGuard(t *test
 	}
 }
 
+func TestRenderPrimeProjectOrchestrationSectionStatesRootOwnershipBoundary(t *testing.T) {
+	section := renderPrimeOrchestrationSection(protocol.OrchestrationSnapshot{Scope: domain.ProjectOrchestrationScope()})
+	for _, want := range []string{"unparented roots", "Rooted orchestrators exclusively own descendants"} {
+		if !strings.Contains(section, want) {
+			t.Fatalf("project primer missing %q:\n%s", want, section)
+		}
+	}
+}
+
 func openSQLiteDB(t *testing.T, dbPath string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+dbPath)
