@@ -1388,14 +1388,18 @@ func (d *Daemon) recoverInterruptedSessionRestart(ctx context.Context, record da
 				item.Stages = []protocol.SessionRestartStage{restartStage("recover", "complete", "replacement identity and hook incarnation recovered", sessionRestartObservationTimeout)}
 				return sessionRestartRecoveryResult(item), true
 			}
-			if managedRestartIdentityLive(plan.SessionID, plan.Old, panes) {
+			oldIdentityLive := managedRestartIdentityLive(plan.SessionID, plan.Old, panes)
+			if oldIdentityLive && plan.Stage == "prepare" {
 				item.Outcome = "partial_failure"
 				item.Error = "restart interrupted before exact-pane replacement"
 				item.Stages = []protocol.SessionRestartStage{restartStage("recover_"+plan.Stage, "failed", item.Error, sessionRestartObservationTimeout)}
 				return sessionRestartRecoveryResult(item), true
 			}
-			replacementLive := restartReplacementPaneLive(plan, panes)
-			if !replacementLive {
+			// replace_ready is durable before tmux accepts respawn-pane. The old
+			// identity can therefore remain observable while an accepted command
+			// is still taking effect; keep it inside the bounded observation window.
+			replacementLive := oldIdentityLive || restartReplacementPaneLive(plan, panes)
+			if !replacementLive && plan.Stage != "replace_ready" {
 				item.Outcome = "crashed"
 				item.Error = "managed pane disappeared during daemon restart"
 				item.Skipped = true
@@ -1410,7 +1414,7 @@ func (d *Daemon) recoverInterruptedSessionRestart(ctx context.Context, record da
 		select {
 		case <-recoveryCtx.Done():
 			item.Outcome = "partial_failure"
-			item.Error = "replacement process exists without matching hook incarnation after bounded recovery observation"
+			item.Error = "replacement did not converge to the planned hook incarnation after bounded recovery observation"
 			if lastErr != nil {
 				item.Error = fmt.Sprintf("restart recovery observation failed: %v", lastErr)
 			}

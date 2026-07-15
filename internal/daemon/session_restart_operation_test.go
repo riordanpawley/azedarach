@@ -249,17 +249,49 @@ func TestRecoverInterruptedSessionRestartConvergesWithoutRespawn(t *testing.T) {
 }
 
 func TestRecoverInterruptedSessionRestartMatrix(t *testing.T) {
-	t.Run("prepare and replace before respawn", func(t *testing.T) {
-		for _, stage := range []string{"prepare", "replace_ready"} {
-			t.Run(stage, func(t *testing.T) {
-				d, _, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
-				recovery, ok := d.recoverInterruptedSessionRestart(context.Background(), restartRecoveryRecord(t, target, stage))
-				result := decodeRestartRecoveryResult(t, recovery)
-				respawns, _, _ := runner.snapshot()
-				if !ok || result.Failed != 1 || result.Sessions[0].Outcome != "partial_failure" || result.Sessions[0].Stages[0].Name != "recover_"+stage || respawns != 0 {
-					t.Fatalf("recovery=%+v result=%+v ok=%v respawns=%d", recovery, result, ok, respawns)
-				}
-			})
+	t.Run("prepare before respawn", func(t *testing.T) {
+		d, _, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+		recovery, ok := d.recoverInterruptedSessionRestart(context.Background(), restartRecoveryRecord(t, target, "prepare"))
+		result := decodeRestartRecoveryResult(t, recovery)
+		respawns, _, _ := runner.snapshot()
+		if !ok || result.Failed != 1 || result.Sessions[0].Outcome != "partial_failure" || result.Sessions[0].Stages[0].Name != "recover_prepare" || respawns != 0 {
+			t.Fatalf("recovery=%+v result=%+v ok=%v respawns=%d", recovery, result, ok, respawns)
+		}
+	})
+	t.Run("replace ready old pane waits for delayed replacement and hook", func(t *testing.T) {
+		d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+		type recoveryResult struct {
+			recovery interruptedOperationRecovery
+			ok       bool
+		}
+		resultCh := make(chan recoveryResult, 1)
+		record := restartRecoveryRecord(t, target, "replace_ready")
+		recoveryCtx, cancelRecovery := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancelRecovery()
+		go func() {
+			recovery, ok := d.recoverInterruptedSessionRestart(recoveryCtx, record)
+			resultCh <- recoveryResult{recovery: recovery, ok: ok}
+		}()
+		select {
+		case result := <-resultCh:
+			t.Fatalf("recovery terminalized while replace_ready old pane was still ambiguous: %+v", result)
+		case <-time.After(75 * time.Millisecond):
+		}
+		runner.mu.Lock()
+		runner.pid = 101
+		runner.mu.Unlock()
+		if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 101, AgentIncarnation: "planned", ObservedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case got := <-resultCh:
+			result := decodeRestartRecoveryResult(t, got.recovery)
+			respawns, _, _ := runner.snapshot()
+			if !got.ok || result.Restarted != 1 || result.Sessions[0].Outcome != restartSuccessOutcome(target.Activity) || respawns != 0 {
+				t.Fatalf("recovery=%+v result=%+v ok=%v respawns=%d", got.recovery, result, got.ok, respawns)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("recovery did not converge after delayed replacement and hook")
 		}
 	})
 	t.Run("live replacement waits for delayed hook", func(t *testing.T) {
