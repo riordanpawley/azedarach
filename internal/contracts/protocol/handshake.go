@@ -2,7 +2,10 @@ package protocol
 
 // Supported protocol window for this daemon/client build.
 const (
-	MinSupportedVersion Version = 1
+	// Payload schemas are version-pinned and are not translated across protocol
+	// revisions. Advertising older revisions as compatible lets a stale client
+	// attach successfully and then fail while decoding a current payload.
+	MinSupportedVersion Version = CurrentVersion
 	MaxSupportedVersion Version = CurrentVersion
 )
 
