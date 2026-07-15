@@ -270,12 +270,12 @@ if [[ "$caller_az_target" == "$active_az_target" &&
   echo "Caller az/azd resolve to installed generation: $active_generation"
 elif [[ "$caller_is_managed" -eq 1 ]]; then
   echo "Caller uses retained managed generation $caller_generation; active install is $active_generation." >&2
-  echo "Reload the repository environment (for example: direnv reload) before running further bare az commands." >&2
+  echo "Re-enter the shell through the stable installed /opt/homebrew/bin/az control link before running further bare az commands." >&2
 else
   echo "Installed coherent az/azd generation, but the caller shell remains shadowed." >&2
   echo "caller az=${caller_az:-<not found>} -> ${caller_az_target:-<unresolved>}" >&2
   echo "caller azd=${caller_azd:-<not found>} -> ${caller_azd_target:-<unresolved>}" >&2
-  echo "Reload the repository environment (for example: direnv reload), verify bare az and azd, then rerun this command." >&2
+  echo "Ensure PATH selects the stable installed /opt/homebrew/bin/az control link, then rerun this command." >&2
   exit 1
 fi
 if [[ "$no_run" -eq 1 ]]; then
