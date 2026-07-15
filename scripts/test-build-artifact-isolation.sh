@@ -277,14 +277,12 @@ done
 
 # Aggregate admission observes raw, unleased Go-shaped work before payload
 # startup and waits for a stable quiescent window.
-cat >"$fixture/raw-overlap.go" <<'EOF'
-package main
-
-import "time"
-
-func main() { time.Sleep(time.Second) }
+cat >"$fixture/fake-bin/raw-overlap.test" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+sleep 5
 EOF
-go build -o "$fixture/fake-bin/raw-overlap.test" "$fixture/raw-overlap.go"
+chmod +x "$fixture/fake-bin/raw-overlap.test"
 "$fixture/fake-bin/raw-overlap.test" &
 raw_go_pid=$!
 cat >"$fixture/fake-bin/validation-ps" <<'EOF'
@@ -337,6 +335,7 @@ done
 test -e "$fixture/whole-gate.started"
 "$fixture/fake-bin/raw-overlap.test" &
 raw_during_gate_pid=$!
+kill -0 "$raw_during_gate_pid"
 printf '%s\n' "$raw_during_gate_pid" >"$fixture/raw-during-gate.pid"
 if wait "$whole_gate_pid"; then
   echo "aggregate validation unexpectedly accepted raw Go overlap" >&2
@@ -345,10 +344,13 @@ fi
 wait "$raw_during_gate_pid"
 grep -q "aggregate validation overlapped" "$fixture/whole-gate.stderr"
 
-(
-  cd "$repo_root"
-  go build -o "$fixture/real-bin/atomic-replace" ./cmd/atomic-replace
-)
+cat >"$fixture/real-bin/atomic-replace" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$#" -eq 2 ]]
+exec perl -e 'rename $ARGV[0], $ARGV[1] or die "rename $ARGV[0] to $ARGV[1]: $!\n"' "$1" "$2"
+EOF
+chmod +x "$fixture/real-bin/atomic-replace"
 
 cat >"$fixture/fake-bin/atomic-replace" <<'EOF'
 #!/usr/bin/env bash
@@ -526,7 +528,7 @@ printf 'partial old azd\n' >"$fixture/partial-bin/.azedarach-generations/generat
 chmod +x "$fixture/partial-bin/.azedarach-generations/generation.old/az" \
   "$fixture/partial-bin/.azedarach-generations/generation.old/azd"
 ln -s .azedarach-generations/generation.old "$fixture/partial-bin/.azedarach-current"
-cp "$fixture/partial-bin/.azedarach-generations/generation.old/az" "$fixture/partial-bin/az"
+ln -s .azedarach-current/az "$fixture/partial-bin/az"
 cp "$fixture/partial-bin/.azedarach-generations/generation.old/azd" "$fixture/partial-bin/azd"
 cp -L "$fixture/partial-bin/az" "$fixture/partial-az.before"
 cp "$fixture/partial-bin/azd" "$fixture/partial-azd.before"
