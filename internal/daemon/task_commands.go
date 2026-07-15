@@ -4631,7 +4631,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 			PendingDecisions: pendingDecisions,
 		}, nil
 	}
-	mailboxRepoDir := strings.TrimSpace(d.resolveRepoDirForProject(projectID))
+	mailboxRepoDir := strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID))
 	if mailboxRepoDir == "" {
 		return taskIntegrationReadinessResult{}, fmt.Errorf("resolve authoritative project mailbox root for %s", projectID)
 	}

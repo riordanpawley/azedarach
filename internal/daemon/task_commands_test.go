@@ -10762,10 +10762,18 @@ func TestTaskIntegrationReadinessBindsAuthoritativeAggregateToExactCandidateRevi
 }
 
 func TestTaskIntegrationReadinessReadsMailboxFromProjectRootForIssueWorktreeCandidate(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	ctx := context.Background()
-	projectID := "proj-worker-evidence-project-mailbox"
+	bootstrapRoot := t.TempDir()
 	projectRoot := t.TempDir()
 	candidateWorktree := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{Projects: []appconfig.Project{{ID: projectID, Name: "review-evidence-project", Path: projectRoot}}}); err != nil {
+		t.Fatal(err)
+	}
 	issuesClient := newMigratedIssueClient(t, projectRoot, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
@@ -10782,13 +10790,33 @@ func TestTaskIntegrationReadinessReadsMailboxFromProjectRootForIssueWorktreeCand
 	}); err != nil {
 		t.Fatal(err)
 	}
-	d := &Daemon{cfg: Config{RepoDir: projectRoot, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, revision: map[string]uint64{projectID: 1}}
+	d := &Daemon{cfg: Config{RepoDir: bootstrapRoot, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, revision: map[string]uint64{projectID: 1}}
 	result, err := d.taskIntegrationReadiness(ctx, projectID, childID, candidateWorktree)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !result.Ready || result.EvidenceEventSeq != 1 || result.EvidencePacket == nil {
 		t.Fatalf("result = %+v, want project-root mailbox evidence independent of candidate path %s", result, candidateWorktree)
+	}
+}
+
+func TestTaskIntegrationReadinessRejectsUnknownProjectMailboxRoute(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx := context.Background()
+	projectID := "unknown-review-evidence-project"
+	bootstrapRoot := t.TempDir()
+	projectRoot := t.TempDir()
+	candidateWorktree := t.TempDir()
+	issuesClient := newMigratedIssueClient(t, projectRoot, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: bootstrapRoot, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, revision: map[string]uint64{projectID: 1}}
+	result, err := d.taskIntegrationReadiness(ctx, projectID, childID, candidateWorktree)
+	if err == nil || !strings.Contains(err.Error(), "resolve authoritative project mailbox root") {
+		t.Fatalf("result=%+v err=%v, want unknown project mailbox route rejected", result, err)
 	}
 }
 
