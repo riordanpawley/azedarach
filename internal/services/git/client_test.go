@@ -3,6 +3,7 @@ package git
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1332,6 +1333,86 @@ func TestRealProcessProfileRecoverIntegrationJournalRetriesDeleteBeforeScratchCl
 	}
 }
 
+func TestRealProcessProfileRecoverIntegrationJournalReprovesOwnershipImmediatelyBeforeCleanup(t *testing.T) {
+	repo := initDivergedRepo(t)
+	setupClient := NewClient(NewExecRunner(repo), slog.Default())
+	ctx := context.Background()
+	targetHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+	tree := runClientTestGitOutput(t, repo, "merge-tree", "--write-tree", targetHead, "feature")
+	desiredHead := runClientTestGitOutput(t, repo, "commit-tree", tree, "-p", targetHead, "-p", "feature", "-m", "scratch merge")
+	scratch, scratchOwner := addOwnedIntegrationScratch(t, setupClient, repo, desiredHead)
+	journal := integrationJournal{
+		Version: integrationJournalVersion, TargetWorktree: repo, TargetHead: targetHead, DesiredHead: desiredHead,
+		ScratchWorktree: scratch,
+		ScratchOwner:    scratchOwner,
+		Validation:      CandidateValidationAttempt{CandidateHead: desiredHead, Status: CandidateValidationPassed},
+		StartedAt:       time.Now().UTC(),
+	}
+	if err := setupClient.writeIntegrationJournal(ctx, repo, journal); err != nil {
+		t.Fatalf("writeIntegrationJournal() error = %v", err)
+	}
+	runClientTestGit(t, repo, "reset", "--hard", desiredHead)
+	commonDir, err := setupClient.gitCommonDir(ctx, repo)
+	if err != nil {
+		t.Fatalf("gitCommonDir() error = %v", err)
+	}
+	ownerPath, err := setupClient.integrationScratchOwnershipPath(ctx, scratch, commonDir)
+	if err != nil {
+		t.Fatalf("integrationScratchOwnershipPath() error = %v", err)
+	}
+
+	baseRunner := NewExecRunner(repo)
+	markerReplaced := false
+	runner := &rawMockRunner{runFunc: func(ctx context.Context, args ...string) (string, error) {
+		output, runErr := baseRunner.Run(ctx, args...)
+		if runErr == nil && !markerReplaced && clientTestArgsForWorktree(args, repo, "reset", "--hard", desiredHead) {
+			markerReplaced = true
+			replacement := scratchOwner
+			replacement.AttemptID = strings.Repeat("f", len(scratchOwner.AttemptID))
+			payload, marshalErr := json.MarshalIndent(replacement, "", "  ")
+			if marshalErr != nil {
+				return "", marshalErr
+			}
+			if writeErr := writeFileAtomic(ownerPath, append(payload, '\n'), 0o600); writeErr != nil {
+				return "", writeErr
+			}
+		}
+		return output, runErr
+	}}
+	recoveryClient := NewClient(runner, slog.Default())
+	err = recoveryClient.RecoverIntegrationJournal(ctx, repo)
+	if err == nil || !strings.Contains(err.Error(), "re-prove exact integration scratch ownership") {
+		t.Fatalf("RecoverIntegrationJournal() error = %v, want cleanup-time ownership refusal", err)
+	}
+	journalPath, pathErr := setupClient.integrationJournalPath(ctx, repo)
+	if pathErr != nil {
+		t.Fatalf("integrationJournalPath() error = %v", pathErr)
+	}
+	if _, statErr := os.Stat(journalPath); statErr != nil {
+		t.Fatalf("journal after cleanup-time replacement stat error = %v, want retained", statErr)
+	}
+	if _, statErr := os.Stat(scratch); statErr != nil {
+		t.Fatalf("scratch after cleanup-time replacement stat error = %v, want retained", statErr)
+	}
+
+	originalPayload, err := json.MarshalIndent(scratchOwner, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal original owner: %v", err)
+	}
+	if err := writeFileAtomic(ownerPath, append(originalPayload, '\n'), 0o600); err != nil {
+		t.Fatalf("restore original owner: %v", err)
+	}
+	if err := setupClient.RecoverIntegrationJournal(ctx, repo); err != nil {
+		t.Fatalf("RecoverIntegrationJournal() retry error = %v", err)
+	}
+	if _, statErr := os.Stat(journalPath); !os.IsNotExist(statErr) {
+		t.Fatalf("journal after ownership retry stat error = %v, want removed", statErr)
+	}
+	if _, statErr := os.Stat(scratch); !os.IsNotExist(statErr) {
+		t.Fatalf("scratch after ownership retry stat error = %v, want removed", statErr)
+	}
+}
+
 func TestRealProcessProfileMergeCleanlyTransactionalWithoutGateCreatesNoCanonicalReceipt(t *testing.T) {
 	repo := initDivergedRepo(t)
 	client := NewClient(NewExecRunner(repo), slog.Default())
@@ -1790,6 +1871,128 @@ func TestMergeCleanlyTransactionalRetainsJournalAndScratchWhenFinalApplyIsDirty(
 	}
 }
 
+func TestRealProcessProfileMergeCleanlyTransactionalSerializesTwoClientsAndPreservesUnrelatedScratch(t *testing.T) {
+	repo := initDivergedRepo(t)
+	baseHead := runClientTestGitOutput(t, repo, "rev-parse", "main~1")
+	runClientTestGit(t, repo, "checkout", "-q", "-b", "feature-b", baseHead)
+	if err := os.WriteFile(filepath.Join(repo, "feature-b.txt"), []byte("feature-b\n"), 0o644); err != nil {
+		t.Fatalf("write feature-b file: %v", err)
+	}
+	runClientTestGit(t, repo, "add", "feature-b.txt")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "feature b")
+	runClientTestGit(t, repo, "checkout", "-q", "main")
+
+	gateSyncDir := t.TempDir()
+	scriptsDir := filepath.Join(repo, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	gate := `#!/bin/sh
+set -eu
+marker="$AZEDARACH_TEST_GATE_SYNC/$AZEDARACH_CANDIDATE_HEAD"
+: >"$marker"
+while [ "$(find "$AZEDARACH_TEST_GATE_SYNC" -type f | wc -l | tr -d ' ')" -lt 2 ]; do
+  sleep 0.01
+done
+`
+	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"), []byte(gate), 0o755); err != nil {
+		t.Fatalf("write integration gate: %v", err)
+	}
+	runClientTestGit(t, repo, "add", "scripts/git-merge-rebase-gate.sh")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "add synchronized integration gate")
+	targetHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+	t.Setenv("AZEDARACH_TEST_GATE_SYNC", gateSyncDir)
+
+	ownerClient := NewClient(NewExecRunner(repo), slog.Default())
+	victimScratch, _ := addOwnedIntegrationScratch(t, ownerClient, repo, targetHead)
+	victimSentinel := filepath.Join(victimScratch, "victim-untracked.txt")
+	if err := os.WriteFile(victimSentinel, []byte("unrelated scratch bytes\n"), 0o644); err != nil {
+		t.Fatalf("write victim sentinel: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	type mergeOutcome struct {
+		branch string
+		result *MergeResult
+		err    error
+	}
+	outcomes := make(chan mergeOutcome, 2)
+	for _, branch := range []string{"feature", "feature-b"} {
+		branch := branch
+		go func() {
+			client := NewClient(NewExecRunner(repo), slog.Default())
+			result, err := client.MergeCleanlyTransactional(ctx, repo, branch)
+			outcomes <- mergeOutcome{branch: branch, result: result, err: err}
+		}()
+	}
+
+	var got []mergeOutcome
+	for len(got) < 2 {
+		select {
+		case outcome := <-outcomes:
+			got = append(got, outcome)
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for two-client integration outcomes: %v", ctx.Err())
+		}
+	}
+	var winner, loser *mergeOutcome
+	for i := range got {
+		outcome := &got[i]
+		if outcome.err != nil {
+			t.Fatalf("%s integration error = %v", outcome.branch, outcome.err)
+		}
+		if outcome.result != nil && outcome.result.Success {
+			if winner != nil {
+				t.Fatalf("both integrations reported success: %+v", got)
+			}
+			winner = outcome
+		} else {
+			loser = outcome
+		}
+	}
+	if winner == nil || loser == nil {
+		t.Fatalf("integration outcomes = %+v, want exactly one winner and one stale loser", got)
+	}
+	if loser.result == nil || !IsTransactionalMergeStaleTarget(loser.result) {
+		t.Fatalf("losing integration result = %+v, want stale-target rejection", loser.result)
+	}
+	if len(winner.result.ValidationAttempts) != 1 || !winner.result.ValidationAttempts[0].Canonical {
+		t.Fatalf("winning validation attempts = %+v, want one canonical candidate", winner.result.ValidationAttempts)
+	}
+	winnerHead := winner.result.ValidationAttempts[0].CandidateHead
+	if head := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); head != winnerHead {
+		t.Fatalf("target HEAD = %s, want sole canonical candidate %s", head, winnerHead)
+	}
+	if len(loser.result.ValidationAttempts) != 1 || loser.result.ValidationAttempts[0].Canonical {
+		t.Fatalf("losing validation attempts = %+v, want noncanonical candidate", loser.result.ValidationAttempts)
+	}
+	attempt, found, err := ownerClient.CanonicalIntegrationValidation(ctx, repo, winnerHead)
+	if err != nil || !found || !attempt.Canonical || attempt.CandidateHead != winnerHead {
+		t.Fatalf("canonical receipt = (%+v, %t, %v), want exact winner %s", attempt, found, err, winnerHead)
+	}
+	if got, err := os.ReadFile(victimSentinel); err != nil || string(got) != "unrelated scratch bytes\n" {
+		t.Fatalf("unrelated scratch sentinel = %q, %v; want preserved bytes", got, err)
+	}
+	worktrees := runClientTestGitOutput(t, repo, "worktree", "list", "--porcelain")
+	victimRegistered := false
+	for _, entry := range parseWorktreeEntries(worktrees) {
+		if normalizeWorktreeLockKey(entry.Path) == normalizeWorktreeLockKey(victimScratch) {
+			victimRegistered = true
+			break
+		}
+	}
+	if !victimRegistered {
+		t.Fatalf("worktree list removed unrelated scratch %s:\n%s", victimScratch, worktrees)
+	}
+	if strings.Count(worktrees, "azedarach-integration-") != 1 {
+		t.Fatalf("worktree list contains unexpected transactional scratch after completion:\n%s", worktrees)
+	}
+	if _, _, found, err := ownerClient.readIntegrationJournal(ctx, repo); err != nil || found {
+		t.Fatalf("integration journal after two-client completion = (found=%t, err=%v), want removed", found, err)
+	}
+}
+
 func TestMergeCleanlyTransactionalAllowsConcurrentScratchValidationAndRejectsStaleFinalApply(t *testing.T) {
 	repo := t.TempDir()
 	gitDir := filepath.Join(repo, ".git")
@@ -1812,6 +2015,14 @@ func TestMergeCleanlyTransactionalAllowsConcurrentScratchValidationAndRejectsSta
 		switch {
 		case clientTestArgsForWorktree(args, repo, "rev-parse", "--git-common-dir"):
 			return gitDir, nil
+		case clientTestArgsForWorktree(args, repo, "worktree", "list", "--porcelain"):
+			mu.Lock()
+			defer mu.Unlock()
+			var entries strings.Builder
+			for scratch, branch := range scratchBranches {
+				fmt.Fprintf(&entries, "worktree %s\nHEAD desired-%s\ndetached\n\n", scratch, branch)
+			}
+			return entries.String(), nil
 		case clientTestArgsForWorktree(args, repo, "status", "--porcelain"):
 			return "", nil
 		case clientTestArgsForWorktree(args, repo, "rev-parse", "--verify", "HEAD"):

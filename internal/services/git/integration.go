@@ -48,7 +48,7 @@ type integrationValidationReceipt struct {
 }
 
 // MergeCleanlyTransactional performs the merge in a disposable worktree and only
-// locks the target worktree for the base snapshot and final apply phases.
+// locks the target worktree for the base snapshot and final publication phases.
 func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch string) (*MergeResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -75,8 +75,8 @@ func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch
 	}
 	var targetHead string
 	var earlyResult *MergeResult
-	if err := c.WithWorktreeLock(ctx, worktree, func(ctx context.Context) error {
-		if err := c.RecoverIntegrationJournal(ctx, worktree); err != nil {
+	if err := c.withIntegrationTransactionLock(ctx, worktree, func(ctx context.Context) error {
+		if err := c.recoverIntegrationJournalLocked(ctx, worktree); err != nil {
 			return fmt.Errorf("recover interrupted integration: %w", err)
 		}
 
@@ -112,7 +112,11 @@ func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch
 		return nil, fmt.Errorf("prepare scratch integration directory: %w", err)
 	}
 	scratchAdded := false
+	scratchCleanupHandled := false
 	defer func() {
+		if scratchCleanupHandled {
+			return
+		}
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mergeCleanupTimeout)
 		defer cancel()
 		if _, retained, err := c.existingIntegrationJournalPath(worktree); err != nil || retained {
@@ -180,7 +184,9 @@ func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch
 		return result, nil
 	}
 
-	return c.applyValidatedScratchMerge(ctx, worktree, scratchPath, targetHead, desiredHead, scratchOwner, result)
+	applied, cleanupHandled, err := c.applyValidatedScratchMerge(ctx, worktree, scratchPath, targetHead, desiredHead, scratchOwner, result)
+	scratchCleanupHandled = cleanupHandled
+	return applied, err
 }
 
 func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scratchPath, candidateHead string) (CandidateValidationAttempt, bool, error) {
@@ -314,10 +320,11 @@ func setCandidateValidationDisposition(ctx context.Context, result *MergeResult,
 	}
 }
 
-func (c *Client) applyValidatedScratchMerge(ctx context.Context, worktree, scratchPath, targetHead, desiredHead string, scratchOwner integrationScratchOwnership, result *MergeResult) (*MergeResult, error) {
+func (c *Client) applyValidatedScratchMerge(ctx context.Context, worktree, scratchPath, targetHead, desiredHead string, scratchOwner integrationScratchOwnership, result *MergeResult) (*MergeResult, bool, error) {
 	var out *MergeResult
-	if err := c.WithWorktreeLock(ctx, worktree, func(ctx context.Context) error {
-		if err := c.RecoverIntegrationJournal(ctx, worktree); err != nil {
+	cleanupHandled := false
+	if err := c.withIntegrationTransactionLock(ctx, worktree, func(ctx context.Context) error {
+		if err := c.recoverIntegrationJournalLocked(ctx, worktree); err != nil {
 			setCandidateValidationDisposition(ctx, result, desiredHead, CandidateValidationFailed, false, "candidate apply recovery failed; evidence is noncanonical")
 			return fmt.Errorf("recover interrupted integration before final apply: %w", err)
 		}
@@ -374,7 +381,7 @@ func (c *Client) applyValidatedScratchMerge(ctx context.Context, worktree, scrat
 			setCandidateValidationDisposition(ctx, result, desiredHead, CandidateValidationFailed, false, "candidate apply failed; evidence is noncanonical")
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mergeCleanupTimeout)
 			defer cancel()
-			if recoverErr := c.RecoverIntegrationJournal(cleanupCtx, worktree); recoverErr != nil {
+			if recoverErr := c.recoverIntegrationJournalLocked(cleanupCtx, worktree); recoverErr != nil {
 				return fmt.Errorf("apply transactional merge failed (%v); recovery failed: %w", err, recoverErr)
 			}
 			out = &MergeResult{
@@ -403,23 +410,31 @@ func (c *Client) applyValidatedScratchMerge(ctx context.Context, worktree, scrat
 				return fmt.Errorf("persist canonical candidate validation receipt: %w", err)
 			}
 		}
+		provenScratch, err := c.proveIntegrationScratchWorktree(ctx, worktree, scratchPath, desiredHead, scratchOwner)
+		if err != nil {
+			return fmt.Errorf("re-prove exact integration scratch ownership before completed cleanup; journal and scratch retained: %w", err)
+		}
 		if err := c.removeIntegrationJournal(ctx, worktree); err != nil {
 			return fmt.Errorf("remove completed transactional merge journal; scratch retained: %w", err)
+		}
+		cleanupHandled = true
+		if err := c.removeWorktree(ctx, worktree, provenScratch); err != nil && c.logger != nil {
+			c.logger.Warn("failed to remove proven scratch after transactional integration completed", "path", provenScratch, "error", err)
 		}
 		setCandidateValidationDisposition(ctx, result, desiredHead, CandidateValidationPassed, true, "candidate validation passed and the exact candidate was applied")
 		out = result
 		return nil
 	}); err != nil {
-		return nil, err
+		return nil, cleanupHandled, err
 	}
-	return out, nil
+	return out, cleanupHandled, nil
 }
 
 func (c *Client) recoverDirtyFinalApply(ctx context.Context, worktree string, postStatus *GitStatus) (*MergeResult, error) {
 	dirtySummary := gitStatusSummary(postStatus)
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mergeCleanupTimeout)
 	defer cancel()
-	if err := c.RecoverIntegrationJournal(cleanupCtx, worktree); err != nil {
+	if err := c.recoverIntegrationJournalLocked(cleanupCtx, worktree); err != nil {
 		return nil, fmt.Errorf("transactional merge final apply left target dirty (%s); recovery failed: %w", dirtySummary, err)
 	}
 	recoveredStatus, err := c.Status(cleanupCtx, worktree)
@@ -441,6 +456,19 @@ func (c *Client) recoverDirtyFinalApply(ctx context.Context, worktree string, po
 // RecoverIntegrationJournal completes or rolls back the brief final-apply phase
 // if the daemon was interrupted after a scratch merge succeeded.
 func (c *Client) RecoverIntegrationJournal(ctx context.Context, worktree string) error {
+	journal, _, found, err := c.readIntegrationJournal(ctx, worktree)
+	if err != nil || !found {
+		return err
+	}
+	if journal.Version != integrationJournalVersionV1 && journal.Version != integrationJournalVersionV2 {
+		return fmt.Errorf("unsupported integration journal version %d", journal.Version)
+	}
+	return c.withIntegrationTransactionLock(ctx, worktree, func(ctx context.Context) error {
+		return c.recoverIntegrationJournalLocked(ctx, worktree)
+	})
+}
+
+func (c *Client) recoverIntegrationJournalLocked(ctx context.Context, worktree string) error {
 	journal, journalPath, found, err := c.readIntegrationJournal(ctx, worktree)
 	if err != nil || !found {
 		return err
@@ -502,6 +530,13 @@ func (c *Client) RecoverIntegrationJournal(ctx context.Context, worktree string)
 			return fmt.Errorf("persist recovered canonical candidate validation receipt: %w", err)
 		}
 	}
+	cleanupScratch, err := c.proveIntegrationScratchWorktree(ctx, worktree, journal.ScratchWorktree, desiredHead, journal.ScratchOwner)
+	if err != nil || cleanupScratch != provenScratch {
+		if err == nil {
+			err = fmt.Errorf("scratch identity changed from %s to %s", provenScratch, cleanupScratch)
+		}
+		return fmt.Errorf("re-prove exact integration scratch ownership before recovery cleanup; journal and scratch retained: %w", err)
+	}
 	if err := c.removeIntegrationJournalAtPath(journalPath); err != nil {
 		return fmt.Errorf("remove recovered integration journal; scratch retained: %w", err)
 	}
@@ -524,7 +559,8 @@ func (c *Client) RecoverIntegrationJournal(ctx context.Context, worktree string)
 func (c *Client) proveIntegrationScratchWorktree(ctx context.Context, worktree, scratchPath, desiredHead string, owner integrationScratchOwnership) (string, error) {
 	scratchPath = normalizeWorktreeLockKey(scratchPath)
 	tempRoot := normalizeWorktreeLockKey(os.TempDir())
-	if filepath.Dir(scratchPath) != tempRoot || !strings.HasPrefix(filepath.Base(scratchPath), "azedarach-integration-") {
+	scratchParent := normalizeWorktreeLockKey(filepath.Dir(scratchPath))
+	if scratchParent != tempRoot || !strings.HasPrefix(filepath.Base(scratchPath), "azedarach-integration-") {
 		return "", fmt.Errorf("scratch path %s is outside the managed integration temp namespace", scratchPath)
 	}
 	if scratchPath == normalizeWorktreeLockKey(worktree) {
@@ -887,6 +923,10 @@ func integrationJournalName(worktree string) string {
 	key := normalizeWorktreeLockKey(worktree)
 	sum := sha256.Sum256([]byte(key))
 	return "integration-" + hex.EncodeToString(sum[:])[:16] + ".json"
+}
+
+func integrationLockName(worktree string) string {
+	return strings.TrimSuffix(integrationJournalName(worktree), ".json") + ".lock"
 }
 
 func integrationJournalCandidateCommonDirs(worktree string) []string {
