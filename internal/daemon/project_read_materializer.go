@@ -547,18 +547,17 @@ func (d *Daemon) ensureProjectReadMaterializer(ctx context.Context, projectID st
 		return nil, fmt.Errorf("project read materialization unavailable for %s", projectID)
 	}
 	materializer = newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(client), func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
-		hydrated, err := client.HydrateRuntime(hydrateCtx, projectID, tasks)
-		if err != nil {
-			return nil, err
-		}
-		return d.enrichTasksWithSessionState(hydrateCtx, projectID, hydrated), nil
+		return d.hydrateProjectReadTasks(hydrateCtx, projectID, client, tasks), nil
 	})
 	d.configureProjectReadMaterializer(materializer, projectID, client)
 	if err := materializer.bootstrap(ctx); err != nil {
 		return nil, fmt.Errorf("bootstrap project %s: %w", projectID, err)
 	}
 	if err := d.refreshProjectReadWorktrees(ctx, projectID, materializer); err != nil {
-		return nil, fmt.Errorf("hydrate project %s worktree materialization: %w", projectID, err)
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.WarnContext(ctx, "project read materializer continuing without runtime worktree enrichment", "project_id", projectID, "error", err)
+		}
+		materializer.replaceWorktrees(map[string]git.Worktree{})
 	}
 	var materializerRunCtx context.Context
 	if runCtx != nil {
@@ -664,11 +663,7 @@ func (d *Daemon) projectReadSnapshot(projectID string) ([]domain.Task, protocol.
 			return nil, protocol.MaterializedSnapshotMetadata{}, fmt.Errorf("project read materialization unavailable for %s", projectID)
 		}
 		candidate := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(client), func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
-			hydrated, err := client.HydrateRuntime(hydrateCtx, projectID, tasks)
-			if err != nil {
-				return nil, err
-			}
-			return d.enrichTasksWithSessionState(hydrateCtx, projectID, hydrated), nil
+			return d.hydrateProjectReadTasks(hydrateCtx, projectID, client, tasks), nil
 		})
 		d.configureProjectReadMaterializer(candidate, projectID, client)
 		if err := candidate.bootstrap(context.Background()); err != nil {
@@ -685,6 +680,17 @@ func (d *Daemon) projectReadSnapshot(projectID string) ([]domain.Task, protocol.
 		return nil, metadata, fmt.Errorf("project read materialization unhealthy: %s", metadata.Health)
 	}
 	return tasks, metadata, nil
+}
+
+func (d *Daemon) hydrateProjectReadTasks(ctx context.Context, projectID string, client *issues.Client, tasks []domain.Task) []domain.Task {
+	hydrated, err := client.HydrateRuntime(ctx, projectID, tasks)
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.WarnContext(ctx, "project read materializer continuing without runtime session enrichment", "project_id", projectID, "error", err)
+		}
+		return tasks
+	}
+	return d.enrichTasksWithSessionState(ctx, projectID, hydrated)
 }
 
 func (d *Daemon) configureProjectReadMaterializer(materializer *projectReadMaterializer, projectID string, client *issues.Client) {
