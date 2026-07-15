@@ -1009,7 +1009,11 @@ func TestReviewAcceptClosesMultipleInternalReviewsBeforeDependentCompletion(t *t
 		ids = append(ids, id)
 	}
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
-	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-review-batch", ActorID: "orchestrator", IssueIDs: ids, RepoDir: repoDir}
+	rootedScope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := protocol.OrchestrationIntentRequest{Scope: rootedScope, Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-review-batch", ActorID: "orchestrator", IssueIDs: ids, RepoDir: repoDir}
 	authority := daemonOrchestrationAuthority{daemon: d}
 	if err := authority.recordReviewOutcome(ctx, "project", ids[0], request, "accepted", ""); err != nil {
 		t.Fatal(err)
