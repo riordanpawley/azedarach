@@ -375,6 +375,11 @@ func seedModelIssueDependency(t *testing.T, repoDir, issueID, dependsOnID, depen
 func startModelTestDaemon(t *testing.T, repoDir, socketPath, lockPath string) func() {
 	t.Helper()
 
+	// Daemon startup discovers every project registered under the user's home
+	// directory. Keep this integration fixture in a private user namespace so a
+	// package test can never open or migrate registered live project databases.
+	t.Setenv("HOME", t.TempDir())
+
 	d := daemon.New(daemon.Config{
 		RepoDir:       repoDir,
 		SocketPath:    socketPath,
