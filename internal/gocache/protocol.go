@@ -201,14 +201,50 @@ func ManagedLayoutExists(cfg Config) (bool, error) {
 	return true, nil
 }
 
-// WithExclusiveLock serializes managed validation and supported cache maintenance.
+// WithExclusiveLock serializes supported cache maintenance and validators that
+// explicitly opt into auto-maintenance.
 func WithExclusiveLock(ctx context.Context, cfg Config, fn func() error) error {
+	return withCacheLock(ctx, cfg, unix.LOCK_EX, fn)
+}
+
+// WithSharedLock lets independent validators reuse their owned cache
+// namespaces concurrently while remaining mutually exclusive with maintenance.
+func WithSharedLock(ctx context.Context, cfg Config, fn func() error) error {
+	return withCacheLock(ctx, cfg, unix.LOCK_SH, fn)
+}
+
+// WithValidationLock prepares a managed cache under the lock required by its
+// policy. Ordinary validators share the lock; explicit auto-maintenance takes
+// it exclusively so `go clean -cache` cannot race another validator.
+func WithValidationLock(ctx context.Context, cfg Config, autoMaintain bool, fn func(Telemetry, error) error) error {
+	mode := unix.LOCK_SH
+	if autoMaintain {
+		mode = unix.LOCK_EX
+	}
+	return withCacheLock(ctx, cfg, mode, func() error {
+		telemetry, err := Prepare(ctx, cfg, autoMaintain)
+		return fn(telemetry, err)
+	})
+}
+
+func withCacheLock(ctx context.Context, cfg Config, mode int, fn func() error) error {
 	lockDir, err := openManagedDir(cfg, []string{"caches"}, true)
 	if err != nil {
 		return fmt.Errorf("open Go cache lock directory: %w", err)
 	}
 	defer lockDir.Close()
-	fd, err := unix.Openat(int(lockDir.Fd()), ".maintenance.lock", unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	var fd int
+	for attempt := 0; ; attempt++ {
+		fd, err = unix.Openat(int(lockDir.Fd()), ".maintenance.lock", unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+		if err == nil || !errors.Is(err, unix.ENOENT) || attempt == 4 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("open Go cache maintenance lock: %w", err)
 	}
@@ -219,7 +255,7 @@ func WithExclusiveLock(ctx context.Context, cfg Config, fn func() error) error {
 	}
 	defer file.Close()
 	for {
-		if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err == nil {
+		if err := unix.Flock(int(file.Fd()), mode|unix.LOCK_NB); err == nil {
 			break
 		} else if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
 			return fmt.Errorf("lock Go cache maintenance: %w", err)

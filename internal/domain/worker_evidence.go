@@ -12,14 +12,15 @@ import (
 const WorkerEvidenceSchemaV1 = "worker_evidence.v1"
 
 type WorkerEvidencePacket struct {
-	Schema        string                       `json:"schema"`
-	Summary       string                       `json:"summary"`
-	CommandsRun   []string                     `json:"commands_run"`
-	KeyAssertions []string                     `json:"key_assertions"`
-	FilesChanged  []string                     `json:"files_changed"`
-	Review        WorkerEvidenceReview         `json:"review"`
-	Risks         []string                     `json:"risks"`
-	ArtifactLinks []WorkerEvidenceArtifactLink `json:"artifact_links,omitempty"`
+	Schema              string                       `json:"schema"`
+	Summary             string                       `json:"summary"`
+	CommandsRun         []string                     `json:"commands_run"`
+	KeyAssertions       []string                     `json:"key_assertions"`
+	FilesChanged        []string                     `json:"files_changed"`
+	Review              WorkerEvidenceReview         `json:"review"`
+	Risks               []string                     `json:"risks"`
+	ArtifactLinks       []WorkerEvidenceArtifactLink `json:"artifact_links,omitempty"`
+	AggregateValidation *ValidationEvidence          `json:"aggregate_validation,omitempty"`
 }
 
 type WorkerEvidenceReview struct {
@@ -295,6 +296,23 @@ func validateWorkerEvidencePacket(packet WorkerEvidencePacket, fields map[string
 		parsed, err := url.Parse(strings.TrimSpace(link.URL))
 		if err != nil || parsed.Scheme == "" {
 			invalid = append(invalid, fmt.Sprintf("artifact_links[%d].url must be an absolute URL", i))
+		}
+	}
+	if evidence := packet.AggregateValidation; evidence != nil {
+		if evidence.Class != ValidationClassAggregate {
+			invalid = append(invalid, "aggregate_validation.class must be aggregate")
+		}
+		if !evidence.Held || strings.TrimSpace(evidence.RequestID) == "" {
+			invalid = append(invalid, "aggregate_validation must identify a held daemon validation request")
+		}
+		if strings.TrimSpace(evidence.SourceRevision) == "" {
+			invalid = append(invalid, "aggregate_validation.source_revision is required")
+		}
+		if !evidence.Present {
+			invalid = append(invalid, "aggregate_validation must include machine-load evidence")
+		}
+		if evidence.OverlapDetected {
+			invalid = append(invalid, "aggregate_validation must not overlap external Go processes")
 		}
 	}
 	sort.Strings(missing)

@@ -831,6 +831,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleHookLogList(ctx, req)
 	case protocol.CommandRuntimeSignalIngest:
 		return d.handleRuntimeSignalIngest(ctx, req)
+	case protocol.CommandValidationAcquire, protocol.CommandValidationHeartbeat, protocol.CommandValidationNested, protocol.CommandValidationFinish, protocol.CommandValidationStatus:
+		return d.handleValidationCommand(ctx, req)
 	case protocol.CommandUIOpenTaskWorkspace, protocol.CommandUIOpenTaskDrillDown:
 		return d.handleUIIssueCommand(ctx, req)
 	case protocol.CommandUIStateGet:
