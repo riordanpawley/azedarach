@@ -3,7 +3,19 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/azedarach-build-contract.XXXXXX")"
-trap 'rm -rf "$fixture"' EXIT
+tui_pid=""
+tui_release=""
+cleanup_fixture() {
+  if [[ -n "$tui_pid" ]] && kill -0 "$tui_pid" 2>/dev/null; then
+    if [[ -n "$tui_release" ]]; then
+      : >"$tui_release"
+    fi
+    kill "$tui_pid" 2>/dev/null || true
+    wait "$tui_pid" 2>/dev/null || true
+  fi
+  rm -rf "$fixture"
+}
+trap cleanup_fixture EXIT
 export FAKE_GIT_COMMON_ROOT="$fixture"
 export AZEDARACH_REAL_GO_BIN="$fixture/fake-bin/go"
 
@@ -14,6 +26,10 @@ cp "$repo_root/scripts/build-install-run.sh" "$fixture/scripts/build-install-run
 cp "$repo_root/scripts/with-machine-validation-lease" "$fixture/scripts/with-machine-validation-lease"
 cp "$repo_root/scripts/with-production-install-admission" "$fixture/scripts/with-production-install-admission"
 chmod +x "$fixture/scripts/with-production-install-admission"
+cat >"$fixture/scripts/jaeger-local.sh" <<'EOF'
+#!/usr/bin/env bash
+jaeger_ensure() { :; }
+EOF
 printf 'production az sentinel\n' >"$fixture/bin/az"
 printf 'production azd sentinel\n' >"$fixture/bin/azd"
 cp "$fixture/bin/az" "$fixture/az.before"
@@ -51,6 +67,17 @@ cat >"$output" <<EOF_SCRIPT
 #!/bin/sh
 if [ "\${1:-}" = "version" ] || [ "\${1:-}" = "--version" ] || [ "\${1:-}" = "-v" ]; then
   printf 'dev (%s)\\n' '$marker'
+fi
+if [ "\$#" -eq 0 ] && [ -n "\${FAKE_AZ_TUI_STARTED:-}" ]; then
+  if [ -d "\${FAKE_GIT_COMMON_ROOT:?}/azedarach-production-admission/production" ]; then
+    echo "production admission remained held while TUI launched" >&2
+    exit 91
+  fi
+  printf '%s\n' "\$0" >"\${FAKE_AZ_TUI_EXECUTABLE:?}"
+  : >"\$FAKE_AZ_TUI_STARTED"
+  while [ ! -e "\${FAKE_AZ_TUI_RELEASE:?}" ]; do
+    sleep 0.05
+  done
 fi
 exit 0
 : <<'AZEDARACH_BUILD_METADATA'
@@ -619,6 +646,45 @@ test -x "$first_installed_generation/az"
 test -x "$first_installed_generation/azd"
 test "$("$first_installed_generation/az" version)" = "dev (default)"
 test "$("$first_installed_generation/azd" version)" = "dev (default)"
+
+tui_started="$fixture/production-tui.started"
+tui_release="$fixture/production-tui.release"
+tui_executable="$fixture/production-tui.executable"
+FAKE_GIT_MODE=primary FAKE_GO_MARKER=tui-admission-lifetime \
+  FAKE_AZ_TUI_STARTED="$tui_started" FAKE_AZ_TUI_RELEASE="$tui_release" \
+  FAKE_AZ_TUI_EXECUTABLE="$tui_executable" \
+  AZ_INSTALL_DIR="$fixture/global-bin" \
+  PATH="$fixture/global-bin:$fixture/fake-bin:$PATH" \
+  "$fixture/scripts/build-install-run.sh" \
+  >"$fixture/tui-admission-lifetime.stdout" 2>"$fixture/tui-admission-lifetime.stderr" &
+tui_pid=$!
+for _ in {1..300}; do
+  [[ -e "$tui_started" ]] && break
+  kill -0 "$tui_pid" 2>/dev/null || break
+  sleep 0.02
+done
+if [[ ! -e "$tui_started" ]]; then
+  echo "production TUI did not start" >&2
+  cat "$fixture/tui-admission-lifetime.stdout" >&2 || true
+  cat "$fixture/tui-admission-lifetime.stderr" >&2 || true
+  exit 1
+fi
+case "$(cat "$tui_executable")" in
+  */global-bin/.azedarach-generations/generation.*/az) ;;
+  *)
+    echo "production TUI launched through mutable or unexpected path: $(cat "$tui_executable")" >&2
+    exit 1
+    ;;
+esac
+test ! -d "$fixture/.git/azedarach-production-admission/production"
+FAKE_GIT_MODE=primary PATH="$fixture/fake-bin:$PATH" \
+  AZEDARACH_PRODUCTION_ADMISSION_WAIT_SECONDS=1 \
+  "$fixture/scripts/with-production-install-admission" -- true
+touch "$tui_release"
+wait "$tui_pid"
+tui_pid=""
+grep -q "releasing admission before TUI launch" "$fixture/tui-admission-lifetime.stdout"
+grep -q "Running az outside production install admission" "$fixture/tui-admission-lifetime.stdout"
 
 FAKE_GIT_MODE=primary FAKE_GO_MARKER=managed-path-default \
   PATH="$first_installed_generation:$fixture/fake-bin:$PATH" \

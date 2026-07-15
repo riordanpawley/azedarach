@@ -7,7 +7,26 @@ git_dir="$(git rev-parse --path-format=absolute --git-dir)"
 git_common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
 
 if [[ -z "${AZEDARACH_PRODUCTION_ADMISSION_ACTIVE:-}" ]]; then
-  exec "$repo_root/scripts/with-production-install-admission" -- "$0" "$@"
+  if [[ "${1:-}" == "--no-run" ]]; then
+    exec "$repo_root/scripts/with-production-install-admission" -- "$0" "$@"
+  fi
+
+  tui_handoff="$(mktemp "${TMPDIR:-/tmp}/azedarach-tui-handoff.XXXXXX")"
+  cleanup_handoff() {
+    rm -f "$tui_handoff"
+  }
+  trap cleanup_handoff EXIT
+  AZEDARACH_POST_ADMISSION_TUI_HANDOFF="$tui_handoff" \
+    "$repo_root/scripts/with-production-install-admission" -- "$0" "$@"
+  installed_az="$(cat "$tui_handoff")"
+  if [[ -z "$installed_az" || ! -x "$installed_az" ]]; then
+    echo "Production install completed without a valid TUI handoff executable: ${installed_az:-<empty>}" >&2
+    exit 1
+  fi
+  cleanup_handoff
+  trap - EXIT
+  echo "Running az outside production install admission..."
+  exec "$installed_az"
 fi
 admission_owner="$git_common_dir/azedarach-production-admission/production/pid"
 if [[ "$(cat "$admission_owner" 2>/dev/null || true)" != "$AZEDARACH_PRODUCTION_ADMISSION_ACTIVE" ]]; then
@@ -302,6 +321,11 @@ if [ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]; then
   AZEDARACH_DAEMON_SCOPE=worktree "$install_dir/az" daemon restart
 else
   "$install_dir/az" daemon restart
+fi
+if [[ -n "${AZEDARACH_POST_ADMISSION_TUI_HANDOFF:-}" ]]; then
+  printf '%s\n' "$active_az_target" >"$AZEDARACH_POST_ADMISSION_TUI_HANDOFF"
+  echo "Production install and daemon restart complete; releasing admission before TUI launch."
+  exit 0
 fi
 echo "Running az..."
 exec "$install_dir/az"
