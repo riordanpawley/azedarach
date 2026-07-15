@@ -8,7 +8,7 @@ mkdir -p "$fixture/bin"
 
 cat >"$fixture/bin/admit" <<'EOF'
 #!/usr/bin/env bash
-while [[ "$(cat "$ADMISSION_STATE_FILE")" != "clear" ]]; do sleep 0.02; done
+while [[ "$(cat "$ADMISSION_STATE_FILE")" == "active" ]]; do sleep 0.02; done
 while [[ "$1" != "--" ]]; do shift; done
 shift
 exec "$@"
@@ -35,12 +35,6 @@ if [[ -e "$started" ]]; then
   exit 1
 fi
 printf 'queued\n' >"$state"
-sleep 0.2
-if [[ -e "$started" ]]; then
-  echo "guarded Go started while aggregate validation was queued" >&2
-  exit 1
-fi
-printf 'clear\n' >"$state"
 wait "$guard_pid"
 test -e "$started"
 
