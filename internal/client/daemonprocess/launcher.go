@@ -463,7 +463,10 @@ func (l *Launcher) cleanupScopedRuntimeAssets() error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect stopped daemon socket: %w", err)
 	}
-	if err := l.waitForScopedLockOwnerExit(2 * time.Second); err != nil {
+	// azd allows up to five seconds for telemetry flush during graceful
+	// shutdown. Keep the cleanup bound above that process-level deadline so a
+	// healthy but slow exit does not leave the detached runtime generation.
+	if err := l.waitForScopedLockOwnerExit(10 * time.Second); err != nil {
 		return err
 	}
 	if err := os.Remove(wantLock); err != nil && !errors.Is(err, os.ErrNotExist) {
