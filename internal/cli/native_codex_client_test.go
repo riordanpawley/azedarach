@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -19,7 +21,7 @@ func TestAcceptNativeCodexDeliveryPreservesDraftAndDeduplicatesAcrossRestart(t *
 	}
 	envelope := nativeCodexEnvelope{ProjectID: "p", IntentKey: "intent", AgentIncarnation: state.Incarnation, LeaseToken: "lease", Payload: "automated"}
 	submissions := 0
-	submit := func() error { submissions++; return nil }
+	submit := func(string) error { submissions++; return nil }
 	response, active := acceptNativeCodexDelivery(envelope, []byte("human draft"), false, path, &state, submit)
 	if response.Outcome != "composer_nonempty" || active || submissions != 0 {
 		t.Fatalf("draft response=%+v active=%t submissions=%d", response, active, submissions)
@@ -36,6 +38,57 @@ func TestAcceptNativeCodexDeliveryPreservesDraftAndDeduplicatesAcrossRestart(t *
 	response, active = acceptNativeCodexDelivery(envelope, nil, false, path, &restarted, submit)
 	if response.Outcome != "accepted" || response.AcknowledgementToken != wantAck || active || submissions != 1 {
 		t.Fatalf("retry response=%+v active=%t submissions=%d", response, active, submissions)
+	}
+	if len(state.Pending) != 0 {
+		t.Fatalf("pending after accepted delivery = %#v", state.Pending)
+	}
+}
+
+func TestAcceptNativeCodexDeliveryPersistsPendingBeforeSubmitFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	state, err := loadNativeCodexState(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := nativeCodexEnvelope{ProjectID: "p", IntentKey: "intent", AgentIncarnation: state.Incarnation, LeaseToken: "lease", Payload: "automated"}
+	response, active := acceptNativeCodexDelivery(envelope, nil, false, path, &state, func(string) error { return errors.New("before reply crash") })
+	if response.Outcome != "not_ready" || active || state.Pending["intent\x00"+state.Incarnation] == "" {
+		t.Fatalf("response=%+v pending=%#v", response, state.Pending)
+	}
+	restarted, err := loadNativeCodexState(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restarted.Pending["intent\x00"+state.Incarnation] == "" {
+		t.Fatalf("pending intent lost on restart: %#v", restarted)
+	}
+}
+
+func TestCodexRPCPreservesStringAndNumericServerRequestIDs(t *testing.T) {
+	c := &codexRPCClient{waits: map[string]chan codexRPCMessage{}, requests: make(chan codexRPCMessage, 2), events: make(chan codexRPCMessage, 2), done: make(chan error, 1)}
+	done := make(chan struct{})
+	go func() {
+		c.read(strings.NewReader("{\"id\":\"request-string\",\"method\":\"item/permissions/requestApproval\",\"params\":{}}\n{\"id\":7,\"method\":\"mcpServer/elicitation/request\",\"params\":{}}\n"))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("read blocked")
+	}
+	var first, second codexRPCMessage
+	select {
+	case first = <-c.requests:
+	case <-time.After(time.Second):
+		t.Fatal("missing first request")
+	}
+	select {
+	case second = <-c.requests:
+	case <-time.After(time.Second):
+		t.Fatal("missing second request")
+	}
+	if string(first.ID) != `"request-string"` || string(second.ID) != "7" {
+		t.Fatalf("request IDs = %s, %s", first.ID, second.ID)
 	}
 }
 
@@ -77,7 +130,7 @@ func TestNativeCodexAuthorityLoopRegistersAndReturnsExactAcknowledgement(t *test
 	delivery := <-deliveries
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	state := nativeCodexState{Incarnation: "inc", Accepted: map[string]string{}}
-	response, active := acceptNativeCodexDelivery(delivery.envelope, nil, false, statePath, &state, func() error { return nil })
+	response, active := acceptNativeCodexDelivery(delivery.envelope, nil, false, statePath, &state, func(string) error { return nil })
 	if !active || response.Outcome != "accepted" {
 		t.Fatalf("response=%+v active=%t", response, active)
 	}
@@ -122,11 +175,13 @@ done
 	if err := rpc.send(map[string]any{"method": "initialized", "params": map[string]any{}}); err != nil {
 		t.Fatal(err)
 	}
-	threadID, err := nativeCodexThread(ctx, rpc, t.TempDir(), false)
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	state := nativeCodexState{Incarnation: "inc", Accepted: map[string]string{}, Pending: map[string]string{}}
+	threadID, err := nativeCodexThread(ctx, rpc, t.TempDir(), false, &state, statePath)
 	if err != nil || threadID != "thread-1" {
 		t.Fatalf("thread=%q err=%v", threadID, err)
 	}
-	if err := nativeCodexStartTurn(ctx, rpc, threadID, t.TempDir(), "hello", true); err != nil {
+	if err := nativeCodexStartTurn(ctx, rpc, threadID, t.TempDir(), "hello", true, "msg-1"); err != nil {
 		t.Fatal(err)
 	}
 }

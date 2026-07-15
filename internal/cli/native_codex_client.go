@@ -32,7 +32,7 @@ type NativeCodexClientOptions struct {
 }
 
 type codexRPCMessage struct {
-	ID     int64           `json:"id,omitempty"`
+	ID     json.RawMessage `json:"id,omitempty"`
 	Method string          `json:"method,omitempty"`
 	Params json.RawMessage `json:"params,omitempty"`
 	Result json.RawMessage `json:"result,omitempty"`
@@ -43,14 +43,16 @@ type codexRPCMessage struct {
 }
 
 type codexRPCClient struct {
-	command *exec.Cmd
-	stdin   io.WriteCloser
-	mu      sync.Mutex
-	nextID  atomic.Int64
-	waitMu  sync.Mutex
-	waits   map[int64]chan codexRPCMessage
-	events  chan codexRPCMessage
-	done    chan error
+	command       *exec.Cmd
+	stdin         io.WriteCloser
+	mu            sync.Mutex
+	nextID        atomic.Int64
+	waitMu        sync.Mutex
+	waits         map[string]chan codexRPCMessage
+	events        chan codexRPCMessage
+	requests      chan codexRPCMessage
+	droppedEvents atomic.Uint64
+	done          chan error
 }
 
 func startCodexRPC(ctx context.Context) (*codexRPCClient, error) {
@@ -67,7 +69,7 @@ func startCodexRPC(ctx context.Context) (*codexRPCClient, error) {
 	if err := command.Start(); err != nil {
 		return nil, err
 	}
-	c := &codexRPCClient{command: command, stdin: stdin, waits: map[int64]chan codexRPCMessage{}, events: make(chan codexRPCMessage, 128), done: make(chan error, 1)}
+	c := &codexRPCClient{command: command, stdin: stdin, waits: map[string]chan codexRPCMessage{}, events: make(chan codexRPCMessage, 128), requests: make(chan codexRPCMessage, 32), done: make(chan error, 1)}
 	go c.read(stdout)
 	return c, nil
 }
@@ -80,27 +82,34 @@ func (c *codexRPCClient) read(reader io.Reader) {
 		if json.Unmarshal(scanner.Bytes(), &message) != nil {
 			continue
 		}
-		if message.ID != 0 {
+		if len(message.ID) != 0 && message.Method != "" {
+			select {
+			case c.requests <- message:
+			default:
+				_ = c.sendRPCError(message.ID, -32000, "unsupported request backpressure")
+			}
+			continue
+		}
+		if len(message.ID) != 0 && message.Method == "" {
 			c.waitMu.Lock()
-			wait := c.waits[message.ID]
-			delete(c.waits, message.ID)
+			wait := c.waits[string(message.ID)]
+			delete(c.waits, string(message.ID))
 			c.waitMu.Unlock()
 			if wait != nil {
 				wait <- message
 			}
 			continue
 		}
-		if message.Method == "turn/completed" {
-			select {
-			case c.events <- message:
-			default:
-				<-c.events
+		select {
+		case c.events <- message:
+		default:
+			c.droppedEvents.Add(1)
+			if message.Method == "turn/completed" {
+				select {
+				case <-c.events:
+				default:
+				}
 				c.events <- message
-			}
-		} else {
-			select {
-			case c.events <- message:
-			default:
 			}
 		}
 	}
@@ -111,6 +120,14 @@ func (c *codexRPCClient) read(reader io.Reader) {
 	c.done <- err
 }
 
+func (c *codexRPCClient) sendRPCError(id json.RawMessage, code int, message string) error {
+	return c.send(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id), "error": map[string]any{"code": code, "message": message}})
+}
+
+func (c *codexRPCClient) sendRPCResult(id json.RawMessage, result any) error {
+	return c.send(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id), "result": result})
+}
+
 func (c *codexRPCClient) send(value any) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -119,9 +136,10 @@ func (c *codexRPCClient) send(value any) error {
 
 func (c *codexRPCClient) call(ctx context.Context, method string, params any, result any) error {
 	id := c.nextID.Add(1)
+	idBytes, _ := json.Marshal(id)
 	wait := make(chan codexRPCMessage, 1)
 	c.waitMu.Lock()
-	c.waits[id] = wait
+	c.waits[string(idBytes)] = wait
 	c.waitMu.Unlock()
 	if err := c.send(map[string]any{"id": id, "method": method, "params": params}); err != nil {
 		return err
@@ -129,7 +147,7 @@ func (c *codexRPCClient) call(ctx context.Context, method string, params any, re
 	select {
 	case <-ctx.Done():
 		c.waitMu.Lock()
-		delete(c.waits, id)
+		delete(c.waits, string(idBytes))
 		c.waitMu.Unlock()
 		return ctx.Err()
 	case message := <-wait:
@@ -176,6 +194,20 @@ type nativeCodexResponse struct {
 type nativeCodexDelivery struct {
 	envelope nativeCodexEnvelope
 	reply    chan nativeCodexResponse
+}
+
+type nativeCodexHumanRequest struct {
+	id     json.RawMessage
+	method string
+}
+
+func codexRequestNeedsHumanDecision(method string) bool {
+	switch method {
+	case "item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval":
+		return true
+	default:
+		return false
+	}
 }
 
 // NativeCodexClient runs the production app-server client used by managed
@@ -227,7 +259,7 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 	if err := rpc.send(map[string]any{"method": "initialized", "params": map[string]any{}}); err != nil {
 		return err
 	}
-	threadID, err := nativeCodexThread(ctx, rpc, cwd, opts.Resume)
+	threadID, err := nativeCodexThread(ctx, rpc, cwd, opts.Resume, &clientState, statePath)
 	if err != nil {
 		return err
 	}
@@ -249,6 +281,7 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 	go readNativeCodexInput(os.Stdin, input)
 	composer := make([]byte, 0, 256)
 	active := false
+	var pendingRequest *nativeCodexHumanRequest
 	signalActivity := func(event string) {
 		_, _ = deps.DaemonClient.RuntimeSignalIngest(context.WithoutCancel(ctx), protocol.RuntimeSignalIngestCommandBody{
 			Source: protocol.RuntimeSignalSourceAgentHook, Kind: protocol.RuntimeSignalKindAgentActivityChanged,
@@ -257,7 +290,7 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 		})
 	}
 	if strings.TrimSpace(opts.Prompt) != "" {
-		if err := nativeCodexStartTurn(ctx, rpc, threadID, cwd, opts.Prompt, opts.Yolo); err != nil {
+		if err := nativeCodexStartTurn(ctx, rpc, threadID, cwd, opts.Prompt, opts.Yolo, "human:"+incarnation+":"+strconv.FormatInt(time.Now().UnixNano(), 10)); err != nil {
 			return err
 		}
 		active = true
@@ -273,6 +306,25 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 		case err := <-rpc.done:
 			return fmt.Errorf("Codex app-server disconnected: %w", err)
 		case event := <-rpc.events:
+			if dropped := rpc.droppedEvents.Swap(0); dropped > 0 {
+				fmt.Fprintf(os.Stderr, "\nCodex event backpressure: dropped %d non-terminal events\n", dropped)
+			}
+			if event.Method == "turn/completed" {
+				var completed struct {
+					Turn struct {
+						Status string `json:"status"`
+						Error  any    `json:"error"`
+					} `json:"turn"`
+				}
+				_ = json.Unmarshal(event.Params, &completed)
+				active = false
+				signalActivity("idle_prompt")
+				if completed.Turn.Status != "completed" && completed.Turn.Status != "" {
+					fmt.Fprintf(os.Stderr, "\nCodex turn %s: status=%s error=%v\n", completed.Turn.Status, completed.Turn.Status, completed.Turn.Error)
+				}
+				fmt.Fprint(os.Stdout, "\n› "+string(composer))
+				continue
+			}
 			if event.Method == "item/agentMessage/delta" {
 				var delta struct {
 					Delta string `json:"delta"`
@@ -281,12 +333,29 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 					fmt.Fprint(os.Stdout, delta.Delta)
 				}
 			}
-			if event.Method == "turn/completed" {
-				active = false
-				signalActivity("idle_prompt")
-				fmt.Fprint(os.Stdout, "\n› "+string(composer))
+			if strings.Contains(event.Method, "error") || strings.Contains(event.Method, "commandExecution") || strings.Contains(event.Method, "fileChange") || strings.Contains(event.Method, "reasoning") {
+				fmt.Fprintf(os.Stdout, "\n[%s] %s\n", event.Method, boundedCodexEvent(event.Params, 4096))
+			}
+		case request := <-rpc.requests:
+			if codexRequestNeedsHumanDecision(request.Method) {
+				pendingRequest = &nativeCodexHumanRequest{id: request.ID, method: request.Method}
+				fmt.Fprintf(os.Stdout, "\nCodex request %s: approve? [y/N] ", request.Method)
+			} else {
+				_ = rpc.sendRPCError(request.ID, -32601, "unsupported Codex server request method: "+request.Method)
 			}
 		case b := <-input:
+			if pendingRequest != nil {
+				if b == 'y' || b == 'Y' {
+					_ = rpc.sendRPCResult(pendingRequest.id, map[string]any{"decision": "accept"})
+				} else if b == 'n' || b == 'N' || b == 3 {
+					_ = rpc.sendRPCResult(pendingRequest.id, map[string]any{"decision": "decline"})
+				} else {
+					continue
+				}
+				pendingRequest = nil
+				fmt.Fprint(os.Stdout, "\n› ")
+				continue
+			}
 			switch b {
 			case 3:
 				return nil
@@ -301,7 +370,7 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 				}
 				text := string(composer)
 				composer = composer[:0]
-				if err := nativeCodexStartTurn(ctx, rpc, threadID, cwd, text, opts.Yolo); err != nil {
+				if err := nativeCodexStartTurn(ctx, rpc, threadID, cwd, text, opts.Yolo, "human:"+incarnation+":"+strconv.FormatInt(time.Now().UnixNano(), 10)); err != nil {
 					fmt.Fprintf(os.Stderr, "\n%v\n› ", err)
 					continue
 				}
@@ -315,8 +384,8 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 				}
 			}
 		case delivery := <-deliveries:
-			response, newlyActive := acceptNativeCodexDelivery(delivery.envelope, composer, active, statePath, &clientState, func() error {
-				return nativeCodexStartTurn(ctx, rpc, threadID, cwd, delivery.envelope.Payload, opts.Yolo)
+			response, newlyActive := acceptNativeCodexDelivery(delivery.envelope, composer, active, statePath, &clientState, func(messageID string) error {
+				return nativeCodexStartTurn(ctx, rpc, threadID, cwd, delivery.envelope.Payload, opts.Yolo, messageID)
 			})
 			active = active || newlyActive
 			if newlyActive {
@@ -327,10 +396,23 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 	}
 }
 
-func acceptNativeCodexDelivery(envelope nativeCodexEnvelope, composer []byte, active bool, statePath string, state *nativeCodexState, submit func() error) (nativeCodexResponse, bool) {
+func boundedCodexEvent(raw json.RawMessage, limit int) string {
+	if len(raw) > limit {
+		raw = raw[:limit]
+	}
+	return string(raw)
+}
+
+func acceptNativeCodexDelivery(envelope nativeCodexEnvelope, composer []byte, active bool, statePath string, state *nativeCodexState, submit func(string) error) (nativeCodexResponse, bool) {
 	response := nativeCodexResponse{ProjectID: envelope.ProjectID, IntentKey: envelope.IntentKey,
 		AgentIncarnation: envelope.AgentIncarnation, LeaseToken: envelope.LeaseToken}
 	key := envelope.IntentKey + "\x00" + envelope.AgentIncarnation
+	if state.Accepted == nil {
+		state.Accepted = map[string]string{}
+	}
+	if state.Pending == nil {
+		state.Pending = map[string]string{}
+	}
 	if ack := state.Accepted[key]; ack != "" {
 		response.Outcome, response.AcknowledgementToken = "accepted", ack
 		return response, false
@@ -339,7 +421,17 @@ func acceptNativeCodexDelivery(envelope nativeCodexEnvelope, composer []byte, ac
 		response.Outcome = "composer_nonempty"
 		return response, false
 	}
-	if active || submit() != nil {
+	messageID := state.Pending[key]
+	if messageID == "" {
+		messageID = envelope.IntentKey + ":" + envelope.AgentIncarnation
+		state.Pending[key] = messageID
+		if err := saveNativeCodexState(statePath, *state); err != nil {
+			delete(state.Pending, key)
+			response.Outcome = "not_ready"
+			return response, false
+		}
+	}
+	if active || submit(messageID) != nil {
 		response.Outcome = "not_ready"
 		return response, false
 	}
@@ -349,6 +441,7 @@ func acceptNativeCodexDelivery(envelope nativeCodexEnvelope, composer []byte, ac
 		return response, false
 	}
 	state.Accepted[key] = ack
+	delete(state.Pending, key)
 	if err := saveNativeCodexState(statePath, *state); err != nil {
 		delete(state.Accepted, key)
 		response.Outcome = "not_ready"
@@ -358,27 +451,23 @@ func acceptNativeCodexDelivery(envelope nativeCodexEnvelope, composer []byte, ac
 	return response, true
 }
 
-func nativeCodexThread(ctx context.Context, rpc *codexRPCClient, cwd string, resume bool) (string, error) {
-	if resume {
-		var listed struct {
-			Data []struct {
+func nativeCodexThread(ctx context.Context, rpc *codexRPCClient, cwd string, resume bool, state *nativeCodexState, statePath string) (string, error) {
+	if strings.TrimSpace(state.ThreadID) != "" {
+		var resumed struct {
+			Thread struct {
 				ID string `json:"id"`
-			} `json:"data"`
+			} `json:"thread"`
 		}
-		if err := rpc.call(ctx, "thread/list", map[string]any{"cwd": cwd, "limit": 1, "sortKey": "updated_at", "sortDirection": "desc"}, &listed); err != nil {
-			return "", err
+		if err := rpc.call(ctx, "thread/resume", map[string]any{"threadId": state.ThreadID}, &resumed); err != nil {
+			return "", fmt.Errorf("resume exact Codex thread %s: %w", state.ThreadID, err)
 		}
-		if len(listed.Data) > 0 {
-			var resumed struct {
-				Thread struct {
-					ID string `json:"id"`
-				} `json:"thread"`
-			}
-			if err := rpc.call(ctx, "thread/resume", map[string]any{"threadId": listed.Data[0].ID}, &resumed); err != nil {
-				return "", err
-			}
-			return resumed.Thread.ID, nil
+		if resumed.Thread.ID == "" {
+			return "", errors.New("Codex resumed thread omitted id")
 		}
+		return resumed.Thread.ID, nil
+	}
+	if resume {
+		return "", errors.New("missing persisted Codex thread identity")
 	}
 	var started struct {
 		Thread struct {
@@ -388,11 +477,18 @@ func nativeCodexThread(ctx context.Context, rpc *codexRPCClient, cwd string, res
 	if err := rpc.call(ctx, "thread/start", map[string]any{"cwd": cwd}, &started); err != nil {
 		return "", err
 	}
+	if started.Thread.ID == "" {
+		return "", errors.New("Codex thread/start omitted id")
+	}
+	state.ThreadID = started.Thread.ID
+	if err := saveNativeCodexState(statePath, *state); err != nil {
+		return "", fmt.Errorf("persist Codex thread identity: %w", err)
+	}
 	return started.Thread.ID, nil
 }
 
-func nativeCodexStartTurn(ctx context.Context, rpc *codexRPCClient, threadID, cwd, text string, yolo bool) error {
-	params := map[string]any{"threadId": threadID, "cwd": cwd, "input": []map[string]string{{"type": "text", "text": text}}}
+func nativeCodexStartTurn(ctx context.Context, rpc *codexRPCClient, threadID, cwd, text string, yolo bool, clientUserMessageID string) error {
+	params := map[string]any{"threadId": threadID, "cwd": cwd, "clientUserMessageId": clientUserMessageID, "input": []map[string]string{{"type": "text", "text": text}}}
 	if yolo {
 		params["approvalPolicy"] = "never"
 		params["sandboxPolicy"] = map[string]any{"type": "dangerFullAccess"}
@@ -463,7 +559,9 @@ func randomNativeCodexToken() (string, error) {
 
 type nativeCodexState struct {
 	Incarnation string            `json:"incarnation"`
+	ThreadID    string            `json:"thread_id"`
 	Accepted    map[string]string `json:"accepted"`
+	Pending     map[string]string `json:"pending"`
 }
 
 func loadNativeCodexState(path string, resume bool) (nativeCodexState, error) {
@@ -475,6 +573,9 @@ func loadNativeCodexState(path string, resume bool) (nativeCodexState, error) {
 				if state.Accepted == nil {
 					state.Accepted = map[string]string{}
 				}
+				if state.Pending == nil {
+					state.Pending = map[string]string{}
+				}
 				return state, nil
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -485,7 +586,7 @@ func loadNativeCodexState(path string, resume bool) (nativeCodexState, error) {
 	if err != nil {
 		return nativeCodexState{}, err
 	}
-	state := nativeCodexState{Incarnation: incarnation, Accepted: map[string]string{}}
+	state := nativeCodexState{Incarnation: incarnation, Accepted: map[string]string{}, Pending: map[string]string{}}
 	return state, saveNativeCodexState(path, state)
 }
 
