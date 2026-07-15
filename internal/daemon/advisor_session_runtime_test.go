@@ -61,8 +61,8 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 		if len(command) == 0 || command[0] != "new-session" {
 			continue
 		}
-		if got, ok := tmuxCommandEnvironmentValue(command, "PATH"); !ok || !strings.HasPrefix(got, managedDir+string(os.PathListSeparator)) {
-			t.Fatalf("advisor tmux PATH = %q, %t, want managed prefix; command=%v", got, ok, command)
+		if got, ok := tmuxCommandEnvironmentValue(command, "PATH"); ok || got != "" {
+			t.Fatalf("advisor tmux injected PATH = %q, %t; command=%v", got, ok, command)
 		}
 	}
 	if err := d.persistTmuxSessionRuntimeState(ctx, protocol.DefaultProjectID, []tmux.SessionInfo{{Name: first.Request.SessionID}}, nil); err != nil {

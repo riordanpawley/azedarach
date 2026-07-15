@@ -63,10 +63,12 @@ const (
 
 // Config configures daemon runtime wiring.
 type Config struct {
-	RepoDir                    string
-	SocketPath                 string
-	LockPath                   string
-	ScopedRuntime              bool
+	RepoDir       string
+	SocketPath    string
+	LockPath      string
+	ScopedRuntime bool
+	// ManagedGenerationBinDir is retained for source compatibility only.
+	// Agent launches intentionally ignore it and inherit the project PATH.
 	ManagedGenerationBinDir    string
 	BaseBranch                 string
 	GitWorkflowMode            string
@@ -257,12 +259,6 @@ func New(cfg Config) *Daemon {
 	if cfg.LockPath == "" {
 		cfg.LockPath = appconfig.GlobalDaemonLockPath()
 	}
-	if cfg.ScopedRuntime {
-		cfg.ManagedGenerationBinDir = ""
-	} else if strings.TrimSpace(cfg.ManagedGenerationBinDir) != "" {
-		cfg.ManagedGenerationBinDir = filepath.Clean(cfg.ManagedGenerationBinDir)
-	}
-
 	tmuxRunner := &tmux.ExecRunner{}
 	gitRunner := git.NewExecRunner(cfg.RepoDir)
 	gitClient := git.NewClient(gitRunner, cfg.Logger)

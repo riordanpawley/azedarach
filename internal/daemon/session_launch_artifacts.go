@@ -17,6 +17,64 @@ type sessionPromptHandoff struct {
 	PromptPath string
 }
 
+type sessionLaunchMode string
+
+const (
+	sessionLaunchInitial sessionLaunchMode = "initial"
+	sessionLaunchResume  sessionLaunchMode = "resume"
+)
+
+// sessionLaunchSpec is the canonical input shared by every session launch
+// path. Tool-specific argument selection happens before the artifact is
+// written; tmux only ever receives the bounded artifact command.
+type sessionLaunchSpec struct {
+	Mode               sessionLaunchMode
+	ProjectID          string
+	IssueID            string
+	SessionID          string
+	Yolo               bool
+	ImagePaths         []string
+	Prompt             string
+	InitReadyPath      string
+	StartupEnvCommands []string
+}
+
+type sessionLaunchArtifact struct {
+	Command       string
+	ScriptPath    string
+	PromptHandoff sessionPromptHandoff
+}
+
+func (a sessionLaunchArtifact) remove() {
+	a.PromptHandoff.remove()
+	if strings.TrimSpace(a.ScriptPath) != "" {
+		_ = os.Remove(a.ScriptPath)
+	}
+}
+
+func (d *Daemon) prepareSessionLaunchArtifact(spec sessionLaunchSpec) (sessionLaunchArtifact, error) {
+	prompt := strings.TrimSpace(spec.Prompt)
+	tool := strings.TrimSpace(d.runtimeConfigForProject(spec.ProjectID).CLITool)
+	if spec.Mode == sessionLaunchResume && strings.EqualFold(tool, "codex") {
+		prompt = ""
+	}
+	handoff := sessionPromptHandoff{}
+	if prompt != "" {
+		var err error
+		handoff, err = prepareSessionPromptHandoff(d.sessionLaunchArtifactDir(), prompt)
+		if err != nil {
+			return sessionLaunchArtifact{}, err
+		}
+	}
+	shell, payload := d.buildSessionLaunchArtifactPayload(spec, handoff)
+	path, command, err := prepareSessionLaunchScript(d.sessionLaunchArtifactDir(), shell, payload)
+	if err != nil {
+		handoff.remove()
+		return sessionLaunchArtifact{}, err
+	}
+	return sessionLaunchArtifact{Command: command, ScriptPath: path, PromptHandoff: handoff}, nil
+}
+
 func (d *Daemon) sessionLaunchArtifactDir() string {
 	base := ""
 	if lockPath := strings.TrimSpace(d.cfg.LockPath); lockPath != "" {
