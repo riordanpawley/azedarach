@@ -441,10 +441,10 @@ func (m *Manager) execute(ctx context.Context, op *managedOp) {
 		return
 	}
 	m.setRecordForOp(op, updated)
-	ctx = daemonops.WithProgressReporter(ctx, func(_ context.Context, progress daemonops.Progress) error {
+	ctx = daemonops.WithProgressReporter(ctx, func(progressCtx context.Context, progress daemonops.Progress) error {
 		progressCopy := progress
 		record := m.recordForOp(op)
-		updated, err := m.store.Update(context.Background(), daemonops.UpdateParams{
+		updated, err := m.store.Update(progressCtx, daemonops.UpdateParams{
 			ID:       record.ID,
 			ToState:  record.State,
 			Progress: &progressCopy,

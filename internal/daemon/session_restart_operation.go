@@ -242,9 +242,13 @@ func (d *Daemon) restartManagedAgentPane(ctx context.Context, target sessionRest
 				item.NewIdentity = restartProtocolIdentity(current)
 				item.Restarted = true
 				item.Outcome = restartSuccessOutcome(target.Activity)
-				item.Stages = append(item.Stages, restartStage("observe", "complete", "distinct pane process and hook incarnation acknowledged", sessionRestartObservationTimeout), restartStage("publish", "complete", "restart result published", sessionRestartPreflightTimeout))
+				item.Stages = append(item.Stages, restartStage("observe", "complete", "distinct pane process and hook incarnation acknowledged", sessionRestartObservationTimeout))
 				plan.Stage = "publish"
-				_ = reportSessionRestartProgress(ctx, plan)
+				if err := reportSessionRestartProgress(ctx, plan); err != nil {
+					appendRestartStageFailure(&item, "publish", sessionRestartPreflightTimeout, err, errors.Is(err, context.DeadlineExceeded))
+					return item
+				}
+				item.Stages = append(item.Stages, restartStage("publish", "complete", "restart result published", sessionRestartPreflightTimeout))
 				return item
 			}
 		}
@@ -256,7 +260,9 @@ func reportSessionRestartProgress(ctx context.Context, plan sessionRestartRecove
 	if err != nil {
 		return err
 	}
-	return daemonops.ReportProgress(ctx, daemonops.Progress{Phase: "session.restart_all." + plan.Stage, Message: string(body), Current: 1, Total: 1, Unit: "pane"})
+	progressCtx, cancel := context.WithTimeout(ctx, sessionRestartPreflightTimeout)
+	defer cancel()
+	return daemonops.ReportProgress(progressCtx, daemonops.Progress{Phase: "session.restart_all." + plan.Stage, Message: string(body), Current: 1, Total: 1, Unit: "pane"})
 }
 func managedRestartIdentityLive(sessionID string, identity daemonstate.ManagedAgentIdentity, panes []tmux.PaneInfo) bool {
 	for _, pane := range panes {

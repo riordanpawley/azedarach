@@ -1373,44 +1373,67 @@ func (d *Daemon) recoverInterruptedSessionRestart(ctx context.Context, record da
 	if store == nil || d.tmux == nil {
 		return interruptedOperationRecovery{}, false
 	}
-	current, found, err := store.GetManagedAgentIdentity(recoveryCtx, plan.ProjectID, plan.SessionID, plan.Old.LogicalPaneID)
-	if err != nil {
-		return interruptedOperationRecovery{}, false
-	}
-	panes, err := d.tmux.ListPaneInfos(recoveryCtx)
-	if err != nil {
-		return interruptedOperationRecovery{}, false
-	}
 	item := protocol.SessionRestartAllItem{ProjectID: naming.ProjectID(plan.ProjectID), IssueID: naming.IssueID(plan.IssueID), SessionID: naming.SessionID(plan.SessionID), Activity: plan.Activity, TmuxReady: true, OldIdentity: restartProtocolIdentity(plan.Old), OperationID: plan.ProjectID + "/" + plan.SessionID + "/" + plan.Old.LogicalPaneID + "/" + plan.Old.AgentIncarnation}
-	if found && current.AgentIncarnation == plan.PlannedIncarnation && current.PanePID != plan.Old.PanePID && managedRestartIdentityLive(plan.SessionID, current, panes) {
-		item.Restarted = true
-		item.NewIdentity = restartProtocolIdentity(current)
-		item.Outcome = restartSuccessOutcome(plan.Activity)
-		item.Stages = []protocol.SessionRestartStage{restartStage("recover", "complete", "replacement identity and hook incarnation recovered", sessionRestartObservationTimeout)}
-		payload, _ := json.Marshal(protocol.SessionRestartAllResponseBody{ProjectID: naming.ProjectID(plan.ProjectID), Restarted: 1, Sessions: []protocol.SessionRestartAllItem{item}})
-		return interruptedOperationRecovery{State: daemonops.StateDone, ResultPayload: payload}, true
-	}
-	oldLive := managedRestartIdentityLive(plan.SessionID, plan.Old, panes)
-	if oldLive {
-		return interruptedOperationRecovery{State: daemonops.StateFailed, ErrorMessage: "restart interrupted before exact-pane replacement"}, true
-	}
-	replacementProcessLive := false
-	for _, pane := range panes {
-		if pane.SessionName == plan.SessionID && sanitizeRuntimePaneID(pane.PaneID) == sanitizeRuntimePaneID(plan.Old.TmuxPaneID) && pane.PanePID != plan.Old.PanePID {
-			replacementProcessLive = true
-			break
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		current, found, identityErr := store.GetManagedAgentIdentity(recoveryCtx, plan.ProjectID, plan.SessionID, plan.Old.LogicalPaneID)
+		panes, panesErr := d.tmux.ListPaneInfos(recoveryCtx)
+		if identityErr == nil && panesErr == nil {
+			if found && current.AgentIncarnation == plan.PlannedIncarnation && current.PanePID != plan.Old.PanePID && managedRestartIdentityLive(plan.SessionID, current, panes) {
+				item.Restarted = true
+				item.NewIdentity = restartProtocolIdentity(current)
+				item.Outcome = restartSuccessOutcome(plan.Activity)
+				item.Stages = []protocol.SessionRestartStage{restartStage("recover", "complete", "replacement identity and hook incarnation recovered", sessionRestartObservationTimeout)}
+				return sessionRestartRecoveryResult(item), true
+			}
+			if managedRestartIdentityLive(plan.SessionID, plan.Old, panes) {
+				item.Outcome = "partial_failure"
+				item.Error = "restart interrupted before exact-pane replacement"
+				item.Stages = []protocol.SessionRestartStage{restartStage("recover_"+plan.Stage, "failed", item.Error, sessionRestartObservationTimeout)}
+				return sessionRestartRecoveryResult(item), true
+			}
+			replacementLive := restartReplacementPaneLive(plan, panes)
+			if !replacementLive {
+				item.Outcome = "crashed"
+				item.Error = "managed pane disappeared during daemon restart"
+				item.Skipped = true
+				item.Stages = []protocol.SessionRestartStage{restartStage("recover_"+plan.Stage, "failed", item.Error, sessionRestartObservationTimeout)}
+				return sessionRestartRecoveryResult(item), true
+			}
+			lastErr = nil
+		} else {
+			lastErr = errors.Join(identityErr, panesErr)
+		}
+
+		select {
+		case <-recoveryCtx.Done():
+			item.Outcome = "partial_failure"
+			item.Error = "replacement process exists without matching hook incarnation after bounded recovery observation"
+			if lastErr != nil {
+				item.Error = fmt.Sprintf("restart recovery observation failed: %v", lastErr)
+			}
+			item.Stages = []protocol.SessionRestartStage{restartStage("recover_"+plan.Stage, "timeout", item.Error, sessionRestartObservationTimeout)}
+			return sessionRestartRecoveryResult(item), true
+		case <-ticker.C:
 		}
 	}
-	item.Outcome = "partial_failure"
-	item.Error = "replacement process exists without matching hook incarnation after daemon restart"
-	item.Stages = []protocol.SessionRestartStage{restartStage("recover", "failed", item.Error, sessionRestartObservationTimeout)}
-	if !replacementProcessLive {
-		item.Outcome = "crashed"
-		item.Error = "managed pane disappeared during daemon restart"
-		item.Skipped = true
+}
+
+func restartReplacementPaneLive(plan sessionRestartRecoveryPlan, panes []tmux.PaneInfo) bool {
+	for _, pane := range panes {
+		if pane.SessionName == plan.SessionID && sanitizeRuntimePaneID(pane.PaneID) == sanitizeRuntimePaneID(plan.Old.TmuxPaneID) && pane.PanePID != plan.Old.PanePID {
+			return true
+		}
 	}
-	payload, _ := json.Marshal(protocol.SessionRestartAllResponseBody{ProjectID: naming.ProjectID(plan.ProjectID), Skipped: boolToInt(item.Skipped), Failed: boolToInt(!item.Skipped), Sessions: []protocol.SessionRestartAllItem{item}})
-	return interruptedOperationRecovery{State: daemonops.StateDone, ResultPayload: payload}, true
+	return false
+}
+
+func sessionRestartRecoveryResult(item protocol.SessionRestartAllItem) interruptedOperationRecovery {
+	body := protocol.SessionRestartAllResponseBody{ProjectID: item.ProjectID, Restarted: boolToInt(item.Restarted), Skipped: boolToInt(item.Skipped), Failed: boolToInt(!item.Restarted && !item.Skipped), Sessions: []protocol.SessionRestartAllItem{item}}
+	payload, _ := json.Marshal(body)
+	return interruptedOperationRecovery{State: daemonops.StateDone, ResultPayload: payload}
 }
 
 func boolToInt(value bool) int {

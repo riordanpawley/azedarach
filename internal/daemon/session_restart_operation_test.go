@@ -32,6 +32,7 @@ type exactRestartRunner struct {
 	respawnArgs      []string
 	extraPanes       string
 	blockListPanes   bool
+	paneMissing      bool
 }
 
 func (r *exactRestartRunner) Run(ctx context.Context, args ...string) (string, error) {
@@ -46,6 +47,9 @@ func (r *exactRestartRunner) Run(ctx context.Context, args ...string) (string, e
 		}
 		r.mu.Lock()
 		defer r.mu.Unlock()
+		if r.paneMissing {
+			return r.extraPanes, nil
+		}
 		return r.session + "\t%12\t" + fmt.Sprint(r.pid) + r.extraPanes, nil
 	case "respawn-pane":
 		if r.respawnDelay > 0 {
@@ -200,6 +204,21 @@ func TestRestartManagedAgentPanePartialFailureAndBoundedTimeout(t *testing.T) {
 			t.Fatalf("result=%+v respawns=%d", result, respawns)
 		}
 	})
+	t.Run("publication failure is typed and returned", func(t *testing.T) {
+		d, _, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+		ctx := daemonops.WithProgressReporter(context.Background(), func(_ context.Context, progress daemonops.Progress) error {
+			if progress.Phase == "session.restart_all.publish" {
+				return errors.New("publish unavailable")
+			}
+			return nil
+		})
+		result := d.restartManagedAgentPane(ctx, target, protocol.SessionRestartAllRequestBody{}, protocol.SessionRestartAllItem{})
+		respawns, _, _ := runner.snapshot()
+		stage := result.Stages[len(result.Stages)-1]
+		if result.Outcome != "partial_failure" || !strings.Contains(result.Error, "publish unavailable") || stage.Name != "publish" || respawns != 1 {
+			t.Fatalf("result=%+v respawns=%d", result, respawns)
+		}
+	})
 }
 
 func TestRecoverInterruptedSessionRestartConvergesWithoutRespawn(t *testing.T) {
@@ -227,6 +246,83 @@ func TestRecoverInterruptedSessionRestartConvergesWithoutRespawn(t *testing.T) {
 	if respawns != 0 {
 		t.Fatalf("respawns=%d, want replay convergence without respawn", respawns)
 	}
+}
+
+func TestRecoverInterruptedSessionRestartMatrix(t *testing.T) {
+	t.Run("prepare and replace before respawn", func(t *testing.T) {
+		for _, stage := range []string{"prepare", "replace"} {
+			t.Run(stage, func(t *testing.T) {
+				d, _, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+				recovery, ok := d.recoverInterruptedSessionRestart(context.Background(), restartRecoveryRecord(t, target, stage))
+				result := decodeRestartRecoveryResult(t, recovery)
+				respawns, _, _ := runner.snapshot()
+				if !ok || result.Failed != 1 || result.Sessions[0].Outcome != "partial_failure" || result.Sessions[0].Stages[0].Name != "recover_"+stage || respawns != 0 {
+					t.Fatalf("recovery=%+v result=%+v ok=%v respawns=%d", recovery, result, ok, respawns)
+				}
+			})
+		}
+	})
+	t.Run("live replacement waits for delayed hook", func(t *testing.T) {
+		d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+		runner.mu.Lock()
+		runner.pid = 101
+		runner.mu.Unlock()
+		go func() {
+			time.Sleep(75 * time.Millisecond)
+			_ = store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 101, AgentIncarnation: "planned", ObservedAt: time.Now()})
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		recovery, ok := d.recoverInterruptedSessionRestart(ctx, restartRecoveryRecord(t, target, "observe"))
+		result := decodeRestartRecoveryResult(t, recovery)
+		if !ok || result.Restarted != 1 || result.Sessions[0].Stages[0].Status != "complete" {
+			t.Fatalf("recovery=%+v result=%+v ok=%v", recovery, result, ok)
+		}
+	})
+	t.Run("missing pane is typed crashed", func(t *testing.T) {
+		d, _, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+		runner.mu.Lock()
+		runner.paneMissing = true
+		runner.mu.Unlock()
+		recovery, ok := d.recoverInterruptedSessionRestart(context.Background(), restartRecoveryRecord(t, target, "observe"))
+		result := decodeRestartRecoveryResult(t, recovery)
+		if !ok || result.Skipped != 1 || result.Sessions[0].Outcome != "crashed" || result.Sessions[0].Stages[0].Status != "failed" {
+			t.Fatalf("recovery=%+v result=%+v ok=%v", recovery, result, ok)
+		}
+	})
+	t.Run("live replacement without hook times out typed partial", func(t *testing.T) {
+		d, _, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+		runner.mu.Lock()
+		runner.pid = 101
+		runner.mu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 125*time.Millisecond)
+		defer cancel()
+		recovery, ok := d.recoverInterruptedSessionRestart(ctx, restartRecoveryRecord(t, target, "observe"))
+		result := decodeRestartRecoveryResult(t, recovery)
+		stage := result.Sessions[0].Stages[0]
+		if !ok || result.Failed != 1 || result.Sessions[0].Outcome != "partial_failure" || stage.Name != "recover_observe" || stage.Status != "timeout" || stage.TimeoutMS == 0 {
+			t.Fatalf("recovery=%+v result=%+v ok=%v", recovery, result, ok)
+		}
+	})
+}
+
+func restartRecoveryRecord(t *testing.T, target sessionRestartAllTarget, stage string) daemonops.Record {
+	t.Helper()
+	plan := sessionRestartRecoveryPlan{ProjectID: target.ProjectID, SessionID: target.SessionID, IssueID: target.IssueID, Activity: target.Activity, Old: daemonstate.ManagedAgentIdentity{ProjectID: target.ProjectID, SessionID: target.SessionID, LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old"}, PlannedIncarnation: "planned", Stage: stage}
+	body, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return daemonops.Record{Kind: protocol.CommandSessionRestartAll, Progress: &daemonops.Progress{Phase: "session.restart_all." + stage, Message: string(body)}}
+}
+
+func decodeRestartRecoveryResult(t *testing.T, recovery interruptedOperationRecovery) protocol.SessionRestartAllResponseBody {
+	t.Helper()
+	var result protocol.SessionRestartAllResponseBody
+	if err := json.Unmarshal(recovery.ResultPayload, &result); err != nil || len(result.Sessions) != 1 {
+		t.Fatalf("decode recovery result: result=%+v err=%v", result, err)
+	}
+	return result
 }
 
 func TestRestartStateOutcomeClassification(t *testing.T) {

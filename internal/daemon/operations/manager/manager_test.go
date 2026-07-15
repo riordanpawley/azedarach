@@ -23,6 +23,20 @@ type toggleUpdateErrorStore struct {
 	updateErr error
 }
 
+type blockingProgressStore struct {
+	*memoryStore
+	deadlineObserved chan struct{}
+}
+
+func (s *blockingProgressStore) Update(ctx context.Context, params daemonops.UpdateParams) (daemonops.Record, error) {
+	if params.Progress != nil {
+		<-ctx.Done()
+		close(s.deadlineObserved)
+		return daemonops.Record{}, ctx.Err()
+	}
+	return s.memoryStore.Update(ctx, params)
+}
+
 func (s *toggleUpdateErrorStore) setUpdateError(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -108,8 +122,37 @@ func (s *memoryStore) Update(_ context.Context, params daemonops.UpdateParams) (
 	if params.ResultPayload != nil {
 		record.ResultPayload = append([]byte(nil), params.ResultPayload...)
 	}
+	if params.Progress != nil {
+		progress := *params.Progress
+		record.Progress = &progress
+	}
 	s.records[record.ID] = cloneRecord(record)
 	return cloneRecord(record), nil
+}
+
+func TestProgressReporterPreservesCallerDeadlineForDurableWrite(t *testing.T) {
+	store := &blockingProgressStore{memoryStore: newMemoryStore(), deadlineObserved: make(chan struct{})}
+	mgr := New(store, Config{NewID: func() string { return "op-progress-timeout" }})
+	result, err := mgr.Submit(context.Background(), daemonops.SubmitRequest{Kind: "bounded-progress"}, func(ctx context.Context) ([]byte, error) {
+		progressCtx, cancel := context.WithTimeout(ctx, 25*time.Millisecond)
+		defer cancel()
+		return nil, daemonops.ReportProgress(progressCtx, daemonops.Progress{Phase: "persist"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-store.deadlineObserved:
+	default:
+		t.Fatal("durable progress store did not observe caller deadline")
+	}
+	record, err := store.Get(context.Background(), result.Record.ID)
+	if err != nil || record.State != daemonops.StateFailed || !strings.Contains(record.ErrorMessage, context.DeadlineExceeded.Error()) {
+		t.Fatalf("record=%+v err=%v", record, err)
+	}
 }
 
 func cloneRecord(record daemonops.Record) daemonops.Record {
