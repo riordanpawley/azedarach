@@ -243,9 +243,9 @@ kill 'TERM', $heartbeat;
 waitpid($heartbeat, 0);
 my $exit_code = wait_status_code($status);
 my $cleanup_error = '';
-my $cleanup_errors = [];
-eval { remove_tree($candidate_runtime, {error => $cleanup_errors}); 1 } or $cleanup_error = $@ || 'candidate runtime cleanup failed';
-$cleanup_error ||= join('; ', map { %$_ } @$cleanup_errors) if @$cleanup_errors;
+my $cleanup_errors;
+eval { remove_tree($candidate_runtime, {error => \$cleanup_errors}); 1 } or $cleanup_error = $@ || 'candidate runtime cleanup failed';
+$cleanup_error ||= join('; ', map { %$_ } @$cleanup_errors) if $cleanup_errors && @$cleanup_errors;
 if ($cleanup_error ne '') {
     warn "candidate validation cleanup failed: $cleanup_error\n";
     $exit_code = 78 if $exit_code == 0;
