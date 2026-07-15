@@ -463,6 +463,9 @@ func (c *Client) RecoverIntegrationJournal(ctx context.Context, worktree string)
 	if journal.Version != integrationJournalVersionV1 && journal.Version != integrationJournalVersionV2 {
 		return fmt.Errorf("unsupported integration journal version %d", journal.Version)
 	}
+	if legacyIntegrationJournalNeedsOperatorRecovery(journal) {
+		return fmt.Errorf("legacy integration journal v1 has no scratch ownership proof; journal and scratch retained for operator recovery")
+	}
 	return c.withIntegrationTransactionLock(ctx, worktree, func(ctx context.Context) error {
 		return c.recoverIntegrationJournalLocked(ctx, worktree)
 	})
@@ -479,6 +482,9 @@ func (c *Client) recoverIntegrationJournalLocked(ctx context.Context, worktree s
 		// always follows the rollback path below.
 	default:
 		return fmt.Errorf("unsupported integration journal version %d", journal.Version)
+	}
+	if legacyIntegrationJournalNeedsOperatorRecovery(journal) {
+		return fmt.Errorf("legacy integration journal v1 has no scratch ownership proof; journal and scratch retained for operator recovery")
 	}
 	targetHead := strings.TrimSpace(journal.TargetHead)
 	desiredHead := strings.TrimSpace(journal.DesiredHead)
@@ -554,6 +560,10 @@ func (c *Client) recoverIntegrationJournalLocked(ctx context.Context, worktree s
 		)
 	}
 	return nil
+}
+
+func legacyIntegrationJournalNeedsOperatorRecovery(journal integrationJournal) bool {
+	return journal.Version == integrationJournalVersionV1 && strings.TrimSpace(journal.ScratchOwner.AttemptID) == ""
 }
 
 func (c *Client) proveIntegrationScratchWorktree(ctx context.Context, worktree, scratchPath, desiredHead string, owner integrationScratchOwnership) (string, error) {

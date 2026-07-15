@@ -1516,6 +1516,84 @@ func TestRecoverIntegrationJournalRejectsUnknownVersionWithoutMutation(t *testin
 	}
 }
 
+func TestRecoverIntegrationJournalRejectsRawLegacyV1WithoutScratchOwner(t *testing.T) {
+	repo := t.TempDir()
+	gitDir := filepath.Join(repo, ".git")
+	if err := os.Mkdir(gitDir, 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	targetSentinel := filepath.Join(repo, "target-must-remain.txt")
+	if err := os.WriteFile(targetSentinel, []byte("target bytes\n"), 0o644); err != nil {
+		t.Fatalf("write target sentinel: %v", err)
+	}
+	scratch := filepath.Join(t.TempDir(), "scratch-must-remain")
+	if err := os.Mkdir(scratch, 0o755); err != nil {
+		t.Fatalf("mkdir scratch: %v", err)
+	}
+	scratchSentinel := filepath.Join(scratch, "scratch-must-remain.txt")
+	if err := os.WriteFile(scratchSentinel, []byte("scratch bytes\n"), 0o644); err != nil {
+		t.Fatalf("write scratch sentinel: %v", err)
+	}
+
+	var commands []string
+	runner := &rawMockRunner{runFunc: func(_ context.Context, args ...string) (string, error) {
+		commands = append(commands, strings.Join(args, " "))
+		if clientTestArgsForWorktree(args, repo, "rev-parse", "--git-common-dir") {
+			return gitDir, nil
+		}
+		return "", fmt.Errorf("unexpected command: %s", strings.Join(args, " "))
+	}}
+	client := NewClient(runner, slog.Default())
+	ctx := context.Background()
+	journalPath, err := client.integrationJournalPath(ctx, repo)
+	if err != nil {
+		t.Fatalf("integrationJournalPath() error = %v", err)
+	}
+	rawJournal, err := json.Marshal(map[string]any{
+		"version":          integrationJournalVersionV1,
+		"target_worktree":  repo,
+		"target_head":      "target-sha",
+		"desired_head":     "desired-sha",
+		"scratch_worktree": scratch,
+		"started_at":       time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal raw legacy journal: %v", err)
+	}
+	if bytes.Contains(rawJournal, []byte("scratch_owner")) {
+		t.Fatalf("raw legacy journal unexpectedly contains scratch_owner: %s", rawJournal)
+	}
+	if err := writeFileAtomic(journalPath, append(rawJournal, '\n'), 0o600); err != nil {
+		t.Fatalf("write raw legacy journal: %v", err)
+	}
+	journalBefore, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatalf("read journal before recovery: %v", err)
+	}
+	commands = nil
+
+	err = client.RecoverIntegrationJournal(ctx, repo)
+	if err == nil || !strings.Contains(err.Error(), "legacy integration journal v1 has no scratch ownership proof") {
+		t.Fatalf("RecoverIntegrationJournal() error = %v, want operator-recovery refusal", err)
+	}
+	if len(commands) != 0 {
+		t.Fatalf("recovery commands = %v, want no Git mutation or inspection", commands)
+	}
+	journalAfter, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatalf("journal was deleted: %v", err)
+	}
+	if !bytes.Equal(journalAfter, journalBefore) {
+		t.Fatal("journal contents changed during ownerless-v1 refusal")
+	}
+	if got, err := os.ReadFile(targetSentinel); err != nil || string(got) != "target bytes\n" {
+		t.Fatalf("target sentinel = %q, %v; want preserved", got, err)
+	}
+	if got, err := os.ReadFile(scratchSentinel); err != nil || string(got) != "scratch bytes\n" {
+		t.Fatalf("scratch sentinel = %q, %v; want preserved", got, err)
+	}
+}
+
 func TestRealProcessProfileRecoverIntegrationJournalRetainsTrackedEditsForV1AndV2(t *testing.T) {
 	for _, version := range []int{integrationJournalVersionV1, integrationJournalVersionV2} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
@@ -1762,8 +1840,12 @@ func TestRealProcessProfileRecoverIntegrationJournalRejectsUnprovenScratchWithou
 			}
 
 			err = client.RecoverIntegrationJournal(ctx, repo)
-			if err == nil || !strings.Contains(err.Error(), "is not a registered worktree") {
-				t.Fatalf("RecoverIntegrationJournal() error = %v, want unproven scratch refusal", err)
+			wantError := "is not a registered worktree"
+			if version == integrationJournalVersionV1 {
+				wantError = "legacy integration journal v1 has no scratch ownership proof"
+			}
+			if err == nil || !strings.Contains(err.Error(), wantError) {
+				t.Fatalf("RecoverIntegrationJournal() error = %v, want %q refusal", err, wantError)
 			}
 			if head := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); head != targetHead {
 				t.Fatalf("HEAD = %s, want unchanged %s", head, targetHead)
