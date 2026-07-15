@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -296,12 +297,23 @@ func applyOrchestratorContinuationProjection(snapshot *protocol.OrchestrationSna
 }
 
 func rootedOrchestratorContinuationRequired(completeCheckPassed bool, snapshot protocol.OrchestrationSnapshot) bool {
-	return !completeCheckPassed && len(snapshot.Interactions) == 0 && len(snapshot.NestedRoots) > 0
+	if completeCheckPassed || len(snapshot.Interactions) > 0 {
+		return false
+	}
+	for _, nested := range snapshot.NestedRoots {
+		if !slices.Contains(nested.ExclusionReasons, "lifecycle-backlog") {
+			return true
+		}
+	}
+	return false
 }
 
 func orchestratorContinuationPrompt(lease daemonstate.OrchestratorScopeLease, nested []protocol.OrchestrationNestedRoot) string {
 	ids := make([]string, 0, len(nested))
 	for _, item := range nested {
+		if slices.Contains(item.ExclusionReasons, "lifecycle-backlog") {
+			continue
+		}
 		if id := strings.TrimSpace(item.IssueID); id != "" {
 			ids = append(ids, id)
 		}
@@ -425,12 +437,18 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		return snapshot, nil
 	}
 
-	tasks := materializedTasks
-	roots := projectOrchestrationRootTasks(tasks)
-	if err := a.enrichPendingDecisions(ctx, projectID, issueClient, &snapshot, roots); err != nil {
+	// Project orchestration consumes the daemon's materialized projection only.
+	// Its actionable window is live, unparented, canonical lifecycle Open roots
+	// before LIMIT. Dependencies remain readiness context only; review and
+	// decision inventory are independently scoped to all live project roots.
+	projectTasks := materializedTasks
+	projectRoots := projectOrchestrationRootTasks(projectTasks)
+	candidateRoots := projectOrchestrationCandidateRoots(projectRoots, limit)
+	tasks := materializedProjectOrchestrationContextForCandidates(projectTasks, candidateRoots)
+	if err := a.enrichPendingDecisions(ctx, projectID, issueClient, &snapshot, projectRoots); err != nil {
 		return protocol.OrchestrationSnapshot{}, err
 	}
-	snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, roots)
+	snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, projectRoots)
 	if err != nil {
 		return protocol.OrchestrationSnapshot{}, err
 	}
@@ -438,36 +456,21 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	for _, task := range tasks {
 		tasksByID[task.ID.String()] = task
 	}
-	snapshot.Health = orchestrationBoardHealth(tasks, tasksByID, limit, a.openIssueLimit())
-	openIssueCount := 0
-	for _, task := range tasks {
-		if task.State.Visibility == domain.IssueVisibilityLive && (task.Status == domain.StatusOpen || task.Status == domain.StatusInProgress || task.Status == domain.StatusInReview) {
-			openIssueCount++
-		}
+	projectTasksByID := make(map[string]domain.Task, len(projectTasks))
+	for _, task := range projectTasks {
+		projectTasksByID[task.ID.String()] = task
 	}
-	snapshot.Health.OpenIssueCount = openIssueCount
-	if openIssueCount > snapshot.Health.OpenIssueLimit {
-		snapshot.Health.Diagnostics = append(snapshot.Health.Diagnostics, fmt.Sprintf("open issue count %d exceeds refusal threshold %d", openIssueCount, snapshot.Health.OpenIssueLimit))
-		sort.Strings(snapshot.Health.Diagnostics)
-		snapshot.Health.Diagnostics = uniqueStrings(snapshot.Health.Diagnostics)
-		snapshot.Health.Healthy = false
-	}
-	for _, task := range roots {
+	openIssueCount := canonicalOpenIssueCount(projectTasks)
+	snapshot.Health = orchestrationBoardHealth(projectTasks, projectTasksByID, openIssueCount, limit, a.openIssueLimit())
+	for _, task := range candidateRoots {
 		snapshot.Candidates = append(snapshot.Candidates, orchestrationCandidateForTask(task, request.ActorID, snapshot.GeneratedAt, snapshot.Health.Diagnostics))
 	}
 	sort.SliceStable(snapshot.Candidates, func(i, j int) bool {
 		left, right := snapshot.Candidates[i], snapshot.Candidates[j]
 		return orchestrationCandidateLess(left, right, tasksByID)
 	})
-	if len(snapshot.Candidates) > limit {
-		snapshot.Candidates = snapshot.Candidates[:limit]
-	}
 	snapshot.Health.InspectedCount = len(snapshot.Candidates)
-	sort.SliceStable(roots, func(i, j int) bool { return orchestrationTaskLess(roots[i], roots[j]) })
-	if len(roots) > limit {
-		roots = roots[:limit]
-	}
-	for _, rootTask := range roots {
+	for _, rootTask := range candidateRoots {
 		root := rootTask.ID.String()
 		snapshot.Roots = append(snapshot.Roots, root)
 		ready, err := a.daemon.taskGraphReadinessForActor(ctx, projectID, root, request.ActorID)
@@ -481,8 +484,8 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		}
 		mergeOrchestrationSnapshot(&snapshot, part)
 	}
-	constrainProjectOrchestrationSnapshotToRoots(&snapshot, roots)
-	if globalActive := orchestrationGlobalActiveCount(tasks); globalActive > snapshot.Capacity.TotalCountingCapacityCount {
+	constrainProjectOrchestrationSnapshotToRoots(&snapshot, candidateRoots)
+	if globalActive := orchestrationGlobalActiveCount(projectTasks); globalActive > snapshot.Capacity.TotalCountingCapacityCount {
 		snapshot.Capacity.TotalCountingCapacityCount = globalActive
 	}
 	explainOrchestrationCandidates(&snapshot)
@@ -491,6 +494,64 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	snapshot.Completion = projectOrchestrationCompletion(snapshot)
 	finalizeOrchestrationSnapshotSource(&snapshot)
 	return snapshot, nil
+}
+
+func canonicalOpenIssueCount(tasks []domain.Task) int {
+	count := 0
+	for _, task := range tasks {
+		if task.IssueFacts().LifecycleState == domain.IssueWorkflowOpen {
+			count++
+		}
+	}
+	return count
+}
+
+func materializedProjectOrchestrationContext(tasks []domain.Task, limit int) []domain.Task {
+	return materializedProjectOrchestrationContextForCandidates(tasks, projectOrchestrationCandidateRoots(projectOrchestrationRootTasks(tasks), limit))
+}
+
+func projectOrchestrationCandidateRoots(roots []domain.Task, limit int) []domain.Task {
+	open := make([]domain.Task, 0, len(roots))
+	for _, task := range roots {
+		if task.IssueFacts().LifecycleState == domain.IssueWorkflowOpen {
+			open = append(open, task)
+		}
+	}
+	sort.SliceStable(open, func(i, j int) bool { return orchestrationTaskLess(open[i], open[j]) })
+	if limit > 0 && len(open) > limit {
+		open = open[:limit]
+	}
+	return open
+}
+
+func materializedProjectOrchestrationContextForCandidates(tasks, candidates []domain.Task) []domain.Task {
+	byID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		id := strings.TrimSpace(task.ID.String())
+		if id == "" {
+			continue
+		}
+		byID[id] = task
+	}
+	selected := make(map[string]struct{}, len(candidates)*2)
+	for _, candidate := range candidates {
+		candidateID := candidate.ID.String()
+		selected[candidateID] = struct{}{}
+		for _, dependency := range candidate.Dependencies {
+			if dependencyID := strings.TrimSpace(dependency.ID.String()); dependencyID != "" {
+				if _, ok := byID[dependencyID]; ok {
+					selected[dependencyID] = struct{}{}
+				}
+			}
+		}
+	}
+	context := make([]domain.Task, 0, len(selected))
+	for _, task := range tasks {
+		if _, ok := selected[task.ID.String()]; ok {
+			context = append(context, task)
+		}
+	}
+	return context
 }
 
 func constrainProjectOrchestrationSnapshotToRoots(snapshot *protocol.OrchestrationSnapshot, roots []domain.Task) {
@@ -735,11 +796,14 @@ func explainOrchestrationCandidates(snapshot *protocol.OrchestrationSnapshot) {
 			// A durable whole-issue interaction is the specific source of the
 			// block and must remain visible as Waiting Human.
 			continue
+		case candidate.Classification != string(domain.OrchestrationCandidateOpen):
+			// Canonical lifecycle/ownership classification precedes rooted graph
+			// refinement. In particular, a backlog exclusion reported by graph
+			// readiness must not collapse the project candidate into generic blocked.
+			continue
 		case snapshot.Blocked[candidate.IssueID] != "":
 			candidate.Included, candidate.Eligible, candidate.Classification, candidate.Reason = false, false, string(domain.OrchestrationCandidateBlocked), "excluded: "+snapshot.Blocked[candidate.IssueID]
 			candidate.ExclusionReasons = append(candidate.ExclusionReasons, snapshot.Blocked[candidate.IssueID])
-		case candidate.Classification != string(domain.OrchestrationCandidateOpen):
-			continue
 		case !candidate.Sufficient && candidate.Executability.Disposition != "":
 			candidate.Included, candidate.Eligible, candidate.Classification = false, false, string(candidate.Executability.Disposition)
 			candidate.Reason = "excluded: " + strings.Join(candidate.Executability.Reasons, "; ")
@@ -1032,13 +1096,12 @@ func (a daemonOrchestrationAuthority) openIssueLimit() int {
 	return defaultOrchestrationOpenIssueLimit
 }
 
-func orchestrationBoardHealth(tasks []domain.Task, byID map[string]domain.Task, inspectLimit, openLimit int) protocol.OrchestrationHealth {
-	health := protocol.OrchestrationHealth{Healthy: true, InspectLimit: inspectLimit, OpenIssueLimit: openLimit}
+func orchestrationBoardHealth(tasks []domain.Task, byID map[string]domain.Task, canonicalOpenCount, inspectLimit, openLimit int) protocol.OrchestrationHealth {
+	health := protocol.OrchestrationHealth{Healthy: true, OpenIssueCount: canonicalOpenCount, InspectLimit: inspectLimit, OpenIssueLimit: openLimit}
 	for _, task := range tasks {
 		if task.Status == domain.StatusDone {
 			continue
 		}
-		health.OpenIssueCount++
 		id := task.ID.String()
 		if task.ParentID != nil && !task.ParentID.IsZero() {
 			parent := task.ParentID.String()
@@ -1122,14 +1185,14 @@ func uniqueStrings(values []string) []string {
 }
 
 func orchestrationSkipReason(issueID string, nestedRoots, active map[string]struct{}, blocked map[string]string) string {
+	if reason := blocked[issueID]; reason != "" {
+		return reason
+	}
 	if _, ok := nestedRoots[issueID]; ok {
 		return fmt.Sprintf("nested-root-start-orchestrator-session: az orchestrator-session start --root %s", issueID)
 	}
 	if _, ok := active[issueID]; ok {
 		return "session-already-running"
-	}
-	if reason := blocked[issueID]; reason != "" {
-		return reason
 	}
 	return "not-runnable"
 }
