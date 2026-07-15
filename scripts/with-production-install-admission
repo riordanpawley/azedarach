@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "--" ]]; then
+  shift
+fi
+if (($# == 0)); then
+  echo "usage: with-production-install-admission -- command [args]" >&2
+  exit 64
+fi
+
+git_common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
+admission_dir="$git_common_dir/azedarach-production-admission"
+owner_dir="$admission_dir/production"
+participants_dir="$admission_dir/validations"
+wait_seconds="${AZEDARACH_PRODUCTION_ADMISSION_WAIT_SECONDS:-15}"
+
+case "$wait_seconds" in
+  ''|*[!0-9]*)
+    echo "AZEDARACH_PRODUCTION_ADMISSION_WAIT_SECONDS must be a non-negative integer" >&2
+    exit 64
+    ;;
+esac
+
+mkdir -p "$participants_dir"
+started_at=$SECONDS
+reported=0
+
+owner_is_live() {
+  local pid
+  pid="$(cat "$owner_dir/pid" 2>/dev/null || true)"
+  [[ -z "$pid" ]] || { [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; }
+}
+
+while ! mkdir "$owner_dir" 2>/dev/null; do
+  if ! owner_is_live; then
+    rm -rf "$owner_dir"
+    continue
+  fi
+  if ((reported == 0)); then
+    echo "Production install admission is waiting for another installer (pid $(cat "$owner_dir/pid")); timeout ${wait_seconds}s." >&2
+    reported=1
+  fi
+  if ((SECONDS - started_at >= wait_seconds)); then
+    echo "Timed out waiting for production install admission after ${wait_seconds}s." >&2
+    exit 75
+  fi
+  sleep 0.1
+done
+printf '%s\n' "$$" >"$owner_dir/pid"
+printf '%s\n' "$*" >"$owner_dir/reason"
+
+cleanup() {
+  if [[ "$(cat "$owner_dir/pid" 2>/dev/null || true)" == "$$" ]]; then
+    rm -rf "$owner_dir"
+  fi
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+shopt -s nullglob
+participants=("$participants_dir"/*)
+while ((${#participants[@]} > 0)); do
+  live=0
+  holder=""
+  for participant in "$participants_dir"/*; do
+    [[ -e "$participant" ]] || continue
+    pid="$(cat "$participant/pid" 2>/dev/null || true)"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      live=1
+      holder="$(cat "$participant/reason" 2>/dev/null || echo validation) (pid $pid)"
+    else
+      rm -rf "$participant"
+    fi
+  done
+  ((live == 1)) || break
+  if ((reported == 0)); then
+    echo "Production install admission is waiting for active $holder; timeout ${wait_seconds}s." >&2
+    reported=1
+  fi
+  if ((SECONDS - started_at >= wait_seconds)); then
+    echo "Timed out waiting for production install admission after ${wait_seconds}s; active $holder." >&2
+    exit 75
+  fi
+  sleep 0.1
+  participants=("$participants_dir"/*)
+done
+
+set +e
+AZEDARACH_PRODUCTION_ADMISSION_ACTIVE="$$" "$@"
+status=$?
+set -e
+exit "$status"

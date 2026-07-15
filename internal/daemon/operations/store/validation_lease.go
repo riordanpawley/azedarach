@@ -32,9 +32,9 @@ func (s *SQLiteStore) AcquireValidation(ctx context.Context, request domain.Vali
 		return domain.ValidationRequest{}, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO daemon_validation_requests
-		(request_id,lease_token_hash,project_id,issue_id,class,profile,command,source_revision,state,queued_at,heartbeat_at,expires_at)
-		VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?)`, request.RequestID, validationTokenHash(request.LeaseToken), request.ProjectID, request.IssueID, request.Class,
-		request.Profile, request.Command, request.SourceRevision, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(request.TTL).Format(time.RFC3339Nano))
+		(request_id,lease_token_hash,project_id,issue_id,class,profile,command,source_revision,reviewer_id,review_epoch_event_id,state,queued_at,heartbeat_at,expires_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)`, request.RequestID, validationTokenHash(request.LeaseToken), request.ProjectID, request.IssueID, request.Class,
+		request.Profile, request.Command, request.SourceRevision, request.ReviewerID, request.ReviewEpochEventID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(request.TTL).Format(time.RFC3339Nano))
 	if err != nil {
 		return domain.ValidationRequest{}, fmt.Errorf("queue validation request: %w", err)
 	}
@@ -45,7 +45,7 @@ func (s *SQLiteStore) AcquireValidation(ctx context.Context, request domain.Vali
 	if err := authenticateValidationRequestTx(ctx, tx, request.RequestID, request.LeaseToken); err != nil {
 		return domain.ValidationRequest{}, err
 	}
-	if current.ProjectID != request.ProjectID || current.IssueID != request.IssueID || current.Class != request.Class || current.Profile != request.Profile || current.Command != request.Command || current.SourceRevision != request.SourceRevision {
+	if current.ProjectID != request.ProjectID || current.IssueID != request.IssueID || current.Class != request.Class || current.Profile != request.Profile || current.Command != request.Command || current.SourceRevision != request.SourceRevision || current.ReviewerID != request.ReviewerID || current.ReviewEpochEventID != request.ReviewEpochEventID {
 		return domain.ValidationRequest{}, fmt.Errorf("validation request id %s already exists with different identity", request.RequestID)
 	}
 	if current.State == domain.ValidationRequestQueued {
@@ -324,7 +324,7 @@ func reconcileValidationQueueTx(ctx context.Context, tx *sql.Tx, projectID strin
 
 const validationAggregateSharedBypassLimit = 1
 
-const validationSelect = `SELECT sequence,request_id,project_id,issue_id,class,profile,command,source_revision,state,queued_at,started_at,heartbeat_at,expires_at,finished_at,outcome,evidence_json FROM daemon_validation_requests`
+const validationSelect = `SELECT sequence,request_id,project_id,issue_id,class,profile,command,source_revision,reviewer_id,review_epoch_event_id,state,queued_at,started_at,heartbeat_at,expires_at,finished_at,outcome,evidence_json FROM daemon_validation_requests`
 
 type validationScanner interface{ Scan(...any) error }
 
@@ -360,7 +360,7 @@ func scanValidationRequest(scanner validationScanner) (domain.ValidationRequest,
 	var queued string
 	var started, heartbeat, expires, finished sql.NullString
 	var evidenceJSON string
-	if err := scanner.Scan(&request.Sequence, &request.RequestID, &request.ProjectID, &request.IssueID, &request.Class, &request.Profile, &request.Command, &request.SourceRevision, &request.State, &queued, &started, &heartbeat, &expires, &finished, &request.Outcome, &evidenceJSON); err != nil {
+	if err := scanner.Scan(&request.Sequence, &request.RequestID, &request.ProjectID, &request.IssueID, &request.Class, &request.Profile, &request.Command, &request.SourceRevision, &request.ReviewerID, &request.ReviewEpochEventID, &request.State, &queued, &started, &heartbeat, &expires, &finished, &request.Outcome, &evidenceJSON); err != nil {
 		return request, err
 	}
 	if err := json.Unmarshal([]byte(evidenceJSON), &request.Evidence); err != nil {

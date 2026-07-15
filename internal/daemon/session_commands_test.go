@@ -1428,6 +1428,7 @@ type sessionStartTmuxRunner struct {
 	sendKeysErrOnCall    int
 	captureOutput        string
 	onSendKeys           func(string, string)
+	onRunWithInput       func(context.Context, string, []string) (string, error)
 }
 
 func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
@@ -1493,9 +1494,12 @@ func tmuxCommandEnvironmentValue(command []string, key string) (string, bool) {
 	return "", false
 }
 
-func (r *sessionStartTmuxRunner) RunWithInput(_ context.Context, input string, args ...string) (string, error) {
+func (r *sessionStartTmuxRunner) RunWithInput(ctx context.Context, input string, args ...string) (string, error) {
 	r.commands = append(r.commands, append([]string(nil), args...))
 	r.inputPayloads = append(r.inputPayloads, input)
+	if r.onRunWithInput != nil {
+		return r.onRunWithInput(ctx, input, args)
+	}
 	return "", nil
 }
 

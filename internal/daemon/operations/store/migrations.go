@@ -25,12 +25,14 @@ var orderedMigrations = []migration{
 	{id: "daemon_operations_0001", path: "migrations/0001_daemon_operations.sql"},
 	{id: "daemon_operations_0002_progress", path: "migrations/0002_daemon_operation_progress.sql"},
 	{id: "daemon_operations_0003_validation_leases", path: "migrations/0003_validation_leases.sql"},
+	{id: "daemon_operations_0004_review_validation_assignment", path: "migrations/0004_review_validation_assignment.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "daemon_operations_0001", Path: "migrations/0001_daemon_operations.sql", Checksum: "573eaaeacb02741d90c12f4d0c747120dd7422dad46d65b0ca2e10fa77408321"},
 	{ID: "daemon_operations_0002_progress", Path: "migrations/0002_daemon_operation_progress.sql", Checksum: "57fde6bd6348ea3925a7c027facbf23185bff81ebe659dfb6f5de1f2bb0c009a"},
 	{ID: "daemon_operations_0003_validation_leases", Path: "migrations/0003_validation_leases.sql", Checksum: "317c9ea680d378637b417005ccfcf0d989e4c025cbbacabdd581f00dafac19df"},
+	{ID: "daemon_operations_0004_review_validation_assignment", Path: "migrations/0004_review_validation_assignment.sql", Checksum: "6f5d54a3f27937ae9adcdd6a0b3f9b79ddd2814f32635eb2c3e5ca051c3268ca"},
 }
 
 const migrationArtifactAuthority sqlitemigration.Authority = "project.daemon_operations"
@@ -91,6 +93,8 @@ func validateValidationLeaseSchema(ctx context.Context, db *sql.DB) error {
 			"profile text not null",
 			"command text not null",
 			"source_revision text not null",
+			"reviewer_id text not null default ''",
+			"review_epoch_event_id integer not null default 0 check (review_epoch_event_id >= 0)",
 			"state text not null check (state in ('queued','active','completed','cancelled','expired','failed'))",
 			"queued_at text not null",
 			"started_at text",
