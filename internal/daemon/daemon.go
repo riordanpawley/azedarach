@@ -215,6 +215,8 @@ type Daemon struct {
 	materializers                        map[string]*projectReadMaterializer
 	materializersStarted                 bool
 	materializersContext                 context.Context
+	projectReadRuntimeHydrate            func(context.Context, string, []domain.Task) ([]domain.Task, error)
+	projectReadWorktreeRefresh           func(context.Context, string, *projectReadMaterializer) error
 	reviewLeaseReleasedBeforeClose       func(context.Context, string, string) error
 	watchClientsMu                       sync.Mutex
 	watchClients                         map[string]watchClientObservation
@@ -281,11 +283,13 @@ func New(cfg Config) *Daemon {
 		cfg.LockPath = appconfig.GlobalDaemonLockPath()
 	}
 	tmuxRunner := &tmux.ExecRunner{}
+	tmuxClient := tmux.NewClient(tmuxRunner, cfg.Logger)
 	gitRunner := git.NewExecRunner(cfg.RepoDir)
 	gitClient := git.NewClient(gitRunner, cfg.Logger)
-	runtimeStateStore := daemonstate.NewRuntimeStateStore(runtimeRepoDir, cfg.Logger)
+	runtimeLiveness := daemonstate.WithRuntimeLivenessProbe(tmuxClient.HasSession)
+	runtimeStateStore := daemonstate.NewRuntimeStateStore(runtimeRepoDir, cfg.Logger, runtimeLiveness)
 	if cfg.ScopedRuntime {
-		runtimeStateStore = daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(runtimeRepoDir, ".azedarach", "azedarach.db"), cfg.Logger)
+		runtimeStateStore = daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(runtimeRepoDir, ".azedarach", "azedarach.db"), cfg.Logger, runtimeLiveness)
 	}
 	runtimeReconcileQueue := newReconcileQueue[protocol.RuntimeReconcileResponseBody](reconcileQueueConfig{
 		Name:    "runtime_reconcile",
@@ -350,7 +354,7 @@ func New(cfg Config) *Daemon {
 		runtimeStoresByRoot:                map[string]*daemonstate.RuntimeStateStore{},
 		hookLogByProject:                   map[string][]protocol.HookLogEvent{},
 		uiState:                            map[string]string{},
-		tmux:                               tmux.NewClient(tmuxRunner, cfg.Logger),
+		tmux:                               tmuxClient,
 		git:                                gitClient,
 		gitStatusAdapter:                   gitService,
 		session:                            sessionHandler,

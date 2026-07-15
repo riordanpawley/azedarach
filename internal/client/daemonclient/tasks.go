@@ -612,13 +612,14 @@ func (c *Client) GetTaskSnapshotWithArchiveMode(ctx context.Context, taskID stri
 		return TaskSnapshot{}, fmt.Errorf("invalid archive mode: %s", archiveMode)
 	}
 
+	startedAt := time.Now()
 	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
 	defer cancel()
 
 	resp, err := c.commandJSONResponse(waitCtx, CommandTaskGet, TaskIDRequest{TaskID: parsedTaskID, Archived: string(archiveMode)})
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)
+			return TaskSnapshot{}, c.readWait.tracedTimeoutError(ctx, CommandTaskGet, mode, budget, startedAt, err)
 		}
 		return TaskSnapshot{}, err
 	}
@@ -698,13 +699,14 @@ func (c *Client) getManyTaskSnapshot(ctx context.Context, taskIDs []string, mode
 		return TaskSnapshot{}, fmt.Errorf("task_ids is required")
 	}
 
+	startedAt := time.Now()
 	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
 	defer cancel()
 
 	resp, err := c.commandJSONResponse(waitCtx, CommandTaskGetMany, TaskIDsRequest{TaskIDs: parsedTaskIDs, IncludeAncestors: opts.includeAncestors, ExcludeDependents: opts.excludeDependents, DirectDependents: opts.directDependents, MetadataOnly: opts.metadataOnly})
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)
+			return TaskSnapshot{}, c.readWait.tracedTimeoutError(ctx, CommandTaskGetMany, mode, budget, startedAt, err)
 		}
 		return TaskSnapshot{}, err
 	}
@@ -818,6 +820,7 @@ func (c *Client) listTasksSnapshotWithQueryMode(ctx context.Context, query strin
 }
 
 func (c *Client) listTasksSnapshotWithQueryArchiveMode(ctx context.Context, query string, mode ReadWaitMode, includeDependencies bool, archiveMode protocol.ArchiveMode) (TaskSnapshot, error) {
+	startedAt := time.Now()
 	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
 	defer cancel()
 	if !archiveMode.Valid() {
@@ -833,7 +836,7 @@ func (c *Client) listTasksSnapshotWithQueryArchiveMode(ctx context.Context, quer
 	resp, err := c.commandJSONResponse(waitCtx, CommandTaskList, body)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)
+			return TaskSnapshot{}, c.readWait.tracedTimeoutError(ctx, CommandTaskList, mode, budget, startedAt, err)
 		}
 		return TaskSnapshot{}, err
 	}
@@ -882,6 +885,7 @@ func (c *Client) BoardSnapshotWithMode(ctx context.Context, mode ReadWaitMode) (
 
 // BoardSnapshotForViewWithMode fetches a board snapshot grouped by the requested view.
 func (c *Client) BoardSnapshotForViewWithMode(ctx context.Context, viewID string, mode ReadWaitMode) (TaskSnapshot, error) {
+	startedAt := time.Now()
 	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
 	defer cancel()
 
@@ -892,7 +896,7 @@ func (c *Client) BoardSnapshotForViewWithMode(ctx context.Context, viewID string
 	resp, err := c.commandJSONResponse(waitCtx, CommandBoardFetch, body)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)
+			return TaskSnapshot{}, c.readWait.tracedTimeoutError(ctx, CommandBoardFetch, mode, budget, startedAt, err)
 		}
 		return TaskSnapshot{}, err
 	}

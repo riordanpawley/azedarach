@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 )
 
 type ReadWaitMode string
@@ -74,6 +76,12 @@ func (p ReadWaitPolicy) timeoutError(mode ReadWaitMode, budget time.Duration, er
 		Hint:   fmt.Sprintf("Task snapshot read timed out after %s; keeping current local view", budget),
 		Err:    err,
 	}
+}
+
+func (p ReadWaitPolicy) tracedTimeoutError(ctx context.Context, command string, mode ReadWaitMode, budget time.Duration, startedAt time.Time, err error) *ReadWaitTimeoutError {
+	latencytrace.LogPhaseContext(ctx, nil, "daemonclient", "task_snapshot.timeout", startedAt,
+		"command", command, "outcome", "timeout", "budget_ms", budget.Milliseconds(), "error", err)
+	return p.timeoutError(mode, budget, err)
 }
 
 type ReadWaitTimeoutError struct {
