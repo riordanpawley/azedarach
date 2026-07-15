@@ -1524,22 +1524,25 @@ func TestClient_ListGraphReadinessWithRuntimeBoundsProjectCandidatesAndCountsAll
 	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
+	// Seed older, higher-priority backlog rows first. The bounded actionable
+	// window must apply canonical lifecycle Open before LIMIT, otherwise these
+	// rows crowd every Open candidate out of the result.
+	for i := 0; i < 189; i++ {
+		_, err := client.Create(ctx, CreateTaskParams{
+			Title:     fmt.Sprintf("Backlog %03d", i),
+			Type:      domain.TypeTask,
+			Priority:  domain.P0,
+			Status:    domain.StatusOpen,
+			Lifecycle: domain.IssueWorkflowBacklog,
+		})
+		require.NoError(t, err)
+	}
 	for i := 0; i < 12; i++ {
 		_, err := client.Create(ctx, CreateTaskParams{
 			Title:    fmt.Sprintf("Candidate %02d", i),
 			Type:     domain.TypeTask,
 			Priority: domain.P1,
 			Status:   domain.StatusOpen,
-		})
-		require.NoError(t, err)
-	}
-	for i := 0; i < 189; i++ {
-		_, err := client.Create(ctx, CreateTaskParams{
-			Title:     fmt.Sprintf("Backlog %03d", i),
-			Type:      domain.TypeTask,
-			Priority:  domain.P1,
-			Status:    domain.StatusOpen,
-			Lifecycle: domain.IssueWorkflowBacklog,
 		})
 		require.NoError(t, err)
 	}
@@ -1553,6 +1556,10 @@ func TestClient_ListGraphReadinessWithRuntimeBoundsProjectCandidatesAndCountsAll
 	tasks, err := client.ListGraphReadinessWithRuntime(ctx, "proj", "", 5)
 	require.NoError(t, err)
 	require.Len(t, tasks, 5)
+	for _, task := range tasks {
+		assert.Equal(t, domain.IssueWorkflowOpen, task.IssueFacts().LifecycleState)
+		assert.Contains(t, task.Title, "Candidate")
+	}
 	count, err := client.CountOpenOrchestrationIssues(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 12, count, "189 backlog, 15 active, and 1 review-requested issues must not inflate canonical lifecycle Open")

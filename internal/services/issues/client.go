@@ -1624,9 +1624,10 @@ func (c *Client) CountOpenOrchestrationIssues(ctx context.Context) (int, error) 
 func (c *Client) projectGraphReadinessContextIDs(ctx context.Context, db *sql.DB, limit int) ([]string, error) {
 	rows, err := db.QueryContext(ctx, `
 		WITH candidates(id) AS (
-			SELECT id FROM issues INDEXED BY idx_issues_status_deleted_priority_updated
+			SELECT id FROM issues
 			WHERE visibility = 'live'
-			  AND disposition IN ('backlog','ready')
+			  AND disposition = 'ready'
+			  AND engagement = 'idle'
 			ORDER BY priority ASC, updated_at ASC, id ASC
 			LIMIT ?
 		), context(id) AS (
