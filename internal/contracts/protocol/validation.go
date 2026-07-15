@@ -5,6 +5,7 @@ import "github.com/riordanpawley/azedarach/internal/domain"
 const (
 	CommandValidationAcquire   = "validation.acquire"
 	CommandValidationHeartbeat = "validation.heartbeat"
+	CommandValidationNested    = "validation.authorize_nested"
 	CommandValidationFinish    = "validation.finish"
 	CommandValidationStatus    = "validation.status"
 )
@@ -24,6 +25,12 @@ type ValidationHeartbeatRequest struct {
 	RequestID  string `json:"request_id"`
 	LeaseToken string `json:"lease_token"`
 	TTLSeconds int    `json:"ttl_seconds,omitempty"`
+}
+
+type ValidationAuthorizeNestedRequest struct {
+	RequestID  string                 `json:"request_id"`
+	LeaseToken string                 `json:"lease_token"`
+	Class      domain.ValidationClass `json:"class"`
 }
 
 type ValidationFinishRequest struct {

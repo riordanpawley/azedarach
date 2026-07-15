@@ -2,12 +2,18 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/cli"
+	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
+	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 )
 
@@ -410,5 +416,65 @@ func TestParseLearnConsolidationArgs(t *testing.T) {
 	}
 	if _, err := parseLearnSuggestionRejectArgs([]string{"--note", "not a duplicate", "learn-sug-1"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunLearnProjectRPCHonorsExplicitRegisteredProject(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	defaultRepo := filepath.Join(home, "default")
+	selectedRepo := filepath.Join(home, "selected")
+	defaultID, err := config.ProjectIDForRoot(defaultRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectedID, err := config.ProjectIDForRoot(selectedRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveProjectsRegistry(&config.ProjectsRegistry{DefaultProject: "Default", Projects: []config.Project{
+		{ID: defaultID, Name: "Default", Path: defaultRepo},
+		{ID: selectedID, Name: "Selected", Path: selectedRepo},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	commands := 0
+	transport := &devServerTransport{replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		commands++
+		if req.Meta.ProjectID.String() != selectedID {
+			t.Fatalf("metadata project = %q, want %q", req.Meta.ProjectID, selectedID)
+		}
+		var body protocol.LearnDoctorRequestBody
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.ProjectID != selectedID {
+			t.Fatalf("body project = %q, want %q", body.ProjectID, selectedID)
+		}
+		return jsonResponse(req, protocol.LearnDoctorResponseBody{})
+	}}
+	deps := &cli.Dependencies{ProjectID: defaultID, RepoDir: defaultRepo, DaemonClient: daemonclient.New(transport).WithProjectID(defaultID)}
+	err = runLearnProjectRPCWithDeps(deps, "Selected", protocol.CommandLearnDoctor, func(projectID string) any {
+		return protocol.LearnDoctorRequestBody{ProjectID: projectID}
+	}, &protocol.LearnDoctorResponseBody{})
+	if err != nil {
+		t.Fatalf("learn doctor RPC: %v", err)
+	}
+	if commands != 1 {
+		t.Fatalf("commands = %d, want 1", commands)
+	}
+	if deps.ProjectID != defaultID || deps.RepoDir != defaultRepo {
+		t.Fatalf("project context not restored: project=%q repo=%q", deps.ProjectID, deps.RepoDir)
+	}
+
+	err = runLearnProjectRPCWithDeps(deps, "missing", protocol.CommandLearnDoctor, func(projectID string) any {
+		return protocol.LearnDoctorRequestBody{ProjectID: projectID}
+	}, &protocol.LearnDoctorResponseBody{})
+	if !errors.Is(err, config.ErrProjectNotFound) {
+		t.Fatalf("unknown project error = %v", err)
+	}
+	if commands != 1 {
+		t.Fatalf("unknown project sent daemon command; commands = %d", commands)
 	}
 }

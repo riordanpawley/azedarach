@@ -22,6 +22,14 @@ func (c *Client) ValidationHeartbeat(ctx context.Context, req protocol.Validatio
 	return out, nil
 }
 
+func (c *Client) ValidationAuthorizeNested(ctx context.Context, req protocol.ValidationAuthorizeNestedRequest) (protocol.ValidationRequestResponse, error) {
+	var out protocol.ValidationRequestResponse
+	if err := c.commandJSON(ctx, protocol.CommandValidationNested, req, &out); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
 func (c *Client) ValidationFinish(ctx context.Context, req protocol.ValidationFinishRequest) (protocol.ValidationRequestResponse, error) {
 	var out protocol.ValidationRequestResponse
 	if err := c.commandJSON(ctx, protocol.CommandValidationFinish, req, &out); err != nil {

@@ -1,9 +1,13 @@
 #!/usr/bin/env perl
 use strict;
 use warnings;
-use JSON::PP qw(decode_json);
+use Fcntl qw(F_GETFD F_SETFD FD_CLOEXEC);
+use File::Basename qw(basename);
 use File::Temp qw(tempfile);
-use POSIX qw(setpgid);
+use IO::Select;
+use JSON::PP qw(decode_json encode_json);
+use POSIX qw(:sys_wait_h setpgid);
+use Socket qw(AF_UNIX SOCK_STREAM PF_UNSPEC);
 use Time::HiRes qw(time sleep);
 
 my $mode = 'run';
@@ -22,6 +26,7 @@ while (@ARGV && $ARGV[0] ne '--') {
 shift @ARGV if @ARGV && $ARGV[0] eq '--';
 die "unsupported validation class $class\n" unless $class eq 'aggregate' || $class eq 'shared' || $class eq 'safe';
 my $az = $ENV{AZEDARACH_VALIDATION_AZ_BIN} || 'az';
+my $git = $ENV{AZEDARACH_VALIDATION_GIT_BIN} || 'git';
 
 if ($mode eq 'status') {
     exec $az, 'validation', 'status', '--json' or die "exec validation status: $!\n";
@@ -31,37 +36,46 @@ if ($mode eq 'watch') {
 }
 die "usage: with-machine-validation-lease [--status|--watch] | --class aggregate|shared|safe --profile name -- command [args]\n" unless @ARGV;
 
-# Nested build/test commands remain under the outer canonical request. The
-# daemon record, heartbeat process, and expiry remain owned by the outer wrapper.
+# Nested commands prove membership in the outer command tree with an inherited
+# kernel descriptor. The public request id is insufficient, and the lease token
+# is never present in the executed command environment or argv.
 if ($ENV{AZEDARACH_VALIDATION_REQUEST_ID}) {
-    my $status = eval { decode_json(capture($az, 'validation', 'status', '--json')) };
-    die "verify nested validation request with daemon\n" unless $status && ref($status->{active}) eq 'ARRAY';
-    my ($owner) = grep { ($_->{request_id} || '') eq $ENV{AZEDARACH_VALIDATION_REQUEST_ID} } @{$status->{active}};
-    die "nested validation request is not active\n" unless $owner;
-    my $outer_class = $owner->{class} || '';
-    my $compatible = $outer_class eq 'aggregate' || $outer_class eq $class;
-    die "nested $class validation cannot join active $outer_class request\n" unless $compatible;
-    $ENV{AZEDARACH_VALIDATION_CLASS} = $outer_class;
-    $ENV{AZEDARACH_VALIDATION_PROFILE} = $owner->{profile} || $ENV{AZEDARACH_VALIDATION_PROFILE} || '';
+    my $fd = $ENV{AZEDARACH_VALIDATION_NESTED_FD};
+    die "nested validation requires an inherited authorization capability\n" unless defined($fd) && $fd =~ /^\d+$/;
+    open my $broker, '+<&=', $fd or die "attach nested validation authorization capability: $!\n";
+    $broker->autoflush(1);
+    my $nested_flags = fcntl($broker, F_GETFD, 0);
+    die "read nested validation capability flags: $!\n" unless defined $nested_flags;
+    fcntl($broker, F_SETFD, $nested_flags & ~FD_CLOEXEC)
+        or die "preserve nested validation capability across exec: $!\n";
+    my $nonce = random_token();
+    print {$broker} encode_json({request_id => $ENV{AZEDARACH_VALIDATION_REQUEST_ID}, class => $class, nonce => $nonce}) . "\n"
+        or die "request nested validation authorization: $!\n";
+    my $line = <$broker>;
+    die "nested validation authorization broker closed\n" unless defined $line;
+    my $authorization = eval { decode_json($line) };
+    die "nested validation authorization returned invalid response\n" unless $authorization && ($authorization->{nonce} || '') eq $nonce;
+    die(($authorization->{error} || 'nested validation authorization rejected') . "\n") unless $authorization->{ok};
+    $ENV{AZEDARACH_VALIDATION_CLASS} = $authorization->{class};
+    $ENV{AZEDARACH_VALIDATION_PROFILE} = $authorization->{profile};
+    $ENV{AZEDARACH_VALIDATION_SOURCE_REVISION} = $authorization->{source_revision};
     exec @ARGV or die "exec nested validation command $ARGV[0]: $!\n";
 }
 
 my $issue = $ENV{AZEDARACH_TICKET_ID} || $ENV{AZEDARACH_ISSUE_ID} || 'manual-' . $$;
-my $revision = `git rev-parse HEAD 2>/dev/null`;
-chomp $revision;
+my $revision = capture($git, 'rev-parse', 'HEAD');
+$revision =~ s/\s+\z//;
 die "resolve validation source revision\n" unless $revision;
 $profile ||= $class;
 my $lease_token = random_token();
-my $request_nonce = random_token();
-my $request_id = sprintf('%s-%d-%d-%s', $issue, $$, int(time() * 1_000_000), substr($request_nonce, 0, 12));
+my $request_id = sprintf('%s-%d-%d-%s', $issue, $$, int(time() * 1_000_000), substr(random_token(), 0, 12));
 $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN} = $lease_token;
 my $command_text = join(' ', @ARGV);
 my @acquire = ($az, 'validation', 'acquire', '--request', $request_id, '--issue', $issue,
     '--class', $class, '--profile', $profile, '--command', $command_text,
     '--revision', $revision, '--ttl', '30', '--json');
 while (1) {
-    my $response = capture(@acquire);
-    my $decoded = eval { decode_json($response) };
+    my $decoded = eval { decode_json(capture(@acquire)) };
     die "validation acquire returned invalid JSON\n" unless $decoded && $decoded->{request}{state};
     last if $decoded->{request}{state} eq 'active';
     die "validation request became $decoded->{request}{state} while waiting\n" unless $decoded->{request}{state} eq 'queued';
@@ -70,64 +84,262 @@ while (1) {
 $ENV{AZEDARACH_VALIDATION_REQUEST_ID} = $request_id;
 $ENV{AZEDARACH_VALIDATION_CLASS} = $class;
 $ENV{AZEDARACH_VALIDATION_PROFILE} = $profile;
+$ENV{AZEDARACH_VALIDATION_SOURCE_REVISION} = $revision;
 my ($evidence_fh, $evidence_file) = tempfile('azedarach-validation-evidence-XXXXXX', TMPDIR => 1, UNLINK => 0);
 close $evidence_fh;
 $ENV{AZEDARACH_VALIDATION_EVIDENCE_FILE} = $evidence_file;
 
+my $wrapper_pid = $$;
 my $heartbeat = fork();
 die "fork validation heartbeat: $!\n" unless defined $heartbeat;
 if ($heartbeat == 0) {
-    while (1) {
-        sleep 10;
-        system($az, 'validation', 'heartbeat', '--request', $request_id, '--ttl', '30');
-        if ($? != 0) {
-            kill 'TERM', getppid();
+    my $heartbeat_interval = $ENV{AZEDARACH_VALIDATION_HEARTBEAT_INTERVAL_SECONDS} || 10;
+    my $next = time() + $heartbeat_interval;
+    while (getppid() == $wrapper_pid) {
+        sleep 0.25;
+        next if time() < $next;
+        my $renewal = fork();
+        exit 1 unless defined $renewal;
+        if ($renewal == 0) {
+            exec $az, 'validation', 'heartbeat', '--request', $request_id, '--ttl', '30'
+                or exit 127;
+        }
+        my $renewal_status;
+        while (1) {
+            my $waited = waitpid($renewal, WNOHANG);
+            if ($waited == $renewal) {
+                $renewal_status = $?;
+                last;
+            }
+            if (getppid() != $wrapper_pid) {
+                kill 'TERM', $renewal;
+                waitpid($renewal, 0);
+                exit 0;
+            }
+            sleep 0.1;
+        }
+        if (wait_status_code($renewal_status) != 0) {
+            kill 'TERM', $wrapper_pid if getppid() == $wrapper_pid;
             exit 1;
         }
+        exit 0 if getppid() != $wrapper_pid;
+        $next = time() + $heartbeat_interval;
+    }
+    exit 0;
+}
+
+# Aggregate admission waits for already-running unleased Go work to quiesce.
+# Work that begins after the gate starts is captured in the terminal evidence.
+if ($class eq 'aggregate') {
+    my $clear_samples = 0;
+    while ($clear_samples < 4) {
+        my $external = external_go_processes($wrapper_pid);
+        $clear_samples = $external == 0 ? $clear_samples + 1 : 0;
+        sleep 0.5 if $clear_samples < 4;
     }
 }
 
-my $child = fork();
-die "fork validation command: $!\n" unless defined $child;
-if ($child == 0) {
-    setpgid(0, 0);
-    delete $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN};
-    exec @ARGV or die "exec validation command $ARGV[0]: $!\n";
+socketpair(my $broker_parent, my $broker_child, AF_UNIX, SOCK_STREAM, PF_UNSPEC)
+    or die "create nested validation authorization capability: $!\n";
+$broker_parent->autoflush(1);
+$broker_child->autoflush(1);
+my $child_flags = fcntl($broker_child, F_GETFD, 0);
+die "read nested validation descriptor flags: $!\n" unless defined $child_flags;
+fcntl($broker_child, F_SETFD, $child_flags & ~FD_CLOEXEC)
+    or die "preserve nested validation descriptor across exec: $!\n";
+
+my $supervisor = fork();
+die "fork validation command supervisor: $!\n" unless defined $supervisor;
+if ($supervisor == 0) {
+    close $broker_parent;
+    my $parent = $wrapper_pid;
+    my $payload = fork();
+    die "fork validation command: $!\n" unless defined $payload;
+    if ($payload == 0) {
+        setpgid(0, 0);
+        delete $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN};
+        $ENV{AZEDARACH_VALIDATION_NESTED_FD} = fileno($broker_child);
+        exec @ARGV or die "exec validation command $ARGV[0]: $!\n";
+    }
+    close $broker_child;
+    eval { setpgid($payload, $payload) };
+    my $forward = sub { my ($signal) = @_; kill $signal, -$payload if $payload; };
+    local $SIG{TERM} = sub { $forward->('TERM') };
+    local $SIG{INT} = sub { $forward->('INT') };
+    local $SIG{HUP} = sub { $forward->('HUP') };
+    while (1) {
+        my $waited = waitpid($payload, WNOHANG);
+        exit wait_status_code($?) if $waited == $payload;
+        if (getppid() != $parent) {
+            kill 'TERM', -$payload;
+            for (1..20) {
+                $waited = waitpid($payload, WNOHANG);
+                exit wait_status_code($?) if $waited == $payload;
+                sleep 0.1;
+            }
+            kill 'KILL', -$payload;
+            waitpid($payload, 0);
+            exit 137;
+        }
+        sleep 0.1;
+    }
 }
-eval { setpgid($child, $child) };
+close $broker_child;
+
 my $interrupted = 0;
-my $forward = sub { my ($signal) = @_; $interrupted = 1; kill $signal, -$child if $child; };
+my $forward = sub { my ($signal) = @_; $interrupted = 1; kill $signal, $supervisor if $supervisor; };
 local $SIG{TERM} = sub { $forward->('TERM') };
 local $SIG{INT} = sub { $forward->('INT') };
 local $SIG{HUP} = sub { $forward->('HUP') };
-my $waited;
-do { $waited = waitpid($child, 0) } while $waited < 0 && $!{EINTR};
-my $status = $?;
+my $selector = IO::Select->new($broker_parent);
+my $broker_buffer = '';
+my $max_external_go = 0;
+my $overlap_detected = 0;
+my $next_sample = 0;
+my $status = 0;
+while (1) {
+    for my $ready ($selector->can_read(0.1)) {
+        my $bytes = sysread($ready, my $chunk, 8192);
+        if (!defined($bytes) || $bytes == 0) {
+            $selector->remove($ready);
+            next;
+        }
+        $broker_buffer .= $chunk;
+        while ($broker_buffer =~ s/^(.*?\n)//) {
+            authorize_nested($broker_parent, $1, $az, $request_id, $lease_token);
+        }
+    }
+    if ($class eq 'aggregate' && time() >= $next_sample) {
+        my $external = external_go_processes($wrapper_pid);
+        $max_external_go = $external if $external > $max_external_go;
+        $overlap_detected ||= $external > 0;
+        $next_sample = time() + 0.5;
+    }
+    my $waited = waitpid($supervisor, WNOHANG);
+    if ($waited == $supervisor) {
+        $status = $?;
+        last;
+    }
+}
+close $broker_parent;
 kill 'TERM', $heartbeat;
 waitpid($heartbeat, 0);
-my $exit_code = ($status & 127) ? 128 + ($status & 127) : ($status >> 8);
+my $exit_code = wait_status_code($status);
+if ($class eq 'aggregate') {
+    my $finished_revision = eval { my $value = capture($git, 'rev-parse', 'HEAD'); $value =~ s/\s+\z//; $value };
+    if (!$finished_revision || $finished_revision ne $revision) {
+        warn "aggregate validation source revision changed while the lease was held\n";
+        $exit_code = 76 if $exit_code == 0;
+    }
+}
+
+merge_whole_gate_evidence($evidence_file, {
+    held => JSON::PP::true, request_id => $request_id, class => $class,
+    profile => $profile, source_revision => $revision, present => JSON::PP::true,
+    overlap_detected => $overlap_detected ? JSON::PP::true : JSON::PP::false,
+    external_go_processes => $max_external_go,
+});
+if ($class eq 'aggregate' && $overlap_detected && $exit_code == 0) {
+    warn "aggregate validation overlapped $max_external_go unleased Go process(es)\n";
+    $exit_code = 75;
+}
 my $terminal = $interrupted ? 'cancelled' : ($exit_code == 0 ? 'completed' : 'failed');
 my @finish = ($az, 'validation', 'finish', '--request', $request_id, '--state', $terminal, '--outcome', "exit $exit_code");
 if (-s $evidence_file) {
-    open my $evidence_fh, '<', $evidence_file or die "open validation evidence: $!\n";
+    open my $final_evidence, '<', $evidence_file or die "open validation evidence: $!\n";
     local $/;
-    my $evidence_json = <$evidence_fh> // '';
-    close $evidence_fh;
-    push @finish, '--evidence-json', $evidence_json;
+    push @finish, '--evidence-json', (<$final_evidence> // '');
+    close $final_evidence;
 }
 my $finish_failed = !eval { capture(@finish); 1 };
 warn "validation finish failed for $request_id\n" if $finish_failed;
 unlink $evidence_file if -e $evidence_file;
 exit(($finish_failed && $exit_code == 0) ? 70 : $exit_code);
 
+sub authorize_nested {
+    my ($broker, $line, $az_path, $held_request, $token) = @_;
+    my $request = eval { decode_json($line) };
+    my $nonce = $request && $request->{nonce} ? $request->{nonce} : '';
+    my $response = {ok => JSON::PP::false, nonce => $nonce, error => 'invalid nested validation authorization request'};
+    if ($request && ($request->{request_id} || '') eq $held_request) {
+        local $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN} = $token;
+        my $ok = eval { capture($az_path, 'validation', 'authorize-nested', '--request', $held_request, '--class', ($request->{class} || '')); 1 };
+        if ($ok) {
+            $response = {ok => JSON::PP::true, nonce => $nonce, class => $ENV{AZEDARACH_VALIDATION_CLASS}, profile => $ENV{AZEDARACH_VALIDATION_PROFILE}, source_revision => $ENV{AZEDARACH_VALIDATION_SOURCE_REVISION}};
+        } else {
+            $response->{error} = 'daemon rejected nested validation authorization';
+        }
+    }
+    print {$broker} encode_json($response) . "\n";
+}
+
+sub external_go_processes {
+    my ($root_pid) = @_;
+    my $ps_bin = $ENV{AZEDARACH_VALIDATION_PS_BIN} || 'ps';
+    open my $ps, '-|', $ps_bin, '-axo', 'pid=,ppid=,stat=,comm=' or die "inspect validation process load: $!\n";
+    my (%parent, %command);
+    while (my $line = <$ps>) {
+        next unless $line =~ /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/;
+        next if $3 =~ /^Z/;
+        $parent{$1} = $2;
+        $command{$1} = $4;
+    }
+    close $ps;
+    my %inside = ($root_pid => 1);
+    my $changed = 1;
+    while ($changed) {
+        $changed = 0;
+        for my $pid (keys %parent) {
+            next if $inside{$pid};
+            if ($inside{$parent{$pid}}) { $inside{$pid} = 1; $changed = 1; }
+        }
+    }
+    my %ancestor;
+    my $cursor = $parent{$root_pid};
+    while ($cursor && !$ancestor{$cursor}++) { $cursor = $parent{$cursor}; }
+    my $count = 0;
+    for my $pid (keys %command) {
+        next if $inside{$pid} || $ancestor{$pid};
+        my $name = basename($command{$pid});
+        $count++ if $name eq 'go' || $name eq 'compile' || $name eq 'link' || $name eq 'vet' || $name =~ /\.test$/;
+    }
+    return $count;
+}
+
+sub merge_whole_gate_evidence {
+    my ($path, $whole) = @_;
+    my $existing = {};
+    if (-s $path) {
+        open my $in, '<', $path or die "open accumulated validation evidence: $!\n";
+        local $/;
+        $existing = decode_json(<$in> // '{}');
+        close $in;
+        for my $field (qw(held request_id class profile source_revision)) {
+            die "accumulated validation lease evidence identity changed\n" if defined($existing->{$field}) && "$existing->{$field}" ne "$whole->{$field}";
+        }
+    }
+    $whole->{overlap_detected} = ($whole->{overlap_detected} || $existing->{overlap_detected}) ? JSON::PP::true : JSON::PP::false;
+    $whole->{external_go_processes} = ($existing->{external_go_processes} || 0) > $whole->{external_go_processes} ? $existing->{external_go_processes} : $whole->{external_go_processes};
+    $whole->{report_path} = $existing->{report_path} if $existing->{report_path};
+    $whole->{report_paths} = $existing->{report_paths} if $existing->{report_paths};
+    open my $out, '>', $path or die "write whole-gate validation evidence: $!\n";
+    print {$out} encode_json($whole) . "\n";
+    close $out;
+}
+
 sub capture {
     my (@command) = @_;
-    open my $fh, '-|', @command or die "start validation acquire: $!\n";
+    open my $fh, '-|', @command or die "start validation command: $!\n";
     local $/;
     my $output = <$fh> // '';
     close $fh;
-    die "validation acquire failed\n" if $? != 0;
+    die "validation command failed\n" if $? != 0;
     return $output;
+}
+
+sub wait_status_code {
+    my ($status) = @_;
+    return ($status & 127) ? 128 + ($status & 127) : ($status >> 8);
 }
 
 sub random_token {

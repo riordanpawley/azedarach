@@ -14,7 +14,14 @@ type CommandRunner interface {
 }
 
 // ExecRunner runs real shell commands using os/exec
-type ExecRunner struct{}
+type ExecRunner struct {
+	Dir string
+}
+
+// NewExecRunner returns a command runner scoped to one repository.
+func NewExecRunner(dir string) *ExecRunner {
+	return &ExecRunner{Dir: dir}
+}
 
 // Run executes a command with a 30-second timeout (gh commands can be slow)
 func (r *ExecRunner) Run(ctx context.Context, name string, args ...string) (out []byte, err error) {
@@ -33,6 +40,7 @@ func (r *ExecRunner) Run(ctx context.Context, name string, args ...string) (out 
 	}
 
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = r.Dir
 	return cmd.CombinedOutput()
 }
 

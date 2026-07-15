@@ -69,7 +69,7 @@ This directory primarily contains **developer/internal documentation**.
 - `validation.machine_capacity`: `projection` (durable daemon-owned aggregate/shared/safe validation queue with heartbeat expiry and transactionally refreshed admission state).
 - `task.review_handoff`: `projection` (durable issue v2 lifecycle/review projection + revisioned material decision change/acknowledgement observations + session activity projection; active issue self-handoff remains allowed only after material decisions are current).
 - `decision.propagation_delivery`: `hybrid` (atomic decision audit/outbox and per-issue materialization checkpoints reconciled with live tmux delivery until an authoritative exact-revision acknowledgement; superseded and withdrawn revisions are not delivered).
-- `task.integration_readiness` and `task.context_risk_closeout`: `projection` (durable issue projection + mailbox/observation evidence).
+- `task.integration_readiness` and `task.context_risk_closeout`: `projection` (durable issue projection + mailbox/observation evidence; integration readiness additionally requires completed non-overlapping aggregate proof bound to the clean exact candidate revision).
 - `task.merge_base_target`: `projection` (durable issue graph + worktree projection; explicit root-to-base requests also require issue-scoped `human.input_provided` acceptance evidence).
 - `decision.markdown_transfer_target`: `hybrid` (refreshed durable worktree ownership plus live Git worktree path and HEAD revision).
 - `task.follow_on_merge_candidates`: `projection` (durable issue graph + worktree projection).

@@ -50,7 +50,7 @@ projection so active owners and waiters are visible beside worker capacity.
 Expired heartbeats terminalize stale owners and transactionally wake the next
 eligible waiter after process death or daemon restart.
 
-The protocol-48 rollout is a one-generation bootstrap: the integration owner
+The protocol-49 rollout is a one-generation bootstrap: the integration owner
 must keep the pre-existing isolated canonical gate, validate the candidate
 without invoking the new outer wrapper, integrate and install that managed
 generation, then use the daemon queue for every later gate. Internal

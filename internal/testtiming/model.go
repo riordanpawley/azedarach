@@ -64,6 +64,7 @@ type ValidationLeaseEvidence struct {
 	RequestID string `json:"request_id,omitempty"`
 	Class     string `json:"class,omitempty"`
 	Profile   string `json:"profile,omitempty"`
+	SourceRevision string `json:"source_revision,omitempty"`
 }
 
 type BaselineProfile struct {

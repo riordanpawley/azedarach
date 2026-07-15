@@ -193,7 +193,10 @@ func InteractionCommand(deps *Dependencies, opts InteractionOptions) error {
 	if deps == nil || deps.DaemonClient == nil {
 		return fmt.Errorf("daemon client unavailable")
 	}
-	restoreProject := applyIssueProjectOverride(deps, opts.Project)
+	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
+	if err != nil {
+		return err
+	}
 	defer restoreProject()
 	ctx := commandTraceContext(deps)
 	client := deps.DaemonClient

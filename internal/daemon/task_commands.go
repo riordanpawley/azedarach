@@ -305,8 +305,8 @@ type taskIntegrationReadinessResult struct {
 	EvidenceIncomplete     bool                           `json:"evidence_incomplete,omitempty"`
 	EvidenceMissingFields  []string                       `json:"evidence_missing_fields,omitempty"`
 	EvidenceInvalidReasons []string                       `json:"evidence_invalid_reasons,omitempty"`
-	AggregateValidation    *domain.ValidationRequest      `json:"aggregate_validation,omitempty"`
 	PendingDecisions       []domain.PendingDecisionChange `json:"pending_decisions,omitempty"`
+	AggregateValidation    *domain.ValidationRequest      `json:"aggregate_validation,omitempty"`
 }
 
 type taskMergeBaseTargetResult struct {
@@ -4523,7 +4523,10 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 		if aggregateErr != nil {
 			return taskIntegrationReadinessResult{}, fmt.Errorf("inspect aggregate validation evidence: %w", aggregateErr)
 		}
-		if aggregate != nil && (aggregate.State != domain.ValidationRequestCompleted || !aggregate.Evidence.Present || aggregate.Evidence.OverlapDetected) {
+		if aggregate == nil {
+			return taskIntegrationReadinessResult{IssueID: task.ID.String(), ParentIssueID: parentIssueID, Ready: false, ContextRisk: contextRisk, Reasons: []string{"no aggregate validation is present in the daemon validation projection"}}, nil
+		}
+		if aggregate.State != domain.ValidationRequestCompleted || !aggregate.Evidence.Present || aggregate.Evidence.OverlapDetected || aggregate.Evidence.SourceRevision != aggregate.SourceRevision {
 			reasons := []string{fmt.Sprintf("aggregate validation %s is not valid integration evidence", aggregate.RequestID)}
 			if aggregate.State != domain.ValidationRequestCompleted {
 				reasons = append(reasons, fmt.Sprintf("aggregate validation outcome is %s", aggregate.State))
@@ -4534,7 +4537,30 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 			if aggregate.Evidence.OverlapDetected {
 				reasons = append(reasons, fmt.Sprintf("aggregate validation overlapped %d external Go processes", aggregate.Evidence.ExternalGoProcesses))
 			}
+			if aggregate.Evidence.SourceRevision != aggregate.SourceRevision {
+				reasons = append(reasons, fmt.Sprintf("aggregate validation evidence revision %q does not match candidate revision %q", aggregate.Evidence.SourceRevision, aggregate.SourceRevision))
+			}
 			return taskIntegrationReadinessResult{IssueID: task.ID.String(), ParentIssueID: parentIssueID, Ready: false, ContextRisk: contextRisk, Reasons: reasons, AggregateValidation: aggregate}, nil
+		}
+		if strings.TrimSpace(repoDir) == "" {
+			return taskIntegrationReadinessResult{IssueID: task.ID.String(), ParentIssueID: parentIssueID, Ready: false, ContextRisk: contextRisk, Reasons: []string{"candidate worktree is required to bind aggregate validation to the exact revision"}, AggregateValidation: aggregate}, nil
+		}
+		if d.git == nil {
+			return taskIntegrationReadinessResult{IssueID: task.ID.String(), ParentIssueID: parentIssueID, Ready: false, ContextRisk: contextRisk, Reasons: []string{"Git authority is unavailable for exact aggregate validation revision binding"}, AggregateValidation: aggregate}, nil
+		}
+		candidateRevision, revisionErr := d.git.HeadRevision(ctx, repoDir)
+		if revisionErr != nil {
+			return taskIntegrationReadinessResult{IssueID: task.ID.String(), ParentIssueID: parentIssueID, Ready: false, ContextRisk: contextRisk, Reasons: []string{fmt.Sprintf("resolve exact candidate revision: %v", revisionErr)}, AggregateValidation: aggregate}, nil
+		}
+		if candidateRevision != aggregate.SourceRevision {
+			return taskIntegrationReadinessResult{IssueID: task.ID.String(), ParentIssueID: parentIssueID, Ready: false, ContextRisk: contextRisk, Reasons: []string{fmt.Sprintf("aggregate validation revision %s does not match exact candidate revision %s", aggregate.SourceRevision, candidateRevision)}, AggregateValidation: aggregate}, nil
+		}
+		candidateStatus, statusErr := d.git.Status(ctx, repoDir)
+		if statusErr != nil {
+			return taskIntegrationReadinessResult{IssueID: task.ID.String(), ParentIssueID: parentIssueID, Ready: false, ContextRisk: contextRisk, Reasons: []string{fmt.Sprintf("inspect exact candidate tree: %v", statusErr)}, AggregateValidation: aggregate}, nil
+		}
+		if candidateStatus.HasChanges {
+			return taskIntegrationReadinessResult{IssueID: task.ID.String(), ParentIssueID: parentIssueID, Ready: false, ContextRisk: contextRisk, Reasons: []string{"aggregate validation does not bind the current dirty candidate tree to an exact revision"}, AggregateValidation: aggregate}, nil
 		}
 		latestAggregate = aggregate
 	}
@@ -4662,28 +4688,35 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 	}, nil
 }
 
-func validateWorkerAggregateRequest(validation *domain.WorkerEvidenceParseResult, packet domain.WorkerEvidencePacket, latest *domain.ValidationRequest) {
-	if validation == nil || packet.AggregateValidation == nil {
-		return
-	}
-	var problem string
-	if latest == nil {
-		problem = fmt.Sprintf("aggregate_validation request %s is not present in the daemon validation projection", packet.AggregateValidation.RequestID)
-	} else if packet.AggregateValidation.RequestID != latest.RequestID {
-		problem = fmt.Sprintf("aggregate_validation request %s does not match latest daemon request %s", packet.AggregateValidation.RequestID, latest.RequestID)
-	}
-	if problem != "" {
-		validation.Invalid = append(validation.Invalid, problem)
-		validation.Complete = false
-	}
-}
-
 func pendingDecisionReadinessReasons(pending []domain.PendingDecisionChange) []string {
 	reasons := make([]string, 0, len(pending))
 	for _, change := range pending {
 		reasons = append(reasons, fmt.Sprintf("stale material decision %s revision %d is unacknowledged; %s", change.DecisionID, change.Revision, change.RequiredAction))
 	}
 	return reasons
+}
+
+func validateWorkerAggregateRequest(validation *domain.WorkerEvidenceParseResult, packet domain.WorkerEvidencePacket, latest *domain.ValidationRequest) {
+	if validation == nil {
+		return
+	}
+	var problem string
+	if packet.AggregateValidation == nil {
+		if latest == nil {
+			return
+		}
+		problem = "aggregate_validation is required for integration readiness"
+	} else if latest == nil {
+		problem = fmt.Sprintf("aggregate_validation request %s is not present in the daemon validation projection", packet.AggregateValidation.RequestID)
+	} else if packet.AggregateValidation.RequestID != latest.RequestID {
+		problem = fmt.Sprintf("aggregate_validation request %s does not match latest daemon request %s", packet.AggregateValidation.RequestID, latest.RequestID)
+	} else if packet.AggregateValidation.SourceRevision != latest.SourceRevision {
+		problem = fmt.Sprintf("aggregate_validation source revision %q does not match candidate revision %q", packet.AggregateValidation.SourceRevision, latest.SourceRevision)
+	}
+	if problem != "" {
+		validation.Invalid = append(validation.Invalid, problem)
+		validation.Complete = false
+	}
 }
 
 func daemonWorkerIntegrationReadyMailType(eventType string) bool {

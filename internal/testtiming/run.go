@@ -176,7 +176,7 @@ func runLocked(ctx context.Context, opts RunOptions, cacheConfig gocache.Config,
 
 func validationLeaseEvidence() ValidationLeaseEvidence {
 	requestID := strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_REQUEST_ID"))
-	return ValidationLeaseEvidence{Held: requestID != "", RequestID: requestID, Class: strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_CLASS")), Profile: strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_PROFILE"))}
+	return ValidationLeaseEvidence{Held: requestID != "", RequestID: requestID, Class: strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_CLASS")), Profile: strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_PROFILE")), SourceRevision: strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_SOURCE_REVISION"))}
 }
 
 func writeValidationLeaseEvidenceFile(measurement Measurement, outputDir string) error {
@@ -185,14 +185,14 @@ func writeValidationLeaseEvidenceFile(measurement Measurement, outputDir string)
 		return nil
 	}
 	reportPath := filepath.Join(outputDir, "report.json")
-	evidence := validationLeaseEvidenceFile{Held: measurement.ValidationLease.Held, RequestID: measurement.ValidationLease.RequestID, Class: measurement.ValidationLease.Class, Profile: measurement.ValidationLease.Profile, Present: true, ReportPath: reportPath, ReportPaths: []string{reportPath}, OverlapDetected: measurement.ProcessLoad.OverlapDetected, ExternalGoProcesses: measurement.ProcessLoad.MaxExternalGoProcesses}
+	evidence := validationLeaseEvidenceFile{Held: measurement.ValidationLease.Held, RequestID: measurement.ValidationLease.RequestID, Class: measurement.ValidationLease.Class, Profile: measurement.ValidationLease.Profile, SourceRevision: measurement.ValidationLease.SourceRevision, Present: true, ReportPath: reportPath, ReportPaths: []string{reportPath}, OverlapDetected: measurement.ProcessLoad.OverlapDetected, ExternalGoProcesses: measurement.ProcessLoad.MaxExternalGoProcesses}
 	if existingData, err := os.ReadFile(path); err == nil {
 		if len(strings.TrimSpace(string(existingData))) > 0 {
 			var existing validationLeaseEvidenceFile
 			if err := json.Unmarshal(existingData, &existing); err != nil {
 				return fmt.Errorf("decode accumulated validation lease evidence: %w", err)
 			}
-			if existing.RequestID != evidence.RequestID || existing.Class != evidence.Class || existing.Profile != evidence.Profile || existing.Held != evidence.Held {
+			if existing.RequestID != evidence.RequestID || existing.Class != evidence.Class || existing.Profile != evidence.Profile || existing.SourceRevision != evidence.SourceRevision || existing.Held != evidence.Held {
 				return fmt.Errorf("accumulated validation lease evidence identity changed")
 			}
 			evidence.OverlapDetected = evidence.OverlapDetected || existing.OverlapDetected
@@ -217,6 +217,7 @@ type validationLeaseEvidenceFile struct {
 	RequestID           string   `json:"request_id,omitempty"`
 	Class               string   `json:"class,omitempty"`
 	Profile             string   `json:"profile,omitempty"`
+	SourceRevision      string   `json:"source_revision,omitempty"`
 	Present             bool     `json:"present"`
 	ReportPath          string   `json:"report_path,omitempty"`
 	ReportPaths         []string `json:"report_paths,omitempty"`
