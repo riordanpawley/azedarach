@@ -921,15 +921,15 @@ func TestProjectOrchestrationSnapshotRefreshesCrossProcessBacklogLifecycle(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := candidateClass(after.Candidates, id); got != string(domain.OrchestrationCandidateBacklog) {
-		t.Fatalf("after class = %q, want backlog", got)
+	if got := candidateClass(after.Candidates, id); got != "" {
+		t.Fatalf("after class = %q, want backlog outside actionable candidate window", got)
 	}
 	if after.Health.OpenIssueCount != 0 {
 		t.Fatalf("after open issue count = %d, want backlog excluded", after.Health.OpenIssueCount)
 	}
 	for _, candidate := range after.Candidates {
-		if candidate.IssueID == id && (!slices.Contains(candidate.ExclusionReasons, "lifecycle-backlog") || candidate.Eligible) {
-			t.Fatalf("after candidate = %+v, want lifecycle-backlog exclusion", candidate)
+		if candidate.IssueID == id {
+			t.Fatalf("after candidate = %+v, want backlog visible only outside actionable candidates", candidate)
 		}
 	}
 }
@@ -947,8 +947,8 @@ func TestProjectOrchestrationStartNeverTouchesExplicitBacklogIssue(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := result.Skipped[id]; got != "lifecycle-backlog" {
-		t.Fatalf("skipped[%s] = %q, want lifecycle-backlog", id, got)
+	if got := result.Skipped[id]; got != "not-runnable" {
+		t.Fatalf("skipped[%s] = %q, want backlog absent from runnable project window", id, got)
 	}
 	if len(result.Started) != 0 || len(result.Launched) != 0 || len(result.Pending) != 0 {
 		t.Fatalf("backlog start result = %+v, want no start side effects", result)
