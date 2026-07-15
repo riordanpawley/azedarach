@@ -163,8 +163,9 @@ AZEDARACH_VALIDATION_BOOTSTRAP_ID=forged \
 AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
 AZEDARACH_TICKET_ID=fixture \
   "$fixture/scripts/with-machine-validation-lease" --class shared --profile runtime-preservation -- \
-  sh -c 'printf "%s" "$XDG_RUNTIME_DIR" >"$0"' "$runtime_probe"
-test "$(cat "$runtime_probe")" = "$fixture/ordinary-runtime"
+  sh -c 'printf "%s\n%s" "$XDG_RUNTIME_DIR" "$AZEDARACH_VALIDATION_CLEANUP_HANDLE" >"$0"' "$runtime_probe"
+test "$(sed -n '1p' "$runtime_probe")" != "$fixture/ordinary-runtime"
+test "$(sed -n '1p' "$runtime_probe")" = "$(sed -n '2p' "$runtime_probe")"
 
 env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
   -u AZEDARACH_VALIDATION_LEASE_TOKEN \

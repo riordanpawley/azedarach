@@ -4,6 +4,7 @@ use warnings;
 use Fcntl qw(F_GETFD F_SETFD FD_CLOEXEC);
 use File::Basename qw(basename);
 use File::Temp qw(tempfile);
+use File::Path qw(remove_tree);
 use IO::Select;
 use JSON::PP qw(decode_json encode_json);
 use POSIX qw(:sys_wait_h setpgid);
@@ -88,6 +89,11 @@ $ENV{AZEDARACH_VALIDATION_SOURCE_REVISION} = $revision;
 my ($evidence_fh, $evidence_file) = tempfile('azedarach-validation-evidence-XXXXXX', TMPDIR => 1, UNLINK => 0);
 close $evidence_fh;
 $ENV{AZEDARACH_VALIDATION_EVIDENCE_FILE} = $evidence_file;
+my ($runtime_fh, $candidate_runtime) = tempfile('azedarach-validation-runtime-XXXXXX', TMPDIR => 1, UNLINK => 1);
+close $runtime_fh;
+unlink $candidate_runtime or die "remove validation runtime placeholder: $!\n";
+mkdir $candidate_runtime, 0700 or die "create private validation runtime: $!\n";
+$ENV{AZEDARACH_VALIDATION_CANDIDATE_RUNTIME} = $candidate_runtime;
 
 my $wrapper_pid = $$;
 my $heartbeat = fork();
@@ -167,6 +173,8 @@ if ($supervisor == 0) {
             AZEDARACH_DAEMON_SCOPE_SOURCE
             AZEDARACH_VALIDATION_AZ_BIN
         )};
+        $ENV{XDG_RUNTIME_DIR} = $ENV{AZEDARACH_VALIDATION_CANDIDATE_RUNTIME};
+        $ENV{AZEDARACH_VALIDATION_CLEANUP_HANDLE} = $ENV{AZEDARACH_VALIDATION_CANDIDATE_RUNTIME};
         $ENV{AZEDARACH_VALIDATION_NESTED_FD} = fileno($broker_child);
         exec @ARGV or die "exec validation command $ARGV[0]: $!\n";
     }
@@ -234,6 +242,14 @@ close $broker_parent;
 kill 'TERM', $heartbeat;
 waitpid($heartbeat, 0);
 my $exit_code = wait_status_code($status);
+my $cleanup_error = '';
+my $cleanup_errors = [];
+eval { remove_tree($candidate_runtime, {error => $cleanup_errors}); 1 } or $cleanup_error = $@ || 'candidate runtime cleanup failed';
+$cleanup_error ||= join('; ', map { %$_ } @$cleanup_errors) if @$cleanup_errors;
+if ($cleanup_error ne '') {
+    warn "candidate validation cleanup failed: $cleanup_error\n";
+    $exit_code = 78 if $exit_code == 0;
+}
 if ($class eq 'aggregate') {
     my $finished_revision = eval { my $value = capture($git, 'rev-parse', 'HEAD'); $value =~ s/\s+\z//; $value };
     if (!$finished_revision || $finished_revision ne $revision) {
@@ -247,6 +263,8 @@ merge_whole_gate_evidence($evidence_file, {
     profile => $profile, source_revision => $revision, present => JSON::PP::true,
     overlap_detected => $overlap_detected ? JSON::PP::true : JSON::PP::false,
     external_go_processes => $max_external_go,
+    cleanup_succeeded => $cleanup_error eq '' ? JSON::PP::true : JSON::PP::false,
+    cleanup_error => $cleanup_error,
 });
 if ($class eq 'aggregate' && $overlap_detected && $exit_code == 0) {
     warn "aggregate validation overlapped $max_external_go unleased Go process(es)\n";
