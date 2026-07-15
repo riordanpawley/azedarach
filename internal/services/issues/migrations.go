@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -678,10 +679,43 @@ func validateAgentInputDeliverySchema(ctx context.Context, db sqlIssueQueryer) e
 			return fmt.Errorf("agent input delivery schema drifted: missing column %s", column)
 		}
 	}
-	for _, index := range []string{"idx_agent_input_delivery_pending", "idx_agent_input_delivery_incarnation"} {
-		var count int
-		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, index).Scan(&count); err != nil || count != 1 {
-			return fmt.Errorf("agent input delivery schema drifted: missing index %s", index)
+	indexes := []struct {
+		name      string
+		columns   []string
+		predicate string
+	}{
+		{name: "idx_agent_input_delivery_pending", columns: []string{"project_id", "state", "expires_at", "created_at"}, predicate: "wherestatein('queued','leased')"},
+		{name: "idx_agent_input_delivery_incarnation", columns: []string{"project_id", "session_id", "logical_pane_id", "agent_incarnation", "state"}},
+	}
+	for _, index := range indexes {
+		var indexSQL string
+		if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='index' AND name=?`, index.name).Scan(&indexSQL); err != nil {
+			return fmt.Errorf("agent input delivery schema drifted: inspect index %s: %w", index.name, err)
+		}
+		normalizedSQL := strings.NewReplacer(" ", "", "\n", "", "\t", "", "\r", "", `"`, "", "`", "", "[", "", "]", "").Replace(strings.ToLower(indexSQL))
+		expectedSQL := "createindex" + index.name + "onagent_input_delivery_intents(" + strings.Join(index.columns, ",") + ")" + index.predicate
+		if normalizedSQL != expectedSQL {
+			return fmt.Errorf("agent input delivery schema drifted: index %s has non-canonical definition", index.name)
+		}
+		rows, err := db.QueryContext(ctx, `PRAGMA index_info(`+index.name+`)`)
+		if err != nil {
+			return fmt.Errorf("inspect agent input delivery index %s columns: %w", index.name, err)
+		}
+		var columns []string
+		for rows.Next() {
+			var sequence, columnID int
+			var column string
+			if err := rows.Scan(&sequence, &columnID, &column); err != nil {
+				rows.Close()
+				return fmt.Errorf("inspect agent input delivery index %s columns: %w", index.name, err)
+			}
+			columns = append(columns, column)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("inspect agent input delivery index %s columns: %w", index.name, err)
+		}
+		if !slices.Equal(columns, index.columns) {
+			return fmt.Errorf("agent input delivery schema drifted: index %s columns are %v, want %v", index.name, columns, index.columns)
 		}
 	}
 	return nil

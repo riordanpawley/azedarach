@@ -138,6 +138,50 @@ func TestAgentInputDeliveryMigrationRejectsLedgerSchemaDrift(t *testing.T) {
 	}
 }
 
+func TestAgentInputDeliveryMigrationRejectsIndexDefinitionDrift(t *testing.T) {
+	tests := []struct {
+		name       string
+		index      string
+		definition string
+	}{
+		{name: "pending column order", index: "idx_agent_input_delivery_pending", definition: `CREATE INDEX idx_agent_input_delivery_pending ON agent_input_delivery_intents(state, project_id, expires_at, created_at) WHERE state IN ('queued','leased')`},
+		{name: "pending predicate", index: "idx_agent_input_delivery_pending", definition: `CREATE INDEX idx_agent_input_delivery_pending ON agent_input_delivery_intents(project_id, state, expires_at, created_at) WHERE state = 'queued'`},
+		{name: "pending uniqueness", index: "idx_agent_input_delivery_pending", definition: `CREATE UNIQUE INDEX idx_agent_input_delivery_pending ON agent_input_delivery_intents(project_id, state, expires_at, created_at) WHERE state IN ('queued','leased')`},
+		{name: "incarnation column order", index: "idx_agent_input_delivery_incarnation", definition: `CREATE INDEX idx_agent_input_delivery_incarnation ON agent_input_delivery_intents(project_id, session_id, agent_incarnation, logical_pane_id, state)`},
+		{name: "incarnation uniqueness", index: "idx_agent_input_delivery_incarnation", definition: `CREATE UNIQUE INDEX idx_agent_input_delivery_incarnation ON agent_input_delivery_intents(project_id, session_id, logical_pane_id, agent_incarnation, state)`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "issues.db")
+			client := NewClientAtPath(path, nil)
+			if _, err := client.Create(context.Background(), CreateTaskParams{Title: "seed", Type: domain.TypeTask}); err != nil {
+				t.Fatal(err)
+			}
+			if err := client.CloseDB(); err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.Exec(`DROP INDEX ` + tt.index); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.Exec(tt.definition); err != nil {
+				t.Fatal(err)
+			}
+			if err = db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened := NewClientAtPath(path, nil)
+			defer reopened.CloseDB()
+			if _, err = reopened.List(context.Background()); err == nil || !strings.Contains(err.Error(), "non-canonical definition") {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
 func TestAgentInputDeliveryMigrationHistoricalUpgradeRollsBackAndRetries(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
