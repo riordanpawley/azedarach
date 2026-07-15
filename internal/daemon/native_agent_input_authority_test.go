@@ -134,6 +134,68 @@ func TestNativeAgentInputAuthorityHonorsDeliveryCancellation(t *testing.T) {
 	}
 }
 
+func TestNativeAgentInputAuthorityBoundsAndCancelsSilentRegistrations(t *testing.T) {
+	authority := newNativeAgentInputAuthority()
+	authority.registrationTimeout = 50 * time.Millisecond
+	authority.registrationSlots = make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	tmp, err := os.MkdirTemp("/tmp", "az-input-registration-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmp) })
+	socket := filepath.Join(tmp, "input.sock")
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- authority.Serve(ctx, socket) }()
+	dial := func() net.Conn {
+		t.Helper()
+		var conn net.Conn
+		for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+			conn, err = net.Dial("unix", socket)
+			if err == nil {
+				return conn
+			}
+		}
+		t.Fatalf("dial authority: %v", err)
+		return nil
+	}
+	first := dial()
+	defer first.Close()
+	for deadline := time.Now().Add(time.Second); len(authority.registrationSlots) != 1 && time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+	}
+	if got := len(authority.registrationSlots); got != 1 {
+		t.Fatalf("registration slots = %d, want 1", got)
+	}
+	second := dial()
+	defer second.Close()
+	if err := second.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.Read(make([]byte, 1)); err == nil {
+		t.Fatal("registration beyond concurrency bound remained open")
+	}
+	if err := first.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Read(make([]byte, 1)); err == nil {
+		t.Fatal("silent registration remained open past deadline")
+	}
+	third := dial()
+	defer third.Close()
+	cancel()
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			t.Fatalf("serve after cancel: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("authority did not join silent registration on cancellation")
+	}
+	if got := len(authority.registrationSlots); got != 0 {
+		t.Fatalf("registration slots after shutdown = %d, want 0", got)
+	}
+}
+
 func TestSessionLaunchExportsNativeAgentInputSocket(t *testing.T) {
 	d := &Daemon{cfg: Config{SocketPath: "/tmp/azedarach-daemon.sock"}}
 	commands := d.sessionLaunchStartupExportCommands(daemonProjectRuntimeConfig{}, issueResourceLifecycleContext{})

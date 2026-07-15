@@ -16,6 +16,7 @@ import (
 
 const nativeAgentInputProtocolVersion = 1
 const nativeAgentInputMaxFrameBytes = 4 << 20
+const nativeAgentInputMaxRegistrations = 64
 
 func nativeAgentInputSocketPath(daemonSocketPath string) string {
 	dir := filepath.Dir(strings.TrimSpace(daemonSocketPath))
@@ -64,9 +65,11 @@ func (e nativeAgentInputRefusalError) Error() string {
 }
 
 type nativeAgentInputAuthority struct {
-	mu      sync.Mutex
-	clients map[string]*nativeAgentInputClient
-	timeout time.Duration
+	mu                  sync.Mutex
+	clients             map[string]*nativeAgentInputClient
+	timeout             time.Duration
+	registrationTimeout time.Duration
+	registrationSlots   chan struct{}
 }
 
 type nativeAgentInputClient struct {
@@ -79,7 +82,10 @@ type nativeAgentInputClient struct {
 }
 
 func newNativeAgentInputAuthority() *nativeAgentInputAuthority {
-	return &nativeAgentInputAuthority{clients: make(map[string]*nativeAgentInputClient), timeout: 30 * time.Second}
+	return &nativeAgentInputAuthority{
+		clients: make(map[string]*nativeAgentInputClient), timeout: 30 * time.Second,
+		registrationTimeout: 10 * time.Second, registrationSlots: make(chan struct{}, nativeAgentInputMaxRegistrations),
+	}
 }
 
 func nativeAgentInputClientKey(projectID, sessionID, logicalPaneID string) string {
@@ -98,8 +104,10 @@ func (a *nativeAgentInputAuthority) Serve(ctx context.Context, socketPath string
 	if err != nil {
 		return fmt.Errorf("listen for native agent input: %w", err)
 	}
+	var registrations sync.WaitGroup
 	defer func() {
 		_ = listener.Close()
+		registrations.Wait()
 		_ = os.Remove(socketPath)
 	}()
 	if err := os.Chmod(socketPath, 0o600); err != nil {
@@ -117,14 +125,34 @@ func (a *nativeAgentInputAuthority) Serve(ctx context.Context, socketPath string
 			}
 			return fmt.Errorf("accept native agent input client: %w", acceptErr)
 		}
-		go a.register(ctx, conn)
+		select {
+		case a.registrationSlots <- struct{}{}:
+			registrations.Add(1)
+			go func() {
+				defer registrations.Done()
+				defer func() { <-a.registrationSlots }()
+				a.register(ctx, conn)
+			}()
+		default:
+			_ = conn.Close()
+		}
 	}
 }
 
 func (a *nativeAgentInputAuthority) register(ctx context.Context, conn net.Conn) {
+	cancelClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer cancelClose()
+	if err := conn.SetReadDeadline(time.Now().Add(a.registrationTimeout)); err != nil {
+		_ = conn.Close()
+		return
+	}
 	reader := bufio.NewReaderSize(conn, nativeAgentInputMaxFrameBytes+1)
 	var registration nativeAgentInputRegistration
 	if err := readNativeAgentInputJSON(reader, &registration); err != nil || !validNativeAgentInputRegistration(registration) {
+		_ = conn.Close()
+		return
+	}
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
 		_ = conn.Close()
 		return
 	}

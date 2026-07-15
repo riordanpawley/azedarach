@@ -42,12 +42,20 @@ same OS user, not a cross-user security boundary.
 
 ## Tool capability matrix
 
-The stock Codex, Claude, OpenCode, and interactive shell clients do not expose a
-native API that also owns and atomically excludes their attached human composer.
-They are therefore unsupported for authoritative automated input and fail
-closed unless launched with a conforming native client integration. Codex
-app-server `turn/start` alone is insufficient: the server does not own unsent
-text in an attached stock TUI composer.
+Codex is supported when `session.codexAppServer` is enabled. Azedarach launches
+`az ai native-codex-client` instead of the stock remote TUI. That client owns
+the visible human composer, submits both human and automated turns through the
+app-server protocol, registers the exact tmux/PID/incarnation identity, and
+persists intent acknowledgements before replying so supervised reconnects do
+not duplicate accepted turns. A non-empty human draft is preserved and causes
+automated delivery to remain queued.
+
+Standalone Codex, Claude, OpenCode, and interactive shell clients are not
+supported for authoritative automated input. They do not expose a native API
+that also owns and atomically excludes their attached human composer, so they
+fail closed. Codex app-server `turn/start` from a second client is likewise
+insufficient: the server does not own unsent text in an attached stock TUI
+composer.
 
 This unsupported state is intentional product behavior. Adding a tool adapter
 requires production evidence that its attached human client uses the same

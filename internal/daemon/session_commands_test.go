@@ -157,7 +157,7 @@ func TestSessionStartFailureCompensationMatchesActualRuntime(t *testing.T) {
 	}
 }
 
-func TestCodexAppServerLaunchUsesNativeDaemonAndSupervisedRemoteResume(t *testing.T) {
+func TestCodexAppServerLaunchUsesAzedarachNativeClientAndSupervisedResume(t *testing.T) {
 	d := &Daemon{cfg: Config{
 		CLITool:                    "codex",
 		CodexAppServer:             true,
@@ -167,8 +167,8 @@ func TestCodexAppServerLaunchUsesNativeDaemonAndSupervisedRemoteResume(t *testin
 	command := d.buildSessionLaunchCommand(protocol.DefaultProjectID, "dbc", "az-dbc", true, nil, "start here")
 	for _, want := range []string{
 		"codex app-server daemon start",
-		"codex --remote unix:// --dangerously-bypass-approvals-and-sandbox",
-		"codex resume --remote unix:// --dangerously-bypass-approvals-and-sandbox --last",
+		"az ai native-codex-client --yolo --prompt",
+		"az ai native-codex-client --resume --yolo",
 		"__az_codex_remote_failures",
 	} {
 		if !strings.Contains(command, want) {
@@ -9033,7 +9033,11 @@ func TestSessionLaunchAtomicallyBootstrapsSlowAgentsAcrossToolsAndStartModes(t *
 				if err := os.WriteFile(filepath.Join(tempDir, agentName), []byte(agent), 0o700); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(filepath.Join(tempDir, "az"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+				azScript := "#!/bin/sh\nexit 0\n"
+				if tool == "codex-app-server" {
+					azScript = strings.Replace(agent, "#!/bin/sh\n", "#!/bin/sh\nif [ \"${1:-} ${2:-}\" != 'ai native-codex-client' ]; then exit 0; fi\n", 1)
+				}
+				if err := os.WriteFile(filepath.Join(tempDir, "az"), []byte(azScript), 0o700); err != nil {
 					t.Fatal(err)
 				}
 				t.Setenv("PATH", tempDir+string(os.PathListSeparator)+os.Getenv("PATH"))

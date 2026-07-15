@@ -4515,14 +4515,15 @@ func prepareSessionLaunchScript(artifactDir, shell, launchPayload string) (strin
 func (d *Daemon) buildCodexResumeCommand(projectID, issueID string, yolo bool, imagePaths []string) string {
 	projectCfg := d.runtimeConfigForProject(projectID)
 	tool := strings.TrimSpace(projectCfg.CLITool)
+	if projectCfg.CodexAppServer {
+		client := nativeCodexClientCommand(issueID, "", true, yolo || projectCfg.DangerouslySkipPermissions)
+		return codexAppServerSupervisedCommand(tool, client, client)
+	}
 
 	parts := []string{
 		fmt.Sprintf(`AZEDARACH_ISSUE_ID="%s"`, escapeForShellDoubleQuotes(issueID)),
 		tool,
 		"resume",
-	}
-	if projectCfg.CodexAppServer {
-		parts = append(parts, "--remote", "unix://")
 	}
 	for _, imagePath := range imagePaths {
 		trimmedPath := strings.TrimSpace(imagePath)
@@ -4538,9 +4539,6 @@ func (d *Daemon) buildCodexResumeCommand(projectID, issueID string, yolo bool, i
 	// Codex's cwd filter makes --last target this worktree's latest session.
 	parts = append(parts, "--last")
 	command := strings.Join(parts, " ")
-	if projectCfg.CodexAppServer {
-		command = codexAppServerSupervisedCommand(tool, command, command)
-	}
 	return command
 }
 
@@ -5454,6 +5452,14 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 	if tool == "" {
 		tool = "claude"
 	}
+	if strings.EqualFold(tool, "codex") && projectCfg.CodexAppServer {
+		if initialPrompt != "" && !allowLargePrompt && !codexLaunchPromptArgAllowed(initialPrompt) {
+			initialPrompt = ""
+		}
+		first := nativeCodexClientCommand(issueID, initialPrompt, false, yolo || projectCfg.DangerouslySkipPermissions)
+		resume := nativeCodexClientCommand(issueID, "", true, yolo || projectCfg.DangerouslySkipPermissions)
+		return codexAppServerSupervisedCommand(tool, first, resume)
+	}
 
 	parts := []string{
 		fmt.Sprintf(`AZEDARACH_ISSUE_ID="%s"`, escapeForShellDoubleQuotes(issueID)),
@@ -5514,6 +5520,22 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 		return codexAppServerSupervisedCommand(tool, command, resume)
 	}
 	return command
+}
+
+func nativeCodexClientCommand(issueID, prompt string, resume, yolo bool) string {
+	parts := []string{fmt.Sprintf(`AZEDARACH_ISSUE_ID="%s"`, escapeForShellDoubleQuotes(issueID)), "az", "ai", "native-codex-client"}
+	if resume {
+		parts = append(parts, "--resume")
+	}
+	if yolo {
+		parts = append(parts, "--yolo")
+	}
+	if prompt != "" {
+		assignment := initialPromptShellAssignment(prompt)
+		parts = append(parts, "--prompt", `"$`+initialPromptShellVariable+`"`)
+		return assignment + "; " + strings.Join(parts, " ")
+	}
+	return strings.Join(parts, " ")
 }
 
 func (d *Daemon) codexAppServerResumeCommand(projectID, issueID string, yolo bool) string {
