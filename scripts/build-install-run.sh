@@ -1,17 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+git_dir="$(git rev-parse --path-format=absolute --git-dir)"
+git_common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
+
+if [[ -z "${AZEDARACH_PRODUCTION_ADMISSION_ACTIVE:-}" ]]; then
+  exec "$repo_root/scripts/with-production-install-admission" -- "$0" "$@"
+fi
+admission_owner="$git_common_dir/azedarach-production-admission/production/pid"
+if [[ "$(cat "$admission_owner" 2>/dev/null || true)" != "$AZEDARACH_PRODUCTION_ADMISSION_ACTIVE" ]]; then
+  echo "Production install admission capability is missing or stale." >&2
+  exit 77
+fi
+
 no_run=0
 if [[ "${1:-}" == "--no-run" ]]; then
   no_run=1
   shift
 fi
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$repo_root"
-
-git_dir="$(git rev-parse --git-dir)"
-git_common_dir="$(git rev-parse --git-common-dir)"
 if [[ "$git_dir" != "$git_common_dir" ]]; then
   echo "Refusing build-install-run from a linked worktree: $repo_root" >&2
   echo "Run it from the primary Azedarach worktree because it mutates user-global runtime assets." >&2
@@ -35,8 +44,13 @@ cleanup_install() {
 trap cleanup_install EXIT
 sha="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 ldflags="-X github.com/riordanpawley/azedarach/internal/buildinfo.Version=dev -X github.com/riordanpawley/azedarach/internal/buildinfo.GitCommit=${sha}"
-go build -ldflags "$ldflags" -o "$build_dir/az" ./cmd/az
-go build -ldflags "$ldflags" -o "$build_dir/azd" ./cmd/azd
+go_bin="${AZEDARACH_REAL_GO_BIN:-$(command -v go)}"
+if [[ "$(cd "$(dirname "$go_bin")" && pwd -P)/$(basename "$go_bin")" == "$repo_root/scripts/validation-bin/go" ]]; then
+  echo "Production install requires AZEDARACH_REAL_GO_BIN to identify the real Go toolchain." >&2
+  exit 78
+fi
+"$go_bin" build -ldflags "$ldflags" -o "$build_dir/az" ./cmd/az
+"$go_bin" build -ldflags "$ldflags" -o "$build_dir/azd" ./cmd/azd
 az_version="$("$build_dir/az" version)"
 azd_version="$("$build_dir/azd" version)"
 if [[ -z "$az_version" || "$az_version" != "$azd_version" ]]; then
@@ -46,7 +60,7 @@ fi
 atomic_replace_bin="${AZEDARACH_ATOMIC_REPLACE_BIN:-}"
 if [[ -z "$atomic_replace_bin" ]]; then
   atomic_replace_bin="$build_dir/atomic-replace"
-  go build -o "$atomic_replace_bin" ./cmd/atomic-replace
+  "$go_bin" build -o "$atomic_replace_bin" ./cmd/atomic-replace
 fi
 
 choose_install_dir() {
