@@ -1589,6 +1589,221 @@ func TestLauncherStopUsesTerminateLockOwner(t *testing.T) {
 	}
 }
 
+func TestProcessIdentityRejectsReusedPID(t *testing.T) {
+	identity, present, err := captureProcessIdentity(os.Getpid())
+	if err != nil {
+		t.Fatalf("captureProcessIdentity(current process): %v", err)
+	}
+	if !present {
+		t.Fatal("current process identity was reported absent")
+	}
+
+	reused := identity
+	reused.startToken += "-different-process"
+	alive, err := processIdentityAlive(reused)
+	if err != nil {
+		t.Fatalf("processIdentityAlive(reused PID): %v", err)
+	}
+	if alive {
+		t.Fatalf("process identity %+v remained alive after start token changed", reused)
+	}
+}
+
+func TestLauncherStopWaitsForExactProcessAfterLockRelease(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	repoDir := newLauncherTestWorktree(t)
+	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
+	runtimeDir := config.ScopedDaemonRuntimeDir(repoDir)
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcher.SocketPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("/bin/sh", "-c", "trap 'rm -f \"$1\" \"$2\"; sleep 0.25; exit 0' TERM; while :; do sleep 1; done", "sh", launcher.LockPath, launcher.SocketPath)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		select {
+		case <-waitDone:
+		default:
+		}
+	})
+	lockRecord, err := json.Marshal(map[string]any{"pid": pid, "created_at": time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcher.LockPath, lockRecord, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		return cmd.Process.Signal(syscall.SIGTERM)
+	}
+
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := launcher.Stop(ctx); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < 200*time.Millisecond {
+		t.Fatalf("Stop() returned after %v, before delayed post-lock process exit", elapsed)
+	}
+	select {
+	case err := <-waitDone:
+		if err != nil {
+			t.Fatalf("daemon child exit: %v", err)
+		}
+	default:
+		t.Fatalf("daemon child pid %d was not reaped before Stop returned", pid)
+	}
+}
+
+func TestLauncherStopBoundsExactProcessExitWait(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	repoDir := newLauncherTestWorktree(t)
+	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
+	launcher.processExitTimeout = 50 * time.Millisecond
+	runtimeDir := config.ScopedDaemonRuntimeDir(repoDir)
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lockRecord, err := json.Marshal(map[string]any{"pid": os.Getppid(), "created_at": time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcher.LockPath, lockRecord, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launcher.shutdownViaSocket = func(context.Context, string) error { return nil }
+
+	started := time.Now()
+	err = launcher.Stop(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "still alive after stop") {
+		t.Fatalf("Stop() error = %v, want bounded exact-process wait failure", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Stop() took %v, want bounded failure", elapsed)
+	}
+}
+
+func TestLauncherStopRejectsLiveCanonicalSocketWithoutOwnerIdentity(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	repoDir := newLauncherTestWorktree(t)
+	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
+	runtimeDir := config.ScopedDaemonRuntimeDir(repoDir)
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcher.SocketPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		return os.Remove(launcher.SocketPath)
+	}
+
+	err := launcher.Stop(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "missing daemon lock owner identity") {
+		t.Fatalf("Stop() error = %v, want missing owner identity failure", err)
+	}
+	if _, err := os.Stat(runtimeDir); err != nil {
+		t.Fatalf("runtime changed despite missing owner identity: %v", err)
+	}
+}
+
+func TestScopedLifecycleLockSerializesStopAndConcurrentStarts(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	repoDir := newLauncherTestWorktree(t)
+	runtimeDir := config.ScopedDaemonRuntimeDir(repoDir)
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	socketPath := config.ScopedDaemonSocketPath(repoDir)
+	if err := os.WriteFile(socketPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.ScopedDaemonLockPath(repoDir), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var ready atomic.Bool
+	ready.Store(true)
+	stopEntered := make(chan struct{})
+	allowStop := make(chan struct{})
+	stopLauncher := NewLauncher(repoDir, socketPath)
+	stopLauncher.waitForReady = func(context.Context, string) error {
+		if ready.Load() {
+			return nil
+		}
+		return context.DeadlineExceeded
+	}
+	stopLauncher.shutdownViaSocket = func(context.Context, string) error {
+		close(stopEntered)
+		<-allowStop
+		ready.Store(false)
+		if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- stopLauncher.Stop(context.Background()) }()
+	<-stopEntered
+
+	var spawnCount atomic.Int32
+	start := func() <-chan error {
+		done := make(chan error, 1)
+		launcher := NewLauncher(repoDir, socketPath)
+		launcher.BinPath = "fixture-azd"
+		launcher.openLogFile = func(string) (io.WriteCloser, error) { return &trackingWriteCloser{}, nil }
+		launcher.waitForReady = func(context.Context, string) error {
+			if ready.Load() {
+				return nil
+			}
+			return context.DeadlineExceeded
+		}
+		launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+			spawnCount.Add(1)
+			ready.Store(true)
+			return &recordingDaemonProcess{exitCh: make(chan error)}, nil
+		}
+		go func() { done <- launcher.Start(context.Background()) }()
+		return done
+	}
+	startOne := start()
+	startTwo := start()
+	select {
+	case err := <-startOne:
+		t.Fatalf("first Start returned before Stop released lifecycle lock: %v", err)
+	case err := <-startTwo:
+		t.Fatalf("second Start returned before Stop released lifecycle lock: %v", err)
+	case <-time.After(75 * time.Millisecond):
+	}
+
+	close(allowStop)
+	if err := <-stopDone; err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	for i, done := range []<-chan error{startOne, startTwo} {
+		if err := <-done; err != nil {
+			t.Fatalf("Start %d error = %v", i+1, err)
+		}
+	}
+	if got := spawnCount.Load(); got != 1 {
+		t.Fatalf("spawn count = %d, want one daemon after serialized Stop/Start race", got)
+	}
+}
+
 func TestLauncherStopWrapsTerminateError(t *testing.T) {
 	repoDir := t.TempDir()
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
@@ -1665,5 +1880,130 @@ func TestLauncherStopFallsBackWhenGracefulSocketShutdownFails(t *testing.T) {
 	}
 	if !terminateCalled {
 		t.Fatal("expected terminateLockOwner fallback when graceful socket shutdown fails")
+	}
+}
+
+func TestLauncherStopRemovesCanonicalScopedRuntimeAssets(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	repoDir := newLauncherTestWorktree(t)
+	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
+	runtimeDir := config.ScopedDaemonRuntimeDir(repoDir)
+	if err := os.MkdirAll(filepath.Join(runtimeDir, "session-launch"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{launcher.SocketPath, launcher.LockPath, launcher.LockPath + ".start"} {
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(launcher.LockPath, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		if err := os.Remove(launcher.SocketPath); err != nil {
+			return err
+		}
+		return os.Remove(launcher.LockPath)
+	}
+
+	if err := launcher.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if _, err := os.Stat(runtimeDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("scoped runtime dir still exists after stop: %v", err)
+	}
+}
+
+func TestLauncherStopTreatsAbsentCanonicalScopedRuntimeAsClean(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	repoDir := newLauncherTestWorktree(t)
+	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
+	launcher.shutdownViaSocket = func(context.Context, string) error { return nil }
+
+	if err := launcher.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if _, err := os.Stat(config.ScopedDaemonRuntimeDir(repoDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("absent scoped runtime was unexpectedly created: %v", err)
+	}
+}
+
+func TestLauncherStopWaitsForGracefulScopedProcessExit(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	repoDir := newLauncherTestWorktree(t)
+	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
+	runtimeDir := config.ScopedDaemonRuntimeDir(repoDir)
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lockRecord, err := json.Marshal(map[string]any{"pid": os.Getpid()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcher.LockPath, lockRecord, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		go func() {
+			time.Sleep(30 * time.Millisecond)
+			_ = os.Remove(launcher.LockPath)
+		}()
+		return nil
+	}
+
+	if err := launcher.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if _, err := os.Stat(runtimeDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("scoped runtime dir still exists after delayed process exit: %v", err)
+	}
+}
+
+func TestLauncherStopReportsScopedRuntimeCleanupResidue(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	repoDir := newLauncherTestWorktree(t)
+	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
+	runtimeDir := config.ScopedDaemonRuntimeDir(repoDir)
+	if err := os.MkdirAll(filepath.Join(runtimeDir, "session-launch"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	residue := filepath.Join(runtimeDir, "unexpected")
+	if err := os.WriteFile(residue, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launcher.shutdownViaSocket = func(context.Context, string) error { return nil }
+
+	err := launcher.Stop(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "clean worktree-scoped daemon runtime") {
+		t.Fatalf("Stop() error = %v, want scoped cleanup failure", err)
+	}
+	if data, readErr := os.ReadFile(residue); readErr != nil || string(data) != "preserve" {
+		t.Fatalf("unexpected residue was changed: data=%q err=%v", data, readErr)
+	}
+}
+
+func TestLauncherStopNeverCleansGlobalRuntimeAssets(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
+	repoDir := t.TempDir()
+	launcher := NewLauncher(repoDir, config.GlobalDaemonSocketPath())
+	startLock := launcher.LockPath + ".start"
+	if err := os.MkdirAll(filepath.Dir(startLock), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(startLock, []byte("global sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launcher.shutdownViaSocket = func(context.Context, string) error { return nil }
+
+	if err := launcher.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if data, err := os.ReadFile(startLock); err != nil || string(data) != "global sentinel" {
+		t.Fatalf("global runtime asset changed: data=%q err=%v", data, err)
 	}
 }
