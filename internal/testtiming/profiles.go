@@ -30,7 +30,7 @@ var profiles = map[string]Profile{
 	},
 	"migration-clone": {
 		Name: "migration-clone", Description: "fresh, historical, repair, drift, rollback, and clone isolation contracts",
-		Packages:   []string{"./internal/services/issues", "./internal/daemon/userstore", "./internal/daemon/state", "./internal/daemon"},
+		Packages:   []string{"./internal/services/issues", "./internal/daemon/userstore", "./internal/daemon/state", "./internal/daemon/operations/store", "./internal/daemon"},
 		GoTestArgs: []string{"-json", "-count=1", "-timeout=15m", "-run", "(Migration|Migrate|Migrates|Migrated|Repair|SchemaDrift)"},
 	},
 	"boundary": {

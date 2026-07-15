@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -195,5 +196,26 @@ func TestParseWorkerEvidencePacketBodyIgnoresUnstructuredText(t *testing.T) {
 	_, result := ParseWorkerEvidencePacketBody("tests pass; ready")
 	if result.Found || result.Complete || len(result.Problems()) != 0 {
 		t.Fatalf("parse result = %+v, want no packet found", result)
+	}
+}
+
+func TestWorkerEvidenceRejectsUnleasedOrOverlappedAggregateValidation(t *testing.T) {
+	base := `{"schema":"worker_evidence.v1","summary":"ready","commands_run":["just test"],"key_assertions":["tests pass"],"files_changed":["justfile"],"review":{"status":"clean","findings":[]},"risks":["none"],"aggregate_validation":%s}`
+	tests := []struct {
+		name     string
+		evidence string
+		complete bool
+	}{
+		{name: "leased clean", evidence: `{"held":true,"request_id":"req-1","class":"aggregate","profile":"cold","present":true,"overlap_detected":false,"external_go_processes":0}`, complete: true},
+		{name: "unleased", evidence: `{"held":false,"class":"aggregate","present":true,"overlap_detected":false}`, complete: false},
+		{name: "overlapped", evidence: `{"held":true,"request_id":"req-2","class":"aggregate","present":true,"overlap_detected":true,"external_go_processes":2}`, complete: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, result := ParseWorkerEvidencePacketBody(fmt.Sprintf(base, tc.evidence))
+			if result.Complete != tc.complete {
+				t.Fatalf("validation = %+v, complete want %t", result, tc.complete)
+			}
+		})
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -37,8 +38,7 @@ func Run(ctx context.Context, opts RunOptions) (Measurement, error) {
 	}
 	var measurement Measurement
 	var runErr error
-	lockErr := gocache.WithExclusiveLock(ctx, cacheConfig, func() error {
-		telemetry, err := gocache.Prepare(ctx, cacheConfig, os.Getenv("AZEDARACH_GO_CACHE_AUTO_MAINTAIN") == "1")
+	lockErr := gocache.WithValidationLock(ctx, cacheConfig, os.Getenv("AZEDARACH_GO_CACHE_AUTO_MAINTAIN") == "1", func(telemetry gocache.Telemetry, err error) error {
 		if err != nil {
 			measurement, runErr = writeRefusalArtifacts(opts, telemetry, err)
 			return nil
@@ -71,6 +71,8 @@ func writeRefusalArtifacts(opts RunOptions, telemetry gocache.Telemetry, refusal
 		TestResultCacheMode: opts.Profile.CachePolicy(),
 		BuildCache:          telemetry,
 		ResourceMethod:      "direct-go-command-process-state-v1",
+		ProcessLoad:         ProcessLoadEvidence{Method: "ps-process-tree-v2", PeakProcesses: []GoProcess{}, PeakExternalProcesses: []GoProcess{}},
+		ValidationLease:     validationLeaseEvidence(),
 		StartedAt:           opts.Now().UTC(),
 		ExitCode:            1,
 		RawJSONPath:         rawPath,
@@ -79,6 +81,9 @@ func writeRefusalArtifacts(opts RunOptions, telemetry gocache.Telemetry, refusal
 		Comparison:          Comparison{BaselineRecordedAt: opts.Baseline.RecordedAt, PackageDeltas: []Delta{}, Violations: []Violation{}},
 	}
 	if err := writeArtifacts(opts.OutputDir, measurement); err != nil {
+		return measurement, errors.Join(refusal, err)
+	}
+	if err := writeValidationLeaseEvidenceFile(measurement, opts.OutputDir); err != nil {
 		return measurement, errors.Join(refusal, err)
 	}
 	return measurement, refusal
@@ -122,9 +127,11 @@ func runLocked(ctx context.Context, opts RunOptions, cacheConfig gocache.Config,
 	collector := NewEventCollector(raw)
 	cmd.Stdout = collector
 	cmd.Stderr = stderr
+	loadSampler := startProcessLoadSampler(500 * time.Millisecond)
 	startedAt := opts.Now().UTC()
 	started := time.Now()
 	runErr := cmd.Run()
+	processLoad := loadSampler.finish()
 	wall := time.Since(started).Seconds()
 	collector.Finish()
 	packages, tests, failures, invalid := collector.Results()
@@ -136,7 +143,7 @@ func runLocked(ctx context.Context, opts RunOptions, cacheConfig gocache.Config,
 		}
 	}
 	cacheTelemetry, cacheErr := gocache.Finish(cacheConfig, cacheTelemetry)
-	m := Measurement{Schema: ReportSchema, Profile: opts.Profile.Name, CacheMode: opts.Profile.CachePolicy(), TestResultCacheMode: opts.Profile.CachePolicy(), BuildCache: cacheTelemetry, ResourceMethod: "direct-go-command-process-state-v1", StartedAt: startedAt, WallSeconds: wall, ExitCode: exitCode, Packages: packages, Tests: tests, Failures: failures, InvalidEvents: invalid, RawJSONPath: rawPath, StderrPath: stderrPath, Command: command}
+	m := Measurement{Schema: ReportSchema, Profile: opts.Profile.Name, CacheMode: opts.Profile.CachePolicy(), TestResultCacheMode: opts.Profile.CachePolicy(), BuildCache: cacheTelemetry, ResourceMethod: "direct-go-command-process-state-v1", StartedAt: startedAt, WallSeconds: wall, ProcessLoad: processLoad, ValidationLease: validationLeaseEvidence(), ExitCode: exitCode, Packages: packages, Tests: tests, Failures: failures, InvalidEvents: invalid, RawJSONPath: rawPath, StderrPath: stderrPath, Command: command}
 	if cmd.ProcessState != nil {
 		m.UserCPUSeconds = cmd.ProcessState.UserTime().Seconds()
 		m.SystemCPUSeconds = cmd.ProcessState.SystemTime().Seconds()
@@ -144,6 +151,9 @@ func runLocked(ctx context.Context, opts RunOptions, cacheConfig gocache.Config,
 	}
 	m.Comparison = Compare(m, opts.Baseline)
 	if err := writeArtifacts(opts.OutputDir, m); err != nil {
+		return m, err
+	}
+	if err := writeValidationLeaseEvidenceFile(m, opts.OutputDir); err != nil {
 		return m, err
 	}
 	var outcomes []error
@@ -162,6 +172,68 @@ func runLocked(ctx context.Context, opts RunOptions, cacheConfig gocache.Config,
 		outcomes = append(outcomes, fmt.Errorf("%d timing budget violation(s)", len(m.Comparison.Violations)))
 	}
 	return m, errors.Join(outcomes...)
+}
+
+func validationLeaseEvidence() ValidationLeaseEvidence {
+	requestID := strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_REQUEST_ID"))
+	return ValidationLeaseEvidence{Held: requestID != "", RequestID: requestID, Class: strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_CLASS")), Profile: strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_PROFILE")), SourceRevision: strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_SOURCE_REVISION"))}
+}
+
+func writeValidationLeaseEvidenceFile(measurement Measurement, outputDir string) error {
+	path := strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_EVIDENCE_FILE"))
+	if path == "" {
+		return nil
+	}
+	reportPath := filepath.Join(outputDir, "report.json")
+	evidence := validationLeaseEvidenceFile{Held: measurement.ValidationLease.Held, RequestID: measurement.ValidationLease.RequestID, Class: measurement.ValidationLease.Class, Profile: measurement.ValidationLease.Profile, SourceRevision: measurement.ValidationLease.SourceRevision, Present: true, ReportPath: reportPath, ReportPaths: []string{reportPath}, OverlapDetected: measurement.ProcessLoad.OverlapDetected, ExternalGoProcesses: measurement.ProcessLoad.MaxExternalGoProcesses}
+	if existingData, err := os.ReadFile(path); err == nil {
+		if len(strings.TrimSpace(string(existingData))) > 0 {
+			var existing validationLeaseEvidenceFile
+			if err := json.Unmarshal(existingData, &existing); err != nil {
+				return fmt.Errorf("decode accumulated validation lease evidence: %w", err)
+			}
+			if existing.RequestID != evidence.RequestID || existing.Class != evidence.Class || existing.Profile != evidence.Profile || existing.SourceRevision != evidence.SourceRevision || existing.Held != evidence.Held {
+				return fmt.Errorf("accumulated validation lease evidence identity changed")
+			}
+			evidence.OverlapDetected = evidence.OverlapDetected || existing.OverlapDetected
+			evidence.ExternalGoProcesses = max(evidence.ExternalGoProcesses, existing.ExternalGoProcesses)
+			evidence.ReportPaths = appendUniqueValidationReport(existing.ReportPaths, existing.ReportPath, reportPath)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read accumulated validation lease evidence: %w", err)
+	}
+	data, err := json.Marshal(evidence)
+	if err != nil {
+		return fmt.Errorf("marshal validation lease evidence: %w", err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write validation lease evidence: %w", err)
+	}
+	return nil
+}
+
+type validationLeaseEvidenceFile struct {
+	Held                bool     `json:"held"`
+	RequestID           string   `json:"request_id,omitempty"`
+	Class               string   `json:"class,omitempty"`
+	Profile             string   `json:"profile,omitempty"`
+	SourceRevision      string   `json:"source_revision,omitempty"`
+	Present             bool     `json:"present"`
+	ReportPath          string   `json:"report_path,omitempty"`
+	ReportPaths         []string `json:"report_paths,omitempty"`
+	OverlapDetected     bool     `json:"overlap_detected"`
+	ExternalGoProcesses int      `json:"external_go_processes"`
+}
+
+func appendUniqueValidationReport(paths []string, candidates ...string) []string {
+	out := append([]string(nil), paths...)
+	for _, candidate := range candidates {
+		if candidate == "" || slices.Contains(out, candidate) {
+			continue
+		}
+		out = append(out, candidate)
+	}
+	return out
 }
 
 func withEnv(env []string, key, value string) []string {

@@ -42,6 +42,7 @@ func TestInvariantSourceMatrixIncludesExpectedRuntimeInvariants(t *testing.T) {
 		daemonInvariantOrchestrationLoop:       daemonInvariantSourceProjection,
 		daemonInvariantProjectionDeltaStream:   daemonInvariantSourceProjection,
 		daemonInvariantTmuxObservation:         daemonInvariantSourceTmux,
+		daemonInvariantValidationCapacity:      daemonInvariantSourceProjection,
 	}
 	for id, want := range expected {
 		got, ok := matrix[id]

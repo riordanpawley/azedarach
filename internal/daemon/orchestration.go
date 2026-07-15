@@ -391,6 +391,17 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	if issueClient == nil {
 		return protocol.OrchestrationSnapshot{}, fmt.Errorf("issue store unavailable")
 	}
+	if a.daemon.operationRuntime != nil {
+		validationStore, err := a.daemon.validationProjectionStore()
+		if err != nil {
+			return protocol.OrchestrationSnapshot{}, fmt.Errorf("load validation capacity projection: %w", err)
+		}
+		validation, err := validationStore.ValidationSnapshot(ctx, projectID, snapshot.GeneratedAt, defaultValidationLeaseTTL)
+		if err != nil {
+			return protocol.OrchestrationSnapshot{}, fmt.Errorf("load validation capacity projection: %w", err)
+		}
+		snapshot.ValidationCapacity = &validation
+	}
 	if identity.Scope.Kind == domain.OrchestrationScopeRooted {
 		root := identity.Scope.RootIssueID.String()
 		ready, err := a.daemon.taskGraphReadinessForActor(ctx, projectID, root, request.ActorID)
