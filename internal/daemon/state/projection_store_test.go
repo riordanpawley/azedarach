@@ -8,12 +8,19 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
+	"github.com/riordanpawley/azedarach/internal/observability"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	_ "modernc.org/sqlite"
 )
 
@@ -1524,6 +1531,7 @@ func TestRuntimeStateStoreOpensRootShapeWithDuplicateArchivedLogicalSessions(t *
 }
 
 func TestRuntimeStateStoreReopensWithMissingIssueRuntimeProjection(t *testing.T) {
+	recorder := newRuntimeRepairTraceRecorder(t)
 	dbPath := filepath.Join(t.TempDir(), "runtime.db")
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -1557,6 +1565,7 @@ func TestRuntimeStateStoreReopensWithMissingIssueRuntimeProjection(t *testing.T)
 	if probeCount != 1 {
 		t.Fatalf("liveness probes=%d want one consistent ch-dkx classification", probeCount)
 	}
+	assertRuntimeRepairSpans(t, recorder, "daemon.runtime_projection.orphan_classification", "daemon.runtime_projection.orphan_repair")
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1574,6 +1583,44 @@ func TestRuntimeStateStoreReopensWithMissingIssueRuntimeProjection(t *testing.T)
 		}
 		if count != 0 {
 			t.Fatalf("%s orphan rows=%d want 0", table, count)
+		}
+	}
+}
+
+func newRuntimeRepairTraceRecorder(t *testing.T) *tracetest.SpanRecorder {
+	t.Helper()
+	t.Setenv(latencytrace.EnvVar, "")
+	t.Setenv(observability.EnvVar, "true")
+	latencytrace.SetConfigEnabled(false)
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(oteltrace.NewNoopTracerProvider())
+		latencytrace.SetConfigEnabled(false)
+	})
+	return recorder
+}
+
+func assertRuntimeRepairSpans(t *testing.T, recorder *tracetest.SpanRecorder, names ...string) {
+	t.Helper()
+	found := map[string]sdktrace.ReadOnlySpan{}
+	for _, span := range recorder.Ended() {
+		found[span.Name()] = span
+	}
+	for _, name := range names {
+		span := found[name]
+		if span == nil {
+			t.Fatalf("missing span %q; ended=%v", name, found)
+		}
+		attrs := map[string]bool{}
+		for _, attr := range span.Attributes() {
+			attrs[string(attr.Key)] = true
+		}
+		for _, key := range []string{"component", "phase", "outcome"} {
+			if !attrs[key] {
+				t.Fatalf("span %q missing attribute %q", name, key)
+			}
 		}
 	}
 }
@@ -1630,6 +1677,83 @@ func TestRuntimeStateStoreFailsClosedForLiveMissingIssueRuntime(t *testing.T) {
 	}
 	if probed != "ch-dkx" {
 		t.Fatalf("liveness probe session=%q want ch-dkx", probed)
+	}
+}
+
+func TestRuntimeStateStoreMissingIssueRepairRollsBackMidBatchFailure(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := func(table string) string {
+		return `CREATE TABLE ` + table + `(project_id TEXT NOT NULL,session_id TEXT NOT NULL,issue_id TEXT NOT NULL,role TEXT NOT NULL,scope_kind TEXT NOT NULL,scope_id TEXT NOT NULL,state TEXT NOT NULL,observed_state TEXT,activity TEXT,activity_source TEXT,tmux_attached_count INTEGER NOT NULL DEFAULT 0,started_at TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(project_id,session_id));`
+	}
+	if _, err := db.Exec(`CREATE TABLE issues(id TEXT PRIMARY KEY,visibility TEXT NOT NULL);` + schema(sessionStateTable) + schema(sessionObservationTable) + `
+		INSERT INTO daemon_session_projections VALUES ('chefy','ch-dkx','dkx','worker','issue','dkx','stopped','stopped','','',0,NULL,'2026-07-09T03:22:36Z');
+		INSERT INTO daemon_session_observations VALUES ('chefy','ch-dkx.pane-1700','dkx','worker','issue','dkx','stopped','stopped','','',0,NULL,'2026-07-09T03:22:36Z');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store := NewRuntimeStateStoreAtPath(dbPath, slog.Default(),
+		WithRuntimeLivenessProbe(func(context.Context, string) (bool, error) { return false, nil }),
+		WithRuntimeRepairDeleteHookForTest(func(_, _ string, index int) error {
+			if index == 1 {
+				return errors.New("injected mid-batch failure")
+			}
+			return nil
+		}),
+	)
+	if _, err := store.ListSessionStates(context.Background(), "chefy"); err == nil || !strings.Contains(err.Error(), "injected mid-batch failure") {
+		t.Fatalf("repair error=%v", err)
+	}
+	verify, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verify.Close()
+	for _, table := range []string{sessionStateTable, sessionObservationTable} {
+		var count int
+		if err := verify.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE issue_id='dkx'`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("%s rows after rollback=%d want 1", table, count)
+		}
+	}
+}
+
+func TestRuntimeStateStoreCandidateCloneOpenAndReopen(t *testing.T) {
+	path := strings.TrimSpace(os.Getenv("AZEDARACH_RUNTIME_CLONE_DB"))
+	if path == "" {
+		t.Skip("AZEDARACH_RUNTIME_CLONE_DB not set")
+	}
+	store := NewRuntimeStateStoreAtPath(path, slog.Default(), WithRuntimeLivenessProbe(func(context.Context, string) (bool, error) { return false, nil }))
+	if _, err := store.ListProjectIDs(context.Background()); err != nil {
+		t.Fatalf("candidate clone open: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ListProjectIDs(context.Background()); err != nil {
+		t.Fatalf("candidate clone idempotent reopen: %v", err)
+	}
+	if issueID := strings.TrimSpace(os.Getenv("AZEDARACH_RUNTIME_CLONE_ABSENT_ISSUE")); issueID != "" {
+		db, err := store.dbHandle()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, table := range []string{sessionStateTable, sessionObservationTable} {
+			var count int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE issue_id=?`, issueID).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 0 {
+				t.Fatalf("%s absent-issue rows=%d want 0", table, count)
+			}
+		}
 	}
 }
 

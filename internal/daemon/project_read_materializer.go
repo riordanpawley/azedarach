@@ -15,6 +15,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/userstore"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
@@ -554,6 +555,8 @@ func (d *Daemon) ensureProjectReadMaterializer(ctx context.Context, projectID st
 		return nil, fmt.Errorf("bootstrap project %s: %w", projectID, err)
 	}
 	if err := d.refreshProjectReadWorktreesForBootstrap(ctx, projectID, materializer); err != nil {
+		_, endFallback := latencytrace.StartSpanWithEndAttributes(ctx, "daemon", "project_read.degraded_fallback", "project_id", projectID, "reason", "worktree_enrichment")
+		endFallback(nil, "outcome", "ticket_only")
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.WarnContext(ctx, "project read materializer continuing without runtime worktree enrichment", "project_id", projectID, "error", err)
 		}
@@ -689,13 +692,18 @@ func (d *Daemon) hydrateProjectReadTasks(ctx context.Context, projectID string, 
 			return d.projectReadRuntimeHydrate(ctx, projectID, tasks)
 		}
 	}
-	hydrated, err := hydrate(ctx, projectID, tasks)
+	hydrateCtx, endHydration := latencytrace.StartSpanWithEndAttributes(ctx, "daemon", "project_read.runtime_hydration", "project_id", projectID, "task_count", len(tasks))
+	hydrated, err := hydrate(hydrateCtx, projectID, tasks)
 	if err != nil {
+		endHydration(err, "outcome", "degraded")
+		_, endFallback := latencytrace.StartSpanWithEndAttributes(ctx, "daemon", "project_read.degraded_fallback", "project_id", projectID, "reason", "session_hydration")
+		endFallback(nil, "outcome", "ticket_only")
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.WarnContext(ctx, "project read materializer continuing without runtime session enrichment", "project_id", projectID, "error", err)
 		}
 		return tasks
 	}
+	endHydration(nil, "outcome", "enriched")
 	return d.enrichTasksWithSessionState(ctx, projectID, hydrated)
 }
 

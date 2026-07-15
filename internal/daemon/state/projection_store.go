@@ -17,6 +17,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/dbpathguard"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/observability/tracesqlite"
 	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
@@ -577,13 +578,16 @@ func (s *RuntimeStateStore) ListLegacyPhysicalObservationCandidates(ctx context.
 
 // RuntimeStateStore persists daemon-owned session/worktree state in sqlite.
 type RuntimeStateStore struct {
-	dbPath               string
-	logger               *slog.Logger
-	runtimeLivenessProbe func(context.Context, string) (bool, error)
+	dbPath                  string
+	logger                  *slog.Logger
+	runtimeLivenessProbe    func(context.Context, string) (bool, error)
+	runtimeRepairDeleteHook func(table, sessionID string, index int) error
 
 	mu sync.Mutex
 	db *sql.DB
 }
+
+type runtimeOrphanKey struct{ table, projectID, sessionID, issueID string }
 
 // RuntimeStateStoreOption configures runtime-store reconciliation boundaries.
 type RuntimeStateStoreOption func(*RuntimeStateStore)
@@ -592,6 +596,12 @@ type RuntimeStateStoreOption func(*RuntimeStateStore)
 // startup may prune terminal projections whose issue authority is absent.
 func WithRuntimeLivenessProbe(probe func(context.Context, string) (bool, error)) RuntimeStateStoreOption {
 	return func(store *RuntimeStateStore) { store.runtimeLivenessProbe = probe }
+}
+
+// WithRuntimeRepairDeleteHookForTest injects failures into the orphan repair
+// transaction. Production callers must not use it to alter repair behavior.
+func WithRuntimeRepairDeleteHookForTest(hook func(table, sessionID string, index int) error) RuntimeStateStoreOption {
+	return func(store *RuntimeStateStore) { store.runtimeRepairDeleteHook = hook }
 }
 
 type sqliteWriteAttemptHookKey struct{}
@@ -2332,7 +2342,7 @@ func (s *RuntimeStateStore) dbHandle() (*sql.DB, error) {
 	db.SetConnMaxLifetime(0)
 	db.SetConnMaxIdleTime(0)
 	if err := sqliteutil.WithWriteLock(s.dbPath, func() error {
-		return ensureRuntimeStateSchema(context.Background(), db, s.runtimeLivenessProbe)
+		return ensureRuntimeStateSchema(context.Background(), db, s.runtimeLivenessProbe, s.runtimeRepairDeleteHook)
 	}); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -2454,7 +2464,7 @@ func isSQLiteWriteContention(err error) bool {
 	return false
 }
 
-func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB, runtimeLivenessProbe func(context.Context, string) (bool, error)) error {
+func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB, runtimeLivenessProbe func(context.Context, string) (bool, error), runtimeRepairDeleteHook func(string, string, int) error) error {
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS ` + physicalSessionObservationTable + ` (
 			project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
@@ -2660,7 +2670,7 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB, runtimeLivenessPr
 	if err := migrateSessionObservations(ctx, db); err != nil {
 		return err
 	}
-	if err := ensureRuntimeSessionProductConstraints(ctx, db, runtimeLivenessProbe); err != nil {
+	if err := ensureRuntimeSessionProductConstraints(ctx, db, runtimeLivenessProbe, runtimeRepairDeleteHook); err != nil {
 		return err
 	}
 	if err := ensureSessionActivityEvidenceSourceKey(ctx, db); err != nil {
@@ -3036,7 +3046,7 @@ func ensureRuntimeLogicalSessionIdentitySchema(ctx context.Context, db *sql.DB) 
 	return nil
 }
 
-func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB, runtimeLivenessProbe func(context.Context, string) (bool, error)) error {
+func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB, runtimeLivenessProbe func(context.Context, string) (bool, error), runtimeRepairDeleteHook func(string, string, int) error) error {
 	var issuesTableCount int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='issues'`).Scan(&issuesTableCount); err != nil {
 		return fmt.Errorf("inspect relational issue authority: %w", err)
@@ -3055,8 +3065,7 @@ func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB, run
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='interaction_requests'`).Scan(&interactionTableCount); err != nil {
 		return fmt.Errorf("inspect relational interaction authority: %w", err)
 	}
-	type orphanKey struct{ table, projectID, sessionID, issueID string }
-	var terminalOrphans []orphanKey
+	var terminalOrphans []runtimeOrphanKey
 	type livenessResult struct {
 		live bool
 		err  error
@@ -3099,20 +3108,23 @@ func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB, run
 						return fmt.Errorf("invalid historical runtime authority %s/%s: issue does not exist; live runtime is unverified, run daemon runtime reconcile after restoring issue authority or stop the session explicitly", table, session.ID)
 					}
 					probeID := strings.TrimSpace(strings.SplitN(session.ID, ".pane-", 2)[0])
+					classifyCtx, endClassification := latencytrace.StartSpanWithEndAttributes(ctx, "daemon", "runtime_projection.orphan_classification", "project_id", projectID, "issue_id", session.IssueID)
 					result, probed := livenessBySession[probeID]
 					if !probed {
-						result.live, result.err = runtimeLivenessProbe(ctx, probeID)
+						result.live, result.err = runtimeLivenessProbe(classifyCtx, probeID)
 						livenessBySession[probeID] = result
 					}
 					live, probeErr := result.live, result.err
 					if probeErr != nil || live {
+						endClassification(probeErr, "outcome", map[bool]string{true: "live", false: "probe_failed"}[live])
 						_ = rows.Close()
 						if probeErr != nil {
 							return fmt.Errorf("classify missing-issue runtime authority %s/%s: live runtime probe failed: %w", table, session.ID, probeErr)
 						}
 						return fmt.Errorf("invalid historical runtime authority %s/%s: issue does not exist but runtime %s is live; restore issue authority or stop the session explicitly", table, session.ID, probeID)
 					}
-					terminalOrphans = append(terminalOrphans, orphanKey{table: table, projectID: projectID, sessionID: session.ID, issueID: session.IssueID})
+					endClassification(nil, "outcome", "repairable")
+					terminalOrphans = append(terminalOrphans, runtimeOrphanKey{table: table, projectID: projectID, sessionID: session.ID, issueID: session.IssueID})
 					continue
 				}
 			}
@@ -3167,10 +3179,40 @@ func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB, run
 			}
 		}
 	}
-	for _, orphan := range terminalOrphans {
-		if _, err := db.ExecContext(ctx, `DELETE FROM `+orphan.table+` WHERE project_id=? AND session_id=? AND issue_id=?`, orphan.projectID, orphan.sessionID, orphan.issueID); err != nil {
-			return fmt.Errorf("prune terminal missing-issue runtime authority %s/%s: %w", orphan.table, orphan.sessionID, err)
+	if err := pruneTerminalRuntimeOrphans(ctx, db, terminalOrphans, runtimeRepairDeleteHook); err != nil {
+		return err
+	}
+	return nil
+}
+
+func pruneTerminalRuntimeOrphans(ctx context.Context, db *sql.DB, orphans []runtimeOrphanKey, hook func(string, string, int) error) (err error) {
+	if len(orphans) == 0 {
+		return nil
+	}
+	ctx, endRepair := latencytrace.StartSpanWithEndAttributes(ctx, "daemon", "runtime_projection.orphan_repair", "task_count", len(orphans))
+	defer func() { endRepair(err, "outcome", map[bool]string{true: "rolled_back", false: "repaired"}[err != nil]) }()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin terminal missing-issue runtime repair: %w", err)
+	}
+	rollback := func(cause error) error {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			return errors.Join(cause, fmt.Errorf("rollback terminal missing-issue runtime repair: %w", rollbackErr))
 		}
+		return cause
+	}
+	for i, orphan := range orphans {
+		if hook != nil {
+			if hookErr := hook(orphan.table, orphan.sessionID, i); hookErr != nil {
+				return rollback(fmt.Errorf("inject terminal missing-issue runtime repair %s/%s: %w", orphan.table, orphan.sessionID, hookErr))
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+orphan.table+` WHERE project_id=? AND session_id=? AND issue_id=?`, orphan.projectID, orphan.sessionID, orphan.issueID); err != nil {
+			return rollback(fmt.Errorf("prune terminal missing-issue runtime authority %s/%s: %w", orphan.table, orphan.sessionID, err))
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return rollback(fmt.Errorf("commit terminal missing-issue runtime repair: %w", err))
 	}
 	return nil
 }
