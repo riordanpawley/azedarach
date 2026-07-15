@@ -28,6 +28,7 @@ const (
 	physicalSessionObservationTable = "daemon_physical_session_observations"
 	worktreeStateTable              = "daemon_worktree_projections"
 	orchestratorLeaseTable          = "daemon_orchestrator_scope_leases"
+	rootedBootstrapAckTable         = "daemon_rooted_bootstrap_acknowledgements"
 	advisorSessionTable             = "daemon_advisor_sessions"
 	orchestratorLoopTable           = "daemon_orchestrator_loop_checkpoints"
 	runtimeSQLiteBusyPrimaryCode    = 5
@@ -2302,6 +2303,17 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daemon_orchestrator_scope_leases_project_updated
 			ON ` + orchestratorLeaseTable + ` (project_id, updated_at DESC, scope_kind, root_issue_id)`,
+		`CREATE TABLE IF NOT EXISTS ` + rootedBootstrapAckTable + ` (
+			project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
+			root_issue_id TEXT NOT NULL CHECK (trim(root_issue_id) <> ''),
+			session_id TEXT NOT NULL CHECK (trim(session_id) <> ''),
+			prompt_hash TEXT NOT NULL CHECK (trim(prompt_hash) <> ''),
+			runtime_nonce TEXT NOT NULL CHECK (trim(runtime_nonce) <> ''),
+			acknowledged_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (project_id, root_issue_id),
+			UNIQUE (project_id, session_id)
+		)`,
 		`CREATE TABLE IF NOT EXISTS ` + advisorSessionTable + ` (
 			project_id TEXT NOT NULL,
 			request_id TEXT NOT NULL,

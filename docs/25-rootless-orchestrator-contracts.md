@@ -29,6 +29,9 @@ are suppressed by the durable debounce timestamp.
 `orchestration.scope_identity` uses refreshed durable projection state.
 `orchestration.scope_singleton` is hybrid: refresh the durable exact-scope
 lease, then compare its session identity with live tmux runtime.
+`orchestration.rooted_bootstrap_delivery` is hybrid: refresh the durable
+accepted prompt acknowledgement, then compare its session, prompt hash, and
+runtime marker with live tmux before trusting the attached agent.
 `orchestration.project_completion` is hybrid: refresh durable issue, review,
 interaction, orchestration, and session projections, then compare runtime
 presence with live tmux. `runtime.reconcile` exposes both mappings.
@@ -68,17 +71,17 @@ Rooted startup is scope-authoritative rather than ticket-type-derived. The
 daemon acquires the rooted lease before agent launch, supplies an explicit
 orchestrator-only prompt whose first commands are `az prime`, rooted status,
 and rooted watch, and does not report startup success until the complete
-file-backed prompt has been acknowledged. An atomic worktree-local receipt
-binds that acknowledgement to the exact project, root, session, prompt hash,
-bootstrap contract version, and a cryptographically random agent-incarnation
-nonce installed in that live tmux session's environment. In-place agent
-replacement rotates the nonce before interrupting the old process and again
-after launching its replacement, so a cancelled, concurrent, or completed
-`session restart-all` cannot preserve bootstrap trust.
-Starting an already-live rooted session repairs a missing, corrupt, obsolete,
-or agent-incarnation-mismatched receipt by re-delivering the full prompt before
-the session is accepted; deterministic session ID reuse after stop, runtime
-loss, or process replacement cannot inherit bootstrap trust. The
+file-backed prompt has been acknowledged. A durable SQLite projection binds
+that acknowledgement to the exact project, root, session, prompt hash, and a
+cryptographically random marker in the live tmux environment. The marker is
+not itself a process identity; trust comes from comparing it with the refreshed
+accepted acknowledgement while holding the exact rooted-scope transition lock.
+`session restart-all` invalidates acknowledgement before interruption, launches
+the replacement under that same cross-process lock, and re-delivers and
+persists the rooted prompt acknowledgement before reporting success. A
+cancelled replacement remains unacknowledged and must be repaired by the next
+rooted start. Deterministic session ID reuse after stop, runtime loss, or
+process replacement cannot inherit bootstrap trust. The
 rooted session must never receive worker or contributor authority merely because
 the root ticket is not typed as an epic.
 

@@ -22,6 +22,8 @@ import (
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
+const rootedBootstrapAcknowledgementMigrationID = "0049_rooted_bootstrap_acknowledgements"
+
 type migration struct {
 	id          string
 	path        string
@@ -82,6 +84,7 @@ var orderedMigrations = []migration{
 	{id: "0046_repair_issue_state_runtime_constraints", path: "migrations/0046_repair_issue_state_runtime_constraints.manifest.sql", apply: applyIssueStateRuntimeConstraintsRepairMigration},
 	{id: humanAuthorityProjectionMigrationID, path: "migrations/0047_human_authority_projection_revision.sql"},
 	{id: "0048_decision_propagation_outbox", path: "migrations/0048_decision_propagation_outbox.sql"},
+	{id: rootedBootstrapAcknowledgementMigrationID, path: "migrations/0049_rooted_bootstrap_acknowledgements.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -137,6 +140,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "0046_repair_issue_state_runtime_constraints", Path: "migrations/0046_repair_issue_state_runtime_constraints.manifest.sql", Checksum: "6420b559de666287450e274b283b2e481c1472e3b02914f3023019975216e20d"},
 	{ID: humanAuthorityProjectionMigrationID, Path: "migrations/0047_human_authority_projection_revision.sql", Checksum: "ac3a48512b2e6e9c018d58a68db24a2465e9d172139d22f8378f69677073a0ab"},
 	{ID: "0048_decision_propagation_outbox", Path: "migrations/0048_decision_propagation_outbox.sql", Checksum: "a12c44ba35156d71fbcd88a9d78e4cdb234e75e7e4aef5f896c8b1182ada858d"},
+	{ID: rootedBootstrapAcknowledgementMigrationID, Path: "migrations/0049_rooted_bootstrap_acknowledgements.sql", Checksum: "b54bdf5ec3f6af17c91e1625582ac58e66e47948cea68ee73db88d4e8df6f161"},
 }
 
 func validateMigrationRegistry() error {

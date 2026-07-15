@@ -248,34 +248,21 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if err != nil || !found || projection.Role != daemonstate.SessionRoleOrchestrator || projection.ScopeKind != daemonstate.SessionScopeOrchestration || projection.ScopeID != rootID {
 		t.Fatalf("rooted projection = %+v found=%t err=%v", projection, found, err)
 	}
-	receiptPath, err := d.rootedOrchestratorBootstrapReceiptPath(ctx, projectID, scope, started.SessionID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(receiptPath); err != nil {
-		t.Fatalf("bootstrap receipt: %v", err)
-	}
-	receiptData, err := os.ReadFile(receiptPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var receipt rootedOrchestratorBootstrapReceipt
-	if err := json.Unmarshal(receiptData, &receipt); err != nil {
-		t.Fatal(err)
-	}
-	if receipt.Version != rootedOrchestratorBootstrapVersion || receipt.ProjectID != projectID || receipt.RootID != rootID || receipt.SessionID != started.SessionID || receipt.RuntimeNonce == "" || receipt.PromptHash != rootedOrchestratorPromptHash(prompt) || receipt.ReceivedAt.IsZero() {
-		t.Fatalf("bootstrap receipt = %+v", receipt)
-	}
-	if got := tmuxRunner.env[started.SessionID][rootedOrchestratorBootstrapNonceEnvironment]; got != receipt.RuntimeNonce {
-		t.Fatalf("runtime nonce = %q, receipt = %q", got, receipt.RuntimeNonce)
-	}
 	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
 	if err != nil {
 		t.Fatal(err)
 	}
+	ackAuthority := daemonstate.NewRootedBootstrapAcknowledgementAuthority(runtimeStore)
+	acknowledgement, found, err := ackAuthority.Get(ctx, identity)
+	if err != nil || !found || acknowledgement.SessionID != started.SessionID || acknowledgement.RuntimeNonce == "" || acknowledgement.PromptHash != rootedOrchestratorPromptHash(prompt) || acknowledgement.AcknowledgedAt.IsZero() {
+		t.Fatalf("bootstrap acknowledgement = %+v found=%t err=%v", acknowledgement, found, err)
+	}
+	if got := tmuxRunner.env[started.SessionID][rootedOrchestratorBootstrapNonceEnvironment]; got != acknowledgement.RuntimeNonce {
+		t.Fatalf("runtime nonce = %q, acknowledgement = %q", got, acknowledgement.RuntimeNonce)
+	}
 	lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(runtimeStore).Get(ctx, identity)
-	if err != nil || !found || lease.SessionID != started.SessionID || lease.Lifecycle != domain.OrchestratorWorking || lease.AcquiredAt.After(receipt.ReceivedAt) {
-		t.Fatalf("rooted lease = %+v found=%t err=%v receipt=%+v", lease, found, err, receipt)
+	if err != nil || !found || lease.SessionID != started.SessionID || lease.Lifecycle != domain.OrchestratorWorking || lease.AcquiredAt.After(acknowledgement.AcknowledgedAt) {
+		t.Fatalf("rooted lease = %+v found=%t err=%v acknowledgement=%+v", lease, found, err, acknowledgement)
 	}
 	inputsBefore := len(tmuxRunner.inputPayloads)
 	response, err = d.handleOrchestratorSession(ctx, request)
@@ -286,38 +273,19 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 		t.Fatalf("same rooted runtime was re-prompted: inputs=%d, want %d", len(tmuxRunner.inputPayloads), inputsBefore)
 	}
 
-	// restart-all replaces the agent process inside the same tmux session. It
-	// must invalidate the receipt before interrupting so the next rooted start
-	// repairs the replacement process instead of trusting tmux-session identity.
+	// restart-all replaces and re-acknowledges the rooted agent while holding
+	// the same exact-scope transition lock used by rooted start/attach.
 	d.sessionResumeWait = immediateSessionResumeWait
 	restartRequest := protocol.RequestEnvelope{
 		Command: protocol.CommandSessionRestartAll,
 		Meta:    protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 		Body:    marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(projectID)}),
 	}
-	var concurrentAttachCalls int
-	var concurrentAttachErr error
-	tmuxRunner.onSendKeys = func(_ string, payload string) {
-		if concurrentAttachCalls != 0 || !strings.Contains(payload, "codex resume") {
-			return
-		}
-		concurrentAttachCalls++
-		concurrentResponse, concurrentErr := d.handleOrchestratorSession(ctx, request)
-		if concurrentErr != nil {
-			concurrentAttachErr = concurrentErr
-			return
-		}
-		if concurrentResponse.Error != nil {
-			concurrentAttachErr = errors.New(concurrentResponse.Error.Message)
-		}
-	}
+	inputsBefore = len(tmuxRunner.inputPayloads)
+	handoffsBefore := len(tmuxRunner.handoffPromptContents)
 	restartResponse, err := d.handleSessionRestartAll(ctx, restartRequest)
-	tmuxRunner.onSendKeys = nil
 	if err != nil || restartResponse.Error != nil {
 		t.Fatalf("restart rooted agent: response=%+v err=%v", restartResponse.Error, err)
-	}
-	if concurrentAttachCalls != 1 || concurrentAttachErr != nil {
-		t.Fatalf("concurrent rooted attach calls=%d err=%v", concurrentAttachCalls, concurrentAttachErr)
 	}
 	var restartResult protocol.SessionRestartAllResponseBody
 	if err := json.Unmarshal(restartResponse.Body, &restartResult); err != nil {
@@ -326,25 +294,24 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if restartResult.Restarted != 1 || restartResult.Failed != 0 {
 		t.Fatalf("restart rooted agent result = %+v", restartResult)
 	}
+	if len(tmuxRunner.inputPayloads) != inputsBefore+1 || len(tmuxRunner.handoffPromptContents) != handoffsBefore+1 {
+		t.Fatalf("restart rooted acknowledgement delivery inputs=%d handoffs=%d", len(tmuxRunner.inputPayloads)-inputsBefore, len(tmuxRunner.handoffPromptContents)-handoffsBefore)
+	}
 	restartedNonce := tmuxRunner.env[started.SessionID][rootedOrchestratorBootstrapNonceEnvironment]
-	if restartedNonce == "" || restartedNonce == receipt.RuntimeNonce {
-		t.Fatalf("restart nonce = %q, seeded nonce = %q", restartedNonce, receipt.RuntimeNonce)
+	if restartedNonce == "" || restartedNonce == acknowledgement.RuntimeNonce {
+		t.Fatalf("restart nonce = %q, seeded nonce = %q", restartedNonce, acknowledgement.RuntimeNonce)
 	}
 	inputsBefore = len(tmuxRunner.inputPayloads)
-	handoffsBefore := len(tmuxRunner.handoffPromptContents)
 	response, err = d.handleOrchestratorSession(ctx, request)
 	if err != nil || response.Error != nil {
-		t.Fatalf("repair restarted rooted agent: response=%+v err=%v", response.Error, err)
+		t.Fatalf("verify restarted rooted agent: response=%+v err=%v", response.Error, err)
 	}
-	if len(tmuxRunner.inputPayloads) != inputsBefore+1 || len(tmuxRunner.handoffPromptContents) != handoffsBefore+1 {
-		t.Fatalf("restarted rooted repair delivery inputs=%d handoffs=%d", len(tmuxRunner.inputPayloads)-inputsBefore, len(tmuxRunner.handoffPromptContents)-handoffsBefore)
-	}
-	if repairedPrompt := tmuxRunner.handoffPromptContents[len(tmuxRunner.handoffPromptContents)-1]; !strings.Contains(repairedPrompt, "Role: orchestrator") {
-		t.Fatalf("restarted rooted repair prompt = %q", repairedPrompt)
+	if len(tmuxRunner.inputPayloads) != inputsBefore {
+		t.Fatalf("acknowledged restarted rooted agent was re-prompted")
 	}
 
-	// Cancellation after the interrupt must still leave the old receipt
-	// invalidated, so a later rooted start repairs whichever process survived.
+	// Cancellation after the interrupt leaves durable acknowledgement absent,
+	// so a later rooted start repairs whichever process survived.
 	var replacementWaits int
 	d.sessionResumeWait = func(context.Context, time.Duration) error {
 		replacementWaits++
@@ -362,8 +329,11 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 		t.Fatalf("cancelled rooted replacement result = %+v waits=%d", cancelledResult, replacementWaits)
 	}
 	cancelledNonce := tmuxRunner.env[started.SessionID][rootedOrchestratorBootstrapNonceEnvironment]
-	if cancelledNonce == "" || cancelledNonce == restartedNonce {
-		t.Fatalf("cancelled replacement nonce = %q, prior = %q", cancelledNonce, restartedNonce)
+	if cancelledNonce != "" {
+		t.Fatalf("cancelled replacement nonce = %q, want invalidated", cancelledNonce)
+	}
+	if _, found, err := ackAuthority.Get(ctx, identity); err != nil || found {
+		t.Fatalf("cancelled replacement acknowledgement found=%t err=%v", found, err)
 	}
 	d.sessionResumeWait = immediateSessionResumeWait
 	inputsBefore = len(tmuxRunner.inputPayloads)
@@ -374,7 +344,11 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if len(tmuxRunner.inputPayloads) != inputsBefore+1 {
 		t.Fatalf("cancelled rooted replacement repair inputs=%d, want 1", len(tmuxRunner.inputPayloads)-inputsBefore)
 	}
-	if err := os.Remove(receiptPath); err != nil {
+	currentAck, found, err := ackAuthority.Get(ctx, identity)
+	if err != nil || !found {
+		t.Fatalf("load repaired acknowledgement found=%t err=%v", found, err)
+	}
+	if err := ackAuthority.Invalidate(ctx, identity, started.SessionID); err != nil {
 		t.Fatal(err)
 	}
 	inputsBefore = len(tmuxRunner.inputPayloads)
@@ -392,24 +366,14 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if len(tmuxRunner.inputPayloads) != inputsBefore+1 || !strings.Contains(tmuxRunner.inputPayloads[len(tmuxRunner.inputPayloads)-1], sessionLaunchArtifactPrefix) {
 		t.Fatalf("bootstrap repair delivery = %+v", tmuxRunner.inputPayloads[inputsBefore:])
 	}
-	if _, err := os.Stat(receiptPath); err != nil {
-		t.Fatalf("repaired bootstrap receipt: %v", err)
-	}
-	repairedData, err := os.ReadFile(receiptPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var repairedReceipt rootedOrchestratorBootstrapReceipt
-	if err := json.Unmarshal(repairedData, &repairedReceipt); err != nil {
-		t.Fatal(err)
-	}
-	if repairedReceipt.RuntimeNonce == "" || repairedReceipt.RuntimeNonce == receipt.RuntimeNonce {
-		t.Fatalf("repaired runtime nonce = %q, original = %q", repairedReceipt.RuntimeNonce, receipt.RuntimeNonce)
+	repairedAck, found, err := ackAuthority.Get(ctx, identity)
+	if err != nil || !found || repairedAck.RuntimeNonce == "" || repairedAck.RuntimeNonce == currentAck.RuntimeNonce {
+		t.Fatalf("repaired acknowledgement = %+v found=%t err=%v", repairedAck, found, err)
 	}
 
-	// Lose the rooted tmux incarnation while retaining its receipt, then reuse
+	// Lose the rooted tmux runtime while retaining its acknowledgement, then reuse
 	// the deterministic session ID for an ordinary task runtime. The stale
-	// receipt must not suppress rooted role repair on the next start.
+	// projection must not suppress rooted role repair on the next start.
 	delete(tmuxRunner.sessions, started.SessionID)
 	delete(tmuxRunner.env, started.SessionID)
 	if _, err := daemonstate.NewOrchestratorLeaseAuthority(runtimeStore).SetLifecycle(ctx, identity, started.SessionID, domain.OrchestratorPaused); err != nil {
@@ -430,19 +394,193 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if !strings.Contains(repairPrompt, "Role: orchestrator") || strings.Contains(repairPrompt, "Role: contributor") || strings.Contains(repairPrompt, "Role: worker") {
 		t.Fatalf("ordinary runtime repair prompt = %q", repairPrompt)
 	}
-	incarnationData, err := os.ReadFile(receiptPath)
+	incarnationAck, found, err := ackAuthority.Get(ctx, identity)
+	if err != nil || !found || incarnationAck.RuntimeNonce == "" || incarnationAck.RuntimeNonce == repairedAck.RuntimeNonce {
+		t.Fatalf("reused runtime acknowledgement = %+v found=%t err=%v", incarnationAck, found, err)
+	}
+	if got := tmuxRunner.env[started.SessionID][rootedOrchestratorBootstrapNonceEnvironment]; got != incarnationAck.RuntimeNonce {
+		t.Fatalf("reused runtime nonce = %q, acknowledgement = %q", got, incarnationAck.RuntimeNonce)
+	}
+}
+
+func TestRootedRestartSerializesAcrossDaemonsAndAcknowledgesReplacement(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var incarnationReceipt rootedOrchestratorBootstrapReceipt
-	if err := json.Unmarshal(incarnationData, &incarnationReceipt); err != nil {
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Coordinate exact-scope restart", Type: domain.TypeTask})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if incarnationReceipt.RuntimeNonce == "" || incarnationReceipt.RuntimeNonce == repairedReceipt.RuntimeNonce {
-		t.Fatalf("reused runtime nonce = %q, stale receipt nonce = %q", incarnationReceipt.RuntimeNonce, repairedReceipt.RuntimeNonce)
+	worktreePath := filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+rootID)
+	manager := git.NewWorktreeManager(&worktreeCreateRunner{worktreePath: worktreePath, branchName: "test/" + rootID}, repoDir, slog.Default())
+	runtimePath := filepath.Join(repoDir, "runtime.db")
+	firstStore := daemonstate.NewRuntimeStateStoreAtPath(runtimePath, slog.Default())
+	secondStore := daemonstate.NewRuntimeStateStoreAtPath(runtimePath, slog.Default())
+	t.Cleanup(func() { _ = firstStore.Close() })
+	t.Cleanup(func() { _ = secondStore.Close() })
+	runner := newSessionStartTmuxRunner()
+	newDaemon := func(store *daemonstate.RuntimeStateStore) *Daemon {
+		memoryStore := daemonstate.NewStore()
+		return &Daemon{
+			cfg:    Config{RepoDir: repoDir, BaseBranch: "main", CLITool: "codex", SessionShell: "zsh", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+			issues: issuesClient, tmux: tmux.NewClient(runner, slog.Default()), session: daemonhandlers.NewSessionHandler(memoryStore), sessionStore: memoryStore,
+			runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{repoDir: store}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+			worktreeManagersByRoot: map[string]*git.WorktreeManager{repoDir: manager}, worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager}, revision: map[string]uint64{},
+		}
 	}
-	if got := tmuxRunner.env[started.SessionID][rootedOrchestratorBootstrapNonceEnvironment]; got != incarnationReceipt.RuntimeNonce {
-		t.Fatalf("reused runtime nonce = %q, receipt = %q", got, incarnationReceipt.RuntimeNonce)
+	first, second := newDaemon(firstStore), newDaemon(secondStore)
+	scope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := marshalJSON(protocol.OrchestratorSessionRequest{Scope: scope})
+	startRequest := protocol.RequestEnvelope{Command: protocol.CommandOrchestratorSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body}
+	startResponse, err := first.handleOrchestratorSession(ctx, startRequest)
+	if err != nil || startResponse.Error != nil {
+		t.Fatalf("initial rooted start: response=%+v err=%v", startResponse.Error, err)
+	}
+	var started protocol.OrchestratorSessionResult
+	if err := json.Unmarshal(startResponse.Body, &started); err != nil {
+		t.Fatal(err)
+	}
+
+	replacementPaused := make(chan struct{})
+	releaseReplacement := make(chan struct{})
+	firstWait := true
+	first.sessionResumeWait = func(ctx context.Context, _ time.Duration) error {
+		if firstWait {
+			firstWait = false
+			close(replacementPaused)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-releaseReplacement:
+			}
+		}
+		return nil
+	}
+	restartRequest := protocol.RequestEnvelope{Command: protocol.CommandSessionRestartAll, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(projectID)})}
+	type commandResult struct {
+		response protocol.ResponseEnvelope
+		err      error
+	}
+	restartDone := make(chan commandResult, 1)
+	inputsBefore := len(runner.inputPayloads)
+	go func() {
+		response, err := first.handleSessionRestartAll(ctx, restartRequest)
+		restartDone <- commandResult{response: response, err: err}
+	}()
+	select {
+	case <-replacementPaused:
+	case <-time.After(5 * time.Second):
+		t.Fatal("restart did not reach replacement boundary")
+	}
+	attachDone := make(chan commandResult, 1)
+	go func() {
+		response, err := second.handleOrchestratorSession(ctx, startRequest)
+		attachDone <- commandResult{response: response, err: err}
+	}()
+	select {
+	case result := <-attachDone:
+		t.Fatalf("concurrent rooted start escaped exact-scope lock: response=%+v err=%v", result.response.Error, result.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseReplacement)
+	var restartResult, attachResult commandResult
+	select {
+	case restartResult = <-restartDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("restart did not finish")
+	}
+	select {
+	case attachResult = <-attachDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent rooted start did not resume")
+	}
+	if restartResult.err != nil || restartResult.response.Error != nil {
+		t.Fatalf("restart result: response=%+v err=%v", restartResult.response.Error, restartResult.err)
+	}
+	if attachResult.err != nil || attachResult.response.Error != nil {
+		t.Fatalf("attach result: response=%+v err=%v", attachResult.response.Error, attachResult.err)
+	}
+	if got := len(runner.inputPayloads) - inputsBefore; got != 1 {
+		t.Fatalf("rooted replacement prompt deliveries = %d, want one acknowledged replacement", got)
+	}
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ack, found, err := daemonstate.NewRootedBootstrapAcknowledgementAuthority(secondStore).Get(ctx, identity)
+	if err != nil || !found || ack.SessionID != started.SessionID || ack.RuntimeNonce == "" {
+		t.Fatalf("post-restart acknowledgement = %+v found=%t err=%v", ack, found, err)
+	}
+	if got := runner.env[started.SessionID][rootedOrchestratorBootstrapNonceEnvironment]; got != ack.RuntimeNonce {
+		t.Fatalf("live marker = %q, durable acknowledgement = %q", got, ack.RuntimeNonce)
+	}
+}
+
+func TestRealProcessProfileRootedMarkerSurvivesPaneChildReplacement(t *testing.T) {
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux is not installed")
+	}
+	tmuxDir, err := os.MkdirTemp("/tmp", "az-die-tmux-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmuxDir) })
+	runner := &isolatedTmuxTestRunner{tmuxPath: tmuxPath, socketPath: filepath.Join(tmuxDir, "server.sock")}
+	if output, err := runner.run(context.Background(), "-f", "/dev/null", "new-session", "-d", "-s", "rooted-replacement", "sh"); err != nil {
+		t.Fatalf("start isolated tmux: %v (%s)", err, output)
+	}
+	t.Cleanup(func() { _, _ = runner.run(context.Background(), "kill-server") })
+	client := tmux.NewClient(runner, slog.Default())
+	if err := client.SetEnvironment(context.Background(), "rooted-replacement", rootedOrchestratorBootstrapNonceEnvironment, "durable-marker"); err != nil {
+		t.Fatal(err)
+	}
+	panePID, err := runner.run(context.Background(), "display-message", "-p", "-t", "rooted-replacement", "#{pane_pid}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	panePID = strings.TrimSpace(panePID)
+	childPID := func(exclude string) string {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			output, _ := exec.Command("ps", "-o", "pid=", "-P", panePID).CombinedOutput()
+			for _, pid := range strings.Fields(string(output)) {
+				if pid != exclude {
+					return pid
+				}
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		return ""
+	}
+	if output, err := runner.run(context.Background(), "send-keys", "-t", "rooted-replacement", "sleep 30", "Enter"); err != nil {
+		t.Fatalf("launch first child: %v (%s)", err, output)
+	}
+	firstChild := childPID("")
+	if firstChild == "" {
+		t.Fatal("first pane child did not start")
+	}
+	if output, err := runner.run(context.Background(), "send-keys", "-t", "rooted-replacement", "C-c"); err != nil {
+		t.Fatalf("interrupt first child: %v (%s)", err, output)
+	}
+	if output, err := runner.run(context.Background(), "send-keys", "-t", "rooted-replacement", "sleep 30", "Enter"); err != nil {
+		t.Fatalf("launch replacement child: %v (%s)", err, output)
+	}
+	secondChild := childPID(firstChild)
+	if secondChild == "" || secondChild == firstChild {
+		t.Fatalf("replacement child pid = %q, first = %q", secondChild, firstChild)
+	}
+	marker, found, err := client.EnvironmentValue(context.Background(), "rooted-replacement", rootedOrchestratorBootstrapNonceEnvironment)
+	if err != nil || !found || marker != "durable-marker" {
+		t.Fatalf("marker after child replacement = %q found=%t err=%v", marker, found, err)
 	}
 }
 

@@ -1746,78 +1746,46 @@ func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.Reque
 	})
 
 	for _, target := range restartTargets {
-		item := protocol.SessionRestartAllItem{
-			ProjectID:      naming.ProjectID(target.ProjectID),
-			SessionID:      naming.SessionID(target.SessionID),
-			IssueID:        naming.IssueID(target.IssueID),
-			Activity:       target.Activity,
-			ActivitySource: target.ActivitySource,
-			TmuxReady:      target.TmuxReady,
-			ActiveIntent:   target.ActiveIntent,
+		var item protocol.SessionRestartAllItem
+		serialized := false
+		if store := d.sessionRuntimeStateStoreIfConfigured(target.ProjectID); store != nil && strings.TrimSpace(target.IssueID) != "" {
+			scope, scopeErr := domain.RootedOrchestrationScope(target.IssueID)
+			if scopeErr != nil {
+				item = sessionRestartAllItem(target)
+				item.Error = fmt.Sprintf("resolve potential rooted restart scope: %v", scopeErr)
+			} else if identity, identityErr := domain.NewOrchestratorIdentity(target.ProjectID, scope); identityErr != nil {
+				item = sessionRestartAllItem(target)
+				item.Error = fmt.Sprintf("resolve potential rooted restart identity: %v", identityErr)
+			} else {
+				serialized = true
+				lockErr := store.WithOrchestratorScopeTransition(ctx, identity, func(lockCtx context.Context) error {
+					var rootedIdentity *domain.OrchestratorIdentity
+					lease, found, leaseErr := daemonstate.NewOrchestratorLeaseAuthority(store).FindBySession(lockCtx, target.ProjectID, target.SessionID)
+					if leaseErr != nil {
+						return fmt.Errorf("refresh orchestrator lease inside restart transition: %w", leaseErr)
+					}
+					if found && lease.Identity == identity {
+						rootedIdentity = &identity
+					}
+					item = d.restartAllTarget(lockCtx, target, body, rootedIdentity)
+					return nil
+				})
+				if lockErr != nil {
+					item = sessionRestartAllItem(target)
+					item.Error = fmt.Sprintf("serialize potential rooted orchestrator replacement: %v", lockErr)
+				}
+			}
 		}
-		if !item.TmuxReady {
-			item.Skipped = true
-			item.Reason = "no_tmux_pane"
+		if !serialized && item.Error == "" {
+			item = d.restartAllTarget(ctx, target, body, nil)
+		}
+		switch {
+		case item.Restarted:
+			result.Restarted++
+		case item.Skipped:
 			result.Skipped++
-			result.Sessions = append(result.Sessions, item)
-			continue
-		}
-
-		if _, err := d.rotateRootedOrchestratorBootstrapIncarnation(ctx, target.SessionID); err != nil {
-			item.Error = err.Error()
+		case item.Error != "":
 			result.Failed++
-			result.Sessions = append(result.Sessions, item)
-			continue
-		}
-		if err := d.tmux.SendKey(ctx, target.SessionID, "C-c"); err != nil {
-			item.Error = err.Error()
-			result.Failed++
-			result.Sessions = append(result.Sessions, item)
-			continue
-		}
-		if err := d.waitBeforeSessionResume(ctx, 250*time.Millisecond); err != nil {
-			item.Error = err.Error()
-			result.Failed++
-			result.Sessions = append(result.Sessions, item)
-			continue
-		}
-		if err := d.setSessionManagedPathEnv(ctx, target.SessionID); err != nil {
-			item.Error = err.Error()
-			result.Failed++
-			result.Sessions = append(result.Sessions, item)
-			continue
-		}
-		resumeCommand := d.buildSessionResumeCommand(target.ProjectID, target.IssueID, target.SessionID, body.Yolo, body.ImagePaths)
-		if err := d.tmux.SendKeys(ctx, target.SessionID, resumeCommand); err != nil {
-			item.Error = err.Error()
-			result.Failed++
-			result.Sessions = append(result.Sessions, item)
-			continue
-		}
-		if _, err := d.rotateRootedOrchestratorBootstrapIncarnation(ctx, target.SessionID); err != nil {
-			item.Error = err.Error()
-			result.Failed++
-			result.Sessions = append(result.Sessions, item)
-			continue
-		}
-		if item.ActiveIntent && d.sessionRestartNeedsPostLaunchPrompt(target.ProjectID) {
-			if err := d.waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
-				item.Error = err.Error()
-				result.Failed++
-				result.Sessions = append(result.Sessions, item)
-				continue
-			}
-			if err := d.tmux.PasteTextAndSubmit(ctx, target.SessionID, sessionRestartContinuePrompt); err != nil {
-				item.Error = err.Error()
-				result.Failed++
-				result.Sessions = append(result.Sessions, item)
-				continue
-			}
-		}
-		item.Restarted = true
-		result.Restarted++
-		if target.IssueID != "" {
-			d.persistRestartedSessionProjection(ctx, target.ProjectID, target.SessionID, target.IssueID)
 		}
 		result.Sessions = append(result.Sessions, item)
 	}
@@ -1848,6 +1816,84 @@ type sessionRestartAllTarget struct {
 	Projected      bool
 	TmuxReady      bool
 	ActiveIntent   bool
+}
+
+func (d *Daemon) restartAllTarget(ctx context.Context, target sessionRestartAllTarget, body protocol.SessionRestartAllRequestBody, rootedIdentity *domain.OrchestratorIdentity) protocol.SessionRestartAllItem {
+	item := sessionRestartAllItem(target)
+	if !item.TmuxReady {
+		item.Skipped, item.Reason = true, "no_tmux_pane"
+		return item
+	}
+	if rootedIdentity != nil {
+		acknowledgement, found, err := daemonstate.NewRootedBootstrapAcknowledgementAuthority(d.sessionRuntimeStateStoreIfConfigured(target.ProjectID)).Get(ctx, *rootedIdentity)
+		if err != nil {
+			item.Error = fmt.Sprintf("refresh rooted bootstrap acknowledgement before replacement: %v", err)
+			return item
+		}
+		if found {
+			if err := d.invalidateRootedBootstrapAcknowledgement(ctx, acknowledgement); err != nil {
+				item.Error = fmt.Sprintf("invalidate rooted bootstrap acknowledgement: %v", err)
+				return item
+			}
+		}
+		if err := d.tmux.SetEnvironment(ctx, target.SessionID, rootedOrchestratorBootstrapNonceEnvironment, ""); err != nil {
+			item.Error = fmt.Sprintf("invalidate rooted bootstrap runtime marker: %v", err)
+			return item
+		}
+	}
+	if err := d.tmux.SendKey(ctx, target.SessionID, "C-c"); err != nil {
+		item.Error = err.Error()
+		return item
+	}
+	if err := d.waitBeforeSessionResume(ctx, 250*time.Millisecond); err != nil {
+		item.Error = err.Error()
+		return item
+	}
+	if err := d.setSessionManagedPathEnv(ctx, target.SessionID); err != nil {
+		item.Error = err.Error()
+		return item
+	}
+	resumeCommand := d.buildSessionResumeCommand(target.ProjectID, target.IssueID, target.SessionID, body.Yolo, body.ImagePaths)
+	if err := d.tmux.SendKeys(ctx, target.SessionID, resumeCommand); err != nil {
+		item.Error = err.Error()
+		return item
+	}
+	if rootedIdentity != nil {
+		if err := d.waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
+			item.Error = err.Error()
+			return item
+		}
+		prompt, err := d.rootedOrchestratorBootstrapPrompt(ctx, target.ProjectID, rootedIdentity.Scope)
+		if err != nil {
+			item.Error = err.Error()
+			return item
+		}
+		if _, err := d.ensureRootedOrchestratorBootstrap(ctx, target.ProjectID, rootedIdentity.Scope, target.SessionID, prompt, false); err != nil {
+			item.Error = fmt.Sprintf("acknowledge restarted rooted orchestrator bootstrap: %v", err)
+			return item
+		}
+	} else if item.ActiveIntent && d.sessionRestartNeedsPostLaunchPrompt(target.ProjectID) {
+		if err := d.waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
+			item.Error = err.Error()
+			return item
+		}
+		if err := d.tmux.PasteTextAndSubmit(ctx, target.SessionID, sessionRestartContinuePrompt); err != nil {
+			item.Error = err.Error()
+			return item
+		}
+	}
+	item.Restarted = true
+	if target.IssueID != "" {
+		d.persistRestartedSessionProjection(ctx, target.ProjectID, target.SessionID, target.IssueID)
+	}
+	return item
+}
+
+func sessionRestartAllItem(target sessionRestartAllTarget) protocol.SessionRestartAllItem {
+	return protocol.SessionRestartAllItem{
+		ProjectID: naming.ProjectID(target.ProjectID), SessionID: naming.SessionID(target.SessionID), IssueID: naming.IssueID(target.IssueID),
+		Activity: target.Activity, ActivitySource: target.ActivitySource, TmuxReady: target.TmuxReady, ActiveIntent: target.ActiveIntent,
+	}
 }
 
 func sessionRestartAllTargetPreferred(candidate, existing sessionRestartAllTarget) bool {

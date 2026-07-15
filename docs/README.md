@@ -81,6 +81,7 @@ This directory primarily contains **developer/internal documentation**.
 - `cross_project.view_projection`: `projection` (the global daemon refreshes the user database from authoritative project stores, then evaluates typed cross-project views from the refreshed user-level projection; stale and unavailable projects remain explicit).
 - `orchestration.scope_identity`: `projection` (durable project plus typed rooted/project scope; startup environment is not authority).
 - `orchestration.scope_singleton`: `hybrid` (refreshed durable scope lease compared with live tmux runtime).
+- `orchestration.rooted_bootstrap_delivery`: `hybrid` (refreshed durable accepted prompt acknowledgement compared with the live tmux marker; exact-scope restart replacement re-acknowledges before success).
 - `orchestration.project_completion`: `hybrid` (refreshed issue/review/interaction/session projections compared with live tmux runtime).
 - `orchestration.parent_continuation`: `hybrid` (durable rooted lease/cursor + refreshed direct nested-root, interaction, completion, and session projections compared with live tmux before a wake prompt is delivered).
 - `runtime.reconcile` includes `invariant_sources` debug output reflecting the active source-policy matrix.

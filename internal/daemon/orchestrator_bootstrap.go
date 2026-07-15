@@ -5,30 +5,16 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
-const rootedOrchestratorBootstrapVersion = "rooted-orchestrator-v2"
-
 const rootedOrchestratorBootstrapNonceEnvironment = "AZEDARACH_ROOTED_ORCHESTRATOR_BOOT_NONCE"
-
-type rootedOrchestratorBootstrapReceipt struct {
-	Version      string    `json:"version"`
-	ProjectID    string    `json:"project_id"`
-	RootID       string    `json:"root_id"`
-	SessionID    string    `json:"session_id"`
-	RuntimeNonce string    `json:"runtime_nonce"`
-	PromptHash   string    `json:"prompt_sha256"`
-	ReceivedAt   time.Time `json:"received_at"`
-}
 
 func (d *Daemon) rootedOrchestratorBootstrapPrompt(ctx context.Context, projectID string, scope domain.OrchestrationScope) (string, error) {
 	rootID := strings.TrimSpace(scope.RootIssueID.String())
@@ -44,24 +30,29 @@ func (d *Daemon) rootedOrchestratorBootstrapPrompt(ctx context.Context, projectI
 }
 
 func (d *Daemon) ensureRootedOrchestratorBootstrap(ctx context.Context, projectID string, scope domain.OrchestrationScope, sessionID, prompt string, launchedHere bool) (string, error) {
-	receiptPath, err := d.rootedOrchestratorBootstrapReceiptPath(ctx, projectID, scope, sessionID)
+	if source := sourceForInvariant(daemonInvariantOrchestrationRootedBootstrap); source != daemonInvariantSourceHybrid || !usesProjectionSource(source) || !usesTmuxSource(source) {
+		return "", fmt.Errorf("unsupported rooted bootstrap invariant source: %s", source)
+	}
+	identity, err := domain.NewOrchestratorIdentity(d.canonicalProjectID(projectID), scope)
 	if err != nil {
 		return "", err
 	}
-	want := rootedOrchestratorBootstrapReceipt{
-		Version:    rootedOrchestratorBootstrapVersion,
-		ProjectID:  d.canonicalProjectID(projectID),
-		RootID:     scope.RootIssueID.String(),
-		SessionID:  sessionID,
-		PromptHash: rootedOrchestratorPromptHash(prompt),
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		return "", errors.New("rooted bootstrap acknowledgement store unavailable")
 	}
+	authority := daemonstate.NewRootedBootstrapAcknowledgementAuthority(store)
+	promptHash := rootedOrchestratorPromptHash(prompt)
 	if !launchedHere {
+		acknowledgement, acknowledged, projectionErr := authority.Get(ctx, identity)
+		if projectionErr != nil {
+			return "", fmt.Errorf("refresh rooted bootstrap acknowledgement: %w", projectionErr)
+		}
 		runtimeNonce, found, nonceErr := d.tmux.EnvironmentValue(ctx, sessionID, rootedOrchestratorBootstrapNonceEnvironment)
 		if nonceErr != nil {
 			return "", fmt.Errorf("read rooted orchestrator runtime nonce: %w", nonceErr)
 		}
-		want.RuntimeNonce = runtimeNonce
-		if found && receiptMatchesRootedOrchestratorBootstrap(receiptPath, want) {
+		if found && acknowledged && acknowledgement.SessionID == sessionID && acknowledgement.PromptHash == promptHash && acknowledgement.RuntimeNonce == runtimeNonce {
 			return "verified", nil
 		}
 	}
@@ -72,7 +63,6 @@ func (d *Daemon) ensureRootedOrchestratorBootstrap(ctx context.Context, projectI
 	if err := d.tmux.SetEnvironment(ctx, sessionID, rootedOrchestratorBootstrapNonceEnvironment, runtimeNonce); err != nil {
 		return "", fmt.Errorf("set rooted orchestrator runtime nonce: %w", err)
 	}
-	want.RuntimeNonce = runtimeNonce
 	if !launchedHere {
 		handoff, handoffErr := prepareSessionPromptHandoff(d.sessionLaunchArtifactDir(), prompt)
 		if handoffErr != nil {
@@ -86,9 +76,13 @@ func (d *Daemon) ensureRootedOrchestratorBootstrap(ctx context.Context, projectI
 			return "", fmt.Errorf("confirm rooted orchestrator bootstrap repair: %w", err)
 		}
 	}
-	want.ReceivedAt = time.Now().UTC()
-	if err := writeRootedOrchestratorBootstrapReceipt(receiptPath, want); err != nil {
-		return "", err
+	now := time.Now().UTC()
+	acknowledgement := daemonstate.RootedBootstrapAcknowledgement{
+		Identity: identity, SessionID: sessionID, PromptHash: promptHash,
+		RuntimeNonce: runtimeNonce, AcknowledgedAt: now, UpdatedAt: now,
+	}
+	if err := authority.Acknowledge(ctx, acknowledgement); err != nil {
+		return "", fmt.Errorf("persist rooted bootstrap acknowledgement: %w", err)
 	}
 	if launchedHere {
 		return "seeded", nil
@@ -96,16 +90,12 @@ func (d *Daemon) ensureRootedOrchestratorBootstrap(ctx context.Context, projectI
 	return "repaired", nil
 }
 
-func (d *Daemon) rootedOrchestratorBootstrapReceiptPath(ctx context.Context, projectID string, scope domain.OrchestrationScope, sessionID string) (string, error) {
-	manager := d.worktreeManagerForProject(projectID)
-	if manager == nil {
-		return "", errors.New("worktree manager unavailable")
+func (d *Daemon) invalidateRootedBootstrapAcknowledgement(ctx context.Context, acknowledgement daemonstate.RootedBootstrapAcknowledgement) error {
+	store := d.sessionRuntimeStateStoreIfConfigured(acknowledgement.Identity.ProjectID)
+	if store == nil {
+		return errors.New("rooted bootstrap acknowledgement store unavailable")
 	}
-	worktree, err := manager.Get(ctx, scope.RootIssueID.String())
-	if err != nil {
-		return "", fmt.Errorf("load rooted orchestrator worktree: %w", err)
-	}
-	return filepath.Join(worktree.Path, ".azedarach", "session-bootstrap", safeSessionAsyncInitPathSegment(sessionID), rootedOrchestratorBootstrapVersion+".json"), nil
+	return daemonstate.NewRootedBootstrapAcknowledgementAuthority(store).Invalidate(ctx, acknowledgement.Identity, acknowledgement.SessionID)
 }
 
 func rootedOrchestratorPromptHash(prompt string) string {
@@ -119,97 +109,4 @@ func newRootedOrchestratorRuntimeNonce() (string, error) {
 		return "", fmt.Errorf("generate rooted orchestrator runtime nonce: %w", err)
 	}
 	return hex.EncodeToString(nonce[:]), nil
-}
-
-// rotateRootedOrchestratorBootstrapIncarnation invalidates a rooted bootstrap
-// receipt around an in-place agent replacement. The nonce lives in tmux so it
-// survives pane process replacement; rotating before the interrupt makes a
-// cancelled or partial replacement fail closed, while rotating after launch
-// binds the final nonce to the replacement rather than the interrupted agent.
-// Sessions without rooted bootstrap state are ordinary workers and are left
-// untouched.
-func (d *Daemon) rotateRootedOrchestratorBootstrapIncarnation(ctx context.Context, sessionID string) (bool, error) {
-	_, found, err := d.tmux.EnvironmentValue(ctx, sessionID, rootedOrchestratorBootstrapNonceEnvironment)
-	if err != nil {
-		return false, fmt.Errorf("read rooted orchestrator runtime nonce before replacement: %w", err)
-	}
-	if !found {
-		return false, nil
-	}
-	runtimeNonce, err := newRootedOrchestratorRuntimeNonce()
-	if err != nil {
-		return false, err
-	}
-	// Clear the accepted value before publishing its replacement. If the
-	// second write fails, receipt matching rejects the empty nonce and the next
-	// rooted attach repairs the role instead of trusting the prior process.
-	if err := d.tmux.SetEnvironment(ctx, sessionID, rootedOrchestratorBootstrapNonceEnvironment, ""); err != nil {
-		return false, fmt.Errorf("invalidate rooted orchestrator runtime nonce for replacement: %w", err)
-	}
-	if err := d.tmux.SetEnvironment(ctx, sessionID, rootedOrchestratorBootstrapNonceEnvironment, runtimeNonce); err != nil {
-		return false, fmt.Errorf("publish rooted orchestrator runtime nonce for replacement: %w", err)
-	}
-	return true, nil
-}
-
-func receiptMatchesRootedOrchestratorBootstrap(path string, want rootedOrchestratorBootstrapReceipt) bool {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	var got rootedOrchestratorBootstrapReceipt
-	if json.Unmarshal(data, &got) != nil {
-		return false
-	}
-	return got.Version == want.Version &&
-		got.ProjectID == want.ProjectID &&
-		got.RootID == want.RootID &&
-		got.SessionID == want.SessionID &&
-		got.RuntimeNonce != "" &&
-		got.RuntimeNonce == want.RuntimeNonce &&
-		got.PromptHash == want.PromptHash &&
-		!got.ReceivedAt.IsZero()
-}
-
-func writeRootedOrchestratorBootstrapReceipt(path string, receipt rootedOrchestratorBootstrapReceipt) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create rooted orchestrator bootstrap receipt directory: %w", err)
-	}
-	data, err := json.MarshalIndent(receipt, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode rooted orchestrator bootstrap receipt: %w", err)
-	}
-	file, err := os.CreateTemp(filepath.Dir(path), ".rooted-bootstrap-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create rooted orchestrator bootstrap receipt: %w", err)
-	}
-	tempPath := file.Name()
-	defer func() { _ = os.Remove(tempPath) }()
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("secure rooted orchestrator bootstrap receipt: %w", err)
-	}
-	if _, err := file.Write(append(data, '\n')); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("write rooted orchestrator bootstrap receipt: %w", err)
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("sync rooted orchestrator bootstrap receipt: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("close rooted orchestrator bootstrap receipt: %w", err)
-	}
-	if err := os.Rename(tempPath, path); err != nil {
-		return fmt.Errorf("publish rooted orchestrator bootstrap receipt: %w", err)
-	}
-	dir, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return fmt.Errorf("open rooted orchestrator bootstrap receipt directory: %w", err)
-	}
-	defer dir.Close()
-	if err := dir.Sync(); err != nil {
-		return fmt.Errorf("sync rooted orchestrator bootstrap receipt directory: %w", err)
-	}
-	return nil
 }
