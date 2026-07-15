@@ -28,6 +28,40 @@ shift @ARGV if @ARGV && $ARGV[0] eq '--';
 die "unsupported validation class $class\n" unless $class eq 'aggregate' || $class eq 'shared' || $class eq 'safe';
 my $az = $ENV{AZEDARACH_VALIDATION_AZ_BIN} || 'az';
 my $git = $ENV{AZEDARACH_VALIDATION_GIT_BIN} || 'git';
+my $daemon_scope = lc($ENV{AZEDARACH_DAEMON_SCOPE} || '');
+my $daemon_scope_source = lc($ENV{AZEDARACH_DAEMON_SCOPE_SOURCE} || '');
+my $cleanup_scoped_daemon = ($daemon_scope eq 'worktree' || $daemon_scope eq 'scoped' || $daemon_scope eq 'local')
+    && $daemon_scope_source ne 'just-run'
+    && $mode eq 'run'
+    && !$ENV{AZEDARACH_VALIDATION_REQUEST_ID};
+my $scoped_cleanup_owner_pid = $$;
+my $scoped_cleanup_done = 0;
+my $stop_scoped_daemon = sub {
+    return 1 unless $$ == $scoped_cleanup_owner_pid && $cleanup_scoped_daemon && !$scoped_cleanup_done;
+    $scoped_cleanup_done = 1;
+    my $stop_status = system($az, 'daemon', 'stop');
+    if ($stop_status != 0) {
+        my $detail = $stop_status == -1 ? $! : 'exit ' . wait_status_code($stop_status);
+        warn "worktree-scoped validation daemon cleanup failed: $detail\n";
+        return 0;
+    }
+    return 1;
+};
+
+# The outer run-mode wrapper owns explicitly worktree-scoped daemons. Register
+# cleanup before the first daemon request so acquire errors and handled signals
+# cannot leave a detached azd behind.
+END {
+    if ($$ == $scoped_cleanup_owner_pid && $cleanup_scoped_daemon && !$scoped_cleanup_done) {
+        my $original_status = $?;
+        $original_status = 70 if !$stop_scoped_daemon->() && $original_status == 0;
+        $? = $original_status;
+    }
+}
+my %preflight_signal_exit = (HUP => 129, INT => 130, TERM => 143);
+$SIG{TERM} = sub { exit $preflight_signal_exit{TERM} };
+$SIG{INT} = sub { exit $preflight_signal_exit{INT} };
+$SIG{HUP} = sub { exit $preflight_signal_exit{HUP} };
 
 if ($mode eq 'status') {
     exec $az, 'validation', 'status', '--json' or die "exec validation status: $!\n";
@@ -282,7 +316,9 @@ if (-s $evidence_file) {
 my $finish_failed = !eval { capture(@finish); 1 };
 warn "validation finish failed for $request_id\n" if $finish_failed;
 unlink $evidence_file if -e $evidence_file;
-exit(($finish_failed && $exit_code == 0) ? 70 : $exit_code);
+my $final_exit = ($finish_failed && $exit_code == 0) ? 70 : $exit_code;
+$final_exit = 70 if !$stop_scoped_daemon->() && $final_exit == 0;
+exit($final_exit);
 
 sub authorize_nested {
     my ($broker, $line, $az_path, $held_request, $token) = @_;
