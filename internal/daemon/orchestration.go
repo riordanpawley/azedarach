@@ -501,11 +501,14 @@ func explainOrchestrationCandidates(snapshot *protocol.OrchestrationSnapshot) {
 			// A durable whole-issue interaction is the specific source of the
 			// block and must remain visible as Waiting Human.
 			continue
+		case candidate.Classification != string(domain.OrchestrationCandidateOpen):
+			// Canonical lifecycle/ownership classification precedes rooted graph
+			// refinement. In particular, a backlog exclusion reported by graph
+			// readiness must not collapse the project candidate into generic blocked.
+			continue
 		case snapshot.Blocked[candidate.IssueID] != "":
 			candidate.Included, candidate.Eligible, candidate.Classification, candidate.Reason = false, false, string(domain.OrchestrationCandidateBlocked), "excluded: "+snapshot.Blocked[candidate.IssueID]
 			candidate.ExclusionReasons = append(candidate.ExclusionReasons, snapshot.Blocked[candidate.IssueID])
-		case candidate.Classification != string(domain.OrchestrationCandidateOpen):
-			continue
 		case !candidate.Sufficient && candidate.Executability.Disposition != "":
 			candidate.Included, candidate.Eligible, candidate.Classification = false, false, string(candidate.Executability.Disposition)
 			candidate.Reason = "excluded: " + strings.Join(candidate.Executability.Reasons, "; ")

@@ -1598,9 +1598,11 @@ func (c *Client) ListGraphReadinessWithRuntime(ctx context.Context, projectID, r
 	return tasks, nil
 }
 
-// CountOpenOrchestrationIssues returns the project-wide durable lifecycle count
-// used by the rootless safety threshold. It deliberately does not hydrate
-// candidates or duplicate candidate-selection semantics.
+// CountOpenOrchestrationIssues returns the project-wide canonical lifecycle-Open
+// count used by the rootless safety threshold. Open is derived from live,
+// ready-disposition, idle-engagement facts; backlog, active, review-requested,
+// and terminal lifecycle states do not count even when compatibility status is
+// open.
 func (c *Client) CountOpenOrchestrationIssues(ctx context.Context) (int, error) {
 	db, err := c.dbHandle()
 	if err != nil {
@@ -1608,9 +1610,10 @@ func (c *Client) CountOpenOrchestrationIssues(ctx context.Context) (int, error) 
 	}
 	var count int
 	err = db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM issues INDEXED BY idx_issues_status_deleted_priority_updated
+		SELECT COUNT(*) FROM issues
 		WHERE visibility = 'live'
-		  AND status IN ('open', 'in_progress', 'in_review')
+		  AND disposition = 'ready'
+		  AND engagement = 'idle'
 	`).Scan(&count)
 	if err != nil {
 		return 0, c.wrapError("count-open-orchestration-issues", "", err)

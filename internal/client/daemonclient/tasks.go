@@ -192,15 +192,17 @@ type TaskCapacitySummary struct {
 // TaskNestedRoot describes a nested orchestration root that must be started
 // from its own parent session instead of flattened into the current root.
 type TaskNestedRoot struct {
-	IssueID        string             `json:"issue_id"`
-	Status         string             `json:"status"`
-	IssueStatus    string             `json:"issue_status,omitempty"`
-	Type           string             `json:"type"`
-	ChildCount     int                `json:"child_count"`
-	ActiveSession  *TaskActiveSession `json:"active_session,omitempty"`
-	StartFailure   *TaskStartFailure  `json:"start_failure,omitempty"`
-	FallbackPolicy string             `json:"fallback_policy,omitempty"`
-	Advice         string             `json:"advice,omitempty"`
+	IssueID          string             `json:"issue_id"`
+	Status           string             `json:"status"`
+	IssueStatus      string             `json:"issue_status,omitempty"`
+	Classification   string             `json:"classification,omitempty"`
+	ExclusionReasons []string           `json:"exclusion_reasons,omitempty"`
+	Type             string             `json:"type"`
+	ChildCount       int                `json:"child_count"`
+	ActiveSession    *TaskActiveSession `json:"active_session,omitempty"`
+	StartFailure     *TaskStartFailure  `json:"start_failure,omitempty"`
+	FallbackPolicy   string             `json:"fallback_policy,omitempty"`
+	Advice           string             `json:"advice,omitempty"`
 }
 
 type TaskStartFailure struct {

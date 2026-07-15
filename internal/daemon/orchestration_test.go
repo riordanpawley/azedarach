@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -867,6 +868,9 @@ func TestProjectOrchestrationSnapshotRefreshesCrossProcessOwnership(t *testing.T
 	if got := candidateClass(before.Candidates, id); got != "runnable" {
 		t.Fatalf("before class = %q, want runnable", got)
 	}
+	if before.Health.OpenIssueCount != 1 {
+		t.Fatalf("before open issue count = %d, want 1", before.Health.OpenIssueCount)
+	}
 	_, err = writer.ClaimOwnershipWithRuntime(ctx, "proj", id, issues.OwnershipClaimParams{OwnerID: "other", OwnerKind: "agent"})
 	if err != nil {
 		t.Fatal(err)
@@ -877,6 +881,75 @@ func TestProjectOrchestrationSnapshotRefreshesCrossProcessOwnership(t *testing.T
 	}
 	if got := candidateClass(after.Candidates, id); got != string(domain.OrchestrationCandidateOwnedElsewhere) {
 		t.Fatalf("after class = %q, want owned-elsewhere", got)
+	}
+}
+
+func TestProjectOrchestrationSnapshotRefreshesCrossProcessBacklogLifecycle(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "issues.db")
+	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
+	writer := newMigratedIssueClientAtPath(t, path, slog.Default())
+	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
+	id, err := reader.Create(ctx, issues.CreateTaskParams{Title: "Candidate", Description: "Executable", Acceptance: "Worker completes the scoped change", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}}
+	authority := daemonOrchestrationAuthority{daemon: d}
+	before, err := authority.Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := candidateClass(before.Candidates, id); got != "runnable" {
+		t.Fatalf("before class = %q, want runnable", got)
+	}
+	backlog := domain.IssueWorkflowBacklog
+	acceptance := "Worker completes the scoped change"
+	if err := writer.UpdateDetails(ctx, id, issues.UpdateTaskParams{Title: "Candidate", Description: "Executable", Acceptance: &acceptance, Type: domain.TypeTask, Priority: domain.P1, Lifecycle: &backlog}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := authority.Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := candidateClass(after.Candidates, id); got != string(domain.OrchestrationCandidateBacklog) {
+		t.Fatalf("after class = %q, want backlog", got)
+	}
+	if after.Health.OpenIssueCount != 0 {
+		t.Fatalf("after open issue count = %d, want backlog excluded", after.Health.OpenIssueCount)
+	}
+	for _, candidate := range after.Candidates {
+		if candidate.IssueID == id && (!slices.Contains(candidate.ExclusionReasons, "lifecycle-backlog") || candidate.Eligible) {
+			t.Fatalf("after candidate = %+v, want lifecycle-backlog exclusion", candidate)
+		}
+	}
+}
+
+func TestProjectOrchestrationStartNeverTouchesExplicitBacklogIssue(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	id, err := client.Create(ctx, issues.CreateTaskParams{Title: "Paused candidate", Description: "Executable", Acceptance: "Worker completes the scoped change", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	result, err := (daemonOrchestrationAuthority{daemon: d}).Apply(ctx, "proj", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentStart, IntentKey: "backlog-explicit", ActorID: "steward", IssueIDs: []string{id}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Skipped[id]; got != "lifecycle-backlog" {
+		t.Fatalf("skipped[%s] = %q, want lifecycle-backlog", id, got)
+	}
+	if len(result.Started) != 0 || len(result.Launched) != 0 || len(result.Pending) != 0 {
+		t.Fatalf("backlog start result = %+v, want no start side effects", result)
+	}
+	task, err := client.GetWithRuntime(ctx, "proj", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.State.Workflow() != domain.IssueWorkflowBacklog || task.Ownership != nil || task.HasTmuxSession {
+		t.Fatalf("backlog task mutated by start: %+v", task)
 	}
 }
 

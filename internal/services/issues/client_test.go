@@ -1533,13 +1533,29 @@ func TestClient_ListGraphReadinessWithRuntimeBoundsProjectCandidatesAndCountsAll
 		})
 		require.NoError(t, err)
 	}
+	for i := 0; i < 189; i++ {
+		_, err := client.Create(ctx, CreateTaskParams{
+			Title:     fmt.Sprintf("Backlog %03d", i),
+			Type:      domain.TypeTask,
+			Priority:  domain.P1,
+			Status:    domain.StatusOpen,
+			Lifecycle: domain.IssueWorkflowBacklog,
+		})
+		require.NoError(t, err)
+	}
+	for i := 0; i < 15; i++ {
+		_, err := client.Create(ctx, CreateTaskParams{Title: fmt.Sprintf("Active %02d", i), Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusInProgress})
+		require.NoError(t, err)
+	}
+	_, err := client.Create(ctx, CreateTaskParams{Title: "Review requested", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusInReview})
+	require.NoError(t, err)
 
 	tasks, err := client.ListGraphReadinessWithRuntime(ctx, "proj", "", 5)
 	require.NoError(t, err)
 	require.Len(t, tasks, 5)
 	count, err := client.CountOpenOrchestrationIssues(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, 12, count)
+	assert.Equal(t, 12, count, "189 backlog, 15 active, and 1 review-requested issues must not inflate canonical lifecycle Open")
 }
 
 func TestClient_ListGraphReadinessWithRuntimeHydratesBoundedProjectContracts(t *testing.T) {
