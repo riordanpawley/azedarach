@@ -2007,13 +2007,17 @@ func parseTaskOwnershipTTL(raw string) (time.Duration, error) {
 }
 
 func (d *Daemon) handleTaskClose(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-	ctx, cancel := context.WithTimeout(ctx, domain.IntegrationCloseTimeout)
-	defer cancel()
 	projectID := d.projectID(req.Meta)
 	var cmd taskCloseRequest
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
+	closeOutcome, _, err := daemonTaskCloseOutcomeStatus(cmd.CloseOutcome)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, taskCloseTimeout(closeOutcome))
+	defer cancel()
 	result, err := d.closeTask(ctx, projectID, cmd, req)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -2026,6 +2030,13 @@ func (d *Daemon) handleTaskClose(ctx context.Context, req protocol.RequestEnvelo
 	resp.Body = body
 	resp.Revision = result.Revision
 	return resp, nil
+}
+
+func taskCloseTimeout(outcome domain.IssueCloseOutcome) time.Duration {
+	if outcome == domain.IssueCloseCancelled {
+		return domain.LifecycleCleanupTimeout
+	}
+	return domain.IntegrationCloseTimeout
 }
 
 func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseRequest, req protocol.RequestEnvelope) (taskCloseResult, error) {

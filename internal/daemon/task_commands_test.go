@@ -3964,6 +3964,15 @@ func TestTaskCloseIntegrationContextReservesCleanupBudget(t *testing.T) {
 	}
 }
 
+func TestTaskCloseTimeoutBoundsNonIntegratingCancellation(t *testing.T) {
+	if got := taskCloseTimeout(domain.IssueCloseCancelled); got != domain.LifecycleCleanupTimeout {
+		t.Fatalf("cancel timeout = %v, want %v", got, domain.LifecycleCleanupTimeout)
+	}
+	if got := taskCloseTimeout(domain.IssueCloseCompleted); got != domain.IntegrationCloseTimeout {
+		t.Fatalf("completed timeout = %v, want %v", got, domain.IntegrationCloseTimeout)
+	}
+}
+
 func TestTaskCloseIntegrationContextRejectsExhaustedCleanupReserve(t *testing.T) {
 	parent, parentCancel := context.WithTimeout(context.Background(), domain.IntegrationCloseReserve-time.Second)
 	defer parentCancel()
@@ -4115,6 +4124,10 @@ func TestTaskCloseRepairsVerifiedStaleLegacyProjectSessionProjection(t *testing.
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
+	preservedWrongProjectWorktree := filepath.Join(t.TempDir(), "wrong-project-worktree")
+	if err := os.MkdirAll(preservedWrongProjectWorktree, 0o755); err != nil {
+		t.Fatalf("create preserved wrong-project worktree: %v", err)
+	}
 
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title:    "Close with stale legacy session alias",
@@ -4148,7 +4161,7 @@ func TestTaskCloseRepairsVerifiedStaleLegacyProjectSessionProjection(t *testing.
 		hub:      publish.NewHub(16, 8, logger),
 	}
 
-	body, err := json.Marshal(taskCloseRequest{TaskID: taskID})
+	body, err := json.Marshal(taskCloseRequest{TaskID: taskID, CloseOutcome: string(domain.IssueCloseCancelled)})
 	if err != nil {
 		t.Fatalf("marshal close request: %v", err)
 	}
@@ -4175,6 +4188,30 @@ func TestTaskCloseRepairsVerifiedStaleLegacyProjectSessionProjection(t *testing.
 	}
 	if session.State != daemonstate.SessionStateStopped || session.ObservedState != daemonstate.SessionStateStopped || session.TmuxAttachedCount != 0 {
 		t.Fatalf("legacy session projection = %+v, want stopped repair marker", session)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get cancelled issue: %v", err)
+	}
+	if task.Status != domain.StatusCancelled {
+		t.Fatalf("task status = %s, want %s", task.Status, domain.StatusCancelled)
+	}
+	if _, err := os.Stat(preservedWrongProjectWorktree); err != nil {
+		t.Fatalf("preserved wrong-project worktree: %v", err)
+	}
+	resp, err = d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-stale-legacy-session-retry",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.close",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("retry handleTaskClose error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("retry task.close response = %+v, want idempotent success", resp)
 	}
 }
 
