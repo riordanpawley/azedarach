@@ -199,6 +199,12 @@ type nativeCodexDelivery struct {
 type nativeCodexHumanRequest struct {
 	id     json.RawMessage
 	method string
+	params json.RawMessage
+}
+
+type nativeCodexPermissionResponse struct {
+	Permissions json.RawMessage `json:"permissions"`
+	Scope       string          `json:"scope,omitempty"`
 }
 
 func codexRequestNeedsHumanDecision(method string) bool {
@@ -281,7 +287,7 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 	go readNativeCodexInput(os.Stdin, input)
 	composer := make([]byte, 0, 256)
 	active := false
-	var pendingRequest *nativeCodexHumanRequest
+	pendingRequests := make([]nativeCodexHumanRequest, 0, 4)
 	signalActivity := func(event string) {
 		_, _ = deps.DaemonClient.RuntimeSignalIngest(context.WithoutCancel(ctx), protocol.RuntimeSignalIngestCommandBody{
 			Source: protocol.RuntimeSignalSourceAgentHook, Kind: protocol.RuntimeSignalKindAgentActivityChanged,
@@ -338,21 +344,39 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 			}
 		case request := <-rpc.requests:
 			if codexRequestNeedsHumanDecision(request.Method) {
-				pendingRequest = &nativeCodexHumanRequest{id: request.ID, method: request.Method}
+				if len(pendingRequests) >= cap(pendingRequests) {
+					_ = rpc.sendRPCError(request.ID, -32000, "too many concurrent approval requests")
+					continue
+				}
+				pendingRequests = append(pendingRequests, nativeCodexHumanRequest{id: request.ID, method: request.Method, params: request.Params})
 				fmt.Fprintf(os.Stdout, "\nCodex request %s: approve? [y/N] ", request.Method)
 			} else {
 				_ = rpc.sendRPCError(request.ID, -32601, "unsupported Codex server request method: "+request.Method)
 			}
 		case b := <-input:
-			if pendingRequest != nil {
+			if len(pendingRequests) > 0 {
 				if b == 'y' || b == 'Y' {
-					_ = rpc.sendRPCResult(pendingRequest.id, map[string]any{"decision": "accept"})
+					req := pendingRequests[0]
+					result := any(map[string]any{"decision": "accept"})
+					if req.method == "item/permissions/requestApproval" {
+						var params struct {
+							Permissions json.RawMessage `json:"permissions"`
+						}
+						_ = json.Unmarshal(req.params, &params)
+						result = nativeCodexPermissionResponse{Permissions: params.Permissions}
+					}
+					_ = rpc.sendRPCResult(req.id, result)
 				} else if b == 'n' || b == 'N' || b == 3 {
-					_ = rpc.sendRPCResult(pendingRequest.id, map[string]any{"decision": "decline"})
+					req := pendingRequests[0]
+					if req.method == "item/permissions/requestApproval" {
+						_ = rpc.sendRPCError(req.id, -32800, "permission approval declined")
+					} else {
+						_ = rpc.sendRPCResult(req.id, map[string]any{"decision": "decline"})
+					}
 				} else {
 					continue
 				}
-				pendingRequest = nil
+				pendingRequests = pendingRequests[1:]
 				fmt.Fprint(os.Stdout, "\n› ")
 				continue
 			}
@@ -384,7 +408,11 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 				}
 			}
 		case delivery := <-deliveries:
+			recoveringPending := clientState.Pending[delivery.envelope.IntentKey+"\x00"+incarnation] != ""
 			response, newlyActive := acceptNativeCodexDelivery(delivery.envelope, composer, active, statePath, &clientState, func(messageID string) error {
+				if recoveringPending {
+					return errors.New("pending Codex turn requires server reconciliation; refusing resubmission")
+				}
 				return nativeCodexStartTurn(ctx, rpc, threadID, cwd, delivery.envelope.Payload, opts.Yolo, messageID)
 			})
 			active = active || newlyActive
