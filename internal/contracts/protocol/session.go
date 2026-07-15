@@ -51,10 +51,24 @@ type SessionProjection struct {
 }
 
 type SessionProjectionEventBody struct {
-	ProjectID naming.ProjectID            `json:"project_id" msgpack:"project_id"`
-	Revision  uint64                      `json:"revision" msgpack:"revision"`
-	Session   SessionProjection           `json:"session" msgpack:"session"`
-	Runtime   *RuntimeProjectionEventBody `json:"runtime,omitempty" msgpack:"runtime,omitempty"`
+	ProjectID   naming.ProjectID               `json:"project_id" msgpack:"project_id"`
+	Revision    uint64                         `json:"revision" msgpack:"revision"`
+	Session     SessionProjection              `json:"session" msgpack:"session"`
+	Runtime     *RuntimeProjectionEventBody    `json:"runtime,omitempty" msgpack:"runtime,omitempty"`
+	Observation *ExternalObservationProvenance `json:"observation,omitempty" msgpack:"observation,omitempty"`
+}
+
+// ExternalObservationProvenance marks a projection event as a disposable
+// current-state product of an external authority. These fields must remain
+// false unless a future event-authority command explicitly admits material
+// semantic evidence.
+type ExternalObservationProvenance struct {
+	Authority                string    `json:"authority" msgpack:"authority"`
+	Product                  string    `json:"product" msgpack:"product"`
+	Disposition              string    `json:"disposition" msgpack:"disposition"`
+	ObservedAt               time.Time `json:"observed_at" msgpack:"observed_at"`
+	CanonicalEventAdmitted   bool      `json:"canonical_event_admitted" msgpack:"canonical_event_admitted"`
+	SemanticSequenceAdvanced bool      `json:"semantic_sequence_advanced" msgpack:"semantic_sequence_advanced"`
 }
 
 type SessionResolveConflictRequestBody struct {

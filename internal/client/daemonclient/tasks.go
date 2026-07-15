@@ -164,18 +164,20 @@ type TaskDeleteResult struct {
 
 // TaskGraphReadiness describes daemon-owned runnable-leaf policy for a root issue graph.
 type TaskGraphReadiness struct {
-	RootIssueID            string                        `json:"root_issue_id"`
-	Capacity               TaskCapacitySummary           `json:"capacity"`
-	Runnable               []string                      `json:"runnable"`
-	NestedRoots            []TaskNestedRoot              `json:"nested_roots,omitempty"`
-	Pending                []TaskPendingStart            `json:"pending,omitempty"`
-	Active                 []string                      `json:"active,omitempty"`
-	ActiveSessions         []TaskActiveSession           `json:"active_sessions,omitempty"`
-	SessionStartProgress   []TaskSessionStartProgress    `json:"session_start_progress,omitempty"`
-	StaleCloseableChildren []TaskStaleCloseableCandidate `json:"stale_closeable_children,omitempty"`
-	ContainmentRisks       []TaskContainmentRisk         `json:"containment_risks,omitempty"`
-	WorkerObservations     []domain.WorkerObservation    `json:"worker_observations,omitempty"`
-	Blocked                map[string]string             `json:"blocked"`
+	Revision               uint64                                `json:"revision,omitempty"`
+	Source                 protocol.MaterializedSnapshotMetadata `json:"source,omitempty"`
+	RootIssueID            string                                `json:"root_issue_id"`
+	Capacity               TaskCapacitySummary                   `json:"capacity"`
+	Runnable               []string                              `json:"runnable"`
+	NestedRoots            []TaskNestedRoot                      `json:"nested_roots,omitempty"`
+	Pending                []TaskPendingStart                    `json:"pending,omitempty"`
+	Active                 []string                              `json:"active,omitempty"`
+	ActiveSessions         []TaskActiveSession                   `json:"active_sessions,omitempty"`
+	SessionStartProgress   []TaskSessionStartProgress            `json:"session_start_progress,omitempty"`
+	StaleCloseableChildren []TaskStaleCloseableCandidate         `json:"stale_closeable_children,omitempty"`
+	ContainmentRisks       []TaskContainmentRisk                 `json:"containment_risks,omitempty"`
+	WorkerObservations     []domain.WorkerObservation            `json:"worker_observations,omitempty"`
+	Blocked                map[string]string                     `json:"blocked"`
 }
 
 type TaskCapacitySummary struct {

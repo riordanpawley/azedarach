@@ -2486,7 +2486,7 @@ func (d *Daemon) handleSessionStatus(ctx context.Context, req protocol.RequestEn
 	if err, unhealthy := d.projectIssueStoreHealthError(cmd.ProjectID); unhealthy {
 		return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
 	}
-	tmuxSessions, err := d.listTmuxSessionsLiveForProject(ctx, cmd.ProjectID)
+	tmuxSessions, err := d.listProjectionSessionsOnly(ctx, cmd.ProjectID)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
@@ -4025,7 +4025,22 @@ func (d *Daemon) listProjectionSessionsOnly(ctx context.Context, projectID strin
 	if err != nil {
 		return nil, err
 	}
-	return d.activeSessionIDsFromProjection(projectID, cachedSessions), nil
+	active := d.activeSessionIDsFromProjection(projectID, cachedSessions)
+	unique := make(map[string]struct{}, len(active))
+	for _, sessionID := range active {
+		if parent, _, ok := agentScopedSessionParentAndPane(sessionID); ok {
+			sessionID = parent
+		}
+		if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
+			unique[sessionID] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(unique))
+	for sessionID := range unique {
+		result = append(result, sessionID)
+	}
+	sort.Strings(result)
+	return result, nil
 }
 
 func (d *Daemon) refreshSessionRuntimeState(ctx context.Context, projectID string) error {
@@ -4120,7 +4135,10 @@ func applyObservedRuntimeLiveness(session *daemonstate.Session, info tmux.Sessio
 	if infoLive {
 		session.ObservedState = daemonstate.SessionStateRunning
 		session.TmuxAttachedCount = info.AttachedCount
-		if (session.StartedAt == nil || session.StartedAt.IsZero()) && info.CreatedAt != nil && !info.CreatedAt.IsZero() {
+		// tmux CreatedAt is the physical runtime start authority. Session start
+		// commands may seed an estimate before inventory observes the runtime;
+		// replace that estimate whenever tmux supplies its creation timestamp.
+		if info.CreatedAt != nil && !info.CreatedAt.IsZero() {
 			started := info.CreatedAt.UTC()
 			session.StartedAt = &started
 		}
@@ -4246,11 +4264,11 @@ func (d *Daemon) refreshIssueSessionRuntimeState(ctx context.Context, projectID 
 		return nil
 	}
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
-	existingSessions, err := store.ListSessionStates(ctx, projectID)
+	existingSessions, err := store.ListSessionStatesByIssueIDs(ctx, projectID, issueIDs)
 	if err != nil {
 		return err
 	}
-	targetSessions := make([]daemonstate.Session, 0, len(issueSet))
+	targetSessions := make([]daemonstate.Session, 0, len(existingSessions))
 	namingScope := d.sessionNamingScope(projectID)
 	for _, session := range existingSessions {
 		if _, ok := issueSet[sessionKey(sessionProjectionIssueID(session, namingScope))]; ok {

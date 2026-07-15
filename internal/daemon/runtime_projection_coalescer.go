@@ -8,6 +8,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
 
@@ -35,14 +36,26 @@ type runtimeProjectionEventKey struct {
 }
 
 type pendingRuntimeProjectionEvent struct {
-	key        runtimeProjectionEventKey
-	kind       runtimeProjectionEventKind
-	generation uint64
-	meta       protocol.Metadata
-	session    daemonstate.Session
-	worktree   string
-	status     *git.GitStatus
-	timer      *time.Timer
+	key         runtimeProjectionEventKey
+	kind        runtimeProjectionEventKind
+	generation  uint64
+	meta        protocol.Metadata
+	session     daemonstate.Session
+	worktree    string
+	status      *git.GitStatus
+	observation *domain.ExternalObservationProvenance
+	timer       *time.Timer
+}
+
+func (c *runtimeProjectionEventCoalescer) ScheduleObservedSession(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session, observation domain.ExternalObservationProvenance) uint64 {
+	if c == nil || c.d == nil {
+		return 0
+	}
+	projectID = c.d.canonicalProjectID(projectID)
+	key := runtimeProjectionCoalesceKey(projectID, session.IssueID, session.ID)
+	return c.schedule(ctx, &pendingRuntimeProjectionEvent{
+		key: key, kind: runtimeProjectionEventSession, meta: meta, session: session, observation: &observation,
+	})
 }
 
 func newRuntimeProjectionEventCoalescer(d *Daemon, window time.Duration) *runtimeProjectionEventCoalescer {
@@ -112,6 +125,7 @@ func (c *runtimeProjectionEventCoalescer) schedule(ctx context.Context, next *pe
 		existing.session = next.session
 		existing.worktree = next.worktree
 		existing.status = next.status
+		existing.observation = next.observation
 		existing.generation++
 		if existing.timer != nil {
 			existing.timer.Stop()
@@ -177,7 +191,11 @@ func (c *runtimeProjectionEventCoalescer) publish(ctx context.Context, event *pe
 	rev := c.d.nextRevision(projectID)
 	switch event.kind {
 	case runtimeProjectionEventSession:
-		c.d.publishSessionProjectionEventAtRevision(ctx, projectID, event.meta, event.session, rev)
+		if event.observation != nil {
+			c.d.publishObservedSessionProjectionEventAtRevision(ctx, projectID, event.meta, event.session, rev, *event.observation)
+		} else {
+			c.d.publishSessionProjectionEventAtRevision(ctx, projectID, event.meta, event.session, rev)
+		}
 	case runtimeProjectionEventWorktree:
 		c.d.publishWorktreeProjectionEventAtRevision(ctx, projectID, event.key.issueID, event.worktree, rev)
 	case runtimeProjectionEventGitStatus:

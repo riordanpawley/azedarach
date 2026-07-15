@@ -73,6 +73,14 @@ type PhysicalSessionObservation struct {
 	ActivitySource  string
 	UpdatedAt       time.Time
 	ObservedVersion int64
+	// TmuxAttachedCount is present only for tmux inventory observations. Hook
+	// observations leave it nil so they cannot erase independently observed
+	// attachment state.
+	TmuxAttachedCount *int
+	// StartedAt is present only when tmux inventory supplies the authoritative
+	// physical session creation time. It replaces any command-time estimate;
+	// other observation sources leave it nil and preserve the tmux value.
+	StartedAt *time.Time
 }
 
 // ApplyPhysicalSessionObservation atomically records a monotonic physical
@@ -137,11 +145,19 @@ func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context,
 				freshness = observation.UpdatedAt
 			}
 			targetTable := sessionStorageTableForID(intent.ID)
-			if _, err := tx.ExecContext(writeCtx, `UPDATE `+targetTable+`
-				SET observed_state=?, activity=?, activity_source=?, updated_at=?
-				WHERE project_id=? AND logical_id=?`, observation.ObservedState,
-				observation.Activity, observation.ActivitySource, freshness.Format(time.RFC3339Nano),
-				observation.ProjectID, logicalSessionIntentID(intent)); err != nil {
+			setClause := "observed_state=?, activity=?, activity_source=?, updated_at=?"
+			args := []any{observation.ObservedState, observation.Activity, observation.ActivitySource, freshness.Format(time.RFC3339Nano)}
+			if observation.TmuxAttachedCount != nil {
+				setClause += ", tmux_attached_count=?"
+				args = append(args, *observation.TmuxAttachedCount)
+			}
+			if observation.StartedAt != nil {
+				setClause += ", started_at=?"
+				args = append(args, observation.StartedAt.Format(time.RFC3339Nano))
+			}
+			args = append(args, observation.ProjectID, logicalSessionIntentID(intent))
+			if _, err := tx.ExecContext(writeCtx, `UPDATE `+targetTable+` SET `+setClause+`
+				WHERE project_id=? AND logical_id=?`, args...); err != nil {
 				return fmt.Errorf("fan physical session observation into logical intent %s: %w", logicalSessionIntentID(intent), err)
 			}
 		}
@@ -258,6 +274,13 @@ func normalizePhysicalSessionObservation(observation PhysicalSessionObservation)
 	}
 	if observation.ObservedState == SessionStateStopped && (observation.Activity != "" || observation.ActivitySource != "") {
 		return observation, fmt.Errorf("physical session observation: stopped runtime cannot retain activity")
+	}
+	if observation.TmuxAttachedCount != nil && *observation.TmuxAttachedCount < 0 {
+		return observation, fmt.Errorf("physical session observation: tmux attachment count cannot be negative")
+	}
+	if observation.StartedAt != nil {
+		startedAt := observation.StartedAt.UTC()
+		observation.StartedAt = &startedAt
 	}
 	if observation.UpdatedAt.IsZero() {
 		observation.UpdatedAt = time.Now().UTC()
@@ -429,6 +452,7 @@ func WithSQLiteWriteAttemptHookForTest(ctx context.Context, hook func(operation 
 // SessionStateReader loads persisted session state rows for a project.
 type SessionStateReader interface {
 	ListSessionStates(context.Context, string) ([]Session, error)
+	ListSessionStatesByIssueIDs(context.Context, string, []string) ([]Session, error)
 	ListSessionIntentStates(context.Context, string) ([]Session, error)
 	GetSessionState(context.Context, string, string) (Session, bool, error)
 	GetSessionIntent(context.Context, string, SessionRole, SessionScopeKind, string) (Session, bool, error)
@@ -1310,11 +1334,40 @@ func sessionProjectionUnionSQL() string {
 }
 
 func (s *RuntimeStateStore) ListSessionStates(ctx context.Context, projectID string) ([]Session, error) {
-	return s.listSessionStatesFromQuery(ctx, projectID, sessionProjectionUnionSQL())
+	return s.listSessionStatesFromQuery(ctx, projectID, sessionProjectionUnionSQL(), "", nil)
+}
+
+// ListSessionStatesByIssueIDs loads only runtime rows in the requested issue
+// scope. The physical tables' project/issue indexes keep historical rows
+// outside the graph from being scanned and materialized.
+func (s *RuntimeStateStore) ListSessionStatesByIssueIDs(ctx context.Context, projectID string, issueIDs []string) ([]Session, error) {
+	unique := make([]string, 0, len(issueIDs))
+	seen := make(map[string]struct{}, len(issueIDs))
+	for _, issueID := range issueIDs {
+		issueID = strings.TrimSpace(issueID)
+		if issueID == "" {
+			continue
+		}
+		if _, ok := seen[issueID]; ok {
+			continue
+		}
+		seen[issueID] = struct{}{}
+		unique = append(unique, issueID)
+	}
+	if len(unique) == 0 {
+		return []Session{}, nil
+	}
+	sort.Strings(unique)
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(unique)), ",")
+	args := make([]any, 0, len(unique))
+	for _, issueID := range unique {
+		args = append(args, issueID)
+	}
+	return s.listSessionStatesFromQuery(ctx, projectID, sessionProjectionUnionSQL(), "AND issue_id IN ("+placeholders+")", args)
 }
 
 func (s *RuntimeStateStore) ListSessionIntentStates(ctx context.Context, projectID string) ([]Session, error) {
-	return s.listSessionStatesFromQuery(ctx, projectID, `
+	sourceQuery := `
 		SELECT
 			project_id,
 			session_id,
@@ -1329,15 +1382,17 @@ func (s *RuntimeStateStore) ListSessionIntentStates(ctx context.Context, project
 			tmux_attached_count,
 			started_at,
 			updated_at
-		FROM `+sessionStateTable)
+		FROM ` + sessionStateTable
+	return s.listSessionStatesFromQuery(ctx, projectID, sourceQuery, "", nil)
 }
 
-func (s *RuntimeStateStore) listSessionStatesFromQuery(ctx context.Context, projectID, sourceQuery string) ([]Session, error) {
+func (s *RuntimeStateStore) listSessionStatesFromQuery(ctx context.Context, projectID, sourceQuery, filterSQL string, filterArgs []any) ([]Session, error) {
 	db, err := s.dbHandle()
 	if err != nil {
 		return nil, err
 	}
 	projectID = normalizedProjectID(projectID)
+	queryArgs := append([]any{projectID}, filterArgs...)
 	rows, err := db.QueryContext(ctx, `
 		SELECT
 			session_id,
@@ -1353,9 +1408,9 @@ func (s *RuntimeStateStore) listSessionStatesFromQuery(ctx context.Context, proj
 			COALESCE(started_at, ''),
 			updated_at
 		FROM (`+sourceQuery+`)
-		WHERE project_id = ?
+		WHERE project_id = ? `+filterSQL+`
 		ORDER BY updated_at DESC, session_id ASC
-	`, projectID)
+	`, queryArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("list session state rows %s: %w", projectID, err)
 	}

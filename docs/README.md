@@ -66,6 +66,7 @@ This directory primarily contains **developer/internal documentation**.
 - `orchestration.project_review`: `hybrid` (refreshed durable issue/review/ownership and exact issue-worktree projections plus live Git worktree identity, clean HEAD, and aggregate-revision verification; accepted outcomes delegate integration and cleanup to hybrid `task.close`).
 - `orchestration.claim_start`: `hybrid` (durable ownership/start-attempt projection plus daemon session-start operation/runtime compensation).
 - `orchestration.project_loop`: `projection` (durable issue-observation cursor and loop checkpoint refreshed before deterministic non-blocking start/review action replay; queued reviews remain visible without globally stalling unrelated starts).
+- `projection.delta_stream`: `projection` (durable project delta ledger and version history; cursor replay and snapshot reads never reconcile or poll tmux).
 - `validation.machine_capacity`: `projection` (durable daemon-owned aggregate/shared/safe validation queue with heartbeat expiry and transactionally refreshed admission state).
 - `task.review_handoff`: `projection` (durable issue v2 lifecycle/review projection + revisioned material decision change/acknowledgement observations + session activity projection; active issue self-handoff remains allowed only after material decisions are current).
 - `decision.propagation_delivery`: `hybrid` (atomic decision audit/outbox and per-issue materialization checkpoints reconciled with live tmux delivery until an authoritative exact-revision acknowledgement; superseded and withdrawn revisions are not delivered).
@@ -78,12 +79,13 @@ This directory primarily contains **developer/internal documentation**.
 - `investigation.waiting_human`: `projection` (durable investigation disposition and issue-specific acceptance/review evidence refreshed before human-authority evaluation).
 - `interaction.staleness`: `projection` (durable interaction requests refreshed before age evaluation and revision-safe stale/reminder/disposition/recovery audit writes).
 - `task.list` freshness/session timestamps: `projection` (refresh-then-cache).
-- `cross_project.view_projection`: `projection` (the global daemon refreshes the user database from authoritative project stores, then evaluates typed cross-project views from the refreshed user-level projection; stale and unavailable projects remain explicit).
+- `cross_project.view_projection`: `projection` (the global daemon incrementally consumes verified per-project issue deltas and independently keyed current runtime/fact materializations into the user database, then evaluates typed cross-project views there; full export is limited to bootstrap, explicit rebuild, and isolated recovery, while stale and unavailable projects remain explicit).
 - `orchestration.scope_identity`: `projection` (durable project plus typed rooted/project scope; startup environment is not authority).
 - `orchestration.scope_singleton`: `hybrid` (refreshed durable scope lease compared with live tmux runtime).
 - `orchestration.project_completion`: `hybrid` (refreshed issue/review/interaction/session projections compared with live tmux runtime).
 - `orchestration.parent_continuation`: `hybrid` (durable rooted lease/cursor + refreshed direct nested-root, interaction, completion, and session projections compared with live tmux before a wake prompt is delivered).
 - `runtime.reconcile` includes `invariant_sources` debug output reflecting the active source-policy matrix.
+- `external.tmux_observation` is a daemon-owned `tmux` source: bounded inventory and sparse pane observation publish coalesced current-state projection changes; snapshot/watch readers never poll tmux and routine observations never become semantic history.
 - Treat this as the required cross-daemon safety contract for session/worktree/runtime invariants.
 
 ## Spec Records

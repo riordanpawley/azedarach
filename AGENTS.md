@@ -191,11 +191,13 @@ fd "filename" -t f internal cmd
    - `interaction.staleness` stale/reminder/disposition/recovery policy -> `projection` (durable interaction request projection refreshed before age evaluation and revision-safe write-through audit)
    - `decision.markdown_transfer_target` decision Markdown import/export scope -> `hybrid` (refresh durable worktree-to-issue projection, then compare it with the live Git worktree path and HEAD revision; issue worktrees transfer only decisions carrying that issue provenance)
    - task-list freshness/session projection checks -> `projection` via refresh-then-cache
-   - cross-project configurable views and tmux selector ordering -> `projection` (global-daemon-owned user database refreshed from authoritative project stores; scoped issue/session/worktree/dependency keys and explicit stale/unavailable project health)
+   - cross-project configurable views and tmux selector ordering -> `projection` (global-daemon-owned user database incrementally consumes verified per-project issue deltas plus independently keyed runtime/fact materializations; full export is bootstrap/explicit rebuild/isolated recovery only; scoped issue/session/worktree/dependency keys and explicit vector/stale/unavailable project health)
    - orchestration scope identity -> `projection` (durable project + typed rooted/project scope)
    - orchestration scope singleton -> `hybrid` (refreshed durable scope lease + live tmux runtime)
    - rooted parent orchestration continuation -> `hybrid` (durable rooted lease/cursor + refreshed direct nested-root, interaction, completion, and session projections + live tmux wake delivery)
    - project orchestration completion -> `hybrid` (refreshed issue/review/interaction/session projections + live tmux runtime)
+   - keyed monotonic projection delta replay, consumer cursors, and snapshot-at-cursor reads -> `projection` (durable project delta ledger and version history; reads never reconcile or poll tmux)
+   - asynchronous tmux current-state observation -> `tmux` (one daemon-owned bounded observer polls inventory and sparse pane classifications, publishes only changed disposable current-state projections with external-observation provenance, and never admits `session.runtime_observed` or advances a semantic sequence)
    - repository-family validation capacity -> `projection` (durable daemon validation request/lease queue refreshed transactionally before aggregate/shared/safe admission; heartbeat expiry is recovery authority)
 
 ### Adding New Invariants (Required Checklist)
