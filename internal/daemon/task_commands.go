@@ -5348,6 +5348,13 @@ func (d *Daemon) taskGraphReadinessCacheExpiry(projectID, rootIssueID, actorID s
 }
 
 func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectID, rootIssueID string) ([]domain.Task, error) {
+	if d.materializedReadsEnabled() {
+		tasks, _, err := d.projectReadSnapshot(projectID)
+		if err != nil {
+			return nil, err
+		}
+		return materializedParentChildClosure(tasks, rootIssueID), nil
+	}
 	// Explicit compatibility exception: production starts project materializers
 	// before serving commands. This direct indexed read exists only for embedded
 	// and migration-isolation tests that deliberately disable that startup path.
