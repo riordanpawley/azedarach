@@ -294,13 +294,35 @@ func reconcileValidationQueueTx(ctx context.Context, tx *sql.Tx, projectID strin
 			_, err = tx.ExecContext(ctx, `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE sequence=? AND state='queued'`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), firstSequence)
 			return err
 		}
+		var bypassedShared int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_validation_requests WHERE project_id=? AND class='shared' AND sequence>? AND started_at IS NOT NULL`, projectID, firstSequence).Scan(&bypassedShared); err != nil {
+			return err
+		}
+		if bypassedShared >= validationAggregateSharedBypassLimit {
+			return nil
+		}
+		// A queued aggregate expresses future exclusivity, not current
+		// ownership. Let one later focused request join the current shared
+		// generation, then drain shared owners for the aggregate. Counting
+		// durable started requests makes the bound survive daemon replacement.
+		_, err = tx.ExecContext(ctx, `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE sequence=(SELECT sequence FROM daemon_validation_requests WHERE project_id=? AND state='queued' AND class='shared' AND sequence>? ORDER BY sequence LIMIT 1) AND state='queued'`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), projectID, firstSequence)
+		return err
 	}
-	// A queued aggregate expresses future exclusivity, not current ownership.
-	// Keep admitting focused work until the aggregate can actually acquire the
-	// machine; only an active aggregate blocks shared validators.
-	_, err = tx.ExecContext(ctx, `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE project_id=? AND state='queued' AND class='shared'`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), projectID)
+	var nextAggregate sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT MIN(sequence) FROM daemon_validation_requests WHERE project_id=? AND state='queued' AND class='aggregate'`, projectID).Scan(&nextAggregate); err != nil {
+		return err
+	}
+	query := `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE project_id=? AND state='queued' AND class='shared'`
+	args := []any{now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), projectID}
+	if nextAggregate.Valid {
+		query += ` AND sequence < ?`
+		args = append(args, nextAggregate.Int64)
+	}
+	_, err = tx.ExecContext(ctx, query, args...)
 	return err
 }
+
+const validationAggregateSharedBypassLimit = 1
 
 const validationSelect = `SELECT sequence,request_id,project_id,issue_id,class,profile,command,source_revision,state,queued_at,started_at,heartbeat_at,expires_at,finished_at,outcome,evidence_json FROM daemon_validation_requests`
 
