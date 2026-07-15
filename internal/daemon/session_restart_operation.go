@@ -196,10 +196,13 @@ func (d *Daemon) restartManagedAgentPane(ctx context.Context, target sessionRest
 	if !strings.HasPrefix(paneTarget, "%") {
 		paneTarget = "%" + paneTarget
 	}
-	plan.Stage = "replace"
+	// replace_ready is persisted before the destructive call. Recovery can
+	// distinguish an unchanged exact old identity (the call did not take effect)
+	// from a changed pane process (replacement took effect before the daemon died).
+	plan.Stage = "replace_ready"
 	if err := reportSessionRestartProgress(ctx, plan); err != nil {
 		prepared.artifact.remove()
-		appendRestartStageFailure(&item, "persist_replace", sessionRestartPreflightTimeout, err, false)
+		appendRestartStageFailure(&item, "persist_replace_ready", sessionRestartPreflightTimeout, err, false)
 		return item
 	}
 	_, err, timedOut = runRestartStage(ctx, sessionRestartReplaceTimeout, func(stageCtx context.Context) (struct{}, error) {
@@ -243,12 +246,12 @@ func (d *Daemon) restartManagedAgentPane(ctx context.Context, target sessionRest
 				item.Restarted = true
 				item.Outcome = restartSuccessOutcome(target.Activity)
 				item.Stages = append(item.Stages, restartStage("observe", "complete", "distinct pane process and hook incarnation acknowledged", sessionRestartObservationTimeout))
-				plan.Stage = "publish"
+				plan.Stage = "complete"
 				if err := reportSessionRestartProgress(ctx, plan); err != nil {
-					appendRestartStageFailure(&item, "publish", sessionRestartPreflightTimeout, err, errors.Is(err, context.DeadlineExceeded))
+					appendRestartStageFailure(&item, "persist_complete", sessionRestartPreflightTimeout, err, errors.Is(err, context.DeadlineExceeded))
 					return item
 				}
-				item.Stages = append(item.Stages, restartStage("publish", "complete", "restart result published", sessionRestartPreflightTimeout))
+				item.Stages = append(item.Stages, restartStage("persist_complete", "complete", "restart completion checkpoint persisted", sessionRestartPreflightTimeout))
 				return item
 			}
 		}

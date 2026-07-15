@@ -110,7 +110,7 @@ func TestRestartManagedAgentPaneRequiresForceAndAcknowledgesReplacement(t *testi
 	if !restarted.Restarted || restarted.Outcome != "busy_forced" || restarted.OldIdentity.PanePID == restarted.NewIdentity.PanePID || runner.respawns != 1 {
 		t.Fatalf("restarted=%+v respawns=%d", restarted, runner.respawns)
 	}
-	if got := strings.Join([]string{restarted.Stages[0].Name, restarted.Stages[len(restarted.Stages)-1].Name}, ","); got != "preflight,publish" {
+	if got := strings.Join([]string{restarted.Stages[0].Name, restarted.Stages[len(restarted.Stages)-1].Name}, ","); got != "preflight,persist_complete" {
 		t.Fatalf("stage bounds=%s", got)
 	}
 }
@@ -204,18 +204,18 @@ func TestRestartManagedAgentPanePartialFailureAndBoundedTimeout(t *testing.T) {
 			t.Fatalf("result=%+v respawns=%d", result, respawns)
 		}
 	})
-	t.Run("publication failure is typed and returned", func(t *testing.T) {
+	t.Run("completion checkpoint failure is typed and returned", func(t *testing.T) {
 		d, _, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
 		ctx := daemonops.WithProgressReporter(context.Background(), func(_ context.Context, progress daemonops.Progress) error {
-			if progress.Phase == "session.restart_all.publish" {
-				return errors.New("publish unavailable")
+			if progress.Phase == "session.restart_all.complete" {
+				return errors.New("completion checkpoint unavailable")
 			}
 			return nil
 		})
 		result := d.restartManagedAgentPane(ctx, target, protocol.SessionRestartAllRequestBody{}, protocol.SessionRestartAllItem{})
 		respawns, _, _ := runner.snapshot()
 		stage := result.Stages[len(result.Stages)-1]
-		if result.Outcome != "partial_failure" || !strings.Contains(result.Error, "publish unavailable") || stage.Name != "publish" || respawns != 1 {
+		if result.Outcome != "partial_failure" || !strings.Contains(result.Error, "completion checkpoint unavailable") || stage.Name != "persist_complete" || respawns != 1 {
 			t.Fatalf("result=%+v respawns=%d", result, respawns)
 		}
 	})
@@ -250,7 +250,7 @@ func TestRecoverInterruptedSessionRestartConvergesWithoutRespawn(t *testing.T) {
 
 func TestRecoverInterruptedSessionRestartMatrix(t *testing.T) {
 	t.Run("prepare and replace before respawn", func(t *testing.T) {
-		for _, stage := range []string{"prepare", "replace"} {
+		for _, stage := range []string{"prepare", "replace_ready"} {
 			t.Run(stage, func(t *testing.T) {
 				d, _, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
 				recovery, ok := d.recoverInterruptedSessionRestart(context.Background(), restartRecoveryRecord(t, target, stage))

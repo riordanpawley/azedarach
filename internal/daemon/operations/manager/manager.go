@@ -14,18 +14,22 @@ import (
 )
 
 type Config struct {
-	Now         func() time.Time
-	NewID       func() string
-	BaseContext context.Context
-	Logger      *slog.Logger
+	Now                    func() time.Time
+	NewID                  func() string
+	BaseContext            context.Context
+	Logger                 *slog.Logger
+	LifecycleWriteTimeout  time.Duration
+	LifecycleRetryInterval time.Duration
 }
 
 type Manager struct {
-	store daemonops.Store
-	now   func() time.Time
-	newID func() string
-	base  context.Context
-	log   *slog.Logger
+	store                  daemonops.Store
+	now                    func() time.Time
+	newID                  func() string
+	base                   context.Context
+	log                    *slog.Logger
+	lifecycleWriteTimeout  time.Duration
+	lifecycleRetryInterval time.Duration
 
 	mu           sync.Mutex
 	intakeClosed bool
@@ -34,6 +38,7 @@ type Manager struct {
 	resourceBusy map[string]string
 	activeDedupe map[string]string
 	recentDedupe map[string]recentEntry
+	lifecycleErr error
 	wg           sync.WaitGroup
 }
 
@@ -61,16 +66,24 @@ func New(store daemonops.Store, cfg Config) *Manager {
 	if cfg.BaseContext == nil {
 		cfg.BaseContext = context.Background()
 	}
+	if cfg.LifecycleWriteTimeout <= 0 {
+		cfg.LifecycleWriteTimeout = 2 * time.Second
+	}
+	if cfg.LifecycleRetryInterval <= 0 {
+		cfg.LifecycleRetryInterval = 100 * time.Millisecond
+	}
 	return &Manager{
-		store:        store,
-		now:          cfg.Now,
-		newID:        cfg.NewID,
-		base:         cfg.BaseContext,
-		log:          cfg.Logger,
-		running:      make(map[string]*managedOp),
-		resourceBusy: make(map[string]string),
-		activeDedupe: make(map[string]string),
-		recentDedupe: make(map[string]recentEntry),
+		store:                  store,
+		now:                    cfg.Now,
+		newID:                  cfg.NewID,
+		base:                   cfg.BaseContext,
+		log:                    cfg.Logger,
+		lifecycleWriteTimeout:  cfg.LifecycleWriteTimeout,
+		lifecycleRetryInterval: cfg.LifecycleRetryInterval,
+		running:                make(map[string]*managedOp),
+		resourceBusy:           make(map[string]string),
+		activeDedupe:           make(map[string]string),
+		recentDedupe:           make(map[string]recentEntry),
 	}
 }
 
@@ -109,7 +122,7 @@ func (m *Manager) Submit(ctx context.Context, req daemonops.SubmitRequest, runne
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	created, err := m.store.Create(ctx, record)
+	created, err := m.create(ctx, record)
 	if err != nil {
 		return daemonops.SubmitResult{}, err
 	}
@@ -198,7 +211,7 @@ func (m *Manager) Cancel(ctx context.Context, operationID, reason string) (daemo
 		if msg == "" {
 			msg = "cancelled"
 		}
-		updated, err := m.store.Update(ctx, daemonops.UpdateParams{
+		updated, err := m.update(ctx, daemonops.UpdateParams{
 			ID:           operationID,
 			ToState:      daemonops.StateCancelled,
 			FinishedAt:   &finished,
@@ -236,19 +249,18 @@ func (m *Manager) StopIntake() error {
 
 func (m *Manager) CancelQueued(ctx context.Context, reason string) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	pending := append([]*managedOp(nil), m.pending...)
-	m.pending = nil
-	m.mu.Unlock()
 
 	var firstErr error
 	for _, op := range pending {
-		record := m.recordForOp(op)
+		record := cloneOperationRecord(op.record)
 		finished := m.now().UTC()
 		msg := reason
 		if msg == "" {
 			msg = "cancelled"
 		}
-		updated, err := m.store.Update(ctx, daemonops.UpdateParams{
+		updated, err := m.update(ctx, daemonops.UpdateParams{
 			ID:           record.ID,
 			ToState:      daemonops.StateCancelled,
 			FinishedAt:   &finished,
@@ -260,10 +272,11 @@ func (m *Manager) CancelQueued(ctx context.Context, reason string) error {
 			}
 			continue
 		}
-		m.setRecordForOp(op, updated)
-		m.mu.Lock()
+		op.record = cloneOperationRecord(updated)
+		if idx := m.indexPendingLocked(record.ID); idx >= 0 {
+			m.pending = append(m.pending[:idx], m.pending[idx+1:]...)
+		}
 		m.clearDedupeLocked(op)
-		m.mu.Unlock()
 	}
 	return firstErr
 }
@@ -276,7 +289,9 @@ func (m *Manager) Drain(ctx context.Context) error {
 	}()
 	select {
 	case <-done:
-		return nil
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.lifecycleErr
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -420,7 +435,7 @@ func (m *Manager) execute(ctx context.Context, op *managedOp) {
 
 	operationID := m.recordForOp(op).ID
 	started := m.now().UTC()
-	updated, err := m.store.Update(context.Background(), daemonops.UpdateParams{
+	updated, err := m.update(ctx, daemonops.UpdateParams{
 		ID:        operationID,
 		ToState:   daemonops.StateRunning,
 		StartedAt: &started,
@@ -428,12 +443,17 @@ func (m *Manager) execute(ctx context.Context, op *managedOp) {
 	if err != nil {
 		msg := err.Error()
 		finished := m.now().UTC()
-		updated, _ = m.store.Update(context.Background(), daemonops.UpdateParams{
+		updated, terminalErr := m.persistTerminal(daemonops.UpdateParams{
 			ID:           operationID,
 			ToState:      daemonops.StateFailed,
 			FinishedAt:   &finished,
 			ErrorMessage: &msg,
 		})
+		if terminalErr != nil {
+			m.logLifecyclePersistenceFailure(operationID, daemonops.StateFailed, terminalErr)
+			m.recordLifecyclePersistenceFailure(terminalErr)
+			return
+		}
 		if updated.ID != "" {
 			m.setRecordForOp(op, updated)
 		}
@@ -444,7 +464,7 @@ func (m *Manager) execute(ctx context.Context, op *managedOp) {
 	ctx = daemonops.WithProgressReporter(ctx, func(progressCtx context.Context, progress daemonops.Progress) error {
 		progressCopy := progress
 		record := m.recordForOp(op)
-		updated, err := m.store.Update(progressCtx, daemonops.UpdateParams{
+		updated, err := m.update(progressCtx, daemonops.UpdateParams{
 			ID:       record.ID,
 			ToState:  record.State,
 			Progress: &progressCopy,
@@ -492,12 +512,60 @@ func (m *Manager) execute(ctx context.Context, op *managedOp) {
 		params.ErrorMessage = &msg
 	}
 
-	updated, err = m.store.Update(context.Background(), params)
-	if err == nil {
-		m.setRecordForOp(op, updated)
+	updated, err = m.persistTerminal(params)
+	if err != nil {
+		m.logLifecyclePersistenceFailure(operationID, params.ToState, err)
+		m.recordLifecyclePersistenceFailure(err)
+		return
 	}
+	m.setRecordForOp(op, updated)
 	m.logOperationFinished(m.recordForOp(op), finished.Sub(started))
 	m.finish(op)
+}
+
+func (m *Manager) create(ctx context.Context, record daemonops.Record) (daemonops.Record, error) {
+	writeCtx, cancel := context.WithTimeout(ctx, m.lifecycleWriteTimeout)
+	defer cancel()
+	return m.store.Create(writeCtx, record)
+}
+
+func (m *Manager) update(ctx context.Context, params daemonops.UpdateParams) (daemonops.Record, error) {
+	writeCtx, cancel := context.WithTimeout(ctx, m.lifecycleWriteTimeout)
+	defer cancel()
+	return m.store.Update(writeCtx, params)
+}
+
+func (m *Manager) persistTerminal(params daemonops.UpdateParams) (daemonops.Record, error) {
+	var lastErr error
+	for {
+		updated, err := m.update(context.WithoutCancel(m.base), params)
+		if err == nil {
+			return updated, nil
+		}
+		lastErr = err
+		if m.log != nil {
+			m.log.Warn("daemon operation terminal persistence retry", "operation_id", params.ID, "state", params.ToState, "error", err)
+		}
+		timer := time.NewTimer(m.lifecycleRetryInterval)
+		select {
+		case <-m.base.Done():
+			timer.Stop()
+			return daemonops.Record{}, lastErr
+		case <-timer.C:
+		}
+	}
+}
+
+func (m *Manager) logLifecyclePersistenceFailure(operationID string, state daemonops.State, err error) {
+	if m.log != nil {
+		m.log.Error("daemon operation lifecycle persistence failed; authority retained", "operation_id", operationID, "state", state, "error", err)
+	}
+}
+
+func (m *Manager) recordLifecyclePersistenceFailure(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lifecycleErr = errors.Join(m.lifecycleErr, err)
 }
 
 func (m *Manager) finish(op *managedOp) {
