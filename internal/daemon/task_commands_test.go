@@ -10575,8 +10575,11 @@ func TestTaskIntegrationReadinessAcceptsLegacyMailboxAliases(t *testing.T) {
 
 func TestTaskIntegrationReadinessRequiresCompleteWorkerEvidencePacket(t *testing.T) {
 	ctx := context.Background()
-	projectID := "proj-worker-evidence-ready"
 	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
@@ -10822,8 +10825,11 @@ func TestTaskIntegrationReadinessRejectsUnknownProjectMailboxRoute(t *testing.T)
 
 func TestTaskIntegrationReadinessSkipsReviewReadyReplayNotification(t *testing.T) {
 	ctx := context.Background()
-	projectID := "proj-worker-evidence-replay"
 	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
@@ -11148,8 +11154,11 @@ func TestTaskIntegrationReadinessLatestIssueEvidenceEventWins(t *testing.T) {
 
 func TestTaskIntegrationReadinessReportsIncompleteWorkerEvidencePacket(t *testing.T) {
 	ctx := context.Background()
-	projectID := "proj-worker-evidence-incomplete"
 	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
@@ -11195,8 +11204,11 @@ func TestTaskIntegrationReadinessReportsIncompleteWorkerEvidencePacket(t *testin
 
 func TestTaskIntegrationReadinessLatestWorkerEvidenceEventWins(t *testing.T) {
 	ctx := context.Background()
-	projectID := "proj-worker-evidence-latest"
 	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
@@ -11257,8 +11269,11 @@ func TestTaskIntegrationReadinessLatestWorkerEvidenceEventWins(t *testing.T) {
 
 func TestTaskIntegrationReadinessAcceptsLegacyAliasOnlyWithStructuredEvidence(t *testing.T) {
 	ctx := context.Background()
-	projectID := "proj-worker-evidence-legacy-alias"
 	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
