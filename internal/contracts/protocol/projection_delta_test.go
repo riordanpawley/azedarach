@@ -82,8 +82,11 @@ func TestProjectionDeltaProtocolVersionClaimAndCompatibility(t *testing.T) {
 	if SupportsProjectionDeltaCommands(47) || !SupportsProjectionDeltaCommands(48) || !SupportsProjectionDeltaCommands(49) || !SupportsProjectionDeltaCommands(50) || SupportsProjectionDeltaCommands(51) {
 		t.Fatal("projection command support window does not span v48-v50")
 	}
-	if ack := NegotiateHello(Hello{ProtocolVersion: 48}, "daemon-v50"); !ack.Accepted || ack.DaemonProtocolVersion != 50 {
-		t.Fatalf("v48 compatibility handshake=%+v", ack)
+	if ack := NegotiateHello(Hello{ProtocolVersion: 48}, "daemon-v50"); ack.Accepted || ack.DaemonProtocolVersion != 50 || ack.ErrorCode != ErrorCodeUpgradeRequired {
+		t.Fatalf("v48 stale-client handshake=%+v", ack)
+	}
+	if ack := NegotiateHello(Hello{ProtocolVersion: 50}, "daemon-v50"); !ack.Accepted || ack.DaemonProtocolVersion != 50 {
+		t.Fatalf("v50 compatibility handshake=%+v", ack)
 	}
 	if ack := NegotiateHello(Hello{ProtocolVersion: 51}, "daemon-v50"); ack.Accepted || ack.ErrorCode != ErrorCodeIncompatible {
 		t.Fatalf("v51 compatibility handshake=%+v", ack)
