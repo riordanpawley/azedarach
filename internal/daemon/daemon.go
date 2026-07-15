@@ -178,6 +178,8 @@ type Daemon struct {
 	issueAutoArchiveLastRun              map[string]time.Time
 	sessionStopMu                        sync.Mutex
 	sessionStopPending                   map[string]int
+	sessionRestartMu                     sync.Mutex
+	sessionRestartPending                map[string]*sessionRestartExecution
 	orchestratorStopGracePeriod          time.Duration
 	orchestratorStopPollInterval         time.Duration
 	orchestratorStopAfterIntentPersisted func()

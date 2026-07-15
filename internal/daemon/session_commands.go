@@ -1644,6 +1644,15 @@ func (d *Daemon) handleSessionResolveConflict(ctx context.Context, req protocol.
 }
 
 func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	if d.sessionLongRunning != nil {
+		return d.sessionLongRunning.Execute(ctx, req, req.Command, func(execCtx context.Context) (protocol.ResponseEnvelope, error) {
+			return d.handleSessionRestartAllDirect(execCtx, req)
+		})
+	}
+	return d.handleSessionRestartAllDirect(ctx, req)
+}
+
+func (d *Daemon) handleSessionRestartAllDirect(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	var body protocol.SessionRestartAllRequestBody
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -1743,55 +1752,23 @@ func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.Reque
 		if !item.TmuxReady {
 			item.Skipped = true
 			item.Reason = "no_tmux_pane"
+			item.Outcome = "crashed"
 			result.Skipped++
 			result.Sessions = append(result.Sessions, item)
 			continue
 		}
-
-		if err := d.tmux.SendKey(ctx, target.SessionID, "C-c"); err != nil {
-			item.Error = err.Error()
+		item = d.restartManagedAgentPane(ctx, target, body, item)
+		if item.Restarted {
+			result.Restarted++
+		} else if item.Skipped {
+			result.Skipped++
+		} else {
 			result.Failed++
-			result.Sessions = append(result.Sessions, item)
-			continue
 		}
-		if err := d.waitBeforeSessionResume(ctx, 250*time.Millisecond); err != nil {
-			item.Error = err.Error()
-			result.Failed++
-			result.Sessions = append(result.Sessions, item)
-			continue
-		}
-		artifact, artifactErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchResume, ProjectID: target.ProjectID, IssueID: target.IssueID, SessionID: target.SessionID, Yolo: body.Yolo, ImagePaths: body.ImagePaths, Prompt: sessionRestartContinuePrompt})
-		if artifactErr != nil {
-			item.Error = artifactErr.Error()
-			result.Failed++
-			result.Sessions = append(result.Sessions, item)
-			continue
-		}
-		if err := d.tmux.SendKeys(ctx, target.SessionID, artifact.Command); err != nil {
-			artifact.remove()
-			item.Error = err.Error()
-			result.Failed++
-			result.Sessions = append(result.Sessions, item)
-			continue
-		}
-		if item.ActiveIntent && d.sessionRestartNeedsPostLaunchPrompt(target.ProjectID) {
-			if err := d.waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
-				item.Error = err.Error()
-				result.Failed++
-				result.Sessions = append(result.Sessions, item)
-				continue
-			}
-			if err := d.tmux.PasteTextAndSubmit(ctx, target.SessionID, sessionRestartContinuePrompt); err != nil {
-				item.Error = err.Error()
-				result.Failed++
-				result.Sessions = append(result.Sessions, item)
-				continue
-			}
-		}
-		item.Restarted = true
-		result.Restarted++
 		if target.IssueID != "" {
-			d.persistRestartedSessionProjection(ctx, target.ProjectID, target.SessionID, target.IssueID)
+			if item.Restarted {
+				d.persistRestartedSessionProjection(ctx, target.ProjectID, target.SessionID, target.IssueID)
+			}
 		}
 		result.Sessions = append(result.Sessions, item)
 	}
@@ -4597,7 +4574,17 @@ func (d *Daemon) buildSessionLaunchArtifactPayload(spec sessionLaunchSpec, promp
 		if shell == "" {
 			shell = appconfig.DefaultSessionShell()
 		}
-		return shell, command + "; " + sessionAgentProcessExitCommand(tool) + "; exec " + singleQuoteForShell(shell)
+		identityEnv := ""
+		if strings.TrimSpace(spec.AgentIncarnation) != "" {
+			logicalPaneID := strings.TrimSpace(spec.LogicalPaneID)
+			if logicalPaneID == "" {
+				logicalPaneID = "agent"
+			}
+			identityEnv = "export AZEDARACH_LOGICAL_PANE_ID=" + singleQuoteForShell(logicalPaneID) +
+				" AZEDARACH_AGENT_INCARNATION=" + singleQuoteForShell(spec.AgentIncarnation) +
+				" AZEDARACH_PANE_PID=$$; "
+		}
+		return shell, identityEnv + command + "; " + sessionAgentProcessExitCommand(tool) + "; exec " + singleQuoteForShell(shell)
 	}
 	return d.buildSessionLaunchComponentsWithInitReadyPathAndEnvPolicy(spec.ProjectID, spec.IssueID, spec.SessionID, spec.Yolo, spec.ImagePaths, promptHandoff.bootstrapPrompt(), spec.InitReadyPath, spec.StartupEnvCommands, false)
 }

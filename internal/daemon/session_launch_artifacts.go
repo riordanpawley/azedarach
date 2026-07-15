@@ -40,6 +40,8 @@ type sessionLaunchSpec struct {
 	CommandPayload      string
 	Shell               string
 	SanitizeEnvironment bool
+	LogicalPaneID       string
+	AgentIncarnation    string
 }
 
 type sessionLaunchArtifact struct {

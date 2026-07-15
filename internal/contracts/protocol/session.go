@@ -96,17 +96,29 @@ type SessionRestartAllRequestBody struct {
 }
 
 type SessionRestartAllItem struct {
-	ProjectID      naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
-	IssueID        naming.IssueID   `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
-	SessionID      naming.SessionID `json:"session_id" msgpack:"session_id"`
-	Activity       string           `json:"activity" msgpack:"activity"`
-	ActivitySource string           `json:"activity_source,omitempty" msgpack:"activity_source,omitempty"`
-	TmuxReady      bool             `json:"tmux_ready" msgpack:"tmux_ready"`
-	ActiveIntent   bool             `json:"active_intent" msgpack:"active_intent"`
-	Restarted      bool             `json:"restarted" msgpack:"restarted"`
-	Skipped        bool             `json:"skipped,omitempty" msgpack:"skipped,omitempty"`
-	Reason         string           `json:"reason,omitempty" msgpack:"reason,omitempty"`
-	Error          string           `json:"error,omitempty" msgpack:"error,omitempty"`
+	ProjectID      naming.ProjectID      `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	IssueID        naming.IssueID        `json:"issue_id,omitempty" msgpack:"issue_id,omitempty"`
+	SessionID      naming.SessionID      `json:"session_id" msgpack:"session_id"`
+	Activity       string                `json:"activity" msgpack:"activity"`
+	ActivitySource string                `json:"activity_source,omitempty" msgpack:"activity_source,omitempty"`
+	TmuxReady      bool                  `json:"tmux_ready" msgpack:"tmux_ready"`
+	ActiveIntent   bool                  `json:"active_intent" msgpack:"active_intent"`
+	Restarted      bool                  `json:"restarted" msgpack:"restarted"`
+	Skipped        bool                  `json:"skipped,omitempty" msgpack:"skipped,omitempty"`
+	Reason         string                `json:"reason,omitempty" msgpack:"reason,omitempty"`
+	Error          string                `json:"error,omitempty" msgpack:"error,omitempty"`
+	Outcome        string                `json:"outcome,omitempty" msgpack:"outcome,omitempty"`
+	OperationID    string                `json:"operation_id,omitempty" msgpack:"operation_id,omitempty"`
+	OldIdentity    *ManagedAgentIdentity `json:"old_identity,omitempty" msgpack:"old_identity,omitempty"`
+	NewIdentity    *ManagedAgentIdentity `json:"new_identity,omitempty" msgpack:"new_identity,omitempty"`
+	Stages         []SessionRestartStage `json:"stages,omitempty" msgpack:"stages,omitempty"`
+}
+
+type SessionRestartStage struct {
+	Name      string `json:"name" msgpack:"name"`
+	Status    string `json:"status" msgpack:"status"`
+	Message   string `json:"message,omitempty" msgpack:"message,omitempty"`
+	TimeoutMS int64  `json:"timeout_ms,omitempty" msgpack:"timeout_ms,omitempty"`
 }
 
 type SessionRestartAllResponseBody struct {
