@@ -361,7 +361,7 @@ func TestReviewReturnAcceptsFailedAggregateGateFromCurrentReviewEpochAfterWorker
 	if err := client.Update(ctx, issueID, domain.StatusInProgress); err != nil {
 		t.Fatal(err)
 	}
-	_, err = runtime.store.FinishValidation(ctx, "review-gate", "secret", domain.ValidationRequestFailed, "failed", domain.ValidationEvidence{Held: true, RequestID: "review-gate", Class: domain.ValidationClassAggregate, Profile: "cold", SourceRevision: "candidate-a", Present: true}, now.Add(time.Second), time.Minute)
+	_, err = runtime.store.FinishValidation(ctx, "review-gate", "secret", domain.ValidationRequestFailed, "exit 1", domain.ValidationEvidence{Held: true, RequestID: "review-gate", Class: domain.ValidationClassAggregate, Profile: "cold", SourceRevision: "candidate-a", Present: true}, now.Add(time.Second), time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,6 +383,39 @@ func TestReviewReturnAcceptsFailedAggregateGateFromCurrentReviewEpochAfterWorker
 	replayed, err := d.orchestrationAuthority().Apply(ctx, "project", request)
 	if err != nil || len(replayed.Returned) != 1 || len(tmuxRunner.inputPayloads) != 1 {
 		t.Fatalf("replay = %+v err=%v prompts=%d, want idempotent return", replayed, err, len(tmuxRunner.inputPayloads))
+	}
+}
+
+func TestReviewReturnRejectsCompletedExitZeroAggregateGateDuringActiveValidation(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker-a")
+	reviewEpochEventID := latestReviewEpochEventID(t, ctx, client, issueID)
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = runtime.Close() })
+	now := time.Now().UTC()
+	_, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "successful-review-gate", LeaseToken: "secret", ProjectID: "project", IssueID: issueID, Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", ReviewerID: "orchestrator", ReviewEpochEventID: reviewEpochEventID, TTL: time.Minute}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusInProgress); err != nil {
+		t.Fatal(err)
+	}
+	_, err = runtime.store.FinishValidation(ctx, "successful-review-gate", "secret", domain.ValidationRequestCompleted, "exit 0", domain.ValidationEvidence{Held: true, RequestID: "successful-review-gate", Class: domain.ValidationClassAggregate, Profile: "cold", SourceRevision: "candidate-a", Present: true}, now.Add(time.Second), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.operationRuntime = runtime
+	d.git = git.NewClient(&recordingGitRunner{runFn: func(args ...string) (string, error) { return "candidate-a\n", nil }}, slog.Default())
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "successful-gate-return", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "must not return after successful validation"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Skipped[issueID] != "not-review-ready" || len(result.Returned) != 0 {
+		t.Fatalf("result = %+v, want completed exit 0 gate rejected", result)
 	}
 }
 

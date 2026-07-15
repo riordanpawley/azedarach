@@ -424,7 +424,11 @@ func (a daemonOrchestrationAuthority) activeValidationReviewReturn(ctx context.C
 	if err != nil {
 		return protocol.OrchestrationReview{}, false, err
 	}
-	failedGate := gate != nil && (gate.State == domain.ValidationRequestFailed || (gate.State == domain.ValidationRequestCompleted && !strings.EqualFold(strings.TrimSpace(gate.Outcome), "passed")))
+	// The production validation wrapper records successful commands as
+	// completed/"exit 0" and unsuccessful commands as failed/"exit N".
+	// Outcome is diagnostic text, not authority: only the typed failed state may
+	// authorize returning an actively validating review candidate.
+	failedGate := gate != nil && gate.State == domain.ValidationRequestFailed
 	if gate == nil || !failedGate || gate.ReviewEpochEventID != reviewEpochEventID {
 		return protocol.OrchestrationReview{}, false, nil
 	}
