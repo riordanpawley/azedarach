@@ -523,6 +523,7 @@ type Client struct {
 	boardViewsMigrationFailureHook     func(stage string) error
 	humanAuthorityMigrationFailureHook func(stage string) error
 	decisionOutboxMigrationFailureHook func(stage string) error
+	agentInputMigrationFailureHook     func(stage string) error
 	requireExistingDB                  bool
 	interactionMu                      sync.RWMutex
 	interactionCache                   map[string]domain.InteractionRequest

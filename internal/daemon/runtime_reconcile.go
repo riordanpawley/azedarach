@@ -107,6 +107,11 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 			errs = append(errs, fmt.Errorf("reconcile interaction staleness: %w", err))
 		}
 	}
+	if d.agentInputService() != nil {
+		if err := d.agentInputService().RetryPending(ctx, result.ProjectID.String(), 100); err != nil {
+			errs = append(errs, fmt.Errorf("reconcile agent input delivery: %w", err))
+		}
+	}
 	if !hasSessionRuntime {
 		return result, errors.Join(errs...)
 	}

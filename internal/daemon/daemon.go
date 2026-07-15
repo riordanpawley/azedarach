@@ -352,7 +352,7 @@ func New(cfg Config) *Daemon {
 		userStoreRefreshDirty:              map[string]bool{},
 		shutdownReqCh:                      make(chan struct{}),
 	}
-	d.agentInput = newAgentInputDeliveryService(d.tmux, d.sessionRuntimeStateStoreIfConfigured)
+	d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, nil, fmt.Sprintf("daemon:%d:%p", os.Getpid(), d))
 	if !cfg.ScopedRuntime && strings.TrimSpace(os.Getenv("AZEDARACH_DISABLE_USER_DB")) != "1" {
 		if store, err := userstore.Open(userstore.DefaultPath()); err != nil {
 			cfg.Logger.Warn("initialize user cross-project projection", "error", err)

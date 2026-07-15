@@ -1466,8 +1466,20 @@ func seedReadyAgentInput(t *testing.T, d *Daemon, runner *sessionStartTmuxRunner
 	if _, _, err := store.ApplyPhysicalSessionObservation(context.Background(), daemonstate.PhysicalSessionObservation{ProjectID: projectID, SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: now, ObservedVersion: now.UnixNano()}); err != nil {
 		t.Fatal(err)
 	}
-	runner.captureOutput = ">\n"
-	d.agentInput = newAgentInputDeliveryService(d.tmux, d.sessionRuntimeStateStoreIfConfigured)
+	client := d.issueClientForProject(projectID)
+	if client == nil {
+		client = issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), d.cfg.Logger)
+		t.Cleanup(func() { _ = client.CloseDB() })
+		d.issues = client
+		if d.issueClientsByProject == nil {
+			d.issueClientsByProject = map[string]*issues.Client{}
+		}
+		d.issueClientsByProject[projectID] = client
+	}
+	receiver := &recordingAuthoritativeReceiver{accepted: map[string]string{}, sink: func(payload string) {
+		runner.inputPayloads = append(runner.inputPayloads, payload)
+	}}
+	d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, receiver, "test-daemon")
 }
 
 func requireNewSessionLaunchCommand(t *testing.T, runner *sessionStartTmuxRunner, sessionID string) string {
@@ -9365,7 +9377,7 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	}
 }
 
-func TestSessionMessagePastesTextAndSubmitsActiveIssueSession(t *testing.T) {
+func TestSessionMessageUsesAuthoritativeReceiverWithoutTmuxTextInput(t *testing.T) {
 	projectID := protocol.DefaultProjectID
 	issueID := naming.IssueID("az-42")
 	repoDir := t.TempDir()
@@ -9403,20 +9415,12 @@ func TestSessionMessagePastesTextAndSubmitsActiveIssueSession(t *testing.T) {
 		}
 		t.Fatalf("response not OK: %+v", resp)
 	}
-	wantCommands := [][]string{
-		{"has-session", "-t", sessionID},
-		{"list-panes", "-a", "-F", "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}\t#{session_attached}"},
-		{"capture-pane", "-t", "1", "-p", "-S", "-12"},
-		{"list-panes", "-a", "-F", "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}\t#{session_attached}"},
-		{"capture-pane", "-t", "1", "-p", "-S", "-12"},
-		{"load-buffer", "-b", "azedarach-agent-input-1", "-"},
-		{"paste-buffer", "-dp", "-b", "azedarach-agent-input-1", "-t", "1", ";", "send-keys", "-t", "1", "Enter"},
-	}
+	wantCommands := [][]string{{"has-session", "-t", sessionID}}
 	if !reflect.DeepEqual(tmuxRunner.commands, wantCommands) {
 		t.Fatalf("tmux commands = %#v, want %#v", tmuxRunner.commands, wantCommands)
 	}
 	if !reflect.DeepEqual(tmuxRunner.inputPayloads, []string{"Orchestrator says proceed now.\n\nKeep notes current."}) {
-		t.Fatalf("input payloads = %#v, want session message payload", tmuxRunner.inputPayloads)
+		t.Fatalf("authoritative receiver payloads = %#v", tmuxRunner.inputPayloads)
 	}
 }
 

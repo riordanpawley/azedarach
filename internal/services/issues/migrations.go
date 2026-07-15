@@ -83,6 +83,7 @@ var orderedMigrations = []migration{
 	{id: humanAuthorityProjectionMigrationID, path: "migrations/0047_human_authority_projection_revision.sql"},
 	{id: "0048_decision_propagation_outbox", path: "migrations/0048_decision_propagation_outbox.sql"},
 	{id: "0049_managed_agent_incarnations", path: "migrations/0049_managed_agent_incarnations.sql"},
+	{id: "0050_agent_input_delivery", path: "migrations/0050_agent_input_delivery.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -139,6 +140,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: humanAuthorityProjectionMigrationID, Path: "migrations/0047_human_authority_projection_revision.sql", Checksum: "ac3a48512b2e6e9c018d58a68db24a2465e9d172139d22f8378f69677073a0ab"},
 	{ID: "0048_decision_propagation_outbox", Path: "migrations/0048_decision_propagation_outbox.sql", Checksum: "a12c44ba35156d71fbcd88a9d78e4cdb234e75e7e4aef5f896c8b1182ada858d"},
 	{ID: "0049_managed_agent_incarnations", Path: "migrations/0049_managed_agent_incarnations.sql", Checksum: "8364ceb9fad589df3f73c1fe0f0462c22b127510f1745e62fcc11e24757fe08d"},
+	{ID: "0050_agent_input_delivery", Path: "migrations/0050_agent_input_delivery.sql", Checksum: "4bb09bc757a9e7604a675fa3f8c0d62eb03f809ba5350418b506bd72296b8af1"},
 }
 
 func validateMigrationRegistry() error {
@@ -434,6 +436,7 @@ const (
 	boardViewsMigrationID                                          = "0031_board_views"
 	humanAuthorityProjectionMigrationID                            = "0047_human_authority_projection_revision"
 	decisionPropagationOutboxMigrationID                           = "0048_decision_propagation_outbox"
+	agentInputDeliveryMigrationID                                  = "0050_agent_input_delivery"
 	contextualLearningMigrationID                                  = "0039_contextual_learning_activation"
 	legacyContextualLearningMigration                              = "0038_contextual_learning_activation"
 )
@@ -527,6 +530,12 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 				}
 				continue
 			}
+			if m.id == agentInputDeliveryMigrationID {
+				if err := c.applyAgentInputDeliveryMigration(ctx, db, m.id); err != nil {
+					return err
+				}
+				continue
+			}
 			if m.apply != nil {
 				if err := m.apply(ctx, db, m.id); err != nil {
 					return err
@@ -559,6 +568,15 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	}
 	if managedIdentityApplied {
 		if err := validateManagedAgentIdentitySchema(ctx, db); err != nil {
+			return err
+		}
+	}
+	agentInputApplied, err := isMigrationApplied(ctx, db, "0050_agent_input_delivery")
+	if err != nil {
+		return fmt.Errorf("check agent input delivery migration: %w", err)
+	}
+	if agentInputApplied {
+		if err := validateAgentInputDeliverySchema(ctx, db); err != nil {
 			return err
 		}
 	}
@@ -621,6 +639,35 @@ func validateManagedAgentIdentitySchema(ctx context.Context, db *sql.DB) error {
 	for _, fragment := range []string{"unique index", "(project_id, tmux_pane_id, pane_pid, agent_incarnation)"} {
 		if !strings.Contains(normalized, fragment) {
 			return fmt.Errorf("managed agent identity schema drifted: index idx_daemon_managed_agent_physical_incarnation has unexpected definition")
+		}
+	}
+	return nil
+}
+
+func validateAgentInputDeliverySchema(ctx context.Context, db *sql.DB) error {
+	var tableSQL string
+	if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_input_delivery_intents'`).Scan(&tableSQL); err != nil {
+		return fmt.Errorf("inspect agent input delivery table: %w", err)
+	}
+	normalized := strings.NewReplacer(" ", "", "\n", "", "\t", "", "\r", "").Replace(strings.ToLower(tableSQL))
+	for _, fragment := range []string{"primarykey(project_id,intent_key)", "statein('queued','leased','delivered','expired','stale')", "acknowledgement_tokenisnotnull", "lease_tokenisnotnull"} {
+		if !strings.Contains(normalized, fragment) {
+			return fmt.Errorf("agent input delivery schema drifted: missing constraint %s", fragment)
+		}
+	}
+	for _, column := range []string{"project_id", "intent_key", "session_id", "logical_pane_id", "tmux_pane_id", "pane_pid", "agent_incarnation", "tool", "message_kind", "payload", "state", "expires_at", "lease_owner", "lease_token", "lease_expires_at", "attempt_count", "acknowledgement_token", "acknowledged_at", "created_at", "updated_at"} {
+		exists, err := columnExistsDB(ctx, db, "agent_input_delivery_intents", column)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("agent input delivery schema drifted: missing column %s", column)
+		}
+	}
+	for _, index := range []string{"idx_agent_input_delivery_pending", "idx_agent_input_delivery_incarnation"} {
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, index).Scan(&count); err != nil || count != 1 {
+			return fmt.Errorf("agent input delivery schema drifted: missing index %s", index)
 		}
 	}
 	return nil
@@ -1156,6 +1203,33 @@ func (c *Client) applyDecisionPropagationOutboxMigration(ctx context.Context, db
 	}
 	if err := validateDecisionPropagationOutboxSchema(ctx, tx); err != nil {
 		return fmt.Errorf("validate migration %s: %w", id, err)
+	}
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	return nil
+}
+
+func (c *Client) applyAgentInputDeliveryMigration(ctx context.Context, db *sql.DB, id string) error {
+	sqlText, err := loadMigrationSQL("migrations/0050_agent_input_delivery.sql")
+	if err != nil {
+		return fmt.Errorf("load migration %s: %w", id, err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+		return fmt.Errorf("apply migration %s: %w", id, err)
+	}
+	if c.agentInputMigrationFailureHook != nil {
+		if err := c.agentInputMigrationFailureHook("after_schema"); err != nil {
+			return fmt.Errorf("migration %s rolled back: %w", id, err)
+		}
 	}
 	if err := recordAppliedMigration(ctx, tx, id); err != nil {
 		return fmt.Errorf("record migration %s: %w", id, err)

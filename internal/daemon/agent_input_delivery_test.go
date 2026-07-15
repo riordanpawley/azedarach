@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -11,113 +12,157 @@ import (
 
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
-	"github.com/riordanpawley/azedarach/internal/services/tmux"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
-type agentInputRunner struct {
-	mu       sync.Mutex
-	capture  string
-	attached string
-	writes   [][]string
-	payloads []string
+type recordingAuthoritativeReceiver struct {
+	mu              sync.Mutex
+	accepted        map[string]string
+	calls           int
+	payloads        []string
+	failAfterAccept bool
+	sink            func(string)
 }
 
-func (r *agentInputRunner) Run(_ context.Context, args ...string) (string, error) {
+func (r *recordingAuthoritativeReceiver) DeliverAgentInput(_ context.Context, request authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	switch args[0] {
-	case "list-panes":
-		return "az-1\t%7\t123\tcodex\t" + r.attached + "\n", nil
-	case "capture-pane":
-		return r.capture, nil
-	case "paste-buffer", "send-keys":
-		r.writes = append(r.writes, append([]string(nil), args...))
+	r.calls++
+	r.payloads = append(r.payloads, request.Delivery.Payload)
+	if r.sink != nil {
+		r.sink(request.Delivery.Payload)
 	}
-	return "", nil
+	key := request.Delivery.ProjectID + "\x00" + request.Delivery.IntentKey + "\x00" + request.Delivery.Target.AgentIncarnation
+	ack := r.accepted[key]
+	if ack == "" {
+		ack = "native-ack-" + request.Delivery.IntentKey
+		r.accepted[key] = ack
+	}
+	if r.failAfterAccept {
+		r.failAfterAccept = false
+		return authoritativeAgentInputAcknowledgement{}, errors.New("simulated crash after receiver acceptance")
+	}
+	return authoritativeAgentInputAcknowledgement{ProjectID: request.Delivery.ProjectID, IntentKey: request.Delivery.IntentKey, AgentIncarnation: request.Delivery.Target.AgentIncarnation, LeaseToken: request.LeaseToken, AcknowledgementToken: ack}, nil
 }
 
-func (r *agentInputRunner) RunWithInput(_ context.Context, input string, args ...string) (string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.payloads = append(r.payloads, input)
-	r.writes = append(r.writes, append([]string(nil), args...))
-	return "", nil
-}
-
-func TestAgentInputDeliveryFailsClosedAndPreservesComposer(t *testing.T) {
+func agentInputFixture(t *testing.T) (*daemonstate.RuntimeStateStore, *issues.Client, domain.AgentInputDeliveryRequest) {
+	t.Helper()
 	ctx := context.Background()
-	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	t.Cleanup(func() { _ = store.Close() })
+	dir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(dir, "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	issueClient := issues.NewClientAtPath(filepath.Join(dir, "issues.db"), logger)
+	t.Cleanup(func() { _ = issueClient.CloseDB() })
 	now := time.Now().UTC()
-	identity := daemonstate.ManagedAgentIdentity{ProjectID: "p", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 123, AgentIncarnation: "inc-1", ObservedAt: now}
-	if err := store.UpsertManagedAgentIdentity(ctx, identity); err != nil {
+	target := domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 123, AgentIncarnation: "inc-1"}
+	if err := runtimeStore.UpsertManagedAgentIdentity(ctx, daemonstate.ManagedAgentIdentity{ProjectID: "p", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 123, AgentIncarnation: "inc-1", ObservedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{ProjectID: "p", SessionID: "az-1", ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: now, ObservedVersion: now.UnixNano()}); err != nil {
+	if _, _, err := runtimeStore.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{ProjectID: "p", SessionID: "az-1", ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: now, ObservedVersion: now.UnixNano()}); err != nil {
 		t.Fatal(err)
 	}
-	runner := &agentInputRunner{capture: "previous output\n› human draft\n", attached: "0"}
-	service := newAgentInputDeliveryService(tmux.NewClient(runner, slog.Default()), func(string) *daemonstate.RuntimeStateStore { return store })
-	request := domain.AgentInputDeliveryRequest{ProjectID: "p", SessionID: "az-1", Target: domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 123, AgentIncarnation: "inc-1"}, Tool: "codex", Kind: domain.AgentInputMessageSessionMessage, Payload: "automation", IntentKey: "one", ExpiresAt: now.Add(time.Minute)}
+	return runtimeStore, issueClient, domain.AgentInputDeliveryRequest{ProjectID: "p", SessionID: "az-1", Target: target, Tool: "codex", Kind: domain.AgentInputMessageSessionMessage, Payload: "line one\nline two › ❯", IntentKey: "intent-1", ExpiresAt: now.Add(time.Minute)}
+}
 
-	result, err := service.Deliver(ctx, request)
-	if err != nil || result.Outcome != domain.AgentInputWaitingInputNonempty {
-		t.Fatalf("nonempty result=%+v err=%v", result, err)
+func TestAgentInputDeliveryFailsClosedWithoutAuthoritativeReceiver(t *testing.T) {
+	runtimeStore, client, request := agentInputFixture(t)
+	service := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, nil, "one")
+	result, err := service.Deliver(context.Background(), request)
+	if err != nil || result.Outcome != domain.AgentInputWaitingNotReady {
+		t.Fatalf("result=%+v err=%v", result, err)
 	}
-	if len(runner.writes) != 0 || len(runner.payloads) != 0 {
-		t.Fatalf("nonempty composer was modified: writes=%v", runner.writes)
-	}
-
-	runner.capture = "previous output\n›\n"
-	runner.attached = "1"
-	result, err = service.Deliver(ctx, request)
-	if err != nil || result.Outcome != domain.AgentInputWaitingHumanAttached || len(runner.writes) != 0 {
-		t.Fatalf("attached result=%+v err=%v writes=%v", result, err, runner.writes)
-	}
-
-	runner.attached = "0"
-	result, err = service.Deliver(ctx, request)
-	if err != nil || result.Outcome != domain.AgentInputDelivered {
-		t.Fatalf("empty detached result=%+v err=%v", result, err)
-	}
-	if len(runner.payloads) != 1 || runner.payloads[0] != "automation" {
-		t.Fatalf("payloads=%v", runner.payloads)
-	}
-	result, err = service.Deliver(ctx, request)
-	if err != nil || result.Outcome != domain.AgentInputDelivered || len(runner.payloads) != 1 {
-		t.Fatalf("duplicate result=%+v err=%v payloads=%v", result, err, runner.payloads)
+	// A restarted daemon observes the same durable queued intent; no tmux write
+	// or synthetic prompt inference can turn it into an acknowledgement.
+	restarted := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, nil, "two")
+	result, err = restarted.Deliver(context.Background(), request)
+	if err != nil || result.Outcome != domain.AgentInputWaitingNotReady {
+		t.Fatalf("restart result=%+v err=%v", result, err)
 	}
 }
 
-func TestAgentInputDeliveryRejectsStaleIncarnation(t *testing.T) {
-	ctx := context.Background()
-	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), nil)
-	t.Cleanup(func() { _ = store.Close() })
-	now := time.Now().UTC()
-	if err := store.UpsertManagedAgentIdentity(ctx, daemonstate.ManagedAgentIdentity{ProjectID: "p", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 124, AgentIncarnation: "new", ObservedAt: now}); err != nil {
-		t.Fatal(err)
-	}
-	runner := &agentInputRunner{capture: "›\n", attached: "0"}
-	service := newAgentInputDeliveryService(tmux.NewClient(runner, slog.Default()), func(string) *daemonstate.RuntimeStateStore { return store })
-	result, err := service.Deliver(ctx, domain.AgentInputDeliveryRequest{ProjectID: "p", SessionID: "az-1", Target: domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 123, AgentIncarnation: "old"}, Tool: "codex", Payload: "automation", IntentKey: "stale"})
-	if err != nil || result.Outcome != domain.AgentInputRejectedStaleTarget || len(runner.writes) != 0 {
-		t.Fatalf("result=%+v err=%v writes=%v", result, err, runner.writes)
-	}
-}
-
-func TestAgentComposerEmptyAdapters(t *testing.T) {
-	tests := []struct {
-		tool, capture string
-		want          bool
-	}{
-		{"codex", "output\n›\n", true}, {"codex", "output\n› draft\n", false},
-		{"claude", "output\n❯\n", true}, {"claude", "output\n❯ draft\n", false},
-		{"opencode", "output\n>\n", true}, {"configured-agent", "output\n>\n", false},
-		{"zsh", "output\n%\n", true}, {"zsh", "output\n% draft\n", false},
-	}
-	for _, tt := range tests {
-		if got := agentComposerEmpty(tt.tool, tt.capture); got != tt.want {
-			t.Errorf("agentComposerEmpty(%q, %q)=%v want %v", tt.tool, tt.capture, got, tt.want)
+func TestAgentInputDeliveryDurableDeduplicationAcrossDaemons(t *testing.T) {
+	runtimeStore, client, request := agentInputFixture(t)
+	receiver := &recordingAuthoritativeReceiver{accepted: map[string]string{}}
+	one := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, receiver, "one")
+	two := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, receiver, "two")
+	for i, service := range []*agentInputDeliveryService{one, two} {
+		result, err := service.Deliver(context.Background(), request)
+		if err != nil || result.Outcome != domain.AgentInputDelivered {
+			t.Fatalf("delivery %d result=%+v err=%v", i, result, err)
 		}
+	}
+	if receiver.calls != 1 {
+		t.Fatalf("receiver calls=%d want 1", receiver.calls)
+	}
+}
+
+func TestAgentInputDeliveryConcurrentDaemonsClaimOnce(t *testing.T) {
+	runtimeStore, client, request := agentInputFixture(t)
+	receiver := &recordingAuthoritativeReceiver{accepted: map[string]string{}}
+	services := []*agentInputDeliveryService{
+		newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, receiver, "one"),
+		newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, receiver, "two"),
+	}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	results := make(chan domain.AgentInputDeliveryResult, 16)
+	errs := make(chan error, 16)
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(service *agentInputDeliveryService) {
+			defer wg.Done()
+			<-start
+			result, err := service.Deliver(context.Background(), request)
+			results <- result
+			errs <- err
+		}(services[i%2])
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for result := range results {
+		if result.Outcome != domain.AgentInputDelivered && result.Outcome != domain.AgentInputWaitingNotReady {
+			t.Fatalf("result=%+v", result)
+		}
+	}
+	if receiver.calls != 1 {
+		t.Fatalf("receiver calls=%d want 1", receiver.calls)
+	}
+}
+
+func TestAgentInputDeliveryRetryAfterAcceptanceIsReceiverIdempotent(t *testing.T) {
+	runtimeStore, client, request := agentInputFixture(t)
+	receiver := &recordingAuthoritativeReceiver{accepted: map[string]string{}, failAfterAccept: true}
+	one := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, receiver, "one")
+	if result, err := one.Deliver(context.Background(), request); err == nil || result.Outcome != domain.AgentInputFailed {
+		t.Fatalf("first result=%+v err=%v", result, err)
+	}
+	two := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, receiver, "two")
+	if result, err := two.Deliver(context.Background(), request); err != nil || result.Outcome != domain.AgentInputDelivered {
+		t.Fatalf("retry result=%+v err=%v", result, err)
+	}
+	if len(receiver.accepted) != 1 {
+		t.Fatalf("receiver accepted distinct deliveries=%d want 1", len(receiver.accepted))
+	}
+}
+
+func TestAgentInputDeliveryRejectsPaneReuseBeforeReceiver(t *testing.T) {
+	runtimeStore, client, request := agentInputFixture(t)
+	receiver := &recordingAuthoritativeReceiver{accepted: map[string]string{}}
+	now := time.Now().UTC().Add(time.Second)
+	if err := runtimeStore.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{ProjectID: "p", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 999, AgentIncarnation: "inc-2", ObservedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	service := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, receiver, "one")
+	result, err := service.Deliver(context.Background(), request)
+	if err != nil || result.Outcome != domain.AgentInputRejectedStaleTarget || receiver.calls != 0 {
+		t.Fatalf("result=%+v err=%v calls=%d", result, err, receiver.calls)
 	}
 }
