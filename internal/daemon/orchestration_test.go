@@ -858,7 +858,13 @@ func TestProjectOrchestrationSnapshotRefreshesCrossProcessOwnership(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}}
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir()})
+	t.Cleanup(func() { _ = runtime.Close() })
+	_, err = runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "focused", LeaseToken: "test-secret", ProjectID: "proj", IssueID: id, Class: domain.ValidationClassShared, Profile: "focused", Command: "go test ./internal/daemon", SourceRevision: "abc123", TTL: time.Minute}, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}, operationRuntime: runtime}
 	authority := daemonOrchestrationAuthority{daemon: d}
 	before, err := authority.Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
 	if err != nil {
@@ -866,6 +872,9 @@ func TestProjectOrchestrationSnapshotRefreshesCrossProcessOwnership(t *testing.T
 	}
 	if got := candidateClass(before.Candidates, id); got != "runnable" {
 		t.Fatalf("before class = %q, want runnable", got)
+	}
+	if before.ValidationCapacity == nil || len(before.ValidationCapacity.Active) != 1 {
+		t.Fatalf("validation capacity = %+v, want active focused validation", before.ValidationCapacity)
 	}
 	_, err = writer.ClaimOwnershipWithRuntime(ctx, "proj", id, issues.OwnershipClaimParams{OwnerID: "other", OwnerKind: "agent"})
 	if err != nil {

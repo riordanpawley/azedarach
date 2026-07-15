@@ -17,6 +17,8 @@ import (
 
 func TestRunWritesCompleteArtifactsBeforeReturningTestFailure(t *testing.T) {
 	module := t.TempDir()
+	outerEvidence := filepath.Join(t.TempDir(), "outer-validation-evidence.json")
+	t.Setenv("AZEDARACH_VALIDATION_EVIDENCE_FILE", outerEvidence)
 	configureTestCacheFamily(t, module)
 	require.NoError(t, os.WriteFile(filepath.Join(module, "go.mod"), []byte("module example.test/failures\n\ngo 1.24.2\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(module, "failure_test.go"), []byte(`package failures
@@ -39,6 +41,7 @@ func TestSecond(t *testing.T) { t.Error("second sentinel") }
 		_, statErr := os.Stat(filepath.Join(output, name))
 		require.NoError(t, statErr, name)
 	}
+	assert.NoFileExists(t, outerEvidence, "library runs must not publish into an enclosing validation lease")
 	raw, err := os.ReadFile(filepath.Join(output, "events.jsonl"))
 	require.NoError(t, err)
 	assert.Contains(t, string(raw), "first sentinel")
@@ -46,6 +49,27 @@ func TestSecond(t *testing.T) { t.Error("second sentinel") }
 	report, err := os.ReadFile(filepath.Join(output, "report.md"))
 	require.NoError(t, err)
 	assert.True(t, strings.Index(string(report), "TestFirst") < strings.Index(string(report), "TestSecond"), "equal-duration failures have deterministic name ordering")
+}
+
+func TestWriteValidationLeaseEvidenceFileIncludesOverlapAndLeaseIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lease.json")
+	t.Setenv("AZEDARACH_VALIDATION_EVIDENCE_FILE", path)
+	measurement := Measurement{ValidationLease: ValidationLeaseEvidence{Held: true, RequestID: "req-1", Class: "aggregate", Profile: "cold", SourceRevision: "abc123"}, ProcessLoad: ProcessLoadEvidence{OverlapDetected: true, MaxExternalGoProcesses: 2}}
+	require.NoError(t, writeValidationLeaseEvidenceFile(measurement, ".tmp/test-timing/cold"))
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(data, &got))
+	assert.Equal(t, true, got["held"])
+	assert.Equal(t, "req-1", got["request_id"])
+	assert.Equal(t, true, got["overlap_detected"])
+	assert.Equal(t, float64(2), got["external_go_processes"])
+	require.NoError(t, writeValidationLeaseEvidenceFile(Measurement{ValidationLease: measurement.ValidationLease, ProcessLoad: ProcessLoadEvidence{}}, ".tmp/test-timing/boundary"))
+	data, err = os.ReadFile(path)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(data, &got))
+	assert.Equal(t, true, got["overlap_detected"], "later nested profiles must not erase earlier overlap")
+	assert.Len(t, got["report_paths"], 2)
 }
 
 func TestRunForcesIsolatedHomeConfigAndDatabaseRoots(t *testing.T) {

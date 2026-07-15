@@ -38,6 +38,7 @@ type Launcher struct {
 	shutdownWithReason func(ctx context.Context, socketPath string, reason string) error
 	replaceReason      string
 	sleepFn            func(time.Duration)
+	processExitTimeout time.Duration
 	terminateLockOwner func(lockPath string) error
 	startProcess       daemonProcessStarter
 }
@@ -211,6 +212,7 @@ func NewLauncher(repoDir, socketPath string) *Launcher {
 		shutdownWithReason: gracefulShutdownViaSocketWithReason,
 		replaceReason:      "compatibility-replace",
 		sleepFn:            time.Sleep,
+		processExitTimeout: 10 * time.Second,
 		terminateLockOwner: lifecycle.TerminateLockOwner,
 	}
 }
@@ -236,8 +238,10 @@ func (l *Launcher) WithReplaceReason(reason string) *Launcher {
 // Start spawns daemon process in background.
 func (l *Launcher) Start(ctx context.Context) error {
 	// Socket readiness is authoritative for service availability. Lock state is
-	// advisory and used only to coordinate spawn/recovery.
-	if err := l.waitForSocketReadyWithin(250 * time.Millisecond); err == nil {
+	// advisory and used only to coordinate spawn/recovery. Canonical scoped
+	// runtimes serialize the readiness check with Stop so a concurrent Start
+	// cannot report the daemon ready while Stop is committed to removing it.
+	if !l.ownsCanonicalScopedRuntime() && l.waitForSocketReadyWithin(250*time.Millisecond) == nil {
 		return nil
 	}
 
@@ -398,9 +402,45 @@ func isRecoverableLockOwnerTerminationError(err error) bool {
 
 // Stop attempts to stop existing lock-owner process.
 func (l *Launcher) Stop(ctx context.Context) error {
+	var releaseLifecycleLock func()
+	if l.ownsCanonicalScopedRuntime() {
+		var acquired bool
+		var err error
+		releaseLifecycleLock, acquired, err = l.acquireStartLock(ctx)
+		if err != nil {
+			return fmt.Errorf("acquire scoped daemon lifecycle lock for stop: %w", err)
+		}
+		if !acquired {
+			return errors.New("acquire scoped daemon lifecycle lock for stop: lock bypassed unexpectedly")
+		}
+		defer releaseLifecycleLock()
+	}
+
+	// Capture the owner before shutdown: azd releases daemon.lock before its
+	// deferred telemetry flush completes, so lock disappearance is not an exit
+	// signal. The OS start token distinguishes the exact process from later PID
+	// reuse.
+	var owner processIdentity
+	ownerPID, ownerRecorded := l.readLockedPID()
+	if l.ownsCanonicalScopedRuntime() {
+		if _, err := os.Lstat(l.SocketPath); err == nil && !ownerRecorded {
+			return errors.New("missing daemon lock owner identity for live canonical scoped socket")
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect canonical scoped daemon socket before stop: %w", err)
+		}
+	}
+	ownerPresent := false
+	if ownerRecorded && ownerPID != os.Getpid() {
+		var err error
+		owner, ownerPresent, err = captureProcessIdentity(ownerPID)
+		if err != nil {
+			return fmt.Errorf("capture daemon lock owner identity: %w", err)
+		}
+	}
+	stopped := false
 	if strings.TrimSpace(l.SocketPath) != "" {
 		if err := l.requestGracefulShutdown(ctx, "stop"); err == nil {
-			return nil
+			stopped = true
 		} else if l.Logger != nil {
 			l.Logger.Warn("graceful daemon socket shutdown failed; falling back to lock-owner termination",
 				"socket_path", l.SocketPath,
@@ -410,14 +450,138 @@ func (l *Launcher) Stop(ctx context.Context) error {
 		}
 	}
 
-	terminate := l.terminateLockOwner
-	if terminate == nil {
-		terminate = lifecycle.TerminateLockOwner
+	if !stopped {
+		terminate := l.terminateLockOwner
+		if terminate == nil {
+			terminate = lifecycle.TerminateLockOwner
+		}
+		if err := terminate(l.LockPath); err != nil {
+			return fmt.Errorf("terminate daemon lock owner: %w", err)
+		}
 	}
-	if err := terminate(l.LockPath); err != nil {
-		return fmt.Errorf("terminate daemon lock owner: %w", err)
+	if ownerPresent {
+		waitCtx := ctx
+		if waitCtx == nil {
+			waitCtx = context.Background()
+		}
+		timeout := l.processExitTimeout
+		if timeout <= 0 {
+			timeout = 10 * time.Second
+		}
+		waitCtx, cancel := context.WithTimeout(waitCtx, timeout)
+		defer cancel()
+		if err := l.waitForProcessExit(waitCtx, owner); err != nil {
+			return err
+		}
+	}
+	if err := l.cleanupScopedRuntimeAssets(); err != nil {
+		return fmt.Errorf("clean worktree-scoped daemon runtime: %w", err)
 	}
 	return nil
+}
+
+func (l *Launcher) cleanupScopedRuntimeAssets() error {
+	if l == nil || !config.UseScopedDaemonRuntimeFor(l.RepoDir) {
+		return nil
+	}
+	runtimeDir := config.ScopedDaemonRuntimeDir(l.RepoDir)
+	wantSocket := config.ScopedDaemonSocketPath(l.RepoDir)
+	wantLock := config.ScopedDaemonLockPath(l.RepoDir)
+	if filepath.Clean(l.SocketPath) != filepath.Clean(wantSocket) || filepath.Clean(l.LockPath) != filepath.Clean(wantLock) {
+		// Tests and specialized callers may supply a private socket while the
+		// process environment is scoped. Only canonical worktree runtime assets
+		// are eligible for automatic removal.
+		return nil
+	}
+	if info, err := os.Lstat(runtimeDir); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect scoped daemon runtime: %w", err)
+	} else if !info.IsDir() {
+		return fmt.Errorf("scoped daemon runtime is not a directory: %s", runtimeDir)
+	}
+
+	// Remove the pre-stable-lock artifact when cleaning a runtime created by an
+	// older launcher; it is not part of the new serialization authority.
+	legacyStartLockPath := wantLock + ".start"
+	if err := os.Remove(legacyStartLockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove legacy scoped daemon start lock: %w", err)
+	}
+	if _, err := os.Lstat(wantSocket); err == nil {
+		return fmt.Errorf("daemon socket still exists after stop: %s", wantSocket)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect stopped daemon socket: %w", err)
+	}
+	if err := os.Remove(wantLock); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove scoped daemon asset %s: %w", wantLock, err)
+	}
+	sessionLaunchDir := filepath.Join(runtimeDir, "session-launch")
+	if err := os.Remove(sessionLaunchDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove scoped daemon runtime directory %s: %w", sessionLaunchDir, err)
+	}
+	entries, err := os.ReadDir(runtimeDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect scoped daemon runtime residue: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.Name() != filepath.Base(wantLock) {
+			return fmt.Errorf("unexpected scoped daemon runtime residue: %s", filepath.Join(runtimeDir, entry.Name()))
+		}
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+
+	// Rename the entire stopped runtime generation while holding its start
+	// lock. A concurrent launcher can then safely recreate the canonical path;
+	// cleanup below touches only the detached generation and cannot remove new
+	// socket or lock assets.
+	tombstone := fmt.Sprintf("%s.cleanup-%d-%d", runtimeDir, os.Getpid(), time.Now().UnixNano())
+	if err := os.Rename(runtimeDir, tombstone); err != nil {
+		return fmt.Errorf("detach stopped scoped daemon runtime: %w", err)
+	}
+	if err := os.Remove(tombstone); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove detached scoped daemon runtime: %w", err)
+	}
+	return nil
+}
+
+func (l *Launcher) waitForProcessExit(ctx context.Context, identity processIdentity) error {
+	for {
+		alive, err := processIdentityAlive(identity)
+		if err != nil {
+			return fmt.Errorf("inspect daemon lock owner %d after stop: %w", identity.pid, err)
+		}
+		if !alive {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("daemon lock owner %d still alive after stop: %w", identity.pid, ctx.Err())
+		default:
+		}
+		sleep := l.sleepFn
+		if sleep == nil {
+			sleep = time.Sleep
+		}
+		sleep(20 * time.Millisecond)
+	}
+}
+
+func (l *Launcher) ownsCanonicalScopedRuntime() bool {
+	if l == nil || !config.UseScopedDaemonRuntimeFor(l.RepoDir) {
+		return false
+	}
+	return filepath.Clean(l.SocketPath) == filepath.Clean(config.ScopedDaemonSocketPath(l.RepoDir)) &&
+		filepath.Clean(l.LockPath) == filepath.Clean(config.ScopedDaemonLockPath(l.RepoDir))
+}
+
+func (l *Launcher) scopedLifecycleLockPath() string {
+	if l != nil && config.UseScopedDaemonRuntimeFor(l.RepoDir) {
+		runtimeDir := config.ScopedDaemonRuntimeDir(l.RepoDir)
+		return filepath.Join(filepath.Dir(runtimeDir), filepath.Base(runtimeDir)+".lifecycle.lock")
+	}
+	return l.LockPath + ".start"
 }
 
 // Replace attempts to stop an existing daemon process, then starts daemon.
@@ -625,7 +789,7 @@ func openDaemonLog(path string) (io.WriteCloser, error) {
 }
 
 func (l *Launcher) acquireStartLock(ctx context.Context) (func(), bool, error) {
-	startLockPath := l.LockPath + ".start"
+	startLockPath := l.scopedLifecycleLockPath()
 	if err := os.MkdirAll(filepath.Dir(startLockPath), 0o755); err != nil {
 		return nil, false, fmt.Errorf("create start lock dir: %w", err)
 	}
@@ -646,7 +810,7 @@ func (l *Launcher) acquireStartLock(ctx context.Context) (func(), bool, error) {
 		// Another client currently owns startup. If daemon socket becomes ready
 		// while we are queued on the lock, return early rather than timing out
 		// waiting for lock ownership we no longer need.
-		if err := l.waitForSocketReadyWithin(100 * time.Millisecond); err == nil {
+		if !l.ownsCanonicalScopedRuntime() && l.waitForSocketReadyWithin(100*time.Millisecond) == nil {
 			_ = f.Close()
 			return func() {}, false, nil
 		}

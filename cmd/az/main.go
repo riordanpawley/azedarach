@@ -480,6 +480,12 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "validation":
+		if err := runValidationCommand(cfg, commandArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
 	case "dev":
 		if err := runDevCommand(cfg, commandArgs); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)

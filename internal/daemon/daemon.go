@@ -731,6 +731,18 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 			endCommandSpan(nil)
 		}
 	}()
+	if req.ProtocolVersion != protocol.CurrentVersion {
+		code := protocol.ErrorCodeUpgradeRequired
+		if req.ProtocolVersion > protocol.CurrentVersion {
+			code = protocol.ErrorCodeIncompatible
+		}
+		message := fmt.Sprintf(
+			"client protocol %d does not match daemon protocol %d; the az command may be a stale long-lived client after an installed control-link switch: re-enter the shell through the stable installed az control link and restart any session that retained the older client identity",
+			req.ProtocolVersion,
+			protocol.CurrentVersion,
+		)
+		return d.errorResponse(req, code, message), nil
+	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Log(
 			ctx,
@@ -819,6 +831,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleHookLogList(ctx, req)
 	case protocol.CommandRuntimeSignalIngest:
 		return d.handleRuntimeSignalIngest(ctx, req)
+	case protocol.CommandValidationAcquire, protocol.CommandValidationHeartbeat, protocol.CommandValidationNested, protocol.CommandValidationFinish, protocol.CommandValidationStatus:
+		return d.handleValidationCommand(ctx, req)
 	case protocol.CommandUIOpenTaskWorkspace, protocol.CommandUIOpenTaskDrillDown:
 		return d.handleUIIssueCommand(ctx, req)
 	case protocol.CommandUIStateGet:

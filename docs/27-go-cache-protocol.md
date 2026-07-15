@@ -24,13 +24,38 @@ cleanup on the same owned bytes.
 
 ## Validation and limits
 
-`cmd/test-timing` and `cmd/go-cache run` take the repository-family exclusive
-cache lock for the full managed validation. Maintenance takes the same lock, so
+The outer `scripts/with-machine-validation-lease` wrapper is a thin client of
+the daemon-owned repository-family validation queue. Aggregate work is
+exclusive; shared focused validators may run concurrently until an aggregate
+waiter reaches the head of the fair durable queue; explicitly safe work may run
+beside an aggregate owner. The wrapper acquires before `go run` compilation,
+heartbeats the durable request, and nested managed commands join its request.
+The safe lane is bounded to daemon-recognized non-compiling command/profile
+pairs; callers cannot relabel focused or aggregate Go work as safe.
+
+The cache lock has a narrower role. Validators hold it shared while cache
+maintenance holds it exclusively, so
 `go clean -cache` never runs concurrently with managed validation. Reports use schema
-`azedarach.test_timing_report.v2` and distinguish test-result cache policy from
+`azedarach.test_timing_report.v3` and distinguish test-result cache policy from
 the retained build cache. The `build_cache` object includes namespace, path,
 policy, bytes/files before and after, deltas, total family bytes, configured
 limits, and the resulting decision.
+
+The daemon's operations database durably retains owners, waiters, request
+identity, class/profile/command, source revision, heartbeat expiry, outcome,
+and machine-load evidence. `just validation-status` and
+`just validation-watch` expose this projection without compiling Go code.
+Project orchestration snapshots also include the same validation-capacity
+projection so active owners and waiters are visible beside worker capacity.
+Expired heartbeats terminalize stale owners and transactionally wake the next
+eligible waiter after process death or daemon restart.
+
+The protocol-49 rollout is a one-generation bootstrap: the integration owner
+must keep the pre-existing isolated canonical gate, validate the candidate
+without invoking the new outer wrapper, integrate and install that managed
+generation, then use the daemon queue for every later gate. Internal
+`*_unleased` recipes are only nested implementation details after rollout and
+must never be started as independent validation commands.
 
 Defaults are a 10 GiB soft warning and a 28 GiB hard refusal. Configure exact
 byte values with `AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES` and
