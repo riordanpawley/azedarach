@@ -525,6 +525,7 @@ type Client struct {
 	projectionDeltaChecksumRepairHook  func(stage string) error
 	projectionDeltaReadHook            func()
 	decisionOutboxMigrationFailureHook func(stage string) error
+	decisionIdempotencyFailureHook     func(stage string) error
 	requireExistingDB                  bool
 	interactionMu                      sync.RWMutex
 	interactionCache                   map[string]domain.InteractionRequest

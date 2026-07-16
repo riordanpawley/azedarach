@@ -75,6 +75,14 @@ func TestDecisionStore_RecordIsIdempotentForStableKey(t *testing.T) {
 	params.Rationale = "different payload"
 	_, err = client.RecordDecision(ctx, params)
 	require.ErrorIs(t, err, domain.ErrConflict)
+	params.Rationale = "portable"
+	params.Title = "Changed title"
+	_, err = client.RecordDecision(ctx, params)
+	require.ErrorIs(t, err, domain.ErrConflict)
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM decisions`).Scan(&decisions))
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM decision_audit_log WHERE entity_type = ?`, decisionEntityKind).Scan(&audits))
+	assert.Equal(t, 1, decisions)
+	assert.Equal(t, 1, audits)
 }
 
 func TestDecisionStore_RecordAndLinks(t *testing.T) {

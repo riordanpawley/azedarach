@@ -29,11 +29,13 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var beforeIssues, beforeCustom int
+			var beforeIssues, beforeCustom, beforeDecisions, beforeDecisionAudits int
 			if err = beforeDB.QueryRow(`SELECT COUNT(*) FROM issues`).Scan(&beforeIssues); err != nil {
 				t.Fatal(err)
 			}
 			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM board_views WHERE built_in=0`).Scan(&beforeCustom)
+			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM decisions`).Scan(&beforeDecisions)
+			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM decision_audit_log`).Scan(&beforeDecisionAudits)
 			_ = beforeDB.Close()
 
 			client := NewClientAtPath(path, slog.Default())
@@ -50,6 +52,9 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = validateProjectionDeltaAuthoritySchema(ctx, db); err != nil {
 				t.Fatal(err)
 			}
+			if err = validateDecisionIdempotencySchema(ctx, db); err != nil {
+				t.Fatal(err)
+			}
 			var checksum string
 			var ledgerRows int
 			if err = db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, projectionDeltaAuthorityMigrationID, projectionDeltaAuthorityChecksum).Scan(&ledgerRows); err != nil || ledgerRows != 1 {
@@ -60,6 +65,9 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			}
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, decisionPropagationOutboxMigrationID).Scan(&checksum); err != nil || checksum != "a12c44ba35156d71fbcd88a9d78e4cdb234e75e7e4aef5f896c8b1182ada858d" {
 				t.Fatalf("decision outbox checksum=%q err=%v", checksum, err)
+			}
+			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, decisionIdempotencyMigrationID).Scan(&checksum); err != nil || checksum != "86d5400fe33bbc19e7e848bc232335809f76d85e4d45a6e45f6bc7ff77547f47" {
+				t.Fatalf("decision idempotency checksum=%q err=%v", checksum, err)
 			}
 			projectIDs := []string{"default"}
 			if rows, queryErr := db.Query(`SELECT DISTINCT project_id FROM board_views`); queryErr == nil {
@@ -84,15 +92,21 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if _, err = client.ExportProjection(ctx, projectIDs[0]); err != nil {
 				t.Fatal(err)
 			}
-			var afterIssues, afterCustom int
+			var afterIssues, afterCustom, afterDecisions, afterDecisionAudits int
 			if err = db.QueryRow(`SELECT COUNT(*) FROM issues`).Scan(&afterIssues); err != nil {
 				t.Fatal(err)
 			}
 			if err = db.QueryRow(`SELECT COUNT(*) FROM board_views WHERE built_in=0`).Scan(&afterCustom); err != nil {
 				t.Fatal(err)
 			}
-			if beforeIssues != afterIssues || beforeCustom != afterCustom {
-				t.Fatalf("row preservation issues=%d/%d custom_views=%d/%d", beforeIssues, afterIssues, beforeCustom, afterCustom)
+			if err = db.QueryRow(`SELECT COUNT(*) FROM decisions`).Scan(&afterDecisions); err != nil {
+				t.Fatal(err)
+			}
+			if err = db.QueryRow(`SELECT COUNT(*) FROM decision_audit_log`).Scan(&afterDecisionAudits); err != nil {
+				t.Fatal(err)
+			}
+			if beforeIssues != afterIssues || beforeCustom != afterCustom || beforeDecisions != afterDecisions || beforeDecisionAudits != afterDecisionAudits {
+				t.Fatalf("row preservation issues=%d/%d custom_views=%d/%d decisions=%d/%d decision_audits=%d/%d", beforeIssues, afterIssues, beforeCustom, afterCustom, beforeDecisions, afterDecisions, beforeDecisionAudits, afterDecisionAudits)
 			}
 			if err = client.CloseDB(); err != nil {
 				t.Fatal(err)
@@ -107,6 +121,9 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			}
 			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, projectionDeltaAuthorityMigrationID, projectionDeltaAuthorityChecksum).Scan(&ledgerRows); err != nil || ledgerRows != 1 {
 				t.Fatalf("projection delta ledger rows after reopen=%d err=%v", ledgerRows, err)
+			}
+			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, decisionIdempotencyMigrationID, "86d5400fe33bbc19e7e848bc232335809f76d85e4d45a6e45f6bc7ff77547f47").Scan(&ledgerRows); err != nil || ledgerRows != 1 {
+				t.Fatalf("decision idempotency ledger rows after reopen=%d err=%v", ledgerRows, err)
 			}
 			_ = reopened.CloseDB()
 		})

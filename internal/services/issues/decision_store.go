@@ -206,20 +206,21 @@ func (c *Client) recordDecisionLocked(ctx context.Context, params RecordDecision
 	localID := newDecisionLocalID(normalized.Title, normalized.IdempotencyKey)
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO decisions (
-			local_id, title, rationale, context, consequences, created_at, updated_at, deleted_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+			local_id, title, rationale, context, consequences, idempotency_key, created_at, updated_at, deleted_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
 	`,
 		localID,
 		normalized.Title,
 		nullableString(normalized.Rationale),
 		nullableString(normalized.Context),
 		nullableString(normalized.Consequences),
+		nullableString(normalized.IdempotencyKey),
 		formatTimestamp(now),
 		formatTimestamp(now),
 	)
 	if err != nil {
 		if errors.Is(classifySQLiteConstraint(err), domain.ErrConflict) && normalized.IdempotencyKey != "" {
-			existing, lookupErr := c.lookupDecisionByLocalID(ctx, tx, localID, false)
+			existing, lookupErr := c.lookupDecisionByIdempotencyKey(ctx, tx, normalized.IdempotencyKey)
 			if lookupErr == nil && decisionMatchesRecordParams(existing.Decision, normalized) {
 				return existing.Decision, nil
 			}
@@ -244,6 +245,19 @@ func (c *Client) recordDecisionLocked(ctx context.Context, params RecordDecision
 	}
 	tx = nil
 	return decision, nil
+}
+
+func (c *Client) lookupDecisionByIdempotencyKey(ctx context.Context, queryer sqlRequirementQueryer, key string) (decisionRecord, error) {
+	row := queryer.QueryRowContext(ctx, `
+		SELECT id, local_id, title, COALESCE(rationale, ''), COALESCE(context, ''), COALESCE(consequences, ''), created_at, updated_at, deleted_at
+		FROM decisions
+		WHERE idempotency_key = ? AND deleted_at IS NULL
+	`, key)
+	record, err := scanDecisionRecord(row)
+	if err != nil {
+		return decisionRecord{}, err
+	}
+	return record, nil
 }
 
 func newDecisionLocalID(title, idempotencyKey string) string {
