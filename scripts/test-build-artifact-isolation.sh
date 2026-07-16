@@ -430,26 +430,96 @@ env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
   AZEDARACH_VALIDATION_PS_BIN="$fixture/fake-bin/validation-ps-empty" \
   AZEDARACH_TICKET_ID=aggregate-holder \
   "$fixture/scripts/with-machine-validation-lease" --class aggregate --profile merge-gate -- \
-  sh -c 'touch "$1"; sleep 30' sh "$aggregate_ready" &
+  sh -c 'touch "$1"; sleep 2' sh "$aggregate_ready" \
+  >"$fixture/aggregate-holder.stdout" 2>"$fixture/aggregate-holder.stderr" &
 aggregate_holder_pid=$!
 for _ in {1..300}; do
   [[ -e "$aggregate_ready" ]] && break
   sleep 0.02
 done
 test -e "$aggregate_ready"
-if AZEDARACH_PRODUCTION_ADMISSION_WAIT_SECONDS=1 PATH="$fixture/fake-bin:$PATH" \
+AZEDARACH_PRODUCTION_ADMISSION_WAIT_SECONDS=1 PATH="$fixture/fake-bin:$PATH" \
   "$fixture/scripts/with-production-install-admission" -- true \
-  >"$fixture/production-admission.stdout" 2>"$fixture/production-admission.stderr"; then
-  echo "production admission unexpectedly overlapped an aggregate validation" >&2
+  >"$fixture/production-admission.stdout" 2>"$fixture/production-admission.stderr"
+kill -0 "$aggregate_holder_pid"
+test ! -s "$fixture/production-admission.stderr"
+test -s "$fixture/.git/azedarach-production-admission/production-epoch"
+if wait "$aggregate_holder_pid"; then
+  echo "aggregate validation remained canonical after a production install overlapped it" >&2
   exit 1
+else
+  test "$?" -eq 74
 fi
-test "$(grep -c "Production install admission is waiting" "$fixture/production-admission.stderr")" -eq 1
-grep -q "aggregate validation merge-gate" "$fixture/production-admission.stderr"
-grep -q "Timed out waiting for production install admission after 1s" "$fixture/production-admission.stderr"
-kill "$aggregate_holder_pid"
-wait "$aggregate_holder_pid" 2>/dev/null || true
+grep -q "validation overlapped a production install and is noncanonical" \
+  "$fixture/aggregate-holder.stderr"
 AZEDARACH_PRODUCTION_ADMISSION_WAIT_SECONDS=1 PATH="$fixture/fake-bin:$PATH" \
   "$fixture/scripts/with-production-install-admission" -- true
+
+install_ready="$fixture/production-install-active.ready"
+install_release="$fixture/production-install-active.release"
+PATH="$fixture/fake-bin:$PATH" \
+  "$fixture/scripts/with-production-install-admission" -- \
+  sh -c 'touch "$1"; while [ ! -e "$2" ]; do sleep 0.02; done' sh \
+    "$install_ready" "$install_release" &
+install_admission_pid=$!
+for _ in {1..300}; do
+  [[ -e "$install_ready" ]] && break
+  sleep 0.02
+done
+test -e "$install_ready"
+env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
+  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  AZEDARACH_VALIDATION_PS_BIN="$fixture/fake-bin/validation-ps-empty" \
+  AZEDARACH_VALIDATION_PRODUCTION_WAIT_SECONDS=5 \
+  AZEDARACH_TICKET_ID=production-waiter \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --profile production-waiter -- \
+  touch "$fixture/production-waiter.started" \
+  >"$fixture/production-waiter.stdout" 2>"$fixture/production-waiter.stderr" &
+production_waiter_pid=$!
+for _ in {1..300}; do
+  grep -q "Validation is waiting for production install admission" \
+    "$fixture/production-waiter.stderr" 2>/dev/null && break
+  sleep 0.02
+done
+test ! -e "$fixture/production-waiter.started"
+grep -q "Validation is waiting for production install admission" \
+  "$fixture/production-waiter.stderr"
+touch "$install_release"
+wait "$install_admission_pid"
+wait "$production_waiter_pid"
+test -e "$fixture/production-waiter.started"
+
+# A production owner may become visible just before it publishes its epoch.
+# The waiting validator must baseline the epoch after the owner exits so work
+# that starts strictly after installation remains canonical.
+rm -f "$fixture/.git/azedarach-production-admission/production-epoch"
+mkdir "$fixture/.git/azedarach-production-admission/production"
+printf '%s\n' "$$" >"$fixture/.git/azedarach-production-admission/production/pid"
+printf '%s\n' "epoch-publication-race" \
+  >"$fixture/.git/azedarach-production-admission/production/reason"
+env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
+  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  AZEDARACH_VALIDATION_PS_BIN="$fixture/fake-bin/validation-ps-empty" \
+  AZEDARACH_VALIDATION_PRODUCTION_WAIT_SECONDS=5 \
+  AZEDARACH_TICKET_ID=epoch-publication-race \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --profile epoch-publication-race -- \
+  touch "$fixture/epoch-publication-race.started" \
+  >"$fixture/epoch-publication-race.stdout" 2>"$fixture/epoch-publication-race.stderr" &
+epoch_waiter_pid=$!
+for _ in {1..300}; do
+  grep -q "Validation is waiting for production install admission" \
+    "$fixture/epoch-publication-race.stderr" 2>/dev/null && break
+  sleep 0.02
+done
+test ! -e "$fixture/epoch-publication-race.started"
+printf '%s\n' "epoch-published-after-owner" \
+  >"$fixture/.git/azedarach-production-admission/production-epoch"
+rm -rf "$fixture/.git/azedarach-production-admission/production"
+wait "$epoch_waiter_pid"
+test -e "$fixture/epoch-publication-race.started"
+! grep -q "noncanonical" "$fixture/epoch-publication-race.stderr"
 
 AZEDARACH_GO_CACHE_ROOT= AZEDARACH_VALIDATION_LEASE_ID= AZEDARACH_VALIDATION_LEASE_ROOT= \
   PATH="$fixture/fake-bin:$PATH" \
