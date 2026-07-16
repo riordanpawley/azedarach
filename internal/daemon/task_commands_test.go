@@ -3777,7 +3777,7 @@ func TestTaskClosePreflightBlocksFiveOpenDescendantsBeforeIntegration(t *testing
 	}
 }
 
-func TestTaskCloseCanAutoCloseCleanUnresolvedChildren(t *testing.T) {
+func TestTaskCloseRejectsCleanUnresolvedChildrenWithoutAutoTerminalizing(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-task-close-clean-children"
 	repoDir := t.TempDir()
@@ -3822,23 +3822,16 @@ func TestTaskCloseCanAutoCloseCleanUnresolvedChildren(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleTaskClose error: %v", err)
 	}
-	if !resp.OK {
-		t.Fatalf("handleTaskClose response = %+v", resp)
-	}
-	var result taskCloseResult
-	if err := json.Unmarshal(resp.Body, &result); err != nil {
-		t.Fatalf("unmarshal close response: %v", err)
-	}
-	if !slices.Contains(result.AutoClosedChildren, childID) {
-		t.Fatalf("auto closed children = %v, want %s", result.AutoClosedChildren, childID)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") {
+		t.Fatalf("handleTaskClose response = %+v, want unresolved child rejection", resp)
 	}
 	for _, issueID := range []string{parentID, childID} {
 		task, err := issuesClient.GetWithRuntime(ctx, projectID, issueID)
 		if err != nil {
 			t.Fatalf("get %s after close: %v", issueID, err)
 		}
-		if task.Status != domain.StatusDone {
-			t.Fatalf("%s status = %s, want %s", issueID, task.Status, domain.StatusDone)
+		if task.Status == domain.StatusDone {
+			t.Fatalf("%s status = %s, want nonterminal unchanged state", issueID, task.Status)
 		}
 	}
 }
@@ -8917,16 +8910,15 @@ func TestTaskGraphReadinessRefreshesNestedRootLifecycleAcrossDaemonClients(t *te
 		t.Fatalf("before nested roots = %+v, want open root startable", before.NestedRoots)
 	}
 	backlog := domain.IssueWorkflowBacklog
-	if err := writer.UpdateDetails(ctx, nestedID, issues.UpdateTaskParams{Title: "ADA", Type: domain.TypeEpic, Priority: domain.P2, Lifecycle: &backlog}); err != nil {
-		t.Fatal(err)
+	if err := writer.UpdateDetails(ctx, nestedID, issues.UpdateTaskParams{Title: "ADA", Type: domain.TypeEpic, Priority: domain.P2, Lifecycle: &backlog}); err == nil || !strings.Contains(err.Error(), "cannot regress to backlog") {
+		t.Fatalf("update nested root = %v, want ancestor lifecycle floor rejection", err)
 	}
-	waitForProjectMaterializerRevision(t, d, "proj", 1)
 	after, err := d.taskGraphReadiness(ctx, "proj", rootID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after.NestedRoots) != 1 || after.NestedRoots[0].Status != "not_counting_capacity" || !slices.Contains(after.NestedRoots[0].ExclusionReasons, "lifecycle-backlog") {
-		t.Fatalf("after nested roots = %+v, want refreshed lifecycle-backlog exclusion", after.NestedRoots)
+	if len(after.NestedRoots) != 1 || after.NestedRoots[0].Status != "startable" {
+		t.Fatalf("after nested roots = %+v, want invariant-preserved startable root", after.NestedRoots)
 	}
 }
 
@@ -13295,8 +13287,8 @@ func TestTaskUpdateStatusRejectsInReviewWithUnreadyChildren(t *testing.T) {
 	}
 
 	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, false)
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "child issues are not review-ready") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") || !strings.Contains(resp.Error.Message, "--cascade-children") {
-		t.Fatalf("task.update_status response = %+v, want child readiness guard", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "all live descendants must be terminal") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") {
+		t.Fatalf("task.update_status response = %+v, want terminal descendant guard", resp)
 	}
 	parent, err := issuesClient.GetWithRuntime(ctx, projectID, parentID)
 	if err != nil {
@@ -13336,8 +13328,8 @@ func TestTaskUpdateStatusRejectsInReviewWithBusyReviewChild(t *testing.T) {
 	})
 
 	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, false)
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "child issues are not review-ready") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") {
-		t.Fatalf("task.update_status response = %+v, want busy in-review child guard", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "all live descendants must be terminal") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") {
+		t.Fatalf("task.update_status response = %+v, want terminal descendant guard", resp)
 	}
 	parent, err := issuesClient.GetWithRuntime(ctx, projectID, parentID)
 	if err != nil {
