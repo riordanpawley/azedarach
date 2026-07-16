@@ -231,7 +231,7 @@ func (f scopedValidationFixture) wrapperCommand(payload ...string) *exec.Cmd {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	args := []string{filepath.Join(repoRoot, "scripts", "with-machine-validation-lease"), "--class", "shared", "--profile", "scoped-cleanup-test", "--"}
+	args := []string{filepath.Join(repoRoot, "scripts", "with-machine-validation-lease"), "--class", "shared", "--purpose", "capacity", "--profile", "scoped-cleanup-test", "--"}
 	args = append(args, payload...)
 	cmd := exec.Command("perl", args...)
 	cmd.Dir = repoRoot
@@ -304,10 +304,7 @@ func (f scopedValidationFixture) startDaemon() int {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		f.t.Fatalf("start fixture daemon: %v: %s", err, output)
 	}
-	if err := waitForFile(f.readyPath, 5*time.Second); err != nil {
-		f.t.Fatal(err)
-	}
-	return readPID(f.t, f.readyPath)
+	return waitForPID(f.t, f.readyPath, 5*time.Second)
 }
 
 func startScopedValidationTestDaemon() error {
@@ -499,6 +496,23 @@ func readPID(t *testing.T, path string) int {
 		t.Fatal(err)
 	}
 	return pid
+}
+
+func waitForPID(t *testing.T, path string, timeout time.Duration) int {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
+			if parseErr == nil && pid > 0 {
+				return pid
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for PID in %s", path)
+	return 0
 }
 
 func processExitCode(err error) int {

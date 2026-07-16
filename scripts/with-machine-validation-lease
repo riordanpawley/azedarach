@@ -140,6 +140,40 @@ die "unsupported validation scope $scope\n" unless $scope eq 'repository' || $sc
 die "unsupported validation purpose $purpose\n" unless $purpose =~ /^(?:capacity|development|push_gate|review_evidence)$/;
 die "repository-scoped validation must not identify a ticket\n" if $scope eq 'repository' && $issue ne '';
 die "ticket-scoped validation requires AZEDARACH_TICKET_ID\n" if $scope eq 'ticket' && $issue eq '';
+
+# Older worktrees may still invoke this wrapper for ordinary development.
+# Preserve their command and scoped-daemon cleanup behavior without touching
+# the daemon validation queue.
+if ($purpose eq 'development') {
+    my $payload = fork();
+    die "fork unleased development command: $!\n" unless defined $payload;
+    if ($payload == 0) {
+        setpgid(0, 0);
+        delete @ENV{qw(
+            AZEDARACH_VALIDATION_CONTROL_AZ_BIN
+            AZEDARACH_VALIDATION_AZ_BIN
+            AZEDARACH_VALIDATION_CLEANUP_AZ_BIN
+        )};
+        exec @ARGV or die "exec development command $ARGV[0]: $!\n";
+    }
+    eval { setpgid($payload, $payload) };
+    my $forward = sub { my ($signal) = @_; kill $signal, -$payload if $payload; };
+    local $SIG{TERM} = sub { $forward->('TERM') };
+    local $SIG{INT} = sub { $forward->('INT') };
+    local $SIG{HUP} = sub { $forward->('HUP') };
+    my $payload_status = 0;
+    while (1) {
+        my $waited = waitpid($payload, WNOHANG);
+        if ($waited == $payload) {
+            $payload_status = $?;
+            last;
+        }
+        sleep 0.1;
+    }
+    my $exit_code = wait_status_code($payload_status);
+    $exit_code = 78 if !$stop_scoped_daemon->() && $exit_code == 0;
+    exit $exit_code;
+}
 my $revision = capture($git, 'rev-parse', 'HEAD');
 $revision =~ s/\s+\z//;
 die "resolve validation source revision\n" unless $revision;
@@ -289,9 +323,9 @@ if ($heartbeat == 0) {
     exit 0;
 }
 
-# Aggregate admission waits for already-running unleased Go work to quiesce.
-# Work that begins after the gate starts is captured in the terminal evidence.
-if ($class eq 'aggregate') {
+# Controlled timing capacity waits for already-running unleased Go work to
+# quiesce. Publication gates intentionally start immediately.
+if ($purpose eq 'capacity' && $class eq 'aggregate') {
     my $clear_samples = 0;
     while ($clear_samples < 4) {
         my $external = external_go_processes($wrapper_pid);
@@ -384,7 +418,7 @@ while (1) {
             authorize_nested($broker_parent, $1, $control_az, $request_id, $lease_token);
         }
     }
-    if ($class eq 'aggregate' && time() >= $next_sample) {
+    if ($purpose eq 'capacity' && $class eq 'aggregate' && time() >= $next_sample) {
         my $external = external_go_processes($wrapper_pid);
         $max_external_go = $external if $external > $max_external_go;
         $overlap_detected ||= $external > 0;
@@ -439,7 +473,7 @@ merge_whole_gate_evidence($evidence_file, {
     payload_exit_code => $payload_exit_code,
     production_install_overlapped => $production_install_overlapped ? JSON::PP::true : JSON::PP::false,
 });
-if ($class eq 'aggregate' && $overlap_detected && $exit_code == 0) {
+if ($purpose eq 'capacity' && $class eq 'aggregate' && $overlap_detected && $exit_code == 0) {
     warn "aggregate validation overlapped $max_external_go unleased Go process(es)\n";
     $exit_code = 75;
 }

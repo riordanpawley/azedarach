@@ -356,7 +356,10 @@ func TestRuntimeProjectionWriterCoalescesProjectionBurstsByIssue(t *testing.T) {
 			".": runtimeStateStore,
 		},
 	}
-	d.runtimeProjectionCoalescer = newRuntimeProjectionEventCoalescer(d, 100*time.Millisecond)
+	// Leave enough headroom for the SQLite persistence performed before each
+	// schedule call when the cold suite is running packages concurrently. The
+	// test is about debounce semantics, not a 100 ms latency budget.
+	d.runtimeProjectionCoalescer = newRuntimeProjectionEventCoalescer(d, 500*time.Millisecond)
 	defer d.runtimeProjectionCoalescer.Close()
 	writer := newRuntimeProjectionWriter(d)
 

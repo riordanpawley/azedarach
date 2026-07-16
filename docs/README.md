@@ -71,10 +71,10 @@ This directory primarily contains **developer/internal documentation**.
 - `orchestration.claim_start`: `hybrid` (durable ownership/start-attempt projection plus daemon session-start operation/runtime compensation).
 - `orchestration.project_loop`: `projection` (durable issue-observation cursor and loop checkpoint refreshed before deterministic non-blocking start/review action replay; queued reviews remain visible without globally stalling unrelated starts).
 - `projection.delta_stream`: `projection` (durable project delta ledger and version history; cursor replay and snapshot reads never reconcile or poll tmux).
-- `validation.machine_capacity`: `projection` (durable daemon-owned aggregate/shared/safe validation queue with heartbeat expiry and transactionally refreshed admission state).
+- `validation.machine_capacity`: `projection` (durable daemon-owned publication/timing-capacity projection; ordinary worktree validation bypasses admission, publication starts immediately, and only controlled timing capacity is overlap-sensitive).
 - `task.review_handoff`: `projection` (durable issue v2 lifecycle/review projection + revisioned material decision change/acknowledgement observations + session activity projection; active issue self-handoff remains allowed only after material decisions are current).
 - `decision.propagation_delivery`: `hybrid` (atomic decision audit/outbox and per-issue materialization checkpoints reconciled with live tmux delivery until an authoritative exact-revision acknowledgement; superseded and withdrawn revisions are not delivered).
-- `task.integration_readiness` and `task.context_risk_closeout`: `projection` (durable issue projection + mailbox/observation evidence; integration readiness additionally requires completed non-overlapping aggregate proof bound to the clean exact candidate revision).
+- `task.integration_readiness` and `task.context_risk_closeout`: `projection` (durable issue projection + mailbox/observation evidence; integration readiness additionally requires completed publication proof bound to the clean exact candidate revision, independent of concurrent development load).
 - `task.merge_base_target`: `projection` (durable issue graph + worktree projection; explicit root-to-base requests also require issue-scoped `human.input_provided` acceptance evidence).
 - `decision.markdown_transfer_target`: `hybrid` (refreshed durable worktree ownership plus live Git worktree path and HEAD revision).
 - `task.follow_on_merge_candidates`: `projection` (durable issue graph + worktree projection).
@@ -86,6 +86,7 @@ This directory primarily contains **developer/internal documentation**.
 - `cross_project.view_projection`: `projection` (the global daemon incrementally consumes verified per-project issue deltas and independently keyed current runtime/fact materializations into the user database, then evaluates typed cross-project views there; full export is limited to bootstrap, explicit rebuild, and isolated recovery, while stale and unavailable projects remain explicit).
 - `orchestration.scope_identity`: `projection` (durable project plus typed rooted/project scope; startup environment is not authority).
 - `orchestration.scope_singleton`: `hybrid` (refreshed durable scope lease compared with live tmux runtime).
+- `orchestration.rooted_bootstrap_delivery`: `hybrid` (one exclusive rooted-orchestrator desired-session product plus refreshed durable accepted prompt acknowledgement compared with the live tmux marker; exact-scope startup retires legacy worker intent and restart replacement re-acknowledges before success).
 - `orchestration.project_completion`: `hybrid` (refreshed issue/review/interaction/session projections compared with live tmux runtime).
 - `orchestration.parent_continuation`: `hybrid` (durable rooted lease/cursor + refreshed direct nested-root, interaction, completion, and session projections compared with live tmux before a wake prompt is delivered).
 - `runtime.reconcile` includes `invariant_sources` debug output reflecting the active source-policy matrix.

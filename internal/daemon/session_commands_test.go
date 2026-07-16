@@ -947,6 +947,9 @@ func TestSessionRestartAllRestartsBusySessionsByDefault(t *testing.T) {
 		if got := tmuxRunner.env[sessionID]["PATH"]; got != "" {
 			t.Fatalf("restart session %s injected PATH = %q", sessionID, got)
 		}
+		if got := tmuxRunner.env[sessionID][rootedOrchestratorBootstrapNonceEnvironment]; got != "" {
+			t.Fatalf("ordinary worker restart session %s gained rooted bootstrap nonce %q", sessionID, got)
+		}
 	}
 	if strings.Contains(string(artifactBody), managedDir) || strings.Contains(string(artifactBody), "export PATH=") {
 		t.Fatalf("resume artifact injects managed PATH: %q", artifactBody)
@@ -1405,32 +1408,33 @@ func TestSessionRestartActiveIntentOnlyForRunningWork(t *testing.T) {
 }
 
 type sessionStartTmuxRunner struct {
-	sessions             map[string]bool
-	sessionsWithoutPanes map[string]bool
-	panes                map[string][]string
-	windows              map[string]map[string]bool
-	commands             [][]string
-	inputPayloads        []string
-	env                  map[string]map[string]string
-	sendKeysCalls        int
-	sendKeysTargets      []string
-	sendKeysPayloads     []string
-	newSessionErr        error
-	onNewSession         func(string)
-	maxNewSessionCommand int
-	launchScriptPaths    map[string]string
-	launchScriptContents map[string]string
-	launchScriptModes    map[string]os.FileMode
-	launchPromptPaths    map[string]string
-	launchPromptContents map[string]string
-	launchPromptModes    map[string]os.FileMode
-	launchArtifactModes  map[string]os.FileMode
-	sendKeysErr          error
-	sendKeysErrOnCall    int
-	captureOutput        string
+	sessions              map[string]bool
+	sessionsWithoutPanes  map[string]bool
+	panes                 map[string][]string
+	windows               map[string]map[string]bool
+	commands              [][]string
+	inputPayloads         []string
+	handoffPromptContents []string
+	env                   map[string]map[string]string
+	sendKeysCalls         int
+	sendKeysTargets       []string
+	sendKeysPayloads      []string
+	newSessionErr         error
+	onNewSession          func(string)
+	maxNewSessionCommand  int
+	launchScriptPaths     map[string]string
+	launchScriptContents  map[string]string
+	launchScriptModes     map[string]os.FileMode
+	launchPromptPaths     map[string]string
+	launchPromptContents  map[string]string
+	launchPromptModes     map[string]os.FileMode
+	launchArtifactModes   map[string]os.FileMode
+	sendKeysErr           error
+	sendKeysErrOnCall     int
+	captureOutput         string
 	currentCommand       string
-	onSendKeys           func(string, string)
-	onRunWithInput       func(context.Context, string, []string) (string, error)
+	onSendKeys            func(string, string)
+	onRunWithInput        func(context.Context, string, []string) (string, error)
 }
 
 func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
@@ -1530,10 +1534,43 @@ func tmuxCommandEnvironmentValue(command []string, key string) (string, bool) {
 func (r *sessionStartTmuxRunner) RunWithInput(ctx context.Context, input string, args ...string) (string, error) {
 	r.commands = append(r.commands, append([]string(nil), args...))
 	r.inputPayloads = append(r.inputPayloads, input)
+	const promptPrefix = "Read and follow the complete worker instructions in "
+	const promptSuffix = ". Delete that file immediately after reading it."
+	if strings.HasPrefix(input, promptPrefix) && strings.HasSuffix(input, promptSuffix) {
+		path := strings.TrimSuffix(strings.TrimPrefix(input, promptPrefix), promptSuffix)
+		if prompt, err := os.ReadFile(filepath.FromSlash(path)); err == nil {
+			r.handoffPromptContents = append(r.handoffPromptContents, string(prompt))
+		}
+		_ = os.Remove(filepath.FromSlash(path))
+	}
 	if r.onRunWithInput != nil {
 		return r.onRunWithInput(ctx, input, args)
 	}
 	return "", nil
+}
+
+func TestWaitForSessionPromptHandoffConsumedRejectsPartialDelivery(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "launch.prompt")
+	if err := os.WriteFile(path, []byte("complete rooted role"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := waitForSessionPromptHandoffConsumed(ctx, sessionPromptHandoff{PromptPath: path})
+	if err == nil || !strings.Contains(err.Error(), "was not consumed") {
+		t.Fatalf("wait error = %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("partial handoff was removed: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	consumedCtx, consumedCancel := context.WithCancel(context.Background())
+	consumedCancel()
+	if err := waitForSessionPromptHandoffConsumed(consumedCtx, sessionPromptHandoff{PromptPath: path}); err != nil {
+		t.Fatalf("consumed handoff: %v", err)
+	}
 }
 
 func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string, error) {
@@ -1613,6 +1650,7 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 		}
 		delete(r.sessions, args[2])
 		delete(r.windows, args[2])
+		delete(r.env, args[2])
 		return "", nil
 	case "list-windows":
 		if len(args) < 3 {
@@ -1660,6 +1698,15 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 		}
 		r.env[session][key] = value
 		return "", nil
+	case "show-environment":
+		if len(args) < 3 {
+			return "", errors.New("missing show-environment args")
+		}
+		lines := make([]string, 0, len(r.env[args[2]]))
+		for key, value := range r.env[args[2]] {
+			lines = append(lines, key+"="+value)
+		}
+		return strings.Join(lines, "\n"), nil
 	case "list-sessions":
 		names := make([]string, 0, len(r.sessions))
 		for name := range r.sessions {
@@ -2458,17 +2505,22 @@ func TestSessionStartRetriesTransientWorktreeProjectionWriterContention(t *testi
 		t.Fatalf("open concurrent runtime writer: %v", err)
 	}
 	t.Cleanup(func() { _ = lockDB.Close() })
-	if _, err := lockDB.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+	lockConn, err := lockDB.Conn(ctx)
+	if err != nil {
+		t.Fatalf("reserve concurrent runtime writer connection: %v", err)
+	}
+	t.Cleanup(func() { _ = lockConn.Close() })
+	if _, err := lockConn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
 		t.Fatalf("begin concurrent runtime write: %v", err)
 	}
 	lockReleaseResult := make(chan error, 1)
 	go func() {
 		time.Sleep(250 * time.Millisecond)
-		_, releaseErr := lockDB.ExecContext(context.Background(), `COMMIT`)
+		_, releaseErr := lockConn.ExecContext(context.Background(), `COMMIT`)
 		lockReleaseResult <- releaseErr
 	}()
 	t.Cleanup(func() {
-		_, _ = lockDB.ExecContext(context.Background(), `ROLLBACK`)
+		_, _ = lockConn.ExecContext(context.Background(), `ROLLBACK`)
 	})
 
 	d := &Daemon{

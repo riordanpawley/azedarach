@@ -345,34 +345,77 @@ func filterGlobalProjects(projects []protocol.GlobalProjectSnapshot, scope proto
 	return out
 }
 
-func (d *Daemon) validateGlobalViewScopeProjects(ctx context.Context, scope protocol.GlobalViewScope) error {
+func (d *Daemon) resolveGlobalViewScopeProjects(ctx context.Context, scope protocol.GlobalViewScope) (protocol.GlobalViewScope, error) {
 	if err := scope.Validate(); err != nil {
-		return err
+		return protocol.GlobalViewScope{}, err
 	}
 	if scope.Kind == protocol.GlobalViewScopeAllProjects || scope.Kind == "" {
-		return nil
+		return scope, nil
 	}
 	snapshot, err := d.userStore.Snapshot(ctx, "")
 	if err != nil {
-		return fmt.Errorf("load project catalog: %w", err)
+		return protocol.GlobalViewScope{}, fmt.Errorf("load project catalog: %w", err)
 	}
-	known := make(map[string]struct{}, len(snapshot.Projects))
+	aliases := make(map[string]string, len(snapshot.Projects)*2)
+	ambiguous := make(map[string]struct{})
 	for _, project := range snapshot.Projects {
 		if !project.Registered {
 			continue
 		}
-		known[protocol.NormalizeProjectID(project.ProjectID)] = struct{}{}
+		canonicalID := protocol.NormalizeProjectID(project.ProjectID)
+		if canonicalID == "" {
+			continue
+		}
+		aliases[canonicalID] = canonicalID
+	}
+	for _, project := range snapshot.Projects {
+		if !project.Registered {
+			continue
+		}
+		canonicalID := protocol.NormalizeProjectID(project.ProjectID)
+		name := protocol.NormalizeProjectID(project.Name)
+		if canonicalID == "" || name == "" || name == canonicalID {
+			continue
+		}
+		if existing, ok := aliases[name]; ok {
+			if existing == name || existing == canonicalID {
+				continue
+			}
+			delete(aliases, name)
+			ambiguous[name] = struct{}{}
+			continue
+		}
+		if _, collision := ambiguous[name]; !collision {
+			aliases[name] = canonicalID
+		}
 	}
 	ids := scope.ProjectIDs
 	if scope.Kind == protocol.GlobalViewScopeCurrentProject {
 		ids = []naming.ProjectID{scope.CurrentProjectID}
 	}
+	resolved := make([]naming.ProjectID, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
-		if _, ok := known[protocol.NormalizeProjectID(id.String())]; !ok {
-			return fmt.Errorf("global view scope references unknown project %q", id)
+		alias := protocol.NormalizeProjectID(id.String())
+		if _, ok := ambiguous[alias]; ok {
+			return protocol.GlobalViewScope{}, fmt.Errorf("global view scope references ambiguous project %q", id)
 		}
+		canonicalID, ok := aliases[alias]
+		if !ok {
+			return protocol.GlobalViewScope{}, fmt.Errorf("global view scope references unknown project %q", id)
+		}
+		if _, duplicate := seen[canonicalID]; duplicate {
+			continue
+		}
+		seen[canonicalID] = struct{}{}
+		resolved = append(resolved, naming.ProjectID(canonicalID))
 	}
-	return nil
+	if scope.Kind == protocol.GlobalViewScopeCurrentProject {
+		scope.CurrentProjectID = resolved[0]
+	} else {
+		scope.ProjectIDs = resolved
+	}
+	return scope, nil
 }
 
 func (d *Daemon) handleGlobalProjectionRebuild(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

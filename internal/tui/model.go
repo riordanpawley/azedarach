@@ -4926,6 +4926,11 @@ type ancestorWorktreeCloseRetryResultMsg struct {
 	err    error
 }
 
+type investigationAcceptanceResultMsg struct {
+	action overlay.CloseFailureActionMsg
+	err    error
+}
+
 type taskLifecycleResultMsg struct {
 	taskID        string
 	previousTask  domain.Task
@@ -5376,8 +5381,42 @@ func (m Model) closeFailureDialogCmd(msg taskStatusResultMsg) tea.Cmd {
 		AllowActiveSessionRetry: closeFailureSupportsActiveSessionRetry(msg.err),
 		AllowCloseCleanChildren: closeFailureSupportsCloseCleanChildren(msg.err),
 		AllowCreateAncestor:     closeFailureSupportsCreateAncestor(msg.err, closeContext.parentID),
+		AllowAcceptFindings:     closeFailureSupportsInvestigationAcceptance(msg.err),
 	}
 	return m.openOverlay(overlay.NewCloseFailureDialog(msg.taskID, msg.err.Error(), options))
+}
+
+func closeFailureSupportsInvestigationAcceptance(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "human-facing investigation lacks explicit issue-specific findings acceptance")
+}
+
+func (m Model) acceptInvestigationFindingsCmd(action overlay.CloseFailureActionMsg) tea.Cmd {
+	return func() tea.Msg {
+		if m.daemonClient == nil {
+			return investigationAcceptanceResultMsg{action: action, err: fmt.Errorf("daemon client unavailable")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := m.daemonClient.AppendTaskEvent(ctx, action.TaskID, daemonclient.TaskEventAppendRequest{
+			Type:          string(domain.IssueEventHumanInputProvided),
+			Source:        "human",
+			SourceCommand: "az tui close blocked accept findings",
+			WorktreePath:  strings.TrimSpace(action.SourceWorktree),
+			Payload: map[string]any{
+				"investigation_findings_accepted": true,
+				"actor_id":                        tuiIssueOwnerID(),
+				"summary":                         "Human accepted the investigation findings from the close-blocked dialog.",
+			},
+		})
+		if err != nil {
+			err = fmt.Errorf("record investigation findings acceptance: %w", err)
+		}
+		return investigationAcceptanceResultMsg{action: action, err: err}
+	}
 }
 
 func closeFailureSupportsCreateAncestor(err error, parentID string) bool {
