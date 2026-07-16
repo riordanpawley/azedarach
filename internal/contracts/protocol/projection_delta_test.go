@@ -91,4 +91,7 @@ func TestProjectionDeltaProtocolVersionClaimAndCompatibility(t *testing.T) {
 	if ack := NegotiateHello(Hello{ProtocolVersion: 51}, "daemon-v51"); !ack.Accepted || ack.DaemonProtocolVersion != 51 {
 		t.Fatalf("v51 compatibility handshake=%+v", ack)
 	}
+	if ack := NegotiateHello(Hello{ProtocolVersion: 52}, "daemon-v51"); ack.Accepted || ack.ErrorCode != ErrorCodeIncompatible {
+		t.Fatalf("v52 compatibility handshake=%+v", ack)
+	}
 }

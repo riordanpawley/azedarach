@@ -51,6 +51,18 @@ func TestSecond(t *testing.T) { t.Error("second sentinel") }
 	assert.True(t, strings.Index(string(report), "TestFirst") < strings.Index(string(report), "TestSecond"), "equal-duration failures have deterministic name ordering")
 }
 
+func TestRunReportsLocalTimingViolationWithoutFailingCorrectness(t *testing.T) {
+	module := t.TempDir()
+	configureTestCacheFamily(t, module)
+	require.NoError(t, os.WriteFile(filepath.Join(module, "go.mod"), []byte("module example.test/diagnostic\n\ngo 1.24.2\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(module, "diagnostic_test.go"), []byte("package diagnostic\nimport \"testing\"\nfunc TestPass(t *testing.T) {}\n"), 0o644))
+	baseline := Baseline{RecordedAt: "fixture", Profiles: map[string]BaselineProfile{"fixture": {WallSeconds: 0.000001}}, Budgets: Budgets{RegressionFactor: 1, MaxWallSeconds: map[string]float64{"fixture": 0.000001}, DefaultPackageSeconds: 0.000001, DefaultTestSeconds: 0.000001}}
+	measurement, err := Run(context.Background(), RunOptions{Profile: Profile{Name: "fixture", Packages: []string{"./..."}, GoTestArgs: []string{"-json", "-count=1"}}, Baseline: baseline, OutputDir: filepath.Join(t.TempDir(), "artifacts"), WorkingDir: module, CheckBudgets: false})
+	require.NoError(t, err)
+	assert.NotEmpty(t, measurement.Comparison.Violations, "local reports retain timing diagnostics")
+	assert.Zero(t, measurement.ExitCode)
+}
+
 func TestWriteValidationLeaseEvidenceFileIncludesOverlapAndLeaseIdentity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lease.json")
 	t.Setenv("AZEDARACH_VALIDATION_EVIDENCE_FILE", path)

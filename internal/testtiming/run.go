@@ -70,6 +70,7 @@ func writeRefusalArtifacts(opts RunOptions, telemetry gocache.Telemetry, refusal
 		Profile:             opts.Profile.Name,
 		CacheMode:           opts.Profile.CachePolicy(),
 		TestResultCacheMode: opts.Profile.CachePolicy(),
+		TimingBudgetPolicy:  timingBudgetPolicy(opts.CheckBudgets),
 		BuildCache:          telemetry,
 		ResourceMethod:      "direct-go-command-process-state-v1",
 		ProcessLoad:         ProcessLoadEvidence{Method: "ps-process-tree-v2", PeakProcesses: []GoProcess{}, PeakExternalProcesses: []GoProcess{}},
@@ -146,7 +147,7 @@ func runLocked(ctx context.Context, opts RunOptions, cacheConfig gocache.Config,
 		}
 	}
 	cacheTelemetry, cacheErr := gocache.Finish(cacheConfig, cacheTelemetry)
-	m := Measurement{Schema: ReportSchema, Profile: opts.Profile.Name, CacheMode: opts.Profile.CachePolicy(), TestResultCacheMode: opts.Profile.CachePolicy(), BuildCache: cacheTelemetry, ResourceMethod: "direct-go-command-process-state-v1", StartedAt: startedAt, WallSeconds: wall, ProcessLoad: processLoad, ValidationLease: validationLeaseEvidence(), ExitCode: exitCode, Packages: packages, Tests: tests, Failures: failures, InvalidEvents: invalid, RawJSONPath: rawPath, StderrPath: stderrPath, Command: command}
+	m := Measurement{Schema: ReportSchema, Profile: opts.Profile.Name, CacheMode: opts.Profile.CachePolicy(), TestResultCacheMode: opts.Profile.CachePolicy(), TimingBudgetPolicy: timingBudgetPolicy(opts.CheckBudgets), BuildCache: cacheTelemetry, ResourceMethod: "direct-go-command-process-state-v1", StartedAt: startedAt, WallSeconds: wall, ProcessLoad: processLoad, ValidationLease: validationLeaseEvidence(), ExitCode: exitCode, Packages: packages, Tests: tests, Failures: failures, InvalidEvents: invalid, RawJSONPath: rawPath, StderrPath: stderrPath, Command: command}
 	if cmd.ProcessState != nil {
 		m.UserCPUSeconds = cmd.ProcessState.UserTime().Seconds()
 		m.SystemCPUSeconds = cmd.ProcessState.SystemTime().Seconds()
@@ -177,6 +178,13 @@ func runLocked(ctx context.Context, opts RunOptions, cacheConfig gocache.Config,
 		outcomes = append(outcomes, fmt.Errorf("%d timing budget violation(s)", len(m.Comparison.Violations)))
 	}
 	return m, errors.Join(outcomes...)
+}
+
+func timingBudgetPolicy(enforced bool) string {
+	if enforced {
+		return "enforced"
+	}
+	return "diagnostic-only"
 }
 
 func validationLeaseEvidence() ValidationLeaseEvidence {
@@ -276,3 +284,7 @@ func writeArtifacts(dir string, m Measurement) error {
 	}
 	return nil
 }
+
+// WriteArtifacts publishes a derived aggregate using the same report schema as
+// individual samples.
+func WriteArtifacts(dir string, m Measurement) error { return writeArtifacts(dir, m) }

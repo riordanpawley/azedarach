@@ -473,25 +473,26 @@ env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
   AZEDARACH_VALIDATION_PS_BIN="$fixture/fake-bin/validation-ps-empty" \
   AZEDARACH_TICKET_ID=aggregate-holder \
   "$fixture/scripts/with-machine-validation-lease" --class aggregate --scope ticket --purpose review_evidence --profile merge-gate -- \
-  sh -c 'touch "$1"; sleep 30' sh "$aggregate_ready" &
+  sh -c 'touch "$1"; sleep 2' sh "$aggregate_ready" \
+  >"$fixture/aggregate-holder.stdout" 2>"$fixture/aggregate-holder.stderr" &
 aggregate_holder_pid=$!
 for _ in {1..300}; do
   [[ -e "$aggregate_ready" ]] && break
   sleep 0.02
 done
 test -e "$aggregate_ready"
-if AZEDARACH_PRODUCTION_ADMISSION_WAIT_SECONDS=1 PATH="$fixture/fake-bin:$PATH" \
+AZEDARACH_PRODUCTION_ADMISSION_WAIT_SECONDS=1 PATH="$fixture/fake-bin:$PATH" \
   "$fixture/scripts/with-production-install-admission" -- true \
-  >"$fixture/production-admission.stdout" 2>"$fixture/production-admission.stderr"; then
-  echo "production admission unexpectedly overlapped an aggregate validation" >&2
+  >"$fixture/production-admission.stdout" 2>"$fixture/production-admission.stderr"
+kill -0 "$aggregate_holder_pid"
+test ! -s "$fixture/production-admission.stderr"
+test -s "$fixture/.git/azedarach-production-admission/production-epoch"
+if wait "$aggregate_holder_pid"; then
+  echo "aggregate validation remained canonical after a production install overlapped it" >&2
   exit 1
+else
+  test "$?" -eq 74
 fi
-test "$(grep -c "Production install admission is waiting" "$fixture/production-admission.stderr")" -eq 1
-grep -q "aggregate validation merge-gate" "$fixture/production-admission.stderr"
-grep -q "Timed out waiting for production install admission after 1s" "$fixture/production-admission.stderr"
-kill "$aggregate_holder_pid"
-wait "$aggregate_holder_pid" 2>/dev/null || true
-
 development_ready="$fixture/development-holder.ready"
 env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
   -u AZEDARACH_VALIDATION_LEASE_TOKEN \
@@ -505,6 +506,8 @@ for _ in {1..300}; do
   sleep 0.02
 done
 test -e "$development_ready"
+grep -q "validation overlapped a production install and is noncanonical" \
+  "$fixture/aggregate-holder.stderr"
 AZEDARACH_PRODUCTION_ADMISSION_WAIT_SECONDS=1 PATH="$fixture/fake-bin:$PATH" \
   "$fixture/scripts/with-production-install-admission" -- true
 kill "$development_holder_pid"

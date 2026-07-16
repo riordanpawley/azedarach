@@ -39,6 +39,7 @@ type Measurement struct {
 	Profile             string                  `json:"profile"`
 	CacheMode           string                  `json:"cache_mode"`
 	TestResultCacheMode string                  `json:"test_result_cache_mode"`
+	TimingBudgetPolicy  string                  `json:"timing_budget_policy"`
 	BuildCache          gocache.Telemetry       `json:"build_cache"`
 	ResourceMethod      string                  `json:"resource_measurement"`
 	StartedAt           time.Time               `json:"started_at"`

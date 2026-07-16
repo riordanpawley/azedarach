@@ -1,6 +1,7 @@
 package issues
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"log/slog"
@@ -109,6 +110,73 @@ func TestClient_LearningLifecycleRecallReviewAndPromote(t *testing.T) {
 	assert.Equal(t, LearningTargetStateActive, promoted.TargetState)
 	assert.Equal(t, "sha256:decision-hash", promoted.TargetHash)
 	assert.Equal(t, map[string]string{"path": "docs/decisions/decision.md"}, promoted.TargetMetadata)
+}
+
+func TestClient_ListLearningsCompilesDetailNoneSearchTerms(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	created, err := client.CreateLearning(ctx, CreateLearningParams{
+		ProjectID: "proj",
+		Summary:   "Compile contextual learning searches safely",
+		Evidence:  "The detail-none index accepts individual terms but rejects phrases.",
+		Tags:      []string{"fts5"},
+	})
+	require.NoError(t, err)
+
+	for _, query := range []string{
+		`contextual-learning`,
+		`"contextual learning"`,
+		`contextual* learning`,
+		`contextual " learning`,
+	} {
+		t.Run(query, func(t *testing.T) {
+			rows, err := client.ListLearnings(ctx, LearningFilter{ProjectID: "proj", Query: query})
+			require.NoError(t, err)
+			require.Len(t, rows, 1)
+			assert.Equal(t, created.LocalID, rows[0].LocalID)
+		})
+	}
+}
+
+func TestLearningFTSMatchQueryUsesDetailNoneCompatibleTerms(t *testing.T) {
+	for _, tc := range []struct {
+		name, query, want string
+	}{
+		{name: "hyphen is not a phrase", query: "contextual-learning", want: `"contextual" AND "learning"`},
+		{name: "quotes do not request a phrase", query: `"contextual learning"`, want: `"contextual" AND "learning"`},
+		{name: "operators are data", query: `contextual OR learning`, want: `"contextual" AND "or" AND "learning"`},
+		{name: "punctuation only", query: `\" -* `, want: ""},
+		{name: "deduplicated case fold", query: `Learning learning`, want: `"learning"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, learningFTSMatchQuery(tc.query))
+		})
+	}
+}
+
+func TestClient_ListLearningsLogsFallbackAndSearchErrorsWithoutRetry(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	var logs bytes.Buffer
+	client := newTestClientWithLogger(t, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	_, err := client.ListLearnings(ctx, LearningFilter{ProjectID: "proj", Query: `\" -*`})
+	require.NoError(t, err)
+	assert.Contains(t, logs.String(), "using metadata-only fallback")
+
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `DROP TABLE agent_learning_search_fts`)
+	require.NoError(t, err)
+	logs.Reset()
+
+	_, err = client.ListLearnings(ctx, LearningFilter{ProjectID: "proj", Query: "learning"})
+	require.Error(t, err)
+	assert.Contains(t, logs.String(), "learning search query failed")
+	assert.Contains(t, logs.String(), "fallback_attempted=false")
+	assert.Equal(t, 1, strings.Count(logs.String(), "learning search query failed"), "one call must emit one error without an internal retry storm")
 }
 
 func TestClient_PromoteLearningCreatesDecisionTargetAndLinksScopesIdempotently(t *testing.T) {

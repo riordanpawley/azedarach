@@ -5825,6 +5825,17 @@ func TestParseIssueEventsArgs(t *testing.T) {
 		t.Fatalf("event types = %+v", got.EventTypes)
 	}
 
+	got, err = ParseIssueEventsArgs([]string{"az-1", "--tail", "20", "--before-id", "500", "--source", "daemon", "--source-command", "review", "--operation", "op-1", "--session", "s-1", "--worktree", "/tmp/wt", "--since", "2026-07-01", "--until", "2026-07-15", "--query", "projection checkpoint", "--payload", "outcome=accepted", "--payload", "revision=2"})
+	if err != nil {
+		t.Fatalf("ParseIssueEventsArgs(full query) error = %v", err)
+	}
+	if got.Order != "desc" || got.Limit != 20 || got.BeforeID != 500 || got.Source != "daemon" || got.Query != "projection checkpoint" || len(got.PayloadEquals) != 2 {
+		t.Fatalf("ParseIssueEventsArgs(full query) = %+v", got)
+	}
+	if got.PayloadEquals[0].Value != "accepted" || got.PayloadEquals[1].Value != float64(2) {
+		t.Fatalf("payload filters = %+v", got.PayloadEquals)
+	}
+
 	got, err = ParseIssueEventsArgs([]string{"--id", "az-2", "--type", "issue.created"})
 	if err != nil {
 		t.Fatalf("ParseIssueEventsArgs(named id) error = %v", err)
@@ -5840,6 +5851,10 @@ func TestParseIssueEventsArgs(t *testing.T) {
 	_, err = ParseIssueEventsArgs([]string{"az-1", "--limit", "-1"})
 	if err == nil || !strings.Contains(err.Error(), "--limit must be non-negative") {
 		t.Fatalf("expected negative limit error, got %v", err)
+	}
+	_, err = ParseIssueEventsArgs([]string{"az-1", "--tail", "10", "--limit", "2"})
+	if err == nil || !strings.Contains(err.Error(), "--tail cannot") {
+		t.Fatalf("expected tail conflict error, got %v", err)
 	}
 
 	got, err = ParseIssueEventsArgs([]string{"--jq-help"})
@@ -7691,9 +7706,9 @@ func TestIssueEventsCommandJSON(t *testing.T) {
 				if body.TaskID != "az-5" || body.Limit != 10 || !reflect.DeepEqual(body.Types, []string{"issue.status_changed"}) {
 					t.Fatalf("task events body = %+v", body)
 				}
-				respBody, err := json.Marshal(struct {
-					Events []domain.IssueObservationEvent `json:"events"`
-				}{
+				next := int64(8)
+				respBody, err := json.Marshal(protocol.TaskEventsPage{
+					Order: "asc", Limit: 10, HasMore: true, FirstID: 7, LastID: 8, NextAfterID: &next,
 					Events: []domain.IssueObservationEvent{{
 						ID:         7,
 						IssueID:    "az-5",
@@ -7740,8 +7755,9 @@ func TestIssueEventsCommandJSON(t *testing.T) {
 	})
 
 	var got struct {
-		SchemaVersion string `json:"schema_version"`
-		IssueID       string `json:"issue_id"`
+		SchemaVersion string              `json:"schema_version"`
+		IssueID       string              `json:"issue_id"`
+		Page          issueEventsPageJSON `json:"page"`
 		Events        []struct {
 			ID         int64          `json:"id"`
 			IssueID    string         `json:"issue_id"`
@@ -7759,8 +7775,11 @@ func TestIssueEventsCommandJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(output), &got); err != nil {
 		t.Fatalf("unmarshal issue events json: %v\n%s", err, output)
 	}
-	if got.SchemaVersion != "issue_events.v1" || got.IssueID != "az-5" || len(got.Events) != 2 {
+	if got.SchemaVersion != "issue_events.v2" || got.IssueID != "az-5" || len(got.Events) != 2 {
 		t.Fatalf("issue events json header = %+v", got)
+	}
+	if got.Page.Order != "asc" || got.Page.Limit != 10 || !got.Page.HasMore || got.Page.NextAfterID == nil || *got.Page.NextAfterID != 8 {
+		t.Fatalf("issue events page = %+v", got.Page)
 	}
 	event := got.Events[0]
 	if event.ID != 7 || event.IssueID != "az-5" {

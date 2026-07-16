@@ -14,6 +14,7 @@ func WriteMarkdown(w io.Writer, m Measurement) error {
 	write("- Started: %s\n", m.StartedAt.UTC().Format("2006-01-02T15:04:05Z"))
 	write("- Command: `%s`\n", strings.Join(m.Command, " "))
 	write("- Test-result cache: %s\n", m.TestResultCacheMode)
+	write("- Timing budgets: %s\n", m.TimingBudgetPolicy)
 	write("- Build cache: `%s` (%s); before %d bytes/%d files; after %d bytes/%d files; delta %d bytes/%d files; family %d bytes; decision `%s`\n", m.BuildCache.Namespace, m.BuildCache.Policy, m.BuildCache.Before.Bytes, m.BuildCache.Before.Files, m.BuildCache.After.Bytes, m.BuildCache.After.Files, m.BuildCache.DeltaBytes, m.BuildCache.DeltaFiles, m.BuildCache.FamilyBytes, m.BuildCache.Decision)
 	write("- Resource measurement: `%s` (direct `go` command process; descendant test-binary resources are not aggregated)\n", m.ResourceMethod)
 	write("- Concurrent Go-process load: max `%d` total / `%d` external across `%d` samples (`%s`); overlap `%t`\n", m.ProcessLoad.MaxGoProcesses, m.ProcessLoad.MaxExternalGoProcesses, m.ProcessLoad.Samples, m.ProcessLoad.Method, m.ProcessLoad.OverlapDetected)
