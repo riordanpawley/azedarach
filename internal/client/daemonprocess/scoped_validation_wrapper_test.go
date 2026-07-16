@@ -231,7 +231,7 @@ func (f scopedValidationFixture) wrapperCommand(payload ...string) *exec.Cmd {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	args := []string{filepath.Join(repoRoot, "scripts", "with-machine-validation-lease"), "--class", "shared", "--profile", "scoped-cleanup-test", "--"}
+	args := []string{filepath.Join(repoRoot, "scripts", "with-machine-validation-lease"), "--class", "shared", "--purpose", "capacity", "--profile", "scoped-cleanup-test", "--"}
 	args = append(args, payload...)
 	cmd := exec.Command("perl", args...)
 	cmd.Dir = repoRoot
