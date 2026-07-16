@@ -33,6 +33,7 @@ type NativeCodexClientOptions struct {
 	RecoverIntent string
 	RecoverAction string
 	RecoverThread string
+	StartRPC      func(context.Context) (*codexRPCClient, error)
 }
 
 type codexRPCMessage struct {
@@ -297,7 +298,11 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 		return fmt.Errorf("bind native Codex incarnation: %w", err)
 	}
 
-	rpc, err := startCodexRPC(childCtx)
+	starter := opts.StartRPC
+	if starter == nil {
+		starter = startCodexRPC
+	}
+	rpc, err := starter(childCtx)
 	if err != nil {
 		return fmt.Errorf("start Codex app-server proxy: %w", err)
 	}
