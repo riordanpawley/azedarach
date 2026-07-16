@@ -727,23 +727,30 @@ func (d *Daemon) configureProjectReadMaterializer(materializer *projectReadMater
 }
 
 func (d *Daemon) refreshProjectReadRuntime(ctx context.Context, projectID string, issueIDs ...string) {
+	if err := d.refreshProjectReadRuntimeForIssues(ctx, projectID, issueIDs); err != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Warn("refresh project read runtime materialization", "project_id", d.canonicalProjectID(projectID), "issue_ids", uniqueStrings(issueIDs), "error", err)
+	}
+}
+
+func (d *Daemon) refreshProjectReadRuntimeForIssues(ctx context.Context, projectID string, issueIDs []string) error {
 	projectID = d.canonicalProjectID(projectID)
 	d.materializersMu.RLock()
 	materializer := d.materializers[projectID]
 	d.materializersMu.RUnlock()
 	if materializer == nil {
-		return
+		return nil
 	}
 	issueIDs = uniqueStrings(issueIDs)
-	if err := materializer.refreshRuntime(ctx, issueIDs); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Warn("refresh project read runtime materialization", "project_id", projectID, "error", err)
+	if err := materializer.refreshRuntime(ctx, issueIDs); err != nil {
+		return fmt.Errorf("refresh runtime issues: %w", err)
 	}
-	if err := d.refreshProjectReadWorktreesForIssues(ctx, projectID, materializer, issueIDs); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Warn("refresh project read worktree materialization", "project_id", projectID, "error", err)
+	if err := d.refreshProjectReadWorktreesForIssues(ctx, projectID, materializer, issueIDs); err != nil {
+		return fmt.Errorf("refresh runtime worktrees: %w", err)
 	}
-	if err := d.syncUserProjectionMaterializedIssues(ctx, projectID, issueIDs); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Warn("apply keyed user projection materialization", "project_id", projectID, "issue_ids", issueIDs, "error", err)
+	if err := d.syncUserProjectionMaterializedIssues(ctx, projectID, issueIDs); err != nil {
+		return fmt.Errorf("sync user projection issues: %w", err)
 	}
+	return nil
 }
 
 func (d *Daemon) refreshProjectReadWorktreesForIssues(ctx context.Context, projectID string, materializer *projectReadMaterializer, issueIDs []string) error {

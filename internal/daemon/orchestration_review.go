@@ -99,6 +99,25 @@ func (a daemonOrchestrationAuthority) reviewQueue(ctx context.Context, projectID
 	if request.Limit > 0 && len(reviewTasks) > request.Limit {
 		reviewTasks = reviewTasks[:request.Limit]
 	}
+	if a.daemon.materializedReadsEnabled() && len(reviewTasks) > 0 {
+		issueIDs := reviewWorktreeRefreshIssueIDs(reviewTasks, tasks)
+		if err := a.daemon.refreshFiniteWorktreeGitFacts(ctx, projectID, issueIDs); err != nil {
+			return nil, fmt.Errorf("refresh review worktree git facts: %w", err)
+		}
+		refreshed, _, err := a.daemon.projectReadSnapshot(projectID)
+		if err != nil {
+			return nil, fmt.Errorf("reload refreshed review projection: %w", err)
+		}
+		refreshedByID := make(map[string]domain.Task, len(refreshed))
+		for _, task := range refreshed {
+			refreshedByID[task.ID.String()] = task
+		}
+		for i := range reviewTasks {
+			if task, ok := refreshedByID[reviewTasks[i].ID.String()]; ok {
+				reviewTasks[i] = task
+			}
+		}
+	}
 
 	worktrees := map[string]git.Worktree{}
 	if a.daemon.materializedReadsEnabled() {
@@ -123,6 +142,33 @@ func (a daemonOrchestrationAuthority) reviewQueue(ctx context.Context, projectID
 		out = append(out, a.reviewInspection(ctx, projectID, repoDir, request.ActorID, task, byID, worktrees))
 	}
 	return out, nil
+}
+
+func reviewWorktreeRefreshIssueIDs(reviewTasks, allTasks []domain.Task) []string {
+	byID := make(map[string]domain.Task, len(allTasks))
+	for _, task := range allTasks {
+		byID[task.ID.String()] = task
+	}
+	ids := taskIDsFromTasks(reviewTasks)
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		seen[id] = struct{}{}
+	}
+	for _, task := range reviewTasks {
+		for parentID := domain.TaskParentIssueID(task); parentID != ""; {
+			if _, ok := seen[parentID]; ok {
+				break
+			}
+			seen[parentID] = struct{}{}
+			ids = append(ids, parentID)
+			parent, ok := byID[parentID]
+			if !ok {
+				break
+			}
+			parentID = domain.TaskParentIssueID(parent)
+		}
+	}
+	return ids
 }
 
 func reviewOutcomeLookupCandidate(task domain.Task) bool {
@@ -845,6 +891,9 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 func (d *Daemon) exactReviewCandidateWorktree(ctx context.Context, projectID, issueID string) (string, error) {
 	if d == nil || d.worktreeAdapter == nil {
 		return "", fmt.Errorf("candidate_worktree_unavailable: worktree projection authority is unavailable")
+	}
+	if err := d.refreshFiniteWorktreeGitFacts(ctx, projectID, []string{issueID}); err != nil {
+		return "", fmt.Errorf("candidate_git_facts_refresh_failed: %w", err)
 	}
 	projected, found, err := d.worktreeAdapter.projectedWorktreeForIssue(ctx, projectID, issueID)
 	if err != nil {
