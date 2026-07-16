@@ -13,14 +13,18 @@ const maxSelectorSnapshotCacheEntries = 32
 // singleflight group coalesces both cold fills and warm refreshes by effective
 // request key; callers always receive a copy they can safely marshal or mutate.
 type selectorSnapshotCache struct {
-	mu      sync.RWMutex
-	entries map[string][]byte
-	order   []string
-	loads   singleflight.Group
+	mu         sync.RWMutex
+	entries    map[string][]byte
+	order      []string
+	refreshing map[string]struct{}
+	loads      singleflight.Group
 }
 
 func newSelectorSnapshotCache() *selectorSnapshotCache {
-	return &selectorSnapshotCache{entries: make(map[string][]byte)}
+	return &selectorSnapshotCache{
+		entries:    make(map[string][]byte),
+		refreshing: make(map[string]struct{}),
+	}
 }
 
 func (c *selectorSnapshotCache) get(key string) ([]byte, bool) {
@@ -75,22 +79,29 @@ func (c *selectorSnapshotCache) loadCold(ctx context.Context, key string, load f
 	}
 }
 
-// refresh starts or joins a refresh and reports its eventual error. The result
-// channel is buffered by singleflight, so callers may intentionally ignore it.
-func (c *selectorSnapshotCache) refresh(ctx context.Context, key string, load func(context.Context) ([]byte, error)) <-chan error {
-	done := make(chan error, 1)
-	result := c.loads.DoChan(key, func() (any, error) {
-		body, err := load(ctx)
-		if err != nil {
-			return nil, err
-		}
-		c.store(key, body)
-		return nil, nil
-	})
-	go func() {
-		response := <-result
-		done <- response.Err
-		close(done)
-	}()
-	return done
+// beginRefresh reserves the only refresh slot for key. Unlike singleflight,
+// this avoids allocating a waiter channel and goroutine for every warm request.
+func (c *selectorSnapshotCache) beginRefresh(key string) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.refreshing == nil {
+		c.refreshing = make(map[string]struct{})
+	}
+	if _, exists := c.refreshing[key]; exists {
+		return false
+	}
+	c.refreshing[key] = struct{}{}
+	return true
+}
+
+func (c *selectorSnapshotCache) finishRefresh(key string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	delete(c.refreshing, key)
+	c.mu.Unlock()
 }

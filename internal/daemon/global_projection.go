@@ -80,6 +80,10 @@ func (d *Daemon) scheduleSelectorSnapshotRefresh(ctx context.Context, key string
 		d.userStoreRefreshMu.Unlock()
 		return
 	}
+	if !d.selectorSnapshots.beginRefresh(key) {
+		d.userStoreRefreshMu.Unlock()
+		return
+	}
 	baseCtx := d.userStoreRefreshCtx
 	if baseCtx == nil {
 		baseCtx = context.WithoutCancel(ctx)
@@ -87,14 +91,15 @@ func (d *Daemon) scheduleSelectorSnapshotRefresh(ctx context.Context, key string
 	d.userStoreRefreshWG.Add(1)
 	d.userStoreRefreshMu.Unlock()
 	refreshCtx, cancel := context.WithTimeout(baseCtx, selectorSnapshotRefreshTimeout)
-	done := d.selectorSnapshots.refresh(refreshCtx, key, func(loadCtx context.Context) ([]byte, error) {
-		return d.buildGlobalSnapshot(loadCtx, body)
-	})
 
 	go func() {
 		defer d.userStoreRefreshWG.Done()
 		defer cancel()
-		err := <-done
+		defer d.selectorSnapshots.finishRefresh(key)
+		body, err := d.buildGlobalSnapshot(refreshCtx, body)
+		if err == nil {
+			d.selectorSnapshots.store(key, body)
+		}
 		if err != nil && d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("tmux selector snapshot cache refresh failed", "error", err)
 		}

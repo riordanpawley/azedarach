@@ -74,30 +74,48 @@ func TestSelectorSnapshotCacheWarmReadDoesNotWaitForRefresh(t *testing.T) {
 		return []byte("fresh"), nil
 	}
 
-	cache.refresh(context.Background(), "key", load)
+	if !cache.beginRefresh("key") {
+		t.Fatal("initial refresh reservation failed")
+	}
+	done := make(chan error, 1)
+	go func() {
+		body, err := load(context.Background())
+		if err == nil {
+			cache.store("key", body)
+		}
+		cache.finishRefresh("key")
+		done <- err
+	}()
 	<-started
 	for range 4 {
-		cache.refresh(context.Background(), "key", load)
+		if cache.beginRefresh("key") {
+			t.Fatal("duplicate refresh reservation succeeded")
+		}
 	}
 	if cached, ok := cache.get("key"); !ok || string(cached) != "stale" {
 		t.Fatalf("warm read = %q,%v, want stale,true", cached, ok)
 	}
 	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
 	waitForSelectorSnapshot(t, cache, "key", "fresh")
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("refresh calls = %d, want 1", got)
 	}
 }
 
-func TestSelectorSnapshotCacheFailedRefreshPreservesLastGoodValue(t *testing.T) {
+func TestSelectorSnapshotCacheRefreshReservationCanBeReleasedAfterFailure(t *testing.T) {
 	cache := newSelectorSnapshotCache()
 	cache.store("key", []byte("last-good"))
-	done := cache.refresh(context.Background(), "key", func(context.Context) ([]byte, error) {
-		return nil, errors.New("refresh failed")
-	})
-	if err := <-done; err == nil {
-		t.Fatal("refresh error = nil, want failure")
+	if !cache.beginRefresh("key") {
+		t.Fatal("refresh reservation failed")
 	}
+	cache.finishRefresh("key")
+	if !cache.beginRefresh("key") {
+		t.Fatal("released refresh reservation could not be reacquired")
+	}
+	cache.finishRefresh("key")
 	cached, ok := cache.get("key")
 	if !ok || string(cached) != "last-good" {
 		t.Fatalf("cached result = %q,%v, want last-good,true", cached, ok)

@@ -142,6 +142,52 @@ func TestTmuxSelectorGlobalSnapshotReturnsCachedValueWhileRefreshing(t *testing.
 	}
 }
 
+func TestTmuxSelectorGlobalSnapshotFailedRefreshPreservesLastGoodValue(t *testing.T) {
+	store, _ := openSelectorSnapshotTestStore(t, "last-good")
+	d := &Daemon{cfg: Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, userStore: store}
+	t.Cleanup(d.stopUserProjectionWorkers)
+	ctx := context.Background()
+	body := protocol.GlobalSnapshotRequestBody{Consumer: protocol.GlobalViewConsumerTmuxSelector}
+
+	_ = readGlobalSnapshotResponse(t, d, ctx, body)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	warm := readGlobalSnapshotResponse(t, d, ctx, body)
+	if got := warm.Projects[0].Tasks[0].Title; got != "last-good" {
+		t.Fatalf("warm snapshot title = %q, want last-good", got)
+	}
+
+	key, err := selectorSnapshotRequestKey(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		d.selectorSnapshots.mu.RLock()
+		_, refreshing := d.selectorSnapshots.refreshing[key]
+		d.selectorSnapshots.mu.RUnlock()
+		if !refreshing {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("failed selector snapshot refresh did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cached, ok := d.selectorSnapshots.get(key)
+	if !ok {
+		t.Fatal("last-good selector snapshot missing after failed refresh")
+	}
+	var snapshot protocol.GlobalSnapshotResponseBody
+	if err = json.Unmarshal(cached, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if got := snapshot.Projects[0].Tasks[0].Title; got != "last-good" {
+		t.Fatalf("cached snapshot title = %q, want last-good", got)
+	}
+}
+
 func TestNonSelectorGlobalSnapshotKeepsStrongReadBehavior(t *testing.T) {
 	store, projectID := openSelectorSnapshotTestStore(t, "first")
 	d := &Daemon{userStore: store}
