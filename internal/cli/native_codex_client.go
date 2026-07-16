@@ -228,6 +228,8 @@ type nativeCodexDelivery struct {
 	reply    chan nativeCodexResponse
 }
 
+var saveNativeCodexStateFn = saveNativeCodexState
+
 type nativeCodexHumanRequest struct {
 	id     json.RawMessage
 	method string
@@ -578,10 +580,14 @@ func acceptNativeCodexDelivery(envelope nativeCodexEnvelope, composer []byte, ac
 		return response, false
 	}
 	messageID := state.Pending[key]
+	if messageID != "" {
+		response.Outcome = "not_ready"
+		return response, false
+	}
 	if messageID == "" {
 		messageID = envelope.IntentKey + ":" + envelope.AgentIncarnation
 		state.Pending[key] = messageID
-		if err := saveNativeCodexState(statePath, *state); err != nil {
+		if err := saveNativeCodexStateFn(statePath, *state); err != nil {
 			delete(state.Pending, key)
 			response.Outcome = "not_ready"
 			return response, false
@@ -598,7 +604,7 @@ func acceptNativeCodexDelivery(envelope nativeCodexEnvelope, composer []byte, ac
 	}
 	state.Accepted[key] = ack
 	delete(state.Pending, key)
-	if err := saveNativeCodexState(statePath, *state); err != nil {
+	if err := saveNativeCodexStateFn(statePath, *state); err != nil {
 		delete(state.Accepted, key)
 		state.Pending[key] = messageID
 		response.Outcome = "not_ready"

@@ -80,6 +80,31 @@ func TestAcceptNativeCodexDeliveryActiveDoesNotPoisonRetry(t *testing.T) {
 	}
 }
 
+func TestAcceptNativeCodexDeliveryFinalSaveFailureRetainsPending(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	state, _ := loadNativeCodexState(path, false)
+	env := nativeCodexEnvelope{IntentKey: "fault", AgentIncarnation: state.Incarnation}
+	calls := 0
+	original := saveNativeCodexStateFn
+	defer func() { saveNativeCodexStateFn = original }()
+	saves := 0
+	saveNativeCodexStateFn = func(string, nativeCodexState) error {
+		saves++
+		if saves == 2 {
+			return errors.New("injected final save failure")
+		}
+		return nil
+	}
+	r, _ := acceptNativeCodexDelivery(env, nil, false, path, &state, func(string) error { calls++; return nil })
+	if r.Outcome != "not_ready" || calls != 1 || state.Pending["fault\x00"+state.Incarnation] == "" {
+		t.Fatalf("response=%+v calls=%d pending=%v", r, calls, state.Pending)
+	}
+	r, _ = acceptNativeCodexDelivery(env, nil, false, path, &state, func(string) error { calls++; return nil })
+	if calls != 1 || r.Outcome != "not_ready" {
+		t.Fatalf("retry response=%+v submit count=%d", r, calls)
+	}
+}
+
 func TestStrictNativeCodexStateDoesNotMutate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing.json")
 	if _, err := strictNativeCodexState(path); err == nil {
