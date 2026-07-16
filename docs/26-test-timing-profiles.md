@@ -3,7 +3,9 @@
 `cmd/test-timing` is the canonical machine-readable test runner. It keeps the
 complete `go test -json` stream even when tests fail, then emits deterministic
 package/test duration tables, every failure identity and output, baseline
-deltas, and budget violations.
+deltas, and budget violations. Ordinary local profiles report those violations
+as diagnostic warnings; only the controlled `ci-timing` profile may turn them
+into a failing performance gate.
 
 Every documented build/test entrypoint first acquires the repository-family
 daemon-owned machine-validation queue before invoking `go`. The `aggregate` class spans the
@@ -69,6 +71,9 @@ just test-timing integration
 just test-timing migration-clone
 just test-timing boundary
 
+# Authoritative only on the controlled, versioned CI runner
+just test-ci-timing
+
 # Required local merge contract
 just merge-gate
 ```
@@ -94,12 +99,14 @@ replayed package/test durations are reported but excluded from current pathology
 budgets; the cached profile's current wall time remains budgeted. The raw stream
 remains authoritative.
 
-Every v2 report records `test_result_cache_mode` as `cleared-and-bypassed`,
+Every v4 report records `test_result_cache_mode` as `cleared-and-bypassed`,
 `bypassed`, or `permitted`. The compatibility `cache_mode` field has the same
 test-result meaning. Neither field describes compiled build objects. The
 `build_cache` object separately records its namespace and retention policy,
 bytes/files before and after, deltas, family bytes, thresholds, and the selected
 warning/refusal/maintenance decision.
+The `timing_budget_policy` field is `diagnostic-only` for local runs and
+`controlled-median-enforced` for the derived authoritative CI aggregate.
 
 The runner writes all artifacts before returning the test command's exit status
 or a budget failure. Do not replace it with a shell pipeline that loses earlier
@@ -109,7 +116,8 @@ failures or reports only the last failing package.
 
 | Profile | Test-result cache | Build-cache namespace | Scope | Purpose |
 |---|---|---|---|---|
-| `cold` | cleared, plus `-count=1` | normal / lifecycle owner | `./...` with `-p=4` | Canonical complete before/after measurement and all-failures run with bounded package concurrency. |
+| `cold` | cleared, plus `-count=1` | normal / lifecycle owner | `./...` with `-p=4` | Canonical local correctness and all-failures run; timing violations are diagnostic. |
+| `ci-timing` | cleared before every sample, plus `-count=1` | normal / lifecycle owner | three or more complete `./...` samples with `-p=4` | CI-only timing authority; gates the per-metric median and retains every sample report. |
 | `cached` | explicitly permitted | normal / lifecycle owner | `./...` | Measures normal repeat developer feedback; cached packages remain visible in the JSON stream. |
 | `focused` | bypassed with `-count=1` | normal / lifecycle owner | defaults to `./internal/testtiming`; override with repeated `--package` | Fast development checks without pretending to be complete coverage. |
 | `integration` | bypassed with `-count=1` | normal / lifecycle owner | daemon, daemon-process, Git, and tmux tests named `RealProcessProfile…` | Real subprocess and lifecycle contracts only. |
@@ -117,8 +125,10 @@ failures or reports only the last failing package.
 | `race` | bypassed with `-count=1` | race / lifecycle owner | selected SQLite-clone, daemon-process, and concurrent Git contracts under `-race` | Focused shared-state validation that remains useful on ordinary developer hosts. |
 | `boundary` | bypassed with `-count=1` | normal / lifecycle owner | CLI/TUI executable boundary guards | Thin-client, transport-shim, and session-projection regressions; static graph checks remain in `just check-boundaries`. |
 
-Use `--check-budgets=false` only for exploratory measurement; it never suppresses
-test failures. `--output` and `--baseline` may select alternative artifact roots
+Local profiles always treat budgets as diagnostic, even if
+`--check-budgets=true` is passed; that flag can enforce budgets only for
+`ci-timing` after its environment contract passes. It never suppresses test
+failures. `--output` and `--baseline` may select alternative artifact roots
 or baseline files. `--package` and `--run` are intentionally accepted only by the
 `focused` profile; canonical named profiles reject scope-changing overrides so
 a narrow run cannot be mislabeled or compared with full-suite budgets.
@@ -152,6 +162,42 @@ action. Run `just test-integration`, `just test-migration-clone`, or `just
 test-race` when a change affects those execution modes. Their overlap with cold
 is intentional mode-specific evidence, not part of the normal completion path.
 
+## Correctness timeouts versus performance budgets
+
+The `-timeout` values in every profile are generous correctness guards. They
+remain locally authoritative: a hung test exits non-zero and emits Go goroutine
+stacks. Test failures, invalid JSON, database-isolation refusals, build-cache
+hard-limit refusals, boundary failures, and build failures also remain fatal in
+`just test` and `just merge-gate`.
+
+Wall, package, and individual-test budgets are performance observations. A
+developer machine can be affected by thermal state, background work, VM load,
+and hardware differences, so a local budget violation is written to
+`report.json` and `report.md` but does not change correctness success.
+
+## Controlled CI timing authority
+
+`.github/workflows/controlled-timing.yml` is deliberately manual and targets
+the versioned self-hosted label `azedarach-timing-v1`. The runner must be a
+dedicated 8-vCPU/16-GiB machine image with Go 1.24.7, no concurrent repository
+validation, and a clean Go test-result cache before each sample. The daemon
+aggregate validation lease supplies exclusive repository admission and rejects
+observed overlapping Go work.
+
+The CLI refuses timing authority unless all controlled markers, the aggregate
+lease identity, runner/toolchain/resource declarations, clean-per-sample cache
+policy, and at least three samples are present. It runs the full cold scope for
+every sample, retains each complete JSON/report directory, then gates the
+per-metric median against the versioned baseline. A single wall-clock sample or
+scheduler outlier therefore cannot decide the result.
+
+The workflow cannot prove physical CPU/RAM allocation or absence of unrelated
+non-Go host load from inside this repository. Those are external runner
+provisioning assumptions attached to the versioned self-hosted label and must
+be audited when that label/image changes. GitHub-hosted runner labels are not
+treated as authoritative because their hardware and ambient load are outside
+this contract. Local machines intentionally cannot satisfy these assumptions.
+
 ## Baseline and budgets
 
 [`testdata/test-timing-baseline-2026-07-13.json`](../testdata/test-timing-baseline-2026-07-13.json)
@@ -162,7 +208,8 @@ complete baseline run exited 1 on the known contention-sensitive
 not successful acceptance evidence. New canonical runs still fail on any test
 failure and preserve the full failure set.
 
-The baseline distinguishes two kinds of limits:
+The baseline distinguishes two kinds of diagnostic limits locally and
+authoritative limits in controlled CI:
 
 - Regression limits use the lower of a hard budget and `baseline × 1.60` for the
   cold wall time and each recorded package.
@@ -170,7 +217,7 @@ The baseline distinguishes two kinds of limits:
   60s per package and 30s per individual test, with a documented daemon-package
   override for its intentionally aggregated contract suite.
 
-The epic's 120s cold-suite target is now the hard cold wall gate. The issue-store
+The epic's 120s cold-suite target is the controlled-CI cold wall gate. The issue-store
 package ceiling is tightened to 60s after fixture cloning and bounded
 parallelism. The daemon package has an explicit 120s ceiling because it remains
 one large package containing SQLite, subprocess, orchestration, and lifecycle
@@ -249,4 +296,4 @@ budget exceptions, if ever needed, cannot collide across packages. A failed run
 may contain both failed subtests and their failed parents; each `fail` event is
 retained deliberately, with the raw JSON stream remaining the lossless authority.
 
-Spec impact: none (test tooling and documentation only).
+Spec: `req-controlled-ci-timing` defines the correctness/timing authority split.
