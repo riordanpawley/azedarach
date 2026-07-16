@@ -188,7 +188,7 @@ func TestStatusBar_LongIntegrationSandboxProjectPreservesEssentialStatus(t *test
 		{
 			name:  "normal hints",
 			width: 80,
-			wants: []string{"NORMAL", "?: help", "O: orchestra"},
+			wants: []string{"NORMAL", "?: help", "O: orchestrator"},
 		},
 		{
 			name:  "overlay close",
@@ -204,7 +204,16 @@ func TestStatusBar_LongIntegrationSandboxProjectPreservesEssentialStatus(t *test
 			configure: func(sb *StatusBar) {
 				sb.SetModeSuffix("orchestrator working live=true  workers 2/4")
 			},
-			wants: []string{"orchestrator working live=true", "workers 2/4", "O: orchestra"},
+			wants: []string{"orchestrator working live=true", "workers 2/4", "O: orchestrator"},
+		},
+		{
+			name:  "compact mandatory state keeps hints",
+			width: 80,
+			configure: func(sb *StatusBar) {
+				sb.SetFilterSummary("F:q=integration-sandbox-status-filter,st:2,pr:3")
+				sb.SetSortSummary("S:project_orchestrator_activity/descending")
+			},
+			wants: []string{"NORMAL", "F/S", "?: help", "O: orchestrator"},
 		},
 		{
 			name:  "hidden selection",

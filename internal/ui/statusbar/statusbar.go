@@ -147,18 +147,22 @@ func (sb StatusBar) Render() string {
 			modeLabelWidth = lipgloss.Width(sb.styles.StatusMode.Render(modeLabel))
 		}
 	}
+	priorityTail, priorityTailStyle := sb.priorityTailReservation()
+	plannedMandatorySlots := mandatorySlots
+	mandatoryTail := priorityTail
+	mandatoryTailStyle := priorityTailStyle
+	if sb.selectionSummary != "" {
+		mandatoryTail = ""
+	}
+	if len(mandatorySlots) > 0 && statusLayoutWidth(modeLabelWidth, mandatorySlots, mandatoryTail, mandatoryTailStyle, separatorWidth) > contentWidth {
+		plannedMandatorySlots = []statusSlot{{style: sb.styles.StatusInfo, text: mandatoryFallback}}
+	}
 
 	if sb.currentProject != "" {
 		projectStyle := sb.styles.StatusInfo.Bold(true)
 		reservedForMode := modeLabelWidth
-		for _, slot := range mandatorySlots {
+		for _, slot := range plannedMandatorySlots {
 			reservedForMode += separatorWidth + lipgloss.Width(slot.style.Render(slot.text))
-		}
-		priorityTail := sb.selectionSummary
-		priorityTailStyle := sb.styles.StatusInfo
-		if priorityTail == "" {
-			priorityTail = sb.essentialInlineHints()
-			priorityTailStyle = sb.styles.StatusHint
 		}
 		if priorityTail != "" {
 			reservedForMode += separatorWidth + lipgloss.Width(priorityTailStyle.Render(priorityTail))
@@ -177,15 +181,8 @@ func (sb StatusBar) Render() string {
 	if !appendSlot(sb.styles.StatusMode, modeLabel) {
 		return sb.styles.StatusBar.Width(sb.width).Render(strings.Join(parts, ""))
 	}
-	partsBeforeMandatory := append([]string(nil), parts...)
-	widthBeforeMandatory := visibleWidth
-	for _, slot := range mandatorySlots {
+	for _, slot := range plannedMandatorySlots {
 		if !appendSlot(slot.style, slot.text) {
-			if fallback := sb.mandatoryFallbackToken(); fallback != "" {
-				parts = append([]string(nil), partsBeforeMandatory...)
-				visibleWidth = widthBeforeMandatory
-				_ = appendSlot(sb.styles.StatusInfo, fallback)
-			}
 			return sb.styles.StatusBar.Width(sb.width).Render(strings.Join(parts, ""))
 		}
 	}
@@ -218,6 +215,17 @@ type statusSlot struct {
 	text  string
 }
 
+func statusLayoutWidth(modeWidth int, mandatory []statusSlot, priorityTail string, priorityTailStyle lipgloss.Style, separatorWidth int) int {
+	width := modeWidth
+	for _, slot := range mandatory {
+		width += separatorWidth + lipgloss.Width(slot.style.Render(slot.text))
+	}
+	if priorityTail != "" {
+		width += separatorWidth + lipgloss.Width(priorityTailStyle.Render(priorityTail))
+	}
+	return width
+}
+
 func renderWithin(style lipgloss.Style, text string, width int) (string, bool) {
 	if width < 1 {
 		return "", false
@@ -245,16 +253,24 @@ func (sb StatusBar) inlineHints() string {
 	return sb.renderHintBindings(bindings)
 }
 
-func (sb StatusBar) essentialInlineHints() string {
-	bindings := sb.effectiveHintBindings()
+func (sb StatusBar) priorityTailReservation() (string, lipgloss.Style) {
+	if sb.selectionSummary != "" {
+		return sb.selectionSummary, sb.styles.StatusInfo
+	}
+	bindings := truncateHintBindings(sb.mode, sb.effectiveHintBindings())
 	if len(bindings) == 0 {
-		return ""
+		return "", sb.styles.StatusHint
 	}
 	limit := 1
 	if len(sb.hintBindings) == 0 && sb.mode == types.ModeNormal {
 		limit = 2
 	}
-	return sb.renderHintBindings(bindings[:min(limit, len(bindings))])
+	limit = min(limit, len(bindings))
+	reservation := sb.renderHintBindings(bindings[:limit])
+	if len(bindings) > limit {
+		reservation += "…"
+	}
+	return reservation, sb.styles.StatusHint
 }
 
 func (sb StatusBar) effectiveHintBindings() []keybinds.Binding {
