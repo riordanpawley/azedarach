@@ -961,6 +961,15 @@ func TestClient_NormalizeProviderDisplayKeyIssueIDsMigratesDurableRefs(t *testin
 	var nextIndex string
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, nextAlphaIssueIndexMetaKey).Scan(&nextIndex))
 	assert.Equal(t, "2", nextIndex)
+	deltas, _, err := client.ListProjectionDeltas(ctx, "default", 0, 100)
+	require.NoError(t, err)
+	var sawNew, sawOldTombstone bool
+	for _, delta := range deltas {
+		sawNew = sawNew || (delta.Key == "b" && delta.Operation == domain.ProjectionDeltaUpsert)
+		sawOldTombstone = sawOldTombstone || (delta.Key == "CHE-02091" && delta.Operation == domain.ProjectionDeltaDelete)
+	}
+	require.True(t, sawNew, "renumbered issue must emit its complete-value projection")
+	require.True(t, sawOldTombstone, "legacy display key must emit a projection tombstone")
 }
 
 func intPtr(value int) *int {
@@ -1028,7 +1037,6 @@ func TestClient_ListWithRuntimeReturnsJoinedProjectionFields(t *testing.T) {
 	assert.Equal(t, 3, got.GitDeletions)
 	assert.Equal(t, 2, got.GitAheadCount)
 	assert.Equal(t, 1, got.GitBehindCount)
-
 	one, err := client.GetWithRuntime(ctx, projectID, taskID)
 	require.NoError(t, err)
 	assert.Equal(t, got.ID, one.ID)
@@ -1156,7 +1164,6 @@ func TestClient_ListWithRuntimeReadsSessionObservations(t *testing.T) {
 		Status:   domain.StatusInProgress,
 	})
 	require.NoError(t, err)
-
 	db, err := sql.Open("sqlite", client.dbPath)
 	require.NoError(t, err)
 	defer db.Close()
@@ -1364,6 +1371,8 @@ func TestClient_HydrateRuntimePreservesDurableFieldsAndOverlaysProjection(t *tes
 		Status:   domain.StatusOpen,
 	})
 	require.NoError(t, err)
+	_, err = client.ClaimOwnershipWithRuntime(ctx, projectID, taskID, OwnershipClaimParams{OwnerID: "reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseExecution})
+	require.NoError(t, err)
 
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(client.dbPath, slog.Default())
 	t.Cleanup(func() { _ = runtimeStore.Close() })
@@ -1424,6 +1433,8 @@ func TestClient_HydrateRuntimePreservesDurableFieldsAndOverlaysProjection(t *tes
 	assert.Equal(t, 3, got.GitDeletions)
 	assert.Equal(t, 2, got.GitAheadCount)
 	assert.Equal(t, 1, got.GitBehindCount)
+	require.Len(t, got.CoordinationLeases, 1)
+	assert.Equal(t, "reviewer", got.CoordinationLeases[0].OwnerID)
 	assert.Truef(t, got.RuntimeUpdatedAt.Equal(updatedAt), "runtime updated_at = %v, want %v", got.RuntimeUpdatedAt, updatedAt)
 
 	hydrated[0].Dependencies[0].Type = domain.DependencyRelatedTo
@@ -1525,6 +1536,19 @@ func TestClient_ListGraphReadinessWithRuntimeBoundsProjectCandidatesAndCountsAll
 	parallelIssueStoreTest(t)
 	ctx := context.Background()
 	client := newTestClient(t)
+	// Seed older, higher-priority backlog rows first. The bounded actionable
+	// window must apply canonical lifecycle Open before LIMIT, otherwise these
+	// rows crowd every Open candidate out of the result.
+	for i := 0; i < 189; i++ {
+		_, err := client.Create(ctx, CreateTaskParams{
+			Title:     fmt.Sprintf("Backlog %03d", i),
+			Type:      domain.TypeTask,
+			Priority:  domain.P0,
+			Status:    domain.StatusOpen,
+			Lifecycle: domain.IssueWorkflowBacklog,
+		})
+		require.NoError(t, err)
+	}
 	for i := 0; i < 12; i++ {
 		_, err := client.Create(ctx, CreateTaskParams{
 			Title:    fmt.Sprintf("Candidate %02d", i),
@@ -1534,13 +1558,23 @@ func TestClient_ListGraphReadinessWithRuntimeBoundsProjectCandidatesAndCountsAll
 		})
 		require.NoError(t, err)
 	}
+	for i := 0; i < 15; i++ {
+		_, err := client.Create(ctx, CreateTaskParams{Title: fmt.Sprintf("Active %02d", i), Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusInProgress})
+		require.NoError(t, err)
+	}
+	_, err := client.Create(ctx, CreateTaskParams{Title: "Review requested", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusInReview})
+	require.NoError(t, err)
 
 	tasks, err := client.ListGraphReadinessWithRuntime(ctx, "proj", "", 5)
 	require.NoError(t, err)
 	require.Len(t, tasks, 5)
+	for _, task := range tasks {
+		assert.Equal(t, domain.IssueWorkflowOpen, task.IssueFacts().LifecycleState)
+		assert.Contains(t, task.Title, "Candidate")
+	}
 	count, err := client.CountOpenOrchestrationIssues(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, 12, count)
+	assert.Equal(t, 12, count, "189 backlog, 15 active, and 1 review-requested issues must not inflate canonical lifecycle Open")
 }
 
 func TestClient_ListGraphReadinessWithRuntimeHydratesBoundedProjectContracts(t *testing.T) {
@@ -4276,6 +4310,15 @@ func TestClient_GraphClosureMigrationBackfillsParentChildEdges(t *testing.T) {
 	ancestors, err := client.ListGraphAncestorIDs(ctx, "grandchild", string(domain.DependencyParentChild))
 	require.NoError(t, err)
 	assert.Equal(t, []string{"child", "root"}, ancestors)
+	deltas, _, err := client.ListProjectionDeltas(ctx, "default", 0, 100)
+	require.NoError(t, err)
+	require.NotEmpty(t, deltas)
+	var payload domain.IssueProjectionDeltaPayload
+	require.NoError(t, json.Unmarshal(deltas[len(deltas)-1].Payload, &payload))
+	require.NotNil(t, payload.Issue)
+	require.Equal(t, naming.IssueID("child"), payload.Issue.ID)
+	require.NotNil(t, payload.Issue.ParentID)
+	require.Equal(t, naming.IssueID("root"), *payload.Issue.ParentID)
 }
 
 func TestClient_MigratesLegacySchemaShape(t *testing.T) {
@@ -4397,8 +4440,10 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0045_issue_state_runtime_constraints",
 		"0046_repair_issue_state_runtime_constraints",
 		"0047_human_authority_projection_revision",
+		"0047_projection_delta_authority",
 		"0048_decision_propagation_outbox",
 		"0048_mailbox_observation_projection_cutover",
+		"0049_managed_agent_incarnations",
 	}, got)
 }
 

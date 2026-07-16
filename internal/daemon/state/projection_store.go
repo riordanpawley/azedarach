@@ -17,6 +17,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/dbpathguard"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/observability/tracesqlite"
 	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
@@ -26,6 +27,7 @@ const (
 	sessionObservationTable         = "daemon_session_observations"
 	sessionActivityTable            = "daemon_session_activity_evidence"
 	physicalSessionObservationTable = "daemon_physical_session_observations"
+	managedAgentIdentityTable       = "daemon_managed_agent_incarnations"
 	worktreeStateTable              = "daemon_worktree_projections"
 	orchestratorLeaseTable          = "daemon_orchestrator_scope_leases"
 	advisorSessionTable             = "daemon_advisor_sessions"
@@ -35,6 +37,8 @@ const (
 	runtimeSQLiteRetryBudget        = 5 * time.Second
 	runtimeSQLiteRetryDelay         = 100 * time.Millisecond
 )
+
+var ErrStaleManagedAgentIdentity = errors.New("stale managed agent identity")
 
 // WorktreeState captures durable daemon worktree state stored in sqlite.
 type WorktreeState struct {
@@ -73,6 +77,159 @@ type PhysicalSessionObservation struct {
 	ActivitySource  string
 	UpdatedAt       time.Time
 	ObservedVersion int64
+	// TmuxAttachedCount is present only for tmux inventory observations. Hook
+	// observations leave it nil so they cannot erase independently observed
+	// attachment state.
+	TmuxAttachedCount *int
+	// StartedAt is present only when tmux inventory supplies the authoritative
+	// physical session creation time. It replaces any command-time estimate;
+	// other observation sources leave it nil and preserve the tmux value.
+	StartedAt *time.Time
+}
+
+// ManagedAgentIdentity is the durable binding between one stable logical agent
+// pane and the exact tmux/agent processes currently occupying it.
+type ManagedAgentIdentity struct {
+	ProjectID        string
+	SessionID        string
+	LogicalPaneID    string
+	TmuxPaneID       string
+	PanePID          int
+	AgentIncarnation string
+	ObservedAt       time.Time
+	UpdatedAt        time.Time
+}
+
+// UpsertManagedAgentIdentity installs a new authoritative incarnation. Callers
+// must use MatchManagedAgentIdentity for hook/ack observations so stale writers
+// cannot replace the current binding.
+func (s *RuntimeStateStore) UpsertManagedAgentIdentity(ctx context.Context, identity ManagedAgentIdentity) error {
+	return s.withRetryingWriteLock(ctx, "upsert_managed_agent_identity", func(writeCtx context.Context) error {
+		db, err := s.dbHandle()
+		if err != nil {
+			return err
+		}
+		identity, err = normalizeManagedAgentIdentity(identity)
+		if err != nil {
+			return err
+		}
+		result, err := db.ExecContext(writeCtx, `INSERT INTO `+managedAgentIdentityTable+`
+			(project_id,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,observed_at,updated_at)
+			VALUES(?,?,?,?,?,?,?,?)
+			ON CONFLICT(project_id,session_id,logical_pane_id) DO UPDATE SET
+				tmux_pane_id=excluded.tmux_pane_id,pane_pid=excluded.pane_pid,
+				agent_incarnation=excluded.agent_incarnation,observed_at=excluded.observed_at,updated_at=excluded.updated_at
+			WHERE excluded.observed_at > `+managedAgentIdentityTable+`.observed_at`,
+			identity.ProjectID, identity.SessionID, identity.LogicalPaneID, identity.TmuxPaneID,
+			identity.PanePID, identity.AgentIncarnation, identity.ObservedAt.Format(time.RFC3339Nano), identity.UpdatedAt.Format(time.RFC3339Nano))
+		if err != nil {
+			return fmt.Errorf("upsert managed agent identity %s/%s/%s: %w", identity.ProjectID, identity.SessionID, identity.LogicalPaneID, err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("inspect managed agent identity upsert: %w", err)
+		}
+		if affected == 0 {
+			current, found, loadErr := s.GetManagedAgentIdentity(writeCtx, identity.ProjectID, identity.SessionID, identity.LogicalPaneID)
+			if loadErr != nil {
+				return loadErr
+			}
+			if found && current.TmuxPaneID == identity.TmuxPaneID && current.PanePID == identity.PanePID && current.AgentIncarnation == identity.AgentIncarnation {
+				return nil
+			}
+			return fmt.Errorf("%w: %s/%s/%s", ErrStaleManagedAgentIdentity, identity.ProjectID, identity.SessionID, identity.LogicalPaneID)
+		}
+		return nil
+	})
+}
+
+func normalizeManagedAgentIdentity(identity ManagedAgentIdentity) (ManagedAgentIdentity, error) {
+	identity.ProjectID = normalizedProjectID(identity.ProjectID)
+	identity.SessionID = strings.TrimSpace(identity.SessionID)
+	identity.LogicalPaneID = strings.TrimSpace(identity.LogicalPaneID)
+	identity.TmuxPaneID = strings.TrimSpace(identity.TmuxPaneID)
+	identity.AgentIncarnation = strings.TrimSpace(identity.AgentIncarnation)
+	if identity.ProjectID == "" || identity.SessionID == "" || identity.LogicalPaneID == "" || identity.TmuxPaneID == "" || identity.AgentIncarnation == "" || identity.PanePID <= 0 {
+		return identity, fmt.Errorf("managed agent identity requires project, session, logical pane, tmux pane, positive pane pid, and agent incarnation")
+	}
+	if identity.ObservedAt.IsZero() {
+		identity.ObservedAt = time.Now().UTC()
+	}
+	identity.ObservedAt = identity.ObservedAt.UTC()
+	if identity.UpdatedAt.IsZero() {
+		identity.UpdatedAt = identity.ObservedAt
+	}
+	identity.UpdatedAt = identity.UpdatedAt.UTC()
+	return identity, nil
+}
+
+func (s *RuntimeStateStore) GetManagedAgentIdentity(ctx context.Context, projectID, sessionID, logicalPaneID string) (ManagedAgentIdentity, bool, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return ManagedAgentIdentity{}, false, err
+	}
+	var identity ManagedAgentIdentity
+	var observedAt, updatedAt string
+	err = db.QueryRowContext(ctx, `SELECT project_id,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,observed_at,updated_at
+		FROM `+managedAgentIdentityTable+` WHERE project_id=? AND session_id=? AND logical_pane_id=?`,
+		normalizedProjectID(projectID), strings.TrimSpace(sessionID), strings.TrimSpace(logicalPaneID)).Scan(
+		&identity.ProjectID, &identity.SessionID, &identity.LogicalPaneID, &identity.TmuxPaneID, &identity.PanePID,
+		&identity.AgentIncarnation, &observedAt, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ManagedAgentIdentity{}, false, nil
+	}
+	if err != nil {
+		return ManagedAgentIdentity{}, false, fmt.Errorf("get managed agent identity: %w", err)
+	}
+	identity.ObservedAt, err = parseRuntimeStateTime(observedAt)
+	if err != nil {
+		return ManagedAgentIdentity{}, false, err
+	}
+	identity.UpdatedAt, err = parseRuntimeStateTime(updatedAt)
+	return identity, true, err
+}
+
+func (s *RuntimeStateStore) ListManagedAgentIdentities(ctx context.Context, projectID, sessionID string) ([]ManagedAgentIdentity, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT project_id,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,observed_at,updated_at
+		FROM `+managedAgentIdentityTable+` WHERE project_id=? AND session_id=? ORDER BY logical_pane_id`, normalizedProjectID(projectID), strings.TrimSpace(sessionID))
+	if err != nil {
+		return nil, fmt.Errorf("list managed agent identities: %w", err)
+	}
+	defer rows.Close()
+	var identities []ManagedAgentIdentity
+	for rows.Next() {
+		var identity ManagedAgentIdentity
+		var observedAt, updatedAt string
+		if err := rows.Scan(&identity.ProjectID, &identity.SessionID, &identity.LogicalPaneID, &identity.TmuxPaneID, &identity.PanePID, &identity.AgentIncarnation, &observedAt, &updatedAt); err != nil {
+			return nil, fmt.Errorf("scan managed agent identity: %w", err)
+		}
+		identity.ObservedAt, err = parseRuntimeStateTime(observedAt)
+		if err != nil {
+			return nil, err
+		}
+		identity.UpdatedAt, err = parseRuntimeStateTime(updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		identities = append(identities, identity)
+	}
+	return identities, rows.Err()
+}
+
+func (s *RuntimeStateStore) MatchManagedAgentIdentity(ctx context.Context, candidate ManagedAgentIdentity) (bool, error) {
+	candidate, err := normalizeManagedAgentIdentity(candidate)
+	if err != nil {
+		return false, err
+	}
+	current, found, err := s.GetManagedAgentIdentity(ctx, candidate.ProjectID, candidate.SessionID, candidate.LogicalPaneID)
+	if err != nil || !found {
+		return false, err
+	}
+	return current.TmuxPaneID == candidate.TmuxPaneID && current.PanePID == candidate.PanePID && current.AgentIncarnation == candidate.AgentIncarnation, nil
 }
 
 // ApplyPhysicalSessionObservation atomically records a monotonic physical
@@ -137,11 +294,19 @@ func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context,
 				freshness = observation.UpdatedAt
 			}
 			targetTable := sessionStorageTableForID(intent.ID)
-			if _, err := tx.ExecContext(writeCtx, `UPDATE `+targetTable+`
-				SET observed_state=?, activity=?, activity_source=?, updated_at=?
-				WHERE project_id=? AND logical_id=?`, observation.ObservedState,
-				observation.Activity, observation.ActivitySource, freshness.Format(time.RFC3339Nano),
-				observation.ProjectID, logicalSessionIntentID(intent)); err != nil {
+			setClause := "observed_state=?, activity=?, activity_source=?, updated_at=?"
+			args := []any{observation.ObservedState, observation.Activity, observation.ActivitySource, freshness.Format(time.RFC3339Nano)}
+			if observation.TmuxAttachedCount != nil {
+				setClause += ", tmux_attached_count=?"
+				args = append(args, *observation.TmuxAttachedCount)
+			}
+			if observation.StartedAt != nil {
+				setClause += ", started_at=?"
+				args = append(args, observation.StartedAt.Format(time.RFC3339Nano))
+			}
+			args = append(args, observation.ProjectID, logicalSessionIntentID(intent))
+			if _, err := tx.ExecContext(writeCtx, `UPDATE `+targetTable+` SET `+setClause+`
+				WHERE project_id=? AND logical_id=?`, args...); err != nil {
 				return fmt.Errorf("fan physical session observation into logical intent %s: %w", logicalSessionIntentID(intent), err)
 			}
 		}
@@ -258,6 +423,13 @@ func normalizePhysicalSessionObservation(observation PhysicalSessionObservation)
 	}
 	if observation.ObservedState == SessionStateStopped && (observation.Activity != "" || observation.ActivitySource != "") {
 		return observation, fmt.Errorf("physical session observation: stopped runtime cannot retain activity")
+	}
+	if observation.TmuxAttachedCount != nil && *observation.TmuxAttachedCount < 0 {
+		return observation, fmt.Errorf("physical session observation: tmux attachment count cannot be negative")
+	}
+	if observation.StartedAt != nil {
+		startedAt := observation.StartedAt.UTC()
+		observation.StartedAt = &startedAt
 	}
 	if observation.UpdatedAt.IsZero() {
 		observation.UpdatedAt = time.Now().UTC()
@@ -406,11 +578,30 @@ func (s *RuntimeStateStore) ListLegacyPhysicalObservationCandidates(ctx context.
 
 // RuntimeStateStore persists daemon-owned session/worktree state in sqlite.
 type RuntimeStateStore struct {
-	dbPath string
-	logger *slog.Logger
+	dbPath                  string
+	logger                  *slog.Logger
+	runtimeLivenessProbe    func(context.Context, string) (bool, error)
+	runtimeRepairDeleteHook func(table, sessionID string, index int) error
 
 	mu sync.Mutex
 	db *sql.DB
+}
+
+type runtimeOrphanKey struct{ table, projectID, sessionID, issueID string }
+
+// RuntimeStateStoreOption configures runtime-store reconciliation boundaries.
+type RuntimeStateStoreOption func(*RuntimeStateStore)
+
+// WithRuntimeLivenessProbe supplies the live runtime authority required before
+// startup may prune terminal projections whose issue authority is absent.
+func WithRuntimeLivenessProbe(probe func(context.Context, string) (bool, error)) RuntimeStateStoreOption {
+	return func(store *RuntimeStateStore) { store.runtimeLivenessProbe = probe }
+}
+
+// WithRuntimeRepairDeleteHookForTest injects failures into the orphan repair
+// transaction. Production callers must not use it to alter repair behavior.
+func WithRuntimeRepairDeleteHookForTest(hook func(table, sessionID string, index int) error) RuntimeStateStoreOption {
+	return func(store *RuntimeStateStore) { store.runtimeRepairDeleteHook = hook }
 }
 
 type sqliteWriteAttemptHookKey struct{}
@@ -429,6 +620,7 @@ func WithSQLiteWriteAttemptHookForTest(ctx context.Context, hook func(operation 
 // SessionStateReader loads persisted session state rows for a project.
 type SessionStateReader interface {
 	ListSessionStates(context.Context, string) ([]Session, error)
+	ListSessionStatesByIssueIDs(context.Context, string, []string) ([]Session, error)
 	ListSessionIntentStates(context.Context, string) ([]Session, error)
 	GetSessionState(context.Context, string, string) (Session, bool, error)
 	GetSessionIntent(context.Context, string, SessionRole, SessionScopeKind, string) (Session, bool, error)
@@ -479,7 +671,7 @@ var (
 const runtimeStateMaxOpenConns = 2
 
 // NewRuntimeStateStore returns a sqlite-backed daemon runtime-state store rooted at the repo db path.
-func NewRuntimeStateStore(repoDir string, logger *slog.Logger) *RuntimeStateStore {
+func NewRuntimeStateStore(repoDir string, logger *slog.Logger, options ...RuntimeStateStoreOption) *RuntimeStateStore {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -488,15 +680,23 @@ func NewRuntimeStateStore(repoDir string, logger *slog.Logger) *RuntimeStateStor
 		logger.Warn("failed to resolve runtime state db path", "repo_dir", repoDir, "error", err)
 		dbPath = filepath.Join(repoDir, ".azedarach", "azedarach.db")
 	}
-	return &RuntimeStateStore{dbPath: dbPath, logger: logger}
+	store := &RuntimeStateStore{dbPath: dbPath, logger: logger}
+	for _, option := range options {
+		option(store)
+	}
+	return store
 }
 
 // NewRuntimeStateStoreAtPath returns a sqlite-backed daemon runtime-state store at dbPath.
-func NewRuntimeStateStoreAtPath(dbPath string, logger *slog.Logger) *RuntimeStateStore {
+func NewRuntimeStateStoreAtPath(dbPath string, logger *slog.Logger, options ...RuntimeStateStoreOption) *RuntimeStateStore {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &RuntimeStateStore{dbPath: dbPath, logger: logger}
+	store := &RuntimeStateStore{dbPath: dbPath, logger: logger}
+	for _, option := range options {
+		option(store)
+	}
+	return store
 }
 
 func resolveRuntimeStateDBPath(repoDir string) (string, error) {
@@ -1310,11 +1510,40 @@ func sessionProjectionUnionSQL() string {
 }
 
 func (s *RuntimeStateStore) ListSessionStates(ctx context.Context, projectID string) ([]Session, error) {
-	return s.listSessionStatesFromQuery(ctx, projectID, sessionProjectionUnionSQL())
+	return s.listSessionStatesFromQuery(ctx, projectID, sessionProjectionUnionSQL(), "", nil)
+}
+
+// ListSessionStatesByIssueIDs loads only runtime rows in the requested issue
+// scope. The physical tables' project/issue indexes keep historical rows
+// outside the graph from being scanned and materialized.
+func (s *RuntimeStateStore) ListSessionStatesByIssueIDs(ctx context.Context, projectID string, issueIDs []string) ([]Session, error) {
+	unique := make([]string, 0, len(issueIDs))
+	seen := make(map[string]struct{}, len(issueIDs))
+	for _, issueID := range issueIDs {
+		issueID = strings.TrimSpace(issueID)
+		if issueID == "" {
+			continue
+		}
+		if _, ok := seen[issueID]; ok {
+			continue
+		}
+		seen[issueID] = struct{}{}
+		unique = append(unique, issueID)
+	}
+	if len(unique) == 0 {
+		return []Session{}, nil
+	}
+	sort.Strings(unique)
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(unique)), ",")
+	args := make([]any, 0, len(unique))
+	for _, issueID := range unique {
+		args = append(args, issueID)
+	}
+	return s.listSessionStatesFromQuery(ctx, projectID, sessionProjectionUnionSQL(), "AND issue_id IN ("+placeholders+")", args)
 }
 
 func (s *RuntimeStateStore) ListSessionIntentStates(ctx context.Context, projectID string) ([]Session, error) {
-	return s.listSessionStatesFromQuery(ctx, projectID, `
+	sourceQuery := `
 		SELECT
 			project_id,
 			session_id,
@@ -1329,15 +1558,17 @@ func (s *RuntimeStateStore) ListSessionIntentStates(ctx context.Context, project
 			tmux_attached_count,
 			started_at,
 			updated_at
-		FROM `+sessionStateTable)
+		FROM ` + sessionStateTable
+	return s.listSessionStatesFromQuery(ctx, projectID, sourceQuery, "", nil)
 }
 
-func (s *RuntimeStateStore) listSessionStatesFromQuery(ctx context.Context, projectID, sourceQuery string) ([]Session, error) {
+func (s *RuntimeStateStore) listSessionStatesFromQuery(ctx context.Context, projectID, sourceQuery, filterSQL string, filterArgs []any) ([]Session, error) {
 	db, err := s.dbHandle()
 	if err != nil {
 		return nil, err
 	}
 	projectID = normalizedProjectID(projectID)
+	queryArgs := append([]any{projectID}, filterArgs...)
 	rows, err := db.QueryContext(ctx, `
 		SELECT
 			session_id,
@@ -1353,9 +1584,9 @@ func (s *RuntimeStateStore) listSessionStatesFromQuery(ctx context.Context, proj
 			COALESCE(started_at, ''),
 			updated_at
 		FROM (`+sourceQuery+`)
-		WHERE project_id = ?
+		WHERE project_id = ? `+filterSQL+`
 		ORDER BY updated_at DESC, session_id ASC
-	`, projectID)
+	`, queryArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("list session state rows %s: %w", projectID, err)
 	}
@@ -2111,7 +2342,7 @@ func (s *RuntimeStateStore) dbHandle() (*sql.DB, error) {
 	db.SetConnMaxLifetime(0)
 	db.SetConnMaxIdleTime(0)
 	if err := sqliteutil.WithWriteLock(s.dbPath, func() error {
-		return ensureRuntimeStateSchema(context.Background(), db)
+		return ensureRuntimeStateSchema(context.Background(), db, s.runtimeLivenessProbe, s.runtimeRepairDeleteHook)
 	}); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -2233,7 +2464,7 @@ func isSQLiteWriteContention(err error) bool {
 	return false
 }
 
-func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
+func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB, runtimeLivenessProbe func(context.Context, string) (bool, error), runtimeRepairDeleteHook func(string, string, int) error) error {
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS ` + physicalSessionObservationTable + ` (
 			project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
@@ -2246,6 +2477,19 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 			PRIMARY KEY(project_id, session_id),
 			CHECK (observed_state <> 'stopped' OR (activity = '' AND activity_source = ''))
 		)`,
+		`CREATE TABLE IF NOT EXISTS ` + managedAgentIdentityTable + ` (
+			project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
+			session_id TEXT NOT NULL CHECK (trim(session_id) <> ''),
+			logical_pane_id TEXT NOT NULL CHECK (trim(logical_pane_id) <> ''),
+			tmux_pane_id TEXT NOT NULL CHECK (trim(tmux_pane_id) <> ''),
+			pane_pid INTEGER NOT NULL CHECK (pane_pid > 0),
+			agent_incarnation TEXT NOT NULL CHECK (trim(agent_incarnation) <> ''),
+			observed_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY(project_id, session_id, logical_pane_id)
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_daemon_managed_agent_physical_incarnation
+			ON ` + managedAgentIdentityTable + ` (project_id, tmux_pane_id, pane_pid, agent_incarnation)`,
 		`CREATE TABLE IF NOT EXISTS ` + sessionStateTable + ` (
 			project_id TEXT NOT NULL,
 			logical_id TEXT GENERATED ALWAYS AS (role||':'||scope_kind||':'||scope_id||CASE WHEN instr(session_id,'.pane-')>0 THEN ':pane:'||session_id ELSE '' END) STORED,
@@ -2265,6 +2509,8 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daemon_session_projections_project_issue
 			ON ` + sessionStateTable + ` (project_id, issue_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_daemon_session_projections_project_issue_updated
+			ON ` + sessionStateTable + ` (project_id, issue_id, updated_at DESC, session_id DESC)`,
 		`CREATE TABLE IF NOT EXISTS ` + sessionObservationTable + ` (
 			project_id TEXT NOT NULL,
 			logical_id TEXT GENERATED ALWAYS AS (role||':'||scope_kind||':'||scope_id||CASE WHEN instr(session_id,'.pane-')>0 THEN ':pane:'||session_id ELSE '' END) STORED,
@@ -2284,6 +2530,8 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daemon_session_observations_project_issue
 			ON ` + sessionObservationTable + ` (project_id, issue_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_daemon_session_observations_project_issue_updated
+			ON ` + sessionObservationTable + ` (project_id, issue_id, updated_at DESC, session_id DESC)`,
 		`CREATE TABLE IF NOT EXISTS ` + orchestratorLeaseTable + ` (
 			project_id TEXT NOT NULL,
 			scope_kind TEXT NOT NULL CHECK (scope_kind IN ('project', 'rooted')),
@@ -2426,7 +2674,7 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB) error {
 	if err := migrateSessionObservations(ctx, db); err != nil {
 		return err
 	}
-	if err := ensureRuntimeSessionProductConstraints(ctx, db); err != nil {
+	if err := ensureRuntimeSessionProductConstraints(ctx, db, runtimeLivenessProbe, runtimeRepairDeleteHook); err != nil {
 		return err
 	}
 	if err := ensureSessionActivityEvidenceSourceKey(ctx, db); err != nil {
@@ -2795,14 +3043,19 @@ func ensureRuntimeLogicalSessionIdentitySchema(ctx context.Context, db *sql.DB) 
 		}
 	}
 	for _, table := range []string{sessionStateTable, sessionObservationTable} {
-		if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_`+table+`_project_issue ON `+table+`(project_id,issue_id)`); err != nil {
+		if _, err := db.ExecContext(ctx, `
+			CREATE INDEX IF NOT EXISTS idx_`+table+`_project_issue
+				ON `+table+`(project_id,issue_id);
+			CREATE INDEX IF NOT EXISTS idx_`+table+`_project_issue_updated
+				ON `+table+`(project_id,issue_id,updated_at DESC,session_id DESC);
+		`); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB) error {
+func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB, runtimeLivenessProbe func(context.Context, string) (bool, error), runtimeRepairDeleteHook func(string, string, int) error) error {
 	var issuesTableCount int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='issues'`).Scan(&issuesTableCount); err != nil {
 		return fmt.Errorf("inspect relational issue authority: %w", err)
@@ -2821,6 +3074,12 @@ func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB) err
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='interaction_requests'`).Scan(&interactionTableCount); err != nil {
 		return fmt.Errorf("inspect relational interaction authority: %w", err)
 	}
+	var terminalOrphans []runtimeOrphanKey
+	type livenessResult struct {
+		live bool
+		err  error
+	}
+	livenessBySession := make(map[string]livenessResult)
 	for _, table := range []string{sessionStateTable, sessionObservationTable} {
 		if _, err := db.ExecContext(ctx, `UPDATE `+table+` SET state=CASE WHEN state='attached' THEN 'running' ELSE state END, observed_state=CASE WHEN observed_state='attached' THEN 'running' ELSE observed_state END WHERE state='attached' OR observed_state='attached'`); err != nil {
 			return fmt.Errorf("normalize %s legacy attached state: %w", table, err)
@@ -2828,14 +3087,14 @@ func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB) err
 		if _, err := db.ExecContext(ctx, `UPDATE `+table+` SET scope_id=issue_id WHERE role='worker' AND scope_kind='issue' AND trim(scope_id)=''`); err != nil {
 			return fmt.Errorf("backfill %s worker scope identity: %w", table, err)
 		}
-		rows, err := db.QueryContext(ctx, `SELECT session_id,issue_id,role,scope_kind,scope_id,state,COALESCE(observed_state,''),tmux_attached_count FROM `+table)
+		rows, err := db.QueryContext(ctx, `SELECT project_id,session_id,issue_id,role,scope_kind,scope_id,state,COALESCE(observed_state,''),tmux_attached_count FROM `+table)
 		if err != nil {
 			return fmt.Errorf("validate %s session products: %w", table, err)
 		}
 		for rows.Next() {
 			var session Session
-			var role, scopeKind, state, observed string
-			if err := rows.Scan(&session.ID, &session.IssueID, &role, &scopeKind, &session.ScopeID, &state, &observed, &session.TmuxAttachedCount); err != nil {
+			var projectID, role, scopeKind, state, observed string
+			if err := rows.Scan(&projectID, &session.ID, &session.IssueID, &role, &scopeKind, &session.ScopeID, &state, &observed, &session.TmuxAttachedCount); err != nil {
 				_ = rows.Close()
 				return fmt.Errorf("scan %s session product: %w", table, err)
 			}
@@ -2852,8 +3111,30 @@ func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB) err
 					return fmt.Errorf("inspect historical runtime authority %s/%s issue: %w", table, session.ID, err)
 				}
 				if count != 1 && !legacyRootIssueProjection {
-					_ = rows.Close()
-					return fmt.Errorf("invalid historical runtime authority %s/%s: issue does not exist", table, session.ID)
+					terminal := session.State == SessionStateStopped && session.ObservedState == SessionStateStopped && session.TmuxAttachedCount == 0
+					if !terminal || runtimeLivenessProbe == nil {
+						_ = rows.Close()
+						return fmt.Errorf("invalid historical runtime authority %s/%s: issue does not exist; live runtime is unverified, run daemon runtime reconcile after restoring issue authority or stop the session explicitly", table, session.ID)
+					}
+					probeID := strings.TrimSpace(strings.SplitN(session.ID, ".pane-", 2)[0])
+					classifyCtx, endClassification := latencytrace.StartSpanWithEndAttributes(ctx, "daemon", "runtime_projection.orphan_classification", "project_id", projectID, "issue_id", session.IssueID)
+					result, probed := livenessBySession[probeID]
+					if !probed {
+						result.live, result.err = runtimeLivenessProbe(classifyCtx, probeID)
+						livenessBySession[probeID] = result
+					}
+					live, probeErr := result.live, result.err
+					if probeErr != nil || live {
+						endClassification(probeErr, "outcome", map[bool]string{true: "live", false: "probe_failed"}[live])
+						_ = rows.Close()
+						if probeErr != nil {
+							return fmt.Errorf("classify missing-issue runtime authority %s/%s: live runtime probe failed: %w", table, session.ID, probeErr)
+						}
+						return fmt.Errorf("invalid historical runtime authority %s/%s: issue does not exist but runtime %s is live; restore issue authority or stop the session explicitly", table, session.ID, probeID)
+					}
+					endClassification(nil, "outcome", "repairable")
+					terminalOrphans = append(terminalOrphans, runtimeOrphanKey{table: table, projectID: projectID, sessionID: session.ID, issueID: session.IssueID})
+					continue
 				}
 			}
 			if interactionTableCount > 0 && session.Role == SessionRoleAdvisor {
@@ -2906,6 +3187,41 @@ func ensureRuntimeSessionProductConstraints(ctx context.Context, db *sql.DB) err
 				return fmt.Errorf("create %s session product trigger: %w", table, err)
 			}
 		}
+	}
+	if err := pruneTerminalRuntimeOrphans(ctx, db, terminalOrphans, runtimeRepairDeleteHook); err != nil {
+		return err
+	}
+	return nil
+}
+
+func pruneTerminalRuntimeOrphans(ctx context.Context, db *sql.DB, orphans []runtimeOrphanKey, hook func(string, string, int) error) (err error) {
+	if len(orphans) == 0 {
+		return nil
+	}
+	ctx, endRepair := latencytrace.StartSpanWithEndAttributes(ctx, "daemon", "runtime_projection.orphan_repair", "task_count", len(orphans))
+	defer func() { endRepair(err, "outcome", map[bool]string{true: "rolled_back", false: "repaired"}[err != nil]) }()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin terminal missing-issue runtime repair: %w", err)
+	}
+	rollback := func(cause error) error {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			return errors.Join(cause, fmt.Errorf("rollback terminal missing-issue runtime repair: %w", rollbackErr))
+		}
+		return cause
+	}
+	for i, orphan := range orphans {
+		if hook != nil {
+			if hookErr := hook(orphan.table, orphan.sessionID, i); hookErr != nil {
+				return rollback(fmt.Errorf("inject terminal missing-issue runtime repair %s/%s: %w", orphan.table, orphan.sessionID, hookErr))
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+orphan.table+` WHERE project_id=? AND session_id=? AND issue_id=?`, orphan.projectID, orphan.sessionID, orphan.issueID); err != nil {
+			return rollback(fmt.Errorf("prune terminal missing-issue runtime authority %s/%s: %w", orphan.table, orphan.sessionID, err))
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return rollback(fmt.Errorf("commit terminal missing-issue runtime repair: %w", err))
 	}
 	return nil
 }

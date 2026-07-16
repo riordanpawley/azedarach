@@ -129,6 +129,39 @@ func TestReconcileStaleBusySessionActivitySkipsFreshAndActivePane(t *testing.T) 
 	}
 }
 
+func TestReconcileStaleBusySessionActivityUsesPersistedTerminalFailureAfterRestart(t *testing.T) {
+	now := time.Date(2026, 7, 14, 1, 0, 0, 0, time.UTC)
+	previousNow := timeNow
+	timeNow = func() time.Time { return now }
+	t.Cleanup(func() { timeNow = previousNow })
+	ctx := context.Background()
+	const projectID, issueID = "project", "dgs"
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
+		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning, Activity: "error", ActivitySource: "terminal", UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertSessionActivityEvidence(ctx, daemonstate.SessionActivityEvidence{
+		ProjectID: projectID, SessionID: sessionID, IssueID: issueID,
+		Activity: "busy", ActivitySource: "hooks", SourceSessionID: sessionID,
+		ObservedAt: now.Add(-time.Minute), UpdatedAt: now.Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &terminalFailureProbeRunner{output: "⚠ Selected model is at capacity. Please try a different model."}
+	d := &Daemon{
+		cfg: Config{Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+	}
+	if count, err := d.reconcileStaleBusySessionActivity(ctx, projectID, nil); err != nil || count != 0 || runner.callCount() != 0 {
+		t.Fatalf("restart convergence count=%d captures=%d err=%v, want persisted terminal projection without re-probe", count, runner.callCount(), err)
+	}
+}
+
 func TestReconcileStaleBusySessionActivityDoesNotOverwriteNewerBusyHook(t *testing.T) {
 	now := time.Date(2026, 7, 14, 1, 0, 0, 0, time.UTC)
 	previousNow := timeNow
@@ -197,9 +230,14 @@ func TestReconcileStaleBusySessionActivityRevalidatesCachedIdlePromptAgainstActi
 		cfg: Config{Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()),
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
 	}
-	d.applyTerminalFailureProbes(ctx, projectID, []daemonstate.Session{{ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning}}, projectID, map[string]sessionDisplayActivity{
+	if _, err := d.observeTerminalFailureProbes(ctx, projectID, []daemonstate.Session{{
+		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning, UpdatedAt: staleAt,
+	}}, projectID, map[string]sessionDisplayActivity{
 		sessionKey(issueID): {Activity: "busy", Source: "hooks", UpdatedAt: staleAt},
-	})
+	}); err != nil {
+		t.Fatalf("seed asynchronous idle-prompt observation: %v", err)
+	}
 	runner.mu.Lock()
 	runner.output = "• Working (2s)\nRunning tests"
 	runner.mu.Unlock()
@@ -246,9 +284,14 @@ func TestReconcileStaleBusySessionActivityNewHookResetsOlderIdleProbeBackoff(t *
 		cfg: Config{Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()),
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
 	}
-	d.applyTerminalFailureProbes(ctx, projectID, []daemonstate.Session{{ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning}}, projectID, map[string]sessionDisplayActivity{
+	if _, err := d.observeTerminalFailureProbes(ctx, projectID, []daemonstate.Session{{
+		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning, UpdatedAt: oldHookAt,
+	}}, projectID, map[string]sessionDisplayActivity{
 		sessionKey(issueID): {Activity: "busy", Source: "hooks", UpdatedAt: oldHookAt},
-	})
+	}); err != nil {
+		t.Fatalf("seed asynchronous idle-prompt observation: %v", err)
+	}
 	newHookAt := now.Add(time.Second)
 	if err := store.UpsertSessionActivityEvidence(ctx, daemonstate.SessionActivityEvidence{
 		ProjectID: projectID, SessionID: sessionID, IssueID: issueID,

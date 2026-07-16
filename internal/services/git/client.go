@@ -48,6 +48,8 @@ type Client struct {
 	diffStatMu      sync.Mutex
 	diffStatBackoff map[string]diffStatBackoffState
 	now             func() time.Time
+	removeJournal   func(string) error
+	syncJournalDir  func(string) error
 }
 
 type diffStatBackoffState struct {
@@ -80,18 +82,19 @@ func (e diffStatBackoffError) Error() string {
 
 // GitStatus represents the status of a git repository.
 type GitStatus struct {
-	Modified       []string `json:"modified"`
-	Added          []string `json:"added"`
-	Deleted        []string `json:"deleted"`
-	Untracked      []string `json:"untracked"`
-	Staged         []string `json:"staged"`
-	Conflicted     []string `json:"conflicted,omitempty"`
-	HasChanges     bool     `json:"has_changes"`
-	HasConflicts   bool     `json:"has_conflicts,omitempty"`
-	GitAdditions   int      `json:"git_additions,omitempty"`
-	GitDeletions   int      `json:"git_deletions,omitempty"`
-	GitAheadCount  int      `json:"git_ahead_count,omitempty"`
-	GitBehindCount int      `json:"git_behind_count,omitempty"`
+	Modified          []string `json:"modified"`
+	Added             []string `json:"added"`
+	Deleted           []string `json:"deleted"`
+	Untracked         []string `json:"untracked"`
+	Staged            []string `json:"staged"`
+	Conflicted        []string `json:"conflicted,omitempty"`
+	HasChanges        bool     `json:"has_changes"`
+	HasConflicts      bool     `json:"has_conflicts,omitempty"`
+	GitAdditions      int      `json:"git_additions,omitempty"`
+	GitDeletions      int      `json:"git_deletions,omitempty"`
+	GitAheadCount     int      `json:"git_ahead_count,omitempty"`
+	GitBehindCount    int      `json:"git_behind_count,omitempty"`
+	hasTrackedChanges bool
 }
 
 // EvidenceCommit is an issue-scoped commit found on a branch.
@@ -121,11 +124,57 @@ type RefGraphCommit struct {
 
 // MergeResult represents the result of a git merge operation.
 type MergeResult struct {
-	Success         bool
-	HasConflicts    bool
-	ConflictFiles   []string
-	Message         string
-	HookDiagnostics []GitHookDiagnostic `json:"hook_diagnostics,omitempty"`
+	Success            bool
+	HasConflicts       bool
+	ConflictFiles      []string
+	Message            string
+	HookDiagnostics    []GitHookDiagnostic          `json:"hook_diagnostics,omitempty"`
+	ValidationAttempts []CandidateValidationAttempt `json:"validation_attempts,omitempty"`
+}
+
+type CandidateValidationStatus = domain.IntegrationCandidateValidationStatus
+
+// CandidateValidationAttempt identifies the exact reconciled commit evaluated
+// by a repository integration gate. Canonical is true only after that same OID
+// has been applied to the target worktree successfully.
+type CandidateValidationAttempt = domain.IntegrationCandidateValidationAttempt
+
+const (
+	CandidateValidationRunning    = domain.IntegrationCandidateValidationRunning
+	CandidateValidationPassed     = domain.IntegrationCandidateValidationPassed
+	CandidateValidationFailed     = domain.IntegrationCandidateValidationFailed
+	CandidateValidationCancelled  = domain.IntegrationCandidateValidationCancelled
+	CandidateValidationSuperseded = domain.IntegrationCandidateValidationSuperseded
+)
+
+type candidateValidationObserverKey struct{}
+
+type CandidateValidationObserver func(CandidateValidationAttempt)
+
+func WithCandidateValidationObserver(ctx context.Context, observer CandidateValidationObserver) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if observer == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, candidateValidationObserverKey{}, observer)
+}
+
+func notifyCandidateValidation(ctx context.Context, attempt CandidateValidationAttempt) {
+	if ctx == nil {
+		return
+	}
+	observer, _ := ctx.Value(candidateValidationObserverKey{}).(CandidateValidationObserver)
+	if observer != nil {
+		observer(attempt)
+	}
+}
+
+// ReportCandidateValidation delivers candidate disposition changes to an
+// observer attached by the daemon integration boundary.
+func ReportCandidateValidation(ctx context.Context, attempt CandidateValidationAttempt) {
+	notifyCandidateValidation(ctx, attempt)
 }
 
 // GitHookDiagnostic describes synchronous git hook time observed while a git
@@ -173,8 +222,9 @@ func NewClient(runner CommandRunner, logger *slog.Logger) *Client {
 		logger = slog.Default()
 	}
 	return &Client{
-		runner: runner,
-		logger: logger,
+		runner:         runner,
+		logger:         logger,
+		syncJournalDir: syncDirectory,
 	}
 }
 
@@ -257,12 +307,16 @@ func (c *Client) Fetch(ctx context.Context, worktree, remote string) error {
 // Merge merges the specified branch into the current branch.
 // It detects merge conflicts and returns detailed information.
 func (c *Client) Merge(ctx context.Context, worktree, branch string) (*MergeResult, error) {
+	return c.mergeWithEnv(ctx, worktree, branch, nil)
+}
+
+func (c *Client) mergeWithEnv(ctx context.Context, worktree, branch string, extraEnv []string) (*MergeResult, error) {
 	c.logger.Info("merging branch", "worktree", worktree, "branch", branch)
 
 	runCtx, cancel := mergeCommandContext(ctx)
 	defer cancel()
 
-	output, err, hookDiagnostics := c.runMergeWithHookDiagnostics(runCtx, worktree, branch)
+	output, err, hookDiagnostics := c.runMergeWithHookDiagnostics(runCtx, worktree, branch, extraEnv)
 
 	result := &MergeResult{
 		Success:      err == nil,
@@ -313,10 +367,10 @@ func mergeCommandContext(ctx context.Context) (context.Context, context.CancelFu
 	return context.WithTimeout(ctx, domain.IntegrationMergeTimeout)
 }
 
-func (c *Client) runMergeWithHookDiagnostics(ctx context.Context, worktree, branch string) (string, error, []GitHookDiagnostic) {
+func (c *Client) runMergeWithHookDiagnostics(ctx context.Context, worktree, branch string, extraEnv []string) (string, error, []GitHookDiagnostic) {
 	traceFile, err := os.CreateTemp("", "azedarach-git-trace2-*.json")
 	if err != nil {
-		output, runErr := c.runInWorktree(ctx, worktree, "merge", "--no-edit", branch)
+		output, runErr := c.runInWorktreeWithEnv(ctx, worktree, extraEnv, "merge", "--no-edit", branch)
 		return output, runErr, nil
 	}
 	tracePath := traceFile.Name()
@@ -324,7 +378,9 @@ func (c *Client) runMergeWithHookDiagnostics(ctx context.Context, worktree, bran
 	defer os.Remove(tracePath)
 
 	startedAt := time.Now()
-	output, runErr := c.runInWorktreeWithEnv(ctx, worktree, []string{"GIT_TRACE2_EVENT=" + tracePath}, "merge", "--no-edit", branch)
+	mergeEnv := append([]string(nil), extraEnv...)
+	mergeEnv = append(mergeEnv, "GIT_TRACE2_EVENT="+tracePath)
+	output, runErr := c.runInWorktreeWithEnv(ctx, worktree, mergeEnv, "merge", "--no-edit", branch)
 	elapsed := time.Since(startedAt)
 	diagnostics := parseGitMergeHookDiagnostics(tracePath, mergeCommandShape(), startedAt.Add(elapsed), errors.Is(ctx.Err(), context.DeadlineExceeded))
 	return output, runErr, diagnostics
@@ -340,6 +396,10 @@ func mergeCommandShape() string {
 // result is reported as unsuccessful so higher-level integration can halt
 // without leaving the target branch dirty.
 func (c *Client) MergeCleanly(ctx context.Context, worktree, branch string) (*MergeResult, error) {
+	return c.mergeCleanlyWithEnv(ctx, worktree, branch, nil)
+}
+
+func (c *Client) mergeCleanlyWithEnv(ctx context.Context, worktree, branch string, extraEnv []string) (*MergeResult, error) {
 	preStatus, preStatusErr := c.Status(ctx, worktree)
 	targetWasClean := preStatusErr == nil && !gitStatusDirty(preStatus)
 	if preStatusErr != nil {
@@ -350,7 +410,7 @@ func (c *Client) MergeCleanly(ctx context.Context, worktree, branch string) (*Me
 		)
 	}
 
-	result, err := c.Merge(ctx, worktree, branch)
+	result, err := c.mergeWithEnv(ctx, worktree, branch, extraEnv)
 	if err != nil {
 		return c.cleanFailedMergeSideEffects(ctx, worktree, branch, targetWasClean, preStatusErr, err)
 	}
@@ -1649,6 +1709,9 @@ func parseGitStatus(output string) *GitStatus {
 		workTreeStatus := line[1]
 		path := strings.TrimSpace(line[2:])
 		statusCode := line[:2]
+		if statusCode != "??" && statusCode != "!!" {
+			status.hasTrackedChanges = true
+		}
 
 		// Check if file is staged (index status is not space or ?)
 		if indexStatus != ' ' && indexStatus != '?' {
@@ -1670,7 +1733,8 @@ func parseGitStatus(output string) *GitStatus {
 		}
 	}
 
-	status.HasChanges = len(status.Modified) > 0 ||
+	status.HasChanges = status.hasTrackedChanges ||
+		len(status.Modified) > 0 ||
 		len(status.Added) > 0 ||
 		len(status.Deleted) > 0 ||
 		len(status.Untracked) > 0 ||
@@ -1691,6 +1755,19 @@ func gitStatusDirty(status *GitStatus) bool {
 		len(status.Added) > 0 ||
 		len(status.Deleted) > 0 ||
 		len(status.Untracked) > 0 ||
+		len(status.Staged) > 0 ||
+		len(status.Conflicted) > 0
+}
+
+func gitStatusHasTrackedChanges(status *GitStatus) bool {
+	if status == nil {
+		return false
+	}
+	return status.hasTrackedChanges ||
+		status.HasConflicts ||
+		len(status.Modified) > 0 ||
+		len(status.Added) > 0 ||
+		len(status.Deleted) > 0 ||
 		len(status.Staged) > 0 ||
 		len(status.Conflicted) > 0
 }

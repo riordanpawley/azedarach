@@ -27,7 +27,10 @@ cleanup on the same owned bytes.
 The outer `scripts/with-machine-validation-lease` wrapper is a thin client of
 the daemon-owned repository-family validation queue. Aggregate work is
 exclusive; shared focused validators may run concurrently until an aggregate
-waiter reaches the head of the fair durable queue; explicitly safe work may run
+waiter reaches the head of the fair durable queue. When shared work is already
+active, one later shared request may bypass the oldest aggregate; durable
+request history then closes the shared lane until that aggregate runs, even
+across daemon replacement. Explicitly safe work may run
 beside an aggregate owner. The wrapper acquires before `go run` compilation,
 heartbeats the durable request, and nested managed commands join its request.
 The safe lane is bounded to daemon-recognized non-compiling command/profile

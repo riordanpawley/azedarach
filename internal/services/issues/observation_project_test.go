@@ -78,6 +78,39 @@ func TestListIssueObservationEventsForIssuesBoundsEachIssueInOneResult(t *testin
 	}
 }
 
+func TestGetProjectIssueObservationEventsByIDsUsesSparseExactPositions(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, CreateTaskParams{Title: "sparse", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := client.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{Type: domain.IssueEventProgressRecorded, Source: "worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := client.dbHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE sqlite_sequence SET seq=10000 WHERE name='issue_observation_events'`); err != nil {
+		t.Fatal(err)
+	}
+	last, err := client.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{Type: domain.IssueEventProgressRecorded, Source: "worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := client.GetProjectIssueObservationEventsByIDs(ctx, []int64{last.ID, first.ID, last.ID, -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].ID != first.ID || events[1].ID != last.ID || last.ID-first.ID <= 5000 {
+		t.Fatalf("sparse exact events = %+v, first=%d last=%d", events, first.ID, last.ID)
+	}
+}
+
 func TestListLatestIssueObservationEventsByIssueScopesAndRanksCandidates(t *testing.T) {
 	parallelIssueStoreTest(t)
 	ctx := context.Background()

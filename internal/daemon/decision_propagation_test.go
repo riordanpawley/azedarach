@@ -171,7 +171,7 @@ func TestParallelWorkerMaterialDecisionPropagationAndAcknowledgement(t *testing.
 		t.Fatalf("review snapshot queue=%+v, want refreshed structured evidence and one pending decision", reviewSnapshot.ReviewQueue)
 	}
 	result, err := restarted.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{
-		Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept,
+		Scope: mustRootedDecisionScope(t, root), Kind: protocol.OrchestrationIntentReviewAccept,
 		IntentKey: "reject-stale-material-decision", ActorID: "orchestrator", IssueIDs: []string{second}, RepoDir: repoDir,
 	})
 	if err != nil || !strings.Contains(result.Failed[second], "stale material decisions") {

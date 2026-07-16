@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -80,9 +81,11 @@ var orderedMigrations = []migration{
 	{id: "0044_learning_activation_abandonment", path: "migrations/0044_learning_activation_abandonment.sql"},
 	{id: "0045_issue_state_runtime_constraints", path: "migrations/0045_issue_state_runtime_constraints.sql", apply: applyIssueStateRuntimeConstraintsMigration},
 	{id: "0046_repair_issue_state_runtime_constraints", path: "migrations/0046_repair_issue_state_runtime_constraints.manifest.sql", apply: applyIssueStateRuntimeConstraintsRepairMigration},
+	{id: projectionDeltaAuthorityMigrationID, path: "migrations/0047_projection_delta_authority.sql", apply: applyProjectionDeltaAuthorityMigration},
 	{id: humanAuthorityProjectionMigrationID, path: "migrations/0047_human_authority_projection_revision.sql"},
 	{id: "0048_decision_propagation_outbox", path: "migrations/0048_decision_propagation_outbox.sql"},
 	{id: mailboxObservationProjectionCutoverMigrationID, path: "migrations/0048_mailbox_observation_projection_cutover.sql"},
+	{id: "0049_managed_agent_incarnations", path: "migrations/0049_managed_agent_incarnations.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -136,9 +139,11 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "0044_learning_activation_abandonment", Path: "migrations/0044_learning_activation_abandonment.sql", Checksum: "56276dedf6d63e8db3e0a58e49cd29d7d862bc83ec7fdf1eb9615127004f607c"},
 	{ID: "0045_issue_state_runtime_constraints", Path: "migrations/0045_issue_state_runtime_constraints.sql", Checksum: "67a11506f5d49059280d6406cbf1e66155549e4e573978f78f3e43b5ea944f23"},
 	{ID: "0046_repair_issue_state_runtime_constraints", Path: "migrations/0046_repair_issue_state_runtime_constraints.manifest.sql", Checksum: "6420b559de666287450e274b283b2e481c1472e3b02914f3023019975216e20d"},
+	{ID: projectionDeltaAuthorityMigrationID, Path: "migrations/0047_projection_delta_authority.sql", Checksum: projectionDeltaAuthorityChecksum},
 	{ID: humanAuthorityProjectionMigrationID, Path: "migrations/0047_human_authority_projection_revision.sql", Checksum: "ac3a48512b2e6e9c018d58a68db24a2465e9d172139d22f8378f69677073a0ab"},
 	{ID: "0048_decision_propagation_outbox", Path: "migrations/0048_decision_propagation_outbox.sql", Checksum: "a12c44ba35156d71fbcd88a9d78e4cdb234e75e7e4aef5f896c8b1182ada858d"},
 	{ID: mailboxObservationProjectionCutoverMigrationID, Path: "migrations/0048_mailbox_observation_projection_cutover.sql", Checksum: "281f07694377b64c8ad2930add9238b7f397c49f4d0af0a402f804aeac367379"},
+	{ID: "0049_managed_agent_incarnations", Path: "migrations/0049_managed_agent_incarnations.sql", Checksum: "8364ceb9fad589df3f73c1fe0f0462c22b127510f1745e62fcc11e24757fe08d"},
 }
 
 func validateMigrationRegistry() error {
@@ -432,6 +437,8 @@ const (
 	issueStateModelV2CutoverMarkerKey                                        = "issue:state_model_v2_cutover"
 	issueStateModelV2Version                                                 = "2"
 	boardViewsMigrationID                                                    = "0031_board_views"
+	projectionDeltaAuthorityMigrationID                                      = "0047_projection_delta_authority"
+	projectionDeltaAuthorityChecksum                                         = "9f7bed54f9694c608c7ce081c4007539eb46ce67adc9127d5649a1dbb49b6c5a"
 	humanAuthorityProjectionMigrationID                                      = "0047_human_authority_projection_revision"
 	mailboxObservationProjectionCutoverMigrationID                           = "0048_mailbox_observation_projection_cutover"
 	mailboxObservationProjectionCutoverMetaKey                               = "issue:mailbox_observation_projection_cutover"
@@ -453,6 +460,9 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("validate migration registry: %w", err)
 	}
 	if err := ensureMigrationTable(ctx, db); err != nil {
+		return err
+	}
+	if err := c.repairKnownProjectionDeltaBlankChecksum(ctx, db); err != nil {
 		return err
 	}
 	if err := sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifactAuthority, migrationArtifacts); err != nil {
@@ -558,6 +568,18 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := validateMailboxObservationProjectionCutover(ctx, db); err != nil {
 		return err
 	}
+	if err := validateProjectionDeltaAuthoritySchema(ctx, db); err != nil {
+		return fmt.Errorf("validate projection delta authority schema: %w", err)
+	}
+	managedIdentityApplied, err := isMigrationApplied(ctx, db, "0049_managed_agent_incarnations")
+	if err != nil {
+		return fmt.Errorf("check managed agent identity migration: %w", err)
+	}
+	if managedIdentityApplied {
+		if err := validateManagedAgentIdentitySchema(ctx, db); err != nil {
+			return err
+		}
+	}
 
 	canonicalApplied, err := isMigrationApplied(ctx, db, "0045_issue_state_runtime_constraints")
 	if err != nil {
@@ -577,7 +599,7 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	}
 	if err := c.retrySQLiteBusy(ctx, func() error {
 		return sqliteutil.WithWriteLock(c.dbPath, func() error {
-			return c.seedBuiltInBoardViews(ctx, db, "default")
+			return c.seedAllBuiltInBoardViews(ctx, db)
 		})
 	}); err != nil {
 		return fmt.Errorf("seed built-in board views: %w", err)
@@ -599,6 +621,363 @@ func validateMailboxObservationProjectionCutover(ctx context.Context, db *sql.DB
 	}
 	if marker.Version != 1 || marker.State != "pending" && marker.State != "complete" {
 		return fmt.Errorf("applied migration %s has unsupported cutover marker state=%q version=%d", mailboxObservationProjectionCutoverMigrationID, marker.State, marker.Version)
+	}
+	return nil
+}
+
+func applyProjectionDeltaAuthorityMigration(ctx context.Context, db *sql.DB, id string) error {
+	return applyProjectionDeltaAuthorityMigrationWithValidator(ctx, db, id, validateProjectionDeltaAuthoritySchema)
+}
+
+func applyProjectionDeltaAuthorityMigrationWithValidator(ctx context.Context, db *sql.DB, id string, validate func(context.Context, projectionDeltaSchemaReader) error) error {
+	sqlText, err := loadMigrationSQL("migrations/0047_projection_delta_authority.sql")
+	if err != nil {
+		return fmt.Errorf("load migration %s: %w", id, err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+		return fmt.Errorf("apply migration %s: %w", id, err)
+	}
+	if err := validate(ctx, tx); err != nil {
+		return fmt.Errorf("validate migration %s before ledger stamp: %w", id, err)
+	}
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	return nil
+}
+
+type projectionDeltaSchemaReader interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (c *Client) repairKnownProjectionDeltaBlankChecksum(ctx context.Context, db *sql.DB) error {
+	var hasChecksumColumn bool
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(schema_migrations)`)
+	if err != nil {
+		return fmt.Errorf("inspect projection delta compatibility ledger: %w", err)
+	}
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, typ string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan projection delta compatibility ledger: %w", err)
+		}
+		hasChecksumColumn = hasChecksumColumn || name == "artifact_checksum"
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close projection delta compatibility ledger: %w", err)
+	}
+	if !hasChecksumColumn {
+		return nil
+	}
+
+	var checksum sql.NullString
+	err = db.QueryRowContext(ctx, `SELECT artifact_checksum FROM schema_migrations WHERE id=?`, projectionDeltaAuthorityMigrationID).Scan(&checksum)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && checksum.Valid && strings.TrimSpace(checksum.String) != "") {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect projection delta compatibility marker: %w", err)
+	}
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire projection delta compatibility connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fmt.Errorf("begin projection delta checksum compatibility conversion: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+	var appliedAt string
+	err = conn.QueryRowContext(ctx, `SELECT applied_at, artifact_checksum FROM schema_migrations WHERE id=?`, projectionDeltaAuthorityMigrationID).Scan(&appliedAt, &checksum)
+	if err != nil {
+		return fmt.Errorf("lock projection delta compatibility marker: %w", err)
+	}
+	if checksum.Valid && strings.TrimSpace(checksum.String) != "" {
+		if checksum.String != projectionDeltaAuthorityChecksum {
+			return fmt.Errorf("migration %s historical artifact mutated: ledger has %s, binary has %s", projectionDeltaAuthorityMigrationID, checksum.String, projectionDeltaAuthorityChecksum)
+		}
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			return fmt.Errorf("commit already-repaired projection delta compatibility conversion: %w", err)
+		}
+		committed = true
+		return nil
+	}
+	if strings.TrimSpace(appliedAt) == "" {
+		return fmt.Errorf("migration %s blank checksum row has empty applied_at", projectionDeltaAuthorityMigrationID)
+	}
+	if err := validateProjectionDeltaAuthoritySchema(ctx, conn); err != nil {
+		return fmt.Errorf("refuse projection delta checksum compatibility conversion: %w", err)
+	}
+	result, err := conn.ExecContext(ctx, `UPDATE schema_migrations SET artifact_checksum=? WHERE id=? AND (artifact_checksum IS NULL OR trim(artifact_checksum)='')`, projectionDeltaAuthorityChecksum, projectionDeltaAuthorityMigrationID)
+	if err != nil {
+		return fmt.Errorf("stamp projection delta compatibility checksum: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil || updated != 1 {
+		return fmt.Errorf("stamp projection delta compatibility checksum changed %d rows (count error %v), want 1", updated, err)
+	}
+	if c.projectionDeltaChecksumRepairHook != nil {
+		if err := c.projectionDeltaChecksumRepairHook("after_checksum"); err != nil {
+			return fmt.Errorf("projection delta checksum compatibility conversion interrupted: %w", err)
+		}
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return fmt.Errorf("commit projection delta checksum compatibility conversion: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+func validateProjectionDeltaAuthoritySchema(ctx context.Context, db projectionDeltaSchemaReader) error {
+	expectedDDL := map[string]string{
+		"projection_streams": `CREATE TABLE projection_streams (
+    project_id TEXT PRIMARY KEY,
+    head_cursor INTEGER NOT NULL DEFAULT 0 CHECK (head_cursor >= 0),
+    updated_at TEXT NOT NULL
+)`,
+		"projection_deltas": `CREATE TABLE projection_deltas (
+    project_id TEXT NOT NULL,
+    cursor INTEGER NOT NULL CHECK (cursor > 0),
+    kind TEXT NOT NULL CHECK (trim(kind) != ''),
+    key TEXT NOT NULL CHECK (trim(key) != ''),
+    operation TEXT NOT NULL CHECK (operation IN ('upsert', 'delete')),
+    idempotency_key TEXT NOT NULL CHECK (trim(idempotency_key) != ''),
+    payload_json TEXT NOT NULL,
+    committed_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, cursor),
+    UNIQUE (project_id, idempotency_key),
+    FOREIGN KEY (project_id) REFERENCES projection_streams(project_id) ON DELETE CASCADE
+)`,
+		"projection_consumer_cursors": `CREATE TABLE projection_consumer_cursors (
+    project_id TEXT NOT NULL,
+    consumer TEXT NOT NULL CHECK (trim(consumer) != ''),
+    cursor INTEGER NOT NULL DEFAULT 0 CHECK (cursor >= 0),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, consumer),
+    FOREIGN KEY (project_id) REFERENCES projection_streams(project_id) ON DELETE CASCADE
+)`,
+		"idx_projection_deltas_key_history": `CREATE INDEX idx_projection_deltas_key_history
+    ON projection_deltas(project_id, kind, key, cursor DESC)`,
+	}
+	required := []struct{ kind, name string }{
+		{"table", "projection_streams"},
+		{"table", "projection_deltas"},
+		{"table", "projection_consumer_cursors"},
+		{"index", "idx_projection_deltas_key_history"},
+	}
+	for _, object := range required {
+		var exists bool
+		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type=? AND name=?)`, object.kind, object.name).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("applied migration 0047_projection_delta_authority is missing %s %s", object.kind, object.name)
+		}
+		var ddl string
+		if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type=? AND name=?`, object.kind, object.name).Scan(&ddl); err != nil {
+			return err
+		}
+		if normalizeProjectionDDL(ddl) != normalizeProjectionDDL(expectedDDL[object.name]) {
+			return fmt.Errorf("applied migration %s %s %s definition drift", projectionDeltaAuthorityMigrationID, object.kind, object.name)
+		}
+	}
+	type columnContract struct {
+		name, typ, defaultValue string
+		notNull, primaryKey     int
+	}
+	columns := map[string][]columnContract{
+		"projection_streams": {
+			{name: "project_id", typ: "TEXT", primaryKey: 1},
+			{name: "head_cursor", typ: "INTEGER", defaultValue: "0", notNull: 1},
+			{name: "updated_at", typ: "TEXT", notNull: 1},
+		},
+		"projection_deltas": {
+			{name: "project_id", typ: "TEXT", notNull: 1, primaryKey: 1},
+			{name: "cursor", typ: "INTEGER", notNull: 1, primaryKey: 2},
+			{name: "kind", typ: "TEXT", notNull: 1},
+			{name: "key", typ: "TEXT", notNull: 1},
+			{name: "operation", typ: "TEXT", notNull: 1},
+			{name: "idempotency_key", typ: "TEXT", notNull: 1},
+			{name: "payload_json", typ: "TEXT", notNull: 1},
+			{name: "committed_at", typ: "TEXT", notNull: 1},
+		},
+		"projection_consumer_cursors": {
+			{name: "project_id", typ: "TEXT", notNull: 1, primaryKey: 1},
+			{name: "consumer", typ: "TEXT", notNull: 1, primaryKey: 2},
+			{name: "cursor", typ: "INTEGER", defaultValue: "0", notNull: 1},
+			{name: "updated_at", typ: "TEXT", notNull: 1},
+		},
+	}
+	for table, requiredColumns := range columns {
+		rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+		if err != nil {
+			return err
+		}
+		var found []columnContract
+		for rows.Next() {
+			var cid int
+			var current columnContract
+			var defaultValue sql.NullString
+			if err := rows.Scan(&cid, &current.name, &current.typ, &current.notNull, &defaultValue, &current.primaryKey); err != nil {
+				rows.Close()
+				return err
+			}
+			if defaultValue.Valid {
+				current.defaultValue = defaultValue.String
+			}
+			found = append(found, current)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(found, requiredColumns) {
+			return fmt.Errorf("applied migration %s column contract drift on %s: got %+v want %+v", projectionDeltaAuthorityMigrationID, table, found, requiredColumns)
+		}
+	}
+	for _, table := range []string{"projection_deltas", "projection_consumer_cursors"} {
+		rows, err := db.QueryContext(ctx, `PRAGMA foreign_key_list(`+table+`)`)
+		if err != nil {
+			return err
+		}
+		var foreignKeys, matchingForeignKeys int
+		for rows.Next() {
+			foreignKeys++
+			var id, seq int
+			var target, from, to, onUpdate, onDelete, match string
+			if err := rows.Scan(&id, &seq, &target, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+				rows.Close()
+				return err
+			}
+			if target == "projection_streams" && from == "project_id" && to == "project_id" && onDelete == "CASCADE" {
+				matchingForeignKeys++
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if foreignKeys != 1 || matchingForeignKeys != 1 {
+			return fmt.Errorf("applied migration 0047_projection_delta_authority foreign key contract drift on %s", table)
+		}
+	}
+	var indexUnique, indexPartial int
+	var indexOrigin string
+	if err := db.QueryRowContext(ctx, `SELECT [unique], origin, partial FROM pragma_index_list('projection_deltas') WHERE name='idx_projection_deltas_key_history'`).Scan(&indexUnique, &indexOrigin, &indexPartial); err != nil {
+		return fmt.Errorf("inspect projection delta key-history index contract: %w", err)
+	}
+	if indexUnique != 0 || indexOrigin != "c" || indexPartial != 0 {
+		return fmt.Errorf("projection delta key-history index flags drift: unique=%d origin=%s partial=%d", indexUnique, indexOrigin, indexPartial)
+	}
+	type indexColumn struct {
+		name string
+		desc int
+	}
+	indexRows, err := db.QueryContext(ctx, `SELECT name, [desc] FROM pragma_index_xinfo('idx_projection_deltas_key_history') WHERE key=1 ORDER BY seqno`)
+	if err != nil {
+		return fmt.Errorf("inspect projection delta key-history index columns: %w", err)
+	}
+	var indexColumns []indexColumn
+	for indexRows.Next() {
+		var current indexColumn
+		if err := indexRows.Scan(&current.name, &current.desc); err != nil {
+			indexRows.Close()
+			return err
+		}
+		indexColumns = append(indexColumns, current)
+	}
+	if err := indexRows.Close(); err != nil {
+		return err
+	}
+	wantIndexColumns := []indexColumn{{"project_id", 0}, {"kind", 0}, {"key", 0}, {"cursor", 1}}
+	if !reflect.DeepEqual(indexColumns, wantIndexColumns) {
+		return fmt.Errorf("projection delta key-history index columns drift: got %+v want %+v", indexColumns, wantIndexColumns)
+	}
+	var uniqueShapeCount int
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*) FROM pragma_index_list('projection_deltas') l
+		WHERE l.[unique]=1 AND l.origin='u' AND (
+			SELECT group_concat(name, ',') FROM pragma_index_info(l.name) ORDER BY seqno
+		)='project_id,idempotency_key'
+	`).Scan(&uniqueShapeCount); err != nil {
+		return fmt.Errorf("inspect projection delta idempotency unique contract: %w", err)
+	}
+	if uniqueShapeCount != 1 {
+		return fmt.Errorf("projection delta idempotency unique contract count=%d, want 1", uniqueShapeCount)
+	}
+	checks := map[string][]string{
+		"projection_streams":          {"check (head_cursor >= 0)"},
+		"projection_deltas":           {"check (cursor > 0)", "check (trim(kind) != '')", "check (trim(key) != '')", "check (operation in ('upsert', 'delete'))", "check (trim(idempotency_key) != '')", "unique (project_id, idempotency_key)"},
+		"projection_consumer_cursors": {"check (trim(consumer) != '')", "check (cursor >= 0)"},
+	}
+	for table, requiredChecks := range checks {
+		var ddl string
+		if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&ddl); err != nil {
+			return err
+		}
+		normalized := strings.ToLower(strings.Join(strings.Fields(ddl), " "))
+		for _, required := range requiredChecks {
+			if !strings.Contains(normalized, required) {
+				return fmt.Errorf("applied migration %s table %s missing constraint %q", projectionDeltaAuthorityMigrationID, table, required)
+			}
+		}
+	}
+	return nil
+}
+
+func normalizeProjectionDDL(ddl string) string {
+	return strings.ToLower(strings.Join(strings.Fields(ddl), " "))
+}
+
+func validateManagedAgentIdentitySchema(ctx context.Context, db *sql.DB) error {
+	var tableSQL string
+	if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='daemon_managed_agent_incarnations'`).Scan(&tableSQL); err != nil {
+		return fmt.Errorf("inspect managed agent identity table: %w", err)
+	}
+	normalizedTable := strings.NewReplacer(" ", "", "\n", "", "\t", "", "\r", "").Replace(strings.ToLower(tableSQL))
+	for _, fragment := range []string{"pane_pidintegernotnullcheck(pane_pid>0)", "primarykey(project_id,session_id,logical_pane_id)"} {
+		if !strings.Contains(normalizedTable, fragment) {
+			return fmt.Errorf("managed agent identity schema drifted: missing constraint %s", fragment)
+		}
+	}
+	for _, column := range []string{"project_id", "session_id", "logical_pane_id", "tmux_pane_id", "pane_pid", "agent_incarnation", "observed_at", "updated_at"} {
+		exists, err := columnExistsDB(ctx, db, "daemon_managed_agent_incarnations", column)
+		if err != nil {
+			return fmt.Errorf("inspect managed agent identity column %s: %w", column, err)
+		}
+		if !exists {
+			return fmt.Errorf("managed agent identity schema drifted: missing column %s", column)
+		}
+	}
+	var indexSQL string
+	err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_daemon_managed_agent_physical_incarnation'`).Scan(&indexSQL)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("managed agent identity schema drifted: missing index idx_daemon_managed_agent_physical_incarnation")
+	}
+	if err != nil {
+		return fmt.Errorf("inspect managed agent identity index: %w", err)
+	}
+	normalized := strings.ToLower(strings.Join(strings.Fields(indexSQL), " "))
+	for _, fragment := range []string{"unique index", "(project_id, tmux_pane_id, pane_pid, agent_incarnation)"} {
+		if !strings.Contains(normalized, fragment) {
+			return fmt.Errorf("managed agent identity schema drifted: index idx_daemon_managed_agent_physical_incarnation has unexpected definition")
+		}
 	}
 	return nil
 }

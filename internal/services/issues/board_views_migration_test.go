@@ -30,6 +30,8 @@ func TestClient_BoardViewsMigrationSeedsDefaultsOnFreshDBAndRestartsIdempotently
 	assertPromisedBuiltInBoardViews(t, views)
 	assertBoardViewsMigrationApplied(t, ctx, db)
 	assertBoardViewsDefaultCount(t, ctx, db, 6)
+	var seededAt string
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT updated_at FROM board_views WHERE project_id = 'default' AND id = ?`, domain.BoardViewDefaultID).Scan(&seededAt))
 	require.NoError(t, client.CloseDB())
 
 	reopened := NewClientAtPath(dbPath, slog.Default())
@@ -38,6 +40,9 @@ func TestClient_BoardViewsMigrationSeedsDefaultsOnFreshDBAndRestartsIdempotently
 	require.NoError(t, err)
 	assertBoardViewsMigrationApplied(t, ctx, reopenedDB)
 	assertBoardViewsDefaultCount(t, ctx, reopenedDB, 6)
+	var reopenedAt string
+	require.NoError(t, reopenedDB.QueryRowContext(ctx, `SELECT updated_at FROM board_views WHERE project_id = 'default' AND id = ?`, domain.BoardViewDefaultID).Scan(&reopenedAt))
+	assert.Equal(t, seededAt, reopenedAt, "idempotent reopen must not rewrite canonical built-ins")
 	var firstUpdatedAt, secondUpdatedAt string
 	require.NoError(t, reopenedDB.QueryRowContext(ctx, `SELECT updated_at FROM board_views WHERE project_id='default' AND id=?`, domain.BoardViewOrchestrationID).Scan(&firstUpdatedAt))
 	_, err = reopened.ListBoardViews(ctx, "default")
@@ -62,6 +67,36 @@ func TestClient_BoardViewsMigrationSeedsDefaultsForExistingDBAndKeepsCustomViews
 	assert.True(t, boardViewTestHasView(views, "custom-active"))
 	assertBoardViewsMigrationApplied(t, ctx, db)
 	assertBoardViewsDefaultCount(t, ctx, db, 7)
+}
+
+func TestClient_BoardViewsStartupRepairsDriftedBuiltInCatalog(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	client := NewClientAtPath(dbPath, slog.Default())
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `
+		UPDATE board_views
+		SET name = 'Broken', definition_json = '{"schema_version":999}', deleted_at = '2026-07-09T00:00:00Z'
+		WHERE project_id = 'default' AND id = ?
+	`, domain.BoardViewDefaultID)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO board_views (project_id, id, name, definition_json, built_in, created_at, updated_at, deleted_at)
+		VALUES ('drifted-project', ?, 'Broken', '{"schema_version":999}', 1, '2026-07-09T00:00:00Z', '2026-07-09T00:00:00Z', NULL)
+	`, domain.BoardViewDefaultID)
+	require.NoError(t, err)
+	require.NoError(t, client.CloseDB())
+
+	reopened := NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { require.NoError(t, reopened.CloseDB()) })
+	record, err := reopened.GetBoardView(ctx, "drifted-project", domain.DefaultBoardViewID)
+	require.NoError(t, err)
+	assert.True(t, record.BuiltIn)
+	assert.Equal(t, domain.DefaultBoardView().Title, record.View.Title)
+	views, err := reopened.ListBoardViews(ctx, "drifted-project")
+	require.NoError(t, err)
+	assertPromisedBuiltInBoardViews(t, views)
 }
 
 func TestClient_RefusesPartialBoardViewsSchema(t *testing.T) {
@@ -183,7 +218,7 @@ func seedBoardViewsPreMigrationDB(t *testing.T, dbPath string, includeCustomBoar
 	require.NoError(t, err)
 
 	for _, migration := range orderedMigrations {
-		if migration.id == "0019_issue_observation_events" || migration.id == boardViewsMigrationID || migration.id == "0035_interaction_requests" || migration.id == "0045_issue_state_runtime_constraints" || migration.id == humanAuthorityProjectionMigrationID || migration.id == decisionPropagationOutboxMigrationID || migration.id == mailboxObservationProjectionCutoverMigrationID {
+		if migration.id == "0019_issue_observation_events" || migration.id == boardViewsMigrationID || migration.id == "0035_interaction_requests" || migration.id == "0045_issue_state_runtime_constraints" || migration.id == humanAuthorityProjectionMigrationID || migration.id == projectionDeltaAuthorityMigrationID || migration.id == decisionPropagationOutboxMigrationID || migration.id == mailboxObservationProjectionCutoverMigrationID || migration.id == "0049_managed_agent_incarnations" {
 			continue
 		}
 		_, err := db.Exec(`INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)`, migration.id, now)

@@ -50,11 +50,7 @@ func (d *Daemon) handleTaskBulkCleanup(ctx context.Context, req protocol.Request
 		}
 	}
 	projectID := d.projectID(req.Meta)
-	client := d.issueClientForProject(projectID)
-	if client == nil {
-		return d.errorResponse(req, protocol.ErrorCodeUnavailable, "issue store unavailable"), nil
-	}
-	tasks, err := client.ListWithRuntime(ctx, projectID)
+	tasks, _, err := d.projectReadSnapshot(projectID)
 	if err != nil {
 		return d.errorResponse(req, projectIssueStoreHealthErrorCode(err), err.Error()), nil
 	}

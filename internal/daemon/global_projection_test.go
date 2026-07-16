@@ -86,19 +86,6 @@ func TestGlobalProjectionSharesInvestigationHumanAuthorityAndAcceptance(t *testi
 	assertPlacement(domain.BoardColumnReviewReady)
 }
 
-func TestCommandMutatesProjectProjectionIsExplicit(t *testing.T) {
-	for _, command := range []string{"task.create", "session.stop", protocol.CommandInteractionAnswer, protocol.CommandRuntimeReconcile} {
-		if !commandMutatesProjectProjection(command) {
-			t.Errorf("%s should trigger refresh", command)
-		}
-	}
-	for _, command := range []string{"task.list", "task.complete_check", "session.status", protocol.CommandSessionCapture, protocol.CommandGlobalSnapshot, "task.unknown_future_command"} {
-		if commandMutatesProjectProjection(command) {
-			t.Errorf("%s should not trigger refresh", command)
-		}
-	}
-}
-
 func TestProjectGlobalViewPreservesCollidingScopedIssueIDs(t *testing.T) {
 	now := time.Now().UTC()
 	projects := []protocol.GlobalProjectSnapshot{{ProjectID: "p-a", Tasks: []domain.Task{{ID: "same", Title: "A", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}}}, {ProjectID: "p-b", Tasks: []domain.Task{{ID: "same", Title: "B", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}}}}

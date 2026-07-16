@@ -50,7 +50,14 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = validateDecisionPropagationOutboxSchema(ctx, db); err != nil {
 				t.Fatal(err)
 			}
+			if err = validateProjectionDeltaAuthoritySchema(ctx, db); err != nil {
+				t.Fatal(err)
+			}
 			var checksum string
+			var ledgerRows int
+			if err = db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, projectionDeltaAuthorityMigrationID, projectionDeltaAuthorityChecksum).Scan(&ledgerRows); err != nil || ledgerRows != 1 {
+				t.Fatalf("projection delta ledger rows=%d err=%v", ledgerRows, err)
+			}
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, humanAuthorityProjectionMigrationID).Scan(&checksum); err != nil || checksum != "ac3a48512b2e6e9c018d58a68db24a2465e9d172139d22f8378f69677073a0ab" {
 				t.Fatalf("checksum=%q err=%v", checksum, err)
 			}
@@ -99,6 +106,13 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			reopened := NewClientAtPath(path, slog.Default())
 			if _, err = reopened.ExportProjection(ctx, projectIDs[0]); err != nil {
 				t.Fatal(err)
+			}
+			reopenedDB, err := reopened.dbHandle()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, projectionDeltaAuthorityMigrationID, projectionDeltaAuthorityChecksum).Scan(&ledgerRows); err != nil || ledgerRows != 1 {
+				t.Fatalf("projection delta ledger rows after reopen=%d err=%v", ledgerRows, err)
 			}
 			_ = reopened.CloseDB()
 		})

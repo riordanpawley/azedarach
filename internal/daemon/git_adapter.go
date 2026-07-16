@@ -14,6 +14,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
@@ -113,6 +114,7 @@ func (a *gitServiceAdapter) Push(ctx context.Context, projectID, worktree, remot
 }
 
 func (a *gitServiceAdapter) Merge(ctx context.Context, projectID, worktree, branch string) (*git.MergeResult, error) {
+	ctx = a.withCandidateValidationProgress(ctx, projectID, worktree)
 	result, err := a.client.MergeCleanlyTransactional(ctx, worktree, branch)
 	if err != nil {
 		return nil, err
@@ -121,6 +123,32 @@ func (a *gitServiceAdapter) Merge(ctx context.Context, projectID, worktree, bran
 	// refresh runtime git signals even when porcelain status stays clean.
 	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, true)
 	return result, nil
+}
+
+func (a *gitServiceAdapter) withCandidateValidationProgress(ctx context.Context, projectID, worktree string) context.Context {
+	return git.WithCandidateValidationObserver(ctx, func(attempt git.CandidateValidationAttempt) {
+		message := fmt.Sprintf("candidate_head=%s status=%s canonical=%t", attempt.CandidateHead, attempt.Status, attempt.Canonical)
+		if detail := strings.TrimSpace(attempt.Message); detail != "" {
+			message += " detail=" + detail
+		}
+		_ = daemonops.ReportProgress(ctx, daemonops.Progress{
+			Phase:   "candidate_validation." + string(attempt.Status),
+			Message: message,
+			Current: 65,
+			Total:   100,
+			Unit:    "percent",
+			Percent: 65,
+		})
+		if a.logger != nil {
+			a.logger.InfoContext(ctx, "integration candidate validation disposition",
+				"project_id", projectID,
+				"worktree", worktree,
+				"candidate_head", attempt.CandidateHead,
+				"validation_status", attempt.Status,
+				"canonical", attempt.Canonical,
+			)
+		}
+	})
 }
 
 func (a *gitServiceAdapter) Checkout(ctx context.Context, projectID, worktree, branch string) error {

@@ -713,6 +713,28 @@ func TestMailListAnnotatesStructuredWorkerEvidencePayload(t *testing.T) {
 	}
 }
 
+func TestMailSendAdvancesOrchestrationProjectionRevision(t *testing.T) {
+	repoDir := t.TempDir()
+	const projectID = "proj-mail-revision"
+	d := New(Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	resp, err := d.handleMailSend(context.Background(), protocol.RequestEnvelope{
+		Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body: mustMarshal(t, protocol.MailSendCommandBody{
+			RepoDir:     repoDir,
+			ParentIssue: "az-parent",
+			IssueID:     naming.IssueID("az-child"),
+			Type:        "worker-progress",
+			Body:        "progress",
+		}),
+	})
+	if err != nil || !resp.OK {
+		t.Fatalf("mail send response=%+v err=%v", resp, err)
+	}
+	if resp.Revision == 0 || d.currentRevision(projectID) != resp.Revision {
+		t.Fatalf("mail revision response=%d current=%d", resp.Revision, d.currentRevision(projectID))
+	}
+}
+
 func TestMailSendRejectsInvalidWorkerEvidenceBeforePersisting(t *testing.T) {
 	repoDir := t.TempDir()
 	d := New(Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})

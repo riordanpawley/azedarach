@@ -351,7 +351,18 @@ func CleanManaged(ctx context.Context, cfg Config) error {
 		return err
 	}
 	defer dir.Close()
-	return cleanDir(ctx, dir, cfg.CachePath())
+	if err := cleanDir(ctx, dir, cfg.CachePath()); err != nil {
+		return err
+	}
+	// Darwin's /dev/fd entries can be statted but cannot be reopened as
+	// directories. In that environment `go clean -cache` successfully exits
+	// after its glob finds no cache subdirectories. Remove the contents through
+	// the already-opened descriptor so maintenance both remains swap-safe and
+	// guarantees that the selected namespace actually shrinks.
+	if err := removeDirContents(dir); err != nil {
+		return fmt.Errorf("remove cleaned Go cache namespace contents %s: %w", cfg.CachePath(), err)
+	}
+	return nil
 }
 
 func cleanDir(ctx context.Context, dir *os.File, displayPath string) error {
