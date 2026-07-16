@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -859,7 +860,7 @@ func TestRuntimeReconcileIssuesSummarizesSharedTmuxSnapshotFailure(t *testing.T)
 
 func immediateSessionResumeWait(context.Context, time.Duration) error { return nil }
 
-func TestSessionRestartAllRestartsBusySessionsByDefault(t *testing.T) {
+func TestSessionRestartAllRefusesSessionsWithoutManagedIdentity(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	managedDir := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.current")
@@ -925,57 +926,15 @@ func TestSessionRestartAllRestartsBusySessionsByDefault(t *testing.T) {
 	if err := json.Unmarshal(resp.Body, &result); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
-	if result.Restarted != 2 || result.Skipped != 0 || result.Failed != 0 {
-		t.Fatalf("result = %+v, want restarted=2 skipped=0 failed=0", result)
+	if result.Restarted != 0 || result.Skipped != 2 || result.Failed != 0 || result.Sessions[0].Outcome != "no_agent" {
+		t.Fatalf("result = %+v, want typed no-agent refusals", result)
 	}
-	if tmuxRunner.sendKeysCalls != 5 {
-		t.Fatalf("send-keys calls = %d, want C-c/resume for idle and C-c/resume/continuation submit for busy", tmuxRunner.sendKeysCalls)
-	}
-	if got := tmuxRunner.sendKeysTargets; !reflect.DeepEqual(got, []string{idleSession, idleSession, busySession, busySession, busySession}) {
-		t.Fatalf("sendKeysTargets = %+v, want idle interrupt/resume and busy interrupt/resume/submit", got)
-	}
-	artifactCommand := tmuxRunner.sendKeysPayloads[1]
-	quoted := strings.Split(artifactCommand, "'")
-	if len(quoted) < 4 {
-		t.Fatalf("resume command = %q, want bounded launch artifact command", artifactCommand)
-	}
-	artifactBody, err := os.ReadFile(quoted[len(quoted)-2])
-	if err != nil {
-		t.Fatalf("read restart launch artifact: %v", err)
-	}
-	if got := string(artifactBody); !strings.Contains(got, "codex resume") || !strings.Contains(got, "--last") || strings.Contains(got, "Continue your prior task") {
-		t.Fatalf("resume artifact = %q, want codex resume --last without positional continuation prompt", got)
-	}
-	for _, sessionID := range []string{idleSession, busySession} {
-		if got := tmuxRunner.env[sessionID]["PATH"]; got != "" {
-			t.Fatalf("restart session %s injected PATH = %q", sessionID, got)
-		}
-		if got := tmuxRunner.env[sessionID][rootedOrchestratorBootstrapNonceEnvironment]; got != "" {
-			t.Fatalf("ordinary worker restart session %s gained rooted bootstrap nonce %q", sessionID, got)
-		}
-	}
-	if strings.Contains(string(artifactBody), managedDir) || strings.Contains(string(artifactBody), "export PATH=") {
-		t.Fatalf("resume artifact injects managed PATH: %q", artifactBody)
-	}
-	if len(result.Sessions) != 2 || result.Sessions[0].ActiveIntent || !result.Sessions[1].ActiveIntent {
-		t.Fatalf("session active intent = %+v, want idle=false busy=true", result.Sessions)
-	}
-	foundContinuationPrompt := false
-	for _, payload := range tmuxRunner.inputPayloads {
-		if strings.Contains(payload, "Continue your prior task") {
-			foundContinuationPrompt = true
-			break
-		}
-	}
-	if !foundContinuationPrompt {
-		t.Fatalf("missing continuation prompt paste in tmux commands: %+v", tmuxRunner.commands)
-	}
-	if want := []time.Duration{250 * time.Millisecond, 250 * time.Millisecond, sessionRestartContinuePromptDelay}; !reflect.DeepEqual(resumeWaits, want) {
-		t.Fatalf("resume waits = %v, want %v", resumeWaits, want)
+	if tmuxRunner.sendKeysCalls != 0 {
+		t.Fatalf("send-keys calls = %d, want exact restart to fail closed before terminal input", tmuxRunner.sendKeysCalls)
 	}
 }
 
-func TestSessionRestartAllForceBusyIncludesBusySessionsAndConfiguredFlags(t *testing.T) {
+func TestSessionRestartAllForceBusyStillRequiresManagedIdentity(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)
@@ -1045,20 +1004,15 @@ func TestSessionRestartAllForceBusyIncludesBusySessionsAndConfiguredFlags(t *tes
 	if err := json.Unmarshal(resp.Body, &result); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
-	if result.Restarted != 2 || result.Skipped != 0 || result.Failed != 0 {
-		t.Fatalf("result = %+v, want restarted=2 skipped=0 failed=0", result)
+	if result.Restarted != 0 || result.Skipped != 2 || result.Failed != 0 || result.Sessions[0].Outcome != "no_agent" {
+		t.Fatalf("result = %+v, want typed no-agent refusals", result)
 	}
-	if tmuxRunner.sendKeysCalls != 6 {
-		t.Fatalf("send-keys calls = %d, want C-c, resume, and continuation submit for two sessions", tmuxRunner.sendKeysCalls)
-	}
-	for _, payload := range tmuxRunner.sendKeysPayloads {
-		if strings.Contains(payload, "codex resume") && !strings.Contains(payload, "--dangerously-bypass-approvals-and-sandbox") {
-			t.Fatalf("resume command missing configured bypass flag: %q", payload)
-		}
+	if tmuxRunner.sendKeysCalls != 0 {
+		t.Fatalf("send-keys calls = %d, want no legacy terminal input", tmuxRunner.sendKeysCalls)
 	}
 }
 
-func TestSessionRestartAllDiscoversKnownProjectSessionsAndReportsPartialFailures(t *testing.T) {
+func TestSessionRestartAllDiscoversKnownProjectSessionsAndReportsNoAgent(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repoA := filepath.Join(root, "qaalpha")
@@ -1151,22 +1105,15 @@ func TestSessionRestartAllDiscoversKnownProjectSessionsAndReportsPartialFailures
 	if err := json.Unmarshal(resp.Body, &result); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
-	if result.Restarted != 1 || result.Skipped != 0 || result.Failed != 1 {
-		t.Fatalf("result = %+v, want restarted=1 skipped=0 failed=1", result)
+	if result.Restarted != 0 || result.Skipped != 2 || result.Failed != 0 {
+		t.Fatalf("result = %+v, want two typed no-agent refusals", result)
 	}
 	seenProjects := map[string]bool{}
-	seenFailures := 0
 	for _, session := range result.Sessions {
 		seenProjects[session.ProjectID.String()] = true
-		if strings.TrimSpace(session.Error) != "" {
-			seenFailures++
-		}
 	}
 	if !seenProjects[projectA] || !seenProjects[projectB] {
 		t.Fatalf("session projects = %+v, want %s and %s", seenProjects, projectA, projectB)
-	}
-	if seenFailures != 1 {
-		t.Fatalf("failed session count from items = %d, want 1", seenFailures)
 	}
 }
 
@@ -1240,7 +1187,7 @@ func TestSessionRestartAllSkipsTmuxSessionWithoutLivePane(t *testing.T) {
 	}
 }
 
-func TestSessionRestartAllRestartsNoAgentPaneWithoutContinuePrompt(t *testing.T) {
+func TestSessionRestartAllClassifiesShellOnlyWithoutTerminalInput(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)
@@ -1298,8 +1245,8 @@ func TestSessionRestartAllRestartsNoAgentPaneWithoutContinuePrompt(t *testing.T)
 	if err := json.Unmarshal(resp.Body, &result); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
-	if result.Restarted != 1 || result.Skipped != 0 || result.Failed != 0 {
-		t.Fatalf("result = %+v, want restarted=1 skipped=0 failed=0", result)
+	if result.Restarted != 0 || result.Skipped != 1 || result.Failed != 0 || result.Sessions[0].Outcome != "shell_only" {
+		t.Fatalf("result = %+v, want typed shell-only refusal", result)
 	}
 	if len(result.Sessions) != 1 || !result.Sessions[0].TmuxReady || result.Sessions[0].ActiveIntent {
 		t.Fatalf("session result = %+v, want tmux_ready=true and active_intent=false", result.Sessions)
@@ -1307,8 +1254,8 @@ func TestSessionRestartAllRestartsNoAgentPaneWithoutContinuePrompt(t *testing.T)
 	if result.Sessions[0].ActivitySource != "session" {
 		t.Fatalf("activity source = %q, want session", result.Sessions[0].ActivitySource)
 	}
-	if tmuxRunner.sendKeysCalls != 2 {
-		t.Fatalf("send-keys calls = %d, want C-c and resume without continuation submit", tmuxRunner.sendKeysCalls)
+	if tmuxRunner.sendKeysCalls != 0 {
+		t.Fatalf("send-keys calls = %d, want no legacy terminal input", tmuxRunner.sendKeysCalls)
 	}
 	for _, payload := range tmuxRunner.inputPayloads {
 		if strings.Contains(payload, "Continue your prior task") {
@@ -1317,7 +1264,7 @@ func TestSessionRestartAllRestartsNoAgentPaneWithoutContinuePrompt(t *testing.T)
 	}
 }
 
-func TestSessionRestartAllForceBusyAllowsSessionSourcedAgent(t *testing.T) {
+func TestSessionRestartAllClassifiesSessionSourcedBusyWithoutIdentity(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)
@@ -1375,14 +1322,14 @@ func TestSessionRestartAllForceBusyAllowsSessionSourcedAgent(t *testing.T) {
 	if err := json.Unmarshal(resp.Body, &result); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
-	if result.Restarted != 1 || result.Skipped != 0 || result.Failed != 0 {
-		t.Fatalf("result = %+v, want restarted=1 skipped=0 failed=0", result)
+	if result.Restarted != 0 || result.Skipped != 1 || result.Failed != 0 || result.Sessions[0].Outcome != "no_agent" {
+		t.Fatalf("result = %+v, want typed no-agent refusal", result)
 	}
 	if len(result.Sessions) != 1 || !result.Sessions[0].TmuxReady || !result.Sessions[0].ActiveIntent || result.Sessions[0].ActivitySource != "session" {
 		t.Fatalf("session result = %+v, want session-sourced active intent with tmux pane", result.Sessions)
 	}
-	if tmuxRunner.sendKeysCalls != 3 {
-		t.Fatalf("send-keys calls = %d, want C-c, resume, and continuation submit", tmuxRunner.sendKeysCalls)
+	if tmuxRunner.sendKeysCalls != 0 {
+		t.Fatalf("send-keys calls = %d, want no legacy terminal input", tmuxRunner.sendKeysCalls)
 	}
 }
 
@@ -1414,6 +1361,7 @@ type sessionStartTmuxRunner struct {
 	sessions              map[string]bool
 	sessionsWithoutPanes  map[string]bool
 	panes                 map[string][]string
+	panePIDs              map[string]int
 	windows               map[string]map[string]bool
 	commands              [][]string
 	inputPayloads         []string
@@ -1435,9 +1383,11 @@ type sessionStartTmuxRunner struct {
 	sendKeysErr           error
 	sendKeysErrOnCall     int
 	captureOutput         string
-	currentCommand       string
+	currentCommand        string
 	onSendKeys            func(string, string)
 	onRunWithInput        func(context.Context, string, []string) (string, error)
+	onRespawnPane         func(context.Context, []string) error
+	respawnErr            error
 }
 
 func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
@@ -1445,6 +1395,7 @@ func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
 		sessions:             map[string]bool{},
 		sessionsWithoutPanes: map[string]bool{},
 		panes:                map[string][]string{},
+		panePIDs:             map[string]int{},
 		windows:              map[string]map[string]bool{},
 		env:                  map[string]map[string]string{},
 		launchScriptPaths:    map[string]string{},
@@ -1494,6 +1445,41 @@ func seedReadyAgentInput(t *testing.T, d *Daemon, runner *sessionStartTmuxRunner
 		runner.inputPayloads = append(runner.inputPayloads, payload)
 	}}
 	d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, receiver, "test-daemon")
+}
+
+func seedManagedRestartIdentity(t *testing.T, d *Daemon, runner *sessionStartTmuxRunner, projectID, sessionID string) func(context.Context, []string) error {
+	t.Helper()
+	projectID = d.canonicalProjectID(projectID)
+	store := d.sessionRuntimeStateStore(projectID)
+	runner.panePIDs[sessionID] = 123
+	if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{
+		ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: "1",
+		PanePID: 123, AgentIncarnation: "pre-restart", ObservedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return func(ctx context.Context, args []string) error {
+		command := args[len(args)-1]
+		for _, matches := range regexp.MustCompile(`'([^']+)'`).FindAllStringSubmatch(command, -1) {
+			if len(matches) != 2 {
+				continue
+			}
+			body, err := os.ReadFile(matches[1])
+			if err != nil {
+				continue
+			}
+			incarnation := regexp.MustCompile(`AZEDARACH_AGENT_INCARNATION='([^']+)'`).FindStringSubmatch(string(body))
+			if len(incarnation) != 2 {
+				continue
+			}
+			runner.panePIDs[sessionID] = 124
+			return store.UpsertManagedAgentIdentity(ctx, daemonstate.ManagedAgentIdentity{
+				ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: "1",
+				PanePID: 124, AgentIncarnation: incarnation[1], ObservedAt: time.Now().UTC().Add(time.Second),
+			})
+		}
+		return errors.New("restart artifact did not contain an agent incarnation")
+	}
 }
 
 func requireNewSessionLaunchCommand(t *testing.T, runner *sessionStartTmuxRunner, sessionID string) string {
@@ -1576,7 +1562,7 @@ func TestWaitForSessionPromptHandoffConsumedRejectsPartialDelivery(t *testing.T)
 	}
 }
 
-func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string, error) {
+func (r *sessionStartTmuxRunner) Run(ctx context.Context, args ...string) (string, error) {
 	if len(args) == 0 {
 		return "", errors.New("missing tmux args")
 	}
@@ -1689,6 +1675,14 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 			return "", r.sendKeysErr
 		}
 		return "", nil
+	case "respawn-pane":
+		if r.respawnErr != nil {
+			return "", r.respawnErr
+		}
+		if r.onRespawnPane != nil {
+			return "", r.onRespawnPane(ctx, append([]string(nil), args...))
+		}
+		return "", nil
 	case "set-environment":
 		if len(args) < 5 {
 			return "", errors.New("missing set-environment args")
@@ -1727,11 +1721,15 @@ func (r *sessionStartTmuxRunner) Run(_ context.Context, args ...string) (string,
 				panes = []string{"%1"}
 			}
 			for _, pane := range panes {
+				panePID := r.panePIDs[name]
+				if panePID == 0 {
+					panePID = 123
+				}
 				if slices.Contains(args, "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}\t#{session_attached}") {
 					currentCommand := runnerCommand(r.currentCommand)
-					lines = append(lines, name+"\t"+pane+"\t123\t"+currentCommand+"\t0")
+					lines = append(lines, fmt.Sprintf("%s\t%s\t%d\t%s\t0", name, pane, panePID, currentCommand))
 				} else {
-					lines = append(lines, name+"\t"+pane+"\t123")
+					lines = append(lines, fmt.Sprintf("%s\t%s\t%d", name, pane, panePID))
 				}
 			}
 		}
@@ -9080,6 +9078,7 @@ func TestSessionLaunchAtomicallyBootstrapsSlowAgentsAcrossToolsAndStartModes(t *
 	for _, tool := range []string{"codex", "claude", "opencode", "codex-app-server"} {
 		for _, mode := range []string{"direct", "orchestrated"} {
 			t.Run(tool+"/"+mode, func(t *testing.T) {
+				t.Parallel()
 				tempDir := t.TempDir()
 				readPath := filepath.Join(tempDir, "read-prompt")
 				argvPath := filepath.Join(tempDir, "agent-argv")
@@ -9094,8 +9093,8 @@ func TestSessionLaunchAtomicallyBootstrapsSlowAgentsAcrossToolsAndStartModes(t *
 				agentName := strings.TrimSuffix(tool, "-app-server")
 				agent := "#!/bin/sh\n" +
 					"printf '%s\\n' \"$@\" >> \"$AGENT_ARGV_PATH\"\n" +
-					"if [ \"${1:-} ${2:-} ${3:-}\" = 'app-server daemon start' ]; then sleep 0.75; exit 0; fi\n" +
-					"sleep 0.75\n" +
+					"if [ \"${1:-} ${2:-} ${3:-}\" = 'app-server daemon start' ]; then sleep 0.05; exit 0; fi\n" +
+					"sleep 0.05\n" +
 					"last=; for arg do last=$arg; done\n" +
 					"prompt_path=${last#* in }; prompt_path=${prompt_path%. Delete*}\n" +
 					"cat \"$prompt_path\" > \"$READ_PATH\" || exit 66\n" +
@@ -9107,10 +9106,6 @@ func TestSessionLaunchAtomicallyBootstrapsSlowAgentsAcrossToolsAndStartModes(t *
 				if err := os.WriteFile(filepath.Join(tempDir, "az"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 					t.Fatal(err)
 				}
-				t.Setenv("PATH", tempDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-				t.Setenv("READ_PATH", readPath)
-				t.Setenv("AGENT_ARGV_PATH", argvPath)
-
 				prompt := "direct request"
 				if mode == "orchestrated" {
 					prompt = buildStartWorkPrompt("az-42", string(domain.TypeTask), "Slow worker", true, "az-root")
@@ -9121,13 +9116,19 @@ func TestSessionLaunchAtomicallyBootstrapsSlowAgentsAcrossToolsAndStartModes(t *
 				}
 				t.Cleanup(handoff.remove)
 				d := &Daemon{cfg: Config{CLITool: agentName, CodexAppServer: tool == "codex-app-server", SessionShell: shellPath}}
-				launchShell, launchPayload := d.buildSessionLaunchScriptPayloadWithInitReadyPathAndEnv(protocol.DefaultProjectID, "az-42", "az-42", false, nil, "", nil, handoff)
+				startupEnv := []string{
+					"export PATH=" + singleQuoteForShell(tempDir+string(os.PathListSeparator)+os.Getenv("PATH")),
+					"export READ_PATH=" + singleQuoteForShell(readPath),
+					"export AGENT_ARGV_PATH=" + singleQuoteForShell(argvPath),
+				}
+				launchShell, launchPayload := d.buildSessionLaunchScriptPayloadWithInitReadyPathAndEnv(protocol.DefaultProjectID, "az-42", "az-42", false, nil, "", startupEnv, handoff)
 				scriptPath, tmuxCommand, err := prepareSessionLaunchScript(tempDir, launchShell, launchPayload)
 				if err != nil {
 					t.Fatal(err)
 				}
 				t.Cleanup(func() { _ = os.Remove(scriptPath) })
-				output, err := exec.Command("/bin/sh", "-c", tmuxCommand).CombinedOutput()
+				command := exec.Command("/bin/sh", "-c", tmuxCommand)
+				output, err := command.CombinedOutput()
 				if err != nil {
 					t.Fatalf("execute slow %s %s launch: %v (%s)", tool, mode, err, output)
 				}

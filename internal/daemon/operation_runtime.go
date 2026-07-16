@@ -40,6 +40,7 @@ type operationRuntimeConfig struct {
 	sessionStart            func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	sessionStop             func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	sessionResolveConflict  func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	sessionRestartAll       func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	taskBulkCleanup         func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	globalProjectionRebuild func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	onTerminal              func(context.Context, daemonops.Record)
@@ -58,6 +59,7 @@ type operationRuntime struct {
 	sessionStart            func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	sessionStop             func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	sessionResolveConflict  func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	sessionRestartAll       func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	taskBulkCleanup         func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	globalProjectionRebuild func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	gitHandler              *daemonhandlers.GitHandler
@@ -160,6 +162,7 @@ func newOperationRuntime(cfg operationRuntimeConfig) *operationRuntime {
 		sessionStart:            cfg.sessionStart,
 		sessionStop:             cfg.sessionStop,
 		sessionResolveConflict:  cfg.sessionResolveConflict,
+		sessionRestartAll:       cfg.sessionRestartAll,
 		taskBulkCleanup:         cfg.taskBulkCleanup,
 		globalProjectionRebuild: cfg.globalProjectionRebuild,
 		gitHandler:              cfg.gitHandler,
@@ -763,6 +766,14 @@ func (r *operationRuntime) deriveOperationRouting(kind, projectID string, payloa
 		}
 		dedupeKey = kind + ":" + issueID
 		return issueID, resourceKeys, dedupeKey, nil
+	case protocol.CommandSessionRestartAll:
+		var body protocol.SessionRestartAllRequestBody
+		if err = json.Unmarshal(payload, &body); err != nil {
+			return "", nil, "", fmt.Errorf("decode %s payload: %w", kind, err)
+		}
+		projectID = r.coalesceProjectID(body.ProjectID.String(), projectID)
+		digest := sha256.Sum256(payload)
+		return "", []string{"project:" + projectID + ":session-restart"}, fmt.Sprintf("%s:%x", kind, digest), nil
 	case daemonhandlers.CommandGitFetch, daemonhandlers.CommandGitPullBase, daemonhandlers.CommandGitPush:
 		var body struct {
 			Worktree   string `json:"worktree"`
@@ -944,6 +955,11 @@ func (r *operationRuntime) directRunnerForKind(kind string) (operationDirectRunn
 			return nil, errors.New("session.resolve_conflict handler unavailable")
 		}
 		return r.sessionResolveConflict, nil
+	case protocol.CommandSessionRestartAll:
+		if r.sessionRestartAll == nil {
+			return nil, errors.New("session.restart_all handler unavailable")
+		}
+		return r.sessionRestartAll, nil
 	case daemonhandlers.CommandGitFetch,
 		daemonhandlers.CommandGitPullBase,
 		daemonhandlers.CommandGitPush,

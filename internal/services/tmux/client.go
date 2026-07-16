@@ -305,6 +305,25 @@ func (c *Client) EnsureWindowWithCommandAndEnvironment(ctx context.Context, sess
 	return c.ensureWindow(ctx, sessionName, windowName, workdir, command, environment)
 }
 
+// RespawnPane replaces exactly one pane process while preserving its session,
+// window, layout, and every unrelated pane. paneID is tmux's stable pane target
+// (for example %12), never a window or session name.
+func (c *Client) RespawnPane(ctx context.Context, paneID, workdir, command string) error {
+	paneID = strings.TrimSpace(paneID)
+	if paneID == "" || strings.TrimSpace(command) == "" {
+		return &domain.TmuxError{Op: "respawn-pane", Session: paneID, Err: errors.New("pane target and command are required")}
+	}
+	args := []string{"respawn-pane", "-k", "-t", paneID}
+	if strings.TrimSpace(workdir) != "" {
+		args = append(args, "-c", workdir)
+	}
+	args = append(args, command)
+	if _, err := c.runner.Run(ctx, args...); err != nil {
+		return &domain.TmuxError{Op: "respawn-pane", Session: paneID, Err: err}
+	}
+	return nil
+}
+
 func (c *Client) ensureWindow(ctx context.Context, sessionName, windowName, workdir, command string, environment map[string]string) (bool, error) {
 	c.logger.Debug("ensuring tmux window", "session", sessionName, "window", windowName, "workdir", workdir)
 

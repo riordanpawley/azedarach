@@ -571,14 +571,14 @@ func TestAgentInputDeliveryMigrationRejectsWeakenedStateConstraints(t *testing.T
 			replacement: `CHECK (state != 'leased' OR lease_token IS NOT NULL)`,
 		},
 	}
-	artifact, err := migrationFiles.ReadFile("migrations/0052_agent_input_delivery_fencing.sql")
+	artifact, err := migrationFiles.ReadFile("migrations/0053_agent_input_delivery_fencing.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
 	artifactText := string(artifact)
 	createStart := strings.Index(artifactText, "CREATE TABLE agent_input_delivery_intents (")
 	copyStart := strings.Index(artifactText, "INSERT INTO agent_input_delivery_intents(")
-	finishStart := strings.Index(artifactText, "DROP TABLE agent_input_delivery_intents_0051;")
+	finishStart := strings.Index(artifactText, "DROP TABLE agent_input_delivery_intents_0052;")
 	if createStart < 0 || copyStart <= createStart || finishStart <= copyStart {
 		t.Fatal("0052 artifact does not contain the expected rebuild phases")
 	}
@@ -603,7 +603,7 @@ func TestAgentInputDeliveryMigrationRejectsWeakenedStateConstraints(t *testing.T
 				`DROP INDEX idx_agent_input_delivery_incarnation`,
 				`DROP INDEX idx_agent_input_session_lease_expiry`,
 				`DROP TABLE agent_input_delivery_session_leases`,
-				`ALTER TABLE agent_input_delivery_intents RENAME TO agent_input_delivery_intents_0051`,
+				`ALTER TABLE agent_input_delivery_intents RENAME TO agent_input_delivery_intents_0052`,
 			} {
 				if _, err := db.Exec(statement); err != nil {
 					t.Fatal(err)
@@ -773,7 +773,7 @@ func TestAgentInputDeliveryMigrationHistoricalUpgradeRollsBackAndRetries(t *test
 	}
 }
 
-func TestAgentInputDeliveryFencingMigrationUpgradesImmutable0051AndRollsBack(t *testing.T) {
+func TestAgentInputDeliveryFencingMigrationUpgradesImmutable0052AndRollsBack(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
 	seed := NewClientAtPath(path, nil)
@@ -788,7 +788,7 @@ func TestAgentInputDeliveryFencingMigrationUpgradesImmutable0051AndRollsBack(t *
 	}
 	var checksum string
 	if err := db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&checksum); err != nil || checksum != agentInputDeliveryMigrationChecksum {
-		t.Fatalf("immutable 0051 checksum=%q err=%v", checksum, err)
+		t.Fatalf("immutable 0052 checksum=%q err=%v", checksum, err)
 	}
 	if err := seed.CloseDB(); err != nil {
 		t.Fatal(err)

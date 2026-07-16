@@ -1,4 +1,4 @@
--- Migration 0052 manifest
+-- Migration 0053 manifest
 --
 -- Schema effects:
 --   Expand agent input delivery intents with the ambiguous submission state
@@ -6,7 +6,7 @@
 --   values and an expiry index.
 -- Data effects:
 --   Rebuild agent_input_delivery_intents transactionally and copy every
---   existing row without changing values. Existing 0051 states all satisfy
+--   existing row without changing values. Existing 0052 states all satisfy
 --   the expanded constraint. The new session lease table starts empty.
 -- Validation effects:
 --   The Go-assisted runner executes this artifact transactionally and validates
@@ -15,14 +15,14 @@
 --   the same final-schema validation when this migration is recorded applied.
 -- Ledger effects:
 --   After schema and data validation, the runner records exactly one
---   schema_migrations row for 0052_agent_input_delivery_fencing with this
+--   schema_migrations row for 0053_agent_input_delivery_fencing with this
 --   artifact's pinned SHA-256 checksum. Schema, copied data, validation, and
 --   ledger mutation roll back together on any failure.
 
 DROP INDEX idx_agent_input_delivery_pending;
 DROP INDEX idx_agent_input_delivery_incarnation;
 
-ALTER TABLE agent_input_delivery_intents RENAME TO agent_input_delivery_intents_0051;
+ALTER TABLE agent_input_delivery_intents RENAME TO agent_input_delivery_intents_0052;
 
 CREATE TABLE agent_input_delivery_intents (
   project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
@@ -61,9 +61,9 @@ SELECT
   agent_incarnation, tool, message_kind, payload, state, expires_at,
   lease_owner, lease_token, lease_expires_at, attempt_count,
   acknowledgement_token, acknowledged_at, created_at, updated_at
-FROM agent_input_delivery_intents_0051;
+FROM agent_input_delivery_intents_0052;
 
-DROP TABLE agent_input_delivery_intents_0051;
+DROP TABLE agent_input_delivery_intents_0052;
 
 CREATE INDEX idx_agent_input_delivery_pending
   ON agent_input_delivery_intents(project_id, state, expires_at, created_at)

@@ -104,13 +104,13 @@ type DecisionGetResponseBody struct {
 }
 
 // DecisionRecordRequestBody creates a new decision. ID is allocated by the
-// store (dec-N) so the caller doesn't have to pick a slug; title and rationale
-// are required.
+// store so the caller doesn't have to pick an id; title and rationale are required.
 type DecisionRecordRequestBody struct {
-	Title        string `json:"title" msgpack:"title"`
-	Rationale    string `json:"rationale" msgpack:"rationale"`
-	Context      string `json:"context,omitempty" msgpack:"context,omitempty"`
-	Consequences string `json:"consequences,omitempty" msgpack:"consequences,omitempty"`
+	Title          string `json:"title" msgpack:"title"`
+	Rationale      string `json:"rationale" msgpack:"rationale"`
+	Context        string `json:"context,omitempty" msgpack:"context,omitempty"`
+	Consequences   string `json:"consequences,omitempty" msgpack:"consequences,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty" msgpack:"idempotency_key,omitempty"`
 }
 
 type DecisionRecordResponseBody struct {

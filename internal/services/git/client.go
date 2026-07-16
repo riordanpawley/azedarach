@@ -392,13 +392,28 @@ func (c *Client) mergeCleanlyWithEnv(ctx context.Context, worktree, branch strin
 
 	result, err := c.mergeWithEnv(ctx, worktree, branch, extraEnv)
 	if err != nil {
-		return c.cleanFailedMergeSideEffects(ctx, worktree, branch, targetWasClean, preStatusErr, err)
+		preservedArtifacts := c.preserveIntegrationFailureArtifacts(worktree, nil, err)
+		cleanedResult, cleanErr := c.cleanFailedMergeSideEffects(ctx, worktree, branch, targetWasClean, preStatusErr, err)
+		if preservedArtifacts != "" {
+			if cleanedResult != nil {
+				cleanedResult.Message = appendMergeResultDetail(cleanedResult.Message, "preserved integration failure artifacts at "+preservedArtifacts)
+			}
+			if cleanErr != nil {
+				cleanErr = fmt.Errorf("%w; preserved integration failure artifacts at %s", cleanErr, preservedArtifacts)
+			}
+		}
+		return cleanedResult, cleanErr
 	}
 	if result == nil {
 		return result, err
 	}
 	if !result.Success {
-		return c.cleanUnsuccessfulMergeSideEffects(ctx, worktree, branch, targetWasClean, preStatusErr, result)
+		preservedArtifacts := c.preserveIntegrationFailureArtifacts(worktree, result, nil)
+		cleanedResult, cleanErr := c.cleanUnsuccessfulMergeSideEffects(ctx, worktree, branch, targetWasClean, preStatusErr, result)
+		if preservedArtifacts != "" && cleanedResult != nil {
+			cleanedResult.Message = appendMergeResultDetail(cleanedResult.Message, "preserved integration failure artifacts at "+preservedArtifacts)
+		}
+		return cleanedResult, cleanErr
 	}
 
 	postStatus, err := c.Status(ctx, worktree)

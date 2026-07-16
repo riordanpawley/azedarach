@@ -71,6 +71,13 @@ func (m *Model) applyGlobalBoardSnapshot(snapshot protocol.GlobalSnapshotRespons
 	for _, identity := range snapshot.Projection.KnownTaskIDs {
 		projection.KnownTaskIDs = append(projection.KnownTaskIDs, naming.IssueID(globalTaskKey(identity)))
 	}
+	for _, progress := range snapshot.Projection.ChildProgress {
+		projection.ChildProgress = append(projection.ChildProgress, domain.BoardChildProgress{
+			ParentID: naming.IssueID(globalTaskKey(progress.ParentID)),
+			Done:     progress.Done,
+			Total:    progress.Total,
+		})
+	}
 	m.boardProjection = projection
 	m.boardView = projection.View
 	m.selectedBoardViewID = string(projection.View.ID)

@@ -356,11 +356,22 @@ func seedIssueStateModelV1DB(t *testing.T, dbPath string) {
 			revision INTEGER NOT NULL CHECK (revision >= 0)
 		);
 		INSERT INTO projection_source_revision(singleton, revision) VALUES (1, 4611686018427387904);
+		CREATE TABLE decisions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			local_id TEXT NOT NULL UNIQUE,
+			title TEXT NOT NULL,
+			rationale TEXT,
+			context TEXT,
+			consequences TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			deleted_at TEXT
+		);
 	`)
 	require.NoError(t, err)
 
 	for _, migration := range orderedMigrations {
-		if migration.id == "0019_issue_observation_events" || migration.id == issueStateModelV2MigrationID || migration.id == "0035_interaction_requests" || migration.id == "0045_issue_state_runtime_constraints" || migration.id == humanAuthorityProjectionMigrationID || migration.id == projectionDeltaAuthorityMigrationID || migration.id == decisionPropagationOutboxMigrationID || migration.id == "0049_managed_agent_incarnations" || migration.id == issueObservationEventSearchMigrationID || migration.id == agentInputDeliveryMigrationID || migration.id == agentInputDeliveryFencingMigrationID {
+		if migration.id == "0019_issue_observation_events" || migration.id == issueStateModelV2MigrationID || migration.id == "0035_interaction_requests" || migration.id == "0045_issue_state_runtime_constraints" || migration.id == humanAuthorityProjectionMigrationID || migration.id == projectionDeltaAuthorityMigrationID || migration.id == decisionPropagationOutboxMigrationID || migration.id == "0049_managed_agent_incarnations" || migration.id == issueObservationEventSearchMigrationID || migration.id == decisionIdempotencyMigrationID || migration.id == agentInputDeliveryMigrationID || migration.id == agentInputDeliveryFencingMigrationID {
 			continue
 		}
 		_, err := db.Exec(`INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)`, migration.id, now)

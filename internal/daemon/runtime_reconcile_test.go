@@ -1343,7 +1343,7 @@ func TestRuntimeReconcileKnownProjectIDsIncludesAllKnownSources(t *testing.T) {
 
 func TestRuntimeReconcileKnownProjectIDsScopedModePrioritizesRepoProject(t *testing.T) {
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "managed-run")
 	repoDir := t.TempDir()
 	repoProjectID, err := appconfig.ProjectIDForRoot(repoDir)
 	if err != nil {
@@ -1388,7 +1388,7 @@ func TestRuntimeReconcileKnownProjectIDsScopedModePrioritizesRepoProject(t *test
 
 func TestRuntimeReconcileKnownProjectIDsCanonicalizesRepoAliases(t *testing.T) {
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "managed-run")
 	base := t.TempDir()
 	repoDir := filepath.Join(base, "azedarach")
 	if err := os.MkdirAll(repoDir, 0o755); err != nil {

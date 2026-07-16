@@ -33,6 +33,8 @@ type migration struct {
 	apply       func(context.Context, *sql.DB, string) error
 }
 
+const decisionIdempotencyMigrationID = "0051_decision_idempotency"
+
 var orderedMigrations = []migration{
 	{id: "0001_bootstrap_tables", path: "migrations/0001_bootstrap_tables.sql"},
 	{id: "0002_dependency_foreign_keys", path: "migrations/0002_dependency_foreign_keys.sql", shouldApply: shouldApplyDependencyFKMigration},
@@ -90,8 +92,9 @@ var orderedMigrations = []migration{
 	{id: rootedBootstrapAcknowledgementMigrationID, path: "migrations/0049_rooted_bootstrap_acknowledgements.sql"},
 	{id: "0049_managed_agent_incarnations", path: "migrations/0049_managed_agent_incarnations.sql"},
 	{id: issueObservationEventSearchMigrationID, path: "migrations/0050_issue_observation_event_search.sql"},
-	{id: agentInputDeliveryMigrationID, path: "migrations/0051_agent_input_delivery.sql"},
-	{id: agentInputDeliveryFencingMigrationID, path: "migrations/0052_agent_input_delivery_fencing.sql"},
+	{id: decisionIdempotencyMigrationID, path: "migrations/0051_decision_idempotency.sql"},
+	{id: agentInputDeliveryMigrationID, path: "migrations/0052_agent_input_delivery.sql"},
+	{id: agentInputDeliveryFencingMigrationID, path: "migrations/0053_agent_input_delivery_fencing.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -151,8 +154,9 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: rootedBootstrapAcknowledgementMigrationID, Path: "migrations/0049_rooted_bootstrap_acknowledgements.sql", Checksum: "b54bdf5ec3f6af17c91e1625582ac58e66e47948cea68ee73db88d4e8df6f161"},
 	{ID: "0049_managed_agent_incarnations", Path: "migrations/0049_managed_agent_incarnations.sql", Checksum: "8364ceb9fad589df3f73c1fe0f0462c22b127510f1745e62fcc11e24757fe08d"},
 	{ID: "0050_issue_observation_event_search", Path: "migrations/0050_issue_observation_event_search.sql", Checksum: "e5a8efc20ddf313822576c4d6d42cd94e1837dfac810834957689d30b952005d"},
-	{ID: agentInputDeliveryMigrationID, Path: "migrations/0051_agent_input_delivery.sql", Checksum: agentInputDeliveryMigrationChecksum},
-	{ID: agentInputDeliveryFencingMigrationID, Path: "migrations/0052_agent_input_delivery_fencing.sql", Checksum: agentInputDeliveryFencingMigrationChecksum},
+	{ID: decisionIdempotencyMigrationID, Path: "migrations/0051_decision_idempotency.sql", Checksum: "86d5400fe33bbc19e7e848bc232335809f76d85e4d45a6e45f6bc7ff77547f47"},
+	{ID: agentInputDeliveryMigrationID, Path: "migrations/0052_agent_input_delivery.sql", Checksum: "92d3be503bc193101944f1bc1ecee38656f04c3be7399a1b88356ae6add42f55"},
+	{ID: agentInputDeliveryFencingMigrationID, Path: "migrations/0053_agent_input_delivery_fencing.sql", Checksum: agentInputDeliveryFencingMigrationChecksum},
 }
 
 func validateMigrationRegistry() error {
@@ -451,10 +455,10 @@ const (
 	humanAuthorityProjectionMigrationID                                  = "0047_human_authority_projection_revision"
 	decisionPropagationOutboxMigrationID                                 = "0048_decision_propagation_outbox"
 	issueObservationEventSearchMigrationID                               = "0050_issue_observation_event_search"
-	agentInputDeliveryMigrationID                                        = "0051_agent_input_delivery"
-	agentInputDeliveryMigrationChecksum                                  = "8836af7f8a96e82aa4f72eaee14a5c48ea9a1c161cfc56376089293df6ae3dfa"
-	agentInputDeliveryFencingMigrationID                                 = "0052_agent_input_delivery_fencing"
-	agentInputDeliveryFencingMigrationChecksum                           = "e9b1f2446e300c1dfb324e4306ace6f893b018cf4662c322ec29c04c590e4b4f"
+	agentInputDeliveryMigrationID                                        = "0052_agent_input_delivery"
+	agentInputDeliveryMigrationChecksum                                  = "92d3be503bc193101944f1bc1ecee38656f04c3be7399a1b88356ae6add42f55"
+	agentInputDeliveryFencingMigrationID                                 = "0053_agent_input_delivery_fencing"
+	agentInputDeliveryFencingMigrationChecksum                           = "ba690a9fc1ae8ef5678a075b1e8ea29bae725696b380a416b29f96a8fb3a46e5"
 	contextualLearningMigrationID                                        = "0039_contextual_learning_activation"
 	legacyContextualLearningMigration                                    = "0038_contextual_learning_activation"
 )
@@ -577,6 +581,12 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 				}
 				continue
 			}
+			if m.id == decisionIdempotencyMigrationID {
+				if err := c.applyDecisionIdempotencyMigration(ctx, db, m.id); err != nil {
+					return err
+				}
+				continue
+			}
 			if m.id == issueObservationEventSearchMigrationID {
 				if err := c.applyIssueObservationEventSearchMigration(ctx, db, m.id); err != nil {
 					return err
@@ -642,6 +652,15 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	}
+	decisionIdempotencyApplied, err := isMigrationApplied(ctx, db, decisionIdempotencyMigrationID)
+	if err != nil {
+		return fmt.Errorf("check decision idempotency migration: %w", err)
+	}
+	if decisionIdempotencyApplied {
+		if err := validateDecisionIdempotencySchema(ctx, db); err != nil {
+			return err
+		}
+	}
 
 	canonicalApplied, err := isMigrationApplied(ctx, db, "0045_issue_state_runtime_constraints")
 	if err != nil {
@@ -667,6 +686,68 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("seed built-in board views: %w", err)
 	}
 	return sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifactAuthority, migrationArtifacts)
+}
+
+func (c *Client) applyDecisionIdempotencyMigration(ctx context.Context, db *sql.DB, id string) error {
+	sqlText, err := loadMigrationSQL("migrations/0051_decision_idempotency.sql")
+	if err != nil {
+		return fmt.Errorf("load migration %s: %w", id, err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+		return fmt.Errorf("apply migration %s: %w", id, err)
+	}
+	if c.decisionIdempotencyFailureHook != nil {
+		if err := c.decisionIdempotencyFailureHook("after_schema"); err != nil {
+			return fmt.Errorf("migration %s rolled back: %w", id, err)
+		}
+	}
+	if err := validateDecisionIdempotencySchema(ctx, tx); err != nil {
+		return fmt.Errorf("validate migration %s: %w", id, err)
+	}
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	return nil
+}
+
+func validateDecisionIdempotencySchema(ctx context.Context, q sqlIssueQueryer) error {
+	var columnCount int
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('decisions') WHERE name='idempotency_key' AND type='TEXT'`).Scan(&columnCount); err != nil {
+		return fmt.Errorf("inspect decision idempotency column: %w", err)
+	}
+	if columnCount != 1 {
+		return errors.New("decision idempotency schema drifted: missing idempotency_key column")
+	}
+	var tableSQL string
+	if err := q.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='decisions'`).Scan(&tableSQL); err != nil {
+		return fmt.Errorf("inspect decisions table: %w", err)
+	}
+	normalizedTable := strings.ToLower(strings.Join(strings.Fields(tableSQL), " "))
+	if !strings.Contains(normalizedTable, "check (idempotency_key is null or trim(idempotency_key) <> '')") {
+		return errors.New("decision idempotency schema drifted: missing non-empty key constraint")
+	}
+	var indexSQL string
+	if err := q.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_decisions_idempotency_key'`).Scan(&indexSQL); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.New("decision idempotency schema drifted: missing unique index")
+		}
+		return fmt.Errorf("inspect decision idempotency index: %w", err)
+	}
+	normalized := strings.ToLower(strings.Join(strings.Fields(indexSQL), " "))
+	for _, fragment := range []string{"create unique index", "on decisions(idempotency_key)"} {
+		if !strings.Contains(normalized, fragment) {
+			return fmt.Errorf("decision idempotency schema drifted: index missing %q", fragment)
+		}
+	}
+	return nil
 }
 
 func applyProjectionDeltaAuthorityMigration(ctx context.Context, db *sql.DB, id string) error {
@@ -1694,7 +1775,7 @@ func (c *Client) applyDecisionPropagationOutboxMigration(ctx context.Context, db
 }
 
 func (c *Client) applyAgentInputDeliveryMigration(ctx context.Context, db *sql.DB, id string) error {
-	sqlText, err := loadMigrationSQL("migrations/0051_agent_input_delivery.sql")
+	sqlText, err := loadMigrationSQL("migrations/0052_agent_input_delivery.sql")
 	if err != nil {
 		return fmt.Errorf("load migration %s: %w", id, err)
 	}
@@ -1724,7 +1805,7 @@ func (c *Client) applyAgentInputDeliveryMigration(ctx context.Context, db *sql.D
 }
 
 func (c *Client) applyAgentInputDeliveryFencingMigration(ctx context.Context, db *sql.DB, id string) error {
-	sqlText, err := loadMigrationSQL("migrations/0052_agent_input_delivery_fencing.sql")
+	sqlText, err := loadMigrationSQL("migrations/0053_agent_input_delivery_fencing.sql")
 	if err != nil {
 		return fmt.Errorf("load migration %s: %w", id, err)
 	}

@@ -1377,6 +1377,22 @@ func TestBuildSubmitRequestRoutesSessionResolveConflictByIssueAndWorktree(t *tes
 	}
 }
 
+func TestBuildSubmitRequestRoutesSessionRestartAllDurablyByProjectAndPayload(t *testing.T) {
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), nextRevision: sequentialRevision()})
+	runtime.sessionRestartAll = func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		return testResponse(req, protocol.SessionRestartAllResponseBody{}), nil
+	}
+	body := mustJSON(t, protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID("proj-1"), ForceBusy: true})
+	first := runtime.buildSubmitRequestForTest(t, protocol.CommandSessionRestartAll, "proj-1", body)
+	second := runtime.buildSubmitRequestForTest(t, protocol.CommandSessionRestartAll, "proj-1", body)
+	if first.DedupeKey == "" || first.DedupeKey != second.DedupeKey {
+		t.Fatalf("dedupe keys = %q and %q, want stable payload identity", first.DedupeKey, second.DedupeKey)
+	}
+	if len(first.ResourceKeys) != 1 || first.ResourceKeys[0] != "project:proj-1:session-restart" {
+		t.Fatalf("resource keys = %v", first.ResourceKeys)
+	}
+}
+
 func TestBuildSubmitRequestNormalizesWorktreeForConflictSerialization(t *testing.T) {
 	runtime := newOperationRuntime(operationRuntimeConfig{
 		repoDir:      t.TempDir(),

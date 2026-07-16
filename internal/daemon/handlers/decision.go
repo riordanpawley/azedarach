@@ -79,6 +79,10 @@ func (h *DecisionHandler) Handle(ctx context.Context, req protocol.RequestEnvelo
 		cmd.Rationale = strings.TrimSpace(cmd.Rationale)
 		cmd.Context = strings.TrimSpace(cmd.Context)
 		cmd.Consequences = strings.TrimSpace(cmd.Consequences)
+		cmd.IdempotencyKey = strings.TrimSpace(cmd.IdempotencyKey)
+		if cmd.IdempotencyKey == "" {
+			cmd.IdempotencyKey = string(req.RequestID)
+		}
 		if cmd.Title == "" || cmd.Rationale == "" {
 			return specInvalidRequest(resp, "missing required fields: title/rationale")
 		}

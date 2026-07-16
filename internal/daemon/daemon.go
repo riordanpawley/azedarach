@@ -106,6 +106,7 @@ type Daemon struct {
 
 	issues                               *issues.Client
 	userStore                            *userstore.Store
+	selectorSnapshots                    selectorSnapshotCache
 	userStoreRefreshMu                   sync.Mutex
 	userStoreProjectLockHook             func(string, bool)
 	userStoreProjectRefreshLocks         sync.Map
@@ -186,6 +187,8 @@ type Daemon struct {
 	issueAutoArchiveLastRun              map[string]time.Time
 	sessionStopMu                        sync.Mutex
 	sessionStopPending                   map[string]int
+	sessionRestartMu                     sync.Mutex
+	sessionRestartPending                map[string]*sessionRestartExecution
 	orchestratorStopGracePeriod          time.Duration
 	orchestratorStopPollInterval         time.Duration
 	orchestratorStopAfterIntentPersisted func()
@@ -477,6 +480,7 @@ func New(cfg Config) *Daemon {
 		sessionStart:            d.handleSessionStartDirect,
 		sessionStop:             d.handleSessionStopDirect,
 		sessionResolveConflict:  d.handleSessionResolveConflictDirect,
+		sessionRestartAll:       d.handleSessionRestartAllDirect,
 		taskBulkCleanup:         d.handleTaskBulkCleanup,
 		globalProjectionRebuild: d.handleGlobalProjectionRebuild,
 		onTerminal:              d.reconcileOrchestrationStartOperation,
@@ -578,6 +582,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	serveCtx, cancelServe := context.WithCancel(context.Background())
 	defer cancelServe()
+	d.startUserProjectionWorkContext(serveCtx)
 	d.startSessionLaunchArtifactCleanup(serveCtx)
 	shutdownDone := make(chan struct{})
 	shutdownStop := make(chan struct{})
@@ -1384,6 +1389,9 @@ func (d *Daemon) recoverInterruptedOperation(ctx context.Context, record daemono
 	if record.Kind == taskDeferredWorktreeCleanupOperationKind {
 		return d.recoverInterruptedDeferredWorktreeCleanup(ctx, record)
 	}
+	if record.Kind == protocol.CommandSessionRestartAll {
+		return d.recoverInterruptedSessionRestart(ctx, record)
+	}
 	if record.Kind != daemonhandlers.CommandSessionStart {
 		return interruptedOperationRecovery{}, false
 	}
@@ -1426,6 +1434,91 @@ func (d *Daemon) recoverInterruptedOperation(ctx context.Context, record daemono
 		State:         daemonops.StateDone,
 		ResultPayload: result,
 	}, true
+}
+
+func (d *Daemon) recoverInterruptedSessionRestart(ctx context.Context, record daemonops.Record) (interruptedOperationRecovery, bool) {
+	plan, ok := decodeSessionRestartRecoveryPlan(record)
+	if !ok {
+		return interruptedOperationRecovery{}, false
+	}
+	recoveryCtx, cancel := context.WithTimeout(ctx, sessionRestartObservationTimeout)
+	defer cancel()
+	store := d.sessionRuntimeStateStoreIfConfigured(plan.ProjectID)
+	if store == nil || d.tmux == nil {
+		return interruptedOperationRecovery{}, false
+	}
+	item := protocol.SessionRestartAllItem{ProjectID: naming.ProjectID(plan.ProjectID), IssueID: naming.IssueID(plan.IssueID), SessionID: naming.SessionID(plan.SessionID), Activity: plan.Activity, TmuxReady: true, OldIdentity: restartProtocolIdentity(plan.Old), OperationID: plan.ProjectID + "/" + plan.SessionID + "/" + plan.Old.LogicalPaneID + "/" + plan.Old.AgentIncarnation}
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		current, found, identityErr := store.GetManagedAgentIdentity(recoveryCtx, plan.ProjectID, plan.SessionID, plan.Old.LogicalPaneID)
+		panes, panesErr := d.tmux.ListPaneInfos(recoveryCtx)
+		if identityErr == nil && panesErr == nil {
+			if found && current.AgentIncarnation == plan.PlannedIncarnation && current.PanePID != plan.Old.PanePID && managedRestartIdentityLive(plan.SessionID, current, panes) {
+				item.Restarted = true
+				item.NewIdentity = restartProtocolIdentity(current)
+				item.Outcome = restartSuccessOutcome(plan.Activity)
+				item.Stages = []protocol.SessionRestartStage{restartStage("recover", "complete", "replacement identity and hook incarnation recovered", sessionRestartObservationTimeout)}
+				return sessionRestartRecoveryResult(item), true
+			}
+			oldIdentityLive := managedRestartIdentityLive(plan.SessionID, plan.Old, panes)
+			if oldIdentityLive && plan.Stage == "prepare" {
+				item.Outcome = "partial_failure"
+				item.Error = "restart interrupted before exact-pane replacement"
+				item.Stages = []protocol.SessionRestartStage{restartStage("recover_"+plan.Stage, "failed", item.Error, sessionRestartObservationTimeout)}
+				return sessionRestartRecoveryResult(item), true
+			}
+			// replace_ready is durable before tmux accepts respawn-pane. The old
+			// identity can therefore remain observable while an accepted command
+			// is still taking effect; keep it inside the bounded observation window.
+			replacementLive := oldIdentityLive || restartReplacementPaneLive(plan, panes)
+			if !replacementLive && plan.Stage != "replace_ready" {
+				item.Outcome = "crashed"
+				item.Error = "managed pane disappeared during daemon restart"
+				item.Skipped = true
+				item.Stages = []protocol.SessionRestartStage{restartStage("recover_"+plan.Stage, "failed", item.Error, sessionRestartObservationTimeout)}
+				return sessionRestartRecoveryResult(item), true
+			}
+			lastErr = nil
+		} else {
+			lastErr = errors.Join(identityErr, panesErr)
+		}
+
+		select {
+		case <-recoveryCtx.Done():
+			item.Outcome = "partial_failure"
+			item.Error = "replacement did not converge to the planned hook incarnation after bounded recovery observation"
+			if lastErr != nil {
+				item.Error = fmt.Sprintf("restart recovery observation failed: %v", lastErr)
+			}
+			item.Stages = []protocol.SessionRestartStage{restartStage("recover_"+plan.Stage, "timeout", item.Error, sessionRestartObservationTimeout)}
+			return sessionRestartRecoveryResult(item), true
+		case <-ticker.C:
+		}
+	}
+}
+
+func restartReplacementPaneLive(plan sessionRestartRecoveryPlan, panes []tmux.PaneInfo) bool {
+	for _, pane := range panes {
+		if pane.SessionName == plan.SessionID && sanitizeRuntimePaneID(pane.PaneID) == sanitizeRuntimePaneID(plan.Old.TmuxPaneID) && pane.PanePID != plan.Old.PanePID {
+			return true
+		}
+	}
+	return false
+}
+
+func sessionRestartRecoveryResult(item protocol.SessionRestartAllItem) interruptedOperationRecovery {
+	body := protocol.SessionRestartAllResponseBody{ProjectID: item.ProjectID, Restarted: boolToInt(item.Restarted), Skipped: boolToInt(item.Skipped), Failed: boolToInt(!item.Restarted && !item.Skipped), Sessions: []protocol.SessionRestartAllItem{item}}
+	payload, _ := json.Marshal(body)
+	return interruptedOperationRecovery{State: daemonops.StateDone, ResultPayload: payload}
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func (d *Daemon) recoverInterruptedDeferredWorktreeCleanup(ctx context.Context, record daemonops.Record) (interruptedOperationRecovery, bool) {

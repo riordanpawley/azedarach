@@ -251,6 +251,20 @@ func TestBuildColumnsUsesConfiguredBoardSnapshotColumns(t *testing.T) {
 	}
 }
 
+func TestBoardRendersAuthoritativeChildProgressWhenChildIsOmitted(t *testing.T) {
+	m := newTestModel()
+	parent := domain.Task{ID: "az-parent", Title: "Parent", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeTask}
+	m.tasks = []domain.Task{parent}
+	m.boardView = domain.DefaultBoardView()
+	m.boardColumns = []domain.BoardViewColumnSnapshot{{Definition: m.boardView.Columns[0], Tasks: []domain.Task{parent}}}
+	m.boardProjection = domain.BoardViewProjection{ChildProgress: []domain.BoardChildProgress{{ParentID: parent.ID, Done: 3, Total: 4}}}
+
+	got := ansi.Strip(m.renderBoardView())
+	if !strings.Contains(got, "[3/4]") {
+		t.Fatalf("board did not render authoritative child progress:\n%s", got)
+	}
+}
+
 func TestBuildColumnsHonorsConfiguredHiddenEmptyColumns(t *testing.T) {
 	m := newTestModel()
 	view := domain.OrchestrationBoardView()
@@ -499,7 +513,7 @@ func TestResolveTUILogFilePath_UsesSessionLogDir(t *testing.T) {
 	}
 }
 
-func TestResolveTUILogFilePath_UsesScopedWorktreeDirInJustRunMode(t *testing.T) {
+func TestResolveTUILogFilePath_UsesScopedWorktreeDirInManagedRunMode(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
 	worktree := filepath.Join(base, "wt")
@@ -519,7 +533,7 @@ func TestResolveTUILogFilePath_UsesScopedWorktreeDirInJustRunMode(t *testing.T) 
 	}
 
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "managed-run")
 	t.Setenv("PATH", "")
 	t.Chdir(nested)
 
@@ -564,7 +578,7 @@ func TestDaemonLogFilePath_UsesSessionLogDir(t *testing.T) {
 	}
 }
 
-func TestDaemonLogFilePath_UsesScopedWorktreeDirInJustRunMode(t *testing.T) {
+func TestDaemonLogFilePath_UsesScopedWorktreeDirInManagedRunMode(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
 	worktree := filepath.Join(base, "wt")
@@ -584,7 +598,7 @@ func TestDaemonLogFilePath_UsesScopedWorktreeDirInJustRunMode(t *testing.T) {
 	}
 
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "managed-run")
 	t.Setenv("PATH", "")
 	t.Chdir(nested)
 
@@ -7784,7 +7798,7 @@ func TestRuntimeSignalsForBoardHidesWorktreeOperationFailureWithoutWorktree(t *t
 			board.Cursor{Column: 0, Task: 0},
 			map[string]bool{},
 			m.runtimeSignalsForBoard(),
-			board.BuildChildProgress([]domain.Task{task}),
+			nil,
 			nil,
 			false,
 			nil,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -93,6 +94,242 @@ func TestGlobalSnapshotDoesNotReconcileProjectCatalog(t *testing.T) {
 	if len(snapshot.Projects) != 1 || !snapshot.Projects[0].Registered {
 		t.Fatalf("global snapshot mutated catalog registration: %+v", snapshot.Projects)
 	}
+}
+
+func TestTmuxSelectorGlobalSnapshotReturnsCachedValueWhileRefreshing(t *testing.T) {
+	store, projectID := openSelectorSnapshotTestStore(t, "first")
+	d := &Daemon{cfg: Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, userStore: store}
+	t.Cleanup(d.stopUserProjectionWorkers)
+	ctx := context.Background()
+	body := protocol.GlobalSnapshotRequestBody{Consumer: protocol.GlobalViewConsumerTmuxSelector}
+
+	first := readGlobalSnapshotResponse(t, d, ctx, body)
+	if got := first.Projects[0].Tasks[0].Title; got != "first" {
+		t.Fatalf("cold snapshot title = %q, want first", got)
+	}
+	if err := store.ReplaceProject(ctx, userstore.ProjectInput{
+		ProjectID: projectID,
+		Name:      "Project",
+		Path:      first.Projects[0].Path,
+		DBPath:    first.Projects[0].DBPath,
+		Tasks:     []domain.Task{{ID: "one", Title: "second", Status: domain.StatusInProgress, Type: domain.TypeTask, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	warm := readGlobalSnapshotResponse(t, d, ctx, body)
+	if got := warm.Projects[0].Tasks[0].Title; got != "first" {
+		t.Fatalf("warm snapshot title = %q, want cached first", got)
+	}
+	key, err := selectorSnapshotRequestKey(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		cached, ok := d.selectorSnapshots.get(key)
+		var snapshot protocol.GlobalSnapshotResponseBody
+		if ok && json.Unmarshal(cached, &snapshot) == nil && len(snapshot.Projects) == 1 && snapshot.Projects[0].Tasks[0].Title == "second" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("selector snapshot cache did not refresh to second")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	refreshed := readGlobalSnapshotResponse(t, d, ctx, body)
+	if got := refreshed.Projects[0].Tasks[0].Title; got != "second" {
+		t.Fatalf("refreshed snapshot title = %q, want second", got)
+	}
+}
+
+func TestTmuxSelectorGlobalSnapshotFailedRefreshPreservesLastGoodValue(t *testing.T) {
+	store, _ := openSelectorSnapshotTestStore(t, "last-good")
+	d := &Daemon{cfg: Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, userStore: store}
+	t.Cleanup(d.stopUserProjectionWorkers)
+	ctx := context.Background()
+	body := protocol.GlobalSnapshotRequestBody{Consumer: protocol.GlobalViewConsumerTmuxSelector}
+
+	_ = readGlobalSnapshotResponse(t, d, ctx, body)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	warm := readGlobalSnapshotResponse(t, d, ctx, body)
+	if got := warm.Projects[0].Tasks[0].Title; got != "last-good" {
+		t.Fatalf("warm snapshot title = %q, want last-good", got)
+	}
+
+	key, err := selectorSnapshotRequestKey(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		d.selectorSnapshots.mu.RLock()
+		_, refreshing := d.selectorSnapshots.refreshing[key]
+		d.selectorSnapshots.mu.RUnlock()
+		if !refreshing {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("failed selector snapshot refresh did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cached, ok := d.selectorSnapshots.get(key)
+	if !ok {
+		t.Fatal("last-good selector snapshot missing after failed refresh")
+	}
+	var snapshot protocol.GlobalSnapshotResponseBody
+	if err = json.Unmarshal(cached, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if got := snapshot.Projects[0].Tasks[0].Title; got != "last-good" {
+		t.Fatalf("cached snapshot title = %q, want last-good", got)
+	}
+}
+
+func TestTmuxSelectorGlobalSnapshotCanceledColdCallerDoesNotCancelDaemonLoad(t *testing.T) {
+	store, _ := openSelectorSnapshotTestStore(t, "survives-cancellation")
+	d := &Daemon{cfg: Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, userStore: store}
+	daemonCtx, stopDaemon := context.WithCancel(context.Background())
+	d.startUserProjectionWorkContext(daemonCtx)
+	t.Cleanup(func() {
+		stopDaemon()
+		d.stopUserProjectionWorkers()
+	})
+	body := protocol.GlobalSnapshotRequestBody{Consumer: protocol.GlobalViewConsumerTmuxSelector}
+	key, err := selectorSnapshotRequestKey(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	cancelLeader()
+	if _, err = d.selectorSnapshots.loadCold(leaderCtx, key, func() ([]byte, error) {
+		return d.loadSelectorSnapshot(leaderCtx, body)
+	}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled leader error = %v, want context canceled", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		if cached, ok := d.selectorSnapshots.get(key); ok {
+			var snapshot protocol.GlobalSnapshotResponseBody
+			if err = json.Unmarshal(cached, &snapshot); err == nil && snapshot.Projects[0].Tasks[0].Title == "survives-cancellation" {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("daemon-owned cold load did not populate cache after caller cancellation")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	got := readGlobalSnapshotResponse(t, d, context.Background(), body)
+	if title := got.Projects[0].Tasks[0].Title; title != "survives-cancellation" {
+		t.Fatalf("surviving caller title = %q, want survives-cancellation", title)
+	}
+}
+
+func TestTmuxSelectorGlobalSnapshotSaturationServesCacheWithoutAnotherRefresh(t *testing.T) {
+	store, _ := openSelectorSnapshotTestStore(t, "cached")
+	d := &Daemon{cfg: Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, userStore: store}
+	t.Cleanup(d.stopUserProjectionWorkers)
+	body := protocol.GlobalSnapshotRequestBody{Consumer: protocol.GlobalViewConsumerTmuxSelector}
+	_ = readGlobalSnapshotResponse(t, d, context.Background(), body)
+
+	reservations := make([]selectorSnapshotLoad, 0, maxSelectorSnapshotRefreshes)
+	for index := 0; index < maxSelectorSnapshotRefreshes; index++ {
+		reservation, ok := d.selectorSnapshots.beginRefresh(fmt.Sprintf("occupied-%d", index))
+		if !ok {
+			t.Fatalf("reserve refresh capacity %d", index)
+		}
+		reservations = append(reservations, reservation)
+	}
+	warm := readGlobalSnapshotResponse(t, d, context.Background(), body)
+	if title := warm.Projects[0].Tasks[0].Title; title != "cached" {
+		t.Fatalf("saturated warm title = %q, want cached", title)
+	}
+	key, err := selectorSnapshotRequestKey(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.selectorSnapshots.mu.RLock()
+	_, targetRefreshing := d.selectorSnapshots.refreshing[key]
+	active := d.selectorSnapshots.activeRefreshes
+	d.selectorSnapshots.mu.RUnlock()
+	if targetRefreshing || active != maxSelectorSnapshotRefreshes {
+		t.Fatalf("saturated refresh state target=%v active=%d, want false,%d", targetRefreshing, active, maxSelectorSnapshotRefreshes)
+	}
+	for _, reservation := range reservations {
+		d.selectorSnapshots.finishLoad(reservation, nil, errors.New("test release"))
+	}
+}
+
+func TestNonSelectorGlobalSnapshotKeepsStrongReadBehavior(t *testing.T) {
+	store, projectID := openSelectorSnapshotTestStore(t, "first")
+	d := &Daemon{userStore: store}
+	ctx := context.Background()
+	body := protocol.GlobalSnapshotRequestBody{Consumer: protocol.GlobalViewConsumerBoard}
+	_ = readGlobalSnapshotResponse(t, d, ctx, body)
+	snapshot, err := store.Snapshot(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.ReplaceProject(ctx, userstore.ProjectInput{
+		ProjectID: projectID,
+		Name:      "Project",
+		Path:      snapshot.Projects[0].Path,
+		DBPath:    snapshot.Projects[0].DBPath,
+		Tasks:     []domain.Task{{ID: "one", Title: "second", Status: domain.StatusInProgress, Type: domain.TypeTask, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second := readGlobalSnapshotResponse(t, d, ctx, body)
+	if got := second.Projects[0].Tasks[0].Title; got != "second" {
+		t.Fatalf("second strong-read title = %q, want second", got)
+	}
+}
+
+func openSelectorSnapshotTestStore(t *testing.T, title string) (*userstore.Store, string) {
+	t.Helper()
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	root := t.TempDir()
+	projectID := "project"
+	now := time.Now().UTC()
+	if err = store.ReplaceProject(context.Background(), userstore.ProjectInput{
+		ProjectID: projectID,
+		Name:      "Project",
+		Path:      root,
+		DBPath:    filepath.Join(root, ".azedarach", "azedarach.db"),
+		Tasks:     []domain.Task{{ID: "one", Title: title, Status: domain.StatusInProgress, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return store, projectID
+}
+
+func readGlobalSnapshotResponse(t *testing.T, d *Daemon, ctx context.Context, body protocol.GlobalSnapshotRequestBody) protocol.GlobalSnapshotResponseBody {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := d.handleGlobalSnapshot(ctx, protocol.RequestEnvelope{Body: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.OK {
+		t.Fatalf("global snapshot response error: %+v", resp.Error)
+	}
+	var snapshot protocol.GlobalSnapshotResponseBody
+	if err = json.Unmarshal(resp.Body, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
 }
 
 func TestScopedRuntimeNeverOpensOrCreatesUserProjectionDatabase(t *testing.T) {
