@@ -25,55 +25,101 @@ type AgentInputDeliveryIntent struct {
 	Acknowledged time.Time
 }
 
+type AgentInputDeliverySessionLease struct {
+	ProjectID                string
+	SessionID                string
+	AgentIncarnation         string
+	LeaseOwner               string
+	LeaseToken               string
+	LeaseExpires             time.Time
+	PreviousAgentIncarnation string
+	PreviousLeaseToken       string
+}
+
 // ClaimAgentInputDeliverySessionLease excludes every automated delivery to the
-// same durable session incarnation, including deliveries owned by another
-// daemon and using a different intent key.
-func (c *Client) ClaimAgentInputDeliverySessionLease(ctx context.Context, projectID, sessionID, incarnation, owner string, now time.Time, leaseDuration time.Duration) (string, bool, error) {
+// same durable session. Incarnation is a fenced value, not part of the key, so
+// an old and new incarnation can never own overlapping session-global gates.
+func (c *Client) ClaimAgentInputDeliverySessionLease(ctx context.Context, projectID, sessionID, incarnation, owner string, now time.Time, leaseDuration time.Duration) (AgentInputDeliverySessionLease, bool, error) {
+	var lease AgentInputDeliverySessionLease
 	projectID = strings.TrimSpace(projectID)
 	sessionID = strings.TrimSpace(sessionID)
 	incarnation = strings.TrimSpace(incarnation)
 	owner = strings.TrimSpace(owner)
 	if projectID == "" || sessionID == "" || incarnation == "" || owner == "" || leaseDuration <= 0 {
-		return "", false, errors.New("invalid agent input session lease")
+		return lease, false, errors.New("invalid agent input session lease")
 	}
 	token, err := randomAgentInputToken()
 	if err != nil {
-		return "", false, err
+		return lease, false, err
 	}
+	expires := now.Add(leaseDuration)
 	acquired := false
 	err = c.retrySQLiteBusy(ctx, func() error {
+		acquired = false
+		lease = AgentInputDeliverySessionLease{}
 		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
 			db, err := c.dbHandle()
 			if err != nil {
 				return err
 			}
-			result, err := db.ExecContext(lockCtx, `INSERT INTO agent_input_delivery_session_leases(project_id,session_id,agent_incarnation,lease_owner,lease_token,lease_expires_at,updated_at)
-				VALUES(?,?,?,?,?,?,?)
-				ON CONFLICT(project_id,session_id,agent_incarnation) DO UPDATE SET lease_owner=excluded.lease_owner,lease_token=excluded.lease_token,lease_expires_at=excluded.lease_expires_at,updated_at=excluded.updated_at
-				WHERE julianday(agent_input_delivery_session_leases.lease_expires_at)<=julianday(?)`, projectID, sessionID, incarnation, owner, token, formatTimestamp(now.Add(leaseDuration)), formatTimestamp(now), formatTimestamp(now))
+			tx, err := db.BeginTx(lockCtx, nil)
 			if err != nil {
 				return err
 			}
-			n, err := result.RowsAffected()
-			acquired = n == 1
-			return err
+			defer tx.Rollback()
+			var previousIncarnation, previousToken, previousExpiry string
+			err = tx.QueryRowContext(lockCtx, `SELECT agent_incarnation,lease_token,lease_expires_at FROM agent_input_delivery_session_leases WHERE project_id=? AND session_id=?`, projectID, sessionID).Scan(&previousIncarnation, &previousToken, &previousExpiry)
+			switch {
+			case errors.Is(err, sql.ErrNoRows):
+				err = nil
+				_, err = tx.ExecContext(lockCtx, `INSERT INTO agent_input_delivery_session_leases(project_id,session_id,agent_incarnation,lease_owner,lease_token,lease_expires_at,updated_at) VALUES(?,?,?,?,?,?,?)`, projectID, sessionID, incarnation, owner, token, formatTimestamp(expires), formatTimestamp(now))
+			case err != nil:
+				return err
+			case parseTimestamp(previousExpiry).After(now):
+				return nil
+			default:
+				result, updateErr := tx.ExecContext(lockCtx, `UPDATE agent_input_delivery_session_leases SET agent_incarnation=?,lease_owner=?,lease_token=?,lease_expires_at=?,updated_at=? WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_token=? AND julianday(lease_expires_at)<=julianday(?)`, incarnation, owner, token, formatTimestamp(expires), formatTimestamp(now), projectID, sessionID, previousIncarnation, previousToken, formatTimestamp(now))
+				if updateErr != nil {
+					return updateErr
+				}
+				n, rowsErr := result.RowsAffected()
+				if rowsErr != nil || n != 1 {
+					return rowsErr
+				}
+				lease.PreviousAgentIncarnation = previousIncarnation
+				lease.PreviousLeaseToken = previousToken
+			}
+			if err != nil {
+				return err
+			}
+			if err := tx.Commit(); err != nil {
+				return err
+			}
+			acquired = true
+			return nil
 		})
 	})
-	if !acquired {
-		token = ""
+	if acquired {
+		lease.ProjectID = projectID
+		lease.SessionID = sessionID
+		lease.AgentIncarnation = incarnation
+		lease.LeaseOwner = owner
+		lease.LeaseToken = token
+		lease.LeaseExpires = expires
 	}
-	return token, acquired, err
+	return lease, acquired, err
 }
 
-func (c *Client) RenewAgentInputDeliverySessionLease(ctx context.Context, projectID, sessionID, incarnation, leaseToken string, now time.Time, leaseDuration time.Duration) (bool, error) {
+func (c *Client) RenewAgentInputDeliverySessionLease(ctx context.Context, projectID, sessionID, incarnation, leaseToken string, now time.Time, leaseDuration time.Duration) (time.Time, bool, error) {
 	var renewed bool
+	expires := now.Add(leaseDuration)
 	err := c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
 			db, err := c.dbHandle()
 			if err != nil {
 				return err
 			}
-			result, err := db.ExecContext(lockCtx, `UPDATE agent_input_delivery_session_leases SET lease_expires_at=?,updated_at=? WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_token=? AND julianday(lease_expires_at)>julianday(?)`, formatTimestamp(now.Add(leaseDuration)), formatTimestamp(now), projectID, sessionID, incarnation, leaseToken, formatTimestamp(now))
+			result, err := db.ExecContext(lockCtx, `UPDATE agent_input_delivery_session_leases SET lease_expires_at=?,updated_at=? WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_token=? AND julianday(lease_expires_at)>julianday(?)`, formatTimestamp(expires), formatTimestamp(now), projectID, sessionID, incarnation, leaseToken, formatTimestamp(now))
 			if err != nil {
 				return err
 			}
@@ -82,7 +128,10 @@ func (c *Client) RenewAgentInputDeliverySessionLease(ctx context.Context, projec
 			return err
 		})
 	})
-	return renewed, err
+	if !renewed {
+		expires = time.Time{}
+	}
+	return expires, renewed, err
 }
 
 func (c *Client) ReleaseAgentInputDeliverySessionLease(ctx context.Context, projectID, sessionID, incarnation, leaseToken string) error {
@@ -96,6 +145,50 @@ func (c *Client) ReleaseAgentInputDeliverySessionLease(ctx context.Context, proj
 			return err
 		})
 	})
+}
+
+// ClaimAgentInputDeliverySessionLeaseRecovery atomically fences recovery of a
+// persisted gate. A different current token, including a takeover owner, can
+// never be restored by an old gate record.
+func (c *Client) ClaimAgentInputDeliverySessionLeaseRecovery(ctx context.Context, projectID, sessionID, incarnation, expectedToken, owner string, now time.Time, leaseDuration time.Duration) (AgentInputDeliverySessionLease, bool, error) {
+	var lease AgentInputDeliverySessionLease
+	projectID = strings.TrimSpace(projectID)
+	sessionID = strings.TrimSpace(sessionID)
+	incarnation = strings.TrimSpace(incarnation)
+	expectedToken = strings.TrimSpace(expectedToken)
+	owner = strings.TrimSpace(owner)
+	if projectID == "" || sessionID == "" || incarnation == "" || expectedToken == "" || owner == "" || leaseDuration <= 0 {
+		return lease, false, errors.New("invalid agent input session recovery lease")
+	}
+	token, err := randomAgentInputToken()
+	if err != nil {
+		return lease, false, err
+	}
+	expires := now.Add(leaseDuration)
+	acquired := false
+	err = c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			result, err := db.ExecContext(lockCtx, `INSERT INTO agent_input_delivery_session_leases(project_id,session_id,agent_incarnation,lease_owner,lease_token,lease_expires_at,updated_at)
+				VALUES(?,?,?,?,?,?,?)
+				ON CONFLICT(project_id,session_id) DO UPDATE SET agent_incarnation=excluded.agent_incarnation,lease_owner=excluded.lease_owner,lease_token=excluded.lease_token,lease_expires_at=excluded.lease_expires_at,updated_at=excluded.updated_at
+				WHERE agent_input_delivery_session_leases.agent_incarnation=? AND agent_input_delivery_session_leases.lease_token=? AND julianday(agent_input_delivery_session_leases.lease_expires_at)<=julianday(?)`,
+				projectID, sessionID, incarnation, owner, token, formatTimestamp(expires), formatTimestamp(now), incarnation, expectedToken, formatTimestamp(now))
+			if err != nil {
+				return err
+			}
+			n, err := result.RowsAffected()
+			acquired = n == 1
+			return err
+		})
+	})
+	if acquired {
+		lease = AgentInputDeliverySessionLease{ProjectID: projectID, SessionID: sessionID, AgentIncarnation: incarnation, LeaseOwner: owner, LeaseToken: token, LeaseExpires: expires}
+	}
+	return lease, acquired, err
 }
 
 func (c *Client) ListPendingAgentInputDeliveryIntents(ctx context.Context, projectID string, now time.Time, limit int) ([]AgentInputDeliveryIntent, error) {
@@ -247,26 +340,50 @@ func (c *Client) ClaimAgentInputDeliveryIntent(ctx context.Context, projectID, i
 }
 
 // BeginAgentInputDeliverySubmission durably crosses the no-automatic-retry
-// boundary immediately before app-server turn/start. A daemon crash after this
-// transition leaves the intent ambiguous instead of risking a duplicate turn.
-func (c *Client) BeginAgentInputDeliverySubmission(ctx context.Context, projectID, intentKey, leaseToken string, now time.Time) (bool, error) {
+// boundary and renews the exact session fence in one transaction immediately
+// before app-server turn/start. A daemon crash after this transition leaves the
+// intent ambiguous instead of risking a duplicate turn.
+func (c *Client) BeginAgentInputDeliverySubmission(ctx context.Context, projectID, intentKey, intentLeaseToken, sessionID, incarnation, sessionLeaseToken string, now time.Time, leaseDuration time.Duration) (time.Time, bool, error) {
 	var begun bool
+	expires := now.Add(leaseDuration)
 	err := c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
 			db, err := c.dbHandle()
 			if err != nil {
 				return err
 			}
-			result, err := db.ExecContext(lockCtx, `UPDATE agent_input_delivery_intents SET state='ambiguous',updated_at=? WHERE project_id=? AND intent_key=? AND state='leased' AND lease_token=?`, formatTimestamp(now), projectID, intentKey, leaseToken)
+			tx, err := db.BeginTx(lockCtx, nil)
 			if err != nil {
 				return err
 			}
-			n, err := result.RowsAffected()
-			begun = n == 1
-			return err
+			defer tx.Rollback()
+			sessionResult, err := tx.ExecContext(lockCtx, `UPDATE agent_input_delivery_session_leases SET lease_expires_at=?,updated_at=? WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_token=? AND julianday(lease_expires_at)>julianday(?)`, formatTimestamp(expires), formatTimestamp(now), projectID, sessionID, incarnation, sessionLeaseToken, formatTimestamp(now))
+			if err != nil {
+				return err
+			}
+			sessionRows, err := sessionResult.RowsAffected()
+			if err != nil || sessionRows != 1 {
+				return err
+			}
+			intentResult, err := tx.ExecContext(lockCtx, `UPDATE agent_input_delivery_intents SET state='ambiguous',updated_at=? WHERE project_id=? AND intent_key=? AND session_id=? AND agent_incarnation=? AND state='leased' AND lease_token=?`, formatTimestamp(now), projectID, intentKey, sessionID, incarnation, intentLeaseToken)
+			if err != nil {
+				return err
+			}
+			intentRows, err := intentResult.RowsAffected()
+			if err != nil || intentRows != 1 {
+				return err
+			}
+			if err := tx.Commit(); err != nil {
+				return err
+			}
+			begun = true
+			return nil
 		})
 	})
-	return begun, err
+	if !begun {
+		expires = time.Time{}
+	}
+	return expires, begun, err
 }
 
 func (c *Client) AcknowledgeAgentInputDeliveryIntent(ctx context.Context, projectID, intentKey, incarnation, leaseToken, acknowledgement string, now time.Time) (bool, error) {

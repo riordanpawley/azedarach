@@ -385,7 +385,10 @@ func New(cfg Config) *Daemon {
 	d.codexAgentInput = newCodexAppServerInputAuthority(d.tmux, cfg.SocketPath, cfg.Logger, func(projectID string) daemonProjectRuntimeConfig {
 		return d.runtimeConfigForProject(projectID)
 	})
-	d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, d.codexAgentInput, fmt.Sprintf("daemon:%d:%p", os.Getpid(), d))
+	agentInputOwner := fmt.Sprintf("daemon:%d:%p", os.Getpid(), d)
+	d.codexAgentInput.issueClients = d.issueClientForProject
+	d.codexAgentInput.recoveryOwner = agentInputOwner + ":recovery"
+	d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, d.codexAgentInput, agentInputOwner)
 	if !cfg.ScopedRuntime && strings.TrimSpace(os.Getenv("AZEDARACH_DISABLE_USER_DB")) != "1" {
 		if store, err := userstore.Open(userstore.DefaultPath()); err != nil {
 			cfg.Logger.Warn("initialize user cross-project projection", "error", err)

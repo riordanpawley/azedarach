@@ -446,7 +446,7 @@ const (
 	decisionPropagationOutboxMigrationID                             = "0048_decision_propagation_outbox"
 	issueObservationEventSearchMigrationID                           = "0050_issue_observation_event_search"
 	agentInputDeliveryMigrationID                                    = "0051_agent_input_delivery"
-	agentInputDeliveryMigrationChecksum                              = "01fbf07eb9edce28d2e843d24a6fd91588a6eb4c2b448302ea553cf4673517f6"
+	agentInputDeliveryMigrationChecksum                              = "9d49ad90af81ef58a80eedd7e021bdde698ad12f33779890c93036d091346e55"
 	contextualLearningMigrationID                                    = "0039_contextual_learning_activation"
 	legacyContextualLearningMigration                                = "0038_contextual_learning_activation"
 )
@@ -1073,7 +1073,7 @@ func validateAgentInputDeliverySchema(ctx context.Context, db sqlIssueQueryer) e
 	}
 	normalizedLeaseTable := strings.NewReplacer(" ", "", "\n", "", "\t", "", "\r", "").Replace(strings.ToLower(leaseTableSQL))
 	for _, fragment := range []string{
-		"primarykey(project_id,session_id,agent_incarnation)",
+		"primarykey(project_id,session_id)",
 		"project_idtextnotnullcheck(trim(project_id)<>'')",
 		"session_idtextnotnullcheck(trim(session_id)<>'')",
 		"agent_incarnationtextnotnullcheck(trim(agent_incarnation)<>'')",

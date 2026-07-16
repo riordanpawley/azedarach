@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/daemon/state"
@@ -21,10 +22,15 @@ type authoritativeAgentInputReceiver interface {
 }
 
 type authoritativeAgentInputRequest struct {
-	Delivery                   domain.AgentInputDeliveryRequest
-	LeaseToken                 string
-	BeginSubmission            func(context.Context) error
-	RevalidateFinalIncarnation func(context.Context) error
+	Delivery                  domain.AgentInputDeliveryRequest
+	LeaseToken                string
+	SessionLeaseOwner         string
+	SessionLeaseToken         string
+	PreviousAgentIncarnation  string
+	PreviousSessionLeaseToken string
+	BeginSubmission           func(context.Context) (time.Time, error)
+	RevalidateSubmissionFence func(context.Context) (time.Time, error)
+	RenewRestoreFence         func(context.Context) (bool, error)
 }
 
 type authoritativeAgentInputAcknowledgement struct {
@@ -45,11 +51,14 @@ const (
 type agentInputRefusalError struct {
 	outcome     string
 	safeToRetry bool
+	cause       error
 }
 
 func (e agentInputRefusalError) Error() string {
 	return "authoritative agent input refused: " + e.outcome
 }
+
+func (e agentInputRefusalError) Unwrap() error { return e.cause }
 
 type unavailableAgentInputReceiver struct{}
 
@@ -58,11 +67,13 @@ func (unavailableAgentInputReceiver) DeliverAgentInput(context.Context, authorit
 }
 
 type agentInputDeliveryService struct {
-	stores       func(string) *state.RuntimeStateStore
-	issueClients func(string) *issues.Client
-	receiver     authoritativeAgentInputReceiver
-	owner        string
-	now          func() time.Time
+	stores                func(string) *state.RuntimeStateStore
+	issueClients          func(string) *issues.Client
+	receiver              authoritativeAgentInputReceiver
+	owner                 string
+	now                   func() time.Time
+	sessionLeaseDuration  time.Duration
+	sessionLeaseHeartbeat time.Duration
 }
 
 func newAgentInputDeliveryService(stores func(string) *state.RuntimeStateStore, issueClients func(string) *issues.Client, receiver authoritativeAgentInputReceiver, owner string) *agentInputDeliveryService {
@@ -72,7 +83,7 @@ func newAgentInputDeliveryService(stores func(string) *state.RuntimeStateStore, 
 	if strings.TrimSpace(owner) == "" {
 		owner = "daemon-agent-input"
 	}
-	return &agentInputDeliveryService{stores: stores, issueClients: issueClients, receiver: receiver, owner: owner, now: func() time.Time { return time.Now().UTC() }}
+	return &agentInputDeliveryService{stores: stores, issueClients: issueClients, receiver: receiver, owner: owner, now: func() time.Time { return time.Now().UTC() }, sessionLeaseDuration: agentInputSessionLeaseDuration, sessionLeaseHeartbeat: agentInputSessionLeaseHeartbeat}
 }
 
 func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.AgentInputDeliveryRequest) (domain.AgentInputDeliveryResult, error) {
@@ -116,21 +127,36 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 	release := func(stale bool) {
 		_ = client.ReleaseAgentInputDeliveryIntent(context.WithoutCancel(ctx), request.ProjectID, request.IntentKey, claimed.LeaseToken, stale, s.now())
 	}
-	sessionLeaseToken, sessionLeaseAcquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, request.ProjectID, request.SessionID, request.Target.AgentIncarnation, s.owner, s.now(), agentInputSessionLeaseDuration)
+	leaseNow := s.now()
+	sessionLease, sessionLeaseAcquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, request.ProjectID, request.SessionID, request.Target.AgentIncarnation, s.owner, leaseNow, s.sessionLeaseDuration)
 	if err != nil {
 		release(false)
 		return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputFailed, Reason: "claim durable session delivery lease"}, err
 	}
 	if !sessionLeaseAcquired {
 		release(false)
-		return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputWaitingNotReady, Reason: "session incarnation delivery owned by another daemon"}, nil
+		return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputWaitingNotReady, Reason: "session delivery owned by another daemon"}, nil
 	}
 	deliveryCtx, cancelDelivery := context.WithCancelCause(ctx)
+	releaseSessionLease := true
+	var leaseExpiryMu sync.RWMutex
+	leaseExpiry := sessionLease.LeaseExpires
+	setLeaseExpiry := func(expires time.Time) {
+		leaseExpiryMu.Lock()
+		leaseExpiry = expires
+		leaseExpiryMu.Unlock()
+	}
+	leaseBoundContext := func(parent context.Context) (context.Context, context.CancelFunc) {
+		leaseExpiryMu.RLock()
+		expires := leaseExpiry
+		leaseExpiryMu.RUnlock()
+		return context.WithDeadline(parent, expires)
+	}
 	heartbeatStop := make(chan struct{})
 	heartbeatDone := make(chan struct{})
 	go func() {
 		defer close(heartbeatDone)
-		ticker := time.NewTicker(agentInputSessionLeaseHeartbeat)
+		ticker := time.NewTicker(s.sessionLeaseHeartbeat)
 		defer ticker.Stop()
 		for {
 			select {
@@ -139,7 +165,9 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 			case <-deliveryCtx.Done():
 				return
 			case <-ticker.C:
-				renewed, renewErr := client.RenewAgentInputDeliverySessionLease(deliveryCtx, request.ProjectID, request.SessionID, request.Target.AgentIncarnation, sessionLeaseToken, s.now(), agentInputSessionLeaseDuration)
+				renewCtx, cancelRenew := leaseBoundContext(deliveryCtx)
+				expires, renewed, renewErr := client.RenewAgentInputDeliverySessionLease(renewCtx, request.ProjectID, request.SessionID, request.Target.AgentIncarnation, sessionLease.LeaseToken, s.now(), s.sessionLeaseDuration)
+				cancelRenew()
 				if renewErr != nil || !renewed {
 					if renewErr == nil {
 						renewErr = errors.New("session delivery lease changed")
@@ -147,6 +175,7 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 					cancelDelivery(fmt.Errorf("renew durable session delivery lease: %w", renewErr))
 					return
 				}
+				setLeaseExpiry(expires)
 			}
 		}
 	}()
@@ -154,7 +183,9 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 		cancelDelivery(nil)
 		close(heartbeatStop)
 		<-heartbeatDone
-		_ = client.ReleaseAgentInputDeliverySessionLease(context.WithoutCancel(ctx), request.ProjectID, request.SessionID, request.Target.AgentIncarnation, sessionLeaseToken)
+		if releaseSessionLease {
+			_ = client.ReleaseAgentInputDeliverySessionLease(context.WithoutCancel(ctx), request.ProjectID, request.SessionID, request.Target.AgentIncarnation, sessionLease.LeaseToken)
+		}
 	}()
 	current, result, err := s.observeIdentity(ctx, request)
 	if err != nil || result.Outcome != "" {
@@ -162,39 +193,64 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 		return result, err
 	}
 	submissionBegun := false
-	beginSubmission := func(beginCtx context.Context) error {
+	beginSubmission := func(beginCtx context.Context) (time.Time, error) {
 		currentAgain, result, err := s.observeIdentity(beginCtx, request)
 		if err != nil {
-			return err
+			return time.Time{}, err
 		}
 		if result.Outcome != "" || !current.SameIncarnation(currentAgain) {
-			return agentInputRefusalError{outcome: "stale_incarnation"}
+			return time.Time{}, agentInputRefusalError{outcome: "stale_incarnation"}
 		}
-		begun, err := client.BeginAgentInputDeliverySubmission(beginCtx, request.ProjectID, request.IntentKey, claimed.LeaseToken, s.now())
+		fenceCtx, cancelFence := leaseBoundContext(beginCtx)
+		expires, begun, err := client.BeginAgentInputDeliverySubmission(fenceCtx, request.ProjectID, request.IntentKey, claimed.LeaseToken, request.SessionID, request.Target.AgentIncarnation, sessionLease.LeaseToken, s.now(), s.sessionLeaseDuration)
+		cancelFence()
 		if err != nil {
-			return fmt.Errorf("persist app-server submission boundary: %w", err)
+			return time.Time{}, fmt.Errorf("persist app-server submission boundary: %w", err)
 		}
 		if !begun {
-			return errors.New("delivery lease changed before app-server submission")
+			return time.Time{}, errors.New("delivery or session fence changed before app-server submission")
 		}
 		submissionBegun = true
-		return nil
+		setLeaseExpiry(expires)
+		return expires, nil
 	}
-	revalidateFinalIncarnation := func(revalidateCtx context.Context) error {
+	revalidateSubmissionFence := func(revalidateCtx context.Context) (time.Time, error) {
 		currentAgain, result, err := s.observeIdentity(revalidateCtx, request)
 		if err != nil {
-			return err
+			return time.Time{}, err
 		}
 		if result.Outcome == domain.AgentInputRejectedStaleTarget || !current.SameIncarnation(currentAgain) {
-			return errCodexPaneIdentityChanged
+			return time.Time{}, agentInputRefusalError{outcome: "stale_incarnation", safeToRetry: true}
 		}
 		if result.Outcome != "" {
-			return agentInputRefusalError{outcome: "not_ready", safeToRetry: true}
+			return time.Time{}, agentInputRefusalError{outcome: "not_ready", safeToRetry: true}
 		}
-		return nil
+		fenceCtx, cancelFence := leaseBoundContext(revalidateCtx)
+		expires, renewed, err := client.RenewAgentInputDeliverySessionLease(fenceCtx, request.ProjectID, request.SessionID, request.Target.AgentIncarnation, sessionLease.LeaseToken, s.now(), s.sessionLeaseDuration)
+		cancelFence()
+		if err != nil {
+			return time.Time{}, fmt.Errorf("renew final submission fence: %w", err)
+		}
+		if !renewed {
+			return time.Time{}, errors.New("session submission fence changed or expired")
+		}
+		setLeaseExpiry(expires)
+		return expires, nil
 	}
-	ack, err := s.receiver.DeliverAgentInput(deliveryCtx, authoritativeAgentInputRequest{Delivery: request, LeaseToken: claimed.LeaseToken, BeginSubmission: beginSubmission, RevalidateFinalIncarnation: revalidateFinalIncarnation})
+	renewRestoreFence := func(restoreCtx context.Context) (bool, error) {
+		fenceCtx, cancelFence := leaseBoundContext(restoreCtx)
+		expires, renewed, err := client.RenewAgentInputDeliverySessionLease(fenceCtx, request.ProjectID, request.SessionID, request.Target.AgentIncarnation, sessionLease.LeaseToken, s.now(), s.sessionLeaseDuration)
+		cancelFence()
+		if renewed {
+			setLeaseExpiry(expires)
+		}
+		return renewed, err
+	}
+	ack, err := s.receiver.DeliverAgentInput(deliveryCtx, authoritativeAgentInputRequest{Delivery: request, LeaseToken: claimed.LeaseToken, SessionLeaseOwner: s.owner, SessionLeaseToken: sessionLease.LeaseToken, PreviousAgentIncarnation: sessionLease.PreviousAgentIncarnation, PreviousSessionLeaseToken: sessionLease.PreviousLeaseToken, BeginSubmission: beginSubmission, RevalidateSubmissionFence: revalidateSubmissionFence, RenewRestoreFence: renewRestoreFence})
 	if err != nil {
+		if errors.Is(err, errCodexGateRestoreIncomplete) {
+			releaseSessionLease = false
+		}
 		var refusal agentInputRefusalError
 		if errors.As(err, &refusal) {
 			if refusal.safeToRetry && submissionBegun {

@@ -20,15 +20,19 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
 const (
-	codexInputGateStateVersion = 1
-	codexInputGateRestoreLimit = 5 * time.Second
+	codexInputGateStateVersion       = 2
+	codexInputGateRestoreLimit       = 5 * time.Second
+	codexSubmissionFenceSafetyMargin = time.Second
 )
 
 var errCodexPaneIdentityChanged = errors.New("managed Codex pane identity changed at submission boundary")
+var errCodexSessionFenceLost = errors.New("managed Codex session fence changed or expired")
+var errCodexGateRestoreIncomplete = errors.New("managed Codex input gate restoration incomplete")
 
 type codexInputTmux interface {
 	ListAttachedClients(context.Context, string) ([]tmux.AttachedClientInfo, error)
@@ -51,20 +55,25 @@ type codexAppServerInputAuthority struct {
 	logger        *slog.Logger
 	runtimeConfig func(string) daemonProjectRuntimeConfig
 	startRPC      func(context.Context, string) (codexAppServerRPC, error)
+	issueClients  func(string) *issues.Client
+	recoveryOwner string
+	now           func() time.Time
+	leaseDuration time.Duration
+	safetyMargin  time.Duration
 	mu            sync.Mutex
 	sessionMux    map[string]*sync.Mutex
 }
 
 func newCodexAppServerInputAuthority(adapter codexInputTmux, daemonSocketPath string, logger *slog.Logger, runtimeConfig func(string) daemonProjectRuntimeConfig) *codexAppServerInputAuthority {
 	gateDir := filepath.Join(filepath.Dir(strings.TrimSpace(daemonSocketPath)), "agent-input-gates")
-	return &codexAppServerInputAuthority{tmux: adapter, gateDir: gateDir, logger: logger, runtimeConfig: runtimeConfig, startRPC: startCodexAppServerRPC, sessionMux: map[string]*sync.Mutex{}}
+	return &codexAppServerInputAuthority{tmux: adapter, gateDir: gateDir, logger: logger, runtimeConfig: runtimeConfig, startRPC: startCodexAppServerRPC, recoveryOwner: "daemon-agent-input-recovery", now: func() time.Time { return time.Now().UTC() }, leaseDuration: agentInputSessionLeaseDuration, safetyMargin: codexSubmissionFenceSafetyMargin, sessionMux: map[string]*sync.Mutex{}}
 }
 
 // RecoverStaleGates performs one bounded startup pass over gates whose daemon
 // exited before flag restoration completed. Failures remain on disk for the
 // next startup and are surfaced to the daemon log without blocking service.
 func (a *codexAppServerInputAuthority) RecoverStaleGates(ctx context.Context) error {
-	if a == nil || a.tmux == nil {
+	if a == nil || a.tmux == nil || a.issueClients == nil {
 		return nil
 	}
 	entries, err := filepath.Glob(filepath.Join(a.gateDir, "gate-*.json"))
@@ -79,16 +88,42 @@ func (a *codexAppServerInputAuthority) RecoverStaleGates(ctx context.Context) er
 			continue
 		}
 		var state codexInputGateState
-		if json.Unmarshal(raw, &state) != nil || state.Version != codexInputGateStateVersion || state.SessionID == "" || state.PaneID == "" || state.HookID == "" {
+		if json.Unmarshal(raw, &state) != nil || state.Version != codexInputGateStateVersion || state.ProjectID == "" || state.SessionID == "" || state.AgentIncarnation == "" || state.FenceToken == "" || state.PaneID == "" || state.HookID == "" {
 			errs = append(errs, fmt.Errorf("invalid stale Codex input gate %s", filepath.Base(statePath)))
 			continue
 		}
+		client := a.issueClients(state.ProjectID)
+		if client == nil {
+			errs = append(errs, fmt.Errorf("recover %s: issue store unavailable", filepath.Base(statePath)))
+			continue
+		}
+		recoveryLease, acquired, claimErr := client.ClaimAgentInputDeliverySessionLeaseRecovery(ctx, state.ProjectID, state.SessionID, state.AgentIncarnation, state.FenceToken, a.recoveryOwner, a.now(), a.leaseDuration)
+		if claimErr != nil {
+			errs = append(errs, fmt.Errorf("recover %s: claim durable recovery fence: %w", filepath.Base(statePath), claimErr))
+			continue
+		}
+		if !acquired {
+			continue
+		}
+		state.LeaseOwner = recoveryLease.LeaseOwner
+		state.FenceToken = recoveryLease.LeaseToken
 		gate := &codexInputGate{tmux: a.tmux, state: state, statePath: statePath}
+		gate.renewRestoreFence = func(restoreCtx context.Context) (bool, error) {
+			_, renewed, err := client.RenewAgentInputDeliverySessionLease(restoreCtx, state.ProjectID, state.SessionID, state.AgentIncarnation, recoveryLease.LeaseToken, a.now(), a.leaseDuration)
+			return renewed, err
+		}
+		if persistErr := gate.persist(); persistErr != nil {
+			releaseErr := client.ReleaseAgentInputDeliverySessionLease(context.WithoutCancel(ctx), state.ProjectID, state.SessionID, state.AgentIncarnation, recoveryLease.LeaseToken)
+			errs = append(errs, fmt.Errorf("recover %s: persist recovery fence: %w", filepath.Base(statePath), errors.Join(persistErr, releaseErr)))
+			continue
+		}
 		recoverCtx, cancel := context.WithTimeout(ctx, codexInputGateRestoreLimit)
 		restoreErr := gate.Restore(recoverCtx)
 		cancel()
 		if restoreErr != nil {
 			errs = append(errs, fmt.Errorf("recover %s: %w", filepath.Base(statePath), restoreErr))
+		} else if releaseErr := client.ReleaseAgentInputDeliverySessionLease(context.WithoutCancel(ctx), state.ProjectID, state.SessionID, state.AgentIncarnation, recoveryLease.LeaseToken); releaseErr != nil {
+			errs = append(errs, fmt.Errorf("recover %s: release durable recovery fence: %w", filepath.Base(statePath), releaseErr))
 		}
 	}
 	return errors.Join(errs...)
@@ -131,6 +166,9 @@ func (a *codexAppServerInputAuthority) DeliverAgentInput(ctx context.Context, re
 	lock := a.sessionLock(request.Delivery.ProjectID, request.Delivery.SessionID)
 	lock.Lock()
 	defer lock.Unlock()
+	if err := a.recoverSupersededGate(ctx, request); err != nil {
+		return ack, codexGateRefusal(err, false)
+	}
 	gate, err := a.acquireGate(ctx, request)
 	if err != nil {
 		return ack, codexGateRefusal(err, false)
@@ -142,9 +180,7 @@ func (a *codexAppServerInputAuthority) DeliverAgentInput(ctx context.Context, re
 			if a.logger != nil {
 				a.logger.Error("restore Codex automated-input client gate", "project_id", request.Delivery.ProjectID, "session_id", request.Delivery.SessionID, "error", restoreErr)
 			}
-			if ack.AcknowledgementToken == "" {
-				retErr = errors.Join(retErr, restoreErr)
-			}
+			retErr = errors.Join(retErr, fmt.Errorf("%w: %v", errCodexGateRestoreIncomplete, restoreErr))
 		}
 	}()
 	if err := gate.Revalidate(ctx, request); err != nil {
@@ -153,7 +189,7 @@ func (a *codexAppServerInputAuthority) DeliverAgentInput(ctx context.Context, re
 	if request.BeginSubmission == nil {
 		return ack, errors.New("missing durable app-server submission boundary")
 	}
-	if err := request.BeginSubmission(ctx); err != nil {
+	if _, err := request.BeginSubmission(ctx); err != nil {
 		return ack, err
 	}
 	// The durable callback revalidates the projected thread incarnation. Check
@@ -163,15 +199,20 @@ func (a *codexAppServerInputAuthority) DeliverAgentInput(ctx context.Context, re
 	if err := gate.Revalidate(ctx, request); err != nil {
 		return ack, codexGateRefusal(err, true)
 	}
-	if request.RevalidateFinalIncarnation == nil {
+	if request.RevalidateSubmissionFence == nil {
 		return ack, codexGateRefusal(errCodexPaneIdentityChanged, true)
 	}
-	if err := request.RevalidateFinalIncarnation(ctx); err != nil {
+	fenceExpiry, err := request.RevalidateSubmissionFence(ctx)
+	if err != nil {
 		var refusal agentInputRefusalError
 		if errors.As(err, &refusal) {
 			return ack, refusal
 		}
-		return ack, codexGateRefusal(err, true)
+		return ack, fmt.Errorf("revalidate durable submission fence: %w", err)
+	}
+	acceptanceDeadline := fenceExpiry.Add(-a.safetyMargin)
+	if !a.now().Before(acceptanceDeadline) {
+		return ack, errCodexSessionFenceLost
 	}
 	messageID := codexDeliveryMessageID(request.Delivery.IntentKey, threadID)
 	var started struct {
@@ -184,11 +225,9 @@ func (a *codexAppServerInputAuthority) DeliverAgentInput(ctx context.Context, re
 		"clientUserMessageId": messageID,
 		"input":               []map[string]string{{"type": "text", "text": request.Delivery.Payload}},
 	}
-	if err := rpc.Call(ctx, "turn/start", params, &started); err != nil {
-		var rejection codexRPCPreAcceptanceRejection
-		if errors.As(err, &rejection) {
-			return ack, agentInputRefusalError{outcome: "not_ready", safeToRetry: true}
-		}
+	acceptCtx, cancelAccept := context.WithDeadline(ctx, acceptanceDeadline)
+	defer cancelAccept()
+	if err := rpc.Call(acceptCtx, "turn/start", params, &started); err != nil {
 		return ack, fmt.Errorf("submit Codex automated turn: %w", err)
 	}
 	turnID := strings.TrimSpace(started.Turn.ID)
@@ -199,12 +238,53 @@ func (a *codexAppServerInputAuthority) DeliverAgentInput(ctx context.Context, re
 		AgentIncarnation: threadID, LeaseToken: request.LeaseToken, AcknowledgementToken: turnID}, nil
 }
 
-// isCodexAuthoritativePreAcceptanceRejection recognizes only the documented
-// app-server refusal that a turn cannot be accepted while one is already
-// active. Other JSON-RPC method errors are application failures after dispatch
-// and therefore leave the durable intent ambiguous.
-func isCodexAuthoritativePreAcceptanceRejection(err codexRPCMethodError) bool {
-	return err.Method == "turn/start" && err.Code == -32600 && strings.EqualFold(strings.TrimSpace(err.Message), "turn already active")
+func (a *codexAppServerInputAuthority) recoverSupersededGate(ctx context.Context, request authoritativeAgentInputRequest) error {
+	previousToken := strings.TrimSpace(request.PreviousSessionLeaseToken)
+	if previousToken == "" {
+		return nil
+	}
+	entries, err := filepath.Glob(filepath.Join(a.gateDir, "gate-*.json"))
+	if err != nil {
+		return err
+	}
+	type persistedGate struct {
+		path  string
+		state codexInputGateState
+	}
+	var matched []persistedGate
+	for _, statePath := range entries {
+		raw, readErr := os.ReadFile(statePath)
+		if readErr != nil {
+			return readErr
+		}
+		var state codexInputGateState
+		if err := json.Unmarshal(raw, &state); err != nil || state.Version != codexInputGateStateVersion || state.ProjectID == "" || state.SessionID == "" || state.AgentIncarnation == "" || state.FenceToken == "" {
+			return fmt.Errorf("invalid persisted Codex gate during session takeover: %s", filepath.Base(statePath))
+		}
+		if state.ProjectID == request.Delivery.ProjectID && state.SessionID == request.Delivery.SessionID && state.AgentIncarnation == request.PreviousAgentIncarnation && state.FenceToken == previousToken {
+			matched = append(matched, persistedGate{path: statePath, state: state})
+		}
+	}
+	if len(matched) > 1 {
+		return errors.New("multiple persisted Codex gates matched one superseded session fence")
+	}
+	if len(matched) == 0 {
+		return nil
+	}
+	state := matched[0].state
+	state.AgentIncarnation = request.Delivery.Target.AgentIncarnation
+	state.LeaseOwner = request.SessionLeaseOwner
+	state.FenceToken = request.SessionLeaseToken
+	gate := &codexInputGate{tmux: a.tmux, state: state, statePath: matched[0].path, renewRestoreFence: request.RenewRestoreFence}
+	if err := gate.persist(); err != nil {
+		return fmt.Errorf("persist superseded Codex gate takeover: %w", err)
+	}
+	restoreCtx, cancel := context.WithTimeout(ctx, codexInputGateRestoreLimit)
+	defer cancel()
+	if err := gate.Restore(restoreCtx); err != nil {
+		return fmt.Errorf("%w: restore superseded Codex gate: %v", errCodexGateRestoreIncomplete, err)
+	}
+	return nil
 }
 
 func codexGateRefusal(err error, safeToRetry bool) agentInputRefusalError {
@@ -212,7 +292,7 @@ func codexGateRefusal(err error, safeToRetry bool) agentInputRefusalError {
 	if errors.Is(err, errCodexPaneIdentityChanged) {
 		outcome = "stale_incarnation"
 	}
-	return agentInputRefusalError{outcome: outcome, safeToRetry: safeToRetry}
+	return agentInputRefusalError{outcome: outcome, safeToRetry: safeToRetry, cause: err}
 }
 
 func (a *codexAppServerInputAuthority) sessionLock(projectID, sessionID string) *sync.Mutex {
@@ -234,7 +314,11 @@ func codexDeliveryMessageID(intentKey, threadID string) string {
 
 type codexInputGateState struct {
 	Version          int             `json:"version"`
+	ProjectID        string          `json:"project_id"`
 	SessionID        string          `json:"session_id"`
+	AgentIncarnation string          `json:"agent_incarnation"`
+	LeaseOwner       string          `json:"lease_owner"`
+	FenceToken       string          `json:"fence_token"`
 	PaneID           string          `json:"pane_id"`
 	PaneInputEnabled bool            `json:"pane_input_enabled"`
 	HookID           string          `json:"hook_id"`
@@ -243,13 +327,14 @@ type codexInputGateState struct {
 }
 
 type codexInputGate struct {
-	tmux      codexInputTmux
-	state     codexInputGateState
-	statePath string
-	restored  bool
+	tmux              codexInputTmux
+	state             codexInputGateState
+	statePath         string
+	restored          bool
+	renewRestoreFence func(context.Context) (bool, error)
 }
 
-func (a *codexAppServerInputAuthority) acquireGate(ctx context.Context, request authoritativeAgentInputRequest) (*codexInputGate, error) {
+func (a *codexAppServerInputAuthority) acquireGate(ctx context.Context, request authoritativeAgentInputRequest) (result *codexInputGate, retErr error) {
 	if err := os.MkdirAll(a.gateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create input gate directory: %w", err)
 	}
@@ -271,9 +356,13 @@ func (a *codexAppServerInputAuthority) acquireGate(ctx context.Context, request 
 		_ = os.Remove(eventsPath)
 		return nil, err
 	}
-	state := codexInputGateState{Version: codexInputGateStateVersion, SessionID: request.Delivery.SessionID,
+	if strings.TrimSpace(request.SessionLeaseOwner) == "" || strings.TrimSpace(request.SessionLeaseToken) == "" || request.RenewRestoreFence == nil {
+		_ = os.Remove(eventsPath)
+		return nil, errCodexSessionFenceLost
+	}
+	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: request.Delivery.ProjectID, SessionID: request.Delivery.SessionID, AgentIncarnation: request.Delivery.Target.AgentIncarnation, LeaseOwner: request.SessionLeaseOwner, FenceToken: request.SessionLeaseToken,
 		PaneID: request.Delivery.Target.TmuxPaneID, HookID: strconv.FormatUint(hookIndex, 10), EventsPath: eventsPath, OriginalReadOnly: map[string]bool{}}
-	gate := &codexInputGate{tmux: a.tmux, state: state, statePath: base + ".json"}
+	gate := &codexInputGate{tmux: a.tmux, state: state, statePath: base + ".json", renewRestoreFence: request.RenewRestoreFence}
 	state.PaneInputEnabled, err = a.tmux.PaneInputEnabled(ctx, state.PaneID)
 	if err != nil {
 		_ = os.Remove(eventsPath)
@@ -295,7 +384,9 @@ func (a *codexAppServerInputAuthority) acquireGate(ctx context.Context, request 
 		if failed {
 			restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), codexInputGateRestoreLimit)
 			defer cancel()
-			_ = gate.Restore(restoreCtx)
+			if restoreErr := gate.Restore(restoreCtx); restoreErr != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("%w: %v", errCodexGateRestoreIncomplete, restoreErr))
+			}
 		}
 	}()
 	if err := a.tmux.SetSessionReadOnlyAttachHooks(ctx, state.SessionID, state.HookID, state.EventsPath, true); err != nil {
@@ -379,6 +470,16 @@ func (g *codexInputGate) Restore(ctx context.Context) error {
 	if g == nil || g.restored {
 		return nil
 	}
+	if g.renewRestoreFence == nil {
+		return errCodexSessionFenceLost
+	}
+	renewed, err := g.renewRestoreFence(ctx)
+	if err != nil {
+		return fmt.Errorf("renew durable restore fence: %w", err)
+	}
+	if !renewed {
+		return errCodexSessionFenceLost
+	}
 	var errs []error
 	if err := g.tmux.SetPaneInputEnabled(ctx, g.state.PaneID, false); err != nil {
 		errs = append(errs, err)
@@ -441,16 +542,16 @@ func randomGateToken() (string, error) {
 }
 
 type processCodexAppServerRPC struct {
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	mu       sync.Mutex
-	nextID   atomic.Int64
-	waitsMu  sync.Mutex
-	waits    map[string]chan codexRPCResponse
-	done     chan struct{}
-	termMu   sync.RWMutex
-	termErr  error
-	closeOne sync.Once
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	writeGate chan struct{}
+	nextID    atomic.Int64
+	waitsMu   sync.Mutex
+	waits     map[string]chan codexRPCResponse
+	done      chan struct{}
+	termMu    sync.RWMutex
+	termErr   error
+	closeOne  sync.Once
 }
 
 type codexRPCResponse struct {
@@ -473,18 +574,6 @@ func (e codexRPCMethodError) Error() string {
 	return fmt.Sprintf("Codex %s: rpc %d: %s", e.Method, e.Code, e.Message)
 }
 
-// codexRPCPreAcceptanceRejection is deliberately distinct from a generic
-// method error: it proves the app-server refused turn/start before accepting a
-// new turn, so the durable ambiguous intent may be made retryable.
-type codexRPCPreAcceptanceRejection struct{ codexRPCMethodError }
-
-func classifyCodexRPCMethodError(err codexRPCMethodError) error {
-	if isCodexAuthoritativePreAcceptanceRejection(err) {
-		return codexRPCPreAcceptanceRejection{codexRPCMethodError: err}
-	}
-	return err
-}
-
 func startCodexAppServerRPC(ctx context.Context, tool string) (codexAppServerRPC, error) {
 	cmd := exec.CommandContext(ctx, tool, "app-server", "proxy")
 	stdin, err := cmd.StdinPipe()
@@ -498,7 +587,8 @@ func startCodexAppServerRPC(ctx context.Context, tool string) (codexAppServerRPC
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	rpc := &processCodexAppServerRPC{cmd: cmd, stdin: stdin, waits: map[string]chan codexRPCResponse{}, done: make(chan struct{})}
+	rpc := &processCodexAppServerRPC{cmd: cmd, stdin: stdin, writeGate: make(chan struct{}, 1), waits: map[string]chan codexRPCResponse{}, done: make(chan struct{})}
+	rpc.writeGate <- struct{}{}
 	go rpc.read(stdout)
 	return rpc, nil
 }
@@ -509,7 +599,7 @@ func (c *processCodexAppServerRPC) Call(ctx context.Context, method string, para
 	c.waitsMu.Lock()
 	c.waits[id] = wait
 	c.waitsMu.Unlock()
-	if err := c.send(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id), "method": method, "params": params}); err != nil {
+	if err := c.sendContext(ctx, map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id), "method": method, "params": params}); err != nil {
 		c.waitsMu.Lock()
 		delete(c.waits, id)
 		c.waitsMu.Unlock()
@@ -518,7 +608,7 @@ func (c *processCodexAppServerRPC) Call(ctx context.Context, method string, para
 	select {
 	case response := <-wait:
 		if response.Error != nil {
-			return classifyCodexRPCMethodError(codexRPCMethodError{Method: method, Code: response.Error.Code, Message: response.Error.Message})
+			return codexRPCMethodError{Method: method, Code: response.Error.Code, Message: response.Error.Message}
 		}
 		if result == nil || len(response.Result) == 0 {
 			return nil
@@ -537,8 +627,26 @@ func (c *processCodexAppServerRPC) Call(ctx context.Context, method string, para
 }
 
 func (c *processCodexAppServerRPC) send(value any) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	return c.sendContext(context.Background(), value)
+}
+
+func (c *processCodexAppServerRPC) sendContext(ctx context.Context, value any) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.writeGate:
+	}
+	defer func() { c.writeGate <- struct{}{} }()
+	if deadline, ok := ctx.Deadline(); ok {
+		writer, ok := c.stdin.(interface{ SetWriteDeadline(time.Time) error })
+		if !ok {
+			return errors.New("Codex app-server stdin cannot enforce submission deadline")
+		}
+		if err := writer.SetWriteDeadline(deadline); err != nil {
+			return fmt.Errorf("set Codex app-server write deadline: %w", err)
+		}
+		defer writer.SetWriteDeadline(time.Time{})
+	}
 	return json.NewEncoder(c.stdin).Encode(value)
 }
 

@@ -1,8 +1,8 @@
 -- Migration 0051 manifest
 --
 -- Schema effects:
---   Create agent_input_delivery_intents, durable session/incarnation delivery
---   leases, and their supporting indexes.
+--   Create agent_input_delivery_intents, durable session-scoped delivery
+--   leases with fenced incarnation values, and their supporting indexes.
 -- Data effects:
 --   None. Existing issue, session, decision, and runtime rows are not read,
 --   rewritten, backfilled, or deleted; both new tables start empty.
@@ -58,7 +58,7 @@ CREATE TABLE agent_input_delivery_session_leases (
   lease_token TEXT NOT NULL CHECK (trim(lease_token) <> ''),
   lease_expires_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  PRIMARY KEY (project_id, session_id, agent_incarnation)
+  PRIMARY KEY (project_id, session_id)
 );
 
 CREATE INDEX idx_agent_input_session_lease_expiry

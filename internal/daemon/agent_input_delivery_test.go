@@ -13,6 +13,7 @@ import (
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
+	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
 type recordingAuthoritativeReceiver struct {
@@ -37,16 +38,18 @@ type blockingAuthoritativeReceiver struct {
 
 type transitionDuringSubmissionReceiver struct{ transition func() error }
 
+type expiredSubmissionFenceReceiver struct{ delay time.Duration }
+
 func (r refusingAuthoritativeReceiver) DeliverAgentInput(context.Context, authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
 	return authoritativeAgentInputAcknowledgement{}, agentInputRefusalError{outcome: r.outcome}
 }
 
 func (r *rejectedSubmissionReceiver) DeliverAgentInput(ctx context.Context, request authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
 	r.calls++
-	if err := request.BeginSubmission(ctx); err != nil {
+	if _, err := request.BeginSubmission(ctx); err != nil {
 		return authoritativeAgentInputAcknowledgement{}, err
 	}
-	if err := request.RevalidateFinalIncarnation(ctx); err != nil {
+	if _, err := request.RevalidateSubmissionFence(ctx); err != nil {
 		return authoritativeAgentInputAcknowledgement{}, err
 	}
 	return authoritativeAgentInputAcknowledgement{}, agentInputRefusalError{outcome: "not_ready", safeToRetry: true}
@@ -56,13 +59,13 @@ func (r *recordingAuthoritativeReceiver) DeliverAgentInput(_ context.Context, re
 	if request.BeginSubmission == nil {
 		return authoritativeAgentInputAcknowledgement{}, errors.New("missing submission boundary")
 	}
-	if err := request.BeginSubmission(context.Background()); err != nil {
+	if _, err := request.BeginSubmission(context.Background()); err != nil {
 		return authoritativeAgentInputAcknowledgement{}, err
 	}
-	if request.RevalidateFinalIncarnation == nil {
+	if request.RevalidateSubmissionFence == nil {
 		return authoritativeAgentInputAcknowledgement{}, errors.New("missing final incarnation validation")
 	}
-	if err := request.RevalidateFinalIncarnation(context.Background()); err != nil {
+	if _, err := request.RevalidateSubmissionFence(context.Background()); err != nil {
 		return authoritativeAgentInputAcknowledgement{}, err
 	}
 	r.mu.Lock()
@@ -86,10 +89,10 @@ func (r *recordingAuthoritativeReceiver) DeliverAgentInput(_ context.Context, re
 }
 
 func (r *blockingAuthoritativeReceiver) DeliverAgentInput(ctx context.Context, request authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
-	if err := request.BeginSubmission(ctx); err != nil {
+	if _, err := request.BeginSubmission(ctx); err != nil {
 		return authoritativeAgentInputAcknowledgement{}, err
 	}
-	if err := request.RevalidateFinalIncarnation(ctx); err != nil {
+	if _, err := request.RevalidateSubmissionFence(ctx); err != nil {
 		return authoritativeAgentInputAcknowledgement{}, err
 	}
 	r.mu.Lock()
@@ -107,13 +110,13 @@ func (r *blockingAuthoritativeReceiver) DeliverAgentInput(ctx context.Context, r
 }
 
 func (r transitionDuringSubmissionReceiver) DeliverAgentInput(ctx context.Context, request authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
-	if err := request.BeginSubmission(ctx); err != nil {
+	if _, err := request.BeginSubmission(ctx); err != nil {
 		return authoritativeAgentInputAcknowledgement{}, err
 	}
 	if err := r.transition(); err != nil {
 		return authoritativeAgentInputAcknowledgement{}, err
 	}
-	if err := request.RevalidateFinalIncarnation(ctx); err != nil {
+	if _, err := request.RevalidateSubmissionFence(ctx); err != nil {
 		var refusal agentInputRefusalError
 		if errors.As(err, &refusal) {
 			return authoritativeAgentInputAcknowledgement{}, refusal
@@ -124,6 +127,17 @@ func (r transitionDuringSubmissionReceiver) DeliverAgentInput(ctx context.Contex
 		return authoritativeAgentInputAcknowledgement{}, err
 	}
 	return authoritativeAgentInputAcknowledgement{}, errors.New("accepted stale incarnation")
+}
+
+func (r expiredSubmissionFenceReceiver) DeliverAgentInput(ctx context.Context, request authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
+	if _, err := request.BeginSubmission(ctx); err != nil {
+		return authoritativeAgentInputAcknowledgement{}, err
+	}
+	time.Sleep(r.delay)
+	if _, err := request.RevalidateSubmissionFence(ctx); err != nil {
+		return authoritativeAgentInputAcknowledgement{}, err
+	}
+	return authoritativeAgentInputAcknowledgement{}, errors.New("expired submission fence was accepted")
 }
 
 func agentInputFixture(t *testing.T) (*daemonstate.RuntimeStateStore, *issues.Client, domain.AgentInputDeliveryRequest) {
@@ -395,6 +409,42 @@ func TestAgentInputDeliveryDoesNotRetryAfterAmbiguousAcceptance(t *testing.T) {
 	}
 	if receiver.calls != 1 || len(receiver.accepted) != 1 {
 		t.Fatalf("receiver calls=%d accepted=%d, want one non-retried submission", receiver.calls, len(receiver.accepted))
+	}
+}
+
+func TestAgentInputDeliveryExpiredFinalFenceRemainsAmbiguous(t *testing.T) {
+	runtimeStore, client, request := agentInputFixture(t)
+	service := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, expiredSubmissionFenceReceiver{delay: 70 * time.Millisecond}, "one")
+	service.sessionLeaseDuration = 40 * time.Millisecond
+	service.sessionLeaseHeartbeat = time.Second
+	result, err := service.Deliver(context.Background(), request)
+	if err == nil || result.Outcome != domain.AgentInputFailed {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	intent, loadErr := client.EnsureAgentInputDeliveryIntent(context.Background(), request)
+	if loadErr != nil || intent.State != "ambiguous" {
+		t.Fatalf("intent=%+v err=%v", intent, loadErr)
+	}
+}
+
+func TestAgentInputDeliveryRetainsSessionFenceWhenGateRestoreIsIncomplete(t *testing.T) {
+	runtimeStore, client, request := agentInputFixture(t)
+	adapter := &fakeCodexInputTmux{paneEnabled: true, failDisableHooks: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: request.SessionID}}, panes: []tmux.PaneInfo{{SessionName: request.SessionID, PaneID: request.Target.TmuxPaneID, PanePID: request.Target.PanePID}}}
+	authority := newCodexAppServerInputAuthority(adapter, filepath.Join(t.TempDir(), "daemon.sock"), nil, func(string) daemonProjectRuntimeConfig {
+		return daemonProjectRuntimeConfig{CLITool: "codex", CodexAppServer: true}
+	})
+	authority.startRPC = func(context.Context, string) (codexAppServerRPC, error) { return &fakeCodexRPC{}, nil }
+	service := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, authority, "daemon-old")
+	result, err := service.Deliver(context.Background(), request)
+	if err == nil || result.Outcome != domain.AgentInputFailed || !errors.Is(err, errCodexGateRestoreIncomplete) {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	intent, loadErr := client.EnsureAgentInputDeliveryIntent(context.Background(), request)
+	if loadErr != nil || intent.State != "ambiguous" {
+		t.Fatalf("intent=%+v err=%v", intent, loadErr)
+	}
+	if lease, acquired, claimErr := client.ClaimAgentInputDeliverySessionLease(context.Background(), request.ProjectID, request.SessionID, "inc-new", "daemon-new", time.Now(), time.Minute); claimErr != nil || acquired || lease.LeaseToken != "" {
+		t.Fatalf("incomplete restore released fence lease=%+v acquired=%v err=%v", lease, acquired, claimErr)
 	}
 }
 

@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
@@ -23,6 +26,7 @@ type fakeCodexInputTmux struct {
 	setReadOnlyCalls []string
 	maxGates         int
 	activeGates      int
+	failDisableHooks bool
 }
 
 func (f *fakeCodexInputTmux) ListAttachedClients(context.Context, string) ([]tmux.AttachedClientInfo, error) {
@@ -59,6 +63,9 @@ func (f *fakeCodexInputTmux) PaneInputEnabled(context.Context, string) (bool, er
 func (f *fakeCodexInputTmux) SetSessionReadOnlyAttachHooks(_ context.Context, _, _, recordPath string, enabled bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if !enabled && f.failDisableHooks {
+		return errors.New("disable hooks failed")
+	}
 	f.hooksEnabled = enabled
 	f.recordPath = recordPath
 	if enabled {
@@ -89,7 +96,7 @@ type fakeCodexRPC struct {
 	turnCheck    func() error
 }
 
-func (f *fakeCodexRPC) Call(_ context.Context, method string, params, result any) error {
+func (f *fakeCodexRPC) Call(ctx context.Context, method string, params, result any) error {
 	f.mu.Lock()
 	f.methods = append(f.methods, method)
 	f.mu.Unlock()
@@ -117,7 +124,11 @@ func (f *fakeCodexRPC) Call(_ context.Context, method string, params, result any
 			close(f.turnStarted)
 		}
 		if f.releaseTurn != nil {
-			<-f.releaseTurn
+			select {
+			case <-f.releaseTurn:
+			case <-ctx.Done():
+				return context.Cause(ctx)
+			}
 		}
 		if f.turnErr != nil {
 			return f.turnErr
@@ -145,7 +156,7 @@ func codexAuthorityRequest() authoritativeAgentInputRequest {
 	return authoritativeAgentInputRequest{Delivery: domain.AgentInputDeliveryRequest{
 		ProjectID: "p", SessionID: "az-dlb", Tool: "codex", IntentKey: "intent", Payload: "automated body",
 		Target: domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 42, AgentIncarnation: "thread-exact"},
-	}, LeaseToken: "lease", BeginSubmission: func(context.Context) error { return nil }, RevalidateFinalIncarnation: func(context.Context) error { return nil }}
+	}, LeaseToken: "lease", SessionLeaseOwner: "daemon", SessionLeaseToken: "fence", BeginSubmission: func(context.Context) (time.Time, error) { return time.Now().Add(time.Minute), nil }, RevalidateSubmissionFence: func(context.Context) (time.Time, error) { return time.Now().Add(time.Minute), nil }, RenewRestoreFence: func(context.Context) (bool, error) { return true, nil }}
 }
 
 func newFakeCodexAuthority(t *testing.T, adapter *fakeCodexInputTmux, rpc *fakeCodexRPC) *codexAppServerInputAuthority {
@@ -201,9 +212,9 @@ func TestCodexAppServerDeliveryGatesClientsSubmitsExactThreadAndRestores(t *test
 		return nil
 	}}
 	request := codexAuthorityRequest()
-	request.BeginSubmission = func(context.Context) error {
+	request.BeginSubmission = func(context.Context) (time.Time, error) {
 		boundaryBegun = true
-		return nil
+		return time.Now().Add(time.Minute), nil
 	}
 	ack, err := newFakeCodexAuthority(t, adapter, rpc).DeliverAgentInput(context.Background(), request)
 	if err != nil {
@@ -250,13 +261,48 @@ func TestCodexAppServerDeliveryKeepsGenericMethodErrorsAmbiguous(t *testing.T) {
 	}
 }
 
-func TestCodexAppServerDeliveryRetriesAuthoritativeActiveTurnRejection(t *testing.T) {
+func TestCodexAppServerDeliveryKeepsActiveTurnMethodErrorAmbiguous(t *testing.T) {
 	adapter := &fakeCodexInputTmux{paneEnabled: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb"}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
 	methodErr := codexRPCMethodError{Method: "turn/start", Code: -32600, Message: "turn already active"}
-	_, err := newFakeCodexAuthority(t, adapter, &fakeCodexRPC{turnErr: classifyCodexRPCMethodError(methodErr)}).DeliverAgentInput(context.Background(), codexAuthorityRequest())
+	_, err := newFakeCodexAuthority(t, adapter, &fakeCodexRPC{turnErr: methodErr}).DeliverAgentInput(context.Background(), codexAuthorityRequest())
 	var refusal agentInputRefusalError
-	if !errors.As(err, &refusal) || !refusal.safeToRetry || refusal.outcome != "not_ready" {
-		t.Fatalf("err=%v refusal=%+v", err, refusal)
+	if err == nil || errors.As(err, &refusal) {
+		t.Fatalf("active-turn method error became retryable refusal: %v", err)
+	}
+}
+
+func TestCodexAppServerDeliveryBoundsAcceptanceBySessionFenceExpiry(t *testing.T) {
+	adapter := &fakeCodexInputTmux{paneEnabled: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb"}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
+	rpc := &fakeCodexRPC{releaseTurn: make(chan struct{})}
+	request := codexAuthorityRequest()
+	request.RevalidateSubmissionFence = func(context.Context) (time.Time, error) { return time.Now().Add(40 * time.Millisecond), nil }
+	authority := newFakeCodexAuthority(t, adapter, rpc)
+	authority.safetyMargin = 5 * time.Millisecond
+	started := time.Now()
+	if _, err := authority.DeliverAgentInput(context.Background(), request); err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, want deadline ambiguity", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("turn/start exceeded fenced acceptance window: %s", elapsed)
+	}
+}
+
+func TestProcessCodexAppServerRPCBoundsBlockedSubmissionWrite(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = server.Close()
+	})
+	rpc := &processCodexAppServerRPC{stdin: client, writeGate: make(chan struct{}, 1), waits: map[string]chan codexRPCResponse{}, done: make(chan struct{})}
+	rpc.writeGate <- struct{}{}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if err := rpc.Call(ctx, "turn/start", map[string]any{"threadId": "thread"}, nil); err == nil {
+		t.Fatal("blocked submission write unexpectedly succeeded")
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("blocked submission write exceeded fence deadline: %s", elapsed)
 	}
 }
 
@@ -265,7 +311,10 @@ func TestCodexAppServerDeliveryFailsClosedForLivePaneMismatch(t *testing.T) {
 	rpc := &fakeCodexRPC{}
 	request := codexAuthorityRequest()
 	boundaryBegun := false
-	request.BeginSubmission = func(context.Context) error { boundaryBegun = true; return nil }
+	request.BeginSubmission = func(context.Context) (time.Time, error) {
+		boundaryBegun = true
+		return time.Now().Add(time.Minute), nil
+	}
 	if _, err := newFakeCodexAuthority(t, adapter, rpc).DeliverAgentInput(context.Background(), request); err == nil {
 		t.Fatal("expected stale pane refusal")
 	}
@@ -281,11 +330,11 @@ func TestCodexAppServerDeliveryRevalidatesClientsAfterDurableBoundary(t *testing
 	adapter := &fakeCodexInputTmux{paneEnabled: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb"}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
 	rpc := &fakeCodexRPC{}
 	request := codexAuthorityRequest()
-	request.BeginSubmission = func(context.Context) error {
+	request.BeginSubmission = func(context.Context) (time.Time, error) {
 		adapter.mu.Lock()
 		adapter.clients[0].ReadOnly = false
 		adapter.mu.Unlock()
-		return nil
+		return time.Now().Add(time.Minute), nil
 	}
 	_, err := newFakeCodexAuthority(t, adapter, rpc).DeliverAgentInput(context.Background(), request)
 	var refusal agentInputRefusalError
@@ -301,7 +350,9 @@ func TestCodexAppServerDeliveryRevalidatesThreadAfterDurableBoundary(t *testing.
 	adapter := &fakeCodexInputTmux{paneEnabled: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb"}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
 	rpc := &fakeCodexRPC{}
 	request := codexAuthorityRequest()
-	request.RevalidateFinalIncarnation = func(context.Context) error { return errCodexPaneIdentityChanged }
+	request.RevalidateSubmissionFence = func(context.Context) (time.Time, error) {
+		return time.Time{}, agentInputRefusalError{outcome: "stale_incarnation", safeToRetry: true}
+	}
 	_, err := newFakeCodexAuthority(t, adapter, rpc).DeliverAgentInput(context.Background(), request)
 	var refusal agentInputRefusalError
 	if !errors.As(err, &refusal) || refusal.outcome != "stale_incarnation" || !refusal.safeToRetry {
@@ -352,6 +403,78 @@ func TestCodexAppServerDeliverySerializesOneSessionGate(t *testing.T) {
 	}
 }
 
+func TestCodexInputGateIncarnationTakeoverNeverOverlapsOrOldOwnerUngates(t *testing.T) {
+	ctx := context.Background()
+	adapter := &fakeCodexInputTmux{paneEnabled: true, hooksEnabled: true, activeGates: 1, maxGates: 1, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb", ReadOnly: true}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
+	authority := newCodexAppServerInputAuthority(adapter, filepath.Join(t.TempDir(), "daemon.sock"), nil, func(string) daemonProjectRuntimeConfig {
+		return daemonProjectRuntimeConfig{CLITool: "codex", CodexAppServer: true}
+	})
+	client := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	oldLease, acquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, "p", "az-dlb", "thread-old", "daemon-old", time.Now().Add(-2*time.Minute), time.Minute)
+	if err != nil || !acquired {
+		t.Fatalf("old lease=%+v acquired=%v err=%v", oldLease, acquired, err)
+	}
+	if err := os.MkdirAll(authority.gateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	eventsPath := filepath.Join(authority.gateDir, "gate-old.events")
+	if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldState := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-old", LeaseOwner: "daemon-old", FenceToken: oldLease.LeaseToken, PaneID: "12", PaneInputEnabled: true, HookID: "100", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
+	statePath := filepath.Join(authority.gateDir, "gate-old.json")
+	raw, _ := json.Marshal(oldState)
+	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldGate := &codexInputGate{tmux: adapter, state: oldState, statePath: statePath, renewRestoreFence: func(restoreCtx context.Context) (bool, error) {
+		_, renewed, err := client.RenewAgentInputDeliverySessionLease(restoreCtx, "p", "az-dlb", "thread-old", oldLease.LeaseToken, time.Now(), time.Minute)
+		return renewed, err
+	}}
+	newLease, acquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, "p", "az-dlb", "thread-new", "daemon-new", time.Now(), time.Minute)
+	if err != nil || !acquired || newLease.PreviousLeaseToken != oldLease.LeaseToken || newLease.PreviousAgentIncarnation != "thread-old" {
+		t.Fatalf("new lease=%+v acquired=%v err=%v", newLease, acquired, err)
+	}
+	rpc := &fakeCodexRPC{turnStarted: make(chan struct{}), releaseTurn: make(chan struct{})}
+	authority.startRPC = func(context.Context, string) (codexAppServerRPC, error) { return rpc, nil }
+	request := codexAuthorityRequest()
+	request.Delivery.Target.AgentIncarnation = "thread-new"
+	request.SessionLeaseOwner = "daemon-new"
+	request.SessionLeaseToken = newLease.LeaseToken
+	request.PreviousAgentIncarnation = newLease.PreviousAgentIncarnation
+	request.PreviousSessionLeaseToken = newLease.PreviousLeaseToken
+	request.RenewRestoreFence = func(restoreCtx context.Context) (bool, error) {
+		_, renewed, err := client.RenewAgentInputDeliverySessionLease(restoreCtx, "p", "az-dlb", "thread-new", newLease.LeaseToken, time.Now(), time.Minute)
+		return renewed, err
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := authority.DeliverAgentInput(ctx, request)
+		done <- err
+	}()
+	<-rpc.turnStarted
+	adapter.mu.Lock()
+	if adapter.maxGates != 1 || adapter.activeGates != 1 || !adapter.hooksEnabled || !adapter.clients[0].ReadOnly {
+		adapter.mu.Unlock()
+		t.Fatalf("takeover gate overlap/state max=%d active=%d hooks=%v clients=%+v", adapter.maxGates, adapter.activeGates, adapter.hooksEnabled, adapter.clients)
+	}
+	adapter.mu.Unlock()
+	if err := oldGate.Restore(ctx); !errors.Is(err, errCodexSessionFenceLost) {
+		t.Fatalf("old owner restore err=%v, want fence loss", err)
+	}
+	adapter.mu.Lock()
+	if adapter.activeGates != 1 || !adapter.hooksEnabled || !adapter.clients[0].ReadOnly {
+		adapter.mu.Unlock()
+		t.Fatalf("old owner ungated new owner: active=%d hooks=%v clients=%+v", adapter.activeGates, adapter.hooksEnabled, adapter.clients)
+	}
+	adapter.mu.Unlock()
+	close(rpc.releaseTurn)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCodexInputGateRestoresNewReadOnlyAttachFromHookLedger(t *testing.T) {
 	adapter := &fakeCodexInputTmux{paneEnabled: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty-old", SessionName: "az-dlb"}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
 	authority := newFakeCodexAuthority(t, adapter, &fakeCodexRPC{})
@@ -376,11 +499,18 @@ func TestCodexInputGateRestoresNewReadOnlyAttachFromHookLedger(t *testing.T) {
 	}
 }
 
-func TestCodexInputGateStartupRecoveryRestoresPersistedFlags(t *testing.T) {
-	adapter := &fakeCodexInputTmux{paneEnabled: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb", ReadOnly: true}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
+func TestCodexInputGateStartupRecoveryRefusesLiveOwner(t *testing.T) {
+	adapter := &fakeCodexInputTmux{paneEnabled: true, hooksEnabled: true, activeGates: 1, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb", ReadOnly: true}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
 	authority := newCodexAppServerInputAuthority(adapter, filepath.Join(t.TempDir(), "daemon.sock"), nil, func(string) daemonProjectRuntimeConfig {
 		return daemonProjectRuntimeConfig{CLITool: "codex", CodexAppServer: true}
 	})
+	client := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	lease, acquired, err := client.ClaimAgentInputDeliverySessionLease(context.Background(), "p", "az-dlb", "thread-exact", "live-daemon", time.Now(), time.Minute)
+	if err != nil || !acquired {
+		t.Fatalf("lease=%+v acquired=%v err=%v", lease, acquired, err)
+	}
+	authority.issueClients = func(string) *issues.Client { return client }
 	if err := os.MkdirAll(authority.gateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -388,8 +518,7 @@ func TestCodexInputGateStartupRecoveryRestoresPersistedFlags(t *testing.T) {
 	if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	state := codexInputGateState{Version: codexInputGateStateVersion, SessionID: "az-dlb", PaneID: "12", PaneInputEnabled: true,
-		HookID: "9137", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
+	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-exact", LeaseOwner: "live-daemon", FenceToken: lease.LeaseToken, PaneID: "12", PaneInputEnabled: true, HookID: "9137", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
 	raw, _ := json.Marshal(state)
 	statePath := filepath.Join(authority.gateDir, "gate-dead.json")
 	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
@@ -399,10 +528,50 @@ func TestCodexInputGateStartupRecoveryRestoresPersistedFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter.mu.Lock()
-	defer adapter.mu.Unlock()
-	if adapter.clients[0].ReadOnly || !adapter.paneEnabled || adapter.hooksEnabled {
-		t.Fatalf("stale gate was not restored: pane=%v hooks=%v clients=%+v", adapter.paneEnabled, adapter.hooksEnabled, adapter.clients)
+	if !adapter.clients[0].ReadOnly || !adapter.paneEnabled || !adapter.hooksEnabled {
+		adapter.mu.Unlock()
+		t.Fatalf("live-owner recovery mutated gate: pane=%v hooks=%v clients=%+v", adapter.paneEnabled, adapter.hooksEnabled, adapter.clients)
 	}
+	adapter.mu.Unlock()
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("live-owner state was removed: %v", err)
+	}
+}
+
+func TestCodexInputGateStartupRecoveryRestoresExpiredOwner(t *testing.T) {
+	adapter := &fakeCodexInputTmux{paneEnabled: true, hooksEnabled: true, activeGates: 1, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb", ReadOnly: true}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
+	authority := newCodexAppServerInputAuthority(adapter, filepath.Join(t.TempDir(), "daemon.sock"), nil, func(string) daemonProjectRuntimeConfig {
+		return daemonProjectRuntimeConfig{CLITool: "codex", CodexAppServer: true}
+	})
+	client := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	lease, acquired, err := client.ClaimAgentInputDeliverySessionLease(context.Background(), "p", "az-dlb", "thread-old", "dead-daemon", time.Now().Add(-2*time.Minute), time.Minute)
+	if err != nil || !acquired {
+		t.Fatalf("lease=%+v acquired=%v err=%v", lease, acquired, err)
+	}
+	authority.issueClients = func(string) *issues.Client { return client }
+	if err := os.MkdirAll(authority.gateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	eventsPath := filepath.Join(authority.gateDir, "gate-dead.events")
+	if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-old", LeaseOwner: "dead-daemon", FenceToken: lease.LeaseToken, PaneID: "12", PaneInputEnabled: true, HookID: "9137", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
+	raw, _ := json.Marshal(state)
+	statePath := filepath.Join(authority.gateDir, "gate-dead.json")
+	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := authority.RecoverStaleGates(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	adapter.mu.Lock()
+	if adapter.clients[0].ReadOnly || !adapter.paneEnabled || adapter.hooksEnabled {
+		adapter.mu.Unlock()
+		t.Fatalf("expired gate was not restored: pane=%v hooks=%v clients=%+v", adapter.paneEnabled, adapter.hooksEnabled, adapter.clients)
+	}
+	adapter.mu.Unlock()
 	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("recovered state remains: %v", err)
 	}
