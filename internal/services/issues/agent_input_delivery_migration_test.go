@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -112,6 +113,51 @@ func TestAgentInputDeliveryLeaseExpiryAndExactAcknowledgementFence(t *testing.T)
 	}
 }
 
+func TestAgentInputDeliverySessionLeaseIsCrossClientAndIncarnationScoped(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "issues.db")
+	clients := []*Client{NewClientAtPath(path, slog.Default()), NewClientAtPath(path, slog.Default())}
+	t.Cleanup(func() {
+		for _, client := range clients {
+			_ = client.CloseDB()
+		}
+	})
+	// Open and migrate before the second client races the same durable table.
+	if _, err := clients[0].dbHandle(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	first, acquired, err := clients[0].ClaimAgentInputDeliverySessionLease(ctx, "p", "s", "inc", "daemon-a", now, time.Second)
+	if err != nil || !acquired || first == "" {
+		t.Fatalf("first token=%q acquired=%v err=%v", first, acquired, err)
+	}
+	if token, acquired, err := clients[1].ClaimAgentInputDeliverySessionLease(ctx, "p", "s", "inc", "daemon-b", now.Add(500*time.Millisecond), time.Second); err != nil || acquired || token != "" {
+		t.Fatalf("overlap token=%q acquired=%v err=%v", token, acquired, err)
+	}
+	otherIncarnation, acquired, err := clients[1].ClaimAgentInputDeliverySessionLease(ctx, "p", "s", "inc-2", "daemon-b", now, time.Second)
+	if err != nil || !acquired || otherIncarnation == "" {
+		t.Fatalf("other incarnation token=%q acquired=%v err=%v", otherIncarnation, acquired, err)
+	}
+	if renewed, err := clients[0].RenewAgentInputDeliverySessionLease(ctx, "p", "s", "inc", first, now.Add(750*time.Millisecond), time.Second); err != nil || !renewed {
+		t.Fatalf("renewed=%v err=%v", renewed, err)
+	}
+	if _, acquired, err := clients[1].ClaimAgentInputDeliverySessionLease(ctx, "p", "s", "inc", "daemon-b", now.Add(1250*time.Millisecond), time.Second); err != nil || acquired {
+		t.Fatalf("renewed lease overlap acquired=%v err=%v", acquired, err)
+	}
+	if err := clients[0].ReleaseAgentInputDeliverySessionLease(ctx, "p", "s", "inc", "wrong"); err != nil {
+		t.Fatal(err)
+	}
+	if _, acquired, err := clients[1].ClaimAgentInputDeliverySessionLease(ctx, "p", "s", "inc", "daemon-b", now.Add(1500*time.Millisecond), time.Second); err != nil || acquired {
+		t.Fatalf("wrong-token release acquired=%v err=%v", acquired, err)
+	}
+	if err := clients[0].ReleaseAgentInputDeliverySessionLease(ctx, "p", "s", "inc", first); err != nil {
+		t.Fatal(err)
+	}
+	if token, acquired, err := clients[1].ClaimAgentInputDeliverySessionLease(ctx, "p", "s", "inc", "daemon-b", now.Add(1500*time.Millisecond), time.Second); err != nil || !acquired || token == "" {
+		t.Fatalf("post-release token=%q acquired=%v err=%v", token, acquired, err)
+	}
+}
+
 func TestAgentInputDeliveryExpiryIsDurablyTerminal(t *testing.T) {
 	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
 	defer client.CloseDB()
@@ -171,6 +217,8 @@ func TestAgentInputDeliveryMigrationRejectsIndexDefinitionDrift(t *testing.T) {
 		{name: "pending uniqueness", index: "idx_agent_input_delivery_pending", definition: `CREATE UNIQUE INDEX idx_agent_input_delivery_pending ON agent_input_delivery_intents(project_id, state, expires_at, created_at) WHERE state IN ('queued','leased')`},
 		{name: "incarnation column order", index: "idx_agent_input_delivery_incarnation", definition: `CREATE INDEX idx_agent_input_delivery_incarnation ON agent_input_delivery_intents(project_id, session_id, agent_incarnation, logical_pane_id, state)`},
 		{name: "incarnation uniqueness", index: "idx_agent_input_delivery_incarnation", definition: `CREATE UNIQUE INDEX idx_agent_input_delivery_incarnation ON agent_input_delivery_intents(project_id, session_id, logical_pane_id, agent_incarnation, state)`},
+		{name: "session lease wrong column", index: "idx_agent_input_session_lease_expiry", definition: `CREATE INDEX idx_agent_input_session_lease_expiry ON agent_input_delivery_session_leases(updated_at)`},
+		{name: "session lease uniqueness", index: "idx_agent_input_session_lease_expiry", definition: `CREATE UNIQUE INDEX idx_agent_input_session_lease_expiry ON agent_input_delivery_session_leases(lease_expires_at)`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -242,6 +290,8 @@ func TestAgentInputDeliveryMigrationRejectsWeakenedStateConstraints(t *testing.T
 			for _, statement := range []string{
 				`DROP INDEX idx_agent_input_delivery_pending`,
 				`DROP INDEX idx_agent_input_delivery_incarnation`,
+				`DROP INDEX idx_agent_input_session_lease_expiry`,
+				`DROP TABLE agent_input_delivery_session_leases`,
 				`ALTER TABLE agent_input_delivery_intents RENAME TO agent_input_delivery_intents_old`,
 			} {
 				if _, err := db.Exec(statement); err != nil {

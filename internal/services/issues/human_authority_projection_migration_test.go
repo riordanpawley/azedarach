@@ -66,7 +66,7 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, decisionPropagationOutboxMigrationID).Scan(&checksum); err != nil || checksum != "a12c44ba35156d71fbcd88a9d78e4cdb234e75e7e4aef5f896c8b1182ada858d" {
 				t.Fatalf("decision outbox checksum=%q err=%v", checksum, err)
 			}
-			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&checksum); err != nil || checksum != "8836af7f8a96e82aa4f72eaee14a5c48ea9a1c161cfc56376089293df6ae3dfa" {
+			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&checksum); err != nil || checksum != agentInputDeliveryMigrationChecksum {
 				t.Fatalf("agent input checksum=%q err=%v", checksum, err)
 			}
 			projectIDs := []string{"default"}

@@ -25,6 +25,79 @@ type AgentInputDeliveryIntent struct {
 	Acknowledged time.Time
 }
 
+// ClaimAgentInputDeliverySessionLease excludes every automated delivery to the
+// same durable session incarnation, including deliveries owned by another
+// daemon and using a different intent key.
+func (c *Client) ClaimAgentInputDeliverySessionLease(ctx context.Context, projectID, sessionID, incarnation, owner string, now time.Time, leaseDuration time.Duration) (string, bool, error) {
+	projectID = strings.TrimSpace(projectID)
+	sessionID = strings.TrimSpace(sessionID)
+	incarnation = strings.TrimSpace(incarnation)
+	owner = strings.TrimSpace(owner)
+	if projectID == "" || sessionID == "" || incarnation == "" || owner == "" || leaseDuration <= 0 {
+		return "", false, errors.New("invalid agent input session lease")
+	}
+	token, err := randomAgentInputToken()
+	if err != nil {
+		return "", false, err
+	}
+	acquired := false
+	err = c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			result, err := db.ExecContext(lockCtx, `INSERT INTO agent_input_delivery_session_leases(project_id,session_id,agent_incarnation,lease_owner,lease_token,lease_expires_at,updated_at)
+				VALUES(?,?,?,?,?,?,?)
+				ON CONFLICT(project_id,session_id,agent_incarnation) DO UPDATE SET lease_owner=excluded.lease_owner,lease_token=excluded.lease_token,lease_expires_at=excluded.lease_expires_at,updated_at=excluded.updated_at
+				WHERE julianday(agent_input_delivery_session_leases.lease_expires_at)<=julianday(?)`, projectID, sessionID, incarnation, owner, token, formatTimestamp(now.Add(leaseDuration)), formatTimestamp(now), formatTimestamp(now))
+			if err != nil {
+				return err
+			}
+			n, err := result.RowsAffected()
+			acquired = n == 1
+			return err
+		})
+	})
+	if !acquired {
+		token = ""
+	}
+	return token, acquired, err
+}
+
+func (c *Client) RenewAgentInputDeliverySessionLease(ctx context.Context, projectID, sessionID, incarnation, leaseToken string, now time.Time, leaseDuration time.Duration) (bool, error) {
+	var renewed bool
+	err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			result, err := db.ExecContext(lockCtx, `UPDATE agent_input_delivery_session_leases SET lease_expires_at=?,updated_at=? WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_token=? AND julianday(lease_expires_at)>julianday(?)`, formatTimestamp(now.Add(leaseDuration)), formatTimestamp(now), projectID, sessionID, incarnation, leaseToken, formatTimestamp(now))
+			if err != nil {
+				return err
+			}
+			n, err := result.RowsAffected()
+			renewed = n == 1
+			return err
+		})
+	})
+	return renewed, err
+}
+
+func (c *Client) ReleaseAgentInputDeliverySessionLease(ctx context.Context, projectID, sessionID, incarnation, leaseToken string) error {
+	return c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			_, err = db.ExecContext(lockCtx, `DELETE FROM agent_input_delivery_session_leases WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_token=?`, projectID, sessionID, incarnation, leaseToken)
+			return err
+		})
+	})
+}
+
 func (c *Client) ListPendingAgentInputDeliveryIntents(ctx context.Context, projectID string, now time.Time, limit int) ([]AgentInputDeliveryIntent, error) {
 	db, err := c.dbHandle()
 	if err != nil {

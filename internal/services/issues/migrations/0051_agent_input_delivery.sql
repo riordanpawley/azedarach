@@ -1,10 +1,11 @@
 -- Migration 0051 manifest
 --
 -- Schema effects:
---   Create agent_input_delivery_intents and its pending/incarnation indexes.
+--   Create agent_input_delivery_intents, durable session/incarnation delivery
+--   leases, and their supporting indexes.
 -- Data effects:
 --   None. Existing issue, session, decision, and runtime rows are not read,
---   rewritten, backfilled, or deleted; the new intent table starts empty.
+--   rewritten, backfilled, or deleted; both new tables start empty.
 -- Validation effects:
 --   The Go-assisted runner executes this artifact transactionally and validates
 --   the table SQL, required columns, constraints, and both indexes before the
@@ -48,3 +49,17 @@ CREATE INDEX idx_agent_input_delivery_pending
 
 CREATE INDEX idx_agent_input_delivery_incarnation
   ON agent_input_delivery_intents(project_id, session_id, logical_pane_id, agent_incarnation, state);
+
+CREATE TABLE agent_input_delivery_session_leases (
+  project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
+  session_id TEXT NOT NULL CHECK (trim(session_id) <> ''),
+  agent_incarnation TEXT NOT NULL CHECK (trim(agent_incarnation) <> ''),
+  lease_owner TEXT NOT NULL CHECK (trim(lease_owner) <> ''),
+  lease_token TEXT NOT NULL CHECK (trim(lease_token) <> ''),
+  lease_expires_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (project_id, session_id, agent_incarnation)
+);
+
+CREATE INDEX idx_agent_input_session_lease_expiry
+  ON agent_input_delivery_session_leases(lease_expires_at);

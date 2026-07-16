@@ -146,7 +146,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "0048_decision_propagation_outbox", Path: "migrations/0048_decision_propagation_outbox.sql", Checksum: "a12c44ba35156d71fbcd88a9d78e4cdb234e75e7e4aef5f896c8b1182ada858d"},
 	{ID: "0049_managed_agent_incarnations", Path: "migrations/0049_managed_agent_incarnations.sql", Checksum: "8364ceb9fad589df3f73c1fe0f0462c22b127510f1745e62fcc11e24757fe08d"},
 	{ID: "0050_issue_observation_event_search", Path: "migrations/0050_issue_observation_event_search.sql", Checksum: "e5a8efc20ddf313822576c4d6d42cd94e1837dfac810834957689d30b952005d"},
-	{ID: agentInputDeliveryMigrationID, Path: "migrations/0051_agent_input_delivery.sql", Checksum: "292df8ca2e7a4af9e06ceb7ae5efb19de6e959dbf0ba57aba470e09acc886732"},
+	{ID: agentInputDeliveryMigrationID, Path: "migrations/0051_agent_input_delivery.sql", Checksum: agentInputDeliveryMigrationChecksum},
 }
 
 func validateMigrationRegistry() error {
@@ -446,6 +446,7 @@ const (
 	decisionPropagationOutboxMigrationID                             = "0048_decision_propagation_outbox"
 	issueObservationEventSearchMigrationID                           = "0050_issue_observation_event_search"
 	agentInputDeliveryMigrationID                                    = "0051_agent_input_delivery"
+	agentInputDeliveryMigrationChecksum                              = "01fbf07eb9edce28d2e843d24a6fd91588a6eb4c2b448302ea553cf4673517f6"
 	contextualLearningMigrationID                                    = "0039_contextual_learning_activation"
 	legacyContextualLearningMigration                                = "0038_contextual_learning_activation"
 )
@@ -1065,6 +1066,41 @@ func validateAgentInputDeliverySchema(ctx context.Context, db sqlIssueQueryer) e
 		if !slices.Equal(columns, index.columns) {
 			return fmt.Errorf("agent input delivery schema drifted: index %s columns are %v, want %v", index.name, columns, index.columns)
 		}
+	}
+	var leaseTableSQL string
+	if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_input_delivery_session_leases'`).Scan(&leaseTableSQL); err != nil {
+		return fmt.Errorf("inspect agent input delivery session lease table: %w", err)
+	}
+	normalizedLeaseTable := strings.NewReplacer(" ", "", "\n", "", "\t", "", "\r", "").Replace(strings.ToLower(leaseTableSQL))
+	for _, fragment := range []string{
+		"primarykey(project_id,session_id,agent_incarnation)",
+		"project_idtextnotnullcheck(trim(project_id)<>'')",
+		"session_idtextnotnullcheck(trim(session_id)<>'')",
+		"agent_incarnationtextnotnullcheck(trim(agent_incarnation)<>'')",
+		"lease_ownertextnotnullcheck(trim(lease_owner)<>'')",
+		"lease_tokentextnotnullcheck(trim(lease_token)<>'')",
+		"lease_expires_attextnotnull",
+	} {
+		if !strings.Contains(normalizedLeaseTable, fragment) {
+			return fmt.Errorf("agent input delivery session lease schema drifted: missing constraint %s", fragment)
+		}
+	}
+	for _, column := range []string{"project_id", "session_id", "agent_incarnation", "lease_owner", "lease_token", "lease_expires_at", "updated_at"} {
+		exists, err := columnExistsDB(ctx, db, "agent_input_delivery_session_leases", column)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("agent input delivery session lease schema drifted: missing column %s", column)
+		}
+	}
+	var leaseIndexSQL string
+	if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_agent_input_session_lease_expiry'`).Scan(&leaseIndexSQL); err != nil {
+		return fmt.Errorf("agent input delivery session lease schema drifted: inspect expiry index: %w", err)
+	}
+	normalizedLeaseIndex := strings.NewReplacer(" ", "", "\n", "", "\t", "", "\r", "", `"`, "", "`", "", "[", "", "]", "").Replace(strings.ToLower(leaseIndexSQL))
+	if normalizedLeaseIndex != "createindexidx_agent_input_session_lease_expiryonagent_input_delivery_session_leases(lease_expires_at)" {
+		return errors.New("agent input delivery session lease schema drifted: expiry index has non-canonical definition")
 	}
 	return nil
 }

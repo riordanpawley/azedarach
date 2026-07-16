@@ -46,18 +46,18 @@ type codexAppServerRPC interface {
 }
 
 type codexAppServerInputAuthority struct {
-	tmux       codexInputTmux
-	gateDir    string
-	logger     *slog.Logger
-	tool       func(string) string
-	startRPC   func(context.Context, string) (codexAppServerRPC, error)
-	mu         sync.Mutex
-	sessionMux map[string]*sync.Mutex
+	tmux          codexInputTmux
+	gateDir       string
+	logger        *slog.Logger
+	runtimeConfig func(string) daemonProjectRuntimeConfig
+	startRPC      func(context.Context, string) (codexAppServerRPC, error)
+	mu            sync.Mutex
+	sessionMux    map[string]*sync.Mutex
 }
 
-func newCodexAppServerInputAuthority(adapter codexInputTmux, daemonSocketPath string, logger *slog.Logger, tool func(string) string) *codexAppServerInputAuthority {
+func newCodexAppServerInputAuthority(adapter codexInputTmux, daemonSocketPath string, logger *slog.Logger, runtimeConfig func(string) daemonProjectRuntimeConfig) *codexAppServerInputAuthority {
 	gateDir := filepath.Join(filepath.Dir(strings.TrimSpace(daemonSocketPath)), "agent-input-gates")
-	return &codexAppServerInputAuthority{tmux: adapter, gateDir: gateDir, logger: logger, tool: tool, startRPC: startCodexAppServerRPC, sessionMux: map[string]*sync.Mutex{}}
+	return &codexAppServerInputAuthority{tmux: adapter, gateDir: gateDir, logger: logger, runtimeConfig: runtimeConfig, startRPC: startCodexAppServerRPC, sessionMux: map[string]*sync.Mutex{}}
 }
 
 // RecoverStaleGates performs one bounded startup pass over gates whose daemon
@@ -95,14 +95,13 @@ func (a *codexAppServerInputAuthority) RecoverStaleGates(ctx context.Context) er
 }
 
 func (a *codexAppServerInputAuthority) DeliverAgentInput(ctx context.Context, request authoritativeAgentInputRequest) (ack authoritativeAgentInputAcknowledgement, retErr error) {
-	if a == nil || a.tmux == nil || !strings.EqualFold(strings.TrimSpace(request.Delivery.Tool), "codex") {
+	if a == nil || a.tmux == nil || a.runtimeConfig == nil || !strings.EqualFold(strings.TrimSpace(request.Delivery.Tool), "codex") {
 		return ack, errAuthoritativeAgentInputUnavailable
 	}
-	tool := "codex"
-	if a.tool != nil {
-		if configured := strings.TrimSpace(a.tool(request.Delivery.ProjectID)); configured != "" {
-			tool = configured
-		}
+	config := a.runtimeConfig(request.Delivery.ProjectID)
+	tool := strings.TrimSpace(config.CLITool)
+	if !config.CodexAppServer || !strings.EqualFold(tool, "codex") {
+		return ack, errAuthoritativeAgentInputUnavailable
 	}
 	rpc, err := a.startRPC(ctx, tool)
 	if err != nil {
@@ -164,6 +163,16 @@ func (a *codexAppServerInputAuthority) DeliverAgentInput(ctx context.Context, re
 	if err := gate.Revalidate(ctx, request); err != nil {
 		return ack, codexGateRefusal(err, true)
 	}
+	if request.RevalidateFinalIncarnation == nil {
+		return ack, codexGateRefusal(errCodexPaneIdentityChanged, true)
+	}
+	if err := request.RevalidateFinalIncarnation(ctx); err != nil {
+		var refusal agentInputRefusalError
+		if errors.As(err, &refusal) {
+			return ack, refusal
+		}
+		return ack, codexGateRefusal(err, true)
+	}
 	messageID := codexDeliveryMessageID(request.Delivery.IntentKey, threadID)
 	var started struct {
 		Turn struct {
@@ -176,8 +185,8 @@ func (a *codexAppServerInputAuthority) DeliverAgentInput(ctx context.Context, re
 		"input":               []map[string]string{{"type": "text", "text": request.Delivery.Payload}},
 	}
 	if err := rpc.Call(ctx, "turn/start", params, &started); err != nil {
-		var methodErr codexRPCMethodError
-		if errors.As(err, &methodErr) {
+		var rejection codexRPCPreAcceptanceRejection
+		if errors.As(err, &rejection) {
 			return ack, agentInputRefusalError{outcome: "not_ready", safeToRetry: true}
 		}
 		return ack, fmt.Errorf("submit Codex automated turn: %w", err)
@@ -188,6 +197,14 @@ func (a *codexAppServerInputAuthority) DeliverAgentInput(ctx context.Context, re
 	}
 	return authoritativeAgentInputAcknowledgement{ProjectID: request.Delivery.ProjectID, IntentKey: request.Delivery.IntentKey,
 		AgentIncarnation: threadID, LeaseToken: request.LeaseToken, AcknowledgementToken: turnID}, nil
+}
+
+// isCodexAuthoritativePreAcceptanceRejection recognizes only the documented
+// app-server refusal that a turn cannot be accepted while one is already
+// active. Other JSON-RPC method errors are application failures after dispatch
+// and therefore leave the durable intent ambiguous.
+func isCodexAuthoritativePreAcceptanceRejection(err codexRPCMethodError) bool {
+	return err.Method == "turn/start" && err.Code == -32600 && strings.EqualFold(strings.TrimSpace(err.Message), "turn already active")
 }
 
 func codexGateRefusal(err error, safeToRetry bool) agentInputRefusalError {
@@ -456,6 +473,18 @@ func (e codexRPCMethodError) Error() string {
 	return fmt.Sprintf("Codex %s: rpc %d: %s", e.Method, e.Code, e.Message)
 }
 
+// codexRPCPreAcceptanceRejection is deliberately distinct from a generic
+// method error: it proves the app-server refused turn/start before accepting a
+// new turn, so the durable ambiguous intent may be made retryable.
+type codexRPCPreAcceptanceRejection struct{ codexRPCMethodError }
+
+func classifyCodexRPCMethodError(err codexRPCMethodError) error {
+	if isCodexAuthoritativePreAcceptanceRejection(err) {
+		return codexRPCPreAcceptanceRejection{codexRPCMethodError: err}
+	}
+	return err
+}
+
 func startCodexAppServerRPC(ctx context.Context, tool string) (codexAppServerRPC, error) {
 	cmd := exec.CommandContext(ctx, tool, "app-server", "proxy")
 	stdin, err := cmd.StdinPipe()
@@ -489,7 +518,7 @@ func (c *processCodexAppServerRPC) Call(ctx context.Context, method string, para
 	select {
 	case response := <-wait:
 		if response.Error != nil {
-			return codexRPCMethodError{Method: method, Code: response.Error.Code, Message: response.Error.Message}
+			return classifyCodexRPCMethodError(codexRPCMethodError{Method: method, Code: response.Error.Code, Message: response.Error.Message})
 		}
 		if result == nil || len(response.Result) == 0 {
 			return nil

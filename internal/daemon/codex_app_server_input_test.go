@@ -145,14 +145,47 @@ func codexAuthorityRequest() authoritativeAgentInputRequest {
 	return authoritativeAgentInputRequest{Delivery: domain.AgentInputDeliveryRequest{
 		ProjectID: "p", SessionID: "az-dlb", Tool: "codex", IntentKey: "intent", Payload: "automated body",
 		Target: domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 42, AgentIncarnation: "thread-exact"},
-	}, LeaseToken: "lease", BeginSubmission: func(context.Context) error { return nil }}
+	}, LeaseToken: "lease", BeginSubmission: func(context.Context) error { return nil }, RevalidateFinalIncarnation: func(context.Context) error { return nil }}
 }
 
 func newFakeCodexAuthority(t *testing.T, adapter *fakeCodexInputTmux, rpc *fakeCodexRPC) *codexAppServerInputAuthority {
 	t.Helper()
-	authority := newCodexAppServerInputAuthority(adapter, filepath.Join(t.TempDir(), "daemon.sock"), nil, func(string) string { return "codex" })
+	authority := newCodexAppServerInputAuthority(adapter, filepath.Join(t.TempDir(), "daemon.sock"), nil, func(string) daemonProjectRuntimeConfig {
+		return daemonProjectRuntimeConfig{CLITool: "codex", CodexAppServer: true}
+	})
 	authority.startRPC = func(context.Context, string) (codexAppServerRPC, error) { return rpc, nil }
 	return authority
+}
+
+func TestCodexAppServerDeliveryFailsClosedUnlessProjectCapabilityIsEnabled(t *testing.T) {
+	tests := []struct {
+		name         string
+		config       daemonProjectRuntimeConfig
+		deliveryTool string
+	}{
+		{name: "disabled app server", config: daemonProjectRuntimeConfig{CLITool: "codex"}, deliveryTool: "codex"},
+		{name: "unsupported configured tool", config: daemonProjectRuntimeConfig{CLITool: "claude", CodexAppServer: true}, deliveryTool: "codex"},
+		{name: "unsupported delivery tool", config: daemonProjectRuntimeConfig{CLITool: "codex", CodexAppServer: true}, deliveryTool: "claude"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			adapter := &fakeCodexInputTmux{}
+			authority := newCodexAppServerInputAuthority(adapter, filepath.Join(t.TempDir(), "daemon.sock"), nil, func(string) daemonProjectRuntimeConfig { return test.config })
+			started := false
+			authority.startRPC = func(context.Context, string) (codexAppServerRPC, error) {
+				started = true
+				return &fakeCodexRPC{}, nil
+			}
+			request := codexAuthorityRequest()
+			request.Delivery.Tool = test.deliveryTool
+			if _, err := authority.DeliverAgentInput(context.Background(), request); !errors.Is(err, errAuthoritativeAgentInputUnavailable) {
+				t.Fatalf("err=%v, want unavailable", err)
+			}
+			if started {
+				t.Fatal("app-server proxy started without exact enabled capability")
+			}
+		})
+	}
 }
 
 func TestCodexAppServerDeliveryGatesClientsSubmitsExactThreadAndRestores(t *testing.T) {
@@ -202,6 +235,31 @@ func TestCodexAppServerDeliveryRestoresGateWhenTurnRejected(t *testing.T) {
 	}
 }
 
+func TestCodexAppServerDeliveryKeepsGenericMethodErrorsAmbiguous(t *testing.T) {
+	tests := []codexRPCMethodError{
+		{Method: "turn/start", Code: -32603, Message: "internal error"},
+		{Method: "turn/start", Code: -32600, Message: "unknown request"},
+	}
+	for _, methodErr := range tests {
+		adapter := &fakeCodexInputTmux{paneEnabled: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb"}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
+		_, err := newFakeCodexAuthority(t, adapter, &fakeCodexRPC{turnErr: methodErr}).DeliverAgentInput(context.Background(), codexAuthorityRequest())
+		var refusal agentInputRefusalError
+		if err == nil || errors.As(err, &refusal) {
+			t.Fatalf("method error %+v became retryable refusal: %v", methodErr, err)
+		}
+	}
+}
+
+func TestCodexAppServerDeliveryRetriesAuthoritativeActiveTurnRejection(t *testing.T) {
+	adapter := &fakeCodexInputTmux{paneEnabled: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb"}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
+	methodErr := codexRPCMethodError{Method: "turn/start", Code: -32600, Message: "turn already active"}
+	_, err := newFakeCodexAuthority(t, adapter, &fakeCodexRPC{turnErr: classifyCodexRPCMethodError(methodErr)}).DeliverAgentInput(context.Background(), codexAuthorityRequest())
+	var refusal agentInputRefusalError
+	if !errors.As(err, &refusal) || !refusal.safeToRetry || refusal.outcome != "not_ready" {
+		t.Fatalf("err=%v refusal=%+v", err, refusal)
+	}
+}
+
 func TestCodexAppServerDeliveryFailsClosedForLivePaneMismatch(t *testing.T) {
 	adapter := &fakeCodexInputTmux{paneEnabled: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb"}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 99}}}
 	rpc := &fakeCodexRPC{}
@@ -239,11 +297,28 @@ func TestCodexAppServerDeliveryRevalidatesClientsAfterDurableBoundary(t *testing
 	}
 }
 
+func TestCodexAppServerDeliveryRevalidatesThreadAfterDurableBoundary(t *testing.T) {
+	adapter := &fakeCodexInputTmux{paneEnabled: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb"}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
+	rpc := &fakeCodexRPC{}
+	request := codexAuthorityRequest()
+	request.RevalidateFinalIncarnation = func(context.Context) error { return errCodexPaneIdentityChanged }
+	_, err := newFakeCodexAuthority(t, adapter, rpc).DeliverAgentInput(context.Background(), request)
+	var refusal agentInputRefusalError
+	if !errors.As(err, &refusal) || refusal.outcome != "stale_incarnation" || !refusal.safeToRetry {
+		t.Fatalf("err=%v refusal=%+v", err, refusal)
+	}
+	if rpc.turnParams != nil {
+		t.Fatalf("turn submitted after thread incarnation changed: %#v", rpc.turnParams)
+	}
+}
+
 func TestCodexAppServerDeliverySerializesOneSessionGate(t *testing.T) {
 	adapter := &fakeCodexInputTmux{paneEnabled: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb"}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
 	firstRPC := &fakeCodexRPC{turnStarted: make(chan struct{}), releaseTurn: make(chan struct{})}
 	secondRPC := &fakeCodexRPC{}
-	authority := newCodexAppServerInputAuthority(adapter, filepath.Join(t.TempDir(), "daemon.sock"), nil, func(string) string { return "codex" })
+	authority := newCodexAppServerInputAuthority(adapter, filepath.Join(t.TempDir(), "daemon.sock"), nil, func(string) daemonProjectRuntimeConfig {
+		return daemonProjectRuntimeConfig{CLITool: "codex", CodexAppServer: true}
+	})
 	var starts int
 	var startsMu sync.Mutex
 	authority.startRPC = func(context.Context, string) (codexAppServerRPC, error) {
@@ -303,7 +378,9 @@ func TestCodexInputGateRestoresNewReadOnlyAttachFromHookLedger(t *testing.T) {
 
 func TestCodexInputGateStartupRecoveryRestoresPersistedFlags(t *testing.T) {
 	adapter := &fakeCodexInputTmux{paneEnabled: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb", ReadOnly: true}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
-	authority := newCodexAppServerInputAuthority(adapter, filepath.Join(t.TempDir(), "daemon.sock"), nil, func(string) string { return "codex" })
+	authority := newCodexAppServerInputAuthority(adapter, filepath.Join(t.TempDir(), "daemon.sock"), nil, func(string) daemonProjectRuntimeConfig {
+		return daemonProjectRuntimeConfig{CLITool: "codex", CodexAppServer: true}
+	})
 	if err := os.MkdirAll(authority.gateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}

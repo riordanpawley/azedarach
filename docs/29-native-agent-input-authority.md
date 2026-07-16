@@ -9,31 +9,36 @@ and paste buffers are not delivery acknowledgement.
 
 For each leased intent, the daemon must:
 
-1. Verify the durable and live pane, PID, and Codex thread incarnation.
-2. Briefly freeze pane input while installing session-scoped tmux hooks.
-3. Record every attached client's prior flags and make it read-only. New
+1. Acquire and renew a durable session-and-incarnation lease so separate daemon
+   processes and different intent keys cannot overlap one managed-input gate.
+2. Verify the durable and live pane, PID, and Codex thread incarnation.
+3. Briefly freeze pane input while installing session-scoped tmux hooks.
+4. Record every attached client's prior flags and make it read-only. New
    attaches and clients switched into the session are synchronously recorded
    and made read-only by the hook before tmux accepts their input.
-4. Re-enable pane rendering/input processing only after every attached client
-   is read-only, then revalidate identity and client flags at submission.
-5. Submit the payload directly to the exact thread with Codex app-server
+5. Re-enable pane rendering/input processing only after every attached client
+   is read-only, then revalidate live pane/client state and the hook-bound
+   thread incarnation after the durable submission boundary.
+6. Submit the payload directly to the exact thread with Codex app-server
    `turn/start`; the stock TUI composer is never inspected or modified.
-6. Treat the returned Codex turn ID as acknowledgement, remove the hooks, and
+7. Treat the returned Codex turn ID as acknowledgement, remove the hooks, and
    restore only flags Azedarach changed while a pane-wide transition fence is
    active.
 
 Only a matching non-empty turn ID advances the durable intent to delivered.
-An authoritative active-turn rejection, stale identity, writable client, or
-gate setup failure leaves the intent queued or stale. A disconnect, timeout,
-malformed acknowledgement, or daemon crash after the durable `turn/start`
-boundary leaves it ambiguous: it is never automatically submitted again, but
-still expires at its original deadline. Gate state is written beneath the
+Only the typed authoritative active-turn pre-acceptance rejection, stale
+identity, writable client, or gate setup failure leaves the intent queued or
+stale. Generic JSON-RPC method errors, disconnects, timeouts, malformed
+acknowledgements, or daemon crashes after the durable `turn/start` boundary
+leave it ambiguous because dispatch may already have had an effect: it is never
+automatically submitted again, but still expires at its original deadline. Gate state is written beneath the
 daemon runtime directory so incomplete restoration remains diagnosable. Prompt
 and composer content are never written to gate records or logs.
 
 ## Tool capability matrix
 
-Codex is supported when `session.codexAppServer` is enabled. Azedarach launches
+Codex is supported only when `cliTool: codex` and `session.codexAppServer: true`
+are both configured. Azedarach launches
 the stock remote TUI (`codex --remote unix://`) under a supervised local
 app-server daemon. Hooks bind the managed pane identity to the exact Codex
 thread ID. Automated turns use a separate app-server proxy only while tmux has

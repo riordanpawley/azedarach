@@ -28,6 +28,15 @@ type refusingAuthoritativeReceiver struct{ outcome string }
 
 type rejectedSubmissionReceiver struct{ calls int }
 
+type blockingAuthoritativeReceiver struct {
+	entered chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	calls   int
+}
+
+type transitionDuringSubmissionReceiver struct{ transition func() error }
+
 func (r refusingAuthoritativeReceiver) DeliverAgentInput(context.Context, authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
 	return authoritativeAgentInputAcknowledgement{}, agentInputRefusalError{outcome: r.outcome}
 }
@@ -35,6 +44,9 @@ func (r refusingAuthoritativeReceiver) DeliverAgentInput(context.Context, author
 func (r *rejectedSubmissionReceiver) DeliverAgentInput(ctx context.Context, request authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
 	r.calls++
 	if err := request.BeginSubmission(ctx); err != nil {
+		return authoritativeAgentInputAcknowledgement{}, err
+	}
+	if err := request.RevalidateFinalIncarnation(ctx); err != nil {
 		return authoritativeAgentInputAcknowledgement{}, err
 	}
 	return authoritativeAgentInputAcknowledgement{}, agentInputRefusalError{outcome: "not_ready", safeToRetry: true}
@@ -45,6 +57,12 @@ func (r *recordingAuthoritativeReceiver) DeliverAgentInput(_ context.Context, re
 		return authoritativeAgentInputAcknowledgement{}, errors.New("missing submission boundary")
 	}
 	if err := request.BeginSubmission(context.Background()); err != nil {
+		return authoritativeAgentInputAcknowledgement{}, err
+	}
+	if request.RevalidateFinalIncarnation == nil {
+		return authoritativeAgentInputAcknowledgement{}, errors.New("missing final incarnation validation")
+	}
+	if err := request.RevalidateFinalIncarnation(context.Background()); err != nil {
 		return authoritativeAgentInputAcknowledgement{}, err
 	}
 	r.mu.Lock()
@@ -65,6 +83,47 @@ func (r *recordingAuthoritativeReceiver) DeliverAgentInput(_ context.Context, re
 		return authoritativeAgentInputAcknowledgement{}, errors.New("simulated crash after receiver acceptance")
 	}
 	return authoritativeAgentInputAcknowledgement{ProjectID: request.Delivery.ProjectID, IntentKey: request.Delivery.IntentKey, AgentIncarnation: request.Delivery.Target.AgentIncarnation, LeaseToken: request.LeaseToken, AcknowledgementToken: ack}, nil
+}
+
+func (r *blockingAuthoritativeReceiver) DeliverAgentInput(ctx context.Context, request authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
+	if err := request.BeginSubmission(ctx); err != nil {
+		return authoritativeAgentInputAcknowledgement{}, err
+	}
+	if err := request.RevalidateFinalIncarnation(ctx); err != nil {
+		return authoritativeAgentInputAcknowledgement{}, err
+	}
+	r.mu.Lock()
+	r.calls++
+	if r.calls == 1 {
+		close(r.entered)
+	}
+	r.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return authoritativeAgentInputAcknowledgement{}, context.Cause(ctx)
+	case <-r.release:
+	}
+	return authoritativeAgentInputAcknowledgement{ProjectID: request.Delivery.ProjectID, IntentKey: request.Delivery.IntentKey, AgentIncarnation: request.Delivery.Target.AgentIncarnation, LeaseToken: request.LeaseToken, AcknowledgementToken: "accepted-" + request.Delivery.IntentKey}, nil
+}
+
+func (r transitionDuringSubmissionReceiver) DeliverAgentInput(ctx context.Context, request authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
+	if err := request.BeginSubmission(ctx); err != nil {
+		return authoritativeAgentInputAcknowledgement{}, err
+	}
+	if err := r.transition(); err != nil {
+		return authoritativeAgentInputAcknowledgement{}, err
+	}
+	if err := request.RevalidateFinalIncarnation(ctx); err != nil {
+		var refusal agentInputRefusalError
+		if errors.As(err, &refusal) {
+			return authoritativeAgentInputAcknowledgement{}, refusal
+		}
+		if errors.Is(err, errCodexPaneIdentityChanged) {
+			return authoritativeAgentInputAcknowledgement{}, agentInputRefusalError{outcome: "stale_incarnation", safeToRetry: true}
+		}
+		return authoritativeAgentInputAcknowledgement{}, err
+	}
+	return authoritativeAgentInputAcknowledgement{}, errors.New("accepted stale incarnation")
 }
 
 func agentInputFixture(t *testing.T) (*daemonstate.RuntimeStateStore, *issues.Client, domain.AgentInputDeliveryRequest) {
@@ -100,6 +159,42 @@ func TestAgentInputDeliveryFailsClosedWithoutAuthoritativeReceiver(t *testing.T)
 	result, err = restarted.Deliver(context.Background(), request)
 	if err != nil || result.Outcome != domain.AgentInputWaitingNotReady {
 		t.Fatalf("restart result=%+v err=%v", result, err)
+	}
+}
+
+func TestAgentInputDeliveryFailsClosedForDisabledOrUnsupportedCodexCapability(t *testing.T) {
+	tests := []struct {
+		name         string
+		config       daemonProjectRuntimeConfig
+		deliveryTool string
+	}{
+		{name: "app server disabled", config: daemonProjectRuntimeConfig{CLITool: "codex"}, deliveryTool: "codex"},
+		{name: "configured tool unsupported", config: daemonProjectRuntimeConfig{CLITool: "claude", CodexAppServer: true}, deliveryTool: "codex"},
+		{name: "delivery tool unsupported", config: daemonProjectRuntimeConfig{CLITool: "codex", CodexAppServer: true}, deliveryTool: "claude"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtimeStore, client, request := agentInputFixture(t)
+			request.Tool = test.deliveryTool
+			authority := newCodexAppServerInputAuthority(&fakeCodexInputTmux{}, filepath.Join(t.TempDir(), "daemon.sock"), nil, func(string) daemonProjectRuntimeConfig { return test.config })
+			started := false
+			authority.startRPC = func(context.Context, string) (codexAppServerRPC, error) {
+				started = true
+				return &fakeCodexRPC{}, nil
+			}
+			service := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, authority, "one")
+			result, err := service.Deliver(context.Background(), request)
+			if err != nil || result.Outcome != domain.AgentInputWaitingNotReady {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			if started {
+				t.Fatal("app-server proxy started without exact enabled capability")
+			}
+			intent, err := client.EnsureAgentInputDeliveryIntent(context.Background(), request)
+			if err != nil || intent.State != "queued" {
+				t.Fatalf("intent=%+v err=%v", intent, err)
+			}
+		})
 	}
 }
 
@@ -178,6 +273,112 @@ func TestAgentInputDeliveryConcurrentDaemonsClaimOnce(t *testing.T) {
 	}
 	if receiver.calls != 1 {
 		t.Fatalf("receiver calls=%d want 1", receiver.calls)
+	}
+}
+
+func TestAgentInputDeliveryCrossDaemonSessionLeaseExcludesDifferentIntents(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	runtimePath := filepath.Join(dir, "runtime.db")
+	issuePath := filepath.Join(dir, "issues.db")
+	stores := []*daemonstate.RuntimeStateStore{
+		daemonstate.NewRuntimeStateStoreAtPath(runtimePath, logger),
+		daemonstate.NewRuntimeStateStoreAtPath(runtimePath, logger),
+	}
+	clients := []*issues.Client{issues.NewClientAtPath(issuePath, logger), issues.NewClientAtPath(issuePath, logger)}
+	t.Cleanup(func() {
+		for _, store := range stores {
+			_ = store.Close()
+		}
+		for _, client := range clients {
+			_ = client.CloseDB()
+		}
+	})
+	now := time.Now().UTC()
+	target := domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 123, AgentIncarnation: "inc-shared"}
+	if err := stores[0].UpsertManagedAgentIdentity(ctx, daemonstate.ManagedAgentIdentity{ProjectID: "p", SessionID: "az-shared", LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 123, AgentIncarnation: target.AgentIncarnation, ObservedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := stores[0].ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{ProjectID: "p", SessionID: "az-shared", ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: now, ObservedVersion: now.UnixNano()}); err != nil {
+		t.Fatal(err)
+	}
+	receiver := &blockingAuthoritativeReceiver{entered: make(chan struct{}), release: make(chan struct{})}
+	services := []*agentInputDeliveryService{
+		newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return stores[0] }, func(string) *issues.Client { return clients[0] }, receiver, "daemon-one"),
+		newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return stores[1] }, func(string) *issues.Client { return clients[1] }, receiver, "daemon-two"),
+	}
+	requestOne := domain.AgentInputDeliveryRequest{ProjectID: "p", SessionID: "az-shared", Target: target, Tool: "codex", Kind: domain.AgentInputMessageSessionMessage, Payload: "one", IntentKey: "intent-one", ExpiresAt: now.Add(time.Minute)}
+	requestTwo := requestOne
+	requestTwo.IntentKey = "intent-two"
+	requestTwo.Payload = "two"
+	firstDone := make(chan error, 1)
+	go func() {
+		result, err := services[0].Deliver(ctx, requestOne)
+		if err == nil && result.Outcome != domain.AgentInputDelivered {
+			err = errors.New("first delivery was not acknowledged")
+		}
+		firstDone <- err
+	}()
+	<-receiver.entered
+	result, err := services[1].Deliver(ctx, requestTwo)
+	if err != nil || result.Outcome != domain.AgentInputWaitingNotReady {
+		t.Fatalf("overlapping delivery result=%+v err=%v", result, err)
+	}
+	receiver.mu.Lock()
+	calls := receiver.calls
+	receiver.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("receiver calls while first gate active=%d, want 1", calls)
+	}
+	close(receiver.release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	result, err = services[1].Deliver(ctx, requestTwo)
+	if err != nil || result.Outcome != domain.AgentInputDelivered {
+		t.Fatalf("post-release delivery result=%+v err=%v", result, err)
+	}
+}
+
+func TestAgentInputDeliveryRevalidatesSamePaneThreadTransitionAfterSubmissionBoundary(t *testing.T) {
+	runtimeStore, client, request := agentInputFixture(t)
+	receiver := transitionDuringSubmissionReceiver{transition: func() error {
+		now := time.Now().UTC().Add(time.Second)
+		return runtimeStore.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{ProjectID: request.ProjectID, SessionID: request.SessionID, LogicalPaneID: string(request.Target.LogicalPaneID), TmuxPaneID: request.Target.TmuxPaneID, PanePID: request.Target.PanePID, AgentIncarnation: "inc-2", ObservedAt: now})
+	}}
+	service := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, receiver, "one")
+	result, err := service.Deliver(context.Background(), request)
+	if err != nil || result.Outcome != domain.AgentInputRejectedStaleTarget {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	intent, err := client.EnsureAgentInputDeliveryIntent(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if intent.State != "stale" {
+		t.Fatalf("intent state=%q, want stale", intent.State)
+	}
+}
+
+func TestAgentInputDeliveryRevalidatesHookReadinessAfterSubmissionBoundary(t *testing.T) {
+	runtimeStore, client, request := agentInputFixture(t)
+	receiver := transitionDuringSubmissionReceiver{transition: func() error {
+		now := time.Now().UTC().Add(time.Second)
+		_, _, err := runtimeStore.ApplyPhysicalSessionObservation(context.Background(), daemonstate.PhysicalSessionObservation{ProjectID: request.ProjectID, SessionID: request.SessionID, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: now, ObservedVersion: now.UnixNano()})
+		return err
+	}}
+	service := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, receiver, "one")
+	result, err := service.Deliver(context.Background(), request)
+	if err != nil || result.Outcome != domain.AgentInputWaitingNotReady {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	intent, err := client.EnsureAgentInputDeliveryIntent(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if intent.State != "queued" {
+		t.Fatalf("intent state=%q, want queued", intent.State)
 	}
 }
 

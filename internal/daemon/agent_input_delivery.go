@@ -21,9 +21,10 @@ type authoritativeAgentInputReceiver interface {
 }
 
 type authoritativeAgentInputRequest struct {
-	Delivery        domain.AgentInputDeliveryRequest
-	LeaseToken      string
-	BeginSubmission func(context.Context) error
+	Delivery                   domain.AgentInputDeliveryRequest
+	LeaseToken                 string
+	BeginSubmission            func(context.Context) error
+	RevalidateFinalIncarnation func(context.Context) error
 }
 
 type authoritativeAgentInputAcknowledgement struct {
@@ -35,6 +36,11 @@ type authoritativeAgentInputAcknowledgement struct {
 }
 
 var errAuthoritativeAgentInputUnavailable = errors.New("authoritative agent input receiver unavailable")
+
+const (
+	agentInputSessionLeaseDuration  = 30 * time.Second
+	agentInputSessionLeaseHeartbeat = 10 * time.Second
+)
 
 type agentInputRefusalError struct {
 	outcome     string
@@ -110,6 +116,46 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 	release := func(stale bool) {
 		_ = client.ReleaseAgentInputDeliveryIntent(context.WithoutCancel(ctx), request.ProjectID, request.IntentKey, claimed.LeaseToken, stale, s.now())
 	}
+	sessionLeaseToken, sessionLeaseAcquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, request.ProjectID, request.SessionID, request.Target.AgentIncarnation, s.owner, s.now(), agentInputSessionLeaseDuration)
+	if err != nil {
+		release(false)
+		return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputFailed, Reason: "claim durable session delivery lease"}, err
+	}
+	if !sessionLeaseAcquired {
+		release(false)
+		return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputWaitingNotReady, Reason: "session incarnation delivery owned by another daemon"}, nil
+	}
+	deliveryCtx, cancelDelivery := context.WithCancelCause(ctx)
+	heartbeatStop := make(chan struct{})
+	heartbeatDone := make(chan struct{})
+	go func() {
+		defer close(heartbeatDone)
+		ticker := time.NewTicker(agentInputSessionLeaseHeartbeat)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatStop:
+				return
+			case <-deliveryCtx.Done():
+				return
+			case <-ticker.C:
+				renewed, renewErr := client.RenewAgentInputDeliverySessionLease(deliveryCtx, request.ProjectID, request.SessionID, request.Target.AgentIncarnation, sessionLeaseToken, s.now(), agentInputSessionLeaseDuration)
+				if renewErr != nil || !renewed {
+					if renewErr == nil {
+						renewErr = errors.New("session delivery lease changed")
+					}
+					cancelDelivery(fmt.Errorf("renew durable session delivery lease: %w", renewErr))
+					return
+				}
+			}
+		}
+	}()
+	defer func() {
+		cancelDelivery(nil)
+		close(heartbeatStop)
+		<-heartbeatDone
+		_ = client.ReleaseAgentInputDeliverySessionLease(context.WithoutCancel(ctx), request.ProjectID, request.SessionID, request.Target.AgentIncarnation, sessionLeaseToken)
+	}()
 	current, result, err := s.observeIdentity(ctx, request)
 	if err != nil || result.Outcome != "" {
 		release(result.Outcome == domain.AgentInputRejectedStaleTarget)
@@ -134,7 +180,20 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 		submissionBegun = true
 		return nil
 	}
-	ack, err := s.receiver.DeliverAgentInput(ctx, authoritativeAgentInputRequest{Delivery: request, LeaseToken: claimed.LeaseToken, BeginSubmission: beginSubmission})
+	revalidateFinalIncarnation := func(revalidateCtx context.Context) error {
+		currentAgain, result, err := s.observeIdentity(revalidateCtx, request)
+		if err != nil {
+			return err
+		}
+		if result.Outcome == domain.AgentInputRejectedStaleTarget || !current.SameIncarnation(currentAgain) {
+			return errCodexPaneIdentityChanged
+		}
+		if result.Outcome != "" {
+			return agentInputRefusalError{outcome: "not_ready", safeToRetry: true}
+		}
+		return nil
+	}
+	ack, err := s.receiver.DeliverAgentInput(deliveryCtx, authoritativeAgentInputRequest{Delivery: request, LeaseToken: claimed.LeaseToken, BeginSubmission: beginSubmission, RevalidateFinalIncarnation: revalidateFinalIncarnation})
 	if err != nil {
 		var refusal agentInputRefusalError
 		if errors.As(err, &refusal) {

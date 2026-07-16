@@ -382,8 +382,8 @@ func New(cfg Config) *Daemon {
 		userProjectionConsumers:            map[string]*userProjectionConsumerHandle{},
 		shutdownReqCh:                      make(chan struct{}),
 	}
-	d.codexAgentInput = newCodexAppServerInputAuthority(d.tmux, cfg.SocketPath, cfg.Logger, func(projectID string) string {
-		return d.runtimeConfigForProject(projectID).CLITool
+	d.codexAgentInput = newCodexAppServerInputAuthority(d.tmux, cfg.SocketPath, cfg.Logger, func(projectID string) daemonProjectRuntimeConfig {
+		return d.runtimeConfigForProject(projectID)
 	})
 	d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, d.codexAgentInput, fmt.Sprintf("daemon:%d:%p", os.Getpid(), d))
 	if !cfg.ScopedRuntime && strings.TrimSpace(os.Getenv("AZEDARACH_DISABLE_USER_DB")) != "1" {
