@@ -8952,6 +8952,43 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 	}
 }
 
+func TestIssueCloseCommandSurfacesCandidateValidationArtifact(t *testing.T) {
+	const detail = "merge worker into main failed: candidate validation failed: " +
+		"validation_request=dov-request candidate_head=candidate-sha " +
+		"failure=example/broken::TestRetained artifacts=/project/.azedarach/validation-artifacts/failures/candidate-sha/dov-request"
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != daemonclient.CommandTaskClose {
+					return protocol.ResponseEnvelope{}, fmt.Errorf("unexpected command: %s", req.Command)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Meta:            req.Meta,
+					OK:              false,
+					CompletedAt:     req.SentAt,
+					Error:           &protocol.ErrorEnvelope{Code: protocol.ErrorCodeConflict, Message: detail},
+				}, nil
+			},
+		}),
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ProjectID: "proj",
+	}
+
+	err := IssueCloseCommand(deps, IssueCloseOptions{IssueID: "dov"})
+	if err == nil {
+		t.Fatal("IssueCloseCommand error = nil, want candidate validation failure")
+	}
+	for _, want := range []string{"validation_request=dov-request", "example/broken::TestRetained", "/project/.azedarach/validation-artifacts/failures/candidate-sha/dov-request"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("IssueCloseCommand error = %q, want %q", err, want)
+		}
+	}
+}
+
 func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testing.T) {
 	var commands []string
 	var closeForce bool

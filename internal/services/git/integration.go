@@ -243,6 +243,9 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 		"AZEDARACH_MERGE_GATE_BODY=" + filepath.Join(gateRoot, "scripts", "git-merge-rebase-gate-body.sh"),
 		"AZEDARACH_SKIP_MERGE_REBASE_GATE=0",
 	})
+	if issueID := candidateValidationIssue(ctx); issueID != "" {
+		env = gitEnvWithOverrides(env, []string{"AZEDARACH_CANDIDATE_ISSUE_ID=" + issueID})
+	}
 	stdout, stderr, runErr := runProcessGroupCommand(ctx, scratchPath, env, gatePath)
 	if runErr != nil {
 		attempt.Status = CandidateValidationFailed

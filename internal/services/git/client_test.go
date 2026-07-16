@@ -819,10 +819,12 @@ func TestMergeGateFailureSurfacesPublishedArtifactReference(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"), gate, 0o755); err != nil {
 		t.Fatalf("write merge gate: %v", err)
 	}
-	body := "#!/bin/sh\nset -eu\nprintf '[gate] validation_request=req-123 candidate_head=%s failure=example/broken::TestRetained artifacts=/durable/artifacts/req-123\\n' \"$AZEDARACH_CANDIDATE_HEAD\" >\"$AZEDARACH_CANDIDATE_ARTIFACT_RESULT_FILE\"\nexit 1\n"
+	body := "#!/bin/sh\nset -eu\nprintf '[gate] validation_request=req-123 candidate_head=candidate-123 failure=example/broken::TestRetained artifacts=/durable/artifacts/req-123\\n' >\"$AZEDARACH_CANDIDATE_ARTIFACT_RESULT_FILE\"\nexit 1\n"
 	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate-body.sh"), []byte(body), 0o755); err != nil {
 		t.Fatalf("write merge gate body: %v", err)
 	}
+	runGit(t, repo, "add", "scripts")
+	runGit(t, repo, "commit", "-m", "add gate fixture")
 
 	cmd := exec.Command(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"))
 	cmd.Dir = repo
@@ -955,7 +957,7 @@ func TestRealProcessProfileMergeCleanlyTransactionalAppliesScratchMergeToCleanTa
 	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
 		t.Fatalf("mkdir scripts: %v", err)
 	}
-	gate := "#!/bin/sh\nset -eu\nif [ \"${AZEDARACH_SKIP_MERGE_REBASE_GATE:-0}\" = 1 ]; then exit 0; fi\nprintf 'head=%s\\nstatus=%s\\nexpected=%s\\n' \"$(git rev-parse HEAD)\" \"$(git status --porcelain)\" \"${AZEDARACH_CANDIDATE_HEAD:-}\" >\"$AZEDARACH_TEST_GATE_EVIDENCE\"\n"
+	gate := "#!/bin/sh\nset -eu\nif [ \"${AZEDARACH_SKIP_MERGE_REBASE_GATE:-0}\" = 1 ]; then exit 0; fi\nprintf 'head=%s\\nstatus=%s\\nexpected=%s\\nissue=%s\\n' \"$(git rev-parse HEAD)\" \"$(git status --porcelain)\" \"${AZEDARACH_CANDIDATE_HEAD:-}\" \"${AZEDARACH_CANDIDATE_ISSUE_ID:-}\" >\"$AZEDARACH_TEST_GATE_EVIDENCE\"\n"
 	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"), []byte(gate), 0o755); err != nil {
 		t.Fatalf("write candidate gate: %v", err)
 	}
@@ -966,7 +968,8 @@ func TestRealProcessProfileMergeCleanlyTransactionalAppliesScratchMergeToCleanTa
 	t.Setenv("AZEDARACH_SKIP_MERGE_REBASE_GATE", "1")
 
 	client := NewClient(NewExecRunner(repo), slog.Default())
-	result, err := client.MergeCleanlyTransactional(context.Background(), repo, "feature")
+	ctx := WithCandidateValidationIssue(context.Background(), "dov")
+	result, err := client.MergeCleanlyTransactional(ctx, repo, "feature")
 	if err != nil {
 		t.Fatalf("MergeCleanlyTransactional() error = %v", err)
 	}
@@ -991,7 +994,7 @@ func TestRealProcessProfileMergeCleanlyTransactionalAppliesScratchMergeToCleanTa
 	if err != nil {
 		t.Fatalf("read candidate gate evidence: %v", err)
 	}
-	wantEvidence := "head=" + resultHead + "\nstatus=\nexpected=" + resultHead + "\n"
+	wantEvidence := "head=" + resultHead + "\nstatus=\nexpected=" + resultHead + "\nissue=dov\n"
 	if string(evidence) != wantEvidence {
 		t.Fatalf("candidate gate evidence = %q, want %q", evidence, wantEvidence)
 	}
@@ -1067,8 +1070,7 @@ func TestRealProcessProfileMergeCleanlyTransactionalDoesNotGateConflictedCandida
 
 func TestRealProcessProfileMergeCleanlyTransactionalRetainsFailedCandidateArtifactReference(t *testing.T) {
 	repo := initDivergedRepo(t)
-	originalHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
-	artifactDir := filepath.Join(repo, ".azedarach", "validation-artifacts", "failures", "candidate", "request")
+	artifactDir := filepath.Join(repo, ".git", "azedarach-validation-artifacts", "failures", "candidate", "request")
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		t.Fatalf("mkdir durable artifact: %v", err)
 	}
@@ -1085,6 +1087,7 @@ func TestRealProcessProfileMergeCleanlyTransactionalRetainsFailedCandidateArtifa
 	}
 	runClientTestGit(t, repo, "add", "scripts/git-merge-rebase-gate.sh")
 	runClientTestGit(t, repo, "commit", "-q", "-m", "add failing candidate gate")
+	originalHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
 	t.Setenv("AZEDARACH_TEST_ARTIFACT_DIR", artifactDir)
 
 	client := NewClient(NewExecRunner(repo), slog.Default())

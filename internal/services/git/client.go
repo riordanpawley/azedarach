@@ -128,6 +128,7 @@ const (
 )
 
 type candidateValidationObserverKey struct{}
+type candidateValidationIssueKey struct{}
 
 type CandidateValidationObserver func(CandidateValidationAttempt)
 
@@ -139,6 +140,28 @@ func WithCandidateValidationObserver(ctx context.Context, observer CandidateVali
 		return ctx
 	}
 	return context.WithValue(ctx, candidateValidationObserverKey{}, observer)
+}
+
+// WithCandidateValidationIssue binds failed gate artifacts to the issue whose
+// integration requested the exact candidate. The repository gate remains
+// repository-scoped for validation admission; this value is retention metadata.
+func WithCandidateValidationIssue(ctx context.Context, issueID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, candidateValidationIssueKey{}, issueID)
+}
+
+func candidateValidationIssue(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	issueID, _ := ctx.Value(candidateValidationIssueKey{}).(string)
+	return strings.TrimSpace(issueID)
 }
 
 func notifyCandidateValidation(ctx context.Context, attempt CandidateValidationAttempt) {

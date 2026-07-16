@@ -3324,7 +3324,8 @@ func recordTaskCloseHookPhases(ctx context.Context, result *taskCloseResult, log
 func (d *Daemon) mergeTaskBranchBeforeClose(ctx context.Context, projectID, taskID, targetWorktree, targetBranch, sourceBranch string) (*git.MergeResult, error) {
 	var validationAttempts []git.CandidateValidationAttempt
 	for attempt := 1; ; attempt++ {
-		result, err := d.git.MergeCleanlyTransactional(ctx, targetWorktree, sourceBranch)
+		mergeCtx := git.WithCandidateValidationIssue(ctx, taskID)
+		result, err := d.git.MergeCleanlyTransactional(mergeCtx, targetWorktree, sourceBranch)
 		if err != nil {
 			return nil, fmt.Errorf("merge %s into %s: %w", sourceBranch, targetBranch, err)
 		}

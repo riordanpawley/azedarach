@@ -190,6 +190,10 @@ if [[ "${1:-}" == "rev-parse" && "${2:-}" == "--path-format=absolute" && "${3:-}
   printf '%s/.git\n' "${FAKE_GIT_COMMON_ROOT:?}"
   exit 0
 fi
+if [[ "${1:-}" == "rev-parse" && "${2:-}" == "--show-toplevel" ]]; then
+  printf '%s\n' "${FAKE_GIT_COMMON_ROOT:?}"
+  exit 0
+fi
 echo "stub validation git: unsupported arguments: $*" >&2
 exit 1
 EOF
@@ -458,6 +462,10 @@ if [[ "${1:-}" == "rev-parse" && ( "${2:-}" == "--git-dir" || "${3:-}" == "--git
 fi
 if [[ "${1:-}" == "rev-parse" && ( "${2:-}" == "--git-common-dir" || "${3:-}" == "--git-common-dir" ) ]]; then
   printf '%s/.git\n' "${FAKE_GIT_COMMON_ROOT:?}"
+  exit 0
+fi
+if [[ "${1:-}" == "rev-parse" && "${2:-}" == "--show-toplevel" ]]; then
+  printf '%s\n' "${FAKE_GIT_COMMON_ROOT:?}"
   exit 0
 fi
 echo "stub git: unsupported arguments: $*" >&2

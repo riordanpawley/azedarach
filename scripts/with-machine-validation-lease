@@ -2,7 +2,7 @@
 use strict;
 use warnings;
 use Fcntl qw(F_GETFD F_SETFD FD_CLOEXEC);
-use File::Basename qw(basename);
+use File::Basename qw(basename dirname);
 use File::Temp qw(tempfile);
 use File::Path qw(remove_tree);
 use IO::Select;
@@ -186,6 +186,9 @@ $request_id =~ s/[^A-Za-z0-9_.-]/_/g;
 my $git_common_dir = capture($git, 'rev-parse', '--path-format=absolute', '--git-common-dir');
 $git_common_dir =~ s/\s+\z//;
 die "resolve Git common directory for validation admission\n" unless $git_common_dir;
+my $candidate_root = capture($git, 'rev-parse', '--show-toplevel');
+$candidate_root =~ s/\s+\z//;
+my $project_root = dirname($git_common_dir);
 my $production_admission = "$git_common_dir/azedarach-production-admission";
 my $production_owner = "$production_admission/production";
 my $production_epoch_file = "$production_admission/production-epoch";
@@ -461,6 +464,37 @@ if ($production_install_overlapped && $exit_code == 0) {
     $exit_code = 74;
 }
 
+if ($exit_code != 0 && ($ENV{AZEDARACH_CANDIDATE_ARTIFACT_RESULT_FILE} || '') ne '') {
+    my $publisher = "$candidate_root/scripts/publish-validation-artifacts";
+    my @publish = ($publisher,
+        '--project-root', $project_root,
+        '--candidate-root', $candidate_root,
+        '--evidence', $evidence_file,
+        '--gate-output', ($ENV{AZEDARACH_CANDIDATE_GATE_OUTPUT_PATH} || ''),
+        '--request', $request_id,
+        '--revision', $revision,
+        '--exit-code', $exit_code,
+        '--result', $ENV{AZEDARACH_CANDIDATE_ARTIFACT_RESULT_FILE},
+    );
+    my $artifact_issue = $ENV{AZEDARACH_CANDIDATE_ISSUE_ID} || '';
+    push @publish, '--issue', $artifact_issue if $artifact_issue ne '';
+    my $publish_status;
+    {
+        local %ENV = %ENV;
+        delete $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN};
+        $publish_status = system(@publish);
+    }
+    if ($publish_status != 0) {
+        my $detail = $publish_status == -1 ? $! : 'exit ' . wait_status_code($publish_status);
+        warn "failed to publish candidate validation artifacts: $detail\n";
+        if (open my $result, '>', $ENV{AZEDARACH_CANDIDATE_ARTIFACT_RESULT_FILE}) {
+            print {$result} "[gate] validation_request=$request_id candidate_head=$revision failure=artifact-publication-failed:$detail\n";
+            close $result;
+        }
+        clear_validation_report_paths($evidence_file);
+    }
+}
+
 merge_whole_gate_evidence($evidence_file, {
     held => JSON::PP::true, request_id => $request_id, class => $class,
     scope => $scope, purpose => $purpose, execution => 'executed',
@@ -502,6 +536,21 @@ sub read_optional_file {
     close $fh;
     $value =~ s/\s+\z//;
     return $value;
+}
+
+sub clear_validation_report_paths {
+    my ($path) = @_;
+    return unless -s $path;
+    open my $in, '<', $path or return;
+    local $/;
+    my $evidence = eval { decode_json(<$in> // '{}') };
+    close $in;
+    return unless ref($evidence) eq 'HASH';
+    delete $evidence->{report_path};
+    delete $evidence->{report_paths};
+    open my $out, '>', $path or return;
+    print {$out} encode_json($evidence) . "\n";
+    close $out;
 }
 
 sub authorize_nested {
