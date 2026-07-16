@@ -634,10 +634,21 @@ func TestCodexInputGateStartupRecoveryRetriesAtLiveOwnerExpiry(t *testing.T) {
 	}
 	authority.issueClients = func(string) *issues.Client { return client }
 	authority.now = func() time.Time { return now }
-	retryAt := make(chan time.Time, 1)
+	retryAt := make(chan time.Time)
 	releaseRetry := make(chan struct{})
+	recoveryCompleted := make(chan error, 1)
+	var statePath string
+	authority.recoveryDone = func(path string, err error) {
+		if path == statePath {
+			recoveryCompleted <- err
+		}
+	}
 	authority.recoveryWait = func(ctx context.Context, at time.Time) bool {
-		retryAt <- at
+		select {
+		case <-ctx.Done():
+			return false
+		case retryAt <- at:
+		}
 		select {
 		case <-ctx.Done():
 			return false
@@ -654,12 +665,12 @@ func TestCodexInputGateStartupRecoveryRetriesAtLiveOwnerExpiry(t *testing.T) {
 	}
 	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-exact", LeaseOwner: "dead-daemon", FenceToken: lease.LeaseToken, PaneID: "12", PaneInputEnabled: true, HookID: "9137", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
 	raw, _ := json.Marshal(state)
-	statePath := filepath.Join(authority.gateDir, "gate-dead.json")
+	statePath = filepath.Join(authority.gateDir, "gate-dead.json")
 	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(cancel)
 	if err := authority.RecoverStaleGates(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -668,21 +679,24 @@ func TestCodexInputGateStartupRecoveryRetriesAtLiveOwnerExpiry(t *testing.T) {
 		if !scheduled.Equal(lease.LeaseExpires) {
 			t.Fatalf("scheduled retry=%s want lease expiry=%s", scheduled, lease.LeaseExpires)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("expiry-driven recovery was not scheduled")
+	case <-ctx.Done():
+		t.Fatalf("recovery context cancelled before retry scheduling: %v", context.Cause(ctx))
 	}
 	now = lease.LeaseExpires.Add(time.Nanosecond)
 	close(releaseRetry)
-	deadline := time.Now().Add(time.Second)
-	for {
-		if _, err := os.Stat(statePath); errors.Is(err, os.ErrNotExist) {
-			break
+	select {
+	case err := <-recoveryCompleted:
+		if err != nil {
+			t.Fatalf("scheduled recovery: %v", err)
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("scheduled recovery did not restore the expired gate")
-		}
-		time.Sleep(time.Millisecond)
+	case <-ctx.Done():
+		t.Fatalf("recovery context cancelled before completion: %v", context.Cause(ctx))
 	}
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovered state remains: %v", err)
+	}
+	cancel()
+	<-ctx.Done()
 	adapter.mu.Lock()
 	defer adapter.mu.Unlock()
 	if adapter.clients[0].ReadOnly || !adapter.paneEnabled || adapter.hooksEnabled {

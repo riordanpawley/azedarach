@@ -62,6 +62,7 @@ type codexAppServerInputAuthority struct {
 	safetyMargin   time.Duration
 	removeGateFile func(string) error
 	recoveryWait   func(context.Context, time.Time) bool
+	recoveryDone   func(string, error)
 	mu             sync.Mutex
 	sessionMux     map[string]*sync.Mutex
 	recoveryMux    sync.Mutex
@@ -109,7 +110,11 @@ func (a *codexAppServerInputAuthority) scheduleGateRecovery(ctx context.Context,
 		a.recoveryMux.Lock()
 		delete(a.recoveryQueued, statePath)
 		a.recoveryMux.Unlock()
-		if err := a.RecoverStaleGates(ctx); err != nil && a.logger != nil {
+		err := a.RecoverStaleGates(ctx)
+		if a.recoveryDone != nil {
+			a.recoveryDone(statePath, err)
+		}
+		if err != nil && a.logger != nil {
 			a.logger.Warn("retry stale Codex input gate recovery", "gate", filepath.Base(statePath), "error", err)
 		}
 	}()
