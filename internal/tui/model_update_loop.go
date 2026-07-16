@@ -2330,6 +2330,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		}
 		if m.applyTaskEvent(evt) {
 			m.daemonRevision = cursor.Advance(evt).Revision
+			return daemonStreamEventResult{key: daemonStreamCommandIssuesRefresh}
 		}
 		return daemonStreamEventResult{}
 	}

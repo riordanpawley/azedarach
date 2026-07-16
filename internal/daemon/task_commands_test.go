@@ -3777,7 +3777,7 @@ func TestTaskClosePreflightBlocksFiveOpenDescendantsBeforeIntegration(t *testing
 	}
 }
 
-func TestTaskCloseCanAutoCloseCleanUnresolvedChildren(t *testing.T) {
+func TestTaskCloseRejectsCleanUnresolvedChildrenWithoutAutoTerminalizing(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-task-close-clean-children"
 	repoDir := t.TempDir()
@@ -3822,23 +3822,66 @@ func TestTaskCloseCanAutoCloseCleanUnresolvedChildren(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleTaskClose error: %v", err)
 	}
-	if !resp.OK {
-		t.Fatalf("handleTaskClose response = %+v", resp)
-	}
-	var result taskCloseResult
-	if err := json.Unmarshal(resp.Body, &result); err != nil {
-		t.Fatalf("unmarshal close response: %v", err)
-	}
-	if !slices.Contains(result.AutoClosedChildren, childID) {
-		t.Fatalf("auto closed children = %v, want %s", result.AutoClosedChildren, childID)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") {
+		t.Fatalf("handleTaskClose response = %+v, want unresolved child rejection", resp)
 	}
 	for _, issueID := range []string{parentID, childID} {
 		task, err := issuesClient.GetWithRuntime(ctx, projectID, issueID)
 		if err != nil {
 			t.Fatalf("get %s after close: %v", issueID, err)
 		}
-		if task.Status != domain.StatusDone {
-			t.Fatalf("%s status = %s, want %s", issueID, task.Status, domain.StatusDone)
+		if task.Status == domain.StatusDone {
+			t.Fatalf("%s status = %s, want nonterminal unchanged state", issueID, task.Status)
+		}
+	}
+}
+
+func TestTaskCloseNeverAutoTerminalizesDescendants(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-task-close-clean-backlog-descendants"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Backlog child", Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog, ParentID: &parentID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grandchildID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Backlog grandchild", Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog, ParentID: &childID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, hub: publish.NewHub(16, 8, slog.Default()),
+		issueClientsByProject:  map[string]*issues.Client{projectID: issuesClient},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store}, revision: map[string]uint64{},
+	}
+	body, err := json.Marshal(taskCloseRequest{TaskID: parentID, CloseCleanChildren: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "req-close-clean-backlog-descendants", Kind: protocol.EnvelopeKindCommand, Command: "task.close", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") {
+		t.Fatalf("handleTaskClose response = %+v, want unresolved descendant rejection", resp)
+	}
+	for _, issueID := range []string{childID, grandchildID} {
+		task, err := issuesClient.GetWithRuntime(ctx, projectID, issueID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if task.Status != domain.StatusOpen {
+			t.Fatalf("%s status = %s, want open", issueID, task.Status)
 		}
 	}
 }
@@ -3857,7 +3900,7 @@ func TestTaskCloseCleanChildrenDoesNotForceDirtyChildWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create parent: %v", err)
 	}
-	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Child", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &parentID})
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Child", Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog, ParentID: &parentID})
 	if err != nil {
 		t.Fatalf("create child: %v", err)
 	}
@@ -3925,8 +3968,8 @@ func TestTaskCloseCleanChildrenDoesNotForceDirtyChildWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleTaskClose error: %v", err)
 	}
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "worktree has local changes: child.go") {
-		t.Fatalf("handleTaskClose response = %+v, want dirty child worktree guard", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") {
+		t.Fatalf("handleTaskClose response = %+v, want unresolved descendant rejection", resp)
 	}
 	child, err := issuesClient.GetWithRuntime(ctx, projectID, childID)
 	if err != nil {
@@ -3934,6 +3977,9 @@ func TestTaskCloseCleanChildrenDoesNotForceDirtyChildWorktree(t *testing.T) {
 	}
 	if child.Status != domain.StatusOpen {
 		t.Fatalf("child status = %s, want %s", child.Status, domain.StatusOpen)
+	}
+	if child.IssueFacts().LifecycleState != domain.IssueWorkflowOpen {
+		t.Fatalf("child lifecycle = %s, want open", child.IssueFacts().LifecycleState)
 	}
 }
 
@@ -8864,16 +8910,15 @@ func TestTaskGraphReadinessRefreshesNestedRootLifecycleAcrossDaemonClients(t *te
 		t.Fatalf("before nested roots = %+v, want open root startable", before.NestedRoots)
 	}
 	backlog := domain.IssueWorkflowBacklog
-	if err := writer.UpdateDetails(ctx, nestedID, issues.UpdateTaskParams{Title: "ADA", Type: domain.TypeEpic, Priority: domain.P2, Lifecycle: &backlog}); err != nil {
-		t.Fatal(err)
+	if err := writer.UpdateDetails(ctx, nestedID, issues.UpdateTaskParams{Title: "ADA", Type: domain.TypeEpic, Priority: domain.P2, Lifecycle: &backlog}); err == nil || !strings.Contains(err.Error(), "cannot regress to backlog") {
+		t.Fatalf("update nested root = %v, want ancestor lifecycle floor rejection", err)
 	}
-	waitForProjectMaterializerRevision(t, d, "proj", 1)
 	after, err := d.taskGraphReadiness(ctx, "proj", rootID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after.NestedRoots) != 1 || after.NestedRoots[0].Status != "not_counting_capacity" || !slices.Contains(after.NestedRoots[0].ExclusionReasons, "lifecycle-backlog") {
-		t.Fatalf("after nested roots = %+v, want refreshed lifecycle-backlog exclusion", after.NestedRoots)
+	if len(after.NestedRoots) != 1 || after.NestedRoots[0].Status != "startable" {
+		t.Fatalf("after nested roots = %+v, want invariant-preserved startable root", after.NestedRoots)
 	}
 }
 
@@ -13242,8 +13287,8 @@ func TestTaskUpdateStatusRejectsInReviewWithUnreadyChildren(t *testing.T) {
 	}
 
 	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, false)
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "child issues are not review-ready") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") || !strings.Contains(resp.Error.Message, "--cascade-children") {
-		t.Fatalf("task.update_status response = %+v, want child readiness guard", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "all live descendants must be terminal") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") {
+		t.Fatalf("task.update_status response = %+v, want terminal descendant guard", resp)
 	}
 	parent, err := issuesClient.GetWithRuntime(ctx, projectID, parentID)
 	if err != nil {
@@ -13283,8 +13328,8 @@ func TestTaskUpdateStatusRejectsInReviewWithBusyReviewChild(t *testing.T) {
 	})
 
 	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, false)
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "child issues are not review-ready") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") {
-		t.Fatalf("task.update_status response = %+v, want busy in-review child guard", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "all live descendants must be terminal") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") {
+		t.Fatalf("task.update_status response = %+v, want terminal descendant guard", resp)
 	}
 	parent, err := issuesClient.GetWithRuntime(ctx, projectID, parentID)
 	if err != nil {
@@ -13439,7 +13484,7 @@ func TestTaskUpdateStatusAllowsInReviewWithIdleActivity(t *testing.T) {
 	}
 }
 
-func TestTaskUpdateStatusCascadeChildrenMovesNestedDescendantsToInReview(t *testing.T) {
+func TestTaskUpdateStatusCascadeChildrenCannotBypassTerminalDescendantGate(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-review-cascade-children"
 	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
@@ -13468,16 +13513,16 @@ func TestTaskUpdateStatusCascadeChildrenMovesNestedDescendantsToInReview(t *test
 	}
 
 	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, true)
-	if !resp.OK || resp.Error != nil {
-		t.Fatalf("task.update_status response = %+v, want cascade success", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "all live descendants must be terminal") {
+		t.Fatalf("task.update_status response = %+v, want terminal descendant rejection", resp)
 	}
 	for _, id := range []string{parentID, childID, grandchildID} {
 		task, err := issuesClient.GetWithRuntime(ctx, projectID, id)
 		if err != nil {
 			t.Fatalf("get %s: %v", id, err)
 		}
-		if task.Status != domain.StatusInReview {
-			t.Fatalf("%s status = %s, want in_review", id, task.Status)
+		if task.Status == domain.StatusInReview {
+			t.Fatalf("%s status = %s, want unchanged non-review state", id, task.Status)
 		}
 	}
 }
@@ -13511,8 +13556,8 @@ func TestTaskUpdateStatusCascadeChildrenRejectsBusyChildActivity(t *testing.T) {
 	})
 
 	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, true)
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "cascade child "+childID+" to in_review") || !strings.Contains(resp.Error.Message, "session activity is working (source: hooks)") {
-		t.Fatalf("task.update_status response = %+v, want busy child cascade guard", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "all live descendants must be terminal") {
+		t.Fatalf("task.update_status response = %+v, want terminal descendant guard", resp)
 	}
 	for _, id := range []string{parentID, childID} {
 		task, err := issuesClient.GetWithRuntime(ctx, projectID, id)
@@ -13548,7 +13593,7 @@ func TestTaskUpdateStatusReviewGuardHonorsLegacyParentChildDependency(t *testing
 	}
 }
 
-func TestTaskUpdateStatusAllowsInReviewWhenChildrenReviewReady(t *testing.T) {
+func TestTaskUpdateStatusRejectsInReviewWhenChildOnlyReviewReady(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-review-guard-ready"
 	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
@@ -13569,15 +13614,15 @@ func TestTaskUpdateStatusAllowsInReviewWhenChildrenReviewReady(t *testing.T) {
 	}
 
 	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, false)
-	if !resp.OK || resp.Error != nil {
-		t.Fatalf("task.update_status response = %+v, want success", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "all live descendants must be terminal") {
+		t.Fatalf("task.update_status response = %+v, want review-ready child rejection", resp)
 	}
 	parent, err := issuesClient.GetWithRuntime(ctx, projectID, parentID)
 	if err != nil {
 		t.Fatalf("get parent: %v", err)
 	}
-	if parent.Status != domain.StatusInReview {
-		t.Fatalf("parent status = %s, want in_review", parent.Status)
+	if parent.Status == domain.StatusInReview {
+		t.Fatalf("parent status = %s, want unchanged", parent.Status)
 	}
 }
 

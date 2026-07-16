@@ -18,7 +18,7 @@ const (
 	CommandBoardViewDelete     = "board.view.delete"
 	CommandBoardViewSelect     = "board.view.select"
 	EventBoardViewChanged      = "board.view.changed"
-	BoardSnapshotSchemaVersion = 5
+	BoardSnapshotSchemaVersion = 6
 )
 
 // BoardViewChangedEventBody invalidates client board projections after a
@@ -54,10 +54,11 @@ type BoardSnapshotPayload struct {
 }
 
 type BoardViewProjection struct {
-	View         domain.BoardView          `json:"view" msgpack:"view"`
-	Groups       []BoardViewProjectedGroup `json:"groups" msgpack:"groups"`
-	Items        []BoardViewProjectedItem  `json:"items" msgpack:"items"`
-	KnownTaskIDs []naming.IssueID          `json:"known_task_ids,omitempty" msgpack:"known_task_ids,omitempty"`
+	View          domain.BoardView            `json:"view" msgpack:"view"`
+	Groups        []BoardViewProjectedGroup   `json:"groups" msgpack:"groups"`
+	Items         []BoardViewProjectedItem    `json:"items" msgpack:"items"`
+	KnownTaskIDs  []naming.IssueID            `json:"known_task_ids,omitempty" msgpack:"known_task_ids,omitempty"`
+	ChildProgress []domain.BoardChildProgress `json:"child_progress,omitempty" msgpack:"child_progress,omitempty"`
 }
 
 type BoardViewProjectedGroup struct {
@@ -74,8 +75,9 @@ type BoardViewProjectedItem struct {
 
 func BoardViewProjectionFromDomain(projection domain.BoardViewProjection) BoardViewProjection {
 	out := BoardViewProjection{
-		View:         projection.View,
-		KnownTaskIDs: append([]naming.IssueID(nil), projection.KnownTaskIDs...),
+		View:          projection.View,
+		KnownTaskIDs:  append([]naming.IssueID(nil), projection.KnownTaskIDs...),
+		ChildProgress: append([]domain.BoardChildProgress(nil), projection.ChildProgress...),
 	}
 	for _, group := range projection.Groups {
 		out.Groups = append(out.Groups, BoardViewProjectedGroup{GroupID: group.GroupID, TaskIDs: append([]naming.IssueID(nil), group.TaskIDs...)})
@@ -364,6 +366,20 @@ func (p BoardViewProjection) Validate() error {
 			return fmt.Errorf("duplicate known task id %q", id)
 		}
 		known[id] = struct{}{}
+	}
+	progressParents := make(map[string]struct{}, len(p.ChildProgress))
+	for _, progress := range p.ChildProgress {
+		parentID := strings.TrimSpace(progress.ParentID.String())
+		if parentID == "" {
+			return fmt.Errorf("child progress parent id is empty")
+		}
+		if _, exists := progressParents[parentID]; exists {
+			return fmt.Errorf("duplicate child progress parent %q", parentID)
+		}
+		if progress.Total <= 0 || progress.Done < 0 || progress.Done > progress.Total {
+			return fmt.Errorf("invalid child progress for parent %q: done=%d total=%d", parentID, progress.Done, progress.Total)
+		}
+		progressParents[parentID] = struct{}{}
 	}
 	items := make(map[string]BoardViewProjectedItem, len(p.Items))
 	viewGroups := make(map[domain.BoardColumnID]struct{}, len(p.View.Columns))
