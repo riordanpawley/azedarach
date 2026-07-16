@@ -636,13 +636,6 @@ func TestCodexInputGateStartupRecoveryRetriesAtLiveOwnerExpiry(t *testing.T) {
 	authority.now = func() time.Time { return now }
 	retryAt := make(chan time.Time)
 	releaseRetry := make(chan struct{})
-	recoveryCompleted := make(chan error, 1)
-	var statePath string
-	authority.recoveryDone = func(path string, err error) {
-		if path == statePath {
-			recoveryCompleted <- err
-		}
-	}
 	authority.recoveryWait = func(ctx context.Context, at time.Time) bool {
 		select {
 		case <-ctx.Done():
@@ -665,14 +658,18 @@ func TestCodexInputGateStartupRecoveryRetriesAtLiveOwnerExpiry(t *testing.T) {
 	}
 	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-exact", LeaseOwner: "dead-daemon", FenceToken: lease.LeaseToken, PaneID: "12", PaneInputEnabled: true, HookID: "9137", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
 	raw, _ := json.Marshal(state)
-	statePath = filepath.Join(authority.gateDir, "gate-dead.json")
+	statePath := filepath.Join(authority.gateDir, "gate-dead.json")
 	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	if err := authority.RecoverStaleGates(ctx); err != nil {
+	operations, err := authority.recoverStaleGates(ctx)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(operations) != 1 || operations[0].statePath != statePath {
+		t.Fatalf("scheduled recovery operations=%+v, want exact gate %s", operations, statePath)
 	}
 	select {
 	case scheduled := <-retryAt:
@@ -685,12 +682,19 @@ func TestCodexInputGateStartupRecoveryRetriesAtLiveOwnerExpiry(t *testing.T) {
 	now = lease.LeaseExpires.Add(time.Nanosecond)
 	close(releaseRetry)
 	select {
-	case err := <-recoveryCompleted:
+	case err := <-operations[0].done:
 		if err != nil {
 			t.Fatalf("scheduled recovery: %v", err)
 		}
 	case <-ctx.Done():
 		t.Fatalf("recovery context cancelled before completion: %v", context.Cause(ctx))
+	}
+	postRecoveryLease, acquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, "p", "az-dlb", "thread-exact", "completion-observer", now, time.Minute)
+	if err != nil || !acquired {
+		t.Fatalf("completion signalled before recovery lease release: lease=%+v acquired=%v err=%v", postRecoveryLease, acquired, err)
+	}
+	if err := client.ReleaseAgentInputDeliverySessionLease(ctx, "p", "az-dlb", "thread-exact", postRecoveryLease.LeaseToken); err != nil {
+		t.Fatalf("release completion-observer lease: %v", err)
 	}
 	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("recovered state remains: %v", err)
@@ -701,6 +705,32 @@ func TestCodexInputGateStartupRecoveryRetriesAtLiveOwnerExpiry(t *testing.T) {
 	defer adapter.mu.Unlock()
 	if adapter.clients[0].ReadOnly || !adapter.paneEnabled || adapter.hooksEnabled {
 		t.Fatalf("scheduled recovery did not restore gate: pane=%v hooks=%v clients=%+v", adapter.paneEnabled, adapter.hooksEnabled, adapter.clients)
+	}
+}
+
+func TestCodexInputGateScheduledRecoveryCompletionReportsCancellation(t *testing.T) {
+	authority := newCodexAppServerInputAuthority(&fakeCodexInputTmux{}, filepath.Join(t.TempDir(), "daemon.sock"), nil, nil)
+	waiting := make(chan struct{})
+	authority.recoveryWait = func(ctx context.Context, _ time.Time) bool {
+		close(waiting)
+		<-ctx.Done()
+		return false
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	operation, scheduled := authority.scheduleGateRecovery(ctx, "gate-cancelled.json", time.Date(2026, 7, 17, 0, 0, 0, 0, time.UTC))
+	if !scheduled {
+		t.Fatal("recovery was not scheduled")
+	}
+	<-waiting
+	cancel()
+	if err := <-operation.done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("scheduled recovery completion error=%v, want context cancellation", err)
+	}
+	authority.recoveryMux.Lock()
+	_, queued := authority.recoveryQueued[operation.statePath]
+	authority.recoveryMux.Unlock()
+	if queued {
+		t.Fatalf("cancelled recovery remained queued: %s", operation.statePath)
 	}
 }
 
