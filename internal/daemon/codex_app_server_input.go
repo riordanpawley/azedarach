@@ -41,6 +41,7 @@ type codexInputTmux interface {
 	SetPaneInputEnabled(context.Context, string, bool) error
 	PaneInputEnabled(context.Context, string) (bool, error)
 	SetSessionReadOnlyAttachHooks(context.Context, string, string, string, bool) error
+	LockSessionReadOnlyAttachHooks(context.Context, string, string, bool) error
 	ListPaneInfos(context.Context) ([]tmux.PaneInfo, error)
 }
 
@@ -347,9 +348,6 @@ func (a *codexAppServerInputAuthority) recoverSupersededGate(ctx context.Context
 		return errors.New("missing superseded Codex gate request")
 	}
 	previousToken := strings.TrimSpace(request.PreviousSessionLeaseToken)
-	if previousToken == "" {
-		return nil
-	}
 	entries, err := filepath.Glob(filepath.Join(a.gateDir, "gate-*.json"))
 	if err != nil {
 		return fmt.Errorf("%w: enumerate superseded Codex gates: %v", errCodexGateRestoreIncomplete, err)
@@ -358,7 +356,7 @@ func (a *codexAppServerInputAuthority) recoverSupersededGate(ctx context.Context
 		path  string
 		state codexInputGateState
 	}
-	var matched []persistedGate
+	var sessionGates []persistedGate
 	for _, statePath := range entries {
 		raw, readErr := os.ReadFile(statePath)
 		if readErr != nil {
@@ -368,19 +366,29 @@ func (a *codexAppServerInputAuthority) recoverSupersededGate(ctx context.Context
 		if err := json.Unmarshal(raw, &state); err != nil || state.Version != codexInputGateStateVersion || state.ProjectID == "" || state.SessionID == "" || state.AgentIncarnation == "" || state.FenceToken == "" || state.PaneID == "" || state.PanePID <= 0 {
 			return fmt.Errorf("%w: invalid persisted Codex gate during session takeover: %s", errCodexGateRestoreIncomplete, filepath.Base(statePath))
 		}
-		if state.ProjectID == request.Delivery.ProjectID && state.SessionID == request.Delivery.SessionID && state.AgentIncarnation == request.PreviousAgentIncarnation && state.FenceToken == previousToken {
-			matched = append(matched, persistedGate{path: statePath, state: state})
+		if state.ProjectID == request.Delivery.ProjectID && state.SessionID == request.Delivery.SessionID {
+			sessionGates = append(sessionGates, persistedGate{path: statePath, state: state})
 		}
 	}
-	if len(matched) > 1 {
-		return fmt.Errorf("%w: multiple persisted Codex gates matched one superseded session fence", errCodexGateRestoreIncomplete)
+	if previousToken == "" {
+		if len(sessionGates) != 0 {
+			return fmt.Errorf("%w: fresh delivery found %d retained Codex gate marker(s) for the exact session", errCodexGateRestoreIncomplete, len(sessionGates))
+		}
+		return nil
 	}
-	if len(matched) == 1 {
+	if len(sessionGates) != 1 {
+		return fmt.Errorf("%w: session takeover requires exactly one persisted Codex gate marker, found %d", errCodexGateRestoreIncomplete, len(sessionGates))
+	}
+	matched := sessionGates[0]
+	if matched.state.AgentIncarnation != request.PreviousAgentIncarnation || matched.state.FenceToken != previousToken {
+		return fmt.Errorf("%w: persisted Codex gate does not match the superseded session fence", errCodexGateRestoreIncomplete)
+	}
+	{
 		// Restore under the exact old incarnation/token. The durable store has
 		// transferred ownership but deliberately preserved this fence, so a
 		// crash anywhere before marker deletion remains startup-recoverable.
-		state := matched[0].state
-		gate := &codexInputGate{tmux: a.tmux, state: state, statePath: matched[0].path, renewRestoreFence: request.RenewRestoreFence, removeFile: a.removeGateFile}
+		state := matched.state
+		gate := &codexInputGate{tmux: a.tmux, state: state, statePath: matched.path, renewRestoreFence: request.RenewRestoreFence, removeFile: a.removeGateFile}
 		if err := a.validatePersistedGatePaneIdentity(ctx, state); err != nil {
 			return fmt.Errorf("%w: validate superseded Codex gate pane identity: %v", errCodexGateRestoreIncomplete, err)
 		}
@@ -614,7 +622,12 @@ func (g *codexInputGate) Restore(ctx context.Context) error {
 		return err
 	}
 	if err := g.tmux.SetSessionReadOnlyAttachHooks(ctx, g.state.SessionID, g.state.HookID, g.state.EventsPath, false); err != nil {
-		errs = append(errs, err)
+		// A hook that could not be removed may dispatch after restoration.
+		// Retain the native pane fence, marker, and durable lease for recovery.
+		return err
+	}
+	if err := g.tmux.LockSessionReadOnlyAttachHooks(ctx, g.state.HookID, g.state.EventsPath, true); err != nil {
+		return fmt.Errorf("quiesce dispatched input-gate hooks: %w", err)
 	}
 	if err := g.mergeHookEvents(); err != nil {
 		errs = append(errs, err)
@@ -637,6 +650,14 @@ func (g *codexInputGate) Restore(ctx context.Context) error {
 			errs = append(errs, err)
 		}
 	}
+	// Release with an independent bound even if the caller's restore context
+	// expired while flags were being repaired. Leaving a tmux wait-for lock held
+	// would prevent every later recovery attempt from reaching the marker.
+	unlockCtx, cancelUnlock := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+	if err := g.tmux.LockSessionReadOnlyAttachHooks(unlockCtx, g.state.HookID, g.state.EventsPath, false); err != nil {
+		errs = append(errs, fmt.Errorf("release input-gate hook lock: %w", err))
+	}
+	cancelUnlock()
 	if len(errs) == 0 {
 		removeFile := g.removeFile
 		if removeFile == nil {

@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -65,14 +66,19 @@ func TestSessionReadOnlyAttachHooksRecordBeforeGating(t *testing.T) {
 	if err := client.SetSessionReadOnlyAttachHooks(context.Background(), "az-dlb", "9137", "/tmp/gate's.events", true); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.commands) != 2 {
+	if len(runner.commands) != 3 {
 		t.Fatalf("commands = %#v", runner.commands)
 	}
-	for _, command := range runner.commands {
+	if got := runner.commands[0]; len(got) != 4 || got[0] != "set-option" || got[3] != "1" {
+		t.Fatalf("hook generation was not opened first: %#v", got)
+	}
+	for _, command := range runner.commands[1:] {
 		joined := strings.Join(command, " ")
 		if !strings.Contains(joined, "#{q:hook_client}") || !strings.Contains(joined, "#{client_readonly}") ||
 			!strings.Contains(joined, "refresh-client -t") || !strings.Contains(joined, "-f read-only") ||
-			!strings.Contains(joined, "\\\\tcomplete\\\\n") {
+			!strings.Contains(joined, "\\\\tcomplete\\\\n") || !strings.Contains(joined, "wait-for -L az-codex-input-gate-") ||
+			!strings.Contains(joined, "wait-for -U az-codex-input-gate-") || !strings.Contains(joined, "show-options -gqv @az_codex_input_gate_") ||
+			!strings.Contains(joined, "trap") {
 			t.Fatalf("hook does not record and gate client: %s", joined)
 		}
 		recordAt := strings.Index(joined, "printf '%s\\\\t%s\\\\n'")
@@ -81,6 +87,35 @@ func TestSessionReadOnlyAttachHooksRecordBeforeGating(t *testing.T) {
 		if recordAt < 0 || gateAt <= recordAt || completeAt <= gateAt {
 			t.Fatalf("hook does not record, gate, then publish completion: %s", joined)
 		}
+	}
+}
+
+func TestSessionReadOnlyAttachHookLockMatchesInstalledHook(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(runner, slog.Default())
+	if err := client.SetSessionReadOnlyAttachHooks(context.Background(), "az-dlb", "9137", "/tmp/gate.events", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.LockSessionReadOnlyAttachHooks(context.Background(), "9137", "/tmp/gate.events", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.LockSessionReadOnlyAttachHooks(context.Background(), "9137", "/tmp/gate.events", false); err != nil {
+		t.Fatal(err)
+	}
+	lock := sessionReadOnlyAttachHookLock("9137", "/tmp/gate.events")
+	for _, command := range runner.commands[1:3] {
+		if !strings.Contains(strings.Join(command, " "), lock) {
+			t.Fatalf("installed hook does not use lock %q: %#v", lock, command)
+		}
+	}
+	want := [][]string{{"wait-for", "-L", lock}, {"wait-for", "-U", lock}}
+	for i, command := range [][]string{runner.commands[3], runner.commands[4]} {
+		if strings.Join(command, "\x00") != strings.Join(want[i], "\x00") {
+			t.Fatalf("lock command[%d] = %#v, want %#v", i, command, want[i])
+		}
+	}
+	if got := runner.commands[5]; len(got) != 3 || got[0] != "set-option" || got[1] != "-gu" {
+		t.Fatalf("closed hook generation option was not removed: %#v", got)
 	}
 }
 
@@ -174,6 +209,86 @@ func TestRealTmuxSessionReadOnlyAttachHookGatesAndRecordsNewClient(t *testing.T)
 	}
 	if !strings.Contains(string(raw), "\t0\n") {
 		t.Fatalf("original writable flag was not recorded: %q", raw)
+	}
+}
+
+func TestRealTmuxRestoreQuiescesDelayedDispatchedAttachHook(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux unavailable")
+	}
+	if _, err := exec.LookPath("expect"); err != nil {
+		t.Skip("expect unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	socket := "az-input-restore-hook-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	runner := isolatedTmuxRunner{socket: socket}
+	client := NewClient(runner, slog.Default())
+	const readyMarker = "AZEDARACH_RESTORE_READY_9139>"
+	if _, err := runner.Run(ctx, "new-session", "-d", "-s", "gate", "PS1='"+readyMarker+" '; export PS1; exec /bin/sh -i"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = runner.Run(context.Background(), "kill-server") })
+	recordPath := filepath.Join(t.TempDir(), "restore.events")
+	if err := os.WriteFile(recordPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const hookID = "9139"
+	const hookStarted = "az-input-restore-hook-started-9139"
+	const hookCompleted = "az-input-restore-hook-completed-9139"
+	const attachRelease = "az-input-restore-attach-release-9139"
+	lock := sessionReadOnlyAttachHookLock(hookID, recordPath)
+	gateOption := sessionReadOnlyAttachHookGateOption(hookID, recordPath)
+	if _, err := runner.Run(ctx, "set-option", "-gq", gateOption, "1"); err != nil {
+		t.Fatal(err)
+	}
+	release := "tmux wait-for -U " + lock
+	record := "umask 077; tmux wait-for -L " + lock + " || exit 1; trap " + shellSingleQuote(release) + " EXIT; trap 'exit 1' HUP INT TERM; tmux wait-for -S " + hookStarted + "; sleep 0.25; if [ \"$(tmux show-options -gqv " + gateOption + ")\" = 1 ]; then __az_client=#{q:hook_client}; printf '%s\\t%s\\n' \"$__az_client\" #{client_readonly} >> " + shellSingleQuote(recordPath) + "; tmux refresh-client -t \"$__az_client\" -f read-only; printf '\\tcomplete\\n' >> " + shellSingleQuote(recordPath) + "; fi; tmux wait-for -S " + hookCompleted
+	command := "run-shell " + tmuxDoubleQuote(record)
+	for _, hook := range []string{"client-attached", "client-session-changed"} {
+		if _, err := runner.Run(ctx, "set-hook", "-t", "gate", hook+"["+hookID+"]", command); err != nil {
+			t.Fatal(err)
+		}
+	}
+	attachDone := make(chan error, 1)
+	go func() {
+		output, err := runRealTmuxAttachInput(ctx, socket, readyMarker, ":", "", "", attachRelease)
+		if err != nil {
+			err = fmt.Errorf("attach: %w output=%q", err, output)
+		}
+		attachDone <- err
+	}()
+	if _, err := runner.Run(ctx, "wait-for", hookStarted); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SetSessionReadOnlyAttachHooks(ctx, "gate", hookID, recordPath, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.LockSessionReadOnlyAttachHooks(ctx, hookID, recordPath, true); err != nil {
+		t.Fatal(err)
+	}
+	clients, err := client.ListAttachedClients(ctx, "gate")
+	if err != nil || len(clients) != 1 || clients[0].ReadOnly {
+		t.Fatalf("closed generation allowed delayed hook mutation: clients=%+v err=%v", clients, err)
+	}
+	if err := client.LockSessionReadOnlyAttachHooks(ctx, hookID, recordPath, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Run(ctx, "wait-for", hookCompleted); err != nil {
+		t.Fatal(err)
+	}
+	clients, err = client.ListAttachedClients(ctx, "gate")
+	if err != nil || len(clients) != 1 || clients[0].ReadOnly {
+		raw, _ := os.ReadFile(recordPath)
+		option, _ := runner.Run(ctx, "show-options", "-gqv", gateOption)
+		hooks, _ := runner.Run(ctx, "show-hooks", "-t", "gate")
+		t.Fatalf("client became read-only after delayed hook restoration: clients=%+v err=%v ledger=%q option=%q hooks=%q", clients, err, raw, option, hooks)
+	}
+	if _, err := runner.Run(ctx, "wait-for", "-S", attachRelease); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-attachDone; err != nil {
+		t.Fatal(err)
 	}
 }
 

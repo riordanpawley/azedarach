@@ -2,6 +2,8 @@ package tmux
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -127,13 +129,30 @@ func (c *Client) PaneInputEnabled(ctx context.Context, paneID string) (bool, err
 // their prior read-only flag for exact restoration. Callers must hold the
 // pane-wide input fence because run-shell hooks do not preempt client input.
 func (c *Client) SetSessionReadOnlyAttachHooks(ctx context.Context, session, hookID, recordPath string, enabled bool) error {
+	lock := sessionReadOnlyAttachHookLock(hookID, recordPath)
+	gateOption := sessionReadOnlyAttachHookGateOption(hookID, recordPath)
+	gateValue := "1"
+	if !enabled {
+		// Close the generation before removing either hook. A hook already
+		// dispatched on another tmux command queue may acquire the shared lock
+		// after restoration does; it must then observe closed and skip mutation.
+		gateValue = "0"
+	}
+	if _, err := c.runner.Run(ctx, "set-option", "-gq", gateOption, gateValue); err != nil {
+		return &domain.TmuxError{Op: "set-option", Session: session, Err: err}
+	}
 	for _, hook := range []string{"client-attached", "client-session-changed"} {
 		name := hook + "[" + hookID + "]"
 		args := []string{"set-hook", "-t", session}
 		if !enabled {
 			args = append(args, "-u", name)
 		} else {
-			record := "umask 077; __az_client=#{q:hook_client}; printf '%s\\t%s\\n' \"$__az_client\" #{client_readonly} >> " + shellSingleQuote(recordPath) + "; tmux refresh-client -t \"$__az_client\" -f read-only; printf '\\tcomplete\\n' >> " + shellSingleQuote(recordPath)
+			release := "tmux wait-for -U " + lock
+			record := "umask 077; tmux wait-for -L " + lock + " || exit 1; trap " + shellSingleQuote(release) + " EXIT; trap 'exit 1' HUP INT TERM; [ \"$(tmux show-options -gqv " + gateOption + ")\" = 1 ] || exit 0; __az_client=#{q:hook_client}; printf '%s\\t%s\\n' \"$__az_client\" #{client_readonly} >> " + shellSingleQuote(recordPath) + "; tmux refresh-client -t \"$__az_client\" -f read-only; printf '\\tcomplete\\n' >> " + shellSingleQuote(recordPath)
+			// The hook shell owns the tmux-server lock across its final generation
+			// check and mutation. Restoration closes the generation first, then
+			// acquires the same lock: earlier mutations complete before restoration,
+			// while later dispatched shells observe closed and cannot mutate.
 			command := "run-shell " + tmuxDoubleQuote(record)
 			args = append(args, name, command)
 		}
@@ -142,6 +161,36 @@ func (c *Client) SetSessionReadOnlyAttachHooks(ctx context.Context, session, hoo
 		}
 	}
 	return nil
+}
+
+// LockSessionReadOnlyAttachHooks acquires or releases the exact gate's
+// tmux-server lock. Callers remove the hooks before acquiring it and retain it
+// through ledger merge and client restoration, so a dispatched hook cannot
+// apply read-only after restoration completes.
+func (c *Client) LockSessionReadOnlyAttachHooks(ctx context.Context, hookID, recordPath string, locked bool) error {
+	flag := "-L"
+	if !locked {
+		flag = "-U"
+	}
+	if _, err := c.runner.Run(ctx, "wait-for", flag, sessionReadOnlyAttachHookLock(hookID, recordPath)); err != nil {
+		return &domain.TmuxError{Op: "wait-for", Session: hookID, Err: err}
+	}
+	if !locked {
+		if _, err := c.runner.Run(ctx, "set-option", "-gu", sessionReadOnlyAttachHookGateOption(hookID, recordPath)); err != nil {
+			return &domain.TmuxError{Op: "set-option", Session: hookID, Err: err}
+		}
+	}
+	return nil
+}
+
+func sessionReadOnlyAttachHookLock(hookID, recordPath string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(hookID) + "\x00" + strings.TrimSpace(recordPath)))
+	return "az-codex-input-gate-" + hex.EncodeToString(sum[:12])
+}
+
+func sessionReadOnlyAttachHookGateOption(hookID, recordPath string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(hookID) + "\x00" + strings.TrimSpace(recordPath)))
+	return "@az_codex_input_gate_" + hex.EncodeToString(sum[:12])
 }
 
 func shellSingleQuote(value string) string {

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +29,10 @@ type fakeCodexInputTmux struct {
 	maxGates                     int
 	activeGates                  int
 	failDisableHooks             bool
+	failHookLock                 bool
+	hookLockCalls                []bool
+	hookLockAcquireStarted       chan struct{}
+	hookLockAcquireRelease       chan struct{}
 	failDisablePane              bool
 	disablePaneErrorsAfterEffect int
 }
@@ -90,6 +96,24 @@ func (f *fakeCodexInputTmux) SetSessionReadOnlyAttachHooks(_ context.Context, _,
 		}
 	} else if f.activeGates > 0 {
 		f.activeGates--
+	}
+	return nil
+}
+
+func (f *fakeCodexInputTmux) LockSessionReadOnlyAttachHooks(_ context.Context, _, _ string, locked bool) error {
+	f.mu.Lock()
+	f.hookLockCalls = append(f.hookLockCalls, locked)
+	started := f.hookLockAcquireStarted
+	release := f.hookLockAcquireRelease
+	f.mu.Unlock()
+	if f.failHookLock {
+		return errors.New("hook lock failed")
+	}
+	if locked && started != nil {
+		close(started)
+	}
+	if locked && release != nil {
+		<-release
 	}
 	return nil
 }
@@ -677,6 +701,70 @@ func TestCodexInputGateTakeoverFailuresRetainExactRecoveryAuthority(t *testing.T
 	}
 }
 
+func TestCodexInputGateFreshDeliveryRefusesRetainedExactSessionMarker(t *testing.T) {
+	authority := newFakeCodexAuthority(t, &fakeCodexInputTmux{}, &fakeCodexRPC{})
+	if err := os.MkdirAll(authority.gateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-stale", LeaseOwner: "dead", FenceToken: "stale-fence", PaneID: "12", PanePID: 42, HookID: "100", EventsPath: filepath.Join(authority.gateDir, "stale.events"), OriginalReadOnly: map[string]bool{}}
+	raw, _ := json.Marshal(state)
+	if err := os.WriteFile(filepath.Join(authority.gateDir, "gate-stale.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := codexAuthorityRequest()
+	if err := authority.recoverSupersededGate(context.Background(), &request); !errors.Is(err, errCodexGateRestoreIncomplete) {
+		t.Fatalf("fresh delivery retained-marker error = %v", err)
+	}
+}
+
+func TestCodexInputGateTakeoverRefusesMissingMismatchedOrDuplicateSessionMarkers(t *testing.T) {
+	tests := []struct {
+		name   string
+		states []codexInputGateState
+	}{
+		{name: "missing"},
+		{name: "mismatched", states: []codexInputGateState{{AgentIncarnation: "thread-other", FenceToken: "fence-old"}}},
+		{name: "duplicate", states: []codexInputGateState{{AgentIncarnation: "thread-old", FenceToken: "fence-old"}, {AgentIncarnation: "thread-old", FenceToken: "fence-old"}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			authority := newFakeCodexAuthority(t, &fakeCodexInputTmux{}, &fakeCodexRPC{})
+			if err := os.MkdirAll(authority.gateDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for i, partial := range test.states {
+				partial.Version = codexInputGateStateVersion
+				partial.ProjectID = "p"
+				partial.SessionID = "az-dlb"
+				partial.LeaseOwner = "dead"
+				partial.PaneID = "12"
+				partial.PanePID = 42
+				partial.HookID = strconv.Itoa(100 + i)
+				partial.EventsPath = filepath.Join(authority.gateDir, fmt.Sprintf("gate-%d.events", i))
+				partial.OriginalReadOnly = map[string]bool{}
+				raw, _ := json.Marshal(partial)
+				if err := os.WriteFile(filepath.Join(authority.gateDir, fmt.Sprintf("gate-%d.json", i)), raw, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			completed := false
+			request := codexAuthorityRequest()
+			request.PreviousAgentIncarnation = "thread-old"
+			request.PreviousSessionLeaseToken = "fence-old"
+			request.CompleteSessionTakeover = func(context.Context) (issues.AgentInputDeliverySessionLease, error) {
+				completed = true
+				return issues.AgentInputDeliverySessionLease{}, nil
+			}
+			if err := authority.recoverSupersededGate(context.Background(), &request); !errors.Is(err, errCodexGateRestoreIncomplete) {
+				t.Fatalf("takeover marker error = %v", err)
+			}
+			if completed {
+				t.Fatal("takeover completed behind invalid marker inventory")
+			}
+		})
+	}
+}
+
 func TestCodexInputGateRestoresNewReadOnlyAttachFromHookLedger(t *testing.T) {
 	adapter := &fakeCodexInputTmux{paneEnabled: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty-old", SessionName: "az-dlb"}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
 	authority := newFakeCodexAuthority(t, adapter, &fakeCodexRPC{})
@@ -698,6 +786,47 @@ func TestCodexInputGateRestoresNewReadOnlyAttachFromHookLedger(t *testing.T) {
 	defer adapter.mu.Unlock()
 	if adapter.clients[1].ReadOnly {
 		t.Fatalf("new writable attach was not restored: %+v", adapter.clients)
+	}
+}
+
+func TestCodexInputGateRestoreWaitsForDispatchedHookBeforeMergingLedger(t *testing.T) {
+	adapter := &fakeCodexInputTmux{paneEnabled: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty-old", SessionName: "az-dlb"}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
+	authority := newFakeCodexAuthority(t, adapter, &fakeCodexRPC{})
+	gate, err := authority.acquireGate(context.Background(), codexAuthorityRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.mu.Lock()
+	adapter.hookLockAcquireStarted = make(chan struct{})
+	adapter.hookLockAcquireRelease = make(chan struct{})
+	started := adapter.hookLockAcquireStarted
+	release := adapter.hookLockAcquireRelease
+	recordPath := adapter.recordPath
+	adapter.mu.Unlock()
+	restored := make(chan error, 1)
+	go func() { restored <- gate.Restore(context.Background()) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("restore did not enter hook quiescence boundary")
+	}
+	adapter.mu.Lock()
+	adapter.clients = append(adapter.clients, tmux.AttachedClientInfo{ClientName: "tty-late", SessionName: "az-dlb", ReadOnly: true})
+	adapter.mu.Unlock()
+	if err := os.WriteFile(recordPath, []byte("tty-late\t0\n\tcomplete\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-restored; err != nil {
+		t.Fatal(err)
+	}
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	if adapter.clients[1].ReadOnly {
+		t.Fatalf("late dispatched hook won after restoration: %+v", adapter.clients)
+	}
+	if len(adapter.hookLockCalls) != 2 || !adapter.hookLockCalls[0] || adapter.hookLockCalls[1] {
+		t.Fatalf("hook lock calls = %v, want acquire then release", adapter.hookLockCalls)
 	}
 }
 

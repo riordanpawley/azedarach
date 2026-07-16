@@ -47,9 +47,18 @@ pane fails closed, retains both the diagnostic marker and its recovery mapping,
 and cannot recreate authority. An incarnation takeover likewise preserves the
 old fence until its predecessor gate is restored and its completion marker is
 removed, then CAS-rotates to the new incarnation/token before installing a new
-gate. Crashes before, during, or after restoration therefore leave either the
+gate. Fresh delivery first requires zero retained markers for the exact
+project/session; takeover requires exactly one marker matching the preserved
+incarnation/token. Missing, mismatched, or duplicate marker inventory fails
+closed before any new gate is installed. Crashes before, during, or after
+restoration therefore leave either the
 old recoverable mapping or the completed new fence, never a marker without
-durable authority. Restoration
+durable authority. Restoration closes a gate-generation option before removing
+the hooks, then holds a gate-specific tmux server lock while merging the event
+ledger and restoring client flags. Hook shells hold the same lock across their
+final generation check and read-only mutation, so a previously dispatched hook
+either completes before restoration or observes the closed generation and
+cannot mutate afterward. Restoration
 deletes the event ledger first and the durable state file last; that state file
 is the authoritative completion marker, so any cleanup failure retains the
 exact session fence. Prompt and composer content are never written to gate
