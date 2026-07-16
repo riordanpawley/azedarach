@@ -440,7 +440,7 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 			})
 			active = active || newlyActive
 			if response.Outcome == "not_ready" && clientState.Pending[delivery.envelope.IntentKey+"\x00"+incarnation] != "" {
-				fmt.Fprintln(os.Stderr, "\nCodex submission state is ambiguous; automatic retry is disabled. Inspect the Codex thread and explicitly recover or discard the pending inbox intent.")
+				fmt.Fprintf(os.Stderr, "\nCodex submission ambiguous for intent %q, thread %q; automatic retry disabled. Inspect the thread, then run: az ai native-codex-client --recover-intent %s --recover-thread %s --recover-action delivered|discard\n", delivery.envelope.IntentKey, threadID, delivery.envelope.IntentKey, threadID)
 			}
 			if newlyActive {
 				signalActivity("user_prompt_submit")

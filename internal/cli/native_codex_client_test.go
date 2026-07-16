@@ -64,6 +64,41 @@ func TestAcceptNativeCodexDeliveryPersistsPendingBeforeSubmitFailure(t *testing.
 	}
 }
 
+func TestRecoverNativeCodexIntentRequiresValidExactState(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, ".azedarach", "native-agent-input")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "s.json"), []byte("bad"), 0600); err == nil {
+		if RecoverNativeCodexIntent(dir, "s", "i", "discard", "t") == nil {
+			t.Fatal("corrupt recovery state accepted")
+		}
+	}
+	path := filepath.Join(stateDir, "s.json")
+	state := nativeCodexState{Incarnation: "inc", ThreadID: "thread", Pending: map[string]string{"i\x00inc": "msg"}, Accepted: map[string]string{}, Resolved: map[string]string{}}
+	if err := saveNativeCodexState(path, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecoverNativeCodexIntent(dir, "s", "i", "discard", "wrong"); err == nil {
+		t.Fatal("thread mismatch accepted")
+	}
+	if err := RecoverNativeCodexIntent(dir, "s", "i", "discard", "thread"); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := loadNativeCodexState(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(reloaded.Resolved["i\x00inc"], "discarded:") {
+		t.Fatalf("resolution=%q", reloaded.Resolved["i\x00inc"])
+	}
+	response, _ := acceptNativeCodexDelivery(nativeCodexEnvelope{IntentKey: "i", AgentIncarnation: "inc"}, nil, false, path, &reloaded, func(string) error { t.Fatal("discard resubmitted"); return nil })
+	if response.Outcome != "accepted" || response.AcknowledgementToken == "" {
+		t.Fatalf("response=%+v", response)
+	}
+}
+
 func TestCodexRPCPreservesStringAndNumericServerRequestIDs(t *testing.T) {
 	c := &codexRPCClient{waits: map[string]chan codexRPCMessage{}, requests: make(chan codexRPCMessage, 2), events: make(chan codexRPCMessage, 2), done: make(chan struct{})}
 	done := make(chan struct{})

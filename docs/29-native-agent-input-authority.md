@@ -40,6 +40,11 @@ client surfaces an explicit recovery action to inspect the thread and recover
 or discard the intent. Disconnects, timeouts, malformed responses, and refusal
 outcomes leave it queued (or mark an explicitly stale incarnation).
 
+Recovery is restricted to the same managed worktree/session and exact persisted
+thread/incarnation. After inspecting the thread, run `az ai native-codex-client
+--recover-intent <intent> --recover-thread <thread> --recover-action
+delivered|discard`. Both actions are audited and never submit to Codex.
+
 Frames are newline-delimited JSON, protocol version 1, with a 4 MiB maximum.
 The socket is mode `0600`; protocol peers are trusted components running as the
 same OS user, not a cross-user security boundary.
