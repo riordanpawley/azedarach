@@ -65,6 +65,40 @@ func TestAcceptNativeCodexDeliveryPersistsPendingBeforeSubmitFailure(t *testing.
 	}
 }
 
+func TestAcceptNativeCodexDeliveryActiveDoesNotPoisonRetry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	state, _ := loadNativeCodexState(path, false)
+	env := nativeCodexEnvelope{IntentKey: "active", AgentIncarnation: state.Incarnation}
+	calls := 0
+	r, _ := acceptNativeCodexDelivery(env, nil, true, path, &state, func(string) error { calls++; return nil })
+	if r.Outcome != "not_ready" || len(state.Pending) != 0 || calls != 0 {
+		t.Fatalf("response=%+v pending=%v calls=%d", r, state.Pending, calls)
+	}
+	r, active := acceptNativeCodexDelivery(env, nil, false, path, &state, func(string) error { calls++; return nil })
+	if r.Outcome != "accepted" || !active || calls != 1 {
+		t.Fatalf("response=%+v active=%v calls=%d", r, active, calls)
+	}
+}
+
+func TestStrictNativeCodexStateDoesNotMutate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.json")
+	if _, err := strictNativeCodexState(path); err == nil {
+		t.Fatal("missing state accepted")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("state mutated: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("corrupt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := strictNativeCodexState(path); err == nil {
+		t.Fatal("corrupt state accepted")
+	}
+	if raw, _ := os.ReadFile(path); string(raw) != "corrupt" {
+		t.Fatalf("state overwritten: %q", raw)
+	}
+}
+
 func TestRecoverNativeCodexIntentRequiresValidExactState(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, ".azedarach", "native-agent-input")
@@ -166,6 +200,12 @@ func TestCodexRPCDisconnectBroadcastsToCallAndObservers(t *testing.T) {
 	}
 	if err := c.call(context.Background(), "turn/start", nil, nil); err == nil {
 		t.Fatal("subsequent call did not fail")
+	}
+	c.waitMu.Lock()
+	pending := len(c.waits)
+	c.waitMu.Unlock()
+	if pending != 0 {
+		t.Fatalf("waiters leaked: %d", pending)
 	}
 }
 

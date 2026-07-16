@@ -186,6 +186,9 @@ func (c *codexRPCClient) call(ctx context.Context, method string, params any, re
 		}
 		return nil
 	case <-c.done:
+		c.waitMu.Lock()
+		delete(c.waits, string(idBytes))
+		c.waitMu.Unlock()
 		c.termMu.RLock()
 		defer c.termMu.RUnlock()
 		return c.terminalErr
@@ -273,12 +276,9 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 		return err
 	}
 	if opts.Resume {
-		raw, readErr := os.ReadFile(statePath)
-		if readErr != nil {
-			return fmt.Errorf("read resume state: %w", readErr)
-		}
-		if json.Unmarshal(raw, &clientState) != nil || clientState.Incarnation == "" || clientState.ThreadID == "" {
-			return errors.New("resume state is missing or corrupt")
+		clientState, err = strictNativeCodexState(statePath)
+		if err != nil {
+			return err
 		}
 	}
 	incarnation := clientState.Incarnation
@@ -471,6 +471,18 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 	}
 }
 
+func strictNativeCodexState(path string) (nativeCodexState, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nativeCodexState{}, fmt.Errorf("read resume state: %w", err)
+	}
+	var state nativeCodexState
+	if json.Unmarshal(raw, &state) != nil || state.Incarnation == "" || state.ThreadID == "" {
+		return nativeCodexState{}, errors.New("resume state is missing or corrupt")
+	}
+	return state, nil
+}
+
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 
 // RecoverNativeCodexIntent resolves an ambiguous pending submission without
@@ -561,6 +573,10 @@ func acceptNativeCodexDelivery(envelope nativeCodexEnvelope, composer []byte, ac
 		response.Outcome = "composer_nonempty"
 		return response, false
 	}
+	if active {
+		response.Outcome = "not_ready"
+		return response, false
+	}
 	messageID := state.Pending[key]
 	if messageID == "" {
 		messageID = envelope.IntentKey + ":" + envelope.AgentIncarnation
@@ -571,7 +587,7 @@ func acceptNativeCodexDelivery(envelope nativeCodexEnvelope, composer []byte, ac
 			return response, false
 		}
 	}
-	if active || submit(messageID) != nil {
+	if submit(messageID) != nil {
 		response.Outcome = "not_ready"
 		return response, false
 	}
