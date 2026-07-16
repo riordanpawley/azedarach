@@ -198,7 +198,8 @@ export AZEDARACH_VALIDATION_GIT_BIN="$fixture/fake-bin/validation-git"
 
 repository_payload="$fixture/repository-payload-ran"
 env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
-  -u AZEDARACH_VALIDATION_LEASE_TOKEN -u AZEDARACH_TICKET_ID -u AZEDARACH_ISSUE_ID \
+	-u AZEDARACH_VALIDATION_LEASE_TOKEN -u AZEDARACH_VALIDATION_SCOPE -u AZEDARACH_VALIDATION_PURPOSE \
+	-u AZEDARACH_TICKET_ID -u AZEDARACH_ISSUE_ID \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
   FAKE_AZ_REQUIRE_REPOSITORY=1 \
   "$fixture/scripts/with-machine-validation-lease" --class aggregate --profile repository-push -- \
