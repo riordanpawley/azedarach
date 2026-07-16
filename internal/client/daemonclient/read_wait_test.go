@@ -10,6 +10,12 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
+	"github.com/riordanpawley/azedarach/internal/observability"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 type readWaitDeadlineTransport struct {
@@ -110,6 +116,16 @@ func TestListTasksSnapshotWithModeUsesLongerExplicitBudget(t *testing.T) {
 }
 
 func TestListTasksSnapshotWithModeReturnsTimeoutError(t *testing.T) {
+	t.Setenv(latencytrace.EnvVar, "")
+	t.Setenv(observability.EnvVar, "true")
+	latencytrace.SetConfigEnabled(false)
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(oteltrace.NewNoopTracerProvider())
+		latencytrace.SetConfigEnabled(false)
+	})
 	client := New(blockingReadTransport{}).
 		WithProjectID("proj-read").
 		WithReadWaitPolicy(ReadWaitPolicy{
@@ -130,5 +146,23 @@ func TestListTasksSnapshotWithModeReturnsTimeoutError(t *testing.T) {
 	}
 	if timeoutErr.Hint == "" || !strings.Contains(timeoutErr.Hint, "keeping current local view") {
 		t.Fatalf("timeout hint = %q, want local-view freshness hint", timeoutErr.Hint)
+	}
+	var timeoutSpan sdktrace.ReadOnlySpan
+	for _, span := range recorder.Ended() {
+		if span.Name() == "daemonclient.task_snapshot.timeout" {
+			timeoutSpan = span
+		}
+	}
+	if timeoutSpan == nil {
+		t.Fatalf("timeout span missing; ended=%d", len(recorder.Ended()))
+	}
+	attrs := map[string]bool{}
+	for _, attr := range timeoutSpan.Attributes() {
+		attrs[string(attr.Key)] = true
+	}
+	for _, key := range []string{"component", "phase", "command", "outcome", "error"} {
+		if !attrs[key] {
+			t.Fatalf("timeout span missing attribute %q", key)
+		}
 	}
 }

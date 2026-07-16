@@ -54,11 +54,18 @@ func TestRealProjectOperationsDatabaseMigrationClones(t *testing.T) {
 				t.Fatal(err)
 			}
 			var checksum string
-			if err = store.db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, "daemon_operations_0003_validation_leases").Scan(&checksum); err != nil {
+			if err = store.db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, "daemon_operations_0004_review_validation_assignment").Scan(&checksum); err != nil {
 				t.Fatal(err)
 			}
-			if checksum != "317c9ea680d378637b417005ccfcf0d989e4c025cbbacabdd581f00dafac19df" {
-				t.Fatalf("validation migration checksum = %q", checksum)
+			if checksum != "6f5d54a3f27937ae9adcdd6a0b3f9b79ddd2814f32635eb2c3e5ca051c3268ca" {
+				t.Fatalf("review assignment migration checksum = %q", checksum)
+			}
+			var assignmentColumns int
+			if err = store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_validation_requests') WHERE name IN ('reviewer_id','review_epoch_event_id')`).Scan(&assignmentColumns); err != nil {
+				t.Fatal(err)
+			}
+			if assignmentColumns != 2 {
+				t.Fatalf("review assignment columns = %d, want 2", assignmentColumns)
 			}
 			var objects, afterOperations int
 			if err = store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name IN (
@@ -86,7 +93,7 @@ func TestRealProjectOperationsDatabaseMigrationClones(t *testing.T) {
 				t.Fatal(err)
 			}
 			var ledgerRows int
-			if err = reopened.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, "daemon_operations_0003_validation_leases", checksum).Scan(&ledgerRows); err != nil {
+			if err = reopened.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, "daemon_operations_0004_review_validation_assignment", checksum).Scan(&ledgerRows); err != nil {
 				t.Fatal(err)
 			}
 			if ledgerRows != 1 {
@@ -277,6 +284,130 @@ func TestValidationLeaseMigrationRejectsAppliedSchemaDrift(t *testing.T) {
 
 	reopened := NewAtPath(dbPath, slog.Default())
 	if _, err := reopened.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err == nil || !strings.Contains(err.Error(), "missing trigger daemon_validation_requests_update_revision") {
+		t.Fatalf("schema drift error = %v", err)
+	}
+	_ = reopened.Close()
+}
+
+func TestReviewValidationAssignmentMigrationUpgradesReopensAndPreservesRows(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TABLE schema_migrations(id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, artifact_checksum TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	for i, migration := range orderedMigrations[:3] {
+		sqlText, loadErr := loadMigrationSQL(migration.path)
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		if _, err = db.Exec(sqlText); err != nil {
+			t.Fatalf("apply migration %s: %v", migration.id, err)
+		}
+		if _, err = db.Exec(`INSERT INTO schema_migrations(id,applied_at,artifact_checksum) VALUES(?, 'historical', ?)`, migration.id, migrationArtifacts[i].Checksum); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = db.Exec(`INSERT INTO daemon_validation_requests(request_id,lease_token_hash,project_id,issue_id,class,profile,command,source_revision,state,queued_at) VALUES('legacy', ?, 'project', 'dki', 'aggregate', 'cold', 'just test', 'candidate-a', 'failed', '2026-07-15T00:00:00Z')`, strings.Repeat("a", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	for pass := 1; pass <= 2; pass++ {
+		store := NewAtPath(dbPath, slog.Default())
+		if _, err = store.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err != nil {
+			t.Fatalf("open %d: %v", pass, err)
+		}
+		var reviewer string
+		var epoch, ledgerRows int64
+		if err = store.db.QueryRow(`SELECT reviewer_id,review_epoch_event_id FROM daemon_validation_requests WHERE request_id='legacy'`).Scan(&reviewer, &epoch); err != nil {
+			t.Fatal(err)
+		}
+		if reviewer != "" || epoch != 0 {
+			t.Fatalf("legacy assignment = %q/%d, want empty/0", reviewer, epoch)
+		}
+		if err = store.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, migrationArtifacts[3].ID, migrationArtifacts[3].Checksum).Scan(&ledgerRows); err != nil {
+			t.Fatal(err)
+		}
+		if ledgerRows != 1 {
+			t.Fatalf("migration ledger rows = %d, want 1", ledgerRows)
+		}
+		if err = store.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestReviewValidationAssignmentMigrationRollsBackAndRejectsDrift(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TABLE schema_migrations(id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, artifact_checksum TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	for i, migration := range orderedMigrations[:3] {
+		sqlText, loadErr := loadMigrationSQL(migration.path)
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		if _, err = db.Exec(sqlText); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.Exec(`INSERT INTO schema_migrations(id,applied_at,artifact_checksum) VALUES(?, 'historical', ?)`, migration.id, migrationArtifacts[i].Checksum); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = db.Exec(`CREATE TRIGGER reject_review_assignment_ledger BEFORE INSERT ON schema_migrations WHEN NEW.id='daemon_operations_0004_review_validation_assignment' BEGIN SELECT RAISE(ABORT, 'injected review assignment ledger failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	failed := NewAtPath(dbPath, slog.Default())
+	if _, err = failed.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err == nil || !strings.Contains(err.Error(), "injected review assignment ledger failure") {
+		t.Fatalf("migration error = %v", err)
+	}
+	_ = failed.Close()
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var columns, ledgerRows int
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_validation_requests') WHERE name IN ('reviewer_id','review_epoch_event_id')`).Scan(&columns); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='daemon_operations_0004_review_validation_assignment'`).Scan(&ledgerRows); err != nil {
+		t.Fatal(err)
+	}
+	if columns != 0 || ledgerRows != 0 {
+		t.Fatalf("failed migration residue columns=%d ledger=%d", columns, ledgerRows)
+	}
+	if _, err = raw.Exec(`DROP TRIGGER reject_review_assignment_ledger`); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	retried := NewAtPath(dbPath, slog.Default())
+	if _, err = retried.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = retried.db.Exec(`ALTER TABLE daemon_validation_requests RENAME COLUMN reviewer_id TO reviewer_id_drift`); err != nil {
+		t.Fatal(err)
+	}
+	if err = retried.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := NewAtPath(dbPath, slog.Default())
+	if _, err = reopened.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err == nil || !strings.Contains(err.Error(), "reviewer_id text not null default ''") {
 		t.Fatalf("schema drift error = %v", err)
 	}
 	_ = reopened.Close()

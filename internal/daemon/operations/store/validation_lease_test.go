@@ -38,7 +38,8 @@ func TestValidationLeaseSerializesAggregateAndPreservesSharedConcurrency(t *test
 	assert.Equal(t, domain.ValidationRequestActive, acquire(storeA, "shared-a", domain.ValidationClassShared).State)
 	assert.Equal(t, domain.ValidationRequestActive, acquire(storeB, "shared-b", domain.ValidationClassShared).State)
 	assert.Equal(t, domain.ValidationRequestQueued, acquire(storeA, "aggregate", domain.ValidationClassAggregate).State)
-	assert.Equal(t, domain.ValidationRequestQueued, acquire(storeB, "shared-late", domain.ValidationClassShared).State, "later shared work must not starve queued aggregate")
+	assert.Equal(t, domain.ValidationRequestActive, acquire(storeB, "shared-late", domain.ValidationClassShared).State, "queued aggregate must not convoy later focused work")
+	assert.Equal(t, domain.ValidationRequestQueued, acquire(storeA, "shared-bounded", domain.ValidationClassShared).State, "only one focused request may bypass the oldest aggregate")
 	assert.Equal(t, domain.ValidationRequestActive, acquire(storeB, "safe", domain.ValidationClassSafe).State)
 
 	_, err := storeA.FinishValidation(ctx, "shared-a", testValidationToken, domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{}, now.Add(time.Second), ttl)
@@ -47,14 +48,86 @@ func TestValidationLeaseSerializesAggregateAndPreservesSharedConcurrency(t *test
 	require.NoError(t, err)
 	snapshot, err := storeA.ValidationSnapshot(ctx, "project", now.Add(2*time.Second), ttl)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"aggregate", "safe"}, validationRequestIDs(snapshot.Active))
-	assert.Equal(t, []string{"shared-late"}, validationRequestIDs(snapshot.Queued))
+	assert.Equal(t, []string{"shared-late", "safe"}, validationRequestIDs(snapshot.Active))
+	assert.Equal(t, []string{"aggregate", "shared-bounded"}, validationRequestIDs(snapshot.Queued))
 
-	_, err = storeA.FinishValidation(ctx, "aggregate", testValidationToken, domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{}, now.Add(3*time.Second), ttl)
+	_, err = storeB.FinishValidation(ctx, "shared-late", testValidationToken, domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{}, now.Add(3*time.Second), ttl)
 	require.NoError(t, err)
 	snapshot, err = storeB.ValidationSnapshot(ctx, "project", now.Add(3*time.Second), ttl)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"shared-late", "safe"}, validationRequestIDs(snapshot.Active))
+	assert.Equal(t, []string{"aggregate", "safe"}, validationRequestIDs(snapshot.Active))
+	assert.Equal(t, []string{"shared-bounded"}, validationRequestIDs(snapshot.Queued))
+
+	_, err = storeA.FinishValidation(ctx, "aggregate", testValidationToken, domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{}, now.Add(4*time.Second), ttl)
+	require.NoError(t, err)
+	snapshot, err = storeA.ValidationSnapshot(ctx, "project", now.Add(4*time.Second), ttl)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"shared-bounded", "safe"}, validationRequestIDs(snapshot.Active))
+}
+
+func TestValidationLeaseSharedBypassBoundSurvivesStoreReplacement(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "project.db")
+	now := time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC)
+	ttl := time.Minute
+	request := func(id string, class domain.ValidationClass) domain.ValidationAcquire {
+		return domain.ValidationAcquire{RequestID: id, LeaseToken: testValidationToken, ProjectID: "project", IssueID: id, Class: class, Profile: id, Command: "go test", SourceRevision: "abc123", TTL: ttl}
+	}
+
+	first := NewAtPath(path, nil)
+	owner, err := first.AcquireValidation(ctx, request("owner", domain.ValidationClassShared), now)
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationRequestActive, owner.State)
+	waiter, err := first.AcquireValidation(ctx, request("aggregate", domain.ValidationClassAggregate), now.Add(time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationRequestQueued, waiter.State)
+	bypass, err := first.AcquireValidation(ctx, request("bypass", domain.ValidationClassShared), now.Add(2*time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationRequestActive, bypass.State)
+	require.NoError(t, first.Close())
+
+	restarted := NewAtPath(path, nil)
+	t.Cleanup(func() { _ = restarted.Close() })
+	bounded, err := restarted.AcquireValidation(ctx, request("bounded", domain.ValidationClassShared), now.Add(3*time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationRequestQueued, bounded.State)
+
+	_, err = restarted.FinishValidation(ctx, "owner", testValidationToken, domain.ValidationRequestCancelled, "cancelled", domain.ValidationEvidence{}, now.Add(4*time.Second), ttl)
+	require.NoError(t, err)
+	_, err = restarted.FinishValidation(ctx, "bypass", testValidationToken, domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{}, now.Add(5*time.Second), ttl)
+	require.NoError(t, err)
+	snapshot, err := restarted.ValidationSnapshot(ctx, "project", now.Add(5*time.Second), ttl)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"aggregate"}, validationRequestIDs(snapshot.Active))
+	assert.Equal(t, []string{"bounded"}, validationRequestIDs(snapshot.Queued))
+}
+
+func TestValidationLeaseCancellingQueuedAggregateReopensSharedAdmission(t *testing.T) {
+	ctx := context.Background()
+	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC)
+	ttl := time.Minute
+	request := func(id string, class domain.ValidationClass) domain.ValidationAcquire {
+		return domain.ValidationAcquire{RequestID: id, LeaseToken: testValidationToken, ProjectID: "project", IssueID: id, Class: class, Profile: id, Command: "go test", SourceRevision: "abc123", TTL: ttl}
+	}
+
+	_, err := store.AcquireValidation(ctx, request("owner", domain.ValidationClassShared), now)
+	require.NoError(t, err)
+	_, err = store.AcquireValidation(ctx, request("aggregate", domain.ValidationClassAggregate), now.Add(time.Second))
+	require.NoError(t, err)
+	_, err = store.AcquireValidation(ctx, request("bypass", domain.ValidationClassShared), now.Add(2*time.Second))
+	require.NoError(t, err)
+	bounded, err := store.AcquireValidation(ctx, request("bounded", domain.ValidationClassShared), now.Add(3*time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationRequestQueued, bounded.State)
+
+	_, err = store.FinishValidation(ctx, "aggregate", testValidationToken, domain.ValidationRequestCancelled, "cancelled while queued", domain.ValidationEvidence{}, now.Add(4*time.Second), ttl)
+	require.NoError(t, err)
+	snapshot, err := store.ValidationSnapshot(ctx, "project", now.Add(4*time.Second), ttl)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"owner", "bypass", "bounded"}, validationRequestIDs(snapshot.Active))
+	assert.Empty(t, snapshot.Queued)
 }
 
 func TestValidationLeaseConcurrentDaemonsActivateExactlyOneAggregate(t *testing.T) {
@@ -96,6 +169,52 @@ func TestValidationLeaseConcurrentDaemonsActivateExactlyOneAggregate(t *testing.
 	}
 	assert.Equal(t, 1, states[domain.ValidationRequestActive])
 	assert.Equal(t, 1, states[domain.ValidationRequestQueued])
+}
+
+func TestValidationLeaseConcurrentStoresAdmitExactlyOneSharedBypass(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "project.db")
+	stores := []*SQLiteStore{NewAtPath(path, nil), NewAtPath(path, nil), NewAtPath(path, nil)}
+	t.Cleanup(func() {
+		for _, store := range stores {
+			_ = store.Close()
+		}
+	})
+	now := time.Now().UTC()
+	request := func(id string, class domain.ValidationClass) domain.ValidationAcquire {
+		return domain.ValidationAcquire{RequestID: id, LeaseToken: testValidationToken, ProjectID: "project", IssueID: id, Class: class, Profile: id, Command: "go test", SourceRevision: "abc123", TTL: time.Minute}
+	}
+	_, err := stores[0].AcquireValidation(ctx, request("owner", domain.ValidationClassShared), now)
+	require.NoError(t, err)
+	queued, err := stores[0].AcquireValidation(ctx, request("aggregate", domain.ValidationClassAggregate), now)
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationRequestQueued, queued.State)
+
+	start := make(chan struct{})
+	results := make(chan domain.ValidationRequest, len(stores))
+	errs := make(chan error, len(stores))
+	var ready sync.WaitGroup
+	ready.Add(len(stores))
+	for i, store := range stores {
+		go func(i int, store *SQLiteStore) {
+			ready.Done()
+			<-start
+			result, acquireErr := store.AcquireValidation(ctx, request(fmt.Sprintf("shared-%d", i), domain.ValidationClassShared), now.Add(time.Second))
+			results <- result
+			errs <- acquireErr
+		}(i, store)
+	}
+	ready.Wait()
+	close(start)
+	for range stores {
+		require.NoError(t, <-errs)
+	}
+	states := map[domain.ValidationRequestState]int{}
+	for range stores {
+		states[(<-results).State]++
+	}
+	assert.Equal(t, 1, states[domain.ValidationRequestActive])
+	assert.Equal(t, len(stores)-1, states[domain.ValidationRequestQueued])
 }
 
 func TestValidationLeaseRejectsUnboundedSafeCommand(t *testing.T) {

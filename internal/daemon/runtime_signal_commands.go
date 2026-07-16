@@ -104,6 +104,8 @@ func normalizeRuntimeSignalCommand(cmd protocol.RuntimeSignalIngestCommandBody) 
 	cmd.SessionID = strings.TrimSpace(cmd.SessionID)
 	cmd.Worktree = strings.TrimSpace(cmd.Worktree)
 	cmd.TmuxPane = strings.TrimSpace(cmd.TmuxPane)
+	cmd.LogicalPaneID = strings.TrimSpace(cmd.LogicalPaneID)
+	cmd.AgentIncarnation = strings.TrimSpace(cmd.AgentIncarnation)
 	cmd.Agent = strings.TrimSpace(cmd.Agent)
 	cmd.Hook = strings.TrimSpace(cmd.Hook)
 	cmd.Command = strings.TrimSpace(cmd.Command)
@@ -116,30 +118,36 @@ func normalizeRuntimeSignalCommand(cmd protocol.RuntimeSignalIngestCommandBody) 
 
 func runtimeSignalID(projectID string, cmd protocol.RuntimeSignalIngestCommandBody) string {
 	type stableSignal struct {
-		Source    string `json:"source"`
-		Kind      string `json:"kind"`
-		ProjectID string `json:"project_id"`
-		IssueID   string `json:"issue_id,omitempty"`
-		SessionID string `json:"session_id,omitempty"`
-		Worktree  string `json:"worktree,omitempty"`
-		TmuxPane  string `json:"tmux_pane,omitempty"`
-		Agent     string `json:"agent,omitempty"`
-		Hook      string `json:"hook,omitempty"`
-		Event     string `json:"event,omitempty"`
-		Activity  string `json:"activity,omitempty"`
+		Source           string `json:"source"`
+		Kind             string `json:"kind"`
+		ProjectID        string `json:"project_id"`
+		IssueID          string `json:"issue_id,omitempty"`
+		SessionID        string `json:"session_id,omitempty"`
+		Worktree         string `json:"worktree,omitempty"`
+		TmuxPane         string `json:"tmux_pane,omitempty"`
+		LogicalPaneID    string `json:"logical_pane_id,omitempty"`
+		PanePID          int    `json:"pane_pid,omitempty"`
+		AgentIncarnation string `json:"agent_incarnation,omitempty"`
+		Agent            string `json:"agent,omitempty"`
+		Hook             string `json:"hook,omitempty"`
+		Event            string `json:"event,omitempty"`
+		Activity         string `json:"activity,omitempty"`
 	}
 	data, _ := json.Marshal(stableSignal{
-		Source:    cmd.Source,
-		Kind:      cmd.Kind,
-		ProjectID: projectID,
-		IssueID:   cmd.IssueID,
-		SessionID: cmd.SessionID,
-		Worktree:  cmd.Worktree,
-		TmuxPane:  cmd.TmuxPane,
-		Agent:     cmd.Agent,
-		Hook:      cmd.Hook,
-		Event:     cmd.Event,
-		Activity:  cmd.Activity,
+		Source:           cmd.Source,
+		Kind:             cmd.Kind,
+		ProjectID:        projectID,
+		IssueID:          cmd.IssueID,
+		SessionID:        cmd.SessionID,
+		Worktree:         cmd.Worktree,
+		TmuxPane:         cmd.TmuxPane,
+		LogicalPaneID:    cmd.LogicalPaneID,
+		PanePID:          cmd.PanePID,
+		AgentIncarnation: cmd.AgentIncarnation,
+		Agent:            cmd.Agent,
+		Hook:             cmd.Hook,
+		Event:            cmd.Event,
+		Activity:         cmd.Activity,
 	})
 	sum := sha256.Sum256(data)
 	return "sig-" + hex.EncodeToString(sum[:8])
@@ -224,6 +232,18 @@ func (d *Daemon) ingestAgentActivitySignal(ctx context.Context, req protocol.Req
 		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity", OK: false, Message: "missing session_id"})
 		return
 	}
+	if cmd.LogicalPaneID != "" || cmd.AgentIncarnation != "" {
+		accepted, message, err := d.validateManagedAgentSignalIdentity(ctx, projectID, sessionID, cmd)
+		if err != nil {
+			out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "managed_agent_identity", OK: false, Message: err.Error()})
+			return
+		}
+		if !accepted {
+			out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "managed_agent_identity", OK: false, Message: message})
+			return
+		}
+		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "managed_agent_identity", OK: true, Message: message})
+	}
 	if cmd.IssueID == "" {
 		store := d.sessionRuntimeStateStoreIfConfigured(projectID)
 		if store == nil {
@@ -287,6 +307,57 @@ func (d *Daemon) ingestAgentActivitySignal(ctx context.Context, req protocol.Req
 			out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "orchestrator_continuation", OK: true})
 		}
 	}
+}
+
+func (d *Daemon) validateManagedAgentSignalIdentity(ctx context.Context, projectID, sessionID string, cmd protocol.RuntimeSignalIngestCommandBody) (bool, string, error) {
+	if cmd.LogicalPaneID == "" || cmd.TmuxPane == "" || cmd.AgentIncarnation == "" {
+		return false, "incomplete managed agent identity", nil
+	}
+	if d.tmux == nil {
+		return false, "tmux adapter unavailable", nil
+	}
+	physicalSessionID := sessionID
+	if parent, _, ok := agentScopedSessionParentAndPane(sessionID); ok {
+		physicalSessionID = parent
+	}
+	panes, err := d.tmux.ListPaneInfos(ctx)
+	if err != nil {
+		return false, "", fmt.Errorf("list managed agent panes: %w", err)
+	}
+	paneID := sanitizeRuntimePaneID(cmd.TmuxPane)
+	livePanePID := 0
+	for _, pane := range panes {
+		if pane.SessionName == physicalSessionID && sanitizeRuntimePaneID(pane.PaneID) == paneID {
+			livePanePID = pane.PanePID
+			break
+		}
+	}
+	if livePanePID <= 0 {
+		return false, "managed tmux pane is not live", nil
+	}
+	if cmd.PanePID > 0 && cmd.PanePID != livePanePID {
+		return false, "stale or reused tmux pane process", nil
+	}
+	identity := daemonstate.ManagedAgentIdentity{ProjectID: projectID, SessionID: physicalSessionID, LogicalPaneID: cmd.LogicalPaneID,
+		TmuxPaneID: paneID, PanePID: livePanePID, AgentIncarnation: cmd.AgentIncarnation, ObservedAt: time.Now().UTC()}
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		return false, "session runtime store unavailable", nil
+	}
+	if strings.TrimSpace(cmd.Event) == "session_start" {
+		if err := store.UpsertManagedAgentIdentity(ctx, identity); err != nil {
+			return false, "", err
+		}
+		return true, "managed agent incarnation bound", nil
+	}
+	matched, err := store.MatchManagedAgentIdentity(ctx, identity)
+	if err != nil {
+		return false, "", err
+	}
+	if !matched {
+		return false, "stale or reused managed agent incarnation", nil
+	}
+	return true, "managed agent incarnation matched", nil
 }
 
 // recordPhysicalSessionObservation persists one fact about the physical tmux

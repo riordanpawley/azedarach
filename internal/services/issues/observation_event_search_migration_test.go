@@ -135,7 +135,7 @@ func downgradeBeforeIssueObservationEventSearchMigration(ctx context.Context, db
 		`DROP INDEX IF EXISTS idx_issue_observation_events_issue_payload_decision_id_id`,
 		`DROP INDEX IF EXISTS idx_issue_observation_events_issue_payload_revision_id`,
 		`DROP INDEX IF EXISTS idx_issue_observation_events_issue_payload_actor_id_id`,
-		`DELETE FROM schema_migrations WHERE id='0049_issue_observation_event_search'`,
+		`DELETE FROM schema_migrations WHERE id='0050_issue_observation_event_search'`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			return err

@@ -41,6 +41,7 @@ import (
 type fakeDaemonTransport struct {
 	handshakeFn             func(context.Context, protocol.Hello) (protocol.HelloAck, error)
 	commandFn               func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	subscribeFn             func(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error)
 	passOrchestrationIntent bool
 	lastGraphReadiness      daemonclient.TaskGraphReadiness
 }
@@ -59,6 +60,15 @@ func TestRenderPrimeOrchestrationSectionExplainsRuntimeContinuationGuard(t *test
 	for _, want := range []string{"Runtime persistence guard: wake-required", "direct nested root active", "consume the durable cursor and continue", "cursor=17", "Validation capacity: active=1 queued=1 revision=4"} {
 		if !strings.Contains(section, want) {
 			t.Fatalf("prime orchestration section missing %q:\n%s", want, section)
+		}
+	}
+}
+
+func TestRenderPrimeProjectOrchestrationSectionStatesRootOwnershipBoundary(t *testing.T) {
+	section := renderPrimeOrchestrationSection(protocol.OrchestrationSnapshot{Scope: domain.ProjectOrchestrationScope()})
+	for _, want := range []string{"unparented roots", "Rooted orchestrators exclusively own descendants"} {
+		if !strings.Contains(section, want) {
+			t.Fatalf("project primer missing %q:\n%s", want, section)
 		}
 	}
 }
@@ -983,7 +993,10 @@ func (f *fakeDaemonTransport) emulateOrchestrationIntent(ctx context.Context, re
 	return responseWithJSON(req, result), nil
 }
 
-func (f *fakeDaemonTransport) Subscribe(context.Context, string, uint64) (<-chan protocol.EventEnvelope, error) {
+func (f *fakeDaemonTransport) Subscribe(ctx context.Context, projectID string, revision uint64) (<-chan protocol.EventEnvelope, error) {
+	if f.subscribeFn != nil {
+		return f.subscribeFn(ctx, projectID, revision)
+	}
 	return nil, errors.New("not implemented")
 }
 
@@ -11246,7 +11259,7 @@ func TestIssueUpdateCommandRoutesCancelledThroughCloseWithoutIntegration(t *test
 	deps := &Dependencies{
 		Config: config.DefaultConfig(),
 		DaemonClient: daemonclient.New(&fakeDaemonTransport{
-			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			commandFn: func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				commands = append(commands, req.Command)
 				switch req.Command {
 				case daemonclient.CommandTaskGet:
@@ -11275,6 +11288,14 @@ func TestIssueUpdateCommandRoutesCancelledThroughCloseWithoutIntegration(t *test
 						Body:            body,
 					}, nil
 				case daemonclient.CommandTaskClose:
+					deadline, ok := ctx.Deadline()
+					if !ok {
+						t.Fatal("cancel close context has no deadline")
+					}
+					remaining := time.Until(deadline)
+					if remaining < domain.LifecycleCleanupClientTimeout-time.Second || remaining > domain.LifecycleCleanupClientTimeout {
+						t.Fatalf("cancel close timeout budget = %v, want near %v", remaining, domain.LifecycleCleanupClientTimeout)
+					}
 					gotCloseReq = req
 					return responseWithJSON(req, daemonclient.TaskCloseResult{
 						TaskID: "az-1",
@@ -11316,6 +11337,18 @@ func TestIssueUpdateCommandRoutesCancelledThroughCloseWithoutIntegration(t *test
 	}
 	if body.TaskID != "az-1" || !body.ForceWorktree || body.IntegrateBeforeClose || body.CloseOutcome != string(domain.IssueCloseCancelled) {
 		t.Fatalf("close body = %+v, want cancelled close without integration", body)
+	}
+}
+
+func TestIssueUpdateLifecycleTimeoutKeepsBacklogBounded(t *testing.T) {
+	if got := issueUpdateLifecycleTimeout(domain.StatusOpen); got != daemonCommandTimeout {
+		t.Fatalf("backlog/open timeout = %v, want %v", got, daemonCommandTimeout)
+	}
+	if got := issueUpdateLifecycleTimeout(domain.StatusCancelled); got != domain.LifecycleCleanupClientTimeout {
+		t.Fatalf("cancel timeout = %v, want %v", got, domain.LifecycleCleanupClientTimeout)
+	}
+	if got := issueUpdateLifecycleTimeout(domain.StatusDone); got != domain.IntegrationClientTimeout {
+		t.Fatalf("close timeout = %v, want %v", got, domain.IntegrationClientTimeout)
 	}
 }
 
@@ -13414,7 +13447,8 @@ func TestPrimeCommandShowsRootExitContractForAzOrchestrationRoot(t *testing.T) {
 	for _, guidance := range []string{
 		"Remain in the active orchestration turn/loop after starting workers, nested orchestrators, or a background watch; startup is not a completed handoff to the human.",
 		"Continuously consume the root watch and react to worker/nested-orchestrator progress, blocked, and integration-ready evidence while graph work remains.",
-		"Supervise nested epic/root orchestrators as direct children while they own their descendant workers; do not flatten or take over those descendants unless explicitly requested.",
+		"Chain of command is strict: coordinate only direct children. Never launch, message, review, integrate, stop, or take over grandchildren or deeper descendants.",
+		"Supervise nested epic/root orchestrators as direct children while they exclusively own their descendants.",
 		"repeat status/start/watch/review until `az orchestrate complete-check --root az-root` passes",
 	} {
 		if !strings.Contains(output, guidance) {

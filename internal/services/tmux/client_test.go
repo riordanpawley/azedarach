@@ -602,17 +602,17 @@ func TestClient_ListPaneInfos(t *testing.T) {
 	}{
 		{
 			name:   "multiple panes",
-			output: "az-1\t%1\naz-1\t%12\naz-2\t%3\n",
+			output: "az-1\t%1\t101\naz-1\t%12\t112\naz-2\t%3\t203\n",
 			want: []PaneInfo{
-				{SessionName: "az-1", PaneID: "1"},
-				{SessionName: "az-1", PaneID: "12"},
-				{SessionName: "az-2", PaneID: "3"},
+				{SessionName: "az-1", PaneID: "1", PanePID: 101},
+				{SessionName: "az-1", PaneID: "12", PanePID: 112},
+				{SessionName: "az-2", PaneID: "3", PanePID: 203},
 			},
 		},
 		{
 			name:   "skips malformed and empty rows",
-			output: "\nmissing-tab\naz-1\t%1\n\t%2\naz-2\t\n",
-			want:   []PaneInfo{{SessionName: "az-1", PaneID: "1"}},
+			output: "\nmissing-tab\naz-1\t%1\t101\n\t%2\t102\naz-2\t\t103\naz-3\t%3\tbad\n",
+			want:   []PaneInfo{{SessionName: "az-1", PaneID: "1", PanePID: 101}},
 		},
 		{
 			name:   "no panes",

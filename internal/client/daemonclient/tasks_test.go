@@ -872,7 +872,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				},
 				wantSubstrs: []string{
 					"decode task.list response",
-					"schema_version mismatch: expected 3, actual 4",
+					fmt.Sprintf("schema_version mismatch: expected %d, actual %d", protocol.TaskListSnapshotSchemaVersion, protocol.TaskListSnapshotSchemaVersion+1),
 				},
 			},
 			{

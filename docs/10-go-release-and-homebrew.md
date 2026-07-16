@@ -66,6 +66,16 @@ an explicit operator action from the primary worktree:
 2. Verify the stable control link and matching `az`/`azd` sibling resolution.
 3. Restart the global daemon only as an explicit production deployment action.
 
+`build-install-run` does not join the worktree validation lease queue. It holds
+a separate repository-family production admission marker and invokes the real
+Go toolchain directly. New validations wait outside the daemon queue while that
+marker exists. Production availability takes precedence over development
+validation: an installer does not wait for active validations to drain, while
+another installer remains mutually exclusive. Any validation spanning the
+production admission epoch becomes noncanonical and must be retried. The
+bounded `AZEDARACH_PRODUCTION_ADMISSION_WAIT_SECONDS` diagnostic applies only
+when waiting for another production installer.
+
 This isolated candidate execution is not a production install path and does not
 make deployment implicit.
 

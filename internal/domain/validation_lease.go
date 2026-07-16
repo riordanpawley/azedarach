@@ -30,22 +30,24 @@ const (
 )
 
 type ValidationRequest struct {
-	Sequence       int64                  `json:"sequence"`
-	RequestID      string                 `json:"request_id"`
-	ProjectID      string                 `json:"project_id"`
-	IssueID        string                 `json:"issue_id"`
-	Class          ValidationClass        `json:"class"`
-	Profile        string                 `json:"profile"`
-	Command        string                 `json:"command"`
-	SourceRevision string                 `json:"source_revision"`
-	State          ValidationRequestState `json:"state"`
-	QueuedAt       time.Time              `json:"queued_at"`
-	StartedAt      *time.Time             `json:"started_at,omitempty"`
-	HeartbeatAt    *time.Time             `json:"heartbeat_at,omitempty"`
-	ExpiresAt      *time.Time             `json:"expires_at,omitempty"`
-	FinishedAt     *time.Time             `json:"finished_at,omitempty"`
-	Outcome        string                 `json:"outcome,omitempty"`
-	Evidence       ValidationEvidence     `json:"evidence"`
+	Sequence           int64                  `json:"sequence"`
+	RequestID          string                 `json:"request_id"`
+	ProjectID          string                 `json:"project_id"`
+	IssueID            string                 `json:"issue_id"`
+	Class              ValidationClass        `json:"class"`
+	Profile            string                 `json:"profile"`
+	Command            string                 `json:"command"`
+	SourceRevision     string                 `json:"source_revision"`
+	ReviewerID         string                 `json:"reviewer_id,omitempty"`
+	ReviewEpochEventID int64                  `json:"review_epoch_event_id,omitempty"`
+	State              ValidationRequestState `json:"state"`
+	QueuedAt           time.Time              `json:"queued_at"`
+	StartedAt          *time.Time             `json:"started_at,omitempty"`
+	HeartbeatAt        *time.Time             `json:"heartbeat_at,omitempty"`
+	ExpiresAt          *time.Time             `json:"expires_at,omitempty"`
+	FinishedAt         *time.Time             `json:"finished_at,omitempty"`
+	Outcome            string                 `json:"outcome,omitempty"`
+	Evidence           ValidationEvidence     `json:"evidence"`
 }
 
 type ValidationEvidence struct {
@@ -86,15 +88,17 @@ type ValidationSnapshot struct {
 }
 
 type ValidationAcquire struct {
-	RequestID      string
-	LeaseToken     string
-	ProjectID      string
-	IssueID        string
-	Class          ValidationClass
-	Profile        string
-	Command        string
-	SourceRevision string
-	TTL            time.Duration
+	RequestID          string
+	LeaseToken         string
+	ProjectID          string
+	IssueID            string
+	Class              ValidationClass
+	Profile            string
+	Command            string
+	SourceRevision     string
+	ReviewerID         string
+	ReviewEpochEventID int64
+	TTL                time.Duration
 }
 
 func (a ValidationAcquire) Validate() error {
@@ -106,6 +110,9 @@ func (a ValidationAcquire) Validate() error {
 	}
 	if strings.TrimSpace(a.Profile) == "" || strings.TrimSpace(a.Command) == "" || strings.TrimSpace(a.SourceRevision) == "" {
 		return fmt.Errorf("validation request requires profile, command, and source revision")
+	}
+	if (strings.TrimSpace(a.ReviewerID) == "") != (a.ReviewEpochEventID == 0) || a.ReviewEpochEventID < 0 {
+		return fmt.Errorf("validation review assignment requires reviewer id and positive review epoch event id together")
 	}
 	if a.Class == ValidationClassSafe && !validSafeValidation(a.Profile, a.Command) {
 		return fmt.Errorf("safe validation requires a bounded non-compiling profile and command")

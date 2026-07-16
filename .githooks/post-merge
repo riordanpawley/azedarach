@@ -5,5 +5,6 @@ az githooks hook --hook post-merge "$@" >/dev/null 2>&1 || true
 
 set -eu
 # Auto-generation was removed after migration to native Codex context files.
-# Keep this hook as a no-op placeholder for compatibility.
+# Canonical validation is launched explicitly by integration orchestration only
+# after reconciliation has returned an exact clean candidate HEAD.
 exit 0

@@ -93,6 +93,26 @@ func TestSessionProjectionEventBodyMessagePackRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSessionProjectionEventBodyCarriesCurrentExternalObservationProvenance(t *testing.T) {
+	observedAt := time.Date(2026, time.July, 14, 1, 2, 3, 0, time.UTC)
+	payload := SessionProjectionEventBody{
+		ProjectID: "proj-1", Revision: 8,
+		Session:     SessionProjection{SessionID: "proj-1-az-42", IssueID: "az-42", State: SessionLifecycleStateRunning, UpdatedAt: observedAt},
+		Observation: &ExternalObservationProvenance{Authority: "tmux", Product: "session_runtime", Disposition: "current", ObservedAt: observedAt},
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got SessionProjectionEventBody
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Observation == nil || got.Observation.Authority != "tmux" || got.Observation.Disposition != "current" || got.Observation.CanonicalEventAdmitted || got.Observation.SemanticSequenceAdvanced {
+		t.Fatalf("observation provenance = %+v", got.Observation)
+	}
+}
+
 func mustMarshalSessionJSON(t *testing.T, payload SessionProjectionEventBody) string {
 	t.Helper()
 

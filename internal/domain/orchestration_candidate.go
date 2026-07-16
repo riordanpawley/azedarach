@@ -51,6 +51,9 @@ func AssessOrchestrationCandidate(task Task, actorID string, now time.Time, bloc
 	}
 
 	switch {
+	case facts.LifecycleState == IssueWorkflowBacklog:
+		a.Classification, a.Eligible = OrchestrationCandidateBacklog, false
+		a.ExclusionReasons = append(a.ExclusionReasons, "lifecycle-backlog")
 	case len(blockers) > 0:
 		a.Classification, a.Eligible = OrchestrationCandidateBlocked, false
 		a.ExclusionReasons = append(a.ExclusionReasons, blockers...)
@@ -63,9 +66,6 @@ func AssessOrchestrationCandidate(task Task, actorID string, now time.Time, bloc
 	case facts.ReviewReadyVisible || facts.ReviewState == IssueReviewRequested:
 		a.Classification, a.Eligible = OrchestrationCandidateReviewReady, false
 		a.ExclusionReasons = append(a.ExclusionReasons, "review-requested")
-	case facts.LifecycleState == IssueWorkflowBacklog:
-		a.Classification, a.Eligible = OrchestrationCandidateBacklog, false
-		a.ExclusionReasons = append(a.ExclusionReasons, "lifecycle-backlog")
 	case facts.HasActiveSession || facts.LifecycleState == IssueWorkflowActive:
 		a.Classification, a.Eligible = OrchestrationCandidateActive, false
 		a.ExclusionReasons = append(a.ExclusionReasons, "active-work-present")

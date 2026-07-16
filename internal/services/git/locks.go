@@ -2,10 +2,18 @@ package git
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
+
+const integrationTransactionLockPollInterval = 10 * time.Millisecond
 
 type worktreeLock struct {
 	mu      sync.Mutex
@@ -31,6 +39,53 @@ func (c *Client) WithWorktreeLock(ctx context.Context, worktree string, fn func(
 	}
 	defer unlock()
 	return fn(ctx)
+}
+
+// withIntegrationTransactionLock serializes target integration publication
+// across Client instances and daemon processes. The common-directory lock file
+// is intentionally retained so contenders always coordinate on the same inode.
+func (c *Client) withIntegrationTransactionLock(ctx context.Context, worktree string, fn func(context.Context) error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if fn == nil {
+		return nil
+	}
+	return c.WithWorktreeLock(ctx, worktree, func(ctx context.Context) error {
+		commonDir, err := c.gitCommonDir(ctx, worktree)
+		if err != nil {
+			return fmt.Errorf("resolve integration lock common directory: %w", err)
+		}
+		lockDir := filepath.Join(commonDir, "azedarach")
+		if err := os.MkdirAll(lockDir, 0o755); err != nil {
+			return fmt.Errorf("create integration lock directory: %w", err)
+		}
+		lockPath := filepath.Join(lockDir, integrationLockName(worktree))
+		file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			return fmt.Errorf("open integration transaction lock: %w", err)
+		}
+		defer file.Close()
+
+		ticker := time.NewTicker(integrationTransactionLockPollInterval)
+		defer ticker.Stop()
+		for {
+			err = unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
+				return fmt.Errorf("acquire integration transaction lock: %w", err)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-ticker.C:
+			}
+		}
+		defer unix.Flock(int(file.Fd()), unix.LOCK_UN) //nolint:errcheck
+		return fn(ctx)
+	})
 }
 
 func (l *worktreeLock) acquire(ctx context.Context) (func(), error) {

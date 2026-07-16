@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
 func TestValidationCommandRoutesDurableAggregateQueue(t *testing.T) {
@@ -50,6 +53,49 @@ func TestValidationCommandRoutesDurableAggregateQueue(t *testing.T) {
 	}
 	if len(status.Snapshot.Active) != 1 || len(status.Snapshot.Queued) != 1 {
 		t.Fatalf("snapshot = %+v, want one owner and one waiter", status.Snapshot)
+	}
+}
+
+func TestValidationAcquireBindsReviewAssignmentToDurableLease(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker-a")
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: "assigned-reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = runtime.Close() })
+	d := &Daemon{operationRuntime: runtime, revision: map[string]uint64{"project": 1}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+
+	acquire := func(requestID, reviewer string) protocol.ResponseEnvelope {
+		t.Helper()
+		body, err := json.Marshal(protocol.ValidationAcquireRequest{RequestID: requestID, LeaseToken: "secret", IssueID: issueID, Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", ReviewerID: reviewer, TTLSeconds: 30})
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := d.handleValidationCommand(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: naming.RequestID("rpc-" + requestID), Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandValidationAcquire, Meta: protocol.Metadata{ProjectID: "project"}, Body: body})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	wrong := acquire("wrong-reviewer", "other-reviewer")
+	if wrong.OK || !strings.Contains(wrong.Error.Message, "does not own review lease") {
+		t.Fatalf("wrong reviewer response = %+v", wrong)
+	}
+	correct := acquire("assigned-reviewer", "assigned-reviewer")
+	if !correct.OK {
+		t.Fatalf("assigned reviewer response = %+v", correct)
+	}
+	var result protocol.ValidationRequestResponse
+	if err := json.Unmarshal(correct.Body, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Request.ReviewerID != "assigned-reviewer" || result.Request.ReviewEpochEventID != latestReviewEpochEventID(t, ctx, client, issueID) {
+		t.Fatalf("durable assignment = %+v", result.Request)
 	}
 }
 
