@@ -4631,7 +4631,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 		if storeErr != nil {
 			return taskIntegrationReadinessResult{}, fmt.Errorf("inspect aggregate validation projection: %w", storeErr)
 		}
-		aggregate, aggregateErr := validationStore.LatestAggregateValidation(ctx, projectID, task.ID.String(), time.Now().UTC(), defaultValidationLeaseTTL)
+		aggregate, aggregateErr := validationStore.LatestReviewValidation(ctx, projectID, task.ID.String(), time.Now().UTC(), defaultValidationLeaseTTL)
 		if aggregateErr != nil {
 			return taskIntegrationReadinessResult{}, fmt.Errorf("inspect aggregate validation evidence: %w", aggregateErr)
 		}

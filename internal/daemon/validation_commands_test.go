@@ -13,6 +13,8 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestValidationCommandRoutesDurableAggregateQueue(t *testing.T) {
@@ -20,9 +22,9 @@ func TestValidationCommandRoutesDurableAggregateQueue(t *testing.T) {
 	t.Cleanup(func() { _ = runtime.Close() })
 	d := &Daemon{operationRuntime: runtime, revision: map[string]uint64{"project": 1}}
 
-	acquire := func(requestID, issueID string) domain.ValidationRequest {
+	acquire := func(requestID string) domain.ValidationRequest {
 		t.Helper()
-		body, err := json.Marshal(protocol.ValidationAcquireRequest{RequestID: requestID, LeaseToken: "test-secret", IssueID: issueID, Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "abc123", TTLSeconds: 30})
+		body, err := json.Marshal(protocol.ValidationAcquireRequest{RequestID: requestID, LeaseToken: "test-secret", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeRepository, Purpose: domain.ValidationPurposePushGate, IsolationMode: "repository-family", EnvironmentFingerprint: "toolchain-a", Override: domain.ValidationOverrideNone, Profile: "cold", Command: "just test", SourceRevision: "abc123", TTLSeconds: 30})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -37,10 +39,10 @@ func TestValidationCommandRoutesDurableAggregateQueue(t *testing.T) {
 		return result.Request
 	}
 
-	if got := acquire("owner", "dkg"); got.State != domain.ValidationRequestActive {
+	if got := acquire("owner"); got.State != domain.ValidationRequestActive {
 		t.Fatalf("owner state = %s, want active", got.State)
 	}
-	if got := acquire("waiter", "dkd"); got.State != domain.ValidationRequestQueued {
+	if got := acquire("waiter"); got.State != domain.ValidationRequestQueued {
 		t.Fatalf("waiter state = %s, want queued", got.State)
 	}
 	resp, err := d.handleValidationCommand(context.Background(), protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "rpc-status", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandValidationStatus, Meta: protocol.Metadata{ProjectID: "project"}, Body: json.RawMessage(`{}`)})
@@ -71,7 +73,7 @@ func TestValidationAcquireBindsReviewAssignmentToDurableLease(t *testing.T) {
 
 	acquire := func(requestID, reviewer string) protocol.ResponseEnvelope {
 		t.Helper()
-		body, err := json.Marshal(protocol.ValidationAcquireRequest{RequestID: requestID, LeaseToken: "secret", IssueID: issueID, Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", ReviewerID: reviewer, TTLSeconds: 30})
+		body, err := json.Marshal(protocol.ValidationAcquireRequest{RequestID: requestID, LeaseToken: "secret", IssueID: issueID, Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence, IsolationMode: "worktree", EnvironmentFingerprint: "toolchain-a", Override: domain.ValidationOverrideNone, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", ReviewerID: reviewer, TTLSeconds: 30})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -99,6 +101,22 @@ func TestValidationAcquireBindsReviewAssignmentToDurableLease(t *testing.T) {
 	}
 }
 
+func TestValidationAcquireTicketScopeFailsClosedForMissingTicket(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = runtime.Close() })
+	d := &Daemon{operationRuntime: runtime, revision: map[string]uint64{"project": 1}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+	body, err := json.Marshal(protocol.ValidationAcquireRequest{RequestID: "missing", LeaseToken: "secret", IssueID: "missing-ticket", Class: domain.ValidationClassShared, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeDevelopment, IsolationMode: "worktree", EnvironmentFingerprint: "toolchain-a", Override: domain.ValidationOverrideNone, Profile: "focused", Command: "go test ./internal/domain", SourceRevision: "candidate-a", TTLSeconds: 30})
+	require.NoError(t, err)
+	resp, err := d.handleValidationCommand(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "rpc-missing", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandValidationAcquire, Meta: protocol.Metadata{ProjectID: "project"}, Body: body})
+	require.NoError(t, err)
+	require.False(t, resp.OK)
+	assert.Contains(t, resp.Error.Message, "resolve ticket-scoped validation")
+}
+
 func TestValidationCommandRejectsSpoofedNestedAuthorization(t *testing.T) {
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir()})
 	t.Cleanup(func() { _ = runtime.Close() })
@@ -108,7 +126,7 @@ func TestValidationCommandRejectsSpoofedNestedAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := json.Marshal(protocol.ValidationAuthorizeNestedRequest{RequestID: "owner", LeaseToken: "spoof", Class: domain.ValidationClassShared})
+	body, err := json.Marshal(protocol.ValidationAuthorizeNestedRequest{RequestID: "owner", LeaseToken: "spoof", Class: domain.ValidationClassShared, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeDevelopment})
 	if err != nil {
 		t.Fatal(err)
 	}

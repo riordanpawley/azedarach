@@ -200,7 +200,7 @@ fd "filename" -t f internal cmd
    - project orchestration completion -> `hybrid` (refreshed issue/review/interaction/session projections + live tmux runtime)
    - keyed monotonic projection delta replay, consumer cursors, and snapshot-at-cursor reads -> `projection` (durable project delta ledger and version history; reads never reconcile or poll tmux)
    - asynchronous tmux current-state observation -> `tmux` (one daemon-owned bounded observer polls inventory and sparse pane classifications, publishes only changed disposable current-state projections with external-observation provenance, and never admits `session.runtime_observed` or advances a semantic sequence)
-   - repository-family validation capacity -> `projection` (durable daemon validation request/lease queue refreshed transactionally before aggregate/shared/safe admission; heartbeat expiry is recovery authority)
+   - repository-family validation capacity -> `projection` (durable daemon validation request/lease queue refreshed transactionally before aggregate/shared/safe admission; validation attribution scope and authorization purpose are independent, repository scope never fabricates a ticket or authorizes review, explicit ticket scope fails closed for missing identity, compatible exact-revision requests reuse or join one authoritative execution, overrides remain audited and cannot manufacture readiness, development admission cannot block production availability, and heartbeat expiry is recovery authority)
 
 ### Adding New Invariants (Required Checklist)
 
