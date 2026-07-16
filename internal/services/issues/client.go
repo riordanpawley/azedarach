@@ -2811,13 +2811,22 @@ func (c *Client) updateLockedWithPrecondition(ctx context.Context, id string, st
 			return c.wrapError("update", id, err)
 		}
 	}
-	if nextState.Workflow() == domain.IssueWorkflowClosed {
-		openChildCount, err := c.countOpenChildren(ctx, tx, id)
+	if nextState.Workflow() == domain.IssueWorkflowBacklog {
+		hasAdmittedAncestor, err := c.hasLiveAdmittedAncestor(ctx, tx, id)
+		if err != nil {
+			return c.wrapError("update", id, err)
+		}
+		if hasAdmittedAncestor {
+			return c.wrapError("update", id, fmt.Errorf("%w: descendant cannot regress to backlog below an admitted ancestor", domain.ErrConflict))
+		}
+	}
+	if status == domain.StatusInReview || nextState.Workflow() == domain.IssueWorkflowClosed {
+		openChildCount, err := c.countLiveNonterminalDescendants(ctx, tx, id)
 		if err != nil {
 			return c.wrapError("update", id, err)
 		}
 		if openChildCount > 0 {
-			return c.wrapError("update", id, fmt.Errorf("%w: cannot close parent issue with %d open child issue(s)", domain.ErrConflict, openChildCount))
+			return c.wrapError("update", id, fmt.Errorf("%w: parent review or close requires all live descendants terminal; %d remain nonterminal", domain.ErrConflict, openChildCount))
 		}
 	}
 	if releaseExecutionLease {
@@ -2876,6 +2885,11 @@ func (c *Client) updateLockedWithPrecondition(ctx context.Context, id string, st
 			"from_status": string(oldLegacyStatus),
 			"to_status":   writeState.LegacyStatus,
 		}); err != nil {
+			return c.wrapError("update", id, err)
+		}
+	}
+	if nextState.Disposition == domain.IssueDispositionReady && oldState.Disposition == domain.IssueDispositionBacklog {
+		if err := c.enforceAncestorLifecycleFloor(ctx, tx, id, "ancestor_lifecycle_floor_admitted"); err != nil {
 			return c.wrapError("update", id, err)
 		}
 	}
@@ -3518,6 +3532,9 @@ func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) 
 		if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
 			return "", c.wrapError("create", issueID, err)
 		}
+		if err := c.enforceAncestorLifecycleFloor(ctx, tx, issueID, "ancestor_lifecycle_floor_create"); err != nil {
+			return "", c.wrapError("create", issueID, err)
+		}
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -3910,6 +3927,9 @@ func (c *Client) addDependency(ctx context.Context, issueID, dependsOnID, depend
 		if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
 			return c.wrapError("add-dependency", issueID, err)
 		}
+		if err := c.enforceAncestorLifecycleFloor(ctx, tx, issueID, "ancestor_lifecycle_floor_parent_attach"); err != nil {
+			return c.wrapError("add-dependency", issueID, err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -4076,6 +4096,110 @@ func (c *Client) rebuildIssueGraphClosure(ctx context.Context, execer sqlIssueEx
 		return err
 	}
 	return nil
+}
+
+// enforceAncestorLifecycleFloor promotes live backlog issues in root's subtree
+// when they have a live admitted ancestor. The caller must hold the mutation
+// lock and an open transaction so graph mutation, promotion, and audit evidence
+// commit atomically across daemon processes.
+func (c *Client) enforceAncestorLifecycleFloor(ctx context.Context, tx *sql.Tx, rootID, reason string) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT candidate.id
+		FROM issues candidate
+		WHERE candidate.visibility = 'live'
+			AND candidate.disposition = 'backlog'
+			AND (candidate.id = ? OR EXISTS (
+				SELECT 1 FROM issue_graph_closure subtree
+				WHERE subtree.dependency_type = ?
+					AND subtree.ancestor_id = ?
+					AND subtree.descendant_id = candidate.id
+			))
+			AND EXISTS (
+				SELECT 1
+				FROM issue_graph_closure ancestry
+				JOIN issues ancestor ON ancestor.id = ancestry.ancestor_id
+				WHERE ancestry.dependency_type = ?
+					AND ancestry.descendant_id = candidate.id
+					AND ancestor.visibility = 'live'
+					AND ancestor.disposition = 'ready'
+			)
+		ORDER BY candidate.id
+	`, rootID, string(domain.DependencyParentChild), rootID, string(domain.DependencyParentChild))
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, id := range ids {
+		res, err := tx.ExecContext(ctx, `
+			UPDATE issues
+			SET disposition='ready', engagement='idle', status='open',
+				lifecycle_state='open', closed_outcome='none', review_state='none', updated_at=?
+			WHERE id=? AND visibility='live' AND disposition='backlog'
+		`, now, id)
+		if err != nil {
+			return err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			continue
+		}
+		if err := c.appendIssueObservationEvent(ctx, tx, id, domain.IssueEventIssueStatusChanged, map[string]any{
+			"from_status":    domain.StatusOpen,
+			"to_status":      domain.StatusOpen,
+			"from_lifecycle": domain.IssueWorkflowBacklog,
+			"to_lifecycle":   domain.IssueWorkflowOpen,
+			"reason":         reason,
+			"ancestor_id":    rootID,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Client) hasLiveAdmittedAncestor(ctx context.Context, tx *sql.Tx, issueID string) (bool, error) {
+	var exists bool
+	err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM issue_graph_closure ancestry
+			JOIN issues ancestor ON ancestor.id = ancestry.ancestor_id
+			WHERE ancestry.dependency_type = ?
+				AND ancestry.descendant_id = ?
+				AND ancestor.visibility = 'live'
+				AND ancestor.disposition = 'ready'
+		)
+	`, string(domain.DependencyParentChild), issueID).Scan(&exists)
+	return exists, err
+}
+
+func (c *Client) countLiveNonterminalDescendants(ctx context.Context, tx *sql.Tx, issueID string) (int, error) {
+	var count int
+	err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM issue_graph_closure closure
+		JOIN issues descendant ON descendant.id = closure.descendant_id
+		WHERE closure.dependency_type = ?
+			AND closure.ancestor_id = ?
+			AND descendant.visibility = 'live'
+			AND descendant.disposition NOT IN ('completed','cancelled')
+	`, string(domain.DependencyParentChild), issueID).Scan(&count)
+	return count, err
 }
 
 // RemoveDependency tombstones a dependency edge between two issues.
@@ -4506,6 +4630,11 @@ func (c *Client) unarchiveLocked(ctx context.Context, id string, opts UnarchiveO
 	if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
 		return result, c.wrapError("unarchive", id, err)
 	}
+	for _, restoreID := range restoreIDs {
+		if err := c.enforceAncestorLifecycleFloor(ctx, tx, restoreID, "ancestor_lifecycle_floor_restore"); err != nil {
+			return result, c.wrapError("unarchive", id, err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return result, c.wrapError("unarchive", id, err)
 	}
@@ -4818,6 +4947,15 @@ func (c *Client) updateDetailsLocked(ctx context.Context, id string, params Upda
 		if err := domain.ValidateIssueStateTransition(oldState, nextState); err != nil {
 			return c.wrapError("update-details", id, err)
 		}
+		if nextState.Workflow() == domain.IssueWorkflowBacklog {
+			hasAdmittedAncestor, err := c.hasLiveAdmittedAncestor(ctx, tx, id)
+			if err != nil {
+				return c.wrapError("update-details", id, err)
+			}
+			if hasAdmittedAncestor {
+				return c.wrapError("update-details", id, fmt.Errorf("%w: descendant cannot regress to backlog below an admitted ancestor", domain.ErrConflict))
+			}
+		}
 	}
 	writeState := issueStateWriteValuesFromState(nextState, oldStateCols.ArchivedAt)
 	implSet := 0
@@ -4927,6 +5065,11 @@ func (c *Client) updateDetailsLocked(ctx context.Context, id string, params Upda
 		if err := c.appendIssueObservationEvent(ctx, tx, id, domain.IssueEventIssueDetailsChanged, map[string]any{
 			"changed_fields": changedFields,
 		}); err != nil {
+			return c.wrapError("update-details", id, err)
+		}
+	}
+	if nextState.Disposition == domain.IssueDispositionReady && oldState.Disposition == domain.IssueDispositionBacklog {
+		if err := c.enforceAncestorLifecycleFloor(ctx, tx, id, "ancestor_lifecycle_floor_admitted"); err != nil {
 			return c.wrapError("update-details", id, err)
 		}
 	}
