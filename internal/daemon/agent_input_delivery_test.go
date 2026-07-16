@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -427,12 +429,18 @@ func TestAgentInputDeliveryExpiredFinalFenceRemainsAmbiguous(t *testing.T) {
 	}
 }
 
-func TestAgentInputDeliveryRetainsSessionFenceWhenGateRestoreIsIncomplete(t *testing.T) {
+func TestAgentInputDeliveryRetainsSessionFenceWhenCompletionMarkerRemovalFails(t *testing.T) {
 	runtimeStore, client, request := agentInputFixture(t)
-	adapter := &fakeCodexInputTmux{paneEnabled: true, failDisableHooks: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: request.SessionID}}, panes: []tmux.PaneInfo{{SessionName: request.SessionID, PaneID: request.Target.TmuxPaneID, PanePID: request.Target.PanePID}}}
+	adapter := &fakeCodexInputTmux{paneEnabled: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: request.SessionID}}, panes: []tmux.PaneInfo{{SessionName: request.SessionID, PaneID: request.Target.TmuxPaneID, PanePID: request.Target.PanePID}}}
 	authority := newCodexAppServerInputAuthority(adapter, filepath.Join(t.TempDir(), "daemon.sock"), nil, func(string) daemonProjectRuntimeConfig {
 		return daemonProjectRuntimeConfig{CLITool: "codex", CodexAppServer: true}
 	})
+	authority.removeGateFile = func(path string) error {
+		if filepath.Ext(path) == ".json" {
+			return errors.New("forced completion marker removal failure")
+		}
+		return os.Remove(path)
+	}
 	authority.startRPC = func(context.Context, string) (codexAppServerRPC, error) { return &fakeCodexRPC{}, nil }
 	service := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, authority, "daemon-old")
 	result, err := service.Deliver(context.Background(), request)
@@ -445,6 +453,45 @@ func TestAgentInputDeliveryRetainsSessionFenceWhenGateRestoreIsIncomplete(t *tes
 	}
 	if lease, acquired, claimErr := client.ClaimAgentInputDeliverySessionLease(context.Background(), request.ProjectID, request.SessionID, "inc-new", "daemon-new", time.Now(), time.Minute); claimErr != nil || acquired || lease.LeaseToken != "" {
 		t.Fatalf("incomplete restore released fence lease=%+v acquired=%v err=%v", lease, acquired, claimErr)
+	}
+	markers, globErr := filepath.Glob(filepath.Join(authority.gateDir, "gate-*.json"))
+	if globErr != nil || len(markers) != 1 {
+		t.Fatalf("completion markers=%v err=%v, want one retained marker", markers, globErr)
+	}
+	raw, readErr := os.ReadFile(markers[0])
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	var state codexInputGateState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Stat(state.EventsPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("event ledger was not cleaned before retained marker: %v", statErr)
+	}
+
+	// Once the retained lease expires, a new daemon may take ownership. The
+	// stale marker still carries the old fence, so startup recovery must refuse
+	// it without changing the new owner's live gate.
+	newLease, acquired, claimErr := client.ClaimAgentInputDeliverySessionLease(context.Background(), request.ProjectID, request.SessionID, "inc-new", "daemon-new", time.Now().Add(10*time.Minute), time.Minute)
+	if claimErr != nil || !acquired || newLease.LeaseToken == "" {
+		t.Fatalf("new owner lease=%+v acquired=%v err=%v", newLease, acquired, claimErr)
+	}
+	adapter.mu.Lock()
+	adapter.paneEnabled = true
+	adapter.hooksEnabled = true
+	adapter.activeGates = 1
+	adapter.clients[0].ReadOnly = true
+	adapter.setReadOnlyCalls = nil
+	adapter.mu.Unlock()
+	authority.issueClients = func(string) *issues.Client { return client }
+	if err := authority.RecoverStaleGates(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	if !adapter.paneEnabled || !adapter.hooksEnabled || adapter.activeGates != 1 || !adapter.clients[0].ReadOnly || len(adapter.setReadOnlyCalls) != 0 {
+		t.Fatalf("stale marker mutated new owner gate: pane=%v hooks=%v active=%d clients=%+v calls=%v", adapter.paneEnabled, adapter.hooksEnabled, adapter.activeGates, adapter.clients, adapter.setReadOnlyCalls)
 	}
 }
 

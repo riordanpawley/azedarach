@@ -38,8 +38,10 @@ Gate state is written beneath the daemon runtime directory with durable
 project/session/incarnation/owner/fence identity. Normal restoration requires
 the exact live fence; startup recovery atomically claims only an expired or
 unowned matching fence, and a takeover restores its predecessor before
-installing a new gate. Prompt and composer content are never written to gate
-records or logs.
+installing a new gate. Restoration deletes the event ledger first and the
+durable state file last; that state file is the authoritative completion
+marker, so any cleanup failure retains the exact session fence. Prompt and
+composer content are never written to gate records or logs.
 
 ## Tool capability matrix
 

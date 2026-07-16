@@ -50,23 +50,24 @@ type codexAppServerRPC interface {
 }
 
 type codexAppServerInputAuthority struct {
-	tmux          codexInputTmux
-	gateDir       string
-	logger        *slog.Logger
-	runtimeConfig func(string) daemonProjectRuntimeConfig
-	startRPC      func(context.Context, string) (codexAppServerRPC, error)
-	issueClients  func(string) *issues.Client
-	recoveryOwner string
-	now           func() time.Time
-	leaseDuration time.Duration
-	safetyMargin  time.Duration
-	mu            sync.Mutex
-	sessionMux    map[string]*sync.Mutex
+	tmux           codexInputTmux
+	gateDir        string
+	logger         *slog.Logger
+	runtimeConfig  func(string) daemonProjectRuntimeConfig
+	startRPC       func(context.Context, string) (codexAppServerRPC, error)
+	issueClients   func(string) *issues.Client
+	recoveryOwner  string
+	now            func() time.Time
+	leaseDuration  time.Duration
+	safetyMargin   time.Duration
+	removeGateFile func(string) error
+	mu             sync.Mutex
+	sessionMux     map[string]*sync.Mutex
 }
 
 func newCodexAppServerInputAuthority(adapter codexInputTmux, daemonSocketPath string, logger *slog.Logger, runtimeConfig func(string) daemonProjectRuntimeConfig) *codexAppServerInputAuthority {
 	gateDir := filepath.Join(filepath.Dir(strings.TrimSpace(daemonSocketPath)), "agent-input-gates")
-	return &codexAppServerInputAuthority{tmux: adapter, gateDir: gateDir, logger: logger, runtimeConfig: runtimeConfig, startRPC: startCodexAppServerRPC, recoveryOwner: "daemon-agent-input-recovery", now: func() time.Time { return time.Now().UTC() }, leaseDuration: agentInputSessionLeaseDuration, safetyMargin: codexSubmissionFenceSafetyMargin, sessionMux: map[string]*sync.Mutex{}}
+	return &codexAppServerInputAuthority{tmux: adapter, gateDir: gateDir, logger: logger, runtimeConfig: runtimeConfig, startRPC: startCodexAppServerRPC, recoveryOwner: "daemon-agent-input-recovery", now: func() time.Time { return time.Now().UTC() }, leaseDuration: agentInputSessionLeaseDuration, safetyMargin: codexSubmissionFenceSafetyMargin, removeGateFile: os.Remove, sessionMux: map[string]*sync.Mutex{}}
 }
 
 // RecoverStaleGates performs one bounded startup pass over gates whose daemon
@@ -107,7 +108,7 @@ func (a *codexAppServerInputAuthority) RecoverStaleGates(ctx context.Context) er
 		}
 		state.LeaseOwner = recoveryLease.LeaseOwner
 		state.FenceToken = recoveryLease.LeaseToken
-		gate := &codexInputGate{tmux: a.tmux, state: state, statePath: statePath}
+		gate := &codexInputGate{tmux: a.tmux, state: state, statePath: statePath, removeFile: a.removeGateFile}
 		gate.renewRestoreFence = func(restoreCtx context.Context) (bool, error) {
 			_, renewed, err := client.RenewAgentInputDeliverySessionLease(restoreCtx, state.ProjectID, state.SessionID, state.AgentIncarnation, recoveryLease.LeaseToken, a.now(), a.leaseDuration)
 			return renewed, err
@@ -275,7 +276,7 @@ func (a *codexAppServerInputAuthority) recoverSupersededGate(ctx context.Context
 	state.AgentIncarnation = request.Delivery.Target.AgentIncarnation
 	state.LeaseOwner = request.SessionLeaseOwner
 	state.FenceToken = request.SessionLeaseToken
-	gate := &codexInputGate{tmux: a.tmux, state: state, statePath: matched[0].path, renewRestoreFence: request.RenewRestoreFence}
+	gate := &codexInputGate{tmux: a.tmux, state: state, statePath: matched[0].path, renewRestoreFence: request.RenewRestoreFence, removeFile: a.removeGateFile}
 	if err := gate.persist(); err != nil {
 		return fmt.Errorf("persist superseded Codex gate takeover: %w", err)
 	}
@@ -332,6 +333,7 @@ type codexInputGate struct {
 	statePath         string
 	restored          bool
 	renewRestoreFence func(context.Context) (bool, error)
+	removeFile        func(string) error
 }
 
 func (a *codexAppServerInputAuthority) acquireGate(ctx context.Context, request authoritativeAgentInputRequest) (result *codexInputGate, retErr error) {
@@ -362,7 +364,7 @@ func (a *codexAppServerInputAuthority) acquireGate(ctx context.Context, request 
 	}
 	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: request.Delivery.ProjectID, SessionID: request.Delivery.SessionID, AgentIncarnation: request.Delivery.Target.AgentIncarnation, LeaseOwner: request.SessionLeaseOwner, FenceToken: request.SessionLeaseToken,
 		PaneID: request.Delivery.Target.TmuxPaneID, HookID: strconv.FormatUint(hookIndex, 10), EventsPath: eventsPath, OriginalReadOnly: map[string]bool{}}
-	gate := &codexInputGate{tmux: a.tmux, state: state, statePath: base + ".json", renewRestoreFence: request.RenewRestoreFence}
+	gate := &codexInputGate{tmux: a.tmux, state: state, statePath: base + ".json", renewRestoreFence: request.RenewRestoreFence, removeFile: a.removeGateFile}
 	state.PaneInputEnabled, err = a.tmux.PaneInputEnabled(ctx, state.PaneID)
 	if err != nil {
 		_ = os.Remove(eventsPath)
@@ -509,9 +511,23 @@ func (g *codexInputGate) Restore(ctx context.Context) error {
 		}
 	}
 	if len(errs) == 0 {
-		g.restored = true
-		_ = os.Remove(g.statePath)
-		_ = os.Remove(g.state.EventsPath)
+		removeFile := g.removeFile
+		if removeFile == nil {
+			removeFile = os.Remove
+		}
+		if err := removeFile(g.state.EventsPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("remove input gate event ledger: %w", err))
+		}
+		// The state file is the durable completion marker. Delete it last and
+		// report success only after its removal is authoritative, so callers
+		// retain the exact session lease while any replayable marker remains.
+		if len(errs) == 0 {
+			if err := removeFile(g.statePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("remove input gate completion marker: %w", err))
+			} else {
+				g.restored = true
+			}
+		}
 	}
 	return errors.Join(errs...)
 }
