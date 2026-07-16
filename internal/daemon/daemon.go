@@ -207,10 +207,17 @@ type Daemon struct {
 	taskGraphRuntimeValidations          map[string]taskGraphRuntimeValidationEntry
 	taskGraphRuntimeValidationLoads      map[string]*taskGraphRuntimeValidationLoad
 	orchestrationMu                      sync.Mutex
-	orchestrationSnapshotMu              sync.Mutex
-	orchestrationSnapshotCache           map[string]orchestrationSnapshotCacheEntry
+	orchestrationSnapshotLoadMu          sync.Mutex
 	orchestrationSnapshotLoads           map[string]*orchestrationSnapshotLoad
 	orchestrationSnapshotBuild           orchestrationSnapshotBuilder
+	orchestrationProjectionExported      func()
+	taskGraphOperationList               func(context.Context, daemonops.Query) ([]daemonops.Record, error)
+	taskGraphUnresolvedInteractionIDs    func(context.Context, string) (map[string]struct{}, error)
+	taskGraphObservationEvents           func(context.Context, string, []string) issues.ProjectIssueObservationCapture
+	taskGraphWorktrees                   func(context.Context, string) ([]git.Worktree, error)
+	taskGraphMailboxRead                 func(string, string) ([]daemonMailEvent, error)
+	orchestrationSnapshotMu              sync.Mutex
+	orchestrationSnapshotCache           map[string]orchestrationSnapshotCacheEntry
 	materializersMu                      sync.RWMutex
 	materializersInitMu                  sync.Mutex
 	materializers                        map[string]*projectReadMaterializer
@@ -219,6 +226,8 @@ type Daemon struct {
 	projectReadRuntimeHydrate            func(context.Context, string, []domain.Task) ([]domain.Task, error)
 	projectReadWorktreeRefresh           func(context.Context, string, *projectReadMaterializer) error
 	reviewLeaseReleasedBeforeClose       func(context.Context, string, string) error
+	reviewAcceptedSourceOID              func(context.Context, string, string) (string, error)
+	mailProjectedBeforeAppend            func(context.Context, daemonMailEvent) error
 	watchClientsMu                       sync.Mutex
 	watchClients                         map[string]watchClientObservation
 	terminalFailureProbeMu               sync.Mutex
@@ -371,11 +380,11 @@ func New(cfg Config) *Daemon {
 		taskListSnapshotCache:              map[string]taskListSnapshotCacheEntry{},
 		issueAutoArchiveLastRun:            map[string]time.Time{},
 		taskGraphReadinessLoads:            map[string]*taskGraphReadinessLoad{},
+		orchestrationSnapshotLoads:         map[string]*orchestrationSnapshotLoad{},
 		taskGraphReadinessCache:            map[string]taskGraphReadinessCacheEntry{},
 		taskGraphRuntimeValidations:        map[string]taskGraphRuntimeValidationEntry{},
 		taskGraphRuntimeValidationLoads:    map[string]*taskGraphRuntimeValidationLoad{},
 		orchestrationSnapshotCache:         map[string]orchestrationSnapshotCacheEntry{},
-		orchestrationSnapshotLoads:         map[string]*orchestrationSnapshotLoad{},
 		materializers:                      map[string]*projectReadMaterializer{},
 		revision:                           map[string]uint64{},
 		userProjectionConsumers:            map[string]*userProjectionConsumerHandle{},

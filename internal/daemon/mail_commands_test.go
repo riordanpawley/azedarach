@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -63,6 +65,16 @@ func TestMailWatchRecoversReviewReadyResubmissionsExactlyOnce(t *testing.T) {
 	if err != nil || !bytes.Contains(encoded, []byte(`"storage":"issue_event_payload_json_v1"`)) {
 		t.Fatalf("replay validation = %s err=%v, want source issue-event diagnostics preserved", encoded, err)
 	}
+	if err := d.ensureLegacyMailboxObservationProjection(ctx, "project", repoDir); err != nil {
+		t.Fatal(err)
+	}
+	cutover, err := client.MailboxObservationProjectionCutoverState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cutover.State != "complete" || cutover.ImportedCount != 1 {
+		t.Fatalf("cutover = %+v, want derived replay publication imported once", cutover)
+	}
 	restarted := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}}
 	afterRestart, err := restarted.readMailboxEventsWithReviewReadyRecovery(ctx, req, repoDir, root)
 	if err != nil || len(afterRestart) != 1 {
@@ -100,6 +112,331 @@ func TestMailWatchRecoversReviewReadyResubmissionsExactlyOnce(t *testing.T) {
 	}
 	if len(watched) != 1 || watched[0].Seq != 2 || watched[0].IssueID.String() != child {
 		t.Fatalf("watched = %+v, want watch-only consumer to receive resubmission", watched)
+	}
+}
+
+func TestLegacyMailboxProjectionPreservesTopLevelWorkerEvidence(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	root, err := client.Create(ctx, issues.CreateTaskParams{Title: "root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := client.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInReview, ParentID: &root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(mustWorkerEvidencePayload(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := appendMailboxEvent(repoDir, daemonMailEvent{
+		Seq: 1, ParentIssue: root, IssueID: child, Type: "worker-integration-ready",
+		From: "worker", Body: string(body), CreatedAt: time.Now().UTC(),
+		Payload: map[string]interface{}{
+			"publication":     reviewReadyReplayPublication,
+			"publication_key": "worker-controlled-payload-must-not-skip",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+	if err := d.ensureLegacyMailboxObservationProjection(ctx, "project", repoDir); err != nil {
+		t.Fatal(err)
+	}
+	durableEvents, err := client.ListIssueReviewReadyObservationEvents(ctx, child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	durableReplay := domain.ReduceReviewReadyEvidence(durableEvents).LatestEvidence
+	if durableReplay == nil || !durableReplay.Validation.Complete || durableReplay.SourceEvent.SourceCommand != "mailbox.cutover" {
+		t.Fatalf("durable replay = %+v, want cutover event with complete top-level evidence", durableReplay)
+	}
+	if _, ok := durableReplay.SourceEvent.Payload["mail_event"]; !ok {
+		t.Fatalf("durable payload = %+v, want nested mailbox identity", durableReplay.SourceEvent.Payload)
+	}
+}
+
+func TestMailSendProjectsStewardshipEventsWithoutProjectMailboxReads(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	root, err := client.Create(ctx, issues.CreateTaskParams{Title: "root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := client.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInProgress, ParentID: &root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+	evidenceBody, err := json.Marshal(mustWorkerEvidencePayload(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []protocol.MailSendCommandBody{
+		{RepoDir: repoDir, ParentIssue: root, IssueID: naming.IssueID(child), Type: "worker-progress", From: "worker", To: "orchestrator", Body: "progress"},
+		{RepoDir: repoDir, ParentIssue: root, IssueID: naming.IssueID(child), Type: "worker-blocked", From: "worker", To: "orchestrator", Body: "blocked"},
+		{RepoDir: repoDir, ParentIssue: root, IssueID: naming.IssueID(child), Type: "worker-integration-ready", From: "worker", To: "orchestrator", Body: string(evidenceBody)},
+	} {
+		resp, handleErr := d.handleMailSend(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: "project"}, Body: mustMarshal(t, event)})
+		if handleErr != nil || !resp.OK {
+			t.Fatalf("mail send %s: resp=%+v err=%v", event.Type, resp, handleErr)
+		}
+	}
+	for i := range 60 {
+		if _, err := client.AppendIssueObservationEvent(ctx, child, issues.IssueObservationEventParams{
+			Type: domain.IssueEventIssueDetailsChanged, ObservedAt: time.Now().UTC().Add(time.Duration(i) * time.Millisecond), Source: "noise", Payload: map[string]any{"index": i},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rootedScope, err := domain.RootedOrchestrationScope(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rooted, err := (daemonOrchestrationAuthority{daemon: d}).Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: rootedScope, ActorID: "orchestrator", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mailboxReads := 0
+	d.taskGraphMailboxRead = func(string, string) ([]daemonMailEvent, error) {
+		mailboxReads++
+		return nil, fmt.Errorf("project scope must not read mailbox files")
+	}
+	project, err := (daemonOrchestrationAuthority{daemon: d}).Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mailboxReads != 0 {
+		t.Fatalf("project mailbox reads = %d, want 0", mailboxReads)
+	}
+	if len(rooted.RecentEvents) != 3 || len(project.RecentEvents) != 3 {
+		t.Fatalf("rooted=%+v project=%+v, want three stewardship events despite noise", rooted.RecentEvents, project.RecentEvents)
+	}
+	for i := range rooted.RecentEvents {
+		rootedEvent, projectEvent := rooted.RecentEvents[i], project.RecentEvents[i]
+		rootedPayloadJSON, rootedErr := json.Marshal(rootedEvent.Payload)
+		projectPayloadJSON, projectErr := json.Marshal(projectEvent.Payload)
+		var rootedPayload, projectPayload any
+		if rootedErr == nil {
+			rootedErr = json.Unmarshal(rootedPayloadJSON, &rootedPayload)
+		}
+		if projectErr == nil {
+			projectErr = json.Unmarshal(projectPayloadJSON, &projectPayload)
+		}
+		rootedEvent.Payload, projectEvent.Payload = nil, nil
+		if rootedErr != nil || projectErr != nil || !reflect.DeepEqual(projectEvent, rootedEvent) || !reflect.DeepEqual(projectPayload, rootedPayload) {
+			t.Fatalf("event %d mismatch:\nrooted=%+v\nproject=%+v", i, rooted.RecentEvents[i], project.RecentEvents[i])
+		}
+	}
+}
+
+func TestMailSendReconcilesSQLiteFirstCrashWithoutSequenceReuse(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	root, err := client.Create(ctx, issues.CreateTaskParams{Title: "root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := client.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInProgress, ParentID: &root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spoofed := daemonMailEvent{
+		Seq: 1, ParentIssue: root, IssueID: child, Type: "worker-progress", From: "spoof", To: "orchestrator",
+		Body: "must not replay", CreatedAt: time.Now().UTC(),
+	}
+	for _, sourceCommand := range []string{"manual.spoof", "mail.send"} {
+		if _, err := client.AppendIssueObservationEvent(ctx, child, issues.IssueObservationEventParams{
+			Type: domain.IssueObservationEventType(spoofed.Type), ObservedAt: spoofed.CreatedAt,
+			Source: "spoof", SourceCommand: sourceCommand, Payload: projectedMailObservationPayload(spoofed),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+	send := func(requestID, body string) protocol.ResponseEnvelope {
+		t.Helper()
+		resp, handleErr := d.handleMailSend(ctx, protocol.RequestEnvelope{
+			RequestID: naming.RequestID(requestID),
+			Meta:      protocol.Metadata{ProjectID: "project"},
+			Body: mustMarshal(t, protocol.MailSendCommandBody{
+				RepoDir: repoDir, ParentIssue: root, IssueID: naming.IssueID(child), Type: "worker-progress",
+				From: "worker", To: "orchestrator", Body: body,
+			}),
+		})
+		if handleErr != nil {
+			t.Fatal(handleErr)
+		}
+		return resp
+	}
+
+	d.mailProjectedBeforeAppend = func(context.Context, daemonMailEvent) error { return errors.New("injected crash after SQLite commit") }
+	if resp := send("mail-crash-1", "first"); resp.OK || !strings.Contains(resp.Error.Message, "injected crash") {
+		t.Fatalf("first send = %+v, want injected SQLite-first crash", resp)
+	}
+	if events, err := readMailboxEvents(repoDir, root); err != nil || len(events) != 0 {
+		t.Fatalf("mailbox after crash = %+v err=%v, want no JSONL append", events, err)
+	}
+
+	d.mailProjectedBeforeAppend = nil
+	if resp := send("mail-crash-1", "first"); !resp.OK {
+		t.Fatalf("same delivery retry = %+v, want durable outbox replay", resp)
+	}
+	if events, err := readMailboxEvents(repoDir, root); err != nil || len(events) != 1 || events[0].Seq != 1 || events[0].Body != "first" {
+		t.Fatalf("mailbox after retry = %+v err=%v, want original sequence 1", events, err)
+	}
+	if resp := send("mail-crash-1", "changed payload"); resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "different message") {
+		t.Fatalf("request ID payload mismatch = %+v, want canonical identity rejection", resp)
+	}
+
+	d.mailProjectedBeforeAppend = func(context.Context, daemonMailEvent) error { return errors.New("injected second crash") }
+	if resp := send("mail-crash-2", "second"); resp.OK {
+		t.Fatalf("second crash send = %+v, want failure", resp)
+	}
+	d.mailProjectedBeforeAppend = nil
+	if resp := send("mail-after-crash", "third"); !resp.OK {
+		t.Fatalf("distinct send after crash = %+v, want reconciliation", resp)
+	}
+	events, err := readMailboxEvents(repoDir, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("mailbox = %+v, want three durable deliveries", events)
+	}
+	for i, wantBody := range []string{"first", "second", "third"} {
+		if events[i].Seq != int64(i+1) || events[i].Body != wantBody {
+			t.Fatalf("mailbox[%d] = %+v, want seq=%d body=%q", i, events[i], i+1, wantBody)
+		}
+	}
+	projected, err := client.ListIssueObservationMailEvents(ctx, root)
+	if err != nil || len(projected) != 3 {
+		t.Fatalf("projected outbox = %+v err=%v, want one row per logical delivery", projected, err)
+	}
+}
+
+func TestValidateCanonicalMailOutboxObservationRejectsSpoofedIdentity(t *testing.T) {
+	createdAt := time.Date(2026, 7, 15, 1, 2, 3, 0, time.UTC)
+	canonical := domain.IssueObservationEvent{
+		ID: 9, IssueID: naming.IssueID("child"), Type: "worker-progress", ObservedAt: createdAt,
+		SourceCommand: "mail.send", Payload: map[string]any{"mail_delivery_id": "request-9"},
+	}
+	base := daemonMailEvent{Seq: 1, ParentIssue: "root", IssueID: "child", Type: "worker-progress", Body: "progress", CreatedAt: createdAt}
+	for _, test := range []struct {
+		name  string
+		event daemonMailEvent
+		want  string
+	}{
+		{name: "issue", event: func() daemonMailEvent { event := base; event.IssueID = "other"; return event }(), want: "does not match observation issue"},
+		{name: "type", event: func() daemonMailEvent { event := base; event.Type = "worker-blocked"; return event }(), want: "does not match canonical observation type"},
+		{name: "time", event: func() daemonMailEvent { event := base; event.CreatedAt = createdAt.Add(time.Second); return event }(), want: "does not match observation time"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateCanonicalMailOutboxObservation(canonical, test.event); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("validation error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestProjectSnapshotBackfillsPreUpgradeMailboxOnceWithRootedShape(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	root, err := client.Create(ctx, issues.CreateTaskParams{Title: "root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := client.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInProgress, ParentID: &root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := time.Date(2026, 7, 14, 3, 0, 0, 0, time.UTC)
+	legacy := []daemonMailEvent{
+		{Seq: 1, ParentIssue: root, IssueID: child, Type: "worker-progress", From: "worker", To: "orchestrator", Body: "legacy progress", CreatedAt: created},
+		{Seq: 2, ParentIssue: root, IssueID: child, Type: "worker-blocked", From: "worker", To: "orchestrator", Body: "legacy blocker", CreatedAt: created.Add(time.Second), Payload: map[string]any{"reason": "dependency"}},
+	}
+	for _, event := range legacy {
+		if err := appendMailboxEvent(repoDir, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+	rootedScope, err := domain.RootedOrchestrationScope(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rooted, err := (daemonOrchestrationAuthority{daemon: d}).Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: rootedScope, ActorID: "orchestrator", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := (daemonOrchestrationAuthority{daemon: d}).Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(project.RecentEvents, rooted.RecentEvents) || len(project.RecentEvents) != 2 {
+		t.Fatalf("rooted=%+v project=%+v, want exact pre-upgrade event shape and ordering", rooted.RecentEvents, project.RecentEvents)
+	}
+
+	mailboxDir := filepath.Join(repoDir, ".azedarach", "mailbox")
+	if err := os.RemoveAll(mailboxDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mailboxDir, []byte("cutover complete; reads must not recur"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restarted := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+	afterRestart, err := (daemonOrchestrationAuthority{daemon: restarted}).Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", Limit: 10})
+	if err != nil {
+		t.Fatalf("completed cutover re-read filesystem mailbox: %v", err)
+	}
+	if !reflect.DeepEqual(afterRestart.RecentEvents, project.RecentEvents) {
+		t.Fatalf("after restart=%+v project=%+v, want stable no-duplicate durable events", afterRestart.RecentEvents, project.RecentEvents)
+	}
+	events, err := client.ListIssueObservationEvents(ctx, child, issues.IssueObservationEventListOptions{Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stewardshipCount := 0
+	for _, event := range events {
+		if _, visible := projectStewardshipEventType(event.Type); visible {
+			stewardshipCount++
+		}
+	}
+	if stewardshipCount != 2 {
+		t.Fatalf("durable events = %+v, want exactly two stewardship rows without retry duplicates", events)
+	}
+}
+
+func TestLegacyMailboxProjectionRefusesOversizedFileWithoutCompleting(t *testing.T) {
+	repoDir := t.TempDir()
+	mailboxDir := filepath.Join(repoDir, ".azedarach", "mailbox")
+	if err := os.MkdirAll(mailboxDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(mailboxDir, "root.jsonl")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(legacyMailboxCutoverMaxFileBytes + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readLegacyMailboxObservationProjection(repoDir); err == nil || !strings.Contains(err.Error(), "bounded file limit") {
+		t.Fatalf("oversized legacy mailbox error = %v, want bounded refusal", err)
 	}
 }
 
@@ -206,7 +543,7 @@ func TestMailConcurrentSendDoesNotWaitForReviewReadyReplayLoad(t *testing.T) {
 	})
 	sendDone := make(chan protocol.ResponseEnvelope, 1)
 	go func() {
-		resp, _ := d.handleMailSend(ctx, protocol.RequestEnvelope{Body: sendBody})
+		resp, _ := d.handleMailSend(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: "project"}, Body: sendBody})
 		sendDone <- resp
 	}()
 	select {

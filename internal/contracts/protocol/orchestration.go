@@ -7,13 +7,14 @@ import (
 )
 
 const (
-	CommandOrchestrationSnapshot     = "orchestration.snapshot"
-	CommandOrchestrationIntent       = "orchestration.intent"
-	CommandOrchestratorSessionStart  = "orchestration.session.start"
-	CommandOrchestratorSessionAttach = "orchestration.session.attach"
-	CommandOrchestratorSessionStop   = "orchestration.session.stop"
-	CommandOrchestratorSessionStatus = "orchestration.session.status"
-	EventOrchestrationLoopUpdated    = "orchestration.loop.updated"
+	CommandOrchestrationSnapshot           = "orchestration.snapshot"
+	CommandOrchestrationIntent             = "orchestration.intent"
+	CommandOrchestratorSessionStart        = "orchestration.session.start"
+	CommandOrchestratorSessionAttach       = "orchestration.session.attach"
+	CommandOrchestratorSessionStop         = "orchestration.session.stop"
+	CommandOrchestratorSessionStatus       = "orchestration.session.status"
+	EventOrchestrationLoopUpdated          = "orchestration.loop.updated"
+	OrchestrationProjectionAuthoritySQLite = "sqlite"
 )
 
 type OrchestrationLoopEventBody struct {
@@ -56,6 +57,8 @@ type OrchestrationSnapshot struct {
 	Lifecycle              domain.OrchestratorLifecycle              `json:"lifecycle,omitempty"`
 	Scope                  domain.OrchestrationScope                 `json:"scope"`
 	Revision               uint64                                    `json:"revision"`
+	ProjectionRevision     uint64                       `json:"projection_revision,omitempty"`
+	ProjectionAuthority    string                       `json:"projection_authority,omitempty"`
 	Source                 MaterializedSnapshotMetadata `json:"source"`
 	GeneratedAt            time.Time                                 `json:"generated_at"`
 	Roots                  []string                                  `json:"roots,omitempty"`

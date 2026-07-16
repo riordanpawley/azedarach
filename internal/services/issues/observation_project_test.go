@@ -2,6 +2,7 @@ package issues
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"testing"
@@ -38,6 +39,42 @@ func TestListProjectIssueObservationEventsProvidesDurableCursor(t *testing.T) {
 	}
 	if len(after) != len(events)-1 || after[0].ID <= cursor {
 		t.Fatalf("after cursor %d = %+v", cursor, after)
+	}
+}
+
+func TestListIssueObservationEventsForIssuesBoundsEachIssueInOneResult(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	ids := make([]string, 0, 2)
+	for _, title := range []string{"first", "second"} {
+		issueID, err := client.Create(ctx, CreateTaskParams{Title: title, Description: "scope", Acceptance: "done", Type: domain.TypeTask, Status: domain.StatusOpen})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, issueID)
+		for sequence := 1; sequence <= 3; sequence++ {
+			if _, err := client.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{Type: domain.IssueObservationEventType("worker.progress"), Source: "test", Payload: map[string]any{"sequence": sequence}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	events, err := client.ListIssueObservationEventsForIssues(ctx, ids, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, issueID := range ids {
+		if len(events[issueID]) != 2 || events[issueID][0].Payload["sequence"] != float64(3) || events[issueID][1].Payload["sequence"] != float64(2) {
+			t.Fatalf("events[%s] = %+v, want newest two", issueID, events[issueID])
+		}
+	}
+	manyIDs := make([]string, 1200)
+	for i := range manyIDs {
+		manyIDs[i] = fmt.Sprintf("missing-%d", i)
+	}
+	if _, err := client.ListIssueObservationEventsForIssues(ctx, manyIDs, 2); err != nil {
+		t.Fatalf("large batch must remain one JSON-parameter query: %v", err)
 	}
 }
 

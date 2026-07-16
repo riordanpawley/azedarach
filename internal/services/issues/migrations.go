@@ -92,6 +92,7 @@ var orderedMigrations = []migration{
 	{id: "0049_managed_agent_incarnations", path: "migrations/0049_managed_agent_incarnations.sql"},
 	{id: issueObservationEventSearchMigrationID, path: "migrations/0050_issue_observation_event_search.sql"},
 	{id: decisionIdempotencyMigrationID, path: "migrations/0051_decision_idempotency.sql"},
+	{id: mailboxObservationProjectionCutoverMigrationID, path: "migrations/0052_mailbox_observation_projection_cutover.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -152,6 +153,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "0049_managed_agent_incarnations", Path: "migrations/0049_managed_agent_incarnations.sql", Checksum: "8364ceb9fad589df3f73c1fe0f0462c22b127510f1745e62fcc11e24757fe08d"},
 	{ID: "0050_issue_observation_event_search", Path: "migrations/0050_issue_observation_event_search.sql", Checksum: "e5a8efc20ddf313822576c4d6d42cd94e1837dfac810834957689d30b952005d"},
 	{ID: decisionIdempotencyMigrationID, Path: "migrations/0051_decision_idempotency.sql", Checksum: "86d5400fe33bbc19e7e848bc232335809f76d85e4d45a6e45f6bc7ff77547f47"},
+	{ID: mailboxObservationProjectionCutoverMigrationID, Path: "migrations/0052_mailbox_observation_projection_cutover.sql", Checksum: "fd86080f491210c169005c7f28bc778aca3eea2d70ce15a6c001bb960397e260"},
 }
 
 func validateMigrationRegistry() error {
@@ -439,19 +441,21 @@ func migrateIssueSessionLogicalIdentity(ctx context.Context, tx *sql.Tx) error {
 }
 
 const (
-	migrationArtifactAuthority             sqlitemigration.Authority = "project.issues"
-	issueStateModelV2MigrationID                                     = "0029_issue_state_model_v2"
-	issueStateModelVersionMetaKey                                    = "issue:state_model_version"
-	issueStateModelV2CutoverMarkerKey                                = "issue:state_model_v2_cutover"
-	issueStateModelV2Version                                         = "2"
-	boardViewsMigrationID                                            = "0031_board_views"
-	projectionDeltaAuthorityMigrationID                              = "0047_projection_delta_authority"
-	projectionDeltaAuthorityChecksum                                 = "9f7bed54f9694c608c7ce081c4007539eb46ce67adc9127d5649a1dbb49b6c5a"
-	humanAuthorityProjectionMigrationID                              = "0047_human_authority_projection_revision"
-	decisionPropagationOutboxMigrationID                             = "0048_decision_propagation_outbox"
+	migrationArtifactAuthority                     sqlitemigration.Authority = "project.issues"
+	issueStateModelV2MigrationID                                             = "0029_issue_state_model_v2"
+	issueStateModelVersionMetaKey                                            = "issue:state_model_version"
+	issueStateModelV2CutoverMarkerKey                                        = "issue:state_model_v2_cutover"
+	issueStateModelV2Version                                                 = "2"
+	boardViewsMigrationID                                                    = "0031_board_views"
+	projectionDeltaAuthorityMigrationID                                      = "0047_projection_delta_authority"
+	projectionDeltaAuthorityChecksum                                         = "9f7bed54f9694c608c7ce081c4007539eb46ce67adc9127d5649a1dbb49b6c5a"
+	humanAuthorityProjectionMigrationID                                      = "0047_human_authority_projection_revision"
+	mailboxObservationProjectionCutoverMigrationID                           = "0052_mailbox_observation_projection_cutover"
+	mailboxObservationProjectionCutoverMetaKey                               = "issue:mailbox_observation_projection_cutover"
+	decisionPropagationOutboxMigrationID                                     = "0048_decision_propagation_outbox"
 	issueObservationEventSearchMigrationID                           = "0050_issue_observation_event_search"
-	contextualLearningMigrationID                                    = "0039_contextual_learning_activation"
-	legacyContextualLearningMigration                                = "0038_contextual_learning_activation"
+	contextualLearningMigrationID                                            = "0039_contextual_learning_activation"
+	legacyContextualLearningMigration                                        = "0038_contextual_learning_activation"
 )
 
 type issueStateModelV2CutoverMarker struct {
@@ -587,6 +591,9 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := validateIssueObservationEventSearchSchema(ctx, db); err != nil {
 		return err
 	}
+	if err := validateMailboxObservationProjectionCutover(ctx, db); err != nil {
+		return err
+	}
 	if err := validateProjectionDeltaAuthoritySchema(ctx, db); err != nil {
 		return fmt.Errorf("validate projection delta authority schema: %w", err)
 	}
@@ -633,6 +640,24 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("seed built-in board views: %w", err)
 	}
 	return sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifactAuthority, migrationArtifacts)
+}
+
+func validateMailboxObservationProjectionCutover(ctx context.Context, db *sql.DB) error {
+	var raw string
+	if err := db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, mailboxObservationProjectionCutoverMetaKey).Scan(&raw); err != nil {
+		return fmt.Errorf("applied migration %s is missing its cutover marker: %w", mailboxObservationProjectionCutoverMigrationID, err)
+	}
+	var marker struct {
+		State   string `json:"state"`
+		Version int    `json:"version"`
+	}
+	if err := json.Unmarshal([]byte(raw), &marker); err != nil {
+		return fmt.Errorf("applied migration %s has invalid cutover marker: %w", mailboxObservationProjectionCutoverMigrationID, err)
+	}
+	if marker.Version != 1 || marker.State != "pending" && marker.State != "complete" {
+		return fmt.Errorf("applied migration %s has unsupported cutover marker state=%q version=%d", mailboxObservationProjectionCutoverMigrationID, marker.State, marker.Version)
+	}
+	return nil
 }
 
 func (c *Client) applyDecisionIdempotencyMigration(ctx context.Context, db *sql.DB, id string) error {

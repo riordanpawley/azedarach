@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -6157,7 +6158,7 @@ func TestTaskCloseIntegrationRetriesRepeatedlyWhenTargetHeadMovesAfterScratchVal
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6303,7 +6304,7 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6414,7 +6415,7 @@ func TestTaskCloseIntegrationOriginBaseSkipsLocalMergeWhenRemoteTreeMatches(t *t
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6534,7 +6535,7 @@ func TestTaskCloseIntegrationOriginBaseAllowsRemoteAheadWhenSourceContained(t *t
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6602,7 +6603,7 @@ func TestTaskCloseIntegrationOriginBaseRetryUsesExactReceiptAfterSourceRemoval(t
 	}
 	result, err := d.integrateTaskBeforeCloseOriginBase(ctx, projectID, taskID, git.Worktree{
 		IssueID: taskID, Path: filepath.Join(repoDir, "removed-worktree"), Branch: sourceBranch,
-	}, repoDir, "preview", true)
+	}, repoDir, "preview", true, "")
 	if err != nil {
 		t.Fatalf("origin retry exact receipt error: %v", err)
 	}
@@ -6708,7 +6709,7 @@ func TestTaskCloseIntegrationOriginBaseRefusesLocalMergeWhenRemoteDiffRemains(t 
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
 	if err == nil {
 		t.Fatalf("integrateTaskBeforeClose error = nil, result = %+v; want origin-mode refusal", result)
 	}
@@ -7378,6 +7379,21 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
+	evidenceEvent, err := issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t),
+	})
+	if err != nil {
+		t.Fatalf("append reviewed evidence: %v", err)
+	}
+	evidence := domain.ReduceReviewReadyEvidence([]domain.IssueObservationEvent{evidenceEvent}).LatestEvidence
+	if evidence == nil || !evidence.Validation.Complete {
+		t.Fatalf("reviewed evidence = %+v, want complete", evidence)
+	}
+	evidenceBody, err := json.Marshal(evidence.Evidence)
+	if err != nil {
+		t.Fatalf("marshal reviewed evidence: %v", err)
+	}
+	evidencePin := &issues.ReviewEvidencePin{Source: "issue_event", EventID: evidenceEvent.ID, Digest: fmt.Sprintf("%x", sha256.Sum256(evidenceBody))}
 	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
 	if err := os.MkdirAll(sourceWorktree, 0o755); err != nil {
 		t.Fatalf("mkdir source worktree: %v", err)
@@ -7395,9 +7411,17 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 
 	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
 	commands := make([]string, 0, 12)
+	var lateEvidenceErr error
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		commands = append(commands, strings.Join(args, " "))
 		joined := strings.Join(args, " ")
+		if lateEvidenceErr == nil && len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-list" {
+			mutated := mustWorkerEvidencePayload(t)
+			mutated["summary"] = "late evidence from git runner hook"
+			_, lateEvidenceErr = issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
+				Type: domain.IssueEventEvidenceSubmitted, Source: "late-worker", Payload: mutated,
+			})
+		}
 		switch {
 		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
 			return worktreeListOutput, nil
@@ -7473,8 +7497,7 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	})
 
 	body, err := json.Marshal(taskCloseRequest{
-		TaskID:               taskID,
-		IntegrateBeforeClose: true,
+		TaskID: taskID, IntegrateBeforeClose: true, ExpectedReviewEvidence: evidencePin,
 	})
 	if err != nil {
 		t.Fatalf("marshal task close request: %v", err)
@@ -7502,6 +7525,9 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	}
 	if !result.IntegrationRequested || result.Integrated {
 		t.Fatalf("close integration result = %+v, want requested no-op integration", result)
+	}
+	if lateEvidenceErr == nil || !strings.Contains(lateEvidenceErr.Error(), "accepted review evidence is fenced") {
+		t.Fatalf("late git-runner evidence error = %v, want durable close-fence conflict", lateEvidenceErr)
 	}
 	if !result.WorktreeRemoved {
 		t.Fatalf("close integration result = %+v, want worktree cleanup", result)
@@ -8685,7 +8711,7 @@ func TestTaskGraphReadinessStopsAtNestedRoots(t *testing.T) {
 	if slices.Contains(result.Runnable, grandchild.String()) {
 		t.Fatalf("runnable = %v, must not flatten nested root descendant %s", result.Runnable, grandchild.String())
 	}
-	observations := (&Daemon{}).daemonTaskGraphWorkerObservations(context.Background(), "proj", rootID, byID, children, result)
+	observations := daemonTaskGraphWorkerObservations(rootID, byID, children, result, taskGraphReadinessContext{})
 	observedDirect := false
 	for _, observation := range observations {
 		if observation.IssueID == direct.String() {
@@ -9964,8 +9990,6 @@ func TestTaskGraphReadinessReportsStaleChildBranchContainmentRisk(t *testing.T) 
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	issuesClient := newMigratedIssueClientAtPath(t, dbPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
-	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, logger)
-	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 
 	rootIDRaw, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
 	if err != nil {
@@ -10006,17 +10030,6 @@ func TestTaskGraphReadinessReportsStaleChildBranchContainmentRisk(t *testing.T) 
 	}
 	runDaemonTestGit(t, repoDir, "commit", "-am", closedID.String()+": generate typed materializer rpc")
 	evidenceCommit := runDaemonTestGitOutput(t, repoDir, "rev-parse", "HEAD")
-	activeWorktree := filepath.Join(t.TempDir(), "active-worktree")
-	runDaemonTestGit(t, repoDir, "worktree", "add", "-q", activeWorktree, activeBranch)
-
-	for _, state := range []daemonstate.WorktreeState{
-		{ProjectID: projectID, IssueID: rootID.String(), Path: repoDir, Branch: rootBranch, UpdatedAt: time.Now().UTC()},
-		{ProjectID: projectID, IssueID: activeID.String(), Path: activeWorktree, Branch: activeBranch, UpdatedAt: time.Now().UTC()},
-	} {
-		if err := runtimeStateStore.UpsertWorktreeState(ctx, state); err != nil {
-			t.Fatalf("seed worktree state: %v", err)
-		}
-	}
 
 	d := &Daemon{
 		cfg: Config{RepoDir: repoDir, Logger: logger},
@@ -10024,14 +10037,12 @@ func TestTaskGraphReadinessReportsStaleChildBranchContainmentRisk(t *testing.T) 
 		issueClientsByProject: map[string]*issues.Client{
 			projectID: issuesClient,
 		},
-		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
-			repoDir: runtimeStateStore,
-		},
-		worktreeAdapter: &worktreeServiceAdapter{
-			manager:           git.NewWorktreeManager(git.NewExecRunner(repoDir), repoDir, logger),
-			runtimeStateStore: runtimeStateStore,
-			logger:            logger,
-		},
+	}
+	d.taskGraphWorktrees = func(context.Context, string) ([]git.Worktree, error) {
+		return []git.Worktree{
+			{IssueID: rootID.String(), Path: repoDir, Branch: rootBranch},
+			{IssueID: activeID.String(), Path: repoDir, Branch: activeBranch},
+		}, nil
 	}
 
 	ready, err := d.taskGraphReadiness(ctx, projectID, rootID.String())

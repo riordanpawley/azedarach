@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,6 +17,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"golang.org/x/sys/unix"
 )
 
@@ -31,7 +33,13 @@ type daemonMailEvent struct {
 	Payload     map[string]interface{} `json:"payload,omitempty"`
 }
 
-func (d *Daemon) handleMailSend(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+const (
+	legacyMailboxCutoverMaxEntries   = 2000
+	legacyMailboxCutoverMaxEvents    = 50000
+	legacyMailboxCutoverMaxFileBytes = 8 << 20
+)
+
+func (d *Daemon) handleMailSend(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	var cmd protocol.MailSendCommandBody
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -67,6 +75,10 @@ func (d *Daemon) handleMailSend(_ context.Context, req protocol.RequestEnvelope)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
+	existing, err = d.reconcileProjectedMailboxEvents(ctx, d.projectID(req.Meta), repoDir, parentIssue, existing)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("reconcile projected mailbox events: %v", err)), nil
+	}
 	nextSeq := int64(1)
 	if len(existing) > 0 {
 		nextSeq = existing[len(existing)-1].Seq + 1
@@ -82,8 +94,20 @@ func (d *Daemon) handleMailSend(_ context.Context, req protocol.RequestEnvelope)
 		Body:        cmd.Body,
 		CreatedAt:   time.Now().UTC(),
 	}
-	if err := appendMailboxEvent(repoDir, event); err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	projected, replayed, err := d.projectMailEvent(ctx, d.projectID(req.Meta), repoDir, strings.TrimSpace(req.RequestID.String()), event)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("project mailbox event: %v", err)), nil
+	}
+	event = projected
+	if !replayed {
+		if hook := d.mailProjectedBeforeAppend; hook != nil {
+			if err := hook(ctx, event); err != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("after project mailbox event: %v", err)), nil
+			}
+		}
+		if err := appendMailboxEvent(repoDir, event); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
 	}
 
 	out, err := json.Marshal(mailEventToProtocol(event))
@@ -118,6 +142,271 @@ func (d *Daemon) handleMailSend(_ context.Context, req protocol.RequestEnvelope)
 		)
 	}
 	return resp, nil
+}
+
+func (d *Daemon) projectMailEvent(ctx context.Context, projectID, repoDir, deliveryID string, event daemonMailEvent) (daemonMailEvent, bool, error) {
+	if strings.TrimSpace(event.IssueID) == "" {
+		return event, false, nil
+	}
+	projectedType, stewardship := projectStewardshipEventType(domain.IssueObservationEventType(event.Type))
+	if !stewardship {
+		return event, false, nil
+	}
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return event, false, nil
+	}
+	eventType := domain.IssueObservationEventType(projectedType)
+	payload := projectedMailObservationPayload(event)
+	if deliveryID = strings.TrimSpace(deliveryID); deliveryID != "" {
+		payload["mail_delivery_id"] = deliveryID
+	}
+	params := issues.IssueObservationEventParams{
+		Type:          eventType,
+		ObservedAt:    event.CreatedAt,
+		Source:        strings.TrimSpace(event.From),
+		SourceCommand: "mail.send",
+		WorktreePath:  strings.TrimSpace(repoDir),
+		Payload:       payload,
+	}
+	var durable domain.IssueObservationEvent
+	inserted := true
+	var err error
+	if deliveryID == "" {
+		durable, err = issueClient.AppendIssueObservationEvent(ctx, event.IssueID, params)
+	} else {
+		durable, inserted, err = issueClient.AppendIssueObservationMailDelivery(ctx, deliveryID, event.IssueID, params)
+	}
+	if errors.Is(err, domain.ErrNotFound) {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("mail event issue projection skipped for unknown issue", "project_id", projectID, "parent_issue", event.ParentIssue, "issue_id", event.IssueID, "type", event.Type)
+		}
+		return event, false, nil
+	}
+	if err != nil {
+		return event, false, err
+	}
+	stored, err := daemonMailEventFromObservation(durable)
+	if err != nil {
+		return event, false, err
+	}
+	if !sameMailDeliveryCommand(stored, event) {
+		return event, false, fmt.Errorf("mail request ID %s was already used for a different message", deliveryID)
+	}
+	return stored, !inserted, nil
+}
+
+func (d *Daemon) reconcileProjectedMailboxEvents(ctx context.Context, projectID, repoDir, parentIssue string, existing []daemonMailEvent) ([]daemonMailEvent, error) {
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return existing, nil
+	}
+	projected, err := issueClient.ListIssueObservationMailEvents(ctx, parentIssue)
+	if err != nil {
+		return nil, err
+	}
+	bySequence := make(map[int64]daemonMailEvent, len(existing))
+	for _, event := range existing {
+		bySequence[event.Seq] = event
+	}
+	lastSequence := lastMailboxSequence(existing)
+	for _, observation := range projected {
+		event, err := daemonMailEventFromObservation(observation)
+		if err != nil {
+			return nil, fmt.Errorf("decode projected mail observation %d: %w", observation.ID, err)
+		}
+		if err := validateCanonicalMailOutboxObservation(observation, event); err != nil {
+			return nil, fmt.Errorf("validate projected mail observation %d: %w", observation.ID, err)
+		}
+		if event.ParentIssue != parentIssue {
+			return nil, fmt.Errorf("projected mail observation %d belongs to parent %s, not %s", observation.ID, event.ParentIssue, parentIssue)
+		}
+		if current, ok := bySequence[event.Seq]; ok {
+			equal, err := sameProjectedMailboxEvent(current, event)
+			if err != nil {
+				return nil, err
+			}
+			if !equal {
+				return nil, fmt.Errorf("mailbox sequence %d conflicts with durable observation %d", event.Seq, observation.ID)
+			}
+			continue
+		}
+		if event.Seq <= lastSequence {
+			return nil, fmt.Errorf("cannot append projected mailbox sequence %d after sequence %d", event.Seq, lastSequence)
+		}
+		if err := appendMailboxEvent(repoDir, event); err != nil {
+			return nil, fmt.Errorf("append projected mailbox sequence %d: %w", event.Seq, err)
+		}
+		existing = append(existing, event)
+		bySequence[event.Seq] = event
+		lastSequence = event.Seq
+	}
+	return existing, nil
+}
+
+func validateCanonicalMailOutboxObservation(observation domain.IssueObservationEvent, event daemonMailEvent) error {
+	command := strings.TrimSpace(observation.SourceCommand)
+	switch command {
+	case "mail.send":
+		if observationPayloadString(observation.Payload, "mail_delivery_id") == "" {
+			return fmt.Errorf("mail.send outbox row is missing mail_delivery_id")
+		}
+	case "mailbox.cutover":
+	default:
+		return fmt.Errorf("source_command %q is not a canonical mail outbox producer", command)
+	}
+	if !naming.IssueIDsEqual(observation.IssueID.String(), event.IssueID) {
+		return fmt.Errorf("mail_event issue %s does not match observation issue %s", event.IssueID, observation.IssueID)
+	}
+	observationType, observationOK := projectStewardshipEventType(observation.Type)
+	eventType, eventOK := projectStewardshipEventType(domain.IssueObservationEventType(event.Type))
+	if !observationOK || !eventOK || observationType != eventType {
+		return fmt.Errorf("mail_event type %q does not match canonical observation type %q", event.Type, observation.Type)
+	}
+	if event.Seq <= 0 || strings.TrimSpace(event.ParentIssue) == "" {
+		return fmt.Errorf("mail_event parent/sequence identity is incomplete")
+	}
+	if !observation.ObservedAt.Equal(event.CreatedAt) {
+		return fmt.Errorf("mail_event created_at does not match observation time")
+	}
+	return nil
+}
+
+func daemonMailEventFromObservation(observation domain.IssueObservationEvent) (daemonMailEvent, error) {
+	raw, ok := observation.Payload["mail_event"]
+	if !ok {
+		return daemonMailEvent{}, fmt.Errorf("mail_event payload is missing")
+	}
+	body, err := json.Marshal(raw)
+	if err != nil {
+		return daemonMailEvent{}, fmt.Errorf("encode mail_event payload: %w", err)
+	}
+	var projected protocol.MailEvent
+	if err := json.Unmarshal(body, &projected); err != nil {
+		return daemonMailEvent{}, fmt.Errorf("decode mail_event payload: %w", err)
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(projected.CreatedAt))
+	if err != nil {
+		return daemonMailEvent{}, fmt.Errorf("decode mail_event created_at: %w", err)
+	}
+	return daemonMailEvent{
+		Seq: projected.Seq, ParentIssue: projected.ParentIssue, IssueID: projected.IssueID.String(), Type: projected.Type,
+		From: projected.From, To: projected.To, Body: projected.Body, CreatedAt: createdAt, Payload: projected.Payload,
+	}, nil
+}
+
+func sameMailDeliveryCommand(left, right daemonMailEvent) bool {
+	return left.ParentIssue == right.ParentIssue && left.IssueID == right.IssueID && left.Type == right.Type &&
+		left.From == right.From && left.To == right.To && left.Body == right.Body
+}
+
+func sameProjectedMailboxEvent(left, right daemonMailEvent) (bool, error) {
+	leftBody, err := json.Marshal(mailEventToProtocol(left))
+	if err != nil {
+		return false, fmt.Errorf("encode filesystem mailbox event %d: %w", left.Seq, err)
+	}
+	rightBody, err := json.Marshal(mailEventToProtocol(right))
+	if err != nil {
+		return false, fmt.Errorf("encode projected mailbox event %d: %w", right.Seq, err)
+	}
+	return bytes.Equal(leftBody, rightBody), nil
+}
+
+func (d *Daemon) ensureLegacyMailboxObservationProjection(ctx context.Context, projectID, repoDir string) error {
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return nil
+	}
+	marker, err := issueClient.MailboxObservationProjectionCutoverState(ctx)
+	if err != nil {
+		return err
+	}
+	if marker.State == "complete" {
+		return nil
+	}
+	observations, err := readLegacyMailboxObservationProjection(repoDir)
+	if err != nil {
+		return err
+	}
+	imported, err := issueClient.CompleteMailboxObservationProjectionCutover(ctx, observations)
+	if err != nil {
+		return err
+	}
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Info("legacy mailbox observation projection completed", "project_id", projectID, "mailbox_events", len(observations), "imported_events", imported)
+	}
+	return nil
+}
+
+func readLegacyMailboxObservationProjection(repoDir string) ([]issues.LegacyMailboxObservation, error) {
+	dirPath := filepath.Join(strings.TrimSpace(repoDir), ".azedarach", "mailbox")
+	dir, err := os.Open(dirPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("open legacy mailbox projection directory: %w", err)
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(legacyMailboxCutoverMaxEntries + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("scan legacy mailbox projection directory: %w", err)
+	}
+	if len(entries) > legacyMailboxCutoverMaxEntries {
+		return nil, fmt.Errorf("legacy mailbox projection exceeds bounded entry limit %d", legacyMailboxCutoverMaxEntries)
+	}
+	observations := make([]issues.LegacyMailboxObservation, 0, min(len(entries)*8, legacyMailboxCutoverMaxEvents))
+	for _, entry := range entries {
+		if entry.Type()&os.ModeSymlink != 0 || entry.IsDir() || filepath.Ext(entry.Name()) != ".jsonl" {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, fmt.Errorf("inspect legacy mailbox %s: %w", entry.Name(), err)
+		}
+		if !info.Mode().IsRegular() || info.Size() > legacyMailboxCutoverMaxFileBytes {
+			return nil, fmt.Errorf("legacy mailbox %s exceeds bounded file limit %d", entry.Name(), legacyMailboxCutoverMaxFileBytes)
+		}
+		file, err := os.Open(filepath.Join(dirPath, entry.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("open legacy mailbox %s: %w", entry.Name(), err)
+		}
+		scanner := bufio.NewScanner(io.LimitReader(file, legacyMailboxCutoverMaxFileBytes+1))
+		scanner.Buffer(make([]byte, 64*1024), legacyMailboxCutoverMaxFileBytes)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			var event daemonMailEvent
+			if err := json.Unmarshal([]byte(line), &event); err != nil {
+				_ = file.Close()
+				return nil, fmt.Errorf("decode legacy mailbox %s: %w", entry.Name(), err)
+			}
+			projectedType, stewardship := projectStewardshipEventType(domain.IssueObservationEventType(event.Type))
+			if !stewardship || strings.TrimSpace(event.IssueID) == "" {
+				continue
+			}
+			if len(observations) >= legacyMailboxCutoverMaxEvents {
+				_ = file.Close()
+				return nil, fmt.Errorf("legacy mailbox projection exceeds bounded event limit %d", legacyMailboxCutoverMaxEvents)
+			}
+			observations = append(observations, issues.LegacyMailboxObservation{
+				IssueID: event.IssueID, EventType: domain.IssueObservationEventType(projectedType), ObservedAt: event.CreatedAt,
+				Source: event.From, WorktreePath: repoDir, ParentIssue: event.ParentIssue, Sequence: event.Seq,
+				Payload: projectedMailObservationPayload(event),
+			})
+		}
+		scanErr := scanner.Err()
+		closeErr := file.Close()
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan legacy mailbox %s: %w", entry.Name(), scanErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close legacy mailbox %s: %w", entry.Name(), closeErr)
+		}
+	}
+	return observations, nil
 }
 
 func (d *Daemon) handleMailList(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -197,7 +486,10 @@ func (d *Daemon) handleMailWatch(ctx context.Context, req protocol.RequestEnvelo
 	return resp, nil
 }
 
-const reviewReadyReplayPublication = "review_ready_observation_replay.v1"
+const (
+	reviewReadyReplayPublication = "review_ready_observation_replay.v1"
+	reviewReadyReplaySender      = "daemon-observation-replay"
+)
 
 func (d *Daemon) readMailboxEventsWithReviewReadyRecovery(ctx context.Context, req protocol.RequestEnvelope, repoDir, parentIssue string) ([]daemonMailEvent, error) {
 	unlock, err := lockMailbox(repoDir, parentIssue)
@@ -298,13 +590,16 @@ func (d *Daemon) recoverReviewReadyMailboxEvents(ctx context.Context, req protoc
 		for _, publication := range domain.ReduceReviewReadyEvidence(byIssue[issueID]).Publications {
 			source := publication.SourceEvent
 			key := fmt.Sprintf("%s:%d", projectID, source.ID)
+			if lineageKey := reviewReadyReplayLineageKey(source); lineageKey != "" {
+				key = lineageKey
+			}
 			body, marshalErr := json.Marshal(publication.Evidence)
 			if marshalErr != nil {
 				return nil, fmt.Errorf("encode review-ready publication %s: %w", key, marshalErr)
 			}
 			event := daemonMailEvent{
 				ParentIssue: rootIssueID, IssueID: issueID,
-				Type: "worker-integration-ready", From: "daemon-observation-replay",
+				Type: "worker-integration-ready", From: reviewReadyReplaySender,
 				Body: string(body), CreatedAt: source.ObservedAt.UTC(),
 				Payload: map[string]interface{}{
 					"publication":                reviewReadyReplayPublication,
@@ -388,6 +683,14 @@ func lastMailboxSequence(events []daemonMailEvent) int64 {
 	return events[len(events)-1].Seq
 }
 
+func reviewReadyReplayLineageKey(event domain.IssueObservationEvent) string {
+	if event.SourceCommand != "mailbox.cutover" || event.Source != reviewReadyReplaySender || event.Payload["publication"] != reviewReadyReplayPublication {
+		return ""
+	}
+	key, _ := event.Payload["publication_key"].(string)
+	return strings.TrimSpace(key)
+}
+
 func filterMailEvents(events []daemonMailEvent, since int64, limit int) []protocol.MailEvent {
 	filtered := make([]protocol.MailEvent, 0, len(events))
 	for _, evt := range events {
@@ -425,6 +728,19 @@ func mailEventToProtocol(evt daemonMailEvent) protocol.MailEvent {
 		CreatedAt:   evt.CreatedAt.UTC().Format(time.RFC3339Nano),
 		Payload:     payload,
 	}
+}
+
+// projectedMailObservationPayload keeps the indexed mailbox identity alongside
+// the original event payload shape. Review and stewardship consumers therefore
+// see the same worker_evidence fields before and after durable projection.
+func projectedMailObservationPayload(evt daemonMailEvent) map[string]any {
+	projected := mailEventToProtocol(evt)
+	payload := make(map[string]any, len(projected.Payload)+1)
+	for key, value := range projected.Payload {
+		payload[key] = value
+	}
+	payload["mail_event"] = projected
+	return payload
 }
 
 func workerEvidencePayload(body string) map[string]interface{} {

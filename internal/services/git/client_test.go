@@ -3688,3 +3688,101 @@ func TestMergeError(t *testing.T) {
 		t.Errorf("Error message should mention merge failure, got: %v", err)
 	}
 }
+
+func TestSnapshotRefGraphCapturesMultipleRefsWithOneCommand(t *testing.T) {
+	calls := 0
+	base := strings.Repeat("0", 39) + "1"
+	root := strings.Repeat("0", 39) + "2"
+	active := strings.Repeat("0", 39) + "3"
+	runner := &mockRunner{runFunc: func(_ context.Context, args ...string) (string, error) {
+		calls++
+		return fmt.Sprintf("\x1e%s\x00%s\x00refs/heads/root\x00az-closed: integrated\n\nshared.go\n\x1e%s\x00%s\x00refs/heads/active\x00az-active: working\n\nshared.go\n\x1e%s\x00\x00\x00base\n", root, base, active, base, base), nil
+	}}
+	snapshot, err := NewClient(runner, slog.Default()).SnapshotRefGraph(context.Background(), "/repo", []string{"root", "active"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("git calls = %d, want one", calls)
+	}
+	if !snapshot.Contains("root", root) || snapshot.Contains("active", root) {
+		t.Fatalf("containment = root:%t active:%t", snapshot.Contains("root", root), snapshot.Contains("active", root))
+	}
+	if evidence := snapshot.IssueEvidence("root", "az-closed"); len(evidence) != 1 || evidence[0].Hash != root {
+		t.Fatalf("evidence = %+v", evidence)
+	}
+	if files := snapshot.ChangedFilesExclusive("root", "active"); len(files) != 1 || files[0] != "shared.go" {
+		t.Fatalf("exclusive files = %v", files)
+	}
+}
+
+func TestSnapshotRefGraphKeepsValidRefsWhenProjectionContainsMissingBranch(t *testing.T) {
+	repoDir := t.TempDir()
+	runClientTestGit(t, repoDir, "init", "-q", "-b", "main")
+	runClientTestGit(t, repoDir, "config", "user.name", "Azedarach Test")
+	runClientTestGit(t, repoDir, "config", "user.email", "azedarach@example.com")
+	if err := os.WriteFile(filepath.Join(repoDir, "tracked.txt"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runClientTestGit(t, repoDir, "add", "tracked.txt")
+	runClientTestGit(t, repoDir, "commit", "-q", "-m", "seed")
+	snapshot, err := NewClient(NewExecRunner(repoDir), slog.Default()).SnapshotRefGraph(context.Background(), repoDir, []string{"main", "missing-branch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainTip := runClientTestGitOutput(t, repoDir, "rev-parse", "main")
+	if !snapshot.Contains("main", mainTip) || snapshot.Tips["missing-branch"] != "" {
+		t.Fatalf("tips = %+v, want valid main and ignored missing branch", snapshot.Tips)
+	}
+}
+
+func TestSnapshotRefGraphMarksUnevenRefsIncompleteAtGlobalBound(t *testing.T) {
+	runner := &mockRunner{runFunc: func(_ context.Context, _ ...string) (string, error) {
+		var out strings.Builder
+		for i := range maxRefGraphSnapshotCommits {
+			hash := fmt.Sprintf("%040x", maxRefGraphSnapshotCommits-i)
+			parent := ""
+			if i+1 < maxRefGraphSnapshotCommits {
+				parent = fmt.Sprintf("%040x", maxRefGraphSnapshotCommits-i-1)
+			} else {
+				parent = strings.Repeat("f", 40)
+			}
+			decoration := ""
+			if i == 0 {
+				decoration = "refs/heads/root"
+			}
+			fmt.Fprintf(&out, "\x1e%s\x00%s\x00%s\x00root history %d\n\nroot.txt\n", hash, parent, decoration, i)
+		}
+		return out.String(), nil
+	}}
+	snapshot, err := NewClient(runner, slog.Default()).SnapshotRefGraph(context.Background(), "/repo", []string{"root", "short-active"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Truncated {
+		t.Fatal("snapshot must report the shared graph bound")
+	}
+	if snapshot.RefComplete("root") || snapshot.RefComplete("short-active") {
+		t.Fatalf("completeness root=%t active=%t, want both incomplete", snapshot.RefComplete("root"), snapshot.RefComplete("short-active"))
+	}
+}
+
+func TestRefGraphChangedFilesExclusiveConservativelyIncludesRevertedFiles(t *testing.T) {
+	base, first, revert := strings.Repeat("0", 39)+"1", strings.Repeat("0", 39)+"2", strings.Repeat("0", 39)+"3"
+	snapshot := RefGraphSnapshot{
+		Tips: map[string]string{"root": base, "active": revert},
+		Commits: map[string]RefGraphCommit{
+			base:   {Hash: base},
+			first:  {Hash: first, Parents: []string{base}, ChangedFiles: []string{"reverted.txt"}},
+			revert: {Hash: revert, Parents: []string{first}, ChangedFiles: []string{"reverted.txt"}},
+		},
+		Order: []string{revert, first, base},
+	}
+	snapshot.reachable = map[string]map[string]struct{}{
+		"root":   snapshot.reachableFrom(base),
+		"active": snapshot.reachableFrom(revert),
+	}
+	if files := snapshot.ChangedFilesExclusive("root", "active"); len(files) != 1 || files[0] != "reverted.txt" {
+		t.Fatalf("exclusive touched files = %v, want conservative reverted-file inclusion", files)
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -148,6 +149,26 @@ func TestParallelWorkerMaterialDecisionPropagationAndAcknowledgement(t *testing.
 	readiness, err = restarted.taskIntegrationReadiness(ctx, "project", second, "")
 	if err != nil || readiness.Ready || len(readiness.PendingDecisions) != 1 || readiness.PendingDecisions[0].Revision == pending[0].Revision {
 		t.Fatalf("new revision readiness=%+v err=%v", readiness, err)
+	}
+	if err := restarted.reconcileDecisionPropagationOutbox(ctx, "project"); err != nil {
+		t.Fatalf("reconcile updated decision propagation: %v", err)
+	}
+	// The decision update intentionally makes the earlier worker packet stale.
+	// Refresh it after canonical delivery so review acceptance reaches the
+	// pending-decision guard that this assertion is intended to exercise.
+	if _, err := client.AppendIssueObservationEvent(ctx, second, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)}); err != nil {
+		t.Fatal(err)
+	}
+	readiness, err = restarted.taskIntegrationReadiness(ctx, "project", second, "")
+	if err != nil || readiness.EvidencePacket == nil {
+		t.Fatalf("refreshed evidence readiness=%+v err=%v", readiness, err)
+	}
+	reviewSnapshot, err := restarted.orchestrationAuthority().Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", RepoDir: repoDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reviewSnapshot.ReviewQueue) != 1 || reviewSnapshot.ReviewQueue[0].Evidence == nil || len(reviewSnapshot.ReviewQueue[0].PendingDecisions) != 1 {
+		t.Fatalf("review snapshot queue=%+v, want refreshed structured evidence and one pending decision", reviewSnapshot.ReviewQueue)
 	}
 	result, err := restarted.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{
 		Scope: mustRootedDecisionScope(t, root), Kind: protocol.OrchestrationIntentReviewAccept,
@@ -1191,6 +1212,32 @@ func TestPendingDecisionEnrichmentComposesAndDeduplicatesExistingBlockers(t *tes
 		if strings.Count(got, want) != 1 {
 			t.Fatalf("composed blocker duplicated %q: %q", want, got)
 		}
+	}
+}
+
+func TestProjectOrchestrationSnapshotEnrichesPendingDecisionsInsideProjectionFence(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	worker, err := client.Create(ctx, issues.CreateTaskParams{Title: "fenced decision worker", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, worker, issues.IssueObservationEventParams{
+		Type: domain.IssueEventDecisionChanged, Source: "daemon-decision", SourceCommand: protocol.CommandDecisionUpdate,
+		Payload: map[string]any{"decision_id": "dec-fenced", "revision": int64(49), "material": true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", RepoDir: repoDir, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.PendingDecisions[worker]) != 1 || !strings.Contains(snapshot.Blocked[worker], "stale material decision dec-fenced revision 49") {
+		t.Fatalf("snapshot pending=%+v blocked=%+v, want fenced pending decision enrichment", snapshot.PendingDecisions, snapshot.Blocked)
 	}
 }
 
