@@ -258,6 +258,44 @@ func TestNativeCodexInputCancellationJoinsBlockedReader(t *testing.T) {
 	_ = r.Close()
 }
 
+func TestNativeCodexAuthorityCancellationClosesSilentConn(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "authority.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() { c, _ := listener.Accept(); accepted <- c }()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := nativeCodexAuthorityLoop(ctx, socket, nativeCodexRegistration{}, make(chan nativeCodexDelivery))
+	<-accepted
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("authority worker did not join")
+	}
+}
+
+func TestNativeCodexInputCancellationWithFullOutputJoins(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	defer r.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := readNativeCodexInputContext(ctx, r, make(chan byte))
+	_, _ = w.Write([]byte("x"))
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("stdin worker blocked on full output")
+	}
+}
+
 func TestCodexRPCPreservesStringAndNumericServerRequestIDs(t *testing.T) {
 	c := &codexRPCClient{waits: map[string]chan codexRPCMessage{}, requests: make(chan codexRPCMessage, 2), events: make(chan codexRPCMessage, 2), done: make(chan struct{})}
 	done := make(chan struct{})
