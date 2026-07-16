@@ -506,6 +506,38 @@ func TestAgentInputDeliveryRetainsSessionFenceWhenCompletionMarkerRemovalFails(t
 	}
 }
 
+func TestAgentInputDeliveryRecoversExpiredLeaseWithoutGateMarker(t *testing.T) {
+	ctx := context.Background()
+	runtimeStore, client, request := agentInputFixture(t)
+	now := request.ExpiresAt.Add(-time.Minute)
+	oldLease, acquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, request.ProjectID, request.SessionID, "inc-old", "daemon-old", now.Add(-2*time.Minute), time.Minute)
+	if err != nil || !acquired {
+		t.Fatalf("old lease=%+v acquired=%v err=%v", oldLease, acquired, err)
+	}
+	adapter := &fakeCodexInputTmux{paneEnabled: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: request.SessionID}}, panes: []tmux.PaneInfo{{SessionName: request.SessionID, PaneID: request.Target.TmuxPaneID, PanePID: request.Target.PanePID}}}
+	authority := newCodexAppServerInputAuthority(adapter, filepath.Join(t.TempDir(), "daemon.sock"), nil, func(string) daemonProjectRuntimeConfig {
+		return daemonProjectRuntimeConfig{CLITool: "codex", CodexAppServer: true}
+	})
+	authority.now = func() time.Time { return now }
+	authority.startRPC = func(context.Context, string) (codexAppServerRPC, error) { return &fakeCodexRPC{}, nil }
+	service := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, authority, "daemon-new")
+	service.now = func() time.Time { return now }
+	result, err := service.Deliver(ctx, request)
+	if err != nil || result.Outcome != domain.AgentInputDelivered {
+		t.Fatalf("marker-free takeover result=%+v err=%v", result, err)
+	}
+	adapter.mu.Lock()
+	if !adapter.paneEnabled || adapter.hooksEnabled || adapter.activeGates != 0 || adapter.clients[0].ReadOnly {
+		adapter.mu.Unlock()
+		t.Fatalf("delivery did not restore tmux after marker-free takeover: pane=%v hooks=%v active=%d clients=%+v", adapter.paneEnabled, adapter.hooksEnabled, adapter.activeGates, adapter.clients)
+	}
+	adapter.mu.Unlock()
+	next, acquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, request.ProjectID, request.SessionID, "inc-next", "daemon-next", now.Add(time.Second), time.Minute)
+	if err != nil || !acquired || next.TakeoverPending {
+		t.Fatalf("completed marker-free takeover left stale fence: lease=%+v acquired=%v err=%v", next, acquired, err)
+	}
+}
+
 func TestAgentInputDeliveryRetriesOnlyAfterAuthoritativeSubmissionRejection(t *testing.T) {
 	runtimeStore, client, request := agentInputFixture(t)
 	receiver := &rejectedSubmissionReceiver{}

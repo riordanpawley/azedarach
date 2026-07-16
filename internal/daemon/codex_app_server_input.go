@@ -376,6 +376,29 @@ func (a *codexAppServerInputAuthority) recoverSupersededGate(ctx context.Context
 		}
 		return nil
 	}
+	completeTakeover := func() error {
+		if request.CompleteSessionTakeover == nil {
+			return errors.New("missing durable session takeover completion boundary")
+		}
+		lease, err := request.CompleteSessionTakeover(ctx)
+		if err != nil {
+			return err
+		}
+		if lease.AgentIncarnation != request.Delivery.Target.AgentIncarnation || strings.TrimSpace(lease.LeaseToken) == "" {
+			return errors.New("durable session takeover completed for a different incarnation")
+		}
+		request.SessionLeaseToken = lease.LeaseToken
+		request.PreviousAgentIncarnation = ""
+		request.PreviousSessionLeaseToken = ""
+		return nil
+	}
+	if len(sessionGates) == 0 {
+		// The marker is persisted before the first tmux mutation and removed only
+		// after restoration is complete. No exact-session marker therefore means
+		// the previous owner crashed at one of the two safe boundaries; rotate the
+		// transferred durable fence without touching tmux.
+		return completeTakeover()
+	}
 	if len(sessionGates) != 1 {
 		return fmt.Errorf("%w: session takeover requires exactly one persisted Codex gate marker, found %d", errCodexGateRestoreIncomplete, len(sessionGates))
 	}
@@ -399,20 +422,7 @@ func (a *codexAppServerInputAuthority) recoverSupersededGate(ctx context.Context
 			return fmt.Errorf("%w: restore superseded Codex gate: %v", errCodexGateRestoreIncomplete, restoreErr)
 		}
 	}
-	if request.CompleteSessionTakeover == nil {
-		return errors.New("missing durable session takeover completion boundary")
-	}
-	lease, err := request.CompleteSessionTakeover(ctx)
-	if err != nil {
-		return err
-	}
-	if lease.AgentIncarnation != request.Delivery.Target.AgentIncarnation || strings.TrimSpace(lease.LeaseToken) == "" {
-		return errors.New("durable session takeover completed for a different incarnation")
-	}
-	request.SessionLeaseToken = lease.LeaseToken
-	request.PreviousAgentIncarnation = ""
-	request.PreviousSessionLeaseToken = ""
-	return nil
+	return completeTakeover()
 }
 
 func codexGateRefusal(err error, safeToRetry bool) agentInputRefusalError {
@@ -497,6 +507,15 @@ func (a *codexAppServerInputAuthority) acquireGate(ctx context.Context, request 
 	if err != nil {
 		_ = os.Remove(eventsPath)
 		return nil, err
+	}
+	renewed, err := request.RenewRestoreFence(ctx)
+	if err != nil {
+		_ = os.Remove(eventsPath)
+		return nil, fmt.Errorf("renew durable input gate fence before mutation: %w", err)
+	}
+	if !renewed {
+		_ = os.Remove(eventsPath)
+		return nil, errCodexSessionFenceLost
 	}
 	gate.state = state
 	if err := gate.persist(); err != nil {

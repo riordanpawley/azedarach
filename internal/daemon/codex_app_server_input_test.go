@@ -540,6 +540,26 @@ func TestCodexAppServerDeliverySerializesOneSessionGate(t *testing.T) {
 	}
 }
 
+func TestCodexInputGateRequiresLiveFenceBeforeMarkerOrTmuxMutation(t *testing.T) {
+	adapter := &fakeCodexInputTmux{paneEnabled: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb"}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
+	authority := newFakeCodexAuthority(t, adapter, &fakeCodexRPC{})
+	request := codexAuthorityRequest()
+	request.RenewRestoreFence = func(context.Context) (bool, error) { return false, nil }
+	gate, err := authority.acquireGate(context.Background(), request)
+	if gate != nil || !errors.Is(err, errCodexSessionFenceLost) {
+		t.Fatalf("gate=%+v err=%v, want durable fence loss", gate, err)
+	}
+	markers, globErr := filepath.Glob(filepath.Join(authority.gateDir, "gate-*"))
+	if globErr != nil || len(markers) != 0 {
+		t.Fatalf("stale owner left gate artifacts: markers=%v err=%v", markers, globErr)
+	}
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	if !adapter.paneEnabled || adapter.hooksEnabled || adapter.activeGates != 0 || len(adapter.setReadOnlyCalls) != 0 {
+		t.Fatalf("stale owner mutated tmux: pane=%v hooks=%v active=%d calls=%v", adapter.paneEnabled, adapter.hooksEnabled, adapter.activeGates, adapter.setReadOnlyCalls)
+	}
+}
+
 func TestCodexInputGateIncarnationTakeoverNeverOverlapsOrOldOwnerUngates(t *testing.T) {
 	ctx := context.Background()
 	adapter := &fakeCodexInputTmux{paneEnabled: true, hooksEnabled: true, activeGates: 1, maxGates: 1, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb", ReadOnly: true}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
@@ -717,12 +737,38 @@ func TestCodexInputGateFreshDeliveryRefusesRetainedExactSessionMarker(t *testing
 	}
 }
 
-func TestCodexInputGateTakeoverRefusesMissingMismatchedOrDuplicateSessionMarkers(t *testing.T) {
+func TestCodexInputGateTakeoverWithoutMarkerRotatesFenceWithoutTmuxMutation(t *testing.T) {
+	for _, name := range []string{"crash before marker persistence", "crash after marker removal"} {
+		t.Run(name, func(t *testing.T) {
+			adapter := &fakeCodexInputTmux{paneEnabled: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb"}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
+			authority := newFakeCodexAuthority(t, adapter, &fakeCodexRPC{})
+			request := codexAuthorityRequest()
+			request.PreviousAgentIncarnation = "thread-old"
+			request.PreviousSessionLeaseToken = "fence-old"
+			request.SessionLeaseToken = "fence-old"
+			request.CompleteSessionTakeover = func(context.Context) (issues.AgentInputDeliverySessionLease, error) {
+				return issues.AgentInputDeliverySessionLease{ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-exact", LeaseOwner: "daemon-new", LeaseToken: "fence-new"}, nil
+			}
+			if err := authority.recoverSupersededGate(context.Background(), &request); err != nil {
+				t.Fatalf("marker-free takeover error = %v", err)
+			}
+			if request.SessionLeaseToken != "fence-new" || request.PreviousAgentIncarnation != "" || request.PreviousSessionLeaseToken != "" {
+				t.Fatalf("takeover request fence was not rotated: %+v", request)
+			}
+			adapter.mu.Lock()
+			defer adapter.mu.Unlock()
+			if !adapter.paneEnabled || adapter.hooksEnabled || adapter.activeGates != 0 || len(adapter.setReadOnlyCalls) != 0 {
+				t.Fatalf("marker-free takeover mutated tmux: pane=%v hooks=%v active=%d calls=%v", adapter.paneEnabled, adapter.hooksEnabled, adapter.activeGates, adapter.setReadOnlyCalls)
+			}
+		})
+	}
+}
+
+func TestCodexInputGateTakeoverRefusesMismatchedOrDuplicateSessionMarkers(t *testing.T) {
 	tests := []struct {
 		name   string
 		states []codexInputGateState
 	}{
-		{name: "missing"},
 		{name: "mismatched", states: []codexInputGateState{{AgentIncarnation: "thread-other", FenceToken: "fence-old"}}},
 		{name: "duplicate", states: []codexInputGateState{{AgentIncarnation: "thread-old", FenceToken: "fence-old"}, {AgentIncarnation: "thread-old", FenceToken: "fence-old"}}},
 	}
