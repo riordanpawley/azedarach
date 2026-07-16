@@ -1059,7 +1059,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("set issue resource env: %v%s", err, cleanupNote)), nil
 		}
-		if err := waitForSessionPromptHandoffConsumed(ctx, promptHandoff); err != nil {
+		if err := waitForSessionPromptHandoffConsumed(ctx, launchArtifact.PromptHandoff); err != nil {
 			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("confirm session bootstrap prompt delivery: %v%s", err, cleanupNote)), nil
 		}
@@ -1835,10 +1835,6 @@ func (d *Daemon) restartAllTarget(ctx context.Context, target sessionRestartAllT
 		return item
 	}
 	if err := d.waitBeforeSessionResume(ctx, 250*time.Millisecond); err != nil {
-		item.Error = err.Error()
-		return item
-	}
-	if err := d.setSessionManagedPathEnv(ctx, target.SessionID); err != nil {
 		item.Error = err.Error()
 		return item
 	}
