@@ -1283,6 +1283,170 @@ func validateAgentInputDeliverySchemaContract(ctx context.Context, db sqlIssueQu
 	return nil
 }
 
+func validateAgentInputDeliveryNoInboundDependencies(ctx context.Context, db sqlIssueQueryer) error {
+	const target = "agent_input_delivery_intents"
+	rows, err := db.QueryContext(ctx, `
+		SELECT type, name, COALESCE(sql, '')
+		FROM sqlite_master
+		WHERE type IN ('view','trigger')
+		ORDER BY type, name
+	`)
+	if err != nil {
+		return fmt.Errorf("inspect inbound view and trigger dependencies: %w", err)
+	}
+	for rows.Next() {
+		var objectType, name, ddl string
+		if err := rows.Scan(&objectType, &name, &ddl); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan inbound schema dependency: %w", err)
+		}
+		if exactSQLiteDDLReferencesIdentifier(ddl, target) {
+			rows.Close()
+			return fmt.Errorf("inbound %s %s references %s", objectType, name, target)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate inbound schema dependencies: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close inbound schema dependency inspection: %w", err)
+	}
+
+	tables, err := db.QueryContext(ctx, `
+		SELECT name
+		FROM sqlite_master
+		WHERE type='table' AND name NOT LIKE 'sqlite_%' AND lower(name) <> lower(?)
+		ORDER BY name
+	`, target)
+	if err != nil {
+		return fmt.Errorf("inspect tables for inbound foreign keys: %w", err)
+	}
+	var tableNames []string
+	for tables.Next() {
+		var table string
+		if err := tables.Scan(&table); err != nil {
+			tables.Close()
+			return fmt.Errorf("scan table for inbound foreign keys: %w", err)
+		}
+		tableNames = append(tableNames, table)
+	}
+	if err := tables.Err(); err != nil {
+		tables.Close()
+		return fmt.Errorf("iterate tables for inbound foreign keys: %w", err)
+	}
+	if err := tables.Close(); err != nil {
+		return fmt.Errorf("close table inspection for inbound foreign keys: %w", err)
+	}
+	for _, table := range tableNames {
+		foreignKeys, err := db.QueryContext(ctx, `
+			SELECT id
+			FROM pragma_foreign_key_list(?)
+			WHERE lower([table])=lower(?)
+			LIMIT 1
+		`, table, target)
+		if err != nil {
+			return fmt.Errorf("inspect table %s inbound foreign keys: %w", table, err)
+		}
+		hasDependency := foreignKeys.Next()
+		if err := foreignKeys.Err(); err != nil {
+			foreignKeys.Close()
+			return fmt.Errorf("iterate table %s inbound foreign keys: %w", table, err)
+		}
+		if err := foreignKeys.Close(); err != nil {
+			return fmt.Errorf("close table %s inbound foreign key inspection: %w", table, err)
+		}
+		if hasDependency {
+			return fmt.Errorf("inbound foreign key from table %s references %s", table, target)
+		}
+	}
+	return nil
+}
+
+func exactSQLiteDDLReferencesIdentifier(ddl, target string) bool {
+	for i := 0; i < len(ddl); {
+		switch {
+		case i+1 < len(ddl) && ddl[i] == '-' && ddl[i+1] == '-':
+			i += 2
+			for i < len(ddl) && ddl[i] != '\n' {
+				i++
+			}
+		case i+1 < len(ddl) && ddl[i] == '/' && ddl[i+1] == '*':
+			i += 2
+			for i+1 < len(ddl) && !(ddl[i] == '*' && ddl[i+1] == '/') {
+				i++
+			}
+			if i+1 < len(ddl) {
+				i += 2
+			}
+		case ddl[i] == '\'':
+			i++
+			var quotedToken strings.Builder
+			for i < len(ddl) {
+				if ddl[i] == '\'' {
+					if i+1 < len(ddl) && ddl[i+1] == '\'' {
+						quotedToken.WriteByte('\'')
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				quotedToken.WriteByte(ddl[i])
+				i++
+			}
+			// SQLite accepts single-quoted identifiers in table-name positions.
+			// Conservatively treat an exact target token as a dependency; rejecting
+			// an unusual string literal is safer than rebuilding through an
+			// unobserved compatibility-quoted reference.
+			if strings.EqualFold(quotedToken.String(), target) {
+				return true
+			}
+		case ddl[i] == '"' || ddl[i] == '`' || ddl[i] == '[':
+			quote := ddl[i]
+			closeQuote := quote
+			if quote == '[' {
+				closeQuote = ']'
+			}
+			i++
+			var identifier strings.Builder
+			for i < len(ddl) {
+				if ddl[i] == closeQuote {
+					if quote != '[' && i+1 < len(ddl) && ddl[i+1] == closeQuote {
+						identifier.WriteByte(closeQuote)
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				identifier.WriteByte(ddl[i])
+				i++
+			}
+			if strings.EqualFold(identifier.String(), target) {
+				return true
+			}
+		default:
+			if !isSQLiteIdentifierByte(ddl[i]) {
+				i++
+				continue
+			}
+			start := i
+			for i < len(ddl) && isSQLiteIdentifierByte(ddl[i]) {
+				i++
+			}
+			if strings.EqualFold(ddl[start:i], target) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isSQLiteIdentifierByte(character byte) bool {
+	return character == '_' || character == '$' || character >= '0' && character <= '9' || character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= 0x80
+}
+
 func inspectExactSQLiteColumns(ctx context.Context, db sqlIssueQueryer, table string) ([]exactSQLiteColumn, error) {
 	rows, err := db.QueryContext(ctx, `SELECT cid, name, type, [notnull], dflt_value, pk, hidden FROM pragma_table_xinfo(?) ORDER BY cid`, table)
 	if err != nil {
@@ -1974,6 +2138,9 @@ func (c *Client) applyAgentInputDeliveryFencingMigration(ctx context.Context, db
 	// so schema drift remains intact and diagnosable on failure.
 	if err := validateAgentInputDeliveryBaseSchema(ctx, tx); err != nil {
 		return fmt.Errorf("validate migration %s predecessor: %w", id, err)
+	}
+	if err := validateAgentInputDeliveryNoInboundDependencies(ctx, tx); err != nil {
+		return fmt.Errorf("validate migration %s predecessor dependencies: %w", id, err)
 	}
 	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
 		return fmt.Errorf("apply migration %s: %w", id, err)

@@ -630,6 +630,36 @@ func TestCodexInputGateRequiresLiveFenceBeforeMarkerOrTmuxMutation(t *testing.T)
 	}
 }
 
+func TestCodexInputGateRevalidatesPaneIdentityImmediatelyBeforeFirstTmuxMutation(t *testing.T) {
+	adapter := &fakeCodexInputTmux{
+		paneEnabled: true,
+		clients:     []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb"}},
+		panes:       []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}},
+	}
+	authority := newFakeCodexAuthority(t, adapter, &fakeCodexRPC{})
+	request := codexAuthorityRequest()
+	request.RenewRestoreFence = func(context.Context) (bool, error) {
+		adapter.mu.Lock()
+		adapter.panes = []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 99}}
+		adapter.mu.Unlock()
+		return true, nil
+	}
+
+	gate, err := authority.acquireGate(context.Background(), request)
+	if gate != nil || !errors.Is(err, errCodexPaneIdentityChanged) || !errors.Is(err, errCodexGateRestoreIncomplete) {
+		t.Fatalf("gate=%+v err=%v, want retained stale-pane recovery gate", gate, err)
+	}
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	if !adapter.paneEnabled || adapter.hooksEnabled || adapter.activeGates != 0 || len(adapter.setReadOnlyCalls) != 0 {
+		t.Fatalf("acquisition mutated replacement runtime: pane=%v hooks=%v active=%d calls=%v", adapter.paneEnabled, adapter.hooksEnabled, adapter.activeGates, adapter.setReadOnlyCalls)
+	}
+	markers, globErr := filepath.Glob(filepath.Join(authority.gateDir, "gate-*"))
+	if globErr != nil || len(markers) != 2 {
+		t.Fatalf("stale-pane acquisition did not retain exact marker and event ledger: markers=%v err=%v", markers, globErr)
+	}
+}
+
 func TestCodexInputGateIncarnationTakeoverNeverOverlapsOrOldOwnerUngates(t *testing.T) {
 	ctx := context.Background()
 	adapter := &fakeCodexInputTmux{paneEnabled: true, hooksEnabled: true, activeGates: 1, maxGates: 1, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb", ReadOnly: true}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}

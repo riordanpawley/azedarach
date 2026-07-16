@@ -570,6 +570,32 @@ func TestNormalizeExactSQLiteDDLPreservesQuotedBytes(t *testing.T) {
 	}
 }
 
+func TestExactSQLiteDDLReferencesIdentifierAcrossSQLiteQuoting(t *testing.T) {
+	const target = "agent_input_delivery_intents"
+	for _, test := range []struct {
+		name string
+		ddl  string
+		want bool
+	}{
+		{name: "bare", ddl: `CREATE VIEW v AS SELECT * FROM agent_input_delivery_intents`, want: true},
+		{name: "double quoted", ddl: `CREATE VIEW v AS SELECT * FROM "agent_input_delivery_intents"`, want: true},
+		{name: "backtick quoted", ddl: "CREATE VIEW v AS SELECT * FROM `agent_input_delivery_intents`", want: true},
+		{name: "bracket quoted", ddl: `CREATE VIEW v AS SELECT * FROM [agent_input_delivery_intents]`, want: true},
+		{name: "single quoted compatibility identifier", ddl: `CREATE VIEW v AS SELECT * FROM 'agent_input_delivery_intents'`, want: true},
+		{name: "case insensitive identifier", ddl: `CREATE VIEW v AS SELECT * FROM AGENT_INPUT_DELIVERY_INTENTS`, want: true},
+		{name: "line comment", ddl: "CREATE VIEW v AS SELECT 1 -- agent_input_delivery_intents\n", want: false},
+		{name: "block comment", ddl: `CREATE VIEW v AS SELECT 1 /* agent_input_delivery_intents */`, want: false},
+		{name: "non-exact string literal", ddl: `CREATE VIEW v AS SELECT 'prefix agent_input_delivery_intents suffix'`, want: false},
+		{name: "different identifier", ddl: `CREATE VIEW v AS SELECT * FROM agent_input_delivery_intents_archive`, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := exactSQLiteDDLReferencesIdentifier(test.ddl, target); got != test.want {
+				t.Fatalf("exactSQLiteDDLReferencesIdentifier(%q)=%v, want %v", test.ddl, got, test.want)
+			}
+		})
+	}
+}
+
 func TestAgentInputDeliveryMigrationRejectsWeakenedStateConstraints(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -947,6 +973,61 @@ func TestAgentInputDeliveryFencingMigrationRejectsPredecessorDriftBeforeRebuild(
 			preservedSQL:      "review_sentinel text not null default 'default'",
 			preservedValueSQL: `SELECT review_sentinel FROM agent_input_delivery_intents WHERE intent_key='sentinel'`,
 			preservedValue:    "preserve-me",
+		},
+		{
+			name: "external view dependency",
+			mutate: func(t *testing.T, db *sql.DB) {
+				t.Helper()
+				if _, err := db.Exec(`CREATE VIEW review_delivery_view AS SELECT payload FROM "agent_input_delivery_intents"`); err != nil {
+					t.Fatal(err)
+				}
+			},
+			preservedType:     "view",
+			preservedName:     "review_delivery_view",
+			preservedSQL:      `select payload from "agent_input_delivery_intents"`,
+			preservedValueSQL: `SELECT payload FROM review_delivery_view WHERE payload='payload'`,
+			preservedValue:    "payload",
+		},
+		{
+			name: "external trigger dependency",
+			mutate: func(t *testing.T, db *sql.DB) {
+				t.Helper()
+				if _, err := db.Exec(`CREATE TABLE review_delivery_audit(id INTEGER PRIMARY KEY)`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`CREATE TRIGGER review_delivery_trigger AFTER INSERT ON review_delivery_audit BEGIN SELECT COUNT(*) FROM [agent_input_delivery_intents]; END`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`INSERT INTO review_delivery_audit(id) VALUES(7)`); err != nil {
+					t.Fatal(err)
+				}
+			},
+			preservedType:     "trigger",
+			preservedName:     "review_delivery_trigger",
+			preservedSQL:      "select count(*) from [agent_input_delivery_intents]",
+			preservedValueSQL: `SELECT CAST(id AS TEXT) FROM review_delivery_audit`,
+			preservedValue:    "7",
+		},
+		{
+			name: "external foreign key dependency",
+			mutate: func(t *testing.T, db *sql.DB) {
+				t.Helper()
+				if _, err := db.Exec(`CREATE TABLE review_delivery_reference(
+					project_id TEXT NOT NULL,
+					intent_key TEXT NOT NULL,
+					FOREIGN KEY(project_id, intent_key) REFERENCES "agent_input_delivery_intents"(project_id, intent_key)
+				)`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`INSERT INTO review_delivery_reference(project_id,intent_key) VALUES('p','sentinel')`); err != nil {
+					t.Fatal(err)
+				}
+			},
+			preservedType:     "table",
+			preservedName:     "review_delivery_reference",
+			preservedSQL:      `references "agent_input_delivery_intents"(project_id, intent_key)`,
+			preservedValueSQL: `SELECT intent_key FROM review_delivery_reference`,
+			preservedValue:    "sentinel",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

@@ -567,6 +567,13 @@ func (a *codexAppServerInputAuthority) acquireGate(ctx context.Context, request 
 			}
 		}
 	}()
+	// The pane may have been replaced after the initial inspection or while the
+	// durable fence/marker was established. Revalidate the exact session, pane,
+	// and PID at the last read-only boundary before acquisition's first tmux
+	// mutation so a replacement runtime is never fenced by this incarnation.
+	if err := gate.validatePaneIdentity(ctx, state.SessionID, state.PaneID, state.PanePID); err != nil {
+		return nil, err
+	}
 	if state.PaneInputEnabled {
 		if err := a.tmux.SetPaneInputEnabled(ctx, state.PaneID, false); err != nil {
 			return nil, err
