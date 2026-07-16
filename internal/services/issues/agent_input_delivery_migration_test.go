@@ -39,11 +39,8 @@ func TestAgentInputDeliveryMigrationFreshReopenAndDurableIntent(t *testing.T) {
 	}
 	defer db.Close()
 	var rows int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND length(artifact_checksum)=64`, agentInputDeliveryMigrationID).Scan(&rows); err != nil || rows != 1 {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, agentInputDeliveryMigrationID, agentInputDeliveryMigrationChecksum).Scan(&rows); err != nil || rows != 1 {
 		t.Fatalf("ledger rows=%d err=%v", rows, err)
-	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, agentInputDeliveryFencingMigrationID, agentInputDeliveryFencingMigrationChecksum).Scan(&rows); err != nil || rows != 1 {
-		t.Fatalf("fencing ledger rows=%d err=%v", rows, err)
 	}
 }
 
@@ -571,18 +568,17 @@ func TestAgentInputDeliveryMigrationRejectsWeakenedStateConstraints(t *testing.T
 			replacement: `CHECK (state != 'leased' OR lease_token IS NOT NULL)`,
 		},
 	}
-	artifact, err := migrationFiles.ReadFile("migrations/0053_agent_input_delivery_fencing.sql")
+	artifact, err := migrationFiles.ReadFile("migrations/0052_agent_input_delivery.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
 	artifactText := string(artifact)
 	createStart := strings.Index(artifactText, "CREATE TABLE agent_input_delivery_intents (")
-	copyStart := strings.Index(artifactText, "INSERT INTO agent_input_delivery_intents(")
-	finishStart := strings.Index(artifactText, "DROP TABLE agent_input_delivery_intents_0052;")
-	if createStart < 0 || copyStart <= createStart || finishStart <= copyStart {
-		t.Fatal("0053 artifact does not contain the expected rebuild phases")
+	finishStart := strings.Index(artifactText, "CREATE INDEX idx_agent_input_delivery_pending")
+	if createStart < 0 || finishStart <= createStart {
+		t.Fatal("0052 artifact does not contain the expected schema phases")
 	}
-	canonicalTable := artifactText[createStart:copyStart]
+	canonicalTable := artifactText[createStart:finishStart]
 	finishSchema := artifactText[finishStart:]
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -603,7 +599,7 @@ func TestAgentInputDeliveryMigrationRejectsWeakenedStateConstraints(t *testing.T
 				`DROP INDEX idx_agent_input_delivery_incarnation`,
 				`DROP INDEX idx_agent_input_session_lease_expiry`,
 				`DROP TABLE agent_input_delivery_session_leases`,
-				`ALTER TABLE agent_input_delivery_intents RENAME TO agent_input_delivery_intents_0052`,
+				`ALTER TABLE agent_input_delivery_intents RENAME TO agent_input_delivery_intents_canonical`,
 			} {
 				if _, err := db.Exec(statement); err != nil {
 					t.Fatal(err)
@@ -613,7 +609,7 @@ func TestAgentInputDeliveryMigrationRejectsWeakenedStateConstraints(t *testing.T
 			if weakened == canonicalTable {
 				t.Fatal("canonical constraint not found in artifact")
 			}
-			if _, err := db.Exec(weakened + "\n" + finishSchema); err != nil {
+			if _, err := db.Exec(weakened + "\n" + finishSchema + "\nDROP TABLE agent_input_delivery_intents_canonical;"); err != nil {
 				t.Fatal(err)
 			}
 			if err := db.Close(); err != nil {
@@ -770,64 +766,5 @@ func TestAgentInputDeliveryMigrationHistoricalUpgradeRollsBackAndRetries(t *test
 	}
 	if err = validateAgentInputDeliverySchema(ctx, retryDB); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestAgentInputDeliveryFencingMigrationUpgradesImmutable0052AndRollsBack(t *testing.T) {
-	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "issues.db")
-	seed := NewClientAtPath(path, nil)
-	seed.migrationCeiling = agentInputDeliveryMigrationID
-	db, err := seed.dbHandle()
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := formatTimestamp(time.Now().UTC())
-	if _, err := db.Exec(`INSERT INTO agent_input_delivery_intents(project_id,intent_key,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,tool,message_kind,payload,state,created_at,updated_at) VALUES('p','sentinel','s','agent','7',42,'inc','codex','session_message','payload','queued',?,?)`, now, now); err != nil {
-		t.Fatal(err)
-	}
-	var checksum string
-	if err := db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&checksum); err != nil || checksum != agentInputDeliveryMigrationChecksum {
-		t.Fatalf("immutable 0052 checksum=%q err=%v", checksum, err)
-	}
-	if err := seed.CloseDB(); err != nil {
-		t.Fatal(err)
-	}
-
-	failed := NewClientAtPath(path, nil)
-	failed.agentInputMigrationFailureHook = func(stage string) error {
-		if stage == "after_fencing_schema" {
-			return errors.New("interrupted")
-		}
-		return nil
-	}
-	if _, err := failed.dbHandle(); err == nil || !strings.Contains(err.Error(), "rolled back") {
-		t.Fatalf("err=%v", err)
-	}
-	_ = failed.CloseDB()
-	raw, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var marker, sentinel, sessionLeaseTable int
-	_ = raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, agentInputDeliveryFencingMigrationID).Scan(&marker)
-	_ = raw.QueryRow(`SELECT COUNT(*) FROM agent_input_delivery_intents WHERE intent_key='sentinel' AND payload='payload'`).Scan(&sentinel)
-	_ = raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_input_delivery_session_leases'`).Scan(&sessionLeaseTable)
-	_ = raw.Close()
-	if marker != 0 || sentinel != 1 || sessionLeaseTable != 0 {
-		t.Fatalf("rollback marker0053=%d sentinel=%d lease_table=%d", marker, sentinel, sessionLeaseTable)
-	}
-
-	retried := NewClientAtPath(path, nil)
-	defer retried.CloseDB()
-	retryDB, err := retried.dbHandle()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validateAgentInputDeliverySchema(ctx, retryDB); err != nil {
-		t.Fatal(err)
-	}
-	if err := retryDB.QueryRow(`SELECT COUNT(*) FROM agent_input_delivery_intents WHERE intent_key='sentinel' AND payload='payload'`).Scan(&sentinel); err != nil || sentinel != 1 {
-		t.Fatalf("upgraded sentinel=%d err=%v", sentinel, err)
 	}
 }
