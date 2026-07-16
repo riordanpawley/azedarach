@@ -311,8 +311,8 @@ func validateWorkerEvidencePacket(packet WorkerEvidencePacket, fields map[string
 		if !evidence.Present {
 			invalid = append(invalid, "aggregate_validation must include machine-load evidence")
 		}
-		if evidence.OverlapDetected {
-			invalid = append(invalid, "aggregate_validation must not overlap external Go processes")
+		if evidence.Purpose == ValidationPurposeCapacity && evidence.OverlapDetected {
+			invalid = append(invalid, "capacity aggregate_validation must not overlap external Go processes")
 		}
 	}
 	sort.Strings(missing)
