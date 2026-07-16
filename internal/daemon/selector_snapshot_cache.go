@@ -18,9 +18,9 @@ type selectorSnapshotLoad struct {
 	refresh    bool
 }
 
-// selectorSnapshotCache keeps only successful, immutable response bodies. The
-// singleflight group coalesces both cold fills and warm refreshes by effective
-// request key; callers always receive a copy they can safely marshal or mutate.
+// selectorSnapshotCache keeps only successful, immutable response bodies.
+// Singleflight coalesces cold fills by request key; explicit refresh admission
+// enforces the per-key and daemon-wide bounds. Callers always receive a copy.
 type selectorSnapshotCache struct {
 	mu              sync.RWMutex
 	entries         map[string][]byte
