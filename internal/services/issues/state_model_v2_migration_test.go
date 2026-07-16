@@ -351,6 +351,17 @@ func seedIssueStateModelV1DB(t *testing.T, dbPath string) {
 			tombstoned_at TEXT,
 			PRIMARY KEY (issue_id, depends_on_id, dependency_type)
 		);
+		CREATE TABLE decisions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			local_id TEXT NOT NULL UNIQUE,
+			title TEXT NOT NULL,
+			rationale TEXT,
+			context TEXT,
+			consequences TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			deleted_at TEXT
+		);
 	`)
 	require.NoError(t, err)
 

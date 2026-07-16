@@ -211,6 +211,17 @@ func seedBoardViewsPreMigrationDB(t *testing.T, dbPath string, includeCustomBoar
 			tombstoned_at TEXT,
 			PRIMARY KEY (issue_id, depends_on_id, dependency_type)
 		);
+		CREATE TABLE decisions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			local_id TEXT NOT NULL UNIQUE,
+			title TEXT NOT NULL,
+			rationale TEXT,
+			context TEXT,
+			consequences TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			deleted_at TEXT
+		);
 		INSERT INTO meta (key, value) VALUES (?, ?);
 		INSERT INTO issues (id, title, status, priority, issue_type, created_at, updated_at, lifecycle_state, closed_outcome, review_state)
 		VALUES ('az-board-open', 'Open board issue', 'open', 2, 'task', ?, ?, 'open', 'none', 'none');
