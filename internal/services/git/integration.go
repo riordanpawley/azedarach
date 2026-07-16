@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +22,8 @@ const (
 	integrationJournalVersion   = integrationJournalVersionV2
 	integrationReceiptVersion   = 1
 )
+
+const integrationFailureArtifactsPrefix = "azedarach-integration-failure-"
 
 type integrationJournal struct {
 	Version         int                         `json:"version"`
@@ -187,6 +191,79 @@ func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch
 	applied, cleanupHandled, err := c.applyValidatedScratchMerge(ctx, worktree, scratchPath, targetHead, desiredHead, scratchOwner, result)
 	scratchCleanupHandled = cleanupHandled
 	return applied, err
+}
+
+func (c *Client) preserveIntegrationFailureArtifacts(scratchPath string, result *MergeResult, mergeErr error) string {
+	if mergeErr == nil && (result == nil || result.Success) {
+		return ""
+	}
+	if !strings.HasPrefix(filepath.Base(scratchPath), "azedarach-integration-") {
+		return ""
+	}
+	source := filepath.Join(scratchPath, ".tmp", "test-timing")
+	if info, err := os.Stat(source); err != nil || !info.IsDir() {
+		return ""
+	}
+	destination, err := os.MkdirTemp("", integrationFailureArtifactsPrefix)
+	if err != nil {
+		if c.logger != nil {
+			c.logger.Warn("failed to create integration failure artifact directory", "source", source, "error", err)
+		}
+		return ""
+	}
+	target := filepath.Join(destination, "test-timing")
+	if err := copyDirectory(source, target); err != nil {
+		_ = os.RemoveAll(destination)
+		if c.logger != nil {
+			c.logger.Warn("failed to preserve integration failure artifacts", "source", source, "error", err)
+		}
+		return ""
+	}
+	return destination
+}
+
+func copyDirectory(source, destination string) error {
+	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return fmt.Errorf("resolve artifact path %s: %w", path, err)
+		}
+		target := filepath.Join(destination, relative)
+		if entry.IsDir() {
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return fmt.Errorf("create artifact directory %s: %w", target, err)
+			}
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return nil
+		}
+		input, err := os.Open(path)
+		if err != nil {
+			return fmt.Errorf("open artifact %s: %w", path, err)
+		}
+		output, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+		if err != nil {
+			_ = input.Close()
+			return fmt.Errorf("create preserved artifact %s: %w", target, err)
+		}
+		_, copyErr := io.Copy(output, input)
+		inputCloseErr := input.Close()
+		closeErr := output.Close()
+		if copyErr != nil {
+			return fmt.Errorf("copy artifact %s: %w", path, copyErr)
+		}
+		if inputCloseErr != nil {
+			return fmt.Errorf("close artifact %s: %w", path, inputCloseErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close preserved artifact %s: %w", target, closeErr)
+		}
+		return nil
+	})
 }
 
 func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scratchPath, candidateHead string) (CandidateValidationAttempt, bool, error) {

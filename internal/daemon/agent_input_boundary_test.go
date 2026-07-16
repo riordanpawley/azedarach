@@ -20,8 +20,6 @@ func TestDaemonRawTmuxInputCallersAreStructurallyBounded(t *testing.T) {
 		"orchestrator_bootstrap.go:ensureRootedOrchestratorBootstrap:PasteTextAndSubmit": true,
 		"orchestrator_session.go:gracefullyStopOrchestratorRuntime:PasteTextAndSubmit":   true,
 		"orchestrator_session.go:gracefullyStopOrchestratorRuntime:SendKeys":             true,
-		"session_commands.go:restartAllTarget:SendKeys":                                  true,
-		"session_commands.go:restartAllTarget:PasteTextAndSubmit":                        true,
 		"session_commands.go:startSessionAsyncInitCommands:SendKeys":                     true,
 		"session_commands.go:exportIssueResourceSessionEnv:SendKeys":                     true,
 		"session_commands.go:exportSessionContextEnv:SendKeys":                           true,

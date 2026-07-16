@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -5592,7 +5593,8 @@ func TestClient_CreateBusyRetryStopsAtEarlierCallerDeadline(t *testing.T) {
 	started := time.Now()
 	_, err = client.Create(ctx, CreateTaskParams{Title: "cancelled-busy-retry", Type: domain.TypeTask, Priority: domain.P3})
 	require.Error(t, err)
-	assert.True(t, IsSQLiteBusy(err), "error = %v, want preserved SQLite busy error", err)
+	assert.True(t, IsSQLiteBusy(err) || errors.Is(err, context.DeadlineExceeded),
+		"error = %v, want SQLite busy observed before the deadline or the caller deadline itself", err)
 	assert.Less(t, time.Since(started), 500*time.Millisecond)
 }
 

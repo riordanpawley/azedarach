@@ -301,11 +301,11 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 
 	// restart-all replaces and re-acknowledges the rooted agent while holding
 	// the same exact-scope transition lock used by rooted start/attach.
-	d.sessionResumeWait = immediateSessionResumeWait
+	tmuxRunner.onRespawnPane = seedManagedRestartIdentity(t, d, tmuxRunner, projectID, started.SessionID)
 	restartRequest := protocol.RequestEnvelope{
 		Command: protocol.CommandSessionRestartAll,
 		Meta:    protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-		Body:    marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(projectID)}),
+		Body:    marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(projectID), ForceBusy: true}),
 	}
 	inputsBefore = len(tmuxRunner.inputPayloads)
 	handoffsBefore := len(tmuxRunner.handoffPromptContents)
@@ -336,13 +336,9 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 		t.Fatalf("acknowledged restarted rooted agent was re-prompted")
 	}
 
-	// Cancellation after the interrupt leaves durable acknowledgement absent,
-	// so a later rooted start repairs whichever process survived.
-	var replacementWaits int
-	d.sessionResumeWait = func(context.Context, time.Duration) error {
-		replacementWaits++
-		return context.Canceled
-	}
+	// A failed exact replacement leaves durable acknowledgement absent, so a
+	// later rooted start repairs whichever process survived.
+	tmuxRunner.respawnErr = context.Canceled
 	cancelledResponse, err := d.handleSessionRestartAll(ctx, restartRequest)
 	if err != nil || cancelledResponse.Error != nil {
 		t.Fatalf("cancel rooted replacement: response=%+v err=%v", cancelledResponse.Error, err)
@@ -351,8 +347,8 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if err := json.Unmarshal(cancelledResponse.Body, &cancelledResult); err != nil {
 		t.Fatal(err)
 	}
-	if replacementWaits != 1 || cancelledResult.Restarted != 0 || cancelledResult.Failed != 1 {
-		t.Fatalf("cancelled rooted replacement result = %+v waits=%d", cancelledResult, replacementWaits)
+	if cancelledResult.Restarted != 0 || cancelledResult.Failed != 1 {
+		t.Fatalf("cancelled rooted replacement result = %+v", cancelledResult)
 	}
 	cancelledNonce := tmuxRunner.env[started.SessionID][rootedOrchestratorBootstrapNonceEnvironment]
 	if cancelledNonce != "" {
@@ -361,7 +357,7 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if _, found, err := ackAuthority.Get(ctx, identity); err != nil || found {
 		t.Fatalf("cancelled replacement acknowledgement found=%t err=%v", found, err)
 	}
-	d.sessionResumeWait = immediateSessionResumeWait
+	tmuxRunner.respawnErr = nil
 	inputsBefore = len(tmuxRunner.inputPayloads)
 	response, err = d.handleOrchestratorSession(ctx, request)
 	if err != nil || response.Error != nil {
@@ -533,20 +529,17 @@ func TestRootedRestartSerializesAcrossDaemonsAndAcknowledgesReplacement(t *testi
 
 	replacementPaused := make(chan struct{})
 	releaseReplacement := make(chan struct{})
-	firstWait := true
-	first.sessionResumeWait = func(ctx context.Context, _ time.Duration) error {
-		if firstWait {
-			firstWait = false
-			close(replacementPaused)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-releaseReplacement:
-			}
+	updateReplacement := seedManagedRestartIdentity(t, first, runner, projectID, started.SessionID)
+	runner.onRespawnPane = func(ctx context.Context, args []string) error {
+		close(replacementPaused)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-releaseReplacement:
 		}
-		return nil
+		return updateReplacement(ctx, args)
 	}
-	restartRequest := protocol.RequestEnvelope{Command: protocol.CommandSessionRestartAll, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(projectID)})}
+	restartRequest := protocol.RequestEnvelope{Command: protocol.CommandSessionRestartAll, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(projectID), ForceBusy: true})}
 	type commandResult struct {
 		response protocol.ResponseEnvelope
 		err      error

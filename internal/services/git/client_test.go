@@ -1185,6 +1185,43 @@ func TestRealProcessProfileMergeCleanlyTransactionalRunsScratchHooksAndKeepsTarg
 	}
 }
 
+func TestRealProcessProfileMergeCleanlyTransactionalPreservesFailedGateArtifacts(t *testing.T) {
+	repo := initDivergedRepo(t)
+	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
+	hook := "#!/bin/sh\nset -eu\nartifact=.tmp/test-timing/cold-sentinel\nmkdir -p \"$artifact\"\nprintf '# sentinel report\\n' > \"$artifact/report.md\"\nprintf '{\"Action\":\"fail\"}\\n' > \"$artifact/events.jsonl\"\necho merge gate failed >&2\nexit 1\n"
+	if err := os.WriteFile(hookPath, []byte(hook), 0o755); err != nil {
+		t.Fatalf("write commit-msg hook: %v", err)
+	}
+
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	result, err := client.MergeCleanlyTransactional(context.Background(), repo, "feature")
+	if err != nil {
+		t.Fatalf("MergeCleanlyTransactional() error = %v", err)
+	}
+	if result == nil || result.Success {
+		t.Fatalf("MergeCleanlyTransactional() result = %+v, want failed gate", result)
+	}
+	const marker = "preserved integration failure artifacts at "
+	markerIndex := strings.LastIndex(result.Message, marker)
+	if markerIndex < 0 {
+		t.Fatalf("MergeCleanlyTransactional() message = %q, want preserved artifact path", result.Message)
+	}
+	preserved := strings.TrimSpace(result.Message[markerIndex+len(marker):])
+	t.Cleanup(func() { _ = os.RemoveAll(preserved) })
+	for name, want := range map[string]string{
+		"report.md":    "# sentinel report\n",
+		"events.jsonl": "{\"Action\":\"fail\"}\n",
+	} {
+		content, readErr := os.ReadFile(filepath.Join(preserved, "test-timing", "cold-sentinel", name))
+		if readErr != nil {
+			t.Fatalf("read preserved %s: %v", name, readErr)
+		}
+		if string(content) != want {
+			t.Fatalf("preserved %s = %q, want %q", name, content, want)
+		}
+	}
+}
+
 func TestRealProcessProfileRecoverIntegrationJournalCompletesInterruptedFinalReset(t *testing.T) {
 	repo := initDivergedRepo(t)
 	client := NewClient(NewExecRunner(repo), slog.Default())
