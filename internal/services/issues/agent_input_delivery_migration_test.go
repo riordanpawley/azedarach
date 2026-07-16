@@ -126,6 +126,64 @@ func TestAgentInputDeliveryLeaseExpiryAndExactAcknowledgementFence(t *testing.T)
 	}
 }
 
+func TestAgentInputDeliveryTimestampPredicatesCompareChronologically(t *testing.T) {
+	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	defer client.CloseDB()
+	ctx := context.Background()
+	base := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	now := base.Add(500 * time.Millisecond)
+	request := domain.AgentInputDeliveryRequest{ProjectID: "p", SessionID: "s", Target: domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 42, AgentIncarnation: "inc"}, Tool: "codex", Kind: domain.AgentInputMessageSessionMessage, Payload: "body"}
+
+	past := request
+	past.IntentKey = "integral-expiry"
+	past.ExpiresAt = base
+	if _, err := client.EnsureAgentInputDeliveryIntent(ctx, past); err != nil {
+		t.Fatal(err)
+	}
+	future := request
+	future.IntentKey = "fractional-expiry"
+	future.ExpiresAt = now.Add(100 * time.Microsecond)
+	if _, err := client.EnsureAgentInputDeliveryIntent(ctx, future); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := client.ListPendingAgentInputDeliveryIntents(ctx, "p", now, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].Request.IntentKey != future.IntentKey {
+		t.Fatalf("pending=%+v, want only fractional future expiry", pending)
+	}
+	expired, err := client.EnsureAgentInputDeliveryIntent(ctx, past)
+	if err != nil || expired.State != "expired" {
+		t.Fatalf("integral expiry intent=%+v err=%v", expired, err)
+	}
+
+	leaseBase := base.Add(time.Hour)
+	for _, key := range []string{"integral-lease", "fractional-lease"} {
+		leased := request
+		leased.IntentKey = key
+		leased.ExpiresAt = leaseBase.Add(time.Hour)
+		if _, err := client.EnsureAgentInputDeliveryIntent(ctx, leased); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, claimed, err := client.ClaimAgentInputDeliveryIntent(ctx, "p", "integral-lease", "daemon-a", leaseBase, time.Second)
+	if err != nil || !claimed {
+		t.Fatalf("integral first claim=%+v claimed=%v err=%v", first, claimed, err)
+	}
+	second, claimed, err := client.ClaimAgentInputDeliveryIntent(ctx, "p", "integral-lease", "daemon-b", leaseBase.Add(1500*time.Millisecond), time.Second)
+	if err != nil || !claimed || second.LeaseToken == first.LeaseToken {
+		t.Fatalf("integral expired takeover=%+v claimed=%v err=%v", second, claimed, err)
+	}
+	first, claimed, err = client.ClaimAgentInputDeliveryIntent(ctx, "p", "fractional-lease", "daemon-a", leaseBase, time.Second+100*time.Microsecond)
+	if err != nil || !claimed {
+		t.Fatalf("fractional first claim=%+v claimed=%v err=%v", first, claimed, err)
+	}
+	if _, claimed, err = client.ClaimAgentInputDeliveryIntent(ctx, "p", "fractional-lease", "daemon-b", leaseBase.Add(time.Second), time.Second); err != nil || claimed {
+		t.Fatalf("fractional live lease claimed=%v err=%v", claimed, err)
+	}
+}
+
 func TestAgentInputDeliverySessionLeaseIsCrossClientAndSessionScoped(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
@@ -230,12 +288,15 @@ func TestAgentInputDeliverySubmissionFenceTimeoutRemainsAmbiguousAndAllowsExpire
 		_ = tx.Rollback()
 		t.Fatal(err)
 	}
-	renewCtx, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
-	_, renewed, renewErr := clients[1].RenewAgentInputDeliverySessionLease(renewCtx, "p", "s", "inc-old", lease.LeaseToken, now.Add(20*time.Millisecond), 100*time.Millisecond)
-	cancel()
-	if renewErr == nil || renewed {
+	busyObserved := false
+	clients[1].sqliteBusyWait = func(context.Context, time.Duration) error {
+		busyObserved = true
+		return errors.New("stop after observed SQLite busy barrier")
+	}
+	_, renewed, renewErr := clients[1].RenewAgentInputDeliverySessionLease(ctx, "p", "s", "inc-old", lease.LeaseToken, now.Add(20*time.Millisecond), 100*time.Millisecond)
+	if renewErr == nil || renewed || !busyObserved || !IsSQLiteBusy(renewErr) {
 		_ = tx.Rollback()
-		t.Fatalf("blocked renewal renewed=%v err=%v", renewed, renewErr)
+		t.Fatalf("blocked renewal renewed=%v busy_observed=%v err=%v", renewed, busyObserved, renewErr)
 	}
 	if err := tx.Rollback(); err != nil {
 		t.Fatal(err)

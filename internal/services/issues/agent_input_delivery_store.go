@@ -203,44 +203,59 @@ func (c *Client) ClaimAgentInputDeliverySessionLeaseRecovery(ctx context.Context
 }
 
 func (c *Client) ListPendingAgentInputDeliveryIntents(ctx context.Context, projectID string, now time.Time, limit int) ([]AgentInputDeliveryIntent, error) {
-	db, err := c.dbHandle()
-	if err != nil {
-		return nil, err
-	}
 	if limit <= 0 {
 		limit = 100
 	}
-	if err := c.retrySQLiteBusy(ctx, func() error {
+	var intents []AgentInputDeliveryIntent
+	err := c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
-			_, err := db.ExecContext(lockCtx, `UPDATE agent_input_delivery_intents SET state='expired',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=? WHERE project_id=? AND state IN ('queued','leased','ambiguous') AND expires_at IS NOT NULL AND expires_at<=?`, formatTimestamp(now), projectID, formatTimestamp(now))
-			return err
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			tx, err := db.BeginTx(lockCtx, nil)
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback()
+			rows, err := tx.QueryContext(lockCtx, `SELECT intent_key FROM agent_input_delivery_intents WHERE project_id=? AND state IN ('queued','leased','ambiguous') ORDER BY created_at,intent_key`, projectID)
+			if err != nil {
+				return err
+			}
+			var keys []string
+			for rows.Next() {
+				var key string
+				if err := rows.Scan(&key); err != nil {
+					rows.Close()
+					return err
+				}
+				keys = append(keys, key)
+			}
+			if err := rows.Close(); err != nil {
+				return err
+			}
+			intents = make([]AgentInputDeliveryIntent, 0, min(limit, len(keys)))
+			for _, key := range keys {
+				intent, err := c.loadAgentInputDeliveryIntent(lockCtx, tx, projectID, key)
+				if err != nil {
+					return err
+				}
+				if !intent.Request.ExpiresAt.IsZero() && !now.Before(intent.Request.ExpiresAt) {
+					if _, err := tx.ExecContext(lockCtx, `UPDATE agent_input_delivery_intents SET state='expired',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=? WHERE project_id=? AND intent_key=? AND state IN ('queued','leased','ambiguous')`, formatTimestamp(now), projectID, key); err != nil {
+						return err
+					}
+					continue
+				}
+				if len(intents) >= limit || intent.State == "ambiguous" || (intent.State == "leased" && (intent.LeaseExpires.IsZero() || now.Before(intent.LeaseExpires))) {
+					continue
+				}
+				intents = append(intents, intent)
+			}
+			return tx.Commit()
 		})
-	}); err != nil {
-		return nil, err
-	}
-	rows, err := db.QueryContext(ctx, `SELECT intent_key FROM agent_input_delivery_intents WHERE project_id=? AND state IN ('queued','leased') AND (expires_at IS NULL OR expires_at>?) AND (state='queued' OR lease_expires_at<=?) ORDER BY created_at,intent_key LIMIT ?`, projectID, formatTimestamp(now), formatTimestamp(now), limit)
+	})
 	if err != nil {
 		return nil, err
-	}
-	defer rows.Close()
-	var keys []string
-	for rows.Next() {
-		var key string
-		if err := rows.Scan(&key); err != nil {
-			return nil, err
-		}
-		keys = append(keys, key)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	intents := make([]AgentInputDeliveryIntent, 0, len(keys))
-	for _, key := range keys {
-		intent, err := c.loadAgentInputDeliveryIntent(ctx, db, projectID, key)
-		if err != nil {
-			return nil, err
-		}
-		intents = append(intents, intent)
 	}
 	return intents, nil
 }
@@ -320,15 +335,22 @@ func (c *Client) ClaimAgentInputDeliveryIntent(ctx context.Context, projectID, i
 			if intent.State == "ambiguous" {
 				return tx.Commit()
 			}
-			if intent.State == "leased" && now.Before(intent.LeaseExpires) {
-				return tx.Commit()
+			if intent.State == "leased" {
+				if intent.LeaseExpires.IsZero() || now.Before(intent.LeaseExpires) {
+					return tx.Commit()
+				}
 			}
 			token, err := randomAgentInputToken()
 			if err != nil {
 				return err
 			}
 			expires := now.Add(leaseDuration)
-			result, err := tx.ExecContext(lockCtx, `UPDATE agent_input_delivery_intents SET state='leased',lease_owner=?,lease_token=?,lease_expires_at=?,attempt_count=attempt_count+1,updated_at=? WHERE project_id=? AND intent_key=? AND state IN ('queued','leased') AND (state='queued' OR lease_expires_at<=?)`, owner, token, formatTimestamp(expires), formatTimestamp(now), projectID, intentKey, formatTimestamp(now))
+			var result sql.Result
+			if intent.State == "leased" {
+				result, err = tx.ExecContext(lockCtx, `UPDATE agent_input_delivery_intents SET state='leased',lease_owner=?,lease_token=?,lease_expires_at=?,attempt_count=attempt_count+1,updated_at=? WHERE project_id=? AND intent_key=? AND state='leased' AND lease_token=?`, owner, token, formatTimestamp(expires), formatTimestamp(now), projectID, intentKey, intent.LeaseToken)
+			} else {
+				result, err = tx.ExecContext(lockCtx, `UPDATE agent_input_delivery_intents SET state='leased',lease_owner=?,lease_token=?,lease_expires_at=?,attempt_count=attempt_count+1,updated_at=? WHERE project_id=? AND intent_key=? AND state='queued'`, owner, token, formatTimestamp(expires), formatTimestamp(now), projectID, intentKey)
+			}
 			if err != nil {
 				return err
 			}

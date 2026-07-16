@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,17 +17,18 @@ import (
 )
 
 type fakeCodexInputTmux struct {
-	mu               sync.Mutex
-	clients          []tmux.AttachedClientInfo
-	panes            []tmux.PaneInfo
-	paneEnabled      bool
-	hooksEnabled     bool
-	recordPath       string
-	setReadOnlyCalls []string
-	maxGates         int
-	activeGates      int
-	failDisableHooks bool
-	failDisablePane  bool
+	mu                           sync.Mutex
+	clients                      []tmux.AttachedClientInfo
+	panes                        []tmux.PaneInfo
+	paneEnabled                  bool
+	hooksEnabled                 bool
+	recordPath                   string
+	setReadOnlyCalls             []string
+	maxGates                     int
+	activeGates                  int
+	failDisableHooks             bool
+	failDisablePane              bool
+	disablePaneErrorsAfterEffect int
 }
 
 func (f *fakeCodexInputTmux) ListAttachedClients(_ context.Context, session string) ([]tmux.AttachedClientInfo, error) {
@@ -61,6 +62,10 @@ func (f *fakeCodexInputTmux) SetPaneInputEnabled(_ context.Context, _ string, en
 		return errors.New("disable pane input failed")
 	}
 	f.paneEnabled = enabled
+	if !enabled && f.disablePaneErrorsAfterEffect > 0 {
+		f.disablePaneErrorsAfterEffect--
+		return errors.New("disable pane input failed after side effect")
+	}
 	return nil
 }
 
@@ -290,34 +295,80 @@ func TestCodexAppServerDeliveryBoundsAcceptanceBySessionFenceExpiry(t *testing.T
 	adapter := &fakeCodexInputTmux{paneEnabled: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb"}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
 	rpc := &fakeCodexRPC{releaseTurn: make(chan struct{})}
 	request := codexAuthorityRequest()
-	request.RevalidateSubmissionFence = func(context.Context) (time.Time, error) { return time.Now().Add(40 * time.Millisecond), nil }
+	now := time.Date(2026, time.July, 17, 5, 0, 0, 0, time.UTC)
+	request.RevalidateSubmissionFence = func(context.Context) (time.Time, error) { return now.Add(time.Minute), nil }
 	authority := newFakeCodexAuthority(t, adapter, rpc)
-	authority.safetyMargin = 5 * time.Millisecond
-	started := time.Now()
+	authority.now = func() time.Time { return now }
+	authority.safetyMargin = 5 * time.Second
+	wantDeadline := now.Add(55 * time.Second)
+	authority.acceptContext = func(parent context.Context, deadline time.Time) (context.Context, context.CancelFunc) {
+		if !deadline.Equal(wantDeadline) {
+			t.Fatalf("acceptance deadline=%s, want %s", deadline, wantDeadline)
+		}
+		acceptCtx, cancelCause := context.WithCancelCause(parent)
+		cancelCause(context.DeadlineExceeded)
+		return acceptCtx, func() {}
+	}
 	if _, err := authority.DeliverAgentInput(context.Background(), request); err == nil || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err=%v, want deadline ambiguity", err)
 	}
-	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
-		t.Fatalf("turn/start exceeded fenced acceptance window: %s", elapsed)
-	}
 }
 
+type controlledDeadlineWriter struct {
+	deadlineObserved bool
+	deadline         time.Time
+}
+
+func (w *controlledDeadlineWriter) SetWriteDeadline(deadline time.Time) error {
+	w.deadline = deadline
+	if !deadline.IsZero() {
+		w.deadlineObserved = true
+	}
+	return nil
+}
+
+func (w *controlledDeadlineWriter) Write([]byte) (int, error) {
+	if w.deadline.IsZero() {
+		return 0, errors.New("write began without a deadline")
+	}
+	return 0, os.ErrDeadlineExceeded
+}
+
+func (*controlledDeadlineWriter) Close() error { return nil }
+
 func TestProcessCodexAppServerRPCBoundsBlockedSubmissionWrite(t *testing.T) {
-	client, server := net.Pipe()
-	t.Cleanup(func() {
-		_ = client.Close()
-		_ = server.Close()
-	})
-	rpc := &processCodexAppServerRPC{stdin: client, writeGate: make(chan struct{}, 1), waits: map[string]chan codexRPCResponse{}, done: make(chan struct{})}
+	writer := &controlledDeadlineWriter{}
+	rpc := &processCodexAppServerRPC{stdin: writer, writeGate: make(chan struct{}, 1), waits: map[string]chan codexRPCResponse{}, done: make(chan struct{})}
 	rpc.writeGate <- struct{}{}
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Hour))
 	defer cancel()
-	started := time.Now()
 	if err := rpc.Call(ctx, "turn/start", map[string]any{"threadId": "thread"}, nil); err == nil {
 		t.Fatal("blocked submission write unexpectedly succeeded")
 	}
-	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
-		t.Fatalf("blocked submission write exceeded fence deadline: %s", elapsed)
+	if !writer.deadlineObserved {
+		t.Fatal("submission writer did not receive the context deadline")
+	}
+}
+
+func TestCodexAppServerGateRestoresAfterPaneDisableSideEffectThenError(t *testing.T) {
+	adapter := &fakeCodexInputTmux{paneEnabled: true, disablePaneErrorsAfterEffect: 1}
+	authority := newFakeCodexAuthority(t, adapter, &fakeCodexRPC{})
+	_, err := authority.acquireGate(context.Background(), codexAuthorityRequest())
+	if err == nil || !strings.Contains(err.Error(), "after side effect") {
+		t.Fatalf("err=%v, want side-effect failure", err)
+	}
+	adapter.mu.Lock()
+	paneEnabled := adapter.paneEnabled
+	adapter.mu.Unlock()
+	if !paneEnabled {
+		t.Fatal("pane input remained disabled after acquisition failure")
+	}
+	markers, globErr := filepath.Glob(filepath.Join(authority.gateDir, "gate-*"))
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(markers) != 0 {
+		t.Fatalf("fully restored acquisition retained gate artifacts: %v", markers)
 	}
 }
 

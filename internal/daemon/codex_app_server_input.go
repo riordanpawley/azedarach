@@ -63,6 +63,7 @@ type codexAppServerInputAuthority struct {
 	safetyMargin   time.Duration
 	removeGateFile func(string) error
 	recoveryWait   func(context.Context, time.Time) bool
+	acceptContext  func(context.Context, time.Time) (context.Context, context.CancelFunc)
 	mu             sync.Mutex
 	sessionMux     map[string]*sync.Mutex
 	recoveryMux    sync.Mutex
@@ -76,7 +77,7 @@ type codexGateRecoveryOperation struct {
 
 func newCodexAppServerInputAuthority(adapter codexInputTmux, daemonSocketPath string, logger *slog.Logger, runtimeConfig func(string) daemonProjectRuntimeConfig) *codexAppServerInputAuthority {
 	gateDir := filepath.Join(filepath.Dir(strings.TrimSpace(daemonSocketPath)), "agent-input-gates")
-	return &codexAppServerInputAuthority{tmux: adapter, gateDir: gateDir, logger: logger, runtimeConfig: runtimeConfig, startRPC: startCodexAppServerRPC, recoveryOwner: "daemon-agent-input-recovery", now: func() time.Time { return time.Now().UTC() }, leaseDuration: agentInputSessionLeaseDuration, safetyMargin: codexSubmissionFenceSafetyMargin, removeGateFile: os.Remove, recoveryWait: waitForCodexGateRecovery, sessionMux: map[string]*sync.Mutex{}, recoveryQueued: map[string]struct{}{}}
+	return &codexAppServerInputAuthority{tmux: adapter, gateDir: gateDir, logger: logger, runtimeConfig: runtimeConfig, startRPC: startCodexAppServerRPC, recoveryOwner: "daemon-agent-input-recovery", now: func() time.Time { return time.Now().UTC() }, leaseDuration: agentInputSessionLeaseDuration, safetyMargin: codexSubmissionFenceSafetyMargin, removeGateFile: os.Remove, recoveryWait: waitForCodexGateRecovery, acceptContext: context.WithDeadline, sessionMux: map[string]*sync.Mutex{}, recoveryQueued: map[string]struct{}{}}
 }
 
 func waitForCodexGateRecovery(ctx context.Context, at time.Time) bool {
@@ -325,7 +326,7 @@ func (a *codexAppServerInputAuthority) DeliverAgentInput(ctx context.Context, re
 		"clientUserMessageId": messageID,
 		"input":               []map[string]string{{"type": "text", "text": request.Delivery.Payload}},
 	}
-	acceptCtx, cancelAccept := context.WithDeadline(ctx, acceptanceDeadline)
+	acceptCtx, cancelAccept := a.acceptContext(ctx, acceptanceDeadline)
 	defer cancelAccept()
 	if err := rpc.Call(acceptCtx, "turn/start", params, &started); err != nil {
 		return ack, fmt.Errorf("submit Codex automated turn: %w", err)
@@ -478,12 +479,10 @@ func (a *codexAppServerInputAuthority) acquireGate(ctx context.Context, request 
 		_ = os.Remove(eventsPath)
 		return nil, err
 	}
-	if state.PaneInputEnabled {
-		if err := a.tmux.SetPaneInputEnabled(ctx, state.PaneID, false); err != nil {
-			_ = os.Remove(eventsPath)
-			return nil, err
-		}
-	}
+	// Once the durable marker exists, every later operation may have changed
+	// tmux even when it reports an error. Arm restoration before the first
+	// mutation so side-effect-then-error implementations retain fenced recovery
+	// authority instead of stranding a disabled pane without cleanup.
 	failed := true
 	defer func() {
 		if failed {
@@ -494,6 +493,11 @@ func (a *codexAppServerInputAuthority) acquireGate(ctx context.Context, request 
 			}
 		}
 	}()
+	if state.PaneInputEnabled {
+		if err := a.tmux.SetPaneInputEnabled(ctx, state.PaneID, false); err != nil {
+			return nil, err
+		}
+	}
 	if err := a.tmux.SetSessionReadOnlyAttachHooks(ctx, state.SessionID, state.HookID, state.EventsPath, true); err != nil {
 		return nil, err
 	}

@@ -133,7 +133,7 @@ func (c *Client) SetSessionReadOnlyAttachHooks(ctx context.Context, session, hoo
 		if !enabled {
 			args = append(args, "-u", name)
 		} else {
-			record := "umask 077; __az_client=#{q:hook_client}; printf '%s\\t%s\\n' \"$__az_client\" #{client_readonly} >> " + shellSingleQuote(recordPath) + "; tmux refresh-client -t \"$__az_client\" -f read-only"
+			record := "umask 077; __az_client=#{q:hook_client}; printf '%s\\t%s\\n' \"$__az_client\" #{client_readonly} >> " + shellSingleQuote(recordPath) + "; tmux refresh-client -t \"$__az_client\" -f read-only; printf '\\tcomplete\\n' >> " + shellSingleQuote(recordPath)
 			command := "run-shell " + tmuxDoubleQuote(record)
 			args = append(args, name, command)
 		}
