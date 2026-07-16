@@ -681,7 +681,7 @@ func main() {
 		case "events":
 			opts, err := cli.ParseIssueEventsArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az ticket events [--project <project-id>] [--id <ticket-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<ticket-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az ticket events [--project <project-id>] [--id <ticket-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--order asc|desc] [--limit N | --tail N] [--after-id ID] [--before-id ID] [--source value] [--source-command value] [--operation ID] [--session ID] [--worktree path] [--since time] [--until time] [--query text] [--payload key=value ...] [<ticket-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -1491,7 +1491,7 @@ func runTUIWithOptions(cfg *config.Config, opts ...app.Option) {
 			exitProcess(exitCode)
 		}
 	}()
-	if cleanup := ownedJustRunScopedDaemonCleanup(); cleanup != nil {
+	if cleanup := ownedManagedRunScopedDaemonCleanup(); cleanup != nil {
 		defer func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -1527,8 +1527,8 @@ func validateTUILaunchContext() error {
 	return fmt.Errorf("refusing to start the TUI from an Azedarach development worktree while AZEDARACH_DAEMON_SCOPE=%q uses the shared production daemon; set AZEDARACH_DAEMON_SCOPE=worktree when intentionally testing this worktree's azd", os.Getenv("AZEDARACH_DAEMON_SCOPE"))
 }
 
-func ownedJustRunScopedDaemonCleanup() func(context.Context) error {
-	if strings.TrimSpace(os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")) != "just-run" {
+func ownedManagedRunScopedDaemonCleanup() func(context.Context) error {
+	if strings.TrimSpace(os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")) != "managed-run" {
 		return nil
 	}
 	cwd, err := os.Getwd()

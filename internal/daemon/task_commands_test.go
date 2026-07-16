@@ -10964,7 +10964,25 @@ func TestTaskIntegrationReadinessRequiresCompleteWorkerEvidencePacket(t *testing
 	}
 }
 
-func TestTaskIntegrationReadinessRejectsOverlappedAggregateEvidence(t *testing.T) {
+func reviewValidationAcquire(requestID, token, projectID, issueID, revision string) domain.ValidationAcquire {
+	return domain.ValidationAcquire{
+		RequestID: requestID, LeaseToken: token, ProjectID: projectID, IssueID: issueID,
+		Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence,
+		IsolationMode: "repository-family", EnvironmentFingerprint: "test-toolchain", Override: domain.ValidationOverrideNone,
+		Profile: "cold", Command: "just test", SourceRevision: revision, ReviewerID: "reviewer", ReviewEpochEventID: 1, TTL: time.Minute,
+	}
+}
+
+func reviewValidationEvidence(requestID, revision string, overlap bool, external int) domain.ValidationEvidence {
+	return domain.ValidationEvidence{
+		Held: true, RequestID: requestID, Class: domain.ValidationClassAggregate,
+		Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence,
+		Profile: "cold", SourceRevision: revision, Present: true,
+		OverlapDetected: overlap, ExternalGoProcesses: external,
+	}
+}
+
+func TestTaskIntegrationReadinessTreatsPublicationOverlapAsDiagnostic(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-overlapped-aggregate"
 	repoDir := t.TempDir()
@@ -10983,11 +11001,11 @@ func TestTaskIntegrationReadinessRejectsOverlappedAggregateEvidence(t *testing.T
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
 	t.Cleanup(func() { _ = runtime.Close() })
 	now := time.Now().UTC()
-	_, err = runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "aggregate-overlap", LeaseToken: "test-secret", ProjectID: projectID, IssueID: childID, Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "abc123", TTL: time.Minute}, now)
+	_, err = runtime.store.AcquireValidation(ctx, reviewValidationAcquire("aggregate-overlap", "test-secret", projectID, childID, "abc123"), now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = runtime.store.FinishValidation(ctx, "aggregate-overlap", "test-secret", domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{Held: true, RequestID: "aggregate-overlap", Class: domain.ValidationClassAggregate, Profile: "cold", SourceRevision: "abc123", Present: true, OverlapDetected: true, ExternalGoProcesses: 2}, now.Add(time.Second), time.Minute)
+	_, err = runtime.store.FinishValidation(ctx, "aggregate-overlap", "test-secret", domain.ValidationRequestCompleted, "passed", reviewValidationEvidence("aggregate-overlap", "abc123", true, 2), now.Add(time.Second), time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -10996,8 +11014,8 @@ func TestTaskIntegrationReadinessRejectsOverlappedAggregateEvidence(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Ready || result.AggregateValidation == nil || !strings.Contains(strings.Join(result.Reasons, "\n"), "overlapped 2 external Go processes") {
-		t.Fatalf("result = %+v, want rejected overlapped aggregate evidence", result)
+	if result.Ready || result.AggregateValidation == nil || strings.Contains(strings.Join(result.Reasons, "\n"), "overlapped") || !strings.Contains(strings.Join(result.Reasons, "\n"), "candidate worktree is required") {
+		t.Fatalf("result = %+v, want overlap accepted before exact-worktree binding", result)
 	}
 }
 
@@ -11064,11 +11082,11 @@ func TestTaskIntegrationReadinessBindsAuthoritativeAggregateToExactCandidateRevi
 			runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
 			t.Cleanup(func() { _ = runtime.Close() })
 			now := time.Now().UTC()
-			_, err = runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "aggregate", LeaseToken: "test-secret", ProjectID: projectID, IssueID: childID, Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "abc123", TTL: time.Minute}, now)
+			_, err = runtime.store.AcquireValidation(ctx, reviewValidationAcquire("aggregate", "test-secret", projectID, childID, "abc123"), now)
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = runtime.store.FinishValidation(ctx, "aggregate", "test-secret", domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{Held: true, RequestID: "aggregate", Class: domain.ValidationClassAggregate, Profile: "cold", SourceRevision: "abc123", Present: true}, now.Add(time.Second), time.Minute)
+			_, err = runtime.store.FinishValidation(ctx, "aggregate", "test-secret", domain.ValidationRequestCompleted, "passed", reviewValidationEvidence("aggregate", "abc123", false, 0), now.Add(time.Second), time.Minute)
 			if err != nil {
 				t.Fatal(err)
 			}

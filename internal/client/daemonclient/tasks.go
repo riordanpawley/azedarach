@@ -374,12 +374,9 @@ type TaskIDsRequest struct {
 	MetadataOnly      bool             `json:"metadata_only,omitempty"`
 }
 
-// TaskEventsRequest contains the payload used to list issue observation events.
-type TaskEventsRequest struct {
-	TaskID naming.IssueID `json:"task_id"`
-	Types  []string       `json:"event_types,omitempty"`
-	Limit  int            `json:"limit,omitempty"`
-}
+type TaskEventsRequest = protocol.TaskEventsRequest
+type TaskEventPayloadFilter = protocol.TaskEventPayloadFilter
+type TaskEventsPage = protocol.TaskEventsPage
 
 // TaskEventAppendRequest contains the payload used to append one issue observation event.
 type TaskEventAppendRequest struct {
@@ -719,28 +716,34 @@ func (c *Client) getManyTaskSnapshot(ctx context.Context, taskIDs []string, mode
 
 // ListTaskEvents fetches the durable observation event stream for one task.
 func (c *Client) ListTaskEvents(ctx context.Context, taskID string, eventTypes []string, limit int) ([]domain.IssueObservationEvent, error) {
+	page, err := c.QueryTaskEvents(ctx, taskID, TaskEventsRequest{Types: eventTypes, Limit: limit})
+	if err != nil {
+		return nil, err
+	}
+	return append([]domain.IssueObservationEvent(nil), page.Events...), nil
+}
+
+// QueryTaskEvents fetches one deterministic page of the durable event stream.
+func (c *Client) QueryTaskEvents(ctx context.Context, taskID string, query TaskEventsRequest) (TaskEventsPage, error) {
 	parsedTaskID, err := naming.ParseIssueID(taskID)
 	if err != nil {
-		return nil, fmt.Errorf("invalid task id: %w", err)
+		return TaskEventsPage{}, fmt.Errorf("invalid task id: %w", err)
 	}
-	types := make([]string, 0, len(eventTypes))
-	for _, eventType := range eventTypes {
+	types := make([]string, 0, len(query.Types))
+	for _, eventType := range query.Types {
 		trimmed := strings.TrimSpace(eventType)
 		if trimmed != "" {
 			types = append(types, trimmed)
 		}
 	}
-	var out struct {
-		Events []domain.IssueObservationEvent `json:"events"`
+	query.TaskID = parsedTaskID
+	query.Types = types
+	var out TaskEventsPage
+	if err := c.commandJSON(ctx, CommandTaskEvents, query, &out); err != nil {
+		return TaskEventsPage{}, err
 	}
-	if err := c.commandJSON(ctx, CommandTaskEvents, TaskEventsRequest{
-		TaskID: parsedTaskID,
-		Types:  types,
-		Limit:  limit,
-	}, &out); err != nil {
-		return nil, err
-	}
-	return append([]domain.IssueObservationEvent(nil), out.Events...), nil
+	out.Events = append([]domain.IssueObservationEvent(nil), out.Events...)
+	return out, nil
 }
 
 // AppendTaskEvent records a durable issue-scoped observation event.

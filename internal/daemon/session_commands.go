@@ -789,6 +789,58 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if !ok {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
 	}
+	store := d.sessionRuntimeStateStoreIfConfigured(cmd.ProjectID)
+	if store == nil {
+		return d.handleSessionStartDirectWithOptions(ctx, req, sessionStartOptions{})
+	}
+	scope, scopeErr := domain.RootedOrchestrationScope(cmd.IssueID)
+	if scopeErr != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, scopeErr.Error()), nil
+	}
+	identity, identityErr := domain.NewOrchestratorIdentity(cmd.ProjectID, scope)
+	if identityErr != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, identityErr.Error()), nil
+	}
+	var commandErr error
+	lockErr := store.WithOrchestratorScopeTransition(ctx, identity, func(lockCtx context.Context) error {
+		resp, commandErr = d.handleSessionStartDirectWithOptions(lockCtx, req, sessionStartOptions{})
+		return nil
+	})
+	if lockErr != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("serialize worker session start: %v", lockErr)), nil
+	}
+	return resp, commandErr
+}
+
+type sessionStartOptions struct {
+	intent             sessionIntentSelector
+	rootedOrchestrator bool
+}
+
+func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req protocol.RequestEnvelope, options sessionStartOptions) (resp protocol.ResponseEnvelope, err error) {
+	cmd, _, ok := d.decodeSessionRequest(req, true)
+	if !ok {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
+	}
+	options.intent = normalizeSessionIntentSelector(options.intent, cmd.IssueID)
+	if !options.rootedOrchestrator {
+		store := d.sessionRuntimeStateStoreIfConfigured(cmd.ProjectID)
+		if store != nil {
+			scope, scopeErr := domain.RootedOrchestrationScope(cmd.IssueID)
+			if scopeErr != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, scopeErr.Error()), nil
+			}
+			identity, identityErr := domain.NewOrchestratorIdentity(cmd.ProjectID, scope)
+			if identityErr != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, identityErr.Error()), nil
+			}
+			if _, found, leaseErr := daemonstate.NewOrchestratorLeaseAuthority(store).Get(ctx, identity); leaseErr != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("load rooted orchestrator lease: %v", leaseErr)), nil
+			} else if found {
+				return d.errorResponse(req, protocol.ErrorCodeConflict, fmt.Sprintf("issue %s is owned by a rooted orchestrator session", cmd.IssueID)), nil
+			}
+		}
+	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session start requested",
 			"project_id", cmd.ProjectID,
@@ -1059,6 +1111,10 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("set issue resource env: %v%s", err, cleanupNote)), nil
 		}
+		if err := waitForSessionPromptHandoffConsumed(ctx, launchArtifact.PromptHandoff); err != nil {
+			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("confirm session bootstrap prompt delivery: %v%s", err, cleanupNote)), nil
+		}
 		d.startSessionAsyncInitCommands(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktree.Path)
 		if len(d.runtimeConfigForProject(cmd.ProjectID).SessionSyncInitCommands) > 0 {
 			reportSessionStartProgress(ctx, "init_commands", "launch sent; configured init commands likely running before agent hooks", 90)
@@ -1095,7 +1151,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		}
 	}
 	initialActivity, initialActivitySource := initialSessionStartActivity(cmd.StartWork)
-	if err := d.applySessionLifecycleTransitionWithActivity(
+	if err := d.applyTypedSessionLifecycleTransition(
 		ctx,
 		req,
 		cmd.ProjectID,
@@ -1104,8 +1160,9 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		daemonhandlers.CommandSessionStart,
 		initialActivity,
 		initialActivitySource,
+		options.intent,
 	); err != nil {
-		cleanupNote := d.compensateSessionStartFailure(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource)
+		cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session start transition: %v%s", err, cleanupNote)), nil
 	}
 	// The tmux session exists at this point. Record that physical fact through
@@ -1115,12 +1172,12 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		ID: cmd.SessionID, ObservedState: daemonstate.SessionStateRunning,
 		Activity: initialActivity, ActivitySource: initialActivitySource, UpdatedAt: time.Now().UTC(),
 	}); err != nil {
-		cleanupNote := d.compensateSessionStartFailure(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource)
+		cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session runtime observation: %v%s", err, cleanupNote)), nil
 	}
-	if task.Type == domain.TypeEpic {
+	if task.Type == domain.TypeEpic && !options.rootedOrchestrator {
 		if err := d.acquireRootedOrchestratorLease(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID); err != nil {
-			cleanupNote := d.compensateSessionStartFailure(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource)
+			cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeConflict, fmt.Sprintf("acquire rooted orchestrator lease: %v%s", err, cleanupNote)), nil
 		}
 	}
@@ -1227,6 +1284,10 @@ func (d *Daemon) rollbackSessionStartLifecycle(projectID, sessionID, issueID str
 }
 
 func (d *Daemon) compensateSessionStartFailure(ctx context.Context, req protocol.RequestEnvelope, projectID, sessionID, issueID string, resourceCtx issueResourceLifecycleContext, liveActivity, liveActivitySource string) string {
+	return d.compensateSessionStartFailureWithSelector(ctx, req, projectID, sessionID, issueID, resourceCtx, liveActivity, liveActivitySource, normalizeSessionIntentSelector(sessionIntentSelector{}, issueID))
+}
+
+func (d *Daemon) compensateSessionStartFailureWithSelector(ctx context.Context, req protocol.RequestEnvelope, projectID, sessionID, issueID string, resourceCtx issueResourceLifecycleContext, liveActivity, liveActivitySource string, selector sessionIntentSelector) string {
 	note := d.issueResourceFailedStartCleanupNote(ctx, projectID, resourceCtx)
 	live := true
 	if d != nil && d.tmux != nil {
@@ -1251,10 +1312,11 @@ func (d *Daemon) compensateSessionStartFailure(ctx context.Context, req protocol
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
 	alignTransient := false
 	if store != nil {
-		rows, winner, err := store.ApplyWorkerSessionCompensation(ctx, projectID, sessionID, issueID, desired, observed, activity, source, updatedAt)
+		intent := daemonstate.Session{ID: sessionID, IssueID: issueID, Role: selector.Role, ScopeKind: selector.ScopeKind, ScopeID: selector.ScopeID}
+		rows, winner, err := store.ApplySessionCompensation(ctx, projectID, intent, desired, observed, activity, source, updatedAt)
 		if err != nil {
 			note += fmt.Sprintf("; failed-start durable session compensation also failed: %v", err)
-			if durable, found, loadErr := store.GetWorkerSessionStateByIssueID(ctx, projectID, issueID, sessionID); loadErr == nil && found {
+			if durable, found, loadErr := store.GetSessionIntent(ctx, projectID, selector.Role, selector.ScopeKind, selector.ScopeID); loadErr == nil && found {
 				desired = durable.State
 				alignTransient = true
 			} else if loadErr != nil {
@@ -1731,67 +1793,46 @@ func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.Reque
 	})
 
 	for _, target := range restartTargets {
-		item := protocol.SessionRestartAllItem{
-			ProjectID:      naming.ProjectID(target.ProjectID),
-			SessionID:      naming.SessionID(target.SessionID),
-			IssueID:        naming.IssueID(target.IssueID),
-			Activity:       target.Activity,
-			ActivitySource: target.ActivitySource,
-			TmuxReady:      target.TmuxReady,
-			ActiveIntent:   target.ActiveIntent,
+		var item protocol.SessionRestartAllItem
+		serialized := false
+		if store := d.sessionRuntimeStateStoreIfConfigured(target.ProjectID); store != nil && strings.TrimSpace(target.IssueID) != "" {
+			scope, scopeErr := domain.RootedOrchestrationScope(target.IssueID)
+			if scopeErr != nil {
+				item = sessionRestartAllItem(target)
+				item.Error = fmt.Sprintf("resolve potential rooted restart scope: %v", scopeErr)
+			} else if identity, identityErr := domain.NewOrchestratorIdentity(target.ProjectID, scope); identityErr != nil {
+				item = sessionRestartAllItem(target)
+				item.Error = fmt.Sprintf("resolve potential rooted restart identity: %v", identityErr)
+			} else {
+				serialized = true
+				lockErr := store.WithOrchestratorScopeTransition(ctx, identity, func(lockCtx context.Context) error {
+					var rootedIdentity *domain.OrchestratorIdentity
+					lease, found, leaseErr := daemonstate.NewOrchestratorLeaseAuthority(store).FindBySession(lockCtx, target.ProjectID, target.SessionID)
+					if leaseErr != nil {
+						return fmt.Errorf("refresh orchestrator lease inside restart transition: %w", leaseErr)
+					}
+					if found && lease.Identity == identity {
+						rootedIdentity = &identity
+					}
+					item = d.restartAllTarget(lockCtx, target, body, rootedIdentity)
+					return nil
+				})
+				if lockErr != nil {
+					item = sessionRestartAllItem(target)
+					item.Error = fmt.Sprintf("serialize potential rooted orchestrator replacement: %v", lockErr)
+				}
+			}
 		}
-		if !item.TmuxReady {
-			item.Skipped = true
-			item.Reason = "no_tmux_pane"
+		if !serialized && item.Error == "" {
+			item = d.restartAllTarget(ctx, target, body, nil)
+		}
+		switch {
+		case item.Restarted:
+			result.Restarted++
+		case item.Skipped:
 			result.Skipped++
-			result.Sessions = append(result.Sessions, item)
-			continue
-		}
-
-		if err := d.tmux.SendKey(ctx, target.SessionID, "C-c"); err != nil {
-			item.Error = err.Error()
+		case item.Error != "":
 			result.Failed++
-			result.Sessions = append(result.Sessions, item)
-			continue
-		}
-		if err := d.waitBeforeSessionResume(ctx, 250*time.Millisecond); err != nil {
-			item.Error = err.Error()
-			result.Failed++
-			result.Sessions = append(result.Sessions, item)
-			continue
-		}
-		artifact, artifactErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchResume, ProjectID: target.ProjectID, IssueID: target.IssueID, SessionID: target.SessionID, Yolo: body.Yolo, ImagePaths: body.ImagePaths, Prompt: sessionRestartContinuePrompt})
-		if artifactErr != nil {
-			item.Error = artifactErr.Error()
-			result.Failed++
-			result.Sessions = append(result.Sessions, item)
-			continue
-		}
-		if err := d.tmux.SendKeys(ctx, target.SessionID, artifact.Command); err != nil {
-			artifact.remove()
-			item.Error = err.Error()
-			result.Failed++
-			result.Sessions = append(result.Sessions, item)
-			continue
-		}
-		if item.ActiveIntent && d.sessionRestartNeedsPostLaunchPrompt(target.ProjectID) {
-			if err := d.waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
-				item.Error = err.Error()
-				result.Failed++
-				result.Sessions = append(result.Sessions, item)
-				continue
-			}
-			if err := d.tmux.PasteTextAndSubmit(ctx, target.SessionID, sessionRestartContinuePrompt); err != nil {
-				item.Error = err.Error()
-				result.Failed++
-				result.Sessions = append(result.Sessions, item)
-				continue
-			}
-		}
-		item.Restarted = true
-		result.Restarted++
-		if target.IssueID != "" {
-			d.persistRestartedSessionProjection(ctx, target.ProjectID, target.SessionID, target.IssueID)
 		}
 		result.Sessions = append(result.Sessions, item)
 	}
@@ -1822,6 +1863,85 @@ type sessionRestartAllTarget struct {
 	Projected      bool
 	TmuxReady      bool
 	ActiveIntent   bool
+}
+
+func (d *Daemon) restartAllTarget(ctx context.Context, target sessionRestartAllTarget, body protocol.SessionRestartAllRequestBody, rootedIdentity *domain.OrchestratorIdentity) protocol.SessionRestartAllItem {
+	item := sessionRestartAllItem(target)
+	if !item.TmuxReady {
+		item.Skipped, item.Reason = true, "no_tmux_pane"
+		return item
+	}
+	if rootedIdentity != nil {
+		acknowledgement, found, err := daemonstate.NewRootedBootstrapAcknowledgementAuthority(d.sessionRuntimeStateStoreIfConfigured(target.ProjectID)).Get(ctx, *rootedIdentity)
+		if err != nil {
+			item.Error = fmt.Sprintf("refresh rooted bootstrap acknowledgement before replacement: %v", err)
+			return item
+		}
+		if found {
+			if err := d.invalidateRootedBootstrapAcknowledgement(ctx, acknowledgement); err != nil {
+				item.Error = fmt.Sprintf("invalidate rooted bootstrap acknowledgement: %v", err)
+				return item
+			}
+		}
+		if err := d.tmux.SetEnvironment(ctx, target.SessionID, rootedOrchestratorBootstrapNonceEnvironment, ""); err != nil {
+			item.Error = fmt.Sprintf("invalidate rooted bootstrap runtime marker: %v", err)
+			return item
+		}
+	}
+	if err := d.tmux.SendKey(ctx, target.SessionID, "C-c"); err != nil {
+		item.Error = err.Error()
+		return item
+	}
+	if err := d.waitBeforeSessionResume(ctx, 250*time.Millisecond); err != nil {
+		item.Error = err.Error()
+		return item
+	}
+	artifact, artifactErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchResume, ProjectID: target.ProjectID, IssueID: target.IssueID, SessionID: target.SessionID, Yolo: body.Yolo, ImagePaths: body.ImagePaths})
+	if artifactErr != nil {
+		item.Error = artifactErr.Error()
+		return item
+	}
+	if err := d.tmux.SendKeys(ctx, target.SessionID, artifact.Command); err != nil {
+		artifact.remove()
+		item.Error = err.Error()
+		return item
+	}
+	if rootedIdentity != nil {
+		if err := d.waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
+			item.Error = err.Error()
+			return item
+		}
+		prompt, err := d.rootedOrchestratorBootstrapPrompt(ctx, target.ProjectID, rootedIdentity.Scope)
+		if err != nil {
+			item.Error = err.Error()
+			return item
+		}
+		if _, err := d.ensureRootedOrchestratorBootstrap(ctx, target.ProjectID, rootedIdentity.Scope, target.SessionID, prompt, false); err != nil {
+			item.Error = fmt.Sprintf("acknowledge restarted rooted orchestrator bootstrap: %v", err)
+			return item
+		}
+	} else if item.ActiveIntent && d.sessionRestartNeedsPostLaunchPrompt(target.ProjectID) {
+		if err := d.waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
+			item.Error = err.Error()
+			return item
+		}
+		if err := d.tmux.PasteTextAndSubmit(ctx, target.SessionID, sessionRestartContinuePrompt); err != nil {
+			item.Error = err.Error()
+			return item
+		}
+	}
+	item.Restarted = true
+	if target.IssueID != "" {
+		d.persistRestartedSessionProjection(ctx, target.ProjectID, target.SessionID, target.IssueID)
+	}
+	return item
+}
+
+func sessionRestartAllItem(target sessionRestartAllTarget) protocol.SessionRestartAllItem {
+	return protocol.SessionRestartAllItem{
+		ProjectID: naming.ProjectID(target.ProjectID), SessionID: naming.SessionID(target.SessionID), IssueID: naming.IssueID(target.IssueID),
+		Activity: target.Activity, ActivitySource: target.ActivitySource, TmuxReady: target.TmuxReady, ActiveIntent: target.ActiveIntent,
+	}
 }
 
 func sessionRestartAllTargetPreferred(candidate, existing sessionRestartAllTarget) bool {
@@ -3235,7 +3355,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 		if _, excluded := excludedTmuxNames[strings.TrimSpace(name)]; excluded {
 			continue
 		}
-		issueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope)
+		issueID, ok := naming.ParseManagedIssueIDFromSessionName(name, namingScope)
 		if !ok {
 			continue
 		}
@@ -4414,7 +4534,7 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 		if name == "" {
 			continue
 		}
-		issueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope)
+		issueID, ok := naming.ParseManagedIssueIDFromSessionName(name, namingScope)
 		if !ok {
 			continue
 		}
@@ -5567,6 +5687,25 @@ func singleQuoteForShell(value string) string {
 }
 
 func buildStartWorkPrompt(issueID, issueType, title string, orchestratedWorker bool, parentIssueID string) string {
+	base, safeIssueType := buildIssueStartPrompt(issueID, issueType, title)
+	if strings.EqualFold(safeIssueType, string(domain.TypeEpic)) {
+		return buildOrchestratorRolePrompt(base)
+	}
+	if !orchestratedWorker {
+		return base + "\n\nRole: contributor\n- Focus only on this issue scope unless the user explicitly expands it.\n- Keep issue status current; record progress, follow-ups, validation, blockers, review facts, risks, and closeout evidence with `az issue record`; keep notes as terse human audit scratchpad only.\n- Use `in_progress` while actively working and `in_review` when complete and awaiting review/integration. Review handoff is non-terminal: preserve the tmux session and worktree; do not stop or close them while waiting for human feedback.\n- Use `closed` only after explicit acceptance/integration and `cancelled` only for a terminal non-integrated outcome.\n- Represent blocked work with dependency edges and issue record evidence, not by using `in_review`."
+	}
+	mailboxGuidance := "- Check inbound orchestrator messages with `az mail list --parent <parent-issue> --since 0 --json` before declaring yourself blocked or idle; apply events for this issue and continue without waiting for a separate user prompt."
+	if strings.TrimSpace(parentIssueID) != "" {
+		mailboxGuidance = fmt.Sprintf("- Coordination mailbox parent: `%s`; check inbound orchestrator messages with `az mail list --parent %s --since 0 --json` before declaring yourself blocked or idle; apply events for this issue and continue without waiting for a separate user prompt.", parentIssueID, parentIssueID)
+	}
+	reportParentID := "<parent-issue>"
+	if strings.TrimSpace(parentIssueID) != "" {
+		reportParentID = parentIssueID
+	}
+	return base + "\n\nRole: worker\n- Focus only on this issue scope unless the user explicitly expands it.\n" + mailboxGuidance + "\n- Report coordination state to an active parent orchestrator/watch with `az mail send --parent " + reportParentID + " --issue " + issueID + " --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`; do not use `az orchestrate message` for your own status because it is an orchestrator-to-worker live delivery command.\n- Use mailbox event types only for active coordination: worker-progress, worker-blocked, and worker-integration-ready; worker-ready and worker-complete are accepted only as legacy aliases for worker-integration-ready. For non-orchestrated progress, follow-ups, validation, risks, blockers, or closeout evidence, use `az issue record` instead.\n- Evidence bodies should be JSON `worker_evidence.v1` packets with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`; use `\"none\"` entries when a required list has no findings or risks. Omit `artifact_links` unless links are needed; when present, encode it as objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array. Preflight with `az evidence validate --body '<json>'`; use `az issue record " + issueID + " --type evidence.submitted --data '<json>'` when mailbox delivery is irrelevant.\n- Before handing off, run the relevant validation/review checks, build the final `worker_evidence.v1` packet from actual results, run `az evidence validate --body '<json>'`, record or send that exact JSON packet, then set/leave the issue `in_review`. Review handoff is non-terminal: preserve this tmux session and worktree for orchestrator feedback; do not stop or close them yourself.\n- Keep issue status current; report progress, blockers, risks, and readiness through issue records or active-coordination mailbox evidence, with notes as terse human audit scratchpad only.\n- Use `in_progress` while actively working and `in_review` when complete and ready for orchestrator integration; the orchestrator closes accepted work.\n- Report blockers via dependency edges, issue record evidence, or active worker-blocked mailbox events, not by setting `in_review`."
+}
+
+func buildIssueStartPrompt(issueID, issueType, title string) (string, string) {
 	safeIssueType := sanitizePromptInline(issueType, 0)
 	if safeIssueType == "" {
 		safeIssueType = "task"
@@ -5581,23 +5720,19 @@ func buildStartWorkPrompt(issueID, issueType, title string, orchestratedWorker b
 		safeIssueType,
 		safeTitle,
 	)
-	if strings.EqualFold(safeIssueType, string(domain.TypeEpic)) {
-		base += "\n\nReview closeout contract: resolve accepted review tickets with `az orchestrate review accept --root <root-issue> --issue <review-issue>` so trusted acceptance and authoritative terminal close finish before dependent results are used or presented. Return unresolved findings with `az orchestrate review return --root <root-issue> --issue <review-issue> --finding \"...\"`. Reuse the reported `--intent-key` when retrying the same decision. Pending, returned, and human-gated reviews remain non-terminal."
-		base += "\nThis review contract supersedes generic manual-close wording below for review decisions; `az issue close` remains only a repair/manual-close path, not reviewer acceptance authority."
-		return base + "\n\nRole: orchestrator\n- Chain of command is strict: orchestrate only this root's direct children. Never launch, message, inspect for intervention, review, integrate, stop, or take over grandchildren or deeper descendants.\n- Use `az orchestrate status --root <issue-id>` for readiness snapshots including active worker activity (`busy|idle|waiting|no-agent|unknown`).\n- Use `az orchestrate watch --root <issue-id> --since <seq> --jsonl` for continuous observe-only mailbox/runnable/activity updates; start it in another pane/session and leave it running while workers are active. Remain in this active turn/loop and continuously consume its events; starting sessions and a background watch is not a completed handoff to the human.\n- Do not use `--once` for orchestration monitoring; reserve it for diagnostic single polls.\n- Trust hook-backed `activity=busy|idle|waiting` for worker idleness checks and treat `activity=no-agent` as an intentional session-only shell. If activity is `unknown`, inspect hooks with `az ai status --target=auto`; run `az ai install --target=auto` only when hooks are missing, outdated, or not installed. Use `az orchestrate capture --issue <worker-issue>` only when watch/status look stale, failed, or contradictory, or when you need a sparse progress spot-check. Do not poll panes on a fixed interval.\n- Start this root's direct runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`, then immediately ensure the continuous watch is running. Queued reviews do not block unrelated starts when managed agent capacity remains.\n- Nested epic/root rule: start a direct child root's own orchestrator session with `az orchestrator-session start --root <child-root>` and let it run `az prime` and `az orchestrate start --root <child-root>`; supervise that orchestrator as a direct child while it exclusively owns its descendants.\n- Send running-worker nudges with `az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\"`; workers reporting to this active parent orchestrator/watch should use `az mail send --parent <issue-id> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`; non-orchestrated progress, follow-ups, validation, risks, or completion evidence should use `az issue record` instead. Bare `az mail send` is durable mailbox-only.\n- React to progress, blocked, and integration-ready evidence; review and integrate accepted children/epics, advance newly unblocked work, and repeat status/start/watch/review while graph work remains.\n- Worker integration evidence should be a structured JSON `worker_evidence.v1` packet with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`; use `az issue record --type evidence.submitted --data '<json>'` when mailbox delivery is irrelevant, and use `worker-integration-ready` mail only for active parent coordination. Omit `artifact_links` unless needed, and when present use objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array. Run `az evidence validate --body '<json>'` before recording or sending, `az evidence validate --fix --body '<json>'` for repairable schema aliases, or `az evidence validate --template` for the canonical template.\n- Delegate every non-trivial diff inspection to a fresh ephemeral review subagent; use bounded parallel delegates for distinct review-ready issues. Give each delegate the issue acceptance context, worker evidence, context risk, exact worktree, and diff base. Delegates are read-only: they must not edit, mutate issue/session state, send findings, accept/return reviews, integrate, or close. Require a structured clean-or-findings verdict with commands and risks. Validate the packet and spot-check high-risk or contradictory results; keep durable review-return, review-accept, integration, and close authority in this orchestrator.\n- Treat blocked work as graph state from unresolved `blocks` dependencies or active worker-blocked mailbox evidence, not as an issue status.\n- Treat `in_review` workers as ready for orchestrator validation; inspect evidence, delegate diff review, run parent checks, then close accepted worker issues with `az issue close --id <issue-id>`.\n- Parent/tracker completion includes child lifecycle cleanup: close accepted completed children with `az issue close --id <child-issue>`, and leave any child `open` or `in_progress` only with an explicit blocker, dependency, or remaining-scope rationale.\n- Use `az orchestrate integrate --issue <issue-id>` for worker result inspection or repair guidance, not as the normal merge authority.\n- Use `az orchestrate close-session --issue <issue-id>` only for exceptional session cleanup when a worker must be stopped without closing the issue; never use it for ordinary review handoff.\n- Keep orchestration authority centralized inside each root session while delegating read-only review inspection; delegate explicit nested epic/root issues to their own orchestrator sessions rather than flattening their children into this session.\n- Continue the parent loop until `az orchestrate complete-check --root <issue-id>` and final validation pass; only then set the root `in_review` and hand it to the human while keeping its tmux session/worktree alive. Close/integrate the root only after explicit human acceptance."
-	}
-	if !orchestratedWorker {
-		return base + "\n\nRole: contributor\n- Focus only on this issue scope unless the user explicitly expands it.\n- Keep issue status current; record progress, follow-ups, validation, blockers, review facts, risks, and closeout evidence with `az issue record`; keep notes as terse human audit scratchpad only.\n- Use `in_progress` while actively working and `in_review` when complete and awaiting review/integration. Review handoff is non-terminal: preserve the tmux session and worktree; do not stop or close them while waiting for human feedback.\n- Use `closed` only after explicit acceptance/integration and `cancelled` only for a terminal non-integrated outcome.\n- Represent blocked work with dependency edges and issue record evidence, not by using `in_review`."
-	}
-	mailboxGuidance := "- Check inbound orchestrator messages with `az mail list --parent <parent-issue> --since 0 --json` before declaring yourself blocked or idle; apply events for this issue and continue without waiting for a separate user prompt."
-	if strings.TrimSpace(parentIssueID) != "" {
-		mailboxGuidance = fmt.Sprintf("- Coordination mailbox parent: `%s`; check inbound orchestrator messages with `az mail list --parent %s --since 0 --json` before declaring yourself blocked or idle; apply events for this issue and continue without waiting for a separate user prompt.", parentIssueID, parentIssueID)
-	}
-	reportParentID := "<parent-issue>"
-	if strings.TrimSpace(parentIssueID) != "" {
-		reportParentID = parentIssueID
-	}
-	return base + "\n\nRole: worker\n- Focus only on this issue scope unless the user explicitly expands it.\n" + mailboxGuidance + "\n- Report coordination state to an active parent orchestrator/watch with `az mail send --parent " + reportParentID + " --issue " + issueID + " --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`; do not use `az orchestrate message` for your own status because it is an orchestrator-to-worker live delivery command.\n- Use mailbox event types only for active coordination: worker-progress, worker-blocked, and worker-integration-ready; worker-ready and worker-complete are accepted only as legacy aliases for worker-integration-ready. For non-orchestrated progress, follow-ups, validation, risks, blockers, or closeout evidence, use `az issue record` instead.\n- Evidence bodies should be JSON `worker_evidence.v1` packets with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`; use `\"none\"` entries when a required list has no findings or risks. Omit `artifact_links` unless links are needed; when present, encode it as objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array. Preflight with `az evidence validate --body '<json>'`; use `az issue record " + issueID + " --type evidence.submitted --data '<json>'` when mailbox delivery is irrelevant.\n- Before handing off, run the relevant validation/review checks, build the final `worker_evidence.v1` packet from actual results, run `az evidence validate --body '<json>'`, record or send that exact JSON packet, then set/leave the issue `in_review`. Review handoff is non-terminal: preserve this tmux session and worktree for orchestrator feedback; do not stop or close them yourself.\n- Keep issue status current; report progress, blockers, risks, and readiness through issue records or active-coordination mailbox evidence, with notes as terse human audit scratchpad only.\n- Use `in_progress` while actively working and `in_review` when complete and ready for orchestrator integration; the orchestrator closes accepted work.\n- Report blockers via dependency edges, issue record evidence, or active worker-blocked mailbox events, not by setting `in_review`."
+	return base, safeIssueType
+}
+
+func buildRootedOrchestratorPrompt(issueID, issueType, title string) string {
+	base, _ := buildIssueStartPrompt(issueID, issueType, title)
+	base += fmt.Sprintf("\n\nRooted startup contract (root %s): after `az prime`, your first orchestration commands MUST be `az orchestrate status --root %s` and `az orchestrate watch --root %s --since 0 --jsonl`. Establish and consume the watch before any other work. You coordinate this root; never implement the root's worker scope in this session.", issueID, issueID, issueID)
+	return buildOrchestratorRolePrompt(base)
+}
+
+func buildOrchestratorRolePrompt(base string) string {
+	base += "\n\nReview closeout contract: resolve accepted review tickets with `az orchestrate review accept --root <root-issue> --issue <review-issue>` so trusted acceptance and authoritative terminal close finish before dependent results are used or presented. Return unresolved findings with `az orchestrate review return --root <root-issue> --issue <review-issue> --finding \"...\"`. Reuse the reported `--intent-key` when retrying the same decision. Pending, returned, and human-gated reviews remain non-terminal."
+	base += "\nThis review contract supersedes generic manual-close wording below for review decisions; `az issue close` remains only a repair/manual-close path, not reviewer acceptance authority."
+	return base + "\n\nRole: orchestrator\n- Chain of command is strict: orchestrate only this root's direct children. Never launch, message, inspect for intervention, review, integrate, stop, or take over grandchildren or deeper descendants.\n- Use `az orchestrate status --root <issue-id>` for readiness snapshots including active worker activity (`busy|idle|waiting|no-agent|unknown`).\n- Use `az orchestrate watch --root <issue-id> --since <seq> --jsonl` for continuous observe-only mailbox/runnable/activity updates; start it in another pane/session and leave it running while workers are active. Remain in this active turn/loop and continuously consume its events; starting sessions and a background watch is not a completed handoff to the human.\n- Do not use `--once` for orchestration monitoring; reserve it for diagnostic single polls.\n- Trust hook-backed `activity=busy|idle|waiting` for worker idleness checks and treat `activity=no-agent` as an intentional session-only shell. If activity is `unknown`, inspect hooks with `az ai status --target=auto`; run `az ai install --target=auto` only when hooks are missing, outdated, or not installed. Use `az orchestrate capture --issue <worker-issue>` only when watch/status look stale, failed, or contradictory, or when you need a sparse progress spot-check. Do not poll panes on a fixed interval.\n- Start this root's direct runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`, then immediately ensure the continuous watch is running. Queued reviews do not block unrelated starts when managed agent capacity remains.\n- Nested epic/root rule: start a direct child root's own orchestrator session with `az orchestrator-session start --root <child-root>` and let it run `az prime` and `az orchestrate start --root <child-root>`; supervise that orchestrator as a direct child while it exclusively owns its descendants.\n- Send running-worker nudges with `az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\"`; workers reporting to this active parent orchestrator/watch should use `az mail send --parent <issue-id> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`; non-orchestrated progress, follow-ups, validation, risks, or completion evidence should use `az issue record` instead. Bare `az mail send` is durable mailbox-only.\n- React to progress, blocked, and integration-ready evidence; review and integrate accepted children/epics, advance newly unblocked work, and repeat status/start/watch/review while graph work remains.\n- Worker integration evidence should be a structured JSON `worker_evidence.v1` packet with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`; use `az issue record --type evidence.submitted --data '<json>'` when mailbox delivery is irrelevant, and use `worker-integration-ready` mail only for active parent coordination. Omit `artifact_links` unless needed, and when present use objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array. Run `az evidence validate --body '<json>'` before recording or sending, `az evidence validate --fix --body '<json>'` for repairable schema aliases, or `az evidence validate --template` for the canonical template.\n- Delegate every non-trivial diff inspection to a fresh ephemeral review subagent; use bounded parallel delegates for distinct review-ready issues. Give each delegate the issue acceptance context, worker evidence, context risk, exact worktree, and diff base. Delegates are read-only: they must not edit, mutate issue/session state, send findings, accept/return reviews, integrate, or close. Require a structured clean-or-findings verdict with commands and risks. Validate the packet and spot-check high-risk or contradictory results; keep durable review-return, review-accept, integration, and close authority in this orchestrator.\n- Treat blocked work as graph state from unresolved `blocks` dependencies or active worker-blocked mailbox evidence, not as an issue status.\n- Treat `in_review` workers as ready for orchestrator validation; inspect evidence, delegate diff review, run parent checks, then close accepted worker issues with `az issue close --id <issue-id>`.\n- Parent/tracker completion includes child lifecycle cleanup: close accepted completed children with `az issue close --id <child-issue>`, and leave any child `open` or `in_progress` only with an explicit blocker, dependency, or remaining-scope rationale.\n- Use `az orchestrate integrate --issue <issue-id>` for worker result inspection or repair guidance, not as the normal merge authority.\n- Use `az orchestrate close-session --issue <issue-id>` only for exceptional session cleanup when a worker must be stopped without closing the issue; never use it for ordinary review handoff.\n- Keep orchestration authority centralized inside each root session while delegating read-only review inspection; delegate explicit nested epic/root issues to their own orchestrator sessions rather than flattening their children into this session.\n- Continue the parent loop until `az orchestrate complete-check --root <issue-id>` and final validation pass; only then set the root `in_review` and hand it to the human while keeping its tmux session/worktree alive. Close/integrate the root only after explicit human acceptance."
 }
 
 func buildConflictResolutionPrompt(issueID string, conflictFiles []string) string {

@@ -163,3 +163,54 @@ func TestCloseFailureDialogAllowsActiveSessionOverride(t *testing.T) {
 		t.Fatalf("view should expose active-session override only: %q", view)
 	}
 }
+
+func TestCloseFailureDialogOffersInvestigationAcceptanceRecovery(t *testing.T) {
+	dialog := NewCloseFailureDialog("dhb", "internal: phase preflight for issue dhb: cannot close issue dhb: human-facing investigation lacks explicit issue-specific findings acceptance", CloseFailureDialogOptions{
+		PreviousStatus:      "in_review",
+		TargetStatus:        "closed",
+		AllowAcceptFindings: true,
+	})
+
+	_, cmd := dialog.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if cmd == nil {
+		t.Fatal("expected accept-findings action command")
+	}
+	selection, ok := cmd().(SelectionMsg)
+	if !ok {
+		t.Fatalf("message = %T, want SelectionMsg", cmd())
+	}
+	action, ok := selection.Value.(CloseFailureActionMsg)
+	if !ok {
+		t.Fatalf("selection value = %T, want CloseFailureActionMsg", selection.Value)
+	}
+	if action.TaskID != "dhb" || action.Action != CloseFailureActionAcceptFindings {
+		t.Fatalf("accept-findings action = %+v, want accept_findings for dhb", action)
+	}
+	view := dialog.View()
+	if !strings.Contains(view, "Accept findings & retry") || !strings.Contains(view, "explicit issue-specific") {
+		t.Fatalf("view missing investigation acceptance recovery: %q", view)
+	}
+	if strings.Contains(view, "internal: phase preflight") {
+		t.Fatalf("view should hide the transport phase prefix: %q", view)
+	}
+	foundBinding := false
+	for _, binding := range dialog.StatusBindings() {
+		if binding.Key == "y" {
+			foundBinding = true
+		}
+	}
+	if !foundBinding {
+		t.Fatal("status bindings missing accept-findings key")
+	}
+}
+
+func TestCloseFailureDialogHidesInvestigationAcceptanceRecoveryUnlessAllowed(t *testing.T) {
+	dialog := NewCloseFailureDialog("dhb", "cannot close issue dhb: human-facing investigation lacks explicit issue-specific findings acceptance", CloseFailureDialogOptions{})
+	_, cmd := dialog.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if cmd != nil {
+		t.Fatal("unexpected accept-findings action without explicit allowance")
+	}
+	if strings.Contains(dialog.View(), "Accept findings") {
+		t.Fatalf("view exposes accept-findings action without explicit allowance: %q", dialog.View())
+	}
+}

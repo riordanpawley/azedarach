@@ -97,6 +97,29 @@ func TestUserProjectionConsumerReplaysAndWatchesWithoutMutationFullExport(t *tes
 	restartCtx, restartCancel := context.WithCancel(context.Background())
 	d2.ensureUserProjectionConsumers(restartCtx, []appconfig.Project{project})
 	waitForGlobalProjectedTask(t, store, projectID, issueID, domain.StatusInReview, 3)
+	if err := client.Archive(context.Background(), issueID); err != nil {
+		t.Fatal(err)
+	}
+	waitForGlobalProjectionCursor(t, store, projectID, 4)
+	archivedSnapshot, err := store.Snapshot(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(archivedSnapshot.Projects) != 1 || len(archivedSnapshot.Projects[0].Tasks) != 1 || !archivedSnapshot.Projects[0].Tasks[0].State.IsArchived() {
+		t.Fatalf("archived keyed delta did not replace the live value: %+v", archivedSnapshot)
+	}
+	archivedView, err := projectGlobalView(domain.DefaultBoardView(), archivedSnapshot.Projects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(archivedView.Items) != 0 {
+		t.Fatalf("archived keyed delta left a live global card: %+v", archivedView)
+	}
+	laterID, err := client.Create(context.Background(), issues.CreateTaskParams{Title: "later", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForGlobalProjectedTask(t, store, projectID, laterID, domain.StatusOpen, 5)
 	legacy, err := client.ExportProjection(context.Background(), projectID)
 	if err != nil {
 		t.Fatal(err)
@@ -124,11 +147,24 @@ func TestUserProjectionConsumerReplaysAndWatchesWithoutMutationFullExport(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if component.Cursor != 3 || component.Hash == "" || len(component.SourceVector) == 0 || component.Projector != issueProjectionProjector() {
+	if component.Cursor != 5 || component.Hash == "" || len(component.SourceVector) == 0 || component.Projector != issueProjectionProjector() {
 		t.Fatalf("incremental vector health = %+v", component)
 	}
 	restartCancel()
 	d2.stopUserProjectionWorkers()
+}
+
+func waitForGlobalProjectionCursor(t *testing.T, store *userstore.Store, projectID string, cursor uint64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		state, err := store.ProjectDeltaState(context.Background(), projectID)
+		if err == nil && state.Cursor >= cursor {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("project %s did not reach cursor=%d", projectID, cursor)
 }
 
 func TestUserProjectionConsumerGapRecoversOnlyAffectedProjectFromVerifiedSnapshot(t *testing.T) {
@@ -275,6 +311,35 @@ func TestUserProjectionConsumerHydratesAffectedIssueForEmptyObservationAdvance(t
 	}
 	if len(changes) != 1 || changes[0].MaterializedIssue == nil || changes[0].MaterializedIssue.ID.String() != issueID || changes[0].MaterializedIssue.IssueFacts().WaitingHuman {
 		t.Fatalf("hydrated empty advance changes = %+v", changes)
+	}
+}
+
+func TestUserProjectionConsumerCleansMissingObservationOnlyIssue(t *testing.T) {
+	ctx := context.Background()
+	client := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	if err := client.OpenProjectionDeltaStore(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "deleted", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventProgressRecorded, Source: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Delete(ctx, issueID); err != nil {
+		t.Fatal(err)
+	}
+	batch := protocol.ProjectionDeltaBatch{EmptyAdvances: []protocol.ProjectionEmptyAdvance{{Source: protocol.ProjectionSourceRange{Authority: "legacy_issue_observation", SourceTo: fmt.Sprint(event.ID)}}}}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issues: client, issueClientsByProject: map[string]*issues.Client{"p": client}}
+	changes, err := d.hydrateUserProjectionChanges(ctx, "p", client, batch, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) != 1 || changes[0].IssueID != issueID || !changes[0].Delete {
+		t.Fatalf("missing observation-only issue changes = %+v, want cleanup", changes)
 	}
 }
 

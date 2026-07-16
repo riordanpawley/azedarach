@@ -66,6 +66,17 @@ All decisions colocated with issues + spec_requirements.
 	}
 }
 
+func TestParseDecisionMarkdownSemanticID(t *testing.T) {
+	id := "dec-use-sqlite-0123456789abcdef0123456789abcdef"
+	parsed, err := parseDecisionMarkdown([]byte("# " + id + ": Use SQLite\n\n## Rationale\n\nPortable identity.\n"))
+	if err != nil {
+		t.Fatalf("parse semantic decision: %v", err)
+	}
+	if parsed.LocalID != id || parsed.NumericID != 0 {
+		t.Fatalf("id = %q/%d, want %s/0", parsed.LocalID, parsed.NumericID, id)
+	}
+}
+
 func TestParseDecisionMarkdownMissingSectionsLeaveFieldsNil(t *testing.T) {
 	body := `# dec-1: Title only
 

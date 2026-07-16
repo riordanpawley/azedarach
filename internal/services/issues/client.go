@@ -525,6 +525,8 @@ type Client struct {
 	projectionDeltaChecksumRepairHook  func(stage string) error
 	projectionDeltaReadHook            func()
 	decisionOutboxMigrationFailureHook func(stage string) error
+	decisionIdempotencyFailureHook     func(stage string) error
+	eventSearchMigrationFailureHook    func(stage string) error
 	requireExistingDB                  bool
 	interactionMu                      sync.RWMutex
 	interactionCache                   map[string]domain.InteractionRequest
@@ -859,6 +861,17 @@ func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daemon_worktree_projections_project_path
 			ON daemon_worktree_projections (project_id, path)`,
+		`CREATE TABLE IF NOT EXISTS daemon_rooted_bootstrap_acknowledgements (
+			project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
+			root_issue_id TEXT NOT NULL CHECK (trim(root_issue_id) <> ''),
+			session_id TEXT NOT NULL CHECK (trim(session_id) <> ''),
+			prompt_hash TEXT NOT NULL CHECK (trim(prompt_hash) <> ''),
+			runtime_nonce TEXT NOT NULL CHECK (trim(runtime_nonce) <> ''),
+			acknowledged_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (project_id, root_issue_id),
+			UNIQUE (project_id, session_id)
+		)`,
 	}
 	for _, stmt := range statements {
 		if _, err := db.Exec(stmt); err != nil {
@@ -1771,6 +1784,12 @@ func (c *Client) GetWithRuntimeArchiveMode(ctx context.Context, projectID, id st
 
 // GetManyWithRuntime fetches active issues by ID with runtime projection fields.
 func (c *Client) GetManyWithRuntime(ctx context.Context, projectID string, ids []string) ([]domain.Task, error) {
+	return c.GetManyWithRuntimeArchiveMode(ctx, projectID, ids, ArchiveExclude)
+}
+
+// GetManyWithRuntimeArchiveMode fetches issues by ID with runtime projection
+// fields using the requested archive visibility.
+func (c *Client) GetManyWithRuntimeArchiveMode(ctx context.Context, projectID string, ids []string, archiveMode ArchiveMode) ([]domain.Task, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return nil, err
@@ -1783,7 +1802,7 @@ func (c *Client) GetManyWithRuntime(ctx context.Context, projectID string, ids [
 	if len(issueIDs) == 0 {
 		return []domain.Task{}, nil
 	}
-	tasks, err := c.queryTasksWithRuntime(ctx, db, projectID, issueIDs...)
+	tasks, err := c.queryTasksWithRuntimeArchiveMode(ctx, db, projectID, archiveMode, issueIDs...)
 	if err != nil {
 		return nil, c.wrapError("get-many-with-runtime", strings.Join(issueIDs, ","), err)
 	}

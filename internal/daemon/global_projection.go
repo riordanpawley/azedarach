@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -19,7 +20,117 @@ import (
 
 const (
 	globalProjectionRepairInterval = 2 * time.Minute
+	selectorSnapshotRefreshTimeout = 5 * time.Second
 )
+
+func selectorSnapshotRequestKey(body protocol.GlobalSnapshotRequestBody) (string, error) {
+	body.Query = strings.TrimSpace(body.Query)
+	body.ViewID = strings.TrimSpace(body.ViewID)
+	body.Scope.CurrentProjectID = naming.ProjectID(strings.TrimSpace(body.Scope.CurrentProjectID.String()))
+	body.Scope.ProjectIDs = append([]naming.ProjectID(nil), body.Scope.ProjectIDs...)
+	for index := range body.Scope.ProjectIDs {
+		body.Scope.ProjectIDs[index] = naming.ProjectID(strings.TrimSpace(body.Scope.ProjectIDs[index].String()))
+	}
+	sort.Slice(body.Scope.ProjectIDs, func(i, j int) bool { return body.Scope.ProjectIDs[i] < body.Scope.ProjectIDs[j] })
+	body.Scope.ProjectIDs = dedupeProjectIDs(body.Scope.ProjectIDs)
+	body.HydrateTaskIDs = append([]protocol.ScopedIssueID(nil), body.HydrateTaskIDs...)
+	for index := range body.HydrateTaskIDs {
+		body.HydrateTaskIDs[index].ProjectID = naming.ProjectID(protocol.NormalizeProjectID(body.HydrateTaskIDs[index].ProjectID.String()))
+		body.HydrateTaskIDs[index].IssueID = naming.IssueID(strings.TrimSpace(body.HydrateTaskIDs[index].IssueID.String()))
+	}
+	sort.Slice(body.HydrateTaskIDs, func(i, j int) bool {
+		if body.HydrateTaskIDs[i].ProjectID != body.HydrateTaskIDs[j].ProjectID {
+			return body.HydrateTaskIDs[i].ProjectID < body.HydrateTaskIDs[j].ProjectID
+		}
+		return body.HydrateTaskIDs[i].IssueID < body.HydrateTaskIDs[j].IssueID
+	})
+	body.HydrateTaskIDs = dedupeScopedIssueIDs(body.HydrateTaskIDs)
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return "", fmt.Errorf("encode tmux selector snapshot cache key: %w", err)
+	}
+	return string(raw), nil
+}
+
+func dedupeProjectIDs(ids []naming.ProjectID) []naming.ProjectID {
+	out := ids[:0]
+	for _, id := range ids {
+		if id == "" || len(out) > 0 && out[len(out)-1] == id {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+func dedupeScopedIssueIDs(ids []protocol.ScopedIssueID) []protocol.ScopedIssueID {
+	out := ids[:0]
+	for _, id := range ids {
+		if id.ProjectID == "" || id.IssueID == "" || len(out) > 0 && out[len(out)-1] == id {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+func (d *Daemon) scheduleSelectorSnapshotRefresh(ctx context.Context, key string, body protocol.GlobalSnapshotRequestBody) {
+	d.userStoreRefreshMu.Lock()
+	if d.userStoreRefreshStopping {
+		d.userStoreRefreshMu.Unlock()
+		return
+	}
+	refresh, ok := d.selectorSnapshots.beginRefresh(key)
+	if !ok {
+		d.userStoreRefreshMu.Unlock()
+		return
+	}
+	baseCtx := d.userStoreRefreshCtx
+	if baseCtx == nil {
+		baseCtx = context.WithoutCancel(ctx)
+	}
+	d.userStoreRefreshWG.Add(1)
+	d.userStoreRefreshMu.Unlock()
+	refreshCtx, cancel := context.WithTimeout(baseCtx, selectorSnapshotRefreshTimeout)
+
+	go func() {
+		defer d.userStoreRefreshWG.Done()
+		defer cancel()
+		body, err := d.buildGlobalSnapshot(refreshCtx, body)
+		d.selectorSnapshots.finishLoad(refresh, body, err)
+		if err != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Debug("tmux selector snapshot cache refresh failed", "error", err)
+		}
+	}()
+}
+
+func (d *Daemon) loadSelectorSnapshot(ctx context.Context, body protocol.GlobalSnapshotRequestBody) ([]byte, error) {
+	d.userStoreRefreshMu.Lock()
+	if d.userStoreRefreshStopping {
+		d.userStoreRefreshMu.Unlock()
+		return nil, context.Canceled
+	}
+	baseCtx := d.userStoreRefreshCtx
+	if baseCtx == nil {
+		baseCtx = context.WithoutCancel(ctx)
+	}
+	d.userStoreRefreshWG.Add(1)
+	d.userStoreRefreshMu.Unlock()
+
+	loadCtx, cancel := context.WithTimeout(baseCtx, selectorSnapshotRefreshTimeout)
+	defer d.userStoreRefreshWG.Done()
+	defer cancel()
+	return d.buildGlobalSnapshot(loadCtx, body)
+}
+
+func (d *Daemon) startUserProjectionWorkContext(ctx context.Context) {
+	d.userStoreRefreshMu.Lock()
+	defer d.userStoreRefreshMu.Unlock()
+	if d.userStoreRefreshStopping || d.userStoreRefreshCancel != nil {
+		return
+	}
+	d.userStoreRefreshCtx, d.userStoreRefreshCancel = context.WithCancel(ctx)
+}
 
 func (d *Daemon) startGlobalProjectionRepairWorker(ctx context.Context) {
 	if d == nil || d.userStore == nil || d.cfg.ScopedRuntime {
@@ -273,9 +384,45 @@ func (d *Daemon) handleGlobalSnapshot(ctx context.Context, req protocol.RequestE
 	if err := body.Scope.Validate(); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
 	}
+	if body.Consumer == protocol.GlobalViewConsumerTmuxSelector {
+		key, err := selectorSnapshotRequestKey(body)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
+		}
+		if cached, ok := d.selectorSnapshots.get(key); ok {
+			d.scheduleSelectorSnapshotRefresh(ctx, key, body)
+			resp := d.successResponse(req)
+			resp.Body = cached
+			return resp, nil
+		}
+		raw, err := d.selectorSnapshots.loadCold(ctx, key, func() ([]byte, error) {
+			return d.loadSelectorSnapshot(ctx, body)
+		})
+		if err != nil {
+			return d.globalSnapshotErrorResponse(req, err), nil
+		}
+		resp := d.successResponse(req)
+		resp.Body = raw
+		return resp, nil
+	}
+	raw, err := d.buildGlobalSnapshot(ctx, body)
+	if err != nil {
+		return d.globalSnapshotErrorResponse(req, err), nil
+	}
+	resp := d.successResponse(req)
+	resp.Body = raw
+	return resp, nil
+}
+
+type globalSnapshotRequestError struct{ err error }
+
+func (e globalSnapshotRequestError) Error() string { return e.err.Error() }
+func (e globalSnapshotRequestError) Unwrap() error { return e.err }
+
+func (d *Daemon) buildGlobalSnapshot(ctx context.Context, body protocol.GlobalSnapshotRequestBody) ([]byte, error) {
 	record, err := d.userStore.ResolveGlobalView(ctx, body.ViewID, string(body.Consumer))
 	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("resolve global view: %v", err)), nil
+		return nil, globalSnapshotRequestError{err: fmt.Errorf("resolve global view: %w", err)}
 	}
 	view := record.View
 	scope := record.Scope
@@ -284,21 +431,27 @@ func (d *Daemon) handleGlobalSnapshot(ctx context.Context, req protocol.RequestE
 	}
 	snapshot, err := d.userStore.SnapshotForScopedViewWithTasks(ctx, strings.TrimSpace(body.Query), &view, scope, body.HydrateTaskIDs)
 	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		return nil, err
 	}
 	projection, err := projectGlobalView(view, filterGlobalProjects(snapshot.Projects, scope))
 	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		return nil, err
 	}
 	projection.KnownTaskIDs = augmentGlobalProjectionKnownTasks(projection.KnownTaskIDs, snapshot.Projects)
 	snapshot.Projection = projection
 	raw, err := json.Marshal(snapshot)
 	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		return nil, err
 	}
-	resp := d.successResponse(req)
-	resp.Body = raw
-	return resp, nil
+	return raw, nil
+}
+
+func (d *Daemon) globalSnapshotErrorResponse(req protocol.RequestEnvelope, err error) protocol.ResponseEnvelope {
+	var requestErr globalSnapshotRequestError
+	if errors.As(err, &requestErr) {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, requestErr.Error())
+	}
+	return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error())
 }
 
 func augmentGlobalProjectionKnownTasks(known []protocol.ScopedIssueID, projects []protocol.GlobalProjectSnapshot) []protocol.ScopedIssueID {
@@ -345,34 +498,77 @@ func filterGlobalProjects(projects []protocol.GlobalProjectSnapshot, scope proto
 	return out
 }
 
-func (d *Daemon) validateGlobalViewScopeProjects(ctx context.Context, scope protocol.GlobalViewScope) error {
+func (d *Daemon) resolveGlobalViewScopeProjects(ctx context.Context, scope protocol.GlobalViewScope) (protocol.GlobalViewScope, error) {
 	if err := scope.Validate(); err != nil {
-		return err
+		return protocol.GlobalViewScope{}, err
 	}
 	if scope.Kind == protocol.GlobalViewScopeAllProjects || scope.Kind == "" {
-		return nil
+		return scope, nil
 	}
 	snapshot, err := d.userStore.Snapshot(ctx, "")
 	if err != nil {
-		return fmt.Errorf("load project catalog: %w", err)
+		return protocol.GlobalViewScope{}, fmt.Errorf("load project catalog: %w", err)
 	}
-	known := make(map[string]struct{}, len(snapshot.Projects))
+	aliases := make(map[string]string, len(snapshot.Projects)*2)
+	ambiguous := make(map[string]struct{})
 	for _, project := range snapshot.Projects {
 		if !project.Registered {
 			continue
 		}
-		known[protocol.NormalizeProjectID(project.ProjectID)] = struct{}{}
+		canonicalID := protocol.NormalizeProjectID(project.ProjectID)
+		if canonicalID == "" {
+			continue
+		}
+		aliases[canonicalID] = canonicalID
+	}
+	for _, project := range snapshot.Projects {
+		if !project.Registered {
+			continue
+		}
+		canonicalID := protocol.NormalizeProjectID(project.ProjectID)
+		name := protocol.NormalizeProjectID(project.Name)
+		if canonicalID == "" || name == "" || name == canonicalID {
+			continue
+		}
+		if existing, ok := aliases[name]; ok {
+			if existing == name || existing == canonicalID {
+				continue
+			}
+			delete(aliases, name)
+			ambiguous[name] = struct{}{}
+			continue
+		}
+		if _, collision := ambiguous[name]; !collision {
+			aliases[name] = canonicalID
+		}
 	}
 	ids := scope.ProjectIDs
 	if scope.Kind == protocol.GlobalViewScopeCurrentProject {
 		ids = []naming.ProjectID{scope.CurrentProjectID}
 	}
+	resolved := make([]naming.ProjectID, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
-		if _, ok := known[protocol.NormalizeProjectID(id.String())]; !ok {
-			return fmt.Errorf("global view scope references unknown project %q", id)
+		alias := protocol.NormalizeProjectID(id.String())
+		if _, ok := ambiguous[alias]; ok {
+			return protocol.GlobalViewScope{}, fmt.Errorf("global view scope references ambiguous project %q", id)
 		}
+		canonicalID, ok := aliases[alias]
+		if !ok {
+			return protocol.GlobalViewScope{}, fmt.Errorf("global view scope references unknown project %q", id)
+		}
+		if _, duplicate := seen[canonicalID]; duplicate {
+			continue
+		}
+		seen[canonicalID] = struct{}{}
+		resolved = append(resolved, naming.ProjectID(canonicalID))
 	}
-	return nil
+	if scope.Kind == protocol.GlobalViewScopeCurrentProject {
+		scope.CurrentProjectID = resolved[0]
+	} else {
+		scope.ProjectIDs = resolved
+	}
+	return scope, nil
 }
 
 func (d *Daemon) handleGlobalProjectionRebuild(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

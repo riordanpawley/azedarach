@@ -24,22 +24,48 @@ cleanup on the same owned bytes.
 
 ## Validation and limits
 
-The outer `scripts/with-machine-validation-lease` wrapper is a thin client of
-the daemon-owned repository-family validation queue. Aggregate work is
-exclusive; shared focused validators may run concurrently until an aggregate
-waiter reaches the head of the fair durable queue. When shared work is already
-active, one later shared request may bypass the oldest aggregate; durable
-request history then closes the shared lane until that aggregate runs, even
-across daemon replacement. Explicitly safe work may run
-beside an aggregate owner. The wrapper acquires before `go run` compilation,
-heartbeats the durable request, and nested managed commands join its request.
-The safe lane is bounded to daemon-recognized non-compiling command/profile
-pairs; callers cannot relabel focused or aggregate Go work as safe.
+Ordinary worktree builds, tests, diagnostics, race runs, and raw Go commands
+run directly against their isolated cache namespace. They do not enter daemon
+validation admission. The `scripts/with-machine-validation-lease` wrapper is
+reserved for publication authority (`push_gate` and `review_evidence`) and the
+controlled runner's timing `capacity`. Publication requests start immediately,
+including while timing capacity is active. Capacity aggregate work remains
+exclusive with other capacity work; its wrapper waits for unleased Go work to
+quiesce, samples overlap, and fails noncanonical timing evidence.
+
+Admission class is independent from attribution and evidence authority.
+Repository-scoped push gates carry no ticket identity and can never authorize
+ticket review or integration. Development runs are identified by their
+worktree and never create validation-lease evidence. Only explicit
+`review_evidence` purpose can enter review-readiness queries, and acquisition
+binds it to the current ticket review epoch, reviewer lease, and source
+revision. Nested recipes inherit class, scope, purpose, and revision from the
+outer capability and cannot upgrade them. Rows predating this contract retain
+`legacy` purpose and remain diagnostic history only.
+
+Exact compatibility is a typed policy over repository identity, revision,
+semantic profile and command, isolation mode, toolchain/environment
+fingerprint, class, scope, and purpose. Equal completed evidence may be reused;
+ticket-scoped `review_evidence` is explicitly stronger than a repository
+`push_gate` request with the same execution contract, but the reverse is never
+true. Concurrent publication requests execute independently so neither waits
+for the other. Compatible capacity requests may record `joined` followers of
+one authoritative execution. Reused and joined status/audit output always
+names the authoritative request.
+
+`--no-reuse` bypasses completed evidence but capacity requests may still join
+identical active work.
+`--force-rerun` creates a separately admitted execution. `--emergency-skip`
+requires an actor and reason and records a cancelled `skipped` request, so it
+cannot manufacture review or integration readiness. The pre-push compatibility
+environment requires the corresponding reason and actor instead of bypassing
+the daemon. Development/capacity validators do not participate in production
+install exclusion; production-sensitive aggregate push/review gates do.
 
 The cache lock has a narrower role. Validators hold it shared while cache
 maintenance holds it exclusively, so
 `go clean -cache` never runs concurrently with managed validation. Reports use schema
-`azedarach.test_timing_report.v3` and distinguish test-result cache policy from
+`azedarach.test_timing_report.v4` and distinguish test-result cache policy from
 the retained build cache. The `build_cache` object includes namespace, path,
 policy, bytes/files before and after, deltas, total family bytes, configured
 limits, and the resulting decision.
@@ -53,12 +79,11 @@ projection so active owners and waiters are visible beside worker capacity.
 Expired heartbeats terminalize stale owners and transactionally wake the next
 eligible waiter after process death or daemon restart.
 
-The protocol-49 rollout is a one-generation bootstrap: the integration owner
-must keep the pre-existing isolated canonical gate, validate the candidate
-without invoking the new outer wrapper, integrate and install that managed
-generation, then use the daemon queue for every later gate. Internal
-`*_unleased` recipes are only nested implementation details after rollout and
-must never be started as independent validation commands.
+Legacy active or queued development rows are cancelled during reconciliation;
+older worktrees that explicitly invoke the wrapper with `development` purpose
+run their payload directly for compatibility. Internal `*_unleased` recipe
+names remain implementation details, while their ordinary child recipes no
+longer acquire nested leases.
 
 Defaults are a 10 GiB soft warning and a 28 GiB hard refusal. Configure exact
 byte values with `AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES` and

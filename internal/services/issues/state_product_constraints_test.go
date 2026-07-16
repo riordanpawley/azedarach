@@ -257,6 +257,9 @@ func TestCanonicalStateRepairRunsAfterRecordedBroken0045(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range triggerNames {
+		if strings.HasSuffix(name, "_search_fts") {
+			continue
+		}
 		if _, err := db.ExecContext(ctx, `DROP TRIGGER IF EXISTS "`+strings.ReplaceAll(name, `"`, `""`)+`"`); err != nil {
 			t.Fatal(err)
 		}

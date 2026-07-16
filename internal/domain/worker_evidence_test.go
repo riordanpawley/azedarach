@@ -6,6 +6,16 @@ import (
 	"testing"
 )
 
+func TestWorkerEvidencePacketTemplateIsProjectAgnostic(t *testing.T) {
+	packet := WorkerEvidencePacketTemplate()
+	if len(packet.CommandsRun) != 1 || packet.CommandsRun[0] != "<project validation command>" {
+		t.Fatalf("commands_run = %v, want project-owned placeholder", packet.CommandsRun)
+	}
+	if len(packet.FilesChanged) != 1 || packet.FilesChanged[0] != "path/to/changed-file" {
+		t.Fatalf("files_changed = %v, want project-agnostic placeholder", packet.FilesChanged)
+	}
+}
+
 func TestParseWorkerEvidencePacketBodyValidDirectPacket(t *testing.T) {
 	body := `{
 		"schema": "worker_evidence.v1",
@@ -199,7 +209,7 @@ func TestParseWorkerEvidencePacketBodyIgnoresUnstructuredText(t *testing.T) {
 	}
 }
 
-func TestWorkerEvidenceRejectsUnleasedOrOverlappedAggregateValidation(t *testing.T) {
+func TestWorkerEvidenceTreatsOverlapAsTimingCapacityOnly(t *testing.T) {
 	base := `{"schema":"worker_evidence.v1","summary":"ready","commands_run":["just test"],"key_assertions":["tests pass"],"files_changed":["justfile"],"review":{"status":"clean","findings":[]},"risks":["none"],"aggregate_validation":%s}`
 	tests := []struct {
 		name     string
@@ -208,7 +218,8 @@ func TestWorkerEvidenceRejectsUnleasedOrOverlappedAggregateValidation(t *testing
 	}{
 		{name: "leased clean", evidence: `{"held":true,"request_id":"req-1","class":"aggregate","profile":"cold","source_revision":"abc123","present":true,"overlap_detected":false,"external_go_processes":0}`, complete: true},
 		{name: "unleased", evidence: `{"held":false,"class":"aggregate","present":true,"overlap_detected":false}`, complete: false},
-		{name: "overlapped", evidence: `{"held":true,"request_id":"req-2","class":"aggregate","present":true,"overlap_detected":true,"external_go_processes":2}`, complete: false},
+		{name: "publication overlap is diagnostic", evidence: `{"held":true,"request_id":"req-2","class":"aggregate","purpose":"review_evidence","profile":"cold","source_revision":"abc123","present":true,"overlap_detected":true,"external_go_processes":2}`, complete: true},
+		{name: "capacity overlap is invalid", evidence: `{"held":true,"request_id":"req-3","class":"aggregate","purpose":"capacity","profile":"ci-timing","source_revision":"abc123","present":true,"overlap_detected":true,"external_go_processes":2}`, complete: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

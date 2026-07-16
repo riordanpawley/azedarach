@@ -70,6 +70,7 @@ func writeRefusalArtifacts(opts RunOptions, telemetry gocache.Telemetry, refusal
 		Profile:             opts.Profile.Name,
 		CacheMode:           opts.Profile.CachePolicy(),
 		TestResultCacheMode: opts.Profile.CachePolicy(),
+		TimingBudgetPolicy:  timingBudgetPolicy(opts.CheckBudgets),
 		BuildCache:          telemetry,
 		ResourceMethod:      "direct-go-command-process-state-v1",
 		ProcessLoad:         ProcessLoadEvidence{Method: "ps-process-tree-v2", PeakProcesses: []GoProcess{}, PeakExternalProcesses: []GoProcess{}},
@@ -146,7 +147,7 @@ func runLocked(ctx context.Context, opts RunOptions, cacheConfig gocache.Config,
 		}
 	}
 	cacheTelemetry, cacheErr := gocache.Finish(cacheConfig, cacheTelemetry)
-	m := Measurement{Schema: ReportSchema, Profile: opts.Profile.Name, CacheMode: opts.Profile.CachePolicy(), TestResultCacheMode: opts.Profile.CachePolicy(), BuildCache: cacheTelemetry, ResourceMethod: "direct-go-command-process-state-v1", StartedAt: startedAt, WallSeconds: wall, ProcessLoad: processLoad, ValidationLease: validationLeaseEvidence(), ExitCode: exitCode, Packages: packages, Tests: tests, Failures: failures, InvalidEvents: invalid, RawJSONPath: rawPath, StderrPath: stderrPath, Command: command}
+	m := Measurement{Schema: ReportSchema, Profile: opts.Profile.Name, CacheMode: opts.Profile.CachePolicy(), TestResultCacheMode: opts.Profile.CachePolicy(), TimingBudgetPolicy: timingBudgetPolicy(opts.CheckBudgets), BuildCache: cacheTelemetry, ResourceMethod: "direct-go-command-process-state-v1", StartedAt: startedAt, WallSeconds: wall, ProcessLoad: processLoad, ValidationLease: validationLeaseEvidence(), ExitCode: exitCode, Packages: packages, Tests: tests, Failures: failures, InvalidEvents: invalid, RawJSONPath: rawPath, StderrPath: stderrPath, Command: command}
 	if cmd.ProcessState != nil {
 		m.UserCPUSeconds = cmd.ProcessState.UserTime().Seconds()
 		m.SystemCPUSeconds = cmd.ProcessState.SystemTime().Seconds()
@@ -179,9 +180,16 @@ func runLocked(ctx context.Context, opts RunOptions, cacheConfig gocache.Config,
 	return m, errors.Join(outcomes...)
 }
 
+func timingBudgetPolicy(enforced bool) string {
+	if enforced {
+		return "enforced"
+	}
+	return "diagnostic-only"
+}
+
 func validationLeaseEvidence() ValidationLeaseEvidence {
 	requestID := strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_REQUEST_ID"))
-	return ValidationLeaseEvidence{Held: requestID != "", RequestID: requestID, Class: strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_CLASS")), Profile: strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_PROFILE")), SourceRevision: strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_SOURCE_REVISION"))}
+	return ValidationLeaseEvidence{Held: requestID != "", RequestID: requestID, Class: strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_CLASS")), Scope: strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_SCOPE")), Purpose: strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_PURPOSE")), Execution: strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_EXECUTION")), AuthoritativeRequestID: strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_AUTHORITATIVE_REQUEST_ID")), Override: strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_OVERRIDE")), Profile: strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_PROFILE")), SourceRevision: strings.TrimSpace(os.Getenv("AZEDARACH_VALIDATION_SOURCE_REVISION"))}
 }
 
 func writeValidationLeaseEvidenceFile(measurement Measurement, outputDir string) error {
@@ -190,14 +198,14 @@ func writeValidationLeaseEvidenceFile(measurement Measurement, outputDir string)
 		return nil
 	}
 	reportPath := filepath.Join(outputDir, "report.json")
-	evidence := validationLeaseEvidenceFile{Held: measurement.ValidationLease.Held, RequestID: measurement.ValidationLease.RequestID, Class: measurement.ValidationLease.Class, Profile: measurement.ValidationLease.Profile, SourceRevision: measurement.ValidationLease.SourceRevision, Present: true, ReportPath: reportPath, ReportPaths: []string{reportPath}, OverlapDetected: measurement.ProcessLoad.OverlapDetected, ExternalGoProcesses: measurement.ProcessLoad.MaxExternalGoProcesses}
+	evidence := validationLeaseEvidenceFile{Held: measurement.ValidationLease.Held, RequestID: measurement.ValidationLease.RequestID, Class: measurement.ValidationLease.Class, Scope: measurement.ValidationLease.Scope, Purpose: measurement.ValidationLease.Purpose, Execution: measurement.ValidationLease.Execution, AuthoritativeRequestID: measurement.ValidationLease.AuthoritativeRequestID, Override: measurement.ValidationLease.Override, Profile: measurement.ValidationLease.Profile, SourceRevision: measurement.ValidationLease.SourceRevision, Present: true, ReportPath: reportPath, ReportPaths: []string{reportPath}, OverlapDetected: measurement.ProcessLoad.OverlapDetected, ExternalGoProcesses: measurement.ProcessLoad.MaxExternalGoProcesses}
 	if existingData, err := os.ReadFile(path); err == nil {
 		if len(strings.TrimSpace(string(existingData))) > 0 {
 			var existing validationLeaseEvidenceFile
 			if err := json.Unmarshal(existingData, &existing); err != nil {
 				return fmt.Errorf("decode accumulated validation lease evidence: %w", err)
 			}
-			if existing.RequestID != evidence.RequestID || existing.Class != evidence.Class || existing.Profile != evidence.Profile || existing.SourceRevision != evidence.SourceRevision || existing.Held != evidence.Held {
+			if existing.RequestID != evidence.RequestID || existing.Class != evidence.Class || existing.Scope != evidence.Scope || existing.Purpose != evidence.Purpose || existing.Execution != evidence.Execution || existing.AuthoritativeRequestID != evidence.AuthoritativeRequestID || existing.Override != evidence.Override || existing.Profile != evidence.Profile || existing.SourceRevision != evidence.SourceRevision || existing.Held != evidence.Held {
 				return fmt.Errorf("accumulated validation lease evidence identity changed")
 			}
 			evidence.OverlapDetected = evidence.OverlapDetected || existing.OverlapDetected
@@ -218,16 +226,21 @@ func writeValidationLeaseEvidenceFile(measurement Measurement, outputDir string)
 }
 
 type validationLeaseEvidenceFile struct {
-	Held                bool     `json:"held"`
-	RequestID           string   `json:"request_id,omitempty"`
-	Class               string   `json:"class,omitempty"`
-	Profile             string   `json:"profile,omitempty"`
-	SourceRevision      string   `json:"source_revision,omitempty"`
-	Present             bool     `json:"present"`
-	ReportPath          string   `json:"report_path,omitempty"`
-	ReportPaths         []string `json:"report_paths,omitempty"`
-	OverlapDetected     bool     `json:"overlap_detected"`
-	ExternalGoProcesses int      `json:"external_go_processes"`
+	Held                   bool     `json:"held"`
+	RequestID              string   `json:"request_id,omitempty"`
+	Class                  string   `json:"class,omitempty"`
+	Scope                  string   `json:"scope,omitempty"`
+	Purpose                string   `json:"purpose,omitempty"`
+	Execution              string   `json:"execution,omitempty"`
+	AuthoritativeRequestID string   `json:"authoritative_request_id,omitempty"`
+	Override               string   `json:"override,omitempty"`
+	Profile                string   `json:"profile,omitempty"`
+	SourceRevision         string   `json:"source_revision,omitempty"`
+	Present                bool     `json:"present"`
+	ReportPath             string   `json:"report_path,omitempty"`
+	ReportPaths            []string `json:"report_paths,omitempty"`
+	OverlapDetected        bool     `json:"overlap_detected"`
+	ExternalGoProcesses    int      `json:"external_go_processes"`
 }
 
 func appendUniqueValidationReport(paths []string, candidates ...string) []string {
@@ -271,3 +284,7 @@ func writeArtifacts(dir string, m Measurement) error {
 	}
 	return nil
 }
+
+// WriteArtifacts publishes a derived aggregate using the same report schema as
+// individual samples.
+func WriteArtifacts(dir string, m Measurement) error { return writeArtifacts(dir, m) }

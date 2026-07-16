@@ -106,6 +106,7 @@ type Daemon struct {
 
 	issues                               *issues.Client
 	userStore                            *userstore.Store
+	selectorSnapshots                    selectorSnapshotCache
 	userStoreRefreshMu                   sync.Mutex
 	userStoreProjectLockHook             func(string, bool)
 	userStoreProjectRefreshLocks         sync.Map
@@ -564,6 +565,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.cfg.Logger.Info("daemon startup phase", "phase", "lock_acquire", "duration_ms", time.Since(startedAt).Milliseconds())
 	serveCtx, cancelServe := context.WithCancel(context.Background())
 	defer cancelServe()
+	d.startUserProjectionWorkContext(serveCtx)
 	d.startSessionLaunchArtifactCleanup(serveCtx)
 	shutdownDone := make(chan struct{})
 	shutdownStop := make(chan struct{})
@@ -1131,6 +1133,19 @@ type sessionIntentSelector struct {
 	ScopeID   string
 }
 
+func normalizeSessionIntentSelector(selector sessionIntentSelector, issueID string) sessionIntentSelector {
+	if selector.Role == "" {
+		selector.Role = daemonstate.SessionRoleWorker
+	}
+	if selector.ScopeKind == "" {
+		selector.ScopeKind = daemonstate.SessionScopeIssue
+	}
+	if strings.TrimSpace(selector.ScopeID) == "" && selector.ScopeKind == daemonstate.SessionScopeIssue {
+		selector.ScopeID = strings.TrimSpace(issueID)
+	}
+	return selector
+}
+
 func (d *Daemon) applySessionLifecycleTransitionWithActivity(
 	ctx context.Context,
 	req protocol.RequestEnvelope,
@@ -1141,7 +1156,7 @@ func (d *Daemon) applySessionLifecycleTransitionWithActivity(
 	activity string,
 	activitySource string,
 ) error {
-	return d.applyTypedSessionLifecycleTransition(ctx, req, projectID, sessionID, issueID, command, activity, activitySource, sessionIntentSelector{Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueID})
+	return d.applyTypedSessionLifecycleTransition(ctx, req, projectID, sessionID, issueID, command, activity, activitySource, normalizeSessionIntentSelector(sessionIntentSelector{}, issueID))
 }
 
 func (d *Daemon) applyTypedSessionLifecycleTransition(ctx context.Context, req protocol.RequestEnvelope, projectID, sessionID, issueID, command, activity, activitySource string, selector sessionIntentSelector) error {
@@ -1168,6 +1183,10 @@ func (d *Daemon) applyTypedSessionLifecycleTransition(ctx context.Context, req p
 	if err != nil {
 		return err
 	}
+	selector = normalizeSessionIntentSelector(selector, issueID)
+	session.Role = selector.Role
+	session.ScopeKind = selector.ScopeKind
+	session.ScopeID = selector.ScopeID
 	runtimeObservedFound := false
 	if runtimeStore := d.sessionRuntimeStateStore(projectID); runtimeStore != nil && strings.TrimSpace(sessionID) != "" {
 		if observed, found, loadErr := runtimeStore.GetSessionIntent(ctx, projectID, selector.Role, selector.ScopeKind, selector.ScopeID); loadErr == nil && found {

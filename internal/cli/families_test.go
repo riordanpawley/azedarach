@@ -1515,25 +1515,158 @@ func TestGitHooksHookCommandLogsDurationExitStatusAndBlocking(t *testing.T) {
 	}
 }
 
-func TestGateCommandParsesAndPrintsStub(t *testing.T) {
+func TestGateCommandRunsProjectConfiguredCommandForTicket(t *testing.T) {
+	projectDir := t.TempDir()
+	binDir := t.TempDir()
+	evidencePath := filepath.Join(t.TempDir(), "gate-evidence")
+	gatePath := filepath.Join(binDir, "project-check")
+	gateScript := "#!/bin/sh\nset -eu\nprintf 'cwd=%s\\nargs=%s\\nticket=%s\\nissue=%s\\nfix=%s\\n' \"$PWD\" \"$*\" \"${AZEDARACH_TICKET_ID:-}\" \"${AZEDARACH_ISSUE_ID:-}\" \"${AZEDARACH_GATE_FIX:-}\" >\"$GATE_EVIDENCE\"\n"
+	if err := os.WriteFile(gatePath, []byte(gateScript), 0o755); err != nil {
+		t.Fatalf("write fake project gate: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GATE_EVIDENCE", evidencePath)
+	writeGateCommandConfig(t, projectDir, "project-check review")
+
 	opts, err := ParseGateArgs([]string{"--fix", "--verbose", "--project-dir", "/tmp/project", "az-123"})
 	if err != nil {
 		t.Fatalf("ParseGateArgs error: %v", err)
 	}
+	opts.ProjectDir = projectDir
 
 	output := captureStdout(t, func() error {
-		return GateCommand(&Dependencies{}, opts)
+		return GateCommand(gateDependenciesForWorktree(t, "az-123", projectDir), opts)
 	})
 
 	for _, want := range []string{
 		"Running quality gates for: az-123",
-		"Project dir: /tmp/project",
-		"Fix mode requested",
+		"Worktree: " + projectDir,
+		"Configured quality gate passed",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("gate output missing %q: %q", want, output)
 		}
 	}
+	evidence, err := os.ReadFile(evidencePath)
+	if err != nil {
+		t.Fatalf("read gate evidence: %v", err)
+	}
+	physicalProjectDir, err := filepath.EvalSymlinks(projectDir)
+	if err != nil {
+		t.Fatalf("resolve physical project directory: %v", err)
+	}
+	for _, want := range []string{
+		"cwd=" + physicalProjectDir,
+		"args=review",
+		"ticket=az-123",
+		"issue=az-123",
+		"fix=1",
+	} {
+		if !strings.Contains(string(evidence), want) {
+			t.Fatalf("gate evidence missing %q: %q", want, evidence)
+		}
+	}
+}
+
+func TestGateCommandResolvesExactIssueWorktreeFromDaemonProjection(t *testing.T) {
+	worktree := t.TempDir()
+	binDir := t.TempDir()
+	evidencePath := filepath.Join(t.TempDir(), "gate-evidence")
+	gatePath := filepath.Join(binDir, "project-check")
+	gateScript := "#!/bin/sh\nset -eu\nprintf '%s' \"$PWD\" >\"$GATE_EVIDENCE\"\n"
+	if err := os.WriteFile(gatePath, []byte(gateScript), 0o755); err != nil {
+		t.Fatalf("write fake project gate: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GATE_EVIDENCE", evidencePath)
+	writeGateCommandConfig(t, worktree, "project-check verify")
+
+	transport := &fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		if req.Command != daemonclient.CommandWorktreeList {
+			t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandWorktreeList)
+		}
+		body, err := json.Marshal(map[string]any{
+			"project_id": "proj-dev",
+			"worktrees": []map[string]any{
+				{"path": t.TempDir(), "branch": "agent/other", "issue_id": "other"},
+				{"path": worktree, "branch": "agent/dnj", "issue_id": "DNJ"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal worktree projection: %v", err)
+		}
+		return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, OK: true, Body: body}, nil
+	}}
+	deps := &Dependencies{ProjectID: "proj-dev", RepoDir: t.TempDir(), DaemonClient: daemonclient.New(transport).WithProjectID("proj-dev")}
+	projectRoot := t.TempDir()
+	if err := GateCommand(deps, GateOptions{IssueID: "dnj", ProjectDir: projectRoot}); err != nil {
+		t.Fatalf("GateCommand error: %v", err)
+	}
+	evidence, err := os.ReadFile(evidencePath)
+	if err != nil {
+		t.Fatalf("read gate evidence: %v", err)
+	}
+	physicalWorktree, err := filepath.EvalSymlinks(worktree)
+	if err != nil {
+		t.Fatalf("resolve physical worktree: %v", err)
+	}
+	if got := strings.TrimSpace(string(evidence)); got != physicalWorktree {
+		t.Fatalf("gate worktree = %q, want %q", got, physicalWorktree)
+	}
+}
+
+func TestGateCommandPropagatesConfiguredCommandFailure(t *testing.T) {
+	projectDir := t.TempDir()
+	binDir := t.TempDir()
+	gatePath := filepath.Join(binDir, "project-check")
+	if err := os.WriteFile(gatePath, []byte("#!/bin/sh\nexit 9\n"), 0o755); err != nil {
+		t.Fatalf("write fake project gate: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	writeGateCommandConfig(t, projectDir, "project-check verify")
+
+	err := GateCommand(gateDependenciesForWorktree(t, "dnj", projectDir), GateOptions{IssueID: "dnj", ProjectDir: projectDir})
+	if err == nil || !strings.Contains(err.Error(), "run configured quality gate for dnj") {
+		t.Fatalf("GateCommand error = %v, want configured gate failure", err)
+	}
+}
+
+func TestGateCommandRejectsProjectWithoutConfiguredGate(t *testing.T) {
+	projectDir := t.TempDir()
+	err := GateCommand(gateDependenciesForWorktree(t, "dnj", projectDir), GateOptions{IssueID: "dnj"})
+	if err == nil || !strings.Contains(err.Error(), "set gate.command in .azedarach/config.json") {
+		t.Fatalf("GateCommand error = %v, want missing gate configuration", err)
+	}
+}
+
+func writeGateCommandConfig(t *testing.T, projectDir, command string) {
+	t.Helper()
+	configDir := filepath.Join(projectDir, config.ConfigDirName)
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("create gate config directory: %v", err)
+	}
+	body, err := json.Marshal(map[string]any{"$version": config.CurrentConfigVersion, "gate": map[string]string{"command": command}})
+	if err != nil {
+		t.Fatalf("marshal gate config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, config.ConfigFileName), body, 0o644); err != nil {
+		t.Fatalf("write gate config: %v", err)
+	}
+}
+
+func gateDependenciesForWorktree(t *testing.T, issueID, worktree string) *Dependencies {
+	t.Helper()
+	transport := &fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		body, err := json.Marshal(map[string]any{
+			"project_id": "proj-gate",
+			"worktrees":  []map[string]any{{"path": worktree, "branch": "agent/" + issueID, "issue_id": issueID}},
+		})
+		if err != nil {
+			t.Fatalf("marshal worktree projection: %v", err)
+		}
+		return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, OK: true, Body: body}, nil
+	}}
+	return &Dependencies{ProjectID: "proj-gate", RepoDir: t.TempDir(), DaemonClient: daemonclient.New(transport).WithProjectID("proj-gate")}
 }
 
 func TestParseDevIssueArg(t *testing.T) {

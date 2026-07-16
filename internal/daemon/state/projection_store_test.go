@@ -699,6 +699,31 @@ func TestReplaceSessionStatesPrunesSharedRuntimeByLogicalIntent(t *testing.T) {
 	}
 }
 
+func TestApplySessionCompensationPreservesRootedOrchestratorIntent(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.July, 16, 7, 30, 0, 0, time.UTC)
+	rooted := Session{
+		ID: "az-root", IssueID: "root", Role: SessionRoleOrchestrator,
+		ScopeKind: SessionScopeOrchestration, ScopeID: "root",
+		State: SessionStateStarting, UpdatedAt: now,
+	}
+	if err := store.ReplaceSessionStates(ctx, "project", []Session{rooted}); err != nil {
+		t.Fatal(err)
+	}
+	changed, winner, err := store.ApplySessionCompensation(ctx, "project", rooted, SessionStateStopped, SessionStateStopped, "", "", now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if winner != SessionStateStopped || len(changed) != 1 || changed[0].Role != SessionRoleOrchestrator || changed[0].State != SessionStateStopped || changed[0].ObservedState != SessionStateStopped {
+		t.Fatalf("typed compensation changed=%+v winner=%s", changed, winner)
+	}
+	if worker, found, err := store.GetWorkerSessionStateByIssueID(ctx, "project", "root", "az-root"); err != nil || found {
+		t.Fatalf("typed compensation worker=%+v found=%t err=%v", worker, found, err)
+	}
+}
+
 func TestRuntimeStateStoreSessionGetters(t *testing.T) {
 	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
 	t.Cleanup(func() {

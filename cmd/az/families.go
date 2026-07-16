@@ -87,7 +87,13 @@ func runGateCommand(cfg *config.Config, args []string) error {
 		cli.PrintGateUsage()
 		return err
 	}
-	return runCommand(cfg, func(deps *cli.Dependencies) error {
+	run := runCommand
+	if strings.TrimSpace(opts.ProjectDir) != "" {
+		run = func(cfg *config.Config, fn func(*cli.Dependencies) error) error {
+			return runCommandAtRepoDir(cfg, opts.ProjectDir, fn)
+		}
+	}
+	return run(cfg, func(deps *cli.Dependencies) error {
 		return cli.GateCommand(deps, opts)
 	})
 }

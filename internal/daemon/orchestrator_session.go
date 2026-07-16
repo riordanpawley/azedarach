@@ -63,6 +63,13 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 	result := protocol.OrchestratorSessionResult{Scope: body.Scope, SessionID: sessionID}
 	switch req.Command {
 	case protocol.CommandOrchestratorSessionStart:
+		rootedPrompt := ""
+		if body.Scope.Kind == domain.OrchestrationScopeRooted {
+			rootedPrompt, err = d.rootedOrchestratorBootstrapPrompt(ctx, projectID, body.Scope)
+			if err != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+			}
+		}
 		acquired, acquireErr := authority.Acquire(ctx, identity, sessionID, d.tmux.HasSession)
 		if acquireErr != nil {
 			return d.errorResponse(req, protocol.ErrorCodeConflict, acquireErr.Error()), nil
@@ -85,6 +92,12 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 			}
 			_ = authority.Release(ctx, identity, acquired.Lease.SessionID)
 		}
+		if body.Scope.Kind == domain.OrchestrationScopeRooted {
+			if err := retireRootedWorkerSessionIntent(ctx, store, projectID, body.Scope.RootIssueID.String(), acquired.Lease.SessionID); err != nil {
+				restoreLeaseAfterProbeFailure()
+				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("retire rooted worker session intent: %v", err)), nil
+			}
+		}
 		if acquired.Lease.Lifecycle == domain.OrchestratorPaused {
 			acquired.Lease, err = authority.SetLifecycle(ctx, identity, acquired.Lease.SessionID, domain.OrchestratorWorking)
 			if err != nil {
@@ -104,10 +117,17 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 				result.Disposition = string(daemonstate.OrchestratorLeaseRecoveredStale)
 			}
 			if body.Scope.Kind == domain.OrchestrationScopeRooted {
-				startBody, _ := json.Marshal(sessionCommandBody{ProjectID: projectID, SessionID: acquired.Lease.SessionID})
+				startBody, _ := json.Marshal(sessionCommandBody{ProjectID: projectID, IssueID: body.Scope.RootIssueID.String(), SessionID: acquired.Lease.SessionID, Prompt: rootedPrompt})
 				startReq := req
 				startReq.Command, startReq.Body = "session.start", startBody
-				startResp, startErr := d.handleSessionStartDirect(ctx, startReq)
+				startResp, startErr := d.handleSessionStartDirectWithOptions(ctx, startReq, sessionStartOptions{
+					intent: sessionIntentSelector{
+						Role:      daemonstate.SessionRoleOrchestrator,
+						ScopeKind: daemonstate.SessionScopeOrchestration,
+						ScopeID:   body.Scope.RootIssueID.String(),
+					},
+					rootedOrchestrator: true,
+				})
 				if startErr != nil || startResp.Error != nil {
 					appeared, _ := d.tmux.HasSession(ctx, acquired.Lease.SessionID)
 					if appeared {
@@ -150,6 +170,22 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 					}
 					return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("set project orchestrator session context: %v", err)), nil
 				}
+			}
+		}
+		if body.Scope.Kind == domain.OrchestrationScopeRooted {
+			bootstrapDisposition, bootstrapErr := d.ensureRootedOrchestratorBootstrap(ctx, projectID, body.Scope, acquired.Lease.SessionID, rootedPrompt, launchedHere)
+			err = bootstrapErr
+			if err != nil {
+				if launchedHere {
+					_ = d.tmux.KillSession(ctx, acquired.Lease.SessionID)
+					pauseOrReleaseLease()
+				} else {
+					restoreLeaseAfterProbeFailure()
+				}
+				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+			}
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Info("rooted orchestrator bootstrap confirmed", "project_id", projectID, "root_id", body.Scope.RootIssueID, "session_id", acquired.Lease.SessionID, "disposition", bootstrapDisposition)
 			}
 		}
 		if err := d.persistOrchestratorSessionProjection(ctx, req.Meta, projectID, body.Scope, acquired.Lease.SessionID); err != nil {
@@ -359,6 +395,17 @@ func (d *Daemon) persistStoppedOrchestratorSessionProjection(ctx context.Context
 		return fmt.Errorf("persist stopped orchestrator runtime observation: %w", err)
 	}
 	return nil
+}
+
+func retireRootedWorkerSessionIntent(ctx context.Context, store *daemonstate.RuntimeStateStore, projectID, rootID, sessionID string) error {
+	if store == nil {
+		return nil
+	}
+	worker, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, rootID, sessionID)
+	if err != nil || !found {
+		return err
+	}
+	return store.DeleteSessionIntentState(ctx, projectID, worker)
 }
 
 func (d *Daemon) pauseEndedOrchestratorSession(ctx context.Context, meta protocol.Metadata, projectID, sessionID string) (bool, error) {
