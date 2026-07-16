@@ -24,6 +24,7 @@ cp "$repo_root/justfile" "$fixture/justfile"
 mkdir -p "$fixture/scripts"
 cp "$repo_root/scripts/build-install-run.sh" "$fixture/scripts/build-install-run.sh"
 cp "$repo_root/scripts/with-machine-validation-lease" "$fixture/scripts/with-machine-validation-lease"
+cp "$repo_root/scripts/publish-validation-artifacts" "$fixture/scripts/publish-validation-artifacts"
 cp "$repo_root/scripts/with-production-install-admission" "$fixture/scripts/with-production-install-admission"
 chmod +x "$fixture/scripts/with-production-install-admission"
 cat >"$fixture/scripts/jaeger-local.sh" <<'EOF'
@@ -223,6 +224,27 @@ env "${fresh_validation_environment[@]}" \
   "$fixture/scripts/with-machine-validation-lease" --class aggregate --scope repository --purpose push_gate --profile repository-push -- \
   sh -c 'touch "$1"' sh "$repository_payload"
 test -e "$repository_payload"
+
+artifact_result="$fixture/candidate-artifact-result"
+artifact_gate_output="$fixture/candidate-gate-output"
+if env "${fresh_validation_environment[@]}" \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  AZEDARACH_CANDIDATE_ARTIFACT_RESULT_FILE="$artifact_result" \
+  AZEDARACH_CANDIDATE_GATE_OUTPUT_PATH="$artifact_gate_output" \
+  AZEDARACH_CANDIDATE_ISSUE_ID=dov \
+  AZEDARACH_TICKET_ID=fixture \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile failed-candidate -- \
+  sh -c 'report_dir="$1/.tmp/test-timing/failed-candidate"; mkdir -p "$report_dir"; printf '\''{"failures":[{"package":"example/broken","test":"TestRetained","output":"assertion failed"}]}\n'\'' >"$report_dir/report.json"; printf '\''failed gate\n'\'' >"$AZEDARACH_CANDIDATE_GATE_OUTPUT_PATH"; printf '\''{"request_id":"%s","source_revision":"%s","report_path":"%s/report.json","report_paths":["%s/report.json"]}\n'\'' "$AZEDARACH_VALIDATION_REQUEST_ID" "$AZEDARACH_VALIDATION_SOURCE_REVISION" "$report_dir" "$report_dir" >"$AZEDARACH_VALIDATION_EVIDENCE_FILE"; exit 1' sh "$fixture"; then
+  echo "failed candidate validation unexpectedly passed" >&2
+  exit 1
+fi
+artifact_manifest="$(find "$fixture/.azedarach/validation-artifacts/failures/fixture-sha" -name manifest.json -print -quit)"
+test -n "$artifact_manifest"
+grep -q '"kind":"issue"' "$artifact_manifest"
+grep -q '"id":"dov"' "$artifact_manifest"
+grep -q 'example/broken::TestRetained' "$artifact_result"
+artifact_directory="$(cd "$(dirname "$artifact_manifest")" && pwd -P)"
+grep -F -q "artifacts=$artifact_directory" "$artifact_result"
 
 # The remaining lease-control fixtures exercise the controlled-capacity path.
 # Ordinary ticket development bypasses this wrapper entirely.
