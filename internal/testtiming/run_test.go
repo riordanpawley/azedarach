@@ -162,6 +162,7 @@ func TestRunWritesMachineReadableArtifactsWhenBuildCacheHardLimitRefuses(t *test
 	t.Setenv("AZEDARACH_GO_CACHE_OWNER", "issue-dhc")
 	t.Setenv("AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES", "4")
 	t.Setenv("AZEDARACH_GO_CACHE_HARD_LIMIT_BYTES", "8")
+	t.Setenv("AZEDARACH_GO_CACHE_AUTO_MAINTAIN", "0")
 	cachePath := filepath.Join(cacheRoot, "caches", "v1", "normal", "issue-dhc")
 	require.NoError(t, os.MkdirAll(cachePath, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(cachePath, "oversized"), []byte("0123456789"), 0o644))
