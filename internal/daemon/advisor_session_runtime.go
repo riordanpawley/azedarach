@@ -82,13 +82,21 @@ func (d *Daemon) ensureAdvisorSessionRuntime(ctx context.Context, projectID stri
 			if buildErr != nil {
 				return buildErr
 			}
-			return d.tmux.NewSessionWithArgsAndEnvironment(ctx, advisor.SessionID, workdir, command.Executable, d.sessionManagedEnvironment(), command.Args...)
+			if len(command.Args) == 0 {
+				return errors.New("advisor launch command has no payload")
+			}
+			artifact, artifactErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: projectID, SessionID: advisor.SessionID, CommandPayload: command.Args[len(command.Args)-1], Shell: advisorShellExecutable, SanitizeEnvironment: true})
+			if artifactErr != nil {
+				return fmt.Errorf("prepare advisor launch artifact: %w", artifactErr)
+			}
+			if launchErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, advisor.SessionID, workdir, artifact.Command, nil); launchErr != nil {
+				artifact.remove()
+				return launchErr
+			}
+			return nil
 		})
 	if err != nil {
 		return advisorSessionRuntimeResult{Session: advisor, Attached: attached}, err
-	}
-	if err := d.setSessionManagedPathEnv(ctx, advisor.SessionID); err != nil {
-		return advisorSessionRuntimeResult{Session: advisor, Attached: attached}, fmt.Errorf("set advisor session PATH: %w", err)
 	}
 	projection := daemonstate.Session{ID: advisor.SessionID, IssueID: advisor.IssueID, Role: daemonstate.SessionRoleAdvisor, ScopeKind: daemonstate.SessionScopeInteraction, ScopeID: advisor.RequestID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "runtime", UpdatedAt: time.Now().UTC()}
 	if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, projection); err != nil {

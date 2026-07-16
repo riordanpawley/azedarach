@@ -18,6 +18,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/services/git"
@@ -37,6 +38,31 @@ func cleanGitStatus() *git.GitStatus {
 		Untracked:  []string{},
 		Staged:     []string{},
 		HasChanges: false,
+	}
+}
+
+func TestGitServiceAdapterCandidateValidationUpdatesOperationProgress(t *testing.T) {
+	var got daemonops.Progress
+	ctx := daemonops.WithProgressReporter(context.Background(), func(_ context.Context, progress daemonops.Progress) error {
+		got = progress
+		return nil
+	})
+	adapter := &gitServiceAdapter{logger: slog.Default()}
+	ctx = adapter.withCandidateValidationProgress(ctx, "project-a", "/repo/root")
+	git.ReportCandidateValidation(ctx, git.CandidateValidationAttempt{
+		CandidateHead: "abc123",
+		Status:        git.CandidateValidationCancelled,
+		Canonical:     false,
+		Message:       "obsolete attempt",
+	})
+
+	if got.Phase != "candidate_validation.cancelled" {
+		t.Fatalf("progress phase = %q, want candidate_validation.cancelled", got.Phase)
+	}
+	for _, want := range []string{"candidate_head=abc123", "status=cancelled", "canonical=false", "obsolete attempt"} {
+		if !strings.Contains(got.Message, want) {
+			t.Fatalf("progress message = %q, want %q", got.Message, want)
+		}
 	}
 }
 
@@ -128,6 +154,8 @@ func TestGitServiceAdapterMergeForcesStatusUpdatePublish(t *testing.T) {
 				return "Already up to date.", nil
 			case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
 				return "target-sha", nil
+			case len(args) == 4 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--git-dir":
+				return filepath.Join(worktree, ".git", "worktrees", "adapter-scratch"), nil
 			case len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "status" && args[3] == "--porcelain":
 				return "", nil
 			case len(args) >= 4 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "status" && args[3] == "--porcelain":

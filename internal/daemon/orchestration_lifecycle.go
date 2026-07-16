@@ -187,15 +187,12 @@ func (d *Daemon) orchestratorLifecycleFacts(ctx context.Context, lease daemonsta
 	if issueClient == nil {
 		return domain.OrchestratorLifecycleFacts{}, time.Time{}, fmt.Errorf("issue store unavailable")
 	}
-	var tasks []domain.Task
-	var err error
-	if lease.Identity.Scope.Kind == domain.OrchestrationScopeRooted {
-		tasks, err = issueClient.ListParentChildSubtreeWithRuntime(ctx, projectID, lease.Identity.Scope.RootIssueID.String())
-	} else {
-		tasks, err = issueClient.ListWithRuntime(ctx, projectID)
-	}
+	tasks, _, err := d.projectReadSnapshot(projectID)
 	if err != nil {
 		return domain.OrchestratorLifecycleFacts{}, time.Time{}, fmt.Errorf("refresh orchestrator issue projection: %w", err)
+	}
+	if lease.Identity.Scope.Kind == domain.OrchestrationScopeRooted {
+		tasks = materializedParentChildClosure(tasks, lease.Identity.Scope.RootIssueID.String())
 	}
 	facts := domain.OrchestratorLifecycleFacts{}
 	latestChange := time.Time{}

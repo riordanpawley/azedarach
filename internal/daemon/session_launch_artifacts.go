@@ -19,6 +19,75 @@ type sessionPromptHandoff struct {
 
 const sessionPromptHandoffPollInterval = 100 * time.Millisecond
 
+type sessionLaunchMode string
+
+const (
+	sessionLaunchInitial sessionLaunchMode = "initial"
+	sessionLaunchResume  sessionLaunchMode = "resume"
+)
+
+// sessionLaunchSpec is the canonical input shared by every session launch
+// path. Tool-specific argument selection happens before the artifact is
+// written; tmux only ever receives the bounded artifact command.
+type sessionLaunchSpec struct {
+	Mode                sessionLaunchMode
+	ProjectID           string
+	IssueID             string
+	SessionID           string
+	Yolo                bool
+	ImagePaths          []string
+	Prompt              string
+	InitReadyPath       string
+	StartupEnvCommands  []string
+	CommandPayload      string
+	Shell               string
+	SanitizeEnvironment bool
+}
+
+type sessionLaunchArtifact struct {
+	Command       string
+	ScriptPath    string
+	PromptHandoff sessionPromptHandoff
+}
+
+func (a sessionLaunchArtifact) remove() {
+	a.PromptHandoff.remove()
+	if strings.TrimSpace(a.ScriptPath) != "" {
+		_ = os.Remove(a.ScriptPath)
+	}
+}
+
+func (d *Daemon) prepareSessionLaunchArtifact(spec sessionLaunchSpec) (sessionLaunchArtifact, error) {
+	prompt := strings.TrimSpace(spec.Prompt)
+	tool := strings.TrimSpace(d.runtimeConfigForProject(spec.ProjectID).CLITool)
+	if spec.Mode == sessionLaunchResume && strings.EqualFold(tool, "codex") {
+		prompt = ""
+	}
+	handoff := sessionPromptHandoff{}
+	if prompt != "" {
+		var err error
+		handoff, err = prepareSessionPromptHandoff(d.sessionLaunchArtifactDir(), prompt)
+		if err != nil {
+			return sessionLaunchArtifact{}, err
+		}
+	}
+	shell, payload := d.buildSessionLaunchArtifactPayload(spec, handoff)
+	if strings.TrimSpace(spec.CommandPayload) != "" {
+		payload = spec.CommandPayload
+	}
+	if strings.TrimSpace(spec.Shell) != "" {
+		shell = spec.Shell
+	}
+	path, command, err := prepareSessionLaunchScript(d.sessionLaunchArtifactDir(), shell, payload)
+	if err != nil {
+		handoff.remove()
+		return sessionLaunchArtifact{}, err
+	}
+	if spec.SanitizeEnvironment {
+		command = "exec " + singleQuoteForShell(advisorEnvExecutable) + " -u BASH_ENV -u ENV -u ZDOTDIR -u ZSH_ENV -u FISH_CONFIG_DIR " + singleQuoteForShell(advisorShellExecutable) + " " + singleQuoteForShell(filepath.ToSlash(path))
+	}
+	return sessionLaunchArtifact{Command: command, ScriptPath: path, PromptHandoff: handoff}, nil
+}
 func (d *Daemon) sessionLaunchArtifactDir() string {
 	base := ""
 	if lockPath := strings.TrimSpace(d.cfg.LockPath); lockPath != "" {

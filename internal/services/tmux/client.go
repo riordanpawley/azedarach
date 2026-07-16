@@ -36,6 +36,7 @@ type SessionInfo struct {
 type PaneInfo struct {
 	SessionName string
 	PaneID      string
+	PanePID     int
 }
 
 // NewClient creates a new tmux client with dependency injection
@@ -385,11 +386,11 @@ func (c *Client) ListSessions(ctx context.Context) ([]string, error) {
 }
 
 // ListPaneInfos returns all tmux panes with their owning session name.
-// Uses: tmux list-panes -a -F "#{session_name}\t#{pane_id}"
+// Uses: tmux list-panes -a -F "#{session_name}\t#{pane_id}\t#{pane_pid}"
 func (c *Client) ListPaneInfos(ctx context.Context) ([]PaneInfo, error) {
 	c.logger.Debug("listing tmux panes")
 
-	out, err := c.runner.Run(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_id}")
+	out, err := c.runner.Run(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_id}\t#{pane_pid}")
 	if err != nil {
 		if isNoTmuxSessionsError(err) {
 			c.logger.Debug("no tmux panes found")
@@ -405,20 +406,27 @@ func (c *Client) ListPaneInfos(ctx context.Context) ([]PaneInfo, error) {
 
 	panes := make([]PaneInfo, 0, len(lines))
 	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 2)
-		if len(parts) != 2 {
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) < 2 {
 			continue
 		}
 		sessionName := strings.TrimSpace(parts[0])
 		paneID := sanitizePaneID(parts[1])
+		panePID := 0
+		if len(parts) == 3 {
+			parsedPID, err := strconv.Atoi(strings.TrimSpace(parts[2]))
+			if err != nil || parsedPID <= 0 {
+				continue
+			}
+			panePID = parsedPID
+		}
 		if sessionName == "" || paneID == "" {
 			continue
 		}
-		panes = append(panes, PaneInfo{SessionName: sessionName, PaneID: paneID})
+		panes = append(panes, PaneInfo{SessionName: sessionName, PaneID: paneID, PanePID: panePID})
 	}
 
 	c.logger.Debug("tmux panes listed", "count", len(panes))

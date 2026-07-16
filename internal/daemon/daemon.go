@@ -59,14 +59,18 @@ const (
 	maxGitStatusRefreshFailureBackoff       = 5 * time.Minute
 
 	defaultRuntimeProjectionCoalesceWindow = 25 * time.Millisecond
+	defaultTmuxObservationInterval         = 2 * time.Second
+	defaultTmuxObservationTimeout          = 5 * time.Second
 )
 
 // Config configures daemon runtime wiring.
 type Config struct {
-	RepoDir                    string
-	SocketPath                 string
-	LockPath                   string
-	ScopedRuntime              bool
+	RepoDir       string
+	SocketPath    string
+	LockPath      string
+	ScopedRuntime bool
+	// ManagedGenerationBinDir is retained for source compatibility only.
+	// Agent launches intentionally ignore it and inherit the project PATH.
 	ManagedGenerationBinDir    string
 	BaseBranch                 string
 	GitWorkflowMode            string
@@ -86,6 +90,8 @@ type Config struct {
 	IdleTimeout                time.Duration
 	RuntimeReconcileInterval   time.Duration
 	RuntimeReconcileTimeout    time.Duration
+	TmuxObservationInterval    time.Duration
+	TmuxObservationTimeout     time.Duration
 	scheduledScriptRunner      scheduledScriptCommandRunner
 }
 
@@ -101,12 +107,14 @@ type Daemon struct {
 	issues                               *issues.Client
 	userStore                            *userstore.Store
 	userStoreRefreshMu                   sync.Mutex
-	userStoreRefreshPending              map[string]bool
-	userStoreRefreshDirty                map[string]bool
+	userStoreProjectLockHook             func(string, bool)
+	userStoreProjectRefreshLocks         sync.Map
 	userStoreRefreshWG                   sync.WaitGroup
 	userStoreRefreshStopping             bool
 	userStoreRefreshCtx                  context.Context
 	userStoreRefreshCancel               context.CancelFunc
+	userProjectionConsumerMu             sync.Mutex
+	userProjectionConsumers              map[string]*userProjectionConsumerHandle
 	issueClientsMu                       sync.Mutex
 	issueClientsByProject                map[string]*issues.Client
 	issueClientsByRoot                   map[string]*issues.Client
@@ -187,19 +195,36 @@ type Daemon struct {
 	worktreeStateLastRefresh             map[string]time.Time
 	taskListRuntimeRefreshMu             sync.Mutex
 	taskListRuntimeLastRefresh           map[string]time.Time
-	taskListRuntimeRefreshes             map[string]*taskListRuntimeRefresh
 	taskListSnapshotCacheMu              sync.Mutex
 	taskListSnapshotCache                map[string]taskListSnapshotCacheEntry
 	taskListSnapshotLoadMu               sync.Mutex
 	taskListSnapshotLoads                map[string]*taskListSnapshotLoad
 	taskGraphReadinessMu                 sync.Mutex
 	taskGraphReadinessLoads              map[string]*taskGraphReadinessLoad
+	taskGraphReadinessCache              map[string]taskGraphReadinessCacheEntry
+	taskGraphRuntimeValidationMu         sync.Mutex
+	taskGraphRuntimeValidations          map[string]taskGraphRuntimeValidationEntry
+	taskGraphRuntimeValidationLoads      map[string]*taskGraphRuntimeValidationLoad
 	orchestrationMu                      sync.Mutex
+	orchestrationSnapshotMu              sync.Mutex
+	orchestrationSnapshotCache           map[string]orchestrationSnapshotCacheEntry
+	orchestrationSnapshotLoads           map[string]*orchestrationSnapshotLoad
+	orchestrationSnapshotBuild           orchestrationSnapshotBuilder
+	materializersMu                      sync.RWMutex
+	materializersInitMu                  sync.Mutex
+	materializers                        map[string]*projectReadMaterializer
+	materializersStarted                 bool
+	materializersContext                 context.Context
+	projectReadRuntimeHydrate            func(context.Context, string, []domain.Task) ([]domain.Task, error)
+	projectReadWorktreeRefresh           func(context.Context, string, *projectReadMaterializer) error
 	reviewLeaseReleasedBeforeClose       func(context.Context, string, string) error
 	watchClientsMu                       sync.Mutex
 	watchClients                         map[string]watchClientObservation
 	terminalFailureProbeMu               sync.Mutex
 	terminalFailureProbes                map[string]terminalFailureProbeState
+	tmuxObservationWG                    sync.WaitGroup
+	tmuxObservationCursorMu              sync.Mutex
+	tmuxObservationCursor                int
 	reviewReadyRecoveryMu                sync.Mutex
 	reviewReadyRecoveryCursor            map[string]int64
 	reviewReadyRecoveryBeforeLoad        func()
@@ -257,18 +282,14 @@ func New(cfg Config) *Daemon {
 	if cfg.LockPath == "" {
 		cfg.LockPath = appconfig.GlobalDaemonLockPath()
 	}
-	if cfg.ScopedRuntime {
-		cfg.ManagedGenerationBinDir = ""
-	} else if strings.TrimSpace(cfg.ManagedGenerationBinDir) != "" {
-		cfg.ManagedGenerationBinDir = filepath.Clean(cfg.ManagedGenerationBinDir)
-	}
-
 	tmuxRunner := &tmux.ExecRunner{}
+	tmuxClient := tmux.NewClient(tmuxRunner, cfg.Logger)
 	gitRunner := git.NewExecRunner(cfg.RepoDir)
 	gitClient := git.NewClient(gitRunner, cfg.Logger)
-	runtimeStateStore := daemonstate.NewRuntimeStateStore(runtimeRepoDir, cfg.Logger)
+	runtimeLiveness := daemonstate.WithRuntimeLivenessProbe(tmuxClient.HasSession)
+	runtimeStateStore := daemonstate.NewRuntimeStateStore(runtimeRepoDir, cfg.Logger, runtimeLiveness)
 	if cfg.ScopedRuntime {
-		runtimeStateStore = daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(runtimeRepoDir, ".azedarach", "azedarach.db"), cfg.Logger)
+		runtimeStateStore = daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(runtimeRepoDir, ".azedarach", "azedarach.db"), cfg.Logger, runtimeLiveness)
 	}
 	runtimeReconcileQueue := newReconcileQueue[protocol.RuntimeReconcileResponseBody](reconcileQueueConfig{
 		Name:    "runtime_reconcile",
@@ -333,7 +354,7 @@ func New(cfg Config) *Daemon {
 		runtimeStoresByRoot:                map[string]*daemonstate.RuntimeStateStore{},
 		hookLogByProject:                   map[string][]protocol.HookLogEvent{},
 		uiState:                            map[string]string{},
-		tmux:                               tmux.NewClient(tmuxRunner, cfg.Logger),
+		tmux:                               tmuxClient,
 		git:                                gitClient,
 		gitStatusAdapter:                   gitService,
 		session:                            sessionHandler,
@@ -346,13 +367,17 @@ func New(cfg Config) *Daemon {
 		worktreeStateRefreshing:            map[string]bool{},
 		worktreeStateLastRefresh:           map[string]time.Time{},
 		taskListRuntimeLastRefresh:         map[string]time.Time{},
-		taskListRuntimeRefreshes:           map[string]*taskListRuntimeRefresh{},
 		taskListSnapshotCache:              map[string]taskListSnapshotCacheEntry{},
 		issueAutoArchiveLastRun:            map[string]time.Time{},
 		taskGraphReadinessLoads:            map[string]*taskGraphReadinessLoad{},
+		taskGraphReadinessCache:            map[string]taskGraphReadinessCacheEntry{},
+		taskGraphRuntimeValidations:        map[string]taskGraphRuntimeValidationEntry{},
+		taskGraphRuntimeValidationLoads:    map[string]*taskGraphRuntimeValidationLoad{},
+		orchestrationSnapshotCache:         map[string]orchestrationSnapshotCacheEntry{},
+		orchestrationSnapshotLoads:         map[string]*orchestrationSnapshotLoad{},
+		materializers:                      map[string]*projectReadMaterializer{},
 		revision:                           map[string]uint64{},
-		userStoreRefreshPending:            map[string]bool{},
-		userStoreRefreshDirty:              map[string]bool{},
+		userProjectionConsumers:            map[string]*userProjectionConsumerHandle{},
 		shutdownReqCh:                      make(chan struct{}),
 	}
 	if !cfg.ScopedRuntime && strings.TrimSpace(os.Getenv("AZEDARACH_DISABLE_USER_DB")) != "1" {
@@ -445,7 +470,6 @@ func New(cfg Config) *Daemon {
 		sessionResolveConflict:  d.handleSessionResolveConflictDirect,
 		taskBulkCleanup:         d.handleTaskBulkCleanup,
 		globalProjectionRebuild: d.handleGlobalProjectionRebuild,
-		onMutationSuccess:       d.enqueueUserProjectionRefresh,
 		onTerminal:              d.reconcileOrchestrationStartOperation,
 		recoverInterrupted:      d.recoverInterruptedOperation,
 		noticeService:           noticeService,
@@ -611,6 +635,18 @@ func (d *Daemon) Run(ctx context.Context) error {
 		_ = d.lock.Release()
 	}()
 
+	if ctx.Err() != nil {
+		return nil
+	}
+	projectionStartedAt := time.Now()
+	if err := d.openProjectionDeltaStores(ctx); err != nil {
+		return fmt.Errorf("open projection delta stores before IPC serve: %w", err)
+	}
+	if err := d.startProjectReadMaterializers(serveCtx); err != nil {
+		return fmt.Errorf("start project read materializers before IPC serve: %w", err)
+	}
+	d.cfg.Logger.Info("daemon startup phase", "phase", "projection_delta_stores_open", "duration_ms", time.Since(projectionStartedAt).Milliseconds())
+
 	serveErrCh := make(chan error, 1)
 	go func() {
 		serveErrCh <- d.serve.Serve(serveCtx)
@@ -671,6 +707,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	d.reconcileAllDecisionPropagationOutboxes(ctx)
 	d.startRuntimeReconcileWorker(serveCtx)
+	d.startTmuxObservationWorker(serveCtx)
 	d.startDecisionPropagationReconcileWorker(serveCtx)
 	d.startLinearSyncWorker(serveCtx)
 	d.startScheduledScriptWorker(serveCtx)
@@ -678,9 +715,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.startGlobalProjectionRepairWorker(serveCtx)
 	d.cfg.Logger.Info("daemon startup phase", "phase", "startup_ready", "duration_ms", time.Since(startedAt).Milliseconds())
 	err = <-serveErrCh
+	cancelServe()
 	if ctx.Err() != nil {
 		<-shutdownDone
 	}
+	d.tmuxObservationWG.Wait()
 	return err
 }
 
@@ -792,14 +831,6 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	}
 	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "command.begin", beginStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
 	defer d.endCommand()
-	if commandMutatesProjectProjection(req.Command) {
-		defer func() {
-			if err == nil && resp.OK {
-				d.enqueueUserProjectionRefresh(projectID)
-			}
-		}()
-	}
-
 	if daemonhandlers.DaemonRoutesThroughDispatcher(req.Command) {
 		if d.router == nil {
 			return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported command"), nil
@@ -867,6 +898,10 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleGlobalSnapshot(ctx, req)
 	case protocol.CommandGlobalProjectionRebuild:
 		return d.handleGlobalProjectionRebuild(ctx, req)
+	case protocol.CommandProjectionDeltaList, protocol.CommandProjectionDeltaWatch:
+		return d.handleProjectionDeltaRead(ctx, req)
+	case protocol.CommandProjectionSnapshot:
+		return d.handleProjectionSnapshot(ctx, req)
 	case "task.list":
 		return d.handleTaskList(ctx, req)
 	case "task.get":
@@ -1739,7 +1774,38 @@ func (d *Daemon) nextRevision(projectID string) uint64 {
 	rev := d.revision[projectID]
 	d.revMu.Unlock()
 	d.invalidateTaskListSnapshotCache(projectID)
+	d.invalidateTaskGraphReadinessCache(projectID)
+	d.invalidateOrchestrationSnapshotCache(projectID)
 	return rev
+}
+
+func (d *Daemon) invalidateTaskGraphReadinessCache(projectID string) {
+	prefix := strings.TrimSpace(projectID) + "\x00"
+	d.taskGraphReadinessMu.Lock()
+	for key := range d.taskGraphReadinessCache {
+		if strings.HasPrefix(key, prefix) {
+			delete(d.taskGraphReadinessCache, key)
+		}
+	}
+	d.taskGraphReadinessMu.Unlock()
+	d.taskGraphRuntimeValidationMu.Lock()
+	for key := range d.taskGraphRuntimeValidations {
+		if strings.HasPrefix(key, prefix) {
+			delete(d.taskGraphRuntimeValidations, key)
+		}
+	}
+	d.taskGraphRuntimeValidationMu.Unlock()
+}
+
+func (d *Daemon) invalidateOrchestrationSnapshotCache(projectID string) {
+	prefix := strings.TrimSpace(projectID) + "\x00"
+	d.orchestrationSnapshotMu.Lock()
+	for key := range d.orchestrationSnapshotCache {
+		if strings.HasPrefix(key, prefix) {
+			delete(d.orchestrationSnapshotCache, key)
+		}
+	}
+	d.orchestrationSnapshotMu.Unlock()
 }
 
 func (d *Daemon) currentRevision(projectID string) uint64 {
@@ -1790,6 +1856,16 @@ func (d *Daemon) publishSessionProjectionEvent(ctx context.Context, projectID st
 	return rev
 }
 
+func (d *Daemon) publishObservedSessionProjectionEvent(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session, observation domain.ExternalObservationProvenance) uint64 {
+	projectID = d.canonicalProjectID(projectID)
+	if d.runtimeProjectionCoalescer != nil {
+		return d.runtimeProjectionCoalescer.ScheduleObservedSession(ctx, projectID, meta, session, observation)
+	}
+	rev := d.nextRevision(projectID)
+	d.publishObservedSessionProjectionEventAtRevision(ctx, projectID, meta, session, rev, observation)
+	return rev
+}
+
 func (d *Daemon) publishWorktreeProjectionEvent(ctx context.Context, projectID, issueID, worktree string) uint64 {
 	projectID = d.canonicalProjectID(projectID)
 	rev := d.nextRevision(projectID)
@@ -1805,6 +1881,14 @@ func (d *Daemon) publishGitStatusProjectionEvent(ctx context.Context, projectID,
 }
 
 func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session, rev uint64) {
+	d.publishSessionProjectionEventWithObservationAtRevision(ctx, projectID, meta, session, rev, nil)
+}
+
+func (d *Daemon) publishObservedSessionProjectionEventAtRevision(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session, rev uint64, observation domain.ExternalObservationProvenance) {
+	d.publishSessionProjectionEventWithObservationAtRevision(ctx, projectID, meta, session, rev, &observation)
+}
+
+func (d *Daemon) publishSessionProjectionEventWithObservationAtRevision(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session, rev uint64, observation *domain.ExternalObservationProvenance) {
 	projectID = d.canonicalProjectID(projectID)
 	if d.hub == nil {
 		return
@@ -1821,7 +1905,7 @@ func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, pr
 		encodedRuntime := buildRuntimeProjectionEventBody(projectID, rev, runtime)
 		runtimeBody = &encodedRuntime
 	}
-	body, err := json.Marshal(protocol.SessionProjectionEventBody{
+	eventBody := protocol.SessionProjectionEventBody{
 		ProjectID: naming.ProjectID(projectID),
 		Revision:  rev,
 		Session: protocol.SessionProjection{
@@ -1834,7 +1918,14 @@ func (d *Daemon) publishSessionProjectionEventAtRevision(ctx context.Context, pr
 			UpdatedAt: session.UpdatedAt,
 		},
 		Runtime: runtimeBody,
-	})
+	}
+	if observation != nil {
+		eventBody.Observation = &protocol.ExternalObservationProvenance{
+			Authority: observation.Authority, Product: observation.Product, Disposition: string(observation.Disposition), ObservedAt: observation.ObservedAt,
+			CanonicalEventAdmitted: observation.CanonicalEventAdmitted, SemanticSequenceAdvanced: observation.SemanticSequenceAdvanced,
+		}
+	}
+	body, err := json.Marshal(eventBody)
 	if err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Warn("marshal session projection event body failed", "project_id", projectID, "session_id", session.ID, "error", err)

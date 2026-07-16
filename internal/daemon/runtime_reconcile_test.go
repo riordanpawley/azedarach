@@ -29,7 +29,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
-func TestRuntimeReconcileRefreshesCrossProjectProjectionAfterSourceChanges(t *testing.T) {
+func TestRuntimeReconcileReadsCrossProjectProjectionHealthWithoutRefreshing(t *testing.T) {
 	home := t.TempDir()
 	root := t.TempDir()
 	t.Setenv("HOME", home)
@@ -41,7 +41,7 @@ func TestRuntimeReconcileRefreshesCrossProjectProjectionAfterSourceChanges(t *te
 		t.Fatal(err)
 	}
 	issueClient := newMigratedIssueClientAtPath(t, filepath.Join(root, ".azedarach", "azedarach.db"), slog.Default())
-	issueID, err := issueClient.Create(context.Background(), issues.CreateTaskParams{Title: "Created before reconcile", Type: domain.TypeTask, Status: domain.StatusOpen})
+	_, err := issueClient.Create(context.Background(), issues.CreateTaskParams{Title: "Projected before reconcile", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,6 +55,16 @@ func TestRuntimeReconcileRefreshesCrossProjectProjectionAfterSourceChanges(t *te
 		userStore:             store,
 		issueClientsByProject: map[string]*issues.Client{projectID: issueClient},
 	}
+	if err = d.openProjectionDeltaStores(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err = d.refreshUserProject(context.Background(), projectID); err != nil {
+		t.Fatal(err)
+	}
+	issueID, err := issueClient.Create(context.Background(), issues.CreateTaskParams{Title: "Created after projection", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	result, err := newRuntimeReconcileService(d).Reconcile(context.Background(), projectID)
 	if err != nil {
@@ -67,8 +77,11 @@ func TestRuntimeReconcileRefreshesCrossProjectProjectionAfterSourceChanges(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Projects) != 1 || len(snapshot.Projects[0].Tasks) != 1 || snapshot.Projects[0].Tasks[0].ID.String() != issueID {
-		t.Fatalf("post-reconcile projection = %+v", snapshot.Projects)
+	if len(snapshot.Projects) != 1 || len(snapshot.Projects[0].Tasks) != 1 {
+		t.Fatalf("post-reconcile projection = %+v, want unchanged one-task snapshot", snapshot.Projects)
+	}
+	if snapshot.Projects[0].Tasks[0].ID.String() == issueID {
+		t.Fatalf("runtime reconcile synchronously refreshed source task %q", issueID)
 	}
 }
 
@@ -494,6 +507,12 @@ func TestCommandRuntimeReconcileRoutesToManualRepair(t *testing.T) {
 	}
 	if got := out.InvariantSources[string(daemonInvariantSessionActivityConverge)]; got != string(daemonInvariantSourceHybrid) {
 		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantSessionActivityConverge, got, daemonInvariantSourceHybrid)
+	}
+	if got := out.InvariantSources[string(daemonInvariantTmuxObservation)]; got != string(daemonInvariantSourceTmux) {
+		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantTmuxObservation, got, daemonInvariantSourceTmux)
+	}
+	if got := out.InvariantSources[string(daemonInvariantManagedAgentIdentity)]; got != string(daemonInvariantSourceHybrid) {
+		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantManagedAgentIdentity, got, daemonInvariantSourceHybrid)
 	}
 	if got := out.InvariantSources[string(daemonInvariantValidationCapacity)]; got != string(daemonInvariantSourceProjection) {
 		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantValidationCapacity, got, daemonInvariantSourceProjection)

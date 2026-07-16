@@ -71,16 +71,16 @@ func TestProjectOrchestratorSessionStartAttachesExactScopeSingleton(t *testing.T
 		t.Fatalf("first result = %+v", first)
 	}
 	launchCommand := requireNewSessionLaunchCommand(t, runner, first.SessionID)
-	if !strings.Contains(launchCommand, "export PATH=") || !strings.Contains(launchCommand, managedDir) {
-		t.Fatalf("project orchestrator launch lacks managed PATH before prompt command: %s", launchCommand)
+	if strings.Contains(launchCommand, "export PATH=") || strings.Contains(launchCommand, managedDir) {
+		t.Fatalf("project orchestrator launch injects managed PATH: %s", launchCommand)
 	}
 	for _, command := range runner.commands {
 		if len(command) == 0 || command[0] != "new-session" {
 			continue
 		}
 		pathValue, ok := tmuxCommandEnvironmentValue(command, "PATH")
-		if !ok || !strings.HasPrefix(pathValue, managedDir+string(os.PathListSeparator)) {
-			t.Fatalf("project orchestrator tmux PATH = %q, %t, want managed prefix; command=%v", pathValue, ok, command)
+		if ok || pathValue != "" {
+			t.Fatalf("project orchestrator tmux injected PATH = %q, %t; command=%v", pathValue, ok, command)
 		}
 		break
 	}
@@ -584,7 +584,7 @@ func TestRealProcessProfileRootedMarkerSurvivesPaneChildReplacement(t *testing.T
 	}
 }
 
-func TestProjectOrchestratorLaunchUsesManagedAzForInitialHookAndBackgroundCommands(t *testing.T) {
+func TestProjectOrchestratorLaunchUsesInheritedAzForInitialHookAndBackgroundCommands(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()
 	repoDir := filepath.Join(base, "repo")
@@ -631,8 +631,15 @@ func TestProjectOrchestratorLaunchUsesManagedAzForInitialHookAndBackgroundComman
 		t.Fatal(err)
 	}
 	launchCommand := requireNewSessionLaunchCommand(t, runner, result.SessionID)
+	// The tmux fixture removes one-shot artifacts to model successful handoff;
+	// recreate its captured bytes for this real-process assertion.
+	artifactCopy := filepath.Join(t.TempDir(), "orchestrator-launch.sh")
+	if err := os.WriteFile(artifactCopy, []byte(runner.launchScriptContents[result.SessionID]), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	launchCommand = strings.Replace(launchCommand, runner.launchScriptPaths[result.SessionID], artifactCopy, 1)
 	cmd := exec.Command("/bin/sh", "-c", launchCommand)
-	cmd.Env = append(os.Environ(), "PATH="+staleDir+string(os.PathListSeparator)+toolDir+":/usr/bin:/bin", "TRACE="+tracePath)
+	cmd.Env = append(os.Environ(), "PATH="+managedDir+string(os.PathListSeparator)+staleDir+string(os.PathListSeparator)+toolDir+":/usr/bin:/bin", "TRACE="+tracePath)
 	cmd.Stdin = strings.NewReader("exit\n")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("execute project orchestrator launch: %v\n%s\n%s", err, output, launchCommand)

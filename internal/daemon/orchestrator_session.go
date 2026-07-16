@@ -133,10 +133,15 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 			} else {
 				workdir := d.resolveRepoDirForProject(projectID)
 				prompt := "You are the project orchestrator for this Azedarach project. Run `az prime`, then remain in the active orchestration loop until project completion."
-				command := d.buildSessionLaunchCommand(projectID, "", acquired.Lease.SessionID, false, nil, prompt)
-				if launchErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, acquired.Lease.SessionID, workdir, command, d.sessionManagedEnvironment()); launchErr != nil {
+				artifact, artifactErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: projectID, SessionID: acquired.Lease.SessionID, Prompt: prompt})
+				if artifactErr != nil {
+					pauseOrReleaseLease()
+					return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare project orchestrator launch artifact: %v", artifactErr)), nil
+				}
+				if launchErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, acquired.Lease.SessionID, workdir, artifact.Command, nil); launchErr != nil {
 					appeared, _ := d.tmux.HasSession(ctx, acquired.Lease.SessionID)
 					if !appeared {
+						artifact.remove()
 						pauseOrReleaseLease()
 						return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("start project orchestrator session: %v", launchErr)), nil
 					}

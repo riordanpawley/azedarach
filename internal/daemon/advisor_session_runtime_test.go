@@ -51,18 +51,27 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 		t.Fatal("advisor unexpectedly received recovery authority")
 	}
 	launch := requireNewSessionLaunchCommand(t, runner, first.Request.SessionID)
-	if !strings.Contains(launch, "AZEDARACH_SESSION_ROLE=advisor") || !strings.Contains(launch, "AZEDARACH_INTERACTION_ID") || !strings.Contains(launch, "AZEDARACH_ISSUE_ID=\"\"") {
-		t.Fatalf("advisor launch command = %s", launch)
+	quoted := strings.Split(launch, "'")
+	if len(quoted) < 4 {
+		t.Fatalf("advisor launch does not use artifact: %s", launch)
 	}
-	if !strings.Contains(launch, "--permission-mode plan") || !strings.Contains(launch, `--tools "Read,Glob,Grep"`) || strings.Contains(launch, "exec zsh") {
-		t.Fatalf("advisor launch command is not read-only = %s", launch)
+	body, err := os.ReadFile(quoted[len(quoted)-2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	launchPayload := string(body)
+	if !strings.Contains(launchPayload, "AZEDARACH_SESSION_ROLE=advisor") || !strings.Contains(launchPayload, "AZEDARACH_INTERACTION_ID") || !strings.Contains(launchPayload, "AZEDARACH_ISSUE_ID=\"\"") {
+		t.Fatalf("advisor launch payload = %s", launchPayload)
+	}
+	if !strings.Contains(launchPayload, "--permission-mode plan") || !strings.Contains(launchPayload, `--tools "Read,Glob,Grep"`) || strings.Contains(launchPayload, "exec zsh") {
+		t.Fatalf("advisor launch payload is not read-only = %s", launchPayload)
 	}
 	for _, command := range runner.commands {
 		if len(command) == 0 || command[0] != "new-session" {
 			continue
 		}
-		if got, ok := tmuxCommandEnvironmentValue(command, "PATH"); !ok || !strings.HasPrefix(got, managedDir+string(os.PathListSeparator)) {
-			t.Fatalf("advisor tmux PATH = %q, %t, want managed prefix; command=%v", got, ok, command)
+		if got, ok := tmuxCommandEnvironmentValue(command, "PATH"); ok || got != "" {
+			t.Fatalf("advisor tmux injected PATH = %q, %t; command=%v", got, ok, command)
 		}
 	}
 	if err := d.persistTmuxSessionRuntimeState(ctx, protocol.DefaultProjectID, []tmux.SessionInfo{{Name: first.Request.SessionID}}, nil); err != nil {

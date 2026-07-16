@@ -115,6 +115,58 @@ die "resolve validation source revision\n" unless $revision;
 $profile ||= $class;
 my $lease_token = random_token();
 my $request_id = sprintf('%s-%d-%d-%s', $issue, $$, int(time() * 1_000_000), substr(random_token(), 0, 12));
+$request_id =~ s/[^A-Za-z0-9_.-]/_/g;
+my $git_common_dir = capture($git, 'rev-parse', '--path-format=absolute', '--git-common-dir');
+$git_common_dir =~ s/\s+\z//;
+die "resolve Git common directory for validation admission\n" unless $git_common_dir;
+my $production_admission = "$git_common_dir/azedarach-production-admission";
+my $production_owner = "$production_admission/production";
+my $validation_participant = "$production_admission/validations/$request_id";
+my $validation_pending = "$production_admission/pending/$request_id.$$";
+my $production_wait_seconds = $ENV{AZEDARACH_VALIDATION_PRODUCTION_WAIT_SECONDS} || 15;
+die "AZEDARACH_VALIDATION_PRODUCTION_WAIT_SECONDS must be a non-negative integer\n"
+    unless $production_wait_seconds =~ /^\d+$/;
+my $production_wait_started = time();
+system('mkdir', '-p', "$production_admission/validations", "$production_admission/pending") == 0
+    or die "create validation admission directory\n";
+my $production_wait_reported = 0;
+while (1) {
+    if (mkdir $validation_pending, 0700) {
+        open my $pid_fh, '>', "$validation_pending/pid" or die "write validation admission pid: $!\n";
+        print {$pid_fh} "$$\n";
+        close $pid_fh;
+        open my $reason_fh, '>', "$validation_pending/reason" or die "write validation admission reason: $!\n";
+        print {$reason_fh} "$class validation $profile\n";
+        close $reason_fh;
+        rename $validation_pending, $validation_participant
+            or die "publish validation admission participant: $!\n";
+        last unless -d $production_owner;
+        remove_tree($validation_participant);
+    }
+    if (-d $production_owner) {
+        my $owner_pid = '';
+        if (open my $owner_fh, '<', "$production_owner/pid") {
+            $owner_pid = <$owner_fh> // '';
+            close $owner_fh;
+            $owner_pid =~ s/\s+\z//;
+        }
+        if ($owner_pid ne '' && ($owner_pid !~ /^\d+$/ || !kill(0, $owner_pid))) {
+            remove_tree($production_owner);
+            next;
+        }
+        if (!$production_wait_reported) {
+            warn "Validation is waiting for production install admission (pid $owner_pid); timeout ${production_wait_seconds}s.\n";
+            $production_wait_reported = 1;
+        }
+        die "Timed out waiting for production install admission after ${production_wait_seconds}s (pid $owner_pid).\n"
+            if time() - $production_wait_started >= $production_wait_seconds;
+    }
+    sleep 0.1;
+}
+END {
+    remove_tree($validation_participant) if defined($validation_participant) && -d $validation_participant;
+    remove_tree($validation_pending) if defined($validation_pending) && -d $validation_pending;
+}
 $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN} = $lease_token;
 my $command_text = join(' ', @ARGV);
 my @acquire = ($control_az, 'validation', 'acquire', '--request', $request_id, '--issue', $issue,
@@ -153,6 +205,7 @@ if ($heartbeat == 0) {
         exit 1 unless defined $renewal;
         if ($renewal == 0) {
             clear_candidate_routing_environment();
+            $ENV{AZEDARACH_OTEL} = 'off';
             exec $control_az, 'validation', 'heartbeat', '--request', $request_id, '--ttl', '30'
                 or exit 127;
         }
@@ -426,6 +479,10 @@ sub control_capture {
     my (@command) = @_;
     local %ENV = %ENV;
     clear_candidate_routing_environment();
+    # Acquire/heartbeat polling is control-plane plumbing. Reinitializing an
+    # exporter for every short-lived poll adds no useful span relationship and
+    # floods queued command output with repeated startup lines.
+    $ENV{AZEDARACH_OTEL} = 'off';
     return capture(@command);
 }
 
