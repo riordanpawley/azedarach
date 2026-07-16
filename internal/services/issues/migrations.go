@@ -91,8 +91,8 @@ var orderedMigrations = []migration{
 	{id: rootedBootstrapAcknowledgementMigrationID, path: "migrations/0049_rooted_bootstrap_acknowledgements.sql"},
 	{id: "0049_managed_agent_incarnations", path: "migrations/0049_managed_agent_incarnations.sql"},
 	{id: issueObservationEventSearchMigrationID, path: "migrations/0050_issue_observation_event_search.sql"},
-	{id: mailboxObservationProjectionCutoverMigrationID, path: "migrations/0051_mailbox_observation_projection_cutover.sql"},
 	{id: decisionIdempotencyMigrationID, path: "migrations/0051_decision_idempotency.sql"},
+	{id: mailboxObservationProjectionCutoverMigrationID, path: "migrations/0052_mailbox_observation_projection_cutover.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -152,8 +152,8 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: rootedBootstrapAcknowledgementMigrationID, Path: "migrations/0049_rooted_bootstrap_acknowledgements.sql", Checksum: "b54bdf5ec3f6af17c91e1625582ac58e66e47948cea68ee73db88d4e8df6f161"},
 	{ID: "0049_managed_agent_incarnations", Path: "migrations/0049_managed_agent_incarnations.sql", Checksum: "8364ceb9fad589df3f73c1fe0f0462c22b127510f1745e62fcc11e24757fe08d"},
 	{ID: "0050_issue_observation_event_search", Path: "migrations/0050_issue_observation_event_search.sql", Checksum: "e5a8efc20ddf313822576c4d6d42cd94e1837dfac810834957689d30b952005d"},
-	{ID: mailboxObservationProjectionCutoverMigrationID, Path: "migrations/0051_mailbox_observation_projection_cutover.sql", Checksum: "a1b2d43ed319d0866e4270ef947ce0c4bea16bfd3b8b04e56907ea0cea2c8d61"},
 	{ID: decisionIdempotencyMigrationID, Path: "migrations/0051_decision_idempotency.sql", Checksum: "86d5400fe33bbc19e7e848bc232335809f76d85e4d45a6e45f6bc7ff77547f47"},
+	{ID: mailboxObservationProjectionCutoverMigrationID, Path: "migrations/0052_mailbox_observation_projection_cutover.sql", Checksum: "fd86080f491210c169005c7f28bc778aca3eea2d70ce15a6c001bb960397e260"},
 }
 
 func validateMigrationRegistry() error {
@@ -450,7 +450,7 @@ const (
 	projectionDeltaAuthorityMigrationID                                      = "0047_projection_delta_authority"
 	projectionDeltaAuthorityChecksum                                         = "9f7bed54f9694c608c7ce081c4007539eb46ce67adc9127d5649a1dbb49b6c5a"
 	humanAuthorityProjectionMigrationID                                      = "0047_human_authority_projection_revision"
-	mailboxObservationProjectionCutoverMigrationID                           = "0051_mailbox_observation_projection_cutover"
+	mailboxObservationProjectionCutoverMigrationID                           = "0052_mailbox_observation_projection_cutover"
 	mailboxObservationProjectionCutoverMetaKey                               = "issue:mailbox_observation_projection_cutover"
 	decisionPropagationOutboxMigrationID                                     = "0048_decision_propagation_outbox"
 	issueObservationEventSearchMigrationID                           = "0050_issue_observation_event_search"

@@ -1,4 +1,4 @@
--- Migration manifest: 0051_mailbox_observation_projection_cutover
+-- Migration manifest: 0052_mailbox_observation_projection_cutover
 -- Authority: issue-store SQLite state plus a daemon-orchestrated, bounded
 -- import from the project-local legacy filesystem mailbox.
 --
@@ -31,7 +31,7 @@
 --
 -- Ledger effects:
 -- * applyMigration commits this marker and the
---   0051_mailbox_observation_projection_cutover schema_migrations row, with the
+--   0052_mailbox_observation_projection_cutover schema_migrations row, with the
 --   pinned artifact checksum, in the same SQL transaction.
 -- * The ledger row records installation of this two-phase contract; pending
 --   explicitly means the later filesystem import has not completed yet.

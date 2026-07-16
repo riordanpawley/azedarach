@@ -15,7 +15,7 @@ import (
 )
 
 func TestMailboxObservationProjectionMigrationArtifactDescribesGoAssistedContract(t *testing.T) {
-	manifest, err := loadMigrationSQL("migrations/0051_mailbox_observation_projection_cutover.sql")
+	manifest, err := loadMigrationSQL("migrations/0052_mailbox_observation_projection_cutover.sql")
 	require.NoError(t, err)
 	for _, required := range []string{
 		"Schema effects:",
@@ -108,7 +108,7 @@ func TestMailboxObservationProjectionMigrationUpgradesPreviousFixtureAndRejectsD
 	require.NoError(t, err)
 	var checksum string
 	require.NoError(t, db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, mailboxObservationProjectionCutoverMigrationID).Scan(&checksum))
-	require.Equal(t, "a1b2d43ed319d0866e4270ef947ce0c4bea16bfd3b8b04e56907ea0cea2c8d61", checksum)
+	require.Equal(t, "fd86080f491210c169005c7f28bc778aca3eea2d70ce15a6c001bb960397e260", checksum)
 	require.NoError(t, upgraded.CloseDB())
 
 	raw, err = sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath))
