@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/types"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -172,6 +173,69 @@ func TestStatusBar_RenderShowsCurrentProjectOnLeft(t *testing.T) {
 	}
 	if projectIdx > modeIdx {
 		t.Fatalf("expected current project to appear before mode badge, got: %s", result)
+	}
+}
+
+func TestStatusBar_LongIntegrationSandboxProjectPreservesEssentialStatus(t *testing.T) {
+	const project = "azedarach-dlb-accept-clone-118b"
+
+	tests := []struct {
+		name      string
+		width     int
+		configure func(*StatusBar)
+		wants     []string
+	}{
+		{
+			name:  "normal hints",
+			width: 80,
+			wants: []string{"NORMAL", "?: help", "O: orchestra"},
+		},
+		{
+			name:  "overlay close",
+			width: 80,
+			configure: func(sb *StatusBar) {
+				sb.SetHintBindings([]keybinds.Binding{{Key: "ctrl+g", Description: "close all"}})
+			},
+			wants: []string{"NORMAL", "ctrl+g: close all"},
+		},
+		{
+			name:  "orchestrator status and key",
+			width: 120,
+			configure: func(sb *StatusBar) {
+				sb.SetModeSuffix("orchestrator working live=true  workers 2/4")
+			},
+			wants: []string{"orchestrator working live=true", "workers 2/4", "O: orchestra"},
+		},
+		{
+			name:  "hidden selection",
+			width: 80,
+			configure: func(sb *StatusBar) {
+				sb.SetSelectionSummary("Selected: 2 (2 hidden)")
+			},
+			wants: []string{"NORMAL", "Selected: 2 (2 hidden)"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sb := New(types.ModeNormal, tt.width, styles.New())
+			sb.SetCurrentProject(project)
+			sb.SetFilterSummary("F:none")
+			sb.SetSortSummary("S:git_diff/asc")
+			if tt.configure != nil {
+				tt.configure(&sb)
+			}
+
+			result := sb.Render()
+			for _, want := range tt.wants {
+				if !strings.Contains(result, want) {
+					t.Fatalf("status bar missing %q: %q", want, result)
+				}
+			}
+			if got := lipgloss.Width(result); got != tt.width {
+				t.Fatalf("status bar width = %d, want %d: %q", got, tt.width, result)
+			}
+		})
 	}
 }
 

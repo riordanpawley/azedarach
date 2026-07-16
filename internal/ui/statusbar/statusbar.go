@@ -151,12 +151,17 @@ func (sb StatusBar) Render() string {
 	if sb.currentProject != "" {
 		projectStyle := sb.styles.StatusInfo.Bold(true)
 		reservedForMode := modeLabelWidth
-		switch {
-		case len(mandatorySlots) > 1:
-			// Guarantee room for compact mandatory fallback markers such as "F/S" or "R!/N!/F/S".
-			reservedForMode += separatorWidth + mandatoryFallbackWidth
-		case len(mandatorySlots) == 1:
-			reservedForMode += separatorWidth + mandatoryFallbackWidth
+		for _, slot := range mandatorySlots {
+			reservedForMode += separatorWidth + lipgloss.Width(slot.style.Render(slot.text))
+		}
+		priorityTail := sb.selectionSummary
+		priorityTailStyle := sb.styles.StatusInfo
+		if priorityTail == "" {
+			priorityTail = sb.essentialInlineHints()
+			priorityTailStyle = sb.styles.StatusHint
+		}
+		if priorityTail != "" {
+			reservedForMode += separatorWidth + lipgloss.Width(priorityTailStyle.Render(priorityTail))
 		}
 		reservedForMode += separatorWidth // separator between project and mode
 		projectWidth := contentWidth - reservedForMode
@@ -232,14 +237,34 @@ func renderWithin(style lipgloss.Style, text string, width int) (string, bool) {
 }
 
 func (sb StatusBar) inlineHints() string {
-	bindings := sb.hintBindings
-	if len(bindings) == 0 {
-		bindings = GetHintBindings(sb.mode)
-	}
+	bindings := sb.effectiveHintBindings()
 	if len(bindings) == 0 {
 		return ""
 	}
 	bindings = truncateHintBindings(sb.mode, bindings)
+	return sb.renderHintBindings(bindings)
+}
+
+func (sb StatusBar) essentialInlineHints() string {
+	bindings := sb.effectiveHintBindings()
+	if len(bindings) == 0 {
+		return ""
+	}
+	limit := 1
+	if len(sb.hintBindings) == 0 && sb.mode == types.ModeNormal {
+		limit = 2
+	}
+	return sb.renderHintBindings(bindings[:min(limit, len(bindings))])
+}
+
+func (sb StatusBar) effectiveHintBindings() []keybinds.Binding {
+	if len(sb.hintBindings) > 0 {
+		return sb.hintBindings
+	}
+	return GetHintBindings(sb.mode)
+}
+
+func (sb StatusBar) renderHintBindings(bindings []keybinds.Binding) string {
 	inline := make([]keybinds.Binding, 0, len(bindings))
 	for _, binding := range bindings {
 		key := strings.TrimSpace(binding.Key)
