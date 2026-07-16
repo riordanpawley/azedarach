@@ -287,9 +287,9 @@ sub one_line {
     return substr($value, 0, 1000);
 }
 
-# Failed artifacts with issue, review, or validation-request references are
-# evidence and remain protected. Orphans are retained for at most 30 days and
-# the newest 20 orphan directories, bounding recoverable-but-unreferenced data.
+# Failed artifacts with explicit durable references are evidence and remain
+# protected. Orphans are retained for at most 30 days and the newest 20 orphan
+# directories, bounding recoverable-but-unreferenced data.
 sub prune_unreferenced {
     my ($root) = @_;
     my @manifests = glob(File::Spec->catfile($root, 'failures', '*', '*', 'manifest.json'));
