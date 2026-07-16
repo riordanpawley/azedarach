@@ -72,8 +72,9 @@ func (a daemonOrchestrationAuthority) reviewQueue(ctx context.Context, projectID
 	if !usesProjectionSource(sourceForInvariant(daemonInvariantOrchestrationReview)) {
 		return nil, nil
 	}
+	actionableTasks := orchestrationReviewScopeTasks(tasks, request.Scope)
 	acceptedCloseCandidates := make([]string, 0)
-	for _, task := range tasks {
+	for _, task := range actionableTasks {
 		if reviewOutcomeLookupCandidate(task) {
 			acceptedCloseCandidates = append(acceptedCloseCandidates, task.ID.String())
 		}
@@ -83,7 +84,7 @@ func (a daemonOrchestrationAuthority) reviewQueue(ctx context.Context, projectID
 		return nil, fmt.Errorf("load accepted review outcomes: %w", err)
 	}
 	reviewTasks := make([]domain.Task, 0)
-	for _, task := range tasks {
+	for _, task := range actionableTasks {
 		if !reviewOutcomeLookupCandidate(task) && task.Status != domain.StatusDone {
 			reviewTasks = append(reviewTasks, task)
 			continue
@@ -123,6 +124,19 @@ func (a daemonOrchestrationAuthority) reviewQueue(ctx context.Context, projectID
 		out = append(out, a.reviewInspection(ctx, projectID, repoDir, request.ActorID, task, byID, worktrees))
 	}
 	return out, nil
+}
+
+func orchestrationReviewScopeTasks(tasks []domain.Task, scope domain.OrchestrationScope) []domain.Task {
+	if scope.Kind != domain.OrchestrationScopeRooted {
+		return tasks
+	}
+	out := make([]domain.Task, 0)
+	for _, task := range tasks {
+		if task.ParentID != nil && !task.ParentID.IsZero() && naming.IssueIDsEqual(task.ParentID.String(), scope.RootIssueID.String()) {
+			out = append(out, task)
+		}
+	}
+	return out
 }
 
 func reviewOutcomeLookupCandidate(task domain.Task) bool {
@@ -267,11 +281,19 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 		requested = ordered
 	}
 	result := protocol.OrchestrationIntentResult{Scope: request.Scope, Kind: request.Kind, IntentKey: request.IntentKey, Requested: requested, Skipped: map[string]string{}, Failed: map[string]string{}}
+	scopeTasks, _, err := a.daemon.projectReadSnapshot(projectID)
+	if err != nil {
+		return protocol.OrchestrationIntentResult{}, fmt.Errorf("refresh orchestration scope projection: %w", err)
+	}
 	issueClient := a.daemon.issueClientForProject(projectID)
 	if issueClient == nil {
 		return protocol.OrchestrationIntentResult{}, fmt.Errorf("issue store unavailable")
 	}
 	for _, issueID := range requested {
+		if request.Scope.Kind == domain.OrchestrationScopeRooted && !directOrchestrationTarget(scopeTasks, request.Scope.RootIssueID.String(), issueID) {
+			result.Skipped[issueID] = "outside-root-direct-child-scope: delegate descendants to their direct parent orchestrator"
+			continue
+		}
 		terminal, err := a.reviewIntentTerminalOutcome(ctx, projectID, issueID, request)
 		if err != nil {
 			result.Failed[issueID] = "inspect prior review intent: " + err.Error()
