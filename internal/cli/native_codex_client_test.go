@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -259,7 +260,7 @@ func TestNativeCodexInputCancellationJoinsBlockedReader(t *testing.T) {
 }
 
 func TestNativeCodexAuthorityCancellationClosesSilentConn(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "authority.sock")
+	socket := filepath.Join("/tmp", fmt.Sprintf("az-auth-%d.sock", time.Now().UnixNano()))
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
