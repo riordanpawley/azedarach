@@ -482,7 +482,7 @@ env "${fresh_validation_environment[@]}" \
   AZEDARACH_VALIDATION_PS_BIN="$fixture/fake-bin/validation-ps-empty" \
   AZEDARACH_TICKET_ID=aggregate-holder \
   "$fixture/scripts/with-machine-validation-lease" --class aggregate --scope ticket --purpose review_evidence --profile merge-gate -- \
-  sh -c 'touch "$1"; sleep 2' sh "$aggregate_ready" \
+  sh -c 'touch "$1"; sleep 30' sh "$aggregate_ready" \
   >"$fixture/aggregate-holder.stdout" 2>"$fixture/aggregate-holder.stderr" &
 aggregate_holder_pid=$!
 for _ in {1..300}; do
