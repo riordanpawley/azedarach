@@ -121,6 +121,7 @@ $git_common_dir =~ s/\s+\z//;
 die "resolve Git common directory for validation admission\n" unless $git_common_dir;
 my $production_admission = "$git_common_dir/azedarach-production-admission";
 my $production_owner = "$production_admission/production";
+my $production_epoch_file = "$production_admission/production-epoch";
 my $validation_participant = "$production_admission/validations/$request_id";
 my $validation_pending = "$production_admission/pending/$request_id.$$";
 my $production_wait_seconds = $ENV{AZEDARACH_VALIDATION_PRODUCTION_WAIT_SECONDS} || 15;
@@ -163,6 +164,7 @@ while (1) {
     }
     sleep 0.1;
 }
+my $production_epoch_at_start = read_optional_file($production_epoch_file);
 END {
     remove_tree($validation_participant) if defined($validation_participant) && -d $validation_participant;
     remove_tree($validation_pending) if defined($validation_pending) && -d $validation_pending;
@@ -364,6 +366,12 @@ if ($class eq 'aggregate') {
         $exit_code = 76 if $exit_code == 0;
     }
 }
+my $production_epoch_at_finish = read_optional_file($production_epoch_file);
+my $production_install_overlapped = $production_epoch_at_finish ne $production_epoch_at_start;
+if ($production_install_overlapped && $exit_code == 0) {
+    warn "validation overlapped a production install and is noncanonical\n";
+    $exit_code = 74;
+}
 
 merge_whole_gate_evidence($evidence_file, {
     held => JSON::PP::true, request_id => $request_id, class => $class,
@@ -373,6 +381,7 @@ merge_whole_gate_evidence($evidence_file, {
     cleanup_succeeded => $cleanup_error eq '' ? JSON::PP::true : JSON::PP::false,
     cleanup_error => $cleanup_error,
     payload_exit_code => $payload_exit_code,
+    production_install_overlapped => $production_install_overlapped ? JSON::PP::true : JSON::PP::false,
 });
 if ($class eq 'aggregate' && $overlap_detected && $exit_code == 0) {
     warn "aggregate validation overlapped $max_external_go unleased Go process(es)\n";
@@ -393,6 +402,17 @@ warn "validation finish failed for $request_id\n" if $finish_failed;
 unlink $evidence_file if -e $evidence_file;
 my $final_exit = ($finish_failed && $exit_code == 0) ? 70 : $exit_code;
 exit($final_exit);
+
+sub read_optional_file {
+    my ($path) = @_;
+    return '' unless -f $path;
+    open my $fh, '<', $path or return '';
+    local $/;
+    my $value = <$fh> // '';
+    close $fh;
+    $value =~ s/\s+\z//;
+    return $value;
+}
 
 sub authorize_nested {
     my ($broker, $line, $az_path, $held_request, $token) = @_;
