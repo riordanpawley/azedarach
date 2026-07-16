@@ -472,6 +472,7 @@ func TestAgentInputDeliveryMigrationRejectsIndexDefinitionDrift(t *testing.T) {
 	}{
 		{name: "pending column order", index: "idx_agent_input_delivery_pending", definition: `CREATE INDEX idx_agent_input_delivery_pending ON agent_input_delivery_intents(state, project_id, expires_at, created_at) WHERE state IN ('queued','leased')`},
 		{name: "pending predicate", index: "idx_agent_input_delivery_pending", definition: `CREATE INDEX idx_agent_input_delivery_pending ON agent_input_delivery_intents(project_id, state, expires_at, created_at) WHERE state = 'queued'`},
+		{name: "pending quoted literal bytes", index: "idx_agent_input_delivery_pending", definition: `CREATE INDEX idx_agent_input_delivery_pending ON agent_input_delivery_intents(project_id, state, expires_at, created_at) WHERE state IN ('QUEUED','leased')`},
 		{name: "pending uniqueness", index: "idx_agent_input_delivery_pending", definition: `CREATE UNIQUE INDEX idx_agent_input_delivery_pending ON agent_input_delivery_intents(project_id, state, expires_at, created_at) WHERE state IN ('queued','leased')`},
 		{name: "incarnation column order", index: "idx_agent_input_delivery_incarnation", definition: `CREATE INDEX idx_agent_input_delivery_incarnation ON agent_input_delivery_intents(project_id, session_id, agent_incarnation, logical_pane_id, state)`},
 		{name: "incarnation uniqueness", index: "idx_agent_input_delivery_incarnation", definition: `CREATE UNIQUE INDEX idx_agent_input_delivery_incarnation ON agent_input_delivery_intents(project_id, session_id, logical_pane_id, agent_incarnation, state)`},
@@ -551,6 +552,21 @@ func TestAgentInputDeliveryMigrationRejectsIncarnationScopedSessionLeasePrimaryK
 	defer reopened.CloseDB()
 	if _, err := reopened.List(context.Background()); err == nil || !strings.Contains(err.Error(), "non-canonical definition") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestNormalizeExactSQLiteDDLPreservesQuotedBytes(t *testing.T) {
+	canonical := `CREATE INDEX "QuotedName" ON agent_input_delivery_intents(state) WHERE state IN ('queued','leased')`
+	if got, want := normalizeExactSQLiteDDL("  create\nindex \"QuotedName\" on agent_input_delivery_intents ( state ) where state in ( 'queued' , 'leased' )  "), normalizeExactSQLiteDDL(canonical); got != want {
+		t.Fatalf("unquoted formatting was not normalized: got=%q want=%q", got, want)
+	}
+	for _, drifted := range []string{
+		`CREATE INDEX "quotedname" ON agent_input_delivery_intents(state) WHERE state IN ('queued','leased')`,
+		`CREATE INDEX "QuotedName" ON agent_input_delivery_intents(state) WHERE state IN ('QUEUED','leased')`,
+	} {
+		if normalizeExactSQLiteDDL(drifted) == normalizeExactSQLiteDDL(canonical) {
+			t.Fatalf("quoted-byte drift normalized away: %s", drifted)
+		}
 	}
 }
 
@@ -874,7 +890,24 @@ func TestAgentInputDeliveryFencingMigrationRejectsPredecessorDriftBeforeRebuild(
 					t.Fatal(err)
 				}
 			},
-			preservedSQL: "(state, project_id)",
+			preservedType: "index",
+			preservedName: "idx_agent_input_delivery_pending",
+			preservedSQL:  "(state, project_id)",
+		},
+		{
+			name: "pending quoted literal bytes",
+			mutate: func(t *testing.T, db *sql.DB) {
+				t.Helper()
+				if _, err := db.Exec(`DROP INDEX idx_agent_input_delivery_pending`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`CREATE INDEX idx_agent_input_delivery_pending ON agent_input_delivery_intents(project_id, state, expires_at, created_at) WHERE state IN ('QUEUED','leased')`); err != nil {
+					t.Fatal(err)
+				}
+			},
+			preservedType: "index",
+			preservedName: "idx_agent_input_delivery_pending",
+			preservedSQL:  "where state in ('queued','leased')",
 		},
 		{
 			name: "extra sentinel index",
@@ -964,10 +997,6 @@ func TestAgentInputDeliveryFencingMigrationRejectsPredecessorDriftBeforeRebuild(
 			if objectType == "" {
 				objectType = "table"
 				objectName = "agent_input_delivery_intents"
-			}
-			if test.name == "pending index" {
-				objectType = "index"
-				objectName = "idx_agent_input_delivery_pending"
 			}
 			if err := raw.QueryRow(`SELECT lower(sql) FROM sqlite_master WHERE type=? AND name=?`, objectType, objectName).Scan(&schemaSQL); err != nil {
 				t.Fatal(err)

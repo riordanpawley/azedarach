@@ -1138,9 +1138,26 @@ type exactSQLiteSchemaObject struct {
 	sql        string
 }
 
+type exactSQLiteIndexColumn struct {
+	sequence   int
+	columnID   int
+	name       string
+	descending int
+	collation  string
+	key        int
+}
+
+type exactSQLiteIndex struct {
+	unique  int
+	origin  string
+	partial int
+	columns []exactSQLiteIndexColumn
+}
+
 type agentInputDeliverySchemaContract struct {
 	objects []exactSQLiteSchemaObject
 	columns map[string][]exactSQLiteColumn
+	indexes map[string]exactSQLiteIndex
 }
 
 var (
@@ -1202,7 +1219,10 @@ func inspectAgentInputDeliverySchemaContract(ctx context.Context, db sqlIssueQue
 	if err != nil {
 		return nil, fmt.Errorf("inspect agent input delivery schema objects: %w", err)
 	}
-	contract := &agentInputDeliverySchemaContract{columns: make(map[string][]exactSQLiteColumn)}
+	contract := &agentInputDeliverySchemaContract{
+		columns: make(map[string][]exactSQLiteColumn),
+		indexes: make(map[string]exactSQLiteIndex),
+	}
 	for rows.Next() {
 		var object exactSQLiteSchemaObject
 		if err := rows.Scan(&object.objectType, &object.name, &object.tableName, &object.sql); err != nil {
@@ -1219,14 +1239,20 @@ func inspectAgentInputDeliverySchemaContract(ctx context.Context, db sqlIssueQue
 		return nil, fmt.Errorf("close agent input delivery schema object inspection: %w", err)
 	}
 	for _, object := range contract.objects {
-		if object.objectType != "table" {
-			continue
+		switch object.objectType {
+		case "table":
+			columns, err := inspectExactSQLiteColumns(ctx, db, object.name)
+			if err != nil {
+				return nil, err
+			}
+			contract.columns[object.name] = columns
+		case "index":
+			index, err := inspectExactSQLiteIndex(ctx, db, object.tableName, object.name)
+			if err != nil {
+				return nil, err
+			}
+			contract.indexes[object.name] = index
 		}
-		columns, err := inspectExactSQLiteColumns(ctx, db, object.name)
-		if err != nil {
-			return nil, err
-		}
-		contract.columns[object.name] = columns
 	}
 	return contract, nil
 }
@@ -1250,6 +1276,9 @@ func validateAgentInputDeliverySchemaContract(ctx context.Context, db sqlIssueQu
 	}
 	if !reflect.DeepEqual(actual.columns, expected.columns) {
 		return errors.New("agent input delivery schema drifted: table column metadata is non-canonical")
+	}
+	if !reflect.DeepEqual(actual.indexes, expected.indexes) {
+		return errors.New("agent input delivery schema drifted: index metadata is non-canonical")
 	}
 	return nil
 }
@@ -1282,8 +1311,82 @@ func inspectExactSQLiteColumns(ctx context.Context, db sqlIssueQueryer, table st
 	return columns, nil
 }
 
+func inspectExactSQLiteIndex(ctx context.Context, db sqlIssueQueryer, table, indexName string) (exactSQLiteIndex, error) {
+	var index exactSQLiteIndex
+	if err := db.QueryRowContext(ctx, `
+		SELECT [unique], origin, partial
+		FROM pragma_index_list(?)
+		WHERE name=?
+	`, table, indexName).Scan(&index.unique, &index.origin, &index.partial); err != nil {
+		return exactSQLiteIndex{}, fmt.Errorf("inspect index %s metadata: %w", indexName, err)
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT seqno, cid, name, [desc], coll, key
+		FROM pragma_index_xinfo(?)
+		ORDER BY seqno
+	`, indexName)
+	if err != nil {
+		return exactSQLiteIndex{}, fmt.Errorf("inspect index %s columns: %w", indexName, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var column exactSQLiteIndexColumn
+		var name, collation sql.NullString
+		if err := rows.Scan(&column.sequence, &column.columnID, &name, &column.descending, &collation, &column.key); err != nil {
+			return exactSQLiteIndex{}, fmt.Errorf("scan index %s columns: %w", indexName, err)
+		}
+		if name.Valid {
+			column.name = name.String
+		}
+		if collation.Valid {
+			column.collation = collation.String
+		}
+		index.columns = append(index.columns, column)
+	}
+	if err := rows.Err(); err != nil {
+		return exactSQLiteIndex{}, fmt.Errorf("iterate index %s columns: %w", indexName, err)
+	}
+	return index, nil
+}
+
 func normalizeExactSQLiteDDL(ddl string) string {
-	return strings.NewReplacer(" ", "", "\n", "", "\t", "", "\r", "").Replace(strings.ToLower(ddl))
+	var normalized strings.Builder
+	normalized.Grow(len(ddl))
+	var quote byte
+	for i := 0; i < len(ddl); i++ {
+		character := ddl[i]
+		if quote != 0 {
+			normalized.WriteByte(character)
+			if quote == '[' {
+				if character == ']' {
+					quote = 0
+				}
+				continue
+			}
+			if character == quote {
+				if i+1 < len(ddl) && ddl[i+1] == quote {
+					i++
+					normalized.WriteByte(ddl[i])
+					continue
+				}
+				quote = 0
+			}
+			continue
+		}
+		switch character {
+		case '\'', '"', '`', '[':
+			quote = character
+			normalized.WriteByte(character)
+		case ' ', '\n', '\t', '\r', '\f', '\v':
+			continue
+		default:
+			if character >= 'A' && character <= 'Z' {
+				character += 'a' - 'A'
+			}
+			normalized.WriteByte(character)
+		}
+	}
+	return normalized.String()
 }
 
 func repairIssueIDAllocationSchema(ctx context.Context, db *sql.DB) error {

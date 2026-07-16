@@ -388,7 +388,11 @@ func TestProcessCodexAppServerRPCBoundsBlockedSubmissionWrite(t *testing.T) {
 }
 
 func TestCodexAppServerGateRestoresAfterPaneDisableSideEffectThenError(t *testing.T) {
-	adapter := &fakeCodexInputTmux{paneEnabled: true, disablePaneErrorsAfterEffect: 1}
+	adapter := &fakeCodexInputTmux{
+		paneEnabled:                  true,
+		disablePaneErrorsAfterEffect: 1,
+		panes:                        []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}},
+	}
 	authority := newFakeCodexAuthority(t, adapter, &fakeCodexRPC{})
 	_, err := authority.acquireGate(context.Background(), codexAuthorityRequest())
 	if err == nil || !strings.Contains(err.Error(), "after side effect") {
@@ -492,12 +496,14 @@ func TestCodexInputGateRestoreRetainsGateWhenPaneFenceFails(t *testing.T) {
 		hooksEnabled:    true,
 		failDisablePane: true,
 		clients:         []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb", ReadOnly: true}},
+		panes:           []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}},
 	}
 	gate := &codexInputGate{
 		tmux: adapter,
 		state: codexInputGateState{
 			SessionID:        "az-dlb",
 			PaneID:           "12",
+			PanePID:          42,
 			PaneInputEnabled: true,
 			OriginalReadOnly: map[string]bool{"tty": false},
 		},
@@ -510,6 +516,57 @@ func TestCodexInputGateRestoreRetainsGateWhenPaneFenceFails(t *testing.T) {
 	defer adapter.mu.Unlock()
 	if !adapter.hooksEnabled || !adapter.clients[0].ReadOnly || gate.restored {
 		t.Fatalf("failed pane fence ungated session: hooks=%v clients=%+v restored=%v", adapter.hooksEnabled, adapter.clients, gate.restored)
+	}
+}
+
+func TestCodexInputGateRestoreRefusesReusedPaneBeforeTmuxMutation(t *testing.T) {
+	adapter := &fakeCodexInputTmux{
+		paneEnabled:  true,
+		hooksEnabled: true,
+		activeGates:  1,
+		clients:      []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb", ReadOnly: true}},
+		panes:        []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}},
+	}
+	gateDir := t.TempDir()
+	statePath, eventsPath, hookID := testCodexGatePaths(gateDir, t.Name())
+	if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, []byte("retained"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gate := &codexInputGate{
+		tmux: adapter,
+		state: codexInputGateState{
+			SessionID:        "az-dlb",
+			PaneID:           "12",
+			PanePID:          42,
+			PaneInputEnabled: true,
+			HookID:           hookID,
+			EventsPath:       eventsPath,
+			OriginalReadOnly: map[string]bool{"tty": false},
+		},
+		statePath: statePath,
+		renewRestoreFence: func(context.Context) (bool, error) {
+			adapter.mu.Lock()
+			adapter.panes[0].PanePID = 99
+			adapter.mu.Unlock()
+			return true, nil
+		},
+	}
+	if err := gate.Restore(context.Background()); !errors.Is(err, errCodexPaneIdentityChanged) {
+		t.Fatalf("restore error=%v, want pane identity refusal", err)
+	}
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	if !adapter.paneEnabled || !adapter.hooksEnabled || adapter.activeGates != 1 || !adapter.clients[0].ReadOnly || len(adapter.setReadOnlyCalls) != 0 {
+		t.Fatalf("reused-pane restore mutated replacement runtime: pane=%v hooks=%v active=%d clients=%+v calls=%v", adapter.paneEnabled, adapter.hooksEnabled, adapter.activeGates, adapter.clients, adapter.setReadOnlyCalls)
+	}
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("reused-pane restore removed recovery marker: %v", err)
+	}
+	if _, err := os.Stat(eventsPath); err != nil {
+		t.Fatalf("reused-pane restore removed event ledger: %v", err)
 	}
 }
 

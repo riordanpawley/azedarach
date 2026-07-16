@@ -601,20 +601,8 @@ func (a *codexAppServerInputAuthority) acquireGate(ctx context.Context, request 
 }
 
 func (g *codexInputGate) Revalidate(ctx context.Context, request authoritativeAgentInputRequest) error {
-	panes, err := g.tmux.ListPaneInfos(ctx)
-	if err != nil {
+	if err := g.validatePaneIdentity(ctx, request.Delivery.SessionID, request.Delivery.Target.TmuxPaneID, request.Delivery.Target.PanePID); err != nil {
 		return err
-	}
-	wantPane := strings.TrimPrefix(strings.TrimSpace(request.Delivery.Target.TmuxPaneID), "%")
-	found := false
-	for _, pane := range panes {
-		if pane.SessionName == request.Delivery.SessionID && strings.TrimPrefix(strings.TrimSpace(pane.PaneID), "%") == wantPane && pane.PanePID == request.Delivery.Target.PanePID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return errCodexPaneIdentityChanged
 	}
 	paneInputEnabled, err := g.tmux.PaneInputEnabled(ctx, g.state.PaneID)
 	if err != nil {
@@ -633,6 +621,20 @@ func (g *codexInputGate) Revalidate(ctx context.Context, request authoritativeAg
 		}
 	}
 	return nil
+}
+
+func (g *codexInputGate) validatePaneIdentity(ctx context.Context, sessionID, paneID string, panePID int) error {
+	panes, err := g.tmux.ListPaneInfos(ctx)
+	if err != nil {
+		return err
+	}
+	wantPane := strings.TrimPrefix(strings.TrimSpace(paneID), "%")
+	for _, pane := range panes {
+		if pane.SessionName == sessionID && strings.TrimPrefix(strings.TrimSpace(pane.PaneID), "%") == wantPane && pane.PanePID == panePID {
+			return nil
+		}
+	}
+	return errCodexPaneIdentityChanged
 }
 
 func (g *codexInputGate) persist() error {
@@ -664,6 +666,13 @@ func (g *codexInputGate) Restore(ctx context.Context) error {
 	}
 	if !renewed {
 		return errCodexSessionFenceLost
+	}
+	// Restore changes session-global tmux state. Revalidate the marker's exact
+	// live session/pane/PID after renewing its durable fence and immediately
+	// before the first tmux mutation. A reused pane ID must retain both the gate
+	// and the replacement runtime untouched for bounded recovery.
+	if err := g.validatePaneIdentity(ctx, g.state.SessionID, g.state.PaneID, g.state.PanePID); err != nil {
+		return err
 	}
 	var errs []error
 	if err := g.tmux.SetPaneInputEnabled(ctx, g.state.PaneID, false); err != nil {
