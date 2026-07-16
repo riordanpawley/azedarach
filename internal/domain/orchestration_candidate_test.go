@@ -31,6 +31,7 @@ func TestAssessOrchestrationCandidateClasses(t *testing.T) {
 		{name: "review", task: Task{ID: "review", Title: "Review", Description: "Executable", Status: StatusInReview, State: review}, want: OrchestrationCandidateReviewReady},
 		{name: "decision", task: Task{ID: "decision", Title: "Decision", Description: "Executable", Status: StatusInProgress, Session: waiting}, want: OrchestrationCandidateDecisionWaiting},
 		{name: "backlog", task: Task{ID: "backlog", Title: "Backlog", Description: "Executable", Status: StatusOpen, State: backlog}, want: OrchestrationCandidateBacklog},
+		{name: "backlog lifecycle precedes stale ownership", task: Task{ID: "backlog-owned", Title: "Backlog", Description: "Executable", Status: StatusOpen, State: backlog, Ownership: &IssueOwnership{OwnerID: "other", OwnerKind: "agent"}}, actor: "self", want: OrchestrationCandidateBacklog},
 		{name: "owned", task: Task{ID: "owned", Title: "Owned", Description: "Executable", Status: StatusOpen, Ownership: &IssueOwnership{OwnerID: "other", OwnerKind: "agent"}}, actor: "self", want: OrchestrationCandidateOwnedElsewhere},
 		{name: "blocked", task: Task{ID: "blocked", Title: "Blocked", Description: "Executable", Status: StatusOpen}, blockers: []string{"waiting on dep"}, want: OrchestrationCandidateBlocked},
 	}
@@ -48,6 +49,9 @@ func TestAssessOrchestrationCandidateClasses(t *testing.T) {
 			}
 			if tt.want == OrchestrationCandidateDecisionWaiting && got.Executability.Disposition != IssueNeedsInteraction {
 				t.Fatalf("decision executability = %+v", got.Executability)
+			}
+			if tt.want == OrchestrationCandidateBacklog && !reflect.DeepEqual(got.ExclusionReasons, []string{"lifecycle-backlog"}) {
+				t.Fatalf("backlog exclusions = %v, want lifecycle-backlog", got.ExclusionReasons)
 			}
 		})
 	}

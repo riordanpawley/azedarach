@@ -19,8 +19,14 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/userstore"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/observability"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	_ "modernc.org/sqlite"
 )
 
@@ -344,6 +350,102 @@ func TestProjectReadMaterializerEmptyObservationRefreshesOnlyAffectedIssue(t *te
 	target, ok = findDaemonTaskByID(after, targetID)
 	if !ok || target.IssueFacts().WaitingHuman || hydrated.Load() != 1 {
 		t.Fatalf("target after keyed acceptance = %+v found=%t hydrated=%d", target, ok, hydrated.Load())
+	}
+}
+
+func TestProjectReadMaterializerRuntimeHydrationFailureReturnsTicketData(t *testing.T) {
+	recorder := newProjectReadTraceRecorder(t)
+	ctx := context.Background()
+	client, _ := newTestIssueClient(t)
+	id, err := client.Create(ctx, issues.CreateTaskParams{Title: "ticket survives degraded runtime", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{
+		cfg:           Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issues:        client,
+		materializers: map[string]*projectReadMaterializer{},
+		projectReadRuntimeHydrate: func(context.Context, string, []domain.Task) ([]domain.Task, error) {
+			return nil, errors.New("injected runtime hydration failure")
+		},
+	}
+	materializer, err := d.ensureProjectReadMaterializer(ctx, protocol.DefaultProjectID, client)
+	if err != nil {
+		t.Fatalf("bootstrap degraded runtime materializer: %v", err)
+	}
+	tasks, _ := materializer.snapshot()
+	got, ok := findDaemonTaskByID(tasks, id)
+	if !ok || got.Title != "ticket survives degraded runtime" {
+		t.Fatalf("degraded ticket = %+v found=%t", got, ok)
+	}
+	assertProjectReadSpans(t, recorder, "daemon.project_read.runtime_hydration", "daemon.project_read.degraded_fallback")
+}
+
+func TestProjectReadMaterializerWorktreeFailureDoesNotAbortBootstrap(t *testing.T) {
+	recorder := newProjectReadTraceRecorder(t)
+	ctx := context.Background()
+	client, _ := newTestIssueClient(t)
+	id, err := client.Create(ctx, issues.CreateTaskParams{Title: "ticket survives degraded worktrees", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{
+		cfg:           Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issues:        client,
+		materializers: map[string]*projectReadMaterializer{},
+		projectReadWorktreeRefresh: func(context.Context, string, *projectReadMaterializer) error {
+			return errors.New("injected worktree enrichment failure")
+		},
+	}
+	materializer, err := d.ensureProjectReadMaterializer(ctx, protocol.DefaultProjectID, client)
+	if err != nil {
+		t.Fatalf("bootstrap degraded worktree materializer: %v", err)
+	}
+	tasks, _ := materializer.snapshot()
+	if got, ok := findDaemonTaskByID(tasks, id); !ok || got.Title != "ticket survives degraded worktrees" {
+		t.Fatalf("degraded ticket = %+v found=%t", got, ok)
+	}
+	if worktrees := materializer.snapshotWorktrees(); len(worktrees) != 0 {
+		t.Fatalf("degraded worktrees = %+v want empty", worktrees)
+	}
+	assertProjectReadSpans(t, recorder, "daemon.project_read.runtime_hydration", "daemon.project_read.degraded_fallback")
+}
+
+func newProjectReadTraceRecorder(t *testing.T) *tracetest.SpanRecorder {
+	t.Helper()
+	t.Setenv(latencytrace.EnvVar, "")
+	t.Setenv(observability.EnvVar, "true")
+	latencytrace.SetConfigEnabled(false)
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(oteltrace.NewNoopTracerProvider())
+		latencytrace.SetConfigEnabled(false)
+	})
+	return recorder
+}
+
+func assertProjectReadSpans(t *testing.T, recorder *tracetest.SpanRecorder, names ...string) {
+	t.Helper()
+	found := map[string]sdktrace.ReadOnlySpan{}
+	for _, span := range recorder.Ended() {
+		found[span.Name()] = span
+	}
+	for _, name := range names {
+		span := found[name]
+		if span == nil {
+			t.Fatalf("missing span %q; ended=%v", name, found)
+		}
+		attrs := map[string]bool{}
+		for _, attr := range span.Attributes() {
+			attrs[string(attr.Key)] = true
+		}
+		for _, key := range []string{"component", "phase", "outcome"} {
+			if !attrs[key] {
+				t.Fatalf("span %q missing attribute %q", name, key)
+			}
+		}
 	}
 }
 

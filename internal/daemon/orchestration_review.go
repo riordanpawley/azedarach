@@ -315,18 +315,30 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 			continue
 		}
 		inspection, ok := queue[issueID]
+		activeValidationReturn := false
+		if !ok && request.Kind == protocol.OrchestrationIntentReviewReturn {
+			inspection, activeValidationReturn, err = a.activeValidationReviewReturn(ctx, projectID, request, issueID)
+			if err != nil {
+				result.Failed[issueID] = "inspect active validation review: " + err.Error()
+				continue
+			}
+		}
 		if !ok {
-			result.Skipped[issueID] = "not-review-ready"
-			continue
+			if !activeValidationReturn {
+				result.Skipped[issueID] = "not-review-ready"
+				continue
+			}
 		}
 		revokingAcceptedReview := request.Kind == protocol.OrchestrationIntentReviewReturn && slices.Contains(inspection.Reasons, "accepted-close-pending")
 		if !inspection.Actionable && !revokingAcceptedReview {
 			result.Skipped[issueID] = strings.Join(inspection.Reasons, "; ")
 			continue
 		}
-		if _, err := issueClient.ClaimOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: request.ActorID, OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview}); err != nil {
-			result.Skipped[issueID] = "claim-review: " + err.Error()
-			continue
+		if !activeValidationReturn {
+			if _, err := issueClient.ClaimOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: request.ActorID, OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview}); err != nil {
+				result.Skipped[issueID] = "claim-review: " + err.Error()
+				continue
+			}
 		}
 		var actionErr error
 		reviewLeaseReleased := false
@@ -369,6 +381,82 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 	return result, nil
 }
 
+// activeValidationReviewReturn preserves the formal review outcome when the
+// canonical aggregate gate assigned during the current review-request epoch
+// moves the worker back to active before reporting a failure. The durable gate
+// request is the fence: gates from an earlier review epoch cannot authorize a
+// return against a later implementation episode.
+func (a daemonOrchestrationAuthority) activeValidationReviewReturn(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string) (protocol.OrchestrationReview, bool, error) {
+	if a.daemon.operationRuntime == nil {
+		return protocol.OrchestrationReview{}, false, nil
+	}
+	issueClient := a.daemon.issueClientForProject(projectID)
+	if issueClient == nil {
+		return protocol.OrchestrationReview{}, false, fmt.Errorf("issue store unavailable")
+	}
+	task, err := issueClient.GetWithRuntime(ctx, projectID, issueID)
+	if err != nil {
+		return protocol.OrchestrationReview{}, false, err
+	}
+	if task.Status != domain.StatusInProgress {
+		return protocol.OrchestrationReview{}, false, nil
+	}
+	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventIssueStatusChanged}})
+	if err != nil {
+		return protocol.OrchestrationReview{}, false, err
+	}
+	var reviewRequestedAt time.Time
+	var reviewEpochEventID int64
+	for _, event := range events {
+		if domain.IsReviewRequestTransition(event) && event.ObservedAt.After(reviewRequestedAt) {
+			reviewRequestedAt = event.ObservedAt
+			reviewEpochEventID = event.ID
+		}
+	}
+	if reviewRequestedAt.IsZero() {
+		return protocol.OrchestrationReview{}, false, nil
+	}
+	validationStore, err := a.daemon.validationProjectionStore()
+	if err != nil {
+		return protocol.OrchestrationReview{}, false, err
+	}
+	gate, err := validationStore.LatestAggregateValidation(ctx, projectID, issueID, time.Now().UTC(), defaultValidationLeaseTTL)
+	if err != nil {
+		return protocol.OrchestrationReview{}, false, err
+	}
+	// The production validation wrapper records successful commands as
+	// completed/"exit 0" and unsuccessful commands as failed/"exit N".
+	// Outcome is diagnostic text, not authority: only the typed failed state may
+	// authorize returning an actively validating review candidate.
+	failedGate := gate != nil && gate.State == domain.ValidationRequestFailed
+	if gate == nil || !failedGate || gate.ReviewEpochEventID != reviewEpochEventID {
+		return protocol.OrchestrationReview{}, false, nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(gate.ReviewerID), strings.TrimSpace(request.ActorID)) {
+		return protocol.OrchestrationReview{}, false, nil
+	}
+	if a.daemon.git == nil || strings.TrimSpace(request.RepoDir) == "" {
+		return protocol.OrchestrationReview{}, false, nil
+	}
+	candidateRevision, err := a.daemon.git.HeadRevision(ctx, request.RepoDir)
+	if err != nil || candidateRevision != strings.TrimSpace(gate.SourceRevision) {
+		return protocol.OrchestrationReview{}, false, nil
+	}
+
+	tasks, _, err := a.daemon.projectReadSnapshot(projectID)
+	if err != nil {
+		return protocol.OrchestrationReview{}, false, err
+	}
+	byID := make(map[string]domain.Task, len(tasks))
+	for _, candidate := range tasks {
+		byID[candidate.ID.String()] = candidate
+	}
+	worktrees := a.daemon.projectReadWorktrees(projectID)
+	inspection := a.reviewInspection(ctx, projectID, request.RepoDir, request.ActorID, task, byID, worktrees)
+	inspection.Reasons = uniqueNonEmpty(append(inspection.Reasons, "active-validation-return:"+gate.RequestID))
+	return inspection, true, nil
+}
+
 func (a daemonOrchestrationAuthority) returnReviewFindings(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, inspection protocol.OrchestrationReview, result *protocol.OrchestrationIntentResult) error {
 	body, err := json.Marshal(map[string]any{"type": "review-finding", "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request), "findings": request.Findings})
 	if err != nil {
@@ -401,7 +489,24 @@ func (a daemonOrchestrationAuthority) returnReviewFindings(ctx context.Context, 
 		}
 	}
 	message := formatReviewFindingMessage(inspection.IssueID, parent, request.Findings)
-	delivered, deliveryErr := a.deliverReviewMessage(ctx, projectID, request, inspection.IssueID, message)
+	deliveryTimeout := a.reviewDeliveryTimeout
+	if deliveryTimeout <= 0 {
+		deliveryTimeout = orchestrationReviewDeliveryTimeout
+	}
+	deliveryCtx, cancelDelivery := context.WithTimeout(ctx, deliveryTimeout)
+	if a.daemon.cfg.Logger != nil {
+		a.daemon.cfg.Logger.Info("orchestration review return stage started", "project_id", projectID, "issue_id", inspection.IssueID, "intent_key", request.IntentKey, "stage", "live_delivery", "target", inspection.IssueID, "timeout", deliveryTimeout)
+	}
+	delivered, deliveryErr := a.deliverReviewMessage(deliveryCtx, projectID, request, inspection.IssueID, message)
+	cancelDelivery()
+	if deliveryErr != nil {
+		deliveryErr = fmt.Errorf("stage=live_delivery target=%s: %w", inspection.IssueID, deliveryErr)
+		if a.daemon.cfg.Logger != nil {
+			a.daemon.cfg.Logger.Warn("orchestration review return stage failed", "project_id", projectID, "issue_id", inspection.IssueID, "intent_key", request.IntentKey, "stage", "live_delivery", "target", inspection.IssueID, "error", deliveryErr)
+		}
+	} else if a.daemon.cfg.Logger != nil {
+		a.daemon.cfg.Logger.Info("orchestration review return stage completed", "project_id", projectID, "issue_id", inspection.IssueID, "intent_key", request.IntentKey, "stage", "live_delivery", "target", inspection.IssueID)
+	}
 	if deliveryErr != nil && request.RestartWorker {
 		allowed, ownershipErr := a.reviewWorkerRestartAllowed(ctx, projectID, inspection.IssueID, request.ActorID)
 		if ownershipErr != nil {
@@ -435,13 +540,23 @@ func (a daemonOrchestrationAuthority) returnReviewFindings(ctx context.Context, 
 		}
 	}
 	if !delivered {
-		_ = a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "delivery_failed", deliveryErr.Error())
-		return fmt.Errorf("review findings recorded but active delivery failed: %w", deliveryErr)
+		failure := deliveryFailureMessage(deliveryErr, inspection.IssueID)
+		if err := a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "delivery_failed", failure); err != nil {
+			return fmt.Errorf("review findings recorded but active delivery failed: %s; publish durable failure: %w", failure, err)
+		}
+		return fmt.Errorf("review findings recorded but active delivery failed: %s", failure)
 	}
 	if err := a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "returned", ""); err != nil {
 		return err
 	}
 	return nil
+}
+
+func deliveryFailureMessage(err error, target string) string {
+	if err != nil {
+		return err.Error()
+	}
+	return fmt.Sprintf("stage=live_delivery target=%s: delivery returned without success", target)
 }
 
 func (a daemonOrchestrationAuthority) convergeReturnedReview(ctx context.Context, projectID, issueID, actorID string) error {
@@ -688,6 +803,9 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 				return strings.Contains(reason, "candidate worktree is required to bind aggregate validation")
 			}) {
 				return false, fmt.Errorf("accepted review candidate rejected: %s", strings.Join(inspection.Reasons, "; "))
+			}
+			if len(inspection.Reasons) > 0 {
+				return false, fmt.Errorf("accepted review requires complete worker_evidence.v1 or a declared internal_review investigation with a durable accepted/ratified review artifact: %s", strings.Join(inspection.Reasons, "; "))
 			}
 			return false, fmt.Errorf("accepted review requires complete worker_evidence.v1 or a declared internal_review investigation with a durable accepted/ratified review artifact")
 		}

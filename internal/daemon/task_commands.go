@@ -223,15 +223,17 @@ type taskGraphCapacitySummary struct {
 }
 
 type taskGraphNestedRoot struct {
-	IssueID        string                  `json:"issue_id"`
-	Status         string                  `json:"status"`
-	IssueStatus    string                  `json:"issue_status,omitempty"`
-	Type           string                  `json:"type"`
-	ChildCount     int                     `json:"child_count"`
-	ActiveSession  *taskGraphActiveSession `json:"active_session,omitempty"`
-	StartFailure   *taskGraphStartFailure  `json:"start_failure,omitempty"`
-	FallbackPolicy string                  `json:"fallback_policy,omitempty"`
-	Advice         string                  `json:"advice,omitempty"`
+	IssueID          string                  `json:"issue_id"`
+	Status           string                  `json:"status"`
+	IssueStatus      string                  `json:"issue_status,omitempty"`
+	Classification   string                  `json:"classification,omitempty"`
+	ExclusionReasons []string                `json:"exclusion_reasons,omitempty"`
+	Type             string                  `json:"type"`
+	ChildCount       int                     `json:"child_count"`
+	ActiveSession    *taskGraphActiveSession `json:"active_session,omitempty"`
+	StartFailure     *taskGraphStartFailure  `json:"start_failure,omitempty"`
+	FallbackPolicy   string                  `json:"fallback_policy,omitempty"`
+	Advice           string                  `json:"advice,omitempty"`
 }
 
 type taskGraphStartFailure struct {
@@ -4651,7 +4653,11 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 			PendingDecisions: pendingDecisions,
 		}, nil
 	}
-	events, err := readMailboxEvents(repoDir, parentIssueID)
+	mailboxRepoDir := strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID))
+	if mailboxRepoDir == "" {
+		return taskIntegrationReadinessResult{}, fmt.Errorf("resolve authoritative project mailbox root for %s", projectID)
+	}
+	events, err := readMailboxEvents(mailboxRepoDir, parentIssueID)
 	if err != nil {
 		return taskIntegrationReadinessResult{}, fmt.Errorf("list mailbox events for %s: %w", parentIssueID, err)
 	}
@@ -4689,6 +4695,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 				ContextRisk:            contextRisk,
 				Reasons:                reasons,
 				EvidenceEventSeq:       evt.Seq,
+				EvidenceSource:         "mailbox",
 				EvidenceIncomplete:     true,
 				EvidenceMissingFields:  validation.Missing,
 				EvidenceInvalidReasons: validation.Invalid,
@@ -4723,10 +4730,10 @@ func validateWorkerAggregateRequest(validation *domain.WorkerEvidenceParseResult
 	}
 	var problem string
 	if packet.AggregateValidation == nil {
-		if latest == nil {
-			return
-		}
-		problem = "aggregate_validation is required for integration readiness"
+		// The daemon projection is the authority for aggregate validation. Older
+		// and issue-recorded worker packets do not have to duplicate that proof;
+		// when they do, the identity and revision are still checked below.
+		return
 	} else if latest == nil {
 		problem = fmt.Sprintf("aggregate_validation request %s is not present in the daemon validation projection", packet.AggregateValidation.RequestID)
 	} else if packet.AggregateValidation.RequestID != latest.RequestID {
@@ -5464,6 +5471,7 @@ func daemonTaskGraphReadinessFromIndexesWithCompletionEvidence(rootID naming.Iss
 }
 
 func daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID, actorID string, now time.Time, completionEvidence map[string]taskDurableCompletionEvidence) (taskGraphReadinessResult, error) {
+	rootBacklog := byID[rootID].IssueFacts().LifecycleState == domain.IssueWorkflowBacklog
 	leafIDs := daemonTaskGraphDirectWorkerLeafIDs(rootID, byID, children)
 	leaves := make([]string, 0, len(leafIDs))
 	for _, id := range leafIDs {
@@ -5477,9 +5485,19 @@ func daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID na
 	result := taskGraphReadinessResult{
 		RootIssueID: rootID.String(),
 		Runnable:    make([]string, 0, len(leaves)),
-		NestedRoots: daemonTaskGraphNestedRootSummaries(rootID, byID, children),
+		NestedRoots: daemonTaskGraphNestedRootSummaries(rootID, byID, children, actorID, now),
 		Active:      make([]string, 0),
 		Blocked:     make(map[string]string),
+	}
+	if rootBacklog {
+		for i := range result.NestedRoots {
+			result.Blocked[result.NestedRoots[i].IssueID] = "lifecycle-backlog"
+			result.NestedRoots[i].Status = "not_counting_capacity"
+			result.NestedRoots[i].Classification = string(domain.OrchestrationCandidateBacklog)
+			result.NestedRoots[i].ExclusionReasons = uniqueNonEmpty(append(result.NestedRoots[i].ExclusionReasons, "lifecycle-backlog"))
+			result.NestedRoots[i].FallbackPolicy = "preserve_issue_lifecycle"
+			result.NestedRoots[i].Advice = fmt.Sprintf("nested root %s is contained by backlog root %s", result.NestedRoots[i].IssueID, rootID.String())
+		}
 	}
 	result.StaleCloseableChildren = daemonTaskGraphStaleCloseableCandidatesWithEvidence(rootID, byID, children, completionEvidence)
 	for _, idRaw := range leaves {
@@ -5495,16 +5513,26 @@ func daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID na
 			result.Active = append(result.Active, idRaw)
 			continue
 		}
-		if reason := daemonTaskOwnershipBlockReason(task, actorID, now); reason != "" {
-			result.Blocked[idRaw] = reason
+		if rootBacklog && id != rootID {
+			result.Blocked[idRaw] = "lifecycle-backlog"
 			continue
 		}
 		blockers := daemonTaskGraphUnresolvedBlockers(task, byID)
-		if len(blockers) > 0 {
-			result.Blocked[idRaw] = "waiting on " + strings.Join(blockers, ",")
+		if daemonTaskStaleCloseableCandidate(task, completionEvidence[task.ID.String()]) {
 			continue
 		}
-		if daemonTaskStaleCloseableCandidate(task, completionEvidence[task.ID.String()]) {
+		assessment := domain.AssessOrchestrationCandidate(task, actorID, now, blockers)
+		if !assessment.Eligible {
+			switch assessment.Classification {
+			case domain.OrchestrationCandidateActive:
+				result.Blocked[idRaw] = strings.Join(assessment.ExclusionReasons, ",")
+			case domain.OrchestrationCandidateBlocked:
+				result.Blocked[idRaw] = "waiting on " + strings.Join(blockers, ",")
+			case domain.OrchestrationCandidateOwnedElsewhere:
+				result.Blocked[idRaw] = daemonTaskOwnershipBlockReason(task, actorID, now)
+			default:
+				result.Blocked[idRaw] = strings.Join(assessment.ExclusionReasons, ",")
+			}
 			continue
 		}
 		result.Runnable = append(result.Runnable, idRaw)
@@ -5891,6 +5919,14 @@ func (d *Daemon) daemonTaskGraphNestedRoots(
 			item.FallbackPolicy = "watch_nested_root"
 			item.Advice = fmt.Sprintf("watch nested root orchestrator: az orchestrate status --root %s --json", item.IssueID)
 		}
+		if item.ActiveSession == nil && len(item.ExclusionReasons) > 0 {
+			item.Status = "not_counting_capacity"
+			item.StartFailure = nil
+			item.FallbackPolicy = "preserve_issue_lifecycle"
+			item.Advice = fmt.Sprintf("nested root %s is excluded from orchestration start candidates: %s", item.IssueID, strings.Join(item.ExclusionReasons, ","))
+			out = append(out, item)
+			continue
+		}
 		if item.ActiveSession == nil {
 			if failure, failed := failedStartsByIssue[item.IssueID]; failed {
 				copyFailure := failure
@@ -6056,6 +6092,7 @@ func cloneTaskGraphNestedRoots(in []taskGraphNestedRoot) []taskGraphNestedRoot {
 	out := make([]taskGraphNestedRoot, len(in))
 	for i := range in {
 		out[i] = in[i]
+		out[i].ExclusionReasons = append([]string(nil), in[i].ExclusionReasons...)
 		if in[i].ActiveSession != nil {
 			active := *in[i].ActiveSession
 			if active.StartProgress != nil {
@@ -6780,7 +6817,7 @@ func daemonTaskGraphDirectWorkerLeafIDs(root naming.IssueID, byID map[naming.Iss
 	return out
 }
 
-func daemonTaskGraphNestedRootSummaries(root naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) []taskGraphNestedRoot {
+func daemonTaskGraphNestedRootSummaries(root naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID, actorID string, now time.Time) []taskGraphNestedRoot {
 	if len(children[root]) == 0 {
 		return nil
 	}
@@ -6802,13 +6839,25 @@ func daemonTaskGraphNestedRootSummaries(root naming.IssueID, byID map[naming.Iss
 				return
 			}
 			seenRoots[id] = struct{}{}
+			assessment := domain.AssessOrchestrationCandidate(task, actorID, now, nil)
+			status := "startable"
+			fallbackPolicy := "start_nested_root"
+			advice := fmt.Sprintf("start nested root orchestrator: az orchestrator-session start --root %s", id.String())
+			if !assessment.Eligible {
+				status = "not_counting_capacity"
+				fallbackPolicy = "preserve_issue_lifecycle"
+				advice = fmt.Sprintf("nested root %s is excluded from orchestration start candidates: %s", id.String(), strings.Join(assessment.ExclusionReasons, ","))
+			}
 			out = append(out, taskGraphNestedRoot{
-				IssueID:     id.String(),
-				Status:      "startable",
-				IssueStatus: string(task.Status),
-				Type:        string(task.Type),
-				ChildCount:  len(daemonTaskGraphDescendants(id, children)),
-				Advice:      fmt.Sprintf("start nested root orchestrator: az orchestrator-session start --root %s", id.String()),
+				IssueID:          id.String(),
+				Status:           status,
+				IssueStatus:      string(task.Status),
+				Classification:   string(assessment.Classification),
+				ExclusionReasons: append([]string(nil), assessment.ExclusionReasons...),
+				Type:             string(task.Type),
+				ChildCount:       len(daemonTaskGraphDescendants(id, children)),
+				FallbackPolicy:   fallbackPolicy,
+				Advice:           advice,
 			})
 			return
 		}
