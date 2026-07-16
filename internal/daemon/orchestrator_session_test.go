@@ -631,15 +631,15 @@ func TestRealProcessProfileRootedMarkerSurvivesPaneChildReplacement(t *testing.T
 		t.Fatal(err)
 	}
 	panePID = strings.TrimSpace(panePID)
-	paneChildren := func() []string {
-		output, err := exec.Command("ps", "-A", "-o", "pid=", "-o", "ppid=").CombinedOutput()
+	paneSleepChildren := func() []string {
+		output, err := exec.Command("ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "comm=").CombinedOutput()
 		if err != nil {
 			return nil
 		}
 		fields := strings.Fields(string(output))
 		children := make([]string, 0, 1)
-		for index := 0; index+1 < len(fields); index += 2 {
-			if fields[index+1] == panePID {
+		for index := 0; index+2 < len(fields); index += 3 {
+			if fields[index+1] == panePID && filepath.Base(fields[index+2]) == "sleep" {
 				children = append(children, fields[index])
 			}
 		}
@@ -648,7 +648,7 @@ func TestRealProcessProfileRootedMarkerSurvivesPaneChildReplacement(t *testing.T
 	childPID := func(exclude string) string {
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
-			for _, pid := range paneChildren() {
+			for _, pid := range paneSleepChildren() {
 				if pid != exclude {
 					return pid
 				}
@@ -669,12 +669,12 @@ func TestRealProcessProfileRootedMarkerSurvivesPaneChildReplacement(t *testing.T
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if !slices.Contains(paneChildren(), firstChild) {
+		if !slices.Contains(paneSleepChildren(), firstChild) {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if slices.Contains(paneChildren(), firstChild) {
+	if slices.Contains(paneSleepChildren(), firstChild) {
 		t.Fatalf("first pane child %s did not stop", firstChild)
 	}
 	if output, err := runner.run(context.Background(), "send-keys", "-t", "rooted-replacement", "sleep 30", "Enter"); err != nil {
