@@ -30,6 +30,7 @@ const (
 	managedAgentIdentityTable       = "daemon_managed_agent_incarnations"
 	worktreeStateTable              = "daemon_worktree_projections"
 	orchestratorLeaseTable          = "daemon_orchestrator_scope_leases"
+	rootedBootstrapAckTable         = "daemon_rooted_bootstrap_acknowledgements"
 	advisorSessionTable             = "daemon_advisor_sessions"
 	orchestratorLoopTable           = "daemon_orchestrator_loop_checkpoints"
 	runtimeSQLiteBusyPrimaryCode    = 5
@@ -323,12 +324,12 @@ func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context,
 	return changed, applied, err
 }
 
-// ApplyWorkerSessionCompensation atomically aligns worker desired intent and
+// ApplySessionCompensation atomically aligns one typed desired intent and its
 // physical runtime observation after a failed start cleanup attempt.
-func (s *RuntimeStateStore) ApplyWorkerSessionCompensation(ctx context.Context, projectID, sessionID, issueID string, desiredState, observedState SessionState, activity, activitySource string, updatedAt time.Time) ([]Session, SessionState, error) {
+func (s *RuntimeStateStore) ApplySessionCompensation(ctx context.Context, projectID string, intent Session, desiredState, observedState SessionState, activity, activitySource string, updatedAt time.Time) ([]Session, SessionState, error) {
 	var changed []Session
 	effectiveState := NormalizeSessionState(desiredState)
-	err := s.withRetryingWriteLock(ctx, "apply_worker_session_compensation", func(writeCtx context.Context) error {
+	err := s.withRetryingWriteLock(ctx, "apply_session_compensation", func(writeCtx context.Context) error {
 		changed = nil
 		effectiveState = NormalizeSessionState(desiredState)
 		db, err := s.dbHandle()
@@ -336,7 +337,7 @@ func (s *RuntimeStateStore) ApplyWorkerSessionCompensation(ctx context.Context, 
 			return err
 		}
 		observation, err := normalizePhysicalSessionObservation(PhysicalSessionObservation{
-			ProjectID: projectID, SessionID: sessionID, ObservedState: observedState,
+			ProjectID: projectID, SessionID: intent.ID, ObservedState: observedState,
 			Activity: activity, ActivitySource: activitySource, UpdatedAt: updatedAt,
 		})
 		if err != nil {
@@ -379,7 +380,8 @@ func (s *RuntimeStateStore) ApplyWorkerSessionCompensation(ctx context.Context, 
 			}
 			effectiveState = observation.ObservedState
 		}
-		logicalID := logicalSessionIntentID(Session{Role: SessionRoleWorker, ScopeKind: SessionScopeIssue, ScopeID: strings.TrimSpace(issueID)})
+		intent = NormalizeSessionMetadata(intent)
+		logicalID := logicalSessionIntentID(intent)
 		result, err = tx.ExecContext(writeCtx, `UPDATE `+sessionStateTable+` SET state=?,updated_at=? WHERE project_id=? AND logical_id=?`,
 			effectiveState, observation.UpdatedAt.Format(time.RFC3339Nano), observation.ProjectID, logicalID)
 		if err != nil {
@@ -2550,6 +2552,17 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB, runtimeLivenessPr
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daemon_orchestrator_scope_leases_project_updated
 			ON ` + orchestratorLeaseTable + ` (project_id, updated_at DESC, scope_kind, root_issue_id)`,
+		`CREATE TABLE IF NOT EXISTS ` + rootedBootstrapAckTable + ` (
+			project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
+			root_issue_id TEXT NOT NULL CHECK (trim(root_issue_id) <> ''),
+			session_id TEXT NOT NULL CHECK (trim(session_id) <> ''),
+			prompt_hash TEXT NOT NULL CHECK (trim(prompt_hash) <> ''),
+			runtime_nonce TEXT NOT NULL CHECK (trim(runtime_nonce) <> ''),
+			acknowledged_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (project_id, root_issue_id),
+			UNIQUE (project_id, session_id)
+		)`,
 		`CREATE TABLE IF NOT EXISTS ` + advisorSessionTable + ` (
 			project_id TEXT NOT NULL,
 			request_id TEXT NOT NULL,

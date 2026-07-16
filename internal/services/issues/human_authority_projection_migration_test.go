@@ -69,6 +69,12 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, decisionIdempotencyMigrationID).Scan(&checksum); err != nil || checksum != "86d5400fe33bbc19e7e848bc232335809f76d85e4d45a6e45f6bc7ff77547f47" {
 				t.Fatalf("decision idempotency checksum=%q err=%v", checksum, err)
 			}
+			if !rootedBootstrapTableExists(t, db) {
+				t.Fatal("rooted bootstrap acknowledgement table missing after clone migration")
+			}
+			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, rootedBootstrapAcknowledgementMigrationID).Scan(&checksum); err != nil || checksum != "b54bdf5ec3f6af17c91e1625582ac58e66e47948cea68ee73db88d4e8df6f161" {
+				t.Fatalf("rooted bootstrap acknowledgement checksum=%q err=%v", checksum, err)
+			}
 			projectIDs := []string{"default"}
 			if rows, queryErr := db.Query(`SELECT DISTINCT project_id FROM board_views`); queryErr == nil {
 				projectIDs = projectIDs[:0]
@@ -112,11 +118,17 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 				t.Fatal(err)
 			}
 			reopened := NewClientAtPath(path, slog.Default())
-			if _, err = reopened.ExportProjection(ctx, projectIDs[0]); err != nil {
-				t.Fatal(err)
-			}
 			reopenedDB, err := reopened.dbHandle()
 			if err != nil {
+				t.Fatal(err)
+			}
+			if !rootedBootstrapTableExists(t, reopenedDB) {
+				t.Fatal("rooted bootstrap acknowledgement table missing after clone reopen")
+			}
+			if err = reopenedDB.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, rootedBootstrapAcknowledgementMigrationID).Scan(&checksum); err != nil || checksum != "b54bdf5ec3f6af17c91e1625582ac58e66e47948cea68ee73db88d4e8df6f161" {
+				t.Fatalf("reopened rooted bootstrap acknowledgement checksum=%q err=%v", checksum, err)
+			}
+			if _, err = reopened.ExportProjection(ctx, projectIDs[0]); err != nil {
 				t.Fatal(err)
 			}
 			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, projectionDeltaAuthorityMigrationID, projectionDeltaAuthorityChecksum).Scan(&ledgerRows); err != nil || ledgerRows != 1 {
