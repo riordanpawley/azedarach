@@ -315,7 +315,7 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 	}
 
 	deliveries := make(chan nativeCodexDelivery)
-	go nativeCodexAuthorityLoop(childCtx, os.Getenv("AZEDARACH_AGENT_INPUT_SOCKET"), nativeCodexRegistration{
+	authorityDone := nativeCodexAuthorityLoop(childCtx, os.Getenv("AZEDARACH_AGENT_INPUT_SOCKET"), nativeCodexRegistration{
 		ProtocolVersion: 1, ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: pane,
 		PanePID: panePID, AgentIncarnation: incarnation, Tool: "codex",
 	}, deliveries)
@@ -328,7 +328,18 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 		defer term.Restore(int(os.Stdin.Fd()), terminalState) //nolint:errcheck
 	}
 	input := make(chan byte, 256)
-	go readNativeCodexInputContext(childCtx, os.Stdin, input)
+	stdinDone := readNativeCodexInputContext(childCtx, os.Stdin, input)
+	defer func() {
+		cancel()
+		select {
+		case <-authorityDone:
+		case <-time.After(time.Second):
+		}
+		select {
+		case <-stdinDone:
+		case <-time.After(time.Second):
+		}
+	}()
 	composer := make([]byte, 0, 256)
 	active := false
 	pendingRequests := make([]nativeCodexHumanRequest, 0, 4)
@@ -665,46 +676,51 @@ func nativeCodexStartTurn(ctx context.Context, rpc *codexRPCClient, threadID, cw
 	return rpc.call(ctx, "turn/start", params, &result)
 }
 
-func nativeCodexAuthorityLoop(ctx context.Context, socket string, registration nativeCodexRegistration, deliveries chan<- nativeCodexDelivery) {
-	for ctx.Err() == nil {
-		conn, err := (&net.Dialer{}).DialContext(ctx, "unix", strings.TrimSpace(socket))
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(250 * time.Millisecond):
-			}
-			continue
-		}
-		if json.NewEncoder(conn).Encode(registration) != nil {
-			_ = conn.Close()
-			continue
-		}
-		reader := bufio.NewReader(conn)
-	connection:
+func nativeCodexAuthorityLoop(ctx context.Context, socket string, registration nativeCodexRegistration, deliveries chan<- nativeCodexDelivery) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
 		for ctx.Err() == nil {
-			var envelope nativeCodexEnvelope
-			line, readErr := reader.ReadBytes('\n')
-			if readErr != nil || json.Unmarshal(line, &envelope) != nil {
-				break
+			conn, err := (&net.Dialer{}).DialContext(ctx, "unix", strings.TrimSpace(socket))
+			if err != nil {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(250 * time.Millisecond):
+				}
+				continue
 			}
-			reply := make(chan nativeCodexResponse, 1)
-			select {
-			case deliveries <- nativeCodexDelivery{envelope: envelope, reply: reply}:
-			case <-ctx.Done():
-				break connection
+			if json.NewEncoder(conn).Encode(registration) != nil {
+				_ = conn.Close()
+				continue
 			}
-			select {
-			case response := <-reply:
-				if json.NewEncoder(conn).Encode(response) != nil {
+			reader := bufio.NewReader(conn)
+		connection:
+			for ctx.Err() == nil {
+				var envelope nativeCodexEnvelope
+				line, readErr := reader.ReadBytes('\n')
+				if readErr != nil || json.Unmarshal(line, &envelope) != nil {
+					break
+				}
+				reply := make(chan nativeCodexResponse, 1)
+				select {
+				case deliveries <- nativeCodexDelivery{envelope: envelope, reply: reply}:
+				case <-ctx.Done():
 					break connection
 				}
-			case <-ctx.Done():
-				break connection
+				select {
+				case response := <-reply:
+					if json.NewEncoder(conn).Encode(response) != nil {
+						break connection
+					}
+				case <-ctx.Done():
+					break connection
+				}
 			}
+			_ = conn.Close()
 		}
-		_ = conn.Close()
-	}
+	}()
+	return done
 }
 
 func readNativeCodexInput(input *os.File, output chan<- byte) {
@@ -717,21 +733,41 @@ func readNativeCodexInput(input *os.File, output chan<- byte) {
 	}
 }
 
-func readNativeCodexInputContext(ctx context.Context, input *os.File, output chan<- byte) {
-	fd, err := syscall.Dup(int(input.Fd()))
-	if err != nil {
-		return
-	}
-	owned := os.NewFile(uintptr(fd), "azedarach-native-stdin")
+func readNativeCodexInputContext(ctx context.Context, input *os.File, output chan<- byte) <-chan struct{} {
 	done := make(chan struct{})
-	go func() { readNativeCodexInput(owned, output); close(done) }()
-	select {
-	case <-ctx.Done():
-		_ = owned.Close()
-		<-done
-	case <-done:
-		_ = owned.Close()
-	}
+	go func() {
+		defer close(done)
+		fd, err := syscall.Dup(int(input.Fd()))
+		if err != nil {
+			return
+		}
+		owned := os.NewFile(uintptr(fd), "azedarach-native-stdin")
+		_ = syscall.SetNonblock(fd, true)
+		defer owned.Close()
+		buffer := make([]byte, 1)
+		for {
+			n, err := owned.Read(buffer)
+			if n > 0 {
+				select {
+				case output <- buffer[0]:
+				case <-ctx.Done():
+					return
+				}
+			}
+			if err != nil {
+				if errors.Is(err, syscall.EAGAIN) {
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(5 * time.Millisecond):
+					}
+					continue
+				}
+				return
+			}
+		}
+	}()
+	return done
 }
 
 func randomNativeCodexToken() (string, error) {
