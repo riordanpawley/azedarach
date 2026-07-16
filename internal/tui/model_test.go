@@ -2138,6 +2138,80 @@ func TestTaskWorkspacePreservesDetailsAcrossSummaryRefresh(t *testing.T) {
 	}
 }
 
+func TestTaskWorkspacePreservesFullGraphContextAcrossSummaryRefresh(t *testing.T) {
+	m := newTestModel()
+	currentID := naming.IssueID("az-current")
+	relatedID := naming.IssueID("az-related")
+	current := domain.Task{
+		ID:          currentID,
+		Title:       "Current task",
+		Description: "Full description stays visible",
+		Status:      domain.StatusInProgress,
+		Priority:    domain.P2,
+		Type:        domain.TypeTask,
+		Dependencies: []domain.Dependency{
+			{ID: relatedID, Type: domain.DependencyRelatedTo},
+		},
+	}
+	related := domain.Task{
+		ID:       relatedID,
+		Title:    "Related off-board task",
+		Status:   domain.StatusOpen,
+		Priority: domain.P3,
+		Type:     domain.TypeTask,
+	}
+	m.tasks = []domain.Task{current}
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(current, m.tasks, nil, 120, 30))
+
+	fullResult, _ := m.Update(refreshTaskWorkspaceResultMsg{
+		projectID: m.daemonProjectID(),
+		revision:  1,
+		taskID:    currentID.String(),
+		hasTask:   true,
+		task:      current,
+		tasks:     []domain.Task{current, related},
+	})
+	withFullContext := fullResult.(Model)
+
+	summary := current
+	summary.Title = "Current task after summary refresh"
+	summary.Description = ""
+	result, _ := withFullContext.Update(issuesLoadedMsg{
+		refreshSeq: 2,
+		projectID:  m.daemonProjectID(),
+		tasks:      []domain.Task{summary},
+		revision:   2,
+	})
+	updated := result.(Model)
+
+	workspace, ok := updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("current overlay = %T, want TaskWorkspaceOverlay", updated.overlayStack.Current())
+	}
+	view := workspace.View()
+	if !strings.Contains(view, "Current task after summary refresh") || !strings.Contains(view, "Full description stays visible") {
+		t.Fatalf("workspace lost refreshed summary or full details:\n%s", view)
+	}
+	if !strings.Contains(view, "Related off-board task") {
+		t.Fatalf("workspace lost full graph context after summary refresh:\n%s", view)
+	}
+
+	authoritativeResult, _ := updated.Update(refreshTaskWorkspaceResultMsg{
+		projectID: m.daemonProjectID(),
+		revision:  3,
+		taskID:    currentID.String(),
+		hasTask:   true,
+		task:      summary,
+		tasks:     []domain.Task{summary},
+	})
+	authoritative := authoritativeResult.(Model)
+	workspace = authoritative.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	view = workspace.View()
+	if strings.Contains(view, "Related off-board task") || strings.Contains(view, "Full description stays visible") {
+		t.Fatalf("workspace retained stale full context after authoritative refresh:\n%s", view)
+	}
+}
+
 func TestTaskWorkspaceFullRefreshAllowsClearedDetails(t *testing.T) {
 	m := newTestModel()
 	task := domain.Task{

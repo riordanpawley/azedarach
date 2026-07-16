@@ -6,6 +6,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/types"
 	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 )
@@ -411,6 +412,7 @@ func (w *TaskWorkspaceOverlay) SyncFullTask(task domain.Task, relatedTasks []dom
 func (w *TaskWorkspaceOverlay) syncTask(task domain.Task, relatedTasks []domain.Task, mutation *TaskMutationProgress, preserveExistingDetails bool) {
 	if preserveExistingDetails {
 		task = mergeWorkspaceTaskDetails(w.detail.task, task)
+		relatedTasks = mergeWorkspaceRelatedTasks(w.detail.relatedTasks, relatedTasks)
 	}
 	w.detail.task = task
 	w.detail.relatedTasks = append([]domain.Task(nil), relatedTasks...)
@@ -436,6 +438,34 @@ func (w *TaskWorkspaceOverlay) syncTask(task domain.Task, relatedTasks []domain.
 	}
 	w.actions.ensureCursorVisible()
 	w.normalizeFocus()
+}
+
+func mergeWorkspaceRelatedTasks(existing, refreshed []domain.Task) []domain.Task {
+	if len(existing) == 0 {
+		return append([]domain.Task(nil), refreshed...)
+	}
+
+	existingByID := make(map[naming.IssueID]domain.Task, len(existing))
+	for _, task := range existing {
+		existingByID[task.ID] = task
+	}
+
+	merged := make([]domain.Task, 0, len(existing)+len(refreshed))
+	seen := make(map[naming.IssueID]struct{}, len(existing)+len(refreshed))
+	for _, task := range refreshed {
+		if previous, ok := existingByID[task.ID]; ok {
+			task = mergeWorkspaceTaskDetails(previous, task)
+		}
+		merged = append(merged, task)
+		seen[task.ID] = struct{}{}
+	}
+	for _, task := range existing {
+		if _, ok := seen[task.ID]; ok {
+			continue
+		}
+		merged = append(merged, task)
+	}
+	return merged
 }
 
 func mergeWorkspaceTaskDetails(existing, refreshed domain.Task) domain.Task {
