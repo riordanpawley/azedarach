@@ -42,7 +42,6 @@ type operationRuntimeConfig struct {
 	sessionResolveConflict  func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	taskBulkCleanup         func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	globalProjectionRebuild func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
-	onMutationSuccess       func(string)
 	onTerminal              func(context.Context, daemonops.Record)
 	recoverInterrupted      func(context.Context, daemonops.Record) (interruptedOperationRecovery, bool)
 	gitHandler              *daemonhandlers.GitHandler
@@ -61,7 +60,6 @@ type operationRuntime struct {
 	sessionResolveConflict  func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	taskBulkCleanup         func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	globalProjectionRebuild func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
-	onMutationSuccess       func(string)
 	gitHandler              *daemonhandlers.GitHandler
 	worktreeHandler         *daemonhandlers.WorktreeHandler
 	pollInterval            time.Duration
@@ -164,7 +162,6 @@ func newOperationRuntime(cfg operationRuntimeConfig) *operationRuntime {
 		sessionResolveConflict:  cfg.sessionResolveConflict,
 		taskBulkCleanup:         cfg.taskBulkCleanup,
 		globalProjectionRebuild: cfg.globalProjectionRebuild,
-		onMutationSuccess:       cfg.onMutationSuccess,
 		gitHandler:              cfg.gitHandler,
 		worktreeHandler:         cfg.worktreeHandler,
 		pollInterval:            defaultOperationPollDelay,
@@ -476,9 +473,6 @@ func (r *operationRuntime) handleOperationSubmit(ctx context.Context, req protoc
 			}
 			runSpanErr = errors.New("operation failed")
 			return nil, runSpanErr
-		}
-		if r.onMutationSuccess != nil && commandMutatesProjectProjection(body.Kind) {
-			r.onMutationSuccess(projectID)
 		}
 		return append([]byte(nil), resp.Body...), nil
 	})

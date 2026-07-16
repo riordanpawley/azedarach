@@ -55,6 +55,14 @@ const (
 type OrchestrationSnapshot = protocol.OrchestrationSnapshot
 type OrchestrationIntentResult = protocol.OrchestrationIntentResult
 
+// TaskBulkCleanupRequest selects and closes multiple issues in one daemon operation.
+type TaskBulkCleanupRequest = protocol.TaskBulkCleanupRequest
+type TaskBulkCleanupItem = protocol.TaskBulkCleanupItem
+type TaskBulkCleanupResult = protocol.TaskBulkCleanupResult
+
+type TaskCloseResult = protocol.TaskCloseResult
+type TaskClosePhaseTiming = protocol.TaskClosePhaseTiming
+
 // TaskCreateParams contains the payload used to create a task through the shared daemon client.
 type TaskCreateParams struct {
 	Title           string               `json:"title"`
@@ -137,11 +145,6 @@ type taskCloseRequest struct {
 	CloseOutcome         string         `json:"closed_outcome,omitempty"`
 }
 
-// TaskBulkCleanupRequest selects and closes multiple issues in one daemon operation.
-type TaskBulkCleanupRequest = protocol.TaskBulkCleanupRequest
-type TaskBulkCleanupItem = protocol.TaskBulkCleanupItem
-type TaskBulkCleanupResult = protocol.TaskBulkCleanupResult
-
 type taskDeleteRequest struct {
 	TaskID         naming.IssueID `json:"task_id"`
 	Cleanup        bool           `json:"cleanup,omitempty"`
@@ -149,9 +152,6 @@ type taskDeleteRequest struct {
 	RemoveWorktree bool           `json:"remove_worktree,omitempty"`
 	ForceWorktree  bool           `json:"force_worktree,omitempty"`
 }
-
-type TaskCloseResult = protocol.TaskCloseResult
-type TaskClosePhaseTiming = protocol.TaskClosePhaseTiming
 
 type TaskDeleteResult struct {
 	TaskID          string `json:"task_id"`
@@ -164,18 +164,20 @@ type TaskDeleteResult struct {
 
 // TaskGraphReadiness describes daemon-owned runnable-leaf policy for a root issue graph.
 type TaskGraphReadiness struct {
-	RootIssueID            string                        `json:"root_issue_id"`
-	Capacity               TaskCapacitySummary           `json:"capacity"`
-	Runnable               []string                      `json:"runnable"`
-	NestedRoots            []TaskNestedRoot              `json:"nested_roots,omitempty"`
-	Pending                []TaskPendingStart            `json:"pending,omitempty"`
-	Active                 []string                      `json:"active,omitempty"`
-	ActiveSessions         []TaskActiveSession           `json:"active_sessions,omitempty"`
-	SessionStartProgress   []TaskSessionStartProgress    `json:"session_start_progress,omitempty"`
-	StaleCloseableChildren []TaskStaleCloseableCandidate `json:"stale_closeable_children,omitempty"`
-	ContainmentRisks       []TaskContainmentRisk         `json:"containment_risks,omitempty"`
-	WorkerObservations     []domain.WorkerObservation    `json:"worker_observations,omitempty"`
-	Blocked                map[string]string             `json:"blocked"`
+	Revision               uint64                                `json:"revision,omitempty"`
+	Source                 protocol.MaterializedSnapshotMetadata `json:"source,omitempty"`
+	RootIssueID            string                                `json:"root_issue_id"`
+	Capacity               TaskCapacitySummary                   `json:"capacity"`
+	Runnable               []string                              `json:"runnable"`
+	NestedRoots            []TaskNestedRoot                      `json:"nested_roots,omitempty"`
+	Pending                []TaskPendingStart                    `json:"pending,omitempty"`
+	Active                 []string                              `json:"active,omitempty"`
+	ActiveSessions         []TaskActiveSession                   `json:"active_sessions,omitempty"`
+	SessionStartProgress   []TaskSessionStartProgress            `json:"session_start_progress,omitempty"`
+	StaleCloseableChildren []TaskStaleCloseableCandidate         `json:"stale_closeable_children,omitempty"`
+	ContainmentRisks       []TaskContainmentRisk                 `json:"containment_risks,omitempty"`
+	WorkerObservations     []domain.WorkerObservation            `json:"worker_observations,omitempty"`
+	Blocked                map[string]string                     `json:"blocked"`
 }
 
 type TaskCapacitySummary struct {
@@ -192,15 +194,17 @@ type TaskCapacitySummary struct {
 // TaskNestedRoot describes a nested orchestration root that must be started
 // from its own parent session instead of flattened into the current root.
 type TaskNestedRoot struct {
-	IssueID        string             `json:"issue_id"`
-	Status         string             `json:"status"`
-	IssueStatus    string             `json:"issue_status,omitempty"`
-	Type           string             `json:"type"`
-	ChildCount     int                `json:"child_count"`
-	ActiveSession  *TaskActiveSession `json:"active_session,omitempty"`
-	StartFailure   *TaskStartFailure  `json:"start_failure,omitempty"`
-	FallbackPolicy string             `json:"fallback_policy,omitempty"`
-	Advice         string             `json:"advice,omitempty"`
+	IssueID          string             `json:"issue_id"`
+	Status           string             `json:"status"`
+	IssueStatus      string             `json:"issue_status,omitempty"`
+	Classification   string             `json:"classification,omitempty"`
+	ExclusionReasons []string           `json:"exclusion_reasons,omitempty"`
+	Type             string             `json:"type"`
+	ChildCount       int                `json:"child_count"`
+	ActiveSession    *TaskActiveSession `json:"active_session,omitempty"`
+	StartFailure     *TaskStartFailure  `json:"start_failure,omitempty"`
+	FallbackPolicy   string             `json:"fallback_policy,omitempty"`
+	Advice           string             `json:"advice,omitempty"`
 }
 
 type TaskStartFailure struct {
@@ -608,13 +612,14 @@ func (c *Client) GetTaskSnapshotWithArchiveMode(ctx context.Context, taskID stri
 		return TaskSnapshot{}, fmt.Errorf("invalid archive mode: %s", archiveMode)
 	}
 
+	startedAt := time.Now()
 	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
 	defer cancel()
 
 	resp, err := c.commandJSONResponse(waitCtx, CommandTaskGet, TaskIDRequest{TaskID: parsedTaskID, Archived: string(archiveMode)})
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)
+			return TaskSnapshot{}, c.readWait.tracedTimeoutError(ctx, CommandTaskGet, mode, budget, startedAt, err)
 		}
 		return TaskSnapshot{}, err
 	}
@@ -694,13 +699,14 @@ func (c *Client) getManyTaskSnapshot(ctx context.Context, taskIDs []string, mode
 		return TaskSnapshot{}, fmt.Errorf("task_ids is required")
 	}
 
+	startedAt := time.Now()
 	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
 	defer cancel()
 
 	resp, err := c.commandJSONResponse(waitCtx, CommandTaskGetMany, TaskIDsRequest{TaskIDs: parsedTaskIDs, IncludeAncestors: opts.includeAncestors, ExcludeDependents: opts.excludeDependents, DirectDependents: opts.directDependents, MetadataOnly: opts.metadataOnly})
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)
+			return TaskSnapshot{}, c.readWait.tracedTimeoutError(ctx, CommandTaskGetMany, mode, budget, startedAt, err)
 		}
 		return TaskSnapshot{}, err
 	}
@@ -814,6 +820,7 @@ func (c *Client) listTasksSnapshotWithQueryMode(ctx context.Context, query strin
 }
 
 func (c *Client) listTasksSnapshotWithQueryArchiveMode(ctx context.Context, query string, mode ReadWaitMode, includeDependencies bool, archiveMode protocol.ArchiveMode) (TaskSnapshot, error) {
+	startedAt := time.Now()
 	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
 	defer cancel()
 	if !archiveMode.Valid() {
@@ -829,7 +836,7 @@ func (c *Client) listTasksSnapshotWithQueryArchiveMode(ctx context.Context, quer
 	resp, err := c.commandJSONResponse(waitCtx, CommandTaskList, body)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)
+			return TaskSnapshot{}, c.readWait.tracedTimeoutError(ctx, CommandTaskList, mode, budget, startedAt, err)
 		}
 		return TaskSnapshot{}, err
 	}
@@ -878,6 +885,7 @@ func (c *Client) BoardSnapshotWithMode(ctx context.Context, mode ReadWaitMode) (
 
 // BoardSnapshotForViewWithMode fetches a board snapshot grouped by the requested view.
 func (c *Client) BoardSnapshotForViewWithMode(ctx context.Context, viewID string, mode ReadWaitMode) (TaskSnapshot, error) {
+	startedAt := time.Now()
 	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
 	defer cancel()
 
@@ -888,7 +896,7 @@ func (c *Client) BoardSnapshotForViewWithMode(ctx context.Context, viewID string
 	resp, err := c.commandJSONResponse(waitCtx, CommandBoardFetch, body)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			return TaskSnapshot{}, c.readWait.timeoutError(mode, budget, err)
+			return TaskSnapshot{}, c.readWait.tracedTimeoutError(ctx, CommandBoardFetch, mode, budget, startedAt, err)
 		}
 		return TaskSnapshot{}, err
 	}

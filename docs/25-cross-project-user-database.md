@@ -28,14 +28,21 @@ SQLite performs candidate filtering compiled from typed view definitions. The
 shared domain evaluator verifies placement and ordering, keeping indexed storage
 behavior aligned with domain policy.
 
-## Refresh and failure behavior
+## Projection delivery and failure behavior
 
-Startup and explicit rebuild reconcile the registry. Successful project
-mutations enqueue a coalesced refresh. Runtime reconcile repairs and reports
-projection health. Each refresh reads the project snapshot before atomically
-replacing that project's user-database rows and checkpoint.
+Startup reconciles the registry, bootstraps only uninitialized project vector
+components, and resumes each initialized project from its durable transitional
+delivery cursor. Verified issue deltas update bounded keyed rows and advance that
+project's cursor, source vector, semantic hash, and projector identity in one
+user-database transaction. Independently sourced runtime, ownership,
+interaction, and worktree materializations update bounded keyed rows without
+advancing or being ordered by the issue delivery cursor.
 
-Failed refreshes retain the last good rows and expose the project as unavailable.
+Routine mutations never schedule dirty-project full replacement. Full export is
+reserved for first bootstrap, explicit operator rebuild, and isolated
+gap/incompatibility recovery; those paths verify a stable delta head before
+publishing. Failed delivery retains the last good rows and vector component and
+exposes the project as stale or unavailable.
 Removed registrations retain diagnostic catalog health but are excluded from
 view items. Routine global views and the tmux selector query only the user
 database; project-by-project fan-out and `ATTACH DATABASE` are not active paths.

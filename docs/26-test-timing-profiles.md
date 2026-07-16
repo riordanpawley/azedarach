@@ -24,6 +24,15 @@ Integration readiness accepts aggregate proof only when the daemon request,
 machine evidence, worker packet, and clean candidate `HEAD` all name the same
 source revision.
 
+Admission uses a bounded shared bypass instead of strict FIFO or an unbounded
+focused-work lane. If shared validators are already active when the oldest
+aggregate queues, exactly one later shared request may join that generation.
+Further shared requests drain behind the aggregate. The daemon counts durable
+started requests after the aggregate's queue sequence, so concurrent clients
+and daemon replacement cannot reset the allowance. Thus an aggregate can be
+overtaken by at most one focused command, while safe commands remain eligible
+and aggregate execution remains exclusive from shared work.
+
 The runner establishes the mandatory database-isolation boundary before any
 test binary starts. It snapshots the configured root-user database, the current
 project database, and every registered project database into a pre-open refusal

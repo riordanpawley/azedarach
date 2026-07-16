@@ -50,11 +50,35 @@ type SessionProjection struct {
 	UpdatedAt time.Time             `json:"updated_at" msgpack:"updated_at"`
 }
 
+// ManagedAgentIdentity is the wire representation of the exact managed pane
+// and process incarnation. LogicalPaneID remains stable across restarts;
+// TmuxPaneID, PanePID, and AgentIncarnation fence stale observations.
+type ManagedAgentIdentity struct {
+	LogicalPaneID    string `json:"logical_pane_id" msgpack:"logical_pane_id"`
+	TmuxPaneID       string `json:"tmux_pane_id" msgpack:"tmux_pane_id"`
+	PanePID          int    `json:"pane_pid" msgpack:"pane_pid"`
+	AgentIncarnation string `json:"agent_incarnation" msgpack:"agent_incarnation"`
+}
+
 type SessionProjectionEventBody struct {
-	ProjectID naming.ProjectID            `json:"project_id" msgpack:"project_id"`
-	Revision  uint64                      `json:"revision" msgpack:"revision"`
-	Session   SessionProjection           `json:"session" msgpack:"session"`
-	Runtime   *RuntimeProjectionEventBody `json:"runtime,omitempty" msgpack:"runtime,omitempty"`
+	ProjectID   naming.ProjectID               `json:"project_id" msgpack:"project_id"`
+	Revision    uint64                         `json:"revision" msgpack:"revision"`
+	Session     SessionProjection              `json:"session" msgpack:"session"`
+	Runtime     *RuntimeProjectionEventBody    `json:"runtime,omitempty" msgpack:"runtime,omitempty"`
+	Observation *ExternalObservationProvenance `json:"observation,omitempty" msgpack:"observation,omitempty"`
+}
+
+// ExternalObservationProvenance marks a projection event as a disposable
+// current-state product of an external authority. These fields must remain
+// false unless a future event-authority command explicitly admits material
+// semantic evidence.
+type ExternalObservationProvenance struct {
+	Authority                string    `json:"authority" msgpack:"authority"`
+	Product                  string    `json:"product" msgpack:"product"`
+	Disposition              string    `json:"disposition" msgpack:"disposition"`
+	ObservedAt               time.Time `json:"observed_at" msgpack:"observed_at"`
+	CanonicalEventAdmitted   bool      `json:"canonical_event_admitted" msgpack:"canonical_event_admitted"`
+	SemanticSequenceAdvanced bool      `json:"semantic_sequence_advanced" msgpack:"semantic_sequence_advanced"`
 }
 
 type SessionResolveConflictRequestBody struct {

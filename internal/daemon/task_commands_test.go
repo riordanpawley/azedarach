@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1232,7 +1233,7 @@ func TestHandleTaskUnarchiveRejectsArchivedParentWithoutFlag(t *testing.T) {
 	}
 }
 
-func TestHandleTaskListRefreshesMissingTmuxSessionBeforeReportingActive(t *testing.T) {
+func TestHandleTaskListConsumesAsynchronousMissingTmuxObservation(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	repoDir := t.TempDir()
@@ -1283,6 +1284,9 @@ func TestHandleTaskListRefreshesMissingTmuxSessionBeforeReportingActive(t *testi
 		revision: map[string]uint64{projectID: 1},
 	}
 	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
+	if err := d.observeTmuxProject(ctx, projectID, newTmuxRuntimeLiveness(nil, nil), domain.CurrentTmuxObservationProvenance(time.Now().UTC().Add(time.Second))); err != nil {
+		t.Fatalf("observe missing tmux session: %v", err)
+	}
 
 	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
@@ -1391,8 +1395,8 @@ func TestHandleTaskListThrottlesSessionRuntimeRefresh(t *testing.T) {
 	} else if !resp.OK {
 		t.Fatalf("first task.list response = %+v", resp.Error)
 	}
-	if got := tmuxRunner.listSessionCallCount(); got != 1 {
-		t.Fatalf("tmux list-sessions calls after first task.list = %d, want 1", got)
+	if got := tmuxRunner.listSessionCallCount(); got != 0 {
+		t.Fatalf("tmux list-sessions calls after first task.list = %d, want 0", got)
 	}
 
 	now = now.Add(time.Second)
@@ -1402,8 +1406,8 @@ func TestHandleTaskListThrottlesSessionRuntimeRefresh(t *testing.T) {
 	} else if !resp.OK {
 		t.Fatalf("second task.list response = %+v", resp.Error)
 	}
-	if got := tmuxRunner.listSessionCallCount(); got != 1 {
-		t.Fatalf("tmux list-sessions calls after throttled task.list = %d, want 1", got)
+	if got := tmuxRunner.listSessionCallCount(); got != 0 {
+		t.Fatalf("tmux list-sessions calls after second task.list = %d, want 0", got)
 	}
 
 	now = now.Add(taskListRuntimeRefreshTTL + time.Millisecond)
@@ -1413,101 +1417,17 @@ func TestHandleTaskListThrottlesSessionRuntimeRefresh(t *testing.T) {
 	} else if !resp.OK {
 		t.Fatalf("third task.list response = %+v", resp.Error)
 	}
-	if got := tmuxRunner.listSessionCallCount(); got != 2 {
-		t.Fatalf("tmux list-sessions calls after throttle expiry = %d, want 2", got)
+	if got := tmuxRunner.listSessionCallCount(); got != 0 {
+		t.Fatalf("tmux list-sessions calls after observation age expiry = %d, want 0", got)
 	}
 }
 
-func TestTaskListSessionRuntimeRefreshSharesInFlightRefresh(t *testing.T) {
-	originalNow := timeNow
+func TestTaskListSessionRuntimeRefreshReadsObserverFreshnessOnly(t *testing.T) {
 	now := time.Date(2026, time.July, 7, 3, 45, 0, 0, time.UTC)
-	timeNow = func() time.Time { return now }
-	t.Cleanup(func() { timeNow = originalNow })
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	const (
-		projectID = "proj-task-list-refresh-shared"
-		issueID   = "az-1"
-	)
-	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
-	t.Cleanup(func() { _ = runtimeStateStore.Close() })
-	if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, daemonstate.Session{
-		ID:            naming.CanonicalSessionID(projectID, issueID),
-		IssueID:       issueID,
-		State:         daemonstate.SessionStateAttached,
-		ObservedState: daemonstate.SessionStateAttached,
-		UpdatedAt:     now,
-	}); err != nil {
-		t.Fatalf("seed projected session: %v", err)
-	}
-
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	tmuxRunner := &testTmuxRunner{
-		sessions:            map[string]bool{},
-		listSessionsEntered: entered,
-		listSessionsRelease: release,
-		killEntered:         make(chan struct{}),
-		killRelease:         make(chan struct{}),
-	}
-	d := &Daemon{
-		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
-		sessionStore: daemonstate.NewStore(),
-		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
-		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
-			".": runtimeStateStore,
-		},
-		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
-			projectID: runtimeStateStore,
-		},
-	}
-	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
-
-	type result struct {
-		runtimeAt time.Time
-		refreshed bool
-		err       error
-	}
-	firstCh := make(chan result, 1)
-	go func() {
-		runtimeAt, refreshed, err := d.refreshTaskListSessionRuntimeState(ctx, projectID)
-		firstCh <- result{runtimeAt: runtimeAt, refreshed: refreshed, err: err}
-	}()
-
-	select {
-	case <-entered:
-	case <-ctx.Done():
-		t.Fatalf("timed out waiting for first refresh to enter tmux: %v", ctx.Err())
-	}
-
-	secondCh := make(chan result, 1)
-	go func() {
-		runtimeAt, refreshed, err := d.refreshTaskListSessionRuntimeState(ctx, projectID)
-		secondCh <- result{runtimeAt: runtimeAt, refreshed: refreshed, err: err}
-	}()
-	close(release)
-
-	first := <-firstCh
-	if first.err != nil {
-		t.Fatalf("first refresh error: %v", first.err)
-	}
-	if !first.refreshed {
-		t.Fatal("first refresh refreshed = false, want true")
-	}
-	second := <-secondCh
-	if second.err != nil {
-		t.Fatalf("second refresh error: %v", second.err)
-	}
-	if second.refreshed {
-		t.Fatal("second refresh refreshed = true, want shared in-flight result")
-	}
-	if !second.runtimeAt.Equal(first.runtimeAt) {
-		t.Fatalf("second runtimeAt = %v, want shared %v", second.runtimeAt, first.runtimeAt)
-	}
-	if got := tmuxRunner.listSessionCallCount(); got != 1 {
-		t.Fatalf("tmux list-sessions calls = %d, want one shared refresh", got)
+	d := &Daemon{taskListRuntimeLastRefresh: map[string]time.Time{"proj": now}}
+	runtimeAt, refreshed, err := d.refreshTaskListSessionRuntimeState(context.Background(), "proj")
+	if err != nil || refreshed || !runtimeAt.Equal(now) {
+		t.Fatalf("runtime freshness = %v refreshed=%v err=%v, want observer time without refresh", runtimeAt, refreshed, err)
 	}
 }
 
@@ -1682,6 +1602,7 @@ func TestHandleTaskListKeepsFreshResponseWhenRuntimeRefreshSkipsUnchangedRows(t 
 		},
 	}
 	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
+	d.taskListRuntimeLastRefresh = map[string]time.Time{projectID: now}
 
 	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
@@ -4103,6 +4024,15 @@ func TestTaskCloseIntegrationContextReservesCleanupBudget(t *testing.T) {
 	}
 }
 
+func TestTaskCloseTimeoutBoundsNonIntegratingCancellation(t *testing.T) {
+	if got := taskCloseTimeout(domain.IssueCloseCancelled); got != domain.LifecycleCleanupTimeout {
+		t.Fatalf("cancel timeout = %v, want %v", got, domain.LifecycleCleanupTimeout)
+	}
+	if got := taskCloseTimeout(domain.IssueCloseCompleted); got != domain.IntegrationCloseTimeout {
+		t.Fatalf("completed timeout = %v, want %v", got, domain.IntegrationCloseTimeout)
+	}
+}
+
 func TestTaskCloseIntegrationContextRejectsExhaustedCleanupReserve(t *testing.T) {
 	parent, parentCancel := context.WithTimeout(context.Background(), domain.IntegrationCloseReserve-time.Second)
 	defer parentCancel()
@@ -4254,6 +4184,10 @@ func TestTaskCloseRepairsVerifiedStaleLegacyProjectSessionProjection(t *testing.
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
+	preservedWrongProjectWorktree := filepath.Join(t.TempDir(), "wrong-project-worktree")
+	if err := os.MkdirAll(preservedWrongProjectWorktree, 0o755); err != nil {
+		t.Fatalf("create preserved wrong-project worktree: %v", err)
+	}
 
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title:    "Close with stale legacy session alias",
@@ -4287,7 +4221,7 @@ func TestTaskCloseRepairsVerifiedStaleLegacyProjectSessionProjection(t *testing.
 		hub:      publish.NewHub(16, 8, logger),
 	}
 
-	body, err := json.Marshal(taskCloseRequest{TaskID: taskID})
+	body, err := json.Marshal(taskCloseRequest{TaskID: taskID, CloseOutcome: string(domain.IssueCloseCancelled)})
 	if err != nil {
 		t.Fatalf("marshal close request: %v", err)
 	}
@@ -4314,6 +4248,30 @@ func TestTaskCloseRepairsVerifiedStaleLegacyProjectSessionProjection(t *testing.
 	}
 	if session.State != daemonstate.SessionStateStopped || session.ObservedState != daemonstate.SessionStateStopped || session.TmuxAttachedCount != 0 {
 		t.Fatalf("legacy session projection = %+v, want stopped repair marker", session)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get cancelled issue: %v", err)
+	}
+	if task.Status != domain.StatusCancelled {
+		t.Fatalf("task status = %s, want %s", task.Status, domain.StatusCancelled)
+	}
+	if _, err := os.Stat(preservedWrongProjectWorktree); err != nil {
+		t.Fatalf("preserved wrong-project worktree: %v", err)
+	}
+	resp, err = d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-stale-legacy-session-retry",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.close",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("retry handleTaskClose error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("retry task.close response = %+v, want idempotent success", resp)
 	}
 }
 
@@ -5128,8 +5086,8 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		commands = append(commands, strings.Join(args, " "))
 		switch {
-		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
-			return worktreeListOutput, nil
+		case integrationTestIsWorktreeList(args):
+			return integrationTestWorktreeList(worktreeListOutput, scratchWorktree, "merged-sha"), nil
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
 			return "", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
@@ -5142,6 +5100,8 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 			return "target-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
 			return "merged-sha", nil
+		case len(args) == 4 && args[0] == "-C" && args[2] == "rev-parse" && args[3] == "--git-dir":
+			return filepath.Join(repoDir, ".git", "worktrees", filepath.Base(scratchWorktree)), nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "merge-base":
 			return "base-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff" && slices.Contains(args, "--name-status"):
@@ -5358,8 +5318,8 @@ func TestTaskCloseCommandIntegrationIgnoresDuplicateIssueTargetWorktreeFromOther
 		commands = append(commands, strings.Join(args, " "))
 		joined := strings.Join(args, " ")
 		switch {
-		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
-			return worktreeListOutput, nil
+		case integrationTestIsWorktreeList(args):
+			return integrationTestWorktreeList(worktreeListOutput, scratchWorktree, "merged-sha"), nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == otherRepo && args[2] == "status":
 			return "A  domain/commerce/tsconfig.json\n", nil
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
@@ -5374,6 +5334,8 @@ func TestTaskCloseCommandIntegrationIgnoresDuplicateIssueTargetWorktreeFromOther
 			return "target-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
 			return "merged-sha", nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--git-dir":
+			return filepath.Join(repoDir, ".git", "worktrees", filepath.Base(scratchWorktree)), nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "merge-base":
 			return "base-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff" && slices.Contains(args, "--name-status"):
@@ -5535,11 +5497,11 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 		commands = append(commands, strings.Join(args, " "))
 		joined := strings.Join(args, " ")
 		switch {
-		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
+		case integrationTestIsWorktreeList(args):
 			if removeAttempts >= 1 {
-				return fmt.Sprintf("worktree %s\nbranch refs/heads/main\n\n", repoDir), nil
+				return integrationTestWorktreeList(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n\n", repoDir), scratchWorktree, "merged-sha"), nil
 			}
-			return fmt.Sprintf("worktree %s\nbranch refs/heads/main\n\nworktree %s\nbranch refs/heads/%s\n\n", repoDir, sourceWorktree, sourceBranch), nil
+			return integrationTestWorktreeList(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n\nworktree %s\nbranch refs/heads/%s\n\n", repoDir, sourceWorktree, sourceBranch), scratchWorktree, "merged-sha"), nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "status" && removeAttempts > 0:
 			return "", fmt.Errorf("cannot change to %s: no such file or directory", sourceWorktree)
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
@@ -5557,6 +5519,8 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 			return "target-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
 			return "merged-sha", nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--git-dir":
+			return filepath.Join(repoDir, ".git", "worktrees", filepath.Base(scratchWorktree)), nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "merge-base":
 			return "base-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff" && slices.Contains(args, "--name-status"):
@@ -6122,8 +6086,8 @@ func TestTaskCloseIntegrationRetriesRepeatedlyWhenTargetHeadMovesAfterScratchVal
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		commands = append(commands, strings.Join(args, " "))
 		switch {
-		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
-			return worktreeListOutput, nil
+		case integrationTestIsWorktreeList(args):
+			return integrationTestWorktreeList(worktreeListOutput, scratchWorktree, scratchDesiredHeads[scratchWorktree]), nil
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
 			return "", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
@@ -6140,6 +6104,8 @@ func TestTaskCloseIntegrationRetriesRepeatedlyWhenTargetHeadMovesAfterScratchVal
 			}
 		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
 			return scratchDesiredHeads[scratchWorktree], nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--git-dir":
+			return filepath.Join(repoDir, ".git", "worktrees", filepath.Base(scratchWorktree)), nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "merge-base":
 			return "base-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff" && slices.Contains(args, "--name-status"):
@@ -6277,8 +6243,8 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		commands = append(commands, strings.Join(args, " "))
 		switch {
-		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
-			return worktreeListOutput, nil
+		case integrationTestIsWorktreeList(args):
+			return integrationTestWorktreeList(worktreeListOutput, scratchWorktree, "merged-sha"), nil
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
 			return "", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == projectRepo && args[2] == "rev-parse" && args[3] == "--git-common-dir":
@@ -6287,6 +6253,8 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 			return "target-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
 			return "merged-sha", nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--git-dir":
+			return filepath.Join(projectRepo, ".git", "worktrees", filepath.Base(scratchWorktree)), nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "merge-base":
 			return "base-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff" && slices.Contains(args, "--name-status"):
@@ -6857,6 +6825,8 @@ func TestTaskCloseCommandKeepsTargetCleanWhenScratchMergeDirties(t *testing.T) {
 			return "target-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "-q" && args[4] == "--verify":
 			return "", fmt.Errorf("no merge head")
+		case len(args) == 4 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--git-dir":
+			return filepath.Join(repoDir, ".git", "worktrees", filepath.Base(scratchWorktree)), nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "merge-base":
 			return "base-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "diff" && slices.Contains(args, "--name-status"):
@@ -7159,6 +7129,58 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceHasNoChangesEvenIfTargetDirty
 		if !strings.Contains(joined, want) {
 			t.Fatalf("git commands missing %q:\n%s", want, joined)
 		}
+	}
+}
+
+func TestTaskCloseNoChangesIntegrationResultCarriesRecoveredCanonicalValidation(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	runDaemonTestGit(t, repo, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repo, "config", "user.email", "test@example.com")
+	runDaemonTestGit(t, repo, "config", "user.name", "Test User")
+	if err := os.MkdirAll(filepath.Join(repo, "scripts"), 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	gatePath := filepath.Join(repo, "scripts", "git-merge-rebase-gate.sh")
+	if err := os.WriteFile(gatePath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write gate: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	runDaemonTestGit(t, repo, "add", ".")
+	runDaemonTestGit(t, repo, "commit", "-q", "-m", "base")
+	runDaemonTestGit(t, repo, "checkout", "-q", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(repo, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatalf("write feature: %v", err)
+	}
+	runDaemonTestGit(t, repo, "add", "feature.txt")
+	runDaemonTestGit(t, repo, "commit", "-q", "-m", "feature")
+	sourceOID := runDaemonTestGitOutput(t, repo, "rev-parse", "HEAD")
+	runDaemonTestGit(t, repo, "checkout", "-q", "main")
+	if err := os.WriteFile(filepath.Join(repo, "main.txt"), []byte("main\n"), 0o644); err != nil {
+		t.Fatalf("write main: %v", err)
+	}
+	runDaemonTestGit(t, repo, "add", "main.txt")
+	runDaemonTestGit(t, repo, "commit", "-q", "-m", "main")
+
+	client := git.NewClient(git.NewExecRunner(repo), slog.Default())
+	merge, err := client.MergeCleanlyTransactional(ctx, repo, "feature")
+	if err != nil || merge == nil || !merge.Success {
+		t.Fatalf("MergeCleanlyTransactional() = (%+v, %v), want success", merge, err)
+	}
+	targetOID := runDaemonTestGitOutput(t, repo, "rev-parse", "HEAD")
+	d := &Daemon{git: client}
+	result, err := d.taskCloseNoChangesIntegrationResult(ctx, repo, "feature", "main", sourceOID, targetOID)
+	if err != nil {
+		t.Fatalf("taskCloseNoChangesIntegrationResult() error = %v", err)
+	}
+	if !result.NoChanges || len(result.ValidationAttempts) != 1 {
+		t.Fatalf("no-change result = %+v, want one durable validation attempt", result)
+	}
+	attempt := result.ValidationAttempts[0]
+	if attempt.CandidateHead != targetOID || attempt.Status != domain.IntegrationCandidateValidationPassed || !attempt.Canonical {
+		t.Fatalf("validation attempt = %+v, want canonical exact target %s", attempt, targetOID)
 	}
 }
 
@@ -8416,7 +8438,7 @@ func TestTaskGraphReadinessDependencyGating(t *testing.T) {
 
 	base := []domain.Task{
 		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress},
-		{ID: a, Type: domain.TypeTask, Status: domain.StatusInProgress, ParentID: &aParent},
+		{ID: a, Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &aParent},
 		{
 			ID:       b,
 			Type:     domain.TypeTask,
@@ -8692,6 +8714,241 @@ func TestTaskGraphReadinessStopsAtNestedRoots(t *testing.T) {
 	}
 }
 
+func TestTaskGraphReadinessExcludesBacklogNestedRootsDespiteOpenCompatibilityStatus(t *testing.T) {
+	root := naming.IssueID("az-root")
+	ada := naming.IssueID("ADA")
+	cif := naming.IssueID("CIF")
+	adaChild := naming.IssueID("ada-child")
+	cifChild := naming.IssueID("cif-child")
+	backlog, err := domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflowBacklog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress},
+		{ID: ada, Type: domain.TypeEpic, Status: domain.StatusOpen, State: backlog, ParentID: &root},
+		{ID: cif, Type: domain.TypeEpic, Status: domain.StatusOpen, State: backlog, ParentID: &root},
+		{ID: adaChild, Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &ada},
+		{ID: cifChild, Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &cif},
+	}
+
+	rootID, byID, children, err := daemonTaskGraphIndexes(root.String(), tasks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.NestedRoots) != 2 {
+		t.Fatalf("nested roots = %+v, want ADA and CIF", result.NestedRoots)
+	}
+	for _, nested := range result.NestedRoots {
+		if nested.Status != "not_counting_capacity" || nested.IssueStatus != string(domain.StatusOpen) || nested.Classification != string(domain.OrchestrationCandidateBacklog) {
+			t.Fatalf("nested root = %+v, want backlog exclusion despite compatibility status open", nested)
+		}
+		if !slices.Contains(nested.ExclusionReasons, "lifecycle-backlog") {
+			t.Fatalf("nested root exclusions = %v, want lifecycle-backlog", nested.ExclusionReasons)
+		}
+	}
+	if result.Capacity.NestedStartableCount != 0 || result.Capacity.NotCountingCapacityCount != 2 {
+		t.Fatalf("capacity = %+v, want both backlog roots outside startable capacity", result.Capacity)
+	}
+}
+
+func TestTaskGraphReadinessExcludesBacklogLeafDespiteOpenCompatibilityStatus(t *testing.T) {
+	root := naming.IssueID("az-root")
+	backlogLeaf := naming.IssueID("paused-leaf")
+	activeLeaf := naming.IssueID("active-leaf")
+	reviewLeaf := naming.IssueID("review-leaf")
+	liveBlockedLeaf := naming.IssueID("live-blocked-leaf")
+	openLeaf := naming.IssueID("ready-leaf")
+	backlog, err := domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflowBacklog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflowActive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflowActive, Review: domain.IssueReviewRequested})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress},
+		{ID: backlogLeaf, Title: "Paused", Description: "Executable", Type: domain.TypeTask, Status: domain.StatusOpen, State: backlog, ParentID: &root},
+		{ID: activeLeaf, Title: "Active", Description: "Executable", Type: domain.TypeTask, Status: domain.StatusInProgress, State: active, ParentID: &root},
+		{ID: reviewLeaf, Title: "Review", Description: "Executable", Type: domain.TypeTask, Status: domain.StatusInReview, State: review, ParentID: &root},
+		{ID: liveBlockedLeaf, Title: "Live blocked", Description: "Executable", Type: domain.TypeTask, Status: domain.StatusInProgress, State: active, ParentID: &root, HasTmuxSession: true, Dependencies: []domain.Dependency{{ID: backlogLeaf, Type: domain.DependencyBlocks}}},
+		{ID: openLeaf, Title: "Ready", Description: "Executable", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &root},
+	}
+	rootID, byID, children, err := daemonTaskGraphIndexes(root.String(), tasks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(result.Runnable, []string{openLeaf.String()}) {
+		t.Fatalf("runnable = %v, want only ready leaf", result.Runnable)
+	}
+	if got := result.Blocked[backlogLeaf.String()]; got != "lifecycle-backlog" {
+		t.Fatalf("blocked backlog reason = %q, want lifecycle-backlog", got)
+	}
+	if got := result.Blocked[activeLeaf.String()]; got != "active-work-present" {
+		t.Fatalf("blocked active reason = %q, want active-work-present", got)
+	}
+	if !slices.Equal(result.Active, []string{liveBlockedLeaf.String()}) {
+		t.Fatalf("active = %v, want live runtime retained despite dependency", result.Active)
+	}
+	if result.Capacity.DirectRunnableCount != 1 || result.Capacity.DirectActiveCount != 1 || result.Capacity.TotalCountingCapacityCount != 1 {
+		t.Fatalf("capacity = %+v, backlog leaf must not count and live runtime must count active", result.Capacity)
+	}
+}
+
+func TestTaskGraphReadinessBacklogRootContainsOpenDescendants(t *testing.T) {
+	root := naming.IssueID("paused-root")
+	direct := naming.IssueID("open-direct")
+	nested := naming.IssueID("open-nested")
+	nestedChild := naming.IssueID("open-nested-child")
+	backlog, err := domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflowBacklog})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusOpen, State: backlog},
+		{ID: direct, Title: "Direct", Description: "Executable", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &root},
+		{ID: nested, Title: "Nested", Type: domain.TypeEpic, Status: domain.StatusOpen, ParentID: &root},
+		{ID: nestedChild, Title: "Nested child", Description: "Executable", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &nested},
+	}
+	rootID, byID, children, err := daemonTaskGraphIndexes(root.String(), tasks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Runnable) != 0 || result.Blocked[direct.String()] != "lifecycle-backlog" {
+		t.Fatalf("readiness = %+v, want direct child contained by backlog root", result)
+	}
+	if len(result.NestedRoots) != 1 || result.NestedRoots[0].Status != "not_counting_capacity" || result.NestedRoots[0].Classification != string(domain.OrchestrationCandidateBacklog) || !slices.Contains(result.NestedRoots[0].ExclusionReasons, "lifecycle-backlog") || result.Blocked[nested.String()] != "lifecycle-backlog" {
+		t.Fatalf("nested roots = %+v, want inherited backlog containment", result.NestedRoots)
+	}
+	if result.Capacity.DirectRunnableCount != 0 || result.Capacity.NestedStartableCount != 0 || result.Capacity.TotalCountingCapacityCount != 0 {
+		t.Fatalf("capacity = %+v, want no backlog-contained start capacity", result.Capacity)
+	}
+}
+
+func TestTaskGraphReadinessRefreshesBacklogRootContainmentAcrossDaemonClients(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "issues.db")
+	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
+	writer := newMigratedIssueClientAtPath(t, path, slog.Default())
+	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
+	rootID, err := reader.Create(ctx, issues.CreateTaskParams{Title: "Active root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := reader.Create(ctx, issues.CreateTaskParams{Title: "Open child", Description: "Executable", Acceptance: "Worker completes scoped change", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	materializerCtx, cancelMaterializer := context.WithCancel(ctx)
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}, hub: publish.NewHub(16, 8, slog.Default()), revision: map[string]uint64{}}
+	if err := d.startProjectReadMaterializers(materializerCtx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cancelMaterializer()
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+		defer cancelShutdown()
+		d.stopAllProjectReadMaterializers(shutdownCtx)
+	})
+	before, err := d.taskGraphReadiness(ctx, "proj", rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(before.Runnable, []string{childID}) {
+		t.Fatalf("before runnable = %v, want open child", before.Runnable)
+	}
+	backlog := domain.IssueWorkflowBacklog
+	if err := writer.UpdateDetails(ctx, rootID, issues.UpdateTaskParams{Title: "Active root", Type: domain.TypeEpic, Priority: domain.P2, Lifecycle: &backlog}); err != nil {
+		t.Fatal(err)
+	}
+	waitForProjectMaterializerRevision(t, d, "proj", 1)
+	after, err := d.taskGraphReadiness(ctx, "proj", rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Runnable) != 0 || after.Blocked[childID] != "lifecycle-backlog" {
+		t.Fatalf("after readiness = %+v, want refreshed backlog-root containment", after)
+	}
+}
+
+func TestTaskGraphReadinessRefreshesNestedRootLifecycleAcrossDaemonClients(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "issues.db")
+	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
+	writer := newMigratedIssueClientAtPath(t, path, slog.Default())
+	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
+	rootID, err := reader.Create(ctx, issues.CreateTaskParams{Title: "Outer root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nestedID, err := reader.Create(ctx, issues.CreateTaskParams{Title: "ADA", Type: domain.TypeEpic, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Create(ctx, issues.CreateTaskParams{Title: "ADA child", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &nestedID}); err != nil {
+		t.Fatal(err)
+	}
+	materializerCtx, cancelMaterializer := context.WithCancel(ctx)
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}, hub: publish.NewHub(16, 8, slog.Default()), revision: map[string]uint64{}}
+	if err := d.startProjectReadMaterializers(materializerCtx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cancelMaterializer()
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+		defer cancelShutdown()
+		d.stopAllProjectReadMaterializers(shutdownCtx)
+	})
+	before, err := d.taskGraphReadiness(ctx, "proj", rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before.NestedRoots) != 1 || before.NestedRoots[0].Status != "startable" {
+		t.Fatalf("before nested roots = %+v, want open root startable", before.NestedRoots)
+	}
+	backlog := domain.IssueWorkflowBacklog
+	if err := writer.UpdateDetails(ctx, nestedID, issues.UpdateTaskParams{Title: "ADA", Type: domain.TypeEpic, Priority: domain.P2, Lifecycle: &backlog}); err != nil {
+		t.Fatal(err)
+	}
+	waitForProjectMaterializerRevision(t, d, "proj", 1)
+	after, err := d.taskGraphReadiness(ctx, "proj", rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.NestedRoots) != 1 || after.NestedRoots[0].Status != "not_counting_capacity" || !slices.Contains(after.NestedRoots[0].ExclusionReasons, "lifecycle-backlog") {
+		t.Fatalf("after nested roots = %+v, want refreshed lifecycle-backlog exclusion", after.NestedRoots)
+	}
+}
+
+func waitForProjectMaterializerRevision(t *testing.T, d *Daemon, projectID string, minimum uint64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if d.currentRevision(projectID) >= minimum {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("project materializer revision = %d, want at least %d", d.currentRevision(projectID), minimum)
+}
+
 func TestTaskGraphReadinessLoadsRootScopedTasksWithLargeUnrelatedProject(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-root-scoped-readiness"
@@ -8887,7 +9144,7 @@ func TestTaskGraphReadinessRefreshesOnlyRootScopedSessions(t *testing.T) {
 	}
 }
 
-func TestTaskGraphReadinessSharesConcurrentRootLoad(t *testing.T) {
+func TestTaskGraphRuntimeValidationCoalescesMultiWatchAndTUIP95(t *testing.T) {
 	projectID := "proj-graph-shared-load"
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	issuesClient := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
@@ -8998,6 +9255,119 @@ func TestTaskGraphReadinessSharesConcurrentRootLoad(t *testing.T) {
 	}
 	if len(second.ready.Active) != 1 || second.ready.Active[0] != childID {
 		t.Fatalf("second active = %v, want [%s]", second.ready.Active, childID)
+	}
+
+	third, err := d.taskGraphReadiness(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("cached readiness error: %v", err)
+	}
+	if len(third.Active) != 1 || third.Active[0] != childID {
+		t.Fatalf("cached active = %v, want [%s]", third.Active, childID)
+	}
+	if got := tmuxRunner.listSessionCallCount(); got != 1 {
+		t.Fatalf("tmux list-sessions calls after sequential duplicate = %d, want cached hybrid runtime observation", got)
+	}
+
+	d.nextRevision(projectID)
+	if _, err := d.taskGraphReadiness(ctx, projectID, rootID); err != nil {
+		t.Fatalf("readiness after revision change: %v", err)
+	}
+	if got := tmuxRunner.listSessionCallCount(); got != 2 {
+		t.Fatalf("tmux list-sessions calls after revision change = %d, want cache invalidation", got)
+	}
+
+	rootedScope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := protocol.OrchestrationSnapshotRequest{Scope: rootedScope}
+	build := func(_ context.Context, _ string, request protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		return protocol.OrchestrationSnapshot{Scope: request.Scope, Active: []string{childID}, Blocked: map[string]string{}}, nil
+	}
+	if _, _, stable, err := d.loadOrchestrationSnapshot(ctx, projectID, request, build); err != nil || !stable {
+		t.Fatalf("warm orchestration snapshot stable=%v err=%v", stable, err)
+	}
+
+	const (
+		watchers   = 5
+		iterations = 20
+		p95Budget  = 25 * time.Millisecond
+	)
+	durations := make([]time.Duration, 0, (watchers+1)*iterations)
+	for range iterations {
+		d.taskGraphRuntimeValidationMu.Lock()
+		d.taskGraphRuntimeValidations = map[string]taskGraphRuntimeValidationEntry{}
+		d.taskGraphRuntimeValidationMu.Unlock()
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		tmuxRunner.mu.Lock()
+		tmuxRunner.listSessionsEntered = entered
+		tmuxRunner.listSessionsRelease = release
+		tmuxRunner.mu.Unlock()
+
+		type timedResult struct {
+			duration time.Duration
+			err      error
+		}
+		results := make(chan timedResult, watchers+1)
+		go func() {
+			started := time.Now()
+			_, err := d.taskGraphReadiness(ctx, projectID, rootID)
+			results <- timedResult{duration: time.Since(started), err: err}
+		}()
+		select {
+		case <-entered:
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for coalesced runtime validation: %v", ctx.Err())
+		}
+		for range watchers - 1 {
+			go func() {
+				started := time.Now()
+				_, err := d.taskGraphReadiness(ctx, projectID, rootID)
+				results <- timedResult{duration: time.Since(started), err: err}
+			}()
+		}
+		go func() {
+			started := time.Now()
+			_, _, _, err := d.loadOrchestrationSnapshot(ctx, projectID, request, build)
+			results <- timedResult{duration: time.Since(started), err: err}
+		}()
+		close(release)
+		for range watchers + 1 {
+			result := <-results
+			if result.err != nil {
+				t.Fatalf("multi-watch/TUI cached read: %v", result.err)
+			}
+			durations = append(durations, result.duration)
+		}
+	}
+	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+	p95 := durations[(len(durations)*95+99)/100-1]
+	if p95 > p95Budget {
+		t.Fatalf("multi-watch plus TUI hybrid p95 = %s, budget %s", p95, p95Budget)
+	}
+	wantRuntimeCalls := 2 + iterations
+	if got := tmuxRunner.listSessionCallCount(); got != wantRuntimeCalls {
+		t.Fatalf("list-sessions calls = %d, want %d (one per forced observation, not per reader)", got, wantRuntimeCalls)
+	}
+	if got := tmuxRunner.listPaneCallCount(); got != wantRuntimeCalls {
+		t.Fatalf("list-panes calls = %d, want %d (one per forced observation, not per reader)", got, wantRuntimeCalls)
+	}
+	t.Logf("multi-watch plus TUI hybrid p95=%s budget=%s samples=%d runtime_validations=%d", p95, p95Budget, len(durations), iterations)
+}
+
+func TestTaskGraphReadinessOwnershipExpiryBoundsCache(t *testing.T) {
+	now := time.Date(2026, time.July, 13, 5, 30, 0, 0, time.UTC)
+	early := now.Add(2 * time.Second)
+	late := now.Add(time.Minute)
+	expired := now.Add(-time.Second)
+	tasks := []domain.Task{
+		{Ownership: &domain.IssueOwnership{ExpiresAt: &late}},
+		{Ownership: &domain.IssueOwnership{ExpiresAt: &early}},
+		{Ownership: &domain.IssueOwnership{ExpiresAt: &expired}},
+	}
+	if got := taskGraphReadinessOwnershipExpiry(tasks, now); !got.Equal(early) {
+		t.Fatalf("cache expiry = %s, want earliest active ownership expiry %s", got, early)
 	}
 }
 
@@ -9868,7 +10238,16 @@ func TestTaskGraphReadinessMarksFailedNestedRootStartAsBlockedCapacity(t *testin
 		t.Fatalf("create nested child: %v", err)
 	}
 
-	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir, nextRevision: sequentialRevision()})
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: logger},
+		hub: publish.NewHub(16, 8, logger),
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
+		revision: map[string]uint64{},
+	}
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir, hub: d.hub, nextRevision: d.nextRevision})
+	d.operationRuntime = runtime
 	if _, err := runtime.manager.Submit(ctx, daemonops.SubmitRequest{
 		ID:           "op-nested-start",
 		ProjectID:    projectID,
@@ -9882,13 +10261,6 @@ func TestTaskGraphReadinessMarksFailedNestedRootStartAsBlockedCapacity(t *testin
 	}
 	_ = waitForRuntimeState(t, runtime, "op-nested-start", daemonops.StateFailed)
 
-	d := &Daemon{
-		cfg:              Config{RepoDir: repoDir, Logger: logger},
-		operationRuntime: runtime,
-		issueClientsByProject: map[string]*issues.Client{
-			projectID: issuesClient,
-		},
-	}
 	ready, err := d.taskGraphReadiness(ctx, projectID, rootID)
 	if err != nil {
 		t.Fatalf("taskGraphReadiness error: %v", err)
@@ -10319,7 +10691,7 @@ func TestTaskGraphReadinessWorkerObservationsIncludeEvidenceAndMissingProjection
 	}
 }
 
-func TestTaskGraphReadinessWorkerObservationsIncludeNonEpicRootLeaf(t *testing.T) {
+func TestTaskGraphReadinessWorkerObservationsIncludeOpenNonEpicRootLeaf(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	repoDir := t.TempDir()
@@ -10331,9 +10703,9 @@ func TestTaskGraphReadinessWorkerObservationsIncludeNonEpicRootLeaf(t *testing.T
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 
 	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
-		Title:  "Ordinary active work",
+		Title:  "Ordinary open work",
 		Type:   domain.TypeTask,
-		Status: domain.StatusInProgress,
+		Status: domain.StatusOpen,
 	})
 	if err != nil {
 		t.Fatalf("create root task: %v", err)
@@ -10599,8 +10971,11 @@ func TestTaskIntegrationReadinessAcceptsLegacyMailboxAliases(t *testing.T) {
 
 func TestTaskIntegrationReadinessRequiresCompleteWorkerEvidencePacket(t *testing.T) {
 	ctx := context.Background()
-	projectID := "proj-worker-evidence-ready"
 	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
@@ -10715,15 +11090,16 @@ func TestTaskIntegrationReadinessRejectsUnleasedAggregateEvidencePacket(t *testi
 	}
 }
 
-func TestTaskIntegrationReadinessRequiresAggregatePacketAndExactCandidateRevision(t *testing.T) {
+func TestTaskIntegrationReadinessBindsAuthoritativeAggregateToExactCandidateRevision(t *testing.T) {
 	for _, tc := range []struct {
 		name              string
 		candidateRevision string
 		includeAggregate  bool
 		dirtyCandidate    bool
+		wantReady         bool
 		wantReason        string
 	}{
-		{name: "missing packet proof", candidateRevision: "abc123", wantReason: "aggregate_validation is required"},
+		{name: "authoritative aggregate need not be duplicated in packet", candidateRevision: "abc123", wantReady: true},
 		{name: "candidate advanced after gate", candidateRevision: "def456", includeAggregate: true, wantReason: "does not match exact candidate revision"},
 		{name: "candidate is dirty after gate", candidateRevision: "abc123", includeAggregate: true, dirtyCandidate: true, wantReason: "dirty candidate tree"},
 	} {
@@ -10773,17 +11149,83 @@ func TestTaskIntegrationReadinessRequiresAggregatePacketAndExactCandidateRevisio
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result.Ready || !strings.Contains(strings.Join(result.Reasons, "\n"), tc.wantReason) {
+			if tc.wantReady {
+				if !result.Ready || result.EvidencePacket == nil || result.EvidenceSource != "issue_event" {
+					t.Fatalf("result = %+v, want structurally complete issue evidence bound by authoritative aggregate", result)
+				}
+			} else if result.Ready || !strings.Contains(strings.Join(result.Reasons, "\n"), tc.wantReason) {
 				t.Fatalf("result = %+v, want rejection containing %q", result, tc.wantReason)
 			}
 		})
 	}
 }
 
+func TestTaskIntegrationReadinessReadsMailboxFromProjectRootForIssueWorktreeCandidate(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx := context.Background()
+	bootstrapRoot := t.TempDir()
+	projectRoot := t.TempDir()
+	candidateWorktree := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{Projects: []appconfig.Project{{ID: projectID, Name: "review-evidence-project", Path: projectRoot}}}); err != nil {
+		t.Fatal(err)
+	}
+	issuesClient := newMigratedIssueClient(t, projectRoot, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeTask, Status: domain.StatusInReview, ParentID: &parentID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := appendMailboxEvent(projectRoot, daemonMailEvent{
+		Seq: 1, ParentIssue: parentID, IssueID: childID, Type: "worker-integration-ready", CreatedAt: time.Now().UTC(),
+		Body: `{"schema":"worker_evidence.v1","summary":"Ready from issue worktree.","commands_run":["just test"],"key_assertions":["authoritative project mailbox replayed"],"files_changed":["internal/daemon/task_commands.go"],"review":{"status":"clean","findings":[]},"risks":["none"]}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: bootstrapRoot, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, revision: map[string]uint64{projectID: 1}}
+	result, err := d.taskIntegrationReadiness(ctx, projectID, childID, candidateWorktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Ready || result.EvidenceEventSeq != 1 || result.EvidencePacket == nil {
+		t.Fatalf("result = %+v, want project-root mailbox evidence independent of candidate path %s", result, candidateWorktree)
+	}
+}
+
+func TestTaskIntegrationReadinessRejectsUnknownProjectMailboxRoute(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx := context.Background()
+	projectID := "unknown-review-evidence-project"
+	bootstrapRoot := t.TempDir()
+	projectRoot := t.TempDir()
+	candidateWorktree := t.TempDir()
+	issuesClient := newMigratedIssueClient(t, projectRoot, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: bootstrapRoot, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{projectID: issuesClient}, revision: map[string]uint64{projectID: 1}}
+	result, err := d.taskIntegrationReadiness(ctx, projectID, childID, candidateWorktree)
+	if err == nil || !strings.Contains(err.Error(), "resolve authoritative project mailbox root") {
+		t.Fatalf("result=%+v err=%v, want unknown project mailbox route rejected", result, err)
+	}
+}
+
 func TestTaskIntegrationReadinessSkipsReviewReadyReplayNotification(t *testing.T) {
 	ctx := context.Background()
-	projectID := "proj-worker-evidence-replay"
 	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
@@ -11108,8 +11550,11 @@ func TestTaskIntegrationReadinessLatestIssueEvidenceEventWins(t *testing.T) {
 
 func TestTaskIntegrationReadinessReportsIncompleteWorkerEvidencePacket(t *testing.T) {
 	ctx := context.Background()
-	projectID := "proj-worker-evidence-incomplete"
 	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
@@ -11142,7 +11587,7 @@ func TestTaskIntegrationReadinessReportsIncompleteWorkerEvidencePacket(t *testin
 	if err != nil {
 		t.Fatalf("taskIntegrationReadiness error: %v", err)
 	}
-	if result.Ready || !result.EvidenceIncomplete || result.EvidenceEventSeq != 1 {
+	if result.Ready || !result.EvidenceIncomplete || result.EvidenceEventSeq != 1 || result.EvidenceSource != "mailbox" {
 		t.Fatalf("result = %+v, want incomplete evidence", result)
 	}
 	reasons := strings.Join(result.Reasons, "\n")
@@ -11155,8 +11600,11 @@ func TestTaskIntegrationReadinessReportsIncompleteWorkerEvidencePacket(t *testin
 
 func TestTaskIntegrationReadinessLatestWorkerEvidenceEventWins(t *testing.T) {
 	ctx := context.Background()
-	projectID := "proj-worker-evidence-latest"
 	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
@@ -11217,8 +11665,11 @@ func TestTaskIntegrationReadinessLatestWorkerEvidenceEventWins(t *testing.T) {
 
 func TestTaskIntegrationReadinessAcceptsLegacyAliasOnlyWithStructuredEvidence(t *testing.T) {
 	ctx := context.Background()
-	projectID := "proj-worker-evidence-legacy-alias"
 	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
@@ -13414,6 +13865,9 @@ func TestHandleTaskGetManyReturnsBatchDependencyContextWithPartialMiss(t *testin
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
 		revision:               map[string]uint64{projectID: initialRevision},
 	}
+	if err := d.observeTmuxProject(ctx, projectID, newTmuxRuntimeLiveness([]tmux.SessionInfo{{Name: firstSessionID}, {Name: secondSessionID}}, nil), domain.CurrentTmuxObservationProvenance(timeNow())); err != nil {
+		t.Fatalf("apply asynchronous tmux observation: %v", err)
+	}
 
 	body, err := json.Marshal(map[string][]string{
 		"task_ids": []string{secondID, "az-missing", firstID},
@@ -13559,6 +14013,117 @@ func TestRefreshWorktreeRuntimeStateForIssuesDoesNotPublishUnchangedGitStatus(t 
 		if evt.Event == protocol.EventGitStatusUpdated {
 			t.Fatalf("unexpected unchanged git status event: %+v", evt)
 		}
+	}
+}
+
+func TestRefreshFiniteWorktreeGitFactsConvergesStaleDirtyAndStaleCleanBoundedly(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	const projectID = "proj-finite-refresh"
+	cleanID, dirtyID := "az-clean", "az-dirty"
+	cleanPath, dirtyPath := t.TempDir(), t.TempDir()
+	cleanBranch, dirtyBranch := "riordan/az-clean/work", "riordan/az-dirty/work"
+
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), logger)
+	t.Cleanup(func() { _ = store.Close() })
+	for _, fixture := range []struct {
+		issueID, path, branch string
+		status                git.GitStatus
+	}{
+		{cleanID, cleanPath, cleanBranch, git.GitStatus{HasChanges: true, Modified: []string{"stale.go"}}},
+		{dirtyID, dirtyPath, dirtyBranch, git.GitStatus{}},
+	} {
+		if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{ProjectID: projectID, IssueID: fixture.issueID, Path: fixture.path, Branch: fixture.branch, UpdatedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal(fixture.status)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpsertWorktreeStateGitStatus(ctx, projectID, fixture.issueID, raw, time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch {
+		case len(args) == 3 && args[0] == "worktree" && args[1] == "list":
+			return "worktree " + cleanPath + "\nbranch refs/heads/" + cleanBranch + "\n\nworktree " + dirtyPath + "\nbranch refs/heads/" + dirtyBranch + "\n\n", nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
+			if args[1] == dirtyPath {
+				return " M live.go\n", nil
+			}
+			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "symbolic-ref":
+			return "origin/main\n", nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "merge-base":
+			return "merge-base-sha\n", nil
+		case len(args) >= 7 && args[0] == "-C" && args[2] == "diff":
+			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "rev-list":
+			return "0\n", nil
+		default:
+			t.Fatalf("unexpected git args: %v", args)
+			return "", nil
+		}
+	}}
+	d := &Daemon{
+		cfg:                       Config{RepoDir: ".", BaseBranch: "main", Logger: logger},
+		hub:                       publish.NewHub(16, 8, logger),
+		runtimeStoresByRoot:       map[string]*daemonstate.RuntimeStateStore{".": store},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: git.NewWorktreeManager(runner, ".", logger)},
+		git:                       git.NewClient(runner, logger),
+	}
+
+	assertConverged := func(issueID string, wantDirty bool) {
+		t.Helper()
+		row, found, err := store.GetWorktreeStateByIssueID(ctx, projectID, issueID)
+		if err != nil || !found {
+			t.Fatalf("load %s projection: found=%v err=%v", issueID, found, err)
+		}
+		var status git.GitStatus
+		if err := json.Unmarshal(row.GitStatusRaw, &status); err != nil {
+			t.Fatal(err)
+		}
+		if status.HasChanges != wantDirty {
+			t.Fatalf("%s dirty = %v, want %v", issueID, status.HasChanges, wantDirty)
+		}
+	}
+
+	initialRevision := d.currentRevision(projectID)
+	if err := d.refreshFiniteWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
+		t.Fatal(err)
+	}
+	assertConverged(cleanID, false)
+	assertConverged(dirtyID, true)
+	firstRevision := d.currentRevision(projectID)
+	if got := firstRevision - initialRevision; got != 2 {
+		t.Fatalf("first refresh revision delta = %d, want one changed status update per worktree", got)
+	}
+
+	if err := d.refreshFiniteWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.currentRevision(projectID) - firstRevision; got != 0 {
+		t.Fatalf("unchanged finite refresh revision delta = %d, want no duplicate projection updates", got)
+	}
+
+	// A fresh daemon instance must derive the same facts from Git rather than
+	// treating either persisted direction as authoritative after restart.
+	restarted := &Daemon{
+		cfg:                       d.cfg,
+		hub:                       publish.NewHub(16, 8, logger),
+		runtimeStoresByRoot:       map[string]*daemonstate.RuntimeStateStore{".": store},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: git.NewWorktreeManager(runner, ".", logger)},
+		git:                       git.NewClient(runner, logger),
+	}
+	if err := restarted.refreshFiniteWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
+		t.Fatal(err)
+	}
+	assertConverged(cleanID, false)
+	assertConverged(dirtyID, true)
+	if got := restarted.currentRevision(projectID); got != 0 {
+		t.Fatalf("restart refresh revision = %d, want no inverted or duplicate updates", got)
 	}
 }
 
@@ -14177,7 +14742,6 @@ func TestHandleTaskGetEnqueuesOnlyRequestedIssueWorktreeRefreshAsync(t *testing.
 			projectID: store,
 		},
 	}
-
 	reqBody, err := json.Marshal(map[string]string{"task_id": targetID})
 	if err != nil {
 		t.Fatalf("marshal task get request: %v", err)
@@ -14349,6 +14913,9 @@ func TestHandleTaskGetRefreshesOnlyRequestedIssueSession(t *testing.T) {
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
 			projectID: store,
 		},
+	}
+	if err := d.observeTmuxProject(ctx, projectID, newTmuxRuntimeLiveness([]tmux.SessionInfo{{Name: targetSessionID}, {Name: contextSessionID}}, nil), domain.CurrentTmuxObservationProvenance(time.Now().UTC())); err != nil {
+		t.Fatalf("apply asynchronous tmux observation: %v", err)
 	}
 
 	reqBody, err := json.Marshal(map[string]string{"task_id": targetID})
@@ -15276,4 +15843,16 @@ func taskIDStrings(tasks []domain.Task) []string {
 		out = append(out, task.ID.String())
 	}
 	return out
+}
+
+func integrationTestWorktreeList(base, scratch, head string) string {
+	if strings.TrimSpace(scratch) == "" {
+		return base
+	}
+	return strings.TrimRight(base, "\n") + fmt.Sprintf("\n\nworktree %s\nHEAD %s\ndetached\n\n", scratch, head)
+}
+
+func integrationTestIsWorktreeList(args []string) bool {
+	return len(args) >= 3 && args[0] == "worktree" && args[1] == "list" ||
+		len(args) >= 5 && args[0] == "-C" && args[2] == "worktree" && args[3] == "list"
 }

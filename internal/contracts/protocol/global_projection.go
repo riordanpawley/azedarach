@@ -130,20 +130,24 @@ type GlobalViewProjection struct {
 }
 
 type GlobalProjectSnapshot struct {
-	ProjectID         string        `json:"project_id"`
-	Name              string        `json:"name"`
-	Path              string        `json:"path"`
-	DBPath            string        `json:"db_path"`
-	SchemaVersion     int           `json:"schema_version"`
-	SchemaFingerprint string        `json:"schema_fingerprint"`
-	ProjectionVersion int           `json:"projection_version"`
-	Checkpoint        uint64        `json:"checkpoint"`
-	Freshness         string        `json:"freshness"`
-	LastRefreshedAt   *time.Time    `json:"last_refreshed_at,omitempty"`
-	LastAttemptAt     *time.Time    `json:"last_attempt_at,omitempty"`
-	LastError         string        `json:"last_error,omitempty"`
-	Registered        bool          `json:"registered"`
-	Tasks             []domain.Task `json:"tasks"`
+	ProjectID         string                  `json:"project_id"`
+	Name              string                  `json:"name"`
+	Path              string                  `json:"path"`
+	DBPath            string                  `json:"db_path"`
+	SchemaVersion     int                     `json:"schema_version"`
+	SchemaFingerprint string                  `json:"schema_fingerprint"`
+	ProjectionVersion int                     `json:"projection_version"`
+	Checkpoint        uint64                  `json:"checkpoint"`
+	DeltaCursor       uint64                  `json:"delta_cursor"`
+	DeltaHash         string                  `json:"delta_hash,omitempty"`
+	DeltaSourceVector []ProjectionSourceRange `json:"delta_source_vector,omitempty"`
+	DeltaProjector    ProjectionProjector     `json:"delta_projector,omitempty"`
+	Freshness         string                  `json:"freshness"`
+	LastRefreshedAt   *time.Time              `json:"last_refreshed_at,omitempty"`
+	LastAttemptAt     *time.Time              `json:"last_attempt_at,omitempty"`
+	LastError         string                  `json:"last_error,omitempty"`
+	Registered        bool                    `json:"registered"`
+	Tasks             []domain.Task           `json:"tasks"`
 }
 
 type GlobalSnapshotResponseBody struct {

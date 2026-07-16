@@ -12,7 +12,7 @@ import (
 )
 
 // TaskListSnapshotSchemaVersion identifies the joined task-list snapshot payload contract.
-const TaskListSnapshotSchemaVersion uint16 = 3
+const TaskListSnapshotSchemaVersion uint16 = 4
 
 // TaskListFreshness describes whether the daemon's joined runtime projection is current enough for UI display.
 type TaskListFreshness string
@@ -69,17 +69,18 @@ func (m ArchiveMode) Valid() bool {
 // TaskListSnapshotPayload is the deterministic daemon/client contract for joined issue/session/worktree task snapshots.
 //
 // The field order is part of the contract:
-// schema_version -> protocol_version -> snapshot_revision -> project_id -> last_checked_at -> freshness -> summaries_only -> tasks.
+// schema_version -> protocol_version -> snapshot_revision -> project_id -> last_checked_at -> freshness -> summaries_only -> source -> tasks.
 // Tasks already carry daemon-authored joined runtime state via domain.Task fields.
 type TaskListSnapshotPayload struct {
-	SchemaVersion    uint16            `json:"schema_version" msgpack:"schema_version"`
-	ProtocolVersion  Version           `json:"protocol_version" msgpack:"protocol_version"`
-	SnapshotRevision uint64            `json:"snapshot_revision" msgpack:"snapshot_revision"`
-	ProjectID        naming.ProjectID  `json:"project_id" msgpack:"project_id"`
-	LastCheckedAt    time.Time         `json:"last_checked_at" msgpack:"last_checked_at"`
-	Freshness        TaskListFreshness `json:"freshness" msgpack:"freshness"`
-	SummariesOnly    bool              `json:"summaries_only,omitempty" msgpack:"summaries_only,omitempty"`
-	Tasks            []domain.Task     `json:"tasks" msgpack:"tasks"`
+	SchemaVersion    uint16                       `json:"schema_version" msgpack:"schema_version"`
+	ProtocolVersion  Version                      `json:"protocol_version" msgpack:"protocol_version"`
+	SnapshotRevision uint64                       `json:"snapshot_revision" msgpack:"snapshot_revision"`
+	ProjectID        naming.ProjectID             `json:"project_id" msgpack:"project_id"`
+	LastCheckedAt    time.Time                    `json:"last_checked_at" msgpack:"last_checked_at"`
+	Freshness        TaskListFreshness            `json:"freshness" msgpack:"freshness"`
+	SummariesOnly    bool                         `json:"summaries_only,omitempty" msgpack:"summaries_only,omitempty"`
+	Source           MaterializedSnapshotMetadata `json:"source" msgpack:"source"`
+	Tasks            []domain.Task                `json:"tasks" msgpack:"tasks"`
 }
 
 // TaskListSnapshotVersionMismatchError indicates schema/protocol contract mismatch.

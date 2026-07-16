@@ -59,13 +59,14 @@ func (d *Daemon) taskContextRisk(ctx context.Context, projectID, issueID, repoDi
 	if issueClient == nil {
 		return domain.IssueContextRiskPacket{}, fmt.Errorf("issue client unavailable for project %s", projectID)
 	}
-	contextTasks, err := issueClient.GetWithDependencyContextRuntime(ctx, projectID, strings.TrimSpace(issueID))
+	materialized, _, err := d.projectReadSnapshot(projectID)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return degradedIssueContextRiskPacket(issueID, "", since, ctxErr), nil
 		}
 		return domain.IssueContextRiskPacket{}, fmt.Errorf("load issue dependency context: %w", err)
 	}
+	contextTasks := materializedTaskContext(materialized, []string{strings.TrimSpace(issueID)}, true, false, true, false, protocol.ArchiveModeInclude)
 	target, ok := findDaemonTaskByID(contextTasks, issueID)
 	if !ok {
 		return domain.IssueContextRiskPacket{}, fmt.Errorf("issue not found: %s", strings.TrimSpace(issueID))
@@ -81,13 +82,7 @@ func (d *Daemon) taskContextRisk(ctx context.Context, projectID, issueID, repoDi
 	}
 	candidates := map[string]domain.Task{}
 	if parentID != "" {
-		subtree, err := issueClient.ListParentChildSubtreeWithRuntime(ctx, projectID, parentID)
-		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return degradedIssueContextRiskPacket(target.ID.String(), parentID, since, ctxErr), nil
-			}
-			return domain.IssueContextRiskPacket{}, fmt.Errorf("load sibling context for %s: %w", parentID, err)
-		}
+		subtree := materializedParentChildClosure(materialized, parentID)
 		for _, task := range subtree {
 			if task.ID == target.ID || task.ParentID == nil || !strings.EqualFold(strings.TrimSpace(task.ParentID.String()), parentID) {
 				continue

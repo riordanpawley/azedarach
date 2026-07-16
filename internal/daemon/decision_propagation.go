@@ -345,7 +345,7 @@ func overlappingDecisionScopeIssues(tasks []domain.Task, scopeIssueIDs []string)
 	}
 	result := make([]string, 0)
 	for _, task := range tasks {
-		if task.Status == domain.StatusDone {
+		if task.Status == domain.StatusDone || task.State.Visibility != domain.IssueVisibilityLive {
 			continue
 		}
 		if _, matches := roots[decisionScopeRoot(task.ID.String(), byID)]; matches {

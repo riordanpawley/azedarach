@@ -84,18 +84,13 @@ type taskListSnapshotLoad struct {
 	err    error
 }
 
-type taskListRuntimeRefresh struct {
-	done      chan struct{}
-	runtimeAt time.Time
-	err       error
-}
-
 type taskListSnapshotLoadResult struct {
 	Revision      uint64
 	LastCheckedAt time.Time
 	Freshness     protocol.TaskListFreshness
 	RuntimeAt     time.Time
 	SummariesOnly bool
+	Source        protocol.MaterializedSnapshotMetadata
 	Tasks         []domain.Task
 }
 
@@ -103,6 +98,22 @@ type taskGraphReadinessLoad struct {
 	done   chan struct{}
 	result taskGraphReadinessResult
 	err    error
+}
+
+type taskGraphReadinessCacheEntry struct {
+	revision  uint64
+	expiresAt time.Time
+	result    taskGraphReadinessResult
+}
+
+type taskGraphRuntimeValidationEntry struct {
+	revision    uint64
+	validatedAt time.Time
+}
+
+type taskGraphRuntimeValidationLoad struct {
+	done chan struct{}
+	err  error
 }
 
 type taskClosePreflightOptions struct {
@@ -183,18 +194,22 @@ type taskDeletePreflightResult struct {
 }
 
 type taskGraphReadinessResult struct {
-	RootIssueID            string                          `json:"root_issue_id"`
-	Capacity               taskGraphCapacitySummary        `json:"capacity"`
-	Runnable               []string                        `json:"runnable"`
-	NestedRoots            []taskGraphNestedRoot           `json:"nested_roots,omitempty"`
-	Pending                []taskGraphPendingStart         `json:"pending,omitempty"`
-	Active                 []string                        `json:"active,omitempty"`
-	ActiveSessions         []taskGraphActiveSession        `json:"active_sessions,omitempty"`
-	SessionStartProgress   []taskGraphSessionStartProgress `json:"session_start_progress,omitempty"`
-	StaleCloseableChildren []taskStaleCloseableCandidate   `json:"stale_closeable_children,omitempty"`
-	ContainmentRisks       []taskContainmentRisk           `json:"containment_risks,omitempty"`
-	WorkerObservations     []domain.WorkerObservation      `json:"worker_observations,omitempty"`
-	Blocked                map[string]string               `json:"blocked"`
+	Revision               uint64                                `json:"revision,omitempty"`
+	Source                 protocol.MaterializedSnapshotMetadata `json:"source,omitempty"`
+	RootIssueID            string                                `json:"root_issue_id"`
+	Capacity               taskGraphCapacitySummary              `json:"capacity"`
+	Runnable               []string                              `json:"runnable"`
+	NestedRoots            []taskGraphNestedRoot                 `json:"nested_roots,omitempty"`
+	Pending                []taskGraphPendingStart               `json:"pending,omitempty"`
+	Active                 []string                              `json:"active,omitempty"`
+	ActiveSessions         []taskGraphActiveSession              `json:"active_sessions,omitempty"`
+	SessionStartProgress   []taskGraphSessionStartProgress       `json:"session_start_progress,omitempty"`
+	StaleCloseableChildren []taskStaleCloseableCandidate         `json:"stale_closeable_children,omitempty"`
+	ContainmentRisks       []taskContainmentRisk                 `json:"containment_risks,omitempty"`
+	WorkerObservations     []domain.WorkerObservation            `json:"worker_observations,omitempty"`
+	Blocked                map[string]string                     `json:"blocked"`
+	scopeIssueIDs          []string
+	cacheExpiresAt         time.Time
 }
 
 type taskGraphCapacitySummary struct {
@@ -209,15 +224,17 @@ type taskGraphCapacitySummary struct {
 }
 
 type taskGraphNestedRoot struct {
-	IssueID        string                  `json:"issue_id"`
-	Status         string                  `json:"status"`
-	IssueStatus    string                  `json:"issue_status,omitempty"`
-	Type           string                  `json:"type"`
-	ChildCount     int                     `json:"child_count"`
-	ActiveSession  *taskGraphActiveSession `json:"active_session,omitempty"`
-	StartFailure   *taskGraphStartFailure  `json:"start_failure,omitempty"`
-	FallbackPolicy string                  `json:"fallback_policy,omitempty"`
-	Advice         string                  `json:"advice,omitempty"`
+	IssueID          string                  `json:"issue_id"`
+	Status           string                  `json:"status"`
+	IssueStatus      string                  `json:"issue_status,omitempty"`
+	Classification   string                  `json:"classification,omitempty"`
+	ExclusionReasons []string                `json:"exclusion_reasons,omitempty"`
+	Type             string                  `json:"type"`
+	ChildCount       int                     `json:"child_count"`
+	ActiveSession    *taskGraphActiveSession `json:"active_session,omitempty"`
+	StartFailure     *taskGraphStartFailure  `json:"start_failure,omitempty"`
+	FallbackPolicy   string                  `json:"fallback_policy,omitempty"`
+	Advice           string                  `json:"advice,omitempty"`
 }
 
 type taskGraphStartFailure struct {
@@ -354,6 +371,7 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 		return d.errorResponse(req, projectIssueStoreHealthErrorCode(err), err.Error()), nil
 	}
 	payload := buildTaskListSnapshotPayload(projectID, result.Revision, result.LastCheckedAt, result.Freshness, result.Tasks, result.SummariesOnly)
+	payload.Source = result.Source
 	marshalStartedAt := time.Now()
 	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.list.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(result.Tasks), "cache_hit", false, "shared_load", shared, "query", query != "")
 	body, err := json.Marshal(payload)
@@ -523,50 +541,73 @@ func contextDeadlineRemainingMillis(ctx context.Context) int64 {
 }
 
 func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID string, query string, includeDependencies bool, archiveMode protocol.ArchiveMode) (taskListSnapshotLoadResult, error) {
+	if !d.materializedReadsEnabled() {
+		return d.buildLegacyTaskListSnapshot(ctx, req, projectID, query, includeDependencies, archiveMode)
+	}
+	_ = ctx
+	_ = req
+	tasks, source, err := d.projectReadSnapshot(projectID)
+	if err != nil {
+		return taskListSnapshotLoadResult{}, err
+	}
+	query = strings.TrimSpace(query)
+	filtered := tasks[:0]
+	lastCheckedAt := time.Unix(0, 0).UTC()
+	for _, task := range tasks {
+		archived := task.State.IsArchived()
+		if (archiveMode == protocol.ArchiveModeExclude && archived) || (archiveMode == protocol.ArchiveModeOnly && !archived) {
+			continue
+		}
+		if query != "" && !domain.TaskMatchesContentQuery(task, query) {
+			continue
+		}
+		lastCheckedAt = laterTime(lastCheckedAt, laterTime(task.UpdatedAt, task.RuntimeUpdatedAt))
+		if query == "" {
+			task.Description, task.Notes, task.Design, task.Acceptance = "", "", "", ""
+			if !includeDependencies {
+				task.Dependencies = nil
+			}
+		}
+		filtered = append(filtered, task)
+	}
+	tasks = filtered
+	summariesOnly := query == ""
+	revision := d.currentRevision(projectID)
+	return taskListSnapshotLoadResult{
+		Revision:      revision,
+		LastCheckedAt: lastCheckedAt,
+		Freshness:     protocol.TaskListFreshnessFresh,
+		SummariesOnly: summariesOnly,
+		Source:        source,
+		Tasks:         tasks,
+	}, nil
+}
+
+func (d *Daemon) buildLegacyTaskListSnapshot(ctx context.Context, req protocol.RequestEnvelope, projectID, query string, includeDependencies bool, archiveMode protocol.ArchiveMode) (taskListSnapshotLoadResult, error) {
+	_ = req
 	if err, unhealthy := d.projectIssueStoreHealthError(projectID); unhealthy {
 		return taskListSnapshotLoadResult{}, err
 	}
 	query = strings.TrimSpace(query)
-	if !archiveMode.Valid() {
-		archiveMode = protocol.ArchiveModeExclude
-	}
-	refreshStartedAt := time.Now()
-	var (
-		runtimeAt        time.Time
-		runtimeRefreshed bool
-		refreshErr       error
-	)
+	var runtimeAt time.Time
+	var refreshErr error
 	if query == "" {
-		runtimeAt, runtimeRefreshed, refreshErr = d.refreshTaskListSessionRuntimeState(ctx, projectID)
-		if refreshErr != nil && d.cfg.Logger != nil {
-			d.cfg.Logger.Debug("task list session runtime projection refresh failed", "project_id", projectID, "error", refreshErr)
-		}
+		runtimeAt, _, refreshErr = d.refreshTaskListSessionRuntimeState(ctx, projectID)
 		d.triggerWorktreeStateRefresh(projectID)
 	} else {
 		runtimeAt, _ = d.taskListSnapshotFreshness(ctx, projectID)
-	}
-	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.list.runtime_refresh", refreshStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "session_runtime_refreshed", runtimeRefreshed, "query", query != "", "skipped_for_query", query != "", "error", refreshErr)
-	if d.cfg.Logger != nil {
-		d.cfg.Logger.Info("daemon task list requested", "project_id", projectID, "query", query != "")
 	}
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return taskListSnapshotLoadResult{}, errors.New("issue store unavailable")
 	}
-	queryStartedAt := time.Now()
-	var (
-		tasks         []domain.Task
-		summariesOnly bool
-		err           error
-	)
-	if query == "" {
-		if includeDependencies {
-			tasks, err = issueClient.ListSummariesWithRuntimeDependenciesArchiveMode(ctx, projectID, issues.ArchiveMode(archiveMode))
-		} else {
-			tasks, err = issueClient.ListSummariesWithRuntimeArchiveMode(ctx, projectID, issues.ArchiveMode(archiveMode))
-		}
-		summariesOnly = true
-		latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.list.issue_store_list_summaries_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "include_dependencies", includeDependencies)
+	var tasks []domain.Task
+	var err error
+	summariesOnly := query == ""
+	if query == "" && includeDependencies {
+		tasks, err = issueClient.ListSummariesWithRuntimeDependenciesArchiveMode(ctx, projectID, issues.ArchiveMode(archiveMode))
+	} else if query == "" {
+		tasks, err = issueClient.ListSummariesWithRuntimeArchiveMode(ctx, projectID, issues.ArchiveMode(archiveMode))
 	} else {
 		tasks, err = issueClient.SearchWithRuntimeArchiveMode(ctx, projectID, query, issues.ArchiveMode(archiveMode))
 	}
@@ -574,11 +615,7 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 		return taskListSnapshotLoadResult{}, d.recordProjectIssueStoreFailure(projectID, err)
 	}
 	d.clearProjectIssueStoreHealth(projectID)
-	if query != "" {
-		latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.list.issue_store_search_with_runtime", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(tasks))
-	}
 	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
-	freshnessStartedAt := time.Now()
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
 	if query == "" && refreshErr == nil && !runtimeAt.IsZero() {
 		lastCheckedAt = laterTime(lastCheckedAt, runtimeAt)
@@ -586,66 +623,22 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 			freshness = protocol.TaskListFreshnessFresh
 		}
 	}
-	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.list.snapshot_freshness", freshnessStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "freshness", freshness)
 	revision := d.currentRevision(projectID)
 	if query == "" && !includeDependencies && archiveMode == protocol.ArchiveModeExclude {
 		d.storeTaskListSnapshotCacheWithRuntimeAt(projectID, revision, lastCheckedAt, freshness, runtimeAt, tasks, summariesOnly)
 	}
-	return taskListSnapshotLoadResult{
-		Revision:      revision,
-		LastCheckedAt: lastCheckedAt,
-		Freshness:     freshness,
-		RuntimeAt:     runtimeAt,
-		SummariesOnly: summariesOnly,
-		Tasks:         tasks,
-	}, nil
+	return taskListSnapshotLoadResult{Revision: revision, LastCheckedAt: lastCheckedAt, Freshness: freshness, RuntimeAt: runtimeAt, SummariesOnly: summariesOnly, Tasks: tasks}, nil
 }
 
-func (d *Daemon) refreshTaskListSessionRuntimeState(ctx context.Context, projectID string) (time.Time, bool, error) {
-	if d == nil || d.tmux == nil || d.sessionRuntimeStateStoreIfConfigured(projectID) == nil {
+func (d *Daemon) refreshTaskListSessionRuntimeState(_ context.Context, projectID string) (time.Time, bool, error) {
+	if d == nil {
 		return time.Time{}, false, nil
 	}
 	projectID = d.canonicalProjectID(projectID)
-	now := timeNow().UTC()
-
 	d.taskListRuntimeRefreshMu.Lock()
-	if d.taskListRuntimeLastRefresh == nil {
-		d.taskListRuntimeLastRefresh = map[string]time.Time{}
-	}
-	if d.taskListRuntimeRefreshes == nil {
-		d.taskListRuntimeRefreshes = map[string]*taskListRuntimeRefresh{}
-	}
 	lastRefresh := d.taskListRuntimeLastRefresh[projectID]
-	if !lastRefresh.IsZero() && now.Sub(lastRefresh) < taskListRuntimeRefreshTTL {
-		d.taskListRuntimeRefreshMu.Unlock()
-		return lastRefresh, false, nil
-	}
-	if refresh := d.taskListRuntimeRefreshes[projectID]; refresh != nil {
-		d.taskListRuntimeRefreshMu.Unlock()
-		select {
-		case <-ctx.Done():
-			return time.Time{}, false, ctx.Err()
-		case <-refresh.done:
-			return refresh.runtimeAt, false, refresh.err
-		}
-	}
-	refresh := &taskListRuntimeRefresh{done: make(chan struct{})}
-	d.taskListRuntimeRefreshes[projectID] = refresh
 	d.taskListRuntimeRefreshMu.Unlock()
-
-	refresh.runtimeAt = now
-	refresh.err = d.refreshExistingSessionRuntimeState(ctx, projectID)
-
-	d.taskListRuntimeRefreshMu.Lock()
-	d.taskListRuntimeLastRefresh[projectID] = now
-	delete(d.taskListRuntimeRefreshes, projectID)
-	close(refresh.done)
-	d.taskListRuntimeRefreshMu.Unlock()
-
-	if refresh.err != nil {
-		return now, true, refresh.err
-	}
-	return now, true, nil
+	return lastRefresh, false, nil
 }
 
 func cloneTaskListSnapshotLoadResult(result taskListSnapshotLoadResult) taskListSnapshotLoadResult {
@@ -671,6 +664,41 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 	archiveMode, err := protocol.NormalizeArchiveMode(cmd.Archived)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
+	}
+	if d.materializedReadsEnabled() {
+		materialized, source, err := d.projectReadSnapshot(projectID)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
+		}
+		tasks := materializedTaskContext(materialized, []string{taskID}, true, false, true, false, archiveMode)
+		found := false
+		for _, task := range tasks {
+			if task.ID.String() == taskID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue not found: %s", taskID)), nil
+		}
+		if err := d.refreshFiniteWorktreeGitFacts(ctx, projectID, taskIDsFromTasks(tasks)); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("refresh issue worktree git facts: %v", err)), nil
+		}
+		materialized, source, err = d.projectReadSnapshot(projectID)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
+		}
+		tasks = materializedTaskContext(materialized, []string{taskID}, true, false, true, false, archiveMode)
+		lastCheckedAt := materializedLastCheckedAt(tasks)
+		payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), lastCheckedAt, protocol.TaskListFreshnessFresh, tasks, false)
+		payload.Source = source
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		resp := d.successResponse(req)
+		resp.Body, resp.Revision = body, payload.SnapshotRevision
+		return resp, nil
 	}
 	cacheStartedAt := time.Now()
 	if archiveMode == protocol.ArchiveModeExclude {
@@ -727,23 +755,6 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 		}
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	contextTaskIDs := taskIDsFromTasks(tasks)
-	refreshSessionStartedAt := time.Now()
-	if err := d.refreshIssueSessionRuntimeState(ctx, projectID, contextTaskIDs); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("task get session runtime refresh failed", "project_id", projectID, "task_id", taskID, "context_task_count", len(contextTaskIDs), "error", err)
-	}
-	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.issue_session_refresh", refreshSessionStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "context_task_count", len(contextTaskIDs))
-	if len(contextTaskIDs) > 0 {
-		queryStartedAt = time.Now()
-		tasks, err = issueClient.GetWithDependencyContextRuntimeArchiveMode(ctx, projectID, taskID, issues.ArchiveMode(archiveMode))
-		latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.issue_store_get_dependency_context_runtime_after_session_refresh", queryStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID)
-		if err != nil {
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Warn("daemon task get reload after session refresh failed", "project_id", projectID, "task_id", taskID, "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
-			}
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-		}
-	}
 	freshnessStartedAt := time.Now()
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
 	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.snapshot_freshness", freshnessStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "freshness", freshness)
@@ -779,6 +790,32 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 	taskIDs := uniqueTrimmedTaskIDs(cmd.TaskIDs)
 	if len(taskIDs) == 0 {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "task_ids is required"), nil
+	}
+	if d.materializedReadsEnabled() {
+		materialized, source, err := d.projectReadSnapshot(projectID)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
+		}
+		tasks := materializedTaskContext(materialized, taskIDs, !cmd.MetadataOnly, cmd.IncludeAncestors, !cmd.ExcludeDependents, cmd.DirectDependents, protocol.ArchiveModeExclude)
+		if !cmd.MetadataOnly {
+			if err := d.refreshFiniteWorktreeGitFacts(ctx, projectID, taskIDsFromTasks(tasks)); err != nil {
+				return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("refresh issue worktree git facts: %v", err)), nil
+			}
+			materialized, source, err = d.projectReadSnapshot(projectID)
+			if err != nil {
+				return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
+			}
+			tasks = materializedTaskContext(materialized, taskIDs, true, cmd.IncludeAncestors, !cmd.ExcludeDependents, cmd.DirectDependents, protocol.ArchiveModeExclude)
+		}
+		payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), materializedLastCheckedAt(tasks), protocol.TaskListFreshnessFresh, tasks, false)
+		payload.Source = source
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		resp := d.successResponse(req)
+		resp.Body, resp.Revision = body, payload.SnapshotRevision
+		return resp, nil
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task get-many requested", "project_id", projectID, "task_count", len(taskIDs))
@@ -829,20 +866,6 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 				d.refreshIssueWorktreeState(ctx, projectID, taskID)
 			}
 			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get_many.direct_dependent_worktree_refresh", worktreeRefreshStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(contextTaskIDs))
-		}
-		refreshSessionStartedAt := time.Now()
-		if err := d.refreshIssueSessionRuntimeState(ctx, projectID, contextTaskIDs); err != nil && d.cfg.Logger != nil {
-			d.cfg.Logger.Debug("task get-many session runtime refresh failed", "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(contextTaskIDs), "error", err)
-		}
-		latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get_many.issue_session_refresh", refreshSessionStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(contextTaskIDs))
-	}
-	if !cmd.MetadataOnly && len(contextTaskIDs) > 0 {
-		tasks, err = issueClient.GetManyWithDependencyContextRuntime(ctx, projectID, taskIDs, contextOptions...)
-		if err != nil {
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Warn("daemon task get-many reload after session refresh failed", "project_id", projectID, "task_count", len(taskIDs), "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
-			}
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 		}
 	}
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
@@ -1582,7 +1605,14 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 			continue
 		}
 		branch := strings.TrimSpace(wt.Branch)
-		d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktreePath, branch)
+		projection, found, projectionErr := d.worktreeRuntimeStateStore(projectID).GetWorktreeStateByIssueID(ctx, projectID, issueID)
+		if projectionErr != nil {
+			errs = append(errs, fmt.Errorf("%s: load worktree projection: %w", issueID, projectionErr))
+			continue
+		}
+		if !found || strings.TrimSpace(projection.Path) != worktreePath || strings.TrimSpace(projection.Branch) != branch {
+			d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktreePath, branch)
+		}
 		refreshed++
 
 		if d.git == nil {
@@ -1611,6 +1641,37 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 		}
 	}
 	return refreshed, errors.Join(errs...)
+}
+
+// refreshFiniteWorktreeGitFacts synchronously converges the bounded issue set
+// from Git into the durable runtime projection, then refreshes the in-memory
+// read model before a finite ticket or orchestration response is assembled.
+func (d *Daemon) refreshFiniteWorktreeGitFacts(ctx context.Context, projectID string, issueIDs []string) error {
+	issueIDs = normalizeRuntimeReconcileIssueIDs(issueIDs)
+	if len(issueIDs) == 0 {
+		return nil
+	}
+	store := d.worktreeRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		return nil
+	}
+	projectedIssueIDs := make([]string, 0, len(issueIDs))
+	for _, issueID := range issueIDs {
+		projection, found, err := store.GetWorktreeStateByIssueID(ctx, d.canonicalProjectID(projectID), issueID)
+		if err != nil {
+			return fmt.Errorf("%s: load finite worktree projection: %w", issueID, err)
+		}
+		if found && strings.TrimSpace(projection.Path) != "" {
+			projectedIssueIDs = append(projectedIssueIDs, issueID)
+		}
+	}
+	if len(projectedIssueIDs) == 0 {
+		return nil
+	}
+	if _, err := d.refreshWorktreeRuntimeStateForIssues(ctx, projectID, projectedIssueIDs); err != nil {
+		return err
+	}
+	return d.refreshProjectReadRuntimeForIssues(ctx, projectID, projectedIssueIDs)
 }
 
 func (d *Daemon) runtimeDiffBaseBranchForIssue(
@@ -2003,13 +2064,17 @@ func parseTaskOwnershipTTL(raw string) (time.Duration, error) {
 }
 
 func (d *Daemon) handleTaskClose(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-	ctx, cancel := context.WithTimeout(ctx, domain.IntegrationCloseTimeout)
-	defer cancel()
 	projectID := d.projectID(req.Meta)
 	var cmd taskCloseRequest
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
+	closeOutcome, _, err := daemonTaskCloseOutcomeStatus(cmd.CloseOutcome)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, taskCloseTimeout(closeOutcome))
+	defer cancel()
 	result, err := d.closeTask(ctx, projectID, cmd, req)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -2022,6 +2087,13 @@ func (d *Daemon) handleTaskClose(ctx context.Context, req protocol.RequestEnvelo
 	resp.Body = body
 	resp.Revision = result.Revision
 	return resp, nil
+}
+
+func taskCloseTimeout(outcome domain.IssueCloseOutcome) time.Duration {
+	if outcome == domain.IssueCloseCancelled {
+		return domain.LifecycleCleanupTimeout
+	}
+	return domain.IntegrationCloseTimeout
 }
 
 func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseRequest, req protocol.RequestEnvelope) (taskCloseResult, error) {
@@ -2135,6 +2207,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	result.Integrated = integration.Integrated
 	result.IntegratedSourceBranch = integration.SourceBranch
 	result.IntegratedTargetBranch = integration.TargetBranch
+	result.IntegrationValidationAttempts = append([]domain.IntegrationCandidateValidationAttempt(nil), integration.ValidationAttempts...)
 
 	phaseStartedAt = time.Now()
 	if integration.Requested && (integration.Integrated || integration.NoChanges) {
@@ -2743,14 +2816,15 @@ func (d *Daemon) liveTmuxSessionSet(ctx context.Context) (map[string]struct{}, b
 }
 
 type taskCloseIntegrationResult struct {
-	Requested       bool
-	Integrated      bool
-	NoChanges       bool
-	SourceBranch    string
-	TargetBranch    string
-	SourceOID       string
-	TargetOID       string
-	HookDiagnostics []git.GitHookDiagnostic
+	Requested          bool
+	Integrated         bool
+	NoChanges          bool
+	SourceBranch       string
+	TargetBranch       string
+	SourceOID          string
+	TargetOID          string
+	HookDiagnostics    []git.GitHookDiagnostic
+	ValidationAttempts []domain.IntegrationCandidateValidationAttempt
 }
 
 type taskCloseIntegrationReceipt struct {
@@ -2927,14 +3001,7 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		if targetOIDErr != nil {
 			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve target commit before no-op close integration: %w", targetOIDErr)
 		}
-		return taskCloseIntegrationResult{
-			Requested:    true,
-			NoChanges:    true,
-			SourceBranch: source.Branch,
-			TargetBranch: targetBranch,
-			SourceOID:    sourceOID,
-			TargetOID:    targetOID,
-		}, nil
+		return d.taskCloseNoChangesIntegrationResult(ctx, targetWorktree, source.Branch, targetBranch, sourceOID, targetOID)
 	}
 	sourcePathMissing, statErr := taskCloseWorktreePathMissing(source.Path)
 	if statErr != nil {
@@ -2981,14 +3048,7 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		if targetOIDErr != nil {
 			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve target commit before no-op close integration: %w", targetOIDErr)
 		}
-		return taskCloseIntegrationResult{
-			Requested:    true,
-			NoChanges:    true,
-			SourceBranch: source.Branch,
-			TargetBranch: targetBranch,
-			SourceOID:    sourceOID,
-			TargetOID:    targetOID,
-		}, nil
+		return d.taskCloseNoChangesIntegrationResult(ctx, targetWorktree, source.Branch, targetBranch, sourceOID, targetOID)
 	}
 	preflight, err := d.git.MergePreflight(ctx, source.Path, targetWorktree, targetBranch, source.Branch)
 	if err != nil {
@@ -3033,15 +3093,43 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve resulting target commit after close integration: %w", targetOIDErr)
 	}
 	integration = taskCloseIntegrationResult{
-		Requested:       true,
-		Integrated:      true,
-		SourceBranch:    source.Branch,
-		TargetBranch:    targetBranch,
-		SourceOID:       sourceOID,
-		TargetOID:       targetOID,
-		HookDiagnostics: append([]git.GitHookDiagnostic(nil), merge.HookDiagnostics...),
+		Requested:          true,
+		Integrated:         true,
+		SourceBranch:       source.Branch,
+		TargetBranch:       targetBranch,
+		SourceOID:          sourceOID,
+		TargetOID:          targetOID,
+		HookDiagnostics:    append([]git.GitHookDiagnostic(nil), merge.HookDiagnostics...),
+		ValidationAttempts: append([]domain.IntegrationCandidateValidationAttempt(nil), merge.ValidationAttempts...),
 	}
 	return integration, nil
+}
+
+func (d *Daemon) canonicalIntegrationValidationAttempts(ctx context.Context, targetWorktree, targetOID string) ([]domain.IntegrationCandidateValidationAttempt, error) {
+	attempt, found, err := d.git.CanonicalIntegrationValidation(ctx, targetWorktree, targetOID)
+	if err != nil {
+		return nil, fmt.Errorf("read canonical integration validation for target %s: %w", targetOID, err)
+	}
+	if !found {
+		return nil, nil
+	}
+	return []domain.IntegrationCandidateValidationAttempt{attempt}, nil
+}
+
+func (d *Daemon) taskCloseNoChangesIntegrationResult(ctx context.Context, targetWorktree, sourceBranch, targetBranch, sourceOID, targetOID string) (taskCloseIntegrationResult, error) {
+	validationAttempts, err := d.canonicalIntegrationValidationAttempts(ctx, targetWorktree, targetOID)
+	if err != nil {
+		return taskCloseIntegrationResult{Requested: true}, err
+	}
+	return taskCloseIntegrationResult{
+		Requested:          true,
+		NoChanges:          true,
+		SourceBranch:       sourceBranch,
+		TargetBranch:       targetBranch,
+		SourceOID:          sourceOID,
+		TargetOID:          targetOID,
+		ValidationAttempts: validationAttempts,
+	}, nil
 }
 
 func daemonCloseIntegrationShouldUseOriginBase(workflowMode string, target taskMergeBaseTargetResult) bool {
@@ -3230,6 +3318,7 @@ func recordTaskCloseHookPhases(ctx context.Context, result *taskCloseResult, log
 }
 
 func (d *Daemon) mergeTaskBranchBeforeClose(ctx context.Context, projectID, taskID, targetWorktree, targetBranch, sourceBranch string) (*git.MergeResult, error) {
+	var validationAttempts []git.CandidateValidationAttempt
 	for attempt := 1; ; attempt++ {
 		result, err := d.git.MergeCleanlyTransactional(ctx, targetWorktree, sourceBranch)
 		if err != nil {
@@ -3238,7 +3327,10 @@ func (d *Daemon) mergeTaskBranchBeforeClose(ctx context.Context, projectID, task
 		if result == nil {
 			return nil, fmt.Errorf("merge %s into %s returned no result", sourceBranch, targetBranch)
 		}
+		currentAttempts := append([]git.CandidateValidationAttempt(nil), result.ValidationAttempts...)
+		validationAttempts = append(validationAttempts, currentAttempts...)
 		if result.Success || !git.IsTransactionalMergeStaleTarget(result) {
+			result.ValidationAttempts = validationAttempts
 			return result, nil
 		}
 		if err := ctx.Err(); err != nil {
@@ -3879,15 +3971,11 @@ func (d *Daemon) closeCleanDescendantsBeforeParent(ctx context.Context, projectI
 }
 
 func (d *Daemon) loadTaskClosePreflightDomainTasks(ctx context.Context, projectID, taskID string) ([]domain.Task, error) {
-	issueClient := d.issueClientForProject(projectID)
-	if issueClient == nil {
-		return nil, fmt.Errorf("issue store unavailable")
-	}
-	tasks, err := issueClient.ListParentChildSubtreeWithRuntime(ctx, projectID, taskID)
+	tasks, _, err := d.projectReadSnapshot(projectID)
 	if err != nil {
 		return nil, err
 	}
-	return d.enrichTasksWithSessionState(ctx, projectID, tasks), nil
+	return materializedParentChildClosure(tasks, taskID), nil
 }
 
 func (d *Daemon) investigationAcceptance(ctx context.Context, projectID string, task domain.Task) (domain.InvestigationAcceptance, error) {
@@ -4434,6 +4522,8 @@ func (d *Daemon) handleTaskGraphReadiness(ctx context.Context, req protocol.Requ
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
+	result.Revision = d.currentRevision(projectID)
+	finalizeTaskGraphReadinessSource(&result)
 	marshalStartedAt := time.Now()
 	body, err := json.Marshal(result)
 	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.marshal_result", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "root_issue_id", cmd.TaskID, "runnable_count", len(result.Runnable), "active_count", len(result.Active))
@@ -4442,7 +4532,7 @@ func (d *Daemon) handleTaskGraphReadiness(ctx context.Context, req protocol.Requ
 	}
 	resp := d.successResponse(req)
 	resp.Body = body
-	resp.Revision = d.currentRevision(projectID)
+	resp.Revision = result.Revision
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task graph readiness completed",
 			"project_id", projectID,
@@ -4649,7 +4739,11 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 			PendingDecisions: pendingDecisions,
 		}, nil
 	}
-	events, err := readMailboxEvents(repoDir, parentIssueID)
+	mailboxRepoDir := strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID))
+	if mailboxRepoDir == "" {
+		return taskIntegrationReadinessResult{}, fmt.Errorf("resolve authoritative project mailbox root for %s", projectID)
+	}
+	events, err := readMailboxEvents(mailboxRepoDir, parentIssueID)
 	if err != nil {
 		return taskIntegrationReadinessResult{}, fmt.Errorf("list mailbox events for %s: %w", parentIssueID, err)
 	}
@@ -4687,6 +4781,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 				ContextRisk:            contextRisk,
 				Reasons:                reasons,
 				EvidenceEventSeq:       evt.Seq,
+				EvidenceSource:         "mailbox",
 				EvidenceIncomplete:     true,
 				EvidenceMissingFields:  validation.Missing,
 				EvidenceInvalidReasons: validation.Invalid,
@@ -4721,10 +4816,10 @@ func validateWorkerAggregateRequest(validation *domain.WorkerEvidenceParseResult
 	}
 	var problem string
 	if packet.AggregateValidation == nil {
-		if latest == nil {
-			return
-		}
-		problem = "aggregate_validation is required for integration readiness"
+		// The daemon projection is the authority for aggregate validation. Older
+		// and issue-recorded worker packets do not have to duplicate that proof;
+		// when they do, the identity and revision are still checked below.
+		return
 	} else if latest == nil {
 		problem = fmt.Sprintf("aggregate_validation request %s is not present in the daemon validation projection", packet.AggregateValidation.RequestID)
 	} else if packet.AggregateValidation.RequestID != latest.RequestID {
@@ -5137,42 +5232,140 @@ func (d *Daemon) taskGraphReadinessForActor(ctx context.Context, projectID, root
 	projectID = d.canonicalProjectID(projectID)
 	rootIssueID = strings.TrimSpace(rootIssueID)
 	actorID = strings.TrimSpace(actorID)
-	loadKey := taskGraphReadinessLoadKey(projectID, rootIssueID, actorID)
+	cacheKey := taskGraphReadinessLoadKey(projectID, rootIssueID, actorID)
 
-	d.taskGraphReadinessMu.Lock()
-	if d.taskGraphReadinessLoads == nil {
-		d.taskGraphReadinessLoads = map[string]*taskGraphReadinessLoad{}
-	}
-	if load := d.taskGraphReadinessLoads[loadKey]; load != nil {
+	for {
+		revision := d.currentRevision(projectID)
+		loadKey := fmt.Sprintf("%s\x00%d", cacheKey, revision)
+
+		d.taskGraphReadinessMu.Lock()
+		if d.taskGraphReadinessCache == nil {
+			d.taskGraphReadinessCache = map[string]taskGraphReadinessCacheEntry{}
+		}
+		if cached, ok := d.taskGraphReadinessCache[cacheKey]; ok && cached.revision == revision && (cached.expiresAt.IsZero() || time.Now().Before(cached.expiresAt)) {
+			d.taskGraphReadinessMu.Unlock()
+			if !d.materializedReadsEnabled() {
+				if err := d.validateTaskGraphRuntime(ctx, projectID, cached.result.scopeIssueIDs, revision); err != nil && d.cfg.Logger != nil {
+					d.cfg.Logger.Debug("validate cached graph readiness runtime", "project_id", projectID, "root_issue_id", rootIssueID, "error", err)
+				}
+			}
+			if d.currentRevision(projectID) != revision {
+				continue
+			}
+			return cloneTaskGraphReadinessResult(cached.result), nil
+		}
+		if d.taskGraphReadinessLoads == nil {
+			d.taskGraphReadinessLoads = map[string]*taskGraphReadinessLoad{}
+		}
+		if load := d.taskGraphReadinessLoads[loadKey]; load != nil {
+			d.taskGraphReadinessMu.Unlock()
+			waitStartedAt := time.Now()
+			select {
+			case <-ctx.Done():
+				latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.singleflight_wait", waitStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "actor_id", actorID, "shared_load", true, "error", ctx.Err())
+				return taskGraphReadinessResult{}, ctx.Err()
+			case <-load.done:
+				latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.singleflight_wait", waitStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "actor_id", actorID, "shared_load", true, "error", load.err)
+				if load.err != nil {
+					return taskGraphReadinessResult{}, load.err
+				}
+				if d.currentRevision(projectID) != revision {
+					continue
+				}
+				return cloneTaskGraphReadinessResult(load.result), nil
+			}
+		}
+		load := &taskGraphReadinessLoad{done: make(chan struct{})}
+		d.taskGraphReadinessLoads[loadKey] = load
 		d.taskGraphReadinessMu.Unlock()
-		waitStartedAt := time.Now()
+
+		result, err := d.buildTaskGraphReadinessForActor(ctx, projectID, rootIssueID, actorID)
+		load.result = cloneTaskGraphReadinessResult(result)
+		load.err = err
+		finishedRevision := d.currentRevision(projectID)
+
+		d.taskGraphReadinessMu.Lock()
+		delete(d.taskGraphReadinessLoads, loadKey)
+		if err == nil && finishedRevision == revision {
+			d.taskGraphReadinessCache[cacheKey] = taskGraphReadinessCacheEntry{
+				revision:  revision,
+				expiresAt: result.cacheExpiresAt,
+				result:    cloneTaskGraphReadinessResult(result),
+			}
+		}
+		close(load.done)
+		d.taskGraphReadinessMu.Unlock()
+
+		return result, err
+	}
+}
+
+const taskGraphRuntimeValidationTTL = time.Second
+
+// validateTaskGraphRuntime bounds the hybrid projection/tmux observation work
+// shared by rooted watches, project watches, and finite snapshot readers. The
+// projection revision remains part of the authority key, while the short TTL
+// ensures out-of-band tmux changes are still observed without making every
+// poll independently query SQLite and tmux.
+func (d *Daemon) validateTaskGraphRuntime(ctx context.Context, projectID string, issueIDs []string, revision uint64) error {
+	if d == nil || d.tmux == nil || d.sessionRuntimeStateStoreIfConfigured(projectID) == nil || len(issueIDs) == 0 {
+		return nil
+	}
+	projectID = d.canonicalProjectID(projectID)
+	ids := uniqueStrings(append([]string(nil), issueIDs...))
+	sort.Strings(ids)
+	cacheKey := projectID + "\x00" + strings.Join(ids, "\x00")
+	loadKey := fmt.Sprintf("%s\x00%d", cacheKey, revision)
+
+	d.taskGraphRuntimeValidationMu.Lock()
+	if d.taskGraphRuntimeValidations == nil {
+		d.taskGraphRuntimeValidations = map[string]taskGraphRuntimeValidationEntry{}
+	}
+	if cached, ok := d.taskGraphRuntimeValidations[cacheKey]; ok && cached.revision == revision && time.Since(cached.validatedAt) <= taskGraphRuntimeValidationTTL {
+		d.taskGraphRuntimeValidationMu.Unlock()
+		return nil
+	}
+	if d.taskGraphRuntimeValidationLoads == nil {
+		d.taskGraphRuntimeValidationLoads = map[string]*taskGraphRuntimeValidationLoad{}
+	}
+	if load := d.taskGraphRuntimeValidationLoads[loadKey]; load != nil {
+		d.taskGraphRuntimeValidationMu.Unlock()
 		select {
 		case <-ctx.Done():
-			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.singleflight_wait", waitStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "actor_id", actorID, "shared_load", true, "error", ctx.Err())
-			return taskGraphReadinessResult{}, ctx.Err()
+			return ctx.Err()
 		case <-load.done:
-			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.singleflight_wait", waitStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "actor_id", actorID, "shared_load", true, "error", load.err)
-			return cloneTaskGraphReadinessResult(load.result), load.err
+			return load.err
 		}
 	}
-	load := &taskGraphReadinessLoad{done: make(chan struct{})}
-	d.taskGraphReadinessLoads[loadKey] = load
-	d.taskGraphReadinessMu.Unlock()
+	load := &taskGraphRuntimeValidationLoad{done: make(chan struct{})}
+	d.taskGraphRuntimeValidationLoads[loadKey] = load
+	d.taskGraphRuntimeValidationMu.Unlock()
 
-	result, err := d.buildTaskGraphReadinessForActor(ctx, projectID, rootIssueID, actorID)
-	load.result = cloneTaskGraphReadinessResult(result)
+	err := d.refreshIssueSessionRuntimeState(ctx, projectID, ids)
 	load.err = err
-
-	d.taskGraphReadinessMu.Lock()
-	delete(d.taskGraphReadinessLoads, loadKey)
+	d.taskGraphRuntimeValidationMu.Lock()
+	delete(d.taskGraphRuntimeValidationLoads, loadKey)
+	if err == nil && d.currentRevision(projectID) == revision {
+		d.taskGraphRuntimeValidations[cacheKey] = taskGraphRuntimeValidationEntry{revision: revision, validatedAt: time.Now()}
+	}
 	close(load.done)
-	d.taskGraphReadinessMu.Unlock()
-
-	return result, err
+	d.taskGraphRuntimeValidationMu.Unlock()
+	return err
 }
 
 func (d *Daemon) buildTaskGraphReadinessForActor(ctx context.Context, projectID, rootIssueID, actorID string) (taskGraphReadinessResult, error) {
-	tasks, err := d.loadTaskGraphReadinessDomainTasks(ctx, projectID, rootIssueID)
+	var (
+		tasks  []domain.Task
+		source protocol.MaterializedSnapshotMetadata
+		err    error
+	)
+	if d.materializedReadsEnabled() {
+		var materialized []domain.Task
+		materialized, source, err = d.projectReadSnapshot(projectID)
+		tasks = materializedParentChildClosure(materialized, rootIssueID)
+	} else {
+		tasks, err = d.loadTaskGraphReadinessDomainTasks(ctx, projectID, rootIssueID)
+	}
 	if err != nil {
 		return taskGraphReadinessResult{}, fmt.Errorf("inspect issue graph readiness: %w", err)
 	}
@@ -5184,13 +5377,19 @@ func (d *Daemon) buildTaskGraphReadinessForActor(ctx context.Context, projectID,
 	if err != nil {
 		return taskGraphReadinessResult{}, err
 	}
-	ready, err := daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID, byID, children, actorID, time.Now().UTC(), completionEvidence)
+	now := time.Now().UTC()
+	ready, err := daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID, byID, children, actorID, now, completionEvidence)
 	if err != nil {
 		return taskGraphReadinessResult{}, err
 	}
-	waitingIssues, err := d.issueClientForProject(projectID).UnresolvedInteractionIssueIDs(ctx)
-	if err != nil {
-		return taskGraphReadinessResult{}, fmt.Errorf("refresh interaction readiness projection: %w", err)
+	ready.scopeIssueIDs = taskIDsFromTasks(tasks)
+	ready.Source = source
+	ready.cacheExpiresAt = taskGraphReadinessOwnershipExpiry(tasks, now)
+	waitingIssues := make(map[string]struct{})
+	for _, task := range tasks {
+		if task.IssueFacts().WaitingHuman {
+			waitingIssues[task.ID.String()] = struct{}{}
+		}
 	}
 	if len(waitingIssues) > 0 {
 		runnable := ready.Runnable[:0]
@@ -5223,51 +5422,73 @@ func (d *Daemon) buildTaskGraphReadinessForActor(ctx context.Context, projectID,
 	return ready, nil
 }
 
+func finalizeTaskGraphReadinessSource(result *taskGraphReadinessResult) {
+	if result == nil || result.Source.IssueChecksum == "" {
+		return
+	}
+	normalized := *result
+	normalized.Revision = 0
+	normalized.Source.SemanticChecksum = ""
+	result.Source.SemanticChecksum = checksumJSON(normalized)
+}
+
+func taskGraphReadinessOwnershipExpiry(tasks []domain.Task, now time.Time) time.Time {
+	var earliest time.Time
+	for _, task := range tasks {
+		if task.Ownership == nil || task.Ownership.ExpiresAt == nil || !task.Ownership.ExpiresAt.After(now) {
+			continue
+		}
+		if earliest.IsZero() || task.Ownership.ExpiresAt.Before(earliest) {
+			earliest = task.Ownership.ExpiresAt.UTC()
+		}
+	}
+	return earliest
+}
+
 func taskGraphReadinessLoadKey(projectID, rootIssueID, actorID string) string {
 	return strings.TrimSpace(projectID) + "\x00" + strings.TrimSpace(rootIssueID) + "\x00" + strings.TrimSpace(actorID)
 }
 
+func (d *Daemon) taskGraphReadinessCacheExpiry(projectID, rootIssueID, actorID string, revision uint64) time.Time {
+	cacheKey := taskGraphReadinessLoadKey(d.canonicalProjectID(projectID), rootIssueID, actorID)
+	d.taskGraphReadinessMu.Lock()
+	defer d.taskGraphReadinessMu.Unlock()
+	cached, ok := d.taskGraphReadinessCache[cacheKey]
+	if !ok || cached.revision != revision {
+		return time.Time{}
+	}
+	return cached.expiresAt
+}
+
 func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectID, rootIssueID string) ([]domain.Task, error) {
+	if d.materializedReadsEnabled() {
+		tasks, _, err := d.projectReadSnapshot(projectID)
+		if err != nil {
+			return nil, err
+		}
+		return materializedParentChildClosure(tasks, rootIssueID), nil
+	}
+	// Explicit compatibility exception: production starts project materializers
+	// before serving commands. This direct indexed read exists only for embedded
+	// and migration-isolation tests that deliberately disable that startup path.
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")
 	}
-	loadStartedAt := time.Now()
 	tasks, err := issueClient.ListGraphReadinessWithRuntime(ctx, projectID, rootIssueID)
-	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.issue_store_list_graph_readiness_with_runtime", loadStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "task_count", len(tasks))
 	if err != nil {
 		return nil, err
 	}
 	contextTaskIDs := taskIDsFromTasks(tasks)
-	canRefreshSessionRuntime := d != nil && d.tmux != nil && d.sessionRuntimeStateStoreIfConfigured(projectID) != nil
-	if canRefreshSessionRuntime && len(contextTaskIDs) > 0 {
-		refreshStartedAt := time.Now()
-		if err := d.refreshIssueSessionRuntimeState(ctx, projectID, contextTaskIDs); err != nil {
-			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.scoped_session_runtime_refresh", refreshStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "context_task_count", len(contextTaskIDs), "error", err)
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Debug("task graph scoped session runtime refresh failed", "project_id", projectID, "root_issue_id", rootIssueID, "context_task_count", len(contextTaskIDs), "error", err)
-			}
-		} else {
-			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.scoped_session_runtime_refresh", refreshStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "context_task_count", len(contextTaskIDs))
-			reloadStartedAt := time.Now()
+	if d.tmux != nil && d.sessionRuntimeStateStoreIfConfigured(projectID) != nil && len(contextTaskIDs) > 0 {
+		if err := d.validateTaskGraphRuntime(ctx, projectID, contextTaskIDs, d.currentRevision(projectID)); err == nil {
 			tasks, err = issueClient.ListGraphReadinessWithRuntime(ctx, projectID, rootIssueID)
-			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.issue_store_reload_after_runtime_refresh", reloadStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "task_count", len(tasks))
 			if err != nil {
 				return nil, err
 			}
 		}
 	}
-	if d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("task graph readiness loaded root-scoped tasks",
-			"project_id", projectID,
-			"root_issue_id", rootIssueID,
-			"task_count", len(tasks),
-		)
-	}
-	enrichStartedAt := time.Now()
-	tasks = d.enrichTasksWithSessionState(ctx, projectID, tasks)
-	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.graph_readiness.enrich_session_state", enrichStartedAt, "project_id", projectID, "root_issue_id", rootIssueID, "task_count", len(tasks))
-	return tasks, nil
+	return d.enrichTasksWithSessionState(ctx, projectID, tasks), nil
 }
 
 func (result *taskGraphReadinessResult) applySessionStartProgress(progressByIssue map[string]taskGraphSessionStartProgress) {
@@ -5297,18 +5518,11 @@ func (result *taskGraphReadinessResult) applySessionStartProgress(progressByIssu
 }
 
 func (d *Daemon) loadTaskGraphDomainTasks(ctx context.Context, projectID string) ([]domain.Task, error) {
-	if err := d.refreshExistingSessionRuntimeState(ctx, projectID); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("task graph session runtime refresh failed", "project_id", projectID, "error", err)
-	}
-	issueClient := d.issueClientForProject(projectID)
-	if issueClient == nil {
-		return nil, fmt.Errorf("issue store unavailable")
-	}
-	tasks, err := issueClient.ListSummariesWithRuntimeDependencies(ctx, projectID)
+	tasks, _, err := d.projectReadSnapshot(projectID)
 	if err != nil {
 		return nil, err
 	}
-	return d.enrichTasksWithSessionState(ctx, projectID, tasks), nil
+	return tasks, nil
 }
 
 func daemonTaskGraphIndexes(rootIssueID string, tasks []domain.Task) (naming.IssueID, map[naming.IssueID]domain.Task, map[naming.IssueID][]naming.IssueID, error) {
@@ -5343,6 +5557,7 @@ func daemonTaskGraphReadinessFromIndexesWithCompletionEvidence(rootID naming.Iss
 }
 
 func daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID, actorID string, now time.Time, completionEvidence map[string]taskDurableCompletionEvidence) (taskGraphReadinessResult, error) {
+	rootBacklog := byID[rootID].IssueFacts().LifecycleState == domain.IssueWorkflowBacklog
 	leafIDs := daemonTaskGraphDirectWorkerLeafIDs(rootID, byID, children)
 	leaves := make([]string, 0, len(leafIDs))
 	for _, id := range leafIDs {
@@ -5356,9 +5571,19 @@ func daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID na
 	result := taskGraphReadinessResult{
 		RootIssueID: rootID.String(),
 		Runnable:    make([]string, 0, len(leaves)),
-		NestedRoots: daemonTaskGraphNestedRootSummaries(rootID, byID, children),
+		NestedRoots: daemonTaskGraphNestedRootSummaries(rootID, byID, children, actorID, now),
 		Active:      make([]string, 0),
 		Blocked:     make(map[string]string),
+	}
+	if rootBacklog {
+		for i := range result.NestedRoots {
+			result.Blocked[result.NestedRoots[i].IssueID] = "lifecycle-backlog"
+			result.NestedRoots[i].Status = "not_counting_capacity"
+			result.NestedRoots[i].Classification = string(domain.OrchestrationCandidateBacklog)
+			result.NestedRoots[i].ExclusionReasons = uniqueNonEmpty(append(result.NestedRoots[i].ExclusionReasons, "lifecycle-backlog"))
+			result.NestedRoots[i].FallbackPolicy = "preserve_issue_lifecycle"
+			result.NestedRoots[i].Advice = fmt.Sprintf("nested root %s is contained by backlog root %s", result.NestedRoots[i].IssueID, rootID.String())
+		}
 	}
 	result.StaleCloseableChildren = daemonTaskGraphStaleCloseableCandidatesWithEvidence(rootID, byID, children, completionEvidence)
 	for _, idRaw := range leaves {
@@ -5374,16 +5599,26 @@ func daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID na
 			result.Active = append(result.Active, idRaw)
 			continue
 		}
-		if reason := daemonTaskOwnershipBlockReason(task, actorID, now); reason != "" {
-			result.Blocked[idRaw] = reason
+		if rootBacklog && id != rootID {
+			result.Blocked[idRaw] = "lifecycle-backlog"
 			continue
 		}
 		blockers := daemonTaskGraphUnresolvedBlockers(task, byID)
-		if len(blockers) > 0 {
-			result.Blocked[idRaw] = "waiting on " + strings.Join(blockers, ",")
+		if daemonTaskStaleCloseableCandidate(task, completionEvidence[task.ID.String()]) {
 			continue
 		}
-		if daemonTaskStaleCloseableCandidate(task, completionEvidence[task.ID.String()]) {
+		assessment := domain.AssessOrchestrationCandidate(task, actorID, now, blockers)
+		if !assessment.Eligible {
+			switch assessment.Classification {
+			case domain.OrchestrationCandidateActive:
+				result.Blocked[idRaw] = strings.Join(assessment.ExclusionReasons, ",")
+			case domain.OrchestrationCandidateBlocked:
+				result.Blocked[idRaw] = "waiting on " + strings.Join(blockers, ",")
+			case domain.OrchestrationCandidateOwnedElsewhere:
+				result.Blocked[idRaw] = daemonTaskOwnershipBlockReason(task, actorID, now)
+			default:
+				result.Blocked[idRaw] = strings.Join(assessment.ExclusionReasons, ",")
+			}
 			continue
 		}
 		result.Runnable = append(result.Runnable, idRaw)
@@ -5770,6 +6005,14 @@ func (d *Daemon) daemonTaskGraphNestedRoots(
 			item.FallbackPolicy = "watch_nested_root"
 			item.Advice = fmt.Sprintf("watch nested root orchestrator: az orchestrate status --root %s --json", item.IssueID)
 		}
+		if item.ActiveSession == nil && len(item.ExclusionReasons) > 0 {
+			item.Status = "not_counting_capacity"
+			item.StartFailure = nil
+			item.FallbackPolicy = "preserve_issue_lifecycle"
+			item.Advice = fmt.Sprintf("nested root %s is excluded from orchestration start candidates: %s", item.IssueID, strings.Join(item.ExclusionReasons, ","))
+			out = append(out, item)
+			continue
+		}
 		if item.ActiveSession == nil {
 			if failure, failed := failedStartsByIssue[item.IssueID]; failed {
 				copyFailure := failure
@@ -5895,10 +6138,27 @@ func cloneTaskGraphReadinessResult(result taskGraphReadinessResult) taskGraphRea
 	result.Runnable = append([]string(nil), result.Runnable...)
 	result.Pending = append([]taskGraphPendingStart(nil), result.Pending...)
 	result.Active = append([]string(nil), result.Active...)
-	result.SessionStartProgress = append([]taskGraphSessionStartProgress(nil), result.SessionStartProgress...)
+	result.SessionStartProgress = cloneTaskGraphSessionStartProgressList(result.SessionStartProgress)
 	result.StaleCloseableChildren = append([]taskStaleCloseableCandidate(nil), result.StaleCloseableChildren...)
+	for i := range result.StaleCloseableChildren {
+		result.StaleCloseableChildren[i].Evidence = append([]string(nil), result.StaleCloseableChildren[i].Evidence...)
+	}
 	result.ContainmentRisks = append([]taskContainmentRisk(nil), result.ContainmentRisks...)
+	for i := range result.ContainmentRisks {
+		result.ContainmentRisks[i].ChangedFiles = append([]string(nil), result.ContainmentRisks[i].ChangedFiles...)
+	}
 	result.WorkerObservations = append([]domain.WorkerObservation(nil), result.WorkerObservations...)
+	for i := range result.WorkerObservations {
+		observation := &result.WorkerObservations[i]
+		if observation.LastEvent != nil {
+			lastEvent := *observation.LastEvent
+			observation.LastEvent = &lastEvent
+		}
+		observation.EvidenceSummary = append([]string(nil), observation.EvidenceSummary...)
+		observation.Risks = append([]string(nil), observation.Risks...)
+		observation.NextActions = append([]string(nil), observation.NextActions...)
+	}
+	result.scopeIssueIDs = append([]string(nil), result.scopeIssueIDs...)
 	if result.Blocked != nil {
 		blocked := make(map[string]string, len(result.Blocked))
 		for key, value := range result.Blocked {
@@ -5918,11 +6178,11 @@ func cloneTaskGraphNestedRoots(in []taskGraphNestedRoot) []taskGraphNestedRoot {
 	out := make([]taskGraphNestedRoot, len(in))
 	for i := range in {
 		out[i] = in[i]
+		out[i].ExclusionReasons = append([]string(nil), in[i].ExclusionReasons...)
 		if in[i].ActiveSession != nil {
 			active := *in[i].ActiveSession
 			if active.StartProgress != nil {
-				progress := *active.StartProgress
-				active.StartProgress = &progress
+				active.StartProgress = cloneTaskGraphSessionStartProgress(active.StartProgress)
 			}
 			out[i].ActiveSession = &active
 		}
@@ -5942,11 +6202,35 @@ func cloneTaskGraphActiveSessions(in []taskGraphActiveSession) []taskGraphActive
 	for i := range in {
 		out[i] = in[i]
 		if in[i].StartProgress != nil {
-			progress := *in[i].StartProgress
-			out[i].StartProgress = &progress
+			out[i].StartProgress = cloneTaskGraphSessionStartProgress(in[i].StartProgress)
 		}
 	}
 	return out
+}
+
+func cloneTaskGraphSessionStartProgressList(in []taskGraphSessionStartProgress) []taskGraphSessionStartProgress {
+	out := append([]taskGraphSessionStartProgress(nil), in...)
+	for i := range out {
+		cloned := cloneTaskGraphSessionStartProgress(&out[i])
+		out[i] = *cloned
+	}
+	return out
+}
+
+func cloneTaskGraphSessionStartProgress(in *taskGraphSessionStartProgress) *taskGraphSessionStartProgress {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.StartedAt != nil {
+		startedAt := *in.StartedAt
+		out.StartedAt = &startedAt
+	}
+	if in.FinishedAt != nil {
+		finishedAt := *in.FinishedAt
+		out.FinishedAt = &finishedAt
+	}
+	return &out
 }
 
 func hasTaskGraphSessionStartProgress(issueID string, progressByIssue map[string]taskGraphSessionStartProgress) bool {
@@ -6619,7 +6903,7 @@ func daemonTaskGraphDirectWorkerLeafIDs(root naming.IssueID, byID map[naming.Iss
 	return out
 }
 
-func daemonTaskGraphNestedRootSummaries(root naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID) []taskGraphNestedRoot {
+func daemonTaskGraphNestedRootSummaries(root naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID, actorID string, now time.Time) []taskGraphNestedRoot {
 	if len(children[root]) == 0 {
 		return nil
 	}
@@ -6641,13 +6925,25 @@ func daemonTaskGraphNestedRootSummaries(root naming.IssueID, byID map[naming.Iss
 				return
 			}
 			seenRoots[id] = struct{}{}
+			assessment := domain.AssessOrchestrationCandidate(task, actorID, now, nil)
+			status := "startable"
+			fallbackPolicy := "start_nested_root"
+			advice := fmt.Sprintf("start nested root orchestrator: az orchestrator-session start --root %s", id.String())
+			if !assessment.Eligible {
+				status = "not_counting_capacity"
+				fallbackPolicy = "preserve_issue_lifecycle"
+				advice = fmt.Sprintf("nested root %s is excluded from orchestration start candidates: %s", id.String(), strings.Join(assessment.ExclusionReasons, ","))
+			}
 			out = append(out, taskGraphNestedRoot{
-				IssueID:     id.String(),
-				Status:      "startable",
-				IssueStatus: string(task.Status),
-				Type:        string(task.Type),
-				ChildCount:  len(daemonTaskGraphDescendants(id, children)),
-				Advice:      fmt.Sprintf("start nested root orchestrator: az orchestrator-session start --root %s", id.String()),
+				IssueID:          id.String(),
+				Status:           status,
+				IssueStatus:      string(task.Status),
+				Classification:   string(assessment.Classification),
+				ExclusionReasons: append([]string(nil), assessment.ExclusionReasons...),
+				Type:             string(task.Type),
+				ChildCount:       len(daemonTaskGraphDescendants(id, children)),
+				FallbackPolicy:   fallbackPolicy,
+				Advice:           advice,
 			})
 			return
 		}

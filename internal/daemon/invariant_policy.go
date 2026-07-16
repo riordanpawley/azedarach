@@ -20,6 +20,7 @@ const (
 	daemonInvariantSessionReconcile        daemonInvariantID = "session.reconcile"
 	daemonInvariantSessionIssueLifecycle   daemonInvariantID = "session.issue_lifecycle_runtime"
 	daemonInvariantSessionActivityConverge daemonInvariantID = "session.activity_convergence"
+	daemonInvariantManagedAgentIdentity     daemonInvariantID = "session.managed_agent_identity"
 	daemonInvariantAdvisorSingleton        daemonInvariantID = "session.advisor_singleton"
 
 	daemonInvariantTaskListFreshness    daemonInvariantID = "task.list_freshness"
@@ -52,6 +53,8 @@ const (
 	daemonInvariantOrchestrationReview     daemonInvariantID = "orchestration.project_review"
 	daemonInvariantOrchestrationClaimStart daemonInvariantID = "orchestration.claim_start"
 	daemonInvariantOrchestrationLoop       daemonInvariantID = "orchestration.project_loop"
+	daemonInvariantProjectionDeltaStream   daemonInvariantID = "projection.delta_stream"
+	daemonInvariantTmuxObservation         daemonInvariantID = "external.tmux_observation"
 	daemonInvariantValidationCapacity      daemonInvariantID = "validation.machine_capacity"
 )
 
@@ -63,6 +66,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantSessionReconcile:        daemonInvariantSourceHybrid,
 	daemonInvariantSessionIssueLifecycle:   daemonInvariantSourceHybrid,
 	daemonInvariantSessionActivityConverge: daemonInvariantSourceHybrid,
+	daemonInvariantManagedAgentIdentity:     daemonInvariantSourceHybrid,
 	daemonInvariantTaskListFreshness:       daemonInvariantSourceProjection,
 	daemonInvariantTaskClose:               daemonInvariantSourceHybrid,
 	daemonInvariantTaskClosePreflight:      daemonInvariantSourceHybrid,
@@ -90,9 +94,11 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantInteractionStaleness:    daemonInvariantSourceProjection,
 	daemonInvariantDecisionMDTransfer:      daemonInvariantSourceHybrid,
 	daemonInvariantDecisionPropagation:     daemonInvariantSourceHybrid,
-	daemonInvariantOrchestrationReview:     daemonInvariantSourceProjection,
+	daemonInvariantOrchestrationReview:     daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationClaimStart: daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationLoop:       daemonInvariantSourceProjection,
+	daemonInvariantProjectionDeltaStream:   daemonInvariantSourceProjection,
+	daemonInvariantTmuxObservation:         daemonInvariantSourceTmux,
 	daemonInvariantValidationCapacity:      daemonInvariantSourceProjection,
 }
 

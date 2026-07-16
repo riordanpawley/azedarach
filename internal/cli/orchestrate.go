@@ -302,6 +302,7 @@ func (e *orchestrateStartLaunchError) Error() string {
 }
 
 type orchestrateWatchFrame struct {
+	sourceRevision         uint64
 	RootIssueID            string                               `json:"root_issue_id"`
 	SinceSeq               int64                                `json:"since_seq"`
 	NextSince              int64                                `json:"next_since"`
@@ -391,15 +392,17 @@ type orchestrateWorkerEvidenceSummary struct {
 }
 
 type orchestrateNestedRoot struct {
-	IssueID        string                    `json:"issue_id"`
-	Status         string                    `json:"status"`
-	IssueStatus    string                    `json:"issue_status,omitempty"`
-	Type           string                    `json:"type"`
-	ChildCount     int                       `json:"child_count"`
-	ActiveSession  *orchestrateActiveSession `json:"active_session,omitempty"`
-	StartFailure   *orchestrateStartFailure  `json:"start_failure,omitempty"`
-	FallbackPolicy string                    `json:"fallback_policy,omitempty"`
-	Advice         string                    `json:"advice,omitempty"`
+	IssueID          string                    `json:"issue_id"`
+	Status           string                    `json:"status"`
+	IssueStatus      string                    `json:"issue_status,omitempty"`
+	Classification   string                    `json:"classification,omitempty"`
+	ExclusionReasons []string                  `json:"exclusion_reasons,omitempty"`
+	Type             string                    `json:"type"`
+	ChildCount       int                       `json:"child_count"`
+	ActiveSession    *orchestrateActiveSession `json:"active_session,omitempty"`
+	StartFailure     *orchestrateStartFailure  `json:"start_failure,omitempty"`
+	FallbackPolicy   string                    `json:"fallback_policy,omitempty"`
+	Advice           string                    `json:"advice,omitempty"`
 }
 
 type orchestrateStartFailure struct {
@@ -951,6 +954,12 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		fmt.Println("Nested roots:")
 		for _, nested := range result.NestedRoots {
 			fmt.Printf("- %s status=%s issue_status=%s type=%s children=%d", nested.IssueID, nested.Status, nested.IssueStatus, nested.Type, nested.ChildCount)
+			if nested.Classification != "" {
+				fmt.Printf(" classification=%s", nested.Classification)
+			}
+			if len(nested.ExclusionReasons) > 0 {
+				fmt.Printf(" exclusions=%s", strings.Join(nested.ExclusionReasons, ","))
+			}
 			if nested.FallbackPolicy != "" {
 				fmt.Printf(" fallback=%s", nested.FallbackPolicy)
 			}
@@ -1156,7 +1165,7 @@ func OrchestrateGroupCommand(deps *Dependencies, opts OrchestrateGroupOptions) e
 	}
 	if result.NestedRoot != nil {
 		nested := result.NestedRoot
-		fmt.Printf("Nested root: %s status=%s issue_status=%s children=%d fallback=%s\n", nested.IssueID, nested.Status, nested.IssueStatus, nested.ChildCount, nested.FallbackPolicy)
+		fmt.Printf("Nested root: %s status=%s issue_status=%s classification=%s exclusions=%s children=%d fallback=%s\n", nested.IssueID, nested.Status, nested.IssueStatus, nested.Classification, strings.Join(nested.ExclusionReasons, ","), nested.ChildCount, nested.FallbackPolicy)
 		if nested.Advice != "" {
 			fmt.Printf("Next: %s\n", nested.Advice)
 		}
@@ -1503,15 +1512,17 @@ func orchestrateNestedRootsFromDaemon(nested []daemonclient.TaskNestedRoot) []or
 			}
 		}
 		out = append(out, orchestrateNestedRoot{
-			IssueID:        item.IssueID,
-			Status:         item.Status,
-			IssueStatus:    item.IssueStatus,
-			Type:           item.Type,
-			ChildCount:     item.ChildCount,
-			ActiveSession:  active,
-			StartFailure:   failure,
-			FallbackPolicy: item.FallbackPolicy,
-			Advice:         item.Advice,
+			IssueID:          item.IssueID,
+			Status:           item.Status,
+			IssueStatus:      item.IssueStatus,
+			Classification:   item.Classification,
+			ExclusionReasons: append([]string(nil), item.ExclusionReasons...),
+			Type:             item.Type,
+			ChildCount:       item.ChildCount,
+			ActiveSession:    active,
+			StartFailure:     failure,
+			FallbackPolicy:   item.FallbackPolicy,
+			Advice:           item.Advice,
 		})
 	}
 	return out
@@ -2043,14 +2054,6 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 		return err
 	}
 	lastSnapshotKey := orchestrateWatchFrameSnapshotKey(frame)
-	readinessCache := newOrchestrateWatchReadinessCache(frame, time.Now(), opts.PollInterval)
-	if deps.Logger != nil {
-		deps.Logger.Debug("orchestrate watch readiness cache initialized",
-			"root_issue_id", opts.RootIssueID,
-			"poll_interval_ms", opts.PollInterval.Milliseconds(),
-			"readiness_refresh_interval_ms", readinessCache.refreshInterval.Milliseconds(),
-		)
-	}
 	if len(frame.Events) > 0 || len(frame.Pending) > 0 || len(frame.SessionStartProgress) > 0 || len(frame.ActiveSessions) > 0 || opts.Once {
 		if err := emitOrchestrateWatchFrame(frame, opts.JSONL, opts.Compact); err != nil {
 			return err
@@ -2062,72 +2065,37 @@ func OrchestrateWatchCommand(deps *Dependencies, opts OrchestrateWatchOptions) e
 	}
 
 	for {
-		if err := sleepWatchPoll(watchCtx, opts.PollInterval); err != nil {
-			return nil
-		}
-		events, err := watchDaemonCommandContext(watchCtx, deps, func(ctx context.Context) ([]protocol.MailEvent, error) {
-			return deps.DaemonClient.MailWatch(ctx, protocol.MailWatchCommandBody{
-				RepoDir:     deps.RepoDir,
-				ParentIssue: opts.RootIssueID,
-				SinceSeq:    lastSeq + 1,
-			})
-		})
+		events, err := deps.DaemonClient.Subscribe(watchCtx, opts.Project, frame.sourceRevision)
 		if err != nil {
 			if isWatchContextDone(watchCtx, err) {
 				return nil
 			}
-			if shouldContinueOrchestrateWatchAfterError(err) {
+			return err
+		}
+		select {
+		case <-watchCtx.Done():
+			return nil
+		case _, ok := <-events:
+			if !ok {
 				continue
+			}
+		}
+		frame, err = buildOrchestrateWatchFrameContext(watchCtx, deps, opts.RootIssueID, lastSeq)
+		if err != nil {
+			if isWatchContextDone(watchCtx, err) {
+				return nil
 			}
 			return err
 		}
-		watchEvents := make([]mailEvent, 0, len(events))
-		for _, event := range events {
-			watchEvents = append(watchEvents, protocolToLocalMailEvent(event))
-		}
-		nextSince := nextMailboxSeq(events, lastSeq)
-		if nextSince > lastSeq {
-			checkpointRootOrchestratorCursor(watchCtx, deps, opts.RootIssueID, nextSince)
-		}
-		now := time.Now()
-		refreshReadiness, refreshReason := readinessCache.shouldRefresh(now, len(events))
-		if deps.Logger != nil {
-			deps.Logger.Debug("orchestrate watch tick",
-				"root_issue_id", opts.RootIssueID,
-				"mailbox_event_count", len(events),
-				"since_seq", lastSeq,
-				"next_since", nextSince,
-				"poll_interval_ms", opts.PollInterval.Milliseconds(),
-				"readiness_cache", readinessCache.decision(refreshReadiness),
-				"readiness_refresh_reason", refreshReason,
-				"readiness_refresh_interval_ms", readinessCache.refreshInterval.Milliseconds(),
-			)
-		}
-		var frame orchestrateWatchFrame
-		if refreshReadiness {
-			ready, err := watchDaemonCommandContext(watchCtx, deps, func(ctx context.Context) (daemonclient.TaskGraphReadiness, error) {
-				return deps.DaemonClient.TaskGraphReadiness(ctx, opts.RootIssueID)
-			})
-			if err != nil {
-				if isWatchContextDone(watchCtx, err) {
-					return nil
-				}
-				return err
-			}
-			frame = orchestrateWatchFrameFromReadiness(ready, watchEvents, lastSeq, nextSince)
-			readinessCache.store(frame, now)
-		} else {
-			frame = readinessCache.cachedReadinessFrame(watchEvents, lastSeq, nextSince)
-		}
 		snapshotKey := orchestrateWatchFrameSnapshotKey(frame)
-		if len(events) == 0 && snapshotKey == lastSnapshotKey {
+		if len(frame.Events) == 0 && snapshotKey == lastSnapshotKey {
 			continue
 		}
 		if err := emitOrchestrateWatchFrame(frame, opts.JSONL, opts.Compact); err != nil {
 			return err
 		}
 		lastSnapshotKey = snapshotKey
-		lastSeq = nextSince
+		lastSeq = frame.NextSince
 	}
 }
 
@@ -2198,6 +2166,7 @@ func (cache orchestrateWatchReadinessCache) cachedReadinessFrame(events []mailEv
 
 func orchestrateWatchFrameFromReadiness(ready daemonclient.TaskGraphReadiness, events []mailEvent, since, nextSince int64) orchestrateWatchFrame {
 	return orchestrateWatchFrame{
+		sourceRevision:         ready.Revision,
 		RootIssueID:            ready.RootIssueID,
 		SinceSeq:               since,
 		NextSince:              nextSince,
@@ -2285,11 +2254,19 @@ func watchDaemonCommand[T any](deps *Dependencies, call func(context.Context) (T
 }
 
 func watchDaemonCommandContext[T any](ctx context.Context, deps *Dependencies, call func(context.Context) (T, error)) (T, error) {
-	value, err := call(ctx)
+	linkCtx := context.Context(nil)
+	if deps != nil {
+		linkCtx = deps.TraceContext
+	}
+	segmentCtx, endSegment := newWatchTraceSegment(ctx, linkCtx, "daemon_command")
+	value, err := call(segmentCtx)
 	if err == nil || !reconnect.IsTransientTransportError(err) {
+		endSegment(err)
 		return value, err
 	}
-	return commandWithDaemonAutostartRetry(ctx, deps, call)
+	value, err = commandWithDaemonAutostartRetry(segmentCtx, deps, call)
+	endSegment(err)
+	return value, err
 }
 
 func shouldContinueOrchestrateWatchAfterError(err error) bool {
@@ -2742,7 +2719,7 @@ func buildOrchestrateWatchFrameContext(ctx context.Context, deps *Dependencies, 
 	events, err := deps.DaemonClient.MailList(ctx, protocol.MailListCommandBody{
 		RepoDir:     deps.RepoDir,
 		ParentIssue: rootIssueID,
-		SinceSeq:    since,
+		SinceSeq:    since + 1,
 		Limit:       200,
 	})
 	if err != nil {
@@ -3071,6 +3048,12 @@ func emitOrchestrateWatchFrame(frame orchestrateWatchFrame, jsonl bool, compact 
 		fmt.Println("nested roots:")
 		for _, nested := range frame.NestedRoots {
 			fmt.Printf("- %s status=%s issue_status=%s type=%s children=%d", nested.IssueID, nested.Status, nested.IssueStatus, nested.Type, nested.ChildCount)
+			if nested.Classification != "" {
+				fmt.Printf(" classification=%s", nested.Classification)
+			}
+			if len(nested.ExclusionReasons) > 0 {
+				fmt.Printf(" exclusions=%s", strings.Join(nested.ExclusionReasons, ","))
+			}
 			if nested.FallbackPolicy != "" {
 				fmt.Printf(" fallback=%s", nested.FallbackPolicy)
 			}

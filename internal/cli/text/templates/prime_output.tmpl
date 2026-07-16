@@ -86,7 +86,8 @@ Orchestration
 - Trust hook-backed activity. If activity is `unknown`, inspect `az ai status --target=auto` and repair missing or outdated hooks before treating the worker as idle.
 - Workers report `worker-progress`, `worker-blocked`, or `worker-integration-ready`. The orchestrator uses `az orchestrate message` only for evidence-backed intervention.
 - Review worker evidence and context risk, return non-trivial findings to live worker sessions, and close accepted children with `az ticket close --id <child>`.
-- Start nested epic/root sessions as their own orchestrators; do not flatten their descendants unless explicitly requested.
+- Chain of command is strict: this orchestrator may coordinate only the root's direct children. It must never launch, message, review, integrate, stop, or otherwise take over grandchildren or deeper descendants.
+- For a direct child that owns children, start and supervise its orchestrator with `az orchestrator-session start --root <child-root>`; that child orchestrator exclusively runs `az orchestrate ... --root <child-root>` for its direct children.
 - Repeat status, start, watch, review, and accepted child close until `az orchestrate complete-check --root <root>` passes. Then validate and request human review of the root without stopping its session.
 {{ else if .OrchestrationViaAz }}- Mode is `az`, but CLI-managed worker fanout requires `tmux`; it is unavailable. Keep work in this session or use native delegation for disposable exploration while tracking durable state in `az ticket`.
 {{ else }}- Unsupported `orchestration.via` value: `{{ .OrchestrationVia }}`. Set it to `az` or `native` before fanning out.
