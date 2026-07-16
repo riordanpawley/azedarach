@@ -228,8 +228,6 @@ type nativeCodexDelivery struct {
 	reply    chan nativeCodexResponse
 }
 
-var saveNativeCodexStateFn = saveNativeCodexState
-
 type nativeCodexHumanRequest struct {
 	id     json.RawMessage
 	method string
@@ -254,6 +252,8 @@ func codexRequestNeedsHumanDecision(method string) bool {
 // Codex sessions. Human bytes and daemon deliveries meet in one event loop, so
 // the daemon can never submit through a second terminal or resume process.
 func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodexClientOptions) error {
+	childCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	if deps == nil || deps.DaemonClient == nil {
 		return errors.New("native Codex client requires daemon client")
 	}
@@ -296,11 +296,11 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 		return fmt.Errorf("bind native Codex incarnation: %w", err)
 	}
 
-	rpc, err := startCodexRPC(ctx)
+	rpc, err := startCodexRPC(childCtx)
 	if err != nil {
 		return fmt.Errorf("start Codex app-server proxy: %w", err)
 	}
-	defer rpc.command.Process.Kill() //nolint:errcheck
+	defer func() { _ = rpc.command.Process.Kill(); _ = rpc.command.Wait() }()
 	var initialize map[string]any
 	if err := rpc.call(ctx, "initialize", map[string]any{"clientInfo": map[string]any{"name": "azedarach", "title": "Azedarach", "version": "1"}}, &initialize); err != nil {
 		return err
@@ -314,7 +314,7 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 	}
 
 	deliveries := make(chan nativeCodexDelivery)
-	go nativeCodexAuthorityLoop(ctx, os.Getenv("AZEDARACH_AGENT_INPUT_SOCKET"), nativeCodexRegistration{
+	go nativeCodexAuthorityLoop(childCtx, os.Getenv("AZEDARACH_AGENT_INPUT_SOCKET"), nativeCodexRegistration{
 		ProtocolVersion: 1, ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: pane,
 		PanePID: panePID, AgentIncarnation: incarnation, Tool: "codex",
 	}, deliveries)
@@ -327,7 +327,7 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 		defer term.Restore(int(os.Stdin.Fd()), terminalState) //nolint:errcheck
 	}
 	input := make(chan byte, 256)
-	go readNativeCodexInput(os.Stdin, input)
+	go readNativeCodexInputContext(childCtx, os.Stdin, input)
 	composer := make([]byte, 0, 256)
 	active := false
 	pendingRequests := make([]nativeCodexHumanRequest, 0, 4)
@@ -547,7 +547,11 @@ func boundedCodexEvent(raw json.RawMessage, limit int) string {
 	return string(raw)
 }
 
-func acceptNativeCodexDelivery(envelope nativeCodexEnvelope, composer []byte, active bool, statePath string, state *nativeCodexState, submit func(string) error) (nativeCodexResponse, bool) {
+func acceptNativeCodexDelivery(envelope nativeCodexEnvelope, composer []byte, active bool, statePath string, state *nativeCodexState, submit func(string) error, saver ...func(string, nativeCodexState) error) (nativeCodexResponse, bool) {
+	save := saveNativeCodexState
+	if len(saver) > 0 && saver[0] != nil {
+		save = saver[0]
+	}
 	response := nativeCodexResponse{ProjectID: envelope.ProjectID, IntentKey: envelope.IntentKey,
 		AgentIncarnation: envelope.AgentIncarnation, LeaseToken: envelope.LeaseToken}
 	key := envelope.IntentKey + "\x00" + envelope.AgentIncarnation
@@ -587,7 +591,7 @@ func acceptNativeCodexDelivery(envelope nativeCodexEnvelope, composer []byte, ac
 	if messageID == "" {
 		messageID = envelope.IntentKey + ":" + envelope.AgentIncarnation
 		state.Pending[key] = messageID
-		if err := saveNativeCodexStateFn(statePath, *state); err != nil {
+		if err := save(statePath, *state); err != nil {
 			delete(state.Pending, key)
 			response.Outcome = "not_ready"
 			return response, false
@@ -604,7 +608,7 @@ func acceptNativeCodexDelivery(envelope nativeCodexEnvelope, composer []byte, ac
 	}
 	state.Accepted[key] = ack
 	delete(state.Pending, key)
-	if err := saveNativeCodexStateFn(statePath, *state); err != nil {
+	if err := save(statePath, *state); err != nil {
 		delete(state.Accepted, key)
 		state.Pending[key] = messageID
 		response.Outcome = "not_ready"
@@ -710,6 +714,11 @@ func readNativeCodexInput(input *os.File, output chan<- byte) {
 		}
 		output <- buffer[0]
 	}
+}
+
+func readNativeCodexInputContext(ctx context.Context, input *os.File, output chan<- byte) {
+	go readNativeCodexInput(input, output)
+	<-ctx.Done()
 }
 
 func randomNativeCodexToken() (string, error) {

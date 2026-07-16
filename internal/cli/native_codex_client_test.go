@@ -85,17 +85,16 @@ func TestAcceptNativeCodexDeliveryFinalSaveFailureRetainsPending(t *testing.T) {
 	state, _ := loadNativeCodexState(path, false)
 	env := nativeCodexEnvelope{IntentKey: "fault", AgentIncarnation: state.Incarnation}
 	calls := 0
-	original := saveNativeCodexStateFn
-	defer func() { saveNativeCodexStateFn = original }()
+	original := saveNativeCodexState
 	saves := 0
-	saveNativeCodexStateFn = func(p string, s nativeCodexState) error {
+	saver := func(p string, s nativeCodexState) error {
 		saves++
 		if saves == 2 {
 			return errors.New("injected final save failure")
 		}
 		return original(p, s)
 	}
-	r, _ := acceptNativeCodexDelivery(env, nil, false, path, &state, func(string) error { calls++; return nil })
+	r, _ := acceptNativeCodexDelivery(env, nil, false, path, &state, func(string) error { calls++; return nil }, saver)
 	if r.Outcome != "not_ready" || calls != 1 || state.Pending["fault\x00"+state.Incarnation] == "" {
 		t.Fatalf("response=%+v calls=%d pending=%v", r, calls, state.Pending)
 	}
@@ -106,7 +105,7 @@ func TestAcceptNativeCodexDeliveryFinalSaveFailureRetainsPending(t *testing.T) {
 	if durable.Pending["fault\x00"+state.Incarnation] == "" {
 		t.Fatal("durable pending missing")
 	}
-	r, _ = acceptNativeCodexDelivery(env, nil, false, path, &state, func(string) error { calls++; return nil })
+	r, _ = acceptNativeCodexDelivery(env, nil, false, path, &state, func(string) error { calls++; return nil }, saver)
 	if calls != 1 || r.Outcome != "not_ready" {
 		t.Fatalf("retry response=%+v submit count=%d", r, calls)
 	}
