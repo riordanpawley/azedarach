@@ -280,6 +280,9 @@ func TestNativeCodexAuthorityCancellationClosesSilentConn(t *testing.T) {
 }
 
 func TestWaitWorkerDoneSuccessAndTimeout(t *testing.T) {
+	if err := waitWorkerDone(nil, time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
 	done := make(chan struct{})
 	close(done)
 	if err := waitWorkerDone(done, time.Millisecond); err != nil {
