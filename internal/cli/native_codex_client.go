@@ -692,6 +692,8 @@ func nativeCodexAuthorityLoop(ctx context.Context, socket string, registration n
 			}
 			connDone := make(chan struct{})
 			closerDone := make(chan struct{})
+			var closeOnce sync.Once
+			cleanup := func() { closeOnce.Do(func() { _ = conn.Close(); close(connDone); <-closerDone }) }
 			go func() {
 				select {
 				case <-ctx.Done():
@@ -701,9 +703,7 @@ func nativeCodexAuthorityLoop(ctx context.Context, socket string, registration n
 				close(closerDone)
 			}()
 			if json.NewEncoder(conn).Encode(registration) != nil {
-				_ = conn.Close()
-				close(connDone)
-				<-closerDone
+				cleanup()
 				continue
 			}
 			reader := bufio.NewReader(conn)
@@ -729,7 +729,7 @@ func nativeCodexAuthorityLoop(ctx context.Context, socket string, registration n
 					break connection
 				}
 			}
-			_ = conn.Close()
+			cleanup()
 		}
 	}()
 	return done
@@ -754,11 +754,16 @@ func readNativeCodexInputContext(ctx context.Context, input *os.File, output cha
 			return
 		}
 		owned := os.NewFile(uintptr(fd), "azedarach-native-stdin")
-		_ = syscall.SetNonblock(fd, true)
+		if err := syscall.SetNonblock(fd, true); err != nil {
+			return
+		}
 		defer owned.Close()
 		buffer := make([]byte, 1)
 		for {
 			n, err := syscall.Read(fd, buffer)
+			if n == 0 && err == nil {
+				return
+			}
 			if n > 0 {
 				select {
 				case output <- buffer[0]:
@@ -767,7 +772,10 @@ func readNativeCodexInputContext(ctx context.Context, input *os.File, output cha
 				}
 			}
 			if err != nil {
-				if errors.Is(err, syscall.EAGAIN) {
+				if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EINTR) {
+					if errors.Is(err, syscall.EINTR) {
+						continue
+					}
 					select {
 					case <-ctx.Done():
 						return
