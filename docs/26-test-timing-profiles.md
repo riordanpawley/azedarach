@@ -7,33 +7,43 @@ deltas, and budget violations. Ordinary local profiles report those violations
 as diagnostic warnings; only the controlled `ci-timing` profile may turn them
 into a failing performance gate.
 
-Every documented build/test entrypoint first acquires the repository-family
-daemon-owned machine-validation queue before invoking `go`. The `aggregate` class spans the
-entire `just merge-gate` build, cold suite, artifact contracts, and boundary
-sequence. Nested managed validators join that live lease; other validators
-remain queued, so no compile-before-lock window can consume the canonical
-timing budget. Inspect the owner and queue with `just validation-status` or
-stream changes without compiling Go code with `just validation-watch`.
-Raw Go diagnostics are not an exception: run them through
-direct `go ...` commands in the worktree-isolated cache.
-An aggregate request waits for already-running unleased Go processes to
-quiesce, then samples the complete outer build/test/contract/boundary command;
-Go work that appears after admission invalidates the aggregate result.
-Nested recipes must prove membership through the outer wrapper's inherited
-kernel authorization descriptor; a public request id or status snapshot never
-admits work. Wrapper death stops renewal and its supervised command tree.
-Integration readiness accepts aggregate proof only when the daemon request,
-machine evidence, worker packet, and clean candidate `HEAD` all name the same
-source revision.
+Ordinary development entrypoints run directly with their worktree-isolated Go
+cache and test roots. This includes `just build`, local named test profiles, raw
+`go ...` diagnostics, benchmarks, race diagnostics, and boundary checks. They
+do not enter daemon admission or create publication evidence.
 
-Admission uses a bounded shared bypass instead of strict FIFO or an unbounded
-focused-work lane. If shared validators are already active when the oldest
-aggregate queues, exactly one later shared request may join that generation.
-Further shared requests drain behind the aggregate. The daemon counts durable
-started requests after the aggregate's queue sequence, so concurrent clients
-and daemon replacement cannot reset the allowance. Thus an aggregate can be
-overtaken by at most one focused command, while safe commands remain eligible
-and aggregate execution remains exclusive from shared work.
+`just merge-gate` and `just review-gate` use the daemon wrapper to record
+publication authority for the complete build, cold suite, artifact-contract,
+and boundary sequence. Push and review publication requests start immediately,
+including while development work or timing-capacity work is active. Compatible
+exact-revision publication may join an authoritative execution or reuse its
+completed evidence. Review evidence is stronger than push evidence for the
+same execution contract; push evidence never authorizes review. Integration
+readiness accepts publication proof only when the daemon request, machine
+evidence, worker packet, and clean candidate `HEAD` all name the same source
+revision.
+
+Only `just test-ci-timing` enters queued timing-capacity admission. Its
+aggregate request waits for already-running unleased Go processes to quiesce,
+then samples the complete controlled timing command; Go work that appears after
+admission invalidates the result. Nested managed recipes must prove membership
+through the outer wrapper's inherited kernel authorization descriptor; a
+public request id or status snapshot never admits work. Wrapper death stops
+renewal and its supervised command tree. Inspect capacity owners and waiters
+with `just validation-status`, or stream changes without compiling Go code with
+`just validation-watch`.
+
+Within timing-capacity admission, a bounded shared bypass prevents starvation
+without creating an unbounded focused-work lane. If shared capacity validators
+are already active when the oldest aggregate capacity request queues, exactly
+one later shared capacity request may join that generation. Further shared
+capacity requests drain behind the aggregate. The daemon counts durable started
+capacity requests after the aggregate's queue sequence, so concurrent clients
+and daemon replacement cannot reset the allowance. An aggregate capacity run
+can therefore be overtaken by at most one shared capacity command, while safe
+non-compiling commands remain eligible and aggregate capacity execution remains
+exclusive from shared capacity work. This policy does not gate ordinary
+development or delay push/review publication.
 
 The runner establishes the mandatory database-isolation boundary before any
 test binary starts. It snapshots the configured root-user database, the current
@@ -60,7 +70,7 @@ just test
 # Developer-selected package/test
 just test-timing focused --package ./internal/cli --run TestCommand
 
-# Raw diagnostic command (still daemon-admitted)
+# Raw diagnostic command (outside daemon admission)
 go test -timeout 30s ./internal/daemon -run TestName
 
 # Complete profiles
@@ -183,9 +193,9 @@ and hardware differences, so a local budget violation is written to
 
 `.github/workflows/controlled-timing.yml` is deliberately manual and targets
 the versioned self-hosted label `azedarach-timing-v1`. The runner must be a
-dedicated 8-vCPU/16-GiB machine image with Go 1.24.7, no concurrent repository
+dedicated 8-vCPU/16-GiB machine image with Go 1.24.7, no concurrent Go
 validation, and a clean Go test-result cache before each sample. The daemon
-aggregate validation lease supplies exclusive repository admission and rejects
+timing-capacity lease supplies exclusive capacity admission and rejects
 observed overlapping Go work.
 
 The CLI refuses timing authority unless all controlled markers, the aggregate
