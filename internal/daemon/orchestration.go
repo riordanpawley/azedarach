@@ -388,6 +388,7 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	if limit <= 0 {
 		limit = a.inspectLimit()
 	}
+	request.Limit = limit
 	snapshot := protocol.OrchestrationSnapshot{
 		Scope: identity.Scope, GeneratedAt: time.Now().UTC(), Blocked: map[string]string{},
 		Constraints: protocol.OrchestrationConstraints{
@@ -451,7 +452,7 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	if err := a.enrichPendingDecisions(ctx, projectID, issueClient, &snapshot, projectRoots); err != nil {
 		return protocol.OrchestrationSnapshot{}, err
 	}
-	snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, projectRoots)
+	snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, projectTasks)
 	if err != nil {
 		return protocol.OrchestrationSnapshot{}, err
 	}

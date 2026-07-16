@@ -1128,10 +1128,10 @@ func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.clampCursor()
 		}
 		return m, nil
-	case "j", "down":
+	case "down":
 		m.moveCursor(0, 1)
 		return m, nil
-	case "k", "up":
+	case "up":
 		m.moveCursor(0, -1)
 		return m, nil
 	case "ctrl+c":

@@ -7095,7 +7095,9 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 		if *opts.Status == domain.StatusInReview {
 			statusOptions.CascadeChildren = opts.CascadeChildren
 		}
-		if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, *opts.Status, statusOptions); err != nil {
+		statusCtx, cancelStatus := context.WithTimeout(context.Background(), issueUpdateLifecycleTimeout(*opts.Status))
+		defer cancelStatus()
+		if err := deps.DaemonClient.UpdateTaskStatusWithOptions(statusCtx, opts.IssueID, *opts.Status, statusOptions); err != nil {
 			return fmt.Errorf("failed to apply lifecycle action for issue %s: %w", opts.IssueID, err)
 		}
 		if updateContextRisk != nil && !opts.JSON {
@@ -7103,7 +7105,9 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 		}
 	}
 	if opts.AppendNotes != "" {
-		if err := deps.DaemonClient.AppendTaskNotes(ctx, opts.IssueID, opts.AppendNotes); err != nil {
+		appendCtx, cancelAppend := context.WithTimeout(context.Background(), daemonCommandTimeout)
+		defer cancelAppend()
+		if err := deps.DaemonClient.AppendTaskNotes(appendCtx, opts.IssueID, opts.AppendNotes); err != nil {
 			return fmt.Errorf("failed to append notes for issue %s: %w", opts.IssueID, err)
 		}
 	}
@@ -7119,6 +7123,17 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 	}
 	fmt.Printf("Updated issue: %s\n", opts.IssueID)
 	return nil
+}
+
+func issueUpdateLifecycleTimeout(status domain.Status) time.Duration {
+	switch status {
+	case domain.StatusDone:
+		return domain.IntegrationClientTimeout
+	case domain.StatusCancelled:
+		return domain.LifecycleCleanupClientTimeout
+	default:
+		return daemonCommandTimeout
+	}
 }
 
 func cleanupCloseTaskStatusOptions(forceWorktree bool, closeCleanChildren ...bool) daemonclient.TaskStatusOptions {

@@ -3964,6 +3964,15 @@ func TestTaskCloseIntegrationContextReservesCleanupBudget(t *testing.T) {
 	}
 }
 
+func TestTaskCloseTimeoutBoundsNonIntegratingCancellation(t *testing.T) {
+	if got := taskCloseTimeout(domain.IssueCloseCancelled); got != domain.LifecycleCleanupTimeout {
+		t.Fatalf("cancel timeout = %v, want %v", got, domain.LifecycleCleanupTimeout)
+	}
+	if got := taskCloseTimeout(domain.IssueCloseCompleted); got != domain.IntegrationCloseTimeout {
+		t.Fatalf("completed timeout = %v, want %v", got, domain.IntegrationCloseTimeout)
+	}
+}
+
 func TestTaskCloseIntegrationContextRejectsExhaustedCleanupReserve(t *testing.T) {
 	parent, parentCancel := context.WithTimeout(context.Background(), domain.IntegrationCloseReserve-time.Second)
 	defer parentCancel()
@@ -4115,6 +4124,10 @@ func TestTaskCloseRepairsVerifiedStaleLegacyProjectSessionProjection(t *testing.
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(issuesDBPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
+	preservedWrongProjectWorktree := filepath.Join(t.TempDir(), "wrong-project-worktree")
+	if err := os.MkdirAll(preservedWrongProjectWorktree, 0o755); err != nil {
+		t.Fatalf("create preserved wrong-project worktree: %v", err)
+	}
 
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title:    "Close with stale legacy session alias",
@@ -4148,7 +4161,7 @@ func TestTaskCloseRepairsVerifiedStaleLegacyProjectSessionProjection(t *testing.
 		hub:      publish.NewHub(16, 8, logger),
 	}
 
-	body, err := json.Marshal(taskCloseRequest{TaskID: taskID})
+	body, err := json.Marshal(taskCloseRequest{TaskID: taskID, CloseOutcome: string(domain.IssueCloseCancelled)})
 	if err != nil {
 		t.Fatalf("marshal close request: %v", err)
 	}
@@ -4175,6 +4188,30 @@ func TestTaskCloseRepairsVerifiedStaleLegacyProjectSessionProjection(t *testing.
 	}
 	if session.State != daemonstate.SessionStateStopped || session.ObservedState != daemonstate.SessionStateStopped || session.TmuxAttachedCount != 0 {
 		t.Fatalf("legacy session projection = %+v, want stopped repair marker", session)
+	}
+	task, err := issuesClient.GetWithRuntime(ctx, projectID, taskID)
+	if err != nil {
+		t.Fatalf("get cancelled issue: %v", err)
+	}
+	if task.Status != domain.StatusCancelled {
+		t.Fatalf("task status = %s, want %s", task.Status, domain.StatusCancelled)
+	}
+	if _, err := os.Stat(preservedWrongProjectWorktree); err != nil {
+		t.Fatalf("preserved wrong-project worktree: %v", err)
+	}
+	resp, err = d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-close-stale-legacy-session-retry",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         "task.close",
+		Body:            body,
+	})
+	if err != nil {
+		t.Fatalf("retry handleTaskClose error: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("retry task.close response = %+v, want idempotent success", resp)
 	}
 }
 
@@ -13916,6 +13953,117 @@ func TestRefreshWorktreeRuntimeStateForIssuesDoesNotPublishUnchangedGitStatus(t 
 		if evt.Event == protocol.EventGitStatusUpdated {
 			t.Fatalf("unexpected unchanged git status event: %+v", evt)
 		}
+	}
+}
+
+func TestRefreshFiniteWorktreeGitFactsConvergesStaleDirtyAndStaleCleanBoundedly(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	const projectID = "proj-finite-refresh"
+	cleanID, dirtyID := "az-clean", "az-dirty"
+	cleanPath, dirtyPath := t.TempDir(), t.TempDir()
+	cleanBranch, dirtyBranch := "riordan/az-clean/work", "riordan/az-dirty/work"
+
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), logger)
+	t.Cleanup(func() { _ = store.Close() })
+	for _, fixture := range []struct {
+		issueID, path, branch string
+		status                git.GitStatus
+	}{
+		{cleanID, cleanPath, cleanBranch, git.GitStatus{HasChanges: true, Modified: []string{"stale.go"}}},
+		{dirtyID, dirtyPath, dirtyBranch, git.GitStatus{}},
+	} {
+		if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{ProjectID: projectID, IssueID: fixture.issueID, Path: fixture.path, Branch: fixture.branch, UpdatedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal(fixture.status)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpsertWorktreeStateGitStatus(ctx, projectID, fixture.issueID, raw, time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		switch {
+		case len(args) == 3 && args[0] == "worktree" && args[1] == "list":
+			return "worktree " + cleanPath + "\nbranch refs/heads/" + cleanBranch + "\n\nworktree " + dirtyPath + "\nbranch refs/heads/" + dirtyBranch + "\n\n", nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
+			if args[1] == dirtyPath {
+				return " M live.go\n", nil
+			}
+			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "symbolic-ref":
+			return "origin/main\n", nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "merge-base":
+			return "merge-base-sha\n", nil
+		case len(args) >= 7 && args[0] == "-C" && args[2] == "diff":
+			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && args[2] == "rev-list":
+			return "0\n", nil
+		default:
+			t.Fatalf("unexpected git args: %v", args)
+			return "", nil
+		}
+	}}
+	d := &Daemon{
+		cfg:                       Config{RepoDir: ".", BaseBranch: "main", Logger: logger},
+		hub:                       publish.NewHub(16, 8, logger),
+		runtimeStoresByRoot:       map[string]*daemonstate.RuntimeStateStore{".": store},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: git.NewWorktreeManager(runner, ".", logger)},
+		git:                       git.NewClient(runner, logger),
+	}
+
+	assertConverged := func(issueID string, wantDirty bool) {
+		t.Helper()
+		row, found, err := store.GetWorktreeStateByIssueID(ctx, projectID, issueID)
+		if err != nil || !found {
+			t.Fatalf("load %s projection: found=%v err=%v", issueID, found, err)
+		}
+		var status git.GitStatus
+		if err := json.Unmarshal(row.GitStatusRaw, &status); err != nil {
+			t.Fatal(err)
+		}
+		if status.HasChanges != wantDirty {
+			t.Fatalf("%s dirty = %v, want %v", issueID, status.HasChanges, wantDirty)
+		}
+	}
+
+	initialRevision := d.currentRevision(projectID)
+	if err := d.refreshFiniteWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
+		t.Fatal(err)
+	}
+	assertConverged(cleanID, false)
+	assertConverged(dirtyID, true)
+	firstRevision := d.currentRevision(projectID)
+	if got := firstRevision - initialRevision; got != 2 {
+		t.Fatalf("first refresh revision delta = %d, want one changed status update per worktree", got)
+	}
+
+	if err := d.refreshFiniteWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.currentRevision(projectID) - firstRevision; got != 0 {
+		t.Fatalf("unchanged finite refresh revision delta = %d, want no duplicate projection updates", got)
+	}
+
+	// A fresh daemon instance must derive the same facts from Git rather than
+	// treating either persisted direction as authoritative after restart.
+	restarted := &Daemon{
+		cfg:                       d.cfg,
+		hub:                       publish.NewHub(16, 8, logger),
+		runtimeStoresByRoot:       map[string]*daemonstate.RuntimeStateStore{".": store},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: git.NewWorktreeManager(runner, ".", logger)},
+		git:                       git.NewClient(runner, logger),
+	}
+	if err := restarted.refreshFiniteWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
+		t.Fatal(err)
+	}
+	assertConverged(cleanID, false)
+	assertConverged(dirtyID, true)
+	if got := restarted.currentRevision(projectID); got != 0 {
+		t.Fatalf("restart refresh revision = %d, want no inverted or duplicate updates", got)
 	}
 }
 

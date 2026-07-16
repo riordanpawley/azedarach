@@ -71,6 +71,27 @@ func TestPrepareAutoMaintenanceStillRefusesWhenAnotherOwnerExceedsHardLimit(t *t
 	assert.Equal(t, "maintenance-insufficient-hard-limit", telemetry.Decision)
 }
 
+func TestPrepareAutoMaintenanceCleansSelectedNamespaceAndUnblocksHardLimit(t *testing.T) {
+	root := t.TempDir()
+	cfg := Config{Root: root, Owner: "issue-dhc", Kind: KindNormal, SoftLimitBytes: 1, HardLimitBytes: 1}
+	module := initTestRepo(t)
+	cmd := exec.Command("go", "build", "./...")
+	cmd.Dir = module
+	cmd.Env = append(filteredEnvironment("GOCACHE"), "GOCACHE="+cfg.CachePath())
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "%s", output)
+
+	before, err := StatsManaged(cfg)
+	require.NoError(t, err)
+	require.Greater(t, before.Bytes, int64(1))
+
+	telemetry, err := Prepare(context.Background(), cfg, true)
+	require.NoError(t, err)
+	assert.Equal(t, "cleaned-selected-namespace", telemetry.Decision)
+	assert.Less(t, telemetry.FamilyBytes, before.Bytes)
+	assert.LessOrEqual(t, telemetry.FamilyBytes, cfg.HardLimitBytes)
+}
+
 func TestExclusiveLockSerializesManagedValidation(t *testing.T) {
 	cfg := Config{Root: t.TempDir(), Owner: "issue-dhc", Kind: KindNormal}
 	entered := make(chan struct{})
