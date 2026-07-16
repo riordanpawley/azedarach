@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -717,8 +718,20 @@ func readNativeCodexInput(input *os.File, output chan<- byte) {
 }
 
 func readNativeCodexInputContext(ctx context.Context, input *os.File, output chan<- byte) {
-	go readNativeCodexInput(input, output)
-	<-ctx.Done()
+	fd, err := syscall.Dup(int(input.Fd()))
+	if err != nil {
+		return
+	}
+	owned := os.NewFile(uintptr(fd), "azedarach-native-stdin")
+	done := make(chan struct{})
+	go func() { readNativeCodexInput(owned, output); close(done) }()
+	select {
+	case <-ctx.Done():
+		_ = owned.Close()
+		<-done
+	case <-done:
+		_ = owned.Close()
+	}
 }
 
 func randomNativeCodexToken() (string, error) {
