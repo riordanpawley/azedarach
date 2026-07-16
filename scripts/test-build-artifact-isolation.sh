@@ -490,6 +490,37 @@ wait "$install_admission_pid"
 wait "$production_waiter_pid"
 test -e "$fixture/production-waiter.started"
 
+# A production owner may become visible just before it publishes its epoch.
+# The waiting validator must baseline the epoch after the owner exits so work
+# that starts strictly after installation remains canonical.
+rm -f "$fixture/.git/azedarach-production-admission/production-epoch"
+mkdir "$fixture/.git/azedarach-production-admission/production"
+printf '%s\n' "$$" >"$fixture/.git/azedarach-production-admission/production/pid"
+printf '%s\n' "epoch-publication-race" \
+  >"$fixture/.git/azedarach-production-admission/production/reason"
+env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
+  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  AZEDARACH_VALIDATION_PS_BIN="$fixture/fake-bin/validation-ps-empty" \
+  AZEDARACH_VALIDATION_PRODUCTION_WAIT_SECONDS=5 \
+  AZEDARACH_TICKET_ID=epoch-publication-race \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --profile epoch-publication-race -- \
+  touch "$fixture/epoch-publication-race.started" \
+  >"$fixture/epoch-publication-race.stdout" 2>"$fixture/epoch-publication-race.stderr" &
+epoch_waiter_pid=$!
+for _ in {1..300}; do
+  grep -q "Validation is waiting for production install admission" \
+    "$fixture/epoch-publication-race.stderr" 2>/dev/null && break
+  sleep 0.02
+done
+test ! -e "$fixture/epoch-publication-race.started"
+printf '%s\n' "epoch-published-after-owner" \
+  >"$fixture/.git/azedarach-production-admission/production-epoch"
+rm -rf "$fixture/.git/azedarach-production-admission/production"
+wait "$epoch_waiter_pid"
+test -e "$fixture/epoch-publication-race.started"
+! grep -q "noncanonical" "$fixture/epoch-publication-race.stderr"
+
 AZEDARACH_GO_CACHE_ROOT= AZEDARACH_VALIDATION_LEASE_ID= AZEDARACH_VALIDATION_LEASE_ROOT= \
   PATH="$fixture/fake-bin:$PATH" \
   just --justfile "$fixture/justfile" --working-directory "$fixture" build
