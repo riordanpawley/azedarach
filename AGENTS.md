@@ -55,6 +55,14 @@ just test-race-daemon
 ./scripts/with-machine-validation-lease --class shared --profile focused-client-boundary -- go test ./internal/tui ./internal/cli ./internal/daemon/...
 ```
 
+## Local Test Determinism (Critical)
+
+1. No test run locally may make correctness depend on wall-clock duration, CPU throughput, scheduler speed or fairness, machine load, process-count capacity, or a performance budget.
+2. Do not use sleeps, short deadlines, elapsed-time assertions, CPU/load thresholds, or reduced processing capacity (for example `GOMAXPROCS`) to prove behavior locally. Use deterministic barriers, hooks, fake clocks, controlled inputs, and explicit state transitions instead.
+3. Local validation may record durations, CPU usage, process overlap, and budget comparisons for diagnostics, but those measurements must never fail or authorize a local correctness result.
+4. Command-level timeouts and concurrency caps may exist only as operational containment for hangs and machine safety. They are not semantic test inputs, performance gates, or evidence that behavior completes within a required duration.
+5. Timing and CPU-performance enforcement belongs exclusively to the controlled `ci-timing` profile (`just test-ci-timing`). That profile must fail closed unless all versioned controlled-environment markers are present, including `CI=true`, `AZEDARACH_TIMING_CONTROLLED=1`, the pinned runner/toolchain/resources, clean-per-sample cache state, and the aggregate `test-ci-timing` validation lease documented in [docs/26-test-timing-profiles.md](docs/26-test-timing-profiles.md).
+
 ## Test Hang Debugging
 
 - If `just test` appears to "hang" at a package boundary, do not rely on aggregate per-test runtimes alone. Run the suspicious package or test through `./scripts/with-machine-validation-lease --class shared --profile diagnostic -- go test -timeout <short-window> ...` so Go dumps goroutine stacks on timeout without bypassing validation admission.
@@ -66,7 +74,7 @@ just test-race-daemon
 
 ## Complete Test-Failure Batch Workflow
 
-- Use `just test` (or `just test-timing cold`) for the canonical uncached machine-readable full run. It preserves the complete `go test -json` stream, bounds package concurrency with `-p=4`, emits sorted package/test durations and all failures, and enforces the committed baseline/budgets documented in [docs/26-test-timing-profiles.md](docs/26-test-timing-profiles.md). Use the distinct `cached`, `focused`, `integration`, `migration-clone`, `race`, or `boundary` profiles only for their documented semantics; do not present a focused or cached result as cold full-suite evidence.
+- Use `just test` (or `just test-timing cold`) for the canonical uncached machine-readable full run. It preserves the complete `go test -json` stream, bounds package concurrency with `-p=4`, and emits sorted package/test durations and all failures. Local timing and CPU measurements are diagnostic-only and must not fail correctness; only the controlled `ci-timing` profile enforces the committed performance baseline/budgets documented in [docs/26-test-timing-profiles.md](docs/26-test-timing-profiles.md). Use the distinct `cached`, `focused`, `integration`, `migration-clone`, `race`, or `boundary` profiles only for their documented semantics; do not present a focused or cached result as cold full-suite evidence.
 - `just merge-gate` is the required local merge contract: build once, run the cold semantic suite once, then run static and focused executable boundary guards. Integration/subprocess, migration-clone, and race profiles are change-sensitive execution-mode gates; they intentionally rerun only the contracts that need those modes.
 - When a broad validation command fails, do not fix the first visible test and repeatedly rerun in a one-test-at-a-time loop.
 - Run the complete relevant suite once with machine-readable output through the lease authority, such as `./scripts/with-machine-validation-lease --class aggregate --profile diagnostic-full -- go test -json ./... -count=1 -timeout 10m`, and preserve the output outside the repository worktree when it is too large for the terminal. Aggregate-class diagnostics require the orchestrator's validation-capacity assignment.
