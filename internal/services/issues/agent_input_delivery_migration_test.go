@@ -205,7 +205,7 @@ func TestAgentInputDeliveryMigrationHistoricalUpgradeRollsBackAndRetries(t *test
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
 	seed := NewClientAtPath(path, nil)
-	seed.migrationCeiling = "0049_managed_agent_incarnations"
+	seed.migrationCeiling = issueObservationEventSearchMigrationID
 	issueID, err := seed.Create(ctx, CreateTaskParams{Title: "sentinel", Type: domain.TypeTask})
 	if err != nil {
 		t.Fatal(err)
@@ -215,7 +215,7 @@ func TestAgentInputDeliveryMigrationHistoricalUpgradeRollsBackAndRetries(t *test
 		t.Fatal(err)
 	}
 	var previousMarker, currentMarker, currentTable int
-	if err = db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='0049_managed_agent_incarnations'`).Scan(&previousMarker); err != nil {
+	if err = db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, issueObservationEventSearchMigrationID).Scan(&previousMarker); err != nil {
 		t.Fatal(err)
 	}
 	if err = db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&currentMarker); err != nil {
@@ -225,7 +225,7 @@ func TestAgentInputDeliveryMigrationHistoricalUpgradeRollsBackAndRetries(t *test
 		t.Fatal(err)
 	}
 	if previousMarker != 1 || currentMarker != 0 || currentTable != 0 {
-		t.Fatalf("previous production fixture marker0049=%d marker0050=%d table0050=%d", previousMarker, currentMarker, currentTable)
+		t.Fatalf("previous production fixture marker0050=%d marker0051=%d table0051=%d", previousMarker, currentMarker, currentTable)
 	}
 	if err = seed.CloseDB(); err != nil {
 		t.Fatal(err)
