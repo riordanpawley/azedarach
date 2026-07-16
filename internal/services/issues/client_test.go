@@ -1508,6 +1508,14 @@ func TestClient_ListGraphReadinessWithRuntimeScopesToRootClosure(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, client.AddDependency(ctx, grandchildID, blockerID, string(domain.DependencyBlocks)))
+	rootBlockerID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Root blocker",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusInProgress,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.AddDependency(ctx, rootID, rootBlockerID, string(domain.DependencyBlocks)))
 	unrelatedRootID, err := client.Create(ctx, CreateTaskParams{
 		Title:    "Unrelated root",
 		Type:     domain.TypeEpic,
@@ -1541,7 +1549,7 @@ func TestClient_ListGraphReadinessWithRuntimeScopesToRootClosure(t *testing.T) {
 		taskByID[task.ID.String()] = task
 	}
 
-	for _, wantID := range []string{rootID, childID, grandchildID, blockerID} {
+	for _, wantID := range []string{rootID, childID, grandchildID, blockerID, rootBlockerID} {
 		require.Contains(t, taskByID, wantID)
 	}
 	require.NotContains(t, taskByID, unrelatedRootID)
@@ -1552,6 +1560,20 @@ func TestClient_ListGraphReadinessWithRuntimeScopesToRootClosure(t *testing.T) {
 	require.Len(t, taskByID[grandchildID].Dependencies, 1)
 	assert.Equal(t, blockerID, taskByID[grandchildID].Dependencies[0].ID.String())
 	assert.Equal(t, domain.DependencyBlocks, taskByID[grandchildID].Dependencies[0].Type)
+	require.Len(t, taskByID[rootID].Dependencies, 1)
+	assert.Equal(t, rootBlockerID, taskByID[rootID].Dependencies[0].ID.String())
+
+	nestedTasks, err := client.ListGraphReadinessWithRuntime(ctx, projectID, childID)
+	require.NoError(t, err)
+	nestedByID := map[string]domain.Task{}
+	for _, task := range nestedTasks {
+		nestedByID[task.ID.String()] = task
+	}
+	for _, wantID := range []string{rootID, rootBlockerID, childID, grandchildID, blockerID} {
+		require.Contains(t, nestedByID, wantID)
+	}
+	require.NotContains(t, nestedByID, unrelatedRootID)
+	require.NotContains(t, nestedByID, unrelatedChildID)
 }
 
 func TestClient_ListGraphReadinessWithRuntimeBoundsProjectCandidatesAndCountsAllOpen(t *testing.T) {
@@ -1729,6 +1751,7 @@ func TestGraphReadinessContextIDsQueryUsesClosureIndexes(t *testing.T) {
 	query, args := graphReadinessContextIDsQuery("root")
 	got := explainQueryPlan(t, ctx, db, query, args...)
 	assert.Contains(t, got, "idx_issue_graph_closure_ancestor", got)
+	assert.Contains(t, got, "idx_issue_graph_closure_descendant", got)
 	assert.Contains(t, got, "idx_dependencies_issue_active_type", got)
 	assert.NotContains(t, got, "SCAN child", got)
 	assert.NotContains(t, got, "SCAN d", got)

@@ -655,6 +655,61 @@ func TestRefreshOwnedSyncFencesMutationAndStructuralHealthTransitions(t *testing
 	}
 }
 
+func TestProjectReadMaterializerCursorNotificationsPreserveFailureDisposition(t *testing.T) {
+	now := time.Date(2026, time.July, 18, 1, 0, 0, 0, time.UTC)
+	task := domain.Task{ID: naming.IssueID("transition"), Title: "transition", Type: domain.TypeTask, Status: domain.StatusOpen, CreatedAt: now, UpdatedAt: now}
+	canonical := map[string]domain.Task{task.ID.String(): task}
+	tasks := map[string]domain.Task{task.ID.String(): task}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, tasks)
+	materializer := newProjectReadMaterializer("project", nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) { return tasks, nil })
+	materializer.replaceBootstrap(canonical, tasks, materializedMetadata(1, 1, issueProjectionProjector(), nil, issueKeys.sum(), runtimeKeys.sum(), "healthy"), issueKeys, runtimeKeys)
+
+	assertNotified := func(signal <-chan struct{}, transition string) {
+		t.Helper()
+		select {
+		case <-signal:
+		default:
+			t.Fatalf("%s did not notify cursor waiters", transition)
+		}
+	}
+	assertDisposition := func(wantRetryable bool, wantHealth string) <-chan struct{} {
+		t.Helper()
+		_, metadata, signal, retryable := materializer.snapshotWithCursorAdvanceSignal()
+		if retryable != wantRetryable || !strings.Contains(metadata.Health, wantHealth) {
+			t.Fatalf("failure disposition retryable=%t health=%q, want retryable=%t health containing %q", retryable, metadata.Health, wantRetryable, wantHealth)
+		}
+		return signal
+	}
+
+	signal := assertDisposition(false, "healthy")
+	materializer.markUnhealthy(fmt.Errorf("%w: transient watch", domain.ErrProjectionRetryable))
+	assertNotified(signal, "retryable failure")
+	signal = assertDisposition(true, "transient watch")
+
+	updated := task
+	updated.Status = domain.StatusInProgress
+	updated.UpdatedAt = now.Add(time.Second)
+	if err := materializer.apply(context.Background(), productionMaterializerBatch(t, updated, 1)); err != nil {
+		t.Fatal(err)
+	}
+	assertNotified(signal, "successful delta apply")
+	signal = assertDisposition(false, "healthy")
+
+	materializer.markUnhealthy(fmt.Errorf("%w: retry before bootstrap", domain.ErrProjectionRetryable))
+	assertNotified(signal, "retryable failure before bootstrap")
+	signal = assertDisposition(true, "retry before bootstrap")
+	canonical = map[string]domain.Task{updated.ID.String(): updated}
+	tasks = map[string]domain.Task{updated.ID.String(): updated}
+	issueKeys, runtimeKeys = checkpointMaterializedTasks(canonical, tasks)
+	materializer.replaceBootstrap(canonical, tasks, materializedMetadata(2, 2, issueProjectionProjector(), nil, issueKeys.sum(), runtimeKeys.sum(), "healthy"), issueKeys, runtimeKeys)
+	assertNotified(signal, "successful bootstrap replacement")
+	signal = assertDisposition(false, "healthy")
+
+	materializer.markUnhealthy(errors.New("structural projection corruption"))
+	assertNotified(signal, "structural failure")
+	assertDisposition(false, "structural projection corruption")
+}
+
 func TestProjectReadMaterializerGapWatchPerformsVerifiedBootstrapRecovery(t *testing.T) {
 	client, _ := newTestIssueClient(t)
 	ctx := context.Background()
@@ -1879,6 +1934,97 @@ func TestProjectReadMaterializerBootstrapCannotClearCanceledQueuedConvergence(t 
 	}
 }
 
+func TestProjectReadSnapshotCurrentWaitsForExternalDependencyDelta(t *testing.T) {
+	ctx := context.Background()
+	writer, repoDir := newTestIssueClient(t)
+	reader := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = reader.CloseDB() })
+	if err := reader.OpenProjectionDeltaStore(); err != nil {
+		t.Fatal(err)
+	}
+	rootID, err := writer.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockerID, err := writer.Create(ctx, issues.CreateTaskParams{Title: "Blocker", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := writer.Create(ctx, issues.CreateTaskParams{Title: "Child", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(reader), nil)
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{issues: reader, materializers: map[string]*projectReadMaterializer{"project": materializer}, materializersStarted: true, revision: map[string]uint64{}, taskGraphReadinessCache: map[string]taskGraphReadinessCacheEntry{}, taskGraphReadinessLoads: map[string]*taskGraphReadinessLoad{}}
+	before, err := d.taskGraphReadiness(ctx, "project", rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before.Runnable) != 1 || before.Runnable[0] != childID {
+		t.Fatalf("before external blocker = %+v", before)
+	}
+
+	// This write represents a second daemon/process advancing the shared
+	// authority after this daemon's disposable read model was bootstrapped.
+	if err := writer.AddDependency(ctx, rootID, blockerID, string(domain.DependencyBlocks)); err != nil {
+		t.Fatal(err)
+	}
+	waiting := make(chan uint64, 1)
+	readCtx := withProjectReadCurrentWaitHookForTest(ctx, func(projectID string, target uint64) {
+		if projectID != "project" {
+			t.Errorf("wait project = %q, want project", projectID)
+		}
+		waiting <- target
+	})
+	type readResult struct {
+		tasks  []domain.Task
+		source protocol.MaterializedSnapshotMetadata
+		err    error
+	}
+	readDone := make(chan readResult, 1)
+	go func() {
+		tasks, source, err := d.projectReadSnapshotCurrent(readCtx, "project")
+		readDone <- readResult{tasks: tasks, source: source, err: err}
+	}()
+	target := <-waiting
+	beforeCursor := materializer.snapshotMetadata().DeliveryCursor
+	batch, err := materializer.authority.List(ctx, protocol.DefaultProjectID, beforeCursor, projectReadMaterializerBatchSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if batch.DeliveryToCursor < target {
+		t.Fatalf("batch cursor = %d, want at least %d", batch.DeliveryToCursor, target)
+	}
+	if err := materializer.apply(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	read := <-readDone
+	if read.err != nil {
+		t.Fatal(read.err)
+	}
+	tasks, source := read.tasks, read.source
+	if source.DeliveryCursor == 0 || source.DeliveryCursor < source.DeliveryHead {
+		t.Fatalf("source not current: %+v", source)
+	}
+	byID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID.String()] = task
+	}
+	if len(byID[rootID].Dependencies) != 1 || byID[rootID].Dependencies[0].ID.String() != blockerID {
+		t.Fatalf("root after current barrier = %+v", byID[rootID])
+	}
+	after, err := d.taskGraphReadiness(ctx, "project", rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Runnable) != 0 || len(after.RootBlockers) != 1 || after.RootBlockers[0] != blockerID || !strings.Contains(after.Blocked[childID], blockerID) {
+		t.Fatalf("after external blocker = %+v", after)
+	}
+}
+
 func TestSyncUserProjectionMaterializedIssuesPropagatesBoundedCurrentState(t *testing.T) {
 	ctx := context.Background()
 	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
@@ -2024,6 +2170,23 @@ func TestMaterializedTaskContextMatchesDirectStoreExpansion(t *testing.T) {
 	sort.Strings(metadataIDs)
 	if want := []string{"requested", "root"}; !reflect.DeepEqual(metadataIDs, want) {
 		t.Fatalf("metadata context IDs = %v, want %v", metadataIDs, want)
+	}
+}
+
+func TestMaterializedRootedGraphContextIncludesAncestorBlockers(t *testing.T) {
+	tasks := []domain.Task{
+		{ID: "root", Type: domain.TypeEpic, Status: domain.StatusOpen, Dependencies: []domain.Dependency{{ID: "root-blocker", Type: domain.DependencyBlocks}}},
+		{ID: "root-blocker", Status: domain.StatusInProgress},
+		{ID: "nested", Type: domain.TypeEpic, Status: domain.StatusOpen, ParentID: issueIDPointer("root")},
+		{ID: "nested-child", Status: domain.StatusOpen, ParentID: issueIDPointer("nested")},
+		{ID: "unrelated", Status: domain.StatusOpen},
+	}
+	got := materializedRootedGraphContext(tasks, "nested")
+	ids := taskIDsFromTasks(got)
+	sort.Strings(ids)
+	want := []string{"nested", "nested-child", "root", "root-blocker"}
+	if !reflect.DeepEqual(ids, want) {
+		t.Fatalf("rooted context IDs = %v, want %v", ids, want)
 	}
 }
 

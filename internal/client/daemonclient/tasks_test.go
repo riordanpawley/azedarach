@@ -302,8 +302,9 @@ func TestTaskGraphReadinessDecodesWorkerObservations(t *testing.T) {
 				t.Fatalf("actor_id = %q, want agent-a", body.ActorID)
 			}
 			return responseWithJSON(t, req, TaskGraphReadiness{
-				RootIssueID: "az-root",
-				Runnable:    []string{"az-1"},
+				RootIssueID:  "az-root",
+				RootBlockers: []string{"az-blocker"},
+				Runnable:     []string{"az-1"},
 				NestedRoots: []TaskNestedRoot{{
 					IssueID:    "az-nested",
 					Status:     string(domain.StatusOpen),
@@ -335,6 +336,9 @@ func TestTaskGraphReadinessDecodesWorkerObservations(t *testing.T) {
 	}
 	if len(ready.WorkerObservations) != 1 {
 		t.Fatalf("worker observations = %+v", ready.WorkerObservations)
+	}
+	if len(ready.RootBlockers) != 1 || ready.RootBlockers[0] != "az-blocker" {
+		t.Fatalf("root blockers = %+v", ready.RootBlockers)
 	}
 	if len(ready.NestedRoots) != 1 || ready.NestedRoots[0].IssueID != "az-nested" {
 		t.Fatalf("nested roots = %+v", ready.NestedRoots)

@@ -53,6 +53,11 @@ func isProjectReadUnavailableError(err error) bool {
 }
 
 type suppressSynchronousProjectReadRuntimeRefreshKey struct{}
+type projectReadCurrentWaitHookKey struct{}
+
+func withProjectReadCurrentWaitHookForTest(ctx context.Context, hook func(string, uint64)) context.Context {
+	return context.WithValue(ctx, projectReadCurrentWaitHookKey{}, hook)
+}
 
 func withProjectReadUpdateWaitHookForTest(ctx context.Context, hook func(string, string)) context.Context {
 	return withContextOperationLockWaitHookForTest(ctx, hook)
@@ -110,6 +115,7 @@ type projectReadMaterializer struct {
 	runtimeRefreshOwners                  map[string]map[uint64]struct{}
 	issueKeys                             keyedCheckpoint
 	runtimeKeys                           keyedCheckpoint
+	cursorAdvanced                        chan struct{}
 	cancel                                context.CancelFunc
 	done                                  chan struct{}
 }
@@ -165,8 +171,16 @@ func newProjectReadMaterializer(projectID string, authority *ProjectionDeltaAuth
 		projectID: strings.TrimSpace(projectID), authority: authority, hydrate: hydrate,
 		canonical: map[string]domain.Task{}, tasks: map[string]domain.Task{}, worktrees: map[string]git.Worktree{},
 		runtimeRefreshEpoch: map[string]uint64{}, runtimePublishedEpoch: map[string]uint64{}, runtimeRefreshOwners: map[string]map[uint64]struct{}{},
-		baseHealth: "healthy", authoritativeRefreshFailures: map[authoritativeReadRefreshComponent]string{},
+		baseHealth:                   "healthy",
+		authoritativeRefreshFailures: map[authoritativeReadRefreshComponent]string{}, cursorAdvanced: make(chan struct{}),
 	}
+}
+
+func (m *projectReadMaterializer) notifyCursorAdvancedLocked() {
+	if m.cursorAdvanced != nil {
+		close(m.cursorAdvanced)
+	}
+	m.cursorAdvanced = make(chan struct{})
 }
 
 func (m *projectReadMaterializer) lockUpdate(ctx context.Context, fallbackOperation string) (func(), error) {
@@ -502,6 +516,7 @@ func (m *projectReadMaterializer) applyCanonicalBatch(ctx context.Context, batch
 	// Canonical reads may accept the deltas they converge, while runtime reads
 	// must be fenced because their hydration began from the prior generation.
 	m.canonicalGeneration++
+	m.notifyCursorAdvancedLocked()
 	m.mu.Unlock()
 	ids := make([]string, 0, len(affected))
 	for issueID := range affected {
@@ -653,6 +668,7 @@ func (m *projectReadMaterializer) replaceBootstrapAfterConvergenceResult(canonic
 		m.runtimeRefreshEpoch[issueID] = m.runtimeRefreshSequence
 		m.runtimePublishedEpoch[issueID] = m.runtimeRefreshSequence
 	}
+	m.notifyCursorAdvancedLocked()
 	m.mu.Unlock()
 }
 
@@ -664,6 +680,7 @@ func (m *projectReadMaterializer) markUnhealthy(err error, serveLastGood bool) {
 	m.baseRetryableFailure = serveLastGood
 	m.aggregateHealthLocked()
 	m.healthEpoch++
+	m.notifyCursorAdvancedLocked()
 	m.mu.Unlock()
 }
 
@@ -856,6 +873,20 @@ func (m *projectReadMaterializer) snapshotWithFailureDisposition() ([]domain.Tas
 	}
 	sortTasksDeterministically(tasks)
 	return cloneTasks(tasks), cloneMaterializedMetadata(m.metadata), m.retryableFailure
+}
+
+func (m *projectReadMaterializer) snapshotWithCursorAdvanceSignal() ([]domain.Task, protocol.MaterializedSnapshotMetadata, <-chan struct{}, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cursorAdvanced == nil {
+		m.cursorAdvanced = make(chan struct{})
+	}
+	tasks := make([]domain.Task, 0, len(m.tasks))
+	for _, task := range m.tasks {
+		tasks = append(tasks, task)
+	}
+	sortTasksDeterministically(tasks)
+	return cloneTasks(tasks), cloneMaterializedMetadata(m.metadata), m.cursorAdvanced, m.retryableFailure
 }
 
 func (m *projectReadMaterializer) snapshotIssues(issueIDs map[string]struct{}) ([]domain.Task, protocol.MaterializedSnapshotMetadata) {
@@ -1372,6 +1403,49 @@ func (d *Daemon) convergedProjectReadSnapshotMode(ctx context.Context, projectID
 	return d.projectReadSnapshot(projectID)
 }
 
+// projectReadSnapshotCurrent waits until the daemon-local disposable read
+// model has consumed the durable delivery head observed for this command. It
+// gives mutation admission checks a cross-daemon refresh boundary without
+// rebuilding the projection or reading authority tables ad hoc.
+func (d *Daemon) projectReadSnapshotCurrent(ctx context.Context, projectID string) ([]domain.Task, protocol.MaterializedSnapshotMetadata, error) {
+	tasks, metadata, err := d.projectReadSnapshot(projectID)
+	if err != nil {
+		return nil, metadata, err
+	}
+	projectID = d.canonicalProjectID(projectID)
+	d.materializersMu.RLock()
+	materializer := d.materializers[projectID]
+	d.materializersMu.RUnlock()
+	if materializer == nil || materializer.authority == nil {
+		return tasks, metadata, nil
+	}
+	probe, err := materializer.authority.List(ctx, protocol.DefaultProjectID, metadata.DeliveryCursor, 1)
+	if err != nil {
+		return nil, metadata, fmt.Errorf("read current project projection head: %w", err)
+	}
+	target := probe.HeadCursor
+	for metadata.DeliveryCursor < target {
+		var advanced <-chan struct{}
+		var retryableFailure bool
+		tasks, metadata, advanced, retryableFailure = materializer.snapshotWithCursorAdvanceSignal()
+		if !strings.HasPrefix(metadata.Health, "healthy") && !retryableFailure {
+			return nil, metadata, fmt.Errorf("project read materialization unhealthy: %s", metadata.Health)
+		}
+		if metadata.DeliveryCursor >= target {
+			break
+		}
+		if hook, _ := ctx.Value(projectReadCurrentWaitHookKey{}).(func(string, uint64)); hook != nil {
+			hook(projectID, target)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, metadata, fmt.Errorf("wait for project projection cursor %d (at %d): %w", target, metadata.DeliveryCursor, ctx.Err())
+		case <-advanced:
+		}
+	}
+	return tasks, metadata, nil
+}
+
 func (d *Daemon) hydrateProjectReadTasks(ctx context.Context, projectID string, client *issues.Client, tasks []domain.Task) ([]domain.Task, error) {
 	hydrate := client.HydrateRuntime
 	if d.projectReadRuntimeHydrate != nil {
@@ -1738,6 +1812,51 @@ func materializedParentChildClosure(tasks []domain.Task, rootID string) []domain
 				}
 			}
 		}
+	}
+	out := make([]domain.Task, 0, len(selected))
+	for _, task := range tasks {
+		if _, ok := selected[task.ID.String()]; ok {
+			out = append(out, task)
+		}
+	}
+	return out
+}
+
+// materializedRootedGraphContext extends the requested rooted subtree with its
+// ancestor containment chain and each ancestor's direct dependencies. Rooted
+// admission needs that context to inherit blockers from enclosing roots.
+func materializedRootedGraphContext(tasks []domain.Task, rootID string) []domain.Task {
+	rootID = strings.TrimSpace(rootID)
+	if rootID == "" {
+		return tasks
+	}
+	byID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID.String()] = task
+	}
+	selected := make(map[string]struct{})
+	for _, task := range materializedParentChildClosure(tasks, rootID) {
+		selected[task.ID.String()] = struct{}{}
+	}
+	seen := map[string]struct{}{rootID: {}}
+	for task, ok := byID[rootID]; ok; {
+		parentID := strings.TrimSpace(domain.TaskParentIssueID(task))
+		if parentID == "" {
+			break
+		}
+		selected[parentID] = struct{}{}
+		if _, cycle := seen[parentID]; cycle {
+			break
+		}
+		seen[parentID] = struct{}{}
+		parent, exists := byID[parentID]
+		if !exists {
+			break
+		}
+		for _, dependency := range parent.Dependencies {
+			selected[dependency.ID.String()] = struct{}{}
+		}
+		task = parent
 	}
 	out := make([]domain.Task, 0, len(selected))
 	for _, task := range tasks {

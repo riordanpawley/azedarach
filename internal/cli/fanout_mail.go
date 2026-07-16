@@ -298,33 +298,41 @@ func IssueFanoutReadyCommand(deps *Dependencies, opts IssueFanoutReadyOptions) e
 	if opts.JSON {
 		return printJSON(result)
 	}
-	fmt.Printf("Root issue: %s\n", result.RootIssueID)
-	fmt.Println("Runnable leaves:")
+	printIssueFanoutReady(os.Stdout, result)
+	return nil
+}
+
+func printIssueFanoutReady(w io.Writer, result daemonclient.TaskGraphReadiness) {
+	fmt.Fprintf(w, "Root issue: %s\n", result.RootIssueID)
+	if len(result.RootBlockers) > 0 {
+		fmt.Fprintf(w, "Root blockers: %s\n", strings.Join(result.RootBlockers, ", "))
+	}
+	fprintln := func(value string) { _, _ = fmt.Fprintln(w, value) }
+	fprintln("Runnable leaves:")
 	if len(result.Runnable) == 0 {
-		fmt.Println("- (none)")
+		fprintln("- (none)")
 	} else {
 		for _, id := range result.Runnable {
-			fmt.Printf("- %s\n", id)
+			fmt.Fprintf(w, "- %s\n", id)
 		}
 	}
 	if len(result.Active) > 0 {
-		fmt.Println("Active leaves:")
+		fprintln("Active leaves:")
 		for _, id := range result.Active {
-			fmt.Printf("- %s\n", id)
+			fmt.Fprintf(w, "- %s\n", id)
 		}
 	}
 	if len(result.Blocked) > 0 {
-		fmt.Println("Blocked leaves:")
+		fprintln("Blocked leaves:")
 		ids := make([]string, 0, len(result.Blocked))
 		for id := range result.Blocked {
 			ids = append(ids, id)
 		}
 		sort.Strings(ids)
 		for _, id := range ids {
-			fmt.Printf("- %s: %s\n", id, result.Blocked[id])
+			fmt.Fprintf(w, "- %s: %s\n", id, result.Blocked[id])
 		}
 	}
-	return nil
 }
 
 func IssueFanoutDriftCommand(deps *Dependencies, opts IssueFanoutDriftOptions) error {

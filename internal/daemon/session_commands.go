@@ -984,6 +984,15 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
+	if task.Type == domain.TypeEpic {
+		admission, gateErr := d.rootedOrchestrationAdmission(ctx, cmd.ProjectID, cmd.IssueID)
+		if gateErr != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, gateErr.Error()), nil
+		}
+		if admission.Blocked() {
+			return d.errorResponse(req, protocol.ErrorCodeConflict, rootedOrchestrationBlockedMessage(admission)), nil
+		}
+	}
 	originalIssueStatus := task.Status
 	if err := d.ensureSessionStartIssueLifecycle(ctx, issueClient, cmd.IssueID, originalIssueStatus); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare issue lifecycle for session start: %v", err)), nil

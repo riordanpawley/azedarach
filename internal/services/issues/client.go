@@ -2648,13 +2648,28 @@ func graphReadinessContextIDsQuery(rootID string) (string, []any) {
 				AND closure.dependency_type = ?
 				AND closure.ancestor_id = ?
 		),
-		context(id) AS (
+		ancestors(id) AS (
+			SELECT closure.ancestor_id
+			FROM issue_graph_closure closure INDEXED BY idx_issue_graph_closure_descendant
+			INNER JOIN issues ancestor
+				ON ancestor.id = closure.ancestor_id
+				AND ancestor.visibility = 'live'
+			WHERE closure.project_id = ?
+				AND closure.dependency_type = ?
+				AND closure.descendant_id = ?
+		),
+		contained(id) AS (
 			SELECT id FROM graph
+			UNION
+			SELECT id FROM ancestors
+		),
+		context(id) AS (
+			SELECT id FROM contained
 
 			UNION
 
 			SELECT dep.depends_on_id
-			FROM graph graph_issue
+			FROM contained graph_issue
 			CROSS JOIN issue_dependencies dep INDEXED BY idx_dependencies_issue_active_type
 			CROSS JOIN issues dep_issue
 			WHERE dep.issue_id = graph_issue.id
@@ -2666,6 +2681,9 @@ func graphReadinessContextIDsQuery(rootID string) (string, []any) {
 		FROM context
 	`
 	return query, []any{
+		strings.TrimSpace(rootID),
+		issueGraphClosureProjectID,
+		string(domain.DependencyParentChild),
 		strings.TrimSpace(rootID),
 		issueGraphClosureProjectID,
 		string(domain.DependencyParentChild),

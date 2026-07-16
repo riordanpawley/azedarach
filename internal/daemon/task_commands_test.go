@@ -9781,6 +9781,50 @@ func TestTaskGraphReadinessDependencyGating(t *testing.T) {
 	}
 }
 
+func TestTaskGraphReadinessPropagatesRootBlockersToDescendantsAndNestedRoots(t *testing.T) {
+	root := naming.IssueID("az-root")
+	blocker := naming.IssueID("az-blocker")
+	leaf := naming.IssueID("az-leaf")
+	nested := naming.IssueID("az-nested")
+	leafParent := root
+	nestedParent := root
+	tasks := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress, Dependencies: []domain.Dependency{{ID: blocker, Type: domain.DependencyBlocks}}},
+		{ID: blocker, Type: domain.TypeTask, Status: domain.StatusInProgress},
+		{ID: leaf, Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &leafParent, Dependencies: []domain.Dependency{{ID: "az-missing", Type: domain.DependencyBlocks}}},
+		{ID: nested, Type: domain.TypeEpic, Status: domain.StatusOpen, ParentID: &nestedParent},
+	}
+
+	rootID, byID, children, err := daemonTaskGraphIndexes(root.String(), tasks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocked.Runnable) != 0 || !slices.Equal(blocked.RootBlockers, []string{blocker.String()}) {
+		t.Fatalf("blocked readiness = %+v", blocked)
+	}
+	if got := blocked.Blocked[leaf.String()]; !strings.Contains(got, "root waiting on "+blocker.String()) {
+		t.Fatalf("leaf blocker = %q", got)
+	} else if !strings.Contains(got, "az-missing(missing)") {
+		t.Fatalf("leaf-local blocker was hidden by root gate: %q", got)
+	}
+	if len(blocked.NestedRoots) != 1 || blocked.NestedRoots[0].Status != "blocked_root_dependency" || blocked.NestedRoots[0].Classification != string(domain.OrchestrationCandidateBlocked) {
+		t.Fatalf("nested roots = %+v", blocked.NestedRoots)
+	}
+
+	byID[blocker] = domain.Task{ID: blocker, Type: domain.TypeTask, Status: domain.StatusDone}
+	ready, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ready.Runnable) != 0 || !strings.Contains(ready.Blocked[leaf.String()], "az-missing(missing)") || len(ready.RootBlockers) != 0 || ready.NestedRoots[0].Status != "startable" {
+		t.Fatalf("settled readiness = %+v", ready)
+	}
+}
+
 func TestTaskGraphReadinessSkipsForeignOwnedRunnableIssues(t *testing.T) {
 	root := naming.IssueID("az-root")
 	leaf := naming.IssueID("az-owned")
