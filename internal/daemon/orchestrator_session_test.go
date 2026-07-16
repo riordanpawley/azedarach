@@ -535,7 +535,10 @@ func TestRealProcessProfileRootedMarkerSurvivesPaneChildReplacement(t *testing.T
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(tmuxDir) })
 	runner := &isolatedTmuxTestRunner{tmuxPath: tmuxPath, socketPath: filepath.Join(tmuxDir, "server.sock")}
-	if output, err := runner.run(context.Background(), "-f", "/dev/null", "new-session", "-d", "-s", "rooted-replacement", "sh"); err != nil {
+	// Let tmux create its normal interactive login shell. An explicitly named
+	// non-interactive `sh` may exit on the foreground child's SIGINT, taking the
+	// private server with it before the replacement can be launched.
+	if output, err := runner.run(context.Background(), "-f", "/dev/null", "new-session", "-d", "-s", "rooted-replacement"); err != nil {
 		t.Fatalf("start isolated tmux: %v (%s)", err, output)
 	}
 	t.Cleanup(func() { _, _ = runner.run(context.Background(), "kill-server") })
