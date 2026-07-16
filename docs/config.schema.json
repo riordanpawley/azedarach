@@ -17,6 +17,19 @@
       "enum": ["claude", "opencode", "codex"],
       "default": "claude"
     },
+    "gate": {
+      "type": "object",
+      "description": "Project-owned quality gate invoked by az gate from the requested ticket worktree.",
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "Shell command to run. Empty or omitted means this project has no configured gate.",
+          "default": ""
+        }
+      },
+      "default": {}
+    },
     "git": {
       "type": "object",
       "additionalProperties": false,
@@ -115,7 +128,7 @@
             },
             "command": {
               "type": "string",
-              "default": "just check-boundaries"
+              "default": ""
             }
           }
         }

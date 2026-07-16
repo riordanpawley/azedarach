@@ -29,13 +29,16 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var beforeIssues, beforeCustom, beforeMigrations, beforeAgentInput int
+			var beforeIssues, beforeCustom, beforeDecisions, beforeDecisionAudits, beforeMigrations, beforeDecisionIdempotency, beforeAgentInput int
 			if err = beforeDB.QueryRow(`SELECT COUNT(*) FROM issues`).Scan(&beforeIssues); err != nil {
 				t.Fatal(err)
 			}
 			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM board_views WHERE built_in=0`).Scan(&beforeCustom)
 			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&beforeMigrations)
+			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, decisionIdempotencyMigrationID).Scan(&beforeDecisionIdempotency)
 			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&beforeAgentInput)
+			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM decisions`).Scan(&beforeDecisions)
+			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM decision_audit_log`).Scan(&beforeDecisionAudits)
 			_ = beforeDB.Close()
 
 			client := NewClientAtPath(path, slog.Default())
@@ -55,6 +58,9 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = validateProjectionDeltaAuthoritySchema(ctx, db); err != nil {
 				t.Fatal(err)
 			}
+			if err = validateDecisionIdempotencySchema(ctx, db); err != nil {
+				t.Fatal(err)
+			}
 			var checksum string
 			var ledgerRows int
 			if err = db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, projectionDeltaAuthorityMigrationID, projectionDeltaAuthorityChecksum).Scan(&ledgerRows); err != nil || ledgerRows != 1 {
@@ -66,8 +72,11 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, decisionPropagationOutboxMigrationID).Scan(&checksum); err != nil || checksum != "a12c44ba35156d71fbcd88a9d78e4cdb234e75e7e4aef5f896c8b1182ada858d" {
 				t.Fatalf("decision outbox checksum=%q err=%v", checksum, err)
 			}
-			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&checksum); err != nil || checksum != "8836af7f8a96e82aa4f72eaee14a5c48ea9a1c161cfc56376089293df6ae3dfa" {
+			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&checksum); err != nil || checksum != "92d3be503bc193101944f1bc1ecee38656f04c3be7399a1b88356ae6add42f55" {
 				t.Fatalf("agent input checksum=%q err=%v", checksum, err)
+			}
+			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, decisionIdempotencyMigrationID).Scan(&checksum); err != nil || checksum != "86d5400fe33bbc19e7e848bc232335809f76d85e4d45a6e45f6bc7ff77547f47" {
+				t.Fatalf("decision idempotency checksum=%q err=%v", checksum, err)
 			}
 			if !rootedBootstrapTableExists(t, db) {
 				t.Fatal("rooted bootstrap acknowledgement table missing after clone migration")
@@ -101,7 +110,7 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if _, err = client.List(ctx); err != nil {
 				t.Fatal(err)
 			}
-			var afterIssues, afterCustom, afterMigrations, afterAgentInput, intentRows int
+			var afterIssues, afterCustom, afterDecisions, afterDecisionAudits, afterMigrations, afterDecisionIdempotency, afterAgentInput, intentRows int
 			if err = db.QueryRow(`SELECT COUNT(*) FROM issues`).Scan(&afterIssues); err != nil {
 				t.Fatal(err)
 			}
@@ -111,19 +120,28 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&afterMigrations); err != nil {
 				t.Fatal(err)
 			}
+			if err = db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, decisionIdempotencyMigrationID).Scan(&afterDecisionIdempotency); err != nil {
+				t.Fatal(err)
+			}
 			if err = db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&afterAgentInput); err != nil {
 				t.Fatal(err)
 			}
 			if err = db.QueryRow(`SELECT COUNT(*) FROM agent_input_delivery_intents`).Scan(&intentRows); err != nil {
 				t.Fatal(err)
 			}
-			if beforeIssues != afterIssues || beforeCustom != afterCustom {
-				t.Fatalf("row preservation issues=%d/%d custom_views=%d/%d", beforeIssues, afterIssues, beforeCustom, afterCustom)
+			if err = db.QueryRow(`SELECT COUNT(*) FROM decisions`).Scan(&afterDecisions); err != nil {
+				t.Fatal(err)
 			}
-			if afterAgentInput != 1 || intentRows != 0 || afterMigrations != beforeMigrations+(1-beforeAgentInput) {
-				t.Fatalf("migration summary before=%d/0050:%d after=%d/0050:%d intent_rows=%d", beforeMigrations, beforeAgentInput, afterMigrations, afterAgentInput, intentRows)
+			if err = db.QueryRow(`SELECT COUNT(*) FROM decision_audit_log`).Scan(&afterDecisionAudits); err != nil {
+				t.Fatal(err)
 			}
-			t.Logf("real clone summary path=%s issues=%d custom_views=%d migrations=%d->%d agent_input_marker=%d->%d intent_rows=%d", path, afterIssues, afterCustom, beforeMigrations, afterMigrations, beforeAgentInput, afterAgentInput, intentRows)
+			if beforeIssues != afterIssues || beforeCustom != afterCustom || beforeDecisions != afterDecisions || beforeDecisionAudits != afterDecisionAudits {
+				t.Fatalf("row preservation issues=%d/%d custom_views=%d/%d decisions=%d/%d decision_audits=%d/%d", beforeIssues, afterIssues, beforeCustom, afterCustom, beforeDecisions, afterDecisions, beforeDecisionAudits, afterDecisionAudits)
+			}
+			if afterDecisionIdempotency != 1 || afterAgentInput != 1 || intentRows != 0 || afterMigrations != beforeMigrations+(1-beforeDecisionIdempotency)+(1-beforeAgentInput) {
+				t.Fatalf("migration summary before=%d/0051:%d/0052:%d after=%d/0051:%d/0052:%d intent_rows=%d", beforeMigrations, beforeDecisionIdempotency, beforeAgentInput, afterMigrations, afterDecisionIdempotency, afterAgentInput, intentRows)
+			}
+			t.Logf("real clone summary path=%s issues=%d custom_views=%d migrations=%d->%d decision_marker=%d->%d agent_input_marker=%d->%d intent_rows=%d", path, afterIssues, afterCustom, beforeMigrations, afterMigrations, beforeDecisionIdempotency, afterDecisionIdempotency, beforeAgentInput, afterAgentInput, intentRows)
 			if err = client.CloseDB(); err != nil {
 				t.Fatal(err)
 			}
@@ -143,6 +161,12 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			}
 			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, projectionDeltaAuthorityMigrationID, projectionDeltaAuthorityChecksum).Scan(&ledgerRows); err != nil || ledgerRows != 1 {
 				t.Fatalf("projection delta ledger rows after reopen=%d err=%v", ledgerRows, err)
+			}
+			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, decisionIdempotencyMigrationID, "86d5400fe33bbc19e7e848bc232335809f76d85e4d45a6e45f6bc7ff77547f47").Scan(&ledgerRows); err != nil || ledgerRows != 1 {
+				t.Fatalf("decision idempotency ledger rows after reopen=%d err=%v", ledgerRows, err)
+			}
+			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, agentInputDeliveryMigrationID, "92d3be503bc193101944f1bc1ecee38656f04c3be7399a1b88356ae6add42f55").Scan(&ledgerRows); err != nil || ledgerRows != 1 {
+				t.Fatalf("agent input delivery ledger rows after reopen=%d err=%v", ledgerRows, err)
 			}
 			_ = reopened.CloseDB()
 		})

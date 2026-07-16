@@ -9499,7 +9499,7 @@ func renderPrimeOrchestrationSection(snapshot protocol.OrchestrationSnapshot) st
 	}
 	fmt.Fprintf(&b, "- Capacity: active=%d runnable=%d total=%d/%d; wave limit=%d.\n", snapshot.Capacity.DirectActiveCount, snapshot.Capacity.DirectRunnableCount, snapshot.Capacity.TotalCountingCapacityCount, snapshot.Constraints.AgentCapacity, snapshot.Constraints.StartLimit)
 	if validation := snapshot.ValidationCapacity; validation != nil && (len(validation.Active) > 0 || len(validation.Queued) > 0) {
-		fmt.Fprintf(&b, "- Validation capacity: active=%d queued=%d revision=%d; inspect with `just validation-status`.\n", len(validation.Active), len(validation.Queued), validation.Revision)
+		fmt.Fprintf(&b, "- Validation capacity: active=%d queued=%d revision=%d; inspect with `az validation status`.\n", len(validation.Active), len(validation.Queued), validation.Revision)
 	}
 	renderCandidates := func(label string, candidates []protocol.OrchestrationCandidate) {
 		if len(candidates) == 0 {

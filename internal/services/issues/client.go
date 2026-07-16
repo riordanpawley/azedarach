@@ -527,6 +527,7 @@ type Client struct {
 	decisionOutboxMigrationFailureHook func(stage string) error
 	agentInputMigrationFailureHook     func(stage string) error
 	migrationCeiling                   string // test-only historical startup seam; empty in production
+	decisionIdempotencyFailureHook     func(stage string) error
 	eventSearchMigrationFailureHook    func(stage string) error
 	requireExistingDB                  bool
 	interactionMu                      sync.RWMutex

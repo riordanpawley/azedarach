@@ -17,13 +17,14 @@ import (
 // only lifecycle/bootstrap control paths; agent messages have no exemption.
 func TestDaemonRawTmuxInputCallersAreStructurallyBounded(t *testing.T) {
 	allowed := map[string]bool{
-		"orchestrator_session.go:gracefullyStopOrchestratorRuntime:PasteTextAndSubmit": true,
-		"orchestrator_session.go:gracefullyStopOrchestratorRuntime:SendKeys":           true,
-		"session_commands.go:handleSessionRestartAll:SendKeys":                         true,
-		"session_commands.go:handleSessionRestartAll:PasteTextAndSubmit":               true,
-		"session_commands.go:startSessionAsyncInitCommands:SendKeys":                   true,
-		"session_commands.go:exportIssueResourceSessionEnv:SendKeys":                   true,
-		"session_commands.go:exportSessionContextEnv:SendKeys":                         true,
+		"orchestrator_bootstrap.go:ensureRootedOrchestratorBootstrap:PasteTextAndSubmit": true,
+		"orchestrator_session.go:gracefullyStopOrchestratorRuntime:PasteTextAndSubmit":   true,
+		"orchestrator_session.go:gracefullyStopOrchestratorRuntime:SendKeys":             true,
+		"session_commands.go:restartAllTarget:SendKeys":                                  true,
+		"session_commands.go:restartAllTarget:PasteTextAndSubmit":                        true,
+		"session_commands.go:startSessionAsyncInitCommands:SendKeys":                     true,
+		"session_commands.go:exportIssueResourceSessionEnv:SendKeys":                     true,
+		"session_commands.go:exportSessionContextEnv:SendKeys":                           true,
 	}
 	var found []string
 	fset := token.NewFileSet()

@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/riordanpawley/azedarach/main/docs/config.schema.json",
-  "$version": 10,
+  "$version": 11,
   "cliTool": "codex",
   "devServer": {
     "basePort": 3000,
@@ -9,6 +9,9 @@
   },
   "diagnostics": {
     "latencyTrace": true
+  },
+  "gate": {
+    "command": "just review-gate"
   },
   "git": {
     "baseBranch": "main",
