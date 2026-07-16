@@ -184,6 +184,7 @@ func TestStatusBar_LongIntegrationSandboxProjectPreservesEssentialStatus(t *test
 		width     int
 		configure func(*StatusBar)
 		wants     []string
+		unwants   []string
 	}{
 		{
 			name:  "normal hints",
@@ -216,6 +217,37 @@ func TestStatusBar_LongIntegrationSandboxProjectPreservesEssentialStatus(t *test
 			wants: []string{"NORMAL", "F/S", "?: help", "O: orchestrator"},
 		},
 		{
+			name:  "narrow mandatory state compacts mode for hints",
+			width: 40,
+			configure: func(sb *StatusBar) {
+				sb.SetFilterSummary("F:q=integration-sandbox-status-filter,st:2,pr:3")
+				sb.SetSortSummary("S:project_orchestrator_activity/descending")
+			},
+			wants:   []string{"N", "F/S", "?: help", "O: orchestrator"},
+			unwants: []string{"NORMAL"},
+		},
+		{
+			name:  "loading preserves essential hints",
+			width: 80,
+			configure: func(sb *StatusBar) {
+				sb.SetFilterSummary("F:q=integration-sandbox-status-filter,st:2,pr:3")
+				sb.SetSortSummary("S:project_orchestrator_activity/descending")
+				sb.SetLoadingIndicator("Loading")
+			},
+			wants: []string{"NORMAL", "F/S", "Loading", "?: help", "O: orchestrator"},
+		},
+		{
+			name:  "selection drives mandatory fallback",
+			width: 64,
+			configure: func(sb *StatusBar) {
+				sb.SetFilterSummary("F:q=board,st:2")
+				sb.SetSortSummary("S:updated/desc")
+				sb.SetSelectionSummary("Selected: 2 (2 hidden)")
+			},
+			wants:   []string{"NORMAL", "F/S", "Selected: 2 (2 hidden)"},
+			unwants: []string{"F:q=board,st:2", "S:updated/desc"},
+		},
+		{
 			name:  "hidden selection",
 			width: 80,
 			configure: func(sb *StatusBar) {
@@ -239,6 +271,11 @@ func TestStatusBar_LongIntegrationSandboxProjectPreservesEssentialStatus(t *test
 			for _, want := range tt.wants {
 				if !strings.Contains(result, want) {
 					t.Fatalf("status bar missing %q: %q", want, result)
+				}
+			}
+			for _, unwanted := range tt.unwants {
+				if strings.Contains(result, unwanted) {
+					t.Fatalf("status bar unexpectedly contains %q: %q", unwanted, result)
 				}
 			}
 			if got := lipgloss.Width(result); got != tt.width {

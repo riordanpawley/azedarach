@@ -129,44 +129,33 @@ func (sb StatusBar) Render() string {
 	if len(mandatorySlots) > 0 && contentWidth <= 18 {
 		return sb.styles.StatusBar.Width(sb.width).Render(sb.compactMandatoryStatus())
 	}
-	mandatoryFallback := sb.mandatoryFallbackToken()
-	mandatoryFallbackWidth := lipgloss.Width(sb.styles.StatusInfo.Render(mandatoryFallback))
 	modeLabel := " " + sb.mode.String() + " "
 	if sb.modeSuffix != "" {
 		modeLabel = " " + sb.mode.String() + " " + sb.modeSuffix + " "
 	}
-	modeLabelWidth := lipgloss.Width(sb.styles.StatusMode.Render(modeLabel))
-	if len(mandatorySlots) > 0 {
-		mandatoryNeed := separatorWidth + mandatoryFallbackWidth
-		if contentWidth < modeLabelWidth+mandatoryNeed {
-			modeLabel = sb.mode.String()
-			modeLabelWidth = lipgloss.Width(sb.styles.StatusMode.Render(modeLabel))
-		}
-		if contentWidth < modeLabelWidth+mandatoryNeed {
-			modeLabel = shortModeLabel(sb.mode)
-			modeLabelWidth = lipgloss.Width(sb.styles.StatusMode.Render(modeLabel))
-		}
-	}
 	priorityTail, priorityTailStyle := sb.priorityTailReservation()
-	plannedMandatorySlots := mandatorySlots
-	mandatoryTail := priorityTail
-	mandatoryTailStyle := priorityTailStyle
-	if sb.selectionSummary != "" {
-		mandatoryTail = ""
+	prioritySlots := make([]statusSlot, 0, 1)
+	if priorityTail != "" {
+		prioritySlots = append(prioritySlots, statusSlot{style: priorityTailStyle, text: priorityTail})
 	}
-	if len(mandatorySlots) > 0 && statusLayoutWidth(modeLabelWidth, mandatorySlots, mandatoryTail, mandatoryTailStyle, separatorWidth) > contentWidth {
-		plannedMandatorySlots = []statusSlot{{style: sb.styles.StatusInfo, text: mandatoryFallback}}
+	modeLabel, plannedMandatorySlots := sb.planCoreLayout(contentWidth, separatorWidth, modeLabel, mandatorySlots, prioritySlots)
+	modeLabelWidth := lipgloss.Width(sb.styles.StatusMode.Render(modeLabel))
+	plannedLoading := ""
+	if sb.loadingIndicator != "" {
+		loadingSlot := statusSlot{style: sb.styles.StatusHint, text: sb.loadingIndicator}
+		if statusLayoutWidth(modeLabelWidth, plannedMandatorySlots, append([]statusSlot{loadingSlot}, prioritySlots...), separatorWidth) <= contentWidth {
+			plannedLoading = sb.loadingIndicator
+		}
 	}
+	reservedTrailing := make([]statusSlot, 0, 2)
+	if plannedLoading != "" {
+		reservedTrailing = append(reservedTrailing, statusSlot{style: sb.styles.StatusHint, text: plannedLoading})
+	}
+	reservedTrailing = append(reservedTrailing, prioritySlots...)
 
 	if sb.currentProject != "" {
 		projectStyle := sb.styles.StatusInfo.Bold(true)
-		reservedForMode := modeLabelWidth
-		for _, slot := range plannedMandatorySlots {
-			reservedForMode += separatorWidth + lipgloss.Width(slot.style.Render(slot.text))
-		}
-		if priorityTail != "" {
-			reservedForMode += separatorWidth + lipgloss.Width(priorityTailStyle.Render(priorityTail))
-		}
+		reservedForMode := statusLayoutWidth(modeLabelWidth, plannedMandatorySlots, reservedTrailing, separatorWidth)
 		reservedForMode += separatorWidth // separator between project and mode
 		projectWidth := contentWidth - reservedForMode
 		if projectWidth > 0 {
@@ -188,8 +177,8 @@ func (sb StatusBar) Render() string {
 	}
 
 	slots := make([]statusSlot, 0, 4)
-	if sb.loadingIndicator != "" {
-		slots = append(slots, statusSlot{style: sb.styles.StatusHint, text: sb.loadingIndicator})
+	if plannedLoading != "" {
+		slots = append(slots, statusSlot{style: sb.styles.StatusHint, text: plannedLoading})
 	}
 	if sb.selectionSummary != "" {
 		slots = append(slots, statusSlot{style: sb.styles.StatusInfo, text: sb.selectionSummary})
@@ -215,15 +204,66 @@ type statusSlot struct {
 	text  string
 }
 
-func statusLayoutWidth(modeWidth int, mandatory []statusSlot, priorityTail string, priorityTailStyle lipgloss.Style, separatorWidth int) int {
+func statusLayoutWidth(modeWidth int, mandatory, trailing []statusSlot, separatorWidth int) int {
 	width := modeWidth
 	for _, slot := range mandatory {
 		width += separatorWidth + lipgloss.Width(slot.style.Render(slot.text))
 	}
-	if priorityTail != "" {
-		width += separatorWidth + lipgloss.Width(priorityTailStyle.Render(priorityTail))
+	for _, slot := range trailing {
+		width += separatorWidth + lipgloss.Width(slot.style.Render(slot.text))
 	}
 	return width
+}
+
+func (sb StatusBar) planCoreLayout(contentWidth, separatorWidth int, preferredMode string, mandatory, priority []statusSlot) (string, []statusSlot) {
+	if len(mandatory) == 0 {
+		return preferredMode, mandatory
+	}
+
+	mandatoryPlans := [][]statusSlot{mandatory}
+	if fallback := sb.filterSortFallbackSlots(); len(fallback) > 0 {
+		mandatoryPlans = append(mandatoryPlans, fallback)
+	}
+	mandatoryPlans = append(mandatoryPlans, []statusSlot{{style: sb.styles.StatusInfo, text: sb.mandatoryFallbackToken()}})
+
+	modePlans := []string{preferredMode, sb.mode.String(), shortModeLabel(sb.mode)}
+	planningPriority := priority
+	shortModeWidth := lipgloss.Width(sb.styles.StatusMode.Render(shortModeLabel(sb.mode)))
+	lastMandatory := mandatoryPlans[len(mandatoryPlans)-1]
+	if statusLayoutWidth(shortModeWidth, lastMandatory, planningPriority, separatorWidth) > contentWidth {
+		// An oversized priority label cannot be preserved in full. Do not let it
+		// demote mandatory alerts that still provide the actionable route.
+		planningPriority = nil
+	}
+	for _, candidateMode := range modePlans {
+		modeWidth := lipgloss.Width(sb.styles.StatusMode.Render(candidateMode))
+		for _, candidateMandatory := range mandatoryPlans {
+			if statusLayoutWidth(modeWidth, candidateMandatory, planningPriority, separatorWidth) <= contentWidth {
+				return candidateMode, candidateMandatory
+			}
+		}
+	}
+	return shortModeLabel(sb.mode), lastMandatory
+}
+
+func (sb StatusBar) filterSortFallbackSlots() []statusSlot {
+	slots := make([]statusSlot, 0, 2)
+	if strings.TrimSpace(sb.alertIndicator) != "" {
+		slots = append(slots, statusSlot{style: sb.styles.StatusHint.Bold(true), text: sb.alertIndicator})
+	}
+	filterSort := ""
+	switch {
+	case strings.TrimSpace(sb.filterSummary) != "" && strings.TrimSpace(sb.sortSummary) != "":
+		filterSort = "F/S"
+	case strings.TrimSpace(sb.filterSummary) != "":
+		filterSort = "F"
+	case strings.TrimSpace(sb.sortSummary) != "":
+		filterSort = "S"
+	}
+	if filterSort != "" {
+		slots = append(slots, statusSlot{style: sb.styles.StatusInfo, text: filterSort})
+	}
+	return slots
 }
 
 func renderWithin(style lipgloss.Style, text string, width int) (string, bool) {
