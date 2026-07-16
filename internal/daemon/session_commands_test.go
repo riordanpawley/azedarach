@@ -10890,6 +10890,64 @@ func TestPersistTmuxSessionRuntimeStateDefaultsRecoveredSessionActivityBusy(t *t
 	}
 }
 
+func TestPersistTmuxSessionRuntimeStateAdmitsOnlyExactProjectManagedSessionsAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	const (
+		firstProjectID  = "wedding"
+		firstIssueID    = "wed-17"
+		secondProjectID = "effect-prisma-generator"
+		secondIssueID   = "efp-29"
+		externalSession = "az"
+	)
+
+	firstStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "first.db"), slog.Default())
+	secondStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "second.db"), slog.Default())
+	t.Cleanup(func() {
+		_ = firstStore.Close()
+		_ = secondStore.Close()
+	})
+	firstSessionID := naming.CanonicalSessionID(firstProjectID, firstIssueID)
+	secondSessionID := naming.CanonicalSessionID(secondProjectID, secondIssueID)
+	inventory := []tmux.SessionInfo{{Name: externalSession}, {Name: firstSessionID}, {Name: secondSessionID}}
+
+	newDaemon := func() *Daemon {
+		return &Daemon{
+			cfg:          Config{RepoDir: ".", Logger: slog.Default()},
+			sessionStore: daemonstate.NewStore(),
+			runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+				firstProjectID: firstStore, secondProjectID: secondStore,
+			},
+		}
+	}
+	for cycle, d := range []*Daemon{newDaemon(), newDaemon()} {
+		for _, projectID := range []string{firstProjectID, secondProjectID} {
+			if err := d.persistTmuxSessionRuntimeState(ctx, projectID, inventory, nil); err != nil {
+				t.Fatalf("cycle %d persist project %s: %v", cycle, projectID, err)
+			}
+		}
+	}
+
+	for _, tc := range []struct {
+		projectID string
+		store     *daemonstate.RuntimeStateStore
+		wantID    string
+	}{
+		{projectID: firstProjectID, store: firstStore, wantID: firstSessionID},
+		{projectID: secondProjectID, store: secondStore, wantID: secondSessionID},
+	} {
+		rows, err := tc.store.ListSessionStates(ctx, tc.projectID)
+		if err != nil {
+			t.Fatalf("list %s sessions: %v", tc.projectID, err)
+		}
+		if len(rows) != 1 || rows[0].ID != tc.wantID {
+			t.Fatalf("%s sessions = %+v, want only %s", tc.projectID, rows, tc.wantID)
+		}
+		if observation, found, err := tc.store.GetPhysicalSessionObservation(ctx, tc.projectID, externalSession); err != nil || found {
+			t.Fatalf("%s external observation = %+v found=%v err=%v", tc.projectID, observation, found, err)
+		}
+	}
+}
+
 func TestPersistTmuxSessionRuntimeStatePreservesNoAgentActivity(t *testing.T) {
 	const (
 		projectID = "proj-reconcile-no-agent"

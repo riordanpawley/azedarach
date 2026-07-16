@@ -15,6 +15,7 @@ func TestCanonicalProfilesMakeCacheAndScopeExplicit(t *testing.T) {
 		wantPkg    string
 	}{
 		{name: "cold", cleanCache: true, wantArg: "-count=1", wantPkg: "./..."},
+		{name: "ci-timing", cleanCache: true, wantArg: "-count=1", wantPkg: "./..."},
 		{name: "cached", wantArg: "-json", wantPkg: "./..."},
 		{name: "focused", wantArg: "-count=1", wantPkg: "./internal/testtiming"},
 		{name: "race", wantArg: "-race", wantPkg: "./internal/services/issues"},
@@ -40,7 +41,7 @@ func TestCanonicalProfilesMakeCacheAndScopeExplicit(t *testing.T) {
 			assert.Equal(t, "test", profile.Command()[1])
 		})
 	}
-	assert.Equal(t, []string{"boundary", "cached", "cold", "focused", "integration", "migration-clone", "race"}, ProfileNames())
+	assert.Equal(t, []string{"boundary", "cached", "ci-timing", "cold", "focused", "integration", "migration-clone", "race"}, ProfileNames())
 	cold, err := ResolveProfile("cold", nil, "")
 	require.NoError(t, err)
 	assert.Contains(t, cold.GoTestArgs, "-timeout=8m")
@@ -55,7 +56,7 @@ func TestFocusedProfileOverridesAreRecordedInExactCommand(t *testing.T) {
 }
 
 func TestCompleteProfilesRejectScopeChangingOverrides(t *testing.T) {
-	for _, name := range []string{"cold", "cached", "race", "integration", "migration-clone", "boundary"} {
+	for _, name := range []string{"cold", "ci-timing", "cached", "race", "integration", "migration-clone", "boundary"} {
 		_, err := ResolveProfile(name, []string{"./internal/testtiming"}, "")
 		assert.ErrorContains(t, err, "canonical scope", name)
 		_, err = ResolveProfile(name, nil, "TestOnlyOne")

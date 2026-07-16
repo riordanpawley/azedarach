@@ -485,6 +485,9 @@ func ProjectTasksByBoardView(view BoardView, tasks []Task) (BoardViewProjection,
 		columns = append(columns, BoardViewColumnSnapshot{Definition: column})
 	}
 	for _, task := range tasks {
+		if task.State.IsArchived() {
+			continue
+		}
 		if !view.MatchesFilters(task) {
 			continue
 		}

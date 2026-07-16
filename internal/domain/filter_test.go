@@ -210,6 +210,19 @@ func TestContentQueryFTSExpression(t *testing.T) {
 	}
 }
 
+func TestIssueObservationEventMatchesQueryUsesHumanFacingPayloadAliases(t *testing.T) {
+	event := IssueObservationEvent{Payload: map[string]any{"summary": "Projection checkpoint", "internal": "secret token"}}
+	if !IssueObservationEventMatchesQuery(event, "projection checkpoint") {
+		t.Fatal("human-facing summary did not match")
+	}
+	if IssueObservationEventMatchesQuery(event, "secret") {
+		t.Fatal("non-human payload field unexpectedly matched")
+	}
+	if IssueObservationEventMatchesQuery(event, "project") {
+		t.Fatal("event search must use FTS-aligned whole-token semantics")
+	}
+}
+
 func TestContentFieldsMatchQuery(t *testing.T) {
 	fields := []string{"REQ-LIFE-2", "Session lifecycle cleanup", "accepted"}
 	if !ContentFieldsMatchQuery(fields, "life cleanup") {
