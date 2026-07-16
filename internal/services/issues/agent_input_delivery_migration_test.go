@@ -171,6 +171,28 @@ func TestAgentInputDeliverySessionLeaseIsCrossClientAndSessionScoped(t *testing.
 	}
 }
 
+func TestAgentInputDeliveryRecoveryLeaseDoesNotRecreateMissingAuthority(t *testing.T) {
+	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	defer client.CloseDB()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 17, 0, 0, 0, 0, time.UTC)
+	original, acquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, "p", "s", "inc", "dead-daemon", now.Add(-2*time.Minute), time.Minute)
+	if err != nil || !acquired {
+		t.Fatalf("original lease=%+v acquired=%v err=%v", original, acquired, err)
+	}
+	if err := client.ReleaseAgentInputDeliverySessionLease(ctx, "p", "s", "inc", original.LeaseToken); err != nil {
+		t.Fatal(err)
+	}
+	recovery, acquired, err := client.ClaimAgentInputDeliverySessionLeaseRecovery(ctx, "p", "s", "inc", original.LeaseToken, "recovery-daemon", now, time.Minute)
+	if err != nil || acquired || recovery.LeaseToken != "" {
+		t.Fatalf("missing authority was recreated: lease=%+v acquired=%v err=%v", recovery, acquired, err)
+	}
+	ordinary, acquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, "p", "s", "new-inc", "new-daemon", now, time.Minute)
+	if err != nil || !acquired || ordinary.LeaseToken == "" {
+		t.Fatalf("ordinary claim after missing recovery lease=%+v acquired=%v err=%v", ordinary, acquired, err)
+	}
+}
+
 func TestAgentInputDeliverySubmissionFenceTimeoutRemainsAmbiguousAndAllowsExpiredTakeover(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
@@ -499,7 +521,7 @@ func TestAgentInputDeliveryAmbiguousSubmissionStillExpires(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	request := domain.AgentInputDeliveryRequest{ProjectID: "p", SessionID: "s", Target: domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 42, AgentIncarnation: "inc"}, Tool: "codex", Kind: domain.AgentInputMessageSessionMessage, Payload: "body", IntentKey: "ambiguous-expiry", ExpiresAt: now.Add(100 * time.Millisecond)}
+	request := domain.AgentInputDeliveryRequest{ProjectID: "p", SessionID: "s", Target: domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 42, AgentIncarnation: "inc"}, Tool: "codex", Kind: domain.AgentInputMessageSessionMessage, Payload: "body", IntentKey: "ambiguous-expiry", ExpiresAt: now.Add(time.Minute)}
 	if _, err := client.EnsureAgentInputDeliveryIntent(ctx, request); err != nil {
 		t.Fatal(err)
 	}
@@ -514,7 +536,16 @@ func TestAgentInputDeliveryAmbiguousSubmissionStillExpires(t *testing.T) {
 	if _, begun, err := client.BeginAgentInputDeliverySubmission(ctx, "p", request.IntentKey, claimed.LeaseToken, "s", "inc", sessionLease.LeaseToken, now, time.Second); err != nil || !begun {
 		t.Fatalf("begin=%v err=%v", begun, err)
 	}
-	time.Sleep(120 * time.Millisecond)
+	db, err := client.dbHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE agent_input_delivery_intents SET expires_at=? WHERE project_id=? AND intent_key=?`, formatTimestamp(now.Add(-time.Second)), request.ProjectID, request.IntentKey); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := client.ListPendingAgentInputDeliveryIntents(ctx, "p", now, 10); err != nil || len(pending) != 0 {
+		t.Fatalf("expired pending=%+v err=%v", pending, err)
+	}
 	intent, err := client.EnsureAgentInputDeliveryIntent(ctx, request)
 	if err != nil || intent.State != "expired" {
 		t.Fatalf("intent=%+v err=%v", intent, err)

@@ -484,7 +484,7 @@ func TestCodexInputGateIncarnationTakeoverNeverOverlapsOrOldOwnerUngates(t *test
 	if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	oldState := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-old", LeaseOwner: "daemon-old", FenceToken: oldLease.LeaseToken, PaneID: "12", PaneInputEnabled: true, HookID: "100", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
+	oldState := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-old", LeaseOwner: "daemon-old", FenceToken: oldLease.LeaseToken, PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: "100", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
 	statePath := filepath.Join(authority.gateDir, "gate-old.json")
 	raw, _ := json.Marshal(oldState)
 	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
@@ -600,7 +600,7 @@ func TestCodexInputGateStartupRecoveryRefusesLiveOwner(t *testing.T) {
 	if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-exact", LeaseOwner: "live-daemon", FenceToken: lease.LeaseToken, PaneID: "12", PaneInputEnabled: true, HookID: "9137", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
+	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-exact", LeaseOwner: "live-daemon", FenceToken: lease.LeaseToken, PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: "9137", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
 	raw, _ := json.Marshal(state)
 	statePath := filepath.Join(authority.gateDir, "gate-dead.json")
 	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
@@ -617,6 +617,45 @@ func TestCodexInputGateStartupRecoveryRefusesLiveOwner(t *testing.T) {
 	adapter.mu.Unlock()
 	if _, err := os.Stat(statePath); err != nil {
 		t.Fatalf("live-owner state was removed: %v", err)
+	}
+}
+
+func TestCodexInputGateStartupRecoveryRefusesMissingDurableLease(t *testing.T) {
+	ctx := context.Background()
+	adapter := &fakeCodexInputTmux{paneEnabled: true, hooksEnabled: true, activeGates: 1, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb", ReadOnly: true}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
+	authority := newCodexAppServerInputAuthority(adapter, filepath.Join(t.TempDir(), "daemon.sock"), nil, func(string) daemonProjectRuntimeConfig {
+		return daemonProjectRuntimeConfig{CLITool: "codex", CodexAppServer: true}
+	})
+	client := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	if _, err := client.List(ctx); err != nil {
+		t.Fatal(err)
+	}
+	authority.issueClients = func(string) *issues.Client { return client }
+	if err := os.MkdirAll(authority.gateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	eventsPath := filepath.Join(authority.gateDir, "gate-missing.events")
+	if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-old", LeaseOwner: "dead-daemon", FenceToken: "missing-token", PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: "9137", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
+	raw, _ := json.Marshal(state)
+	statePath := filepath.Join(authority.gateDir, "gate-missing.json")
+	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := authority.RecoverStaleGates(ctx); !errors.Is(err, errCodexSessionFenceLost) {
+		t.Fatalf("recovery error=%v, want missing-fence diagnostic", err)
+	}
+	adapter.mu.Lock()
+	if !adapter.clients[0].ReadOnly || !adapter.paneEnabled || !adapter.hooksEnabled {
+		adapter.mu.Unlock()
+		t.Fatalf("missing-lease recovery mutated runtime: pane=%v hooks=%v clients=%+v", adapter.paneEnabled, adapter.hooksEnabled, adapter.clients)
+	}
+	adapter.mu.Unlock()
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("missing-lease diagnostic marker was removed: %v", err)
 	}
 }
 
@@ -656,7 +695,7 @@ func TestCodexInputGateStartupRecoveryRetriesAtLiveOwnerExpiry(t *testing.T) {
 	if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-exact", LeaseOwner: "dead-daemon", FenceToken: lease.LeaseToken, PaneID: "12", PaneInputEnabled: true, HookID: "9137", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
+	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-exact", LeaseOwner: "dead-daemon", FenceToken: lease.LeaseToken, PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: "9137", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
 	raw, _ := json.Marshal(state)
 	statePath := filepath.Join(authority.gateDir, "gate-dead.json")
 	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
@@ -753,7 +792,7 @@ func TestCodexInputGateStartupRecoveryRestoresExpiredOwner(t *testing.T) {
 	if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-old", LeaseOwner: "dead-daemon", FenceToken: lease.LeaseToken, PaneID: "12", PaneInputEnabled: true, HookID: "9137", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
+	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-old", LeaseOwner: "dead-daemon", FenceToken: lease.LeaseToken, PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: "9137", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
 	raw, _ := json.Marshal(state)
 	statePath := filepath.Join(authority.gateDir, "gate-dead.json")
 	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
@@ -770,5 +809,56 @@ func TestCodexInputGateStartupRecoveryRestoresExpiredOwner(t *testing.T) {
 	adapter.mu.Unlock()
 	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("recovered state remains: %v", err)
+	}
+}
+
+func TestCodexInputGateStartupRecoveryRefusesReusedPanePID(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 17, 0, 0, 0, 0, time.UTC)
+	adapter := &fakeCodexInputTmux{paneEnabled: true, hooksEnabled: true, activeGates: 1, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb", ReadOnly: true}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 99}}}
+	authority := newCodexAppServerInputAuthority(adapter, filepath.Join(t.TempDir(), "daemon.sock"), nil, func(string) daemonProjectRuntimeConfig {
+		return daemonProjectRuntimeConfig{CLITool: "codex", CodexAppServer: true}
+	})
+	client := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	lease, acquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, "p", "az-dlb", "thread-old", "dead-daemon", now.Add(-2*time.Minute), time.Minute)
+	if err != nil || !acquired {
+		t.Fatalf("lease=%+v acquired=%v err=%v", lease, acquired, err)
+	}
+	authority.issueClients = func(string) *issues.Client { return client }
+	authority.now = func() time.Time { return now }
+	if err := os.MkdirAll(authority.gateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	eventsPath := filepath.Join(authority.gateDir, "gate-reused.events")
+	if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-old", LeaseOwner: "dead-daemon", FenceToken: lease.LeaseToken, PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: "9137", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
+	raw, _ := json.Marshal(state)
+	statePath := filepath.Join(authority.gateDir, "gate-reused.json")
+	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := authority.RecoverStaleGates(ctx); !errors.Is(err, errCodexPaneIdentityChanged) {
+		t.Fatalf("recovery error=%v, want pane identity refusal", err)
+	}
+	adapter.mu.Lock()
+	if !adapter.clients[0].ReadOnly || !adapter.paneEnabled || !adapter.hooksEnabled {
+		adapter.mu.Unlock()
+		t.Fatalf("reused-pane recovery mutated runtime: pane=%v hooks=%v clients=%+v", adapter.paneEnabled, adapter.hooksEnabled, adapter.clients)
+	}
+	adapter.mu.Unlock()
+	persistedRaw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("diagnostic recovery marker was removed: %v", err)
+	}
+	var persisted codexInputGateState
+	if err := json.Unmarshal(persistedRaw, &persisted); err != nil || persisted.FenceToken == lease.LeaseToken || persisted.LeaseOwner != authority.recoveryOwner {
+		t.Fatalf("recovery fence was not durably advanced before validation: state=%+v err=%v", persisted, err)
+	}
+	next, acquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, "p", "az-dlb", "thread-new", "new-daemon", now, time.Minute)
+	if err != nil || !acquired || next.LeaseToken == "" {
+		t.Fatalf("failed recovery retained durable lease: lease=%+v acquired=%v err=%v", next, acquired, err)
 	}
 }

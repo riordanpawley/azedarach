@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	codexInputGateStateVersion       = 2
+	codexInputGateStateVersion       = 3
 	codexInputGateRestoreLimit       = 5 * time.Second
 	codexSubmissionFenceSafetyMargin = time.Second
 )
@@ -158,7 +158,7 @@ func (a *codexAppServerInputAuthority) recoverStaleGates(ctx context.Context) ([
 			continue
 		}
 		var state codexInputGateState
-		if json.Unmarshal(raw, &state) != nil || state.Version != codexInputGateStateVersion || state.ProjectID == "" || state.SessionID == "" || state.AgentIncarnation == "" || state.FenceToken == "" || state.PaneID == "" || state.HookID == "" {
+		if json.Unmarshal(raw, &state) != nil || state.Version != codexInputGateStateVersion || state.ProjectID == "" || state.SessionID == "" || state.AgentIncarnation == "" || state.FenceToken == "" || state.PaneID == "" || state.PanePID <= 0 || state.HookID == "" {
 			errs = append(errs, fmt.Errorf("invalid stale Codex input gate %s", filepath.Base(statePath)))
 			continue
 		}
@@ -175,6 +175,8 @@ func (a *codexAppServerInputAuthority) recoverStaleGates(ctx context.Context) ([
 		if !acquired {
 			if operation, ok := a.scheduleGateRecovery(ctx, statePath, recoveryLease.LeaseExpires); ok {
 				scheduled = append(scheduled, operation)
+			} else if recoveryLease.LeaseToken == "" {
+				errs = append(errs, fmt.Errorf("recover %s: durable recovery fence missing or changed: %w", filepath.Base(statePath), errCodexSessionFenceLost))
 			}
 			continue
 		}
@@ -190,6 +192,11 @@ func (a *codexAppServerInputAuthority) recoverStaleGates(ctx context.Context) ([
 			errs = append(errs, fmt.Errorf("recover %s: persist recovery fence: %w", filepath.Base(statePath), errors.Join(persistErr, releaseErr)))
 			continue
 		}
+		if identityErr := a.validatePersistedGatePaneIdentity(ctx, state); identityErr != nil {
+			releaseErr := client.ReleaseAgentInputDeliverySessionLease(context.WithoutCancel(ctx), state.ProjectID, state.SessionID, state.AgentIncarnation, recoveryLease.LeaseToken)
+			errs = append(errs, fmt.Errorf("recover %s: validate managed pane identity: %w", filepath.Base(statePath), errors.Join(identityErr, releaseErr)))
+			continue
+		}
 		recoverCtx, cancel := context.WithTimeout(ctx, codexInputGateRestoreLimit)
 		restoreErr := gate.Restore(recoverCtx)
 		cancel()
@@ -200,6 +207,20 @@ func (a *codexAppServerInputAuthority) recoverStaleGates(ctx context.Context) ([
 		}
 	}
 	return scheduled, errors.Join(errs...)
+}
+
+func (a *codexAppServerInputAuthority) validatePersistedGatePaneIdentity(ctx context.Context, state codexInputGateState) error {
+	panes, err := a.tmux.ListPaneInfos(ctx)
+	if err != nil {
+		return err
+	}
+	wantPane := strings.TrimPrefix(strings.TrimSpace(state.PaneID), "%")
+	for _, pane := range panes {
+		if pane.SessionName == state.SessionID && strings.TrimPrefix(strings.TrimSpace(pane.PaneID), "%") == wantPane && pane.PanePID == state.PanePID {
+			return nil
+		}
+	}
+	return errCodexPaneIdentityChanged
 }
 
 func (a *codexAppServerInputAuthority) DeliverAgentInput(ctx context.Context, request authoritativeAgentInputRequest) (ack authoritativeAgentInputAcknowledgement, retErr error) {
@@ -337,7 +358,7 @@ func (a *codexAppServerInputAuthority) recoverSupersededGate(ctx context.Context
 			return readErr
 		}
 		var state codexInputGateState
-		if err := json.Unmarshal(raw, &state); err != nil || state.Version != codexInputGateStateVersion || state.ProjectID == "" || state.SessionID == "" || state.AgentIncarnation == "" || state.FenceToken == "" {
+		if err := json.Unmarshal(raw, &state); err != nil || state.Version != codexInputGateStateVersion || state.ProjectID == "" || state.SessionID == "" || state.AgentIncarnation == "" || state.FenceToken == "" || state.PaneID == "" || state.PanePID <= 0 {
 			return fmt.Errorf("invalid persisted Codex gate during session takeover: %s", filepath.Base(statePath))
 		}
 		if state.ProjectID == request.Delivery.ProjectID && state.SessionID == request.Delivery.SessionID && state.AgentIncarnation == request.PreviousAgentIncarnation && state.FenceToken == previousToken {
@@ -357,6 +378,9 @@ func (a *codexAppServerInputAuthority) recoverSupersededGate(ctx context.Context
 	gate := &codexInputGate{tmux: a.tmux, state: state, statePath: matched[0].path, renewRestoreFence: request.RenewRestoreFence, removeFile: a.removeGateFile}
 	if err := gate.persist(); err != nil {
 		return fmt.Errorf("persist superseded Codex gate takeover: %w", err)
+	}
+	if err := a.validatePersistedGatePaneIdentity(ctx, state); err != nil {
+		return fmt.Errorf("validate superseded Codex gate pane identity: %w", err)
 	}
 	restoreCtx, cancel := context.WithTimeout(ctx, codexInputGateRestoreLimit)
 	defer cancel()
@@ -399,6 +423,7 @@ type codexInputGateState struct {
 	LeaseOwner       string          `json:"lease_owner"`
 	FenceToken       string          `json:"fence_token"`
 	PaneID           string          `json:"pane_id"`
+	PanePID          int             `json:"pane_pid"`
 	PaneInputEnabled bool            `json:"pane_input_enabled"`
 	HookID           string          `json:"hook_id"`
 	EventsPath       string          `json:"events_path"`
@@ -441,7 +466,7 @@ func (a *codexAppServerInputAuthority) acquireGate(ctx context.Context, request 
 		return nil, errCodexSessionFenceLost
 	}
 	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: request.Delivery.ProjectID, SessionID: request.Delivery.SessionID, AgentIncarnation: request.Delivery.Target.AgentIncarnation, LeaseOwner: request.SessionLeaseOwner, FenceToken: request.SessionLeaseToken,
-		PaneID: request.Delivery.Target.TmuxPaneID, HookID: strconv.FormatUint(hookIndex, 10), EventsPath: eventsPath, OriginalReadOnly: map[string]bool{}}
+		PaneID: request.Delivery.Target.TmuxPaneID, PanePID: request.Delivery.Target.PanePID, HookID: strconv.FormatUint(hookIndex, 10), EventsPath: eventsPath, OriginalReadOnly: map[string]bool{}}
 	gate := &codexInputGate{tmux: a.tmux, state: state, statePath: base + ".json", renewRestoreFence: request.RenewRestoreFence, removeFile: a.removeGateFile}
 	state.PaneInputEnabled, err = a.tmux.PaneInputEnabled(ctx, state.PaneID)
 	if err != nil {

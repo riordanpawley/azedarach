@@ -172,11 +172,10 @@ func (c *Client) ClaimAgentInputDeliverySessionLeaseRecovery(ctx context.Context
 			if err != nil {
 				return err
 			}
-			result, err := db.ExecContext(lockCtx, `INSERT INTO agent_input_delivery_session_leases(project_id,session_id,agent_incarnation,lease_owner,lease_token,lease_expires_at,updated_at)
-				VALUES(?,?,?,?,?,?,?)
-				ON CONFLICT(project_id,session_id) DO UPDATE SET agent_incarnation=excluded.agent_incarnation,lease_owner=excluded.lease_owner,lease_token=excluded.lease_token,lease_expires_at=excluded.lease_expires_at,updated_at=excluded.updated_at
-				WHERE agent_input_delivery_session_leases.agent_incarnation=? AND agent_input_delivery_session_leases.lease_token=? AND julianday(agent_input_delivery_session_leases.lease_expires_at)<=julianday(?)`,
-				projectID, sessionID, incarnation, owner, token, formatTimestamp(expires), formatTimestamp(now), incarnation, expectedToken, formatTimestamp(now))
+			result, err := db.ExecContext(lockCtx, `UPDATE agent_input_delivery_session_leases
+				SET lease_owner=?,lease_token=?,lease_expires_at=?,updated_at=?
+				WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_token=? AND julianday(lease_expires_at)<=julianday(?)`,
+				owner, token, formatTimestamp(expires), formatTimestamp(now), projectID, sessionID, incarnation, expectedToken, formatTimestamp(now))
 			if err != nil {
 				return err
 			}

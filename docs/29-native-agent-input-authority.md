@@ -37,13 +37,16 @@ acknowledgement, or daemon crash after the durable submission boundary leaves
 it ambiguous because dispatch may already have had an effect: it is never
 automatically submitted again, but still expires at its original deadline.
 Gate state is written beneath the daemon runtime directory with durable
-project/session/incarnation/owner/fence identity. Normal restoration requires
-the exact live fence; startup recovery atomically claims only an expired or
-unowned matching fence, and a takeover restores its predecessor before
-installing a new gate. Restoration deletes the event ledger first and the
-durable state file last; that state file is the authoritative completion
-marker, so any cleanup failure retains the exact session fence. Prompt and
-composer content are never written to gate records or logs.
+project/session/incarnation/owner/fence and pane/PID identity. Normal
+restoration requires the exact live fence; startup recovery atomically updates
+only an existing expired matching lease row, then verifies the exact live
+session, pane, and PID before any tmux mutation. A missing lease or reused pane
+fails closed, retains the diagnostic marker, and cannot recreate authority; a
+takeover restores its predecessor before installing a new gate. Restoration
+deletes the event ledger first and the durable state file last; that state file
+is the authoritative completion marker, so any cleanup failure retains the
+exact session fence. Prompt and composer content are never written to gate
+records or logs.
 
 ## Tool capability matrix
 

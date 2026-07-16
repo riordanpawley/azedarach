@@ -485,8 +485,8 @@ func TestAgentInputDeliveryRetainsSessionFenceWhenCompletionMarkerRemovalFails(t
 	adapter.setReadOnlyCalls = nil
 	adapter.mu.Unlock()
 	authority.issueClients = func(string) *issues.Client { return client }
-	if err := authority.RecoverStaleGates(context.Background()); err != nil {
-		t.Fatal(err)
+	if err := authority.RecoverStaleGates(context.Background()); !errors.Is(err, errCodexSessionFenceLost) {
+		t.Fatalf("stale marker recovery error=%v, want exact fence-loss diagnostic", err)
 	}
 	adapter.mu.Lock()
 	defer adapter.mu.Unlock()
