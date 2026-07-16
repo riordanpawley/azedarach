@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +19,17 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
+
+func testCodexGatePaths(gateDir, label string) (statePath, eventsPath, hookID string) {
+	sum := sha256.Sum256([]byte(label))
+	token := hex.EncodeToString(sum[:12])
+	base := filepath.Join(gateDir, "gate-"+token)
+	hook, err := strconv.ParseUint(token[:8], 16, 32)
+	if err != nil {
+		panic(err)
+	}
+	return base + ".json", base + ".events", strconv.FormatUint(hook, 10)
+}
 
 type fakeCodexInputTmux struct {
 	mu                           sync.Mutex
@@ -575,12 +588,11 @@ func TestCodexInputGateIncarnationTakeoverNeverOverlapsOrOldOwnerUngates(t *test
 	if err := os.MkdirAll(authority.gateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	eventsPath := filepath.Join(authority.gateDir, "gate-old.events")
+	statePath, eventsPath, hookID := testCodexGatePaths(authority.gateDir, t.Name())
 	if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	oldState := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-old", LeaseOwner: "daemon-old", FenceToken: oldLease.LeaseToken, PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: "100", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
-	statePath := filepath.Join(authority.gateDir, "gate-old.json")
+	oldState := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-old", LeaseOwner: "daemon-old", FenceToken: oldLease.LeaseToken, PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: hookID, EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
 	raw, _ := json.Marshal(oldState)
 	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
 		t.Fatal(err)
@@ -678,12 +690,11 @@ func TestCodexInputGateTakeoverFailuresRetainExactRecoveryAuthority(t *testing.T
 			if err := os.MkdirAll(authority.gateDir, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			eventsPath := filepath.Join(authority.gateDir, "gate-old.events")
+			statePath, eventsPath, hookID := testCodexGatePaths(authority.gateDir, t.Name())
 			if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-old", LeaseOwner: "daemon-old", FenceToken: oldLease.LeaseToken, PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: "100", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
-			statePath := filepath.Join(authority.gateDir, "gate-old.json")
+			state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-old", LeaseOwner: "daemon-old", FenceToken: oldLease.LeaseToken, PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: hookID, EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
 			raw, _ := json.Marshal(state)
 			if err := os.WriteFile(statePath, raw, 0o600); err != nil {
 				t.Fatal(err)
@@ -726,9 +737,10 @@ func TestCodexInputGateFreshDeliveryRefusesRetainedExactSessionMarker(t *testing
 	if err := os.MkdirAll(authority.gateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-stale", LeaseOwner: "dead", FenceToken: "stale-fence", PaneID: "12", PanePID: 42, HookID: "100", EventsPath: filepath.Join(authority.gateDir, "stale.events"), OriginalReadOnly: map[string]bool{}}
+	statePath, eventsPath, hookID := testCodexGatePaths(authority.gateDir, t.Name())
+	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-stale", LeaseOwner: "dead", FenceToken: "stale-fence", PaneID: "12", PanePID: 42, HookID: hookID, EventsPath: eventsPath, OriginalReadOnly: map[string]bool{}}
 	raw, _ := json.Marshal(state)
-	if err := os.WriteFile(filepath.Join(authority.gateDir, "gate-stale.json"), raw, 0o600); err != nil {
+	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	request := codexAuthorityRequest()
@@ -785,11 +797,12 @@ func TestCodexInputGateTakeoverRefusesMismatchedOrDuplicateSessionMarkers(t *tes
 				partial.LeaseOwner = "dead"
 				partial.PaneID = "12"
 				partial.PanePID = 42
-				partial.HookID = strconv.Itoa(100 + i)
-				partial.EventsPath = filepath.Join(authority.gateDir, fmt.Sprintf("gate-%d.events", i))
+				statePath, eventsPath, hookID := testCodexGatePaths(authority.gateDir, fmt.Sprintf("%s-%d", t.Name(), i))
+				partial.HookID = hookID
+				partial.EventsPath = eventsPath
 				partial.OriginalReadOnly = map[string]bool{}
 				raw, _ := json.Marshal(partial)
-				if err := os.WriteFile(filepath.Join(authority.gateDir, fmt.Sprintf("gate-%d.json", i)), raw, 0o600); err != nil {
+				if err := os.WriteFile(statePath, raw, 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -896,6 +909,109 @@ func TestCodexInputGateRestoresRecordedClientAfterSessionSwitch(t *testing.T) {
 	}
 }
 
+func TestCodexInputGateStartupRecoveryAuthenticatesMarkerBeforeClaimOrTmux(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		corrupt func(*codexInputGateState, string)
+	}{
+		{name: "hook identity", corrupt: func(state *codexInputGateState, _ string) { state.HookID += "1" }},
+		{name: "event path", corrupt: func(state *codexInputGateState, victim string) { state.EventsPath = victim }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			adapter := &fakeCodexInputTmux{paneEnabled: true, hooksEnabled: true, activeGates: 1, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb", ReadOnly: true}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
+			authority := newCodexAppServerInputAuthority(adapter, filepath.Join(t.TempDir(), "daemon.sock"), nil, nil)
+			if err := os.MkdirAll(authority.gateDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			statePath, eventsPath, hookID := testCodexGatePaths(authority.gateDir, t.Name())
+			victimPath := filepath.Join(t.TempDir(), "must-not-remove")
+			if err := os.WriteFile(victimPath, []byte("preserve"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-old", LeaseOwner: "dead-daemon", FenceToken: "fence", PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: hookID, EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
+			test.corrupt(&state, victimPath)
+			raw, err := json.Marshal(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			authority.issueClients = func(string) *issues.Client {
+				t.Fatal("corrupt marker reached durable lease claim")
+				return nil
+			}
+			if err := authority.RecoverStaleGates(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid stale Codex input gate") {
+				t.Fatalf("recovery error=%v, want authenticated-marker refusal", err)
+			}
+			adapter.mu.Lock()
+			if !adapter.paneEnabled || !adapter.hooksEnabled || adapter.activeGates != 1 || len(adapter.setReadOnlyCalls) != 0 {
+				adapter.mu.Unlock()
+				t.Fatalf("corrupt marker mutated tmux: pane=%v hooks=%v active=%d calls=%v", adapter.paneEnabled, adapter.hooksEnabled, adapter.activeGates, adapter.setReadOnlyCalls)
+			}
+			adapter.mu.Unlock()
+			if got, err := os.ReadFile(victimPath); err != nil || string(got) != "preserve" {
+				t.Fatalf("external path changed: content=%q err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestCodexInputGateTakeoverAuthenticatesMarkerBeforeRestoreOrFenceRotation(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		corrupt func(*codexInputGateState, string)
+	}{
+		{name: "hook identity", corrupt: func(state *codexInputGateState, _ string) { state.HookID = "0" }},
+		{name: "event path", corrupt: func(state *codexInputGateState, victim string) { state.EventsPath = victim }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			adapter := &fakeCodexInputTmux{paneEnabled: false, hooksEnabled: true, activeGates: 1, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb", ReadOnly: true}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
+			authority := newFakeCodexAuthority(t, adapter, &fakeCodexRPC{})
+			if err := os.MkdirAll(authority.gateDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			statePath, eventsPath, hookID := testCodexGatePaths(authority.gateDir, t.Name())
+			victimPath := filepath.Join(t.TempDir(), "must-not-remove")
+			if err := os.WriteFile(victimPath, []byte("preserve"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-old", LeaseOwner: "dead-daemon", FenceToken: "fence-old", PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: hookID, EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
+			test.corrupt(&state, victimPath)
+			raw, err := json.Marshal(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			completed := false
+			request := codexAuthorityRequest()
+			request.PreviousAgentIncarnation = "thread-old"
+			request.PreviousSessionLeaseToken = "fence-old"
+			request.CompleteSessionTakeover = func(context.Context) (issues.AgentInputDeliverySessionLease, error) {
+				completed = true
+				return issues.AgentInputDeliverySessionLease{}, nil
+			}
+			if err := authority.recoverSupersededGate(context.Background(), &request); !errors.Is(err, errCodexGateRestoreIncomplete) {
+				t.Fatalf("takeover error=%v, want authenticated-marker refusal", err)
+			}
+			if completed {
+				t.Fatal("corrupt marker reached durable fence rotation")
+			}
+			adapter.mu.Lock()
+			if adapter.paneEnabled || !adapter.hooksEnabled || adapter.activeGates != 1 || len(adapter.setReadOnlyCalls) != 0 {
+				adapter.mu.Unlock()
+				t.Fatalf("corrupt marker mutated tmux: pane=%v hooks=%v active=%d calls=%v", adapter.paneEnabled, adapter.hooksEnabled, adapter.activeGates, adapter.setReadOnlyCalls)
+			}
+			adapter.mu.Unlock()
+			if got, err := os.ReadFile(victimPath); err != nil || string(got) != "preserve" {
+				t.Fatalf("external path changed: content=%q err=%v", got, err)
+			}
+		})
+	}
+}
+
 func TestCodexInputGateStartupRecoveryRefusesLiveOwner(t *testing.T) {
 	adapter := &fakeCodexInputTmux{paneEnabled: true, hooksEnabled: true, activeGates: 1, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb", ReadOnly: true}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
 	authority := newCodexAppServerInputAuthority(adapter, filepath.Join(t.TempDir(), "daemon.sock"), nil, func(string) daemonProjectRuntimeConfig {
@@ -911,13 +1027,12 @@ func TestCodexInputGateStartupRecoveryRefusesLiveOwner(t *testing.T) {
 	if err := os.MkdirAll(authority.gateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	eventsPath := filepath.Join(authority.gateDir, "gate-dead.events")
+	statePath, eventsPath, hookID := testCodexGatePaths(authority.gateDir, t.Name())
 	if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-exact", LeaseOwner: "live-daemon", FenceToken: lease.LeaseToken, PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: "9137", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
+	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-exact", LeaseOwner: "live-daemon", FenceToken: lease.LeaseToken, PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: hookID, EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
 	raw, _ := json.Marshal(state)
-	statePath := filepath.Join(authority.gateDir, "gate-dead.json")
 	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -950,13 +1065,12 @@ func TestCodexInputGateStartupRecoveryRefusesMissingDurableLease(t *testing.T) {
 	if err := os.MkdirAll(authority.gateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	eventsPath := filepath.Join(authority.gateDir, "gate-missing.events")
+	statePath, eventsPath, hookID := testCodexGatePaths(authority.gateDir, t.Name())
 	if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-old", LeaseOwner: "dead-daemon", FenceToken: "missing-token", PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: "9137", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
+	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-old", LeaseOwner: "dead-daemon", FenceToken: "missing-token", PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: hookID, EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
 	raw, _ := json.Marshal(state)
-	statePath := filepath.Join(authority.gateDir, "gate-missing.json")
 	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1006,13 +1120,12 @@ func TestCodexInputGateStartupRecoveryRetriesAtLiveOwnerExpiry(t *testing.T) {
 	if err := os.MkdirAll(authority.gateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	eventsPath := filepath.Join(authority.gateDir, "gate-dead.events")
+	statePath, eventsPath, hookID := testCodexGatePaths(authority.gateDir, t.Name())
 	if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-exact", LeaseOwner: "dead-daemon", FenceToken: lease.LeaseToken, PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: "9137", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
+	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-exact", LeaseOwner: "dead-daemon", FenceToken: lease.LeaseToken, PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: hookID, EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
 	raw, _ := json.Marshal(state)
-	statePath := filepath.Join(authority.gateDir, "gate-dead.json")
 	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1103,13 +1216,12 @@ func TestCodexInputGateStartupRecoveryRestoresExpiredOwner(t *testing.T) {
 	if err := os.MkdirAll(authority.gateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	eventsPath := filepath.Join(authority.gateDir, "gate-dead.events")
+	statePath, eventsPath, hookID := testCodexGatePaths(authority.gateDir, t.Name())
 	if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-old", LeaseOwner: "dead-daemon", FenceToken: lease.LeaseToken, PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: "9137", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
+	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-old", LeaseOwner: "dead-daemon", FenceToken: lease.LeaseToken, PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: hookID, EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
 	raw, _ := json.Marshal(state)
-	statePath := filepath.Join(authority.gateDir, "gate-dead.json")
 	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1145,13 +1257,12 @@ func TestCodexInputGateStartupRecoveryRefusesReusedPanePID(t *testing.T) {
 	if err := os.MkdirAll(authority.gateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	eventsPath := filepath.Join(authority.gateDir, "gate-reused.events")
+	statePath, eventsPath, hookID := testCodexGatePaths(authority.gateDir, t.Name())
 	if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-old", LeaseOwner: "dead-daemon", FenceToken: lease.LeaseToken, PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: "9137", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
+	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-old", LeaseOwner: "dead-daemon", FenceToken: lease.LeaseToken, PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: hookID, EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
 	raw, _ := json.Marshal(state)
-	statePath := filepath.Join(authority.gateDir, "gate-reused.json")
 	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}

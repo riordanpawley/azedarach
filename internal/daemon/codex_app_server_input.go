@@ -160,8 +160,12 @@ func (a *codexAppServerInputAuthority) recoverStaleGates(ctx context.Context) ([
 			continue
 		}
 		var state codexInputGateState
-		if json.Unmarshal(raw, &state) != nil || state.Version != codexInputGateStateVersion || state.ProjectID == "" || state.SessionID == "" || state.AgentIncarnation == "" || state.FenceToken == "" || state.PaneID == "" || state.PanePID <= 0 || state.HookID == "" {
+		if json.Unmarshal(raw, &state) != nil {
 			errs = append(errs, fmt.Errorf("invalid stale Codex input gate %s", filepath.Base(statePath)))
+			continue
+		}
+		if validateErr := validatePersistedCodexGateState(statePath, state); validateErr != nil {
+			errs = append(errs, fmt.Errorf("invalid stale Codex input gate %s: %w", filepath.Base(statePath), validateErr))
 			continue
 		}
 		client := a.issueClients(state.ProjectID)
@@ -363,8 +367,11 @@ func (a *codexAppServerInputAuthority) recoverSupersededGate(ctx context.Context
 			return fmt.Errorf("%w: read superseded Codex gate %s: %v", errCodexGateRestoreIncomplete, filepath.Base(statePath), readErr)
 		}
 		var state codexInputGateState
-		if err := json.Unmarshal(raw, &state); err != nil || state.Version != codexInputGateStateVersion || state.ProjectID == "" || state.SessionID == "" || state.AgentIncarnation == "" || state.FenceToken == "" || state.PaneID == "" || state.PanePID <= 0 {
+		if err := json.Unmarshal(raw, &state); err != nil {
 			return fmt.Errorf("%w: invalid persisted Codex gate during session takeover: %s", errCodexGateRestoreIncomplete, filepath.Base(statePath))
+		}
+		if validateErr := validatePersistedCodexGateState(statePath, state); validateErr != nil {
+			return fmt.Errorf("%w: invalid persisted Codex gate during session takeover %s: %v", errCodexGateRestoreIncomplete, filepath.Base(statePath), validateErr)
 		}
 		if state.ProjectID == request.Delivery.ProjectID && state.SessionID == request.Delivery.SessionID {
 			sessionGates = append(sessionGates, persistedGate{path: statePath, state: state})
@@ -463,6 +470,30 @@ type codexInputGateState struct {
 	HookID           string          `json:"hook_id"`
 	EventsPath       string          `json:"events_path"`
 	OriginalReadOnly map[string]bool `json:"original_read_only"`
+}
+
+func validatePersistedCodexGateState(statePath string, state codexInputGateState) error {
+	if state.Version != codexInputGateStateVersion || state.ProjectID == "" || state.SessionID == "" || state.AgentIncarnation == "" || state.FenceToken == "" || state.PaneID == "" || state.PanePID <= 0 {
+		return errors.New("missing required gate state")
+	}
+	if statePath != filepath.Clean(statePath) || filepath.Ext(statePath) != ".json" {
+		return errors.New("non-canonical gate marker path")
+	}
+	base := strings.TrimSuffix(statePath, ".json")
+	token := strings.TrimPrefix(filepath.Base(base), "gate-")
+	decoded, err := hex.DecodeString(token)
+	if err != nil || len(decoded) != 12 || token != strings.ToLower(token) || filepath.Base(base) != "gate-"+token {
+		return errors.New("invalid gate marker token")
+	}
+	wantHook, err := strconv.ParseUint(token[:8], 16, 32)
+	if err != nil || state.HookID != strconv.FormatUint(wantHook, 10) {
+		return errors.New("gate hook identity does not match marker token")
+	}
+	wantEventsPath := base + ".events"
+	if state.EventsPath != filepath.Clean(state.EventsPath) || state.EventsPath != wantEventsPath {
+		return errors.New("gate event ledger path does not match marker token")
+	}
+	return nil
 }
 
 type codexInputGate struct {

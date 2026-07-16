@@ -458,7 +458,7 @@ const (
 	agentInputDeliveryMigrationID                                        = "0052_agent_input_delivery"
 	agentInputDeliveryMigrationChecksum                                  = "92d3be503bc193101944f1bc1ecee38656f04c3be7399a1b88356ae6add42f55"
 	agentInputDeliveryFencingMigrationID                                 = "0053_agent_input_delivery_fencing"
-	agentInputDeliveryFencingMigrationChecksum                           = "ba690a9fc1ae8ef5678a075b1e8ea29bae725696b380a416b29f96a8fb3a46e5"
+	agentInputDeliveryFencingMigrationChecksum                           = "ac13ed80fe4449e8dda180ecfae02f8c133a3d6b837cf8ad334e35b6bab27035"
 	contextualLearningMigrationID                                        = "0039_contextual_learning_activation"
 	legacyContextualLearningMigration                                    = "0038_contextual_learning_activation"
 )
@@ -1814,6 +1814,12 @@ func (c *Client) applyAgentInputDeliveryFencingMigration(ctx context.Context, db
 		return fmt.Errorf("begin migration %s: %w", id, err)
 	}
 	defer tx.Rollback()
+	// Migration 0053 rebuilds the 0052 table. Validate the exact immutable
+	// predecessor, including both indexes, before executing any destructive DDL
+	// so schema drift remains intact and diagnosable on failure.
+	if err := validateAgentInputDeliveryBaseSchema(ctx, tx); err != nil {
+		return fmt.Errorf("validate migration %s predecessor: %w", id, err)
+	}
 	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
 		return fmt.Errorf("apply migration %s: %w", id, err)
 	}

@@ -831,3 +831,103 @@ func TestAgentInputDeliveryFencingMigrationUpgradesImmutable0052AndRollsBack(t *
 		t.Fatalf("upgraded sentinel=%d err=%v", sentinel, err)
 	}
 }
+
+func TestAgentInputDeliveryFencingMigrationRejectsPredecessorDriftBeforeRebuild(t *testing.T) {
+	const canonicalLeasedConstraint = `CHECK ((state = 'leased') = (lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL))`
+	const weakenedLeasedConstraint = `CHECK (state != 'leased' OR lease_token IS NOT NULL)`
+	for _, test := range []struct {
+		name         string
+		mutate       func(*testing.T, *sql.DB)
+		preservedSQL string
+	}{
+		{
+			name: "table constraint",
+			mutate: func(t *testing.T, db *sql.DB) {
+				t.Helper()
+				if _, err := db.Exec(`PRAGMA writable_schema=ON`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`UPDATE sqlite_master SET sql=replace(sql, ?, ?) WHERE type='table' AND name='agent_input_delivery_intents'`, canonicalLeasedConstraint, weakenedLeasedConstraint); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`PRAGMA writable_schema=OFF`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`PRAGMA schema_version=999`); err != nil {
+					t.Fatal(err)
+				}
+			},
+			preservedSQL: "state != 'leased' or lease_token is not null",
+		},
+		{
+			name: "pending index",
+			mutate: func(t *testing.T, db *sql.DB) {
+				t.Helper()
+				if _, err := db.Exec(`DROP INDEX idx_agent_input_delivery_pending`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`CREATE INDEX idx_agent_input_delivery_pending ON agent_input_delivery_intents(state, project_id)`); err != nil {
+					t.Fatal(err)
+				}
+			},
+			preservedSQL: "(state, project_id)",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "issues.db")
+			seed := NewClientAtPath(path, nil)
+			seed.migrationCeiling = agentInputDeliveryMigrationID
+			db, err := seed.dbHandle()
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := formatTimestamp(time.Now().UTC())
+			if _, err := db.Exec(`INSERT INTO agent_input_delivery_intents(project_id,intent_key,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,tool,message_kind,payload,state,created_at,updated_at) VALUES('p','sentinel','s','agent','7',42,'inc','codex','session_message','payload','queued',?,?)`, now, now); err != nil {
+				t.Fatal(err)
+			}
+			if err := seed.CloseDB(); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(t, raw)
+			if err := raw.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			candidate := NewClientAtPath(path, nil)
+			if _, err := candidate.dbHandle(); err == nil || !strings.Contains(err.Error(), "validate migration 0053_agent_input_delivery_fencing predecessor") {
+				t.Fatalf("candidate open error=%v, want predecessor drift refusal", err)
+			}
+			_ = candidate.CloseDB()
+
+			raw, err = sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer raw.Close()
+			var marker, sentinel int
+			if err := raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, agentInputDeliveryFencingMigrationID).Scan(&marker); err != nil {
+				t.Fatal(err)
+			}
+			if err := raw.QueryRow(`SELECT COUNT(*) FROM agent_input_delivery_intents WHERE intent_key='sentinel' AND payload='payload'`).Scan(&sentinel); err != nil {
+				t.Fatal(err)
+			}
+			var schemaSQL string
+			objectType := "table"
+			objectName := "agent_input_delivery_intents"
+			if test.name == "pending index" {
+				objectType = "index"
+				objectName = "idx_agent_input_delivery_pending"
+			}
+			if err := raw.QueryRow(`SELECT lower(sql) FROM sqlite_master WHERE type=? AND name=?`, objectType, objectName).Scan(&schemaSQL); err != nil {
+				t.Fatal(err)
+			}
+			if marker != 0 || sentinel != 1 || !strings.Contains(schemaSQL, test.preservedSQL) {
+				t.Fatalf("rollback marker0053=%d sentinel=%d schema=%q", marker, sentinel, schemaSQL)
+			}
+		})
+	}
+}

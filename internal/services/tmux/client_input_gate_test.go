@@ -235,6 +235,7 @@ func TestRealTmuxRestoreQuiescesDelayedDispatchedAttachHook(t *testing.T) {
 	}
 	const hookID = "9139"
 	const hookStarted = "az-input-restore-hook-started-9139"
+	const hookCheckReleased = "az-input-restore-hook-check-released-9139"
 	const hookCompleted = "az-input-restore-hook-completed-9139"
 	const attachRelease = "az-input-restore-attach-release-9139"
 	lock := sessionReadOnlyAttachHookLock(hookID, recordPath)
@@ -243,7 +244,7 @@ func TestRealTmuxRestoreQuiescesDelayedDispatchedAttachHook(t *testing.T) {
 		t.Fatal(err)
 	}
 	release := "tmux wait-for -U " + lock
-	record := "umask 077; tmux wait-for -L " + lock + " || exit 1; trap " + shellSingleQuote(release) + " EXIT; trap 'exit 1' HUP INT TERM; tmux wait-for -S " + hookStarted + "; sleep 0.25; if [ \"$(tmux show-options -gqv " + gateOption + ")\" = 1 ]; then __az_client=#{q:hook_client}; printf '%s\\t%s\\n' \"$__az_client\" #{client_readonly} >> " + shellSingleQuote(recordPath) + "; tmux refresh-client -t \"$__az_client\" -f read-only; printf '\\tcomplete\\n' >> " + shellSingleQuote(recordPath) + "; fi; tmux wait-for -S " + hookCompleted
+	record := "umask 077; tmux wait-for -L " + lock + " || exit 1; trap " + shellSingleQuote(release) + " EXIT; trap 'exit 1' HUP INT TERM; tmux wait-for -S " + hookStarted + "; tmux wait-for " + hookCheckReleased + "; if [ \"$(tmux show-options -gqv " + gateOption + ")\" = 1 ]; then __az_client=#{q:hook_client}; printf '%s\\t%s\\n' \"$__az_client\" #{client_readonly} >> " + shellSingleQuote(recordPath) + "; tmux refresh-client -t \"$__az_client\" -f read-only; printf '\\tcomplete\\n' >> " + shellSingleQuote(recordPath) + "; fi; tmux wait-for -S " + hookCompleted
 	command := "run-shell " + tmuxDoubleQuote(record)
 	for _, hook := range []string{"client-attached", "client-session-changed"} {
 		if _, err := runner.Run(ctx, "set-hook", "-t", "gate", hook+"["+hookID+"]", command); err != nil {
@@ -262,6 +263,9 @@ func TestRealTmuxRestoreQuiescesDelayedDispatchedAttachHook(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := client.SetSessionReadOnlyAttachHooks(ctx, "gate", hookID, recordPath, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Run(ctx, "wait-for", "-S", hookCheckReleased); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.LockSessionReadOnlyAttachHooks(ctx, hookID, recordPath, true); err != nil {

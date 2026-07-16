@@ -9,8 +9,10 @@
 --   existing row without changing values. Existing 0052 states all satisfy
 --   the expanded constraint. The new session lease table starts empty.
 -- Validation effects:
---   The Go-assisted runner executes this artifact transactionally and validates
---   the final table SQL, required columns, constraints, and indexes before the
+--   Before any destructive statement runs, the Go-assisted runner validates
+--   the exact immutable 0052 table SQL, required columns, constraints, and both
+--   indexes. It then executes this artifact transactionally and validates the
+--   final table SQL, required columns, constraints, and indexes before the
 --   transaction may write its ledger row or commit. Every later startup repeats
 --   the same final-schema validation when this migration is recorded applied.
 -- Ledger effects:
