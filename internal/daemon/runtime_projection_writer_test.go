@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +15,8 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/daemon/userstore"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
@@ -251,6 +254,79 @@ func TestRuntimeProjectionWriterPersistsBeforePublishingSessionEvents(t *testing
 	}
 	if sessions[0].ID != sessionID || sessions[0].IssueID != issueID {
 		t.Fatalf("session row = %+v", sessions[0])
+	}
+}
+
+func TestRuntimeProjectionWriterSnapshotReplacementRefreshesRemovedIssueKeys(t *testing.T) {
+	ctx := context.Background()
+	const (
+		projectID = "proj-snapshot-removal"
+		issueID   = "az-removed"
+	)
+	now := time.Date(2026, time.April, 2, 12, 30, 0, 0, time.UTC)
+	runtimeStore := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	if err := runtimeStore.ReplaceSessionStates(ctx, projectID, []daemonstate.Session{{
+		ID: "sess-removed", IssueID: issueID, State: daemonstate.SessionStateRunning, UpdatedAt: now,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtimeStore.ReplaceWorktreeStates(ctx, projectID, []daemonstate.WorktreeState{{
+		ProjectID: projectID, IssueID: issueID, Path: "/tmp/removed", Branch: "issue/removed", UpdatedAt: now,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	rootStore, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rootStore.Close() })
+	canonical := domain.Task{ID: naming.IssueID(issueID), Title: "removed runtime", Status: domain.StatusInProgress, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}
+	projected := canonical
+	projected.Session = &domain.Session{IssueID: naming.IssueID(issueID), State: domain.SessionBusy, UpdatedAt: now}
+	projected.HasTmuxSession = true
+	projected.HasWorktree = true
+	delta := userstore.ProjectDeltaState{ProjectID: projectID, Cursor: 1, Hash: "one", Initialized: true, Projector: issueProjectionProjector()}
+	if err := rootStore.ReplaceProject(ctx, userstore.ProjectInput{ProjectID: projectID, Name: "P", Path: "/p", DBPath: "/p/db", Tasks: []domain.Task{projected}, Delta: &delta}); err != nil {
+		t.Fatal(err)
+	}
+	materializer := newProjectReadMaterializer(projectID, nil, func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		rows, listErr := runtimeStore.ListSessionStates(hydrateCtx, projectID)
+		if listErr != nil {
+			return nil, listErr
+		}
+		if len(rows) > 0 {
+			tasks[0].Session = &domain.Session{IssueID: naming.IssueID(issueID), State: domain.SessionBusy, UpdatedAt: rows[0].UpdatedAt}
+			tasks[0].HasTmuxSession = true
+		}
+		worktrees, listErr := runtimeStore.ListWorktreeStates(hydrateCtx, projectID)
+		if listErr != nil {
+			return nil, listErr
+		}
+		tasks[0].HasWorktree = len(worktrees) > 0
+		return tasks, nil
+	})
+	canonicalByID := map[string]domain.Task{issueID: canonical}
+	projectedByID := map[string]domain.Task{issueID: projected}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonicalByID, projectedByID)
+	materializer.replaceBootstrap(canonicalByID, projectedByID, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+	d := &Daemon{
+		cfg: Config{RepoDir: "."}, userStore: rootStore,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{".": runtimeStore},
+		materializers:       map[string]*projectReadMaterializer{projectID: materializer},
+	}
+	if err := newRuntimeProjectionWriter(d).ReplaceSessionProjectionSnapshot(ctx, projectID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := newRuntimeProjectionWriter(d).ReplaceWorktreeProjectionSnapshot(ctx, projectID, nil); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := rootStore.Snapshot(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Projects) != 1 || len(snapshot.Projects[0].Tasks) != 1 || snapshot.Projects[0].Tasks[0].Session != nil || snapshot.Projects[0].Tasks[0].HasTmuxSession || snapshot.Projects[0].Tasks[0].HasWorktree {
+		t.Fatalf("removed runtime keys retained stale root current state: %+v", snapshot.Projects)
 	}
 }
 

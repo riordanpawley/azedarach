@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -86,6 +87,59 @@ func (c *Client) ListProjectIssueObservationEvents(ctx context.Context, afterID 
 	}
 	if err := rows.Err(); err != nil {
 		return nil, c.wrapError("list-project-observation-events", "", err)
+	}
+	return events, nil
+}
+
+// GetProjectIssueObservationEventsByIDs resolves exact durable source
+// positions without scanning the history between sparse positions.
+func (c *Client) GetProjectIssueObservationEventsByIDs(ctx context.Context, ids []int64) ([]domain.IssueObservationEvent, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	wanted := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if id > 0 {
+			wanted[id] = struct{}{}
+		}
+	}
+	ordered := make([]int64, 0, len(wanted))
+	for id := range wanted {
+		ordered = append(ordered, id)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
+	const observationIDBatchSize = 400
+	events := make([]domain.IssueObservationEvent, 0, len(ordered))
+	for start := 0; start < len(ordered); start += observationIDBatchSize {
+		end := min(start+observationIDBatchSize, len(ordered))
+		args := make([]any, 0, end-start)
+		for _, id := range ordered[start:end] {
+			args = append(args, id)
+		}
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")
+		rows, queryErr := db.QueryContext(ctx, `
+			SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+			FROM issue_observation_events
+			WHERE id IN (`+placeholders+`)
+			ORDER BY id ASC
+		`, args...)
+		if queryErr != nil {
+			return nil, c.wrapError("get-project-observation-events-by-id", "", queryErr)
+		}
+		for rows.Next() {
+			event, scanErr := scanIssueObservationEvent(rows)
+			if scanErr != nil {
+				_ = rows.Close()
+				return nil, c.wrapError("get-project-observation-events-by-id", "", scanErr)
+			}
+			events = append(events, event)
+		}
+		rowsErr := rows.Err()
+		_ = rows.Close()
+		if rowsErr != nil {
+			return nil, c.wrapError("get-project-observation-events-by-id", "", rowsErr)
+		}
 	}
 	return events, nil
 }
@@ -546,7 +600,7 @@ func (c *Client) InvestigationAcceptances(ctx context.Context, tasks []domain.Ta
 	return out, nil
 }
 
-func (c *Client) appendIssueObservationEvent(ctx context.Context, execer sqlIssueExecer, issueID string, eventType domain.IssueObservationEventType, payload map[string]any) error {
+func (c *Client) appendIssueObservationEvent(ctx context.Context, execer sqlIssueDBTX, issueID string, eventType domain.IssueObservationEventType, payload map[string]any) error {
 	_, err := c.insertIssueObservationEvent(ctx, execer, issueID, IssueObservationEventParams{
 		Type:    eventType,
 		Source:  "issue-store",
@@ -555,7 +609,7 @@ func (c *Client) appendIssueObservationEvent(ctx context.Context, execer sqlIssu
 	return err
 }
 
-func (c *Client) insertIssueObservationEvent(ctx context.Context, execer sqlIssueExecer, issueID string, params IssueObservationEventParams) (int64, error) {
+func (c *Client) insertIssueObservationEvent(ctx context.Context, execer sqlIssueDBTX, issueID string, params IssueObservationEventParams) (int64, error) {
 	issueID = strings.TrimSpace(issueID)
 	if issueID == "" {
 		return 0, errors.New("issue id is required")
@@ -593,7 +647,72 @@ func (c *Client) insertIssueObservationEvent(ctx context.Context, execer sqlIssu
 	if err != nil {
 		return 0, fmt.Errorf("read observation event id: %w", err)
 	}
+	operation := domain.ProjectionDeltaUpsert
+	if params.Type == domain.IssueEventIssueDeleted {
+		operation = domain.ProjectionDeltaDelete
+	}
+	if !issueEventChangesIssueProjection(params.Type) {
+		if _, err := appendProjectionEmptyAdvance(ctx, execer, ProjectionSourceAdvance{
+			ProjectID: "default", SourceAuthority: "legacy_issue_observation", SourcePosition: fmt.Sprint(id),
+			IdempotencyKey: fmt.Sprintf("issue-observation:%d", id), CommittedAt: observedAt,
+		}); err != nil {
+			return 0, fmt.Errorf("append issue observation empty projection advance: %w", err)
+		}
+		return id, nil
+	}
+	deltaPayload, err := c.issueProjectionDeltaPayload(ctx, execer, issueID, operation)
+	if err != nil {
+		return 0, fmt.Errorf("build issue projection delta: %w", err)
+	}
+	if _, err := appendProjectionDelta(ctx, execer, ProjectionDeltaParams{
+		ProjectID:      "default",
+		Kind:           domain.ProjectionKindIssue,
+		Key:            issueID,
+		Operation:      operation,
+		IdempotencyKey: fmt.Sprintf("issue-observation:%d", id),
+		Payload:        deltaPayload,
+		CommittedAt:    observedAt,
+	}); err != nil {
+		return 0, fmt.Errorf("append issue observation projection delta: %w", err)
+	}
 	return id, nil
+}
+
+func issueEventChangesIssueProjection(eventType domain.IssueObservationEventType) bool {
+	switch eventType {
+	case domain.IssueEventIssueCreated, domain.IssueEventIssueStatusChanged, domain.IssueEventIssueDetailsChanged,
+		domain.IssueEventIssueNotesAppended, domain.IssueEventIssueDependencyAdded, domain.IssueEventIssueDependencyRemoved,
+		domain.IssueEventIssueArchived, domain.IssueEventIssueUnarchived, domain.IssueEventIssueDeleted:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Client) issueProjectionDeltaPayload(ctx context.Context, db sqlIssueDBTX, issueID string, operation domain.ProjectionDeltaOperation) ([]byte, error) {
+	payload := domain.IssueProjectionDeltaPayload{
+		SchemaVersion: domain.IssueProjectionDeltaSchemaVersion,
+		IssueID:       strings.TrimSpace(issueID),
+		Deleted:       operation == domain.ProjectionDeltaDelete,
+	}
+	if operation != domain.ProjectionDeltaDelete {
+		tasks, err := c.queryTasks(ctx, db, `
+			SELECT id,title,COALESCE(description,''),COALESCE(notes,''),COALESCE(design,''),COALESCE(acceptance,''),
+				COALESCE(assignee,''),COALESCE(labels_json,'[]'),estimate,status,COALESCE(disposition,''),
+				COALESCE(engagement,''),COALESCE(visibility,''),archived_at,priority,issue_type,
+				COALESCE(implementations_json,'[]'),created_at,updated_at
+			FROM issues WHERE id=?
+		`, issueID)
+		if err != nil {
+			return nil, err
+		}
+		if len(tasks) != 1 {
+			return nil, fmt.Errorf("canonical issue projection %s: %w", issueID, domain.ErrNotFound)
+		}
+		canonical := domain.CanonicalIssueProjectionTask(tasks[0])
+		payload.Issue = &canonical
+	}
+	return json.Marshal(payload)
 }
 
 func (c *Client) getIssueObservationEventByID(ctx context.Context, id int64) (domain.IssueObservationEvent, error) {

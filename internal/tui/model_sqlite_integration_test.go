@@ -291,6 +291,57 @@ func TestIssueSnapshotParityAcrossCLIAndTUIJSONListFields(t *testing.T) {
 	}
 }
 
+func TestModelTestDaemonDoesNotOpenProjectsRegisteredInCallerHome(t *testing.T) {
+	callerHome := t.TempDir()
+	liveRepoDir := t.TempDir()
+	seedModelIssueStore(t, liveRepoDir, "live-sentinel", "Must remain untouched", "open", 1, "bug")
+
+	liveDBPath := filepath.Join(liveRepoDir, ".azedarach", "azedarach.db")
+	liveDB, err := sql.Open("sqlite", "file:"+liveDBPath+"?_pragma=busy_timeout(1)")
+	if err != nil {
+		t.Fatalf("open live sentinel database: %v", err)
+	}
+	defer liveDB.Close()
+	if _, err := liveDB.Exec("BEGIN EXCLUSIVE"); err != nil {
+		t.Fatalf("lock live sentinel database: %v", err)
+	}
+	defer func() { _, _ = liveDB.Exec("ROLLBACK") }()
+
+	registry := config.ProjectsRegistry{
+		Projects: []config.Project{{ID: "live-sentinel", Name: "Live sentinel", Path: liveRepoDir}},
+	}
+	registryData, err := json.Marshal(registry)
+	if err != nil {
+		t.Fatalf("marshal caller-home projects registry: %v", err)
+	}
+	registryDir := filepath.Join(callerHome, ".config", "azedarach")
+	if err := os.MkdirAll(registryDir, 0o755); err != nil {
+		t.Fatalf("create caller-home registry directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(registryDir, "projects.json"), registryData, 0o644); err != nil {
+		t.Fatalf("write caller-home projects registry: %v", err)
+	}
+	before, err := os.ReadFile(liveDBPath)
+	if err != nil {
+		t.Fatalf("read live sentinel database before fixture: %v", err)
+	}
+
+	t.Setenv("HOME", callerHome)
+	repoDir := t.TempDir()
+	seedModelIssueStore(t, repoDir, "fixture", "Fixture issue", "open", 1, "task")
+	socketPath, lockPath := newModelTestRuntimePaths(t)
+	stop := startModelTestDaemon(t, repoDir, socketPath, lockPath)
+	stop()
+
+	after, err := os.ReadFile(liveDBPath)
+	if err != nil {
+		t.Fatalf("read live sentinel database after fixture: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("registered live sentinel database was modified by test daemon fixture")
+	}
+}
+
 func seedModelIssueStore(t *testing.T, repoDir, id, title, status string, priority int, issueType string) {
 	t.Helper()
 	dbDir := filepath.Join(repoDir, ".azedarach")
@@ -374,6 +425,11 @@ func seedModelIssueDependency(t *testing.T, repoDir, issueID, dependsOnID, depen
 
 func startModelTestDaemon(t *testing.T, repoDir, socketPath, lockPath string) func() {
 	t.Helper()
+
+	// Daemon startup discovers every project registered under the user's home
+	// directory. Keep this integration fixture in a private user namespace so a
+	// package test can never open or migrate registered live project databases.
+	t.Setenv("HOME", t.TempDir())
 
 	d := daemon.New(daemon.Config{
 		RepoDir:       repoDir,

@@ -46,6 +46,17 @@ func TestRealUserDatabaseMigrationClone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err = validateProjectDeltaConsumerSchema(context.Background(), store.db); err != nil {
+		t.Fatal(err)
+	}
+	var deltaMigrationChecksum string
+	if err = store.db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id='user_0005_project_delta_consumer'`).Scan(&deltaMigrationChecksum); err != nil || deltaMigrationChecksum != "3462d998e1abfb9ef02f22b964934bbcd7b6e2c9e25e233a2d9d89002f6cc863" {
+		t.Fatalf("delta consumer migration checksum=%q err=%v", deltaMigrationChecksum, err)
+	}
+	var ledgerRows int
+	if err = store.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='user_0005_project_delta_consumer' AND artifact_checksum=?`, deltaMigrationChecksum).Scan(&ledgerRows); err != nil || ledgerRows != 1 {
+		t.Fatalf("delta consumer ledger rows=%d err=%v", ledgerRows, err)
+	}
 	if _, err = store.ListViews(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -75,6 +86,9 @@ func TestRealUserDatabaseMigrationClone(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
+	if err = reopened.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='user_0005_project_delta_consumer' AND artifact_checksum=?`, deltaMigrationChecksum).Scan(&ledgerRows); err != nil || ledgerRows != 1 {
+		t.Fatalf("delta consumer ledger rows after reopen=%d err=%v", ledgerRows, err)
+	}
 	if _, err = reopened.ListViewSelections(context.Background()); err != nil {
 		t.Fatal(err)
 	}

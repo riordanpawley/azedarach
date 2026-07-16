@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-# Block rebases when repository build/tests are red.
-"$(git rev-parse --show-toplevel)/scripts/git-merge-rebase-gate.sh"
-
+# Candidate validation is launched explicitly after rebase returns an exact
+# clean HEAD. Running it here validates the pre-rebase commit and can leave an
+# obsolete aggregate alive while conflict reconciliation proceeds.
+exit 0

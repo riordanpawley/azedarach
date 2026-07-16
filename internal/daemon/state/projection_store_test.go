@@ -8,12 +8,21 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/testisolation"
+
+	"github.com/riordanpawley/azedarach/internal/latencytrace"
+	"github.com/riordanpawley/azedarach/internal/observability"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	_ "modernc.org/sqlite"
 )
 
@@ -783,6 +792,72 @@ func TestRuntimeStateStoreSeparatesSessionIntentAndObservations(t *testing.T) {
 	}
 }
 
+func TestRuntimeStateStoreListsSessionStatesByIssueIDs(t *testing.T) {
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx := context.Background()
+	now := time.Date(2026, time.July, 13, 5, 0, 0, 0, time.UTC)
+	for _, session := range []Session{
+		{ID: "target-intent", IssueID: "det", State: SessionStateRunning, UpdatedAt: now},
+		{ID: "target-intent.pane-1", IssueID: "det", State: SessionStateRunning, UpdatedAt: now.Add(time.Second)},
+		{ID: "historical", IssueID: "old", State: SessionStateStopped, UpdatedAt: now.Add(-time.Hour)},
+	} {
+		if err := store.UpsertSessionState(ctx, "project", session); err != nil {
+			t.Fatalf("seed %s: %v", session.ID, err)
+		}
+	}
+
+	sessions, err := store.ListSessionStatesByIssueIDs(ctx, "project", []string{"det"})
+	if err != nil {
+		t.Fatalf("ListSessionStatesByIssueIDs: %v", err)
+	}
+	if got, want := len(sessions), 2; got != want {
+		t.Fatalf("scoped sessions = %d, want %d: %+v", got, want, sessions)
+	}
+	for _, session := range sessions {
+		if session.IssueID != "det" {
+			t.Fatalf("scoped query returned unrelated session: %+v", session)
+		}
+	}
+
+	db, err := sql.Open("sqlite", store.dbPath)
+	if err != nil {
+		t.Fatalf("open query-plan db: %v", err)
+	}
+	defer db.Close()
+	rows, err := db.QueryContext(ctx, `
+		EXPLAIN QUERY PLAN
+		SELECT session_id
+		FROM (`+sessionProjectionUnionSQL()+`)
+		WHERE project_id = ? AND issue_id IN (?)
+	`, "project", "det")
+	if err != nil {
+		t.Fatalf("explain scoped session query: %v", err)
+	}
+	defer rows.Close()
+	var plan strings.Builder
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatalf("scan query plan: %v", err)
+		}
+		plan.WriteString(detail)
+		plan.WriteByte('\n')
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate query plan: %v", err)
+	}
+	for _, table := range []string{sessionStateTable, sessionObservationTable} {
+		tablePlan := "SEARCH " + table + " USING "
+		if !strings.Contains(plan.String(), tablePlan+"INDEX") &&
+			!strings.Contains(plan.String(), tablePlan+"COVERING INDEX") {
+			t.Fatalf("scoped query plan does not use issue index for %s:\n%s", table, plan.String())
+		}
+	}
+}
+
 func TestRuntimeStateStoreKeepsHookObservationSeparateFromCanonicalSession(t *testing.T) {
 	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
 	t.Cleanup(func() {
@@ -986,6 +1061,125 @@ func TestRuntimeStateStoreMigratesLegacyHookPaneObservationsToActivityEvidence(t
 		t.Fatalf("GetSessionActivityEvidence bjd: %v", err)
 	} else if found {
 		t.Fatal("did not expect runtime-sourced pane observation to migrate as hook evidence")
+	}
+}
+
+func TestRuntimeStateStoreLogicalIdentityRebuildRestoresOrderedSessionIndexes(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	legacyTable := func(table string) string {
+		return `CREATE TABLE ` + table + ` (
+			project_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			issue_id TEXT NOT NULL,
+			state TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (project_id, session_id)
+		);`
+	}
+	if _, err := db.Exec(
+		legacyTable(sessionStateTable) +
+			legacyTable(sessionObservationTable) + `
+			CREATE INDEX idx_daemon_session_projections_project_issue_updated
+				ON daemon_session_projections(project_id, issue_id, updated_at DESC, session_id DESC);
+			CREATE INDEX idx_daemon_session_observations_project_issue_updated
+				ON daemon_session_observations(project_id, issue_id, updated_at DESC, session_id DESC);
+		`); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed legacy runtime schema: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy runtime schema: %v", err)
+	}
+
+	store := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.ListSessionStates(context.Background(), "proj-a"); err != nil {
+		t.Fatalf("open runtime store: %v", err)
+	}
+	handle, err := store.dbHandle()
+	if err != nil {
+		t.Fatalf("runtime db handle: %v", err)
+	}
+	for _, table := range []string{sessionStateTable, sessionObservationTable} {
+		index := "idx_" + table + "_project_issue_updated"
+		query := `SELECT session_id FROM ` + table + ` INDEXED BY ` + index + ` WHERE project_id=? AND issue_id=? ORDER BY updated_at DESC,session_id DESC`
+		rows, err := handle.QueryContext(context.Background(), query, "proj-a", "issue-a")
+		if err != nil {
+			t.Fatalf("ordered query for %s after logical identity rebuild: %v", table, err)
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatalf("close ordered query for %s: %v", table, err)
+		}
+	}
+}
+
+func TestRuntimeStateStoreRealProjectDatabaseMigrationClones(t *testing.T) {
+	rawPaths := strings.TrimSpace(os.Getenv("AZEDARACH_PROJECT_DB_CLONES"))
+	if rawPaths == "" {
+		t.Skip("AZEDARACH_PROJECT_DB_CLONES is not set")
+	}
+	for _, path := range filepath.SplitList(rawPaths) {
+		path := path
+		t.Run(filepath.Base(filepath.Dir(path)), func(t *testing.T) {
+			if err := testisolation.CheckDatabaseClone(path, "."); err != nil {
+				t.Fatalf("refuse unsafe project database clone before SQLite open: %v", err)
+			}
+			before, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?mode=ro")
+			if err != nil {
+				t.Fatalf("open project database clone read-only: %v", err)
+			}
+			rowCounts := make(map[string]int)
+			for _, table := range []string{sessionStateTable, sessionObservationTable} {
+				var count int
+				if err := before.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
+					_ = before.Close()
+					t.Fatalf("count %s before runtime-store open: %v", table, err)
+				}
+				rowCounts[table] = count
+			}
+			if err := before.Close(); err != nil {
+				t.Fatalf("close project database clone read-only: %v", err)
+			}
+
+			assertOpen := func() {
+				store := NewRuntimeStateStoreAtPath(path, slog.Default())
+				handle, err := store.dbHandle()
+				if err != nil {
+					t.Fatalf("open runtime store against project database clone: %v", err)
+				}
+				for _, table := range []string{sessionStateTable, sessionObservationTable} {
+					index := "idx_" + table + "_project_issue_updated"
+					query := `SELECT session_id FROM ` + table + ` INDEXED BY ` + index + ` ORDER BY project_id,issue_id,updated_at DESC,session_id DESC LIMIT 1`
+					rows, err := handle.QueryContext(context.Background(), query)
+					if err != nil {
+						_ = store.Close()
+						t.Fatalf("ordered runtime read for %s: %v", table, err)
+					}
+					if err := rows.Close(); err != nil {
+						_ = store.Close()
+						t.Fatalf("close ordered runtime read for %s: %v", table, err)
+					}
+					var count int
+					if err := handle.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
+						_ = store.Close()
+						t.Fatalf("count %s after runtime-store open: %v", table, err)
+					}
+					if count != rowCounts[table] {
+						_ = store.Close()
+						t.Fatalf("%s rows = %d after runtime-store open, want %d", table, count, rowCounts[table])
+					}
+				}
+				if err := store.Close(); err != nil {
+					t.Fatalf("close runtime store: %v", err)
+				}
+			}
+			assertOpen()
+			assertOpen()
+		})
 	}
 }
 
@@ -1459,6 +1653,233 @@ func TestRuntimeStateStoreOpensRootShapeWithDuplicateArchivedLogicalSessions(t *
 	}
 }
 
+func TestRuntimeStateStoreReopensWithMissingIssueRuntimeProjection(t *testing.T) {
+	recorder := newRuntimeRepairTraceRecorder(t)
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := func(table string) string {
+		return `CREATE TABLE ` + table + `(project_id TEXT NOT NULL,session_id TEXT NOT NULL,issue_id TEXT NOT NULL,role TEXT NOT NULL,scope_kind TEXT NOT NULL,scope_id TEXT NOT NULL,state TEXT NOT NULL,observed_state TEXT,activity TEXT,activity_source TEXT,tmux_attached_count INTEGER NOT NULL DEFAULT 0,started_at TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(project_id,session_id));`
+	}
+	if _, err := db.Exec(`CREATE TABLE issues(id TEXT PRIMARY KEY,visibility TEXT NOT NULL);` + schema(sessionStateTable) + schema(sessionObservationTable) + `
+		INSERT INTO daemon_session_projections VALUES
+		('old-chefy','ch-dkx','dkx','worker','issue','dkx','stopped','stopped','','',0,NULL,'2026-07-09T03:22:36Z'),
+		('chefy','ch-dkx','dkx','worker','issue','dkx','stopped','stopped','','',0,NULL,'2026-07-15T00:27:33Z');
+		INSERT INTO daemon_session_observations VALUES
+		('chefy','ch-dkx.pane-1700','dkx','worker','issue','dkx','stopped','stopped','','',0,NULL,'2026-07-09T03:22:36Z'),
+		('chefy','ch-dkx.pane-2034','dkx','worker','issue','dkx','stopped','stopped','','',0,NULL,'2026-07-09T03:22:36Z');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	probeCount := 0
+	store := NewRuntimeStateStoreAtPath(dbPath, slog.Default(), WithRuntimeLivenessProbe(func(context.Context, string) (bool, error) {
+		probeCount++
+		return false, nil
+	}))
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.ListSessionStates(context.Background(), "chefy"); err != nil {
+		t.Fatalf("reopen with inactive missing-issue projection: %v", err)
+	}
+	if probeCount != 1 {
+		t.Fatalf("liveness probes=%d want one consistent ch-dkx classification", probeCount)
+	}
+	assertRuntimeRepairSpans(t, recorder, "daemon.runtime_projection.orphan_classification", "daemon.runtime_projection.orphan_repair")
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ListSessionStates(context.Background(), "chefy"); err != nil {
+		t.Fatalf("second reopen after missing-issue repair: %v", err)
+	}
+	handle, err := store.dbHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{sessionStateTable, sessionObservationTable} {
+		var count int
+		if err := handle.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE issue_id='dkx'`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("%s orphan rows=%d want 0", table, count)
+		}
+	}
+}
+
+func newRuntimeRepairTraceRecorder(t *testing.T) *tracetest.SpanRecorder {
+	t.Helper()
+	t.Setenv(latencytrace.EnvVar, "")
+	t.Setenv(observability.EnvVar, "true")
+	latencytrace.SetConfigEnabled(false)
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(oteltrace.NewNoopTracerProvider())
+		latencytrace.SetConfigEnabled(false)
+	})
+	return recorder
+}
+
+func assertRuntimeRepairSpans(t *testing.T, recorder *tracetest.SpanRecorder, names ...string) {
+	t.Helper()
+	found := map[string]sdktrace.ReadOnlySpan{}
+	for _, span := range recorder.Ended() {
+		found[span.Name()] = span
+	}
+	for _, name := range names {
+		span := found[name]
+		if span == nil {
+			t.Fatalf("missing span %q; ended=%v", name, found)
+		}
+		attrs := map[string]bool{}
+		for _, attr := range span.Attributes() {
+			attrs[string(attr.Key)] = true
+		}
+		for _, key := range []string{"component", "phase", "outcome"} {
+			if !attrs[key] {
+				t.Fatalf("span %q missing attribute %q", name, key)
+			}
+		}
+	}
+}
+
+func TestRuntimeStateStoreFailsClosedForUnverifiableMissingIssueRuntime(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := func(table string) string {
+		return `CREATE TABLE ` + table + `(project_id TEXT NOT NULL,session_id TEXT NOT NULL,issue_id TEXT NOT NULL,role TEXT NOT NULL,scope_kind TEXT NOT NULL,scope_id TEXT NOT NULL,state TEXT NOT NULL,observed_state TEXT,activity TEXT,activity_source TEXT,tmux_attached_count INTEGER NOT NULL DEFAULT 0,started_at TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(project_id,session_id));`
+	}
+	if _, err := db.Exec(`CREATE TABLE issues(id TEXT PRIMARY KEY,visibility TEXT NOT NULL);` + schema(sessionStateTable) + schema(sessionObservationTable) + `
+		INSERT INTO daemon_session_projections VALUES
+		('chefy','ch-live','live','worker','issue','live','running','running','busy','hooks',0,NULL,'2026-07-15T00:00:00Z');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.ListSessionStates(context.Background(), "chefy"); err == nil || !strings.Contains(err.Error(), "ch-live: issue does not exist") {
+		t.Fatalf("live missing-issue error=%v", err)
+	}
+}
+
+func TestRuntimeStateStoreFailsClosedForLiveMissingIssueRuntime(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := func(table string) string {
+		return `CREATE TABLE ` + table + `(project_id TEXT NOT NULL,session_id TEXT NOT NULL,issue_id TEXT NOT NULL,role TEXT NOT NULL,scope_kind TEXT NOT NULL,scope_id TEXT NOT NULL,state TEXT NOT NULL,observed_state TEXT,activity TEXT,activity_source TEXT,tmux_attached_count INTEGER NOT NULL DEFAULT 0,started_at TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(project_id,session_id));`
+	}
+	if _, err := db.Exec(`CREATE TABLE issues(id TEXT PRIMARY KEY,visibility TEXT NOT NULL);` + schema(sessionStateTable) + schema(sessionObservationTable) + `
+		INSERT INTO daemon_session_observations VALUES
+		('chefy','ch-dkx.pane-1700','dkx','worker','issue','dkx','stopped','stopped','','',0,NULL,'2026-07-09T03:22:36Z');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var probed string
+	store := NewRuntimeStateStoreAtPath(dbPath, slog.Default(), WithRuntimeLivenessProbe(func(_ context.Context, sessionID string) (bool, error) {
+		probed = sessionID
+		return true, nil
+	}))
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.ListSessionStates(context.Background(), "chefy"); err == nil || !strings.Contains(err.Error(), "runtime ch-dkx is live") {
+		t.Fatalf("live terminal orphan error=%v", err)
+	}
+	if probed != "ch-dkx" {
+		t.Fatalf("liveness probe session=%q want ch-dkx", probed)
+	}
+}
+
+func TestRuntimeStateStoreMissingIssueRepairRollsBackMidBatchFailure(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := func(table string) string {
+		return `CREATE TABLE ` + table + `(project_id TEXT NOT NULL,session_id TEXT NOT NULL,issue_id TEXT NOT NULL,role TEXT NOT NULL,scope_kind TEXT NOT NULL,scope_id TEXT NOT NULL,state TEXT NOT NULL,observed_state TEXT,activity TEXT,activity_source TEXT,tmux_attached_count INTEGER NOT NULL DEFAULT 0,started_at TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(project_id,session_id));`
+	}
+	if _, err := db.Exec(`CREATE TABLE issues(id TEXT PRIMARY KEY,visibility TEXT NOT NULL);` + schema(sessionStateTable) + schema(sessionObservationTable) + `
+		INSERT INTO daemon_session_projections VALUES ('chefy','ch-dkx','dkx','worker','issue','dkx','stopped','stopped','','',0,NULL,'2026-07-09T03:22:36Z');
+		INSERT INTO daemon_session_observations VALUES ('chefy','ch-dkx.pane-1700','dkx','worker','issue','dkx','stopped','stopped','','',0,NULL,'2026-07-09T03:22:36Z');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store := NewRuntimeStateStoreAtPath(dbPath, slog.Default(),
+		WithRuntimeLivenessProbe(func(context.Context, string) (bool, error) { return false, nil }),
+		WithRuntimeRepairDeleteHookForTest(func(_, _ string, index int) error {
+			if index == 1 {
+				return errors.New("injected mid-batch failure")
+			}
+			return nil
+		}),
+	)
+	if _, err := store.ListSessionStates(context.Background(), "chefy"); err == nil || !strings.Contains(err.Error(), "injected mid-batch failure") {
+		t.Fatalf("repair error=%v", err)
+	}
+	verify, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verify.Close()
+	for _, table := range []string{sessionStateTable, sessionObservationTable} {
+		var count int
+		if err := verify.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE issue_id='dkx'`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("%s rows after rollback=%d want 1", table, count)
+		}
+	}
+}
+
+func TestRuntimeStateStoreCandidateCloneOpenAndReopen(t *testing.T) {
+	path := strings.TrimSpace(os.Getenv("AZEDARACH_RUNTIME_CLONE_DB"))
+	if path == "" {
+		t.Skip("AZEDARACH_RUNTIME_CLONE_DB not set")
+	}
+	store := NewRuntimeStateStoreAtPath(path, slog.Default(), WithRuntimeLivenessProbe(func(context.Context, string) (bool, error) { return false, nil }))
+	if _, err := store.ListProjectIDs(context.Background()); err != nil {
+		t.Fatalf("candidate clone open: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ListProjectIDs(context.Background()); err != nil {
+		t.Fatalf("candidate clone idempotent reopen: %v", err)
+	}
+	if issueID := strings.TrimSpace(os.Getenv("AZEDARACH_RUNTIME_CLONE_ABSENT_ISSUE")); issueID != "" {
+		db, err := store.dbHandle()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, table := range []string{sessionStateTable, sessionObservationTable} {
+			var count int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE issue_id=?`, issueID).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 0 {
+				t.Fatalf("%s absent-issue rows=%d want 0", table, count)
+			}
+		}
+	}
+}
+
 func TestRuntimeStateStorePaneMigrationReplacesStaleObservationMetadata(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "runtime.db")
 	db, err := sql.Open("sqlite", dbPath)
@@ -1676,6 +2097,29 @@ func TestRuntimeStateStorePhysicalObservationConstraints(t *testing.T) {
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO daemon_physical_session_observations(project_id,session_id,observed_state,activity,activity_source,updated_at) VALUES('p','bad','stopped','busy','hooks',?)`, time.Now().UTC().Format(time.RFC3339Nano)); err == nil {
 		t.Fatal("direct SQL accepted stopped physical observation with activity")
+	}
+}
+
+func TestRuntimeStateStoreTmuxAttachmentObservationIsOptionalAndPreservedAcrossHooks(t *testing.T) {
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	now := time.Now().UTC()
+	seed := Session{ID: "az-root", IssueID: "root", Role: SessionRoleWorker, ScopeKind: SessionScopeIssue, ScopeID: "root", State: SessionStateRunning, ObservedState: SessionStateRunning, UpdatedAt: now.Add(-time.Minute)}
+	if err := store.UpsertSessionState(ctx, "p", seed); err != nil {
+		t.Fatal(err)
+	}
+	attached := 2
+	startedAt := now.Add(-time.Hour)
+	if _, applied, err := store.ApplyPhysicalSessionObservation(ctx, PhysicalSessionObservation{ProjectID: "p", SessionID: seed.ID, ObservedState: SessionStateRunning, UpdatedAt: now, TmuxAttachedCount: &attached, StartedAt: &startedAt}); err != nil || !applied {
+		t.Fatalf("apply tmux attachment observation: applied=%v err=%v", applied, err)
+	}
+	if _, applied, err := store.ApplyPhysicalSessionObservation(ctx, PhysicalSessionObservation{ProjectID: "p", SessionID: seed.ID, ObservedState: SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: now.Add(time.Second)}); err != nil || !applied {
+		t.Fatalf("apply hook observation: applied=%v err=%v", applied, err)
+	}
+	got, found, err := store.GetSessionState(ctx, "p", seed.ID)
+	if err != nil || !found || got.TmuxAttachedCount != attached || got.StartedAt == nil || !got.StartedAt.Equal(startedAt) || got.Activity != "busy" {
+		t.Fatalf("session=%+v found=%v err=%v", got, found, err)
 	}
 }
 

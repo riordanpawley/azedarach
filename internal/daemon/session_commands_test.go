@@ -301,6 +301,12 @@ func (r *testTmuxRunner) listSessionCallCount() int {
 	return r.listSessionsCalls
 }
 
+func (r *testTmuxRunner) listPaneCallCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.listPanesCalls
+}
+
 type failingListSessionsTmuxRunner struct {
 	listSessionsCalls int
 }
@@ -1424,6 +1430,7 @@ type sessionStartTmuxRunner struct {
 	captureOutput        string
 	currentCommand       string
 	onSendKeys           func(string, string)
+	onRunWithInput       func(context.Context, string, []string) (string, error)
 }
 
 func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
@@ -1520,9 +1527,12 @@ func tmuxCommandEnvironmentValue(command []string, key string) (string, bool) {
 	return "", false
 }
 
-func (r *sessionStartTmuxRunner) RunWithInput(_ context.Context, input string, args ...string) (string, error) {
+func (r *sessionStartTmuxRunner) RunWithInput(ctx context.Context, input string, args ...string) (string, error) {
 	r.commands = append(r.commands, append([]string(nil), args...))
 	r.inputPayloads = append(r.inputPayloads, input)
+	if r.onRunWithInput != nil {
+		return r.onRunWithInput(ctx, input, args)
+	}
 	return "", nil
 }
 
@@ -7650,6 +7660,9 @@ func TestSessionStatusIgnoresStaleProjectionWhenTmuxHasNoSession(t *testing.T) {
 			projectID: issuesClient,
 		},
 	}
+	if err := daemon.observeTmuxProject(ctx, projectID, newTmuxRuntimeLiveness(nil, nil), domain.CurrentTmuxObservationProvenance(time.Now().UTC().Add(time.Second))); err != nil {
+		t.Fatalf("apply asynchronous missing-session observation: %v", err)
+	}
 
 	resp, err := daemon.handleSessionStatus(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
@@ -7676,6 +7689,9 @@ func TestSessionStatusIgnoresStaleProjectionWhenTmuxHasNoSession(t *testing.T) {
 	}
 	if !strings.Contains(payload.Output, "No active sessions") {
 		t.Fatalf("status output = %q, want no active sessions", payload.Output)
+	}
+	if got := tmuxRunner.listSessionCallCount(); got != 0 {
+		t.Fatalf("session.status tmux inventory calls = %d, want 0", got)
 	}
 }
 
@@ -9308,11 +9324,14 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "Queued reviews do not block unrelated starts when managed agent capacity remains") {
 		t.Fatalf("prompt = %q, want non-blocking review scheduling guidance", prompt)
 	}
-	if !strings.Contains(prompt, "Nested epic/root rule: if a runnable child is itself an epic/root that should self-orchestrate, start that child's own orchestrator session with `az orchestrator-session start --root <child-root>`") {
+	if !strings.Contains(prompt, "Chain of command is strict: orchestrate only this root's direct children") ||
+		!strings.Contains(prompt, "Never launch, message, inspect for intervention, review, integrate, stop, or take over grandchildren or deeper descendants") {
+		t.Fatalf("prompt = %q, want strict direct-child boundary", prompt)
+	}
+	if !strings.Contains(prompt, "Nested epic/root rule: start a direct child root's own orchestrator session with `az orchestrator-session start --root <child-root>`") {
 		t.Fatalf("prompt = %q, want nested root session guidance", prompt)
 	}
-	if !strings.Contains(prompt, "supervise that nested orchestrator as a direct child while it owns its descendant workers") ||
-		!strings.Contains(prompt, "do not launch or take over those descendants unless the user explicitly asks to flatten orchestration") {
+	if !strings.Contains(prompt, "supervise that orchestrator as a direct child while it exclusively owns its descendants") {
 		t.Fatalf("prompt = %q, want no-flattening guidance", prompt)
 	}
 	if !strings.Contains(prompt, "React to progress, blocked, and integration-ready evidence; review and integrate accepted children/epics, advance newly unblocked work, and repeat status/start/watch/review while graph work remains") {

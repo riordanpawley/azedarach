@@ -12,7 +12,7 @@ import (
 )
 
 func TestTaskListSnapshotPayloadContractConstants(t *testing.T) {
-	if got, want := TaskListSnapshotSchemaVersion, uint16(3); got != want {
+	if got, want := TaskListSnapshotSchemaVersion, uint16(4); got != want {
 		t.Fatalf("TaskListSnapshotSchemaVersion = %d, want %d", got, want)
 	}
 }
@@ -68,7 +68,7 @@ func TestTaskListSnapshotPayloadJSONShapeIsDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal task list snapshot: %v", err)
 	}
-	want := fmt.Sprintf(`{"schema_version":3,"protocol_version":%d,"snapshot_revision":17,"project_id":"proj-joined","last_checked_at":"2026-04-02T10:31:45Z","freshness":"fresh","tasks":[{"id":"az-1","title":"Joined snapshot","description":"daemon-authored issue/session/worktree payload","status":"in_progress","issue_state":{"disposition":"ready","engagement":"working","visibility":"live"},"priority":1,"issue_type":"task","session":{"issue_id":"az-1","state":"busy","started_at":"2026-04-02T10:30:00Z","worktree":"/tmp/repo-az-1"},"has_worktree":true,"git_ahead_count":2,"git_behind_count":1,"has_uncommitted_changes":true,"git_additions":7,"git_deletions":3,"created_at":"0001-01-01T00:00:00Z","updated_at":"0001-01-01T00:00:00Z"}]}`, CurrentVersion)
+	want := fmt.Sprintf(`{"schema_version":4,"protocol_version":%d,"snapshot_revision":17,"project_id":"proj-joined","last_checked_at":"2026-04-02T10:31:45Z","freshness":"fresh","source":{"delivery_cursor":0,"delivery_head":0,"delivery_cursor_transitional":false,"projector":{"id":"","schema_version":0,"build":"","checksum":""},"source_vector":null,"issue_checksum":"","runtime_checksum":"","semantic_checksum":"","health":""},"tasks":[{"id":"az-1","title":"Joined snapshot","description":"daemon-authored issue/session/worktree payload","status":"in_progress","issue_state":{"disposition":"ready","engagement":"working","visibility":"live"},"priority":1,"issue_type":"task","session":{"issue_id":"az-1","state":"busy","started_at":"2026-04-02T10:30:00Z","worktree":"/tmp/repo-az-1"},"has_worktree":true,"git_ahead_count":2,"git_behind_count":1,"has_uncommitted_changes":true,"git_additions":7,"git_deletions":3,"created_at":"0001-01-01T00:00:00Z","updated_at":"0001-01-01T00:00:00Z"}]}`, CurrentVersion)
 	if string(got) != want {
 		t.Fatalf("json = %s, want %s", string(got), want)
 	}
@@ -134,13 +134,13 @@ func TestDecodeTaskListSnapshotPayloadRejectsVersionMismatch(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected schema version mismatch error")
 		}
-		if got := err.Error(); !strings.Contains(got, "schema_version mismatch: expected 3, actual 99") {
+		if got := err.Error(); !strings.Contains(got, "schema_version mismatch: expected 4, actual 99") {
 			t.Fatalf("error = %q, want expected/actual schema mismatch", got)
 		}
 	})
 
 	t.Run("protocol version", func(t *testing.T) {
-		body := []byte(`{"schema_version":3,"protocol_version":99,"snapshot_revision":1,"project_id":"proj","last_checked_at":"2026-04-02T10:31:45Z","freshness":"fresh","tasks":[]}`)
+		body := []byte(`{"schema_version":4,"protocol_version":99,"snapshot_revision":1,"project_id":"proj","last_checked_at":"2026-04-02T10:31:45Z","freshness":"fresh","tasks":[]}`)
 
 		_, err := DecodeTaskListSnapshotPayload(body)
 		if err == nil {
@@ -152,7 +152,7 @@ func TestDecodeTaskListSnapshotPayloadRejectsVersionMismatch(t *testing.T) {
 	})
 
 	t.Run("missing freshness metadata", func(t *testing.T) {
-		body := []byte(fmt.Sprintf(`{"schema_version":3,"protocol_version":%d,"snapshot_revision":1,"project_id":"proj","tasks":[]}`, CurrentVersion))
+		body := []byte(fmt.Sprintf(`{"schema_version":4,"protocol_version":%d,"snapshot_revision":1,"project_id":"proj","tasks":[]}`, CurrentVersion))
 
 		_, err := DecodeTaskListSnapshotPayload(body)
 		if err == nil {
@@ -164,7 +164,7 @@ func TestDecodeTaskListSnapshotPayloadRejectsVersionMismatch(t *testing.T) {
 	})
 
 	t.Run("invalid freshness", func(t *testing.T) {
-		body := []byte(fmt.Sprintf(`{"schema_version":3,"protocol_version":%d,"snapshot_revision":1,"project_id":"proj","last_checked_at":"2026-04-02T10:31:45Z","freshness":"unknown","tasks":[]}`, CurrentVersion))
+		body := []byte(fmt.Sprintf(`{"schema_version":4,"protocol_version":%d,"snapshot_revision":1,"project_id":"proj","last_checked_at":"2026-04-02T10:31:45Z","freshness":"unknown","tasks":[]}`, CurrentVersion))
 
 		_, err := DecodeTaskListSnapshotPayload(body)
 		if err == nil {

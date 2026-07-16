@@ -15,4 +15,10 @@ func TestIntegrationBudgetLayersPreserveLifecycleReserves(t *testing.T) {
 	if IntegrationClientTimeout != IntegrationCloseTimeout+IntegrationClientReserve {
 		t.Fatalf("client timeout = %v, want daemon close %v + transport reserve %v", IntegrationClientTimeout, IntegrationCloseTimeout, IntegrationClientReserve)
 	}
+	if LifecycleCleanupTimeout != IntegrationCloseReserve {
+		t.Fatalf("lifecycle cleanup timeout = %v, want cleanup reserve %v", LifecycleCleanupTimeout, IntegrationCloseReserve)
+	}
+	if LifecycleCleanupClientTimeout != LifecycleCleanupTimeout+IntegrationClientReserve {
+		t.Fatalf("lifecycle cleanup client timeout = %v, want daemon cleanup %v + transport reserve %v", LifecycleCleanupClientTimeout, LifecycleCleanupTimeout, IntegrationClientReserve)
+	}
 }
