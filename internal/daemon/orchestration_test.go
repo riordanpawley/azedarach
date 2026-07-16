@@ -947,7 +947,6 @@ func TestOrchestrationSnapshotCacheRecoversFromRevisionChurn(t *testing.T) {
 }
 
 func TestOrchestrationSnapshotHandlerReturnsPromptConflictDuringContinuousChurn(t *testing.T) {
-	t.Skip("superseded by materialized project snapshot convergence coverage")
 	const projectID = "project"
 	d := &Daemon{revision: map[string]uint64{projectID: 1}}
 	builds := 0
@@ -967,8 +966,8 @@ func TestOrchestrationSnapshotHandlerReturnsPromptConflictDuringContinuousChurn(
 	if err != nil {
 		t.Fatalf("handler error: %v", err)
 	}
-	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeConflict {
-		t.Fatalf("response = %+v, want projection conflict", resp)
+	if !resp.OK || resp.Error != nil {
+		t.Fatalf("response = %+v, want converged project snapshot", resp)
 	}
 	if builds != 1 {
 		t.Fatalf("snapshot builds = %d, want one prompt attempt", builds)
@@ -1717,7 +1716,6 @@ func TestProjectOrchestrationSnapshotRefreshesCrossProcessInteractions(t *testin
 }
 
 func TestProjectOrchestrationSnapshotRetriesAcrossPostExportInteractionResolution(t *testing.T) {
-	t.Skip("superseded: materialized snapshots publish source vectors instead of retrying export hooks")
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
 	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
@@ -1749,29 +1747,28 @@ func TestProjectOrchestrationSnapshotRetriesAcrossPostExportInteractionResolutio
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := candidateClass(snapshot.Candidates, issueID); got != "runnable" {
-		t.Fatalf("candidate class = %q, want runnable from retried checkpoint", got)
+	if got := candidateClass(snapshot.Candidates, issueID); got != string(domain.OrchestrationCandidateDecisionWaiting) {
+		t.Fatalf("candidate class = %q, want checkpointed decision-waiting state", got)
 	}
-	if reason := snapshot.Blocked[issueID]; strings.Contains(reason, "unresolved interaction") {
-		t.Fatalf("blocked reason = %q, must not retain superseded interaction", reason)
+	if reason := snapshot.Blocked[issueID]; reason == "" {
+		t.Fatalf("blocked reason = %q, want checkpointed interaction blocker", reason)
 	}
-	if !slices.Contains(snapshot.Runnable, issueID) {
-		t.Fatalf("runnable = %v, want issue from retried checkpoint", snapshot.Runnable)
+	if slices.Contains(snapshot.Runnable, issueID) {
+		t.Fatalf("runnable = %v, must not mix post-checkpoint interaction resolution", snapshot.Runnable)
 	}
-	if len(snapshot.Interactions) != 0 {
-		t.Fatalf("interactions = %+v, want resolved request absent after whole-snapshot retry", snapshot.Interactions)
+	if len(snapshot.Interactions) != 1 {
+		t.Fatalf("interactions = %+v, want checkpointed request", snapshot.Interactions)
 	}
 	checkpoint, err := reader.ProjectionSourceCheckpoint(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.ProjectionRevision != checkpoint {
-		t.Fatalf("projection revision = %d, want retried checkpoint %d", snapshot.ProjectionRevision, checkpoint)
+	if snapshot.Source.Projector.ID == "" || checkpoint == 0 {
+		t.Fatalf("snapshot source=%+v checkpoint=%d", snapshot.Source, checkpoint)
 	}
 }
 
 func TestProjectOrchestrationSnapshotRetriesPostExportReviewEvidenceMutation(t *testing.T) {
-	t.Skip("superseded: materialized snapshots publish source vectors instead of retrying export hooks")
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
 	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
@@ -1800,23 +1797,22 @@ func TestProjectOrchestrationSnapshotRetriesPostExportReviewEvidenceMutation(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.ProjectionRevision != checkpoint || appended.ID == 0 {
-		t.Fatalf("snapshot revision=%d checkpoint=%d appended=%d, want one retried authoritative checkpoint", snapshot.ProjectionRevision, checkpoint, appended.ID)
+	if snapshot.Source.Projector.ID == "" || checkpoint == 0 || appended.ID != 0 {
+		t.Fatalf("snapshot source=%+v checkpoint=%d appended=%d, want one checkpoint without export-hook retry", snapshot.Source, checkpoint, appended.ID)
 	}
-	if len(snapshot.ReviewQueue) != 1 || snapshot.ReviewQueue[0].IssueID != issueID || snapshot.ReviewQueue[0].Evidence == nil {
-		t.Fatalf("review queue = %+v, want post-export evidence from retried snapshot", snapshot.ReviewQueue)
+	if len(snapshot.ReviewQueue) != 1 || snapshot.ReviewQueue[0].IssueID != issueID || snapshot.ReviewQueue[0].Evidence != nil {
+		t.Fatalf("review queue = %+v, want checkpointed pre-evidence state", snapshot.ReviewQueue)
 	}
 	foundRecent := false
 	for _, event := range snapshot.RecentEvents {
 		foundRecent = foundRecent || event.Seq == appended.ID
 	}
-	if !foundRecent {
-		t.Fatalf("recent events = %+v, want post-export event %d", snapshot.RecentEvents, appended.ID)
+	if foundRecent {
+		t.Fatalf("recent events = %+v, must not include post-checkpoint event %d", snapshot.RecentEvents, appended.ID)
 	}
 }
 
 func TestProjectOrchestrationSnapshotCapturesAuxiliaryReadinessInputsOnce(t *testing.T) {
-	t.Skip("superseded by shared materializer and live-session root visibility coverage")
 	ctx := context.Background()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
@@ -1873,7 +1869,7 @@ func TestProjectOrchestrationSnapshotCapturesAuxiliaryReadinessInputsOnce(t *tes
 		mailboxReads++
 		return nil, nil
 	}
-	for _, tc := range []struct{ limit, roots int }{{2, 1}, {100, 50}} {
+	for _, tc := range []struct{ limit, roots int }{{2, 2}, {100, 50}} {
 		limit := tc.limit
 		operationReads, interactionReads, observationReads, worktreeReads, mailboxReads, gitRunner.calls = 0, 0, 0, 0, 0, 0
 		snapshot, err := (daemonOrchestrationAuthority{daemon: d}).Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: limit})
@@ -1889,8 +1885,8 @@ func TestProjectOrchestrationSnapshotCapturesAuxiliaryReadinessInputsOnce(t *tes
 		if interactionReads != 0 {
 			t.Fatalf("limit %d auxiliary interaction reads = %d, want exported interaction map only", limit, interactionReads)
 		}
-		if observationReads != 1 || worktreeReads != 1 || gitRunner.calls != 1 {
-			t.Fatalf("limit %d project captures = observations:%d worktrees:%d git:%d, want one each", limit, observationReads, worktreeReads, gitRunner.calls)
+		if observationReads != 1 || worktreeReads != 1 || gitRunner.calls != 0 {
+			t.Fatalf("limit %d project captures = observations:%d worktrees:%d git:%d, want one durable capture without live Git amplification", limit, observationReads, worktreeReads, gitRunner.calls)
 		}
 		if mailboxReads != 0 {
 			t.Fatalf("limit %d mailbox file reads = %d, want durable observation projection only", limit, mailboxReads)
@@ -2014,7 +2010,6 @@ func (r *snapshotCountingGitRunner) Run(_ context.Context, args ...string) (stri
 }
 
 func TestProjectOrchestrationRealBuilderRemainsCoherentDuringProjectionChurn(t *testing.T) {
-	t.Skip("superseded by materialized source-vector churn coverage")
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
 	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
@@ -2060,7 +2055,7 @@ func TestProjectOrchestrationRealBuilderRemainsCoherentDuringProjectionChurn(t *
 			<-writerErr
 			t.Fatalf("snapshot %d candidate class = %q", i, got)
 		}
-		if slices.Contains(snapshot.Runnable, guardedID) || !strings.Contains(snapshot.Blocked[guardedID], "unresolved interaction") {
+		if slices.Contains(snapshot.Runnable, guardedID) || snapshot.Blocked[guardedID] == "" {
 			close(stop)
 			<-writerErr
 			t.Fatalf("snapshot %d readiness contradiction: runnable=%v blocked=%q", i, snapshot.Runnable, snapshot.Blocked[guardedID])
