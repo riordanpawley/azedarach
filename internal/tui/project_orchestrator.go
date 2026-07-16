@@ -84,7 +84,6 @@ func (m Model) openProjectOrchestratorOverlay() tea.Cmd {
 	refresh := m.loadProjectOrchestratorSnapshotCmd()
 	if m.projectOrchestrator != nil {
 		project = *m.projectOrchestrator
-		refresh = nil
 	}
 	details := projectOrchestratorDetails(project)
 	open := m.openOverlay(overlay.NewProjectOrchestratorOverlay(details, func(action string) tea.Cmd {

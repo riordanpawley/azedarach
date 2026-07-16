@@ -8290,3 +8290,24 @@ func TestProjectOrchestratorRefreshFailurePreservesLastKnownSnapshot(t *testing.
 		t.Fatalf("last-known orchestrator snapshot was discarded: %+v", updated.projectOrchestrator)
 	}
 }
+
+func TestOpenProjectOrchestratorOverlayRefreshesCachedSnapshot(t *testing.T) {
+	m := newTestModel()
+	m.projectOrchestrator = &projectOrchestratorSnapshot{
+		ProjectID: m.daemonProjectID(),
+		Snapshot:  &protocol.OrchestrationSnapshot{Lifecycle: domain.OrchestratorWorking},
+	}
+
+	cmd := m.openProjectOrchestratorOverlay()
+	if cmd == nil {
+		t.Fatal("cached orchestrator overlay did not schedule open and refresh")
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatalf("cached orchestrator command = %T with %d commands, want open plus refresh", msg, len(batch))
+	}
+	if _, ok := batch[0]().(tea.BatchMsg); !ok {
+		t.Fatal("first cached orchestrator command was not the overlay open command")
+	}
+}

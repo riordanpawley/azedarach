@@ -778,6 +778,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.daemonStreamMetrics.RefreshesCoalesced++
 				}
 			}
+			if result.refreshOrchestrator {
+				if _, exists := queuedCmdKeys[daemonStreamCommandOrchestratorRefresh]; !exists {
+					queuedCmdKeys[daemonStreamCommandOrchestratorRefresh] = struct{}{}
+					if cmd := m.loadProjectOrchestratorSnapshotCmd(); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
+				} else {
+					m.daemonStreamMetrics.RefreshesCoalesced++
+				}
+			}
 			if result.rehydrate {
 				m.daemonStreamMetrics.Rehydrates++
 			}
@@ -2256,15 +2266,17 @@ func mergeTaskWorkspaceContext(detailTasks, boardTasks []domain.Task) []domain.T
 }
 
 type daemonStreamEventResult struct {
-	cmd       tea.Cmd
-	key       string
-	stop      bool
-	rehydrate bool
+	cmd                 tea.Cmd
+	key                 string
+	stop                bool
+	rehydrate           bool
+	refreshOrchestrator bool
 }
 
 const (
-	daemonStreamCommandIssuesRefresh = "issues-refresh"
-	daemonStreamCommandNoticeRefresh = "notice-refresh"
+	daemonStreamCommandIssuesRefresh       = "issues-refresh"
+	daemonStreamCommandNoticeRefresh       = "notice-refresh"
+	daemonStreamCommandOrchestratorRefresh = "orchestrator-refresh"
 )
 
 func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectionApply bool) daemonStreamEventResult {
@@ -2293,7 +2305,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
 		}
 		m.daemonRevision = cursor.Advance(evt).Revision
-		return daemonStreamEventResult{cmd: m.loadProjectOrchestratorSnapshotCmd()}
+		return daemonStreamEventResult{refreshOrchestrator: true}
 	}
 	if isNoticeEvent(evt.Event) {
 		switch cursor.Decide(evt) {
@@ -2331,7 +2343,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		if m.applyTaskEvent(evt) {
 			m.daemonRevision = cursor.Advance(evt).Revision
 		}
-		return daemonStreamEventResult{}
+		return daemonStreamEventResult{refreshOrchestrator: true}
 	}
 	if evt.Event == protocol.EventSessionUpdated {
 		switch cursor.Decide(evt) {
@@ -2343,7 +2355,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		}
 		m.applySessionProjectionEvent(evt)
 		m.daemonRevision = cursor.Advance(evt).Revision
-		return daemonStreamEventResult{}
+		return daemonStreamEventResult{refreshOrchestrator: true}
 	}
 	if evt.Event == protocol.EventWorktreeProjectionUpdated || evt.Event == protocol.EventGitStatusUpdated {
 		switch cursor.Decide(evt) {
@@ -2355,7 +2367,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		}
 		if skipProjectionApply {
 			m.daemonRevision = cursor.Advance(evt).Revision
-			return daemonStreamEventResult{}
+			return daemonStreamEventResult{refreshOrchestrator: true}
 		}
 
 		var body protocol.ProjectionUpdateEventBody
@@ -2364,7 +2376,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		}
 		diffRefreshCmd := m.refreshOpenDiffOverlayFromProjectionBody(body)
 		m.daemonRevision = cursor.Advance(evt).Revision
-		return daemonStreamEventResult{cmd: diffRefreshCmd}
+		return daemonStreamEventResult{cmd: diffRefreshCmd, refreshOrchestrator: true}
 	}
 	if evt.Event == protocol.EventUICommandRequested {
 		switch cursor.Decide(evt) {
@@ -2384,12 +2396,37 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 	case daemonEventRefreshSnapshot:
 		cursor := protocol.StreamCursor{Revision: m.daemonRevision}
 		m.daemonRevision = cursor.Advance(evt).Revision
-		return daemonStreamEventResult{key: daemonStreamCommandIssuesRefresh}
+		return daemonStreamEventResult{
+			key:                 daemonStreamCommandIssuesRefresh,
+			refreshOrchestrator: isProjectOrchestratorProjectionEvent(evt.Event),
+		}
 	case daemonEventRehydrate:
 		m.clearDaemonEventStream()
 		return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
 	default:
 		return daemonStreamEventResult{}
+	}
+}
+
+func isProjectOrchestratorProjectionEvent(event string) bool {
+	if isTaskMutationEvent(event) {
+		return true
+	}
+	switch event {
+	case protocol.EventOrchestrationLoopUpdated,
+		protocol.EventSessionUpdated,
+		protocol.EventWorktreeProjectionUpdated,
+		protocol.EventGitStatusUpdated,
+		protocol.EventInteractionResolved,
+		protocol.EventInteractionStale,
+		protocol.EventInteractionReminder,
+		protocol.EventInteractionWithdrawn,
+		protocol.EventInteractionSuperseded,
+		protocol.EventInteractionRecovered,
+		protocol.EventMailAppended:
+		return true
+	default:
+		return false
 	}
 }
 

@@ -102,7 +102,7 @@ func (d *Daemon) handleMailSend(_ context.Context, req protocol.RequestEnvelope)
 			ProjectID:       naming.ProjectID(projectID),
 			Meta:            req.Meta,
 			Revision:        resp.Revision,
-			Event:           "mail.appended",
+			Event:           protocol.EventMailAppended,
 			Kind:            protocol.EnvelopeKindEvent,
 			EmittedAt:       event.CreatedAt,
 			Body:            out,
