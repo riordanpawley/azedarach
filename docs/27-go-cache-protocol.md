@@ -45,14 +45,16 @@ outer capability and cannot upgrade them. Rows predating this contract retain
 
 Exact compatibility is a typed policy over repository identity, revision,
 semantic profile and command, isolation mode, toolchain/environment
-fingerprint, class, scope, and purpose. Equal evidence may be reused;
+fingerprint, class, scope, and purpose. Equal completed evidence may be reused;
 ticket-scoped `review_evidence` is explicitly stronger than a repository
 `push_gate` request with the same execution contract, but the reverse is never
-true. Concurrent compatible requests record `joined` followers of one
-authoritative execution. Completed followers record `reused`; status and audit
-output always names the authoritative request.
+true. Concurrent publication requests execute independently so neither waits
+for the other. Compatible capacity requests may record `joined` followers of
+one authoritative execution. Reused and joined status/audit output always
+names the authoritative request.
 
-`--no-reuse` bypasses completed evidence but may still join identical work.
+`--no-reuse` bypasses completed evidence but capacity requests may still join
+identical active work.
 `--force-rerun` creates a separately admitted execution. `--emergency-skip`
 requires an actor and reason and records a cancelled `skipped` request, so it
 cannot manufacture review or integration readiness. The pre-push compatibility

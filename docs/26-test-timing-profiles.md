@@ -16,12 +16,12 @@ do not enter daemon admission or create publication evidence.
 publication authority for the complete build, cold suite, artifact-contract,
 and boundary sequence. Push and review publication requests start immediately,
 including while development work or timing-capacity work is active. Compatible
-exact-revision publication may join an authoritative execution or reuse its
-completed evidence. Review evidence is stronger than push evidence for the
-same execution contract; push evidence never authorizes review. Integration
-readiness accepts publication proof only when the daemon request, machine
-evidence, worker packet, and clean candidate `HEAD` all name the same source
-revision.
+exact-revision publication may reuse completed authoritative evidence;
+concurrent publication requests execute independently. Review evidence is
+stronger than push evidence for the same execution contract; push evidence
+never authorizes review. Integration readiness accepts publication proof only
+when the daemon request, machine evidence, worker packet, and clean candidate
+`HEAD` all name the same source revision.
 
 Only `just test-ci-timing` enters queued timing-capacity admission. Its
 aggregate request waits for already-running unleased Go processes to quiesce,
