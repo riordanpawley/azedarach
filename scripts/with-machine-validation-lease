@@ -131,7 +131,6 @@ my $production_wait_started = time();
 system('mkdir', '-p', "$production_admission/validations", "$production_admission/pending") == 0
     or die "create validation admission directory\n";
 my $production_wait_reported = 0;
-my $production_epoch_at_start = read_optional_file($production_epoch_file);
 while (1) {
     if (mkdir $validation_pending, 0700) {
         open my $pid_fh, '>', "$validation_pending/pid" or die "write validation admission pid: $!\n";
@@ -165,6 +164,7 @@ while (1) {
     }
     sleep 0.1;
 }
+my $production_epoch_at_start = read_optional_file($production_epoch_file);
 END {
     remove_tree($validation_participant) if defined($validation_participant) && -d $validation_participant;
     remove_tree($validation_pending) if defined($validation_pending) && -d $validation_pending;
