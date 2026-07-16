@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -92,24 +93,67 @@ func TestRealTmuxSessionReadOnlyAttachHookGatesAndRecordsNewClient(t *testing.T)
 	if err := client.SetSessionReadOnlyAttachHooks(ctx, "gate", "9137", recordPath, true); err != nil {
 		t.Fatal(err)
 	}
-	attach := exec.CommandContext(ctx, "script", "-q", "/dev/null", "tmux", "-L", socket, "attach-session", "-t", "gate")
-	stdin, err := attach.StdinPipe()
+	attachOutputPath := filepath.Join(t.TempDir(), "attach.output")
+	attachOutput, err := os.OpenFile(attachOutputPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := attach.Start(); err != nil {
+	attach := exec.CommandContext(ctx, "script", "-q", "/dev/null", "tmux", "-L", socket, "attach-session", "-t", "gate")
+	attach.Stdout = attachOutput
+	attach.Stderr = attachOutput
+	stdin, err := attach.StdinPipe()
+	if err != nil {
+		_ = attachOutput.Close()
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = stdin.Close(); _ = attach.Process.Kill(); _ = attach.Wait() })
+	if err := attach.Start(); err != nil {
+		_ = stdin.Close()
+		_ = attachOutput.Close()
+		t.Fatal(err)
+	}
+	attachDone := make(chan error, 1)
+	go func() { attachDone <- attach.Wait() }()
+	attachExited := false
+	stopAttach := func() (error, string) {
+		var waitErr error
+		_ = stdin.Close()
+		if !attachExited {
+			_ = attach.Process.Kill()
+			select {
+			case waitErr = <-attachDone:
+			case <-time.After(time.Second):
+				waitErr = errors.New("timed out waiting for attach subprocess exit")
+			}
+			attachExited = true
+		}
+		_ = attachOutput.Sync()
+		raw, readErr := os.ReadFile(attachOutputPath)
+		if readErr != nil {
+			return errors.Join(waitErr, readErr), ""
+		}
+		return waitErr, string(raw)
+	}
+	t.Cleanup(func() {
+		_, _ = stopAttach()
+		_ = attachOutput.Close()
+	})
 	deadline := time.Now().Add(3 * time.Second)
 	for {
+		select {
+		case attachErr := <-attachDone:
+			attachExited = true
+			_, output := stopAttach()
+			t.Fatalf("tmux attach subprocess exited before the client was gated: err=%v output=%q", attachErr, output)
+		default:
+		}
 		clients, listErr := client.ListAttachedClients(ctx, "gate")
-		if listErr == nil && len(clients) == 1 && clients[0].ReadOnly {
+		raw, readErr := os.ReadFile(recordPath)
+		if listErr == nil && readErr == nil && len(clients) == 1 && clients[0].ReadOnly && strings.Contains(string(raw), "\t0\n") {
 			break
 		}
 		if time.Now().After(deadline) {
-			raw, _ := os.ReadFile(recordPath)
-			t.Fatalf("new client was not gated: clients=%+v err=%v record=%q", clients, listErr, raw)
+			attachErr, output := stopAttach()
+			t.Fatalf("new client was not synchronously recorded and gated: clients=%+v list_err=%v record=%q record_err=%v attach_err=%v attach_output=%q", clients, listErr, raw, readErr, attachErr, output)
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
