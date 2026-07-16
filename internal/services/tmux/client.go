@@ -39,12 +39,115 @@ type PaneInfo struct {
 	PanePID     int
 }
 
+// AttachedClientInfo captures the mutable input flag for one attached tmux
+// client. ClientName is tmux's stable target for refresh-client while the
+// client remains attached.
+type AttachedClientInfo struct {
+	ClientName  string
+	SessionName string
+	Flags       string
+	ReadOnly    bool
+}
+
 // NewClient creates a new tmux client with dependency injection
 func NewClient(runner CommandRunner, logger *slog.Logger) *Client {
 	return &Client{
 		runner: runner,
 		logger: logger,
 	}
+}
+
+// ListAttachedClients returns clients currently attached to one exact session.
+func (c *Client) ListAttachedClients(ctx context.Context, session string) ([]AttachedClientInfo, error) {
+	out, err := c.runner.Run(ctx, "list-clients", "-F", "#{client_name}\t#{client_session}\t#{client_flags}\t#{client_readonly}")
+	if err != nil {
+		return nil, &domain.TmuxError{Op: "list-clients", Session: session, Err: err}
+	}
+	clients := make([]AttachedClientInfo, 0)
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) != 4 || fields[1] != session || strings.TrimSpace(fields[0]) == "" {
+			continue
+		}
+		clients = append(clients, AttachedClientInfo{ClientName: fields[0], SessionName: fields[1], Flags: fields[2], ReadOnly: fields[3] == "1"})
+	}
+	return clients, nil
+}
+
+// SetClientReadOnly changes only the read-only flag, preserving every other
+// client flag. A leading ! is tmux's attached-client flag removal syntax.
+func (c *Client) SetClientReadOnly(ctx context.Context, clientName string, readOnly bool) error {
+	flag := "read-only"
+	if !readOnly {
+		flag = "!read-only"
+	}
+	if _, err := c.runner.Run(ctx, "refresh-client", "-t", clientName, "-f", flag); err != nil {
+		return &domain.TmuxError{Op: "refresh-client", Session: clientName, Err: err}
+	}
+	return nil
+}
+
+// SetPaneInputEnabled changes tmux's pane-wide input fence. It is used only
+// while transitioning attached clients into or out of read-only mode.
+func (c *Client) SetPaneInputEnabled(ctx context.Context, paneID string, enabled bool) error {
+	flag := "-d"
+	if enabled {
+		flag = "-e"
+	}
+	if _, err := c.runner.Run(ctx, "select-pane", flag, "-t", paneID); err != nil {
+		return &domain.TmuxError{Op: "select-pane", Session: paneID, Err: err}
+	}
+	return nil
+}
+
+// PaneInputEnabled reports the current pane-wide input fence.
+func (c *Client) PaneInputEnabled(ctx context.Context, paneID string) (bool, error) {
+	out, err := c.runner.Run(ctx, "display-message", "-p", "-t", paneID, "#{pane_input_off}")
+	if err != nil {
+		return false, &domain.TmuxError{Op: "display-message", Session: paneID, Err: err}
+	}
+	switch strings.TrimSpace(out) {
+	case "0":
+		return true, nil
+	case "1":
+		return false, nil
+	default:
+		return false, &domain.TmuxError{Op: "display-message", Session: paneID, Err: fmt.Errorf("unexpected pane_input_off value %q", strings.TrimSpace(out))}
+	}
+}
+
+// SetSessionReadOnlyAttachHooks installs or removes session-scoped hooks that
+// make newly attached or switched-in clients read-only before tmux accepts
+// their input. The hook synchronously records the client's prior read-only
+// flag so restoration does not overwrite an independently read-only attach.
+func (c *Client) SetSessionReadOnlyAttachHooks(ctx context.Context, session, hookID, recordPath string, enabled bool) error {
+	for _, hook := range []string{"client-attached", "client-session-changed"} {
+		name := hook + "[" + hookID + "]"
+		args := []string{"set-hook", "-t", session}
+		if !enabled {
+			args = append(args, "-u", name)
+		} else {
+			record := "umask 077; __az_client=#{q:hook_client}; printf '%s\\t%s\\n' \"$__az_client\" #{client_readonly} >> " + shellSingleQuote(recordPath) + "; tmux refresh-client -t \"$__az_client\" -f read-only"
+			command := "run-shell " + tmuxDoubleQuote(record)
+			args = append(args, name, command)
+		}
+		if _, err := c.runner.Run(ctx, args...); err != nil {
+			return &domain.TmuxError{Op: "set-hook", Session: session, Err: err}
+		}
+	}
+	return nil
+}
+
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+func tmuxDoubleQuote(value string) string {
+	replacer := strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "$", "\\$")
+	return "\"" + replacer.Replace(value) + "\""
 }
 
 // NewSession creates a new tmux session with the given name and working directory

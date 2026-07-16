@@ -146,7 +146,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "0048_decision_propagation_outbox", Path: "migrations/0048_decision_propagation_outbox.sql", Checksum: "a12c44ba35156d71fbcd88a9d78e4cdb234e75e7e4aef5f896c8b1182ada858d"},
 	{ID: "0049_managed_agent_incarnations", Path: "migrations/0049_managed_agent_incarnations.sql", Checksum: "8364ceb9fad589df3f73c1fe0f0462c22b127510f1745e62fcc11e24757fe08d"},
 	{ID: "0050_issue_observation_event_search", Path: "migrations/0050_issue_observation_event_search.sql", Checksum: "e5a8efc20ddf313822576c4d6d42cd94e1837dfac810834957689d30b952005d"},
-	{ID: agentInputDeliveryMigrationID, Path: "migrations/0051_agent_input_delivery.sql", Checksum: "8836af7f8a96e82aa4f72eaee14a5c48ea9a1c161cfc56376089293df6ae3dfa"},
+	{ID: agentInputDeliveryMigrationID, Path: "migrations/0051_agent_input_delivery.sql", Checksum: "292df8ca2e7a4af9e06ceb7ae5efb19de6e959dbf0ba57aba470e09acc886732"},
 }
 
 func validateMigrationRegistry() error {
@@ -1008,7 +1008,12 @@ func validateAgentInputDeliverySchema(ctx context.Context, db sqlIssueQueryer) e
 		return fmt.Errorf("inspect agent input delivery table: %w", err)
 	}
 	normalized := strings.NewReplacer(" ", "", "\n", "", "\t", "", "\r", "").Replace(strings.ToLower(tableSQL))
-	for _, fragment := range []string{"primarykey(project_id,intent_key)", "statein('queued','leased','delivered','expired','stale')", "acknowledgement_tokenisnotnull", "lease_tokenisnotnull"} {
+	for _, fragment := range []string{
+		"primarykey(project_id,intent_key)",
+		"statein('queued','leased','ambiguous','delivered','expired','stale')",
+		"check((state='delivered')=(acknowledgement_tokenisnotnullandacknowledged_atisnotnull))",
+		"check((statein('leased','ambiguous'))=(lease_ownerisnotnullandlease_tokenisnotnullandlease_expires_atisnotnull))",
+	} {
 		if !strings.Contains(normalized, fragment) {
 			return fmt.Errorf("agent input delivery schema drifted: missing constraint %s", fragment)
 		}

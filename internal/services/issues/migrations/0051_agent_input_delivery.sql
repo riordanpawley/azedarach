@@ -27,7 +27,7 @@ CREATE TABLE agent_input_delivery_intents (
   tool TEXT NOT NULL CHECK (trim(tool) <> ''),
   message_kind TEXT NOT NULL CHECK (trim(message_kind) <> ''),
   payload TEXT NOT NULL CHECK (length(payload) > 0),
-  state TEXT NOT NULL CHECK (state IN ('queued','leased','delivered','expired','stale')),
+  state TEXT NOT NULL CHECK (state IN ('queued','leased','ambiguous','delivered','expired','stale')),
   expires_at TEXT,
   lease_owner TEXT,
   lease_token TEXT,
@@ -39,7 +39,7 @@ CREATE TABLE agent_input_delivery_intents (
   updated_at TEXT NOT NULL,
   PRIMARY KEY (project_id, intent_key),
   CHECK ((state = 'delivered') = (acknowledgement_token IS NOT NULL AND acknowledged_at IS NOT NULL)),
-  CHECK ((state = 'leased') = (lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL))
+  CHECK ((state IN ('leased','ambiguous')) = (lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL))
 );
 
 CREATE INDEX idx_agent_input_delivery_pending

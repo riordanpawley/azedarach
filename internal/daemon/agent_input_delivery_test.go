@@ -26,11 +26,27 @@ type recordingAuthoritativeReceiver struct {
 
 type refusingAuthoritativeReceiver struct{ outcome string }
 
+type rejectedSubmissionReceiver struct{ calls int }
+
 func (r refusingAuthoritativeReceiver) DeliverAgentInput(context.Context, authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
-	return authoritativeAgentInputAcknowledgement{}, nativeAgentInputRefusalError{outcome: r.outcome}
+	return authoritativeAgentInputAcknowledgement{}, agentInputRefusalError{outcome: r.outcome}
+}
+
+func (r *rejectedSubmissionReceiver) DeliverAgentInput(ctx context.Context, request authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
+	r.calls++
+	if err := request.BeginSubmission(ctx); err != nil {
+		return authoritativeAgentInputAcknowledgement{}, err
+	}
+	return authoritativeAgentInputAcknowledgement{}, agentInputRefusalError{outcome: "not_ready", safeToRetry: true}
 }
 
 func (r *recordingAuthoritativeReceiver) DeliverAgentInput(_ context.Context, request authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
+	if request.BeginSubmission == nil {
+		return authoritativeAgentInputAcknowledgement{}, errors.New("missing submission boundary")
+	}
+	if err := request.BeginSubmission(context.Background()); err != nil {
+		return authoritativeAgentInputAcknowledgement{}, err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++
@@ -165,7 +181,7 @@ func TestAgentInputDeliveryConcurrentDaemonsClaimOnce(t *testing.T) {
 	}
 }
 
-func TestAgentInputDeliveryRetryAfterAcceptanceIsReceiverIdempotent(t *testing.T) {
+func TestAgentInputDeliveryDoesNotRetryAfterAmbiguousAcceptance(t *testing.T) {
 	runtimeStore, client, request := agentInputFixture(t)
 	receiver := &recordingAuthoritativeReceiver{accepted: map[string]string{}, failAfterAccept: true}
 	one := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, receiver, "one")
@@ -173,11 +189,26 @@ func TestAgentInputDeliveryRetryAfterAcceptanceIsReceiverIdempotent(t *testing.T
 		t.Fatalf("first result=%+v err=%v", result, err)
 	}
 	two := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, receiver, "two")
-	if result, err := two.Deliver(context.Background(), request); err != nil || result.Outcome != domain.AgentInputDelivered {
+	if result, err := two.Deliver(context.Background(), request); err != nil || result.Outcome != domain.AgentInputWaitingNotReady {
 		t.Fatalf("retry result=%+v err=%v", result, err)
 	}
-	if len(receiver.accepted) != 1 {
-		t.Fatalf("receiver accepted distinct deliveries=%d want 1", len(receiver.accepted))
+	if receiver.calls != 1 || len(receiver.accepted) != 1 {
+		t.Fatalf("receiver calls=%d accepted=%d, want one non-retried submission", receiver.calls, len(receiver.accepted))
+	}
+}
+
+func TestAgentInputDeliveryRetriesOnlyAfterAuthoritativeSubmissionRejection(t *testing.T) {
+	runtimeStore, client, request := agentInputFixture(t)
+	receiver := &rejectedSubmissionReceiver{}
+	service := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, receiver, "one")
+	for i := 0; i < 2; i++ {
+		result, err := service.Deliver(context.Background(), request)
+		if err != nil || result.Outcome != domain.AgentInputWaitingNotReady {
+			t.Fatalf("delivery %d result=%+v err=%v", i, result, err)
+		}
+	}
+	if receiver.calls != 2 {
+		t.Fatalf("receiver calls=%d, want authoritative rejection to remain retryable", receiver.calls)
 	}
 }
 

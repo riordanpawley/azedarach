@@ -98,6 +98,9 @@ func TestAgentInputDeliveryLeaseExpiryAndExactAcknowledgementFence(t *testing.T)
 	if err != nil || !claimed || second.LeaseToken == first.LeaseToken {
 		t.Fatalf("takeover=%+v claimed=%v err=%v", second, claimed, err)
 	}
+	if begun, err := client.BeginAgentInputDeliverySubmission(ctx, "p", "lease", second.LeaseToken, now.Add(2*time.Second)); err != nil || !begun {
+		t.Fatalf("begin submission begun=%v err=%v", begun, err)
+	}
 	if ok, err := client.AcknowledgeAgentInputDeliveryIntent(ctx, "p", "lease", "wrong-incarnation", second.LeaseToken, "ack", now.Add(2*time.Second)); err != nil || ok {
 		t.Fatalf("wrong incarnation ok=%v err=%v", ok, err)
 	}
@@ -198,6 +201,139 @@ func TestAgentInputDeliveryMigrationRejectsIndexDefinitionDrift(t *testing.T) {
 				t.Fatalf("err=%v", err)
 			}
 		})
+	}
+}
+
+func TestAgentInputDeliveryMigrationRejectsWeakenedStateConstraints(t *testing.T) {
+	tests := []struct {
+		name        string
+		canonical   string
+		replacement string
+	}{
+		{
+			name:        "delivered acknowledgement equation",
+			canonical:   `CHECK ((state = 'delivered') = (acknowledgement_token IS NOT NULL AND acknowledged_at IS NOT NULL))`,
+			replacement: `CHECK (state != 'delivered' OR acknowledgement_token IS NOT NULL)`,
+		},
+		{
+			name:        "leased ownership equation",
+			canonical:   `CHECK ((state IN ('leased','ambiguous')) = (lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL))`,
+			replacement: `CHECK (state != 'leased' OR lease_token IS NOT NULL)`,
+		},
+	}
+	artifact, err := migrationFiles.ReadFile("migrations/0051_agent_input_delivery.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "issues.db")
+			client := NewClientAtPath(path, nil)
+			if _, err := client.Create(context.Background(), CreateTaskParams{Title: "seed", Type: domain.TypeTask}); err != nil {
+				t.Fatal(err)
+			}
+			if err := client.CloseDB(); err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, statement := range []string{
+				`DROP INDEX idx_agent_input_delivery_pending`,
+				`DROP INDEX idx_agent_input_delivery_incarnation`,
+				`ALTER TABLE agent_input_delivery_intents RENAME TO agent_input_delivery_intents_old`,
+			} {
+				if _, err := db.Exec(statement); err != nil {
+					t.Fatal(err)
+				}
+			}
+			weakened := strings.Replace(string(artifact), tt.canonical, tt.replacement, 1)
+			if weakened == string(artifact) {
+				t.Fatal("canonical constraint not found in artifact")
+			}
+			if _, err := db.Exec(weakened); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`DROP TABLE agent_input_delivery_intents_old`); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened := NewClientAtPath(path, nil)
+			defer reopened.CloseDB()
+			if _, err := reopened.List(context.Background()); err == nil || !strings.Contains(err.Error(), "missing constraint") {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestAgentInputDeliveryAmbiguousSubmissionDoesNotAutomaticallyRetry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.db")
+	client := NewClientAtPath(path, nil)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	request := domain.AgentInputDeliveryRequest{ProjectID: "p", SessionID: "s", Target: domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 42, AgentIncarnation: "inc"}, Tool: "codex", Kind: domain.AgentInputMessageSessionMessage, Payload: "body", IntentKey: "ambiguous", ExpiresAt: now.Add(time.Hour)}
+	if _, err := client.EnsureAgentInputDeliveryIntent(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	claimed, ok, err := client.ClaimAgentInputDeliveryIntent(ctx, "p", "ambiguous", "daemon-a", now, time.Second)
+	if err != nil || !ok {
+		t.Fatalf("claim=%+v ok=%v err=%v", claimed, ok, err)
+	}
+	if begun, err := client.BeginAgentInputDeliverySubmission(ctx, "p", "ambiguous", claimed.LeaseToken, now); err != nil || !begun {
+		t.Fatalf("begin=%v err=%v", begun, err)
+	}
+	if err := client.CloseDB(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := NewClientAtPath(path, nil)
+	defer reopened.CloseDB()
+	pending, err := reopened.ListPendingAgentInputDeliveryIntents(ctx, "p", now.Add(2*time.Second), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("ambiguous intent was automatically retryable: %+v", pending)
+	}
+	if err := reopened.ReleaseAgentInputDeliveryIntent(ctx, "p", "ambiguous", claimed.LeaseToken, false, now.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	intent, err := reopened.EnsureAgentInputDeliveryIntent(ctx, request)
+	if err != nil || intent.State != "ambiguous" {
+		t.Fatalf("intent=%+v err=%v", intent, err)
+	}
+	if err := reopened.ResolveAgentInputDeliverySubmissionRefusal(ctx, "p", "ambiguous", claimed.LeaseToken, false, now.Add(4*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	intent, err = reopened.EnsureAgentInputDeliveryIntent(ctx, request)
+	if err != nil || intent.State != "queued" {
+		t.Fatalf("rejected intent=%+v err=%v", intent, err)
+	}
+}
+
+func TestAgentInputDeliveryAmbiguousSubmissionStillExpires(t *testing.T) {
+	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	defer client.CloseDB()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	request := domain.AgentInputDeliveryRequest{ProjectID: "p", SessionID: "s", Target: domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 42, AgentIncarnation: "inc"}, Tool: "codex", Kind: domain.AgentInputMessageSessionMessage, Payload: "body", IntentKey: "ambiguous-expiry", ExpiresAt: now.Add(100 * time.Millisecond)}
+	if _, err := client.EnsureAgentInputDeliveryIntent(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	claimed, ok, err := client.ClaimAgentInputDeliveryIntent(ctx, "p", request.IntentKey, "daemon-a", now, time.Second)
+	if err != nil || !ok {
+		t.Fatalf("claim=%+v ok=%v err=%v", claimed, ok, err)
+	}
+	if begun, err := client.BeginAgentInputDeliverySubmission(ctx, "p", request.IntentKey, claimed.LeaseToken, now); err != nil || !begun {
+		t.Fatalf("begin=%v err=%v", begun, err)
+	}
+	time.Sleep(120 * time.Millisecond)
+	intent, err := client.EnsureAgentInputDeliveryIntent(ctx, request)
+	if err != nil || intent.State != "expired" {
+		t.Fatalf("intent=%+v err=%v", intent, err)
 	}
 }
 

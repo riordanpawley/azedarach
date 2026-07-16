@@ -13,17 +13,17 @@ import (
 )
 
 // authoritativeAgentInputReceiver is deliberately stronger than a terminal
-// transport. Implementations must atomically prove the exact incarnation and
-// an empty tool-owned composer, exclude human input through submission, and
-// idempotently return an acknowledgement for the same intent after retries.
-// tmux send-keys/paste-buffer cannot implement this contract.
+// transport. Implementations must prove the exact incarnation, exclude managed
+// human submission through app-server acceptance, and return an exact
+// acknowledgement. tmux send-keys/paste-buffer cannot implement this contract.
 type authoritativeAgentInputReceiver interface {
 	DeliverAgentInput(context.Context, authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error)
 }
 
 type authoritativeAgentInputRequest struct {
-	Delivery   domain.AgentInputDeliveryRequest
-	LeaseToken string
+	Delivery        domain.AgentInputDeliveryRequest
+	LeaseToken      string
+	BeginSubmission func(context.Context) error
 }
 
 type authoritativeAgentInputAcknowledgement struct {
@@ -35,6 +35,15 @@ type authoritativeAgentInputAcknowledgement struct {
 }
 
 var errAuthoritativeAgentInputUnavailable = errors.New("authoritative agent input receiver unavailable")
+
+type agentInputRefusalError struct {
+	outcome     string
+	safeToRetry bool
+}
+
+func (e agentInputRefusalError) Error() string {
+	return "authoritative agent input refused: " + e.outcome
+}
 
 type unavailableAgentInputReceiver struct{}
 
@@ -81,6 +90,9 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 	if intent.State == "stale" {
 		return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputRejectedStaleTarget, Reason: "managed agent incarnation changed"}, nil
 	}
+	if intent.State == "ambiguous" {
+		return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputWaitingNotReady, Reason: "app-server submission acceptance is ambiguous; automatic retry is disabled"}, nil
+	}
 
 	claimed, acquired, err := client.ClaimAgentInputDeliveryIntent(ctx, request.ProjectID, request.IntentKey, s.owner, s.now(), 30*time.Second)
 	if err != nil {
@@ -103,39 +115,58 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 		release(result.Outcome == domain.AgentInputRejectedStaleTarget)
 		return result, err
 	}
-	currentAgain, result, err := s.observeIdentity(ctx, request)
-	if err != nil || result.Outcome != "" || !current.SameIncarnation(currentAgain) {
-		release(true)
-		if result.Outcome == "" {
-			result = domain.AgentInputDeliveryResult{Outcome: domain.AgentInputRejectedStaleTarget, Reason: "managed agent incarnation changed before delivery"}
+	submissionBegun := false
+	beginSubmission := func(beginCtx context.Context) error {
+		currentAgain, result, err := s.observeIdentity(beginCtx, request)
+		if err != nil {
+			return err
 		}
-		return result, err
+		if result.Outcome != "" || !current.SameIncarnation(currentAgain) {
+			return agentInputRefusalError{outcome: "stale_incarnation"}
+		}
+		begun, err := client.BeginAgentInputDeliverySubmission(beginCtx, request.ProjectID, request.IntentKey, claimed.LeaseToken, s.now())
+		if err != nil {
+			return fmt.Errorf("persist app-server submission boundary: %w", err)
+		}
+		if !begun {
+			return errors.New("delivery lease changed before app-server submission")
+		}
+		submissionBegun = true
+		return nil
 	}
-
-	ack, err := s.receiver.DeliverAgentInput(ctx, authoritativeAgentInputRequest{Delivery: request, LeaseToken: claimed.LeaseToken})
+	ack, err := s.receiver.DeliverAgentInput(ctx, authoritativeAgentInputRequest{Delivery: request, LeaseToken: claimed.LeaseToken, BeginSubmission: beginSubmission})
 	if err != nil {
-		var refusal nativeAgentInputRefusalError
+		var refusal agentInputRefusalError
 		if errors.As(err, &refusal) {
-			release(refusal.outcome == "stale_incarnation")
+			if refusal.safeToRetry && submissionBegun {
+				_ = client.ResolveAgentInputDeliverySubmissionRefusal(context.WithoutCancel(ctx), request.ProjectID, request.IntentKey, claimed.LeaseToken, refusal.outcome == "stale_incarnation", s.now())
+			} else if !submissionBegun {
+				release(refusal.outcome == "stale_incarnation")
+			}
 			switch refusal.outcome {
 			case "composer_nonempty":
-				return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputWaitingInputNonempty, Reason: "native client composer is not empty; intent remains queued"}, nil
+				return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputWaitingInputNonempty, Reason: "managed input gate reports local input is not empty; intent remains queued"}, nil
 			case "human_attached":
-				return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputWaitingHumanAttached, Reason: "native client could not exclude attached human input; intent remains queued"}, nil
+				return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputWaitingHumanAttached, Reason: "managed tmux gate could not exclude attached human input; intent remains queued"}, nil
 			case "stale_incarnation":
-				return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputRejectedStaleTarget, Reason: "native client rejected stale incarnation"}, nil
+				return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputRejectedStaleTarget, Reason: "app-server gate rejected stale incarnation"}, nil
 			default:
-				return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputWaitingNotReady, Reason: "native client not ready; intent remains queued"}, nil
+				return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputWaitingNotReady, Reason: "app-server turn is not ready; intent remains queued"}, nil
 			}
 		}
-		release(false)
+		if !submissionBegun {
+			release(false)
+		}
 		if errors.Is(err, errAuthoritativeAgentInputUnavailable) {
-			return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputWaitingNotReady, Reason: "authoritative composer and exclusion proof unavailable; intent remains queued"}, nil
+			return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputWaitingNotReady, Reason: "authoritative app-server and managed-input exclusion proof unavailable; intent remains queued"}, nil
 		}
 		return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputFailed, Reason: "authoritative receiver failed"}, err
 	}
-	if ack.ProjectID != request.ProjectID || ack.IntentKey != request.IntentKey || ack.AgentIncarnation != request.Target.AgentIncarnation || ack.LeaseToken != claimed.LeaseToken || strings.TrimSpace(ack.AcknowledgementToken) == "" {
+	if !submissionBegun {
 		release(false)
+		return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputFailed, Reason: "receiver skipped durable app-server submission boundary"}, nil
+	}
+	if ack.ProjectID != request.ProjectID || ack.IntentKey != request.IntentKey || ack.AgentIncarnation != request.Target.AgentIncarnation || ack.LeaseToken != claimed.LeaseToken || strings.TrimSpace(ack.AcknowledgementToken) == "" {
 		return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputFailed, Reason: "receiver acknowledgement did not match exact intent and incarnation"}, nil
 	}
 	acknowledged, err := client.AcknowledgeAgentInputDeliveryIntent(ctx, request.ProjectID, request.IntentKey, request.Target.AgentIncarnation, claimed.LeaseToken, ack.AcknowledgementToken, s.now())

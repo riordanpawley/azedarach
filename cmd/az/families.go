@@ -163,22 +163,6 @@ func runAICommand(cfg *config.Config, args []string) error {
 	}
 
 	switch args[0] {
-	case "native-codex-client":
-		fs := flag.NewFlagSet("ai native-codex-client", flag.ContinueOnError)
-		fs.SetOutput(io.Discard)
-		var opts cli.NativeCodexClientOptions
-		fs.StringVar(&opts.Prompt, "prompt", "", "initial prompt")
-		fs.BoolVar(&opts.Resume, "resume", false, "resume latest worktree thread")
-		fs.BoolVar(&opts.Yolo, "yolo", false, "disable approvals and sandbox")
-		fs.StringVar(&opts.RecoverIntent, "recover-intent", "", "resolve an ambiguous intent without resubmission")
-		fs.StringVar(&opts.RecoverAction, "recover-action", "", "recovery action: delivered or discard")
-		fs.StringVar(&opts.RecoverThread, "recover-thread", "", "exact persisted Codex thread for recovery")
-		if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 {
-			return fmt.Errorf("usage: az ai native-codex-client [--prompt text] [--resume] [--yolo] [--recover-intent key --recover-thread id --recover-action delivered|discard]")
-		}
-		return runCommand(cfg, func(deps *cli.Dependencies) error {
-			return cli.NativeCodexClient(context.Background(), deps, opts)
-		})
 	case "account":
 		if len(args) < 2 || isHelpArg(args[1]) {
 			cli.PrintAIAccountUsage()

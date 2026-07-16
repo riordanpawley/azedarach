@@ -35,7 +35,7 @@ func (c *Client) ListPendingAgentInputDeliveryIntents(ctx context.Context, proje
 	}
 	if err := c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
-			_, err := db.ExecContext(lockCtx, `UPDATE agent_input_delivery_intents SET state='expired',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=? WHERE project_id=? AND state IN ('queued','leased') AND expires_at IS NOT NULL AND expires_at<=?`, formatTimestamp(now), projectID, formatTimestamp(now))
+			_, err := db.ExecContext(lockCtx, `UPDATE agent_input_delivery_intents SET state='expired',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=? WHERE project_id=? AND state IN ('queued','leased','ambiguous') AND expires_at IS NOT NULL AND expires_at<=?`, formatTimestamp(now), projectID, formatTimestamp(now))
 			return err
 		})
 	}); err != nil {
@@ -95,6 +95,16 @@ func (c *Client) EnsureAgentInputDeliveryIntent(ctx context.Context, request dom
 			if !sameAgentInputRequest(intent.Request, request) {
 				return ErrAgentInputIntentConflict
 			}
+			if (intent.State == "queued" || intent.State == "leased" || intent.State == "ambiguous") &&
+				!intent.Request.ExpiresAt.IsZero() && !now.Before(intent.Request.ExpiresAt) {
+				if _, err := db.ExecContext(lockCtx, `UPDATE agent_input_delivery_intents SET state='expired',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=? WHERE project_id=? AND intent_key=? AND state IN ('queued','leased','ambiguous')`, formatTimestamp(now), request.ProjectID, request.IntentKey); err != nil {
+					return err
+				}
+				intent.State = "expired"
+				intent.LeaseOwner = ""
+				intent.LeaseToken = ""
+				intent.LeaseExpires = time.Time{}
+			}
 			return nil
 		})
 	})
@@ -130,6 +140,9 @@ func (c *Client) ClaimAgentInputDeliveryIntent(ctx context.Context, projectID, i
 				}
 				return tx.Commit()
 			}
+			if intent.State == "ambiguous" {
+				return tx.Commit()
+			}
 			if intent.State == "leased" && now.Before(intent.LeaseExpires) {
 				return tx.Commit()
 			}
@@ -160,6 +173,29 @@ func (c *Client) ClaimAgentInputDeliveryIntent(ctx context.Context, projectID, i
 	return intent, claimed, err
 }
 
+// BeginAgentInputDeliverySubmission durably crosses the no-automatic-retry
+// boundary immediately before app-server turn/start. A daemon crash after this
+// transition leaves the intent ambiguous instead of risking a duplicate turn.
+func (c *Client) BeginAgentInputDeliverySubmission(ctx context.Context, projectID, intentKey, leaseToken string, now time.Time) (bool, error) {
+	var begun bool
+	err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			result, err := db.ExecContext(lockCtx, `UPDATE agent_input_delivery_intents SET state='ambiguous',updated_at=? WHERE project_id=? AND intent_key=? AND state='leased' AND lease_token=?`, formatTimestamp(now), projectID, intentKey, leaseToken)
+			if err != nil {
+				return err
+			}
+			n, err := result.RowsAffected()
+			begun = n == 1
+			return err
+		})
+	})
+	return begun, err
+}
+
 func (c *Client) AcknowledgeAgentInputDeliveryIntent(ctx context.Context, projectID, intentKey, incarnation, leaseToken, acknowledgement string, now time.Time) (bool, error) {
 	if strings.TrimSpace(acknowledgement) == "" {
 		return false, errors.New("empty agent input acknowledgement")
@@ -171,7 +207,7 @@ func (c *Client) AcknowledgeAgentInputDeliveryIntent(ctx context.Context, projec
 			if err != nil {
 				return err
 			}
-			result, err := db.ExecContext(lockCtx, `UPDATE agent_input_delivery_intents SET state='delivered',acknowledgement_token=?,acknowledged_at=?,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=? WHERE project_id=? AND intent_key=? AND agent_incarnation=? AND state='leased' AND lease_token=?`, acknowledgement, formatTimestamp(now), formatTimestamp(now), projectID, intentKey, incarnation, leaseToken)
+			result, err := db.ExecContext(lockCtx, `UPDATE agent_input_delivery_intents SET state='delivered',acknowledgement_token=?,acknowledged_at=?,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=? WHERE project_id=? AND intent_key=? AND agent_incarnation=? AND state='ambiguous' AND lease_token=?`, acknowledgement, formatTimestamp(now), formatTimestamp(now), projectID, intentKey, incarnation, leaseToken)
 			if err != nil {
 				return err
 			}
@@ -195,6 +231,27 @@ func (c *Client) ReleaseAgentInputDeliveryIntent(ctx context.Context, projectID,
 				return err
 			}
 			_, err = db.ExecContext(lockCtx, `UPDATE agent_input_delivery_intents SET state=?,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=? WHERE project_id=? AND intent_key=? AND state='leased' AND lease_token=?`, state, formatTimestamp(now), projectID, intentKey, leaseToken)
+			return err
+		})
+	})
+}
+
+// ResolveAgentInputDeliverySubmissionRefusal leaves an ambiguous intent
+// retryable (or stale) only after the caller proved that turn/start was not
+// attempted or app-server authoritatively rejected it. Transport failures and
+// daemon crashes must never call this path.
+func (c *Client) ResolveAgentInputDeliverySubmissionRefusal(ctx context.Context, projectID, intentKey, leaseToken string, stale bool, now time.Time) error {
+	state := "queued"
+	if stale {
+		state = "stale"
+	}
+	return c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			_, err = db.ExecContext(lockCtx, `UPDATE agent_input_delivery_intents SET state=?,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=? WHERE project_id=? AND intent_key=? AND state='ambiguous' AND lease_token=?`, state, formatTimestamp(now), projectID, intentKey, leaseToken)
 			return err
 		})
 	})
