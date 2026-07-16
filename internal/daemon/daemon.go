@@ -106,6 +106,7 @@ type Daemon struct {
 
 	issues                               *issues.Client
 	userStore                            *userstore.Store
+	selectorSnapshots                    selectorSnapshotCache
 	userStoreRefreshMu                   sync.Mutex
 	userStoreProjectLockHook             func(string, bool)
 	userStoreProjectRefreshLocks         sync.Map
