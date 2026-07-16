@@ -399,6 +399,38 @@ func (w *TaskWorkspaceOverlay) SyncDecisionLinks(links []DecisionLinkSummary) {
 	w.detail.decisionLinks = append([]DecisionLinkSummary(nil), links...)
 }
 
+// BeginRefresh marks independently converging workspace projections without
+// hiding the last usable snapshot.
+func (w *TaskWorkspaceOverlay) BeginRefresh(includeRuntimeAndDecisions bool) {
+	w.detail.detailRefresh = "refreshing"
+	if includeRuntimeAndDecisions {
+		w.detail.runtimeRefresh = "refreshing"
+		w.detail.decisionRefresh = "refreshing"
+	}
+}
+
+// SyncDetailRefresh records the full-detail projection outcome.
+func (w *TaskWorkspaceOverlay) SyncDetailRefresh(err error) {
+	w.detail.detailRefresh = taskWorkspaceRefreshState(err)
+}
+
+// SyncRuntimeRefresh records the runtime projection outcome.
+func (w *TaskWorkspaceOverlay) SyncRuntimeRefresh(err error) {
+	w.detail.runtimeRefresh = taskWorkspaceRefreshState(err)
+}
+
+// SyncDecisionRefresh records the decision-link projection outcome.
+func (w *TaskWorkspaceOverlay) SyncDecisionRefresh(err error) {
+	w.detail.decisionRefresh = taskWorkspaceRefreshState(err)
+}
+
+func taskWorkspaceRefreshState(err error) string {
+	if err == nil {
+		return "fresh"
+	}
+	return "degraded: " + err.Error()
+}
+
 // SyncTask updates workspace detail/actions from refreshed task projection data.
 func (w *TaskWorkspaceOverlay) SyncTask(task domain.Task, relatedTasks []domain.Task, mutation *TaskMutationProgress) {
 	w.syncTask(task, relatedTasks, mutation, true)

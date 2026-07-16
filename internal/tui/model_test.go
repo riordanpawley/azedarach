@@ -2212,6 +2212,70 @@ func TestTaskWorkspacePreservesFullGraphContextAcrossSummaryRefresh(t *testing.T
 	}
 }
 
+func TestTaskWorkspaceIgnoresStaleFullDetailRefreshGeneration(t *testing.T) {
+	m := newTestModel()
+	task := domain.Task{
+		ID:          "az-1",
+		Title:       "Current detail",
+		Description: "Current description",
+		Status:      domain.StatusInProgress,
+		Priority:    domain.P2,
+		Type:        domain.TypeTask,
+	}
+	m.tasks = []domain.Task{task}
+	m.taskWorkspaceRefreshSeq = 2
+	workspace := overlay.NewTaskWorkspaceOverlay(task, m.tasks, nil, 120, 30)
+	workspace.SyncDecisionLinks([]overlay.DecisionLinkSummary{{DecisionID: "current", DecisionTitle: "Current decision", Relation: "implements"}})
+	m.overlayStack.Push(workspace)
+
+	stale := task
+	stale.Title = "Stale detail"
+	stale.Description = "Stale description"
+	result, _ := m.Update(refreshTaskWorkspaceResultMsg{
+		projectID:  m.daemonProjectID(),
+		refreshSeq: 1,
+		revision:   3,
+		taskID:     task.ID.String(),
+		hasTask:    true,
+		task:       stale,
+		tasks:      []domain.Task{stale},
+	})
+	updated := result.(Model)
+
+	workspace = updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	view := workspace.View()
+	if !strings.Contains(view, "Current detail") || !strings.Contains(view, "Current description") {
+		t.Fatalf("stale refresh generation overwrote current workspace:\n%s", view)
+	}
+	if strings.Contains(view, "Stale detail") || strings.Contains(view, "Stale description") {
+		t.Fatalf("stale refresh generation remained visible:\n%s", view)
+	}
+
+	result, _ = updated.Update(refreshTaskWorkspaceDecisionResultMsg{
+		projectID:     m.daemonProjectID(),
+		refreshSeq:    1,
+		taskID:        task.ID.String(),
+		decisionLinks: []overlay.DecisionLinkSummary{{DecisionID: "stale", DecisionTitle: "Stale decision", Relation: "implements"}},
+	})
+	updated = result.(Model)
+	view = updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay).View()
+	if !strings.Contains(view, "Current decision") || strings.Contains(view, "Stale decision") {
+		t.Fatalf("stale decision generation overwrote current links:\n%s", view)
+	}
+
+	toastCount := len(updated.toasts)
+	result, _ = updated.Update(refreshTaskWorkspaceReconcileResultMsg{
+		projectID:  m.daemonProjectID(),
+		refreshSeq: 1,
+		taskID:     task.ID.String(),
+		err:        errors.New("stale runtime failure"),
+	})
+	updated = result.(Model)
+	if len(updated.toasts) != toastCount {
+		t.Fatalf("stale runtime generation produced user feedback: %+v", updated.toasts)
+	}
+}
+
 func TestTaskWorkspaceFullRefreshAllowsClearedDetails(t *testing.T) {
 	m := newTestModel()
 	task := domain.Task{

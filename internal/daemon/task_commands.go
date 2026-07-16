@@ -680,14 +680,6 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 		if !found {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue not found: %s", taskID)), nil
 		}
-		if err := d.refreshFiniteWorktreeGitFacts(ctx, projectID, taskIDsFromTasks(tasks)); err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("refresh issue worktree git facts: %v", err)), nil
-		}
-		materialized, source, err = d.projectReadSnapshot(projectID)
-		if err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
-		}
-		tasks = materializedTaskContext(materialized, []string{taskID}, true, false, true, false, archiveMode)
 		lastCheckedAt := materializedLastCheckedAt(tasks)
 		payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), lastCheckedAt, protocol.TaskListFreshnessFresh, tasks, false)
 		payload.Source = source
@@ -732,9 +724,6 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task get requested", "project_id", projectID, "task_id", taskID)
 	}
-	refreshIssueStartedAt := time.Now()
-	d.refreshIssueWorktreeState(ctx, projectID, taskID)
-	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.issue_worktree_refresh", refreshIssueStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID)
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
