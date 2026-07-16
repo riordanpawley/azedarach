@@ -140,10 +140,19 @@ type BoardViewColumnSnapshot struct {
 // BoardViewProjection is the surface-neutral result of applying a view.
 // Renderers choose geometry and interaction; placement and ordering live here.
 type BoardViewProjection struct {
-	View         BoardView                 `json:"view"`
-	Groups       []BoardViewProjectedGroup `json:"groups"`
-	Items        []BoardViewProjectedItem  `json:"items"`
-	KnownTaskIDs []naming.IssueID          `json:"known_task_ids,omitempty"`
+	View          BoardView                 `json:"view"`
+	Groups        []BoardViewProjectedGroup `json:"groups"`
+	Items         []BoardViewProjectedItem  `json:"items"`
+	KnownTaskIDs  []naming.IssueID          `json:"known_task_ids,omitempty"`
+	ChildProgress []BoardChildProgress      `json:"child_progress,omitempty"`
+}
+
+// BoardChildProgress is the authoritative direct-child completion aggregate
+// computed before a board view omits or places tasks.
+type BoardChildProgress struct {
+	ParentID naming.IssueID `json:"parent_id"`
+	Done     int            `json:"done"`
+	Total    int            `json:"total"`
 }
 
 type BoardViewProjectedGroup struct {
@@ -533,7 +542,40 @@ func ProjectTasksByBoardView(view BoardView, tasks []Task) (BoardViewProjection,
 	for _, task := range tasks {
 		knownTaskIDs = append(knownTaskIDs, task.ID)
 	}
-	return BoardViewProjection{View: view, Groups: groups, Items: items, KnownTaskIDs: knownTaskIDs}, nil
+	return BoardViewProjection{
+		View:          view,
+		Groups:        groups,
+		Items:         items,
+		KnownTaskIDs:  knownTaskIDs,
+		ChildProgress: boardChildProgress(tasks),
+	}, nil
+}
+
+func boardChildProgress(tasks []Task) []BoardChildProgress {
+	byParent := make(map[string]BoardChildProgress)
+	parentOrder := make([]string, 0)
+	for _, task := range tasks {
+		parentID := boardViewTaskParentID(task)
+		if parentID == "" {
+			continue
+		}
+		progress, exists := byParent[parentID]
+		if !exists {
+			progress.ParentID = naming.IssueID(parentID)
+			parentOrder = append(parentOrder, parentID)
+		}
+		progress.Total++
+		facts := task.IssueFacts()
+		if facts.LifecycleState == IssueWorkflowClosed && facts.ClosedOutcome == IssueCloseCompleted {
+			progress.Done++
+		}
+		byParent[parentID] = progress
+	}
+	result := make([]BoardChildProgress, 0, len(parentOrder))
+	for _, parentID := range parentOrder {
+		result = append(result, byParent[parentID])
+	}
+	return result
 }
 
 func boardViewTreeDepths(tasks []Task) map[string]int {

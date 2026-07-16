@@ -907,7 +907,7 @@ func (m Model) renderBoardView() string {
 		cursor,
 		m.editor.GetSelectedTasks(),
 		m.runtimeSignalsForBoard(),
-		board.BuildChildProgress(m.tasks),
+		board.BuildChildProgress(m.boardProjection.ChildProgress),
 		phaseData,
 		m.editor.GetShowPhases(),
 		m.jumpLabelsByTask(),

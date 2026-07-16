@@ -608,6 +608,13 @@ func projectGlobalView(view domain.BoardView, projects []protocol.GlobalProjectS
 		for _, id := range p.KnownTaskIDs {
 			out.KnownTaskIDs = append(out.KnownTaskIDs, protocol.ScopedIssueID{ProjectID: naming.ProjectID(project.ProjectID), IssueID: id})
 		}
+		for _, progress := range p.ChildProgress {
+			out.ChildProgress = append(out.ChildProgress, protocol.GlobalViewChildProgress{
+				ParentID: protocol.ScopedIssueID{ProjectID: naming.ProjectID(project.ProjectID), IssueID: progress.ParentID},
+				Done:     progress.Done,
+				Total:    progress.Total,
+			})
+		}
 		for _, item := range p.Items {
 			projected := protocol.GlobalViewProjectedItem{Identity: protocol.ScopedIssueID{ProjectID: naming.ProjectID(project.ProjectID), IssueID: item.Task.ID}, Task: item.Task, GroupID: item.GroupID, Depth: item.Depth, OrchestrationState: item.OrchestrationState}
 			groups[item.GroupID] = append(groups[item.GroupID], projected)
