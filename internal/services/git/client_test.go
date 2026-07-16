@@ -795,6 +795,49 @@ func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
 	}
 }
 
+func TestMergeGateFailureSurfacesPublishedArtifactReference(t *testing.T) {
+	timeoutPath, err := exec.LookPath("timeout")
+	if err != nil {
+		timeoutPath, err = exec.LookPath("gtimeout")
+	}
+	if err != nil {
+		t.Skip("GNU timeout unavailable")
+	}
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	runGit(t, repo, "config", "user.email", "test@example.com")
+	runGit(t, repo, "config", "user.name", "Test User")
+	runGit(t, repo, "commit", "--allow-empty", "-m", "candidate")
+	scriptsDir := filepath.Join(repo, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	gate, err := os.ReadFile(filepath.Join("..", "..", "..", "scripts", "git-merge-rebase-gate.sh"))
+	if err != nil {
+		t.Fatalf("read merge gate: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"), gate, 0o755); err != nil {
+		t.Fatalf("write merge gate: %v", err)
+	}
+	body := "#!/bin/sh\nset -eu\nprintf '[gate] validation_request=req-123 candidate_head=%s failure=example/broken::TestRetained artifacts=/durable/artifacts/req-123\\n' \"$AZEDARACH_CANDIDATE_HEAD\" >\"$AZEDARACH_CANDIDATE_ARTIFACT_RESULT_FILE\"\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate-body.sh"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write merge gate body: %v", err)
+	}
+
+	cmd := exec.Command(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"))
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(), "PATH="+filepath.Dir(timeoutPath)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	output, runErr := cmd.CombinedOutput()
+	if runErr == nil {
+		t.Fatalf("merge gate error = nil, output=%s", output)
+	}
+	for _, detail := range []string{"validation_request=req-123", "failure=example/broken::TestRetained", "artifacts=/durable/artifacts/req-123"} {
+		if !strings.Contains(string(output), detail) {
+			t.Fatalf("merge gate output = %q, want %q", output, detail)
+		}
+	}
+}
+
 func killProcessGroupWithGrace(pgid int) {
 	if syscall.Kill(pgid, 0) != nil {
 		return
@@ -1019,6 +1062,52 @@ func TestRealProcessProfileMergeCleanlyTransactionalDoesNotGateConflictedCandida
 	}
 	if head := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); head != originalHead {
 		t.Fatalf("target HEAD = %s, want unchanged %s", head, originalHead)
+	}
+}
+
+func TestRealProcessProfileMergeCleanlyTransactionalRetainsFailedCandidateArtifactReference(t *testing.T) {
+	repo := initDivergedRepo(t)
+	originalHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+	artifactDir := filepath.Join(repo, ".azedarach", "validation-artifacts", "failures", "candidate", "request")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatalf("mkdir durable artifact: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactDir, "manifest.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write durable artifact: %v", err)
+	}
+	scriptsDir := filepath.Join(repo, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	gate := "#!/bin/sh\nset -eu\necho \"[gate] validation_request=req-retained candidate_head=$AZEDARACH_CANDIDATE_HEAD failure=example/broken::TestRetained artifacts=$AZEDARACH_TEST_ARTIFACT_DIR\" >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"), []byte(gate), 0o755); err != nil {
+		t.Fatalf("write candidate gate: %v", err)
+	}
+	runClientTestGit(t, repo, "add", "scripts/git-merge-rebase-gate.sh")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "add failing candidate gate")
+	t.Setenv("AZEDARACH_TEST_ARTIFACT_DIR", artifactDir)
+
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	result, err := client.MergeCleanlyTransactional(context.Background(), repo, "feature")
+	if err != nil {
+		t.Fatalf("MergeCleanlyTransactional() error = %v", err)
+	}
+	if result == nil || result.Success || len(result.ValidationAttempts) != 1 {
+		t.Fatalf("MergeCleanlyTransactional() result = %+v, want one failed validation", result)
+	}
+	for _, detail := range []string{"req-retained", "example/broken::TestRetained", artifactDir} {
+		if !strings.Contains(result.Message, detail) || !strings.Contains(result.ValidationAttempts[0].Message, detail) {
+			t.Fatalf("validation result = %+v, want retained detail %q", result, detail)
+		}
+	}
+	if head := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); head != originalHead {
+		t.Fatalf("target HEAD = %s, want unchanged %s", head, originalHead)
+	}
+	if _, err := os.Stat(filepath.Join(artifactDir, "manifest.json")); err != nil {
+		t.Fatalf("durable artifact after scratch cleanup: %v", err)
+	}
+	if worktrees := runClientTestGitOutput(t, repo, "worktree", "list", "--porcelain"); strings.Contains(worktrees, "azedarach-integration-") {
+		t.Fatalf("worktree list contains failed scratch integration worktree after cleanup:\n%s", worktrees)
 	}
 }
 
