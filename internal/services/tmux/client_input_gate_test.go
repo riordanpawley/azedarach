@@ -99,6 +99,7 @@ func TestRealTmuxSessionReadOnlyAttachHookGatesAndRecordsNewClient(t *testing.T)
 		t.Fatal(err)
 	}
 	attach := exec.CommandContext(ctx, "script", "-q", "/dev/null", "tmux", "-L", socket, "attach-session", "-t", "gate")
+	attach.Env = realTmuxTestTerminalEnv()
 	attach.Stdout = attachOutput
 	attach.Stderr = attachOutput
 	stdin, err := attach.StdinPipe()
@@ -184,6 +185,13 @@ func TestRealTmuxPaneInputFenceBlocksImmediateAttachInputBeforeDelayedHook(t *te
 	}
 	t.Cleanup(func() { _, _ = runner.Run(context.Background(), "kill-server") })
 	const target = "gate:"
+	paneOutputPath := filepath.Join(t.TempDir(), "pane.output")
+	if err := os.WriteFile(paneOutputPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Run(ctx, "pipe-pane", "-t", target, "cat >> "+shellSingleQuote(paneOutputPath)); err != nil {
+		t.Fatal(err)
+	}
 
 	// Prove the exact real attach, readiness, and send path before using absence
 	// of pane output as evidence. The helper cannot succeed until it observes the
@@ -196,11 +204,12 @@ func TestRealTmuxPaneInputFenceBlocksImmediateAttachInputBeforeDelayedHook(t *te
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		output, captureErr := runner.Run(ctx, "capture-pane", "-p", "-t", target)
-		if captureErr == nil && strings.Contains(output, allowed) {
+		paneOutput, readErr := os.ReadFile(paneOutputPath)
+		if captureErr == nil && readErr == nil && strings.Contains(output, allowed) && strings.Contains(string(paneOutput), allowed) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("proven attach path did not deliver unfenced control input: pane=%q err=%v attach_output=%q", output, captureErr, allowedOutput)
+			t.Fatalf("proven attach path did not deliver unfenced control input: pane=%q capture_err=%v live_output=%q read_err=%v attach_output=%q", output, captureErr, paneOutput, readErr, allowedOutput)
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
@@ -231,12 +240,45 @@ func TestRealTmuxPaneInputFenceBlocksImmediateAttachInputBeforeDelayedHook(t *te
 	if err != nil {
 		t.Fatalf("send immediate input through attached tmux client: %v output=%q", err, blockedOutput)
 	}
+	// Observe through the authoritative end of the adversarial window. pipe-pane
+	// writes independently while run-shell blocks tmux's command queue, allowing
+	// the test to detect admitted input immediately instead of sampling early.
+	hookCtx, cancelHook := context.WithTimeout(ctx, 3*time.Second)
+	defer cancelHook()
+	for {
+		paneOutput, readErr := os.ReadFile(paneOutputPath)
+		if readErr != nil {
+			t.Fatalf("read live pane output before delayed hook completion: %v", readErr)
+		}
+		if strings.Contains(string(paneOutput), blocked) {
+			t.Fatalf("input reached the pane while the delayed attach hook was pending: %q", paneOutput)
+		}
+		_, completionErr := os.Stat(hookCompletedPath)
+		if completionErr == nil {
+			break
+		}
+		if !errors.Is(completionErr, os.ErrNotExist) {
+			t.Fatalf("inspect delayed attach hook completion marker: %v", completionErr)
+		}
+		select {
+		case <-hookCtx.Done():
+			t.Fatalf("delayed attach hook did not complete: %v attach_output=%q", context.Cause(hookCtx), blockedOutput)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	paneOutput, err := os.ReadFile(paneOutputPath)
+	if err != nil {
+		t.Fatalf("read live pane output after delayed hook completion: %v", err)
+	}
+	if strings.Contains(string(paneOutput), blocked) {
+		t.Fatalf("input reached pane output by delayed hook completion: %q", paneOutput)
+	}
 	output, err := runner.Run(ctx, "capture-pane", "-p", "-t", target)
 	if err != nil {
-		t.Fatalf("capture fenced pane: %v attach_output=%q", err, blockedOutput)
+		t.Fatalf("capture fenced pane after delayed hook completion: %v attach_output=%q", err, blockedOutput)
 	}
 	if strings.Contains(output, blocked) {
-		t.Fatalf("input sent before the delayed attach hook gated the client reached the pane: %q", output)
+		t.Fatalf("input reached the pane after the delayed attach hook completed: %q", output)
 	}
 }
 
@@ -269,7 +311,8 @@ after 100
 exit 0
 `
 	command := exec.CommandContext(ctx, "expect", "-c", program)
-	command.Env = append(os.Environ(),
+	command.Env = realTmuxTestTerminalEnv()
+	command.Env = append(command.Env,
 		"AZ_TEST_TMUX_SOCKET="+socket,
 		"AZ_TEST_TMUX_READY="+readyMarker,
 		"AZ_TEST_TMUX_SENTINEL="+sentinel,
@@ -277,6 +320,16 @@ exit 0
 		"AZ_TEST_TMUX_HOOK_COMPLETED="+hookCompletedPath,
 	)
 	return command.CombinedOutput()
+}
+
+func realTmuxTestTerminalEnv() []string {
+	environment := make([]string, 0, len(os.Environ())+1)
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "TERM=") {
+			environment = append(environment, entry)
+		}
+	}
+	return append(environment, "TERM=xterm-256color")
 }
 
 func TestRealTmuxPaneInputFencePreservesUnsubmittedDraft(t *testing.T) {
