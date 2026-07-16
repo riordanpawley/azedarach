@@ -288,14 +288,12 @@ func goldenCleanupSmallView(t *testing.T) string {
 func goldenCloseFailureView(t *testing.T) string {
 	t.Helper()
 	dialog := NewCloseFailureDialog(
-		"gav",
-		"refusing to merge child issue gav directly into base: no active ancestor worktree branch was found; run `az worktree create gat`, then close the child into that target",
+		"dhb",
+		"internal: phase preflight for issue dhb: cannot close issue dhb: human-facing investigation lacks explicit issue-specific findings acceptance. Next: fix the listed blockers, refresh, then retry",
 		CloseFailureDialogOptions{
-			ParentID:            "gat",
 			PreviousStatus:      "in_review",
 			TargetStatus:        "closed",
-			AllowAIMerge:        true,
-			AllowCreateAncestor: true,
+			AllowAcceptFindings: true,
 		},
 	)
 	model, _ := dialog.Update(tea.WindowSizeMsg{Width: 120, Height: 34})
@@ -305,14 +303,12 @@ func goldenCloseFailureView(t *testing.T) string {
 func goldenCloseFailureSmallView(t *testing.T) string {
 	t.Helper()
 	dialog := NewCloseFailureDialog(
-		"gav",
-		"refusing to merge child issue gav directly into base: no active ancestor worktree branch was found; run `az worktree create gat`, then close the child into that target",
+		"dhb",
+		"internal: phase preflight for issue dhb: cannot close issue dhb: human-facing investigation lacks explicit issue-specific findings acceptance. Next: fix the listed blockers, refresh, then retry",
 		CloseFailureDialogOptions{
-			ParentID:            "gat",
 			PreviousStatus:      "in_review",
 			TargetStatus:        "closed",
-			AllowAIMerge:        true,
-			AllowCreateAncestor: true,
+			AllowAcceptFindings: true,
 		},
 	)
 	model, _ := dialog.Update(tea.WindowSizeMsg{Width: 72, Height: 22})

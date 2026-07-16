@@ -120,6 +120,21 @@ func (a *OrchestratorLeaseAuthority) Get(ctx context.Context, identity domain.Or
 	return lease, found, nil
 }
 
+func (a *OrchestratorLeaseAuthority) FindBySession(ctx context.Context, projectID, sessionID string) (OrchestratorScopeLease, bool, error) {
+	projectID, sessionID = normalizedProjectID(projectID), strings.TrimSpace(sessionID)
+	if err := a.Refresh(ctx, projectID); err != nil {
+		return OrchestratorScopeLease{}, false, err
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	for _, lease := range a.cache[projectID] {
+		if lease.SessionID == sessionID {
+			return lease, true, nil
+		}
+	}
+	return OrchestratorScopeLease{}, false, nil
+}
+
 func (a *OrchestratorLeaseAuthority) Acquire(ctx context.Context, identity domain.OrchestratorIdentity, sessionID string, probe SessionRuntimeProbe) (OrchestratorLeaseAcquireResult, error) {
 	identity, err := normalizeOrchestratorIdentity(identity)
 	if err != nil {

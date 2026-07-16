@@ -2057,6 +2057,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		actionModel := m.modelForCloseFailureAction(action)
 		return m, actionModel.moveTaskStatusCmdWithOptions(action.TaskID, previousStatus, targetStatus, opts)
 
+	case investigationAcceptanceResultMsg:
+		action := msg.action
+		if msg.err != nil {
+			m.addToast(Toast{Level: ToastError, Message: msg.err.Error(), Expires: time.Now().Add(8 * time.Second)})
+			options := overlay.CloseFailureDialogOptions{
+				ProjectID: action.ProjectID, ProjectName: action.ProjectName, ProjectPath: action.ProjectPath,
+				DaemonSocket: action.DaemonSocket, BaseBranch: action.BaseBranch, ParentID: action.ParentID,
+				SourceWorktree: action.SourceWorktree, PreviousStatus: action.PreviousStatus, TargetStatus: action.TargetStatus,
+				ForceWorktree: action.ForceWorktree, CloseCleanChildren: action.CloseCleanChildren,
+				AllowActiveSession: action.AllowActiveSession, AllowAcceptFindings: true,
+			}
+			return m, m.openOverlay(overlay.NewCloseFailureDialog(action.TaskID, msg.err.Error()+". The findings acceptance was not recorded.", options))
+		}
+		previousStatus := domain.Status(strings.TrimSpace(action.PreviousStatus))
+		targetStatus := domain.Status(strings.TrimSpace(action.TargetStatus))
+		if previousStatus == "" {
+			previousStatus = domain.StatusInReview
+		}
+		if targetStatus == "" {
+			targetStatus = domain.StatusDone
+		}
+		opts := daemonclient.TaskStatusOptions{ForceWorktree: action.ForceWorktree, CloseCleanChildren: action.CloseCleanChildren, AllowActiveSession: action.AllowActiveSession}
+		m.beginTaskStatusMoveFeedback(action.TaskID, previousStatus, targetStatus)
+		m.addToast(Toast{Level: ToastInfo, Message: fmt.Sprintf("Findings accepted; retrying close for %s", action.TaskID), Expires: time.Now().Add(5 * time.Second)})
+		actionModel := m.modelForCloseFailureAction(action)
+		return m, actionModel.moveTaskStatusCmdWithOptions(action.TaskID, previousStatus, targetStatus, opts)
+
 	case taskLifecycleResultMsg:
 		if msg.err != nil {
 			m.rollbackOptimisticTask(msg.previousTask)

@@ -45,6 +45,7 @@ func TestDefaultConfig(t *testing.T) {
 	assert.Equal(t, "merge", cfg.Git.DefaultMergeStrategy)
 	assert.True(t, cfg.Git.PushEnabled)
 	assert.True(t, cfg.Git.FetchEnabled)
+	assert.Empty(t, cfg.Gate.Command)
 
 	assert.Equal(t, DefaultSessionShell(), cfg.Session.Shell)
 	assert.False(t, cfg.Session.DangerouslySkipPermissions)
@@ -92,6 +93,14 @@ func TestDefaultConfig(t *testing.T) {
 	assert.False(t, cfg.Session.CodexAppServer)
 }
 
+func TestLoadConfigReadsProjectGateCommand(t *testing.T) {
+	root := t.TempDir()
+	writeConfigFile(t, root, `{"$version":11,"gate":{"command":"npm run review"}}`)
+	cfg, err := LoadConfig(root)
+	require.NoError(t, err)
+	assert.Equal(t, "npm run review", cfg.Gate.Command)
+}
+
 func TestLoadConfigEnablesCodexAppServer(t *testing.T) {
 	root := t.TempDir()
 	writeConfigFile(t, root, `{"$schema":"./config.schema.json","$version":11,"cliTool":"codex","session":{"codexAppServer":true}}`)
@@ -112,6 +121,12 @@ func TestConfigSchemaVersionMatchesCurrentConfigVersion(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &schema))
 	require.Contains(t, schema.Properties, "$version")
 	assert.Equal(t, CurrentConfigVersion, schema.Properties["$version"].Const)
+}
+
+func TestConfigSchemaDoesNotDefaultToAzedarachDogfoodCommands(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "config.schema.json"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), `"default": "just`)
 }
 
 func TestResolveConfigBaseFindsNearestAncestorConfig(t *testing.T) {

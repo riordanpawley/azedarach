@@ -379,6 +379,10 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 			m.beginMutationFeedback(fmt.Sprintf("Creating ancestor worktree %s for %s", action.ParentID, action.TaskID))
 			return m, actionModel.createAncestorWorktreeAndRetryCloseCmd(action)
 		}
+		if action.Action == overlay.CloseFailureActionAcceptFindings {
+			m.beginMutationFeedback(fmt.Sprintf("Recording findings acceptance for %s", action.TaskID))
+			return m, actionModel.acceptInvestigationFindingsCmd(action)
+		}
 		previousStatus := domain.Status(strings.TrimSpace(action.PreviousStatus))
 		targetStatus := domain.Status(strings.TrimSpace(action.TargetStatus))
 		if previousStatus == "" {

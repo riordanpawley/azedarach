@@ -159,13 +159,11 @@ func TestOrchestratorScopeLeaseDuplicateAcquireAcrossStoresHasSingleWinner(t *te
 }
 
 func TestOrchestratorScopeLeaseAcquireRetriesConcurrentRuntimeWriter(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
 	store := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
 	identity := mustRootedOrchestratorIdentity(t, "proj-a", "root-a")
-	if _, err := store.AcquireOrchestratorScopeLease(ctx, identity, "stale-session", func(context.Context, string) (bool, error) { return true, nil }); err != nil {
+	if _, err := store.AcquireOrchestratorScopeLease(t.Context(), identity, "stale-session", func(context.Context, string) (bool, error) { return true, nil }); err != nil {
 		t.Fatalf("seed lease: %v", err)
 	}
 
@@ -175,9 +173,27 @@ func TestOrchestratorScopeLeaseAcquireRetriesConcurrentRuntimeWriter(t *testing.
 	}
 	storeDB.SetMaxOpenConns(1)
 	storeDB.SetMaxIdleConns(1)
-	if _, err := storeDB.ExecContext(ctx, `PRAGMA busy_timeout=1`); err != nil {
-		t.Fatalf("shorten runtime store busy timeout: %v", err)
+	if _, err := storeDB.ExecContext(t.Context(), `PRAGMA busy_timeout=0`); err != nil {
+		t.Fatalf("disable runtime store busy wait: %v", err)
 	}
+
+	retryStarted := make(chan struct{})
+	releaseRetry := make(chan struct{})
+	var retryStartedOnce, releaseRetryOnce sync.Once
+	releaseRetryBarrier := func() { releaseRetryOnce.Do(func() { close(releaseRetry) }) }
+	t.Cleanup(releaseRetryBarrier)
+	ctx := WithSQLiteWriteAttemptHookForTest(t.Context(), func(operation string, attempt int) error {
+		if operation != "acquire_orchestrator_scope_lease" || attempt != 2 {
+			return nil
+		}
+		retryStartedOnce.Do(func() { close(retryStarted) })
+		select {
+		case <-releaseRetry:
+			return nil
+		case <-t.Context().Done():
+			return t.Context().Err()
+		}
+	})
 
 	probeStarted := make(chan struct{})
 	releaseProbe := make(chan struct{})
@@ -197,12 +213,8 @@ func TestOrchestratorScopeLeaseAcquireRetriesConcurrentRuntimeWriter(t *testing.
 		leaseResult <- acquireErr
 	}()
 
-	select {
-	case <-probeStarted:
-	case <-ctx.Done():
-		t.Fatal("lease acquisition did not reach runtime probe")
-	}
-	concurrentDB, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=busy_timeout(1)")
+	<-probeStarted
+	concurrentDB, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=busy_timeout(0)")
 	if err != nil {
 		t.Fatalf("open concurrent runtime writer: %v", err)
 	}
@@ -223,10 +235,11 @@ func TestOrchestratorScopeLeaseAcquireRetriesConcurrentRuntimeWriter(t *testing.
 		})
 	}()
 	close(releaseProbe)
-	time.Sleep(25 * time.Millisecond)
+	<-retryStarted
 	if _, err := concurrentDB.ExecContext(ctx, `COMMIT`); err != nil {
 		t.Fatalf("commit concurrent runtime write: %v", err)
 	}
+	releaseRetryBarrier()
 
 	if err := <-leaseResult; err != nil {
 		t.Fatalf("acquire lease after transient contention: %v", err)

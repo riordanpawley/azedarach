@@ -513,7 +513,7 @@ func TestResolveTUILogFilePath_UsesSessionLogDir(t *testing.T) {
 	}
 }
 
-func TestResolveTUILogFilePath_UsesScopedWorktreeDirInJustRunMode(t *testing.T) {
+func TestResolveTUILogFilePath_UsesScopedWorktreeDirInManagedRunMode(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
 	worktree := filepath.Join(base, "wt")
@@ -533,7 +533,7 @@ func TestResolveTUILogFilePath_UsesScopedWorktreeDirInJustRunMode(t *testing.T) 
 	}
 
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "managed-run")
 	t.Setenv("PATH", "")
 	t.Chdir(nested)
 
@@ -578,7 +578,7 @@ func TestDaemonLogFilePath_UsesSessionLogDir(t *testing.T) {
 	}
 }
 
-func TestDaemonLogFilePath_UsesScopedWorktreeDirInJustRunMode(t *testing.T) {
+func TestDaemonLogFilePath_UsesScopedWorktreeDirInManagedRunMode(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
 	worktree := filepath.Join(base, "wt")
@@ -598,7 +598,7 @@ func TestDaemonLogFilePath_UsesScopedWorktreeDirInJustRunMode(t *testing.T) {
 	}
 
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "managed-run")
 	t.Setenv("PATH", "")
 	t.Chdir(nested)
 

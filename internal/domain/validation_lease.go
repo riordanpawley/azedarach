@@ -191,6 +191,9 @@ func (a ValidationAcquire) Validate() error {
 	if a.Scope == ValidationScopeTicket && issueID == "" {
 		return fmt.Errorf("ticket-scoped validation requires an existing ticket identity")
 	}
+	if a.Purpose == ValidationPurposeDevelopment {
+		return fmt.Errorf("development validation does not use daemon admission")
+	}
 	if a.Purpose == ValidationPurposeReviewEvidence && a.Scope != ValidationScopeTicket {
 		return fmt.Errorf("review evidence requires ticket scope")
 	}

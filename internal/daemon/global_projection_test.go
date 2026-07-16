@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -190,6 +191,86 @@ func TestFilterGlobalProjectsUsesCanonicalScopedIdentity(t *testing.T) {
 	current := filterGlobalProjects(projects, protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeCurrentProject, CurrentProjectID: "alpha"})
 	if len(current) != 1 || current[0].ProjectID != "alpha" {
 		t.Fatalf("current projects = %+v", current)
+	}
+}
+
+func TestResolveGlobalViewScopeProjectsCanonicalizesRegisteredNames(t *testing.T) {
+	ctx := context.Background()
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.ReconcileProjects(ctx, []userstore.CatalogProject{
+		{ProjectID: "stable-alpha", Name: "Alpha Project", Path: "/alpha", DBPath: "/alpha/issues.db"},
+		{ProjectID: "stable-beta", Name: "Beta", Path: "/beta", DBPath: "/beta/issues.db"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Daemon{userStore: store}
+	scope, err := d.resolveGlobalViewScopeProjects(ctx, protocol.GlobalViewScope{
+		Kind:       protocol.GlobalViewScopeSelectedProjects,
+		ProjectIDs: []naming.ProjectID{"Alpha Project", "stable-beta", "Alpha Project"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []naming.ProjectID{"stable-alpha", "stable-beta"}
+	if len(scope.ProjectIDs) != len(want) {
+		t.Fatalf("resolved project ids = %v, want %v", scope.ProjectIDs, want)
+	}
+	for i := range want {
+		if scope.ProjectIDs[i] != want[i] {
+			t.Fatalf("resolved project ids = %v, want %v", scope.ProjectIDs, want)
+		}
+	}
+
+	current, err := d.resolveGlobalViewScopeProjects(ctx, protocol.GlobalViewScope{
+		Kind:             protocol.GlobalViewScopeCurrentProject,
+		CurrentProjectID: "Beta",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.CurrentProjectID != "stable-beta" {
+		t.Fatalf("current project id = %q, want stable-beta", current.CurrentProjectID)
+	}
+
+	view := domain.DefaultBoardView()
+	view.ID, view.Title = "named-project-scope", "Named project scope"
+	body, err := json.Marshal(protocol.BoardViewSaveRequestBody{
+		ProjectID: "global",
+		View:      view,
+		Scope: protocol.GlobalViewScope{
+			Kind:       protocol.GlobalViewScopeSelectedProjects,
+			ProjectIDs: []naming.ProjectID{"Alpha Project"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := d.handleBoardViewSave(ctx, protocol.RequestEnvelope{Body: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.OK || resp.Error != nil {
+		t.Fatalf("save response = %+v", resp)
+	}
+	var saved protocol.BoardViewResponseBody
+	if err := json.Unmarshal(resp.Body, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.GlobalView == nil || len(saved.GlobalView.Scope.ProjectIDs) != 1 || saved.GlobalView.Scope.ProjectIDs[0] != "stable-alpha" {
+		t.Fatalf("saved global view = %+v, want canonical stable-alpha scope", saved.GlobalView)
+	}
+
+	_, err = d.resolveGlobalViewScopeProjects(ctx, protocol.GlobalViewScope{
+		Kind:       protocol.GlobalViewScopeSelectedProjects,
+		ProjectIDs: []naming.ProjectID{"missing"},
+	})
+	if err == nil || !strings.Contains(err.Error(), `unknown project "missing"`) {
+		t.Fatalf("unknown project error = %v", err)
 	}
 }
 

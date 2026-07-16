@@ -1,0 +1,7 @@
+[packs]
+enabled = [
+    "cicd.github_actions",
+    "database.sqlite",
+    "package_managers",
+    "platform.github",
+]

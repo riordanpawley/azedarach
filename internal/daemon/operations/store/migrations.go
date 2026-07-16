@@ -27,6 +27,7 @@ var orderedMigrations = []migration{
 	{id: "daemon_operations_0003_validation_leases", path: "migrations/0003_validation_leases.sql"},
 	{id: "daemon_operations_0004_review_validation_assignment", path: "migrations/0004_review_validation_assignment.sql"},
 	{id: "daemon_operations_0005_validation_scope_purpose", path: "migrations/0005_validation_scope_purpose.sql"},
+	{id: "daemon_operations_0006_publication_validation_priority", path: "migrations/0006_publication_validation_priority.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -35,6 +36,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "daemon_operations_0003_validation_leases", Path: "migrations/0003_validation_leases.sql", Checksum: "317c9ea680d378637b417005ccfcf0d989e4c025cbbacabdd581f00dafac19df"},
 	{ID: "daemon_operations_0004_review_validation_assignment", Path: "migrations/0004_review_validation_assignment.sql", Checksum: "6f5d54a3f27937ae9adcdd6a0b3f9b79ddd2814f32635eb2c3e5ca051c3268ca"},
 	{ID: "daemon_operations_0005_validation_scope_purpose", Path: "migrations/0005_validation_scope_purpose.sql", Checksum: "6cb59febaf88ccc7948f5289cbdc040bfa041fbd639ea88eb77766dfff15a192"},
+	{ID: "daemon_operations_0006_publication_validation_priority", Path: "migrations/0006_publication_validation_priority.sql", Checksum: "bbbf9fd51c2d9289a295a6aeb7427d65d04d3d3a897cc995d2d91ea4577713fd"},
 }
 
 const migrationArtifactAuthority sqlitemigration.Authority = "project.daemon_operations"
@@ -124,7 +126,7 @@ func validateValidationLeaseSchema(ctx context.Context, db *sql.DB) error {
 		{typeName: "index", name: "idx_daemon_validation_one_active_aggregate", fragments: []string{
 			"create unique index idx_daemon_validation_one_active_aggregate",
 			"on daemon_validation_requests(project_id)",
-			"where state = 'active' and class = 'aggregate'",
+			"where state = 'active' and class = 'aggregate' and purpose = 'capacity'",
 		}},
 		{typeName: "index", name: "idx_daemon_validation_project_queue", fragments: []string{
 			"create index idx_daemon_validation_project_queue",

@@ -21,7 +21,7 @@ func (s *SQLiteStore) AcquireValidation(ctx context.Context, request domain.Vali
 		request.Scope = domain.ValidationScopeTicket
 	}
 	if request.Purpose == "" {
-		request.Purpose = domain.ValidationPurposeDevelopment
+		request.Purpose = domain.ValidationPurposeCapacity
 		if request.ReviewerID != "" || request.ReviewEpochEventID != 0 {
 			request.Purpose = domain.ValidationPurposeReviewEvidence
 		}
@@ -69,7 +69,7 @@ func (s *SQLiteStore) AcquireValidation(ctx context.Context, request domain.Vali
 				execution, authoritativeRequestID, state = domain.ValidationExecutionReused, source.RequestID, source.State
 			}
 		}
-		if source == nil {
+		if source == nil && request.Purpose == domain.ValidationPurposeCapacity {
 			source, err = compatibleValidationTx(ctx, tx, request, compatibilityKey, false)
 			if err != nil {
 				return domain.ValidationRequest{}, err
@@ -376,7 +376,7 @@ func (s *SQLiteStore) LatestAggregateValidation(ctx context.Context, projectID, 
 func compatibleValidationTx(ctx context.Context, tx *sql.Tx, target domain.ValidationAcquire, key string, completed bool) (*domain.ValidationRequest, error) {
 	condition := `state IN ('active','queued') AND execution='executed'`
 	if completed {
-		condition = `state='completed' AND execution='executed' AND json_extract(evidence_json,'$.present')=1 AND json_extract(evidence_json,'$.overlap_detected')=0`
+		condition = `state='completed' AND execution='executed' AND json_extract(evidence_json,'$.present')=1`
 	}
 	rows, err := tx.QueryContext(ctx, validationSelect+` WHERE project_id=? AND compatibility_key=? AND `+condition+` ORDER BY sequence DESC`, target.ProjectID, key)
 	if err != nil {
@@ -389,6 +389,9 @@ func compatibleValidationTx(ctx context.Context, tx *sql.Tx, target domain.Valid
 			return nil, scanErr
 		}
 		if domain.ValidationRequestCanSatisfy(request, target) {
+			if target.Purpose == domain.ValidationPurposeCapacity && request.Evidence.OverlapDetected {
+				continue
+			}
 			return &request, nil
 		}
 	}
@@ -428,11 +431,20 @@ func expireAndReconcileValidationTx(ctx context.Context, tx *sql.Tx, projectID s
 }
 
 func reconcileValidationQueueTx(ctx context.Context, tx *sql.Tx, projectID string, now time.Time, ttl time.Duration) error {
-	if _, err := tx.ExecContext(ctx, `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE project_id=? AND state='queued' AND execution='executed' AND class='safe'`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), projectID); err != nil {
+	finished := now.Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `UPDATE daemon_validation_requests SET state='cancelled',finished_at=?,expires_at=NULL,outcome='development validation no longer uses daemon admission' WHERE project_id=? AND state IN ('active','queued') AND purpose='development'`, finished, projectID); err != nil {
+		return fmt.Errorf("cancel legacy development validation requests: %w", err)
+	}
+	// Publication authority is never capacity-admitted. A push or exact-review
+	// gate starts immediately even while controlled CI timing owns capacity.
+	if _, err := tx.ExecContext(ctx, `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE project_id=? AND state='queued' AND execution='executed' AND purpose IN ('push_gate','review_evidence')`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), projectID); err != nil {
+		return fmt.Errorf("activate publication validation requests: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE project_id=? AND state='queued' AND execution='executed' AND purpose='capacity' AND class='safe'`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), projectID); err != nil {
 		return fmt.Errorf("activate safe validation requests: %w", err)
 	}
 	var activeAggregate int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_validation_requests WHERE project_id=? AND state='active' AND class='aggregate'`, projectID).Scan(&activeAggregate); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_validation_requests WHERE project_id=? AND state='active' AND purpose='capacity' AND class='aggregate'`, projectID).Scan(&activeAggregate); err != nil {
 		return err
 	}
 	if activeAggregate > 0 {
@@ -440,7 +452,7 @@ func reconcileValidationQueueTx(ctx context.Context, tx *sql.Tx, projectID strin
 	}
 	var firstSequence int64
 	var firstClass domain.ValidationClass
-	err := tx.QueryRowContext(ctx, `SELECT sequence,class FROM daemon_validation_requests WHERE project_id=? AND state='queued' AND execution='executed' AND class!='safe' ORDER BY sequence LIMIT 1`, projectID).Scan(&firstSequence, &firstClass)
+	err := tx.QueryRowContext(ctx, `SELECT sequence,class FROM daemon_validation_requests WHERE project_id=? AND state='queued' AND execution='executed' AND purpose='capacity' AND class!='safe' ORDER BY sequence LIMIT 1`, projectID).Scan(&firstSequence, &firstClass)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -449,7 +461,7 @@ func reconcileValidationQueueTx(ctx context.Context, tx *sql.Tx, projectID strin
 	}
 	if firstClass == domain.ValidationClassAggregate {
 		var activeShared int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_validation_requests WHERE project_id=? AND state='active' AND class='shared'`, projectID).Scan(&activeShared); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_validation_requests WHERE project_id=? AND state='active' AND purpose='capacity' AND class='shared'`, projectID).Scan(&activeShared); err != nil {
 			return err
 		}
 		if activeShared == 0 {
@@ -457,7 +469,7 @@ func reconcileValidationQueueTx(ctx context.Context, tx *sql.Tx, projectID strin
 			return err
 		}
 		var bypassedShared int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_validation_requests WHERE project_id=? AND class='shared' AND sequence>? AND started_at IS NOT NULL`, projectID, firstSequence).Scan(&bypassedShared); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_validation_requests WHERE project_id=? AND purpose='capacity' AND class='shared' AND sequence>? AND started_at IS NOT NULL`, projectID, firstSequence).Scan(&bypassedShared); err != nil {
 			return err
 		}
 		if bypassedShared >= validationAggregateSharedBypassLimit {
@@ -467,14 +479,14 @@ func reconcileValidationQueueTx(ctx context.Context, tx *sql.Tx, projectID strin
 		// ownership. Let one later focused request join the current shared
 		// generation, then drain shared owners for the aggregate. Counting
 		// durable started requests makes the bound survive daemon replacement.
-		_, err = tx.ExecContext(ctx, `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE sequence=(SELECT sequence FROM daemon_validation_requests WHERE project_id=? AND state='queued' AND execution='executed' AND class='shared' AND sequence>? ORDER BY sequence LIMIT 1) AND state='queued'`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), projectID, firstSequence)
+		_, err = tx.ExecContext(ctx, `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE sequence=(SELECT sequence FROM daemon_validation_requests WHERE project_id=? AND state='queued' AND execution='executed' AND purpose='capacity' AND class='shared' AND sequence>? ORDER BY sequence LIMIT 1) AND state='queued'`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), projectID, firstSequence)
 		return err
 	}
 	var nextAggregate sql.NullInt64
-	if err := tx.QueryRowContext(ctx, `SELECT MIN(sequence) FROM daemon_validation_requests WHERE project_id=? AND state='queued' AND execution='executed' AND class='aggregate'`, projectID).Scan(&nextAggregate); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT MIN(sequence) FROM daemon_validation_requests WHERE project_id=? AND state='queued' AND execution='executed' AND purpose='capacity' AND class='aggregate'`, projectID).Scan(&nextAggregate); err != nil {
 		return err
 	}
-	query := `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE project_id=? AND state='queued' AND execution='executed' AND class='shared'`
+	query := `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE project_id=? AND state='queued' AND execution='executed' AND purpose='capacity' AND class='shared'`
 	args := []any{now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), projectID}
 	if nextAggregate.Valid {
 		query += ` AND sequence < ?`

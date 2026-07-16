@@ -229,9 +229,9 @@ func WorkerEvidencePacketTemplate() WorkerEvidencePacket {
 	return WorkerEvidencePacket{
 		Schema:        WorkerEvidenceSchemaV1,
 		Summary:       "Ready for integration.",
-		CommandsRun:   []string{"just test"},
+		CommandsRun:   []string{"<project validation command>"},
 		KeyAssertions: []string{"validation passed"},
-		FilesChanged:  []string{"internal/daemon/mail_commands.go"},
+		FilesChanged:  []string{"path/to/changed-file"},
 		Review: WorkerEvidenceReview{
 			Status:   "clean",
 			Findings: []string{},
@@ -311,8 +311,8 @@ func validateWorkerEvidencePacket(packet WorkerEvidencePacket, fields map[string
 		if !evidence.Present {
 			invalid = append(invalid, "aggregate_validation must include machine-load evidence")
 		}
-		if evidence.OverlapDetected {
-			invalid = append(invalid, "aggregate_validation must not overlap external Go processes")
+		if evidence.Purpose == ValidationPurposeCapacity && evidence.OverlapDetected {
+			invalid = append(invalid, "capacity aggregate_validation must not overlap external Go processes")
 		}
 	}
 	sort.Strings(missing)
@@ -498,7 +498,7 @@ func normalizeWorkerEvidenceCommands(raw json.RawMessage, fix bool) ([]string, b
 			diagnostics = append(diagnostics, WorkerEvidenceDiagnostic{
 				Path:       path,
 				Message:    "commands_run structured records are normalized to command strings",
-				Suggestion: `use "command" strings in the canonical packet, for example "just test"`,
+				Suggestion: `use "command" strings in the canonical packet, for example "project-check test"`,
 			})
 			if fix {
 				out = append(out, value)
@@ -509,7 +509,7 @@ func normalizeWorkerEvidenceCommands(raw json.RawMessage, fix bool) ([]string, b
 		diagnostics = append(diagnostics, WorkerEvidenceDiagnostic{
 			Path:       path,
 			Message:    "commands_run entries must be strings or objects with a non-empty command field",
-			Suggestion: `use "just test" or {"command":"just test","result":"passed"}`,
+			Suggestion: `use "project-check test" or {"command":"project-check test","result":"passed"}`,
 		})
 		unrepairable = true
 	}
@@ -664,7 +664,7 @@ func workerEvidenceSuggestionForField(field string) string {
 	case "schema":
 		return fmt.Sprintf("set schema to %q", WorkerEvidenceSchemaV1)
 	case "commands_run":
-		return `use an array of command strings, for example ["just test"]`
+		return `use an array of command strings, for example ["project-check test"]`
 	case "key_assertions":
 		return `use an array of concise validation assertions, for example ["validation passed"]`
 	case "files_changed":

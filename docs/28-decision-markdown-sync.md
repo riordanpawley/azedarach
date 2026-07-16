@@ -68,10 +68,13 @@ explicitly; it is made absolute but is not promoted to a Git root.
 the same rename/delete rules only to decisions linked to that issue. It writes the canonical
 `<decision-id>-<title-slug>.md` file for every live decision, removes old paths
 after title changes and duplicate parseable exports for the same ID, and removes
-exports for deleted decisions. Files using the reserved `dec-N[-slug].md`
-decision naming convention are reconciled even if their contents are malformed;
-other non-decision Markdown files are left untouched. Check mode reports both
-writes and removals without changing files.
+exports for deleted decisions. Files using either the historical
+`dec-N[-slug].md` convention or the semantic
+`dec-<topic>-<random-suffix>[-slug].md` convention are reconciled even if their
+contents are malformed when the filename matches exactly one known live or
+deleted decision ID. Ambiguous semantic filename prefixes are preserved rather
+than guessed; other non-decision Markdown files are left untouched.
+Check mode reports both writes and removals without changing files.
 
 ## Recovery
 

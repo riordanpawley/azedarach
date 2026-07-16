@@ -94,7 +94,10 @@ azd --help
 - Supports attach/detach flow for active sessions
 - Handles hook notifications: `az notify <event> <issue-id>`
 - Installs hook configuration: `az hooks install <issue-id>`
-- Runs quality gates: `az gate <issue-id>` and `az dev gate <issue-id>`
+- Runs a project's configured quality gate: `az gate <issue-id>` and `az dev gate <issue-id>`
+  use `gate.command` from `.azedarach/config.json`; projects without one fail
+  clearly instead of assuming a build tool or recipe. `--fix` exposes
+  `AZEDARACH_GATE_FIX=1` to the configured command.
 - Manages per-issue dev servers: `az dev start|stop|restart|status` and `az dev list`
 
 ### AI Account Profiles
