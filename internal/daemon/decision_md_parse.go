@@ -13,9 +13,9 @@ import (
 // Fields that were absent from the file are nil — the import planner treats
 // nil as "no update intended for this field" rather than "set to empty".
 type parsedDecisionMD struct {
-	LocalID      string  // required; comes from "# dec-N: ..." header
-	NumericID    int64   // parsed from local_id for explicit-id insert
-	Title        string  // required; comes from "# dec-N: <title>" header
+	LocalID      string  // required; comes from the "# dec-...: ..." header
+	NumericID    int64   // historical dec-N rowid; zero for semantic ids
+	Title        string  // required; comes from the decision header
 	Rationale    *string // optional; "## Rationale" body
 	Context      *string // optional; "## Context" body
 	Consequences *string // optional; "## Consequences" body
@@ -31,7 +31,7 @@ type parsedDecisionLink struct {
 }
 
 var (
-	decisionMDHeaderRE   = regexp.MustCompile(`^#\s+(dec-(\d+))\s*:\s*(.+?)\s*$`)
+	decisionMDHeaderRE   = regexp.MustCompile(`^#\s+(dec-(?:\d+|[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{32}))\s*:\s*(.+?)\s*$`)
 	decisionMDMetaRE     = regexp.MustCompile(`^-\s+([A-Za-z][A-Za-z ]*?):\s*(.+?)\s*$`)
 	decisionMDLinkRE     = regexp.MustCompile(`^-\s+(\S[^:—]*?)\s+(issue|requirement|decision):([^\s—]+)(?:\s+—\s+(.+?))?\s*$`)
 	decisionMDSectionRE  = regexp.MustCompile(`^##\s+(\S.*?)\s*$`)
@@ -73,15 +73,19 @@ func parseDecisionMarkdown(content []byte) (parsedDecisionMD, error) {
 		line := scanner.Text()
 		trimmed := strings.TrimRight(line, " \t")
 
-		// Header line: # dec-N: title
+		// Header line: historical # dec-N or semantic # dec-<slug>-<uuid>.
 		if m := decisionMDHeaderRE.FindStringSubmatch(trimmed); m != nil {
 			if headerFound {
 				return parsedDecisionMD{}, fmt.Errorf("multiple decision headers found")
 			}
-			id, _ := strconv.ParseInt(m[2], 10, 64)
+			idText := strings.TrimPrefix(m[1], "dec-")
+			id, parseErr := strconv.ParseInt(idText, 10, 64)
+			if !strings.Contains(idText, "-") && (parseErr != nil || id <= 0) {
+				return parsedDecisionMD{}, fmt.Errorf("invalid decision id %q", m[1])
+			}
 			out.LocalID = m[1]
 			out.NumericID = id
-			out.Title = strings.TrimSpace(m[3])
+			out.Title = strings.TrimSpace(m[2])
 			headerFound = true
 			continue
 		}
@@ -133,10 +137,7 @@ func parseDecisionMarkdown(content []byte) (parsedDecisionMD, error) {
 	flushSection()
 
 	if !headerFound {
-		return parsedDecisionMD{}, fmt.Errorf("missing decision header (expected '# dec-N: <title>')")
-	}
-	if out.NumericID <= 0 {
-		return parsedDecisionMD{}, fmt.Errorf("invalid decision id %q", out.LocalID)
+		return parsedDecisionMD{}, fmt.Errorf("missing decision header (expected '# dec-<id>: <title>')")
 	}
 	if strings.TrimSpace(out.Title) == "" {
 		return parsedDecisionMD{}, fmt.Errorf("missing decision title")

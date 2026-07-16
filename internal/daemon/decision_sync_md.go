@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode"
@@ -18,6 +19,8 @@ import (
 const (
 	decisionMDSubdir = "docs/decisions"
 )
+
+var semanticDecisionMDFilenameRE = regexp.MustCompile(`^(dec-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{32})(?:-[a-z0-9-]+)?\.md$`)
 
 // SyncMD writes (or, with Check=true, compares) one markdown file per
 // recorded decision under <repoDir>/docs/decisions/. It returns the list of
@@ -239,6 +242,9 @@ func decisionMDID(name string, content []byte) string {
 	if !isDecisionMDFilename(name) {
 		return ""
 	}
+	if match := semanticDecisionMDFilenameRE.FindStringSubmatch(name); match != nil {
+		return match[1]
+	}
 	if i := strings.IndexByte(stem, '-'); i >= 0 {
 		rest := stem[i+1:]
 		if j := strings.IndexByte(rest, '-'); j >= 0 {
@@ -270,6 +276,9 @@ func isDecisionMDFilename(name string) bool {
 	stem := strings.TrimSuffix(name, ".md")
 	if stem == name || !strings.HasPrefix(stem, "dec-") {
 		return false
+	}
+	if semanticDecisionMDFilenameRE.MatchString(name) {
+		return true
 	}
 	numeric := strings.TrimPrefix(stem, "dec-")
 	if i := strings.IndexByte(numeric, '-'); i >= 0 {

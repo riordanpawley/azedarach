@@ -172,10 +172,11 @@ func (s issueDecisionService) RecordDecision(ctx context.Context, req protocol.D
 		return protocol.DecisionRecordResponseBody{}, err
 	}
 	decision, err := c.RecordDecision(ctx, issues.RecordDecisionParams{
-		Title:        req.Title,
-		Rationale:    req.Rationale,
-		Context:      req.Context,
-		Consequences: req.Consequences,
+		Title:          req.Title,
+		Rationale:      req.Rationale,
+		Context:        req.Context,
+		Consequences:   req.Consequences,
+		IdempotencyKey: req.IdempotencyKey,
 	})
 	if err != nil {
 		return protocol.DecisionRecordResponseBody{}, err

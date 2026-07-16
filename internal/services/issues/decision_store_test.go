@@ -3,6 +3,7 @@ package issues
 import (
 	"context"
 	"database/sql"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,70 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestDecisionStore_SemanticIDsDoNotCollideAcrossIsolatedStores(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	clients := []*Client{newTestClient(t), newTestClient(t)}
+	titles := []string{"Use SQLite / WAL?", "Use SQLite / WAL?", "Ship offline mode"}
+	seen := make(map[string]struct{})
+	validID := regexp.MustCompile(`^dec-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{32}$`)
+
+	for _, client := range clients {
+		for _, title := range titles {
+			decision, err := client.RecordDecision(ctx, RecordDecisionParams{Title: title, Rationale: "durable rationale"})
+			require.NoError(t, err)
+			assert.True(t, validID.MatchString(decision.LocalID), decision.LocalID)
+			assert.NotContains(t, decision.LocalID, "/")
+			if _, exists := seen[decision.LocalID]; exists {
+				t.Fatalf("decision id collided across isolated stores: %s", decision.LocalID)
+			}
+			seen[decision.LocalID] = struct{}{}
+		}
+	}
+}
+
+func TestDecisionStore_ImportsLegacyAndSemanticIDs(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	legacy, err := client.ImportDecision(ctx, ImportDecisionParams{LocalID: "dec-41", NumericID: 41, Title: "Legacy", Rationale: "preserve it"})
+	require.NoError(t, err)
+	assert.Equal(t, "dec-41", legacy.LocalID)
+
+	semanticID := "dec-use-sqlite-0123456789abcdef0123456789abcdef"
+	semantic, err := client.ImportDecision(ctx, ImportDecisionParams{LocalID: semanticID, Title: "Use SQLite", Rationale: "portable import"})
+	require.NoError(t, err)
+	assert.Equal(t, semanticID, semantic.LocalID)
+	_, err = client.GetDecision(ctx, semanticID)
+	require.NoError(t, err)
+}
+
+func TestDecisionStore_RecordIsIdempotentForStableKey(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClient(t)
+	params := RecordDecisionParams{Title: "Use SQLite", Rationale: "portable", IdempotencyKey: "decision.record-01234567-89ab-cdef-0123-456789abcdef"}
+
+	first, err := client.RecordDecision(ctx, params)
+	require.NoError(t, err)
+	replayed, err := client.RecordDecision(ctx, params)
+	require.NoError(t, err)
+	assert.Equal(t, first, replayed)
+
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	var decisions, audits int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM decisions WHERE local_id = ?`, first.LocalID).Scan(&decisions))
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM decision_audit_log WHERE entity_type = ? AND entity_id = ?`, decisionEntityKind, first.LocalID).Scan(&audits))
+	assert.Equal(t, 1, decisions)
+	assert.Equal(t, 1, audits)
+
+	params.Rationale = "different payload"
+	_, err = client.RecordDecision(ctx, params)
+	require.ErrorIs(t, err, domain.ErrConflict)
+}
 
 func TestDecisionStore_RecordAndLinks(t *testing.T) {
 	parallelIssueStoreTest(t)
@@ -32,23 +97,24 @@ func TestDecisionStore_RecordAndLinks(t *testing.T) {
 		Context:   "Need durable local storage for decisions alongside issues.",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "dec-1", first.LocalID)
+	assert.Regexp(t, `^dec-use-sqlite-for-the-decision-store-[0-9a-f]{32}$`, first.LocalID)
 	assert.NotEmpty(t, first.Title)
 	assert.NotEmpty(t, first.Rationale)
 	assert.WithinDuration(t, time.Now(), first.CreatedAt, 5*time.Second)
 
-	got, err := client.GetDecision(ctx, "dec-1")
+	got, err := client.GetDecision(ctx, first.LocalID)
 	require.NoError(t, err)
 	assert.Equal(t, first.Title, got.Title)
 	assert.Equal(t, first.Rationale, got.Rationale)
 
-	// Auto-allocation keeps incrementing.
+	// Auto-allocation communicates the topic without depending on row order.
 	second, err := client.RecordDecision(ctx, RecordDecisionParams{
 		Title:     "Polymorphic decision_links table",
 		Rationale: "One table covers issue/requirement/decision targets without parallel schemas.",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "dec-2", second.LocalID)
+	assert.Regexp(t, `^dec-polymorphic-decision-links-table-[0-9a-f]{32}$`, second.LocalID)
+	assert.NotEqual(t, first.LocalID, second.LocalID)
 
 	// Required-field validation.
 	_, err = client.RecordDecision(ctx, RecordDecisionParams{Title: " "})
@@ -58,30 +124,30 @@ func TestDecisionStore_RecordAndLinks(t *testing.T) {
 
 	// Update only specified fields.
 	newRationale := "Reuse existing SQLite tables; document the link in spec."
-	updated, err := client.UpdateDecision(ctx, "dec-1", UpdateDecisionParams{Rationale: &newRationale})
+	updated, err := client.UpdateDecision(ctx, first.LocalID, UpdateDecisionParams{Rationale: &newRationale})
 	require.NoError(t, err)
 	assert.Equal(t, newRationale, updated.Rationale)
 	assert.Equal(t, first.Title, updated.Title)
 
 	// Link decisions to issues, requirements, and other decisions.
 	_, err = client.AddDecisionLink(ctx, AddDecisionLinkParams{
-		DecisionID: "dec-1",
+		DecisionID: first.LocalID,
 		TargetKind: DecisionTargetIssue,
 		TargetID:   "cgn",
 		Relation:   DecisionRelationAppliesTo,
 	})
 	require.NoError(t, err)
 	_, err = client.AddDecisionLink(ctx, AddDecisionLinkParams{
-		DecisionID: "dec-2",
+		DecisionID: second.LocalID,
 		TargetKind: DecisionTargetRequirement,
 		TargetID:   requirement.LocalID,
 		Relation:   DecisionRelationAppliesTo,
 	})
 	require.NoError(t, err)
 	revisesLink, err := client.AddDecisionLink(ctx, AddDecisionLinkParams{
-		DecisionID: "dec-2",
+		DecisionID: second.LocalID,
 		TargetKind: DecisionTargetDecision,
-		TargetID:   "dec-1",
+		TargetID:   first.LocalID,
 		Relation:   DecisionRelationRevises,
 	})
 	require.NoError(t, err)
@@ -89,16 +155,16 @@ func TestDecisionStore_RecordAndLinks(t *testing.T) {
 
 	// Self-link is rejected.
 	_, err = client.AddDecisionLink(ctx, AddDecisionLinkParams{
-		DecisionID: "dec-1",
+		DecisionID: first.LocalID,
 		TargetKind: DecisionTargetDecision,
-		TargetID:   "dec-1",
+		TargetID:   first.LocalID,
 		Relation:   DecisionRelationRevises,
 	})
 	require.Error(t, err)
 
 	// Linking to a non-existent target returns ErrNotFound.
 	_, err = client.AddDecisionLink(ctx, AddDecisionLinkParams{
-		DecisionID: "dec-1",
+		DecisionID: first.LocalID,
 		TargetKind: DecisionTargetIssue,
 		TargetID:   "no-such-issue",
 	})
@@ -108,36 +174,36 @@ func TestDecisionStore_RecordAndLinks(t *testing.T) {
 	filtered, err := client.ListDecisions(ctx, DecisionFilter{IssueID: "cgn"})
 	require.NoError(t, err)
 	require.Len(t, filtered, 1)
-	assert.Equal(t, "dec-1", filtered[0].LocalID)
+	assert.Equal(t, first.LocalID, filtered[0].LocalID)
 
 	// Listing by requirement surfaces decisions that apply to that requirement.
 	filtered, err = client.ListDecisions(ctx, DecisionFilter{RequirementID: "cgn-req-1"})
 	require.NoError(t, err)
 	require.Len(t, filtered, 1)
-	assert.Equal(t, "dec-2", filtered[0].LocalID)
+	assert.Equal(t, second.LocalID, filtered[0].LocalID)
 
 	// Query search hits title/rationale/context.
 	filtered, err = client.ListDecisions(ctx, DecisionFilter{Query: "polymorphic"})
 	require.NoError(t, err)
 	require.Len(t, filtered, 1)
-	assert.Equal(t, "dec-2", filtered[0].LocalID)
+	assert.Equal(t, second.LocalID, filtered[0].LocalID)
 
 	// Removing a link and re-adding works (soft-delete then revive).
-	require.NoError(t, client.RemoveDecisionLink(ctx, "dec-1", DecisionTargetIssue, "cgn"))
+	require.NoError(t, client.RemoveDecisionLink(ctx, first.LocalID, DecisionTargetIssue, "cgn"))
 	_, err = client.AddDecisionLink(ctx, AddDecisionLinkParams{
-		DecisionID: "dec-1",
+		DecisionID: first.LocalID,
 		TargetKind: DecisionTargetIssue,
 		TargetID:   "cgn",
 		Relation:   DecisionRelationAppliesTo,
 	})
 	require.NoError(t, err)
-	links, err := client.ListDecisionLinks(ctx, DecisionLinkFilter{DecisionID: "dec-1"})
+	links, err := client.ListDecisionLinks(ctx, DecisionLinkFilter{DecisionID: first.LocalID})
 	require.NoError(t, err)
 	assert.Len(t, links, 1)
 
 	// Deleting a decision soft-deletes its active links.
-	require.NoError(t, client.DeleteDecision(ctx, "dec-1"))
-	_, err = client.GetDecision(ctx, "dec-1")
+	require.NoError(t, client.DeleteDecision(ctx, first.LocalID))
+	_, err = client.GetDecision(ctx, first.LocalID)
 	require.ErrorIs(t, err, domain.ErrNotFound)
 }
 
@@ -320,13 +386,13 @@ func TestDecisionStore_AuditLogIsolatedFromSpecAudit(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = client.RecordDecision(ctx, RecordDecisionParams{
+	decision, err := client.RecordDecision(ctx, RecordDecisionParams{
 		Title:     "test decision",
 		Rationale: "test rationale",
 	})
 	require.NoError(t, err)
 	_, err = client.AddDecisionLink(ctx, AddDecisionLinkParams{
-		DecisionID: "dec-1",
+		DecisionID: decision.LocalID,
 		TargetKind: DecisionTargetIssue,
 		TargetID:   "cgn",
 		Relation:   DecisionRelationAppliesTo,

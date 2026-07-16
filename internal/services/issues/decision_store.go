@@ -2,13 +2,17 @@ package issues
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
+	"github.com/google/uuid"
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
@@ -19,6 +23,8 @@ const (
 	decisionOpCreate = "create"
 	decisionOpUpdate = "update"
 	decisionOpDelete = "delete"
+
+	decisionIDSlugMaxRunes = 48
 )
 
 // DecisionTargetKind enumerates what a decision link points at. Decisions can
@@ -90,17 +96,16 @@ type DecisionLink struct {
 }
 
 type RecordDecisionParams struct {
-	Title        string
-	Rationale    string
-	Context      string
-	Consequences string
+	Title          string
+	Rationale      string
+	Context        string
+	Consequences   string
+	IdempotencyKey string
 }
 
-// ImportDecisionParams creates a decision at an explicit local_id (and the
-// matching numeric rowid). Used by the markdown importer so a `dec-N` from
-// another machine keeps its identity locally; without explicit ids the
-// SQLite AUTOINCREMENT would assign a different rowid and the dec-N name
-// would drift relative to the rowid.
+// ImportDecisionParams creates a decision at an explicit local_id. NumericID
+// preserves the matching rowid for historical dec-N imports; semantic ids
+// leave it zero and receive an ordinary SQLite rowid.
 type ImportDecisionParams struct {
 	LocalID      string
 	NumericID    int64
@@ -164,7 +169,7 @@ type decisionLinkRecord struct {
 	DecisionLink
 }
 
-// RecordDecision creates a new decision with an auto-allocated dec-N id.
+// RecordDecision creates a new decision with a semantic, collision-resistant id.
 // Title and rationale are required; context is optional.
 func (c *Client) RecordDecision(ctx context.Context, params RecordDecisionParams) (Decision, error) {
 	var out Decision
@@ -198,12 +203,13 @@ func (c *Client) recordDecisionLocked(ctx context.Context, params RecordDecision
 	}()
 
 	now := time.Now().UTC()
-	result, err := tx.ExecContext(ctx, `
+	localID := newDecisionLocalID(normalized.Title, normalized.IdempotencyKey)
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO decisions (
 			local_id, title, rationale, context, consequences, created_at, updated_at, deleted_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
 	`,
-		"", // placeholder; filled in via UPDATE below using the assigned rowid
+		localID,
 		normalized.Title,
 		nullableString(normalized.Rationale),
 		nullableString(normalized.Context),
@@ -212,14 +218,12 @@ func (c *Client) recordDecisionLocked(ctx context.Context, params RecordDecision
 		formatTimestamp(now),
 	)
 	if err != nil {
-		return Decision{}, c.wrapError("record-decision", "", classifySQLiteConstraint(err))
-	}
-	rowID, err := result.LastInsertId()
-	if err != nil {
-		return Decision{}, c.wrapError("record-decision", "", err)
-	}
-	localID := fmt.Sprintf("dec-%d", rowID)
-	if _, err := tx.ExecContext(ctx, `UPDATE decisions SET local_id = ? WHERE id = ?`, localID, rowID); err != nil {
+		if errors.Is(classifySQLiteConstraint(err), domain.ErrConflict) && normalized.IdempotencyKey != "" {
+			existing, lookupErr := c.lookupDecisionByLocalID(ctx, tx, localID, false)
+			if lookupErr == nil && decisionMatchesRecordParams(existing.Decision, normalized) {
+				return existing.Decision, nil
+			}
+		}
 		return Decision{}, c.wrapError("record-decision", localID, classifySQLiteConstraint(err))
 	}
 
@@ -240,6 +244,47 @@ func (c *Client) recordDecisionLocked(ctx context.Context, params RecordDecision
 	}
 	tx = nil
 	return decision, nil
+}
+
+func newDecisionLocalID(title, idempotencyKey string) string {
+	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")
+	if idempotencyKey != "" {
+		digest := sha256.Sum256([]byte(idempotencyKey))
+		suffix = hex.EncodeToString(digest[:16])
+	}
+	return "dec-" + decisionTitleSlug(title) + "-" + suffix
+}
+
+func decisionMatchesRecordParams(decision Decision, params RecordDecisionParams) bool {
+	return decision.Title == params.Title && decision.Rationale == params.Rationale && decision.Context == params.Context && decision.Consequences == params.Consequences
+}
+
+func decisionTitleSlug(title string) string {
+	var slug strings.Builder
+	lastHyphen := false
+	runes := 0
+	for _, r := range strings.ToLower(strings.TrimSpace(title)) {
+		if runes >= decisionIDSlugMaxRunes {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			slug.WriteRune(r)
+			lastHyphen = false
+			runes++
+		case unicode.IsSpace(r) || r == '-' || r == '_' || unicode.IsPunct(r):
+			if slug.Len() > 0 && !lastHyphen {
+				slug.WriteByte('-')
+				lastHyphen = true
+				runes++
+			}
+		}
+	}
+	value := strings.Trim(slug.String(), "-")
+	if value == "" {
+		return "decision"
+	}
+	return value
 }
 
 // ImportDecision inserts a decision with an explicit local_id and numeric
@@ -270,8 +315,8 @@ func (c *Client) importDecisionLocked(ctx context.Context, params ImportDecision
 	if params.LocalID == "" {
 		return Decision{}, c.wrapError("import-decision", "", errors.New("local_id is required"))
 	}
-	if params.NumericID <= 0 {
-		return Decision{}, c.wrapError("import-decision", params.LocalID, errors.New("numeric id must be positive"))
+	if params.NumericID < 0 {
+		return Decision{}, c.wrapError("import-decision", params.LocalID, errors.New("numeric id must not be negative"))
 	}
 	if params.Title == "" {
 		return Decision{}, c.wrapError("import-decision", params.LocalID, errors.New("title is required"))
@@ -291,21 +336,15 @@ func (c *Client) importDecisionLocked(ctx context.Context, params ImportDecision
 	}()
 
 	now := time.Now().UTC()
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO decisions (
-			id, local_id, title, rationale, context, consequences,
-			created_at, updated_at, deleted_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
-	`,
-		params.NumericID,
-		params.LocalID,
-		params.Title,
-		nullableString(params.Rationale),
-		nullableString(params.Context),
-		nullableString(params.Consequences),
-		formatTimestamp(now),
-		formatTimestamp(now),
-	); err != nil {
+	columns := "local_id, title, rationale, context, consequences, created_at, updated_at, deleted_at"
+	values := "?, ?, ?, ?, ?, ?, ?, NULL"
+	args := []any{params.LocalID, params.Title, nullableString(params.Rationale), nullableString(params.Context), nullableString(params.Consequences), formatTimestamp(now), formatTimestamp(now)}
+	if params.NumericID > 0 {
+		columns = "id, " + columns
+		values = "?, " + values
+		args = append([]any{params.NumericID}, args...)
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO decisions ("+columns+") VALUES ("+values+")", args...); err != nil {
 		return Decision{}, c.wrapError("import-decision", params.LocalID, classifySQLiteConstraint(err))
 	}
 
@@ -1277,6 +1316,7 @@ func normalizeRecordDecisionParams(params RecordDecisionParams) (RecordDecisionP
 	params.Rationale = strings.TrimSpace(params.Rationale)
 	params.Context = strings.TrimSpace(params.Context)
 	params.Consequences = strings.TrimSpace(params.Consequences)
+	params.IdempotencyKey = strings.TrimSpace(params.IdempotencyKey)
 	if params.Title == "" {
 		return params, errors.New("decision title is required")
 	}

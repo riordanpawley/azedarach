@@ -922,7 +922,7 @@ func TestReconcileDecisionMarkdownEquivalentWorktreesProduceIdenticalRenames(t *
 }
 
 func TestIsDecisionMDFilename(t *testing.T) {
-	for _, name := range []string{"dec-1.md", "dec-42-title.md"} {
+	for _, name := range []string{"dec-1.md", "dec-42-title.md", "dec-use-sqlite-0123456789abcdef0123456789abcdef-use-sqlite.md"} {
 		if !isDecisionMDFilename(name) {
 			t.Errorf("isDecisionMDFilename(%q) = false, want true", name)
 		}
@@ -931,6 +931,14 @@ func TestIsDecisionMDFilename(t *testing.T) {
 		if isDecisionMDFilename(name) {
 			t.Errorf("isDecisionMDFilename(%q) = true, want false", name)
 		}
+	}
+}
+
+func TestDecisionMDIDRecoversSemanticIDFromMalformedFile(t *testing.T) {
+	id := "dec-use-sqlite-0123456789abcdef0123456789abcdef"
+	name := id + "-use-sqlite.md"
+	if got := decisionMDID(name, []byte("partially written")); got != id {
+		t.Fatalf("decisionMDID(%q) = %q, want %q", name, got, id)
 	}
 }
 
