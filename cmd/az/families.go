@@ -174,7 +174,7 @@ func runAICommand(cfg *config.Config, args []string) error {
 		fs.StringVar(&opts.RecoverAction, "recover-action", "", "recovery action: delivered or discard")
 		fs.StringVar(&opts.RecoverThread, "recover-thread", "", "exact persisted Codex thread for recovery")
 		if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 {
-			return fmt.Errorf("usage: az ai native-codex-client [--prompt text] [--resume] [--yolo] [--recover-intent key --recover-action delivered|discard]")
+			return fmt.Errorf("usage: az ai native-codex-client [--prompt text] [--resume] [--yolo] [--recover-intent key --recover-thread id --recover-action delivered|discard]")
 		}
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
 			return cli.NativeCodexClient(context.Background(), deps, opts)

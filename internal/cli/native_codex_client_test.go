@@ -99,6 +99,31 @@ func TestRecoverNativeCodexIntentRequiresValidExactState(t *testing.T) {
 	}
 }
 
+func TestRecoverNativeCodexDeliveredStableReplay(t *testing.T) {
+	dir := t.TempDir()
+	sd := filepath.Join(dir, ".azedarach", "native-agent-input")
+	_ = os.MkdirAll(sd, 0700)
+	path := filepath.Join(sd, "s.json")
+	state := nativeCodexState{Incarnation: "inc", ThreadID: "thread", Pending: map[string]string{"i\x00inc": "msg"}, Accepted: map[string]string{}, Resolved: map[string]string{}}
+	if err := saveNativeCodexState(path, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecoverNativeCodexIntent(dir, "s", "i", "delivered", "thread"); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, _ := loadNativeCodexState(path, true)
+	calls := 0
+	for n := 0; n < 2; n++ {
+		r, _ := acceptNativeCodexDelivery(nativeCodexEnvelope{IntentKey: "i", AgentIncarnation: "inc"}, nil, false, path, &reloaded, func(string) error { calls++; return nil })
+		if r.Outcome != "accepted" || r.AcknowledgementToken == "" {
+			t.Fatalf("response=%+v", r)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("submission calls=%d", calls)
+	}
+}
+
 func TestCodexRPCPreservesStringAndNumericServerRequestIDs(t *testing.T) {
 	c := &codexRPCClient{waits: map[string]chan codexRPCMessage{}, requests: make(chan codexRPCMessage, 2), events: make(chan codexRPCMessage, 2), done: make(chan struct{})}
 	done := make(chan struct{})
