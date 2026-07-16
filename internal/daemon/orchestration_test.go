@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -636,6 +637,62 @@ func TestProjectOrchestrationRejectsDirectStartOfParentedTicket(t *testing.T) {
 	}
 	if result.Skipped[childID] != "outside-project-root-candidate-scope" || len(result.Started) != 0 {
 		t.Fatalf("direct child start result = %+v", result)
+	}
+}
+
+func TestRootedOrchestrationReviewQueueStopsAtDirectChildren(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	rootID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Nested root", Type: domain.TypeEpic, Status: domain.StatusInReview, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grandchildID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Nested worker", Type: domain.TypeTask, Status: domain.StatusInReview, ParentID: &childID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	scope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: scope, ActorID: "parent-orchestrator", Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reviewIDs []string
+	for _, review := range snapshot.ReviewQueue {
+		reviewIDs = append(reviewIDs, review.IssueID)
+	}
+	if !slices.Contains(reviewIDs, childID) {
+		t.Fatalf("review queue = %v, want direct child %s", reviewIDs, childID)
+	}
+	if slices.Contains(reviewIDs, grandchildID) {
+		t.Fatalf("review queue = %v, nested orchestrator must own descendant %s", reviewIDs, grandchildID)
+	}
+	result, err := d.orchestrationAuthority().Apply(ctx, "proj", protocol.OrchestrationIntentRequest{
+		Scope: scope, Kind: protocol.OrchestrationIntentStart, IntentKey: "reject-grandchild", ActorID: "parent-orchestrator", IssueIDs: []string{grandchildID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Skipped[grandchildID]; !strings.Contains(got, "outside-root-direct-child-scope") || !strings.Contains(got, "direct parent orchestrator") {
+		t.Fatalf("skipped[%s] = %q, want chain-of-command refusal", grandchildID, got)
+	}
+	reviewResult, err := d.orchestrationAuthority().Apply(ctx, "proj", protocol.OrchestrationIntentRequest{
+		Scope: scope, Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "reject-grandchild-review", ActorID: "parent-orchestrator", IssueIDs: []string{grandchildID},
+		Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "nested worker finding"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reviewResult.Skipped[grandchildID]; !strings.Contains(got, "outside-root-direct-child-scope") {
+		t.Fatalf("review skipped[%s] = %q, want chain-of-command refusal", grandchildID, got)
 	}
 }
 

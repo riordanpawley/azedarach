@@ -13428,7 +13428,8 @@ func TestPrimeCommandShowsRootExitContractForAzOrchestrationRoot(t *testing.T) {
 	for _, guidance := range []string{
 		"Remain in the active orchestration turn/loop after starting workers, nested orchestrators, or a background watch; startup is not a completed handoff to the human.",
 		"Continuously consume the root watch and react to worker/nested-orchestrator progress, blocked, and integration-ready evidence while graph work remains.",
-		"Supervise nested epic/root orchestrators as direct children while they own their descendant workers; do not flatten or take over those descendants unless explicitly requested.",
+		"Chain of command is strict: coordinate only direct children. Never launch, message, review, integrate, stop, or take over grandchildren or deeper descendants.",
+		"Supervise nested epic/root orchestrators as direct children while they exclusively own their descendants.",
 		"repeat status/start/watch/review until `az orchestrate complete-check --root az-root` passes",
 	} {
 		if !strings.Contains(output, guidance) {
