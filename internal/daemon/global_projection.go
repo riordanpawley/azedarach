@@ -80,7 +80,8 @@ func (d *Daemon) scheduleSelectorSnapshotRefresh(ctx context.Context, key string
 		d.userStoreRefreshMu.Unlock()
 		return
 	}
-	if !d.selectorSnapshots.beginRefresh(key) {
+	refresh, ok := d.selectorSnapshots.beginRefresh(key)
+	if !ok {
 		d.userStoreRefreshMu.Unlock()
 		return
 	}
@@ -95,15 +96,40 @@ func (d *Daemon) scheduleSelectorSnapshotRefresh(ctx context.Context, key string
 	go func() {
 		defer d.userStoreRefreshWG.Done()
 		defer cancel()
-		defer d.selectorSnapshots.finishRefresh(key)
 		body, err := d.buildGlobalSnapshot(refreshCtx, body)
-		if err == nil {
-			d.selectorSnapshots.store(key, body)
-		}
+		d.selectorSnapshots.finishLoad(refresh, body, err)
 		if err != nil && d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("tmux selector snapshot cache refresh failed", "error", err)
 		}
 	}()
+}
+
+func (d *Daemon) loadSelectorSnapshot(ctx context.Context, body protocol.GlobalSnapshotRequestBody) ([]byte, error) {
+	d.userStoreRefreshMu.Lock()
+	if d.userStoreRefreshStopping {
+		d.userStoreRefreshMu.Unlock()
+		return nil, context.Canceled
+	}
+	baseCtx := d.userStoreRefreshCtx
+	if baseCtx == nil {
+		baseCtx = context.WithoutCancel(ctx)
+	}
+	d.userStoreRefreshWG.Add(1)
+	d.userStoreRefreshMu.Unlock()
+
+	loadCtx, cancel := context.WithTimeout(baseCtx, selectorSnapshotRefreshTimeout)
+	defer d.userStoreRefreshWG.Done()
+	defer cancel()
+	return d.buildGlobalSnapshot(loadCtx, body)
+}
+
+func (d *Daemon) startUserProjectionWorkContext(ctx context.Context) {
+	d.userStoreRefreshMu.Lock()
+	defer d.userStoreRefreshMu.Unlock()
+	if d.userStoreRefreshStopping || d.userStoreRefreshCancel != nil {
+		return
+	}
+	d.userStoreRefreshCtx, d.userStoreRefreshCancel = context.WithCancel(ctx)
 }
 
 func (d *Daemon) startGlobalProjectionRepairWorker(ctx context.Context) {
@@ -369,8 +395,8 @@ func (d *Daemon) handleGlobalSnapshot(ctx context.Context, req protocol.RequestE
 			resp.Body = cached
 			return resp, nil
 		}
-		raw, err := d.selectorSnapshots.loadCold(ctx, key, func(loadCtx context.Context) ([]byte, error) {
-			return d.buildGlobalSnapshot(loadCtx, body)
+		raw, err := d.selectorSnapshots.loadCold(ctx, key, func() ([]byte, error) {
+			return d.loadSelectorSnapshot(ctx, body)
 		})
 		if err != nil {
 			return d.globalSnapshotErrorResponse(req, err), nil

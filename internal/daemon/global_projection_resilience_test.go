@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -185,6 +186,82 @@ func TestTmuxSelectorGlobalSnapshotFailedRefreshPreservesLastGoodValue(t *testin
 	}
 	if got := snapshot.Projects[0].Tasks[0].Title; got != "last-good" {
 		t.Fatalf("cached snapshot title = %q, want last-good", got)
+	}
+}
+
+func TestTmuxSelectorGlobalSnapshotCanceledColdCallerDoesNotCancelDaemonLoad(t *testing.T) {
+	store, _ := openSelectorSnapshotTestStore(t, "survives-cancellation")
+	d := &Daemon{cfg: Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, userStore: store}
+	daemonCtx, stopDaemon := context.WithCancel(context.Background())
+	d.startUserProjectionWorkContext(daemonCtx)
+	t.Cleanup(func() {
+		stopDaemon()
+		d.stopUserProjectionWorkers()
+	})
+	body := protocol.GlobalSnapshotRequestBody{Consumer: protocol.GlobalViewConsumerTmuxSelector}
+	key, err := selectorSnapshotRequestKey(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	cancelLeader()
+	if _, err = d.selectorSnapshots.loadCold(leaderCtx, key, func() ([]byte, error) {
+		return d.loadSelectorSnapshot(leaderCtx, body)
+	}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled leader error = %v, want context canceled", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		if cached, ok := d.selectorSnapshots.get(key); ok {
+			var snapshot protocol.GlobalSnapshotResponseBody
+			if err = json.Unmarshal(cached, &snapshot); err == nil && snapshot.Projects[0].Tasks[0].Title == "survives-cancellation" {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("daemon-owned cold load did not populate cache after caller cancellation")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	got := readGlobalSnapshotResponse(t, d, context.Background(), body)
+	if title := got.Projects[0].Tasks[0].Title; title != "survives-cancellation" {
+		t.Fatalf("surviving caller title = %q, want survives-cancellation", title)
+	}
+}
+
+func TestTmuxSelectorGlobalSnapshotSaturationServesCacheWithoutAnotherRefresh(t *testing.T) {
+	store, _ := openSelectorSnapshotTestStore(t, "cached")
+	d := &Daemon{cfg: Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, userStore: store}
+	t.Cleanup(d.stopUserProjectionWorkers)
+	body := protocol.GlobalSnapshotRequestBody{Consumer: protocol.GlobalViewConsumerTmuxSelector}
+	_ = readGlobalSnapshotResponse(t, d, context.Background(), body)
+
+	reservations := make([]selectorSnapshotLoad, 0, maxSelectorSnapshotRefreshes)
+	for index := 0; index < maxSelectorSnapshotRefreshes; index++ {
+		reservation, ok := d.selectorSnapshots.beginRefresh(fmt.Sprintf("occupied-%d", index))
+		if !ok {
+			t.Fatalf("reserve refresh capacity %d", index)
+		}
+		reservations = append(reservations, reservation)
+	}
+	warm := readGlobalSnapshotResponse(t, d, context.Background(), body)
+	if title := warm.Projects[0].Tasks[0].Title; title != "cached" {
+		t.Fatalf("saturated warm title = %q, want cached", title)
+	}
+	key, err := selectorSnapshotRequestKey(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.selectorSnapshots.mu.RLock()
+	_, targetRefreshing := d.selectorSnapshots.refreshing[key]
+	active := d.selectorSnapshots.activeRefreshes
+	d.selectorSnapshots.mu.RUnlock()
+	if targetRefreshing || active != maxSelectorSnapshotRefreshes {
+		t.Fatalf("saturated refresh state target=%v active=%d, want false,%d", targetRefreshing, active, maxSelectorSnapshotRefreshes)
+	}
+	for _, reservation := range reservations {
+		d.selectorSnapshots.finishLoad(reservation, nil, errors.New("test release"))
 	}
 }
 

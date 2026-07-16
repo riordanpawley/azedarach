@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,7 +17,7 @@ func TestSelectorSnapshotCacheCoalescesColdLoadsAndIsolatesResults(t *testing.T)
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var calls atomic.Int32
-	load := func(context.Context) ([]byte, error) {
+	load := func() ([]byte, error) {
 		if calls.Add(1) == 1 {
 			close(started)
 		}
@@ -66,7 +67,7 @@ func TestSelectorSnapshotCacheWarmReadDoesNotWaitForRefresh(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var calls atomic.Int32
-	load := func(context.Context) ([]byte, error) {
+	load := func() ([]byte, error) {
 		if calls.Add(1) == 1 {
 			close(started)
 		}
@@ -74,21 +75,19 @@ func TestSelectorSnapshotCacheWarmReadDoesNotWaitForRefresh(t *testing.T) {
 		return []byte("fresh"), nil
 	}
 
-	if !cache.beginRefresh("key") {
+	refresh, ok := cache.beginRefresh("key")
+	if !ok {
 		t.Fatal("initial refresh reservation failed")
 	}
 	done := make(chan error, 1)
 	go func() {
-		body, err := load(context.Background())
-		if err == nil {
-			cache.store("key", body)
-		}
-		cache.finishRefresh("key")
+		body, err := load()
+		cache.finishLoad(refresh, body, err)
 		done <- err
 	}()
 	<-started
 	for range 4 {
-		if cache.beginRefresh("key") {
+		if _, ok := cache.beginRefresh("key"); ok {
 			t.Fatal("duplicate refresh reservation succeeded")
 		}
 	}
@@ -108,17 +107,131 @@ func TestSelectorSnapshotCacheWarmReadDoesNotWaitForRefresh(t *testing.T) {
 func TestSelectorSnapshotCacheRefreshReservationCanBeReleasedAfterFailure(t *testing.T) {
 	cache := newSelectorSnapshotCache()
 	cache.store("key", []byte("last-good"))
-	if !cache.beginRefresh("key") {
+	refresh, ok := cache.beginRefresh("key")
+	if !ok {
 		t.Fatal("refresh reservation failed")
 	}
-	cache.finishRefresh("key")
-	if !cache.beginRefresh("key") {
+	cache.finishLoad(refresh, nil, errors.New("refresh failed"))
+	refresh, ok = cache.beginRefresh("key")
+	if !ok {
 		t.Fatal("released refresh reservation could not be reacquired")
 	}
-	cache.finishRefresh("key")
+	cache.finishLoad(refresh, nil, errors.New("refresh failed again"))
 	cached, ok := cache.get("key")
 	if !ok || string(cached) != "last-good" {
 		t.Fatalf("cached result = %q,%v, want last-good,true", cached, ok)
+	}
+}
+
+func TestSelectorSnapshotCacheRejectsRefreshOlderThanEvictedColdLoad(t *testing.T) {
+	cache := newSelectorSnapshotCache()
+	cache.store("key", []byte("initial"))
+	oldRefresh, ok := cache.beginRefresh("key")
+	if !ok {
+		t.Fatal("old refresh reservation failed")
+	}
+	for index := 0; index < maxSelectorSnapshotCacheEntries; index++ {
+		cache.store(fmt.Sprintf("churn-%02d", index), []byte("churn"))
+	}
+	if _, ok := cache.get("key"); ok {
+		t.Fatal("key was not evicted while its refresh was in flight")
+	}
+
+	newer, err := cache.loadCold(context.Background(), "key", func() ([]byte, error) {
+		return []byte("newer-cold"), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(newer) != "newer-cold" {
+		t.Fatalf("cold result = %q, want newer-cold", newer)
+	}
+	if applied := cache.finishLoad(oldRefresh, []byte("older-refresh"), nil); applied {
+		t.Fatal("older refresh overwrote a newer cold load")
+	}
+	if cached, ok := cache.get("key"); !ok || string(cached) != "newer-cold" {
+		t.Fatalf("cached result = %q,%v, want newer-cold,true", cached, ok)
+	}
+}
+
+func TestSelectorSnapshotCacheColdLeaderCancellationDoesNotCancelSurvivingWaiter(t *testing.T) {
+	cache := newSelectorSnapshotCache()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	load := func() ([]byte, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return []byte("fresh"), nil
+	}
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderResult := make(chan error, 1)
+	go func() {
+		_, err := cache.loadCold(leaderCtx, "key", load)
+		leaderResult <- err
+	}()
+	<-started
+	waiterResult := make(chan struct {
+		body []byte
+		err  error
+	}, 1)
+	waiterCtx := &observedDoneContext{Context: context.Background(), observed: make(chan struct{})}
+	go func() {
+		body, err := cache.loadCold(waiterCtx, "key", load)
+		waiterResult <- struct {
+			body []byte
+			err  error
+		}{body: body, err: err}
+	}()
+	<-waiterCtx.observed
+	cancelLeader()
+	if err := <-leaderResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("leader error = %v, want context canceled", err)
+	}
+	close(release)
+	waiter := <-waiterResult
+	if waiter.err != nil || string(waiter.body) != "fresh" {
+		t.Fatalf("surviving waiter = %q,%v, want fresh,nil", waiter.body, waiter.err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("load calls = %d, want 1", got)
+	}
+}
+
+type observedDoneContext struct {
+	context.Context
+	observed chan struct{}
+	once     sync.Once
+}
+
+func (c *observedDoneContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.observed) })
+	return c.Context.Done()
+}
+
+func TestSelectorSnapshotCacheBoundsRefreshesAcrossKeys(t *testing.T) {
+	cache := newSelectorSnapshotCache()
+	loads := make([]selectorSnapshotLoad, 0, maxSelectorSnapshotRefreshes)
+	for index := 0; index < maxSelectorSnapshotRefreshes; index++ {
+		load, ok := cache.beginRefresh(fmt.Sprintf("key-%02d", index))
+		if !ok {
+			t.Fatalf("refresh %d was rejected before global capacity", index)
+		}
+		loads = append(loads, load)
+	}
+	if _, ok := cache.beginRefresh("saturated"); ok {
+		t.Fatal("refresh above daemon-wide capacity was admitted")
+	}
+	cache.finishLoad(loads[0], []byte("fresh"), nil)
+	load, ok := cache.beginRefresh("after-release")
+	if !ok {
+		t.Fatal("refresh was not admitted after capacity was released")
+	}
+	cache.finishLoad(load, []byte("fresh"), nil)
+	for _, load := range loads[1:] {
+		cache.finishLoad(load, []byte("fresh"), nil)
 	}
 }
 
