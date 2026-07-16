@@ -737,7 +737,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	select {
 	case err = <-serveErrCh:
 	case err = <-nativeAgentInputErrCh:
-		if err != nil {
+		if ctx.Err() != nil {
+			err = nil
+		} else if err != nil {
 			err = fmt.Errorf("native agent input authority exited: %w", err)
 		} else {
 			err = errors.New("native agent input authority exited")
