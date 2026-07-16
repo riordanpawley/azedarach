@@ -542,7 +542,7 @@ func TestCodexInputGateIncarnationTakeoverNeverOverlapsOrOldOwnerUngates(t *test
 		t.Fatal(err)
 	}
 	oldGate := &codexInputGate{tmux: adapter, state: oldState, statePath: statePath, renewRestoreFence: func(restoreCtx context.Context) (bool, error) {
-		_, renewed, err := client.RenewAgentInputDeliverySessionLease(restoreCtx, "p", "az-dlb", "thread-old", oldLease.LeaseToken, time.Now(), time.Minute)
+		_, renewed, err := client.RenewAgentInputDeliverySessionLease(restoreCtx, "p", "az-dlb", "thread-old", oldLease.LeaseOwner, oldLease.LeaseToken, time.Now(), time.Minute)
 		return renewed, err
 	}}
 	newLease, acquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, "p", "az-dlb", "thread-new", "daemon-new", time.Now(), time.Minute)
@@ -557,8 +557,20 @@ func TestCodexInputGateIncarnationTakeoverNeverOverlapsOrOldOwnerUngates(t *test
 	request.SessionLeaseToken = newLease.LeaseToken
 	request.PreviousAgentIncarnation = newLease.PreviousAgentIncarnation
 	request.PreviousSessionLeaseToken = newLease.PreviousLeaseToken
+	currentLease := newLease
+	request.CompleteSessionTakeover = func(takeoverCtx context.Context) (issues.AgentInputDeliverySessionLease, error) {
+		completed, ok, err := client.CompleteAgentInputDeliverySessionLeaseTakeover(takeoverCtx, "p", "az-dlb", currentLease.AgentIncarnation, currentLease.LeaseToken, "thread-new", "daemon-new", time.Now(), time.Minute)
+		if err != nil {
+			return issues.AgentInputDeliverySessionLease{}, err
+		}
+		if !ok {
+			return issues.AgentInputDeliverySessionLease{}, errors.New("takeover completion lost exact fence")
+		}
+		currentLease = completed
+		return completed, nil
+	}
 	request.RenewRestoreFence = func(restoreCtx context.Context) (bool, error) {
-		_, renewed, err := client.RenewAgentInputDeliverySessionLease(restoreCtx, "p", "az-dlb", "thread-new", newLease.LeaseToken, time.Now(), time.Minute)
+		_, renewed, err := client.RenewAgentInputDeliverySessionLease(restoreCtx, "p", "az-dlb", currentLease.AgentIncarnation, currentLease.LeaseOwner, currentLease.LeaseToken, time.Now(), time.Minute)
 		return renewed, err
 	}
 	done := make(chan error, 1)
@@ -585,6 +597,83 @@ func TestCodexInputGateIncarnationTakeoverNeverOverlapsOrOldOwnerUngates(t *test
 	close(rpc.releaseTurn)
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCodexInputGateTakeoverFailuresRetainExactRecoveryAuthority(t *testing.T) {
+	tests := []struct {
+		name       string
+		configure  func(*fakeCodexInputTmux)
+		wantMarker bool
+	}{
+		{name: "before restore", configure: func(adapter *fakeCodexInputTmux) { adapter.panes[0].PanePID = 99 }, wantMarker: true},
+		{name: "during restore", configure: func(adapter *fakeCodexInputTmux) { adapter.failDisableHooks = true }, wantMarker: true},
+		{name: "after restore before rotation", wantMarker: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Now().UTC()
+			adapter := &fakeCodexInputTmux{paneEnabled: true, hooksEnabled: true, activeGates: 1, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb", ReadOnly: true}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
+			if test.configure != nil {
+				test.configure(adapter)
+			}
+			authority := newCodexAppServerInputAuthority(adapter, filepath.Join(t.TempDir(), "daemon.sock"), nil, func(string) daemonProjectRuntimeConfig {
+				return daemonProjectRuntimeConfig{CLITool: "codex", CodexAppServer: true}
+			})
+			client := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+			t.Cleanup(func() { _ = client.CloseDB() })
+			oldLease, acquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, "p", "az-dlb", "thread-old", "daemon-old", now.Add(-2*time.Minute), time.Minute)
+			if err != nil || !acquired {
+				t.Fatalf("old lease=%+v acquired=%v err=%v", oldLease, acquired, err)
+			}
+			takeover, acquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, "p", "az-dlb", "thread-new", "daemon-new", now, time.Minute)
+			if err != nil || !acquired || !takeover.TakeoverPending || takeover.LeaseToken != oldLease.LeaseToken {
+				t.Fatalf("takeover=%+v acquired=%v err=%v", takeover, acquired, err)
+			}
+			if err := os.MkdirAll(authority.gateDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			eventsPath := filepath.Join(authority.gateDir, "gate-old.events")
+			if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-old", LeaseOwner: "daemon-old", FenceToken: oldLease.LeaseToken, PaneID: "12", PanePID: 42, PaneInputEnabled: true, HookID: "100", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
+			statePath := filepath.Join(authority.gateDir, "gate-old.json")
+			raw, _ := json.Marshal(state)
+			if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			request := codexAuthorityRequest()
+			request.Delivery.Target.AgentIncarnation = "thread-new"
+			request.SessionLeaseOwner = takeover.LeaseOwner
+			request.SessionLeaseToken = takeover.LeaseToken
+			request.PreviousAgentIncarnation = takeover.PreviousAgentIncarnation
+			request.PreviousSessionLeaseToken = takeover.PreviousLeaseToken
+			request.RenewRestoreFence = func(restoreCtx context.Context) (bool, error) {
+				_, renewed, err := client.RenewAgentInputDeliverySessionLease(restoreCtx, "p", "az-dlb", takeover.AgentIncarnation, takeover.LeaseOwner, takeover.LeaseToken, time.Now().UTC(), time.Minute)
+				return renewed, err
+			}
+			request.CompleteSessionTakeover = func(context.Context) (issues.AgentInputDeliverySessionLease, error) {
+				return issues.AgentInputDeliverySessionLease{}, errors.New("injected crash before fence rotation")
+			}
+			if err := authority.recoverSupersededGate(ctx, &request); err == nil {
+				t.Fatal("takeover failure was accepted")
+			}
+			if _, renewed, err := client.RenewAgentInputDeliverySessionLease(ctx, "p", "az-dlb", takeover.AgentIncarnation, "daemon-old", takeover.LeaseToken, now.Add(time.Second), time.Minute); err != nil || renewed {
+				t.Fatalf("old owner renewed transferred fence=%v err=%v", renewed, err)
+			}
+			if _, renewed, err := client.RenewAgentInputDeliverySessionLease(ctx, "p", "az-dlb", takeover.AgentIncarnation, takeover.LeaseOwner, takeover.LeaseToken, now.Add(time.Second), time.Minute); err != nil || !renewed {
+				t.Fatalf("takeover owner lost recovery fence=%v err=%v", renewed, err)
+			}
+			_, statErr := os.Stat(statePath)
+			if test.wantMarker && statErr != nil {
+				t.Fatalf("recovery marker removed: %v", statErr)
+			}
+			if !test.wantMarker && !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("completed restore marker remains: %v", statErr)
+			}
+		})
 	}
 }
 
@@ -783,7 +872,7 @@ func TestCodexInputGateStartupRecoveryRetriesAtLiveOwnerExpiry(t *testing.T) {
 	if err != nil || !acquired {
 		t.Fatalf("completion signalled before recovery lease release: lease=%+v acquired=%v err=%v", postRecoveryLease, acquired, err)
 	}
-	if err := client.ReleaseAgentInputDeliverySessionLease(ctx, "p", "az-dlb", "thread-exact", postRecoveryLease.LeaseToken); err != nil {
+	if err := client.ReleaseAgentInputDeliverySessionLease(ctx, "p", "az-dlb", "thread-exact", postRecoveryLease.LeaseOwner, postRecoveryLease.LeaseToken); err != nil {
 		t.Fatalf("release completion-observer lease: %v", err)
 	}
 	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
@@ -905,11 +994,15 @@ func TestCodexInputGateStartupRecoveryRefusesReusedPanePID(t *testing.T) {
 		t.Fatalf("diagnostic recovery marker was removed: %v", err)
 	}
 	var persisted codexInputGateState
-	if err := json.Unmarshal(persistedRaw, &persisted); err != nil || persisted.FenceToken == lease.LeaseToken || persisted.LeaseOwner != authority.recoveryOwner {
-		t.Fatalf("recovery fence was not durably advanced before validation: state=%+v err=%v", persisted, err)
+	if err := json.Unmarshal(persistedRaw, &persisted); err != nil || persisted.FenceToken != lease.LeaseToken || persisted.LeaseOwner != authority.recoveryOwner {
+		t.Fatalf("recovery ownership was not durably transferred without rotating the marker fence: state=%+v err=%v", persisted, err)
 	}
 	next, acquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, "p", "az-dlb", "thread-new", "new-daemon", now, time.Minute)
-	if err != nil || !acquired || next.LeaseToken == "" {
-		t.Fatalf("failed recovery retained durable lease: lease=%+v acquired=%v err=%v", next, acquired, err)
+	if err != nil || acquired || next.LeaseToken != "" {
+		t.Fatalf("failed recovery released live durable authority: lease=%+v acquired=%v err=%v", next, acquired, err)
+	}
+	next, acquired, err = client.ClaimAgentInputDeliverySessionLease(ctx, "p", "az-dlb", "thread-new", "new-daemon", now.Add(authority.leaseDuration), time.Minute)
+	if err != nil || !acquired || !next.TakeoverPending || next.LeaseToken != lease.LeaseToken {
+		t.Fatalf("expired failed recovery could not transfer exact fence: lease=%+v acquired=%v err=%v", next, acquired, err)
 	}
 }

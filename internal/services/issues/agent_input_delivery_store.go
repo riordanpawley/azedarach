@@ -34,6 +34,7 @@ type AgentInputDeliverySessionLease struct {
 	LeaseExpires             time.Time
 	PreviousAgentIncarnation string
 	PreviousLeaseToken       string
+	TakeoverPending          bool
 }
 
 // ClaimAgentInputDeliverySessionLease excludes every automated delivery to the
@@ -67,18 +68,24 @@ func (c *Client) ClaimAgentInputDeliverySessionLease(ctx context.Context, projec
 				return err
 			}
 			defer tx.Rollback()
-			var previousIncarnation, previousToken, previousExpiry string
-			err = tx.QueryRowContext(lockCtx, `SELECT agent_incarnation,lease_token,lease_expires_at FROM agent_input_delivery_session_leases WHERE project_id=? AND session_id=?`, projectID, sessionID).Scan(&previousIncarnation, &previousToken, &previousExpiry)
+			var previousIncarnation, previousOwner, previousToken, previousExpiry string
+			err = tx.QueryRowContext(lockCtx, `SELECT agent_incarnation,lease_owner,lease_token,lease_expires_at FROM agent_input_delivery_session_leases WHERE project_id=? AND session_id=?`, projectID, sessionID).Scan(&previousIncarnation, &previousOwner, &previousToken, &previousExpiry)
 			switch {
 			case errors.Is(err, sql.ErrNoRows):
 				err = nil
 				_, err = tx.ExecContext(lockCtx, `INSERT INTO agent_input_delivery_session_leases(project_id,session_id,agent_incarnation,lease_owner,lease_token,lease_expires_at,updated_at) VALUES(?,?,?,?,?,?,?)`, projectID, sessionID, incarnation, owner, token, formatTimestamp(expires), formatTimestamp(now))
 			case err != nil:
 				return err
-			case parseTimestamp(previousExpiry).After(now):
+			case parseTimestamp(previousExpiry).IsZero():
+				return fmt.Errorf("invalid durable agent input session lease expiry %q", previousExpiry)
+			case now.Before(parseTimestamp(previousExpiry)):
 				return nil
 			default:
-				result, updateErr := tx.ExecContext(lockCtx, `UPDATE agent_input_delivery_session_leases SET agent_incarnation=?,lease_owner=?,lease_token=?,lease_expires_at=?,updated_at=? WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_token=? AND julianday(lease_expires_at)<=julianday(?)`, incarnation, owner, token, formatTimestamp(expires), formatTimestamp(now), projectID, sessionID, previousIncarnation, previousToken, formatTimestamp(now))
+				// Take ownership of the expired fence without rotating its identity.
+				// A persisted tmux gate still names this exact incarnation/token, so
+				// changing either before restoration would destroy the only durable
+				// recovery authority if this daemon crashed mid-takeover.
+				result, updateErr := tx.ExecContext(lockCtx, `UPDATE agent_input_delivery_session_leases SET lease_owner=?,lease_expires_at=?,updated_at=? WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_owner=? AND lease_token=? AND lease_expires_at=?`, owner, formatTimestamp(expires), formatTimestamp(now), projectID, sessionID, previousIncarnation, previousOwner, previousToken, previousExpiry)
 				if updateErr != nil {
 					return updateErr
 				}
@@ -88,6 +95,9 @@ func (c *Client) ClaimAgentInputDeliverySessionLease(ctx context.Context, projec
 				}
 				lease.PreviousAgentIncarnation = previousIncarnation
 				lease.PreviousLeaseToken = previousToken
+				lease.TakeoverPending = true
+				lease.AgentIncarnation = previousIncarnation
+				lease.LeaseToken = previousToken
 			}
 			if err != nil {
 				return err
@@ -102,15 +112,19 @@ func (c *Client) ClaimAgentInputDeliverySessionLease(ctx context.Context, projec
 	if acquired {
 		lease.ProjectID = projectID
 		lease.SessionID = sessionID
-		lease.AgentIncarnation = incarnation
+		if !lease.TakeoverPending {
+			lease.AgentIncarnation = incarnation
+		}
 		lease.LeaseOwner = owner
-		lease.LeaseToken = token
+		if !lease.TakeoverPending {
+			lease.LeaseToken = token
+		}
 		lease.LeaseExpires = expires
 	}
 	return lease, acquired, err
 }
 
-func (c *Client) RenewAgentInputDeliverySessionLease(ctx context.Context, projectID, sessionID, incarnation, leaseToken string, now time.Time, leaseDuration time.Duration) (time.Time, bool, error) {
+func (c *Client) RenewAgentInputDeliverySessionLease(ctx context.Context, projectID, sessionID, incarnation, leaseOwner, leaseToken string, now time.Time, leaseDuration time.Duration) (time.Time, bool, error) {
 	var renewed bool
 	expires := now.Add(leaseDuration)
 	err := c.retrySQLiteBusy(ctx, func() error {
@@ -119,13 +133,34 @@ func (c *Client) RenewAgentInputDeliverySessionLease(ctx context.Context, projec
 			if err != nil {
 				return err
 			}
-			result, err := db.ExecContext(lockCtx, `UPDATE agent_input_delivery_session_leases SET lease_expires_at=?,updated_at=? WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_token=? AND julianday(lease_expires_at)>julianday(?)`, formatTimestamp(expires), formatTimestamp(now), projectID, sessionID, incarnation, leaseToken, formatTimestamp(now))
+			tx, err := db.BeginTx(lockCtx, nil)
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback()
+			var storedExpiry string
+			if err := tx.QueryRowContext(lockCtx, `SELECT lease_expires_at FROM agent_input_delivery_session_leases WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_owner=? AND lease_token=?`, projectID, sessionID, incarnation, leaseOwner, leaseToken).Scan(&storedExpiry); errors.Is(err, sql.ErrNoRows) {
+				return tx.Commit()
+			} else if err != nil {
+				return err
+			}
+			parsedExpiry := parseTimestamp(storedExpiry)
+			if parsedExpiry.IsZero() {
+				return fmt.Errorf("invalid durable agent input session lease expiry %q", storedExpiry)
+			}
+			if !now.Before(parsedExpiry) {
+				return tx.Commit()
+			}
+			result, err := tx.ExecContext(lockCtx, `UPDATE agent_input_delivery_session_leases SET lease_expires_at=?,updated_at=? WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_owner=? AND lease_token=? AND lease_expires_at=?`, formatTimestamp(expires), formatTimestamp(now), projectID, sessionID, incarnation, leaseOwner, leaseToken, storedExpiry)
 			if err != nil {
 				return err
 			}
 			n, err := result.RowsAffected()
 			renewed = n == 1
-			return err
+			if err != nil {
+				return err
+			}
+			return tx.Commit()
 		})
 	})
 	if !renewed {
@@ -134,22 +169,80 @@ func (c *Client) RenewAgentInputDeliverySessionLease(ctx context.Context, projec
 	return expires, renewed, err
 }
 
-func (c *Client) ReleaseAgentInputDeliverySessionLease(ctx context.Context, projectID, sessionID, incarnation, leaseToken string) error {
+// CompleteAgentInputDeliverySessionLeaseTakeover rotates a takeover fence only
+// after the caller has restored and removed the persisted gate that names the
+// old incarnation/token. The exact old expiry participates in the CAS so a
+// concurrent renewal or recovery claim cannot be overwritten.
+func (c *Client) CompleteAgentInputDeliverySessionLeaseTakeover(ctx context.Context, projectID, sessionID, previousIncarnation, previousToken, incarnation, owner string, now time.Time, leaseDuration time.Duration) (AgentInputDeliverySessionLease, bool, error) {
+	var lease AgentInputDeliverySessionLease
+	if strings.TrimSpace(projectID) == "" || strings.TrimSpace(sessionID) == "" || strings.TrimSpace(previousIncarnation) == "" || strings.TrimSpace(previousToken) == "" || strings.TrimSpace(incarnation) == "" || strings.TrimSpace(owner) == "" || leaseDuration <= 0 {
+		return lease, false, errors.New("invalid agent input session lease takeover")
+	}
+	token, err := randomAgentInputToken()
+	if err != nil {
+		return lease, false, err
+	}
+	expires := now.Add(leaseDuration)
+	completed := false
+	err = c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			tx, err := db.BeginTx(lockCtx, nil)
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback()
+			var storedOwner, storedExpiry string
+			if err := tx.QueryRowContext(lockCtx, `SELECT lease_owner,lease_expires_at FROM agent_input_delivery_session_leases WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_token=?`, projectID, sessionID, previousIncarnation, previousToken).Scan(&storedOwner, &storedExpiry); errors.Is(err, sql.ErrNoRows) {
+				return tx.Commit()
+			} else if err != nil {
+				return err
+			}
+			parsedExpiry := parseTimestamp(storedExpiry)
+			if parsedExpiry.IsZero() {
+				return fmt.Errorf("invalid durable agent input session lease expiry %q", storedExpiry)
+			}
+			if storedOwner != owner || !now.Before(parsedExpiry) {
+				return tx.Commit()
+			}
+			result, err := tx.ExecContext(lockCtx, `UPDATE agent_input_delivery_session_leases SET agent_incarnation=?,lease_token=?,lease_expires_at=?,updated_at=? WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_owner=? AND lease_token=? AND lease_expires_at=?`, incarnation, token, formatTimestamp(expires), formatTimestamp(now), projectID, sessionID, previousIncarnation, owner, previousToken, storedExpiry)
+			if err != nil {
+				return err
+			}
+			n, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			completed = n == 1
+			return tx.Commit()
+		})
+	})
+	if completed {
+		lease = AgentInputDeliverySessionLease{ProjectID: projectID, SessionID: sessionID, AgentIncarnation: incarnation, LeaseOwner: owner, LeaseToken: token, LeaseExpires: expires}
+	}
+	return lease, completed, err
+}
+
+func (c *Client) ReleaseAgentInputDeliverySessionLease(ctx context.Context, projectID, sessionID, incarnation, leaseOwner, leaseToken string) error {
 	return c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
 			db, err := c.dbHandle()
 			if err != nil {
 				return err
 			}
-			_, err = db.ExecContext(lockCtx, `DELETE FROM agent_input_delivery_session_leases WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_token=?`, projectID, sessionID, incarnation, leaseToken)
+			_, err = db.ExecContext(lockCtx, `DELETE FROM agent_input_delivery_session_leases WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_owner=? AND lease_token=?`, projectID, sessionID, incarnation, leaseOwner, leaseToken)
 			return err
 		})
 	})
 }
 
-// ClaimAgentInputDeliverySessionLeaseRecovery atomically fences recovery of a
-// persisted gate. A different current token, including a takeover owner, can
-// never be restored by an old gate record.
+// ClaimAgentInputDeliverySessionLeaseRecovery atomically transfers ownership
+// of an expired persisted-gate fence without rotating its token. Keeping the
+// marker's exact token makes crashes before marker persistence recoverable;
+// owner-aware renew/release calls fence the superseded daemon.
 func (c *Client) ClaimAgentInputDeliverySessionLeaseRecovery(ctx context.Context, projectID, sessionID, incarnation, expectedToken, owner string, now time.Time, leaseDuration time.Duration) (AgentInputDeliverySessionLease, bool, error) {
 	var lease AgentInputDeliverySessionLease
 	projectID = strings.TrimSpace(projectID)
@@ -160,44 +253,50 @@ func (c *Client) ClaimAgentInputDeliverySessionLeaseRecovery(ctx context.Context
 	if projectID == "" || sessionID == "" || incarnation == "" || expectedToken == "" || owner == "" || leaseDuration <= 0 {
 		return lease, false, errors.New("invalid agent input session recovery lease")
 	}
-	token, err := randomAgentInputToken()
-	if err != nil {
-		return lease, false, err
-	}
 	expires := now.Add(leaseDuration)
 	acquired := false
-	err = c.retrySQLiteBusy(ctx, func() error {
+	err := c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(lockCtx context.Context) error {
 			db, err := c.dbHandle()
 			if err != nil {
 				return err
 			}
-			result, err := db.ExecContext(lockCtx, `UPDATE agent_input_delivery_session_leases
-				SET lease_owner=?,lease_token=?,lease_expires_at=?,updated_at=?
-				WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_token=? AND julianday(lease_expires_at)<=julianday(?)`,
-				owner, token, formatTimestamp(expires), formatTimestamp(now), projectID, sessionID, incarnation, expectedToken, formatTimestamp(now))
+			tx, err := db.BeginTx(lockCtx, nil)
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback()
+			var currentOwner, currentExpiry string
+			if err := tx.QueryRowContext(lockCtx, `SELECT lease_owner,lease_expires_at FROM agent_input_delivery_session_leases WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_token=?`, projectID, sessionID, incarnation, expectedToken).Scan(&currentOwner, &currentExpiry); errors.Is(err, sql.ErrNoRows) {
+				return tx.Commit()
+			} else if err != nil {
+				return err
+			}
+			parsedExpiry := parseTimestamp(currentExpiry)
+			if parsedExpiry.IsZero() {
+				return fmt.Errorf("invalid durable agent input session lease expiry %q", currentExpiry)
+			}
+			if now.Before(parsedExpiry) {
+				lease = AgentInputDeliverySessionLease{ProjectID: projectID, SessionID: sessionID, AgentIncarnation: incarnation, LeaseOwner: currentOwner, LeaseToken: expectedToken, LeaseExpires: parsedExpiry}
+				return tx.Commit()
+			}
+			result, err := tx.ExecContext(lockCtx, `UPDATE agent_input_delivery_session_leases
+				SET lease_owner=?,lease_expires_at=?,updated_at=?
+				WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_owner=? AND lease_token=? AND lease_expires_at=?`,
+				owner, formatTimestamp(expires), formatTimestamp(now), projectID, sessionID, incarnation, currentOwner, expectedToken, currentExpiry)
 			if err != nil {
 				return err
 			}
 			n, err := result.RowsAffected()
 			acquired = n == 1
-			if err != nil || acquired {
-				return err
-			}
-			var currentExpiry string
-			err = db.QueryRowContext(lockCtx, `SELECT lease_owner,lease_expires_at FROM agent_input_delivery_session_leases WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_token=?`, projectID, sessionID, incarnation, expectedToken).Scan(&lease.LeaseOwner, &currentExpiry)
-			if errors.Is(err, sql.ErrNoRows) {
-				return nil
-			}
 			if err != nil {
 				return err
 			}
-			lease = AgentInputDeliverySessionLease{ProjectID: projectID, SessionID: sessionID, AgentIncarnation: incarnation, LeaseOwner: lease.LeaseOwner, LeaseToken: expectedToken, LeaseExpires: parseTimestamp(currentExpiry)}
-			return nil
+			return tx.Commit()
 		})
 	})
 	if acquired {
-		lease = AgentInputDeliverySessionLease{ProjectID: projectID, SessionID: sessionID, AgentIncarnation: incarnation, LeaseOwner: owner, LeaseToken: token, LeaseExpires: expires}
+		lease = AgentInputDeliverySessionLease{ProjectID: projectID, SessionID: sessionID, AgentIncarnation: incarnation, LeaseOwner: owner, LeaseToken: expectedToken, LeaseExpires: expires}
 	}
 	return lease, acquired, err
 }
@@ -376,7 +475,7 @@ func (c *Client) ClaimAgentInputDeliveryIntent(ctx context.Context, projectID, i
 // boundary and renews the exact session fence in one transaction immediately
 // before app-server turn/start. A daemon crash after this transition leaves the
 // intent ambiguous instead of risking a duplicate turn.
-func (c *Client) BeginAgentInputDeliverySubmission(ctx context.Context, projectID, intentKey, intentLeaseToken, sessionID, incarnation, sessionLeaseToken string, now time.Time, leaseDuration time.Duration) (time.Time, bool, error) {
+func (c *Client) BeginAgentInputDeliverySubmission(ctx context.Context, projectID, intentKey, intentLeaseToken, sessionID, incarnation, sessionLeaseOwner, sessionLeaseToken string, now time.Time, leaseDuration time.Duration) (time.Time, bool, error) {
 	var begun bool
 	expires := now.Add(leaseDuration)
 	err := c.retrySQLiteBusy(ctx, func() error {
@@ -390,7 +489,20 @@ func (c *Client) BeginAgentInputDeliverySubmission(ctx context.Context, projectI
 				return err
 			}
 			defer tx.Rollback()
-			sessionResult, err := tx.ExecContext(lockCtx, `UPDATE agent_input_delivery_session_leases SET lease_expires_at=?,updated_at=? WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_token=? AND julianday(lease_expires_at)>julianday(?)`, formatTimestamp(expires), formatTimestamp(now), projectID, sessionID, incarnation, sessionLeaseToken, formatTimestamp(now))
+			var storedExpiry string
+			if err := tx.QueryRowContext(lockCtx, `SELECT lease_expires_at FROM agent_input_delivery_session_leases WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_owner=? AND lease_token=?`, projectID, sessionID, incarnation, sessionLeaseOwner, sessionLeaseToken).Scan(&storedExpiry); errors.Is(err, sql.ErrNoRows) {
+				return tx.Commit()
+			} else if err != nil {
+				return err
+			}
+			parsedExpiry := parseTimestamp(storedExpiry)
+			if parsedExpiry.IsZero() {
+				return fmt.Errorf("invalid durable agent input session lease expiry %q", storedExpiry)
+			}
+			if !now.Before(parsedExpiry) {
+				return tx.Commit()
+			}
+			sessionResult, err := tx.ExecContext(lockCtx, `UPDATE agent_input_delivery_session_leases SET lease_expires_at=?,updated_at=? WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_owner=? AND lease_token=? AND lease_expires_at=?`, formatTimestamp(expires), formatTimestamp(now), projectID, sessionID, incarnation, sessionLeaseOwner, sessionLeaseToken, storedExpiry)
 			if err != nil {
 				return err
 			}

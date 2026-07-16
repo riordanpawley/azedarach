@@ -106,13 +106,13 @@ func TestAgentInputDeliveryLeaseExpiryAndExactAcknowledgementFence(t *testing.T)
 	if err != nil || !acquired {
 		t.Fatalf("session lease=%+v acquired=%v err=%v", sessionLease, acquired, err)
 	}
-	if _, begun, err := client.BeginAgentInputDeliverySubmission(ctx, "p", "lease", second.LeaseToken, "s", "inc", "wrong-session-fence", now.Add(2*time.Second), time.Second); err != nil || begun {
+	if _, begun, err := client.BeginAgentInputDeliverySubmission(ctx, "p", "lease", second.LeaseToken, "s", "inc", sessionLease.LeaseOwner, "wrong-session-fence", now.Add(2*time.Second), time.Second); err != nil || begun {
 		t.Fatalf("wrong session fence begun=%v err=%v", begun, err)
 	}
 	if stillLeased, err := client.EnsureAgentInputDeliveryIntent(ctx, request); err != nil || stillLeased.State != "leased" {
 		t.Fatalf("failed atomic fence changed intent=%+v err=%v", stillLeased, err)
 	}
-	if _, begun, err := client.BeginAgentInputDeliverySubmission(ctx, "p", "lease", second.LeaseToken, "s", "inc", sessionLease.LeaseToken, now.Add(2*time.Second), time.Second); err != nil || !begun {
+	if _, begun, err := client.BeginAgentInputDeliverySubmission(ctx, "p", "lease", second.LeaseToken, "s", "inc", sessionLease.LeaseOwner, sessionLease.LeaseToken, now.Add(2*time.Second), time.Second); err != nil || !begun {
 		t.Fatalf("begin submission begun=%v err=%v", begun, err)
 	}
 	if ok, err := client.AcknowledgeAgentInputDeliveryIntent(ctx, "p", "lease", "wrong-incarnation", second.LeaseToken, "ack", now.Add(2*time.Second)); err != nil || ok {
@@ -209,23 +209,125 @@ func TestAgentInputDeliverySessionLeaseIsCrossClientAndSessionScoped(t *testing.
 	if err != nil || acquired || otherIncarnation.LeaseToken != "" {
 		t.Fatalf("other incarnation overlapped session lease=%+v acquired=%v err=%v", otherIncarnation, acquired, err)
 	}
-	if _, renewed, err := clients[0].RenewAgentInputDeliverySessionLease(ctx, "p", "s", "inc", first.LeaseToken, now.Add(750*time.Millisecond), time.Second); err != nil || !renewed {
+	if _, renewed, err := clients[0].RenewAgentInputDeliverySessionLease(ctx, "p", "s", "inc", first.LeaseOwner, first.LeaseToken, now.Add(750*time.Millisecond), time.Second); err != nil || !renewed {
 		t.Fatalf("renewed=%v err=%v", renewed, err)
 	}
 	if _, acquired, err := clients[1].ClaimAgentInputDeliverySessionLease(ctx, "p", "s", "inc", "daemon-b", now.Add(1250*time.Millisecond), time.Second); err != nil || acquired {
 		t.Fatalf("renewed lease overlap acquired=%v err=%v", acquired, err)
 	}
-	if err := clients[0].ReleaseAgentInputDeliverySessionLease(ctx, "p", "s", "inc", "wrong"); err != nil {
+	if err := clients[0].ReleaseAgentInputDeliverySessionLease(ctx, "p", "s", "inc", first.LeaseOwner, "wrong"); err != nil {
 		t.Fatal(err)
 	}
 	if _, acquired, err := clients[1].ClaimAgentInputDeliverySessionLease(ctx, "p", "s", "inc", "daemon-b", now.Add(1500*time.Millisecond), time.Second); err != nil || acquired {
 		t.Fatalf("wrong-token release acquired=%v err=%v", acquired, err)
 	}
-	if err := clients[0].ReleaseAgentInputDeliverySessionLease(ctx, "p", "s", "inc", first.LeaseToken); err != nil {
+	if err := clients[0].ReleaseAgentInputDeliverySessionLease(ctx, "p", "s", "inc", first.LeaseOwner, first.LeaseToken); err != nil {
 		t.Fatal(err)
 	}
 	if lease, acquired, err := clients[1].ClaimAgentInputDeliverySessionLease(ctx, "p", "s", "inc-2", "daemon-b", now.Add(1500*time.Millisecond), time.Second); err != nil || !acquired || lease.LeaseToken == "" || lease.AgentIncarnation != "inc-2" {
 		t.Fatalf("post-release lease=%+v acquired=%v err=%v", lease, acquired, err)
+	}
+}
+
+func TestAgentInputDeliverySessionLeaseFencesUseExactRFC3339NanoBoundaries(t *testing.T) {
+	ctx := context.Background()
+	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	base := time.Date(2026, 7, 17, 1, 2, 3, 123456789, time.UTC)
+	window := 100 * time.Microsecond
+
+	original, acquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, "p", "claim", "inc-old", "owner-old", base, window)
+	if err != nil || !acquired {
+		t.Fatalf("original claim=%+v acquired=%v err=%v", original, acquired, err)
+	}
+	if lease, acquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, "p", "claim", "inc-new", "owner-new", original.LeaseExpires.Add(-time.Nanosecond), time.Second); err != nil || acquired || lease.LeaseToken != "" {
+		t.Fatalf("sub-nanosecond-early takeover lease=%+v acquired=%v err=%v", lease, acquired, err)
+	}
+	takeover, acquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, "p", "claim", "inc-new", "owner-new", original.LeaseExpires, time.Second)
+	if err != nil || !acquired || !takeover.TakeoverPending || takeover.AgentIncarnation != original.AgentIncarnation || takeover.LeaseToken != original.LeaseToken {
+		t.Fatalf("exact-expiry takeover=%+v acquired=%v err=%v", takeover, acquired, err)
+	}
+	if _, renewed, err := client.RenewAgentInputDeliverySessionLease(ctx, "p", "claim", original.AgentIncarnation, original.LeaseOwner, original.LeaseToken, original.LeaseExpires, time.Second); err != nil || renewed {
+		t.Fatalf("superseded owner renewed=%v err=%v", renewed, err)
+	}
+	if err := client.ReleaseAgentInputDeliverySessionLease(ctx, "p", "claim", original.AgentIncarnation, original.LeaseOwner, original.LeaseToken); err != nil {
+		t.Fatalf("superseded owner release: %v", err)
+	}
+	if _, renewed, err := client.RenewAgentInputDeliverySessionLease(ctx, "p", "claim", takeover.AgentIncarnation, takeover.LeaseOwner, takeover.LeaseToken, original.LeaseExpires.Add(time.Nanosecond), time.Second); err != nil || !renewed {
+		t.Fatalf("superseded owner deleted takeover fence renewed=%v err=%v", renewed, err)
+	}
+	completed, ok, err := client.CompleteAgentInputDeliverySessionLeaseTakeover(ctx, "p", "claim", takeover.AgentIncarnation, takeover.LeaseToken, "inc-new", "owner-new", original.LeaseExpires.Add(time.Nanosecond), time.Second)
+	if err != nil || !ok || completed.AgentIncarnation != "inc-new" || completed.LeaseToken == takeover.LeaseToken {
+		t.Fatalf("completed takeover=%+v ok=%v err=%v", completed, ok, err)
+	}
+
+	renewLease, acquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, "p", "renew", "inc", "owner", base, window)
+	if err != nil || !acquired {
+		t.Fatalf("renew fixture=%+v acquired=%v err=%v", renewLease, acquired, err)
+	}
+	renewedExpiry, renewed, err := client.RenewAgentInputDeliverySessionLease(ctx, "p", "renew", "inc", "owner", renewLease.LeaseToken, renewLease.LeaseExpires.Add(-time.Nanosecond), window)
+	if err != nil || !renewed {
+		t.Fatalf("sub-nanosecond-live renewal renewed=%v err=%v", renewed, err)
+	}
+	if _, renewed, err := client.RenewAgentInputDeliverySessionLease(ctx, "p", "renew", "inc", "owner", renewLease.LeaseToken, renewedExpiry, window); err != nil || renewed {
+		t.Fatalf("exact-expiry renewal renewed=%v err=%v", renewed, err)
+	}
+
+	recoveryLease, acquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, "p", "recovery", "inc", "dead", base, window)
+	if err != nil || !acquired {
+		t.Fatalf("recovery fixture=%+v acquired=%v err=%v", recoveryLease, acquired, err)
+	}
+	if observed, acquired, err := client.ClaimAgentInputDeliverySessionLeaseRecovery(ctx, "p", "recovery", "inc", recoveryLease.LeaseToken, "recovery-owner", recoveryLease.LeaseExpires.Add(-time.Nanosecond), time.Second); err != nil || acquired || observed.LeaseToken != recoveryLease.LeaseToken {
+		t.Fatalf("sub-nanosecond-early recovery=%+v acquired=%v err=%v", observed, acquired, err)
+	}
+	if recovered, acquired, err := client.ClaimAgentInputDeliverySessionLeaseRecovery(ctx, "p", "recovery", "inc", recoveryLease.LeaseToken, "recovery-owner", recoveryLease.LeaseExpires, time.Second); err != nil || !acquired || recovered.LeaseToken != recoveryLease.LeaseToken || recovered.LeaseOwner != "recovery-owner" {
+		t.Fatalf("exact-expiry recovery=%+v acquired=%v err=%v", recovered, acquired, err)
+	}
+
+	ownerRequest := domain.AgentInputDeliveryRequest{ProjectID: "p", SessionID: "begin-owner", Target: domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 42, AgentIncarnation: "inc-old"}, Tool: "codex", Kind: domain.AgentInputMessageSessionMessage, Payload: "body", IntentKey: "begin-old-owner", ExpiresAt: base.Add(time.Hour)}
+	if _, err := client.EnsureAgentInputDeliveryIntent(ctx, ownerRequest); err != nil {
+		t.Fatal(err)
+	}
+	ownerIntent, claimed, err := client.ClaimAgentInputDeliveryIntent(ctx, "p", ownerRequest.IntentKey, "owner-old", base, time.Second)
+	if err != nil || !claimed {
+		t.Fatalf("old-owner intent claimed=%v err=%v", claimed, err)
+	}
+	ownerLease, acquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, "p", ownerRequest.SessionID, "inc-old", "owner-old", base, window)
+	if err != nil || !acquired {
+		t.Fatalf("old-owner lease=%+v acquired=%v err=%v", ownerLease, acquired, err)
+	}
+	ownerTakeover, acquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, "p", ownerRequest.SessionID, "inc-new", "owner-new", ownerLease.LeaseExpires, time.Second)
+	if err != nil || !acquired || !ownerTakeover.TakeoverPending {
+		t.Fatalf("owner takeover=%+v acquired=%v err=%v", ownerTakeover, acquired, err)
+	}
+	if _, begun, err := client.BeginAgentInputDeliverySubmission(ctx, "p", ownerRequest.IntentKey, ownerIntent.LeaseToken, ownerRequest.SessionID, "inc-old", "owner-old", ownerLease.LeaseToken, ownerLease.LeaseExpires.Add(time.Nanosecond), window); err != nil || begun {
+		t.Fatalf("superseded owner began submission=%v err=%v", begun, err)
+	}
+
+	begin := func(sessionID, intentKey string, at time.Time) bool {
+		request := domain.AgentInputDeliveryRequest{ProjectID: "p", SessionID: sessionID, Target: domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 42, AgentIncarnation: "inc"}, Tool: "codex", Kind: domain.AgentInputMessageSessionMessage, Payload: "body", IntentKey: intentKey, ExpiresAt: base.Add(time.Hour)}
+		if _, err := client.EnsureAgentInputDeliveryIntent(ctx, request); err != nil {
+			t.Fatal(err)
+		}
+		intent, claimed, err := client.ClaimAgentInputDeliveryIntent(ctx, "p", intentKey, "owner", base, time.Second)
+		if err != nil || !claimed {
+			t.Fatalf("intent %s claimed=%v err=%v", intentKey, claimed, err)
+		}
+		lease, acquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, "p", sessionID, "inc", "owner", base, window)
+		if err != nil || !acquired {
+			t.Fatalf("session %s acquired=%v err=%v", sessionID, acquired, err)
+		}
+		_, begun, err := client.BeginAgentInputDeliverySubmission(ctx, "p", intentKey, intent.LeaseToken, sessionID, "inc", lease.LeaseOwner, lease.LeaseToken, at, window)
+		if err != nil {
+			t.Fatalf("begin %s: %v", intentKey, err)
+		}
+		return begun
+	}
+	if !begin("begin-live", "begin-live", base.Add(window-time.Nanosecond)) {
+		t.Fatal("sub-nanosecond-live begin submission was rejected")
+	}
+	if begin("begin-expired", "begin-expired", base.Add(window)) {
+		t.Fatal("exact-expiry begin submission was accepted")
 	}
 }
 
@@ -238,7 +340,7 @@ func TestAgentInputDeliveryRecoveryLeaseDoesNotRecreateMissingAuthority(t *testi
 	if err != nil || !acquired {
 		t.Fatalf("original lease=%+v acquired=%v err=%v", original, acquired, err)
 	}
-	if err := client.ReleaseAgentInputDeliverySessionLease(ctx, "p", "s", "inc", original.LeaseToken); err != nil {
+	if err := client.ReleaseAgentInputDeliverySessionLease(ctx, "p", "s", "inc", original.LeaseOwner, original.LeaseToken); err != nil {
 		t.Fatal(err)
 	}
 	recovery, acquired, err := client.ClaimAgentInputDeliverySessionLeaseRecovery(ctx, "p", "s", "inc", original.LeaseToken, "recovery-daemon", now, time.Minute)
@@ -273,7 +375,7 @@ func TestAgentInputDeliverySubmissionFenceTimeoutRemainsAmbiguousAndAllowsExpire
 	if err != nil || !acquired {
 		t.Fatalf("lease=%+v acquired=%v err=%v", lease, acquired, err)
 	}
-	if _, begun, err := clients[0].BeginAgentInputDeliverySubmission(ctx, "p", request.IntentKey, intent.LeaseToken, "s", "inc-old", lease.LeaseToken, now.Add(10*time.Millisecond), 100*time.Millisecond); err != nil || !begun {
+	if _, begun, err := clients[0].BeginAgentInputDeliverySubmission(ctx, "p", request.IntentKey, intent.LeaseToken, "s", "inc-old", lease.LeaseOwner, lease.LeaseToken, now.Add(10*time.Millisecond), 100*time.Millisecond); err != nil || !begun {
 		t.Fatalf("begin=%v err=%v", begun, err)
 	}
 	db, err := clients[0].dbHandle()
@@ -293,7 +395,7 @@ func TestAgentInputDeliverySubmissionFenceTimeoutRemainsAmbiguousAndAllowsExpire
 		busyObserved = true
 		return errors.New("stop after observed SQLite busy barrier")
 	}
-	_, renewed, renewErr := clients[1].RenewAgentInputDeliverySessionLease(ctx, "p", "s", "inc-old", lease.LeaseToken, now.Add(20*time.Millisecond), 100*time.Millisecond)
+	_, renewed, renewErr := clients[1].RenewAgentInputDeliverySessionLease(ctx, "p", "s", "inc-old", lease.LeaseOwner, lease.LeaseToken, now.Add(20*time.Millisecond), 100*time.Millisecond)
 	if renewErr == nil || renewed || !busyObserved || !IsSQLiteBusy(renewErr) {
 		_ = tx.Rollback()
 		t.Fatalf("blocked renewal renewed=%v busy_observed=%v err=%v", renewed, busyObserved, renewErr)
@@ -309,7 +411,7 @@ func TestAgentInputDeliverySubmissionFenceTimeoutRemainsAmbiguousAndAllowsExpire
 	if err != nil || !acquired || newLease.PreviousLeaseToken != lease.LeaseToken || newLease.PreviousAgentIncarnation != "inc-old" {
 		t.Fatalf("takeover lease=%+v acquired=%v err=%v", newLease, acquired, err)
 	}
-	if _, renewed, err := clients[0].RenewAgentInputDeliverySessionLease(ctx, "p", "s", "inc-old", lease.LeaseToken, now.Add(260*time.Millisecond), time.Second); err != nil || renewed {
+	if _, renewed, err := clients[0].RenewAgentInputDeliverySessionLease(ctx, "p", "s", "inc-old", lease.LeaseOwner, lease.LeaseToken, now.Add(260*time.Millisecond), time.Second); err != nil || renewed {
 		t.Fatalf("old fence renewed=%v err=%v", renewed, err)
 	}
 }
@@ -543,7 +645,7 @@ func TestAgentInputDeliveryAmbiguousSubmissionDoesNotAutomaticallyRetry(t *testi
 	if err != nil || !acquired {
 		t.Fatalf("session lease=%+v acquired=%v err=%v", sessionLease, acquired, err)
 	}
-	if _, begun, err := client.BeginAgentInputDeliverySubmission(ctx, "p", "ambiguous", claimed.LeaseToken, "s", "inc", sessionLease.LeaseToken, now, time.Second); err != nil || !begun {
+	if _, begun, err := client.BeginAgentInputDeliverySubmission(ctx, "p", "ambiguous", claimed.LeaseToken, "s", "inc", sessionLease.LeaseOwner, sessionLease.LeaseToken, now, time.Second); err != nil || !begun {
 		t.Fatalf("begin=%v err=%v", begun, err)
 	}
 	if err := client.CloseDB(); err != nil {
@@ -594,7 +696,7 @@ func TestAgentInputDeliveryAmbiguousSubmissionStillExpires(t *testing.T) {
 	if err != nil || !acquired {
 		t.Fatalf("session lease=%+v acquired=%v err=%v", sessionLease, acquired, err)
 	}
-	if _, begun, err := client.BeginAgentInputDeliverySubmission(ctx, "p", request.IntentKey, claimed.LeaseToken, "s", "inc", sessionLease.LeaseToken, now, time.Second); err != nil || !begun {
+	if _, begun, err := client.BeginAgentInputDeliverySubmission(ctx, "p", request.IntentKey, claimed.LeaseToken, "s", "inc", sessionLease.LeaseOwner, sessionLease.LeaseToken, now, time.Second); err != nil || !begun {
 		t.Fatalf("begin=%v err=%v", begun, err)
 	}
 	db, err := client.dbHandle()

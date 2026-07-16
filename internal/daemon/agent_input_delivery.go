@@ -28,6 +28,7 @@ type authoritativeAgentInputRequest struct {
 	SessionLeaseToken         string
 	PreviousAgentIncarnation  string
 	PreviousSessionLeaseToken string
+	CompleteSessionTakeover   func(context.Context) (issues.AgentInputDeliverySessionLease, error)
 	BeginSubmission           func(context.Context) (time.Time, error)
 	RevalidateSubmissionFence func(context.Context) (time.Time, error)
 	RenewRestoreFence         func(context.Context) (bool, error)
@@ -139,18 +140,25 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 	}
 	deliveryCtx, cancelDelivery := context.WithCancelCause(ctx)
 	releaseSessionLease := true
-	var leaseExpiryMu sync.RWMutex
-	leaseExpiry := sessionLease.LeaseExpires
-	setLeaseExpiry := func(expires time.Time) {
-		leaseExpiryMu.Lock()
-		leaseExpiry = expires
-		leaseExpiryMu.Unlock()
+	var sessionFenceMu sync.Mutex
+	currentSessionFence := sessionLease
+	setSessionFence := func(lease issues.AgentInputDeliverySessionLease) {
+		currentSessionFence = lease
 	}
 	leaseBoundContext := func(parent context.Context) (context.Context, context.CancelFunc) {
-		leaseExpiryMu.RLock()
-		expires := leaseExpiry
-		leaseExpiryMu.RUnlock()
+		expires := currentSessionFence.LeaseExpires
 		return context.WithDeadline(parent, expires)
+	}
+	renewSessionFence := func(parent context.Context) (time.Time, bool, error) {
+		sessionFenceMu.Lock()
+		defer sessionFenceMu.Unlock()
+		renewCtx, cancelRenew := leaseBoundContext(parent)
+		defer cancelRenew()
+		expires, renewed, renewErr := client.RenewAgentInputDeliverySessionLease(renewCtx, request.ProjectID, request.SessionID, currentSessionFence.AgentIncarnation, currentSessionFence.LeaseOwner, currentSessionFence.LeaseToken, s.now(), s.sessionLeaseDuration)
+		if renewed {
+			currentSessionFence.LeaseExpires = expires
+		}
+		return expires, renewed, renewErr
 	}
 	heartbeatStop := make(chan struct{})
 	heartbeatDone := make(chan struct{})
@@ -165,9 +173,7 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 			case <-deliveryCtx.Done():
 				return
 			case <-ticker.C:
-				renewCtx, cancelRenew := leaseBoundContext(deliveryCtx)
-				expires, renewed, renewErr := client.RenewAgentInputDeliverySessionLease(renewCtx, request.ProjectID, request.SessionID, request.Target.AgentIncarnation, sessionLease.LeaseToken, s.now(), s.sessionLeaseDuration)
-				cancelRenew()
+				_, renewed, renewErr := renewSessionFence(deliveryCtx)
 				if renewErr != nil || !renewed {
 					if renewErr == nil {
 						renewErr = errors.New("session delivery lease changed")
@@ -175,7 +181,6 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 					cancelDelivery(fmt.Errorf("renew durable session delivery lease: %w", renewErr))
 					return
 				}
-				setLeaseExpiry(expires)
 			}
 		}
 	}()
@@ -184,7 +189,10 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 		close(heartbeatStop)
 		<-heartbeatDone
 		if releaseSessionLease {
-			_ = client.ReleaseAgentInputDeliverySessionLease(context.WithoutCancel(ctx), request.ProjectID, request.SessionID, request.Target.AgentIncarnation, sessionLease.LeaseToken)
+			sessionFenceMu.Lock()
+			fence := currentSessionFence
+			sessionFenceMu.Unlock()
+			_ = client.ReleaseAgentInputDeliverySessionLease(context.WithoutCancel(ctx), request.ProjectID, request.SessionID, fence.AgentIncarnation, fence.LeaseOwner, fence.LeaseToken)
 		}
 	}()
 	current, result, err := s.observeIdentity(ctx, request)
@@ -193,6 +201,22 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 		return result, err
 	}
 	submissionBegun := false
+	completeSessionTakeover := func(takeoverCtx context.Context) (issues.AgentInputDeliverySessionLease, error) {
+		sessionFenceMu.Lock()
+		defer sessionFenceMu.Unlock()
+		if !currentSessionFence.TakeoverPending {
+			return currentSessionFence, nil
+		}
+		takeoverLease, completed, err := client.CompleteAgentInputDeliverySessionLeaseTakeover(takeoverCtx, request.ProjectID, request.SessionID, currentSessionFence.AgentIncarnation, currentSessionFence.LeaseToken, request.Target.AgentIncarnation, s.owner, s.now(), s.sessionLeaseDuration)
+		if err != nil {
+			return issues.AgentInputDeliverySessionLease{}, fmt.Errorf("complete durable session fence takeover: %w", err)
+		}
+		if !completed {
+			return issues.AgentInputDeliverySessionLease{}, errors.New("durable session fence changed before takeover completion")
+		}
+		setSessionFence(takeoverLease)
+		return takeoverLease, nil
+	}
 	beginSubmission := func(beginCtx context.Context) (time.Time, error) {
 		currentAgain, result, err := s.observeIdentity(beginCtx, request)
 		if err != nil {
@@ -201,8 +225,10 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 		if result.Outcome != "" || !current.SameIncarnation(currentAgain) {
 			return time.Time{}, agentInputRefusalError{outcome: "stale_incarnation"}
 		}
+		sessionFenceMu.Lock()
+		defer sessionFenceMu.Unlock()
 		fenceCtx, cancelFence := leaseBoundContext(beginCtx)
-		expires, begun, err := client.BeginAgentInputDeliverySubmission(fenceCtx, request.ProjectID, request.IntentKey, claimed.LeaseToken, request.SessionID, request.Target.AgentIncarnation, sessionLease.LeaseToken, s.now(), s.sessionLeaseDuration)
+		expires, begun, err := client.BeginAgentInputDeliverySubmission(fenceCtx, request.ProjectID, request.IntentKey, claimed.LeaseToken, request.SessionID, currentSessionFence.AgentIncarnation, currentSessionFence.LeaseOwner, currentSessionFence.LeaseToken, s.now(), s.sessionLeaseDuration)
 		cancelFence()
 		if err != nil {
 			return time.Time{}, fmt.Errorf("persist app-server submission boundary: %w", err)
@@ -211,7 +237,7 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 			return time.Time{}, errors.New("delivery or session fence changed before app-server submission")
 		}
 		submissionBegun = true
-		setLeaseExpiry(expires)
+		currentSessionFence.LeaseExpires = expires
 		return expires, nil
 	}
 	revalidateSubmissionFence := func(revalidateCtx context.Context) (time.Time, error) {
@@ -225,28 +251,20 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 		if result.Outcome != "" {
 			return time.Time{}, agentInputRefusalError{outcome: "not_ready", safeToRetry: true}
 		}
-		fenceCtx, cancelFence := leaseBoundContext(revalidateCtx)
-		expires, renewed, err := client.RenewAgentInputDeliverySessionLease(fenceCtx, request.ProjectID, request.SessionID, request.Target.AgentIncarnation, sessionLease.LeaseToken, s.now(), s.sessionLeaseDuration)
-		cancelFence()
+		expires, renewed, err := renewSessionFence(revalidateCtx)
 		if err != nil {
 			return time.Time{}, fmt.Errorf("renew final submission fence: %w", err)
 		}
 		if !renewed {
 			return time.Time{}, errors.New("session submission fence changed or expired")
 		}
-		setLeaseExpiry(expires)
 		return expires, nil
 	}
 	renewRestoreFence := func(restoreCtx context.Context) (bool, error) {
-		fenceCtx, cancelFence := leaseBoundContext(restoreCtx)
-		expires, renewed, err := client.RenewAgentInputDeliverySessionLease(fenceCtx, request.ProjectID, request.SessionID, request.Target.AgentIncarnation, sessionLease.LeaseToken, s.now(), s.sessionLeaseDuration)
-		cancelFence()
-		if renewed {
-			setLeaseExpiry(expires)
-		}
+		_, renewed, err := renewSessionFence(restoreCtx)
 		return renewed, err
 	}
-	ack, err := s.receiver.DeliverAgentInput(deliveryCtx, authoritativeAgentInputRequest{Delivery: request, LeaseToken: claimed.LeaseToken, SessionLeaseOwner: s.owner, SessionLeaseToken: sessionLease.LeaseToken, PreviousAgentIncarnation: sessionLease.PreviousAgentIncarnation, PreviousSessionLeaseToken: sessionLease.PreviousLeaseToken, BeginSubmission: beginSubmission, RevalidateSubmissionFence: revalidateSubmissionFence, RenewRestoreFence: renewRestoreFence})
+	ack, err := s.receiver.DeliverAgentInput(deliveryCtx, authoritativeAgentInputRequest{Delivery: request, LeaseToken: claimed.LeaseToken, SessionLeaseOwner: s.owner, SessionLeaseToken: sessionLease.LeaseToken, PreviousAgentIncarnation: sessionLease.PreviousAgentIncarnation, PreviousSessionLeaseToken: sessionLease.PreviousLeaseToken, CompleteSessionTakeover: completeSessionTakeover, BeginSubmission: beginSubmission, RevalidateSubmissionFence: revalidateSubmissionFence, RenewRestoreFence: renewRestoreFence})
 	if err != nil {
 		if errors.Is(err, errCodexGateRestoreIncomplete) {
 			releaseSessionLease = false

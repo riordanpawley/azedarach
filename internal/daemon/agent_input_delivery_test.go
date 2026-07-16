@@ -40,7 +40,7 @@ type blockingAuthoritativeReceiver struct {
 
 type transitionDuringSubmissionReceiver struct{ transition func() error }
 
-type expiredSubmissionFenceReceiver struct{ delay time.Duration }
+type expiredSubmissionFenceReceiver struct{ advance func() }
 
 func (r refusingAuthoritativeReceiver) DeliverAgentInput(context.Context, authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
 	return authoritativeAgentInputAcknowledgement{}, agentInputRefusalError{outcome: r.outcome}
@@ -135,7 +135,7 @@ func (r expiredSubmissionFenceReceiver) DeliverAgentInput(ctx context.Context, r
 	if _, err := request.BeginSubmission(ctx); err != nil {
 		return authoritativeAgentInputAcknowledgement{}, err
 	}
-	time.Sleep(r.delay)
+	r.advance()
 	if _, err := request.RevalidateSubmissionFence(ctx); err != nil {
 		return authoritativeAgentInputAcknowledgement{}, err
 	}
@@ -416,7 +416,12 @@ func TestAgentInputDeliveryDoesNotRetryAfterAmbiguousAcceptance(t *testing.T) {
 
 func TestAgentInputDeliveryExpiredFinalFenceRemainsAmbiguous(t *testing.T) {
 	runtimeStore, client, request := agentInputFixture(t)
-	service := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, expiredSubmissionFenceReceiver{delay: 70 * time.Millisecond}, "one")
+	// Keep context deadlines comfortably in the future while advancing the
+	// injected service clock across the durable lease boundary immediately.
+	now := time.Now().UTC().Add(time.Minute)
+	request.ExpiresAt = now.Add(time.Minute)
+	service := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, expiredSubmissionFenceReceiver{advance: func() { now = now.Add(41 * time.Millisecond) }}, "one")
+	service.now = func() time.Time { return now }
 	service.sessionLeaseDuration = 40 * time.Millisecond
 	service.sessionLeaseHeartbeat = time.Second
 	result, err := service.Deliver(context.Background(), request)
@@ -470,11 +475,12 @@ func TestAgentInputDeliveryRetainsSessionFenceWhenCompletionMarkerRemovalFails(t
 		t.Fatalf("event ledger was not cleaned before retained marker: %v", statErr)
 	}
 
-	// Once the retained lease expires, a new daemon may take ownership. The
-	// stale marker still carries the old fence, so startup recovery must refuse
-	// it without changing the new owner's live gate.
+	// Once the retained lease expires, a new daemon may take ownership, but the
+	// first takeover phase deliberately preserves the old marker's exact fence.
+	// Startup recovery must therefore leave the live takeover owner and gate
+	// untouched until that owner restores the marker or its lease expires.
 	newLease, acquired, claimErr := client.ClaimAgentInputDeliverySessionLease(context.Background(), request.ProjectID, request.SessionID, "inc-new", "daemon-new", time.Now().Add(10*time.Minute), time.Minute)
-	if claimErr != nil || !acquired || newLease.LeaseToken == "" {
+	if claimErr != nil || !acquired || !newLease.TakeoverPending || newLease.LeaseToken != state.FenceToken || newLease.AgentIncarnation != state.AgentIncarnation {
 		t.Fatalf("new owner lease=%+v acquired=%v err=%v", newLease, acquired, claimErr)
 	}
 	adapter.mu.Lock()
@@ -485,9 +491,14 @@ func TestAgentInputDeliveryRetainsSessionFenceWhenCompletionMarkerRemovalFails(t
 	adapter.setReadOnlyCalls = nil
 	adapter.mu.Unlock()
 	authority.issueClients = func(string) *issues.Client { return client }
-	if err := authority.RecoverStaleGates(context.Background()); !errors.Is(err, errCodexSessionFenceLost) {
-		t.Fatalf("stale marker recovery error=%v, want exact fence-loss diagnostic", err)
+	recoveryCtx, cancelRecovery := context.WithCancel(context.Background())
+	operations, recoveryErr := authority.recoverStaleGates(recoveryCtx)
+	if recoveryErr != nil || len(operations) != 1 {
+		cancelRecovery()
+		t.Fatalf("live takeover recovery scheduling: operations=%v err=%v", operations, recoveryErr)
 	}
+	cancelRecovery()
+	<-operations[0].done
 	adapter.mu.Lock()
 	defer adapter.mu.Unlock()
 	if !adapter.paneEnabled || !adapter.hooksEnabled || adapter.activeGates != 1 || !adapter.clients[0].ReadOnly || len(adapter.setReadOnlyCalls) != 0 {

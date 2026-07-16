@@ -185,17 +185,20 @@ func (a *codexAppServerInputAuthority) recoverStaleGates(ctx context.Context) ([
 		state.FenceToken = recoveryLease.LeaseToken
 		gate := &codexInputGate{tmux: a.tmux, state: state, statePath: statePath, removeFile: a.removeGateFile}
 		gate.renewRestoreFence = func(restoreCtx context.Context) (bool, error) {
-			_, renewed, err := client.RenewAgentInputDeliverySessionLease(restoreCtx, state.ProjectID, state.SessionID, state.AgentIncarnation, recoveryLease.LeaseToken, a.now(), a.leaseDuration)
+			_, renewed, err := client.RenewAgentInputDeliverySessionLease(restoreCtx, state.ProjectID, state.SessionID, state.AgentIncarnation, recoveryLease.LeaseOwner, recoveryLease.LeaseToken, a.now(), a.leaseDuration)
 			return renewed, err
 		}
 		if persistErr := gate.persist(); persistErr != nil {
-			releaseErr := client.ReleaseAgentInputDeliverySessionLease(context.WithoutCancel(ctx), state.ProjectID, state.SessionID, state.AgentIncarnation, recoveryLease.LeaseToken)
-			errs = append(errs, fmt.Errorf("recover %s: persist recovery fence: %w", filepath.Base(statePath), errors.Join(persistErr, releaseErr)))
+			// The old marker still exists and names this unchanged token. Retain
+			// the transferred lease until expiry so a crash or write failure never
+			// destroys the only durable mapping for later recovery.
+			errs = append(errs, fmt.Errorf("recover %s: persist recovery fence: %w", filepath.Base(statePath), persistErr))
 			continue
 		}
 		if identityErr := a.validatePersistedGatePaneIdentity(ctx, state); identityErr != nil {
-			releaseErr := client.ReleaseAgentInputDeliverySessionLease(context.WithoutCancel(ctx), state.ProjectID, state.SessionID, state.AgentIncarnation, recoveryLease.LeaseToken)
-			errs = append(errs, fmt.Errorf("recover %s: validate managed pane identity: %w", filepath.Base(statePath), errors.Join(identityErr, releaseErr)))
+			// Preserve the exact recovery mapping alongside the diagnostic marker.
+			// A later retry may proceed only after this owner's lease expires.
+			errs = append(errs, fmt.Errorf("recover %s: validate managed pane identity: %w", filepath.Base(statePath), identityErr))
 			continue
 		}
 		recoverCtx, cancel := context.WithTimeout(ctx, codexInputGateRestoreLimit)
@@ -203,7 +206,7 @@ func (a *codexAppServerInputAuthority) recoverStaleGates(ctx context.Context) ([
 		cancel()
 		if restoreErr != nil {
 			errs = append(errs, fmt.Errorf("recover %s: %w", filepath.Base(statePath), restoreErr))
-		} else if releaseErr := client.ReleaseAgentInputDeliverySessionLease(context.WithoutCancel(ctx), state.ProjectID, state.SessionID, state.AgentIncarnation, recoveryLease.LeaseToken); releaseErr != nil {
+		} else if releaseErr := client.ReleaseAgentInputDeliverySessionLease(context.WithoutCancel(ctx), state.ProjectID, state.SessionID, state.AgentIncarnation, recoveryLease.LeaseOwner, recoveryLease.LeaseToken); releaseErr != nil {
 			errs = append(errs, fmt.Errorf("recover %s: release durable recovery fence: %w", filepath.Base(statePath), releaseErr))
 		}
 	}
@@ -261,7 +264,7 @@ func (a *codexAppServerInputAuthority) DeliverAgentInput(ctx context.Context, re
 	lock := a.sessionLock(request.Delivery.ProjectID, request.Delivery.SessionID)
 	lock.Lock()
 	defer lock.Unlock()
-	if err := a.recoverSupersededGate(ctx, request); err != nil {
+	if err := a.recoverSupersededGate(ctx, &request); err != nil {
 		return ack, codexGateRefusal(err, false)
 	}
 	gate, err := a.acquireGate(ctx, request)
@@ -339,14 +342,17 @@ func (a *codexAppServerInputAuthority) DeliverAgentInput(ctx context.Context, re
 		AgentIncarnation: threadID, LeaseToken: request.LeaseToken, AcknowledgementToken: turnID}, nil
 }
 
-func (a *codexAppServerInputAuthority) recoverSupersededGate(ctx context.Context, request authoritativeAgentInputRequest) error {
+func (a *codexAppServerInputAuthority) recoverSupersededGate(ctx context.Context, request *authoritativeAgentInputRequest) error {
+	if request == nil {
+		return errors.New("missing superseded Codex gate request")
+	}
 	previousToken := strings.TrimSpace(request.PreviousSessionLeaseToken)
 	if previousToken == "" {
 		return nil
 	}
 	entries, err := filepath.Glob(filepath.Join(a.gateDir, "gate-*.json"))
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: enumerate superseded Codex gates: %v", errCodexGateRestoreIncomplete, err)
 	}
 	type persistedGate struct {
 		path  string
@@ -356,38 +362,48 @@ func (a *codexAppServerInputAuthority) recoverSupersededGate(ctx context.Context
 	for _, statePath := range entries {
 		raw, readErr := os.ReadFile(statePath)
 		if readErr != nil {
-			return readErr
+			return fmt.Errorf("%w: read superseded Codex gate %s: %v", errCodexGateRestoreIncomplete, filepath.Base(statePath), readErr)
 		}
 		var state codexInputGateState
 		if err := json.Unmarshal(raw, &state); err != nil || state.Version != codexInputGateStateVersion || state.ProjectID == "" || state.SessionID == "" || state.AgentIncarnation == "" || state.FenceToken == "" || state.PaneID == "" || state.PanePID <= 0 {
-			return fmt.Errorf("invalid persisted Codex gate during session takeover: %s", filepath.Base(statePath))
+			return fmt.Errorf("%w: invalid persisted Codex gate during session takeover: %s", errCodexGateRestoreIncomplete, filepath.Base(statePath))
 		}
 		if state.ProjectID == request.Delivery.ProjectID && state.SessionID == request.Delivery.SessionID && state.AgentIncarnation == request.PreviousAgentIncarnation && state.FenceToken == previousToken {
 			matched = append(matched, persistedGate{path: statePath, state: state})
 		}
 	}
 	if len(matched) > 1 {
-		return errors.New("multiple persisted Codex gates matched one superseded session fence")
+		return fmt.Errorf("%w: multiple persisted Codex gates matched one superseded session fence", errCodexGateRestoreIncomplete)
 	}
-	if len(matched) == 0 {
-		return nil
+	if len(matched) == 1 {
+		// Restore under the exact old incarnation/token. The durable store has
+		// transferred ownership but deliberately preserved this fence, so a
+		// crash anywhere before marker deletion remains startup-recoverable.
+		state := matched[0].state
+		gate := &codexInputGate{tmux: a.tmux, state: state, statePath: matched[0].path, renewRestoreFence: request.RenewRestoreFence, removeFile: a.removeGateFile}
+		if err := a.validatePersistedGatePaneIdentity(ctx, state); err != nil {
+			return fmt.Errorf("%w: validate superseded Codex gate pane identity: %v", errCodexGateRestoreIncomplete, err)
+		}
+		restoreCtx, cancel := context.WithTimeout(ctx, codexInputGateRestoreLimit)
+		restoreErr := gate.Restore(restoreCtx)
+		cancel()
+		if restoreErr != nil {
+			return fmt.Errorf("%w: restore superseded Codex gate: %v", errCodexGateRestoreIncomplete, restoreErr)
+		}
 	}
-	state := matched[0].state
-	state.AgentIncarnation = request.Delivery.Target.AgentIncarnation
-	state.LeaseOwner = request.SessionLeaseOwner
-	state.FenceToken = request.SessionLeaseToken
-	gate := &codexInputGate{tmux: a.tmux, state: state, statePath: matched[0].path, renewRestoreFence: request.RenewRestoreFence, removeFile: a.removeGateFile}
-	if err := gate.persist(); err != nil {
-		return fmt.Errorf("persist superseded Codex gate takeover: %w", err)
+	if request.CompleteSessionTakeover == nil {
+		return errors.New("missing durable session takeover completion boundary")
 	}
-	if err := a.validatePersistedGatePaneIdentity(ctx, state); err != nil {
-		return fmt.Errorf("validate superseded Codex gate pane identity: %w", err)
+	lease, err := request.CompleteSessionTakeover(ctx)
+	if err != nil {
+		return err
 	}
-	restoreCtx, cancel := context.WithTimeout(ctx, codexInputGateRestoreLimit)
-	defer cancel()
-	if err := gate.Restore(restoreCtx); err != nil {
-		return fmt.Errorf("%w: restore superseded Codex gate: %v", errCodexGateRestoreIncomplete, err)
+	if lease.AgentIncarnation != request.Delivery.Target.AgentIncarnation || strings.TrimSpace(lease.LeaseToken) == "" {
+		return errors.New("durable session takeover completed for a different incarnation")
 	}
+	request.SessionLeaseToken = lease.LeaseToken
+	request.PreviousAgentIncarnation = ""
+	request.PreviousSessionLeaseToken = ""
 	return nil
 }
 
