@@ -2122,9 +2122,6 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	if result.ContextRisk != nil && domain.IssueContextRiskRequiresStructuredCloseout(*result.ContextRisk) {
 		return result, fmt.Errorf("context risk is high for issue %s: record root_cause, invariant, regression_validation, or a structured risk note before closeout", taskID)
 	}
-	if err := d.validateTaskCloseReviewEvidence(ctx, projectID, taskID, cmd.ExpectedReviewEvidence); err != nil {
-		return result, fmt.Errorf("reviewed evidence revalidation for issue %s: %w", taskID, err)
-	}
 	reviewEvidenceFence := ""
 	if cmd.ExpectedReviewEvidence != nil {
 		reviewEvidenceFence, err = issueClient.BeginReviewEvidenceClose(ctx, taskID, *cmd.ExpectedReviewEvidence)

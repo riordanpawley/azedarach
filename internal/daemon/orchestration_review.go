@@ -379,7 +379,11 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 				result.Failed[issueID] = err.Error()
 				continue
 			}
-			currentPin, err := a.captureAcceptedReviewPin(ctx, projectID, request.RepoDir, inspection, integrateBeforeClose)
+			currentPin := storedPin
+			if integrateBeforeClose {
+				currentPin.SourceOID, err = a.resolveAcceptedReviewSourceOID(ctx, projectID, issueID)
+				currentPin.SourceOID = strings.TrimSpace(currentPin.SourceOID)
+			}
 			if err != nil || currentPin != storedPin {
 				failure := "reviewed source or evidence changed; fresh review required"
 				if err != nil {

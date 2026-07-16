@@ -634,11 +634,11 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 			waitingIssues[task.ID.String()] = struct{}{}
 		}
 	}
-	readinessContext, err := a.daemon.captureTaskGraphReadinessContext(ctx, projectID, tasks, rootIDs, waitingIssues, false)
+	readinessContext, err := a.daemon.captureTaskGraphReadinessContext(ctx, projectID, projectTasks, rootIDs, waitingIssues, false)
 	if err != nil {
 		return protocol.OrchestrationSnapshot{}, fmt.Errorf("capture project readiness context: %w", err)
 	}
-	snapshot.RecentEvents = projectRecentObservationEvents(tasks, readinessContext.stewardshipByIssue)
+	snapshot.RecentEvents = projectRecentObservationEvents(projectTasks, readinessContext.stewardshipByIssue)
 	for _, rootTask := range candidateRoots {
 		root := rootTask.ID.String()
 		snapshot.Roots = append(snapshot.Roots, root)

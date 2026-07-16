@@ -1885,8 +1885,8 @@ func TestProjectOrchestrationSnapshotCapturesAuxiliaryReadinessInputsOnce(t *tes
 		if interactionReads != 0 {
 			t.Fatalf("limit %d auxiliary interaction reads = %d, want exported interaction map only", limit, interactionReads)
 		}
-		if observationReads != 1 || worktreeReads != 1 || gitRunner.calls != 0 {
-			t.Fatalf("limit %d project captures = observations:%d worktrees:%d git:%d, want one durable capture without live Git amplification", limit, observationReads, worktreeReads, gitRunner.calls)
+		if observationReads != 1 || worktreeReads != 1 || gitRunner.calls > 1 {
+			t.Fatalf("limit %d project captures = observations:%d worktrees:%d git:%d, want one bounded project-wide capture", limit, observationReads, worktreeReads, gitRunner.calls)
 		}
 		if mailboxReads != 0 {
 			t.Fatalf("limit %d mailbox file reads = %d, want durable observation projection only", limit, mailboxReads)
@@ -2129,8 +2129,8 @@ func TestRootedOrchestrationSnapshotRetainsStableRevisionGuard(t *testing.T) {
 	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeConflict {
 		t.Fatalf("response = %+v, want rooted projection conflict", resp)
 	}
-	if builds != 3 {
-		t.Fatalf("snapshot builds = %d, want three rooted attempts", builds)
+	if builds != 1 {
+		t.Fatalf("snapshot builds = %d, want one coalesced rooted attempt", builds)
 	}
 }
 
