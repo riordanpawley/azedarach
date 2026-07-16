@@ -420,7 +420,7 @@ func (a daemonOrchestrationAuthority) activeValidationReviewReturn(ctx context.C
 	if err != nil {
 		return protocol.OrchestrationReview{}, false, err
 	}
-	gate, err := validationStore.LatestAggregateValidation(ctx, projectID, issueID, time.Now().UTC(), defaultValidationLeaseTTL)
+	gate, err := validationStore.LatestReviewValidation(ctx, projectID, issueID, time.Now().UTC(), defaultValidationLeaseTTL)
 	if err != nil {
 		return protocol.OrchestrationReview{}, false, err
 	}

@@ -76,8 +76,8 @@ func TestProjectionDeltaProtocolVersionClaimAndCompatibility(t *testing.T) {
 	if ProjectionDeltaProtocolVersion != 48 {
 		t.Fatalf("projection protocol first version=%d, want 48", ProjectionDeltaProtocolVersion)
 	}
-	if CurrentVersion != 50 {
-		t.Fatalf("current protocol version=%d, want 50", CurrentVersion)
+	if CurrentVersion != 51 {
+		t.Fatalf("current protocol version=%d, want 51", CurrentVersion)
 	}
 	if SupportsProjectionDeltaCommands(47) || !SupportsProjectionDeltaCommands(48) || !SupportsProjectionDeltaCommands(49) || !SupportsProjectionDeltaCommands(50) || SupportsProjectionDeltaCommands(51) {
 		t.Fatal("projection command support window does not span v48-v50")

@@ -28,6 +28,8 @@ func runValidationCommand(cfg *config.Config, args []string) error {
 		leaseToken := flags.String("token", os.Getenv("AZEDARACH_VALIDATION_LEASE_TOKEN"), "secret lease fencing token")
 		issueID := flags.String("issue", os.Getenv("AZEDARACH_TICKET_ID"), "owning issue id")
 		class := flags.String("class", "shared", "aggregate, shared, or safe")
+		scope := flags.String("scope", "", "repository or ticket")
+		purpose := flags.String("purpose", "", "capacity, development, push_gate, or review_evidence")
 		profile := flags.String("profile", "", "validation profile")
 		command := flags.String("command", "", "command description")
 		revision := flags.String("revision", "", "source revision")
@@ -38,7 +40,7 @@ func runValidationCommand(cfg *config.Config, args []string) error {
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		request := protocol.ValidationAcquireRequest{RequestID: *requestID, LeaseToken: *leaseToken, IssueID: *issueID, Class: domain.ValidationClass(*class), Profile: *profile, Command: *command, SourceRevision: *revision, ReviewerID: *reviewer, TTLSeconds: *ttl}
+		request := protocol.ValidationAcquireRequest{RequestID: *requestID, LeaseToken: *leaseToken, IssueID: *issueID, Class: domain.ValidationClass(*class), Scope: domain.ValidationScope(*scope), Purpose: domain.ValidationPurpose(*purpose), Profile: *profile, Command: *command, SourceRevision: *revision, ReviewerID: *reviewer, TTLSeconds: *ttl}
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
 			for {
 				result, err := deps.DaemonClient.ValidationAcquire(context.Background(), request)
@@ -71,11 +73,13 @@ func runValidationCommand(cfg *config.Config, args []string) error {
 		requestID := flags.String("request", "", "request id")
 		leaseToken := flags.String("token", os.Getenv("AZEDARACH_VALIDATION_LEASE_TOKEN"), "secret lease fencing token")
 		class := flags.String("class", "shared", "aggregate, shared, or safe")
+		scope := flags.String("scope", "", "inherited repository or ticket scope")
+		purpose := flags.String("purpose", "", "inherited validation purpose")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
-			_, err := deps.DaemonClient.ValidationAuthorizeNested(context.Background(), protocol.ValidationAuthorizeNestedRequest{RequestID: *requestID, LeaseToken: *leaseToken, Class: domain.ValidationClass(*class)})
+			_, err := deps.DaemonClient.ValidationAuthorizeNested(context.Background(), protocol.ValidationAuthorizeNestedRequest{RequestID: *requestID, LeaseToken: *leaseToken, Class: domain.ValidationClass(*class), Scope: domain.ValidationScope(*scope), Purpose: domain.ValidationPurpose(*purpose)})
 			return err
 		})
 	case "finish":
@@ -158,7 +162,7 @@ func printValidationValue(value any, asJSON bool) error {
 	}
 	switch value := value.(type) {
 	case protocol.ValidationRequestResponse:
-		fmt.Printf("%s %s %s (%s)\n", value.Request.RequestID, value.Request.State, value.Request.Profile, value.Request.IssueID)
+		fmt.Printf("%s %s %s scope=%s purpose=%s ticket=%s\n", value.Request.RequestID, value.Request.State, value.Request.Profile, value.Request.Scope, value.Request.Purpose, value.Request.IssueID)
 	case domain.ValidationSnapshot:
 		fmt.Printf("active=%d queued=%d revision=%d\n", len(value.Active), len(value.Queued), value.Revision)
 	default:
@@ -169,7 +173,7 @@ func printValidationValue(value any, asJSON bool) error {
 
 func printValidationUsage() {
 	fmt.Println(strings.TrimSpace(`Usage: az validation <acquire|heartbeat|authorize-nested|finish|status|watch> [flags]
-  acquire --request <id> --token <secret> --issue <id> --class aggregate|shared|safe --profile <name> --command <text> --revision <sha> [--wait] [--json]
+  acquire --request <id> --token <secret> --scope repository|ticket --purpose capacity|development|push_gate|review_evidence [--issue <id>] --class aggregate|shared|safe --profile <name> --command <text> --revision <sha> [--wait] [--json]
   heartbeat --request <id> --token <secret> [--ttl 30]
   authorize-nested --request <id> --token <secret> --class aggregate|shared|safe
   finish --request <id> --token <secret> --state completed|cancelled|failed [--outcome text] [--evidence-json object] [--json]

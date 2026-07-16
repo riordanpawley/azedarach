@@ -36,6 +36,16 @@ heartbeats the durable request, and nested managed commands join its request.
 The safe lane is bounded to daemon-recognized non-compiling command/profile
 pairs; callers cannot relabel focused or aggregate Go work as safe.
 
+Admission class is independent from attribution and evidence authority.
+Repository-scoped push gates carry no ticket identity and can never authorize
+ticket review or integration. Ticket-scoped development runs require an
+existing ticket but remain development evidence. Only explicit
+`review_evidence` purpose can enter review-readiness queries, and acquisition
+binds it to the current ticket review epoch, reviewer lease, and source
+revision. Nested recipes inherit class, scope, purpose, and revision from the
+outer capability and cannot upgrade them. Rows predating this contract retain
+`legacy` purpose and remain diagnostic history only.
+
 The cache lock has a narrower role. Validators hold it shared while cache
 maintenance holds it exclusively, so
 `go clean -cache` never runs concurrently with managed validation. Reports use schema

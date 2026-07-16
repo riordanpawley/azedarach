@@ -14,6 +14,8 @@ use Time::HiRes qw(time sleep);
 my $mode = 'run';
 my $class = 'shared';
 my $profile = '';
+my $scope = '';
+my $purpose = '';
 my $interval = 1;
 while (@ARGV && $ARGV[0] ne '--') {
     my $flag = shift @ARGV;
@@ -21,6 +23,8 @@ while (@ARGV && $ARGV[0] ne '--') {
     if ($flag eq '--watch') { $mode = 'watch'; next; }
     if ($flag eq '--interval') { $interval = shift(@ARGV) // die "--interval requires seconds\n"; next; }
     if ($flag eq '--class') { $class = shift(@ARGV) // die "--class requires a value\n"; next; }
+    if ($flag eq '--scope') { $scope = shift(@ARGV) // die "--scope requires a value\n"; next; }
+    if ($flag eq '--purpose') { $purpose = shift(@ARGV) // die "--purpose requires a value\n"; next; }
     if ($flag eq '--label' || $flag eq '--profile') { $profile = shift(@ARGV) // die "$flag requires a value\n"; next; }
     die "unknown option $flag\n";
 }
@@ -95,7 +99,9 @@ if ($ENV{AZEDARACH_VALIDATION_REQUEST_ID}) {
     fcntl($broker, F_SETFD, $nested_flags & ~FD_CLOEXEC)
         or die "preserve nested validation capability across exec: $!\n";
     my $nonce = random_token();
-    print {$broker} encode_json({request_id => $ENV{AZEDARACH_VALIDATION_REQUEST_ID}, class => $class, nonce => $nonce}) . "\n"
+    $scope ||= $ENV{AZEDARACH_VALIDATION_SCOPE} || '';
+    $purpose ||= $ENV{AZEDARACH_VALIDATION_PURPOSE} || '';
+    print {$broker} encode_json({request_id => $ENV{AZEDARACH_VALIDATION_REQUEST_ID}, class => $class, scope => $scope, purpose => $purpose, nonce => $nonce}) . "\n"
         or die "request nested validation authorization: $!\n";
     my $line = <$broker>;
     die "nested validation authorization broker closed\n" unless defined $line;
@@ -105,10 +111,18 @@ if ($ENV{AZEDARACH_VALIDATION_REQUEST_ID}) {
     $ENV{AZEDARACH_VALIDATION_CLASS} = $authorization->{class};
     $ENV{AZEDARACH_VALIDATION_PROFILE} = $authorization->{profile};
     $ENV{AZEDARACH_VALIDATION_SOURCE_REVISION} = $authorization->{source_revision};
+    $ENV{AZEDARACH_VALIDATION_SCOPE} = $authorization->{scope};
+    $ENV{AZEDARACH_VALIDATION_PURPOSE} = $authorization->{purpose};
     exec @ARGV or die "exec nested validation command $ARGV[0]: $!\n";
 }
 
-my $issue = $ENV{AZEDARACH_TICKET_ID} || $ENV{AZEDARACH_ISSUE_ID} || 'manual-' . $$;
+my $issue = $ENV{AZEDARACH_TICKET_ID} || $ENV{AZEDARACH_ISSUE_ID} || '';
+$scope ||= $ENV{AZEDARACH_VALIDATION_SCOPE} || ($issue ne '' ? 'ticket' : 'repository');
+$purpose ||= $ENV{AZEDARACH_VALIDATION_PURPOSE} || ($scope eq 'repository' ? 'push_gate' : 'development');
+die "unsupported validation scope $scope\n" unless $scope eq 'repository' || $scope eq 'ticket';
+die "unsupported validation purpose $purpose\n" unless $purpose =~ /^(?:capacity|development|push_gate|review_evidence)$/;
+die "repository-scoped validation must not identify a ticket\n" if $scope eq 'repository' && $issue ne '';
+die "ticket-scoped validation requires AZEDARACH_TICKET_ID\n" if $scope eq 'ticket' && $issue eq '';
 my $revision = capture($git, 'rev-parse', 'HEAD');
 $revision =~ s/\s+\z//;
 die "resolve validation source revision\n" unless $revision;
@@ -170,7 +184,7 @@ END {
 $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN} = $lease_token;
 my $command_text = join(' ', @ARGV);
 my @acquire = ($control_az, 'validation', 'acquire', '--request', $request_id, '--issue', $issue,
-    '--class', $class, '--profile', $profile, '--command', $command_text,
+    '--class', $class, '--scope', $scope, '--purpose', $purpose, '--profile', $profile, '--command', $command_text,
     '--revision', $revision, '--ttl', '30', '--json');
 while (1) {
     my $decoded = eval { decode_json(control_capture(@acquire)) };
@@ -183,6 +197,8 @@ $ENV{AZEDARACH_VALIDATION_REQUEST_ID} = $request_id;
 $ENV{AZEDARACH_VALIDATION_CLASS} = $class;
 $ENV{AZEDARACH_VALIDATION_PROFILE} = $profile;
 $ENV{AZEDARACH_VALIDATION_SOURCE_REVISION} = $revision;
+$ENV{AZEDARACH_VALIDATION_SCOPE} = $scope;
+$ENV{AZEDARACH_VALIDATION_PURPOSE} = $purpose;
 my ($evidence_fh, $evidence_file) = tempfile('azedarach-validation-evidence-XXXXXX', TMPDIR => 1, UNLINK => 0);
 close $evidence_fh;
 $ENV{AZEDARACH_VALIDATION_EVIDENCE_FILE} = $evidence_file;
@@ -367,6 +383,7 @@ if ($class eq 'aggregate') {
 
 merge_whole_gate_evidence($evidence_file, {
     held => JSON::PP::true, request_id => $request_id, class => $class,
+    scope => $scope, purpose => $purpose,
     profile => $profile, source_revision => $revision, present => JSON::PP::true,
     overlap_detected => $overlap_detected ? JSON::PP::true : JSON::PP::false,
     external_go_processes => $max_external_go,
@@ -401,9 +418,9 @@ sub authorize_nested {
     my $response = {ok => JSON::PP::false, nonce => $nonce, error => 'invalid nested validation authorization request'};
     if ($request && ($request->{request_id} || '') eq $held_request) {
         local $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN} = $token;
-        my $ok = eval { control_capture($az_path, 'validation', 'authorize-nested', '--request', $held_request, '--class', ($request->{class} || '')); 1 };
+        my $ok = eval { control_capture($az_path, 'validation', 'authorize-nested', '--request', $held_request, '--class', ($request->{class} || ''), '--scope', ($request->{scope} || ''), '--purpose', ($request->{purpose} || '')); 1 };
         if ($ok) {
-            $response = {ok => JSON::PP::true, nonce => $nonce, class => $ENV{AZEDARACH_VALIDATION_CLASS}, profile => $ENV{AZEDARACH_VALIDATION_PROFILE}, source_revision => $ENV{AZEDARACH_VALIDATION_SOURCE_REVISION}};
+            $response = {ok => JSON::PP::true, nonce => $nonce, class => $ENV{AZEDARACH_VALIDATION_CLASS}, scope => $ENV{AZEDARACH_VALIDATION_SCOPE}, purpose => $ENV{AZEDARACH_VALIDATION_PURPOSE}, profile => $ENV{AZEDARACH_VALIDATION_PROFILE}, source_revision => $ENV{AZEDARACH_VALIDATION_SOURCE_REVISION}};
         } else {
             $response->{error} = 'daemon rejected nested validation authorization';
         }
@@ -508,6 +525,8 @@ sub clear_control_authority_environment {
         AZEDARACH_VALIDATION_CLASS
         AZEDARACH_VALIDATION_PROFILE
         AZEDARACH_VALIDATION_SOURCE_REVISION
+        AZEDARACH_VALIDATION_SCOPE
+        AZEDARACH_VALIDATION_PURPOSE
     )};
 }
 

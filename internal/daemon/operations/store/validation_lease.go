@@ -15,6 +15,17 @@ import (
 )
 
 func (s *SQLiteStore) AcquireValidation(ctx context.Context, request domain.ValidationAcquire, now time.Time) (domain.ValidationRequest, error) {
+	// Preserve source compatibility for internal callers while all transport
+	// callers are required to provide the explicit authority dimensions.
+	if request.Scope == "" {
+		request.Scope = domain.ValidationScopeTicket
+	}
+	if request.Purpose == "" {
+		request.Purpose = domain.ValidationPurposeDevelopment
+		if request.ReviewerID != "" || request.ReviewEpochEventID != 0 {
+			request.Purpose = domain.ValidationPurposeReviewEvidence
+		}
+	}
 	if err := request.Validate(); err != nil {
 		return domain.ValidationRequest{}, err
 	}
@@ -32,8 +43,8 @@ func (s *SQLiteStore) AcquireValidation(ctx context.Context, request domain.Vali
 		return domain.ValidationRequest{}, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO daemon_validation_requests
-		(request_id,lease_token_hash,project_id,issue_id,class,profile,command,source_revision,reviewer_id,review_epoch_event_id,state,queued_at,heartbeat_at,expires_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)`, request.RequestID, validationTokenHash(request.LeaseToken), request.ProjectID, request.IssueID, request.Class,
+		(request_id,lease_token_hash,project_id,issue_id,class,scope,purpose,profile,command,source_revision,reviewer_id,review_epoch_event_id,state,queued_at,heartbeat_at,expires_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)`, request.RequestID, validationTokenHash(request.LeaseToken), request.ProjectID, request.IssueID, request.Class, request.Scope, request.Purpose,
 		request.Profile, request.Command, request.SourceRevision, request.ReviewerID, request.ReviewEpochEventID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(request.TTL).Format(time.RFC3339Nano))
 	if err != nil {
 		return domain.ValidationRequest{}, fmt.Errorf("queue validation request: %w", err)
@@ -45,7 +56,7 @@ func (s *SQLiteStore) AcquireValidation(ctx context.Context, request domain.Vali
 	if err := authenticateValidationRequestTx(ctx, tx, request.RequestID, request.LeaseToken); err != nil {
 		return domain.ValidationRequest{}, err
 	}
-	if current.ProjectID != request.ProjectID || current.IssueID != request.IssueID || current.Class != request.Class || current.Profile != request.Profile || current.Command != request.Command || current.SourceRevision != request.SourceRevision || current.ReviewerID != request.ReviewerID || current.ReviewEpochEventID != request.ReviewEpochEventID {
+	if current.ProjectID != request.ProjectID || current.IssueID != request.IssueID || current.Class != request.Class || current.Scope != request.Scope || current.Purpose != request.Purpose || current.Profile != request.Profile || current.Command != request.Command || current.SourceRevision != request.SourceRevision || current.ReviewerID != request.ReviewerID || current.ReviewEpochEventID != request.ReviewEpochEventID {
 		return domain.ValidationRequest{}, fmt.Errorf("validation request id %s already exists with different identity", request.RequestID)
 	}
 	if current.State == domain.ValidationRequestQueued {
@@ -71,8 +82,8 @@ func (s *SQLiteStore) HeartbeatValidation(ctx context.Context, requestID, leaseT
 }
 
 func (s *SQLiteStore) AuthorizeNestedValidation(ctx context.Context, authorization domain.ValidationNestedAuthorization, now time.Time, ttl time.Duration) (domain.ValidationRequest, error) {
-	if err := authorization.Validate(); err != nil {
-		return domain.ValidationRequest{}, err
+	if strings.TrimSpace(authorization.RequestID) == "" || strings.TrimSpace(authorization.LeaseToken) == "" || !authorization.Class.Valid() {
+		return domain.ValidationRequest{}, fmt.Errorf("nested validation authorization requires request id, lease token, and supported class")
 	}
 	db, err := s.dbHandle()
 	if err != nil {
@@ -90,6 +101,15 @@ func (s *SQLiteStore) AuthorizeNestedValidation(ctx context.Context, authorizati
 	if err := authenticateValidationRequestTx(ctx, tx, authorization.RequestID, authorization.LeaseToken); err != nil {
 		return domain.ValidationRequest{}, err
 	}
+	if authorization.Scope == "" {
+		authorization.Scope = current.Scope
+	}
+	if authorization.Purpose == "" {
+		authorization.Purpose = current.Purpose
+	}
+	if err := authorization.Validate(); err != nil {
+		return domain.ValidationRequest{}, err
+	}
 	if err := expireAndReconcileValidationTx(ctx, tx, current.ProjectID, now.UTC(), ttl); err != nil {
 		return domain.ValidationRequest{}, err
 	}
@@ -102,6 +122,9 @@ func (s *SQLiteStore) AuthorizeNestedValidation(ctx context.Context, authorizati
 	}
 	if current.Class != domain.ValidationClassAggregate && current.Class != authorization.Class {
 		return domain.ValidationRequest{}, fmt.Errorf("nested %s validation cannot join active %s request", authorization.Class, current.Class)
+	}
+	if current.Scope != authorization.Scope || current.Purpose != authorization.Purpose {
+		return domain.ValidationRequest{}, fmt.Errorf("nested validation cannot change active %s/%s identity to %s/%s", current.Scope, current.Purpose, authorization.Scope, authorization.Purpose)
 	}
 	if err := tx.Commit(); err != nil {
 		return domain.ValidationRequest{}, fmt.Errorf("commit nested validation authorization: %w", err)
@@ -152,7 +175,13 @@ func (s *SQLiteStore) transitionValidation(ctx context.Context, requestID, lease
 		if len(evidence) > 0 {
 			validationEvidence = evidence[0]
 		}
-		if validationEvidence.Present && (validationEvidence.RequestID != current.RequestID || validationEvidence.Class != current.Class || validationEvidence.Profile != current.Profile || validationEvidence.SourceRevision != current.SourceRevision || !validationEvidence.Held) {
+		if validationEvidence.Present && validationEvidence.Scope == "" {
+			validationEvidence.Scope = current.Scope
+		}
+		if validationEvidence.Present && validationEvidence.Purpose == "" {
+			validationEvidence.Purpose = current.Purpose
+		}
+		if validationEvidence.Present && (validationEvidence.RequestID != current.RequestID || validationEvidence.Class != current.Class || validationEvidence.Scope != current.Scope || validationEvidence.Purpose != current.Purpose || validationEvidence.Profile != current.Profile || validationEvidence.SourceRevision != current.SourceRevision || !validationEvidence.Held) {
 			return domain.ValidationRequest{}, fmt.Errorf("validation evidence identity does not match held request %s", current.RequestID)
 		}
 		evidenceJSON, marshalErr := json.Marshal(validationEvidence)
@@ -229,7 +258,7 @@ func (s *SQLiteStore) ValidationSnapshot(ctx context.Context, projectID string, 
 	return snapshot, nil
 }
 
-func (s *SQLiteStore) LatestAggregateValidation(ctx context.Context, projectID, issueID string, now time.Time, ttl time.Duration) (*domain.ValidationRequest, error) {
+func (s *SQLiteStore) LatestReviewValidation(ctx context.Context, projectID, issueID string, now time.Time, ttl time.Duration) (*domain.ValidationRequest, error) {
 	db, err := s.dbHandle()
 	if err != nil {
 		return nil, err
@@ -242,7 +271,7 @@ func (s *SQLiteStore) LatestAggregateValidation(ctx context.Context, projectID, 
 	if err := expireAndReconcileValidationTx(ctx, tx, strings.TrimSpace(projectID), now.UTC(), ttl); err != nil {
 		return nil, err
 	}
-	request, err := scanValidationRequest(tx.QueryRowContext(ctx, validationSelect+` WHERE project_id=? AND issue_id=? AND class='aggregate' ORDER BY sequence DESC LIMIT 1`, strings.TrimSpace(projectID), strings.TrimSpace(issueID)))
+	request, err := scanValidationRequest(tx.QueryRowContext(ctx, validationSelect+` WHERE project_id=? AND issue_id=? AND class='aggregate' AND scope='ticket' AND purpose='review_evidence' ORDER BY sequence DESC LIMIT 1`, strings.TrimSpace(projectID), strings.TrimSpace(issueID)))
 	if errors.Is(err, sql.ErrNoRows) {
 		if commitErr := tx.Commit(); commitErr != nil {
 			return nil, fmt.Errorf("commit latest aggregate validation reconciliation: %w", commitErr)
@@ -256,6 +285,13 @@ func (s *SQLiteStore) LatestAggregateValidation(ctx context.Context, projectID, 
 		return nil, fmt.Errorf("commit latest aggregate validation reconciliation: %w", err)
 	}
 	return &request, nil
+}
+
+// LatestAggregateValidation remains as a compatibility name for callers that
+// have not yet adopted the authority-oriented method name. It intentionally
+// returns only explicit review evidence; legacy aggregate rows are excluded.
+func (s *SQLiteStore) LatestAggregateValidation(ctx context.Context, projectID, issueID string, now time.Time, ttl time.Duration) (*domain.ValidationRequest, error) {
+	return s.LatestReviewValidation(ctx, projectID, issueID, now, ttl)
 }
 
 func expireAndReconcileValidationTx(ctx context.Context, tx *sql.Tx, projectID string, now time.Time, ttl time.Duration) error {
@@ -324,7 +360,7 @@ func reconcileValidationQueueTx(ctx context.Context, tx *sql.Tx, projectID strin
 
 const validationAggregateSharedBypassLimit = 1
 
-const validationSelect = `SELECT sequence,request_id,project_id,issue_id,class,profile,command,source_revision,reviewer_id,review_epoch_event_id,state,queued_at,started_at,heartbeat_at,expires_at,finished_at,outcome,evidence_json FROM daemon_validation_requests`
+const validationSelect = `SELECT sequence,request_id,project_id,issue_id,class,scope,purpose,profile,command,source_revision,reviewer_id,review_epoch_event_id,state,queued_at,started_at,heartbeat_at,expires_at,finished_at,outcome,evidence_json FROM daemon_validation_requests`
 
 type validationScanner interface{ Scan(...any) error }
 
@@ -360,7 +396,7 @@ func scanValidationRequest(scanner validationScanner) (domain.ValidationRequest,
 	var queued string
 	var started, heartbeat, expires, finished sql.NullString
 	var evidenceJSON string
-	if err := scanner.Scan(&request.Sequence, &request.RequestID, &request.ProjectID, &request.IssueID, &request.Class, &request.Profile, &request.Command, &request.SourceRevision, &request.ReviewerID, &request.ReviewEpochEventID, &request.State, &queued, &started, &heartbeat, &expires, &finished, &request.Outcome, &evidenceJSON); err != nil {
+	if err := scanner.Scan(&request.Sequence, &request.RequestID, &request.ProjectID, &request.IssueID, &request.Class, &request.Scope, &request.Purpose, &request.Profile, &request.Command, &request.SourceRevision, &request.ReviewerID, &request.ReviewEpochEventID, &request.State, &queued, &started, &heartbeat, &expires, &finished, &request.Outcome, &evidenceJSON); err != nil {
 		return request, err
 	}
 	if err := json.Unmarshal([]byte(evidenceJSON), &request.Evidence); err != nil {

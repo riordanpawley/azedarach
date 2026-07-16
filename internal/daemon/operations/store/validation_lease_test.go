@@ -299,9 +299,9 @@ func TestLatestAggregateValidationRetainsMachineEvidence(t *testing.T) {
 	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
 	t.Cleanup(func() { _ = store.Close() })
 	now := time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC)
-	_, err := store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "aggregate", LeaseToken: testValidationToken, ProjectID: "project", IssueID: "dkg", Class: domain.ValidationClassAggregate, Profile: "cold", Command: "just test", SourceRevision: "abc123", TTL: time.Minute}, now)
+	_, err := store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "aggregate", LeaseToken: testValidationToken, ProjectID: "project", IssueID: "dkg", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence, Profile: "cold", Command: "just test", SourceRevision: "abc123", ReviewerID: "reviewer", ReviewEpochEventID: 1, TTL: time.Minute}, now)
 	require.NoError(t, err)
-	want := domain.ValidationEvidence{Held: true, RequestID: "aggregate", Class: domain.ValidationClassAggregate, Profile: "cold", SourceRevision: "abc123", Present: true, ReportPath: ".tmp/report.json", OverlapDetected: true, ExternalGoProcesses: 3}
+	want := domain.ValidationEvidence{Held: true, RequestID: "aggregate", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence, Profile: "cold", SourceRevision: "abc123", Present: true, ReportPath: ".tmp/report.json", OverlapDetected: true, ExternalGoProcesses: 3}
 	_, err = store.FinishValidation(ctx, "aggregate", testValidationToken, domain.ValidationRequestCompleted, "passed", want, now.Add(time.Second), time.Minute)
 	require.NoError(t, err)
 	got, err := store.LatestAggregateValidation(ctx, "project", "dkg", now.Add(time.Second), time.Minute)
