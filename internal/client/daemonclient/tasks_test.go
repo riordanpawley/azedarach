@@ -257,6 +257,32 @@ func TestListTaskEventsCommand(t *testing.T) {
 	}
 }
 
+func TestQueryTaskEventsCarriesFiltersAndPageMetadata(t *testing.T) {
+	next := int64(70)
+	transport := &taskRecordingTransport{replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		var body TaskEventsRequest
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.TaskID != "az-1" || body.Order != "desc" || body.BeforeID != 80 || body.Query != "projection" || body.Source != "daemon" || len(body.PayloadEquals) != 1 {
+			t.Fatalf("request body = %+v", body)
+		}
+		payload, err := json.Marshal(TaskEventsPage{Order: "desc", Limit: 10, HasMore: true, FirstID: 79, LastID: 70, NextBeforeID: &next})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, OK: true, Body: payload}, nil
+	}}
+	client := New(transport)
+	page, err := client.QueryTaskEvents(context.Background(), "az-1", TaskEventsRequest{Order: "desc", BeforeID: 80, Limit: 10, Query: "projection", Source: "daemon", PayloadEquals: []TaskEventPayloadFilter{{Key: "outcome", Value: "accepted"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page.HasMore || page.NextBeforeID == nil || *page.NextBeforeID != 70 {
+		t.Fatalf("page = %+v", page)
+	}
+}
+
 func TestTaskGraphReadinessDecodesWorkerObservations(t *testing.T) {
 	const wantProjectID = "proj-task"
 	transport := &taskRecordingTransport{

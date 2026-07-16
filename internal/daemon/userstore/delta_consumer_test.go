@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -109,6 +110,57 @@ func TestApplyProjectDeltaIsAtomicIdempotentAndPreservesRuntimeProjection(t *tes
 	identityMismatch.Next.ProjectID = "other"
 	if err := store.ApplyProjectDelta(ctx, identityMismatch); err == nil {
 		t.Fatal("cross-project component identity mismatch unexpectedly applied")
+	}
+}
+
+func TestApplyProjectDeltaConcurrentStoresConvergeOnArchivedValue(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "user.db")
+	first, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+
+	ctx := context.Background()
+	initial := testDeltaState("p", 1, "one")
+	live := domain.Task{ID: "issue", Title: "live", Status: domain.StatusOpen, Type: domain.TypeTask, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := first.ReplaceProject(ctx, ProjectInput{ProjectID: "p", Name: "P", Path: "/p", DBPath: "/p/db", Tasks: []domain.Task{live}, Delta: &initial}); err != nil {
+		t.Fatal(err)
+	}
+	archived := live
+	archived.State, err = domain.NewIssueState(domain.IssueStateParts{Workflow: domain.IssueWorkflowOpen, Archive: domain.IssueArchiveArchived})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := testDeltaState("p", 2, "two")
+	apply := ProjectDeltaApply{Project: CatalogProject{ProjectID: "p", Name: "P", Path: "/p", DBPath: "/p/db"}, Expected: initial, Next: next, Changes: []ProjectDeltaChange{{IssueID: "issue", Issue: &archived, MaterializedIssue: &archived}}}
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var ready sync.WaitGroup
+	ready.Add(2)
+	for _, store := range []*Store{first, second} {
+		go func(store *Store) {
+			ready.Done()
+			<-start
+			errs <- store.ApplyProjectDelta(ctx, apply)
+		}(store)
+	}
+	ready.Wait()
+	close(start)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent idempotent apply: %v", err)
+		}
+	}
+	project := projectSnapshot(t, first, "p")
+	if project.DeltaCursor != 2 || len(project.Tasks) != 1 || !project.Tasks[0].State.IsArchived() {
+		t.Fatalf("concurrent archived apply did not converge: %+v", project)
 	}
 }
 

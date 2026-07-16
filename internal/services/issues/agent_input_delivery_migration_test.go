@@ -38,7 +38,7 @@ func TestAgentInputDeliveryMigrationFreshReopenAndDurableIntent(t *testing.T) {
 	}
 	defer db.Close()
 	var rows int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='0050_agent_input_delivery' AND length(artifact_checksum)=64`).Scan(&rows); err != nil || rows != 1 {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND length(artifact_checksum)=64`, agentInputDeliveryMigrationID).Scan(&rows); err != nil || rows != 1 {
 		t.Fatalf("ledger rows=%d err=%v", rows, err)
 	}
 }

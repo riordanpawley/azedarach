@@ -3254,7 +3254,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 		if _, excluded := excludedTmuxNames[strings.TrimSpace(name)]; excluded {
 			continue
 		}
-		issueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope)
+		issueID, ok := naming.ParseManagedIssueIDFromSessionName(name, namingScope)
 		if !ok {
 			continue
 		}
@@ -4433,7 +4433,7 @@ func (d *Daemon) persistTmuxSessionRuntimeState(ctx context.Context, projectID s
 		if name == "" {
 			continue
 		}
-		issueID, ok := naming.ParseIssueIDFromSessionName(name, namingScope)
+		issueID, ok := naming.ParseManagedIssueIDFromSessionName(name, namingScope)
 		if !ok {
 			continue
 		}

@@ -681,7 +681,7 @@ func main() {
 		case "events":
 			opts, err := cli.ParseIssueEventsArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az ticket events [--project <project-id>] [--id <ticket-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<ticket-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az ticket events [--project <project-id>] [--id <ticket-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--order asc|desc] [--limit N | --tail N] [--after-id ID] [--before-id ID] [--source value] [--source-command value] [--operation ID] [--session ID] [--worktree path] [--since time] [--until time] [--query text] [--payload key=value ...] [<ticket-id>]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}

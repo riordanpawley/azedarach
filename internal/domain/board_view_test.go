@@ -204,6 +204,21 @@ func TestProjectionExposesOrchestrationViewState(t *testing.T) {
 	}
 }
 
+func TestProjectTasksByBoardViewKeepsArchivedIssuesKnownButUnprojected(t *testing.T) {
+	state, err := NewIssueState(IssueStateParts{Workflow: IssueWorkflowOpen, Archive: IssueArchiveArchived})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := Task{ID: "archived", Title: "Archived", Status: StatusOpen, State: state}
+	projection, err := ProjectTasksByBoardView(DefaultBoardView(), []Task{task})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Items) != 0 || len(projection.KnownTaskIDs) != 1 || projection.KnownTaskIDs[0] != task.ID {
+		t.Fatalf("archived projection = %+v, want known but unprojected", projection)
+	}
+}
+
 func TestBuiltInBoardViewsUseFocusedWorkflows(t *testing.T) {
 	tests := []struct {
 		view BoardView

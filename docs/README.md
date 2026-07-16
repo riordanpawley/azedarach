@@ -43,6 +43,7 @@ This directory primarily contains **developer/internal documentation**.
 - [27-go-cache-protocol.md](27-go-cache-protocol.md) — bounded worktree-aware Go cache ownership, validation, and maintenance
 - [28-decision-markdown-sync.md](28-decision-markdown-sync.md) — worktree-safe decision store/export authority and recovery workflow
 - [29-native-agent-input-authority.md](29-native-agent-input-authority.md) — exact-incarnation native delivery and fail-closed tool capability contract
+- [29-ticket-event-history-query.md](29-ticket-event-history-query.md) — searchable, cursor-pageable ticket observation history
 - [adr/1-daemon-ownership-adr.md](adr/1-daemon-ownership-adr.md)
 - [adr/2-daemon-owned-async-notices.md](adr/2-daemon-owned-async-notices.md)
 

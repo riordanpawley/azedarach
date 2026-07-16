@@ -556,6 +556,22 @@ func TestClient_GetManyWithRuntimeFiltersRequestedActiveIssues(t *testing.T) {
 	assert.NotContains(t, got, archivedID)
 }
 
+func TestClient_GetManyWithRuntimeArchiveModeIncludesArchivedIssues(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClient(t)
+
+	archivedID, err := client.Create(ctx, CreateTaskParams{Title: "archived", Type: domain.TypeTask, Priority: domain.P2})
+	require.NoError(t, err)
+	require.NoError(t, client.Archive(ctx, archivedID))
+
+	tasks, err := client.GetManyWithRuntimeArchiveMode(ctx, "proj", []string{archivedID}, ArchiveInclude)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, archivedID, tasks[0].ID.String())
+	assert.True(t, tasks[0].State.IsArchived())
+}
+
 func TestClient_ArchiveModeRuntimeReads(t *testing.T) {
 	parallelIssueStoreTest(t)
 	ctx := context.Background()
@@ -4391,7 +4407,8 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0047_projection_delta_authority",
 		"0048_decision_propagation_outbox",
 		"0049_managed_agent_incarnations",
-		"0050_agent_input_delivery",
+		"0051_agent_input_delivery",
+		"0050_issue_observation_event_search",
 	}, got)
 }
 

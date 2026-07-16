@@ -103,6 +103,18 @@ func ParseIssueIDFromSessionName(sessionName, projectPath string) (string, bool)
 	return decoded, true
 }
 
+// ParseManagedIssueIDFromSessionName accepts only the exact canonical tmux
+// identity for an issue in the given project. ParseIssueIDFromSessionName also
+// accepts legacy bare issue IDs for explicit user input, which is unsafe for
+// global tmux inventory fanout because unrelated sessions can share those names.
+func ParseManagedIssueIDFromSessionName(sessionName, projectPath string) (string, bool) {
+	issueID, ok := ParseIssueIDFromSessionName(sessionName, projectPath)
+	if !ok || CanonicalSessionID(projectPath, issueID) != strings.TrimSpace(sessionName) {
+		return "", false
+	}
+	return issueID, true
+}
+
 func SanitizeIssueIDForBranchSegment(value string) string {
 	normalized := strings.ToLower(strings.TrimSpace(value))
 	var b strings.Builder

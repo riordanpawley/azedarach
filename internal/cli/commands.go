@@ -177,12 +177,24 @@ type IssueOwnershipOptions struct {
 }
 
 type IssueEventsOptions struct {
-	Project    string
-	IssueID    string
-	JSON       bool
-	JQHelp     bool
-	EventTypes []string
-	Limit      int
+	Project       string
+	IssueID       string
+	JSON          bool
+	JQHelp        bool
+	EventTypes    []string
+	Order         string
+	Limit         int
+	AfterID       int64
+	BeforeID      int64
+	Source        string
+	SourceCommand string
+	OperationID   string
+	SessionID     string
+	WorktreePath  string
+	ObservedSince *time.Time
+	ObservedUntil *time.Time
+	Query         string
+	PayloadEquals []daemonclient.TaskEventPayloadFilter
 }
 
 type IssueRecordOptions struct {
@@ -3633,10 +3645,14 @@ func ParseIssueOwnershipArgs(args []string, command string) (IssueOwnershipOptio
 }
 
 func ParseIssueEventsArgs(args []string) (IssueEventsOptions, error) {
-	opts := IssueEventsOptions{}
+	opts := IssueEventsOptions{Order: "asc"}
 	issueIDFlag := ""
 	typesCSV := ""
+	tail := 0
+	observedSince := ""
+	observedUntil := ""
 	var typeFlags repeatedStringFlag
+	var payloadFlags repeatedStringFlag
 	fs := flag.NewFlagSet("issue events", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
@@ -3645,12 +3661,25 @@ func ParseIssueEventsArgs(args []string) (IssueEventsOptions, error) {
 	fs.StringVar(&issueIDFlag, "id", "", "issue id (named alternative to positional)")
 	fs.Var(&typeFlags, "type", "filter by event type; may be repeated")
 	fs.StringVar(&typesCSV, "types", "", "comma-separated event types")
+	fs.StringVar(&opts.Order, "order", "asc", "event ID order: asc or desc")
 	fs.IntVar(&opts.Limit, "limit", 0, "maximum events to return")
+	fs.IntVar(&tail, "tail", 0, "return the newest N events in descending ID order")
+	fs.Int64Var(&opts.AfterID, "after-id", 0, "return events after this exclusive event ID")
+	fs.Int64Var(&opts.BeforeID, "before-id", 0, "return events before this exclusive event ID")
+	fs.StringVar(&opts.Source, "source", "", "filter by exact source")
+	fs.StringVar(&opts.SourceCommand, "source-command", "", "filter by exact source command")
+	fs.StringVar(&opts.OperationID, "operation", "", "filter by exact operation ID")
+	fs.StringVar(&opts.SessionID, "session", "", "filter by exact session ID")
+	fs.StringVar(&opts.WorktreePath, "worktree", "", "filter by exact worktree path")
+	fs.StringVar(&observedSince, "since", "", "filter at or after YYYY-MM-DD or RFC3339")
+	fs.StringVar(&observedUntil, "until", "", "filter at or before YYYY-MM-DD or RFC3339")
+	fs.StringVar(&opts.Query, "query", "", "search human-facing event summary/body text")
+	fs.Var(&payloadFlags, "payload", "filter indexed outcome|disposition|decision_id|revision|actor_id key=value; may be repeated")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueEventsOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueEventsOptions{}, fmt.Errorf("usage: az ticket events [--project <project-id>] [--id <ticket-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<ticket-id>]")
+		return IssueEventsOptions{}, fmt.Errorf("usage: az ticket events [--project <project-id>] [--id <ticket-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--order asc|desc] [--limit N | --tail N] [--after-id ID] [--before-id ID] [--source value] [--source-command value] [--operation ID] [--session ID] [--worktree path] [--since time] [--until time] [--query text] [--payload key=value ...] [<ticket-id>]")
 	}
 	if fs.NArg() == 1 {
 		opts.IssueID = fs.Arg(0)
@@ -3659,10 +3688,54 @@ func ParseIssueEventsArgs(args []string) (IssueEventsOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" && !opts.JQHelp {
-		return IssueEventsOptions{}, fmt.Errorf("usage: az ticket events [--project <project-id>] [--id <ticket-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<ticket-id>]")
+		return IssueEventsOptions{}, fmt.Errorf("usage: az ticket events [--project <project-id>] [--id <ticket-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--order asc|desc] [--limit N | --tail N] [--after-id ID] [--before-id ID] [--source value] [--source-command value] [--operation ID] [--session ID] [--worktree path] [--since time] [--until time] [--query text] [--payload key=value ...] [<ticket-id>]")
 	}
 	if opts.Limit < 0 {
 		return IssueEventsOptions{}, fmt.Errorf("--limit must be non-negative")
+	}
+	visited := map[string]bool{}
+	fs.Visit(func(flag *flag.Flag) { visited[flag.Name] = true })
+	if visited["tail"] {
+		if tail <= 0 {
+			return IssueEventsOptions{}, fmt.Errorf("--tail must be positive")
+		}
+		if visited["limit"] || visited["order"] {
+			return IssueEventsOptions{}, fmt.Errorf("--tail cannot be combined with --limit or --order")
+		}
+		opts.Limit = tail
+		opts.Order = "desc"
+	}
+	opts.Order = strings.ToLower(strings.TrimSpace(opts.Order))
+	if opts.Order != "asc" && opts.Order != "desc" {
+		return IssueEventsOptions{}, fmt.Errorf("--order must be asc or desc")
+	}
+	if opts.AfterID < 0 || opts.BeforeID < 0 {
+		return IssueEventsOptions{}, fmt.Errorf("--after-id and --before-id must be non-negative")
+	}
+	if opts.AfterID > 0 && opts.BeforeID > 0 && opts.AfterID >= opts.BeforeID {
+		return IssueEventsOptions{}, fmt.Errorf("--after-id must be less than --before-id")
+	}
+	var parseErr error
+	if opts.ObservedSince, parseErr = parseIssueListDateFilter(observedSince, false); parseErr != nil {
+		return IssueEventsOptions{}, fmt.Errorf("--since: %w", parseErr)
+	}
+	if opts.ObservedUntil, parseErr = parseIssueListDateFilter(observedUntil, true); parseErr != nil {
+		return IssueEventsOptions{}, fmt.Errorf("--until: %w", parseErr)
+	}
+	if opts.ObservedSince != nil && opts.ObservedUntil != nil && opts.ObservedSince.After(*opts.ObservedUntil) {
+		return IssueEventsOptions{}, fmt.Errorf("--since must not be after --until")
+	}
+	for _, raw := range payloadFlags {
+		key, value, ok := strings.Cut(raw, "=")
+		key = strings.TrimSpace(key)
+		if !ok || key == "" {
+			return IssueEventsOptions{}, fmt.Errorf("--payload must be key=value")
+		}
+		var typedValue any = strings.TrimSpace(value)
+		if err := json.Unmarshal([]byte(strings.TrimSpace(value)), &typedValue); err != nil {
+			typedValue = strings.TrimSpace(value)
+		}
+		opts.PayloadEquals = append(opts.PayloadEquals, daemonclient.TaskEventPayloadFilter{Key: key, Value: typedValue})
 	}
 	types := append([]string(nil), typeFlags...)
 	if strings.TrimSpace(typesCSV) != "" {
@@ -5685,7 +5758,22 @@ func IssueEventsCommand(deps *Dependencies, opts IssueEventsOptions) error {
 		return err
 	}
 
-	events, err := deps.DaemonClient.ListTaskEvents(ctx, opts.IssueID, opts.EventTypes, opts.Limit)
+	page, err := deps.DaemonClient.QueryTaskEvents(ctx, opts.IssueID, daemonclient.TaskEventsRequest{
+		Types:         opts.EventTypes,
+		Order:         opts.Order,
+		Limit:         opts.Limit,
+		AfterID:       opts.AfterID,
+		BeforeID:      opts.BeforeID,
+		Source:        opts.Source,
+		SourceCommand: opts.SourceCommand,
+		OperationID:   opts.OperationID,
+		SessionID:     opts.SessionID,
+		WorktreePath:  opts.WorktreePath,
+		ObservedSince: opts.ObservedSince,
+		ObservedUntil: opts.ObservedUntil,
+		Query:         opts.Query,
+		PayloadEquals: opts.PayloadEquals,
+	})
 	if err != nil {
 		if strings.Contains(err.Error(), fmt.Sprintf("issue not found: %s", opts.IssueID)) {
 			return fmt.Errorf("issue not found: %s", opts.IssueID)
@@ -5697,17 +5785,23 @@ func IssueEventsCommand(deps *Dependencies, opts IssueEventsOptions) error {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(issueEventsJSONOutput{
-			SchemaVersion: "issue_events.v1",
+			SchemaVersion: "issue_events.v2",
 			IssueID:       opts.IssueID,
-			Events:        issueEventsJSON(events),
+			Page: issueEventsPageJSON{
+				Order: page.Order, Limit: page.Limit, HasMore: page.HasMore,
+				FirstID: page.FirstID, LastID: page.LastID,
+				NextAfterID: page.NextAfterID, NextBeforeID: page.NextBeforeID,
+				AfterID: opts.AfterID, BeforeID: opts.BeforeID,
+			},
+			Events: issueEventsJSON(page.Events),
 		})
 	}
 
-	if len(events) == 0 {
+	if len(page.Events) == 0 {
 		fmt.Printf("No observation events for issue %s\n", opts.IssueID)
 		return nil
 	}
-	for _, event := range events {
+	for _, event := range page.Events {
 		fmt.Printf("%d %s %s", event.ID, event.ObservedAt.Format(time.RFC3339Nano), event.Type)
 		if event.Source != "" {
 			fmt.Printf(" source=%s", event.Source)
@@ -5732,6 +5826,12 @@ func IssueEventsCommand(deps *Dependencies, opts IssueEventsOptions) error {
 			fmt.Printf(" payload=%s", payload)
 		}
 		fmt.Println()
+	}
+	if page.NextAfterID != nil {
+		fmt.Printf("More: --after-id %d\n", *page.NextAfterID)
+	}
+	if page.NextBeforeID != nil {
+		fmt.Printf("More: --before-id %d\n", *page.NextBeforeID)
 	}
 	return nil
 }
@@ -5833,9 +5933,22 @@ func issueObservationEventSummaryText(payload map[string]any) string {
 }
 
 type issueEventsJSONOutput struct {
-	SchemaVersion string           `json:"schema_version"`
-	IssueID       string           `json:"issue_id"`
-	Events        []issueEventJSON `json:"events"`
+	SchemaVersion string              `json:"schema_version"`
+	IssueID       string              `json:"issue_id"`
+	Page          issueEventsPageJSON `json:"page"`
+	Events        []issueEventJSON    `json:"events"`
+}
+
+type issueEventsPageJSON struct {
+	Order        string `json:"order"`
+	Limit        int    `json:"limit"`
+	HasMore      bool   `json:"has_more"`
+	FirstID      int64  `json:"first_id,omitempty"`
+	LastID       int64  `json:"last_id,omitempty"`
+	NextAfterID  *int64 `json:"next_after_id,omitempty"`
+	NextBeforeID *int64 `json:"next_before_id,omitempty"`
+	AfterID      int64  `json:"after_id,omitempty"`
+	BeforeID     int64  `json:"before_id,omitempty"`
 }
 
 type issueEventJSON struct {
@@ -5901,8 +6014,9 @@ func firstStringPayloadValue(data map[string]any, keys ...string) string {
 }
 
 func printIssueEventsJQHelp(w io.Writer) {
-	fmt.Fprintln(w, "Stable JSON schema: issue_events.v1")
-	fmt.Fprintln(w, "Primary fields: id, issue_id, type, created_at, source, source_command, operation_id, session_id, worktree_path, body, notes, data")
+	fmt.Fprintln(w, "Stable JSON schema: issue_events.v2")
+	fmt.Fprintln(w, "Page fields: order, limit, has_more, first_id, last_id, next_after_id, next_before_id")
+	fmt.Fprintln(w, "Event fields: id, issue_id, type, created_at, source, source_command, operation_id, session_id, worktree_path, body, notes, data")
 	fmt.Fprintln(w, "Compatibility aliases: event_type == type, observed_at == created_at, payload == data")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Examples:")
@@ -5910,6 +6024,9 @@ func printIssueEventsJQHelp(w io.Writer) {
 	fmt.Fprintln(w, "  az issue events az-123 --json | jq '[.events[] | {type, created_at, source, data}]'")
 	fmt.Fprintln(w, "  az issue events az-123 --json | jq '.events[] | select(.type == \"issue.status_changed\")'")
 	fmt.Fprintln(w, "  az issue events az-123 --type validation.passed --json | jq '.events[] | {created_at, body, data}'")
+	fmt.Fprintln(w, "  az ticket events --tail 20 --json az-123 | jq '{page, events}'")
+	fmt.Fprintln(w, "  az ticket events --query 'projection checkpoint' --source daemon --json az-123")
+	fmt.Fprintln(w, "  az ticket events --order desc --before-id 4200 --limit 100 --json az-123")
 }
 
 func IssueContextRiskCommand(deps *Dependencies, opts IssueContextRiskOptions) error {
