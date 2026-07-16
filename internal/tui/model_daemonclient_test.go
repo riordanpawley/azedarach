@@ -3106,6 +3106,122 @@ func TestCloseFailureCreatesAncestorThenRetriesClose(t *testing.T) {
 	}
 }
 
+func TestCloseFailureAcceptsInvestigationFindingsThenRetriesClose(t *testing.T) {
+	var commands []string
+	var projects []string
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			commands = append(commands, req.Command)
+			projects = append(projects, req.Meta.ProjectID.String())
+			var body any
+			switch req.Command {
+			case daemonclient.CommandTaskEventAppend:
+				var request daemonclient.TaskEventAppendRequest
+				if err := json.Unmarshal(req.Body, &request); err != nil {
+					t.Fatalf("unmarshal acceptance request: %v", err)
+				}
+				if request.TaskID != "dhb" || request.Type != string(domain.IssueEventHumanInputProvided) || request.Source != "human" {
+					t.Fatalf("acceptance request identity = %+v, want dhb human.input_provided from human", request)
+				}
+				if accepted, ok := request.Payload["investigation_findings_accepted"].(bool); !ok || !accepted {
+					t.Fatalf("acceptance payload = %#v, want investigation_findings_accepted=true", request.Payload)
+				}
+				if actor, _ := request.Payload["actor_id"].(string); strings.TrimSpace(actor) == "" {
+					t.Fatalf("acceptance payload = %#v, want a non-empty human actor_id", request.Payload)
+				}
+				body = map[string]any{"event": domain.IssueObservationEvent{
+					ID: 17, IssueID: "dhb", Type: domain.IssueEventHumanInputProvided, Source: "human", Payload: request.Payload,
+				}}
+			case daemonclient.CommandTaskClose:
+				body = daemonclient.TaskCloseResult{TaskID: "dhb", Status: string(domain.StatusDone)}
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			respBody, err := json.Marshal(body)
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, OK: true, Body: respBody}, nil
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.daemonClient.WithProjectID("project-a")
+	m.daemonProjectRouteID = "project-a"
+	m.currentProject = "project-a"
+	m.tasks = []domain.Task{{ID: "dhb", Status: domain.StatusInReview}}
+	dialogCmd := m.closeFailureDialogCmd(taskStatusResultMsg{
+		taskID: "dhb", previousStatus: domain.StatusInReview, newStatus: domain.StatusDone,
+		err: errors.New("cannot close issue dhb: human-facing investigation lacks explicit issue-specific findings acceptance"),
+	})
+	if dialogCmd == nil {
+		t.Fatal("expected close failure dialog command")
+	}
+	openedAny, _ := m.Update(dialogCmd())
+	opened := openedAny.(Model)
+	if !strings.Contains(opened.overlayStack.Current().View(), "Accept findings & retry") {
+		t.Fatal("close failure dialog missing investigation acceptance recovery action")
+	}
+
+	opened.daemonClient.WithProjectID("project-b")
+	opened.daemonProjectRouteID = "project-b"
+	afterKeyAny, selectionCmd := opened.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	selection := selectionCmd().(overlay.SelectionMsg)
+	afterSelectionAny, acceptanceCmd := afterKeyAny.(Model).Update(selection)
+	acceptanceResult := acceptanceCmd()
+	result, ok := acceptanceResult.(investigationAcceptanceResultMsg)
+	if !ok || result.err != nil {
+		t.Fatalf("acceptance result = %+v (%T), want success", acceptanceResult, acceptanceResult)
+	}
+	retryingAny, retryCmd := afterSelectionAny.(Model).Update(result)
+	if retryCmd == nil {
+		t.Fatal("expected automatic close retry command")
+	}
+	closeResult := retryCmd().(taskStatusResultMsg)
+	if closeResult.err != nil {
+		t.Fatalf("close retry error: %v", closeResult.err)
+	}
+	if got, want := commands, []string{daemonclient.CommandTaskEventAppend, daemonclient.CommandTaskClose}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("commands = %v, want %v", got, want)
+	}
+	if got, want := projects, []string{"project-a", "project-a"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("projects = %v, want %v", got, want)
+	}
+	if retryingAny.(Model).tasks[0].Status != domain.StatusDone {
+		t.Fatalf("optimistic retry status = %s, want done", retryingAny.(Model).tasks[0].Status)
+	}
+}
+
+func TestCloseFailureSurfacesInvestigationAcceptanceFailureWithoutClosing(t *testing.T) {
+	transport := &recordingDaemonTransport{}
+	m := newDaemonTestModel(transport)
+	action := overlay.CloseFailureActionMsg{
+		TaskID: "dhb", ProjectID: "project-a",
+		PreviousStatus: string(domain.StatusInReview), TargetStatus: string(domain.StatusDone),
+		Action: overlay.CloseFailureActionAcceptFindings,
+	}
+
+	failedAny, dialogCmd := m.Update(investigationAcceptanceResultMsg{
+		action: action,
+		err:    errors.New("daemon rejected event"),
+	})
+	if dialogCmd == nil {
+		t.Fatal("expected acceptance failure dialog command")
+	}
+	openedAny, _ := failedAny.(Model).Update(dialogCmd())
+	dialog, ok := openedAny.(Model).overlayStack.Current().(*overlay.CloseFailureDialog)
+	if !ok {
+		t.Fatalf("overlay = %T, want CloseFailureDialog", openedAny.(Model).overlayStack.Current())
+	}
+	view := dialog.View()
+	if !strings.Contains(view, "daemon rejected event") || !strings.Contains(view, "Accept findings & retry") {
+		t.Fatalf("dialog should surface the event failure and retain recovery: %q", view)
+	}
+	if len(transport.requests) != 0 {
+		t.Fatalf("acceptance failure should not issue close; requests = %v", transport.requests)
+	}
+}
+
 func TestCloseFailureSurfacesAncestorWorktreeCreationFailure(t *testing.T) {
 	m := newDaemonTestModel(&recordingDaemonTransport{})
 	action := overlay.CloseFailureActionMsg{

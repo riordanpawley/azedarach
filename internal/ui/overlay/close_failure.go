@@ -16,6 +16,7 @@ const (
 	CloseFailureActionAIMerge            CloseFailureAction = "ai_merge"
 	CloseFailureActionCreatePR           CloseFailureAction = "create_pr"
 	CloseFailureActionCreateAncestor     CloseFailureAction = "create_ancestor"
+	CloseFailureActionAcceptFindings     CloseFailureAction = "accept_findings"
 	CloseFailureActionForceWorktree      CloseFailureAction = "force_worktree"
 	CloseFailureActionAllowActiveSession CloseFailureAction = "allow_active_session"
 	CloseFailureActionCloseCleanChildren CloseFailureAction = "close_clean_children"
@@ -57,6 +58,7 @@ type CloseFailureDialogOptions struct {
 	AllowActiveSessionRetry bool
 	AllowCloseCleanChildren bool
 	AllowCreateAncestor     bool
+	AllowAcceptFindings     bool
 }
 
 type CloseFailureDialog struct {
@@ -122,6 +124,8 @@ func (c *CloseFailureDialog) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return c, c.selectionForAction(CloseFailureActionCreatePR)
 		case "w", "W":
 			return c, c.selectionForAction(CloseFailureActionCreateAncestor)
+		case "y", "Y":
+			return c, c.selectionForAction(CloseFailureActionAcceptFindings)
 		case "f", "F":
 			if c.options.AllowActiveSessionRetry {
 				return c, c.selectionForAction(CloseFailureActionAllowActiveSession)
@@ -180,6 +184,9 @@ func (c *CloseFailureDialog) StatusBindings() []keybinds.Binding {
 	}
 	if c.options.AllowCreateAncestor {
 		bindings = append(bindings, keybinds.Binding{Key: "w", Description: "create ancestor"})
+	}
+	if c.allowAcceptFindings() {
+		bindings = append(bindings, keybinds.Binding{Key: "y", Description: "accept findings"})
 	}
 	if c.options.AllowActiveSessionRetry {
 		bindings = append(bindings, keybinds.Binding{Key: "f", Description: "force active close"})
@@ -349,6 +356,17 @@ func (c *CloseFailureDialog) closeFailureActions() []closeFailureActionItem {
 			activeClose: c.options.AllowActiveSession,
 		})
 	}
+	if c.allowAcceptFindings() {
+		actions = append(actions, closeFailureActionItem{
+			key:         "y",
+			label:       "Accept findings & retry",
+			description: "Record your acceptance, then retry close.",
+			action:      CloseFailureActionAcceptFindings,
+			force:       c.options.ForceWorktree,
+			cleanKids:   c.options.CloseCleanChildren,
+			activeClose: c.options.AllowActiveSession,
+		})
+	}
 	if c.options.AllowActiveSessionRetry {
 		actions = append(actions, closeFailureActionItem{
 			key:         "f",
@@ -420,6 +438,9 @@ func (c *CloseFailureDialog) nextStepLines() []string {
 	if c.options.AllowCreateAncestor {
 		lines = append(lines, "- Create ancestor & retry preserves child-to-parent integration.")
 	}
+	if c.allowAcceptFindings() {
+		lines = append(lines, "- Accept findings records explicit issue-specific human acceptance.")
+	}
 	return lines
 }
 
@@ -431,22 +452,32 @@ func (c *CloseFailureDialog) allowCreatePR() bool {
 	return closeFailureReasonSupportsCreatePR(c.reasonOrFallback())
 }
 
+func (c *CloseFailureDialog) allowAcceptFindings() bool {
+	return c.options.AllowAcceptFindings
+}
+
 func closeFailureReadableReason(reason string) string {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		return ""
 	}
-	const phasePrefix = "phase integrate_before_close for issue "
+	const phasePrefix = "phase "
 	phaseIndex := strings.Index(reason, phasePrefix)
 	if phaseIndex == -1 {
 		return reason
 	}
 	afterPhase := reason[phaseIndex+len(phasePrefix):]
-	colonIndex := strings.Index(afterPhase, ":")
+	const issueMarker = " for issue "
+	issueIndex := strings.Index(afterPhase, issueMarker)
+	if issueIndex == -1 {
+		return reason
+	}
+	afterIssue := afterPhase[issueIndex+len(issueMarker):]
+	colonIndex := strings.Index(afterIssue, ":")
 	if colonIndex == -1 {
 		return reason
 	}
-	trimmed := strings.TrimSpace(afterPhase[colonIndex+1:])
+	trimmed := strings.TrimSpace(afterIssue[colonIndex+1:])
 	if trimmed == "" {
 		return reason
 	}
