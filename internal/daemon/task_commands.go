@@ -2137,7 +2137,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		AllowTargetWorktree:          true,
 		ForceWorktree:                cmd.ForceWorktree,
 		IgnoreAhead:                  cmd.IgnoreAhead || cmd.IntegrateBeforeClose,
-		CloseCleanChildren:           cmd.CloseCleanChildren,
+		CloseCleanChildren:           false,
 		SkipStatusRepairs:            true,
 		AllowIntegratedWorktreeRetry: cmd.IntegrateBeforeClose,
 	}
@@ -2153,41 +2153,6 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	recordPhase("preflight", phaseStartedAt, false)
 	if err != nil {
 		return result, fmt.Errorf("phase preflight for issue %s: %w", taskID, err)
-	}
-
-	phaseStartedAt = time.Now()
-	autoClosedChildren, err := d.closeCleanDescendantsBeforeParent(ctx, projectID, taskID, cmd, req)
-	recordPhase("close_clean_children", phaseStartedAt, !cmd.CloseCleanChildren)
-	if err != nil {
-		return result, fmt.Errorf("phase close_clean_children for issue %s: %w", taskID, err)
-	}
-	result.AutoClosedChildren = autoClosedChildren
-	if cmd.CloseCleanChildren {
-		phaseStartedAt = time.Now()
-		strictOptions := preflightOptions
-		strictOptions.CloseCleanChildren = false
-		guard, err = d.validateTaskClosePreflight(ctx, projectID, taskID, strictOptions, req)
-		recordPhase("preflight_after_child_close", phaseStartedAt, false)
-		if err != nil {
-			return result, fmt.Errorf("phase preflight_after_child_close for issue %s: %w", taskID, err)
-		}
-	}
-	if cmd.PromoteBacklogBeforeClose && guard.Task.IssueFacts().LifecycleState == domain.IssueWorkflowBacklog {
-		phaseStartedAt = time.Now()
-		openLifecycle := domain.IssueWorkflowOpen
-		guard.Task, err = issueClient.UpdateDetailsWithRuntime(ctx, projectID, guard.Task.ID.String(), issues.UpdateTaskParams{
-			Title:       guard.Task.Title,
-			Description: guard.Task.Description,
-			Type:        guard.Task.Type,
-			Priority:    guard.Task.Priority,
-			Lifecycle:   &openLifecycle,
-		})
-		recordPhase("promote_backlog_child", phaseStartedAt, false)
-		if err != nil {
-			return result, fmt.Errorf("phase promote_backlog_child for issue %s: %w", taskID, err)
-		}
-		revision := d.nextRevision(projectID)
-		d.publishTaskEvent(req, protocol.EventTaskUpdated, revision, taskEventBodyFromTask(projectID, guard.Task))
 	}
 
 	phaseStartedAt = time.Now()

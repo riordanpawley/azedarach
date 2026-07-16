@@ -3843,7 +3843,7 @@ func TestTaskCloseCanAutoCloseCleanUnresolvedChildren(t *testing.T) {
 	}
 }
 
-func TestTaskCloseCanAutoCloseCleanBacklogDescendants(t *testing.T) {
+func TestTaskCloseNeverAutoTerminalizesDescendants(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-task-close-clean-backlog-descendants"
 	repoDir := t.TempDir()
@@ -3879,23 +3879,16 @@ func TestTaskCloseCanAutoCloseCleanBacklogDescendants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !resp.OK {
-		t.Fatalf("handleTaskClose response = %+v", resp)
-	}
-	var result taskCloseResult
-	if err := json.Unmarshal(resp.Body, &result); err != nil {
-		t.Fatal(err)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") {
+		t.Fatalf("handleTaskClose response = %+v, want unresolved descendant rejection", resp)
 	}
 	for _, issueID := range []string{childID, grandchildID} {
-		if !slices.Contains(result.AutoClosedChildren, issueID) {
-			t.Fatalf("auto closed children = %v, missing %s", result.AutoClosedChildren, issueID)
-		}
 		task, err := issuesClient.GetWithRuntime(ctx, projectID, issueID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if task.Status != domain.StatusDone {
-			t.Fatalf("%s status = %s, want done", issueID, task.Status)
+		if task.Status != domain.StatusOpen {
+			t.Fatalf("%s status = %s, want open", issueID, task.Status)
 		}
 	}
 }
@@ -3982,8 +3975,8 @@ func TestTaskCloseCleanChildrenDoesNotForceDirtyChildWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleTaskClose error: %v", err)
 	}
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "worktree has local changes: child.go") {
-		t.Fatalf("handleTaskClose response = %+v, want dirty child worktree guard", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") {
+		t.Fatalf("handleTaskClose response = %+v, want unresolved descendant rejection", resp)
 	}
 	child, err := issuesClient.GetWithRuntime(ctx, projectID, childID)
 	if err != nil {
@@ -3992,8 +3985,8 @@ func TestTaskCloseCleanChildrenDoesNotForceDirtyChildWorktree(t *testing.T) {
 	if child.Status != domain.StatusOpen {
 		t.Fatalf("child status = %s, want %s", child.Status, domain.StatusOpen)
 	}
-	if child.IssueFacts().LifecycleState != domain.IssueWorkflowBacklog {
-		t.Fatalf("child lifecycle = %s, want backlog", child.IssueFacts().LifecycleState)
+	if child.IssueFacts().LifecycleState != domain.IssueWorkflowOpen {
+		t.Fatalf("child lifecycle = %s, want open", child.IssueFacts().LifecycleState)
 	}
 }
 

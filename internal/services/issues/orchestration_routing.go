@@ -98,6 +98,13 @@ func (c *Client) routeOrchestrationCandidateLocked(ctx context.Context, actorID 
 			if err := domain.ValidateIssueStateTransition(state, next); err != nil {
 				return nil, false, err
 			}
+			hasAdmittedAncestor, err := c.hasLiveAdmittedAncestor(ctx, tx, route.IssueID)
+			if err != nil {
+				return nil, false, err
+			}
+			if hasAdmittedAncestor {
+				return nil, false, c.wrapError("orchestration-route", route.IssueID, fmt.Errorf("%w: descendant cannot regress to backlog below an admitted ancestor", domain.ErrConflict))
+			}
 			write := issueStateWriteValuesFromState(next, nil)
 			nowRaw := now.Format(time.RFC3339Nano)
 			if _, err := tx.ExecContext(ctx, `UPDATE issues SET disposition=?, engagement=?, visibility=?, status=?, lifecycle_state=?, closed_outcome=?, review_state=?, updated_at=? WHERE id=? AND visibility='live'`, write.Disposition, write.Engagement, write.Visibility, write.LegacyStatus, write.Lifecycle, write.ClosedOutcome, write.Review, nowRaw, route.IssueID); err != nil {
