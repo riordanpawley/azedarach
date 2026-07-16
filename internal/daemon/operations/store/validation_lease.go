@@ -15,6 +15,26 @@ import (
 )
 
 func (s *SQLiteStore) AcquireValidation(ctx context.Context, request domain.ValidationAcquire, now time.Time) (domain.ValidationRequest, error) {
+	// Preserve source compatibility for internal callers while all transport
+	// callers are required to provide the explicit authority dimensions.
+	if request.Scope == "" {
+		request.Scope = domain.ValidationScopeTicket
+	}
+	if request.Purpose == "" {
+		request.Purpose = domain.ValidationPurposeDevelopment
+		if request.ReviewerID != "" || request.ReviewEpochEventID != 0 {
+			request.Purpose = domain.ValidationPurposeReviewEvidence
+		}
+	}
+	if request.IsolationMode == "" {
+		request.IsolationMode = "legacy"
+	}
+	if request.EnvironmentFingerprint == "" {
+		request.EnvironmentFingerprint = "legacy"
+	}
+	if request.Override == "" {
+		request.Override = domain.ValidationOverrideNone
+	}
 	if err := request.Validate(); err != nil {
 		return domain.ValidationRequest{}, err
 	}
@@ -31,10 +51,62 @@ func (s *SQLiteStore) AcquireValidation(ctx context.Context, request domain.Vali
 	if err := expireAndReconcileValidationTx(ctx, tx, request.ProjectID, now, request.TTL); err != nil {
 		return domain.ValidationRequest{}, err
 	}
+	if err := reconcileJoinedValidationTx(ctx, tx, request.ProjectID); err != nil {
+		return domain.ValidationRequest{}, err
+	}
+	compatibilityKey := request.CompatibilityKey()
+	execution := domain.ValidationExecutionExecuted
+	authoritativeRequestID := request.RequestID
+	state := domain.ValidationRequestQueued
+	var source *domain.ValidationRequest
+	if request.Override != domain.ValidationOverrideForceRerun {
+		if request.Override != domain.ValidationOverrideNoReuse {
+			source, err = compatibleValidationTx(ctx, tx, request, compatibilityKey, true)
+			if err != nil {
+				return domain.ValidationRequest{}, err
+			}
+			if source != nil {
+				execution, authoritativeRequestID, state = domain.ValidationExecutionReused, source.RequestID, source.State
+			}
+		}
+		if source == nil {
+			source, err = compatibleValidationTx(ctx, tx, request, compatibilityKey, false)
+			if err != nil {
+				return domain.ValidationRequest{}, err
+			}
+			if source != nil {
+				execution, authoritativeRequestID = domain.ValidationExecutionJoined, source.RequestID
+			}
+		}
+	}
+	if request.Override == domain.ValidationOverrideEmergency {
+		execution, authoritativeRequestID, state = domain.ValidationExecutionSkipped, request.RequestID, domain.ValidationRequestCancelled
+		source = nil
+	}
+	var finishedAt any
+	var outcome string
+	evidenceJSON := "{}"
+	if source != nil && execution == domain.ValidationExecutionReused {
+		finishedAt = now.Format(time.RFC3339Nano)
+		outcome = "reused " + source.RequestID
+		reusedEvidence := source.Evidence
+		reusedEvidence.RequestID = request.RequestID
+		reusedEvidence.Execution = domain.ValidationExecutionReused
+		reusedEvidence.AuthoritativeRequestID = source.RequestID
+		encoded, marshalErr := json.Marshal(reusedEvidence)
+		if marshalErr != nil {
+			return domain.ValidationRequest{}, fmt.Errorf("encode reused validation evidence: %w", marshalErr)
+		}
+		evidenceJSON = string(encoded)
+	} else if execution == domain.ValidationExecutionSkipped {
+		finishedAt = now.Format(time.RFC3339Nano)
+		outcome = "emergency skip: " + request.OverrideReason
+	}
 	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO daemon_validation_requests
-		(request_id,lease_token_hash,project_id,issue_id,class,profile,command,source_revision,reviewer_id,review_epoch_event_id,state,queued_at,heartbeat_at,expires_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)`, request.RequestID, validationTokenHash(request.LeaseToken), request.ProjectID, request.IssueID, request.Class,
-		request.Profile, request.Command, request.SourceRevision, request.ReviewerID, request.ReviewEpochEventID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(request.TTL).Format(time.RFC3339Nano))
+		(request_id,lease_token_hash,project_id,issue_id,class,scope,purpose,execution,authoritative_request_id,compatibility_key,isolation_mode,environment_fingerprint,override_kind,override_actor,override_reason,profile,command,source_revision,reviewer_id,review_epoch_event_id,state,queued_at,heartbeat_at,expires_at,finished_at,outcome,evidence_json)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, request.RequestID, validationTokenHash(request.LeaseToken), request.ProjectID, request.IssueID, request.Class, request.Scope, request.Purpose,
+		execution, authoritativeRequestID, compatibilityKey, request.IsolationMode, request.EnvironmentFingerprint, request.Override, request.OverrideActor, request.OverrideReason,
+		request.Profile, request.Command, request.SourceRevision, request.ReviewerID, request.ReviewEpochEventID, state, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), nullableValidationExpiry(execution, now, request.TTL), finishedAt, outcome, evidenceJSON)
 	if err != nil {
 		return domain.ValidationRequest{}, fmt.Errorf("queue validation request: %w", err)
 	}
@@ -45,7 +117,7 @@ func (s *SQLiteStore) AcquireValidation(ctx context.Context, request domain.Vali
 	if err := authenticateValidationRequestTx(ctx, tx, request.RequestID, request.LeaseToken); err != nil {
 		return domain.ValidationRequest{}, err
 	}
-	if current.ProjectID != request.ProjectID || current.IssueID != request.IssueID || current.Class != request.Class || current.Profile != request.Profile || current.Command != request.Command || current.SourceRevision != request.SourceRevision || current.ReviewerID != request.ReviewerID || current.ReviewEpochEventID != request.ReviewEpochEventID {
+	if current.ProjectID != request.ProjectID || current.IssueID != request.IssueID || current.Class != request.Class || current.Scope != request.Scope || current.Purpose != request.Purpose || current.Profile != request.Profile || current.Command != request.Command || current.SourceRevision != request.SourceRevision || current.ReviewerID != request.ReviewerID || current.ReviewEpochEventID != request.ReviewEpochEventID || current.IsolationMode != request.IsolationMode || current.EnvironmentFingerprint != request.EnvironmentFingerprint || current.Override != request.Override || current.OverrideActor != request.OverrideActor || current.OverrideReason != request.OverrideReason {
 		return domain.ValidationRequest{}, fmt.Errorf("validation request id %s already exists with different identity", request.RequestID)
 	}
 	if current.State == domain.ValidationRequestQueued {
@@ -54,6 +126,9 @@ func (s *SQLiteStore) AcquireValidation(ctx context.Context, request domain.Vali
 		}
 	}
 	if err := reconcileValidationQueueTx(ctx, tx, request.ProjectID, now, request.TTL); err != nil {
+		return domain.ValidationRequest{}, err
+	}
+	if err := reconcileJoinedValidationTx(ctx, tx, request.ProjectID); err != nil {
 		return domain.ValidationRequest{}, err
 	}
 	current, err = getValidationRequestTx(ctx, tx, request.RequestID)
@@ -71,8 +146,8 @@ func (s *SQLiteStore) HeartbeatValidation(ctx context.Context, requestID, leaseT
 }
 
 func (s *SQLiteStore) AuthorizeNestedValidation(ctx context.Context, authorization domain.ValidationNestedAuthorization, now time.Time, ttl time.Duration) (domain.ValidationRequest, error) {
-	if err := authorization.Validate(); err != nil {
-		return domain.ValidationRequest{}, err
+	if strings.TrimSpace(authorization.RequestID) == "" || strings.TrimSpace(authorization.LeaseToken) == "" || !authorization.Class.Valid() {
+		return domain.ValidationRequest{}, fmt.Errorf("nested validation authorization requires request id, lease token, and supported class")
 	}
 	db, err := s.dbHandle()
 	if err != nil {
@@ -90,6 +165,15 @@ func (s *SQLiteStore) AuthorizeNestedValidation(ctx context.Context, authorizati
 	if err := authenticateValidationRequestTx(ctx, tx, authorization.RequestID, authorization.LeaseToken); err != nil {
 		return domain.ValidationRequest{}, err
 	}
+	if authorization.Scope == "" {
+		authorization.Scope = current.Scope
+	}
+	if authorization.Purpose == "" {
+		authorization.Purpose = current.Purpose
+	}
+	if err := authorization.Validate(); err != nil {
+		return domain.ValidationRequest{}, err
+	}
 	if err := expireAndReconcileValidationTx(ctx, tx, current.ProjectID, now.UTC(), ttl); err != nil {
 		return domain.ValidationRequest{}, err
 	}
@@ -102,6 +186,9 @@ func (s *SQLiteStore) AuthorizeNestedValidation(ctx context.Context, authorizati
 	}
 	if current.Class != domain.ValidationClassAggregate && current.Class != authorization.Class {
 		return domain.ValidationRequest{}, fmt.Errorf("nested %s validation cannot join active %s request", authorization.Class, current.Class)
+	}
+	if current.Scope != authorization.Scope || current.Purpose != authorization.Purpose {
+		return domain.ValidationRequest{}, fmt.Errorf("nested validation cannot change active %s/%s identity to %s/%s", current.Scope, current.Purpose, authorization.Scope, authorization.Purpose)
 	}
 	if err := tx.Commit(); err != nil {
 		return domain.ValidationRequest{}, fmt.Errorf("commit nested validation authorization: %w", err)
@@ -152,7 +239,25 @@ func (s *SQLiteStore) transitionValidation(ctx context.Context, requestID, lease
 		if len(evidence) > 0 {
 			validationEvidence = evidence[0]
 		}
-		if validationEvidence.Present && (validationEvidence.RequestID != current.RequestID || validationEvidence.Class != current.Class || validationEvidence.Profile != current.Profile || validationEvidence.SourceRevision != current.SourceRevision || !validationEvidence.Held) {
+		if validationEvidence.Present && validationEvidence.Scope == "" {
+			validationEvidence.Scope = current.Scope
+		}
+		if validationEvidence.Present && validationEvidence.Purpose == "" {
+			validationEvidence.Purpose = current.Purpose
+		}
+		if validationEvidence.Present && validationEvidence.Execution != "" && validationEvidence.Execution != domain.ValidationExecutionExecuted {
+			return domain.ValidationRequest{}, fmt.Errorf("executed validation cannot submit %s evidence", validationEvidence.Execution)
+		}
+		if validationEvidence.Present && validationEvidence.AuthoritativeRequestID != "" && validationEvidence.AuthoritativeRequestID != current.RequestID {
+			return domain.ValidationRequest{}, fmt.Errorf("validation evidence authoritative request does not match held request %s", current.RequestID)
+		}
+		if validationEvidence.Present && validationEvidence.Execution == "" {
+			validationEvidence.Execution = domain.ValidationExecutionExecuted
+		}
+		if validationEvidence.Present && validationEvidence.AuthoritativeRequestID == "" {
+			validationEvidence.AuthoritativeRequestID = current.RequestID
+		}
+		if validationEvidence.Present && (validationEvidence.RequestID != current.RequestID || validationEvidence.Class != current.Class || validationEvidence.Scope != current.Scope || validationEvidence.Purpose != current.Purpose || validationEvidence.Profile != current.Profile || validationEvidence.SourceRevision != current.SourceRevision || !validationEvidence.Held) {
 			return domain.ValidationRequest{}, fmt.Errorf("validation evidence identity does not match held request %s", current.RequestID)
 		}
 		evidenceJSON, marshalErr := json.Marshal(validationEvidence)
@@ -167,6 +272,9 @@ func (s *SQLiteStore) transitionValidation(ctx context.Context, requestID, lease
 			return domain.ValidationRequest{}, fmt.Errorf("validation request %s is already terminal", requestID)
 		}
 		if err := reconcileValidationQueueTx(ctx, tx, current.ProjectID, now, ttl); err != nil {
+			return domain.ValidationRequest{}, err
+		}
+		if err := reconcileJoinedValidationTx(ctx, tx, current.ProjectID); err != nil {
 			return domain.ValidationRequest{}, err
 		}
 	}
@@ -199,7 +307,7 @@ func (s *SQLiteStore) ValidationSnapshot(ctx context.Context, projectID string, 
 		return domain.ValidationSnapshot{}, fmt.Errorf("list validation requests: %w", err)
 	}
 	defer rows.Close()
-	snapshot := domain.ValidationSnapshot{Schema: "azedarach.validation_lease_status.v1", Active: []domain.ValidationRequest{}, Queued: []domain.ValidationRequest{}, Recent: []domain.ValidationRequest{}}
+	snapshot := domain.ValidationSnapshot{Schema: "azedarach.validation_lease_status.v2", Active: []domain.ValidationRequest{}, Queued: []domain.ValidationRequest{}, Recent: []domain.ValidationRequest{}}
 	for rows.Next() {
 		request, scanErr := scanValidationRequest(rows)
 		if scanErr != nil {
@@ -229,7 +337,7 @@ func (s *SQLiteStore) ValidationSnapshot(ctx context.Context, projectID string, 
 	return snapshot, nil
 }
 
-func (s *SQLiteStore) LatestAggregateValidation(ctx context.Context, projectID, issueID string, now time.Time, ttl time.Duration) (*domain.ValidationRequest, error) {
+func (s *SQLiteStore) LatestReviewValidation(ctx context.Context, projectID, issueID string, now time.Time, ttl time.Duration) (*domain.ValidationRequest, error) {
 	db, err := s.dbHandle()
 	if err != nil {
 		return nil, err
@@ -242,7 +350,7 @@ func (s *SQLiteStore) LatestAggregateValidation(ctx context.Context, projectID, 
 	if err := expireAndReconcileValidationTx(ctx, tx, strings.TrimSpace(projectID), now.UTC(), ttl); err != nil {
 		return nil, err
 	}
-	request, err := scanValidationRequest(tx.QueryRowContext(ctx, validationSelect+` WHERE project_id=? AND issue_id=? AND class='aggregate' ORDER BY sequence DESC LIMIT 1`, strings.TrimSpace(projectID), strings.TrimSpace(issueID)))
+	request, err := scanValidationRequest(tx.QueryRowContext(ctx, validationSelect+` WHERE project_id=? AND issue_id=? AND class='aggregate' AND scope='ticket' AND purpose='review_evidence' ORDER BY sequence DESC LIMIT 1`, strings.TrimSpace(projectID), strings.TrimSpace(issueID)))
 	if errors.Is(err, sql.ErrNoRows) {
 		if commitErr := tx.Commit(); commitErr != nil {
 			return nil, fmt.Errorf("commit latest aggregate validation reconciliation: %w", commitErr)
@@ -258,6 +366,60 @@ func (s *SQLiteStore) LatestAggregateValidation(ctx context.Context, projectID, 
 	return &request, nil
 }
 
+// LatestAggregateValidation remains as a compatibility name for callers that
+// have not yet adopted the authority-oriented method name. It intentionally
+// returns only explicit review evidence; legacy aggregate rows are excluded.
+func (s *SQLiteStore) LatestAggregateValidation(ctx context.Context, projectID, issueID string, now time.Time, ttl time.Duration) (*domain.ValidationRequest, error) {
+	return s.LatestReviewValidation(ctx, projectID, issueID, now, ttl)
+}
+
+func compatibleValidationTx(ctx context.Context, tx *sql.Tx, target domain.ValidationAcquire, key string, completed bool) (*domain.ValidationRequest, error) {
+	condition := `state IN ('active','queued') AND execution='executed'`
+	if completed {
+		condition = `state='completed' AND execution='executed' AND json_extract(evidence_json,'$.present')=1 AND json_extract(evidence_json,'$.overlap_detected')=0`
+	}
+	rows, err := tx.QueryContext(ctx, validationSelect+` WHERE project_id=? AND compatibility_key=? AND `+condition+` ORDER BY sequence DESC`, target.ProjectID, key)
+	if err != nil {
+		return nil, fmt.Errorf("find compatible validation: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		request, scanErr := scanValidationRequest(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		if domain.ValidationRequestCanSatisfy(request, target) {
+			return &request, nil
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+func reconcileJoinedValidationTx(ctx context.Context, tx *sql.Tx, projectID string) error {
+	_, err := tx.ExecContext(ctx, `UPDATE daemon_validation_requests AS follower
+		SET state=(SELECT source.state FROM daemon_validation_requests source WHERE source.request_id=follower.authoritative_request_id),
+			finished_at=(SELECT source.finished_at FROM daemon_validation_requests source WHERE source.request_id=follower.authoritative_request_id),
+			outcome='joined ' || follower.authoritative_request_id || ': ' || (SELECT source.outcome FROM daemon_validation_requests source WHERE source.request_id=follower.authoritative_request_id),
+			evidence_json=json_set((SELECT source.evidence_json FROM daemon_validation_requests source WHERE source.request_id=follower.authoritative_request_id), '$.request_id', follower.request_id, '$.execution', 'joined', '$.authoritative_request_id', follower.authoritative_request_id),
+			expires_at=NULL
+		WHERE follower.project_id=? AND follower.execution='joined' AND follower.state='queued'
+		AND (SELECT source.state FROM daemon_validation_requests source WHERE source.request_id=follower.authoritative_request_id) IN ('completed','failed','cancelled','expired')`, projectID)
+	if err != nil {
+		return fmt.Errorf("reconcile joined validation requests: %w", err)
+	}
+	return nil
+}
+
+func nullableValidationExpiry(execution domain.ValidationExecution, now time.Time, ttl time.Duration) any {
+	if execution == domain.ValidationExecutionReused || execution == domain.ValidationExecutionSkipped {
+		return nil
+	}
+	return now.Add(ttl).Format(time.RFC3339Nano)
+}
+
 func expireAndReconcileValidationTx(ctx context.Context, tx *sql.Tx, projectID string, now time.Time, ttl time.Duration) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE daemon_validation_requests SET state='expired',finished_at=?,outcome='heartbeat expired',expires_at=NULL WHERE project_id=? AND state IN ('active','queued') AND expires_at IS NOT NULL AND julianday(expires_at)<=julianday(?)`, now.Format(time.RFC3339Nano), projectID, now.Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("expire stale validation requests: %w", err)
@@ -266,7 +428,7 @@ func expireAndReconcileValidationTx(ctx context.Context, tx *sql.Tx, projectID s
 }
 
 func reconcileValidationQueueTx(ctx context.Context, tx *sql.Tx, projectID string, now time.Time, ttl time.Duration) error {
-	if _, err := tx.ExecContext(ctx, `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE project_id=? AND state='queued' AND class='safe'`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), projectID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE project_id=? AND state='queued' AND execution='executed' AND class='safe'`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), projectID); err != nil {
 		return fmt.Errorf("activate safe validation requests: %w", err)
 	}
 	var activeAggregate int
@@ -278,7 +440,7 @@ func reconcileValidationQueueTx(ctx context.Context, tx *sql.Tx, projectID strin
 	}
 	var firstSequence int64
 	var firstClass domain.ValidationClass
-	err := tx.QueryRowContext(ctx, `SELECT sequence,class FROM daemon_validation_requests WHERE project_id=? AND state='queued' AND class!='safe' ORDER BY sequence LIMIT 1`, projectID).Scan(&firstSequence, &firstClass)
+	err := tx.QueryRowContext(ctx, `SELECT sequence,class FROM daemon_validation_requests WHERE project_id=? AND state='queued' AND execution='executed' AND class!='safe' ORDER BY sequence LIMIT 1`, projectID).Scan(&firstSequence, &firstClass)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -305,14 +467,14 @@ func reconcileValidationQueueTx(ctx context.Context, tx *sql.Tx, projectID strin
 		// ownership. Let one later focused request join the current shared
 		// generation, then drain shared owners for the aggregate. Counting
 		// durable started requests makes the bound survive daemon replacement.
-		_, err = tx.ExecContext(ctx, `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE sequence=(SELECT sequence FROM daemon_validation_requests WHERE project_id=? AND state='queued' AND class='shared' AND sequence>? ORDER BY sequence LIMIT 1) AND state='queued'`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), projectID, firstSequence)
+		_, err = tx.ExecContext(ctx, `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE sequence=(SELECT sequence FROM daemon_validation_requests WHERE project_id=? AND state='queued' AND execution='executed' AND class='shared' AND sequence>? ORDER BY sequence LIMIT 1) AND state='queued'`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), projectID, firstSequence)
 		return err
 	}
 	var nextAggregate sql.NullInt64
-	if err := tx.QueryRowContext(ctx, `SELECT MIN(sequence) FROM daemon_validation_requests WHERE project_id=? AND state='queued' AND class='aggregate'`, projectID).Scan(&nextAggregate); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT MIN(sequence) FROM daemon_validation_requests WHERE project_id=? AND state='queued' AND execution='executed' AND class='aggregate'`, projectID).Scan(&nextAggregate); err != nil {
 		return err
 	}
-	query := `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE project_id=? AND state='queued' AND class='shared'`
+	query := `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE project_id=? AND state='queued' AND execution='executed' AND class='shared'`
 	args := []any{now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), projectID}
 	if nextAggregate.Valid {
 		query += ` AND sequence < ?`
@@ -324,7 +486,7 @@ func reconcileValidationQueueTx(ctx context.Context, tx *sql.Tx, projectID strin
 
 const validationAggregateSharedBypassLimit = 1
 
-const validationSelect = `SELECT sequence,request_id,project_id,issue_id,class,profile,command,source_revision,reviewer_id,review_epoch_event_id,state,queued_at,started_at,heartbeat_at,expires_at,finished_at,outcome,evidence_json FROM daemon_validation_requests`
+const validationSelect = `SELECT sequence,request_id,project_id,issue_id,class,scope,purpose,execution,authoritative_request_id,compatibility_key,isolation_mode,environment_fingerprint,override_kind,override_actor,override_reason,profile,command,source_revision,reviewer_id,review_epoch_event_id,state,queued_at,started_at,heartbeat_at,expires_at,finished_at,outcome,evidence_json FROM daemon_validation_requests`
 
 type validationScanner interface{ Scan(...any) error }
 
@@ -360,7 +522,7 @@ func scanValidationRequest(scanner validationScanner) (domain.ValidationRequest,
 	var queued string
 	var started, heartbeat, expires, finished sql.NullString
 	var evidenceJSON string
-	if err := scanner.Scan(&request.Sequence, &request.RequestID, &request.ProjectID, &request.IssueID, &request.Class, &request.Profile, &request.Command, &request.SourceRevision, &request.ReviewerID, &request.ReviewEpochEventID, &request.State, &queued, &started, &heartbeat, &expires, &finished, &request.Outcome, &evidenceJSON); err != nil {
+	if err := scanner.Scan(&request.Sequence, &request.RequestID, &request.ProjectID, &request.IssueID, &request.Class, &request.Scope, &request.Purpose, &request.Execution, &request.AuthoritativeRequestID, &request.CompatibilityKey, &request.IsolationMode, &request.EnvironmentFingerprint, &request.Override, &request.OverrideActor, &request.OverrideReason, &request.Profile, &request.Command, &request.SourceRevision, &request.ReviewerID, &request.ReviewEpochEventID, &request.State, &queued, &started, &heartbeat, &expires, &finished, &request.Outcome, &evidenceJSON); err != nil {
 		return request, err
 	}
 	if err := json.Unmarshal([]byte(evidenceJSON), &request.Evidence); err != nil {

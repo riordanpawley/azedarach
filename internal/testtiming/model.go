@@ -61,11 +61,16 @@ type Measurement struct {
 }
 
 type ValidationLeaseEvidence struct {
-	Held           bool   `json:"held"`
-	RequestID      string `json:"request_id,omitempty"`
-	Class          string `json:"class,omitempty"`
-	Profile        string `json:"profile,omitempty"`
-	SourceRevision string `json:"source_revision,omitempty"`
+	Held                   bool   `json:"held"`
+	RequestID              string `json:"request_id,omitempty"`
+	Class                  string `json:"class,omitempty"`
+	Scope                  string `json:"scope,omitempty"`
+	Purpose                string `json:"purpose,omitempty"`
+	Execution              string `json:"execution,omitempty"`
+	AuthoritativeRequestID string `json:"authoritative_request_id,omitempty"`
+	Override               string `json:"override,omitempty"`
+	Profile                string `json:"profile,omitempty"`
+	SourceRevision         string `json:"source_revision,omitempty"`
 }
 
 type BaselineProfile struct {

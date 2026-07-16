@@ -66,7 +66,7 @@ func TestRunReportsLocalTimingViolationWithoutFailingCorrectness(t *testing.T) {
 func TestWriteValidationLeaseEvidenceFileIncludesOverlapAndLeaseIdentity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lease.json")
 	t.Setenv("AZEDARACH_VALIDATION_EVIDENCE_FILE", path)
-	measurement := Measurement{ValidationLease: ValidationLeaseEvidence{Held: true, RequestID: "req-1", Class: "aggregate", Profile: "cold", SourceRevision: "abc123"}, ProcessLoad: ProcessLoadEvidence{OverlapDetected: true, MaxExternalGoProcesses: 2}}
+	measurement := Measurement{ValidationLease: ValidationLeaseEvidence{Held: true, RequestID: "req-1", Class: "aggregate", Scope: "ticket", Purpose: "review_evidence", Execution: "executed", AuthoritativeRequestID: "req-1", Override: "none", Profile: "cold", SourceRevision: "abc123"}, ProcessLoad: ProcessLoadEvidence{OverlapDetected: true, MaxExternalGoProcesses: 2}}
 	require.NoError(t, writeValidationLeaseEvidenceFile(measurement, ".tmp/test-timing/cold"))
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -74,6 +74,11 @@ func TestWriteValidationLeaseEvidenceFileIncludesOverlapAndLeaseIdentity(t *test
 	require.NoError(t, json.Unmarshal(data, &got))
 	assert.Equal(t, true, got["held"])
 	assert.Equal(t, "req-1", got["request_id"])
+	assert.Equal(t, "ticket", got["scope"])
+	assert.Equal(t, "review_evidence", got["purpose"])
+	assert.Equal(t, "executed", got["execution"])
+	assert.Equal(t, "req-1", got["authoritative_request_id"])
+	assert.Equal(t, "none", got["override"])
 	assert.Equal(t, true, got["overlap_detected"])
 	assert.Equal(t, float64(2), got["external_go_processes"])
 	require.NoError(t, writeValidationLeaseEvidenceFile(Measurement{ValidationLease: measurement.ValidationLease, ProcessLoad: ProcessLoadEvidence{}}, ".tmp/test-timing/boundary"))
