@@ -59,6 +59,25 @@ func TestAgentInputDeliveryIntentConflictDoesNotReplacePayloadOrIncarnation(t *t
 	}
 }
 
+func TestAgentInputDeliveryIntentRetryKeepsFirstExpiry(t *testing.T) {
+	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	defer client.CloseDB()
+	ctx := context.Background()
+	firstExpiry := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)
+	request := domain.AgentInputDeliveryRequest{ProjectID: "p", SessionID: "s", Target: domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 42, AgentIncarnation: "inc"}, Tool: "codex", Kind: domain.AgentInputMessageSessionMessage, Payload: "same", IntentKey: "retry", ExpiresAt: firstExpiry}
+	if _, err := client.EnsureAgentInputDeliveryIntent(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	request.ExpiresAt = firstExpiry.Add(time.Minute)
+	intent, err := client.EnsureAgentInputDeliveryIntent(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !intent.Request.ExpiresAt.Equal(firstExpiry) {
+		t.Fatalf("expiry=%s, want first durable expiry %s", intent.Request.ExpiresAt, firstExpiry)
+	}
+}
+
 func TestAgentInputDeliveryLeaseExpiryAndExactAcknowledgementFence(t *testing.T) {
 	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
 	defer client.CloseDB()

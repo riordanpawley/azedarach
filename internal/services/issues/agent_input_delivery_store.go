@@ -225,7 +225,10 @@ func (c *Client) loadAgentInputDeliveryIntent(ctx context.Context, q sqlIssueDBT
 }
 
 func sameAgentInputRequest(a, b domain.AgentInputDeliveryRequest) bool {
-	return a.ProjectID == b.ProjectID && a.IntentKey == b.IntentKey && a.SessionID == b.SessionID && a.Target.SameIncarnation(b.Target) && a.Tool == b.Tool && a.Kind == b.Kind && a.Payload == b.Payload && a.ExpiresAt.Equal(b.ExpiresAt)
+	// Expiry is attempt-time delivery policy, not part of the logical intent.
+	// The first durable expiry wins so an idempotent retry cannot extend the
+	// delivery window, while exact target, kind, and payload remain fenced.
+	return a.ProjectID == b.ProjectID && a.IntentKey == b.IntentKey && a.SessionID == b.SessionID && a.Target.SameIncarnation(b.Target) && a.Tool == b.Tool && a.Kind == b.Kind && a.Payload == b.Payload
 }
 func nullableTimestamp(t time.Time) any {
 	if t.IsZero() {
