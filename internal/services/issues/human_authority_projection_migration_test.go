@@ -61,7 +61,7 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, humanAuthorityProjectionMigrationID).Scan(&checksum); err != nil || checksum != "ac3a48512b2e6e9c018d58a68db24a2465e9d172139d22f8378f69677073a0ab" {
 				t.Fatalf("checksum=%q err=%v", checksum, err)
 			}
-			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, mailboxObservationProjectionCutoverMigrationID).Scan(&checksum); err != nil || checksum != "281f07694377b64c8ad2930add9238b7f397c49f4d0af0a402f804aeac367379" {
+			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, mailboxObservationProjectionCutoverMigrationID).Scan(&checksum); err != nil || checksum != "a1b2d43ed319d0866e4270ef947ce0c4bea16bfd3b8b04e56907ea0cea2c8d61" {
 				t.Fatalf("mailbox cutover checksum=%q err=%v", checksum, err)
 			}
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, decisionPropagationOutboxMigrationID).Scan(&checksum); err != nil || checksum != "a12c44ba35156d71fbcd88a9d78e4cdb234e75e7e4aef5f896c8b1182ada858d" {
