@@ -94,13 +94,26 @@ set -euo pipefail
 
 if [[ "${1:-}" == "validation" && "${2:-}" == "acquire" ]]; then
   request=""
+  issue=""
+  scope=""
+  purpose=""
   while (($# > 0)); do
     if [[ "$1" == "--request" ]]; then
       request="$2"
-      break
+      shift 2
+      continue
     fi
+    if [[ "$1" == "--issue" ]]; then issue="$2"; shift 2; continue; fi
+    if [[ "$1" == "--scope" ]]; then scope="$2"; shift 2; continue; fi
+    if [[ "$1" == "--purpose" ]]; then purpose="$2"; shift 2; continue; fi
     shift
   done
+  if [[ "${FAKE_AZ_REQUIRE_REPOSITORY:-0}" == "1" ]]; then
+    if [[ -n "$issue" || "$scope" != "repository" || "$purpose" != "push_gate" ]]; then
+      echo "stub az: repository validation identity mismatch issue=$issue scope=$scope purpose=$purpose" >&2
+      exit 1
+    fi
+  fi
   token="${AZEDARACH_VALIDATION_LEASE_TOKEN:-}"
   if [[ -n "$token" && "$request" == *"${token:0:12}"* ]]; then
     echo "stub az: public request id leaked lease-token material" >&2
@@ -111,7 +124,10 @@ if [[ "${1:-}" == "validation" && "${2:-}" == "acquire" ]]; then
     : >"$FAKE_AZ_QUEUE_ONCE_FILE"
     state=queued
   fi
-  printf '{"request":{"request_id":"%s","state":"%s"}}\n' "$request" "$state"
+  execution="${FAKE_AZ_EXECUTION:-executed}"
+  [[ "$execution" == "reused" || "$execution" == "joined" ]] && state=completed
+  [[ "$execution" == "skipped" ]] && state=cancelled
+  printf '{"request":{"request_id":"%s","state":"%s","execution":"%s","authoritative_request_id":"source-request"}}\n' "$request" "$state" "$execution"
   exit 0
 fi
 if [[ "${1:-}" == "validation" && "${2:-}" == "status" ]]; then
@@ -179,6 +195,33 @@ exit 1
 EOF
 chmod +x "$fixture/fake-bin/validation-git"
 export AZEDARACH_VALIDATION_GIT_BIN="$fixture/fake-bin/validation-git"
+
+repository_payload="$fixture/repository-payload-ran"
+env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
+  -u AZEDARACH_VALIDATION_LEASE_TOKEN -u AZEDARACH_TICKET_ID -u AZEDARACH_ISSUE_ID \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  FAKE_AZ_REQUIRE_REPOSITORY=1 \
+  "$fixture/scripts/with-machine-validation-lease" --class aggregate --profile repository-push -- \
+  sh -c 'touch "$1"' sh "$repository_payload"
+test -e "$repository_payload"
+
+reused_payload="$fixture/reused-payload-ran"
+env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
+  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" AZEDARACH_TICKET_ID=fixture \
+  FAKE_AZ_EXECUTION=reused \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --profile reused -- \
+  sh -c 'touch "$1"' sh "$reused_payload"
+test ! -e "$reused_payload"
+
+skipped_payload="$fixture/skipped-payload-ran"
+env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
+  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" AZEDARACH_TICKET_ID=fixture \
+  FAKE_AZ_EXECUTION=skipped \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --profile skipped \
+  --emergency-skip 'operator-approved outage recovery' --override-actor operator -- true
+test ! -e "$skipped_payload"
 
 env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
   -u AZEDARACH_VALIDATION_LEASE_TOKEN \
@@ -429,7 +472,7 @@ env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
   AZEDARACH_VALIDATION_PS_BIN="$fixture/fake-bin/validation-ps-empty" \
   AZEDARACH_TICKET_ID=aggregate-holder \
-  "$fixture/scripts/with-machine-validation-lease" --class aggregate --profile merge-gate -- \
+  "$fixture/scripts/with-machine-validation-lease" --class aggregate --scope ticket --purpose review_evidence --profile merge-gate -- \
   sh -c 'touch "$1"; sleep 30' sh "$aggregate_ready" &
 aggregate_holder_pid=$!
 for _ in {1..300}; do
@@ -448,8 +491,24 @@ grep -q "aggregate validation merge-gate" "$fixture/production-admission.stderr"
 grep -q "Timed out waiting for production install admission after 1s" "$fixture/production-admission.stderr"
 kill "$aggregate_holder_pid"
 wait "$aggregate_holder_pid" 2>/dev/null || true
+
+development_ready="$fixture/development-holder.ready"
+env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
+  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  AZEDARACH_TICKET_ID=development-holder \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --profile focused-development -- \
+  sh -c 'touch "$1"; sleep 30' sh "$development_ready" &
+development_holder_pid=$!
+for _ in {1..300}; do
+  [[ -e "$development_ready" ]] && break
+  sleep 0.02
+done
+test -e "$development_ready"
 AZEDARACH_PRODUCTION_ADMISSION_WAIT_SECONDS=1 PATH="$fixture/fake-bin:$PATH" \
   "$fixture/scripts/with-production-install-admission" -- true
+kill "$development_holder_pid"
+wait "$development_holder_pid" 2>/dev/null || true
 
 AZEDARACH_GO_CACHE_ROOT= AZEDARACH_VALIDATION_LEASE_ID= AZEDARACH_VALIDATION_LEASE_ROOT= \
   PATH="$fixture/fake-bin:$PATH" \

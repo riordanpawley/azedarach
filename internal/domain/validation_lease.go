@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"strings"
 	"time"
@@ -10,15 +11,25 @@ type ValidationClass string
 
 type ValidationScope string
 type ValidationPurpose string
+type ValidationExecution string
+type ValidationOverride string
 
 const (
-	ValidationScopeRepository       ValidationScope   = "repository"
-	ValidationScopeTicket           ValidationScope   = "ticket"
-	ValidationPurposeCapacity       ValidationPurpose = "capacity"
-	ValidationPurposeDevelopment    ValidationPurpose = "development"
-	ValidationPurposePushGate       ValidationPurpose = "push_gate"
-	ValidationPurposeReviewEvidence ValidationPurpose = "review_evidence"
-	ValidationPurposeLegacy         ValidationPurpose = "legacy"
+	ValidationScopeRepository       ValidationScope     = "repository"
+	ValidationScopeTicket           ValidationScope     = "ticket"
+	ValidationPurposeCapacity       ValidationPurpose   = "capacity"
+	ValidationPurposeDevelopment    ValidationPurpose   = "development"
+	ValidationPurposePushGate       ValidationPurpose   = "push_gate"
+	ValidationPurposeReviewEvidence ValidationPurpose   = "review_evidence"
+	ValidationPurposeLegacy         ValidationPurpose   = "legacy"
+	ValidationExecutionExecuted     ValidationExecution = "executed"
+	ValidationExecutionJoined       ValidationExecution = "joined"
+	ValidationExecutionReused       ValidationExecution = "reused"
+	ValidationExecutionSkipped      ValidationExecution = "skipped"
+	ValidationOverrideNone          ValidationOverride  = "none"
+	ValidationOverrideNoReuse       ValidationOverride  = "no_reuse"
+	ValidationOverrideForceRerun    ValidationOverride  = "force_rerun"
+	ValidationOverrideEmergency     ValidationOverride  = "emergency_skip"
 )
 
 func (s ValidationScope) Valid() bool {
@@ -26,6 +37,9 @@ func (s ValidationScope) Valid() bool {
 }
 func (p ValidationPurpose) Valid() bool {
 	return p == ValidationPurposeCapacity || p == ValidationPurposeDevelopment || p == ValidationPurposePushGate || p == ValidationPurposeReviewEvidence
+}
+func (o ValidationOverride) Valid() bool {
+	return o == ValidationOverrideNone || o == ValidationOverrideNoReuse || o == ValidationOverrideForceRerun || o == ValidationOverrideEmergency
 }
 
 const (
@@ -50,41 +64,51 @@ const (
 )
 
 type ValidationRequest struct {
-	Sequence           int64                  `json:"sequence"`
-	RequestID          string                 `json:"request_id"`
-	ProjectID          string                 `json:"project_id"`
-	IssueID            string                 `json:"issue_id"`
-	Class              ValidationClass        `json:"class"`
-	Scope              ValidationScope        `json:"scope"`
-	Purpose            ValidationPurpose      `json:"purpose"`
-	Profile            string                 `json:"profile"`
-	Command            string                 `json:"command"`
-	SourceRevision     string                 `json:"source_revision"`
-	ReviewerID         string                 `json:"reviewer_id,omitempty"`
-	ReviewEpochEventID int64                  `json:"review_epoch_event_id,omitempty"`
-	State              ValidationRequestState `json:"state"`
-	QueuedAt           time.Time              `json:"queued_at"`
-	StartedAt          *time.Time             `json:"started_at,omitempty"`
-	HeartbeatAt        *time.Time             `json:"heartbeat_at,omitempty"`
-	ExpiresAt          *time.Time             `json:"expires_at,omitempty"`
-	FinishedAt         *time.Time             `json:"finished_at,omitempty"`
-	Outcome            string                 `json:"outcome,omitempty"`
-	Evidence           ValidationEvidence     `json:"evidence"`
+	Sequence               int64                  `json:"sequence"`
+	RequestID              string                 `json:"request_id"`
+	ProjectID              string                 `json:"project_id"`
+	IssueID                string                 `json:"issue_id"`
+	Class                  ValidationClass        `json:"class"`
+	Scope                  ValidationScope        `json:"scope"`
+	Purpose                ValidationPurpose      `json:"purpose"`
+	Execution              ValidationExecution    `json:"execution"`
+	AuthoritativeRequestID string                 `json:"authoritative_request_id,omitempty"`
+	CompatibilityKey       string                 `json:"compatibility_key"`
+	IsolationMode          string                 `json:"isolation_mode"`
+	EnvironmentFingerprint string                 `json:"environment_fingerprint"`
+	Override               ValidationOverride     `json:"override"`
+	OverrideActor          string                 `json:"override_actor,omitempty"`
+	OverrideReason         string                 `json:"override_reason,omitempty"`
+	Profile                string                 `json:"profile"`
+	Command                string                 `json:"command"`
+	SourceRevision         string                 `json:"source_revision"`
+	ReviewerID             string                 `json:"reviewer_id,omitempty"`
+	ReviewEpochEventID     int64                  `json:"review_epoch_event_id,omitempty"`
+	State                  ValidationRequestState `json:"state"`
+	QueuedAt               time.Time              `json:"queued_at"`
+	StartedAt              *time.Time             `json:"started_at,omitempty"`
+	HeartbeatAt            *time.Time             `json:"heartbeat_at,omitempty"`
+	ExpiresAt              *time.Time             `json:"expires_at,omitempty"`
+	FinishedAt             *time.Time             `json:"finished_at,omitempty"`
+	Outcome                string                 `json:"outcome,omitempty"`
+	Evidence               ValidationEvidence     `json:"evidence"`
 }
 
 type ValidationEvidence struct {
-	Held                bool              `json:"held"`
-	RequestID           string            `json:"request_id,omitempty"`
-	Class               ValidationClass   `json:"class,omitempty"`
-	Scope               ValidationScope   `json:"scope,omitempty"`
-	Purpose             ValidationPurpose `json:"purpose,omitempty"`
-	Profile             string            `json:"profile,omitempty"`
-	SourceRevision      string            `json:"source_revision,omitempty"`
-	Present             bool              `json:"present"`
-	ReportPath          string            `json:"report_path,omitempty"`
-	ReportPaths         []string          `json:"report_paths,omitempty"`
-	OverlapDetected     bool              `json:"overlap_detected"`
-	ExternalGoProcesses int               `json:"external_go_processes"`
+	Held                   bool                `json:"held"`
+	RequestID              string              `json:"request_id,omitempty"`
+	Class                  ValidationClass     `json:"class,omitempty"`
+	Scope                  ValidationScope     `json:"scope,omitempty"`
+	Purpose                ValidationPurpose   `json:"purpose,omitempty"`
+	Execution              ValidationExecution `json:"execution,omitempty"`
+	AuthoritativeRequestID string              `json:"authoritative_request_id,omitempty"`
+	Profile                string              `json:"profile,omitempty"`
+	SourceRevision         string              `json:"source_revision,omitempty"`
+	Present                bool                `json:"present"`
+	ReportPath             string              `json:"report_path,omitempty"`
+	ReportPaths            []string            `json:"report_paths,omitempty"`
+	OverlapDetected        bool                `json:"overlap_detected"`
+	ExternalGoProcesses    int                 `json:"external_go_processes"`
 }
 
 type ValidationNestedAuthorization struct {
@@ -117,19 +141,24 @@ type ValidationSnapshot struct {
 }
 
 type ValidationAcquire struct {
-	RequestID          string
-	LeaseToken         string
-	ProjectID          string
-	IssueID            string
-	Class              ValidationClass
-	Scope              ValidationScope
-	Purpose            ValidationPurpose
-	Profile            string
-	Command            string
-	SourceRevision     string
-	ReviewerID         string
-	ReviewEpochEventID int64
-	TTL                time.Duration
+	RequestID              string
+	LeaseToken             string
+	ProjectID              string
+	IssueID                string
+	Class                  ValidationClass
+	Scope                  ValidationScope
+	Purpose                ValidationPurpose
+	IsolationMode          string
+	EnvironmentFingerprint string
+	Override               ValidationOverride
+	OverrideActor          string
+	OverrideReason         string
+	Profile                string
+	Command                string
+	SourceRevision         string
+	ReviewerID             string
+	ReviewEpochEventID     int64
+	TTL                    time.Duration
 }
 
 func (a ValidationAcquire) Validate() error {
@@ -141,6 +170,19 @@ func (a ValidationAcquire) Validate() error {
 	}
 	if !a.Scope.Valid() || !a.Purpose.Valid() {
 		return fmt.Errorf("validation request requires supported scope and purpose")
+	}
+	if strings.TrimSpace(a.IsolationMode) == "" || strings.TrimSpace(a.EnvironmentFingerprint) == "" {
+		return fmt.Errorf("validation request requires isolation mode and environment fingerprint")
+	}
+	if !a.Override.Valid() {
+		return fmt.Errorf("unsupported validation override %q", a.Override)
+	}
+	if a.Override == ValidationOverrideEmergency {
+		if strings.TrimSpace(a.OverrideActor) == "" || strings.TrimSpace(a.OverrideReason) == "" {
+			return fmt.Errorf("emergency validation skip requires explicit actor and reason")
+		}
+	} else if strings.TrimSpace(a.OverrideActor) != "" || strings.TrimSpace(a.OverrideReason) != "" {
+		return fmt.Errorf("validation override actor and reason are reserved for emergency skip")
 	}
 	issueID := strings.TrimSpace(a.IssueID)
 	if a.Scope == ValidationScopeRepository && issueID != "" {
@@ -171,6 +213,26 @@ func (a ValidationAcquire) Validate() error {
 		return fmt.Errorf("validation request TTL must be positive")
 	}
 	return nil
+}
+
+func (a ValidationAcquire) CompatibilityKey() string {
+	identity := strings.Join([]string{
+		strings.TrimSpace(a.ProjectID), string(a.Class), strings.TrimSpace(a.Profile),
+		strings.Join(strings.Fields(a.Command), " "), strings.TrimSpace(a.SourceRevision),
+		strings.TrimSpace(a.IsolationMode), strings.TrimSpace(a.EnvironmentFingerprint),
+	}, "\x00")
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(identity)))
+}
+
+func ValidationRequestCanSatisfy(source ValidationRequest, target ValidationAcquire) bool {
+	if source.ProjectID != target.ProjectID || source.Class != target.Class || source.Profile != target.Profile || strings.Join(strings.Fields(source.Command), " ") != strings.Join(strings.Fields(target.Command), " ") || source.SourceRevision != target.SourceRevision || source.IsolationMode != target.IsolationMode || source.EnvironmentFingerprint != target.EnvironmentFingerprint {
+		return false
+	}
+	if target.Scope == ValidationScopeRepository && target.Purpose == ValidationPurposePushGate {
+		return (source.Scope == ValidationScopeRepository && source.Purpose == ValidationPurposePushGate) ||
+			(source.Scope == ValidationScopeTicket && source.Purpose == ValidationPurposeReviewEvidence && source.ReviewerID != "" && source.ReviewEpochEventID > 0)
+	}
+	return source.Scope == target.Scope && source.Purpose == target.Purpose && source.IssueID == target.IssueID && source.ReviewerID == target.ReviewerID && source.ReviewEpochEventID == target.ReviewEpochEventID
 }
 
 func validSafeValidation(profile, command string) bool {

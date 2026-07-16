@@ -11,17 +11,22 @@ const (
 )
 
 type ValidationAcquireRequest struct {
-	RequestID      string                   `json:"request_id"`
-	LeaseToken     string                   `json:"lease_token"`
-	IssueID        string                   `json:"issue_id"`
-	Class          domain.ValidationClass   `json:"class"`
-	Scope          domain.ValidationScope   `json:"scope"`
-	Purpose        domain.ValidationPurpose `json:"purpose"`
-	Profile        string                   `json:"profile"`
-	Command        string                   `json:"command"`
-	SourceRevision string                   `json:"source_revision"`
-	ReviewerID     string                   `json:"reviewer_id,omitempty"`
-	TTLSeconds     int                      `json:"ttl_seconds,omitempty"`
+	RequestID              string                    `json:"request_id"`
+	LeaseToken             string                    `json:"lease_token"`
+	IssueID                string                    `json:"issue_id"`
+	Class                  domain.ValidationClass    `json:"class"`
+	Scope                  domain.ValidationScope    `json:"scope"`
+	Purpose                domain.ValidationPurpose  `json:"purpose"`
+	IsolationMode          string                    `json:"isolation_mode"`
+	EnvironmentFingerprint string                    `json:"environment_fingerprint"`
+	Override               domain.ValidationOverride `json:"override"`
+	OverrideActor          string                    `json:"override_actor,omitempty"`
+	OverrideReason         string                    `json:"override_reason,omitempty"`
+	Profile                string                    `json:"profile"`
+	Command                string                    `json:"command"`
+	SourceRevision         string                    `json:"source_revision"`
+	ReviewerID             string                    `json:"reviewer_id,omitempty"`
+	TTLSeconds             int                       `json:"ttl_seconds,omitempty"`
 }
 
 type ValidationHeartbeatRequest struct {

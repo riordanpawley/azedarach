@@ -46,10 +46,27 @@ revision. Nested recipes inherit class, scope, purpose, and revision from the
 outer capability and cannot upgrade them. Rows predating this contract retain
 `legacy` purpose and remain diagnostic history only.
 
+Exact compatibility is a typed policy over repository identity, revision,
+semantic profile and command, isolation mode, toolchain/environment
+fingerprint, class, scope, and purpose. Equal evidence may be reused;
+ticket-scoped `review_evidence` is explicitly stronger than a repository
+`push_gate` request with the same execution contract, but the reverse is never
+true. Concurrent compatible requests record `joined` followers of one
+authoritative execution. Completed followers record `reused`; status and audit
+output always names the authoritative request.
+
+`--no-reuse` bypasses completed evidence but may still join identical work.
+`--force-rerun` creates a separately admitted execution. `--emergency-skip`
+requires an actor and reason and records a cancelled `skipped` request, so it
+cannot manufacture review or integration readiness. The pre-push compatibility
+environment requires the corresponding reason and actor instead of bypassing
+the daemon. Development/capacity validators do not participate in production
+install exclusion; production-sensitive aggregate push/review gates do.
+
 The cache lock has a narrower role. Validators hold it shared while cache
 maintenance holds it exclusively, so
 `go clean -cache` never runs concurrently with managed validation. Reports use schema
-`azedarach.test_timing_report.v3` and distinguish test-result cache policy from
+`azedarach.test_timing_report.v4` and distinguish test-result cache policy from
 the retained build cache. The `build_cache` object includes namespace, path,
 policy, bytes/files before and after, deltas, total family bytes, configured
 limits, and the resulting decision.

@@ -48,6 +48,7 @@ func TestValidationLeaseSerializesAggregateAndPreservesSharedConcurrency(t *test
 	require.NoError(t, err)
 	snapshot, err := storeA.ValidationSnapshot(ctx, "project", now.Add(2*time.Second), ttl)
 	require.NoError(t, err)
+	assert.Equal(t, "azedarach.validation_lease_status.v2", snapshot.Schema)
 	assert.Equal(t, []string{"shared-late", "safe"}, validationRequestIDs(snapshot.Active))
 	assert.Equal(t, []string{"aggregate", "shared-bounded"}, validationRequestIDs(snapshot.Queued))
 
@@ -301,7 +302,7 @@ func TestLatestAggregateValidationRetainsMachineEvidence(t *testing.T) {
 	now := time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC)
 	_, err := store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "aggregate", LeaseToken: testValidationToken, ProjectID: "project", IssueID: "dkg", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence, Profile: "cold", Command: "just test", SourceRevision: "abc123", ReviewerID: "reviewer", ReviewEpochEventID: 1, TTL: time.Minute}, now)
 	require.NoError(t, err)
-	want := domain.ValidationEvidence{Held: true, RequestID: "aggregate", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence, Profile: "cold", SourceRevision: "abc123", Present: true, ReportPath: ".tmp/report.json", OverlapDetected: true, ExternalGoProcesses: 3}
+	want := domain.ValidationEvidence{Held: true, RequestID: "aggregate", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence, Execution: domain.ValidationExecutionExecuted, AuthoritativeRequestID: "aggregate", Profile: "cold", SourceRevision: "abc123", Present: true, ReportPath: ".tmp/report.json", OverlapDetected: true, ExternalGoProcesses: 3}
 	_, err = store.FinishValidation(ctx, "aggregate", testValidationToken, domain.ValidationRequestCompleted, "passed", want, now.Add(time.Second), time.Minute)
 	require.NoError(t, err)
 	got, err := store.LatestAggregateValidation(ctx, "project", "dkg", now.Add(time.Second), time.Minute)
@@ -362,6 +363,175 @@ func TestValidationLeaseRejectsEvidenceFromDifferentSourceRevision(t *testing.T)
 	require.NoError(t, err)
 	_, err = store.FinishValidation(ctx, "aggregate", testValidationToken, domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{Held: true, RequestID: "aggregate", Class: domain.ValidationClassAggregate, Profile: "cold", SourceRevision: "candidate-b", Present: true}, now.Add(time.Second), time.Minute)
 	require.ErrorContains(t, err, "evidence identity does not match")
+}
+
+func TestValidationLeaseReusesCompatibleCompletedEvidence(t *testing.T) {
+	ctx := context.Background()
+	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)
+	request := reusableValidationAcquire("source")
+	source, err := store.AcquireValidation(ctx, request, now)
+	require.NoError(t, err)
+	require.Equal(t, domain.ValidationRequestActive, source.State)
+	evidence := validationEvidenceFor(source)
+	_, err = store.FinishValidation(ctx, source.RequestID, request.LeaseToken, domain.ValidationRequestCompleted, "exit 0", evidence, now.Add(time.Second), time.Minute)
+	require.NoError(t, err)
+
+	reusedRequest := reusableValidationAcquire("follower")
+	reused, err := store.AcquireValidation(ctx, reusedRequest, now.Add(2*time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationExecutionReused, reused.Execution)
+	assert.Equal(t, domain.ValidationRequestCompleted, reused.State)
+	assert.Equal(t, source.RequestID, reused.AuthoritativeRequestID)
+	assert.Equal(t, reused.RequestID, reused.Evidence.RequestID)
+	assert.Equal(t, domain.ValidationExecutionReused, reused.Evidence.Execution)
+	assert.Equal(t, source.RequestID, reused.Evidence.AuthoritativeRequestID)
+	assert.Equal(t, evidence.SourceRevision, reused.Evidence.SourceRevision)
+}
+
+func TestValidationLeaseCoalescesConcurrentCompatibleRequests(t *testing.T) {
+	ctx := context.Background()
+	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)
+	sourceAcquire := reusableValidationAcquire("source")
+	source, err := store.AcquireValidation(ctx, sourceAcquire, now)
+	require.NoError(t, err)
+	followerAcquire := reusableValidationAcquire("follower")
+	follower, err := store.AcquireValidation(ctx, followerAcquire, now.Add(time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationExecutionJoined, follower.Execution)
+	assert.Equal(t, domain.ValidationRequestQueued, follower.State)
+	assert.Equal(t, source.RequestID, follower.AuthoritativeRequestID)
+
+	evidence := validationEvidenceFor(source)
+	_, err = store.FinishValidation(ctx, source.RequestID, sourceAcquire.LeaseToken, domain.ValidationRequestCompleted, "exit 0", evidence, now.Add(2*time.Second), time.Minute)
+	require.NoError(t, err)
+	follower, err = store.AcquireValidation(ctx, followerAcquire, now.Add(3*time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationRequestCompleted, follower.State)
+	assert.Equal(t, follower.RequestID, follower.Evidence.RequestID)
+	assert.Equal(t, domain.ValidationExecutionJoined, follower.Evidence.Execution)
+	assert.Equal(t, source.RequestID, follower.Evidence.AuthoritativeRequestID)
+	assert.Equal(t, evidence.SourceRevision, follower.Evidence.SourceRevision)
+}
+
+func TestValidationLeaseOverridesCannotManufactureEvidence(t *testing.T) {
+	ctx := context.Background()
+	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)
+	sourceAcquire := reusableValidationAcquire("source")
+	source, err := store.AcquireValidation(ctx, sourceAcquire, now)
+	require.NoError(t, err)
+	_, err = store.FinishValidation(ctx, source.RequestID, sourceAcquire.LeaseToken, domain.ValidationRequestCompleted, "exit 0", validationEvidenceFor(source), now.Add(time.Second), time.Minute)
+	require.NoError(t, err)
+
+	noReuse := reusableValidationAcquire("no-reuse")
+	noReuse.Override = domain.ValidationOverrideNoReuse
+	got, err := store.AcquireValidation(ctx, noReuse, now.Add(2*time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationExecutionExecuted, got.Execution)
+	assert.Equal(t, domain.ValidationRequestActive, got.State)
+
+	force := reusableValidationAcquire("force")
+	force.Override = domain.ValidationOverrideForceRerun
+	got, err = store.AcquireValidation(ctx, force, now.Add(3*time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationExecutionExecuted, got.Execution)
+	assert.Equal(t, domain.ValidationRequestQueued, got.State)
+
+	skip := reusableValidationAcquire("skip")
+	skip.Override = domain.ValidationOverrideEmergency
+	skip.OverrideActor = "operator"
+	skip.OverrideReason = "restore production push path"
+	got, err = store.AcquireValidation(ctx, skip, now.Add(4*time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationExecutionSkipped, got.Execution)
+	assert.Equal(t, domain.ValidationRequestCancelled, got.State)
+	assert.False(t, got.Evidence.Present)
+	assert.Contains(t, got.Outcome, skip.OverrideReason)
+}
+
+func TestValidationLeaseCompatibilityPolicyAllowsReviewEvidenceToSatisfyRepositoryPushOnly(t *testing.T) {
+	ctx := context.Background()
+	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)
+	review := reusableValidationAcquire("review")
+	review.Purpose = domain.ValidationPurposeReviewEvidence
+	review.ReviewerID = "reviewer"
+	review.ReviewEpochEventID = 42
+	source, err := store.AcquireValidation(ctx, review, now)
+	require.NoError(t, err)
+	_, err = store.FinishValidation(ctx, source.RequestID, review.LeaseToken, domain.ValidationRequestCompleted, "exit 0", validationEvidenceFor(source), now.Add(time.Second), time.Minute)
+	require.NoError(t, err)
+
+	push := reusableValidationAcquire("push")
+	push.IssueID = ""
+	push.Scope = domain.ValidationScopeRepository
+	push.Purpose = domain.ValidationPurposePushGate
+	got, err := store.AcquireValidation(ctx, push, now.Add(2*time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationExecutionReused, got.Execution)
+	assert.Equal(t, source.RequestID, got.AuthoritativeRequestID)
+
+	incompatible := reusableValidationAcquire("different-toolchain")
+	incompatible.EnvironmentFingerprint = "go1.26-darwin-arm64"
+	got, err = store.AcquireValidation(ctx, incompatible, now.Add(3*time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationExecutionExecuted, got.Execution)
+
+	reverseStore := NewAtPath(filepath.Join(t.TempDir(), "reverse.db"), nil)
+	t.Cleanup(func() { _ = reverseStore.Close() })
+	pushSource := push
+	pushSource.RequestID = "push-source"
+	pushSource.Override = domain.ValidationOverrideNone
+	pushRow, err := reverseStore.AcquireValidation(ctx, pushSource, now)
+	require.NoError(t, err)
+	_, err = reverseStore.FinishValidation(ctx, pushRow.RequestID, pushSource.LeaseToken, domain.ValidationRequestCompleted, "exit 0", validationEvidenceFor(pushRow), now.Add(time.Second), time.Minute)
+	require.NoError(t, err)
+	reviewTarget := review
+	reviewTarget.RequestID = "review-target"
+	got, err = reverseStore.AcquireValidation(ctx, reviewTarget, now.Add(2*time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationExecutionExecuted, got.Execution, "repository push evidence must never authorize review")
+}
+
+func TestValidationLeaseCoalescingSurvivesStoreRestart(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "project.db")
+	now := time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)
+	first := NewAtPath(dbPath, nil)
+	sourceAcquire := reusableValidationAcquire("source-restart")
+	source, err := first.AcquireValidation(ctx, sourceAcquire, now)
+	require.NoError(t, err)
+	require.NoError(t, first.Close())
+
+	restarted := NewAtPath(dbPath, nil)
+	followerAcquire := reusableValidationAcquire("follower-restart")
+	follower, err := restarted.AcquireValidation(ctx, followerAcquire, now.Add(time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationExecutionJoined, follower.Execution)
+	_, err = restarted.FinishValidation(ctx, source.RequestID, sourceAcquire.LeaseToken, domain.ValidationRequestCompleted, "exit 0", validationEvidenceFor(source), now.Add(2*time.Second), time.Minute)
+	require.NoError(t, err)
+	require.NoError(t, restarted.Close())
+
+	reopened := NewAtPath(dbPath, nil)
+	defer reopened.Close()
+	follower, err = reopened.AcquireValidation(ctx, followerAcquire, now.Add(3*time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationRequestCompleted, follower.State)
+	assert.Equal(t, source.RequestID, follower.AuthoritativeRequestID)
+}
+
+func reusableValidationAcquire(id string) domain.ValidationAcquire {
+	return domain.ValidationAcquire{RequestID: id, LeaseToken: testValidationToken, ProjectID: "project", IssueID: "dmm", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeDevelopment, IsolationMode: "worktree", EnvironmentFingerprint: "go1.25-darwin-arm64", Override: domain.ValidationOverrideNone, Profile: "cold", Command: "just test", SourceRevision: "abc123", TTL: time.Minute}
+}
+
+func validationEvidenceFor(request domain.ValidationRequest) domain.ValidationEvidence {
+	return domain.ValidationEvidence{Held: true, RequestID: request.RequestID, Class: request.Class, Scope: request.Scope, Purpose: request.Purpose, Execution: domain.ValidationExecutionExecuted, AuthoritativeRequestID: request.RequestID, Profile: request.Profile, SourceRevision: request.SourceRevision, Present: true}
 }
 
 func validationRequestIDs(requests []domain.ValidationRequest) []string {

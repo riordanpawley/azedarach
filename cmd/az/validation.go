@@ -30,6 +30,11 @@ func runValidationCommand(cfg *config.Config, args []string) error {
 		class := flags.String("class", "shared", "aggregate, shared, or safe")
 		scope := flags.String("scope", "", "repository or ticket")
 		purpose := flags.String("purpose", "", "capacity, development, push_gate, or review_evidence")
+		isolation := flags.String("isolation", "", "validation isolation mode")
+		fingerprint := flags.String("environment-fingerprint", "", "toolchain and environment fingerprint")
+		override := flags.String("override", "none", "none, no_reuse, force_rerun, or emergency_skip")
+		overrideActor := flags.String("override-actor", "", "emergency skip actor")
+		overrideReason := flags.String("override-reason", "", "emergency skip reason")
 		profile := flags.String("profile", "", "validation profile")
 		command := flags.String("command", "", "command description")
 		revision := flags.String("revision", "", "source revision")
@@ -40,7 +45,7 @@ func runValidationCommand(cfg *config.Config, args []string) error {
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		request := protocol.ValidationAcquireRequest{RequestID: *requestID, LeaseToken: *leaseToken, IssueID: *issueID, Class: domain.ValidationClass(*class), Scope: domain.ValidationScope(*scope), Purpose: domain.ValidationPurpose(*purpose), Profile: *profile, Command: *command, SourceRevision: *revision, ReviewerID: *reviewer, TTLSeconds: *ttl}
+		request := protocol.ValidationAcquireRequest{RequestID: *requestID, LeaseToken: *leaseToken, IssueID: *issueID, Class: domain.ValidationClass(*class), Scope: domain.ValidationScope(*scope), Purpose: domain.ValidationPurpose(*purpose), IsolationMode: *isolation, EnvironmentFingerprint: *fingerprint, Override: domain.ValidationOverride(*override), OverrideActor: *overrideActor, OverrideReason: *overrideReason, Profile: *profile, Command: *command, SourceRevision: *revision, ReviewerID: *reviewer, TTLSeconds: *ttl}
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
 			for {
 				result, err := deps.DaemonClient.ValidationAcquire(context.Background(), request)
@@ -162,9 +167,12 @@ func printValidationValue(value any, asJSON bool) error {
 	}
 	switch value := value.(type) {
 	case protocol.ValidationRequestResponse:
-		fmt.Printf("%s %s %s scope=%s purpose=%s ticket=%s\n", value.Request.RequestID, value.Request.State, value.Request.Profile, value.Request.Scope, value.Request.Purpose, value.Request.IssueID)
+		fmt.Printf("%s %s %s scope=%s purpose=%s execution=%s source=%s override=%s ticket=%s\n", value.Request.RequestID, value.Request.State, value.Request.Profile, value.Request.Scope, value.Request.Purpose, value.Request.Execution, value.Request.AuthoritativeRequestID, value.Request.Override, value.Request.IssueID)
 	case domain.ValidationSnapshot:
 		fmt.Printf("active=%d queued=%d revision=%d\n", len(value.Active), len(value.Queued), value.Revision)
+		for _, request := range append(append(append([]domain.ValidationRequest{}, value.Active...), value.Queued...), value.Recent...) {
+			fmt.Printf("%s %s class=%s scope=%s purpose=%s execution=%s source=%s override=%s ticket=%s revision=%s\n", request.RequestID, request.State, request.Class, request.Scope, request.Purpose, request.Execution, request.AuthoritativeRequestID, request.Override, request.IssueID, request.SourceRevision)
+		}
 	default:
 		return fmt.Errorf("unsupported validation output %T", value)
 	}
@@ -173,7 +181,7 @@ func printValidationValue(value any, asJSON bool) error {
 
 func printValidationUsage() {
 	fmt.Println(strings.TrimSpace(`Usage: az validation <acquire|heartbeat|authorize-nested|finish|status|watch> [flags]
-  acquire --request <id> --token <secret> --scope repository|ticket --purpose capacity|development|push_gate|review_evidence [--issue <id>] --class aggregate|shared|safe --profile <name> --command <text> --revision <sha> [--wait] [--json]
+  acquire --request <id> --token <secret> --scope repository|ticket --purpose capacity|development|push_gate|review_evidence --isolation <mode> --environment-fingerprint <hash> --override none|no_reuse|force_rerun|emergency_skip [--override-actor <id> --override-reason <text>] [--issue <id>] --class aggregate|shared|safe --profile <name> --command <text> --revision <sha> [--wait] [--json]
   heartbeat --request <id> --token <secret> [--ttl 30]
   authorize-nested --request <id> --token <secret> --class aggregate|shared|safe
   finish --request <id> --token <secret> --state completed|cancelled|failed [--outcome text] [--evidence-json object] [--json]

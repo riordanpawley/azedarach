@@ -78,6 +78,11 @@ test-jaeger-workload:
 merge-gate:
     ./scripts/with-machine-validation-lease --class aggregate --profile merge-gate -- just _merge-gate-unleased
 
+# Reviewer-owned exact-revision evidence. The daemon additionally requires the
+# current durable review lease and review epoch before admitting this purpose.
+review-gate:
+    ./scripts/with-machine-validation-lease --class aggregate --scope ticket --purpose review_evidence --profile merge-gate -- just _merge-gate-unleased
+
 _merge-gate-unleased:
     just build
     just test

@@ -34,7 +34,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "daemon_operations_0002_progress", Path: "migrations/0002_daemon_operation_progress.sql", Checksum: "57fde6bd6348ea3925a7c027facbf23185bff81ebe659dfb6f5de1f2bb0c009a"},
 	{ID: "daemon_operations_0003_validation_leases", Path: "migrations/0003_validation_leases.sql", Checksum: "317c9ea680d378637b417005ccfcf0d989e4c025cbbacabdd581f00dafac19df"},
 	{ID: "daemon_operations_0004_review_validation_assignment", Path: "migrations/0004_review_validation_assignment.sql", Checksum: "6f5d54a3f27937ae9adcdd6a0b3f9b79ddd2814f32635eb2c3e5ca051c3268ca"},
-	{ID: "daemon_operations_0005_validation_scope_purpose", Path: "migrations/0005_validation_scope_purpose.sql", Checksum: "ad40a2045a89936eb7dc8718a68c0503b9131a49171f841088956c113508e174"},
+	{ID: "daemon_operations_0005_validation_scope_purpose", Path: "migrations/0005_validation_scope_purpose.sql", Checksum: "6cb59febaf88ccc7948f5289cbdc040bfa041fbd639ea88eb77766dfff15a192"},
 }
 
 const migrationArtifactAuthority sqlitemigration.Authority = "project.daemon_operations"
@@ -99,6 +99,14 @@ func validateValidationLeaseSchema(ctx context.Context, db *sql.DB) error {
 			"review_epoch_event_id integer not null default 0 check (review_epoch_event_id >= 0)",
 			"scope text not null default 'ticket' check (scope in ('repository','ticket'))",
 			"purpose text not null default 'legacy' check (purpose in ('legacy','capacity','development','push_gate','review_evidence'))",
+			"execution text not null default 'executed' check (execution in ('executed','joined','reused','skipped'))",
+			"authoritative_request_id text not null default ''",
+			"compatibility_key text not null default ''",
+			"isolation_mode text not null default 'legacy'",
+			"environment_fingerprint text not null default 'legacy'",
+			"override_kind text not null default 'none' check (override_kind in ('none','no_reuse','force_rerun','emergency_skip'))",
+			"override_actor text not null default ''",
+			"override_reason text not null default ''",
 			"state text not null check (state in ('queued','active','completed','cancelled','expired','failed'))",
 			"queued_at text not null",
 			"started_at text",
@@ -130,6 +138,10 @@ func validateValidationLeaseSchema(ctx context.Context, db *sql.DB) error {
 			"create index idx_daemon_validation_review_evidence",
 			"on daemon_validation_requests(project_id, issue_id, source_revision, sequence)",
 			"where scope = 'ticket' and purpose = 'review_evidence' and class = 'aggregate'",
+		}},
+		{typeName: "index", name: "idx_daemon_validation_compatibility", fragments: []string{
+			"create index idx_daemon_validation_compatibility",
+			"on daemon_validation_requests(project_id, compatibility_key, state, sequence)",
 		}},
 		{typeName: "trigger", name: "daemon_validation_requests_insert_revision", fragments: []string{
 			"create trigger daemon_validation_requests_insert_revision",

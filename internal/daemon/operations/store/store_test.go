@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -31,6 +32,11 @@ func TestRealProjectOperationsDatabaseMigrationClones(t *testing.T) {
 				t.Fatal(err)
 			}
 			var beforeOperations, hasOperations int
+			beforeValidationCount, beforeValidationDigest, err := validationRowsDigest(beforeDB)
+			if err != nil {
+				_ = beforeDB.Close()
+				t.Fatal(err)
+			}
 			if err = beforeDB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='daemon_operations'`).Scan(&hasOperations); err != nil {
 				_ = beforeDB.Close()
 				t.Fatal(err)
@@ -54,35 +60,43 @@ func TestRealProjectOperationsDatabaseMigrationClones(t *testing.T) {
 				t.Fatal(err)
 			}
 			var checksum string
-			if err = store.db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, "daemon_operations_0004_review_validation_assignment").Scan(&checksum); err != nil {
+			if err = store.db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, migrationArtifacts[4].ID).Scan(&checksum); err != nil {
 				t.Fatal(err)
 			}
-			if checksum != "6f5d54a3f27937ae9adcdd6a0b3f9b79ddd2814f32635eb2c3e5ca051c3268ca" {
-				t.Fatalf("review assignment migration checksum = %q", checksum)
+			if checksum != migrationArtifacts[4].Checksum {
+				t.Fatalf("validation authority migration checksum = %q", checksum)
 			}
-			var assignmentColumns int
-			if err = store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_validation_requests') WHERE name IN ('reviewer_id','review_epoch_event_id')`).Scan(&assignmentColumns); err != nil {
+			var authorityColumns int
+			if err = store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_validation_requests') WHERE name IN ('scope','purpose','execution','authoritative_request_id','compatibility_key','isolation_mode','environment_fingerprint','override_kind','override_actor','override_reason')`).Scan(&authorityColumns); err != nil {
 				t.Fatal(err)
 			}
-			if assignmentColumns != 2 {
-				t.Fatalf("review assignment columns = %d, want 2", assignmentColumns)
+			if authorityColumns != 10 {
+				t.Fatalf("validation authority columns = %d, want 10", authorityColumns)
 			}
 			var objects, afterOperations int
 			if err = store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name IN (
 				'daemon_validation_requests','daemon_validation_state',
 				'idx_daemon_validation_one_active_aggregate','idx_daemon_validation_project_queue','idx_daemon_validation_expiry',
+				'idx_daemon_validation_review_evidence','idx_daemon_validation_compatibility',
 				'daemon_validation_requests_insert_revision','daemon_validation_requests_update_revision'
 			)`).Scan(&objects); err != nil {
 				t.Fatal(err)
 			}
-			if objects != 7 {
-				t.Fatalf("validation migration objects = %d, want 7", objects)
+			if objects != 9 {
+				t.Fatalf("validation migration objects = %d, want 9", objects)
 			}
 			if err = store.db.QueryRow(`SELECT COUNT(*) FROM daemon_operations`).Scan(&afterOperations); err != nil {
 				t.Fatal(err)
 			}
 			if afterOperations != beforeOperations {
 				t.Fatalf("operation row preservation = %d/%d", beforeOperations, afterOperations)
+			}
+			afterValidationCount, afterValidationDigest, digestErr := validationRowsDigest(store.db)
+			if digestErr != nil {
+				t.Fatal(digestErr)
+			}
+			if afterValidationCount != beforeValidationCount || afterValidationDigest != beforeValidationDigest {
+				t.Fatalf("validation row preservation count=%d/%d digest_equal=%t", beforeValidationCount, afterValidationCount, beforeValidationDigest == afterValidationDigest)
 			}
 			if err = store.Close(); err != nil {
 				t.Fatal(err)
@@ -93,7 +107,7 @@ func TestRealProjectOperationsDatabaseMigrationClones(t *testing.T) {
 				t.Fatal(err)
 			}
 			var ledgerRows int
-			if err = reopened.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, "daemon_operations_0004_review_validation_assignment", checksum).Scan(&ledgerRows); err != nil {
+			if err = reopened.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, migrationArtifacts[4].ID, checksum).Scan(&ledgerRows); err != nil {
 				t.Fatal(err)
 			}
 			if ledgerRows != 1 {
@@ -104,6 +118,44 @@ func TestRealProjectOperationsDatabaseMigrationClones(t *testing.T) {
 			}
 		})
 	}
+}
+
+func validationRowsDigest(db *sql.DB) (int, [sha256.Size]byte, error) {
+	var exists int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='daemon_validation_requests'`).Scan(&exists); err != nil {
+		return 0, [sha256.Size]byte{}, err
+	}
+	if exists == 0 {
+		return 0, sha256.Sum256(nil), nil
+	}
+	rows, err := db.Query(`SELECT request_id,issue_id,class,profile,command,source_revision,state,queued_at,COALESCE(started_at,''),COALESCE(heartbeat_at,''),COALESCE(expires_at,''),COALESCE(finished_at,''),outcome,evidence_json FROM daemon_validation_requests ORDER BY sequence`)
+	if err != nil {
+		return 0, [sha256.Size]byte{}, err
+	}
+	defer rows.Close()
+	hash := sha256.New()
+	count := 0
+	for rows.Next() {
+		fields := make([]string, 14)
+		dest := make([]any, len(fields))
+		for i := range fields {
+			dest[i] = &fields[i]
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return 0, [sha256.Size]byte{}, err
+		}
+		for _, field := range fields {
+			_, _ = hash.Write([]byte(field))
+			_, _ = hash.Write([]byte{0})
+		}
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return 0, [sha256.Size]byte{}, err
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], hash.Sum(nil))
+	return count, digest, nil
 }
 
 func TestSQLiteStoreMigrationBackfillsLegacyOperationsAfterOtherAuthorityConversion(t *testing.T) {
@@ -411,6 +463,115 @@ func TestReviewValidationAssignmentMigrationRollsBackAndRejectsDrift(t *testing.
 		t.Fatalf("schema drift error = %v", err)
 	}
 	_ = reopened.Close()
+}
+
+func TestValidationAuthorityMigrationUpgradesLegacyRowsAndReopens(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 4)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO daemon_validation_requests(request_id,lease_token_hash,project_id,issue_id,class,profile,command,source_revision,state,queued_at) VALUES('legacy-authority', ?, 'project', 'dki', 'aggregate', 'cold', 'just test', 'candidate-a', 'completed', '2026-07-15T00:00:00Z')`, strings.Repeat("a", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	for pass := 1; pass <= 2; pass++ {
+		store := NewAtPath(dbPath, slog.Default())
+		if _, err = store.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err != nil {
+			t.Fatalf("open %d: %v", pass, err)
+		}
+		var scope, purpose, execution, isolation, fingerprint, override string
+		if err = store.db.QueryRow(`SELECT scope,purpose,execution,isolation_mode,environment_fingerprint,override_kind FROM daemon_validation_requests WHERE request_id='legacy-authority'`).Scan(&scope, &purpose, &execution, &isolation, &fingerprint, &override); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join([]string{scope, purpose, execution, isolation, fingerprint, override}, "/"); got != "ticket/legacy/executed/legacy/legacy/none" {
+			t.Fatalf("legacy authority = %s", got)
+		}
+		var ledgerRows int
+		if err = store.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, migrationArtifacts[4].ID, migrationArtifacts[4].Checksum).Scan(&ledgerRows); err != nil {
+			t.Fatal(err)
+		}
+		if ledgerRows != 1 {
+			t.Fatalf("authority migration ledger rows = %d, want 1", ledgerRows)
+		}
+		if err = store.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestValidationAuthorityMigrationRollsBackAtomically(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 4)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TRIGGER reject_validation_authority_ledger BEFORE INSERT ON schema_migrations WHEN NEW.id='daemon_operations_0005_validation_scope_purpose' BEGIN SELECT RAISE(ABORT, 'injected validation authority ledger failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	failed := NewAtPath(dbPath, slog.Default())
+	if _, err = failed.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err == nil || !strings.Contains(err.Error(), "injected validation authority ledger failure") {
+		t.Fatalf("migration error = %v", err)
+	}
+	_ = failed.Close()
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var columns, ledgerRows int
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_validation_requests') WHERE name IN ('scope','purpose','execution','compatibility_key')`).Scan(&columns); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='daemon_operations_0005_validation_scope_purpose'`).Scan(&ledgerRows); err != nil {
+		t.Fatal(err)
+	}
+	if columns != 0 || ledgerRows != 0 {
+		t.Fatalf("failed authority migration residue columns=%d ledger=%d", columns, ledgerRows)
+	}
+	if _, err = raw.Exec(`DROP TRIGGER reject_validation_authority_ledger`); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	retried := NewAtPath(dbPath, slog.Default())
+	defer retried.Close()
+	if _, err = retried.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func seedOperationsMigrations(t *testing.T, dbPath string, count int) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err = db.Exec(`CREATE TABLE schema_migrations(id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, artifact_checksum TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	for i, migration := range orderedMigrations[:count] {
+		sqlText, loadErr := loadMigrationSQL(migration.path)
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		if _, err = db.Exec(sqlText); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.Exec(`INSERT INTO schema_migrations(id,applied_at,artifact_checksum) VALUES(?, 'historical', ?)`, migration.id, migrationArtifacts[i].Checksum); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func TestSQLiteStoreCreateGetAndList(t *testing.T) {

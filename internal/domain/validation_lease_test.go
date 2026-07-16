@@ -9,7 +9,7 @@ import (
 )
 
 func validValidationAcquire() ValidationAcquire {
-	return ValidationAcquire{RequestID: "request", LeaseToken: "secret", ProjectID: "project", Class: ValidationClassAggregate, Scope: ValidationScopeRepository, Purpose: ValidationPurposePushGate, Profile: "merge-gate", Command: "just merge-gate", SourceRevision: "abc", TTL: time.Minute}
+	return ValidationAcquire{RequestID: "request", LeaseToken: "secret", ProjectID: "project", Class: ValidationClassAggregate, Scope: ValidationScopeRepository, Purpose: ValidationPurposePushGate, IsolationMode: "repository-family", EnvironmentFingerprint: "toolchain-a", Override: ValidationOverrideNone, Profile: "merge-gate", Command: "just merge-gate", SourceRevision: "abc", TTL: time.Minute}
 }
 
 func TestValidationAcquireSeparatesScopeAndPurpose(t *testing.T) {

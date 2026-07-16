@@ -33,7 +33,11 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeConflict, err.Error()), nil
 		}
-		result, err := store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: strings.TrimSpace(body.RequestID), LeaseToken: strings.TrimSpace(body.LeaseToken), ProjectID: projectID, IssueID: strings.TrimSpace(body.IssueID), Class: body.Class, Scope: body.Scope, Purpose: body.Purpose, Profile: strings.TrimSpace(body.Profile), Command: strings.TrimSpace(body.Command), SourceRevision: strings.TrimSpace(body.SourceRevision), ReviewerID: reviewerID, ReviewEpochEventID: reviewEpochEventID, TTL: ttl}, now)
+		acquire := domain.ValidationAcquire{RequestID: strings.TrimSpace(body.RequestID), LeaseToken: strings.TrimSpace(body.LeaseToken), ProjectID: projectID, IssueID: strings.TrimSpace(body.IssueID), Class: body.Class, Scope: body.Scope, Purpose: body.Purpose, IsolationMode: strings.TrimSpace(body.IsolationMode), EnvironmentFingerprint: strings.TrimSpace(body.EnvironmentFingerprint), Override: body.Override, OverrideActor: strings.TrimSpace(body.OverrideActor), OverrideReason: strings.TrimSpace(body.OverrideReason), Profile: strings.TrimSpace(body.Profile), Command: strings.TrimSpace(body.Command), SourceRevision: strings.TrimSpace(body.SourceRevision), ReviewerID: reviewerID, ReviewEpochEventID: reviewEpochEventID, TTL: ttl}
+		if err := acquire.Validate(); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
+		}
+		result, err := store.AcquireValidation(ctx, acquire, now)
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeConflict, err.Error()), nil
 		}

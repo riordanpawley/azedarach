@@ -73,6 +73,11 @@ just test-timing boundary
 just merge-gate
 ```
 
+Reviewers use `just review-gate` for the same canonical execution contract with
+explicit ticket-scoped `review_evidence` authority. A later repository push of
+the exact revision may reuse that stronger evidence; a push gate can never
+authorize review in the opposite direction.
+
 Artifacts are written beneath `.tmp/test-timing/<profile>-<UTC timestamp>/`:
 
 - `events.jsonl` is the unmodified complete stdout stream from `go test -json`.
