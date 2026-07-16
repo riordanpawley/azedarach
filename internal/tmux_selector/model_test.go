@@ -2695,6 +2695,35 @@ func TestModelSlashSearchTreatsQAsQueryRune(t *testing.T) {
 	}
 }
 
+func TestModelSlashSearchTreatsNavigationLettersAsQueryRunes(t *testing.T) {
+	entries := []InventoryEntry{
+		{SessionID: "az-jk", IssueID: "jk", TaskTitle: "JK task", HasTmuxSession: true},
+		{SessionID: "az-else", IssueID: "else", TaskTitle: "Else task", HasTmuxSession: true},
+	}
+	model := New(fakeSnapshotLoader{snapshot: Snapshot{Entries: entries}})
+	updated, cmd := model.Update(snapshotLoadedMsg{snapshot: Snapshot{Entries: entries}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("snapshot update returned command")
+	}
+
+	model = updateKey(t, model, "/")
+	for _, r := range "jk" {
+		updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		model = updated.(Model)
+		if cmd != nil {
+			t.Fatalf("search rune %q returned command", r)
+		}
+	}
+
+	if got := model.searchQuery; got != "jk" {
+		t.Fatalf("search query = %q, want jk", got)
+	}
+	if got := len(model.filteredEntries()); got != 1 {
+		t.Fatalf("filtered sessions = %d, want 1", got)
+	}
+}
+
 func TestModelSlashSearchFiltersTreeView(t *testing.T) {
 	parentID := naming.IssueID("az-parent")
 	entries := []InventoryEntry{
