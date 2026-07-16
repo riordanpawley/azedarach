@@ -271,15 +271,15 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 	pane := strings.TrimSpace(os.Getenv("TMUX_PANE"))
 	panePID := nativeCodexPanePID()
 	statePath := filepath.Join(cwd, ".azedarach", "native-agent-input", sessionID+".json")
-	clientState, err := loadNativeCodexState(statePath, opts.Resume)
-	if err != nil {
-		return err
-	}
+	var clientState nativeCodexState
+	var stateErr error
 	if opts.Resume {
-		clientState, err = strictNativeCodexState(statePath)
-		if err != nil {
-			return err
-		}
+		clientState, stateErr = strictNativeCodexState(statePath)
+	} else {
+		clientState, stateErr = loadNativeCodexState(statePath, false)
+	}
+	if stateErr != nil {
+		return stateErr
 	}
 	incarnation := clientState.Incarnation
 	if sessionID == "" || pane == "" || panePID <= 0 {
@@ -600,6 +600,7 @@ func acceptNativeCodexDelivery(envelope nativeCodexEnvelope, composer []byte, ac
 	delete(state.Pending, key)
 	if err := saveNativeCodexState(statePath, *state); err != nil {
 		delete(state.Accepted, key)
+		state.Pending[key] = messageID
 		response.Outcome = "not_ready"
 		return response, false
 	}

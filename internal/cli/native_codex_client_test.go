@@ -189,8 +189,9 @@ func TestCodexRPCDisconnectBroadcastsToCallAndObservers(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	c.terminalDisconnect(errors.New("connection lost"))
-	if err := <-result; err == nil {
+	sentinel := errors.New("connection lost")
+	c.terminalDisconnect(sentinel)
+	if err := <-result; !errors.Is(err, sentinel) {
 		t.Fatal("in-flight call did not observe disconnect")
 	}
 	select {
@@ -198,7 +199,7 @@ func TestCodexRPCDisconnectBroadcastsToCallAndObservers(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("observer did not wake")
 	}
-	if err := c.call(context.Background(), "turn/start", nil, nil); err == nil {
+	if err := c.call(context.Background(), "turn/start", nil, nil); !errors.Is(err, sentinel) {
 		t.Fatal("subsequent call did not fail")
 	}
 	c.waitMu.Lock()
