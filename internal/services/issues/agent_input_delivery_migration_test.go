@@ -549,7 +549,7 @@ func TestAgentInputDeliveryMigrationRejectsIncarnationScopedSessionLeasePrimaryK
 	}
 	reopened := NewClientAtPath(path, nil)
 	defer reopened.CloseDB()
-	if _, err := reopened.List(context.Background()); err == nil || !strings.Contains(err.Error(), "missing constraint primarykey(project_id,session_id)") {
+	if _, err := reopened.List(context.Background()); err == nil || !strings.Contains(err.Error(), "non-canonical definition") {
 		t.Fatalf("err=%v", err)
 	}
 }
@@ -621,7 +621,7 @@ func TestAgentInputDeliveryMigrationRejectsWeakenedStateConstraints(t *testing.T
 			}
 			reopened := NewClientAtPath(path, nil)
 			defer reopened.CloseDB()
-			if _, err := reopened.List(context.Background()); err == nil || !strings.Contains(err.Error(), "missing constraint") {
+			if _, err := reopened.List(context.Background()); err == nil || !strings.Contains(err.Error(), "non-canonical definition") {
 				t.Fatalf("err=%v", err)
 			}
 		})
@@ -836,9 +836,11 @@ func TestAgentInputDeliveryFencingMigrationRejectsPredecessorDriftBeforeRebuild(
 	const canonicalLeasedConstraint = `CHECK ((state = 'leased') = (lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL))`
 	const weakenedLeasedConstraint = `CHECK (state != 'leased' OR lease_token IS NOT NULL)`
 	for _, test := range []struct {
-		name         string
-		mutate       func(*testing.T, *sql.DB)
-		preservedSQL string
+		name              string
+		mutate            func(*testing.T, *sql.DB)
+		preservedSQL      string
+		preservedValueSQL string
+		preservedValue    string
 	}{
 		{
 			name: "table constraint",
@@ -871,6 +873,21 @@ func TestAgentInputDeliveryFencingMigrationRejectsPredecessorDriftBeforeRebuild(
 				}
 			},
 			preservedSQL: "(state, project_id)",
+		},
+		{
+			name: "extra sentinel column",
+			mutate: func(t *testing.T, db *sql.DB) {
+				t.Helper()
+				if _, err := db.Exec(`ALTER TABLE agent_input_delivery_intents ADD COLUMN review_sentinel TEXT NOT NULL DEFAULT 'default'`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`UPDATE agent_input_delivery_intents SET review_sentinel='preserve-me' WHERE intent_key='sentinel'`); err != nil {
+					t.Fatal(err)
+				}
+			},
+			preservedSQL:      "review_sentinel text not null default 'default'",
+			preservedValueSQL: `SELECT review_sentinel FROM agent_input_delivery_intents WHERE intent_key='sentinel'`,
+			preservedValue:    "preserve-me",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -928,6 +945,41 @@ func TestAgentInputDeliveryFencingMigrationRejectsPredecessorDriftBeforeRebuild(
 			if marker != 0 || sentinel != 1 || !strings.Contains(schemaSQL, test.preservedSQL) {
 				t.Fatalf("rollback marker0053=%d sentinel=%d schema=%q", marker, sentinel, schemaSQL)
 			}
+			if test.preservedValueSQL != "" {
+				var value string
+				if err := raw.QueryRow(test.preservedValueSQL).Scan(&value); err != nil {
+					t.Fatal(err)
+				}
+				if value != test.preservedValue {
+					t.Fatalf("preserved value=%q, want %q", value, test.preservedValue)
+				}
+			}
 		})
+	}
+}
+
+func TestAgentInputDeliveryMigrationRejectsAppliedExtraColumnDrift(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.db")
+	client := NewClientAtPath(path, nil)
+	if _, err := client.Create(context.Background(), CreateTaskParams{Title: "seed", Type: domain.TypeTask}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CloseDB(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`ALTER TABLE agent_input_delivery_session_leases ADD COLUMN review_sentinel TEXT`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := NewClientAtPath(path, nil)
+	defer reopened.CloseDB()
+	if _, err := reopened.List(context.Background()); err == nil || !strings.Contains(err.Error(), "non-canonical definition") {
+		t.Fatalf("reopen error=%v, want final-schema drift refusal", err)
 	}
 }

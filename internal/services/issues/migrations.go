@@ -1119,39 +1119,12 @@ func validateAgentInputDeliverySchema(ctx context.Context, db sqlIssueQueryer) e
 }
 
 func validateAgentInputDeliveryIntentSchema(ctx context.Context, db sqlIssueQueryer, fenced bool) error {
-	var tableSQL string
-	if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_input_delivery_intents'`).Scan(&tableSQL); err != nil {
-		return fmt.Errorf("inspect agent input delivery table: %w", err)
-	}
-	normalized := strings.NewReplacer(" ", "", "\n", "", "\t", "", "\r", "").Replace(strings.ToLower(tableSQL))
-	fragments := []string{
-		"primarykey(project_id,intent_key)",
-		"check((state='delivered')=(acknowledgement_tokenisnotnullandacknowledged_atisnotnull))",
-	}
+	expectedTableSQL := agentInputDeliveryBaseTableSQL
 	if fenced {
-		fragments = append(fragments,
-			"statein('queued','leased','ambiguous','delivered','expired','stale')",
-			"check((statein('leased','ambiguous'))=(lease_ownerisnotnullandlease_tokenisnotnullandlease_expires_atisnotnull))",
-		)
-	} else {
-		fragments = append(fragments,
-			"statein('queued','leased','delivered','expired','stale')",
-			"check((state='leased')=(lease_ownerisnotnullandlease_tokenisnotnullandlease_expires_atisnotnull))",
-		)
+		expectedTableSQL = agentInputDeliveryFencedTableSQL
 	}
-	for _, fragment := range fragments {
-		if !strings.Contains(normalized, fragment) {
-			return fmt.Errorf("agent input delivery schema drifted: missing constraint %s", fragment)
-		}
-	}
-	for _, column := range []string{"project_id", "intent_key", "session_id", "logical_pane_id", "tmux_pane_id", "pane_pid", "agent_incarnation", "tool", "message_kind", "payload", "state", "expires_at", "lease_owner", "lease_token", "lease_expires_at", "attempt_count", "acknowledgement_token", "acknowledged_at", "created_at", "updated_at"} {
-		exists, err := columnExistsDB(ctx, db, "agent_input_delivery_intents", column)
-		if err != nil {
-			return err
-		}
-		if !exists {
-			return fmt.Errorf("agent input delivery schema drifted: missing column %s", column)
-		}
+	if err := validateExactSQLiteTable(ctx, db, "agent_input_delivery_intents", expectedTableSQL, agentInputDeliveryIntentColumns); err != nil {
+		return fmt.Errorf("agent input delivery schema drifted: %w", err)
 	}
 	indexes := []struct {
 		name      string
@@ -1196,32 +1169,8 @@ func validateAgentInputDeliveryIntentSchema(ctx context.Context, db sqlIssueQuer
 }
 
 func validateAgentInputDeliverySessionLeaseSchema(ctx context.Context, db sqlIssueQueryer) error {
-	var leaseTableSQL string
-	if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_input_delivery_session_leases'`).Scan(&leaseTableSQL); err != nil {
-		return fmt.Errorf("inspect agent input delivery session lease table: %w", err)
-	}
-	normalizedLeaseTable := strings.NewReplacer(" ", "", "\n", "", "\t", "", "\r", "").Replace(strings.ToLower(leaseTableSQL))
-	for _, fragment := range []string{
-		"primarykey(project_id,session_id)",
-		"project_idtextnotnullcheck(trim(project_id)<>'')",
-		"session_idtextnotnullcheck(trim(session_id)<>'')",
-		"agent_incarnationtextnotnullcheck(trim(agent_incarnation)<>'')",
-		"lease_ownertextnotnullcheck(trim(lease_owner)<>'')",
-		"lease_tokentextnotnullcheck(trim(lease_token)<>'')",
-		"lease_expires_attextnotnull",
-	} {
-		if !strings.Contains(normalizedLeaseTable, fragment) {
-			return fmt.Errorf("agent input delivery session lease schema drifted: missing constraint %s", fragment)
-		}
-	}
-	for _, column := range []string{"project_id", "session_id", "agent_incarnation", "lease_owner", "lease_token", "lease_expires_at", "updated_at"} {
-		exists, err := columnExistsDB(ctx, db, "agent_input_delivery_session_leases", column)
-		if err != nil {
-			return err
-		}
-		if !exists {
-			return fmt.Errorf("agent input delivery session lease schema drifted: missing column %s", column)
-		}
+	if err := validateExactSQLiteTable(ctx, db, "agent_input_delivery_session_leases", agentInputDeliverySessionLeaseTableSQL, agentInputDeliverySessionLeaseColumns); err != nil {
+		return fmt.Errorf("agent input delivery session lease schema drifted: %w", err)
 	}
 	var leaseIndexSQL string
 	if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_agent_input_session_lease_expiry'`).Scan(&leaseIndexSQL); err != nil {
@@ -1232,6 +1181,152 @@ func validateAgentInputDeliverySessionLeaseSchema(ctx context.Context, db sqlIss
 		return errors.New("agent input delivery session lease schema drifted: expiry index has non-canonical definition")
 	}
 	return nil
+}
+
+type exactSQLiteColumn struct {
+	name       string
+	columnType string
+	notNull    int
+	defaultSQL string
+	primaryKey int
+}
+
+var agentInputDeliveryIntentColumns = []exactSQLiteColumn{
+	{name: "project_id", columnType: "TEXT", notNull: 1, primaryKey: 1},
+	{name: "intent_key", columnType: "TEXT", notNull: 1, primaryKey: 2},
+	{name: "session_id", columnType: "TEXT", notNull: 1},
+	{name: "logical_pane_id", columnType: "TEXT", notNull: 1},
+	{name: "tmux_pane_id", columnType: "TEXT", notNull: 1},
+	{name: "pane_pid", columnType: "INTEGER", notNull: 1},
+	{name: "agent_incarnation", columnType: "TEXT", notNull: 1},
+	{name: "tool", columnType: "TEXT", notNull: 1},
+	{name: "message_kind", columnType: "TEXT", notNull: 1},
+	{name: "payload", columnType: "TEXT", notNull: 1},
+	{name: "state", columnType: "TEXT", notNull: 1},
+	{name: "expires_at", columnType: "TEXT"},
+	{name: "lease_owner", columnType: "TEXT"},
+	{name: "lease_token", columnType: "TEXT"},
+	{name: "lease_expires_at", columnType: "TEXT"},
+	{name: "attempt_count", columnType: "INTEGER", notNull: 1, defaultSQL: "0"},
+	{name: "acknowledgement_token", columnType: "TEXT"},
+	{name: "acknowledged_at", columnType: "TEXT"},
+	{name: "created_at", columnType: "TEXT", notNull: 1},
+	{name: "updated_at", columnType: "TEXT", notNull: 1},
+}
+
+var agentInputDeliverySessionLeaseColumns = []exactSQLiteColumn{
+	{name: "project_id", columnType: "TEXT", notNull: 1, primaryKey: 1},
+	{name: "session_id", columnType: "TEXT", notNull: 1, primaryKey: 2},
+	{name: "agent_incarnation", columnType: "TEXT", notNull: 1},
+	{name: "lease_owner", columnType: "TEXT", notNull: 1},
+	{name: "lease_token", columnType: "TEXT", notNull: 1},
+	{name: "lease_expires_at", columnType: "TEXT", notNull: 1},
+	{name: "updated_at", columnType: "TEXT", notNull: 1},
+}
+
+const agentInputDeliveryBaseTableSQL = `CREATE TABLE agent_input_delivery_intents (
+  project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
+  intent_key TEXT NOT NULL CHECK (trim(intent_key) <> ''),
+  session_id TEXT NOT NULL CHECK (trim(session_id) <> ''),
+  logical_pane_id TEXT NOT NULL CHECK (trim(logical_pane_id) <> ''),
+  tmux_pane_id TEXT NOT NULL CHECK (trim(tmux_pane_id) <> ''),
+  pane_pid INTEGER NOT NULL CHECK (pane_pid > 0),
+  agent_incarnation TEXT NOT NULL CHECK (trim(agent_incarnation) <> ''),
+  tool TEXT NOT NULL CHECK (trim(tool) <> ''),
+  message_kind TEXT NOT NULL CHECK (trim(message_kind) <> ''),
+  payload TEXT NOT NULL CHECK (length(payload) > 0),
+  state TEXT NOT NULL CHECK (state IN ('queued','leased','delivered','expired','stale')),
+  expires_at TEXT,
+  lease_owner TEXT,
+  lease_token TEXT,
+  lease_expires_at TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  acknowledgement_token TEXT,
+  acknowledged_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (project_id, intent_key),
+  CHECK ((state = 'delivered') = (acknowledgement_token IS NOT NULL AND acknowledged_at IS NOT NULL)),
+  CHECK ((state = 'leased') = (lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL))
+)`
+
+const agentInputDeliveryFencedTableSQL = `CREATE TABLE agent_input_delivery_intents (
+  project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
+  intent_key TEXT NOT NULL CHECK (trim(intent_key) <> ''),
+  session_id TEXT NOT NULL CHECK (trim(session_id) <> ''),
+  logical_pane_id TEXT NOT NULL CHECK (trim(logical_pane_id) <> ''),
+  tmux_pane_id TEXT NOT NULL CHECK (trim(tmux_pane_id) <> ''),
+  pane_pid INTEGER NOT NULL CHECK (pane_pid > 0),
+  agent_incarnation TEXT NOT NULL CHECK (trim(agent_incarnation) <> ''),
+  tool TEXT NOT NULL CHECK (trim(tool) <> ''),
+  message_kind TEXT NOT NULL CHECK (trim(message_kind) <> ''),
+  payload TEXT NOT NULL CHECK (length(payload) > 0),
+  state TEXT NOT NULL CHECK (state IN ('queued','leased','ambiguous','delivered','expired','stale')),
+  expires_at TEXT,
+  lease_owner TEXT,
+  lease_token TEXT,
+  lease_expires_at TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  acknowledgement_token TEXT,
+  acknowledged_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (project_id, intent_key),
+  CHECK ((state = 'delivered') = (acknowledgement_token IS NOT NULL AND acknowledged_at IS NOT NULL)),
+  CHECK ((state IN ('leased','ambiguous')) = (lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL))
+)`
+
+const agentInputDeliverySessionLeaseTableSQL = `CREATE TABLE agent_input_delivery_session_leases (
+  project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
+  session_id TEXT NOT NULL CHECK (trim(session_id) <> ''),
+  agent_incarnation TEXT NOT NULL CHECK (trim(agent_incarnation) <> ''),
+  lease_owner TEXT NOT NULL CHECK (trim(lease_owner) <> ''),
+  lease_token TEXT NOT NULL CHECK (trim(lease_token) <> ''),
+  lease_expires_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (project_id, session_id)
+)`
+
+func validateExactSQLiteTable(ctx context.Context, db sqlIssueQueryer, table, expectedSQL string, expectedColumns []exactSQLiteColumn) error {
+	var tableSQL string
+	if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&tableSQL); err != nil {
+		return fmt.Errorf("inspect table %s: %w", table, err)
+	}
+	if normalizeExactSQLiteDDL(tableSQL) != normalizeExactSQLiteDDL(expectedSQL) {
+		return fmt.Errorf("table %s has non-canonical definition", table)
+	}
+	rows, err := db.QueryContext(ctx, `SELECT cid, name, type, [notnull], dflt_value, pk, hidden FROM pragma_table_xinfo(?) ORDER BY cid`, table)
+	if err != nil {
+		return fmt.Errorf("inspect table %s columns: %w", table, err)
+	}
+	defer rows.Close()
+	var actual []exactSQLiteColumn
+	for rows.Next() {
+		var column exactSQLiteColumn
+		var cid, hidden int
+		var defaultSQL sql.NullString
+		if err := rows.Scan(&cid, &column.name, &column.columnType, &column.notNull, &defaultSQL, &column.primaryKey, &hidden); err != nil {
+			return fmt.Errorf("inspect table %s columns: %w", table, err)
+		}
+		if cid != len(actual) || hidden != 0 {
+			return fmt.Errorf("table %s column %s has cid=%d hidden=%d", table, column.name, cid, hidden)
+		}
+		if defaultSQL.Valid {
+			column.defaultSQL = defaultSQL.String
+		}
+		actual = append(actual, column)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("inspect table %s columns: %w", table, err)
+	}
+	if !slices.Equal(actual, expectedColumns) {
+		return fmt.Errorf("table %s has non-canonical column metadata", table)
+	}
+	return nil
+}
+
+func normalizeExactSQLiteDDL(ddl string) string {
+	return strings.NewReplacer(" ", "", "\n", "", "\t", "", "\r", "").Replace(strings.ToLower(ddl))
 }
 
 func repairIssueIDAllocationSchema(ctx context.Context, db *sql.DB) error {
