@@ -241,7 +241,6 @@ func TestCodexRPCDisconnectBroadcastsToCallAndObservers(t *testing.T) {
 	}
 }
 
-/*
 func TestNativeCodexInputCancellationJoinsBlockedReader(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -258,7 +257,6 @@ func TestNativeCodexInputCancellationJoinsBlockedReader(t *testing.T) {
 	}
 	_ = r.Close()
 }
-*/
 
 func TestCodexRPCPreservesStringAndNumericServerRequestIDs(t *testing.T) {
 	c := &codexRPCClient{waits: map[string]chan codexRPCMessage{}, requests: make(chan codexRPCMessage, 2), events: make(chan codexRPCMessage, 2), done: make(chan struct{})}

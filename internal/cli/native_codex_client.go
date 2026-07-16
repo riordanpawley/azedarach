@@ -758,7 +758,7 @@ func readNativeCodexInputContext(ctx context.Context, input *os.File, output cha
 		defer owned.Close()
 		buffer := make([]byte, 1)
 		for {
-			n, err := owned.Read(buffer)
+			n, err := syscall.Read(fd, buffer)
 			if n > 0 {
 				select {
 				case output <- buffer[0]:
