@@ -142,3 +142,51 @@ func TestExportProjectionUsesStableSchemaFingerprintAndMonotonicSourceRevision(t
 		t.Fatalf("deleted coordination lease remains: %+v", exported.Tasks[0].CoordinationLeases)
 	}
 }
+
+func TestExportOrchestrationProjectionExcludesArchivedRowsAtItsCheckpoint(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	c := newTestClient(t)
+	liveID, err := c.Create(ctx, CreateTaskParams{Title: "Live", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivedID, err := c.Create(ctx, CreateTaskParams{Title: "Archived", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Archive(ctx, archivedID); err != nil {
+		t.Fatal(err)
+	}
+	exported, err := c.ExportOrchestrationProjection(ctx, "project", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exported.Checkpoint == 0 {
+		t.Fatal("active projection checkpoint = 0")
+	}
+	if len(exported.Tasks) != 1 || exported.Tasks[0].ID.String() != liveID {
+		t.Fatalf("active projection tasks = %+v, want only %s", exported.Tasks, liveID)
+	}
+}
+
+func TestExportOrchestrationProjectionBoundsRootsAndCountsWholeProject(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	c := newTestClient(t)
+	for _, title := range []string{"First", "Second", "Third"} {
+		if _, err := c.Create(ctx, CreateTaskParams{Title: title, Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exported, err := c.ExportOrchestrationProjection(ctx, "project", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exported.Tasks) != 2 {
+		t.Fatalf("bounded projection tasks = %d, want 2", len(exported.Tasks))
+	}
+	if exported.OpenIssueCount != 3 {
+		t.Fatalf("open issue count = %d, want 3", exported.OpenIssueCount)
+	}
+}

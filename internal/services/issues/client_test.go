@@ -3,6 +3,7 @@ package issues
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -2502,6 +2503,57 @@ func TestClientCloseWithRuntimeAtomicallyReleasesExecutionLeaseBeforeTerminalWri
 	assert.Less(t, releaseEventID, statusEventID, "lease release event must precede terminal status event")
 }
 
+func TestClientCloseWithRuntimeReviewEvidenceRejectsNewerEvidenceAtomically(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-close-reviewed-evidence"
+	newTask := func(title string) string {
+		t.Helper()
+		id, err := client.Create(ctx, CreateTaskParams{Title: title, Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInReview})
+		require.NoError(t, err)
+		return id
+	}
+	appendEvidence := func(taskID, summary string) domain.IssueObservationEvent {
+		t.Helper()
+		event, err := client.AppendIssueObservationEvent(ctx, taskID, IssueObservationEventParams{
+			Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: map[string]any{
+				"schema": domain.WorkerEvidenceSchemaV1, "summary": summary,
+				"commands_run": []any{"go test ./internal/daemon"}, "key_assertions": []any{"tests pass"},
+				"files_changed": []any{"internal/daemon/orchestration_review.go"},
+				"review":        map[string]any{"status": "clean", "findings": []any{"none"}}, "risks": []any{"none"},
+			},
+		})
+		require.NoError(t, err)
+		return event
+	}
+	pinFor := func(event domain.IssueObservationEvent) ReviewEvidencePin {
+		t.Helper()
+		evidence := domain.ReduceReviewReadyEvidence([]domain.IssueObservationEvent{event}).LatestEvidence
+		require.NotNil(t, evidence)
+		require.True(t, evidence.Validation.Complete)
+		body, err := json.Marshal(evidence.Evidence)
+		require.NoError(t, err)
+		return ReviewEvidencePin{Source: "issue_event", EventID: event.ID, Digest: fmt.Sprintf("%x", sha256.Sum256(body))}
+	}
+
+	changedID := newTask("Reject changed reviewed evidence")
+	accepted := appendEvidence(changedID, "accepted evidence")
+	pin := pinFor(accepted)
+	appendEvidence(changedID, "new evidence after acceptance")
+	_, err := client.CloseWithRuntimeReviewEvidence(ctx, projectID, changedID, domain.StatusDone, pin)
+	require.ErrorContains(t, err, "reviewed evidence changed")
+	unchanged, err := client.GetWithRuntime(ctx, projectID, changedID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusInReview, unchanged.Status)
+
+	stableID := newTask("Close stable reviewed evidence")
+	stablePin := pinFor(appendEvidence(stableID, "stable evidence"))
+	closed, err := client.CloseWithRuntimeReviewEvidence(ctx, projectID, stableID, domain.StatusDone, stablePin)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusDone, closed.Status)
+}
+
 func TestClientUpdateDetailsReopensAtomicallyAndIdempotently(t *testing.T) {
 	parallelIssueStoreTest(t)
 	ctx := context.Background()
@@ -4540,6 +4592,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0049_rooted_bootstrap_acknowledgements",
 		"0050_issue_observation_event_search",
 		"0051_decision_idempotency",
+		"0052_mailbox_observation_projection_cutover",
 	}, got)
 }
 

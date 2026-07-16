@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -617,9 +618,6 @@ func TestRealProcessProfileRootedMarkerSurvivesPaneChildReplacement(t *testing.T
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(tmuxDir) })
 	runner := &isolatedTmuxTestRunner{tmuxPath: tmuxPath, socketPath: filepath.Join(tmuxDir, "server.sock")}
-	// Let tmux create its normal interactive login shell. An explicitly named
-	// non-interactive `sh` may exit on the foreground child's SIGINT, taking the
-	// private server with it before the replacement can be launched.
 	if output, err := runner.run(context.Background(), "-f", "/dev/null", "new-session", "-d", "-s", "rooted-replacement"); err != nil {
 		t.Fatalf("start isolated tmux: %v (%s)", err, output)
 	}
@@ -633,11 +631,24 @@ func TestRealProcessProfileRootedMarkerSurvivesPaneChildReplacement(t *testing.T
 		t.Fatal(err)
 	}
 	panePID = strings.TrimSpace(panePID)
+	paneSleepChildren := func() []string {
+		output, err := exec.Command("ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "comm=").CombinedOutput()
+		if err != nil {
+			return nil
+		}
+		fields := strings.Fields(string(output))
+		children := make([]string, 0, 1)
+		for index := 0; index+2 < len(fields); index += 3 {
+			if fields[index+1] == panePID && filepath.Base(fields[index+2]) == "sleep" {
+				children = append(children, fields[index])
+			}
+		}
+		return children
+	}
 	childPID := func(exclude string) string {
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
-			output, _ := exec.Command("ps", "-o", "pid=", "-P", panePID).CombinedOutput()
-			for _, pid := range strings.Fields(string(output)) {
+			for _, pid := range paneSleepChildren() {
 				if pid != exclude {
 					return pid
 				}
@@ -653,8 +664,18 @@ func TestRealProcessProfileRootedMarkerSurvivesPaneChildReplacement(t *testing.T
 	if firstChild == "" {
 		t.Fatal("first pane child did not start")
 	}
-	if output, err := runner.run(context.Background(), "send-keys", "-t", "rooted-replacement", "C-c"); err != nil {
-		t.Fatalf("interrupt first child: %v (%s)", err, output)
+	if output, err := exec.Command("kill", "-TERM", firstChild).CombinedOutput(); err != nil {
+		t.Fatalf("stop first child: %v (%s)", err, output)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !slices.Contains(paneSleepChildren(), firstChild) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if slices.Contains(paneSleepChildren(), firstChild) {
+		t.Fatalf("first pane child %s did not stop", firstChild)
 	}
 	if output, err := runner.run(context.Background(), "send-keys", "-t", "rooted-replacement", "sleep 30", "Enter"); err != nil {
 		t.Fatalf("launch replacement child: %v (%s)", err, output)
