@@ -293,6 +293,15 @@ func TestWaitWorkerDoneSuccessAndTimeout(t *testing.T) {
 	}
 }
 
+func TestRPCExitErrorAttribution(t *testing.T) {
+	if err := rpcExitError(errors.New("signal: killed"), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := rpcExitError(errors.New("signal: killed"), false); err == nil {
+		t.Fatal("crash suppressed")
+	}
+}
+
 func TestNativeCodexInputCancellationWithFullOutputJoins(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {

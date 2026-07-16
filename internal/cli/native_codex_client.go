@@ -317,7 +317,7 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 			} else if !errors.Is(e, os.ErrProcessDone) {
 				retErr = errors.Join(retErr, e)
 			}
-			if e := rpc.command.Wait(); e != nil && !(killed && strings.Contains(e.Error(), "signal: killed")) {
+			if e := rpcExitError(rpc.command.Wait(), killed); e != nil {
 				retErr = errors.Join(retErr, e)
 			}
 		}
@@ -518,6 +518,16 @@ func waitWorkerDone(done <-chan struct{}, timeout time.Duration) error {
 	case <-time.After(timeout):
 		return fmt.Errorf("worker teardown timeout")
 	}
+}
+
+func rpcExitError(err error, killInitiated bool) error {
+	if err == nil {
+		return nil
+	}
+	if killInitiated && strings.Contains(err.Error(), "signal: killed") {
+		return nil
+	}
+	return err
 }
 
 // RecoverNativeCodexIntent resolves an ambiguous pending submission without
