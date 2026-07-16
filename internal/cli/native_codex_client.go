@@ -301,6 +301,19 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 	if err != nil {
 		return fmt.Errorf("start Codex app-server proxy: %w", err)
 	}
+	var authorityDone, stdinDone <-chan struct{}
+	defer func() {
+		cancel()
+		retErr = errors.Join(retErr, waitWorkerDone(authorityDone, time.Second), waitWorkerDone(stdinDone, time.Second))
+		if rpc.command != nil {
+			if e := rpc.command.Process.Kill(); e != nil && !errors.Is(e, os.ErrProcessDone) {
+				retErr = errors.Join(retErr, e)
+			}
+			if e := rpc.command.Wait(); e != nil && !strings.Contains(e.Error(), "signal: killed") {
+				retErr = errors.Join(retErr, e)
+			}
+		}
+	}()
 	var initialize map[string]any
 	if err := rpc.call(ctx, "initialize", map[string]any{"clientInfo": map[string]any{"name": "azedarach", "title": "Azedarach", "version": "1"}}, &initialize); err != nil {
 		return err
@@ -314,7 +327,7 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 	}
 
 	deliveries := make(chan nativeCodexDelivery)
-	authorityDone := nativeCodexAuthorityLoop(childCtx, os.Getenv("AZEDARACH_AGENT_INPUT_SOCKET"), nativeCodexRegistration{
+	authorityDone = nativeCodexAuthorityLoop(childCtx, os.Getenv("AZEDARACH_AGENT_INPUT_SOCKET"), nativeCodexRegistration{
 		ProtocolVersion: 1, ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: pane,
 		PanePID: panePID, AgentIncarnation: incarnation, Tool: "codex",
 	}, deliveries)
@@ -327,14 +340,7 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 		defer term.Restore(int(os.Stdin.Fd()), terminalState) //nolint:errcheck
 	}
 	input := make(chan byte, 256)
-	stdinDone := readNativeCodexInputContext(childCtx, os.Stdin, input)
-	defer func() {
-		cancel()
-		retErr = errors.Join(retErr, waitWorkerDone(authorityDone, time.Second), waitWorkerDone(stdinDone, time.Second))
-		if rpc != nil && rpc.command != nil {
-			retErr = errors.Join(retErr, rpc.command.Process.Kill(), rpc.command.Wait())
-		}
-	}()
+	stdinDone = readNativeCodexInputContext(childCtx, os.Stdin, input)
 	composer := make([]byte, 0, 256)
 	active := false
 	pendingRequests := make([]nativeCodexHumanRequest, 0, 4)
