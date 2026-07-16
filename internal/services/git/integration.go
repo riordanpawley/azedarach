@@ -864,17 +864,51 @@ func (c *Client) removeIntegrationJournal(ctx context.Context, worktree string) 
 }
 
 func (c *Client) removeIntegrationJournalAtPath(path string) error {
-	if c.removeJournal == nil {
-		return removeIntegrationJournalPath(path)
+	if c.removeJournal != nil {
+		return c.removeJournal(path)
 	}
-	return c.removeJournal(path)
+	return removeIntegrationJournalPathWithSync(path, c.syncJournalDir)
 }
 
 func removeIntegrationJournalPath(path string) error {
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	return removeIntegrationJournalPathWithSync(path, syncDirectory)
+}
+
+func removeIntegrationJournalPathWithSync(path string, syncDir func(string) error) error {
+	payload, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read integration journal before durable unlink: %w", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("inspect integration journal before durable unlink: %w", err)
+	}
+	if err := os.Remove(path); err != nil {
 		return err
 	}
+	if syncDir == nil {
+		syncDir = syncDirectory
+	}
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		restoreErr := writeFileAtomic(path, payload, info.Mode().Perm())
+		if restoreErr != nil {
+			return fmt.Errorf("sync integration journal unlink: %w; restore journal after failed sync: %v", err, restoreErr)
+		}
+		return fmt.Errorf("sync integration journal unlink (journal restored): %w", err)
+	}
 	return nil
+}
+
+func syncDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func (c *Client) integrationJournalPath(ctx context.Context, worktree string) (string, error) {

@@ -1267,6 +1267,48 @@ func TestRealProcessProfileMergeCleanlyTransactionalPreservesJournalScratchAcros
 	}
 }
 
+func TestRealProcessProfileMergeCleanlyTransactionalRetainsScratchUntilUnlinkIsDurable(t *testing.T) {
+	repo := initDivergedRepo(t)
+	installPassingIntegrationGate(t, repo)
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	syncAttempts := 0
+	client.syncJournalDir = func(string) error {
+		syncAttempts++
+		if syncAttempts == 1 {
+			return fmt.Errorf("injected journal directory sync failure")
+		}
+		return nil
+	}
+
+	result, err := client.MergeCleanlyTransactional(context.Background(), repo, "feature")
+	if err == nil || !strings.Contains(err.Error(), "injected journal directory sync failure") {
+		t.Fatalf("MergeCleanlyTransactional() = (%+v, %v), want injected sync failure", result, err)
+	}
+	journal, journalPath, found, readErr := client.readIntegrationJournal(context.Background(), repo)
+	if readErr != nil || !found {
+		t.Fatalf("readIntegrationJournal() = (%+v, %q, %t, %v), want restored journal", journal, journalPath, found, readErr)
+	}
+	if _, statErr := os.Stat(journal.ScratchWorktree); statErr != nil {
+		t.Fatalf("scratch after failed durable unlink stat error = %v, want retained", statErr)
+	}
+	if head := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); head != journal.DesiredHead {
+		t.Fatalf("HEAD after failed durable unlink = %s, want applied candidate %s", head, journal.DesiredHead)
+	}
+
+	if err := client.RecoverIntegrationJournal(context.Background(), repo); err != nil {
+		t.Fatalf("RecoverIntegrationJournal() retry error = %v", err)
+	}
+	if _, statErr := os.Stat(journalPath); !os.IsNotExist(statErr) {
+		t.Fatalf("journal after durable retry stat error = %v, want removed", statErr)
+	}
+	if _, statErr := os.Stat(journal.ScratchWorktree); !os.IsNotExist(statErr) {
+		t.Fatalf("scratch after durable retry stat error = %v, want removed", statErr)
+	}
+	if syncAttempts != 2 {
+		t.Fatalf("journal directory sync attempts = %d, want failed apply and successful recovery", syncAttempts)
+	}
+}
+
 func TestRealProcessProfileRecoverIntegrationJournalRetriesDeleteBeforeScratchCleanup(t *testing.T) {
 	repo := initDivergedRepo(t)
 	client := NewClient(NewExecRunner(repo), slog.Default())
@@ -1330,6 +1372,68 @@ func TestRealProcessProfileRecoverIntegrationJournalRetriesDeleteBeforeScratchCl
 	attempt, canonical, receiptErr := client.CanonicalIntegrationValidation(ctx, repo, desiredHead)
 	if receiptErr != nil || !canonical || !attempt.Canonical {
 		t.Fatalf("canonical receipt after delete retry = (%+v, %t, %v), want exact canonical proof", attempt, canonical, receiptErr)
+	}
+}
+
+func TestRealProcessProfileRecoverIntegrationJournalRetainsScratchUntilUnlinkIsDurable(t *testing.T) {
+	repo := initDivergedRepo(t)
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	ctx := context.Background()
+	targetHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+	tree := runClientTestGitOutput(t, repo, "merge-tree", "--write-tree", targetHead, "feature")
+	desiredHead := runClientTestGitOutput(t, repo, "commit-tree", tree, "-p", targetHead, "-p", "feature", "-m", "scratch merge")
+	scratch, scratchOwner := addOwnedIntegrationScratch(t, client, repo, desiredHead)
+	journal := integrationJournal{
+		Version: integrationJournalVersion, TargetWorktree: repo, TargetHead: targetHead, DesiredHead: desiredHead,
+		ScratchWorktree: scratch,
+		ScratchOwner:    scratchOwner,
+		Validation:      CandidateValidationAttempt{CandidateHead: desiredHead, Status: CandidateValidationPassed},
+		StartedAt:       time.Now().UTC(),
+	}
+	if err := client.writeIntegrationJournal(ctx, repo, journal); err != nil {
+		t.Fatalf("writeIntegrationJournal() error = %v", err)
+	}
+	runClientTestGit(t, repo, "reset", "--hard", desiredHead)
+	journalPath, err := client.integrationJournalPath(ctx, repo)
+	if err != nil {
+		t.Fatalf("integrationJournalPath() error = %v", err)
+	}
+	wantJournal, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatalf("read journal before recovery: %v", err)
+	}
+
+	syncAttempts := 0
+	client.syncJournalDir = func(string) error {
+		syncAttempts++
+		if syncAttempts == 1 {
+			return fmt.Errorf("injected journal directory sync failure")
+		}
+		return nil
+	}
+	err = client.RecoverIntegrationJournal(ctx, repo)
+	if err == nil || !strings.Contains(err.Error(), "injected journal directory sync failure") {
+		t.Fatalf("first RecoverIntegrationJournal() error = %v, want injected sync failure", err)
+	}
+	gotJournal, readErr := os.ReadFile(journalPath)
+	if readErr != nil || !bytes.Equal(gotJournal, wantJournal) {
+		t.Fatalf("journal after failed durable unlink = %q, %v; want restored bytes %q", gotJournal, readErr, wantJournal)
+	}
+	if _, statErr := os.Stat(scratch); statErr != nil {
+		t.Fatalf("scratch after failed durable unlink stat error = %v, want retained", statErr)
+	}
+
+	if err := client.RecoverIntegrationJournal(ctx, repo); err != nil {
+		t.Fatalf("second RecoverIntegrationJournal() error = %v", err)
+	}
+	if _, statErr := os.Stat(journalPath); !os.IsNotExist(statErr) {
+		t.Fatalf("journal after durable retry stat error = %v, want removed", statErr)
+	}
+	if _, statErr := os.Stat(scratch); !os.IsNotExist(statErr) {
+		t.Fatalf("scratch after durable retry stat error = %v, want removed", statErr)
+	}
+	if syncAttempts != 2 {
+		t.Fatalf("journal directory sync attempts = %d, want failed attempt and successful retry", syncAttempts)
 	}
 }
 

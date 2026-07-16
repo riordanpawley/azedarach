@@ -48,6 +48,7 @@ type Client struct {
 	diffStatBackoff map[string]diffStatBackoffState
 	now             func() time.Time
 	removeJournal   func(string) error
+	syncJournalDir  func(string) error
 }
 
 type diffStatBackoffState struct {
@@ -201,9 +202,9 @@ func NewClient(runner CommandRunner, logger *slog.Logger) *Client {
 		logger = slog.Default()
 	}
 	return &Client{
-		runner:        runner,
-		logger:        logger,
-		removeJournal: removeIntegrationJournalPath,
+		runner:         runner,
+		logger:         logger,
+		syncJournalDir: syncDirectory,
 	}
 }
 
