@@ -127,6 +127,9 @@ func (c *codexRPCClient) read(reader io.Reader) {
 }
 
 func (c *codexRPCClient) terminalDisconnect(err error) {
+	if err == nil {
+		err = io.EOF
+	}
 	c.disconnected.Store(true)
 	c.termMu.Lock()
 	if c.terminalErr == nil {
@@ -163,6 +166,9 @@ func (c *codexRPCClient) call(ctx context.Context, method string, params any, re
 	c.waits[string(idBytes)] = wait
 	c.waitMu.Unlock()
 	if err := c.send(map[string]any{"id": id, "method": method, "params": params}); err != nil {
+		c.waitMu.Lock()
+		delete(c.waits, string(idBytes))
+		c.waitMu.Unlock()
 		return err
 	}
 	select {
@@ -265,6 +271,15 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 	clientState, err := loadNativeCodexState(statePath, opts.Resume)
 	if err != nil {
 		return err
+	}
+	if opts.Resume {
+		raw, readErr := os.ReadFile(statePath)
+		if readErr != nil {
+			return fmt.Errorf("read resume state: %w", readErr)
+		}
+		if json.Unmarshal(raw, &clientState) != nil || clientState.Incarnation == "" || clientState.ThreadID == "" {
+			return errors.New("resume state is missing or corrupt")
+		}
 	}
 	incarnation := clientState.Incarnation
 	if sessionID == "" || pane == "" || panePID <= 0 {
