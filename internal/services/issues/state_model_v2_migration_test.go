@@ -351,11 +351,22 @@ func seedIssueStateModelV1DB(t *testing.T, dbPath string) {
 			tombstoned_at TEXT,
 			PRIMARY KEY (issue_id, depends_on_id, dependency_type)
 		);
+		CREATE TABLE decisions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			local_id TEXT NOT NULL UNIQUE,
+			title TEXT NOT NULL,
+			rationale TEXT,
+			context TEXT,
+			consequences TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			deleted_at TEXT
+		);
 	`)
 	require.NoError(t, err)
 
 	for _, migration := range orderedMigrations {
-		if migration.id == "0019_issue_observation_events" || migration.id == issueStateModelV2MigrationID || migration.id == "0035_interaction_requests" || migration.id == "0045_issue_state_runtime_constraints" || migration.id == humanAuthorityProjectionMigrationID || migration.id == projectionDeltaAuthorityMigrationID || migration.id == decisionPropagationOutboxMigrationID || migration.id == "0049_managed_agent_incarnations" || migration.id == issueObservationEventSearchMigrationID {
+		if migration.id == "0019_issue_observation_events" || migration.id == issueStateModelV2MigrationID || migration.id == "0035_interaction_requests" || migration.id == "0045_issue_state_runtime_constraints" || migration.id == humanAuthorityProjectionMigrationID || migration.id == projectionDeltaAuthorityMigrationID || migration.id == decisionPropagationOutboxMigrationID || migration.id == "0049_managed_agent_incarnations" || migration.id == issueObservationEventSearchMigrationID || migration.id == decisionIdempotencyMigrationID {
 			continue
 		}
 		_, err := db.Exec(`INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)`, migration.id, now)

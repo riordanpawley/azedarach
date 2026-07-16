@@ -117,6 +117,22 @@ func TestDecisionHandler_RecordValidation(t *testing.T) {
 	}
 }
 
+func TestDecisionHandler_RecordUsesRequestIDForIdempotency(t *testing.T) {
+	var got protocol.DecisionRecordRequestBody
+	handler := NewDecisionHandler(&fakeDecisionService{recordFn: func(_ context.Context, req protocol.DecisionRecordRequestBody) (protocol.DecisionRecordResponseBody, error) {
+		got = req
+		return protocol.DecisionRecordResponseBody{}, nil
+	}})
+	payload, _ := json.Marshal(protocol.DecisionRecordRequestBody{Title: "what", Rationale: "why"})
+	resp := handler.Handle(context.Background(), protocol.RequestEnvelope{RequestID: "decision-record-request", Command: protocol.CommandDecisionRecord, Body: payload})
+	if !resp.OK || resp.Error != nil {
+		t.Fatalf("record response error: %+v", resp.Error)
+	}
+	if got.IdempotencyKey != "decision-record-request" {
+		t.Fatalf("idempotency key = %q", got.IdempotencyKey)
+	}
+}
+
 func TestDecisionHandler_LinkAddValidation(t *testing.T) {
 	handler := NewDecisionHandler(&fakeDecisionService{
 		addLinkFn: func(ctx context.Context, req protocol.DecisionLinkAddRequestBody) (protocol.DecisionLinkAddResponseBody, error) {

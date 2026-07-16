@@ -96,9 +96,12 @@ func TestCommandLogsFailure(t *testing.T) {
 }
 
 func TestCommandRejectsStaleClientProtocolWithRefreshPath(t *testing.T) {
+	if protocol.CurrentVersion != 52 {
+		t.Fatalf("protocol version = %d, want 52", protocol.CurrentVersion)
+	}
 	d := &Daemon{}
 	req := protocol.RequestEnvelope{
-		ProtocolVersion: protocol.CurrentVersion - 1,
+		ProtocolVersion: 51,
 		RequestID:       "req-stale-client",
 		Kind:            protocol.EnvelopeKindCommand,
 		Command:         "task.list",
