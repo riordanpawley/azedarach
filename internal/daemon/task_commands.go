@@ -133,13 +133,14 @@ type taskClosePreflightRequest struct {
 }
 
 type taskCloseRequest struct {
-	TaskID               string `json:"task_id"`
-	ForceWorktree        bool   `json:"force_worktree,omitempty"`
-	IgnoreAhead          bool   `json:"ignore_ahead,omitempty"`
-	IntegrateBeforeClose bool   `json:"integrate_before_close,omitempty"`
-	CloseCleanChildren   bool   `json:"close_clean_children,omitempty"`
-	AllowActiveSession   bool   `json:"allow_active_session,omitempty"`
-	CloseOutcome         string `json:"closed_outcome,omitempty"`
+	TaskID                    string `json:"task_id"`
+	ForceWorktree             bool   `json:"force_worktree,omitempty"`
+	IgnoreAhead               bool   `json:"ignore_ahead,omitempty"`
+	IntegrateBeforeClose      bool   `json:"integrate_before_close,omitempty"`
+	CloseCleanChildren        bool   `json:"close_clean_children,omitempty"`
+	AllowActiveSession        bool   `json:"allow_active_session,omitempty"`
+	CloseOutcome              string `json:"closed_outcome,omitempty"`
+	PromoteBacklogBeforeClose bool   `json:"-"`
 }
 
 type taskStatusUpdateOptions struct {
@@ -2158,7 +2159,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		AllowTargetWorktree:          true,
 		ForceWorktree:                cmd.ForceWorktree,
 		IgnoreAhead:                  cmd.IgnoreAhead || cmd.IntegrateBeforeClose,
-		CloseCleanChildren:           cmd.CloseCleanChildren,
+		CloseCleanChildren:           false,
 		SkipStatusRepairs:            true,
 		AllowIntegratedWorktreeRetry: cmd.IntegrateBeforeClose,
 	}
@@ -2174,24 +2175,6 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	recordPhase("preflight", phaseStartedAt, false)
 	if err != nil {
 		return result, fmt.Errorf("phase preflight for issue %s: %w", taskID, err)
-	}
-
-	phaseStartedAt = time.Now()
-	autoClosedChildren, err := d.closeCleanDescendantsBeforeParent(ctx, projectID, taskID, cmd, req)
-	recordPhase("close_clean_children", phaseStartedAt, !cmd.CloseCleanChildren)
-	if err != nil {
-		return result, fmt.Errorf("phase close_clean_children for issue %s: %w", taskID, err)
-	}
-	result.AutoClosedChildren = autoClosedChildren
-	if cmd.CloseCleanChildren {
-		phaseStartedAt = time.Now()
-		strictOptions := preflightOptions
-		strictOptions.CloseCleanChildren = false
-		guard, err = d.validateTaskClosePreflight(ctx, projectID, taskID, strictOptions, req)
-		recordPhase("preflight_after_child_close", phaseStartedAt, false)
-		if err != nil {
-			return result, fmt.Errorf("phase preflight_after_child_close for issue %s: %w", taskID, err)
-		}
 	}
 
 	phaseStartedAt = time.Now()
@@ -3704,7 +3687,7 @@ func taskForReviewActivityInvariant(ctx context.Context, issueClient *issues.Cli
 	return issueClient.GetWithRuntime(ctx, projectID, taskID)
 }
 
-func (d *Daemon) validateOrCascadeChildrenForReview(ctx context.Context, projectID, taskID string, opts taskStatusUpdateOptions) ([]domain.Task, error) {
+func (d *Daemon) validateOrCascadeChildrenForReview(ctx context.Context, projectID, taskID string, _ taskStatusUpdateOptions) ([]domain.Task, error) {
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")
@@ -3729,24 +3712,7 @@ func (d *Daemon) validateOrCascadeChildrenForReview(ctx context.Context, project
 	if len(blocked) == 0 {
 		return nil, nil
 	}
-	if !opts.CascadeChildren {
-		return nil, fmt.Errorf("cannot move issue %s to in_review: child issues are not review-ready: %s. Next: move or finish the listed child issues first, or retry with --cascade-children to move them to in_review first", taskID, strings.Join(blocked, "; "))
-	}
-	updated := make([]domain.Task, 0)
-	for _, childID := range daemonReviewGuardChildIDsToCascade(task.ID, tasks) {
-		if err := d.validateTaskDecisionAcknowledgementsForReview(ctx, projectID, childID.String()); err != nil {
-			return nil, fmt.Errorf("cascade child %s to in_review before moving %s: %w", childID.String(), taskID, err)
-		}
-		if err := d.validateTaskActivityForReview(ctx, projectID, childID.String(), reviewHandoffAllowsBusy(opts, childID.String())); err != nil {
-			return nil, fmt.Errorf("cascade child %s to in_review before moving %s: %w", childID.String(), taskID, err)
-		}
-		child, err := issueClient.UpdateWithRuntime(ctx, projectID, childID.String(), domain.StatusInReview)
-		if err != nil {
-			return nil, fmt.Errorf("cascade child %s to in_review before moving %s: %w", childID.String(), taskID, err)
-		}
-		updated = append(updated, child)
-	}
-	return updated, nil
+	return nil, fmt.Errorf("cannot move issue %s to in_review: all live descendants must be terminal: %s", taskID, strings.Join(blocked, "; "))
 }
 
 func daemonReviewGuardChildBlockers(parentID naming.IssueID, tasks []domain.Task) []string {
@@ -3793,7 +3759,7 @@ func daemonReviewGuardChildIDsToCascade(parentID naming.IssueID, tasks []domain.
 
 func daemonReviewGuardChildReady(child domain.Task) bool {
 	switch child.IssueDisplayPhase() {
-	case domain.IssueDisplayReview, domain.IssueDisplayDone, domain.IssueDisplayCancelled:
+	case domain.IssueDisplayDone, domain.IssueDisplayCancelled:
 		return true
 	default:
 		return false
@@ -3958,12 +3924,13 @@ func (d *Daemon) closeCleanDescendantsBeforeParent(ctx context.Context, projectI
 			continue
 		}
 		childResult, err := d.closeTask(ctx, projectID, taskCloseRequest{
-			TaskID:               child.ID.String(),
-			ForceWorktree:        false,
-			IgnoreAhead:          false,
-			IntegrateBeforeClose: false,
-			CloseCleanChildren:   true,
-			CloseOutcome:         cmd.CloseOutcome,
+			TaskID:                    child.ID.String(),
+			ForceWorktree:             false,
+			IgnoreAhead:               false,
+			IntegrateBeforeClose:      false,
+			CloseCleanChildren:        true,
+			CloseOutcome:              cmd.CloseOutcome,
+			PromoteBacklogBeforeClose: cmd.CloseOutcome != string(domain.IssueCloseCancelled),
 		}, req)
 		if err != nil {
 			return closed, fmt.Errorf("close clean child %s: %w", child.ID.String(), err)

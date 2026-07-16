@@ -200,50 +200,59 @@ EOF
 chmod +x "$fixture/fake-bin/validation-git"
 export AZEDARACH_VALIDATION_GIT_BIN="$fixture/fake-bin/validation-git"
 
+fresh_validation_environment=(
+    -u AZEDARACH_VALIDATION_REQUEST_ID \
+    -u AZEDARACH_VALIDATION_NESTED_FD \
+    -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+    -u AZEDARACH_VALIDATION_CLASS \
+    -u AZEDARACH_VALIDATION_PROFILE \
+    -u AZEDARACH_VALIDATION_SOURCE_REVISION \
+    -u AZEDARACH_VALIDATION_SCOPE \
+    -u AZEDARACH_VALIDATION_PURPOSE \
+    -u AZEDARACH_VALIDATION_EXECUTION \
+    -u AZEDARACH_VALIDATION_AUTHORITATIVE_REQUEST_ID \
+    -u AZEDARACH_VALIDATION_OVERRIDE \
+    -u AZEDARACH_TICKET_ID \
+    -u AZEDARACH_ISSUE_ID
+)
+
 repository_payload="$fixture/repository-payload-ran"
-env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
-  -u AZEDARACH_VALIDATION_LEASE_TOKEN -u AZEDARACH_TICKET_ID -u AZEDARACH_ISSUE_ID \
-  -u AZEDARACH_VALIDATION_SCOPE -u AZEDARACH_VALIDATION_PURPOSE \
+env "${fresh_validation_environment[@]}" \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
   FAKE_AZ_REQUIRE_REPOSITORY=1 \
-  "$fixture/scripts/with-machine-validation-lease" --class aggregate --profile repository-push -- \
+  "$fixture/scripts/with-machine-validation-lease" --class aggregate --scope repository --purpose push_gate --profile repository-push -- \
   sh -c 'touch "$1"' sh "$repository_payload"
 test -e "$repository_payload"
 
 # The remaining lease-control fixtures exercise the controlled-capacity path.
 # Ordinary ticket development bypasses this wrapper entirely.
-export AZEDARACH_VALIDATION_PURPOSE=capacity
 
 reused_payload="$fixture/reused-payload-ran"
-env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
-  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+env "${fresh_validation_environment[@]}" \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" AZEDARACH_TICKET_ID=fixture \
   FAKE_AZ_EXECUTION=reused \
-  "$fixture/scripts/with-machine-validation-lease" --class shared --profile reused -- \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile reused -- \
   sh -c 'touch "$1"' sh "$reused_payload"
 test ! -e "$reused_payload"
 
 skipped_payload="$fixture/skipped-payload-ran"
-env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
-  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+env "${fresh_validation_environment[@]}" \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" AZEDARACH_TICKET_ID=fixture \
   FAKE_AZ_EXECUTION=skipped \
-  "$fixture/scripts/with-machine-validation-lease" --class shared --profile skipped \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile skipped \
   --emergency-skip 'operator-approved outage recovery' --override-actor operator -- true
 test ! -e "$skipped_payload"
 
-env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
-  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+env "${fresh_validation_environment[@]}" \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
   AZEDARACH_TICKET_ID=fixture \
   FAKE_AZ_QUEUE_ONCE_FILE="$fixture/queued-once" \
-  "$fixture/scripts/with-machine-validation-lease" --class shared --profile token-isolation -- \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile token-isolation -- \
   sh -c 'test -z "${AZEDARACH_VALIDATION_LEASE_TOKEN:-}"'
 test -e "$fixture/queued-once"
 
 runtime_probe="$fixture/runtime-probe"
-env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
--u AZEDARACH_VALIDATION_LEASE_TOKEN \
+env "${fresh_validation_environment[@]}" \
 XDG_RUNTIME_DIR="$fixture/ordinary-runtime" \
 AZEDARACH_DAEMON_SCOPE=validation-bootstrap \
 AZEDARACH_VALIDATION_BOOTSTRAP_XDG_WAS_SET=1 \
@@ -251,23 +260,21 @@ AZEDARACH_VALIDATION_BOOTSTRAP_ORIGINAL_XDG_RUNTIME_DIR="$fixture/forged-runtime
 AZEDARACH_VALIDATION_BOOTSTRAP_ID=forged \
 AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
 AZEDARACH_TICKET_ID=fixture \
-  "$fixture/scripts/with-machine-validation-lease" --class shared --profile runtime-preservation -- \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile runtime-preservation -- \
   sh -c 'printf "%s\n%s" "$XDG_RUNTIME_DIR" "$AZEDARACH_VALIDATION_CLEANUP_HANDLE" >"$0"' "$runtime_probe"
 test "$(sed -n '1p' "$runtime_probe")" != "$fixture/ordinary-runtime"
 test "$(sed -n '1p' "$runtime_probe")" = "$(sed -n '2p' "$runtime_probe")"
 
-env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
-  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+env "${fresh_validation_environment[@]}" \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
   AZEDARACH_TICKET_ID=fixture \
-  "$fixture/scripts/with-machine-validation-lease" --class shared --profile outer -- \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile outer -- \
   "$fixture/scripts/with-machine-validation-lease" --class shared --profile nested -- \
   "$fixture/scripts/with-machine-validation-lease" --class shared --profile nested-deep -- true
-if env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
-  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+if env "${fresh_validation_environment[@]}" \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
   AZEDARACH_TICKET_ID=fixture \
-  "$fixture/scripts/with-machine-validation-lease" --class shared --profile outer -- \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile outer -- \
   "$fixture/scripts/with-machine-validation-lease" --class aggregate --profile nested -- true \
   >"$fixture/nested-upgrade.stdout" 2>"$fixture/nested-upgrade.stderr"; then
   echo "nested aggregate unexpectedly joined a shared validation request" >&2
@@ -276,11 +283,12 @@ fi
 grep -q "daemon rejected nested validation authorization" "$fixture/nested-upgrade.stderr"
 
 # A public request id and status are not a nested capability.
-if env -u AZEDARACH_VALIDATION_NESTED_FD -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+if env "${fresh_validation_environment[@]}" \
+  AZEDARACH_TICKET_ID=fixture \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
   AZEDARACH_VALIDATION_REQUEST_ID=spoofed-public-id \
   AZEDARACH_VALIDATION_CLASS=aggregate \
-  "$fixture/scripts/with-machine-validation-lease" --class shared --profile spoof -- true \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile spoof -- true \
   >"$fixture/nested-spoof.stdout" 2>"$fixture/nested-spoof.stderr"; then
   echo "public validation request id unexpectedly authorized nested work" >&2
   exit 1
@@ -288,12 +296,11 @@ fi
 grep -q "requires an inherited authorization capability" "$fixture/nested-spoof.stderr"
 
 # Killing the wrapper must reap both the heartbeat and the executed command.
-env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
-  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+env "${fresh_validation_environment[@]}" \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" AZEDARACH_TICKET_ID=fixture \
   AZEDARACH_VALIDATION_HEARTBEAT_INTERVAL_SECONDS=0.05 \
   FAKE_AZ_HEARTBEAT_BLOCK_FILE="$fixture/heartbeat-blocked" \
-  "$fixture/scripts/with-machine-validation-lease" --class shared --profile parent-death -- \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile parent-death -- \
   sh -c 'echo $$ >"$1"; exec sleep 30' sh "$fixture/orphan-command.pid" &
 wrapper_pid=$!
 for _ in {1..100}; do
@@ -347,12 +354,11 @@ fi
 EOF
 chmod +x "$fixture/fake-bin/validation-ps"
 raw_started="$(date +%s)"
-env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
-  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+env "${fresh_validation_environment[@]}" \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" AZEDARACH_TICKET_ID=fixture \
   AZEDARACH_VALIDATION_PS_BIN="$fixture/fake-bin/validation-ps" \
   RAW_GO_PID="$raw_go_pid" RAW_GO_COMMAND="$fixture/fake-bin/raw-overlap.test" \
-  "$fixture/scripts/with-machine-validation-lease" --class aggregate --profile raw-go-overlap -- \
+  "$fixture/scripts/with-machine-validation-lease" --class aggregate --scope ticket --purpose capacity --profile raw-go-overlap -- \
   sh -c 'date +%s >"$1"' sh "$fixture/raw-overlap-command.started"
 wait "$raw_go_pid"
 test "$(cat "$fixture/raw-overlap-command.started")" -gt "$raw_started"
@@ -370,13 +376,12 @@ if [[ -n "$stat" && "$stat" != Z* ]]; then
 fi
 EOF
 chmod +x "$fixture/fake-bin/validation-ps-dynamic"
-env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
-  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+env "${fresh_validation_environment[@]}" \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" AZEDARACH_TICKET_ID=fixture \
   AZEDARACH_VALIDATION_PS_BIN="$fixture/fake-bin/validation-ps-dynamic" \
   RAW_GO_PID_FILE="$fixture/raw-during-gate.pid" \
   RAW_GO_COMMAND="$fixture/fake-bin/raw-overlap.test" \
-  "$fixture/scripts/with-machine-validation-lease" --class aggregate --profile whole-gate-overlap -- \
+  "$fixture/scripts/with-machine-validation-lease" --class aggregate --scope ticket --purpose capacity --profile whole-gate-overlap -- \
   sh -c 'touch "$1"; sleep 2' sh "$fixture/whole-gate.started" \
   >"$fixture/whole-gate.stdout" 2>"$fixture/whole-gate.stderr" &
 whole_gate_pid=$!
@@ -480,8 +485,7 @@ cat >"$fixture/fake-bin/validation-ps-empty" <<'EOF'
 exit 0
 EOF
 chmod +x "$fixture/fake-bin/validation-ps-empty"
-env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
-  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+env "${fresh_validation_environment[@]}" \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
   AZEDARACH_VALIDATION_PS_BIN="$fixture/fake-bin/validation-ps-empty" \
   AZEDARACH_TICKET_ID=aggregate-holder \
@@ -507,11 +511,10 @@ else
   test "$?" -eq 74
 fi
 development_ready="$fixture/development-holder.ready"
-env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
-  -u AZEDARACH_VALIDATION_LEASE_TOKEN \
+env "${fresh_validation_environment[@]}" \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
   AZEDARACH_TICKET_ID=development-holder \
-  "$fixture/scripts/with-machine-validation-lease" --class shared --purpose development --profile focused-development -- \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose development --profile focused-development -- \
   sh -c 'touch "$1"; sleep 30' sh "$development_ready" &
 development_holder_pid=$!
 for _ in {1..300}; do

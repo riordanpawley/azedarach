@@ -48,10 +48,12 @@ uses the configured Grid, Board, or Tree layout. Full issue projection remains
 asynchronous: until it arrives, raw sessions use the final **Live tmux** fallback
 placement rather than client-side guesses about durable grouping or ordering.
 
-The project-local daemon board snapshot schema v5 carries one typed `projection`: ordered
+The project-local daemon board snapshot schema v6 carries one typed `projection`: ordered
 groups reference a single ordered item collection, items carry tree depth, and
 `known_task_ids` distinguishes filtered durable issues from tmux-only runtime
-discoveries. The TUI and tmux selector render column-board, tree-list, and
+discoveries. Direct-child completion aggregates are computed from the complete
+live issue set before view filtering, so parent progress remains authoritative
+when a selected view omits children. The TUI and tmux selector render column-board, tree-list, and
 horizontal-grid adapters over that same projection. The selector retains live
 tmux sessions only when they have no durable issue match. Live tmux discovery
 remains authoritative for runtime presence without bypassing view filters.
