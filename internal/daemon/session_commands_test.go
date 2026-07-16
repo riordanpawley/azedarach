@@ -2460,17 +2460,22 @@ func TestSessionStartRetriesTransientWorktreeProjectionWriterContention(t *testi
 		t.Fatalf("open concurrent runtime writer: %v", err)
 	}
 	t.Cleanup(func() { _ = lockDB.Close() })
-	if _, err := lockDB.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+	lockConn, err := lockDB.Conn(ctx)
+	if err != nil {
+		t.Fatalf("reserve concurrent runtime writer connection: %v", err)
+	}
+	t.Cleanup(func() { _ = lockConn.Close() })
+	if _, err := lockConn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
 		t.Fatalf("begin concurrent runtime write: %v", err)
 	}
 	lockReleaseResult := make(chan error, 1)
 	go func() {
 		time.Sleep(250 * time.Millisecond)
-		_, releaseErr := lockDB.ExecContext(context.Background(), `COMMIT`)
+		_, releaseErr := lockConn.ExecContext(context.Background(), `COMMIT`)
 		lockReleaseResult <- releaseErr
 	}()
 	t.Cleanup(func() {
-		_, _ = lockDB.ExecContext(context.Background(), `ROLLBACK`)
+		_, _ = lockConn.ExecContext(context.Background(), `ROLLBACK`)
 	})
 
 	d := &Daemon{
