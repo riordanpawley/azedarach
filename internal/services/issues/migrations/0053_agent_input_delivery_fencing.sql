@@ -9,12 +9,13 @@
 --   existing row without changing values. Existing 0052 states all satisfy
 --   the expanded constraint. The new session lease table starts empty.
 -- Validation effects:
---   Before any destructive statement runs, the Go-assisted runner validates
---   the exact immutable 0052 table SQL, required columns, constraints, and both
---   indexes. It then executes this artifact transactionally and validates the
---   final table SQL, required columns, constraints, and indexes before the
---   transaction may write its ledger row or commit. Every later startup repeats
---   the same final-schema validation when this migration is recorded applied.
+--   The Go-assisted runner derives its schema contracts by executing the pinned
+--   immutable 0052 artifact and this artifact in isolated SQLite databases.
+--   Before any destructive statement runs, it requires the live predecessor's
+--   complete table/column/index/trigger inventory to equal that 0052 contract.
+--   After executing this artifact transactionally, it requires the complete
+--   final inventory to equal the derived 0053 contract before writing the
+--   ledger row or committing. Every later startup repeats the final validation.
 -- Ledger effects:
 --   After schema and data validation, the runner records exactly one
 --   schema_migrations row for 0053_agent_input_delivery_fencing with this

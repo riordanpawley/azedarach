@@ -838,6 +838,8 @@ func TestAgentInputDeliveryFencingMigrationRejectsPredecessorDriftBeforeRebuild(
 	for _, test := range []struct {
 		name              string
 		mutate            func(*testing.T, *sql.DB)
+		preservedType     string
+		preservedName     string
 		preservedSQL      string
 		preservedValueSQL string
 		preservedValue    string
@@ -873,6 +875,30 @@ func TestAgentInputDeliveryFencingMigrationRejectsPredecessorDriftBeforeRebuild(
 				}
 			},
 			preservedSQL: "(state, project_id)",
+		},
+		{
+			name: "extra sentinel index",
+			mutate: func(t *testing.T, db *sql.DB) {
+				t.Helper()
+				if _, err := db.Exec(`CREATE INDEX review_sentinel_index ON agent_input_delivery_intents(updated_at)`); err != nil {
+					t.Fatal(err)
+				}
+			},
+			preservedType: "index",
+			preservedName: "review_sentinel_index",
+			preservedSQL:  "review_sentinel_index on agent_input_delivery_intents(updated_at)",
+		},
+		{
+			name: "extra sentinel trigger",
+			mutate: func(t *testing.T, db *sql.DB) {
+				t.Helper()
+				if _, err := db.Exec(`CREATE TRIGGER review_sentinel_trigger AFTER UPDATE ON agent_input_delivery_intents BEGIN SELECT 1; END`); err != nil {
+					t.Fatal(err)
+				}
+			},
+			preservedType: "trigger",
+			preservedName: "review_sentinel_trigger",
+			preservedSQL:  "review_sentinel_trigger after update on agent_input_delivery_intents",
 		},
 		{
 			name: "extra sentinel column",
@@ -933,8 +959,12 @@ func TestAgentInputDeliveryFencingMigrationRejectsPredecessorDriftBeforeRebuild(
 				t.Fatal(err)
 			}
 			var schemaSQL string
-			objectType := "table"
-			objectName := "agent_input_delivery_intents"
+			objectType := test.preservedType
+			objectName := test.preservedName
+			if objectType == "" {
+				objectType = "table"
+				objectName = "agent_input_delivery_intents"
+			}
 			if test.name == "pending index" {
 				objectType = "index"
 				objectName = "idx_agent_input_delivery_pending"
@@ -981,5 +1011,47 @@ func TestAgentInputDeliveryMigrationRejectsAppliedExtraColumnDrift(t *testing.T)
 	defer reopened.CloseDB()
 	if _, err := reopened.List(context.Background()); err == nil || !strings.Contains(err.Error(), "non-canonical definition") {
 		t.Fatalf("reopen error=%v, want final-schema drift refusal", err)
+	}
+}
+
+func TestAgentInputDeliveryMigrationRejectsAppliedSchemaObjectInventoryDrift(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		create string
+	}{
+		{
+			name:   "extra index",
+			create: `CREATE INDEX review_sentinel_index ON agent_input_delivery_session_leases(updated_at)`,
+		},
+		{
+			name:   "extra trigger",
+			create: `CREATE TRIGGER review_sentinel_trigger AFTER UPDATE ON agent_input_delivery_session_leases BEGIN SELECT 1; END`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "issues.db")
+			client := NewClientAtPath(path, nil)
+			if _, err := client.Create(context.Background(), CreateTaskParams{Title: "seed", Type: domain.TypeTask}); err != nil {
+				t.Fatal(err)
+			}
+			if err := client.CloseDB(); err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(test.create); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened := NewClientAtPath(path, nil)
+			defer reopened.CloseDB()
+			if _, err := reopened.List(context.Background()); err == nil || !strings.Contains(err.Error(), "schema object inventory") {
+				t.Fatalf("reopen error=%v, want final object-inventory drift refusal", err)
+			}
+		})
 	}
 }

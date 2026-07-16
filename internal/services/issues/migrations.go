@@ -11,9 +11,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -458,7 +458,7 @@ const (
 	agentInputDeliveryMigrationID                                        = "0052_agent_input_delivery"
 	agentInputDeliveryMigrationChecksum                                  = "92d3be503bc193101944f1bc1ecee38656f04c3be7399a1b88356ae6add42f55"
 	agentInputDeliveryFencingMigrationID                                 = "0053_agent_input_delivery_fencing"
-	agentInputDeliveryFencingMigrationChecksum                           = "ac13ed80fe4449e8dda180ecfae02f8c133a3d6b837cf8ad334e35b6bab27035"
+	agentInputDeliveryFencingMigrationChecksum                           = "39c5faf5c816e604d8826b8e6548d2b047234ea0340a490e4bfa2ae64d21de79"
 	contextualLearningMigrationID                                        = "0039_contextual_learning_activation"
 	legacyContextualLearningMigration                                    = "0038_contextual_learning_activation"
 )
@@ -1108,79 +1108,19 @@ func validateManagedAgentIdentitySchema(ctx context.Context, db *sql.DB) error {
 }
 
 func validateAgentInputDeliveryBaseSchema(ctx context.Context, db sqlIssueQueryer) error {
-	return validateAgentInputDeliveryIntentSchema(ctx, db, false)
+	contract, err := agentInputDeliveryBaseSchemaContract()
+	if err != nil {
+		return fmt.Errorf("derive agent input delivery base schema from pinned artifact: %w", err)
+	}
+	return validateAgentInputDeliverySchemaContract(ctx, db, contract)
 }
 
 func validateAgentInputDeliverySchema(ctx context.Context, db sqlIssueQueryer) error {
-	if err := validateAgentInputDeliveryIntentSchema(ctx, db, true); err != nil {
-		return err
+	contract, err := agentInputDeliveryFencedSchemaContract()
+	if err != nil {
+		return fmt.Errorf("derive agent input delivery fenced schema from pinned artifacts: %w", err)
 	}
-	return validateAgentInputDeliverySessionLeaseSchema(ctx, db)
-}
-
-func validateAgentInputDeliveryIntentSchema(ctx context.Context, db sqlIssueQueryer, fenced bool) error {
-	expectedTableSQL := agentInputDeliveryBaseTableSQL
-	if fenced {
-		expectedTableSQL = agentInputDeliveryFencedTableSQL
-	}
-	if err := validateExactSQLiteTable(ctx, db, "agent_input_delivery_intents", expectedTableSQL, agentInputDeliveryIntentColumns); err != nil {
-		return fmt.Errorf("agent input delivery schema drifted: %w", err)
-	}
-	indexes := []struct {
-		name      string
-		columns   []string
-		predicate string
-	}{
-		{name: "idx_agent_input_delivery_pending", columns: []string{"project_id", "state", "expires_at", "created_at"}, predicate: "wherestatein('queued','leased')"},
-		{name: "idx_agent_input_delivery_incarnation", columns: []string{"project_id", "session_id", "logical_pane_id", "agent_incarnation", "state"}},
-	}
-	for _, index := range indexes {
-		var indexSQL string
-		if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='index' AND name=?`, index.name).Scan(&indexSQL); err != nil {
-			return fmt.Errorf("agent input delivery schema drifted: inspect index %s: %w", index.name, err)
-		}
-		normalizedSQL := strings.NewReplacer(" ", "", "\n", "", "\t", "", "\r", "", `"`, "", "`", "", "[", "", "]", "").Replace(strings.ToLower(indexSQL))
-		expectedSQL := "createindex" + index.name + "onagent_input_delivery_intents(" + strings.Join(index.columns, ",") + ")" + index.predicate
-		if normalizedSQL != expectedSQL {
-			return fmt.Errorf("agent input delivery schema drifted: index %s has non-canonical definition", index.name)
-		}
-		rows, err := db.QueryContext(ctx, `PRAGMA index_info(`+index.name+`)`)
-		if err != nil {
-			return fmt.Errorf("inspect agent input delivery index %s columns: %w", index.name, err)
-		}
-		var columns []string
-		for rows.Next() {
-			var sequence, columnID int
-			var column string
-			if err := rows.Scan(&sequence, &columnID, &column); err != nil {
-				rows.Close()
-				return fmt.Errorf("inspect agent input delivery index %s columns: %w", index.name, err)
-			}
-			columns = append(columns, column)
-		}
-		if err := rows.Close(); err != nil {
-			return fmt.Errorf("inspect agent input delivery index %s columns: %w", index.name, err)
-		}
-		if !slices.Equal(columns, index.columns) {
-			return fmt.Errorf("agent input delivery schema drifted: index %s columns are %v, want %v", index.name, columns, index.columns)
-		}
-	}
-	return nil
-}
-
-func validateAgentInputDeliverySessionLeaseSchema(ctx context.Context, db sqlIssueQueryer) error {
-	if err := validateExactSQLiteTable(ctx, db, "agent_input_delivery_session_leases", agentInputDeliverySessionLeaseTableSQL, agentInputDeliverySessionLeaseColumns); err != nil {
-		return fmt.Errorf("agent input delivery session lease schema drifted: %w", err)
-	}
-	var leaseIndexSQL string
-	if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_agent_input_session_lease_expiry'`).Scan(&leaseIndexSQL); err != nil {
-		return fmt.Errorf("agent input delivery session lease schema drifted: inspect expiry index: %w", err)
-	}
-	normalizedLeaseIndex := strings.NewReplacer(" ", "", "\n", "", "\t", "", "\r", "", `"`, "", "`", "", "[", "", "]", "").Replace(strings.ToLower(leaseIndexSQL))
-	if normalizedLeaseIndex != "createindexidx_agent_input_session_lease_expiryonagent_input_delivery_session_leases(lease_expires_at)" {
-		return errors.New("agent input delivery session lease schema drifted: expiry index has non-canonical definition")
-	}
-	return nil
+	return validateAgentInputDeliverySchemaContract(ctx, db, contract)
 }
 
 type exactSQLiteColumn struct {
@@ -1191,138 +1131,155 @@ type exactSQLiteColumn struct {
 	primaryKey int
 }
 
-var agentInputDeliveryIntentColumns = []exactSQLiteColumn{
-	{name: "project_id", columnType: "TEXT", notNull: 1, primaryKey: 1},
-	{name: "intent_key", columnType: "TEXT", notNull: 1, primaryKey: 2},
-	{name: "session_id", columnType: "TEXT", notNull: 1},
-	{name: "logical_pane_id", columnType: "TEXT", notNull: 1},
-	{name: "tmux_pane_id", columnType: "TEXT", notNull: 1},
-	{name: "pane_pid", columnType: "INTEGER", notNull: 1},
-	{name: "agent_incarnation", columnType: "TEXT", notNull: 1},
-	{name: "tool", columnType: "TEXT", notNull: 1},
-	{name: "message_kind", columnType: "TEXT", notNull: 1},
-	{name: "payload", columnType: "TEXT", notNull: 1},
-	{name: "state", columnType: "TEXT", notNull: 1},
-	{name: "expires_at", columnType: "TEXT"},
-	{name: "lease_owner", columnType: "TEXT"},
-	{name: "lease_token", columnType: "TEXT"},
-	{name: "lease_expires_at", columnType: "TEXT"},
-	{name: "attempt_count", columnType: "INTEGER", notNull: 1, defaultSQL: "0"},
-	{name: "acknowledgement_token", columnType: "TEXT"},
-	{name: "acknowledged_at", columnType: "TEXT"},
-	{name: "created_at", columnType: "TEXT", notNull: 1},
-	{name: "updated_at", columnType: "TEXT", notNull: 1},
+type exactSQLiteSchemaObject struct {
+	objectType string
+	name       string
+	tableName  string
+	sql        string
 }
 
-var agentInputDeliverySessionLeaseColumns = []exactSQLiteColumn{
-	{name: "project_id", columnType: "TEXT", notNull: 1, primaryKey: 1},
-	{name: "session_id", columnType: "TEXT", notNull: 1, primaryKey: 2},
-	{name: "agent_incarnation", columnType: "TEXT", notNull: 1},
-	{name: "lease_owner", columnType: "TEXT", notNull: 1},
-	{name: "lease_token", columnType: "TEXT", notNull: 1},
-	{name: "lease_expires_at", columnType: "TEXT", notNull: 1},
-	{name: "updated_at", columnType: "TEXT", notNull: 1},
+type agentInputDeliverySchemaContract struct {
+	objects []exactSQLiteSchemaObject
+	columns map[string][]exactSQLiteColumn
 }
 
-const agentInputDeliveryBaseTableSQL = `CREATE TABLE agent_input_delivery_intents (
-  project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
-  intent_key TEXT NOT NULL CHECK (trim(intent_key) <> ''),
-  session_id TEXT NOT NULL CHECK (trim(session_id) <> ''),
-  logical_pane_id TEXT NOT NULL CHECK (trim(logical_pane_id) <> ''),
-  tmux_pane_id TEXT NOT NULL CHECK (trim(tmux_pane_id) <> ''),
-  pane_pid INTEGER NOT NULL CHECK (pane_pid > 0),
-  agent_incarnation TEXT NOT NULL CHECK (trim(agent_incarnation) <> ''),
-  tool TEXT NOT NULL CHECK (trim(tool) <> ''),
-  message_kind TEXT NOT NULL CHECK (trim(message_kind) <> ''),
-  payload TEXT NOT NULL CHECK (length(payload) > 0),
-  state TEXT NOT NULL CHECK (state IN ('queued','leased','delivered','expired','stale')),
-  expires_at TEXT,
-  lease_owner TEXT,
-  lease_token TEXT,
-  lease_expires_at TEXT,
-  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
-  acknowledgement_token TEXT,
-  acknowledged_at TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  PRIMARY KEY (project_id, intent_key),
-  CHECK ((state = 'delivered') = (acknowledgement_token IS NOT NULL AND acknowledged_at IS NOT NULL)),
-  CHECK ((state = 'leased') = (lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL))
-)`
+var (
+	agentInputDeliveryBaseSchemaContract = sync.OnceValues(func() (*agentInputDeliverySchemaContract, error) {
+		return deriveAgentInputDeliverySchemaContract(false)
+	})
+	agentInputDeliveryFencedSchemaContract = sync.OnceValues(func() (*agentInputDeliverySchemaContract, error) {
+		return deriveAgentInputDeliverySchemaContract(true)
+	})
+)
 
-const agentInputDeliveryFencedTableSQL = `CREATE TABLE agent_input_delivery_intents (
-  project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
-  intent_key TEXT NOT NULL CHECK (trim(intent_key) <> ''),
-  session_id TEXT NOT NULL CHECK (trim(session_id) <> ''),
-  logical_pane_id TEXT NOT NULL CHECK (trim(logical_pane_id) <> ''),
-  tmux_pane_id TEXT NOT NULL CHECK (trim(tmux_pane_id) <> ''),
-  pane_pid INTEGER NOT NULL CHECK (pane_pid > 0),
-  agent_incarnation TEXT NOT NULL CHECK (trim(agent_incarnation) <> ''),
-  tool TEXT NOT NULL CHECK (trim(tool) <> ''),
-  message_kind TEXT NOT NULL CHECK (trim(message_kind) <> ''),
-  payload TEXT NOT NULL CHECK (length(payload) > 0),
-  state TEXT NOT NULL CHECK (state IN ('queued','leased','ambiguous','delivered','expired','stale')),
-  expires_at TEXT,
-  lease_owner TEXT,
-  lease_token TEXT,
-  lease_expires_at TEXT,
-  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
-  acknowledgement_token TEXT,
-  acknowledged_at TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  PRIMARY KEY (project_id, intent_key),
-  CHECK ((state = 'delivered') = (acknowledgement_token IS NOT NULL AND acknowledged_at IS NOT NULL)),
-  CHECK ((state IN ('leased','ambiguous')) = (lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL))
-)`
-
-const agentInputDeliverySessionLeaseTableSQL = `CREATE TABLE agent_input_delivery_session_leases (
-  project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
-  session_id TEXT NOT NULL CHECK (trim(session_id) <> ''),
-  agent_incarnation TEXT NOT NULL CHECK (trim(agent_incarnation) <> ''),
-  lease_owner TEXT NOT NULL CHECK (trim(lease_owner) <> ''),
-  lease_token TEXT NOT NULL CHECK (trim(lease_token) <> ''),
-  lease_expires_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  PRIMARY KEY (project_id, session_id)
-)`
-
-func validateExactSQLiteTable(ctx context.Context, db sqlIssueQueryer, table, expectedSQL string, expectedColumns []exactSQLiteColumn) error {
-	var tableSQL string
-	if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&tableSQL); err != nil {
-		return fmt.Errorf("inspect table %s: %w", table, err)
+func deriveAgentInputDeliverySchemaContract(fenced bool) (*agentInputDeliverySchemaContract, error) {
+	if err := validateMigrationRegistry(); err != nil {
+		return nil, fmt.Errorf("authenticate pinned migration artifacts: %w", err)
 	}
-	if normalizeExactSQLiteDDL(tableSQL) != normalizeExactSQLiteDDL(expectedSQL) {
-		return fmt.Errorf("table %s has non-canonical definition", table)
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		return nil, fmt.Errorf("open reference database: %w", err)
 	}
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+	ctx := context.Background()
+	baseSQL, err := loadRegisteredMigrationSQL(agentInputDeliveryMigrationID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := db.ExecContext(ctx, baseSQL); err != nil {
+		return nil, fmt.Errorf("execute pinned migration 0052 reference artifact: %w", err)
+	}
+	if fenced {
+		fencingSQL, err := loadRegisteredMigrationSQL(agentInputDeliveryFencingMigrationID)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := db.ExecContext(ctx, fencingSQL); err != nil {
+			return nil, fmt.Errorf("execute pinned migration 0053 reference artifact: %w", err)
+		}
+	}
+	return inspectAgentInputDeliverySchemaContract(ctx, db)
+}
+
+func loadRegisteredMigrationSQL(id string) (string, error) {
+	for _, migration := range orderedMigrations {
+		if migration.id == id {
+			return loadMigrationSQL(migration.path)
+		}
+	}
+	return "", fmt.Errorf("migration %s is not registered", id)
+}
+
+func inspectAgentInputDeliverySchemaContract(ctx context.Context, db sqlIssueQueryer) (*agentInputDeliverySchemaContract, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT type, name, tbl_name, COALESCE(sql, '')
+		FROM sqlite_master
+		WHERE type IN ('table','index','trigger')
+		  AND (name GLOB 'agent_input_delivery_*' OR tbl_name GLOB 'agent_input_delivery_*')
+		ORDER BY type, name
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("inspect agent input delivery schema objects: %w", err)
+	}
+	contract := &agentInputDeliverySchemaContract{columns: make(map[string][]exactSQLiteColumn)}
+	for rows.Next() {
+		var object exactSQLiteSchemaObject
+		if err := rows.Scan(&object.objectType, &object.name, &object.tableName, &object.sql); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan agent input delivery schema object: %w", err)
+		}
+		contract.objects = append(contract.objects, object)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("iterate agent input delivery schema objects: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close agent input delivery schema object inspection: %w", err)
+	}
+	for _, object := range contract.objects {
+		if object.objectType != "table" {
+			continue
+		}
+		columns, err := inspectExactSQLiteColumns(ctx, db, object.name)
+		if err != nil {
+			return nil, err
+		}
+		contract.columns[object.name] = columns
+	}
+	return contract, nil
+}
+
+func validateAgentInputDeliverySchemaContract(ctx context.Context, db sqlIssueQueryer, expected *agentInputDeliverySchemaContract) error {
+	actual, err := inspectAgentInputDeliverySchemaContract(ctx, db)
+	if err != nil {
+		return fmt.Errorf("agent input delivery schema drifted: %w", err)
+	}
+	if len(actual.objects) != len(expected.objects) {
+		return fmt.Errorf("agent input delivery schema drifted: schema object inventory has %d objects, want %d", len(actual.objects), len(expected.objects))
+	}
+	for i := range expected.objects {
+		got, want := actual.objects[i], expected.objects[i]
+		if got.objectType != want.objectType || got.name != want.name || got.tableName != want.tableName {
+			return fmt.Errorf("agent input delivery schema drifted: schema object inventory entry %d is %s %s on %s, want %s %s on %s", i, got.objectType, got.name, got.tableName, want.objectType, want.name, want.tableName)
+		}
+		if normalizeExactSQLiteDDL(got.sql) != normalizeExactSQLiteDDL(want.sql) {
+			return fmt.Errorf("agent input delivery schema drifted: %s %s has non-canonical definition", got.objectType, got.name)
+		}
+	}
+	if !reflect.DeepEqual(actual.columns, expected.columns) {
+		return errors.New("agent input delivery schema drifted: table column metadata is non-canonical")
+	}
+	return nil
+}
+
+func inspectExactSQLiteColumns(ctx context.Context, db sqlIssueQueryer, table string) ([]exactSQLiteColumn, error) {
 	rows, err := db.QueryContext(ctx, `SELECT cid, name, type, [notnull], dflt_value, pk, hidden FROM pragma_table_xinfo(?) ORDER BY cid`, table)
 	if err != nil {
-		return fmt.Errorf("inspect table %s columns: %w", table, err)
+		return nil, fmt.Errorf("inspect table %s columns: %w", table, err)
 	}
 	defer rows.Close()
-	var actual []exactSQLiteColumn
+	var columns []exactSQLiteColumn
 	for rows.Next() {
 		var column exactSQLiteColumn
 		var cid, hidden int
 		var defaultSQL sql.NullString
 		if err := rows.Scan(&cid, &column.name, &column.columnType, &column.notNull, &defaultSQL, &column.primaryKey, &hidden); err != nil {
-			return fmt.Errorf("inspect table %s columns: %w", table, err)
+			return nil, fmt.Errorf("inspect table %s columns: %w", table, err)
 		}
-		if cid != len(actual) || hidden != 0 {
-			return fmt.Errorf("table %s column %s has cid=%d hidden=%d", table, column.name, cid, hidden)
+		if cid != len(columns) || hidden != 0 {
+			return nil, fmt.Errorf("table %s column %s has cid=%d hidden=%d", table, column.name, cid, hidden)
 		}
 		if defaultSQL.Valid {
 			column.defaultSQL = defaultSQL.String
 		}
-		actual = append(actual, column)
+		columns = append(columns, column)
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("inspect table %s columns: %w", table, err)
+		return nil, fmt.Errorf("inspect table %s columns: %w", table, err)
 	}
-	if !slices.Equal(actual, expectedColumns) {
-		return fmt.Errorf("table %s has non-canonical column metadata", table)
-	}
-	return nil
+	return columns, nil
 }
 
 func normalizeExactSQLiteDDL(ddl string) string {
