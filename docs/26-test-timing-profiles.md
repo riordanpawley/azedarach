@@ -15,7 +15,7 @@ remain queued, so no compile-before-lock window can consume the canonical
 timing budget. Inspect the owner and queue with `just validation-status` or
 stream changes without compiling Go code with `just validation-watch`.
 Raw Go diagnostics are not an exception: run them through
-`./scripts/with-machine-validation-lease --class shared --profile diagnostic -- go ...`.
+direct `go ...` commands in the worktree-isolated cache.
 An aggregate request waits for already-running unleased Go processes to
 quiesce, then samples the complete outer build/test/contract/boundary command;
 Go work that appears after admission invalidates the aggregate result.
@@ -61,7 +61,7 @@ just test
 just test-timing focused --package ./internal/cli --run TestCommand
 
 # Raw diagnostic command (still daemon-admitted)
-./scripts/with-machine-validation-lease --class shared --profile diagnostic -- go test -timeout 30s ./internal/daemon -run TestName
+go test -timeout 30s ./internal/daemon -run TestName
 
 # Complete profiles
 just test-timing cold
@@ -90,11 +90,10 @@ Artifacts are written beneath `.tmp/test-timing/<profile>-<UTC timestamp>/`:
 - `report.json` is the versioned machine-readable measurement and comparison.
 - `report.md` is the same result rendered for review, sorted slowest first.
 
-Reports sample the host process tree during the run and separate the validator's
-own Go compiler, linker, vet, and test processes from external Go load. The
-daemon retains this overlap evidence with the completed aggregate request, and
-integration readiness rejects aggregate results with missing or overlapping
-machine-load evidence.
+Controlled CI timing reports sample the host process tree and separate the
+validator's own Go compiler, linker, vet, and test processes from external Go
+load. The daemon retains that capacity-run overlap evidence. Local semantic
+profiles run directly and keep timing/overlap observations diagnostic.
 
 Cached packages are marked with `cached: true` in `report.json` and `(cached)`
 in the Markdown result column; their replayed individual-test rows are marked the

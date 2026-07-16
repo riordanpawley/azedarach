@@ -39,3 +39,9 @@ func TestValidationReviewEvidenceRequiresFullAuthorityIdentity(t *testing.T) {
 	a.ReviewerID, a.ReviewEpochEventID = "reviewer", 42
 	assert.NoError(t, a.Validate())
 }
+
+func TestValidationDevelopmentDoesNotUseDaemonAdmission(t *testing.T) {
+	a := validValidationAcquire()
+	a.Scope, a.Purpose, a.IssueID = ValidationScopeTicket, ValidationPurposeDevelopment, "dnb"
+	require.ErrorContains(t, a.Validate(), "development validation does not use daemon admission")
+}
