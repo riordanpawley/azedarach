@@ -13492,7 +13492,7 @@ func TestTaskUpdateStatusAllowsInReviewWithIdleActivity(t *testing.T) {
 	}
 }
 
-func TestTaskUpdateStatusCascadeChildrenMovesNestedDescendantsToInReview(t *testing.T) {
+func TestTaskUpdateStatusCascadeChildrenCannotBypassTerminalDescendantGate(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-review-cascade-children"
 	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
@@ -13521,16 +13521,16 @@ func TestTaskUpdateStatusCascadeChildrenMovesNestedDescendantsToInReview(t *test
 	}
 
 	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, true)
-	if !resp.OK || resp.Error != nil {
-		t.Fatalf("task.update_status response = %+v, want cascade success", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "all live descendants must be terminal") {
+		t.Fatalf("task.update_status response = %+v, want terminal descendant rejection", resp)
 	}
 	for _, id := range []string{parentID, childID, grandchildID} {
 		task, err := issuesClient.GetWithRuntime(ctx, projectID, id)
 		if err != nil {
 			t.Fatalf("get %s: %v", id, err)
 		}
-		if task.Status != domain.StatusInReview {
-			t.Fatalf("%s status = %s, want in_review", id, task.Status)
+		if task.Status == domain.StatusInReview {
+			t.Fatalf("%s status = %s, want unchanged non-review state", id, task.Status)
 		}
 	}
 }
@@ -13564,8 +13564,8 @@ func TestTaskUpdateStatusCascadeChildrenRejectsBusyChildActivity(t *testing.T) {
 	})
 
 	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, true)
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "cascade child "+childID+" to in_review") || !strings.Contains(resp.Error.Message, "session activity is working (source: hooks)") {
-		t.Fatalf("task.update_status response = %+v, want busy child cascade guard", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "all live descendants must be terminal") {
+		t.Fatalf("task.update_status response = %+v, want terminal descendant guard", resp)
 	}
 	for _, id := range []string{parentID, childID} {
 		task, err := issuesClient.GetWithRuntime(ctx, projectID, id)
@@ -13601,7 +13601,7 @@ func TestTaskUpdateStatusReviewGuardHonorsLegacyParentChildDependency(t *testing
 	}
 }
 
-func TestTaskUpdateStatusAllowsInReviewWhenChildrenReviewReady(t *testing.T) {
+func TestTaskUpdateStatusRejectsInReviewWhenChildOnlyReviewReady(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-review-guard-ready"
 	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
@@ -13622,15 +13622,15 @@ func TestTaskUpdateStatusAllowsInReviewWhenChildrenReviewReady(t *testing.T) {
 	}
 
 	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, false)
-	if !resp.OK || resp.Error != nil {
-		t.Fatalf("task.update_status response = %+v, want success", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "all live descendants must be terminal") {
+		t.Fatalf("task.update_status response = %+v, want review-ready child rejection", resp)
 	}
 	parent, err := issuesClient.GetWithRuntime(ctx, projectID, parentID)
 	if err != nil {
 		t.Fatalf("get parent: %v", err)
 	}
-	if parent.Status != domain.StatusInReview {
-		t.Fatalf("parent status = %s, want in_review", parent.Status)
+	if parent.Status == domain.StatusInReview {
+		t.Fatalf("parent status = %s, want unchanged", parent.Status)
 	}
 }
 

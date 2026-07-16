@@ -3686,7 +3686,7 @@ func taskForReviewActivityInvariant(ctx context.Context, issueClient *issues.Cli
 	return issueClient.GetWithRuntime(ctx, projectID, taskID)
 }
 
-func (d *Daemon) validateOrCascadeChildrenForReview(ctx context.Context, projectID, taskID string, opts taskStatusUpdateOptions) ([]domain.Task, error) {
+func (d *Daemon) validateOrCascadeChildrenForReview(ctx context.Context, projectID, taskID string, _ taskStatusUpdateOptions) ([]domain.Task, error) {
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")
@@ -3711,24 +3711,7 @@ func (d *Daemon) validateOrCascadeChildrenForReview(ctx context.Context, project
 	if len(blocked) == 0 {
 		return nil, nil
 	}
-	if !opts.CascadeChildren {
-		return nil, fmt.Errorf("cannot move issue %s to in_review: child issues are not review-ready: %s. Next: move or finish the listed child issues first, or retry with --cascade-children to move them to in_review first", taskID, strings.Join(blocked, "; "))
-	}
-	updated := make([]domain.Task, 0)
-	for _, childID := range daemonReviewGuardChildIDsToCascade(task.ID, tasks) {
-		if err := d.validateTaskDecisionAcknowledgementsForReview(ctx, projectID, childID.String()); err != nil {
-			return nil, fmt.Errorf("cascade child %s to in_review before moving %s: %w", childID.String(), taskID, err)
-		}
-		if err := d.validateTaskActivityForReview(ctx, projectID, childID.String(), reviewHandoffAllowsBusy(opts, childID.String())); err != nil {
-			return nil, fmt.Errorf("cascade child %s to in_review before moving %s: %w", childID.String(), taskID, err)
-		}
-		child, err := issueClient.UpdateWithRuntime(ctx, projectID, childID.String(), domain.StatusInReview)
-		if err != nil {
-			return nil, fmt.Errorf("cascade child %s to in_review before moving %s: %w", childID.String(), taskID, err)
-		}
-		updated = append(updated, child)
-	}
-	return updated, nil
+	return nil, fmt.Errorf("cannot move issue %s to in_review: all live descendants must be terminal: %s", taskID, strings.Join(blocked, "; "))
 }
 
 func daemonReviewGuardChildBlockers(parentID naming.IssueID, tasks []domain.Task) []string {
@@ -3775,7 +3758,7 @@ func daemonReviewGuardChildIDsToCascade(parentID naming.IssueID, tasks []domain.
 
 func daemonReviewGuardChildReady(child domain.Task) bool {
 	switch child.IssueDisplayPhase() {
-	case domain.IssueDisplayReview, domain.IssueDisplayDone, domain.IssueDisplayCancelled:
+	case domain.IssueDisplayDone, domain.IssueDisplayCancelled:
 		return true
 	default:
 		return false

@@ -3103,6 +3103,21 @@ func TestClientParentAttachPromotesBacklogSubtree(t *testing.T) {
 	}
 }
 
+func TestClientRestorePreservesAncestorLifecycleFloor(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	parentID, err := client.Create(ctx, CreateTaskParams{Title: "parent", Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{Title: "child", Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog, ParentID: &parentID})
+	require.NoError(t, err)
+	require.NoError(t, client.Archive(ctx, childID))
+	require.NoError(t, client.Update(ctx, parentID, domain.StatusOpen))
+	require.NoError(t, client.Unarchive(ctx, childID))
+	child, err := client.GetWithRuntime(ctx, "test", childID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.IssueWorkflowOpen, child.IssueFacts().LifecycleState)
+}
+
 func TestClient_CreateWithOpenChildReopensClosedParent(t *testing.T) {
 	parallelIssueStoreTest(t)
 	ctx := context.Background()
