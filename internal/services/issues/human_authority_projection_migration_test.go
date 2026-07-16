@@ -117,10 +117,6 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if _, err = reopened.ExportProjection(ctx, projectIDs[0]); err != nil {
 				t.Fatal(err)
 			}
-			reopenedDB, err := reopened.dbHandle()
-			if err != nil {
-				t.Fatal(err)
-			}
 			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, projectionDeltaAuthorityMigrationID, projectionDeltaAuthorityChecksum).Scan(&ledgerRows); err != nil || ledgerRows != 1 {
 				t.Fatalf("projection delta ledger rows after reopen=%d err=%v", ledgerRows, err)
 			}
