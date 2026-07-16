@@ -306,10 +306,13 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 		cancel()
 		retErr = errors.Join(retErr, waitWorkerDone(authorityDone, time.Second), waitWorkerDone(stdinDone, time.Second))
 		if rpc.command != nil {
-			if e := rpc.command.Process.Kill(); e != nil && !errors.Is(e, os.ErrProcessDone) {
+			killed := false
+			if e := rpc.command.Process.Kill(); e == nil {
+				killed = true
+			} else if !errors.Is(e, os.ErrProcessDone) {
 				retErr = errors.Join(retErr, e)
 			}
-			if e := rpc.command.Wait(); e != nil && !strings.Contains(e.Error(), "signal: killed") {
+			if e := rpc.command.Wait(); e != nil && !(killed && strings.Contains(e.Error(), "signal: killed")) {
 				retErr = errors.Join(retErr, e)
 			}
 		}
@@ -501,6 +504,9 @@ func strictNativeCodexState(path string) (nativeCodexState, error) {
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 
 func waitWorkerDone(done <-chan struct{}, timeout time.Duration) error {
+	if done == nil {
+		return nil
+	}
 	select {
 	case <-done:
 		return nil
