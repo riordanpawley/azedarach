@@ -2,11 +2,14 @@
 set -eu
 
 if [ "${AZEDARACH_SKIP_MERGE_REBASE_GATE:-0}" = "1" ]; then
-  echo "merge/rebase gate skipped (AZEDARACH_SKIP_MERGE_REBASE_GATE=1)"
+  echo "merge/rebase gate skipped for internal scratch integration (AZEDARACH_SKIP_MERGE_REBASE_GATE=1)"
   exit 0
 fi
 
 repo_root="$(git rev-parse --show-toplevel)"
+unset AZEDARACH_TICKET_ID AZEDARACH_ISSUE_ID
+export AZEDARACH_VALIDATION_SCOPE=repository
+export AZEDARACH_VALIDATION_PURPOSE=push_gate
 candidate_head="${AZEDARACH_CANDIDATE_HEAD:-$(git rev-parse --verify HEAD)}"
 current_head="$(git rev-parse --verify HEAD)"
 if [ "$current_head" != "$candidate_head" ]; then

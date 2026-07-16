@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
@@ -383,9 +384,14 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 		FROM agent_learnings l
 		LEFT JOIN spec_requirements r ON r.id = l.requirement_id
 	`)
-	if match := learningFTSMatchQuery(filter.Query); match != "" {
+	match := learningFTSMatchQuery(filter.Query)
+	if match != "" {
 		query.WriteString(` JOIN agent_learning_search_fts fts ON fts.rowid = l.id AND agent_learning_search_fts MATCH ?`)
 		args = append(args, match)
+	} else if strings.TrimSpace(filter.Query) != "" && c.logger != nil {
+		c.logger.Debug("learning search query normalized to no terms; using metadata-only fallback",
+			"query_runes", utf8.RuneCountInString(filter.Query),
+		)
 	}
 	query.WriteString(` WHERE l.consolidated_into_id IS NULL`)
 	if !filter.IncludeDeleted {
@@ -440,7 +446,7 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 		query.WriteString(` AND l.updated_at <= ?`)
 		args = append(args, formatTimestamp(*filter.UpdatedBefore))
 	}
-	if strings.TrimSpace(filter.Query) != "" {
+	if match != "" {
 		query.WriteString(` ORDER BY bm25(agent_learning_search_fts), l.updated_at DESC, l.local_id ASC`)
 	} else {
 		query.WriteString(` ORDER BY l.updated_at DESC, l.local_id ASC`)
@@ -455,6 +461,13 @@ func (c *Client) ListLearnings(ctx context.Context, filter LearningFilter) ([]Le
 	}
 	rows, err := db.QueryContext(ctx, query.String(), args...)
 	if err != nil {
+		if strings.TrimSpace(filter.Query) != "" && c.logger != nil {
+			c.logger.Warn("learning search query failed",
+				"query_terms", len(domain.ContentQueryTerms(filter.Query)),
+				"fallback_attempted", false,
+				"error", err,
+			)
+		}
 		return nil, c.wrapError("list-learnings", "", err)
 	}
 	defer rows.Close()
@@ -1910,17 +1923,12 @@ func hasDisallowedControlRune(value string) bool {
 }
 
 func learningFTSMatchQuery(raw string) string {
-	tokens := strings.Fields(strings.TrimSpace(raw))
+	tokens := domain.ContentQueryTerms(raw)
 	if len(tokens) == 0 {
 		return ""
 	}
 	out := make([]string, 0, len(tokens))
 	for _, token := range tokens {
-		token = strings.Trim(token, `"*`)
-		token = strings.ReplaceAll(token, `"`, `""`)
-		if token == "" {
-			continue
-		}
 		out = append(out, fmt.Sprintf(`"%s"`, token))
 	}
 	return strings.Join(out, " AND ")

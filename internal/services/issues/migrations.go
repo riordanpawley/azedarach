@@ -88,6 +88,7 @@ var orderedMigrations = []migration{
 	{id: "0048_decision_propagation_outbox", path: "migrations/0048_decision_propagation_outbox.sql"},
 	{id: rootedBootstrapAcknowledgementMigrationID, path: "migrations/0049_rooted_bootstrap_acknowledgements.sql"},
 	{id: "0049_managed_agent_incarnations", path: "migrations/0049_managed_agent_incarnations.sql"},
+	{id: issueObservationEventSearchMigrationID, path: "migrations/0050_issue_observation_event_search.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -146,6 +147,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "0048_decision_propagation_outbox", Path: "migrations/0048_decision_propagation_outbox.sql", Checksum: "a12c44ba35156d71fbcd88a9d78e4cdb234e75e7e4aef5f896c8b1182ada858d"},
 	{ID: rootedBootstrapAcknowledgementMigrationID, Path: "migrations/0049_rooted_bootstrap_acknowledgements.sql", Checksum: "b54bdf5ec3f6af17c91e1625582ac58e66e47948cea68ee73db88d4e8df6f161"},
 	{ID: "0049_managed_agent_incarnations", Path: "migrations/0049_managed_agent_incarnations.sql", Checksum: "8364ceb9fad589df3f73c1fe0f0462c22b127510f1745e62fcc11e24757fe08d"},
+	{ID: "0050_issue_observation_event_search", Path: "migrations/0050_issue_observation_event_search.sql", Checksum: "e5a8efc20ddf313822576c4d6d42cd94e1837dfac810834957689d30b952005d"},
 }
 
 func validateMigrationRegistry() error {
@@ -433,18 +435,19 @@ func migrateIssueSessionLogicalIdentity(ctx context.Context, tx *sql.Tx) error {
 }
 
 const (
-	migrationArtifactAuthority           sqlitemigration.Authority = "project.issues"
-	issueStateModelV2MigrationID                                   = "0029_issue_state_model_v2"
-	issueStateModelVersionMetaKey                                  = "issue:state_model_version"
-	issueStateModelV2CutoverMarkerKey                              = "issue:state_model_v2_cutover"
-	issueStateModelV2Version                                       = "2"
-	boardViewsMigrationID                                          = "0031_board_views"
-	projectionDeltaAuthorityMigrationID                            = "0047_projection_delta_authority"
-	projectionDeltaAuthorityChecksum                               = "9f7bed54f9694c608c7ce081c4007539eb46ce67adc9127d5649a1dbb49b6c5a"
-	humanAuthorityProjectionMigrationID                            = "0047_human_authority_projection_revision"
-	decisionPropagationOutboxMigrationID                           = "0048_decision_propagation_outbox"
-	contextualLearningMigrationID                                  = "0039_contextual_learning_activation"
-	legacyContextualLearningMigration                              = "0038_contextual_learning_activation"
+	migrationArtifactAuthority             sqlitemigration.Authority = "project.issues"
+	issueStateModelV2MigrationID                                     = "0029_issue_state_model_v2"
+	issueStateModelVersionMetaKey                                    = "issue:state_model_version"
+	issueStateModelV2CutoverMarkerKey                                = "issue:state_model_v2_cutover"
+	issueStateModelV2Version                                         = "2"
+	boardViewsMigrationID                                            = "0031_board_views"
+	projectionDeltaAuthorityMigrationID                              = "0047_projection_delta_authority"
+	projectionDeltaAuthorityChecksum                                 = "9f7bed54f9694c608c7ce081c4007539eb46ce67adc9127d5649a1dbb49b6c5a"
+	humanAuthorityProjectionMigrationID                              = "0047_human_authority_projection_revision"
+	decisionPropagationOutboxMigrationID                             = "0048_decision_propagation_outbox"
+	issueObservationEventSearchMigrationID                           = "0050_issue_observation_event_search"
+	contextualLearningMigrationID                                    = "0039_contextual_learning_activation"
+	legacyContextualLearningMigration                                = "0038_contextual_learning_activation"
 )
 
 type issueStateModelV2CutoverMarker struct {
@@ -539,6 +542,12 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 				}
 				continue
 			}
+			if m.id == issueObservationEventSearchMigrationID {
+				if err := c.applyIssueObservationEventSearchMigration(ctx, db, m.id); err != nil {
+					return err
+				}
+				continue
+			}
 			if m.apply != nil {
 				if err := m.apply(ctx, db, m.id); err != nil {
 					return err
@@ -563,6 +572,9 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if err := validateDecisionPropagationOutboxSchema(ctx, db); err != nil {
+		return err
+	}
+	if err := validateIssueObservationEventSearchSchema(ctx, db); err != nil {
 		return err
 	}
 	if err := validateProjectionDeltaAuthoritySchema(ctx, db); err != nil {
@@ -1565,6 +1577,106 @@ func validateDecisionPropagationOutboxSchema(ctx context.Context, q sqlIssueQuer
 		if normalizedIndexSQL != expectedSQL {
 			return fmt.Errorf("decision propagation outbox index %s drifted: got %q", index, normalizedIndexSQL)
 		}
+	}
+	return nil
+}
+
+func (c *Client) applyIssueObservationEventSearchMigration(ctx context.Context, db *sql.DB, id string) error {
+	sqlText, err := loadMigrationSQL("migrations/0050_issue_observation_event_search.sql")
+	if err != nil {
+		return fmt.Errorf("load migration %s: %w", id, err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+		return fmt.Errorf("apply migration %s: %w", id, err)
+	}
+	if c.eventSearchMigrationFailureHook != nil {
+		if err := c.eventSearchMigrationFailureHook("after_schema"); err != nil {
+			return fmt.Errorf("migration %s rolled back: %w", id, err)
+		}
+	}
+	if err := validateIssueObservationEventSearchSchema(ctx, tx); err != nil {
+		return fmt.Errorf("validate migration %s: %w", id, err)
+	}
+	if err := validateIssueObservationEventSearchCoverage(ctx, tx); err != nil {
+		return fmt.Errorf("validate migration %s backfill: %w", id, err)
+	}
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	return nil
+}
+
+func validateIssueObservationEventSearchSchema(ctx context.Context, q sqlIssueQueryer) error {
+	var tableSQL string
+	if err := q.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='issue_observation_event_search_fts'`).Scan(&tableSQL); err != nil {
+		return fmt.Errorf("inspect issue observation event search table: %w", err)
+	}
+	normalizedTableSQL := strings.ToLower(strings.Join(strings.Fields(tableSQL), " "))
+	for _, fragment := range []string{"using fts5", "issue_id unindexed", "content", "content = ''", "detail = none", "tokenize = 'unicode61'"} {
+		if !strings.Contains(normalizedTableSQL, fragment) {
+			return fmt.Errorf("issue observation event search table drifted: missing %s", fragment)
+		}
+	}
+	for _, trigger := range []string{"issue_observation_events_ai_search_fts", "issue_observation_events_ad_search_fts", "issue_observation_events_au_search_fts"} {
+		var triggerSQL string
+		if err := q.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?`, trigger).Scan(&triggerSQL); err != nil {
+			return fmt.Errorf("inspect issue observation event search trigger %s: %w", trigger, err)
+		}
+		normalized := strings.ToLower(strings.Join(strings.Fields(triggerSQL), " "))
+		for _, fragment := range []string{"issue_observation_event_search_fts", "$.summary", "$.body", "$.message", "$.line", "$.evidence"} {
+			if !strings.Contains(normalized, fragment) {
+				return fmt.Errorf("issue observation event search trigger %s drifted: missing %s", trigger, fragment)
+			}
+		}
+	}
+	expectedIndexes := map[string]string{
+		"idx_issue_observation_events_issue_source_id":              "create index idx_issue_observation_events_issue_source_id on issue_observation_events(issue_id, source, id)",
+		"idx_issue_observation_events_issue_source_command_id":      "create index idx_issue_observation_events_issue_source_command_id on issue_observation_events(issue_id, source_command, id)",
+		"idx_issue_observation_events_issue_operation_id_id":        "create index idx_issue_observation_events_issue_operation_id_id on issue_observation_events(issue_id, operation_id, id)",
+		"idx_issue_observation_events_issue_session_id_id":          "create index idx_issue_observation_events_issue_session_id_id on issue_observation_events(issue_id, session_id, id)",
+		"idx_issue_observation_events_issue_worktree_path_id":       "create index idx_issue_observation_events_issue_worktree_path_id on issue_observation_events(issue_id, worktree_path, id)",
+		"idx_issue_observation_events_issue_payload_outcome_id":     "create index idx_issue_observation_events_issue_payload_outcome_id on issue_observation_events(issue_id, json_extract(payload_json, '$.outcome'), id)",
+		"idx_issue_observation_events_issue_payload_disposition_id": "create index idx_issue_observation_events_issue_payload_disposition_id on issue_observation_events(issue_id, json_extract(payload_json, '$.disposition'), id)",
+		"idx_issue_observation_events_issue_payload_decision_id_id": "create index idx_issue_observation_events_issue_payload_decision_id_id on issue_observation_events(issue_id, json_extract(payload_json, '$.decision_id'), id)",
+		"idx_issue_observation_events_issue_payload_revision_id":    "create index idx_issue_observation_events_issue_payload_revision_id on issue_observation_events(issue_id, json_extract(payload_json, '$.revision'), id)",
+		"idx_issue_observation_events_issue_payload_actor_id_id":    "create index idx_issue_observation_events_issue_payload_actor_id_id on issue_observation_events(issue_id, json_extract(payload_json, '$.actor_id'), id)",
+	}
+	for index, expectedSQL := range expectedIndexes {
+		var indexSQL string
+		if err := q.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='index' AND name=?`, index).Scan(&indexSQL); err != nil {
+			return fmt.Errorf("inspect issue observation event search index %s: %w", index, err)
+		}
+		if normalized := strings.ToLower(strings.Join(strings.Fields(indexSQL), " ")); normalized != expectedSQL {
+			return fmt.Errorf("issue observation event search index %s drifted: got %q", index, normalized)
+		}
+	}
+	return nil
+}
+
+func validateIssueObservationEventSearchCoverage(ctx context.Context, q sqlIssueQueryer) error {
+	var eventCount, searchCount, missingCount int
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_observation_events`).Scan(&eventCount); err != nil {
+		return fmt.Errorf("count issue observation events for search validation: %w", err)
+	}
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_observation_event_search_fts`).Scan(&searchCount); err != nil {
+		return fmt.Errorf("count issue observation event search rows: %w", err)
+	}
+	if searchCount != eventCount {
+		return fmt.Errorf("issue observation event search projection drifted: events=%d search_rows=%d", eventCount, searchCount)
+	}
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_observation_events AS events LEFT JOIN issue_observation_event_search_fts ON issue_observation_event_search_fts.rowid=events.id WHERE issue_observation_event_search_fts.rowid IS NULL`).Scan(&missingCount); err != nil {
+		return fmt.Errorf("inspect issue observation event search coverage: %w", err)
+	}
+	if missingCount != 0 {
+		return fmt.Errorf("issue observation event search projection drifted: missing_rows=%d", missingCount)
 	}
 	return nil
 }

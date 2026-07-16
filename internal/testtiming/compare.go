@@ -7,7 +7,11 @@ import (
 
 func Compare(m Measurement, baseline Baseline) Comparison {
 	comparison := Comparison{BaselineRecordedAt: baseline.RecordedAt, PackageDeltas: []Delta{}, Violations: []Violation{}}
-	bp, hasBaseline := baseline.Profiles[m.Profile]
+	baselineProfile := m.Profile
+	if baselineProfile == "ci-timing" {
+		baselineProfile = "cold"
+	}
+	bp, hasBaseline := baseline.Profiles[baselineProfile]
 	if hasBaseline && bp.WallSeconds > 0 {
 		delta := makeDelta("wall", m.WallSeconds, bp.WallSeconds)
 		comparison.WallDelta = &delta
@@ -51,7 +55,7 @@ func Compare(m Measurement, baseline Baseline) Comparison {
 		return 0
 	})
 
-	if hard := baseline.Budgets.MaxWallSeconds[m.Profile]; hard > 0 {
+	if hard := baseline.Budgets.MaxWallSeconds[baselineProfile]; hard > 0 {
 		budget, source := hard, "hard profile budget"
 		if hasBaseline && bp.WallSeconds > 0 && baseline.Budgets.RegressionFactor > 0 {
 			regression := bp.WallSeconds * baseline.Budgets.RegressionFactor
@@ -145,6 +149,9 @@ func ValidateBaseline(b Baseline) error {
 		return fmt.Errorf("cold baseline wall measurement must be positive")
 	}
 	for _, profile := range ProfileNames() {
+		if profile == "ci-timing" {
+			continue
+		}
 		if b.Budgets.MaxWallSeconds[profile] <= 0 {
 			return fmt.Errorf("max wall budget for profile %q must be positive", profile)
 		}

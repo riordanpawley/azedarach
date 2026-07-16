@@ -33,7 +33,11 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeConflict, err.Error()), nil
 		}
-		result, err := store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: strings.TrimSpace(body.RequestID), LeaseToken: strings.TrimSpace(body.LeaseToken), ProjectID: projectID, IssueID: strings.TrimSpace(body.IssueID), Class: body.Class, Profile: strings.TrimSpace(body.Profile), Command: strings.TrimSpace(body.Command), SourceRevision: strings.TrimSpace(body.SourceRevision), ReviewerID: reviewerID, ReviewEpochEventID: reviewEpochEventID, TTL: ttl}, now)
+		acquire := domain.ValidationAcquire{RequestID: strings.TrimSpace(body.RequestID), LeaseToken: strings.TrimSpace(body.LeaseToken), ProjectID: projectID, IssueID: strings.TrimSpace(body.IssueID), Class: body.Class, Scope: body.Scope, Purpose: body.Purpose, IsolationMode: strings.TrimSpace(body.IsolationMode), EnvironmentFingerprint: strings.TrimSpace(body.EnvironmentFingerprint), Override: body.Override, OverrideActor: strings.TrimSpace(body.OverrideActor), OverrideReason: strings.TrimSpace(body.OverrideReason), Profile: strings.TrimSpace(body.Profile), Command: strings.TrimSpace(body.Command), SourceRevision: strings.TrimSpace(body.SourceRevision), ReviewerID: reviewerID, ReviewEpochEventID: reviewEpochEventID, TTL: ttl}
+		if err := acquire.Validate(); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
+		}
+		result, err := store.AcquireValidation(ctx, acquire, now)
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeConflict, err.Error()), nil
 		}
@@ -53,7 +57,7 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 		if err := json.Unmarshal(req.Body, &body); err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("decode nested validation authorization: %v", err)), nil
 		}
-		result, err := store.AuthorizeNestedValidation(ctx, domain.ValidationNestedAuthorization{RequestID: strings.TrimSpace(body.RequestID), LeaseToken: strings.TrimSpace(body.LeaseToken), Class: body.Class}, now, defaultValidationLeaseTTL)
+		result, err := store.AuthorizeNestedValidation(ctx, domain.ValidationNestedAuthorization{RequestID: strings.TrimSpace(body.RequestID), LeaseToken: strings.TrimSpace(body.LeaseToken), Class: body.Class, Scope: body.Scope, Purpose: body.Purpose}, now, defaultValidationLeaseTTL)
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeConflict, err.Error()), nil
 		}
@@ -80,17 +84,32 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 }
 
 func (d *Daemon) validationReviewAssignment(ctx context.Context, projectID string, body protocol.ValidationAcquireRequest) (string, int64, error) {
-	if body.Class != domain.ValidationClassAggregate {
+	if body.Scope == domain.ValidationScopeRepository {
+		if strings.TrimSpace(body.IssueID) != "" {
+			return "", 0, fmt.Errorf("repository-scoped validation must not identify a ticket")
+		}
 		return "", 0, nil
+	}
+	if body.Scope != domain.ValidationScopeTicket {
+		return "", 0, fmt.Errorf("validation requires explicit repository or ticket scope")
 	}
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
-		return "", 0, nil
+		return "", 0, fmt.Errorf("ticket-scoped validation requires issue store")
 	}
 	issueID := strings.TrimSpace(body.IssueID)
+	if issueID == "" {
+		return "", 0, fmt.Errorf("ticket-scoped validation requires ticket identity")
+	}
 	task, err := issueClient.GetWithRuntime(ctx, projectID, issueID)
 	if err != nil {
-		return "", 0, err
+		return "", 0, fmt.Errorf("resolve ticket-scoped validation %s: %w", issueID, err)
+	}
+	if body.Purpose != domain.ValidationPurposeReviewEvidence {
+		return "", 0, nil
+	}
+	if body.Class != domain.ValidationClassAggregate {
+		return "", 0, fmt.Errorf("review evidence requires aggregate class and ticket scope")
 	}
 	if task.Status != domain.StatusInReview {
 		return "", 0, nil

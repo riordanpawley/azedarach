@@ -42,6 +42,19 @@ func TestParseIssueIDFromSessionNameRouteProjectID(t *testing.T) {
 	}
 }
 
+func TestParseManagedIssueIDFromSessionNameRequiresExactProjectIdentity(t *testing.T) {
+	const projectPath = "/tmp/wedding"
+	canonical := CanonicalSessionID(projectPath, "wed-17")
+	if issueID, ok := ParseManagedIssueIDFromSessionName(canonical, projectPath); !ok || issueID != "wed-17" {
+		t.Fatalf("canonical managed session = %q ok=%v", issueID, ok)
+	}
+	for _, sessionName := range []string{"wed-17", "az", "ef-wed-17"} {
+		if issueID, ok := ParseManagedIssueIDFromSessionName(sessionName, projectPath); ok {
+			t.Fatalf("external session %q parsed as managed issue %q", sessionName, issueID)
+		}
+	}
+}
+
 func TestComposeIssueBranchName(t *testing.T) {
 	got := ComposeIssueBranchName("Riordan Pawley", "CHE-3002", "Migrate prep lists to db", 24)
 	want := "riordanpawley/che-3002/migrate-prep-lists-to-db"

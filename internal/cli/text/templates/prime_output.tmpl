@@ -95,6 +95,7 @@ Orchestration
 Evidence And Coordination
 
 - Use `az ticket record --type <event-type> --summary "..." --data '<json>' <ticket-id>` for durable facts that do not require live delivery. Inspect with `az ticket events` or `az observe`.
+- Search durable ticket history with `az ticket events --query <text> --payload key=value <ticket-id>` and cursor pagination via `--after-id` / `--before-id`; run `az ticket events --jq-help` for filter and jq examples.
 - Use mailbox events only when an active parent orchestrator/watch needs coordination delivery. Bare `az mail send` is durable but may not be observed immediately.
 - Worker handoff evidence uses `worker_evidence.v1`: summary, commands run, key assertions, files changed, review status/findings, and risks. Validate it with `az evidence validate` before recording or sending.
 - Before accepting repeated-locality work, inspect `az ticket context-risk --since 14d <ticket-id>`; treat low risk as advisory and require structured diagnosis/invariant/consumer/test evidence for high risk.

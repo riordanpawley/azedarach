@@ -2,9 +2,18 @@
 set -eu
 
 if [ "${AZEDARACH_SKIP_PUSH_GATE:-0}" = "1" ]; then
-  echo "pre-push: gate skipped (AZEDARACH_SKIP_PUSH_GATE=1)"
-  exit 0
+  : "${AZEDARACH_SKIP_PUSH_GATE_REASON:?AZEDARACH_SKIP_PUSH_GATE_REASON is required for an audited emergency skip}"
+  : "${AZEDARACH_SKIP_PUSH_GATE_ACTOR:=${AZEDARACH_AUDIT_ACTOR:-${USER:-}}}"
+  : "${AZEDARACH_SKIP_PUSH_GATE_ACTOR:?AZEDARACH_SKIP_PUSH_GATE_ACTOR is required for an audited emergency skip}"
+  export AZEDARACH_VALIDATION_EMERGENCY_SKIP_REASON="$AZEDARACH_SKIP_PUSH_GATE_REASON"
+  export AZEDARACH_VALIDATION_OVERRIDE_ACTOR="$AZEDARACH_SKIP_PUSH_GATE_ACTOR"
 fi
+
+# Push validation belongs to the repository and remote update, never to an
+# ambient worker ticket selected by the invoking shell.
+unset AZEDARACH_TICKET_ID AZEDARACH_ISSUE_ID
+export AZEDARACH_VALIDATION_SCOPE=repository
+export AZEDARACH_VALIDATION_PURPOSE=push_gate
 
 "$(git rev-parse --show-toplevel)/scripts/git-merge-rebase-gate.sh"
 

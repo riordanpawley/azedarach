@@ -472,7 +472,7 @@ const (
 	issueClaimUsage               = "Usage: az ticket claim [--project <project-id>] [--id <ticket-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--force] [--json] [<ticket-id>]"
 	issueTakeoverUsage            = "Usage: az ticket takeover [--project <project-id>] [--id <ticket-id>] [--owner <owner-id>] [--kind human|agent|orchestrator] [--ttl 2h] [--json] [<ticket-id>]"
 	issueReleaseUsage             = "Usage: az ticket release [--project <project-id>] [--id <ticket-id>] [--owner <owner-id>] [--force] [--json] [<ticket-id>]"
-	issueEventsUsage              = "Usage: az ticket events [--project <project-id>] [--id <ticket-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--limit N] [<ticket-id>]"
+	issueEventsUsage              = "Usage: az ticket events [--project <project-id>] [--id <ticket-id>] [--json] [--jq-help] [--type <event-type> ...] [--types a,b] [--order asc|desc] [--limit N | --tail N] [--after-id ID] [--before-id ID] [--source value] [--source-command value] [--operation ID] [--session ID] [--worktree path] [--since time] [--until time] [--query text] [--payload key=value ...] [<ticket-id>]"
 	issueRecordUsage              = "Usage: az ticket record [--project <project-id>] [--id <ticket-id>] [--type <event-type>] [--summary <text>] [--body <text>] [--data <json-object>] [--follow-up <ticket-id> ...] [--json] [<ticket-id>]"
 	issueContextRiskUsage         = "Usage: az ticket context-risk [--project <project-id>] [--id <ticket-id>] [--since 14d] [--summary|--full] [--json] [<ticket-id>]"
 	issueGetManyUsage             = "Usage: az ticket get-many [--project <project-id>] --id <ticket-id> [--id <ticket-id> ...] [--ids a,b,c] [--json] [--with-notes]"

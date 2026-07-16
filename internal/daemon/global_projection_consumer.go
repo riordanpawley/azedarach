@@ -260,7 +260,10 @@ func (d *Daemon) hydrateUserProjectionChanges(ctx context.Context, projectID str
 		ids = append(ids, issueID)
 	}
 	sort.Strings(ids)
-	tasks, err := client.GetManyWithRuntime(ctx, protocol.DefaultProjectID, ids)
+	// Verified upsert payloads cover the complete issue lifecycle. Hydration must
+	// use the same visibility or an archived value is mistaken for a missing key
+	// and permanently blocks this project's ordered delivery stream.
+	tasks, err := client.GetManyWithRuntimeArchiveMode(ctx, protocol.DefaultProjectID, ids, issues.ArchiveInclude)
 	if err != nil {
 		return nil, fmt.Errorf("hydrate keyed user projection changes: %w", err)
 	}
@@ -274,10 +277,21 @@ func (d *Daemon) hydrateUserProjectionChanges(ctx context.Context, projectID str
 		delete(wanted, task.ID.String())
 	}
 	for issueID := range wanted {
-		if existing, ok := byID[issueID]; ok && existing.Delete {
-			continue
+		if existing, ok := byID[issueID]; ok {
+			if existing.Delete {
+				continue
+			}
+			// The verified keyed payload is a complete canonical value. If the
+			// source row changed again before current-state hydration, consume
+			// this value and let the following ordered delta converge it.
+			if existing.Issue != nil {
+				continue
+			}
 		}
-		return nil, fmt.Errorf("hydrate keyed user projection issue %s: %w", issueID, domain.ErrNotFound)
+		// Observation-only advances have no issue payload. Absence from the
+		// archive-inclusive source means the key was deleted, so clear every
+		// derived row while atomically advancing the delivery cursor.
+		byID[issueID] = userstore.ProjectDeltaChange{IssueID: issueID, Delete: true}
 	}
 	result := make([]userstore.ProjectDeltaChange, 0, len(byID))
 	for _, change := range byID {
