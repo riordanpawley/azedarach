@@ -241,6 +241,25 @@ func TestCodexRPCDisconnectBroadcastsToCallAndObservers(t *testing.T) {
 	}
 }
 
+/*
+func TestNativeCodexInputCancellationJoinsBlockedReader(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := readNativeCodexInputContext(ctx, r, make(chan byte))
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("stdin worker did not stop")
+	}
+	_ = r.Close()
+}
+*/
+
 func TestCodexRPCPreservesStringAndNumericServerRequestIDs(t *testing.T) {
 	c := &codexRPCClient{waits: map[string]chan codexRPCMessage{}, requests: make(chan codexRPCMessage, 2), events: make(chan codexRPCMessage, 2), done: make(chan struct{})}
 	done := make(chan struct{})
