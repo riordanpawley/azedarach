@@ -235,6 +235,39 @@ func TestSelectorSnapshotCacheBoundsRefreshesAcrossKeys(t *testing.T) {
 	}
 }
 
+func TestSelectorSnapshotCacheConcurrentRefreshAdmissionNeverExceedsGlobalBound(t *testing.T) {
+	cache := newSelectorSnapshotCache()
+	const contenders = 64
+	start := make(chan struct{})
+	reservations := make(chan selectorSnapshotLoad, contenders)
+	var ready sync.WaitGroup
+	var finished sync.WaitGroup
+	ready.Add(contenders)
+	finished.Add(contenders)
+	for index := 0; index < contenders; index++ {
+		go func(index int) {
+			defer finished.Done()
+			ready.Done()
+			<-start
+			if load, ok := cache.beginRefresh(fmt.Sprintf("key-%02d", index)); ok {
+				reservations <- load
+			}
+		}(index)
+	}
+	ready.Wait()
+	close(start)
+	finished.Wait()
+	close(reservations)
+	admitted := 0
+	for load := range reservations {
+		admitted++
+		cache.finishLoad(load, []byte("fresh"), nil)
+	}
+	if admitted != maxSelectorSnapshotRefreshes {
+		t.Fatalf("concurrent refresh admissions = %d, want %d", admitted, maxSelectorSnapshotRefreshes)
+	}
+}
+
 func TestSelectorSnapshotCacheBoundsDistinctRequestKeys(t *testing.T) {
 	cache := newSelectorSnapshotCache()
 	for index := 0; index < maxSelectorSnapshotCacheEntries+5; index++ {
@@ -242,12 +275,17 @@ func TestSelectorSnapshotCacheBoundsDistinctRequestKeys(t *testing.T) {
 	}
 	cache.mu.RLock()
 	got := len(cache.entries)
+	metadata := len(cache.latestStarted)
+	inFlight := len(cache.inFlight)
 	cache.mu.RUnlock()
 	if got != maxSelectorSnapshotCacheEntries {
 		t.Fatalf("cache entries = %d, want %d", got, maxSelectorSnapshotCacheEntries)
 	}
 	if _, ok := cache.get("key-00"); ok {
 		t.Fatal("oldest cache entry was not evicted")
+	}
+	if metadata != maxSelectorSnapshotCacheEntries || inFlight != 0 {
+		t.Fatalf("cache metadata entries,in-flight = %d,%d, want %d,0", metadata, inFlight, maxSelectorSnapshotCacheEntries)
 	}
 }
 
