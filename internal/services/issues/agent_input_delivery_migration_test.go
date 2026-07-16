@@ -318,6 +318,9 @@ func TestAgentInputDeliveryAmbiguousSubmissionStillExpires(t *testing.T) {
 	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
 	defer client.CloseDB()
 	ctx := context.Background()
+	if _, err := client.List(ctx); err != nil {
+		t.Fatal(err)
+	}
 	now := time.Now().UTC()
 	request := domain.AgentInputDeliveryRequest{ProjectID: "p", SessionID: "s", Target: domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 42, AgentIncarnation: "inc"}, Tool: "codex", Kind: domain.AgentInputMessageSessionMessage, Payload: "body", IntentKey: "ambiguous-expiry", ExpiresAt: now.Add(100 * time.Millisecond)}
 	if _, err := client.EnsureAgentInputDeliveryIntent(ctx, request); err != nil {
