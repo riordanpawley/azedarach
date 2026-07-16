@@ -28,8 +28,8 @@ run:
     AZ_BIN="$(pwd)/.tmp/az-test/az"; \
     DAEMON_BIN="$(pwd)/.tmp/az-test/azd"; \
     if [ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]; then \
-        AZEDARACH_DAEMON_BIN="$DAEMON_BIN" AZEDARACH_DAEMON_SCOPE=worktree AZEDARACH_DAEMON_SCOPE_SOURCE=just-run "$AZ_BIN" daemon restart; \
-        AZEDARACH_DAEMON_SCOPE=worktree AZEDARACH_DAEMON_SCOPE_SOURCE=just-run "$AZ_BIN"; \
+        AZEDARACH_DAEMON_BIN="$DAEMON_BIN" AZEDARACH_DAEMON_SCOPE=worktree AZEDARACH_DAEMON_SCOPE_SOURCE=managed-run "$AZ_BIN" daemon restart; \
+        AZEDARACH_DAEMON_SCOPE=worktree AZEDARACH_DAEMON_SCOPE_SOURCE=managed-run "$AZ_BIN"; \
     else \
         AZEDARACH_DAEMON_BIN="$DAEMON_BIN" "$AZ_BIN" daemon restart; \
         "$AZ_BIN"; \

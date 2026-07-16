@@ -140,17 +140,17 @@ func TestValidateTUILaunchContextAllowsLinkedWorktreeWithExplicitWorktreeScope(t
 	}
 }
 
-func TestOwnedJustRunScopedDaemonCleanupStopsWorktreeScopedDaemon(t *testing.T) {
+func TestOwnedManagedRunScopedDaemonCleanupStopsWorktreeScopedDaemon(t *testing.T) {
 	_, worktree := makeLinkedWorktree(t)
 	t.Chdir(worktree)
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "runtime"))
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "managed-run")
 	hooks := installTUILaunchTestHooks(t, nil)
 
-	cleanup := ownedJustRunScopedDaemonCleanup()
+	cleanup := ownedManagedRunScopedDaemonCleanup()
 	if cleanup == nil {
-		t.Fatal("ownedJustRunScopedDaemonCleanup() = nil, want cleanup")
+		t.Fatal("ownedManagedRunScopedDaemonCleanup() = nil, want cleanup")
 	}
 	if err := cleanup(context.Background()); err != nil {
 		t.Fatalf("cleanup() error = %v, want nil", err)
@@ -179,27 +179,27 @@ func TestOwnedJustRunScopedDaemonCleanupStopsWorktreeScopedDaemon(t *testing.T) 
 	}
 }
 
-func TestOwnedJustRunScopedDaemonCleanupSkipsWithoutJustRunSource(t *testing.T) {
+func TestOwnedManagedRunScopedDaemonCleanupSkipsWithoutManagedRunSource(t *testing.T) {
 	_, worktree := makeLinkedWorktree(t)
 	t.Chdir(worktree)
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
 	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "")
 	forbidTUIDaemonStopper(t)
 
-	if cleanup := ownedJustRunScopedDaemonCleanup(); cleanup != nil {
-		t.Fatal("ownedJustRunScopedDaemonCleanup() returned cleanup without just-run ownership source")
+	if cleanup := ownedManagedRunScopedDaemonCleanup(); cleanup != nil {
+		t.Fatal("ownedManagedRunScopedDaemonCleanup() returned cleanup without managed-run ownership source")
 	}
 }
 
-func TestOwnedJustRunScopedDaemonCleanupSkipsGlobalDaemonScope(t *testing.T) {
+func TestOwnedManagedRunScopedDaemonCleanupSkipsGlobalDaemonScope(t *testing.T) {
 	_, worktree := makeLinkedWorktree(t)
 	t.Chdir(worktree)
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "managed-run")
 	forbidTUIDaemonStopper(t)
 
-	if cleanup := ownedJustRunScopedDaemonCleanup(); cleanup != nil {
-		t.Fatal("ownedJustRunScopedDaemonCleanup() returned cleanup for global daemon scope")
+	if cleanup := ownedManagedRunScopedDaemonCleanup(); cleanup != nil {
+		t.Fatal("ownedManagedRunScopedDaemonCleanup() returned cleanup for global daemon scope")
 	}
 }
 
@@ -207,7 +207,7 @@ func TestRunTUICleansOwnedScopedDaemonOnNormalExit(t *testing.T) {
 	_, worktree := makeLinkedWorktree(t)
 	t.Chdir(worktree)
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "managed-run")
 	hooks := installTUILaunchTestHooks(t, nil)
 
 	runTUIWithOptions(testTUIConfig())
@@ -224,7 +224,7 @@ func TestRunTUICleansOwnedScopedDaemonBeforeErrorExit(t *testing.T) {
 	_, worktree := makeLinkedWorktree(t)
 	t.Chdir(worktree)
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "managed-run")
 	hooks := installTUILaunchTestHooks(t, errors.New("program failed"))
 
 	runTUIWithOptions(testTUIConfig())

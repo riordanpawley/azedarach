@@ -46,6 +46,8 @@ func TestPrepareRefusesHardLimitAndFinishReportsDeltas(t *testing.T) {
 
 	telemetry, err := Prepare(context.Background(), cfg, false)
 	require.ErrorContains(t, err, "above hard limit")
+	require.ErrorContains(t, err, "project's cache-maintenance workflow")
+	assert.NotContains(t, err.Error(), "just")
 	assert.Equal(t, "refused-hard-limit", telemetry.Decision)
 	assert.EqualValues(t, 10, telemetry.Before.Bytes)
 
