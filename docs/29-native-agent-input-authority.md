@@ -13,10 +13,12 @@ For each leased intent, the daemon must:
    processes, intent keys, and old/new incarnations cannot overlap one
    managed-input gate. Incarnation and fence token are exact lease values.
 2. Verify the durable and live pane, PID, and Codex thread incarnation.
-3. Briefly freeze pane input while installing session-scoped tmux hooks.
+3. Freeze pane input before installing session-scoped tmux hooks and keep that
+   native fence active through app-server acceptance and complete restoration.
 4. Record every attached client's prior flags and make it read-only. New
-   attaches and clients switched into the session are synchronously recorded
-   and made read-only by the hook before tmux accepts their input.
+   attaches and clients switched into the session are asynchronously recorded
+   and made read-only by the hook; the pane-wide fence excludes their input
+   while that hook is pending.
 5. Atomically renew the exact session fence while crossing the durable
    ambiguous-submission boundary, then revalidate live pane/client state,
    hook-bound thread incarnation, and the exact durable fence again.
@@ -24,8 +26,8 @@ For each leased intent, the daemon must:
    `turn/start`, bounded to finish before the renewed lease deadline; the stock
    TUI composer is never inspected or modified.
 7. Treat the returned Codex turn ID as acknowledgement, remove the hooks, and
-   restore only flags Azedarach changed while a pane-wide transition fence is
-   active.
+   restore only flags Azedarach changed, then restore the original pane input
+   state last.
 
 Only a matching non-empty turn ID advances the durable intent to delivered.
 Stale identity, writable clients, or gate setup failure proven before RPC may

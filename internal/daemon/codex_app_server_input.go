@@ -215,6 +215,12 @@ func (a *codexAppServerInputAuthority) DeliverAgentInput(ctx context.Context, re
 	if !a.now().Before(acceptanceDeadline) {
 		return ack, errCodexSessionFenceLost
 	}
+	// Durable fencing excludes other daemons. Recheck the native tmux fence
+	// after that transaction so pane input, rather than the asynchronous client
+	// hook, is the final human-input exclusion boundary before turn/start.
+	if err := gate.Revalidate(ctx, request); err != nil {
+		return ack, codexGateRefusal(err, true)
+	}
 	messageID := codexDeliveryMessageID(request.Delivery.IntentKey, threadID)
 	var started struct {
 		Turn struct {
@@ -415,11 +421,6 @@ func (a *codexAppServerInputAuthority) acquireGate(ctx context.Context, request 
 	if err := gate.Revalidate(ctx, request); err != nil {
 		return nil, err
 	}
-	if state.PaneInputEnabled {
-		if err := a.tmux.SetPaneInputEnabled(ctx, state.PaneID, true); err != nil {
-			return nil, err
-		}
-	}
 	failed = false
 	return gate, nil
 }
@@ -439,6 +440,13 @@ func (g *codexInputGate) Revalidate(ctx context.Context, request authoritativeAg
 	}
 	if !found {
 		return errCodexPaneIdentityChanged
+	}
+	paneInputEnabled, err := g.tmux.PaneInputEnabled(ctx, g.state.PaneID)
+	if err != nil {
+		return err
+	}
+	if paneInputEnabled {
+		return errors.New("managed Codex pane input fence is not active")
 	}
 	clients, err := g.tmux.ListAttachedClients(ctx, g.state.SessionID)
 	if err != nil {
@@ -484,7 +492,9 @@ func (g *codexInputGate) Restore(ctx context.Context) error {
 	}
 	var errs []error
 	if err := g.tmux.SetPaneInputEnabled(ctx, g.state.PaneID, false); err != nil {
-		errs = append(errs, err)
+		// Do not remove hooks or restore writable client flags unless the native
+		// pane fence is authoritative. Recovery retains the marker and lease.
+		return err
 	}
 	if err := g.tmux.SetSessionReadOnlyAttachHooks(ctx, g.state.SessionID, g.state.HookID, g.state.EventsPath, false); err != nil {
 		errs = append(errs, err)

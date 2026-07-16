@@ -90,8 +90,9 @@ func (c *Client) SetClientReadOnly(ctx context.Context, clientName string, readO
 	return nil
 }
 
-// SetPaneInputEnabled changes tmux's pane-wide input fence. It is used only
-// while transitioning attached clients into or out of read-only mode.
+// SetPaneInputEnabled changes tmux's pane-wide input fence. Automated input
+// keeps this native fence closed from gate acquisition through submission and
+// restoration; asynchronous client hooks are not an input-exclusion boundary.
 func (c *Client) SetPaneInputEnabled(ctx context.Context, paneID string, enabled bool) error {
 	flag := "-d"
 	if enabled {
@@ -120,9 +121,9 @@ func (c *Client) PaneInputEnabled(ctx context.Context, paneID string) (bool, err
 }
 
 // SetSessionReadOnlyAttachHooks installs or removes session-scoped hooks that
-// make newly attached or switched-in clients read-only before tmux accepts
-// their input. The hook synchronously records the client's prior read-only
-// flag so restoration does not overwrite an independently read-only attach.
+// eventually make newly attached or switched-in clients read-only and record
+// their prior read-only flag for exact restoration. Callers must hold the
+// pane-wide input fence because run-shell hooks do not preempt client input.
 func (c *Client) SetSessionReadOnlyAttachHooks(ctx context.Context, session, hookID, recordPath string, enabled bool) error {
 	for _, hook := range []string{"client-attached", "client-session-changed"} {
 		name := hook + "[" + hookID + "]"

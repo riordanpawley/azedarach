@@ -166,6 +166,100 @@ func TestRealTmuxSessionReadOnlyAttachHookGatesAndRecordsNewClient(t *testing.T)
 	}
 }
 
+func TestRealTmuxPaneInputFenceBlocksImmediateAttachInputBeforeDelayedHook(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux unavailable")
+	}
+	if _, err := exec.LookPath("expect"); err != nil {
+		t.Skip("expect unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	socket := "az-input-attach-fence-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	runner := isolatedTmuxRunner{socket: socket}
+	client := NewClient(runner, slog.Default())
+	if _, err := runner.Run(ctx, "new-session", "-d", "-s", "gate", "sh"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = runner.Run(context.Background(), "kill-server") })
+	const target = "gate:"
+	if err := client.SetPaneInputEnabled(ctx, target, false); err != nil {
+		t.Fatal(err)
+	}
+
+	recordPath := filepath.Join(t.TempDir(), "attach.events")
+	if err := os.WriteFile(recordPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately preserve the vulnerable shape from the regression: tmux runs
+	// the shell hook asynchronously from client input, and the refresh is late.
+	// The pane-wide fence must be sufficient even while this hook is sleeping.
+	record := "sleep 1; umask 077; __az_client=#{q:hook_client}; printf '%s\\t%s\\n' \"$__az_client\" #{client_readonly} >> " + shellSingleQuote(recordPath) + "; tmux refresh-client -t \"$__az_client\" -f read-only"
+	for _, hook := range []string{"client-attached", "client-session-changed"} {
+		name := hook + "[9138]"
+		if _, err := runner.Run(ctx, "set-hook", "-t", "gate", name, "run-shell "+tmuxDoubleQuote(record)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	const blocked = "AZEDARACH_BLOCKED_ATTACH_SENTINEL_9138"
+	blockedOutput, err := runRealTmuxAttachInput(ctx, socket, blocked, "1250")
+	if err != nil {
+		t.Fatalf("send immediate input through attached tmux client: %v output=%q", err, blockedOutput)
+	}
+	output, err := runner.Run(ctx, "capture-pane", "-p", "-t", target)
+	if err != nil {
+		t.Fatalf("capture fenced pane: %v attach_output=%q", err, blockedOutput)
+	}
+	if strings.Contains(output, blocked) {
+		t.Fatalf("input sent before the delayed attach hook gated the client reached the pane: %q", output)
+	}
+
+	for _, hook := range []string{"client-attached", "client-session-changed"} {
+		if _, err := runner.Run(ctx, "set-hook", "-t", "gate", "-u", hook+"[9138]"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := client.SetPaneInputEnabled(ctx, target, true); err != nil {
+		t.Fatal(err)
+	}
+	const allowed = "AZEDARACH_ALLOWED_ATTACH_SENTINEL_9138"
+	allowedOutput, err := runRealTmuxAttachInput(ctx, socket, allowed, "250")
+	if err != nil {
+		t.Fatalf("send control input through attached tmux client: %v output=%q", err, allowedOutput)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		output, err = runner.Run(ctx, "capture-pane", "-p", "-t", target)
+		if err == nil && strings.Contains(output, allowed) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("attach harness did not deliver input after restoring writability: pane=%q err=%v attach_output=%q", output, err, allowedOutput)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func runRealTmuxAttachInput(ctx context.Context, socket, sentinel, settleMilliseconds string) ([]byte, error) {
+	const program = `
+set timeout 5
+log_user 0
+spawn tmux -L $env(AZ_TEST_TMUX_SOCKET) attach-session -t gate
+after 250
+send -- "$env(AZ_TEST_TMUX_SENTINEL)\r"
+after $env(AZ_TEST_TMUX_SETTLE_MS)
+exit 0
+`
+	command := exec.CommandContext(ctx, "expect", "-c", program)
+	command.Env = append(os.Environ(),
+		"AZ_TEST_TMUX_SOCKET="+socket,
+		"AZ_TEST_TMUX_SENTINEL="+sentinel,
+		"AZ_TEST_TMUX_SETTLE_MS="+settleMilliseconds,
+	)
+	return command.CombinedOutput()
+}
+
 func TestRealTmuxPaneInputFencePreservesUnsubmittedDraft(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux unavailable")

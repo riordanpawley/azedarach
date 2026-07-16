@@ -27,6 +27,7 @@ type fakeCodexInputTmux struct {
 	maxGates         int
 	activeGates      int
 	failDisableHooks bool
+	failDisablePane  bool
 }
 
 func (f *fakeCodexInputTmux) ListAttachedClients(context.Context, string) ([]tmux.AttachedClientInfo, error) {
@@ -50,6 +51,9 @@ func (f *fakeCodexInputTmux) SetClientReadOnly(_ context.Context, name string, r
 func (f *fakeCodexInputTmux) SetPaneInputEnabled(_ context.Context, _ string, enabled bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if !enabled && f.failDisablePane {
+		return errors.New("disable pane input failed")
+	}
 	f.paneEnabled = enabled
 	return nil
 }
@@ -209,6 +213,11 @@ func TestCodexAppServerDeliveryGatesClientsSubmitsExactThreadAndRestores(t *test
 		if !boundaryBegun {
 			return errors.New("turn/start preceded durable boundary")
 		}
+		adapter.mu.Lock()
+		defer adapter.mu.Unlock()
+		if adapter.paneEnabled {
+			return errors.New("turn/start ran without the pane input fence")
+		}
 		return nil
 	}}
 	request := codexAuthorityRequest()
@@ -360,6 +369,53 @@ func TestCodexAppServerDeliveryRevalidatesThreadAfterDurableBoundary(t *testing.
 	}
 	if rpc.turnParams != nil {
 		t.Fatalf("turn submitted after thread incarnation changed: %#v", rpc.turnParams)
+	}
+}
+
+func TestCodexAppServerDeliveryRevalidatesPaneFenceAfterDurableFence(t *testing.T) {
+	adapter := &fakeCodexInputTmux{paneEnabled: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb"}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
+	rpc := &fakeCodexRPC{}
+	request := codexAuthorityRequest()
+	request.RevalidateSubmissionFence = func(context.Context) (time.Time, error) {
+		adapter.mu.Lock()
+		adapter.paneEnabled = true
+		adapter.mu.Unlock()
+		return time.Now().Add(time.Minute), nil
+	}
+	_, err := newFakeCodexAuthority(t, adapter, rpc).DeliverAgentInput(context.Background(), request)
+	var refusal agentInputRefusalError
+	if !errors.As(err, &refusal) || refusal.outcome != "human_attached" || !refusal.safeToRetry {
+		t.Fatalf("err=%v refusal=%+v", err, refusal)
+	}
+	if rpc.turnParams != nil {
+		t.Fatalf("turn submitted after pane input fence was lost: %#v", rpc.turnParams)
+	}
+}
+
+func TestCodexInputGateRestoreRetainsGateWhenPaneFenceFails(t *testing.T) {
+	adapter := &fakeCodexInputTmux{
+		paneEnabled:     true,
+		hooksEnabled:    true,
+		failDisablePane: true,
+		clients:         []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb", ReadOnly: true}},
+	}
+	gate := &codexInputGate{
+		tmux: adapter,
+		state: codexInputGateState{
+			SessionID:        "az-dlb",
+			PaneID:           "12",
+			PaneInputEnabled: true,
+			OriginalReadOnly: map[string]bool{"tty": false},
+		},
+		renewRestoreFence: func(context.Context) (bool, error) { return true, nil },
+	}
+	if err := gate.Restore(context.Background()); err == nil {
+		t.Fatal("restore unexpectedly proceeded without the pane input fence")
+	}
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	if !adapter.hooksEnabled || !adapter.clients[0].ReadOnly || gate.restored {
+		t.Fatalf("failed pane fence ungated session: hooks=%v clients=%+v restored=%v", adapter.hooksEnabled, adapter.clients, gate.restored)
 	}
 }
 
