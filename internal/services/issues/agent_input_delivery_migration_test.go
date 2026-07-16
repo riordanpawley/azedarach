@@ -580,7 +580,7 @@ func TestAgentInputDeliveryMigrationRejectsWeakenedStateConstraints(t *testing.T
 	copyStart := strings.Index(artifactText, "INSERT INTO agent_input_delivery_intents(")
 	finishStart := strings.Index(artifactText, "DROP TABLE agent_input_delivery_intents_0052;")
 	if createStart < 0 || copyStart <= createStart || finishStart <= copyStart {
-		t.Fatal("0052 artifact does not contain the expected rebuild phases")
+		t.Fatal("0053 artifact does not contain the expected rebuild phases")
 	}
 	canonicalTable := artifactText[createStart:copyStart]
 	finishSchema := artifactText[finishStart:]
@@ -739,7 +739,7 @@ func TestAgentInputDeliveryMigrationHistoricalUpgradeRollsBackAndRetries(t *test
 		t.Fatal(err)
 	}
 	if previousMarker != 1 || currentMarker != 0 || currentTable != 0 {
-		t.Fatalf("previous production fixture marker0050=%d marker0051=%d table0051=%d", previousMarker, currentMarker, currentTable)
+		t.Fatalf("previous production fixture marker0050=%d marker0052=%d table0052=%d", previousMarker, currentMarker, currentTable)
 	}
 	if err = seed.CloseDB(); err != nil {
 		t.Fatal(err)
@@ -815,7 +815,7 @@ func TestAgentInputDeliveryFencingMigrationUpgradesImmutable0052AndRollsBack(t *
 	_ = raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_input_delivery_session_leases'`).Scan(&sessionLeaseTable)
 	_ = raw.Close()
 	if marker != 0 || sentinel != 1 || sessionLeaseTable != 0 {
-		t.Fatalf("rollback marker0052=%d sentinel=%d lease_table=%d", marker, sentinel, sessionLeaseTable)
+		t.Fatalf("rollback marker0053=%d sentinel=%d lease_table=%d", marker, sentinel, sessionLeaseTable)
 	}
 
 	retried := NewClientAtPath(path, nil)
