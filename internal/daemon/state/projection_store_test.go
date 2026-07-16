@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/testisolation"
+
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/observability"
 	"go.opentelemetry.io/otel"
@@ -848,7 +850,9 @@ func TestRuntimeStateStoreListsSessionStatesByIssueIDs(t *testing.T) {
 		t.Fatalf("iterate query plan: %v", err)
 	}
 	for _, table := range []string{sessionStateTable, sessionObservationTable} {
-		if !strings.Contains(plan.String(), "SEARCH "+table+" USING INDEX") {
+		tablePlan := "SEARCH " + table + " USING "
+		if !strings.Contains(plan.String(), tablePlan+"INDEX") &&
+			!strings.Contains(plan.String(), tablePlan+"COVERING INDEX") {
 			t.Fatalf("scoped query plan does not use issue index for %s:\n%s", table, plan.String())
 		}
 	}
@@ -1057,6 +1061,125 @@ func TestRuntimeStateStoreMigratesLegacyHookPaneObservationsToActivityEvidence(t
 		t.Fatalf("GetSessionActivityEvidence bjd: %v", err)
 	} else if found {
 		t.Fatal("did not expect runtime-sourced pane observation to migrate as hook evidence")
+	}
+}
+
+func TestRuntimeStateStoreLogicalIdentityRebuildRestoresOrderedSessionIndexes(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	legacyTable := func(table string) string {
+		return `CREATE TABLE ` + table + ` (
+			project_id TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			issue_id TEXT NOT NULL,
+			state TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (project_id, session_id)
+		);`
+	}
+	if _, err := db.Exec(
+		legacyTable(sessionStateTable) +
+			legacyTable(sessionObservationTable) + `
+			CREATE INDEX idx_daemon_session_projections_project_issue_updated
+				ON daemon_session_projections(project_id, issue_id, updated_at DESC, session_id DESC);
+			CREATE INDEX idx_daemon_session_observations_project_issue_updated
+				ON daemon_session_observations(project_id, issue_id, updated_at DESC, session_id DESC);
+		`); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed legacy runtime schema: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy runtime schema: %v", err)
+	}
+
+	store := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.ListSessionStates(context.Background(), "proj-a"); err != nil {
+		t.Fatalf("open runtime store: %v", err)
+	}
+	handle, err := store.dbHandle()
+	if err != nil {
+		t.Fatalf("runtime db handle: %v", err)
+	}
+	for _, table := range []string{sessionStateTable, sessionObservationTable} {
+		index := "idx_" + table + "_project_issue_updated"
+		query := `SELECT session_id FROM ` + table + ` INDEXED BY ` + index + ` WHERE project_id=? AND issue_id=? ORDER BY updated_at DESC,session_id DESC`
+		rows, err := handle.QueryContext(context.Background(), query, "proj-a", "issue-a")
+		if err != nil {
+			t.Fatalf("ordered query for %s after logical identity rebuild: %v", table, err)
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatalf("close ordered query for %s: %v", table, err)
+		}
+	}
+}
+
+func TestRuntimeStateStoreRealProjectDatabaseMigrationClones(t *testing.T) {
+	rawPaths := strings.TrimSpace(os.Getenv("AZEDARACH_PROJECT_DB_CLONES"))
+	if rawPaths == "" {
+		t.Skip("AZEDARACH_PROJECT_DB_CLONES is not set")
+	}
+	for _, path := range filepath.SplitList(rawPaths) {
+		path := path
+		t.Run(filepath.Base(filepath.Dir(path)), func(t *testing.T) {
+			if err := testisolation.CheckDatabaseClone(path, "."); err != nil {
+				t.Fatalf("refuse unsafe project database clone before SQLite open: %v", err)
+			}
+			before, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?mode=ro")
+			if err != nil {
+				t.Fatalf("open project database clone read-only: %v", err)
+			}
+			rowCounts := make(map[string]int)
+			for _, table := range []string{sessionStateTable, sessionObservationTable} {
+				var count int
+				if err := before.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
+					_ = before.Close()
+					t.Fatalf("count %s before runtime-store open: %v", table, err)
+				}
+				rowCounts[table] = count
+			}
+			if err := before.Close(); err != nil {
+				t.Fatalf("close project database clone read-only: %v", err)
+			}
+
+			assertOpen := func() {
+				store := NewRuntimeStateStoreAtPath(path, slog.Default())
+				handle, err := store.dbHandle()
+				if err != nil {
+					t.Fatalf("open runtime store against project database clone: %v", err)
+				}
+				for _, table := range []string{sessionStateTable, sessionObservationTable} {
+					index := "idx_" + table + "_project_issue_updated"
+					query := `SELECT session_id FROM ` + table + ` INDEXED BY ` + index + ` ORDER BY project_id,issue_id,updated_at DESC,session_id DESC LIMIT 1`
+					rows, err := handle.QueryContext(context.Background(), query)
+					if err != nil {
+						_ = store.Close()
+						t.Fatalf("ordered runtime read for %s: %v", table, err)
+					}
+					if err := rows.Close(); err != nil {
+						_ = store.Close()
+						t.Fatalf("close ordered runtime read for %s: %v", table, err)
+					}
+					var count int
+					if err := handle.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
+						_ = store.Close()
+						t.Fatalf("count %s after runtime-store open: %v", table, err)
+					}
+					if count != rowCounts[table] {
+						_ = store.Close()
+						t.Fatalf("%s rows = %d after runtime-store open, want %d", table, count, rowCounts[table])
+					}
+				}
+				if err := store.Close(); err != nil {
+					t.Fatalf("close runtime store: %v", err)
+				}
+			}
+			assertOpen()
+			assertOpen()
+		})
 	}
 }
 

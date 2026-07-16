@@ -388,12 +388,13 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	if limit <= 0 {
 		limit = a.inspectLimit()
 	}
+	request.Limit = limit
 	snapshot := protocol.OrchestrationSnapshot{
 		Scope: identity.Scope, GeneratedAt: time.Now().UTC(), Blocked: map[string]string{},
 		Constraints: protocol.OrchestrationConstraints{
 			InspectLimit: limit, StartLimit: a.startLimit(), AgentCapacity: a.agentCapacity(),
 			Commands:       orchestrationScopeCommands(identity.Scope),
-			RoleGuardrails: []string{"remain in the active orchestration loop", "do not implement worker issue scope", "delegate non-trivial review inspection to fresh read-only ephemeral subagents", "retain orchestrator-only durable review and integration authority", "preserve sessions during review handoff"},
+			RoleGuardrails: []string{"remain in the active orchestration loop", "orchestrate only direct children; nested roots own their descendants", "do not implement worker issue scope", "delegate non-trivial review inspection to fresh read-only ephemeral subagents", "retain orchestrator-only durable review and integration authority", "preserve sessions during review handoff"},
 		},
 	}
 	materializedTasks, source, err := a.daemon.projectReadSnapshot(projectID)
@@ -431,6 +432,8 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 		if err := a.enrichPendingDecisions(ctx, projectID, issueClient, &snapshot, tasks); err != nil {
 			return protocol.OrchestrationSnapshot{}, err
 		}
+		// reviewQueue retains the closure as integration-base context while
+		// selecting only this rooted orchestrator's direct children for action.
 		snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, tasks)
 		if err != nil {
 			return protocol.OrchestrationSnapshot{}, err
@@ -451,7 +454,7 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 	if err := a.enrichPendingDecisions(ctx, projectID, issueClient, &snapshot, projectRoots); err != nil {
 		return protocol.OrchestrationSnapshot{}, err
 	}
-	snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, projectRoots)
+	snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, projectTasks)
 	if err != nil {
 		return protocol.OrchestrationSnapshot{}, err
 	}
@@ -891,6 +894,10 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 		requested = stableRequestedCandidates(requested, snapshot.Runnable)
 	}
 	result := protocol.OrchestrationIntentResult{Scope: request.Scope, Kind: request.Kind, IntentKey: request.IntentKey, Requested: requested, Skipped: map[string]string{}, Failed: map[string]string{}}
+	scopeTasks, _, err := a.daemon.projectReadSnapshot(projectID)
+	if err != nil {
+		return protocol.OrchestrationIntentResult{}, fmt.Errorf("refresh orchestration scope projection: %w", err)
+	}
 	routedIssues := map[string]struct{}{}
 	if request.Scope.Kind == domain.OrchestrationScopeProject {
 		issueClient := a.daemon.issueClientForProject(projectID)
@@ -948,6 +955,10 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	}
 	started := 0
 	for _, issueID := range requested {
+		if request.Scope.Kind == domain.OrchestrationScopeRooted && !directOrchestrationTarget(scopeTasks, request.Scope.RootIssueID.String(), issueID) {
+			result.Skipped[issueID] = "outside-root-direct-child-scope: delegate descendants to their direct parent orchestrator"
+			continue
+		}
 		if request.Scope.Kind == domain.OrchestrationScopeProject {
 			if _, ok := candidates[issueID]; !ok {
 				result.Skipped[issueID] = "outside-project-root-candidate-scope"
@@ -987,6 +998,16 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 		started++
 	}
 	return result, nil
+}
+
+func directOrchestrationTarget(tasks []domain.Task, rootIssueID, issueID string) bool {
+	for _, task := range tasks {
+		if !naming.IssueIDsEqual(task.ID.String(), issueID) {
+			continue
+		}
+		return task.ParentID != nil && !task.ParentID.IsZero() && naming.IssueIDsEqual(task.ParentID.String(), rootIssueID)
+	}
+	return false
 }
 
 func projectCandidateRoutes(snapshot protocol.OrchestrationSnapshot, explicit []domain.OrchestrationCandidateRoute, requested []string) []domain.OrchestrationCandidateRoute {

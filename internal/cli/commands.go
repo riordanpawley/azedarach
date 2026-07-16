@@ -6731,17 +6731,18 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 
 	if opts.JSON {
 		return printJSON(map[string]any{
-			"issue_id":                  opts.IssueID,
-			"status":                    "closed",
-			"updated":                   true,
-			"integration_requested":     result.IntegrationRequested,
-			"integrated":                result.Integrated,
-			"cleanup_performed":         true,
-			"worktree_forced":           opts.ForceWorktree,
-			"auto_closed_children":      result.AutoClosedChildren,
-			"worktree_cleanup_deferred": result.WorktreeCleanupDeferred,
-			"phases":                    taskClosePhaseJSON(result.Phases),
-			"context_risk":              result.ContextRisk,
+			"issue_id":                        opts.IssueID,
+			"status":                          "closed",
+			"updated":                         true,
+			"integration_requested":           result.IntegrationRequested,
+			"integrated":                      result.Integrated,
+			"integration_validation_attempts": result.IntegrationValidationAttempts,
+			"cleanup_performed":               true,
+			"worktree_forced":                 opts.ForceWorktree,
+			"auto_closed_children":            result.AutoClosedChildren,
+			"worktree_cleanup_deferred":       result.WorktreeCleanupDeferred,
+			"phases":                          taskClosePhaseJSON(result.Phases),
+			"context_risk":                    result.ContextRisk,
 		})
 	}
 	fmt.Printf("Closed issue: %s\n", opts.IssueID)
@@ -6752,6 +6753,7 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 	if result.Integrated {
 		fmt.Printf("- Integrated %s into %s\n", result.IntegratedSourceBranch, result.IntegratedTargetBranch)
 	}
+	printIntegrationValidationAttempts(result.IntegrationValidationAttempts)
 	fmt.Println("- Cleanup performed")
 	if opts.ForceWorktree {
 		fmt.Println("- Worktree removal forced")
@@ -6892,6 +6894,12 @@ func printTaskClosePhases(phases []daemonclient.TaskClosePhaseTiming) {
 			suffix += " [" + strings.Join(details, " ") + "]"
 		}
 		fmt.Printf("  - %s: %s%s\n", name, phase.Elapsed().Round(time.Millisecond), suffix)
+	}
+}
+
+func printIntegrationValidationAttempts(attempts []domain.IntegrationCandidateValidationAttempt) {
+	for _, attempt := range attempts {
+		fmt.Printf("- Integration candidate %s: status=%s canonical=%t\n", attempt.CandidateHead, attempt.Status, attempt.Canonical)
 	}
 }
 
@@ -7087,7 +7095,9 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 		if *opts.Status == domain.StatusInReview {
 			statusOptions.CascadeChildren = opts.CascadeChildren
 		}
-		if err := deps.DaemonClient.UpdateTaskStatusWithOptions(ctx, opts.IssueID, *opts.Status, statusOptions); err != nil {
+		statusCtx, cancelStatus := context.WithTimeout(context.Background(), issueUpdateLifecycleTimeout(*opts.Status))
+		defer cancelStatus()
+		if err := deps.DaemonClient.UpdateTaskStatusWithOptions(statusCtx, opts.IssueID, *opts.Status, statusOptions); err != nil {
 			return fmt.Errorf("failed to apply lifecycle action for issue %s: %w", opts.IssueID, err)
 		}
 		if updateContextRisk != nil && !opts.JSON {
@@ -7095,7 +7105,9 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 		}
 	}
 	if opts.AppendNotes != "" {
-		if err := deps.DaemonClient.AppendTaskNotes(ctx, opts.IssueID, opts.AppendNotes); err != nil {
+		appendCtx, cancelAppend := context.WithTimeout(context.Background(), daemonCommandTimeout)
+		defer cancelAppend()
+		if err := deps.DaemonClient.AppendTaskNotes(appendCtx, opts.IssueID, opts.AppendNotes); err != nil {
 			return fmt.Errorf("failed to append notes for issue %s: %w", opts.IssueID, err)
 		}
 	}
@@ -7111,6 +7123,17 @@ func IssueUpdateCommand(deps *Dependencies, opts IssueUpdateOptions) error {
 	}
 	fmt.Printf("Updated issue: %s\n", opts.IssueID)
 	return nil
+}
+
+func issueUpdateLifecycleTimeout(status domain.Status) time.Duration {
+	switch status {
+	case domain.StatusDone:
+		return domain.IntegrationClientTimeout
+	case domain.StatusCancelled:
+		return domain.LifecycleCleanupClientTimeout
+	default:
+		return daemonCommandTimeout
+	}
 }
 
 func cleanupCloseTaskStatusOptions(forceWorktree bool, closeCleanChildren ...bool) daemonclient.TaskStatusOptions {
@@ -9334,7 +9357,8 @@ func renderPrimeOrchestratorExitContract(rootIssueID string) string {
 	return fmt.Sprintf(`Orchestrator Exit Contract (root %s):
 - Remain in the active orchestration turn/loop after starting workers, nested orchestrators, or a background watch; startup is not a completed handoff to the human.
 - Continuously consume the root watch and react to worker/nested-orchestrator progress, blocked, and integration-ready evidence while graph work remains.
-- Supervise nested epic/root orchestrators as direct children while they own their descendant workers; do not flatten or take over those descendants unless explicitly requested.
+- Chain of command is strict: coordinate only direct children. Never launch, message, review, integrate, stop, or take over grandchildren or deeper descendants.
+- Supervise nested epic/root orchestrators as direct children while they exclusively own their descendants.
 - Resolve each review through `+"`az orchestrate review accept --root %s --issue <review-issue>`"+` or `+"`az orchestrate review return ...`"+`; accepted close must finish before using or presenting dependent results. Then advance newly unblocked work and repeat status/start/watch/review until `+"`az orchestrate complete-check --root %s`"+` passes; then run root validation.
 - Set the root `+"`in_review`"+` and report to the human without stopping its session or cleaning its worktree.
 - Close/integrate the root only after explicit human acceptance.

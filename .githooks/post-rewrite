@@ -5,3 +5,5 @@ az githooks hook --hook post-rewrite "$@" >/dev/null 2>&1 || true
 
 set -eu
 
+# Canonical validation is launched explicitly by integration orchestration only
+# after rebase has returned and removed its reconciliation state.
