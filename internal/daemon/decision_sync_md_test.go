@@ -936,9 +936,20 @@ func TestIsDecisionMDFilename(t *testing.T) {
 
 func TestDecisionMDIDRecoversSemanticIDFromMalformedFile(t *testing.T) {
 	id := "dec-use-sqlite-0123456789abcdef0123456789abcdef"
-	name := id + "-use-sqlite.md"
-	if got := decisionMDID(name, []byte("partially written")); got != id {
+	name := id + "-use-sqlite-deadbeefdeadbeefdeadbeefdeadbeef.md"
+	known := map[string]struct{}{id: {}}
+	if got := decisionMDID(name, []byte("partially written"), known); got != id {
 		t.Fatalf("decisionMDID(%q) = %q, want %q", name, got, id)
+	}
+}
+
+func TestDecisionMDIDRejectsAmbiguousKnownSemanticIDs(t *testing.T) {
+	shortID := "dec-topic-0123456789abcdef0123456789abcdef"
+	longID := shortID + "-title-deadbeefdeadbeefdeadbeefdeadbeef"
+	name := longID + "-old-title.md"
+	known := map[string]struct{}{shortID: {}, longID: {}}
+	if got := decisionMDID(name, []byte("partially written"), known); got != "" {
+		t.Fatalf("decisionMDID(%q) = %q, want ambiguous empty result", name, got)
 	}
 }
 

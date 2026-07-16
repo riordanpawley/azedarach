@@ -71,7 +71,9 @@ after title changes and duplicate parseable exports for the same ID, and removes
 exports for deleted decisions. Files using either the historical
 `dec-N[-slug].md` convention or the semantic
 `dec-<topic>-<random-suffix>[-slug].md` convention are reconciled even if their
-contents are malformed; other non-decision Markdown files are left untouched.
+contents are malformed when the filename matches exactly one known live or
+deleted decision ID. Ambiguous semantic filename prefixes are preserved rather
+than guessed; other non-decision Markdown files are left untouched.
 Check mode reports both writes and removals without changing files.
 
 ## Recovery

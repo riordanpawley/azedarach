@@ -165,6 +165,13 @@ func reconcileDecisionMarkdownScoped(repoDir string, exports []decisionMDExport,
 		}
 		return nil, fmt.Errorf("read %s: %w", targetDir, err)
 	}
+	knownDecisionIDs := make(map[string]struct{}, len(authorized)+len(provenance))
+	for id := range authorized {
+		knownDecisionIDs[id] = struct{}{}
+	}
+	for id := range provenance {
+		knownDecisionIDs[id] = struct{}{}
+	}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
 			continue
@@ -177,7 +184,7 @@ func reconcileDecisionMarkdownScoped(repoDir string, exports []decisionMDExport,
 		if readErr != nil {
 			return nil, fmt.Errorf("read %s: %w", path, readErr)
 		}
-		decisionID := decisionMDID(entry.Name(), content)
+		decisionID := decisionMDID(entry.Name(), content, knownDecisionIDs)
 		if decisionID == "" {
 			if _, parseErr := parseDecisionMarkdown(content); parseErr != nil {
 				continue
@@ -234,25 +241,43 @@ func decisionOwnerIssueID(issueIDs []string) string {
 	return ""
 }
 
-func decisionMDID(name string, content []byte) string {
+func decisionMDID(name string, content []byte, knownDecisionIDs map[string]struct{}) string {
 	if parsed, err := parseDecisionMarkdown(content); err == nil {
 		return parsed.LocalID
 	}
-	stem := strings.TrimSuffix(name, ".md")
 	if !isDecisionMDFilename(name) {
 		return ""
 	}
-	if match := semanticDecisionMDFilenameRE.FindStringSubmatch(name); match != nil {
-		return match[1]
-	}
-	if i := strings.IndexByte(stem, '-'); i >= 0 {
-		rest := stem[i+1:]
-		if j := strings.IndexByte(rest, '-'); j >= 0 {
-			rest = rest[:j]
+	stem := strings.TrimSuffix(name, ".md")
+	matched := ""
+	for id := range knownDecisionIDs {
+		if stem != id && !strings.HasPrefix(stem, id+"-") {
+			continue
 		}
-		return "dec-" + rest
+		if matched != "" {
+			return ""
+		}
+		matched = id
 	}
-	return ""
+	if matched != "" {
+		return matched
+	}
+	// Historical numeric IDs have an unambiguous delimiter because their ID
+	// component contains digits only. Semantic IDs are recovered only by exact
+	// lookup above; their topic and title slugs share the same alphabet.
+	rest := strings.TrimPrefix(stem, "dec-")
+	if j := strings.IndexByte(rest, '-'); j >= 0 {
+		rest = rest[:j]
+	}
+	if rest == "" {
+		return ""
+	}
+	for _, r := range rest {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return "dec-" + rest
 }
 
 func sortedDecisionMDResults(repoDir string, results map[string]protocol.DecisionMDFileResult) []protocol.DecisionMDFileResult {
