@@ -142,7 +142,7 @@
         "codexAppServer": {
           "type": "boolean",
           "default": false,
-          "description": "Launch Codex TUI sessions through the native app-server daemon and supervise thin-client resume across daemon restarts."
+          "description": "Launch Codex sessions through Azedarach's shared-composer native app-server client and supervise exact-worktree resume across app-server restarts."
         },
         "shell": {
           "type": "string",

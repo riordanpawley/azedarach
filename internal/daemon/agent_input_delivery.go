@@ -114,6 +114,20 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 
 	ack, err := s.receiver.DeliverAgentInput(ctx, authoritativeAgentInputRequest{Delivery: request, LeaseToken: claimed.LeaseToken})
 	if err != nil {
+		var refusal nativeAgentInputRefusalError
+		if errors.As(err, &refusal) {
+			release(refusal.outcome == "stale_incarnation")
+			switch refusal.outcome {
+			case "composer_nonempty":
+				return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputWaitingInputNonempty, Reason: "native client composer is not empty; intent remains queued"}, nil
+			case "human_attached":
+				return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputWaitingHumanAttached, Reason: "native client could not exclude attached human input; intent remains queued"}, nil
+			case "stale_incarnation":
+				return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputRejectedStaleTarget, Reason: "native client rejected stale incarnation"}, nil
+			default:
+				return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputWaitingNotReady, Reason: "native client not ready; intent remains queued"}, nil
+			}
+		}
 		release(false)
 		if errors.Is(err, errAuthoritativeAgentInputUnavailable) {
 			return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputWaitingNotReady, Reason: "authoritative composer and exclusion proof unavailable; intent remains queued"}, nil

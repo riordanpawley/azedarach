@@ -118,8 +118,8 @@ azd --help
   `az session restart-all` or a manual restart.
 - Projects can opt into Codex's native client/server runtime with
   `session.codexAppServer: true`. Azedarach ensures the managed app-server is
-  running, launches the stock TUI with `--remote unix://`, and supervises an
-  exact-worktree `resume --last` when a daemon restart disconnects the thin
+  running, launches its shared-composer native client, and supervises an
+  exact-worktree native resume when an app-server restart disconnects the
   client. Account activation prefers Codex's official scoped
   `app-server daemon restart`; PID scanning remains a fallback for standalone
   legacy sessions.
