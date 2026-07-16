@@ -88,16 +88,23 @@ func TestAcceptNativeCodexDeliveryFinalSaveFailureRetainsPending(t *testing.T) {
 	original := saveNativeCodexStateFn
 	defer func() { saveNativeCodexStateFn = original }()
 	saves := 0
-	saveNativeCodexStateFn = func(string, nativeCodexState) error {
+	saveNativeCodexStateFn = func(p string, s nativeCodexState) error {
 		saves++
 		if saves == 2 {
 			return errors.New("injected final save failure")
 		}
-		return nil
+		return original(p, s)
 	}
 	r, _ := acceptNativeCodexDelivery(env, nil, false, path, &state, func(string) error { calls++; return nil })
 	if r.Outcome != "not_ready" || calls != 1 || state.Pending["fault\x00"+state.Incarnation] == "" {
 		t.Fatalf("response=%+v calls=%d pending=%v", r, calls, state.Pending)
+	}
+	durable, err := loadNativeCodexState(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if durable.Pending["fault\x00"+state.Incarnation] == "" {
+		t.Fatal("durable pending missing")
 	}
 	r, _ = acceptNativeCodexDelivery(env, nil, false, path, &state, func(string) error { calls++; return nil })
 	if calls != 1 || r.Outcome != "not_ready" {
