@@ -248,6 +248,20 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if err != nil || !found || projection.Role != daemonstate.SessionRoleOrchestrator || projection.ScopeKind != daemonstate.SessionScopeOrchestration || projection.ScopeID != rootID {
 		t.Fatalf("rooted projection = %+v found=%t err=%v", projection, found, err)
 	}
+	workerProjection, found, err := runtimeStore.GetWorkerSessionStateByIssueID(ctx, projectID, rootID, started.SessionID)
+	if err != nil {
+		t.Fatalf("load rooted worker projection: %v", err)
+	}
+	if found {
+		t.Fatalf("rooted startup retained recoverable worker intent: %+v", workerProjection)
+	}
+	intents, err := runtimeStore.ListSessionIntentStates(ctx, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(intents) != 1 || !orchestratorSessionProjection(intents[0]) {
+		t.Fatalf("rooted startup intents = %+v, want one orchestrator intent", intents)
+	}
 	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
 	if err != nil {
 		t.Fatal(err)
@@ -264,6 +278,15 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if err != nil || !found || lease.SessionID != started.SessionID || lease.Lifecycle != domain.OrchestratorWorking || lease.AcquiredAt.After(acknowledgement.AcknowledgedAt) {
 		t.Fatalf("rooted lease = %+v found=%t err=%v acknowledgement=%+v", lease, found, err, acknowledgement)
 	}
+	// Upgrade/recovery may encounter the legacy dual-intent product. Exact-scope
+	// rooted start must retire it before accepting the live runtime.
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
+		ID: started.SessionID, IssueID: rootID, Role: daemonstate.SessionRoleWorker,
+		ScopeKind: daemonstate.SessionScopeIssue, ScopeID: rootID,
+		State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	inputsBefore := len(tmuxRunner.inputPayloads)
 	response, err = d.handleOrchestratorSession(ctx, request)
 	if err != nil || response.Error != nil {
@@ -271,6 +294,9 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	}
 	if len(tmuxRunner.inputPayloads) != inputsBefore {
 		t.Fatalf("same rooted runtime was re-prompted: inputs=%d, want %d", len(tmuxRunner.inputPayloads), inputsBefore)
+	}
+	if worker, found, err := runtimeStore.GetWorkerSessionStateByIssueID(ctx, projectID, rootID, started.SessionID); err != nil || found {
+		t.Fatalf("legacy rooted worker intent = %+v found=%t err=%v", worker, found, err)
 	}
 
 	// restart-all replaces and re-acknowledges the rooted agent while holding
@@ -400,6 +426,62 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	}
 	if got := tmuxRunner.env[started.SessionID][rootedOrchestratorBootstrapNonceEnvironment]; got != incarnationAck.RuntimeNonce {
 		t.Fatalf("reused runtime nonce = %q, acknowledgement = %q", got, incarnationAck.RuntimeNonce)
+	}
+
+	// Runtime loss while desired-working must recover only through rooted
+	// orchestrator authority, including a fresh role prompt and acknowledgement.
+	delete(tmuxRunner.sessions, started.SessionID)
+	delete(tmuxRunner.env, started.SessionID)
+	workerBody := marshalJSON(sessionCommandBody{ProjectID: projectID, IssueID: rootID, SessionID: started.SessionID, Prompt: "Role: contributor"})
+	workerResponse, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
+		Command: daemonhandlers.CommandSessionStart,
+		Meta:    protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:    workerBody,
+	})
+	if err != nil || workerResponse.Error == nil || workerResponse.Error.Code != protocol.ErrorCodeConflict {
+		t.Fatalf("generic worker recovery response=%+v err=%v", workerResponse.Error, err)
+	}
+	if tmuxRunner.sessions[started.SessionID] {
+		t.Fatal("generic worker recovery recreated rooted runtime")
+	}
+	launchesBefore := len(tmuxRunner.launchPromptContents)
+	recovery, err := d.reconcileTmuxAndDaemonSessions(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("reconcile missing rooted runtime: %v", err)
+	}
+	if recovery.RecreatedTmuxSessions != 1 || !tmuxRunner.sessions[started.SessionID] {
+		t.Fatalf("rooted recovery = %+v live=%t", recovery, tmuxRunner.sessions[started.SessionID])
+	}
+	if len(tmuxRunner.launchPromptContents) != launchesBefore || !strings.Contains(tmuxRunner.launchPromptContents[started.SessionID], "Role: orchestrator") {
+		t.Fatalf("rooted recovery prompt = %q", tmuxRunner.launchPromptContents[started.SessionID])
+	}
+	recoveryAck, found, err := ackAuthority.Get(ctx, identity)
+	if err != nil || !found || recoveryAck.RuntimeNonce == "" || recoveryAck.RuntimeNonce == incarnationAck.RuntimeNonce {
+		t.Fatalf("rooted recovery acknowledgement = %+v found=%t err=%v", recoveryAck, found, err)
+	}
+	if worker, found, err := runtimeStore.GetWorkerSessionStateByIssueID(ctx, projectID, rootID, started.SessionID); err != nil || found {
+		t.Fatalf("rooted recovery worker intent = %+v found=%t err=%v", worker, found, err)
+	}
+
+	// Explicit pause is durable desired-stopped intent. Reconcile must neither
+	// relaunch the rooted runtime nor fall back to generic worker recovery.
+	d.orchestratorStopGracePeriod = time.Millisecond
+	d.orchestratorStopPollInterval = time.Millisecond
+	stopRequest := request
+	stopRequest.Command = protocol.CommandOrchestratorSessionStop
+	stopResponse, err := d.handleOrchestratorSession(ctx, stopRequest)
+	if err != nil || stopResponse.Error != nil {
+		t.Fatalf("stop rooted orchestrator: response=%+v err=%v", stopResponse.Error, err)
+	}
+	recovery, err = d.reconcileTmuxAndDaemonSessions(ctx, projectID, rootID)
+	if err != nil {
+		t.Fatalf("reconcile paused rooted runtime: %v", err)
+	}
+	if recovery.RecreatedTmuxSessions != 0 || tmuxRunner.sessions[started.SessionID] {
+		t.Fatalf("paused rooted recovery = %+v live=%t", recovery, tmuxRunner.sessions[started.SessionID])
+	}
+	if worker, found, err := runtimeStore.GetWorkerSessionStateByIssueID(ctx, projectID, rootID, started.SessionID); err != nil || found {
+		t.Fatalf("paused rooted worker intent = %+v found=%t err=%v", worker, found, err)
 	}
 }
 

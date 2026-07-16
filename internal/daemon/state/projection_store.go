@@ -324,12 +324,12 @@ func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context,
 	return changed, applied, err
 }
 
-// ApplyWorkerSessionCompensation atomically aligns worker desired intent and
+// ApplySessionCompensation atomically aligns one typed desired intent and its
 // physical runtime observation after a failed start cleanup attempt.
-func (s *RuntimeStateStore) ApplyWorkerSessionCompensation(ctx context.Context, projectID, sessionID, issueID string, desiredState, observedState SessionState, activity, activitySource string, updatedAt time.Time) ([]Session, SessionState, error) {
+func (s *RuntimeStateStore) ApplySessionCompensation(ctx context.Context, projectID string, intent Session, desiredState, observedState SessionState, activity, activitySource string, updatedAt time.Time) ([]Session, SessionState, error) {
 	var changed []Session
 	effectiveState := NormalizeSessionState(desiredState)
-	err := s.withRetryingWriteLock(ctx, "apply_worker_session_compensation", func(writeCtx context.Context) error {
+	err := s.withRetryingWriteLock(ctx, "apply_session_compensation", func(writeCtx context.Context) error {
 		changed = nil
 		effectiveState = NormalizeSessionState(desiredState)
 		db, err := s.dbHandle()
@@ -337,7 +337,7 @@ func (s *RuntimeStateStore) ApplyWorkerSessionCompensation(ctx context.Context, 
 			return err
 		}
 		observation, err := normalizePhysicalSessionObservation(PhysicalSessionObservation{
-			ProjectID: projectID, SessionID: sessionID, ObservedState: observedState,
+			ProjectID: projectID, SessionID: intent.ID, ObservedState: observedState,
 			Activity: activity, ActivitySource: activitySource, UpdatedAt: updatedAt,
 		})
 		if err != nil {
@@ -380,7 +380,8 @@ func (s *RuntimeStateStore) ApplyWorkerSessionCompensation(ctx context.Context, 
 			}
 			effectiveState = observation.ObservedState
 		}
-		logicalID := logicalSessionIntentID(Session{Role: SessionRoleWorker, ScopeKind: SessionScopeIssue, ScopeID: strings.TrimSpace(issueID)})
+		intent = NormalizeSessionMetadata(intent)
+		logicalID := logicalSessionIntentID(intent)
 		result, err = tx.ExecContext(writeCtx, `UPDATE `+sessionStateTable+` SET state=?,updated_at=? WHERE project_id=? AND logical_id=?`,
 			effectiveState, observation.UpdatedAt.Format(time.RFC3339Nano), observation.ProjectID, logicalID)
 		if err != nil {

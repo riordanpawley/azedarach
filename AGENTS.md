@@ -195,7 +195,7 @@ fd "filename" -t f internal cmd
    - cross-project configurable views and tmux selector ordering -> `projection` (global-daemon-owned user database incrementally consumes verified per-project issue deltas plus independently keyed runtime/fact materializations; full export is bootstrap/explicit rebuild/isolated recovery only; scoped issue/session/worktree/dependency keys and explicit vector/stale/unavailable project health)
    - orchestration scope identity -> `projection` (durable project + typed rooted/project scope)
    - orchestration scope singleton -> `hybrid` (refreshed durable scope lease + live tmux runtime)
-   - rooted orchestrator bootstrap delivery -> `hybrid` (refreshed durable accepted prompt acknowledgement + live tmux runtime marker; restart replacement is serialized by exact rooted scope and must re-deliver and persist acknowledgement before success)
+   - rooted orchestrator bootstrap delivery -> `hybrid` (exclusive rooted-orchestrator desired-session projection + refreshed durable accepted prompt acknowledgement + live tmux runtime marker; exact-scope startup retires legacy worker intent, and restart replacement is serialized by exact rooted scope and must re-deliver and persist acknowledgement before success)
    - rooted parent orchestration continuation -> `hybrid` (durable rooted lease/cursor + refreshed direct nested-root, interaction, completion, and session projections + live tmux wake delivery)
    - project orchestration completion -> `hybrid` (refreshed issue/review/interaction/session projections + live tmux runtime)
    - keyed monotonic projection delta replay, consumer cursors, and snapshot-at-cursor reads -> `projection` (durable project delta ledger and version history; reads never reconcile or poll tmux)

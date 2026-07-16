@@ -71,7 +71,10 @@ Rooted startup is scope-authoritative rather than ticket-type-derived. The
 daemon acquires the rooted lease before agent launch, supplies an explicit
 orchestrator-only prompt whose first commands are `az prime`, rooted status,
 and rooted watch, and does not report startup success until the complete
-file-backed prompt has been acknowledged. A durable SQLite projection binds
+file-backed prompt has been acknowledged. The launcher writes the rooted
+orchestrator desired-session product directly; it never leaves a generic worker
+desired-running product for the same root, and exact-scope startup retires any
+legacy dual worker intent before accepting or recovering the runtime. A durable SQLite projection binds
 that acknowledgement to the exact project, root, session, prompt hash, and a
 cryptographically random marker in the live tmux environment. The marker is
 not itself a process identity; trust comes from comparing it with the refreshed

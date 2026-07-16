@@ -789,6 +789,58 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if !ok {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
 	}
+	store := d.sessionRuntimeStateStoreIfConfigured(cmd.ProjectID)
+	if store == nil {
+		return d.handleSessionStartDirectWithOptions(ctx, req, sessionStartOptions{})
+	}
+	scope, scopeErr := domain.RootedOrchestrationScope(cmd.IssueID)
+	if scopeErr != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, scopeErr.Error()), nil
+	}
+	identity, identityErr := domain.NewOrchestratorIdentity(cmd.ProjectID, scope)
+	if identityErr != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, identityErr.Error()), nil
+	}
+	var commandErr error
+	lockErr := store.WithOrchestratorScopeTransition(ctx, identity, func(lockCtx context.Context) error {
+		resp, commandErr = d.handleSessionStartDirectWithOptions(lockCtx, req, sessionStartOptions{})
+		return nil
+	})
+	if lockErr != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("serialize worker session start: %v", lockErr)), nil
+	}
+	return resp, commandErr
+}
+
+type sessionStartOptions struct {
+	intent             sessionIntentSelector
+	rootedOrchestrator bool
+}
+
+func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req protocol.RequestEnvelope, options sessionStartOptions) (resp protocol.ResponseEnvelope, err error) {
+	cmd, _, ok := d.decodeSessionRequest(req, true)
+	if !ok {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
+	}
+	options.intent = normalizeSessionIntentSelector(options.intent, cmd.IssueID)
+	if !options.rootedOrchestrator {
+		store := d.sessionRuntimeStateStoreIfConfigured(cmd.ProjectID)
+		if store != nil {
+			scope, scopeErr := domain.RootedOrchestrationScope(cmd.IssueID)
+			if scopeErr != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, scopeErr.Error()), nil
+			}
+			identity, identityErr := domain.NewOrchestratorIdentity(cmd.ProjectID, scope)
+			if identityErr != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, identityErr.Error()), nil
+			}
+			if _, found, leaseErr := daemonstate.NewOrchestratorLeaseAuthority(store).Get(ctx, identity); leaseErr != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("load rooted orchestrator lease: %v", leaseErr)), nil
+			} else if found {
+				return d.errorResponse(req, protocol.ErrorCodeConflict, fmt.Sprintf("issue %s is owned by a rooted orchestrator session", cmd.IssueID)), nil
+			}
+		}
+	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session start requested",
 			"project_id", cmd.ProjectID,
@@ -1099,7 +1151,7 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		}
 	}
 	initialActivity, initialActivitySource := initialSessionStartActivity(cmd.StartWork)
-	if err := d.applySessionLifecycleTransitionWithActivity(
+	if err := d.applyTypedSessionLifecycleTransition(
 		ctx,
 		req,
 		cmd.ProjectID,
@@ -1108,8 +1160,9 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		daemonhandlers.CommandSessionStart,
 		initialActivity,
 		initialActivitySource,
+		options.intent,
 	); err != nil {
-		cleanupNote := d.compensateSessionStartFailure(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource)
+		cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session start transition: %v%s", err, cleanupNote)), nil
 	}
 	// The tmux session exists at this point. Record that physical fact through
@@ -1119,12 +1172,12 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		ID: cmd.SessionID, ObservedState: daemonstate.SessionStateRunning,
 		Activity: initialActivity, ActivitySource: initialActivitySource, UpdatedAt: time.Now().UTC(),
 	}); err != nil {
-		cleanupNote := d.compensateSessionStartFailure(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource)
+		cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session runtime observation: %v%s", err, cleanupNote)), nil
 	}
-	if task.Type == domain.TypeEpic {
+	if task.Type == domain.TypeEpic && !options.rootedOrchestrator {
 		if err := d.acquireRootedOrchestratorLease(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID); err != nil {
-			cleanupNote := d.compensateSessionStartFailure(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource)
+			cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeConflict, fmt.Sprintf("acquire rooted orchestrator lease: %v%s", err, cleanupNote)), nil
 		}
 	}
@@ -1231,6 +1284,10 @@ func (d *Daemon) rollbackSessionStartLifecycle(projectID, sessionID, issueID str
 }
 
 func (d *Daemon) compensateSessionStartFailure(ctx context.Context, req protocol.RequestEnvelope, projectID, sessionID, issueID string, resourceCtx issueResourceLifecycleContext, liveActivity, liveActivitySource string) string {
+	return d.compensateSessionStartFailureWithSelector(ctx, req, projectID, sessionID, issueID, resourceCtx, liveActivity, liveActivitySource, normalizeSessionIntentSelector(sessionIntentSelector{}, issueID))
+}
+
+func (d *Daemon) compensateSessionStartFailureWithSelector(ctx context.Context, req protocol.RequestEnvelope, projectID, sessionID, issueID string, resourceCtx issueResourceLifecycleContext, liveActivity, liveActivitySource string, selector sessionIntentSelector) string {
 	note := d.issueResourceFailedStartCleanupNote(ctx, projectID, resourceCtx)
 	live := true
 	if d != nil && d.tmux != nil {
@@ -1255,10 +1312,11 @@ func (d *Daemon) compensateSessionStartFailure(ctx context.Context, req protocol
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
 	alignTransient := false
 	if store != nil {
-		rows, winner, err := store.ApplyWorkerSessionCompensation(ctx, projectID, sessionID, issueID, desired, observed, activity, source, updatedAt)
+		intent := daemonstate.Session{ID: sessionID, IssueID: issueID, Role: selector.Role, ScopeKind: selector.ScopeKind, ScopeID: selector.ScopeID}
+		rows, winner, err := store.ApplySessionCompensation(ctx, projectID, intent, desired, observed, activity, source, updatedAt)
 		if err != nil {
 			note += fmt.Sprintf("; failed-start durable session compensation also failed: %v", err)
-			if durable, found, loadErr := store.GetWorkerSessionStateByIssueID(ctx, projectID, issueID, sessionID); loadErr == nil && found {
+			if durable, found, loadErr := store.GetSessionIntent(ctx, projectID, selector.Role, selector.ScopeKind, selector.ScopeID); loadErr == nil && found {
 				desired = durable.State
 				alignTransient = true
 			} else if loadErr != nil {
