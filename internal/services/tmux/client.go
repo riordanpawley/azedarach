@@ -669,6 +669,28 @@ func (c *Client) SetEnvironment(ctx context.Context, name, key, value string) er
 	return nil
 }
 
+// EnvironmentValue returns one tmux session-scoped environment value.
+// Listing the complete session environment distinguishes an absent variable
+// from a missing session without placing the requested value in argv.
+func (c *Client) EnvironmentValue(ctx context.Context, name, key string) (string, bool, error) {
+	c.logger.Debug("getting tmux environment variable", "name", name, "key", key)
+
+	out, err := c.runner.Run(ctx, "show-environment", "-t", name)
+	if err != nil {
+		return "", false, &domain.TmuxError{Op: "show-environment", Session: name, Err: err}
+	}
+	prefix := key + "="
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimPrefix(line, prefix), true, nil
+		}
+		if line == "-"+key {
+			return "", false, nil
+		}
+	}
+	return "", false, nil
+}
+
 func (c *Client) SwitchClient(ctx context.Context, name string) error {
 	c.logger.Debug("switching tmux client", "name", name)
 

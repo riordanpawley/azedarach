@@ -60,10 +60,11 @@ func TestRealProjectOperationsDatabaseMigrationClones(t *testing.T) {
 				t.Fatal(err)
 			}
 			var checksum string
-			if err = store.db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, migrationArtifacts[4].ID).Scan(&checksum); err != nil {
+			latestArtifact := migrationArtifacts[len(migrationArtifacts)-1]
+			if err = store.db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, latestArtifact.ID).Scan(&checksum); err != nil {
 				t.Fatal(err)
 			}
-			if checksum != migrationArtifacts[4].Checksum {
+			if checksum != latestArtifact.Checksum {
 				t.Fatalf("validation authority migration checksum = %q", checksum)
 			}
 			var authorityColumns int
@@ -107,7 +108,7 @@ func TestRealProjectOperationsDatabaseMigrationClones(t *testing.T) {
 				t.Fatal(err)
 			}
 			var ledgerRows int
-			if err = reopened.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, migrationArtifacts[4].ID, checksum).Scan(&ledgerRows); err != nil {
+			if err = reopened.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, latestArtifact.ID, checksum).Scan(&ledgerRows); err != nil {
 				t.Fatal(err)
 			}
 			if ledgerRows != 1 {
@@ -547,6 +548,84 @@ func TestValidationAuthorityMigrationRollsBackAtomically(t *testing.T) {
 	defer retried.Close()
 	if _, err = retried.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPublicationValidationPriorityMigrationRollsBackAtomically(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 5)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TRIGGER reject_publication_priority_ledger BEFORE INSERT ON schema_migrations WHEN NEW.id='daemon_operations_0006_publication_validation_priority' BEGIN SELECT RAISE(ABORT, 'injected publication priority ledger failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	failed := NewAtPath(dbPath, slog.Default())
+	if _, err = failed.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err == nil || !strings.Contains(err.Error(), "injected publication priority ledger failure") {
+		t.Fatalf("migration error = %v", err)
+	}
+	_ = failed.Close()
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var indexSQL string
+	if err = raw.QueryRow(`SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_daemon_validation_one_active_aggregate'`).Scan(&indexSQL); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.ToLower(indexSQL), "purpose = 'capacity'") {
+		t.Fatalf("failed migration left capacity-only index: %s", indexSQL)
+	}
+	var ledgerRows int
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='daemon_operations_0006_publication_validation_priority'`).Scan(&ledgerRows); err != nil {
+		t.Fatal(err)
+	}
+	if ledgerRows != 0 {
+		t.Fatalf("failed migration left %d ledger rows", ledgerRows)
+	}
+	if _, err = raw.Exec(`DROP TRIGGER reject_publication_priority_ledger`); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	retried := NewAtPath(dbPath, slog.Default())
+	defer retried.Close()
+	if _, err = retried.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err = retried.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_daemon_validation_one_active_aggregate'`).Scan(&indexSQL); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.ToLower(indexSQL), "purpose = 'capacity'") {
+		t.Fatalf("retried migration index = %s", indexSQL)
+	}
+}
+
+func TestPublicationValidationPriorityMigrationRejectsLedgerSchemaDrift(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 5)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := migrationArtifacts[len(migrationArtifacts)-1]
+	if _, err = db.Exec(`INSERT INTO schema_migrations(id,applied_at,artifact_checksum) VALUES(?, 'drifted', ?)`, artifact.ID, artifact.Checksum); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	drifted := NewAtPath(dbPath, slog.Default())
+	defer drifted.Close()
+	if _, err = drifted.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err == nil || !strings.Contains(err.Error(), "purpose = 'capacity'") {
+		t.Fatalf("schema drift error = %v", err)
 	}
 }
 

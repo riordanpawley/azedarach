@@ -1,10 +1,10 @@
 ╭────────────────────────────────────────────────────────────────────╮
 │CLOSE BLOCKED                                                       │
 │────────────────────────────────────────────────────────────────────│
-│Issue: gav                                                          │
+│Issue: dhb                                                          │
 │The issue was not closed.                                           │
-│refusing to merge child issue gav directly into base: no active     │
-│ancestor worktree branch was found; run `az worktree create gat`,   │
+│cannot close issue dhb: human-facing investigation lacks explicit   │
+│issue-specific findings acceptance. Next: fix the listed blockers,  │
 │...                                                                 │
 │                                                                    │
 │                                                                    │
@@ -13,8 +13,8 @@
 │────────────────────────────────────────────────────────────────────│
 │> r Retry close                                                     │
 │  Run the close again after fixing the blocker.                     │
-│  w Create ancestor & retry                                         │
-│  Create the missing parent worktree, then retry close.             │
+│  y Accept findings & retry                                         │
+│  Record your acceptance, then retry close.                         │
 │  esc Cancel                                                        │
 │  Leave the issue in its previous status.                           │
 ╰────────────────────────────────────────────────────────────────────╯

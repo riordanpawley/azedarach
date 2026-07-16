@@ -7,16 +7,7 @@ if [[ -z "$real_go" || ! -x "$real_go" || "$real_go" == "$0" ]]; then
   exit 78
 fi
 
-# A managed lease wrapper has already admitted this command tree. Its inherited
-# kernel capability remains the daemon-authoritative nested authorization.
-if [[ -n "${AZEDARACH_VALIDATION_REQUEST_ID:-}" && "${AZEDARACH_VALIDATION_NESTED_FD:-}" =~ ^[0-9]+$ && -S "/dev/fd/$AZEDARACH_VALIDATION_NESTED_FD" ]]; then
-  exec "$real_go" "$@"
-fi
-
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-admission_wrapper="${AZEDARACH_GO_ADMISSION_WRAPPER:-$script_dir/with-machine-validation-lease}"
-if [[ ! -x "$admission_wrapper" ]]; then
-  echo "Go validation admission wrapper is unavailable: $admission_wrapper" >&2
-  exit 78
-fi
-exec "$admission_wrapper" --class shared --profile raw-go -- "$real_go" "$@"
+# Development Go commands rely on per-worktree cache isolation and never enter
+# daemon validation admission. Publication wrappers still provide their nested
+# capability to the command tree, but Go itself needs no additional hop.
+exec "$real_go" "$@"

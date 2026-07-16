@@ -17,7 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestValidationCommandRoutesDurableAggregateQueue(t *testing.T) {
+func TestValidationCommandStartsPublicationWithoutAggregateQueueing(t *testing.T) {
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir()})
 	t.Cleanup(func() { _ = runtime.Close() })
 	d := &Daemon{operationRuntime: runtime, revision: map[string]uint64{"project": 1}}
@@ -42,8 +42,8 @@ func TestValidationCommandRoutesDurableAggregateQueue(t *testing.T) {
 	if got := acquire("owner"); got.State != domain.ValidationRequestActive {
 		t.Fatalf("owner state = %s, want active", got.State)
 	}
-	if got := acquire("waiter"); got.State != domain.ValidationRequestQueued {
-		t.Fatalf("waiter state = %s, want queued", got.State)
+	if got := acquire("second-publication"); got.State != domain.ValidationRequestActive {
+		t.Fatalf("second publication state = %s, want active", got.State)
 	}
 	resp, err := d.handleValidationCommand(context.Background(), protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "rpc-status", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandValidationStatus, Meta: protocol.Metadata{ProjectID: "project"}, Body: json.RawMessage(`{}`)})
 	if err != nil || !resp.OK {
@@ -53,8 +53,8 @@ func TestValidationCommandRoutesDurableAggregateQueue(t *testing.T) {
 	if err := json.Unmarshal(resp.Body, &status); err != nil {
 		t.Fatal(err)
 	}
-	if len(status.Snapshot.Active) != 1 || len(status.Snapshot.Queued) != 1 {
-		t.Fatalf("snapshot = %+v, want one owner and one waiter", status.Snapshot)
+	if len(status.Snapshot.Active) != 2 || len(status.Snapshot.Queued) != 0 {
+		t.Fatalf("snapshot = %+v, want both publication requests active", status.Snapshot)
 	}
 }
 

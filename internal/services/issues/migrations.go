@@ -24,6 +24,8 @@ import (
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
+const rootedBootstrapAcknowledgementMigrationID = "0049_rooted_bootstrap_acknowledgements"
+
 type migration struct {
 	id          string
 	path        string
@@ -85,6 +87,7 @@ var orderedMigrations = []migration{
 	{id: projectionDeltaAuthorityMigrationID, path: "migrations/0047_projection_delta_authority.sql", apply: applyProjectionDeltaAuthorityMigration},
 	{id: humanAuthorityProjectionMigrationID, path: "migrations/0047_human_authority_projection_revision.sql"},
 	{id: "0048_decision_propagation_outbox", path: "migrations/0048_decision_propagation_outbox.sql"},
+	{id: rootedBootstrapAcknowledgementMigrationID, path: "migrations/0049_rooted_bootstrap_acknowledgements.sql"},
 	{id: "0049_managed_agent_incarnations", path: "migrations/0049_managed_agent_incarnations.sql"},
 	{id: issueObservationEventSearchMigrationID, path: "migrations/0050_issue_observation_event_search.sql"},
 	{id: agentInputDeliveryMigrationID, path: "migrations/0051_agent_input_delivery.sql"},
@@ -144,6 +147,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: projectionDeltaAuthorityMigrationID, Path: "migrations/0047_projection_delta_authority.sql", Checksum: projectionDeltaAuthorityChecksum},
 	{ID: humanAuthorityProjectionMigrationID, Path: "migrations/0047_human_authority_projection_revision.sql", Checksum: "ac3a48512b2e6e9c018d58a68db24a2465e9d172139d22f8378f69677073a0ab"},
 	{ID: "0048_decision_propagation_outbox", Path: "migrations/0048_decision_propagation_outbox.sql", Checksum: "a12c44ba35156d71fbcd88a9d78e4cdb234e75e7e4aef5f896c8b1182ada858d"},
+	{ID: rootedBootstrapAcknowledgementMigrationID, Path: "migrations/0049_rooted_bootstrap_acknowledgements.sql", Checksum: "b54bdf5ec3f6af17c91e1625582ac58e66e47948cea68ee73db88d4e8df6f161"},
 	{ID: "0049_managed_agent_incarnations", Path: "migrations/0049_managed_agent_incarnations.sql", Checksum: "8364ceb9fad589df3f73c1fe0f0462c22b127510f1745e62fcc11e24757fe08d"},
 	{ID: "0050_issue_observation_event_search", Path: "migrations/0050_issue_observation_event_search.sql", Checksum: "e5a8efc20ddf313822576c4d6d42cd94e1837dfac810834957689d30b952005d"},
 	{ID: agentInputDeliveryMigrationID, Path: "migrations/0051_agent_input_delivery.sql", Checksum: agentInputDeliveryMigrationChecksum},

@@ -198,13 +198,17 @@ export AZEDARACH_VALIDATION_GIT_BIN="$fixture/fake-bin/validation-git"
 
 repository_payload="$fixture/repository-payload-ran"
 env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
-	-u AZEDARACH_VALIDATION_LEASE_TOKEN -u AZEDARACH_VALIDATION_SCOPE -u AZEDARACH_VALIDATION_PURPOSE \
-	-u AZEDARACH_TICKET_ID -u AZEDARACH_ISSUE_ID \
+  -u AZEDARACH_VALIDATION_LEASE_TOKEN -u AZEDARACH_TICKET_ID -u AZEDARACH_ISSUE_ID \
+  -u AZEDARACH_VALIDATION_SCOPE -u AZEDARACH_VALIDATION_PURPOSE \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
   FAKE_AZ_REQUIRE_REPOSITORY=1 \
   "$fixture/scripts/with-machine-validation-lease" --class aggregate --profile repository-push -- \
   sh -c 'touch "$1"' sh "$repository_payload"
 test -e "$repository_payload"
+
+# The remaining lease-control fixtures exercise the controlled-capacity path.
+# Ordinary ticket development bypasses this wrapper entirely.
+export AZEDARACH_VALIDATION_PURPOSE=capacity
 
 reused_payload="$fixture/reused-payload-ran"
 env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
@@ -499,7 +503,7 @@ env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
   -u AZEDARACH_VALIDATION_LEASE_TOKEN \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
   AZEDARACH_TICKET_ID=development-holder \
-  "$fixture/scripts/with-machine-validation-lease" --class shared --profile focused-development -- \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --purpose development --profile focused-development -- \
   sh -c 'touch "$1"; sleep 30' sh "$development_ready" &
 development_holder_pid=$!
 for _ in {1..300}; do
