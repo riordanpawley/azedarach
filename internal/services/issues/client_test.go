@@ -4407,6 +4407,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0047_projection_delta_authority",
 		"0048_decision_propagation_outbox",
 		"0049_managed_agent_incarnations",
+		"0049_rooted_bootstrap_acknowledgements",
 		"0050_issue_observation_event_search",
 	}, got)
 }
