@@ -7,6 +7,7 @@ use File::Temp qw(tempfile);
 use File::Path qw(remove_tree);
 use IO::Select;
 use JSON::PP qw(decode_json encode_json);
+use Digest::SHA qw(sha256_hex);
 use POSIX qw(:sys_wait_h setpgid);
 use Socket qw(AF_UNIX SOCK_STREAM PF_UNSPEC);
 use Time::HiRes qw(time sleep);
@@ -14,6 +15,11 @@ use Time::HiRes qw(time sleep);
 my $mode = 'run';
 my $class = 'shared';
 my $profile = '';
+my $scope = '';
+my $purpose = '';
+my $override = 'none';
+my $override_actor = '';
+my $override_reason = '';
 my $interval = 1;
 while (@ARGV && $ARGV[0] ne '--') {
     my $flag = shift @ARGV;
@@ -21,11 +27,25 @@ while (@ARGV && $ARGV[0] ne '--') {
     if ($flag eq '--watch') { $mode = 'watch'; next; }
     if ($flag eq '--interval') { $interval = shift(@ARGV) // die "--interval requires seconds\n"; next; }
     if ($flag eq '--class') { $class = shift(@ARGV) // die "--class requires a value\n"; next; }
+    if ($flag eq '--scope') { $scope = shift(@ARGV) // die "--scope requires a value\n"; next; }
+    if ($flag eq '--purpose') { $purpose = shift(@ARGV) // die "--purpose requires a value\n"; next; }
+    if ($flag eq '--no-reuse') { die "validation override already selected\n" unless $override eq 'none'; $override = 'no_reuse'; next; }
+    if ($flag eq '--force-rerun') { die "validation override already selected\n" unless $override eq 'none'; $override = 'force_rerun'; next; }
+    if ($flag eq '--emergency-skip') { die "validation override already selected\n" unless $override eq 'none'; $override = 'emergency_skip'; $override_reason = shift(@ARGV) // die "--emergency-skip requires a reason\n"; next; }
+    if ($flag eq '--override-actor') { $override_actor = shift(@ARGV) // die "--override-actor requires a value\n"; next; }
     if ($flag eq '--label' || $flag eq '--profile') { $profile = shift(@ARGV) // die "$flag requires a value\n"; next; }
     die "unknown option $flag\n";
 }
 shift @ARGV if @ARGV && $ARGV[0] eq '--';
 die "unsupported validation class $class\n" unless $class eq 'aggregate' || $class eq 'shared' || $class eq 'safe';
+$override = 'emergency_skip' if $override eq 'none' && ($ENV{AZEDARACH_VALIDATION_EMERGENCY_SKIP_REASON} || '') ne '';
+$override_reason ||= $ENV{AZEDARACH_VALIDATION_EMERGENCY_SKIP_REASON} || '';
+$override_actor ||= $ENV{AZEDARACH_VALIDATION_OVERRIDE_ACTOR} || '';
+die "--override-actor is only valid with --emergency-skip\n" if $override ne 'emergency_skip' && $override_actor ne '';
+if ($override eq 'emergency_skip') {
+    $override_actor ||= $ENV{AZEDARACH_AUDIT_ACTOR} || $ENV{USER} || $ENV{LOGNAME} || '';
+    die "emergency validation skip requires an explicit actor\n" if $override_actor eq '';
+}
 my $control_az = $ENV{AZEDARACH_VALIDATION_CONTROL_AZ_BIN}
     || $ENV{AZEDARACH_VALIDATION_AZ_BIN}
     || 'az';
@@ -86,6 +106,7 @@ die "usage: with-machine-validation-lease [--status|--watch] | --class aggregate
 # kernel descriptor. The public request id is insufficient, and the lease token
 # is never present in the executed command environment or argv.
 if ($ENV{AZEDARACH_VALIDATION_REQUEST_ID}) {
+    die "nested validation cannot select an override outside the outer capability\n" unless $override eq 'none';
     my $fd = $ENV{AZEDARACH_VALIDATION_NESTED_FD};
     die "nested validation requires an inherited authorization capability\n" unless defined($fd) && $fd =~ /^\d+$/;
     open my $broker, '+<&=', $fd or die "attach nested validation authorization capability: $!\n";
@@ -95,7 +116,9 @@ if ($ENV{AZEDARACH_VALIDATION_REQUEST_ID}) {
     fcntl($broker, F_SETFD, $nested_flags & ~FD_CLOEXEC)
         or die "preserve nested validation capability across exec: $!\n";
     my $nonce = random_token();
-    print {$broker} encode_json({request_id => $ENV{AZEDARACH_VALIDATION_REQUEST_ID}, class => $class, nonce => $nonce}) . "\n"
+    $scope ||= $ENV{AZEDARACH_VALIDATION_SCOPE} || '';
+    $purpose ||= $ENV{AZEDARACH_VALIDATION_PURPOSE} || '';
+    print {$broker} encode_json({request_id => $ENV{AZEDARACH_VALIDATION_REQUEST_ID}, class => $class, scope => $scope, purpose => $purpose, nonce => $nonce}) . "\n"
         or die "request nested validation authorization: $!\n";
     my $line = <$broker>;
     die "nested validation authorization broker closed\n" unless defined $line;
@@ -105,14 +128,24 @@ if ($ENV{AZEDARACH_VALIDATION_REQUEST_ID}) {
     $ENV{AZEDARACH_VALIDATION_CLASS} = $authorization->{class};
     $ENV{AZEDARACH_VALIDATION_PROFILE} = $authorization->{profile};
     $ENV{AZEDARACH_VALIDATION_SOURCE_REVISION} = $authorization->{source_revision};
+    $ENV{AZEDARACH_VALIDATION_SCOPE} = $authorization->{scope};
+    $ENV{AZEDARACH_VALIDATION_PURPOSE} = $authorization->{purpose};
     exec @ARGV or die "exec nested validation command $ARGV[0]: $!\n";
 }
 
-my $issue = $ENV{AZEDARACH_TICKET_ID} || $ENV{AZEDARACH_ISSUE_ID} || 'manual-' . $$;
+my $issue = $ENV{AZEDARACH_TICKET_ID} || $ENV{AZEDARACH_ISSUE_ID} || '';
+$scope ||= $ENV{AZEDARACH_VALIDATION_SCOPE} || ($issue ne '' ? 'ticket' : 'repository');
+$purpose ||= $ENV{AZEDARACH_VALIDATION_PURPOSE} || ($scope eq 'repository' ? 'push_gate' : 'development');
+die "unsupported validation scope $scope\n" unless $scope eq 'repository' || $scope eq 'ticket';
+die "unsupported validation purpose $purpose\n" unless $purpose =~ /^(?:capacity|development|push_gate|review_evidence)$/;
+die "repository-scoped validation must not identify a ticket\n" if $scope eq 'repository' && $issue ne '';
+die "ticket-scoped validation requires AZEDARACH_TICKET_ID\n" if $scope eq 'ticket' && $issue eq '';
 my $revision = capture($git, 'rev-parse', 'HEAD');
 $revision =~ s/\s+\z//;
 die "resolve validation source revision\n" unless $revision;
 $profile ||= $class;
+my $isolation_mode = $daemon_scope eq 'worktree' ? 'worktree' : 'repository-family';
+my $environment_fingerprint = $ENV{AZEDARACH_VALIDATION_ENVIRONMENT_FINGERPRINT} || sha256_hex(join("\0", map { $_ . '=' . ($ENV{$_} || '') } qw(PATH GOROOT GOFLAGS GOOS GOARCH GOTOOLCHAIN CGO_ENABLED CC CXX AZEDARACH_REAL_GO_BIN NIX_PROFILES)));
 my $lease_token = random_token();
 my $request_id = sprintf('%s-%d-%d-%s', $issue, $$, int(time() * 1_000_000), substr(random_token(), 0, 12));
 $request_id =~ s/[^A-Za-z0-9_.-]/_/g;
@@ -128,16 +161,18 @@ my $production_wait_seconds = $ENV{AZEDARACH_VALIDATION_PRODUCTION_WAIT_SECONDS}
 die "AZEDARACH_VALIDATION_PRODUCTION_WAIT_SECONDS must be a non-negative integer\n"
     unless $production_wait_seconds =~ /^\d+$/;
 my $production_wait_started = time();
+my $production_wait_reported = 0;
+my $production_sensitive = $class eq 'aggregate' && ($purpose eq 'push_gate' || $purpose eq 'review_evidence') && $override ne 'emergency_skip';
+if ($production_sensitive) {
 system('mkdir', '-p', "$production_admission/validations", "$production_admission/pending") == 0
     or die "create validation admission directory\n";
-my $production_wait_reported = 0;
 while (1) {
     if (mkdir $validation_pending, 0700) {
         open my $pid_fh, '>', "$validation_pending/pid" or die "write validation admission pid: $!\n";
         print {$pid_fh} "$$\n";
         close $pid_fh;
         open my $reason_fh, '>', "$validation_pending/reason" or die "write validation admission reason: $!\n";
-        print {$reason_fh} "$class validation $profile\n";
+        print {$reason_fh} "$class validation $profile scope=$scope purpose=$purpose override=$override\n";
         close $reason_fh;
         rename $validation_pending, $validation_participant
             or die "publish validation admission participant: $!\n";
@@ -164,6 +199,7 @@ while (1) {
     }
     sleep 0.1;
 }
+}
 my $production_epoch_at_start = read_optional_file($production_epoch_file);
 END {
     remove_tree($validation_participant) if defined($validation_participant) && -d $validation_participant;
@@ -172,19 +208,37 @@ END {
 $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN} = $lease_token;
 my $command_text = join(' ', @ARGV);
 my @acquire = ($control_az, 'validation', 'acquire', '--request', $request_id, '--issue', $issue,
-    '--class', $class, '--profile', $profile, '--command', $command_text,
-    '--revision', $revision, '--ttl', '30', '--json');
+    '--class', $class, '--scope', $scope, '--purpose', $purpose, '--profile', $profile, '--command', $command_text,
+    '--revision', $revision, '--isolation', $isolation_mode, '--environment-fingerprint', $environment_fingerprint,
+    '--override', $override, '--ttl', '30', '--json');
+push @acquire, '--override-actor', $override_actor, '--override-reason', $override_reason if $override eq 'emergency_skip';
+my $acquired;
 while (1) {
     my $decoded = eval { decode_json(control_capture(@acquire)) };
     die "validation acquire returned invalid JSON\n" unless $decoded && $decoded->{request}{state};
-    last if $decoded->{request}{state} eq 'active';
-    die "validation request became $decoded->{request}{state} while waiting\n" unless $decoded->{request}{state} eq 'queued';
+    $acquired = $decoded->{request};
+    last if $acquired->{state} eq 'active' || $acquired->{state} ne 'queued';
     sleep 0.5;
 }
+my $execution = $acquired->{execution} || 'executed';
+my $source_request = $acquired->{authoritative_request_id} || $request_id;
+warn "Validation override $override selected; machine admission and durable audit remain enforced.\n" if $override ne 'none';
+if ($execution eq 'reused' || $execution eq 'joined' || $execution eq 'skipped') {
+    warn "Validation $request_id $execution authoritative request $source_request ($acquired->{state}).\n";
+    exit 0 if $acquired->{state} eq 'completed' || $execution eq 'skipped';
+    exit 130 if $acquired->{state} eq 'cancelled';
+    exit 1;
+}
+die "validation request became $acquired->{state} before execution\n" unless $acquired->{state} eq 'active';
 $ENV{AZEDARACH_VALIDATION_REQUEST_ID} = $request_id;
 $ENV{AZEDARACH_VALIDATION_CLASS} = $class;
 $ENV{AZEDARACH_VALIDATION_PROFILE} = $profile;
 $ENV{AZEDARACH_VALIDATION_SOURCE_REVISION} = $revision;
+$ENV{AZEDARACH_VALIDATION_SCOPE} = $scope;
+$ENV{AZEDARACH_VALIDATION_PURPOSE} = $purpose;
+$ENV{AZEDARACH_VALIDATION_EXECUTION} = 'executed';
+$ENV{AZEDARACH_VALIDATION_AUTHORITATIVE_REQUEST_ID} = $request_id;
+$ENV{AZEDARACH_VALIDATION_OVERRIDE} = $override;
 my ($evidence_fh, $evidence_file) = tempfile('azedarach-validation-evidence-XXXXXX', TMPDIR => 1, UNLINK => 0);
 close $evidence_fh;
 $ENV{AZEDARACH_VALIDATION_EVIDENCE_FILE} = $evidence_file;
@@ -375,6 +429,8 @@ if ($production_install_overlapped && $exit_code == 0) {
 
 merge_whole_gate_evidence($evidence_file, {
     held => JSON::PP::true, request_id => $request_id, class => $class,
+    scope => $scope, purpose => $purpose, execution => 'executed',
+    authoritative_request_id => $request_id, override => $override,
     profile => $profile, source_revision => $revision, present => JSON::PP::true,
     overlap_detected => $overlap_detected ? JSON::PP::true : JSON::PP::false,
     external_go_processes => $max_external_go,
@@ -421,9 +477,9 @@ sub authorize_nested {
     my $response = {ok => JSON::PP::false, nonce => $nonce, error => 'invalid nested validation authorization request'};
     if ($request && ($request->{request_id} || '') eq $held_request) {
         local $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN} = $token;
-        my $ok = eval { control_capture($az_path, 'validation', 'authorize-nested', '--request', $held_request, '--class', ($request->{class} || '')); 1 };
+        my $ok = eval { control_capture($az_path, 'validation', 'authorize-nested', '--request', $held_request, '--class', ($request->{class} || ''), '--scope', ($request->{scope} || ''), '--purpose', ($request->{purpose} || '')); 1 };
         if ($ok) {
-            $response = {ok => JSON::PP::true, nonce => $nonce, class => $ENV{AZEDARACH_VALIDATION_CLASS}, profile => $ENV{AZEDARACH_VALIDATION_PROFILE}, source_revision => $ENV{AZEDARACH_VALIDATION_SOURCE_REVISION}};
+            $response = {ok => JSON::PP::true, nonce => $nonce, class => $ENV{AZEDARACH_VALIDATION_CLASS}, scope => $ENV{AZEDARACH_VALIDATION_SCOPE}, purpose => $ENV{AZEDARACH_VALIDATION_PURPOSE}, profile => $ENV{AZEDARACH_VALIDATION_PROFILE}, source_revision => $ENV{AZEDARACH_VALIDATION_SOURCE_REVISION}};
         } else {
             $response->{error} = 'daemon rejected nested validation authorization';
         }
@@ -472,7 +528,7 @@ sub merge_whole_gate_evidence {
         local $/;
         $existing = decode_json(<$in> // '{}');
         close $in;
-        for my $field (qw(held request_id class profile source_revision)) {
+        for my $field (qw(held request_id class scope purpose execution authoritative_request_id override profile source_revision)) {
             die "accumulated validation lease evidence identity changed\n" if defined($existing->{$field}) && "$existing->{$field}" ne "$whole->{$field}";
         }
     }
@@ -528,6 +584,11 @@ sub clear_control_authority_environment {
         AZEDARACH_VALIDATION_CLASS
         AZEDARACH_VALIDATION_PROFILE
         AZEDARACH_VALIDATION_SOURCE_REVISION
+        AZEDARACH_VALIDATION_SCOPE
+        AZEDARACH_VALIDATION_PURPOSE
+        AZEDARACH_VALIDATION_EXECUTION
+        AZEDARACH_VALIDATION_AUTHORITATIVE_REQUEST_ID
+        AZEDARACH_VALIDATION_OVERRIDE
     )};
 }
 

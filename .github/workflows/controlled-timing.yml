@@ -1,0 +1,38 @@
+name: Controlled Timing
+
+on:
+  workflow_dispatch:
+
+jobs:
+  timing:
+    # This versioned label must identify a dedicated runner with the documented
+    # CPU/RAM image. GitHub-hosted labels are deliberately not authoritative.
+    runs-on: [self-hosted, azedarach-timing-v1]
+    concurrency:
+      group: azedarach-controlled-timing-v1
+      cancel-in-progress: false
+    env:
+      CI: "true"
+      AZEDARACH_TIMING_CONTROLLED: "1"
+      AZEDARACH_TIMING_RUNNER: "azedarach-timing-v1"
+      AZEDARACH_TIMING_TOOLCHAIN: "go1.24.7"
+      AZEDARACH_TIMING_RESOURCES: "8-vcpu-16-gib-exclusive"
+      AZEDARACH_TIMING_CACHE_STATE: "clean-per-sample"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.24.7
+          cache: false
+      - name: Verify controlled runner identity
+        run: |
+          test "$(go env GOVERSION)" = "go1.24.7"
+          test "$RUNNER_ENVIRONMENT" = "self-hosted"
+      - name: Run repeated authoritative timing gate
+        run: just test-ci-timing
+      - name: Preserve all sample and aggregate diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: controlled-timing-reports
+          path: .tmp/test-timing/

@@ -47,7 +47,12 @@ test:
 # Canonical machine-readable timing profiles. Additional flags can be passed
 # after the recipe name, for example: just test-timing focused --package ./internal/cli --run TestName
 test-timing PROFILE="focused" *ARGS:
-    CLASS=shared; case "{{PROFILE}}" in cold|cached|race|migration-clone) CLASS=aggregate;; esac; ./scripts/with-machine-validation-lease --class "$CLASS" --profile test-{{PROFILE}} -- go run ./cmd/test-timing --profile {{PROFILE}} {{ARGS}}
+    CLASS=shared; case "{{PROFILE}}" in cold|cached|ci-timing|race|migration-clone) CLASS=aggregate;; esac; ./scripts/with-machine-validation-lease --class "$CLASS" --profile test-{{PROFILE}} -- go run ./cmd/test-timing --profile {{PROFILE}} {{ARGS}}
+
+# Authoritative only on the versioned controlled runner described in
+# docs/26-test-timing-profiles.md; the runner refuses incomplete attestations.
+test-ci-timing:
+    just test-timing ci-timing --samples 3
 
 test-fast *ARGS:
     just test-timing focused {{ARGS}}
@@ -77,6 +82,11 @@ test-jaeger-workload:
 
 merge-gate:
     ./scripts/with-machine-validation-lease --class aggregate --profile merge-gate -- just _merge-gate-unleased
+
+# Reviewer-owned exact-revision evidence. The daemon additionally requires the
+# current durable review lease and review epoch before admitting this purpose.
+review-gate:
+    ./scripts/with-machine-validation-lease --class aggregate --scope ticket --purpose review_evidence --profile merge-gate -- just _merge-gate-unleased
 
 _merge-gate-unleased:
     just build

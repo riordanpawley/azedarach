@@ -1,6 +1,8 @@
 package domain
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -55,6 +57,42 @@ type IssueObservationEvent struct {
 	SessionID     string                    `json:"session_id,omitempty"`
 	WorktreePath  string                    `json:"worktree_path,omitempty"`
 	Payload       map[string]any            `json:"payload,omitempty"`
+}
+
+// IssueObservationEventSearchFields returns the human-facing payload surface
+// shared by the durable FTS projection and the final semantic search filter.
+func IssueObservationEventSearchFields(event IssueObservationEvent) []string {
+	fields := make([]string, 0, 5)
+	for _, key := range []string{"summary", "body", "message", "line", "evidence"} {
+		if value, ok := event.Payload[key]; ok {
+			text := strings.TrimSpace(fmt.Sprint(value))
+			if text != "" {
+				fields = append(fields, text)
+			}
+		}
+	}
+	return fields
+}
+
+// IssueObservationEventMatchesQuery applies the canonical content-query term
+// semantics after FTS has selected a bounded candidate set.
+func IssueObservationEventMatchesQuery(event IssueObservationEvent, query string) bool {
+	wanted := ContentQueryTerms(query)
+	if len(wanted) == 0 {
+		return true
+	}
+	available := make(map[string]struct{})
+	for _, field := range IssueObservationEventSearchFields(event) {
+		for _, term := range ContentQueryTerms(field) {
+			available[term] = struct{}{}
+		}
+	}
+	for _, term := range wanted {
+		if _, ok := available[term]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // IssueObservationEventTypeRequiresAuthority reports event types that may only
