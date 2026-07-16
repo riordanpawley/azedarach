@@ -208,6 +208,7 @@ test -e "$repository_payload"
 
 # The remaining lease-control fixtures exercise the controlled-capacity path.
 # Ordinary ticket development bypasses this wrapper entirely.
+export AZEDARACH_VALIDATION_SCOPE=ticket
 export AZEDARACH_VALIDATION_PURPOSE=capacity
 
 reused_payload="$fixture/reused-payload-ran"
