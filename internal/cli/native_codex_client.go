@@ -123,10 +123,16 @@ func (c *codexRPCClient) read(reader io.Reader) {
 	if err == nil {
 		err = io.EOF
 	}
+	c.terminalDisconnect(err)
+}
+
+func (c *codexRPCClient) terminalDisconnect(err error) {
 	c.disconnected.Store(true)
 	c.termMu.Lock()
-	c.terminalErr = err
-	close(c.done)
+	if c.terminalErr == nil {
+		c.terminalErr = err
+		close(c.done)
+	}
 	c.termMu.Unlock()
 }
 
@@ -440,7 +446,7 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 			})
 			active = active || newlyActive
 			if response.Outcome == "not_ready" && clientState.Pending[delivery.envelope.IntentKey+"\x00"+incarnation] != "" {
-				fmt.Fprintf(os.Stderr, "\nCodex submission ambiguous for intent %q, thread %q; automatic retry disabled. Inspect the thread, then run: az ai native-codex-client --recover-intent %s --recover-thread %s --recover-action delivered|discard\n", delivery.envelope.IntentKey, threadID, delivery.envelope.IntentKey, threadID)
+				fmt.Fprintf(os.Stderr, "\nCodex submission ambiguous for intent %q, thread %q; automatic retry disabled. Inspect the thread, then run: az ai native-codex-client --recover-intent %s --recover-thread %s --recover-action delivered|discard\n", delivery.envelope.IntentKey, threadID, shellQuote(delivery.envelope.IntentKey), shellQuote(threadID))
 			}
 			if newlyActive {
 				signalActivity("user_prompt_submit")
@@ -449,6 +455,8 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 		}
 	}
 }
+
+func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 
 // RecoverNativeCodexIntent resolves an ambiguous pending submission without
 // contacting Codex. The caller must inspect the exact bound thread first.

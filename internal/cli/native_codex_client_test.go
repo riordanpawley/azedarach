@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -113,14 +114,58 @@ func TestRecoverNativeCodexDeliveredStableReplay(t *testing.T) {
 	}
 	reloaded, _ := loadNativeCodexState(path, true)
 	calls := 0
+	var token string
 	for n := 0; n < 2; n++ {
 		r, _ := acceptNativeCodexDelivery(nativeCodexEnvelope{IntentKey: "i", AgentIncarnation: "inc"}, nil, false, path, &reloaded, func(string) error { calls++; return nil })
 		if r.Outcome != "accepted" || r.AcknowledgementToken == "" {
 			t.Fatalf("response=%+v", r)
 		}
+		if n == 0 {
+			token = r.AcknowledgementToken
+		} else if r.AcknowledgementToken != token {
+			t.Fatalf("ack changed: %q != %q", r.AcknowledgementToken, token)
+		}
 	}
 	if calls != 0 {
 		t.Fatalf("submission calls=%d", calls)
+	}
+}
+
+func TestNativeCodexRecoveryShellQuote(t *testing.T) {
+	if got := shellQuote("intent with 'quote'"); got != `'intent with '\''quote'\'''` {
+		t.Fatalf("quote=%q", got)
+	}
+}
+
+func TestCodexRPCDisconnectBroadcastsToCallAndObservers(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	go io.Copy(io.Discard, server)
+	c := &codexRPCClient{stdin: client, waits: map[string]chan codexRPCMessage{}, done: make(chan struct{})}
+	result := make(chan error, 1)
+	go func() { result <- c.call(context.Background(), "turn/start", nil, nil) }()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		c.waitMu.Lock()
+		waiting := len(c.waits) > 0
+		c.waitMu.Unlock()
+		if waiting {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	c.terminalDisconnect(errors.New("connection lost"))
+	if err := <-result; err == nil {
+		t.Fatal("in-flight call did not observe disconnect")
+	}
+	select {
+	case <-c.done:
+	case <-time.After(time.Second):
+		t.Fatal("observer did not wake")
+	}
+	if err := c.call(context.Background(), "turn/start", nil, nil); err == nil {
+		t.Fatal("subsequent call did not fail")
 	}
 }
 
