@@ -252,7 +252,7 @@ func codexRequestNeedsHumanDecision(method string) bool {
 // NativeCodexClient runs the production app-server client used by managed
 // Codex sessions. Human bytes and daemon deliveries meet in one event loop, so
 // the daemon can never submit through a second terminal or resume process.
-func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodexClientOptions) error {
+func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodexClientOptions) (retErr error) {
 	childCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if deps == nil || deps.DaemonClient == nil {
@@ -301,7 +301,6 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 	if err != nil {
 		return fmt.Errorf("start Codex app-server proxy: %w", err)
 	}
-	defer func() { _ = rpc.command.Process.Kill(); _ = rpc.command.Wait() }()
 	var initialize map[string]any
 	if err := rpc.call(ctx, "initialize", map[string]any{"clientInfo": map[string]any{"name": "azedarach", "title": "Azedarach", "version": "1"}}, &initialize); err != nil {
 		return err
@@ -331,13 +330,9 @@ func NativeCodexClient(ctx context.Context, deps *Dependencies, opts NativeCodex
 	stdinDone := readNativeCodexInputContext(childCtx, os.Stdin, input)
 	defer func() {
 		cancel()
-		select {
-		case <-authorityDone:
-		case <-time.After(time.Second):
-		}
-		select {
-		case <-stdinDone:
-		case <-time.After(time.Second):
+		retErr = errors.Join(retErr, waitWorkerDone(authorityDone, time.Second), waitWorkerDone(stdinDone, time.Second))
+		if rpc != nil && rpc.command != nil {
+			retErr = errors.Join(retErr, rpc.command.Process.Kill(), rpc.command.Wait())
 		}
 	}()
 	composer := make([]byte, 0, 256)
@@ -498,6 +493,15 @@ func strictNativeCodexState(path string) (nativeCodexState, error) {
 }
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
+
+func waitWorkerDone(done <-chan struct{}, timeout time.Duration) error {
+	select {
+	case <-done:
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("worker teardown timeout")
+	}
+}
 
 // RecoverNativeCodexIntent resolves an ambiguous pending submission without
 // contacting Codex. The caller must inspect the exact bound thread first.
