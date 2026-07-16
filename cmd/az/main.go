@@ -1491,7 +1491,7 @@ func runTUIWithOptions(cfg *config.Config, opts ...app.Option) {
 			exitProcess(exitCode)
 		}
 	}()
-	if cleanup := ownedJustRunScopedDaemonCleanup(); cleanup != nil {
+	if cleanup := ownedManagedRunScopedDaemonCleanup(); cleanup != nil {
 		defer func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -1527,8 +1527,8 @@ func validateTUILaunchContext() error {
 	return fmt.Errorf("refusing to start the TUI from an Azedarach development worktree while AZEDARACH_DAEMON_SCOPE=%q uses the shared production daemon; set AZEDARACH_DAEMON_SCOPE=worktree when intentionally testing this worktree's azd", os.Getenv("AZEDARACH_DAEMON_SCOPE"))
 }
 
-func ownedJustRunScopedDaemonCleanup() func(context.Context) error {
-	if strings.TrimSpace(os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")) != "just-run" {
+func ownedManagedRunScopedDaemonCleanup() func(context.Context) error {
+	if strings.TrimSpace(os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")) != "managed-run" {
 		return nil
 	}
 	cwd, err := os.Getwd()

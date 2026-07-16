@@ -116,7 +116,9 @@ func (d *Daemon) handleBoardViewSave(ctx context.Context, req protocol.RequestEn
 				scope = protocol.GlobalViewScope{Kind: protocol.GlobalViewScopeAllProjects}
 			}
 		}
-		if err := d.validateGlobalViewScopeProjects(ctx, scope); err != nil {
+		var err error
+		scope, err = d.resolveGlobalViewScopeProjects(ctx, scope)
+		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
 		}
 		globalRecord, err := d.userStore.SaveGlobalView(ctx, protocol.GlobalViewRecord{View: body.View, Scope: scope})

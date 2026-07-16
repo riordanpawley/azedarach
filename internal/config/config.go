@@ -12,6 +12,7 @@ import (
 type Config struct {
 	CLITool          string                 `json:"cliTool"`
 	IssueTracker     IssueTrackerConfig     `json:"issueTracker"`
+	Gate             GateConfig             `json:"gate"`
 	Git              GitConfig              `json:"git"`
 	GitHooks         GitHooksConfig         `json:"githooks"`
 	Keyboard         KeyboardConfig         `json:"keyboard"`
@@ -28,6 +29,11 @@ type Config struct {
 	Spec             SpecConfig             `json:"spec"`
 	Orchestration    OrchestrationConfig    `json:"orchestration"`
 	Diagnostics      DiagnosticsConfig      `json:"diagnostics"`
+}
+
+// GateConfig selects the project-owned command run by `az gate`.
+type GateConfig struct {
+	Command string `json:"command"`
 }
 
 type IssueTrackerConfig struct {
@@ -327,6 +333,7 @@ func DefaultConfig() *Config {
 			SyncInitCommands:  []string{},
 			AsyncInitCommands: []string{},
 		},
+		Gate: GateConfig{},
 		IssueResources: IssueResourcesConfig{
 			Env:                        map[string]string{},
 			PrepareCommands:            []string{},

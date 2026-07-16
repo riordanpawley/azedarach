@@ -29,6 +29,9 @@ are suppressed by the durable debounce timestamp.
 `orchestration.scope_identity` uses refreshed durable projection state.
 `orchestration.scope_singleton` is hybrid: refresh the durable exact-scope
 lease, then compare its session identity with live tmux runtime.
+`orchestration.rooted_bootstrap_delivery` is hybrid: refresh the durable
+accepted prompt acknowledgement, then compare its session, prompt hash, and
+runtime marker with live tmux before trusting the attached agent.
 `orchestration.project_completion` is hybrid: refresh durable issue, review,
 interaction, orchestration, and session projections, then compare runtime
 presence with live tmux. `runtime.reconcile` exposes both mappings.
@@ -64,6 +67,27 @@ The supported operator surfaces are:
 and returns its tmux target. The CLI may then exec the user's terminal attach;
 the daemon handler must never perform a blocking terminal attach.
 
+Rooted startup is scope-authoritative rather than ticket-type-derived. The
+daemon acquires the rooted lease before agent launch, supplies an explicit
+orchestrator-only prompt whose first commands are `az prime`, rooted status,
+and rooted watch, and does not report startup success until the complete
+file-backed prompt has been acknowledged. The launcher writes the rooted
+orchestrator desired-session product directly; it never leaves a generic worker
+desired-running product for the same root, and exact-scope startup retires any
+legacy dual worker intent before accepting or recovering the runtime. A durable SQLite projection binds
+that acknowledgement to the exact project, root, session, prompt hash, and a
+cryptographically random marker in the live tmux environment. The marker is
+not itself a process identity; trust comes from comparing it with the refreshed
+accepted acknowledgement while holding the exact rooted-scope transition lock.
+`session restart-all` invalidates acknowledgement before interruption, launches
+the replacement under that same cross-process lock, and re-delivers and
+persists the rooted prompt acknowledgement before reporting success. A
+cancelled replacement remains unacknowledged and must be repaired by the next
+rooted start. Deterministic session ID reuse after stop, runtime loss, or
+process replacement cannot inherit bootstrap trust. The
+rooted session must never receive worker or contributor authority merely because
+the root ticket is not typed as an epic.
+
 `stop` is also exact-scope and daemon-authoritative. It first records paused
 lease intent without releasing the durable scope or cursor, then requests agent
 exit, closes the residual shell, and falls back to bounded tmux cleanup. Missing
@@ -84,6 +108,7 @@ paths rather than transitional adapters:
 | Contract | Executable evidence |
 | --- | --- |
 | Exact-scope singleton start, attach, stale-runtime recovery | `TestProjectOrchestratorSessionStartAttachesExactScopeSingleton` |
+| Rooted role bootstrap, first action, and attached-session repair | `TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap` |
 | Bounded project scheduling and stable ordering | `TestOrchestrationCandidateOrderingIsStable`, `TestProjectOrchestratorLoopPrioritizesReviewAndPersistsCursor`, `TestProjectOrchestratorSnapshotKeepsStartsActionableAlongsideReview`, `TestProjectStartIntentDoesNotGloballyBlockOnActionableReview` |
 | Foreign ownership exclusion and claim races | `TestProjectOrchestrationSnapshotRefreshesCrossProcessOwnership`, `TestProjectReviewQueueRefreshesCrossProcessReviewLease` |
 | Human request, advisor discussion, edited/direct answer, atomic resolution | `TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifecycle`, `TestInteractionStructuredProposalCanBeHumanEditedAndAtomicallyResolved` |
@@ -100,7 +125,7 @@ partial package run or future refactor from silently dropping a required leg.
 Run the focused acceptance gate with:
 
 ```bash
-go test ./internal/daemon -run 'TestProject(OrchestrationEndToEndAcceptanceInventory|OrchestratorSessionStartAttachesExactScopeSingleton|OrchestratorLoopPrioritizesReviewAndPersistsCursor|OrchestrationSnapshotRefreshesCrossProcessOwnership)|TestInteraction(DiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifecycle|StructuredProposalCanBeHumanEditedAndAtomicallyResolved)|TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings|TestOrchestrator(LifecycleGracePersistsAcrossRestartAndResets|WakeIsDurablyDebouncedAcrossStores|LeaseAuthorityRefreshesStaleCacheBeforeAcquire)' -count=1
+go test ./internal/daemon -run 'TestProject(OrchestrationEndToEndAcceptanceInventory|OrchestratorSessionStartAttachesExactScopeSingleton|OrchestratorLoopPrioritizesReviewAndPersistsCursor|OrchestrationSnapshotRefreshesCrossProcessOwnership)|TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap|TestInteraction(DiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifecycle|StructuredProposalCanBeHumanEditedAndAtomicallyResolved)|TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings|TestOrchestrator(LifecycleGracePersistsAcrossRestartAndResets|WakeIsDurablyDebouncedAcrossStores|LeaseAuthorityRefreshesStaleCacheBeforeAcquire)' -count=1
 go test ./internal/daemon/state -run 'TestOrchestrator(LifecycleGracePersistsAcrossRestartAndResets|WakeIsDurablyDebouncedAcrossStores)' -count=1
 ```
 

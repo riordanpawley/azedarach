@@ -4708,16 +4708,13 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 		if aggregate == nil {
 			return taskIntegrationReadinessResult{IssueID: task.ID.String(), ParentIssueID: parentIssueID, Ready: false, ContextRisk: contextRisk, Reasons: []string{"no aggregate validation is present in the daemon validation projection"}}, nil
 		}
-		if aggregate.State != domain.ValidationRequestCompleted || !aggregate.Evidence.Present || aggregate.Evidence.OverlapDetected || aggregate.Evidence.SourceRevision != aggregate.SourceRevision {
+		if aggregate.State != domain.ValidationRequestCompleted || !aggregate.Evidence.Present || aggregate.Evidence.SourceRevision != aggregate.SourceRevision {
 			reasons := []string{fmt.Sprintf("aggregate validation %s is not valid integration evidence", aggregate.RequestID)}
 			if aggregate.State != domain.ValidationRequestCompleted {
 				reasons = append(reasons, fmt.Sprintf("aggregate validation outcome is %s", aggregate.State))
 			}
 			if !aggregate.Evidence.Present {
 				reasons = append(reasons, "aggregate validation did not record machine-load evidence")
-			}
-			if aggregate.Evidence.OverlapDetected {
-				reasons = append(reasons, fmt.Sprintf("aggregate validation overlapped %d external Go processes", aggregate.Evidence.ExternalGoProcesses))
 			}
 			if aggregate.Evidence.SourceRevision != aggregate.SourceRevision {
 				reasons = append(reasons, fmt.Sprintf("aggregate validation evidence revision %q does not match candidate revision %q", aggregate.Evidence.SourceRevision, aggregate.SourceRevision))

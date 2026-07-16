@@ -10993,7 +10993,7 @@ func reviewValidationEvidence(requestID, revision string, overlap bool, external
 	}
 }
 
-func TestTaskIntegrationReadinessRejectsOverlappedAggregateEvidence(t *testing.T) {
+func TestTaskIntegrationReadinessTreatsPublicationOverlapAsDiagnostic(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-overlapped-aggregate"
 	repoDir := t.TempDir()
@@ -11025,8 +11025,8 @@ func TestTaskIntegrationReadinessRejectsOverlappedAggregateEvidence(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Ready || result.AggregateValidation == nil || !strings.Contains(strings.Join(result.Reasons, "\n"), "overlapped 2 external Go processes") {
-		t.Fatalf("result = %+v, want rejected overlapped aggregate evidence", result)
+	if result.Ready || result.AggregateValidation == nil || strings.Contains(strings.Join(result.Reasons, "\n"), "overlapped") || !strings.Contains(strings.Join(result.Reasons, "\n"), "candidate worktree is required") {
+		t.Fatalf("result = %+v, want overlap accepted before exact-worktree binding", result)
 	}
 }
 

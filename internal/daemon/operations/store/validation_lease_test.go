@@ -66,6 +66,51 @@ func TestValidationLeaseSerializesAggregateAndPreservesSharedConcurrency(t *test
 	assert.Equal(t, []string{"shared-bounded", "safe"}, validationRequestIDs(snapshot.Active))
 }
 
+func TestPublicationValidationStartsImmediatelyAndRetiresLegacyDevelopmentAdmission(t *testing.T) {
+	ctx := context.Background()
+	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC)
+	ttl := time.Minute
+	capacity := func(id string) domain.ValidationAcquire {
+		return domain.ValidationAcquire{RequestID: id, LeaseToken: testValidationToken, ProjectID: "project", IssueID: "dnb", Class: domain.ValidationClassShared, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeCapacity, IsolationMode: "worktree", EnvironmentFingerprint: "toolchain", Override: domain.ValidationOverrideNone, Profile: id, Command: "go test", SourceRevision: "abc123", TTL: ttl}
+	}
+
+	activeCapacity, err := store.AcquireValidation(ctx, capacity("capacity"), now)
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationRequestActive, activeCapacity.State)
+	legacyDevelopment, err := store.AcquireValidation(ctx, capacity("legacy-development"), now)
+	require.NoError(t, err)
+	require.Equal(t, domain.ValidationRequestActive, legacyDevelopment.State)
+	db, err := store.dbHandle()
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `UPDATE daemon_validation_requests SET purpose='development' WHERE request_id='legacy-development'`)
+	require.NoError(t, err)
+
+	publication, err := store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "push", LeaseToken: testValidationToken, ProjectID: "project", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeRepository, Purpose: domain.ValidationPurposePushGate, IsolationMode: "repository-family", EnvironmentFingerprint: "toolchain", Override: domain.ValidationOverrideNone, Profile: "merge-gate", Command: "just merge-gate", SourceRevision: "abc123", TTL: ttl}, now.Add(time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationRequestActive, publication.State, "publication must not queue behind capacity validation")
+	duplicatePublication := domain.ValidationAcquire{RequestID: "push-duplicate", LeaseToken: testValidationToken, ProjectID: "project", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeRepository, Purpose: domain.ValidationPurposePushGate, IsolationMode: "repository-family", EnvironmentFingerprint: "toolchain", Override: domain.ValidationOverrideNone, Profile: "merge-gate", Command: "just merge-gate", SourceRevision: "abc123", TTL: ttl}
+	duplicate, err := store.AcquireValidation(ctx, duplicatePublication, now.Add(2*time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, domain.ValidationRequestActive, duplicate.State, "publication must not join and wait behind another publication run")
+	assert.Equal(t, domain.ValidationExecutionExecuted, duplicate.Execution)
+
+	snapshot, err := store.ValidationSnapshot(ctx, "project", now.Add(2*time.Second), ttl)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"capacity", "push", "push-duplicate"}, validationRequestIDs(snapshot.Active))
+	var retired *domain.ValidationRequest
+	for i := range snapshot.Recent {
+		if snapshot.Recent[i].RequestID == "legacy-development" {
+			retired = &snapshot.Recent[i]
+			break
+		}
+	}
+	require.NotNil(t, retired)
+	assert.Equal(t, domain.ValidationRequestCancelled, retired.State)
+	assert.Contains(t, retired.Outcome, "no longer uses daemon admission")
+}
+
 func TestValidationLeaseSharedBypassBoundSurvivesStoreReplacement(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "project.db")
@@ -465,7 +510,10 @@ func TestValidationLeaseCompatibilityPolicyAllowsReviewEvidenceToSatisfyReposito
 	review.ReviewEpochEventID = 42
 	source, err := store.AcquireValidation(ctx, review, now)
 	require.NoError(t, err)
-	_, err = store.FinishValidation(ctx, source.RequestID, review.LeaseToken, domain.ValidationRequestCompleted, "exit 0", validationEvidenceFor(source), now.Add(time.Second), time.Minute)
+	reviewEvidence := validationEvidenceFor(source)
+	reviewEvidence.OverlapDetected = true
+	reviewEvidence.ExternalGoProcesses = 2
+	_, err = store.FinishValidation(ctx, source.RequestID, review.LeaseToken, domain.ValidationRequestCompleted, "exit 0", reviewEvidence, now.Add(time.Second), time.Minute)
 	require.NoError(t, err)
 
 	push := reusableValidationAcquire("push")
@@ -527,7 +575,7 @@ func TestValidationLeaseCoalescingSurvivesStoreRestart(t *testing.T) {
 }
 
 func reusableValidationAcquire(id string) domain.ValidationAcquire {
-	return domain.ValidationAcquire{RequestID: id, LeaseToken: testValidationToken, ProjectID: "project", IssueID: "dmm", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeDevelopment, IsolationMode: "worktree", EnvironmentFingerprint: "go1.25-darwin-arm64", Override: domain.ValidationOverrideNone, Profile: "cold", Command: "just test", SourceRevision: "abc123", TTL: time.Minute}
+	return domain.ValidationAcquire{RequestID: id, LeaseToken: testValidationToken, ProjectID: "project", IssueID: "dmm", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeCapacity, IsolationMode: "worktree", EnvironmentFingerprint: "go1.25-darwin-arm64", Override: domain.ValidationOverrideNone, Profile: "cold", Command: "just test", SourceRevision: "abc123", TTL: time.Minute}
 }
 
 func validationEvidenceFor(request domain.ValidationRequest) domain.ValidationEvidence {

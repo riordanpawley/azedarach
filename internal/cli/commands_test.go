@@ -57,7 +57,7 @@ func TestRenderPrimeOrchestrationSectionExplainsRuntimeContinuationGuard(t *test
 		ContinuationContract: "consume the durable cursor and continue",
 		ValidationCapacity:   &domain.ValidationSnapshot{Revision: 4, Active: []domain.ValidationRequest{{RequestID: "gate"}}, Queued: []domain.ValidationRequest{{RequestID: "waiter"}}},
 	})
-	for _, want := range []string{"Runtime persistence guard: wake-required", "direct nested root active", "consume the durable cursor and continue", "cursor=17", "Validation capacity: active=1 queued=1 revision=4"} {
+	for _, want := range []string{"Runtime persistence guard: wake-required", "direct nested root active", "consume the durable cursor and continue", "cursor=17", "Validation capacity: active=1 queued=1 revision=4", "inspect with `az validation status`"} {
 		if !strings.Contains(section, want) {
 			t.Fatalf("prime orchestration section missing %q:\n%s", want, section)
 		}
@@ -4366,7 +4366,7 @@ func TestLogCommandPrintsSourcePrefixedPrettyLines(t *testing.T) {
 	}
 }
 
-func TestResolveSessionLogDirFor_UsesScopedWorktreeDirInJustRunMode(t *testing.T) {
+func TestResolveSessionLogDirFor_UsesScopedWorktreeDirInManagedRunMode(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
 	worktree := filepath.Join(base, "wt")
@@ -4386,7 +4386,7 @@ func TestResolveSessionLogDirFor_UsesScopedWorktreeDirInJustRunMode(t *testing.T
 	}
 
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "managed-run")
 	t.Setenv("PATH", "")
 	t.Chdir(nested)
 
@@ -4418,7 +4418,7 @@ func TestLogCommandReadsScopedWorktreeDaemonAndTUILogs(t *testing.T) {
 		t.Fatalf("WriteFile(worktree .git): %v", err)
 	}
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
-	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "just-run")
+	t.Setenv("AZEDARACH_DAEMON_SCOPE_SOURCE", "managed-run")
 	t.Setenv("PATH", "")
 	t.Chdir(nested)
 

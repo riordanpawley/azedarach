@@ -2,21 +2,21 @@
 │CLOSE BLOCKED                                                                                 │
 │──────────────────────────────────────────────────────────────────────────────────────────────│
 ││                                                              Actions                        │
-││ Issue: gav                                                   ───────────────────────────────│
+││ Issue: dhb                                                   ───────────────────────────────│
 ││                                                              > r Retry close                │
 ││ The issue was not closed.                                      Run the close again after …  │
-││                                                                w Create ancestor & retry    │
-││                                                                Create the missing parent …  │
+││                                                                y Accept findings & retry    │
+││                                                                Record your acceptance, th…  │
 ││ Problem                                                        esc Cancel                   │
-││ refusing to merge child issue gav directly into base: no       Leave the issue in its pre…  │
-││ active ancestor worktree branch was found; run `az                                          │
-││ worktree create gat`, then close the child into that                                        │
-││ target                                                                                      │
+││ cannot close issue dhb: human-facing investigation lacks       Leave the issue in its pre…  │
+││ explicit issue-specific findings acceptance. Next: fix the                                  │
+││ listed blockers, refresh, then retry                                                        │
 ││                                                                                             │
 ││                                                                                             │
 ││ Next steps                                                                                  │
 ││ - Fix the blocker described above, then retry.                                              │
-││ - Create ancestor & retry preserves child-to-parent integ…                                  │
+││ - Accept findings records explicit issue-specific human a…                                  │
+││                                                                                             │
 ││                                                                                             │
 ││                                                                                             │
 ││                                                                                             │

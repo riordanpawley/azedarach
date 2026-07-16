@@ -211,6 +211,17 @@ func seedBoardViewsPreMigrationDB(t *testing.T, dbPath string, includeCustomBoar
 			tombstoned_at TEXT,
 			PRIMARY KEY (issue_id, depends_on_id, dependency_type)
 		);
+		CREATE TABLE decisions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			local_id TEXT NOT NULL UNIQUE,
+			title TEXT NOT NULL,
+			rationale TEXT,
+			context TEXT,
+			consequences TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			deleted_at TEXT
+		);
 		INSERT INTO meta (key, value) VALUES (?, ?);
 		INSERT INTO issues (id, title, status, priority, issue_type, created_at, updated_at, lifecycle_state, closed_outcome, review_state)
 		VALUES ('az-board-open', 'Open board issue', 'open', 2, 'task', ?, ?, 'open', 'none', 'none');
@@ -218,7 +229,7 @@ func seedBoardViewsPreMigrationDB(t *testing.T, dbPath string, includeCustomBoar
 	require.NoError(t, err)
 
 	for _, migration := range orderedMigrations {
-		if migration.id == "0019_issue_observation_events" || migration.id == boardViewsMigrationID || migration.id == "0035_interaction_requests" || migration.id == "0045_issue_state_runtime_constraints" || migration.id == humanAuthorityProjectionMigrationID || migration.id == projectionDeltaAuthorityMigrationID || migration.id == decisionPropagationOutboxMigrationID || migration.id == "0049_managed_agent_incarnations" || migration.id == issueObservationEventSearchMigrationID || migration.id == mailboxObservationProjectionCutoverMigrationID {
+		if migration.id == "0019_issue_observation_events" || migration.id == boardViewsMigrationID || migration.id == "0035_interaction_requests" || migration.id == "0045_issue_state_runtime_constraints" || migration.id == humanAuthorityProjectionMigrationID || migration.id == projectionDeltaAuthorityMigrationID || migration.id == decisionPropagationOutboxMigrationID || migration.id == "0049_managed_agent_incarnations" || migration.id == issueObservationEventSearchMigrationID || migration.id == mailboxObservationProjectionCutoverMigrationID || migration.id == decisionIdempotencyMigrationID {
 			continue
 		}
 		_, err := db.Exec(`INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)`, migration.id, now)

@@ -15,6 +15,14 @@ Agent instructions for this repository. This file is the canonical source of age
 3. When the best path substantially expands the requested scope, make that expansion and its benefits explicit. Pursue it when it remains within the task's authority; otherwise, ask for the authority or decision needed rather than silently substituting an inferior shortcut.
 4. **Hotfix exception:** Apply a speed-first approach only when the user explicitly identifies the task as a hotfix. In that case, prioritize the fastest safe, targeted correction, avoid unrelated scope expansion, and record broader improvements as follow-up work instead of delaying the fix.
 
+## Dogfooding Portability Contract (Critical)
+
+1. Treat this Azedarach repository as one small consumer sample of the `az` product. Its dogfood setup is not evidence for a product default or a universal project convention.
+2. Never hardcode this repository's tools, recipes (including `just` and `review-gate`), directory layout, language or toolchain, validation profiles, issue IDs, branch naming, or workflow conventions into product code, defaults, help, or generic tests under `cmd/` or `internal/`.
+3. Consumer-specific behavior belongs in explicit project configuration, typed capability discovery, or project-owned adapters and scripts. When a capability is absent, fail clearly or degrade honestly; never report fabricated success or readiness.
+4. Tests for configurable or extensible product behavior must exercise at least one non-Azedarach consumer command or toolchain and the absent-capability path. Keep dogfood-specific expectations in repository configuration or clearly labelled integration fixtures.
+5. Before landing a dogfood-driven fix, audit product code, defaults, help, and generic tests for leaked repository assumptions and record the audit evidence.
+
 ## Working Directory
 
 Run commands from repo root:
@@ -50,14 +58,22 @@ just test-race
 just test-race-daemon
 
 # Focused daemon/client boundary checks
-./scripts/with-machine-validation-lease --class shared --profile focused-tui-cli -- go test ./internal/tui ./internal/cli
-./scripts/with-machine-validation-lease --class shared --profile focused-daemon-client -- go test ./internal/daemon/... ./internal/client/...
-./scripts/with-machine-validation-lease --class shared --profile focused-client-boundary -- go test ./internal/tui ./internal/cli ./internal/daemon/...
+go test ./internal/tui ./internal/cli
+go test ./internal/daemon/... ./internal/client/...
+go test ./internal/tui ./internal/cli ./internal/daemon/...
 ```
+
+## Local Test Determinism (Critical)
+
+1. No test run locally may make correctness depend on wall-clock duration, CPU throughput, scheduler speed or fairness, machine load, process-count capacity, or a performance budget.
+2. Do not use sleeps, short deadlines, elapsed-time assertions, CPU/load thresholds, or reduced processing capacity (for example `GOMAXPROCS`) to prove behavior locally. Use deterministic barriers, hooks, fake clocks, controlled inputs, and explicit state transitions instead.
+3. Local validation may record durations, CPU usage, process overlap, and budget comparisons for diagnostics, but those measurements must never fail or authorize a local correctness result.
+4. Command-level timeouts and concurrency caps may exist only as operational containment for hangs and machine safety. They are not semantic test inputs, performance gates, or evidence that behavior completes within a required duration.
+5. Timing and CPU-performance enforcement belongs exclusively to the controlled `ci-timing` profile (`just test-ci-timing`). That profile must fail closed unless all versioned controlled-environment markers are present, including `CI=true`, `AZEDARACH_TIMING_CONTROLLED=1`, the pinned runner/toolchain/resources, clean-per-sample cache state, and the aggregate `test-ci-timing` validation lease documented in [docs/26-test-timing-profiles.md](docs/26-test-timing-profiles.md).
 
 ## Test Hang Debugging
 
-- If `just test` appears to "hang" at a package boundary, do not rely on aggregate per-test runtimes alone. Run the suspicious package or test through `./scripts/with-machine-validation-lease --class shared --profile diagnostic -- go test -timeout <short-window> ...` so Go dumps goroutine stacks on timeout without bypassing validation admission.
+- If `just test` appears to "hang" at a package boundary, do not rely on aggregate per-test runtimes alone. Run the suspicious package or test directly with `go test -timeout <short-window> ...` so Go dumps goroutine stacks on timeout.
 - Use the stack trace to identify the exact blocked call, then inspect the test fixture for intent/runtime mismatches. Recovery and reconcile tests are especially sensitive to seeding the wrong lifecycle state.
 - For session/reconcile flows, model the intended production case explicitly:
   - recovery tests should seed a live tmux runtime with empty daemon cache when validating event publication
@@ -66,10 +82,10 @@ just test-race-daemon
 
 ## Complete Test-Failure Batch Workflow
 
-- Use `just test` (or `just test-timing cold`) for the canonical uncached machine-readable full run. It preserves the complete `go test -json` stream, bounds package concurrency with `-p=4`, emits sorted package/test durations and all failures, and enforces the committed baseline/budgets documented in [docs/26-test-timing-profiles.md](docs/26-test-timing-profiles.md). Use the distinct `cached`, `focused`, `integration`, `migration-clone`, `race`, or `boundary` profiles only for their documented semantics; do not present a focused or cached result as cold full-suite evidence.
+- Use `just test` (or `just test-timing cold`) for the canonical uncached machine-readable full run. It preserves the complete `go test -json` stream, bounds package concurrency with `-p=4`, and emits sorted package/test durations and all failures. Local timing and CPU measurements are diagnostic-only and must not fail correctness; only the controlled `ci-timing` profile enforces the committed performance baseline/budgets documented in [docs/26-test-timing-profiles.md](docs/26-test-timing-profiles.md). Use the distinct `cached`, `focused`, `integration`, `migration-clone`, `race`, or `boundary` profiles only for their documented semantics; do not present a focused or cached result as cold full-suite evidence.
 - `just merge-gate` is the required local merge contract: build once, run the cold semantic suite once, then run static and focused executable boundary guards. Integration/subprocess, migration-clone, and race profiles are change-sensitive execution-mode gates; they intentionally rerun only the contracts that need those modes.
 - When a broad validation command fails, do not fix the first visible test and repeatedly rerun in a one-test-at-a-time loop.
-- Run the complete relevant suite once with machine-readable output through the lease authority, such as `./scripts/with-machine-validation-lease --class aggregate --profile diagnostic-full -- go test -json ./... -count=1 -timeout 10m`, and preserve the output outside the repository worktree when it is too large for the terminal. Aggregate-class diagnostics require the orchestrator's validation-capacity assignment.
+- Run the complete relevant suite once with machine-readable output, such as `go test -json ./... -count=1 -timeout 10m`, and preserve the output outside the repository worktree when it is too large for the terminal. Ordinary development validation runs outside daemon admission and uses its worktree-isolated cache.
 - Extract the full set of failed tests and packages from that run, then inspect the associated output and classify failures by shared root cause. Truncated terminal output is not evidence that only the visible failure exists.
 - Repair each coherent failure class as a batch. Prefer one shared fixture or production-boundary correction when many tests violate the same contract; do not bulk-relax expectations until the intended production semantics are established.
 - After the batch repair, rerun the complete suite and collect the next complete failure set. Use focused tests for diagnosis and regression development, but never substitute isolated green tests for the complete rerun.
@@ -179,7 +195,7 @@ fd "filename" -t f internal cmd
    - `task.close`/`task.close_preflight`/`task.delete`/`task.delete_preflight`/`task.graph_readiness`/`task.complete_check` durable lifecycle, investigation disposition/acceptance, and orchestration checks -> `hybrid` (read v2 issue lifecycle and evidence projection first, then compare with live runtime)
    - `task.review_handoff` material-decision acknowledgement and external busy-equivalent session activity gates before moving to `in_review` -> `projection` (durable issue v2 lifecycle/review projection + revisioned decision change/acknowledgement observations + session activity projection; active issue self-handoff remains allowed only after material decisions are current)
    - `decision.propagation_delivery` integration-affecting decision fanout and worker wake retry -> `hybrid` (atomic durable decision audit/outbox + per-issue materialization checkpoint and authoritative exact-revision acknowledgement projection, reconciled with live tmux delivery until acknowledged; superseded and withdrawn revisions remain silent)
-   - `task.integration_readiness` worker evidence gate and `task.context_risk_closeout` repeated-local-failure gate -> `projection` (durable issue projection + mailbox/observation evidence; integration readiness also requires completed non-overlapping aggregate evidence bound to the clean exact candidate revision)
+   - `task.integration_readiness` worker evidence gate and `task.context_risk_closeout` repeated-local-failure gate -> `projection` (durable issue projection + mailbox/observation evidence; integration readiness also requires completed publication evidence bound to the clean exact candidate revision; concurrent development load is diagnostic, while controlled timing capacity remains overlap-sensitive)
    - `task.merge_base_target` branch integration target gate -> `projection` (durable issue graph + worktree projection; explicit root-to-base requests also require issue-scoped `human.input_provided` acceptance evidence)
    - `task.follow_on_merge_candidates` follow-on merge source gate -> `projection` (durable issue graph + worktree projection)
    - `orchestration.project_candidates` bounded project candidate classification -> `projection` (durable issue graph/lifecycle, ownership, session activity, and interaction projections)
@@ -195,11 +211,12 @@ fd "filename" -t f internal cmd
    - cross-project configurable views and tmux selector ordering -> `projection` (global-daemon-owned user database incrementally consumes verified per-project issue deltas plus independently keyed runtime/fact materializations; full export is bootstrap/explicit rebuild/isolated recovery only; scoped issue/session/worktree/dependency keys and explicit vector/stale/unavailable project health)
    - orchestration scope identity -> `projection` (durable project + typed rooted/project scope)
    - orchestration scope singleton -> `hybrid` (refreshed durable scope lease + live tmux runtime)
+   - rooted orchestrator bootstrap delivery -> `hybrid` (exclusive rooted-orchestrator desired-session projection + refreshed durable accepted prompt acknowledgement + live tmux runtime marker; exact-scope startup retires legacy worker intent, and restart replacement is serialized by exact rooted scope and must re-deliver and persist acknowledgement before success)
    - rooted parent orchestration continuation -> `hybrid` (durable rooted lease/cursor + refreshed direct nested-root, interaction, completion, and session projections + live tmux wake delivery)
    - project orchestration completion -> `hybrid` (refreshed issue/review/interaction/session projections + live tmux runtime)
    - keyed monotonic projection delta replay, consumer cursors, and snapshot-at-cursor reads -> `projection` (durable project delta ledger and version history; reads never reconcile or poll tmux)
    - asynchronous tmux current-state observation -> `tmux` (one daemon-owned bounded observer polls inventory and sparse pane classifications, publishes only changed disposable current-state projections with external-observation provenance, and never admits `session.runtime_observed` or advances a semantic sequence)
-   - repository-family validation capacity -> `projection` (durable daemon validation request/lease queue refreshed transactionally before aggregate/shared/safe admission; validation attribution scope and authorization purpose are independent, repository scope never fabricates a ticket or authorizes review, explicit ticket scope fails closed for missing identity, compatible exact-revision requests reuse or join one authoritative execution, overrides remain audited and cannot manufacture readiness, development admission cannot block production availability, and heartbeat expiry is recovery authority)
+   - repository-family publication validation and controlled CI timing capacity -> `projection` (durable daemon validation request/lease queue refreshed transactionally before publication/capacity admission; ordinary worktree development never enters the queue, push/review publication starts immediately despite capacity work, validation attribution scope and authorization purpose are independent, repository scope never fabricates a ticket or authorizes review, explicit ticket scope fails closed for missing identity, compatible exact-revision publication requests reuse completed evidence while concurrent publication executions start independently, overrides remain audited and cannot manufacture readiness, and heartbeat expiry is recovery authority)
 
 ### Adding New Invariants (Required Checklist)
 
@@ -293,7 +310,7 @@ If any are missing, keep issue state `in_progress` or `open`.
 - `.envrc` stores one shared direnv/nix-direnv layout per repository under `${XDG_CACHE_HOME:-$HOME/.cache}/direnv/layouts`, keyed by the canonical Git common directory, so linked worktrees reuse the warm profile without gaining checkout-local `.direnv` state. Run `nix-direnv-reload` after changing `flake.nix` or `flake.lock`.
 - `.envrc` keeps `GOPATH` and module downloads shared under the primary repo's `.azedarach/go/path`, but assigns build output to `.azedarach/go/caches/v1/<normal|race|coverage>/<main|issue-ID>`. It exports `-trimpath` through `GOFLAGS`; `AZEDARACH_GO_CACHE_ROOT` and `AZEDARACH_GOCACHE` may only restate their derived daemon-authoritative locations and are rejected when they redirect outside the project layout. `AZEDARACH_GOPATH` remains an explicit local module-download override.
 - Managed validators hold the repository-family Go cache lock shared while supported cache maintenance holds it exclusively. Cache accounting defaults to a 10 GiB soft warning plus a 28 GiB hard refusal. Override bytes with `AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES` and `AZEDARACH_GO_CACHE_HARD_LIMIT_BYTES`; opt into selected-namespace maintenance with `AZEDARACH_GO_CACHE_AUTO_MAINTAIN=1`.
-- Canonical `just merge-gate` holds the daemon-owned repository-family aggregate validation lease across its complete build/test/boundary sequence. Start builds and named test profiles through `just`; wrap any necessary raw `go test`, `go build`, `go run`, benchmark, race, or diagnostic command with `scripts/with-machine-validation-lease` so it queues before invoking Go. Aggregate admission waits for observed unleased Go work to quiesce, samples the complete leased command, and refuses overlapping evidence. Inspect live ownership and waiters without compiling Go via `just validation-status` or `just validation-watch`.
+- Canonical `just merge-gate` and `just review-gate` hold daemon-owned publication leases across their complete build/test/boundary sequences, and start immediately rather than waiting behind development or timing-capacity work. Ordinary builds, named test profiles, raw Go commands, benchmarks, race diagnostics, and boundary checks run outside daemon admission with worktree-isolated caches. Only `just test-ci-timing` uses capacity admission and waits for unleased Go work to quiesce; its overlap evidence is authoritative only on the controlled runner. Inspect live ownership without compiling Go via `just validation-status` or `just validation-watch`.
 - Production installation from the primary `main` worktree outranks development validation admission. `just build-install-run` must serialize against another production installer, but it must never wait for active shared or aggregate validation. A validation that overlaps a production install is noncanonical and must be rerun; production build, atomic install, daemon restart, and TUI availability proceed normally.
 - Use `just go-cache-inventory` before legacy cleanup. `just go-cache-clean-legacy --confirm` uses supported Go cleanup for legacy build caches; add `--include-gopath-modcache` only to remove the legacy module download cache. It never removes legacy GOPATH binaries or other user files.
 - After `direnv allow`, use normal `go ...` commands from repo root without per-command env prefixes.

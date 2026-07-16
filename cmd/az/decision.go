@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/riordanpawley/azedarach/internal/cli"
 	"github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -690,7 +691,7 @@ func runDecisionRPC(cfg *config.Config, projectDir, command string, body any, ou
 		}
 		resp, err := deps.DaemonClient.Command(ctx, protocol.RequestEnvelope{
 			ProtocolVersion: protocol.CurrentVersion,
-			RequestID:       naming.RequestID(fmt.Sprintf("%s-%d", command, time.Now().UnixNano())),
+			RequestID:       naming.RequestID(command + "-" + uuid.NewString()),
 			Kind:            protocol.EnvelopeKindCommand,
 			Command:         command,
 			SentAt:          time.Now().UTC(),
@@ -1022,7 +1023,7 @@ func printDecisionUsage() {
 	fmt.Println("Usage: az decision <list|get|record|update|delete|revisit|acknowledge|sync|import|link> [arguments]")
 	fmt.Println("  list     List recorded decisions (optionally filtered by linked issue/requirement)")
 	fmt.Println("  get      Show a single decision (use --with-links for links)")
-	fmt.Println("  record   Record a new decision (id auto-allocated as dec-N)")
+	fmt.Println("  record   Record a new decision (semantic id auto-allocated from its title)")
 	fmt.Println("  update   Update fields on an existing decision")
 	fmt.Println("  delete   Soft-delete a decision (requires --confirm)")
 	fmt.Println("  revisit  Replace an older decision with a new one (creates the revises link)")
