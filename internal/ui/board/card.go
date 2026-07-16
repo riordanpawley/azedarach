@@ -1016,30 +1016,15 @@ func CardLineFootprint(s *styles.Styles, width int) int {
 	return cardLines
 }
 
-// BuildChildProgress computes done/total child counts keyed by parent task ID.
-func BuildChildProgress(tasks []domain.Task) map[string]ChildProgress {
+// BuildChildProgress converts daemon/domain aggregates for board rendering.
+func BuildChildProgress(progress []domain.BoardChildProgress) map[string]ChildProgress {
 	progressByParent := make(map[string]ChildProgress)
-	for _, task := range tasks {
-		parentID := ""
-		if task.ParentID != nil && task.ParentID.String() != "" {
-			parentID = task.ParentID.String()
-		} else {
-			for _, dep := range task.Dependencies {
-				if dep.Type == domain.DependencyParentChild && dep.ID.String() != "" {
-					parentID = dep.ID.String()
-					break
-				}
-			}
-		}
-		if parentID == "" {
+	for _, aggregate := range progress {
+		parentID := aggregate.ParentID.String()
+		if parentID == "" || aggregate.Total <= 0 {
 			continue
 		}
-		progress := progressByParent[parentID]
-		progress.Total++
-		if task.Status == domain.StatusDone {
-			progress.Done++
-		}
-		progressByParent[parentID] = progress
+		progressByParent[parentID] = ChildProgress{Done: aggregate.Done, Total: aggregate.Total}
 	}
 	return progressByParent
 }

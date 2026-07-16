@@ -92,7 +92,7 @@ func TestRender(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := Render(columns, tt.cursor, tt.selectedTasks, map[string]RuntimeSignals{}, BuildChildProgress(columnsToTasks(columns)), nil, false, nil, 0, s, tt.width, tt.height)
+			got := Render(columns, tt.cursor, tt.selectedTasks, map[string]RuntimeSignals{}, testChildProgress(columnsToTasks(columns)), nil, false, nil, 0, s, tt.width, tt.height)
 
 			goldenFile := filepath.Join("testdata", tt.name+".golden")
 
@@ -388,7 +388,15 @@ func TestCursorBounds(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Should not panic
-			_ = Render(columns, tt.cursor, make(map[string]bool), map[string]RuntimeSignals{}, BuildChildProgress(columnsToTasks(columns)), nil, false, nil, 0, s, 120, 30)
+			_ = Render(columns, tt.cursor, make(map[string]bool), map[string]RuntimeSignals{}, testChildProgress(columnsToTasks(columns)), nil, false, nil, 0, s, 120, 30)
 		})
 	}
+}
+
+func testChildProgress(tasks []domain.Task) map[string]ChildProgress {
+	projection, err := domain.ProjectTasksByBoardView(domain.DefaultBoardView(), tasks)
+	if err != nil {
+		panic(err)
+	}
+	return BuildChildProgress(projection.ChildProgress)
 }

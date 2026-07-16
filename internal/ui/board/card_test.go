@@ -1517,13 +1517,7 @@ func TestRuntimeSignalsForHeader_SuppressesTmuxMarkersWithSession(t *testing.T) 
 
 func TestBuildChildProgress(t *testing.T) {
 	parentID := naming.IssueID("az-parent")
-	tasks := []domain.Task{
-		{ID: parentID, Title: "Parent", Status: domain.StatusOpen},
-		{ID: "az-c1", Title: "Child 1", Status: domain.StatusDone, ParentID: &parentID},
-		{ID: "az-c2", Title: "Child 2", Status: domain.StatusInProgress, ParentID: &parentID},
-	}
-
-	progress := BuildChildProgress(tasks)
+	progress := BuildChildProgress([]domain.BoardChildProgress{{ParentID: parentID, Total: 2, Done: 1}})
 	got, ok := progress[parentID.String()]
 	if !ok {
 		t.Fatalf("expected child progress for %s", parentID.String())
