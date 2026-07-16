@@ -61,13 +61,58 @@ type codexAppServerInputAuthority struct {
 	leaseDuration  time.Duration
 	safetyMargin   time.Duration
 	removeGateFile func(string) error
+	recoveryWait   func(context.Context, time.Time) bool
 	mu             sync.Mutex
 	sessionMux     map[string]*sync.Mutex
+	recoveryMux    sync.Mutex
+	recoveryQueued map[string]struct{}
 }
 
 func newCodexAppServerInputAuthority(adapter codexInputTmux, daemonSocketPath string, logger *slog.Logger, runtimeConfig func(string) daemonProjectRuntimeConfig) *codexAppServerInputAuthority {
 	gateDir := filepath.Join(filepath.Dir(strings.TrimSpace(daemonSocketPath)), "agent-input-gates")
-	return &codexAppServerInputAuthority{tmux: adapter, gateDir: gateDir, logger: logger, runtimeConfig: runtimeConfig, startRPC: startCodexAppServerRPC, recoveryOwner: "daemon-agent-input-recovery", now: func() time.Time { return time.Now().UTC() }, leaseDuration: agentInputSessionLeaseDuration, safetyMargin: codexSubmissionFenceSafetyMargin, removeGateFile: os.Remove, sessionMux: map[string]*sync.Mutex{}}
+	return &codexAppServerInputAuthority{tmux: adapter, gateDir: gateDir, logger: logger, runtimeConfig: runtimeConfig, startRPC: startCodexAppServerRPC, recoveryOwner: "daemon-agent-input-recovery", now: func() time.Time { return time.Now().UTC() }, leaseDuration: agentInputSessionLeaseDuration, safetyMargin: codexSubmissionFenceSafetyMargin, removeGateFile: os.Remove, recoveryWait: waitForCodexGateRecovery, sessionMux: map[string]*sync.Mutex{}, recoveryQueued: map[string]struct{}{}}
+}
+
+func waitForCodexGateRecovery(ctx context.Context, at time.Time) bool {
+	delay := time.Until(at)
+	if delay < 0 {
+		delay = 0
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func (a *codexAppServerInputAuthority) scheduleGateRecovery(ctx context.Context, statePath string, at time.Time) {
+	if at.IsZero() || a.recoveryWait == nil {
+		return
+	}
+	a.recoveryMux.Lock()
+	if _, exists := a.recoveryQueued[statePath]; exists {
+		a.recoveryMux.Unlock()
+		return
+	}
+	a.recoveryQueued[statePath] = struct{}{}
+	a.recoveryMux.Unlock()
+	go func() {
+		if !a.recoveryWait(ctx, at) {
+			a.recoveryMux.Lock()
+			delete(a.recoveryQueued, statePath)
+			a.recoveryMux.Unlock()
+			return
+		}
+		a.recoveryMux.Lock()
+		delete(a.recoveryQueued, statePath)
+		a.recoveryMux.Unlock()
+		if err := a.RecoverStaleGates(ctx); err != nil && a.logger != nil {
+			a.logger.Warn("retry stale Codex input gate recovery", "gate", filepath.Base(statePath), "error", err)
+		}
+	}()
 }
 
 // RecoverStaleGates performs one bounded startup pass over gates whose daemon
@@ -104,6 +149,7 @@ func (a *codexAppServerInputAuthority) RecoverStaleGates(ctx context.Context) er
 			continue
 		}
 		if !acquired {
+			a.scheduleGateRecovery(ctx, statePath, recoveryLease.LeaseExpires)
 			continue
 		}
 		state.LeaseOwner = recoveryLease.LeaseOwner
@@ -502,7 +548,7 @@ func (g *codexInputGate) Restore(ctx context.Context) error {
 	if err := g.mergeHookEvents(); err != nil {
 		errs = append(errs, err)
 	}
-	clients, err := g.tmux.ListAttachedClients(ctx, g.state.SessionID)
+	clients, err := g.tmux.ListAttachedClients(ctx, "")
 	if err != nil {
 		errs = append(errs, err)
 	} else {

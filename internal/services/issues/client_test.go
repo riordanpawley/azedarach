@@ -4410,6 +4410,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0049_rooted_bootstrap_acknowledgements",
 		"0050_issue_observation_event_search",
 		"0051_agent_input_delivery",
+		"0052_agent_input_delivery_fencing",
 	}, got)
 }
 

@@ -182,7 +182,19 @@ func (c *Client) ClaimAgentInputDeliverySessionLeaseRecovery(ctx context.Context
 			}
 			n, err := result.RowsAffected()
 			acquired = n == 1
-			return err
+			if err != nil || acquired {
+				return err
+			}
+			var currentExpiry string
+			err = db.QueryRowContext(lockCtx, `SELECT lease_owner,lease_expires_at FROM agent_input_delivery_session_leases WHERE project_id=? AND session_id=? AND agent_incarnation=? AND lease_token=?`, projectID, sessionID, incarnation, expectedToken).Scan(&lease.LeaseOwner, &currentExpiry)
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			lease = AgentInputDeliverySessionLease{ProjectID: projectID, SessionID: sessionID, AgentIncarnation: incarnation, LeaseOwner: lease.LeaseOwner, LeaseToken: expectedToken, LeaseExpires: parseTimestamp(currentExpiry)}
+			return nil
 		})
 	})
 	if acquired {

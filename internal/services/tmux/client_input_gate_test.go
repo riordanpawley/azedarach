@@ -25,6 +25,18 @@ func TestListAttachedClientsFiltersExactSessionAndParsesReadOnly(t *testing.T) {
 	}
 }
 
+func TestListAttachedClientsEmptySessionListsAllClients(t *testing.T) {
+	runner := &recordingOutputRunner{outputs: []string{"/dev/tty1\taz-dlb\tread-only\t1\n/dev/tty2\tother\t\t0\n"}}
+	client := NewClient(runner, slog.Default())
+	got, err := client.ListAttachedClients(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].SessionName != "az-dlb" || got[1].SessionName != "other" {
+		t.Fatalf("clients = %+v", got)
+	}
+}
+
 func TestSetClientReadOnlyChangesOnlyReadOnlyFlag(t *testing.T) {
 	runner := &recordingRunner{}
 	client := NewClient(runner, slog.Default())

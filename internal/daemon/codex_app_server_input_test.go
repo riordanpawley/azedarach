@@ -30,10 +30,16 @@ type fakeCodexInputTmux struct {
 	failDisablePane  bool
 }
 
-func (f *fakeCodexInputTmux) ListAttachedClients(context.Context, string) ([]tmux.AttachedClientInfo, error) {
+func (f *fakeCodexInputTmux) ListAttachedClients(_ context.Context, session string) ([]tmux.AttachedClientInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]tmux.AttachedClientInfo(nil), f.clients...), nil
+	clients := make([]tmux.AttachedClientInfo, 0, len(f.clients))
+	for _, client := range f.clients {
+		if session == "" || client.SessionName == session {
+			clients = append(clients, client)
+		}
+	}
+	return clients, nil
 }
 
 func (f *fakeCodexInputTmux) SetClientReadOnly(_ context.Context, name string, readOnly bool) error {
@@ -555,6 +561,26 @@ func TestCodexInputGateRestoresNewReadOnlyAttachFromHookLedger(t *testing.T) {
 	}
 }
 
+func TestCodexInputGateRestoresRecordedClientAfterSessionSwitch(t *testing.T) {
+	adapter := &fakeCodexInputTmux{paneEnabled: true, clients: []tmux.AttachedClientInfo{{ClientName: "tty-old", SessionName: "az-dlb"}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
+	authority := newFakeCodexAuthority(t, adapter, &fakeCodexRPC{})
+	gate, err := authority.acquireGate(context.Background(), codexAuthorityRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter.mu.Lock()
+	adapter.clients[0].SessionName = "az-other"
+	adapter.mu.Unlock()
+	if err := gate.Restore(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	if adapter.clients[0].ReadOnly {
+		t.Fatalf("recorded client remained globally read-only after switching sessions: %+v", adapter.clients)
+	}
+}
+
 func TestCodexInputGateStartupRecoveryRefusesLiveOwner(t *testing.T) {
 	adapter := &fakeCodexInputTmux{paneEnabled: true, hooksEnabled: true, activeGates: 1, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb", ReadOnly: true}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
 	authority := newCodexAppServerInputAuthority(adapter, filepath.Join(t.TempDir(), "daemon.sock"), nil, func(string) daemonProjectRuntimeConfig {
@@ -591,6 +617,76 @@ func TestCodexInputGateStartupRecoveryRefusesLiveOwner(t *testing.T) {
 	adapter.mu.Unlock()
 	if _, err := os.Stat(statePath); err != nil {
 		t.Fatalf("live-owner state was removed: %v", err)
+	}
+}
+
+func TestCodexInputGateStartupRecoveryRetriesAtLiveOwnerExpiry(t *testing.T) {
+	now := time.Date(2026, 7, 17, 0, 0, 0, 0, time.UTC)
+	adapter := &fakeCodexInputTmux{paneEnabled: true, hooksEnabled: true, activeGates: 1, clients: []tmux.AttachedClientInfo{{ClientName: "tty", SessionName: "az-dlb", ReadOnly: true}}, panes: []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 42}}}
+	authority := newCodexAppServerInputAuthority(adapter, filepath.Join(t.TempDir(), "daemon.sock"), nil, func(string) daemonProjectRuntimeConfig {
+		return daemonProjectRuntimeConfig{CLITool: "codex", CodexAppServer: true}
+	})
+	client := issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	lease, acquired, err := client.ClaimAgentInputDeliverySessionLease(context.Background(), "p", "az-dlb", "thread-exact", "dead-daemon", now, time.Minute)
+	if err != nil || !acquired {
+		t.Fatalf("lease=%+v acquired=%v err=%v", lease, acquired, err)
+	}
+	authority.issueClients = func(string) *issues.Client { return client }
+	authority.now = func() time.Time { return now }
+	retryAt := make(chan time.Time, 1)
+	releaseRetry := make(chan struct{})
+	authority.recoveryWait = func(ctx context.Context, at time.Time) bool {
+		retryAt <- at
+		select {
+		case <-ctx.Done():
+			return false
+		case <-releaseRetry:
+			return true
+		}
+	}
+	if err := os.MkdirAll(authority.gateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	eventsPath := filepath.Join(authority.gateDir, "gate-dead.events")
+	if err := os.WriteFile(eventsPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := codexInputGateState{Version: codexInputGateStateVersion, ProjectID: "p", SessionID: "az-dlb", AgentIncarnation: "thread-exact", LeaseOwner: "dead-daemon", FenceToken: lease.LeaseToken, PaneID: "12", PaneInputEnabled: true, HookID: "9137", EventsPath: eventsPath, OriginalReadOnly: map[string]bool{"tty": false}}
+	raw, _ := json.Marshal(state)
+	statePath := filepath.Join(authority.gateDir, "gate-dead.json")
+	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := authority.RecoverStaleGates(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case scheduled := <-retryAt:
+		if !scheduled.Equal(lease.LeaseExpires) {
+			t.Fatalf("scheduled retry=%s want lease expiry=%s", scheduled, lease.LeaseExpires)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expiry-driven recovery was not scheduled")
+	}
+	now = lease.LeaseExpires.Add(time.Nanosecond)
+	close(releaseRetry)
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(statePath); errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("scheduled recovery did not restore the expired gate")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	if adapter.clients[0].ReadOnly || !adapter.paneEnabled || adapter.hooksEnabled {
+		t.Fatalf("scheduled recovery did not restore gate: pane=%v hooks=%v clients=%+v", adapter.paneEnabled, adapter.hooksEnabled, adapter.clients)
 	}
 }
 

@@ -58,6 +58,8 @@ func NewClient(runner CommandRunner, logger *slog.Logger) *Client {
 }
 
 // ListAttachedClients returns clients currently attached to one exact session.
+// An empty session returns all attached clients so durable gate recovery can
+// restore a recorded client even after it switches to another session.
 func (c *Client) ListAttachedClients(ctx context.Context, session string) ([]AttachedClientInfo, error) {
 	out, err := c.runner.Run(ctx, "list-clients", "-F", "#{client_name}\t#{client_session}\t#{client_flags}\t#{client_readonly}")
 	if err != nil {
@@ -69,7 +71,7 @@ func (c *Client) ListAttachedClients(ctx context.Context, session string) ([]Att
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 4 || fields[1] != session || strings.TrimSpace(fields[0]) == "" {
+		if len(fields) != 4 || (session != "" && fields[1] != session) || strings.TrimSpace(fields[0]) == "" {
 			continue
 		}
 		clients = append(clients, AttachedClientInfo{ClientName: fields[0], SessionName: fields[1], Flags: fields[2], ReadOnly: fields[3] == "1"})

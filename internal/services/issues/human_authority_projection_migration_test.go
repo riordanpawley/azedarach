@@ -29,13 +29,15 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var beforeIssues, beforeCustom, beforeMigrations, beforeAgentInput int
+			var beforeIssues, beforeCustom, beforeMigrations, beforeAgentInput, beforeFencing, beforeIntents int
 			if err = beforeDB.QueryRow(`SELECT COUNT(*) FROM issues`).Scan(&beforeIssues); err != nil {
 				t.Fatal(err)
 			}
 			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM board_views WHERE built_in=0`).Scan(&beforeCustom)
 			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&beforeMigrations)
 			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&beforeAgentInput)
+			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, agentInputDeliveryFencingMigrationID).Scan(&beforeFencing)
+			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM agent_input_delivery_intents`).Scan(&beforeIntents)
 			_ = beforeDB.Close()
 
 			client := NewClientAtPath(path, slog.Default())
@@ -69,6 +71,9 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&checksum); err != nil || checksum != agentInputDeliveryMigrationChecksum {
 				t.Fatalf("agent input checksum=%q err=%v", checksum, err)
 			}
+			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, agentInputDeliveryFencingMigrationID).Scan(&checksum); err != nil || checksum != agentInputDeliveryFencingMigrationChecksum {
+				t.Fatalf("agent input fencing checksum=%q err=%v", checksum, err)
+			}
 			if !rootedBootstrapTableExists(t, db) {
 				t.Fatal("rooted bootstrap acknowledgement table missing after clone migration")
 			}
@@ -101,7 +106,7 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if _, err = client.List(ctx); err != nil {
 				t.Fatal(err)
 			}
-			var afterIssues, afterCustom, afterMigrations, afterAgentInput, intentRows int
+			var afterIssues, afterCustom, afterMigrations, afterAgentInput, afterFencing, intentRows int
 			if err = db.QueryRow(`SELECT COUNT(*) FROM issues`).Scan(&afterIssues); err != nil {
 				t.Fatal(err)
 			}
@@ -114,16 +119,19 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&afterAgentInput); err != nil {
 				t.Fatal(err)
 			}
+			if err = db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, agentInputDeliveryFencingMigrationID).Scan(&afterFencing); err != nil {
+				t.Fatal(err)
+			}
 			if err = db.QueryRow(`SELECT COUNT(*) FROM agent_input_delivery_intents`).Scan(&intentRows); err != nil {
 				t.Fatal(err)
 			}
 			if beforeIssues != afterIssues || beforeCustom != afterCustom {
 				t.Fatalf("row preservation issues=%d/%d custom_views=%d/%d", beforeIssues, afterIssues, beforeCustom, afterCustom)
 			}
-			if afterAgentInput != 1 || intentRows != 0 || afterMigrations != beforeMigrations+(1-beforeAgentInput) {
-				t.Fatalf("migration summary before=%d/0050:%d after=%d/0050:%d intent_rows=%d", beforeMigrations, beforeAgentInput, afterMigrations, afterAgentInput, intentRows)
+			if afterAgentInput != 1 || afterFencing != 1 || intentRows != beforeIntents || afterMigrations != beforeMigrations+(1-beforeAgentInput)+(1-beforeFencing) {
+				t.Fatalf("migration summary before=%d/0051:%d/0052:%d after=%d/0051:%d/0052:%d intent_rows=%d/%d", beforeMigrations, beforeAgentInput, beforeFencing, afterMigrations, afterAgentInput, afterFencing, beforeIntents, intentRows)
 			}
-			t.Logf("real clone summary path=%s issues=%d custom_views=%d migrations=%d->%d agent_input_marker=%d->%d intent_rows=%d", path, afterIssues, afterCustom, beforeMigrations, afterMigrations, beforeAgentInput, afterAgentInput, intentRows)
+			t.Logf("real clone summary path=%s issues=%d custom_views=%d migrations=%d->%d agent_input_markers=0051:%d->%d/0052:%d->%d intent_rows=%d->%d", path, afterIssues, afterCustom, beforeMigrations, afterMigrations, beforeAgentInput, afterAgentInput, beforeFencing, afterFencing, beforeIntents, intentRows)
 			if err = client.CloseDB(); err != nil {
 				t.Fatal(err)
 			}
