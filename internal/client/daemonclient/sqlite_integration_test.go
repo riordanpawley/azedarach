@@ -276,7 +276,10 @@ func startDaemonForTest(t *testing.T, repoDir, socketPath, lockPath string) func
 			if err != nil {
 				t.Fatalf("daemon shutdown error: %v", err)
 			}
-		case <-time.After(15 * time.Second):
+		// The server starts accepting requests before startup reconciliation
+		// completes. Race instrumentation can leave that in-flight startup work
+		// draining for longer than the normal request budget.
+		case <-time.After(30 * time.Second):
 			t.Fatalf("daemon shutdown timed out")
 		}
 	}

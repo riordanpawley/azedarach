@@ -2509,6 +2509,8 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB, runtimeLivenessPr
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daemon_session_projections_project_issue
 			ON ` + sessionStateTable + ` (project_id, issue_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_daemon_session_projections_project_issue_updated
+			ON ` + sessionStateTable + ` (project_id, issue_id, updated_at DESC, session_id DESC)`,
 		`CREATE TABLE IF NOT EXISTS ` + sessionObservationTable + ` (
 			project_id TEXT NOT NULL,
 			logical_id TEXT GENERATED ALWAYS AS (role||':'||scope_kind||':'||scope_id||CASE WHEN instr(session_id,'.pane-')>0 THEN ':pane:'||session_id ELSE '' END) STORED,
@@ -2528,6 +2530,8 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB, runtimeLivenessPr
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daemon_session_observations_project_issue
 			ON ` + sessionObservationTable + ` (project_id, issue_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_daemon_session_observations_project_issue_updated
+			ON ` + sessionObservationTable + ` (project_id, issue_id, updated_at DESC, session_id DESC)`,
 		`CREATE TABLE IF NOT EXISTS ` + orchestratorLeaseTable + ` (
 			project_id TEXT NOT NULL,
 			scope_kind TEXT NOT NULL CHECK (scope_kind IN ('project', 'rooted')),
@@ -3039,7 +3043,12 @@ func ensureRuntimeLogicalSessionIdentitySchema(ctx context.Context, db *sql.DB) 
 		}
 	}
 	for _, table := range []string{sessionStateTable, sessionObservationTable} {
-		if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_`+table+`_project_issue ON `+table+`(project_id,issue_id)`); err != nil {
+		if _, err := db.ExecContext(ctx, `
+			CREATE INDEX IF NOT EXISTS idx_`+table+`_project_issue
+				ON `+table+`(project_id,issue_id);
+			CREATE INDEX IF NOT EXISTS idx_`+table+`_project_issue_updated
+				ON `+table+`(project_id,issue_id,updated_at DESC,session_id DESC);
+		`); err != nil {
 			return err
 		}
 	}
