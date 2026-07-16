@@ -279,6 +279,17 @@ func TestNativeCodexAuthorityCancellationClosesSilentConn(t *testing.T) {
 	}
 }
 
+func TestWaitWorkerDoneSuccessAndTimeout(t *testing.T) {
+	done := make(chan struct{})
+	close(done)
+	if err := waitWorkerDone(done, time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitWorkerDone(make(chan struct{}), time.Millisecond); err == nil {
+		t.Fatal("timeout not reported")
+	}
+}
+
 func TestNativeCodexInputCancellationWithFullOutputJoins(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {
