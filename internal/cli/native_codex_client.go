@@ -690,8 +690,20 @@ func nativeCodexAuthorityLoop(ctx context.Context, socket string, registration n
 				}
 				continue
 			}
+			connDone := make(chan struct{})
+			closerDone := make(chan struct{})
+			go func() {
+				select {
+				case <-ctx.Done():
+					_ = conn.Close()
+				case <-connDone:
+				}
+				close(closerDone)
+			}()
 			if json.NewEncoder(conn).Encode(registration) != nil {
 				_ = conn.Close()
+				close(connDone)
+				<-closerDone
 				continue
 			}
 			reader := bufio.NewReader(conn)
