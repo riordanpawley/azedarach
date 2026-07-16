@@ -84,8 +84,8 @@ var orderedMigrations = []migration{
 	{id: projectionDeltaAuthorityMigrationID, path: "migrations/0047_projection_delta_authority.sql", apply: applyProjectionDeltaAuthorityMigration},
 	{id: humanAuthorityProjectionMigrationID, path: "migrations/0047_human_authority_projection_revision.sql"},
 	{id: "0048_decision_propagation_outbox", path: "migrations/0048_decision_propagation_outbox.sql"},
-	{id: mailboxObservationProjectionCutoverMigrationID, path: "migrations/0051_mailbox_observation_projection_cutover.sql"},
 	{id: "0049_managed_agent_incarnations", path: "migrations/0049_managed_agent_incarnations.sql"},
+	{id: mailboxObservationProjectionCutoverMigrationID, path: "migrations/0051_mailbox_observation_projection_cutover.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -142,8 +142,8 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: projectionDeltaAuthorityMigrationID, Path: "migrations/0047_projection_delta_authority.sql", Checksum: projectionDeltaAuthorityChecksum},
 	{ID: humanAuthorityProjectionMigrationID, Path: "migrations/0047_human_authority_projection_revision.sql", Checksum: "ac3a48512b2e6e9c018d58a68db24a2465e9d172139d22f8378f69677073a0ab"},
 	{ID: "0048_decision_propagation_outbox", Path: "migrations/0048_decision_propagation_outbox.sql", Checksum: "a12c44ba35156d71fbcd88a9d78e4cdb234e75e7e4aef5f896c8b1182ada858d"},
-	{ID: mailboxObservationProjectionCutoverMigrationID, Path: "migrations/0051_mailbox_observation_projection_cutover.sql", Checksum: "a1b2d43ed319d0866e4270ef947ce0c4bea16bfd3b8b04e56907ea0cea2c8d61"},
 	{ID: "0049_managed_agent_incarnations", Path: "migrations/0049_managed_agent_incarnations.sql", Checksum: "8364ceb9fad589df3f73c1fe0f0462c22b127510f1745e62fcc11e24757fe08d"},
+	{ID: mailboxObservationProjectionCutoverMigrationID, Path: "migrations/0051_mailbox_observation_projection_cutover.sql", Checksum: "a1b2d43ed319d0866e4270ef947ce0c4bea16bfd3b8b04e56907ea0cea2c8d61"},
 }
 
 func validateMigrationRegistry() error {
