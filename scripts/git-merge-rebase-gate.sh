@@ -7,6 +7,18 @@ if [ "${AZEDARACH_SKIP_MERGE_REBASE_GATE:-0}" = "1" ]; then
 fi
 
 repo_root="$(git rev-parse --show-toplevel)"
+candidate_head="${AZEDARACH_CANDIDATE_HEAD:-$(git rev-parse --verify HEAD)}"
+current_head="$(git rev-parse --verify HEAD)"
+if [ "$current_head" != "$candidate_head" ]; then
+	echo "[gate] candidate_head=$candidate_head observed_head=$current_head canonical=false reason=head-mismatch-before-start" >&2
+	exit 1
+fi
+if [ -n "$(git status --porcelain)" ]; then
+	echo "[gate] candidate_head=$candidate_head canonical=false reason=dirty-before-start" >&2
+	exit 1
+fi
+
+echo "[gate] candidate_head=$candidate_head canonical=false status=running"
 
 timeout_cmd=""
 if command -v timeout >/dev/null 2>&1; then
@@ -19,14 +31,30 @@ else
 fi
 
 validation_timeout="${AZEDARACH_MERGE_GATE_TIMEOUT:-10m}"
+validation_body="${AZEDARACH_MERGE_GATE_BODY:-$repo_root/scripts/git-merge-rebase-gate-body.sh}"
 validation_status="$(mktemp -t azedarach-merge-gate-wrapper-status.XXXXXX)"
+validation_runner_pid="$(mktemp -t azedarach-merge-gate-wrapper-pid.XXXXXX)"
 cleanup() {
-	rm -f "$validation_status"
+	rm -f "$validation_status" "$validation_runner_pid"
+}
+cancelled() {
+	if [ -s "$validation_runner_pid" ]; then
+		runner_pid="$(cat "$validation_runner_pid")"
+		kill -TERM "-$runner_pid" 2>/dev/null || kill -TERM "$runner_pid" 2>/dev/null || true
+		sleep 0.2
+		kill -KILL "-$runner_pid" 2>/dev/null || kill -KILL "$runner_pid" 2>/dev/null || true
+	fi
+	echo "[gate] candidate_head=$candidate_head canonical=false status=cancelled" >&2
+	exit 130
 }
 trap cleanup EXIT
+trap cancelled INT TERM
 (
 	set +e
-	"$timeout_cmd" --signal=TERM --kill-after=15s "$validation_timeout" "$repo_root/scripts/git-merge-rebase-gate-body.sh"
+	"$timeout_cmd" --signal=TERM --kill-after=15s "$validation_timeout" "$validation_body" &
+	runner_pid=$!
+	printf '%s\n' "$runner_pid" >"$validation_runner_pid"
+	wait "$runner_pid"
 	printf '%s\n' "$?" >"$validation_status"
 ) 2>&1 | tee
 if [ ! -s "$validation_status" ]; then
@@ -36,5 +64,19 @@ fi
 status="$(cat "$validation_status")"
 if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
 	echo "[gate] validation exceeded the $validation_timeout wall-clock budget; inspect retained Go timeout stacks/output above" >&2
+fi
+if [ "$status" -eq 0 ]; then
+	current_head="$(git rev-parse --verify HEAD)"
+	if [ "$current_head" != "$candidate_head" ]; then
+		echo "[gate] candidate_head=$candidate_head observed_head=$current_head canonical=false reason=head-moved-during-validation" >&2
+		exit 1
+	fi
+	if [ -n "$(git status --porcelain)" ]; then
+		echo "[gate] candidate_head=$candidate_head canonical=false reason=dirty-after-validation" >&2
+		exit 1
+	fi
+	echo "[gate] candidate_head=$candidate_head canonical=false status=passed awaiting_exact_apply=true"
+else
+	echo "[gate] candidate_head=$candidate_head canonical=false status=failed exit_status=$status" >&2
 fi
 exit "$status"

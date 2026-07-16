@@ -5026,8 +5026,8 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		commands = append(commands, strings.Join(args, " "))
 		switch {
-		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
-			return worktreeListOutput, nil
+		case integrationTestIsWorktreeList(args):
+			return integrationTestWorktreeList(worktreeListOutput, scratchWorktree, "merged-sha"), nil
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
 			return "", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
@@ -5040,6 +5040,8 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 			return "target-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
 			return "merged-sha", nil
+		case len(args) == 4 && args[0] == "-C" && args[2] == "rev-parse" && args[3] == "--git-dir":
+			return filepath.Join(repoDir, ".git", "worktrees", filepath.Base(scratchWorktree)), nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "merge-base":
 			return "base-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff" && slices.Contains(args, "--name-status"):
@@ -5256,8 +5258,8 @@ func TestTaskCloseCommandIntegrationIgnoresDuplicateIssueTargetWorktreeFromOther
 		commands = append(commands, strings.Join(args, " "))
 		joined := strings.Join(args, " ")
 		switch {
-		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
-			return worktreeListOutput, nil
+		case integrationTestIsWorktreeList(args):
+			return integrationTestWorktreeList(worktreeListOutput, scratchWorktree, "merged-sha"), nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == otherRepo && args[2] == "status":
 			return "A  domain/commerce/tsconfig.json\n", nil
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
@@ -5272,6 +5274,8 @@ func TestTaskCloseCommandIntegrationIgnoresDuplicateIssueTargetWorktreeFromOther
 			return "target-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
 			return "merged-sha", nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--git-dir":
+			return filepath.Join(repoDir, ".git", "worktrees", filepath.Base(scratchWorktree)), nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "merge-base":
 			return "base-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff" && slices.Contains(args, "--name-status"):
@@ -5433,11 +5437,11 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 		commands = append(commands, strings.Join(args, " "))
 		joined := strings.Join(args, " ")
 		switch {
-		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
+		case integrationTestIsWorktreeList(args):
 			if removeAttempts >= 1 {
-				return fmt.Sprintf("worktree %s\nbranch refs/heads/main\n\n", repoDir), nil
+				return integrationTestWorktreeList(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n\n", repoDir), scratchWorktree, "merged-sha"), nil
 			}
-			return fmt.Sprintf("worktree %s\nbranch refs/heads/main\n\nworktree %s\nbranch refs/heads/%s\n\n", repoDir, sourceWorktree, sourceBranch), nil
+			return integrationTestWorktreeList(fmt.Sprintf("worktree %s\nbranch refs/heads/main\n\nworktree %s\nbranch refs/heads/%s\n\n", repoDir, sourceWorktree, sourceBranch), scratchWorktree, "merged-sha"), nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "status" && removeAttempts > 0:
 			return "", fmt.Errorf("cannot change to %s: no such file or directory", sourceWorktree)
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
@@ -5455,6 +5459,8 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 			return "target-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
 			return "merged-sha", nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--git-dir":
+			return filepath.Join(repoDir, ".git", "worktrees", filepath.Base(scratchWorktree)), nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "merge-base":
 			return "base-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff" && slices.Contains(args, "--name-status"):
@@ -6020,8 +6026,8 @@ func TestTaskCloseIntegrationRetriesRepeatedlyWhenTargetHeadMovesAfterScratchVal
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		commands = append(commands, strings.Join(args, " "))
 		switch {
-		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
-			return worktreeListOutput, nil
+		case integrationTestIsWorktreeList(args):
+			return integrationTestWorktreeList(worktreeListOutput, scratchWorktree, scratchDesiredHeads[scratchWorktree]), nil
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
 			return "", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
@@ -6038,6 +6044,8 @@ func TestTaskCloseIntegrationRetriesRepeatedlyWhenTargetHeadMovesAfterScratchVal
 			}
 		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
 			return scratchDesiredHeads[scratchWorktree], nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--git-dir":
+			return filepath.Join(repoDir, ".git", "worktrees", filepath.Base(scratchWorktree)), nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "merge-base":
 			return "base-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff" && slices.Contains(args, "--name-status"):
@@ -6175,8 +6183,8 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		commands = append(commands, strings.Join(args, " "))
 		switch {
-		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
-			return worktreeListOutput, nil
+		case integrationTestIsWorktreeList(args):
+			return integrationTestWorktreeList(worktreeListOutput, scratchWorktree, "merged-sha"), nil
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
 			return "", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == projectRepo && args[2] == "rev-parse" && args[3] == "--git-common-dir":
@@ -6185,6 +6193,8 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 			return "target-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
 			return "merged-sha", nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--git-dir":
+			return filepath.Join(projectRepo, ".git", "worktrees", filepath.Base(scratchWorktree)), nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "merge-base":
 			return "base-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[2] == "diff" && slices.Contains(args, "--name-status"):
@@ -6755,6 +6765,8 @@ func TestTaskCloseCommandKeepsTargetCleanWhenScratchMergeDirties(t *testing.T) {
 			return "target-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "-q" && args[4] == "--verify":
 			return "", fmt.Errorf("no merge head")
+		case len(args) == 4 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "rev-parse" && args[3] == "--git-dir":
+			return filepath.Join(repoDir, ".git", "worktrees", filepath.Base(scratchWorktree)), nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "merge-base":
 			return "base-sha", nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == sourceWorktree && args[2] == "diff" && slices.Contains(args, "--name-status"):
@@ -7057,6 +7069,58 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceHasNoChangesEvenIfTargetDirty
 		if !strings.Contains(joined, want) {
 			t.Fatalf("git commands missing %q:\n%s", want, joined)
 		}
+	}
+}
+
+func TestTaskCloseNoChangesIntegrationResultCarriesRecoveredCanonicalValidation(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	runDaemonTestGit(t, repo, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repo, "config", "user.email", "test@example.com")
+	runDaemonTestGit(t, repo, "config", "user.name", "Test User")
+	if err := os.MkdirAll(filepath.Join(repo, "scripts"), 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	gatePath := filepath.Join(repo, "scripts", "git-merge-rebase-gate.sh")
+	if err := os.WriteFile(gatePath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write gate: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	runDaemonTestGit(t, repo, "add", ".")
+	runDaemonTestGit(t, repo, "commit", "-q", "-m", "base")
+	runDaemonTestGit(t, repo, "checkout", "-q", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(repo, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatalf("write feature: %v", err)
+	}
+	runDaemonTestGit(t, repo, "add", "feature.txt")
+	runDaemonTestGit(t, repo, "commit", "-q", "-m", "feature")
+	sourceOID := runDaemonTestGitOutput(t, repo, "rev-parse", "HEAD")
+	runDaemonTestGit(t, repo, "checkout", "-q", "main")
+	if err := os.WriteFile(filepath.Join(repo, "main.txt"), []byte("main\n"), 0o644); err != nil {
+		t.Fatalf("write main: %v", err)
+	}
+	runDaemonTestGit(t, repo, "add", "main.txt")
+	runDaemonTestGit(t, repo, "commit", "-q", "-m", "main")
+
+	client := git.NewClient(git.NewExecRunner(repo), slog.Default())
+	merge, err := client.MergeCleanlyTransactional(ctx, repo, "feature")
+	if err != nil || merge == nil || !merge.Success {
+		t.Fatalf("MergeCleanlyTransactional() = (%+v, %v), want success", merge, err)
+	}
+	targetOID := runDaemonTestGitOutput(t, repo, "rev-parse", "HEAD")
+	d := &Daemon{git: client}
+	result, err := d.taskCloseNoChangesIntegrationResult(ctx, repo, "feature", "main", sourceOID, targetOID)
+	if err != nil {
+		t.Fatalf("taskCloseNoChangesIntegrationResult() error = %v", err)
+	}
+	if !result.NoChanges || len(result.ValidationAttempts) != 1 {
+		t.Fatalf("no-change result = %+v, want one durable validation attempt", result)
+	}
+	attempt := result.ValidationAttempts[0]
+	if attempt.CandidateHead != targetOID || attempt.Status != domain.IntegrationCandidateValidationPassed || !attempt.Canonical {
+		t.Fatalf("validation attempt = %+v, want canonical exact target %s", attempt, targetOID)
 	}
 }
 
@@ -15719,4 +15783,16 @@ func taskIDStrings(tasks []domain.Task) []string {
 		out = append(out, task.ID.String())
 	}
 	return out
+}
+
+func integrationTestWorktreeList(base, scratch, head string) string {
+	if strings.TrimSpace(scratch) == "" {
+		return base
+	}
+	return strings.TrimRight(base, "\n") + fmt.Sprintf("\n\nworktree %s\nHEAD %s\ndetached\n\n", scratch, head)
+}
+
+func integrationTestIsWorktreeList(args []string) bool {
+	return len(args) >= 3 && args[0] == "worktree" && args[1] == "list" ||
+		len(args) >= 5 && args[0] == "-C" && args[2] == "worktree" && args[3] == "list"
 }

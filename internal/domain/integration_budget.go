@@ -2,6 +2,25 @@ package domain
 
 import "time"
 
+type IntegrationCandidateValidationStatus string
+
+const (
+	IntegrationCandidateValidationRunning    IntegrationCandidateValidationStatus = "running"
+	IntegrationCandidateValidationPassed     IntegrationCandidateValidationStatus = "passed"
+	IntegrationCandidateValidationFailed     IntegrationCandidateValidationStatus = "failed"
+	IntegrationCandidateValidationCancelled  IntegrationCandidateValidationStatus = "cancelled"
+	IntegrationCandidateValidationSuperseded IntegrationCandidateValidationStatus = "superseded"
+)
+
+// IntegrationCandidateValidationAttempt is canonical evidence only when the
+// exact validated candidate OID was subsequently applied to the target.
+type IntegrationCandidateValidationAttempt struct {
+	CandidateHead string                               `json:"candidate_head"`
+	Status        IntegrationCandidateValidationStatus `json:"status"`
+	Canonical     bool                                 `json:"canonical"`
+	Message       string                               `json:"message,omitempty"`
+}
+
 // Integration validation and lifecycle budgets are deliberately layered. The
 // repository merge gate owns the validation window, Git retains time to finish
 // the merge and post-merge hooks after validation, and task close retains a

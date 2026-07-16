@@ -10,7 +10,7 @@ cd "$repo_root"
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
 unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
 
-echo "[gate] running canonical build, cold semantic suite, and boundary gates"
+echo "[gate] running canonical build, cold semantic suite, and boundary gates for candidate $(git rev-parse --verify HEAD)"
 if [ -f "$repo_root/justfile" ] && command -v just >/dev/null 2>&1; then
 	just merge-gate
 else

@@ -3,10 +3,13 @@ package git
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
 )
@@ -50,17 +53,13 @@ func (e *ExecRunner) run(ctx context.Context, extraEnv []string, args ...string)
 	)
 	defer func() { endSpan(err) }()
 
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = e.workDir
-	cmd.Env = gitEnvWithOverrides(sanitizedGitEnv(os.Environ()), extraEnv)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err = cmd.Run()
-	stdoutText := strings.TrimSpace(stdout.String())
-	stderrText := strings.TrimSpace(stderr.String())
+	stdoutText, stderrText, err := runProcessGroupCommand(
+		ctx,
+		e.workDir,
+		gitEnvWithOverrides(sanitizedGitEnv(os.Environ()), extraEnv),
+		"git",
+		args...,
+	)
 	if err != nil {
 		detail := stderrText
 		if detail == "" {
@@ -73,6 +72,51 @@ func (e *ExecRunner) run(ctx context.Context, extraEnv []string, args ...string)
 	}
 
 	return stdoutText, nil
+}
+
+// runProcessGroupCommand gives every managed subprocess its own process group.
+// Cancelling the context terminates the group rather than only the direct
+// child, which prevents Git hooks, task runners, and their descendants from
+// surviving an obsolete integration attempt.
+func runProcessGroupCommand(ctx context.Context, dir string, env []string, name string, args ...string) (stdoutText, stderrText string, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	cmd.Env = env
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = 2 * time.Second
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		pid := cmd.Process.Pid
+		if signalErr := syscall.Kill(-pid, syscall.SIGTERM); signalErr != nil {
+			if errors.Is(signalErr, syscall.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return signalErr
+		}
+		timer := time.NewTimer(500 * time.Millisecond)
+		defer timer.Stop()
+		<-timer.C
+		if syscall.Kill(-pid, 0) == nil {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	stdoutText = strings.TrimSpace(stdout.String())
+	stderrText = strings.TrimSpace(stderr.String())
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		err = ctxErr
+	}
+	return stdoutText, stderrText, err
 }
 
 func gitOperation(args []string) string {

@@ -38,21 +38,22 @@ type TaskBulkCleanupResult struct {
 }
 
 type TaskCloseResult struct {
-	TaskID                     string                         `json:"task_id"`
-	Status                     string                         `json:"status"`
-	ContextRisk                *domain.IssueContextRiskPacket `json:"context_risk,omitempty"`
-	IntegrationRequested       bool                           `json:"integration_requested,omitempty"`
-	Integrated                 bool                           `json:"integrated,omitempty"`
-	IntegratedSourceBranch     string                         `json:"integrated_source_branch,omitempty"`
-	IntegratedTargetBranch     string                         `json:"integrated_target_branch,omitempty"`
-	SessionStopped             bool                           `json:"session_stopped,omitempty"`
-	WorktreeRemoved            bool                           `json:"worktree_removed,omitempty"`
-	WorktreeCleanupDeferred    bool                           `json:"worktree_cleanup_deferred,omitempty"`
-	WorktreeCleanupOperationID string                         `json:"worktree_cleanup_operation_id,omitempty"`
-	WorktreeForced             bool                           `json:"worktree_forced,omitempty"`
-	Revision                   uint64                         `json:"revision,omitempty"`
-	Phases                     []TaskClosePhaseTiming         `json:"phases,omitempty"`
-	AutoClosedChildren         []string                       `json:"auto_closed_children,omitempty"`
+	TaskID                        string                                         `json:"task_id"`
+	Status                        string                                         `json:"status"`
+	ContextRisk                   *domain.IssueContextRiskPacket                 `json:"context_risk,omitempty"`
+	IntegrationRequested          bool                                           `json:"integration_requested,omitempty"`
+	Integrated                    bool                                           `json:"integrated,omitempty"`
+	IntegratedSourceBranch        string                                         `json:"integrated_source_branch,omitempty"`
+	IntegratedTargetBranch        string                                         `json:"integrated_target_branch,omitempty"`
+	IntegrationValidationAttempts []domain.IntegrationCandidateValidationAttempt `json:"integration_validation_attempts,omitempty"`
+	SessionStopped                bool                                           `json:"session_stopped,omitempty"`
+	WorktreeRemoved               bool                                           `json:"worktree_removed,omitempty"`
+	WorktreeCleanupDeferred       bool                                           `json:"worktree_cleanup_deferred,omitempty"`
+	WorktreeCleanupOperationID    string                                         `json:"worktree_cleanup_operation_id,omitempty"`
+	WorktreeForced                bool                                           `json:"worktree_forced,omitempty"`
+	Revision                      uint64                                         `json:"revision,omitempty"`
+	Phases                        []TaskClosePhaseTiming                         `json:"phases,omitempty"`
+	AutoClosedChildren            []string                                       `json:"auto_closed_children,omitempty"`
 }
 
 type TaskClosePhaseTiming struct {
