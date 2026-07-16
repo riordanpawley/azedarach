@@ -6,6 +6,16 @@ import (
 	"testing"
 )
 
+func TestWorkerEvidencePacketTemplateIsProjectAgnostic(t *testing.T) {
+	packet := WorkerEvidencePacketTemplate()
+	if len(packet.CommandsRun) != 1 || packet.CommandsRun[0] != "<project validation command>" {
+		t.Fatalf("commands_run = %v, want project-owned placeholder", packet.CommandsRun)
+	}
+	if len(packet.FilesChanged) != 1 || packet.FilesChanged[0] != "path/to/changed-file" {
+		t.Fatalf("files_changed = %v, want project-agnostic placeholder", packet.FilesChanged)
+	}
+}
+
 func TestParseWorkerEvidencePacketBodyValidDirectPacket(t *testing.T) {
 	body := `{
 		"schema": "worker_evidence.v1",

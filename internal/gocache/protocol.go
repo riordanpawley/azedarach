@@ -287,7 +287,7 @@ func Prepare(ctx context.Context, cfg Config, autoMaintain bool) (Telemetry, err
 	if family.Bytes > cfg.HardLimitBytes {
 		if !autoMaintain {
 			telemetry.Decision = "refused-hard-limit"
-			return telemetry, fmt.Errorf("Go build-cache family uses %d bytes, above hard limit %d; run `just go-cache-maintain` or set AZEDARACH_GO_CACHE_AUTO_MAINTAIN=1", family.Bytes, cfg.HardLimitBytes)
+			return telemetry, fmt.Errorf("Go build-cache family uses %d bytes, above hard limit %d; set AZEDARACH_GO_CACHE_AUTO_MAINTAIN=1 or run the project's cache-maintenance workflow", family.Bytes, cfg.HardLimitBytes)
 		}
 		if err := CleanManaged(ctx, cfg); err != nil {
 			telemetry.Decision = "maintenance-failed"

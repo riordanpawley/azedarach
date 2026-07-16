@@ -170,11 +170,12 @@ func TestRunDevHelpAndGateRegression(t *testing.T) {
 		t.Fatalf("help output missing dev list = %q", helpOut)
 	}
 
-	gateOut := captureMainStdout(t, func() error {
-		return runDevCommand(config.DefaultConfig(), []string{"gate", "--verbose", "--project-dir", "/tmp/dev", "az-123"})
-	})
-	if !strings.Contains(gateOut, "Running quality gates for: az-123") {
-		t.Fatalf("gate output = %q", gateOut)
+	opts, err := cli.ParseGateArgs([]string{"--verbose", "--project-dir", "/tmp/dev", "az-123"})
+	if err != nil {
+		t.Fatalf("parse dev gate options: %v", err)
+	}
+	if opts.IssueID != "az-123" || opts.ProjectDir != "/tmp/dev" || !opts.Verbose {
+		t.Fatalf("dev gate options = %+v", opts)
 	}
 }
 

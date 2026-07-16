@@ -660,24 +660,124 @@ func shellSingleQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
-func GateCommand(_ *Dependencies, opts GateOptions) error {
-	if strings.TrimSpace(opts.IssueID) == "" {
+func GateCommand(deps *Dependencies, opts GateOptions) error {
+	issueID := strings.TrimSpace(opts.IssueID)
+	if issueID == "" {
 		return fmt.Errorf("issue id is required")
 	}
 
+	ctx := context.Background()
+	if deps != nil && deps.TraceContext != nil {
+		ctx = deps.TraceContext
+	}
+	worktree, err := resolveGateWorktree(ctx, deps, issueID, opts.ProjectDir)
+	if err != nil {
+		return err
+	}
+	projectConfig, err := config.LoadConfig(worktree)
+	if err != nil {
+		return fmt.Errorf("load gate config for %s: %w", issueID, err)
+	}
+	gateCommand := strings.TrimSpace(projectConfig.Gate.Command)
+	if gateCommand == "" {
+		return fmt.Errorf("quality gate is not configured for %s; set gate.command in .azedarach/config.json", issueID)
+	}
+
 	if opts.Verbose {
-		fmt.Printf("Running quality gates for: %s\n", opts.IssueID)
+		fmt.Printf("Running quality gates for: %s\n", issueID)
 	} else {
-		fmt.Printf("Quality gate requested for: %s\n", opts.IssueID)
+		fmt.Printf("Running quality gates for: %s\n", issueID)
 	}
-	if strings.TrimSpace(opts.ProjectDir) != "" {
-		fmt.Printf("  Project dir: %s\n", opts.ProjectDir)
-	}
+	fmt.Printf("  Worktree: %s\n", worktree)
 	if opts.Fix {
-		fmt.Println("  Fix mode requested; no automated gates are wired in go-bubbletea yet.")
+		fmt.Println("  Fix mode requested; exposing AZEDARACH_GATE_FIX=1 to the configured command.")
 	}
-	fmt.Println("  go-bubbletea exposes the family and help surface; full gate automation is still being wired.")
+	gateFix := "0"
+	if opts.Fix {
+		gateFix = "1"
+	}
+
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-lc", gateCommand)
+	cmd.Dir = worktree
+	cmd.Env = environmentWithOverrides(os.Environ(), map[string]string{
+		"AZEDARACH_GATE_FIX":  gateFix,
+		"AZEDARACH_TICKET_ID": issueID,
+		"AZEDARACH_ISSUE_ID":  issueID,
+	})
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("run configured quality gate for %s: %w", issueID, err)
+	}
+	fmt.Printf("Configured quality gate passed for: %s\n", issueID)
 	return nil
+}
+
+func resolveGateWorktree(ctx context.Context, deps *Dependencies, issueID, explicitProjectDir string) (string, error) {
+	if projectDir := strings.TrimSpace(explicitProjectDir); projectDir != "" {
+		if _, err := validateGateWorktree(projectDir); err != nil {
+			return "", err
+		}
+	}
+	if deps == nil || deps.DaemonClient == nil {
+		return "", fmt.Errorf("resolve worktree for %s: daemon client is unavailable", issueID)
+	}
+	worktrees, err := deps.DaemonClient.ListWorktrees(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve worktree for %s: list daemon worktree projection: %w", issueID, err)
+	}
+	var match string
+	for _, worktree := range worktrees {
+		if !naming.IssueIDsEqual(worktree.IssueID, issueID) {
+			continue
+		}
+		if match != "" && filepath.Clean(match) != filepath.Clean(worktree.Path) {
+			return "", fmt.Errorf("resolve worktree for %s: daemon projection contains multiple worktrees", issueID)
+		}
+		match = strings.TrimSpace(worktree.Path)
+	}
+	if match == "" {
+		return "", fmt.Errorf("resolve worktree for %s: no daemon worktree projection found", issueID)
+	}
+	return validateGateWorktree(match)
+}
+
+func validateGateWorktree(path string) (string, error) {
+	absolute, err := filepath.Abs(strings.TrimSpace(path))
+	if err != nil {
+		return "", fmt.Errorf("resolve absolute gate worktree: %w", err)
+	}
+	info, err := os.Stat(absolute)
+	if err != nil {
+		return "", fmt.Errorf("inspect gate worktree %s: %w", absolute, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("gate worktree %s is not a directory", absolute)
+	}
+	return absolute, nil
+}
+
+func environmentWithOverrides(base []string, overrides map[string]string) []string {
+	result := make([]string, 0, len(base)+len(overrides))
+	for _, entry := range base {
+		key, _, found := strings.Cut(entry, "=")
+		if found {
+			if _, overridden := overrides[key]; overridden {
+				continue
+			}
+		}
+		result = append(result, entry)
+	}
+	keys := make([]string, 0, len(overrides))
+	for key := range overrides {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		result = append(result, key+"="+overrides[key])
+	}
+	return result
 }
 
 func ParseDevIssueArg(command string, args []string) (string, error) {
@@ -1261,7 +1361,8 @@ func injectManagedGitHookBlock(base, managedBlock string) string {
 
 func PrintGateUsage() {
 	fmt.Println("Usage: az gate <issue-id> [--project-dir <dir>] [--verbose] [--fix]")
-	fmt.Println("Run quality gates for a task.")
+	fmt.Println("Run the project's configured gate.command for a task; fail when no gate is configured.")
+	fmt.Println("--fix exposes AZEDARACH_GATE_FIX=1 to the configured command.")
 }
 
 func PrintDevUsage() {

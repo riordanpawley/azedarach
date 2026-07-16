@@ -2757,10 +2757,15 @@ func TestOrchestratePromptCommandMailboxCoordinationOptIn(t *testing.T) {
 		"`worker-ready` and `worker-complete` are accepted only as legacy aliases for `worker-integration-ready`",
 		"az mail send --parent az-1 --issue az-2 --type worker-integration-ready",
 		`"schema":"worker_evidence.v1","summary":"Ready for integration."`,
+		`"commands_run":["<project validation command>"]`,
+		`"files_changed":["path/to/changed-file"]`,
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
 		}
+	}
+	if strings.Contains(output, "just test") || strings.Contains(output, "internal/daemon/mail_commands.go") {
+		t.Fatalf("worker prompt leaked Azedarach dogfood assumptions:\n%s", output)
 	}
 }
 

@@ -15,6 +15,14 @@ Agent instructions for this repository. This file is the canonical source of age
 3. When the best path substantially expands the requested scope, make that expansion and its benefits explicit. Pursue it when it remains within the task's authority; otherwise, ask for the authority or decision needed rather than silently substituting an inferior shortcut.
 4. **Hotfix exception:** Apply a speed-first approach only when the user explicitly identifies the task as a hotfix. In that case, prioritize the fastest safe, targeted correction, avoid unrelated scope expansion, and record broader improvements as follow-up work instead of delaying the fix.
 
+## Dogfooding Portability Contract (Critical)
+
+1. Treat this Azedarach repository as one small consumer sample of the `az` product. Its dogfood setup is not evidence for a product default or a universal project convention.
+2. Never hardcode this repository's tools, recipes (including `just` and `review-gate`), directory layout, language or toolchain, validation profiles, issue IDs, branch naming, or workflow conventions into product code, defaults, help, or generic tests under `cmd/` or `internal/`.
+3. Consumer-specific behavior belongs in explicit project configuration, typed capability discovery, or project-owned adapters and scripts. When a capability is absent, fail clearly or degrade honestly; never report fabricated success or readiness.
+4. Tests for configurable or extensible product behavior must exercise at least one non-Azedarach consumer command or toolchain and the absent-capability path. Keep dogfood-specific expectations in repository configuration or clearly labelled integration fixtures.
+5. Before landing a dogfood-driven fix, audit product code, defaults, help, and generic tests for leaked repository assumptions and record the audit evidence.
+
 ## Working Directory
 
 Run commands from repo root:

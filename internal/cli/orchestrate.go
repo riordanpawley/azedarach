@@ -3222,9 +3222,9 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 			fmt.Sprintf("az mail list --parent %s --since 0 --json", parentIssueID),
 			fmt.Sprintf("az mail send --parent %s --issue %s --type worker-progress --body \"<progress>\"", parentIssueID, issueID),
 			"az evidence validate --template",
-			`az evidence validate --body '{"schema":"worker_evidence.v1","summary":"Ready for integration.","commands_run":["just test"],"key_assertions":["validation passed"],"files_changed":["internal/daemon/mail_commands.go"],"review":{"status":"clean","findings":[]},"risks":["none"]}'`,
-			fmt.Sprintf("az issue record %s --type evidence.submitted --data '{\"schema\":\"worker_evidence.v1\",\"summary\":\"Ready for integration.\",\"commands_run\":[\"just test\"],\"key_assertions\":[\"validation passed\"],\"files_changed\":[\"internal/daemon/mail_commands.go\"],\"review\":{\"status\":\"clean\",\"findings\":[]},\"risks\":[\"none\"]}'", issueID),
-			fmt.Sprintf("az mail send --parent %s --issue %s --type worker-integration-ready --body '{\"schema\":\"worker_evidence.v1\",\"summary\":\"Ready for integration.\",\"commands_run\":[\"just test\"],\"key_assertions\":[\"validation passed\"],\"files_changed\":[\"internal/daemon/mail_commands.go\"],\"review\":{\"status\":\"clean\",\"findings\":[]},\"risks\":[\"none\"]}'", parentIssueID, issueID),
+			`az evidence validate --body '{"schema":"worker_evidence.v1","summary":"Ready for integration.","commands_run":["<project validation command>"],"key_assertions":["validation passed"],"files_changed":["path/to/changed-file"],"review":{"status":"clean","findings":[]},"risks":["none"]}'`,
+			fmt.Sprintf("az issue record %s --type evidence.submitted --data '{\"schema\":\"worker_evidence.v1\",\"summary\":\"Ready for integration.\",\"commands_run\":[\"<project validation command>\"],\"key_assertions\":[\"validation passed\"],\"files_changed\":[\"path/to/changed-file\"],\"review\":{\"status\":\"clean\",\"findings\":[]},\"risks\":[\"none\"]}'", issueID),
+			fmt.Sprintf("az mail send --parent %s --issue %s --type worker-integration-ready --body '{\"schema\":\"worker_evidence.v1\",\"summary\":\"Ready for integration.\",\"commands_run\":[\"<project validation command>\"],\"key_assertions\":[\"validation passed\"],\"files_changed\":[\"path/to/changed-file\"],\"review\":{\"status\":\"clean\",\"findings\":[]},\"risks\":[\"none\"]}'", parentIssueID, issueID),
 		)
 	}
 	var b strings.Builder
