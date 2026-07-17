@@ -50,6 +50,17 @@ type integrationValidationReceipt struct {
 // MergeCleanlyTransactional performs the merge in a disposable worktree and only
 // locks the target worktree for the base snapshot and final publication phases.
 func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch string) (*MergeResult, error) {
+	return c.mergeCleanlyTransactional(ctx, worktree, branch, true)
+}
+
+// MergeCleanlyTransactionalComposition performs exact clean conflict-safe
+// compare/apply composition without invoking repository publication validation.
+// It is reserved for typed non-base integration targets.
+func (c *Client) MergeCleanlyTransactionalComposition(ctx context.Context, worktree, branch string) (*MergeResult, error) {
+	return c.mergeCleanlyTransactional(ctx, worktree, branch, false)
+}
+
+func (c *Client) mergeCleanlyTransactional(ctx context.Context, worktree, branch string, validatePublication bool) (*MergeResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -171,17 +182,19 @@ func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch
 	if desiredHead == targetHead {
 		return result, nil
 	}
-	attempt, configured, validationErr := c.validateIntegrationCandidate(ctx, worktree, scratchPath, desiredHead)
-	if configured {
-		result.ValidationAttempts = append(result.ValidationAttempts, attempt)
-	}
-	if validationErr != nil {
-		if errors.Is(validationErr, context.Canceled) || errors.Is(validationErr, context.DeadlineExceeded) {
-			return nil, validationErr
+	if validatePublication {
+		attempt, configured, validationErr := c.validateIntegrationCandidate(ctx, worktree, scratchPath, desiredHead)
+		if configured {
+			result.ValidationAttempts = append(result.ValidationAttempts, attempt)
 		}
-		result.Success = false
-		result.Message = appendMergeResultDetail(result.Message, validationErr.Error())
-		return result, nil
+		if validationErr != nil {
+			if errors.Is(validationErr, context.Canceled) || errors.Is(validationErr, context.DeadlineExceeded) {
+				return nil, validationErr
+			}
+			result.Success = false
+			result.Message = appendMergeResultDetail(result.Message, validationErr.Error())
+			return result, nil
+		}
 	}
 
 	applied, cleanupHandled, err := c.applyValidatedScratchMerge(ctx, worktree, scratchPath, targetHead, desiredHead, scratchOwner, result)

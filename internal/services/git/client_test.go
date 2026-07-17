@@ -1084,6 +1084,46 @@ func TestRealProcessProfileMergeCleanlyTransactionalUsesTargetGateAuthority(t *t
 	}
 }
 
+func TestRealProcessProfileMergeCleanlyTransactionalCompositionSkipsPublicationGate(t *testing.T) {
+	repo := t.TempDir()
+	runClientTestGit(t, repo, "init", "-q", "-b", "main")
+	runClientTestGit(t, repo, "config", "user.email", "test@example.com")
+	runClientTestGit(t, repo, "config", "user.name", "Test User")
+	requireDir := filepath.Join(repo, "scripts")
+	if err := os.MkdirAll(requireDir, 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	gateMarker := filepath.Join(t.TempDir(), "gate-ran")
+	gate := "#!/bin/sh\nprintf ran >\"$AZEDARACH_TEST_GATE_MARKER\"\nexit 91\n"
+	if err := os.WriteFile(filepath.Join(requireDir, "git-merge-rebase-gate.sh"), []byte(gate), 0o755); err != nil {
+		t.Fatalf("write publication gate: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	runClientTestGit(t, repo, "add", ".")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "base")
+	runClientTestGit(t, repo, "checkout", "-q", "-b", "child")
+	if err := os.WriteFile(filepath.Join(repo, "child.txt"), []byte("child\n"), 0o644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+	runClientTestGit(t, repo, "add", "child.txt")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "child")
+	runClientTestGit(t, repo, "checkout", "-q", "main")
+	t.Setenv("AZEDARACH_TEST_GATE_MARKER", gateMarker)
+
+	result, err := NewClient(NewExecRunner(repo), slog.Default()).MergeCleanlyTransactionalComposition(context.Background(), repo, "child")
+	if err != nil || result == nil || !result.Success {
+		t.Fatalf("MergeCleanlyTransactionalComposition() = (%+v, %v), want clean composition", result, err)
+	}
+	if len(result.ValidationAttempts) != 0 {
+		t.Fatalf("composition validation attempts = %+v, want none", result.ValidationAttempts)
+	}
+	if _, err := os.Stat(gateMarker); !os.IsNotExist(err) {
+		t.Fatalf("non-base composition invoked publication gate: %v", err)
+	}
+}
+
 func TestRealProcessProfileMergeCleanlyTransactionalRunsScratchHooksAndKeepsTargetCleanWhenHookFails(t *testing.T) {
 	repo := initDivergedRepo(t)
 	originalHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")

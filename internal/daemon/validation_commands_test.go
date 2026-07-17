@@ -63,6 +63,14 @@ func TestValidationCommandStartsPublicationWithoutAggregateQueueing(t *testing.T
 	}
 }
 
+func TestPublicationCoverageForPathsRejectsNonRepoRelativeGitPaths(t *testing.T) {
+	for _, candidate := range []string{"../escape.txt", "src/../../escape.txt", "/absolute.txt", `C:/absolute.txt`, `back\\slash.txt`} {
+		if coverage, err := publicationCoverageForPaths([]string{candidate}, publicationEvidenceCapability{}); err == nil {
+			t.Fatalf("publicationCoverageForPaths(%q) = %+v, want traversal or absolute path rejection", candidate, coverage)
+		}
+	}
+}
+
 func TestValidationAcquireBindsReviewAssignmentToDurableLease(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
@@ -290,7 +298,7 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 		publicationEvidenceCache: map[string]domain.PublicationEvidenceSnapshot{}, issueClientsByProject: map[string]*issues.Client{"project": issueClient},
 	}
 	integration := taskCloseIntegrationResult{
-		Requested: true, Integrated: true, SourceBranch: "feature", TargetBranch: "main",
+		Requested: true, Integrated: true, ConfiguredBaseTarget: true, SourceBranch: "feature", TargetBranch: "main",
 		BaseOID: baseOID, SourceOID: sourceOID, TargetOID: targetOID, ValidationAttempts: merge.ValidationAttempts,
 	}
 	// Model the durable state after integration receipt succeeds but publication
@@ -322,6 +330,43 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 	require.NoError(t, err)
 	require.Len(t, assessments, 1)
 	assert.True(t, assessments[0].Retained, "exact synthetic merge must remain active after the issue worktree is gone: %+v", assessments[0])
+}
+
+func TestTaskClosePublicationDistinguishesTypedBaseFromNonBaseComposition(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".azedarach", "config.json"), []byte(`{
+  "publicationEvidence": {
+    "policyVersion": "consumer-policy-v1",
+    "activePathProfiles": ["consumer-integration"]
+  }
+}`), 0o644))
+	issueClient := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = issueClient.CloseDB() })
+	issueID, err := issueClient.Create(ctx, issues.CreateTaskParams{Title: "child composition", Type: domain.TypeTask, Status: domain.StatusInReview})
+	require.NoError(t, err)
+	d := &Daemon{
+		cfg:                   Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{"project": issueClient},
+	}
+	nonBase := taskCloseIntegrationResult{
+		Requested: true, Integrated: true, ConfiguredBaseTarget: false,
+		SourceBranch: "child", TargetBranch: "parent", BaseOID: "base", SourceOID: "source", TargetOID: "result",
+	}
+	require.NoError(t, d.persistTaskCloseIntegrationPublication(ctx, "project", issueID, repoDir, nonBase))
+	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted}, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, false, events[0].Payload["configured_base_target"])
+
+	base := nonBase
+	base.ConfiguredBaseTarget = true
+	base.SourceBranch = "root"
+	base.TargetBranch = "main"
+	err = d.persistTaskCloseIntegrationPublication(ctx, "project", issueID, repoDir, base)
+	require.Error(t, err, "typed configured-base integration must enter exact publication validation")
+	assert.Contains(t, err.Error(), "passed canonical validation")
 }
 
 func runPublicationGit(t *testing.T, dir string, args ...string) string {

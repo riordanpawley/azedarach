@@ -1400,7 +1400,7 @@ func (c *Client) CommitChangedFiles(ctx context.Context, worktree, commit string
 	if commit == "" {
 		return nil, fmt.Errorf("commit is required")
 	}
-	output, err := c.runInWorktree(ctx, worktree, "diff-tree", "--no-commit-id", "--name-only", "-z", "-r", commit)
+	output, err := c.runInWorktreeRaw(ctx, worktree, "diff-tree", "--no-commit-id", "--name-only", "-z", "-r", commit)
 	if err != nil {
 		return nil, fmt.Errorf("list files changed by commit %s: %w", commit, err)
 	}
@@ -1417,7 +1417,7 @@ func (c *Client) ChangedFilesBetweenRefs(ctx context.Context, worktree, baseRef,
 	if headRef == "" {
 		return nil, fmt.Errorf("head ref is required")
 	}
-	output, err := c.runInWorktree(ctx, worktree, "diff", "--name-only", "-z", baseRef+"..."+headRef, "--")
+	output, err := c.runInWorktreeRaw(ctx, worktree, "diff", "--name-only", "-z", baseRef+"..."+headRef, "--")
 	if err != nil {
 		return nil, fmt.Errorf("list files changed between %s and %s: %w", baseRef, headRef, err)
 	}
@@ -1435,7 +1435,7 @@ func (c *Client) ChangedFilesBetweenRefTrees(ctx context.Context, worktree, base
 	if headRef == "" {
 		return nil, fmt.Errorf("head ref is required")
 	}
-	output, err := c.runInWorktree(ctx, worktree, "diff", "--name-only", "-z", baseRef, headRef, "--")
+	output, err := c.runInWorktreeRaw(ctx, worktree, "diff", "--name-only", "-z", baseRef, headRef, "--")
 	if err != nil {
 		return nil, fmt.Errorf("list files with different trees between %s and %s: %w", baseRef, headRef, err)
 	}
@@ -1592,6 +1592,21 @@ func (c *Client) runInWorktree(ctx context.Context, worktree string, args ...str
 	prefixed = append(prefixed, "-C", worktree)
 	prefixed = append(prefixed, args...)
 	return c.runner.Run(ctx, prefixed...)
+}
+
+func (c *Client) runInWorktreeRaw(ctx context.Context, worktree string, args ...string) (string, error) {
+	runner, ok := c.runner.(rawCommandRunner)
+	if !ok {
+		return c.runInWorktree(ctx, worktree, args...)
+	}
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return runner.RunRaw(ctx, args...)
+	}
+	prefixed := make([]string, 0, len(args)+2)
+	prefixed = append(prefixed, "-C", worktree)
+	prefixed = append(prefixed, args...)
+	return runner.RunRaw(ctx, prefixed...)
 }
 
 func (c *Client) runInWorktreeWithEnv(ctx context.Context, worktree string, extraEnv []string, args ...string) (string, error) {

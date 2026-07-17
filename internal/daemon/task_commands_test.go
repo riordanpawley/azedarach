@@ -7158,7 +7158,7 @@ func TestTaskCloseNoChangesIntegrationResultCarriesRecoveredCanonicalValidation(
 	}
 	targetOID := runDaemonTestGitOutput(t, repo, "rev-parse", "HEAD")
 	d := &Daemon{git: client}
-	result, err := d.taskCloseNoChangesIntegrationResult(ctx, repo, "feature", "main", sourceOID, targetOID)
+	result, err := d.taskCloseNoChangesIntegrationResult(ctx, repo, "feature", "main", sourceOID, targetOID, true)
 	if err != nil {
 		t.Fatalf("taskCloseNoChangesIntegrationResult() error = %v", err)
 	}
