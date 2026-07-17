@@ -3959,6 +3959,86 @@ func TestEpicDrillDownFlow(t *testing.T) {
 	}
 }
 
+func TestDrillDownUsesDefaultBoardViewAndRestoresRootView(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+	m.loading = false
+
+	parentID := naming.IssueID("az-parent")
+	openChildID := naming.IssueID("az-open-child")
+	doneChildID := naming.IssueID("az-done-child")
+	parent := domain.Task{ID: parentID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeEpic}
+	openChild := domain.Task{ID: openChildID, Title: "Open child", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID}
+	doneChild := domain.Task{ID: doneChildID, Title: "Done child", Status: domain.StatusDone, Priority: domain.P3, Type: domain.TypeTask, ParentID: &parentID}
+	m.tasks = append(m.tasks, parent, openChild, doneChild)
+
+	rootView := domain.PlanningBoardView()
+	m.boardView = rootView
+	m.selectedBoardViewID = string(rootView.ID)
+	m.boardColumns = []domain.BoardViewColumnSnapshot{{Definition: rootView.Columns[0], Tasks: []domain.Task{parent}}}
+	m.boardOrdered = []domain.Task{parent}
+	m.boardProjection = domain.BoardViewProjection{View: rootView}
+
+	entered, _ := m.enterDrillDownByID(parentID.String())
+	drilled := entered.(Model)
+	if got, want := drilled.boardView.ID, domain.BoardViewDefaultID; got != want {
+		t.Fatalf("drill-down view = %q, want %q", got, want)
+	}
+	if got, want := drilled.selectedBoardViewID, string(rootView.ID); got != want {
+		t.Fatalf("persisted root selection = %q, want unchanged %q", got, want)
+	}
+	var rendered []string
+	for _, column := range drilled.buildColumns() {
+		for _, task := range column.Tasks {
+			rendered = append(rendered, task.ID.String())
+		}
+	}
+	for _, want := range []string{openChildID.String(), doneChildID.String()} {
+		if !slices.Contains(rendered, want) {
+			t.Fatalf("default drill-down columns = %v, want child %s", rendered, want)
+		}
+	}
+
+	refreshedAny, _ := drilled.Update(issuesLoadedMsg{
+		projectID:      drilled.daemonProjectID(),
+		scopedParentID: parentID.String(),
+		tasks:          []domain.Task{parent, openChild, doneChild},
+		boardView:      domain.CloseoutBoardView(),
+	})
+	refreshed := refreshedAny.(Model)
+	if got, want := refreshed.boardView.ID, domain.BoardViewDefaultID; got != want {
+		t.Fatalf("refreshed drill-down view = %q, want %q", got, want)
+	}
+	if got := refreshed.selectedBoardViewID; got != string(rootView.ID) {
+		t.Fatalf("refreshed drill-down changed persisted root selection to %q", got)
+	}
+
+	staleRootAny, _ := refreshed.Update(issuesLoadedMsg{
+		projectID: refreshed.daemonProjectID(),
+		tasks:     []domain.Task{parent},
+		boardView: domain.CloseoutBoardView(),
+	})
+	staleRoot := staleRootAny.(Model)
+	if got, want := staleRoot.boardView.ID, domain.BoardViewDefaultID; got != want {
+		t.Fatalf("unscoped root refresh replaced active drill-down view with %q", got)
+	}
+
+	exitedAny, exitRefreshCmd := staleRoot.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	exited := exitedAny.(Model)
+	if exitRefreshCmd == nil && !exited.issueRefreshPending {
+		t.Fatal("final drill-down exit neither scheduled nor queued a root board refresh")
+	}
+	if got, want := exited.boardView.ID, rootView.ID; got != want {
+		t.Fatalf("restored root view = %q, want %q", got, want)
+	}
+	if got, want := exited.selectedBoardViewID, string(rootView.ID); got != want {
+		t.Fatalf("restored root selection = %q, want %q", got, want)
+	}
+	if exited.isDrillDownActive() {
+		t.Fatal("drill-down remained active after exit")
+	}
+}
+
 func TestNestedDrillDownEscapePopsSingleLevel(t *testing.T) {
 	m := newTestModel()
 	m.editor.EnterNormal()

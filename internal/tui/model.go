@@ -114,6 +114,13 @@ type drillDownContext struct {
 	parentName string
 }
 
+type drillDownRootBoardState struct {
+	view       domain.BoardView
+	columns    []domain.BoardViewColumnSnapshot
+	ordered    []domain.Task
+	projection domain.BoardViewProjection
+}
+
 type pendingTaskStatus struct {
 	previousStatus domain.Status
 	targetStatus   domain.Status
@@ -246,6 +253,7 @@ type Model struct {
 	drillDownParentID               string
 	drillDownParentName             string
 	drillDownTrail                  []drillDownContext
+	drillDownRootBoard              *drillDownRootBoardState
 	pendingCreatedTaskID            string
 	pendingCreatedWorkspaceTaskID   string
 	pendingUIOpenTaskID             string
@@ -686,6 +694,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.nav.JumpToTaskByID(columns, exitedParentID)
 			}
 			m.ensureCursorVisible(columns)
+			if !m.isDrillDownActive() && !m.scope.IsGlobal() {
+				m.boardRefreshing = true
+				return m, m.scheduleIssuesRefreshCmd()
+			}
 			return m, nil
 		}
 		if m.editor.IsSelect() {

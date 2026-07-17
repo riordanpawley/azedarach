@@ -281,18 +281,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if m.shouldIgnoreDaemonSnapshot(msg.projectID, msg.revision) {
-			if msg.eventsCancel != nil {
-				msg.eventsCancel()
-			}
-			return m, m.finishIssuesRefreshCmd(msg.refreshSeq)
-		}
-		if scopedParentID := strings.TrimSpace(msg.scopedParentID); scopedParentID != "" && !naming.IssueIDsEqual(scopedParentID, m.drillDownParentID) {
+		currentParentID := strings.TrimSpace(m.drillDownParentID)
+		messageParentID := strings.TrimSpace(msg.scopedParentID)
+		if (currentParentID != "" || messageParentID != "") && !naming.IssueIDsEqual(messageParentID, currentParentID) {
 			if msg.eventsCancel != nil {
 				msg.eventsCancel()
 			}
 			m.loading = false
 			m.boardRefreshing = false
+			return m, m.finishIssuesRefreshCmd(msg.refreshSeq)
+		}
+		if m.shouldIgnoreDaemonSnapshot(msg.projectID, msg.revision) {
+			if msg.eventsCancel != nil {
+				msg.eventsCancel()
+			}
 			return m, m.finishIssuesRefreshCmd(msg.refreshSeq)
 		}
 		if msg.daemonClient != nil {
@@ -343,12 +345,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
 		}
-		m.boardView = msg.boardView
-		m.boardColumns = cloneBoardViewColumnSnapshots(msg.boardColumns)
-		m.boardOrdered = append([]domain.Task(nil), msg.boardOrdered...)
-		m.boardProjection = msg.boardProjection
-		if msg.boardView.ID != "" {
-			m.selectedBoardViewID = string(msg.boardView.ID)
+		if messageParentID != "" {
+			m.useDefaultDrillDownBoardView()
+		} else {
+			m.boardView = msg.boardView
+			m.boardColumns = cloneBoardViewColumnSnapshots(msg.boardColumns)
+			m.boardOrdered = append([]domain.Task(nil), msg.boardOrdered...)
+			m.boardProjection = msg.boardProjection
+			if msg.boardView.ID != "" {
+				m.selectedBoardViewID = string(msg.boardView.ID)
+			}
 		}
 		for i := range m.tasks {
 			m.tasks[i].Session = cloneSession(m.tasks[i].Session)

@@ -3959,8 +3959,9 @@ func TestStaleIssuesLoadedMsgMarksManualDrillDownRefreshStale(t *testing.T) {
 	m.taskSnapshotFreshness = protocol.TaskListFreshnessFresh
 
 	updatedAny, _ := m.Update(issuesLoadedMsg{
-		stale:         true,
-		freshnessHint: "Drill-down child-board refresh timed out during task snapshot read after 5s; keeping current local view",
+		scopedParentID: "az-parent",
+		stale:          true,
+		freshnessHint:  "Drill-down child-board refresh timed out during task snapshot read after 5s; keeping current local view",
 	})
 	updated, ok := updatedAny.(Model)
 	if !ok {
