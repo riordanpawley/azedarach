@@ -69,7 +69,28 @@ test_cleanup() {
     kill "$child" 2>/dev/null || true
   done
   wait 2>/dev/null || true
-  if [[ -n "${AZEDARACH_JAEGER_TEST_CLEANUP_READY_FIFO:-}" ||
+  if [[ -n "${AZEDARACH_JAEGER_TEST_EVENT_FIFO:-}" ]]; then
+    if [[ ! -p "$AZEDARACH_JAEGER_TEST_EVENT_FIFO" ||
+      ! -p "${AZEDARACH_JAEGER_TEST_CLEANUP_CONTINUE_FIFO:-}" ]]; then
+      echo "concurrent validator event cleanup requires event and continue FIFOs" >&2
+      cleanup_status=1
+    else
+      printf 'cleanup|%s\n' "$tmp" >"$AZEDARACH_JAEGER_TEST_EVENT_FIFO" || {
+        echo "concurrent validator could not signal cleanup readiness for $tmp" >&2
+        cleanup_status=1
+      }
+      if (( cleanup_status == 0 )); then
+        IFS= read -r cleanup_signal <"$AZEDARACH_JAEGER_TEST_CLEANUP_CONTINUE_FIFO" || {
+          echo "concurrent validator could not read cleanup release for $tmp" >&2
+          cleanup_status=1
+        }
+      fi
+      if (( cleanup_status == 0 )) && [[ "$cleanup_signal" != "continue" ]]; then
+        echo "concurrent validator received invalid cleanup release '$cleanup_signal' for $tmp" >&2
+        cleanup_status=1
+      fi
+    fi
+  elif [[ -n "${AZEDARACH_JAEGER_TEST_CLEANUP_READY_FIFO:-}" ||
     -n "${AZEDARACH_JAEGER_TEST_CLEANUP_CONTINUE_FIFO:-}" ]]; then
     if [[ ! -p "${AZEDARACH_JAEGER_TEST_CLEANUP_READY_FIFO:-}" ||
       ! -p "${AZEDARACH_JAEGER_TEST_CLEANUP_CONTINUE_FIFO:-}" ]]; then
@@ -442,7 +463,20 @@ if grep -Eq '^volume rm (azedarach-jaeger-data|azedarach-jaeger-222-data|unrelat
 fi
 
 : >"$calls"
-if [[ -n "${AZEDARACH_JAEGER_TEST_OOM_READY_FIFO:-}" ||
+if [[ -n "${AZEDARACH_JAEGER_TEST_EVENT_FIFO:-}" ]]; then
+  if [[ ! -p "$AZEDARACH_JAEGER_TEST_EVENT_FIFO" ||
+    ! -p "${AZEDARACH_JAEGER_TEST_OOM_CONTINUE_FIFO:-}" ]]; then
+    echo "concurrent OOM lifecycle requires event and continue FIFOs" >&2
+    exit 1
+  fi
+  printf 'oom|%s|%s|%s\n' "$tmp" "$AZEDARACH_JAEGER_LIFECYCLE_LOCK_FILE" \
+    "$AZEDARACH_JAEGER_ENDPOINT_FILE" >"$AZEDARACH_JAEGER_TEST_EVENT_FIFO"
+  IFS= read -r oom_release <"$AZEDARACH_JAEGER_TEST_OOM_CONTINUE_FIFO"
+  if [[ "$oom_release" != "continue" ]]; then
+    echo "concurrent OOM lifecycle received invalid release '$oom_release' for $tmp" >&2
+    exit 1
+  fi
+elif [[ -n "${AZEDARACH_JAEGER_TEST_OOM_READY_FIFO:-}" ||
   -n "${AZEDARACH_JAEGER_TEST_OOM_CONTINUE_FIFO:-}" ]]; then
   if [[ ! -p "${AZEDARACH_JAEGER_TEST_OOM_READY_FIFO:-}" ||
     ! -p "${AZEDARACH_JAEGER_TEST_OOM_CONTINUE_FIFO:-}" ]]; then
@@ -609,6 +643,10 @@ fi
 
 # Initialization failure is failure-atomic: no collector, endpoint, or slot is
 # left behind when the child cannot publish readiness.
+if [[ "${AZEDARACH_JAEGER_TEST_FAIL_BEFORE_WORKER_INIT:-0}" == "1" ]]; then
+  echo "deliberate validator failure before worker initialization" >&2
+  exit 67
+fi
 export AZEDARACH_JAEGER_DISABLE_EXPIRY_WORKER=0
 export FAKE_EXPIRES_AT="$((now + 60))"
 export AZEDARACH_JAEGER_EXPIRY_WORKER_FAIL_INIT=1

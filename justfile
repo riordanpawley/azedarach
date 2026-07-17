@@ -74,6 +74,7 @@ test-build-contract:
     ./scripts/test-go-validation-admission.sh
 
 test-jaeger-contract:
+    ./scripts/test-jaeger-local-termination.sh
     ./scripts/test-jaeger-local-concurrent.sh
 
 # Requires a healthy local Docker/Podman engine and the pinned Jaeger image.
