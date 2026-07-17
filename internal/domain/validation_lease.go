@@ -107,6 +107,7 @@ type ValidationEvidence struct {
 	Present                bool                `json:"present"`
 	ReportPath             string              `json:"report_path,omitempty"`
 	ReportPaths            []string            `json:"report_paths,omitempty"`
+	FailureSummary         string              `json:"failure_summary,omitempty"`
 	OverlapDetected        bool                `json:"overlap_detected"`
 	ExternalGoProcesses    int                 `json:"external_go_processes"`
 }

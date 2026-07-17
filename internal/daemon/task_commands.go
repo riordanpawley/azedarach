@@ -133,16 +133,16 @@ type taskClosePreflightRequest struct {
 }
 
 type taskCloseRequest struct {
-	TaskID                 string                    `json:"task_id"`
-	ForceWorktree          bool                      `json:"force_worktree,omitempty"`
-	IgnoreAhead            bool                      `json:"ignore_ahead,omitempty"`
-	IntegrateBeforeClose   bool                      `json:"integrate_before_close,omitempty"`
-	CloseCleanChildren     bool                      `json:"close_clean_children,omitempty"`
-	AllowActiveSession     bool                      `json:"allow_active_session,omitempty"`
-	CloseOutcome           string                    `json:"closed_outcome,omitempty"`
-	ExpectedSourceOID      string                    `json:"expected_source_oid,omitempty"`
-	ExpectedReviewEvidence *issues.ReviewEvidencePin `json:"expected_review_evidence,omitempty"`
-	PromoteBacklogBeforeClose bool   `json:"-"`
+	TaskID                    string                    `json:"task_id"`
+	ForceWorktree             bool                      `json:"force_worktree,omitempty"`
+	IgnoreAhead               bool                      `json:"ignore_ahead,omitempty"`
+	IntegrateBeforeClose      bool                      `json:"integrate_before_close,omitempty"`
+	CloseCleanChildren        bool                      `json:"close_clean_children,omitempty"`
+	AllowActiveSession        bool                      `json:"allow_active_session,omitempty"`
+	CloseOutcome              string                    `json:"closed_outcome,omitempty"`
+	ExpectedSourceOID         string                    `json:"expected_source_oid,omitempty"`
+	ExpectedReviewEvidence    *issues.ReviewEvidencePin `json:"expected_review_evidence,omitempty"`
+	PromoteBacklogBeforeClose bool                      `json:"-"`
 }
 
 type taskStatusUpdateOptions struct {
@@ -3111,6 +3111,13 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge %s into %s returned no result", source.Branch, targetBranch)
 	}
 	if !merge.Success {
+		if attempt, ok := failedCandidateValidationAttempt(merge.ValidationAttempts); ok {
+			details := strings.TrimSpace(attempt.Message)
+			if details == "" {
+				details = "candidate validation gate failed without diagnostic output"
+			}
+			return taskCloseIntegrationResult{Requested: true, ValidationAttempts: append([]domain.IntegrationCandidateValidationAttempt(nil), merge.ValidationAttempts...)}, fmt.Errorf("candidate validation for revision %s failed: %s", attempt.CandidateHead, details)
+		}
 		details := strings.TrimSpace(merge.Message)
 		if len(merge.ConflictFiles) > 0 {
 			details = strings.TrimSpace(details + "\nconflicts: " + strings.Join(merge.ConflictFiles, ", "))
@@ -3135,6 +3142,15 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		ValidationAttempts: append([]domain.IntegrationCandidateValidationAttempt(nil), merge.ValidationAttempts...),
 	}
 	return integration, nil
+}
+
+func failedCandidateValidationAttempt(attempts []domain.IntegrationCandidateValidationAttempt) (domain.IntegrationCandidateValidationAttempt, bool) {
+	for i := len(attempts) - 1; i >= 0; i-- {
+		if attempts[i].Status == domain.IntegrationCandidateValidationFailed {
+			return attempts[i], true
+		}
+	}
+	return domain.IntegrationCandidateValidationAttempt{}, false
 }
 
 func (d *Daemon) canonicalIntegrationValidationAttempts(ctx context.Context, targetWorktree, targetOID string) ([]domain.IntegrationCandidateValidationAttempt, error) {

@@ -198,7 +198,7 @@ func writeValidationLeaseEvidenceFile(measurement Measurement, outputDir string)
 		return nil
 	}
 	reportPath := filepath.Join(outputDir, "report.json")
-	evidence := validationLeaseEvidenceFile{Held: measurement.ValidationLease.Held, RequestID: measurement.ValidationLease.RequestID, Class: measurement.ValidationLease.Class, Scope: measurement.ValidationLease.Scope, Purpose: measurement.ValidationLease.Purpose, Execution: measurement.ValidationLease.Execution, AuthoritativeRequestID: measurement.ValidationLease.AuthoritativeRequestID, Override: measurement.ValidationLease.Override, Profile: measurement.ValidationLease.Profile, SourceRevision: measurement.ValidationLease.SourceRevision, Present: true, ReportPath: reportPath, ReportPaths: []string{reportPath}, OverlapDetected: measurement.ProcessLoad.OverlapDetected, ExternalGoProcesses: measurement.ProcessLoad.MaxExternalGoProcesses}
+	evidence := validationLeaseEvidenceFile{Held: measurement.ValidationLease.Held, RequestID: measurement.ValidationLease.RequestID, Class: measurement.ValidationLease.Class, Scope: measurement.ValidationLease.Scope, Purpose: measurement.ValidationLease.Purpose, Execution: measurement.ValidationLease.Execution, AuthoritativeRequestID: measurement.ValidationLease.AuthoritativeRequestID, Override: measurement.ValidationLease.Override, Profile: measurement.ValidationLease.Profile, SourceRevision: measurement.ValidationLease.SourceRevision, Present: true, ReportPath: reportPath, ReportPaths: []string{reportPath}, FailureSummary: FailureSummary(measurement.Failures), OverlapDetected: measurement.ProcessLoad.OverlapDetected, ExternalGoProcesses: measurement.ProcessLoad.MaxExternalGoProcesses}
 	if existingData, err := os.ReadFile(path); err == nil {
 		if len(strings.TrimSpace(string(existingData))) > 0 {
 			var existing validationLeaseEvidenceFile
@@ -211,6 +211,9 @@ func writeValidationLeaseEvidenceFile(measurement Measurement, outputDir string)
 			evidence.OverlapDetected = evidence.OverlapDetected || existing.OverlapDetected
 			evidence.ExternalGoProcesses = max(evidence.ExternalGoProcesses, existing.ExternalGoProcesses)
 			evidence.ReportPaths = appendUniqueValidationReport(existing.ReportPaths, existing.ReportPath, reportPath)
+			if evidence.FailureSummary == "" {
+				evidence.FailureSummary = existing.FailureSummary
+			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read accumulated validation lease evidence: %w", err)
@@ -239,8 +242,42 @@ type validationLeaseEvidenceFile struct {
 	Present                bool     `json:"present"`
 	ReportPath             string   `json:"report_path,omitempty"`
 	ReportPaths            []string `json:"report_paths,omitempty"`
+	FailureSummary         string   `json:"failure_summary,omitempty"`
 	OverlapDetected        bool     `json:"overlap_detected"`
 	ExternalGoProcesses    int      `json:"external_go_processes"`
+}
+
+// FailureSummary preserves actionable test identity and output when the full
+// report lives in a disposable validation worktree. It is deliberately bounded
+// because validation evidence is stored inline in the durable request ledger.
+func FailureSummary(failures []Failure) string {
+	const maxBytes = 32 * 1024
+	var summary strings.Builder
+	for i, failure := range failures {
+		name := strings.TrimSpace(failure.Package)
+		if test := strings.TrimSpace(failure.Test); test != "" {
+			name += "::" + test
+		}
+		entry := "FAIL " + name
+		if output := strings.TrimSpace(failure.Output); output != "" {
+			entry += "\n" + output
+		}
+		entry += "\n"
+		remaining := maxBytes - summary.Len()
+		if remaining <= 0 {
+			break
+		}
+		if len(entry) > remaining {
+			summary.WriteString(entry[:remaining])
+			summary.WriteString("\n[failure summary truncated]\n")
+			break
+		}
+		summary.WriteString(entry)
+		if i == len(failures)-1 {
+			break
+		}
+	}
+	return strings.TrimSpace(summary.String())
 }
 
 func appendUniqueValidationReport(paths []string, candidates ...string) []string {

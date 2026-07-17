@@ -649,6 +649,7 @@ sub merge_whole_gate_evidence {
     $whole->{external_go_processes} = ($existing->{external_go_processes} || 0) > $whole->{external_go_processes} ? $existing->{external_go_processes} : $whole->{external_go_processes};
     $whole->{report_path} = $existing->{report_path} if $existing->{report_path};
     $whole->{report_paths} = $existing->{report_paths} if $existing->{report_paths};
+    $whole->{failure_summary} = $existing->{failure_summary} if $existing->{failure_summary};
     $whole->{fatal_phase} = $existing->{fatal_phase} if $existing->{fatal_phase};
     $whole->{fatal_detail} = $existing->{fatal_detail} if $existing->{fatal_detail};
     $whole->{fatal_phase} = $fatal->{fatal_phase} if $fatal->{fatal_phase};
