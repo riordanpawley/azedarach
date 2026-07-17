@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -37,6 +38,21 @@ type watchErrorProjectionStore struct {
 
 func (s watchErrorProjectionStore) WatchProjectionDeltas(ctx context.Context, projectID string, after uint64, limit int) ([]domain.ProjectionDelta, uint64, error) {
 	return s.watch(ctx, projectID, after, limit)
+}
+
+type watchBarrierProjectionStore struct {
+	projectionDeltaStore
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *watchBarrierProjectionStore) WatchProjectionDeltas(ctx context.Context, projectID string, after uint64, limit int) ([]domain.ProjectionDelta, uint64, error) {
+	s.once.Do(func() {
+		close(s.entered)
+		<-s.release
+	})
+	return s.projectionDeltaStore.WatchProjectionDeltas(ctx, projectID, after, limit)
 }
 
 func TestProjectReadMaterializerTransientWatchErrorRetainsLastGoodWithoutLegacyExport(t *testing.T) {
@@ -508,7 +524,12 @@ func TestProjectReadMaterializerWatchBlocksAndWakesAcrossClients(t *testing.T) {
 	if err := reader.OpenProjectionDeltaStore(); err != nil {
 		t.Fatal(err)
 	}
-	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(reader), nil)
+	watchStore := &watchBarrierProjectionStore{
+		projectionDeltaStore: reader,
+		entered:              make(chan struct{}),
+		release:              make(chan struct{}),
+	}
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(watchStore), nil)
 	if err := materializer.bootstrap(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -516,21 +537,19 @@ func TestProjectReadMaterializerWatchBlocksAndWakesAcrossClients(t *testing.T) {
 	defer cancel()
 	advanced := make(chan protocol.MaterializedSnapshotMetadata, 1)
 	go materializer.run(ctx, func(metadata protocol.MaterializedSnapshotMetadata) { advanced <- metadata })
+	<-watchStore.entered
 	select {
 	case <-advanced:
 		t.Fatal("watch returned without source advancement")
-	case <-time.After(75 * time.Millisecond):
+	default:
 	}
+	close(watchStore.release)
 	if _, err := writer.Create(context.Background(), issues.CreateTaskParams{Title: "cross-client", Type: domain.TypeTask}); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case metadata := <-advanced:
-		if metadata.DeliveryCursor == 0 {
-			t.Fatalf("watch metadata = %+v", metadata)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("materializer watch did not wake on cross-client source advancement")
+	metadata := <-advanced
+	if metadata.DeliveryCursor == 0 {
+		t.Fatalf("watch metadata = %+v", metadata)
 	}
 }
 
