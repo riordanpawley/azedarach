@@ -252,7 +252,9 @@ func (l *Launcher) Start(ctx context.Context) error {
 	}
 	releaseStartLock, lockAcquired, err := l.acquireStartLock(ctx)
 	if err != nil {
-		if (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) && l.waitForSocketReadyWithin(300*time.Millisecond) == nil {
+		if !l.ownsCanonicalRuntime() &&
+			(errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) &&
+			l.waitForSocketReadyWithin(300*time.Millisecond) == nil {
 			return nil
 		}
 		return err

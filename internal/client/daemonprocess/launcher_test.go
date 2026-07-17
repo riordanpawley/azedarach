@@ -1429,6 +1429,35 @@ func TestLauncherGlobalStartSerializesWithStopAndReplace(t *testing.T) {
 	}
 }
 
+func TestLauncherGlobalStartCancellationDoesNotBypassLifecycleLock(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
+	launcher.BinPath = "true"
+	launcher.waitForReady = func(context.Context, string) error { return nil }
+
+	lifecyclePath := launcher.scopedLifecycleLockPath()
+	if err := os.MkdirAll(filepath.Dir(lifecyclePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lifecycleFile, err := os.OpenFile(lifecyclePath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lifecycleFile.Close()
+	if err := syscall.Flock(int(lifecycleFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Flock(int(lifecycleFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = launcher.Start(ctx)
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start() error = %v, want canonical lifecycle-lock cancellation", err)
+	}
+}
+
 func TestLauncherStart_ErrorsWhenLockRecoveryFails(t *testing.T) {
 	repoDir := t.TempDir()
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
