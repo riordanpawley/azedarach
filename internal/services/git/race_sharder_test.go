@@ -93,6 +93,7 @@ case "${FAKE_GO_SCENARIO:-success}" in
 	  printf 'arrive %s\n' "$pattern" >"$FAKE_GO_CONCURRENCY_EVENT_FIFO"
 	  read -r _ <"$FAKE_GO_CONCURRENCY_RELEASE_FIFO"
 	  printf 'depart %s\n' "$pattern" >"$FAKE_GO_CONCURRENCY_EVENT_FIFO"
+	  read -r _ <"$FAKE_GO_CONCURRENCY_DEPART_ACK_FIFO"
 	  ;;
 esac
 `
@@ -271,11 +272,13 @@ func TestDaemonRaceSharderCapsConcurrentProcesses(t *testing.T) {
 			repo, script := prepareRaceSharder(t)
 			events := newRaceShardFIFO(t, "concurrency-events")
 			release := newRaceShardFIFO(t, "concurrency-release")
+			departAck := newRaceShardFIFO(t, "concurrency-depart-ack")
 			env := []string{
 				"AZEDARACH_DAEMON_RACE_INNER=1",
 				"FAKE_GO_SCENARIO=concurrency",
 				"FAKE_GO_CONCURRENCY_EVENT_FIFO=" + events.path,
 				"FAKE_GO_CONCURRENCY_RELEASE_FIFO=" + release.path,
+				"FAKE_GO_CONCURRENCY_DEPART_ACK_FIFO=" + departAck.path,
 			}
 			if tc.parallelism != "" {
 				env = append(env, "AZEDARACH_DAEMON_RACE_PARALLELISM="+tc.parallelism)
@@ -284,6 +287,7 @@ func TestDaemonRaceSharderCapsConcurrentProcesses(t *testing.T) {
 			t.Cleanup(func() {
 				for range 4 {
 					release.writeLine(t, "cleanup")
+					departAck.writeLine(t, "cleanup")
 				}
 			})
 
@@ -315,6 +319,7 @@ func TestDaemonRaceSharderCapsConcurrentProcesses(t *testing.T) {
 						t.Fatalf("wave %d unexpected shard departure %q", waveIndex, pattern)
 					}
 					delete(wave, pattern)
+					departAck.writeLine(t, "ack")
 				}
 			}
 			<-done
