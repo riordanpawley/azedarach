@@ -205,7 +205,10 @@ func (p *execDaemonProcess) stopAndWait(ctx context.Context) error {
 		}
 		select {
 		case <-p.done:
-			return fmt.Errorf("wait for spawned daemon process cleanup: %w", ctx.Err())
+			// Wait completing for this exact exec.Cmd proves that the candidate
+			// was reaped. The expired cleanup context only explains why SIGKILL
+			// was required; it must not make proven cleanup appear unproven.
+			return nil
 		case <-time.After(time.Second):
 			return fmt.Errorf("spawned daemon process group %d did not reap after force-kill: %w", pid, ctx.Err())
 		}
@@ -1136,9 +1139,9 @@ func (l *Launcher) stageScopedExecutableCopy(owner processIdentity, purpose stri
 			_ = os.RemoveAll(stageDir)
 		}
 	}()
-	source, err := os.Open(owner.executable)
+	source, err := openPlatformProcessExecutable(owner)
 	if err != nil {
-		return "", fmt.Errorf("open scoped daemon predecessor executable for rollback: %w", err)
+		return "", fmt.Errorf("open process-bound scoped daemon predecessor executable for rollback: %w", err)
 	}
 	before, err := source.Stat()
 	if err != nil {

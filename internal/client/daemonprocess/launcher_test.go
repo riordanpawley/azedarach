@@ -53,6 +53,31 @@ type recordingDaemonStarter struct {
 	specs   []daemonProcessSpec
 }
 
+func TestExecDaemonProcessStopAndWaitAcceptsProvenReapAfterKill(t *testing.T) {
+	done := make(chan error, 1)
+	process := &execDaemonProcess{
+		cmd:  &exec.Cmd{Process: &os.Process{Pid: 424242}},
+		done: done,
+	}
+	var signals []syscall.Signal
+	process.signalProcessGroup = func(signal syscall.Signal) error {
+		signals = append(signals, signal)
+		if signal == syscall.SIGKILL {
+			done <- errors.New("fixture process exited after KILL")
+		}
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := process.stopAndWait(ctx); err != nil {
+		t.Fatalf("stopAndWait() error = %v, want proven post-KILL reap success", err)
+	}
+	if !reflect.DeepEqual(signals, []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL}) {
+		t.Fatalf("cleanup signals = %v, want TERM then KILL", signals)
+	}
+}
+
 const lingeringDaemonHelperEnv = "AZEDARACH_TEST_LINGERING_DAEMON"
 
 const lingeringDaemonModeEnv = "AZEDARACH_TEST_LINGERING_DAEMON_MODE"
@@ -1346,6 +1371,54 @@ func TestLauncherReplace_ScopedSourceFallbackRollbackUsesStablePredecessor(t *te
 	}
 	if len(starts) != 2 {
 		t.Fatalf("replacement starts = %d, want candidate then predecessor", len(starts))
+	}
+}
+
+func TestLauncherScopedRollbackNeverCopiesSwappedExecutablePath(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	repoDir := writeScopedSourceFallbackDaemon(t)
+	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
+
+	originalBytes, err := os.ReadFile(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(t.TempDir(), "scoped-predecessor-azd")
+	if err := os.WriteFile(executable, originalBytes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	predecessor := startLingeringDaemonProcessWith(
+		t,
+		launcher,
+		executable,
+		"",
+		[]string{"--", "--repo", launcher.RepoDir, "--socket", launcher.SocketPath, "--lock", launcher.LockPath},
+	)
+	owner, present, err := launcher.captureLockOwnerIdentity()
+	if err != nil || !present {
+		t.Fatalf("capture predecessor identity = %+v, %t, %v", owner, present, err)
+	}
+
+	replacement := filepath.Join(t.TempDir(), "path-swap-azd")
+	replacementBytes := []byte("#!/bin/sh\nexit 97\n")
+	if err := os.WriteFile(replacement, replacementBytes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, executable); err != nil {
+		t.Fatal(err)
+	}
+
+	staged, stageErr := launcher.stageScopedExecutableCopy(owner, "predecessor")
+	if stageErr != nil {
+		return // Failing closed is valid when the mapped executable cannot be opened safely.
+	}
+	stagedBytes, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(stagedBytes, replacementBytes) || !bytes.Equal(stagedBytes, originalBytes) {
+		t.Fatalf("staged rollback bytes came from swapped pathname for live pid %d", predecessor.cmd.Process.Pid)
 	}
 }
 
