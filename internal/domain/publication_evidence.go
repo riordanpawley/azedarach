@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -74,6 +75,9 @@ func (e PublicationEvidence) Validate() error {
 	if e.Cost.WallMilliseconds < 0 || e.Cost.CPUMilliseconds < 0 || e.Cost.Tokens < 0 || e.Cost.CacheBytes < 0 {
 		return fmt.Errorf("publication evidence cost cannot be negative")
 	}
+	if err := e.Coverage.Validate(); err != nil {
+		return err
+	}
 	switch e.Layer {
 	case PublicationEvidencePatchReview, PublicationEvidenceActivePath:
 		if strings.TrimSpace(e.PatchDigest) == "" {
@@ -88,6 +92,32 @@ func (e PublicationEvidence) Validate() error {
 		}
 	}
 	return nil
+}
+
+func (c PublicationEvidenceCoverage) Validate() error {
+	for _, candidate := range c.Paths {
+		if _, err := CanonicalPublicationPath(candidate); err != nil {
+			return fmt.Errorf("publication evidence coverage path: %w", err)
+		}
+	}
+	for _, values := range [][]string{c.Dependencies, c.Surfaces} {
+		for _, value := range values {
+			if strings.TrimSpace(value) == "" || value != strings.TrimSpace(value) {
+				return fmt.Errorf("publication evidence coverage names must be non-empty and canonical")
+			}
+		}
+	}
+	return nil
+}
+
+func CanonicalizePublicationCoverage(coverage PublicationEvidenceCoverage) (PublicationEvidenceCoverage, error) {
+	paths, err := CanonicalPublicationPaths(coverage.Paths)
+	if err != nil {
+		return PublicationEvidenceCoverage{}, err
+	}
+	return PublicationEvidenceCoverage{
+		Paths: paths, Dependencies: canonicalPublicationNames(coverage.Dependencies), Surfaces: canonicalPublicationNames(coverage.Surfaces),
+	}, nil
 }
 
 type PublicationInvalidationReason string
@@ -173,6 +203,9 @@ func (c PublicationEvidenceCandidate) Validate() error {
 	if strings.TrimSpace(c.SourceRevision) == "" || strings.TrimSpace(c.BaseRevision) == "" || strings.TrimSpace(c.PolicyVersion) == "" || strings.TrimSpace(c.EnvironmentFingerprint) == "" {
 		return fmt.Errorf("publication evidence candidate requires source revision, base revision, policy version, and environment fingerprint")
 	}
+	if _, err := CanonicalPublicationPaths(c.ChangedPaths); err != nil {
+		return fmt.Errorf("publication evidence candidate changed paths: %w", err)
+	}
 	return nil
 }
 
@@ -217,21 +250,28 @@ type PublicationEvidenceDiagnostic struct {
 // retains the more explicit PublicationEvidence naming.
 type EvidenceDiagnostic = PublicationEvidenceDiagnostic
 
-func SummarizePublicationEvidence(snapshot PublicationEvidenceSnapshot) PublicationEvidenceDiagnostic {
+func SummarizePublicationEvidence(snapshot PublicationEvidenceSnapshot, assessments []PublicationEvidenceAssessment) PublicationEvidenceDiagnostic {
 	diagnostic := PublicationEvidenceDiagnostic{State: "none", Availability: "available", Revision: snapshot.Revision}
-	effectiveInvalidations := EffectivePublicationEvidenceInvalidations(snapshot)
-	invalidated := make(map[string]struct{}, len(effectiveInvalidations))
-	seenReasons := make(map[PublicationInvalidationReason]struct{}, len(effectiveInvalidations))
-	for _, invalidation := range effectiveInvalidations {
-		invalidated[invalidation.EvidenceID] = struct{}{}
-		if _, ok := seenReasons[invalidation.Reason]; !ok {
-			diagnostic.Reasons = append(diagnostic.Reasons, invalidation.Reason)
-			seenReasons[invalidation.Reason] = struct{}{}
-		}
+	if len(snapshot.Evidence) > 0 && len(assessments) == 0 {
+		diagnostic.State = "recorded"
+		diagnostic.Detail = "evidence ledger recorded; authoritative current assessment unavailable"
+		return diagnostic
 	}
+	assessmentByID := make(map[string]PublicationEvidenceAssessment, len(assessments))
+	for _, assessment := range assessments {
+		assessmentByID[assessment.EvidenceID] = assessment
+	}
+	seenReasons := make(map[PublicationInvalidationReason]struct{})
 	for _, evidence := range snapshot.Evidence {
-		if _, invalid := invalidated[evidence.EvidenceID]; invalid {
+		assessment, assessed := assessmentByID[evidence.EvidenceID]
+		if !assessed || !assessment.Retained {
 			diagnostic.Invalidated++
+			for _, reason := range assessment.Reasons {
+				if _, exists := seenReasons[reason]; !exists {
+					diagnostic.Reasons = append(diagnostic.Reasons, reason)
+					seenReasons[reason] = struct{}{}
+				}
+			}
 			continue
 		}
 		switch evidence.Layer {
@@ -371,6 +411,58 @@ func evidencePathOverlap(covered, changed []string) []string {
 	}
 	sort.Strings(overlap)
 	return overlap
+}
+
+// CanonicalPublicationPath accepts only normalized repository-relative slash
+// paths. Backslashes, drive roots, absolute paths, dot segments, traversal, and
+// alternate spellings are rejected so overlap decisions cannot be bypassed by
+// platform-specific path syntax.
+func CanonicalPublicationPath(value string) (string, error) {
+	if value == "" || value != strings.TrimSpace(value) {
+		return "", fmt.Errorf("path must be non-empty without surrounding whitespace")
+	}
+	if strings.Contains(value, "\\") || strings.HasPrefix(value, "/") || (len(value) >= 2 && value[1] == ':') {
+		return "", fmt.Errorf("path %q must be repository-relative slash form", value)
+	}
+	clean := path.Clean(value)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || clean != value {
+		return "", fmt.Errorf("path %q is not canonical repository-relative form", value)
+	}
+	return clean, nil
+}
+
+func CanonicalPublicationPaths(values []string) ([]string, error) {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		canonical, err := CanonicalPublicationPath(value)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := seen[canonical]; !exists {
+			seen[canonical] = struct{}{}
+			out = append(out, canonical)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func canonicalPublicationNames(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; !exists {
+			seen[value] = struct{}{}
+			out = append(out, value)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func ApplyPublicationEvidenceInvalidations(assessment PublicationEvidenceAssessment, invalidations []PublicationEvidenceInvalidation) PublicationEvidenceAssessment {

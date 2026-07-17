@@ -20,12 +20,13 @@ CREATE TABLE daemon_publication_evidence (
     producer TEXT NOT NULL CHECK (length(producer) > 0),
     policy_version TEXT NOT NULL CHECK (length(policy_version) > 0),
     environment_fingerprint TEXT NOT NULL CHECK (length(environment_fingerprint) > 0),
-    reused_from_evidence_id TEXT NOT NULL DEFAULT '',
+    reused_from_evidence_id TEXT REFERENCES daemon_publication_evidence(evidence_id),
     coverage_json TEXT NOT NULL DEFAULT '{}',
     cost_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     CHECK (layer = 'merge_result' OR length(patch_digest) > 0),
-    CHECK (layer != 'merge_result' OR (length(base_revision) > 0 AND length(result_revision) > 0))
+    CHECK (layer != 'merge_result' OR (length(base_revision) > 0 AND length(result_revision) > 0)),
+    CHECK (reused_from_evidence_id IS NULL OR reused_from_evidence_id != evidence_id)
 );
 
 CREATE TABLE daemon_publication_evidence_invalidations (

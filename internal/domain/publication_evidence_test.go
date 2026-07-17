@@ -85,12 +85,29 @@ func TestPublicationEvidenceValidationRequiresLayerIdentity(t *testing.T) {
 	}
 }
 
+func TestCanonicalPublicationPathIsPortableAndRepoRelative(t *testing.T) {
+	for _, valid := range []string{"src/api.ts", "packages/windows/portable.go", "README.md"} {
+		got, err := CanonicalPublicationPath(valid)
+		if err != nil || got != valid {
+			t.Fatalf("CanonicalPublicationPath(%q) = %q, %v", valid, got, err)
+		}
+	}
+	for _, invalid := range []string{"", ".", "../secret", "src/../secret", "/etc/passwd", `C:/Windows/system.ini`, `src\\api.ts`, "./src/api.ts", "src//api.ts"} {
+		if got, err := CanonicalPublicationPath(invalid); err == nil {
+			t.Fatalf("CanonicalPublicationPath(%q) = %q, want portable rejection", invalid, got)
+		}
+	}
+}
+
 func TestSummarizePublicationEvidenceExplainsPartialInvalidation(t *testing.T) {
 	snapshot := PublicationEvidenceSnapshot{Revision: 4, Evidence: []PublicationEvidence{
 		{EvidenceID: "review", Layer: PublicationEvidencePatchReview},
 		{EvidenceID: "path", Layer: PublicationEvidenceActivePath},
 	}, Invalidations: []PublicationEvidenceInvalidation{{EvidenceID: "path", Reason: PublicationInvalidDependencyOverlap}}}
-	got := SummarizePublicationEvidence(snapshot)
+	got := SummarizePublicationEvidence(snapshot, []PublicationEvidenceAssessment{
+		{EvidenceID: "review", Layer: PublicationEvidencePatchReview, Retained: true},
+		{EvidenceID: "path", Layer: PublicationEvidenceActivePath, Reasons: []PublicationInvalidationReason{PublicationInvalidDependencyOverlap}},
+	})
 	if got.State != "partial" || got.PatchReview != 1 || got.ActivePath != 0 || got.Invalidated != 1 || !reflect.DeepEqual(got.Reasons, []PublicationInvalidationReason{PublicationInvalidDependencyOverlap}) {
 		t.Fatalf("diagnostic = %+v", got)
 	}

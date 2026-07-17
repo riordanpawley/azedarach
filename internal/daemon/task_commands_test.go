@@ -15946,7 +15946,7 @@ func TestTaskDetailAttachesPublicationEvidenceDiagnostic(t *testing.T) {
 		t.Fatal(err)
 	}
 	tasks := d.attachPublicationEvidenceDiagnostic(ctx, "project", "issue", []domain.Task{{ID: "issue"}, {ID: "related"}})
-	if tasks[0].PublicationEvidence == nil || tasks[0].PublicationEvidence.State != "retained" || tasks[0].PublicationEvidence.PatchReview != 1 {
+	if tasks[0].PublicationEvidence == nil || tasks[0].PublicationEvidence.State != "recorded" || tasks[0].PublicationEvidence.PatchReview != 0 || !strings.Contains(tasks[0].PublicationEvidence.Detail, "authoritative current assessment unavailable") {
 		t.Fatalf("publication diagnostic = %+v", tasks[0].PublicationEvidence)
 	}
 	if tasks[1].PublicationEvidence != nil {

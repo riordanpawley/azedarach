@@ -251,7 +251,6 @@ var commandSpecRegistry = map[string]CommandSpec{
 func init() {
 	for _, command := range []string{
 		protocol.CommandPublicationEvidenceRecord,
-		protocol.CommandPublicationEvidenceInvalidate,
 		protocol.CommandPublicationEvidenceStatus,
 		protocol.CommandPublicationEvidenceEvaluate,
 	} {

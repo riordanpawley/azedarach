@@ -13,6 +13,9 @@ import (
 )
 
 func (s *SQLiteStore) RecordPublicationEvidence(ctx context.Context, evidence domain.PublicationEvidence) (domain.PublicationEvidence, error) {
+	if evidence.CreatedAt.IsZero() {
+		evidence.CreatedAt = time.Now().UTC()
+	}
 	if err := evidence.Validate(); err != nil {
 		return domain.PublicationEvidence{}, err
 	}
@@ -45,7 +48,7 @@ func (s *SQLiteStore) RecordPublicationEvidence(ctx context.Context, evidence do
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO daemon_publication_evidence(
 		evidence_id,project_id,issue_id,layer,patch_digest,source_revision,base_revision,result_revision,producer,policy_version,environment_fingerprint,reused_from_evidence_id,coverage_json,cost_json,created_at
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, evidence.EvidenceID, evidence.ProjectID, evidence.IssueID, evidence.Layer, evidence.PatchDigest, evidence.SourceRevision, evidence.BaseRevision, evidence.ResultRevision, evidence.Producer, evidence.PolicyVersion, evidence.EnvironmentFingerprint, evidence.ReusedFromEvidenceID, string(coverageJSON), string(costJSON), evidence.CreatedAt.Format(time.RFC3339Nano))
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, evidence.EvidenceID, evidence.ProjectID, evidence.IssueID, evidence.Layer, evidence.PatchDigest, evidence.SourceRevision, evidence.BaseRevision, evidence.ResultRevision, evidence.Producer, evidence.PolicyVersion, evidence.EnvironmentFingerprint, nullablePublicationEvidenceID(evidence.ReusedFromEvidenceID), string(coverageJSON), string(costJSON), evidence.CreatedAt.Format(time.RFC3339Nano))
 	if err == nil {
 		if err = tx.Commit(); err != nil {
 			return domain.PublicationEvidence{}, fmt.Errorf("commit publication evidence record: %w", err)
@@ -54,7 +57,7 @@ func (s *SQLiteStore) RecordPublicationEvidence(ctx context.Context, evidence do
 	}
 	_ = tx.Rollback()
 	existing, getErr := s.publicationEvidenceByID(ctx, evidence.EvidenceID)
-	if getErr == nil && publicationEvidenceEqual(existing, evidence) {
+	if getErr == nil && publicationEvidenceSemanticallyEqual(existing, evidence) {
 		return existing, nil
 	}
 	if getErr == nil {
@@ -64,6 +67,9 @@ func (s *SQLiteStore) RecordPublicationEvidence(ctx context.Context, evidence do
 }
 
 func (s *SQLiteStore) RecordPublicationEvidenceInvalidation(ctx context.Context, invalidation domain.PublicationEvidenceInvalidation) (domain.PublicationEvidenceInvalidation, error) {
+	if invalidation.CreatedAt.IsZero() {
+		invalidation.CreatedAt = time.Now().UTC()
+	}
 	if err := invalidation.Validate(); err != nil {
 		return domain.PublicationEvidenceInvalidation{}, err
 	}
@@ -77,13 +83,52 @@ func (s *SQLiteStore) RecordPublicationEvidenceInvalidation(ctx context.Context,
 		return invalidation, nil
 	}
 	existing, getErr := publicationInvalidationByID(ctx, db, invalidation.InvalidationID)
-	if getErr == nil && reflect.DeepEqual(existing, invalidation) {
+	if getErr == nil && publicationInvalidationSemanticallyEqual(existing, invalidation) {
 		return existing, nil
 	}
 	if getErr == nil {
 		return domain.PublicationEvidenceInvalidation{}, fmt.Errorf("publication invalidation %s conflicts with immutable record", invalidation.InvalidationID)
 	}
 	return domain.PublicationEvidenceInvalidation{}, fmt.Errorf("record publication evidence invalidation: %w", err)
+}
+
+// RecordPublicationEvidenceInvalidations appends one authoritative assessment
+// atomically. Lost-response retries are idempotent by stable invalidation ID and
+// semantic fields; the first server timestamp remains authoritative.
+func (s *SQLiteStore) RecordPublicationEvidenceInvalidations(ctx context.Context, invalidations []domain.PublicationEvidenceInvalidation) error {
+	if len(invalidations) == 0 {
+		return nil
+	}
+	db, err := s.dbHandle()
+	if err != nil {
+		return err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin publication evidence assessment: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, invalidation := range invalidations {
+		if invalidation.CreatedAt.IsZero() {
+			invalidation.CreatedAt = time.Now().UTC()
+		}
+		if err := invalidation.Validate(); err != nil {
+			return err
+		}
+		invalidation.CreatedAt = invalidation.CreatedAt.UTC()
+		_, err = tx.ExecContext(ctx, `INSERT INTO daemon_publication_evidence_invalidations(invalidation_id,evidence_id,reason,details,created_at) VALUES(?,?,?,?,?)`, invalidation.InvalidationID, invalidation.EvidenceID, invalidation.Reason, invalidation.Details, invalidation.CreatedAt.Format(time.RFC3339Nano))
+		if err == nil {
+			continue
+		}
+		existing, getErr := scanPublicationInvalidation(tx.QueryRowContext(ctx, `SELECT invalidation_id,evidence_id,reason,details,created_at FROM daemon_publication_evidence_invalidations WHERE invalidation_id=?`, invalidation.InvalidationID))
+		if getErr != nil || !publicationInvalidationSemanticallyEqual(existing, invalidation) {
+			return fmt.Errorf("record publication evidence invalidation %s: %w", invalidation.InvalidationID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit publication evidence assessment: %w", err)
+	}
+	return nil
 }
 
 func (s *SQLiteStore) PublicationEvidenceSnapshot(ctx context.Context, projectID, issueID string) (domain.PublicationEvidenceSnapshot, error) {
@@ -175,9 +220,11 @@ const publicationEvidenceSelect = `SELECT evidence_id,project_id,issue_id,layer,
 func scanPublicationEvidence(scanner validationScanner) (domain.PublicationEvidence, error) {
 	var evidence domain.PublicationEvidence
 	var coverageJSON, costJSON, createdAt string
-	if err := scanner.Scan(&evidence.EvidenceID, &evidence.ProjectID, &evidence.IssueID, &evidence.Layer, &evidence.PatchDigest, &evidence.SourceRevision, &evidence.BaseRevision, &evidence.ResultRevision, &evidence.Producer, &evidence.PolicyVersion, &evidence.EnvironmentFingerprint, &evidence.ReusedFromEvidenceID, &coverageJSON, &costJSON, &createdAt); err != nil {
+	var reusedFrom sql.NullString
+	if err := scanner.Scan(&evidence.EvidenceID, &evidence.ProjectID, &evidence.IssueID, &evidence.Layer, &evidence.PatchDigest, &evidence.SourceRevision, &evidence.BaseRevision, &evidence.ResultRevision, &evidence.Producer, &evidence.PolicyVersion, &evidence.EnvironmentFingerprint, &reusedFrom, &coverageJSON, &costJSON, &createdAt); err != nil {
 		return evidence, err
 	}
+	evidence.ReusedFromEvidenceID = reusedFrom.String
 	if err := json.Unmarshal([]byte(coverageJSON), &evidence.Coverage); err != nil {
 		return evidence, fmt.Errorf("decode publication evidence coverage: %w", err)
 	}
@@ -210,17 +257,29 @@ func scanPublicationInvalidation(scanner validationScanner) (domain.PublicationE
 	return invalidation, nil
 }
 
-func publicationEvidenceEqual(left, right domain.PublicationEvidence) bool {
-	left.CreatedAt, right.CreatedAt = left.CreatedAt.UTC(), right.CreatedAt.UTC()
+func publicationEvidenceSemanticallyEqual(left, right domain.PublicationEvidence) bool {
+	left.CreatedAt, right.CreatedAt = time.Time{}, time.Time{}
+	return reflect.DeepEqual(left, right)
+}
+
+func publicationInvalidationSemanticallyEqual(left, right domain.PublicationEvidenceInvalidation) bool {
+	left.CreatedAt, right.CreatedAt = time.Time{}, time.Time{}
 	return reflect.DeepEqual(left, right)
 }
 
 func publicationEvidenceReusableAs(source, target domain.PublicationEvidence) bool {
-	if source.ProjectID != target.ProjectID || source.Layer != target.Layer || source.PatchDigest != target.PatchDigest || source.SourceRevision != target.SourceRevision || source.PolicyVersion != target.PolicyVersion || source.EnvironmentFingerprint != target.EnvironmentFingerprint {
+	if source.ProjectID != target.ProjectID || source.IssueID != target.IssueID || source.Layer != target.Layer || source.PatchDigest != target.PatchDigest || source.SourceRevision != target.SourceRevision || source.PolicyVersion != target.PolicyVersion || source.EnvironmentFingerprint != target.EnvironmentFingerprint || !reflect.DeepEqual(source.Coverage, target.Coverage) {
 		return false
 	}
 	if source.Layer == domain.PublicationEvidenceMergeResult {
 		return source.BaseRevision == target.BaseRevision && source.ResultRevision == target.ResultRevision
 	}
 	return true
+}
+
+func nullablePublicationEvidenceID(value string) any {
+	if value = strings.TrimSpace(value); value != "" {
+		return value
+	}
+	return nil
 }

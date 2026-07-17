@@ -221,7 +221,6 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		protocol.CommandValidationFinish,
 		protocol.CommandValidationStatus,
 		protocol.CommandPublicationEvidenceRecord,
-		protocol.CommandPublicationEvidenceInvalidate,
 		protocol.CommandPublicationEvidenceStatus,
 		protocol.CommandPublicationEvidenceEvaluate,
 		protocol.CommandUIOpenTaskWorkspace,

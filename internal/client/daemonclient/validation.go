@@ -54,14 +54,6 @@ func (c *Client) PublicationEvidenceRecord(ctx context.Context, req protocol.Pub
 	return out, nil
 }
 
-func (c *Client) PublicationEvidenceInvalidate(ctx context.Context, req protocol.PublicationEvidenceInvalidateRequest) (protocol.PublicationEvidenceInvalidateResponse, error) {
-	var out protocol.PublicationEvidenceInvalidateResponse
-	if err := c.commandJSON(ctx, protocol.CommandPublicationEvidenceInvalidate, req, &out); err != nil {
-		return out, err
-	}
-	return out, nil
-}
-
 func (c *Client) PublicationEvidenceStatus(ctx context.Context, req protocol.PublicationEvidenceStatusRequest) (protocol.PublicationEvidenceStatusResponse, error) {
 	var out protocol.PublicationEvidenceStatusResponse
 	if err := c.commandJSON(ctx, protocol.CommandPublicationEvidenceStatus, req, &out); err != nil {

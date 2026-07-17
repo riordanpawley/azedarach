@@ -180,6 +180,7 @@ type Daemon struct {
 	operationRuntime                     *operationRuntime
 	publicationEvidenceMu                sync.RWMutex
 	publicationEvidenceCache             map[string]domain.PublicationEvidenceSnapshot
+	publicationEvidenceAfterRefresh      func(domain.PublicationEvidenceSnapshot)
 	noticeService                        *daemonnotices.Service
 	runtimeProjectionCoalescer           *runtimeProjectionEventCoalescer
 	scheduledScripts                     *scheduledScriptManager
@@ -879,7 +880,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	case protocol.CommandRuntimeSignalIngest:
 		return d.handleRuntimeSignalIngest(ctx, req)
 	case protocol.CommandValidationAcquire, protocol.CommandValidationHeartbeat, protocol.CommandValidationNested, protocol.CommandValidationFinish, protocol.CommandValidationStatus,
-		protocol.CommandPublicationEvidenceRecord, protocol.CommandPublicationEvidenceInvalidate, protocol.CommandPublicationEvidenceStatus, protocol.CommandPublicationEvidenceEvaluate:
+		protocol.CommandPublicationEvidenceRecord, protocol.CommandPublicationEvidenceStatus, protocol.CommandPublicationEvidenceEvaluate:
 		return d.handleValidationCommand(ctx, req)
 	case protocol.CommandUIOpenTaskWorkspace, protocol.CommandUIOpenTaskDrillDown:
 		return d.handleUIIssueCommand(ctx, req)

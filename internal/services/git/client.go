@@ -3,6 +3,7 @@ package git
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1003,6 +1004,25 @@ func (c *Client) MergeBaseLocal(ctx context.Context, worktree, baseBranch string
 	return mergeBase, nil
 }
 
+// MergeBaseBetween resolves the common ancestor of two explicit immutable
+// revisions without consulting HEAD or remote-tracking policy.
+func (c *Client) MergeBaseBetween(ctx context.Context, worktree, leftRevision, rightRevision string) (string, error) {
+	leftRevision = strings.TrimSpace(leftRevision)
+	rightRevision = strings.TrimSpace(rightRevision)
+	if leftRevision == "" || rightRevision == "" {
+		return "", fmt.Errorf("merge-base requires two explicit revisions")
+	}
+	output, err := c.runInWorktree(ctx, worktree, "merge-base", leftRevision, rightRevision)
+	if err != nil {
+		return "", fmt.Errorf("resolve merge-base between %s and %s: %w", leftRevision, rightRevision, err)
+	}
+	resolved := strings.TrimSpace(output)
+	if resolved == "" {
+		return "", fmt.Errorf("merge-base between %s and %s was empty", leftRevision, rightRevision)
+	}
+	return resolved, nil
+}
+
 // ChangedFiles returns changed files from merge-base..HEAD.
 func (c *Client) ChangedFiles(ctx context.Context, worktree, baseBranch string) ([]ChangedFile, error) {
 	mergeBase, err := c.MergeBase(ctx, worktree, baseBranch)
@@ -1420,6 +1440,23 @@ func (c *Client) ChangedFilesBetweenRefTrees(ctx context.Context, worktree, base
 		return nil, fmt.Errorf("list files with different trees between %s and %s: %w", baseRef, headRef, err)
 	}
 	return splitNonEmptyLines(output), nil
+}
+
+// PatchDigest returns a stable SHA-256 identity for the exact tree delta
+// between two verified revisions. The digest is independent of later movement
+// on the configured integration branch because callers retain the original
+// base revision as part of evidence provenance.
+func (c *Client) PatchDigest(ctx context.Context, worktree, baseRef, headRef string) (string, error) {
+	baseRef = strings.TrimSpace(baseRef)
+	headRef = strings.TrimSpace(headRef)
+	if baseRef == "" || headRef == "" {
+		return "", fmt.Errorf("patch digest requires base and head revisions")
+	}
+	output, err := c.runInWorktree(ctx, worktree, "diff", "--binary", "--no-ext-diff", baseRef, headRef, "--")
+	if err != nil {
+		return "", fmt.Errorf("derive patch digest for %s..%s: %w", baseRef, headRef, err)
+	}
+	return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(output))), nil
 }
 
 // BranchAheadBehind reports commit deltas for HEAD relative to the base branch.

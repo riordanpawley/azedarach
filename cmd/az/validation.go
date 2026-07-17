@@ -113,35 +113,20 @@ func runValidationCommand(cfg *config.Config, args []string) error {
 		})
 	case "evidence-record":
 		flags := flag.NewFlagSet("validation evidence-record", flag.ContinueOnError)
-		body := flags.String("body", "", "publication evidence JSON object")
+		evidenceID := flags.String("id", "", "stable evidence id")
+		issueID := flags.String("issue", os.Getenv("AZEDARACH_TICKET_ID"), "issue id")
+		layer := flags.String("layer", "", "patch_review or active_path")
+		validationRequestID := flags.String("validation-request", "", "completed validation request id")
+		reusedFrom := flags.String("reused-from", "", "optional prior evidence id")
 		jsonOutput := flags.Bool("json", false, "emit JSON")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		var evidence domain.PublicationEvidence
-		if err := json.Unmarshal([]byte(*body), &evidence); err != nil {
-			return fmt.Errorf("decode publication evidence: %w", err)
-		}
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
-			result, err := deps.DaemonClient.PublicationEvidenceRecord(context.Background(), protocol.PublicationEvidenceRecordRequest{Evidence: evidence})
-			if err != nil {
-				return err
-			}
-			return printValidationValue(result, *jsonOutput)
-		})
-	case "evidence-invalidate":
-		flags := flag.NewFlagSet("validation evidence-invalidate", flag.ContinueOnError)
-		body := flags.String("body", "", "publication evidence invalidation JSON object")
-		jsonOutput := flags.Bool("json", false, "emit JSON")
-		if err := flags.Parse(args[1:]); err != nil {
-			return err
-		}
-		var invalidation domain.PublicationEvidenceInvalidation
-		if err := json.Unmarshal([]byte(*body), &invalidation); err != nil {
-			return fmt.Errorf("decode publication evidence invalidation: %w", err)
-		}
-		return runCommand(cfg, func(deps *cli.Dependencies) error {
-			result, err := deps.DaemonClient.PublicationEvidenceInvalidate(context.Background(), protocol.PublicationEvidenceInvalidateRequest{Invalidation: invalidation})
+			result, err := deps.DaemonClient.PublicationEvidenceRecord(context.Background(), protocol.PublicationEvidenceRecordRequest{
+				EvidenceID: *evidenceID, IssueID: *issueID, Layer: domain.PublicationEvidenceLayer(*layer),
+				ValidationRequestID: *validationRequestID, ReusedFromEvidenceID: *reusedFrom,
+			})
 			if err != nil {
 				return err
 			}
@@ -164,22 +149,12 @@ func runValidationCommand(cfg *config.Config, args []string) error {
 	case "evidence-evaluate":
 		flags := flag.NewFlagSet("validation evidence-evaluate", flag.ContinueOnError)
 		issueID := flags.String("issue", os.Getenv("AZEDARACH_TICKET_ID"), "issue id")
-		candidateJSON := flags.String("candidate-json", "", "candidate identity and intervening-change JSON")
-		policyJSON := flags.String("policy-json", "", "project evidence policy JSON")
 		jsonOutput := flags.Bool("json", false, "emit JSON")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		var candidate domain.PublicationEvidenceCandidate
-		if err := json.Unmarshal([]byte(*candidateJSON), &candidate); err != nil {
-			return fmt.Errorf("decode publication evidence candidate: %w", err)
-		}
-		var policy domain.PublicationEvidencePolicy
-		if err := json.Unmarshal([]byte(*policyJSON), &policy); err != nil {
-			return fmt.Errorf("decode publication evidence policy: %w", err)
-		}
 		return runCommand(cfg, func(deps *cli.Dependencies) error {
-			result, err := deps.DaemonClient.PublicationEvidenceEvaluate(context.Background(), protocol.PublicationEvidenceEvaluateRequest{IssueID: *issueID, Candidate: candidate, Policy: policy})
+			result, err := deps.DaemonClient.PublicationEvidenceEvaluate(context.Background(), protocol.PublicationEvidenceEvaluateRequest{IssueID: *issueID})
 			if err != nil {
 				return err
 			}
@@ -249,8 +224,6 @@ func printValidationValue(value any, asJSON bool) error {
 		}
 	case protocol.PublicationEvidenceRecordResponse:
 		fmt.Printf("%s layer=%s ticket=%s source=%s base=%s result=%s policy=%s reused_from=%s\n", value.Evidence.EvidenceID, value.Evidence.Layer, value.Evidence.IssueID, value.Evidence.SourceRevision, value.Evidence.BaseRevision, value.Evidence.ResultRevision, value.Evidence.PolicyVersion, value.Evidence.ReusedFromEvidenceID)
-	case protocol.PublicationEvidenceInvalidateResponse:
-		fmt.Printf("%s evidence=%s reason=%s details=%s\n", value.Invalidation.InvalidationID, value.Invalidation.EvidenceID, value.Invalidation.Reason, value.Invalidation.Details)
 	case protocol.PublicationEvidenceStatusResponse:
 		fmt.Printf("evidence=%d invalidations=%d revision=%d ticket=%s\n", len(value.Snapshot.Evidence), len(value.Snapshot.Invalidations), value.Snapshot.Revision, value.Snapshot.IssueID)
 		for _, evidence := range value.Snapshot.Evidence {
@@ -274,15 +247,14 @@ func printValidationValue(value any, asJSON bool) error {
 }
 
 func printValidationUsage() {
-	fmt.Println(strings.TrimSpace(`Usage: az validation <acquire|heartbeat|authorize-nested|finish|status|watch|evidence-record|evidence-invalidate|evidence-status|evidence-evaluate> [flags]
+	fmt.Println(strings.TrimSpace(`Usage: az validation <acquire|heartbeat|authorize-nested|finish|status|watch|evidence-record|evidence-status|evidence-evaluate> [flags]
   acquire --request <id> --token <secret> --scope repository|ticket --purpose capacity|development|push_gate|review_evidence --isolation <mode> --environment-fingerprint <hash> --override none|no_reuse|force_rerun|emergency_skip [--override-actor <id> --override-reason <text>] [--issue <id>] --class aggregate|shared|safe --profile <name> --command <text> --revision <sha> [--wait] [--json]
   heartbeat --request <id> --token <secret> [--ttl 30]
   authorize-nested --request <id> --token <secret> --class aggregate|shared|safe
   finish --request <id> --token <secret> --state completed|cancelled|failed [--outcome text] [--evidence-json object] [--json]
-  evidence-record --body <publication-evidence-json> [--json]
-  evidence-invalidate --body <invalidation-json> [--json]
+  evidence-record --id <id> --issue <id> --layer patch_review|active_path --validation-request <id> [--reused-from <id>] [--json]
   evidence-status [--issue <id>] [--json]
-  evidence-evaluate --issue <id> --candidate-json <object> --policy-json <object> [--json]
+  evidence-evaluate --issue <id> [--json]
   status [--json]
   watch [--interval 1s] [--json]`))
 }

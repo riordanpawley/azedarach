@@ -4,14 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	gitservice "github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -142,19 +147,62 @@ func TestValidationCommandRejectsSpoofedNestedAuthorization(t *testing.T) {
 func TestPublicationEvidenceCommandsRetainPatchAcrossUnrelatedBaseMovement(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
+	runPublicationGit(t, repoDir, "init", "-b", "main")
+	runPublicationGit(t, repoDir, "config", "user.email", "test@example.com")
+	runPublicationGit(t, repoDir, "config", "user.name", "Test")
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".azedarach", "config.json"), []byte(`{
+  "publicationEvidence": {
+    "policyVersion": "consumer-policy-v1",
+    "activePathProfiles": ["consumer-integration"],
+    "exactBaseSurfaces": {"wire": ["src/wire"]},
+    "dependencies": {"api": ["src/api.ts"]}
+  }
+}`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("issues.db*\nruntime.db*\n.azedarach/*\n!.azedarach/config.json\n"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, "src"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "src", "api.ts"), []byte("export const api = 1;\n"), 0o644))
+	runPublicationGit(t, repoDir, "add", ".")
+	runPublicationGit(t, repoDir, "commit", "-m", "base")
+	runPublicationGit(t, repoDir, "checkout", "-b", "consumer-change")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "src", "api.ts"), []byte("export const api = 2;\n"), 0o644))
+	runPublicationGit(t, repoDir, "add", "src/api.ts")
+	runPublicationGit(t, repoDir, "commit", "-m", "consumer change")
+	sourceRevision := runPublicationGit(t, repoDir, "rev-parse", "HEAD")
+
 	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "portable consumer change", Type: domain.TypeFeature, Priority: domain.P1, Status: domain.StatusInProgress})
 	require.NoError(t, err)
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
 	t.Cleanup(func() { _ = runtime.Close() })
-	d := &Daemon{operationRuntime: runtime, revision: map[string]uint64{"project": 1}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	require.NoError(t, runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{ProjectID: "project", IssueID: issueID, Path: repoDir, Branch: "consumer-change", UpdatedAt: time.Now().UTC()}))
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()}, operationRuntime: runtime,
+		revision: map[string]uint64{"project": 1}, issueClientsByProject: map[string]*issues.Client{"project": client},
+		runtimeStoresByProject:   map[string]*daemonstate.RuntimeStateStore{"project": runtimeStore},
+		publicationEvidenceCache: map[string]domain.PublicationEvidenceSnapshot{},
+		git:                      gitservice.NewClient(gitservice.NewExecRunner(repoDir), slog.Default()),
+	}
 
-	recordBody, err := json.Marshal(protocol.PublicationEvidenceRecordRequest{Evidence: domain.PublicationEvidence{
-		EvidenceID: "review-1", ProjectID: "spoofed", IssueID: issueID, Layer: domain.PublicationEvidencePatchReview,
-		PatchDigest: "patch-a", SourceRevision: "source-a", BaseRevision: "base-a", Producer: "reviewer",
-		PolicyVersion: "consumer-policy-v1", EnvironmentFingerprint: "node-22", Coverage: domain.PublicationEvidenceCoverage{Paths: []string{"src/api.ts"}},
-	}})
+	started := time.Now().UTC()
+	_, err = runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{
+		RequestID: "review-validation", LeaseToken: "secret", ProjectID: "project", IssueID: issueID,
+		Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence,
+		IsolationMode: "worktree", EnvironmentFingerprint: "node-22", Profile: "consumer-integration", Command: "npm test",
+		SourceRevision: sourceRevision, ReviewerID: "reviewer", ReviewEpochEventID: 1, TTL: time.Minute,
+	}, started)
+	require.NoError(t, err)
+	_, err = runtime.store.FinishValidation(ctx, "review-validation", "secret", domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{
+		Held: true, RequestID: "review-validation", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket,
+		Purpose: domain.ValidationPurposeReviewEvidence, Profile: "consumer-integration", SourceRevision: sourceRevision, Present: true,
+	}, started.Add(time.Second), time.Minute)
+	require.NoError(t, err)
+	require.Empty(t, runPublicationGit(t, repoDir, "status", "--porcelain=v1", "--untracked-files=all"))
+
+	recordBody, err := json.Marshal(protocol.PublicationEvidenceRecordRequest{EvidenceID: "review-1", IssueID: issueID, Layer: domain.PublicationEvidencePatchReview, ValidationRequestID: "review-validation"})
 	require.NoError(t, err)
 	recordResp, err := d.handleValidationCommand(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "record", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandPublicationEvidenceRecord, Meta: protocol.Metadata{ProjectID: "project"}, Body: recordBody})
 	require.NoError(t, err)
@@ -163,12 +211,18 @@ func TestPublicationEvidenceCommandsRetainPatchAcrossUnrelatedBaseMovement(t *te
 	require.NoError(t, json.Unmarshal(recordResp.Body, &recorded))
 	assert.Equal(t, "project", recorded.Evidence.ProjectID)
 	assert.False(t, recorded.Evidence.CreatedAt.IsZero())
+	assert.Equal(t, sourceRevision, recorded.Evidence.SourceRevision)
+	assert.Equal(t, []string{"src/api.ts"}, recorded.Evidence.Coverage.Paths)
 
-	evaluateBody, err := json.Marshal(protocol.PublicationEvidenceEvaluateRequest{
-		IssueID:   issueID,
-		Candidate: domain.PublicationEvidenceCandidate{PatchDigest: "patch-a", SourceRevision: "source-a", BaseRevision: "base-b", PolicyVersion: "consumer-policy-v1", EnvironmentFingerprint: "node-22", ImpactKnown: true, CapabilityAvailable: true, ChangedPaths: []string{"docs/readme.md"}},
-		Policy:    domain.PublicationEvidencePolicy{Version: "consumer-policy-v1", ExactBaseSurfaces: []string{"wire"}, InvalidatePathOverlap: true, FailClosedUnknownImpact: true, RequireCapability: true},
-	})
+	baseWorktree := t.TempDir()
+	runPublicationGit(t, repoDir, "worktree", "add", baseWorktree, "main")
+	t.Cleanup(func() { runPublicationGit(t, repoDir, "worktree", "remove", "--force", baseWorktree) })
+	require.NoError(t, os.MkdirAll(filepath.Join(baseWorktree, "docs"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(baseWorktree, "docs", "readme.md"), []byte("unrelated\n"), 0o644))
+	runPublicationGit(t, baseWorktree, "add", "docs/readme.md")
+	runPublicationGit(t, baseWorktree, "commit", "-m", "unrelated base movement")
+
+	evaluateBody, err := json.Marshal(protocol.PublicationEvidenceEvaluateRequest{IssueID: issueID})
 	require.NoError(t, err)
 	evaluateResp, err := d.handleValidationCommand(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "evaluate", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandPublicationEvidenceEvaluate, Meta: protocol.Metadata{ProjectID: "project"}, Body: evaluateBody})
 	require.NoError(t, err)
@@ -178,6 +232,88 @@ func TestPublicationEvidenceCommandsRetainPatchAcrossUnrelatedBaseMovement(t *te
 	require.Len(t, evaluated.Assessments, 1)
 	assert.True(t, evaluated.Assessments[0].Retained)
 	assert.True(t, evaluated.Assessments[0].BaseMovementOnly)
+}
+
+func TestTaskCloseRecordsExactSyntheticMergeEvidence(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	runPublicationGit(t, repoDir, "init", "-b", "main")
+	runPublicationGit(t, repoDir, "config", "user.email", "test@example.com")
+	runPublicationGit(t, repoDir, "config", "user.name", "Test")
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755))
+	configJSON := "{\n  \"publicationEvidence\": {\n    \"policyVersion\": \"portable-v1\",\n    \"activePathProfiles\": [\"consumer-integration\"],\n    \"exactBaseSurfaces\": {\"wire\": [\"src/wire\"]},\n    \"dependencies\": {\"api\": [\"src/api.ts\"]}\n  }\n}"
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".azedarach", "config.json"), []byte(configJSON), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte(".azedarach/*\n!.azedarach/config.json\nissues.db*\n"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, "src"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, "scripts"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "scripts", "git-merge-rebase-gate.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "src", "api.ts"), []byte("export const api = 1;\n"), 0o644))
+	runPublicationGit(t, repoDir, "add", ".")
+	runPublicationGit(t, repoDir, "commit", "-m", "base")
+	runPublicationGit(t, repoDir, "checkout", "-b", "feature")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "src", "api.ts"), []byte("export const api = 2;\n"), 0o644))
+	runPublicationGit(t, repoDir, "add", "src/api.ts")
+	runPublicationGit(t, repoDir, "commit", "-m", "feature")
+	sourceOID := runPublicationGit(t, repoDir, "rev-parse", "HEAD")
+	runPublicationGit(t, repoDir, "checkout", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "main.txt"), []byte("divergent target\n"), 0o644))
+	runPublicationGit(t, repoDir, "add", "main.txt")
+	runPublicationGit(t, repoDir, "commit", "-m", "advance target")
+	baseOID := runPublicationGit(t, repoDir, "rev-parse", "HEAD")
+
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = runtime.Close() })
+	issueClient := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = issueClient.CloseDB() })
+	issueID, err := issueClient.Create(ctx, issues.CreateTaskParams{Title: "portable merge", Type: domain.TypeFeature, Priority: domain.P1, Status: domain.StatusInProgress})
+	require.NoError(t, err)
+	started := time.Now().UTC()
+	_, err = runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{
+		RequestID: "merge-review", LeaseToken: "secret", ProjectID: "project", IssueID: issueID,
+		Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence,
+		IsolationMode: "worktree", EnvironmentFingerprint: "go-portable", Profile: "consumer-integration", Command: "go test ./...",
+		SourceRevision: sourceOID, ReviewerID: "reviewer", ReviewEpochEventID: 1, TTL: time.Minute,
+	}, started)
+	require.NoError(t, err)
+	_, err = runtime.store.FinishValidation(ctx, "merge-review", "secret", domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{
+		Held: true, RequestID: "merge-review", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket,
+		Purpose: domain.ValidationPurposeReviewEvidence, Profile: "consumer-integration", SourceRevision: sourceOID, Present: true,
+	}, started.Add(time.Second), time.Minute)
+	require.NoError(t, err)
+	gitClient := gitservice.NewClient(gitservice.NewExecRunner(repoDir), slog.Default())
+	merge, err := gitClient.MergeCleanlyTransactional(ctx, repoDir, "feature")
+	require.NoError(t, err)
+	require.True(t, merge.Success)
+	targetOID := runPublicationGit(t, repoDir, "rev-parse", "HEAD")
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()}, operationRuntime: runtime, git: gitClient,
+		publicationEvidenceCache: map[string]domain.PublicationEvidenceSnapshot{}, issueClientsByProject: map[string]*issues.Client{"project": issueClient},
+	}
+	err = d.recordTaskCloseMergeResultEvidence(ctx, "project", issueID, taskCloseIntegrationResult{
+		Requested: true, Integrated: true, SourceBranch: "feature", TargetBranch: "main",
+		BaseOID: baseOID, SourceOID: sourceOID, TargetOID: targetOID, ValidationAttempts: merge.ValidationAttempts,
+	})
+	require.NoError(t, err, "merge=%+v target=%s", merge, targetOID)
+	snapshot, err := runtime.store.PublicationEvidenceSnapshot(ctx, "project", issueID)
+	require.NoError(t, err)
+	require.Len(t, snapshot.Evidence, 1)
+	assert.Equal(t, domain.PublicationEvidenceMergeResult, snapshot.Evidence[0].Layer)
+	assert.Equal(t, baseOID, snapshot.Evidence[0].BaseRevision)
+	assert.Equal(t, sourceOID, snapshot.Evidence[0].SourceRevision)
+	assert.Equal(t, targetOID, snapshot.Evidence[0].ResultRevision)
+	assert.Equal(t, []string{"src/api.ts"}, snapshot.Evidence[0].Coverage.Paths)
+	_, assessments, err := d.evaluateCurrentPublicationEvidence(ctx, "project", issueID, time.Now().UTC())
+	require.NoError(t, err)
+	require.Len(t, assessments, 1)
+	assert.True(t, assessments[0].Retained, "exact synthetic merge must remain active after the issue worktree is gone: %+v", assessments[0])
+}
+
+func runPublicationGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	output, err := command.CombinedOutput()
+	require.NoError(t, err, "git %s: %s", strings.Join(args, " "), output)
+	return strings.TrimSpace(string(output))
 }
 
 func TestPublicationEvidenceProjectionRefreshesAcrossDaemons(t *testing.T) {
@@ -207,4 +343,52 @@ func TestPublicationEvidenceProjectionRefreshesAcrossDaemons(t *testing.T) {
 	refreshed, err := secondDaemon.publicationEvidenceSnapshot(ctx, "project", evidence.IssueID)
 	require.NoError(t, err)
 	assert.Len(t, refreshed.Evidence, 2, "second daemon must refresh durable projection before reading its cache")
+}
+
+func TestPublicationEvidenceProjectionRejectsStaleConcurrentRefresh(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	writer := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	reader := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = writer.Close() })
+	t.Cleanup(func() { _ = reader.Close() })
+	d := &Daemon{operationRuntime: reader, publicationEvidenceCache: map[string]domain.PublicationEvidenceSnapshot{}}
+	evidence := domain.PublicationEvidence{
+		EvidenceID: "review-1", ProjectID: "project", IssueID: "consumer-1", Layer: domain.PublicationEvidencePatchReview,
+		PatchDigest: "patch-a", SourceRevision: "source-a", Producer: "reviewer", PolicyVersion: "policy-v1",
+		EnvironmentFingerprint: "node-22", CreatedAt: time.Now().UTC(),
+	}
+	_, err := writer.store.RecordPublicationEvidence(ctx, evidence)
+	require.NoError(t, err)
+
+	firstRead := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var refreshes atomic.Int32
+	d.publicationEvidenceAfterRefresh = func(snapshot domain.PublicationEvidenceSnapshot) {
+		if refreshes.Add(1) == 1 {
+			close(firstRead)
+			<-releaseFirst
+		}
+	}
+	firstResult := make(chan domain.PublicationEvidenceSnapshot, 1)
+	firstError := make(chan error, 1)
+	go func() {
+		snapshot, readErr := d.publicationEvidenceSnapshot(ctx, "project", evidence.IssueID)
+		firstResult <- snapshot
+		firstError <- readErr
+	}()
+	<-firstRead
+	evidence.EvidenceID = "active-path-1"
+	evidence.Layer = domain.PublicationEvidenceActivePath
+	_, err = writer.store.RecordPublicationEvidence(ctx, evidence)
+	require.NoError(t, err)
+	newer, err := d.publicationEvidenceSnapshot(ctx, "project", evidence.IssueID)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), newer.Revision)
+	require.Len(t, newer.Evidence, 2)
+	close(releaseFirst)
+	require.NoError(t, <-firstError)
+	staleCallerResult := <-firstResult
+	assert.Equal(t, int64(2), staleCallerResult.Revision)
+	assert.Len(t, staleCallerResult.Evidence, 2, "an N refresh must return the selected N+1 cache snapshot")
 }

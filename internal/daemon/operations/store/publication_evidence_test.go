@@ -97,6 +97,49 @@ func TestPublicationEvidenceReuseRequiresMatchingStoredProof(t *testing.T) {
 	if _, err := store.RecordPublicationEvidence(ctx, mismatch); err == nil {
 		t.Fatal("mismatched reusable proof recorded")
 	}
+	crossIssue := reused
+	crossIssue.EvidenceID = "e-cross-issue"
+	crossIssue.IssueID = "other-issue"
+	if _, err := store.RecordPublicationEvidence(ctx, crossIssue); err == nil {
+		t.Fatal("cross-issue reusable proof recorded")
+	}
+	narrowedCoverage := reused
+	narrowedCoverage.EvidenceID = "e-narrowed"
+	narrowedCoverage.Coverage.Paths = nil
+	if _, err := store.RecordPublicationEvidence(ctx, narrowedCoverage); err == nil {
+		t.Fatal("narrowed-coverage reusable proof recorded")
+	}
+}
+
+func TestPublicationEvidenceLostResponseRetriesPreserveServerTimestamp(t *testing.T) {
+	ctx := context.Background()
+	store := NewAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	defer store.Close()
+	evidence := storedPublicationEvidence()
+	evidence.CreatedAt = time.Time{}
+	first, err := store.RecordPublicationEvidence(ctx, evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retried, err := store.RecordPublicationEvidence(ctx, evidence)
+	if err != nil {
+		t.Fatalf("lost-response evidence retry: %v", err)
+	}
+	if retried.CreatedAt != first.CreatedAt || retried.CreatedAt.IsZero() {
+		t.Fatalf("retry timestamps first=%s retried=%s", first.CreatedAt, retried.CreatedAt)
+	}
+	invalidation := domain.PublicationEvidenceInvalidation{InvalidationID: "retry-i", EvidenceID: first.EvidenceID, Reason: domain.PublicationInvalidPathOverlap, Details: "same semantic invalidation"}
+	firstInvalidation, err := store.RecordPublicationEvidenceInvalidation(ctx, invalidation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retriedInvalidation, err := store.RecordPublicationEvidenceInvalidation(ctx, invalidation)
+	if err != nil {
+		t.Fatalf("lost-response invalidation retry: %v", err)
+	}
+	if retriedInvalidation.CreatedAt != firstInvalidation.CreatedAt || retriedInvalidation.CreatedAt.IsZero() {
+		t.Fatalf("invalidation retry timestamps first=%s retried=%s", firstInvalidation.CreatedAt, retriedInvalidation.CreatedAt)
+	}
 }
 
 func storedPublicationEvidence() domain.PublicationEvidence {

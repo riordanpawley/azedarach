@@ -535,6 +535,35 @@
         }
       }
     },
+    "publicationEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Project-owned capability and policy mapping for layered publication evidence.",
+      "properties": {
+        "policyVersion": {"type": "string", "minLength": 1},
+        "activePathProfiles": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "default": []
+        },
+        "exactBaseSurfaces": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "default": {}
+        },
+        "dependencies": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "default": {}
+        }
+      }
+    },
     "diagnostics": {
       "type": "object",
       "additionalProperties": false,

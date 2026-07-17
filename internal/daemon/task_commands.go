@@ -771,12 +771,17 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 func (d *Daemon) attachPublicationEvidenceDiagnostic(ctx context.Context, projectID, taskID string, tasks []domain.Task) []domain.Task {
 	out := append([]domain.Task(nil), tasks...)
 	diagnostic := domain.PublicationEvidenceDiagnostic{State: "unavailable", Availability: "unavailable", Detail: "publication evidence projection is unavailable"}
-	snapshot, err := d.publicationEvidenceSnapshot(ctx, projectID, taskID)
+	snapshot, assessments, err := d.evaluateCurrentPublicationEvidence(ctx, projectID, taskID, time.Now().UTC())
 	if err == nil {
-		diagnostic = domain.SummarizePublicationEvidence(snapshot)
+		diagnostic = domain.SummarizePublicationEvidence(snapshot, assessments)
 	}
 	if err != nil {
-		diagnostic.Detail = err.Error()
+		if recorded, readErr := d.publicationEvidenceSnapshot(ctx, projectID, taskID); readErr == nil && len(recorded.Evidence) > 0 {
+			diagnostic = domain.SummarizePublicationEvidence(recorded, nil)
+			diagnostic.Detail += ": " + err.Error()
+		} else {
+			diagnostic.Detail = err.Error()
+		}
 	}
 	for i := range out {
 		if out[i].ID.String() == taskID {
@@ -2230,6 +2235,19 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 			recordPhase("integration_receipt", phaseStartedAt, false)
 			return result, fmt.Errorf("phase integration_receipt for issue %s: %w", taskID, err)
 		}
+		if integration.Integrated {
+			configured, capabilityErr := d.publicationEvidenceConfigured(projectID)
+			if capabilityErr != nil {
+				recordPhase("integration_receipt", phaseStartedAt, false)
+				return result, fmt.Errorf("phase merge_result_evidence for issue %s: %w", taskID, capabilityErr)
+			}
+			if configured {
+				if err := d.recordTaskCloseMergeResultEvidence(ctx, projectID, taskID, integration); err != nil {
+					recordPhase("integration_receipt", phaseStartedAt, false)
+					return result, fmt.Errorf("phase merge_result_evidence for issue %s: %w", taskID, err)
+				}
+			}
+		}
 	}
 	recordPhase("integration_receipt", phaseStartedAt, !integration.Requested || (!integration.Integrated && !integration.NoChanges))
 
@@ -2862,6 +2880,7 @@ type taskCloseIntegrationResult struct {
 	NoChanges          bool
 	SourceBranch       string
 	TargetBranch       string
+	BaseOID            string
 	SourceOID          string
 	TargetOID          string
 	HookDiagnostics    []git.GitHookDiagnostic
@@ -2872,6 +2891,7 @@ type taskCloseIntegrationReceipt struct {
 	ProjectID    string
 	SourceBranch string
 	TargetBranch string
+	BaseOID      string
 	SourceOID    string
 	TargetOID    string
 }
@@ -2920,11 +2940,12 @@ func (d *Daemon) persistTaskCloseIntegrationReceipt(ctx context.Context, project
 		ProjectID:    protocol.NormalizeProjectID(projectID),
 		SourceBranch: strings.TrimSpace(integration.SourceBranch),
 		TargetBranch: strings.TrimSpace(integration.TargetBranch),
+		BaseOID:      strings.TrimSpace(integration.BaseOID),
 		SourceOID:    strings.TrimSpace(integration.SourceOID),
 		TargetOID:    strings.TrimSpace(integration.TargetOID),
 	}
-	if receipt.SourceBranch == "" || receipt.TargetBranch == "" || receipt.SourceOID == "" || receipt.TargetOID == "" {
-		return fmt.Errorf("integration result is missing exact source/target branch or OID")
+	if receipt.SourceBranch == "" || receipt.TargetBranch == "" || receipt.BaseOID == "" || receipt.SourceOID == "" || receipt.TargetOID == "" {
+		return fmt.Errorf("integration result is missing exact base/source/target branch or OID")
 	}
 	_, err := issueClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
 		Type:          domain.IssueEventTaskIntegrationCompleted,
@@ -2935,6 +2956,7 @@ func (d *Daemon) persistTaskCloseIntegrationReceipt(ctx context.Context, project
 			"project_id":    receipt.ProjectID,
 			"source_branch": receipt.SourceBranch,
 			"target_branch": receipt.TargetBranch,
+			"base_oid":      receipt.BaseOID,
 			"source_oid":    receipt.SourceOID,
 			"target_oid":    receipt.TargetOID,
 		},
@@ -2966,6 +2988,7 @@ func (d *Daemon) latestTaskCloseIntegrationReceipt(ctx context.Context, projectI
 			ProjectID:    observationPayloadString(event.Payload, "project_id"),
 			SourceBranch: observationPayloadString(event.Payload, "source_branch"),
 			TargetBranch: observationPayloadString(event.Payload, "target_branch"),
+			BaseOID:      observationPayloadString(event.Payload, "base_oid"),
 			SourceOID:    observationPayloadString(event.Payload, "source_oid"),
 			TargetOID:    observationPayloadString(event.Payload, "target_oid"),
 		}
@@ -3082,11 +3105,15 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		if err := verifyTaskCloseIntegrationReceipt(ctx, d.git, targetWorktree, receipt, projectID, source.Branch, targetBranch); err != nil {
 			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("source worktree and branch for %s are already removed, but the exact integration receipt is not valid: %w", taskID, err)
 		}
+		if receipt.BaseOID == "" {
+			receipt.BaseOID = receipt.TargetOID
+		}
 		return taskCloseIntegrationResult{
 			Requested:    true,
 			NoChanges:    true,
 			SourceBranch: source.Branch,
 			TargetBranch: targetBranch,
+			BaseOID:      receipt.BaseOID,
 			SourceOID:    receipt.SourceOID,
 			TargetOID:    receipt.TargetOID,
 		}, nil
@@ -3126,6 +3153,10 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("checkout target branch before close integration: %w", err)
 		}
 	}
+	baseOID, baseOIDErr := d.git.ResolveCommit(ctx, targetWorktree, targetBranch)
+	if baseOIDErr != nil {
+		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve target commit before close integration: %w", baseOIDErr)
+	}
 	merge, err := d.mergeTaskBranchBeforeClose(ctx, projectID, taskID, targetWorktree, targetBranch, sourceRef)
 	if err != nil {
 		return taskCloseIntegrationResult{Requested: true}, err
@@ -3152,6 +3183,7 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		Integrated:         true,
 		SourceBranch:       source.Branch,
 		TargetBranch:       targetBranch,
+		BaseOID:            baseOID,
 		SourceOID:          sourceOID,
 		TargetOID:          targetOID,
 		HookDiagnostics:    append([]git.GitHookDiagnostic(nil), merge.HookDiagnostics...),
@@ -3181,6 +3213,7 @@ func (d *Daemon) taskCloseNoChangesIntegrationResult(ctx context.Context, target
 		NoChanges:          true,
 		SourceBranch:       sourceBranch,
 		TargetBranch:       targetBranch,
+		BaseOID:            targetOID,
 		SourceOID:          sourceOID,
 		TargetOID:          targetOID,
 		ValidationAttempts: validationAttempts,
@@ -3226,6 +3259,7 @@ func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, project
 				return result, fmt.Errorf("resolve %s during origin-mode close integration retry for %s: %w", remoteBaseRef, source.IssueID, err)
 			}
 			result.NoChanges = true
+			result.BaseOID = targetOID
 			result.SourceOID = sourceOID
 			result.TargetOID = targetOID
 			return result, nil
@@ -3243,7 +3277,11 @@ func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, project
 		if err := verifyTaskCloseIntegrationReceipt(ctx, d.git, targetWorktree, receipt, projectID, source.Branch, remoteBaseRef); err != nil {
 			return result, fmt.Errorf("source worktree and branch for %s are already removed, but the exact origin-mode integration receipt is not valid: %w", taskID, err)
 		}
+		if receipt.BaseOID == "" {
+			receipt.BaseOID = receipt.TargetOID
+		}
 		result.NoChanges = true
+		result.BaseOID = receipt.BaseOID
 		result.SourceOID = receipt.SourceOID
 		result.TargetOID = receipt.TargetOID
 		return result, nil
@@ -3274,6 +3312,7 @@ func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, project
 		return result, fmt.Errorf("resolve %s before origin-mode close integration for %s: %w", remoteBaseRef, source.IssueID, err)
 	}
 	result.SourceOID = sourceOID
+	result.BaseOID = targetOID
 	result.TargetOID = targetOID
 	changedFiles, err := d.git.ChangedFilesBetweenRefTrees(ctx, targetWorktree, remoteBaseRef, sourceRef)
 	if err != nil {

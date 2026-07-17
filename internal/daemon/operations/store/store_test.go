@@ -704,6 +704,64 @@ func TestLayeredPublicationEvidenceMigrationRejectsAppliedSchemaDrift(t *testing
 	}
 }
 
+func TestLayeredPublicationEvidenceMigrationRejectsCanonicalDefinitionDrift(t *testing.T) {
+	tests := []struct {
+		name, objectType, objectName, old, replacement string
+	}{
+		{
+			name: "invalidation enum removal", objectType: "table", objectName: "daemon_publication_evidence_invalidations",
+			old: ",'capability_absent','impact_unknown'", replacement: ",'capability_absent'",
+		},
+		{
+			name: "merge result constraint removal", objectType: "table", objectName: "daemon_publication_evidence",
+			old: "CHECK (layer != 'merge_result' OR (length(base_revision) > 0 AND length(result_revision) > 0)),", replacement: "",
+		},
+		{
+			name: "reuse foreign key removal", objectType: "table", objectName: "daemon_publication_evidence",
+			old: " REFERENCES daemon_publication_evidence(evidence_id)", replacement: "",
+		},
+		{
+			name: "revision trigger semantic change", objectType: "trigger", objectName: "daemon_publication_evidence_insert_revision",
+			old: "revision = revision + 1", replacement: "revision = revision + 2",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+			seedOperationsMigrations(t, dbPath, 7)
+			db, err := sql.Open("sqlite", dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var definition string
+			if err = db.QueryRow(`SELECT sql FROM sqlite_master WHERE type=? AND name=?`, tc.objectType, tc.objectName).Scan(&definition); err != nil {
+				t.Fatal(err)
+			}
+			driftedDefinition := strings.Replace(definition, tc.old, tc.replacement, 1)
+			if driftedDefinition == definition {
+				t.Fatalf("fixture did not alter %s %s: %q absent", tc.objectType, tc.objectName, tc.old)
+			}
+			if _, err = db.Exec(`PRAGMA writable_schema=ON`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.Exec(`UPDATE sqlite_master SET sql=? WHERE type=? AND name=?`, driftedDefinition, tc.objectType, tc.objectName); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.Exec(`PRAGMA schema_version=9876`); err != nil {
+				t.Fatal(err)
+			}
+			if err = db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			drifted := NewAtPath(dbPath, slog.Default())
+			defer drifted.Close()
+			if _, err = drifted.PublicationEvidenceSnapshot(context.Background(), "project", ""); err == nil || !strings.Contains(err.Error(), "differs from immutable artifact") {
+				t.Fatalf("schema drift error = %v", err)
+			}
+		})
+	}
+}
+
 func seedOperationsMigrations(t *testing.T, dbPath string, count int) {
 	t.Helper()
 	db, err := sql.Open("sqlite", dbPath)
