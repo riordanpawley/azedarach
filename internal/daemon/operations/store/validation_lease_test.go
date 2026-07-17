@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -215,6 +216,62 @@ func TestValidationLeaseConcurrentDaemonsActivateExactlyOneAggregate(t *testing.
 	}
 	assert.Equal(t, 1, states[domain.ValidationRequestActive])
 	assert.Equal(t, 1, states[domain.ValidationRequestQueued])
+}
+
+func TestValidationSnapshotRemainsReadableDuringValidationWriter(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "project.db")
+	store := NewAtPath(path, nil)
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 7, 17, 0, 0, 0, 0, time.UTC)
+	_, err := store.AcquireValidation(ctx, domain.ValidationAcquire{
+		RequestID: "lease", LeaseToken: testValidationToken, ProjectID: "project", IssueID: "consumer-ticket",
+		Class: domain.ValidationClassAggregate, Profile: "consumer-gate", Command: "make verify", SourceRevision: "abc123", TTL: time.Minute,
+	}, now)
+	require.NoError(t, err)
+
+	writer, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?_pragma=busy_timeout(100)&_txlock=immediate")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = writer.Close() })
+	tx, err := writer.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	_, err = tx.ExecContext(ctx, `UPDATE daemon_validation_state SET revision=revision WHERE project_id='project'`)
+	require.NoError(t, err)
+
+	snapshot, err := store.ValidationSnapshot(ctx, "project", now.Add(time.Second), time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, []string{"lease"}, validationRequestIDs(snapshot.Active))
+	require.Equal(t, domain.ValidationSnapshotFresh, snapshot.Freshness)
+	require.Empty(t, snapshot.DegradedReason)
+}
+
+func TestValidationSnapshotMarksExpiredCapacityStaleWhenWriterPreventsReconciliation(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "project.db")
+	store := NewAtPath(path, nil)
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 7, 17, 0, 0, 0, 0, time.UTC)
+	_, err := store.AcquireValidation(ctx, domain.ValidationAcquire{
+		RequestID: "expired", LeaseToken: testValidationToken, ProjectID: "project", IssueID: "consumer-ticket",
+		Class: domain.ValidationClassAggregate, Profile: "consumer-gate", Command: "make verify", SourceRevision: "abc123", TTL: time.Minute,
+	}, now)
+	require.NoError(t, err)
+
+	writer, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?_pragma=busy_timeout(100)&_txlock=immediate")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = writer.Close() })
+	tx, err := writer.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	_, err = tx.ExecContext(ctx, `UPDATE daemon_validation_state SET revision=revision WHERE project_id='project'`)
+	require.NoError(t, err)
+
+	snapshot, err := store.ValidationSnapshot(ctx, "project", now.Add(2*time.Minute), time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, []string{"expired"}, validationRequestIDs(snapshot.Active))
+	require.Equal(t, domain.ValidationSnapshotStale, snapshot.Freshness)
+	require.Contains(t, snapshot.DegradedReason, "expired leases pending reconciliation")
 }
 
 func TestValidationLeaseConcurrentStoresAdmitExactlyOneSharedBypass(t *testing.T) {
