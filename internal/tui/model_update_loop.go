@@ -287,18 +287,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.finishIssuesRefreshCmd(msg.refreshSeq)
 		}
-		if m.shouldIgnoreDaemonSnapshot(msg.projectID, msg.revision) {
-			if msg.eventsCancel != nil {
-				msg.eventsCancel()
-			}
-			return m, m.finishIssuesRefreshCmd(msg.refreshSeq)
-		}
-		if scopedParentID := strings.TrimSpace(msg.scopedParentID); scopedParentID != "" && !naming.IssueIDsEqual(scopedParentID, m.drillDownParentID) {
+		currentParentID := strings.TrimSpace(m.drillDownParentID)
+		messageParentID := strings.TrimSpace(msg.scopedParentID)
+		if (currentParentID != "" || messageParentID != "") && !naming.IssueIDsEqual(messageParentID, currentParentID) {
 			if msg.eventsCancel != nil {
 				msg.eventsCancel()
 			}
 			m.loading = false
 			m.boardRefreshing = false
+			return m, m.finishIssuesRefreshCmd(msg.refreshSeq)
+		}
+		if m.shouldIgnoreDaemonSnapshot(msg.projectID, msg.revision) {
+			if msg.eventsCancel != nil {
+				msg.eventsCancel()
+			}
 			return m, m.finishIssuesRefreshCmd(msg.refreshSeq)
 		}
 		if msg.daemonClient != nil {
@@ -349,12 +351,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.tasks = linearsync.ReconcileHydratedTasks(m.tasks, tasks)
 		}
-		m.boardView = msg.boardView
-		m.boardColumns = cloneBoardViewColumnSnapshots(msg.boardColumns)
-		m.boardOrdered = append([]domain.Task(nil), msg.boardOrdered...)
-		m.boardProjection = msg.boardProjection
-		if msg.boardView.ID != "" {
-			m.selectedBoardViewID = string(msg.boardView.ID)
+		if messageParentID != "" {
+			m.useDefaultDrillDownBoardView()
+		} else {
+			m.boardView = msg.boardView
+			m.boardColumns = cloneBoardViewColumnSnapshots(msg.boardColumns)
+			m.boardOrdered = append([]domain.Task(nil), msg.boardOrdered...)
+			m.boardProjection = msg.boardProjection
+			if msg.boardView.ID != "" {
+				m.selectedBoardViewID = string(msg.boardView.ID)
+			}
 		}
 		for i := range m.tasks {
 			m.tasks[i].Session = cloneSession(m.tasks[i].Session)
@@ -414,11 +420,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			if opCmd := m.loadOperationsCmd(); opCmd != nil {
 				cmds = append(cmds, opCmd)
-				if orchestratorCmd := m.loadProjectOrchestratorSnapshotCmd(); orchestratorCmd != nil {
+				if orchestratorCmd := m.scheduleProjectOrchestratorRefreshCmd(); orchestratorCmd != nil {
 					cmds = append(cmds, orchestratorCmd)
 				}
 			} else {
-				if orchestratorCmd := m.loadProjectOrchestratorSnapshotCmd(); orchestratorCmd != nil {
+				if orchestratorCmd := m.scheduleProjectOrchestratorRefreshCmd(); orchestratorCmd != nil {
 					cmds = append(cmds, orchestratorCmd)
 				}
 			}
@@ -554,16 +560,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.scheduleIssuesRefreshCmd(), m.loadBoardViewsCmd())
 
 	case projectOrchestratorLoadedMsg:
+		if msg.seq != m.projectOrchestratorRefreshSeq {
+			return m, nil
+		}
+		m.projectOrchestratorRefreshBusy = false
+		var replay tea.Cmd
+		if m.projectOrchestratorRefreshAgain {
+			m.projectOrchestratorRefreshAgain = false
+			replay = m.scheduleProjectOrchestratorRefreshCmd()
+		}
+		if msg.project.ProjectID != strings.TrimSpace(m.daemonProjectID()) {
+			if replay == nil {
+				replay = m.scheduleProjectOrchestratorRefreshCmd()
+			}
+			return m, replay
+		}
 		project := msg.project
 		if msg.err != nil && project.Snapshot == nil && project.Session == nil && m.projectOrchestrator != nil &&
 			(m.projectOrchestrator.Snapshot != nil || m.projectOrchestrator.Session != nil) {
-			return m, nil
+			return m, replay
 		}
 		m.projectOrchestrator = &project
 		if current, ok := m.overlayStack.Current().(*overlay.ProjectOrchestratorOverlay); ok {
 			current.Sync(projectOrchestratorDetails(project))
 		}
-		return m, nil
+		return m, replay
 
 	case projectOrchestratorActionMsg:
 		if msg.err != nil {
@@ -575,7 +596,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.projectOrchestrator.Session = &result
 		}
 		m.addToast(Toast{Level: ToastSuccess, Message: fmt.Sprintf("Project orchestrator %s: %s", msg.action, msg.result.Disposition), Expires: time.Now().Add(3 * time.Second)})
-		return m, m.loadProjectOrchestratorSnapshotCmd()
+		return m, m.scheduleProjectOrchestratorRefreshCmd()
 
 	case issuesErrorMsg:
 		if msg.refreshSeq != 0 && msg.refreshSeq < m.issueRefreshSeq {
@@ -780,6 +801,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if _, exists := queuedCmdKeys[result.key]; !exists {
 					queuedCmdKeys[result.key] = struct{}{}
 					cmds = append(cmds, result.cmd)
+				} else {
+					m.daemonStreamMetrics.RefreshesCoalesced++
+				}
+			}
+			if result.refreshOrchestrator {
+				if _, exists := queuedCmdKeys[daemonStreamCommandOrchestratorRefresh]; !exists {
+					queuedCmdKeys[daemonStreamCommandOrchestratorRefresh] = struct{}{}
+					if cmd := m.scheduleProjectOrchestratorRefreshCmd(); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
 				} else {
 					m.daemonStreamMetrics.RefreshesCoalesced++
 				}
@@ -1425,7 +1456,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(3 * time.Second),
 		})
 		cmds := []tea.Cmd{m.waitForDaemonEventCmd()}
-		if orchestratorCmd := m.loadProjectOrchestratorSnapshotCmd(); orchestratorCmd != nil {
+		if orchestratorCmd := m.scheduleProjectOrchestratorRefreshCmd(); orchestratorCmd != nil {
 			cmds = append(cmds, orchestratorCmd)
 		}
 		if opCmd := m.loadOperationsCmd(); opCmd != nil {
@@ -2318,15 +2349,17 @@ func (m Model) currentTaskWorkspaceRefresh(projectID, taskID string, refreshSeq 
 }
 
 type daemonStreamEventResult struct {
-	cmd       tea.Cmd
-	key       string
-	stop      bool
-	rehydrate bool
+	cmd                 tea.Cmd
+	key                 string
+	stop                bool
+	rehydrate           bool
+	refreshOrchestrator bool
 }
 
 const (
-	daemonStreamCommandIssuesRefresh = "issues-refresh"
-	daemonStreamCommandNoticeRefresh = "notice-refresh"
+	daemonStreamCommandIssuesRefresh       = "issues-refresh"
+	daemonStreamCommandNoticeRefresh       = "notice-refresh"
+	daemonStreamCommandOrchestratorRefresh = "orchestrator-refresh"
 )
 
 func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectionApply bool) daemonStreamEventResult {
@@ -2355,7 +2388,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 			return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
 		}
 		m.daemonRevision = cursor.Advance(evt).Revision
-		return daemonStreamEventResult{cmd: m.loadProjectOrchestratorSnapshotCmd()}
+		return daemonStreamEventResult{refreshOrchestrator: true}
 	}
 	if isNoticeEvent(evt.Event) {
 		switch cursor.Decide(evt) {
@@ -2394,7 +2427,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 			m.daemonRevision = cursor.Advance(evt).Revision
 			return daemonStreamEventResult{key: daemonStreamCommandIssuesRefresh}
 		}
-		return daemonStreamEventResult{}
+		return daemonStreamEventResult{refreshOrchestrator: true}
 	}
 	if evt.Event == protocol.EventSessionUpdated {
 		switch cursor.Decide(evt) {
@@ -2406,7 +2439,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		}
 		m.applySessionProjectionEvent(evt)
 		m.daemonRevision = cursor.Advance(evt).Revision
-		return daemonStreamEventResult{}
+		return daemonStreamEventResult{refreshOrchestrator: true}
 	}
 	if evt.Event == protocol.EventWorktreeProjectionUpdated || evt.Event == protocol.EventGitStatusUpdated {
 		switch cursor.Decide(evt) {
@@ -2418,7 +2451,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		}
 		if skipProjectionApply {
 			m.daemonRevision = cursor.Advance(evt).Revision
-			return daemonStreamEventResult{}
+			return daemonStreamEventResult{refreshOrchestrator: true}
 		}
 
 		var body protocol.ProjectionUpdateEventBody
@@ -2427,7 +2460,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		}
 		diffRefreshCmd := m.refreshOpenDiffOverlayFromProjectionBody(body)
 		m.daemonRevision = cursor.Advance(evt).Revision
-		return daemonStreamEventResult{cmd: diffRefreshCmd}
+		return daemonStreamEventResult{cmd: diffRefreshCmd, refreshOrchestrator: true}
 	}
 	if evt.Event == protocol.EventUICommandRequested {
 		switch cursor.Decide(evt) {
@@ -2447,12 +2480,37 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 	case daemonEventRefreshSnapshot:
 		cursor := protocol.StreamCursor{Revision: m.daemonRevision}
 		m.daemonRevision = cursor.Advance(evt).Revision
-		return daemonStreamEventResult{key: daemonStreamCommandIssuesRefresh}
+		return daemonStreamEventResult{
+			key:                 daemonStreamCommandIssuesRefresh,
+			refreshOrchestrator: isProjectOrchestratorProjectionEvent(evt.Event),
+		}
 	case daemonEventRehydrate:
 		m.clearDaemonEventStream()
 		return daemonStreamEventResult{cmd: m.attachDaemonCmd(), stop: true, rehydrate: true}
 	default:
 		return daemonStreamEventResult{}
+	}
+}
+
+func isProjectOrchestratorProjectionEvent(event string) bool {
+	if isTaskMutationEvent(event) {
+		return true
+	}
+	switch event {
+	case protocol.EventOrchestrationLoopUpdated,
+		protocol.EventSessionUpdated,
+		protocol.EventWorktreeProjectionUpdated,
+		protocol.EventGitStatusUpdated,
+		protocol.EventInteractionResolved,
+		protocol.EventInteractionStale,
+		protocol.EventInteractionReminder,
+		protocol.EventInteractionWithdrawn,
+		protocol.EventInteractionSuperseded,
+		protocol.EventInteractionRecovered,
+		protocol.EventMailAppended:
+		return true
+	default:
+		return false
 	}
 }
 
