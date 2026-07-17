@@ -20,6 +20,8 @@ func TestProtocolV52PreservesCombinedOrchestrationViewProjectionDecisionAndLearn
 		SessionID:            "az-root",
 		Lifecycle:            domain.OrchestratorWorking,
 		Scope:                domain.ProjectOrchestrationScope(),
+		ProjectionRevision:   41,
+		ProjectionAuthority:  OrchestrationProjectionAuthoritySQLite,
 		Cursor:               17,
 		ContinuationRequired: true,
 		Completion:           OrchestrationCompletion{Pass: false, Reasons: []string{"work remains"}},
@@ -37,7 +39,7 @@ func TestProtocolV52PreservesCombinedOrchestrationViewProjectionDecisionAndLearn
 	if err := json.Unmarshal(encoded, &shape); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"role", "session_id", "lifecycle", "cursor", "continuation_required", "completion", "review_queue", "candidates"} {
+	for _, key := range []string{"role", "session_id", "lifecycle", "projection_revision", "projection_authority", "cursor", "continuation_required", "completion", "review_queue", "candidates"} {
 		if _, ok := shape[key]; !ok {
 			t.Fatalf("combined snapshot omitted %q: %s", key, encoded)
 		}

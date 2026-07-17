@@ -3,6 +3,7 @@ package issues
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -2502,6 +2503,57 @@ func TestClientCloseWithRuntimeAtomicallyReleasesExecutionLeaseBeforeTerminalWri
 	assert.Less(t, releaseEventID, statusEventID, "lease release event must precede terminal status event")
 }
 
+func TestClientCloseWithRuntimeReviewEvidenceRejectsNewerEvidenceAtomically(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-close-reviewed-evidence"
+	newTask := func(title string) string {
+		t.Helper()
+		id, err := client.Create(ctx, CreateTaskParams{Title: title, Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInReview})
+		require.NoError(t, err)
+		return id
+	}
+	appendEvidence := func(taskID, summary string) domain.IssueObservationEvent {
+		t.Helper()
+		event, err := client.AppendIssueObservationEvent(ctx, taskID, IssueObservationEventParams{
+			Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: map[string]any{
+				"schema": domain.WorkerEvidenceSchemaV1, "summary": summary,
+				"commands_run": []any{"go test ./internal/daemon"}, "key_assertions": []any{"tests pass"},
+				"files_changed": []any{"internal/daemon/orchestration_review.go"},
+				"review":        map[string]any{"status": "clean", "findings": []any{"none"}}, "risks": []any{"none"},
+			},
+		})
+		require.NoError(t, err)
+		return event
+	}
+	pinFor := func(event domain.IssueObservationEvent) ReviewEvidencePin {
+		t.Helper()
+		evidence := domain.ReduceReviewReadyEvidence([]domain.IssueObservationEvent{event}).LatestEvidence
+		require.NotNil(t, evidence)
+		require.True(t, evidence.Validation.Complete)
+		body, err := json.Marshal(evidence.Evidence)
+		require.NoError(t, err)
+		return ReviewEvidencePin{Source: "issue_event", EventID: event.ID, Digest: fmt.Sprintf("%x", sha256.Sum256(body))}
+	}
+
+	changedID := newTask("Reject changed reviewed evidence")
+	accepted := appendEvidence(changedID, "accepted evidence")
+	pin := pinFor(accepted)
+	appendEvidence(changedID, "new evidence after acceptance")
+	_, err := client.CloseWithRuntimeReviewEvidence(ctx, projectID, changedID, domain.StatusDone, pin)
+	require.ErrorContains(t, err, "reviewed evidence changed")
+	unchanged, err := client.GetWithRuntime(ctx, projectID, changedID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusInReview, unchanged.Status)
+
+	stableID := newTask("Close stable reviewed evidence")
+	stablePin := pinFor(appendEvidence(stableID, "stable evidence"))
+	closed, err := client.CloseWithRuntimeReviewEvidence(ctx, projectID, stableID, domain.StatusDone, stablePin)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusDone, closed.Status)
+}
+
 func TestClientUpdateDetailsReopensAtomicallyAndIdempotently(t *testing.T) {
 	parallelIssueStoreTest(t)
 	ctx := context.Background()
@@ -2986,6 +3038,136 @@ func TestClient_CreateWithParentDependency(t *testing.T) {
 	require.Len(t, tasks, 1)
 	require.NotNil(t, tasks[0].ParentID)
 	assert.Equal(t, naming.IssueID(parentID), *tasks[0].ParentID)
+}
+
+func TestClientAncestorLifecycleFloorCascadesAndRejectsRegression(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	rootID, err := client.Create(ctx, CreateTaskParams{Title: "root", Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{Title: "child", Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog, ParentID: &rootID})
+	require.NoError(t, err)
+	grandchildID, err := client.Create(ctx, CreateTaskParams{Title: "grandchild", Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog, ParentID: &childID})
+	require.NoError(t, err)
+
+	require.NoError(t, client.Update(ctx, rootID, domain.StatusOpen))
+	for _, id := range []string{childID, grandchildID} {
+		task, getErr := client.GetWithRuntime(ctx, "test", id)
+		require.NoError(t, getErr)
+		assert.Equal(t, domain.IssueWorkflowOpen, task.IssueFacts().LifecycleState)
+		events, eventErr := client.ListIssueObservationEvents(ctx, id, IssueObservationEventListOptions{})
+		require.NoError(t, eventErr)
+		assert.Condition(t, func() bool {
+			for _, event := range events {
+				if event.Type == domain.IssueEventIssueStatusChanged && event.Payload["reason"] == "ancestor_lifecycle_floor_admitted" {
+					return true
+				}
+			}
+			return false
+		}, "missing auditable promotion for %s", id)
+	}
+
+	backlog := domain.IssueWorkflowBacklog
+	child, err := client.GetWithRuntime(ctx, "test", childID)
+	require.NoError(t, err)
+	err = client.UpdateDetails(ctx, childID, UpdateTaskParams{Title: child.Title, Description: child.Description, Type: child.Type, Priority: child.Priority, Lifecycle: &backlog})
+	require.ErrorContains(t, err, "cannot regress to backlog")
+}
+
+func TestClientParentReviewRequiresAllDescendantsTerminal(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	rootID, err := client.Create(ctx, CreateTaskParams{Title: "root", Type: domain.TypeTask, Status: domain.StatusOpen})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{Title: "child", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &rootID})
+	require.NoError(t, err)
+	require.ErrorContains(t, client.Update(ctx, rootID, domain.StatusInReview), "requires all live descendants terminal")
+	require.NoError(t, client.Update(ctx, childID, domain.StatusDone))
+	require.NoError(t, client.Update(ctx, rootID, domain.StatusInReview))
+}
+
+func TestClientAncestorLifecycleFloorConvergesAcrossClients(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "shared.db")
+	first := newTestClientAtPath(t, dbPath, slog.Default())
+	second := newTestClientAtPath(t, dbPath, slog.Default())
+	rootID, err := first.Create(ctx, CreateTaskParams{Title: "root", Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog})
+	require.NoError(t, err)
+	childID, err := first.Create(ctx, CreateTaskParams{Title: "child", Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog, ParentID: &rootID})
+	require.NoError(t, err)
+
+	require.NoError(t, second.Update(ctx, rootID, domain.StatusOpen))
+	child, err := first.GetWithRuntime(ctx, "test", childID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.IssueWorkflowOpen, child.IssueFacts().LifecycleState)
+
+	backlog := domain.IssueWorkflowBacklog
+	err = first.UpdateDetails(ctx, childID, UpdateTaskParams{Title: child.Title, Description: child.Description, Type: child.Type, Priority: child.Priority, Lifecycle: &backlog})
+	require.ErrorContains(t, err, "cannot regress to backlog")
+}
+
+func TestClientAncestorLifecycleFloorConcurrentAdmissionAndRegression(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "shared.db")
+	first := newTestClientAtPath(t, dbPath, slog.Default())
+	second := newTestClientAtPath(t, dbPath, slog.Default())
+	for i := 0; i < 10; i++ {
+		rootID, err := first.Create(ctx, CreateTaskParams{Title: fmt.Sprintf("root-%d", i), Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog})
+		require.NoError(t, err)
+		childID, err := first.Create(ctx, CreateTaskParams{Title: fmt.Sprintf("child-%d", i), Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog, ParentID: &rootID})
+		require.NoError(t, err)
+		start := make(chan struct{})
+		errs := make(chan error, 2)
+		go func() { <-start; errs <- first.Update(ctx, rootID, domain.StatusOpen) }()
+		go func() {
+			<-start
+			child, getErr := second.GetWithRuntime(ctx, "test", childID)
+			if getErr != nil {
+				errs <- getErr
+				return
+			}
+			backlog := domain.IssueWorkflowBacklog
+			errs <- second.UpdateDetails(ctx, childID, UpdateTaskParams{Title: child.Title, Description: child.Description, Type: child.Type, Priority: child.Priority, Lifecycle: &backlog})
+		}()
+		close(start)
+		firstErr, secondErr := <-errs, <-errs
+		require.True(t, firstErr == nil || secondErr == nil)
+		task, err := first.GetWithRuntime(ctx, "test", childID)
+		require.NoError(t, err)
+		assert.Equal(t, domain.IssueWorkflowOpen, task.IssueFacts().LifecycleState)
+	}
+}
+
+func TestClientParentAttachPromotesBacklogSubtree(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	parentID, err := client.Create(ctx, CreateTaskParams{Title: "admitted", Type: domain.TypeTask, Status: domain.StatusOpen})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{Title: "backlog", Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog})
+	require.NoError(t, err)
+	grandchildID, err := client.Create(ctx, CreateTaskParams{Title: "nested", Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog, ParentID: &childID})
+	require.NoError(t, err)
+	require.NoError(t, client.AddDependency(ctx, childID, parentID, string(domain.DependencyParentChild)))
+	for _, id := range []string{childID, grandchildID} {
+		task, getErr := client.GetWithRuntime(ctx, "test", id)
+		require.NoError(t, getErr)
+		assert.Equal(t, domain.IssueWorkflowOpen, task.IssueFacts().LifecycleState)
+	}
+}
+
+func TestClientRestorePreservesAncestorLifecycleFloor(t *testing.T) {
+	ctx := context.Background()
+	client := newTestClient(t)
+	parentID, err := client.Create(ctx, CreateTaskParams{Title: "parent", Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog})
+	require.NoError(t, err)
+	childID, err := client.Create(ctx, CreateTaskParams{Title: "child", Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog, ParentID: &parentID})
+	require.NoError(t, err)
+	require.NoError(t, client.Archive(ctx, childID))
+	require.NoError(t, client.Update(ctx, parentID, domain.StatusOpen))
+	require.NoError(t, client.Unarchive(ctx, childID))
+	child, err := client.GetWithRuntime(ctx, "test", childID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.IssueWorkflowOpen, child.IssueFacts().LifecycleState)
 }
 
 func TestClient_CreateWithOpenChildReopensClosedParent(t *testing.T) {
@@ -4410,6 +4592,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0049_rooted_bootstrap_acknowledgements",
 		"0050_issue_observation_event_search",
 		"0051_decision_idempotency",
+		"0052_mailbox_observation_projection_cutover",
 	}, got)
 }
 

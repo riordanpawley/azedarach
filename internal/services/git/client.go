@@ -36,6 +36,7 @@ const (
 	diffStatFallbackTimeout       = 1500 * time.Millisecond
 	diffStatFailureBackoff        = 5 * time.Minute
 	maxDiffStatBackoffReasonRunes = 180
+	maxRefGraphSnapshotCommits    = 5000
 )
 
 // Client provides high-level git operations.
@@ -100,6 +101,25 @@ type GitStatus struct {
 type EvidenceCommit struct {
 	Hash    string
 	Subject string
+}
+
+// RefGraphSnapshot is one immutable view of several refs captured by a single
+// git-log process. It supports snapshot-wide containment analysis without
+// issuing subprocesses per issue, commit, or branch.
+type RefGraphSnapshot struct {
+	Tips      map[string]string
+	Commits   map[string]RefGraphCommit
+	Order     []string
+	Truncated bool
+	reachable map[string]map[string]struct{}
+	complete  map[string]bool
+}
+
+type RefGraphCommit struct {
+	Hash         string
+	Parents      []string
+	Subject      string
+	ChangedFiles []string
 }
 
 // MergeResult represents the result of a git merge operation.
@@ -1169,6 +1189,170 @@ func (c *Client) IssueEvidenceCommits(ctx context.Context, worktree, ref, issueI
 		out = append(out, EvidenceCommit{Hash: hash, Subject: subject})
 	}
 	return out, nil
+}
+
+// SnapshotRefGraph captures commit ancestry, subjects, and changed files for
+// all requested refs with one git subprocess. Requested refs must name local
+// or remote refs so --decorate=full can identify their tips.
+func (c *Client) SnapshotRefGraph(ctx context.Context, worktree string, refs []string) (RefGraphSnapshot, error) {
+	refs = uniqueTrimmedStrings(refs)
+	if len(refs) == 0 {
+		return RefGraphSnapshot{Tips: map[string]string{}, Commits: map[string]RefGraphCommit{}}, nil
+	}
+	args := []string{"log", "--ignore-missing", fmt.Sprintf("--max-count=%d", maxRefGraphSnapshotCommits), "--decorate=full", "--format=%x1e%H%x00%P%x00%D%x00%s", "--name-only"}
+	args = append(args, refs...)
+	args = append(args, "--")
+	output, err := c.runInWorktree(ctx, worktree, args...)
+	if err != nil {
+		return RefGraphSnapshot{}, fmt.Errorf("capture ref graph: %w", err)
+	}
+	snapshot := RefGraphSnapshot{Tips: make(map[string]string, len(refs)), Commits: make(map[string]RefGraphCommit)}
+	for _, record := range strings.Split(output, "\x1e") {
+		record = strings.TrimSpace(record)
+		if record == "" {
+			continue
+		}
+		lines := strings.Split(record, "\n")
+		fields := strings.SplitN(lines[0], "\x00", 4)
+		if len(fields) != 4 {
+			continue
+		}
+		hash := strings.TrimSpace(fields[0])
+		if hash == "" {
+			continue
+		}
+		commit := RefGraphCommit{Hash: hash, Parents: strings.Fields(fields[1]), Subject: strings.TrimSpace(fields[3])}
+		commit.ChangedFiles = uniqueTrimmedStrings(lines[1:])
+		snapshot.Commits[hash] = commit
+		snapshot.Order = append(snapshot.Order, hash)
+		for _, decoration := range strings.Split(fields[2], ",") {
+			decoration = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(decoration), "tag: "))
+			if _, target, ok := strings.Cut(decoration, " -> "); ok {
+				decoration = strings.TrimSpace(target)
+			}
+			for _, ref := range refs {
+				if refDecorationMatches(ref, decoration) {
+					snapshot.Tips[ref] = hash
+				}
+			}
+		}
+	}
+	snapshot.reachable = make(map[string]map[string]struct{}, len(refs))
+	snapshot.complete = make(map[string]bool, len(refs))
+	for _, ref := range refs {
+		snapshot.reachable[ref] = snapshot.reachableFrom(snapshot.Tips[ref])
+		snapshot.complete[ref] = snapshot.Tips[ref] != ""
+		for hash := range snapshot.reachable[ref] {
+			if _, captured := snapshot.Commits[hash]; !captured {
+				snapshot.complete[ref] = false
+				break
+			}
+		}
+	}
+	snapshot.Truncated = len(snapshot.Order) >= maxRefGraphSnapshotCommits
+	return snapshot, nil
+}
+
+// RefComplete reports whether the captured graph contains the ref tip and all
+// of its reachable parents. False means containment negatives are unknown.
+func (s RefGraphSnapshot) RefComplete(ref string) bool {
+	return s.complete[strings.TrimSpace(ref)]
+}
+
+func (s RefGraphSnapshot) Contains(ref, hash string) bool {
+	ref = strings.TrimSpace(ref)
+	hash = strings.TrimSpace(hash)
+	if hash == "" {
+		return false
+	}
+	_, ok := s.reachable[ref][hash]
+	return ok
+}
+
+func (s RefGraphSnapshot) reachableFrom(tip string) map[string]struct{} {
+	seen := make(map[string]struct{})
+	stack := []string{tip}
+	for len(stack) > 0 {
+		current := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if current == "" {
+			continue
+		}
+		if _, exists := seen[current]; exists {
+			continue
+		}
+		seen[current] = struct{}{}
+		stack = append(stack, s.Commits[current].Parents...)
+	}
+	return seen
+}
+
+func (s RefGraphSnapshot) IssueEvidence(ref, issueID string) []EvidenceCommit {
+	return s.IssueEvidenceByIssue(ref, []string{issueID})[strings.TrimSpace(issueID)]
+}
+
+func (s RefGraphSnapshot) IssueEvidenceByIssue(ref string, issueIDs []string) map[string][]EvidenceCommit {
+	requested := make(map[string]string, len(issueIDs))
+	out := make(map[string][]EvidenceCommit, len(issueIDs))
+	for _, issueID := range issueIDs {
+		issueID = strings.TrimSpace(issueID)
+		if issueID != "" {
+			requested[strings.ToLower(issueID)] = issueID
+		}
+	}
+	for _, hash := range s.Order {
+		commit := s.Commits[hash]
+		if !s.Contains(ref, hash) {
+			continue
+		}
+		prefix, _, ok := strings.Cut(strings.TrimSpace(commit.Subject), ":")
+		issueID, requestedIssue := requested[strings.ToLower(strings.TrimSpace(prefix))]
+		if ok && requestedIssue {
+			out[issueID] = append(out[issueID], EvidenceCommit{Hash: hash, Subject: commit.Subject})
+		}
+	}
+	return out
+}
+
+// ChangedFilesExclusive returns a conservative touched-file union for commits
+// reachable only from headRef. Files changed and later reverted remain present
+// so overlap diagnostics prefer false positives over hidden collision risk.
+func (s RefGraphSnapshot) ChangedFilesExclusive(baseRef, headRef string) []string {
+	out := make([]string, 0)
+	for _, hash := range s.Order {
+		if s.Contains(headRef, hash) && !s.Contains(baseRef, hash) {
+			out = append(out, s.Commits[hash].ChangedFiles...)
+		}
+	}
+	return uniqueTrimmedStrings(out)
+}
+
+func refDecorationMatches(ref, decoration string) bool {
+	ref, decoration = strings.TrimSpace(ref), strings.TrimSpace(decoration)
+	if ref == "" || decoration == "" {
+		return false
+	}
+	if ref == decoration || "refs/heads/"+ref == decoration || "refs/tags/"+ref == decoration {
+		return true
+	}
+	return strings.HasPrefix(ref, "origin/") && "refs/remotes/"+ref == decoration
+}
+
+func uniqueTrimmedStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 // CommitContainedInRef reports whether commit is reachable from ref.

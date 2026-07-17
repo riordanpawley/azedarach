@@ -256,6 +256,7 @@ type Model struct {
 	openCreatedTaskInWorkspace      bool
 	openSessionSelectorOnLoad       bool
 	sessionTreeFilterOnly           bool
+	taskWorkspaceRefreshSeq         uint64
 	runtimeSignalsByTask            map[string]board.RuntimeSignals
 	runtimeSignalWorktreeByTask     map[string]string
 	runtimeSignalBranchByTask       map[string]string
@@ -542,7 +543,8 @@ func (m Model) openTaskWorkspaceByID(taskID string) (tea.Model, tea.Cmd) {
 		if m.daemonClient == nil {
 			return m, nil
 		}
-		return m, m.refreshTaskWorkspaceInBackgroundCmd(taskID)
+		cmd := m.refreshTaskWorkspaceInBackgroundCmd(taskID)
+		return m, cmd
 	}
 
 	m.overlayStack.RemoveTaskWorkspaces()
@@ -551,9 +553,11 @@ func (m Model) openTaskWorkspaceByID(taskID string) (tea.Model, tea.Cmd) {
 	if m.daemonClient == nil {
 		return m, m.openOverlay(workspace)
 	}
+	workspace.BeginRefresh(taskIDKey(taskID) != "main")
+	refreshCmd := m.refreshTaskWorkspaceInBackgroundCmd(taskID)
 	return m, tea.Batch(
 		m.openOverlay(workspace),
-		m.refreshTaskWorkspaceInBackgroundCmd(taskID),
+		refreshCmd,
 	)
 }
 
@@ -3601,6 +3605,7 @@ type closeCleanupTaskSummary struct {
 
 type refreshTaskWorkspaceResultMsg struct {
 	projectID     string
+	refreshSeq    uint64
 	revision      uint64
 	taskID        string
 	hasTask       bool
@@ -3608,32 +3613,46 @@ type refreshTaskWorkspaceResultMsg struct {
 	tasks         []domain.Task
 	lastCheckedAt time.Time
 	freshness     protocol.TaskListFreshness
-	reconcileErr  error
 	snapshotErr   error
-	decisionLinks []overlay.DecisionLinkSummary
-	decisionErr   error
 }
 
-func (m Model) refreshTaskWorkspaceInBackgroundCmd(taskID string) tea.Cmd {
+type refreshTaskWorkspaceReconcileResultMsg struct {
+	projectID  string
+	refreshSeq uint64
+	taskID     string
+	err        error
+}
+
+type refreshTaskWorkspaceDecisionResultMsg struct {
+	projectID     string
+	refreshSeq    uint64
+	taskID        string
+	decisionLinks []overlay.DecisionLinkSummary
+	err           error
+}
+
+func (m *Model) refreshTaskWorkspaceInBackgroundCmd(taskID string) tea.Cmd {
+	if m == nil {
+		return nil
+	}
 	projectID := m.daemonProjectID()
-	return func() tea.Msg {
-		msg := refreshTaskWorkspaceResultMsg{projectID: projectID, taskID: taskID}
-		if m.daemonClient == nil {
+	client := m.daemonClient
+	issueID := strings.TrimSpace(taskID)
+	includeRuntimeAndDecisions := issueID != "" && taskIDKey(issueID) != "main" && client != nil
+	if workspace, ok := m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); ok && naming.IssueIDsEqual(workspace.TaskID(), taskID) {
+		workspace.BeginRefresh(includeRuntimeAndDecisions)
+	}
+	m.taskWorkspaceRefreshSeq++
+	refreshSeq := m.taskWorkspaceRefreshSeq
+	detailCmd := func() tea.Msg {
+		msg := refreshTaskWorkspaceResultMsg{projectID: projectID, refreshSeq: refreshSeq, taskID: taskID}
+		if client == nil {
+			msg.snapshotErr = fmt.Errorf("daemon client unavailable")
 			return msg
 		}
-
-		issueID := strings.TrimSpace(taskID)
-		if issueID != "" && taskIDKey(issueID) != "main" {
-			reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 8*time.Second)
-			if _, err := m.daemonClient.ReconcileRuntimeIssues(reconcileCtx, []string{issueID}); err != nil {
-				msg.reconcileErr = err
-			}
-			reconcileCancel()
-		}
-
 		snapshotCtx, snapshotCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer snapshotCancel()
-		snapshot, err := m.daemonClient.GetTaskSnapshotWithMode(snapshotCtx, msg.taskID, daemonclient.ReadWaitModeExplicit)
+		snapshot, err := client.GetTaskSnapshotWithMode(snapshotCtx, msg.taskID, daemonclient.ReadWaitModeExplicit)
 		if err != nil {
 			msg.snapshotErr = err
 			return msg
@@ -3647,27 +3666,8 @@ func (m Model) refreshTaskWorkspaceInBackgroundCmd(taskID string) tea.Cmd {
 		msg.revision = snapshot.Revision
 		msg.lastCheckedAt = snapshot.LastCheckedAt
 		msg.freshness = snapshot.Freshness
-
-		// Fetch decision links for this issue. Failure here is non-fatal — the rest of the
-		// refresh continues without a Decisions section. The decision feature is new and
-		// the daemon may not yet expose it on older builds.
-		if issueID != "" && taskIDKey(issueID) != "main" {
-			decisionCtx, decisionCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			result, decisionErr := m.daemonClient.ListDecisionLinks(decisionCtx, daemonclient.DecisionLinkListRequest{
-				TargetKind:       daemonclient.DecisionTargetIssue,
-				TargetID:         issueID,
-				IncludeDecisions: true,
-			})
-			decisionCancel()
-			if decisionErr != nil {
-				msg.decisionErr = decisionErr
-			} else {
-				msg.decisionLinks = decisionLinkSummariesFrom(result)
-			}
-		}
-
 		for _, candidate := range snapshot.Tasks {
-			if candidate.ID.String() == msg.taskID {
+			if naming.IssueIDsEqual(candidate.ID.String(), msg.taskID) {
 				msg.hasTask = true
 				msg.task = candidate
 				return msg
@@ -3676,6 +3676,35 @@ func (m Model) refreshTaskWorkspaceInBackgroundCmd(taskID string) tea.Cmd {
 		msg.snapshotErr = fmt.Errorf("task %s not found in refreshed snapshot", msg.taskID)
 		return msg
 	}
+	cmds := []tea.Cmd{detailCmd}
+	if !includeRuntimeAndDecisions {
+		return tea.Batch(cmds...)
+	}
+	cmds = append(cmds,
+		func() tea.Msg {
+			msg := refreshTaskWorkspaceReconcileResultMsg{projectID: projectID, refreshSeq: refreshSeq, taskID: issueID}
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			_, msg.err = client.ReconcileRuntimeIssues(ctx, []string{issueID})
+			return msg
+		},
+		func() tea.Msg {
+			msg := refreshTaskWorkspaceDecisionResultMsg{projectID: projectID, refreshSeq: refreshSeq, taskID: issueID}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			result, err := client.ListDecisionLinks(ctx, daemonclient.DecisionLinkListRequest{
+				TargetKind:       daemonclient.DecisionTargetIssue,
+				TargetID:         issueID,
+				IncludeDecisions: true,
+			})
+			msg.err = err
+			if err == nil {
+				msg.decisionLinks = decisionLinkSummariesFrom(result)
+			}
+			return msg
+		},
+	)
+	return tea.Batch(cmds...)
 }
 
 // decisionLinkSummariesFrom maps a daemonclient response into the overlay-local

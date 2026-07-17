@@ -37,6 +37,187 @@ type ProjectionExport struct {
 	SchemaFingerprint string
 }
 
+// OrchestrationProjectionExport is a transactionally consistent snapshot of
+// the bounded issue/runtime projection. Checkpoint is read in the same SQLite
+// transaction as Tasks, so callers never label rows with a newer revision.
+type OrchestrationProjectionExport struct {
+	Tasks                    []domain.Task
+	Checkpoint               uint64
+	OpenIssueCount           int
+	UnresolvedInteractionIDs map[string]struct{}
+	Interactions             []domain.InteractionRequest
+	InvestigationAcceptances map[string]domain.InvestigationAcceptance
+}
+
+// ExportOrchestrationProjection reads a bounded project graph plus its durable
+// lifecycle/runtime context at one checkpoint. Candidate count bounds roots;
+// complete root closures and dependency targets preserve readiness semantics.
+func (c *Client) ExportOrchestrationProjection(ctx context.Context, projectID string, limit int) (OrchestrationProjectionExport, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return OrchestrationProjectionExport{}, err
+	}
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return OrchestrationProjectionExport{}, fmt.Errorf("begin orchestration projection export: %w", err)
+	}
+	defer tx.Rollback()
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		projectID = "default"
+	}
+	checkpoint, err := projectionCompositeCheckpoint(ctx, tx, projectID)
+	if err != nil {
+		return OrchestrationProjectionExport{}, err
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	issueIDs, err := c.projectOrchestrationContextIDs(ctx, tx, limit)
+	if err != nil {
+		return OrchestrationProjectionExport{}, c.wrapError("export-orchestration-projection", projectID, err)
+	}
+	tasks := []domain.Task{}
+	if len(issueIDs) > 0 {
+		tasks, err = c.queryTasksWithRuntimeProjection(ctx, tx, projectID, true, taskDependencyLoadAll, ArchiveExclude, issueIDs...)
+		if err != nil {
+			return OrchestrationProjectionExport{}, c.wrapError("export-orchestration-projection", projectID, err)
+		}
+	}
+	interactions, unresolvedInteractionIDs, err := orchestrationInteractions(ctx, tx, issueIDs)
+	if err != nil {
+		return OrchestrationProjectionExport{}, c.wrapError("export-orchestration-interactions", projectID, err)
+	}
+	investigationAcceptances, err := c.investigationAcceptances(ctx, tx, tasks)
+	if err != nil {
+		return OrchestrationProjectionExport{}, err
+	}
+	var openIssueCount int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM issues INDEXED BY idx_issues_status_deleted_priority_updated
+		WHERE visibility = 'live'
+		  AND status IN ('open', 'in_progress', 'in_review')
+	`).Scan(&openIssueCount); err != nil {
+		return OrchestrationProjectionExport{}, c.wrapError("count-open-orchestration-issues", projectID, err)
+	}
+	divergent, err := runtimeDivergentIssueIDs(ctx, tx)
+	if err != nil {
+		return OrchestrationProjectionExport{}, err
+	}
+	for i := range tasks {
+		if _, quarantined := divergent[tasks[i].ID.String()]; quarantined {
+			tasks[i].Session, tasks[i].HasTmuxSession = nil, false
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return OrchestrationProjectionExport{}, fmt.Errorf("commit orchestration projection export read: %w", err)
+	}
+	return OrchestrationProjectionExport{
+		Tasks: tasks, Checkpoint: checkpoint, OpenIssueCount: openIssueCount,
+		UnresolvedInteractionIDs: unresolvedInteractionIDs,
+		Interactions:             interactions,
+		InvestigationAcceptances: investigationAcceptances,
+	}, nil
+}
+
+func orchestrationInteractions(ctx context.Context, q sqlIssueDBTX, issueIDs []string) ([]domain.InteractionRequest, map[string]struct{}, error) {
+	out := make(map[string]struct{})
+	issueIDs = uniqueIssueIDStrings(issueIDs)
+	if len(issueIDs) == 0 {
+		return []domain.InteractionRequest{}, out, nil
+	}
+	args := make([]any, 0, len(issueIDs)+3)
+	for _, id := range issueIDs {
+		args = append(args, id)
+	}
+	args = append(args, string(domain.InteractionOpen), string(domain.InteractionDiscussing), string(domain.InteractionAnswerProposed))
+	rows, err := q.QueryContext(ctx, `
+		SELECT request_json FROM interaction_requests
+		WHERE issue_id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(issueIDs)), ",")+`)
+		  AND state IN (?,?,?)
+		ORDER BY created_at, id
+	`, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	interactions := make([]domain.InteractionRequest, 0)
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, nil, err
+		}
+		request, err := decodeInteractionRequest(raw)
+		if err != nil {
+			return nil, nil, err
+		}
+		interactions = append(interactions, request)
+		if issueID := strings.TrimSpace(request.IssueID); issueID != "" {
+			out[issueID] = struct{}{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return interactions, out, nil
+}
+
+func (c *Client) projectOrchestrationContextIDs(ctx context.Context, q sqlIssueDBTX, limit int) ([]string, error) {
+	rows, err := q.QueryContext(ctx, `
+		WITH candidates(id) AS (
+			SELECT id FROM issues INDEXED BY idx_issues_status_deleted_priority_updated
+			WHERE visibility = 'live'
+			  AND disposition IN ('backlog','ready')
+			ORDER BY priority ASC, updated_at ASC, id ASC
+			LIMIT ?
+		), seed(id) AS (
+			SELECT id FROM candidates
+			UNION SELECT closure.ancestor_id FROM candidates c
+			JOIN issue_graph_closure closure INDEXED BY idx_issue_graph_closure_descendant
+			  ON closure.descendant_id = c.id
+			WHERE closure.project_id = ? AND closure.dependency_type = ?
+		), roots(id) AS (
+			SELECT seed.id FROM seed
+			JOIN issues i ON i.id = seed.id AND i.visibility = 'live'
+			WHERE NOT EXISTS (
+				SELECT 1 FROM issue_dependencies parent
+				JOIN issues parent_issue ON parent_issue.id = parent.depends_on_id
+				  AND parent_issue.visibility = 'live'
+				WHERE parent.issue_id = seed.id
+				  AND parent.dependency_type IN (?, ?)
+				  AND parent.tombstoned_at IS NULL
+			)
+		), graph(id) AS (
+			SELECT id FROM roots
+			UNION SELECT closure.descendant_id FROM roots
+			JOIN issue_graph_closure closure INDEXED BY idx_issue_graph_closure_ancestor
+			  ON closure.ancestor_id = roots.id
+			WHERE closure.project_id = ? AND closure.dependency_type = ?
+		), context(id) AS (
+			SELECT id FROM graph
+			UNION SELECT dep.depends_on_id FROM graph
+			JOIN issue_dependencies dep INDEXED BY idx_dependencies_issue_active_type
+			  ON dep.issue_id = graph.id AND dep.tombstoned_at IS NULL
+		)
+		SELECT id FROM context ORDER BY id
+	`, limit, issueGraphClosureProjectID, string(domain.DependencyParentChild), string(domain.DependencyParentChild), "parent_child", issueGraphClosureProjectID, string(domain.DependencyParentChild))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0, limit*2)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		if id = strings.TrimSpace(id); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, rows.Err()
+}
+
 // ExportProjection reads the source contract, composite issue/runtime
 // checkpoint, issues, dependencies, and runtime projections in one SQLite
 // read transaction. A successful export therefore never acknowledges state
@@ -522,6 +703,7 @@ type Client struct {
 	stateModelV2MigrationFailureHook   func(stage string) error
 	boardViewsMigrationFailureHook     func(stage string) error
 	humanAuthorityMigrationFailureHook func(stage string) error
+	mailboxProjectionFailureHook       func(stage string) error
 	projectionDeltaChecksumRepairHook  func(stage string) error
 	projectionDeltaReadHook            func()
 	decisionOutboxMigrationFailureHook func(stage string) error
@@ -615,6 +797,28 @@ func (c *Client) WithMutationLock(ctx context.Context, fn func(context.Context) 
 	lock.Lock()
 	defer lock.Unlock()
 	return fn(context.WithValue(ctx, issueMutationLockKey{}, true))
+}
+
+// WithProjectionSnapshotFence holds SQLite's write reservation while fn reads
+// a projection through ordinary store queries. This prevents another daemon
+// from committing projection-source changes between an export and its bounded
+// auxiliary reads without forcing those reads onto one long-lived sql.Tx.
+func (c *Client) WithProjectionSnapshotFence(ctx context.Context, fn func(context.Context) error) error {
+	return c.withMutationLock(ctx, func(lockCtx context.Context) error {
+		db, err := c.dbHandle()
+		if err != nil {
+			return err
+		}
+		tx, err := db.BeginTx(lockCtx, nil)
+		if err != nil {
+			return fmt.Errorf("begin projection snapshot fence: %w", err)
+		}
+		defer tx.Rollback()
+		if _, err := tx.ExecContext(lockCtx, `UPDATE projection_source_revision SET revision=revision WHERE singleton=1`); err != nil {
+			return fmt.Errorf("acquire projection snapshot fence: %w", err)
+		}
+		return fn(lockCtx)
+	})
 }
 
 func (c *Client) withMutationLock(ctx context.Context, fn func(context.Context) error) error {
@@ -2548,6 +2752,10 @@ func (c *Client) RepairReadyIdleEngagement(ctx context.Context, id string) (bool
 }
 
 func (c *Client) updateLocked(ctx context.Context, id string, status domain.Status, releaseExecutionLease bool) error {
+	return c.updateLockedWithPrecondition(ctx, id, status, releaseExecutionLease, nil)
+}
+
+func (c *Client) updateLockedWithPrecondition(ctx context.Context, id string, status domain.Status, releaseExecutionLease bool, precondition func(context.Context, *sql.Tx) error) error {
 	db, err := c.dbHandle()
 	if err != nil {
 		return err
@@ -2598,13 +2806,27 @@ func (c *Client) updateLocked(ctx context.Context, id string, status domain.Stat
 	if err := domain.ValidateIssueStateTransition(oldState, nextState); err != nil {
 		return c.wrapError("update", id, err)
 	}
-	if nextState.Workflow() == domain.IssueWorkflowClosed {
-		openChildCount, err := c.countOpenChildren(ctx, tx, id)
+	if precondition != nil {
+		if err := precondition(ctx, tx); err != nil {
+			return c.wrapError("update", id, err)
+		}
+	}
+	if nextState.Workflow() == domain.IssueWorkflowBacklog {
+		hasAdmittedAncestor, err := c.hasLiveAdmittedAncestor(ctx, tx, id)
+		if err != nil {
+			return c.wrapError("update", id, err)
+		}
+		if hasAdmittedAncestor {
+			return c.wrapError("update", id, fmt.Errorf("%w: descendant cannot regress to backlog below an admitted ancestor", domain.ErrConflict))
+		}
+	}
+	if status == domain.StatusInReview || nextState.Workflow() == domain.IssueWorkflowClosed {
+		openChildCount, err := c.countLiveNonterminalDescendants(ctx, tx, id)
 		if err != nil {
 			return c.wrapError("update", id, err)
 		}
 		if openChildCount > 0 {
-			return c.wrapError("update", id, fmt.Errorf("%w: cannot close parent issue with %d open child issue(s)", domain.ErrConflict, openChildCount))
+			return c.wrapError("update", id, fmt.Errorf("%w: parent review or close requires all live descendants terminal; %d remain nonterminal", domain.ErrConflict, openChildCount))
 		}
 	}
 	if releaseExecutionLease {
@@ -2666,6 +2888,11 @@ func (c *Client) updateLocked(ctx context.Context, id string, status domain.Stat
 			return c.wrapError("update", id, err)
 		}
 	}
+	if nextState.Disposition == domain.IssueDispositionReady && oldState.Disposition == domain.IssueDispositionBacklog {
+		if err := c.enforceAncestorLifecycleFloor(ctx, tx, id, "ancestor_lifecycle_floor_admitted"); err != nil {
+			return c.wrapError("update", id, err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return c.wrapError("update", id, err)
 	}
@@ -2699,6 +2926,123 @@ func (c *Client) CloseWithRuntime(ctx context.Context, projectID, id string, sta
 		return domain.Task{}, err
 	}
 	return c.GetWithRuntime(ctx, projectID, id)
+}
+
+// CloseWithRuntimeReviewEvidence revalidates the exact accepted evidence in
+// the same SQLite transaction that releases the execution lease and writes the
+// terminal issue state. A newer or altered evidence event fails closed.
+func (c *Client) CloseWithRuntimeReviewEvidence(ctx context.Context, projectID, id string, status domain.Status, pin ReviewEvidencePin) (domain.Task, error) {
+	nextState, err := issueStateFromStatus(status)
+	if err != nil {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), err)
+	}
+	if nextState.Workflow() != domain.IssueWorkflowClosed {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), fmt.Errorf("status %s is not terminal", status))
+	}
+	if strings.TrimSpace(pin.Source) != "issue_event" || pin.EventID <= 0 || pin.Seq != 0 || strings.TrimSpace(pin.Digest) == "" {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), errors.New("review evidence pin must identify one durable issue event"))
+	}
+	if err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			return c.updateLockedWithPrecondition(ctx, id, status, true, func(ctx context.Context, tx *sql.Tx) error {
+				return validateTerminalReviewEvidencePin(ctx, tx, id, pin)
+			})
+		})
+	}); err != nil {
+		return domain.Task{}, err
+	}
+	return c.GetWithRuntime(ctx, projectID, id)
+}
+
+// CloseWithRuntimeReviewEvidenceFence consumes the matching durable evidence
+// fence in the same transaction as final pin validation and terminal state.
+func (c *Client) CloseWithRuntimeReviewEvidenceFence(ctx context.Context, projectID, id string, status domain.Status, pin ReviewEvidencePin, fenceToken string) (domain.Task, error) {
+	nextState, err := issueStateFromStatus(status)
+	if err != nil {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), err)
+	}
+	if nextState.Workflow() != domain.IssueWorkflowClosed {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), fmt.Errorf("status %s is not terminal", status))
+	}
+	fenceToken = strings.TrimSpace(fenceToken)
+	if strings.TrimSpace(pin.Source) != "issue_event" || pin.EventID <= 0 || pin.Seq != 0 || strings.TrimSpace(pin.Digest) == "" || fenceToken == "" {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), errors.New("review evidence close requires one durable issue-event pin and fence"))
+	}
+	if err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			return c.updateLockedWithPrecondition(ctx, id, status, true, func(ctx context.Context, tx *sql.Tx) error {
+				if err := validateTerminalReviewEvidencePin(ctx, tx, id, pin); err != nil {
+					return err
+				}
+				result, err := tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases
+					WHERE issue_id=? AND purpose=? AND owner_id=? AND owner_kind=?`, strings.TrimSpace(id), domain.CoordinationLeaseReview, fenceToken, reviewEvidenceCloseFenceOwnerKind)
+				if err != nil {
+					return err
+				}
+				removed, err := result.RowsAffected()
+				if err != nil {
+					return err
+				}
+				if removed != 1 {
+					return fmt.Errorf("%w: accepted review evidence close fence is missing or changed", domain.ErrConflict)
+				}
+				return nil
+			})
+		})
+	}); err != nil {
+		return domain.Task{}, err
+	}
+	return c.GetWithRuntime(ctx, projectID, id)
+}
+
+func validateTerminalReviewEvidencePin(ctx context.Context, tx *sql.Tx, issueID string, pin ReviewEvidencePin) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+		FROM issue_observation_events
+		WHERE issue_id = ?
+		  AND (
+			event_type = ?
+			OR LOWER(REPLACE(REPLACE(TRIM(event_type), '_', '.'), '-', '.')) IN (?, ?, ?, ?)
+		  )
+		ORDER BY observed_at ASC, id ASC
+	`, strings.TrimSpace(issueID),
+		string(domain.IssueEventIssueStatusChanged),
+		string(domain.IssueEventEvidenceSubmitted),
+		"worker.integration.ready",
+		"worker.ready",
+		"worker.complete",
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	events := make([]domain.IssueObservationEvent, 0, 16)
+	for rows.Next() {
+		event, err := scanIssueObservationEvent(rows)
+		if err != nil {
+			return err
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	evidence := domain.ReduceReviewReadyEvidence(events).LatestEvidence
+	if evidence == nil || !evidence.Validation.Complete {
+		return errors.New("reviewed evidence is no longer complete; fresh review required")
+	}
+	if evidence.SourceEvent.ID != pin.EventID {
+		return fmt.Errorf("reviewed evidence changed from event %d to event %d; fresh review required", pin.EventID, evidence.SourceEvent.ID)
+	}
+	body, err := json.Marshal(evidence.Evidence)
+	if err != nil {
+		return fmt.Errorf("encode terminal review evidence: %w", err)
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(body))
+	if digest != strings.TrimSpace(pin.Digest) {
+		return errors.New("reviewed evidence digest changed; fresh review required")
+	}
+	return nil
 }
 
 type OwnershipClaimParams struct {
@@ -3188,6 +3532,9 @@ func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) 
 		if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
 			return "", c.wrapError("create", issueID, err)
 		}
+		if err := c.enforceAncestorLifecycleFloor(ctx, tx, issueID, "ancestor_lifecycle_floor_create"); err != nil {
+			return "", c.wrapError("create", issueID, err)
+		}
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -3580,6 +3927,9 @@ func (c *Client) addDependency(ctx context.Context, issueID, dependsOnID, depend
 		if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
 			return c.wrapError("add-dependency", issueID, err)
 		}
+		if err := c.enforceAncestorLifecycleFloor(ctx, tx, issueID, "ancestor_lifecycle_floor_parent_attach"); err != nil {
+			return c.wrapError("add-dependency", issueID, err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -3746,6 +4096,110 @@ func (c *Client) rebuildIssueGraphClosure(ctx context.Context, execer sqlIssueEx
 		return err
 	}
 	return nil
+}
+
+// enforceAncestorLifecycleFloor promotes live backlog issues in root's subtree
+// when they have a live admitted ancestor. The caller must hold the mutation
+// lock and an open transaction so graph mutation, promotion, and audit evidence
+// commit atomically across daemon processes.
+func (c *Client) enforceAncestorLifecycleFloor(ctx context.Context, tx *sql.Tx, rootID, reason string) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT candidate.id
+		FROM issues candidate
+		WHERE candidate.visibility = 'live'
+			AND candidate.disposition = 'backlog'
+			AND (candidate.id = ? OR EXISTS (
+				SELECT 1 FROM issue_graph_closure subtree
+				WHERE subtree.dependency_type = ?
+					AND subtree.ancestor_id = ?
+					AND subtree.descendant_id = candidate.id
+			))
+			AND EXISTS (
+				SELECT 1
+				FROM issue_graph_closure ancestry
+				JOIN issues ancestor ON ancestor.id = ancestry.ancestor_id
+				WHERE ancestry.dependency_type = ?
+					AND ancestry.descendant_id = candidate.id
+					AND ancestor.visibility = 'live'
+					AND ancestor.disposition = 'ready'
+			)
+		ORDER BY candidate.id
+	`, rootID, string(domain.DependencyParentChild), rootID, string(domain.DependencyParentChild))
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, id := range ids {
+		res, err := tx.ExecContext(ctx, `
+			UPDATE issues
+			SET disposition='ready', engagement='idle', status='open',
+				lifecycle_state='open', closed_outcome='none', review_state='none', updated_at=?
+			WHERE id=? AND visibility='live' AND disposition='backlog'
+		`, now, id)
+		if err != nil {
+			return err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			continue
+		}
+		if err := c.appendIssueObservationEvent(ctx, tx, id, domain.IssueEventIssueStatusChanged, map[string]any{
+			"from_status":    domain.StatusOpen,
+			"to_status":      domain.StatusOpen,
+			"from_lifecycle": domain.IssueWorkflowBacklog,
+			"to_lifecycle":   domain.IssueWorkflowOpen,
+			"reason":         reason,
+			"ancestor_id":    rootID,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Client) hasLiveAdmittedAncestor(ctx context.Context, tx *sql.Tx, issueID string) (bool, error) {
+	var exists bool
+	err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM issue_graph_closure ancestry
+			JOIN issues ancestor ON ancestor.id = ancestry.ancestor_id
+			WHERE ancestry.dependency_type = ?
+				AND ancestry.descendant_id = ?
+				AND ancestor.visibility = 'live'
+				AND ancestor.disposition = 'ready'
+		)
+	`, string(domain.DependencyParentChild), issueID).Scan(&exists)
+	return exists, err
+}
+
+func (c *Client) countLiveNonterminalDescendants(ctx context.Context, tx *sql.Tx, issueID string) (int, error) {
+	var count int
+	err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM issue_graph_closure closure
+		JOIN issues descendant ON descendant.id = closure.descendant_id
+		WHERE closure.dependency_type = ?
+			AND closure.ancestor_id = ?
+			AND descendant.visibility = 'live'
+			AND descendant.disposition NOT IN ('completed','cancelled')
+	`, string(domain.DependencyParentChild), issueID).Scan(&count)
+	return count, err
 }
 
 // RemoveDependency tombstones a dependency edge between two issues.
@@ -4176,6 +4630,11 @@ func (c *Client) unarchiveLocked(ctx context.Context, id string, opts UnarchiveO
 	if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
 		return result, c.wrapError("unarchive", id, err)
 	}
+	for _, restoreID := range restoreIDs {
+		if err := c.enforceAncestorLifecycleFloor(ctx, tx, restoreID, "ancestor_lifecycle_floor_restore"); err != nil {
+			return result, c.wrapError("unarchive", id, err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return result, c.wrapError("unarchive", id, err)
 	}
@@ -4488,6 +4947,15 @@ func (c *Client) updateDetailsLocked(ctx context.Context, id string, params Upda
 		if err := domain.ValidateIssueStateTransition(oldState, nextState); err != nil {
 			return c.wrapError("update-details", id, err)
 		}
+		if nextState.Workflow() == domain.IssueWorkflowBacklog {
+			hasAdmittedAncestor, err := c.hasLiveAdmittedAncestor(ctx, tx, id)
+			if err != nil {
+				return c.wrapError("update-details", id, err)
+			}
+			if hasAdmittedAncestor {
+				return c.wrapError("update-details", id, fmt.Errorf("%w: descendant cannot regress to backlog below an admitted ancestor", domain.ErrConflict))
+			}
+		}
 	}
 	writeState := issueStateWriteValuesFromState(nextState, oldStateCols.ArchivedAt)
 	implSet := 0
@@ -4597,6 +5065,11 @@ func (c *Client) updateDetailsLocked(ctx context.Context, id string, params Upda
 		if err := c.appendIssueObservationEvent(ctx, tx, id, domain.IssueEventIssueDetailsChanged, map[string]any{
 			"changed_fields": changedFields,
 		}); err != nil {
+			return c.wrapError("update-details", id, err)
+		}
+	}
+	if nextState.Disposition == domain.IssueDispositionReady && oldState.Disposition == domain.IssueDispositionBacklog {
+		if err := c.enforceAncestorLifecycleFloor(ctx, tx, id, "ancestor_lifecycle_floor_admitted"); err != nil {
 			return c.wrapError("update-details", id, err)
 		}
 	}

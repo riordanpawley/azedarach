@@ -1081,14 +1081,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.shouldIgnoreDaemonSnapshot(msg.projectID, msg.revision) {
 			return m, nil
 		}
-		if msg.reconcileErr != nil && m.logger != nil {
-			m.logger.Warn("task workspace issue reconcile failed", "task_id", msg.taskID, "error", msg.reconcileErr)
-		}
-		if msg.snapshotErr != nil || !msg.hasTask {
+		currentWorkspace, matches := m.currentTaskWorkspaceRefresh(msg.projectID, msg.taskID, msg.refreshSeq)
+		if !matches {
 			return m, nil
 		}
-		currentWorkspace, ok := m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
-		if !ok || taskIDKey(currentWorkspace.TaskID()) != taskIDKey(msg.taskID) {
+		if msg.snapshotErr != nil || !msg.hasTask {
+			reason := msg.snapshotErr
+			if reason == nil {
+				reason = fmt.Errorf("task not found in full-detail response")
+			}
+			currentWorkspace.SyncDetailRefresh(reason)
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("Full details for %s may be stale: %v", msg.taskID, reason),
+				Expires: time.Now().Add(6 * time.Second),
+			})
 			return m, nil
 		}
 		boardTask, ok := m.applySingleTaskWorkspaceRefresh(msg.taskID, msg.task)
@@ -1103,13 +1110,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		workspaceTasks := mergeTaskWorkspaceContext(msg.tasks, m.tasks)
 		currentWorkspace.SyncFullTask(msg.task, workspaceTasks, m.pendingMutationForTask(boardTask.ID.String()))
-		if msg.decisionErr != nil {
-			if m.logger != nil {
-				m.logger.Debug("task workspace decision link refresh failed", "task_id", msg.taskID, "error", msg.decisionErr)
-			}
-		} else {
-			currentWorkspace.SyncDecisionLinks(msg.decisionLinks)
+		currentWorkspace.SyncDetailRefresh(nil)
+		return m, nil
+
+	case refreshTaskWorkspaceReconcileResultMsg:
+		workspace, matches := m.currentTaskWorkspaceRefresh(msg.projectID, msg.taskID, msg.refreshSeq)
+		if !matches {
+			return m, nil
 		}
+		if msg.err != nil {
+			workspace.SyncRuntimeRefresh(msg.err)
+			if m.logger != nil {
+				m.logger.Warn("task workspace issue reconcile failed", "task_id", msg.taskID, "error", msg.err)
+			}
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("Runtime details for %s may be stale: %v", msg.taskID, msg.err),
+				Expires: time.Now().Add(6 * time.Second),
+			})
+			return m, nil
+		}
+		workspace.SyncRuntimeRefresh(nil)
+		return m, nil
+
+	case refreshTaskWorkspaceDecisionResultMsg:
+		currentWorkspace, matches := m.currentTaskWorkspaceRefresh(msg.projectID, msg.taskID, msg.refreshSeq)
+		if !matches {
+			return m, nil
+		}
+		if msg.err != nil {
+			currentWorkspace.SyncDecisionRefresh(msg.err)
+			if m.logger != nil {
+				m.logger.Debug("task workspace decision link refresh failed", "task_id", msg.taskID, "error", msg.err)
+			}
+			m.addToast(Toast{
+				Level:   ToastWarning,
+				Message: fmt.Sprintf("Decision links for %s may be stale: %v", msg.taskID, msg.err),
+				Expires: time.Now().Add(6 * time.Second),
+			})
+			return m, nil
+		}
+		currentWorkspace.SyncDecisionLinks(msg.decisionLinks)
+		currentWorkspace.SyncDecisionRefresh(nil)
 		return m, nil
 
 	case taskOwnershipResultMsg:
@@ -2280,6 +2322,20 @@ func mergeTaskWorkspaceContext(detailTasks, boardTasks []domain.Task) []domain.T
 	return merged
 }
 
+func (m Model) currentTaskWorkspaceRefresh(projectID, taskID string, refreshSeq uint64) (*overlay.TaskWorkspaceOverlay, bool) {
+	if projectID = strings.TrimSpace(projectID); projectID != "" && projectID != m.daemonProjectID() {
+		return nil, false
+	}
+	if refreshSeq != 0 && refreshSeq != m.taskWorkspaceRefreshSeq {
+		return nil, false
+	}
+	workspace, ok := m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok || !naming.IssueIDsEqual(workspace.TaskID(), taskID) {
+		return nil, false
+	}
+	return workspace, true
+}
+
 type daemonStreamEventResult struct {
 	cmd                 tea.Cmd
 	key                 string
@@ -2357,6 +2413,7 @@ func (m *Model) applyDaemonStreamEvent(evt protocol.EventEnvelope, skipProjectio
 		}
 		if m.applyTaskEvent(evt) {
 			m.daemonRevision = cursor.Advance(evt).Revision
+			return daemonStreamEventResult{key: daemonStreamCommandIssuesRefresh}
 		}
 		return daemonStreamEventResult{refreshOrchestrator: true}
 	}

@@ -1,0 +1,40 @@
+-- Migration manifest: 0052_mailbox_observation_projection_cutover
+-- Authority: issue-store SQLite state plus a daemon-orchestrated, bounded
+-- import from the project-local legacy filesystem mailbox.
+--
+-- Schema effects:
+-- * No table, column, trigger, or index is added. This migration depends on the
+--   existing meta and issue_observation_events schemas.
+--
+-- Data effects (transactional SQL phase):
+-- * Insert the versioned pending cutover marker when it does not already
+--   exist. An existing marker is preserved so reopen and retry are idempotent.
+--
+-- Go-assisted data completion:
+-- * ensureLegacyMailboxObservationProjection reads only regular, non-symlink
+--   .azedarach/mailbox/*.jsonl files within the committed entry, file-size,
+--   line-size, and total-event bounds.
+-- * Only stewardship event types with a non-empty issue ID are candidates.
+--   CompleteMailboxObservationProjectionCutover skips malformed identities,
+--   missing issues, non-positive parent/sequence identities, and rows already
+--   represented by issue ID + event type + mail_event parent + sequence.
+-- * Eligible rows are inserted into issue_observation_events with
+--   source_command=mailbox.cutover. Imported rows and the transition of this
+--   marker to {state:complete,version:1} commit in one SQLite transaction.
+--   Failure rolls back both; retry repeats the bounded snapshot and dedup makes
+--   completion idempotent. A complete marker is an immediate no-op on reopen.
+--
+-- Validation effects:
+-- * Store startup fails closed unless the marker exists, parses as JSON, has
+--   version 1, and has state pending or complete. Completion revalidates the
+--   same contract inside its write transaction before importing any row.
+--
+-- Ledger effects:
+-- * applyMigration commits this marker and the
+--   0052_mailbox_observation_projection_cutover schema_migrations row, with the
+--   pinned artifact checksum, in the same SQL transaction.
+-- * The ledger row records installation of this two-phase contract; pending
+--   explicitly means the later filesystem import has not completed yet.
+INSERT INTO meta(key, value)
+VALUES ('issue:mailbox_observation_projection_cutover', '{"state":"pending","version":1}')
+ON CONFLICT(key) DO NOTHING;

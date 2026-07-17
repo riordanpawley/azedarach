@@ -257,6 +257,60 @@ func TestRuntimeProjectionWriterPersistsBeforePublishingSessionEvents(t *testing
 	}
 }
 
+func TestRuntimeProjectionWriterReleasesLockBeforeReadModelRefresh(t *testing.T) {
+	ctx := context.Background()
+	runtimeStateStore := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+
+	const (
+		projectID = "proj-refresh-outside-writer-lock"
+		issueID   = "az-refresh"
+		sessionID = "sess-refresh"
+	)
+	canonical := domain.Task{ID: naming.IssueID(issueID), Title: "refresh overlap", Type: domain.TypeTask}
+	refreshEntered := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	materializer := newProjectReadMaterializer(projectID, nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		close(refreshEntered)
+		<-releaseRefresh
+		return tasks, nil
+	})
+	canonicalByID := map[string]domain.Task{issueID: canonical}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonicalByID, canonicalByID)
+	materializer.replaceBootstrap(canonicalByID, canonicalByID, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+
+	d := &Daemon{
+		cfg: Config{RepoDir: ".", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStateStore,
+		},
+		materializers: map[string]*projectReadMaterializer{projectID: materializer},
+	}
+	writer := newRuntimeProjectionWriter(d)
+	done := make(chan error, 1)
+	go func() {
+		done <- writer.PersistSessionProjection(ctx, projectID, daemonstate.Session{
+			ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
+		})
+	}()
+
+	<-refreshEntered
+	lockAvailable := writer.mu.TryLock()
+	if lockAvailable {
+		writer.mu.Unlock()
+	}
+	close(releaseRefresh)
+	if err := <-done; err != nil {
+		t.Fatalf("PersistSessionProjection: %v", err)
+	}
+	if !lockAvailable {
+		t.Fatal("projection writer lock remained held across read-model refresh")
+	}
+	if session, found, err := runtimeStateStore.GetSessionState(ctx, projectID, sessionID); err != nil || !found || session.IssueID != issueID {
+		t.Fatalf("persisted session = %+v found=%v err=%v", session, found, err)
+	}
+}
+
 func TestRuntimeProjectionWriterSnapshotReplacementRefreshesRemovedIssueKeys(t *testing.T) {
 	ctx := context.Background()
 	const (

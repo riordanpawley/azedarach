@@ -251,6 +251,20 @@ func TestBuildColumnsUsesConfiguredBoardSnapshotColumns(t *testing.T) {
 	}
 }
 
+func TestBoardRendersAuthoritativeChildProgressWhenChildIsOmitted(t *testing.T) {
+	m := newTestModel()
+	parent := domain.Task{ID: "az-parent", Title: "Parent", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeTask}
+	m.tasks = []domain.Task{parent}
+	m.boardView = domain.DefaultBoardView()
+	m.boardColumns = []domain.BoardViewColumnSnapshot{{Definition: m.boardView.Columns[0], Tasks: []domain.Task{parent}}}
+	m.boardProjection = domain.BoardViewProjection{ChildProgress: []domain.BoardChildProgress{{ParentID: parent.ID, Done: 3, Total: 4}}}
+
+	got := ansi.Strip(m.renderBoardView())
+	if !strings.Contains(got, "[3/4]") {
+		t.Fatalf("board did not render authoritative child progress:\n%s", got)
+	}
+}
+
 func TestBuildColumnsHonorsConfiguredHiddenEmptyColumns(t *testing.T) {
 	m := newTestModel()
 	view := domain.OrchestrationBoardView()
@@ -2135,6 +2149,144 @@ func TestTaskWorkspacePreservesDetailsAcrossSummaryRefresh(t *testing.T) {
 	}
 	if updated.tasks[0].Description != "" || updated.tasks[0].Notes != "" {
 		t.Fatalf("model task details after summary refresh = %+v, want board summary without long details", updated.tasks[0])
+	}
+}
+
+func TestTaskWorkspacePreservesFullGraphContextAcrossSummaryRefresh(t *testing.T) {
+	m := newTestModel()
+	currentID := naming.IssueID("az-current")
+	relatedID := naming.IssueID("az-related")
+	current := domain.Task{
+		ID:          currentID,
+		Title:       "Current task",
+		Description: "Full description stays visible",
+		Status:      domain.StatusInProgress,
+		Priority:    domain.P2,
+		Type:        domain.TypeTask,
+		Dependencies: []domain.Dependency{
+			{ID: relatedID, Type: domain.DependencyRelatedTo},
+		},
+	}
+	related := domain.Task{
+		ID:       relatedID,
+		Title:    "Related off-board task",
+		Status:   domain.StatusOpen,
+		Priority: domain.P3,
+		Type:     domain.TypeTask,
+	}
+	m.tasks = []domain.Task{current}
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(current, m.tasks, nil, 120, 30))
+
+	fullResult, _ := m.Update(refreshTaskWorkspaceResultMsg{
+		projectID: m.daemonProjectID(),
+		revision:  1,
+		taskID:    currentID.String(),
+		hasTask:   true,
+		task:      current,
+		tasks:     []domain.Task{current, related},
+	})
+	withFullContext := fullResult.(Model)
+
+	summary := current
+	summary.Title = "Current task after summary refresh"
+	summary.Description = ""
+	result, _ := withFullContext.Update(issuesLoadedMsg{
+		refreshSeq: 2,
+		projectID:  m.daemonProjectID(),
+		tasks:      []domain.Task{summary},
+		revision:   2,
+	})
+	updated := result.(Model)
+
+	workspace, ok := updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("current overlay = %T, want TaskWorkspaceOverlay", updated.overlayStack.Current())
+	}
+	view := workspace.View()
+	if !strings.Contains(view, "Current task after summary refresh") || !strings.Contains(view, "Full description stays visible") {
+		t.Fatalf("workspace lost refreshed summary or full details:\n%s", view)
+	}
+	if !strings.Contains(view, "Related off-board task") {
+		t.Fatalf("workspace lost full graph context after summary refresh:\n%s", view)
+	}
+
+	authoritativeResult, _ := updated.Update(refreshTaskWorkspaceResultMsg{
+		projectID: m.daemonProjectID(),
+		revision:  3,
+		taskID:    currentID.String(),
+		hasTask:   true,
+		task:      summary,
+		tasks:     []domain.Task{summary},
+	})
+	authoritative := authoritativeResult.(Model)
+	workspace = authoritative.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	view = workspace.View()
+	if strings.Contains(view, "Related off-board task") || strings.Contains(view, "Full description stays visible") {
+		t.Fatalf("workspace retained stale full context after authoritative refresh:\n%s", view)
+	}
+}
+
+func TestTaskWorkspaceIgnoresStaleFullDetailRefreshGeneration(t *testing.T) {
+	m := newTestModel()
+	task := domain.Task{
+		ID:          "az-1",
+		Title:       "Current detail",
+		Description: "Current description",
+		Status:      domain.StatusInProgress,
+		Priority:    domain.P2,
+		Type:        domain.TypeTask,
+	}
+	m.tasks = []domain.Task{task}
+	m.taskWorkspaceRefreshSeq = 2
+	workspace := overlay.NewTaskWorkspaceOverlay(task, m.tasks, nil, 120, 30)
+	workspace.SyncDecisionLinks([]overlay.DecisionLinkSummary{{DecisionID: "current", DecisionTitle: "Current decision", Relation: "implements"}})
+	m.overlayStack.Push(workspace)
+
+	stale := task
+	stale.Title = "Stale detail"
+	stale.Description = "Stale description"
+	result, _ := m.Update(refreshTaskWorkspaceResultMsg{
+		projectID:  m.daemonProjectID(),
+		refreshSeq: 1,
+		revision:   3,
+		taskID:     task.ID.String(),
+		hasTask:    true,
+		task:       stale,
+		tasks:      []domain.Task{stale},
+	})
+	updated := result.(Model)
+
+	workspace = updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	view := workspace.View()
+	if !strings.Contains(view, "Current detail") || !strings.Contains(view, "Current description") {
+		t.Fatalf("stale refresh generation overwrote current workspace:\n%s", view)
+	}
+	if strings.Contains(view, "Stale detail") || strings.Contains(view, "Stale description") {
+		t.Fatalf("stale refresh generation remained visible:\n%s", view)
+	}
+
+	result, _ = updated.Update(refreshTaskWorkspaceDecisionResultMsg{
+		projectID:     m.daemonProjectID(),
+		refreshSeq:    1,
+		taskID:        task.ID.String(),
+		decisionLinks: []overlay.DecisionLinkSummary{{DecisionID: "stale", DecisionTitle: "Stale decision", Relation: "implements"}},
+	})
+	updated = result.(Model)
+	view = updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay).View()
+	if !strings.Contains(view, "Current decision") || strings.Contains(view, "Stale decision") {
+		t.Fatalf("stale decision generation overwrote current links:\n%s", view)
+	}
+
+	toastCount := len(updated.toasts)
+	result, _ = updated.Update(refreshTaskWorkspaceReconcileResultMsg{
+		projectID:  m.daemonProjectID(),
+		refreshSeq: 1,
+		taskID:     task.ID.String(),
+		err:        errors.New("stale runtime failure"),
+	})
+	updated = result.(Model)
+	if len(updated.toasts) != toastCount {
+		t.Fatalf("stale runtime generation produced user feedback: %+v", updated.toasts)
 	}
 }
 
@@ -7784,7 +7936,7 @@ func TestRuntimeSignalsForBoardHidesWorktreeOperationFailureWithoutWorktree(t *t
 			board.Cursor{Column: 0, Task: 0},
 			map[string]bool{},
 			m.runtimeSignalsForBoard(),
-			board.BuildChildProgress([]domain.Task{task}),
+			nil,
 			nil,
 			false,
 			nil,

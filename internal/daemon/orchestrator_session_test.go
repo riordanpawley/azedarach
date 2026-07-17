@@ -617,10 +617,7 @@ func TestRealProcessProfileRootedMarkerSurvivesPaneChildReplacement(t *testing.T
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(tmuxDir) })
 	runner := &isolatedTmuxTestRunner{tmuxPath: tmuxPath, socketPath: filepath.Join(tmuxDir, "server.sock")}
-	// Let tmux create its normal interactive login shell. An explicitly named
-	// non-interactive `sh` may exit on the foreground child's SIGINT, taking the
-	// private server with it before the replacement can be launched.
-	if output, err := runner.run(context.Background(), "-f", "/dev/null", "new-session", "-d", "-s", "rooted-replacement"); err != nil {
+	if output, err := runner.run(context.Background(), "-f", "/dev/null", "new-session", "-d", "-s", "rooted-replacement", "/bin/sh -c 'while :; do sleep 30; done'"); err != nil {
 		t.Fatalf("start isolated tmux: %v (%s)", err, output)
 	}
 	t.Cleanup(func() { _, _ = runner.run(context.Background(), "kill-server") })
@@ -633,11 +630,24 @@ func TestRealProcessProfileRootedMarkerSurvivesPaneChildReplacement(t *testing.T
 		t.Fatal(err)
 	}
 	panePID = strings.TrimSpace(panePID)
+	paneSleepChildren := func() []string {
+		output, err := exec.Command("ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "comm=").CombinedOutput()
+		if err != nil {
+			return nil
+		}
+		children := make([]string, 0, 1)
+		for _, line := range strings.Split(string(output), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 3 && fields[1] == panePID && filepath.Base(fields[2]) == "sleep" {
+				children = append(children, fields[0])
+			}
+		}
+		return children
+	}
 	childPID := func(exclude string) string {
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(15 * time.Second)
 		for time.Now().Before(deadline) {
-			output, _ := exec.Command("ps", "-o", "pid=", "-P", panePID).CombinedOutput()
-			for _, pid := range strings.Fields(string(output)) {
+			for _, pid := range paneSleepChildren() {
 				if pid != exclude {
 					return pid
 				}
@@ -646,18 +656,12 @@ func TestRealProcessProfileRootedMarkerSurvivesPaneChildReplacement(t *testing.T
 		}
 		return ""
 	}
-	if output, err := runner.run(context.Background(), "send-keys", "-t", "rooted-replacement", "sleep 30", "Enter"); err != nil {
-		t.Fatalf("launch first child: %v (%s)", err, output)
-	}
 	firstChild := childPID("")
 	if firstChild == "" {
 		t.Fatal("first pane child did not start")
 	}
-	if output, err := runner.run(context.Background(), "send-keys", "-t", "rooted-replacement", "C-c"); err != nil {
-		t.Fatalf("interrupt first child: %v (%s)", err, output)
-	}
-	if output, err := runner.run(context.Background(), "send-keys", "-t", "rooted-replacement", "sleep 30", "Enter"); err != nil {
-		t.Fatalf("launch replacement child: %v (%s)", err, output)
+	if output, err := exec.Command("kill", "-TERM", firstChild).CombinedOutput(); err != nil {
+		t.Fatalf("stop first child: %v (%s)", err, output)
 	}
 	secondChild := childPID(firstChild)
 	if secondChild == "" || secondChild == firstChild {

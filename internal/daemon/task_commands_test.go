@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -3777,7 +3778,7 @@ func TestTaskClosePreflightBlocksFiveOpenDescendantsBeforeIntegration(t *testing
 	}
 }
 
-func TestTaskCloseCanAutoCloseCleanUnresolvedChildren(t *testing.T) {
+func TestTaskCloseRejectsCleanUnresolvedChildrenWithoutAutoTerminalizing(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-task-close-clean-children"
 	repoDir := t.TempDir()
@@ -3822,23 +3823,66 @@ func TestTaskCloseCanAutoCloseCleanUnresolvedChildren(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleTaskClose error: %v", err)
 	}
-	if !resp.OK {
-		t.Fatalf("handleTaskClose response = %+v", resp)
-	}
-	var result taskCloseResult
-	if err := json.Unmarshal(resp.Body, &result); err != nil {
-		t.Fatalf("unmarshal close response: %v", err)
-	}
-	if !slices.Contains(result.AutoClosedChildren, childID) {
-		t.Fatalf("auto closed children = %v, want %s", result.AutoClosedChildren, childID)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") {
+		t.Fatalf("handleTaskClose response = %+v, want unresolved child rejection", resp)
 	}
 	for _, issueID := range []string{parentID, childID} {
 		task, err := issuesClient.GetWithRuntime(ctx, projectID, issueID)
 		if err != nil {
 			t.Fatalf("get %s after close: %v", issueID, err)
 		}
-		if task.Status != domain.StatusDone {
-			t.Fatalf("%s status = %s, want %s", issueID, task.Status, domain.StatusDone)
+		if task.Status == domain.StatusDone {
+			t.Fatalf("%s status = %s, want nonterminal unchanged state", issueID, task.Status)
+		}
+	}
+}
+
+func TestTaskCloseNeverAutoTerminalizesDescendants(t *testing.T) {
+	ctx := context.Background()
+	projectID := "proj-task-close-clean-backlog-descendants"
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Backlog child", Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog, ParentID: &parentID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grandchildID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Backlog grandchild", Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog, ParentID: &childID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, hub: publish.NewHub(16, 8, slog.Default()),
+		issueClientsByProject:  map[string]*issues.Client{projectID: issuesClient},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store}, revision: map[string]uint64{},
+	}
+	body, err := json.Marshal(taskCloseRequest{TaskID: parentID, CloseCleanChildren: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "req-close-clean-backlog-descendants", Kind: protocol.EnvelopeKindCommand, Command: "task.close", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") {
+		t.Fatalf("handleTaskClose response = %+v, want unresolved descendant rejection", resp)
+	}
+	for _, issueID := range []string{childID, grandchildID} {
+		task, err := issuesClient.GetWithRuntime(ctx, projectID, issueID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if task.Status != domain.StatusOpen {
+			t.Fatalf("%s status = %s, want open", issueID, task.Status)
 		}
 	}
 }
@@ -3857,7 +3901,7 @@ func TestTaskCloseCleanChildrenDoesNotForceDirtyChildWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create parent: %v", err)
 	}
-	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Child", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &parentID})
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Child", Type: domain.TypeTask, Status: domain.StatusOpen, Lifecycle: domain.IssueWorkflowBacklog, ParentID: &parentID})
 	if err != nil {
 		t.Fatalf("create child: %v", err)
 	}
@@ -3925,8 +3969,8 @@ func TestTaskCloseCleanChildrenDoesNotForceDirtyChildWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleTaskClose error: %v", err)
 	}
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "worktree has local changes: child.go") {
-		t.Fatalf("handleTaskClose response = %+v, want dirty child worktree guard", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "unresolved child issues remain") {
+		t.Fatalf("handleTaskClose response = %+v, want unresolved descendant rejection", resp)
 	}
 	child, err := issuesClient.GetWithRuntime(ctx, projectID, childID)
 	if err != nil {
@@ -3934,6 +3978,9 @@ func TestTaskCloseCleanChildrenDoesNotForceDirtyChildWorktree(t *testing.T) {
 	}
 	if child.Status != domain.StatusOpen {
 		t.Fatalf("child status = %s, want %s", child.Status, domain.StatusOpen)
+	}
+	if child.IssueFacts().LifecycleState != domain.IssueWorkflowOpen {
+		t.Fatalf("child lifecycle = %s, want open", child.IssueFacts().LifecycleState)
 	}
 }
 
@@ -6111,7 +6158,7 @@ func TestTaskCloseIntegrationRetriesRepeatedlyWhenTargetHeadMovesAfterScratchVal
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6257,7 +6304,7 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6368,7 +6415,7 @@ func TestTaskCloseIntegrationOriginBaseSkipsLocalMergeWhenRemoteTreeMatches(t *t
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6488,7 +6535,7 @@ func TestTaskCloseIntegrationOriginBaseAllowsRemoteAheadWhenSourceContained(t *t
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6556,7 +6603,7 @@ func TestTaskCloseIntegrationOriginBaseRetryUsesExactReceiptAfterSourceRemoval(t
 	}
 	result, err := d.integrateTaskBeforeCloseOriginBase(ctx, projectID, taskID, git.Worktree{
 		IssueID: taskID, Path: filepath.Join(repoDir, "removed-worktree"), Branch: sourceBranch,
-	}, repoDir, "preview", true)
+	}, repoDir, "preview", true, "")
 	if err != nil {
 		t.Fatalf("origin retry exact receipt error: %v", err)
 	}
@@ -6662,7 +6709,7 @@ func TestTaskCloseIntegrationOriginBaseRefusesLocalMergeWhenRemoteDiffRemains(t 
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false)
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
 	if err == nil {
 		t.Fatalf("integrateTaskBeforeClose error = nil, result = %+v; want origin-mode refusal", result)
 	}
@@ -7332,6 +7379,21 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
+	evidenceEvent, err := issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t),
+	})
+	if err != nil {
+		t.Fatalf("append reviewed evidence: %v", err)
+	}
+	evidence := domain.ReduceReviewReadyEvidence([]domain.IssueObservationEvent{evidenceEvent}).LatestEvidence
+	if evidence == nil || !evidence.Validation.Complete {
+		t.Fatalf("reviewed evidence = %+v, want complete", evidence)
+	}
+	evidenceBody, err := json.Marshal(evidence.Evidence)
+	if err != nil {
+		t.Fatalf("marshal reviewed evidence: %v", err)
+	}
+	evidencePin := &issues.ReviewEvidencePin{Source: "issue_event", EventID: evidenceEvent.ID, Digest: fmt.Sprintf("%x", sha256.Sum256(evidenceBody))}
 	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
 	if err := os.MkdirAll(sourceWorktree, 0o755); err != nil {
 		t.Fatalf("mkdir source worktree: %v", err)
@@ -7349,9 +7411,17 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 
 	worktreeListOutput := fmt.Sprintf("worktree %s\nbranch refs/heads/%s\n\n", sourceWorktree, sourceBranch)
 	commands := make([]string, 0, 12)
+	var lateEvidenceErr error
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		commands = append(commands, strings.Join(args, " "))
 		joined := strings.Join(args, " ")
+		if lateEvidenceErr == nil && len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-list" {
+			mutated := mustWorkerEvidencePayload(t)
+			mutated["summary"] = "late evidence from git runner hook"
+			_, lateEvidenceErr = issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
+				Type: domain.IssueEventEvidenceSubmitted, Source: "late-worker", Payload: mutated,
+			})
+		}
 		switch {
 		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
 			return worktreeListOutput, nil
@@ -7427,8 +7497,7 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	})
 
 	body, err := json.Marshal(taskCloseRequest{
-		TaskID:               taskID,
-		IntegrateBeforeClose: true,
+		TaskID: taskID, IntegrateBeforeClose: true, ExpectedReviewEvidence: evidencePin,
 	})
 	if err != nil {
 		t.Fatalf("marshal task close request: %v", err)
@@ -7456,6 +7525,9 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	}
 	if !result.IntegrationRequested || result.Integrated {
 		t.Fatalf("close integration result = %+v, want requested no-op integration", result)
+	}
+	if lateEvidenceErr == nil || !strings.Contains(lateEvidenceErr.Error(), "accepted review evidence is fenced") {
+		t.Fatalf("late git-runner evidence error = %v, want durable close-fence conflict", lateEvidenceErr)
 	}
 	if !result.WorktreeRemoved {
 		t.Fatalf("close integration result = %+v, want worktree cleanup", result)
@@ -8639,7 +8711,7 @@ func TestTaskGraphReadinessStopsAtNestedRoots(t *testing.T) {
 	if slices.Contains(result.Runnable, grandchild.String()) {
 		t.Fatalf("runnable = %v, must not flatten nested root descendant %s", result.Runnable, grandchild.String())
 	}
-	observations := (&Daemon{}).daemonTaskGraphWorkerObservations(context.Background(), "proj", rootID, byID, children, result)
+	observations := daemonTaskGraphWorkerObservations(rootID, byID, children, result, taskGraphReadinessContext{})
 	observedDirect := false
 	for _, observation := range observations {
 		if observation.IssueID == direct.String() {
@@ -8864,16 +8936,15 @@ func TestTaskGraphReadinessRefreshesNestedRootLifecycleAcrossDaemonClients(t *te
 		t.Fatalf("before nested roots = %+v, want open root startable", before.NestedRoots)
 	}
 	backlog := domain.IssueWorkflowBacklog
-	if err := writer.UpdateDetails(ctx, nestedID, issues.UpdateTaskParams{Title: "ADA", Type: domain.TypeEpic, Priority: domain.P2, Lifecycle: &backlog}); err != nil {
-		t.Fatal(err)
+	if err := writer.UpdateDetails(ctx, nestedID, issues.UpdateTaskParams{Title: "ADA", Type: domain.TypeEpic, Priority: domain.P2, Lifecycle: &backlog}); err == nil || !strings.Contains(err.Error(), "cannot regress to backlog") {
+		t.Fatalf("update nested root = %v, want ancestor lifecycle floor rejection", err)
 	}
-	waitForProjectMaterializerRevision(t, d, "proj", 1)
 	after, err := d.taskGraphReadiness(ctx, "proj", rootID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after.NestedRoots) != 1 || after.NestedRoots[0].Status != "not_counting_capacity" || !slices.Contains(after.NestedRoots[0].ExclusionReasons, "lifecycle-backlog") {
-		t.Fatalf("after nested roots = %+v, want refreshed lifecycle-backlog exclusion", after.NestedRoots)
+	if len(after.NestedRoots) != 1 || after.NestedRoots[0].Status != "startable" {
+		t.Fatalf("after nested roots = %+v, want invariant-preserved startable root", after.NestedRoots)
 	}
 }
 
@@ -9919,8 +9990,6 @@ func TestTaskGraphReadinessReportsStaleChildBranchContainmentRisk(t *testing.T) 
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	issuesClient := newMigratedIssueClientAtPath(t, dbPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
-	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, logger)
-	t.Cleanup(func() { _ = runtimeStateStore.Close() })
 
 	rootIDRaw, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Parent", Type: domain.TypeEpic, Status: domain.StatusInProgress})
 	if err != nil {
@@ -9961,17 +10030,6 @@ func TestTaskGraphReadinessReportsStaleChildBranchContainmentRisk(t *testing.T) 
 	}
 	runDaemonTestGit(t, repoDir, "commit", "-am", closedID.String()+": generate typed materializer rpc")
 	evidenceCommit := runDaemonTestGitOutput(t, repoDir, "rev-parse", "HEAD")
-	activeWorktree := filepath.Join(t.TempDir(), "active-worktree")
-	runDaemonTestGit(t, repoDir, "worktree", "add", "-q", activeWorktree, activeBranch)
-
-	for _, state := range []daemonstate.WorktreeState{
-		{ProjectID: projectID, IssueID: rootID.String(), Path: repoDir, Branch: rootBranch, UpdatedAt: time.Now().UTC()},
-		{ProjectID: projectID, IssueID: activeID.String(), Path: activeWorktree, Branch: activeBranch, UpdatedAt: time.Now().UTC()},
-	} {
-		if err := runtimeStateStore.UpsertWorktreeState(ctx, state); err != nil {
-			t.Fatalf("seed worktree state: %v", err)
-		}
-	}
 
 	d := &Daemon{
 		cfg: Config{RepoDir: repoDir, Logger: logger},
@@ -9979,14 +10037,12 @@ func TestTaskGraphReadinessReportsStaleChildBranchContainmentRisk(t *testing.T) 
 		issueClientsByProject: map[string]*issues.Client{
 			projectID: issuesClient,
 		},
-		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
-			repoDir: runtimeStateStore,
-		},
-		worktreeAdapter: &worktreeServiceAdapter{
-			manager:           git.NewWorktreeManager(git.NewExecRunner(repoDir), repoDir, logger),
-			runtimeStateStore: runtimeStateStore,
-			logger:            logger,
-		},
+	}
+	d.taskGraphWorktrees = func(context.Context, string) ([]git.Worktree, error) {
+		return []git.Worktree{
+			{IssueID: rootID.String(), Path: repoDir, Branch: rootBranch},
+			{IssueID: activeID.String(), Path: repoDir, Branch: activeBranch},
+		}, nil
 	}
 
 	ready, err := d.taskGraphReadiness(ctx, projectID, rootID.String())
@@ -13242,8 +13298,8 @@ func TestTaskUpdateStatusRejectsInReviewWithUnreadyChildren(t *testing.T) {
 	}
 
 	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, false)
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "child issues are not review-ready") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") || !strings.Contains(resp.Error.Message, "--cascade-children") {
-		t.Fatalf("task.update_status response = %+v, want child readiness guard", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "all live descendants must be terminal") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") {
+		t.Fatalf("task.update_status response = %+v, want terminal descendant guard", resp)
 	}
 	parent, err := issuesClient.GetWithRuntime(ctx, projectID, parentID)
 	if err != nil {
@@ -13283,8 +13339,8 @@ func TestTaskUpdateStatusRejectsInReviewWithBusyReviewChild(t *testing.T) {
 	})
 
 	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, false)
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "child issues are not review-ready") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") {
-		t.Fatalf("task.update_status response = %+v, want busy in-review child guard", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "all live descendants must be terminal") || !strings.Contains(resp.Error.Message, childID+" (in_progress)") {
+		t.Fatalf("task.update_status response = %+v, want terminal descendant guard", resp)
 	}
 	parent, err := issuesClient.GetWithRuntime(ctx, projectID, parentID)
 	if err != nil {
@@ -13439,7 +13495,7 @@ func TestTaskUpdateStatusAllowsInReviewWithIdleActivity(t *testing.T) {
 	}
 }
 
-func TestTaskUpdateStatusCascadeChildrenMovesNestedDescendantsToInReview(t *testing.T) {
+func TestTaskUpdateStatusCascadeChildrenCannotBypassTerminalDescendantGate(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-review-cascade-children"
 	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
@@ -13468,16 +13524,16 @@ func TestTaskUpdateStatusCascadeChildrenMovesNestedDescendantsToInReview(t *test
 	}
 
 	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, true)
-	if !resp.OK || resp.Error != nil {
-		t.Fatalf("task.update_status response = %+v, want cascade success", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "all live descendants must be terminal") {
+		t.Fatalf("task.update_status response = %+v, want terminal descendant rejection", resp)
 	}
 	for _, id := range []string{parentID, childID, grandchildID} {
 		task, err := issuesClient.GetWithRuntime(ctx, projectID, id)
 		if err != nil {
 			t.Fatalf("get %s: %v", id, err)
 		}
-		if task.Status != domain.StatusInReview {
-			t.Fatalf("%s status = %s, want in_review", id, task.Status)
+		if task.Status == domain.StatusInReview {
+			t.Fatalf("%s status = %s, want unchanged non-review state", id, task.Status)
 		}
 	}
 }
@@ -13511,8 +13567,8 @@ func TestTaskUpdateStatusCascadeChildrenRejectsBusyChildActivity(t *testing.T) {
 	})
 
 	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, true)
-	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "cascade child "+childID+" to in_review") || !strings.Contains(resp.Error.Message, "session activity is working (source: hooks)") {
-		t.Fatalf("task.update_status response = %+v, want busy child cascade guard", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "all live descendants must be terminal") {
+		t.Fatalf("task.update_status response = %+v, want terminal descendant guard", resp)
 	}
 	for _, id := range []string{parentID, childID} {
 		task, err := issuesClient.GetWithRuntime(ctx, projectID, id)
@@ -13548,7 +13604,7 @@ func TestTaskUpdateStatusReviewGuardHonorsLegacyParentChildDependency(t *testing
 	}
 }
 
-func TestTaskUpdateStatusAllowsInReviewWhenChildrenReviewReady(t *testing.T) {
+func TestTaskUpdateStatusRejectsInReviewWhenChildOnlyReviewReady(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-review-guard-ready"
 	d, issuesClient := newTaskStatusReviewGuardDaemon(t, projectID)
@@ -13569,15 +13625,15 @@ func TestTaskUpdateStatusAllowsInReviewWhenChildrenReviewReady(t *testing.T) {
 	}
 
 	resp := updateStatusForTest(t, d, projectID, parentID, domain.StatusInReview, false)
-	if !resp.OK || resp.Error != nil {
-		t.Fatalf("task.update_status response = %+v, want success", resp)
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "all live descendants must be terminal") {
+		t.Fatalf("task.update_status response = %+v, want review-ready child rejection", resp)
 	}
 	parent, err := issuesClient.GetWithRuntime(ctx, projectID, parentID)
 	if err != nil {
 		t.Fatalf("get parent: %v", err)
 	}
-	if parent.Status != domain.StatusInReview {
-		t.Fatalf("parent status = %s, want in_review", parent.Status)
+	if parent.Status == domain.StatusInReview {
+		t.Fatalf("parent status = %s, want unchanged", parent.Status)
 	}
 }
 
@@ -14625,7 +14681,7 @@ func TestHandleTaskSnapshotExportUsesProjectionSessions(t *testing.T) {
 	}
 }
 
-func TestHandleTaskGetEnqueuesOnlyRequestedIssueWorktreeRefreshAsync(t *testing.T) {
+func TestHandleTaskGetDoesNotEnqueueWorktreeRefresh(t *testing.T) {
 	ctx := context.Background()
 	projectID := protocol.DefaultProjectID
 	repoDir := t.TempDir()
@@ -14663,12 +14719,10 @@ func TestHandleTaskGetEnqueuesOnlyRequestedIssueWorktreeRefreshAsync(t *testing.
 		}
 	}
 
-	statusPaths := make(chan string, 4)
-	statusRelease := make(chan struct{})
+	statusCalls := 0
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		if len(args) >= 4 && args[0] == "-C" && args[2] == "status" && args[3] == "--porcelain" {
-			statusPaths <- args[1]
-			<-statusRelease
+			statusCalls++
 			return " M changed.go\n", nil
 		}
 		return "", nil
@@ -14704,58 +14758,122 @@ func TestHandleTaskGetEnqueuesOnlyRequestedIssueWorktreeRefreshAsync(t *testing.
 	if err != nil {
 		t.Fatalf("marshal task get request: %v", err)
 	}
-	type taskGetResult struct {
-		resp protocol.ResponseEnvelope
-		err  error
+	resp, err := d.handleTaskGet(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-get-projection-only",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.get",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            reqBody,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskGet returned error: %v", err)
 	}
-	resultCh := make(chan taskGetResult, 1)
-	go func() {
-		resp, err := d.handleTaskGet(ctx, protocol.RequestEnvelope{
-			ProtocolVersion: protocol.CurrentVersion,
-			RequestID:       "req-task-get-refresh",
-			Kind:            protocol.EnvelopeKindCommand,
-			Command:         "task.get",
-			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-			Body:            reqBody,
-		})
-		resultCh <- taskGetResult{resp: resp, err: err}
-	}()
-
-	select {
-	case got := <-statusPaths:
-		if got != targetWorktree {
-			t.Fatalf("refreshed worktree = %q, want %q", got, targetWorktree)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for target issue worktree refresh")
+	if !resp.OK {
+		t.Fatalf("task.get response not OK: %+v", resp.Error)
 	}
 
-	var result taskGetResult
-	select {
-	case result = <-resultCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("task.get did not return while git status refresh was still running")
-	}
-	if result.err != nil {
-		t.Fatalf("handleTaskGet returned error: %v", result.err)
-	}
-	if !result.resp.OK {
-		t.Fatalf("task.get response not OK: %+v", result.resp.Error)
-	}
-
-	payload, err := protocol.DecodeTaskListSnapshotPayload(result.resp.Body)
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
 	if err != nil {
 		t.Fatalf("decode task.get body: %v", err)
 	}
 	if len(payload.Tasks) != 1 {
 		t.Fatalf("response task count = %d, want 1", len(payload.Tasks))
 	}
-	close(statusRelease)
+	if counters := queue.snapshotCounters(); counters.Enqueued != 0 {
+		t.Fatalf("task.get enqueued worktree refresh: %+v", counters)
+	}
+	if statusCalls != 0 {
+		t.Fatalf("task.get invoked git status %d times", statusCalls)
+	}
+}
 
-	select {
-	case got := <-statusPaths:
-		t.Fatalf("unexpected extra worktree refresh for %q", got)
-	case <-time.After(100 * time.Millisecond):
+func TestHandleTaskGetMaterializedReadDoesNotRefreshRuntimeOrGit(t *testing.T) {
+	ctx := context.Background()
+	const (
+		projectID = "proj-detail-read"
+		issueID   = "az-1"
+		worktree  = "/tmp/proj-detail-read-az-1"
+	)
+
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   issueID,
+		Path:      worktree,
+		Branch:    "az/az-1",
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree state: %v", err)
+	}
+
+	queue := newReconcileQueue[*git.GitStatus](reconcileQueueConfig{Name: "detail_read_git_status", Workers: 1, Logger: slog.Default()})
+	t.Cleanup(func() { _ = queue.Close() })
+	gitAdapter := &gitServiceAdapter{
+		client:             git.NewClient(&recordingGitRunner{}, slog.Default()),
+		runtimeStateStore:  store,
+		statusRefreshQueue: queue,
+		logger:             slog.Default(),
+		baseBranch:         "main",
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return store
+		},
+	}
+	hydrateCalls := 0
+	materializer := newProjectReadMaterializer(projectID, nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		hydrateCalls++
+		return tasks, nil
+	})
+	detailTask := domain.Task{
+		ID:          issueID,
+		Title:       "Durable detail",
+		Description: "Return without external Git",
+		Status:      domain.StatusInProgress,
+		Type:        domain.TypeTask,
+	}
+	materializer.canonical[issueID] = detailTask
+	materializer.tasks[issueID] = detailTask
+	materializer.metadata.Health = "healthy"
+	d := &Daemon{
+		cfg:              Config{BaseBranch: "main", Logger: slog.Default()},
+		gitStatusAdapter: gitAdapter,
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: store,
+		},
+		materializersStarted: true,
+		materializers: map[string]*projectReadMaterializer{
+			projectID: materializer,
+		},
+		revision: map[string]uint64{projectID: 7},
+	}
+	body, err := json.Marshal(map[string]string{"task_id": issueID})
+	if err != nil {
+		t.Fatalf("marshal task get: %v", err)
+	}
+	resp, err := d.handleTaskGet(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-detail-projection-only",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.get",
+		Meta:            protocol.Metadata{ProjectID: projectID},
+		Body:            body,
+	})
+	if err != nil || !resp.OK {
+		t.Fatalf("task.get response = %+v, err = %v", resp.Error, err)
+	}
+	if counters := queue.snapshotCounters(); counters.Enqueued != 0 {
+		t.Fatalf("task.get enqueued external Git refreshes: %+v", counters)
+	}
+	if hydrateCalls != 0 {
+		t.Fatalf("task.get synchronously refreshed runtime enrichment %d times, want projection-only read", hydrateCalls)
+	}
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatalf("decode task.get response: %v", err)
+	}
+	if len(payload.Tasks) != 1 || payload.Tasks[0].Description != "Return without external Git" {
+		t.Fatalf("task.get payload = %+v, want durable detail", payload.Tasks)
 	}
 }
 
