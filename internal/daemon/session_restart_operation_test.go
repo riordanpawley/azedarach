@@ -21,6 +21,7 @@ import (
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
+	"golang.org/x/sys/unix"
 )
 
 type exactRestartRunner struct {
@@ -39,6 +40,7 @@ type exactRestartRunner struct {
 	paneMissing      bool
 	listPanesEntered chan struct{}
 	listPanesRelease <-chan struct{}
+	environment      map[string]string
 }
 
 type realRestartRunner struct {
@@ -57,23 +59,27 @@ func (r *realRestartRunner) Run(ctx context.Context, args ...string) (string, er
 		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 	}
+	var replacementIncarnation string
+	if len(args) > 0 && args[0] == "respawn-pane" {
+		command := args[len(args)-1]
+		scriptMatch := regexp.MustCompile(`-i '([^']+)'`).FindStringSubmatch(command)
+		if len(scriptMatch) != 2 {
+			return "", fmt.Errorf("restart artifact path missing from %q", command)
+		}
+		script, readErr := os.ReadFile(scriptMatch[1])
+		if readErr != nil {
+			return "", readErr
+		}
+		incarnationMatch := regexp.MustCompile(`AZEDARACH_AGENT_INCARNATION='([^']+)'`).FindSubmatch(script)
+		if len(incarnationMatch) != 2 {
+			return "", fmt.Errorf("restart incarnation missing from artifact")
+		}
+		replacementIncarnation = string(incarnationMatch[1])
+	}
 	outputBytes, err := exec.CommandContext(ctx, r.tmuxPath, append([]string{"-L", r.socketName}, args...)...).CombinedOutput()
 	output := string(outputBytes)
-	if err != nil || len(args) == 0 || args[0] != "respawn-pane" {
+	if err != nil || replacementIncarnation == "" {
 		return output, err
-	}
-	command := args[len(args)-1]
-	scriptMatch := regexp.MustCompile(`-i '([^']+)'`).FindStringSubmatch(command)
-	if len(scriptMatch) != 2 {
-		return output, fmt.Errorf("restart artifact path missing from %q", command)
-	}
-	script, readErr := os.ReadFile(scriptMatch[1])
-	if readErr != nil {
-		return output, readErr
-	}
-	incarnationMatch := regexp.MustCompile(`AZEDARACH_AGENT_INCARNATION='([^']+)'`).FindSubmatch(script)
-	if len(incarnationMatch) != 2 {
-		return output, fmt.Errorf("restart incarnation missing from artifact")
 	}
 	metadata, metadataErr := r.Run(ctx, "display-message", "-p", "-t", r.session, "#{pane_id}\t#{pane_pid}")
 	if metadataErr != nil {
@@ -90,7 +96,7 @@ func (r *realRestartRunner) Run(ctx context.Context, args ...string) (string, er
 	identity := daemonstate.ManagedAgentIdentity{
 		ProjectID: r.projectID, SessionID: r.session, LogicalPaneID: "agent",
 		TmuxPaneID: strings.TrimPrefix(fields[0], "%"), PanePID: pid,
-		AgentIncarnation: string(incarnationMatch[1]), ObservedAt: time.Now().UTC(),
+		AgentIncarnation: replacementIncarnation, ObservedAt: time.Now().UTC(),
 	}
 	if storeErr := r.store.UpsertManagedAgentIdentity(ctx, identity); storeErr != nil {
 		return output, storeErr
@@ -103,6 +109,24 @@ func (r *exactRestartRunner) Run(ctx context.Context, args ...string) (string, e
 		return "", nil
 	}
 	switch args[0] {
+	case "set-environment":
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.environment == nil {
+			r.environment = make(map[string]string)
+		}
+		if len(args) >= 5 {
+			r.environment[args[3]] = args[4]
+		}
+		return "", nil
+	case "show-environment":
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		var lines []string
+		for key, value := range r.environment {
+			lines = append(lines, key+"="+value)
+		}
+		return strings.Join(lines, "\n"), nil
 	case "list-panes":
 		if r.listPanesEntered != nil {
 			select {
@@ -326,6 +350,91 @@ func TestRestartManagedAgentPaneCrossDaemonStaleIdentityRespawnsOnce(t *testing.
 	if err != nil || len(lockFiles) != 1 {
 		t.Fatalf("stable restart lock files=%v err=%v, want exactly one across incarnations", lockFiles, err)
 	}
+}
+
+func TestRestartManagedAgentPaneAmbiguousAcceptedResponseRemainsFencedAcrossDaemons(t *testing.T) {
+	ctx := context.Background()
+	const project = "project"
+	const session = "az-1"
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	storeA := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	storeB := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = storeB.Close() })
+	t.Cleanup(func() { _ = storeA.Close() })
+	old := daemonstate.ManagedAgentIdentity{ProjectID: project, SessionID: session, LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old", ObservedAt: time.Now()}
+	if err := storeA.UpsertManagedAgentIdentity(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	runner := &exactRestartRunner{store: storeA, project: project, session: session, pid: old.PanePID}
+	newDaemon := func(store *daemonstate.RuntimeStateStore) *Daemon {
+		return &Daemon{cfg: Config{RepoDir: t.TempDir(), CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()), runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{project: store}}
+	}
+	daemonA, daemonB := newDaemon(storeA), newDaemon(storeB)
+	observationEntered := make(chan struct{}, 1)
+	observationRelease := make(chan struct{})
+	accepted := make(chan string, 1)
+	respawnCalls := 0
+	daemonA.sessionRestartRespawn = func(_ context.Context, _, _, command string) (error, bool) {
+		incarnation := regexp.MustCompile(`AZEDARACH_AGENT_INCARNATION='([^']+)'`).FindStringSubmatch(readLaunchScriptFromCommand(t, command))
+		if len(incarnation) != 2 {
+			t.Fatalf("planned incarnation missing from %q", command)
+		}
+		runner.mu.Lock()
+		respawnCalls++
+		runner.listPanesEntered = observationEntered
+		runner.listPanesRelease = observationRelease
+		runner.mu.Unlock()
+		accepted <- incarnation[1]
+		return context.DeadlineExceeded, true
+	}
+	daemonB.sessionRestartRespawn = func(context.Context, string, string, string) (error, bool) {
+		runner.mu.Lock()
+		respawnCalls++
+		runner.mu.Unlock()
+		return errors.New("second daemon reached respawn"), false
+	}
+	target := sessionRestartAllTarget{ProjectID: project, SessionID: session, IssueID: "one", Activity: "idle", TmuxReady: true}
+	resultA := make(chan protocol.SessionRestartAllItem, 1)
+	go func() {
+		resultA <- daemonA.restartManagedAgentPaneWithIdentity(ctx, storeA, old, target, protocol.SessionRestartAllRequestBody{}, protocol.SessionRestartAllItem{}, nil)
+	}()
+	planned := <-accepted
+	<-observationEntered
+	resultB := make(chan protocol.SessionRestartAllItem, 1)
+	go func() {
+		resultB <- daemonB.restartManagedAgentPaneWithIdentity(ctx, storeB, old, target, protocol.SessionRestartAllRequestBody{}, protocol.SessionRestartAllItem{}, nil)
+	}()
+
+	// Model tmux accepting the first command despite its lost/timed-out reply,
+	// followed by the replacement hook projection. The first daemon still owns
+	// the stable transition lock while this convergence becomes visible.
+	runner.mu.Lock()
+	runner.pid = 101
+	runner.mu.Unlock()
+	if err := storeA.UpsertManagedAgentIdentity(ctx, daemonstate.ManagedAgentIdentity{ProjectID: project, SessionID: session, LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 101, AgentIncarnation: planned, ObservedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	close(observationRelease)
+	first, second := <-resultA, <-resultB
+	runner.mu.Lock()
+	gotRespawnCalls := respawnCalls
+	runner.mu.Unlock()
+	if !first.Restarted || second.Outcome != "superseded" || !second.Skipped || gotRespawnCalls != 1 {
+		t.Fatalf("first=%+v second=%+v respawn_calls=%d", first, second, gotRespawnCalls)
+	}
+}
+
+func readLaunchScriptFromCommand(t *testing.T, command string) string {
+	t.Helper()
+	for _, match := range regexp.MustCompile(`'([^']+)'`).FindAllStringSubmatch(command, -1) {
+		if len(match) == 2 {
+			if body, err := os.ReadFile(match[1]); err == nil {
+				return string(body)
+			}
+		}
+	}
+	t.Fatalf("launch script missing from %q", command)
+	return ""
 }
 
 func TestRestartManagedAgentPaneArtifactFlagsWorktreeAndUnrelatedPanes(t *testing.T) {
@@ -584,7 +693,7 @@ func TestRecoverInterruptedSessionRestartMatrix(t *testing.T) {
 		got := <-resultCh
 		result := decodeRestartRecoveryResult(t, got.recovery)
 		stage := result.Sessions[0].Stages[0]
-		if !got.ok || result.Failed != 1 || result.Sessions[0].Outcome != "partial_failure" || stage.Name != "recover_observe" || stage.Status != "timeout" || stage.TimeoutMS == 0 {
+		if !got.ok || result.Failed != 1 || result.Sessions[0].Outcome != "partial_failure" || stage.Name != "recover_observe" || stage.Status != "failed" || !strings.Contains(stage.Message, "canceled") || stage.TimeoutMS == 0 {
 			t.Fatalf("recovery=%+v result=%+v ok=%v", got.recovery, result, got.ok)
 		}
 	})
@@ -707,6 +816,9 @@ func TestRecoverInterruptedRootedRestartRepairsBootstrapAcrossCrashWindows(t *te
 					t.Fatalf("repair target identity=%+v session=%q", got, sessionID)
 				}
 				now := time.Now().UTC()
+				if err := d.tmux.SetEnvironment(ctx, sessionID, rootedOrchestratorBootstrapNonceEnvironment, "nonce"); err != nil {
+					return err
+				}
 				return daemonstate.NewRootedBootstrapAcknowledgementAuthority(store).Acknowledge(ctx, daemonstate.RootedBootstrapAcknowledgement{
 					Identity: got, SessionID: sessionID, PromptHash: "prompt", RuntimeNonce: "nonce", AcknowledgedAt: now, UpdatedAt: now,
 				})
@@ -728,6 +840,122 @@ func TestRecoverInterruptedRootedRestartRepairsBootstrapAcrossCrashWindows(t *te
 				t.Fatalf("repaired acknowledgement=%+v found=%t err=%v", ack, found, err)
 			}
 		})
+	}
+}
+
+func TestRecoverInterruptedRootedRestartHoldsRootedThenPaneLocksAgainstLiveRestart(t *testing.T) {
+	base := t.TempDir()
+	dbPath := filepath.Join(base, "runtime.db")
+	store := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	old := daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old", ObservedAt: time.Now()}
+	if err := store.UpsertManagedAgentIdentity(context.Background(), old); err != nil {
+		t.Fatal(err)
+	}
+	runner := &exactRestartRunner{store: store, project: "project", session: "az-1", pid: 100}
+	d := &Daemon{cfg: Config{RepoDir: base, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()), runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{"project": store}}
+	target := sessionRestartAllTarget{ProjectID: "project", SessionID: "az-1", IssueID: "one", Activity: "idle", TmuxReady: true}
+	scope, err := domain.RootedOrchestrationScope(target.IssueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := domain.NewOrchestratorIdentity(target.ProjectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := recoveryPlanForTarget(target, sessionRestartStageRootedInvalidateReady)
+	plan.RootedIdentity = &identity
+	repairEntered := make(chan struct{})
+	repairRelease := make(chan struct{})
+	d.sessionRestartRootedBootstrapRepair = func(ctx context.Context, got domain.OrchestratorIdentity, sessionID string) error {
+		close(repairEntered)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-repairRelease:
+		}
+		if err := d.tmux.SetEnvironment(ctx, sessionID, rootedOrchestratorBootstrapNonceEnvironment, "nonce"); err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		return daemonstate.NewRootedBootstrapAcknowledgementAuthority(store).Acknowledge(ctx, daemonstate.RootedBootstrapAcknowledgement{Identity: got, SessionID: sessionID, PromptHash: "prompt", RuntimeNonce: "nonce", AcknowledgedAt: now, UpdatedAt: now})
+	}
+	body, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := daemonops.Record{Kind: protocol.CommandSessionRestartAll, Progress: &daemonops.Progress{Phase: "session.restart_all." + plan.Stage, Message: string(body)}}
+	type recovered struct {
+		value interruptedOperationRecovery
+		ok    bool
+	}
+	recoveryResult := make(chan recovered, 1)
+	go func() {
+		value, ok := d.recoverInterruptedSessionRestart(context.Background(), record)
+		recoveryResult <- recovered{value: value, ok: ok}
+	}()
+	<-repairEntered
+	assertRestartTransitionLocksHeld(t, dbPath)
+	close(repairRelease)
+	recoveredResult := <-recoveryResult
+	if !recoveredResult.ok {
+		t.Fatal("restart plan was not recognized")
+	}
+	result := decodeRestartRecoveryResult(t, recoveredResult.value)
+	if result.Failed != 1 || !strings.Contains(result.Sessions[0].Error, "before exact-pane replacement") {
+		t.Fatalf("recovery result=%+v", result)
+	}
+	if got := d.restartManagedAgentPane(context.Background(), target, protocol.SessionRestartAllRequestBody{}, protocol.SessionRestartAllItem{}, nil); !got.Restarted {
+		t.Fatalf("live restart after recovered lock release=%+v", got)
+	}
+	respawns, _, _ := runner.snapshot()
+	if respawns != 1 {
+		t.Fatalf("respawns=%d, want one live replacement after recovery", respawns)
+	}
+}
+
+func TestRecoverInterruptedRootedRestartRejectsDurableRuntimeNonceMismatch(t *testing.T) {
+	d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+	scope, err := domain.RootedOrchestrationScope(target.IssueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := domain.NewOrchestratorIdentity(target.ProjectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedRecoveredReplacement(t, store, runner, "planned")
+	plan := recoveryPlanForTarget(target, "observe")
+	plan.RootedIdentity = &identity
+	d.sessionRestartRootedBootstrapRepair = func(ctx context.Context, got domain.OrchestratorIdentity, sessionID string) error {
+		if err := d.tmux.SetEnvironment(ctx, sessionID, rootedOrchestratorBootstrapNonceEnvironment, "live-nonce"); err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		return daemonstate.NewRootedBootstrapAcknowledgementAuthority(store).Acknowledge(ctx, daemonstate.RootedBootstrapAcknowledgement{Identity: got, SessionID: sessionID, PromptHash: "prompt", RuntimeNonce: "durable-nonce", AcknowledgedAt: now, UpdatedAt: now})
+	}
+	result := decodeRestartRecoveryResult(t, mustRecoverRestartPlan(t, d, plan))
+	if result.Failed != 1 || !strings.Contains(result.Sessions[0].Error, "does not match live runtime nonce") {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func assertRestartTransitionLocksHeld(t *testing.T, dbPath string) {
+	t.Helper()
+	for _, pattern := range []string{dbPath + ".orchestrator-*.lock", dbPath + ".managed-agent-restart-*.lock"} {
+		paths, err := filepath.Glob(pattern)
+		if err != nil || len(paths) != 1 {
+			t.Fatalf("transition locks for %q: paths=%v err=%v", pattern, paths, err)
+		}
+		file, err := os.OpenFile(paths[0], os.O_RDWR, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		_ = file.Close()
+		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
+			t.Fatalf("lock %s was not held by recovery: %v", paths[0], err)
+		}
 	}
 }
 
@@ -775,6 +1003,51 @@ func restartRecoveryRecord(t *testing.T, target sessionRestartAllTarget, stage s
 		t.Fatal(err)
 	}
 	return daemonops.Record{Kind: protocol.CommandSessionRestartAll, Progress: &daemonops.Progress{Phase: "session.restart_all." + stage, Message: string(body)}}
+}
+
+func TestDecodeSessionRestartRecoveryPlanBindsDuplicatedAuthority(t *testing.T) {
+	target := sessionRestartAllTarget{ProjectID: "project", SessionID: "az-1", IssueID: "one", Activity: "idle"}
+	rootedScope, err := domain.RootedOrchestrationScope(target.IssueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootedIdentity, err := domain.NewOrchestratorIdentity(target.ProjectID, rootedScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := recoveryPlanForTarget(target, "observe")
+	base.RootedIdentity = &rootedIdentity
+	recordFor := func(plan sessionRestartRecoveryPlan, phase, projectID string) daemonops.Record {
+		body, marshalErr := json.Marshal(plan)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		return daemonops.Record{ProjectID: projectID, Kind: protocol.CommandSessionRestartAll, Progress: &daemonops.Progress{Phase: phase, Message: string(body)}}
+	}
+	if _, ok := decodeSessionRestartRecoveryPlan(recordFor(base, "session.restart_all.observe", target.ProjectID)); !ok {
+		t.Fatal("exact duplicated authority was rejected")
+	}
+
+	wrongStage := base
+	wrongStage.Stage = "replace_ready"
+	wrongRoot := base
+	wrongRoot.IssueID = "two"
+	wrongIdentityProject := base
+	identity := rootedIdentity
+	identity.ProjectID = "other"
+	wrongIdentityProject.RootedIdentity = &identity
+	for name, record := range map[string]daemonops.Record{
+		"phase stage mismatch":      recordFor(wrongStage, "session.restart_all.observe", target.ProjectID),
+		"record project mismatch":   recordFor(base, "session.restart_all.observe", "other"),
+		"root issue mismatch":       recordFor(wrongRoot, "session.restart_all.observe", target.ProjectID),
+		"identity project mismatch": recordFor(wrongIdentityProject, "session.restart_all.observe", target.ProjectID),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, ok := decodeSessionRestartRecoveryPlan(record); ok {
+				t.Fatalf("mismatched recovery authority was accepted: %+v", record)
+			}
+		})
+	}
 }
 
 func decodeRestartRecoveryResult(t *testing.T, recovery interruptedOperationRecovery) protocol.SessionRestartAllResponseBody {

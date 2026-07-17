@@ -319,15 +319,21 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 		return item
 	}
 	item.Stages = append(item.Stages, restartStage("replace_preflight", "complete", "exact durable identity still matches live pane", sessionRestartPreflightTimeout))
-	_, err, timedOut = runRestartStage(ctx, sessionRestartReplaceTimeout, func(stageCtx context.Context) (struct{}, error) {
-		return struct{}{}, d.tmux.RespawnPane(stageCtx, paneTarget, prepared.worktree, prepared.artifact.Command)
-	})
+	err, timedOut = d.respawnManagedAgentPane(ctx, paneTarget, prepared.worktree, prepared.artifact.Command)
 	if err != nil {
-		prepared.artifact.remove()
-		appendRestartStageFailure(&item, "replace", sessionRestartReplaceTimeout, err, timedOut)
-		return item
+		if !timedOut {
+			prepared.artifact.remove()
+			appendRestartStageFailure(&item, "replace", sessionRestartReplaceTimeout, err, false)
+			return item
+		}
+		// A timed-out tmux client cannot prove that the server rejected the
+		// destructive command. Keep the stable transition lock while observing
+		// the exact planned incarnation so another daemon cannot replace the
+		// same pane across this ambiguous acceptance window.
+		item.Stages = append(item.Stages, restartStage("replace", "ambiguous", err.Error(), sessionRestartReplaceTimeout))
+	} else {
+		item.Stages = append(item.Stages, restartStage("replace", "complete", "old pane process terminated and replacement launched", sessionRestartReplaceTimeout))
 	}
-	item.Stages = append(item.Stages, restartStage("replace", "complete", "old pane process terminated and replacement launched", sessionRestartReplaceTimeout))
 	plan.Stage = "observe"
 	if err := reportSessionRestartProgress(ctx, plan); err != nil {
 		appendRestartStageFailure(&item, "persist_observe", sessionRestartPreflightTimeout, err, false)
@@ -392,6 +398,16 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 			}
 		}
 	}
+}
+
+func (d *Daemon) respawnManagedAgentPane(ctx context.Context, paneTarget, worktree, command string) (error, bool) {
+	if d != nil && d.sessionRestartRespawn != nil {
+		return d.sessionRestartRespawn(ctx, paneTarget, worktree, command)
+	}
+	_, err, timedOut := runRestartStage(ctx, sessionRestartReplaceTimeout, func(stageCtx context.Context) (struct{}, error) {
+		return struct{}{}, d.tmux.RespawnPane(stageCtx, paneTarget, worktree, command)
+	})
+	return err, timedOut
 }
 
 func (d *Daemon) waitForSessionRestartPromptHandoff(ctx context.Context, handoff sessionPromptHandoff) error {
@@ -487,6 +503,13 @@ func (d *Daemon) repairRecoveredSessionRestartRootedBootstrap(ctx context.Contex
 	if !found || acknowledgement.Identity != identity || acknowledgement.SessionID != plan.SessionID || strings.TrimSpace(acknowledgement.PromptHash) == "" || strings.TrimSpace(acknowledgement.RuntimeNonce) == "" || acknowledgement.AcknowledgedAt.IsZero() {
 		return errors.New("recovered rooted bootstrap acknowledgement is incomplete")
 	}
+	runtimeNonce, runtimeNonceFound, err := d.tmux.EnvironmentValue(ctx, plan.SessionID, rootedOrchestratorBootstrapNonceEnvironment)
+	if err != nil {
+		return fmt.Errorf("verify recovered rooted bootstrap runtime nonce: %w", err)
+	}
+	if !runtimeNonceFound || strings.TrimSpace(runtimeNonce) == "" || runtimeNonce != acknowledgement.RuntimeNonce {
+		return errors.New("recovered rooted bootstrap acknowledgement does not match live runtime nonce")
+	}
 	return nil
 }
 
@@ -519,6 +542,20 @@ func decodeSessionRestartRecoveryPlan(record daemonops.Record) (sessionRestartRe
 	var plan sessionRestartRecoveryPlan
 	if json.Unmarshal([]byte(record.Progress.Message), &plan) != nil || plan.ProjectID == "" || plan.SessionID == "" || plan.PlannedIncarnation == "" {
 		return sessionRestartRecoveryPlan{}, false
+	}
+	phaseStage := strings.TrimPrefix(record.Progress.Phase, "session.restart_all.")
+	if phaseStage == "" || phaseStage != strings.TrimSpace(plan.Stage) {
+		return sessionRestartRecoveryPlan{}, false
+	}
+	if recordProjectID := protocol.TrimProjectID(record.ProjectID); recordProjectID != "" && recordProjectID != protocol.NormalizeProjectID(plan.ProjectID) {
+		return sessionRestartRecoveryPlan{}, false
+	}
+	if plan.RootedIdentity != nil {
+		identity, err := domain.NewOrchestratorIdentity(plan.RootedIdentity.ProjectID, plan.RootedIdentity.Scope)
+		if err != nil || identity != *plan.RootedIdentity || identity.ProjectID != protocol.NormalizeProjectID(plan.ProjectID) ||
+			identity.Scope.Kind != domain.OrchestrationScopeRooted || identity.Scope.RootIssueID.String() != strings.TrimSpace(plan.IssueID) {
+			return sessionRestartRecoveryPlan{}, false
+		}
 	}
 	return plan, true
 }

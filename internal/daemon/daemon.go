@@ -190,6 +190,7 @@ type Daemon struct {
 	sessionRestartPending                map[string]*sessionRestartExecution
 	sessionRestartPromptHandoffWait      func(context.Context, sessionPromptHandoff) error
 	sessionRestartRootedBootstrapRepair  func(context.Context, domain.OrchestratorIdentity, string) error
+	sessionRestartRespawn                func(context.Context, string, string, string) (error, bool)
 	orchestratorStopGracePeriod          time.Duration
 	orchestratorStopPollInterval         time.Duration
 	orchestratorStopAfterIntentPersisted func()
@@ -1442,13 +1443,38 @@ func (d *Daemon) recoverInterruptedSessionRestart(ctx context.Context, record da
 	if !ok {
 		return interruptedOperationRecovery{}, false
 	}
-	recoveryCtx, cancel := context.WithTimeout(ctx, sessionRestartObservationTimeout)
-	defer cancel()
 	store := d.sessionRuntimeStateStoreIfConfigured(plan.ProjectID)
 	if store == nil || d.tmux == nil {
 		return interruptedOperationRecovery{}, false
 	}
-	item := protocol.SessionRestartAllItem{ProjectID: naming.ProjectID(plan.ProjectID), IssueID: naming.IssueID(plan.IssueID), SessionID: naming.SessionID(plan.SessionID), Activity: plan.Activity, TmuxReady: true, OldIdentity: restartProtocolIdentity(plan.Old), OperationID: plan.ProjectID + "/" + plan.SessionID + "/" + plan.Old.LogicalPaneID + "/" + plan.Old.AgentIncarnation}
+	var recovery interruptedOperationRecovery
+	var recovered bool
+	recoverWithPaneLock := func(lockCtx context.Context) error {
+		return store.WithManagedAgentRestartTransition(lockCtx, plan.ProjectID, plan.SessionID, plan.Old.LogicalPaneID, func(paneCtx context.Context) error {
+			recovery, recovered = d.recoverInterruptedSessionRestartLocked(paneCtx, store, plan)
+			return nil
+		})
+	}
+	var lockErr error
+	if plan.RootedIdentity != nil {
+		lockErr = store.WithOrchestratorScopeTransition(ctx, *plan.RootedIdentity, recoverWithPaneLock)
+	} else {
+		lockErr = recoverWithPaneLock(ctx)
+	}
+	if lockErr != nil {
+		item := sessionRestartRecoveryItem(plan)
+		item.Outcome = "partial_failure"
+		item.Error = fmt.Sprintf("serialize interrupted managed-agent restart recovery: %v", lockErr)
+		item.Stages = []protocol.SessionRestartStage{restartStage("recover_lock", "failed", item.Error, sessionRestartObservationTimeout)}
+		return sessionRestartRecoveryResult(item), true
+	}
+	return recovery, recovered
+}
+
+func (d *Daemon) recoverInterruptedSessionRestartLocked(ctx context.Context, store *daemonstate.RuntimeStateStore, plan sessionRestartRecoveryPlan) (interruptedOperationRecovery, bool) {
+	recoveryCtx, cancel := context.WithTimeout(ctx, sessionRestartObservationTimeout)
+	defer cancel()
+	item := sessionRestartRecoveryItem(plan)
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	var lastErr error
@@ -1554,14 +1580,24 @@ func (d *Daemon) recoverInterruptedSessionRestart(ctx context.Context, record da
 			}
 			item.Outcome = "partial_failure"
 			item.Error = "replacement did not converge to the planned hook incarnation after bounded recovery observation"
-			if lastErr != nil {
+			if errors.Is(recoveryCtx.Err(), context.Canceled) {
+				item.Error = fmt.Sprintf("restart recovery observation canceled: %v", recoveryCtx.Err())
+			} else if lastErr != nil {
 				item.Error = fmt.Sprintf("restart recovery observation failed: %v", lastErr)
 			}
-			item.Stages = []protocol.SessionRestartStage{restartStage("recover_"+plan.Stage, "timeout", item.Error, sessionRestartObservationTimeout)}
+			status := "failed"
+			if errors.Is(recoveryCtx.Err(), context.DeadlineExceeded) {
+				status = "timeout"
+			}
+			item.Stages = []protocol.SessionRestartStage{restartStage("recover_"+plan.Stage, status, item.Error, sessionRestartObservationTimeout)}
 			return sessionRestartRecoveryResult(item), true
 		case <-ticker.C:
 		}
 	}
+}
+
+func sessionRestartRecoveryItem(plan sessionRestartRecoveryPlan) protocol.SessionRestartAllItem {
+	return protocol.SessionRestartAllItem{ProjectID: naming.ProjectID(plan.ProjectID), IssueID: naming.IssueID(plan.IssueID), SessionID: naming.SessionID(plan.SessionID), Activity: plan.Activity, TmuxReady: true, OldIdentity: restartProtocolIdentity(plan.Old), OperationID: plan.ProjectID + "/" + plan.SessionID + "/" + plan.Old.LogicalPaneID + "/" + plan.Old.AgentIncarnation}
 }
 
 func restartReplacementPaneLive(plan sessionRestartRecoveryPlan, panes []tmux.PaneInfo) bool {
