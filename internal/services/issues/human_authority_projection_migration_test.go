@@ -29,11 +29,25 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var beforeIssues, beforeCustom, beforeDecisions, beforeDecisionAudits int
+			var beforeIssues, beforeCustom, beforeSessionIntents, beforeRetirableWorkers, beforeDecisions, beforeDecisionAudits int
 			if err = beforeDB.QueryRow(`SELECT COUNT(*) FROM issues`).Scan(&beforeIssues); err != nil {
 				t.Fatal(err)
 			}
 			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM board_views WHERE built_in=0`).Scan(&beforeCustom)
+			if err = beforeDB.QueryRow(`SELECT COUNT(*) FROM daemon_session_projections`).Scan(&beforeSessionIntents); err != nil {
+				t.Fatal(err)
+			}
+			if err = beforeDB.QueryRow(`SELECT COUNT(*) FROM daemon_session_projections AS worker
+				WHERE worker.role='worker' AND worker.scope_kind='issue' AND instr(worker.session_id,'.pane-')=0
+					AND EXISTS (
+						SELECT 1 FROM daemon_session_projections AS rooted
+						WHERE rooted.project_id=worker.project_id AND rooted.session_id=worker.session_id
+							AND rooted.role='orchestrator' AND rooted.scope_kind='orchestration'
+							AND rooted.scope_id<>'project' AND rooted.scope_id=worker.issue_id
+							AND worker.scope_id=worker.issue_id
+					)`).Scan(&beforeRetirableWorkers); err != nil {
+				t.Fatal(err)
+			}
 			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM decisions`).Scan(&beforeDecisions)
 			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM decision_audit_log`).Scan(&beforeDecisionAudits)
 			_ = beforeDB.Close()
@@ -87,6 +101,12 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, rootedBootstrapAcknowledgementMigrationID).Scan(&checksum); err != nil || checksum != "b54bdf5ec3f6af17c91e1625582ac58e66e47948cea68ee73db88d4e8df6f161" {
 				t.Fatalf("rooted bootstrap acknowledgement checksum=%q err=%v", checksum, err)
 			}
+			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, rootedSessionRoleExclusivityMigrationID).Scan(&checksum); err != nil || checksum != rootedSessionRoleExclusivityChecksum {
+				t.Fatalf("rooted session role exclusivity checksum=%q err=%v", checksum, err)
+			}
+			if err = validateRootedSessionRoleExclusivitySchema(ctx, db); err != nil {
+				t.Fatal(err)
+			}
 			projectIDs := []string{"default"}
 			if rows, queryErr := db.Query(`SELECT DISTINCT project_id FROM board_views`); queryErr == nil {
 				projectIDs = projectIDs[:0]
@@ -110,11 +130,14 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if _, err = client.ExportProjection(ctx, projectIDs[0]); err != nil {
 				t.Fatal(err)
 			}
-			var afterIssues, afterCustom, afterDecisions, afterDecisionAudits int
+			var afterIssues, afterCustom, afterSessionIntents, afterDecisions, afterDecisionAudits int
 			if err = db.QueryRow(`SELECT COUNT(*) FROM issues`).Scan(&afterIssues); err != nil {
 				t.Fatal(err)
 			}
 			if err = db.QueryRow(`SELECT COUNT(*) FROM board_views WHERE built_in=0`).Scan(&afterCustom); err != nil {
+				t.Fatal(err)
+			}
+			if err = db.QueryRow(`SELECT COUNT(*) FROM daemon_session_projections`).Scan(&afterSessionIntents); err != nil {
 				t.Fatal(err)
 			}
 			if err = db.QueryRow(`SELECT COUNT(*) FROM decisions`).Scan(&afterDecisions); err != nil {
@@ -125,6 +148,9 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			}
 			if beforeIssues != afterIssues || beforeCustom != afterCustom || beforeDecisions != afterDecisions || beforeDecisionAudits != afterDecisionAudits {
 				t.Fatalf("row preservation issues=%d/%d custom_views=%d/%d decisions=%d/%d decision_audits=%d/%d", beforeIssues, afterIssues, beforeCustom, afterCustom, beforeDecisions, afterDecisions, beforeDecisionAudits, afterDecisionAudits)
+			}
+			if want := beforeSessionIntents - beforeRetirableWorkers; afterSessionIntents != want {
+				t.Fatalf("session intent convergence before=%d retirable_workers=%d after=%d want=%d", beforeSessionIntents, beforeRetirableWorkers, afterSessionIntents, want)
 			}
 			if err = client.CloseDB(); err != nil {
 				t.Fatal(err)
@@ -139,6 +165,12 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			}
 			if err = reopenedDB.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, rootedBootstrapAcknowledgementMigrationID).Scan(&checksum); err != nil || checksum != "b54bdf5ec3f6af17c91e1625582ac58e66e47948cea68ee73db88d4e8df6f161" {
 				t.Fatalf("reopened rooted bootstrap acknowledgement checksum=%q err=%v", checksum, err)
+			}
+			if err = reopenedDB.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, rootedSessionRoleExclusivityMigrationID).Scan(&checksum); err != nil || checksum != rootedSessionRoleExclusivityChecksum {
+				t.Fatalf("reopened rooted session role exclusivity checksum=%q err=%v", checksum, err)
+			}
+			if err = validateRootedSessionRoleExclusivitySchema(ctx, reopenedDB); err != nil {
+				t.Fatal(err)
 			}
 			if _, err = reopened.ExportProjection(ctx, projectIDs[0]); err != nil {
 				t.Fatal(err)

@@ -63,6 +63,72 @@ func TestOrchestratorScopeLeaseExactScopeIdentity(t *testing.T) {
 	}
 }
 
+func TestRootedOrchestratorAcquireRollsBackLeaseAtRoleTransitionCrashBoundary(t *testing.T) {
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	identity := mustRootedOrchestratorIdentity(t, "proj-a", "root-a")
+	sessionID := "root-session"
+	worker := Session{
+		ID:            sessionID,
+		IssueID:       "root-a",
+		State:         SessionStateRunning,
+		ObservedState: SessionStateRunning,
+		UpdatedAt:     time.Now().UTC(),
+	}
+	if err := store.UpsertSessionState(ctx, "proj-a", worker); err != nil {
+		t.Fatalf("seed worker intent: %v", err)
+	}
+
+	injected := errors.New("injected crash after lease acquire")
+	crashCtx := WithRootedOrchestratorTransitionHookForTest(ctx, func(stage string) error {
+		if stage != "after_lease_acquire" {
+			t.Fatalf("transition stage = %q", stage)
+		}
+		return injected
+	})
+	_, err := store.AcquireRootedOrchestratorScopeLease(crashCtx, identity, Session{
+		ID:        sessionID,
+		IssueID:   "root-a",
+		Role:      SessionRoleOrchestrator,
+		ScopeKind: SessionScopeOrchestration,
+		ScopeID:   "root-a",
+		State:     SessionStateStarting,
+		UpdatedAt: time.Now().UTC(),
+	}, func(context.Context, string) (bool, error) { return false, nil })
+	if !errors.Is(err, injected) {
+		t.Fatalf("crash-boundary error = %v, want injected", err)
+	}
+	if _, found, loadErr := store.GetOrchestratorScopeLease(ctx, identity); loadErr != nil || found {
+		t.Fatalf("lease survived rollback found=%t err=%v", found, loadErr)
+	}
+	if _, found, loadErr := store.GetWorkerSessionStateByIssueID(ctx, "proj-a", "root-a", sessionID); loadErr != nil || !found {
+		t.Fatalf("worker intent after rollback found=%t err=%v", found, loadErr)
+	}
+	if _, found, loadErr := store.GetSessionIntent(ctx, "proj-a", SessionRoleOrchestrator, SessionScopeOrchestration, "root-a"); loadErr != nil || found {
+		t.Fatalf("rooted intent survived rollback found=%t err=%v", found, loadErr)
+	}
+
+	result, err := store.AcquireRootedOrchestratorScopeLease(ctx, identity, Session{
+		ID:        sessionID,
+		IssueID:   "root-a",
+		Role:      SessionRoleOrchestrator,
+		ScopeKind: SessionScopeOrchestration,
+		ScopeID:   "root-a",
+		State:     SessionStateStarting,
+		UpdatedAt: time.Now().UTC(),
+	}, func(context.Context, string) (bool, error) { return false, nil })
+	if err != nil || result.Disposition != OrchestratorLeaseAcquired {
+		t.Fatalf("retry rooted acquire = %+v, %v", result, err)
+	}
+	if _, found, loadErr := store.GetWorkerSessionStateByIssueID(ctx, "proj-a", "root-a", sessionID); loadErr != nil || found {
+		t.Fatalf("worker intent after convergence found=%t err=%v", found, loadErr)
+	}
+	if rooted, found, loadErr := store.GetSessionIntent(ctx, "proj-a", SessionRoleOrchestrator, SessionScopeOrchestration, "root-a"); loadErr != nil || !found || rooted.ID != sessionID {
+		t.Fatalf("rooted intent after convergence = %+v found=%t err=%v", rooted, found, loadErr)
+	}
+}
+
 func TestOrchestratorScopeLeaseStaleRecoveryAndLifecyclePersistence(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
 	ctx := context.Background()

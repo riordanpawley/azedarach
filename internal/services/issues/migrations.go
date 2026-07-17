@@ -26,6 +26,10 @@ var migrationFiles embed.FS
 
 const rootedBootstrapAcknowledgementMigrationID = "0049_rooted_bootstrap_acknowledgements"
 
+const rootedSessionRoleExclusivityMigrationID = "0054_rooted_session_role_exclusivity"
+
+const rootedSessionRoleExclusivityChecksum = "451378cc1dcd80c0d5e3ac47466c2407a5f68f987f4e4b19f7e6348051caa721"
+
 type migration struct {
 	id          string
 	path        string
@@ -96,6 +100,7 @@ var orderedMigrations = []migration{
 	{id: decisionIdempotencyMigrationID, path: "migrations/0051_decision_idempotency.sql"},
 	{id: mailboxObservationProjectionCutoverMigrationID, path: "migrations/0052_mailbox_observation_projection_cutover.sql"},
 	{id: gitHookRefreshIntentsMigrationID, path: "migrations/0053_git_hook_refresh_intents.sql"},
+	{id: rootedSessionRoleExclusivityMigrationID, path: "migrations/0054_rooted_session_role_exclusivity.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -158,6 +163,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: decisionIdempotencyMigrationID, Path: "migrations/0051_decision_idempotency.sql", Checksum: "86d5400fe33bbc19e7e848bc232335809f76d85e4d45a6e45f6bc7ff77547f47"},
 	{ID: mailboxObservationProjectionCutoverMigrationID, Path: "migrations/0052_mailbox_observation_projection_cutover.sql", Checksum: "fd86080f491210c169005c7f28bc778aca3eea2d70ce15a6c001bb960397e260"},
 	{ID: gitHookRefreshIntentsMigrationID, Path: "migrations/0053_git_hook_refresh_intents.sql", Checksum: "7eecd212c9b9a5907c425870ee861571d7654929d77067a1fc50c2e857c3335c"},
+	{ID: rootedSessionRoleExclusivityMigrationID, Path: "migrations/0054_rooted_session_role_exclusivity.sql", Checksum: rootedSessionRoleExclusivityChecksum},
 }
 
 func validateMigrationRegistry() error {
@@ -211,6 +217,10 @@ func applyIssueStateRuntimeConstraintsMigration(ctx context.Context, db *sql.DB,
 	var client Client
 	if err := client.ensureRuntimeProjectionSchema(db); err != nil {
 		return fmt.Errorf("repair runtime projection schema before migration %s: %w", id, err)
+	}
+	rootedRoleExclusivityApplied, err := isMigrationApplied(ctx, db, rootedSessionRoleExclusivityMigrationID)
+	if err != nil {
+		return fmt.Errorf("inspect downstream rooted role exclusivity before migration %s: %w", id, err)
 	}
 	sqlText, err := loadMigrationSQL("migrations/0045_issue_state_runtime_constraints.sql")
 	if err != nil {
@@ -388,6 +398,15 @@ func applyIssueStateRuntimeConstraintsMigration(ctx context.Context, db *sql.DB,
 					return fmt.Errorf("restore projection revision trigger %s: %w", trigger, err)
 				}
 			}
+		}
+	}
+	if rootedRoleExclusivityApplied {
+		rootedRoleExclusivitySQL, err := loadMigrationSQL("migrations/0054_rooted_session_role_exclusivity.sql")
+		if err != nil {
+			return fmt.Errorf("load downstream rooted role exclusivity repair during migration %s: %w", id, err)
+		}
+		if _, err := tx.ExecContext(ctx, rootedRoleExclusivitySQL); err != nil {
+			return fmt.Errorf("restore downstream rooted role exclusivity during migration %s: %w", id, err)
 		}
 	}
 	if err := recordAppliedMigration(ctx, tx, id); err != nil {
@@ -625,6 +644,15 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	}
 	if gitHookRefreshIntentsApplied {
 		if err := validateGitHookRefreshIntentsSchema(ctx, db); err != nil {
+			return err
+		}
+	}
+	rootedRoleExclusivityApplied, err := isMigrationApplied(ctx, db, rootedSessionRoleExclusivityMigrationID)
+	if err != nil {
+		return fmt.Errorf("check rooted session role exclusivity migration: %w", err)
+	}
+	if rootedRoleExclusivityApplied {
+		if err := validateRootedSessionRoleExclusivitySchema(ctx, db); err != nil {
 			return err
 		}
 	}
@@ -930,6 +958,35 @@ func validateDecisionIdempotencySchema(ctx context.Context, q sqlIssueQueryer) e
 		if !strings.Contains(normalized, fragment) {
 			return fmt.Errorf("decision idempotency schema drifted: index missing %q", fragment)
 		}
+	}
+	return nil
+}
+
+func validateRootedSessionRoleExclusivitySchema(ctx context.Context, db *sql.DB) error {
+	var indexSQL string
+	err := db.QueryRowContext(ctx, `SELECT COALESCE(sql,'') FROM sqlite_master WHERE type='index' AND name='idx_daemon_session_projections_physical_session_unique'`).Scan(&indexSQL)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errors.New("rooted session role exclusivity schema drift: missing idx_daemon_session_projections_physical_session_unique")
+	}
+	if err != nil {
+		return fmt.Errorf("inspect rooted session role exclusivity index: %w", err)
+	}
+	normalizedSQL := strings.ReplaceAll(strings.ToLower(strings.Join(strings.Fields(indexSQL), " ")), " ", "")
+	for _, fragment := range []string{"uniqueindex", "daemon_session_projections", "project_id", "session_id", "instr(session_id,'.pane-')=0"} {
+		if !strings.Contains(normalizedSQL, fragment) {
+			return fmt.Errorf("rooted session role exclusivity schema drift: index definition missing %q", fragment)
+		}
+	}
+	var conflicts int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM (
+		SELECT project_id,session_id FROM daemon_session_projections
+		WHERE instr(session_id,'.pane-')=0
+		GROUP BY project_id,session_id HAVING COUNT(*)>1
+	)`).Scan(&conflicts); err != nil {
+		return fmt.Errorf("validate rooted session role exclusivity rows: %w", err)
+	}
+	if conflicts != 0 {
+		return fmt.Errorf("rooted session role exclusivity schema drift: %d physical sessions have multiple desired roles", conflicts)
 	}
 	return nil
 }
