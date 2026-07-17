@@ -1286,23 +1286,30 @@ func validateAgentInputDeliverySchemaContract(ctx context.Context, db sqlIssueQu
 func validateAgentInputDeliveryNoInboundDependencies(ctx context.Context, db sqlIssueQueryer) error {
 	const target = "agent_input_delivery_intents"
 	rows, err := db.QueryContext(ctx, `
-		SELECT type, name, COALESCE(sql, '')
-		FROM sqlite_master
-		WHERE type IN ('view','trigger')
+		SELECT schema_name, type, name, ddl
+		FROM (
+			SELECT 'main' AS schema_name, type, name, COALESCE(sql, '') AS ddl
+			FROM sqlite_master
+			WHERE type IN ('view','trigger')
+			UNION ALL
+			SELECT 'temp' AS schema_name, type, name, COALESCE(sql, '') AS ddl
+			FROM sqlite_temp_master
+			WHERE type IN ('view','trigger')
+		)
 		ORDER BY type, name
 	`)
 	if err != nil {
 		return fmt.Errorf("inspect inbound view and trigger dependencies: %w", err)
 	}
 	for rows.Next() {
-		var objectType, name, ddl string
-		if err := rows.Scan(&objectType, &name, &ddl); err != nil {
+		var schemaName, objectType, name, ddl string
+		if err := rows.Scan(&schemaName, &objectType, &name, &ddl); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan inbound schema dependency: %w", err)
 		}
 		if exactSQLiteDDLReferencesIdentifier(ddl, target) {
 			rows.Close()
-			return fmt.Errorf("inbound %s %s references %s", objectType, name, target)
+			return fmt.Errorf("inbound %s %s.%s references %s", objectType, schemaName, name, target)
 		}
 	}
 	if err := rows.Err(); err != nil {

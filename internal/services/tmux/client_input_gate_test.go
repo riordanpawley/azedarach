@@ -60,6 +60,71 @@ func TestSetClientReadOnlyChangesOnlyReadOnlyFlag(t *testing.T) {
 	}
 }
 
+func TestDisablePaneInputIfIdentityUsesOneServerSerializedCommand(t *testing.T) {
+	runner := &recordingOutputRunner{outputs: []string{"az-input-gate-disabled\n"}}
+	client := NewClient(runner, slog.Default())
+	matched, err := client.DisablePaneInputIfIdentity(context.Background(), "az-dlb", "%12", 42)
+	if err != nil || !matched {
+		t.Fatalf("matched=%v err=%v", matched, err)
+	}
+	if len(runner.commands) != 1 {
+		t.Fatalf("commands=%#v, want one atomic tmux command", runner.commands)
+	}
+	joined := strings.Join(runner.commands[0], " ")
+	for _, want := range []string{"if-shell -F -t %12", "#{session_name},az-dlb", "#{pane_id},%12", "#{pane_pid},42", "select-pane -d -t %12"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("atomic command %q missing %q", joined, want)
+		}
+	}
+}
+
+func TestDisablePaneInputIfIdentityReportsServerMismatch(t *testing.T) {
+	runner := &recordingOutputRunner{outputs: []string{"az-input-gate-identity-mismatch\n"}}
+	client := NewClient(runner, slog.Default())
+	matched, err := client.DisablePaneInputIfIdentity(context.Background(), "az-dlb", "12", 42)
+	if err != nil || matched {
+		t.Fatalf("matched=%v err=%v", matched, err)
+	}
+}
+
+func TestRealTmuxDisablePaneInputIfIdentityIsAtomic(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	socket := "az-input-atomic-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	runner := isolatedTmuxRunner{socket: socket}
+	client := NewClient(runner, slog.Default())
+	if _, err := runner.Run(ctx, "new-session", "-d", "-s", "atomic", "sh"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = runner.Run(context.Background(), "kill-server") })
+	panes, err := client.ListPaneInfos(ctx)
+	if err != nil || len(panes) != 1 {
+		t.Fatalf("panes=%+v err=%v", panes, err)
+	}
+	pane := panes[0]
+
+	matched, err := client.DisablePaneInputIfIdentity(ctx, pane.SessionName, pane.PaneID, pane.PanePID+1)
+	if err != nil || matched {
+		t.Fatalf("stale identity matched=%v err=%v", matched, err)
+	}
+	enabled, err := client.PaneInputEnabled(ctx, pane.PaneID)
+	if err != nil || !enabled {
+		t.Fatalf("stale identity changed pane input: enabled=%v err=%v", enabled, err)
+	}
+
+	matched, err = client.DisablePaneInputIfIdentity(ctx, pane.SessionName, pane.PaneID, pane.PanePID)
+	if err != nil || !matched {
+		t.Fatalf("exact identity matched=%v err=%v", matched, err)
+	}
+	enabled, err = client.PaneInputEnabled(ctx, pane.PaneID)
+	if err != nil || enabled {
+		t.Fatalf("exact identity did not disable pane input: enabled=%v err=%v", enabled, err)
+	}
+}
+
 func TestSessionReadOnlyAttachHooksRecordBeforeGating(t *testing.T) {
 	runner := &recordingRunner{}
 	client := NewClient(runner, slog.Default())

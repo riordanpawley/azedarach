@@ -98,19 +98,70 @@ func (c *Client) SetClientReadOnly(ctx context.Context, clientName string, readO
 // keeps this native fence closed from gate acquisition through submission and
 // restoration; asynchronous client hooks are not an input-exclusion boundary.
 func (c *Client) SetPaneInputEnabled(ctx context.Context, paneID string, enabled bool) error {
+	target := canonicalPaneTarget(paneID)
 	flag := "-d"
 	if enabled {
 		flag = "-e"
 	}
-	if _, err := c.runner.Run(ctx, "select-pane", flag, "-t", paneID); err != nil {
+	if _, err := c.runner.Run(ctx, "select-pane", flag, "-t", target); err != nil {
 		return &domain.TmuxError{Op: "select-pane", Session: paneID, Err: err}
 	}
 	return nil
 }
 
+// DisablePaneInputIfIdentity compares the exact tmux-owned pane identity and
+// disables input in the same server command queue item. This prevents a
+// respawned pane from being fenced after a stale client-side identity check.
+func (c *Client) DisablePaneInputIfIdentity(ctx context.Context, session, paneID string, panePID int) (bool, error) {
+	normalizedPane, err := normalizeInputGatePaneID(paneID)
+	if err != nil {
+		return false, err
+	}
+	if !isSafeTmuxFormatLiteral(session) || panePID <= 0 {
+		return false, fmt.Errorf("invalid managed pane identity")
+	}
+	const disabled = "az-input-gate-disabled"
+	const mismatch = "az-input-gate-identity-mismatch"
+	predicate := fmt.Sprintf("#{&&:#{==:#{session_name},%s},#{==:#{pane_id},%s},#{==:#{pane_pid},%d}}", session, normalizedPane, panePID)
+	onMatch := fmt.Sprintf("select-pane -d -t %s ; display-message -p %s", normalizedPane, disabled)
+	out, err := c.runner.Run(ctx, "if-shell", "-F", "-t", normalizedPane, predicate, onMatch, "display-message -p "+mismatch)
+	if err != nil {
+		return false, &domain.TmuxError{Op: "compare-and-disable-pane", Session: session, Err: err}
+	}
+	switch strings.TrimSpace(out) {
+	case disabled:
+		return true, nil
+	case mismatch:
+		return false, nil
+	default:
+		return false, &domain.TmuxError{Op: "compare-and-disable-pane", Session: session, Err: fmt.Errorf("unexpected result %q", strings.TrimSpace(out))}
+	}
+}
+
+func normalizeInputGatePaneID(paneID string) (string, error) {
+	value := strings.TrimPrefix(strings.TrimSpace(paneID), "%")
+	n, err := strconv.Atoi(value)
+	if err != nil || n < 0 || strconv.Itoa(n) != value {
+		return "", fmt.Errorf("invalid managed pane id %q", paneID)
+	}
+	return "%" + value, nil
+}
+
+func isSafeTmuxFormatLiteral(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && !strings.ContainsRune("-_.:", r) {
+			return false
+		}
+	}
+	return true
+}
+
 // PaneInputEnabled reports the current pane-wide input fence.
 func (c *Client) PaneInputEnabled(ctx context.Context, paneID string) (bool, error) {
-	out, err := c.runner.Run(ctx, "display-message", "-p", "-t", paneID, "#{pane_input_off}")
+	out, err := c.runner.Run(ctx, "display-message", "-p", "-t", canonicalPaneTarget(paneID), "#{pane_input_off}")
 	if err != nil {
 		return false, &domain.TmuxError{Op: "display-message", Session: paneID, Err: err}
 	}
@@ -122,6 +173,15 @@ func (c *Client) PaneInputEnabled(ctx context.Context, paneID string) (bool, err
 	default:
 		return false, &domain.TmuxError{Op: "display-message", Session: paneID, Err: fmt.Errorf("unexpected pane_input_off value %q", strings.TrimSpace(out))}
 	}
+}
+
+func canonicalPaneTarget(paneID string) string {
+	trimmed := strings.TrimSpace(paneID)
+	value := strings.TrimPrefix(trimmed, "%")
+	if n, err := strconv.Atoi(value); err == nil && n >= 0 && strconv.Itoa(n) == value {
+		return "%" + value
+	}
+	return trimmed
 }
 
 // SetSessionReadOnlyAttachHooks installs or removes session-scoped hooks that

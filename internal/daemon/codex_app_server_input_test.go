@@ -48,6 +48,7 @@ type fakeCodexInputTmux struct {
 	hookLockAcquireRelease       chan struct{}
 	failDisablePane              bool
 	disablePaneErrorsAfterEffect int
+	beforeAtomicPaneDisable      func()
 }
 
 func (f *fakeCodexInputTmux) ListAttachedClients(_ context.Context, session string) ([]tmux.AttachedClientInfo, error) {
@@ -86,6 +87,34 @@ func (f *fakeCodexInputTmux) SetPaneInputEnabled(_ context.Context, _ string, en
 		return errors.New("disable pane input failed after side effect")
 	}
 	return nil
+}
+
+func (f *fakeCodexInputTmux) DisablePaneInputIfIdentity(_ context.Context, session, paneID string, panePID int) (bool, error) {
+	if f.beforeAtomicPaneDisable != nil {
+		f.beforeAtomicPaneDisable()
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	wantPane := strings.TrimPrefix(strings.TrimSpace(paneID), "%")
+	matched := false
+	for _, pane := range f.panes {
+		if pane.SessionName == session && strings.TrimPrefix(strings.TrimSpace(pane.PaneID), "%") == wantPane && pane.PanePID == panePID {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return false, nil
+	}
+	if f.failDisablePane {
+		return false, errors.New("disable pane input failed")
+	}
+	f.paneEnabled = false
+	if f.disablePaneErrorsAfterEffect > 0 {
+		f.disablePaneErrorsAfterEffect--
+		return false, errors.New("disable pane input failed after side effect")
+	}
+	return true, nil
 }
 
 func (f *fakeCodexInputTmux) PaneInputEnabled(context.Context, string) (bool, error) {
@@ -638,11 +667,10 @@ func TestCodexInputGateRevalidatesPaneIdentityImmediatelyBeforeFirstTmuxMutation
 	}
 	authority := newFakeCodexAuthority(t, adapter, &fakeCodexRPC{})
 	request := codexAuthorityRequest()
-	request.RenewRestoreFence = func(context.Context) (bool, error) {
+	adapter.beforeAtomicPaneDisable = func() {
 		adapter.mu.Lock()
 		adapter.panes = []tmux.PaneInfo{{SessionName: "az-dlb", PaneID: "12", PanePID: 99}}
 		adapter.mu.Unlock()
-		return true, nil
 	}
 
 	gate, err := authority.acquireGate(context.Background(), request)

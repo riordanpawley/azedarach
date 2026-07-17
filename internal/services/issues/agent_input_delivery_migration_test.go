@@ -1098,6 +1098,74 @@ func TestAgentInputDeliveryFencingMigrationRejectsPredecessorDriftBeforeRebuild(
 	}
 }
 
+func TestAgentInputDeliveryFencingMigrationRejectsSameConnectionTempDependenciesBeforeDDL(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		createSQL  string
+		objectType string
+		objectName string
+	}{
+		{
+			name:       "temp view",
+			createSQL:  `CREATE TEMP VIEW review_temp_delivery_view AS SELECT payload FROM main.agent_input_delivery_intents`,
+			objectType: "view",
+			objectName: "review_temp_delivery_view",
+		},
+		{
+			name:       "temp trigger",
+			createSQL:  `CREATE TEMP TRIGGER review_temp_delivery_trigger AFTER INSERT ON agent_input_delivery_intents BEGIN SELECT count(*) FROM agent_input_delivery_intents; END`,
+			objectType: "trigger",
+			objectName: "review_temp_delivery_trigger",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "issues.db")
+			seed := NewClientAtPath(path, nil)
+			seed.migrationCeiling = agentInputDeliveryMigrationID
+			db, err := seed.dbHandle()
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := formatTimestamp(time.Now().UTC())
+			if _, err := db.Exec(`INSERT INTO agent_input_delivery_intents(project_id,intent_key,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,tool,message_kind,payload,state,created_at,updated_at) VALUES('p','sentinel','s','agent','7',42,'inc','codex','session_message','payload','queued',?,?)`, now, now); err != nil {
+				t.Fatal(err)
+			}
+			if err := seed.CloseDB(); err != nil {
+				t.Fatal(err)
+			}
+
+			raw, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer raw.Close()
+			raw.SetMaxOpenConns(1)
+			if _, err := raw.Exec(test.createSQL); err != nil {
+				t.Fatal(err)
+			}
+			candidate := NewClientAtPath(path, nil)
+			err = candidate.applyAgentInputDeliveryFencingMigration(context.Background(), raw, agentInputDeliveryFencingMigrationID)
+			if err == nil || !strings.Contains(err.Error(), "predecessor dependencies") || !strings.Contains(err.Error(), "temp."+test.objectName) {
+				t.Fatalf("migration error=%v, want exact TEMP dependency refusal", err)
+			}
+
+			var marker, sentinel, tempObject int
+			if err := raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, agentInputDeliveryFencingMigrationID).Scan(&marker); err != nil {
+				t.Fatal(err)
+			}
+			if err := raw.QueryRow(`SELECT COUNT(*) FROM agent_input_delivery_intents WHERE intent_key='sentinel' AND payload='payload'`).Scan(&sentinel); err != nil {
+				t.Fatal(err)
+			}
+			if err := raw.QueryRow(`SELECT COUNT(*) FROM sqlite_temp_master WHERE type=? AND name=?`, test.objectType, test.objectName).Scan(&tempObject); err != nil {
+				t.Fatal(err)
+			}
+			if marker != 0 || sentinel != 1 || tempObject != 1 {
+				t.Fatalf("preflight mutated state: marker=%d sentinel=%d temp_object=%d", marker, sentinel, tempObject)
+			}
+		})
+	}
+}
+
 func TestAgentInputDeliveryMigrationRejectsAppliedExtraColumnDrift(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "issues.db")
 	client := NewClientAtPath(path, nil)

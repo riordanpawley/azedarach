@@ -39,6 +39,7 @@ type codexInputTmux interface {
 	ListAttachedClients(context.Context, string) ([]tmux.AttachedClientInfo, error)
 	SetClientReadOnly(context.Context, string, bool) error
 	SetPaneInputEnabled(context.Context, string, bool) error
+	DisablePaneInputIfIdentity(context.Context, string, string, int) (bool, error)
 	PaneInputEnabled(context.Context, string) (bool, error)
 	SetSessionReadOnlyAttachHooks(context.Context, string, string, string, bool) error
 	LockSessionReadOnlyAttachHooks(context.Context, string, string, bool) error
@@ -567,17 +568,15 @@ func (a *codexAppServerInputAuthority) acquireGate(ctx context.Context, request 
 			}
 		}
 	}()
-	// The pane may have been replaced after the initial inspection or while the
-	// durable fence/marker was established. Revalidate the exact session, pane,
-	// and PID at the last read-only boundary before acquisition's first tmux
-	// mutation so a replacement runtime is never fenced by this incarnation.
-	if err := gate.validatePaneIdentity(ctx, state.SessionID, state.PaneID, state.PanePID); err != nil {
+	// Compare the exact session, pane, and PID and disable input in one tmux
+	// server command. Separate validation and mutation commands leave a pane
+	// respawn/reuse gap even when they are adjacent client calls.
+	matched, err := a.tmux.DisablePaneInputIfIdentity(ctx, state.SessionID, state.PaneID, state.PanePID)
+	if err != nil {
 		return nil, err
 	}
-	if state.PaneInputEnabled {
-		if err := a.tmux.SetPaneInputEnabled(ctx, state.PaneID, false); err != nil {
-			return nil, err
-		}
+	if !matched {
+		return nil, errCodexPaneIdentityChanged
 	}
 	if err := a.tmux.SetSessionReadOnlyAttachHooks(ctx, state.SessionID, state.HookID, state.EventsPath, true); err != nil {
 		return nil, err
@@ -674,18 +673,18 @@ func (g *codexInputGate) Restore(ctx context.Context) error {
 	if !renewed {
 		return errCodexSessionFenceLost
 	}
-	// Restore changes session-global tmux state. Revalidate the marker's exact
-	// live session/pane/PID after renewing its durable fence and immediately
-	// before the first tmux mutation. A reused pane ID must retain both the gate
-	// and the replacement runtime untouched for bounded recovery.
-	if err := g.validatePaneIdentity(ctx, g.state.SessionID, g.state.PaneID, g.state.PanePID); err != nil {
-		return err
-	}
+	// Restore changes session-global tmux state. Compare the marker's exact live
+	// identity and close pane input in one server command after renewing the
+	// durable fence. A reused pane remains untouched for bounded recovery.
 	var errs []error
-	if err := g.tmux.SetPaneInputEnabled(ctx, g.state.PaneID, false); err != nil {
+	matched, err := g.tmux.DisablePaneInputIfIdentity(ctx, g.state.SessionID, g.state.PaneID, g.state.PanePID)
+	if err != nil {
 		// Do not remove hooks or restore writable client flags unless the native
 		// pane fence is authoritative. Recovery retains the marker and lease.
 		return err
+	}
+	if !matched {
+		return errCodexPaneIdentityChanged
 	}
 	if err := g.tmux.SetSessionReadOnlyAttachHooks(ctx, g.state.SessionID, g.state.HookID, g.state.EventsPath, false); err != nil {
 		// A hook that could not be removed may dispatch after restoration.
