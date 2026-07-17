@@ -1,6 +1,7 @@
 package daemonprocess
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -40,7 +41,6 @@ type Launcher struct {
 	replaceReason                string
 	sleepFn                      func(time.Duration)
 	processExitTimeout           time.Duration
-	processExitContext func(context.Context, time.Duration) (context.Context, context.CancelFunc)
 	gracefulExitTimeout          time.Duration
 	termExitTimeout              time.Duration
 	killExitTimeout              time.Duration
@@ -52,6 +52,8 @@ type Launcher struct {
 	replacementSuccessorVerifier func(daemonCommand) error
 	startProcess                 daemonProcessStarter
 	beforeReplaceLock            func()
+	preflightReplace             func(context.Context, daemonCommand) error
+	captureOwner                 func() (processIdentity, bool, error)
 }
 
 type daemonCommand struct {
@@ -59,6 +61,22 @@ type daemonCommand struct {
 	args       []string
 	dir        string
 	env        []string
+}
+
+type boundedOutput struct {
+	bytes.Buffer
+	remaining int
+}
+
+func (b *boundedOutput) Write(p []byte) (int, error) {
+	written := len(p)
+	if b.remaining <= 0 {
+		return written, nil
+	}
+	keep := min(len(p), b.remaining)
+	_, _ = b.Buffer.Write(p[:keep])
+	b.remaining -= keep
+	return written, nil
 }
 
 type daemonProcessSpec struct {
@@ -83,6 +101,7 @@ type execDaemonProcess struct {
 
 var errSpawnedDaemonExited = errors.New("spawned daemon process exited before readiness")
 var errPairedDaemonUnavailable = errors.New("paired daemon executable unavailable")
+var errReplacementCandidateCleanupUnproven = errors.New("exact rejected replacement candidate cleanup was not proven")
 
 var currentExecutable = os.Executable
 
@@ -224,12 +243,12 @@ func NewLauncher(repoDir, socketPath string) *Launcher {
 		replaceReason:           "compatibility-replace",
 		sleepFn:                 time.Sleep,
 		processExitTimeout:      10 * time.Second,
-		processExitContext: context.WithTimeout,
-		terminateLockOwner:      lifecycle.TerminateLockOwner,
 		gracefulExitTimeout:     2 * time.Second,
 		termExitTimeout:         2 * time.Second,
 		killExitTimeout:         2 * time.Second,
+		terminateLockOwner:      lifecycle.TerminateLockOwner,
 		openProcessSignalHandle: openPlatformProcessSignalHandle,
+		preflightReplace:        preflightReplacementCommand,
 	}
 }
 
@@ -290,20 +309,29 @@ func (l *Launcher) startWithLifecycleLock(ctx context.Context, daemonCmd daemonC
 }
 
 func (l *Launcher) startWithLifecycleLockMode(ctx context.Context, daemonCmd daemonCommand, allowUnreadyOwnerRecovery bool) error {
+	_, err := l.startWithLifecycleLockModeRetained(ctx, daemonCmd, allowUnreadyOwnerRecovery)
+	return err
+}
+
+// startWithLifecycleLockModeRetained returns the exact process handle only when
+// this call spawned the daemon. Replacement keeps that handle until runtime
+// identity verification finishes, so a rejected candidate can be cleaned up
+// without addressing whichever process later owns the shared lock or socket.
+func (l *Launcher) startWithLifecycleLockModeRetained(ctx context.Context, daemonCmd daemonCommand, allowUnreadyOwnerRecovery bool) (daemonProcess, error) {
 	// Re-check after acquiring start lock to avoid duplicate spawns from racing
 	// clients.
 	if err := l.waitForSocketReadyWithin(500 * time.Millisecond); err == nil {
-		return nil
+		return nil, nil
 	}
 
 	if l.daemonLockOwnerAlive() {
 		if l.waitForReady != nil {
 			err := l.waitForSocketReadyWithin(2 * time.Second)
 			if err == nil {
-				return nil
+				return nil, nil
 			}
 			if !allowUnreadyOwnerRecovery {
-				return errors.New("daemon lock owner appeared before replacement successor startup; refusing unverified recovery termination")
+				return nil, errors.New("daemon lock owner appeared before replacement successor startup; refusing unverified recovery termination")
 			}
 			if l.Logger != nil {
 				l.Logger.Warn("daemon lock owner alive but socket is not ready; attempting fresh spawn",
@@ -318,21 +346,21 @@ func (l *Launcher) startWithLifecycleLockMode(ctx context.Context, daemonCmd dae
 			}
 			owner, ownerPresent, captureErr := l.captureLockOwnerIdentity()
 			if captureErr != nil {
-				return fmt.Errorf("capture stale daemon lock owner before recovery: %w", captureErr)
+				return nil, fmt.Errorf("capture stale daemon lock owner before recovery: %w", captureErr)
 			}
 			if err := terminate(l.LockPath); err != nil {
 				if l.waitForSocketReadyWithin(1*time.Second) == nil {
-					return nil
+					return nil, nil
 				}
-				return fmt.Errorf("recover stale daemon lock owner: %w", err)
+				return nil, fmt.Errorf("recover stale daemon lock owner: %w", err)
 			}
 			if ownerPresent {
 				if err := l.waitForCapturedOwnerExit(ctx, owner, "start recovery"); err != nil {
-					return err
+					return nil, err
 				}
 			}
 		} else if !allowUnreadyOwnerRecovery {
-			return errors.New("daemon lock owner appeared before replacement successor startup; refusing unverified recovery termination")
+			return nil, errors.New("daemon lock owner appeared before replacement successor startup; refusing unverified recovery termination")
 		}
 	}
 
@@ -343,7 +371,7 @@ func (l *Launcher) startWithLifecycleLockMode(ctx context.Context, daemonCmd dae
 	cfg, _ := config.LoadConfig(l.RepoDir)
 	logFile, err := openLogFile(filepath.Join(config.SessionLogDirFor(cfg, l.RepoDir), logging.DaemonLogFileName))
 	if err != nil {
-		return fmt.Errorf("open daemon log: %w", err)
+		return nil, fmt.Errorf("open daemon log: %w", err)
 	}
 	defer func() {
 		_ = logFile.Close()
@@ -370,11 +398,11 @@ func (l *Launcher) startWithLifecycleLockMode(ctx context.Context, daemonCmd dae
 	})
 	if err != nil {
 		spanErr = err
-		return fmt.Errorf("start daemon %s: %w", daemonCmd.displayName(), err)
+		return nil, fmt.Errorf("start daemon %s: %w", daemonCmd.displayName(), err)
 	}
 	if process == nil {
 		spanErr = errors.New("daemon process starter returned nil process")
-		return fmt.Errorf("start daemon %s: %w", daemonCmd.displayName(), spanErr)
+		return nil, fmt.Errorf("start daemon %s: %w", daemonCmd.displayName(), spanErr)
 	}
 	if l.waitForReady != nil {
 		readyCtx, cancel := context.WithTimeout(launchCtx, 15*time.Second)
@@ -386,7 +414,7 @@ func (l *Launcher) startWithLifecycleLockMode(ctx context.Context, daemonCmd dae
 		case waitErr := <-process.exited():
 			cancel()
 			spanErr = spawnedDaemonExitError(waitErr)
-			return fmt.Errorf("wait for daemon socket readiness: %w", spanErr)
+			return nil, fmt.Errorf("wait for daemon socket readiness: %w", spanErr)
 		case err = <-readyResult:
 			cancel()
 		}
@@ -396,13 +424,13 @@ func (l *Launcher) startWithLifecycleLockMode(ctx context.Context, daemonCmd dae
 			cleanupCancel()
 			if cleanupErr != nil {
 				spanErr = errors.Join(err, cleanupErr)
-				return fmt.Errorf("wait for daemon socket readiness and cleanup spawned daemon: %w", spanErr)
+				return process, fmt.Errorf("wait for daemon socket readiness and cleanup spawned daemon: %w", spanErr)
 			}
 			spanErr = err
-			return fmt.Errorf("wait for daemon socket readiness: %w (spawned daemon cleaned up)", err)
+			return nil, fmt.Errorf("wait for daemon socket readiness: %w (spawned daemon cleaned up)", err)
 		}
 	}
-	return nil
+	return process, nil
 }
 
 func (l *Launcher) waitForSocketReadyWithin(timeout time.Duration) error {
@@ -778,13 +806,21 @@ func (l *Launcher) logPredecessorReapStage(action, stage, outcome string) {
 }
 
 func (l *Launcher) startReplacementWithLifecycleLock(ctx context.Context, daemonCmd daemonCommand) error {
-	err := l.startWithLifecycleLockMode(ctx, daemonCmd, false)
-	if err == nil && (l.startProcess == nil || l.replacementSuccessorVerifier != nil) && l.ownsCanonicalRuntime() && !config.UseScopedDaemonRuntimeFor(l.RepoDir) {
+	process, err := l.startWithLifecycleLockModeRetained(ctx, daemonCmd, false)
+	if err == nil && (l.startProcess == nil || l.replacementSuccessorVerifier != nil) {
 		verifySuccessor := l.replacementSuccessorVerifier
 		if verifySuccessor == nil {
 			verifySuccessor = l.verifyReplacementSuccessor
 		}
 		err = verifySuccessor(daemonCmd)
+	}
+	if err != nil && process != nil {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		cleanupErr := process.stopAndWait(cleanupCtx)
+		cleanupCancel()
+		if cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("%w: %v", errReplacementCandidateCleanupUnproven, cleanupErr))
+		}
 	}
 	if l.Logger == nil {
 		return err
@@ -823,8 +859,10 @@ func (l *Launcher) verifyReplacementSuccessor(daemonCmd daemonCommand) error {
 	if filepath.Clean(gotExecutable) != filepath.Clean(wantExecutable) {
 		return errors.New("replacement socket lock owner does not run the installed successor executable")
 	}
-	if _, managed := config.ManagedGenerationBinDir(successor.executable, "azd"); !managed {
-		return errors.New("replacement socket lock owner is not a managed installed daemon")
+	if !config.UseScopedDaemonRuntimeFor(l.RepoDir) {
+		if _, managed := config.ManagedGenerationBinDir(successor.executable, "azd"); !managed {
+			return errors.New("replacement socket lock owner is not a managed installed daemon")
+		}
 	}
 	for _, required := range []struct {
 		flag  string
@@ -944,6 +982,22 @@ func (l *Launcher) Replace(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	resolvedExecutable, err := resolveCommandExecutable(daemonCmd)
+	if err != nil {
+		return fmt.Errorf("resolve daemon replacement candidate: %w", err)
+	}
+	daemonCmd.executable = resolvedExecutable
+	preflight := l.preflightReplace
+	if preflight == nil {
+		preflight = preflightReplacementCommand
+	}
+	if err := preflight(ctx, daemonCmd); err != nil {
+		return fmt.Errorf("preflight daemon replacement %s before stopping predecessor: %w", daemonCmd.displayName(), err)
+	}
+	predecessorCmd, predecessorPresent, err := l.resolvePredecessorRollbackCommand(owner, ownerPresent)
+	if err != nil {
+		return fmt.Errorf("preflight daemon predecessor rollback before stopping predecessor: %w", err)
+	}
 	if strings.TrimSpace(l.SocketPath) != "" && (ownerPresent || !l.ownsCanonicalRuntime()) {
 		reason := strings.TrimSpace(l.replaceReason)
 		if reason == "" {
@@ -955,7 +1009,7 @@ func (l *Launcher) Replace(ctx context.Context) error {
 					return err
 				}
 			}
-			return l.startReplacementWithLifecycleLock(ctx, daemonCmd)
+			return l.startReplacementWithRollback(ctx, daemonCmd, predecessorCmd, predecessorPresent)
 		} else if l.Logger != nil {
 			l.Logger.Warn("graceful daemon socket shutdown failed before replace; evaluating verified predecessor escalation",
 				"stage", "graceful_request",
@@ -984,10 +1038,110 @@ func (l *Launcher) Replace(ctx context.Context) error {
 			return fmt.Errorf("inspect daemon socket before replacement start: %w", socketErr)
 		}
 	}
-	return l.startReplacementWithLifecycleLock(ctx, daemonCmd)
+	return l.startReplacementWithRollback(ctx, daemonCmd, predecessorCmd, predecessorPresent)
+}
+
+func (l *Launcher) resolvePredecessorRollbackCommand(owner processIdentity, ownerPresent bool) (daemonCommand, bool, error) {
+	if !ownerPresent {
+		return daemonCommand{}, false, nil
+	}
+	if strings.TrimSpace(owner.executable) == "" {
+		return daemonCommand{}, false, errors.New("predecessor executable path was unavailable")
+	}
+	resolvedExecutable, err := resolveCommandExecutable(daemonCommand{executable: owner.executable})
+	if err != nil {
+		return daemonCommand{}, false, fmt.Errorf("resolve predecessor executable %s: %w", owner.executable, err)
+	}
+	if !config.UseScopedDaemonRuntimeFor(l.RepoDir) {
+		if _, ok := config.ManagedGenerationBinDir(resolvedExecutable, "azd"); !ok {
+			return daemonCommand{}, false, fmt.Errorf("predecessor executable %s is not a managed azd generation", resolvedExecutable)
+		}
+	}
+	return l.commandForExecutable(resolvedExecutable), true, nil
+}
+
+func (l *Launcher) startReplacementWithRollback(ctx context.Context, daemonCmd, predecessorCmd daemonCommand, predecessorPresent bool) error {
+	startErr := l.startReplacementWithLifecycleLock(ctx, daemonCmd)
+	if startErr == nil {
+		return nil
+	}
+	if errors.Is(startErr, errReplacementCandidateCleanupUnproven) {
+		return fmt.Errorf("start replacement daemon: %w; refusing predecessor restore while rejected candidate cleanup is unproven", startErr)
+	}
+	if !predecessorPresent {
+		return fmt.Errorf("start replacement daemon: %w; no predecessor was present to restore", startErr)
+	}
+	rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer rollbackCancel()
+	if rollbackErr := l.startReplacementWithLifecycleLock(rollbackCtx, predecessorCmd); rollbackErr != nil {
+		return fmt.Errorf("start replacement daemon: %w; restore predecessor %s: %v", startErr, predecessorCmd.displayName(), rollbackErr)
+	}
+	return fmt.Errorf("start replacement daemon: %w; restored predecessor %s", startErr, predecessorCmd.displayName())
+}
+
+func preflightReplacementCommand(ctx context.Context, command daemonCommand) error {
+	args := append(append([]string(nil), command.args...), "--preflight")
+	probe := exec.CommandContext(ctx, command.executable, args...)
+	probe.Dir = command.dir
+	probe.Env = command.env
+	probe.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	probe.Cancel = func() error {
+		if probe.Process == nil {
+			return os.ErrProcessDone
+		}
+		if err := syscall.Kill(-probe.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return err
+		}
+		return nil
+	}
+	stdout := boundedOutput{remaining: 64 << 10}
+	stderr := boundedOutput{remaining: 64 << 10}
+	probe.Stdout = &stdout
+	probe.Stderr = &stderr
+	err := probe.Run()
+	if err != nil {
+		return fmt.Errorf("run candidate compatibility preflight: %w (stdout %q, stderr %q)", err, strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()))
+	}
+	var report protocol.DaemonExecutablePreflight
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		return fmt.Errorf("decode candidate preflight report: %w (stdout %q, stderr %q)", err, strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()))
+	}
+	if !report.Accepts(protocol.CurrentVersion) {
+		return fmt.Errorf("candidate %q supports protocol %d..%d, incompatible with client protocol %d", report.DaemonVersion, report.MinProtocolVersion, report.MaxProtocolVersion, protocol.CurrentVersion)
+	}
+	return nil
+}
+
+func resolveCommandExecutable(command daemonCommand) (string, error) {
+	executable := strings.TrimSpace(command.executable)
+	if executable == "" {
+		return "", errors.New("empty daemon executable candidate")
+	}
+	if strings.ContainsRune(executable, filepath.Separator) {
+		if !executableFile(executable) {
+			return "", fmt.Errorf("daemon executable candidate is missing, not a regular file, or not executable: %s", executable)
+		}
+		resolved, err := filepath.EvalSymlinks(executable)
+		if err != nil {
+			return "", fmt.Errorf("resolve daemon executable candidate %s: %w", executable, err)
+		}
+		return resolved, nil
+	}
+	resolved, err := exec.LookPath(executable)
+	if err != nil {
+		return "", fmt.Errorf("daemon executable candidate %q was not found on PATH: %w", executable, err)
+	}
+	resolved, err = filepath.EvalSymlinks(resolved)
+	if err != nil {
+		return "", fmt.Errorf("resolve daemon executable candidate %s: %w", executable, err)
+	}
+	return resolved, nil
 }
 
 func (l *Launcher) captureLockOwnerIdentity() (processIdentity, bool, error) {
+	if l.captureOwner != nil {
+		return l.captureOwner()
+	}
 	ownerPID, ownerRecorded := l.readLockedPID()
 	if !ownerRecorded || ownerPID == os.Getpid() {
 		return processIdentity{}, false, nil
@@ -1017,11 +1171,7 @@ func (l *Launcher) waitForCapturedOwnerExit(ctx context.Context, owner processId
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	withTimeout := l.processExitContext
-	if withTimeout == nil {
-		withTimeout = context.WithTimeout
-	}
-	waitCtx, cancel := withTimeout(waitCtx, timeout)
+	waitCtx, cancel := context.WithTimeout(waitCtx, timeout)
 	defer cancel()
 	if err := l.waitForProcessExit(waitCtx, owner); err != nil {
 		return fmt.Errorf("prove daemon predecessor exited before %s: %w", action, err)
@@ -1051,7 +1201,7 @@ func (l *Launcher) resolveCommand() (daemonCommand, error) {
 		if paired := daemonBinaryNearCurrentExecutable(); paired != "" {
 			return l.commandForExecutable(paired), nil
 		}
-		return daemonCommand{}, fmt.Errorf("%w: global daemon launch requires the running az to resolve under .azedarach-generations/generation.* with an executable sibling azd; reinstall the managed az/azd pair or set AZEDARACH_DAEMON_BIN explicitly", errPairedDaemonUnavailable)
+		return daemonCommand{}, fmt.Errorf("%w: global daemon launch requires the running az to resolve under .azedarach-generations/generation.* with an executable sibling azd; %s; reinstall the managed az/azd pair or set AZEDARACH_DAEMON_BIN explicitly", errPairedDaemonUnavailable, daemonCandidateDiagnostics())
 	}
 	candidates := []string{}
 	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
@@ -1073,6 +1223,21 @@ func (l *Launcher) resolveCommand() (daemonCommand, error) {
 		return daemonCommand{executable: "go", args: []string{"run", "./cmd/azd"}, dir: sourceDir}, nil
 	}
 	return daemonCommand{executable: "azd"}, nil
+}
+
+func daemonCandidateDiagnostics() string {
+	parts := make([]string, 0, 3)
+	if executable, err := currentExecutable(); err != nil {
+		parts = append(parts, "running az unresolved: "+err.Error())
+	} else {
+		parts = append(parts, "running az="+executable, "required sibling="+filepath.Join(filepath.Dir(executable), "azd"))
+	}
+	if pathAzd, err := exec.LookPath("azd"); err == nil {
+		parts = append(parts, "PATH azd ignored for global replacement="+pathAzd)
+	} else {
+		parts = append(parts, "PATH azd unavailable")
+	}
+	return strings.Join(parts, "; ")
 }
 
 func (l *Launcher) commandForExecutable(executable string) daemonCommand {

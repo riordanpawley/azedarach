@@ -33,6 +33,7 @@ type trackingWriteCloser struct {
 type recordingDaemonProcess struct {
 	stopCalls atomic.Int32
 	stopErr   error
+	stopFn    func()
 	exitCh    chan error
 }
 
@@ -40,6 +41,9 @@ func (p *recordingDaemonProcess) exited() <-chan error { return p.exitCh }
 
 func (p *recordingDaemonProcess) stopAndWait(context.Context) error {
 	p.stopCalls.Add(1)
+	if p.stopFn != nil {
+		p.stopFn()
+	}
 	return p.stopErr
 }
 
@@ -246,6 +250,188 @@ func useRecordingDaemonStarter(launcher *Launcher) *recordingDaemonStarter {
 		return starter.process, nil
 	}
 	return starter
+}
+
+func TestLauncherRollbackCleansRejectedCandidateAndVerifiesRestoredPredecessor(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
+	generationsRoot := filepath.Join(t.TempDir(), ".azedarach-generations")
+	candidate := filepath.Join(writeManagedTestGeneration(t, generationsRoot, "generation.candidate"), "azd")
+	predecessor := filepath.Join(writeManagedTestGeneration(t, generationsRoot, "generation.predecessor"), "azd")
+	candidateCmd := launcher.commandForExecutable(candidate)
+	predecessorCmd := launcher.commandForExecutable(predecessor)
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return &trackingWriteCloser{}, nil }
+
+	var authority atomic.Int32
+	launcher.waitForReady = func(context.Context, string) error {
+		if authority.Load() == 1 || authority.Load() == 3 {
+			return nil
+		}
+		return context.DeadlineExceeded
+	}
+	candidateProcess := &recordingDaemonProcess{
+		exitCh: make(chan error),
+		stopFn: func() { authority.Store(2) },
+	}
+	starts := make([]string, 0, 2)
+	launcher.startProcess = func(spec daemonProcessSpec) (daemonProcess, error) {
+		starts = append(starts, spec.command.executable)
+		switch spec.command.executable {
+		case candidate:
+			authority.Store(1)
+			return candidateProcess, nil
+		case predecessor:
+			authority.Store(3)
+			return &recordingDaemonProcess{exitCh: make(chan error)}, nil
+		default:
+			return nil, fmt.Errorf("unexpected executable %s", spec.command.executable)
+		}
+	}
+	verified := make([]string, 0, 2)
+	launcher.replacementSuccessorVerifier = func(command daemonCommand) error {
+		verified = append(verified, command.executable)
+		if command.executable == candidate {
+			return errors.New("ready socket belongs to wrong candidate owner")
+		}
+		if command.executable != predecessor || authority.Load() != 3 {
+			return errors.New("restored predecessor identity mismatch")
+		}
+		return nil
+	}
+
+	err := launcher.startReplacementWithRollback(context.Background(), candidateCmd, predecessorCmd, true)
+	if err == nil || !strings.Contains(err.Error(), "restored predecessor") {
+		t.Fatalf("startReplacementWithRollback() error = %v, want verified restoration diagnostic", err)
+	}
+	if got := candidateProcess.stopCalls.Load(); got != 1 {
+		t.Fatalf("rejected candidate cleanup calls = %d, want 1", got)
+	}
+	if !reflect.DeepEqual(starts, []string{candidate, predecessor}) {
+		t.Fatalf("starts = %v, want candidate then predecessor", starts)
+	}
+	if !reflect.DeepEqual(verified, []string{candidate, predecessor}) {
+		t.Fatalf("verified executables = %v, want candidate then predecessor", verified)
+	}
+}
+
+func TestLauncherRollbackRejectsReadyWrongOwnerInsteadOfReportingRestored(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
+	launcher.waitForReady = func(context.Context, string) error { return nil }
+	launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+		t.Fatal("ready wrong owner must not spawn another daemon")
+		return nil, nil
+	}
+	verified := 0
+	launcher.replacementSuccessorVerifier = func(daemonCommand) error {
+		verified++
+		return errors.New("ready socket owner does not match requested executable")
+	}
+
+	err := launcher.startReplacementWithRollback(
+		context.Background(),
+		daemonCommand{executable: "candidate-azd"},
+		daemonCommand{executable: "predecessor-azd"},
+		true,
+	)
+	if err == nil || strings.Contains(err.Error(), "; restored predecessor") || !strings.Contains(err.Error(), "restore predecessor") {
+		t.Fatalf("startReplacementWithRollback() error = %v, want fail-closed restore refusal", err)
+	}
+	if verified != 2 {
+		t.Fatalf("owner verification calls = %d, want candidate and predecessor checks", verified)
+	}
+}
+
+func TestLauncherRollbackRefusesRestoreWhenExactCandidateCleanupFails(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return &trackingWriteCloser{}, nil }
+	ready := false
+	launcher.waitForReady = func(context.Context, string) error {
+		if ready {
+			return nil
+		}
+		return context.DeadlineExceeded
+	}
+	candidateProcess := &recordingDaemonProcess{
+		exitCh:  make(chan error),
+		stopErr: errors.New("candidate cleanup failed"),
+	}
+	starts := 0
+	launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+		starts++
+		ready = true
+		return candidateProcess, nil
+	}
+	launcher.replacementSuccessorVerifier = func(daemonCommand) error {
+		return errors.New("candidate identity rejected")
+	}
+
+	err := launcher.startReplacementWithRollback(
+		context.Background(),
+		daemonCommand{executable: "candidate-azd"},
+		daemonCommand{executable: "predecessor-azd"},
+		true,
+	)
+	if err == nil || !errors.Is(err, errReplacementCandidateCleanupUnproven) || !strings.Contains(err.Error(), "refusing predecessor restore") {
+		t.Fatalf("startReplacementWithRollback() error = %v, want cleanup-proof refusal", err)
+	}
+	if starts != 1 {
+		t.Fatalf("daemon starts = %d, want rejected candidate only", starts)
+	}
+	if got := candidateProcess.stopCalls.Load(); got != 1 {
+		t.Fatalf("rejected candidate cleanup calls = %d, want 1", got)
+	}
+}
+
+func TestLauncherRollbackNeverTerminatesNewUnreadyOwner(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
+	if err := os.MkdirAll(filepath.Dir(launcher.LockPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	owner := exec.Command("/bin/sleep", "30")
+	if err := owner.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = owner.Process.Kill()
+		_ = owner.Wait()
+	})
+	record, err := json.Marshal(map[string]any{"pid": owner.Process.Pid, "created_at": time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcher.LockPath, record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launcher.waitForReady = func(context.Context, string) error { return context.DeadlineExceeded }
+	terminateCalls := 0
+	launcher.terminateLockOwner = func(string) error {
+		terminateCalls++
+		return errors.New("must not terminate unverified owner")
+	}
+	launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+		t.Fatal("unready owner must prevent daemon spawn")
+		return nil, nil
+	}
+
+	err = launcher.startReplacementWithRollback(
+		context.Background(),
+		daemonCommand{executable: "candidate-azd"},
+		daemonCommand{executable: "predecessor-azd"},
+		true,
+	)
+	if err == nil || !strings.Contains(err.Error(), "appeared before replacement successor startup") {
+		t.Fatalf("startReplacementWithRollback() error = %v, want unverified-owner refusal", err)
+	}
+	if terminateCalls != 0 {
+		t.Fatalf("terminateLockOwner calls = %d, want 0", terminateCalls)
+	}
 }
 
 func (w *trackingWriteCloser) Write(p []byte) (int, error) {
