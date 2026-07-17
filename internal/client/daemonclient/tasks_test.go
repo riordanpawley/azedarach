@@ -484,6 +484,37 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("board snapshot carries transient child visibility override", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				if req.Command != CommandBoardFetch {
+					t.Fatalf("command = %q, want %q", req.Command, CommandBoardFetch)
+				}
+				var body protocol.BoardSnapshotRequestBody
+				if err := json.Unmarshal(req.Body, &body); err != nil {
+					t.Fatalf("unmarshal request body: %v", err)
+				}
+				if body.ShowChildren == nil || !*body.ShowChildren {
+					t.Fatalf("show_children = %v, want explicit true", body.ShowChildren)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					Revision:        19,
+					OK:              true,
+					Body:            mustMarshalBoardSnapshotPayload(t, req.ProtocolVersion, wantProjectID, 19, nil),
+				}, nil
+			},
+		}
+
+		showChildren := true
+		client := New(transport).WithProjectID(wantProjectID)
+		if _, err := client.BoardSnapshotWithOptions(context.Background(), BoardSnapshotOptions{ShowChildren: &showChildren}, ReadWaitModeExplicit); err != nil {
+			t.Fatalf("BoardSnapshotWithOptions error: %v", err)
+		}
+	})
+
 	t.Run("list snapshot with query", func(t *testing.T) {
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

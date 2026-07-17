@@ -6,6 +6,12 @@ or `horizontal_grid`), first-match groups, conjunctive filters, ordered sort
 rules, and display options. The domain projection engine applies those rules;
 surface code owns only interaction and rendering.
 
+Child cards are hidden at the current board level by default. A saved view can
+set the typed `options.show_children` display option to render them directly;
+the built-in **Tree** view opts in. The normal TUI's `t` session-tree filter is
+a transient child-inclusive projection override and does not rewrite the saved
+view. Parent drill-down remains the focused way to inspect direct children.
+
 User-level views may scope themselves across all registered projects. They are
 stored in the user database and evaluated against its project-scoped SQLite
 projection. Global results use `(project_id, issue_id)` identities throughout;

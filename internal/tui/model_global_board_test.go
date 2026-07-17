@@ -117,12 +117,13 @@ func TestGlobalBoardGotoSpecRequiresOwningProject(t *testing.T) {
 
 func TestGlobalBoardViewKeysStayInGlobalScope(t *testing.T) {
 	for _, tc := range []struct {
-		key     tea.KeyMsg
-		wantCmd bool
+		key      tea.KeyMsg
+		wantCmd  bool
+		wantTree bool
 	}{
 		{key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'V'}}, wantCmd: true},
 		{key: tea.KeyMsg{Type: tea.KeyTab}, wantCmd: true},
-		{key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}}},
+		{key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}}, wantCmd: true, wantTree: true},
 	} {
 		m := New(config.DefaultConfig())
 		m.scope = globalTUIScope()
@@ -132,7 +133,7 @@ func TestGlobalBoardViewKeysStayInGlobalScope(t *testing.T) {
 		if (cmd != nil) != tc.wantCmd || !got.scope.IsGlobal() || got.projectSwitchInFlight {
 			t.Fatalf("key=%q scope=%+v switching=%v cmd=%v", tc.key.String(), got.scope, got.projectSwitchInFlight, cmd != nil)
 		}
-		if !tc.wantCmd {
+		if tc.wantTree {
 			if !got.sessionTreeFilterOnly {
 				t.Fatalf("key=%q did not toggle projection-local filter", tc.key.String())
 			}

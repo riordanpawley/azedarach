@@ -2642,12 +2642,18 @@ func TestHandleTaskListIncludesDependenciesOnlyWhenRequested(t *testing.T) {
 		t.Fatalf("full dependencies = %+v, want blocker %s", fullTask.Dependencies, blockerID)
 	}
 
+	showChildren := true
+	boardBody, err := json.Marshal(protocol.BoardSnapshotRequestBody{ShowChildren: &showChildren})
+	if err != nil {
+		t.Fatalf("marshal board child-visibility override: %v", err)
+	}
 	boardResp, err := d.handleBoardFetch(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-list-deps-board",
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 		Command:         "board.fetch",
+		Body:            boardBody,
 	})
 	if err != nil {
 		t.Fatalf("handle board.fetch error: %v", err)

@@ -78,6 +78,7 @@ type BoardView struct {
 
 type BoardViewDisplayOptions struct {
 	HideEmptyColumns bool                `json:"hide_empty_columns,omitempty"`
+	ShowChildren     bool                `json:"show_children,omitempty"`
 	SortPolicy       BoardViewSortPolicy `json:"sort_policy,omitempty"`
 }
 
@@ -288,6 +289,7 @@ func GridBoardView() BoardView {
 func TreeBoardView() BoardView {
 	view := DefaultBoardView()
 	view.ID, view.Title, view.Layout = BoardViewTreeID, "Tree", BoardViewLayoutTreeList
+	view.Options.ShowChildren = true
 	view.Sort = DefaultBoardViewSortRules()
 	return view
 }
@@ -486,6 +488,9 @@ func ProjectTasksByBoardView(view BoardView, tasks []Task) (BoardViewProjection,
 	}
 	for _, task := range tasks {
 		if task.State.IsArchived() {
+			continue
+		}
+		if !view.Options.ShowChildren && boardViewTaskParentID(task) != "" {
 			continue
 		}
 		if !view.MatchesFilters(task) {
