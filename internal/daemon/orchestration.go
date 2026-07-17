@@ -476,7 +476,8 @@ func (a daemonOrchestrationAuthority) buildSnapshot(ctx context.Context, project
 	admissionError := func(err error) error { return err }
 	if prepareProjectAttempt {
 		parentCtx := ctx
-		ctx, cancel := a.daemon.orchestrationSnapshotAdmissionContextFor(ctx)
+		var cancel context.CancelFunc
+		ctx, cancel = a.daemon.orchestrationSnapshotAdmissionContextFor(ctx)
 		defer cancel()
 		admissionError = func(err error) error {
 			if err != nil && parentCtx.Err() == nil && ctx.Err() != nil {

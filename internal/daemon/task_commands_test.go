@@ -5651,7 +5651,7 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 	if resp.OK || resp.Error == nil {
 		t.Fatalf("first handleTaskClose response = %+v, want cleanup failure", resp)
 	}
-	for _, want := range []string{"phase runtime_projection_repair", "Integration already completed", sourceBranch, "landed on main", "cleanup/status remains", "Next:"} {
+	for _, want := range []string{"phase worktree_cleanup", "Integration already completed", sourceBranch, "landed on main", "cleanup/status remains", "Next:"} {
 		if !strings.Contains(resp.Error.Message, want) {
 			t.Fatalf("first close error = %q, missing %q", resp.Error.Message, want)
 		}

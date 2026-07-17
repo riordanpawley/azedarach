@@ -648,7 +648,7 @@ func TestRuntimeSignalIngestFansPhysicalObservationAcrossSharedLogicalIntents(t 
 			t.Fatalf("seed %s intent: %v", seed.Role, err)
 		}
 	}
-	projectionWriter := &recordingRuntimeProjectionWriter{}
+	projectionWriter := &recordingRuntimeProjectionWriter{delegate: newRuntimeProjectionWriter(d)}
 	d.runtimeProjectionWriter = projectionWriter
 
 	resp, err := d.command(ctx, protocol.RequestEnvelope{

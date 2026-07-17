@@ -28,11 +28,21 @@ type recordingRuntimeProjectionWriter struct {
 	calls             []string
 	publishedSessions []daemonstate.Session
 	publishErr        error
+	delegate          runtimeProjectionWriter
 }
 
-func (r *recordingRuntimeProjectionWriter) ApplyPhysicalSessionObservationAndPublish(context.Context, string, protocol.Metadata, daemonstate.PhysicalSessionObservation) ([]daemonstate.Session, bool, []uint64, error) {
+func (r *recordingRuntimeProjectionWriter) ApplyPhysicalSessionObservationAndPublish(ctx context.Context, projectID string, meta protocol.Metadata, observation daemonstate.PhysicalSessionObservation) ([]daemonstate.Session, bool, []uint64, error) {
 	r.record("session.observe+publish")
-	return nil, false, nil, nil
+	if r.delegate == nil {
+		return nil, false, nil, nil
+	}
+	changed, applied, revisions, err := r.delegate.ApplyPhysicalSessionObservationAndPublish(ctx, projectID, meta, observation)
+	if err == nil && applied {
+		r.mu.Lock()
+		r.publishedSessions = append(r.publishedSessions, changed...)
+		r.mu.Unlock()
+	}
+	return changed, applied, revisions, err
 }
 
 func (r *recordingRuntimeProjectionWriter) record(call string) {
