@@ -29,6 +29,10 @@ func withProjectReadUpdateWaitHookForTest(ctx context.Context, hook func(string,
 	return withContextOperationLockWaitHookForTest(ctx, hook)
 }
 
+func withProjectReadUpdateQueuedHookForTest(ctx context.Context, hook func(string)) context.Context {
+	return withContextOperationLockQueuedHookForTest(ctx, hook)
+}
+
 func withoutSynchronousProjectReadRuntimeRefresh(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()

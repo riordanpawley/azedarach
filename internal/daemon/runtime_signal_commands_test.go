@@ -22,7 +22,98 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
-func TestRuntimeSignalIngestGitHookPersistsFastProjectionAndQueuesEnrichment(t *testing.T) {
+type runtimeSignalForegroundProjectionMarker struct{}
+
+type deterministicRuntimeSignalGitRunner struct{}
+
+func (deterministicRuntimeSignalGitRunner) Run(_ context.Context, args ...string) (string, error) {
+	if len(args) < 4 || args[0] != "-C" {
+		return "", fmt.Errorf("unexpected git args: %v", args)
+	}
+	switch {
+	case args[2] == "status" && args[3] == "--porcelain":
+		return "?? dirty.txt\n", nil
+	case args[2] == "branch" && args[3] == "--show-current":
+		return "tester/az-42/runtime-signal\n", nil
+	default:
+		return "", fmt.Errorf("unexpected git args: %v", args)
+	}
+}
+
+func useDeterministicRuntimeSignalGitClient(d *Daemon) {
+	if d.runtimeProjectionCoalescer != nil {
+		d.runtimeProjectionCoalescer.Close()
+		d.runtimeProjectionCoalescer = nil
+	}
+	d.gitStatusAdapter.client = git.NewClient(deterministicRuntimeSignalGitRunner{}, d.cfg.Logger)
+	d.gitStatusAdapter.baseBranch = ""
+	d.gitStatusAdapter.baseBranchForProject = nil
+	d.gitStatusAdapter.baseBranchForWorktree = nil
+}
+
+func cleanupRuntimeSignalTestDaemon(d *Daemon) {
+	if d.runtimeProjectionCoalescer != nil {
+		d.runtimeProjectionCoalescer.Close()
+	}
+	if d.scheduledScripts != nil {
+		d.scheduledScripts.Close()
+	}
+	if d.issueAutoArchive != nil {
+		d.issueAutoArchive.Close()
+	}
+	if d.runtimeReconcileQueue != nil {
+		_ = d.runtimeReconcileQueue.Close()
+	}
+	if d.gitStatusAdapter != nil {
+		d.gitStatusAdapter.stopGitHookRefreshReconciler()
+	}
+	if d.gitStatusRefreshQueue != nil {
+		_ = d.gitStatusRefreshQueue.Close()
+	}
+	if d.gitStatusAdapter != nil {
+		d.gitStatusAdapter.waitForGitHookRefreshContinuations()
+	}
+	d.stopUserProjectionWorkers()
+	d.closeIssueClients()
+	d.closeRuntimeStateStores()
+}
+
+type runtimeSignalContextInspectingWriter struct {
+	*recordingRuntimeProjectionWriter
+	foreground chan string
+	delegate   runtimeProjectionWriter
+}
+
+func (w *runtimeSignalContextInspectingWriter) PersistWorktreeProjection(ctx context.Context, projectID, issueID, path, branch string) error {
+	if ctx.Value(runtimeSignalForegroundProjectionMarker{}) != nil {
+		w.foreground <- "worktree.persist"
+	}
+	if w.delegate != nil {
+		w.record("worktree.persist")
+		return w.delegate.PersistWorktreeProjection(ctx, projectID, issueID, path, branch)
+	}
+	return w.recordingRuntimeProjectionWriter.PersistWorktreeProjection(ctx, projectID, issueID, path, branch)
+}
+
+func (w *runtimeSignalContextInspectingWriter) PersistGitStatusProjectionAndPublish(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus, publishOnChange, forcePublish bool) (uint64, error) {
+	if ctx.Value(runtimeSignalForegroundProjectionMarker{}) != nil {
+		w.foreground <- "git_status.persist_publish"
+	}
+	return w.recordingRuntimeProjectionWriter.PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktree, status, publishOnChange, forcePublish)
+}
+
+func (w *runtimeSignalContextInspectingWriter) PersistGitHookStatusProjectionAndPublishResult(ctx context.Context, projectID, issueID, worktree string, generation int64, status *git.GitStatus) (uint64, error) {
+	if ctx.Value(runtimeSignalForegroundProjectionMarker{}) != nil {
+		w.foreground <- "git_status.hook_persist_publish"
+	}
+	if w.delegate != nil {
+		w.record("git.persist+publish")
+		return w.delegate.PersistGitHookStatusProjectionAndPublishResult(ctx, projectID, issueID, worktree, generation, status)
+	}
+	return w.recordingRuntimeProjectionWriter.PersistGitHookStatusProjectionAndPublishResult(ctx, projectID, issueID, worktree, generation, status)
+}
+
+func TestRuntimeSignalIngestGitHookQueuesWriteThroughProjection(t *testing.T) {
 	repoDir := initRuntimeSignalGitRepo(t)
 	if err := os.WriteFile(filepath.Join(repoDir, "dirty.txt"), []byte("dirty\n"), 0o644); err != nil {
 		t.Fatalf("write dirty file: %v", err)
@@ -32,19 +123,8 @@ func TestRuntimeSignalIngestGitHookPersistsFastProjectionAndQueuesEnrichment(t *
 		RepoDir: repoDir,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
-	t.Cleanup(func() {
-		if d.runtimeProjectionCoalescer != nil {
-			d.runtimeProjectionCoalescer.Close()
-		}
-		if d.runtimeReconcileQueue != nil {
-			_ = d.runtimeReconcileQueue.Close()
-		}
-		if d.gitStatusRefreshQueue != nil {
-			_ = d.gitStatusRefreshQueue.Close()
-		}
-		d.closeIssueClients()
-		d.closeRuntimeStateStores()
-	})
+	useDeterministicRuntimeSignalGitClient(d)
+	t.Cleanup(func() { cleanupRuntimeSignalTestDaemon(d) })
 	projectID := "proj-signals"
 
 	resp, err := d.command(context.Background(), protocol.RequestEnvelope{
@@ -72,31 +152,134 @@ func TestRuntimeSignalIngestGitHookPersistsFastProjectionAndQueuesEnrichment(t *
 	if err := json.Unmarshal(resp.Body, &body); err != nil {
 		t.Fatalf("unmarshal runtime signal response: %v", err)
 	}
-	if !body.Accepted || !body.EnrichmentQueued || len(body.ProjectionRevisions) == 0 {
+	if !body.Accepted || !body.EnrichmentQueued || len(body.ProjectionRevisions) != 1 {
 		t.Fatalf("runtime signal response = %+v", body)
 	}
-	if !runtimeSignalStageOK(body.Stages, "git_status_fast") {
-		t.Fatalf("runtime signal stages = %+v, want git_status_fast ok", body.Stages)
+	if !runtimeSignalStageOK(body.Stages, "git_status_refresh_queued") {
+		t.Fatalf("runtime signal stages = %+v, want git_status_refresh_queued ok", body.Stages)
 	}
 
-	projection, found, err := d.worktreeRuntimeStateStore(projectID).GetWorktreeStateByPath(context.Background(), projectID, repoDir)
+	// Join the keyed queue entry without using wall-clock polling. If the hook
+	// refresh already completed this schedules one harmless idempotent refresh;
+	// otherwise it deterministically waits for the accepted work.
+	submission, err := d.gitStatusAdapter.queueGitStatusRefresh(projectID, repoDir, reconcilePriorityManual, "test-convergence")
 	if err != nil {
-		t.Fatalf("GetWorktreeStateByPath: %v", err)
+		t.Fatalf("join queued git status refresh: %v", err)
 	}
-	if !found {
-		t.Fatalf("expected worktree projection for %s", repoDir)
+	result, err := submission.Wait(context.Background())
+	if err != nil || result.Err != nil {
+		t.Fatalf("queued git status refresh err=%v result_err=%v", err, result.Err)
 	}
-	var status git.GitStatus
-	if err := json.Unmarshal(projection.GitStatusRaw, &status); err != nil {
-		t.Fatalf("unmarshal projected git status: %v", err)
-	}
-	if !status.HasChanges {
-		t.Fatalf("projected git status = %+v, want dirty status", status)
+	if result.Value == nil || !result.Value.HasChanges {
+		t.Fatalf("queued git status = %+v, want dirty status", result.Value)
 	}
 
 	events := d.listHookLogEvents(projectID, 10)
 	if len(events) != 1 || events[0].Source != "githooks.hook" || events[0].Hook != "post-commit" {
 		t.Fatalf("hook log events = %+v", events)
+	}
+}
+
+func TestRuntimeSignalIngestGitHookDoesNotPersistOnRequestContext(t *testing.T) {
+	repoDir := initRuntimeSignalGitRepo(t)
+	d := New(Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	useDeterministicRuntimeSignalGitClient(d)
+	t.Cleanup(func() { cleanupRuntimeSignalTestDaemon(d) })
+
+	writer := &runtimeSignalContextInspectingWriter{
+		recordingRuntimeProjectionWriter: &recordingRuntimeProjectionWriter{},
+		foreground:                       make(chan string, 2),
+		delegate:                         newRuntimeProjectionWriter(d),
+	}
+	d.runtimeProjectionWriter = writer
+	d.gitStatusAdapter.runtimeProjectionWriter = writer
+	ctx := context.WithValue(context.Background(), runtimeSignalForegroundProjectionMarker{}, true)
+	projectID := "proj-hook-admission"
+	resp, err := d.command(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "runtime-signal-git-detached",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         protocol.CommandRuntimeSignalIngest,
+		Body: mustMarshal(t, protocol.RuntimeSignalIngestCommandBody{
+			Source: protocol.RuntimeSignalSourceGitHook, Kind: protocol.RuntimeSignalKindGitWorktreeChanged,
+			Worktree: repoDir, Hook: "post-commit", Event: "post-commit",
+		}),
+	})
+	if err != nil || !resp.OK {
+		t.Fatalf("runtime signal response=%+v err=%v", resp, err)
+	}
+
+	// Join the queue to prove persistence did run, while the context marker
+	// proves none of it ran on the foreground hook request.
+	submission, err := d.gitStatusAdapter.queueGitStatusRefresh(projectID, repoDir, reconcilePriorityManual, "test-convergence")
+	if err != nil {
+		t.Fatalf("join queued refresh: %v", err)
+	}
+	result, err := submission.Wait(context.Background())
+	if err != nil || result.Err != nil {
+		t.Fatalf("queued refresh err=%v result_err=%v", err, result.Err)
+	}
+	select {
+	case operation := <-writer.foreground:
+		t.Fatalf("hook request performed foreground projection write %q", operation)
+	default:
+	}
+	if calls := strings.Join(writer.snapshot(), ","); !strings.Contains(calls, "worktree.persist") || !strings.Contains(calls, "git.persist+publish") {
+		t.Fatalf("detached writer calls = %q", calls)
+	}
+}
+
+func TestRuntimeSignalIngestGitHookAcknowledgesWhileWriterContended(t *testing.T) {
+	repoDir := initRuntimeSignalGitRepo(t)
+	d := New(Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	useDeterministicRuntimeSignalGitClient(d)
+	t.Cleanup(func() { cleanupRuntimeSignalTestDaemon(d) })
+
+	writer, ok := d.runtimeProjectionStateWriter().(*daemonRuntimeProjectionWriter)
+	if !ok {
+		t.Fatalf("runtime projection writer = %T", d.runtimeProjectionStateWriter())
+	}
+	holderCtx := contextWithRuntimeProjectionWriterOperation(context.Background(), "worktree.replace_snapshot")
+	releaseWriter, err := writer.lockProjectionWriter(holderCtx, "proj-hook-contention", "fallback.holder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	defer func() {
+		if !released {
+			releaseWriter()
+		}
+	}()
+
+	projectID := "proj-hook-contention"
+	resp, err := d.command(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "runtime-signal-git-contended",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         protocol.CommandRuntimeSignalIngest,
+		Body: mustMarshal(t, protocol.RuntimeSignalIngestCommandBody{
+			Source: protocol.RuntimeSignalSourceGitHook, Kind: protocol.RuntimeSignalKindGitWorktreeChanged,
+			Worktree: repoDir, Hook: "post-commit", Event: "post-commit",
+		}),
+	})
+	if err != nil || !resp.OK {
+		t.Fatalf("runtime signal response=%+v err=%v", resp, err)
+	}
+	if holder := writer.mu.currentHolder(); holder != "worktree.replace_snapshot" {
+		t.Fatalf("writer holder after acknowledgement = %q", holder)
+	}
+
+	releaseWriter()
+	released = true
+	submission, err := d.gitStatusAdapter.queueGitStatusRefresh(projectID, repoDir, reconcilePriorityManual, "test-convergence")
+	if err != nil {
+		t.Fatalf("join queued refresh: %v", err)
+	}
+	result, err := submission.Wait(context.Background())
+	if err != nil || result.Err != nil {
+		t.Fatalf("queued refresh err=%v result_err=%v", err, result.Err)
 	}
 }
 

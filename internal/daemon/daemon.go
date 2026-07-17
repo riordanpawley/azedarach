@@ -236,6 +236,7 @@ type Daemon struct {
 	terminalFailureProbeMu               sync.Mutex
 	terminalFailureProbes                map[string]terminalFailureProbeState
 	tmuxObservationWG                    sync.WaitGroup
+	gitHookReplayWG                      sync.WaitGroup
 	tmuxObservationCursorMu              sync.Mutex
 	tmuxObservationCursor                int
 	reviewReadyRecoveryMu                sync.Mutex
@@ -636,10 +637,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 				d.cfg.Logger.Warn("failed to close runtime reconcile queue", "error", closeErr)
 			}
 		}
+		if d.gitStatusAdapter != nil {
+			d.gitStatusAdapter.stopGitHookRefreshReconciler()
+		}
 		if d.gitStatusRefreshQueue != nil {
 			if closeErr := d.gitStatusRefreshQueue.Close(); closeErr != nil && d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("failed to close git status refresh queue", "error", closeErr)
 			}
+		}
+		d.gitHookReplayWG.Wait()
+		if d.gitStatusAdapter != nil {
+			d.gitStatusAdapter.waitForGitHookRefreshContinuations()
 		}
 		d.stopUserProjectionWorkers()
 		d.closeIssueClients()
@@ -666,10 +674,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.cfg.Logger.Info("daemon startup phase", "phase", "projection_delta_stores_open", "duration_ms", time.Since(projectionStartedAt).Milliseconds())
 
 	serveErrCh := make(chan error, 1)
+	if d.gitStatusAdapter != nil {
+		d.gitStatusAdapter.setGitHookRefreshReconcileContext(serveCtx)
+	}
 	go func() {
 		serveErrCh <- d.serve.Serve(serveCtx)
 	}()
 	d.cfg.Logger.Info("daemon startup phase", "phase", "ipc_serve_start", "duration_ms", time.Since(startedAt).Milliseconds())
+	d.startGitHookRefreshReplay(serveCtx)
 	waitForShutdown := func() {
 		if ctx.Err() != nil {
 			<-shutdownDone
@@ -741,6 +753,82 @@ func (d *Daemon) Run(ctx context.Context) error {
 	return err
 }
 
+func (d *Daemon) startGitHookRefreshReplay(ctx context.Context) {
+	if d == nil {
+		return
+	}
+	d.gitHookReplayWG.Add(1)
+	go func() {
+		defer d.gitHookReplayWG.Done()
+		if err := d.prepareRuntimeStoresForGitHookReplay(); err != nil {
+			if d.cfg.Logger != nil && ctx.Err() == nil {
+				d.cfg.Logger.Warn("open runtime stores for git hook replay failed", "error", err)
+			}
+			return
+		}
+		if err := d.replayPendingGitHookRefreshes(ctx); err != nil && d.cfg.Logger != nil && ctx.Err() == nil {
+			d.cfg.Logger.Warn("replay pending git hook refreshes failed", "error", err)
+		}
+	}()
+}
+
+func (d *Daemon) prepareRuntimeStoresForGitHookReplay() error {
+	registry, err := appconfig.LoadProjectsRegistry()
+	if err != nil {
+		return err
+	}
+	projectIDs := []string{d.canonicalProjectID(protocol.DefaultProjectID)}
+	for _, project := range registry.Projects {
+		projectID := strings.TrimSpace(project.ID)
+		if projectID == "" {
+			projectID = strings.TrimSpace(project.Name)
+		}
+		if projectID != "" {
+			projectIDs = append(projectIDs, projectID)
+		}
+	}
+	for _, projectID := range projectIDs {
+		if store := d.runtimeStateStoreForProject(projectID); store == nil {
+			return fmt.Errorf("runtime state store unavailable for project %q", projectID)
+		}
+	}
+	return nil
+}
+
+func (d *Daemon) replayPendingGitHookRefreshes(ctx context.Context) error {
+	if d == nil || d.gitStatusAdapter == nil {
+		return nil
+	}
+	d.runtimeStoresMu.Lock()
+	stores := make([]*daemonstate.RuntimeStateStore, 0, len(d.runtimeStoresByRoot))
+	for _, store := range d.runtimeStoresByRoot {
+		stores = append(stores, store)
+	}
+	d.runtimeStoresMu.Unlock()
+	seen := make(map[*daemonstate.RuntimeStateStore]struct{}, len(stores))
+	for _, store := range stores {
+		if store == nil {
+			continue
+		}
+		if _, ok := seen[store]; ok {
+			continue
+		}
+		seen[store] = struct{}{}
+		intents, err := store.ListPendingGitHookRefreshes(ctx)
+		if err != nil {
+			return err
+		}
+		for _, intent := range intents {
+			submission, err := d.gitStatusAdapter.queuePersistedGitHookRefresh(intent.ProjectID, intent.Worktree)
+			if err != nil {
+				return err
+			}
+			d.gitStatusAdapter.continuePendingGitHookRefreshAfter(submission, intent.ProjectID, intent.Worktree)
+		}
+	}
+	return nil
+}
+
 func (d *Daemon) prepareRunShutdownState() {
 	d.shutdownMu.Lock()
 	defer d.shutdownMu.Unlock()
@@ -777,6 +865,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	req.Meta.ProjectID = naming.ProjectID(projectID)
 	ctx = withDaemonProjectIDContext(ctx, projectID)
 	ctx = issues.ContextWithMutationOperation(ctx, "command."+req.Command)
+	ctx = contextWithRuntimeProjectionWriterOperation(ctx, "command."+req.Command)
 	ctx, endCommandSpan := latencytrace.StartSpan(ctx, "daemon", "command", "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
 	d.recordWatchClientRequest(projectID, req, startedAt.UTC())
 	defer func() {

@@ -29,6 +29,7 @@ const (
 	physicalSessionObservationTable = "daemon_physical_session_observations"
 	managedAgentIdentityTable       = "daemon_managed_agent_incarnations"
 	worktreeStateTable              = "daemon_worktree_projections"
+	gitHookRefreshIntentTable       = "daemon_git_hook_refresh_intents"
 	orchestratorLeaseTable          = "daemon_orchestrator_scope_leases"
 	rootedBootstrapAckTable         = "daemon_rooted_bootstrap_acknowledgements"
 	advisorSessionTable             = "daemon_advisor_sessions"
@@ -50,6 +51,193 @@ type WorktreeState struct {
 	UpdatedAt        time.Time
 	GitStatusRaw     json.RawMessage
 	GitStatusUpdated *time.Time
+}
+
+// GitHookRefreshIntent is a coalesced durable request to force-publish the
+// authoritative Git status projection for one worktree. RequestedGeneration
+// advances before hook acknowledgement; CompletedGeneration advances only
+// after the corresponding forced publication succeeds.
+type GitHookRefreshIntent struct {
+	ProjectID           string
+	Worktree            string
+	RequestedGeneration int64
+	CompletedGeneration int64
+	RequestedAt         time.Time
+	CompletedAt         *time.Time
+}
+
+func (s *RuntimeStateStore) AcceptGitHookRefresh(ctx context.Context, projectID, worktree string, requestedAt time.Time) (GitHookRefreshIntent, error) {
+	projectID = normalizedProjectID(projectID)
+	worktree = strings.TrimSpace(worktree)
+	if projectID == "" || worktree == "" {
+		return GitHookRefreshIntent{}, fmt.Errorf("git hook refresh intent requires project and worktree")
+	}
+	if requestedAt.IsZero() {
+		requestedAt = time.Now().UTC()
+	}
+	requestedAt = requestedAt.UTC()
+	var intent GitHookRefreshIntent
+	err := s.withRetryingWriteLock(ctx, "accept_git_hook_refresh", func(writeCtx context.Context) error {
+		db, err := s.dbHandle()
+		if err != nil {
+			return err
+		}
+		row := db.QueryRowContext(writeCtx, `INSERT INTO `+gitHookRefreshIntentTable+`
+			(project_id,worktree,requested_generation,completed_generation,requested_at,completed_at)
+			VALUES(?,?,1,0,?,NULL)
+			ON CONFLICT(project_id,worktree) DO UPDATE SET
+				requested_generation=`+gitHookRefreshIntentTable+`.requested_generation+1,
+				requested_at=excluded.requested_at
+			RETURNING project_id,worktree,requested_generation,completed_generation,requested_at,completed_at`,
+			projectID, worktree, requestedAt.Format(time.RFC3339Nano))
+		return scanGitHookRefreshIntent(row, &intent)
+	})
+	if err != nil {
+		return GitHookRefreshIntent{}, fmt.Errorf("accept git hook refresh %s/%s: %w", projectID, worktree, err)
+	}
+	return intent, nil
+}
+
+// PersistGitHookRefreshPublication atomically persists the Git status snapshot
+// and advances the durable publication checkpoint for generation. The returned
+// boolean is true only for the transaction that first completes that generation.
+func (s *RuntimeStateStore) PersistGitHookRefreshPublication(ctx context.Context, projectID, issueID, worktree string, generation int64, statusRaw json.RawMessage, completedAt time.Time) (bool, error) {
+	projectID = normalizedProjectID(projectID)
+	issueID = strings.TrimSpace(issueID)
+	worktree = strings.TrimSpace(worktree)
+	if projectID == "" || issueID == "" || worktree == "" || generation <= 0 || len(statusRaw) == 0 {
+		return false, fmt.Errorf("persist git hook publication requires project, issue, worktree, generation, and payload")
+	}
+	if completedAt.IsZero() {
+		completedAt = time.Now().UTC()
+	}
+	completedAt = completedAt.UTC()
+	var published bool
+	err := s.withRetryingWriteLock(ctx, "persist_git_hook_publication", func(writeCtx context.Context) error {
+		db, err := s.dbHandle()
+		if err != nil {
+			return err
+		}
+		tx, err := db.BeginTx(writeCtx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		result, err := tx.ExecContext(writeCtx, `UPDATE `+gitHookRefreshIntentTable+`
+			SET completed_generation=?, completed_at=?
+			WHERE project_id=? AND worktree=?
+			  AND requested_generation>=? AND completed_generation<?`,
+			generation, completedAt.Format(time.RFC3339Nano), projectID, worktree, generation, generation)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			var requestedGeneration, completedGeneration int64
+			if err := tx.QueryRowContext(writeCtx, `SELECT requested_generation,completed_generation
+				FROM `+gitHookRefreshIntentTable+` WHERE project_id=? AND worktree=?`, projectID, worktree).
+				Scan(&requestedGeneration, &completedGeneration); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("git hook publication intent not found")
+				}
+				return err
+			}
+			if completedGeneration < generation {
+				return fmt.Errorf("git hook publication generation %d exceeds requested generation %d", generation, requestedGeneration)
+			}
+			return tx.Commit()
+		}
+		if affected != 1 {
+			return fmt.Errorf("persist git hook publication %s/%s generation %d: affected %d intents", projectID, worktree, generation, affected)
+		}
+		result, err = tx.ExecContext(writeCtx, `UPDATE `+worktreeStateTable+`
+			SET git_status_json=?, git_status_updated_at=?
+			WHERE project_id=? AND issue_id=? AND path=?`, string(statusRaw), completedAt.Format(time.RFC3339Nano), projectID, issueID, worktree)
+		if err != nil {
+			return err
+		}
+		if err := requireAffectedRows(result, 1, "persist git hook status", projectID, issueID); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		published = true
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("persist git hook publication %s/%s generation %d: %w", projectID, worktree, generation, err)
+	}
+	return published, nil
+}
+
+func (s *RuntimeStateStore) ListPendingGitHookRefreshes(ctx context.Context) ([]GitHookRefreshIntent, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT project_id,worktree,requested_generation,completed_generation,requested_at,completed_at
+		FROM `+gitHookRefreshIntentTable+` WHERE completed_generation < requested_generation
+		ORDER BY project_id,worktree`)
+	if err != nil {
+		return nil, fmt.Errorf("list pending git hook refreshes: %w", err)
+	}
+	defer rows.Close()
+	var intents []GitHookRefreshIntent
+	for rows.Next() {
+		var intent GitHookRefreshIntent
+		if err := scanGitHookRefreshIntent(rows, &intent); err != nil {
+			return nil, err
+		}
+		intents = append(intents, intent)
+	}
+	return intents, rows.Err()
+}
+
+func (s *RuntimeStateStore) GetPendingGitHookRefresh(ctx context.Context, projectID, worktree string) (GitHookRefreshIntent, bool, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return GitHookRefreshIntent{}, false, err
+	}
+	var intent GitHookRefreshIntent
+	err = scanGitHookRefreshIntent(db.QueryRowContext(ctx, `SELECT project_id,worktree,requested_generation,completed_generation,requested_at,completed_at
+		FROM `+gitHookRefreshIntentTable+` WHERE project_id=? AND worktree=? AND completed_generation < requested_generation`,
+		normalizedProjectID(projectID), strings.TrimSpace(worktree)), &intent)
+	if errors.Is(err, sql.ErrNoRows) {
+		return GitHookRefreshIntent{}, false, nil
+	}
+	if err != nil {
+		return GitHookRefreshIntent{}, false, fmt.Errorf("get pending git hook refresh: %w", err)
+	}
+	return intent, true, nil
+}
+
+type gitHookRefreshIntentScanner interface {
+	Scan(...any) error
+}
+
+func scanGitHookRefreshIntent(scanner gitHookRefreshIntentScanner, intent *GitHookRefreshIntent) error {
+	var requestedAt string
+	var completedAt sql.NullString
+	if err := scanner.Scan(&intent.ProjectID, &intent.Worktree, &intent.RequestedGeneration, &intent.CompletedGeneration, &requestedAt, &completedAt); err != nil {
+		return err
+	}
+	var err error
+	intent.RequestedAt, err = parseRuntimeStateTime(requestedAt)
+	if err != nil {
+		return err
+	}
+	if completedAt.Valid {
+		parsed, err := parseRuntimeStateTime(completedAt.String)
+		if err != nil {
+			return err
+		}
+		intent.CompletedAt = &parsed
+	}
+	return nil
 }
 
 // SessionActivityEvidence records durable activity evidence before it is
@@ -2648,6 +2836,18 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB, runtimeLivenessPr
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daemon_worktree_projections_project_path
 			ON ` + worktreeStateTable + ` (project_id, path)`,
+		`CREATE TABLE IF NOT EXISTS ` + gitHookRefreshIntentTable + ` (
+			project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
+			worktree TEXT NOT NULL CHECK (trim(worktree) <> ''),
+			requested_generation INTEGER NOT NULL CHECK (requested_generation > 0),
+			completed_generation INTEGER NOT NULL DEFAULT 0 CHECK (completed_generation >= 0),
+			requested_at TEXT NOT NULL,
+			completed_at TEXT,
+			PRIMARY KEY (project_id, worktree),
+			CHECK (completed_generation <= requested_generation)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_daemon_git_hook_refresh_intents_pending
+			ON ` + gitHookRefreshIntentTable + ` (project_id, requested_generation, completed_generation)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.ExecContext(ctx, statement); err != nil {

@@ -58,6 +58,9 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = validateDecisionIdempotencySchema(ctx, db); err != nil {
 				t.Fatal(err)
 			}
+			if err = validateGitHookRefreshIntentsSchema(ctx, db); err != nil {
+				t.Fatal(err)
+			}
 			var checksum string
 			var ledgerRows int
 			if err = db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, projectionDeltaAuthorityMigrationID, projectionDeltaAuthorityChecksum).Scan(&ledgerRows); err != nil || ledgerRows != 1 {
@@ -74,6 +77,9 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			}
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, decisionIdempotencyMigrationID).Scan(&checksum); err != nil || checksum != "86d5400fe33bbc19e7e848bc232335809f76d85e4d45a6e45f6bc7ff77547f47" {
 				t.Fatalf("decision idempotency checksum=%q err=%v", checksum, err)
+			}
+			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, gitHookRefreshIntentsMigrationID).Scan(&checksum); err != nil || checksum != "7eecd212c9b9a5907c425870ee861571d7654929d77067a1fc50c2e857c3335c" {
+				t.Fatalf("git hook refresh intents checksum=%q err=%v", checksum, err)
 			}
 			if !rootedBootstrapTableExists(t, db) {
 				t.Fatal("rooted bootstrap acknowledgement table missing after clone migration")

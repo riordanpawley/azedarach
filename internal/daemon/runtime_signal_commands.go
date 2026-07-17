@@ -17,8 +17,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
-const runtimeSignalFastGitStatusTimeout = 1500 * time.Millisecond
-
 func (d *Daemon) handleRuntimeSignalIngest(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	ctx = withoutSynchronousProjectReadRuntimeRefresh(ctx)
 	var cmd protocol.RuntimeSignalIngestCommandBody
@@ -200,28 +198,20 @@ func runtimeSignalHookLogEvent(projectID string, cmd protocol.RuntimeSignalInges
 
 func (d *Daemon) ingestGitWorktreeSignal(ctx context.Context, projectID string, cmd protocol.RuntimeSignalIngestCommandBody, out *protocol.RuntimeSignalIngestResponseBody) {
 	if d.gitStatusAdapter == nil {
-		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_fast", OK: false, Message: "git status adapter unavailable"})
+		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_refresh_queued", OK: false, Message: "git status adapter unavailable"})
 		return
 	}
 	if cmd.Worktree == "" {
-		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_fast", OK: false, Message: "missing worktree"})
+		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_refresh_queued", OK: false, Message: "missing worktree"})
 		return
 	}
-	statusCtx, cancel := context.WithTimeout(ctx, runtimeSignalFastGitStatusTimeout)
-	defer cancel()
-	_, rev, err := d.gitStatusAdapter.refreshGitStatusPorcelainWriteThroughResult(statusCtx, projectID, cmd.Worktree, true, true)
-	if err != nil {
-		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_fast", OK: false, Message: err.Error()})
-		return
-	}
-	out.ProjectionRevisions = appendRevision(out.ProjectionRevisions, rev)
-	out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_fast", OK: true, Revision: rev})
-	if _, err := d.gitStatusAdapter.queueGitStatusRefresh(projectID, cmd.Worktree, reconcilePriorityBackground, "runtime-signal-enrichment"); err != nil {
-		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_enrichment", OK: false, Message: err.Error()})
+	if _, err := d.gitStatusAdapter.queueDurableGitHookRefresh(ctx, projectID, cmd.Worktree); err != nil {
+		out.Accepted = false
+		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_refresh_queued", OK: false, Message: err.Error()})
 		return
 	}
 	out.EnrichmentQueued = true
-	out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_enrichment", OK: true})
+	out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_refresh_queued", OK: true})
 }
 
 func (d *Daemon) ingestAgentActivitySignal(ctx context.Context, req protocol.RequestEnvelope, projectID string, cmd protocol.RuntimeSignalIngestCommandBody, out *protocol.RuntimeSignalIngestResponseBody) {

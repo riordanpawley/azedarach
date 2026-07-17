@@ -1700,9 +1700,9 @@ func TestProjectOrchestrationSnapshotMapsCanceledRuntimeWriterAdmissionToUnavail
 	writerWaited := make(chan struct{})
 	d.snapshotAdmissionContext = func(parent context.Context) (context.Context, context.CancelFunc) {
 		admissionCtx, cancel := context.WithCancel(parent)
-		admissionCtx = withRuntimeProjectionWriterWaitHookForTest(admissionCtx, func(waiterOperation, holderOperation string) {
-			if waiterOperation != "orchestration.snapshot" || holderOperation != "background.projection_refresh" {
-				t.Errorf("runtime writer attribution waiter=%q holder=%q", waiterOperation, holderOperation)
+		admissionCtx = withRuntimeProjectionWriterQueuedHookForTest(admissionCtx, func(waiterOperation string) {
+			if waiterOperation != "orchestration.snapshot" {
+				t.Errorf("runtime writer queued waiter=%q", waiterOperation)
 			}
 			close(writerWaited)
 			cancel()

@@ -544,12 +544,13 @@ func TestRuntimeStateStoreContentionDiagnosticNamesOperation(t *testing.T) {
 	if _, err := store.dbHandle(); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	err := store.withRetryingWriteLock(ctx, "delete_worktree_state", func(context.Context) error {
+		cancel()
 		return codedSQLiteTestError{code: 517}
 	})
-	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "runtime projection write delete_worktree_state failed on attempt 1") {
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "runtime projection write delete_worktree_state failed on attempt 1") {
 		t.Fatalf("diagnostic error = %v", err)
 	}
 	if got := logs.String(); !strings.Contains(got, `"operation":"delete_worktree_state"`) || !strings.Contains(got, `"attempt":1`) {
@@ -2065,6 +2066,29 @@ func TestRuntimeStateStoreWorktreeGitStatusUpdateGuardrail(t *testing.T) {
 	}
 	if got := err.Error(); !strings.Contains(got, "expected 1 affected row(s), got 0") {
 		t.Fatalf("UpsertWorktreeStateGitStatus missing row error = %q, want affected-row guardrail", got)
+	}
+}
+
+func TestRuntimeStateStoreGitHookPublicationBindsGenerationToExactWorktree(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	projectID := "proj-hook-binding"
+	issueID := "az-hook-binding"
+	projectedPath := "/repo/current-worktree"
+	acceptedPath := "/repo/stale-worktree"
+	if err := store.UpsertWorktreeState(ctx, WorktreeState{ProjectID: projectID, IssueID: issueID, Path: projectedPath, Branch: "az/hook-binding", UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	intent, err := store.AcceptGitHookRefresh(ctx, projectID, acceptedPath, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if published, err := store.PersistGitHookRefreshPublication(ctx, projectID, issueID, acceptedPath, intent.RequestedGeneration, json.RawMessage(`{"has_changes":true}`), time.Now().UTC()); err == nil || published {
+		t.Fatalf("stale-path publication published=%t err=%v, want transactional failure", published, err)
+	}
+	if pending, found, err := store.GetPendingGitHookRefresh(ctx, projectID, acceptedPath); err != nil || !found || pending.CompletedGeneration != 0 {
+		t.Fatalf("pending intent after rolled-back stale path = %+v found=%t err=%v", pending, found, err)
 	}
 }
 

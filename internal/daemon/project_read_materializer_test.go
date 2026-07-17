@@ -682,9 +682,9 @@ func TestProjectReadMaterializerRuntimeRefreshWaitIsCancelableAndAttributed(t *t
 	waitObserved := make(chan struct{})
 	waitCtx, cancelWait := context.WithCancel(context.Background())
 	waitCtx = contextWithRuntimeProjectionWriterOperation(waitCtx, "orchestration.snapshot")
-	waitCtx = withProjectReadUpdateWaitHookForTest(waitCtx, func(waiterOperation, holderOperation string) {
-		if waiterOperation != "orchestration.snapshot" || holderOperation != "background.projection_refresh" {
-			t.Errorf("refresh attribution waiter=%q holder=%q", waiterOperation, holderOperation)
+	waitCtx = withProjectReadUpdateQueuedHookForTest(waitCtx, func(waiterOperation string) {
+		if waiterOperation != "orchestration.snapshot" {
+			t.Errorf("refresh queued waiter=%q", waiterOperation)
 		}
 		close(waitObserved)
 	})

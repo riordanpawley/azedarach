@@ -116,6 +116,11 @@ func (r *recordingRuntimeProjectionWriter) PersistGitStatusProjectionAndPublish(
 	return 6, r.publishErr
 }
 
+func (r *recordingRuntimeProjectionWriter) PersistGitHookStatusProjectionAndPublishResult(context.Context, string, string, string, int64, *git.GitStatus) (uint64, error) {
+	r.record("git.hook.persist+publish")
+	return 6, nil
+}
+
 func (r *recordingRuntimeProjectionWriter) PublishGitStatusProjectionEvent(context.Context, string, string, string, *git.GitStatus) (uint64, error) {
 	r.record("git.publish")
 	return 7, r.publishErr
@@ -123,6 +128,132 @@ func (r *recordingRuntimeProjectionWriter) PublishGitStatusProjectionEvent(conte
 
 type statusRunner struct {
 	status string
+}
+
+func TestRuntimeProjectionWriterAttributesContendedHolderAndWaiter(t *testing.T) {
+	recorder := newProjectReadTraceRecorder(t)
+	d := &Daemon{cfg: Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
+	writer := newRuntimeProjectionWriter(d)
+	holderCtx := contextWithRuntimeProjectionWriterOperation(context.Background(), "worktree.replace_snapshot")
+	releaseHolder, err := writer.lockProjectionWriter(holderCtx, "proj-attribution", "fallback.holder")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	attributed := make(chan [2]string, 1)
+	queued := make(chan struct{})
+	waiterCtx := contextWithRuntimeProjectionWriterOperation(context.Background(), "command.runtime.signal.ingest")
+	waiterCtx = withRuntimeProjectionWriterQueuedHookForTest(waiterCtx, func(string) { close(queued) })
+	waiterCtx = withRuntimeProjectionWriterWaitHookForTest(waiterCtx, func(waiter, holder string) {
+		attributed <- [2]string{waiter, holder}
+	})
+	waiterDone := make(chan struct{})
+	go func() {
+		releaseWaiter, err := writer.lockProjectionWriter(waiterCtx, "proj-attribution", "fallback.waiter")
+		if err != nil {
+			t.Errorf("waiter lock: %v", err)
+			close(waiterDone)
+			return
+		}
+		releaseWaiter()
+		close(waiterDone)
+	}()
+
+	<-queued
+	releaseHolder()
+	got := <-attributed
+	if got != [2]string{"command.runtime.signal.ingest", "worktree.replace_snapshot"} {
+		t.Fatalf("writer attribution = %q/%q", got[0], got[1])
+	}
+	<-waiterDone
+
+	var traced bool
+	for _, span := range recorder.Ended() {
+		if span.Name() != "daemon.runtime_projection.writer_lock_wait" {
+			continue
+		}
+		attrs := map[string]string{}
+		for _, attr := range span.Attributes() {
+			if attr.Value.Type().String() == "STRING" {
+				attrs[string(attr.Key)] = attr.Value.AsString()
+			}
+		}
+		if attrs["writer.waiter_operation"] == "command.runtime.signal.ingest" && attrs["writer.holder_operation"] == "worktree.replace_snapshot" {
+			traced = true
+		}
+	}
+	if !traced {
+		t.Fatal("writer wait span missing bounded waiter/holder attribution")
+	}
+}
+
+func TestRuntimeProjectionWriterCanceledAdmissionReturnsErrorAndDoesNotPersist(t *testing.T) {
+	ctx := context.Background()
+	store := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = store.Close() })
+	projectID := "proj-canceled-writer"
+	d := &Daemon{
+		cfg:                 Config{RepoDir: ".", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{".": store},
+	}
+	writer := newRuntimeProjectionWriter(d)
+	release, err := writer.lockProjectionWriter(ctx, projectID, "holder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued := make(chan struct{})
+	waitCtx, cancel := context.WithCancel(withRuntimeProjectionWriterQueuedHookForTest(ctx, func(string) { close(queued) }))
+	result := make(chan error, 1)
+	go func() {
+		_, persistErr := writer.PersistWorktreeProjectionAndPublish(waitCtx, projectID, "az-cancel", "/tmp/az-cancel", "az/cancel")
+		result <- persistErr
+	}()
+	<-queued
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("persist error = %v, want context canceled", err)
+	}
+	release()
+	if rows, err := store.ListWorktreeStates(ctx, projectID); err != nil || len(rows) != 0 {
+		t.Fatalf("worktree rows after canceled admission = %+v err=%v", rows, err)
+	}
+}
+
+func TestGitHookPublicationCheckpointPreventsRepublishAfterPostCommitCrash(t *testing.T) {
+	ctx := context.Background()
+	store := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = store.Close() })
+	projectID := "proj-hook-crash"
+	issueID := "az-hook-crash"
+	worktree := "/tmp/az-hook-crash"
+	if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{ProjectID: projectID, IssueID: issueID, Path: worktree, Branch: "az/hook-crash", UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	intent, err := store.AcceptGitHookRefresh(ctx, projectID, worktree, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{
+		cfg:                 Config{RepoDir: ".", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		hub:                 publish.NewHub(8, 4, slog.Default()),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{".": store},
+		revision:            map[string]uint64{},
+	}
+	writer := newRuntimeProjectionWriter(d)
+	crashErr := errors.New("injected crash after durable publication commit")
+	crashCtx := withGitHookPublicationCommittedHookForTest(ctx, func() error { return crashErr })
+	if _, err := writer.PersistGitHookStatusProjectionAndPublishResult(crashCtx, projectID, issueID, worktree, intent.RequestedGeneration, cleanGitStatus()); !errors.Is(err, crashErr) {
+		t.Fatalf("post-commit crash error = %v", err)
+	}
+	if pending, err := store.ListPendingGitHookRefreshes(ctx); err != nil || len(pending) != 0 {
+		t.Fatalf("pending after durable commit = %+v err=%v", pending, err)
+	}
+	if rev, err := writer.PersistGitHookStatusProjectionAndPublishResult(ctx, projectID, issueID, worktree, intent.RequestedGeneration, cleanGitStatus()); err != nil || rev != 0 {
+		t.Fatalf("reopen replay result revision=%d err=%v, want idempotent no-op", rev, err)
+	}
+	if got := d.currentRevision(projectID); got != 1 {
+		t.Fatalf("logical publication revisions = %d, want one durable publication allocation", got)
+	}
 }
 
 func (r statusRunner) Run(_ context.Context, args ...string) (string, error) {
@@ -315,9 +446,9 @@ func TestRuntimeProjectionWriterWaitHonorsCancellation(t *testing.T) {
 
 	waitObserved := make(chan struct{})
 	waitCtx, cancelWait := context.WithCancel(ctx)
-	waitCtx = withRuntimeProjectionWriterWaitHookForTest(waitCtx, func(waiterOperation, holderOperation string) {
-		if waiterOperation != "orchestration.snapshot" || holderOperation != "background.projection_refresh" {
-			t.Errorf("runtime writer attribution waiter=%q holder=%q", waiterOperation, holderOperation)
+	waitCtx = withRuntimeProjectionWriterQueuedHookForTest(waitCtx, func(waiterOperation string) {
+		if waiterOperation != "orchestration.snapshot" {
+			t.Errorf("runtime writer queued waiter=%q", waiterOperation)
 		}
 		close(waitObserved)
 	})
@@ -382,7 +513,7 @@ func TestRuntimeProjectionPersistAndPublishMethodsReturnCanceledAdmission(t *tes
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			callCtx, cancel := context.WithCancel(ctx)
-			callCtx = withRuntimeProjectionWriterWaitHookForTest(callCtx, func(_, _ string) { cancel() })
+			callCtx = withRuntimeProjectionWriterQueuedHookForTest(callCtx, func(string) { cancel() })
 			revision, callErr := test.run(callCtx)
 			if revision != 0 || !errors.Is(callErr, context.Canceled) {
 				t.Fatalf("result = (%d, %v), want (0, context.Canceled)", revision, callErr)
@@ -412,7 +543,7 @@ func TestPhysicalSessionObservationCancellationLeavesRetryablePublication(t *tes
 	}
 	observation := daemonstate.PhysicalSessionObservation{ProjectID: projectID, SessionID: "physical", ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: time.Now().UTC()}
 	callCtx, cancel := context.WithCancel(ctx)
-	callCtx = withRuntimeProjectionWriterWaitHookForTest(callCtx, func(_, _ string) { cancel() })
+	callCtx = withRuntimeProjectionWriterQueuedHookForTest(callCtx, func(string) { cancel() })
 	_, applied, revisions, callErr := writer.ApplyPhysicalSessionObservationAndPublish(callCtx, projectID, protocol.Metadata{}, observation)
 	if applied || len(revisions) != 0 || !errors.Is(callErr, context.Canceled) {
 		t.Fatalf("canceled observation = (applied %t, revisions %v, error %v), want false, empty, context.Canceled", applied, revisions, callErr)

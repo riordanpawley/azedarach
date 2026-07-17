@@ -33,6 +33,7 @@ type migration struct {
 }
 
 const decisionIdempotencyMigrationID = "0051_decision_idempotency"
+const gitHookRefreshIntentsMigrationID = "0053_git_hook_refresh_intents"
 
 var orderedMigrations = []migration{
 	{id: "0001_bootstrap_tables", path: "migrations/0001_bootstrap_tables.sql"},
@@ -93,6 +94,7 @@ var orderedMigrations = []migration{
 	{id: issueObservationEventSearchMigrationID, path: "migrations/0050_issue_observation_event_search.sql"},
 	{id: decisionIdempotencyMigrationID, path: "migrations/0051_decision_idempotency.sql"},
 	{id: mailboxObservationProjectionCutoverMigrationID, path: "migrations/0052_mailbox_observation_projection_cutover.sql"},
+	{id: gitHookRefreshIntentsMigrationID, path: "migrations/0053_git_hook_refresh_intents.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -154,6 +156,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "0050_issue_observation_event_search", Path: "migrations/0050_issue_observation_event_search.sql", Checksum: "e5a8efc20ddf313822576c4d6d42cd94e1837dfac810834957689d30b952005d"},
 	{ID: decisionIdempotencyMigrationID, Path: "migrations/0051_decision_idempotency.sql", Checksum: "86d5400fe33bbc19e7e848bc232335809f76d85e4d45a6e45f6bc7ff77547f47"},
 	{ID: mailboxObservationProjectionCutoverMigrationID, Path: "migrations/0052_mailbox_observation_projection_cutover.sql", Checksum: "fd86080f491210c169005c7f28bc778aca3eea2d70ce15a6c001bb960397e260"},
+	{ID: gitHookRefreshIntentsMigrationID, Path: "migrations/0053_git_hook_refresh_intents.sql", Checksum: "7eecd212c9b9a5907c425870ee861571d7654929d77067a1fc50c2e857c3335c"},
 }
 
 func validateMigrationRegistry() error {
@@ -453,7 +456,7 @@ const (
 	mailboxObservationProjectionCutoverMigrationID                           = "0052_mailbox_observation_projection_cutover"
 	mailboxObservationProjectionCutoverMetaKey                               = "issue:mailbox_observation_projection_cutover"
 	decisionPropagationOutboxMigrationID                                     = "0048_decision_propagation_outbox"
-	issueObservationEventSearchMigrationID                           = "0050_issue_observation_event_search"
+	issueObservationEventSearchMigrationID                                   = "0050_issue_observation_event_search"
 	contextualLearningMigrationID                                            = "0039_contextual_learning_activation"
 	legacyContextualLearningMigration                                        = "0038_contextual_learning_activation"
 )
@@ -615,6 +618,15 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	}
+	gitHookRefreshIntentsApplied, err := isMigrationApplied(ctx, db, gitHookRefreshIntentsMigrationID)
+	if err != nil {
+		return fmt.Errorf("check git hook refresh intents migration: %w", err)
+	}
+	if gitHookRefreshIntentsApplied {
+		if err := validateGitHookRefreshIntentsSchema(ctx, db); err != nil {
+			return err
+		}
+	}
 
 	canonicalApplied, err := isMigrationApplied(ctx, db, "0045_issue_state_runtime_constraints")
 	if err != nil {
@@ -640,6 +652,71 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("seed built-in board views: %w", err)
 	}
 	return sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifactAuthority, migrationArtifacts)
+}
+
+func validateGitHookRefreshIntentsSchema(ctx context.Context, db *sql.DB) error {
+	for _, column := range []string{"project_id", "worktree", "requested_generation", "completed_generation", "requested_at", "completed_at"} {
+		exists, err := columnExistsDB(ctx, db, "daemon_git_hook_refresh_intents", column)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("git hook refresh intents schema drifted: missing column %s", column)
+		}
+	}
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(daemon_git_hook_refresh_intents)`)
+	if err != nil {
+		return fmt.Errorf("git hook refresh intents schema drifted: inspect primary key: %w", err)
+	}
+	primaryKey := map[string]int{}
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		primaryKey[strings.ToLower(strings.TrimSpace(name))] = pk
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if primaryKey["project_id"] != 1 || primaryKey["worktree"] != 2 {
+		return fmt.Errorf("git hook refresh intents schema drifted: primary key must be (project_id, worktree)")
+	}
+	for column, ordinal := range primaryKey {
+		if column != "project_id" && column != "worktree" && ordinal != 0 {
+			return fmt.Errorf("git hook refresh intents schema drifted: unexpected primary key column %s", column)
+		}
+	}
+	var tableSQL string
+	if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='daemon_git_hook_refresh_intents'`).Scan(&tableSQL); err != nil {
+		return fmt.Errorf("git hook refresh intents schema drifted: missing table definition: %w", err)
+	}
+	compactTableSQL := strings.NewReplacer(" ", "", "\n", "", "\t", "", "\r", "").Replace(strings.ToLower(tableSQL))
+	for name, expression := range map[string]string{
+		"project_id nonempty check":  "check(trim(project_id)<>'')",
+		"worktree nonempty check":    "check(trim(worktree)<>'')",
+		"requested generation check": "check(requested_generation>0)",
+		"completed generation check": "check(completed_generation>=0)",
+		"generation ordering check":  "check(completed_generation<=requested_generation)",
+	} {
+		if !strings.Contains(compactTableSQL, expression) {
+			return fmt.Errorf("git hook refresh intents schema drifted: missing %s", name)
+		}
+	}
+	var indexSQL string
+	if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_daemon_git_hook_refresh_intents_pending'`).Scan(&indexSQL); err != nil {
+		return fmt.Errorf("git hook refresh intents schema drifted: missing pending index: %w", err)
+	}
+	normalized := strings.ToLower(strings.Join(strings.Fields(indexSQL), " "))
+	for _, fragment := range []string{"project_id", "requested_generation", "completed_generation"} {
+		if !strings.Contains(normalized, fragment) {
+			return fmt.Errorf("git hook refresh intents schema drifted: pending index missing %s", fragment)
+		}
+	}
+	return nil
 }
 
 func validateMailboxObservationProjectionCutover(ctx context.Context, db *sql.DB) error {

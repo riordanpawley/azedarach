@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ type runtimeProjectionWriter interface {
 	ReplaceWorktreeProjectionSnapshot(context.Context, string, []daemonstate.WorktreeState) error
 
 	PersistGitStatusProjectionAndPublish(context.Context, string, string, string, *git.GitStatus, bool, bool) (uint64, error)
+	PersistGitHookStatusProjectionAndPublishResult(context.Context, string, string, string, int64, *git.GitStatus) (uint64, error)
 	PublishGitStatusProjectionEvent(context.Context, string, string, string, *git.GitStatus) (uint64, error)
 }
 
@@ -86,6 +88,10 @@ func withRuntimeProjectionWriterWaitHookForTest(ctx context.Context, hook func(s
 	return withContextOperationLockWaitHookForTest(ctx, hook)
 }
 
+func withRuntimeProjectionWriterQueuedHookForTest(ctx context.Context, hook func(string)) context.Context {
+	return withContextOperationLockQueuedHookForTest(ctx, hook)
+}
+
 func (w *daemonRuntimeProjectionWriter) lockProjectionWriter(ctx context.Context, projectID, operation string) (func(), error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -93,7 +99,12 @@ func (w *daemonRuntimeProjectionWriter) lockProjectionWriter(ctx context.Context
 	operation = runtimeProjectionWriterOperationFromContext(ctx, operation)
 	waitStartedAt := time.Now()
 	holderOperation, err := w.mu.acquire(ctx, operation)
-	latencytrace.LogPhaseContext(ctx, w.d.cfg.Logger, "daemon", "runtime_projection.writer_lock_wait", waitStartedAt, "project_id", projectID, "operation", operation, "holder_operation", holderOperation)
+	latencytrace.LogPhaseContext(ctx, w.d.cfg.Logger, "daemon", "runtime_projection.writer_lock_wait", waitStartedAt,
+		"project_id", projectID,
+		"operation", operation,
+		"writer.waiter_operation", operation,
+		"writer.holder_operation", holderOperation,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -509,6 +520,73 @@ func (w *daemonRuntimeProjectionWriter) PersistGitStatusProjectionAndPublish(
 	}
 	w.logPhase(ctx, projectID, operation, "publish", publishStartedAt, nil)
 	return rev, nil
+}
+
+func (w *daemonRuntimeProjectionWriter) PersistGitHookStatusProjectionAndPublishResult(
+	ctx context.Context,
+	projectID, issueID, worktree string,
+	generation int64,
+	status *git.GitStatus,
+) (uint64, error) {
+	if w == nil || w.d == nil || status == nil {
+		return 0, fmt.Errorf("git hook status projection writer unavailable")
+	}
+	projectID = w.d.canonicalProjectID(projectID)
+	store := w.d.worktreeRuntimeStateStore(projectID)
+	if store == nil {
+		return 0, fmt.Errorf("git hook runtime state store unavailable")
+	}
+	issueID = strings.TrimSpace(issueID)
+	worktree = strings.TrimSpace(worktree)
+	rawStatus, err := json.Marshal(status)
+	if err != nil {
+		return 0, err
+	}
+	operation := "git_status.hook_persist_publish"
+	unlock, err := w.lockProjectionWriter(ctx, projectID, operation)
+	if err != nil {
+		return 0, err
+	}
+	persistStartedAt := time.Now()
+	published, persistErr := store.PersistGitHookRefreshPublication(ctx, projectID, issueID, worktree, generation, rawStatus, time.Now().UTC())
+	var rev uint64
+	if published && w.d.runtimeProjectionCoalescer == nil {
+		rev = w.d.nextRevision(projectID)
+	}
+	unlock()
+	w.logPhase(ctx, projectID, operation, "persist", persistStartedAt, persistErr)
+	if persistErr != nil {
+		return 0, persistErr
+	}
+	if !published {
+		return 0, nil
+	}
+	w.d.refreshProjectReadRuntime(ctx, projectID, issueID)
+	if hook := gitHookPublicationCommittedHookFromContext(ctx); hook != nil {
+		if err := hook(); err != nil {
+			return 0, err
+		}
+	}
+	if w.d.runtimeProjectionCoalescer != nil {
+		rev = w.d.runtimeProjectionCoalescer.ScheduleGitStatus(ctx, projectID, issueID, worktree, status)
+	} else {
+		w.d.publishGitStatusProjectionEventAtRevision(ctx, projectID, issueID, worktree, status, rev)
+	}
+	return rev, nil
+}
+
+type gitHookPublicationCommittedHookKey struct{}
+
+func withGitHookPublicationCommittedHookForTest(ctx context.Context, hook func() error) context.Context {
+	return context.WithValue(ctx, gitHookPublicationCommittedHookKey{}, hook)
+}
+
+func gitHookPublicationCommittedHookFromContext(ctx context.Context) func() error {
+	if ctx == nil {
+		return nil
+	}
+	hook, _ := ctx.Value(gitHookPublicationCommittedHookKey{}).(func() error)
+	return hook
 }
 
 func (w *daemonRuntimeProjectionWriter) PublishGitStatusProjectionEvent(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) (uint64, error) {
