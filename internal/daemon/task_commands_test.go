@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -5682,6 +5683,7 @@ func TestTaskCloseCommandRetryRepairsProjectionAndReleasesLeaseAfterIntegratedWo
 	if len(receipts) != 1 || observationPayloadString(receipts[0].Payload, "source_oid") != "source-sha" || observationPayloadString(receipts[0].Payload, "target_oid") != "merged-sha" {
 		t.Fatalf("exact integration receipts = %+v, want one source-sha/merged-sha receipt before destructive cleanup", receipts)
 	}
+	originalReceipt := receipts[0]
 	if _, err := os.Stat(sourceWorktree); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("source worktree after failed close stat error = %v, want removed path", err)
 	}
@@ -5729,6 +5731,15 @@ func TestTaskCloseCommandRetryRepairsProjectionAndReleasesLeaseAfterIntegratedWo
 	}
 	if closed.Ownership != nil || len(closed.CoordinationLeases) != 0 {
 		t.Fatalf("closed task leases = %+v ownership = %+v, want terminal retry to release execution lease", closed.CoordinationLeases, closed.Ownership)
+	}
+	receipts, err = issuesClient.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{
+		Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted},
+	})
+	if err != nil {
+		t.Fatalf("list exact integration receipts after retry: %v", err)
+	}
+	if len(receipts) != 1 || receipts[0].ID != originalReceipt.ID || !reflect.DeepEqual(receipts[0].Payload, originalReceipt.Payload) {
+		t.Fatalf("exact integration receipts after retry = %+v, want only original receipt id=%d payload=%+v", receipts, originalReceipt.ID, originalReceipt.Payload)
 	}
 	joined := strings.Join(commands, "\n")
 	if got := strings.Count(joined, "merge --no-edit "+sourceBranch); got != 1 {
