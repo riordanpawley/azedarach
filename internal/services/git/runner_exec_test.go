@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -79,16 +80,74 @@ func TestProcessReapSupervisor(t *testing.T) {
 	if err := syscall.Setpgid(0, 0); err != nil {
 		t.Fatalf("leave managed process group: %v", err)
 	}
-	child := exec.Command("sh", "-c", "trap '' TERM; exec sleep 30")
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve cancellation blocker binary: %v", err)
+	}
+	blockerRead, blockerWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create cancellation blocker pipe: %v", err)
+	}
+	defer blockerRead.Close()
+	defer blockerWrite.Close()
+	readyRead, readyWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create cancellation readiness pipe: %v", err)
+	}
+	defer readyRead.Close()
+	defer readyWrite.Close()
+
+	child := exec.Command(testBinary, "-test.run=^TestProcessCancellationBlocker$")
+	child.Env = append(os.Environ(), "AZEDARACH_TEST_CANCELLATION_BLOCKER=1")
+	child.ExtraFiles = []*os.File{blockerRead, readyWrite}
 	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: managedProcessGroup}
 	if err := child.Start(); err != nil {
 		t.Fatalf("start supervised process-group child: %v", err)
+	}
+	childWaited := false
+	defer func() {
+		if childWaited {
+			return
+		}
+		_ = child.Process.Kill()
+		_ = child.Wait()
+	}()
+	_ = blockerRead.Close()
+	_ = readyWrite.Close()
+	var ready [1]byte
+	if count, err := readyRead.Read(ready[:]); err != nil || count != len(ready) {
+		t.Fatalf("receive cancellation blocker readiness: count=%d err=%v", count, err)
 	}
 	writeTestFIFO(t, os.Getenv("AZEDARACH_TEST_CHILD_PID_FILE"), strconv.Itoa(child.Process.Pid)+"\n")
 	if err := child.Wait(); err == nil {
 		t.Fatal("supervised process-group child exited without cancellation")
 	}
+	childWaited = true
 	writeTestFIFO(t, os.Getenv("AZEDARACH_TEST_CHILD_REAP_FIFO"), "reaped\n")
+}
+
+func TestProcessCancellationBlocker(t *testing.T) {
+	if os.Getenv("AZEDARACH_TEST_CANCELLATION_BLOCKER") != "1" {
+		return
+	}
+
+	blocker := os.NewFile(3, "cancellation-blocker")
+	ready := os.NewFile(4, "cancellation-ready")
+	if blocker == nil || ready == nil {
+		t.Fatal("cancellation blocker file descriptors unavailable")
+	}
+	defer blocker.Close()
+	defer ready.Close()
+	signal.Ignore(syscall.SIGTERM)
+	if _, err := ready.Write([]byte{1}); err != nil {
+		t.Fatalf("publish cancellation blocker readiness: %v", err)
+	}
+	_ = ready.Close()
+	var release [1]byte
+	if count, err := blocker.Read(release[:]); err != nil || count != len(release) {
+		t.Fatalf("cancellation blocker released without process cancellation: count=%d err=%v", count, err)
+	}
+	t.Fatal("cancellation blocker received an unexpected release event")
 }
 
 func TestRealProcessProfileExecRunnerReturnsStdoutOnMergeTreeConflict(t *testing.T) {
