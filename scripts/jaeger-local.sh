@@ -544,10 +544,16 @@ jaeger_expiry_worker() {
   fi
   if [[ -n "${AZEDARACH_JAEGER_TEST_EXPIRY_COMPLETE_FIFO:-}" ]]; then
     [[ -p "$AZEDARACH_JAEGER_TEST_EXPIRY_COMPLETE_FIFO" ]] || return 1
-    printf '%s\n' complete >"$AZEDARACH_JAEGER_TEST_EXPIRY_COMPLETE_FIFO" || return 1
   fi
+  # Completion transfers cleanup authority back to the scheduling test. Disarm
+  # the failure-atomic EXIT handler first so a caller that begins fixture
+  # cleanup as soon as it observes completion cannot race a late abort that
+  # recreates endpoint or engine state below the retired fixture directory.
   armed=0
   trap - EXIT
+  if [[ -n "${AZEDARACH_JAEGER_TEST_EXPIRY_COMPLETE_FIFO:-}" ]]; then
+    printf '%s\n' complete >"$AZEDARACH_JAEGER_TEST_EXPIRY_COMPLETE_FIFO" || return 1
+  fi
 }
 
 jaeger_endpoint_record_valid() {

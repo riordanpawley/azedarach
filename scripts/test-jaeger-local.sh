@@ -62,13 +62,24 @@ source "$repo_root/scripts/jaeger-local.sh"
 test_tmp_parent="${TMPDIR:-/tmp}"
 tmp="$(mktemp -d "$test_tmp_parent/azedarach jaeger.XXXXXX")"
 test_cleanup() {
-  local child
+  local child cleanup_signal
   trap - ERR EXIT
   set +e
   for child in $(jobs -pr); do
     kill "$child" 2>/dev/null || true
   done
   wait 2>/dev/null || true
+  if [[ -n "${AZEDARACH_JAEGER_TEST_CLEANUP_READY_FIFO:-}" ||
+    -n "${AZEDARACH_JAEGER_TEST_CLEANUP_CONTINUE_FIFO:-}" ]]; then
+    if [[ ! -p "${AZEDARACH_JAEGER_TEST_CLEANUP_READY_FIFO:-}" ||
+      ! -p "${AZEDARACH_JAEGER_TEST_CLEANUP_CONTINUE_FIFO:-}" ]]; then
+      echo "concurrent validator cleanup barrier requires ready and continue FIFOs" >&2
+      return 1
+    fi
+    printf '%s\n' "$tmp" >"$AZEDARACH_JAEGER_TEST_CLEANUP_READY_FIFO" || return 1
+    IFS= read -r cleanup_signal <"$AZEDARACH_JAEGER_TEST_CLEANUP_CONTINUE_FIFO" || return 1
+    [[ "$cleanup_signal" == "continue" ]] || return 1
+  fi
   rm -rf "$tmp"
 }
 trap test_cleanup EXIT
