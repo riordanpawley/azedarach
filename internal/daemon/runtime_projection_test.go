@@ -281,12 +281,44 @@ func TestBuildRuntimeProjectionSurfacesGitFactAvailability(t *testing.T) {
 		t.Fatalf("unavailable Git facts = %+v", unavailable.Worktree)
 	}
 	cleanObservedAt := now.Add(-time.Second)
-	clean := buildRuntimeProjection("portable-project", nil, &daemonstate.WorktreeState{
+	timestampOnly := buildRuntimeProjection("portable-project", nil, &daemonstate.WorktreeState{
 		ProjectID: "portable-project", IssueID: "task-1", Path: "/tmp/portable-task", Branch: "worker/task-1",
 		GitStatusUpdated: &cleanObservedAt,
 	})
+	if timestampOnly.Worktree.GitFactsAvailability != string(domain.GitFactsUnavailable) || timestampOnly.Worktree.GitFactsReason != "git_status_not_observed" {
+		t.Fatalf("timestamp-only Git facts = %+v", timestampOnly.Worktree)
+	}
+	cleanStatusRaw, err := json.Marshal(git.GitStatus{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clean := buildRuntimeProjection("portable-project", nil, &daemonstate.WorktreeState{
+		ProjectID: "portable-project", IssueID: "task-1", Path: "/tmp/portable-task", Branch: "worker/task-1",
+		GitStatusRaw: cleanStatusRaw, GitStatusUpdated: &cleanObservedAt,
+	})
 	if clean.Worktree.GitFactsAvailability != string(domain.GitFactsAvailable) || clean.Worktree.GitFactsReason != "" {
 		t.Fatalf("clean observed Git facts = %+v", clean.Worktree)
+	}
+	for _, invalidStatus := range []struct {
+		name string
+		raw  []byte
+	}{
+		{name: "malformed object", raw: []byte(`{"has_changes":`)},
+		{name: "null", raw: []byte(`null`)},
+		{name: "non-object", raw: []byte(`[]`)},
+	} {
+		t.Run(invalidStatus.name, func(t *testing.T) {
+			malformed := buildRuntimeProjection("portable-project", nil, &daemonstate.WorktreeState{
+				ProjectID: "portable-project", IssueID: "task-1", Path: "/tmp/portable-task", Branch: "worker/task-1",
+				GitStatusRaw: invalidStatus.raw, GitStatusUpdated: &cleanObservedAt,
+			})
+			if malformed.Worktree.GitFactsAvailability != string(domain.GitFactsPartial) || malformed.Worktree.GitFactsReason != "git_status_invalid" {
+				t.Fatalf("invalid Git facts = %+v", malformed.Worktree)
+			}
+			if malformed.Git.HasUncommittedChanges || malformed.Git.HasConflicts || len(malformed.Git.ConflictFiles) != 0 {
+				t.Fatalf("invalid Git payload leaked zero-value facts as observed: %+v", malformed.Git)
+			}
+		})
 	}
 	statusRaw, err := json.Marshal(git.GitStatus{HasChanges: true})
 	if err != nil {

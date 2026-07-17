@@ -15,6 +15,17 @@ const (
 
 const DefaultGitFactsStaleAfter = 30 * time.Second
 
+// GitFactsStatusState describes whether the projected Git status payload can
+// supply facts. An observation timestamp alone is not evidence that a payload
+// exists or decoded successfully.
+type GitFactsStatusState uint8
+
+const (
+	GitFactsStatusMissing GitFactsStatusState = iota
+	GitFactsStatusValid
+	GitFactsStatusInvalid
+)
+
 // GitFactsObservation makes degraded external Git state explicit without
 // withholding the durable task snapshot.
 type GitFactsObservation struct {
@@ -29,12 +40,15 @@ func (o GitFactsObservation) IsZero() bool {
 
 // DeriveGitFactsObservation classifies already-projected Git facts. It never
 // performs external observation itself.
-func DeriveGitFactsObservation(hasWorktree, hasStatus bool, observedAt, now time.Time, staleAfter time.Duration) GitFactsObservation {
+func DeriveGitFactsObservation(hasWorktree bool, statusState GitFactsStatusState, observedAt, now time.Time, staleAfter time.Duration) GitFactsObservation {
 	if !hasWorktree {
 		return GitFactsObservation{Availability: GitFactsUnavailable, Reason: "worktree_unavailable"}
 	}
-	if !hasStatus {
+	if statusState == GitFactsStatusMissing {
 		return GitFactsObservation{Availability: GitFactsUnavailable, Reason: "git_status_not_observed"}
+	}
+	if statusState == GitFactsStatusInvalid {
+		return GitFactsObservation{Availability: GitFactsPartial, Reason: "git_status_invalid"}
 	}
 	if observedAt.IsZero() {
 		return GitFactsObservation{Availability: GitFactsPartial, Reason: "observation_time_unavailable"}

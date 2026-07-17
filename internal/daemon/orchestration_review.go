@@ -134,6 +134,33 @@ func (a daemonOrchestrationAuthority) reviewQueue(ctx context.Context, projectID
 	return out, nil
 }
 
+func reviewWorktreeRefreshIssueIDs(reviewTasks, allTasks []domain.Task) []string {
+	byID := make(map[string]domain.Task, len(allTasks))
+	for _, task := range allTasks {
+		byID[task.ID.String()] = task
+	}
+	ids := taskIDsFromTasks(reviewTasks)
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		seen[id] = struct{}{}
+	}
+	for _, task := range reviewTasks {
+		for parentID := domain.TaskParentIssueID(task); parentID != ""; {
+			if _, ok := seen[parentID]; ok {
+				break
+			}
+			seen[parentID] = struct{}{}
+			ids = append(ids, parentID)
+			parent, ok := byID[parentID]
+			if !ok {
+				break
+			}
+			parentID = domain.TaskParentIssueID(parent)
+		}
+	}
+	return ids
+}
+
 func orchestrationReviewScopeTasks(tasks []domain.Task, scope domain.OrchestrationScope, requestedIssueIDs []string) []domain.Task {
 	requested := make(map[string]struct{}, len(requestedIssueIDs))
 	for _, issueID := range requestedIssueIDs {

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"time"
@@ -53,8 +54,19 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 		if projection.IssueID == "" {
 			projection.IssueID = parseIssueIDOrZero(worktree.IssueID)
 		}
-		hasGitObservation := len(worktree.GitStatusRaw) > 0 || worktree.GitStatusUpdated != nil
-		gitFacts := domain.DeriveGitFactsObservation(path != "", hasGitObservation, timeValue(worktree.GitStatusUpdated), timeNow().UTC(), domain.DefaultGitFactsStaleAfter)
+		gitStatusState := domain.GitFactsStatusMissing
+		var status git.GitStatus
+		if len(worktree.GitStatusRaw) > 0 {
+			trimmedStatus := bytes.TrimSpace(worktree.GitStatusRaw)
+			if len(trimmedStatus) == 0 || trimmedStatus[0] != '{' {
+				gitStatusState = domain.GitFactsStatusInvalid
+			} else if err := json.Unmarshal(trimmedStatus, &status); err != nil {
+				gitStatusState = domain.GitFactsStatusInvalid
+			} else {
+				gitStatusState = domain.GitFactsStatusValid
+			}
+		}
+		gitFacts := domain.DeriveGitFactsObservation(path != "", gitStatusState, timeValue(worktree.GitStatusUpdated), timeNow().UTC(), domain.DefaultGitFactsStaleAfter)
 		projection.Worktree = protocol.RuntimeWorktreeProjection{
 			Exists:               path != "",
 			Path:                 path,
@@ -67,17 +79,14 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 		if projection.Session.SessionID != "" && projection.Session.Worktree == "" {
 			projection.Session.Worktree = path
 		}
-		if len(worktree.GitStatusRaw) > 0 {
-			var status git.GitStatus
-			if err := json.Unmarshal(worktree.GitStatusRaw, &status); err == nil {
-				projection.Git.HasUncommittedChanges = status.HasChanges
-				projection.Git.HasConflicts = status.HasConflicts
-				projection.Git.ConflictFiles = append([]string(nil), status.Conflicted...)
-				projection.Git.GitAdditions = status.GitAdditions
-				projection.Git.GitDeletions = status.GitDeletions
-				projection.Git.GitAheadCount = status.GitAheadCount
-				projection.Git.GitBehindCount = status.GitBehindCount
-			}
+		if gitStatusState == domain.GitFactsStatusValid {
+			projection.Git.HasUncommittedChanges = status.HasChanges
+			projection.Git.HasConflicts = status.HasConflicts
+			projection.Git.ConflictFiles = append([]string(nil), status.Conflicted...)
+			projection.Git.GitAdditions = status.GitAdditions
+			projection.Git.GitDeletions = status.GitDeletions
+			projection.Git.GitAheadCount = status.GitAheadCount
+			projection.Git.GitBehindCount = status.GitBehindCount
 		}
 	}
 	if worktree == nil {
