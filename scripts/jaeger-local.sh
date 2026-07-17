@@ -590,7 +590,7 @@ jaeger_start_locked() {
   local engine="$1" name="$2" fixed_ports="$3" storage="$4"
   local image="${AZEDARACH_JAEGER_IMAGE:-cr.jaegertracing.io/jaegertracing/jaeger:2.19.0}"
   local memory="${AZEDARACH_JAEGER_MEMORY:-1g}"
-  local max_traces="${AZEDARACH_JAEGER_MAX_TRACES:-2000}"
+  local max_traces="${AZEDARACH_JAEGER_MAX_TRACES:-40000}"
   local ttl="${AZEDARACH_JAEGER_BADGER_TTL:-24h}"
   local volume="${AZEDARACH_JAEGER_VOLUME:-${AZEDARACH_JAEGER_CONTAINER:-azedarach-jaeger}-data}"
   local config="/etc/jaeger/jaeger-${storage}.yaml"
@@ -760,7 +760,7 @@ jaeger_labels_match() {
     grep -qx "azedarach.jaeger.image = ${image}" <<<"$labels" &&
     grep -qx "azedarach.jaeger.storage = ${storage}" <<<"$labels" &&
     grep -qx "azedarach.jaeger.volume = ${volume}" <<<"$labels" &&
-    grep -qx "azedarach.jaeger.max_traces = ${AZEDARACH_JAEGER_MAX_TRACES:-2000}" <<<"$labels" &&
+    grep -qx "azedarach.jaeger.max_traces = ${AZEDARACH_JAEGER_MAX_TRACES:-40000}" <<<"$labels" &&
     grep -qx "azedarach.jaeger.badger_ttl = ${AZEDARACH_JAEGER_BADGER_TTL:-24h}" <<<"$labels"
 }
 
@@ -773,10 +773,11 @@ jaeger_ensure_locked() {
     echo "Skipping Jaeger (AZEDARACH_SKIP_JAEGER=1)"
     return 0
   fi
-  local engine name storage
+  local engine name storage configured_limit live_limit
   engine="$(jaeger_choose_engine)" || { echo "Warning: docker/podman not found; skipping Jaeger startup" >&2; return 0; }
   name="${AZEDARACH_JAEGER_CONTAINER:-azedarach-jaeger}"
   storage="$(jaeger_storage_type)"
+  configured_limit="${AZEDARACH_JAEGER_MAX_TRACES:-40000}"
   jaeger_reclaim_fallbacks_locked "$engine" "$name" 1
 
   if "$engine" inspect "$name" >/dev/null 2>&1; then
@@ -786,10 +787,11 @@ jaeger_ensure_locked() {
       return 0
     fi
     if ! jaeger_labels_match "$engine" "$name" "$storage"; then
-      echo "Warning: recreating $name to apply supported bounded Jaeger settings" >&2
+      live_limit="$(jaeger_container_trace_limit "$engine" "$name")"
+      echo "Warning: recreating $name to apply supported bounded Jaeger settings (configured trace limit: $configured_limit; existing effective trace limit: ${live_limit:-unknown})" >&2
       "$engine" rm -f "$name" >/dev/null 2>&1 || true
     elif jaeger_running "$engine" "$name"; then
-      echo "Jaeger already running: $name"
+      echo "Jaeger already running: $name (effective trace limit: $(jaeger_container_trace_limit "$engine" "$name"))"
       jaeger_activate_primary_locked "$engine" "$name" || true
       return 0
     elif "$engine" start "$name" >/dev/null 2>&1; then
@@ -806,7 +808,7 @@ jaeger_ensure_locked() {
     fi
   fi
 
-  echo "Starting Jaeger container: $name"
+  echo "Starting Jaeger container: $name (configured trace limit: $configured_limit)"
   if ! jaeger_start_locked "$engine" "$name" 1 "$storage"; then
     "$engine" rm -f "$name" >/dev/null 2>&1 || true
     jaeger_start_fallback_locked "$engine" "$name" || echo "Warning: failed to start Jaeger fallback" >&2
@@ -815,9 +817,20 @@ jaeger_ensure_locked() {
   jaeger_activate_primary_locked "$engine" "$name" || true
 }
 
+jaeger_container_trace_limit() {
+  "$1" inspect -f '{{index .Config.Labels "azedarach.jaeger.max_traces"}}' "$2" 2>/dev/null || true
+}
+
 jaeger_inventory() {
-  local engine="$1" primary="${AZEDARACH_JAEGER_CONTAINER:-azedarach-jaeger}" selected remainder
+  local engine="$1" primary="${AZEDARACH_JAEGER_CONTAINER:-azedarach-jaeger}" selected remainder configured_limit live_limit
   selected="${AZEDARACH_JAEGER_VOLUME:-${primary}-data}"
+  configured_limit="${AZEDARACH_JAEGER_MAX_TRACES:-40000}"
+  live_limit="$(jaeger_container_trace_limit "$engine" "$primary")"
+  echo "Configured Jaeger trace limit: $configured_limit"
+  echo "Primary effective trace limit: ${live_limit:-unavailable}"
+  if [[ -n "$live_limit" && "$live_limit" != "$configured_limit" ]]; then
+    echo "Warning: primary trace limit is stale; run the supported startup flow to recreate it" >&2
+  fi
   echo "Managed fallback containers:"
   jaeger_matching_fallbacks "$engine" "$primary"
   echo "Legacy fallback containers (running containers are never cleaned):"

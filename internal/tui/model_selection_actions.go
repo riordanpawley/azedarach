@@ -675,7 +675,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "a":
-		m.beginMutationFeedback(fmt.Sprintf("Attach queued for %s", task.ID))
+		m.beginMutationFeedback(fmt.Sprintf("Attaching to %s", task.ID))
 		return m, m.attachSessionCmd(task.ID.String())
 	case "p":
 		// TODO: Pause session

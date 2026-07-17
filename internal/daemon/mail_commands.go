@@ -126,7 +126,7 @@ func (d *Daemon) handleMailSend(ctx context.Context, req protocol.RequestEnvelop
 			ProjectID:       naming.ProjectID(projectID),
 			Meta:            req.Meta,
 			Revision:        resp.Revision,
-			Event:           "mail.appended",
+			Event:           protocol.EventMailAppended,
 			Kind:            protocol.EnvelopeKindEvent,
 			EmittedAt:       event.CreatedAt,
 			Body:            out,

@@ -6,7 +6,7 @@ extensions:
     backends:
       local:
         memory:
-          max_traces: ${env:JAEGER_MAX_TRACES:-2000}
+          max_traces: ${env:JAEGER_MAX_TRACES:-40000}
 receivers:
   otlp:
     protocols:

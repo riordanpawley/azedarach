@@ -133,12 +133,23 @@ func (a ValidationNestedAuthorization) Validate() error {
 	return nil
 }
 
+type ValidationSnapshotFreshness string
+
+const (
+	ValidationSnapshotFresh       ValidationSnapshotFreshness = "fresh"
+	ValidationSnapshotStale       ValidationSnapshotFreshness = "stale"
+	ValidationSnapshotUnavailable ValidationSnapshotFreshness = "unavailable"
+)
+
 type ValidationSnapshot struct {
-	Schema   string              `json:"schema"`
-	Active   []ValidationRequest `json:"active"`
-	Queued   []ValidationRequest `json:"queued"`
-	Recent   []ValidationRequest `json:"recent,omitempty"`
-	Revision int64               `json:"revision"`
+	Schema         string                      `json:"schema"`
+	Active         []ValidationRequest         `json:"active"`
+	Queued         []ValidationRequest         `json:"queued"`
+	Recent         []ValidationRequest         `json:"recent,omitempty"`
+	Revision       int64                       `json:"revision"`
+	Freshness      ValidationSnapshotFreshness `json:"freshness"`
+	ObservedAt     time.Time                   `json:"observed_at"`
+	DegradedReason string                      `json:"degraded_reason,omitempty"`
 }
 
 type ValidationAcquire struct {

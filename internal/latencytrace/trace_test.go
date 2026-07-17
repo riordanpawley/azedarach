@@ -1,6 +1,8 @@
 package latencytrace
 
 import (
+	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -167,4 +169,110 @@ func TestLogPhaseEmitsSpanWhenOTelEnvOverridesLatencyTrace(t *testing.T) {
 	if spans := recorder.Ended(); len(spans) != 1 {
 		t.Fatalf("ended spans = %d, want 1", len(spans))
 	}
+}
+
+func TestStandaloneDependencyRetentionBoundsRootSpanVolume(t *testing.T) {
+	t.Setenv(EnvVar, "")
+	t.Setenv(observability.EnvVar, "true")
+	SetConfigEnabled(false)
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(oteltrace.NewNoopTracerProvider())
+		SetConfigEnabled(false)
+	})
+
+	start := time.Unix(1_000, 0)
+	fastEnd := func() time.Time { return start.Add(10 * time.Millisecond) }
+	for range 1_000 {
+		_, endSpan := startSpanAt(context.Background(), "dependency", "sqlite.query", start, fastEnd,
+			"dependency.name", "sqlite",
+			"dependency.operation", "select",
+		)
+		endSpan(nil)
+	}
+	if spans := recorder.Ended(); len(spans) != 0 {
+		t.Fatalf("fast successful standalone dependency spans = %d, want 0", len(spans))
+	}
+
+	_, endError := startSpanAt(context.Background(), "dependency", "sqlite.query", start, fastEnd,
+		"dependency.name", "sqlite",
+		"dependency.operation", "select",
+	)
+	endError(errors.New("query failed"))
+	assertStandaloneSpanReason(t, recorder.Ended(), "error")
+
+	before := len(recorder.Ended())
+	slowEnd := func() time.Time { return start.Add(standaloneDependencySlowThreshold) }
+	_, endSlow := startSpanAt(context.Background(), "dependency", "git", start, slowEnd,
+		"dependency.name", "git",
+		"dependency.operation", "status",
+	)
+	endSlow(nil)
+	assertStandaloneSpanReason(t, recorder.Ended()[before:], "slow")
+
+	before = len(recorder.Ended())
+	_, endDiagnostic := startSpanAt(context.Background(), "dependency", "tmux", start, fastEnd,
+		"dependency.name", "tmux",
+		"dependency.operation", "list-panes",
+		"standalone.reason", "diagnostic",
+	)
+	endDiagnostic(nil)
+	assertStandaloneSpanReason(t, recorder.Ended()[before:], "diagnostic")
+
+	before = len(recorder.Ended())
+	parentCtx, parent := otel.Tracer("test").Start(context.Background(), "daemon.background_scan")
+	_, endParented := startSpanAt(parentCtx, "dependency", "sqlite.query", start, fastEnd,
+		"dependency.name", "sqlite",
+		"dependency.operation", "select",
+	)
+	endParented(nil)
+	parent.End()
+	spans := recorder.Ended()[before:]
+	if len(spans) != 2 {
+		t.Fatalf("parented trace spans = %d, want dependency plus parent", len(spans))
+	}
+	if spans[0].Parent().SpanID() != parent.SpanContext().SpanID() {
+		t.Fatalf("dependency parent = %s, want %s", spans[0].Parent().SpanID(), parent.SpanContext().SpanID())
+	}
+}
+
+func TestStandaloneDependencyPhaseRetainsErrorOutcome(t *testing.T) {
+	t.Setenv(EnvVar, "")
+	t.Setenv(observability.EnvVar, "true")
+	SetConfigEnabled(false)
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(oteltrace.NewNoopTracerProvider())
+		SetConfigEnabled(false)
+	})
+
+	LogPhaseContext(context.Background(), nil, "dependency", "sqlite.issue.runtime_projection", time.Now(),
+		"dependency.name", "sqlite",
+		"dependency.operation", "issue.runtime_projection",
+		"outcome", "error",
+	)
+	assertStandaloneSpanReason(t, recorder.Ended(), "error")
+}
+
+func assertStandaloneSpanReason(t *testing.T, spans []sdktrace.ReadOnlySpan, want string) {
+	t.Helper()
+	if len(spans) != 1 {
+		t.Fatalf("standalone spans = %d, want 1", len(spans))
+	}
+	if spans[0].Parent().IsValid() {
+		t.Fatalf("standalone span parent = %s, want invalid", spans[0].Parent().SpanID())
+	}
+	for _, attr := range spans[0].Attributes() {
+		if string(attr.Key) == "standalone.reason" {
+			if got := attr.Value.AsString(); got != want {
+				t.Fatalf("standalone.reason = %q, want %q", got, want)
+			}
+			return
+		}
+	}
+	t.Fatal("standalone span missing standalone.reason")
 }
