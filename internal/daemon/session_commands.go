@@ -3384,7 +3384,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 		tmuxNameByIssueKey[key] = name
 	}
 
-	validationIssueIDs := reconcileSessionValidationIssueIDs(targetIssueKeys, tmuxSet, snapshotSessions, namingScope)
+	validationIssueIDs, deferredValidationIssueCount := reconcileSessionValidationIssueIDs(targetIssueKeys, tmuxSet, snapshotSessions, namingScope)
 	if len(targetIssueKeys) == 0 && strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID)) != "" {
 		if issueClient := d.issueClientForProject(projectID); issueClient != nil {
 			divergentIssueIDs, divergenceErr := issueClient.ListActiveRuntimeDivergenceIssueIDs(ctx)
@@ -3393,6 +3393,15 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 			}
 			validationIssueIDs = normalizeRuntimeReconcileIssueIDs(append(validationIssueIDs, divergentIssueIDs...))
 		}
+	}
+	validationIssueKeys := runtimeReconcileTargetIssueKeySet(validationIssueIDs)
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.Debug("daemon session reconcile candidates selected",
+			"project_id", projectID,
+			"target_issue_id", targetIssueID,
+			"candidate_issue_count", len(validationIssueIDs),
+			"deferred_quiescent_issue_count", deferredValidationIssueCount,
+		)
 	}
 	issuesByKey, issueValidationEnabled, err := d.reconcileIssueKeyIndex(ctx, projectID, validationIssueIDs)
 	if err != nil {
@@ -3517,6 +3526,9 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 		issueID := sessionProjectionIssueID(session, namingScope)
 		issueKey := sessionKey(issueID)
 		if !matchesTargetIssue(issueKey) {
+			continue
+		}
+		if _, selected := validationIssueKeys[issueKey]; !selected {
 			continue
 		}
 		if issueKey == "" || !isValidIssueKey(issueKey) {
@@ -3727,6 +3739,8 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 			"recreated_tmux_sessions", result.RecreatedTmuxSessions,
 			"aligned_daemon_sessions", result.AlignedDaemonSessions,
 			"repaired_issue_lifecycle", result.RepairedIssueLifecycle,
+			"candidate_issue_count", len(validationIssueIDs),
+			"deferred_quiescent_issue_count", deferredValidationIssueCount,
 		)
 	}
 	return result, errors.Join(lifecycleInvariantErrs...)
@@ -3743,8 +3757,9 @@ func runtimeReconcileTargetIssueKeySet(issueIDs []string) map[string]struct{} {
 	return keys
 }
 
-func reconcileSessionValidationIssueIDs(targetIssueKeys map[string]struct{}, tmuxSet map[string]struct{}, snapshotSessions []daemonstate.Session, namingScope string) []string {
+func reconcileSessionValidationIssueIDs(targetIssueKeys map[string]struct{}, tmuxSet map[string]struct{}, snapshotSessions []daemonstate.Session, namingScope string) ([]string, int) {
 	ids := make([]string, 0, len(tmuxSet)+len(snapshotSessions))
+	deferredIssueKeys := make(map[string]struct{})
 	targeted := len(targetIssueKeys) > 0
 	matchesTargetIssue := func(issueKey string) bool {
 		if !targeted {
@@ -3774,9 +3789,23 @@ func reconcileSessionValidationIssueIDs(targetIssueKeys map[string]struct{}, tmu
 		if !matchesTargetIssue(issueKey) {
 			continue
 		}
+		// Full reconciliation only needs issue data for live tmux sessions or
+		// durable intent that can recreate one. Historical stopped projections
+		// remain available to explicit issue reconciliation without expanding
+		// every background issue read to project size.
+		if _, targetedIssue := targetIssueKeys[issueKey]; !targetedIssue {
+			if _, live := tmuxSet[issueKey]; !live && !sessionProjectionCanRecreateTmuxSession(session) {
+				deferredIssueKeys[issueKey] = struct{}{}
+				continue
+			}
+		}
 		ids = append(ids, issueKey)
 	}
-	return normalizeRuntimeReconcileIssueIDs(ids)
+	selected := normalizeRuntimeReconcileIssueIDs(ids)
+	for _, issueID := range selected {
+		delete(deferredIssueKeys, sessionKey(issueID))
+	}
+	return selected, len(deferredIssueKeys)
 }
 
 func lifecycleManagedSessionProjection(session daemonstate.Session) bool {

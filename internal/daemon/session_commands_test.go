@@ -668,12 +668,22 @@ func TestReconcileSessionValidationIssueIDsUsesOnlyObservedCandidates(t *testing
 		"cpb": {},
 	}
 	snapshotSessions := []daemonstate.Session{
-		{ID: naming.CanonicalSessionID(namingScope, "cpc"), IssueID: "cpc"},
-		{ID: naming.CanonicalSessionID(namingScope, "cpa"), IssueID: "cpa"},
+		{ID: naming.CanonicalSessionID(namingScope, "cpc"), IssueID: "cpc", State: daemonstate.SessionStateRunning},
+		{ID: naming.CanonicalSessionID(namingScope, "cpc") + ".stopped-pane", IssueID: "cpc", State: daemonstate.SessionStateStopped, ObservedState: daemonstate.SessionStateStopped},
+		{ID: naming.CanonicalSessionID(namingScope, "cpa"), IssueID: "cpa", State: daemonstate.SessionStateStopped, ObservedState: daemonstate.SessionStateStopped},
 		{ID: "###", IssueID: ""},
 	}
+	for i := 0; i < 1300; i++ {
+		issueID := fmt.Sprintf("stopped-%04d", i)
+		snapshotSessions = append(snapshotSessions, daemonstate.Session{
+			ID:            naming.CanonicalSessionID(namingScope, issueID),
+			IssueID:       issueID,
+			State:         daemonstate.SessionStateStopped,
+			ObservedState: daemonstate.SessionStateStopped,
+		})
+	}
 
-	ids := reconcileSessionValidationIssueIDs(nil, tmuxSet, snapshotSessions, namingScope)
+	ids, deferred := reconcileSessionValidationIssueIDs(nil, tmuxSet, snapshotSessions, namingScope)
 	got := map[string]struct{}{}
 	for _, id := range ids {
 		got[id] = struct{}{}
@@ -685,6 +695,9 @@ func TestReconcileSessionValidationIssueIDsUsesOnlyObservedCandidates(t *testing
 	}
 	if len(got) != 3 {
 		t.Fatalf("validation ids = %v, want only observed candidates", ids)
+	}
+	if deferred != 1300 {
+		t.Fatalf("deferred validation issue count = %d, want 1300 quiescent stopped issues", deferred)
 	}
 }
 
@@ -699,9 +712,12 @@ func TestReconcileSessionValidationIssueIDsHonorsTargetIssue(t *testing.T) {
 		{ID: naming.CanonicalSessionID(namingScope, "cpb"), IssueID: "cpb"},
 	}
 
-	ids := reconcileSessionValidationIssueIDs(map[string]struct{}{"cpa": {}}, tmuxSet, snapshotSessions, namingScope)
+	ids, deferred := reconcileSessionValidationIssueIDs(map[string]struct{}{"cpa": {}}, tmuxSet, snapshotSessions, namingScope)
 	if len(ids) != 1 || ids[0] != "cpa" {
 		t.Fatalf("validation ids = %v, want [cpa]", ids)
+	}
+	if deferred != 0 {
+		t.Fatalf("deferred validation issue count = %d, want 0 outside explicit target scope", deferred)
 	}
 }
 
@@ -718,7 +734,7 @@ func TestReconcileSessionValidationIssueIDsHonorsMultipleTargetIssues(t *testing
 		{ID: naming.CanonicalSessionID(namingScope, "cpc"), IssueID: "cpc"},
 	}
 
-	ids := reconcileSessionValidationIssueIDs(map[string]struct{}{"cpa": {}, "cpc": {}}, tmuxSet, snapshotSessions, namingScope)
+	ids, deferred := reconcileSessionValidationIssueIDs(map[string]struct{}{"cpa": {}, "cpc": {}}, tmuxSet, snapshotSessions, namingScope)
 	got := map[string]struct{}{}
 	for _, id := range ids {
 		got[id] = struct{}{}
@@ -730,6 +746,9 @@ func TestReconcileSessionValidationIssueIDsHonorsMultipleTargetIssues(t *testing
 	}
 	if _, ok := got["cpb"]; ok || len(got) != 2 {
 		t.Fatalf("validation ids = %v, want only cpa/cpc", ids)
+	}
+	if deferred != 0 {
+		t.Fatalf("deferred validation issue count = %d, want 0 outside explicit target scope", deferred)
 	}
 }
 
@@ -6604,6 +6623,72 @@ func TestReconcileResolvesLifecycleDivergenceAfterStoppedRuntime(t *testing.T) {
 	}
 	if active != 0 {
 		t.Fatalf("active divergence=%d, want resolved", active)
+	}
+}
+
+func TestUntargetedReconcileDefersQuiescentStoppedProjectionWithoutPruning(t *testing.T) {
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issueClient.CloseDB() })
+	issueID, err := issueClient.Create(context.Background(), issues.CreateTaskParams{Title: "quiescent stopped issue", Type: domain.TypeBug, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	sessionID := naming.CanonicalSessionID(repoDir, issueID)
+	if err := upsertSessionStateFixture(runtimeStore, context.Background(), projectID, daemonstate.Session{
+		ID:            sessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateStopped,
+		ObservedState: daemonstate.SessionStateStopped,
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tmuxRunner := newTestTmuxRunner("")
+	delete(tmuxRunner.sessions, "")
+	store := daemonstate.NewStore()
+	d := &Daemon{
+		cfg:          Config{RepoDir: repoDir, Logger: slog.Default()},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issueClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(&testGitRunner{}, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(&testGitRunner{}, repoDir, slog.Default()),
+		},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			repoDir: runtimeStore,
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		issueClientsByRoot: map[string]*issues.Client{
+			repoDir: issueClient,
+		},
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issueClient,
+		},
+	}
+	if _, err := d.reconcileTmuxAndDaemonSessions(context.Background(), projectID, ""); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := runtimeStore.ListSessionIntentStates(context.Background(), projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].IssueID != issueID || !daemonSessionProjectionStopped(rows[0]) {
+		t.Fatalf("quiescent stopped projection = %+v, want retained stopped intent for %s", rows, issueID)
 	}
 }
 
