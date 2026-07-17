@@ -247,7 +247,10 @@ func TestTerminalPersistenceFailureRetainsAuthorityUntilRetrySucceeds(t *testing
 	}); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(50 * time.Millisecond)
+	queue := mgr.Queue(daemonops.Query{})
+	if len(queue.Running) != 1 || queue.Running[0].Record.ID != "op-first" || len(queue.Queued) != 1 || queue.Queued[0].Record.ID != "op-second" || !containsString(queue.Queued[0].BlockingOperationIDs, "op-first") {
+		t.Fatalf("terminal retry authority snapshot=%+v, want op-first blocking op-second", queue)
+	}
 	select {
 	case <-secondStarted:
 		t.Fatal("resource authority released while first operation remained durably running")
@@ -565,10 +568,14 @@ func TestSubmitSerializesConflictingResources(t *testing.T) {
 		t.Fatalf("second submit error: %v", err)
 	}
 
+	queue := mgr.Queue(daemonops.Query{})
+	if len(queue.Running) != 1 || len(queue.Queued) != 1 || queue.Queued[0].Record.Kind != "worktree.cleanup" || !containsString(queue.Queued[0].BlockingOperationIDs, queue.Running[0].Record.ID) {
+		t.Fatalf("conflicting resource snapshot=%+v, want queued cleanup blocked by running merge", queue)
+	}
 	select {
 	case <-secondStarted:
 		t.Fatal("second operation started before conflicting resource was released")
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
 
 	close(firstRelease)

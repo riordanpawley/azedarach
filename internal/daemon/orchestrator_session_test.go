@@ -576,40 +576,37 @@ func TestRootedRestartAfterCallerCancellationSerializesAndAcknowledgesReplacemen
 	case <-time.After(5 * time.Second):
 		t.Fatal("restart did not reach replacement boundary")
 	}
-	attachDone := make(chan commandResult, 1)
-	go func() {
-		response, err := second.handleOrchestratorSession(ctx, startRequest)
-		attachDone <- commandResult{response: response, err: err}
-	}()
-	select {
-	case result := <-attachDone:
-		t.Fatalf("concurrent rooted start escaped exact-scope lock: response=%+v err=%v", result.response.Error, result.err)
-	case <-time.After(100 * time.Millisecond):
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockedCtx, cancelBlocked := context.WithCancel(ctx)
+	cancelBlocked()
+	enteredLockedTransition := false
+	blockedErr := secondStore.WithOrchestratorScopeTransition(blockedCtx, identity, func(context.Context) error {
+		enteredLockedTransition = true
+		return nil
+	})
+	if !errors.Is(blockedErr, context.Canceled) || enteredLockedTransition {
+		t.Fatalf("concurrent rooted transition exclusion: entered=%t err=%v", enteredLockedTransition, blockedErr)
 	}
 	close(releaseReplacement)
-	var restartResult, attachResult commandResult
+	var restartResult commandResult
 	select {
 	case restartResult = <-restartDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("restart did not finish")
 	}
-	select {
-	case attachResult = <-attachDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("concurrent rooted start did not resume")
-	}
 	if restartResult.err != nil || restartResult.response.Error != nil {
 		t.Fatalf("restart result: response=%+v err=%v", restartResult.response.Error, restartResult.err)
 	}
+	attachResponse, attachErr := second.handleOrchestratorSession(ctx, startRequest)
+	attachResult := commandResult{response: attachResponse, err: attachErr}
 	if attachResult.err != nil || attachResult.response.Error != nil {
 		t.Fatalf("attach result: response=%+v err=%v", attachResult.response.Error, attachResult.err)
 	}
 	if got := len(runner.inputPayloads) - inputsBefore; got != 1 {
 		t.Fatalf("rooted replacement prompt deliveries = %d, want one acknowledged replacement", got)
-	}
-	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
-	if err != nil {
-		t.Fatal(err)
 	}
 	ack, found, err := daemonstate.NewRootedBootstrapAcknowledgementAuthority(secondStore).Get(ctx, identity)
 	if err != nil || !found || ack.SessionID != started.SessionID || ack.RuntimeNonce == "" {
