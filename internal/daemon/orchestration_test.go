@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1431,7 +1432,8 @@ func TestProjectOrchestrationSnapshotRefreshesCrossProcessOwnership(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir()})
+	runtimeRepoDir := t.TempDir()
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: runtimeRepoDir})
 	t.Cleanup(func() { _ = runtime.Close() })
 	_, err = runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "focused", LeaseToken: "test-secret", ProjectID: "proj", IssueID: id, Class: domain.ValidationClassShared, Profile: "focused", Command: "go test ./internal/daemon", SourceRevision: "abc123", TTL: time.Minute}, time.Now().UTC())
 	if err != nil {
@@ -1456,12 +1458,28 @@ func TestProjectOrchestrationSnapshotRefreshesCrossProcessOwnership(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	validationWriter, err := sql.Open("sqlite", "file:"+filepath.ToSlash(filepath.Join(runtimeRepoDir, ".azedarach", "azedarach.db"))+"?_pragma=busy_timeout(100)&_txlock=immediate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = validationWriter.Close() })
+	validationTx, err := validationWriter.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = validationTx.Rollback() })
+	if _, err := validationTx.ExecContext(ctx, `UPDATE daemon_validation_state SET revision=revision WHERE project_id='proj'`); err != nil {
+		t.Fatal(err)
+	}
 	after, err := authority.Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := candidateClass(after.Candidates, id); got != string(domain.OrchestrationCandidateOwnedElsewhere) {
 		t.Fatalf("after class = %q, want owned-elsewhere", got)
+	}
+	if after.ValidationCapacity == nil || after.ValidationCapacity.Freshness != domain.ValidationSnapshotFresh {
+		t.Fatalf("validation capacity = %+v, want fresh snapshot during writer", after.ValidationCapacity)
 	}
 }
 

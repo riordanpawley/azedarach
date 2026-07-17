@@ -35,6 +35,28 @@ func TestRootlessOrchestrateParsersAcceptProjectScope(t *testing.T) {
 	}
 }
 
+func TestPrintProjectOrchestrationSnapshotReportsDegradedValidationCapacity(t *testing.T) {
+	output := captureStdout(t, func() error {
+		printProjectOrchestrationSnapshot(protocol.OrchestrationSnapshot{
+			Scope: domain.ProjectOrchestrationScope(),
+			ValidationCapacity: &domain.ValidationSnapshot{
+				Freshness: domain.ValidationSnapshotStale, Revision: 7,
+				Active:         []domain.ValidationRequest{{RequestID: "gate"}},
+				DegradedReason: "validation capacity has expired leases pending reconciliation",
+			},
+		})
+		return nil
+	})
+	for _, want := range []string{
+		"Validation capacity: freshness=stale active=1 queued=0 revision=7",
+		"validation capacity has expired leases pending reconciliation",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q: %s", want, output)
+		}
+	}
+}
+
 func TestParseOrchestrateReviewArgsEnforcesDecisionShape(t *testing.T) {
 	accept, err := ParseOrchestrateReviewArgs("accept", []string{"--root", "az-root", "--issue", "az-2", "--issue", "az-1", "--issue", "az-2", "--intent-key", "accept-1", "--json"})
 	if err != nil {
