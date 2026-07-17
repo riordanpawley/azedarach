@@ -58,39 +58,55 @@ func TestProjectReviewQueuePrioritizesReviewAndExcludesForeignOwnedWork(t *testi
 	}
 }
 
-func TestReviewInspectionExposesExactDiffBaseAndHeadRevisions(t *testing.T) {
+func TestReviewInspectionKeepsStableScopeAcrossCandidateRevisions(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
-	d.git = git.NewClient(revisionReviewGitRunner{}, slog.Default())
+	runner := &revisionReviewGitRunner{headRevision: "head-revision-1"}
+	d.git = git.NewClient(runner, slog.Default())
 	task, err := client.GetWithRuntime(ctx, "project", issueID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	worktrees := map[string]git.Worktree{issueID: {IssueID: issueID, Path: repoDir, Branch: "feature/review"}}
 
-	inspection := (daemonOrchestrationAuthority{daemon: d}).reviewInspection(ctx, "project", repoDir, "orchestrator", task, map[string]domain.Task{issueID: task}, worktrees)
-	if inspection.DiffBaseRevision != "base-revision" || inspection.HeadRevision != "head-revision" {
-		t.Fatalf("inspection revisions = base:%q head:%q", inspection.DiffBaseRevision, inspection.HeadRevision)
+	authority := daemonOrchestrationAuthority{daemon: d}
+	first := authority.reviewInspection(ctx, "project", repoDir, "orchestrator", task, map[string]domain.Task{issueID: task}, worktrees)
+	runner.headRevision = "head-revision-2"
+	second := authority.reviewInspection(ctx, "project", repoDir, "orchestrator", task, map[string]domain.Task{issueID: task}, worktrees)
+
+	if first.DiffBaseRevision != "base-revision" || first.HeadRevision != "head-revision-1" {
+		t.Fatalf("first revisions = base:%q head:%q", first.DiffBaseRevision, first.HeadRevision)
 	}
-	wantScope := "base-revision..head-revision"
-	if inspection.DiffScope != wantScope {
-		t.Fatalf("diff scope = %q, want %q", inspection.DiffScope, wantScope)
+	if second.DiffBaseRevision != "base-revision" || second.HeadRevision != "head-revision-2" {
+		t.Fatalf("second revisions = base:%q head:%q", second.DiffBaseRevision, second.HeadRevision)
+	}
+	wantScope := "issue:" + issueID + ":base:main@base-revision"
+	if first.DiffScope != wantScope || second.DiffScope != wantScope {
+		t.Fatalf("diff scopes = first:%q second:%q, want stable %q", first.DiffScope, second.DiffScope, wantScope)
+	}
+	if first.DiffRange != "base-revision..head-revision-1" || second.DiffRange != "base-revision..head-revision-2" {
+		t.Fatalf("diff ranges = first:%q second:%q", first.DiffRange, second.DiffRange)
+	}
+	if incremental := first.HeadRevision + ".." + second.HeadRevision; incremental != "head-revision-1..head-revision-2" {
+		t.Fatalf("incremental range = %q, want prior reviewed head through current head", incremental)
 	}
 }
 
-type revisionReviewGitRunner struct{}
+type revisionReviewGitRunner struct {
+	headRevision string
+}
 
-func (revisionReviewGitRunner) Run(_ context.Context, args ...string) (string, error) {
+func (r *revisionReviewGitRunner) Run(_ context.Context, args ...string) (string, error) {
 	command := strings.Join(args, " ")
 	switch {
-	case strings.Contains(command, " merge-base ") && strings.HasSuffix(command, " head-revision"):
+	case strings.Contains(command, " merge-base ") && strings.HasSuffix(command, " "+r.headRevision):
 		return "base-revision\n", nil
 	case strings.Contains(command, " rev-parse --verify HEAD"):
-		return "head-revision\n", nil
+		return r.headRevision + "\n", nil
 	case strings.Contains(command, " diff "):
 		return "1 file changed, 1 insertion(+)\n", nil
 	default:

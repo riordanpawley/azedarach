@@ -122,6 +122,7 @@ type OrchestrationReview struct {
 	DiffBaseRevision   string                         `json:"diff_base_revision,omitempty"`
 	HeadRevision       string                         `json:"head_revision,omitempty"`
 	DiffScope          string                         `json:"diff_scope,omitempty"`
+	DiffRange          string                         `json:"diff_range,omitempty"`
 	DiffStat           string                         `json:"diff_stat,omitempty"`
 	ExecutionOwner     string                         `json:"execution_owner,omitempty"`
 	OrchestrationOwner string                         `json:"orchestration_owner,omitempty"`

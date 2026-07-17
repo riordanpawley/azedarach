@@ -10,15 +10,22 @@ checkpoint_base=
 checkpoint_scope=
 broader_invalidated=false
 
+require_value() {
+	if [ "$#" -lt 2 ]; then
+		echo "review-range: $1 requires a value" >&2
+		exit 2
+	fi
+}
+
 while [ "$#" -gt 0 ]; do
 	case "$1" in
-		--repo) repo=$2; shift 2 ;;
-		--base-revision) base_revision=$2; shift 2 ;;
-		--head-revision) head_revision=$2; shift 2 ;;
-		--scope) scope=$2; shift 2 ;;
-		--checkpoint-head) checkpoint_head=$2; shift 2 ;;
-		--checkpoint-base) checkpoint_base=$2; shift 2 ;;
-		--checkpoint-scope) checkpoint_scope=$2; shift 2 ;;
+		--repo) require_value "$@"; repo=$2; shift 2 ;;
+		--base-revision) require_value "$@"; base_revision=$2; shift 2 ;;
+		--head-revision) require_value "$@"; head_revision=$2; shift 2 ;;
+		--scope) require_value "$@"; scope=$2; shift 2 ;;
+		--checkpoint-head) require_value "$@"; checkpoint_head=$2; shift 2 ;;
+		--checkpoint-base) require_value "$@"; checkpoint_base=$2; shift 2 ;;
+		--checkpoint-scope) require_value "$@"; checkpoint_scope=$2; shift 2 ;;
 		--broader-invalidated) broader_invalidated=true; shift ;;
 		*) echo "review-range: unknown argument: $1" >&2; exit 2 ;;
 	esac

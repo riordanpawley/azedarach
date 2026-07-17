@@ -9358,9 +9358,9 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Review revision contract",
-		"exact `diff_base_revision`, `head_revision`, and `diff_scope`",
+		"exact `diff_base_revision`, `head_revision`, stable `diff_scope`, and executable `diff_range`",
 		"previous reviewed head through current head plus unresolved findings and affected contracts",
-		"Fall back to the full scope when the prior checkpoint cannot be verified, is not an ancestor, or its base/scope changed",
+		"Fall back to the full `diff_range` when the prior checkpoint cannot be verified, is not an ancestor, or its base/scope changed",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt = %q, want revision-incremental review guidance %q", prompt, want)

@@ -283,7 +283,8 @@ func (a daemonOrchestrationAuthority) reviewInspection(ctx context.Context, proj
 				} else {
 					inspection.DiffBaseRevision = strings.TrimSpace(baseRevision)
 					inspection.HeadRevision = strings.TrimSpace(headRevision)
-					inspection.DiffScope = inspection.DiffBaseRevision + ".." + inspection.HeadRevision
+					inspection.DiffScope = fmt.Sprintf("issue:%s:base:%s@%s", task.ID.String(), inspection.BaseBranch, inspection.DiffBaseRevision)
+					inspection.DiffRange = inspection.DiffBaseRevision + ".." + inspection.HeadRevision
 				}
 			}
 		}

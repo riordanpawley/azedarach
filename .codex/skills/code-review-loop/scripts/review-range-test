@@ -23,6 +23,18 @@ run_range() {
 	"$script_dir/review-range" --repo "$fixture" --base-revision "$base" --head-revision "$second" --scope source "$@"
 }
 
+for option in --repo --base-revision --head-revision --scope --checkpoint-head --checkpoint-base --checkpoint-scope; do
+	set +e
+	missing_value_output=$("$script_dir/review-range" "$option" 2>&1)
+	missing_value_status=$?
+	set -e
+	[ "$missing_value_status" -eq 2 ] || {
+		echo "$option missing value exit = $missing_value_status, want 2" >&2
+		exit 1
+	}
+	printf '%s\n' "$missing_value_output" | grep -q "^review-range: $option requires a value$"
+done
+
 initial=$(run_range)
 printf '%s\n' "$initial" | grep -q '^mode=full$'
 printf '%s\n' "$initial" | grep -q '^reason=checkpoint-absent$'
