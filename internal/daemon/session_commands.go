@@ -3789,12 +3789,13 @@ func reconcileSessionValidationIssueIDs(targetIssueKeys map[string]struct{}, tmu
 		if !matchesTargetIssue(issueKey) {
 			continue
 		}
-		// Full reconciliation only needs issue data for live tmux sessions or
-		// durable intent that can recreate one. Historical stopped projections
+		// Full reconciliation may defer only projections that are unambiguously
+		// quiescent. Every other state needs issue data so stale, invalid, or
+		// partially stopped runtime can converge. Historical stopped projections
 		// remain available to explicit issue reconciliation without expanding
 		// every background issue read to project size.
 		if _, targetedIssue := targetIssueKeys[issueKey]; !targetedIssue {
-			if _, live := tmuxSet[issueKey]; !live && !sessionProjectionCanRecreateTmuxSession(session) {
+			if _, live := tmuxSet[issueKey]; !live && daemonSessionProjectionStopped(session) {
 				deferredIssueKeys[issueKey] = struct{}{}
 				continue
 			}
