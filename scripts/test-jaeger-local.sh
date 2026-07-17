@@ -62,7 +62,7 @@ source "$repo_root/scripts/jaeger-local.sh"
 test_tmp_parent="${TMPDIR:-/tmp}"
 tmp="$(mktemp -d "$test_tmp_parent/azedarach jaeger.XXXXXX")"
 test_cleanup() {
-  local child cleanup_signal
+  local original_status="$1" child cleanup_signal cleanup_status=0
   trap - ERR EXIT
   set +e
   for child in $(jobs -pr); do
@@ -74,15 +74,34 @@ test_cleanup() {
     if [[ ! -p "${AZEDARACH_JAEGER_TEST_CLEANUP_READY_FIFO:-}" ||
       ! -p "${AZEDARACH_JAEGER_TEST_CLEANUP_CONTINUE_FIFO:-}" ]]; then
       echo "concurrent validator cleanup barrier requires ready and continue FIFOs" >&2
-      return 1
+      cleanup_status=1
+    else
+      printf '%s\n' "$tmp" >"$AZEDARACH_JAEGER_TEST_CLEANUP_READY_FIFO" || {
+        echo "concurrent validator could not signal cleanup readiness for $tmp" >&2
+        cleanup_status=1
+      }
+      if (( cleanup_status == 0 )); then
+        IFS= read -r cleanup_signal <"$AZEDARACH_JAEGER_TEST_CLEANUP_CONTINUE_FIFO" || {
+          echo "concurrent validator could not read cleanup release for $tmp" >&2
+          cleanup_status=1
+        }
+      fi
+      if (( cleanup_status == 0 )) && [[ "$cleanup_signal" != "continue" ]]; then
+        echo "concurrent validator received invalid cleanup release '$cleanup_signal' for $tmp" >&2
+        cleanup_status=1
+      fi
     fi
-    printf '%s\n' "$tmp" >"$AZEDARACH_JAEGER_TEST_CLEANUP_READY_FIFO" || return 1
-    IFS= read -r cleanup_signal <"$AZEDARACH_JAEGER_TEST_CLEANUP_CONTINUE_FIFO" || return 1
-    [[ "$cleanup_signal" == "continue" ]] || return 1
   fi
-  rm -rf "$tmp"
+  if ! rm -rf "$tmp"; then
+    echo "concurrent validator could not remove owned fixture root: $tmp" >&2
+    cleanup_status=1
+  fi
+  if (( original_status != 0 )); then
+    exit "$original_status"
+  fi
+  exit "$cleanup_status"
 }
-trap test_cleanup EXIT
+trap 'test_cleanup "$?"' EXIT
 calls="$tmp/calls"
 now="$(date +%s)"
 
@@ -423,6 +442,21 @@ if grep -Eq '^volume rm (azedarach-jaeger-data|azedarach-jaeger-222-data|unrelat
 fi
 
 : >"$calls"
+if [[ -n "${AZEDARACH_JAEGER_TEST_OOM_READY_FIFO:-}" ||
+  -n "${AZEDARACH_JAEGER_TEST_OOM_CONTINUE_FIFO:-}" ]]; then
+  if [[ ! -p "${AZEDARACH_JAEGER_TEST_OOM_READY_FIFO:-}" ||
+    ! -p "${AZEDARACH_JAEGER_TEST_OOM_CONTINUE_FIFO:-}" ]]; then
+    echo "concurrent OOM lifecycle barrier requires ready and continue FIFOs" >&2
+    exit 1
+  fi
+  printf '%s|%s|%s\n' "$tmp" "$AZEDARACH_JAEGER_LIFECYCLE_LOCK_FILE" \
+    "$AZEDARACH_JAEGER_ENDPOINT_FILE" >"$AZEDARACH_JAEGER_TEST_OOM_READY_FIFO"
+  IFS= read -r oom_release <"$AZEDARACH_JAEGER_TEST_OOM_CONTINUE_FIFO"
+  if [[ "$oom_release" != "continue" ]]; then
+    echo "concurrent OOM lifecycle received invalid release '$oom_release' for $tmp" >&2
+    exit 1
+  fi
+fi
 FAKE_PRIMARY_EXISTS=1 FAKE_OOM=true jaeger_ensure
 if grep -q '^rm -f azedarach-jaeger ' "$calls"; then
   echo "OOM recovery removed the primary container" >&2
