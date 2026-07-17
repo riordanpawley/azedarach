@@ -131,6 +131,7 @@ type statusRunner struct {
 }
 
 func TestRuntimeProjectionWriterAttributesContendedHolderAndWaiter(t *testing.T) {
+	recorder := newProjectReadTraceRecorder(t)
 	d := &Daemon{cfg: Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
 	writer := newRuntimeProjectionWriter(d)
 	holderCtx := contextWithRuntimeProjectionWriterOperation(context.Background(), "worktree.replace_snapshot")
@@ -165,6 +166,25 @@ func TestRuntimeProjectionWriterAttributesContendedHolderAndWaiter(t *testing.T)
 		t.Fatalf("writer attribution = %q/%q", got[0], got[1])
 	}
 	<-waiterDone
+
+	var traced bool
+	for _, span := range recorder.Ended() {
+		if span.Name() != "daemon.runtime_projection.writer_lock_wait" {
+			continue
+		}
+		attrs := map[string]string{}
+		for _, attr := range span.Attributes() {
+			if attr.Value.Type().String() == "STRING" {
+				attrs[string(attr.Key)] = attr.Value.AsString()
+			}
+		}
+		if attrs["writer.waiter_operation"] == "command.runtime.signal.ingest" && attrs["writer.holder_operation"] == "worktree.replace_snapshot" {
+			traced = true
+		}
+	}
+	if !traced {
+		t.Fatal("writer wait span missing bounded waiter/holder attribution")
+	}
 }
 
 func TestRuntimeProjectionWriterCanceledAdmissionReturnsErrorAndDoesNotPersist(t *testing.T) {

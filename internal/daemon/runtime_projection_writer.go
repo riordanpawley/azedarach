@@ -99,7 +99,12 @@ func (w *daemonRuntimeProjectionWriter) lockProjectionWriter(ctx context.Context
 	operation = runtimeProjectionWriterOperationFromContext(ctx, operation)
 	waitStartedAt := time.Now()
 	holderOperation, err := w.mu.acquire(ctx, operation)
-	latencytrace.LogPhaseContext(ctx, w.d.cfg.Logger, "daemon", "runtime_projection.writer_lock_wait", waitStartedAt, "project_id", projectID, "operation", operation, "holder_operation", holderOperation)
+	latencytrace.LogPhaseContext(ctx, w.d.cfg.Logger, "daemon", "runtime_projection.writer_lock_wait", waitStartedAt,
+		"project_id", projectID,
+		"operation", operation,
+		"writer.waiter_operation", operation,
+		"writer.holder_operation", holderOperation,
+	)
 	if err != nil {
 		return nil, err
 	}
