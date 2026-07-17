@@ -19,8 +19,9 @@ type raceShardRecord struct {
 }
 
 type raceShardFIFO struct {
-	path string
-	file *os.File
+	path   string
+	file   *os.File
+	reader *bufio.Reader
 }
 
 type raceSharderProcessResult struct {
@@ -89,20 +90,9 @@ case "${FAKE_GO_SCENARIO:-success}" in
     wait "$child"
     ;;
 	concurrency)
-	  while ! mkdir "$FAKE_GO_CONCURRENCY_DIR/lock" 2>/dev/null; do sleep 0.01; done
-	  active=0
-	  [ ! -s "$FAKE_GO_CONCURRENCY_DIR/active" ] || active="$(cat "$FAKE_GO_CONCURRENCY_DIR/active")"
-	  active=$((active + 1))
-	  printf '%s\n' "$active" >"$FAKE_GO_CONCURRENCY_DIR/active"
-	  maximum=0
-	  [ ! -s "$FAKE_GO_CONCURRENCY_DIR/max" ] || maximum="$(cat "$FAKE_GO_CONCURRENCY_DIR/max")"
-	  if [ "$active" -gt "$maximum" ]; then printf '%s\n' "$active" >"$FAKE_GO_CONCURRENCY_DIR/max"; fi
-	  rmdir "$FAKE_GO_CONCURRENCY_DIR/lock"
-	  sleep 0.3
-	  while ! mkdir "$FAKE_GO_CONCURRENCY_DIR/lock" 2>/dev/null; do sleep 0.01; done
-	  active="$(cat "$FAKE_GO_CONCURRENCY_DIR/active")"
-	  printf '%s\n' $((active - 1)) >"$FAKE_GO_CONCURRENCY_DIR/active"
-	  rmdir "$FAKE_GO_CONCURRENCY_DIR/lock"
+	  printf 'arrive %s\n' "$pattern" >"$FAKE_GO_CONCURRENCY_EVENT_FIFO"
+	  read -r _ <"$FAKE_GO_CONCURRENCY_RELEASE_FIFO"
+	  printf 'depart %s\n' "$pattern" >"$FAKE_GO_CONCURRENCY_EVENT_FIFO"
 	  ;;
 esac
 `
@@ -137,7 +127,7 @@ func newRaceShardFIFO(t *testing.T, name string) *raceShardFIFO {
 		t.Fatalf("open %s FIFO: %v", name, err)
 	}
 	t.Cleanup(func() { _ = file.Close() })
-	return &raceShardFIFO{path: path, file: file}
+	return &raceShardFIFO{path: path, file: file, reader: bufio.NewReader(file)}
 }
 
 func (f *raceShardFIFO) readLine(t *testing.T, processDone <-chan struct{}, result *raceSharderProcessResult) string {
@@ -148,7 +138,7 @@ func (f *raceShardFIFO) readLine(t *testing.T, processDone <-chan struct{}, resu
 	}
 	read := make(chan readResult, 1)
 	go func() {
-		line, err := bufio.NewReader(f.file).ReadString('\n')
+		line, err := f.reader.ReadString('\n')
 		read <- readResult{line: strings.TrimSpace(line), err: err}
 	}()
 	select {
@@ -271,42 +261,73 @@ func TestDaemonRaceSharderAssignsEveryTestExactlyOnceAndSkipsEmptyShards(t *test
 func TestDaemonRaceSharderCapsConcurrentProcesses(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
-		shards      string
 		parallelism string
-		want        string
+		waves       []int
 	}{
-		{name: "sequential by default", want: "1"},
-		{name: "explicit bounded parallelism", shards: "4", parallelism: "2", want: "2"},
+		{name: "sequential by default", waves: []int{1, 1, 1, 1}},
+		{name: "explicit bounded parallelism", parallelism: "2", waves: []int{2, 2}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo, script := prepareRaceSharder(t)
-			concurrencyDir := filepath.Join(repo, "concurrency")
-			if err := os.MkdirAll(concurrencyDir, 0o755); err != nil {
-				t.Fatalf("mkdir concurrency state: %v", err)
-			}
+			events := newRaceShardFIFO(t, "concurrency-events")
+			release := newRaceShardFIFO(t, "concurrency-release")
 			env := []string{
 				"AZEDARACH_DAEMON_RACE_INNER=1",
 				"FAKE_GO_SCENARIO=concurrency",
-				"FAKE_GO_CONCURRENCY_DIR=" + concurrencyDir,
-			}
-			if tc.shards != "" {
-				env = append(env, "AZEDARACH_DAEMON_RACE_SHARDS="+tc.shards)
+				"FAKE_GO_CONCURRENCY_EVENT_FIFO=" + events.path,
+				"FAKE_GO_CONCURRENCY_RELEASE_FIFO=" + release.path,
 			}
 			if tc.parallelism != "" {
 				env = append(env, "AZEDARACH_DAEMON_RACE_PARALLELISM="+tc.parallelism)
 			}
-			stdout, stderr, err := runRaceSharder(t, repo, script, env...)
-			if err != nil {
-				t.Fatalf("race sharder failed: %v\nstdout=%q\nstderr=%q", err, stdout, stderr)
+			_, stdout, stderr, done, result := startRaceSharder(t, repo, script, env...)
+			t.Cleanup(func() {
+				for range 4 {
+					release.writeLine(t, "cleanup")
+				}
+			})
+
+			arrived := make(map[string]struct{}, 4)
+			for waveIndex, waveSize := range tc.waves {
+				wave := make(map[string]struct{}, waveSize)
+				for range waveSize {
+					event := events.readLine(t, done, result)
+					pattern, ok := strings.CutPrefix(event, "arrive ")
+					if !ok {
+						t.Fatalf("wave %d event = %q, want shard arrival", waveIndex, event)
+					}
+					if _, duplicate := arrived[pattern]; duplicate {
+						t.Fatalf("wave %d duplicate shard arrival %q", waveIndex, pattern)
+					}
+					arrived[pattern] = struct{}{}
+					wave[pattern] = struct{}{}
+				}
+				for range waveSize {
+					release.writeLine(t, "release")
+				}
+				for range waveSize {
+					event := events.readLine(t, done, result)
+					pattern, ok := strings.CutPrefix(event, "depart ")
+					if !ok {
+						t.Fatalf("wave %d event = %q, want shard departure", waveIndex, event)
+					}
+					if _, belongs := wave[pattern]; !belongs {
+						t.Fatalf("wave %d unexpected shard departure %q", waveIndex, pattern)
+					}
+					delete(wave, pattern)
+				}
 			}
-			maximum, err := os.ReadFile(filepath.Join(concurrencyDir, "max"))
-			if err != nil {
-				t.Fatalf("read maximum concurrency: %v", err)
+			<-done
+			if result.err != nil {
+				t.Fatalf("race sharder failed: %v\nstdout=%q\nstderr=%q", result.err, stdout.String(), stderr.String())
 			}
-			if got := strings.TrimSpace(string(maximum)); got != tc.want {
-				t.Fatalf("maximum shard concurrency = %s, want %s", got, tc.want)
+			if len(arrived) != 4 {
+				t.Fatalf("arrived shards = %d, want 4: %v", len(arrived), arrived)
 			}
-			if tc.name == "sequential by default" && !strings.Contains(string(stderr), "across 4 shards") {
+			if records := decodeRaceShardOutput(t, []byte(stdout.String())); len(records) != 4 {
+				t.Fatalf("race sharder records = %d, want 4", len(records))
+			}
+			if tc.name == "sequential by default" && !strings.Contains(stderr.String(), "across 4 shards") {
 				t.Fatalf("default shard count not reported as 4: %q", stderr)
 			}
 		})
