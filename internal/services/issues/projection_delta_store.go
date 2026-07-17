@@ -257,7 +257,13 @@ func (c *Client) WatchProjectionDeltas(ctx context.Context, projectID string, af
 	if err != nil {
 		return nil, head, fmt.Errorf("create projection cursor watcher: %w: %w", err, domain.ErrProjectionRetryable)
 	}
-	defer watcher.Close()
+	c.projectionWatchStarted.Add(1)
+	c.projectionWatchActive.Add(1)
+	defer func() {
+		closeProjectionDeltaWatcher(watcher)
+		c.projectionWatchActive.Add(-1)
+		c.projectionWatchCompleted.Add(1)
+	}()
 	if err := watcher.Add(filepath.Dir(c.dbPath)); err != nil {
 		return nil, head, fmt.Errorf("watch projection cursor directory: %w: %w", err, domain.ErrProjectionRetryable)
 	}
@@ -289,6 +295,15 @@ func (c *Client) WatchProjectionDeltas(ctx context.Context, projectID string, af
 				return deltas, head, projectionWatchError(err)
 			}
 		}
+	}
+}
+
+// closeProjectionDeltaWatcher waits for the backend read loop to finish so a
+// completed watch owns no asynchronous operating-system resources when it
+// returns to its caller.
+func closeProjectionDeltaWatcher(watcher *fsnotify.Watcher) {
+	_ = watcher.Close()
+	for range watcher.Errors {
 	}
 }
 

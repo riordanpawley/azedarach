@@ -3,16 +3,22 @@ package sqliteutil
 import (
 	"context"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"time"
 )
 
 var writeLocks sync.Map
 
 type writeLockContextKey struct{}
+type writeOperationContextKey struct{}
 
 type writeLock struct {
-	token chan struct{}
+	token       chan struct{}
+	mu          sync.RWMutex
+	holder      string
+	holderSince time.Time
 }
 
 func newWriteLock() *writeLock {
@@ -21,7 +27,7 @@ func newWriteLock() *writeLock {
 	return lock
 }
 
-func (l *writeLock) acquire(ctx context.Context) error {
+func (l *writeLock) acquire(ctx context.Context, operation string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -29,18 +35,61 @@ func (l *writeLock) acquire(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-l.token:
+		l.mu.Lock()
+		l.holder = operation
+		l.holderSince = time.Now()
+		l.mu.Unlock()
 		return nil
 	}
 }
 
 func (l *writeLock) release() {
+	l.mu.Lock()
+	l.holder = ""
+	l.holderSince = time.Time{}
+	l.mu.Unlock()
 	l.token <- struct{}{}
+}
+
+func (l *writeLock) diagnostics(now time.Time) WriteLockDiagnostics {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	diagnostic := WriteLockDiagnostics{Holder: l.holder}
+	if l.holder != "" && !l.holderSince.IsZero() && !now.Before(l.holderSince) {
+		diagnostic.HeldFor = now.Sub(l.holderSince)
+	}
+	return diagnostic
+}
+
+// WriteLockDiagnostics identifies the current process-local SQLite write-lock
+// owner. HeldFor is operational evidence only and is never a correctness gate.
+type WriteLockDiagnostics struct {
+	Holder  string
+	HeldFor time.Duration
+}
+
+// ContextWithWriteOperation attaches stable provenance to a shared SQLite
+// write-lock acquisition.
+func ContextWithWriteOperation(ctx context.Context, operation string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	operation = strings.TrimSpace(operation)
+	if operation == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, writeOperationContextKey{}, operation)
+}
+
+// WriteLockResourceDiagnostics reports the shared write-lock holder for dbPath.
+func WriteLockResourceDiagnostics(dbPath string) WriteLockDiagnostics {
+	return writeLockForPath(dbPath).diagnostics(time.Now())
 }
 
 // WithWriteLock serializes process-local writes for one SQLite database file.
 func WithWriteLock(dbPath string, fn func() error) error {
 	lock := writeLockForPath(dbPath)
-	if err := lock.acquire(context.Background()); err != nil {
+	if err := lock.acquire(context.Background(), writeOperationFromCaller()); err != nil {
 		return err
 	}
 	defer lock.release()
@@ -61,7 +110,11 @@ func WithWriteLockContext(ctx context.Context, dbPath string, fn func(context.Co
 		}
 	}
 	lock := writeLockForPath(key)
-	if err := lock.acquire(ctx); err != nil {
+	operation, _ := ctx.Value(writeOperationContextKey{}).(string)
+	if strings.TrimSpace(operation) == "" {
+		operation = writeOperationFromCaller()
+	}
+	if err := lock.acquire(ctx, operation); err != nil {
 		return err
 	}
 	defer lock.release()
@@ -72,6 +125,30 @@ func WithWriteLockContext(ctx context.Context, dbPath string, fn func(context.Co
 	}
 	next[key] = struct{}{}
 	return fn(context.WithValue(ctx, writeLockContextKey{}, next))
+}
+
+func writeOperationFromCaller() string {
+	pcs := make([]uintptr, 12)
+	count := runtime.Callers(2, pcs)
+	frames := runtime.CallersFrames(pcs[:count])
+	for {
+		frame, more := frames.Next()
+		name := frame.Function
+		if !strings.HasSuffix(name, ".writeOperationFromCaller") &&
+			!strings.HasSuffix(name, ".WithWriteLock") &&
+			!strings.HasSuffix(name, ".WithWriteLockContext") {
+			if slash := strings.LastIndex(name, "/"); slash >= 0 {
+				name = name[slash+1:]
+			}
+			if name != "" {
+				return name
+			}
+		}
+		if !more {
+			break
+		}
+	}
+	return "sqlite.write"
 }
 
 func writeLockForPath(dbPath string) *writeLock {

@@ -967,6 +967,22 @@ func (s *RuntimeStateStore) Close() error {
 	return err
 }
 
+// StoreResourceDiagnostics reports the runtime store's process-owned pool
+// without opening a closed store as a side effect of diagnosis.
+func (s *RuntimeStateStore) StoreResourceDiagnostics() (string, bool, sql.DBStats) {
+	if s == nil {
+		return "", false, sql.DBStats{}
+	}
+	s.mu.Lock()
+	db := s.db
+	dbPath := s.dbPath
+	s.mu.Unlock()
+	if db == nil {
+		return dbPath, false, sql.DBStats{}
+	}
+	return dbPath, true, db.Stats()
+}
+
 func (s *RuntimeStateStore) UpsertSessionState(ctx context.Context, projectID string, session Session) error {
 	return s.withRetryingWriteLock(ctx, "upsert_session_state", func(writeCtx context.Context) error {
 		return s.upsertSessionStateLocked(writeCtx, projectID, session)
@@ -2618,6 +2634,7 @@ func (s *RuntimeStateStore) withRetryingWriteLock(ctx context.Context, operation
 	if _, err := s.dbHandle(); err != nil {
 		return err
 	}
+	ctx = sqliteutil.ContextWithWriteOperation(ctx, "runtime_state."+operation)
 	return sqliteutil.WithWriteLockContext(ctx, s.dbPath, func(lockCtx context.Context) error {
 		attempts := 0
 		err := retrySQLiteWrite(lockCtx, runtimeSQLiteRetryBudget, runtimeSQLiteRetryDelay, func(waitCtx context.Context, delay time.Duration) error {
