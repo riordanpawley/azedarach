@@ -86,6 +86,12 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, mailboxObservationProjectionCutoverMigrationID).Scan(&checksum); err != nil || checksum != "fd86080f491210c169005c7f28bc778aca3eea2d70ce15a6c001bb960397e260" {
 				t.Fatalf("mailbox cutover checksum=%q err=%v", checksum, err)
 			}
+			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, mailboxObservationReplayRepairMigrationID).Scan(&checksum); err != nil || checksum != "d2b70f9828f9e642d4ec6191205500713bf51c0378cf3c261bf54fadf976779e" {
+				t.Fatalf("mailbox replay repair checksum=%q err=%v", checksum, err)
+			}
+			if err = validateMailboxObservationReplayRepair(ctx, db); err != nil {
+				t.Fatal(err)
+			}
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, decisionPropagationOutboxMigrationID).Scan(&checksum); err != nil || checksum != "a12c44ba35156d71fbcd88a9d78e4cdb234e75e7e4aef5f896c8b1182ada858d" {
 				t.Fatalf("decision outbox checksum=%q err=%v", checksum, err)
 			}
@@ -180,6 +186,12 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			}
 			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, decisionIdempotencyMigrationID, "86d5400fe33bbc19e7e848bc232335809f76d85e4d45a6e45f6bc7ff77547f47").Scan(&ledgerRows); err != nil || ledgerRows != 1 {
 				t.Fatalf("decision idempotency ledger rows after reopen=%d err=%v", ledgerRows, err)
+			}
+			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, mailboxObservationReplayRepairMigrationID, "d2b70f9828f9e642d4ec6191205500713bf51c0378cf3c261bf54fadf976779e").Scan(&ledgerRows); err != nil || ledgerRows != 1 {
+				t.Fatalf("mailbox replay repair ledger rows after reopen=%d err=%v", ledgerRows, err)
+			}
+			if err = validateMailboxObservationReplayRepair(ctx, reopenedDB); err != nil {
+				t.Fatal(err)
 			}
 			_ = reopened.CloseDB()
 		})

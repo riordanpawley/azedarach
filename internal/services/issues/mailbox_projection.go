@@ -103,9 +103,13 @@ func (c *Client) CompleteMailboxObservationProjectionCutover(ctx context.Context
 				if observedAt.IsZero() {
 					observedAt = time.Unix(0, 0).UTC()
 				}
+				canonicalPayload, err := canonicalMailboxObservationPayload(observation.Payload)
+				if err != nil {
+					return fmt.Errorf("canonicalize mailbox observation %s/%d: %w", parentIssue, observation.Sequence, err)
+				}
 				if _, err := c.insertIssueObservationEvent(ctx, tx, issueID, IssueObservationEventParams{
 					Type: observation.EventType, ObservedAt: observedAt, Source: strings.TrimSpace(observation.Source),
-					SourceCommand: "mailbox.cutover", WorktreePath: strings.TrimSpace(observation.WorktreePath), Payload: observation.Payload,
+					SourceCommand: "mailbox.cutover", WorktreePath: strings.TrimSpace(observation.WorktreePath), Payload: canonicalPayload,
 				}); err != nil {
 					return err
 				}
@@ -137,6 +141,22 @@ func (c *Client) CompleteMailboxObservationProjectionCutover(ctx context.Context
 		return 0, c.wrapError("complete-mailbox-projection-cutover", "", err)
 	}
 	return imported, nil
+}
+
+func canonicalMailboxObservationPayload(payload map[string]any) (map[string]any, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	canonical, _, err := canonicalMailboxObservationJSON(string(raw))
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(canonical), &result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func mailboxProjectionCutoverStateTx(ctx context.Context, tx *sql.Tx) (MailboxObservationProjectionCutover, error) {
