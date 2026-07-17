@@ -2152,6 +2152,144 @@ func TestTaskWorkspacePreservesDetailsAcrossSummaryRefresh(t *testing.T) {
 	}
 }
 
+func TestTaskWorkspacePreservesFullGraphContextAcrossSummaryRefresh(t *testing.T) {
+	m := newTestModel()
+	currentID := naming.IssueID("az-current")
+	relatedID := naming.IssueID("az-related")
+	current := domain.Task{
+		ID:          currentID,
+		Title:       "Current task",
+		Description: "Full description stays visible",
+		Status:      domain.StatusInProgress,
+		Priority:    domain.P2,
+		Type:        domain.TypeTask,
+		Dependencies: []domain.Dependency{
+			{ID: relatedID, Type: domain.DependencyRelatedTo},
+		},
+	}
+	related := domain.Task{
+		ID:       relatedID,
+		Title:    "Related off-board task",
+		Status:   domain.StatusOpen,
+		Priority: domain.P3,
+		Type:     domain.TypeTask,
+	}
+	m.tasks = []domain.Task{current}
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(current, m.tasks, nil, 120, 30))
+
+	fullResult, _ := m.Update(refreshTaskWorkspaceResultMsg{
+		projectID: m.daemonProjectID(),
+		revision:  1,
+		taskID:    currentID.String(),
+		hasTask:   true,
+		task:      current,
+		tasks:     []domain.Task{current, related},
+	})
+	withFullContext := fullResult.(Model)
+
+	summary := current
+	summary.Title = "Current task after summary refresh"
+	summary.Description = ""
+	result, _ := withFullContext.Update(issuesLoadedMsg{
+		refreshSeq: 2,
+		projectID:  m.daemonProjectID(),
+		tasks:      []domain.Task{summary},
+		revision:   2,
+	})
+	updated := result.(Model)
+
+	workspace, ok := updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if !ok {
+		t.Fatalf("current overlay = %T, want TaskWorkspaceOverlay", updated.overlayStack.Current())
+	}
+	view := workspace.View()
+	if !strings.Contains(view, "Current task after summary refresh") || !strings.Contains(view, "Full description stays visible") {
+		t.Fatalf("workspace lost refreshed summary or full details:\n%s", view)
+	}
+	if !strings.Contains(view, "Related off-board task") {
+		t.Fatalf("workspace lost full graph context after summary refresh:\n%s", view)
+	}
+
+	authoritativeResult, _ := updated.Update(refreshTaskWorkspaceResultMsg{
+		projectID: m.daemonProjectID(),
+		revision:  3,
+		taskID:    currentID.String(),
+		hasTask:   true,
+		task:      summary,
+		tasks:     []domain.Task{summary},
+	})
+	authoritative := authoritativeResult.(Model)
+	workspace = authoritative.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	view = workspace.View()
+	if strings.Contains(view, "Related off-board task") || strings.Contains(view, "Full description stays visible") {
+		t.Fatalf("workspace retained stale full context after authoritative refresh:\n%s", view)
+	}
+}
+
+func TestTaskWorkspaceIgnoresStaleFullDetailRefreshGeneration(t *testing.T) {
+	m := newTestModel()
+	task := domain.Task{
+		ID:          "az-1",
+		Title:       "Current detail",
+		Description: "Current description",
+		Status:      domain.StatusInProgress,
+		Priority:    domain.P2,
+		Type:        domain.TypeTask,
+	}
+	m.tasks = []domain.Task{task}
+	m.taskWorkspaceRefreshSeq = 2
+	workspace := overlay.NewTaskWorkspaceOverlay(task, m.tasks, nil, 120, 30)
+	workspace.SyncDecisionLinks([]overlay.DecisionLinkSummary{{DecisionID: "current", DecisionTitle: "Current decision", Relation: "implements"}})
+	m.overlayStack.Push(workspace)
+
+	stale := task
+	stale.Title = "Stale detail"
+	stale.Description = "Stale description"
+	result, _ := m.Update(refreshTaskWorkspaceResultMsg{
+		projectID:  m.daemonProjectID(),
+		refreshSeq: 1,
+		revision:   3,
+		taskID:     task.ID.String(),
+		hasTask:    true,
+		task:       stale,
+		tasks:      []domain.Task{stale},
+	})
+	updated := result.(Model)
+
+	workspace = updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	view := workspace.View()
+	if !strings.Contains(view, "Current detail") || !strings.Contains(view, "Current description") {
+		t.Fatalf("stale refresh generation overwrote current workspace:\n%s", view)
+	}
+	if strings.Contains(view, "Stale detail") || strings.Contains(view, "Stale description") {
+		t.Fatalf("stale refresh generation remained visible:\n%s", view)
+	}
+
+	result, _ = updated.Update(refreshTaskWorkspaceDecisionResultMsg{
+		projectID:     m.daemonProjectID(),
+		refreshSeq:    1,
+		taskID:        task.ID.String(),
+		decisionLinks: []overlay.DecisionLinkSummary{{DecisionID: "stale", DecisionTitle: "Stale decision", Relation: "implements"}},
+	})
+	updated = result.(Model)
+	view = updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay).View()
+	if !strings.Contains(view, "Current decision") || strings.Contains(view, "Stale decision") {
+		t.Fatalf("stale decision generation overwrote current links:\n%s", view)
+	}
+
+	toastCount := len(updated.toasts)
+	result, _ = updated.Update(refreshTaskWorkspaceReconcileResultMsg{
+		projectID:  m.daemonProjectID(),
+		refreshSeq: 1,
+		taskID:     task.ID.String(),
+		err:        errors.New("stale runtime failure"),
+	})
+	updated = result.(Model)
+	if len(updated.toasts) != toastCount {
+		t.Fatalf("stale runtime generation produced user feedback: %+v", updated.toasts)
+	}
+}
+
 func TestTaskWorkspaceFullRefreshAllowsClearedDetails(t *testing.T) {
 	m := newTestModel()
 	task := domain.Task{
@@ -3821,6 +3959,97 @@ func TestEpicDrillDownFlow(t *testing.T) {
 	}
 }
 
+func TestDrillDownUsesDefaultBoardViewAndRestoresRootView(t *testing.T) {
+	m := newTestModel()
+	m.editor.EnterNormal()
+	m.loading = false
+
+	parentID := naming.IssueID("az-parent")
+	doneChildID := naming.IssueID("az-done-child")
+	parent := domain.Task{ID: parentID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeEpic}
+	doneChild := domain.Task{ID: doneChildID, Title: "Done child", Status: domain.StatusDone, Priority: domain.P3, Type: domain.TypeTask, ParentID: &parentID}
+	rootView := domain.PlanningBoardView()
+	rootProjection, err := domain.ProjectTasksByBoardView(rootView, []domain.Task{parent, doneChild})
+	if err != nil {
+		t.Fatalf("project cold Planning board: %v", err)
+	}
+	if slices.ContainsFunc(rootProjection.OrderedTasks(), func(task domain.Task) bool { return task.ID == doneChildID }) {
+		t.Fatal("cold Planning projection unexpectedly includes Done child")
+	}
+	m.tasks = append([]domain.Task(nil), rootProjection.OrderedTasks()...)
+	m.boardView = rootView
+	m.selectedBoardViewID = string(rootView.ID)
+	m.boardColumns = rootProjection.ColumnSnapshots()
+	m.boardOrdered = rootProjection.OrderedTasks()
+	m.boardProjection = rootProjection
+
+	entered, scopedRefreshCmd := m.enterDrillDownByID(parentID.String())
+	drilled := entered.(Model)
+	if scopedRefreshCmd == nil && !drilled.issueRefreshPending {
+		t.Fatal("cold drill-down neither scheduled nor queued a scoped child-board refresh")
+	}
+	if got, want := drilled.boardView.ID, domain.BoardViewDefaultID; got != want {
+		t.Fatalf("drill-down view = %q, want %q", got, want)
+	}
+	if got, want := drilled.selectedBoardViewID, string(rootView.ID); got != want {
+		t.Fatalf("persisted root selection = %q, want unchanged %q", got, want)
+	}
+	var rendered []string
+	for _, column := range drilled.buildColumns() {
+		for _, task := range column.Tasks {
+			rendered = append(rendered, task.ID.String())
+		}
+	}
+	if len(rendered) != 0 {
+		t.Fatalf("cold drill-down columns = %v, want empty until scoped refresh", rendered)
+	}
+
+	refreshedAny, _ := drilled.Update(issuesLoadedMsg{
+		projectID:      drilled.daemonProjectID(),
+		scopedParentID: parentID.String(),
+		tasks:          []domain.Task{parent, doneChild},
+		boardView:      domain.CloseoutBoardView(),
+	})
+	refreshed := refreshedAny.(Model)
+	if got, want := refreshed.boardView.ID, domain.BoardViewDefaultID; got != want {
+		t.Fatalf("refreshed drill-down view = %q, want %q", got, want)
+	}
+	if got := refreshed.selectedBoardViewID; got != string(rootView.ID) {
+		t.Fatalf("refreshed drill-down changed persisted root selection to %q", got)
+	}
+	refreshedColumns := refreshed.buildColumns()
+	if !slices.ContainsFunc(refreshedColumns, func(column board.Column) bool {
+		return slices.ContainsFunc(column.Tasks, func(task domain.Task) bool { return task.ID == doneChildID })
+	}) {
+		t.Fatalf("refreshed Default drill-down columns = %+v, want Done child %s", refreshedColumns, doneChildID)
+	}
+
+	staleRootAny, _ := refreshed.Update(issuesLoadedMsg{
+		projectID: refreshed.daemonProjectID(),
+		tasks:     []domain.Task{parent},
+		boardView: domain.CloseoutBoardView(),
+	})
+	staleRoot := staleRootAny.(Model)
+	if got, want := staleRoot.boardView.ID, domain.BoardViewDefaultID; got != want {
+		t.Fatalf("unscoped root refresh replaced active drill-down view with %q", got)
+	}
+
+	exitedAny, exitRefreshCmd := staleRoot.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	exited := exitedAny.(Model)
+	if exitRefreshCmd == nil && !exited.issueRefreshPending {
+		t.Fatal("final drill-down exit neither scheduled nor queued a root board refresh")
+	}
+	if got, want := exited.boardView.ID, rootView.ID; got != want {
+		t.Fatalf("restored root view = %q, want %q", got, want)
+	}
+	if got, want := exited.selectedBoardViewID, string(rootView.ID); got != want {
+		t.Fatalf("restored root selection = %q, want %q", got, want)
+	}
+	if exited.isDrillDownActive() {
+		t.Fatal("drill-down remained active after exit")
+	}
+}
+
 func TestNestedDrillDownEscapePopsSingleLevel(t *testing.T) {
 	m := newTestModel()
 	m.editor.EnterNormal()
@@ -4262,7 +4491,7 @@ func TestDrillDownBoardAttachKeyTargetsSelectedChild(t *testing.T) {
 	if len(next.toasts) == 0 {
 		t.Fatal("expected attach feedback toast")
 	}
-	if got := next.toasts[len(next.toasts)-1].Message; got != "Attach queued for az-child" {
+	if got := next.toasts[len(next.toasts)-1].Message; got != "Attaching to az-child" {
 		t.Fatalf("toast = %q, want attach feedback for selected child", got)
 	}
 }
@@ -5566,6 +5795,60 @@ func TestAttachSessionCmd_SwitchesTmuxClientWhenAvailable(t *testing.T) {
 	}
 	if got, want := strings.Join(commands[1], " "), "tmux switch-client -t ch-em"; got != want {
 		t.Fatalf("second switch command = %q, want %q", got, want)
+	}
+}
+
+func TestAttachSessionCmd_SwitchesTmuxBeforeDaemonLifecycleSync(t *testing.T) {
+	t.Setenv("TMUX", "client")
+	m := newTestModel()
+	m.currentProject = "Chefy"
+	m.tmuxAvailable = true
+
+	switched := false
+	m.tmuxClient = mockTmuxService{
+		switchFn: func(_ context.Context, target string) error {
+			if target != "az-1" {
+				t.Fatalf("switch target = %q, want az-1", target)
+			}
+			switched = true
+			return nil
+		},
+	}
+
+	switchedBeforeSync := false
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandSessionAttach {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionAttach)
+			}
+			switchedBeforeSync = switched
+			respBody, err := json.Marshal(struct {
+				Output string `json:"output"`
+			}{Output: "attached"})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	m.daemonClient = daemonclient.New(transport)
+
+	msg := m.attachSessionCmd("az-1")()
+	attached, ok := msg.(sessionAttachedMsg)
+	if !ok {
+		t.Fatalf("attachSessionCmd returned %T, want sessionAttachedMsg", msg)
+	}
+	if !attached.switchedTmux {
+		t.Fatal("expected tmux client to switch")
+	}
+	if !switchedBeforeSync {
+		t.Fatal("daemon lifecycle sync ran before tmux client switch")
 	}
 }
 
@@ -7258,7 +7541,7 @@ func TestHandleSelectionAsyncActionsShowImmediateFeedback(t *testing.T) {
 		key       string
 		wantToast string
 	}{
-		{name: "attach", key: "a", wantToast: "Attach queued for az-1"},
+		{name: "attach", key: "a", wantToast: "Attaching to az-1"},
 		{name: "update from base", key: "u", wantToast: "Update from base queued for az-1"},
 		{name: "merge", key: "m", wantToast: "Preparing merge for az-1"},
 		{name: "prepare pr", key: "P", wantToast: "Preparing PR for az-1"},
@@ -7304,8 +7587,8 @@ func TestHandleNormalModeAttachShortcutQueuesSelectedIssueAttach(t *testing.T) {
 	if len(updated.toasts) == 0 {
 		t.Fatal("expected immediate feedback toast")
 	}
-	if got := updated.toasts[len(updated.toasts)-1].Message; got != "Attach queued for az-3" {
-		t.Fatalf("toast = %q, want %q", got, "Attach queued for az-3")
+	if got := updated.toasts[len(updated.toasts)-1].Message; got != "Attaching to az-3" {
+		t.Fatalf("toast = %q, want %q", got, "Attaching to az-3")
 	}
 }
 
@@ -8268,12 +8551,15 @@ func TestPendingWorktreeCleanupOperationFailureOpensForceConfirmation(t *testing
 
 func TestLoadProjectOrchestratorSnapshotCmd(t *testing.T) {
 	m := newTestModel()
-	if cmd := m.loadProjectOrchestratorSnapshotCmd(); cmd == nil {
+	if cmd := m.scheduleProjectOrchestratorRefreshCmd(); cmd == nil {
 		t.Fatal("current-project orchestrator snapshot command = nil")
 	}
 
-	if cmd := m.loadProjectOrchestratorSnapshotCmd(); cmd == nil {
-		t.Fatal("snapshot refresh must not depend on a legacy mode")
+	if cmd := m.scheduleProjectOrchestratorRefreshCmd(); cmd != nil {
+		t.Fatal("concurrent snapshot refresh was not coalesced")
+	}
+	if !m.projectOrchestratorRefreshAgain {
+		t.Fatal("coalesced snapshot refresh did not request one replay")
 	}
 }
 
@@ -8298,9 +8584,150 @@ func TestProjectOrchestratorRefreshFailurePreservesLastKnownSnapshot(t *testing.
 	m := newTestModel()
 	known := projectOrchestratorSnapshot{ProjectID: m.daemonProjectID(), Snapshot: &protocol.OrchestrationSnapshot{Lifecycle: domain.OrchestratorWorking}}
 	m.projectOrchestrator = &known
-	updatedAny, _ := m.Update(projectOrchestratorLoadedMsg{project: projectOrchestratorSnapshot{ProjectID: m.daemonProjectID()}, err: errors.New("temporary read failure")})
+	m.projectOrchestratorRefreshSeq = 1
+	m.projectOrchestratorRefreshBusy = true
+	updatedAny, _ := m.Update(projectOrchestratorLoadedMsg{project: projectOrchestratorSnapshot{ProjectID: m.daemonProjectID()}, seq: 1, err: errors.New("temporary read failure")})
 	updated := updatedAny.(Model)
 	if updated.projectOrchestrator == nil || updated.projectOrchestrator.Snapshot == nil || updated.projectOrchestrator.Snapshot.Lifecycle != domain.OrchestratorWorking {
 		t.Fatalf("last-known orchestrator snapshot was discarded: %+v", updated.projectOrchestrator)
+	}
+}
+
+func TestProjectOrchestratorRefreshCoalescesBusyRequestsIntoOneReplay(t *testing.T) {
+	m := newTestModel()
+	projectID := m.daemonProjectID()
+	if cmd := m.scheduleProjectOrchestratorRefreshCmd(); cmd == nil {
+		t.Fatal("first refresh command = nil")
+	}
+	if cmd := m.scheduleProjectOrchestratorRefreshCmd(); cmd != nil {
+		t.Fatal("busy refresh scheduled a concurrent command")
+	}
+
+	updatedAny, replay := m.Update(projectOrchestratorLoadedMsg{
+		project: projectOrchestratorSnapshot{
+			ProjectID: projectID,
+			Snapshot:  &protocol.OrchestrationSnapshot{Lifecycle: domain.OrchestratorWorking},
+		},
+		seq: 1,
+	})
+	updated := updatedAny.(Model)
+	if replay == nil {
+		t.Fatal("coalesced refresh did not schedule its pending replay")
+	}
+	if !updated.projectOrchestratorRefreshBusy || updated.projectOrchestratorRefreshAgain || updated.projectOrchestratorRefreshSeq != 2 {
+		t.Fatalf("refresh state after replay: busy=%v again=%v seq=%d", updated.projectOrchestratorRefreshBusy, updated.projectOrchestratorRefreshAgain, updated.projectOrchestratorRefreshSeq)
+	}
+	if updated.projectOrchestrator == nil || updated.projectOrchestrator.Snapshot.Lifecycle != domain.OrchestratorWorking {
+		t.Fatalf("first refresh result was not applied: %+v", updated.projectOrchestrator)
+	}
+
+	staleAny, staleCmd := updated.Update(projectOrchestratorLoadedMsg{
+		project: projectOrchestratorSnapshot{ProjectID: projectID, Snapshot: &protocol.OrchestrationSnapshot{Lifecycle: domain.OrchestratorPaused}},
+		seq:     1,
+	})
+	stale := staleAny.(Model)
+	if staleCmd != nil || stale.projectOrchestrator.Snapshot.Lifecycle != domain.OrchestratorWorking || !stale.projectOrchestratorRefreshBusy {
+		t.Fatalf("stale completion changed current state: cmd=%v snapshot=%+v busy=%v", staleCmd, stale.projectOrchestrator, stale.projectOrchestratorRefreshBusy)
+	}
+}
+
+func TestProjectOrchestratorRefreshRejectsPreviousProjectAndReplaysCurrent(t *testing.T) {
+	m := newTestModel()
+	originalProjectID := m.daemonProjectID()
+	if cmd := m.scheduleProjectOrchestratorRefreshCmd(); cmd == nil {
+		t.Fatal("first refresh command = nil")
+	}
+	m.currentProject = "switched-project"
+
+	updatedAny, replay := m.Update(projectOrchestratorLoadedMsg{
+		project: projectOrchestratorSnapshot{ProjectID: originalProjectID, Snapshot: &protocol.OrchestrationSnapshot{Lifecycle: domain.OrchestratorWorking}},
+		seq:     1,
+	})
+	updated := updatedAny.(Model)
+	if replay == nil || updated.projectOrchestratorRefreshSeq != 2 || !updated.projectOrchestratorRefreshBusy {
+		t.Fatalf("current-project replay state: cmd=%v seq=%d busy=%v", replay, updated.projectOrchestratorRefreshSeq, updated.projectOrchestratorRefreshBusy)
+	}
+	if updated.projectOrchestrator != nil {
+		t.Fatalf("previous-project result was applied: %+v", updated.projectOrchestrator)
+	}
+}
+
+func TestOpenProjectOrchestratorOverlayRefreshesCachedSnapshot(t *testing.T) {
+	m := newTestModel()
+	m.projectOrchestrator = &projectOrchestratorSnapshot{
+		ProjectID: m.daemonProjectID(),
+		Snapshot:  &protocol.OrchestrationSnapshot{Lifecycle: domain.OrchestratorWorking},
+	}
+
+	cmd := m.openProjectOrchestratorOverlay()
+	if cmd == nil {
+		t.Fatal("cached orchestrator overlay did not schedule open and refresh")
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatalf("cached orchestrator command = %T with %d commands, want open plus refresh", msg, len(batch))
+	}
+	if _, ok := m.overlayStack.Current().(*overlay.ProjectOrchestratorOverlay); !ok {
+		t.Fatal("cached orchestrator overlay was not pushed synchronously")
+	}
+	if _, ok := batch[0]().(tea.WindowSizeMsg); !ok {
+		t.Fatalf("first cached orchestrator command = %T, want window size sync", batch[0]())
+	}
+}
+
+func TestOpenProjectOrchestratorOverlayAfterProjectRebindUsesCurrentProject(t *testing.T) {
+	m := newTestModel()
+	projectA := config.Project{Name: "project-a", Path: t.TempDir()}
+	projectB := config.Project{Name: "project-b", Path: t.TempDir()}
+	m.rebindProjectContext(projectA, nil)
+	m.projectOrchestrator = &projectOrchestratorSnapshot{
+		Name:      projectA.Name,
+		Path:      projectA.Path,
+		ProjectID: m.daemonProjectID(),
+		Snapshot:  &protocol.OrchestrationSnapshot{Lifecycle: domain.OrchestratorWorking},
+	}
+	m.openProjectOrchestratorOverlay()
+	openedOnA, ok := m.overlayStack.Current().(*overlay.ProjectOrchestratorOverlay)
+	if !ok {
+		t.Fatalf("current overlay = %T, want project orchestrator", m.overlayStack.Current())
+	}
+
+	m.rebindProjectContext(projectB, nil)
+	currentProjectID := m.daemonProjectID()
+	if m.projectOrchestrator != nil {
+		t.Fatalf("project A cache survived project B rebind: %+v", m.projectOrchestrator)
+	}
+	var gotTarget projectOrchestratorTarget
+	m.projectOrchestratorActionRunner = func(_ context.Context, target projectOrchestratorTarget, _ string, _ protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
+		gotTarget = target
+		return protocol.OrchestratorSessionResult{Disposition: "stopped"}, nil
+	}
+
+	view := openedOnA.View()
+	if !strings.Contains(view, projectB.Name) || strings.Contains(view, projectA.Name) {
+		t.Fatalf("rebound orchestrator overlay rendered stale project:\n%s", view)
+	}
+	_, actionCmd := openedOnA.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if actionCmd == nil {
+		t.Fatal("stop action command = nil")
+	}
+	msg, ok := actionCmd().(projectOrchestratorActionMsg)
+	if !ok || msg.err != nil {
+		t.Fatalf("stop action message = %+v", msg)
+	}
+	wantSocket := config.DaemonSocketPathFor(projectB.Path)
+	if gotTarget.ProjectID != currentProjectID || gotTarget.ProjectPath != projectB.Path || gotTarget.SocketPath != wantSocket {
+		t.Fatalf("stop target = %+v, want project ID %q path %q socket %q", gotTarget, currentProjectID, projectB.Path, wantSocket)
+	}
+
+	m.openProjectOrchestratorOverlay()
+	reopened, ok := m.overlayStack.Current().(*overlay.ProjectOrchestratorOverlay)
+	if !ok {
+		t.Fatalf("reopened overlay = %T, want project orchestrator", m.overlayStack.Current())
+	}
+	reopenedView := reopened.View()
+	if !strings.Contains(reopenedView, projectB.Name) || strings.Contains(reopenedView, projectA.Name) {
+		t.Fatalf("reopened orchestrator overlay rendered stale project:\n%s", reopenedView)
 	}
 }

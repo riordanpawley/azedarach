@@ -118,6 +118,19 @@ func emitTelemetry(telemetry gocache.Telemetry) error {
 }
 
 func printInventory(cfg gocache.Config) error {
+	items, err := collectInventory(cfg)
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(map[string]any{"schema": "azedarach.go_cache_inventory.v1", "items": items}, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(data))
+	return nil
+}
+
+func collectInventory(cfg gocache.Config) ([]inventoryItem, error) {
 	paths := append([]string{cfg.LayoutRoot()}, gocache.LegacyPaths(cfg.Root)...)
 	items := make([]inventoryItem, 0, len(paths))
 	for index, path := range paths {
@@ -140,7 +153,7 @@ func printInventory(cfg gocache.Config) error {
 			}
 		}
 		if err != nil {
-			return err
+			return nil, err
 		}
 		kind := "managed"
 		if index > 0 {
@@ -148,12 +161,7 @@ func printInventory(cfg gocache.Config) error {
 		}
 		items = append(items, inventoryItem{Path: path, Kind: kind, Exists: exists, Stats: stats})
 	}
-	data, err := json.MarshalIndent(map[string]any{"schema": "azedarach.go_cache_inventory.v1", "items": items}, "", "  ")
-	if err != nil {
-		return err
-	}
-	fmt.Println(string(data))
-	return nil
+	return items, nil
 }
 
 func maintain(ctx context.Context, cfg gocache.Config) error {

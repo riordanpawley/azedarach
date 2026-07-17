@@ -640,10 +640,28 @@ func TestRealProcessProfileRootedMarkerSurvivesPaneChildReplacement(t *testing.T
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(tmuxDir) })
 	runner := &isolatedTmuxTestRunner{tmuxPath: tmuxPath, socketPath: filepath.Join(tmuxDir, "server.sock")}
-	// Let tmux create its normal interactive login shell. An explicitly named
-	// non-interactive `sh` may exit on the foreground child's SIGINT, taking the
-	// private server with it before the replacement can be launched.
-	if output, err := runner.run(context.Background(), "-f", "/dev/null", "new-session", "-d", "-s", "rooted-replacement"); err != nil {
+	childPIDPath := filepath.Join(tmuxDir, "child.pid")
+	childReadyPrefix := "rooted-replacement-child-ready"
+	childLoopPath := filepath.Join(tmuxDir, "child-loop.sh")
+	childLoop := "#!/bin/sh\n" +
+		"generation=1\n" +
+		"while :; do\n" +
+		"  " + singleQuoteForShell(tmuxPath) + " -S " + singleQuoteForShell(runner.socketPath) + " wait-for " + singleQuoteForShell(childReadyPrefix) + "-release-\"$generation\" &\n" +
+		"  child=$!\n" +
+		"  printf '%s\\n' \"$child\" > " + singleQuoteForShell(childPIDPath) + "\n" +
+		"  " + singleQuoteForShell(tmuxPath) + " -S " + singleQuoteForShell(runner.socketPath) + " wait-for -S " + singleQuoteForShell(childReadyPrefix) + "-\"$generation\"\n" +
+		"  wait \"$child\"\n" +
+		"  generation=$((generation + 1))\n" +
+		"done\n"
+	if err := os.WriteFile(childLoopPath, []byte(childLoop), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := runner.run(
+		context.Background(),
+		"-f", "/dev/null",
+		"new-session", "-d", "-s", "rooted-replacement", singleQuoteForShell(childLoopPath),
+		";", "set-option", "-s", "exit-empty", "off",
+	); err != nil {
 		t.Fatalf("start isolated tmux: %v (%s)", err, output)
 	}
 	t.Cleanup(func() { _, _ = runner.run(context.Background(), "kill-server") })
@@ -651,38 +669,25 @@ func TestRealProcessProfileRootedMarkerSurvivesPaneChildReplacement(t *testing.T
 	if err := client.SetEnvironment(context.Background(), "rooted-replacement", rootedOrchestratorBootstrapNonceEnvironment, "durable-marker"); err != nil {
 		t.Fatal(err)
 	}
-	panePID, err := runner.run(context.Background(), "display-message", "-p", "-t", "rooted-replacement", "#{pane_pid}")
-	if err != nil {
-		t.Fatal(err)
-	}
-	panePID = strings.TrimSpace(panePID)
-	childPID := func(exclude string) string {
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			output, _ := exec.Command("ps", "-o", "pid=", "-P", panePID).CombinedOutput()
-			for _, pid := range strings.Fields(string(output)) {
-				if pid != exclude {
-					return pid
-				}
-			}
-			time.Sleep(20 * time.Millisecond)
+	childPID := func(readyChannel string) string {
+		t.Helper()
+		if output, err := runner.run(context.Background(), "wait-for", readyChannel); err != nil {
+			t.Fatalf("wait for pane child on %q: %v (%s)", readyChannel, err, output)
 		}
-		return ""
+		pid, err := os.ReadFile(childPIDPath)
+		if err != nil {
+			t.Fatalf("read pane child pid: %v", err)
+		}
+		return strings.TrimSpace(string(pid))
 	}
-	if output, err := runner.run(context.Background(), "send-keys", "-t", "rooted-replacement", "sleep 30", "Enter"); err != nil {
-		t.Fatalf("launch first child: %v (%s)", err, output)
-	}
-	firstChild := childPID("")
+	firstChild := childPID(childReadyPrefix + "-1")
 	if firstChild == "" {
 		t.Fatal("first pane child did not start")
 	}
-	if output, err := runner.run(context.Background(), "send-keys", "-t", "rooted-replacement", "C-c"); err != nil {
-		t.Fatalf("interrupt first child: %v (%s)", err, output)
+	if output, err := runner.run(context.Background(), "wait-for", "-S", childReadyPrefix+"-release-1"); err != nil {
+		t.Fatalf("release first pane child: %v (%s)", err, output)
 	}
-	if output, err := runner.run(context.Background(), "send-keys", "-t", "rooted-replacement", "sleep 30", "Enter"); err != nil {
-		t.Fatalf("launch replacement child: %v (%s)", err, output)
-	}
-	secondChild := childPID(firstChild)
+	secondChild := childPID(childReadyPrefix + "-2")
 	if secondChild == "" || secondChild == firstChild {
 		t.Fatalf("replacement child pid = %q, first = %q", secondChild, firstChild)
 	}

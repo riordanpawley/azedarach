@@ -15,10 +15,201 @@ import (
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/daemon/userstore"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
+
+func TestGlobalProjectionTerminalSessionSuppressionConvergesBootstrapAndIncremental(t *testing.T) {
+	ctx := context.Background()
+	home, rootA, rootB := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	projectForRoot := func(root, name string) appconfig.Project {
+		t.Helper()
+		projectID, err := appconfig.ProjectIDForRoot(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return appconfig.Project{ID: projectID, Name: name, Path: root}
+	}
+	projectA, projectB := projectForRoot(rootA, "A"), projectForRoot(rootB, "B")
+	projectAID := appconfig.RegisteredProjectID(projectA)
+	projectBID := appconfig.RegisteredProjectID(projectB)
+
+	openProject := func(root string) (*issues.Client, *daemonstate.RuntimeStateStore) {
+		t.Helper()
+		dbPath := filepath.Join(root, ".azedarach", "azedarach.db")
+		client := issues.NewClientAtPath(dbPath, logger)
+		if err := client.OpenProjectionDeltaStore(); err != nil {
+			t.Fatal(err)
+		}
+		runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, logger)
+		t.Cleanup(func() {
+			_ = runtimeStore.Close()
+			_ = client.CloseDB()
+		})
+		return client, runtimeStore
+	}
+	clientA, runtimeA := openProject(rootA)
+	clientB, runtimeB := openProject(rootB)
+	closedID, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "closed", Type: domain.TypeBug, Status: domain.StatusDone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closingID, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "stop then close", Type: domain.TypeBug, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveID, err := clientB.Create(ctx, issues.CreateTaskParams{Title: "live", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 17, 0, 18, 45, 0, time.UTC)
+	closedSessionID := naming.CanonicalSessionID(projectAID, closedID)
+	for _, session := range []daemonstate.Session{
+		{ID: closedSessionID, IssueID: closedID, Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: closedID, State: daemonstate.SessionStateStopped, ObservedState: daemonstate.SessionStateStopped, UpdatedAt: now},
+		{ID: closedSessionID + ".pane-12", IssueID: closedID, Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: closedID, State: daemonstate.SessionStatePaused, ObservedState: daemonstate.SessionStatePaused, Activity: "idle", ActivitySource: "hooks", UpdatedAt: now.Add(-time.Second)},
+		{ID: naming.CanonicalSessionID(projectAID, closingID), IssueID: closingID, Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: closingID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: now},
+	} {
+		if err := upsertSessionStateFixture(runtimeA, ctx, projectAID, session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	liveSessionID := naming.CanonicalSessionID(projectBID, liveID)
+	if err := upsertSessionStateFixture(runtimeB, ctx, projectBID, daemonstate.Session{ID: liveSessionID, IssueID: liveID, Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: liveID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	userStore, err := userstore.Open(filepath.Join(home, ".azedarach", "azedarach.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = userStore.Close() })
+	d := &Daemon{
+		cfg: Config{RepoDir: rootA, Logger: logger}, userStore: userStore, sessionStore: daemonstate.NewStore(),
+		issues:                 clientA,
+		issueClientsByProject:  map[string]*issues.Client{projectAID: clientA, projectBID: clientB},
+		issueClientsByRoot:     map[string]*issues.Client{daemonStoreRootKey(rootA): clientA, daemonStoreRootKey(rootB): clientB},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectAID: runtimeA, projectBID: runtimeB},
+	}
+	// Even an exact live snapshot cannot turn a terminal/stopped divergence into
+	// a healthy global session.
+	if _, err := d.sessionStore.UpsertSession(projectAID, closedSessionID, closedID, daemonstate.SessionStateRunning); err != nil {
+		t.Fatal(err)
+	}
+
+	assertProjection := func(closedHasSession, closingHasSession, liveHasSession bool) {
+		t.Helper()
+		snapshot, err := userStore.Snapshot(ctx, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		byProject := make(map[string]map[string]domain.Task, len(snapshot.Projects))
+		for _, project := range snapshot.Projects {
+			byProject[project.ProjectID] = make(map[string]domain.Task, len(project.Tasks))
+			for _, task := range project.Tasks {
+				byProject[project.ProjectID][task.ID.String()] = task
+			}
+		}
+		closed, found := byProject[projectAID][closedID]
+		if !found {
+			t.Fatalf("closed issue %s/%s missing from global projection", projectAID, closedID)
+		}
+		if got := closed.Session != nil || closed.HasTmuxSession; got != closedHasSession {
+			t.Fatalf("closed projection session=%+v has_tmux_session=%t, want presence=%t", closed.Session, closed.HasTmuxSession, closedHasSession)
+		}
+		closing, found := byProject[projectAID][closingID]
+		if !found {
+			t.Fatalf("stop-close issue %s/%s missing from global projection", projectAID, closingID)
+		}
+		if got := closing.Session != nil || closing.HasTmuxSession; got != closingHasSession {
+			t.Fatalf("stop-close projection session=%+v has_tmux_session=%t, want presence=%t", closing.Session, closing.HasTmuxSession, closingHasSession)
+		}
+		live, found := byProject[projectBID][liveID]
+		if !found {
+			t.Fatalf("live issue %s/%s missing from global projection", projectBID, liveID)
+		}
+		if got := live.Session != nil && live.HasTmuxSession; got != liveHasSession {
+			t.Fatalf("cross-project live projection session=%+v has_tmux_session=%t, want presence=%t", live.Session, live.HasTmuxSession, liveHasSession)
+		}
+	}
+
+	for _, project := range []appconfig.Project{projectA, projectB} {
+		if err := d.refreshRegisteredUserProject(ctx, project); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertProjection(false, true, true)
+	// Full bootstrap/recovery is idempotent and remains project-scoped.
+	if err := d.refreshRegisteredUserProject(ctx, projectA); err != nil {
+		t.Fatal(err)
+	}
+	assertProjection(false, true, true)
+
+	// Supported materialized current-state writes now reject the production
+	// corruption at the root-user projection boundary.
+	staleStartedAt := now.Add(-time.Hour)
+	stale := domain.Task{ID: naming.IssueID(closedID), Status: domain.StatusDone, Type: domain.TypeBug, UpdatedAt: now, HasTmuxSession: true, Session: &domain.Session{IssueID: naming.IssueID(closedID), State: domain.SessionPaused, Activity: "idle", ActivitySource: "hooks", StartedAt: &staleStartedAt, UpdatedAt: now.Add(-time.Second)}}
+	if err := userStore.ApplyProjectMaterializedIssues(ctx, projectAID, []userstore.ProjectDeltaChange{{IssueID: closedID, Issue: &stale}}); err != nil {
+		t.Fatal(err)
+	}
+	assertProjection(false, true, true)
+
+	applyNextObservation := func(issueID string) {
+		t.Helper()
+		if _, err := clientA.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventProgressRecorded, Source: "test"}); err != nil {
+			t.Fatal(err)
+		}
+		state, err := userStore.ProjectDeltaState(ctx, projectAID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		batch, err := NewProjectionDeltaAuthority(clientA).List(ctx, protocol.DefaultProjectID, state.Cursor, rootProjectionDeltaBatchLimit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		remapProjectionDeltaBatch(&batch, projectAID)
+		if err := protocol.VerifyProjectionDeltaBatch(batch, state.Cursor, issueProjectionProjector()); err != nil {
+			t.Fatal(err)
+		}
+		changes, err := decodeUserProjectionChanges(batch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		changes, err = d.hydrateUserProjectionChanges(ctx, projectAID, clientA, batch, changes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next := userstore.ProjectDeltaState{ProjectID: projectAID, Cursor: batch.DeliveryToCursor, SourceVector: mergeRootProjectionSources(state.SourceVector, batch.SourceVector), Projector: batch.Projector, Initialized: true}
+		next.Hash = chainRootProjectDelta(state, next, batch.SemanticChecksum)
+		if err := userStore.ApplyProjectDelta(ctx, userstore.ProjectDeltaApply{Project: userstore.CatalogProject{ProjectID: projectAID, Name: projectA.Name, Path: rootA, DBPath: filepath.Join(rootA, ".azedarach", "azedarach.db")}, Expected: state, Next: next, Changes: changes}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	applyNextObservation(closedID)
+	assertProjection(false, true, true)
+	applyNextObservation(closedID)
+	assertProjection(false, true, true)
+
+	// The active path must converge immediately when stop intent is persisted
+	// before lifecycle close, without needing a full project rebuild.
+	if err := upsertSessionStateFixture(runtimeA, ctx, projectAID, daemonstate.Session{
+		ID: naming.CanonicalSessionID(projectAID, closingID), IssueID: closingID,
+		Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: closingID,
+		State: daemonstate.SessionStateStopped, ObservedState: daemonstate.SessionStateStopped, UpdatedAt: now.Add(time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientA.Update(ctx, closingID, domain.StatusDone); err != nil {
+		t.Fatal(err)
+	}
+	applyNextObservation(closingID)
+	assertProjection(false, false, true)
+}
 
 func TestUserProjectionConsumerReplaysAndWatchesWithoutMutationFullExport(t *testing.T) {
 	home, root := t.TempDir(), t.TempDir()

@@ -100,6 +100,156 @@ func TestRuntimeSignalIngestGitHookPersistsFastProjectionAndQueuesEnrichment(t *
 	}
 }
 
+func TestRuntimeProjectionWriterDoesNotHoldWriterLockAcrossRuntimeRefresh(t *testing.T) {
+	ctx := context.Background()
+	runtimeStore := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	const (
+		projectID = "proj-runtime-signal-refresh-overlap"
+		issueID   = "az-overlap"
+		sessionID = "sess-overlap"
+	)
+	now := time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC)
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
+		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed session intent: %v", err)
+	}
+
+	canonical := domain.Task{ID: naming.IssueID(issueID), Title: "runtime signal overlap", Type: domain.TypeTask}
+	refreshEntered := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	materializer := newProjectReadMaterializer(projectID, nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		close(refreshEntered)
+		<-releaseRefresh
+		return tasks, nil
+	})
+	canonicalByID := map[string]domain.Task{issueID: canonical}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonicalByID, canonicalByID)
+	materializer.replaceBootstrap(canonicalByID, canonicalByID, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStore,
+		},
+		materializers: map[string]*projectReadMaterializer{projectID: materializer},
+	}
+	writer := newRuntimeProjectionWriter(d)
+	d.runtimeProjectionWriter = writer
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := d.recordPhysicalSessionObservation(ctx, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, sessionID, issueID, daemonstate.SessionStateRunning, "busy", "hooks")
+		done <- err
+	}()
+
+	<-refreshEntered
+	lockAvailable := writer.mu.TryLock()
+	if lockAvailable {
+		writer.mu.Unlock()
+	}
+	if tasks, _ := materializer.snapshot(); len(tasks) != 1 || tasks[0].ID.String() != issueID {
+		t.Fatalf("board/graph snapshot unavailable during runtime refresh: %+v", tasks)
+	}
+	close(releaseRefresh)
+	if err := <-done; err != nil {
+		t.Fatalf("runtime projection write: %v", err)
+	}
+	if !lockAvailable {
+		t.Fatal("runtime projection write held projection writer lock across runtime refresh")
+	}
+	session, found, err := runtimeStore.GetSessionState(ctx, projectID, sessionID)
+	if err != nil || !found || session.Activity != "busy" || session.ActivitySource != "hooks" {
+		t.Fatalf("session after overlapping ingest = %+v found=%v err=%v", session, found, err)
+	}
+}
+
+func TestRuntimeSignalIngestDoesNotSynchronouslyRefreshDisposableProjectRead(t *testing.T) {
+	ctx := context.Background()
+	runtimeStore := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	const (
+		projectID = "proj-runtime-signal-no-sync-refresh"
+		issueID   = "az-no-sync-refresh"
+		sessionID = "sess-no-sync-refresh"
+	)
+	now := time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC)
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
+		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed session intent: %v", err)
+	}
+
+	refreshEntered := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	materializer := newProjectReadMaterializer(projectID, nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		close(refreshEntered)
+		<-releaseRefresh
+		return tasks, nil
+	})
+	canonical := map[string]domain.Task{issueID: {ID: naming.IssueID(issueID), Title: "runtime signal", Type: domain.TypeTask}}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, canonical)
+	materializer.replaceBootstrap(canonical, canonical, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+	backgroundRefreshDone := make(chan error, 1)
+	go func() {
+		refreshCtx := contextWithRuntimeProjectionWriterOperation(ctx, "background.projection_refresh")
+		backgroundRefreshDone <- materializer.refreshRuntime(refreshCtx, []string{issueID})
+	}()
+	<-refreshEntered
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": runtimeStore,
+		},
+		materializers: map[string]*projectReadMaterializer{projectID: materializer},
+	}
+	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
+
+	type ingestResult struct {
+		response protocol.ResponseEnvelope
+		err      error
+	}
+	unexpectedRefreshWait := make(chan struct{})
+	signalCtx := withProjectReadUpdateWaitHookForTest(ctx, func(_, _ string) { close(unexpectedRefreshWait) })
+	done := make(chan ingestResult, 1)
+	go func() {
+		resp, err := d.handleRuntimeSignalIngest(signalCtx, protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       "runtime-signal-no-sync-refresh",
+			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+			Body: mustMarshal(t, protocol.RuntimeSignalIngestCommandBody{
+				Source: protocol.RuntimeSignalSourceAgentHook, Kind: protocol.RuntimeSignalKindAgentActivityChanged,
+				ProjectID: projectID, IssueID: issueID, SessionID: sessionID, Agent: "codex", Event: "pre_tool_use",
+			}),
+		})
+		done <- ingestResult{response: resp, err: err}
+	}()
+
+	select {
+	case result := <-done:
+		if result.err != nil || !result.response.OK {
+			t.Fatalf("runtime signal response=%+v err=%v", result.response, result.err)
+		}
+	case <-unexpectedRefreshWait:
+		close(releaseRefresh)
+		<-done
+		<-backgroundRefreshDone
+		t.Fatal("runtime signal waited on the contended disposable project-read refresh")
+	}
+	close(releaseRefresh)
+	if err := <-backgroundRefreshDone; err != nil {
+		t.Fatalf("background project-read refresh: %v", err)
+	}
+	session, found, err := runtimeStore.GetSessionState(ctx, projectID, sessionID)
+	if err != nil || !found || session.Activity != "busy" || session.ActivitySource != "hooks" {
+		t.Fatalf("durable session after ingest = %+v found=%v err=%v", session, found, err)
+	}
+}
+
 func TestManagedAgentSignalIdentityRejectsStaleAndReusedIncarnations(t *testing.T) {
 	repoDir := initRuntimeSignalGitRepo(t)
 	runner := &managedIdentityTmuxRunner{session: "az-1", pane: "%12", pid: 100}

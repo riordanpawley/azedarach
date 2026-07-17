@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -16,30 +17,38 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
-const EnvVar = "AZEDARACH_LATENCY_TRACE"
+const (
+	EnvVar                            = "AZEDARACH_LATENCY_TRACE"
+	standaloneDependencySlowThreshold = 100 * time.Millisecond
+)
 const tracerName = "github.com/riordanpawley/azedarach/internal/latencytrace"
 
 var configEnabled atomic.Bool
 
 var spanStringAttributeKeys = map[string]struct{}{
-	"client_name":          {},
-	"command":              {},
-	"command_shape":        {},
-	"daemon_version":       {},
-	"dependency.name":      {},
-	"dependency.operation": {},
-	"freshness":            {},
-	"hook":                 {},
-	"hook_command_shape":   {},
-	"issue_id":             {},
-	"operation":            {},
-	"outcome":              {},
-	"project_id":           {},
-	"reason":               {},
-	"request_id":           {},
-	"root_issue_id":        {},
-	"transport":            {},
-	"task_id":              {},
+	"client_name":               {},
+	"command":                   {},
+	"command_shape":             {},
+	"daemon_version":            {},
+	"dependency.name":           {},
+	"dependency.operation":      {},
+	"freshness":                 {},
+	"hook":                      {},
+	"hook_command_shape":        {},
+	"mutation.holder_operation": {},
+	"mutation.waiter_operation": {},
+	"issue_id":                  {},
+	"operation":                 {},
+	"outcome":                   {},
+	"project_id":                {},
+	"refresh.holder_operation":  {},
+	"refresh.waiter_operation":  {},
+	"reason":                    {},
+	"request_id":                {},
+	"root_issue_id":             {},
+	"standalone.reason":    {},
+	"transport":                 {},
+	"task_id":                   {},
 }
 
 // SetConfigEnabled sets the persisted config default for latency phase logging.
@@ -100,7 +109,8 @@ func LogPhaseContext(ctx context.Context, logger *slog.Logger, component, phase 
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	duration := time.Since(startedAt)
+	endedAt := time.Now()
+	duration := elapsed(startedAt, endedAt)
 	base := []any{
 		"component", component,
 		"phase", phase,
@@ -113,33 +123,8 @@ func LogPhaseContext(ctx context.Context, logger *slog.Logger, component, phase 
 	if !spanEnabled {
 		return
 	}
-	spanAttrs := []attribute.KeyValue{
-		attribute.String("component", component),
-		attribute.String("phase", phase),
-		attribute.Int64("duration_ms", duration.Milliseconds()),
-	}
-	hadError := false
-	for i := 0; i+1 < len(attrs); i += 2 {
-		key, ok := attrs[i].(string)
-		if !ok || key == "" {
-			continue
-		}
-		attr, isError, ok := spanAttribute(key, attrs[i+1])
-		if ok {
-			spanAttrs = append(spanAttrs, attr)
-		}
-		hadError = hadError || isError
-	}
-	_, span := otel.Tracer(tracerName).Start(
-		ctx,
-		component+"."+phase,
-		oteltrace.WithTimestamp(startedAt),
-		oteltrace.WithAttributes(spanAttrs...),
-	)
-	if hadError {
-		span.SetStatus(codes.Error, "phase failed")
-	}
-	span.End(oteltrace.WithTimestamp(startedAt.Add(duration)))
+	_, endSpan := startSpanAt(ctx, component, phase, startedAt, func() time.Time { return endedAt }, attrs...)
+	endSpan(nil)
 }
 
 // StartSpan starts a safe, bounded span when OpenTelemetry diagnostics are enabled.
@@ -162,6 +147,10 @@ func DetachedSpanContext(ctx context.Context) context.Context {
 // StartSpanWithEndAttributes starts a safe, bounded span and allows callers to
 // add final low-cardinality attributes once the operation outcome is known.
 func StartSpanWithEndAttributes(ctx context.Context, component, phase string, attrs ...any) (context.Context, func(error, ...any)) {
+	return startSpanAt(ctx, component, phase, time.Now(), time.Now, attrs...)
+}
+
+func startSpanAt(ctx context.Context, component, phase string, startedAt time.Time, now func() time.Time, attrs ...any) (context.Context, func(error, ...any)) {
 	if !observability.Enabled(configEnabled.Load()) {
 		if ctx == nil {
 			ctx = context.Background()
@@ -171,9 +160,81 @@ func StartSpanWithEndAttributes(ctx context.Context, component, phase string, at
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	spanAttrs := []attribute.KeyValue{
-		attribute.String("component", component),
-		attribute.String("phase", phase),
+	if now == nil {
+		now = time.Now
+	}
+	spanAttrs, hadError := spanAttributes(component, phase, attrs)
+	explicitReason := standaloneReason(attrs)
+	parented := oteltrace.SpanContextFromContext(ctx).IsValid()
+	if component == "dependency" && !parented && explicitReason == "" {
+		var once sync.Once
+		return ctx, func(err error, endAttrs ...any) {
+			once.Do(func() {
+				endedAt := now()
+				duration := elapsed(startedAt, endedAt)
+				endSpanAttrs, hadEndError := spanAttributes("", "", endAttrs)
+				reason := ""
+				switch {
+				case err != nil || hadError || hadEndError:
+					reason = "error"
+				case duration >= standaloneDependencySlowThreshold:
+					reason = "slow"
+				case standaloneReason(endAttrs) != "":
+					reason = standaloneReason(endAttrs)
+				}
+				if reason == "" {
+					return
+				}
+				retainedAttrs := make([]attribute.KeyValue, 0, len(spanAttrs)+len(endSpanAttrs)+2)
+				retainedAttrs = append(retainedAttrs, spanAttrs...)
+				retainedAttrs = append(retainedAttrs, endSpanAttrs...)
+				retainedAttrs = append(retainedAttrs,
+					attribute.Int64("duration_ms", duration.Milliseconds()),
+					attribute.String("standalone.reason", reason),
+				)
+				_, span := otel.Tracer(tracerName).Start(ctx, component+"."+phase,
+					oteltrace.WithTimestamp(startedAt),
+					oteltrace.WithAttributes(retainedAttrs...),
+				)
+				if err != nil || hadError || hadEndError {
+					span.SetAttributes(attribute.Bool("error", true))
+					span.SetStatus(codes.Error, "operation failed")
+				}
+				span.End(oteltrace.WithTimestamp(endedAt))
+			})
+		}
+	}
+
+	ctx, span := otel.Tracer(tracerName).Start(
+		ctx,
+		component+"."+phase,
+		oteltrace.WithTimestamp(startedAt),
+		oteltrace.WithAttributes(spanAttrs...),
+	)
+	var once sync.Once
+	return ctx, func(err error, endAttrs ...any) {
+		once.Do(func() {
+			endedAt := now()
+			duration := elapsed(startedAt, endedAt)
+			endSpanAttrs, hadEndError := spanAttributes("", "", endAttrs)
+			span.SetAttributes(endSpanAttrs...)
+			span.SetAttributes(attribute.Int64("duration_ms", duration.Milliseconds()))
+			if err != nil || hadError || hadEndError {
+				span.SetAttributes(attribute.Bool("error", true))
+				span.SetStatus(codes.Error, "operation failed")
+			}
+			span.End(oteltrace.WithTimestamp(endedAt))
+		})
+	}
+}
+
+func spanAttributes(component, phase string, attrs []any) ([]attribute.KeyValue, bool) {
+	spanAttrs := make([]attribute.KeyValue, 0, len(attrs)/2+2)
+	if component != "" {
+		spanAttrs = append(spanAttrs,
+			attribute.String("component", component),
+			attribute.String("phase", phase),
+		)
 	}
 	hadError := false
 	for i := 0; i+1 < len(attrs); i += 2 {
@@ -187,30 +248,32 @@ func StartSpanWithEndAttributes(ctx context.Context, component, phase string, at
 		}
 		hadError = hadError || isError
 	}
-	ctx, span := otel.Tracer(tracerName).Start(
-		ctx,
-		component+"."+phase,
-		oteltrace.WithAttributes(spanAttrs...),
-	)
-	return ctx, func(err error, endAttrs ...any) {
-		hadEndError := false
-		for i := 0; i+1 < len(endAttrs); i += 2 {
-			key, ok := endAttrs[i].(string)
-			if !ok || key == "" {
-				continue
-			}
-			attr, isError, ok := spanAttribute(key, endAttrs[i+1])
-			if ok {
-				span.SetAttributes(attr)
-			}
-			hadEndError = hadEndError || isError
+	return spanAttrs, hadError
+}
+
+func standaloneReason(attrs []any) string {
+	for i := 0; i+1 < len(attrs); i += 2 {
+		key, ok := attrs[i].(string)
+		if !ok || key != "standalone.reason" {
+			continue
 		}
-		if err != nil || hadError || hadEndError {
-			span.SetAttributes(attribute.Bool("error", true))
-			span.SetStatus(codes.Error, "operation failed")
+		value, _ := attrs[i+1].(string)
+		switch value {
+		case "diagnostic":
+			return value
+		default:
+			return ""
 		}
-		span.End()
 	}
+	return ""
+}
+
+func elapsed(startedAt, endedAt time.Time) time.Duration {
+	duration := endedAt.Sub(startedAt)
+	if duration < 0 {
+		return 0
+	}
+	return duration
 }
 
 func spanAttribute(key string, value any) (attribute.KeyValue, bool, bool) {
@@ -220,10 +283,13 @@ func spanAttribute(key string, value any) (attribute.KeyValue, bool, bool) {
 	case error:
 		return attribute.Bool("error", true), true, true
 	case string:
+		if key == "standalone.reason" && v != "diagnostic" && v != "error" && v != "slow" {
+			return attribute.KeyValue{}, false, false
+		}
 		if !allowSpanStringAttribute(key) {
 			return attribute.KeyValue{}, false, false
 		}
-		return attribute.String(key, v), false, true
+		return attribute.String(key, v), key == "outcome" && v == "error", true
 	case fmt.Stringer:
 		if !allowSpanStringAttribute(key) {
 			return attribute.KeyValue{}, false, false

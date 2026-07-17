@@ -22,6 +22,20 @@ Hard import direction:
 - `internal/tui`, `internal/cli` X> `internal/daemon/*`.
 - `internal/daemon/*` X> Bubble Tea/UI packages.
 
+### CLI/config project resolution
+
+- `internal/config` owns dependency-light local helpers for resolving a project
+  root and deriving its project ID. Active `internal/cli` and `cmd/az`
+  entrypoints call those helpers directly.
+- Project root and ID discovery are local path/identity concerns. They must not
+  depend on daemon, client, TUI, UI, or authority-service packages.
+- Do not introduce a shared `ProjectService` abstraction for CLI/config project
+  discovery. Daemon-authoritative project registration and lifecycle remain
+  behind typed daemon/client contracts; they are separate from local discovery.
+- `scripts/check-boundaries.sh` enforces the config import direction, rejects
+  project-authority service imports from CLI paths, and rejects a
+  `ProjectService` dependency in active CLI/config Go sources.
+
 ## Enforcement Levels
 
 ### Level 0 (current baseline)

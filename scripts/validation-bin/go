@@ -2,7 +2,25 @@
 set -euo pipefail
 
 real_go="${AZEDARACH_REAL_GO_BIN:-}"
-if [[ -z "$real_go" || ! -x "$real_go" || "$real_go" == "$0" ]]; then
+if [[ -z "$real_go" ]]; then
+  remaining_path="${PATH}:"
+  while [[ "$remaining_path" == *:* ]]; do
+    directory="${remaining_path%%:*}"
+    remaining_path="${remaining_path#*:}"
+    [[ -n "$directory" ]] || directory=.
+    candidate="${directory}/go"
+    if [[ -x "$candidate" && ! "$candidate" -ef "$0" ]]; then
+      real_go="$candidate"
+      export AZEDARACH_REAL_GO_BIN="$real_go"
+      break
+    fi
+  done
+fi
+if [[ -z "$real_go" || ! -x "$real_go" || "$real_go" -ef "$0" ]]; then
+  if [[ -n "${AZEDARACH_VALIDATION_EVIDENCE_FILE:-}" ]]; then
+    fatal_evidence="${AZEDARACH_VALIDATION_FATAL_EVIDENCE_FILE:-${AZEDARACH_VALIDATION_EVIDENCE_FILE}.fatal}"
+    printf '%s\n' '{"fatal_phase":"toolchain_configuration","fatal_detail":"AZEDARACH_REAL_GO_BIN must name the executable Go toolchain"}' >"$fatal_evidence"
+  fi
   echo "AZEDARACH_REAL_GO_BIN must name the executable Go toolchain" >&2
   exit 78
 fi

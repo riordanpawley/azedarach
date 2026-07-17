@@ -471,7 +471,8 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		if m.daemonClient == nil {
 			return m, nil
 		}
-		return m, m.refreshTaskWorkspaceInBackgroundCmd(task.ID.String())
+		cmd := m.refreshTaskWorkspaceInBackgroundCmd(task.ID.String())
+		return m, cmd
 	case "task_workspace_drill_down":
 		targetID, ok := msg.Value.(string)
 		if !ok || strings.TrimSpace(targetID) == "" {
@@ -674,7 +675,7 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "a":
-		m.beginMutationFeedback(fmt.Sprintf("Attach queued for %s", task.ID))
+		m.beginMutationFeedback(fmt.Sprintf("Attaching to %s", task.ID))
 		return m, m.attachSessionCmd(task.ID.String())
 	case "p":
 		// TODO: Pause session
@@ -792,7 +793,8 @@ func (m Model) handleSelection(msg overlay.SelectionMsg) (tea.Model, tea.Cmd) {
 
 	case "r":
 		m.beginMutationFeedback(fmt.Sprintf("Refreshing %s", task.ID))
-		return m, m.refreshTaskWorkspaceInBackgroundCmd(task.ID.String())
+		cmd := m.refreshTaskWorkspaceInBackgroundCmd(task.ID.String())
+		return m, cmd
 	case "o":
 		m.beginMutationFeedback(fmt.Sprintf("Claiming ownership for %s", task.ID))
 		return m, m.issueOwnershipCmd(task.ID.String(), "claim", false)

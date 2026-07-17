@@ -39,7 +39,7 @@ exported to the launched daemon and TUI. Set `AZEDARACH_SKIP_JAEGER=1` to skip
 startup.
 
 The default backend is bounded, throwaway memory storage
-(`AZEDARACH_JAEGER_STORAGE=memory`, `AZEDARACH_JAEGER_MAX_TRACES=2000`) with a
+(`AZEDARACH_JAEGER_STORAGE=memory`, `AZEDARACH_JAEGER_MAX_TRACES=40000`) with a
 1 GiB container limit and a 768 MiB ingestion limiter. For explicitly durable
 local traces, set `AZEDARACH_JAEGER_STORAGE=badger`; it reuses the single named
 volume `azedarach-jaeger-data` with a 24-hour TTL. Override that store with
@@ -55,15 +55,19 @@ just jaeger-inventory
 just jaeger-cleanup --confirm
 ```
 
+Inventory reports both the configured and live effective trace limits so a
+collector still running with an older capacity is immediately visible.
+
 Cleanup never removes the selected primary store, a volume attached to any
 container, or an unrelated volume. When querying Jaeger, start with a 15-minute
 window and at most 10 traces, filter by service and operation, and widen one
 dimension at a time. A result limit bounds trace count, not spans per trace;
 export an important trace by ID before experimenting with broader searches.
 Maintainers with a healthy local container engine can exercise the configured
-memory budget with `just test-jaeger-workload`; it ingests and queries a
-15,000-span trace in an isolated ephemeral collector and fails if the collector
-exits or is OOM-killed.
+memory budget with `just test-jaeger-workload`; it fills an isolated ephemeral
+collector to the 40,000-trace default, verifies the oldest trace remains
+addressable by ID, safely queries ten results and one 15,000-span trace, reports
+container memory use, and fails if the collector exits or is OOM-killed.
 
 Build and link without starting interactive TUI:
 

@@ -6,6 +6,9 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 )
 
 func TestProjectOrchestratorOverlayGolden(t *testing.T) {
@@ -56,5 +59,32 @@ func TestProjectOrchestratorOverlayRoutesActions(t *testing.T) {
 	_, _ = overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
 	if action != "stop" {
 		t.Fatalf("stop action = %q", action)
+	}
+}
+
+func TestProjectOrchestratorOverlayUsesSemanticColor(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(previous)
+
+	o := NewProjectOrchestratorOverlay(ProjectOrchestratorDetails{
+		Project: "azedarach", Status: "orchestrator working live=true",
+		Ready: 3, Review: 2, WaitingHuman: 1, OwnedElsewhere: 4,
+	}, nil)
+	view := o.View()
+	if !strings.Contains(view, "38;2;") {
+		t.Fatal("orchestrator overlay rendered without semantic color")
+	}
+	for _, want := range []string{"azedarach", "working", "ready", "review", "waiting-human", "owned-elsewhere"} {
+		if !strings.Contains(ansi.Strip(view), want) {
+			t.Fatalf("styled view missing %q: %q", want, ansi.Strip(view))
+		}
+	}
+	if !strings.Contains(view, projectOrchestratorLiveStyle.Render("orchestrator working live=true")) {
+		t.Fatal("live orchestrator status did not use healthy styling")
+	}
+	idle := NewProjectOrchestratorOverlay(ProjectOrchestratorDetails{Status: "orchestrator working live=false"}, nil).View()
+	if !strings.Contains(idle, projectOrchestratorIdleStyle.Render("orchestrator working live=false")) {
+		t.Fatal("non-live orchestrator status did not use idle styling")
 	}
 }

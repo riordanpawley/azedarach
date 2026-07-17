@@ -99,8 +99,9 @@ type SQLiteStore struct {
 	dbPath string
 	logger *slog.Logger
 
-	mu sync.Mutex
-	db *sql.DB
+	mu     sync.Mutex
+	db     *sql.DB
+	readDB *sql.DB
 }
 
 func New(repoDir string, logger *slog.Logger) *SQLiteStore {
@@ -131,12 +132,16 @@ func NewAtPath(dbPath string, logger *slog.Logger) *SQLiteStore {
 func (s *SQLiteStore) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		return nil
+	var errs []error
+	if s.db != nil {
+		errs = append(errs, s.db.Close())
+		s.db = nil
 	}
-	err := s.db.Close()
-	s.db = nil
-	return err
+	if s.readDB != nil {
+		errs = append(errs, s.readDB.Close())
+		s.readDB = nil
+	}
+	return errors.Join(errs...)
 }
 
 func (s *SQLiteStore) Create(ctx context.Context, params CreateParams) (Record, error) {
@@ -548,6 +553,36 @@ func (s *SQLiteStore) dbHandle() (*sql.DB, error) {
 		return nil, fmt.Errorf("open operation db: %w", err)
 	}
 	s.db = db
+	return db, nil
+}
+
+// validationReadDBHandle owns a deferred, read-only connection pool. The
+// primary pool intentionally uses immediate transactions for mutation
+// authority, so it cannot serve projection reads while another writer holds a
+// validation lease transaction even though WAL has a coherent readable view.
+func (s *SQLiteStore) validationReadDBHandle() (*sql.DB, error) {
+	if _, err := s.dbHandle(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.readDB != nil {
+		return s.readDB, nil
+	}
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", filepath.ToSlash(s.dbPath))
+	db, err := tracesqlite.Open(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open operation projection reader: %w", err)
+	}
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
+	db.SetConnMaxLifetime(0)
+	db.SetConnMaxIdleTime(0)
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("open operation projection reader: %w", err)
+	}
+	s.readDB = db
 	return db, nil
 }
 

@@ -59,6 +59,12 @@ my $cleanup_scoped_daemon = ($daemon_scope eq 'worktree' || $daemon_scope eq 'sc
     && !$ENV{AZEDARACH_VALIDATION_REQUEST_ID};
 my $scoped_cleanup_owner_pid = $$;
 my $scoped_cleanup_done = 0;
+my $scoped_cleanup_timeout = $ENV{AZEDARACH_VALIDATION_CLEANUP_TIMEOUT_SECONDS} || 20;
+my $scoped_cleanup_watchdog = $ENV{AZEDARACH_VALIDATION_TEST_CLEANUP_WATCHDOG_FILE} || '';
+if ($cleanup_scoped_daemon) {
+    die "AZEDARACH_VALIDATION_CLEANUP_TIMEOUT_SECONDS must be positive seconds\n"
+        unless $scoped_cleanup_timeout =~ /^\d+(?:\.\d+)?$/ && $scoped_cleanup_timeout > 0;
+}
 if ($cleanup_scoped_daemon && $cleanup_az eq '') {
     $scoped_cleanup_done = 1;
     die "worktree-scoped validation requires AZEDARACH_VALIDATION_CLEANUP_AZ_BIN\n";
@@ -68,9 +74,9 @@ my $stop_scoped_daemon = sub {
     $scoped_cleanup_done = 1;
     local %ENV = %ENV;
     clear_control_authority_environment();
-    my $stop_status = system($cleanup_az, 'daemon', 'stop');
+    my $stop_status = bounded_cleanup_system($cleanup_az, $scoped_cleanup_timeout, $scoped_cleanup_watchdog, 'daemon', 'stop');
     if ($stop_status != 0) {
-        my $detail = $stop_status == -1 ? $! : 'exit ' . wait_status_code($stop_status);
+        my $detail = $stop_status == -1 ? $! : $stop_status == -2 ? 'operational timeout' : 'exit ' . wait_status_code($stop_status);
         warn "worktree-scoped validation daemon cleanup failed: $detail\n";
         return 0;
     }
@@ -153,6 +159,7 @@ if ($purpose eq 'development') {
             AZEDARACH_VALIDATION_CONTROL_AZ_BIN
             AZEDARACH_VALIDATION_AZ_BIN
             AZEDARACH_VALIDATION_CLEANUP_AZ_BIN
+            AZEDARACH_VALIDATION_TEST_CLEANUP_WATCHDOG_FILE
         )};
         exec @ARGV or die "exec development command $ARGV[0]: $!\n";
     }
@@ -276,6 +283,9 @@ $ENV{AZEDARACH_VALIDATION_OVERRIDE} = $override;
 my ($evidence_fh, $evidence_file) = tempfile('azedarach-validation-evidence-XXXXXX', TMPDIR => 1, UNLINK => 0);
 close $evidence_fh;
 $ENV{AZEDARACH_VALIDATION_EVIDENCE_FILE} = $evidence_file;
+my ($fatal_evidence_fh, $fatal_evidence_file) = tempfile('azedarach-validation-fatal-XXXXXX', TMPDIR => 1, UNLINK => 0);
+close $fatal_evidence_fh;
+$ENV{AZEDARACH_VALIDATION_FATAL_EVIDENCE_FILE} = $fatal_evidence_file;
 my ($runtime_fh, $candidate_runtime) = tempfile('azedarach-validation-runtime-XXXXXX', TMPDIR => 1, UNLINK => 1);
 close $runtime_fh;
 unlink $candidate_runtime or die "remove validation runtime placeholder: $!\n";
@@ -364,6 +374,7 @@ if ($supervisor == 0) {
             AZEDARACH_VALIDATION_CONTROL_AZ_BIN
             AZEDARACH_VALIDATION_AZ_BIN
             AZEDARACH_VALIDATION_CLEANUP_AZ_BIN
+            AZEDARACH_VALIDATION_TEST_CLEANUP_WATCHDOG_FILE
         )};
         $ENV{XDG_RUNTIME_DIR} = $ENV{AZEDARACH_VALIDATION_CANDIDATE_RUNTIME};
         $ENV{AZEDARACH_VALIDATION_CLEANUP_HANDLE} = $ENV{AZEDARACH_VALIDATION_CANDIDATE_RUNTIME};
@@ -426,6 +437,7 @@ while (1) {
     }
     my $waited = waitpid($supervisor, WNOHANG);
     if ($waited == $supervisor) {
+        $supervisor = 0;
         $status = $?;
         last;
     }
@@ -480,7 +492,22 @@ if ($purpose eq 'capacity' && $class eq 'aggregate' && $overlap_detected && $exi
 my $terminal = $interrupted ? 'cancelled' : ($exit_code == 0 ? 'completed' : 'failed');
 kill 'TERM', $heartbeat;
 waitpid($heartbeat, 0);
-my @finish = ($control_az, 'validation', 'finish', '--request', $request_id, '--state', $terminal, '--outcome', "exit $exit_code");
+my $outcome = "exit $exit_code";
+my $fatal_evidence = read_json_file($evidence_file);
+if (($fatal_evidence->{fatal_phase} || '') ne '') {
+    my $payload_phase = bounded_outcome_detail($fatal_evidence->{fatal_phase});
+    my $payload_detail = bounded_outcome_detail($fatal_evidence->{fatal_detail} || 'validation payload configuration failed');
+    if ($cleanup_error ne '') {
+        my $cleanup_detail = bounded_outcome_detail($cleanup_error);
+        $outcome .= " phase=cleanup payload_exit=$payload_exit_code detail=$cleanup_detail payload_phase=$payload_phase payload_detail=$payload_detail";
+    } else {
+        $outcome .= " phase=$payload_phase detail=$payload_detail";
+    }
+} elsif ($cleanup_error ne '') {
+    my $detail = bounded_outcome_detail($cleanup_error);
+    $outcome .= " phase=cleanup payload_exit=$payload_exit_code detail=$detail";
+}
+my @finish = ($control_az, 'validation', 'finish', '--request', $request_id, '--state', $terminal, '--outcome', $outcome);
 if (-s $evidence_file) {
     open my $final_evidence, '<', $evidence_file or die "open validation evidence: $!\n";
     local $/;
@@ -490,6 +517,7 @@ if (-s $evidence_file) {
 my $finish_failed = !eval { control_capture(@finish); 1 };
 warn "validation finish failed for $request_id\n" if $finish_failed;
 unlink $evidence_file if -e $evidence_file;
+unlink $fatal_evidence_file if -e $fatal_evidence_file;
 my $final_exit = ($finish_failed && $exit_code == 0) ? 70 : $exit_code;
 exit($final_exit);
 
@@ -502,6 +530,61 @@ sub read_optional_file {
     close $fh;
     $value =~ s/\s+\z//;
     return $value;
+}
+
+sub read_json_file {
+    my ($path) = @_;
+    return {} unless -s $path;
+    open my $fh, '<', $path or return {};
+    local $/;
+    my $decoded = eval { decode_json(<$fh> // '{}') };
+    close $fh;
+    return $decoded && ref($decoded) eq 'HASH' ? $decoded : {};
+}
+
+sub bounded_outcome_detail {
+    my ($detail) = @_;
+    $detail = '' unless defined $detail;
+    $detail =~ s/\s+/ /g;
+    $detail =~ s/^\s+|\s+$//g;
+    return substr($detail, 0, 512);
+}
+
+sub bounded_cleanup_system {
+    my ($program, $timeout, $watchdog, @arguments) = @_;
+    my $child = fork();
+    return -1 unless defined $child;
+    if ($child == 0) {
+        setpgid(0, 0);
+        exec $program, @arguments or exit 127;
+    }
+    eval { setpgid($child, $child) };
+    my $deadline = time() + $timeout;
+    while (1) {
+        my $waited = waitpid($child, WNOHANG);
+        return $? if $waited == $child;
+        my $expired = time() >= $deadline
+            || ($watchdog ne '' && read_optional_file($watchdog) eq 'expire');
+        last if $expired;
+        sleep 0.05;
+    }
+    kill 'TERM', -$child;
+    my $kill_deadline = time() + 2;
+    my $leader_reaped = 0;
+    while (1) {
+        if (!$leader_reaped) {
+            my $waited = waitpid($child, WNOHANG);
+            $leader_reaped = 1 if $waited == $child;
+        }
+        last unless kill 0, -$child;
+        my $kill_now = time() >= $kill_deadline
+            || ($watchdog ne '' && read_optional_file($watchdog) eq 'kill');
+        last if $kill_now;
+        sleep 0.05;
+    }
+    kill 'KILL', -$child;
+    waitpid($child, 0) unless $leader_reaped;
+    return -2;
 }
 
 sub authorize_nested {
@@ -557,6 +640,7 @@ sub external_go_processes {
 sub merge_whole_gate_evidence {
     my ($path, $whole) = @_;
     my $existing = {};
+    my $fatal = read_json_file($ENV{AZEDARACH_VALIDATION_FATAL_EVIDENCE_FILE} || $path . '.fatal');
     if (-s $path) {
         open my $in, '<', $path or die "open accumulated validation evidence: $!\n";
         local $/;
@@ -570,6 +654,11 @@ sub merge_whole_gate_evidence {
     $whole->{external_go_processes} = ($existing->{external_go_processes} || 0) > $whole->{external_go_processes} ? $existing->{external_go_processes} : $whole->{external_go_processes};
     $whole->{report_path} = $existing->{report_path} if $existing->{report_path};
     $whole->{report_paths} = $existing->{report_paths} if $existing->{report_paths};
+    $whole->{failure_summary} = $existing->{failure_summary} if $existing->{failure_summary};
+    $whole->{fatal_phase} = $existing->{fatal_phase} if $existing->{fatal_phase};
+    $whole->{fatal_detail} = $existing->{fatal_detail} if $existing->{fatal_detail};
+    $whole->{fatal_phase} = $fatal->{fatal_phase} if $fatal->{fatal_phase};
+    $whole->{fatal_detail} = $fatal->{fatal_detail} if $fatal->{fatal_detail};
     open my $out, '>', $path or die "write whole-gate validation evidence: $!\n";
     print {$out} encode_json($whole) . "\n";
     close $out;
@@ -615,6 +704,7 @@ sub clear_control_authority_environment {
         AZEDARACH_VALIDATION_REQUEST_ID
         AZEDARACH_VALIDATION_NESTED_FD
         AZEDARACH_VALIDATION_EVIDENCE_FILE
+        AZEDARACH_VALIDATION_FATAL_EVIDENCE_FILE
         AZEDARACH_VALIDATION_CLASS
         AZEDARACH_VALIDATION_PROFILE
         AZEDARACH_VALIDATION_SOURCE_REVISION

@@ -3,6 +3,7 @@ package issues
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,10 @@ import (
 	"github.com/riordanpawley/azedarach/internal/testutil/sqlitetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 func TestClientSQLiteBusyPolicyDefaultsAndOverrides(t *testing.T) {
@@ -2503,6 +2508,57 @@ func TestClientCloseWithRuntimeAtomicallyReleasesExecutionLeaseBeforeTerminalWri
 	assert.Less(t, releaseEventID, statusEventID, "lease release event must precede terminal status event")
 }
 
+func TestClientCloseWithRuntimeReviewEvidenceRejectsNewerEvidenceAtomically(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	client := newTestClient(t)
+	const projectID = "proj-close-reviewed-evidence"
+	newTask := func(title string) string {
+		t.Helper()
+		id, err := client.Create(ctx, CreateTaskParams{Title: title, Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInReview})
+		require.NoError(t, err)
+		return id
+	}
+	appendEvidence := func(taskID, summary string) domain.IssueObservationEvent {
+		t.Helper()
+		event, err := client.AppendIssueObservationEvent(ctx, taskID, IssueObservationEventParams{
+			Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: map[string]any{
+				"schema": domain.WorkerEvidenceSchemaV1, "summary": summary,
+				"commands_run": []any{"go test ./internal/daemon"}, "key_assertions": []any{"tests pass"},
+				"files_changed": []any{"internal/daemon/orchestration_review.go"},
+				"review":        map[string]any{"status": "clean", "findings": []any{"none"}}, "risks": []any{"none"},
+			},
+		})
+		require.NoError(t, err)
+		return event
+	}
+	pinFor := func(event domain.IssueObservationEvent) ReviewEvidencePin {
+		t.Helper()
+		evidence := domain.ReduceReviewReadyEvidence([]domain.IssueObservationEvent{event}).LatestEvidence
+		require.NotNil(t, evidence)
+		require.True(t, evidence.Validation.Complete)
+		body, err := json.Marshal(evidence.Evidence)
+		require.NoError(t, err)
+		return ReviewEvidencePin{Source: "issue_event", EventID: event.ID, Digest: fmt.Sprintf("%x", sha256.Sum256(body))}
+	}
+
+	changedID := newTask("Reject changed reviewed evidence")
+	accepted := appendEvidence(changedID, "accepted evidence")
+	pin := pinFor(accepted)
+	appendEvidence(changedID, "new evidence after acceptance")
+	_, err := client.CloseWithRuntimeReviewEvidence(ctx, projectID, changedID, domain.StatusDone, pin)
+	require.ErrorContains(t, err, "reviewed evidence changed")
+	unchanged, err := client.GetWithRuntime(ctx, projectID, changedID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusInReview, unchanged.Status)
+
+	stableID := newTask("Close stable reviewed evidence")
+	stablePin := pinFor(appendEvidence(stableID, "stable evidence"))
+	closed, err := client.CloseWithRuntimeReviewEvidence(ctx, projectID, stableID, domain.StatusDone, stablePin)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusDone, closed.Status)
+}
+
 func TestClientUpdateDetailsReopensAtomicallyAndIdempotently(t *testing.T) {
 	parallelIssueStoreTest(t)
 	ctx := context.Background()
@@ -4543,6 +4599,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0051_decision_idempotency",
 		"0052_agent_input_delivery",
 		"0053_agent_input_delivery_fencing",
+		"0052_mailbox_observation_projection_cutover",
 	}, got)
 }
 
@@ -5486,6 +5543,73 @@ func TestClient_AddDependencyWithRuntimeWaitsForIssueMutationLock(t *testing.T) 
 		require.NoError(t, addErr)
 	case <-time.After(3 * time.Second):
 		t.Fatal("AddDependencyWithRuntime did not complete after releasing mutation lock")
+	}
+}
+
+func TestClient_MutationLockWaitIsCancelableAndAttributed(t *testing.T) {
+	t.Setenv("AZEDARACH_OTEL", "true")
+	recorder := tracetest.NewSpanRecorder()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
+	t.Cleanup(func() { otel.SetTracerProvider(oteltrace.NewNoopTracerProvider()) })
+
+	client := newTestClient(t)
+	holderEntered := make(chan struct{})
+	releaseHolder := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderCtx := ContextWithMutationOperation(context.Background(), "background.reconcile")
+		holderDone <- client.WithMutationLock(holderCtx, func(context.Context) error {
+			close(holderEntered)
+			<-releaseHolder
+			return nil
+		})
+	}()
+	<-holderEntered
+
+	waitObserved := make(chan struct{})
+	waitCtx, cancelWait := context.WithCancel(context.Background())
+	waitCtx = ContextWithMutationOperation(waitCtx, "runtime.signal.ingest")
+	waitCtx = WithMutationLockWaitHookForTest(waitCtx, func(waiterOperation, holderOperation string) {
+		if waiterOperation != "runtime.signal.ingest" || holderOperation != "background.reconcile" {
+			t.Errorf("mutation attribution waiter=%q holder=%q", waiterOperation, holderOperation)
+		}
+		close(waitObserved)
+	})
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- client.WithMutationLock(waitCtx, func(context.Context) error {
+			t.Error("canceled mutation waiter acquired the lock")
+			return nil
+		})
+	}()
+	<-waitObserved
+	cancelWait()
+	if err := <-waitDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled mutation wait error = %v, want context.Canceled", err)
+	}
+
+	close(releaseHolder)
+	require.NoError(t, <-holderDone)
+
+	foundAttributedWait := false
+	seenAttribution := make([]map[string]string, 0)
+	for _, span := range recorder.Ended() {
+		if span.Name() != "dependency.issue_store.mutation_lock" {
+			continue
+		}
+		attrs := map[string]string{}
+		for _, attr := range span.Attributes() {
+			if attr.Value.Type().String() == "STRING" {
+				attrs[string(attr.Key)] = attr.Value.AsString()
+			}
+		}
+		seenAttribution = append(seenAttribution, attrs)
+		if attrs["mutation.waiter_operation"] == "runtime.signal.ingest" && attrs["mutation.holder_operation"] == "background.reconcile" {
+			foundAttributedWait = true
+		}
+	}
+	if !foundAttributedWait {
+		t.Fatalf("mutation wait span did not attribute both waiter and holder operations: %+v", seenAttribution)
 	}
 }
 

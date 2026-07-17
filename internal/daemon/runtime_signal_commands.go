@@ -20,6 +20,7 @@ import (
 const runtimeSignalFastGitStatusTimeout = 1500 * time.Millisecond
 
 func (d *Daemon) handleRuntimeSignalIngest(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	ctx = withoutSynchronousProjectReadRuntimeRefresh(ctx)
 	var cmd protocol.RuntimeSignalIngestCommandBody
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil

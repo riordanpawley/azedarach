@@ -16,21 +16,24 @@ import (
 
 // DetailPanel displays full task details with scrollable description
 type DetailPanel struct {
-	task           domain.Task
-	relatedTasks   []domain.Task
-	decisionLinks  []DecisionLinkSummary
-	mutation       *TaskMutationProgress
-	scrollY        int
-	graphCursor    int
-	graphFocused   bool
-	contentHeight  int
-	viewHeight     int
-	descViewHeight int
-	wrapWidth      int
-	checkedAt      time.Time
-	freshness      protocol.TaskListFreshness
-	styles         *Styles
-	markdownCache  map[string]markdownRenderCacheEntry
+	task            domain.Task
+	relatedTasks    []domain.Task
+	decisionLinks   []DecisionLinkSummary
+	mutation        *TaskMutationProgress
+	scrollY         int
+	graphCursor     int
+	graphFocused    bool
+	contentHeight   int
+	viewHeight      int
+	descViewHeight  int
+	wrapWidth       int
+	checkedAt       time.Time
+	freshness       protocol.TaskListFreshness
+	detailRefresh   string
+	runtimeRefresh  string
+	decisionRefresh string
+	styles          *Styles
+	markdownCache   map[string]markdownRenderCacheEntry
 }
 
 // DecisionLinkSummary is a read-only projection of a decision link rendered
@@ -347,6 +350,9 @@ func (d *DetailPanel) buildLines() ([]string, int) {
 		addLine(labelStyle.Render("Freshness:") + "  " + d.formatSnapshotFreshness())
 		addLine(labelStyle.Render("Checked:") + "  " + valueStyle.Render(d.formatTime(d.checkedAt)))
 	}
+	addWrappedField("Detail", d.detailRefresh)
+	addWrappedField("Runtime", d.runtimeRefresh)
+	addWrappedField("Decisions", d.decisionRefresh)
 
 	if d.showRuntimeSections() {
 		addLine("")

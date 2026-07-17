@@ -2,6 +2,7 @@ package issues
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,103 @@ import (
 )
 
 const defaultIssueObservationEventLimit = 500
+
+const reviewEvidenceCloseFenceOwnerKind = "review-evidence-close-fence"
+
+// ReviewEvidencePin identifies the exact durable evidence accepted by a
+// reviewer. Terminal close supports only issue-event evidence so the pin can
+// be revalidated in the same SQLite transaction as the terminal state write.
+type ReviewEvidencePin struct {
+	Source  string `json:"source"`
+	EventID int64  `json:"event_id"`
+	Seq     int64  `json:"seq,omitempty"`
+	Digest  string `json:"digest"`
+}
+
+func reviewEvidenceCloseFenceToken(pin ReviewEvidencePin) string {
+	return fmt.Sprintf("review-evidence:%d:%s", pin.EventID, strings.TrimSpace(pin.Digest))
+}
+
+// ReviewEvidenceCloseFenceMatches reports whether lease is the durable fence
+// for this exact accepted evidence epoch. Accepted-intent replay uses it to
+// resume a close after a daemon crash without dropping the write fence.
+func ReviewEvidenceCloseFenceMatches(lease *domain.CoordinationLease, pin ReviewEvidencePin) bool {
+	return lease != nil && lease.Purpose == domain.CoordinationLeaseReview &&
+		lease.OwnerKind == reviewEvidenceCloseFenceOwnerKind && lease.OwnerID == reviewEvidenceCloseFenceToken(pin)
+}
+
+// BeginReviewEvidenceClose installs a durable, cross-process write fence for
+// one accepted evidence epoch. Evidence producers cannot supersede the pin
+// while external integration and resource cleanup are in flight.
+func (c *Client) BeginReviewEvidenceClose(ctx context.Context, issueID string, pin ReviewEvidencePin) (string, error) {
+	issueID = strings.TrimSpace(issueID)
+	token := reviewEvidenceCloseFenceToken(pin)
+	if strings.TrimSpace(pin.Source) != "issue_event" || pin.EventID <= 0 || pin.Seq != 0 || strings.TrimSpace(pin.Digest) == "" {
+		return "", c.wrapError("begin-review-evidence-close", issueID, errors.New("review evidence pin must identify one durable issue event"))
+	}
+	err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				return c.wrapError("begin-review-evidence-close", issueID, err)
+			}
+			defer tx.Rollback()
+			if err := validateTerminalReviewEvidencePin(ctx, tx, issueID, pin); err != nil {
+				return c.wrapError("begin-review-evidence-close", issueID, err)
+			}
+			lease, err := coordinationLeaseForUpdate(ctx, tx, issueID, domain.CoordinationLeaseReview)
+			if err != nil {
+				return c.wrapError("begin-review-evidence-close", issueID, err)
+			}
+			if lease != nil && (lease.OwnerKind != reviewEvidenceCloseFenceOwnerKind || lease.OwnerID != token) {
+				return c.wrapError("begin-review-evidence-close", issueID, fmt.Errorf("%w: review lease owned by %s", domain.ErrConflict, lease.OwnerID))
+			}
+			if lease == nil {
+				now := time.Now().UTC().Format(time.RFC3339Nano)
+				if _, err := tx.ExecContext(ctx, `INSERT INTO issue_coordination_leases
+					(issue_id,purpose,owner_id,owner_kind,claimed_at,expires_at)
+					VALUES(?,?,?,?,?,NULL)`, issueID, domain.CoordinationLeaseReview, token, reviewEvidenceCloseFenceOwnerKind, now); err != nil {
+					return c.wrapError("begin-review-evidence-close", issueID, err)
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				return c.wrapError("begin-review-evidence-close", issueID, err)
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// ReleaseReviewEvidenceClose removes a matching fence after a failed close.
+// A successful fenced terminal write consumes the fence atomically instead.
+func (c *Client) ReleaseReviewEvidenceClose(ctx context.Context, issueID, token string) error {
+	issueID, token = strings.TrimSpace(issueID), strings.TrimSpace(token)
+	if issueID == "" || token == "" {
+		return nil
+	}
+	return c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			_, err = db.ExecContext(ctx, `DELETE FROM issue_coordination_leases
+				WHERE issue_id=? AND purpose=? AND owner_id=? AND owner_kind=?`, issueID, domain.CoordinationLeaseReview, token, reviewEvidenceCloseFenceOwnerKind)
+			if err != nil {
+				return c.wrapError("release-review-evidence-close", issueID, err)
+			}
+			return nil
+		})
+	})
+}
 
 type IssueObservationEventParams struct {
 	Type          domain.IssueObservationEventType
@@ -47,6 +145,11 @@ type LatestIssueObservationEventOptions struct {
 type IssueObservationCommandOutcomePair struct {
 	SourceCommand string
 	Outcomes      []string
+}
+
+type ProjectIssueObservationCapture struct {
+	RecentByIssue      map[string][]domain.IssueObservationEvent
+	StewardshipByIssue map[string][]domain.IssueObservationEvent
 }
 
 // ListProjectIssueObservationEvents returns the durable project event stream
@@ -186,6 +289,156 @@ func (c *Client) AppendIssueObservationEvent(ctx context.Context, issueID string
 	return event, nil
 }
 
+// IssueObservationMailEventExists supports idempotent filesystem-mail mirroring
+// while the caller holds the mailbox's per-parent serialization lock.
+func (c *Client) IssueObservationMailEventExists(ctx context.Context, issueID string, eventType domain.IssueObservationEventType, parentIssue string, sequence int64) (bool, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return false, err
+	}
+	var exists bool
+	err = db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM issue_observation_events
+			WHERE issue_id = ? AND event_type = ?
+			  AND json_extract(payload_json, '$.mail_event.parent_issue') = ?
+			  AND CAST(json_extract(payload_json, '$.mail_event.seq') AS INTEGER) = ?
+		)
+	`, strings.TrimSpace(issueID), strings.TrimSpace(string(eventType)), strings.TrimSpace(parentIssue), sequence).Scan(&exists)
+	if err != nil {
+		return false, c.wrapError("find-mail-observation-event", issueID, err)
+	}
+	return exists, nil
+}
+
+// ListIssueObservationMailEvents returns the durable mailbox outbox for one
+// parent in mailbox sequence order. The nested mail_event is the canonical
+// payload written back to JSONL after a SQLite-first crash.
+func (c *Client) ListIssueObservationMailEvents(ctx context.Context, parentIssue string) ([]domain.IssueObservationEvent, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	parentIssue = strings.TrimSpace(parentIssue)
+	if parentIssue == "" {
+		return nil, c.wrapError("list-mail-observation-events", "", errors.New("parent issue is required"))
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+		FROM issue_observation_events
+		WHERE (
+			(source_command = 'mail.send' AND TRIM(COALESCE(json_extract(payload_json, '$.mail_delivery_id'), '')) <> '')
+			OR source_command = 'mailbox.cutover'
+		  )
+		  AND LOWER(REPLACE(REPLACE(TRIM(event_type), '_', '-'), '.', '-')) IN (
+			'worker-progress', 'worker-blocked', 'worker-integration-ready', 'worker-ready', 'worker-complete'
+		  )
+		  AND json_extract(payload_json, '$.mail_event.parent_issue') = ?
+		  AND CAST(json_extract(payload_json, '$.mail_event.seq') AS INTEGER) > 0
+		ORDER BY CAST(json_extract(payload_json, '$.mail_event.seq') AS INTEGER) ASC, id ASC
+	`, parentIssue)
+	if err != nil {
+		return nil, c.wrapError("list-mail-observation-events", parentIssue, err)
+	}
+	defer rows.Close()
+	events := make([]domain.IssueObservationEvent, 0, 16)
+	for rows.Next() {
+		event, scanErr := scanIssueObservationEvent(rows)
+		if scanErr != nil {
+			return nil, c.wrapError("list-mail-observation-events", parentIssue, scanErr)
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, c.wrapError("list-mail-observation-events", parentIssue, err)
+	}
+	return events, nil
+}
+
+// AppendIssueObservationMailDelivery atomically reserves a daemon request ID
+// and appends its outbox event. The project-wide issue-store write lock makes
+// the identity check safe even when equal request IDs reach different mailbox
+// parent locks in separate daemon processes.
+func (c *Client) AppendIssueObservationMailDelivery(ctx context.Context, deliveryID, issueID string, params IssueObservationEventParams) (domain.IssueObservationEvent, bool, error) {
+	deliveryID = strings.TrimSpace(deliveryID)
+	if deliveryID == "" {
+		return domain.IssueObservationEvent{}, false, c.wrapError("append-mail-observation-delivery", issueID, errors.New("delivery id is required"))
+	}
+	payloadDeliveryID, _ := params.Payload["mail_delivery_id"].(string)
+	if strings.TrimSpace(payloadDeliveryID) != deliveryID {
+		return domain.IssueObservationEvent{}, false, c.wrapError("append-mail-observation-delivery", issueID, errors.New("payload mail_delivery_id does not match delivery id"))
+	}
+	var durable domain.IssueObservationEvent
+	inserted := false
+	err := c.retrySQLiteBusy(ctx, func() error {
+		durable = domain.IssueObservationEvent{}
+		inserted = false
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				return c.wrapError("append-mail-observation-delivery", issueID, err)
+			}
+			defer tx.Rollback()
+			existing, found, err := findIssueObservationMailDelivery(ctx, tx, deliveryID)
+			if err != nil {
+				return c.wrapError("append-mail-observation-delivery", issueID, err)
+			}
+			if found {
+				durable = existing
+				inserted = false
+				return nil
+			}
+			if err := c.requireIssueExists(ctx, tx, issueID, "append-mail-observation-delivery"); err != nil {
+				return err
+			}
+			id, err := c.insertIssueObservationEvent(ctx, tx, issueID, params)
+			if err != nil {
+				return c.wrapError("append-mail-observation-delivery", issueID, err)
+			}
+			durable, err = scanIssueObservationEvent(tx.QueryRowContext(ctx, `
+				SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+				FROM issue_observation_events
+				WHERE id = ?
+			`, id))
+			if err != nil {
+				return c.wrapError("append-mail-observation-delivery", issueID, err)
+			}
+			if err := tx.Commit(); err != nil {
+				return c.wrapError("append-mail-observation-delivery", issueID, err)
+			}
+			inserted = true
+			return nil
+		})
+	})
+	if err != nil {
+		return domain.IssueObservationEvent{}, false, err
+	}
+	return durable, inserted, nil
+}
+
+func findIssueObservationMailDelivery(ctx context.Context, queryer sqlIssueQueryer, deliveryID string) (domain.IssueObservationEvent, bool, error) {
+	event, err := scanIssueObservationEvent(queryer.QueryRowContext(ctx, `
+		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+		FROM issue_observation_events
+		WHERE source_command = 'mail.send'
+		  AND json_extract(payload_json, '$.mail_delivery_id') = ?
+		ORDER BY id DESC
+		LIMIT 1
+	`, deliveryID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.IssueObservationEvent{}, false, nil
+	}
+	if err != nil {
+		return domain.IssueObservationEvent{}, false, err
+	}
+	return event, true, nil
+}
+
 func (c *Client) ListIssueObservationEvents(ctx context.Context, issueID string, opts IssueObservationEventListOptions) ([]domain.IssueObservationEvent, error) {
 	db, err := c.dbHandle()
 	if err != nil {
@@ -253,6 +506,109 @@ func (c *Client) ListIssueObservationEvents(ctx context.Context, issueID string,
 		return nil, c.wrapError("list-observation-events", issueID, err)
 	}
 	return events, nil
+}
+
+// ListIssueObservationEventsForIssues returns the newest bounded event slice
+// for every requested issue with one SQLite query.
+func (c *Client) ListIssueObservationEventsForIssues(ctx context.Context, issueIDs []string, perIssueLimit int) (map[string][]domain.IssueObservationEvent, error) {
+	capture, err := c.CaptureProjectIssueObservationEvents(ctx, issueIDs, perIssueLimit, 0)
+	return capture.RecentByIssue, err
+}
+
+// CaptureProjectIssueObservationEvents returns one bounded snapshot of recent
+// issue evidence plus stewardship events. Stewardship classification happens
+// before its per-issue limit so unrelated lifecycle noise cannot evict mail.
+func (c *Client) CaptureProjectIssueObservationEvents(ctx context.Context, issueIDs []string, perIssueLimit, stewardshipPerIssueLimit int) (ProjectIssueObservationCapture, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return ProjectIssueObservationCapture{}, err
+	}
+	issueIDs = uniqueIssueIDStrings(issueIDs)
+	out := ProjectIssueObservationCapture{
+		RecentByIssue:      make(map[string][]domain.IssueObservationEvent, len(issueIDs)),
+		StewardshipByIssue: make(map[string][]domain.IssueObservationEvent, len(issueIDs)),
+	}
+	if len(issueIDs) == 0 {
+		return out, nil
+	}
+	if perIssueLimit <= 0 {
+		perIssueLimit = defaultIssueObservationEventLimit
+	}
+	if perIssueLimit > 5000 {
+		perIssueLimit = 5000
+	}
+	if stewardshipPerIssueLimit <= 0 {
+		stewardshipPerIssueLimit = perIssueLimit
+	}
+	if stewardshipPerIssueLimit > 5000 {
+		stewardshipPerIssueLimit = 5000
+	}
+	issueIDsJSON, err := json.Marshal(issueIDs)
+	if err != nil {
+		return ProjectIssueObservationCapture{}, c.wrapError("list-project-observation-events", "", err)
+	}
+	stewardshipTypesJSON, err := json.Marshal([]string{
+		string(domain.IssueEventProgressRecorded), string(domain.IssueEventBlockerReported), string(domain.IssueEventEvidenceSubmitted),
+		"worker-progress", "worker.progress", "worker-blocked", "worker.blocked",
+		"worker-integration-ready", "worker.integration.ready", "worker-ready", "worker.ready", "worker-complete", "worker.complete",
+	})
+	if err != nil {
+		return ProjectIssueObservationCapture{}, c.wrapError("list-project-observation-events", "", err)
+	}
+	rows, err := db.QueryContext(ctx, `
+		WITH candidate_issues(issue_id) AS (
+			SELECT DISTINCT TRIM(CAST(value AS TEXT))
+			FROM json_each(?)
+			WHERE type = 'text' AND TRIM(CAST(value AS TEXT)) <> ''
+		), stewardship_types(event_type) AS (
+			SELECT DISTINCT TRIM(CAST(value AS TEXT))
+			FROM json_each(?)
+			WHERE type = 'text' AND TRIM(CAST(value AS TEXT)) <> ''
+		), classified AS (
+			SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json,
+				CASE WHEN event_type IN (SELECT event_type FROM stewardship_types) THEN 1 ELSE 0 END AS stewardship
+			FROM issue_observation_events
+			JOIN candidate_issues USING (issue_id)
+		), ranked AS (
+			SELECT *,
+				ROW_NUMBER() OVER (PARTITION BY issue_id ORDER BY observed_at DESC, id DESC) AS issue_rank,
+				ROW_NUMBER() OVER (PARTITION BY issue_id, stewardship ORDER BY observed_at DESC, id DESC) AS class_rank
+			FROM classified
+		)
+		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json,
+			issue_rank, stewardship, class_rank
+		FROM ranked
+		WHERE issue_rank <= ? OR (stewardship = 1 AND class_rank <= ?)
+		ORDER BY issue_id ASC, observed_at DESC, id DESC
+	`, string(issueIDsJSON), string(stewardshipTypesJSON), perIssueLimit, stewardshipPerIssueLimit)
+	if err != nil {
+		return ProjectIssueObservationCapture{}, c.wrapError("list-project-observation-events", "", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var event domain.IssueObservationEvent
+		var issueID, eventType, observedRaw, payloadRaw string
+		var issueRank, stewardship, classRank int
+		scanErr := rows.Scan(&event.ID, &issueID, &eventType, &observedRaw, &event.Source, &event.SourceCommand, &event.OperationID, &event.SessionID, &event.WorktreePath, &payloadRaw, &issueRank, &stewardship, &classRank)
+		if scanErr != nil {
+			return ProjectIssueObservationCapture{}, c.wrapError("list-project-observation-events", "", scanErr)
+		}
+		event, scanErr = decodeIssueObservationEvent(event, issueID, eventType, observedRaw, payloadRaw)
+		if scanErr != nil {
+			return ProjectIssueObservationCapture{}, c.wrapError("list-project-observation-events", "", scanErr)
+		}
+		key := event.IssueID.String()
+		if issueRank <= perIssueLimit {
+			out.RecentByIssue[key] = append(out.RecentByIssue[key], event)
+		}
+		if stewardship == 1 && classRank <= stewardshipPerIssueLimit {
+			out.StewardshipByIssue[key] = append(out.StewardshipByIssue[key], event)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return ProjectIssueObservationCapture{}, c.wrapError("list-project-observation-events", "", err)
+	}
+	return out, nil
 }
 
 // ListIssueReviewReadyObservationEvents returns the complete typed event set
@@ -544,6 +900,10 @@ func (c *Client) InvestigationAcceptances(ctx context.Context, tasks []domain.Ta
 	if err != nil {
 		return nil, err
 	}
+	return c.investigationAcceptances(ctx, db, tasks)
+}
+
+func (c *Client) investigationAcceptances(ctx context.Context, q sqlIssueDBTX, tasks []domain.Task) (map[string]domain.InvestigationAcceptance, error) {
 	ids := make([]string, 0, len(tasks))
 	tasksByID := make(map[string]domain.Task)
 	for _, task := range tasks {
@@ -570,7 +930,7 @@ func (c *Client) InvestigationAcceptances(ctx context.Context, tasks []domain.Ta
 		string(domain.IssueEventHumanInputProvided),
 		string(domain.IssueEventIssueStatusChanged),
 	)
-	rows, err := db.QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
 		FROM issue_observation_events
 		WHERE issue_id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")+`)
@@ -626,7 +986,7 @@ func (c *Client) insertIssueObservationEvent(ctx context.Context, execer sqlIssu
 	if err != nil {
 		return 0, err
 	}
-	result, err := execer.ExecContext(ctx, `
+	insertSQL := `
 		INSERT INTO issue_observation_events (
 			issue_id,
 			event_type,
@@ -638,10 +998,32 @@ func (c *Client) insertIssueObservationEvent(ctx context.Context, execer sqlIssu
 			worktree_path,
 			payload_json
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, issueID, eventType, observedAt.UTC().Format(time.RFC3339Nano), strings.TrimSpace(params.Source), strings.TrimSpace(params.SourceCommand), strings.TrimSpace(params.OperationID), strings.TrimSpace(params.SessionID), strings.TrimSpace(params.WorktreePath), payloadJSON)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	args := []any{issueID, eventType, observedAt.UTC().Format(time.RFC3339Nano), strings.TrimSpace(params.Source), strings.TrimSpace(params.SourceCommand), strings.TrimSpace(params.OperationID), strings.TrimSpace(params.SessionID), strings.TrimSpace(params.WorktreePath), payloadJSON}
+	if isReviewEvidenceEventType(params.Type) {
+		insertSQL = `
+			INSERT INTO issue_observation_events (
+				issue_id,event_type,observed_at,source,source_command,operation_id,session_id,worktree_path,payload_json
+			)
+			SELECT ?,?,?,?,?,?,?,?,?
+			WHERE NOT EXISTS (
+				SELECT 1 FROM issue_coordination_leases
+				WHERE issue_id=? AND purpose=? AND owner_kind=?
+			)`
+		args = append(args, issueID, domain.CoordinationLeaseReview, reviewEvidenceCloseFenceOwnerKind)
+	}
+	result, err := execer.ExecContext(ctx, insertSQL, args...)
 	if err != nil {
 		return 0, err
+	}
+	if isReviewEvidenceEventType(params.Type) {
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		if affected == 0 {
+			return 0, fmt.Errorf("%w: accepted review evidence is fenced for authoritative close", domain.ErrConflict)
+		}
 	}
 	id, err := result.LastInsertId()
 	if err != nil {
@@ -676,6 +1058,17 @@ func (c *Client) insertIssueObservationEvent(ctx context.Context, execer sqlIssu
 		return 0, fmt.Errorf("append issue observation projection delta: %w", err)
 	}
 	return id, nil
+}
+
+func isReviewEvidenceEventType(eventType domain.IssueObservationEventType) bool {
+	normalized := strings.ToLower(strings.TrimSpace(string(eventType)))
+	normalized = strings.NewReplacer("_", ".", "-", ".").Replace(normalized)
+	switch normalized {
+	case string(domain.IssueEventEvidenceSubmitted), "worker.integration.ready", "worker.ready", "worker.complete":
+		return true
+	default:
+		return false
+	}
 }
 
 func issueEventChangesIssueProjection(eventType domain.IssueObservationEventType) bool {
@@ -780,6 +1173,10 @@ func scanIssueObservationEvent(scanner issueObservationEventScanner) (domain.Iss
 	); err != nil {
 		return domain.IssueObservationEvent{}, err
 	}
+	return decodeIssueObservationEvent(event, issueID, eventType, observedRaw, payloadRaw)
+}
+
+func decodeIssueObservationEvent(event domain.IssueObservationEvent, issueID, eventType, observedRaw, payloadRaw string) (domain.IssueObservationEvent, error) {
 	parsedIssueID, err := naming.ParseIssueID(issueID)
 	if err != nil {
 		return domain.IssueObservationEvent{}, fmt.Errorf("parse issue id %q: %w", issueID, err)

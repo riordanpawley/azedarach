@@ -2358,14 +2358,20 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 	}
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
 	canonicalID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
+	var current daemonstate.Session
 	if existing, found, err := store.GetWorkerSessionStateByIssueID(context.Background(), projectID, issueID, canonicalID); err != nil {
 		return fmt.Errorf("load logical session before stop projection: %w", err)
 	} else if found && !isAgentScopedSessionID(existing.ID) {
+		current = existing
 		sessionID = existing.ID
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+	updatedAt := time.Now().UTC()
+	if current.UpdatedAt.After(updatedAt) {
+		updatedAt = current.UpdatedAt
+	}
 	session := daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       issueID,
@@ -2374,7 +2380,7 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 		ScopeID:       issueID,
 		State:         daemonstate.SessionStateStopped,
 		ObservedState: daemonstate.SessionStateStopped,
-		UpdatedAt:     time.Now().UTC(),
+		UpdatedAt:     updatedAt,
 	}
 	if err := store.UpsertSessionState(ctx, projectID, session); err != nil {
 		if d.cfg.Logger != nil {
@@ -3906,20 +3912,30 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 	for i := range tasks {
 		taskID := tasks[i].ID
 		taskKey := sessionKey(taskID.String())
-		if _, ok := activeIssueKeys[taskKey]; !ok {
+		session, sessionOK := sessionByKey[taskKey]
+		_, active := activeIssueKeys[taskKey]
+		if !active && (!sessionOK || !daemonSessionProjectionStopped(session)) {
+			continue
+		}
+		// Runtime hydration may carry an older session row than the daemon's
+		// logical-intent projection. Rebuild active session presence from the
+		// refreshed daemon state, and let an explicit stopped intent clear stale
+		// pane-derived activity instead of preserving it by omission.
+		worktree := ""
+		if tasks[i].Session != nil {
+			worktree = strings.TrimSpace(tasks[i].Session.Worktree)
+		}
+		tasks[i].Session = nil
+		tasks[i].HasTmuxSession = false
+		if !active {
 			continue
 		}
 
 		state := domain.SessionBusy
 		var startedAt *time.Time
-		worktree := ""
-		if tasks[i].Session != nil {
-			worktree = strings.TrimSpace(tasks[i].Session.Worktree)
-		}
 		snapshotSession, snapshotOK := snapshotByKey[taskKey]
 		projectionSession, projectionOK := projectionByKey[taskKey]
-		session, ok := sessionByKey[taskKey]
-		if ok {
+		if sessionOK {
 			startedAt = sessionProjectionStartedAtForTaskDisplay(snapshotSession, snapshotOK, projectionSession, projectionOK)
 			switch session.State {
 			case daemonstate.SessionStatePaused:
@@ -3960,6 +3976,7 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 			UpdatedAt:         session.UpdatedAt,
 			Worktree:          worktree,
 		}
+		tasks[i].HasTmuxSession = true
 	}
 
 	return tasks
