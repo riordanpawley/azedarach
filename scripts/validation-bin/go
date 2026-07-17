@@ -3,23 +3,23 @@ set -euo pipefail
 
 real_go="${AZEDARACH_REAL_GO_BIN:-}"
 if [[ -z "$real_go" ]]; then
-  while IFS= read -r candidate; do
+  remaining_path="${PATH}:"
+  while [[ "$remaining_path" == *:* ]]; do
+    directory="${remaining_path%%:*}"
+    remaining_path="${remaining_path#*:}"
+    [[ -n "$directory" ]] || directory=.
+    candidate="${directory}/go"
     if [[ -x "$candidate" && ! "$candidate" -ef "$0" ]]; then
       real_go="$candidate"
       export AZEDARACH_REAL_GO_BIN="$real_go"
       break
     fi
-  done < <(
-    IFS=:
-    for directory in $PATH; do
-      [[ -n "$directory" ]] || directory=.
-      printf '%s/go\n' "$directory"
-    done
-  )
+  done
 fi
 if [[ -z "$real_go" || ! -x "$real_go" || "$real_go" -ef "$0" ]]; then
-  if [[ -n "${AZEDARACH_VALIDATION_EVIDENCE_FILE:-}" && ! -s "$AZEDARACH_VALIDATION_EVIDENCE_FILE" ]]; then
-    printf '%s\n' '{"fatal_phase":"toolchain_configuration","fatal_detail":"AZEDARACH_REAL_GO_BIN must name the executable Go toolchain"}' >"$AZEDARACH_VALIDATION_EVIDENCE_FILE"
+  if [[ -n "${AZEDARACH_VALIDATION_EVIDENCE_FILE:-}" ]]; then
+    fatal_evidence="${AZEDARACH_VALIDATION_FATAL_EVIDENCE_FILE:-${AZEDARACH_VALIDATION_EVIDENCE_FILE}.fatal}"
+    printf '%s\n' '{"fatal_phase":"toolchain_configuration","fatal_detail":"AZEDARACH_REAL_GO_BIN must name the executable Go toolchain"}' >"$fatal_evidence"
   fi
   echo "AZEDARACH_REAL_GO_BIN must name the executable Go toolchain" >&2
   exit 78

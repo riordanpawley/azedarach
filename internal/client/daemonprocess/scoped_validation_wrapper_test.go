@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -41,30 +42,35 @@ func TestScopedValidationDaemonProcess(t *testing.T) {
 
 func TestRealProcessProfileScopedValidationWrapperReapsDaemon(t *testing.T) {
 	tests := []struct {
-		name          string
-		payload       []string
-		signal        os.Signal
-		stopFails     bool
-		global        bool
-		wantHeartbeat bool
-		slowCleanup   bool
-		recoverGo     bool
-		missingGo     bool
-		wantExit      int
-		wantReaped    bool
+		name            string
+		payload         []string
+		signal          os.Signal
+		stopFails       bool
+		global          bool
+		wantHeartbeat   bool
+		slowCleanup     bool
+		recoverGo       bool
+		missingGo       bool
+		preloadEvidence bool
+		hangingCleanup  bool
+		wantExit        int
+		wantReaped      bool
 	}{
 		{name: "success with protocol-skewed heartbeat during cleanup", payload: []string{"/bin/sh", "-c", "exit 0"}, wantExit: 0, wantReaped: true, wantHeartbeat: true, slowCleanup: true},
 		{name: "missing explicit Go binding recovers before cleanup", recoverGo: true, wantExit: 0, wantReaped: true},
 		{name: "missing Go toolchain reports durable payload phase before cleanup", missingGo: true, wantExit: 78, wantReaped: true},
+		{name: "preexisting evidence retains typed missing Go failure", missingGo: true, preloadEvidence: true, wantExit: 78, wantReaped: true},
 		{name: "payload failure", payload: []string{"/bin/sh", "-c", "exit 23"}, wantExit: 23, wantReaped: true},
 		{name: "termination signal", payload: []string{"/bin/sh", "-c", "touch \"$AZEDARACH_SCOPED_VALIDATION_PAYLOAD_READY\"; while :; do sleep 1; done"}, signal: syscall.SIGTERM, wantExit: 143, wantReaped: true},
 		{name: "cleanup failure after success is durable", payload: []string{"/bin/sh", "-c", "exit 0"}, stopFails: true, wantExit: 78},
 		{name: "cleanup failure after payload failure is durable", payload: []string{"/bin/sh", "-c", "exit 23"}, stopFails: true, wantExit: 78},
+		{name: "cleanup failure retains missing toolchain as payload phase", missingGo: true, stopFails: true, wantExit: 78},
+		{name: "hung cleanup is killed and durable finish continues", payload: []string{"/bin/sh", "-c", "exit 0"}, hangingCleanup: true, wantExit: 78},
 		{name: "global daemon is untouched", payload: []string{"/bin/sh", "-c", "exit 0"}, global: true, wantExit: 0},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			fixture := newScopedValidationFixture(t, test.stopFails, test.global, test.slowCleanup)
+			fixture := newScopedValidationFixture(t, test.stopFails, test.global, test.slowCleanup, test.hangingCleanup)
 			payload := test.payload
 			if test.recoverGo || test.missingGo {
 				repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
@@ -84,6 +90,9 @@ func TestRealProcessProfileScopedValidationWrapperReapsDaemon(t *testing.T) {
 					"PATH=" + path,
 					"go", "version",
 				}
+				if test.preloadEvidence {
+					payload = []string{"/bin/sh", "-c", `printf '%s\n' '{"report_path":"kept"}' >"$AZEDARACH_VALIDATION_EVIDENCE_FILE"; exec /usr/bin/env -u AZEDARACH_REAL_GO_BIN PATH="$1" go version`, "preload-evidence", path}
+				}
 			}
 			var pid int
 			if !test.global {
@@ -96,6 +105,20 @@ func TestRealProcessProfileScopedValidationWrapperReapsDaemon(t *testing.T) {
 			cmd.Stderr = &wrapperOutput
 			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
+			}
+			if test.hangingCleanup {
+				if err := waitForFileContent(fixture.orderLog, "stop-begin\n", 5*time.Second); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(fixture.cleanupWatchdog, []byte("expire\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := waitForFileContent(fixture.orderLog, "cleanup-term\n", 5*time.Second); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(fixture.cleanupWatchdog, []byte("kill\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if test.signal != nil {
 				if err := waitForFile(fixture.payloadReady, 5*time.Second); err != nil {
@@ -129,7 +152,7 @@ func TestRealProcessProfileScopedValidationWrapperReapsDaemon(t *testing.T) {
 			} else if !errors.Is(readErr, os.ErrNotExist) {
 				t.Fatalf("global/failed cleanup unexpectedly invoked stop: %q err=%v", stopCalls, readErr)
 			}
-			fixture.assertChannelSeparationAndFinishOrder(test.stopFails, test.global, test.signal != nil, test.wantHeartbeat, test.slowCleanup, test.missingGo, payload, wrapperOutput.String())
+			fixture.assertChannelSeparationAndFinishOrder(test.stopFails, test.global, test.signal != nil, test.wantHeartbeat, test.slowCleanup, test.missingGo, test.preloadEvidence, test.hangingCleanup, payload, wrapperOutput.String())
 		})
 	}
 }
@@ -157,22 +180,107 @@ func TestScopedValidationWrapperRequiresDedicatedCleanupClient(t *testing.T) {
 	}
 }
 
-type scopedValidationFixture struct {
-	t            *testing.T
-	root         string
-	controlShim  string
-	cleanupShim  string
-	readyPath    string
-	pidPath      string
-	stopLog      string
-	controlLog   string
-	orderLog     string
-	payloadReady string
-	runtimeDir   string
-	env          []string
+func TestValidationGoShimDiscoversOnlyLiteralPATHEntries(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	shim := filepath.Join(repoRoot, "scripts", "validation-bin", "go")
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name      string
+		path      func(root, wanted, decoy string) string
+		linkSelf  bool
+		wantedDir string
+	}{
+		{
+			name: "glob component stays literal",
+			path: func(root, wanted, decoy string) string {
+				return filepath.Join(root, "glob-*") + string(os.PathListSeparator) + wanted
+			},
+		},
+		{
+			name:      "space component stays whole",
+			path:      func(root, wanted, decoy string) string { return wanted },
+			wantedDir: "with space",
+		},
+		{
+			name: "empty component means working directory",
+			path: func(root, wanted, decoy string) string {
+				return string(os.PathListSeparator) + decoy
+			},
+			wantedDir: ".",
+		},
+		{
+			name: "self symlink is skipped",
+			path: func(root, wanted, decoy string) string {
+				return decoy + string(os.PathListSeparator) + wanted
+			},
+			linkSelf: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			wanted := filepath.Join(root, "wanted")
+			if test.wantedDir != "" {
+				wanted = filepath.Join(root, test.wantedDir)
+			}
+			decoy := filepath.Join(root, "glob-decoy")
+			for _, directory := range []string{wanted, decoy} {
+				if err := os.MkdirAll(directory, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(wanted, "go"), []byte("#!/bin/sh\nprintf wanted\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			decoyGo := filepath.Join(decoy, "go")
+			if test.linkSelf {
+				if err := os.Symlink(shim, decoyGo); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(decoyGo, []byte("#!/bin/sh\nprintf decoy\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(bash, shim, "version")
+			cmd.Dir = root
+			cmd.Env = append(withoutEnvironment(os.Environ(), "PATH", "AZEDARACH_REAL_GO_BIN"),
+				"PATH="+test.path(root, wanted, decoy),
+			)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("run Go shim: %v: %s", err, output)
+			}
+			if string(output) != "wanted" {
+				t.Fatalf("Go shim output = %q, want literal PATH target", output)
+			}
+		})
+	}
 }
 
-func newScopedValidationFixture(t *testing.T, stopFails, global, slowCleanup bool) scopedValidationFixture {
+type scopedValidationFixture struct {
+	t               *testing.T
+	root            string
+	controlShim     string
+	cleanupShim     string
+	readyPath       string
+	pidPath         string
+	stopLog         string
+	controlLog      string
+	orderLog        string
+	payloadReady    string
+	runtimeDir      string
+	cleanupWatchdog string
+	cleanupPID      string
+	env             []string
+}
+
+func newScopedValidationFixture(t *testing.T, stopFails, global, slowCleanup, hangingCleanup bool) scopedValidationFixture {
 	t.Helper()
 	root := t.TempDir()
 	controlShim := filepath.Join(root, "production-az")
@@ -219,16 +327,25 @@ func newScopedValidationFixture(t *testing.T, stopFails, global, slowCleanup boo
 	if slowCleanup {
 		env = append(env, "AZEDARACH_SCOPED_VALIDATION_SLOW_STOP=1")
 	}
+	if hangingCleanup {
+		env = append(env,
+			"AZEDARACH_SCOPED_VALIDATION_HANG_STOP=1",
+			"AZEDARACH_VALIDATION_TEST_CLEANUP_WATCHDOG_FILE="+filepath.Join(root, "cleanup.watchdog"),
+			"AZEDARACH_SCOPED_VALIDATION_CLEANUP_PID="+filepath.Join(root, "cleanup.pid"),
+		)
+	}
 	return scopedValidationFixture{
 		t: t, root: root, controlShim: controlShim, cleanupShim: cleanupShim,
-		readyPath:    filepath.Join(root, "ready"),
-		pidPath:      filepath.Join(root, "pid"),
-		stopLog:      filepath.Join(root, "stop.log"),
-		controlLog:   filepath.Join(root, "control.log"),
-		orderLog:     filepath.Join(root, "order.log"),
-		payloadReady: filepath.Join(root, "payload.ready"),
-		runtimeDir:   filepath.Join(root, "runtime"),
-		env:          env,
+		readyPath:       filepath.Join(root, "ready"),
+		pidPath:         filepath.Join(root, "pid"),
+		stopLog:         filepath.Join(root, "stop.log"),
+		controlLog:      filepath.Join(root, "control.log"),
+		orderLog:        filepath.Join(root, "order.log"),
+		payloadReady:    filepath.Join(root, "payload.ready"),
+		runtimeDir:      filepath.Join(root, "runtime"),
+		cleanupWatchdog: filepath.Join(root, "cleanup.watchdog"),
+		cleanupPID:      filepath.Join(root, "cleanup.pid"),
+		env:             env,
 	}
 }
 
@@ -295,12 +412,14 @@ func runScopedValidationFakeAZ(channel string, args []string) int {
 		evidence := argumentValue(args, "--evidence-json")
 		cleanupSucceeded := "missing"
 		payloadExit := "missing"
+		reportPath := "missing"
 		var decoded map[string]any
 		if json.Unmarshal([]byte(evidence), &decoded) == nil {
 			cleanupSucceeded = fmt.Sprint(decoded["cleanup_succeeded"])
 			payloadExit = fmt.Sprint(decoded["payload_exit_code"])
+			reportPath = fmt.Sprint(decoded["report_path"])
 		}
-		if err := appendLine(os.Getenv("AZEDARACH_SCOPED_VALIDATION_ORDER_LOG"), fmt.Sprintf("finish state=%s outcome=%s cleanup=%s payload=%s", state, outcome, cleanupSucceeded, payloadExit)); err != nil {
+		if err := appendLine(os.Getenv("AZEDARACH_SCOPED_VALIDATION_ORDER_LOG"), fmt.Sprintf("finish state=%s outcome=%s cleanup=%s payload=%s report=%s", state, outcome, cleanupSucceeded, payloadExit, reportPath)); err != nil {
 			return 43
 		}
 		return 0
@@ -361,6 +480,17 @@ func startScopedValidationTestDaemon() error {
 }
 
 func stopScopedValidationTestDaemon() int {
+	if os.Getenv("AZEDARACH_SCOPED_VALIDATION_HANG_STOP") == "1" {
+		orderLog := os.Getenv("AZEDARACH_SCOPED_VALIDATION_ORDER_LOG")
+		term := make(chan os.Signal, 1)
+		signal.Notify(term, syscall.SIGTERM)
+		defer signal.Stop(term)
+		_ = os.WriteFile(os.Getenv("AZEDARACH_SCOPED_VALIDATION_CLEANUP_PID"), []byte(strconv.Itoa(os.Getpid())), 0o600)
+		_ = appendLine(orderLog, "stop-begin")
+		for range term {
+			_ = appendLine(orderLog, "cleanup-term")
+		}
+	}
 	if os.Getenv("AZEDARACH_SCOPED_VALIDATION_SLOW_STOP") == "1" {
 		orderLog := os.Getenv("AZEDARACH_SCOPED_VALIDATION_ORDER_LOG")
 		_ = appendLine(orderLog, "stop-begin")
@@ -399,7 +529,7 @@ func stopScopedValidationTestDaemon() int {
 	return 0
 }
 
-func (f scopedValidationFixture) assertChannelSeparationAndFinishOrder(stopFails, global, interrupted, wantHeartbeat, slowCleanup, missingGo bool, payload []string, wrapperOutput string) {
+func (f scopedValidationFixture) assertChannelSeparationAndFinishOrder(stopFails, global, interrupted, wantHeartbeat, slowCleanup, missingGo, preloadEvidence, hangingCleanup bool, payload []string, wrapperOutput string) {
 	f.t.Helper()
 	control := strings.Fields(string(readFileBestEffort(f.controlLog)))
 	joinedControl := strings.Join(control, " ")
@@ -426,7 +556,14 @@ func (f scopedValidationFixture) assertChannelSeparationAndFinishOrder(stopFails
 	if slowCleanup {
 		wantSemantic = 3
 	}
-	if len(semanticOrder) != wantSemantic || !(semanticOrder[len(semanticOrder)-2] == "stop" || semanticOrder[len(semanticOrder)-2] == "stop-failed") || !strings.HasPrefix(semanticOrder[len(semanticOrder)-1], "finish ") {
+	if hangingCleanup {
+		wantSemantic = 3
+	}
+	if len(semanticOrder) != wantSemantic {
+		f.t.Fatalf("cleanup/finish order = %q, want %d semantic events", order, wantSemantic)
+	}
+	wantCleanupEvent := semanticOrder[len(semanticOrder)-2] == "stop" || semanticOrder[len(semanticOrder)-2] == "stop-failed" || (hangingCleanup && semanticOrder[len(semanticOrder)-2] == "cleanup-term")
+	if !wantCleanupEvent || !strings.HasPrefix(semanticOrder[len(semanticOrder)-1], "finish ") {
 		f.t.Fatalf("cleanup/finish order = %q, want stop then finish", order)
 	}
 	if slowCleanup {
@@ -440,7 +577,7 @@ func (f scopedValidationFixture) assertChannelSeparationAndFinishOrder(stopFails
 	finish := semanticOrder[len(semanticOrder)-1]
 	wantCleanup := "cleanup=true"
 	wantState := "state=completed"
-	if stopFails {
+	if stopFails || hangingCleanup {
 		wantCleanup = "cleanup=false"
 		wantState = "state=failed"
 	} else if interrupted {
@@ -462,13 +599,36 @@ func (f scopedValidationFixture) assertChannelSeparationAndFinishOrder(stopFails
 	if !strings.Contains(finish, wantPayload) {
 		f.t.Fatalf("finish record = %q, want original %s evidence", finish, wantPayload)
 	}
+	if preloadEvidence && !strings.Contains(finish, "report=kept") {
+		f.t.Fatalf("finish record = %q, want preexisting report evidence preserved", finish)
+	}
+	if hangingCleanup {
+		cleanupPID, err := strconv.Atoi(strings.TrimSpace(string(readFileBestEffort(f.cleanupPID))))
+		if err != nil || processAlive(cleanupPID) {
+			f.t.Fatalf("cleanup process pid=%d err=%v survived bounded cleanup", cleanupPID, err)
+		}
+	}
 	wantOutcomePayload := strings.Replace(wantPayload, "payload=", "payload_exit=", 1)
-	if stopFails && (!strings.Contains(finish, "outcome=exit 78 phase=cleanup") || !strings.Contains(finish, wantOutcomePayload)) {
+	if (stopFails || hangingCleanup) && (!strings.Contains(finish, "outcome=exit 78 phase=cleanup") || !strings.Contains(finish, wantOutcomePayload)) {
 		f.t.Fatalf("finish record = %q, want typed cleanup failure with original payload exit", finish)
 	}
-	if missingGo && !strings.Contains(finish, "outcome=exit 78 phase=toolchain_configuration") {
+	if missingGo && stopFails && !strings.Contains(finish, "payload_phase=toolchain_configuration") {
+		f.t.Fatalf("finish record = %q, want retained toolchain payload phase", finish)
+	}
+	if missingGo && !stopFails && !strings.Contains(finish, "outcome=exit 78 phase=toolchain_configuration") {
 		f.t.Fatalf("finish record = %q, want durable toolchain-configuration phase", finish)
 	}
+}
+
+func waitForFileContent(path, content string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if strings.Contains(string(readFileBestEffort(path)), content) {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return fmt.Errorf("timed out waiting for %q in %s", content, path)
 }
 
 func appendLine(path, line string) error {
