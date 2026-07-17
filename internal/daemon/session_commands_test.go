@@ -3374,7 +3374,10 @@ func TestSessionStartDefaultsAgentActivityToBusy(t *testing.T) {
 func TestSessionStartInjectsIssueImageAttachments(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
-	projectID := "proj-image-start"
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	dbPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
 	t.Setenv("AZEDARACH_DB_PATH", dbPath)
 	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
@@ -3466,6 +3469,9 @@ func TestSessionStartInjectsIssueImageAttachments(t *testing.T) {
 	}
 	if strings.Contains(launchScript, attached.Path) {
 		t.Fatalf("launch script = %q, must not use shared attachment store path %q", launchScript, attached.Path)
+	}
+	if _, err := os.Stat(filepath.Join(worktreePath, ".azedarach", "azedarach.db")); !os.IsNotExist(err) {
+		t.Fatalf("session attachment read created worktree-local database: %v", err)
 	}
 	if !strings.Contains(launchScript, `codex --image "`) || !strings.Contains(launchScript, initialPromptShellVariable) {
 		t.Fatalf("launch script = %q, want image args with bounded file bootstrap", launchScript)

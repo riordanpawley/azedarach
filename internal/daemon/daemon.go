@@ -62,6 +62,9 @@ const (
 	defaultRuntimeProjectionCoalesceWindow = 25 * time.Millisecond
 	defaultTmuxObservationInterval         = 2 * time.Second
 	defaultTmuxObservationTimeout          = 5 * time.Second
+	defaultGitObservationInterval          = 5 * time.Second
+	defaultGitObservationTimeout           = 5 * time.Second
+	defaultGitObservationProjectLimit      = 64
 )
 
 // Config configures daemon runtime wiring.
@@ -93,6 +96,8 @@ type Config struct {
 	RuntimeReconcileTimeout    time.Duration
 	TmuxObservationInterval    time.Duration
 	TmuxObservationTimeout     time.Duration
+	GitObservationInterval     time.Duration
+	GitObservationTimeout      time.Duration
 	scheduledScriptRunner      scheduledScriptCommandRunner
 }
 
@@ -272,6 +277,10 @@ type Daemon struct {
 	gitHookReplayWG                      sync.WaitGroup
 	tmuxObservationCursorMu              sync.Mutex
 	tmuxObservationCursor                int
+	gitObservationWG                     sync.WaitGroup
+	gitObservationCursorMu               sync.Mutex
+	gitObservationCursor                 int
+	gitObservationIssueCursor            map[string]int
 	reviewReadyRecoveryMu                sync.Mutex
 	reviewReadyRecoveryCursor            map[string]int64
 	reviewReadyRecoveryBeforeLoad        func()
@@ -785,6 +794,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.recoverPublicationOperations(serveCtx)
 	d.startRuntimeReconcileWorker(serveCtx)
 	d.startTmuxObservationWorker(serveCtx)
+	d.startGitObservationWorker(serveCtx)
 	d.startDecisionPropagationReconcileWorker(serveCtx)
 	d.startLinearSyncWorker(serveCtx)
 	d.startScheduledScriptWorker(serveCtx)
@@ -797,6 +807,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		<-shutdownDone
 	}
 	d.tmuxObservationWG.Wait()
+	d.gitObservationWG.Wait()
 	return err
 }
 
@@ -1945,37 +1956,6 @@ func (d *Daemon) triggerWorktreeStateRefresh(projectID string) {
 		defer cancel()
 		d.worktreeAdapter.pollAndPersistWorktrees(ctx, projectID)
 	}()
-}
-
-func (d *Daemon) refreshIssueWorktreeState(ctx context.Context, projectID, issueID string) {
-	if d == nil || d.gitStatusAdapter == nil {
-		return
-	}
-	projectID = strings.TrimSpace(projectID)
-	if projectID == "" {
-		projectID = protocol.DefaultProjectID
-	}
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return
-	}
-	store := d.worktreeRuntimeStateStoreIfConfigured(projectID)
-	if store == nil {
-		return
-	}
-	projection, found, err := store.GetWorktreeStateByIssueID(ctx, projectID, issueID)
-	if err != nil {
-		if d.cfg.Logger != nil {
-			d.cfg.Logger.Debug("issue worktree refresh lookup failed", "project_id", projectID, "issue_id", issueID, "error", err)
-		}
-		return
-	}
-	if !found || strings.TrimSpace(projection.Path) == "" {
-		return
-	}
-	if _, err := d.gitStatusAdapter.queueGitStatusRefresh(projectID, projection.Path, reconcilePriorityVisible, "issue-read"); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("issue worktree refresh failed", "project_id", projectID, "issue_id", issueID, "worktree", projection.Path, "error", err)
-	}
 }
 
 func (d *Daemon) persistWorktreeState(ctx context.Context, projectID, issueID, path, branch string) error {

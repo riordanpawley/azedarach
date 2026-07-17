@@ -11,6 +11,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
 
@@ -264,6 +265,40 @@ func TestApplyRuntimeSessionCountsCarriesTmuxAttachmentMetadata(t *testing.T) {
 
 	if !projection.Session.TmuxAttached || projection.Session.TmuxAttachedCount != 1 {
 		t.Fatalf("tmux attachment = %v/%d, want true/1", projection.Session.TmuxAttached, projection.Session.TmuxAttachedCount)
+	}
+}
+
+func TestBuildRuntimeProjectionSurfacesGitFactAvailability(t *testing.T) {
+	originalNow := timeNow
+	t.Cleanup(func() { timeNow = originalNow })
+	now := time.Date(2026, time.July, 17, 12, 0, 0, 0, time.UTC)
+	timeNow = func() time.Time { return now }
+
+	unavailable := buildRuntimeProjection("portable-project", nil, &daemonstate.WorktreeState{
+		ProjectID: "portable-project", IssueID: "task-1", Path: "/tmp/portable-task", Branch: "worker/task-1",
+	})
+	if unavailable.Worktree.GitFactsAvailability != string(domain.GitFactsUnavailable) || unavailable.Worktree.GitFactsReason != "git_status_not_observed" {
+		t.Fatalf("unavailable Git facts = %+v", unavailable.Worktree)
+	}
+	cleanObservedAt := now.Add(-time.Second)
+	clean := buildRuntimeProjection("portable-project", nil, &daemonstate.WorktreeState{
+		ProjectID: "portable-project", IssueID: "task-1", Path: "/tmp/portable-task", Branch: "worker/task-1",
+		GitStatusUpdated: &cleanObservedAt,
+	})
+	if clean.Worktree.GitFactsAvailability != string(domain.GitFactsAvailable) || clean.Worktree.GitFactsReason != "" {
+		t.Fatalf("clean observed Git facts = %+v", clean.Worktree)
+	}
+	statusRaw, err := json.Marshal(git.GitStatus{HasChanges: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observedAt := now.Add(-time.Minute)
+	stale := buildRuntimeProjection("portable-project", nil, &daemonstate.WorktreeState{
+		ProjectID: "portable-project", IssueID: "task-1", Path: "/tmp/portable-task", Branch: "worker/task-1",
+		GitStatusRaw: statusRaw, GitStatusUpdated: &observedAt,
+	})
+	if stale.Worktree.GitFactsAvailability != string(domain.GitFactsStale) || stale.Worktree.GitFactsReason != "observation_stale" {
+		t.Fatalf("stale Git facts = %+v", stale.Worktree)
 	}
 }
 

@@ -14994,7 +14994,7 @@ func TestRefreshWorktreeRuntimeStateForIssuesDoesNotPublishUnchangedGitStatus(t 
 	}
 }
 
-func TestRefreshFiniteWorktreeGitFactsConvergesStaleDirtyAndStaleCleanBoundedly(t *testing.T) {
+func TestRefreshExactReviewWorktreeGitFactsConvergesStaleDirtyAndStaleCleanBoundedly(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	const projectID = "proj-finite-refresh"
@@ -15069,7 +15069,7 @@ func TestRefreshFiniteWorktreeGitFactsConvergesStaleDirtyAndStaleCleanBoundedly(
 	}
 
 	initialRevision := d.currentRevision(projectID)
-	if err := d.refreshFiniteWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
+	if err := d.refreshExactReviewWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
 		t.Fatal(err)
 	}
 	assertConverged(cleanID, false)
@@ -15079,7 +15079,7 @@ func TestRefreshFiniteWorktreeGitFactsConvergesStaleDirtyAndStaleCleanBoundedly(
 		t.Fatalf("first refresh revision delta = %d, want one changed status update per worktree", got)
 	}
 
-	if err := d.refreshFiniteWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
+	if err := d.refreshExactReviewWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
 		t.Fatal(err)
 	}
 	if got := d.currentRevision(projectID) - firstRevision; got != 0 {
@@ -15095,7 +15095,7 @@ func TestRefreshFiniteWorktreeGitFactsConvergesStaleDirtyAndStaleCleanBoundedly(
 		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: git.NewWorktreeManager(runner, ".", logger)},
 		git:                       git.NewClient(runner, logger),
 	}
-	if err := restarted.refreshFiniteWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
+	if err := restarted.refreshExactReviewWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
 		t.Fatal(err)
 	}
 	assertConverged(cleanID, false)
@@ -15645,7 +15645,7 @@ func TestHandleTaskSnapshotExportUsesProjectionSessions(t *testing.T) {
 	}
 }
 
-func TestHandleTaskGetDoesNotEnqueueWorktreeRefresh(t *testing.T) {
+func TestHandleTaskReadsDoNotEnqueueWorktreeRefresh(t *testing.T) {
 	ctx := context.Background()
 	projectID := protocol.DefaultProjectID
 	repoDir := t.TempDir()
@@ -15718,37 +15718,46 @@ func TestHandleTaskGetDoesNotEnqueueWorktreeRefresh(t *testing.T) {
 			projectID: store,
 		},
 	}
-	reqBody, err := json.Marshal(map[string]string{"task_id": targetID})
-	if err != nil {
-		t.Fatalf("marshal task get request: %v", err)
+	reads := []struct {
+		name    string
+		command string
+		body    any
+		handle  func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	}{
+		{name: "get", command: "task.get", body: map[string]string{"task_id": targetID}, handle: d.handleTaskGet},
+		{name: "get many", command: "task.get_many", body: map[string]any{"task_ids": []string{targetID}}, handle: d.handleTaskGetMany},
 	}
-	resp, err := d.handleTaskGet(ctx, protocol.RequestEnvelope{
-		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       "req-task-get-projection-only",
-		Kind:            protocol.EnvelopeKindCommand,
-		Command:         "task.get",
-		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-		Body:            reqBody,
-	})
-	if err != nil {
-		t.Fatalf("handleTaskGet returned error: %v", err)
-	}
-	if !resp.OK {
-		t.Fatalf("task.get response not OK: %+v", resp.Error)
-	}
-
-	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
-	if err != nil {
-		t.Fatalf("decode task.get body: %v", err)
-	}
-	if len(payload.Tasks) != 1 {
-		t.Fatalf("response task count = %d, want 1", len(payload.Tasks))
+	for _, read := range reads {
+		t.Run(read.name, func(t *testing.T) {
+			reqBody, err := json.Marshal(read.body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := read.handle(ctx, protocol.RequestEnvelope{
+				ProtocolVersion: protocol.CurrentVersion,
+				RequestID:       "req-task-read-projection-only",
+				Kind:            protocol.EnvelopeKindCommand,
+				Command:         read.command,
+				Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+				Body:            reqBody,
+			})
+			if err != nil || !resp.OK {
+				t.Fatalf("%s response = %+v, err = %v", read.command, resp.Error, err)
+			}
+			payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(payload.Tasks) == 0 || payload.Tasks[0].ID.String() != targetID {
+				t.Fatalf("%s tasks = %+v, want target %s", read.command, payload.Tasks, targetID)
+			}
+		})
 	}
 	if counters := queue.snapshotCounters(); counters.Enqueued != 0 {
-		t.Fatalf("task.get enqueued worktree refresh: %+v", counters)
+		t.Fatalf("task reads enqueued worktree refresh: %+v", counters)
 	}
 	if statusCalls != 0 {
-		t.Fatalf("task.get invoked git status %d times", statusCalls)
+		t.Fatalf("task reads invoked git status %d times", statusCalls)
 	}
 }
 
@@ -15844,6 +15853,58 @@ func TestHandleTaskGetMaterializedReadRefreshesRuntimeWithoutExternalGit(t *test
 	}
 	if len(payload.Tasks) != 1 || payload.Tasks[0].Description != "Return without external Git" {
 		t.Fatalf("task.get payload = %+v, want durable detail", payload.Tasks)
+	}
+}
+
+func TestHandleTaskGetManyMaterializedReadDoesNotInvokeGit(t *testing.T) {
+	ctx := context.Background()
+	const projectID = "portable-go-consumer"
+	issueID := naming.IssueID("go-1")
+	materializer := newProjectReadMaterializer(projectID, nil, nil)
+	for i := 0; i < 800; i++ {
+		id := naming.IssueID(fmt.Sprintf("go-%d", i+1))
+		task := domain.Task{ID: id, Title: "portable durable task " + id.String(), Status: domain.StatusOpen, Type: domain.TypeTask}
+		materializer.canonical[id.String()] = task
+		materializer.tasks[id.String()] = task
+	}
+	materializer.metadata.Health = "healthy"
+
+	gitCalls := 0
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		gitCalls++
+		return "", errors.New("Git must not run from task.get_many")
+	}}
+	d := &Daemon{
+		cfg:                  Config{Logger: slog.Default()},
+		git:                  git.NewClient(runner, slog.Default()),
+		materializersStarted: true,
+		materializers:        map[string]*projectReadMaterializer{projectID: materializer},
+		revision:             map[string]uint64{projectID: 4},
+	}
+	body, err := json.Marshal(map[string]any{"task_ids": []string{issueID.String()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := d.handleTaskGetMany(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-projection-only-get-many",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.get_many",
+		Meta:            protocol.Metadata{ProjectID: projectID},
+		Body:            body,
+	})
+	if err != nil || !resp.OK {
+		t.Fatalf("task.get_many response = %+v, err = %v", resp.Error, err)
+	}
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Tasks) != 1 || payload.Tasks[0].Title != "portable durable task go-1" {
+		t.Fatalf("tasks = %+v, want durable portable task", payload.Tasks)
+	}
+	if gitCalls != 0 {
+		t.Fatalf("Git calls = %d, want 0", gitCalls)
 	}
 }
 

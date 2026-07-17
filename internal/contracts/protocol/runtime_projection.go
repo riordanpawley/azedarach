@@ -85,9 +85,11 @@ type RuntimeAgentProjection struct {
 
 // RuntimeWorktreeProjection captures the worktree identity and health metadata used by the UI.
 type RuntimeWorktreeProjection struct {
-	Exists             bool       `json:"exists" msgpack:"exists"`
-	Path               string     `json:"path,omitempty" msgpack:"path,omitempty"`
-	Branch             string     `json:"branch,omitempty" msgpack:"branch,omitempty"`
-	Healthy            bool       `json:"healthy" msgpack:"healthy"`
-	GitStatusUpdatedAt *time.Time `json:"git_status_updated_at,omitempty" msgpack:"git_status_updated_at,omitempty"`
+	Exists               bool       `json:"exists" msgpack:"exists"`
+	Path                 string     `json:"path,omitempty" msgpack:"path,omitempty"`
+	Branch               string     `json:"branch,omitempty" msgpack:"branch,omitempty"`
+	Healthy              bool       `json:"healthy" msgpack:"healthy"`
+	GitStatusUpdatedAt   *time.Time `json:"git_status_updated_at,omitempty" msgpack:"git_status_updated_at,omitempty"`
+	GitFactsAvailability string     `json:"git_facts_availability,omitempty" msgpack:"git_facts_availability,omitempty"`
+	GitFactsReason       string     `json:"git_facts_reason,omitempty" msgpack:"git_facts_reason,omitempty"`
 }

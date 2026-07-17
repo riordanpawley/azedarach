@@ -858,29 +858,13 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "task_ids is required"), nil
 	}
 	if d.materializedReadsEnabled() {
-		materialized, source, err := d.convergedProjectReadSnapshot(ctx, projectID)
+		projectionStartedAt := time.Now()
+		materialized, source, err := d.projectReadSnapshot(projectID)
 		if err != nil {
 			return d.errorResponse(req, taskReadErrorCode(err), err.Error()), nil
 		}
 		tasks := materializedTaskContext(materialized, taskIDs, !cmd.MetadataOnly, cmd.IncludeAncestors, !cmd.ExcludeDependents, cmd.DirectDependents, protocol.ArchiveModeExclude)
-		if err := d.refreshProjectReadRuntimeForIssues(ctx, projectID, taskIDsFromTasks(tasks)); err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("refresh issue runtime facts: %v", err)), nil
-		}
-		materialized, source, err = d.convergedProjectReadSnapshot(ctx, projectID)
-		if err != nil {
-			return d.errorResponse(req, taskReadErrorCode(err), err.Error()), nil
-		}
-		tasks = materializedTaskContext(materialized, taskIDs, !cmd.MetadataOnly, cmd.IncludeAncestors, !cmd.ExcludeDependents, cmd.DirectDependents, protocol.ArchiveModeExclude)
-		if !cmd.MetadataOnly {
-			if err := d.refreshFiniteWorktreeGitFacts(ctx, projectID, taskIDsFromTasks(tasks)); err != nil {
-				return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("refresh issue worktree git facts: %v", err)), nil
-			}
-			materialized, source, err = d.convergedProjectReadSnapshot(ctx, projectID)
-			if err != nil {
-				return d.errorResponse(req, taskReadErrorCode(err), err.Error()), nil
-			}
-			tasks = materializedTaskContext(materialized, taskIDs, true, cmd.IncludeAncestors, !cmd.ExcludeDependents, cmd.DirectDependents, protocol.ArchiveModeExclude)
-		}
+		latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get_many.projection_read", projectionStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(tasks))
 		payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), materializedLastCheckedAt(tasks), protocol.TaskListFreshnessFresh, tasks, false)
 		payload.Source = source
 		body, err := json.Marshal(payload)
@@ -893,11 +877,6 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task get-many requested", "project_id", projectID, "task_count", len(taskIDs))
-	}
-	if !cmd.MetadataOnly {
-		for _, taskID := range taskIDs {
-			d.refreshIssueWorktreeState(ctx, projectID, taskID)
-		}
 	}
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
@@ -931,16 +910,6 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 			d.cfg.Logger.Warn("daemon task get-many failed", "project_id", projectID, "task_count", len(taskIDs), "elapsed_ms", time.Since(startedAt).Milliseconds(), "error", err)
 		}
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-	}
-	contextTaskIDs := taskIDsFromTasks(tasks)
-	if !cmd.MetadataOnly {
-		if cmd.DirectDependents {
-			worktreeRefreshStartedAt := time.Now()
-			for _, taskID := range contextTaskIDs {
-				d.refreshIssueWorktreeState(ctx, projectID, taskID)
-			}
-			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get_many.direct_dependent_worktree_refresh", worktreeRefreshStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(contextTaskIDs))
-		}
 	}
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
 	payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), lastCheckedAt, freshness, tasks, false)
@@ -1757,10 +1726,10 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 	return refreshed, errors.Join(errs...)
 }
 
-// refreshFiniteWorktreeGitFacts synchronously converges the bounded issue set
-// from Git into the durable runtime projection, then refreshes the in-memory
-// read model before a finite ticket or orchestration response is assembled.
-func (d *Daemon) refreshFiniteWorktreeGitFacts(ctx context.Context, projectID string, issueIDs []string) error {
+// refreshExactReviewWorktreeGitFacts is reserved for hybrid review acceptance
+// and mutation preflight paths that must bind durable projection identity to
+// live Git authority. Ordinary task and orchestration reads must never call it.
+func (d *Daemon) refreshExactReviewWorktreeGitFacts(ctx context.Context, projectID string, issueIDs []string) error {
 	issueIDs = normalizeRuntimeReconcileIssueIDs(issueIDs)
 	if len(issueIDs) == 0 {
 		return nil

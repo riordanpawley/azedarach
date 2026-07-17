@@ -7,6 +7,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
@@ -52,12 +53,16 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 		if projection.IssueID == "" {
 			projection.IssueID = parseIssueIDOrZero(worktree.IssueID)
 		}
+		hasGitObservation := len(worktree.GitStatusRaw) > 0 || worktree.GitStatusUpdated != nil
+		gitFacts := domain.DeriveGitFactsObservation(path != "", hasGitObservation, timeValue(worktree.GitStatusUpdated), timeNow().UTC(), domain.DefaultGitFactsStaleAfter)
 		projection.Worktree = protocol.RuntimeWorktreeProjection{
-			Exists:             path != "",
-			Path:               path,
-			Branch:             branch,
-			Healthy:            path != "" && branch != "",
-			GitStatusUpdatedAt: timePtrFrom(worktree.GitStatusUpdated),
+			Exists:               path != "",
+			Path:                 path,
+			Branch:               branch,
+			Healthy:              path != "" && branch != "",
+			GitStatusUpdatedAt:   timePtrFrom(worktree.GitStatusUpdated),
+			GitFactsAvailability: string(gitFacts.Availability),
+			GitFactsReason:       gitFacts.Reason,
 		}
 		if projection.Session.SessionID != "" && projection.Session.Worktree == "" {
 			projection.Session.Worktree = path
@@ -75,8 +80,19 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 			}
 		}
 	}
+	if worktree == nil {
+		projection.Worktree.GitFactsAvailability = string(domain.GitFactsUnavailable)
+		projection.Worktree.GitFactsReason = "worktree_unavailable"
+	}
 
 	return projection
+}
+
+func timeValue(value *time.Time) time.Time {
+	if value == nil {
+		return time.Time{}
+	}
+	return value.UTC()
 }
 
 func projectionSessionState(desired, observed daemonstate.SessionState) daemonstate.SessionState {

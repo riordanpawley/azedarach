@@ -116,6 +116,47 @@ func (r *revisionReviewGitRunner) Run(_ context.Context, args ...string) (string
 	}
 }
 
+func TestProjectReviewQueueConsumesProjectionWithoutGitRefresh(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker")
+	tasks, err := client.GetManyWithRuntime(ctx, "project", []string{issueID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	materializer := newProjectReadMaterializer("project", nil, nil)
+	for _, task := range tasks {
+		materializer.canonical[task.ID.String()] = task
+		materializer.tasks[task.ID.String()] = task
+	}
+	materializer.metadata.Health = "healthy"
+	materializer.replaceWorktrees(map[string]git.Worktree{issueID: {IssueID: issueID, Path: filepath.Join(repoDir, "review-worktree"), Branch: "worker/review"}})
+
+	gitCalls := 0
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		gitCalls++
+		return "", errors.New("Git must not run from orchestration snapshot")
+	}}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.git = git.NewClient(runner, slog.Default())
+	d.materializersStarted = true
+	d.materializers = map[string]*projectReadMaterializer{"project": materializer}
+	d.worktreeManagersByProject = map[string]*git.WorktreeManager{"project": git.NewWorktreeManager(runner, repoDir, slog.Default())}
+
+	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", RepoDir: repoDir})
+	if err != nil {
+		t.Fatalf("orchestration snapshot: %v", err)
+	}
+	if len(snapshot.ReviewQueue) != 1 || snapshot.ReviewQueue[0].IssueID != issueID {
+		t.Fatalf("reviews = %+v, want projected review %s", snapshot.ReviewQueue, issueID)
+	}
+	if gitCalls != 0 {
+		t.Fatalf("Git calls = %d, want 0", gitCalls)
+	}
+}
+
 func TestProjectReviewQueueUsesOneObservationQueryForLargeOrdinaryGraph(t *testing.T) {
 	repoDir := t.TempDir()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
