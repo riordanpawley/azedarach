@@ -661,7 +661,7 @@ func (m Model) boardVisibleTasks(tasks []domain.Task) []domain.Task {
 	}
 	if m.boardProjection.View.ID != "" {
 		filter := *m.editor.GetFilter()
-		filter.HideEpicChildren = false
+		filter.HideEpicChildren = !m.boardProjection.View.Options.ShowChildren
 		return m.applySessionTreeFilter(filter.Apply(tasks))
 	}
 

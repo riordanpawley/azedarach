@@ -119,8 +119,9 @@ func (p BoardViewProjection) ColumnSnapshots() []BoardSnapshotColumn {
 }
 
 type BoardSnapshotRequestBody struct {
-	ProjectID naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
-	ViewID    string           `json:"view_id,omitempty" msgpack:"view_id,omitempty"`
+	ProjectID    naming.ProjectID `json:"project_id,omitempty" msgpack:"project_id,omitempty"`
+	ViewID       string           `json:"view_id,omitempty" msgpack:"view_id,omitempty"`
+	ShowChildren *bool            `json:"show_children,omitempty" msgpack:"show_children,omitempty"`
 }
 
 type BoardSnapshotColumn struct {

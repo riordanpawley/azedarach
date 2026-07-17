@@ -253,6 +253,7 @@ type Model struct {
 	openCreatedTaskInWorkspace      bool
 	openSessionSelectorOnLoad       bool
 	sessionTreeFilterOnly           bool
+	childVisibilityGeneration       uint64
 	taskWorkspaceRefreshSeq         uint64
 	runtimeSignalsByTask            map[string]board.RuntimeSignals
 	runtimeSignalWorktreeByTask     map[string]string
@@ -703,10 +704,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.editor.IsFilterActive() || m.sessionTreeFilterOnly {
+			refreshSessionTreeProjection := m.sessionTreeFilterOnly
 			m.editor.ClearFilters()
 			m.sessionTreeFilterOnly = false
+			if refreshSessionTreeProjection {
+				m.childVisibilityGeneration++
+			}
 			columns := m.buildColumns()
 			m.ensureCursorVisible(columns)
+			if refreshSessionTreeProjection {
+				cmd := m.refreshSessionTreeProjectionCmd()
+				return m, cmd
+			}
 		}
 		return m, nil
 	}
@@ -801,6 +810,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case keybinds.ActionToggleSessionTreeFilter:
 		m.sessionTreeFilterOnly = !m.sessionTreeFilterOnly
+		m.childVisibilityGeneration++
 		columns := m.buildColumns()
 		m.ensureCursorVisible(columns)
 		if m.sessionTreeFilterOnly {
@@ -816,7 +826,8 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				Expires: time.Now().Add(2 * time.Second),
 			})
 		}
-		return m, nil
+		cmd := m.refreshSessionTreeProjectionCmd()
+		return m, cmd
 
 	case keybinds.ActionOpenSort: // Sort menu
 		return m, m.openOverlay(overlay.NewSortMenu(m.editor.GetSort()))
@@ -1192,6 +1203,8 @@ type issuesLoadedMsg struct {
 	stale           bool
 	freshnessHint   string
 	reconcileWarn   error
+	visibilityGen   uint64
+	visibilitySet   bool
 }
 
 type issuesErrorMsg struct {
@@ -1744,6 +1757,8 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 					refreshSeq:     refreshSeq,
 					projectID:      projectID,
 					scopedParentID: scopedParentID,
+					visibilityGen:  m.childVisibilityGeneration,
+					visibilitySet:  true,
 					stale:          true,
 					freshnessHint:  m.taskSnapshotTimeoutHint(timeoutErr),
 				}
@@ -1754,6 +1769,8 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 			refreshSeq:      refreshSeq,
 			projectID:       projectID,
 			scopedParentID:  scopedParentID,
+			visibilityGen:   m.childVisibilityGeneration,
+			visibilitySet:   true,
 			tasks:           snapshot.Tasks,
 			boardView:       snapshot.View,
 			boardColumns:    snapshot.Columns,
@@ -1991,6 +2008,8 @@ func (m Model) loadIssuesAfterRuntimeReconcileCmd() tea.Cmd {
 					refreshSeq:     refreshSeq,
 					projectID:      projectID,
 					scopedParentID: scopedParentID,
+					visibilityGen:  m.childVisibilityGeneration,
+					visibilitySet:  true,
 					stale:          true,
 					freshnessHint:  m.taskSnapshotTimeoutHint(timeoutErr),
 					reconcileWarn:  reconcileWarn,
@@ -2003,6 +2022,8 @@ func (m Model) loadIssuesAfterRuntimeReconcileCmd() tea.Cmd {
 			refreshSeq:      refreshSeq,
 			projectID:       projectID,
 			scopedParentID:  scopedParentID,
+			visibilityGen:   m.childVisibilityGeneration,
+			visibilitySet:   true,
 			tasks:           snapshot.Tasks,
 			boardView:       snapshot.View,
 			boardColumns:    snapshot.Columns,
@@ -2060,6 +2081,8 @@ func (m Model) loadIssuesAfterIssueReconcileCmd(issueIDs []string) tea.Cmd {
 					refreshSeq:     refreshSeq,
 					projectID:      projectID,
 					scopedParentID: scopedParentID,
+					visibilityGen:  m.childVisibilityGeneration,
+					visibilitySet:  true,
 					stale:          true,
 					freshnessHint:  m.taskSnapshotTimeoutHint(timeoutErr),
 					reconcileWarn:  reconcileWarn,
@@ -2072,6 +2095,8 @@ func (m Model) loadIssuesAfterIssueReconcileCmd(issueIDs []string) tea.Cmd {
 			refreshSeq:      refreshSeq,
 			projectID:       projectID,
 			scopedParentID:  scopedParentID,
+			visibilityGen:   m.childVisibilityGeneration,
+			visibilitySet:   true,
 			tasks:           snapshot.Tasks,
 			boardView:       snapshot.View,
 			boardColumns:    snapshot.Columns,
@@ -2226,7 +2251,20 @@ func (m Model) readTaskSnapshot(ctx context.Context, client *daemonclient.Client
 	if parentID := strings.TrimSpace(m.drillDownParentID); parentID != "" {
 		return client.GetChildBoardSnapshotWithMode(ctx, parentID, daemonclient.ReadWaitModeExplicit)
 	}
-	return client.BoardSnapshotWithMode(ctx, daemonclient.ReadWaitModeExplicit)
+	var showChildren *bool
+	if m.sessionTreeFilterOnly {
+		show := true
+		showChildren = &show
+	}
+	return client.BoardSnapshotWithOptions(ctx, daemonclient.BoardSnapshotOptions{ShowChildren: showChildren}, daemonclient.ReadWaitModeExplicit)
+}
+
+func (m *Model) refreshSessionTreeProjectionCmd() tea.Cmd {
+	if m.scope.IsGlobal() {
+		m.globalLoadSeq++
+		return m.loadGlobalBoardCmd(m.globalLoadSeq)
+	}
+	return m.scheduleIssuesRefreshCmd()
 }
 
 func (m Model) taskSnapshotTimeoutHint(timeoutErr *daemonclient.ReadWaitTimeoutError) string {
@@ -2478,6 +2516,8 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 
 		return issuesLoadedMsg{
 			projectID:       projectID,
+			visibilityGen:   m.childVisibilityGeneration,
+			visibilitySet:   true,
 			tasks:           snapshot.Tasks,
 			boardView:       snapshot.View,
 			boardColumns:    snapshot.Columns,

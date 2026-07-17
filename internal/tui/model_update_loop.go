@@ -281,6 +281,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if msg.visibilitySet && msg.visibilityGen != m.childVisibilityGeneration {
+			if msg.eventsCancel != nil {
+				msg.eventsCancel()
+			}
+			return m, m.finishIssuesRefreshCmd(msg.refreshSeq)
+		}
 		if m.shouldIgnoreDaemonSnapshot(msg.projectID, msg.revision) {
 			if msg.eventsCancel != nil {
 				msg.eventsCancel()

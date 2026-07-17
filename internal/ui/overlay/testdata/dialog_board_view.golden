@@ -8,6 +8,7 @@
 ││                                                              Board places issues into       │
 ││                                                              configured columns.            │
 ││                                                              hide empty columns: false      │
+││                                                              show children: false           │
 ││                                                                                             │
 ││                                                              Built-in · immutable           │
 ││                                                              Press d to duplicate before    │
@@ -17,7 +18,6 @@
 ││                                                              In Progress: phase=active      │
 ││                                                              In Review: review_ready        │
 ││                                                              Done: outcome=completed        │
-││                                                                                             │
 ││                                                                                             │
 ││                                                                                             │
 ││                                                                                             │

@@ -133,16 +133,16 @@ type taskClosePreflightRequest struct {
 }
 
 type taskCloseRequest struct {
-	TaskID                 string                    `json:"task_id"`
-	ForceWorktree          bool                      `json:"force_worktree,omitempty"`
-	IgnoreAhead            bool                      `json:"ignore_ahead,omitempty"`
-	IntegrateBeforeClose   bool                      `json:"integrate_before_close,omitempty"`
-	CloseCleanChildren     bool                      `json:"close_clean_children,omitempty"`
-	AllowActiveSession     bool                      `json:"allow_active_session,omitempty"`
-	CloseOutcome           string                    `json:"closed_outcome,omitempty"`
-	ExpectedSourceOID      string                    `json:"expected_source_oid,omitempty"`
-	ExpectedReviewEvidence *issues.ReviewEvidencePin `json:"expected_review_evidence,omitempty"`
-	PromoteBacklogBeforeClose bool   `json:"-"`
+	TaskID                    string                    `json:"task_id"`
+	ForceWorktree             bool                      `json:"force_worktree,omitempty"`
+	IgnoreAhead               bool                      `json:"ignore_ahead,omitempty"`
+	IntegrateBeforeClose      bool                      `json:"integrate_before_close,omitempty"`
+	CloseCleanChildren        bool                      `json:"close_clean_children,omitempty"`
+	AllowActiveSession        bool                      `json:"allow_active_session,omitempty"`
+	CloseOutcome              string                    `json:"closed_outcome,omitempty"`
+	ExpectedSourceOID         string                    `json:"expected_source_oid,omitempty"`
+	ExpectedReviewEvidence    *issues.ReviewEvidencePin `json:"expected_review_evidence,omitempty"`
+	PromoteBacklogBeforeClose bool                      `json:"-"`
 }
 
 type taskStatusUpdateOptions struct {
@@ -408,6 +408,9 @@ func (d *Daemon) handleBoardFetch(ctx context.Context, req protocol.RequestEnvel
 	viewRecord, err := d.boardViewRecord(ctx, projectID, viewID)
 	if err != nil {
 		return d.boardViewErrorResponse(req, err), nil
+	}
+	if boardReq.ShowChildren != nil {
+		viewRecord.View.Options.ShowChildren = *boardReq.ShowChildren
 	}
 	startedAt := time.Now()
 	cacheStartedAt := time.Now()

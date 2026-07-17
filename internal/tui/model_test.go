@@ -4645,6 +4645,23 @@ func TestBuildColumns_HidesParentChildEvenWhenFilterToggleIsOff(t *testing.T) {
 	}
 }
 
+func TestBuildColumns_ConfiguredViewExplicitlyShowsChildren(t *testing.T) {
+	m := newTestModel()
+	parentID := naming.IssueID("az-parent")
+	m.tasks = []domain.Task{
+		{ID: parentID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
+		{ID: "az-child", Title: "Child", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID},
+	}
+	view := domain.DefaultBoardView()
+	view.Options.ShowChildren = true
+	m.boardProjection.View = view
+
+	openTasks := m.buildColumns()[domain.StatusOpen.Column()].Tasks
+	if len(openTasks) != 2 {
+		t.Fatalf("configured show-children tasks = %+v, want parent and child", openTasks)
+	}
+}
+
 func TestSessionTreeFilterShowsIssuesWithOwnOrDescendantSessionsDirectly(t *testing.T) {
 	m := newTestModel()
 	m.editor.EnterNormal()
@@ -4714,8 +4731,11 @@ func TestSessionTreeFilterHotkeyTogglesSummaryAndVisibleTasks(t *testing.T) {
 		{ID: naming.IssueID(inactiveID), Title: "Inactive", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask},
 	}
 
-	result, _ := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	result, cmd := m.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
 	next := result.(Model)
+	if cmd == nil {
+		t.Fatal("expected t to refresh child-inclusive projection")
+	}
 	if !next.sessionTreeFilterOnly {
 		t.Fatal("expected t to enable session tree filter")
 	}
@@ -4727,13 +4747,42 @@ func TestSessionTreeFilterHotkeyTogglesSummaryAndVisibleTasks(t *testing.T) {
 		t.Fatalf("visible open tasks = %+v, want only %s", openTasks, activeID)
 	}
 
-	result, _ = next.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	result, cmd = next.handleNormalMode(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
 	next = result.(Model)
+	if cmd == nil && !next.issueRefreshPending {
+		t.Fatal("expected clearing t to queue persisted view projection refresh")
+	}
 	if next.sessionTreeFilterOnly {
 		t.Fatal("expected t to disable session tree filter")
 	}
 	if got := next.filterSummary(); got != "F:none" {
 		t.Fatalf("filter summary after disable = %q, want F:none", got)
+	}
+}
+
+func TestIssuesLoadedMsgDropsStaleChildVisibilityProjection(t *testing.T) {
+	m := newTestModel()
+	m.childVisibilityGeneration = 2
+	m.issueRefreshSeq = 4
+	m.issueRefreshInFlight = true
+	m.tasks = []domain.Task{{ID: "az-root", Title: "Root", Status: domain.StatusOpen, Priority: domain.P2}}
+	staleView := domain.DefaultBoardView()
+	staleView.Options.ShowChildren = true
+
+	updatedAny, _ := m.Update(issuesLoadedMsg{
+		refreshSeq:      4,
+		visibilityGen:   1,
+		visibilitySet:   true,
+		tasks:           []domain.Task{{ID: "az-child", Title: "Child", Status: domain.StatusOpen, Priority: domain.P2}},
+		boardView:       staleView,
+		boardProjection: domain.BoardViewProjection{View: staleView},
+	})
+	updated := updatedAny.(Model)
+	if len(updated.tasks) != 1 || updated.tasks[0].ID != "az-root" {
+		t.Fatalf("stale child-visibility response replaced tasks: %+v", updated.tasks)
+	}
+	if updated.boardProjection.View.Options.ShowChildren {
+		t.Fatal("stale child-inclusive projection was applied after visibility changed")
 	}
 }
 
