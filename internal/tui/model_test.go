@@ -8530,3 +8530,59 @@ func TestOpenProjectOrchestratorOverlayRefreshesCachedSnapshot(t *testing.T) {
 		t.Fatalf("first cached orchestrator command = %T, want window size sync", batch[0]())
 	}
 }
+
+func TestOpenProjectOrchestratorOverlayAfterProjectRebindUsesCurrentProject(t *testing.T) {
+	m := newTestModel()
+	projectA := config.Project{Name: "project-a", Path: t.TempDir()}
+	projectB := config.Project{Name: "project-b", Path: t.TempDir()}
+	m.rebindProjectContext(projectA, nil)
+	m.projectOrchestrator = &projectOrchestratorSnapshot{
+		Name:      projectA.Name,
+		Path:      projectA.Path,
+		ProjectID: m.daemonProjectID(),
+		Snapshot:  &protocol.OrchestrationSnapshot{Lifecycle: domain.OrchestratorWorking},
+	}
+	m.openProjectOrchestratorOverlay()
+	openedOnA, ok := m.overlayStack.Current().(*overlay.ProjectOrchestratorOverlay)
+	if !ok {
+		t.Fatalf("current overlay = %T, want project orchestrator", m.overlayStack.Current())
+	}
+
+	m.rebindProjectContext(projectB, nil)
+	currentProjectID := m.daemonProjectID()
+	if m.projectOrchestrator != nil {
+		t.Fatalf("project A cache survived project B rebind: %+v", m.projectOrchestrator)
+	}
+	var gotTarget projectOrchestratorTarget
+	m.projectOrchestratorActionRunner = func(_ context.Context, target projectOrchestratorTarget, _ string, _ protocol.OrchestratorSessionRequest) (protocol.OrchestratorSessionResult, error) {
+		gotTarget = target
+		return protocol.OrchestratorSessionResult{Disposition: "stopped"}, nil
+	}
+
+	view := openedOnA.View()
+	if !strings.Contains(view, projectB.Name) || strings.Contains(view, projectA.Name) {
+		t.Fatalf("rebound orchestrator overlay rendered stale project:\n%s", view)
+	}
+	_, actionCmd := openedOnA.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if actionCmd == nil {
+		t.Fatal("stop action command = nil")
+	}
+	msg, ok := actionCmd().(projectOrchestratorActionMsg)
+	if !ok || msg.err != nil {
+		t.Fatalf("stop action message = %+v", msg)
+	}
+	wantSocket := config.DaemonSocketPathFor(projectB.Path)
+	if gotTarget.ProjectID != currentProjectID || gotTarget.ProjectPath != projectB.Path || gotTarget.SocketPath != wantSocket {
+		t.Fatalf("stop target = %+v, want project ID %q path %q socket %q", gotTarget, currentProjectID, projectB.Path, wantSocket)
+	}
+
+	m.openProjectOrchestratorOverlay()
+	reopened, ok := m.overlayStack.Current().(*overlay.ProjectOrchestratorOverlay)
+	if !ok {
+		t.Fatalf("reopened overlay = %T, want project orchestrator", m.overlayStack.Current())
+	}
+	reopenedView := reopened.View()
+	if !strings.Contains(reopenedView, projectB.Name) || strings.Contains(reopenedView, projectA.Name) {
+		t.Fatalf("reopened orchestrator overlay rendered stale project:\n%s", reopenedView)
+	}
+}

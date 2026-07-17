@@ -2521,6 +2521,7 @@ func (m *Model) rebindProjectContext(project config.Project, projectConfig *conf
 	m.repoDir = project.Path
 	m.refreshDaemonProjectRouteID()
 	m.rebuildProjectScopedServices()
+	m.reconcileProjectOrchestratorRoute()
 	if m.daemonClient != nil {
 		m.daemonClient.WithProjectRouteID(m.daemonProjectRouteIDValue())
 	}
