@@ -25,6 +25,33 @@ const projectReadMaterializerBatchSize = 500
 
 const projectReadMutationConvergenceTimeout = 5 * time.Second
 
+type projectReadUnavailableError struct {
+	cause error
+}
+
+func (e *projectReadUnavailableError) Error() string {
+	if e == nil || e.cause == nil {
+		return "project read materialization unavailable"
+	}
+	return e.cause.Error()
+}
+
+func (e *projectReadUnavailableError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func newProjectReadUnavailableError(format string, args ...any) error {
+	return &projectReadUnavailableError{cause: fmt.Errorf(format, args...)}
+}
+
+func isProjectReadUnavailableError(err error) bool {
+	var unavailable *projectReadUnavailableError
+	return errors.As(err, &unavailable)
+}
+
 type suppressSynchronousProjectReadRuntimeRefreshKey struct{}
 
 func withProjectReadUpdateWaitHookForTest(ctx context.Context, hook func(string, string)) context.Context {
@@ -838,7 +865,7 @@ func (d *Daemon) projectReadSnapshot(projectID string) ([]domain.Task, protocol.
 		}
 		materializer, err = d.ensureProjectReadMaterializer(materializerCtx, projectID, nil)
 		if err != nil {
-			return nil, protocol.MaterializedSnapshotMetadata{}, err
+			return nil, protocol.MaterializedSnapshotMetadata{}, newProjectReadUnavailableError("project read materialization unavailable for %s: %w", projectID, err)
 		}
 	}
 	if materializer == nil {
@@ -847,24 +874,24 @@ func (d *Daemon) projectReadSnapshot(projectID string) ([]domain.Task, protocol.
 		// the same verified semantics. Production IPC cannot reach this path.
 		client := d.issueClientForProject(projectID)
 		if client == nil {
-			return nil, protocol.MaterializedSnapshotMetadata{}, fmt.Errorf("project read materialization unavailable for %s", projectID)
+			return nil, protocol.MaterializedSnapshotMetadata{}, newProjectReadUnavailableError("project read materialization unavailable for %s", projectID)
 		}
 		candidate := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(client), func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
 			return d.hydrateProjectReadTasks(hydrateCtx, projectID, client, tasks), nil
 		})
 		d.configureProjectReadMaterializer(candidate, projectID, client)
 		if err := candidate.bootstrap(context.Background()); err != nil {
-			return nil, protocol.MaterializedSnapshotMetadata{}, fmt.Errorf("bootstrap embedded project read materialization for %s: %w", projectID, err)
+			return nil, protocol.MaterializedSnapshotMetadata{}, newProjectReadUnavailableError("bootstrap embedded project read materialization for %s: %w", projectID, err)
 		}
 		tasks, metadata := candidate.snapshot()
 		if !strings.HasPrefix(metadata.Health, "healthy") {
-			return nil, metadata, fmt.Errorf("project read materialization unhealthy: %s", metadata.Health)
+			return nil, metadata, newProjectReadUnavailableError("project read materialization unhealthy: %s", metadata.Health)
 		}
 		return tasks, metadata, nil
 	}
 	tasks, metadata, retryableFailure := materializer.snapshotWithFailureDisposition()
 	if !strings.HasPrefix(metadata.Health, "healthy") && !retryableFailure {
-		return nil, metadata, fmt.Errorf("project read materialization unhealthy: %s", metadata.Health)
+		return nil, metadata, newProjectReadUnavailableError("project read materialization unhealthy: %s", metadata.Health)
 	}
 	return tasks, metadata, nil
 }
@@ -989,7 +1016,7 @@ func (d *Daemon) syncUserProjectionMaterializedIssues(ctx context.Context, proje
 	}
 	tasks, metadata := materializer.snapshotIssues(wanted)
 	if !strings.HasPrefix(metadata.Health, "healthy") {
-		return fmt.Errorf("project read materialization unhealthy: %s", metadata.Health)
+		return newProjectReadUnavailableError("project read materialization unhealthy: %s", metadata.Health)
 	}
 	changes := make([]userstore.ProjectDeltaChange, 0, len(wanted))
 	for i := range tasks {

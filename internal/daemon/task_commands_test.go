@@ -4448,6 +4448,76 @@ func TestCommittedCreateSurvivesConcurrentWorktreeRefreshAndAdvancesMaterialized
 	}
 }
 
+func TestMaterializedTaskReadsFailUnavailableWithoutStalePayload(t *testing.T) {
+	ctx := context.Background()
+	const (
+		projectID = "proj-materializer-unavailable"
+		taskID    = "issue-stale"
+	)
+	stale := domain.Task{ID: taskID, Title: "stale payload must not escape", Status: domain.StatusInProgress, Type: domain.TypeTask}
+	materializer := newProjectReadMaterializer(projectID, nil, nil)
+	materializer.canonical[taskID] = stale
+	materializer.tasks[taskID] = stale
+	materializer.metadata.Health = "stale: committed mutation convergence: injected failure"
+	d := &Daemon{
+		cfg:                  Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		materializersStarted: true,
+		materializers:        map[string]*projectReadMaterializer{projectID: materializer},
+		revision:             map[string]uint64{projectID: 7},
+	}
+	request := func(command string, body any) protocol.RequestEnvelope {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       naming.RequestID("req-unavailable-" + command),
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         command,
+			Meta:            protocol.Metadata{ProjectID: projectID},
+			Body:            encoded,
+		}
+	}
+	tests := []struct {
+		name   string
+		invoke func() (protocol.ResponseEnvelope, error)
+	}{
+		{name: "list", invoke: func() (protocol.ResponseEnvelope, error) {
+			return d.handleTaskList(ctx, request("task.list", map[string]any{}))
+		}},
+		{name: "search", invoke: func() (protocol.ResponseEnvelope, error) {
+			return d.handleTaskList(ctx, request("task.search", map[string]any{"query": "stale"}))
+		}},
+		{name: "get", invoke: func() (protocol.ResponseEnvelope, error) {
+			return d.handleTaskGet(ctx, request("task.get", map[string]any{"task_id": taskID}))
+		}},
+		{name: "get-many", invoke: func() (protocol.ResponseEnvelope, error) {
+			return d.handleTaskGetMany(ctx, request("task.get-many", map[string]any{"task_ids": []string{taskID}, "metadata_only": true}))
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			resp, err := test.invoke()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.OK || resp.Error == nil {
+				t.Fatalf("response = %+v, want materializer-unavailable error", resp)
+			}
+			if resp.Error.Code != protocol.ErrorCodeUnavailable || !resp.Error.Retryable {
+				t.Fatalf("error = %+v, want retryable unavailable", resp.Error)
+			}
+			if !strings.Contains(resp.Error.Message, "injected failure") {
+				t.Fatalf("error message = %q, want injected convergence failure", resp.Error.Message)
+			}
+			if len(resp.Body) != 0 {
+				t.Fatalf("body = %q, want no stale payload", resp.Body)
+			}
+		})
+	}
+}
+
 func TestTaskCloseRepairsVerifiedStaleLegacyProjectSessionProjection(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

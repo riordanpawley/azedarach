@@ -400,7 +400,7 @@ func (d *Daemon) handleTaskList(ctx context.Context, req protocol.RequestEnvelop
 	startedAt := time.Now()
 	result, shared, err := d.loadTaskListSnapshot(ctx, req, projectID, query, listReq.IncludeDependencies, archiveMode)
 	if err != nil {
-		return d.errorResponse(req, projectIssueStoreHealthErrorCode(err), err.Error()), nil
+		return d.errorResponse(req, taskReadErrorCode(err), err.Error()), nil
 	}
 	payload := buildTaskListSnapshotPayload(projectID, result.Revision, result.LastCheckedAt, result.Freshness, result.Tasks, result.SummariesOnly)
 	payload.Source = result.Source
@@ -703,7 +703,7 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 	if d.materializedReadsEnabled() {
 		materialized, source, err := d.projectReadSnapshot(projectID)
 		if err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
+			return d.errorResponse(req, taskReadErrorCode(err), err.Error()), nil
 		}
 		tasks := materializedTaskContext(materialized, []string{taskID}, true, false, true, false, archiveMode)
 		found := false
@@ -846,7 +846,7 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 	if d.materializedReadsEnabled() {
 		materialized, source, err := d.projectReadSnapshot(projectID)
 		if err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
+			return d.errorResponse(req, taskReadErrorCode(err), err.Error()), nil
 		}
 		tasks := materializedTaskContext(materialized, taskIDs, !cmd.MetadataOnly, cmd.IncludeAncestors, !cmd.ExcludeDependents, cmd.DirectDependents, protocol.ArchiveModeExclude)
 		if !cmd.MetadataOnly {
@@ -855,7 +855,7 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 			}
 			materialized, source, err = d.projectReadSnapshot(projectID)
 			if err != nil {
-				return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
+				return d.errorResponse(req, taskReadErrorCode(err), err.Error()), nil
 			}
 			tasks = materializedTaskContext(materialized, taskIDs, true, cmd.IncludeAncestors, !cmd.ExcludeDependents, cmd.DirectDependents, protocol.ArchiveModeExclude)
 		}
@@ -933,6 +933,10 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 		d.cfg.Logger.Info("daemon task get-many completed", "project_id", projectID, "requested_task_count", len(taskIDs), "context_task_count", len(tasks), "metadata_only", cmd.MetadataOnly, "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds())
 	}
 	return resp, nil
+}
+
+func taskReadErrorCode(err error) protocol.ErrorCode {
+	return projectIssueStoreHealthErrorCode(err)
 }
 
 func (d *Daemon) handleTaskEvents(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
