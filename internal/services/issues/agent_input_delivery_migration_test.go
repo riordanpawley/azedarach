@@ -284,7 +284,7 @@ func TestAgentInputDeliverySessionLeaseFencesUseExactRFC3339NanoBoundaries(t *te
 		t.Fatalf("exact-expiry recovery=%+v acquired=%v err=%v", recovered, acquired, err)
 	}
 
-	ownerRequest := domain.AgentInputDeliveryRequest{ProjectID: "p", SessionID: "begin-owner", Target: domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 42, AgentIncarnation: "inc-old"}, Tool: "codex", Kind: domain.AgentInputMessageSessionMessage, Payload: "body", IntentKey: "begin-old-owner", ExpiresAt: base.Add(time.Hour)}
+	ownerRequest := domain.AgentInputDeliveryRequest{ProjectID: "p", SessionID: "begin-owner", Target: domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 42, AgentIncarnation: "inc-old"}, Tool: "codex", Kind: domain.AgentInputMessageSessionMessage, Payload: "body", IntentKey: "begin-old-owner"}
 	if _, err := client.EnsureAgentInputDeliveryIntent(ctx, ownerRequest); err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +305,7 @@ func TestAgentInputDeliverySessionLeaseFencesUseExactRFC3339NanoBoundaries(t *te
 	}
 
 	begin := func(sessionID, intentKey string, at time.Time) bool {
-		request := domain.AgentInputDeliveryRequest{ProjectID: "p", SessionID: sessionID, Target: domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 42, AgentIncarnation: "inc"}, Tool: "codex", Kind: domain.AgentInputMessageSessionMessage, Payload: "body", IntentKey: intentKey, ExpiresAt: base.Add(time.Hour)}
+		request := domain.AgentInputDeliveryRequest{ProjectID: "p", SessionID: sessionID, Target: domain.ManagedAgentRuntimeIdentity{LogicalPaneID: "agent", TmuxPaneID: "7", PanePID: 42, AgentIncarnation: "inc"}, Tool: "codex", Kind: domain.AgentInputMessageSessionMessage, Payload: "body", IntentKey: intentKey}
 		if _, err := client.EnsureAgentInputDeliveryIntent(ctx, request); err != nil {
 			t.Fatal(err)
 		}
