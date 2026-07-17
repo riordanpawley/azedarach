@@ -29,7 +29,7 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var beforeIssues, beforeCustom, beforeDecisions, beforeDecisionAudits, beforeMigrations, beforeDecisionIdempotency, beforeAgentInput int
+			var beforeIssues, beforeCustom, beforeDecisions, beforeDecisionAudits, beforeMigrations, beforeDecisionIdempotency, beforeAgentInput, beforeFencing, beforeIntents int
 			if err = beforeDB.QueryRow(`SELECT COUNT(*) FROM issues`).Scan(&beforeIssues); err != nil {
 				t.Fatal(err)
 			}
@@ -37,6 +37,8 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&beforeMigrations)
 			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, decisionIdempotencyMigrationID).Scan(&beforeDecisionIdempotency)
 			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&beforeAgentInput)
+			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, agentInputDeliveryFencingMigrationID).Scan(&beforeFencing)
+			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM agent_input_delivery_intents`).Scan(&beforeIntents)
 			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM decisions`).Scan(&beforeDecisions)
 			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM decision_audit_log`).Scan(&beforeDecisionAudits)
 			_ = beforeDB.Close()
@@ -75,6 +77,9 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&checksum); err != nil || checksum != "92d3be503bc193101944f1bc1ecee38656f04c3be7399a1b88356ae6add42f55" {
 				t.Fatalf("agent input checksum=%q err=%v", checksum, err)
 			}
+			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, agentInputDeliveryFencingMigrationID).Scan(&checksum); err != nil || checksum != agentInputDeliveryFencingMigrationChecksum {
+				t.Fatalf("agent input fencing checksum=%q err=%v", checksum, err)
+			}
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, decisionIdempotencyMigrationID).Scan(&checksum); err != nil || checksum != "86d5400fe33bbc19e7e848bc232335809f76d85e4d45a6e45f6bc7ff77547f47" {
 				t.Fatalf("decision idempotency checksum=%q err=%v", checksum, err)
 			}
@@ -110,7 +115,7 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if _, err = client.List(ctx); err != nil {
 				t.Fatal(err)
 			}
-			var afterIssues, afterCustom, afterDecisions, afterDecisionAudits, afterMigrations, afterDecisionIdempotency, afterAgentInput, intentRows int
+			var afterIssues, afterCustom, afterDecisions, afterDecisionAudits, afterMigrations, afterDecisionIdempotency, afterAgentInput, afterFencing, intentRows int
 			if err = db.QueryRow(`SELECT COUNT(*) FROM issues`).Scan(&afterIssues); err != nil {
 				t.Fatal(err)
 			}
@@ -126,6 +131,9 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&afterAgentInput); err != nil {
 				t.Fatal(err)
 			}
+			if err = db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, agentInputDeliveryFencingMigrationID).Scan(&afterFencing); err != nil {
+				t.Fatal(err)
+			}
 			if err = db.QueryRow(`SELECT COUNT(*) FROM agent_input_delivery_intents`).Scan(&intentRows); err != nil {
 				t.Fatal(err)
 			}
@@ -138,10 +146,10 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if beforeIssues != afterIssues || beforeCustom != afterCustom || beforeDecisions != afterDecisions || beforeDecisionAudits != afterDecisionAudits {
 				t.Fatalf("row preservation issues=%d/%d custom_views=%d/%d decisions=%d/%d decision_audits=%d/%d", beforeIssues, afterIssues, beforeCustom, afterCustom, beforeDecisions, afterDecisions, beforeDecisionAudits, afterDecisionAudits)
 			}
-			if afterDecisionIdempotency != 1 || afterAgentInput != 1 || intentRows != 0 || afterMigrations != beforeMigrations+(1-beforeDecisionIdempotency)+(1-beforeAgentInput) {
-				t.Fatalf("migration summary before=%d/0051:%d/0052:%d after=%d/0051:%d/0052:%d intent_rows=%d", beforeMigrations, beforeDecisionIdempotency, beforeAgentInput, afterMigrations, afterDecisionIdempotency, afterAgentInput, intentRows)
+			if afterDecisionIdempotency != 1 || afterAgentInput != 1 || afterFencing != 1 || intentRows != beforeIntents || afterMigrations != beforeMigrations+(1-beforeDecisionIdempotency)+(1-beforeAgentInput)+(1-beforeFencing) {
+				t.Fatalf("migration summary before=%d/0051:%d/0052:%d/0053:%d after=%d/0051:%d/0052:%d/0053:%d intent_rows=%d/%d", beforeMigrations, beforeDecisionIdempotency, beforeAgentInput, beforeFencing, afterMigrations, afterDecisionIdempotency, afterAgentInput, afterFencing, beforeIntents, intentRows)
 			}
-			t.Logf("real clone summary path=%s issues=%d custom_views=%d migrations=%d->%d decision_marker=%d->%d agent_input_marker=%d->%d intent_rows=%d", path, afterIssues, afterCustom, beforeMigrations, afterMigrations, beforeDecisionIdempotency, afterDecisionIdempotency, beforeAgentInput, afterAgentInput, intentRows)
+			t.Logf("real clone summary path=%s issues=%d custom_views=%d migrations=%d->%d decision_marker=0051:%d->%d agent_input_markers=0052:%d->%d/0053:%d->%d intent_rows=%d->%d", path, afterIssues, afterCustom, beforeMigrations, afterMigrations, beforeDecisionIdempotency, afterDecisionIdempotency, beforeAgentInput, afterAgentInput, beforeFencing, afterFencing, beforeIntents, intentRows)
 			if err = client.CloseDB(); err != nil {
 				t.Fatal(err)
 			}
@@ -167,6 +175,9 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			}
 			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, agentInputDeliveryMigrationID, "92d3be503bc193101944f1bc1ecee38656f04c3be7399a1b88356ae6add42f55").Scan(&ledgerRows); err != nil || ledgerRows != 1 {
 				t.Fatalf("agent input delivery ledger rows after reopen=%d err=%v", ledgerRows, err)
+			}
+			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, agentInputDeliveryFencingMigrationID, agentInputDeliveryFencingMigrationChecksum).Scan(&ledgerRows); err != nil || ledgerRows != 1 {
+				t.Fatalf("agent input fencing ledger rows after reopen=%d err=%v", ledgerRows, err)
 			}
 			_ = reopened.CloseDB()
 		})

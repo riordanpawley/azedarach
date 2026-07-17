@@ -161,7 +161,7 @@ type Daemon struct {
 	uiState                              map[string]string
 	tmux                                 *tmux.Client
 	agentInput                           *agentInputDeliveryService
-	nativeAgentInput                     *nativeAgentInputAuthority
+	codexAgentInput                      *codexAppServerInputAuthority
 	git                                  *git.Client
 	gitStatusAdapter                     *gitServiceAdapter
 	gitHandler                           *daemonhandlers.GitHandler
@@ -385,8 +385,13 @@ func New(cfg Config) *Daemon {
 		userProjectionConsumers:            map[string]*userProjectionConsumerHandle{},
 		shutdownReqCh:                      make(chan struct{}),
 	}
-	d.nativeAgentInput = newNativeAgentInputAuthority()
-	d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, d.nativeAgentInput, fmt.Sprintf("daemon:%d:%p", os.Getpid(), d))
+	d.codexAgentInput = newCodexAppServerInputAuthority(d.tmux, cfg.SocketPath, cfg.Logger, func(projectID string) daemonProjectRuntimeConfig {
+		return d.runtimeConfigForProject(projectID)
+	})
+	agentInputOwner := fmt.Sprintf("daemon:%d:%p", os.Getpid(), d)
+	d.codexAgentInput.issueClients = d.issueClientForProject
+	d.codexAgentInput.recoveryOwner = agentInputOwner + ":recovery"
+	d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, d.codexAgentInput, agentInputOwner)
 	if !cfg.ScopedRuntime && strings.TrimSpace(os.Getenv("AZEDARACH_DISABLE_USER_DB")) != "1" {
 		if store, err := userstore.Open(userstore.DefaultPath()); err != nil {
 			cfg.Logger.Warn("initialize user cross-project projection", "error", err)
@@ -570,6 +575,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return err
 	}
 	d.cfg.Logger.Info("daemon startup phase", "phase", "lock_acquire", "duration_ms", time.Since(startedAt).Milliseconds())
+	if d.codexAgentInput != nil {
+		if err := d.codexAgentInput.RecoverStaleGates(ctx); err != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("recover stale Codex input gates", "error", err)
+		}
+	}
 	serveCtx, cancelServe := context.WithCancel(context.Background())
 	defer cancelServe()
 	d.startUserProjectionWorkContext(serveCtx)
@@ -660,10 +670,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 	go func() {
 		serveErrCh <- d.serve.Serve(serveCtx)
 	}()
-	nativeAgentInputErrCh := make(chan error, 1)
-	go func() {
-		nativeAgentInputErrCh <- d.nativeAgentInput.Serve(serveCtx, nativeAgentInputSocketPath(d.cfg.SocketPath))
-	}()
 	d.cfg.Logger.Info("daemon startup phase", "phase", "ipc_serve_start", "duration_ms", time.Since(startedAt).Milliseconds())
 	waitForShutdown := func() {
 		if ctx.Err() != nil {
@@ -683,19 +689,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return fmt.Errorf("daemon server exited during %s", phase)
 		default:
 		}
-		select {
-		case err := <-nativeAgentInputErrCh:
-			if ctx.Err() != nil {
-				waitForShutdown()
-				return nil
-			}
-			if err != nil {
-				return fmt.Errorf("native agent input authority exited during %s: %w", phase, err)
-			}
-			return fmt.Errorf("native agent input authority exited during %s", phase)
-		default:
-			return nil
-		}
+		return nil
 	}
 
 	bootstrapStartedAt := time.Now()
@@ -741,14 +735,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.cfg.Logger.Info("daemon startup phase", "phase", "startup_ready", "duration_ms", time.Since(startedAt).Milliseconds())
 	select {
 	case err = <-serveErrCh:
-	case err = <-nativeAgentInputErrCh:
-		if ctx.Err() != nil {
-			err = nil
-		} else if err != nil {
-			err = fmt.Errorf("native agent input authority exited: %w", err)
-		} else {
-			err = errors.New("native agent input authority exited")
-		}
 	}
 	cancelServe()
 	if ctx.Err() != nil {

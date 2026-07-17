@@ -11,9 +11,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -94,6 +94,7 @@ var orderedMigrations = []migration{
 	{id: issueObservationEventSearchMigrationID, path: "migrations/0050_issue_observation_event_search.sql"},
 	{id: decisionIdempotencyMigrationID, path: "migrations/0051_decision_idempotency.sql"},
 	{id: agentInputDeliveryMigrationID, path: "migrations/0052_agent_input_delivery.sql"},
+	{id: agentInputDeliveryFencingMigrationID, path: "migrations/0053_agent_input_delivery_fencing.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -155,6 +156,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "0050_issue_observation_event_search", Path: "migrations/0050_issue_observation_event_search.sql", Checksum: "e5a8efc20ddf313822576c4d6d42cd94e1837dfac810834957689d30b952005d"},
 	{ID: decisionIdempotencyMigrationID, Path: "migrations/0051_decision_idempotency.sql", Checksum: "86d5400fe33bbc19e7e848bc232335809f76d85e4d45a6e45f6bc7ff77547f47"},
 	{ID: agentInputDeliveryMigrationID, Path: "migrations/0052_agent_input_delivery.sql", Checksum: "92d3be503bc193101944f1bc1ecee38656f04c3be7399a1b88356ae6add42f55"},
+	{ID: agentInputDeliveryFencingMigrationID, Path: "migrations/0053_agent_input_delivery_fencing.sql", Checksum: agentInputDeliveryFencingMigrationChecksum},
 }
 
 func validateMigrationRegistry() error {
@@ -442,20 +444,23 @@ func migrateIssueSessionLogicalIdentity(ctx context.Context, tx *sql.Tx) error {
 }
 
 const (
-	migrationArtifactAuthority             sqlitemigration.Authority = "project.issues"
-	issueStateModelV2MigrationID                                     = "0029_issue_state_model_v2"
-	issueStateModelVersionMetaKey                                    = "issue:state_model_version"
-	issueStateModelV2CutoverMarkerKey                                = "issue:state_model_v2_cutover"
-	issueStateModelV2Version                                         = "2"
-	boardViewsMigrationID                                            = "0031_board_views"
-	projectionDeltaAuthorityMigrationID                              = "0047_projection_delta_authority"
-	projectionDeltaAuthorityChecksum                                 = "9f7bed54f9694c608c7ce081c4007539eb46ce67adc9127d5649a1dbb49b6c5a"
-	humanAuthorityProjectionMigrationID                              = "0047_human_authority_projection_revision"
-	decisionPropagationOutboxMigrationID                             = "0048_decision_propagation_outbox"
-	issueObservationEventSearchMigrationID                           = "0050_issue_observation_event_search"
-	agentInputDeliveryMigrationID                                    = "0052_agent_input_delivery"
-	contextualLearningMigrationID                                    = "0039_contextual_learning_activation"
-	legacyContextualLearningMigration                                = "0038_contextual_learning_activation"
+	migrationArtifactAuthority                 sqlitemigration.Authority = "project.issues"
+	issueStateModelV2MigrationID                                         = "0029_issue_state_model_v2"
+	issueStateModelVersionMetaKey                                        = "issue:state_model_version"
+	issueStateModelV2CutoverMarkerKey                                    = "issue:state_model_v2_cutover"
+	issueStateModelV2Version                                             = "2"
+	boardViewsMigrationID                                                = "0031_board_views"
+	projectionDeltaAuthorityMigrationID                                  = "0047_projection_delta_authority"
+	projectionDeltaAuthorityChecksum                                     = "9f7bed54f9694c608c7ce081c4007539eb46ce67adc9127d5649a1dbb49b6c5a"
+	humanAuthorityProjectionMigrationID                                  = "0047_human_authority_projection_revision"
+	decisionPropagationOutboxMigrationID                                 = "0048_decision_propagation_outbox"
+	issueObservationEventSearchMigrationID                               = "0050_issue_observation_event_search"
+	agentInputDeliveryMigrationID                                        = "0052_agent_input_delivery"
+	agentInputDeliveryMigrationChecksum                                  = "92d3be503bc193101944f1bc1ecee38656f04c3be7399a1b88356ae6add42f55"
+	agentInputDeliveryFencingMigrationID                                 = "0053_agent_input_delivery_fencing"
+	agentInputDeliveryFencingMigrationChecksum                           = "39c5faf5c816e604d8826b8e6548d2b047234ea0340a490e4bfa2ae64d21de79"
+	contextualLearningMigrationID                                        = "0039_contextual_learning_activation"
+	legacyContextualLearningMigration                                    = "0038_contextual_learning_activation"
 )
 
 type issueStateModelV2CutoverMarker struct {
@@ -570,6 +575,12 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 				}
 				continue
 			}
+			if m.id == agentInputDeliveryFencingMigrationID {
+				if err := c.applyAgentInputDeliveryFencingMigration(ctx, db, m.id); err != nil {
+					return err
+				}
+				continue
+			}
 			if m.id == decisionIdempotencyMigrationID {
 				if err := c.applyDecisionIdempotencyMigration(ctx, db, m.id); err != nil {
 					return err
@@ -628,7 +639,16 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("check agent input delivery migration: %w", err)
 	}
 	if agentInputApplied {
-		if err := validateAgentInputDeliverySchema(ctx, db); err != nil {
+		fencingApplied, err := isMigrationApplied(ctx, db, agentInputDeliveryFencingMigrationID)
+		if err != nil {
+			return fmt.Errorf("check agent input delivery fencing migration: %w", err)
+		}
+		if fencingApplied {
+			err = validateAgentInputDeliverySchema(ctx, db)
+		} else {
+			err = validateAgentInputDeliveryBaseSchema(ctx, db)
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -1087,66 +1107,457 @@ func validateManagedAgentIdentitySchema(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+func validateAgentInputDeliveryBaseSchema(ctx context.Context, db sqlIssueQueryer) error {
+	contract, err := agentInputDeliveryBaseSchemaContract()
+	if err != nil {
+		return fmt.Errorf("derive agent input delivery base schema from pinned artifact: %w", err)
+	}
+	return validateAgentInputDeliverySchemaContract(ctx, db, contract)
+}
+
 func validateAgentInputDeliverySchema(ctx context.Context, db sqlIssueQueryer) error {
-	var tableSQL string
-	if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_input_delivery_intents'`).Scan(&tableSQL); err != nil {
-		return fmt.Errorf("inspect agent input delivery table: %w", err)
+	contract, err := agentInputDeliveryFencedSchemaContract()
+	if err != nil {
+		return fmt.Errorf("derive agent input delivery fenced schema from pinned artifacts: %w", err)
 	}
-	normalized := strings.NewReplacer(" ", "", "\n", "", "\t", "", "\r", "").Replace(strings.ToLower(tableSQL))
-	for _, fragment := range []string{"primarykey(project_id,intent_key)", "statein('queued','leased','delivered','expired','stale')", "acknowledgement_tokenisnotnull", "lease_tokenisnotnull"} {
-		if !strings.Contains(normalized, fragment) {
-			return fmt.Errorf("agent input delivery schema drifted: missing constraint %s", fragment)
-		}
+	return validateAgentInputDeliverySchemaContract(ctx, db, contract)
+}
+
+type exactSQLiteColumn struct {
+	name       string
+	columnType string
+	notNull    int
+	defaultSQL string
+	primaryKey int
+}
+
+type exactSQLiteSchemaObject struct {
+	objectType string
+	name       string
+	tableName  string
+	sql        string
+}
+
+type exactSQLiteIndexColumn struct {
+	sequence   int
+	columnID   int
+	name       string
+	descending int
+	collation  string
+	key        int
+}
+
+type exactSQLiteIndex struct {
+	unique  int
+	origin  string
+	partial int
+	columns []exactSQLiteIndexColumn
+}
+
+type agentInputDeliverySchemaContract struct {
+	objects []exactSQLiteSchemaObject
+	columns map[string][]exactSQLiteColumn
+	indexes map[string]exactSQLiteIndex
+}
+
+var (
+	agentInputDeliveryBaseSchemaContract = sync.OnceValues(func() (*agentInputDeliverySchemaContract, error) {
+		return deriveAgentInputDeliverySchemaContract(false)
+	})
+	agentInputDeliveryFencedSchemaContract = sync.OnceValues(func() (*agentInputDeliverySchemaContract, error) {
+		return deriveAgentInputDeliverySchemaContract(true)
+	})
+)
+
+func deriveAgentInputDeliverySchemaContract(fenced bool) (*agentInputDeliverySchemaContract, error) {
+	if err := validateMigrationRegistry(); err != nil {
+		return nil, fmt.Errorf("authenticate pinned migration artifacts: %w", err)
 	}
-	for _, column := range []string{"project_id", "intent_key", "session_id", "logical_pane_id", "tmux_pane_id", "pane_pid", "agent_incarnation", "tool", "message_kind", "payload", "state", "expires_at", "lease_owner", "lease_token", "lease_expires_at", "attempt_count", "acknowledgement_token", "acknowledged_at", "created_at", "updated_at"} {
-		exists, err := columnExistsDB(ctx, db, "agent_input_delivery_intents", column)
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		return nil, fmt.Errorf("open reference database: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+	ctx := context.Background()
+	baseSQL, err := loadRegisteredMigrationSQL(agentInputDeliveryMigrationID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := db.ExecContext(ctx, baseSQL); err != nil {
+		return nil, fmt.Errorf("execute pinned migration 0052 reference artifact: %w", err)
+	}
+	if fenced {
+		fencingSQL, err := loadRegisteredMigrationSQL(agentInputDeliveryFencingMigrationID)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if !exists {
-			return fmt.Errorf("agent input delivery schema drifted: missing column %s", column)
+		if _, err := db.ExecContext(ctx, fencingSQL); err != nil {
+			return nil, fmt.Errorf("execute pinned migration 0053 reference artifact: %w", err)
 		}
 	}
-	indexes := []struct {
-		name      string
-		columns   []string
-		predicate string
-	}{
-		{name: "idx_agent_input_delivery_pending", columns: []string{"project_id", "state", "expires_at", "created_at"}, predicate: "wherestatein('queued','leased')"},
-		{name: "idx_agent_input_delivery_incarnation", columns: []string{"project_id", "session_id", "logical_pane_id", "agent_incarnation", "state"}},
+	return inspectAgentInputDeliverySchemaContract(ctx, db)
+}
+
+func loadRegisteredMigrationSQL(id string) (string, error) {
+	for _, migration := range orderedMigrations {
+		if migration.id == id {
+			return loadMigrationSQL(migration.path)
+		}
 	}
-	for _, index := range indexes {
-		var indexSQL string
-		if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='index' AND name=?`, index.name).Scan(&indexSQL); err != nil {
-			return fmt.Errorf("agent input delivery schema drifted: inspect index %s: %w", index.name, err)
+	return "", fmt.Errorf("migration %s is not registered", id)
+}
+
+func inspectAgentInputDeliverySchemaContract(ctx context.Context, db sqlIssueQueryer) (*agentInputDeliverySchemaContract, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT type, name, tbl_name, COALESCE(sql, '')
+		FROM sqlite_master
+		WHERE type IN ('table','index','trigger')
+		  AND (name GLOB 'agent_input_delivery_*' OR tbl_name GLOB 'agent_input_delivery_*')
+		ORDER BY type, name
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("inspect agent input delivery schema objects: %w", err)
+	}
+	contract := &agentInputDeliverySchemaContract{
+		columns: make(map[string][]exactSQLiteColumn),
+		indexes: make(map[string]exactSQLiteIndex),
+	}
+	for rows.Next() {
+		var object exactSQLiteSchemaObject
+		if err := rows.Scan(&object.objectType, &object.name, &object.tableName, &object.sql); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan agent input delivery schema object: %w", err)
 		}
-		normalizedSQL := strings.NewReplacer(" ", "", "\n", "", "\t", "", "\r", "", `"`, "", "`", "", "[", "", "]", "").Replace(strings.ToLower(indexSQL))
-		expectedSQL := "createindex" + index.name + "onagent_input_delivery_intents(" + strings.Join(index.columns, ",") + ")" + index.predicate
-		if normalizedSQL != expectedSQL {
-			return fmt.Errorf("agent input delivery schema drifted: index %s has non-canonical definition", index.name)
-		}
-		rows, err := db.QueryContext(ctx, `PRAGMA index_info(`+index.name+`)`)
-		if err != nil {
-			return fmt.Errorf("inspect agent input delivery index %s columns: %w", index.name, err)
-		}
-		var columns []string
-		for rows.Next() {
-			var sequence, columnID int
-			var column string
-			if err := rows.Scan(&sequence, &columnID, &column); err != nil {
-				rows.Close()
-				return fmt.Errorf("inspect agent input delivery index %s columns: %w", index.name, err)
+		contract.objects = append(contract.objects, object)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("iterate agent input delivery schema objects: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close agent input delivery schema object inspection: %w", err)
+	}
+	for _, object := range contract.objects {
+		switch object.objectType {
+		case "table":
+			columns, err := inspectExactSQLiteColumns(ctx, db, object.name)
+			if err != nil {
+				return nil, err
 			}
-			columns = append(columns, column)
+			contract.columns[object.name] = columns
+		case "index":
+			index, err := inspectExactSQLiteIndex(ctx, db, object.tableName, object.name)
+			if err != nil {
+				return nil, err
+			}
+			contract.indexes[object.name] = index
 		}
-		if err := rows.Close(); err != nil {
-			return fmt.Errorf("inspect agent input delivery index %s columns: %w", index.name, err)
+	}
+	return contract, nil
+}
+
+func validateAgentInputDeliverySchemaContract(ctx context.Context, db sqlIssueQueryer, expected *agentInputDeliverySchemaContract) error {
+	actual, err := inspectAgentInputDeliverySchemaContract(ctx, db)
+	if err != nil {
+		return fmt.Errorf("agent input delivery schema drifted: %w", err)
+	}
+	if len(actual.objects) != len(expected.objects) {
+		return fmt.Errorf("agent input delivery schema drifted: schema object inventory has %d objects, want %d", len(actual.objects), len(expected.objects))
+	}
+	for i := range expected.objects {
+		got, want := actual.objects[i], expected.objects[i]
+		if got.objectType != want.objectType || got.name != want.name || got.tableName != want.tableName {
+			return fmt.Errorf("agent input delivery schema drifted: schema object inventory entry %d is %s %s on %s, want %s %s on %s", i, got.objectType, got.name, got.tableName, want.objectType, want.name, want.tableName)
 		}
-		if !slices.Equal(columns, index.columns) {
-			return fmt.Errorf("agent input delivery schema drifted: index %s columns are %v, want %v", index.name, columns, index.columns)
+		if normalizeExactSQLiteDDL(got.sql) != normalizeExactSQLiteDDL(want.sql) {
+			return fmt.Errorf("agent input delivery schema drifted: %s %s has non-canonical definition", got.objectType, got.name)
+		}
+	}
+	if !reflect.DeepEqual(actual.columns, expected.columns) {
+		return errors.New("agent input delivery schema drifted: table column metadata is non-canonical")
+	}
+	if !reflect.DeepEqual(actual.indexes, expected.indexes) {
+		return errors.New("agent input delivery schema drifted: index metadata is non-canonical")
+	}
+	return nil
+}
+
+func validateAgentInputDeliveryNoInboundDependencies(ctx context.Context, db sqlIssueQueryer) error {
+	const target = "agent_input_delivery_intents"
+	rows, err := db.QueryContext(ctx, `
+		SELECT schema_name, type, name, ddl
+		FROM (
+			SELECT 'main' AS schema_name, type, name, COALESCE(sql, '') AS ddl
+			FROM sqlite_master
+			WHERE type IN ('view','trigger')
+			UNION ALL
+			SELECT 'temp' AS schema_name, type, name, COALESCE(sql, '') AS ddl
+			FROM sqlite_temp_master
+			WHERE type IN ('view','trigger')
+		)
+		ORDER BY type, name
+	`)
+	if err != nil {
+		return fmt.Errorf("inspect inbound view and trigger dependencies: %w", err)
+	}
+	for rows.Next() {
+		var schemaName, objectType, name, ddl string
+		if err := rows.Scan(&schemaName, &objectType, &name, &ddl); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan inbound schema dependency: %w", err)
+		}
+		if exactSQLiteDDLReferencesIdentifier(ddl, target) {
+			rows.Close()
+			return fmt.Errorf("inbound %s %s.%s references %s", objectType, schemaName, name, target)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate inbound schema dependencies: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close inbound schema dependency inspection: %w", err)
+	}
+
+	tables, err := db.QueryContext(ctx, `
+		SELECT name
+		FROM sqlite_master
+		WHERE type='table' AND name NOT LIKE 'sqlite_%' AND lower(name) <> lower(?)
+		ORDER BY name
+	`, target)
+	if err != nil {
+		return fmt.Errorf("inspect tables for inbound foreign keys: %w", err)
+	}
+	var tableNames []string
+	for tables.Next() {
+		var table string
+		if err := tables.Scan(&table); err != nil {
+			tables.Close()
+			return fmt.Errorf("scan table for inbound foreign keys: %w", err)
+		}
+		tableNames = append(tableNames, table)
+	}
+	if err := tables.Err(); err != nil {
+		tables.Close()
+		return fmt.Errorf("iterate tables for inbound foreign keys: %w", err)
+	}
+	if err := tables.Close(); err != nil {
+		return fmt.Errorf("close table inspection for inbound foreign keys: %w", err)
+	}
+	for _, table := range tableNames {
+		foreignKeys, err := db.QueryContext(ctx, `
+			SELECT id
+			FROM pragma_foreign_key_list(?)
+			WHERE lower([table])=lower(?)
+			LIMIT 1
+		`, table, target)
+		if err != nil {
+			return fmt.Errorf("inspect table %s inbound foreign keys: %w", table, err)
+		}
+		hasDependency := foreignKeys.Next()
+		if err := foreignKeys.Err(); err != nil {
+			foreignKeys.Close()
+			return fmt.Errorf("iterate table %s inbound foreign keys: %w", table, err)
+		}
+		if err := foreignKeys.Close(); err != nil {
+			return fmt.Errorf("close table %s inbound foreign key inspection: %w", table, err)
+		}
+		if hasDependency {
+			return fmt.Errorf("inbound foreign key from table %s references %s", table, target)
 		}
 	}
 	return nil
+}
+
+func exactSQLiteDDLReferencesIdentifier(ddl, target string) bool {
+	for i := 0; i < len(ddl); {
+		switch {
+		case i+1 < len(ddl) && ddl[i] == '-' && ddl[i+1] == '-':
+			i += 2
+			for i < len(ddl) && ddl[i] != '\n' {
+				i++
+			}
+		case i+1 < len(ddl) && ddl[i] == '/' && ddl[i+1] == '*':
+			i += 2
+			for i+1 < len(ddl) && !(ddl[i] == '*' && ddl[i+1] == '/') {
+				i++
+			}
+			if i+1 < len(ddl) {
+				i += 2
+			}
+		case ddl[i] == '\'':
+			i++
+			var quotedToken strings.Builder
+			for i < len(ddl) {
+				if ddl[i] == '\'' {
+					if i+1 < len(ddl) && ddl[i+1] == '\'' {
+						quotedToken.WriteByte('\'')
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				quotedToken.WriteByte(ddl[i])
+				i++
+			}
+			// SQLite accepts single-quoted identifiers in table-name positions.
+			// Conservatively treat an exact target token as a dependency; rejecting
+			// an unusual string literal is safer than rebuilding through an
+			// unobserved compatibility-quoted reference.
+			if strings.EqualFold(quotedToken.String(), target) {
+				return true
+			}
+		case ddl[i] == '"' || ddl[i] == '`' || ddl[i] == '[':
+			quote := ddl[i]
+			closeQuote := quote
+			if quote == '[' {
+				closeQuote = ']'
+			}
+			i++
+			var identifier strings.Builder
+			for i < len(ddl) {
+				if ddl[i] == closeQuote {
+					if quote != '[' && i+1 < len(ddl) && ddl[i+1] == closeQuote {
+						identifier.WriteByte(closeQuote)
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				identifier.WriteByte(ddl[i])
+				i++
+			}
+			if strings.EqualFold(identifier.String(), target) {
+				return true
+			}
+		default:
+			if !isSQLiteIdentifierByte(ddl[i]) {
+				i++
+				continue
+			}
+			start := i
+			for i < len(ddl) && isSQLiteIdentifierByte(ddl[i]) {
+				i++
+			}
+			if strings.EqualFold(ddl[start:i], target) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isSQLiteIdentifierByte(character byte) bool {
+	return character == '_' || character == '$' || character >= '0' && character <= '9' || character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= 0x80
+}
+
+func inspectExactSQLiteColumns(ctx context.Context, db sqlIssueQueryer, table string) ([]exactSQLiteColumn, error) {
+	rows, err := db.QueryContext(ctx, `SELECT cid, name, type, [notnull], dflt_value, pk, hidden FROM pragma_table_xinfo(?) ORDER BY cid`, table)
+	if err != nil {
+		return nil, fmt.Errorf("inspect table %s columns: %w", table, err)
+	}
+	defer rows.Close()
+	var columns []exactSQLiteColumn
+	for rows.Next() {
+		var column exactSQLiteColumn
+		var cid, hidden int
+		var defaultSQL sql.NullString
+		if err := rows.Scan(&cid, &column.name, &column.columnType, &column.notNull, &defaultSQL, &column.primaryKey, &hidden); err != nil {
+			return nil, fmt.Errorf("inspect table %s columns: %w", table, err)
+		}
+		if cid != len(columns) || hidden != 0 {
+			return nil, fmt.Errorf("table %s column %s has cid=%d hidden=%d", table, column.name, cid, hidden)
+		}
+		if defaultSQL.Valid {
+			column.defaultSQL = defaultSQL.String
+		}
+		columns = append(columns, column)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("inspect table %s columns: %w", table, err)
+	}
+	return columns, nil
+}
+
+func inspectExactSQLiteIndex(ctx context.Context, db sqlIssueQueryer, table, indexName string) (exactSQLiteIndex, error) {
+	var index exactSQLiteIndex
+	if err := db.QueryRowContext(ctx, `
+		SELECT [unique], origin, partial
+		FROM pragma_index_list(?)
+		WHERE name=?
+	`, table, indexName).Scan(&index.unique, &index.origin, &index.partial); err != nil {
+		return exactSQLiteIndex{}, fmt.Errorf("inspect index %s metadata: %w", indexName, err)
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT seqno, cid, name, [desc], coll, key
+		FROM pragma_index_xinfo(?)
+		ORDER BY seqno
+	`, indexName)
+	if err != nil {
+		return exactSQLiteIndex{}, fmt.Errorf("inspect index %s columns: %w", indexName, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var column exactSQLiteIndexColumn
+		var name, collation sql.NullString
+		if err := rows.Scan(&column.sequence, &column.columnID, &name, &column.descending, &collation, &column.key); err != nil {
+			return exactSQLiteIndex{}, fmt.Errorf("scan index %s columns: %w", indexName, err)
+		}
+		if name.Valid {
+			column.name = name.String
+		}
+		if collation.Valid {
+			column.collation = collation.String
+		}
+		index.columns = append(index.columns, column)
+	}
+	if err := rows.Err(); err != nil {
+		return exactSQLiteIndex{}, fmt.Errorf("iterate index %s columns: %w", indexName, err)
+	}
+	return index, nil
+}
+
+func normalizeExactSQLiteDDL(ddl string) string {
+	var normalized strings.Builder
+	normalized.Grow(len(ddl))
+	var quote byte
+	for i := 0; i < len(ddl); i++ {
+		character := ddl[i]
+		if quote != 0 {
+			normalized.WriteByte(character)
+			if quote == '[' {
+				if character == ']' {
+					quote = 0
+				}
+				continue
+			}
+			if character == quote {
+				if i+1 < len(ddl) && ddl[i+1] == quote {
+					i++
+					normalized.WriteByte(ddl[i])
+					continue
+				}
+				quote = 0
+			}
+			continue
+		}
+		switch character {
+		case '\'', '"', '`', '[':
+			quote = character
+			normalized.WriteByte(character)
+		case ' ', '\n', '\t', '\r', '\f', '\v':
+			continue
+		default:
+			if character >= 'A' && character <= 'Z' {
+				character += 'a' - 'A'
+			}
+			normalized.WriteByte(character)
+		}
+	}
+	return normalized.String()
 }
 
 func repairIssueIDAllocationSchema(ctx context.Context, db *sql.DB) error {
@@ -1704,6 +2115,45 @@ func (c *Client) applyAgentInputDeliveryMigration(ctx context.Context, db *sql.D
 	}
 	if c.agentInputMigrationFailureHook != nil {
 		if err := c.agentInputMigrationFailureHook("after_schema"); err != nil {
+			return fmt.Errorf("migration %s rolled back: %w", id, err)
+		}
+	}
+	if err := validateAgentInputDeliveryBaseSchema(ctx, tx); err != nil {
+		return fmt.Errorf("validate migration %s: %w", id, err)
+	}
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	return nil
+}
+
+func (c *Client) applyAgentInputDeliveryFencingMigration(ctx context.Context, db *sql.DB, id string) error {
+	sqlText, err := loadMigrationSQL("migrations/0053_agent_input_delivery_fencing.sql")
+	if err != nil {
+		return fmt.Errorf("load migration %s: %w", id, err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer tx.Rollback()
+	// Migration 0053 rebuilds the 0052 table. Validate the exact immutable
+	// predecessor, including both indexes, before executing any destructive DDL
+	// so schema drift remains intact and diagnosable on failure.
+	if err := validateAgentInputDeliveryBaseSchema(ctx, tx); err != nil {
+		return fmt.Errorf("validate migration %s predecessor: %w", id, err)
+	}
+	if err := validateAgentInputDeliveryNoInboundDependencies(ctx, tx); err != nil {
+		return fmt.Errorf("validate migration %s predecessor dependencies: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+		return fmt.Errorf("apply migration %s: %w", id, err)
+	}
+	if c.agentInputMigrationFailureHook != nil {
+		if err := c.agentInputMigrationFailureHook("after_fencing_schema"); err != nil {
 			return fmt.Errorf("migration %s rolled back: %w", id, err)
 		}
 	}

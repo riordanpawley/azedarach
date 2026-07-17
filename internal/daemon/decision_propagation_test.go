@@ -952,7 +952,7 @@ func TestDecisionScopeRemovalAndDeletionWithdrawPendingRevision(t *testing.T) {
 	assertPendingDecisionCount(t, ctx, client, second, 0)
 }
 
-func TestDecisionPropagationOutboxRecoversCrashPartialFanoutAndDeliveryFailure(t *testing.T) {
+func TestDecisionPropagationOutboxRecoversFanoutWithoutRetryingAmbiguousDelivery(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
@@ -1028,8 +1028,8 @@ func TestDecisionPropagationOutboxRecoversCrashPartialFanoutAndDeliveryFailure(t
 	if err := restarted.agentInput.RetryPending(ctx, "project", 100); err != nil {
 		t.Fatal(err)
 	}
-	if len(retryRunner.inputPayloads) != 1 || !strings.Contains(retryRunner.inputPayloads[0], "az decision acknowledge") {
-		t.Fatalf("restart retry payloads=%#v, want pending exact-revision wake", retryRunner.inputPayloads)
+	if len(retryRunner.inputPayloads) != 0 {
+		t.Fatalf("restart retried transport-uncertain wake: %#v", retryRunner.inputPayloads)
 	}
 	events, err := client.ListIssueDecisionObservationEvents(ctx, second)
 	if err != nil {
