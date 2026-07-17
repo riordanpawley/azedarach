@@ -102,10 +102,7 @@ func (m Model) attachSessionCmd(issueID string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		if _, err := m.daemonClient.AttachSession(ctx, issueID); err != nil {
-			return sessionErrorMsg{issueID: issueID, err: err}
-		}
-
+		switchedTmux := false
 		if m.tmuxAvailable || strings.TrimSpace(os.Getenv("TMUX")) != "" {
 			targets := []string{
 				issueID,
@@ -126,20 +123,25 @@ func (m Model) attachSessionCmd(issueID string) tea.Cmd {
 					break
 				}
 				if err := m.tmuxClient.SwitchClient(ctx, target); err == nil {
-					return sessionAttachedMsg{issueID: issueID, switchedTmux: true}
+					switchedTmux = true
+					break
 				} else {
 					lastErr = err
 				}
 			}
-			if lastErr != nil {
+			if !switchedTmux && lastErr != nil {
 				return sessionErrorMsg{
 					issueID: issueID,
-					err:     fmt.Errorf("attached in daemon but failed to switch tmux client: %w", lastErr),
+					err:     fmt.Errorf("failed to switch tmux client: %w", lastErr),
 				}
 			}
 		}
 
-		return sessionAttachedMsg{issueID: issueID, switchedTmux: false}
+		if _, err := m.daemonClient.AttachSession(ctx, issueID); err != nil {
+			return sessionErrorMsg{issueID: issueID, err: err}
+		}
+
+		return sessionAttachedMsg{issueID: issueID, switchedTmux: switchedTmux}
 	}
 }
 

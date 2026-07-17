@@ -840,7 +840,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if task == nil {
 			return m, nil
 		}
-		m.beginMutationFeedback(fmt.Sprintf("Attach queued for %s", task.ID))
+		m.beginMutationFeedback(fmt.Sprintf("Attaching to %s", task.ID))
 		return m, m.attachSessionCmd(task.ID.String())
 
 	case keybinds.ActionCreateTask: // Create task

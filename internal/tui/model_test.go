@@ -4400,7 +4400,7 @@ func TestDrillDownBoardAttachKeyTargetsSelectedChild(t *testing.T) {
 	if len(next.toasts) == 0 {
 		t.Fatal("expected attach feedback toast")
 	}
-	if got := next.toasts[len(next.toasts)-1].Message; got != "Attach queued for az-child" {
+	if got := next.toasts[len(next.toasts)-1].Message; got != "Attaching to az-child" {
 		t.Fatalf("toast = %q, want attach feedback for selected child", got)
 	}
 }
@@ -5704,6 +5704,60 @@ func TestAttachSessionCmd_SwitchesTmuxClientWhenAvailable(t *testing.T) {
 	}
 	if got, want := strings.Join(commands[1], " "), "tmux switch-client -t ch-em"; got != want {
 		t.Fatalf("second switch command = %q, want %q", got, want)
+	}
+}
+
+func TestAttachSessionCmd_SwitchesTmuxBeforeDaemonLifecycleSync(t *testing.T) {
+	t.Setenv("TMUX", "client")
+	m := newTestModel()
+	m.currentProject = "Chefy"
+	m.tmuxAvailable = true
+
+	switched := false
+	m.tmuxClient = mockTmuxService{
+		switchFn: func(_ context.Context, target string) error {
+			if target != "az-1" {
+				t.Fatalf("switch target = %q, want az-1", target)
+			}
+			switched = true
+			return nil
+		},
+	}
+
+	switchedBeforeSync := false
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != daemonclient.CommandSessionAttach {
+				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandSessionAttach)
+			}
+			switchedBeforeSync = switched
+			respBody, err := json.Marshal(struct {
+				Output string `json:"output"`
+			}{Output: "attached"})
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				OK:              true,
+				Body:            respBody,
+			}, nil
+		},
+	}
+	m.daemonClient = daemonclient.New(transport)
+
+	msg := m.attachSessionCmd("az-1")()
+	attached, ok := msg.(sessionAttachedMsg)
+	if !ok {
+		t.Fatalf("attachSessionCmd returned %T, want sessionAttachedMsg", msg)
+	}
+	if !attached.switchedTmux {
+		t.Fatal("expected tmux client to switch")
+	}
+	if !switchedBeforeSync {
+		t.Fatal("daemon lifecycle sync ran before tmux client switch")
 	}
 }
 
@@ -7396,7 +7450,7 @@ func TestHandleSelectionAsyncActionsShowImmediateFeedback(t *testing.T) {
 		key       string
 		wantToast string
 	}{
-		{name: "attach", key: "a", wantToast: "Attach queued for az-1"},
+		{name: "attach", key: "a", wantToast: "Attaching to az-1"},
 		{name: "update from base", key: "u", wantToast: "Update from base queued for az-1"},
 		{name: "merge", key: "m", wantToast: "Preparing merge for az-1"},
 		{name: "prepare pr", key: "P", wantToast: "Preparing PR for az-1"},
@@ -7442,8 +7496,8 @@ func TestHandleNormalModeAttachShortcutQueuesSelectedIssueAttach(t *testing.T) {
 	if len(updated.toasts) == 0 {
 		t.Fatal("expected immediate feedback toast")
 	}
-	if got := updated.toasts[len(updated.toasts)-1].Message; got != "Attach queued for az-3" {
-		t.Fatalf("toast = %q, want %q", got, "Attach queued for az-3")
+	if got := updated.toasts[len(updated.toasts)-1].Message; got != "Attaching to az-3" {
+		t.Fatalf("toast = %q, want %q", got, "Attaching to az-3")
 	}
 }
 

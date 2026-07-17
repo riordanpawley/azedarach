@@ -214,7 +214,7 @@ func (m Model) handleMouseAttach(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 func (m Model) attachFocusedTask(taskID string) (tea.Model, tea.Cmd) {
 	m.mouseTap = mouseTapState{}
 	m.mouseDrag = mouseDragState{}
-	m.beginMutationFeedback(fmt.Sprintf("Attach queued for %s", taskID))
+	m.beginMutationFeedback(fmt.Sprintf("Attaching to %s", taskID))
 	return m, m.attachSessionCmd(taskID)
 }
 
