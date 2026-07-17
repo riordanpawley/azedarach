@@ -319,9 +319,9 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 		return item
 	}
 	item.Stages = append(item.Stages, restartStage("replace_preflight", "complete", "exact durable identity still matches live pane", sessionRestartPreflightTimeout))
-	err, timedOut = d.respawnManagedAgentPane(ctx, paneTarget, prepared.worktree, prepared.artifact.Command)
+	err, ambiguous := d.respawnManagedAgentPane(ctx, paneTarget, prepared.worktree, prepared.artifact.Command)
 	if err != nil {
-		if !timedOut {
+		if !ambiguous {
 			prepared.artifact.remove()
 			appendRestartStageFailure(&item, "replace", sessionRestartReplaceTimeout, err, false)
 			return item
@@ -335,19 +335,22 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 		item.Stages = append(item.Stages, restartStage("replace", "complete", "old pane process terminated and replacement launched", sessionRestartReplaceTimeout))
 	}
 	plan.Stage = "observe"
-	if err := reportSessionRestartProgress(ctx, plan); err != nil {
-		appendRestartStageFailure(&item, "persist_observe", sessionRestartPreflightTimeout, err, false)
-		return item
+	observeProgressErr := reportSessionRestartProgress(ctx, plan)
+	if observeProgressErr != nil {
+		item.Stages = append(item.Stages, restartStage("persist_observe", "failed", observeProgressErr.Error(), sessionRestartPreflightTimeout))
 	}
 
-	observeCtx, cancel := context.WithTimeout(ctx, sessionRestartObservationTimeout)
+	// replace_ready was durable before dispatch. Once dispatch is accepted or
+	// ambiguous, caller cancellation and intermediate progress failures cannot
+	// release the stable pane fence before exact-incarnation reconciliation.
+	observeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionRestartObservationTimeout)
 	defer cancel()
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-observeCtx.Done():
-			appendRestartStageFailure(&item, "observe", sessionRestartObservationTimeout, observeCtx.Err(), errors.Is(observeCtx.Err(), context.DeadlineExceeded))
+			appendRestartStageFailure(&item, "observe", sessionRestartObservationTimeout, errors.Join(observeCtx.Err(), observeProgressErr), errors.Is(observeCtx.Err(), context.DeadlineExceeded))
 			return item
 		case <-ticker.C:
 			current, found, loadErr := store.GetManagedAgentIdentity(observeCtx, target.ProjectID, target.SessionID, old.LogicalPaneID)
@@ -404,10 +407,24 @@ func (d *Daemon) respawnManagedAgentPane(ctx context.Context, paneTarget, worktr
 	if d != nil && d.sessionRestartRespawn != nil {
 		return d.sessionRestartRespawn(ctx, paneTarget, worktree, command)
 	}
-	_, err, timedOut := runRestartStage(ctx, sessionRestartReplaceTimeout, func(stageCtx context.Context) (struct{}, error) {
-		return struct{}{}, d.tmux.RespawnPane(stageCtx, paneTarget, worktree, command)
+	return runRestartRespawnStage(ctx, sessionRestartReplaceTimeout, func(stageCtx context.Context) error {
+		return d.tmux.RespawnPane(stageCtx, paneTarget, worktree, command)
 	})
-	return err, timedOut
+}
+
+func runRestartRespawnStage(ctx context.Context, timeout time.Duration, fn func(context.Context) error) (error, bool) {
+	stageCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- fn(stageCtx) }()
+	select {
+	case err := <-result:
+		// CommandContext may return at the same instant its context becomes
+		// terminal. The result arm winning does not prove tmux rejected dispatch.
+		return err, err != nil && stageCtx.Err() != nil
+	case <-stageCtx.Done():
+		return stageCtx.Err(), true
+	}
 }
 
 func (d *Daemon) waitForSessionRestartPromptHandoff(ctx context.Context, handoff sessionPromptHandoff) error {

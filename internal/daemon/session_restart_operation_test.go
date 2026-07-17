@@ -352,8 +352,8 @@ func TestRestartManagedAgentPaneCrossDaemonStaleIdentityRespawnsOnce(t *testing.
 	}
 }
 
-func TestRestartManagedAgentPaneAmbiguousAcceptedResponseRemainsFencedAcrossDaemons(t *testing.T) {
-	ctx := context.Background()
+func TestRestartManagedAgentPaneParentCancellationAfterDispatchRemainsFencedAcrossDaemons(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
 	const project = "project"
 	const session = "az-1"
 	dbPath := filepath.Join(t.TempDir(), "runtime.db")
@@ -366,6 +366,113 @@ func TestRestartManagedAgentPaneAmbiguousAcceptedResponseRemainsFencedAcrossDaem
 		t.Fatal(err)
 	}
 	runner := &exactRestartRunner{store: storeA, project: project, session: session, pid: old.PanePID}
+	newDaemon := func(store *daemonstate.RuntimeStateStore) *Daemon {
+		return &Daemon{cfg: Config{RepoDir: t.TempDir(), CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()), runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{project: store}}
+	}
+	daemonA, daemonB := newDaemon(storeA), newDaemon(storeB)
+	observationEntered := make(chan struct{}, 1)
+	observationRelease := make(chan struct{})
+	accepted := make(chan string, 1)
+	respawnCalls := 0
+	daemonA.sessionRestartRespawn = func(_ context.Context, _, _, command string) (error, bool) {
+		incarnation := regexp.MustCompile(`AZEDARACH_AGENT_INCARNATION='([^']+)'`).FindStringSubmatch(readLaunchScriptFromCommand(t, command))
+		if len(incarnation) != 2 {
+			t.Fatalf("planned incarnation missing from %q", command)
+		}
+		runner.mu.Lock()
+		respawnCalls++
+		runner.listPanesEntered = observationEntered
+		runner.listPanesRelease = observationRelease
+		runner.mu.Unlock()
+		accepted <- incarnation[1]
+		cancel()
+		return context.Canceled, true
+	}
+	daemonB.sessionRestartRespawn = func(context.Context, string, string, string) (error, bool) {
+		runner.mu.Lock()
+		respawnCalls++
+		runner.mu.Unlock()
+		return errors.New("second daemon reached respawn"), false
+	}
+	target := sessionRestartAllTarget{ProjectID: project, SessionID: session, IssueID: "one", Activity: "idle", TmuxReady: true}
+	resultA := make(chan protocol.SessionRestartAllItem, 1)
+	go func() {
+		resultA <- daemonA.restartManagedAgentPaneWithIdentity(ctx, storeA, old, target, protocol.SessionRestartAllRequestBody{}, protocol.SessionRestartAllItem{}, nil)
+	}()
+	planned := <-accepted
+	<-observationEntered
+	resultB := make(chan protocol.SessionRestartAllItem, 1)
+	go func() {
+		resultB <- daemonB.restartManagedAgentPaneWithIdentity(context.Background(), storeB, old, target, protocol.SessionRestartAllRequestBody{}, protocol.SessionRestartAllItem{}, nil)
+	}()
+
+	// Model tmux accepting the first command despite its lost/timed-out reply,
+	// followed by the replacement hook projection. The first daemon still owns
+	// the stable transition lock while this convergence becomes visible.
+	runner.mu.Lock()
+	runner.pid = 101
+	runner.mu.Unlock()
+	if err := storeA.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{ProjectID: project, SessionID: session, LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 101, AgentIncarnation: planned, ObservedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	close(observationRelease)
+	first, second := <-resultA, <-resultB
+	runner.mu.Lock()
+	gotRespawnCalls := respawnCalls
+	runner.mu.Unlock()
+	if !first.Restarted || second.Outcome != "superseded" || !second.Skipped || gotRespawnCalls != 1 {
+		t.Fatalf("first=%+v second=%+v respawn_calls=%d", first, second, gotRespawnCalls)
+	}
+}
+
+func TestRunRestartRespawnStageTreatsResultContextRaceAsAmbiguous(t *testing.T) {
+	for range 100 {
+		ctx, cancel := context.WithCancel(context.Background())
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		result := make(chan struct {
+			err       error
+			ambiguous bool
+		}, 1)
+		go func() {
+			err, ambiguous := runRestartRespawnStage(ctx, time.Hour, func(stageCtx context.Context) error {
+				close(entered)
+				<-release
+				return stageCtx.Err()
+			})
+			result <- struct {
+				err       error
+				ambiguous bool
+			}{err: err, ambiguous: ambiguous}
+		}()
+		<-entered
+		cancel()
+		close(release)
+		got := <-result
+		if !errors.Is(got.err, context.Canceled) || !got.ambiguous {
+			t.Fatalf("result-context race err=%v ambiguous=%t", got.err, got.ambiguous)
+		}
+	}
+}
+
+func TestRestartManagedAgentPaneObserveProgressFailureRemainsFencedAcrossDaemons(t *testing.T) {
+	ctx := daemonops.WithProgressReporter(context.Background(), func(_ context.Context, progress daemonops.Progress) error {
+		if progress.Phase == "session.restart_all.observe" {
+			return errors.New("observe checkpoint unavailable")
+		}
+		return nil
+	})
+	const project, session = "project", "az-1"
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	storeA := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	storeB := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = storeB.Close() })
+	t.Cleanup(func() { _ = storeA.Close() })
+	old := daemonstate.ManagedAgentIdentity{ProjectID: project, SessionID: session, LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old", ObservedAt: time.Now()}
+	if err := storeA.UpsertManagedAgentIdentity(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	runner := &exactRestartRunner{store: storeA, project: project, session: session, pid: 100}
 	newDaemon := func(store *daemonstate.RuntimeStateStore) *Daemon {
 		return &Daemon{cfg: Config{RepoDir: t.TempDir(), CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()), runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{project: store}}
 	}
@@ -404,10 +511,6 @@ func TestRestartManagedAgentPaneAmbiguousAcceptedResponseRemainsFencedAcrossDaem
 	go func() {
 		resultB <- daemonB.restartManagedAgentPaneWithIdentity(ctx, storeB, old, target, protocol.SessionRestartAllRequestBody{}, protocol.SessionRestartAllItem{}, nil)
 	}()
-
-	// Model tmux accepting the first command despite its lost/timed-out reply,
-	// followed by the replacement hook projection. The first daemon still owns
-	// the stable transition lock while this convergence becomes visible.
 	runner.mu.Lock()
 	runner.pid = 101
 	runner.mu.Unlock()
@@ -419,7 +522,13 @@ func TestRestartManagedAgentPaneAmbiguousAcceptedResponseRemainsFencedAcrossDaem
 	runner.mu.Lock()
 	gotRespawnCalls := respawnCalls
 	runner.mu.Unlock()
-	if !first.Restarted || second.Outcome != "superseded" || !second.Skipped || gotRespawnCalls != 1 {
+	foundProgressFailure := false
+	for _, stage := range first.Stages {
+		if stage.Name == "persist_observe" && stage.Status == "failed" && strings.Contains(stage.Message, "checkpoint unavailable") {
+			foundProgressFailure = true
+		}
+	}
+	if !first.Restarted || !foundProgressFailure || second.Outcome != "superseded" || !second.Skipped || gotRespawnCalls != 1 {
 		t.Fatalf("first=%+v second=%+v respawn_calls=%d", first, second, gotRespawnCalls)
 	}
 }
