@@ -408,11 +408,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			if opCmd := m.loadOperationsCmd(); opCmd != nil {
 				cmds = append(cmds, opCmd)
-				if orchestratorCmd := m.loadProjectOrchestratorSnapshotCmd(); orchestratorCmd != nil {
+				if orchestratorCmd := m.scheduleProjectOrchestratorRefreshCmd(); orchestratorCmd != nil {
 					cmds = append(cmds, orchestratorCmd)
 				}
 			} else {
-				if orchestratorCmd := m.loadProjectOrchestratorSnapshotCmd(); orchestratorCmd != nil {
+				if orchestratorCmd := m.scheduleProjectOrchestratorRefreshCmd(); orchestratorCmd != nil {
 					cmds = append(cmds, orchestratorCmd)
 				}
 			}
@@ -548,16 +548,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.scheduleIssuesRefreshCmd(), m.loadBoardViewsCmd())
 
 	case projectOrchestratorLoadedMsg:
+		if msg.seq != m.projectOrchestratorRefreshSeq {
+			return m, nil
+		}
+		m.projectOrchestratorRefreshBusy = false
+		var replay tea.Cmd
+		if m.projectOrchestratorRefreshAgain {
+			m.projectOrchestratorRefreshAgain = false
+			replay = m.scheduleProjectOrchestratorRefreshCmd()
+		}
+		if msg.project.ProjectID != strings.TrimSpace(m.daemonProjectID()) {
+			if replay == nil {
+				replay = m.scheduleProjectOrchestratorRefreshCmd()
+			}
+			return m, replay
+		}
 		project := msg.project
 		if msg.err != nil && project.Snapshot == nil && project.Session == nil && m.projectOrchestrator != nil &&
 			(m.projectOrchestrator.Snapshot != nil || m.projectOrchestrator.Session != nil) {
-			return m, nil
+			return m, replay
 		}
 		m.projectOrchestrator = &project
 		if current, ok := m.overlayStack.Current().(*overlay.ProjectOrchestratorOverlay); ok {
 			current.Sync(projectOrchestratorDetails(project))
 		}
-		return m, nil
+		return m, replay
 
 	case projectOrchestratorActionMsg:
 		if msg.err != nil {
@@ -569,7 +584,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.projectOrchestrator.Session = &result
 		}
 		m.addToast(Toast{Level: ToastSuccess, Message: fmt.Sprintf("Project orchestrator %s: %s", msg.action, msg.result.Disposition), Expires: time.Now().Add(3 * time.Second)})
-		return m, m.loadProjectOrchestratorSnapshotCmd()
+		return m, m.scheduleProjectOrchestratorRefreshCmd()
 
 	case issuesErrorMsg:
 		if msg.refreshSeq != 0 && msg.refreshSeq < m.issueRefreshSeq {
@@ -781,7 +796,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if result.refreshOrchestrator {
 				if _, exists := queuedCmdKeys[daemonStreamCommandOrchestratorRefresh]; !exists {
 					queuedCmdKeys[daemonStreamCommandOrchestratorRefresh] = struct{}{}
-					if cmd := m.loadProjectOrchestratorSnapshotCmd(); cmd != nil {
+					if cmd := m.scheduleProjectOrchestratorRefreshCmd(); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
 				} else {
@@ -1387,7 +1402,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Expires: time.Now().Add(3 * time.Second),
 		})
 		cmds := []tea.Cmd{m.waitForDaemonEventCmd()}
-		if orchestratorCmd := m.loadProjectOrchestratorSnapshotCmd(); orchestratorCmd != nil {
+		if orchestratorCmd := m.scheduleProjectOrchestratorRefreshCmd(); orchestratorCmd != nil {
 			cmds = append(cmds, orchestratorCmd)
 		}
 		if opCmd := m.loadOperationsCmd(); opCmd != nil {

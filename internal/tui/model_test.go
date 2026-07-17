@@ -8254,12 +8254,15 @@ func TestPendingWorktreeCleanupOperationFailureOpensForceConfirmation(t *testing
 
 func TestLoadProjectOrchestratorSnapshotCmd(t *testing.T) {
 	m := newTestModel()
-	if cmd := m.loadProjectOrchestratorSnapshotCmd(); cmd == nil {
+	if cmd := m.scheduleProjectOrchestratorRefreshCmd(); cmd == nil {
 		t.Fatal("current-project orchestrator snapshot command = nil")
 	}
 
-	if cmd := m.loadProjectOrchestratorSnapshotCmd(); cmd == nil {
-		t.Fatal("snapshot refresh must not depend on a legacy mode")
+	if cmd := m.scheduleProjectOrchestratorRefreshCmd(); cmd != nil {
+		t.Fatal("concurrent snapshot refresh was not coalesced")
+	}
+	if !m.projectOrchestratorRefreshAgain {
+		t.Fatal("coalesced snapshot refresh did not request one replay")
 	}
 }
 
@@ -8284,10 +8287,71 @@ func TestProjectOrchestratorRefreshFailurePreservesLastKnownSnapshot(t *testing.
 	m := newTestModel()
 	known := projectOrchestratorSnapshot{ProjectID: m.daemonProjectID(), Snapshot: &protocol.OrchestrationSnapshot{Lifecycle: domain.OrchestratorWorking}}
 	m.projectOrchestrator = &known
-	updatedAny, _ := m.Update(projectOrchestratorLoadedMsg{project: projectOrchestratorSnapshot{ProjectID: m.daemonProjectID()}, err: errors.New("temporary read failure")})
+	m.projectOrchestratorRefreshSeq = 1
+	m.projectOrchestratorRefreshBusy = true
+	updatedAny, _ := m.Update(projectOrchestratorLoadedMsg{project: projectOrchestratorSnapshot{ProjectID: m.daemonProjectID()}, seq: 1, err: errors.New("temporary read failure")})
 	updated := updatedAny.(Model)
 	if updated.projectOrchestrator == nil || updated.projectOrchestrator.Snapshot == nil || updated.projectOrchestrator.Snapshot.Lifecycle != domain.OrchestratorWorking {
 		t.Fatalf("last-known orchestrator snapshot was discarded: %+v", updated.projectOrchestrator)
+	}
+}
+
+func TestProjectOrchestratorRefreshCoalescesBusyRequestsIntoOneReplay(t *testing.T) {
+	m := newTestModel()
+	projectID := m.daemonProjectID()
+	if cmd := m.scheduleProjectOrchestratorRefreshCmd(); cmd == nil {
+		t.Fatal("first refresh command = nil")
+	}
+	if cmd := m.scheduleProjectOrchestratorRefreshCmd(); cmd != nil {
+		t.Fatal("busy refresh scheduled a concurrent command")
+	}
+
+	updatedAny, replay := m.Update(projectOrchestratorLoadedMsg{
+		project: projectOrchestratorSnapshot{
+			ProjectID: projectID,
+			Snapshot:  &protocol.OrchestrationSnapshot{Lifecycle: domain.OrchestratorWorking},
+		},
+		seq: 1,
+	})
+	updated := updatedAny.(Model)
+	if replay == nil {
+		t.Fatal("coalesced refresh did not schedule its pending replay")
+	}
+	if !updated.projectOrchestratorRefreshBusy || updated.projectOrchestratorRefreshAgain || updated.projectOrchestratorRefreshSeq != 2 {
+		t.Fatalf("refresh state after replay: busy=%v again=%v seq=%d", updated.projectOrchestratorRefreshBusy, updated.projectOrchestratorRefreshAgain, updated.projectOrchestratorRefreshSeq)
+	}
+	if updated.projectOrchestrator == nil || updated.projectOrchestrator.Snapshot.Lifecycle != domain.OrchestratorWorking {
+		t.Fatalf("first refresh result was not applied: %+v", updated.projectOrchestrator)
+	}
+
+	staleAny, staleCmd := updated.Update(projectOrchestratorLoadedMsg{
+		project: projectOrchestratorSnapshot{ProjectID: projectID, Snapshot: &protocol.OrchestrationSnapshot{Lifecycle: domain.OrchestratorPaused}},
+		seq:     1,
+	})
+	stale := staleAny.(Model)
+	if staleCmd != nil || stale.projectOrchestrator.Snapshot.Lifecycle != domain.OrchestratorWorking || !stale.projectOrchestratorRefreshBusy {
+		t.Fatalf("stale completion changed current state: cmd=%v snapshot=%+v busy=%v", staleCmd, stale.projectOrchestrator, stale.projectOrchestratorRefreshBusy)
+	}
+}
+
+func TestProjectOrchestratorRefreshRejectsPreviousProjectAndReplaysCurrent(t *testing.T) {
+	m := newTestModel()
+	originalProjectID := m.daemonProjectID()
+	if cmd := m.scheduleProjectOrchestratorRefreshCmd(); cmd == nil {
+		t.Fatal("first refresh command = nil")
+	}
+	m.currentProject = "switched-project"
+
+	updatedAny, replay := m.Update(projectOrchestratorLoadedMsg{
+		project: projectOrchestratorSnapshot{ProjectID: originalProjectID, Snapshot: &protocol.OrchestrationSnapshot{Lifecycle: domain.OrchestratorWorking}},
+		seq:     1,
+	})
+	updated := updatedAny.(Model)
+	if replay == nil || updated.projectOrchestratorRefreshSeq != 2 || !updated.projectOrchestratorRefreshBusy {
+		t.Fatalf("current-project replay state: cmd=%v seq=%d busy=%v", replay, updated.projectOrchestratorRefreshSeq, updated.projectOrchestratorRefreshBusy)
+	}
+	if updated.projectOrchestrator != nil {
+		t.Fatalf("previous-project result was applied: %+v", updated.projectOrchestrator)
 	}
 }
 
@@ -8307,7 +8371,10 @@ func TestOpenProjectOrchestratorOverlayRefreshesCachedSnapshot(t *testing.T) {
 	if !ok || len(batch) != 2 {
 		t.Fatalf("cached orchestrator command = %T with %d commands, want open plus refresh", msg, len(batch))
 	}
-	if _, ok := batch[0]().(tea.BatchMsg); !ok {
-		t.Fatal("first cached orchestrator command was not the overlay open command")
+	if _, ok := m.overlayStack.Current().(*overlay.ProjectOrchestratorOverlay); !ok {
+		t.Fatal("cached orchestrator overlay was not pushed synchronously")
+	}
+	if _, ok := batch[0]().(tea.WindowSizeMsg); !ok {
+		t.Fatalf("first cached orchestrator command = %T, want window size sync", batch[0]())
 	}
 }

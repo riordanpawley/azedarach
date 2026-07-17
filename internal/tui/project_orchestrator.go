@@ -16,7 +16,20 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
-func (m Model) loadProjectOrchestratorSnapshotCmd() tea.Cmd {
+func (m *Model) scheduleProjectOrchestratorRefreshCmd() tea.Cmd {
+	if m.daemonClient == nil {
+		return nil
+	}
+	if m.projectOrchestratorRefreshBusy {
+		m.projectOrchestratorRefreshAgain = true
+		return nil
+	}
+	m.projectOrchestratorRefreshSeq++
+	m.projectOrchestratorRefreshBusy = true
+	return m.loadProjectOrchestratorSnapshotCmd(m.projectOrchestratorRefreshSeq)
+}
+
+func (m Model) loadProjectOrchestratorSnapshotCmd(seq uint64) tea.Cmd {
 	client := m.daemonClient
 	if client == nil {
 		return nil
@@ -39,7 +52,7 @@ func (m Model) loadProjectOrchestratorSnapshotCmd() tea.Cmd {
 			project.Session = &session
 		}
 		project.OrchestrationErr = errors.Join(snapshotErr, sessionErr)
-		return projectOrchestratorLoadedMsg{project: project, err: project.OrchestrationErr}
+		return projectOrchestratorLoadedMsg{project: project, seq: seq, err: project.OrchestrationErr}
 	}
 }
 
@@ -79,9 +92,9 @@ func (m Model) projectOrchestratorActionCmd(project projectOrchestratorSnapshot,
 	}
 }
 
-func (m Model) openProjectOrchestratorOverlay() tea.Cmd {
+func (m *Model) openProjectOrchestratorOverlay() tea.Cmd {
 	project := projectOrchestratorSnapshot{Name: strings.TrimSpace(m.currentProject), Path: strings.TrimSpace(m.activeProjectPath()), ProjectID: strings.TrimSpace(m.daemonProjectID())}
-	refresh := m.loadProjectOrchestratorSnapshotCmd()
+	refresh := m.scheduleProjectOrchestratorRefreshCmd()
 	if m.projectOrchestrator != nil {
 		project = *m.projectOrchestrator
 	}
