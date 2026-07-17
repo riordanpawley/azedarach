@@ -8725,8 +8725,18 @@ func TestSpaceOpensWorkspaceImmediatelyAndRefreshesInBackground(t *testing.T) {
 		t.Fatalf("workspace should open immediately with current projection, got %q", workspace.View())
 	}
 
-	refreshMsg := updated.refreshTaskWorkspaceInBackgroundCmd(issueID)()
-	nextAny, _ := updated.Update(refreshMsg)
+	refreshBatch, ok := updated.refreshTaskWorkspaceInBackgroundCmd(issueID)().(tea.BatchMsg)
+	if !ok {
+		t.Fatal("workspace refresh should batch detail, runtime, and decision requests independently")
+	}
+	if len(refreshBatch) != 3 {
+		t.Fatalf("workspace refresh commands = %d, want 3", len(refreshBatch))
+	}
+	detailMsg := refreshBatch[0]()
+	if _, ok := detailMsg.(refreshTaskWorkspaceResultMsg); !ok {
+		t.Fatalf("first workspace refresh message = %T, want full detail result", detailMsg)
+	}
+	nextAny, _ := updated.Update(detailMsg)
 	next, ok := nextAny.(Model)
 	if !ok {
 		t.Fatalf("next model type = %T, want Model", nextAny)
@@ -8761,8 +8771,107 @@ func TestSpaceOpensWorkspaceImmediatelyAndRefreshesInBackground(t *testing.T) {
 	if len(doneTasks) != 1 || doneTasks[0].ID.String() != issueID {
 		t.Fatalf("done column after workspace refresh = %+v, want %s", doneTasks, issueID)
 	}
-	if got := transport.requests; len(got) != 3 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskGet || got[2] != daemonclient.CommandDecisionLinkList {
+	for _, cmd := range refreshBatch[1:] {
+		msg := cmd()
+		nextAny, _ = next.Update(msg)
+		next = nextAny.(Model)
+	}
+	if got := transport.requests; len(got) != 3 || got[0] != daemonclient.CommandTaskGet || got[1] != daemonclient.CommandRuntimeReconcileIssue || got[2] != daemonclient.CommandDecisionLinkList {
 		t.Fatalf("requests = %v", got)
+	}
+}
+
+func TestTaskWorkspaceDetailRefreshDoesNotWaitForRuntimeReconcile(t *testing.T) {
+	const issueID = "az-1"
+	reconcileStarted := make(chan struct{})
+	reconcileRelease := make(chan struct{})
+	reconcileResult := make(chan tea.Msg, 1)
+	t.Cleanup(func() {
+		select {
+		case <-reconcileRelease:
+		default:
+			close(reconcileRelease)
+		}
+	})
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			switch req.Command {
+			case daemonclient.CommandTaskGet:
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+					Body: mustMarshalFullTaskSnapshot(t, req.ProtocolVersion, 1, req.Meta.ProjectID.String(), []domain.Task{{
+						ID:          issueID,
+						Title:       "Durable detail",
+						Description: "Description loaded while runtime is blocked",
+						Status:      domain.StatusInProgress,
+						Type:        domain.TypeTask,
+					}}),
+				}, nil
+			case daemonclient.CommandRuntimeReconcileIssue:
+				close(reconcileStarted)
+				<-reconcileRelease
+				body, _ := json.Marshal(daemonclient.RuntimeReconcileResult{})
+				return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, OK: true, Body: body}, nil
+			case daemonclient.CommandDecisionLinkList:
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              false,
+					Error:           &protocol.ErrorEnvelope{Code: protocol.ErrorCodeUnavailable, Message: "decision projection unavailable"},
+				}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+				return protocol.ResponseEnvelope{}, nil
+			}
+		},
+	}
+
+	m := newDaemonTestModel(transport)
+	m.tasks = []domain.Task{{ID: issueID, Title: "Summary", Status: domain.StatusInProgress, Type: domain.TypeTask}}
+	m.overlayStack.Push(overlay.NewTaskWorkspaceOverlay(m.tasks[0], m.tasks, nil, 120, 30))
+	refreshBatch, ok := m.refreshTaskWorkspaceInBackgroundCmd(issueID)().(tea.BatchMsg)
+	if !ok || len(refreshBatch) != 3 {
+		t.Fatalf("workspace refresh batch = %T len=%d, want three independent commands", refreshBatch, len(refreshBatch))
+	}
+	refreshingView := ansi.Strip(m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay).View())
+	for _, state := range []string{"Detail:", "Runtime:", "Decisions:", "refreshing"} {
+		if !strings.Contains(refreshingView, state) {
+			t.Fatalf("workspace missing independent refresh state %q: %q", state, refreshingView)
+		}
+	}
+
+	go func() { reconcileResult <- refreshBatch[1]() }()
+	<-reconcileStarted
+
+	detailMsg := refreshBatch[0]()
+	updatedAny, _ := m.Update(detailMsg)
+	updated := updatedAny.(Model)
+	workspace := updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if view := ansi.Strip(workspace.View()); !strings.Contains(view, "Description loaded while runtime is blocked") || !strings.Contains(view, "Detail:") || !strings.Contains(view, "fresh") || !strings.Contains(view, "Runtime:") || !strings.Contains(view, "refreshing") {
+		t.Fatalf("durable detail remained gated by runtime reconcile: %q", view)
+	}
+
+	decisionMsg := refreshBatch[2]()
+	updatedAny, _ = updated.Update(decisionMsg)
+	updated = updatedAny.(Model)
+	if len(updated.toasts) == 0 || !strings.Contains(updated.toasts[len(updated.toasts)-1].Message, "Decision") {
+		t.Fatalf("decision enrichment failure was not surfaced independently: %+v", updated.toasts)
+	}
+	workspace = updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
+	if view := ansi.Strip(workspace.View()); !strings.Contains(view, "Description loaded while runtime is blocked") || !strings.Contains(view, "Decisions:  degraded:") || !strings.Contains(view, "decision projection unavailable") {
+		t.Fatalf("decision failure cleared durable detail: %q", view)
+	}
+
+	close(reconcileRelease)
+	updatedAny, _ = updated.Update(<-reconcileResult)
+	updated = updatedAny.(Model)
+	if view := ansi.Strip(updated.overlayStack.Current().(*overlay.TaskWorkspaceOverlay).View()); !strings.Contains(view, "Runtime:") || !strings.Contains(view, "fresh") {
+		t.Fatalf("runtime refresh completion did not converge independently: %q", view)
 	}
 }
 
@@ -8842,11 +8951,18 @@ func TestTaskWorkspaceRKeyRefreshesCurrentIssue(t *testing.T) {
 		t.Fatal("expected r selection to start issue refresh")
 	}
 
-	refreshedMsg := refreshCmd()
-	refreshedAny, _ := next.Update(refreshedMsg)
-	refreshed, ok := refreshedAny.(Model)
-	if !ok {
-		t.Fatalf("refreshed model type = %T, want Model", refreshedAny)
+	refreshed := next
+	refreshMsgs := teaBatchMessages(refreshCmd())
+	if len(refreshMsgs) != 3 {
+		t.Fatalf("refresh messages = %d, want detail, runtime, and decisions", len(refreshMsgs))
+	}
+	for _, msg := range refreshMsgs {
+		refreshedAny, _ := refreshed.Update(msg)
+		var ok bool
+		refreshed, ok = refreshedAny.(Model)
+		if !ok {
+			t.Fatalf("refreshed model type = %T, want Model", refreshedAny)
+		}
 	}
 	workspace, ok := refreshed.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
 	if !ok {
@@ -8862,7 +8978,7 @@ func TestTaskWorkspaceRKeyRefreshesCurrentIssue(t *testing.T) {
 	if len(refreshed.tasks) != 1 || refreshed.tasks[0].Title != "Task fresh from r" || refreshed.tasks[0].Description != "refreshed description" || refreshed.tasks[0].Status != domain.StatusInReview {
 		t.Fatalf("board task after r refresh = %+v", refreshed.tasks)
 	}
-	if got := transport.requests; len(got) != 3 || got[0] != daemonclient.CommandRuntimeReconcileIssue || got[1] != daemonclient.CommandTaskGet || got[2] != daemonclient.CommandDecisionLinkList {
+	if got := transport.requests; len(got) != 3 || got[0] != daemonclient.CommandTaskGet || got[1] != daemonclient.CommandRuntimeReconcileIssue || got[2] != daemonclient.CommandDecisionLinkList {
 		t.Fatalf("requests = %v", got)
 	}
 }
