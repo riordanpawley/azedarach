@@ -15,6 +15,13 @@ type processIdentity struct {
 	arguments  []string
 }
 
+// processSignalHandle is bound by the kernel to one process incarnation. Its
+// Signal method must never fall back to addressing a process by bare PID.
+type processSignalHandle interface {
+	Signal(syscall.Signal) error
+	Close() error
+}
+
 func captureProcessIdentity(pid int) (processIdentity, bool, error) {
 	if pid <= 0 {
 		return processIdentity{}, false, nil

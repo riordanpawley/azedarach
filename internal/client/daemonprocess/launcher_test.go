@@ -1077,9 +1077,9 @@ func TestLauncherReplaceRefusesUnreadyOwnerIdentityChangeWhileQueued(t *testing.
 		t.Fatal("Replace attempted shutdown after owner identity changed")
 		return nil
 	}
-	launcher.signalProcess = func(int, syscall.Signal) error {
+	launcher.openProcessSignalHandle = func(int) (processSignalHandle, error) {
 		t.Fatal("Replace signaled a changed owner")
-		return nil
+		return nil, nil
 	}
 
 	err := launcher.Replace(context.Background())
@@ -1405,12 +1405,21 @@ func TestRealProcessProfileLauncherReplaceManagedPredecessorExitStages(t *testin
 				return predecessor.cmd.Process.Signal(syscall.SIGUSR1)
 			}
 			var signals []syscall.Signal
-			launcher.signalProcess = func(pid int, signal syscall.Signal) error {
+			launcher.openProcessSignalHandle = func(pid int) (processSignalHandle, error) {
 				if pid != predecessor.cmd.Process.Pid {
-					t.Fatalf("signaled pid = %d, want predecessor %d", pid, predecessor.cmd.Process.Pid)
+					t.Fatalf("opened signal handle for pid = %d, want predecessor %d", pid, predecessor.cmd.Process.Pid)
 				}
-				signals = append(signals, signal)
-				return syscall.Kill(pid, signal)
+				handle, err := openPlatformProcessSignalHandle(pid)
+				if err != nil {
+					return nil, err
+				}
+				return &recordingProcessSignalHandle{
+					signal: func(signal syscall.Signal) error {
+						signals = append(signals, signal)
+						return handle.Signal(signal)
+					},
+					close: handle.Close,
+				}, nil
 			}
 			waitCall := 0
 			launcher.waitForOwnerExit = func(context.Context, processIdentity) error {
@@ -1486,9 +1495,18 @@ func TestRealProcessProfileLauncherReplaceRejectsLockIdentityChangeBeforeKill(t 
 		}
 	}
 	var signals []syscall.Signal
-	launcher.signalProcess = func(pid int, signal syscall.Signal) error {
-		signals = append(signals, signal)
-		return syscall.Kill(pid, signal)
+	launcher.openProcessSignalHandle = func(pid int) (processSignalHandle, error) {
+		handle, err := openPlatformProcessSignalHandle(pid)
+		if err != nil {
+			return nil, err
+		}
+		return &recordingProcessSignalHandle{
+			signal: func(signal syscall.Signal) error {
+				signals = append(signals, signal)
+				return handle.Signal(signal)
+			},
+			close: handle.Close,
+		}, nil
 	}
 	waitCall := 0
 	launcher.waitForOwnerExit = func(context.Context, processIdentity) error {
@@ -1515,6 +1533,89 @@ func TestRealProcessProfileLauncherReplaceRejectsLockIdentityChangeBeforeKill(t 
 	if captureErr != nil || !present {
 		t.Fatalf("predecessor identity after refused KILL = (%+v, %t, %v), want still alive", identity, present, captureErr)
 	}
+}
+
+func TestLauncherSignalCapturedPredecessorBindsSignalBeforeFinalIdentityReuseGap(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
+	predecessor := startManagedLingeringDaemonProcess(t, launcher, "kill")
+	owner, present, err := captureProcessIdentity(predecessor.cmd.Process.Pid)
+	if err != nil || !present {
+		t.Fatalf("capture predecessor = (%+v, %t, %v)", owner, present, err)
+	}
+	command, err := launcher.resolveCommand()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pidOccupant := owner
+	handle := &recordingProcessSignalHandle{bound: owner}
+	launcher.openProcessSignalHandle = func(pid int) (processSignalHandle, error) {
+		if pid != owner.pid {
+			t.Fatalf("opened signal handle for pid %d, want %d", pid, owner.pid)
+		}
+		return handle, nil
+	}
+	launcher.afterPredecessorVerification = func() {
+		pidOccupant = processIdentity{pid: owner.pid, startToken: owner.startToken + "-reused"}
+	}
+	handle.signal = func(signal syscall.Signal) error {
+		if sameProcessIdentity(handle.bound, true, pidOccupant, true) {
+			t.Fatal("test barrier did not replace the PID occupant")
+		}
+		return syscall.ESRCH
+	}
+
+	if err := launcher.signalCapturedPredecessor(context.Background(), owner, command, syscall.SIGTERM); err != nil {
+		t.Fatalf("signalCapturedPredecessor() error = %v, want recycled PID treated as exited", err)
+	}
+	if !reflect.DeepEqual(handle.signals, []syscall.Signal{syscall.SIGTERM}) {
+		t.Fatalf("identity-bound signals = %v, want TERM", handle.signals)
+	}
+	if !handle.closed {
+		t.Fatal("identity-bound signal handle was not closed")
+	}
+}
+
+func TestLauncherSignalCapturedPredecessorFailsClosedOnNilIdentityHandle(t *testing.T) {
+	launcher := NewLauncher(t.TempDir(), filepath.Join(t.TempDir(), "daemon.sock"))
+	launcher.openProcessSignalHandle = func(int) (processSignalHandle, error) {
+		return nil, nil
+	}
+	err := launcher.signalCapturedPredecessor(
+		context.Background(),
+		processIdentity{pid: 42, startToken: "captured"},
+		daemonCommand{},
+		syscall.SIGTERM,
+	)
+	if err == nil || !strings.Contains(err.Error(), "platform returned no handle") {
+		t.Fatalf("signalCapturedPredecessor() error = %v, want nil-handle refusal", err)
+	}
+}
+
+type recordingProcessSignalHandle struct {
+	bound   processIdentity
+	signal  func(syscall.Signal) error
+	close   func() error
+	signals []syscall.Signal
+	closed  bool
+}
+
+func (h *recordingProcessSignalHandle) Signal(signal syscall.Signal) error {
+	h.signals = append(h.signals, signal)
+	if h.signal != nil {
+		return h.signal(signal)
+	}
+	return nil
+}
+
+func (h *recordingProcessSignalHandle) Close() error {
+	h.closed = true
+	if h.close != nil {
+		return h.close()
+	}
+	return nil
 }
 
 func TestRealProcessProfileLauncherReplaceSuccessorStartFailureLeavesRecoverableStoppedState(t *testing.T) {

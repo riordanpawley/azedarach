@@ -45,9 +45,10 @@ type Launcher struct {
 	termExitTimeout              time.Duration
 	killExitTimeout              time.Duration
 	terminateLockOwner           func(lockPath string) error
-	signalProcess                func(int, syscall.Signal) error
+	openProcessSignalHandle      func(int) (processSignalHandle, error)
 	waitForOwnerExit             func(context.Context, processIdentity) error
 	beforePredecessorSignal      func(syscall.Signal)
+	afterPredecessorVerification func()
 	replacementSuccessorVerifier func(daemonCommand) error
 	startProcess                 daemonProcessStarter
 	beforeReplaceLock            func()
@@ -213,22 +214,22 @@ func NewLauncher(repoDir, socketPath string) *Launcher {
 		lockPath = filepath.Join(filepath.Dir(socketPath), "daemon.lock")
 	}
 	return &Launcher{
-		RepoDir:             repoDir,
-		SocketPath:          socketPath,
-		LockPath:            lockPath,
-		Logger:              slog.Default(),
-		openLogFile:         openDaemonLog,
-		waitForReady:        waitForDaemonReady,
-		shutdownWithReason:  gracefulShutdownViaSocketWithReason,
-		replaceReason:       "compatibility-replace",
-		sleepFn:             time.Sleep,
-		processExitTimeout:  10 * time.Second,
+		RepoDir:                 repoDir,
+		SocketPath:              socketPath,
+		LockPath:                lockPath,
+		Logger:                  slog.Default(),
+		openLogFile:             openDaemonLog,
+		waitForReady:            waitForDaemonReady,
+		shutdownWithReason:      gracefulShutdownViaSocketWithReason,
+		replaceReason:           "compatibility-replace",
+		sleepFn:                 time.Sleep,
+		processExitTimeout:      10 * time.Second,
 		processExitContext: context.WithTimeout,
-		terminateLockOwner:  lifecycle.TerminateLockOwner,
-		gracefulExitTimeout: 2 * time.Second,
-		termExitTimeout:     2 * time.Second,
-		killExitTimeout:     2 * time.Second,
-		signalProcess:       syscall.Kill,
+		terminateLockOwner:      lifecycle.TerminateLockOwner,
+		gracefulExitTimeout:     2 * time.Second,
+		termExitTimeout:         2 * time.Second,
+		killExitTimeout:         2 * time.Second,
+		openProcessSignalHandle: openPlatformProcessSignalHandle,
 	}
 }
 
@@ -645,6 +646,25 @@ func (l *Launcher) signalCapturedPredecessor(ctx context.Context, owner processI
 	if l.beforePredecessorSignal != nil {
 		l.beforePredecessorSignal(signal)
 	}
+	openSignalHandle := l.openProcessSignalHandle
+	if openSignalHandle == nil {
+		openSignalHandle = openPlatformProcessSignalHandle
+	}
+	handle, err := openSignalHandle(owner.pid)
+	if err != nil {
+		alive, identityErr := processIdentityAlive(owner)
+		if identityErr == nil && !alive {
+			return nil
+		}
+		if identityErr != nil {
+			return fmt.Errorf("open identity-bound signal handle for daemon predecessor: %w (identity check: %v)", err, identityErr)
+		}
+		return fmt.Errorf("open identity-bound signal handle for daemon predecessor: %w", err)
+	}
+	if handle == nil {
+		return fmt.Errorf("open identity-bound signal handle for daemon predecessor: platform returned no handle")
+	}
+	defer func() { _ = handle.Close() }()
 	if err := l.verifyCapturedPredecessor(ctx, owner, daemonCmd); err != nil {
 		return err
 	}
@@ -655,15 +675,14 @@ func (l *Launcher) signalCapturedPredecessor(ctx context.Context, owner processI
 	if err != nil || !alive {
 		return err
 	}
-	signalProcess := l.signalProcess
-	if signalProcess == nil {
-		signalProcess = syscall.Kill
+	if l.afterPredecessorVerification != nil {
+		l.afterPredecessorVerification()
 	}
 	signalCtx, endSpan := latencytrace.StartSpan(ctx, "dependency", "daemon_process.reap_predecessor",
 		"dependency.operation", strings.ToLower(strings.TrimPrefix(signal.String(), "SIG")),
 	)
 	_ = signalCtx
-	if err := signalProcess(owner.pid, signal); err != nil && !errors.Is(err, syscall.ESRCH) {
+	if err := handle.Signal(signal); err != nil && !errors.Is(err, syscall.ESRCH) {
 		endSpan(err)
 		return fmt.Errorf("signal verified daemon predecessor with %s: %w", signal, err)
 	}
