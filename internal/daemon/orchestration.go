@@ -580,7 +580,9 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 			a.daemon.orchestrationProjectionExported()
 		}
 		if a.daemon.orchestrationSnapshotAuxiliaryRead != nil {
-			a.daemon.orchestrationSnapshotAuxiliaryRead(ctx)
+			if err := a.daemon.orchestrationSnapshotAuxiliaryRead(ctx); err != nil {
+				return protocol.OrchestrationSnapshot{}, fmt.Errorf("load project orchestration auxiliary projection: %w", err)
+			}
 		}
 		materializedTasks = deriveOrchestrationProjectionFacts(projection.Tasks, projection.UnresolvedInteractionIDs, projection.InvestigationAcceptances)
 		projectOpenIssueCount = projection.OpenIssueCount

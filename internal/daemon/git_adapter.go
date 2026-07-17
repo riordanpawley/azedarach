@@ -81,8 +81,8 @@ func (a *gitServiceAdapter) Fetch(ctx context.Context, projectID, worktree, remo
 	if err := a.client.Fetch(ctx, worktree, remote); err != nil {
 		return err
 	}
-	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, false)
-	return nil
+	_, err := a.refreshGitStatusWriteThroughResult(ctx, projectID, worktree, true, false)
+	return err
 }
 
 func (a *gitServiceAdapter) PullBase(ctx context.Context, projectID, worktree, remote, baseBranch string) error {
@@ -99,8 +99,8 @@ func (a *gitServiceAdapter) PullBase(ctx context.Context, projectID, worktree, r
 	if err != nil {
 		return err
 	}
-	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, true)
-	return nil
+	_, err = a.refreshGitStatusWriteThroughResult(ctx, projectID, worktree, true, true)
+	return err
 }
 
 func (a *gitServiceAdapter) Push(ctx context.Context, projectID, worktree, remote, branch string) error {
@@ -109,8 +109,8 @@ func (a *gitServiceAdapter) Push(ctx context.Context, projectID, worktree, remot
 	}); err != nil {
 		return err
 	}
-	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, true)
-	return nil
+	_, err := a.refreshGitStatusWriteThroughResult(ctx, projectID, worktree, true, true)
+	return err
 }
 
 func (a *gitServiceAdapter) Merge(ctx context.Context, projectID, worktree, branch string) (*git.MergeResult, error) {
@@ -121,7 +121,9 @@ func (a *gitServiceAdapter) Merge(ctx context.Context, projectID, worktree, bran
 	}
 	// Merge completion should always trigger an update notification so clients
 	// refresh runtime git signals even when porcelain status stays clean.
-	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, true)
+	if _, refreshErr := a.refreshGitStatusWriteThroughResult(ctx, projectID, worktree, true, true); refreshErr != nil {
+		return nil, refreshErr
+	}
 	return result, nil
 }
 
@@ -157,8 +159,8 @@ func (a *gitServiceAdapter) Checkout(ctx context.Context, projectID, worktree, b
 	}); err != nil {
 		return err
 	}
-	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, false)
-	return nil
+	_, err := a.refreshGitStatusWriteThroughResult(ctx, projectID, worktree, true, false)
+	return err
 }
 
 func (a *gitServiceAdapter) WorktreePathForBranch(ctx context.Context, _ string, branch string) (string, bool, error) {
@@ -171,8 +173,8 @@ func (a *gitServiceAdapter) AbortMerge(ctx context.Context, projectID, worktree 
 	}); err != nil {
 		return err
 	}
-	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, false)
-	return nil
+	_, err := a.refreshGitStatusWriteThroughResult(ctx, projectID, worktree, true, false)
+	return err
 }
 
 func (a *gitServiceAdapter) MergePreflight(ctx context.Context, _ string, req daemonhandlers.GitMergePreflightRequest) (*daemonhandlers.GitMergePreflightResult, error) {
@@ -221,7 +223,9 @@ func (a *gitServiceAdapter) DiscardChanges(ctx context.Context, projectID, workt
 	}); err != nil {
 		return nil, err
 	}
-	a.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, false)
+	if _, err := a.refreshGitStatusWriteThroughResult(ctx, projectID, worktree, true, false); err != nil {
+		return nil, err
+	}
 	return &daemonhandlers.GitDiscardChangesResult{Worktree: worktree}, nil
 }
 
@@ -231,7 +235,9 @@ func (a *gitServiceAdapter) Checkpoint(ctx context.Context, projectID string, re
 	}); err != nil {
 		return nil, err
 	}
-	a.refreshGitStatusWriteThrough(ctx, projectID, req.Worktree, true, false)
+	if _, err := a.refreshGitStatusWriteThroughResult(ctx, projectID, req.Worktree, true, false); err != nil {
+		return nil, err
+	}
 	message := strings.TrimSpace(req.Message)
 	if message == "" {
 		message = git.DefaultCheckpointMessage
@@ -617,10 +623,6 @@ func (a *gitServiceAdapter) refreshGitStatusManual(ctx context.Context, projectI
 	return result.Value, result.Err
 }
 
-func (a *gitServiceAdapter) refreshGitStatusWriteThrough(ctx context.Context, projectID, worktree string, publishOnChange, forcePublish bool) {
-	_, _ = a.refreshGitStatusWriteThroughResult(ctx, projectID, worktree, publishOnChange, forcePublish)
-}
-
 func (a *gitServiceAdapter) refreshGitStatusPorcelainWriteThroughResult(ctx context.Context, projectID, worktree string, publishOnChange, forcePublish bool) (*git.GitStatus, uint64, error) {
 	projectID = normalizeProjectID(projectID)
 	worktree = strings.TrimSpace(worktree)
@@ -650,9 +652,14 @@ func (a *gitServiceAdapter) refreshGitStatusPorcelainWriteThroughResult(ctx cont
 	var rev uint64
 	if a.runtimeProjectionWriter != nil {
 		if issueID != "" {
-			_ = a.runtimeProjectionWriter.PersistWorktreeProjection(statusPersistCtx, projectID, issueID, worktree, branch)
+			if err := a.runtimeProjectionWriter.PersistWorktreeProjection(statusPersistCtx, projectID, issueID, worktree, branch); err != nil {
+				return nil, 0, fmt.Errorf("persist git worktree projection: %w", err)
+			}
 		}
-		rev = a.runtimeProjectionWriter.PersistGitStatusProjectionAndPublish(statusPersistCtx, projectID, issueID, worktree, status, publishOnChange, forcePublish)
+		rev, err = a.runtimeProjectionWriter.PersistGitStatusProjectionAndPublish(statusPersistCtx, projectID, issueID, worktree, status, publishOnChange, forcePublish)
+		if err != nil {
+			return nil, 0, fmt.Errorf("persist and publish git status projection: %w", err)
+		}
 		a.invalidateRuntimeSignalCache(projectID, worktree)
 		return status, rev, nil
 	}
@@ -723,7 +730,9 @@ func (a *gitServiceAdapter) refreshGitStatusWriteThroughResult(ctx context.Conte
 	statusPersistCtx, statusPersistCancel := gitStatusProjectionPersistContext(ctx)
 	defer statusPersistCancel()
 	if a.runtimeProjectionWriter != nil {
-		_ = a.runtimeProjectionWriter.PersistGitStatusProjectionAndPublish(statusPersistCtx, projectID, "", worktree, status, publishOnChange, forcePublish)
+		if _, err := a.runtimeProjectionWriter.PersistGitStatusProjectionAndPublish(statusPersistCtx, projectID, "", worktree, status, publishOnChange, forcePublish); err != nil {
+			return nil, fmt.Errorf("persist and publish git status projection: %w", err)
+		}
 		a.invalidateRuntimeSignalCache(projectID, worktree)
 		return status, nil
 	}

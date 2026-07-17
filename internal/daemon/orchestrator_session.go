@@ -394,7 +394,9 @@ func (d *Daemon) persistStoppedOrchestratorSessionProjection(ctx context.Context
 	if err := writer.PersistSessionProjection(ctx, projectID, projection); err != nil {
 		return fmt.Errorf("persist stopped orchestrator session projection: %w", err)
 	}
-	writer.PublishSessionProjectionEvent(ctx, projectID, meta, projection)
+	if _, err := writer.PublishSessionProjectionEvent(ctx, projectID, meta, projection); err != nil {
+		return fmt.Errorf("publish stopped orchestrator session projection: %w", err)
+	}
 	if err := d.persistObservedRuntimeProjection(ctx, projectID, meta, projection); err != nil {
 		return fmt.Errorf("persist stopped orchestrator runtime observation: %w", err)
 	}

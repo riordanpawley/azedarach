@@ -1545,7 +1545,9 @@ func (a *worktreeServiceAdapter) Create(ctx context.Context, projectID string, i
 			return worktree, baseBranch, nil
 		}
 		if a.runtimeProjectionWriter != nil {
-			a.runtimeProjectionWriter.PersistWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), worktree.IssueID, worktree.Path, worktree.Branch)
+			if _, err := a.runtimeProjectionWriter.PersistWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), worktree.IssueID, worktree.Path, worktree.Branch); err != nil {
+				return nil, "", fmt.Errorf("persist created worktree projection: %w", err)
+			}
 		}
 		a.observeWorktrees(ctx, normalizedProjectID(projectID), []git.Worktree{*worktree}, taskByIssue)
 	}
@@ -1626,7 +1628,9 @@ func finalizeDeletedWorktree(ctx context.Context, projectID, issueID string, man
 		_ = lifecycle.TerminateLockOwner(appconfig.ScopedDaemonLockPath(removedWorktree.Path))
 	}
 	if writer != nil {
-		writer.DeleteWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), issueID)
+		if _, err := writer.DeleteWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), issueID); err != nil {
+			return fmt.Errorf("delete worktree projection: %w", err)
+		}
 	}
 	if manager == nil {
 		return errors.New("worktree manager unavailable for post-delete cache cleanup")

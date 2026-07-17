@@ -27,6 +27,12 @@ type recordingRuntimeProjectionWriter struct {
 	mu                sync.Mutex
 	calls             []string
 	publishedSessions []daemonstate.Session
+	publishErr        error
+}
+
+func (r *recordingRuntimeProjectionWriter) ApplyPhysicalSessionObservationAndPublish(context.Context, string, protocol.Metadata, daemonstate.PhysicalSessionObservation) ([]daemonstate.Session, bool, []uint64, error) {
+	r.record("session.observe+publish")
+	return nil, false, nil, nil
 }
 
 func (r *recordingRuntimeProjectionWriter) record(call string) {
@@ -52,17 +58,17 @@ func (r *recordingRuntimeProjectionWriter) PersistSessionProjection(context.Cont
 	return nil
 }
 
-func (r *recordingRuntimeProjectionWriter) PersistSessionProjectionAndPublish(context.Context, string, protocol.Metadata, daemonstate.Session) uint64 {
+func (r *recordingRuntimeProjectionWriter) PersistSessionProjectionAndPublish(context.Context, string, protocol.Metadata, daemonstate.Session) (uint64, error) {
 	r.record("session.persist+publish")
-	return 1
+	return 1, r.publishErr
 }
 
-func (r *recordingRuntimeProjectionWriter) PublishSessionProjectionEvent(_ context.Context, _ string, _ protocol.Metadata, session daemonstate.Session) uint64 {
+func (r *recordingRuntimeProjectionWriter) PublishSessionProjectionEvent(_ context.Context, _ string, _ protocol.Metadata, session daemonstate.Session) (uint64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, "session.publish")
 	r.publishedSessions = append(r.publishedSessions, session)
-	return 2
+	return 2, r.publishErr
 }
 
 func (r *recordingRuntimeProjectionWriter) ReplaceSessionProjectionSnapshot(context.Context, string, []daemonstate.Session) error {
@@ -75,19 +81,19 @@ func (r *recordingRuntimeProjectionWriter) PersistWorktreeProjection(context.Con
 	return nil
 }
 
-func (r *recordingRuntimeProjectionWriter) PersistWorktreeProjectionAndPublish(context.Context, string, string, string, string) uint64 {
+func (r *recordingRuntimeProjectionWriter) PersistWorktreeProjectionAndPublish(context.Context, string, string, string, string) (uint64, error) {
 	r.record("worktree.persist+publish")
-	return 3
+	return 3, r.publishErr
 }
 
-func (r *recordingRuntimeProjectionWriter) DeleteWorktreeProjectionAndPublish(context.Context, string, string) uint64 {
+func (r *recordingRuntimeProjectionWriter) DeleteWorktreeProjectionAndPublish(context.Context, string, string) (uint64, error) {
 	r.record("worktree.delete+publish")
-	return 4
+	return 4, r.publishErr
 }
 
-func (r *recordingRuntimeProjectionWriter) PublishWorktreeProjectionEvent(context.Context, string, string, string) uint64 {
+func (r *recordingRuntimeProjectionWriter) PublishWorktreeProjectionEvent(context.Context, string, string, string) (uint64, error) {
 	r.record("worktree.publish")
-	return 5
+	return 5, r.publishErr
 }
 
 func (r *recordingRuntimeProjectionWriter) ReplaceWorktreeProjectionSnapshot(context.Context, string, []daemonstate.WorktreeState) error {
@@ -95,14 +101,14 @@ func (r *recordingRuntimeProjectionWriter) ReplaceWorktreeProjectionSnapshot(con
 	return nil
 }
 
-func (r *recordingRuntimeProjectionWriter) PersistGitStatusProjectionAndPublish(context.Context, string, string, string, *git.GitStatus, bool, bool) uint64 {
+func (r *recordingRuntimeProjectionWriter) PersistGitStatusProjectionAndPublish(context.Context, string, string, string, *git.GitStatus, bool, bool) (uint64, error) {
 	r.record("git.persist+publish")
-	return 6
+	return 6, r.publishErr
 }
 
-func (r *recordingRuntimeProjectionWriter) PublishGitStatusProjectionEvent(context.Context, string, string, string, *git.GitStatus) uint64 {
+func (r *recordingRuntimeProjectionWriter) PublishGitStatusProjectionEvent(context.Context, string, string, string, *git.GitStatus) (uint64, error) {
 	r.record("git.publish")
-	return 7
+	return 7, r.publishErr
 }
 
 type statusRunner struct {
@@ -174,7 +180,9 @@ func TestRuntimeProjectionHelpersRouteThroughSingleWriter(t *testing.T) {
 		runtimeProjectionWriter: writer,
 		logger:                  logger,
 	}
-	ga.refreshGitStatusWriteThrough(ctx, projectID, worktree, true, false)
+	if _, err := ga.refreshGitStatusWriteThroughResult(ctx, projectID, worktree, true, false); err != nil {
+		t.Fatalf("refresh git status write-through: %v", err)
+	}
 
 	got := strings.Join(writer.snapshot(), ",")
 	for _, want := range []string{
@@ -187,6 +195,31 @@ func TestRuntimeProjectionHelpersRouteThroughSingleWriter(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("writer calls %q missing %q", got, want)
 		}
+	}
+}
+
+func TestActiveSessionAndGitCallersPropagateProjectionPublicationFailure(t *testing.T) {
+	ctx := context.Background()
+	projectionErr := context.Canceled
+	writer := &recordingRuntimeProjectionWriter{publishErr: projectionErr}
+
+	d := &Daemon{sessionStore: daemonstate.NewStore(), runtimeProjectionWriter: writer}
+	if err := d.recordConflictSessionAttached(ctx, protocol.RequestEnvelope{}, "project", "session", "issue", true); !errors.Is(err, projectionErr) {
+		t.Fatalf("record conflict session error = %v, want context.Canceled", err)
+	}
+
+	runtimeStore := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{ProjectID: "project", IssueID: "issue", Path: "/tmp/worktree", Branch: "branch", UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &gitServiceAdapter{
+		client:                  git.NewClient(statusRunner{status: " M README.md\n"}, slog.Default()),
+		runtimeStateStore:       runtimeStore,
+		runtimeProjectionWriter: writer,
+	}
+	if _, err := adapter.refreshGitStatusWriteThroughResult(ctx, "project", "/tmp/worktree", true, true); !errors.Is(err, projectionErr) {
+		t.Fatalf("git refresh error = %v, want context.Canceled", err)
 	}
 }
 
@@ -225,7 +258,10 @@ func TestRuntimeProjectionWriterPersistsBeforePublishingSessionEvents(t *testing
 	ch, cancel := d.hub.Subscribe(projectID, 0)
 	defer cancel()
 
-	rev := writer.PersistSessionProjectionAndPublish(ctx, projectID, protocol.Metadata{ProjectID: projectID}, session)
+	rev, err := writer.PersistSessionProjectionAndPublish(ctx, projectID, protocol.Metadata{ProjectID: projectID}, session)
+	if err != nil {
+		t.Fatalf("persist and publish session projection: %v", err)
+	}
 	if rev != 1 {
 		t.Fatalf("revision = %d, want 1", rev)
 	}
@@ -286,6 +322,107 @@ func TestRuntimeProjectionWriterWaitHonorsCancellation(t *testing.T) {
 		t.Fatalf("canceled runtime writer wait error = %v, want context.Canceled", err)
 	}
 	releaseHolder()
+}
+
+func TestRuntimeProjectionPersistAndPublishMethodsReturnCanceledAdmission(t *testing.T) {
+	ctx := context.Background()
+	runtimeStore := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	d := &Daemon{
+		cfg:                 Config{RepoDir: ".", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		hub:                 publish.NewHub(8, 4, slog.New(slog.NewTextHandler(io.Discard, nil))),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{".": runtimeStore},
+	}
+	writer := newRuntimeProjectionWriter(d)
+	if err := writer.PersistWorktreeProjection(ctx, "project", "issue", "/tmp/worktree", "branch"); err != nil {
+		t.Fatal(err)
+	}
+	releaseHolder, err := writer.lockProjectionWriter(ctx, "project", "background.projection_refresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseHolder()
+
+	tests := []struct {
+		name string
+		run  func(context.Context) (uint64, error)
+	}{
+		{name: "session persist and publish", run: func(callCtx context.Context) (uint64, error) {
+			return writer.PersistSessionProjectionAndPublish(callCtx, "project", protocol.Metadata{}, daemonstate.Session{ID: "session", IssueID: "issue"})
+		}},
+		{name: "session publish", run: func(callCtx context.Context) (uint64, error) {
+			return writer.PublishSessionProjectionEvent(callCtx, "project", protocol.Metadata{}, daemonstate.Session{ID: "session", IssueID: "issue"})
+		}},
+		{name: "worktree persist and publish", run: func(callCtx context.Context) (uint64, error) {
+			return writer.PersistWorktreeProjectionAndPublish(callCtx, "project", "issue", "/tmp/worktree", "branch")
+		}},
+		{name: "worktree delete and publish", run: func(callCtx context.Context) (uint64, error) {
+			return writer.DeleteWorktreeProjectionAndPublish(callCtx, "project", "issue")
+		}},
+		{name: "worktree publish", run: func(callCtx context.Context) (uint64, error) {
+			return writer.PublishWorktreeProjectionEvent(callCtx, "project", "issue", "/tmp/worktree")
+		}},
+		{name: "git persist and publish", run: func(callCtx context.Context) (uint64, error) {
+			return writer.PersistGitStatusProjectionAndPublish(callCtx, "project", "issue", "/tmp/worktree", &git.GitStatus{HasChanges: true}, true, true)
+		}},
+		{name: "git publish", run: func(callCtx context.Context) (uint64, error) {
+			return writer.PublishGitStatusProjectionEvent(callCtx, "project", "issue", "/tmp/worktree", &git.GitStatus{HasChanges: true})
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			callCtx, cancel := context.WithCancel(ctx)
+			callCtx = withRuntimeProjectionWriterWaitHookForTest(callCtx, func(_, _ string) { cancel() })
+			revision, callErr := test.run(callCtx)
+			if revision != 0 || !errors.Is(callErr, context.Canceled) {
+				t.Fatalf("result = (%d, %v), want (0, context.Canceled)", revision, callErr)
+			}
+		})
+	}
+}
+
+func TestPhysicalSessionObservationCancellationLeavesRetryablePublication(t *testing.T) {
+	ctx := context.Background()
+	runtimeStore := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	d := &Daemon{
+		cfg:                 Config{RepoDir: ".", Logger: logger},
+		hub:                 publish.NewHub(8, 4, logger),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{".": runtimeStore},
+	}
+	const projectID = "project"
+	if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{ID: "physical", IssueID: "issue", State: daemonstate.SessionStateRunning}); err != nil {
+		t.Fatal(err)
+	}
+	writer := newRuntimeProjectionWriter(d)
+	releaseHolder, err := writer.lockProjectionWriter(ctx, projectID, "background.projection_refresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := daemonstate.PhysicalSessionObservation{ProjectID: projectID, SessionID: "physical", ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: time.Now().UTC()}
+	callCtx, cancel := context.WithCancel(ctx)
+	callCtx = withRuntimeProjectionWriterWaitHookForTest(callCtx, func(_, _ string) { cancel() })
+	_, applied, revisions, callErr := writer.ApplyPhysicalSessionObservationAndPublish(callCtx, projectID, protocol.Metadata{}, observation)
+	if applied || len(revisions) != 0 || !errors.Is(callErr, context.Canceled) {
+		t.Fatalf("canceled observation = (applied %t, revisions %v, error %v), want false, empty, context.Canceled", applied, revisions, callErr)
+	}
+	physical, err := runtimeStore.ListPhysicalSessionObservations(ctx, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(physical) != 0 {
+		t.Fatalf("physical observations after canceled admission = %v, want none", physical)
+	}
+
+	releaseHolder()
+	_, applied, revisions, err = writer.ApplyPhysicalSessionObservationAndPublish(ctx, projectID, protocol.Metadata{}, observation)
+	if err != nil || !applied || len(revisions) != 1 || revisions[0] == 0 {
+		t.Fatalf("retried observation = (applied %t, revisions %v, error %v), want applied publication", applied, revisions, err)
+	}
+	if current := d.currentRevision(projectID); current != revisions[0] {
+		t.Fatalf("current revision after retried publication = %d, want %d", current, revisions[0])
+	}
 }
 
 func TestRuntimeProjectionWriterReleasesLockBeforeReadModelRefresh(t *testing.T) {
@@ -448,8 +585,8 @@ func TestRuntimeProjectionWriterCoalescesProjectionBurstsByIssue(t *testing.T) {
 	ch, cancel := d.hub.Subscribe(projectID, 0)
 	defer cancel()
 
-	if rev := writer.PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktree, branch); rev != 0 {
-		t.Fatalf("scheduled worktree revision = %d, want 0 before delayed publish", rev)
+	if rev, err := writer.PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktree, branch); err != nil || rev != 0 {
+		t.Fatalf("scheduled worktree result = (%d, %v), want (0, nil) before delayed publish", rev, err)
 	}
 	for i := 1; i <= 8; i++ {
 		status := &git.GitStatus{
@@ -460,8 +597,8 @@ func TestRuntimeProjectionWriterCoalescesProjectionBurstsByIssue(t *testing.T) {
 			GitAheadCount:  i + 2,
 			GitBehindCount: i + 3,
 		}
-		if rev := writer.PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktree, status, true, true); rev != 0 {
-			t.Fatalf("scheduled git revision %d = %d, want 0 before delayed publish", i, rev)
+		if rev, err := writer.PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktree, status, true, true); err != nil || rev != 0 {
+			t.Fatalf("scheduled git result %d = (%d, %v), want (0, nil) before delayed publish", i, rev, err)
 		}
 		// Keep the burst active for longer than one coalescing window while each
 		// update still arrives well within that window. Publication must wait for

@@ -1634,6 +1634,7 @@ func TestProjectOrchestrationSnapshotDoesNotHoldIssueMutationLockWhileRuntimeWri
 		t.Fatal(err)
 	}
 	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	d.snapshotAdmissionContext = context.WithCancel
 	writer := newRuntimeProjectionWriter(d)
 	releaseWriter, err := writer.lockProjectionWriter(ctx, "proj", "background.projection_refresh")
 	if err != nil {
@@ -1642,13 +1643,14 @@ func TestProjectOrchestrationSnapshotDoesNotHoldIssueMutationLockWhileRuntimeWri
 
 	snapshotWaiting := make(chan struct{})
 	var waitOnce sync.Once
-	d.orchestrationSnapshotAuxiliaryRead = func(waitCtx context.Context) {
+	d.orchestrationSnapshotAuxiliaryRead = func(waitCtx context.Context) error {
 		waitOnce.Do(func() { close(snapshotWaiting) })
 		unlock, lockErr := writer.lockProjectionWriter(waitCtx, "proj", "orchestration.snapshot")
 		if lockErr != nil {
-			return
+			return lockErr
 		}
 		unlock()
+		return nil
 	}
 	snapshotDone := make(chan error, 1)
 	go func() {
@@ -1686,6 +1688,8 @@ func TestProjectOrchestrationSnapshotDoesNotHoldIssueMutationLockWhileRuntimeWri
 	}
 
 	blockedBySnapshot := ""
+	mutationFailure := ""
+	var blockedMutationDone <-chan error
 	for _, mutation := range mutations {
 		mutationWaited := make(chan struct{}, 1)
 		mutationCtx := issues.WithMutationLockWaitHookForTest(ctx, func(_, _ string) {
@@ -1696,25 +1700,83 @@ func TestProjectOrchestrationSnapshotDoesNotHoldIssueMutationLockWhileRuntimeWri
 		select {
 		case err := <-mutationDone:
 			if err != nil {
-				t.Fatalf("concurrent %s: %v", mutation.name, err)
+				mutationFailure = fmt.Sprintf("concurrent %s: %v", mutation.name, err)
 			}
 		case <-mutationWaited:
 			blockedBySnapshot = mutation.name
+			blockedMutationDone = mutationDone
 		}
 		if blockedBySnapshot != "" {
-			releaseWriter()
-			if err := <-mutationDone; err != nil {
-				t.Fatalf("blocked %s: %v", mutation.name, err)
-			}
-			if err := <-snapshotDone; err != nil {
-				t.Fatalf("project snapshot: %v", err)
-			}
-			t.Fatalf("project snapshot held the issue mutation lock while waiting for the runtime projection writer; blocked %s", blockedBySnapshot)
+			break
+		}
+		if mutationFailure != "" {
+			break
 		}
 	}
 	releaseWriter()
-	if err := <-snapshotDone; err != nil {
-		t.Fatalf("project snapshot: %v", err)
+	snapshotErr := <-snapshotDone
+	if blockedMutationDone != nil {
+		if err := <-blockedMutationDone; err != nil {
+			mutationFailure = fmt.Sprintf("blocked %s: %v", blockedBySnapshot, err)
+		}
+	}
+	if blockedBySnapshot != "" {
+		t.Fatalf("project snapshot held the issue mutation lock while waiting for the runtime projection writer; blocked %s", blockedBySnapshot)
+	}
+	if mutationFailure != "" {
+		t.Fatal(mutationFailure)
+	}
+	if snapshotErr != nil {
+		t.Fatalf("project snapshot: %v", snapshotErr)
+	}
+}
+
+func TestProjectOrchestrationSnapshotMapsCanceledRuntimeWriterAdmissionToUnavailable(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	if _, err := client.Create(ctx, issues.CreateTaskParams{Title: "Candidate", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen}); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	writer := newRuntimeProjectionWriter(d)
+	releaseWriter, err := writer.lockProjectionWriter(ctx, "proj", "background.projection_refresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	writerWaited := make(chan struct{})
+	d.snapshotAdmissionContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+		admissionCtx, cancel := context.WithCancel(parent)
+		admissionCtx = withRuntimeProjectionWriterWaitHookForTest(admissionCtx, func(waiterOperation, holderOperation string) {
+			if waiterOperation != "orchestration.snapshot" || holderOperation != "background.projection_refresh" {
+				t.Errorf("runtime writer attribution waiter=%q holder=%q", waiterOperation, holderOperation)
+			}
+			close(writerWaited)
+			cancel()
+		})
+		return admissionCtx, cancel
+	}
+	d.orchestrationSnapshotAuxiliaryRead = func(waitCtx context.Context) error {
+		unlock, lockErr := writer.lockProjectionWriter(waitCtx, "proj", "orchestration.snapshot")
+		if lockErr != nil {
+			return lockErr
+		}
+		unlock()
+		return nil
+	}
+
+	body := mustMarshal(t, protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
+	resp, handleErr := d.handleOrchestrationSnapshot(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, Command: protocol.CommandOrchestrationSnapshot, Meta: protocol.Metadata{ProjectID: "proj"}, Body: body})
+	<-writerWaited
+	releaseWriter()
+	if handleErr != nil {
+		t.Fatal(handleErr)
+	}
+	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeUnavailable || !resp.Error.Retryable {
+		t.Fatalf("canceled runtime-writer admission response = %+v, want retryable unavailable", resp.Error)
 	}
 }
 
@@ -2272,15 +2334,16 @@ func TestProjectOrchestrationRealBuilderRemainsCoherentDuringProjectionChurn(t *
 	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}}
 	mutateAfterExport := false
 	mutation := 0
-	d.orchestrationSnapshotAuxiliaryRead = func(context.Context) {
+	d.orchestrationSnapshotAuxiliaryRead = func(context.Context) error {
 		if !mutateAfterExport {
-			return
+			return nil
 		}
 		mutateAfterExport = false
 		mutation++
 		if _, createErr := writer.Create(ctx, issues.CreateTaskParams{Title: fmt.Sprintf("Churn %d", mutation), Description: "Revision churn", Acceptance: "Recorded", Type: domain.TypeTask, Priority: domain.P4, Status: domain.StatusOpen}); createErr != nil {
-			t.Fatal(createErr)
+			return createErr
 		}
+		return nil
 	}
 	for i := range 25 {
 		mutateAfterExport = true
