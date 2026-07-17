@@ -2489,27 +2489,16 @@ func TestSessionStartRetriesTransientWorktreeProjectionWriterContention(t *testi
 		t.Fatalf("warm runtime projection store: %v", err)
 	}
 
-	lockDB, err := sql.Open("sqlite", "file:"+runtimeDBPath)
-	if err != nil {
-		t.Fatalf("open concurrent runtime writer: %v", err)
-	}
-	t.Cleanup(func() { _ = lockDB.Close() })
-	lockConn, err := lockDB.Conn(ctx)
-	if err != nil {
-		t.Fatalf("reserve concurrent runtime writer connection: %v", err)
-	}
-	t.Cleanup(func() { _ = lockConn.Close() })
-	if _, err := lockConn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		t.Fatalf("begin concurrent runtime write: %v", err)
-	}
-	lockReleaseResult := make(chan error, 1)
-	go func() {
-		time.Sleep(250 * time.Millisecond)
-		_, releaseErr := lockConn.ExecContext(context.Background(), `COMMIT`)
-		lockReleaseResult <- releaseErr
-	}()
-	t.Cleanup(func() {
-		_, _ = lockConn.ExecContext(context.Background(), `ROLLBACK`)
+	projectionAttempts := 0
+	ctx = daemonstate.WithSQLiteWriteAttemptHookForTest(ctx, func(operation string, attempt int) error {
+		if operation != "upsert_worktree_state" {
+			return nil
+		}
+		projectionAttempts = attempt
+		if attempt == 1 {
+			return codedSQLiteDaemonTestError{code: 517}
+		}
+		return nil
 	})
 
 	d := &Daemon{
@@ -2554,8 +2543,8 @@ func TestSessionStartRetriesTransientWorktreeProjectionWriterContention(t *testi
 	if !resp.OK || resp.Error != nil {
 		t.Fatalf("session start response = %+v, want success after transient contention", resp)
 	}
-	if err := <-lockReleaseResult; err != nil {
-		t.Fatalf("commit concurrent runtime write: %v", err)
+	if projectionAttempts != 2 {
+		t.Fatalf("worktree projection attempts = %d, want 2 after injected transient contention", projectionAttempts)
 	}
 	if worktreeRunner.worktreeRemoved {
 		t.Fatal("worktree cleanup ran despite successful projection retry")
