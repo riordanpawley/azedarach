@@ -251,7 +251,10 @@ type validationLeaseEvidenceFile struct {
 // report lives in a disposable validation worktree. It is deliberately bounded
 // because validation evidence is stored inline in the durable request ledger.
 func FailureSummary(failures []Failure) string {
-	const maxBytes = 32 * 1024
+	const (
+		maxBytes         = 32 * 1024
+		maxFailureOutput = 4 * 1024
+	)
 	var summary strings.Builder
 	for i, failure := range failures {
 		name := strings.TrimSpace(failure.Package)
@@ -260,22 +263,18 @@ func FailureSummary(failures []Failure) string {
 		}
 		entry := "FAIL " + name
 		if output := strings.TrimSpace(failure.Output); output != "" {
+			if len(output) > maxFailureOutput {
+				output = "[failure output truncated]\n..." + strings.ToValidUTF8(output[len(output)-maxFailureOutput:], "")
+			}
 			entry += "\n" + output
 		}
 		entry += "\n"
 		remaining := maxBytes - summary.Len()
-		if remaining <= 0 {
-			break
-		}
 		if len(entry) > remaining {
-			summary.WriteString(entry[:remaining])
-			summary.WriteString("\n[failure summary truncated]\n")
+			fmt.Fprintf(&summary, "[failure summary truncated; %d failure(s) omitted]\n", len(failures)-i)
 			break
 		}
 		summary.WriteString(entry)
-		if i == len(failures)-1 {
-			break
-		}
 	}
 	return strings.TrimSpace(summary.String())
 }

@@ -169,6 +169,15 @@ if [[ "${1:-}" == "validation" && "${2:-}" == "heartbeat" ]]; then
   exit 0
 fi
 if [[ "${1:-}" == "validation" && "${2:-}" == "finish" ]]; then
+  if [[ -n "${FAKE_AZ_FINISH_EVIDENCE_FILE:-}" ]]; then
+    while (($# > 0)); do
+      if [[ "$1" == "--evidence-json" ]]; then
+        printf '%s\n' "$2" >"$FAKE_AZ_FINISH_EVIDENCE_FILE"
+        break
+      fi
+      shift
+    done
+  fi
   exit 0
 fi
 echo "stub az: unsupported arguments: $*" >&2
@@ -219,6 +228,18 @@ env "${fresh_validation_environment[@]}" \
   "$fixture/scripts/with-machine-validation-lease" --class aggregate --scope repository --purpose push_gate --profile repository-push -- \
   sh -c 'touch "$1"' sh "$repository_payload"
 test -e "$repository_payload"
+
+failure_evidence="$fixture/failure-evidence.json"
+if env "${fresh_validation_environment[@]}" \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  FAKE_AZ_FINISH_EVIDENCE_FILE="$failure_evidence" \
+  "$fixture/scripts/with-machine-validation-lease" --class aggregate --scope repository --purpose push_gate --profile repository-push -- \
+  sh -c 'printf %s "{\"failure_summary\":\"FAIL make-verify::consumer-check\\nexact consumer failure\"}" >"$AZEDARACH_VALIDATION_EVIDENCE_FILE"; exit 1'; then
+  echo "failing validation payload unexpectedly passed" >&2
+  exit 1
+fi
+grep -q 'FAIL make-verify::consumer-check' "$failure_evidence"
+grep -q 'exact consumer failure' "$failure_evidence"
 
 # The remaining lease-control fixtures exercise the controlled-capacity path.
 # Ordinary ticket development bypasses this wrapper entirely.

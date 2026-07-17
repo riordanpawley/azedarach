@@ -302,7 +302,9 @@ func candidateValidationOutput(stdout, stderr string) string {
 }
 
 func boundedCandidateValidationDetail(detail string) string {
-	const maxRunes = 4096
+	// Keep the same practical envelope as durable validation failure summaries
+	// so task.close can surface every failed test retained by test-timing.
+	const maxRunes = 32 * 1024
 	detail = strings.TrimSpace(detail)
 	runes := []rune(detail)
 	if len(runes) <= maxRunes {

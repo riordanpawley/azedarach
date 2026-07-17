@@ -3111,12 +3111,8 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge %s into %s returned no result", source.Branch, targetBranch)
 	}
 	if !merge.Success {
-		if attempt, ok := failedCandidateValidationAttempt(merge.ValidationAttempts); ok {
-			details := strings.TrimSpace(attempt.Message)
-			if details == "" {
-				details = "candidate validation gate failed without diagnostic output"
-			}
-			return taskCloseIntegrationResult{Requested: true, ValidationAttempts: append([]domain.IntegrationCandidateValidationAttempt(nil), merge.ValidationAttempts...)}, fmt.Errorf("candidate validation for revision %s failed: %s", attempt.CandidateHead, details)
+		if message, ok := candidateValidationFailureMessage(merge.ValidationAttempts); ok {
+			return taskCloseIntegrationResult{Requested: true, ValidationAttempts: append([]domain.IntegrationCandidateValidationAttempt(nil), merge.ValidationAttempts...)}, errors.New(message)
 		}
 		details := strings.TrimSpace(merge.Message)
 		if len(merge.ConflictFiles) > 0 {
@@ -3151,6 +3147,18 @@ func failedCandidateValidationAttempt(attempts []domain.IntegrationCandidateVali
 		}
 	}
 	return domain.IntegrationCandidateValidationAttempt{}, false
+}
+
+func candidateValidationFailureMessage(attempts []domain.IntegrationCandidateValidationAttempt) (string, bool) {
+	attempt, ok := failedCandidateValidationAttempt(attempts)
+	if !ok {
+		return "", false
+	}
+	details := strings.TrimSpace(attempt.Message)
+	if details == "" {
+		details = "candidate validation gate failed without diagnostic output"
+	}
+	return fmt.Sprintf("candidate validation for revision %s failed: %s", attempt.CandidateHead, details), true
 }
 
 func (d *Daemon) canonicalIntegrationValidationAttempts(ctx context.Context, targetWorktree, targetOID string) ([]domain.IntegrationCandidateValidationAttempt, error) {
