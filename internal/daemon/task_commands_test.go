@@ -6571,11 +6571,11 @@ func TestTaskCloseIntegrationOriginBaseRetryUsesExactReceiptAfterSourceRemoval(t
 	}
 	sourceBranch := "riordan/" + taskID + "/origin-retry"
 	receipt := taskCloseIntegrationReceipt{
-		ProjectID: projectID, SourceBranch: sourceBranch, TargetBranch: "origin/preview", SourceOID: "source-oid", TargetOID: "target-oid",
+		ProjectID: projectID, SourceBranch: sourceBranch, TargetBranch: "origin/preview", TargetID: "base", ConfiguredBaseTarget: true, SourceOID: "source-oid", TargetOID: "target-oid",
 	}
 	if _, err := issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
 		Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close", SourceCommand: "integrate-before-close",
-		Payload: map[string]any{"project_id": receipt.ProjectID, "source_branch": receipt.SourceBranch, "target_branch": receipt.TargetBranch, "source_oid": receipt.SourceOID, "target_oid": receipt.TargetOID},
+		Payload: map[string]any{"project_id": receipt.ProjectID, "source_branch": receipt.SourceBranch, "target_branch": receipt.TargetBranch, "target_id": receipt.TargetID, "configured_base_target": receipt.ConfiguredBaseTarget, "source_oid": receipt.SourceOID, "target_oid": receipt.TargetOID},
 	}); err != nil {
 		t.Fatalf("seed integration receipt: %v", err)
 	}
@@ -7158,7 +7158,7 @@ func TestTaskCloseNoChangesIntegrationResultCarriesRecoveredCanonicalValidation(
 	}
 	targetOID := runDaemonTestGitOutput(t, repo, "rev-parse", "HEAD")
 	d := &Daemon{git: client}
-	result, err := d.taskCloseNoChangesIntegrationResult(ctx, repo, "feature", "main", sourceOID, targetOID, true)
+	result, err := d.taskCloseNoChangesIntegrationResult(ctx, repo, "base", "feature", "main", sourceOID, targetOID, true)
 	if err != nil {
 		t.Fatalf("taskCloseNoChangesIntegrationResult() error = %v", err)
 	}
@@ -7168,6 +7168,154 @@ func TestTaskCloseNoChangesIntegrationResultCarriesRecoveredCanonicalValidation(
 	attempt := result.ValidationAttempts[0]
 	if attempt.CandidateHead != targetOID || attempt.Status != domain.IntegrationCandidateValidationPassed || !attempt.Canonical {
 		t.Fatalf("validation attempt = %+v, want canonical exact target %s", attempt, targetOID)
+	}
+}
+
+func TestTaskCloseIntegrationReceiptRequiresExactFreshTypedTarget(t *testing.T) {
+	tests := []struct {
+		name                  string
+		receipt               taskCloseIntegrationReceipt
+		currentTargetID       string
+		currentConfiguredBase bool
+		wantError             string
+	}{
+		{
+			name:            "matching non-base target",
+			receipt:         taskCloseIntegrationReceipt{TargetID: "parent-a", TargetBranch: "shared", ConfiguredBaseTarget: false},
+			currentTargetID: "parent-a",
+		},
+		{
+			name:            "same branch different non-base target",
+			receipt:         taskCloseIntegrationReceipt{TargetID: "parent-a", TargetBranch: "shared", ConfiguredBaseTarget: false},
+			currentTargetID: "parent-b",
+			wantError:       "target identity changed",
+		},
+		{
+			name:            "base retargeted to non-base with reused branch",
+			receipt:         taskCloseIntegrationReceipt{TargetID: "base", TargetBranch: "shared", ConfiguredBaseTarget: true},
+			currentTargetID: "parent-a",
+			wantError:       "target identity changed",
+		},
+		{
+			name:                  "non-base retargeted to base with reused branch",
+			receipt:               taskCloseIntegrationReceipt{TargetID: "parent-a", TargetBranch: "shared", ConfiguredBaseTarget: false},
+			currentTargetID:       "base",
+			currentConfiguredBase: true,
+			wantError:             "target identity changed",
+		},
+		{
+			name:                  "legacy receipt missing target identity",
+			receipt:               taskCloseIntegrationReceipt{TargetBranch: "shared", ConfiguredBaseTarget: true},
+			currentTargetID:       "base",
+			currentConfiguredBase: true,
+			wantError:             "missing authoritative typed target identity",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateTaskCloseIntegrationReceiptTarget(tt.receipt, tt.currentTargetID, tt.currentConfiguredBase)
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("validateTaskCloseIntegrationReceiptTarget() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("validateTaskCloseIntegrationReceiptTarget() error = %v, want %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestTaskCloseRemovedWorktreeRejectsStaleReceiptAfterSameBranchAncestorRetarget(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-retarget"
+	repoDir := t.TempDir()
+	issuesClient := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	parentA, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Original ancestor", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatalf("create original ancestor: %v", err)
+	}
+	parentB, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Current ancestor", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatalf("create current ancestor: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Retargeted child", Type: domain.TypeTask, Status: domain.StatusInReview, ParentID: &parentB})
+	if err != nil {
+		t.Fatalf("create retargeted child: %v", err)
+	}
+	sharedBranch := "riordan/" + parentB + "/shared-parent-branch"
+	childBranch := "riordan/" + childID + "/retargeted"
+	missingChildWorktree := filepath.Join(t.TempDir(), "removed-child")
+	currentParentWorktree := filepath.Join(t.TempDir(), "parent-b")
+	for _, projection := range []daemonstate.WorktreeState{
+		{ProjectID: projectID, IssueID: childID, Path: missingChildWorktree, Branch: childBranch, UpdatedAt: time.Now().UTC()},
+		{ProjectID: projectID, IssueID: parentB, Path: currentParentWorktree, Branch: sharedBranch, UpdatedAt: time.Now().UTC()},
+	} {
+		if err := runtimeStore.UpsertWorktreeState(ctx, projection); err != nil {
+			t.Fatalf("seed worktree projection for %s: %v", projection.IssueID, err)
+		}
+	}
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, childID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close", SourceCommand: "integrate-before-close",
+		Payload: map[string]any{
+			"project_id": projectID, "source_branch": childBranch, "target_branch": sharedBranch,
+			"target_id": parentA, "configured_base_target": false, "integrated": true,
+			"base_oid": "parent-a-before", "source_oid": "child-source", "target_oid": "parent-a-result",
+		},
+	}); err != nil {
+		t.Fatalf("seed stale ancestor integration receipt: %v", err)
+	}
+
+	var ancestryReuseReached atomic.Bool
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		if slices.Contains(args, "merge-base") {
+			ancestryReuseReached.Store(true)
+		}
+		switch {
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
+			return fmt.Sprintf("worktree %s\nHEAD parent-b-head\nbranch refs/heads/%s\n\n", currentParentWorktree, sharedBranch), nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == currentParentWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == childBranch+"^{commit}":
+			return "", fmt.Errorf("unknown revision")
+		case len(args) >= 5 && args[0] == "-C" && args[1] == currentParentWorktree && args[2] == "rev-list":
+			return "", fmt.Errorf("unknown revision")
+		default:
+			return "", fmt.Errorf("unexpected git command: %s", strings.Join(args, " "))
+		}
+	}}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg:                       Config{RepoDir: repoDir, BaseBranch: "main", Logger: logger},
+		git:                       git.NewClient(runner, logger),
+		issueClientsByProject:     map[string]*issues.Client{projectID: issuesClient},
+		runtimeStoresByProject:    map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager},
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject:           func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore { return runtimeStore },
+		logger:                      logger,
+		pollInterval:                time.Hour,
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, childID, true, true, "")
+	if err == nil || !strings.Contains(err.Error(), "target identity changed: recorded="+parentA+" current="+parentB) {
+		t.Fatalf("integrateTaskBeforeClose() = (%+v, %v), want stale same-branch target identity rejection", result, err)
+	}
+	if ancestryReuseReached.Load() {
+		t.Fatal("stale receipt reached ancestry reuse before typed target rejection")
 	}
 }
 

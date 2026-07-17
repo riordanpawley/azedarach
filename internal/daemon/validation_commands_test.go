@@ -298,14 +298,14 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 		publicationEvidenceCache: map[string]domain.PublicationEvidenceSnapshot{}, issueClientsByProject: map[string]*issues.Client{"project": issueClient},
 	}
 	integration := taskCloseIntegrationResult{
-		Requested: true, Integrated: true, ConfiguredBaseTarget: true, SourceBranch: "feature", TargetBranch: "main",
+		Requested: true, Integrated: true, ConfiguredBaseTarget: true, TargetID: "base", SourceBranch: "feature", TargetBranch: "main",
 		BaseOID: baseOID, SourceOID: sourceOID, TargetOID: targetOID, ValidationAttempts: merge.ValidationAttempts,
 	}
 	// Model the durable state after integration receipt succeeds but publication
 	// evidence fails. The retry sees source already contained by target.
 	err = d.persistTaskCloseIntegrationReceipt(ctx, "project", issueID, repoDir, integration)
 	require.NoError(t, err)
-	recovered, found, err := d.recoverPublishedTaskCloseIntegration(ctx, "project", issueID, repoDir, "feature", "main", sourceOID, targetOID)
+	recovered, found, err := d.recoverPublishedTaskCloseIntegration(ctx, "project", issueID, repoDir, "base", "feature", "main", sourceOID, targetOID)
 	require.NoError(t, err)
 	require.True(t, found)
 	require.True(t, recovered.NoChanges)
@@ -352,7 +352,7 @@ func TestTaskClosePublicationDistinguishesTypedBaseFromNonBaseComposition(t *tes
 	}
 	nonBase := taskCloseIntegrationResult{
 		Requested: true, Integrated: true, ConfiguredBaseTarget: false,
-		SourceBranch: "child", TargetBranch: "parent", BaseOID: "base", SourceOID: "source", TargetOID: "result",
+		TargetID: "parent-issue", SourceBranch: "child", TargetBranch: "parent", BaseOID: "base", SourceOID: "source", TargetOID: "result",
 	}
 	require.NoError(t, d.persistTaskCloseIntegrationPublication(ctx, "project", issueID, repoDir, nonBase))
 	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted}, Limit: 10})
@@ -362,6 +362,7 @@ func TestTaskClosePublicationDistinguishesTypedBaseFromNonBaseComposition(t *tes
 
 	base := nonBase
 	base.ConfiguredBaseTarget = true
+	base.TargetID = "base"
 	base.SourceBranch = "root"
 	base.TargetBranch = "main"
 	err = d.persistTaskCloseIntegrationPublication(ctx, "project", issueID, repoDir, base)
