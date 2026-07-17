@@ -366,7 +366,7 @@ func (d *Daemon) recordPhysicalSessionObservation(ctx context.Context, meta prot
 	if observedState == daemonstate.SessionStateStopped {
 		activity, activitySource = "", ""
 	}
-	changed, applied, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+	_, applied, revisions, err := d.runtimeProjectionStateWriter().ApplyPhysicalSessionObservationAndPublish(ctx, projectID, meta, daemonstate.PhysicalSessionObservation{
 		ProjectID: projectID, SessionID: sessionID, ObservedState: observedState,
 		Activity: activity, ActivitySource: activitySource, UpdatedAt: now,
 	})
@@ -375,11 +375,6 @@ func (d *Daemon) recordPhysicalSessionObservation(ctx context.Context, meta prot
 	}
 	if !applied {
 		return nil, nil
-	}
-	revisions := make([]uint64, 0, len(changed))
-	writer := d.runtimeProjectionStateWriter()
-	for _, row := range changed {
-		revisions = appendRevision(revisions, writer.PublishSessionProjectionEvent(ctx, projectID, meta, row))
 	}
 	return revisions, nil
 }

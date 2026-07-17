@@ -24,75 +24,13 @@ import (
 const projectReadMaterializerBatchSize = 500
 
 type suppressSynchronousProjectReadRuntimeRefreshKey struct{}
-type projectReadUpdateWaitHookKey struct{}
-
-type projectReadUpdateLock struct {
-	once   sync.Once
-	token  chan struct{}
-	mu     sync.RWMutex
-	holder string
-}
-
-func (l *projectReadUpdateLock) init() {
-	l.once.Do(func() {
-		l.token = make(chan struct{}, 1)
-		l.token <- struct{}{}
-	})
-}
-
-func (l *projectReadUpdateLock) currentHolder() string {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	return l.holder
-}
-
-func (l *projectReadUpdateLock) acquire(ctx context.Context, operation string) (string, error) {
-	l.init()
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case <-l.token:
-		if err := ctx.Err(); err != nil {
-			l.token <- struct{}{}
-			return "", err
-		}
-		l.mu.Lock()
-		l.holder = operation
-		l.mu.Unlock()
-		return "", nil
-	default:
-	}
-	holder := l.currentHolder()
-	if hook, _ := ctx.Value(projectReadUpdateWaitHookKey{}).(func(string, string)); hook != nil {
-		hook(operation, holder)
-	}
-	select {
-	case <-ctx.Done():
-		return holder, ctx.Err()
-	case <-l.token:
-		if err := ctx.Err(); err != nil {
-			l.token <- struct{}{}
-			return holder, err
-		}
-		l.mu.Lock()
-		l.holder = operation
-		l.mu.Unlock()
-		return holder, nil
-	}
-}
-
-func (l *projectReadUpdateLock) release() {
-	l.mu.Lock()
-	l.holder = ""
-	l.mu.Unlock()
-	l.token <- struct{}{}
-}
 
 func withProjectReadUpdateWaitHookForTest(ctx context.Context, hook func(string, string)) context.Context {
-	return context.WithValue(ctx, projectReadUpdateWaitHookKey{}, hook)
+	return withContextOperationLockWaitHookForTest(ctx, hook)
+}
+
+func withProjectReadUpdateQueuedHookForTest(ctx context.Context, hook func(string)) context.Context {
+	return withContextOperationLockQueuedHookForTest(ctx, hook)
 }
 
 func withoutSynchronousProjectReadRuntimeRefresh(ctx context.Context) context.Context {
@@ -107,7 +45,7 @@ func withoutSynchronousProjectReadRuntimeRefresh(ctx context.Context) context.Co
 // revision and is never written back to the project database.
 type projectReadMaterializer struct {
 	mu          sync.RWMutex
-	updateMu    projectReadUpdateLock
+	updateMu    contextOperationLock
 	projectID   string
 	authority   *ProjectionDeltaAuthority
 	hydrate     func(context.Context, []domain.Task) ([]domain.Task, error)

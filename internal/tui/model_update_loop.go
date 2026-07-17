@@ -281,6 +281,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if msg.visibilitySet && msg.visibilityGen != m.childVisibilityGeneration {
+			if msg.eventsCancel != nil {
+				msg.eventsCancel()
+			}
+			return m, m.finishIssuesRefreshCmd(msg.refreshSeq)
+		}
 		currentParentID := strings.TrimSpace(m.drillDownParentID)
 		messageParentID := strings.TrimSpace(msg.scopedParentID)
 		if (currentParentID != "" || messageParentID != "") && !naming.IssueIDsEqual(messageParentID, currentParentID) {

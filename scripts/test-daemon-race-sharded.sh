@@ -49,12 +49,22 @@ if [ "${AZEDARACH_DAEMON_RACE_INNER:-0}" != "1" ]; then
 		# Coalesce repeated terminal signals until the supervised process
 		# group has been escalated and reaped.
 		trap '' INT TERM HUP
+		if [ -n "${AZEDARACH_DAEMON_RACE_TEST_CANCEL_READY_FIFO:-}" ]; then
+			printf 'ready\n' >"$AZEDARACH_DAEMON_RACE_TEST_CANCEL_READY_FIFO"
+		fi
+		if [ -n "${AZEDARACH_DAEMON_RACE_TEST_CANCEL_RELEASE_FIFO:-}" ]; then
+			read -r _ <"$AZEDARACH_DAEMON_RACE_TEST_CANCEL_RELEASE_FIFO"
+		fi
 		if [ -n "$timeout_pid" ]; then
 			# GNU timeout owns a distinct process group unless --foreground is
 			# used. Cancel that whole group, then escalate independently of its
 			# aggregate-expiry-only --kill-after timer.
 			kill -TERM "-$timeout_pid" 2>/dev/null || kill -TERM "$timeout_pid" 2>/dev/null || true
-			sleep "$cancel_grace"
+			if [ -n "${AZEDARACH_DAEMON_RACE_TEST_TERM_ACK_FIFO:-}" ]; then
+				read -r _ <"$AZEDARACH_DAEMON_RACE_TEST_TERM_ACK_FIFO"
+			else
+				sleep "$cancel_grace"
+			fi
 			kill -KILL "-$timeout_pid" 2>/dev/null || kill -KILL "$timeout_pid" 2>/dev/null || true
 			wait "$timeout_pid" 2>/dev/null || true
 		fi
@@ -75,8 +85,8 @@ if [ "${AZEDARACH_DAEMON_RACE_INNER:-0}" != "1" ]; then
 	set +e
 	"$timeout_cmd" --signal=TERM --kill-after="$kill_after" "$aggregate_timeout" \
 		env AZEDARACH_DAEMON_RACE_INNER=1 AZEDARACH_DAEMON_RACE_TMPDIR="$tmpdir" "$0" "$@" &
-	if [ -n "${AZEDARACH_DAEMON_RACE_SUPERVISOR_START_DELAY:-}" ]; then
-		sleep "$AZEDARACH_DAEMON_RACE_SUPERVISOR_START_DELAY"
+	if [ -n "${AZEDARACH_DAEMON_RACE_TEST_SUPERVISOR_RELEASE_FIFO:-}" ]; then
+		while ! read -r _ <"$AZEDARACH_DAEMON_RACE_TEST_SUPERVISOR_RELEASE_FIFO"; do :; done
 	fi
 	timeout_pid=$!
 	if [ "$pending_cancel_status" -ne 0 ]; then

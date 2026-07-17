@@ -2642,12 +2642,18 @@ func TestHandleTaskListIncludesDependenciesOnlyWhenRequested(t *testing.T) {
 		t.Fatalf("full dependencies = %+v, want blocker %s", fullTask.Dependencies, blockerID)
 	}
 
+	showChildren := true
+	boardBody, err := json.Marshal(protocol.BoardSnapshotRequestBody{ShowChildren: &showChildren})
+	if err != nil {
+		t.Fatalf("marshal board child-visibility override: %v", err)
+	}
 	boardResp, err := d.handleBoardFetch(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-list-deps-board",
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 		Command:         "board.fetch",
+		Body:            boardBody,
 	})
 	if err != nil {
 		t.Fatalf("handle board.fetch error: %v", err)
@@ -5645,7 +5651,7 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 	if resp.OK || resp.Error == nil {
 		t.Fatalf("first handleTaskClose response = %+v, want cleanup failure", resp)
 	}
-	for _, want := range []string{"phase runtime_projection_repair", "Integration already completed", sourceBranch, "landed on main", "cleanup/status remains", "Next:"} {
+	for _, want := range []string{"phase worktree_cleanup", "Integration already completed", sourceBranch, "landed on main", "cleanup/status remains", "Next:"} {
 		if !strings.Contains(resp.Error.Message, want) {
 			t.Fatalf("first close error = %q, missing %q", resp.Error.Message, want)
 		}

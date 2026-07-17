@@ -661,7 +661,7 @@ func (m Model) boardVisibleTasks(tasks []domain.Task) []domain.Task {
 	}
 	if m.boardProjection.View.ID != "" {
 		filter := *m.editor.GetFilter()
-		filter.HideEpicChildren = false
+		filter.HideEpicChildren = !m.boardProjection.View.Options.ShowChildren
 		return m.applySessionTreeFilter(filter.Apply(tasks))
 	}
 
@@ -1324,6 +1324,10 @@ func (m *Model) clearDrillDown() {
 
 func (m *Model) useDefaultDrillDownBoardView() {
 	view := domain.DefaultBoardView()
+	// Drill-down snapshots are already scoped to the selected parent's direct
+	// children. Opt this transient projection in without changing the persisted
+	// Default view's child-hidden semantics.
+	view.Options.ShowChildren = true
 	m.boardView = view
 	m.boardColumns = nil
 	m.boardOrdered = nil

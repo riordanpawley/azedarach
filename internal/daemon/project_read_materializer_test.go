@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -37,6 +38,27 @@ type watchErrorProjectionStore struct {
 
 func (s watchErrorProjectionStore) WatchProjectionDeltas(ctx context.Context, projectID string, after uint64, limit int) ([]domain.ProjectionDelta, uint64, error) {
 	return s.watch(ctx, projectID, after, limit)
+}
+
+type watchBarrierProjectionStore struct {
+	projectionDeltaStore
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *watchBarrierProjectionStore) WatchProjectionDeltas(ctx context.Context, projectID string, after uint64, limit int) ([]domain.ProjectionDelta, uint64, error) {
+	s.once.Do(func() {
+		close(s.entered)
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+		}
+	})
+	if err := ctx.Err(); err != nil {
+		return nil, 0, &domain.ProjectionCanceledError{Cause: err}
+	}
+	return s.projectionDeltaStore.WatchProjectionDeltas(ctx, projectID, after, limit)
 }
 
 func TestProjectReadMaterializerTransientWatchErrorRetainsLastGoodWithoutLegacyExport(t *testing.T) {
@@ -508,29 +530,39 @@ func TestProjectReadMaterializerWatchBlocksAndWakesAcrossClients(t *testing.T) {
 	if err := reader.OpenProjectionDeltaStore(); err != nil {
 		t.Fatal(err)
 	}
-	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(reader), nil)
+	watchStore := &watchBarrierProjectionStore{
+		projectionDeltaStore: reader,
+		entered:              make(chan struct{}),
+		release:              make(chan struct{}),
+	}
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(watchStore), nil)
 	if err := materializer.bootstrap(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	advanced := make(chan protocol.MaterializedSnapshotMetadata, 1)
-	go materializer.run(ctx, func(metadata protocol.MaterializedSnapshotMetadata) { advanced <- metadata })
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		materializer.run(ctx, func(metadata protocol.MaterializedSnapshotMetadata) { advanced <- metadata })
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	<-watchStore.entered
 	select {
 	case <-advanced:
 		t.Fatal("watch returned without source advancement")
-	case <-time.After(75 * time.Millisecond):
+	default:
 	}
+	close(watchStore.release)
 	if _, err := writer.Create(context.Background(), issues.CreateTaskParams{Title: "cross-client", Type: domain.TypeTask}); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case metadata := <-advanced:
-		if metadata.DeliveryCursor == 0 {
-			t.Fatalf("watch metadata = %+v", metadata)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("materializer watch did not wake on cross-client source advancement")
+	metadata := <-advanced
+	if metadata.DeliveryCursor == 0 {
+		t.Fatalf("watch metadata = %+v", metadata)
 	}
 }
 
@@ -650,9 +682,9 @@ func TestProjectReadMaterializerRuntimeRefreshWaitIsCancelableAndAttributed(t *t
 	waitObserved := make(chan struct{})
 	waitCtx, cancelWait := context.WithCancel(context.Background())
 	waitCtx = contextWithRuntimeProjectionWriterOperation(waitCtx, "orchestration.snapshot")
-	waitCtx = withProjectReadUpdateWaitHookForTest(waitCtx, func(waiterOperation, holderOperation string) {
-		if waiterOperation != "orchestration.snapshot" || holderOperation != "background.projection_refresh" {
-			t.Errorf("refresh attribution waiter=%q holder=%q", waiterOperation, holderOperation)
+	waitCtx = withProjectReadUpdateQueuedHookForTest(waitCtx, func(waiterOperation string) {
+		if waiterOperation != "orchestration.snapshot" {
+			t.Errorf("refresh queued waiter=%q", waiterOperation)
 		}
 		close(waitObserved)
 	})

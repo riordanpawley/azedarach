@@ -912,7 +912,9 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 	defer func() {
 		if rollbackIssueLifecycle && (err != nil || !resp.OK) {
 			if worktreeProjectionPersisted && !startedWorktreeReused && startedWorktreePath != "" {
-				d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID)
+				if _, projectionErr := d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID); projectionErr != nil && d.cfg.Logger != nil {
+					d.cfg.Logger.Warn("rollback session-start worktree projection failed", "project_id", cmd.ProjectID, "issue_id", cmd.IssueID, "error", projectionErr)
+				}
 				_ = d.cleanupNewWorktreeAfterInitFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, startedWorktreePath, startedWorktreeReused)
 			}
 			d.rollbackSessionStartIssueLifecycle(ctx, issueClient, cmd.IssueID, originalIssueStatus)
@@ -1058,7 +1060,9 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist worktree runtime projection for %s: %v%s%s", cmd.IssueID, err, cleanupNote, worktreeCleanupNote)), nil
 	}
 	worktreeProjectionPersisted = true
-	projectionWriter.PublishWorktreeProjectionEvent(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path)
+	if _, err := projectionWriter.PublishWorktreeProjectionEvent(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("publish worktree runtime projection for %s: %v", cmd.IssueID, err)), nil
+	}
 	sessionInitMarker := sessionInitReadyMarker{}
 	if cmd.StartWork {
 		var markerErr error
@@ -1327,7 +1331,9 @@ func (d *Daemon) compensateSessionStartFailureWithSelector(ctx context.Context, 
 			alignTransient = true
 			writer := d.runtimeProjectionStateWriter()
 			for _, row := range rows {
-				writer.PublishSessionProjectionEvent(ctx, projectID, req.Meta, row)
+				if _, publishErr := writer.PublishSessionProjectionEvent(ctx, projectID, req.Meta, row); publishErr != nil {
+					note += fmt.Sprintf("; failed-start session compensation publication also failed: %v", publishErr)
+				}
 			}
 		}
 	}
@@ -2141,7 +2147,7 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	if _, err := d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueIDString, worktreePath, worktreeBranch); err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist conflict worktree projection: %v", err)), nil
+		return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("persist conflict worktree projection: %v", err)), nil
 	}
 
 	canonicalSessionID := naming.CanonicalSessionIDForIssue(d.sessionNamingScope(projectID), issueID).String()
@@ -3688,7 +3694,9 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 			continue
 		}
 
-		d.ensureSessionWorktreeProjection(ctx, projectID, issueID)
+		if err := d.ensureSessionWorktreeProjection(ctx, projectID, issueID); err != nil {
+			return result, fmt.Errorf("ensure session worktree projection for %s: %w", issueID, err)
+		}
 
 		switch session.State {
 		case daemonstate.SessionStateStarting:
@@ -3839,27 +3847,27 @@ func (d *Daemon) sessionSnapshotForReconcile(ctx context.Context, projectID stri
 	return d.sessionRuntimeStateStoreIfConfigured(projectID).ListSessionIntentStates(ctx, projectID)
 }
 
-func (d *Daemon) ensureSessionWorktreeProjection(ctx context.Context, projectID, issueID string) {
+func (d *Daemon) ensureSessionWorktreeProjection(ctx context.Context, projectID, issueID string) error {
 	if d == nil || d.worktreeRuntimeStateStore(projectID) == nil {
-		return
+		return nil
 	}
 	projectID = protocol.NormalizeProjectID(projectID)
 	issueID = strings.TrimSpace(issueID)
 	if issueID == "" {
-		return
+		return nil
 	}
 	if _, found, err := d.worktreeRuntimeStateStore(projectID).GetWorktreeStateByIssueID(ctx, projectID, issueID); err == nil && found {
-		return
+		return nil
 	}
 
 	repoDir := strings.TrimSpace(d.resolveRepoDirForProjectLocked(projectID))
 	if repoDir == "" {
-		return
+		return nil
 	}
 	worktreePath := filepath.Join(filepath.Dir(repoDir), fmt.Sprintf("%s-%s", filepath.Base(repoDir), issueID))
 	info, err := os.Stat(worktreePath)
 	if err != nil || !info.IsDir() {
-		return
+		return nil
 	}
 
 	branch := ""
@@ -3870,10 +3878,7 @@ func (d *Daemon) ensureSessionWorktreeProjection(ctx context.Context, projectID,
 	}
 	rev, err := d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktreePath, branch)
 	if err != nil {
-		if d.cfg.Logger != nil {
-			d.cfg.Logger.Warn("backfill session worktree projection failed", "project_id", projectID, "issue_id", issueID, "error", err)
-		}
-		return
+		return err
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info(
@@ -3885,6 +3890,7 @@ func (d *Daemon) ensureSessionWorktreeProjection(ctx context.Context, projectID,
 			"revision", rev,
 		)
 	}
+	return nil
 }
 
 func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID string, tasks []domain.Task) []domain.Task {

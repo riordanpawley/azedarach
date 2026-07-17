@@ -212,6 +212,8 @@ type Daemon struct {
 	orchestrationSnapshotBuild           orchestrationSnapshotBuilder
 	snapshotAdmissionContext             func(context.Context) (context.Context, context.CancelFunc)
 	orchestrationProjectionExported      func()
+	orchestrationSnapshotPrepared        func(uint64, []string)
+	orchestrationSnapshotAuxiliaryRead   func(context.Context) error
 	taskGraphOperationList               func(context.Context, daemonops.Query) ([]daemonops.Record, error)
 	taskGraphUnresolvedInteractionIDs    func(context.Context, string) (map[string]struct{}, error)
 	taskGraphObservationEvents           func(context.Context, string, []string) issues.ProjectIssueObservationCapture
@@ -464,7 +466,9 @@ func New(cfg Config) *Daemon {
 		return active
 	}
 	gitService.onStatusUpdate = func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) {
-		d.runtimeProjectionStateWriter().PublishGitStatusProjectionEvent(ctx, projectID, issueID, worktree, status)
+		if _, err := d.runtimeProjectionStateWriter().PublishGitStatusProjectionEvent(ctx, projectID, issueID, worktree, status); err != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("publish observed git status projection failed", "project_id", projectID, "issue_id", issueID, "error", err)
+		}
 	}
 	noticeService := daemonnotices.NewService(daemonnotices.ServiceConfig{
 		Repository:   daemonnotices.New(cfg.RepoDir, cfg.Logger),
@@ -520,7 +524,9 @@ func New(cfg Config) *Daemon {
 		startWorktreeAsyncInit: d.startWorktreeAsyncInitCommands,
 		logger:                 cfg.Logger,
 		onProjectionUpdate: func(ctx context.Context, projectID, issueID, path string) {
-			d.runtimeProjectionStateWriter().PublishWorktreeProjectionEvent(ctx, projectID, issueID, path)
+			if _, err := d.runtimeProjectionStateWriter().PublishWorktreeProjectionEvent(ctx, projectID, issueID, path); err != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("publish observed worktree projection failed", "project_id", projectID, "issue_id", issueID, "error", err)
+			}
 		},
 		onWorktreeObserved: func(_ context.Context, projectID, _ string, path string) {
 			gitService.refreshGitStatusAsync(projectID, path)
@@ -1351,8 +1357,8 @@ func (d *Daemon) applyTypedSessionLifecycleTransition(ctx context.Context, req p
 			session = persisted
 		}
 	}
-	writer.PublishSessionProjectionEvent(ctx, projectID, req.Meta, session)
-	return nil
+	_, err = writer.PublishSessionProjectionEvent(ctx, projectID, req.Meta, session)
+	return err
 }
 
 func (d *Daemon) sessionLifecycleTransitionNeeded(projectID, sessionID, issueID string, state daemonstate.SessionState) bool {
@@ -1529,11 +1535,11 @@ func (d *Daemon) recoverInterruptedDeferredWorktreeCleanup(ctx context.Context, 
 		task, err := issueClient.GetWithRuntime(ctx, projectID, taskID)
 		if err == nil && !task.IssueClosed() {
 			if fallbackPath != "" {
-				if _, persistErr := d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, fallbackPath, fallbackBranch); persistErr != nil {
+				if _, err := d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, fallbackPath, fallbackBranch); err != nil {
 					return interruptedOperationRecovery{}, false
 				}
 			} else {
-				if persistErr := d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, taskID); persistErr != nil {
+				if err := d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, taskID); err != nil {
 					return interruptedOperationRecovery{}, false
 				}
 			}

@@ -425,6 +425,9 @@ func (d *Daemon) buildGlobalSnapshot(ctx context.Context, body protocol.GlobalSn
 		return nil, globalSnapshotRequestError{err: fmt.Errorf("resolve global view: %w", err)}
 	}
 	view := record.View
+	if body.ShowChildren != nil {
+		view.Options.ShowChildren = *body.ShowChildren
+	}
 	scope := record.Scope
 	if body.Scope.Kind != "" {
 		scope = body.Scope

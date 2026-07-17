@@ -334,6 +334,7 @@ func (o *BoardViewOverlay) renderDetails(width int) string {
 		o.styles.Title.Render(string(view.ID)),
 		o.styles.MenuItemDisabled.Render(viewLayoutDescription(view.Layout)),
 		fmt.Sprintf("hide empty columns: %t", view.Options.HideEmptyColumns),
+		fmt.Sprintf("show children: %t", view.Options.ShowChildren),
 		"",
 	}
 	if o.views[o.cursor].BuiltIn {
@@ -391,8 +392,8 @@ func (o *BoardViewOverlay) beginAdvancedEdit() {
 	o.mode, o.errorText = boardViewAdvancedEdit, ""
 }
 
-var configuratorFields = []string{"Title", "Layout", "Filters", "Grouping", "Ordered sorting", "Hide empty"}
-var globalConfiguratorFields = []string{"Title", "Layout", "Project scope", "Scope projects", "Filters", "Grouping", "Ordered sorting", "Hide empty"}
+var configuratorFields = []string{"Title", "Layout", "Filters", "Grouping", "Ordered sorting", "Hide empty", "Show children"}
+var globalConfiguratorFields = []string{"Title", "Layout", "Project scope", "Scope projects", "Filters", "Grouping", "Ordered sorting", "Hide empty", "Show children"}
 var globalScopePresets = []string{"All projects", "Selected projects", "Current project"}
 var filterPresets = []string{"All issues", "Open only", "Active only", "Review ready"}
 var groupingPresets = []string{"Workflow columns", "Single list"}
@@ -493,6 +494,8 @@ func (o *BoardViewOverlay) adjustConfigurator(delta int) {
 		c.sortChanged = true
 	case 5:
 		c.view.Options.HideEmptyColumns = !c.view.Options.HideEmptyColumns
+	case 6:
+		c.view.Options.ShowChildren = !c.view.Options.ShowChildren
 	}
 }
 
@@ -532,9 +535,9 @@ func (o *BoardViewOverlay) configuredView() domain.BoardView {
 func (o *BoardViewOverlay) renderConfigurator(width, height int) string {
 	view := o.configuredView()
 	labels := o.configuratorFieldLabels()
-	values := []string{o.configurator.title.View(), viewLayoutLabel(view.Layout), filterPresets[o.configurator.filter], groupingPresets[o.configurator.grouping], sortPresets[o.configurator.sortPreset], fmt.Sprintf("%t", view.Options.HideEmptyColumns)}
+	values := []string{o.configurator.title.View(), viewLayoutLabel(view.Layout), filterPresets[o.configurator.filter], groupingPresets[o.configurator.grouping], sortPresets[o.configurator.sortPreset], fmt.Sprintf("%t", view.Options.HideEmptyColumns), fmt.Sprintf("%t", view.Options.ShowChildren)}
 	if o.global {
-		values = []string{o.configurator.title.View(), viewLayoutLabel(view.Layout), globalScopePresets[o.configurator.scope], o.configurator.projects.View(), filterPresets[o.configurator.filter], groupingPresets[o.configurator.grouping], sortPresets[o.configurator.sortPreset], fmt.Sprintf("%t", view.Options.HideEmptyColumns)}
+		values = []string{o.configurator.title.View(), viewLayoutLabel(view.Layout), globalScopePresets[o.configurator.scope], o.configurator.projects.View(), filterPresets[o.configurator.filter], groupingPresets[o.configurator.grouping], sortPresets[o.configurator.sortPreset], fmt.Sprintf("%t", view.Options.HideEmptyColumns), fmt.Sprintf("%t", view.Options.ShowChildren)}
 	}
 	lines := []string{"Configure the View with guided fields; no JSON required.", ""}
 	for i, label := range labels {
