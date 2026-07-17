@@ -11,20 +11,27 @@ import (
 type processIdentity struct {
 	pid        int
 	startToken string
+	executable string
+	arguments  []string
 }
 
 func captureProcessIdentity(pid int) (processIdentity, bool, error) {
 	if pid <= 0 {
 		return processIdentity{}, false, nil
 	}
-	startToken, err := platformProcessStartToken(pid)
+	startToken, executable, arguments, err := platformProcessIdentity(pid)
 	if err != nil {
-		if errors.Is(err, syscall.ESRCH) || !processAlive(pid) {
+		if platformProcessMissing(err) || errors.Is(err, syscall.ESRCH) || !processAlive(pid) {
 			return processIdentity{}, false, nil
 		}
 		return processIdentity{}, false, fmt.Errorf("read process %d start token: %w", pid, err)
 	}
-	return processIdentity{pid: pid, startToken: startToken}, true, nil
+	return processIdentity{
+		pid:        pid,
+		startToken: startToken,
+		executable: executable,
+		arguments:  arguments,
+	}, true, nil
 }
 
 func processIdentityAlive(identity processIdentity) (bool, error) {
@@ -33,7 +40,7 @@ func processIdentityAlive(identity processIdentity) (bool, error) {
 	}
 	startToken, err := platformProcessStartToken(identity.pid)
 	if err != nil {
-		if errors.Is(err, syscall.ESRCH) || !processAlive(identity.pid) {
+		if platformProcessMissing(err) || errors.Is(err, syscall.ESRCH) || !processAlive(identity.pid) {
 			return false, nil
 		}
 		return false, fmt.Errorf("read process %d start token: %w", identity.pid, err)

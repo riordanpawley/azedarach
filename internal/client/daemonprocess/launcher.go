@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -27,22 +28,29 @@ import (
 
 // Launcher starts/replaces the singleton daemon process for a user-global socket.
 type Launcher struct {
-	RepoDir            string
-	SocketPath         string
-	LockPath           string
-	BinPath            string
-	Logger             *slog.Logger
-	openLogFile        func(path string) (io.WriteCloser, error)
-	waitForReady       func(ctx context.Context, socketPath string) error
-	shutdownViaSocket  func(ctx context.Context, socketPath string) error
-	shutdownWithReason func(ctx context.Context, socketPath string, reason string) error
-	replaceReason      string
-	sleepFn            func(time.Duration)
-	processExitTimeout time.Duration
+	RepoDir                      string
+	SocketPath                   string
+	LockPath                     string
+	BinPath                      string
+	Logger                       *slog.Logger
+	openLogFile                  func(path string) (io.WriteCloser, error)
+	waitForReady                 func(ctx context.Context, socketPath string) error
+	shutdownViaSocket            func(ctx context.Context, socketPath string) error
+	shutdownWithReason           func(ctx context.Context, socketPath string, reason string) error
+	replaceReason                string
+	sleepFn                      func(time.Duration)
+	processExitTimeout           time.Duration
 	processExitContext func(context.Context, time.Duration) (context.Context, context.CancelFunc)
-	terminateLockOwner func(lockPath string) error
-	startProcess       daemonProcessStarter
-	beforeReplaceLock  func()
+	gracefulExitTimeout          time.Duration
+	termExitTimeout              time.Duration
+	killExitTimeout              time.Duration
+	terminateLockOwner           func(lockPath string) error
+	signalProcess                func(int, syscall.Signal) error
+	waitForOwnerExit             func(context.Context, processIdentity) error
+	beforePredecessorSignal      func(syscall.Signal)
+	replacementSuccessorVerifier func(daemonCommand) error
+	startProcess                 daemonProcessStarter
+	beforeReplaceLock            func()
 }
 
 type daemonCommand struct {
@@ -205,18 +213,22 @@ func NewLauncher(repoDir, socketPath string) *Launcher {
 		lockPath = filepath.Join(filepath.Dir(socketPath), "daemon.lock")
 	}
 	return &Launcher{
-		RepoDir:            repoDir,
-		SocketPath:         socketPath,
-		LockPath:           lockPath,
-		Logger:             slog.Default(),
-		openLogFile:        openDaemonLog,
-		waitForReady:       waitForDaemonReady,
-		shutdownWithReason: gracefulShutdownViaSocketWithReason,
-		replaceReason:      "compatibility-replace",
-		sleepFn:            time.Sleep,
-		processExitTimeout: 10 * time.Second,
+		RepoDir:             repoDir,
+		SocketPath:          socketPath,
+		LockPath:            lockPath,
+		Logger:              slog.Default(),
+		openLogFile:         openDaemonLog,
+		waitForReady:        waitForDaemonReady,
+		shutdownWithReason:  gracefulShutdownViaSocketWithReason,
+		replaceReason:       "compatibility-replace",
+		sleepFn:             time.Sleep,
+		processExitTimeout:  10 * time.Second,
 		processExitContext: context.WithTimeout,
-		terminateLockOwner: lifecycle.TerminateLockOwner,
+		terminateLockOwner:  lifecycle.TerminateLockOwner,
+		gracefulExitTimeout: 2 * time.Second,
+		termExitTimeout:     2 * time.Second,
+		killExitTimeout:     2 * time.Second,
+		signalProcess:       syscall.Kill,
 	}
 }
 
@@ -273,6 +285,10 @@ func (l *Launcher) Start(ctx context.Context) error {
 // Replace serialize predecessor shutdown, exact exit proof, and successor
 // startup without recursively acquiring the same flock.
 func (l *Launcher) startWithLifecycleLock(ctx context.Context, daemonCmd daemonCommand) error {
+	return l.startWithLifecycleLockMode(ctx, daemonCmd, true)
+}
+
+func (l *Launcher) startWithLifecycleLockMode(ctx context.Context, daemonCmd daemonCommand, allowUnreadyOwnerRecovery bool) error {
 	// Re-check after acquiring start lock to avoid duplicate spawns from racing
 	// clients.
 	if err := l.waitForSocketReadyWithin(500 * time.Millisecond); err == nil {
@@ -284,6 +300,9 @@ func (l *Launcher) startWithLifecycleLock(ctx context.Context, daemonCmd daemonC
 			err := l.waitForSocketReadyWithin(2 * time.Second)
 			if err == nil {
 				return nil
+			}
+			if !allowUnreadyOwnerRecovery {
+				return errors.New("daemon lock owner appeared before replacement successor startup; refusing unverified recovery termination")
 			}
 			if l.Logger != nil {
 				l.Logger.Warn("daemon lock owner alive but socket is not ready; attempting fresh spawn",
@@ -311,6 +330,8 @@ func (l *Launcher) startWithLifecycleLock(ctx context.Context, daemonCmd daemonC
 					return err
 				}
 			}
+		} else if !allowUnreadyOwnerRecovery {
+			return errors.New("daemon lock owner appeared before replacement successor startup; refusing unverified recovery termination")
 		}
 	}
 
@@ -524,6 +545,9 @@ func (l *Launcher) cleanupScopedRuntimeAssets() error {
 }
 
 func (l *Launcher) waitForProcessExit(ctx context.Context, identity processIdentity) error {
+	if l.waitForOwnerExit != nil {
+		return l.waitForOwnerExit(ctx, identity)
+	}
 	for {
 		alive, err := processIdentityAlive(identity)
 		if err != nil {
@@ -543,6 +567,295 @@ func (l *Launcher) waitForProcessExit(ctx context.Context, identity processIdent
 		}
 		sleep(20 * time.Millisecond)
 	}
+}
+
+func (l *Launcher) verifyCapturedPredecessor(ctx context.Context, owner processIdentity, daemonCmd daemonCommand) error {
+	if !l.ownsCanonicalRuntime() || config.UseScopedDaemonRuntimeFor(l.RepoDir) {
+		return errors.New("refuse forced predecessor termination outside the canonical global runtime")
+	}
+	current, present, err := captureProcessIdentity(owner.pid)
+	if err != nil {
+		return fmt.Errorf("recapture daemon predecessor identity: %w", err)
+	}
+	if !present {
+		return nil
+	}
+	if !sameProcessIdentity(owner, true, current, true) {
+		return errors.New("daemon predecessor process identity changed during termination")
+	}
+	if pid, recorded := l.readLockedPID(); recorded {
+		lockOwner, lockOwnerPresent, captureErr := captureProcessIdentity(pid)
+		if captureErr != nil {
+			return fmt.Errorf("recapture daemon lock owner: %w", captureErr)
+		}
+		if !sameProcessIdentity(owner, true, lockOwner, lockOwnerPresent) {
+			return errors.New("daemon lock ownership changed during predecessor termination")
+		}
+	} else if _, lockErr := os.Lstat(l.LockPath); lockErr == nil {
+		return errors.New("daemon lock became unreadable during predecessor termination")
+	} else if !errors.Is(lockErr, os.ErrNotExist) {
+		return fmt.Errorf("inspect daemon lock during predecessor termination: %w", lockErr)
+	} else if _, socketErr := os.Lstat(l.SocketPath); socketErr == nil {
+		return errors.New("daemon lock disappeared while canonical socket remains")
+	} else if !errors.Is(socketErr, os.ErrNotExist) {
+		return fmt.Errorf("inspect daemon socket during predecessor termination: %w", socketErr)
+	}
+	predecessorGeneration, predecessorManaged := config.ManagedGenerationBinDir(current.executable, "azd")
+	successorGeneration, successorManaged := config.ManagedGenerationBinDir(daemonCmd.executable, "azd")
+	if !predecessorManaged {
+		return errors.New("refuse forced predecessor termination for unmanaged executable")
+	}
+	if !successorManaged || filepath.Clean(filepath.Dir(predecessorGeneration)) != filepath.Clean(filepath.Dir(successorGeneration)) {
+		return errors.New("refuse forced predecessor termination across unrelated install roots")
+	}
+	for _, required := range []struct {
+		flag  string
+		value string
+	}{
+		{flag: "--repo", value: l.RepoDir},
+		{flag: "--socket", value: l.SocketPath},
+		{flag: "--lock", value: l.LockPath},
+	} {
+		if !hasExactProcessArgument(current.arguments, required.flag, required.value) {
+			return fmt.Errorf("refuse forced predecessor termination: command does not match canonical %s", strings.TrimPrefix(required.flag, "--"))
+		}
+	}
+	return nil
+}
+
+func hasExactProcessArgument(arguments []string, flag, value string) bool {
+	occurrences := 0
+	matches := 0
+	for i := 0; i < len(arguments); i++ {
+		if arguments[i] != flag {
+			continue
+		}
+		occurrences++
+		if i+1 < len(arguments) && arguments[i+1] == value {
+			matches++
+		}
+	}
+	return occurrences == 1 && matches == 1
+}
+
+func (l *Launcher) signalCapturedPredecessor(ctx context.Context, owner processIdentity, daemonCmd daemonCommand, signal syscall.Signal) error {
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if l.beforePredecessorSignal != nil {
+		l.beforePredecessorSignal(signal)
+	}
+	if err := l.verifyCapturedPredecessor(ctx, owner, daemonCmd); err != nil {
+		return err
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	alive, err := processIdentityAlive(owner)
+	if err != nil || !alive {
+		return err
+	}
+	signalProcess := l.signalProcess
+	if signalProcess == nil {
+		signalProcess = syscall.Kill
+	}
+	signalCtx, endSpan := latencytrace.StartSpan(ctx, "dependency", "daemon_process.reap_predecessor",
+		"dependency.operation", strings.ToLower(strings.TrimPrefix(signal.String(), "SIG")),
+	)
+	_ = signalCtx
+	if err := signalProcess(owner.pid, signal); err != nil && !errors.Is(err, syscall.ESRCH) {
+		endSpan(err)
+		return fmt.Errorf("signal verified daemon predecessor with %s: %w", signal, err)
+	}
+	endSpan(nil)
+	return nil
+}
+
+func (l *Launcher) waitForCapturedOwnerExitWithin(ctx context.Context, owner processIdentity, timeout time.Duration) error {
+	waitCtx := ctx
+	if waitCtx == nil {
+		waitCtx = context.Background()
+	}
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		waitCtx, cancel = context.WithTimeout(waitCtx, timeout)
+		defer cancel()
+	}
+	return l.waitForProcessExit(waitCtx, owner)
+}
+
+func (l *Launcher) reapCapturedPredecessor(ctx context.Context, owner processIdentity, daemonCmd daemonCommand, action string) error {
+	gracefulTimeout := l.gracefulExitTimeout
+	if gracefulTimeout <= 0 {
+		gracefulTimeout = 2 * time.Second
+	}
+	if err := l.waitForCapturedOwnerExitWithin(ctx, owner, gracefulTimeout); err == nil {
+		if err := l.cleanupReapedPredecessor(owner); err != nil {
+			return err
+		}
+		l.logPredecessorReapStage(action, "graceful", "exited")
+		return nil
+	} else if ctx != nil && ctx.Err() != nil {
+		return fmt.Errorf("wait for graceful daemon predecessor exit before %s: %w", action, err)
+	} else if !errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("inspect graceful daemon predecessor exit before %s: %w", action, err)
+	}
+	if l.Logger != nil {
+		l.Logger.Warn("verified daemon predecessor did not exit after graceful shutdown; escalating",
+			"action", action,
+			"stage", "term",
+		)
+	}
+	if err := l.signalCapturedPredecessor(ctx, owner, daemonCmd, syscall.SIGTERM); err != nil {
+		return fmt.Errorf("terminate verified daemon predecessor before %s: %w", action, err)
+	}
+	termTimeout := l.termExitTimeout
+	if termTimeout <= 0 {
+		termTimeout = 2 * time.Second
+	}
+	if err := l.waitForCapturedOwnerExitWithin(ctx, owner, termTimeout); err == nil {
+		if err := l.cleanupReapedPredecessor(owner); err != nil {
+			return err
+		}
+		l.logPredecessorReapStage(action, "term", "exited")
+		return nil
+	} else if ctx != nil && ctx.Err() != nil {
+		return fmt.Errorf("wait for verified daemon predecessor after TERM before %s: %w", action, err)
+	} else if !errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("inspect verified daemon predecessor after TERM before %s: %w", action, err)
+	}
+	if l.Logger != nil {
+		l.Logger.Warn("verified daemon predecessor ignored TERM; force killing",
+			"action", action,
+			"stage", "kill",
+		)
+	}
+	if err := l.signalCapturedPredecessor(ctx, owner, daemonCmd, syscall.SIGKILL); err != nil {
+		return fmt.Errorf("force-kill verified daemon predecessor before %s: %w", action, err)
+	}
+	killTimeout := l.killExitTimeout
+	if killTimeout <= 0 {
+		killTimeout = 2 * time.Second
+	}
+	if err := l.waitForCapturedOwnerExitWithin(ctx, owner, killTimeout); err != nil {
+		return fmt.Errorf("prove force-killed daemon predecessor exited before %s: %w", action, err)
+	}
+	if err := l.cleanupReapedPredecessor(owner); err != nil {
+		return err
+	}
+	l.logPredecessorReapStage(action, "kill", "exited")
+	return nil
+}
+
+func (l *Launcher) logPredecessorReapStage(action, stage, outcome string) {
+	if l.Logger == nil {
+		return
+	}
+	l.Logger.Info("daemon predecessor replacement stage completed",
+		"action", action,
+		"stage", stage,
+		"outcome", outcome,
+	)
+}
+
+func (l *Launcher) startReplacementWithLifecycleLock(ctx context.Context, daemonCmd daemonCommand) error {
+	err := l.startWithLifecycleLockMode(ctx, daemonCmd, false)
+	if err == nil && (l.startProcess == nil || l.replacementSuccessorVerifier != nil) && l.ownsCanonicalRuntime() && !config.UseScopedDaemonRuntimeFor(l.RepoDir) {
+		verifySuccessor := l.replacementSuccessorVerifier
+		if verifySuccessor == nil {
+			verifySuccessor = l.verifyReplacementSuccessor
+		}
+		err = verifySuccessor(daemonCmd)
+	}
+	if l.Logger == nil {
+		return err
+	}
+	if err != nil {
+		l.Logger.Error("daemon replacement successor failed to start; runtime state preserved for recovery",
+			"stage", "successor_start",
+			"outcome", "failed",
+			"reason", "start_failed",
+		)
+		return err
+	}
+	l.Logger.Info("daemon replacement successor is ready",
+		"stage", "successor_start",
+		"outcome", "ready",
+	)
+	return nil
+}
+
+func (l *Launcher) verifyReplacementSuccessor(daemonCmd daemonCommand) error {
+	successor, present, err := l.captureLockOwnerIdentity()
+	if err != nil {
+		return fmt.Errorf("capture replacement successor identity: %w", err)
+	}
+	if !present {
+		return errors.New("replacement socket became ready without a verified lock owner")
+	}
+	wantExecutable, err := filepath.EvalSymlinks(daemonCmd.executable)
+	if err != nil {
+		return fmt.Errorf("resolve replacement successor executable: %w", err)
+	}
+	gotExecutable, err := filepath.EvalSymlinks(successor.executable)
+	if err != nil {
+		return fmt.Errorf("resolve replacement lock owner executable: %w", err)
+	}
+	if filepath.Clean(gotExecutable) != filepath.Clean(wantExecutable) {
+		return errors.New("replacement socket lock owner does not run the installed successor executable")
+	}
+	if _, managed := config.ManagedGenerationBinDir(successor.executable, "azd"); !managed {
+		return errors.New("replacement socket lock owner is not a managed installed daemon")
+	}
+	for _, required := range []struct {
+		flag  string
+		value string
+	}{
+		{flag: "--repo", value: l.RepoDir},
+		{flag: "--socket", value: l.SocketPath},
+		{flag: "--lock", value: l.LockPath},
+	} {
+		if !hasExactProcessArgument(successor.arguments, required.flag, required.value) {
+			return fmt.Errorf("replacement socket lock owner does not match canonical %s", strings.TrimPrefix(required.flag, "--"))
+		}
+	}
+	confirmed, confirmedPresent, err := l.captureLockOwnerIdentity()
+	if err != nil {
+		return fmt.Errorf("recapture replacement successor identity: %w", err)
+	}
+	if !sameProcessIdentity(successor, true, confirmed, confirmedPresent) {
+		return errors.New("replacement successor lock ownership changed during readiness verification")
+	}
+	return nil
+}
+
+func (l *Launcher) cleanupReapedPredecessor(owner processIdentity) error {
+	if alive, err := processIdentityAlive(owner); err != nil {
+		return err
+	} else if alive {
+		return fmt.Errorf("daemon predecessor %d remains alive after termination", owner.pid)
+	}
+	if pid, recorded := l.readLockedPID(); recorded {
+		if pid != owner.pid {
+			return errors.New("daemon lock owner changed before predecessor cleanup")
+		}
+		_, present, err := captureProcessIdentity(pid)
+		if err != nil {
+			return fmt.Errorf("inspect daemon lock owner before predecessor cleanup: %w", err)
+		}
+		if present {
+			return errors.New("daemon predecessor PID was reused before lock cleanup")
+		}
+		if err := os.Remove(l.LockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove reaped daemon predecessor lock: %w", err)
+		}
+	}
+	if _, err := os.Lstat(l.SocketPath); err == nil {
+		return errors.New("daemon predecessor exited but canonical socket remains; recovery requires removing the verified stale runtime asset")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect reaped daemon predecessor socket: %w", err)
+	}
+	return nil
 }
 
 func (l *Launcher) ownsCanonicalScopedRuntime() bool {
@@ -598,10 +911,11 @@ func (l *Launcher) Replace(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("capture daemon predecessor for replace: %w", err)
 	}
-	if observedOwnerPresent && !sameProcessIdentity(observedOwner, observedOwnerPresent, owner, ownerPresent) {
+	if ownerPresent && !sameProcessIdentity(observedOwner, observedOwnerPresent, owner, ownerPresent) {
 		if l.waitForSocketReadyWithin(300*time.Millisecond) == nil {
 			return nil
 		}
+		return errors.New("daemon owner identity changed while replacement waited for the lifecycle lock; refusing to signal the unready successor")
 	}
 	if !ownerPresent && l.ownsCanonicalRuntime() && l.waitForSocketReadyWithin(300*time.Millisecond) == nil {
 		return errors.New("missing daemon lock owner identity for live canonical runtime during replace")
@@ -611,40 +925,47 @@ func (l *Launcher) Replace(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(l.SocketPath) != "" {
+	if strings.TrimSpace(l.SocketPath) != "" && (ownerPresent || !l.ownsCanonicalRuntime()) {
 		reason := strings.TrimSpace(l.replaceReason)
 		if reason == "" {
 			reason = "compatibility-replace"
 		}
 		if err := l.requestGracefulShutdown(ctx, reason); err == nil {
 			if ownerPresent {
-				if err := l.waitForCapturedOwnerExit(ctx, owner, "replace"); err != nil {
+				if err := l.reapCapturedPredecessor(ctx, owner, daemonCmd, "replace"); err != nil {
 					return err
 				}
 			}
-			return l.startWithLifecycleLock(ctx, daemonCmd)
+			return l.startReplacementWithLifecycleLock(ctx, daemonCmd)
 		} else if l.Logger != nil {
-			l.Logger.Warn("graceful daemon socket shutdown failed before replace; falling back to lock-owner termination",
-				"socket_path", l.SocketPath,
-				"lock_path", l.LockPath,
-				"error", err,
+			l.Logger.Warn("graceful daemon socket shutdown failed before replace; evaluating verified predecessor escalation",
+				"stage", "graceful_request",
+				"outcome", "failed",
+				"reason", "typed_shutdown_failed",
 			)
 		}
 	}
 
-	terminate := l.terminateLockOwner
-	if terminate == nil {
-		terminate = lifecycle.TerminateLockOwner
-	}
-	if err := terminate(l.LockPath); err != nil {
-		return fmt.Errorf("terminate daemon lock owner before replace: %w", err)
-	}
 	if ownerPresent {
-		if err := l.waitForCapturedOwnerExit(ctx, owner, "replace"); err != nil {
+		if err := l.reapCapturedPredecessor(ctx, owner, daemonCmd, "replace"); err != nil {
 			return err
 		}
+	} else {
+		if pid, recorded := l.readLockedPID(); recorded {
+			return fmt.Errorf("daemon lock owner %d appeared after predecessor capture; refusing unverified replacement termination", pid)
+		}
+		if _, lockErr := os.Lstat(l.LockPath); lockErr == nil {
+			return errors.New("unreadable daemon lock appeared after predecessor capture; refusing replacement start")
+		} else if !errors.Is(lockErr, os.ErrNotExist) {
+			return fmt.Errorf("inspect daemon lock before replacement start: %w", lockErr)
+		}
+		if _, socketErr := os.Lstat(l.SocketPath); socketErr == nil {
+			return errors.New("daemon socket appeared without a verified predecessor; refusing replacement start")
+		} else if !errors.Is(socketErr, os.ErrNotExist) {
+			return fmt.Errorf("inspect daemon socket before replacement start: %w", socketErr)
+		}
 	}
-	return l.startWithLifecycleLock(ctx, daemonCmd)
+	return l.startReplacementWithLifecycleLock(ctx, daemonCmd)
 }
 
 func (l *Launcher) captureLockOwnerIdentity() (processIdentity, bool, error) {
@@ -662,7 +983,10 @@ func sameProcessIdentity(left processIdentity, leftPresent bool, right processId
 	if !leftPresent {
 		return true
 	}
-	return left.pid == right.pid && left.startToken == right.startToken
+	return left.pid == right.pid &&
+		left.startToken == right.startToken &&
+		left.executable == right.executable &&
+		slices.Equal(left.arguments, right.arguments)
 }
 
 func (l *Launcher) waitForCapturedOwnerExit(ctx context.Context, owner processIdentity, action string) error {
@@ -924,11 +1248,8 @@ func gracefulShutdownViaSocketWithReason(ctx context.Context, socketPath string,
 	if shutdownCtx == nil {
 		shutdownCtx = context.Background()
 	}
-	if _, hasDeadline := shutdownCtx.Deadline(); !hasDeadline {
-		var cancel context.CancelFunc
-		shutdownCtx, cancel = context.WithTimeout(shutdownCtx, 2*time.Second)
-		defer cancel()
-	}
+	shutdownCtx, cancel := context.WithTimeout(shutdownCtx, 2*time.Second)
+	defer cancel()
 
 	client := transport.NewClient(socketPath).WithTimeout(1 * time.Second)
 	reason = strings.TrimSpace(reason)

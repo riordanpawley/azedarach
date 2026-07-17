@@ -1,11 +1,13 @@
 package daemonprocess
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -48,6 +50,8 @@ type recordingDaemonStarter struct {
 
 const lingeringDaemonHelperEnv = "AZEDARACH_TEST_LINGERING_DAEMON"
 
+const lingeringDaemonModeEnv = "AZEDARACH_TEST_LINGERING_DAEMON_MODE"
+
 // TestLauncherReplaceLingeringDaemonHelper is a real predecessor process for
 // replacement tests. On TERM it removes the runtime socket and lock exactly as
 // azd does, reports that authority assets are gone, then deliberately remains
@@ -62,12 +66,16 @@ func TestLauncherReplaceLingeringDaemonHelper(t *testing.T) {
 	if ready == nil || shutdownObserved == nil || exitBarrier == nil {
 		os.Exit(2)
 	}
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGTERM)
+	signals := make(chan os.Signal, 4)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGUSR1)
 	if _, err := ready.Write([]byte{1}); err != nil {
 		os.Exit(7)
 	}
-	<-signals
+	mode := os.Getenv(lingeringDaemonModeEnv)
+	shutdownSignal := <-signals
+	if mode != "" && shutdownSignal != syscall.SIGUSR1 {
+		os.Exit(8)
+	}
 	if err := os.Remove(os.Getenv("AZEDARACH_TEST_DAEMON_SOCKET")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		os.Exit(3)
 	}
@@ -76,6 +84,23 @@ func TestLauncherReplaceLingeringDaemonHelper(t *testing.T) {
 	}
 	if _, err := shutdownObserved.Write([]byte{1}); err != nil {
 		os.Exit(5)
+	}
+	if mode == "graceful" {
+		os.Exit(0)
+	}
+	if mode == "term" {
+		if signal := <-signals; signal != syscall.SIGTERM {
+			os.Exit(9)
+		}
+		os.Exit(0)
+	}
+	if mode == "kill" {
+		for {
+			select {
+			case <-signals:
+			case <-time.After(time.Hour):
+			}
+		}
 	}
 	var release [1]byte
 	if _, err := exitBarrier.Read(release[:]); err != nil {
@@ -89,10 +114,49 @@ type lingeringDaemonProcess struct {
 	shutdownObserved *os.File
 	exitBarrier      *os.File
 	waitDone         chan error
+	exited           chan struct{}
 	releaseOnce      sync.Once
 }
 
 func startLingeringDaemonProcess(t *testing.T, launcher *Launcher) *lingeringDaemonProcess {
+	return startLingeringDaemonProcessWith(t, launcher, os.Args[0], "", nil)
+}
+
+func startManagedLingeringDaemonProcess(t *testing.T, launcher *Launcher, mode string) *lingeringDaemonProcess {
+	t.Helper()
+	installRoot := t.TempDir()
+	generationsRoot := filepath.Join(installRoot, ".azedarach-generations")
+	predecessorGeneration := writeManagedTestGeneration(t, generationsRoot, "generation.predecessor")
+	successorGeneration := writeManagedTestGeneration(t, generationsRoot, "generation.successor")
+	launcher.BinPath = filepath.Join(successorGeneration, "azd")
+	return startLingeringDaemonProcessWith(
+		t,
+		launcher,
+		filepath.Join(predecessorGeneration, "azd"),
+		mode,
+		[]string{"--", "--repo", launcher.RepoDir, "--socket", launcher.SocketPath, "--lock", launcher.LockPath},
+	)
+}
+
+func writeManagedTestGeneration(t *testing.T, generationsRoot, generationName string) string {
+	t.Helper()
+	generation := filepath.Join(generationsRoot, generationName)
+	testBinary, err := os.ReadFile(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(generation, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, binary := range []string{"az", "azd"} {
+		if err := os.WriteFile(filepath.Join(generation, binary), testBinary, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return generation
+}
+
+func startLingeringDaemonProcessWith(t *testing.T, launcher *Launcher, executable, mode string, extraArgs []string) *lingeringDaemonProcess {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(launcher.LockPath), 0o700); err != nil {
 		t.Fatal(err)
@@ -112,9 +176,11 @@ func startLingeringDaemonProcess(t *testing.T, launcher *Launcher) *lingeringDae
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=^TestLauncherReplaceLingeringDaemonHelper$")
+	args := append([]string{"-test.run=^TestLauncherReplaceLingeringDaemonHelper$"}, extraArgs...)
+	cmd := exec.Command(executable, args...)
 	cmd.Env = append(os.Environ(),
 		lingeringDaemonHelperEnv+"=1",
+		lingeringDaemonModeEnv+"="+mode,
 		"AZEDARACH_TEST_DAEMON_SOCKET="+launcher.SocketPath,
 		"AZEDARACH_TEST_DAEMON_LOCK="+launcher.LockPath,
 	)
@@ -142,8 +208,12 @@ func startLingeringDaemonProcess(t *testing.T, launcher *Launcher) *lingeringDae
 		shutdownObserved: observedReader,
 		exitBarrier:      exitWriter,
 		waitDone:         make(chan error, 1),
+		exited:           make(chan struct{}),
 	}
-	go func() { process.waitDone <- cmd.Wait() }()
+	go func() {
+		process.waitDone <- cmd.Wait()
+		close(process.exited)
+	}()
 	t.Cleanup(func() {
 		process.release()
 		_ = cmd.Process.Kill()
@@ -939,13 +1009,13 @@ func TestLauncherStart_SpawnsWhenLockOwnerAliveButSocketUnready(t *testing.T) {
 	}
 }
 
-func TestLauncherReplaceTerminatesBeforeStart(t *testing.T) {
+func TestLauncherReplaceRefusesLockOwnerThatAppearsAfterCapture(t *testing.T) {
 	repoDir := t.TempDir()
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
 	tracker := &trackingWriteCloser{}
 
 	launcher := NewLauncher(repoDir, socketPath)
-	useRecordingDaemonStarter(launcher)
+	starter := useRecordingDaemonStarter(launcher)
 	launcher.BinPath = "true"
 	launcher.sleepFn = func(time.Duration) {}
 
@@ -955,17 +1025,7 @@ func TestLauncherReplaceTerminatesBeforeStart(t *testing.T) {
 		return os.Remove(lockPath)
 	}
 
-	readyCalls := 0
-	launcher.waitForReady = func(context.Context, string) error {
-		readyCalls++
-		if !terminated {
-			return nil
-		}
-		if readyCalls <= 1 {
-			return context.DeadlineExceeded
-		}
-		return nil
-	}
+	launcher.waitForReady = func(context.Context, string) error { return context.DeadlineExceeded }
 	launcher.openLogFile = func(string) (io.WriteCloser, error) { return tracker, nil }
 
 	lockRecordBytes, err := json.Marshal(map[string]any{
@@ -979,14 +1039,89 @@ func TestLauncherReplaceTerminatesBeforeStart(t *testing.T) {
 		t.Fatalf("WriteFile(lock): %v", err)
 	}
 
-	if err := launcher.Replace(context.Background()); err != nil {
-		t.Fatalf("Replace() error = %v", err)
+	if err := launcher.Replace(context.Background()); err == nil || !strings.Contains(err.Error(), "appeared after predecessor capture") {
+		t.Fatalf("Replace() error = %v, want unverified-owner refusal", err)
 	}
-	if !terminated {
-		t.Fatal("Replace() did not terminate lock owner before Start")
+	if terminated {
+		t.Fatal("Replace() terminated an owner that appeared after capture")
 	}
-	if !tracker.closed.Load() {
-		t.Fatal("daemon log file was not closed after replacement Start() returned")
+	if len(starter.specs) != 0 || tracker.closed.Load() {
+		t.Fatalf("successor starts/log opens = %d/%t, want 0/false", len(starter.specs), tracker.closed.Load())
+	}
+}
+
+func TestLauncherReplaceRefusesUnreadyOwnerIdentityChangeWhileQueued(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
+	predecessor := startManagedLingeringDaemonProcess(t, launcher, "kill")
+	replacement := exec.Command("/bin/sleep", "30")
+	if err := replacement.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = replacement.Process.Kill()
+		_ = replacement.Wait()
+	})
+	launcher.beforeReplaceLock = func() {
+		record, err := json.Marshal(map[string]any{"pid": replacement.Process.Pid, "created_at": time.Now().UTC()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(launcher.LockPath, record, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	launcher.waitForReady = func(context.Context, string) error { return context.DeadlineExceeded }
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		t.Fatal("Replace attempted shutdown after owner identity changed")
+		return nil
+	}
+	launcher.signalProcess = func(int, syscall.Signal) error {
+		t.Fatal("Replace signaled a changed owner")
+		return nil
+	}
+
+	err := launcher.Replace(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "owner identity changed") {
+		t.Fatalf("Replace() error = %v, want changed-owner refusal", err)
+	}
+	identity, present, captureErr := captureProcessIdentity(predecessor.cmd.Process.Pid)
+	if captureErr != nil || !present {
+		t.Fatalf("original predecessor after changed-owner refusal = (%+v, %t, %v), want alive", identity, present, captureErr)
+	}
+}
+
+func TestLauncherReplacementStartRefusesNewUnreadyLockOwner(t *testing.T) {
+	launcher := NewLauncher(t.TempDir(), filepath.Join(t.TempDir(), "daemon.sock"))
+	replacement := exec.Command("/bin/sleep", "30")
+	if err := replacement.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = replacement.Process.Kill()
+		_ = replacement.Wait()
+	})
+	record, err := json.Marshal(map[string]any{"pid": replacement.Process.Pid, "created_at": time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcher.LockPath, record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launcher.waitForReady = func(context.Context, string) error { return context.DeadlineExceeded }
+	launcher.terminateLockOwner = func(string) error {
+		t.Fatal("replacement startup terminated a newly appeared owner")
+		return nil
+	}
+	launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+		t.Fatal("replacement startup spawned alongside a newly appeared owner")
+		return nil, nil
+	}
+
+	err = launcher.startWithLifecycleLockMode(context.Background(), daemonCommand{executable: "true"}, false)
+	if err == nil || !strings.Contains(err.Error(), "appeared before replacement successor startup") {
+		t.Fatalf("startWithLifecycleLockMode() error = %v, want new-owner refusal", err)
 	}
 }
 
@@ -1242,13 +1377,350 @@ func TestLauncherReplaceFailsClosedWhenExactPredecessorExitCannotBeProven(t *tes
 	predecessor.awaitShutdown(t)
 	cancel()
 	err := <-replaceDone
-	if err == nil || !strings.Contains(err.Error(), "prove daemon predecessor exited before replace") || !errors.Is(err, context.Canceled) {
+	if err == nil || !strings.Contains(err.Error(), "wait for graceful daemon predecessor exit before replace") || !errors.Is(err, context.Canceled) {
 		t.Fatalf("Replace() error = %v, want fail-closed exact-exit proof cancellation", err)
 	}
 	if got := successorStarts.Load(); got != 0 {
 		t.Fatalf("successor starts after exact-exit proof failure = %d, want 0", got)
 	}
 	predecessor.release()
+}
+
+func TestRealProcessProfileLauncherReplaceManagedPredecessorExitStages(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		mode        string
+		wantSignals []syscall.Signal
+	}{
+		{name: "graceful exit", mode: "graceful"},
+		{name: "TERM exit", mode: "term", wantSignals: []syscall.Signal{syscall.SIGTERM}},
+		{name: "KILL escalation", mode: "kill", wantSignals: []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+			launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
+			predecessor := startManagedLingeringDaemonProcess(t, launcher, testCase.mode)
+			launcher.shutdownViaSocket = func(context.Context, string) error {
+				return predecessor.cmd.Process.Signal(syscall.SIGUSR1)
+			}
+			var signals []syscall.Signal
+			launcher.signalProcess = func(pid int, signal syscall.Signal) error {
+				if pid != predecessor.cmd.Process.Pid {
+					t.Fatalf("signaled pid = %d, want predecessor %d", pid, predecessor.cmd.Process.Pid)
+				}
+				signals = append(signals, signal)
+				return syscall.Kill(pid, signal)
+			}
+			waitCall := 0
+			launcher.waitForOwnerExit = func(context.Context, processIdentity) error {
+				waitCall++
+				if waitCall == 1 {
+					predecessor.awaitShutdown(t)
+				}
+				switch testCase.mode {
+				case "graceful":
+					<-predecessor.exited
+					return nil
+				case "term":
+					if waitCall == 1 {
+						return context.DeadlineExceeded
+					}
+					<-predecessor.exited
+					return nil
+				case "kill":
+					if waitCall < 3 {
+						return context.DeadlineExceeded
+					}
+					<-predecessor.exited
+					return nil
+				default:
+					t.Fatalf("unknown helper mode %q", testCase.mode)
+					return nil
+				}
+			}
+			var successorReady atomic.Bool
+			launcher.waitForReady = func(context.Context, string) error {
+				if successorReady.Load() {
+					return nil
+				}
+				return context.DeadlineExceeded
+			}
+			launcher.openLogFile = func(string) (io.WriteCloser, error) { return &trackingWriteCloser{}, nil }
+			launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+				successorReady.Store(true)
+				return &recordingDaemonProcess{exitCh: make(chan error)}, nil
+			}
+
+			if err := launcher.Replace(context.Background()); err != nil {
+				t.Fatalf("Replace() error = %v", err)
+			}
+			if !reflect.DeepEqual(signals, testCase.wantSignals) {
+				t.Fatalf("signals = %v, want %v", signals, testCase.wantSignals)
+			}
+			if !successorReady.Load() {
+				t.Fatal("successor was not started after predecessor exit")
+			}
+		})
+	}
+}
+
+func TestRealProcessProfileLauncherReplaceRejectsLockIdentityChangeBeforeKill(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
+	predecessor := startManagedLingeringDaemonProcess(t, launcher, "kill")
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		return predecessor.cmd.Process.Signal(syscall.SIGUSR1)
+	}
+	launcher.beforePredecessorSignal = func(signal syscall.Signal) {
+		if signal != syscall.SIGKILL {
+			return
+		}
+		replacement, err := json.Marshal(map[string]any{"pid": os.Getpid(), "created_at": time.Now().UTC()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(launcher.LockPath, replacement, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var signals []syscall.Signal
+	launcher.signalProcess = func(pid int, signal syscall.Signal) error {
+		signals = append(signals, signal)
+		return syscall.Kill(pid, signal)
+	}
+	waitCall := 0
+	launcher.waitForOwnerExit = func(context.Context, processIdentity) error {
+		waitCall++
+		if waitCall == 1 {
+			predecessor.awaitShutdown(t)
+		}
+		return context.DeadlineExceeded
+	}
+	launcher.waitForReady = func(context.Context, string) error { return context.DeadlineExceeded }
+	launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+		t.Fatal("successor started after lock identity changed")
+		return nil, nil
+	}
+
+	err := launcher.Replace(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "lock ownership changed") {
+		t.Fatalf("Replace() error = %v, want lock-identity refusal", err)
+	}
+	if !reflect.DeepEqual(signals, []syscall.Signal{syscall.SIGTERM}) {
+		t.Fatalf("signals = %v, want TERM only", signals)
+	}
+	identity, present, captureErr := captureProcessIdentity(predecessor.cmd.Process.Pid)
+	if captureErr != nil || !present {
+		t.Fatalf("predecessor identity after refused KILL = (%+v, %t, %v), want still alive", identity, present, captureErr)
+	}
+}
+
+func TestRealProcessProfileLauncherReplaceSuccessorStartFailureLeavesRecoverableStoppedState(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	var logs bytes.Buffer
+	launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath()).WithLogger(
+		slog.New(slog.NewJSONHandler(&logs, nil)),
+	)
+	predecessor := startManagedLingeringDaemonProcess(t, launcher, "graceful")
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		return predecessor.cmd.Process.Signal(syscall.SIGUSR1)
+	}
+	launcher.waitForOwnerExit = func(context.Context, processIdentity) error {
+		predecessor.awaitShutdown(t)
+		<-predecessor.exited
+		return nil
+	}
+	launcher.waitForReady = func(context.Context, string) error { return context.DeadlineExceeded }
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return &trackingWriteCloser{}, nil }
+	launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+		return nil, errors.New("injected successor start failure")
+	}
+
+	err := launcher.Replace(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "injected successor start failure") {
+		t.Fatalf("Replace() error = %v, want successor start failure", err)
+	}
+	if _, err := os.Lstat(launcher.LockPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lock after failed successor start = %v, want absent recoverable stopped state", err)
+	}
+	if _, err := os.Lstat(launcher.SocketPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("socket after failed successor start = %v, want absent recoverable stopped state", err)
+	}
+	for _, field := range []string{`"stage":"successor_start"`, `"outcome":"failed"`, `"reason":"start_failed"`} {
+		if !strings.Contains(logs.String(), field) {
+			t.Fatalf("replacement logs = %s, want field %s", logs.String(), field)
+		}
+	}
+}
+
+func TestRealProcessProfileLauncherReplaceRefusesStaleSocketAfterPredecessorExit(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
+	predecessor := startManagedLingeringDaemonProcess(t, launcher, "graceful")
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		return predecessor.cmd.Process.Signal(syscall.SIGUSR1)
+	}
+	launcher.waitForOwnerExit = func(context.Context, processIdentity) error {
+		predecessor.awaitShutdown(t)
+		<-predecessor.exited
+		if err := os.WriteFile(launcher.SocketPath, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	}
+	launcher.waitForReady = func(context.Context, string) error { return context.DeadlineExceeded }
+	launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+		t.Fatal("successor started while stale socket remained")
+		return nil, nil
+	}
+
+	err := launcher.Replace(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "canonical socket remains") {
+		t.Fatalf("Replace() error = %v, want stale-socket refusal", err)
+	}
+}
+
+func TestLauncherVerifyCapturedPredecessorFailsClosed(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		mutate  func(*testing.T, *Launcher, *processIdentity, *daemonCommand)
+		wantErr string
+	}{
+		{
+			name: "PID reuse start identity",
+			mutate: func(_ *testing.T, _ *Launcher, owner *processIdentity, _ *daemonCommand) {
+				owner.startToken += "-reused"
+			},
+			wantErr: "process identity changed",
+		},
+		{
+			name: "predecessor executable mismatch",
+			mutate: func(_ *testing.T, _ *Launcher, owner *processIdentity, _ *daemonCommand) {
+				owner.executable += "-replacement"
+			},
+			wantErr: "process identity changed",
+		},
+		{
+			name: "repo mismatch",
+			mutate: func(_ *testing.T, launcher *Launcher, _ *processIdentity, _ *daemonCommand) {
+				launcher.RepoDir += "-other"
+			},
+			wantErr: "canonical repo",
+		},
+		{
+			name: "unrelated successor install root",
+			mutate: func(t *testing.T, _ *Launcher, _ *processIdentity, command *daemonCommand) {
+				root := filepath.Join(t.TempDir(), ".azedarach-generations")
+				command.executable = filepath.Join(writeManagedTestGeneration(t, root, "generation.unrelated"), "azd")
+			},
+			wantErr: "unrelated install roots",
+		},
+		{
+			name: "linked worktree scope",
+			mutate: func(t *testing.T, launcher *Launcher, _ *processIdentity, _ *daemonCommand) {
+				t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+				worktree, err := os.Getwd()
+				if err != nil {
+					t.Fatal(err)
+				}
+				launcher.RepoDir = worktree
+			},
+			wantErr: "outside the canonical global runtime",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+			launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
+			predecessor := startManagedLingeringDaemonProcess(t, launcher, "kill")
+			owner, present, err := captureProcessIdentity(predecessor.cmd.Process.Pid)
+			if err != nil || !present {
+				t.Fatalf("capture predecessor = (%+v, %t, %v)", owner, present, err)
+			}
+			command, err := launcher.resolveCommand()
+			if err != nil {
+				t.Fatal(err)
+			}
+			testCase.mutate(t, launcher, &owner, &command)
+			err = launcher.verifyCapturedPredecessor(context.Background(), owner, command)
+			if err == nil || !strings.Contains(err.Error(), testCase.wantErr) {
+				t.Fatalf("verifyCapturedPredecessor() error = %v, want %q", err, testCase.wantErr)
+			}
+		})
+	}
+
+	t.Run("unmanaged predecessor", func(t *testing.T) {
+		t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+		t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+		launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
+		root := filepath.Join(t.TempDir(), ".azedarach-generations")
+		launcher.BinPath = filepath.Join(writeManagedTestGeneration(t, root, "generation.successor"), "azd")
+		predecessor := startLingeringDaemonProcessWith(
+			t,
+			launcher,
+			os.Args[0],
+			"kill",
+			[]string{"--", "--repo", launcher.RepoDir, "--socket", launcher.SocketPath, "--lock", launcher.LockPath},
+		)
+		owner, present, err := captureProcessIdentity(predecessor.cmd.Process.Pid)
+		if err != nil || !present {
+			t.Fatalf("capture predecessor = (%+v, %t, %v)", owner, present, err)
+		}
+		command, err := launcher.resolveCommand()
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = launcher.verifyCapturedPredecessor(context.Background(), owner, command)
+		if err == nil || !strings.Contains(err.Error(), "unmanaged executable") {
+			t.Fatalf("verifyCapturedPredecessor() error = %v, want unmanaged refusal", err)
+		}
+	})
+}
+
+func TestHasExactProcessArgumentRejectsAmbiguousFlags(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		arguments []string
+		want      bool
+	}{
+		{name: "exact", arguments: []string{"azd", "--repo", "/project"}, want: true},
+		{name: "wrong value", arguments: []string{"azd", "--repo", "/other"}},
+		{name: "missing value", arguments: []string{"azd", "--repo"}},
+		{name: "duplicate same", arguments: []string{"azd", "--repo", "/project", "--repo", "/project"}},
+		{name: "duplicate conflicting", arguments: []string{"azd", "--repo", "/project", "--repo", "/other"}},
+		{name: "equals form", arguments: []string{"azd", "--repo=/project"}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := hasExactProcessArgument(testCase.arguments, "--repo", "/project"); got != testCase.want {
+				t.Fatalf("hasExactProcessArgument(%v) = %t, want %t", testCase.arguments, got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestRealProcessProfileLauncherVerifyReplacementSuccessorRequiresExactInstalledOwner(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
+	predecessor := startManagedLingeringDaemonProcess(t, launcher, "kill")
+	owner, present, err := captureProcessIdentity(predecessor.cmd.Process.Pid)
+	if err != nil || !present {
+		t.Fatalf("capture managed process = (%+v, %t, %v)", owner, present, err)
+	}
+	if err := launcher.verifyReplacementSuccessor(daemonCommand{executable: owner.executable}); err != nil {
+		t.Fatalf("verifyReplacementSuccessor(exact) error = %v", err)
+	}
+	if err := launcher.verifyReplacementSuccessor(daemonCommand{executable: launcher.BinPath}); err == nil || !strings.Contains(err.Error(), "installed successor executable") {
+		t.Fatalf("verifyReplacementSuccessor(other generation) error = %v, want executable mismatch", err)
+	}
+	launcher.RepoDir += "-other"
+	if err := launcher.verifyReplacementSuccessor(daemonCommand{executable: owner.executable}); err == nil || !strings.Contains(err.Error(), "canonical repo") {
+		t.Fatalf("verifyReplacementSuccessor(repo mismatch) error = %v, want repo mismatch", err)
+	}
 }
 
 func TestLauncherReplaceRejectsLiveCanonicalRuntimeWithoutOwnerIdentity(t *testing.T) {
@@ -1391,6 +1863,9 @@ func TestLauncherGlobalStartSerializesWithStopAndReplace(t *testing.T) {
 			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 			t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
 			launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
+			if testCase.name == "replace" {
+				launcher.replacementSuccessorVerifier = func(daemonCommand) error { return nil }
+			}
 			launcher.BinPath = "true"
 			predecessor := startLingeringDaemonProcess(t, launcher)
 
