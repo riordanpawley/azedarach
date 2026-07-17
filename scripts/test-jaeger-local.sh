@@ -2,12 +2,32 @@
 
 set -euo pipefail
 
+test_failure() {
+  local status="$1" line="$2" command="$3"
+  trap - ERR
+  printf 'jaeger lifecycle assertion failed at line %s (status %s): %s\n' \
+    "$line" "$status" "$command" >&2
+  exit "$status"
+}
+
+trap 'test_failure "$?" "$LINENO" "$BASH_COMMAND"' ERR
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo_root/scripts/jaeger-local.sh"
 
 test_tmp_parent="${TMPDIR:-/tmp}"
 tmp="$(mktemp -d "$test_tmp_parent/azedarach jaeger.XXXXXX")"
-trap 'rm -rf "$tmp"' EXIT
+test_cleanup() {
+  local child
+  trap - ERR EXIT
+  set +e
+  for child in $(jobs -pr); do
+    kill "$child" 2>/dev/null || true
+  done
+  wait 2>/dev/null || true
+  rm -rf "$tmp"
+}
+trap test_cleanup EXIT
 calls="$tmp/calls"
 now="$(date +%s)"
 
@@ -233,26 +253,24 @@ fi
 # publish transaction. The loser must reuse the winner and cannot remove it.
 concurrent_fallback_endpoint="$tmp/concurrent fallback endpoint"
 concurrent_fallback_second_endpoint="$tmp/concurrent fallback second endpoint"
-fallback_lock_acquired="$tmp/fallback lifecycle acquired"
-fallback_lock_continue="$tmp/fallback lifecycle continue"
+fallback_lock_acquired="$tmp/fallback lifecycle acquired fifo"
+fallback_lock_continue="$tmp/fallback lifecycle continue fifo"
 fallback_first_result="$tmp/fallback first result"
 fallback_second_result="$tmp/fallback second result"
 : >"$stateful_calls"
-rm -f "$stateful_fallback" "$fallback_lock_acquired" "$fallback_lock_continue"
+rm -f "$stateful_fallback"
+mkfifo "$fallback_lock_acquired" "$fallback_lock_continue"
 (
   set +e
   AZEDARACH_JAEGER_ENDPOINT_FILE="$concurrent_fallback_second_endpoint" \
-    AZEDARACH_JAEGER_TEST_LIFECYCLE_ACQUIRED_FILE="$fallback_lock_acquired" \
-    AZEDARACH_JAEGER_TEST_LIFECYCLE_CONTINUE_FILE="$fallback_lock_continue" \
+    AZEDARACH_JAEGER_TEST_LIFECYCLE_ACQUIRED_FIFO="$fallback_lock_acquired" \
+    AZEDARACH_JAEGER_TEST_LIFECYCLE_CONTINUE_FIFO="$fallback_lock_continue" \
     jaeger_start_fallback "$stateful_engine_executable" azedarach-jaeger
   printf '%s\n' "$?" >"$fallback_first_result"
 ) &
 fallback_first_pid=$!
-for attempt in {1..200}; do
-  [[ -e "$fallback_lock_acquired" ]] && break
-  sleep 0.05
-done
-[[ -e "$fallback_lock_acquired" ]]
+IFS= read -r fallback_lock_signal <"$fallback_lock_acquired"
+[[ "$fallback_lock_signal" == "ready" ]]
 (
   set +e
   AZEDARACH_JAEGER_ENDPOINT_FILE="$concurrent_fallback_endpoint" \
@@ -260,9 +278,7 @@ done
   printf '%s\n' "$?" >"$fallback_second_result"
 ) &
 fallback_second_pid=$!
-sleep 0.2
-[[ ! -e "$fallback_second_result" ]]
-: >"$fallback_lock_continue"
+printf '%s\n' continue >"$fallback_lock_continue"
 wait "$fallback_first_pid"
 wait "$fallback_second_pid"
 [[ "$(<"$fallback_first_result")" == "0" && "$(<"$fallback_second_result")" == "0" ]]
@@ -277,27 +293,25 @@ awk '
 # first caller creates and activates the primary, the second observes/reuses it.
 concurrent_primary_endpoint="$tmp/concurrent primary endpoint"
 concurrent_primary_second_endpoint="$tmp/concurrent primary second endpoint"
-primary_lock_acquired="$tmp/primary lifecycle acquired"
-primary_lock_continue="$tmp/primary lifecycle continue"
+primary_lock_acquired="$tmp/primary lifecycle acquired fifo"
+primary_lock_continue="$tmp/primary lifecycle continue fifo"
 primary_first_result="$tmp/primary first result"
 primary_second_result="$tmp/primary second result"
 : >"$stateful_calls"
-rm -f "$stateful_primary" "$stateful_fallback" "$primary_lock_acquired" "$primary_lock_continue"
+rm -f "$stateful_primary" "$stateful_fallback"
+mkfifo "$primary_lock_acquired" "$primary_lock_continue"
 (
   set +e
   AZEDARACH_CONTAINER_ENGINE="$stateful_engine_executable" \
     AZEDARACH_JAEGER_ENDPOINT_FILE="$concurrent_primary_second_endpoint" \
-    AZEDARACH_JAEGER_TEST_LIFECYCLE_ACQUIRED_FILE="$primary_lock_acquired" \
-    AZEDARACH_JAEGER_TEST_LIFECYCLE_CONTINUE_FILE="$primary_lock_continue" \
+    AZEDARACH_JAEGER_TEST_LIFECYCLE_ACQUIRED_FIFO="$primary_lock_acquired" \
+    AZEDARACH_JAEGER_TEST_LIFECYCLE_CONTINUE_FIFO="$primary_lock_continue" \
     jaeger_ensure
   printf '%s\n' "$?" >"$primary_first_result"
 ) &
 primary_first_pid=$!
-for attempt in {1..200}; do
-  [[ -e "$primary_lock_acquired" ]] && break
-  sleep 0.05
-done
-[[ -e "$primary_lock_acquired" ]]
+IFS= read -r primary_lock_signal <"$primary_lock_acquired"
+[[ "$primary_lock_signal" == "ready" ]]
 (
   set +e
   AZEDARACH_CONTAINER_ENGINE="$stateful_engine_executable" \
@@ -306,9 +320,7 @@ done
   printf '%s\n' "$?" >"$primary_second_result"
 ) &
 primary_second_pid=$!
-sleep 0.2
-[[ ! -e "$primary_second_result" ]]
-: >"$primary_lock_continue"
+printf '%s\n' continue >"$primary_lock_continue"
 wait "$primary_first_pid"
 wait "$primary_second_pid"
 [[ "$(<"$primary_first_result")" == "0" && "$(<"$primary_second_result")" == "0" ]]
@@ -377,19 +389,19 @@ printf '%s\n%s\n' 99999999 stale-start >"${AZEDARACH_JAEGER_ENDPOINT_FILE}.state
 stale_lock_record="$(jaeger_write_endpoint_state localhost:34318 "$((now + 3600))" stale-lock-recovery)"
 [[ -e "$stale_lock_record" && -f "${AZEDARACH_JAEGER_ENDPOINT_FILE}.state-lock" ]]
 
-# Rewriting stale-looking file contents cannot steal a live advisory lock or
-# admit another writer into the critical section.
+# Rewriting stale-looking file contents while an advisory lock is held cannot
+# prevent the queued writer from acquiring the same lock after release.
 jaeger_endpoint_lock_acquire
+blocked_entered="$tmp/blocked entered fifo"
+mkfifo "$blocked_entered"
 (
+  printf '%s\n' ready >"$blocked_entered"
   jaeger_write_endpoint_state localhost:34318 "$((now + 3600))" blocked-writer >"$tmp/blocked record"
-  : >"$tmp/blocked done"
 ) &
 blocked_pid=$!
-sleep 0.2
-[[ ! -e "$tmp/blocked done" ]]
+IFS= read -r blocked_signal <"$blocked_entered"
+[[ "$blocked_signal" == "ready" ]]
 printf '%s\n%s\n' 88888888 replacement-looking >"${AZEDARACH_JAEGER_ENDPOINT_FILE}.state-lock"
-sleep 0.1
-[[ ! -e "$tmp/blocked done" ]]
 jaeger_endpoint_lock_release
 wait "$blocked_pid"
 [[ -e "$(sed -n '1p' "$tmp/blocked record")" ]]
@@ -398,37 +410,35 @@ wait "$blocked_pid"
 # long-lived parent in subshells. The Perl holder captures getppid() itself, so
 # killing the actual spawning shell releases flock and unblocks the contender.
 bash32_endpoint="$tmp/bash 3.2 endpoint"
-bash32_ready="$tmp/bash 3.2 lock ready"
+bash32_ready="$tmp/bash 3.2 lock ready fifo"
+bash32_hold="$tmp/bash 3.2 lock hold fifo"
+mkfifo "$bash32_ready" "$bash32_hold"
 JAEGER_SCRIPT="$repo_root/scripts/jaeger-local.sh" \
   AZEDARACH_JAEGER_ENDPOINT_FILE="$bash32_endpoint" \
   LOCK_READY="$bash32_ready" \
+  LOCK_HOLD="$bash32_hold" \
   /bin/bash -c '
     set -euo pipefail
     source "$JAEGER_SCRIPT"
     jaeger_endpoint_lock_acquire
-    : >"$LOCK_READY"
-    while :; do sleep 1; done
+    printf "%s\n" ready >"$LOCK_READY"
+    IFS= read -r _ <"$LOCK_HOLD"
   ' &
 bash32_owner=$!
-for attempt in {1..200}; do
-  [[ -e "$bash32_ready" ]] && break
-  sleep 0.05
-done
-[[ -e "$bash32_ready" ]]
+IFS= read -r bash32_signal <"$bash32_ready"
+[[ "$bash32_signal" == "ready" ]]
+bash32_contender_entered="$tmp/bash 3.2 contender entered fifo"
+mkfifo "$bash32_contender_entered"
 (
+  printf '%s\n' ready >"$bash32_contender_entered"
   AZEDARACH_JAEGER_ENDPOINT_FILE="$bash32_endpoint" \
     jaeger_write_endpoint_state localhost:4318 0 bash32-contender >"$tmp/bash 3.2 record"
-  : >"$tmp/bash 3.2 done"
 ) &
 bash32_contender=$!
-sleep 0.2
-[[ ! -e "$tmp/bash 3.2 done" ]]
+IFS= read -r bash32_contender_signal <"$bash32_contender_entered"
+[[ "$bash32_contender_signal" == "ready" ]]
 kill -9 "$bash32_owner"
 wait "$bash32_owner" 2>/dev/null || true
-for attempt in {1..200}; do
-  [[ -e "$tmp/bash 3.2 done" ]] && break
-  sleep 0.05
-done
 wait "$bash32_contender"
 [[ -e "$(sed -n '1p' "$tmp/bash 3.2 record")" ]]
 if find "$tmp" -maxdepth 1 -name 'bash 3.2 endpoint.state-lock.control.*' -print -quit | grep -q .; then
@@ -551,9 +561,16 @@ rm -f "${AZEDARACH_JAEGER_ENDPOINT_FILE}.workers"
 # Stateful reuse relinks the established owner's immutable endpoint generation.
 # It must not replace the collector or owner, and the original deadline wins.
 : >"$calls"
-export FAKE_FALLBACK=1 FAKE_EXPIRES_AT="$(( $(date +%s) + 3 ))"
+expiry_ready_fifo="$tmp/expiry ready fifo"
+expiry_continue_fifo="$tmp/expiry continue fifo"
+mkfifo "$expiry_ready_fifo" "$expiry_continue_fifo"
+export AZEDARACH_JAEGER_TEST_EXPIRY_READY_FIFO="$expiry_ready_fifo"
+export AZEDARACH_JAEGER_TEST_EXPIRY_CONTINUE_FIFO="$expiry_continue_fifo"
+export FAKE_FALLBACK=1 FAKE_EXPIRES_AT="$((now + 60))"
 jaeger_publish_env "$fake_engine_executable" azedarach-jaeger-fallback >/dev/null
 jaeger_schedule_published_expiry "$fake_engine_executable" azedarach-jaeger-fallback
+IFS= read -r expiry_ready_signal <"$expiry_ready_fifo"
+[[ "$expiry_ready_signal" == "ready" ]]
 worker_ready_file="$(find "${AZEDARACH_JAEGER_ENDPOINT_FILE}.workers" -name ready -type f)"
 worker_pid="$(sed -n '1p' "$worker_ready_file")"
 worker_record="$(sed -n '7p' "$worker_ready_file")"
@@ -568,10 +585,11 @@ if grep -Eq '^(rm -f|run) ' "$calls"; then
   echo "live fallback reuse replaced the collector" >&2
   exit 1
 fi
-sleep 4
+printf '%s\n' continue >"$expiry_continue_fifo"
+wait "$worker_pid"
 grep -q '^rm -f azedarach-jaeger-fallback ' "$calls"
 [[ ! -e "$worker_record" && ! -e "$AZEDARACH_JAEGER_ENDPOINT_FILE" ]]
-unset FAKE_FALLBACK
+unset FAKE_FALLBACK AZEDARACH_JAEGER_TEST_EXPIRY_READY_FIFO AZEDARACH_JAEGER_TEST_EXPIRY_CONTINUE_FIFO
 
 # Endpoint mutation is serialized across the full adoption decision. If a
 # primary publication wins after fallback adoption observes its owner, the
@@ -585,21 +603,21 @@ race_ready_file="$(find "${AZEDARACH_JAEGER_ENDPOINT_FILE}.workers" -name ready 
 race_slot="$(dirname "$race_ready_file")"
 race_pid="$(sed -n '1p' "$race_ready_file")"
 race_record="$JAEGER_PUBLISHED_ENDPOINT_RECORD"
-export AZEDARACH_JAEGER_TEST_ADOPT_OBSERVED_FILE="$tmp/adopt observed"
-export AZEDARACH_JAEGER_TEST_ADOPT_CONTINUE_FILE="$tmp/adopt continue"
+adopt_observed_fifo="$tmp/adopt observed fifo"
+adopt_continue_fifo="$tmp/adopt continue fifo"
+mkfifo "$adopt_observed_fifo" "$adopt_continue_fifo"
+export AZEDARACH_JAEGER_TEST_ADOPT_OBSERVED_FIFO="$adopt_observed_fifo"
+export AZEDARACH_JAEGER_TEST_ADOPT_CONTINUE_FIFO="$adopt_continue_fifo"
 (
   set +e
   jaeger_start_fallback "$fake_engine_executable" azedarach-jaeger >"$tmp/adopt output" 2>&1
   printf '%s\n' "$?" >"$tmp/adopt status"
 ) &
 adopt_pid=$!
-for attempt in {1..200}; do
-  [[ -e "$AZEDARACH_JAEGER_TEST_ADOPT_OBSERVED_FILE" ]] && break
-  sleep 0.05
-done
-[[ -e "$AZEDARACH_JAEGER_TEST_ADOPT_OBSERVED_FILE" ]]
+IFS= read -r adopt_signal <"$adopt_observed_fifo"
+[[ "$adopt_signal" == "ready" ]]
 primary_record="$(jaeger_write_endpoint_state localhost:4318 0 race-primary)"
-: >"$AZEDARACH_JAEGER_TEST_ADOPT_CONTINUE_FILE"
+printf '%s\n' continue >"$adopt_continue_fifo"
 wait "$adopt_pid"
 [[ "$(sed -n '1p' "$tmp/adopt status")" == "0" ]]
 [[ "$(readlink "$AZEDARACH_JAEGER_ENDPOINT_FILE")" == "$primary_record" ]]
@@ -610,10 +628,9 @@ if grep -Eq '^(rm -f|run) ' "$calls"; then
   echo "losing fallback publisher replaced the primary winner" >&2
   exit 1
 fi
-unset AZEDARACH_JAEGER_TEST_ADOPT_OBSERVED_FILE AZEDARACH_JAEGER_TEST_ADOPT_CONTINUE_FILE
+unset AZEDARACH_JAEGER_TEST_ADOPT_OBSERVED_FIFO AZEDARACH_JAEGER_TEST_ADOPT_CONTINUE_FIFO
 kill "$race_pid" 2>/dev/null || true
 wait "$race_pid" 2>/dev/null || true
-sleep 0.1
 jaeger_clear_worker_slot "$race_slot" || true
 unset FAKE_FALLBACK
 
@@ -638,6 +655,7 @@ if kill -0 "$handoff_pid" 2>/dev/null; then
   echo "established expiry owner survived generation handoff" >&2
   exit 1
 fi
+wait "$handoff_pid" 2>/dev/null || true
 grep -q '^rm -f azedarach-jaeger-fallback ' "$calls"
 [[ ! -e "$JAEGER_PUBLISHED_ENDPOINT_RECORD" && ! -e "$AZEDARACH_JAEGER_ENDPOINT_FILE" ]]
 unset AZEDARACH_JAEGER_EXPIRY_WORKER_FAIL_INIT
@@ -650,7 +668,9 @@ JAEGER_PUBLISHED_ENDPOINT_RECORD="$(jaeger_write_endpoint_state localhost:34318 
 worker_key="$(printf '%s' "${fake_engine_executable}:azedarach-jaeger-fallback:${JAEGER_PUBLISHED_EXPIRES_AT}" | cksum | awk '{print $1}')"
 stale_slot="${AZEDARACH_JAEGER_ENDPOINT_FILE}.workers/${worker_key}"
 mkdir "$stale_slot"
-sleep 30 &
+unrelated_hold_fifo="$tmp/unrelated process hold fifo"
+mkfifo "$unrelated_hold_fifo"
+/bin/bash -c 'IFS= read -r _ <"$1"' _ "$unrelated_hold_fifo" &
 unrelated_pid=$!
 unrelated_start="$(ps -p "$unrelated_pid" -o lstart= | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
 printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
@@ -665,7 +685,6 @@ kill "$replacement_pid" 2>/dev/null || true
 wait "$replacement_pid" 2>/dev/null || true
 kill "$unrelated_pid" 2>/dev/null || true
 wait "$unrelated_pid" 2>/dev/null || true
-sleep 0.1
 jaeger_clear_worker_slot "$stale_slot" || true
 
 # An abandoned pre-readiness slot is reclaimed instead of suppressing expiry.
@@ -678,18 +697,33 @@ jaeger_schedule_published_expiry "$fake_engine_executable" azedarach-jaeger-fall
 worker_pid="$(sed -n '1p' "$abandoned_slot/ready")"
 kill "$worker_pid" 2>/dev/null || true
 wait "$worker_pid" 2>/dev/null || true
-sleep 0.1
 jaeger_clear_worker_slot "$abandoned_slot" || true
 
-# The ready worker survives its scheduling caller and expires the fallback.
+# The ready worker survives its scheduling caller and expires the fallback
+# after an explicit test-controlled expiry transition.
 : >"$calls"
-export FAKE_EXPIRES_AT="$(( $(date +%s) + 2 ))"
+final_expiry_ready_fifo="$tmp/final expiry ready fifo"
+final_expiry_continue_fifo="$tmp/final expiry continue fifo"
+final_expiry_complete_fifo="$tmp/final expiry complete fifo"
+mkfifo "$final_expiry_ready_fifo" "$final_expiry_continue_fifo" "$final_expiry_complete_fifo"
+export AZEDARACH_JAEGER_TEST_EXPIRY_READY_FIFO="$final_expiry_ready_fifo"
+export AZEDARACH_JAEGER_TEST_EXPIRY_CONTINUE_FIFO="$final_expiry_continue_fifo"
+export AZEDARACH_JAEGER_TEST_EXPIRY_COMPLETE_FIFO="$final_expiry_complete_fifo"
+export FAKE_EXPIRES_AT="$((now + 60))"
 JAEGER_PUBLISHED_EXPIRES_AT="$FAKE_EXPIRES_AT"
 JAEGER_PUBLISHED_ENDPOINT_RECORD="$(jaeger_write_endpoint_state localhost:34318 "$JAEGER_PUBLISHED_EXPIRES_AT" azedarach-jaeger-fallback)"
 (jaeger_schedule_published_expiry "$fake_engine_executable" azedarach-jaeger-fallback)
-sleep 3
+IFS= read -r final_expiry_signal <"$final_expiry_ready_fifo"
+[[ "$final_expiry_signal" == "ready" ]]
+final_worker_ready_file="$(find "${AZEDARACH_JAEGER_ENDPOINT_FILE}.workers" -name ready -type f -print -quit)"
+[[ -n "$(sed -n '1p' "$final_worker_ready_file")" ]]
+printf '%s\n' continue >"$final_expiry_continue_fifo"
+IFS= read -r final_expiry_complete_signal <"$final_expiry_complete_fifo"
+[[ "$final_expiry_complete_signal" == "complete" ]]
 grep -q '^rm -f azedarach-jaeger-fallback ' "$calls"
 [[ ! -e "$AZEDARACH_JAEGER_ENDPOINT_FILE" ]]
+unset AZEDARACH_JAEGER_TEST_EXPIRY_READY_FIFO AZEDARACH_JAEGER_TEST_EXPIRY_CONTINUE_FIFO \
+  AZEDARACH_JAEGER_TEST_EXPIRY_COMPLETE_FIFO
 export AZEDARACH_JAEGER_DISABLE_EXPIRY_WORKER=1
 
 echo "jaeger local lifecycle tests passed"

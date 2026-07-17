@@ -96,6 +96,18 @@ jaeger_lifecycle_lock_file() {
   fi
 }
 
+jaeger_test_barrier() {
+  local ready_fifo="$1" continue_fifo="$2" signal
+  [[ -n "$ready_fifo" || -n "$continue_fifo" ]] || return 0
+  if [[ ! -p "$ready_fifo" || ! -p "$continue_fifo" ]]; then
+    echo "Warning: managed Jaeger test barrier requires ready and continue FIFOs" >&2
+    return 1
+  fi
+  printf '%s\n' ready >"$ready_fifo" || return 1
+  IFS= read -r signal <"$continue_fifo" || return 1
+  [[ "$signal" == "continue" ]]
+}
+
 jaeger_advisory_lock_acquire() {
   local lock="$1" purpose="$2" control ready release helper attempt perl_bin="${AZEDARACH_JAEGER_PERL:-perl}"
   mkdir -p "$(dirname "$lock")" || return 1
@@ -200,7 +212,14 @@ jaeger_lifecycle_lock_acquire() {
   JAEGER_LIFECYCLE_LOCK_HELPER="$JAEGER_ADVISORY_LOCK_HELPER"
   JAEGER_ADVISORY_LOCK_CONTROL=""
   JAEGER_ADVISORY_LOCK_HELPER=""
-  if [[ -n "${AZEDARACH_JAEGER_TEST_LIFECYCLE_ACQUIRED_FILE:-}" &&
+  if [[ -n "${AZEDARACH_JAEGER_TEST_LIFECYCLE_ACQUIRED_FIFO:-}" ||
+    -n "${AZEDARACH_JAEGER_TEST_LIFECYCLE_CONTINUE_FIFO:-}" ]]; then
+    if ! jaeger_test_barrier "${AZEDARACH_JAEGER_TEST_LIFECYCLE_ACQUIRED_FIFO:-}" \
+      "${AZEDARACH_JAEGER_TEST_LIFECYCLE_CONTINUE_FIFO:-}"; then
+      jaeger_lifecycle_lock_release || true
+      return 1
+    fi
+  elif [[ -n "${AZEDARACH_JAEGER_TEST_LIFECYCLE_ACQUIRED_FILE:-}" &&
     ! -e "$AZEDARACH_JAEGER_TEST_LIFECYCLE_ACQUIRED_FILE" ]]; then
     : >"$AZEDARACH_JAEGER_TEST_LIFECYCLE_ACQUIRED_FILE"
     for attempt in {1..200}; do
@@ -359,6 +378,7 @@ jaeger_schedule_published_expiry_locked() {
     return 0
   fi
   kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
   jaeger_abort_fallback_expiry_locked "$engine" "$name" "$expires" "$record" "$slot"
   return 1
 }
@@ -457,7 +477,11 @@ jaeger_adopt_expiry_owner() {
   worker_key="$(printf '%s' "${engine}:${name}:${expires}" | cksum | awk '{print $1}')" || return 1
   slot="${worker_dir}/${worker_key}"
   [[ -d "$slot" ]] || return 1
-  if [[ -n "${AZEDARACH_JAEGER_TEST_ADOPT_OBSERVED_FILE:-}" ]]; then
+  if [[ -n "${AZEDARACH_JAEGER_TEST_ADOPT_OBSERVED_FIFO:-}" ||
+    -n "${AZEDARACH_JAEGER_TEST_ADOPT_CONTINUE_FIFO:-}" ]]; then
+    jaeger_test_barrier "${AZEDARACH_JAEGER_TEST_ADOPT_OBSERVED_FIFO:-}" \
+      "${AZEDARACH_JAEGER_TEST_ADOPT_CONTINUE_FIFO:-}" || return 2
+  elif [[ -n "${AZEDARACH_JAEGER_TEST_ADOPT_OBSERVED_FILE:-}" ]]; then
     : >"$AZEDARACH_JAEGER_TEST_ADOPT_OBSERVED_FILE"
     for attempt in {1..200}; do
       [[ -e "${AZEDARACH_JAEGER_TEST_ADOPT_CONTINUE_FILE:-}" ]] && break
@@ -496,7 +520,18 @@ jaeger_expiry_worker() {
   ready_tmp="$slot/ready.tmp.$$"
   printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$$" "$start" "$nonce" "$engine" "$name" "$expires" "$record" "$slot" >"$ready_tmp" || return 1
   mv -f "$ready_tmp" "$slot/ready" || return 1
-  jaeger_expire_fallback "$engine" "$name" "$expires" "$record" "$slot"
+  if [[ -n "${AZEDARACH_JAEGER_TEST_EXPIRY_READY_FIFO:-}" ||
+    -n "${AZEDARACH_JAEGER_TEST_EXPIRY_CONTINUE_FIFO:-}" ]]; then
+    jaeger_test_barrier "${AZEDARACH_JAEGER_TEST_EXPIRY_READY_FIFO:-}" \
+      "${AZEDARACH_JAEGER_TEST_EXPIRY_CONTINUE_FIFO:-}" || return 1
+    jaeger_with_lifecycle_lock jaeger_expire_fallback_locked "$engine" "$name" "$expires" "$record" "$slot"
+  else
+    jaeger_expire_fallback "$engine" "$name" "$expires" "$record" "$slot"
+  fi
+  if [[ -n "${AZEDARACH_JAEGER_TEST_EXPIRY_COMPLETE_FIFO:-}" ]]; then
+    [[ -p "$AZEDARACH_JAEGER_TEST_EXPIRY_COMPLETE_FIFO" ]] || return 1
+    printf '%s\n' complete >"$AZEDARACH_JAEGER_TEST_EXPIRY_COMPLETE_FIFO" || return 1
+  fi
   armed=0
   trap - EXIT
 }
