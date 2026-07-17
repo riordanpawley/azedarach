@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -257,6 +258,36 @@ func TestRuntimeProjectionWriterPersistsBeforePublishingSessionEvents(t *testing
 	}
 }
 
+func TestRuntimeProjectionWriterWaitHonorsCancellation(t *testing.T) {
+	ctx := context.Background()
+	d := &Daemon{cfg: Config{RepoDir: ".", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
+	writer := newRuntimeProjectionWriter(d)
+	releaseHolder, err := writer.lockProjectionWriter(ctx, "project", "background.projection_refresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	waitObserved := make(chan struct{})
+	waitCtx, cancelWait := context.WithCancel(ctx)
+	waitCtx = withRuntimeProjectionWriterWaitHookForTest(waitCtx, func(waiterOperation, holderOperation string) {
+		if waiterOperation != "orchestration.snapshot" || holderOperation != "background.projection_refresh" {
+			t.Errorf("runtime writer attribution waiter=%q holder=%q", waiterOperation, holderOperation)
+		}
+		close(waitObserved)
+	})
+	waitCtx = contextWithRuntimeProjectionWriterOperation(waitCtx, "orchestration.snapshot")
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- writer.PersistSessionProjection(waitCtx, "project", daemonstate.Session{ID: "blocked", IssueID: "issue"})
+	}()
+	<-waitObserved
+	cancelWait()
+	if err := <-waitDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled runtime writer wait error = %v, want context.Canceled", err)
+	}
+	releaseHolder()
+}
+
 func TestRuntimeProjectionWriterReleasesLockBeforeReadModelRefresh(t *testing.T) {
 	ctx := context.Background()
 	runtimeStateStore := newRuntimeProjectionStore(t)
@@ -295,10 +326,7 @@ func TestRuntimeProjectionWriterReleasesLockBeforeReadModelRefresh(t *testing.T)
 	}()
 
 	<-refreshEntered
-	lockAvailable := writer.mu.TryLock()
-	if lockAvailable {
-		writer.mu.Unlock()
-	}
+	lockAvailable := writer.mu.currentHolder() == ""
 	close(releaseRefresh)
 	if err := <-done; err != nil {
 		t.Fatalf("PersistSessionProjection: %v", err)

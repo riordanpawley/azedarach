@@ -968,6 +968,43 @@ func TestRealProcessProfileMergeCleanlyTransactionalAppliesScratchMergeToCleanTa
 	}
 }
 
+func TestCandidateValidationOutputRetainsStdoutWhenGateAlsoWritesStderr(t *testing.T) {
+	got := candidateValidationOutput("FAIL example.test/pkg::TestActionable\nexact assertion", "[gate] status=failed exit_status=1")
+	for _, want := range []string{"TestActionable", "exact assertion", "status=failed"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("candidateValidationOutput() = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestRealProcessProfileCandidateFailureRetainsActionableStdoutAndStderr(t *testing.T) {
+	repo := initDivergedRepo(t)
+	scriptsDir := filepath.Join(repo, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	gate := "#!/bin/sh\necho 'FAIL make-verify::consumer-check'\necho 'exact consumer failure'\necho '[gate] status=failed exit_status=1' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"), []byte(gate), 0o755); err != nil {
+		t.Fatalf("write candidate gate: %v", err)
+	}
+	runClientTestGit(t, repo, "add", "scripts/git-merge-rebase-gate.sh")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "add failing candidate gate")
+
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	result, err := client.MergeCleanlyTransactional(context.Background(), repo, "feature")
+	if err != nil {
+		t.Fatalf("MergeCleanlyTransactional() error = %v", err)
+	}
+	if result == nil || result.Success || len(result.ValidationAttempts) != 1 {
+		t.Fatalf("MergeCleanlyTransactional() = %+v, want typed candidate failure", result)
+	}
+	for _, want := range []string{"FAIL make-verify::consumer-check", "exact consumer failure", "status=failed"} {
+		if !strings.Contains(result.Message, want) || !strings.Contains(result.ValidationAttempts[0].Message, want) {
+			t.Fatalf("candidate failure = %+v, want %q", result, want)
+		}
+	}
+}
+
 func TestRealProcessProfileMergeCleanlyTransactionalDoesNotGateConflictedCandidate(t *testing.T) {
 	repo := t.TempDir()
 	runClientTestGit(t, repo, "init", "-q", "-b", "main")

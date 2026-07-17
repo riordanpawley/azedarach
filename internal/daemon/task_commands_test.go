@@ -7319,6 +7319,21 @@ func TestTaskCloseRemovedWorktreeRejectsStaleReceiptAfterSameBranchAncestorRetar
 	}
 }
 
+func TestFailedCandidateValidationAttemptSelectsLatestTypedFailure(t *testing.T) {
+	attempt, ok := failedCandidateValidationAttempt([]domain.IntegrationCandidateValidationAttempt{
+		{CandidateHead: "old", Status: domain.IntegrationCandidateValidationFailed, Message: "old failure"},
+		{CandidateHead: "cancelled", Status: domain.IntegrationCandidateValidationCancelled},
+		{CandidateHead: "exact", Status: domain.IntegrationCandidateValidationFailed, Message: "actionable failure"},
+	})
+	if !ok || attempt.CandidateHead != "exact" || attempt.Message != "actionable failure" {
+		t.Fatalf("failedCandidateValidationAttempt() = (%+v, %t), want latest typed failure", attempt, ok)
+	}
+	message, ok := candidateValidationFailureMessage([]domain.IntegrationCandidateValidationAttempt{attempt})
+	if !ok || !strings.Contains(message, "candidate validation for revision exact failed") || !strings.Contains(message, "actionable failure") || strings.Contains(message, "merge failed") {
+		t.Fatalf("candidateValidationFailureMessage() = (%q, %t), want typed actionable classification", message, ok)
+	}
+}
+
 func TestTaskCloseCommandDirtyChildTargetNamesPathsAndRecovery(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

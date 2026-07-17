@@ -63,10 +63,10 @@ func TestRunReportsLocalTimingViolationWithoutFailingCorrectness(t *testing.T) {
 	assert.Zero(t, measurement.ExitCode)
 }
 
-func TestWriteValidationLeaseEvidenceFileIncludesOverlapAndLeaseIdentity(t *testing.T) {
+func TestWriteValidationLeaseEvidenceFileIncludesFailuresOverlapAndLeaseIdentity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lease.json")
 	t.Setenv("AZEDARACH_VALIDATION_EVIDENCE_FILE", path)
-	measurement := Measurement{ValidationLease: ValidationLeaseEvidence{Held: true, RequestID: "req-1", Class: "aggregate", Scope: "ticket", Purpose: "review_evidence", Execution: "executed", AuthoritativeRequestID: "req-1", Override: "none", Profile: "cold", SourceRevision: "abc123"}, ProcessLoad: ProcessLoadEvidence{OverlapDetected: true, MaxExternalGoProcesses: 2}}
+	measurement := Measurement{ValidationLease: ValidationLeaseEvidence{Held: true, RequestID: "req-1", Class: "aggregate", Scope: "ticket", Purpose: "review_evidence", Execution: "executed", AuthoritativeRequestID: "req-1", Override: "none", Profile: "cold", SourceRevision: "abc123"}, ProcessLoad: ProcessLoadEvidence{OverlapDetected: true, MaxExternalGoProcesses: 2}, Failures: []Failure{{Package: "example.test/failure", Test: "TestSentinel", Output: "exact failure output"}}}
 	require.NoError(t, writeValidationLeaseEvidenceFile(measurement, ".tmp/test-timing/cold"))
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -81,12 +81,28 @@ func TestWriteValidationLeaseEvidenceFileIncludesOverlapAndLeaseIdentity(t *test
 	assert.Equal(t, "none", got["override"])
 	assert.Equal(t, true, got["overlap_detected"])
 	assert.Equal(t, float64(2), got["external_go_processes"])
+	assert.Contains(t, got["failure_summary"], "FAIL example.test/failure::TestSentinel")
+	assert.Contains(t, got["failure_summary"], "exact failure output")
 	require.NoError(t, writeValidationLeaseEvidenceFile(Measurement{ValidationLease: measurement.ValidationLease, ProcessLoad: ProcessLoadEvidence{}}, ".tmp/test-timing/boundary"))
 	data, err = os.ReadFile(path)
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(data, &got))
 	assert.Equal(t, true, got["overlap_detected"], "later nested profiles must not erase earlier overlap")
 	assert.Len(t, got["report_paths"], 2)
+	assert.Contains(t, got["failure_summary"], "TestSentinel", "later successful profiles must not erase earlier failures")
+}
+
+func TestFailureSummaryIsBoundedAndNamesTheFailure(t *testing.T) {
+	summary := FailureSummary([]Failure{
+		{Package: "example.test/failure", Test: "TestLarge", Output: strings.Repeat("é", 40*1024)},
+		{Package: "example.test/failure", Test: "TestLater", Output: "later exact output"},
+	})
+	assert.Contains(t, summary, "FAIL example.test/failure::TestLarge")
+	assert.Contains(t, summary, "[failure output truncated]")
+	assert.Contains(t, summary, "FAIL example.test/failure::TestLater")
+	assert.Contains(t, summary, "later exact output")
+	assert.True(t, len(summary) <= 33*1024, "summary bytes = %d", len(summary))
+	assert.True(t, strings.ToValidUTF8(summary, "") == summary, "summary must retain valid UTF-8")
 }
 
 func TestRunForcesIsolatedHomeConfigAndDatabaseRoots(t *testing.T) {

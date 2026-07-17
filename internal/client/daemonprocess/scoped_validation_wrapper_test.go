@@ -42,19 +42,21 @@ func TestScopedValidationDaemonProcess(t *testing.T) {
 
 func TestRealProcessProfileScopedValidationWrapperReapsDaemon(t *testing.T) {
 	tests := []struct {
-		name            string
-		payload         []string
-		signal          os.Signal
-		stopFails       bool
-		global          bool
-		wantHeartbeat   bool
-		slowCleanup     bool
-		recoverGo       bool
-		missingGo       bool
-		preloadEvidence bool
-		hangingCleanup  bool
-		wantExit        int
-		wantReaped      bool
+		name                     string
+		payload                  []string
+		signal                   os.Signal
+		stopFails                bool
+		global                   bool
+		wantHeartbeat            bool
+		slowCleanup              bool
+		recoverGo                bool
+		missingGo                bool
+		preloadEvidence          bool
+		hangingCleanup           bool
+		cleanupLeaderExitsOnTERM bool
+		signalDuringCleanup      bool
+		wantExit                 int
+		wantReaped               bool
 	}{
 		{name: "success with protocol-skewed heartbeat during cleanup", payload: []string{"/bin/sh", "-c", "exit 0"}, wantExit: 0, wantReaped: true, wantHeartbeat: true, slowCleanup: true},
 		{name: "missing explicit Go binding recovers before cleanup", recoverGo: true, wantExit: 0, wantReaped: true},
@@ -66,11 +68,13 @@ func TestRealProcessProfileScopedValidationWrapperReapsDaemon(t *testing.T) {
 		{name: "cleanup failure after payload failure is durable", payload: []string{"/bin/sh", "-c", "exit 23"}, stopFails: true, wantExit: 78},
 		{name: "cleanup failure retains missing toolchain as payload phase", missingGo: true, stopFails: true, wantExit: 78},
 		{name: "hung cleanup is killed and durable finish continues", payload: []string{"/bin/sh", "-c", "exit 0"}, hangingCleanup: true, wantExit: 78},
+		{name: "cleanup timeout kills descendants after leader exits on term", payload: []string{"/bin/sh", "-c", "exit 0"}, hangingCleanup: true, cleanupLeaderExitsOnTERM: true, wantExit: 78},
+		{name: "signal after supervisor reap is handled during cleanup", payload: []string{"/bin/sh", "-c", "exit 0"}, signalDuringCleanup: true, wantExit: 0, wantReaped: true},
 		{name: "global daemon is untouched", payload: []string{"/bin/sh", "-c", "exit 0"}, global: true, wantExit: 0},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			fixture := newScopedValidationFixture(t, test.stopFails, test.global, test.slowCleanup, test.hangingCleanup)
+			fixture := newScopedValidationFixture(t, test.stopFails, test.global, test.slowCleanup, test.hangingCleanup, test.cleanupLeaderExitsOnTERM, test.signalDuringCleanup)
 			payload := test.payload
 			if test.recoverGo || test.missingGo {
 				repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
@@ -120,6 +124,17 @@ func TestRealProcessProfileScopedValidationWrapperReapsDaemon(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if test.signalDuringCleanup {
+				if err := waitForFileContent(fixture.orderLog, "stop-begin\n", 5*time.Second); err != nil {
+					t.Fatal(err)
+				}
+				if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(fixture.cleanupRelease, []byte("release\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if test.signal != nil {
 				if err := waitForFile(fixture.payloadReady, 5*time.Second); err != nil {
 					_ = cmd.Process.Kill()
@@ -152,7 +167,7 @@ func TestRealProcessProfileScopedValidationWrapperReapsDaemon(t *testing.T) {
 			} else if !errors.Is(readErr, os.ErrNotExist) {
 				t.Fatalf("global/failed cleanup unexpectedly invoked stop: %q err=%v", stopCalls, readErr)
 			}
-			fixture.assertChannelSeparationAndFinishOrder(test.stopFails, test.global, test.signal != nil, test.wantHeartbeat, test.slowCleanup, test.missingGo, test.preloadEvidence, test.hangingCleanup, payload, wrapperOutput.String())
+			fixture.assertChannelSeparationAndFinishOrder(test.stopFails, test.global, test.signal != nil || test.signalDuringCleanup, test.signalDuringCleanup, test.wantHeartbeat, test.slowCleanup, test.missingGo, test.preloadEvidence, test.hangingCleanup, payload, wrapperOutput.String())
 		})
 	}
 }
@@ -264,23 +279,25 @@ func TestValidationGoShimDiscoversOnlyLiteralPATHEntries(t *testing.T) {
 }
 
 type scopedValidationFixture struct {
-	t               *testing.T
-	root            string
-	controlShim     string
-	cleanupShim     string
-	readyPath       string
-	pidPath         string
-	stopLog         string
-	controlLog      string
-	orderLog        string
-	payloadReady    string
-	runtimeDir      string
-	cleanupWatchdog string
-	cleanupPID      string
-	env             []string
+	t                    *testing.T
+	root                 string
+	controlShim          string
+	cleanupShim          string
+	readyPath            string
+	pidPath              string
+	stopLog              string
+	controlLog           string
+	orderLog             string
+	payloadReady         string
+	runtimeDir           string
+	cleanupWatchdog      string
+	cleanupPID           string
+	cleanupDescendantPID string
+	cleanupRelease       string
+	env                  []string
 }
 
-func newScopedValidationFixture(t *testing.T, stopFails, global, slowCleanup, hangingCleanup bool) scopedValidationFixture {
+func newScopedValidationFixture(t *testing.T, stopFails, global, slowCleanup, hangingCleanup, cleanupLeaderExitsOnTERM, signalDuringCleanup bool) scopedValidationFixture {
 	t.Helper()
 	root := t.TempDir()
 	controlShim := filepath.Join(root, "production-az")
@@ -327,25 +344,39 @@ func newScopedValidationFixture(t *testing.T, stopFails, global, slowCleanup, ha
 	if slowCleanup {
 		env = append(env, "AZEDARACH_SCOPED_VALIDATION_SLOW_STOP=1")
 	}
+	if signalDuringCleanup {
+		env = append(env,
+			"AZEDARACH_SCOPED_VALIDATION_SIGNAL_DURING_CLEANUP=1",
+			"AZEDARACH_SCOPED_VALIDATION_CLEANUP_RELEASE="+filepath.Join(root, "cleanup.release"),
+		)
+	}
 	if hangingCleanup {
 		env = append(env,
 			"AZEDARACH_SCOPED_VALIDATION_HANG_STOP=1",
 			"AZEDARACH_VALIDATION_TEST_CLEANUP_WATCHDOG_FILE="+filepath.Join(root, "cleanup.watchdog"),
 			"AZEDARACH_SCOPED_VALIDATION_CLEANUP_PID="+filepath.Join(root, "cleanup.pid"),
 		)
+		if cleanupLeaderExitsOnTERM {
+			env = append(env,
+				"AZEDARACH_SCOPED_VALIDATION_CLEANUP_LEADER_EXITS_ON_TERM=1",
+				"AZEDARACH_SCOPED_VALIDATION_CLEANUP_DESCENDANT_PID="+filepath.Join(root, "cleanup-descendant.pid"),
+			)
+		}
 	}
 	return scopedValidationFixture{
 		t: t, root: root, controlShim: controlShim, cleanupShim: cleanupShim,
-		readyPath:       filepath.Join(root, "ready"),
-		pidPath:         filepath.Join(root, "pid"),
-		stopLog:         filepath.Join(root, "stop.log"),
-		controlLog:      filepath.Join(root, "control.log"),
-		orderLog:        filepath.Join(root, "order.log"),
-		payloadReady:    filepath.Join(root, "payload.ready"),
-		runtimeDir:      filepath.Join(root, "runtime"),
-		cleanupWatchdog: filepath.Join(root, "cleanup.watchdog"),
-		cleanupPID:      filepath.Join(root, "cleanup.pid"),
-		env:             env,
+		readyPath:            filepath.Join(root, "ready"),
+		pidPath:              filepath.Join(root, "pid"),
+		stopLog:              filepath.Join(root, "stop.log"),
+		controlLog:           filepath.Join(root, "control.log"),
+		orderLog:             filepath.Join(root, "order.log"),
+		payloadReady:         filepath.Join(root, "payload.ready"),
+		runtimeDir:           filepath.Join(root, "runtime"),
+		cleanupWatchdog:      filepath.Join(root, "cleanup.watchdog"),
+		cleanupPID:           filepath.Join(root, "cleanup.pid"),
+		cleanupDescendantPID: filepath.Join(root, "cleanup-descendant.pid"),
+		cleanupRelease:       filepath.Join(root, "cleanup.release"),
+		env:                  env,
 	}
 }
 
@@ -487,8 +518,25 @@ func stopScopedValidationTestDaemon() int {
 		defer signal.Stop(term)
 		_ = os.WriteFile(os.Getenv("AZEDARACH_SCOPED_VALIDATION_CLEANUP_PID"), []byte(strconv.Itoa(os.Getpid())), 0o600)
 		_ = appendLine(orderLog, "stop-begin")
+		if os.Getenv("AZEDARACH_SCOPED_VALIDATION_CLEANUP_LEADER_EXITS_ON_TERM") == "1" {
+			descendant := exec.Command("/bin/sh", "-c", `trap '' TERM; printf '%s\n' "$$" >"$AZEDARACH_SCOPED_VALIDATION_CLEANUP_DESCENDANT_PID"; while :; do sleep 1; done`)
+			descendant.Env = os.Environ()
+			if err := descendant.Start(); err != nil {
+				return 11
+			}
+			_ = descendant.Process.Release()
+			<-term
+			_ = appendLine(orderLog, "cleanup-term")
+			return 0
+		}
 		for range term {
 			_ = appendLine(orderLog, "cleanup-term")
+		}
+	}
+	if os.Getenv("AZEDARACH_SCOPED_VALIDATION_SIGNAL_DURING_CLEANUP") == "1" {
+		_ = appendLine(os.Getenv("AZEDARACH_SCOPED_VALIDATION_ORDER_LOG"), "stop-begin")
+		for !strings.Contains(string(readFileBestEffort(os.Getenv("AZEDARACH_SCOPED_VALIDATION_CLEANUP_RELEASE"))), "release\n") {
+			time.Sleep(10 * time.Millisecond)
 		}
 	}
 	if os.Getenv("AZEDARACH_SCOPED_VALIDATION_SLOW_STOP") == "1" {
@@ -529,7 +577,7 @@ func stopScopedValidationTestDaemon() int {
 	return 0
 }
 
-func (f scopedValidationFixture) assertChannelSeparationAndFinishOrder(stopFails, global, interrupted, wantHeartbeat, slowCleanup, missingGo, preloadEvidence, hangingCleanup bool, payload []string, wrapperOutput string) {
+func (f scopedValidationFixture) assertChannelSeparationAndFinishOrder(stopFails, global, interrupted, signalDuringCleanup, wantHeartbeat, slowCleanup, missingGo, preloadEvidence, hangingCleanup bool, payload []string, wrapperOutput string) {
 	f.t.Helper()
 	control := strings.Fields(string(readFileBestEffort(f.controlLog)))
 	joinedControl := strings.Join(control, " ")
@@ -553,7 +601,7 @@ func (f scopedValidationFixture) assertChannelSeparationAndFinishOrder(stopFails
 		return
 	}
 	wantSemantic := 2
-	if slowCleanup {
+	if slowCleanup || signalDuringCleanup {
 		wantSemantic = 3
 	}
 	if hangingCleanup {
@@ -589,7 +637,7 @@ func (f scopedValidationFixture) assertChannelSeparationAndFinishOrder(stopFails
 		f.t.Fatalf("finish record = %q, want %s and %s", finish, wantCleanup, wantState)
 	}
 	wantPayload := "payload=0"
-	if interrupted {
+	if interrupted && !signalDuringCleanup {
 		wantPayload = "payload=143"
 	} else if strings.Contains(strings.Join(payload, " "), "exit 23") {
 		wantPayload = "payload=23"
@@ -606,6 +654,12 @@ func (f scopedValidationFixture) assertChannelSeparationAndFinishOrder(stopFails
 		cleanupPID, err := strconv.Atoi(strings.TrimSpace(string(readFileBestEffort(f.cleanupPID))))
 		if err != nil || processAlive(cleanupPID) {
 			f.t.Fatalf("cleanup process pid=%d err=%v survived bounded cleanup", cleanupPID, err)
+		}
+		if data := readFileBestEffort(f.cleanupDescendantPID); len(data) > 0 {
+			descendantPID, err := strconv.Atoi(strings.TrimSpace(string(data)))
+			if err != nil || processAlive(descendantPID) {
+				f.t.Fatalf("cleanup descendant pid=%d err=%v survived bounded cleanup", descendantPID, err)
+			}
 		}
 	}
 	wantOutcomePayload := strings.Replace(wantPayload, "payload=", "payload_exit=", 1)

@@ -1624,6 +1624,100 @@ func TestProjectOrchestrationSnapshotReturnsUnavailableWhenMutationAdmissionIsCo
 	}
 }
 
+func TestProjectOrchestrationSnapshotDoesNotHoldIssueMutationLockWhileRuntimeWriterIsBlocked(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Candidate", Description: "Executable", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	writer := newRuntimeProjectionWriter(d)
+	releaseWriter, err := writer.lockProjectionWriter(ctx, "proj", "background.projection_refresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshotWaiting := make(chan struct{})
+	var waitOnce sync.Once
+	d.orchestrationSnapshotAuxiliaryRead = func(waitCtx context.Context) {
+		waitOnce.Do(func() { close(snapshotWaiting) })
+		unlock, lockErr := writer.lockProjectionWriter(waitCtx, "proj", "orchestration.snapshot")
+		if lockErr != nil {
+			return
+		}
+		unlock()
+	}
+	snapshotDone := make(chan error, 1)
+	go func() {
+		_, snapshotErr := (daemonOrchestrationAuthority{daemon: d}).Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
+		snapshotDone <- snapshotErr
+	}()
+	<-snapshotWaiting
+
+	mutations := []struct {
+		name string
+		run  func(context.Context) error
+	}{
+		{name: "update", run: func(mutationCtx context.Context) error {
+			return client.Update(mutationCtx, issueID, domain.StatusInProgress)
+		}},
+		{name: "event append", run: func(mutationCtx context.Context) error {
+			_, appendErr := client.AppendIssueObservationEvent(mutationCtx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventProgressRecorded, Source: "test", Payload: map[string]any{"summary": "still admissible"}})
+			return appendErr
+		}},
+		{name: "create", run: func(mutationCtx context.Context) error {
+			_, createErr := client.Create(mutationCtx, issues.CreateTaskParams{Title: "Concurrent", Type: domain.TypeTask, Priority: domain.P2, Status: domain.StatusOpen})
+			return createErr
+		}},
+		{name: "mail send", run: func(mutationCtx context.Context) error {
+			body := mustMarshal(t, protocol.MailSendCommandBody{RepoDir: repoDir, ParentIssue: issueID, IssueID: naming.IssueID(issueID), Type: "worker-progress", From: "worker", Body: "snapshot must not block mail"})
+			resp, sendErr := d.handleMailSend(mutationCtx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "dqq-mail", Command: protocol.CommandMailSend, Meta: protocol.Metadata{ProjectID: "proj"}, Body: body})
+			if sendErr != nil {
+				return sendErr
+			}
+			if !resp.OK {
+				return fmt.Errorf("mail response: %+v", resp.Error)
+			}
+			return nil
+		}},
+	}
+
+	blockedBySnapshot := ""
+	for _, mutation := range mutations {
+		mutationWaited := make(chan struct{}, 1)
+		mutationCtx := issues.WithMutationLockWaitHookForTest(ctx, func(_, _ string) {
+			mutationWaited <- struct{}{}
+		})
+		mutationDone := make(chan error, 1)
+		go func() { mutationDone <- mutation.run(mutationCtx) }()
+		select {
+		case err := <-mutationDone:
+			if err != nil {
+				t.Fatalf("concurrent %s: %v", mutation.name, err)
+			}
+		case <-mutationWaited:
+			blockedBySnapshot = mutation.name
+		}
+		if blockedBySnapshot != "" {
+			releaseWriter()
+			if err := <-mutationDone; err != nil {
+				t.Fatalf("blocked %s: %v", mutation.name, err)
+			}
+			if err := <-snapshotDone; err != nil {
+				t.Fatalf("project snapshot: %v", err)
+			}
+			t.Fatalf("project snapshot held the issue mutation lock while waiting for the runtime projection writer; blocked %s", blockedBySnapshot)
+		}
+	}
+	releaseWriter()
+	if err := <-snapshotDone; err != nil {
+		t.Fatalf("project snapshot: %v", err)
+	}
+}
+
 func TestProjectOrchestrationStartNeverTouchesExplicitBacklogIssue(t *testing.T) {
 	ctx := context.Background()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
@@ -1865,24 +1959,24 @@ func TestProjectOrchestrationSnapshotRetriesAcrossPostExportInteractionResolutio
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := candidateClass(snapshot.Candidates, issueID); got != string(domain.OrchestrationCandidateDecisionWaiting) {
-		t.Fatalf("candidate class = %q, want checkpointed decision-waiting state", got)
+	if got := candidateClass(snapshot.Candidates, issueID); got != "runnable" {
+		t.Fatalf("candidate class = %q, want runnable from retried checkpoint", got)
 	}
-	if reason := snapshot.Blocked[issueID]; reason == "" {
-		t.Fatalf("blocked reason = %q, want checkpointed interaction blocker", reason)
+	if reason := snapshot.Blocked[issueID]; strings.Contains(reason, "unresolved interaction") {
+		t.Fatalf("blocked reason = %q, must not retain superseded interaction", reason)
 	}
-	if slices.Contains(snapshot.Runnable, issueID) {
-		t.Fatalf("runnable = %v, must not mix post-checkpoint interaction resolution", snapshot.Runnable)
+	if !slices.Contains(snapshot.Runnable, issueID) {
+		t.Fatalf("runnable = %v, want issue from retried checkpoint", snapshot.Runnable)
 	}
-	if len(snapshot.Interactions) != 1 {
-		t.Fatalf("interactions = %+v, want checkpointed request", snapshot.Interactions)
+	if len(snapshot.Interactions) != 0 {
+		t.Fatalf("interactions = %+v, want resolved request absent after whole-snapshot retry", snapshot.Interactions)
 	}
 	checkpoint, err := reader.ProjectionSourceCheckpoint(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Source.Projector.ID == "" || checkpoint == 0 {
-		t.Fatalf("snapshot source=%+v checkpoint=%d", snapshot.Source, checkpoint)
+	if snapshot.ProjectionRevision != checkpoint {
+		t.Fatalf("projection revision = %d, want retried checkpoint %d", snapshot.ProjectionRevision, checkpoint)
 	}
 }
 
@@ -1915,18 +2009,51 @@ func TestProjectOrchestrationSnapshotRetriesPostExportReviewEvidenceMutation(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Source.Projector.ID == "" || checkpoint == 0 || appended.ID != 0 {
-		t.Fatalf("snapshot source=%+v checkpoint=%d appended=%d, want one checkpoint without export-hook retry", snapshot.Source, checkpoint, appended.ID)
+	if snapshot.ProjectionRevision != checkpoint || appended.ID == 0 {
+		t.Fatalf("snapshot revision=%d checkpoint=%d appended=%d, want one retried authoritative checkpoint", snapshot.ProjectionRevision, checkpoint, appended.ID)
 	}
-	if len(snapshot.ReviewQueue) != 1 || snapshot.ReviewQueue[0].IssueID != issueID || snapshot.ReviewQueue[0].Evidence != nil {
-		t.Fatalf("review queue = %+v, want checkpointed pre-evidence state", snapshot.ReviewQueue)
+	if len(snapshot.ReviewQueue) != 1 || snapshot.ReviewQueue[0].IssueID != issueID || snapshot.ReviewQueue[0].Evidence == nil {
+		t.Fatalf("review queue = %+v, want post-export evidence from retried snapshot", snapshot.ReviewQueue)
 	}
 	foundRecent := false
 	for _, event := range snapshot.RecentEvents {
 		foundRecent = foundRecent || event.Seq == appended.ID
 	}
-	if foundRecent {
-		t.Fatalf("recent events = %+v, must not include post-checkpoint event %d", snapshot.RecentEvents, appended.ID)
+	if !foundRecent {
+		t.Fatalf("recent events = %+v, want post-export event %d", snapshot.RecentEvents, appended.ID)
+	}
+}
+
+func TestProjectOrchestrationSnapshotReturnsUnavailableAfterBoundedRevisionChurn(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "issues.db")
+	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
+	writer := newMigratedIssueClientAtPath(t, path, slog.Default())
+	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
+	issueID, err := reader.Create(ctx, issues.CreateTaskParams{Title: "Candidate", Description: "Executable", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}}
+	exports := 0
+	d.orchestrationProjectionExported = func() {
+		exports++
+		if _, appendErr := writer.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+			Type: domain.IssueEventProgressRecorded, Source: "churn", Payload: map[string]any{"attempt": exports},
+		}); appendErr != nil {
+			t.Fatal(appendErr)
+		}
+	}
+	body := mustMarshal(t, protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
+	resp, err := d.handleOrchestrationSnapshot(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, Command: protocol.CommandOrchestrationSnapshot, Meta: protocol.Metadata{ProjectID: "proj"}, Body: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeUnavailable || !resp.Error.Retryable {
+		t.Fatalf("churning snapshot error = %+v, want retryable unavailable", resp.Error)
+	}
+	if exports != 5 {
+		t.Fatalf("projection export attempts = %d, want bounded 5", exports)
 	}
 }
 
@@ -2143,45 +2270,33 @@ func TestProjectOrchestrationRealBuilderRemainsCoherentDuringProjectionChurn(t *
 		t.Fatal(err)
 	}
 	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}}
-	stop := make(chan struct{})
-	writerErr := make(chan error, 1)
-	go func() {
-		for i := 0; ; i++ {
-			select {
-			case <-stop:
-				writerErr <- nil
-				return
-			default:
-			}
-			_, createErr := writer.Create(ctx, issues.CreateTaskParams{Title: fmt.Sprintf("Churn %d", i), Description: "Revision churn", Acceptance: "Recorded", Type: domain.TypeTask, Priority: domain.P4, Status: domain.StatusOpen})
-			if createErr != nil {
-				writerErr <- createErr
-				return
-			}
-			time.Sleep(time.Millisecond)
+	mutateAfterExport := false
+	mutation := 0
+	d.orchestrationSnapshotAuxiliaryRead = func(context.Context) {
+		if !mutateAfterExport {
+			return
 		}
-	}()
+		mutateAfterExport = false
+		mutation++
+		if _, createErr := writer.Create(ctx, issues.CreateTaskParams{Title: fmt.Sprintf("Churn %d", mutation), Description: "Revision churn", Acceptance: "Recorded", Type: domain.TypeTask, Priority: domain.P4, Status: domain.StatusOpen}); createErr != nil {
+			t.Fatal(createErr)
+		}
+	}
 	for i := range 25 {
+		mutateAfterExport = true
 		snapshot, snapshotErr := (daemonOrchestrationAuthority{daemon: d}).Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
 		if snapshotErr != nil {
-			close(stop)
-			<-writerErr
 			t.Fatalf("snapshot %d: %v", i, snapshotErr)
 		}
 		if got := candidateClass(snapshot.Candidates, guardedID); got != string(domain.OrchestrationCandidateDecisionWaiting) {
-			close(stop)
-			<-writerErr
 			t.Fatalf("snapshot %d candidate class = %q", i, got)
 		}
 		if slices.Contains(snapshot.Runnable, guardedID) || snapshot.Blocked[guardedID] == "" {
-			close(stop)
-			<-writerErr
 			t.Fatalf("snapshot %d readiness contradiction: runnable=%v blocked=%q", i, snapshot.Runnable, snapshot.Blocked[guardedID])
 		}
 	}
-	close(stop)
-	if err := <-writerErr; err != nil {
-		t.Fatal(err)
+	if mutation != 25 {
+		t.Fatalf("post-export mutations = %d, want one deterministic revision advance per snapshot", mutation)
 	}
 }
 

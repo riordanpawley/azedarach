@@ -949,28 +949,6 @@ func (c *Client) WithMutationLock(ctx context.Context, fn func(context.Context) 
 	return spanErr
 }
 
-// WithProjectionSnapshotFence holds SQLite's write reservation while fn reads
-// a projection through ordinary store queries. This prevents another daemon
-// from committing projection-source changes between an export and its bounded
-// auxiliary reads without forcing those reads onto one long-lived sql.Tx.
-func (c *Client) WithProjectionSnapshotFence(ctx context.Context, fn func(context.Context) error) error {
-	return c.withMutationLock(ctx, func(lockCtx context.Context) error {
-		db, err := c.dbHandle()
-		if err != nil {
-			return err
-		}
-		tx, err := db.BeginTx(lockCtx, nil)
-		if err != nil {
-			return fmt.Errorf("begin projection snapshot fence: %w", err)
-		}
-		defer tx.Rollback()
-		if _, err := tx.ExecContext(lockCtx, `UPDATE projection_source_revision SET revision=revision WHERE singleton=1`); err != nil {
-			return fmt.Errorf("acquire projection snapshot fence: %w", err)
-		}
-		return fn(lockCtx)
-	})
-}
-
 func (c *Client) withMutationLock(ctx context.Context, fn func(context.Context) error) error {
 	if ctx == nil {
 		ctx = context.Background()

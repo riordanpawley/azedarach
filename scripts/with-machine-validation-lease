@@ -437,6 +437,7 @@ while (1) {
     }
     my $waited = waitpid($supervisor, WNOHANG);
     if ($waited == $supervisor) {
+        $supervisor = 0;
         $status = $?;
         last;
     }
@@ -569,16 +570,20 @@ sub bounded_cleanup_system {
     }
     kill 'TERM', -$child;
     my $kill_deadline = time() + 2;
+    my $leader_reaped = 0;
     while (1) {
-        my $waited = waitpid($child, WNOHANG);
-        return $? if $waited == $child;
+        if (!$leader_reaped) {
+            my $waited = waitpid($child, WNOHANG);
+            $leader_reaped = 1 if $waited == $child;
+        }
+        last unless kill 0, -$child;
         my $kill_now = time() >= $kill_deadline
             || ($watchdog ne '' && read_optional_file($watchdog) eq 'kill');
         last if $kill_now;
         sleep 0.05;
     }
     kill 'KILL', -$child;
-    waitpid($child, 0);
+    waitpid($child, 0) unless $leader_reaped;
     return -2;
 }
 
@@ -649,6 +654,7 @@ sub merge_whole_gate_evidence {
     $whole->{external_go_processes} = ($existing->{external_go_processes} || 0) > $whole->{external_go_processes} ? $existing->{external_go_processes} : $whole->{external_go_processes};
     $whole->{report_path} = $existing->{report_path} if $existing->{report_path};
     $whole->{report_paths} = $existing->{report_paths} if $existing->{report_paths};
+    $whole->{failure_summary} = $existing->{failure_summary} if $existing->{failure_summary};
     $whole->{fatal_phase} = $existing->{fatal_phase} if $existing->{fatal_phase};
     $whole->{fatal_detail} = $existing->{fatal_detail} if $existing->{fatal_detail};
     $whole->{fatal_phase} = $fatal->{fatal_phase} if $fatal->{fatal_phase};

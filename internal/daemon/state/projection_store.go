@@ -830,6 +830,24 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 		return fmt.Errorf("begin upsert session state %s/%s: %w", projectID, session.ID, err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	logicalID := logicalSessionIntentID(session)
+	var currentState SessionState
+	var currentUpdatedAtRaw string
+	if err := tx.QueryRowContext(ctx, `SELECT state,updated_at FROM `+targetTable+` WHERE project_id=? AND logical_id=?`, projectID, logicalID).Scan(&currentState, &currentUpdatedAtRaw); err == nil {
+		currentUpdatedAt, parseErr := parseRuntimeStateTime(currentUpdatedAtRaw)
+		if parseErr != nil {
+			return fmt.Errorf("parse existing session freshness for %s/%s: %w", projectID, logicalID, parseErr)
+		}
+		currentState = NormalizeSessionState(currentState)
+		incomingState := NormalizeSessionState(session.State)
+		stale := session.UpdatedAt.Before(currentUpdatedAt) ||
+			(session.UpdatedAt.Equal(currentUpdatedAt) && currentState == SessionStateStopped && incomingState != SessionStateStopped)
+		if stale {
+			return tx.Commit()
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("read existing session freshness for %s/%s: %w", projectID, logicalID, err)
+	}
 	if targetTable == sessionStateTable {
 		var observedState, activity, activitySource, observedAt string
 		err := tx.QueryRowContext(ctx, `SELECT observed_state,activity,activity_source,updated_at

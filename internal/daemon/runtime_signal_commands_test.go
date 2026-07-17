@@ -146,10 +146,7 @@ func TestRuntimeProjectionWriterDoesNotHoldWriterLockAcrossRuntimeRefresh(t *tes
 	}()
 
 	<-refreshEntered
-	lockAvailable := writer.mu.TryLock()
-	if lockAvailable {
-		writer.mu.Unlock()
-	}
+	lockAvailable := writer.mu.currentHolder() == ""
 	if tasks, _ := materializer.snapshot(); len(tasks) != 1 || tasks[0].ID.String() != issueID {
 		t.Fatalf("board/graph snapshot unavailable during runtime refresh: %+v", tasks)
 	}

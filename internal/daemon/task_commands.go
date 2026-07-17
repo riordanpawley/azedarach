@@ -3275,6 +3275,9 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge %s into %s returned no result", source.Branch, targetBranch)
 	}
 	if !merge.Success {
+		if message, ok := candidateValidationFailureMessage(merge.ValidationAttempts); ok {
+			return taskCloseIntegrationResult{Requested: true, ValidationAttempts: append([]domain.IntegrationCandidateValidationAttempt(nil), merge.ValidationAttempts...)}, errors.New(message)
+		}
 		details := strings.TrimSpace(merge.Message)
 		if len(merge.ConflictFiles) > 0 {
 			details = strings.TrimSpace(details + "\nconflicts: " + strings.Join(merge.ConflictFiles, ", "))
@@ -3302,6 +3305,27 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		ValidationAttempts:   append([]domain.IntegrationCandidateValidationAttempt(nil), merge.ValidationAttempts...),
 	}
 	return integration, nil
+}
+
+func failedCandidateValidationAttempt(attempts []domain.IntegrationCandidateValidationAttempt) (domain.IntegrationCandidateValidationAttempt, bool) {
+	for i := len(attempts) - 1; i >= 0; i-- {
+		if attempts[i].Status == domain.IntegrationCandidateValidationFailed {
+			return attempts[i], true
+		}
+	}
+	return domain.IntegrationCandidateValidationAttempt{}, false
+}
+
+func candidateValidationFailureMessage(attempts []domain.IntegrationCandidateValidationAttempt) (string, bool) {
+	attempt, ok := failedCandidateValidationAttempt(attempts)
+	if !ok {
+		return "", false
+	}
+	details := strings.TrimSpace(attempt.Message)
+	if details == "" {
+		details = "candidate validation gate failed without diagnostic output"
+	}
+	return fmt.Sprintf("candidate validation for revision %s failed: %s", attempt.CandidateHead, details), true
 }
 
 func (d *Daemon) canonicalIntegrationValidationAttempts(ctx context.Context, targetWorktree, targetOID string) ([]domain.IntegrationCandidateValidationAttempt, error) {
@@ -4890,7 +4914,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 		}
 		latestAggregate = aggregate
 	}
-	if !orchestrationProjectionSnapshotFenceHeld(ctx) {
+	if !orchestrationSnapshotPrepared(ctx) {
 		if err := d.reconcileDecisionPropagationOutbox(ctx, projectID); err != nil {
 			return taskIntegrationReadinessResult{}, fmt.Errorf("reconcile issue decision propagation: %w", err)
 		}
@@ -5674,7 +5698,7 @@ func (d *Daemon) captureTaskGraphReadinessContext(ctx context.Context, projectID
 		for _, rootIssueID := range uniqueNonEmpty(roots) {
 			captured.mailEventsByRoot[rootIssueID] = d.workerObservationMailboxEvents(rootIssueID)
 		}
-	} else if d.taskGraphObservationEvents == nil && !orchestrationProjectionSnapshotFenceHeld(ctx) {
+	} else if d.taskGraphObservationEvents == nil && !orchestrationSnapshotPrepared(ctx) {
 		repoDir := strings.TrimSpace(d.resolveRepoDirForProject(projectID))
 		if err := d.ensureLegacyMailboxObservationProjection(ctx, projectID, repoDir); err != nil {
 			return taskGraphReadinessContext{}, fmt.Errorf("project legacy mailbox observation projection: %w", err)
