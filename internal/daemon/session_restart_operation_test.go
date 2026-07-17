@@ -367,9 +367,18 @@ func TestRestartManagedAgentPaneParentCancellationAfterDispatchRemainsFencedAcro
 	}
 	runner := &exactRestartRunner{store: storeA, project: project, session: session, pid: old.PanePID}
 	newDaemon := func(store *daemonstate.RuntimeStateStore) *Daemon {
-		return &Daemon{cfg: Config{RepoDir: t.TempDir(), CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()), runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{project: store}}
+		return &Daemon{cfg: Config{RepoDir: t.TempDir(), CLITool: "custom-agent", SessionShell: "zsh", Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()), runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{project: store}}
 	}
 	daemonA, daemonB := newDaemon(storeA), newDaemon(storeB)
+	handoffConsumed := false
+	daemonA.sessionRestartPromptHandoffWait = func(handoffCtx context.Context, handoff sessionPromptHandoff) error {
+		if handoffCtx.Err() != nil {
+			t.Fatalf("detached handoff context was canceled: %v", handoffCtx.Err())
+		}
+		handoffConsumed = true
+		handoff.remove()
+		return nil
+	}
 	observationEntered := make(chan struct{}, 1)
 	observationRelease := make(chan struct{})
 	accepted := make(chan string, 1)
@@ -420,7 +429,7 @@ func TestRestartManagedAgentPaneParentCancellationAfterDispatchRemainsFencedAcro
 	runner.mu.Lock()
 	gotRespawnCalls := respawnCalls
 	runner.mu.Unlock()
-	if !first.Restarted || second.Outcome != "superseded" || !second.Skipped || gotRespawnCalls != 1 {
+	if !first.Restarted || !handoffConsumed || second.Outcome != "superseded" || !second.Skipped || gotRespawnCalls != 1 || first.Stages[len(first.Stages)-1].Name != "persist_complete" {
 		t.Fatalf("first=%+v second=%+v respawn_calls=%d", first, second, gotRespawnCalls)
 	}
 }
@@ -452,6 +461,18 @@ func TestRunRestartRespawnStageTreatsResultContextRaceAsAmbiguous(t *testing.T) 
 		if !errors.Is(got.err, context.Canceled) || !got.ambiguous {
 			t.Fatalf("result-context race err=%v ambiguous=%t", got.err, got.ambiguous)
 		}
+	}
+	for name, resultErr := range map[string]error{
+		"result canceled":          context.Canceled,
+		"result deadline exceeded": context.DeadlineExceeded,
+		"untyped command error":    errors.New("tmux command failed after dispatch"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			err, ambiguous := runRestartRespawnStage(context.Background(), time.Hour, func(context.Context) error { return resultErr })
+			if !errors.Is(err, resultErr) || !ambiguous {
+				t.Fatalf("result err=%v ambiguous=%t", err, ambiguous)
+			}
+		})
 	}
 }
 
@@ -569,8 +590,10 @@ func TestRestartManagedAgentPaneArtifactFlagsWorktreeAndUnrelatedPanes(t *testin
 
 func TestRestartManagedAgentPanePartialFailureAndBoundedTimeout(t *testing.T) {
 	t.Run("respawn failure", func(t *testing.T) {
-		d, _, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
-		runner.respawnErr = errors.New("respawn failed")
+		d, _, _, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+		d.sessionRestartRespawn = func(context.Context, string, string, string) (error, bool) {
+			return errors.New("respawn failed"), false
+		}
 		result := d.restartManagedAgentPane(context.Background(), target, protocol.SessionRestartAllRequestBody{}, protocol.SessionRestartAllItem{}, nil)
 		if result.Outcome != "partial_failure" || !strings.Contains(result.Error, "respawn failed") || result.Stages[len(result.Stages)-1].Name != "replace" {
 			t.Fatalf("result=%+v", result)
