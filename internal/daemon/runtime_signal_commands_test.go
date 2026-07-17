@@ -203,6 +203,56 @@ func TestRuntimeSignalIngestGitHookDoesNotPersistOnRequestContext(t *testing.T) 
 	}
 }
 
+func TestRuntimeSignalIngestGitHookAcknowledgesWhileWriterContended(t *testing.T) {
+	repoDir := initRuntimeSignalGitRepo(t)
+	d := New(Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	useDeterministicRuntimeSignalGitClient(d)
+	t.Cleanup(func() { cleanupRuntimeSignalTestDaemon(d) })
+
+	writer, ok := d.runtimeProjectionStateWriter().(*daemonRuntimeProjectionWriter)
+	if !ok {
+		t.Fatalf("runtime projection writer = %T", d.runtimeProjectionStateWriter())
+	}
+	holderCtx := contextWithRuntimeProjectionWriterOperation(context.Background(), "worktree.replace_snapshot")
+	releaseWriter := writer.lockProjectionWriter(holderCtx, "proj-hook-contention", "fallback.holder")
+	released := false
+	defer func() {
+		if !released {
+			releaseWriter()
+		}
+	}()
+
+	projectID := "proj-hook-contention"
+	resp, err := d.command(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "runtime-signal-git-contended",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         protocol.CommandRuntimeSignalIngest,
+		Body: mustMarshal(t, protocol.RuntimeSignalIngestCommandBody{
+			Source: protocol.RuntimeSignalSourceGitHook, Kind: protocol.RuntimeSignalKindGitWorktreeChanged,
+			Worktree: repoDir, Hook: "post-commit", Event: "post-commit",
+		}),
+	})
+	if err != nil || !resp.OK {
+		t.Fatalf("runtime signal response=%+v err=%v", resp, err)
+	}
+	if holder := writer.currentHolderOperation(); holder != "worktree.replace_snapshot" {
+		t.Fatalf("writer holder after acknowledgement = %q", holder)
+	}
+
+	releaseWriter()
+	released = true
+	submission, err := d.gitStatusAdapter.queueGitStatusRefresh(projectID, repoDir, reconcilePriorityManual, "test-convergence")
+	if err != nil {
+		t.Fatalf("join queued refresh: %v", err)
+	}
+	result, err := submission.Wait(context.Background())
+	if err != nil || result.Err != nil {
+		t.Fatalf("queued refresh err=%v result_err=%v", err, result.Err)
+	}
+}
+
 func TestRuntimeProjectionWriterDoesNotHoldWriterLockAcrossRuntimeRefresh(t *testing.T) {
 	ctx := context.Background()
 	runtimeStore := newRuntimeProjectionStore(t)
