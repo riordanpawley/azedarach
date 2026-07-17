@@ -86,6 +86,19 @@ func TestRealProjectOperationsDatabaseMigrationClones(t *testing.T) {
 			if objects != 9 {
 				t.Fatalf("validation migration objects = %d, want 9", objects)
 			}
+			var evidenceObjects int
+			if err = store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name IN (
+				'daemon_publication_evidence','daemon_publication_evidence_invalidations','daemon_publication_evidence_state',
+				'idx_daemon_publication_evidence_issue_layer','idx_daemon_publication_evidence_invalidations',
+				'daemon_publication_evidence_immutable_update','daemon_publication_evidence_immutable_delete',
+				'daemon_publication_invalidation_immutable_update','daemon_publication_invalidation_immutable_delete',
+				'daemon_publication_evidence_insert_revision','daemon_publication_invalidation_insert_revision'
+			)`).Scan(&evidenceObjects); err != nil {
+				t.Fatal(err)
+			}
+			if evidenceObjects != 11 {
+				t.Fatalf("publication evidence migration objects = %d, want 11", evidenceObjects)
+			}
 			if err = store.db.QueryRow(`SELECT COUNT(*) FROM daemon_operations`).Scan(&afterOperations); err != nil {
 				t.Fatal(err)
 			}
@@ -614,7 +627,7 @@ func TestPublicationValidationPriorityMigrationRejectsLedgerSchemaDrift(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifact := migrationArtifacts[len(migrationArtifacts)-1]
+	artifact := migrationArtifacts[5]
 	if _, err = db.Exec(`INSERT INTO schema_migrations(id,applied_at,artifact_checksum) VALUES(?, 'drifted', ?)`, artifact.ID, artifact.Checksum); err != nil {
 		t.Fatal(err)
 	}
@@ -625,6 +638,68 @@ func TestPublicationValidationPriorityMigrationRejectsLedgerSchemaDrift(t *testi
 	drifted := NewAtPath(dbPath, slog.Default())
 	defer drifted.Close()
 	if _, err = drifted.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err == nil || !strings.Contains(err.Error(), "purpose = 'capacity'") {
+		t.Fatalf("schema drift error = %v", err)
+	}
+}
+
+func TestLayeredPublicationEvidenceMigrationRollsBackAndRetries(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 6)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TRIGGER reject_layered_evidence_ledger BEFORE INSERT ON schema_migrations WHEN NEW.id='daemon_operations_0007_layered_publication_evidence' BEGIN SELECT RAISE(ABORT, 'injected layered evidence ledger failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	failed := NewAtPath(dbPath, slog.Default())
+	if _, err = failed.PublicationEvidenceSnapshot(context.Background(), "project", ""); err == nil || !strings.Contains(err.Error(), "injected layered evidence ledger failure") {
+		t.Fatalf("migration error = %v", err)
+	}
+	_ = failed.Close()
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tables int
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='daemon_publication_evidence'`).Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if tables != 0 {
+		t.Fatal("failed migration left publication evidence table")
+	}
+	if _, err = raw.Exec(`DROP TRIGGER reject_layered_evidence_ledger`); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	retried := NewAtPath(dbPath, slog.Default())
+	defer retried.Close()
+	if _, err = retried.PublicationEvidenceSnapshot(context.Background(), "project", ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLayeredPublicationEvidenceMigrationRejectsAppliedSchemaDrift(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 7)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`DROP TRIGGER daemon_publication_evidence_immutable_update`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	drifted := NewAtPath(dbPath, slog.Default())
+	defer drifted.Close()
+	if _, err = drifted.PublicationEvidenceSnapshot(context.Background(), "project", ""); err == nil || !strings.Contains(err.Error(), "missing trigger daemon_publication_evidence_immutable_update") {
 		t.Fatalf("schema drift error = %v", err)
 	}
 }

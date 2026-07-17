@@ -15932,3 +15932,24 @@ func integrationTestIsWorktreeList(args []string) bool {
 	return len(args) >= 3 && args[0] == "worktree" && args[1] == "list" ||
 		len(args) >= 5 && args[0] == "-C" && args[2] == "worktree" && args[3] == "list"
 }
+
+func TestTaskDetailAttachesPublicationEvidenceDiagnostic(t *testing.T) {
+	ctx := context.Background()
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir()})
+	t.Cleanup(func() { _ = runtime.Close() })
+	d := &Daemon{operationRuntime: runtime}
+	evidence := domain.PublicationEvidence{
+		EvidenceID: "review-1", ProjectID: "project", IssueID: "issue", Layer: domain.PublicationEvidencePatchReview,
+		PatchDigest: "patch", SourceRevision: "source", Producer: "reviewer", PolicyVersion: "policy", EnvironmentFingerprint: "env", CreatedAt: time.Unix(1, 0).UTC(),
+	}
+	if _, err := runtime.store.RecordPublicationEvidence(ctx, evidence); err != nil {
+		t.Fatal(err)
+	}
+	tasks := d.attachPublicationEvidenceDiagnostic(ctx, "project", "issue", []domain.Task{{ID: "issue"}, {ID: "related"}})
+	if tasks[0].PublicationEvidence == nil || tasks[0].PublicationEvidence.State != "retained" || tasks[0].PublicationEvidence.PatchReview != 1 {
+		t.Fatalf("publication diagnostic = %+v", tasks[0].PublicationEvidence)
+	}
+	if tasks[1].PublicationEvidence != nil {
+		t.Fatalf("related task received selected-task publication diagnostic: %+v", tasks[1].PublicationEvidence)
+	}
+}

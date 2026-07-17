@@ -248,6 +248,17 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandLearnSuggestionReject:   {Command: protocol.CommandLearnSuggestionReject, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 }
 
+func init() {
+	for _, command := range []string{
+		protocol.CommandPublicationEvidenceRecord,
+		protocol.CommandPublicationEvidenceInvalidate,
+		protocol.CommandPublicationEvidenceStatus,
+		protocol.CommandPublicationEvidenceEvaluate,
+	} {
+		commandSpecRegistry[command] = CommandSpec{Command: command, RequiresProjectID: true}
+	}
+}
+
 // LookupCommandSpec returns the typed command specification for a command.
 func LookupCommandSpec(command string) (CommandSpec, bool) {
 	spec, ok := commandSpecRegistry[strings.TrimSpace(command)]

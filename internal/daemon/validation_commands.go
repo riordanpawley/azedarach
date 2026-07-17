@@ -16,9 +16,17 @@ import (
 const defaultValidationLeaseTTL = 30 * time.Second
 
 func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-	store, storeErr := d.validationProjectionStore()
+	var store *operationstore.SQLiteStore
+	var storeErr error
+	switch req.Command {
+	case protocol.CommandPublicationEvidenceRecord, protocol.CommandPublicationEvidenceInvalidate,
+		protocol.CommandPublicationEvidenceStatus, protocol.CommandPublicationEvidenceEvaluate:
+		store, storeErr = d.publicationEvidenceProjectionStore()
+	default:
+		store, storeErr = d.validationProjectionStore()
+	}
 	if storeErr != nil {
-		return d.errorResponse(req, protocol.ErrorCodeUnavailable, "validation lease store unavailable"), nil
+		return d.errorResponse(req, protocol.ErrorCodeUnavailable, storeErr.Error()), nil
 	}
 	projectID := d.projectID(req.Meta)
 	now := time.Now().UTC()
@@ -78,9 +86,106 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 		}
 		return d.validationSuccessResponse(req, protocol.ValidationStatusResponse{Snapshot: snapshot})
+	case protocol.CommandPublicationEvidenceRecord:
+		var body protocol.PublicationEvidenceRecordRequest
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("decode publication evidence: %v", err)), nil
+		}
+		body.Evidence.ProjectID = projectID
+		if body.Evidence.CreatedAt.IsZero() {
+			body.Evidence.CreatedAt = now
+		}
+		if err := d.validatePublicationEvidenceIssue(ctx, projectID, body.Evidence.IssueID); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
+		}
+		evidence, err := store.RecordPublicationEvidence(ctx, body.Evidence)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeConflict, err.Error()), nil
+		}
+		if _, err = d.publicationEvidenceSnapshot(ctx, projectID, body.Evidence.IssueID); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		return d.validationSuccessResponse(req, protocol.PublicationEvidenceRecordResponse{Evidence: evidence})
+	case protocol.CommandPublicationEvidenceInvalidate:
+		var body protocol.PublicationEvidenceInvalidateRequest
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("decode publication evidence invalidation: %v", err)), nil
+		}
+		if body.Invalidation.CreatedAt.IsZero() {
+			body.Invalidation.CreatedAt = now
+		}
+		snapshot, err := d.publicationEvidenceSnapshot(ctx, projectID, "")
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		found := false
+		for _, evidence := range snapshot.Evidence {
+			if evidence.EvidenceID == body.Invalidation.EvidenceID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "publication evidence does not belong to this project"), nil
+		}
+		invalidation, err := store.RecordPublicationEvidenceInvalidation(ctx, body.Invalidation)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeConflict, err.Error()), nil
+		}
+		if _, err = d.publicationEvidenceSnapshot(ctx, projectID, ""); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		return d.validationSuccessResponse(req, protocol.PublicationEvidenceInvalidateResponse{Invalidation: invalidation})
+	case protocol.CommandPublicationEvidenceStatus:
+		var body protocol.PublicationEvidenceStatusRequest
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("decode publication evidence status: %v", err)), nil
+		}
+		snapshot, err := d.publicationEvidenceSnapshot(ctx, projectID, strings.TrimSpace(body.IssueID))
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		return d.validationSuccessResponse(req, protocol.PublicationEvidenceStatusResponse{Snapshot: snapshot})
+	case protocol.CommandPublicationEvidenceEvaluate:
+		var body protocol.PublicationEvidenceEvaluateRequest
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("decode publication evidence evaluation: %v", err)), nil
+		}
+		if err := body.Candidate.Validate(); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
+		}
+		if err := body.Policy.Validate(); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
+		}
+		snapshot, err := d.publicationEvidenceSnapshot(ctx, projectID, strings.TrimSpace(body.IssueID))
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
+		assessments := make([]domain.PublicationEvidenceAssessment, 0, len(snapshot.Evidence))
+		effectiveInvalidations := domain.EffectivePublicationEvidenceInvalidations(snapshot)
+		for _, evidence := range snapshot.Evidence {
+			assessment := domain.EvaluatePublicationEvidence(evidence, body.Candidate, body.Policy)
+			assessments = append(assessments, domain.ApplyPublicationEvidenceInvalidations(assessment, effectiveInvalidations))
+		}
+		return d.validationSuccessResponse(req, protocol.PublicationEvidenceEvaluateResponse{Snapshot: snapshot, Assessments: assessments})
 	default:
 		return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported validation command"), nil
 	}
+}
+
+func (d *Daemon) validatePublicationEvidenceIssue(ctx context.Context, projectID, issueID string) error {
+	issueID = strings.TrimSpace(issueID)
+	if issueID == "" {
+		return fmt.Errorf("publication evidence requires issue identity")
+	}
+	client := d.issueClientForProject(projectID)
+	if client == nil {
+		return fmt.Errorf("publication evidence requires issue store")
+	}
+	if _, err := client.GetWithRuntime(ctx, projectID, issueID); err != nil {
+		return fmt.Errorf("resolve publication evidence issue %s: %w", issueID, err)
+	}
+	return nil
 }
 
 func (d *Daemon) validationReviewAssignment(ctx context.Context, projectID string, body protocol.ValidationAcquireRequest) (string, int64, error) {
@@ -145,6 +250,64 @@ func (d *Daemon) validationProjectionStore() (*operationstore.SQLiteStore, error
 		return nil, fmt.Errorf("validation projection store unavailable")
 	}
 	return d.operationRuntime.store, nil
+}
+
+func (d *Daemon) publicationEvidenceProjectionStore() (*operationstore.SQLiteStore, error) {
+	if sourceForInvariant(daemonInvariantPublicationEvidence) != daemonInvariantSourceProjection {
+		return nil, fmt.Errorf("invariant %s requires projection source", daemonInvariantPublicationEvidence)
+	}
+	if d.operationRuntime == nil || d.operationRuntime.store == nil {
+		return nil, fmt.Errorf("publication evidence projection store unavailable")
+	}
+	return d.operationRuntime.store, nil
+}
+
+// publicationEvidenceSnapshot enforces the projection invariant's
+// refresh-then-cache read contract. Every read replaces the complete project
+// cache from durable SQLite before selecting an issue, so another daemon's
+// write cannot leave this process evaluating stale evidence.
+func (d *Daemon) publicationEvidenceSnapshot(ctx context.Context, projectID, issueID string) (domain.PublicationEvidenceSnapshot, error) {
+	store, err := d.publicationEvidenceProjectionStore()
+	if err != nil {
+		return domain.PublicationEvidenceSnapshot{}, err
+	}
+	refreshed, err := store.PublicationEvidenceSnapshot(ctx, projectID, "")
+	if err != nil {
+		return domain.PublicationEvidenceSnapshot{}, fmt.Errorf("refresh publication evidence projection: %w", err)
+	}
+	d.publicationEvidenceMu.Lock()
+	if d.publicationEvidenceCache == nil {
+		d.publicationEvidenceCache = make(map[string]domain.PublicationEvidenceSnapshot)
+	}
+	d.publicationEvidenceCache[projectID] = refreshed
+	d.publicationEvidenceMu.Unlock()
+
+	d.publicationEvidenceMu.RLock()
+	cached := d.publicationEvidenceCache[projectID]
+	d.publicationEvidenceMu.RUnlock()
+	return publicationEvidenceSnapshotForIssue(cached, strings.TrimSpace(issueID)), nil
+}
+
+func publicationEvidenceSnapshotForIssue(snapshot domain.PublicationEvidenceSnapshot, issueID string) domain.PublicationEvidenceSnapshot {
+	if issueID == "" {
+		return snapshot
+	}
+	filtered := domain.PublicationEvidenceSnapshot{
+		Schema: snapshot.Schema, ProjectID: snapshot.ProjectID, IssueID: issueID, Revision: snapshot.Revision,
+	}
+	evidenceIDs := make(map[string]struct{})
+	for _, evidence := range snapshot.Evidence {
+		if evidence.IssueID == issueID {
+			filtered.Evidence = append(filtered.Evidence, evidence)
+			evidenceIDs[evidence.EvidenceID] = struct{}{}
+		}
+	}
+	for _, invalidation := range snapshot.Invalidations {
+		if _, ok := evidenceIDs[invalidation.EvidenceID]; ok {
+			filtered.Invalidations = append(filtered.Invalidations, invalidation)
+		}
+	}
+	return filtered
 }
 
 func (d *Daemon) validationSuccessResponse(req protocol.RequestEnvelope, value any) (protocol.ResponseEnvelope, error) {

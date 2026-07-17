@@ -133,16 +133,16 @@ type taskClosePreflightRequest struct {
 }
 
 type taskCloseRequest struct {
-	TaskID                 string                    `json:"task_id"`
-	ForceWorktree          bool                      `json:"force_worktree,omitempty"`
-	IgnoreAhead            bool                      `json:"ignore_ahead,omitempty"`
-	IntegrateBeforeClose   bool                      `json:"integrate_before_close,omitempty"`
-	CloseCleanChildren     bool                      `json:"close_clean_children,omitempty"`
-	AllowActiveSession     bool                      `json:"allow_active_session,omitempty"`
-	CloseOutcome           string                    `json:"closed_outcome,omitempty"`
-	ExpectedSourceOID      string                    `json:"expected_source_oid,omitempty"`
-	ExpectedReviewEvidence *issues.ReviewEvidencePin `json:"expected_review_evidence,omitempty"`
-	PromoteBacklogBeforeClose bool   `json:"-"`
+	TaskID                    string                    `json:"task_id"`
+	ForceWorktree             bool                      `json:"force_worktree,omitempty"`
+	IgnoreAhead               bool                      `json:"ignore_ahead,omitempty"`
+	IntegrateBeforeClose      bool                      `json:"integrate_before_close,omitempty"`
+	CloseCleanChildren        bool                      `json:"close_clean_children,omitempty"`
+	AllowActiveSession        bool                      `json:"allow_active_session,omitempty"`
+	CloseOutcome              string                    `json:"closed_outcome,omitempty"`
+	ExpectedSourceOID         string                    `json:"expected_source_oid,omitempty"`
+	ExpectedReviewEvidence    *issues.ReviewEvidencePin `json:"expected_review_evidence,omitempty"`
+	PromoteBacklogBeforeClose bool                      `json:"-"`
 }
 
 type taskStatusUpdateOptions struct {
@@ -683,6 +683,7 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 		if !found {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue not found: %s", taskID)), nil
 		}
+		tasks = d.attachPublicationEvidenceDiagnostic(ctx, projectID, taskID, tasks)
 		lastCheckedAt := materializedLastCheckedAt(tasks)
 		payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), lastCheckedAt, protocol.TaskListFreshnessFresh, tasks, false)
 		payload.Source = source
@@ -703,6 +704,7 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 					latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.snapshot_cache_hydrate", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "cache_hit", false, "error", hydrateErr)
 				} else {
 					cached.Tasks = hydrated
+					cached.Tasks = d.attachPublicationEvidenceDiagnostic(ctx, projectID, taskID, cached.Tasks)
 					cached.LastCheckedAt, cached.Freshness = d.taskListSnapshotFreshness(ctx, projectID)
 					latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "cache_hit", true)
 					payload := buildTaskListSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks, cached.SummariesOnly)
@@ -749,6 +751,7 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 	freshnessStartedAt := time.Now()
 	lastCheckedAt, freshness := d.taskListSnapshotFreshness(ctx, projectID)
 	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.snapshot_freshness", freshnessStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID, "freshness", freshness)
+	tasks = d.attachPublicationEvidenceDiagnostic(ctx, projectID, taskID, tasks)
 	payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), lastCheckedAt, freshness, tasks, false)
 	marshalStartedAt := time.Now()
 	body, err := json.Marshal(payload)
@@ -763,6 +766,26 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 		d.cfg.Logger.Info("daemon task get completed", "project_id", projectID, "task_id", taskID, "context_task_count", len(tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds())
 	}
 	return resp, nil
+}
+
+func (d *Daemon) attachPublicationEvidenceDiagnostic(ctx context.Context, projectID, taskID string, tasks []domain.Task) []domain.Task {
+	out := append([]domain.Task(nil), tasks...)
+	diagnostic := domain.PublicationEvidenceDiagnostic{State: "unavailable", Availability: "unavailable", Detail: "publication evidence projection is unavailable"}
+	snapshot, err := d.publicationEvidenceSnapshot(ctx, projectID, taskID)
+	if err == nil {
+		diagnostic = domain.SummarizePublicationEvidence(snapshot)
+	}
+	if err != nil {
+		diagnostic.Detail = err.Error()
+	}
+	for i := range out {
+		if out[i].ID.String() == taskID {
+			copy := diagnostic
+			out[i].PublicationEvidence = &copy
+			break
+		}
+	}
+	return out
 }
 
 func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {

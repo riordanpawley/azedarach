@@ -178,6 +178,8 @@ type Daemon struct {
 	worktreeGitProbeThrottle             *reconcileThrottle
 	queueMu                              sync.Mutex
 	operationRuntime                     *operationRuntime
+	publicationEvidenceMu                sync.RWMutex
+	publicationEvidenceCache             map[string]domain.PublicationEvidenceSnapshot
 	noticeService                        *daemonnotices.Service
 	runtimeProjectionCoalescer           *runtimeProjectionEventCoalescer
 	scheduledScripts                     *scheduledScriptManager
@@ -385,6 +387,7 @@ func New(cfg Config) *Daemon {
 		taskGraphRuntimeValidations:        map[string]taskGraphRuntimeValidationEntry{},
 		taskGraphRuntimeValidationLoads:    map[string]*taskGraphRuntimeValidationLoad{},
 		orchestrationSnapshotCache:         map[string]orchestrationSnapshotCacheEntry{},
+		publicationEvidenceCache:           map[string]domain.PublicationEvidenceSnapshot{},
 		materializers:                      map[string]*projectReadMaterializer{},
 		revision:                           map[string]uint64{},
 		userProjectionConsumers:            map[string]*userProjectionConsumerHandle{},
@@ -873,7 +876,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleHookLogList(ctx, req)
 	case protocol.CommandRuntimeSignalIngest:
 		return d.handleRuntimeSignalIngest(ctx, req)
-	case protocol.CommandValidationAcquire, protocol.CommandValidationHeartbeat, protocol.CommandValidationNested, protocol.CommandValidationFinish, protocol.CommandValidationStatus:
+	case protocol.CommandValidationAcquire, protocol.CommandValidationHeartbeat, protocol.CommandValidationNested, protocol.CommandValidationFinish, protocol.CommandValidationStatus,
+		protocol.CommandPublicationEvidenceRecord, protocol.CommandPublicationEvidenceInvalidate, protocol.CommandPublicationEvidenceStatus, protocol.CommandPublicationEvidenceEvaluate:
 		return d.handleValidationCommand(ctx, req)
 	case protocol.CommandUIOpenTaskWorkspace, protocol.CommandUIOpenTaskDrillDown:
 		return d.handleUIIssueCommand(ctx, req)

@@ -45,3 +45,35 @@ func (c *Client) ValidationStatus(ctx context.Context) (protocol.ValidationStatu
 	}
 	return out, nil
 }
+
+func (c *Client) PublicationEvidenceRecord(ctx context.Context, req protocol.PublicationEvidenceRecordRequest) (protocol.PublicationEvidenceRecordResponse, error) {
+	var out protocol.PublicationEvidenceRecordResponse
+	if err := c.commandJSON(ctx, protocol.CommandPublicationEvidenceRecord, req, &out); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+func (c *Client) PublicationEvidenceInvalidate(ctx context.Context, req protocol.PublicationEvidenceInvalidateRequest) (protocol.PublicationEvidenceInvalidateResponse, error) {
+	var out protocol.PublicationEvidenceInvalidateResponse
+	if err := c.commandJSON(ctx, protocol.CommandPublicationEvidenceInvalidate, req, &out); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+func (c *Client) PublicationEvidenceStatus(ctx context.Context, req protocol.PublicationEvidenceStatusRequest) (protocol.PublicationEvidenceStatusResponse, error) {
+	var out protocol.PublicationEvidenceStatusResponse
+	if err := c.commandJSON(ctx, protocol.CommandPublicationEvidenceStatus, req, &out); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+func (c *Client) PublicationEvidenceEvaluate(ctx context.Context, req protocol.PublicationEvidenceEvaluateRequest) (protocol.PublicationEvidenceEvaluateResponse, error) {
+	var out protocol.PublicationEvidenceEvaluateResponse
+	if err := c.commandJSON(ctx, protocol.CommandPublicationEvidenceEvaluate, req, &out); err != nil {
+		return out, err
+	}
+	return out, nil
+}

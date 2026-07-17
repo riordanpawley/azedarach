@@ -138,3 +138,73 @@ func TestValidationCommandRejectsSpoofedNestedAuthorization(t *testing.T) {
 		t.Fatalf("response = %+v, want rejected spoofed nested authorization", resp)
 	}
 }
+
+func TestPublicationEvidenceCommandsRetainPatchAcrossUnrelatedBaseMovement(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "portable consumer change", Type: domain.TypeFeature, Priority: domain.P1, Status: domain.StatusInProgress})
+	require.NoError(t, err)
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = runtime.Close() })
+	d := &Daemon{operationRuntime: runtime, revision: map[string]uint64{"project": 1}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+
+	recordBody, err := json.Marshal(protocol.PublicationEvidenceRecordRequest{Evidence: domain.PublicationEvidence{
+		EvidenceID: "review-1", ProjectID: "spoofed", IssueID: issueID, Layer: domain.PublicationEvidencePatchReview,
+		PatchDigest: "patch-a", SourceRevision: "source-a", BaseRevision: "base-a", Producer: "reviewer",
+		PolicyVersion: "consumer-policy-v1", EnvironmentFingerprint: "node-22", Coverage: domain.PublicationEvidenceCoverage{Paths: []string{"src/api.ts"}},
+	}})
+	require.NoError(t, err)
+	recordResp, err := d.handleValidationCommand(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "record", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandPublicationEvidenceRecord, Meta: protocol.Metadata{ProjectID: "project"}, Body: recordBody})
+	require.NoError(t, err)
+	require.True(t, recordResp.OK, recordResp.Error)
+	var recorded protocol.PublicationEvidenceRecordResponse
+	require.NoError(t, json.Unmarshal(recordResp.Body, &recorded))
+	assert.Equal(t, "project", recorded.Evidence.ProjectID)
+	assert.False(t, recorded.Evidence.CreatedAt.IsZero())
+
+	evaluateBody, err := json.Marshal(protocol.PublicationEvidenceEvaluateRequest{
+		IssueID:   issueID,
+		Candidate: domain.PublicationEvidenceCandidate{PatchDigest: "patch-a", SourceRevision: "source-a", BaseRevision: "base-b", PolicyVersion: "consumer-policy-v1", EnvironmentFingerprint: "node-22", ImpactKnown: true, CapabilityAvailable: true, ChangedPaths: []string{"docs/readme.md"}},
+		Policy:    domain.PublicationEvidencePolicy{Version: "consumer-policy-v1", ExactBaseSurfaces: []string{"wire"}, InvalidatePathOverlap: true, FailClosedUnknownImpact: true, RequireCapability: true},
+	})
+	require.NoError(t, err)
+	evaluateResp, err := d.handleValidationCommand(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "evaluate", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandPublicationEvidenceEvaluate, Meta: protocol.Metadata{ProjectID: "project"}, Body: evaluateBody})
+	require.NoError(t, err)
+	require.True(t, evaluateResp.OK, evaluateResp.Error)
+	var evaluated protocol.PublicationEvidenceEvaluateResponse
+	require.NoError(t, json.Unmarshal(evaluateResp.Body, &evaluated))
+	require.Len(t, evaluated.Assessments, 1)
+	assert.True(t, evaluated.Assessments[0].Retained)
+	assert.True(t, evaluated.Assessments[0].BaseMovementOnly)
+}
+
+func TestPublicationEvidenceProjectionRefreshesAcrossDaemons(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	firstRuntime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	secondRuntime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = firstRuntime.Close() })
+	t.Cleanup(func() { _ = secondRuntime.Close() })
+	secondDaemon := &Daemon{operationRuntime: secondRuntime, publicationEvidenceCache: map[string]domain.PublicationEvidenceSnapshot{}}
+
+	evidence := domain.PublicationEvidence{
+		EvidenceID: "review-1", ProjectID: "project", IssueID: "consumer-1", Layer: domain.PublicationEvidencePatchReview,
+		PatchDigest: "patch-a", SourceRevision: "source-a", Producer: "reviewer", PolicyVersion: "policy-v1",
+		EnvironmentFingerprint: "node-22", CreatedAt: time.Now().UTC(),
+	}
+	_, err := firstRuntime.store.RecordPublicationEvidence(ctx, evidence)
+	require.NoError(t, err)
+	initial, err := secondDaemon.publicationEvidenceSnapshot(ctx, "project", evidence.IssueID)
+	require.NoError(t, err)
+	require.Len(t, initial.Evidence, 1)
+
+	evidence.EvidenceID = "active-path-1"
+	evidence.Layer = domain.PublicationEvidenceActivePath
+	_, err = firstRuntime.store.RecordPublicationEvidence(ctx, evidence)
+	require.NoError(t, err)
+	refreshed, err := secondDaemon.publicationEvidenceSnapshot(ctx, "project", evidence.IssueID)
+	require.NoError(t, err)
+	assert.Len(t, refreshed.Evidence, 2, "second daemon must refresh durable projection before reading its cache")
+}

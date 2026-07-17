@@ -3,11 +3,15 @@ package protocol
 import "github.com/riordanpawley/azedarach/internal/domain"
 
 const (
-	CommandValidationAcquire   = "validation.acquire"
-	CommandValidationHeartbeat = "validation.heartbeat"
-	CommandValidationNested    = "validation.authorize_nested"
-	CommandValidationFinish    = "validation.finish"
-	CommandValidationStatus    = "validation.status"
+	CommandValidationAcquire             = "validation.acquire"
+	CommandValidationHeartbeat           = "validation.heartbeat"
+	CommandValidationNested              = "validation.authorize_nested"
+	CommandValidationFinish              = "validation.finish"
+	CommandValidationStatus              = "validation.status"
+	CommandPublicationEvidenceRecord     = "validation.publication_evidence.record"
+	CommandPublicationEvidenceInvalidate = "validation.publication_evidence.invalidate"
+	CommandPublicationEvidenceStatus     = "validation.publication_evidence.status"
+	CommandPublicationEvidenceEvaluate   = "validation.publication_evidence.evaluate"
 )
 
 type ValidationAcquireRequest struct {
@@ -59,4 +63,39 @@ type ValidationRequestResponse struct {
 
 type ValidationStatusResponse struct {
 	Snapshot domain.ValidationSnapshot `json:"snapshot"`
+}
+
+type PublicationEvidenceRecordRequest struct {
+	Evidence domain.PublicationEvidence `json:"evidence"`
+}
+
+type PublicationEvidenceRecordResponse struct {
+	Evidence domain.PublicationEvidence `json:"evidence"`
+}
+
+type PublicationEvidenceInvalidateRequest struct {
+	Invalidation domain.PublicationEvidenceInvalidation `json:"invalidation"`
+}
+
+type PublicationEvidenceInvalidateResponse struct {
+	Invalidation domain.PublicationEvidenceInvalidation `json:"invalidation"`
+}
+
+type PublicationEvidenceStatusRequest struct {
+	IssueID string `json:"issue_id,omitempty"`
+}
+
+type PublicationEvidenceStatusResponse struct {
+	Snapshot domain.PublicationEvidenceSnapshot `json:"snapshot"`
+}
+
+type PublicationEvidenceEvaluateRequest struct {
+	IssueID   string                              `json:"issue_id"`
+	Candidate domain.PublicationEvidenceCandidate `json:"candidate"`
+	Policy    domain.PublicationEvidencePolicy    `json:"policy"`
+}
+
+type PublicationEvidenceEvaluateResponse struct {
+	Snapshot    domain.PublicationEvidenceSnapshot     `json:"snapshot"`
+	Assessments []domain.PublicationEvidenceAssessment `json:"assessments"`
 }
