@@ -35,6 +35,11 @@ runtime marker with live tmux before trusting the attached agent.
 `orchestration.project_completion` is hybrid: refresh durable issue, review,
 interaction, orchestration, and session projections, then compare runtime
 presence with live tmux. `runtime.reconcile` exposes both mappings.
+`session.managed_agent_restart` is hybrid: refresh the durable logical pane,
+tmux pane, pane PID, and agent incarnation binding, then compare it with live
+tmux before exact-pane replacement and again with hook-backed replacement
+evidence before reporting success. Tmux command acceptance is never restart
+acknowledgement.
 
 ## Client and authority boundary
 

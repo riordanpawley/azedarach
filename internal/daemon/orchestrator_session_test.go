@@ -10,12 +10,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -338,7 +340,9 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 
 	// A failed exact replacement leaves durable acknowledgement absent, so a
 	// later rooted start repairs whichever process survived.
-	tmuxRunner.respawnErr = context.Canceled
+	d.sessionRestartRespawn = func(context.Context, string, string, string) (error, bool) {
+		return context.Canceled, false
+	}
 	cancelledResponse, err := d.handleSessionRestartAll(ctx, restartRequest)
 	if err != nil || cancelledResponse.Error != nil {
 		t.Fatalf("cancel rooted replacement: response=%+v err=%v", cancelledResponse.Error, err)
@@ -357,7 +361,7 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if _, found, err := ackAuthority.Get(ctx, identity); err != nil || found {
 		t.Fatalf("cancelled replacement acknowledgement found=%t err=%v", found, err)
 	}
-	tmuxRunner.respawnErr = nil
+	d.sessionRestartRespawn = nil
 	inputsBefore = len(tmuxRunner.inputPayloads)
 	response, err = d.handleOrchestratorSession(ctx, request)
 	if err != nil || response.Error != nil {
@@ -481,7 +485,7 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	}
 }
 
-func TestRootedRestartSerializesAcrossDaemonsAndAcknowledgesReplacement(t *testing.T) {
+func TestRootedRestartAfterCallerCancellationSerializesAndAcknowledgesReplacement(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)
@@ -529,6 +533,19 @@ func TestRootedRestartSerializesAcrossDaemonsAndAcknowledgesReplacement(t *testi
 
 	replacementPaused := make(chan struct{})
 	releaseReplacement := make(chan struct{})
+	restartBaseCtx, cancelRestart := context.WithCancel(context.Background())
+	t.Cleanup(cancelRestart)
+	var progressMu sync.Mutex
+	var progressPhases []string
+	restartCtx := daemonops.WithProgressReporter(restartBaseCtx, func(progressCtx context.Context, progress daemonops.Progress) error {
+		if progress.Phase == "session.restart_all.complete" && progressCtx.Err() != nil {
+			t.Errorf("complete progress used canceled caller context: %v", progressCtx.Err())
+		}
+		progressMu.Lock()
+		progressPhases = append(progressPhases, progress.Phase)
+		progressMu.Unlock()
+		return nil
+	})
 	updateReplacement := seedManagedRestartIdentity(t, first, runner, projectID, started.SessionID)
 	runner.onRespawnPane = func(ctx context.Context, args []string) error {
 		close(replacementPaused)
@@ -537,7 +554,11 @@ func TestRootedRestartSerializesAcrossDaemonsAndAcknowledgesReplacement(t *testi
 			return ctx.Err()
 		case <-releaseReplacement:
 		}
-		return updateReplacement(ctx, args)
+		if err := updateReplacement(ctx, args); err != nil {
+			return err
+		}
+		cancelRestart()
+		return context.Canceled
 	}
 	restartRequest := protocol.RequestEnvelope{Command: protocol.CommandSessionRestartAll, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(projectID), ForceBusy: true})}
 	type commandResult struct {
@@ -547,7 +568,7 @@ func TestRootedRestartSerializesAcrossDaemonsAndAcknowledgesReplacement(t *testi
 	restartDone := make(chan commandResult, 1)
 	inputsBefore := len(runner.inputPayloads)
 	go func() {
-		response, err := first.handleSessionRestartAll(ctx, restartRequest)
+		response, err := first.handleSessionRestartAll(restartCtx, restartRequest)
 		restartDone <- commandResult{response: response, err: err}
 	}()
 	select {
@@ -596,6 +617,15 @@ func TestRootedRestartSerializesAcrossDaemonsAndAcknowledgesReplacement(t *testi
 	}
 	if got := runner.env[started.SessionID][rootedOrchestratorBootstrapNonceEnvironment]; got != ack.RuntimeNonce {
 		t.Fatalf("live marker = %q, durable acknowledgement = %q", got, ack.RuntimeNonce)
+	}
+	progressMu.Lock()
+	gotProgressPhases := append([]string(nil), progressPhases...)
+	progressMu.Unlock()
+	if len(gotProgressPhases) == 0 {
+		t.Fatal("restart persisted no progress checkpoints")
+	}
+	if got := gotProgressPhases[len(gotProgressPhases)-1]; got != "session.restart_all.complete" {
+		t.Fatalf("last progress phase = %q, want exact complete checkpoint; phases=%v", got, gotProgressPhases)
 	}
 }
 

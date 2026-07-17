@@ -118,7 +118,6 @@ const (
 
 	sessionConflictWindowName         = "resolve-conflict"
 	sessionActivityStartupGrace       = 45 * time.Second
-	sessionRestartContinuePromptDelay = 500 * time.Millisecond
 	sessionRestartContinuePrompt      = "Continue your prior task. Start by running `az prime` if you need to refresh issue context, then keep working from the existing conversation without waiting for further instruction."
 	sessionCaptureDefaultLines        = 120
 	sessionCaptureMaxLines            = 1000
@@ -2007,24 +2006,6 @@ func (d *Daemon) sessionRestartAllProjectIDs(requestProjectID string) []string {
 	}
 	sort.Strings(projectIDs)
 	return projectIDs
-}
-
-func waitBeforeSessionResume(ctx context.Context, delay time.Duration) error {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-func (d *Daemon) waitBeforeSessionResume(ctx context.Context, delay time.Duration) error {
-	if d != nil && d.sessionResumeWait != nil {
-		return d.sessionResumeWait(ctx, delay)
-	}
-	return waitBeforeSessionResume(ctx, delay)
 }
 
 func (d *Daemon) persistRestartedSessionProjection(ctx context.Context, projectID, sessionID, issueID string) {
@@ -4629,11 +4610,6 @@ func (d *Daemon) buildCodexResumeCommand(projectID, issueID string, yolo bool, i
 	parts = append(parts, "--last")
 	command := strings.Join(parts, " ")
 	return command
-}
-
-func (d *Daemon) sessionRestartNeedsPostLaunchPrompt(projectID string) bool {
-	tool := strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool)
-	return strings.EqualFold(tool, "codex")
 }
 
 func codexLaunchPromptArgAllowed(prompt string) bool {

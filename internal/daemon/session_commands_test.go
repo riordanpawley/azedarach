@@ -858,8 +858,6 @@ func TestRuntimeReconcileIssuesSummarizesSharedTmuxSnapshotFailure(t *testing.T)
 	}
 }
 
-func immediateSessionResumeWait(context.Context, time.Duration) error { return nil }
-
 func TestSessionRestartAllRefusesSessionsWithoutManagedIdentity(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
@@ -890,13 +888,8 @@ func TestSessionRestartAllRefusesSessionsWithoutManagedIdentity(t *testing.T) {
 	tmuxRunner.sessions[idleSession] = true
 	tmuxRunner.sessions[busySession] = true
 	store := daemonstate.NewStore()
-	var resumeWaits []time.Duration
 	daemon := &Daemon{
 		cfg: Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", ManagedGenerationBinDir: managedDir, Logger: slog.Default()},
-		sessionResumeWait: func(_ context.Context, delay time.Duration) error {
-			resumeWaits = append(resumeWaits, delay)
-			return nil
-		},
 		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
 		issues:       issuesClient,
 		session:      daemonhandlers.NewSessionHandler(store),
@@ -971,7 +964,6 @@ func TestSessionRestartAllForceBusyStillRequiresManagedIdentity(t *testing.T) {
 			SessionShell:               "zsh",
 			Logger:                     slog.Default(),
 		},
-		sessionResumeWait: immediateSessionResumeWait,
 		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
 		issues:            issuesClient,
 		session:           daemonhandlers.NewSessionHandler(store),
@@ -1070,7 +1062,6 @@ func TestSessionRestartAllDiscoversKnownProjectSessionsAndReportsNoAgent(t *test
 	stateStore := daemonstate.NewStore()
 	daemon := &Daemon{
 		cfg:               Config{RepoDir: repoA, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
-		sessionResumeWait: immediateSessionResumeWait,
 		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
 		issues:            newMigratedIssueClient(t, repoA, slog.Default()),
 		session:           daemonhandlers.NewSessionHandler(stateStore),
@@ -1147,7 +1138,6 @@ func TestSessionRestartAllSkipsTmuxSessionWithoutLivePane(t *testing.T) {
 	store := daemonstate.NewStore()
 	daemon := &Daemon{
 		cfg:               Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
-		sessionResumeWait: immediateSessionResumeWait,
 		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
 		session:           daemonhandlers.NewSessionHandler(store),
 		sessionStore:      store,
@@ -1216,7 +1206,6 @@ func TestSessionRestartAllClassifiesShellOnlyWithoutTerminalInput(t *testing.T) 
 	store := daemonstate.NewStore()
 	daemon := &Daemon{
 		cfg:               Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
-		sessionResumeWait: immediateSessionResumeWait,
 		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
 		session:           daemonhandlers.NewSessionHandler(store),
 		sessionStore:      store,
@@ -1293,7 +1282,6 @@ func TestSessionRestartAllClassifiesSessionSourcedBusyWithoutIdentity(t *testing
 	store := daemonstate.NewStore()
 	daemon := &Daemon{
 		cfg:               Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
-		sessionResumeWait: immediateSessionResumeWait,
 		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
 		session:           daemonhandlers.NewSessionHandler(store),
 		sessionStore:      store,
@@ -2884,7 +2872,6 @@ func TestSessionStartReportsFailedStartCleanupFailures(t *testing.T) {
 					Logger: slog.Default(),
 				},
 				tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
-				sessionResumeWait: immediateSessionResumeWait,
 				issues:            issuesClient,
 				session:           daemonhandlers.NewSessionHandler(store),
 				sessionStore:      store,

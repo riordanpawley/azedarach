@@ -21,6 +21,7 @@ const (
 	daemonInvariantSessionIssueLifecycle   daemonInvariantID = "session.issue_lifecycle_runtime"
 	daemonInvariantSessionActivityConverge daemonInvariantID = "session.activity_convergence"
 	daemonInvariantManagedAgentIdentity    daemonInvariantID = "session.managed_agent_identity"
+	daemonInvariantManagedAgentRestart     daemonInvariantID = "session.managed_agent_restart"
 	daemonInvariantAgentInputDelivery      daemonInvariantID = "session.agent_input_delivery"
 	daemonInvariantAdvisorSingleton        daemonInvariantID = "session.advisor_singleton"
 
@@ -68,8 +69,9 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantSessionReconcile:             daemonInvariantSourceHybrid,
 	daemonInvariantSessionIssueLifecycle:        daemonInvariantSourceHybrid,
 	daemonInvariantSessionActivityConverge:      daemonInvariantSourceHybrid,
-	daemonInvariantManagedAgentIdentity:    daemonInvariantSourceHybrid,
-	daemonInvariantAgentInputDelivery:      daemonInvariantSourceHybrid,
+	daemonInvariantManagedAgentIdentity:         daemonInvariantSourceHybrid,
+	daemonInvariantManagedAgentRestart:          daemonInvariantSourceHybrid,
+	daemonInvariantAgentInputDelivery:           daemonInvariantSourceHybrid,
 	daemonInvariantTaskListFreshness:            daemonInvariantSourceProjection,
 	daemonInvariantTaskClose:                    daemonInvariantSourceHybrid,
 	daemonInvariantTaskClosePreflight:           daemonInvariantSourceHybrid,

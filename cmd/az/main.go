@@ -1596,7 +1596,7 @@ func printSessionUsage() {
 	fmt.Println("  status [issue-id]     Show all sessions or one issue session status")
 	fmt.Println("  capture <issue-id>    Capture recent pane output through the daemon")
 	fmt.Println("  diagnose <issue-id>   Collect session, worktree, operation, hook, and log diagnostics")
-	fmt.Println("  restart-all           Restart idle AI sessions and tell them to continue; use --force-busy to include busy sessions")
+	fmt.Println("  restart-all           Supervise exact managed-agent replacement; use --force-busy to include busy sessions")
 	fmt.Println("  resolve-conflict <issue-id> [--worktree <path>] [--file <path> ...] [--prompt <text>]")
 	fmt.Println("                        Launch conflict-resolution agent")
 	fmt.Println()
