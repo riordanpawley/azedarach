@@ -134,7 +134,34 @@ func (d *Daemon) restartManagedAgentPane(ctx context.Context, target sessionRest
 		delete(d.sessionRestartPending, item.OperationID)
 		d.sessionRestartMu.Unlock()
 	}()
+	item = d.restartManagedAgentPaneWithIdentity(ctx, store, old, target, body, item, rootedIdentity)
+	return item
+}
 
+func (d *Daemon) restartManagedAgentPaneWithIdentity(ctx context.Context, store *daemonstate.RuntimeStateStore, old daemonstate.ManagedAgentIdentity, target sessionRestartAllTarget, body protocol.SessionRestartAllRequestBody, item protocol.SessionRestartAllItem, rootedIdentity *domain.OrchestratorIdentity) protocol.SessionRestartAllItem {
+	var lockedItem protocol.SessionRestartAllItem
+	lockErr := store.WithManagedAgentRestartTransition(ctx, target.ProjectID, target.SessionID, old.LogicalPaneID, old.AgentIncarnation, func(lockCtx context.Context) error {
+		lockedItem = d.restartManagedAgentPaneLocked(lockCtx, store, old, target, body, item, rootedIdentity)
+		return nil
+	})
+	if lockErr != nil {
+		item.Outcome, item.Error = "partial_failure", fmt.Sprintf("serialize exact managed-agent replacement: %v", lockErr)
+		return item
+	}
+	return lockedItem
+}
+
+func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemonstate.RuntimeStateStore, old daemonstate.ManagedAgentIdentity, target sessionRestartAllTarget, body protocol.SessionRestartAllRequestBody, item protocol.SessionRestartAllItem, rootedIdentity *domain.OrchestratorIdentity) protocol.SessionRestartAllItem {
+	current, found, err := store.GetManagedAgentIdentity(ctx, target.ProjectID, target.SessionID, old.LogicalPaneID)
+	if err != nil {
+		appendRestartStageFailure(&item, "identity_refresh", sessionRestartPreflightTimeout, err, errors.Is(err, context.DeadlineExceeded))
+		return item
+	}
+	if !found || !sameManagedRestartIdentity(current, old) {
+		item.Outcome, item.Reason, item.Skipped = "superseded", "managed_agent_identity_changed", true
+		item.Stages = append(item.Stages, restartStage("identity_refresh", "refused", item.Reason, sessionRestartPreflightTimeout))
+		return item
+	}
 	panes, err, timedOut := runRestartStage(ctx, sessionRestartPreflightTimeout, func(stageCtx context.Context) ([]tmux.PaneInfo, error) { return d.tmux.ListPaneInfos(stageCtx) })
 	if err != nil {
 		appendRestartStageFailure(&item, "preflight", sessionRestartPreflightTimeout, err, timedOut)
@@ -232,6 +259,31 @@ func (d *Daemon) restartManagedAgentPane(ctx context.Context, target sessionRest
 		appendRestartStageFailure(&item, "persist_replace_ready", sessionRestartPreflightTimeout, err, false)
 		return item
 	}
+	current, found, err = store.GetManagedAgentIdentity(ctx, target.ProjectID, target.SessionID, old.LogicalPaneID)
+	if err != nil {
+		prepared.artifact.remove()
+		appendRestartStageFailure(&item, "replace_preflight", sessionRestartPreflightTimeout, err, errors.Is(err, context.DeadlineExceeded))
+		return item
+	}
+	if !found || !sameManagedRestartIdentity(current, old) {
+		prepared.artifact.remove()
+		item.Outcome, item.Reason, item.Skipped = "superseded", "managed_agent_identity_changed_before_replace", true
+		item.Stages = append(item.Stages, restartStage("replace_preflight", "refused", item.Reason, sessionRestartPreflightTimeout))
+		return item
+	}
+	livePanes, liveErr, liveTimedOut := runRestartStage(ctx, sessionRestartPreflightTimeout, func(stageCtx context.Context) ([]tmux.PaneInfo, error) { return d.tmux.ListPaneInfos(stageCtx) })
+	if liveErr != nil {
+		prepared.artifact.remove()
+		appendRestartStageFailure(&item, "replace_preflight", sessionRestartPreflightTimeout, liveErr, liveTimedOut)
+		return item
+	}
+	if !managedRestartIdentityLive(target.SessionID, old, livePanes) {
+		prepared.artifact.remove()
+		item.Outcome, item.Reason, item.Skipped = "superseded", "managed_agent_process_changed_before_replace", true
+		item.Stages = append(item.Stages, restartStage("replace_preflight", "refused", item.Reason, sessionRestartPreflightTimeout))
+		return item
+	}
+	item.Stages = append(item.Stages, restartStage("replace_preflight", "complete", "exact durable identity still matches live pane", sessionRestartPreflightTimeout))
 	_, err, timedOut = runRestartStage(ctx, sessionRestartReplaceTimeout, func(stageCtx context.Context) (struct{}, error) {
 		return struct{}{}, d.tmux.RespawnPane(stageCtx, paneTarget, prepared.worktree, prepared.artifact.Command)
 	})
@@ -294,6 +346,11 @@ func (d *Daemon) restartManagedAgentPane(ctx context.Context, target sessionRest
 			}
 		}
 	}
+}
+
+func sameManagedRestartIdentity(a, b daemonstate.ManagedAgentIdentity) bool {
+	return a.ProjectID == b.ProjectID && a.SessionID == b.SessionID && a.LogicalPaneID == b.LogicalPaneID &&
+		sanitizeRuntimePaneID(a.TmuxPaneID) == sanitizeRuntimePaneID(b.TmuxPaneID) && a.PanePID == b.PanePID && a.AgentIncarnation == b.AgentIncarnation
 }
 
 func reportSessionRestartProgress(ctx context.Context, plan sessionRestartRecoveryPlan) error {

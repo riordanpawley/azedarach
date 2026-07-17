@@ -227,6 +227,63 @@ func TestRestartManagedAgentPaneConcurrentDuplicateRespawnsOnce(t *testing.T) {
 	}
 }
 
+func TestRestartManagedAgentPaneCrossDaemonStaleIdentityRespawnsOnce(t *testing.T) {
+	ctx := context.Background()
+	const project = "project"
+	const session = "az-1"
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	storeA := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	storeB := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = storeB.Close() })
+	t.Cleanup(func() { _ = storeA.Close() })
+	old := daemonstate.ManagedAgentIdentity{
+		ProjectID: project, SessionID: session, LogicalPaneID: "agent", TmuxPaneID: "12",
+		PanePID: 100, AgentIncarnation: "old", ObservedAt: time.Now(),
+	}
+	if err := storeA.UpsertManagedAgentIdentity(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	runner := &exactRestartRunner{store: storeA, project: project, session: session, pid: old.PanePID}
+	newDaemon := func(store *daemonstate.RuntimeStateStore) *Daemon {
+		return &Daemon{
+			cfg:  Config{RepoDir: t.TempDir(), CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+			tmux: tmux.NewClient(runner, slog.Default()), runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{project: store},
+		}
+	}
+	daemonA, daemonB := newDaemon(storeA), newDaemon(storeB)
+	target := sessionRestartAllTarget{ProjectID: project, SessionID: session, IssueID: "one", Activity: "idle", TmuxReady: true}
+	start := make(chan struct{})
+	results := make(chan protocol.SessionRestartAllItem, 2)
+	var wg sync.WaitGroup
+	for _, daemon := range []*Daemon{daemonA, daemonB} {
+		wg.Add(1)
+		go func(d *Daemon) {
+			defer wg.Done()
+			<-start
+			results <- d.restartManagedAgentPaneWithIdentity(ctx, d.runtimeStoresByProject[project], old, target, protocol.SessionRestartAllRequestBody{}, protocol.SessionRestartAllItem{}, nil)
+		}(daemon)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	restarted, superseded := 0, 0
+	for result := range results {
+		switch {
+		case result.Restarted:
+			restarted++
+		case result.Skipped && result.Outcome == "superseded" && result.Reason == "managed_agent_identity_changed":
+			superseded++
+		default:
+			t.Fatalf("unexpected result: %+v", result)
+		}
+	}
+	respawns, _, _ := runner.snapshot()
+	if restarted != 1 || superseded != 1 || respawns != 1 {
+		t.Fatalf("restarted=%d superseded=%d respawns=%d, want 1/1/1", restarted, superseded, respawns)
+	}
+}
+
 func TestRestartManagedAgentPaneArtifactFlagsWorktreeAndUnrelatedPanes(t *testing.T) {
 	d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "waiting")
 	d.cfg.DangerouslySkipPermissions = true
