@@ -3965,22 +3965,29 @@ func TestDrillDownUsesDefaultBoardViewAndRestoresRootView(t *testing.T) {
 	m.loading = false
 
 	parentID := naming.IssueID("az-parent")
-	openChildID := naming.IssueID("az-open-child")
 	doneChildID := naming.IssueID("az-done-child")
 	parent := domain.Task{ID: parentID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeEpic}
-	openChild := domain.Task{ID: openChildID, Title: "Open child", Status: domain.StatusOpen, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID}
 	doneChild := domain.Task{ID: doneChildID, Title: "Done child", Status: domain.StatusDone, Priority: domain.P3, Type: domain.TypeTask, ParentID: &parentID}
-	m.tasks = append(m.tasks, parent, openChild, doneChild)
-
 	rootView := domain.PlanningBoardView()
+	rootProjection, err := domain.ProjectTasksByBoardView(rootView, []domain.Task{parent, doneChild})
+	if err != nil {
+		t.Fatalf("project cold Planning board: %v", err)
+	}
+	if slices.ContainsFunc(rootProjection.OrderedTasks(), func(task domain.Task) bool { return task.ID == doneChildID }) {
+		t.Fatal("cold Planning projection unexpectedly includes Done child")
+	}
+	m.tasks = append([]domain.Task(nil), rootProjection.OrderedTasks()...)
 	m.boardView = rootView
 	m.selectedBoardViewID = string(rootView.ID)
-	m.boardColumns = []domain.BoardViewColumnSnapshot{{Definition: rootView.Columns[0], Tasks: []domain.Task{parent}}}
-	m.boardOrdered = []domain.Task{parent}
-	m.boardProjection = domain.BoardViewProjection{View: rootView}
+	m.boardColumns = rootProjection.ColumnSnapshots()
+	m.boardOrdered = rootProjection.OrderedTasks()
+	m.boardProjection = rootProjection
 
-	entered, _ := m.enterDrillDownByID(parentID.String())
+	entered, scopedRefreshCmd := m.enterDrillDownByID(parentID.String())
 	drilled := entered.(Model)
+	if scopedRefreshCmd == nil && !drilled.issueRefreshPending {
+		t.Fatal("cold drill-down neither scheduled nor queued a scoped child-board refresh")
+	}
 	if got, want := drilled.boardView.ID, domain.BoardViewDefaultID; got != want {
 		t.Fatalf("drill-down view = %q, want %q", got, want)
 	}
@@ -3993,16 +4000,14 @@ func TestDrillDownUsesDefaultBoardViewAndRestoresRootView(t *testing.T) {
 			rendered = append(rendered, task.ID.String())
 		}
 	}
-	for _, want := range []string{openChildID.String(), doneChildID.String()} {
-		if !slices.Contains(rendered, want) {
-			t.Fatalf("default drill-down columns = %v, want child %s", rendered, want)
-		}
+	if len(rendered) != 0 {
+		t.Fatalf("cold drill-down columns = %v, want empty until scoped refresh", rendered)
 	}
 
 	refreshedAny, _ := drilled.Update(issuesLoadedMsg{
 		projectID:      drilled.daemonProjectID(),
 		scopedParentID: parentID.String(),
-		tasks:          []domain.Task{parent, openChild, doneChild},
+		tasks:          []domain.Task{parent, doneChild},
 		boardView:      domain.CloseoutBoardView(),
 	})
 	refreshed := refreshedAny.(Model)
@@ -4011,6 +4016,12 @@ func TestDrillDownUsesDefaultBoardViewAndRestoresRootView(t *testing.T) {
 	}
 	if got := refreshed.selectedBoardViewID; got != string(rootView.ID) {
 		t.Fatalf("refreshed drill-down changed persisted root selection to %q", got)
+	}
+	refreshedColumns := refreshed.buildColumns()
+	if !slices.ContainsFunc(refreshedColumns, func(column board.Column) bool {
+		return slices.ContainsFunc(column.Tasks, func(task domain.Task) bool { return task.ID == doneChildID })
+	}) {
+		t.Fatalf("refreshed Default drill-down columns = %+v, want Done child %s", refreshedColumns, doneChildID)
 	}
 
 	staleRootAny, _ := refreshed.Update(issuesLoadedMsg{
