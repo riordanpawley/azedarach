@@ -22,6 +22,7 @@ func TestRealTmuxHumanDraftAndConcurrentTypingArePreservedWhenNativeProofUnavail
 	defer cancel()
 	socket := "az-dlb-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	session := "agent-input"
+	readyChannel := socket + "-shell-ready"
 	run := func(args ...string) string {
 		out, err := exec.CommandContext(ctx, "tmux", append([]string{"-L", socket}, args...)...).CombinedOutput()
 		if err != nil {
@@ -29,9 +30,11 @@ func TestRealTmuxHumanDraftAndConcurrentTypingArePreservedWhenNativeProofUnavail
 		}
 		return string(out)
 	}
-	run("new-session", "-d", "-s", session, "zsh -f")
+	run("new-session", "-d", "-s", session, "zsh -f -c 'tmux wait-for -S "+readyChannel+"; exec zsh -f'")
 	t.Cleanup(func() { _ = exec.Command("tmux", "-L", socket, "kill-server").Run() })
-	time.Sleep(100 * time.Millisecond)
+	// The pane shell signals through the tmux server after it has started, giving
+	// the test a deterministic barrier before metadata inspection and typing.
+	run("wait-for", readyChannel)
 	meta := strings.Split(strings.TrimSpace(run("display-message", "-p", "-t", session, "#{pane_id}\t#{pane_pid}")), "\t")
 	if len(meta) != 2 {
 		t.Fatalf("meta=%q", meta)

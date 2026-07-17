@@ -95,7 +95,6 @@ var orderedMigrations = []migration{
 	{id: decisionIdempotencyMigrationID, path: "migrations/0051_decision_idempotency.sql"},
 	{id: mailboxObservationProjectionCutoverMigrationID, path: "migrations/0052_mailbox_observation_projection_cutover.sql"},
 	{id: agentInputDeliveryMigrationID, path: "migrations/0053_agent_input_delivery.sql"},
-	{id: agentInputDeliveryFencingMigrationID, path: "migrations/0054_agent_input_delivery_fencing.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -158,7 +157,6 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: decisionIdempotencyMigrationID, Path: "migrations/0051_decision_idempotency.sql", Checksum: "86d5400fe33bbc19e7e848bc232335809f76d85e4d45a6e45f6bc7ff77547f47"},
 	{ID: mailboxObservationProjectionCutoverMigrationID, Path: "migrations/0052_mailbox_observation_projection_cutover.sql", Checksum: "fd86080f491210c169005c7f28bc778aca3eea2d70ce15a6c001bb960397e260"},
 	{ID: agentInputDeliveryMigrationID, Path: "migrations/0053_agent_input_delivery.sql", Checksum: agentInputDeliveryMigrationChecksum},
-	{ID: agentInputDeliveryFencingMigrationID, Path: "migrations/0054_agent_input_delivery_fencing.sql", Checksum: agentInputDeliveryFencingMigrationChecksum},
 }
 
 func validateMigrationRegistry() error {
@@ -460,9 +458,7 @@ const (
 	decisionPropagationOutboxMigrationID                                     = "0048_decision_propagation_outbox"
 	issueObservationEventSearchMigrationID                                   = "0050_issue_observation_event_search"
 	agentInputDeliveryMigrationID                                            = "0053_agent_input_delivery"
-	agentInputDeliveryMigrationChecksum                                      = "0ab79e683f8af50d532fc65792e984fe261ce4c3e0a3b63096aac81f5d6c2fdd"
-	agentInputDeliveryFencingMigrationID                                     = "0054_agent_input_delivery_fencing"
-	agentInputDeliveryFencingMigrationChecksum                               = "939375d24a268a26e77e5d60e7f46b0d84e86ba8dfaf13815c427b886eb9f3c8"
+	agentInputDeliveryMigrationChecksum                                      = "cdf11b795b22321461dad3e7c1fd88b2b93cff338828c4abd7903cc20b3fa362"
 	contextualLearningMigrationID                                            = "0039_contextual_learning_activation"
 	legacyContextualLearningMigration                                        = "0038_contextual_learning_activation"
 )
@@ -579,12 +575,6 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 				}
 				continue
 			}
-			if m.id == agentInputDeliveryFencingMigrationID {
-				if err := c.applyAgentInputDeliveryFencingMigration(ctx, db, m.id); err != nil {
-					return err
-				}
-				continue
-			}
 			if m.id == decisionIdempotencyMigrationID {
 				if err := c.applyDecisionIdempotencyMigration(ctx, db, m.id); err != nil {
 					return err
@@ -652,16 +642,7 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("check agent input delivery migration: %w", err)
 	}
 	if agentInputApplied {
-		fencingApplied, err := isMigrationApplied(ctx, db, agentInputDeliveryFencingMigrationID)
-		if err != nil {
-			return fmt.Errorf("check agent input delivery fencing migration: %w", err)
-		}
-		if fencingApplied {
-			err = validateAgentInputDeliverySchema(ctx, db)
-		} else {
-			err = validateAgentInputDeliveryBaseSchema(ctx, db)
-		}
-		if err != nil {
+		if err := validateAgentInputDeliverySchema(ctx, db); err != nil {
 			return err
 		}
 	}
@@ -1138,18 +1119,10 @@ func validateManagedAgentIdentitySchema(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func validateAgentInputDeliveryBaseSchema(ctx context.Context, db sqlIssueQueryer) error {
-	contract, err := agentInputDeliveryBaseSchemaContract()
-	if err != nil {
-		return fmt.Errorf("derive agent input delivery base schema from pinned artifact: %w", err)
-	}
-	return validateAgentInputDeliverySchemaContract(ctx, db, contract)
-}
-
 func validateAgentInputDeliverySchema(ctx context.Context, db sqlIssueQueryer) error {
-	contract, err := agentInputDeliveryFencedSchemaContract()
+	contract, err := cachedAgentInputDeliverySchemaContract()
 	if err != nil {
-		return fmt.Errorf("derive agent input delivery fenced schema from pinned artifacts: %w", err)
+		return fmt.Errorf("derive agent input delivery schema from pinned artifact: %w", err)
 	}
 	return validateAgentInputDeliverySchemaContract(ctx, db, contract)
 }
@@ -1191,16 +1164,9 @@ type agentInputDeliverySchemaContract struct {
 	indexes map[string]exactSQLiteIndex
 }
 
-var (
-	agentInputDeliveryBaseSchemaContract = sync.OnceValues(func() (*agentInputDeliverySchemaContract, error) {
-		return deriveAgentInputDeliverySchemaContract(false)
-	})
-	agentInputDeliveryFencedSchemaContract = sync.OnceValues(func() (*agentInputDeliverySchemaContract, error) {
-		return deriveAgentInputDeliverySchemaContract(true)
-	})
-)
+var cachedAgentInputDeliverySchemaContract = sync.OnceValues(deriveAgentInputDeliverySchemaContract)
 
-func deriveAgentInputDeliverySchemaContract(fenced bool) (*agentInputDeliverySchemaContract, error) {
+func deriveAgentInputDeliverySchemaContract() (*agentInputDeliverySchemaContract, error) {
 	if err := validateMigrationRegistry(); err != nil {
 		return nil, fmt.Errorf("authenticate pinned migration artifacts: %w", err)
 	}
@@ -1217,15 +1183,6 @@ func deriveAgentInputDeliverySchemaContract(fenced bool) (*agentInputDeliverySch
 	}
 	if _, err := db.ExecContext(ctx, baseSQL); err != nil {
 		return nil, fmt.Errorf("execute pinned migration 0053 reference artifact: %w", err)
-	}
-	if fenced {
-		fencingSQL, err := loadRegisteredMigrationSQL(agentInputDeliveryFencingMigrationID)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := db.ExecContext(ctx, fencingSQL); err != nil {
-			return nil, fmt.Errorf("execute pinned migration 0054 reference artifact: %w", err)
-		}
 	}
 	return inspectAgentInputDeliverySchemaContract(ctx, db)
 }
@@ -1312,177 +1269,6 @@ func validateAgentInputDeliverySchemaContract(ctx context.Context, db sqlIssueQu
 		return errors.New("agent input delivery schema drifted: index metadata is non-canonical")
 	}
 	return nil
-}
-
-func validateAgentInputDeliveryNoInboundDependencies(ctx context.Context, db sqlIssueQueryer) error {
-	const target = "agent_input_delivery_intents"
-	rows, err := db.QueryContext(ctx, `
-		SELECT schema_name, type, name, ddl
-		FROM (
-			SELECT 'main' AS schema_name, type, name, COALESCE(sql, '') AS ddl
-			FROM sqlite_master
-			WHERE type IN ('view','trigger')
-			UNION ALL
-			SELECT 'temp' AS schema_name, type, name, COALESCE(sql, '') AS ddl
-			FROM sqlite_temp_master
-			WHERE type IN ('view','trigger')
-		)
-		ORDER BY type, name
-	`)
-	if err != nil {
-		return fmt.Errorf("inspect inbound view and trigger dependencies: %w", err)
-	}
-	for rows.Next() {
-		var schemaName, objectType, name, ddl string
-		if err := rows.Scan(&schemaName, &objectType, &name, &ddl); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan inbound schema dependency: %w", err)
-		}
-		if exactSQLiteDDLReferencesIdentifier(ddl, target) {
-			rows.Close()
-			return fmt.Errorf("inbound %s %s.%s references %s", objectType, schemaName, name, target)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return fmt.Errorf("iterate inbound schema dependencies: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close inbound schema dependency inspection: %w", err)
-	}
-
-	tables, err := db.QueryContext(ctx, `
-		SELECT name
-		FROM sqlite_master
-		WHERE type='table' AND name NOT LIKE 'sqlite_%' AND lower(name) <> lower(?)
-		ORDER BY name
-	`, target)
-	if err != nil {
-		return fmt.Errorf("inspect tables for inbound foreign keys: %w", err)
-	}
-	var tableNames []string
-	for tables.Next() {
-		var table string
-		if err := tables.Scan(&table); err != nil {
-			tables.Close()
-			return fmt.Errorf("scan table for inbound foreign keys: %w", err)
-		}
-		tableNames = append(tableNames, table)
-	}
-	if err := tables.Err(); err != nil {
-		tables.Close()
-		return fmt.Errorf("iterate tables for inbound foreign keys: %w", err)
-	}
-	if err := tables.Close(); err != nil {
-		return fmt.Errorf("close table inspection for inbound foreign keys: %w", err)
-	}
-	for _, table := range tableNames {
-		foreignKeys, err := db.QueryContext(ctx, `
-			SELECT id
-			FROM pragma_foreign_key_list(?)
-			WHERE lower([table])=lower(?)
-			LIMIT 1
-		`, table, target)
-		if err != nil {
-			return fmt.Errorf("inspect table %s inbound foreign keys: %w", table, err)
-		}
-		hasDependency := foreignKeys.Next()
-		if err := foreignKeys.Err(); err != nil {
-			foreignKeys.Close()
-			return fmt.Errorf("iterate table %s inbound foreign keys: %w", table, err)
-		}
-		if err := foreignKeys.Close(); err != nil {
-			return fmt.Errorf("close table %s inbound foreign key inspection: %w", table, err)
-		}
-		if hasDependency {
-			return fmt.Errorf("inbound foreign key from table %s references %s", table, target)
-		}
-	}
-	return nil
-}
-
-func exactSQLiteDDLReferencesIdentifier(ddl, target string) bool {
-	for i := 0; i < len(ddl); {
-		switch {
-		case i+1 < len(ddl) && ddl[i] == '-' && ddl[i+1] == '-':
-			i += 2
-			for i < len(ddl) && ddl[i] != '\n' {
-				i++
-			}
-		case i+1 < len(ddl) && ddl[i] == '/' && ddl[i+1] == '*':
-			i += 2
-			for i+1 < len(ddl) && !(ddl[i] == '*' && ddl[i+1] == '/') {
-				i++
-			}
-			if i+1 < len(ddl) {
-				i += 2
-			}
-		case ddl[i] == '\'':
-			i++
-			var quotedToken strings.Builder
-			for i < len(ddl) {
-				if ddl[i] == '\'' {
-					if i+1 < len(ddl) && ddl[i+1] == '\'' {
-						quotedToken.WriteByte('\'')
-						i += 2
-						continue
-					}
-					i++
-					break
-				}
-				quotedToken.WriteByte(ddl[i])
-				i++
-			}
-			// SQLite accepts single-quoted identifiers in table-name positions.
-			// Conservatively treat an exact target token as a dependency; rejecting
-			// an unusual string literal is safer than rebuilding through an
-			// unobserved compatibility-quoted reference.
-			if strings.EqualFold(quotedToken.String(), target) {
-				return true
-			}
-		case ddl[i] == '"' || ddl[i] == '`' || ddl[i] == '[':
-			quote := ddl[i]
-			closeQuote := quote
-			if quote == '[' {
-				closeQuote = ']'
-			}
-			i++
-			var identifier strings.Builder
-			for i < len(ddl) {
-				if ddl[i] == closeQuote {
-					if quote != '[' && i+1 < len(ddl) && ddl[i+1] == closeQuote {
-						identifier.WriteByte(closeQuote)
-						i += 2
-						continue
-					}
-					i++
-					break
-				}
-				identifier.WriteByte(ddl[i])
-				i++
-			}
-			if strings.EqualFold(identifier.String(), target) {
-				return true
-			}
-		default:
-			if !isSQLiteIdentifierByte(ddl[i]) {
-				i++
-				continue
-			}
-			start := i
-			for i < len(ddl) && isSQLiteIdentifierByte(ddl[i]) {
-				i++
-			}
-			if strings.EqualFold(ddl[start:i], target) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func isSQLiteIdentifierByte(character byte) bool {
-	return character == '_' || character == '$' || character >= '0' && character <= '9' || character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= 0x80
 }
 
 func inspectExactSQLiteColumns(ctx context.Context, db sqlIssueQueryer, table string) ([]exactSQLiteColumn, error) {
@@ -2146,45 +1932,6 @@ func (c *Client) applyAgentInputDeliveryMigration(ctx context.Context, db *sql.D
 	}
 	if c.agentInputMigrationFailureHook != nil {
 		if err := c.agentInputMigrationFailureHook("after_schema"); err != nil {
-			return fmt.Errorf("migration %s rolled back: %w", id, err)
-		}
-	}
-	if err := validateAgentInputDeliveryBaseSchema(ctx, tx); err != nil {
-		return fmt.Errorf("validate migration %s: %w", id, err)
-	}
-	if err := recordAppliedMigration(ctx, tx, id); err != nil {
-		return fmt.Errorf("record migration %s: %w", id, err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit migration %s: %w", id, err)
-	}
-	return nil
-}
-
-func (c *Client) applyAgentInputDeliveryFencingMigration(ctx context.Context, db *sql.DB, id string) error {
-	sqlText, err := loadMigrationSQL("migrations/0054_agent_input_delivery_fencing.sql")
-	if err != nil {
-		return fmt.Errorf("load migration %s: %w", id, err)
-	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin migration %s: %w", id, err)
-	}
-	defer tx.Rollback()
-	// Migration 0054 rebuilds the 0053 table. Validate the exact immutable
-	// predecessor, including both indexes, before executing any destructive DDL
-	// so schema drift remains intact and diagnosable on failure.
-	if err := validateAgentInputDeliveryBaseSchema(ctx, tx); err != nil {
-		return fmt.Errorf("validate migration %s predecessor: %w", id, err)
-	}
-	if err := validateAgentInputDeliveryNoInboundDependencies(ctx, tx); err != nil {
-		return fmt.Errorf("validate migration %s predecessor dependencies: %w", id, err)
-	}
-	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
-		return fmt.Errorf("apply migration %s: %w", id, err)
-	}
-	if c.agentInputMigrationFailureHook != nil {
-		if err := c.agentInputMigrationFailureHook("after_fencing_schema"); err != nil {
 			return fmt.Errorf("migration %s rolled back: %w", id, err)
 		}
 	}

@@ -1,13 +1,15 @@
 -- Migration 0053 manifest
 --
 -- Schema effects:
---   Create agent_input_delivery_intents and its pending/incarnation indexes.
+--   Create the final agent_input_delivery_intents schema, including the
+--   ambiguous submission state, plus durable session-scoped delivery leases
+--   with fenced incarnation values and an expiry index.
 -- Data effects:
 --   None. Existing issue, session, decision, and runtime rows are not read,
---   rewritten, backfilled, or deleted; the new intent table starts empty.
+--   rewritten, backfilled, or deleted; both new tables start empty.
 -- Validation effects:
 --   The Go-assisted runner executes this artifact transactionally and validates
---   the table SQL, required columns, constraints, and both indexes before the
+--   complete table, column, constraint, and index inventory before the
 --   transaction may write its ledger row or commit. Every later startup repeats
 --   the same schema validation when the ledger records this migration applied.
 -- Ledger effects:
@@ -27,7 +29,7 @@ CREATE TABLE agent_input_delivery_intents (
   tool TEXT NOT NULL CHECK (trim(tool) <> ''),
   message_kind TEXT NOT NULL CHECK (trim(message_kind) <> ''),
   payload TEXT NOT NULL CHECK (length(payload) > 0),
-  state TEXT NOT NULL CHECK (state IN ('queued','leased','delivered','expired','stale')),
+  state TEXT NOT NULL CHECK (state IN ('queued','leased','ambiguous','delivered','expired','stale')),
   expires_at TEXT,
   lease_owner TEXT,
   lease_token TEXT,
@@ -39,7 +41,7 @@ CREATE TABLE agent_input_delivery_intents (
   updated_at TEXT NOT NULL,
   PRIMARY KEY (project_id, intent_key),
   CHECK ((state = 'delivered') = (acknowledgement_token IS NOT NULL AND acknowledged_at IS NOT NULL)),
-  CHECK ((state = 'leased') = (lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL))
+  CHECK ((state IN ('leased','ambiguous')) = (lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL))
 );
 
 CREATE INDEX idx_agent_input_delivery_pending
@@ -48,3 +50,17 @@ CREATE INDEX idx_agent_input_delivery_pending
 
 CREATE INDEX idx_agent_input_delivery_incarnation
   ON agent_input_delivery_intents(project_id, session_id, logical_pane_id, agent_incarnation, state);
+
+CREATE TABLE agent_input_delivery_session_leases (
+  project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
+  session_id TEXT NOT NULL CHECK (trim(session_id) <> ''),
+  agent_incarnation TEXT NOT NULL CHECK (trim(agent_incarnation) <> ''),
+  lease_owner TEXT NOT NULL CHECK (trim(lease_owner) <> ''),
+  lease_token TEXT NOT NULL CHECK (trim(lease_token) <> ''),
+  lease_expires_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (project_id, session_id)
+);
+
+CREATE INDEX idx_agent_input_session_lease_expiry
+  ON agent_input_delivery_session_leases(lease_expires_at);

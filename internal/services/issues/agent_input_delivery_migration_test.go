@@ -42,8 +42,8 @@ func TestAgentInputDeliveryMigrationFreshReopenAndDurableIntent(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND length(artifact_checksum)=64`, agentInputDeliveryMigrationID).Scan(&rows); err != nil || rows != 1 {
 		t.Fatalf("ledger rows=%d err=%v", rows, err)
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, agentInputDeliveryFencingMigrationID, agentInputDeliveryFencingMigrationChecksum).Scan(&rows); err != nil || rows != 1 {
-		t.Fatalf("fencing ledger rows=%d err=%v", rows, err)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, agentInputDeliveryMigrationID, agentInputDeliveryMigrationChecksum).Scan(&rows); err != nil || rows != 1 {
+		t.Fatalf("pinned ledger rows=%d err=%v", rows, err)
 	}
 }
 
@@ -570,32 +570,6 @@ func TestNormalizeExactSQLiteDDLPreservesQuotedBytes(t *testing.T) {
 	}
 }
 
-func TestExactSQLiteDDLReferencesIdentifierAcrossSQLiteQuoting(t *testing.T) {
-	const target = "agent_input_delivery_intents"
-	for _, test := range []struct {
-		name string
-		ddl  string
-		want bool
-	}{
-		{name: "bare", ddl: `CREATE VIEW v AS SELECT * FROM agent_input_delivery_intents`, want: true},
-		{name: "double quoted", ddl: `CREATE VIEW v AS SELECT * FROM "agent_input_delivery_intents"`, want: true},
-		{name: "backtick quoted", ddl: "CREATE VIEW v AS SELECT * FROM `agent_input_delivery_intents`", want: true},
-		{name: "bracket quoted", ddl: `CREATE VIEW v AS SELECT * FROM [agent_input_delivery_intents]`, want: true},
-		{name: "single quoted compatibility identifier", ddl: `CREATE VIEW v AS SELECT * FROM 'agent_input_delivery_intents'`, want: true},
-		{name: "case insensitive identifier", ddl: `CREATE VIEW v AS SELECT * FROM AGENT_INPUT_DELIVERY_INTENTS`, want: true},
-		{name: "line comment", ddl: "CREATE VIEW v AS SELECT 1 -- agent_input_delivery_intents\n", want: false},
-		{name: "block comment", ddl: `CREATE VIEW v AS SELECT 1 /* agent_input_delivery_intents */`, want: false},
-		{name: "non-exact string literal", ddl: `CREATE VIEW v AS SELECT 'prefix agent_input_delivery_intents suffix'`, want: false},
-		{name: "different identifier", ddl: `CREATE VIEW v AS SELECT * FROM agent_input_delivery_intents_archive`, want: false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if got := exactSQLiteDDLReferencesIdentifier(test.ddl, target); got != test.want {
-				t.Fatalf("exactSQLiteDDLReferencesIdentifier(%q)=%v, want %v", test.ddl, got, test.want)
-			}
-		})
-	}
-}
-
 func TestAgentInputDeliveryMigrationRejectsWeakenedStateConstraints(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -613,19 +587,6 @@ func TestAgentInputDeliveryMigrationRejectsWeakenedStateConstraints(t *testing.T
 			replacement: `CHECK (state != 'leased' OR lease_token IS NOT NULL)`,
 		},
 	}
-	artifact, err := migrationFiles.ReadFile("migrations/0054_agent_input_delivery_fencing.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	artifactText := string(artifact)
-	createStart := strings.Index(artifactText, "CREATE TABLE agent_input_delivery_intents (")
-	copyStart := strings.Index(artifactText, "INSERT INTO agent_input_delivery_intents(")
-	finishStart := strings.Index(artifactText, "DROP TABLE agent_input_delivery_intents_0053;")
-	if createStart < 0 || copyStart <= createStart || finishStart <= copyStart {
-		t.Fatal("0054 artifact does not contain the expected rebuild phases")
-	}
-	canonicalTable := artifactText[createStart:copyStart]
-	finishSchema := artifactText[finishStart:]
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "issues.db")
@@ -640,22 +601,20 @@ func TestAgentInputDeliveryMigrationRejectsWeakenedStateConstraints(t *testing.T
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, statement := range []string{
-				`DROP INDEX idx_agent_input_delivery_pending`,
-				`DROP INDEX idx_agent_input_delivery_incarnation`,
-				`DROP INDEX idx_agent_input_session_lease_expiry`,
-				`DROP TABLE agent_input_delivery_session_leases`,
-				`ALTER TABLE agent_input_delivery_intents RENAME TO agent_input_delivery_intents_0053`,
-			} {
-				if _, err := db.Exec(statement); err != nil {
-					t.Fatal(err)
-				}
+			if _, err := db.Exec(`PRAGMA writable_schema=ON`); err != nil {
+				t.Fatal(err)
 			}
-			weakened := strings.Replace(canonicalTable, tt.canonical, tt.replacement, 1)
-			if weakened == canonicalTable {
-				t.Fatal("canonical constraint not found in artifact")
+			result, err := db.Exec(`UPDATE sqlite_master SET sql=replace(sql, ?, ?) WHERE type='table' AND name='agent_input_delivery_intents'`, tt.canonical, tt.replacement)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if _, err := db.Exec(weakened + "\n" + finishSchema); err != nil {
+			if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+				t.Fatalf("weaken schema affected=%d err=%v", affected, err)
+			}
+			if _, err := db.Exec(`PRAGMA writable_schema=OFF`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`PRAGMA schema_version=999`); err != nil {
 				t.Fatal(err)
 			}
 			if err := db.Close(); err != nil {
@@ -761,7 +720,7 @@ func TestAgentInputDeliveryMigrationHistoricalUpgradeRollsBackAndRetries(t *test
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
 	seed := NewClientAtPath(path, nil)
-	seed.migrationCeiling = issueObservationEventSearchMigrationID
+	seed.migrationCeiling = mailboxObservationProjectionCutoverMigrationID
 	issueID, err := seed.Create(ctx, CreateTaskParams{Title: "sentinel", Type: domain.TypeTask})
 	if err != nil {
 		t.Fatal(err)
@@ -771,7 +730,7 @@ func TestAgentInputDeliveryMigrationHistoricalUpgradeRollsBackAndRetries(t *test
 		t.Fatal(err)
 	}
 	var previousMarker, currentMarker, currentTable int
-	if err = db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, issueObservationEventSearchMigrationID).Scan(&previousMarker); err != nil {
+	if err = db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, mailboxObservationProjectionCutoverMigrationID).Scan(&previousMarker); err != nil {
 		t.Fatal(err)
 	}
 	if err = db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&currentMarker); err != nil {
@@ -781,7 +740,7 @@ func TestAgentInputDeliveryMigrationHistoricalUpgradeRollsBackAndRetries(t *test
 		t.Fatal(err)
 	}
 	if previousMarker != 1 || currentMarker != 0 || currentTable != 0 {
-		t.Fatalf("previous production fixture marker0050=%d marker0053=%d table0053=%d", previousMarker, currentMarker, currentTable)
+		t.Fatalf("previous production fixture marker0052=%d marker0053=%d table0053=%d", previousMarker, currentMarker, currentTable)
 	}
 	if err = seed.CloseDB(); err != nil {
 		t.Fatal(err)
@@ -796,13 +755,14 @@ func TestAgentInputDeliveryMigrationHistoricalUpgradeRollsBackAndRetries(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	var tables, markers, issueCount int
+	var tables, leaseTables, markers, issueCount int
 	_ = raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_input_delivery_intents'`).Scan(&tables)
+	_ = raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_input_delivery_session_leases'`).Scan(&leaseTables)
 	_ = raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&markers)
 	_ = raw.QueryRow(`SELECT COUNT(*) FROM issues WHERE id=?`, issueID).Scan(&issueCount)
 	_ = raw.Close()
-	if tables != 0 || markers != 0 || issueCount != 1 {
-		t.Fatalf("rollback table=%d marker=%d issues=%d", tables, markers, issueCount)
+	if tables != 0 || leaseTables != 0 || markers != 0 || issueCount != 1 {
+		t.Fatalf("rollback intent_table=%d lease_table=%d marker=%d issues=%d", tables, leaseTables, markers, issueCount)
 	}
 	retried := NewClientAtPath(path, nil)
 	defer retried.CloseDB()
@@ -812,357 +772,6 @@ func TestAgentInputDeliveryMigrationHistoricalUpgradeRollsBackAndRetries(t *test
 	}
 	if err = validateAgentInputDeliverySchema(ctx, retryDB); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestAgentInputDeliveryFencingMigrationUpgradesImmutable0053AndRollsBack(t *testing.T) {
-	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "issues.db")
-	seed := NewClientAtPath(path, nil)
-	seed.migrationCeiling = agentInputDeliveryMigrationID
-	db, err := seed.dbHandle()
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := formatTimestamp(time.Now().UTC())
-	if _, err := db.Exec(`INSERT INTO agent_input_delivery_intents(project_id,intent_key,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,tool,message_kind,payload,state,created_at,updated_at) VALUES('p','sentinel','s','agent','7',42,'inc','codex','session_message','payload','queued',?,?)`, now, now); err != nil {
-		t.Fatal(err)
-	}
-	var checksum string
-	if err := db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&checksum); err != nil || checksum != agentInputDeliveryMigrationChecksum {
-		t.Fatalf("immutable 0053 checksum=%q err=%v", checksum, err)
-	}
-	if err := seed.CloseDB(); err != nil {
-		t.Fatal(err)
-	}
-
-	failed := NewClientAtPath(path, nil)
-	failed.agentInputMigrationFailureHook = func(stage string) error {
-		if stage == "after_fencing_schema" {
-			return errors.New("interrupted")
-		}
-		return nil
-	}
-	if _, err := failed.dbHandle(); err == nil || !strings.Contains(err.Error(), "rolled back") {
-		t.Fatalf("err=%v", err)
-	}
-	_ = failed.CloseDB()
-	raw, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var marker, sentinel, sessionLeaseTable int
-	_ = raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, agentInputDeliveryFencingMigrationID).Scan(&marker)
-	_ = raw.QueryRow(`SELECT COUNT(*) FROM agent_input_delivery_intents WHERE intent_key='sentinel' AND payload='payload'`).Scan(&sentinel)
-	_ = raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_input_delivery_session_leases'`).Scan(&sessionLeaseTable)
-	_ = raw.Close()
-	if marker != 0 || sentinel != 1 || sessionLeaseTable != 0 {
-		t.Fatalf("rollback marker0054=%d sentinel=%d lease_table=%d", marker, sentinel, sessionLeaseTable)
-	}
-
-	retried := NewClientAtPath(path, nil)
-	defer retried.CloseDB()
-	retryDB, err := retried.dbHandle()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validateAgentInputDeliverySchema(ctx, retryDB); err != nil {
-		t.Fatal(err)
-	}
-	if err := retryDB.QueryRow(`SELECT COUNT(*) FROM agent_input_delivery_intents WHERE intent_key='sentinel' AND payload='payload'`).Scan(&sentinel); err != nil || sentinel != 1 {
-		t.Fatalf("upgraded sentinel=%d err=%v", sentinel, err)
-	}
-}
-
-func TestAgentInputDeliveryFencingMigrationRejectsPredecessorDriftBeforeRebuild(t *testing.T) {
-	const canonicalLeasedConstraint = `CHECK ((state = 'leased') = (lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL))`
-	const weakenedLeasedConstraint = `CHECK (state != 'leased' OR lease_token IS NOT NULL)`
-	for _, test := range []struct {
-		name              string
-		mutate            func(*testing.T, *sql.DB)
-		preservedType     string
-		preservedName     string
-		preservedSQL      string
-		preservedValueSQL string
-		preservedValue    string
-	}{
-		{
-			name: "table constraint",
-			mutate: func(t *testing.T, db *sql.DB) {
-				t.Helper()
-				if _, err := db.Exec(`PRAGMA writable_schema=ON`); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := db.Exec(`UPDATE sqlite_master SET sql=replace(sql, ?, ?) WHERE type='table' AND name='agent_input_delivery_intents'`, canonicalLeasedConstraint, weakenedLeasedConstraint); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := db.Exec(`PRAGMA writable_schema=OFF`); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := db.Exec(`PRAGMA schema_version=999`); err != nil {
-					t.Fatal(err)
-				}
-			},
-			preservedSQL: "state != 'leased' or lease_token is not null",
-		},
-		{
-			name: "pending index",
-			mutate: func(t *testing.T, db *sql.DB) {
-				t.Helper()
-				if _, err := db.Exec(`DROP INDEX idx_agent_input_delivery_pending`); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := db.Exec(`CREATE INDEX idx_agent_input_delivery_pending ON agent_input_delivery_intents(state, project_id)`); err != nil {
-					t.Fatal(err)
-				}
-			},
-			preservedType: "index",
-			preservedName: "idx_agent_input_delivery_pending",
-			preservedSQL:  "(state, project_id)",
-		},
-		{
-			name: "pending quoted literal bytes",
-			mutate: func(t *testing.T, db *sql.DB) {
-				t.Helper()
-				if _, err := db.Exec(`DROP INDEX idx_agent_input_delivery_pending`); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := db.Exec(`CREATE INDEX idx_agent_input_delivery_pending ON agent_input_delivery_intents(project_id, state, expires_at, created_at) WHERE state IN ('QUEUED','leased')`); err != nil {
-					t.Fatal(err)
-				}
-			},
-			preservedType: "index",
-			preservedName: "idx_agent_input_delivery_pending",
-			preservedSQL:  "where state in ('queued','leased')",
-		},
-		{
-			name: "extra sentinel index",
-			mutate: func(t *testing.T, db *sql.DB) {
-				t.Helper()
-				if _, err := db.Exec(`CREATE INDEX review_sentinel_index ON agent_input_delivery_intents(updated_at)`); err != nil {
-					t.Fatal(err)
-				}
-			},
-			preservedType: "index",
-			preservedName: "review_sentinel_index",
-			preservedSQL:  "review_sentinel_index on agent_input_delivery_intents(updated_at)",
-		},
-		{
-			name: "extra sentinel trigger",
-			mutate: func(t *testing.T, db *sql.DB) {
-				t.Helper()
-				if _, err := db.Exec(`CREATE TRIGGER review_sentinel_trigger AFTER UPDATE ON agent_input_delivery_intents BEGIN SELECT 1; END`); err != nil {
-					t.Fatal(err)
-				}
-			},
-			preservedType: "trigger",
-			preservedName: "review_sentinel_trigger",
-			preservedSQL:  "review_sentinel_trigger after update on agent_input_delivery_intents",
-		},
-		{
-			name: "extra sentinel column",
-			mutate: func(t *testing.T, db *sql.DB) {
-				t.Helper()
-				if _, err := db.Exec(`ALTER TABLE agent_input_delivery_intents ADD COLUMN review_sentinel TEXT NOT NULL DEFAULT 'default'`); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := db.Exec(`UPDATE agent_input_delivery_intents SET review_sentinel='preserve-me' WHERE intent_key='sentinel'`); err != nil {
-					t.Fatal(err)
-				}
-			},
-			preservedSQL:      "review_sentinel text not null default 'default'",
-			preservedValueSQL: `SELECT review_sentinel FROM agent_input_delivery_intents WHERE intent_key='sentinel'`,
-			preservedValue:    "preserve-me",
-		},
-		{
-			name: "external view dependency",
-			mutate: func(t *testing.T, db *sql.DB) {
-				t.Helper()
-				if _, err := db.Exec(`CREATE VIEW review_delivery_view AS SELECT payload FROM "agent_input_delivery_intents"`); err != nil {
-					t.Fatal(err)
-				}
-			},
-			preservedType:     "view",
-			preservedName:     "review_delivery_view",
-			preservedSQL:      `select payload from "agent_input_delivery_intents"`,
-			preservedValueSQL: `SELECT payload FROM review_delivery_view WHERE payload='payload'`,
-			preservedValue:    "payload",
-		},
-		{
-			name: "external trigger dependency",
-			mutate: func(t *testing.T, db *sql.DB) {
-				t.Helper()
-				if _, err := db.Exec(`CREATE TABLE review_delivery_audit(id INTEGER PRIMARY KEY)`); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := db.Exec(`CREATE TRIGGER review_delivery_trigger AFTER INSERT ON review_delivery_audit BEGIN SELECT COUNT(*) FROM [agent_input_delivery_intents]; END`); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := db.Exec(`INSERT INTO review_delivery_audit(id) VALUES(7)`); err != nil {
-					t.Fatal(err)
-				}
-			},
-			preservedType:     "trigger",
-			preservedName:     "review_delivery_trigger",
-			preservedSQL:      "select count(*) from [agent_input_delivery_intents]",
-			preservedValueSQL: `SELECT CAST(id AS TEXT) FROM review_delivery_audit`,
-			preservedValue:    "7",
-		},
-		{
-			name: "external foreign key dependency",
-			mutate: func(t *testing.T, db *sql.DB) {
-				t.Helper()
-				if _, err := db.Exec(`CREATE TABLE review_delivery_reference(
-					project_id TEXT NOT NULL,
-					intent_key TEXT NOT NULL,
-					FOREIGN KEY(project_id, intent_key) REFERENCES "agent_input_delivery_intents"(project_id, intent_key)
-				)`); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := db.Exec(`INSERT INTO review_delivery_reference(project_id,intent_key) VALUES('p','sentinel')`); err != nil {
-					t.Fatal(err)
-				}
-			},
-			preservedType:     "table",
-			preservedName:     "review_delivery_reference",
-			preservedSQL:      `references "agent_input_delivery_intents"(project_id, intent_key)`,
-			preservedValueSQL: `SELECT intent_key FROM review_delivery_reference`,
-			preservedValue:    "sentinel",
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "issues.db")
-			seed := NewClientAtPath(path, nil)
-			seed.migrationCeiling = agentInputDeliveryMigrationID
-			db, err := seed.dbHandle()
-			if err != nil {
-				t.Fatal(err)
-			}
-			now := formatTimestamp(time.Now().UTC())
-			if _, err := db.Exec(`INSERT INTO agent_input_delivery_intents(project_id,intent_key,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,tool,message_kind,payload,state,created_at,updated_at) VALUES('p','sentinel','s','agent','7',42,'inc','codex','session_message','payload','queued',?,?)`, now, now); err != nil {
-				t.Fatal(err)
-			}
-			if err := seed.CloseDB(); err != nil {
-				t.Fatal(err)
-			}
-			raw, err := sql.Open("sqlite", path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			test.mutate(t, raw)
-			if err := raw.Close(); err != nil {
-				t.Fatal(err)
-			}
-
-			candidate := NewClientAtPath(path, nil)
-			if _, err := candidate.dbHandle(); err == nil || !strings.Contains(err.Error(), "validate migration 0054_agent_input_delivery_fencing predecessor") {
-				t.Fatalf("candidate open error=%v, want predecessor drift refusal", err)
-			}
-			_ = candidate.CloseDB()
-
-			raw, err = sql.Open("sqlite", path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer raw.Close()
-			var marker, sentinel int
-			if err := raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, agentInputDeliveryFencingMigrationID).Scan(&marker); err != nil {
-				t.Fatal(err)
-			}
-			if err := raw.QueryRow(`SELECT COUNT(*) FROM agent_input_delivery_intents WHERE intent_key='sentinel' AND payload='payload'`).Scan(&sentinel); err != nil {
-				t.Fatal(err)
-			}
-			var schemaSQL string
-			objectType := test.preservedType
-			objectName := test.preservedName
-			if objectType == "" {
-				objectType = "table"
-				objectName = "agent_input_delivery_intents"
-			}
-			if err := raw.QueryRow(`SELECT lower(sql) FROM sqlite_master WHERE type=? AND name=?`, objectType, objectName).Scan(&schemaSQL); err != nil {
-				t.Fatal(err)
-			}
-			if marker != 0 || sentinel != 1 || !strings.Contains(schemaSQL, test.preservedSQL) {
-				t.Fatalf("rollback marker0054=%d sentinel=%d schema=%q", marker, sentinel, schemaSQL)
-			}
-			if test.preservedValueSQL != "" {
-				var value string
-				if err := raw.QueryRow(test.preservedValueSQL).Scan(&value); err != nil {
-					t.Fatal(err)
-				}
-				if value != test.preservedValue {
-					t.Fatalf("preserved value=%q, want %q", value, test.preservedValue)
-				}
-			}
-		})
-	}
-}
-
-func TestAgentInputDeliveryFencingMigrationRejectsSameConnectionTempDependenciesBeforeDDL(t *testing.T) {
-	for _, test := range []struct {
-		name       string
-		createSQL  string
-		objectType string
-		objectName string
-	}{
-		{
-			name:       "temp view",
-			createSQL:  `CREATE TEMP VIEW review_temp_delivery_view AS SELECT payload FROM main.agent_input_delivery_intents`,
-			objectType: "view",
-			objectName: "review_temp_delivery_view",
-		},
-		{
-			name:       "temp trigger",
-			createSQL:  `CREATE TEMP TRIGGER review_temp_delivery_trigger AFTER INSERT ON agent_input_delivery_intents BEGIN SELECT count(*) FROM agent_input_delivery_intents; END`,
-			objectType: "trigger",
-			objectName: "review_temp_delivery_trigger",
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "issues.db")
-			seed := NewClientAtPath(path, nil)
-			seed.migrationCeiling = agentInputDeliveryMigrationID
-			db, err := seed.dbHandle()
-			if err != nil {
-				t.Fatal(err)
-			}
-			now := formatTimestamp(time.Now().UTC())
-			if _, err := db.Exec(`INSERT INTO agent_input_delivery_intents(project_id,intent_key,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,tool,message_kind,payload,state,created_at,updated_at) VALUES('p','sentinel','s','agent','7',42,'inc','codex','session_message','payload','queued',?,?)`, now, now); err != nil {
-				t.Fatal(err)
-			}
-			if err := seed.CloseDB(); err != nil {
-				t.Fatal(err)
-			}
-
-			raw, err := sql.Open("sqlite", path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer raw.Close()
-			raw.SetMaxOpenConns(1)
-			if _, err := raw.Exec(test.createSQL); err != nil {
-				t.Fatal(err)
-			}
-			candidate := NewClientAtPath(path, nil)
-			err = candidate.applyAgentInputDeliveryFencingMigration(context.Background(), raw, agentInputDeliveryFencingMigrationID)
-			if err == nil || !strings.Contains(err.Error(), "predecessor dependencies") || !strings.Contains(err.Error(), "temp."+test.objectName) {
-				t.Fatalf("migration error=%v, want exact TEMP dependency refusal", err)
-			}
-
-			var marker, sentinel, tempObject int
-			if err := raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, agentInputDeliveryFencingMigrationID).Scan(&marker); err != nil {
-				t.Fatal(err)
-			}
-			if err := raw.QueryRow(`SELECT COUNT(*) FROM agent_input_delivery_intents WHERE intent_key='sentinel' AND payload='payload'`).Scan(&sentinel); err != nil {
-				t.Fatal(err)
-			}
-			if err := raw.QueryRow(`SELECT COUNT(*) FROM sqlite_temp_master WHERE type=? AND name=?`, test.objectType, test.objectName).Scan(&tempObject); err != nil {
-				t.Fatal(err)
-			}
-			if marker != 0 || sentinel != 1 || tempObject != 1 {
-				t.Fatalf("preflight mutated state: marker=%d sentinel=%d temp_object=%d", marker, sentinel, tempObject)
-			}
-		})
 	}
 }
 
