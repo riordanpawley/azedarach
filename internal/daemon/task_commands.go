@@ -4723,7 +4723,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 		}
 		latestAggregate = aggregate
 	}
-	if !orchestrationProjectionSnapshotFenceHeld(ctx) {
+	if !orchestrationSnapshotPrepared(ctx) {
 		if err := d.reconcileDecisionPropagationOutbox(ctx, projectID); err != nil {
 			return taskIntegrationReadinessResult{}, fmt.Errorf("reconcile issue decision propagation: %w", err)
 		}
@@ -5507,7 +5507,7 @@ func (d *Daemon) captureTaskGraphReadinessContext(ctx context.Context, projectID
 		for _, rootIssueID := range uniqueNonEmpty(roots) {
 			captured.mailEventsByRoot[rootIssueID] = d.workerObservationMailboxEvents(rootIssueID)
 		}
-	} else if d.taskGraphObservationEvents == nil && !orchestrationProjectionSnapshotFenceHeld(ctx) {
+	} else if d.taskGraphObservationEvents == nil && !orchestrationSnapshotPrepared(ctx) {
 		repoDir := strings.TrimSpace(d.resolveRepoDirForProject(projectID))
 		if err := d.ensureLegacyMailboxObservationProjection(ctx, projectID, repoDir); err != nil {
 			return taskGraphReadinessContext{}, fmt.Errorf("project legacy mailbox observation projection: %w", err)

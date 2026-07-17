@@ -40,11 +40,11 @@ type orchestrationAuthority interface {
 	Apply(context.Context, string, protocol.OrchestrationIntentRequest) (protocol.OrchestrationIntentResult, error)
 }
 
-type orchestrationProjectionSnapshotFenceKey struct{}
+type orchestrationSnapshotPreparedKey struct{}
 
-func orchestrationProjectionSnapshotFenceHeld(ctx context.Context) bool {
-	held, _ := ctx.Value(orchestrationProjectionSnapshotFenceKey{}).(bool)
-	return held
+func orchestrationSnapshotPrepared(ctx context.Context) bool {
+	prepared, _ := ctx.Value(orchestrationSnapshotPreparedKey{}).(bool)
+	return prepared
 }
 
 type daemonOrchestrationAuthority struct {
@@ -472,7 +472,7 @@ func (d *Daemon) canonicalOrchestrationRepoDir(projectID, repoDir string) string
 }
 
 func (a daemonOrchestrationAuthority) buildSnapshot(ctx context.Context, projectID string, request protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
-	if request.Scope.Kind == domain.OrchestrationScopeProject && a.daemon.orchestrationProjectionExported == nil && !orchestrationProjectionSnapshotFenceHeld(ctx) {
+	if request.Scope.Kind == domain.OrchestrationScopeProject && a.daemon.orchestrationProjectionExported == nil && !orchestrationSnapshotPrepared(ctx) {
 		parentCtx := ctx
 		ctx, cancel := a.daemon.orchestrationSnapshotAdmissionContextFor(ctx)
 		defer cancel()
@@ -492,11 +492,11 @@ func (a daemonOrchestrationAuthority) buildSnapshot(ctx context.Context, project
 		}
 		projection, err := issueClient.ExportOrchestrationProjection(ctx, projectID, limit)
 		if err != nil {
-			return protocol.OrchestrationSnapshot{}, admissionError(fmt.Errorf("prepare project orchestration projection fence: %w", err))
+			return protocol.OrchestrationSnapshot{}, admissionError(fmt.Errorf("prepare project orchestration projection: %w", err))
 		}
 		if ids := taskIDsFromTasks(projection.Tasks); len(ids) > 0 {
 			if err := a.daemon.refreshIssueSessionRuntimeState(ctx, projectID, ids); err != nil && a.daemon.cfg.Logger != nil {
-				a.daemon.cfg.Logger.Debug("prepare project orchestration runtime projection fence", "project_id", projectID, "task_count", len(ids), "error", err)
+				a.daemon.cfg.Logger.Debug("prepare project orchestration runtime projection", "project_id", projectID, "task_count", len(ids), "error", err)
 			}
 		}
 		repoDir := strings.TrimSpace(a.daemon.resolveRepoDirForProject(projectID))
@@ -506,13 +506,11 @@ func (a daemonOrchestrationAuthority) buildSnapshot(ctx context.Context, project
 		if err := a.daemon.reconcileDecisionPropagationOutbox(ctx, projectID); err != nil {
 			return protocol.OrchestrationSnapshot{}, admissionError(fmt.Errorf("prepare project decision propagation projection: %w", err))
 		}
-		var snapshot protocol.OrchestrationSnapshot
-		err = issueClient.WithProjectionSnapshotFence(ctx, func(fenceCtx context.Context) error {
-			fenceCtx = context.WithValue(fenceCtx, orchestrationProjectionSnapshotFenceKey{}, true)
-			var buildErr error
-			snapshot, buildErr = a.buildSnapshot(fenceCtx, projectID, request)
-			return buildErr
-		})
+		// Snapshot enrichment may wait on runtime, Git, tmux, and mailbox
+		// authorities. Keep it outside the issue mutation lock and establish
+		// coherence by validating the exported SQLite revision below.
+		ctx = context.WithValue(ctx, orchestrationSnapshotPreparedKey{}, true)
+		snapshot, err := a.buildSnapshot(ctx, projectID, request)
 		return snapshot, admissionError(err)
 	}
 	const maxProjectionSnapshotAttempts = 5
@@ -536,7 +534,7 @@ func (a daemonOrchestrationAuthority) buildSnapshot(ctx context.Context, project
 			return snapshot, nil
 		}
 		if attempt == maxProjectionSnapshotAttempts {
-			return protocol.OrchestrationSnapshot{}, fmt.Errorf("project orchestration projection changed while building snapshot after %d attempts (exported %d, current %d)", attempt, snapshot.ProjectionRevision, checkpoint)
+			return protocol.OrchestrationSnapshot{}, fmt.Errorf("%w: project orchestration projection changed while building snapshot after %d attempts (exported %d, current %d)", errOrchestrationSnapshotAdmissionContended, attempt, snapshot.ProjectionRevision, checkpoint)
 		}
 	}
 	return protocol.OrchestrationSnapshot{}, errors.New("project orchestration snapshot retry exhausted")
@@ -577,6 +575,12 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 		projection, exportErr := issueClient.ExportOrchestrationProjection(ctx, projectID, limit)
 		if exportErr != nil {
 			return protocol.OrchestrationSnapshot{}, fmt.Errorf("load project orchestration projection: %w", exportErr)
+		}
+		if a.daemon.orchestrationProjectionExported != nil {
+			a.daemon.orchestrationProjectionExported()
+		}
+		if a.daemon.orchestrationSnapshotAuxiliaryRead != nil {
+			a.daemon.orchestrationSnapshotAuxiliaryRead(ctx)
 		}
 		materializedTasks = deriveOrchestrationProjectionFacts(projection.Tasks, projection.UnresolvedInteractionIDs, projection.InvestigationAcceptances)
 		projectOpenIssueCount = projection.OpenIssueCount
@@ -1010,7 +1014,7 @@ func deriveOrchestrationProjectionFacts(tasks []domain.Task, waiting map[string]
 }
 
 func (a daemonOrchestrationAuthority) enrichPendingDecisions(ctx context.Context, projectID string, issueClient *issues.Client, snapshot *protocol.OrchestrationSnapshot, tasks []domain.Task) error {
-	if !orchestrationProjectionSnapshotFenceHeld(ctx) {
+	if !orchestrationSnapshotPrepared(ctx) {
 		if err := a.daemon.reconcileDecisionPropagationOutbox(ctx, projectID); err != nil {
 			return fmt.Errorf("reconcile pending decisions: %w", err)
 		}
