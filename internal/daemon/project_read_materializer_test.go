@@ -50,8 +50,14 @@ type watchBarrierProjectionStore struct {
 func (s *watchBarrierProjectionStore) WatchProjectionDeltas(ctx context.Context, projectID string, after uint64, limit int) ([]domain.ProjectionDelta, uint64, error) {
 	s.once.Do(func() {
 		close(s.entered)
-		<-s.release
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+		}
 	})
+	if err := ctx.Err(); err != nil {
+		return nil, 0, &domain.ProjectionCanceledError{Cause: err}
+	}
 	return s.projectionDeltaStore.WatchProjectionDeltas(ctx, projectID, after, limit)
 }
 
@@ -534,9 +540,16 @@ func TestProjectReadMaterializerWatchBlocksAndWakesAcrossClients(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	advanced := make(chan protocol.MaterializedSnapshotMetadata, 1)
-	go materializer.run(ctx, func(metadata protocol.MaterializedSnapshotMetadata) { advanced <- metadata })
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		materializer.run(ctx, func(metadata protocol.MaterializedSnapshotMetadata) { advanced <- metadata })
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
 	<-watchStore.entered
 	select {
 	case <-advanced:
