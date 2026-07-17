@@ -160,6 +160,10 @@ func TestRestartManagedAgentPaneRequiresForceAndAcknowledgesReplacement(t *testi
 	}
 	runner := &exactRestartRunner{store: store, project: project, session: session, pid: 100}
 	d := &Daemon{cfg: Config{RepoDir: t.TempDir(), CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()), runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{project: store}}
+	d.sessionRestartPromptHandoffWait = func(context.Context, sessionPromptHandoff) error {
+		t.Fatal("Codex resume must not create or wait on a prompt handoff")
+		return nil
+	}
 	target := sessionRestartAllTarget{ProjectID: project, SessionID: session, IssueID: "one", Activity: "busy", TmuxReady: true, ActiveIntent: true}
 	refused := d.restartManagedAgentPane(ctx, target, protocol.SessionRestartAllRequestBody{}, protocol.SessionRestartAllItem{}, nil)
 	if refused.Outcome != "busy" || !refused.Skipped || runner.respawns != 0 {
@@ -282,6 +286,18 @@ func TestRestartManagedAgentPaneCrossDaemonStaleIdentityRespawnsOnce(t *testing.
 	if restarted != 1 || superseded != 1 || respawns != 1 {
 		t.Fatalf("restarted=%d superseded=%d respawns=%d, want 1/1/1", restarted, superseded, respawns)
 	}
+	current, found, err := storeB.GetManagedAgentIdentity(ctx, project, session, old.LogicalPaneID)
+	if err != nil || !found {
+		t.Fatalf("load replacement identity: found=%t err=%v", found, err)
+	}
+	third := daemonA.restartManagedAgentPaneWithIdentity(ctx, storeA, current, target, protocol.SessionRestartAllRequestBody{}, protocol.SessionRestartAllItem{}, nil)
+	if !third.Restarted {
+		t.Fatalf("next incarnation restart = %+v", third)
+	}
+	lockFiles, err := filepath.Glob(dbPath + ".managed-agent-restart-*.lock")
+	if err != nil || len(lockFiles) != 1 {
+		t.Fatalf("stable restart lock files=%v err=%v, want exactly one across incarnations", lockFiles, err)
+	}
 }
 
 func TestRestartManagedAgentPaneArtifactFlagsWorktreeAndUnrelatedPanes(t *testing.T) {
@@ -347,6 +363,24 @@ func TestRestartManagedAgentPanePartialFailureAndBoundedTimeout(t *testing.T) {
 			t.Fatalf("result=%+v respawns=%d", result, respawns)
 		}
 	})
+	t.Run("unconsumed continuation handoff is partial failure", func(t *testing.T) {
+		d, _, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+		d.cfg.CLITool = "custom-agent"
+		var promptPath string
+		d.sessionRestartPromptHandoffWait = func(_ context.Context, handoff sessionPromptHandoff) error {
+			promptPath = handoff.PromptPath
+			return errors.New("continuation handoff was not consumed")
+		}
+		result := d.restartManagedAgentPane(context.Background(), target, protocol.SessionRestartAllRequestBody{}, protocol.SessionRestartAllItem{}, nil)
+		respawns, _, _ := runner.snapshot()
+		stage := result.Stages[len(result.Stages)-1]
+		if result.Restarted || result.Outcome != "partial_failure" || !strings.Contains(result.Error, "not consumed") || stage.Name != "prompt_handoff" || respawns != 1 || promptPath == "" {
+			t.Fatalf("result=%+v respawns=%d prompt_path=%q", result, respawns, promptPath)
+		}
+		if _, err := os.Stat(promptPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("prompt handoff remains after partial failure: %v", err)
+		}
+	})
 }
 
 func TestRecoverInterruptedSessionRestartConvergesWithoutRespawn(t *testing.T) {
@@ -377,6 +411,35 @@ func TestRecoverInterruptedSessionRestartConvergesWithoutRespawn(t *testing.T) {
 }
 
 func TestRecoverInterruptedSessionRestartMatrix(t *testing.T) {
+	t.Run("replacement with unconsumed handoff remains partial", func(t *testing.T) {
+		d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+		promptPath := filepath.Join(t.TempDir(), "restart.prompt")
+		if err := os.WriteFile(promptPath, []byte("continue"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		d.sessionRestartPromptHandoffWait = func(_ context.Context, handoff sessionPromptHandoff) error {
+			if handoff.PromptPath != promptPath {
+				t.Fatalf("handoff path=%q want %q", handoff.PromptPath, promptPath)
+			}
+			return errors.New("recovered continuation handoff was not consumed")
+		}
+		runner.mu.Lock()
+		runner.pid = 101
+		runner.mu.Unlock()
+		if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 101, AgentIncarnation: "planned", ObservedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+		plan := sessionRestartRecoveryPlan{ProjectID: target.ProjectID, SessionID: target.SessionID, IssueID: target.IssueID, Activity: target.Activity, Old: daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old"}, PlannedIncarnation: "planned", PromptPath: promptPath, Stage: "observe"}
+		body, err := json.Marshal(plan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recovery, ok := d.recoverInterruptedSessionRestart(context.Background(), daemonops.Record{Kind: protocol.CommandSessionRestartAll, Progress: &daemonops.Progress{Phase: "session.restart_all.observe", Message: string(body)}})
+		result := decodeRestartRecoveryResult(t, recovery)
+		if !ok || result.Failed != 1 || result.Sessions[0].Restarted || result.Sessions[0].Stages[0].Name != "recover_prompt_handoff" {
+			t.Fatalf("recovery=%+v result=%+v ok=%v", recovery, result, ok)
+		}
+	})
 	t.Run("prepare before respawn", func(t *testing.T) {
 		d, _, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
 		recovery, ok := d.recoverInterruptedSessionRestart(context.Background(), restartRecoveryRecord(t, target, "prepare"))
@@ -516,6 +579,15 @@ func TestRealTmuxSupervisedRestartNeverSubmitsLifecycleTextAndPreservesOtherPane
 	t.Setenv("AZ_TEST_AUX_READY", auxReady)
 	fakeAgent := filepath.Join(base, "fakeagent")
 	fakeAgentScript := `#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    "Read and follow the complete worker instructions in "*)
+      prompt_path=${arg#Read and follow the complete worker instructions in }
+      prompt_path=${prompt_path%. Delete that file immediately after reading it.}
+      rm -f -- "$prompt_path"
+      ;;
+  esac
+done
 if [ "$1" = "--aux" ]; then
   label=auxiliary
   channel="$AZ_TEST_AUX_READY"

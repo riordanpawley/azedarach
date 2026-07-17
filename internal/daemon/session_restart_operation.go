@@ -36,6 +36,7 @@ type sessionRestartRecoveryPlan struct {
 	Activity           string                           `json:"activity"`
 	Old                daemonstate.ManagedAgentIdentity `json:"old"`
 	PlannedIncarnation string                           `json:"planned_incarnation"`
+	PromptPath         string                           `json:"prompt_path,omitempty"`
 	Stage              string                           `json:"stage"`
 }
 
@@ -140,7 +141,7 @@ func (d *Daemon) restartManagedAgentPane(ctx context.Context, target sessionRest
 
 func (d *Daemon) restartManagedAgentPaneWithIdentity(ctx context.Context, store *daemonstate.RuntimeStateStore, old daemonstate.ManagedAgentIdentity, target sessionRestartAllTarget, body protocol.SessionRestartAllRequestBody, item protocol.SessionRestartAllItem, rootedIdentity *domain.OrchestratorIdentity) protocol.SessionRestartAllItem {
 	var lockedItem protocol.SessionRestartAllItem
-	lockErr := store.WithManagedAgentRestartTransition(ctx, target.ProjectID, target.SessionID, old.LogicalPaneID, old.AgentIncarnation, func(lockCtx context.Context) error {
+	lockErr := store.WithManagedAgentRestartTransition(ctx, target.ProjectID, target.SessionID, old.LogicalPaneID, func(lockCtx context.Context) error {
 		lockedItem = d.restartManagedAgentPaneLocked(lockCtx, store, old, target, body, item, rootedIdentity)
 		return nil
 	})
@@ -230,6 +231,7 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 		return item
 	}
 	item.Stages = append(item.Stages, restartStage("prepare", "complete", "canonical launch artifact and worktree prepared", sessionRestartPrepareTimeout))
+	plan.PromptPath = prepared.artifact.PromptHandoff.PromptPath
 	if rootedIdentity != nil {
 		authority := daemonstate.NewRootedBootstrapAcknowledgementAuthority(store)
 		acknowledgement, found, rootErr := authority.Get(ctx, *rootedIdentity)
@@ -322,6 +324,18 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 			}
 			if found && liveReplacement && current.AgentIncarnation == incarnation && current.PanePID != old.PanePID {
 				item.NewIdentity = restartProtocolIdentity(current)
+				item.Stages = append(item.Stages, restartStage("observe", "complete", "distinct pane process and hook incarnation acknowledged", sessionRestartObservationTimeout))
+				handoffCtx, cancelHandoff := context.WithTimeout(ctx, sessionRestartObservationTimeout)
+				handoffErr := d.waitForSessionRestartPromptHandoff(handoffCtx, prepared.artifact.PromptHandoff)
+				cancelHandoff()
+				if handoffErr != nil {
+					prepared.artifact.remove()
+					appendRestartStageFailure(&item, "prompt_handoff", sessionRestartObservationTimeout, handoffErr, errors.Is(handoffErr, context.DeadlineExceeded))
+					return item
+				}
+				if strings.TrimSpace(prepared.artifact.PromptHandoff.PromptPath) != "" {
+					item.Stages = append(item.Stages, restartStage("prompt_handoff", "complete", "replacement consumed continuation handoff", sessionRestartObservationTimeout))
+				}
 				if rootedIdentity != nil {
 					prompt, promptErr := d.rootedOrchestratorBootstrapPrompt(ctx, target.ProjectID, rootedIdentity.Scope)
 					if promptErr == nil {
@@ -335,7 +349,6 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 				}
 				item.Restarted = true
 				item.Outcome = restartSuccessOutcome(target.Activity)
-				item.Stages = append(item.Stages, restartStage("observe", "complete", "distinct pane process and hook incarnation acknowledged", sessionRestartObservationTimeout))
 				plan.Stage = "complete"
 				if err := reportSessionRestartProgress(ctx, plan); err != nil {
 					appendRestartStageFailure(&item, "persist_complete", sessionRestartPreflightTimeout, err, errors.Is(err, context.DeadlineExceeded))
@@ -346,6 +359,16 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 			}
 		}
 	}
+}
+
+func (d *Daemon) waitForSessionRestartPromptHandoff(ctx context.Context, handoff sessionPromptHandoff) error {
+	if strings.TrimSpace(handoff.PromptPath) == "" {
+		return nil
+	}
+	if d != nil && d.sessionRestartPromptHandoffWait != nil {
+		return d.sessionRestartPromptHandoffWait(ctx, handoff)
+	}
+	return waitForSessionPromptHandoffConsumed(ctx, handoff)
 }
 
 func sameManagedRestartIdentity(a, b daemonstate.ManagedAgentIdentity) bool {

@@ -15,11 +15,11 @@ import (
 
 const managedAgentRestartTransitionLockPollInterval = 10 * time.Millisecond
 
-// WithManagedAgentRestartTransition serializes replacement of one exact
-// managed-agent incarnation across daemon processes. The lock is deliberately
-// scoped to the old incarnation: after a successful replacement, a waiter must
-// refresh durable and live identity and refuse to act on its stale candidate.
-func (s *RuntimeStateStore) WithManagedAgentRestartTransition(ctx context.Context, projectID, sessionID, logicalPaneID, incarnation string, fn func(context.Context) error) error {
+// WithManagedAgentRestartTransition serializes replacement of one managed
+// logical pane across daemon processes. The stable session/pane lock is reused
+// across incarnations; callers keep the old incarnation as their stale-identity
+// compare-and-refuse input after acquiring it.
+func (s *RuntimeStateStore) WithManagedAgentRestartTransition(ctx context.Context, projectID, sessionID, logicalPaneID string, fn func(context.Context) error) error {
 	if s == nil {
 		return errors.New("managed-agent restart transition store is unavailable")
 	}
@@ -29,14 +29,13 @@ func (s *RuntimeStateStore) WithManagedAgentRestartTransition(ctx context.Contex
 	projectID = strings.TrimSpace(projectID)
 	sessionID = strings.TrimSpace(sessionID)
 	logicalPaneID = strings.TrimSpace(logicalPaneID)
-	incarnation = strings.TrimSpace(incarnation)
-	if projectID == "" || sessionID == "" || logicalPaneID == "" || incarnation == "" {
+	if projectID == "" || sessionID == "" || logicalPaneID == "" {
 		return errors.New("managed-agent restart transition identity is incomplete")
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	key := projectID + "\x00" + sessionID + "\x00" + logicalPaneID + "\x00" + incarnation
+	key := projectID + "\x00" + sessionID + "\x00" + logicalPaneID
 	digest := sha256.Sum256([]byte(key))
 	lockPath := fmt.Sprintf("%s.managed-agent-restart-%x.lock", sqliteutil.CanonicalPath(s.dbPath), digest[:12])
 	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)

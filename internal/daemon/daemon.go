@@ -188,6 +188,7 @@ type Daemon struct {
 	sessionStopPending                   map[string]int
 	sessionRestartMu                     sync.Mutex
 	sessionRestartPending                map[string]*sessionRestartExecution
+	sessionRestartPromptHandoffWait      func(context.Context, sessionPromptHandoff) error
 	orchestratorStopGracePeriod          time.Duration
 	orchestratorStopPollInterval         time.Duration
 	orchestratorStopAfterIntentPersisted func()
@@ -1455,6 +1456,16 @@ func (d *Daemon) recoverInterruptedSessionRestart(ctx context.Context, record da
 		panes, panesErr := d.tmux.ListPaneInfos(recoveryCtx)
 		if identityErr == nil && panesErr == nil {
 			if found && current.AgentIncarnation == plan.PlannedIncarnation && current.PanePID != plan.Old.PanePID && managedRestartIdentityLive(plan.SessionID, current, panes) {
+				handoff := sessionPromptHandoff{PromptPath: plan.PromptPath}
+				handoffCtx, cancelHandoff := context.WithTimeout(ctx, sessionRestartObservationTimeout)
+				handoffErr := d.waitForSessionRestartPromptHandoff(handoffCtx, handoff)
+				cancelHandoff()
+				if handoffErr != nil {
+					item.Outcome = "partial_failure"
+					item.Error = handoffErr.Error()
+					item.Stages = []protocol.SessionRestartStage{restartStage("recover_prompt_handoff", "failed", item.Error, sessionRestartObservationTimeout)}
+					return sessionRestartRecoveryResult(item), true
+				}
 				item.Restarted = true
 				item.NewIdentity = restartProtocolIdentity(current)
 				item.Outcome = restartSuccessOutcome(plan.Activity)
