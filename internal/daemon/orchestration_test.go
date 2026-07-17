@@ -1506,6 +1506,106 @@ func TestProjectOrchestrationSnapshotRefreshesCrossProcessBacklogLifecycle(t *te
 	}
 }
 
+func TestProjectOrchestrationSnapshotUsesExactSQLiteEpochInsteadOfStaleMaterializer(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "issues.db")
+	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
+	writer := newMigratedIssueClientAtPath(t, path, slog.Default())
+	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
+	id, err := reader.Create(ctx, issues.CreateTaskParams{Title: "Candidate", Description: "Executable", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := reader.ExportOrchestrationProjection(ctx, "proj", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical := map[string]domain.Task{id: initial.Tasks[0]}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, canonical)
+	materializer := newProjectReadMaterializer("proj", nil, nil)
+	materializer.replaceBootstrap(canonical, canonical, materializedMetadata(1, 1, issueProjectionProjector(), nil, issueKeys.sum(), runtimeKeys.sum(), "healthy"), issueKeys, runtimeKeys)
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{"proj": reader},
+		materializers:         map[string]*projectReadMaterializer{"proj": materializer},
+		materializersStarted:  true,
+	}
+
+	backlog := domain.IssueWorkflowBacklog
+	acceptance := "Done"
+	if err := writer.UpdateDetails(ctx, id, issues.UpdateTaskParams{Title: "Candidate", Description: "Executable", Acceptance: &acceptance, Type: domain.TypeTask, Priority: domain.P1, Lifecycle: &backlog}); err != nil {
+		t.Fatal(err)
+	}
+	expectedCheckpoint, err := reader.ProjectionSourceCheckpoint(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := (daemonOrchestrationAuthority{daemon: d}).Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := candidateClass(snapshot.Candidates, id); got != "" {
+		t.Fatalf("candidate class = %q, want exact SQLite backlog epoch instead of stale materialized open state", got)
+	}
+	if snapshot.Health.OpenIssueCount != 0 {
+		t.Fatalf("open issue count = %d, want exact SQLite count 0", snapshot.Health.OpenIssueCount)
+	}
+	if snapshot.ProjectionAuthority != protocol.OrchestrationProjectionAuthoritySQLite || snapshot.ProjectionRevision != expectedCheckpoint {
+		t.Fatalf("projection authority/revision = %q/%d, want %q/%d", snapshot.ProjectionAuthority, snapshot.ProjectionRevision, protocol.OrchestrationProjectionAuthoritySQLite, expectedCheckpoint)
+	}
+}
+
+func TestProjectOrchestrationSnapshotReturnsUnavailableWhenMutationAdmissionIsContended(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	if _, err := client.Create(ctx, issues.CreateTaskParams{Title: "Candidate", Description: "Executable", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen}); err != nil {
+		t.Fatal(err)
+	}
+
+	holderEntered := make(chan struct{})
+	releaseHolder := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderCtx := issues.ContextWithMutationOperation(ctx, "background.projection")
+		holderDone <- client.WithMutationLock(holderCtx, func(context.Context) error {
+			close(holderEntered)
+			<-releaseHolder
+			return nil
+		})
+	}()
+	<-holderEntered
+
+	fenceWaiting := make(chan struct{})
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	d.snapshotAdmissionContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+		admissionCtx, cancel := context.WithCancel(parent)
+		admissionCtx = issues.WithMutationLockWaitHookForTest(admissionCtx, func(_, holderOperation string) {
+			if holderOperation != "background.projection" {
+				t.Errorf("snapshot mutation holder = %q, want background.projection", holderOperation)
+			}
+			close(fenceWaiting)
+			cancel()
+		})
+		return admissionCtx, cancel
+	}
+	body := mustMarshal(t, protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
+	resp, err := d.handleOrchestrationSnapshot(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, Command: protocol.CommandOrchestrationSnapshot, Meta: protocol.Metadata{ProjectID: "proj"}, Body: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-fenceWaiting
+	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeUnavailable || !resp.Error.Retryable {
+		t.Fatalf("contended snapshot error = %+v, want retryable unavailable", resp.Error)
+	}
+
+	close(releaseHolder)
+	if err := <-holderDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProjectOrchestrationStartNeverTouchesExplicitBacklogIssue(t *testing.T) {
 	ctx := context.Background()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())

@@ -18,8 +18,8 @@ import (
 )
 
 const (
-	DefaultSoftLimitBytes int64 = 10 << 30
-	DefaultHardLimitBytes int64 = 28 << 30
+	DefaultSoftLimitBytes int64 = 50 << 30
+	DefaultHardLimitBytes int64 = 70 << 30
 	LayoutVersion               = "v1"
 )
 

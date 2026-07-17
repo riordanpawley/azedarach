@@ -38,6 +38,76 @@ func TestFromEnvironmentSelectsDistinctInstrumentNamespacesAndThresholds(t *test
 	assert.Equal(t, KindNormal, KindForProfile("cold"))
 }
 
+func TestFromEnvironmentUsesManagedCapacityDefaultsForAnyRepository(t *testing.T) {
+	repo := initTestRepo(t)
+	t.Setenv("AZEDARACH_GO_CACHE_ROOT", "")
+	t.Setenv("AZEDARACH_GOCACHE", "")
+	t.Setenv("AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES", "")
+	t.Setenv("AZEDARACH_GO_CACHE_HARD_LIMIT_BYTES", "")
+
+	cfg, err := FromEnvironmentForRepository(context.Background(), KindNormal, repo)
+	require.NoError(t, err)
+	canonicalRepo, err := filepath.EvalSymlinks(repo)
+	require.NoError(t, err)
+	assert.Equal(t, int64(50)<<30, DefaultSoftLimitBytes)
+	assert.Equal(t, int64(70)<<30, DefaultHardLimitBytes)
+	assert.Equal(t, DefaultSoftLimitBytes, cfg.SoftLimitBytes)
+	assert.Equal(t, DefaultHardLimitBytes, cfg.HardLimitBytes)
+	assert.Equal(t, filepath.Join(canonicalRepo, ".azedarach", "go"), cfg.Root)
+}
+
+func TestPrepareEnforcesManagedCapacityBoundaries(t *testing.T) {
+	const oldHardLimitBytes int64 = 28 << 30
+	tests := []struct {
+		name     string
+		bytes    int64
+		decision string
+		wantErr  bool
+	}{
+		{name: "just over old limit is allowed", bytes: oldHardLimitBytes + 1, decision: "within-limits"},
+		{name: "just under new limit is allowed", bytes: DefaultHardLimitBytes - 1, decision: "warn-soft-limit"},
+		{name: "above new limit is refused", bytes: DefaultHardLimitBytes + 1, decision: "refused-hard-limit", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{Root: t.TempDir(), Owner: "non-azedarach-consumer", Kind: KindNormal, SoftLimitBytes: DefaultSoftLimitBytes, HardLimitBytes: DefaultHardLimitBytes}
+			require.NoError(t, os.MkdirAll(cfg.CachePath(), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(cfg.CachePath(), "sparse"), nil, 0o644))
+			require.NoError(t, os.Truncate(filepath.Join(cfg.CachePath(), "sparse"), tt.bytes))
+
+			telemetry, err := Prepare(context.Background(), cfg, false)
+			if tt.wantErr {
+				require.ErrorContains(t, err, fmt.Sprintf("above hard limit %d", DefaultHardLimitBytes))
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tt.decision, telemetry.Decision)
+			assert.Equal(t, tt.bytes, telemetry.FamilyBytes)
+			assert.Equal(t, DefaultSoftLimitBytes, telemetry.SoftLimitBytes)
+			assert.Equal(t, DefaultHardLimitBytes, telemetry.HardLimitBytes)
+		})
+	}
+}
+
+func TestPrepareAutoMaintenanceUsesNewHardLimit(t *testing.T) {
+	cfg := Config{Root: t.TempDir(), Owner: "issue-dqb", Kind: KindNormal, SoftLimitBytes: DefaultSoftLimitBytes, HardLimitBytes: DefaultHardLimitBytes}
+	require.NoError(t, os.MkdirAll(cfg.CachePath(), 0o755))
+	sparse := filepath.Join(cfg.CachePath(), "sparse")
+	require.NoError(t, os.WriteFile(sparse, nil, 0o644))
+	require.NoError(t, os.Truncate(sparse, DefaultHardLimitBytes+1))
+	legacy := filepath.Join(LegacyPaths(cfg.Root)[0], "preserved")
+	require.NoError(t, os.MkdirAll(filepath.Dir(legacy), 0o755))
+	require.NoError(t, os.WriteFile(legacy, []byte("legacy data"), 0o644))
+
+	telemetry, err := Prepare(context.Background(), cfg, true)
+	require.NoError(t, err)
+	assert.Equal(t, "cleaned-selected-namespace", telemetry.Decision)
+	assert.LessOrEqual(t, telemetry.FamilyBytes, DefaultHardLimitBytes)
+	data, err := os.ReadFile(legacy)
+	require.NoError(t, err)
+	assert.Equal(t, "legacy data", string(data))
+}
+
 func TestPrepareRefusesHardLimitAndFinishReportsDeltas(t *testing.T) {
 	root := t.TempDir()
 	cfg := Config{Root: root, Owner: "issue-dhc", Kind: KindNormal, SoftLimitBytes: 4, HardLimitBytes: 8}
@@ -358,6 +428,23 @@ func TestLegacyPathsTargetRepositoryRootWithoutOverlappingManagedLayout(t *testi
 		filepath.Join(repo, ".gopath"),
 	}, paths)
 	assert.NotContains(t, paths, filepath.Join(root, "caches", "v1"))
+}
+
+func TestStatsManagedExcludesLegacyFootprint(t *testing.T) {
+	repo := t.TempDir()
+	root := filepath.Join(repo, ".azedarach", "go")
+	cfg := Config{Root: root, Owner: "main", Kind: KindNormal}
+	require.NoError(t, os.MkdirAll(cfg.CachePath(), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cfg.CachePath(), "managed"), []byte("managed"), 0o644))
+	for _, path := range LegacyPaths(root) {
+		require.NoError(t, os.MkdirAll(path, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(path, "legacy"), []byte("a much larger legacy footprint"), 0o644))
+	}
+
+	stats, err := StatsManaged(cfg)
+	require.NoError(t, err)
+	assert.EqualValues(t, len("managed"), stats.Bytes)
+	assert.EqualValues(t, 1, stats.Files)
 }
 
 func TestRootForRepositoryUsesGitCommonDirectoryFromLinkedWorktree(t *testing.T) {

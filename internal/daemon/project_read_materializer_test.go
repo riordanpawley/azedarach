@@ -627,6 +627,49 @@ func TestProjectReadMaterializerSerializesRuntimeRefreshWithDeltaApply(t *testin
 	}
 }
 
+func TestProjectReadMaterializerRuntimeRefreshWaitIsCancelableAndAttributed(t *testing.T) {
+	const issueID = "az-refresh-contention"
+	canonical := map[string]domain.Task{issueID: {ID: issueID, Title: "contended refresh", Type: domain.TypeTask}}
+	hydrateEntered := make(chan struct{})
+	releaseHydrate := make(chan struct{})
+	materializer := newProjectReadMaterializer("project", nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		close(hydrateEntered)
+		<-releaseHydrate
+		return tasks, nil
+	})
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, canonical)
+	materializer.replaceBootstrap(canonical, canonical, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+
+	holderDone := make(chan error, 1)
+	go func() {
+		holderCtx := contextWithRuntimeProjectionWriterOperation(context.Background(), "background.projection_refresh")
+		holderDone <- materializer.refreshRuntime(holderCtx, []string{issueID})
+	}()
+	<-hydrateEntered
+
+	waitObserved := make(chan struct{})
+	waitCtx, cancelWait := context.WithCancel(context.Background())
+	waitCtx = contextWithRuntimeProjectionWriterOperation(waitCtx, "orchestration.snapshot")
+	waitCtx = withProjectReadUpdateWaitHookForTest(waitCtx, func(waiterOperation, holderOperation string) {
+		if waiterOperation != "orchestration.snapshot" || holderOperation != "background.projection_refresh" {
+			t.Errorf("refresh attribution waiter=%q holder=%q", waiterOperation, holderOperation)
+		}
+		close(waitObserved)
+	})
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- materializer.refreshRuntime(waitCtx, []string{issueID}) }()
+	<-waitObserved
+	cancelWait()
+	if err := <-waitDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled refresh wait error = %v, want context.Canceled", err)
+	}
+
+	close(releaseHydrate)
+	if err := <-holderDone; err != nil {
+		t.Fatalf("holder refresh: %v", err)
+	}
+}
+
 func TestProjectReadSnapshotIsPureAtDeclaredChecksum(t *testing.T) {
 	client, repoDir := newTestIssueClient(t)
 	if _, err := client.Create(context.Background(), issues.CreateTaskParams{Title: "pure", Type: domain.TypeTask}); err != nil {
