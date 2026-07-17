@@ -95,10 +95,11 @@ func TestDefaultConfig(t *testing.T) {
 
 func TestLoadConfigReadsProjectGateCommand(t *testing.T) {
 	root := t.TempDir()
-	writeConfigFile(t, root, `{"$version":11,"gate":{"command":"npm run review"}}`)
+	writeConfigFile(t, root, `{"$version":11,"gate":{"command":"npm run review","environmentFingerprint":"node-22-lock-a1"}}`)
 	cfg, err := LoadConfig(root)
 	require.NoError(t, err)
 	assert.Equal(t, "npm run review", cfg.Gate.Command)
+	assert.Equal(t, "node-22-lock-a1", cfg.Gate.EnvironmentFingerprint)
 }
 
 func TestLoadConfigEnablesCodexAppServer(t *testing.T) {

@@ -203,6 +203,7 @@ type taskGraphReadinessResult struct {
 	Runnable               []string                              `json:"runnable"`
 	NestedRoots            []taskGraphNestedRoot                 `json:"nested_roots,omitempty"`
 	Pending                []taskGraphPendingStart               `json:"pending,omitempty"`
+	PublicationQueue       []domain.PublicationOperation         `json:"publication_queue,omitempty"`
 	Active                 []string                              `json:"active,omitempty"`
 	ActiveSessions         []taskGraphActiveSession              `json:"active_sessions,omitempty"`
 	SessionStartProgress   []taskGraphSessionStartProgress       `json:"session_start_progress,omitempty"`
@@ -5625,6 +5626,25 @@ func (d *Daemon) buildTaskGraphReadinessForActor(ctx context.Context, projectID,
 		return taskGraphReadinessResult{}, err
 	}
 	ready.scopeIssueIDs = taskIDsFromTasks(tasks)
+	if d.operationRuntime != nil && d.operationRuntime.store != nil {
+		publicationStore, publicationErr := d.publicationStoreForProject(projectID)
+		if publicationErr != nil {
+			return taskGraphReadinessResult{}, fmt.Errorf("resolve publication queue projection: %w", publicationErr)
+		}
+		publications, publicationErr := publicationStore.PublicationOperations(ctx, projectID, "", true)
+		if publicationErr != nil {
+			return taskGraphReadinessResult{}, fmt.Errorf("load publication queue projection: %w", publicationErr)
+		}
+		allowed := make(map[string]struct{}, len(ready.scopeIssueIDs))
+		for _, issueID := range ready.scopeIssueIDs {
+			allowed[issueID] = struct{}{}
+		}
+		for _, publication := range publications {
+			if _, ok := allowed[publication.IssueID]; ok {
+				ready.PublicationQueue = append(ready.PublicationQueue, publication)
+			}
+		}
+	}
 	ready.Source = source
 	ready.cacheExpiresAt = taskGraphReadinessOwnershipExpiry(tasks, readinessContext.capturedAt)
 	return ready, nil
@@ -6537,6 +6557,7 @@ func cloneTaskGraphReadinessResult(result taskGraphReadinessResult) taskGraphRea
 		observation.Risks = append([]string(nil), observation.Risks...)
 		observation.NextActions = append([]string(nil), observation.NextActions...)
 	}
+	result.PublicationQueue = append([]domain.PublicationOperation(nil), result.PublicationQueue...)
 	result.scopeIssueIDs = append([]string(nil), result.scopeIssueIDs...)
 	if result.Blocked != nil {
 		blocked := make(map[string]string, len(result.Blocked))

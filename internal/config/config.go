@@ -34,7 +34,8 @@ type Config struct {
 
 // GateConfig selects the project-owned command run by `az gate`.
 type GateConfig struct {
-	Command string `json:"command"`
+	Command                string `json:"command"`
+	EnvironmentFingerprint string `json:"environmentFingerprint,omitempty"`
 }
 
 type IssueTrackerConfig struct {

@@ -175,6 +175,12 @@ func OrchestrateReviewCommand(deps *Dependencies, opts OrchestrateReviewOptions)
 		for _, id := range result.Returned {
 			fmt.Printf("- findings returned: %s\n", id)
 		}
+		for _, publication := range result.Publications {
+			fmt.Printf("- publication queued %s: operation=%s intent=%s state=%s position=%d source=%s base=%s candidate=%s lease=%s evidence=%s validation=%s reused=%s\n",
+				publication.IssueID, publication.OperationID, publication.IntentKey, publication.State, publication.QueuePosition,
+				publication.SourceRevision, publication.BaseRevision, publication.CandidateRevision, publication.LeaseOwner,
+				publication.EvidenceSource, publication.ValidationRequestID, publication.ReusedEvidenceID)
+		}
 		for _, id := range sortedKeys(result.Skipped) {
 			fmt.Printf("- skipped %s: %s\n", id, result.Skipped[id])
 		}

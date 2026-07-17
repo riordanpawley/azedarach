@@ -20,6 +20,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	daemonnotices "github.com/riordanpawley/azedarach/internal/daemon/notices"
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
+	operationstore "github.com/riordanpawley/azedarach/internal/daemon/operations/store"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/daemon/userstore"
@@ -181,6 +182,11 @@ type Daemon struct {
 	publicationEvidenceMu                sync.RWMutex
 	publicationEvidenceCache             map[string]domain.PublicationEvidenceSnapshot
 	publicationEvidenceAfterRefresh      func(domain.PublicationEvidenceSnapshot)
+	publicationClose                     func(context.Context, domain.PublicationOperation) error
+	publicationIdentityCheck             func(context.Context, domain.PublicationOperation) error
+	publicationStateChanged              func(domain.PublicationOperation)
+	publicationStoresMu                  sync.Mutex
+	publicationStores                    map[string]*operationstore.SQLiteStore
 	noticeService                        *daemonnotices.Service
 	runtimeProjectionCoalescer           *runtimeProjectionEventCoalescer
 	scheduledScripts                     *scheduledScriptManager
@@ -616,6 +622,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 				d.cfg.Logger.Warn("failed to close operation runtime", "error", closeErr)
 			}
 		}
+		d.closePublicationStores()
 		if d.noticeService != nil {
 			if closeErr := d.noticeService.Close(); closeErr != nil {
 				d.cfg.Logger.Warn("failed to close notice service", "error", closeErr)
@@ -723,6 +730,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return nil
 	}
 	d.reconcileAllDecisionPropagationOutboxes(ctx)
+	d.recoverPublicationOperations(serveCtx)
 	d.startRuntimeReconcileWorker(serveCtx)
 	d.startTmuxObservationWorker(serveCtx)
 	d.startDecisionPropagationReconcileWorker(serveCtx)

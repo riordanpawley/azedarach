@@ -26,6 +26,11 @@
           "type": "string",
           "description": "Shell command to run. Empty or omitted means this project has no configured gate.",
           "default": ""
+        },
+        "environmentFingerprint": {
+          "type": "string",
+          "description": "Project-owned toolchain/environment identity used to decide whether exact candidate gate evidence remains reusable. Change it whenever the gate's effective toolchain changes.",
+          "default": ""
         }
       },
       "default": {}

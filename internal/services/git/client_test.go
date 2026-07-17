@@ -1121,6 +1121,67 @@ func TestRealProcessProfileMergeCleanlyTransactionalUsesTargetGateAuthority(t *t
 	}
 }
 
+func TestRealProcessProfileMergeCleanlyTransactionalRunsConfiguredConsumerGate(t *testing.T) {
+	repo := initDivergedRepo(t)
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	ctx := WithCandidateValidationCommand(context.Background(), `test "$AZEDARACH_CANDIDATE_HEAD" = "$(git rev-parse HEAD)"`)
+	result, err := client.MergeCleanlyTransactional(ctx, repo, "feature")
+	if err != nil {
+		t.Fatalf("configured candidate merge: %v", err)
+	}
+	if result == nil || !result.Success || len(result.ValidationAttempts) != 1 {
+		t.Fatalf("configured candidate merge = %+v", result)
+	}
+	attempt := result.ValidationAttempts[0]
+	if attempt.Status != CandidateValidationPassed || !attempt.Canonical || attempt.CandidateHead == "" {
+		t.Fatalf("configured candidate validation = %+v", attempt)
+	}
+}
+
+func TestRealProcessProfileMergeCleanlyTransactionalReusesAdmittedExactCandidate(t *testing.T) {
+	repo := initDivergedRepo(t)
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	var admitted string
+	ctx := WithCandidateValidationCommand(context.Background(), `echo should-not-run >&2; exit 77`)
+	ctx = WithCandidateValidationAdmission(ctx, func(_ context.Context, candidate string) (bool, func(CandidateValidationAttempt) error, error) {
+		admitted = candidate
+		return true, nil, nil
+	})
+	result, err := client.MergeCleanlyTransactional(ctx, repo, "feature")
+	if err != nil || result == nil || !result.Success {
+		t.Fatalf("reused candidate merge = (%+v,%v)", result, err)
+	}
+	if admitted == "" || len(result.ValidationAttempts) != 1 || result.ValidationAttempts[0].CandidateHead != admitted || !result.ValidationAttempts[0].Canonical {
+		t.Fatalf("reused candidate validation = admitted %q attempts %+v", admitted, result.ValidationAttempts)
+	}
+}
+
+func TestRealProcessProfileMergeCleanlyTransactionalPublishesPassedAfterDurableAdmission(t *testing.T) {
+	repo := initDivergedRepo(t)
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	durable := false
+	sawPassed := false
+	ctx := WithCandidateValidationCommand(context.Background(), `true`)
+	ctx = WithCandidateValidationAdmission(ctx, func(_ context.Context, _ string) (bool, func(CandidateValidationAttempt) error, error) {
+		return false, func(CandidateValidationAttempt) error {
+			durable = true
+			return nil
+		}, nil
+	})
+	ctx = WithCandidateValidationObserver(ctx, func(attempt CandidateValidationAttempt) {
+		if attempt.Status == CandidateValidationPassed {
+			sawPassed = true
+			if !durable {
+				t.Error("passed candidate was published before durable validation completion")
+			}
+		}
+	})
+	result, err := client.MergeCleanlyTransactional(ctx, repo, "feature")
+	if err != nil || result == nil || !result.Success || !sawPassed {
+		t.Fatalf("durably admitted candidate merge = (%+v,%v), saw_passed=%t", result, err, sawPassed)
+	}
+}
+
 func TestRealProcessProfileMergeCleanlyTransactionalCompositionSkipsPublicationGate(t *testing.T) {
 	repo := t.TempDir()
 	runClientTestGit(t, repo, "init", "-q", "-b", "main")

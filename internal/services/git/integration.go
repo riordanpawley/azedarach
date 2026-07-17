@@ -207,20 +207,24 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 		return CandidateValidationAttempt{}, false, fmt.Errorf("target gate authority path must be absolute: %s", gateRoot)
 	}
 	gateRoot = filepath.Clean(gateRoot)
+	configuredCommand, _ := ctx.Value(candidateValidationCommandKey{}).(string)
+	configuredCommand = strings.TrimSpace(configuredCommand)
 	gatePath := filepath.Join(gateRoot, "scripts", "git-merge-rebase-gate.sh")
 	attempt := CandidateValidationAttempt{
 		CandidateHead: candidateHead,
 		Status:        CandidateValidationRunning,
 		Canonical:     false,
 	}
-	if _, err := os.Stat(gatePath); err != nil {
-		if os.IsNotExist(err) {
-			return CandidateValidationAttempt{}, false, nil
+	if configuredCommand == "" {
+		if _, err := os.Stat(gatePath); err != nil {
+			if os.IsNotExist(err) {
+				return CandidateValidationAttempt{}, false, nil
+			}
+			attempt.Status = CandidateValidationFailed
+			attempt.Message = "candidate validation gate could not be inspected"
+			notifyCandidateValidation(ctx, attempt)
+			return attempt, true, fmt.Errorf("inspect candidate validation gate: %w", err)
 		}
-		attempt.Status = CandidateValidationFailed
-		attempt.Message = "candidate validation gate could not be inspected"
-		notifyCandidateValidation(ctx, attempt)
-		return attempt, true, fmt.Errorf("inspect candidate validation gate: %w", err)
 	}
 	notifyCandidateValidation(ctx, attempt)
 
@@ -250,19 +254,45 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 		notifyCandidateValidation(ctx, attempt)
 		return attempt, true, errors.New(attempt.Message)
 	}
+	var finishAdmission func(CandidateValidationAttempt) error
+	if admission, _ := ctx.Value(candidateValidationAdmissionKey{}).(CandidateValidationAdmission); admission != nil {
+		reused, finish, admissionErr := admission(ctx, candidateHead)
+		if admissionErr != nil {
+			attempt.Status = CandidateValidationFailed
+			attempt.Message = "candidate validation admission failed: " + admissionErr.Error()
+			notifyCandidateValidation(ctx, attempt)
+			return attempt, true, errors.New(attempt.Message)
+		}
+		finishAdmission = finish
+		if reused {
+			attempt.Status = CandidateValidationPassed
+			attempt.Message = "compatible exact candidate validation reused; awaiting exact apply"
+			notifyCandidateValidation(ctx, attempt)
+			return attempt, true, nil
+		}
+	}
 
 	env := gitEnvWithOverrides(sanitizedGitEnv(os.Environ()), []string{
 		"AZEDARACH_CANDIDATE_HEAD=" + candidateHead,
 		"AZEDARACH_MERGE_GATE_BODY=" + filepath.Join(gateRoot, "scripts", "git-merge-rebase-gate-body.sh"),
 		"AZEDARACH_SKIP_MERGE_REBASE_GATE=0",
 	})
-	stdout, stderr, runErr := runProcessGroupCommand(ctx, scratchPath, env, gatePath)
+	var stdout, stderr string
+	var runErr error
+	if configuredCommand != "" {
+		stdout, stderr, runErr = runProcessGroupCommand(ctx, scratchPath, env, "/bin/sh", "-lc", configuredCommand)
+	} else {
+		stdout, stderr, runErr = runProcessGroupCommand(ctx, scratchPath, env, gatePath)
+	}
 	if runErr != nil {
 		attempt.Status = CandidateValidationFailed
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			attempt.Status = CandidateValidationCancelled
 			attempt.Message = "candidate validation cancelled; evidence is noncanonical"
 			notifyCandidateValidation(ctx, attempt)
+			if finishAdmission != nil {
+				_ = finishAdmission(attempt)
+			}
 			return attempt, true, fmt.Errorf("validate candidate %s: %w", candidateHead, ctxErr)
 		}
 		detail := candidateValidationOutput(stdout, stderr)
@@ -272,6 +302,11 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 			attempt.Message += ": " + detail
 		}
 		notifyCandidateValidation(ctx, attempt)
+		if finishAdmission != nil {
+			if finishErr := finishAdmission(attempt); finishErr != nil {
+				return attempt, true, fmt.Errorf("record failed candidate validation: %w", finishErr)
+			}
+		}
 		return attempt, true, fmt.Errorf("validate candidate %s: %s", candidateHead, attempt.Message)
 	}
 
@@ -280,6 +315,9 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 		attempt.Status = CandidateValidationSuperseded
 		attempt.Message = fmt.Sprintf("candidate HEAD changed during validation: expected %s, found %s", candidateHead, actualHead)
 		notifyCandidateValidation(ctx, attempt)
+		if finishAdmission != nil {
+			_ = finishAdmission(attempt)
+		}
 		if err != nil {
 			return attempt, true, fmt.Errorf("resolve candidate HEAD after validation: %w", err)
 		}
@@ -290,6 +328,9 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 		attempt.Status = CandidateValidationFailed
 		attempt.Message = "candidate worktree was not clean after validation"
 		notifyCandidateValidation(ctx, attempt)
+		if finishAdmission != nil {
+			_ = finishAdmission(attempt)
+		}
 		if err != nil {
 			return attempt, true, fmt.Errorf("inspect candidate status after validation: %w", err)
 		}
@@ -297,6 +338,17 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 	}
 	attempt.Status = CandidateValidationPassed
 	attempt.Message = "candidate validation passed; awaiting exact apply"
+	if finishAdmission != nil {
+		if finishErr := finishAdmission(attempt); finishErr != nil {
+			attempt.Status = CandidateValidationFailed
+			attempt.Message = "candidate validation passed but durable evidence recording failed: " + finishErr.Error()
+			notifyCandidateValidation(ctx, attempt)
+			return attempt, true, errors.New(attempt.Message)
+		}
+	}
+	// Publish "passed" only after the daemon has durably completed the exact
+	// validation lease. A crash after this notification can then recover by
+	// reusing completed evidence instead of executing the same gate again.
 	notifyCandidateValidation(ctx, attempt)
 	return attempt, true, nil
 }

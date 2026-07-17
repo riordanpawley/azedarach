@@ -609,6 +609,15 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 			return protocol.OrchestrationSnapshot{}, fmt.Errorf("load validation capacity projection: %w", err)
 		}
 		snapshot.ValidationCapacity = &validation
+		publicationStore, err := a.daemon.publicationStoreForProject(projectID)
+		if err != nil {
+			return protocol.OrchestrationSnapshot{}, fmt.Errorf("resolve publication queue projection: %w", err)
+		}
+		publications, err := publicationStore.PublicationOperations(ctx, projectID, "", true)
+		if err != nil {
+			return protocol.OrchestrationSnapshot{}, fmt.Errorf("load publication queue projection: %w", err)
+		}
+		snapshot.PublicationQueue = publications
 	}
 	if identity.Scope.Kind == domain.OrchestrationScopeRooted {
 		root := identity.Scope.RootIssueID.String()
@@ -622,6 +631,7 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 		snapshot.Scope, snapshot.Roots, snapshot.GeneratedAt = identity.Scope, []string{root}, time.Now().UTC()
 		a.enrichStewardshipContext(ctx, projectID, &snapshot)
 		tasks := materializedParentChildClosure(materializedTasks, root)
+		snapshot.PublicationQueue = publicationOperationsForTasks(snapshot.PublicationQueue, tasks)
 		if err := a.enrichPendingDecisions(ctx, projectID, issueClient, &snapshot, tasks); err != nil {
 			return protocol.OrchestrationSnapshot{}, err
 		}
@@ -714,6 +724,20 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 	snapshot.Completion = projectOrchestrationCompletion(snapshot)
 	finalizeOrchestrationSnapshotSource(&snapshot)
 	return snapshot, nil
+}
+
+func publicationOperationsForTasks(operations []domain.PublicationOperation, tasks []domain.Task) []domain.PublicationOperation {
+	allowed := make(map[string]struct{}, len(tasks))
+	for _, task := range tasks {
+		allowed[task.ID.String()] = struct{}{}
+	}
+	out := make([]domain.PublicationOperation, 0, len(operations))
+	for _, operation := range operations {
+		if _, ok := allowed[operation.IssueID]; ok {
+			out = append(out, operation)
+		}
+	}
+	return out
 }
 
 func canonicalOpenIssueCount(tasks []domain.Task) int {
@@ -1079,6 +1103,7 @@ func projectOrchestrationCompletion(snapshot protocol.OrchestrationSnapshot) pro
 		{snapshot.Health.OpenIssueCount, "open issues remain"},
 		{len(snapshot.ActiveSessions), "active worker sessions remain"},
 		{len(snapshot.Pending), "session starts remain pending"},
+		{len(snapshot.PublicationQueue), "publication operations remain pending"},
 		{len(snapshot.Reviews), "review requests remain"},
 		{len(snapshot.Interactions), "human interactions remain unresolved"},
 	}

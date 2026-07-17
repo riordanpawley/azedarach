@@ -289,6 +289,105 @@ func (c *Client) AppendIssueObservationEvent(ctx context.Context, issueID string
 	return event, nil
 }
 
+// AppendAcceptedReviewAndPublication atomically records the immutable accepted
+// review decision and its daemon-owned publication intent. The queue table is
+// owned by the daemon-operations migration authority but shares this project
+// database specifically so no accepted base-target patch can exist without its
+// continuation intent (or vice versa).
+func (c *Client) AppendAcceptedReviewAndPublication(ctx context.Context, issueID string, params IssueObservationEventParams, operation domain.PublicationOperation, coalesceKey string) (domain.IssueObservationEvent, string, error) {
+	if params.Type != domain.IssueEventReviewCompleted || strings.TrimSpace(fmt.Sprint(params.Payload["outcome"])) != string(domain.ReviewOutcomeAccepted) {
+		return domain.IssueObservationEvent{}, "", c.wrapError("append-accepted-review-publication", issueID, errors.New("accepted review publication requires accepted review.completed event"))
+	}
+	if err := operation.ValidateIntent(); err != nil {
+		return domain.IssueObservationEvent{}, "", c.wrapError("append-accepted-review-publication", issueID, err)
+	}
+	coalesceKey = strings.TrimSpace(coalesceKey)
+	if coalesceKey == "" {
+		return domain.IssueObservationEvent{}, "", c.wrapError("append-accepted-review-publication", issueID, errors.New("coalesce key is required"))
+	}
+	var eventID int64
+	var publicationOperationID string
+	err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				return c.wrapError("append-accepted-review-publication", issueID, err)
+			}
+			defer func() { _ = tx.Rollback() }()
+			if err := c.requireIssueExists(ctx, tx, issueID, "append-accepted-review-publication"); err != nil {
+				return err
+			}
+			now := operation.CreatedAt.UTC()
+			if now.IsZero() {
+				now = time.Now().UTC()
+			}
+			_, err = tx.ExecContext(ctx, `INSERT INTO daemon_publication_operations(
+				operation_id,project_id,issue_id,intent_key,request_fingerprint,actor_id,target_id,target_branch,
+				source_revision,base_revision,candidate_revision,policy_version,environment_fingerprint,validation_command,
+				evidence_source,evidence_event_id,evidence_seq,evidence_digest,coalesce_key,state,created_at,updated_at
+			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`,
+				operation.OperationID, operation.ProjectID, operation.IssueID, operation.IntentKey, operation.RequestFingerprint,
+				operation.ActorID, operation.TargetID, operation.TargetBranch, operation.SourceRevision, operation.BaseRevision,
+				operation.CandidateRevision, operation.PolicyVersion, operation.EnvironmentFingerprint, operation.ValidationCommand,
+				operation.EvidenceSource, operation.EvidenceEventID, operation.EvidenceSeq, operation.EvidenceDigest, coalesceKey,
+				string(domain.PublicationOperationQueued), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+			if err != nil {
+				return c.wrapError("append-accepted-review-publication", issueID, err)
+			}
+			// Resolve the canonical operation after INSERT OR IGNORE. A concurrent
+			// identical request may have won the coalesce key with a different
+			// intent/operation ID; the accepted event must point at that durable
+			// continuation rather than a row that does not exist.
+			err = tx.QueryRowContext(ctx, `SELECT operation_id FROM daemon_publication_operations
+				WHERE project_id=? AND (coalesce_key=? OR (issue_id=? AND intent_key=?))
+				  AND issue_id=? AND request_fingerprint=? AND target_id=? AND target_branch=?
+				  AND source_revision=? AND base_revision=? AND policy_version=?
+				  AND environment_fingerprint=? AND validation_command=? AND evidence_digest=?
+				ORDER BY created_at,operation_id LIMIT 1`,
+				operation.ProjectID, coalesceKey, operation.IssueID, operation.IntentKey,
+				operation.IssueID, operation.RequestFingerprint, operation.TargetID, operation.TargetBranch,
+				operation.SourceRevision, operation.BaseRevision, operation.PolicyVersion,
+				operation.EnvironmentFingerprint, operation.ValidationCommand, operation.EvidenceDigest,
+			).Scan(&publicationOperationID)
+			if errors.Is(err, sql.ErrNoRows) {
+				return c.wrapError("append-accepted-review-publication", issueID, errors.New("publication intent conflicts with an existing operation"))
+			}
+			if err != nil {
+				return c.wrapError("append-accepted-review-publication", issueID, err)
+			}
+			if params.Payload == nil {
+				params.Payload = make(map[string]any)
+			}
+			params.Payload["publication_operation_id"] = publicationOperationID
+			intentKey := strings.TrimSpace(fmt.Sprint(params.Payload["intent_key"]))
+			fingerprint := strings.TrimSpace(fmt.Sprint(params.Payload["request_fingerprint"]))
+			err = tx.QueryRowContext(ctx, `SELECT id FROM issue_observation_events WHERE issue_id=? AND event_type=? AND json_extract(payload_json,'$.outcome')=? AND json_extract(payload_json,'$.intent_key')=? AND json_extract(payload_json,'$.request_fingerprint')=? ORDER BY id DESC LIMIT 1`, issueID, string(domain.IssueEventReviewCompleted), string(domain.ReviewOutcomeAccepted), intentKey, fingerprint).Scan(&eventID)
+			if errors.Is(err, sql.ErrNoRows) {
+				eventID, err = c.insertIssueObservationEvent(ctx, tx, issueID, params)
+			}
+			if err != nil {
+				return c.wrapError("append-accepted-review-publication", issueID, err)
+			}
+			if err := tx.Commit(); err != nil {
+				return c.wrapError("append-accepted-review-publication", issueID, err)
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return domain.IssueObservationEvent{}, "", err
+	}
+	event, err := c.getIssueObservationEventByID(ctx, eventID)
+	if err != nil {
+		return domain.IssueObservationEvent{}, "", c.wrapError("append-accepted-review-publication", issueID, err)
+	}
+	return event, publicationOperationID, nil
+}
+
 // IssueObservationMailEventExists supports idempotent filesystem-mail mirroring
 // while the caller holds the mailbox's per-parent serialization lock.
 func (c *Client) IssueObservationMailEventExists(ctx context.Context, issueID string, eventType domain.IssueObservationEventType, parentIssue string, sequence int64) (bool, error) {

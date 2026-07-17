@@ -179,6 +179,7 @@ type orchestrateStatusResult struct {
 	Runnable               []string                             `json:"runnable"`
 	NestedRoots            []orchestrateNestedRoot              `json:"nested_roots,omitempty"`
 	Pending                []orchestratePendingStart            `json:"pending,omitempty"`
+	PublicationQueue       []domain.PublicationOperation        `json:"publication_queue,omitempty"`
 	Active                 []string                             `json:"active,omitempty"`
 	ActiveSessions         []orchestrateActiveSession           `json:"active_sessions,omitempty"`
 	SessionStartProgress   []orchestrateSessionStartProgress    `json:"session_start_progress,omitempty"`
@@ -310,6 +311,7 @@ type orchestrateWatchFrame struct {
 	Runnable               []string                             `json:"runnable"`
 	NestedRoots            []orchestrateNestedRoot              `json:"nested_roots,omitempty"`
 	Pending                []orchestratePendingStart            `json:"pending,omitempty"`
+	PublicationQueue       []domain.PublicationOperation        `json:"publication_queue,omitempty"`
 	Active                 []string                             `json:"active,omitempty"`
 	ActiveSessions         []orchestrateActiveSession           `json:"active_sessions,omitempty"`
 	SessionStartProgress   []orchestrateSessionStartProgress    `json:"session_start_progress,omitempty"`
@@ -345,6 +347,7 @@ type orchestrateCompactReadiness struct {
 	Active                 []orchestrateCompactActiveSession    `json:"active,omitempty"`
 	Blocked                map[string]string                    `json:"blocked,omitempty"`
 	Pending                []orchestratePendingStart            `json:"pending,omitempty"`
+	PublicationQueue       []domain.PublicationOperation        `json:"publication_queue,omitempty"`
 	NestedRoots            []orchestrateCompactNestedRoot       `json:"nested_roots,omitempty"`
 	SessionStartProgress   []orchestrateCompactSessionProgress  `json:"session_start_progress,omitempty"`
 	StaleCloseableChildren []orchestrateStaleCloseableCandidate `json:"stale_closeable_children,omitempty"`
@@ -905,6 +908,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		Runnable:               ready.Runnable,
 		NestedRoots:            orchestrateNestedRootsFromDaemon(ready.NestedRoots),
 		Pending:                orchestratePendingStartsFromDaemon(ready.Pending),
+		PublicationQueue:       append([]domain.PublicationOperation(nil), ready.PublicationQueue...),
 		Active:                 ready.Active,
 		ActiveSessions:         orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
 		SessionStartProgress:   orchestrateSessionStartProgressFromDaemon(ready.SessionStartProgress),
@@ -948,6 +952,22 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		fmt.Println("Pending starts:")
 		for _, pending := range result.Pending {
 			fmt.Printf("- %s operation=%s state=%s\n", pending.IssueID, pending.OperationID, pending.OperationState)
+		}
+	}
+	if len(result.PublicationQueue) > 0 {
+		fmt.Println("Publication queue:")
+		for _, publication := range result.PublicationQueue {
+			fmt.Printf("- %s issue=%s intent=%s state=%s position=%d source=%s base=%s candidate=%s lease=%s evidence=%s validation=%s reused=%s",
+				publication.OperationID, publication.IssueID, publication.IntentKey, publication.State, publication.QueuePosition,
+				publication.SourceRevision, publication.BaseRevision, publication.CandidateRevision, publication.LeaseOwner,
+				publication.EvidenceSource, publication.ValidationRequestID, publication.ReusedEvidenceID)
+			if publication.FailureKind != "" {
+				fmt.Printf(" failure=%s", publication.FailureKind)
+			}
+			if publication.FailureArtifact != "" {
+				fmt.Printf(" artifact=%s", publication.FailureArtifact)
+			}
+			fmt.Println()
 		}
 	}
 	if len(result.NestedRoots) > 0 {
@@ -2174,6 +2194,7 @@ func orchestrateWatchFrameFromReadiness(ready daemonclient.TaskGraphReadiness, e
 		Runnable:               ready.Runnable,
 		NestedRoots:            orchestrateNestedRootsFromDaemon(ready.NestedRoots),
 		Pending:                orchestratePendingStartsFromDaemon(ready.Pending),
+		PublicationQueue:       append([]domain.PublicationOperation(nil), ready.PublicationQueue...),
 		Active:                 ready.Active,
 		ActiveSessions:         orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
 		SessionStartProgress:   orchestrateSessionStartProgressFromDaemon(ready.SessionStartProgress),
@@ -2191,6 +2212,7 @@ func orchestrateWatchFrameSnapshotKey(frame orchestrateWatchFrame) string {
 		Runnable               []string                             `json:"runnable"`
 		NestedRoots            []orchestrateNestedRoot              `json:"nested_roots,omitempty"`
 		Pending                []orchestratePendingStart            `json:"pending,omitempty"`
+		PublicationQueue       []domain.PublicationOperation        `json:"publication_queue,omitempty"`
 		Active                 []string                             `json:"active,omitempty"`
 		ActiveSessions         []orchestrateActiveSession           `json:"active_sessions,omitempty"`
 		SessionStartProgress   []orchestrateSessionStartProgress    `json:"session_start_progress,omitempty"`
@@ -2216,6 +2238,7 @@ func orchestrateWatchFrameSnapshotKey(frame orchestrateWatchFrame) string {
 		Runnable:               frame.Runnable,
 		NestedRoots:            nestedRoots,
 		Pending:                frame.Pending,
+		PublicationQueue:       frame.PublicationQueue,
 		Active:                 frame.Active,
 		ActiveSessions:         activeSessions,
 		SessionStartProgress:   sessionStartProgress,
@@ -2763,6 +2786,7 @@ func compactFrameFromStatusResult(result orchestrateStatusResult, since, nextSin
 		Runnable:               result.Runnable,
 		NestedRoots:            result.NestedRoots,
 		Pending:                result.Pending,
+		PublicationQueue:       result.PublicationQueue,
 		Active:                 result.Active,
 		ActiveSessions:         result.ActiveSessions,
 		SessionStartProgress:   result.SessionStartProgress,
@@ -2804,6 +2828,7 @@ func compactFrameFromWatchFrame(frame orchestrateWatchFrame) orchestrateCompactF
 			Active:                 compactActiveSessions(frame.ActiveSessions),
 			Blocked:                compactBlocked(frame.Blocked),
 			Pending:                append([]orchestratePendingStart(nil), frame.Pending...),
+			PublicationQueue:       append([]domain.PublicationOperation(nil), frame.PublicationQueue...),
 			NestedRoots:            compactNestedRoots(frame.NestedRoots),
 			SessionStartProgress:   compactSessionStartProgress(frame.SessionStartProgress),
 			StaleCloseableChildren: append([]orchestrateStaleCloseableCandidate(nil), frame.StaleCloseableChildren...),

@@ -149,8 +149,15 @@ const (
 )
 
 type candidateValidationObserverKey struct{}
+type candidateValidationCommandKey struct{}
+type candidateValidationAdmissionKey struct{}
 
 type CandidateValidationObserver func(CandidateValidationAttempt)
+
+// CandidateValidationAdmission lets the daemon bind exact synthetic-candidate
+// execution to its durable validation authority. A reused admission skips the
+// command; otherwise finish must be called with the terminal attempt.
+type CandidateValidationAdmission func(context.Context, string) (reused bool, finish func(CandidateValidationAttempt) error, err error)
 
 func WithCandidateValidationObserver(ctx context.Context, observer CandidateValidationObserver) context.Context {
 	if ctx == nil {
@@ -160,6 +167,26 @@ func WithCandidateValidationObserver(ctx context.Context, observer CandidateVali
 		return ctx
 	}
 	return context.WithValue(ctx, candidateValidationObserverKey{}, observer)
+}
+
+// WithCandidateValidationCommand binds the project-owned configured command
+// used to validate an exact synthetic merge candidate. The command executes in
+// the detached candidate worktree with AZEDARACH_CANDIDATE_HEAD set.
+func WithCandidateValidationCommand(ctx context.Context, command string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, candidateValidationCommandKey{}, strings.TrimSpace(command))
+}
+
+func WithCandidateValidationAdmission(ctx context.Context, admission CandidateValidationAdmission) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if admission == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, candidateValidationAdmissionKey{}, admission)
 }
 
 func notifyCandidateValidation(ctx context.Context, attempt CandidateValidationAttempt) {

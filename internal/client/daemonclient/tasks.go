@@ -171,6 +171,7 @@ type TaskGraphReadiness struct {
 	Runnable               []string                              `json:"runnable"`
 	NestedRoots            []TaskNestedRoot                      `json:"nested_roots,omitempty"`
 	Pending                []TaskPendingStart                    `json:"pending,omitempty"`
+	PublicationQueue       []domain.PublicationOperation         `json:"publication_queue,omitempty"`
 	Active                 []string                              `json:"active,omitempty"`
 	ActiveSessions         []TaskActiveSession                   `json:"active_sessions,omitempty"`
 	SessionStartProgress   []TaskSessionStartProgress            `json:"session_start_progress,omitempty"`

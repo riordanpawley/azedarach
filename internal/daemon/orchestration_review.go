@@ -411,6 +411,24 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 				result.Failed[issueID] = failure
 				continue
 			}
+			var target taskMergeBaseTargetResult
+			queueAvailable := integrateBeforeClose && a.daemon.operationRuntime != nil && a.daemon.operationRuntime.store != nil && a.daemon.operationRuntime.manager != nil && a.daemon.worktreeAdapter != nil && a.daemon.git != nil
+			if queueAvailable {
+				target, err = a.daemon.taskMergeBaseTarget(ctx, projectID, issueID, a.daemon.baseBranchForProject(projectID), false)
+				if err != nil {
+					result.Failed[issueID] = err.Error()
+					continue
+				}
+			}
+			if queueAvailable && strings.EqualFold(strings.TrimSpace(target.TargetID), "base") {
+				publication, enqueueErr := a.daemon.enqueueAcceptedReviewPublication(ctx, projectID, request, issueID, storedPin)
+				if enqueueErr != nil {
+					result.Failed[issueID] = enqueueErr.Error()
+					continue
+				}
+				result.Publications = append(result.Publications, publication)
+				continue
+			}
 			if _, err := a.releaseAndCloseAcceptedReview(ctx, projectID, request, issueID, integrateBeforeClose, storedPin, &result); err != nil {
 				result.Failed[issueID] = err.Error()
 			}
@@ -949,6 +967,25 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 	pin, err := a.captureAcceptedReviewPin(ctx, projectID, request.RepoDir, inspection, integrateBeforeClose)
 	if err != nil {
 		return false, err
+	}
+	var target taskMergeBaseTargetResult
+	queueAvailable := integrateBeforeClose && a.daemon.operationRuntime != nil && a.daemon.operationRuntime.store != nil && a.daemon.operationRuntime.manager != nil && a.daemon.worktreeAdapter != nil && a.daemon.git != nil
+	if queueAvailable {
+		target, err = a.daemon.taskMergeBaseTarget(ctx, projectID, inspection.IssueID, a.daemon.baseBranchForProject(projectID), false)
+		if err != nil {
+			return false, err
+		}
+	}
+	if queueAvailable && strings.EqualFold(strings.TrimSpace(target.TargetID), "base") {
+		publication, err := a.daemon.acceptAndEnqueueReviewPublication(ctx, projectID, request, inspection.IssueID, pin)
+		if err != nil {
+			return false, fmt.Errorf("enqueue accepted review publication: %w", err)
+		}
+		result.Publications = append(result.Publications, publication)
+		// The durable review lease remains owned by the queue until its runner
+		// enters authoritative close. Returning true prevents the outer intent
+		// loop from releasing it while this accepted patch is queued.
+		return true, nil
 	}
 	if err := a.recordAcceptedReviewOutcome(ctx, projectID, inspection.IssueID, request, pin); err != nil {
 		return false, err

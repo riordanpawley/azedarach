@@ -14,6 +14,7 @@ const (
 	CommandOrchestratorSessionStop         = "orchestration.session.stop"
 	CommandOrchestratorSessionStatus       = "orchestration.session.status"
 	EventOrchestrationLoopUpdated          = "orchestration.loop.updated"
+	EventPublicationOperationUpdated       = "publication.operation.updated"
 	OrchestrationProjectionAuthoritySQLite = "sqlite"
 )
 
@@ -64,6 +65,7 @@ type OrchestrationSnapshot struct {
 	Roots                  []string                                  `json:"roots,omitempty"`
 	Capacity               OrchestrationCapacity                     `json:"capacity"`
 	ValidationCapacity     *domain.ValidationSnapshot                `json:"validation_capacity,omitempty"`
+	PublicationQueue       []domain.PublicationOperation             `json:"publication_queue,omitempty"`
 	Runnable               []string                                  `json:"runnable"`
 	NestedRoots            []OrchestrationNestedRoot                 `json:"nested_roots,omitempty"`
 	Pending                []OrchestrationPending                    `json:"pending,omitempty"`
@@ -264,19 +266,20 @@ type OrchestrationIntentRequest struct {
 }
 
 type OrchestrationIntentResult struct {
-	Scope     domain.OrchestrationScope  `json:"scope"`
-	Kind      OrchestrationIntentKind    `json:"kind"`
-	IntentKey string                     `json:"intent_key"`
-	Revision  uint64                     `json:"revision"`
-	Requested []string                   `json:"requested"`
-	Started   []string                   `json:"started,omitempty"`
-	Returned  []string                   `json:"returned,omitempty"`
-	Closed    []string                   `json:"closed,omitempty"`
-	Launched  []OrchestrationLaunch      `json:"launched,omitempty"`
-	Pending   []OrchestrationPending     `json:"pending,omitempty"`
-	Routed    []OrchestrationRouteResult `json:"routed,omitempty"`
-	Skipped   map[string]string          `json:"skipped,omitempty"`
-	Failed    map[string]string          `json:"failed,omitempty"`
+	Scope        domain.OrchestrationScope     `json:"scope"`
+	Kind         OrchestrationIntentKind       `json:"kind"`
+	IntentKey    string                        `json:"intent_key"`
+	Revision     uint64                        `json:"revision"`
+	Requested    []string                      `json:"requested"`
+	Started      []string                      `json:"started,omitempty"`
+	Returned     []string                      `json:"returned,omitempty"`
+	Closed       []string                      `json:"closed,omitempty"`
+	Launched     []OrchestrationLaunch         `json:"launched,omitempty"`
+	Pending      []OrchestrationPending        `json:"pending,omitempty"`
+	Publications []domain.PublicationOperation `json:"publications,omitempty"`
+	Routed       []OrchestrationRouteResult    `json:"routed,omitempty"`
+	Skipped      map[string]string             `json:"skipped,omitempty"`
+	Failed       map[string]string             `json:"failed,omitempty"`
 }
 
 type OrchestrationRouteResult struct {
