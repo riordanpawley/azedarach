@@ -8,10 +8,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -42,6 +44,128 @@ func (p *recordingDaemonProcess) stopAndWait(context.Context) error {
 type recordingDaemonStarter struct {
 	process *recordingDaemonProcess
 	specs   []daemonProcessSpec
+}
+
+const lingeringDaemonHelperEnv = "AZEDARACH_TEST_LINGERING_DAEMON"
+
+// TestLauncherReplaceLingeringDaemonHelper is a real predecessor process for
+// replacement tests. On TERM it removes the runtime socket and lock exactly as
+// azd does, reports that authority assets are gone, then deliberately remains
+// alive on a pipe barrier until the parent authorizes exact process exit.
+func TestLauncherReplaceLingeringDaemonHelper(t *testing.T) {
+	if os.Getenv(lingeringDaemonHelperEnv) != "1" {
+		return
+	}
+	ready := os.NewFile(3, "ready")
+	shutdownObserved := os.NewFile(4, "shutdown-observed")
+	exitBarrier := os.NewFile(5, "exit-barrier")
+	if ready == nil || shutdownObserved == nil || exitBarrier == nil {
+		os.Exit(2)
+	}
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGTERM)
+	if _, err := ready.Write([]byte{1}); err != nil {
+		os.Exit(7)
+	}
+	<-signals
+	if err := os.Remove(os.Getenv("AZEDARACH_TEST_DAEMON_SOCKET")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		os.Exit(3)
+	}
+	if err := os.Remove(os.Getenv("AZEDARACH_TEST_DAEMON_LOCK")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		os.Exit(4)
+	}
+	if _, err := shutdownObserved.Write([]byte{1}); err != nil {
+		os.Exit(5)
+	}
+	var release [1]byte
+	if _, err := exitBarrier.Read(release[:]); err != nil {
+		os.Exit(6)
+	}
+	os.Exit(0)
+}
+
+type lingeringDaemonProcess struct {
+	cmd              *exec.Cmd
+	shutdownObserved *os.File
+	exitBarrier      *os.File
+	waitDone         chan error
+	releaseOnce      sync.Once
+}
+
+func startLingeringDaemonProcess(t *testing.T, launcher *Launcher) *lingeringDaemonProcess {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(launcher.LockPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcher.SocketPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	readyReader, readyWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	observedReader, observedWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exitReader, exitWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestLauncherReplaceLingeringDaemonHelper$")
+	cmd.Env = append(os.Environ(),
+		lingeringDaemonHelperEnv+"=1",
+		"AZEDARACH_TEST_DAEMON_SOCKET="+launcher.SocketPath,
+		"AZEDARACH_TEST_DAEMON_LOCK="+launcher.LockPath,
+	)
+	cmd.ExtraFiles = []*os.File{readyWriter, observedWriter, exitReader}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = readyWriter.Close()
+	_ = observedWriter.Close()
+	_ = exitReader.Close()
+	var ready [1]byte
+	if _, err := io.ReadFull(readyReader, ready[:]); err != nil {
+		t.Fatalf("await lingering daemon helper readiness: %v", err)
+	}
+	_ = readyReader.Close()
+	record, err := json.Marshal(map[string]any{"pid": cmd.Process.Pid, "created_at": time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcher.LockPath, record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	process := &lingeringDaemonProcess{
+		cmd:              cmd,
+		shutdownObserved: observedReader,
+		exitBarrier:      exitWriter,
+		waitDone:         make(chan error, 1),
+	}
+	go func() { process.waitDone <- cmd.Wait() }()
+	t.Cleanup(func() {
+		process.release()
+		_ = cmd.Process.Kill()
+		<-process.waitDone
+		_ = observedReader.Close()
+	})
+	return process
+}
+
+func (p *lingeringDaemonProcess) awaitShutdown(t *testing.T) {
+	t.Helper()
+	var observed [1]byte
+	if _, err := io.ReadFull(p.shutdownObserved, observed[:]); err != nil {
+		t.Fatalf("await lingering daemon shutdown barrier: %v", err)
+	}
+}
+
+func (p *lingeringDaemonProcess) release() {
+	p.releaseOnce.Do(func() {
+		_, _ = p.exitBarrier.Write([]byte{1})
+		_ = p.exitBarrier.Close()
+	})
 }
 
 func useRecordingDaemonStarter(launcher *Launcher) *recordingDaemonStarter {
@@ -837,7 +961,7 @@ func TestLauncherReplaceTerminatesBeforeStart(t *testing.T) {
 		if !terminated {
 			return nil
 		}
-		if readyCalls <= 2 {
+		if readyCalls <= 1 {
 			return context.DeadlineExceeded
 		}
 		return nil
@@ -1052,6 +1176,259 @@ func TestLauncherReplaceReasonOverride(t *testing.T) {
 	}
 }
 
+func TestLauncherReplaceWaitsForExactPredecessorExitAfterRuntimeAssetsDisappear(t *testing.T) {
+	repoDir := t.TempDir()
+	launcher := NewLauncher(repoDir, filepath.Join(t.TempDir(), "daemon.sock"))
+	launcher.BinPath = "true"
+	predecessor := startLingeringDaemonProcess(t, launcher)
+
+	var successorStarts atomic.Int32
+	successorReady := atomic.Bool{}
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		return predecessor.cmd.Process.Signal(syscall.SIGTERM)
+	}
+	launcher.waitForReady = func(context.Context, string) error {
+		if successorReady.Load() {
+			return nil
+		}
+		return context.DeadlineExceeded
+	}
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return &trackingWriteCloser{}, nil }
+	launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+		successorStarts.Add(1)
+		successorReady.Store(true)
+		return &recordingDaemonProcess{exitCh: make(chan error)}, nil
+	}
+
+	replaceDone := make(chan error, 1)
+	go func() { replaceDone <- launcher.Replace(context.Background()) }()
+	predecessor.awaitShutdown(t)
+	if got := successorStarts.Load(); got != 0 {
+		t.Fatalf("successor starts while exact predecessor remains alive = %d, want 0", got)
+	}
+	select {
+	case err := <-replaceDone:
+		t.Fatalf("Replace returned before exact predecessor exit: %v", err)
+	default:
+	}
+	predecessor.release()
+	if err := <-replaceDone; err != nil {
+		t.Fatalf("Replace() error = %v", err)
+	}
+	if got := successorStarts.Load(); got != 1 {
+		t.Fatalf("successor starts after exact predecessor exit = %d, want 1", got)
+	}
+}
+
+func TestLauncherReplaceFailsClosedWhenExactPredecessorExitCannotBeProven(t *testing.T) {
+	repoDir := t.TempDir()
+	launcher := NewLauncher(repoDir, filepath.Join(t.TempDir(), "daemon.sock"))
+	launcher.BinPath = "true"
+	predecessor := startLingeringDaemonProcess(t, launcher)
+
+	var successorStarts atomic.Int32
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		return predecessor.cmd.Process.Signal(syscall.SIGTERM)
+	}
+	launcher.waitForReady = func(context.Context, string) error { return context.DeadlineExceeded }
+	launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+		successorStarts.Add(1)
+		return &recordingDaemonProcess{exitCh: make(chan error)}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	replaceDone := make(chan error, 1)
+	go func() { replaceDone <- launcher.Replace(ctx) }()
+	predecessor.awaitShutdown(t)
+	cancel()
+	err := <-replaceDone
+	if err == nil || !strings.Contains(err.Error(), "prove daemon predecessor exited before replace") || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Replace() error = %v, want fail-closed exact-exit proof cancellation", err)
+	}
+	if got := successorStarts.Load(); got != 0 {
+		t.Fatalf("successor starts after exact-exit proof failure = %d, want 0", got)
+	}
+	predecessor.release()
+}
+
+func TestLauncherReplaceRejectsLiveCanonicalRuntimeWithoutOwnerIdentity(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
+	launcher.BinPath = "true"
+	launcher.waitForReady = func(context.Context, string) error { return nil }
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		t.Fatal("Replace attempted shutdown without an exact canonical owner identity")
+		return nil
+	}
+	launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+		t.Fatal("Replace attempted successor start without an exact canonical owner identity")
+		return nil, nil
+	}
+
+	err := launcher.Replace(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "missing daemon lock owner identity") {
+		t.Fatalf("Replace() error = %v, want missing canonical owner identity failure", err)
+	}
+}
+
+func TestLauncherConcurrentReplaceCoalescesToOneSuccessor(t *testing.T) {
+	repoDir := t.TempDir()
+	launcher := NewLauncher(repoDir, filepath.Join(t.TempDir(), "daemon.sock"))
+	launcher.BinPath = "true"
+	predecessor := startLingeringDaemonProcess(t, launcher)
+
+	var successorStarts atomic.Int32
+	successorReady := atomic.Bool{}
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		return predecessor.cmd.Process.Signal(syscall.SIGTERM)
+	}
+	launcher.waitForReady = func(context.Context, string) error {
+		if successorReady.Load() {
+			return nil
+		}
+		return context.DeadlineExceeded
+	}
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return &trackingWriteCloser{}, nil }
+	launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+		successorStarts.Add(1)
+		successorReady.Store(true)
+		return &recordingDaemonProcess{exitCh: make(chan error)}, nil
+	}
+	beforeLock := make(chan struct{}, 2)
+	releaseLockRace := make(chan struct{})
+	launcher.beforeReplaceLock = func() {
+		beforeLock <- struct{}{}
+		<-releaseLockRace
+	}
+
+	results := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() { results <- launcher.Replace(context.Background()) }()
+	}
+	<-beforeLock
+	<-beforeLock
+	close(releaseLockRace)
+	predecessor.awaitShutdown(t)
+	if got := successorStarts.Load(); got != 0 {
+		t.Fatalf("successor starts while predecessor lingers = %d, want 0", got)
+	}
+	predecessor.release()
+	for i := 0; i < 2; i++ {
+		if err := <-results; err != nil {
+			t.Fatalf("concurrent Replace() error = %v", err)
+		}
+	}
+	if got := successorStarts.Load(); got != 1 {
+		t.Fatalf("concurrent replacement successor starts = %d, want 1", got)
+	}
+}
+
+func TestLauncherGlobalStopSerializesWithReplace(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
+	launcher.BinPath = "true"
+	predecessor := startLingeringDaemonProcess(t, launcher)
+
+	var shutdownCalls atomic.Int32
+	var successorStarts atomic.Int32
+	successorReady := atomic.Bool{}
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		if shutdownCalls.Add(1) == 1 {
+			return predecessor.cmd.Process.Signal(syscall.SIGTERM)
+		}
+		return errors.New("daemon socket already stopped")
+	}
+	launcher.waitForReady = func(context.Context, string) error {
+		if successorReady.Load() {
+			return nil
+		}
+		return context.DeadlineExceeded
+	}
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return &trackingWriteCloser{}, nil }
+	launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+		successorStarts.Add(1)
+		successorReady.Store(true)
+		return &recordingDaemonProcess{exitCh: make(chan error)}, nil
+	}
+	replaceQueued := make(chan struct{}, 1)
+	launcher.beforeReplaceLock = func() { replaceQueued <- struct{}{} }
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- launcher.Stop(context.Background()) }()
+	predecessor.awaitShutdown(t)
+	replaceDone := make(chan error, 1)
+	go func() { replaceDone <- launcher.Replace(context.Background()) }()
+	<-replaceQueued
+	if got := shutdownCalls.Load(); got != 1 {
+		t.Fatalf("shutdown calls while global Stop owns lifecycle lock = %d, want 1", got)
+	}
+	if got := successorStarts.Load(); got != 0 {
+		t.Fatalf("successor starts while global Stop owns lifecycle lock = %d, want 0", got)
+	}
+	predecessor.release()
+	if err := <-stopDone; err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if err := <-replaceDone; err != nil {
+		t.Fatalf("Replace() error = %v", err)
+	}
+	if got := successorStarts.Load(); got != 1 {
+		t.Fatalf("successor starts after serialized global Stop/Replace = %d, want 1", got)
+	}
+}
+
+func TestLauncherGlobalStartSerializesWithStopAndReplace(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		run  func(*Launcher) error
+	}{
+		{name: "stop", run: func(launcher *Launcher) error { return launcher.Stop(context.Background()) }},
+		{name: "replace", run: func(launcher *Launcher) error { return launcher.Replace(context.Background()) }},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+			launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
+			launcher.BinPath = "true"
+			predecessor := startLingeringDaemonProcess(t, launcher)
+
+			lifecycleEntered := make(chan struct{})
+			releaseShutdown := make(chan struct{})
+			launcher.shutdownViaSocket = func(context.Context, string) error {
+				close(lifecycleEntered)
+				<-releaseShutdown
+				return predecessor.cmd.Process.Signal(syscall.SIGTERM)
+			}
+			// A ready socket must not let canonical global Start bypass a
+			// lifecycle operation that already owns the exact-scope flock.
+			launcher.waitForReady = func(context.Context, string) error { return nil }
+
+			lifecycleDone := make(chan error, 1)
+			go func() { lifecycleDone <- testCase.run(launcher) }()
+			<-lifecycleEntered
+			startDone := make(chan error, 1)
+			go func() { startDone <- launcher.Start(context.Background()) }()
+			select {
+			case err := <-startDone:
+				t.Fatalf("global Start returned while %s owned lifecycle lock: %v", testCase.name, err)
+			default:
+			}
+
+			close(releaseShutdown)
+			predecessor.awaitShutdown(t)
+			predecessor.release()
+			if err := <-lifecycleDone; err != nil {
+				t.Fatalf("%s error = %v", testCase.name, err)
+			}
+			if err := <-startDone; err != nil {
+				t.Fatalf("Start() after serialized %s error = %v", testCase.name, err)
+			}
+		})
+	}
+}
+
 func TestLauncherStart_ErrorsWhenLockRecoveryFails(t *testing.T) {
 	repoDir := t.TempDir()
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
@@ -1079,13 +1456,13 @@ func TestLauncherStart_ErrorsWhenLockRecoveryFails(t *testing.T) {
 	}
 }
 
-func TestLauncherStart_ForceClearsLockWhenTerminateReturnsEPERM(t *testing.T) {
+func TestLauncherStart_FailsClosedWhenTerminateReturnsEPERM(t *testing.T) {
 	repoDir := t.TempDir()
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
 	tracker := &trackingWriteCloser{}
 
 	launcher := NewLauncher(repoDir, socketPath)
-	useRecordingDaemonStarter(launcher)
+	starter := useRecordingDaemonStarter(launcher)
 	launcher.BinPath = "true"
 	launcher.sleepFn = func(time.Duration) {}
 	terminateCalls := 0
@@ -1097,10 +1474,7 @@ func TestLauncherStart_ForceClearsLockWhenTerminateReturnsEPERM(t *testing.T) {
 	readyCalls := 0
 	launcher.waitForReady = func(context.Context, string) error {
 		readyCalls++
-		if readyCalls <= 3 {
-			return context.DeadlineExceeded
-		}
-		return nil
+		return context.DeadlineExceeded
 	}
 	launcher.openLogFile = func(string) (io.WriteCloser, error) { return tracker, nil }
 
@@ -1115,8 +1489,8 @@ func TestLauncherStart_ForceClearsLockWhenTerminateReturnsEPERM(t *testing.T) {
 		t.Fatalf("WriteFile(lock): %v", err)
 	}
 
-	if err := launcher.Start(context.Background()); err != nil {
-		t.Fatalf("Start() error = %v", err)
+	if err := launcher.Start(context.Background()); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("Start() error = %v, want EPERM fail-closed error", err)
 	}
 	if readyCalls != 4 {
 		t.Fatalf("waitForReady call count = %d, want 4", readyCalls)
@@ -1124,21 +1498,21 @@ func TestLauncherStart_ForceClearsLockWhenTerminateReturnsEPERM(t *testing.T) {
 	if terminateCalls != 1 {
 		t.Fatalf("terminate lock owner call count = %d, want 1", terminateCalls)
 	}
-	if _, err := os.Stat(launcher.LockPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("lock file should be removed by permission fallback, stat err = %v", err)
+	if _, err := os.Stat(launcher.LockPath); err != nil {
+		t.Fatalf("lock file should remain after permission failure, stat err = %v", err)
 	}
-	if !tracker.closed.Load() {
-		t.Fatal("daemon log file was not closed after Start() returned")
+	if len(starter.specs) != 0 || tracker.closed.Load() {
+		t.Fatalf("successor starts/log opens = %d/%t, want 0/false", len(starter.specs), tracker.closed.Load())
 	}
 }
 
-func TestLauncherStart_ForceClearsLockWhenTerminateReturnsWrappedPermissionDenied(t *testing.T) {
+func TestLauncherStart_FailsClosedWhenTerminateReturnsWrappedPermissionDenied(t *testing.T) {
 	repoDir := t.TempDir()
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
 	tracker := &trackingWriteCloser{}
 
 	launcher := NewLauncher(repoDir, socketPath)
-	useRecordingDaemonStarter(launcher)
+	starter := useRecordingDaemonStarter(launcher)
 	launcher.BinPath = "true"
 	launcher.sleepFn = func(time.Duration) {}
 	terminateCalls := 0
@@ -1150,10 +1524,7 @@ func TestLauncherStart_ForceClearsLockWhenTerminateReturnsWrappedPermissionDenie
 	readyCalls := 0
 	launcher.waitForReady = func(context.Context, string) error {
 		readyCalls++
-		if readyCalls <= 3 {
-			return context.DeadlineExceeded
-		}
-		return nil
+		return context.DeadlineExceeded
 	}
 	launcher.openLogFile = func(string) (io.WriteCloser, error) { return tracker, nil }
 
@@ -1168,8 +1539,8 @@ func TestLauncherStart_ForceClearsLockWhenTerminateReturnsWrappedPermissionDenie
 		t.Fatalf("WriteFile(lock): %v", err)
 	}
 
-	if err := launcher.Start(context.Background()); err != nil {
-		t.Fatalf("Start() error = %v", err)
+	if err := launcher.Start(context.Background()); !errors.Is(err, lifecycle.ErrLockOwnerPermissionDenied) {
+		t.Fatalf("Start() error = %v, want permission-denied fail-closed error", err)
 	}
 	if readyCalls != 4 {
 		t.Fatalf("waitForReady call count = %d, want 4", readyCalls)
@@ -1177,21 +1548,21 @@ func TestLauncherStart_ForceClearsLockWhenTerminateReturnsWrappedPermissionDenie
 	if terminateCalls != 1 {
 		t.Fatalf("terminate lock owner call count = %d, want 1", terminateCalls)
 	}
-	if _, err := os.Stat(launcher.LockPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("lock file should be removed by permission fallback, stat err = %v", err)
+	if _, err := os.Stat(launcher.LockPath); err != nil {
+		t.Fatalf("lock file should remain after permission failure, stat err = %v", err)
 	}
-	if !tracker.closed.Load() {
-		t.Fatal("daemon log file was not closed after Start() returned")
+	if len(starter.specs) != 0 || tracker.closed.Load() {
+		t.Fatalf("successor starts/log opens = %d/%t, want 0/false", len(starter.specs), tracker.closed.Load())
 	}
 }
 
-func TestLauncherStart_ForceClearsLockWhenTerminateReturnsTerminationTimeout(t *testing.T) {
+func TestLauncherStart_FailsClosedWhenTerminateReturnsTerminationTimeout(t *testing.T) {
 	repoDir := t.TempDir()
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
 	tracker := &trackingWriteCloser{}
 
 	launcher := NewLauncher(repoDir, socketPath)
-	useRecordingDaemonStarter(launcher)
+	starter := useRecordingDaemonStarter(launcher)
 	launcher.BinPath = "true"
 	launcher.sleepFn = func(time.Duration) {}
 	terminateCalls := 0
@@ -1203,10 +1574,7 @@ func TestLauncherStart_ForceClearsLockWhenTerminateReturnsTerminationTimeout(t *
 	readyCalls := 0
 	launcher.waitForReady = func(context.Context, string) error {
 		readyCalls++
-		if readyCalls <= 3 {
-			return context.DeadlineExceeded
-		}
-		return nil
+		return context.DeadlineExceeded
 	}
 	launcher.openLogFile = func(string) (io.WriteCloser, error) { return tracker, nil }
 
@@ -1221,8 +1589,8 @@ func TestLauncherStart_ForceClearsLockWhenTerminateReturnsTerminationTimeout(t *
 		t.Fatalf("WriteFile(lock): %v", err)
 	}
 
-	if err := launcher.Start(context.Background()); err != nil {
-		t.Fatalf("Start() error = %v", err)
+	if err := launcher.Start(context.Background()); !errors.Is(err, lifecycle.ErrLockOwnerTerminationTimeout) {
+		t.Fatalf("Start() error = %v, want termination-timeout fail-closed error", err)
 	}
 	if readyCalls != 4 {
 		t.Fatalf("waitForReady call count = %d, want 4", readyCalls)
@@ -1230,21 +1598,21 @@ func TestLauncherStart_ForceClearsLockWhenTerminateReturnsTerminationTimeout(t *
 	if terminateCalls != 1 {
 		t.Fatalf("terminate lock owner call count = %d, want 1", terminateCalls)
 	}
-	if _, err := os.Stat(launcher.LockPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("lock file should be removed by timeout fallback, stat err = %v", err)
+	if _, err := os.Stat(launcher.LockPath); err != nil {
+		t.Fatalf("lock file should remain after termination timeout, stat err = %v", err)
 	}
-	if !tracker.closed.Load() {
-		t.Fatal("daemon log file was not closed after Start() returned")
+	if len(starter.specs) != 0 || tracker.closed.Load() {
+		t.Fatalf("successor starts/log opens = %d/%t, want 0/false", len(starter.specs), tracker.closed.Load())
 	}
 }
 
-func TestLauncherStart_ForceClearsLockWhenTerminateReturnsPermissionDeniedString(t *testing.T) {
+func TestLauncherStart_FailsClosedWhenTerminateReturnsPermissionDeniedString(t *testing.T) {
 	repoDir := t.TempDir()
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
 	tracker := &trackingWriteCloser{}
 
 	launcher := NewLauncher(repoDir, socketPath)
-	useRecordingDaemonStarter(launcher)
+	starter := useRecordingDaemonStarter(launcher)
 	launcher.BinPath = "true"
 	launcher.sleepFn = func(time.Duration) {}
 	terminateCalls := 0
@@ -1256,10 +1624,7 @@ func TestLauncherStart_ForceClearsLockWhenTerminateReturnsPermissionDeniedString
 	readyCalls := 0
 	launcher.waitForReady = func(context.Context, string) error {
 		readyCalls++
-		if readyCalls <= 3 {
-			return context.DeadlineExceeded
-		}
-		return nil
+		return context.DeadlineExceeded
 	}
 	launcher.openLogFile = func(string) (io.WriteCloser, error) { return tracker, nil }
 
@@ -1274,8 +1639,8 @@ func TestLauncherStart_ForceClearsLockWhenTerminateReturnsPermissionDeniedString
 		t.Fatalf("WriteFile(lock): %v", err)
 	}
 
-	if err := launcher.Start(context.Background()); err != nil {
-		t.Fatalf("Start() error = %v", err)
+	if err := launcher.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("Start() error = %v, want permission-denied fail-closed error", err)
 	}
 	if readyCalls != 4 {
 		t.Fatalf("waitForReady call count = %d, want 4", readyCalls)
@@ -1283,11 +1648,11 @@ func TestLauncherStart_ForceClearsLockWhenTerminateReturnsPermissionDeniedString
 	if terminateCalls != 1 {
 		t.Fatalf("terminate lock owner call count = %d, want 1", terminateCalls)
 	}
-	if _, err := os.Stat(launcher.LockPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("lock file should be removed by permission fallback, stat err = %v", err)
+	if _, err := os.Stat(launcher.LockPath); err != nil {
+		t.Fatalf("lock file should remain after permission failure, stat err = %v", err)
 	}
-	if !tracker.closed.Load() {
-		t.Fatal("daemon log file was not closed after Start() returned")
+	if len(starter.specs) != 0 || tracker.closed.Load() {
+		t.Fatalf("successor starts/log opens = %d/%t, want 0/false", len(starter.specs), tracker.closed.Load())
 	}
 }
 

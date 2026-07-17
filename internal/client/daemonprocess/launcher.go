@@ -41,6 +41,7 @@ type Launcher struct {
 	processExitTimeout time.Duration
 	terminateLockOwner func(lockPath string) error
 	startProcess       daemonProcessStarter
+	beforeReplaceLock  func()
 }
 
 type daemonCommand struct {
@@ -241,7 +242,7 @@ func (l *Launcher) Start(ctx context.Context) error {
 	// advisory and used only to coordinate spawn/recovery. Canonical scoped
 	// runtimes serialize the readiness check with Stop so a concurrent Start
 	// cannot report the daemon ready while Stop is committed to removing it.
-	if !l.ownsCanonicalScopedRuntime() && l.waitForSocketReadyWithin(250*time.Millisecond) == nil {
+	if !l.ownsCanonicalRuntime() && l.waitForSocketReadyWithin(250*time.Millisecond) == nil {
 		return nil
 	}
 
@@ -260,7 +261,14 @@ func (l *Launcher) Start(ctx context.Context) error {
 		return nil
 	}
 	defer releaseStartLock()
+	return l.startWithLifecycleLock(ctx, daemonCmd)
+}
 
+// startWithLifecycleLock starts the daemon while the caller owns the exact
+// runtime's lifecycle lock. Keeping lock acquisition outside this helper lets
+// Replace serialize predecessor shutdown, exact exit proof, and successor
+// startup without recursively acquiring the same flock.
+func (l *Launcher) startWithLifecycleLock(ctx context.Context, daemonCmd daemonCommand) error {
 	// Re-check after acquiring start lock to avoid duplicate spawns from racing
 	// clients.
 	if err := l.waitForSocketReadyWithin(500 * time.Millisecond); err == nil {
@@ -284,22 +292,19 @@ func (l *Launcher) Start(ctx context.Context) error {
 			if terminate == nil {
 				terminate = lifecycle.TerminateLockOwner
 			}
+			owner, ownerPresent, captureErr := l.captureLockOwnerIdentity()
+			if captureErr != nil {
+				return fmt.Errorf("capture stale daemon lock owner before recovery: %w", captureErr)
+			}
 			if err := terminate(l.LockPath); err != nil {
-				if !isRecoverableLockOwnerTerminationError(err) {
-					readyErr := l.waitForSocketReadyWithin(1 * time.Second)
-					if readyErr == nil {
-						return nil
-					}
-					return fmt.Errorf("recover stale daemon lock owner: %w", err)
+				if l.waitForSocketReadyWithin(1*time.Second) == nil {
+					return nil
 				}
-				if l.Logger != nil {
-					l.Logger.Warn("lock owner termination did not complete cleanly; force-clearing stale daemon lock",
-						"lock_path", l.LockPath,
-						"error", err,
-					)
-				}
-				if rmErr := os.Remove(l.LockPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-					return fmt.Errorf("recover stale daemon lock owner after forced lock clear: %w", rmErr)
+				return fmt.Errorf("recover stale daemon lock owner: %w", err)
+			}
+			if ownerPresent {
+				if err := l.waitForCapturedOwnerExit(ctx, owner, "start recovery"); err != nil {
+					return err
 				}
 			}
 		}
@@ -383,35 +388,18 @@ func (l *Launcher) waitForSocketReadyWithin(timeout time.Duration) error {
 	return l.waitForReady(readyCtx, l.SocketPath)
 }
 
-func isRecoverableLockOwnerTerminationError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, lifecycle.ErrLockOwnerPermissionDenied) ||
-		errors.Is(err, lifecycle.ErrLockOwnerTerminationTimeout) ||
-		errors.Is(err, syscall.EPERM) ||
-		errors.Is(err, syscall.EACCES) ||
-		errors.Is(err, os.ErrPermission) {
-		return true
-	}
-	msg := strings.ToLower(strings.TrimSpace(err.Error()))
-	return strings.Contains(msg, "lock owner permission denied") ||
-		strings.Contains(msg, "operation not permitted") ||
-		strings.Contains(msg, "permission denied")
-}
-
 // Stop attempts to stop existing lock-owner process.
 func (l *Launcher) Stop(ctx context.Context) error {
 	var releaseLifecycleLock func()
-	if l.ownsCanonicalScopedRuntime() {
+	if l.ownsCanonicalRuntime() {
 		var acquired bool
 		var err error
-		releaseLifecycleLock, acquired, err = l.acquireStartLock(ctx)
+		releaseLifecycleLock, acquired, err = l.acquireLifecycleLock(ctx, false)
 		if err != nil {
-			return fmt.Errorf("acquire scoped daemon lifecycle lock for stop: %w", err)
+			return fmt.Errorf("acquire daemon lifecycle lock for stop: %w", err)
 		}
 		if !acquired {
-			return errors.New("acquire scoped daemon lifecycle lock for stop: lock bypassed unexpectedly")
+			return errors.New("acquire daemon lifecycle lock for stop: lock bypassed unexpectedly")
 		}
 		defer releaseLifecycleLock()
 	}
@@ -420,22 +408,17 @@ func (l *Launcher) Stop(ctx context.Context) error {
 	// deferred telemetry flush completes, so lock disappearance is not an exit
 	// signal. The OS start token distinguishes the exact process from later PID
 	// reuse.
-	var owner processIdentity
-	ownerPID, ownerRecorded := l.readLockedPID()
-	if l.ownsCanonicalScopedRuntime() {
+	_, ownerRecorded := l.readLockedPID()
+	if l.ownsCanonicalRuntime() {
 		if _, err := os.Lstat(l.SocketPath); err == nil && !ownerRecorded {
-			return errors.New("missing daemon lock owner identity for live canonical scoped socket")
+			return errors.New("missing daemon lock owner identity for live canonical runtime socket")
 		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("inspect canonical scoped daemon socket before stop: %w", err)
+			return fmt.Errorf("inspect canonical daemon socket before stop: %w", err)
 		}
 	}
-	ownerPresent := false
-	if ownerRecorded && ownerPID != os.Getpid() {
-		var err error
-		owner, ownerPresent, err = captureProcessIdentity(ownerPID)
-		if err != nil {
-			return fmt.Errorf("capture daemon lock owner identity: %w", err)
-		}
+	owner, ownerPresent, err := l.captureLockOwnerIdentity()
+	if err != nil {
+		return fmt.Errorf("capture daemon lock owner identity: %w", err)
 	}
 	stopped := false
 	if strings.TrimSpace(l.SocketPath) != "" {
@@ -460,17 +443,7 @@ func (l *Launcher) Stop(ctx context.Context) error {
 		}
 	}
 	if ownerPresent {
-		waitCtx := ctx
-		if waitCtx == nil {
-			waitCtx = context.Background()
-		}
-		timeout := l.processExitTimeout
-		if timeout <= 0 {
-			timeout = 10 * time.Second
-		}
-		waitCtx, cancel := context.WithTimeout(waitCtx, timeout)
-		defer cancel()
-		if err := l.waitForProcessExit(waitCtx, owner); err != nil {
+		if err := l.waitForCapturedOwnerExit(ctx, owner, "stop"); err != nil {
 			return err
 		}
 	}
@@ -576,6 +549,17 @@ func (l *Launcher) ownsCanonicalScopedRuntime() bool {
 		filepath.Clean(l.LockPath) == filepath.Clean(config.ScopedDaemonLockPath(l.RepoDir))
 }
 
+func (l *Launcher) ownsCanonicalRuntime() bool {
+	if l == nil {
+		return false
+	}
+	if l.ownsCanonicalScopedRuntime() {
+		return true
+	}
+	return filepath.Clean(l.SocketPath) == filepath.Clean(config.GlobalDaemonSocketPath()) &&
+		filepath.Clean(l.LockPath) == filepath.Clean(config.GlobalDaemonLockPath())
+}
+
 func (l *Launcher) scopedLifecycleLockPath() string {
 	if l != nil && config.UseScopedDaemonRuntimeFor(l.RepoDir) {
 		runtimeDir := config.ScopedDaemonRuntimeDir(l.RepoDir)
@@ -586,16 +570,55 @@ func (l *Launcher) scopedLifecycleLockPath() string {
 
 // Replace attempts to stop an existing daemon process, then starts daemon.
 func (l *Launcher) Replace(ctx context.Context) error {
+	// Observe the caller-visible predecessor before queueing. A concurrent
+	// Replace that wins the lifecycle lock may replace this exact incarnation;
+	// after we acquire the lock, that identity change lets us coalesce onto its
+	// ready successor instead of immediately replacing the successor again.
+	observedOwner, observedOwnerPresent, err := l.captureLockOwnerIdentity()
+	if err != nil {
+		return fmt.Errorf("capture daemon predecessor before replace: %w", err)
+	}
+	if l.beforeReplaceLock != nil {
+		l.beforeReplaceLock()
+	}
+	releaseLifecycleLock, acquired, err := l.acquireLifecycleLock(ctx, false)
+	if err != nil {
+		return fmt.Errorf("acquire daemon lifecycle lock for replace: %w", err)
+	}
+	if !acquired {
+		return errors.New("acquire daemon lifecycle lock for replace: lock bypassed unexpectedly")
+	}
+	defer releaseLifecycleLock()
+
+	owner, ownerPresent, err := l.captureLockOwnerIdentity()
+	if err != nil {
+		return fmt.Errorf("capture daemon predecessor for replace: %w", err)
+	}
+	if observedOwnerPresent && !sameProcessIdentity(observedOwner, observedOwnerPresent, owner, ownerPresent) {
+		if l.waitForSocketReadyWithin(300*time.Millisecond) == nil {
+			return nil
+		}
+	}
+	if !ownerPresent && l.ownsCanonicalRuntime() && l.waitForSocketReadyWithin(300*time.Millisecond) == nil {
+		return errors.New("missing daemon lock owner identity for live canonical runtime during replace")
+	}
+
+	daemonCmd, err := l.resolveCommand()
+	if err != nil {
+		return err
+	}
 	if strings.TrimSpace(l.SocketPath) != "" {
 		reason := strings.TrimSpace(l.replaceReason)
 		if reason == "" {
 			reason = "compatibility-replace"
 		}
 		if err := l.requestGracefulShutdown(ctx, reason); err == nil {
-			if err := l.waitForSocketUnavailable(ctx, 2*time.Second); err != nil {
-				return fmt.Errorf("wait for daemon socket shutdown before replace: %w", err)
+			if ownerPresent {
+				if err := l.waitForCapturedOwnerExit(ctx, owner, "replace"); err != nil {
+					return err
+				}
 			}
-			return l.Start(ctx)
+			return l.startWithLifecycleLock(ctx, daemonCmd)
 		} else if l.Logger != nil {
 			l.Logger.Warn("graceful daemon socket shutdown failed before replace; falling back to lock-owner termination",
 				"socket_path", l.SocketPath,
@@ -612,7 +635,47 @@ func (l *Launcher) Replace(ctx context.Context) error {
 	if err := terminate(l.LockPath); err != nil {
 		return fmt.Errorf("terminate daemon lock owner before replace: %w", err)
 	}
-	return l.Start(ctx)
+	if ownerPresent {
+		if err := l.waitForCapturedOwnerExit(ctx, owner, "replace"); err != nil {
+			return err
+		}
+	}
+	return l.startWithLifecycleLock(ctx, daemonCmd)
+}
+
+func (l *Launcher) captureLockOwnerIdentity() (processIdentity, bool, error) {
+	ownerPID, ownerRecorded := l.readLockedPID()
+	if !ownerRecorded || ownerPID == os.Getpid() {
+		return processIdentity{}, false, nil
+	}
+	return captureProcessIdentity(ownerPID)
+}
+
+func sameProcessIdentity(left processIdentity, leftPresent bool, right processIdentity, rightPresent bool) bool {
+	if leftPresent != rightPresent {
+		return false
+	}
+	if !leftPresent {
+		return true
+	}
+	return left.pid == right.pid && left.startToken == right.startToken
+}
+
+func (l *Launcher) waitForCapturedOwnerExit(ctx context.Context, owner processIdentity, action string) error {
+	waitCtx := ctx
+	if waitCtx == nil {
+		waitCtx = context.Background()
+	}
+	timeout := l.processExitTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	waitCtx, cancel := context.WithTimeout(waitCtx, timeout)
+	defer cancel()
+	if err := l.waitForProcessExit(waitCtx, owner); err != nil {
+		return fmt.Errorf("prove daemon predecessor exited before %s: %w", action, err)
+	}
+	return nil
 }
 
 func (l *Launcher) requestGracefulShutdown(ctx context.Context, reason string) error {
@@ -624,31 +687,6 @@ func (l *Launcher) requestGracefulShutdown(ctx context.Context, reason string) e
 		shutdown = gracefulShutdownViaSocketWithReason
 	}
 	return shutdown(ctx, l.SocketPath, reason)
-}
-
-func (l *Launcher) waitForSocketUnavailable(ctx context.Context, timeout time.Duration) error {
-	if l.waitForReady == nil {
-		return nil
-	}
-	deadlineCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	for {
-		readyCtx, readyCancel := context.WithTimeout(deadlineCtx, 100*time.Millisecond)
-		err := l.waitForReady(readyCtx, l.SocketPath)
-		readyCancel()
-		if err != nil {
-			return nil
-		}
-		if deadlineCtx.Err() != nil {
-			return deadlineCtx.Err()
-		}
-		sleep := l.sleepFn
-		if sleep == nil {
-			sleep = time.Sleep
-		}
-		sleep(50 * time.Millisecond)
-	}
 }
 
 func (l *Launcher) resolveCommand() (daemonCommand, error) {
@@ -789,6 +827,10 @@ func openDaemonLog(path string) (io.WriteCloser, error) {
 }
 
 func (l *Launcher) acquireStartLock(ctx context.Context) (func(), bool, error) {
+	return l.acquireLifecycleLock(ctx, true)
+}
+
+func (l *Launcher) acquireLifecycleLock(ctx context.Context, allowReadyBypass bool) (func(), bool, error) {
 	startLockPath := l.scopedLifecycleLockPath()
 	if err := os.MkdirAll(filepath.Dir(startLockPath), 0o755); err != nil {
 		return nil, false, fmt.Errorf("create start lock dir: %w", err)
@@ -810,7 +852,7 @@ func (l *Launcher) acquireStartLock(ctx context.Context) (func(), bool, error) {
 		// Another client currently owns startup. If daemon socket becomes ready
 		// while we are queued on the lock, return early rather than timing out
 		// waiting for lock ownership we no longer need.
-		if !l.ownsCanonicalScopedRuntime() && l.waitForSocketReadyWithin(100*time.Millisecond) == nil {
+		if allowReadyBypass && !l.ownsCanonicalRuntime() && l.waitForSocketReadyWithin(100*time.Millisecond) == nil {
 			_ = f.Close()
 			return func() {}, false, nil
 		}
