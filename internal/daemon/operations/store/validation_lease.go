@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"modernc.org/sqlite"
 )
 
 func (s *SQLiteStore) AcquireValidation(ctx context.Context, request domain.ValidationAcquire, now time.Time) (domain.ValidationRequest, error) {
@@ -289,25 +290,90 @@ func (s *SQLiteStore) transitionValidation(ctx context.Context, requestID, lease
 }
 
 func (s *SQLiteStore) ValidationSnapshot(ctx context.Context, projectID string, now time.Time, ttl time.Duration) (domain.ValidationSnapshot, error) {
+	now = now.UTC()
+	snapshot, err := s.readValidationSnapshot(ctx, projectID, now)
+	if err != nil {
+		if isValidationSQLiteBusy(err) {
+			return unavailableValidationSnapshot(now, err), nil
+		}
+		return domain.ValidationSnapshot{}, err
+	}
+	if snapshot.Freshness == domain.ValidationSnapshotFresh {
+		return snapshot, nil
+	}
+	staleSnapshot := snapshot
+
 	db, err := s.dbHandle()
 	if err != nil {
 		return domain.ValidationSnapshot{}, err
 	}
-	now = now.UTC()
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
+		if isValidationSQLiteBusy(err) {
+			return snapshot, nil
+		}
 		return domain.ValidationSnapshot{}, fmt.Errorf("begin validation snapshot: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := expireAndReconcileValidationTx(ctx, tx, projectID, now, ttl); err != nil {
+		if isValidationSQLiteBusy(err) {
+			return snapshot, nil
+		}
 		return domain.ValidationSnapshot{}, err
 	}
-	rows, err := tx.QueryContext(ctx, validationSelect+` WHERE project_id=? AND (state IN ('active','queued') OR sequence IN (SELECT sequence FROM daemon_validation_requests WHERE project_id=? AND state NOT IN ('active','queued') ORDER BY sequence DESC LIMIT 20)) ORDER BY sequence`, projectID, projectID)
+	snapshot, err = queryValidationSnapshot(ctx, tx, projectID, now)
+	if err != nil {
+		if isValidationSQLiteBusy(err) {
+			return staleSnapshot, nil
+		}
+		return domain.ValidationSnapshot{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		if isValidationSQLiteBusy(err) {
+			return staleSnapshot, nil
+		}
+		return domain.ValidationSnapshot{}, fmt.Errorf("commit validation snapshot reconciliation: %w", err)
+	}
+	snapshot.Freshness = domain.ValidationSnapshotFresh
+	snapshot.DegradedReason = ""
+	return snapshot, nil
+}
+
+type validationSnapshotQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (s *SQLiteStore) readValidationSnapshot(ctx context.Context, projectID string, now time.Time) (domain.ValidationSnapshot, error) {
+	db, err := s.validationReadDBHandle()
+	if err != nil {
+		return domain.ValidationSnapshot{}, err
+	}
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return domain.ValidationSnapshot{}, fmt.Errorf("begin validation projection read: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	snapshot, err := queryValidationSnapshot(ctx, tx, projectID, now)
+	if err != nil {
+		return domain.ValidationSnapshot{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.ValidationSnapshot{}, fmt.Errorf("commit validation projection read: %w", err)
+	}
+	return snapshot, nil
+}
+
+func queryValidationSnapshot(ctx context.Context, queryer validationSnapshotQueryer, projectID string, now time.Time) (domain.ValidationSnapshot, error) {
+	rows, err := queryer.QueryContext(ctx, validationSelect+` WHERE project_id=? AND (state IN ('active','queued') OR sequence IN (SELECT sequence FROM daemon_validation_requests WHERE project_id=? AND state NOT IN ('active','queued') ORDER BY sequence DESC LIMIT 20)) ORDER BY sequence`, projectID, projectID)
 	if err != nil {
 		return domain.ValidationSnapshot{}, fmt.Errorf("list validation requests: %w", err)
 	}
 	defer rows.Close()
-	snapshot := domain.ValidationSnapshot{Schema: "azedarach.validation_lease_status.v2", Active: []domain.ValidationRequest{}, Queued: []domain.ValidationRequest{}, Recent: []domain.ValidationRequest{}}
+	snapshot := domain.ValidationSnapshot{
+		Schema: "azedarach.validation_lease_status.v2", Active: []domain.ValidationRequest{}, Queued: []domain.ValidationRequest{}, Recent: []domain.ValidationRequest{},
+		Freshness: domain.ValidationSnapshotFresh, ObservedAt: now,
+	}
 	for rows.Next() {
 		request, scanErr := scanValidationRequest(rows)
 		if scanErr != nil {
@@ -321,6 +387,10 @@ func (s *SQLiteStore) ValidationSnapshot(ctx context.Context, projectID string, 
 		default:
 			snapshot.Recent = append(snapshot.Recent, request)
 		}
+		if (request.State == domain.ValidationRequestActive || request.State == domain.ValidationRequestQueued) && request.ExpiresAt != nil && !request.ExpiresAt.After(now) {
+			snapshot.Freshness = domain.ValidationSnapshotStale
+			snapshot.DegradedReason = "validation capacity has expired leases pending reconciliation"
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return domain.ValidationSnapshot{}, err
@@ -328,13 +398,22 @@ func (s *SQLiteStore) ValidationSnapshot(ctx context.Context, projectID string, 
 	if err := rows.Close(); err != nil {
 		return domain.ValidationSnapshot{}, fmt.Errorf("close validation snapshot rows: %w", err)
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE((SELECT revision FROM daemon_validation_state WHERE project_id=?),0)`, projectID).Scan(&snapshot.Revision); err != nil {
+	if err := queryer.QueryRowContext(ctx, `SELECT COALESCE((SELECT revision FROM daemon_validation_state WHERE project_id=?),0)`, projectID).Scan(&snapshot.Revision); err != nil {
 		return domain.ValidationSnapshot{}, fmt.Errorf("read validation snapshot revision: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
-		return domain.ValidationSnapshot{}, fmt.Errorf("commit validation snapshot reconciliation: %w", err)
-	}
 	return snapshot, nil
+}
+
+func unavailableValidationSnapshot(now time.Time, err error) domain.ValidationSnapshot {
+	return domain.ValidationSnapshot{
+		Schema: "azedarach.validation_lease_status.v2", Active: []domain.ValidationRequest{}, Queued: []domain.ValidationRequest{}, Recent: []domain.ValidationRequest{},
+		Freshness: domain.ValidationSnapshotUnavailable, ObservedAt: now, DegradedReason: "validation capacity projection unavailable: " + err.Error(),
+	}
+}
+
+func isValidationSQLiteBusy(err error) bool {
+	var sqliteErr *sqlite.Error
+	return errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == 5
 }
 
 func (s *SQLiteStore) LatestReviewValidation(ctx context.Context, projectID, issueID string, now time.Time, ttl time.Duration) (*domain.ValidationRequest, error) {
@@ -364,6 +443,18 @@ func (s *SQLiteStore) LatestReviewValidation(ctx context.Context, projectID, iss
 		return nil, fmt.Errorf("commit latest aggregate validation reconciliation: %w", err)
 	}
 	return &request, nil
+}
+
+func (s *SQLiteStore) ValidationRequest(ctx context.Context, projectID, requestID string) (domain.ValidationRequest, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return domain.ValidationRequest{}, err
+	}
+	request, err := scanValidationRequest(db.QueryRowContext(ctx, validationSelect+` WHERE project_id=? AND request_id=?`, strings.TrimSpace(projectID), strings.TrimSpace(requestID)))
+	if err != nil {
+		return domain.ValidationRequest{}, fmt.Errorf("resolve validation request %s: %w", requestID, err)
+	}
+	return request, nil
 }
 
 // LatestAggregateValidation remains as a compatibility name for callers that

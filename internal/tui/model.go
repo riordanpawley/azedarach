@@ -114,6 +114,13 @@ type drillDownContext struct {
 	parentName string
 }
 
+type drillDownRootBoardState struct {
+	view       domain.BoardView
+	columns    []domain.BoardViewColumnSnapshot
+	ordered    []domain.Task
+	projection domain.BoardViewProjection
+}
+
 type pendingTaskStatus struct {
 	previousStatus domain.Status
 	targetStatus   domain.Status
@@ -235,6 +242,9 @@ type Model struct {
 	selectedBoardViewID             string
 	boardViewScopeGeneration        uint64
 	projectOrchestrator             *projectOrchestratorSnapshot
+	projectOrchestratorRefreshSeq   uint64
+	projectOrchestratorRefreshBusy  bool
+	projectOrchestratorRefreshAgain bool
 	projectOrchestratorActionRunner projectOrchestratorActionRunner
 	jumpMode                        *overlay.JumpMode
 	jumpTargets                     []string
@@ -246,6 +256,7 @@ type Model struct {
 	drillDownParentID               string
 	drillDownParentName             string
 	drillDownTrail                  []drillDownContext
+	drillDownRootBoard              *drillDownRootBoardState
 	pendingCreatedTaskID            string
 	pendingCreatedWorkspaceTaskID   string
 	pendingUIOpenTaskID             string
@@ -613,7 +624,7 @@ func (m Model) enterDrillDownByID(taskID string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	children := m.getTaskChildren(task.ID.String())
-	if len(children) == 0 {
+	if len(children) == 0 && !m.boardProjectionHasDirectChildren(task.ID.String()) {
 		m.addToast(Toast{
 			Level:   ToastInfo,
 			Message: "No children to drill into (use Space for details/actions)",
@@ -624,7 +635,9 @@ func (m Model) enterDrillDownByID(taskID string) (tea.Model, tea.Cmd) {
 	m.overlayStack.Pop()
 	m.enterDrillDown(task.ID.String(), task.Title)
 	columns := m.buildColumns()
-	m.nav.JumpToTaskByID(columns, children[0].ID.String())
+	if len(children) > 0 {
+		m.nav.JumpToTaskByID(columns, children[0].ID.String())
+	}
 	m.ensureCursorVisible(columns)
 	issueIDs := make([]string, 0, len(children)+1)
 	issueIDs = append(issueIDs, task.ID.String())
@@ -686,6 +699,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.nav.JumpToTaskByID(columns, exitedParentID)
 			}
 			m.ensureCursorVisible(columns)
+			if !m.isDrillDownActive() && !m.scope.IsGlobal() {
+				m.boardRefreshing = true
+				return m, m.scheduleIssuesRefreshCmd()
+			}
 			return m, nil
 		}
 		if m.editor.IsSelect() {
@@ -840,7 +857,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if task == nil {
 			return m, nil
 		}
-		m.beginMutationFeedback(fmt.Sprintf("Attach queued for %s", task.ID))
+		m.beginMutationFeedback(fmt.Sprintf("Attaching to %s", task.ID))
 		return m, m.attachSessionCmd(task.ID.String())
 
 	case keybinds.ActionCreateTask: // Create task
@@ -1311,6 +1328,7 @@ type boardViewMutatedMsg struct {
 
 type projectOrchestratorLoadedMsg struct {
 	project projectOrchestratorSnapshot
+	seq     uint64
 	err     error
 }
 
@@ -2517,6 +2535,7 @@ func (m *Model) rebindProjectContext(project config.Project, projectConfig *conf
 	m.repoDir = project.Path
 	m.refreshDaemonProjectRouteID()
 	m.rebuildProjectScopedServices()
+	m.reconcileProjectOrchestratorRoute()
 	if m.daemonClient != nil {
 		m.daemonClient.WithProjectRouteID(m.daemonProjectRouteIDValue())
 	}
@@ -6657,6 +6676,15 @@ func (m Model) getTaskChildren(parentID string) []domain.Task {
 		}
 	}
 	return children
+}
+
+func (m Model) boardProjectionHasDirectChildren(parentID string) bool {
+	for _, progress := range m.boardProjection.ChildProgress {
+		if progress.Total > 0 && naming.IssueIDsEqual(progress.ParentID.String(), parentID) {
+			return true
+		}
+	}
+	return false
 }
 
 type taskCreatedResultMsg struct {

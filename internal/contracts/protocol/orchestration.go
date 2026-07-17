@@ -57,13 +57,13 @@ type OrchestrationSnapshot struct {
 	Lifecycle              domain.OrchestratorLifecycle              `json:"lifecycle,omitempty"`
 	Scope                  domain.OrchestrationScope                 `json:"scope"`
 	Revision               uint64                                    `json:"revision"`
-	ProjectionRevision     uint64                       `json:"projection_revision,omitempty"`
-	ProjectionAuthority    string                       `json:"projection_authority,omitempty"`
-	Source                 MaterializedSnapshotMetadata `json:"source"`
+	ProjectionRevision     uint64                                    `json:"projection_revision,omitempty"`
+	ProjectionAuthority    string                                    `json:"projection_authority,omitempty"`
+	Source                 MaterializedSnapshotMetadata              `json:"source"`
 	GeneratedAt            time.Time                                 `json:"generated_at"`
 	Roots                  []string                                  `json:"roots,omitempty"`
 	Capacity               OrchestrationCapacity                     `json:"capacity"`
-	ValidationCapacity     *domain.ValidationSnapshot   `json:"validation_capacity,omitempty"`
+	ValidationCapacity     *domain.ValidationSnapshot                `json:"validation_capacity,omitempty"`
 	Runnable               []string                                  `json:"runnable"`
 	NestedRoots            []OrchestrationNestedRoot                 `json:"nested_roots,omitempty"`
 	Pending                []OrchestrationPending                    `json:"pending,omitempty"`
@@ -119,6 +119,10 @@ type OrchestrationReview struct {
 	WorktreePath       string                         `json:"worktree_path,omitempty"`
 	Branch             string                         `json:"branch,omitempty"`
 	BaseBranch         string                         `json:"base_branch,omitempty"`
+	DiffBaseRevision   string                         `json:"diff_base_revision,omitempty"`
+	HeadRevision       string                         `json:"head_revision,omitempty"`
+	DiffScope          string                         `json:"diff_scope,omitempty"`
+	DiffRange          string                         `json:"diff_range,omitempty"`
 	DiffStat           string                         `json:"diff_stat,omitempty"`
 	ExecutionOwner     string                         `json:"execution_owner,omitempty"`
 	OrchestrationOwner string                         `json:"orchestration_owner,omitempty"`

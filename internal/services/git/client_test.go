@@ -1084,6 +1084,46 @@ func TestRealProcessProfileMergeCleanlyTransactionalUsesTargetGateAuthority(t *t
 	}
 }
 
+func TestRealProcessProfileMergeCleanlyTransactionalCompositionSkipsPublicationGate(t *testing.T) {
+	repo := t.TempDir()
+	runClientTestGit(t, repo, "init", "-q", "-b", "main")
+	runClientTestGit(t, repo, "config", "user.email", "test@example.com")
+	runClientTestGit(t, repo, "config", "user.name", "Test User")
+	requireDir := filepath.Join(repo, "scripts")
+	if err := os.MkdirAll(requireDir, 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	gateMarker := filepath.Join(t.TempDir(), "gate-ran")
+	gate := "#!/bin/sh\nprintf ran >\"$AZEDARACH_TEST_GATE_MARKER\"\nexit 91\n"
+	if err := os.WriteFile(filepath.Join(requireDir, "git-merge-rebase-gate.sh"), []byte(gate), 0o755); err != nil {
+		t.Fatalf("write publication gate: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	runClientTestGit(t, repo, "add", ".")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "base")
+	runClientTestGit(t, repo, "checkout", "-q", "-b", "child")
+	if err := os.WriteFile(filepath.Join(repo, "child.txt"), []byte("child\n"), 0o644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+	runClientTestGit(t, repo, "add", "child.txt")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "child")
+	runClientTestGit(t, repo, "checkout", "-q", "main")
+	t.Setenv("AZEDARACH_TEST_GATE_MARKER", gateMarker)
+
+	result, err := NewClient(NewExecRunner(repo), slog.Default()).MergeCleanlyTransactionalComposition(context.Background(), repo, "child")
+	if err != nil || result == nil || !result.Success {
+		t.Fatalf("MergeCleanlyTransactionalComposition() = (%+v, %v), want clean composition", result, err)
+	}
+	if len(result.ValidationAttempts) != 0 {
+		t.Fatalf("composition validation attempts = %+v, want none", result.ValidationAttempts)
+	}
+	if _, err := os.Stat(gateMarker); !os.IsNotExist(err) {
+		t.Fatalf("non-base composition invoked publication gate: %v", err)
+	}
+}
+
 func TestRealProcessProfileMergeCleanlyTransactionalRunsScratchHooksAndKeepsTargetCleanWhenHookFails(t *testing.T) {
 	repo := initDivergedRepo(t)
 	originalHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
@@ -3487,6 +3527,26 @@ func TestMergeBase(t *testing.T) {
 	}
 }
 
+func TestMergeBaseForRevisionPinsCandidateHead(t *testing.T) {
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "main" && args[2] == "candidate-123" {
+				return "base-456\n", nil
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	mergeBase, err := client.MergeBaseForRevision(context.Background(), "/fake/worktree", "main", "candidate-123")
+	if err != nil {
+		t.Fatalf("MergeBaseForRevision() error = %v", err)
+	}
+	if mergeBase != "base-456" {
+		t.Fatalf("MergeBaseForRevision() = %q, want base-456", mergeBase)
+	}
+}
+
 func TestChangedFiles(t *testing.T) {
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {
@@ -3559,8 +3619,8 @@ func TestChangedFilesBetweenRefTreesDoesNotUseMergeBase(t *testing.T) {
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {
 			gotArgs = append([]string(nil), args...)
-			if len(args) >= 5 && args[0] == "diff" && args[1] == "--name-only" && args[2] == "origin/preview" && args[3] == "feature" {
-				return "main.go\ninternal/app.go\n", nil
+			if len(args) >= 6 && args[0] == "diff" && args[1] == "--name-only" && args[2] == "-z" && args[3] == "origin/preview" && args[4] == "feature" {
+				return "portable/雪\nline.txt\x00 leading-space.txt\x00trailing-space.txt \x00", nil
 			}
 			return "", fmt.Errorf("unexpected command: %v", args)
 		},
@@ -3571,12 +3631,20 @@ func TestChangedFilesBetweenRefTreesDoesNotUseMergeBase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ChangedFilesBetweenRefTrees() error = %v", err)
 	}
-	if !reflect.DeepEqual(files, []string{"main.go", "internal/app.go"}) {
+	if !reflect.DeepEqual(files, []string{"portable/雪\nline.txt", " leading-space.txt", "trailing-space.txt "}) {
 		t.Fatalf("ChangedFilesBetweenRefTrees() = %v", files)
 	}
 	joined := strings.Join(gotArgs, " ")
 	if strings.Contains(joined, "...") || strings.Contains(joined, "merge-base") {
 		t.Fatalf("ChangedFilesBetweenRefTrees() used ancestry comparison: %v", gotArgs)
+	}
+}
+
+func TestParseNULTerminatedGitPathsRejectsAmbiguousOutput(t *testing.T) {
+	for _, output := range []string{"newline-delimited\n", "path\x00\x00"} {
+		if paths, err := parseNULTerminatedGitPaths(output); err == nil {
+			t.Fatalf("parseNULTerminatedGitPaths(%q) = %q, want error", output, paths)
+		}
 	}
 }
 

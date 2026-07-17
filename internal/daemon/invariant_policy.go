@@ -57,6 +57,7 @@ const (
 	daemonInvariantProjectionDeltaStream        daemonInvariantID = "projection.delta_stream"
 	daemonInvariantTmuxObservation              daemonInvariantID = "external.tmux_observation"
 	daemonInvariantValidationCapacity           daemonInvariantID = "validation.machine_capacity"
+	daemonInvariantPublicationEvidence          daemonInvariantID = "validation.publication_evidence"
 )
 
 var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
@@ -99,6 +100,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantOrchestrationClaimStart:      daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationLoop:            daemonInvariantSourceProjection,
 	daemonInvariantValidationCapacity:           daemonInvariantSourceProjection,
+	daemonInvariantPublicationEvidence:          daemonInvariantSourceProjection,
 	daemonInvariantManagedAgentIdentity:         daemonInvariantSourceHybrid,
 	daemonInvariantProjectionDeltaStream:        daemonInvariantSourceProjection,
 	daemonInvariantTmuxObservation:              daemonInvariantSourceTmux,

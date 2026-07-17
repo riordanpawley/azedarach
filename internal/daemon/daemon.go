@@ -178,6 +178,9 @@ type Daemon struct {
 	worktreeGitProbeThrottle             *reconcileThrottle
 	queueMu                              sync.Mutex
 	operationRuntime                     *operationRuntime
+	publicationEvidenceMu                sync.RWMutex
+	publicationEvidenceCache             map[string]domain.PublicationEvidenceSnapshot
+	publicationEvidenceAfterRefresh      func(domain.PublicationEvidenceSnapshot)
 	noticeService                        *daemonnotices.Service
 	runtimeProjectionCoalescer           *runtimeProjectionEventCoalescer
 	scheduledScripts                     *scheduledScriptManager
@@ -210,6 +213,7 @@ type Daemon struct {
 	orchestrationSnapshotLoadMu          sync.Mutex
 	orchestrationSnapshotLoads           map[string]*orchestrationSnapshotLoad
 	orchestrationSnapshotBuild           orchestrationSnapshotBuilder
+	snapshotAdmissionContext             func(context.Context) (context.Context, context.CancelFunc)
 	orchestrationProjectionExported      func()
 	taskGraphOperationList               func(context.Context, daemonops.Query) ([]daemonops.Record, error)
 	taskGraphUnresolvedInteractionIDs    func(context.Context, string) (map[string]struct{}, error)
@@ -385,6 +389,7 @@ func New(cfg Config) *Daemon {
 		taskGraphRuntimeValidations:        map[string]taskGraphRuntimeValidationEntry{},
 		taskGraphRuntimeValidationLoads:    map[string]*taskGraphRuntimeValidationLoad{},
 		orchestrationSnapshotCache:         map[string]orchestrationSnapshotCacheEntry{},
+		publicationEvidenceCache:           map[string]domain.PublicationEvidenceSnapshot{},
 		materializers:                      map[string]*projectReadMaterializer{},
 		revision:                           map[string]uint64{},
 		userProjectionConsumers:            map[string]*userProjectionConsumerHandle{},
@@ -769,6 +774,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	projectID := d.projectID(req.Meta)
 	req.Meta.ProjectID = naming.ProjectID(projectID)
 	ctx = withDaemonProjectIDContext(ctx, projectID)
+	ctx = issues.ContextWithMutationOperation(ctx, "command."+req.Command)
 	ctx, endCommandSpan := latencytrace.StartSpan(ctx, "daemon", "command", "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
 	d.recordWatchClientRequest(projectID, req, startedAt.UTC())
 	defer func() {
@@ -873,7 +879,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleHookLogList(ctx, req)
 	case protocol.CommandRuntimeSignalIngest:
 		return d.handleRuntimeSignalIngest(ctx, req)
-	case protocol.CommandValidationAcquire, protocol.CommandValidationHeartbeat, protocol.CommandValidationNested, protocol.CommandValidationFinish, protocol.CommandValidationStatus:
+	case protocol.CommandValidationAcquire, protocol.CommandValidationHeartbeat, protocol.CommandValidationNested, protocol.CommandValidationFinish, protocol.CommandValidationStatus,
+		protocol.CommandPublicationEvidenceRecord, protocol.CommandPublicationEvidenceStatus, protocol.CommandPublicationEvidenceEvaluate:
 		return d.handleValidationCommand(ctx, req)
 	case protocol.CommandUIOpenTaskWorkspace, protocol.CommandUIOpenTaskDrillDown:
 		return d.handleUIIssueCommand(ctx, req)

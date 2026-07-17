@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -26,6 +27,10 @@ import (
 	"github.com/riordanpawley/azedarach/internal/testutil/sqlitetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 func TestClientSQLiteBusyPolicyDefaultsAndOverrides(t *testing.T) {
@@ -5536,6 +5541,73 @@ func TestClient_AddDependencyWithRuntimeWaitsForIssueMutationLock(t *testing.T) 
 		require.NoError(t, addErr)
 	case <-time.After(3 * time.Second):
 		t.Fatal("AddDependencyWithRuntime did not complete after releasing mutation lock")
+	}
+}
+
+func TestClient_MutationLockWaitIsCancelableAndAttributed(t *testing.T) {
+	t.Setenv("AZEDARACH_OTEL", "true")
+	recorder := tracetest.NewSpanRecorder()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
+	t.Cleanup(func() { otel.SetTracerProvider(oteltrace.NewNoopTracerProvider()) })
+
+	client := newTestClient(t)
+	holderEntered := make(chan struct{})
+	releaseHolder := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderCtx := ContextWithMutationOperation(context.Background(), "background.reconcile")
+		holderDone <- client.WithMutationLock(holderCtx, func(context.Context) error {
+			close(holderEntered)
+			<-releaseHolder
+			return nil
+		})
+	}()
+	<-holderEntered
+
+	waitObserved := make(chan struct{})
+	waitCtx, cancelWait := context.WithCancel(context.Background())
+	waitCtx = ContextWithMutationOperation(waitCtx, "runtime.signal.ingest")
+	waitCtx = WithMutationLockWaitHookForTest(waitCtx, func(waiterOperation, holderOperation string) {
+		if waiterOperation != "runtime.signal.ingest" || holderOperation != "background.reconcile" {
+			t.Errorf("mutation attribution waiter=%q holder=%q", waiterOperation, holderOperation)
+		}
+		close(waitObserved)
+	})
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- client.WithMutationLock(waitCtx, func(context.Context) error {
+			t.Error("canceled mutation waiter acquired the lock")
+			return nil
+		})
+	}()
+	<-waitObserved
+	cancelWait()
+	if err := <-waitDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled mutation wait error = %v, want context.Canceled", err)
+	}
+
+	close(releaseHolder)
+	require.NoError(t, <-holderDone)
+
+	foundAttributedWait := false
+	seenAttribution := make([]map[string]string, 0)
+	for _, span := range recorder.Ended() {
+		if span.Name() != "dependency.issue_store.mutation_lock" {
+			continue
+		}
+		attrs := map[string]string{}
+		for _, attr := range span.Attributes() {
+			if attr.Value.Type().String() == "STRING" {
+				attrs[string(attr.Key)] = attr.Value.AsString()
+			}
+		}
+		seenAttribution = append(seenAttribution, attrs)
+		if attrs["mutation.waiter_operation"] == "runtime.signal.ingest" && attrs["mutation.holder_operation"] == "background.reconcile" {
+			foundAttributedWait = true
+		}
+	}
+	if !foundAttributedWait {
+		t.Fatalf("mutation wait span did not attribute both waiter and holder operations: %+v", seenAttribution)
 	}
 }
 

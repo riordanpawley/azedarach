@@ -852,3 +852,16 @@ func TestDecisionLinksAccessorReturnsCopy(t *testing.T) {
 	again := panel.DecisionLinks()
 	assert.Equal(t, "relates", again[0].Relation, "DecisionLinks() must return a defensive copy")
 }
+
+func TestDetailPanelRendersPublicationEvidenceDiagnostic(t *testing.T) {
+	task := domain.Task{
+		ID: "az-44", Title: "Layer evidence", Status: domain.StatusInReview, Priority: domain.P1, Type: domain.TypeFeature,
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		PublicationEvidence: &domain.PublicationEvidenceDiagnostic{State: "partial", Availability: "available", Revision: 3, PatchReview: 1, ActivePath: 1, Invalidated: 1, Reasons: []domain.PublicationInvalidationReason{domain.PublicationInvalidPathOverlap}},
+	}
+	view := NewDetailPanel(task).View()
+	assert.Contains(t, view, "Publication Evidence")
+	assert.Contains(t, view, "partial")
+	assert.Contains(t, view, "patch=1 active-path=1 merge-result=0 invalidated=1")
+	assert.Contains(t, view, "path_overlap")
+}

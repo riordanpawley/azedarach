@@ -28,6 +28,7 @@ var orderedMigrations = []migration{
 	{id: "daemon_operations_0004_review_validation_assignment", path: "migrations/0004_review_validation_assignment.sql"},
 	{id: "daemon_operations_0005_validation_scope_purpose", path: "migrations/0005_validation_scope_purpose.sql"},
 	{id: "daemon_operations_0006_publication_validation_priority", path: "migrations/0006_publication_validation_priority.sql"},
+	{id: "daemon_operations_0007_layered_publication_evidence", path: "migrations/0007_layered_publication_evidence.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -37,6 +38,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "daemon_operations_0004_review_validation_assignment", Path: "migrations/0004_review_validation_assignment.sql", Checksum: "6f5d54a3f27937ae9adcdd6a0b3f9b79ddd2814f32635eb2c3e5ca051c3268ca"},
 	{ID: "daemon_operations_0005_validation_scope_purpose", Path: "migrations/0005_validation_scope_purpose.sql", Checksum: "6cb59febaf88ccc7948f5289cbdc040bfa041fbd639ea88eb77766dfff15a192"},
 	{ID: "daemon_operations_0006_publication_validation_priority", Path: "migrations/0006_publication_validation_priority.sql", Checksum: "bbbf9fd51c2d9289a295a6aeb7427d65d04d3d3a897cc995d2d91ea4577713fd"},
+	{ID: "daemon_operations_0007_layered_publication_evidence", Path: "migrations/0007_layered_publication_evidence.sql", Checksum: "8085a1cf4fef3028e18e3d43a338a7b441382cd05862433fa4e074dc89bc19df"},
 }
 
 const migrationArtifactAuthority sqlitemigration.Authority = "project.daemon_operations"
@@ -77,7 +79,52 @@ func runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifactAuthority, migrationArtifacts); err != nil {
 		return err
 	}
-	return validateValidationLeaseSchema(ctx, db)
+	if err := validateValidationLeaseSchema(ctx, db); err != nil {
+		return err
+	}
+	return validatePublicationEvidenceSchema(ctx, db)
+}
+
+func validatePublicationEvidenceSchema(ctx context.Context, db *sql.DB) error {
+	artifact, err := loadMigrationSQL("migrations/0007_layered_publication_evidence.sql")
+	if err != nil {
+		return fmt.Errorf("load canonical publication evidence schema: %w", err)
+	}
+	canonicalDB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		return fmt.Errorf("open canonical publication evidence schema: %w", err)
+	}
+	defer canonicalDB.Close()
+	canonicalDB.SetMaxOpenConns(1)
+	if _, err = canonicalDB.ExecContext(ctx, artifact); err != nil {
+		return fmt.Errorf("build canonical publication evidence schema: %w", err)
+	}
+	for _, object := range []struct{ typeName, name string }{
+		{"table", "daemon_publication_evidence"}, {"table", "daemon_publication_evidence_invalidations"}, {"table", "daemon_publication_evidence_state"},
+		{"index", "idx_daemon_publication_evidence_issue_layer"}, {"index", "idx_daemon_publication_evidence_invalidations"},
+		{"trigger", "daemon_publication_evidence_immutable_update"}, {"trigger", "daemon_publication_evidence_immutable_delete"},
+		{"trigger", "daemon_publication_invalidation_immutable_update"}, {"trigger", "daemon_publication_invalidation_immutable_delete"},
+		{"trigger", "daemon_publication_evidence_insert_revision"}, {"trigger", "daemon_publication_invalidation_insert_revision"},
+	} {
+		var expected, actual string
+		if err = canonicalDB.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type=? AND name=?`, object.typeName, object.name).Scan(&expected); err != nil {
+			return fmt.Errorf("read canonical publication evidence %s %s: %w", object.typeName, object.name, err)
+		}
+		if err = db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type=? AND name=?`, object.typeName, object.name).Scan(&actual); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("publication evidence schema drift: missing %s %s", object.typeName, object.name)
+			}
+			return fmt.Errorf("validate publication evidence %s %s: %w", object.typeName, object.name, err)
+		}
+		if normalizeSQLiteDefinition(actual) != normalizeSQLiteDefinition(expected) {
+			return fmt.Errorf("publication evidence schema drift: %s %s differs from immutable artifact", object.typeName, object.name)
+		}
+	}
+	return nil
+}
+
+func normalizeSQLiteDefinition(value string) string {
+	return strings.ToLower(strings.Join(strings.Fields(value), " "))
 }
 
 func validateValidationLeaseSchema(ctx context.Context, db *sql.DB) error {

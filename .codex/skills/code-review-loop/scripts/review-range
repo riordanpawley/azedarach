@@ -1,0 +1,71 @@
+#!/bin/sh
+set -eu
+
+repo=
+base_revision=
+head_revision=
+scope=
+checkpoint_head=
+checkpoint_base=
+checkpoint_scope=
+broader_invalidated=false
+
+require_value() {
+	if [ "$#" -lt 2 ]; then
+		echo "review-range: $1 requires a value" >&2
+		exit 2
+	fi
+}
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--repo) require_value "$@"; repo=$2; shift 2 ;;
+		--base-revision) require_value "$@"; base_revision=$2; shift 2 ;;
+		--head-revision) require_value "$@"; head_revision=$2; shift 2 ;;
+		--scope) require_value "$@"; scope=$2; shift 2 ;;
+		--checkpoint-head) require_value "$@"; checkpoint_head=$2; shift 2 ;;
+		--checkpoint-base) require_value "$@"; checkpoint_base=$2; shift 2 ;;
+		--checkpoint-scope) require_value "$@"; checkpoint_scope=$2; shift 2 ;;
+		--broader-invalidated) broader_invalidated=true; shift ;;
+		*) echo "review-range: unknown argument: $1" >&2; exit 2 ;;
+	esac
+done
+
+if [ -z "$repo" ] || [ -z "$base_revision" ] || [ -z "$head_revision" ] || [ -z "$scope" ]; then
+	echo "review-range: --repo, --base-revision, --head-revision, and --scope are required" >&2
+	exit 2
+fi
+
+full() {
+	printf 'mode=full\nrange=%s..%s\nreason=%s\n' "$base_revision" "$head_revision" "$1"
+	exit 0
+}
+
+is_exact_oid() {
+	case "$1" in
+		*[!0-9a-fA-F]*|'') return 1 ;;
+	esac
+	length=${#1}
+	[ "$length" -eq 40 ] || [ "$length" -eq 64 ]
+}
+
+if ! is_exact_oid "$base_revision" || ! git -C "$repo" cat-file -e "$base_revision^{commit}" 2>/dev/null; then
+	echo "review-range: base revision is not an exact verifiable commit" >&2
+	exit 1
+fi
+if ! is_exact_oid "$head_revision" || ! git -C "$repo" cat-file -e "$head_revision^{commit}" 2>/dev/null; then
+	echo "review-range: head revision is not an exact verifiable commit" >&2
+	exit 1
+fi
+
+if [ -z "$checkpoint_head" ] || [ -z "$checkpoint_base" ] || [ -z "$checkpoint_scope" ]; then
+	full checkpoint-absent
+fi
+is_exact_oid "$checkpoint_head" || full checkpoint-unverifiable
+git -C "$repo" cat-file -e "$checkpoint_head^{commit}" 2>/dev/null || full checkpoint-unverifiable
+[ "$checkpoint_base" = "$base_revision" ] || full diff-base-changed
+[ "$checkpoint_scope" = "$scope" ] || full scope-changed
+[ "$broader_invalidated" = false ] || full broader-assumptions-invalidated
+git -C "$repo" merge-base --is-ancestor "$checkpoint_head" "$head_revision" 2>/dev/null || full checkpoint-not-ancestor
+
+printf 'mode=incremental\nrange=%s..%s\nreason=checkpoint-verified\n' "$checkpoint_head" "$head_revision"

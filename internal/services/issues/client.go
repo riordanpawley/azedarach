@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -73,7 +74,7 @@ func (c *Client) ExportOrchestrationProjection(ctx context.Context, projectID st
 	if limit <= 0 {
 		limit = 50
 	}
-	issueIDs, err := c.projectOrchestrationContextIDs(ctx, tx, limit)
+	issueIDs, err := c.projectOrchestrationContextIDs(ctx, tx, projectID, limit)
 	if err != nil {
 		return OrchestrationProjectionExport{}, c.wrapError("export-orchestration-projection", projectID, err)
 	}
@@ -94,9 +95,10 @@ func (c *Client) ExportOrchestrationProjection(ctx context.Context, projectID st
 	}
 	var openIssueCount int
 	if err := tx.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM issues INDEXED BY idx_issues_status_deleted_priority_updated
+		SELECT COUNT(*) FROM issues
 		WHERE visibility = 'live'
-		  AND status IN ('open', 'in_progress', 'in_review')
+		  AND disposition = 'ready'
+		  AND engagement = 'idle'
 	`).Scan(&openIssueCount); err != nil {
 		return OrchestrationProjectionExport{}, c.wrapError("count-open-orchestration-issues", projectID, err)
 	}
@@ -162,31 +164,53 @@ func orchestrationInteractions(ctx context.Context, q sqlIssueDBTX, issueIDs []s
 	return interactions, out, nil
 }
 
-func (c *Client) projectOrchestrationContextIDs(ctx context.Context, q sqlIssueDBTX, limit int) ([]string, error) {
+func (c *Client) projectOrchestrationContextIDs(ctx context.Context, q sqlIssueDBTX, projectID string, limit int) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
-		WITH candidates(id) AS (
-			SELECT id FROM issues INDEXED BY idx_issues_status_deleted_priority_updated
-			WHERE visibility = 'live'
-			  AND disposition IN ('backlog','ready')
-			ORDER BY priority ASC, updated_at ASC, id ASC
-			LIMIT ?
-		), seed(id) AS (
-			SELECT id FROM candidates
-			UNION SELECT closure.ancestor_id FROM candidates c
-			JOIN issue_graph_closure closure INDEXED BY idx_issue_graph_closure_descendant
-			  ON closure.descendant_id = c.id
-			WHERE closure.project_id = ? AND closure.dependency_type = ?
-		), roots(id) AS (
-			SELECT seed.id FROM seed
-			JOIN issues i ON i.id = seed.id AND i.visibility = 'live'
-			WHERE NOT EXISTS (
+		WITH open_roots(id) AS (
+			SELECT issue.id FROM issues issue INDEXED BY idx_issues_status_deleted_priority_updated
+			WHERE issue.visibility = 'live'
+			  AND issue.disposition = 'ready'
+			  AND issue.engagement = 'idle'
+			  AND NOT EXISTS (
 				SELECT 1 FROM issue_dependencies parent
 				JOIN issues parent_issue ON parent_issue.id = parent.depends_on_id
 				  AND parent_issue.visibility = 'live'
-				WHERE parent.issue_id = seed.id
+				WHERE parent.issue_id = issue.id
+				  AND parent.dependency_type IN (?, ?)
+				  AND parent.tombstoned_at IS NULL
+			  )
+			ORDER BY issue.priority ASC, issue.updated_at ASC, issue.id ASC
+			LIMIT ?
+		), retained_roots(id) AS (
+			SELECT issue.id FROM issues issue
+			WHERE issue.visibility = 'live'
+			  AND issue.disposition IN ('backlog', 'ready')
+			  AND NOT (issue.disposition = 'ready' AND issue.engagement = 'idle')
+			  AND NOT EXISTS (
+				SELECT 1 FROM issue_dependencies parent
+				JOIN issues parent_issue ON parent_issue.id = parent.depends_on_id
+				  AND parent_issue.visibility = 'live'
+				WHERE parent.issue_id = issue.id
+				  AND parent.dependency_type IN (?, ?)
+				  AND parent.tombstoned_at IS NULL
+			  )
+		), active_roots(id) AS (
+			SELECT DISTINCT issue.id FROM issues issue
+			JOIN daemon_session_projections session
+			  ON session.project_id = ? AND session.issue_id = issue.id AND session.state != 'stopped'
+			WHERE issue.visibility = 'live'
+			  AND NOT EXISTS (
+				SELECT 1 FROM issue_dependencies parent
+				JOIN issues parent_issue ON parent_issue.id = parent.depends_on_id
+				  AND parent_issue.visibility = 'live'
+				WHERE parent.issue_id = issue.id
 				  AND parent.dependency_type IN (?, ?)
 				  AND parent.tombstoned_at IS NULL
 			)
+		), roots(id) AS (
+			SELECT id FROM open_roots
+			UNION SELECT id FROM retained_roots
+			UNION SELECT id FROM active_roots
 		), graph(id) AS (
 			SELECT id FROM roots
 			UNION SELECT closure.descendant_id FROM roots
@@ -200,7 +224,7 @@ func (c *Client) projectOrchestrationContextIDs(ctx context.Context, q sqlIssueD
 			  ON dep.issue_id = graph.id AND dep.tombstoned_at IS NULL
 		)
 		SELECT id FROM context ORDER BY id
-	`, limit, issueGraphClosureProjectID, string(domain.DependencyParentChild), string(domain.DependencyParentChild), "parent_child", issueGraphClosureProjectID, string(domain.DependencyParentChild))
+	`, string(domain.DependencyParentChild), "parent_child", limit, string(domain.DependencyParentChild), "parent_child", projectID, string(domain.DependencyParentChild), "parent_child", issueGraphClosureProjectID, string(domain.DependencyParentChild))
 	if err != nil {
 		return nil, err
 	}
@@ -386,8 +410,120 @@ func projectionCompositeCheckpoint(ctx context.Context, q sqlIssueDBTX, projectI
 type dependencyRemovalConfirmationKey struct{}
 type parentChildOrphanConfirmationKey struct{}
 type issueMutationLockKey struct{}
+type issueMutationOperationKey struct{}
+type issueMutationLockWaitHookKey struct{}
 
 var issueOperationLocks sync.Map
+
+type issueOperationLock struct {
+	token  chan struct{}
+	mu     sync.RWMutex
+	holder string
+}
+
+func newIssueOperationLock() *issueOperationLock {
+	lock := &issueOperationLock{token: make(chan struct{}, 1)}
+	lock.token <- struct{}{}
+	return lock
+}
+
+func (l *issueOperationLock) currentHolder() string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.holder
+}
+
+func (l *issueOperationLock) acquire(ctx context.Context, operation string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-l.token:
+		if err := ctx.Err(); err != nil {
+			l.token <- struct{}{}
+			return "", err
+		}
+		l.mu.Lock()
+		l.holder = operation
+		l.mu.Unlock()
+		return "", nil
+	default:
+	}
+	holder := l.currentHolder()
+	if hook, _ := ctx.Value(issueMutationLockWaitHookKey{}).(func(string, string)); hook != nil {
+		hook(operation, holder)
+	}
+	select {
+	case <-ctx.Done():
+		return holder, ctx.Err()
+	case <-l.token:
+		if err := ctx.Err(); err != nil {
+			l.token <- struct{}{}
+			return holder, err
+		}
+		l.mu.Lock()
+		l.holder = operation
+		l.mu.Unlock()
+		return holder, nil
+	}
+}
+
+func (l *issueOperationLock) release() {
+	l.mu.Lock()
+	l.holder = ""
+	l.mu.Unlock()
+	l.token <- struct{}{}
+}
+
+// ContextWithMutationOperation attaches a stable, low-cardinality operation
+// name used to attribute issue-store mutation waiters and holders.
+func ContextWithMutationOperation(ctx context.Context, operation string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	operation = strings.TrimSpace(operation)
+	if operation == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, issueMutationOperationKey{}, operation)
+}
+
+// WithMutationLockWaitHookForTest installs a deterministic contention barrier.
+// Production callers must not use it for mutation policy.
+func WithMutationLockWaitHookForTest(ctx context.Context, hook func(string, string)) context.Context {
+	return context.WithValue(ctx, issueMutationLockWaitHookKey{}, hook)
+}
+
+func mutationOperationFromContext(ctx context.Context) string {
+	if ctx != nil {
+		if operation, _ := ctx.Value(issueMutationOperationKey{}).(string); strings.TrimSpace(operation) != "" {
+			return strings.TrimSpace(operation)
+		}
+	}
+	pcs := make([]uintptr, 12)
+	count := runtime.Callers(2, pcs)
+	frames := runtime.CallersFrames(pcs[:count])
+	for {
+		frame, more := frames.Next()
+		name := frame.Function
+		if !strings.HasSuffix(name, ".mutationOperationFromContext") &&
+			!strings.HasSuffix(name, ".(*Client).WithMutationLock") &&
+			!strings.HasSuffix(name, ".(*Client).withMutationLock") {
+			if slash := strings.LastIndex(name, "/"); slash >= 0 {
+				name = name[slash+1:]
+			}
+			if name != "" {
+				return name
+			}
+		}
+		if !more {
+			break
+		}
+	}
+	return "issue_store.mutation"
+}
 
 // ProjectionSourceVersion reports the applied project-schema migration count.
 func (c *Client) ProjectionSourceVersion(ctx context.Context) (int, error) {
@@ -793,10 +929,24 @@ func (c *Client) WithMutationLock(ctx context.Context, fn func(context.Context) 
 	if locked, _ := ctx.Value(issueMutationLockKey{}).(bool); locked {
 		return fn(ctx)
 	}
+	operation := mutationOperationFromContext(ctx)
 	lock := issueOperationLockForPath(c.dbPath)
-	lock.Lock()
-	defer lock.Unlock()
-	return fn(context.WithValue(ctx, issueMutationLockKey{}, true))
+	holderOperation := lock.currentHolder()
+	ctx, endSpan := latencytrace.StartSpanWithEndAttributes(ctx, "dependency", "issue_store.mutation_lock",
+		"dependency.name", "sqlite",
+		"dependency.operation", "issue_mutation_lock",
+		"mutation.waiter_operation", operation,
+		"mutation.holder_operation", holderOperation,
+	)
+	var spanErr error
+	defer func() { endSpan(spanErr, "mutation.holder_operation", holderOperation) }()
+	holderOperation, spanErr = lock.acquire(ctx, operation)
+	if spanErr != nil {
+		return spanErr
+	}
+	defer lock.release()
+	spanErr = fn(context.WithValue(ctx, issueMutationLockKey{}, true))
+	return spanErr
 }
 
 // WithProjectionSnapshotFence holds SQLite's write reservation while fn reads
@@ -831,15 +981,10 @@ func (c *Client) withMutationLock(ctx context.Context, fn func(context.Context) 
 	if _, err := c.dbHandle(); err != nil {
 		return err
 	}
-	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "issue_store.mutation_lock",
-		"dependency.name", "sqlite",
-		"dependency.operation", "issue_mutation_lock",
-	)
-	var spanErr error
-	defer func() { endSpan(spanErr) }()
 	runWrite := func(lockCtx context.Context) error {
 		return sqliteutil.WithWriteLockContext(lockCtx, c.dbPath, fn)
 	}
+	var spanErr error
 	if locked, _ := ctx.Value(issueMutationLockKey{}).(bool); locked {
 		spanErr = runWrite(ctx)
 	} else {
@@ -851,13 +996,13 @@ func (c *Client) withMutationLock(ctx context.Context, fn func(context.Context) 
 	return spanErr
 }
 
-func issueOperationLockForPath(dbPath string) *sync.Mutex {
+func issueOperationLockForPath(dbPath string) *issueOperationLock {
 	key := sqliteutil.CanonicalPath(dbPath)
 	if key == "" {
 		key = "."
 	}
-	value, _ := issueOperationLocks.LoadOrStore(key, &sync.Mutex{})
-	return value.(*sync.Mutex)
+	value, _ := issueOperationLocks.LoadOrStore(key, newIssueOperationLock())
+	return value.(*issueOperationLock)
 }
 
 // NewClient creates a SQLite-backed issue store client rooted at the repository.

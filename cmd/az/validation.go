@@ -111,6 +111,55 @@ func runValidationCommand(cfg *config.Config, args []string) error {
 			}
 			return printValidationValue(result, *jsonOutput)
 		})
+	case "evidence-record":
+		flags := flag.NewFlagSet("validation evidence-record", flag.ContinueOnError)
+		evidenceID := flags.String("id", "", "stable evidence id")
+		issueID := flags.String("issue", os.Getenv("AZEDARACH_TICKET_ID"), "issue id")
+		layer := flags.String("layer", "", "patch_review or active_path")
+		validationRequestID := flags.String("validation-request", "", "completed validation request id")
+		reusedFrom := flags.String("reused-from", "", "optional prior evidence id")
+		jsonOutput := flags.Bool("json", false, "emit JSON")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			result, err := deps.DaemonClient.PublicationEvidenceRecord(context.Background(), protocol.PublicationEvidenceRecordRequest{
+				EvidenceID: *evidenceID, IssueID: *issueID, Layer: domain.PublicationEvidenceLayer(*layer),
+				ValidationRequestID: *validationRequestID, ReusedFromEvidenceID: *reusedFrom,
+			})
+			if err != nil {
+				return err
+			}
+			return printValidationValue(result, *jsonOutput)
+		})
+	case "evidence-status":
+		flags := flag.NewFlagSet("validation evidence-status", flag.ContinueOnError)
+		issueID := flags.String("issue", "", "optional issue id filter")
+		jsonOutput := flags.Bool("json", false, "emit JSON")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			result, err := deps.DaemonClient.PublicationEvidenceStatus(context.Background(), protocol.PublicationEvidenceStatusRequest{IssueID: *issueID})
+			if err != nil {
+				return err
+			}
+			return printValidationValue(result, *jsonOutput)
+		})
+	case "evidence-evaluate":
+		flags := flag.NewFlagSet("validation evidence-evaluate", flag.ContinueOnError)
+		issueID := flags.String("issue", os.Getenv("AZEDARACH_TICKET_ID"), "issue id")
+		jsonOutput := flags.Bool("json", false, "emit JSON")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			result, err := deps.DaemonClient.PublicationEvidenceEvaluate(context.Background(), protocol.PublicationEvidenceEvaluateRequest{IssueID: *issueID})
+			if err != nil {
+				return err
+			}
+			return printValidationValue(result, *jsonOutput)
+		})
 	case "status", "watch":
 		flags := flag.NewFlagSet("validation "+args[0], flag.ContinueOnError)
 		jsonOutput := flags.Bool("json", false, "emit JSON")
@@ -173,6 +222,24 @@ func printValidationValue(value any, asJSON bool) error {
 		for _, request := range append(append(append([]domain.ValidationRequest{}, value.Active...), value.Queued...), value.Recent...) {
 			fmt.Printf("%s %s class=%s scope=%s purpose=%s execution=%s source=%s override=%s ticket=%s revision=%s\n", request.RequestID, request.State, request.Class, request.Scope, request.Purpose, request.Execution, request.AuthoritativeRequestID, request.Override, request.IssueID, request.SourceRevision)
 		}
+	case protocol.PublicationEvidenceRecordResponse:
+		fmt.Printf("%s layer=%s ticket=%s source=%s base=%s result=%s policy=%s reused_from=%s\n", value.Evidence.EvidenceID, value.Evidence.Layer, value.Evidence.IssueID, value.Evidence.SourceRevision, value.Evidence.BaseRevision, value.Evidence.ResultRevision, value.Evidence.PolicyVersion, value.Evidence.ReusedFromEvidenceID)
+	case protocol.PublicationEvidenceStatusResponse:
+		fmt.Printf("evidence=%d invalidations=%d revision=%d ticket=%s\n", len(value.Snapshot.Evidence), len(value.Snapshot.Invalidations), value.Snapshot.Revision, value.Snapshot.IssueID)
+		for _, evidence := range value.Snapshot.Evidence {
+			fmt.Printf("%s layer=%s source=%s base=%s result=%s policy=%s environment=%s reused_from=%s\n", evidence.EvidenceID, evidence.Layer, evidence.SourceRevision, evidence.BaseRevision, evidence.ResultRevision, evidence.PolicyVersion, evidence.EnvironmentFingerprint, evidence.ReusedFromEvidenceID)
+		}
+		for _, invalidation := range value.Snapshot.Invalidations {
+			fmt.Printf("%s evidence=%s invalidated=%s details=%s\n", invalidation.InvalidationID, invalidation.EvidenceID, invalidation.Reason, invalidation.Details)
+		}
+	case protocol.PublicationEvidenceEvaluateResponse:
+		for _, assessment := range value.Assessments {
+			state := "retained"
+			if !assessment.Retained {
+				state = "invalidated"
+			}
+			fmt.Printf("%s layer=%s state=%s base_movement_only=%t reasons=%v\n", assessment.EvidenceID, assessment.Layer, state, assessment.BaseMovementOnly, assessment.Reasons)
+		}
 	default:
 		return fmt.Errorf("unsupported validation output %T", value)
 	}
@@ -180,11 +247,14 @@ func printValidationValue(value any, asJSON bool) error {
 }
 
 func printValidationUsage() {
-	fmt.Println(strings.TrimSpace(`Usage: az validation <acquire|heartbeat|authorize-nested|finish|status|watch> [flags]
+	fmt.Println(strings.TrimSpace(`Usage: az validation <acquire|heartbeat|authorize-nested|finish|status|watch|evidence-record|evidence-status|evidence-evaluate> [flags]
   acquire --request <id> --token <secret> --scope repository|ticket --purpose capacity|development|push_gate|review_evidence --isolation <mode> --environment-fingerprint <hash> --override none|no_reuse|force_rerun|emergency_skip [--override-actor <id> --override-reason <text>] [--issue <id>] --class aggregate|shared|safe --profile <name> --command <text> --revision <sha> [--wait] [--json]
   heartbeat --request <id> --token <secret> [--ttl 30]
   authorize-nested --request <id> --token <secret> --class aggregate|shared|safe
   finish --request <id> --token <secret> --state completed|cancelled|failed [--outcome text] [--evidence-json object] [--json]
+  evidence-record --id <id> --issue <id> --layer patch_review|active_path --validation-request <id> [--reused-from <id>] [--json]
+  evidence-status [--issue <id>] [--json]
+  evidence-evaluate --issue <id> [--json]
   status [--json]
   watch [--interval 1s] [--json]`))
 }

@@ -272,6 +272,22 @@ func (a daemonOrchestrationAuthority) reviewInspection(ctx context.Context, proj
 		inspection.WorktreePath = strings.TrimSpace(worktree.Path)
 		inspection.Branch = strings.TrimSpace(worktree.Branch)
 		inspection.BaseBranch = a.daemon.runtimeDiffBaseBranchForIssue(task.ID.String(), a.daemon.baseBranchForProject(projectID), tasks, worktrees)
+		if a.daemon.git != nil && inspection.WorktreePath != "" && inspection.BaseBranch != "" {
+			headRevision, headErr := a.daemon.git.HeadRevision(ctx, inspection.WorktreePath)
+			if headErr != nil {
+				inspection.Reasons = append(inspection.Reasons, "inspect-head-revision: "+headErr.Error())
+			} else {
+				baseRevision, baseErr := a.daemon.git.MergeBaseForRevision(ctx, inspection.WorktreePath, inspection.BaseBranch, headRevision)
+				if baseErr != nil {
+					inspection.Reasons = append(inspection.Reasons, "inspect-diff-base-revision: "+baseErr.Error())
+				} else {
+					inspection.DiffBaseRevision = strings.TrimSpace(baseRevision)
+					inspection.HeadRevision = strings.TrimSpace(headRevision)
+					inspection.DiffScope = fmt.Sprintf("issue:%s:base:%s@%s", task.ID.String(), inspection.BaseBranch, inspection.DiffBaseRevision)
+					inspection.DiffRange = inspection.DiffBaseRevision + ".." + inspection.HeadRevision
+				}
+			}
+		}
 		if a.daemon.materializedReadsEnabled() {
 			if task.GitAdditions != 0 || task.GitDeletions != 0 {
 				inspection.DiffStat = fmt.Sprintf("%d additions, %d deletions", task.GitAdditions, task.GitDeletions)

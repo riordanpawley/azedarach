@@ -617,7 +617,28 @@ func TestRealProcessProfileRootedMarkerSurvivesPaneChildReplacement(t *testing.T
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(tmuxDir) })
 	runner := &isolatedTmuxTestRunner{tmuxPath: tmuxPath, socketPath: filepath.Join(tmuxDir, "server.sock")}
-	if output, err := runner.run(context.Background(), "-f", "/dev/null", "new-session", "-d", "-s", "rooted-replacement", "/bin/sh -c 'while :; do sleep 30; done'"); err != nil {
+	childPIDPath := filepath.Join(tmuxDir, "child.pid")
+	childReadyPrefix := "rooted-replacement-child-ready"
+	childLoopPath := filepath.Join(tmuxDir, "child-loop.sh")
+	childLoop := "#!/bin/sh\n" +
+		"generation=1\n" +
+		"while :; do\n" +
+		"  " + singleQuoteForShell(tmuxPath) + " -S " + singleQuoteForShell(runner.socketPath) + " wait-for " + singleQuoteForShell(childReadyPrefix) + "-release-\"$generation\" &\n" +
+		"  child=$!\n" +
+		"  printf '%s\\n' \"$child\" > " + singleQuoteForShell(childPIDPath) + "\n" +
+		"  " + singleQuoteForShell(tmuxPath) + " -S " + singleQuoteForShell(runner.socketPath) + " wait-for -S " + singleQuoteForShell(childReadyPrefix) + "-\"$generation\"\n" +
+		"  wait \"$child\"\n" +
+		"  generation=$((generation + 1))\n" +
+		"done\n"
+	if err := os.WriteFile(childLoopPath, []byte(childLoop), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := runner.run(
+		context.Background(),
+		"-f", "/dev/null",
+		"new-session", "-d", "-s", "rooted-replacement", singleQuoteForShell(childLoopPath),
+		";", "set-option", "-s", "exit-empty", "off",
+	); err != nil {
 		t.Fatalf("start isolated tmux: %v (%s)", err, output)
 	}
 	t.Cleanup(func() { _, _ = runner.run(context.Background(), "kill-server") })
@@ -625,45 +646,25 @@ func TestRealProcessProfileRootedMarkerSurvivesPaneChildReplacement(t *testing.T
 	if err := client.SetEnvironment(context.Background(), "rooted-replacement", rootedOrchestratorBootstrapNonceEnvironment, "durable-marker"); err != nil {
 		t.Fatal(err)
 	}
-	panePID, err := runner.run(context.Background(), "display-message", "-p", "-t", "rooted-replacement", "#{pane_pid}")
-	if err != nil {
-		t.Fatal(err)
-	}
-	panePID = strings.TrimSpace(panePID)
-	paneSleepChildren := func() []string {
-		output, err := exec.Command("ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "comm=").CombinedOutput()
+	childPID := func(readyChannel string) string {
+		t.Helper()
+		if output, err := runner.run(context.Background(), "wait-for", readyChannel); err != nil {
+			t.Fatalf("wait for pane child on %q: %v (%s)", readyChannel, err, output)
+		}
+		pid, err := os.ReadFile(childPIDPath)
 		if err != nil {
-			return nil
+			t.Fatalf("read pane child pid: %v", err)
 		}
-		children := make([]string, 0, 1)
-		for _, line := range strings.Split(string(output), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) >= 3 && fields[1] == panePID && filepath.Base(fields[2]) == "sleep" {
-				children = append(children, fields[0])
-			}
-		}
-		return children
+		return strings.TrimSpace(string(pid))
 	}
-	childPID := func(exclude string) string {
-		deadline := time.Now().Add(15 * time.Second)
-		for time.Now().Before(deadline) {
-			for _, pid := range paneSleepChildren() {
-				if pid != exclude {
-					return pid
-				}
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-		return ""
-	}
-	firstChild := childPID("")
+	firstChild := childPID(childReadyPrefix + "-1")
 	if firstChild == "" {
 		t.Fatal("first pane child did not start")
 	}
-	if output, err := exec.Command("kill", "-TERM", firstChild).CombinedOutput(); err != nil {
-		t.Fatalf("stop first child: %v (%s)", err, output)
+	if output, err := runner.run(context.Background(), "wait-for", "-S", childReadyPrefix+"-release-1"); err != nil {
+		t.Fatalf("release first pane child: %v (%s)", err, output)
 	}
-	secondChild := childPID(firstChild)
+	secondChild := childPID(childReadyPrefix + "-2")
 	if secondChild == "" || secondChild == firstChild {
 		t.Fatalf("replacement child pid = %q, first = %q", secondChild, firstChild)
 	}

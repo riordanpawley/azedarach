@@ -9356,6 +9356,16 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "Worker integration evidence should be a structured JSON `worker_evidence.v1` packet") {
 		t.Fatalf("prompt = %q, want structured evidence guidance", prompt)
 	}
+	for _, want := range []string{
+		"Review revision contract",
+		"exact `diff_base_revision`, `head_revision`, stable `diff_scope`, and executable `diff_range`",
+		"previous reviewed head through current head plus unresolved findings and affected contracts",
+		"Fall back to the full `diff_range` when the prior checkpoint cannot be verified, is not an ancestor, or its base/scope changed",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt = %q, want revision-incremental review guidance %q", prompt, want)
+		}
+	}
 	if !strings.Contains(prompt, "Trust hook-backed `activity=busy|idle|waiting` for worker idleness checks") {
 		t.Fatalf("prompt = %q, want bounded tmux observation guidance", prompt)
 	}
@@ -11436,6 +11446,76 @@ func TestEnrichTasksWithSessionStateDoesNotTreatLaunchBusyAsHookActivity(t *test
 	}
 	if tasks[0].Session.Activity != "unknown" || tasks[0].Session.ActivitySource != "none" {
 		t.Fatalf("session activity = %s/%s, want unknown/none", tasks[0].Session.Activity, tasks[0].Session.ActivitySource)
+	}
+}
+
+func TestEnrichTasksWithSessionStateClearsStalePaneRuntimeBehindStoppedIntent(t *testing.T) {
+	ctx := context.Background()
+	const (
+		projectID = "proj-stopped-pane"
+		issueID   = "closed-ticket"
+	)
+
+	now := time.Date(2026, time.July, 17, 0, 18, 45, 0, time.UTC)
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	for _, session := range []daemonstate.Session{
+		{
+			ID: sessionID, IssueID: issueID,
+			Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueID,
+			State: daemonstate.SessionStateStopped, ObservedState: daemonstate.SessionStateStopped,
+			UpdatedAt: now,
+		},
+		{
+			ID: sessionID + ".pane-12", IssueID: issueID,
+			Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueID,
+			State: daemonstate.SessionStatePaused, ObservedState: daemonstate.SessionStatePaused,
+			Activity: "idle", ActivitySource: "hooks", UpdatedAt: now.Add(-time.Second),
+		},
+	} {
+		if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, session); err != nil {
+			t.Fatalf("seed runtime state %+v: %v", session, err)
+		}
+	}
+
+	sessionStore := daemonstate.NewStore()
+	if _, err := sessionStore.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateRunning); err != nil {
+		t.Fatalf("seed contradictory exact live session: %v", err)
+	}
+	d := &Daemon{
+		cfg:          Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		sessionStore: sessionStore,
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+	}
+	staleStartedAt := now.Add(-time.Hour)
+	tasks := d.enrichTasksWithSessionState(ctx, projectID, []domain.Task{
+		{
+			ID:     naming.IssueID(issueID),
+			Title:  "Already closed",
+			Status: domain.StatusDone,
+			Session: &domain.Session{
+				IssueID: naming.IssueID(issueID), State: domain.SessionPaused,
+				Activity: "idle", ActivitySource: "hooks", StartedAt: &staleStartedAt, UpdatedAt: now.Add(-time.Second),
+			},
+			HasTmuxSession: true,
+		},
+		{
+			ID: naming.IssueID("projection-gap"), Title: "Projection temporarily unavailable", Status: domain.StatusInProgress,
+			Session:        &domain.Session{IssueID: naming.IssueID("projection-gap"), State: domain.SessionBusy, Activity: "busy", ActivitySource: "hooks", UpdatedAt: now},
+			HasTmuxSession: true,
+		},
+	})
+	if len(tasks) != 2 {
+		t.Fatalf("tasks = %+v, want two tasks", tasks)
+	}
+	if tasks[0].Session != nil || tasks[0].HasTmuxSession {
+		t.Fatalf("stopped logical intent retained stale pane runtime: session=%+v has_tmux_session=%t", tasks[0].Session, tasks[0].HasTmuxSession)
+	}
+	if tasks[1].Session == nil || !tasks[1].HasTmuxSession {
+		t.Fatalf("missing runtime authority erased pre-hydrated session: %+v", tasks[1])
 	}
 }
 
