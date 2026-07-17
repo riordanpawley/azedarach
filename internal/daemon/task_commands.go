@@ -409,6 +409,9 @@ func (d *Daemon) handleBoardFetch(ctx context.Context, req protocol.RequestEnvel
 	if err != nil {
 		return d.boardViewErrorResponse(req, err), nil
 	}
+	if boardReq.ShowChildren != nil {
+		viewRecord.View.Options.ShowChildren = *boardReq.ShowChildren
+	}
 	startedAt := time.Now()
 	cacheStartedAt := time.Now()
 	if cached, ok := d.readFreshTaskListSnapshotCache(projectID); ok {

@@ -9,8 +9,8 @@
 │  Grouping         Workflow columns               │
 │  Ordered sorting  Attention ↓, priority ↑, upda… │
 │  Hide empty       false                          │
+│  Show children    false                          │
 │ Tab field                                        │
 │ ←/→ choice                                       │
 │ Ctrl+S save                                      │
-│ Ctrl+J advanced JSON                             │
 ╰──────────────────────────────────────────────────╯
