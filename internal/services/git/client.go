@@ -1400,11 +1400,11 @@ func (c *Client) CommitChangedFiles(ctx context.Context, worktree, commit string
 	if commit == "" {
 		return nil, fmt.Errorf("commit is required")
 	}
-	output, err := c.runInWorktree(ctx, worktree, "diff-tree", "--no-commit-id", "--name-only", "-r", commit)
+	output, err := c.runInWorktree(ctx, worktree, "diff-tree", "--no-commit-id", "--name-only", "-z", "-r", commit)
 	if err != nil {
 		return nil, fmt.Errorf("list files changed by commit %s: %w", commit, err)
 	}
-	return splitNonEmptyLines(output), nil
+	return parseNULTerminatedGitPaths(output)
 }
 
 // ChangedFilesBetweenRefs returns files changed between baseRef and headRef.
@@ -1417,11 +1417,11 @@ func (c *Client) ChangedFilesBetweenRefs(ctx context.Context, worktree, baseRef,
 	if headRef == "" {
 		return nil, fmt.Errorf("head ref is required")
 	}
-	output, err := c.runInWorktree(ctx, worktree, "diff", "--name-only", baseRef+"..."+headRef, "--")
+	output, err := c.runInWorktree(ctx, worktree, "diff", "--name-only", "-z", baseRef+"..."+headRef, "--")
 	if err != nil {
 		return nil, fmt.Errorf("list files changed between %s and %s: %w", baseRef, headRef, err)
 	}
-	return splitNonEmptyLines(output), nil
+	return parseNULTerminatedGitPaths(output)
 }
 
 // ChangedFilesBetweenRefTrees returns files whose final tree differs between
@@ -1435,11 +1435,27 @@ func (c *Client) ChangedFilesBetweenRefTrees(ctx context.Context, worktree, base
 	if headRef == "" {
 		return nil, fmt.Errorf("head ref is required")
 	}
-	output, err := c.runInWorktree(ctx, worktree, "diff", "--name-only", baseRef, headRef, "--")
+	output, err := c.runInWorktree(ctx, worktree, "diff", "--name-only", "-z", baseRef, headRef, "--")
 	if err != nil {
 		return nil, fmt.Errorf("list files with different trees between %s and %s: %w", baseRef, headRef, err)
 	}
-	return splitNonEmptyLines(output), nil
+	return parseNULTerminatedGitPaths(output)
+}
+
+func parseNULTerminatedGitPaths(output string) ([]string, error) {
+	if output == "" {
+		return nil, nil
+	}
+	if !strings.HasSuffix(output, "\x00") {
+		return nil, fmt.Errorf("Git path output is not NUL terminated")
+	}
+	values := strings.Split(output[:len(output)-1], "\x00")
+	for _, value := range values {
+		if value == "" {
+			return nil, fmt.Errorf("Git path output contains an empty path")
+		}
+	}
+	return values, nil
 }
 
 // PatchDigest returns a stable SHA-256 identity for the exact tree delta

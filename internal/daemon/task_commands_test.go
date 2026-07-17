@@ -6366,7 +6366,7 @@ func TestTaskCloseIntegrationOriginBaseSkipsLocalMergeWhenRemoteTreeMatches(t *t
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "fetch" && args[3] == "origin":
 			fetchedOrigin = true
 			return "", nil
-		case len(args) >= 7 && args[0] == "-C" && args[1] == repoDir && args[2] == "diff" && args[3] == "--name-only" && args[4] == "origin/preview" && args[5] == sourceBranch:
+		case len(args) >= 8 && args[0] == "-C" && args[1] == repoDir && args[2] == "diff" && args[3] == "--name-only" && args[4] == "-z" && args[5] == "origin/preview" && args[6] == sourceBranch:
 			if !fetchedOrigin {
 				t.Fatal("origin close diff ran before fetching origin")
 			}
@@ -6483,11 +6483,11 @@ func TestTaskCloseIntegrationOriginBaseAllowsRemoteAheadWhenSourceContained(t *t
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "fetch" && args[3] == "origin":
 			fetchedOrigin = true
 			return "", nil
-		case len(args) >= 7 && args[0] == "-C" && args[1] == repoDir && args[2] == "diff" && args[3] == "--name-only" && args[4] == "origin/preview" && args[5] == sourceBranch:
+		case len(args) >= 8 && args[0] == "-C" && args[1] == repoDir && args[2] == "diff" && args[3] == "--name-only" && args[4] == "-z" && args[5] == "origin/preview" && args[6] == sourceBranch:
 			if !fetchedOrigin {
 				t.Fatal("origin close diff ran before fetching origin")
 			}
-			return "docs/alchemy-infra.md\nops/infra/src/stacks/chefy-fly.test.ts\nops/infra/src/stacks/fly-configs.ts\n", nil
+			return "docs/alchemy-infra.md\x00ops/infra/src/stacks/chefy-fly.test.ts\x00ops/infra/src/stacks/fly-configs.ts\x00", nil
 		case len(args) >= 6 && args[0] == "-C" && args[1] == repoDir && args[2] == "merge-base" && args[3] == "--is-ancestor" && args[4] == sourceBranch && args[5] == "origin/preview":
 			checkedContainment = true
 			return "", nil
@@ -6658,11 +6658,11 @@ func TestTaskCloseIntegrationOriginBaseRefusesLocalMergeWhenRemoteDiffRemains(t 
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "fetch" && args[3] == "origin":
 			fetchedOrigin = true
 			return "", nil
-		case len(args) >= 7 && args[0] == "-C" && args[1] == repoDir && args[2] == "diff" && args[3] == "--name-only" && args[4] == "origin/preview" && args[5] == sourceBranch:
+		case len(args) >= 8 && args[0] == "-C" && args[1] == repoDir && args[2] == "diff" && args[3] == "--name-only" && args[4] == "-z" && args[5] == "origin/preview" && args[6] == sourceBranch:
 			if !fetchedOrigin {
 				t.Fatal("origin close diff ran before fetching origin")
 			}
-			return "main.go\n", nil
+			return "main.go\x00", nil
 		case len(args) >= 6 && args[0] == "-C" && args[1] == repoDir && args[2] == "merge-base" && args[3] == "--is-ancestor" && args[4] == sourceBranch && args[5] == "origin/preview":
 			return "", fmt.Errorf("exit status 1")
 		case slices.Contains(args, "merge") || slices.Contains(args, "checkout") || slices.Contains(args, "reset"):

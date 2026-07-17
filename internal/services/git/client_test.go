@@ -3559,8 +3559,8 @@ func TestChangedFilesBetweenRefTreesDoesNotUseMergeBase(t *testing.T) {
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {
 			gotArgs = append([]string(nil), args...)
-			if len(args) >= 5 && args[0] == "diff" && args[1] == "--name-only" && args[2] == "origin/preview" && args[3] == "feature" {
-				return "main.go\ninternal/app.go\n", nil
+			if len(args) >= 6 && args[0] == "diff" && args[1] == "--name-only" && args[2] == "-z" && args[3] == "origin/preview" && args[4] == "feature" {
+				return "portable/雪\nline.txt\x00 leading-space.txt\x00trailing-space.txt \x00", nil
 			}
 			return "", fmt.Errorf("unexpected command: %v", args)
 		},
@@ -3571,12 +3571,20 @@ func TestChangedFilesBetweenRefTreesDoesNotUseMergeBase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ChangedFilesBetweenRefTrees() error = %v", err)
 	}
-	if !reflect.DeepEqual(files, []string{"main.go", "internal/app.go"}) {
+	if !reflect.DeepEqual(files, []string{"portable/雪\nline.txt", " leading-space.txt", "trailing-space.txt "}) {
 		t.Fatalf("ChangedFilesBetweenRefTrees() = %v", files)
 	}
 	joined := strings.Join(gotArgs, " ")
 	if strings.Contains(joined, "...") || strings.Contains(joined, "merge-base") {
 		t.Fatalf("ChangedFilesBetweenRefTrees() used ancestry comparison: %v", gotArgs)
+	}
+}
+
+func TestParseNULTerminatedGitPathsRejectsAmbiguousOutput(t *testing.T) {
+	for _, output := range []string{"newline-delimited\n", "path\x00\x00"} {
+		if paths, err := parseNULTerminatedGitPaths(output); err == nil {
+			t.Fatalf("parseNULTerminatedGitPaths(%q) = %q, want error", output, paths)
+		}
 	}
 }
 

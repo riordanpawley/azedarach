@@ -234,7 +234,7 @@ func TestPublicationEvidenceCommandsRetainPatchAcrossUnrelatedBaseMovement(t *te
 	assert.True(t, evaluated.Assessments[0].BaseMovementOnly)
 }
 
-func TestTaskCloseRecordsExactSyntheticMergeEvidence(t *testing.T) {
+func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	runPublicationGit(t, repoDir, "init", "-b", "main")
@@ -289,11 +289,27 @@ func TestTaskCloseRecordsExactSyntheticMergeEvidence(t *testing.T) {
 		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()}, operationRuntime: runtime, git: gitClient,
 		publicationEvidenceCache: map[string]domain.PublicationEvidenceSnapshot{}, issueClientsByProject: map[string]*issues.Client{"project": issueClient},
 	}
-	err = d.recordTaskCloseMergeResultEvidence(ctx, "project", issueID, taskCloseIntegrationResult{
+	integration := taskCloseIntegrationResult{
 		Requested: true, Integrated: true, SourceBranch: "feature", TargetBranch: "main",
 		BaseOID: baseOID, SourceOID: sourceOID, TargetOID: targetOID, ValidationAttempts: merge.ValidationAttempts,
-	})
+	}
+	// Model the durable state after integration receipt succeeds but publication
+	// evidence fails. The retry sees source already contained by target.
+	err = d.persistTaskCloseIntegrationReceipt(ctx, "project", issueID, repoDir, integration)
+	require.NoError(t, err)
+	recovered, found, err := d.recoverPublishedTaskCloseIntegration(ctx, "project", issueID, repoDir, "feature", "main", sourceOID, targetOID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.True(t, recovered.NoChanges)
+	require.True(t, recovered.ReceiptRecovered)
+	require.False(t, recovered.Integrated)
+	require.Equal(t, baseOID, recovered.BaseOID)
+	require.NotEmpty(t, recovered.ValidationAttempts)
+	err = d.persistTaskCloseIntegrationPublication(ctx, "project", issueID, repoDir, recovered)
 	require.NoError(t, err, "merge=%+v target=%s", merge, targetOID)
+	receipts, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted}, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, receipts, 1, "retry must reuse the exact receipt rather than append a generic no-change receipt")
 	snapshot, err := runtime.store.PublicationEvidenceSnapshot(ctx, "project", issueID)
 	require.NoError(t, err)
 	require.Len(t, snapshot.Evidence, 1)
