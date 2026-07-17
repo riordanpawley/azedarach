@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	"github.com/riordanpawley/azedarach/internal/logging"
 )
@@ -113,6 +114,97 @@ func TestLauncherReplaceLingeringDaemonHelper(t *testing.T) {
 	os.Exit(0)
 }
 
+func TestCaptureProcessIdentityIncludesExecutableForRollback(t *testing.T) {
+	identity, present, err := captureProcessIdentity(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !present || !executableFile(identity.executable) {
+		t.Fatalf("process identity = %+v present=%t, want executable rollback identity", identity, present)
+	}
+}
+
+func TestCommandWithScopedOwnerPropagatesExactIdentity(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv(daemonOwnerPIDEnv, strconv.Itoa(os.Getpid()))
+	repoDir := newLauncherTestWorktree(t)
+	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
+
+	command, err := launcher.commandWithScopedOwner(daemonCommand{executable: "azd", env: []string{"PATH=/bin", daemonOwnerStartTokenEnv + "=stale"}})
+	if err != nil {
+		t.Fatalf("commandWithScopedOwner() error = %v", err)
+	}
+	values := environmentMap(command.env)
+	if values[daemonOwnerPIDEnv] != strconv.Itoa(os.Getpid()) {
+		t.Fatalf("owner PID = %q, want %d", values[daemonOwnerPIDEnv], os.Getpid())
+	}
+	identity, present, err := captureProcessIdentity(os.Getpid())
+	if err != nil || !present {
+		t.Fatalf("capture current identity = %+v, %t, %v", identity, present, err)
+	}
+	if values[daemonOwnerStartTokenEnv] != identity.startToken {
+		t.Fatalf("owner start token = %q, want %q", values[daemonOwnerStartTokenEnv], identity.startToken)
+	}
+	if values["PATH"] != "/bin" {
+		t.Fatalf("PATH = %q, want preserved /bin", values["PATH"])
+	}
+}
+
+func TestCommandWithScopedOwnerRejectsInvalidOwner(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv(daemonOwnerPIDEnv, "not-a-pid")
+	repoDir := newLauncherTestWorktree(t)
+	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
+
+	if _, err := launcher.commandWithScopedOwner(daemonCommand{executable: "azd"}); err == nil || !strings.Contains(err.Error(), "invalid scoped daemon owner PID") {
+		t.Fatalf("commandWithScopedOwner() error = %v, want invalid owner", err)
+	}
+}
+
+func TestCommandWithScopedOwnerNeverBindsGlobalDaemon(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
+	t.Setenv(daemonOwnerPIDEnv, strconv.Itoa(os.Getpid()))
+	launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
+	command := daemonCommand{executable: "azd", env: []string{"PATH=/bin"}}
+
+	got, err := launcher.commandWithScopedOwner(command)
+	if err != nil {
+		t.Fatalf("commandWithScopedOwner() error = %v", err)
+	}
+	values := environmentMap(got.env)
+	if values["PATH"] != "/bin" || values[daemonOwnerPIDEnv] != "" || values[daemonOwnerStartTokenEnv] != "" {
+		t.Fatalf("global command environment = %+v, want PATH only and no owner metadata", values)
+	}
+}
+
+func TestCommandWithScopedOwnerNeverBindsNonAzedarachWorktree(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv(daemonOwnerPIDEnv, strconv.Itoa(os.Getpid()))
+	repoDir := newLauncherTestWorktreeWithModule(t, "github.com/acme/portable-consumer")
+	launcher := NewLauncher(repoDir, filepath.Join(t.TempDir(), "daemon.sock"))
+
+	got, err := launcher.commandWithScopedOwner(daemonCommand{executable: "azd", env: []string{"PATH=/portable", daemonOwnerPIDEnv + "=stale"}})
+	if err != nil {
+		t.Fatalf("commandWithScopedOwner() error = %v", err)
+	}
+	values := environmentMap(got.env)
+	if values["PATH"] != "/portable" || values[daemonOwnerPIDEnv] != "" || values[daemonOwnerStartTokenEnv] != "" {
+		t.Fatalf("non-Azedarach command environment = %+v, want portable PATH and no owner metadata", values)
+	}
+}
+
+func environmentMap(environment []string) map[string]string {
+	values := make(map[string]string, len(environment))
+	for _, entry := range environment {
+		key, value, found := strings.Cut(entry, "=")
+		if found {
+			values[key] = value
+		}
+	}
+	return values
+}
+
 type lingeringDaemonProcess struct {
 	cmd              *exec.Cmd
 	shutdownObserved *os.File
@@ -123,7 +215,19 @@ type lingeringDaemonProcess struct {
 }
 
 func startLingeringDaemonProcess(t *testing.T, launcher *Launcher) *lingeringDaemonProcess {
-	return startLingeringDaemonProcessWith(t, launcher, os.Args[0], "", nil)
+	t.Helper()
+	generation := writeManagedTestGeneration(
+		t,
+		filepath.Join(t.TempDir(), ".azedarach-generations"),
+		"generation.predecessor",
+	)
+	return startLingeringDaemonProcessWith(
+		t,
+		launcher,
+		filepath.Join(generation, "azd"),
+		"",
+		[]string{"--", "--repo", launcher.RepoDir, "--socket", launcher.SocketPath, "--lock", launcher.LockPath},
+	)
 }
 
 func startManagedLingeringDaemonProcess(t *testing.T, launcher *Launcher, mode string) *lingeringDaemonProcess {
@@ -162,6 +266,7 @@ func writeManagedTestGeneration(t *testing.T, generationsRoot, generationName st
 
 func startLingeringDaemonProcessWith(t *testing.T, launcher *Launcher, executable, mode string, extraArgs []string) *lingeringDaemonProcess {
 	t.Helper()
+	launcher.preflightReplace = func(context.Context, daemonCommand) error { return nil }
 	if err := os.MkdirAll(filepath.Dir(launcher.LockPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -244,12 +349,246 @@ func (p *lingeringDaemonProcess) release() {
 
 func useRecordingDaemonStarter(launcher *Launcher) *recordingDaemonStarter {
 	starter := &recordingDaemonStarter{process: &recordingDaemonProcess{exitCh: make(chan error)}}
+	launcher.preflightReplace = func(context.Context, daemonCommand) error { return nil }
 	launcher.startProcess = func(spec daemonProcessSpec) (daemonProcess, error) {
 		spec.args = append([]string(nil), spec.args...)
 		starter.specs = append(starter.specs, spec)
 		return starter.process, nil
 	}
 	return starter
+}
+
+func TestLauncherReplacePreflightFailureLeavesPredecessorRunning(t *testing.T) {
+	repoDir := t.TempDir()
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	launcher := NewLauncher(repoDir, socketPath)
+	launcher.BinPath = filepath.Join(t.TempDir(), "candidate-azd")
+	if err := os.WriteFile(launcher.BinPath, []byte("candidate"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shutdownCalls := 0
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		shutdownCalls++
+		return nil
+	}
+	launcher.preflightReplace = func(context.Context, daemonCommand) error {
+		return errors.New("candidate missing")
+	}
+
+	err := launcher.Replace(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "before stopping predecessor") {
+		t.Fatalf("Replace() error = %v, want preflight failure", err)
+	}
+	if shutdownCalls != 0 {
+		t.Fatalf("shutdown calls = %d, want predecessor untouched", shutdownCalls)
+	}
+}
+
+func TestLauncherReplaceRejectsUnavailableRollbackIdentityBeforeShutdown(t *testing.T) {
+	launcher, shutdownCalls := newRollbackPreflightLauncher(t, processIdentity{})
+
+	err := launcher.Replace(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "executable path was unavailable") {
+		t.Fatalf("Replace() error = %v, want unavailable predecessor executable", err)
+	}
+	if *shutdownCalls != 0 {
+		t.Fatalf("shutdown calls = %d, want healthy predecessor untouched", *shutdownCalls)
+	}
+}
+
+func TestLauncherReplaceRejectsUnmanagedGlobalRollbackIdentityBeforeShutdown(t *testing.T) {
+	predecessor := filepath.Join(t.TempDir(), "azd")
+	if err := os.WriteFile(predecessor, []byte("predecessor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	launcher, shutdownCalls := newRollbackPreflightLauncher(t, processIdentity{executable: predecessor})
+
+	err := launcher.Replace(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "not a managed azd generation") {
+		t.Fatalf("Replace() error = %v, want unmanaged predecessor rejection", err)
+	}
+	if *shutdownCalls != 0 {
+		t.Fatalf("shutdown calls = %d, want healthy predecessor untouched", *shutdownCalls)
+	}
+}
+
+func newRollbackPreflightLauncher(t *testing.T, owner processIdentity) (*Launcher, *int) {
+	t.Helper()
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	candidate := filepath.Join(t.TempDir(), "candidate-azd")
+	if err := os.WriteFile(candidate, []byte("candidate"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	launcher := NewLauncher(t.TempDir(), filepath.Join(t.TempDir(), "daemon.sock"))
+	launcher.BinPath = candidate
+	launcher.preflightReplace = func(context.Context, daemonCommand) error { return nil }
+	launcher.captureOwner = func() (processIdentity, bool, error) { return owner, true, nil }
+	shutdownCalls := 0
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		shutdownCalls++
+		return errors.New("shutdown must not be attempted")
+	}
+	launcher.terminateLockOwner = func(string) error {
+		return errors.New("termination must not be attempted")
+	}
+	return launcher, &shutdownCalls
+}
+
+func TestPreflightReplacementCommandRejectsMissingAndIncompatibleCandidate(t *testing.T) {
+	missing := daemonCommand{executable: filepath.Join(t.TempDir(), "missing-azd")}
+	if _, err := resolveCommandExecutable(missing); err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("missing preflight error = %v", err)
+	}
+
+	incompatible := filepath.Join(t.TempDir(), "azd")
+	if err := os.WriteFile(incompatible, []byte("#!/bin/sh\necho '{\"daemon_version\":\"old\",\"min_protocol_version\":999,\"max_protocol_version\":999}'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := preflightReplacementCommand(context.Background(), daemonCommand{executable: incompatible}); err == nil || !strings.Contains(err.Error(), "incompatible") {
+		t.Fatalf("incompatible preflight error = %v", err)
+	}
+
+	compatible := filepath.Join(t.TempDir(), "azd")
+	report, err := json.Marshal(protocol.CurrentDaemonExecutablePreflight("candidate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nprintf '%s\\n' '" + string(report) + "'\n"
+	if err := os.WriteFile(compatible, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := preflightReplacementCommand(context.Background(), daemonCommand{executable: compatible}); err != nil {
+		t.Fatalf("compatible preflight error = %v", err)
+	}
+}
+
+func TestLauncherReplacementStartupFailureRestoresPredecessor(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	repoDir := makeScopedDaemonLauncherRepo(t)
+	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
+	launcher := NewLauncher(repoDir, socketPath)
+	candidate := filepath.Join(t.TempDir(), "candidate-azd")
+	if err := os.WriteFile(candidate, []byte("candidate"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resolvedCandidate, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launcher.BinPath = candidate
+	predecessor := startLingeringDaemonProcess(t, launcher)
+	launcher.preflightReplace = func(context.Context, daemonCommand) error { return nil }
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		if err := predecessor.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			return err
+		}
+		predecessor.awaitShutdown(t)
+		predecessor.release()
+		return nil
+	}
+	restored := false
+	launcher.waitForReady = func(context.Context, string) error {
+		if restored {
+			return nil
+		}
+		return context.DeadlineExceeded
+	}
+	starts := make([]string, 0, 2)
+	launcher.startProcess = func(spec daemonProcessSpec) (daemonProcess, error) {
+		starts = append(starts, spec.command.executable)
+		if spec.command.executable == resolvedCandidate {
+			return nil, errors.New("candidate startup failed")
+		}
+		restored = true
+		return &recordingDaemonProcess{exitCh: make(chan error)}, nil
+	}
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return &trackingWriteCloser{}, nil }
+
+	err = launcher.Replace(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "restored predecessor") {
+		t.Fatalf("Replace() error = %v starts=%v restored=%t, want restored predecessor diagnostic", err, starts, restored)
+	}
+	if len(starts) != 2 || starts[0] != resolvedCandidate || starts[1] == resolvedCandidate {
+		t.Fatalf("replacement starts = %v, want candidate then captured predecessor", starts)
+	}
+}
+
+func TestLauncherGlobalRollbackUsesManagedPredecessorAfterCallerCancellation(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	generationDir := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.previous")
+	if err := os.MkdirAll(generationDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	predecessor := filepath.Join(generationDir, "azd")
+	for _, executable := range []string{filepath.Join(generationDir, "az"), predecessor} {
+		if err := os.WriteFile(executable, []byte("predecessor"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resolvedPredecessor, err := filepath.EvalSymlinks(predecessor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(t.TempDir(), "candidate-azd")
+	if err := os.WriteFile(candidate, []byte("candidate"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	launcher := NewLauncher(t.TempDir(), filepath.Join(t.TempDir(), "daemon.sock"))
+	restored := false
+	launcher.waitForReady = func(ctx context.Context, _ string) error {
+		if restored {
+			return ctx.Err()
+		}
+		return context.DeadlineExceeded
+	}
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return &trackingWriteCloser{}, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	launcher.startProcess = func(spec daemonProcessSpec) (daemonProcess, error) {
+		if spec.command.executable == candidate {
+			cancel()
+			return nil, errors.New("candidate startup failed")
+		}
+		if spec.command.executable != resolvedPredecessor {
+			t.Fatalf("rollback executable = %q, want %q", spec.command.executable, resolvedPredecessor)
+		}
+		restored = true
+		return &recordingDaemonProcess{exitCh: make(chan error)}, nil
+	}
+
+	predecessorCmd, present, err := launcher.resolvePredecessorRollbackCommand(processIdentity{
+		executable: predecessor,
+		arguments:  []string{"azd", "--repo", launcher.RepoDir, "--socket", launcher.SocketPath, "--lock", launcher.LockPath},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = launcher.startReplacementWithRollback(ctx, daemonCommand{executable: candidate}, predecessorCmd, present)
+	if err == nil || !strings.Contains(err.Error(), "restored predecessor") {
+		t.Fatalf("rollback error = %v, want restored predecessor after caller cancellation", err)
+	}
+}
+
+func TestLauncherReplacementStartupFailureReportsNoPredecessor(t *testing.T) {
+	launcher := NewLauncher(t.TempDir(), filepath.Join(t.TempDir(), "daemon.sock"))
+	launcher.waitForReady = func(context.Context, string) error { return context.DeadlineExceeded }
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return &trackingWriteCloser{}, nil }
+	launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+		return nil, errors.New("candidate startup failed")
+	}
+
+	err := launcher.startReplacementWithRollback(
+		context.Background(),
+		daemonCommand{executable: "candidate-azd"},
+		daemonCommand{},
+		false,
+	)
+	if err == nil || !strings.Contains(err.Error(), "no predecessor was present to restore") {
+		t.Fatalf("startup error = %v, want absent predecessor diagnostic", err)
+	}
+	if strings.Contains(err.Error(), "executable path was unavailable") {
+		t.Fatalf("startup error = %v, unexpectedly reports unavailable predecessor executable", err)
+	}
 }
 
 func TestLauncherRollbackCleansRejectedCandidateAndVerifiesRestoredPredecessor(t *testing.T) {
@@ -431,6 +770,25 @@ func TestLauncherRollbackNeverTerminatesNewUnreadyOwner(t *testing.T) {
 	}
 	if terminateCalls != 0 {
 		t.Fatalf("terminateLockOwner calls = %d, want 0", terminateCalls)
+	}
+}
+
+func TestLauncherGlobalRollbackRejectsUnmanagedPredecessor(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	predecessor := filepath.Join(t.TempDir(), "azd")
+	if err := os.WriteFile(predecessor, []byte("predecessor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	launcher := NewLauncher(t.TempDir(), filepath.Join(t.TempDir(), "daemon.sock"))
+	launcher.waitForReady = func(context.Context, string) error { return context.DeadlineExceeded }
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return &trackingWriteCloser{}, nil }
+	launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+		return nil, errors.New("candidate startup failed")
+	}
+
+	_, _, err := launcher.resolvePredecessorRollbackCommand(processIdentity{executable: predecessor}, true)
+	if err == nil || !strings.Contains(err.Error(), "not a managed azd generation") {
+		t.Fatalf("rollback error = %v, want unmanaged predecessor rejection", err)
 	}
 }
 
@@ -798,6 +1156,10 @@ func TestLauncherResolveBinary_PrefersWorkingDirBinOverRepoBin(t *testing.T) {
 }
 
 func newLauncherTestWorktree(t *testing.T) string {
+	return newLauncherTestWorktreeWithModule(t, "github.com/riordanpawley/azedarach")
+}
+
+func newLauncherTestWorktreeWithModule(t *testing.T, module string) string {
 	t.Helper()
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
@@ -805,7 +1167,7 @@ func newLauncherTestWorktree(t *testing.T) string {
 	if err := os.MkdirAll(filepath.Join(repo, ".git", "worktrees", "wt"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(repo worktrees): %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module github.com/riordanpawley/azedarach\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module "+module+"\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(go.mod): %v", err)
 	}
 	if err := os.MkdirAll(worktree, 0o755); err != nil {
@@ -853,6 +1215,175 @@ func TestLauncherResolveCommand_UsesLocalGoRunForScopedWorktreeWithoutBinary(t *
 	if got.dir != worktree {
 		t.Fatalf("resolveCommand().dir = %q, want %q", got.dir, worktree)
 	}
+}
+
+func TestLauncherReplace_ScopedSourceFallbackStagesDirectExecutable(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv("AZEDARACH_DAEMON_BIN", "")
+	repoDir := writeScopedSourceFallbackDaemon(t)
+	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return &trackingWriteCloser{}, nil }
+
+	ready := false
+	launcher.waitForReady = func(context.Context, string) error {
+		if ready {
+			return nil
+		}
+		return context.DeadlineExceeded
+	}
+	var started daemonProcessSpec
+	launcher.startProcess = func(spec daemonProcessSpec) (daemonProcess, error) {
+		started = spec
+		ready = true
+		return &recordingDaemonProcess{exitCh: make(chan error)}, nil
+	}
+	launcher.replacementSuccessorVerifier = func(command daemonCommand) error {
+		if command.executable != started.command.executable {
+			return fmt.Errorf("verified executable %q differs from started %q", command.executable, started.command.executable)
+		}
+		if len(command.args) != 0 || command.dir != "" {
+			return fmt.Errorf("replacement command remained wrapped: %+v", command)
+		}
+		if !executableFile(command.executable) {
+			return fmt.Errorf("staged executable is unavailable: %s", command.executable)
+		}
+		stagingRoot := filepath.Join(config.ScopedDaemonRuntimeDir(repoDir), "executables")
+		resolvedStagingRoot, err := filepath.EvalSymlinks(stagingRoot)
+		if err != nil {
+			return fmt.Errorf("resolve staging root: %w", err)
+		}
+		if rel, err := filepath.Rel(resolvedStagingRoot, command.executable); err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("staged executable %q is outside %q", command.executable, stagingRoot)
+		}
+		return nil
+	}
+
+	if err := launcher.Replace(context.Background()); err != nil {
+		t.Fatalf("Replace() error = %v", err)
+	}
+	if started.command.executable == "" {
+		t.Fatal("Replace() did not start the staged daemon")
+	}
+}
+
+func TestLauncherReplace_ScopedSourceFallbackRollbackUsesStablePredecessor(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv("AZEDARACH_DAEMON_BIN", "")
+	repoDir := writeScopedSourceFallbackDaemon(t)
+	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return &trackingWriteCloser{}, nil }
+	launcher.preflightReplace = func(_ context.Context, command daemonCommand) error {
+		if len(command.args) != 0 || command.dir != "" || !executableFile(command.executable) {
+			return fmt.Errorf("preflight command is not a stable direct executable: %+v", command)
+		}
+		return nil
+	}
+
+	predecessorExecutable := filepath.Join(t.TempDir(), "go-build-predecessor-azd")
+	testBinary, err := os.ReadFile(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(predecessorExecutable, testBinary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	predecessor := startLingeringDaemonProcessWith(
+		t,
+		launcher,
+		predecessorExecutable,
+		"",
+		[]string{"--", "--repo", launcher.RepoDir, "--socket", launcher.SocketPath, "--lock", launcher.LockPath},
+	)
+	launcher.preflightReplace = func(_ context.Context, command daemonCommand) error {
+		if len(command.args) != 0 || command.dir != "" || !executableFile(command.executable) {
+			return fmt.Errorf("preflight command is not a stable direct executable: %+v", command)
+		}
+		return nil
+	}
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		if err := predecessor.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			return err
+		}
+		predecessor.awaitShutdown(t)
+		if err := os.Remove(predecessorExecutable); err != nil {
+			return err
+		}
+		predecessor.release()
+		return nil
+	}
+
+	restored := false
+	launcher.waitForReady = func(context.Context, string) error {
+		if restored {
+			return nil
+		}
+		return context.DeadlineExceeded
+	}
+	starts := make([]daemonProcessSpec, 0, 2)
+	launcher.startProcess = func(spec daemonProcessSpec) (daemonProcess, error) {
+		starts = append(starts, spec)
+		if len(starts) == 1 {
+			return nil, errors.New("candidate startup failed")
+		}
+		if spec.command.executable == predecessorExecutable || !executableFile(spec.command.executable) {
+			return nil, fmt.Errorf("rollback executable was not retained: %s", spec.command.executable)
+		}
+		restored = true
+		return &recordingDaemonProcess{exitCh: make(chan error)}, nil
+	}
+	launcher.replacementSuccessorVerifier = func(command daemonCommand) error {
+		if !restored || !executableFile(command.executable) {
+			return errors.New("restored predecessor executable is unavailable")
+		}
+		return nil
+	}
+
+	err = launcher.Replace(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "restored predecessor") {
+		t.Fatalf("Replace() error = %v, want stable predecessor restoration", err)
+	}
+	if len(starts) != 2 {
+		t.Fatalf("replacement starts = %d, want candidate then predecessor", len(starts))
+	}
+}
+
+func writeScopedSourceFallbackDaemon(t *testing.T) string {
+	t.Helper()
+	repoDir := newLauncherTestWorktree(t)
+	if err := os.WriteFile(filepath.Join(repoDir, "go.mod"), []byte("module github.com/riordanpawley/azedarach\n\ngo 1.24.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commandDir := filepath.Join(repoDir, "cmd", "azd")
+	if err := os.MkdirAll(commandDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	report, err := json.Marshal(protocol.CurrentDaemonExecutablePreflight("scoped-source-fixture"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := fmt.Sprintf(`package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	for _, arg := range os.Args[1:] {
+		if arg == "--preflight" {
+			fmt.Println(%q)
+			return
+		}
+	}
+	select {}
+}
+`, string(report))
+	if err := os.WriteFile(filepath.Join(commandDir, "main.go"), []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return repoDir
 }
 
 func TestLauncherResolveCommand_DaemonBinOverrideWinsOverScopedGoRun(t *testing.T) {
@@ -2770,22 +3301,55 @@ func TestLauncherStopWaitsForExactProcessAfterLockRelease(t *testing.T) {
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
 	repoDir := newLauncherTestWorktree(t)
 	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
-	predecessor := startLingeringDaemonProcess(t, launcher)
-	launcher.shutdownViaSocket = func(context.Context, string) error {
-		return predecessor.cmd.Process.Signal(syscall.SIGTERM)
+	runtimeDir := config.ScopedDaemonRuntimeDir(repoDir)
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcher.SocketPath, nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
 
-	stopDone := make(chan error, 1)
-	go func() { stopDone <- launcher.Stop(context.Background()) }()
-	predecessor.awaitShutdown(t)
-	select {
-	case err := <-stopDone:
-		t.Fatalf("Stop returned before exact predecessor exit: %v", err)
-	default:
+	cmd := exec.Command("/bin/sh", "-c", "trap 'rm -f \"$1\" \"$2\"; sleep 0.25; exit 0' TERM; while :; do sleep 1; done", "sh", launcher.LockPath, launcher.SocketPath)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
 	}
-	predecessor.release()
-	if err := <-stopDone; err != nil {
+	pid := cmd.Process.Pid
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		select {
+		case <-waitDone:
+		default:
+		}
+	})
+	lockRecord, err := json.Marshal(map[string]any{"pid": pid, "created_at": time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcher.LockPath, lockRecord, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		return cmd.Process.Signal(syscall.SIGTERM)
+	}
+
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := launcher.Stop(ctx); err != nil {
 		t.Fatalf("Stop() error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < 200*time.Millisecond {
+		t.Fatalf("Stop() returned after %v, before delayed post-lock process exit", elapsed)
+	}
+	select {
+	case err := <-waitDone:
+		if err != nil {
+			t.Fatalf("daemon child exit: %v", err)
+		}
+	default:
+		t.Fatalf("daemon child pid %d was not reaped before Stop returned", pid)
 	}
 }
 
@@ -2795,13 +3359,6 @@ func TestLauncherStopBoundsExactProcessExitWait(t *testing.T) {
 	repoDir := newLauncherTestWorktree(t)
 	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
 	launcher.processExitTimeout = 50 * time.Millisecond
-	var gotTimeout time.Duration
-	launcher.processExitContext = func(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
-		gotTimeout = timeout
-		ctx, cancel := context.WithCancel(parent)
-		cancel()
-		return ctx, func() {}
-	}
 	runtimeDir := config.ScopedDaemonRuntimeDir(repoDir)
 	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -2815,12 +3372,13 @@ func TestLauncherStopBoundsExactProcessExitWait(t *testing.T) {
 	}
 	launcher.shutdownViaSocket = func(context.Context, string) error { return nil }
 
+	started := time.Now()
 	err = launcher.Stop(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "still alive after stop") {
 		t.Fatalf("Stop() error = %v, want bounded exact-process wait failure", err)
 	}
-	if gotTimeout != launcher.processExitTimeout {
-		t.Fatalf("process exit timeout = %v, want %v", gotTimeout, launcher.processExitTimeout)
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Stop() took %v, want bounded failure", elapsed)
 	}
 }
 

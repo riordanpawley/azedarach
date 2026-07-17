@@ -3,6 +3,7 @@ package daemonprocess
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -57,10 +58,11 @@ type Launcher struct {
 }
 
 type daemonCommand struct {
-	executable string
-	args       []string
-	dir        string
-	env        []string
+	executable     string
+	args           []string
+	dir            string
+	env            []string
+	sourceFallback bool
 }
 
 type boundedOutput struct {
@@ -542,6 +544,10 @@ func (l *Launcher) cleanupScopedRuntimeAssets() error {
 	if err := os.Remove(wantLock); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove scoped daemon asset %s: %w", wantLock, err)
 	}
+	stagedExecutables := filepath.Join(runtimeDir, "executables")
+	if err := os.RemoveAll(stagedExecutables); err != nil {
+		return fmt.Errorf("remove scoped daemon staged executables: %w", err)
+	}
 	sessionLaunchDir := filepath.Join(runtimeDir, "session-launch")
 	if err := os.Remove(sessionLaunchDir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove scoped daemon runtime directory %s: %w", sessionLaunchDir, err)
@@ -864,17 +870,8 @@ func (l *Launcher) verifyReplacementSuccessor(daemonCmd daemonCommand) error {
 			return errors.New("replacement socket lock owner is not a managed installed daemon")
 		}
 	}
-	for _, required := range []struct {
-		flag  string
-		value string
-	}{
-		{flag: "--repo", value: l.RepoDir},
-		{flag: "--socket", value: l.SocketPath},
-		{flag: "--lock", value: l.LockPath},
-	} {
-		if !hasExactProcessArgument(successor.arguments, required.flag, required.value) {
-			return fmt.Errorf("replacement socket lock owner does not match canonical %s", strings.TrimPrefix(required.flag, "--"))
-		}
+	if err := l.verifyCanonicalDaemonArguments(successor, "replacement socket lock owner"); err != nil {
+		return err
 	}
 	confirmed, confirmedPresent, err := l.captureLockOwnerIdentity()
 	if err != nil {
@@ -982,11 +979,10 @@ func (l *Launcher) Replace(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	resolvedExecutable, err := resolveCommandExecutable(daemonCmd)
+	daemonCmd, err = l.materializeReplacementCommand(ctx, daemonCmd)
 	if err != nil {
 		return fmt.Errorf("resolve daemon replacement candidate: %w", err)
 	}
-	daemonCmd.executable = resolvedExecutable
 	preflight := l.preflightReplace
 	if preflight == nil {
 		preflight = preflightReplacementCommand
@@ -997,6 +993,11 @@ func (l *Launcher) Replace(ctx context.Context) error {
 	predecessorCmd, predecessorPresent, err := l.resolvePredecessorRollbackCommand(owner, ownerPresent)
 	if err != nil {
 		return fmt.Errorf("preflight daemon predecessor rollback before stopping predecessor: %w", err)
+	}
+	if predecessorPresent {
+		if err := preflight(ctx, predecessorCmd); err != nil {
+			return fmt.Errorf("preflight daemon predecessor rollback %s before stopping predecessor: %w", predecessorCmd.displayName(), err)
+		}
 	}
 	if strings.TrimSpace(l.SocketPath) != "" && (ownerPresent || !l.ownsCanonicalRuntime()) {
 		reason := strings.TrimSpace(l.replaceReason)
@@ -1057,7 +1058,179 @@ func (l *Launcher) resolvePredecessorRollbackCommand(owner processIdentity, owne
 			return daemonCommand{}, false, fmt.Errorf("predecessor executable %s is not a managed azd generation", resolvedExecutable)
 		}
 	}
+	if err := l.verifyCanonicalDaemonArguments(owner, "predecessor"); err != nil {
+		return daemonCommand{}, false, err
+	}
+	if config.UseScopedDaemonRuntimeFor(l.RepoDir) {
+		stagedExecutable, err := l.stageScopedExecutableCopy(owner, "predecessor")
+		if err != nil {
+			return daemonCommand{}, false, err
+		}
+		resolvedExecutable = stagedExecutable
+	}
 	return l.commandForExecutable(resolvedExecutable), true, nil
+}
+
+func (l *Launcher) materializeReplacementCommand(ctx context.Context, command daemonCommand) (daemonCommand, error) {
+	if !command.sourceFallback {
+		resolvedExecutable, err := resolveCommandExecutable(command)
+		if err != nil {
+			return daemonCommand{}, err
+		}
+		command.executable = resolvedExecutable
+		return command, nil
+	}
+	if !config.UseScopedDaemonRuntimeFor(l.RepoDir) {
+		return daemonCommand{}, errors.New("source-fallback daemon materialization requires worktree-scoped runtime")
+	}
+	goExecutable, err := resolveCommandExecutable(command)
+	if err != nil {
+		return daemonCommand{}, fmt.Errorf("resolve Go tool for scoped daemon source fallback: %w", err)
+	}
+	stageDir, stagedExecutable, err := l.newScopedExecutableStage("candidate")
+	if err != nil {
+		return daemonCommand{}, err
+	}
+	keepStage := false
+	defer func() {
+		if !keepStage {
+			_ = os.RemoveAll(stageDir)
+		}
+	}()
+	build := exec.CommandContext(ctx, goExecutable, "build", "-o", stagedExecutable, "./cmd/azd")
+	build.Dir = command.dir
+	build.Env = command.env
+	build.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	build.Cancel = func() error {
+		if build.Process == nil {
+			return os.ErrProcessDone
+		}
+		if err := syscall.Kill(-build.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return err
+		}
+		return nil
+	}
+	stdout := boundedOutput{remaining: 64 << 10}
+	stderr := boundedOutput{remaining: 64 << 10}
+	build.Stdout = &stdout
+	build.Stderr = &stderr
+	if err := build.Run(); err != nil {
+		return daemonCommand{}, fmt.Errorf("build scoped daemon source fallback: %w (stdout %q, stderr %q)", err, strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()))
+	}
+	resolvedExecutable, err := resolveCommandExecutable(daemonCommand{executable: stagedExecutable})
+	if err != nil {
+		return daemonCommand{}, fmt.Errorf("resolve staged scoped daemon candidate: %w", err)
+	}
+	keepStage = true
+	return daemonCommand{executable: resolvedExecutable, env: command.env}, nil
+}
+
+func (l *Launcher) stageScopedExecutableCopy(owner processIdentity, purpose string) (string, error) {
+	stageDir, stagedExecutable, err := l.newScopedExecutableStage(purpose)
+	if err != nil {
+		return "", err
+	}
+	keepStage := false
+	defer func() {
+		if !keepStage {
+			_ = os.RemoveAll(stageDir)
+		}
+	}()
+	source, err := os.Open(owner.executable)
+	if err != nil {
+		return "", fmt.Errorf("open scoped daemon predecessor executable for rollback: %w", err)
+	}
+	before, err := source.Stat()
+	if err != nil {
+		_ = source.Close()
+		return "", fmt.Errorf("inspect scoped daemon predecessor executable before staging: %w", err)
+	}
+	if !before.Mode().IsRegular() || before.Mode().Perm()&0o111 == 0 {
+		_ = source.Close()
+		return "", errors.New("scoped daemon predecessor executable is not a regular executable file")
+	}
+	destination, err := os.OpenFile(stagedExecutable, os.O_CREATE|os.O_EXCL|os.O_WRONLY, before.Mode().Perm())
+	if err != nil {
+		_ = source.Close()
+		return "", fmt.Errorf("create staged scoped daemon predecessor executable: %w", err)
+	}
+	copiedHash := sha256.New()
+	copiedBytes, copyErr := io.Copy(io.MultiWriter(destination, copiedHash), source)
+	syncErr := destination.Sync()
+	closeDestinationErr := destination.Close()
+	_, seekErr := source.Seek(0, io.SeekStart)
+	sourceHash := sha256.New()
+	_, hashErr := io.Copy(sourceHash, source)
+	after, statErr := source.Stat()
+	closeSourceErr := source.Close()
+	if copyErr != nil {
+		return "", fmt.Errorf("copy scoped daemon predecessor executable for rollback: %w", copyErr)
+	}
+	if syncErr != nil {
+		return "", fmt.Errorf("sync staged scoped daemon predecessor executable: %w", syncErr)
+	}
+	if closeDestinationErr != nil {
+		return "", fmt.Errorf("close staged scoped daemon predecessor executable: %w", closeDestinationErr)
+	}
+	if seekErr != nil {
+		return "", fmt.Errorf("rewind scoped daemon predecessor executable after staging: %w", seekErr)
+	}
+	if hashErr != nil {
+		return "", fmt.Errorf("hash scoped daemon predecessor executable after staging: %w", hashErr)
+	}
+	if statErr != nil {
+		return "", fmt.Errorf("inspect scoped daemon predecessor executable after staging: %w", statErr)
+	}
+	if closeSourceErr != nil {
+		return "", fmt.Errorf("close scoped daemon predecessor executable: %w", closeSourceErr)
+	}
+	if !os.SameFile(before, after) || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		return "", errors.New("scoped daemon predecessor executable changed while staging rollback copy")
+	}
+	if copiedBytes != before.Size() || !bytes.Equal(copiedHash.Sum(nil), sourceHash.Sum(nil)) {
+		return "", errors.New("staged scoped daemon predecessor executable does not match the verified source bytes")
+	}
+	confirmed, confirmedPresent, err := l.captureLockOwnerIdentity()
+	if err != nil {
+		return "", fmt.Errorf("recapture scoped daemon predecessor after staging rollback copy: %w", err)
+	}
+	if !sameProcessIdentity(owner, true, confirmed, confirmedPresent) {
+		return "", errors.New("scoped daemon predecessor identity changed while staging rollback copy")
+	}
+	resolvedExecutable, err := resolveCommandExecutable(daemonCommand{executable: stagedExecutable})
+	if err != nil {
+		return "", fmt.Errorf("resolve staged scoped daemon predecessor: %w", err)
+	}
+	keepStage = true
+	return resolvedExecutable, nil
+}
+
+func (l *Launcher) newScopedExecutableStage(purpose string) (string, string, error) {
+	root := filepath.Join(config.ScopedDaemonRuntimeDir(l.RepoDir), "executables")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", "", fmt.Errorf("create scoped daemon executable staging root: %w", err)
+	}
+	stageDir, err := os.MkdirTemp(root, purpose+"-")
+	if err != nil {
+		return "", "", fmt.Errorf("create scoped daemon executable stage: %w", err)
+	}
+	return stageDir, filepath.Join(stageDir, "azd"), nil
+}
+
+func (l *Launcher) verifyCanonicalDaemonArguments(identity processIdentity, label string) error {
+	for _, required := range []struct {
+		flag  string
+		value string
+	}{
+		{flag: "--repo", value: l.RepoDir},
+		{flag: "--socket", value: l.SocketPath},
+		{flag: "--lock", value: l.LockPath},
+	} {
+		if !hasExactProcessArgument(identity.arguments, required.flag, required.value) {
+			return fmt.Errorf("%s executable arguments do not match canonical %s", label, strings.TrimPrefix(required.flag, "--"))
+		}
+	}
+	return nil
 }
 
 func (l *Launcher) startReplacementWithRollback(ctx context.Context, daemonCmd, predecessorCmd daemonCommand, predecessorPresent bool) error {
@@ -1220,7 +1393,7 @@ func (l *Launcher) resolveCommand() (daemonCommand, error) {
 		}
 	}
 	if sourceDir := l.localScopedDaemonSourceDir(); sourceDir != "" {
-		return daemonCommand{executable: "go", args: []string{"run", "./cmd/azd"}, dir: sourceDir}, nil
+		return daemonCommand{executable: "go", args: []string{"run", "./cmd/azd"}, dir: sourceDir, sourceFallback: true}, nil
 	}
 	return daemonCommand{executable: "azd"}, nil
 }
