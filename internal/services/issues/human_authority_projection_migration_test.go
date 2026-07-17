@@ -86,7 +86,7 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, mailboxObservationProjectionCutoverMigrationID).Scan(&checksum); err != nil || checksum != "fd86080f491210c169005c7f28bc778aca3eea2d70ce15a6c001bb960397e260" {
 				t.Fatalf("mailbox cutover checksum=%q err=%v", checksum, err)
 			}
-			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, mailboxObservationReplayRepairMigrationID).Scan(&checksum); err != nil || checksum != "d2b70f9828f9e642d4ec6191205500713bf51c0378cf3c261bf54fadf976779e" {
+			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, mailboxObservationReplayRepairMigrationID).Scan(&checksum); err != nil || checksum != "d08cab5cab607c0c91cfb01bbf96dd5ad52fef3e53372916462143174c0f7997" {
 				t.Fatalf("mailbox replay repair checksum=%q err=%v", checksum, err)
 			}
 			if err = validateMailboxObservationReplayRepair(ctx, db); err != nil {
@@ -187,7 +187,7 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, decisionIdempotencyMigrationID, "86d5400fe33bbc19e7e848bc232335809f76d85e4d45a6e45f6bc7ff77547f47").Scan(&ledgerRows); err != nil || ledgerRows != 1 {
 				t.Fatalf("decision idempotency ledger rows after reopen=%d err=%v", ledgerRows, err)
 			}
-			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, mailboxObservationReplayRepairMigrationID, "d2b70f9828f9e642d4ec6191205500713bf51c0378cf3c261bf54fadf976779e").Scan(&ledgerRows); err != nil || ledgerRows != 1 {
+			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, mailboxObservationReplayRepairMigrationID, "d08cab5cab607c0c91cfb01bbf96dd5ad52fef3e53372916462143174c0f7997").Scan(&ledgerRows); err != nil || ledgerRows != 1 {
 				t.Fatalf("mailbox replay repair ledger rows after reopen=%d err=%v", ledgerRows, err)
 			}
 			if err = validateMailboxObservationReplayRepair(ctx, reopenedDB); err != nil {

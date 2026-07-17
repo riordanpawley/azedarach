@@ -1,12 +1,15 @@
--- Migration manifest: 0053_mailbox_observation_replay_repair
+-- Migration manifest: 0055_mailbox_observation_replay_repair
 -- Authority: project issue-store SQLite observation history.
 --
 -- Schema effects:
 -- * No table, column, trigger, or index changes.
 --
 -- Data effects (Go-assisted, one transaction):
--- * Select only source_command=mailbox.cutover observations.
--- * Fail closed above the versioned 50,000-row cutover bound.
+-- * Select canonical mailbox envelopes produced by source_command=mailbox.cutover
+--   or source_command=mail.send observations.
+-- * Preserve legacy mail.send rows without a canonical mail_event envelope;
+--   malformed mailbox.cutover envelopes remain a fail-closed cutover error.
+-- * Fail closed above the versioned 50,000-row mailbox observation bound.
 -- * Preserve every top-level observation field and immutable mail_event scalar.
 -- * Reconstruct mail_event.payload from producer-authored top-level fields.
 -- * Exclude mail_event, mail_delivery_id, worker_evidence, and
@@ -15,7 +18,7 @@
 -- * Existing source mailbox JSONL is never read, rewritten, or deleted.
 --
 -- Validation effects:
--- * Every repaired cutover row must have a JSON object mail_event whose nested
+-- * Every repaired mailbox row must have a JSON object mail_event whose nested
 --   payload exactly matches canonical producer-authored top-level fields.
 -- * Applied-ledger payload-shape drift is repaired through the same bounded,
 --   transactional path; malformed or missing mail_event envelopes fail startup.
@@ -28,4 +31,4 @@
 --
 -- Ledger effects:
 -- * The immutable artifact checksum is pinned in the project.issues catalog.
--- * Exactly one 0053_mailbox_observation_replay_repair row is recorded.
+-- * Exactly one 0055_mailbox_observation_replay_repair row is recorded.

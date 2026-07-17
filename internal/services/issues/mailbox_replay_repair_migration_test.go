@@ -32,9 +32,14 @@ func TestMailboxObservationReplayRepairMigrationUpgradesRollsBackAndRejectsDrift
 			"body": "evidence", "created_at": observedAt.Format(time.RFC3339Nano),
 		},
 	}
-	event, err := seed.AppendIssueObservationEvent(ctx, child, IssueObservationEventParams{
+	cutoverEvent, err := seed.AppendIssueObservationEvent(ctx, child, IssueObservationEventParams{
 		Type: "worker-integration-ready", ObservedAt: observedAt, Source: "daemon-observation-replay",
 		SourceCommand: "mailbox.cutover", WorktreePath: t.TempDir(), Payload: payload,
+	})
+	require.NoError(t, err)
+	mailSendEvent, err := seed.AppendIssueObservationEvent(ctx, child, IssueObservationEventParams{
+		Type: "worker-integration-ready", ObservedAt: observedAt.Add(time.Second), Source: "agent",
+		SourceCommand: "mail.send", WorktreePath: t.TempDir(), Payload: payload,
 	})
 	require.NoError(t, err)
 	require.NoError(t, seed.CloseDB())
@@ -48,45 +53,45 @@ func TestMailboxObservationReplayRepairMigrationUpgradesRollsBackAndRejectsDrift
 	_, err = failed.List(ctx)
 	require.ErrorContains(t, err, "injected repair failure")
 	require.NoError(t, failed.CloseDB())
-	assertMailboxReplayRepairState(t, dbPath, event.ID, false, false)
+	assertMailboxReplayRepairState(t, dbPath, []int64{cutoverEvent.ID, mailSendEvent.ID}, false, false)
 
 	upgraded := NewClientAtPath(dbPath, slog.Default())
 	_, err = upgraded.List(ctx)
 	require.NoError(t, err)
 	require.NoError(t, upgraded.CloseDB())
-	assertMailboxReplayRepairState(t, dbPath, event.ID, true, true)
+	assertMailboxReplayRepairState(t, dbPath, []int64{cutoverEvent.ID, mailSendEvent.ID}, true, true)
 
 	reopened := NewClientAtPath(dbPath, slog.Default())
 	_, err = reopened.List(ctx)
 	require.NoError(t, err)
 	require.NoError(t, reopened.CloseDB())
-	assertMailboxReplayRepairState(t, dbPath, event.ID, true, true)
+	assertMailboxReplayRepairState(t, dbPath, []int64{cutoverEvent.ID, mailSendEvent.ID}, true, true)
 
 	raw, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath))
 	require.NoError(t, err)
-	_, err = raw.Exec(`UPDATE issue_observation_events SET payload_json = json_remove(payload_json, '$.mail_event.payload') WHERE id = ?`, event.ID)
+	_, err = raw.Exec(`UPDATE issue_observation_events SET payload_json = json_remove(payload_json, '$.mail_event.payload') WHERE id = ?`, cutoverEvent.ID)
 	require.NoError(t, err)
 	require.NoError(t, raw.Close())
 	drifted := NewClientAtPath(dbPath, slog.Default())
 	_, err = drifted.List(ctx)
 	require.NoError(t, err)
 	require.NoError(t, drifted.CloseDB())
-	assertMailboxReplayRepairState(t, dbPath, event.ID, true, true)
+	assertMailboxReplayRepairState(t, dbPath, []int64{cutoverEvent.ID, mailSendEvent.ID}, true, true)
 
 	raw, err = sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath))
 	require.NoError(t, err)
-	_, err = raw.Exec(`UPDATE issue_observation_events SET payload_json = json_set(payload_json, '$.mail_event.payload', 'invalid') WHERE id = ?`, event.ID)
+	_, err = raw.Exec(`UPDATE issue_observation_events SET payload_json = json_set(payload_json, '$.mail_event.payload', 'invalid') WHERE id = ?`, mailSendEvent.ID)
 	require.NoError(t, err)
 	require.NoError(t, raw.Close())
 	scalarDrift := NewClientAtPath(dbPath, slog.Default())
 	_, err = scalarDrift.List(ctx)
 	require.NoError(t, err)
 	require.NoError(t, scalarDrift.CloseDB())
-	assertMailboxReplayRepairState(t, dbPath, event.ID, true, true)
+	assertMailboxReplayRepairState(t, dbPath, []int64{cutoverEvent.ID, mailSendEvent.ID}, true, true)
 
 	raw, err = sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath))
 	require.NoError(t, err)
-	_, err = raw.Exec(`UPDATE issue_observation_events SET payload_json = json_remove(payload_json, '$.mail_event') WHERE id = ?`, event.ID)
+	_, err = raw.Exec(`UPDATE issue_observation_events SET payload_json = json_remove(payload_json, '$.mail_event') WHERE id = ?`, cutoverEvent.ID)
 	require.NoError(t, err)
 	require.NoError(t, raw.Close())
 	malformed := NewClientAtPath(dbPath, slog.Default())
@@ -96,10 +101,10 @@ func TestMailboxObservationReplayRepairMigrationUpgradesRollsBackAndRejectsDrift
 }
 
 func TestMailboxObservationReplayRepairManifestDescribesImmutableContract(t *testing.T) {
-	manifest, err := loadMigrationSQL("migrations/0053_mailbox_observation_replay_repair.manifest.sql")
+	manifest, err := loadMigrationSQL("migrations/0055_mailbox_observation_replay_repair.manifest.sql")
 	require.NoError(t, err)
 	for _, required := range []string{
-		"Schema effects:", "Data effects", "source_command=mailbox.cutover",
+		"Schema effects:", "Data effects", "source_command=mailbox.cutover", "source_command=mail.send",
 		"Validation effects:", "Rollback and idempotency effects:", "Ledger effects:",
 		"immutable artifact checksum",
 	} {
@@ -116,28 +121,32 @@ func removeMailboxReplayRepairLedger(t *testing.T, dbPath string) {
 	require.NoError(t, raw.Close())
 }
 
-func assertMailboxReplayRepairState(t *testing.T, dbPath string, eventID int64, wantPayload, wantLedger bool) {
+func assertMailboxReplayRepairState(t *testing.T, dbPath string, eventIDs []int64, wantPayload, wantLedger bool) {
 	t.Helper()
 	raw, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath))
 	require.NoError(t, err)
 	defer raw.Close()
-	var hasPayload bool
-	require.NoError(t, raw.QueryRow(`SELECT COALESCE(json_type(payload_json, '$.mail_event.payload') = 'object', 0) FROM issue_observation_events WHERE id = ?`, eventID).Scan(&hasPayload))
-	require.Equal(t, wantPayload, hasPayload)
+	for _, eventID := range eventIDs {
+		var hasPayload bool
+		require.NoError(t, raw.QueryRow(`SELECT COALESCE(json_type(payload_json, '$.mail_event.payload') = 'object', 0) FROM issue_observation_events WHERE id = ?`, eventID).Scan(&hasPayload))
+		require.Equal(t, wantPayload, hasPayload)
+	}
 	var ledger bool
 	require.NoError(t, raw.QueryRow(`SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE id = ?)`, mailboxObservationReplayRepairMigrationID).Scan(&ledger))
 	require.Equal(t, wantLedger, ledger)
 	if wantLedger {
 		var checksum string
 		require.NoError(t, raw.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id = ?`, mailboxObservationReplayRepairMigrationID).Scan(&checksum))
-		require.Equal(t, "d2b70f9828f9e642d4ec6191205500713bf51c0378cf3c261bf54fadf976779e", checksum)
+		require.Equal(t, "d08cab5cab607c0c91cfb01bbf96dd5ad52fef3e53372916462143174c0f7997", checksum)
 	}
 	if wantPayload {
-		var derivedCount int
-		require.NoError(t, raw.QueryRow(`
+		for _, eventID := range eventIDs {
+			var derivedCount int
+			require.NoError(t, raw.QueryRow(`
 			SELECT COUNT(*) FROM json_each((SELECT json_extract(payload_json, '$.mail_event.payload') FROM issue_observation_events WHERE id = ?))
 			WHERE key IN ('worker_evidence', 'worker_evidence_validation')
 		`, eventID).Scan(&derivedCount))
-		require.Zero(t, derivedCount)
+			require.Zero(t, derivedCount)
+		}
 	}
 }

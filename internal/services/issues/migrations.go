@@ -104,6 +104,7 @@ var orderedMigrations = []migration{
 	{id: gitHookRefreshIntentsMigrationID, path: "migrations/0053_git_hook_refresh_intents.sql"},
 	{id: rootedSessionRoleExclusivityMigrationID, path: "migrations/0054_rooted_session_role_exclusivity.sql"},
 	{id: mailboxObservationReplayRepairMigrationID, path: "migrations/0053_mailbox_observation_replay_repair.manifest.sql"},
+	{id: mailboxObservationReplayRepairMigrationID, path: "migrations/0055_mailbox_observation_replay_repair.manifest.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -168,6 +169,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: gitHookRefreshIntentsMigrationID, Path: "migrations/0053_git_hook_refresh_intents.sql", Checksum: "7eecd212c9b9a5907c425870ee861571d7654929d77067a1fc50c2e857c3335c"},
 	{ID: rootedSessionRoleExclusivityMigrationID, Path: "migrations/0054_rooted_session_role_exclusivity.sql", Checksum: rootedSessionRoleExclusivityChecksum},
 	{ID: mailboxObservationReplayRepairMigrationID, Path: "migrations/0053_mailbox_observation_replay_repair.manifest.sql", Checksum: "d2b70f9828f9e642d4ec6191205500713bf51c0378cf3c261bf54fadf976779e"},
+	{ID: mailboxObservationReplayRepairMigrationID, Path: "migrations/0055_mailbox_observation_replay_repair.manifest.sql", Checksum: "d08cab5cab607c0c91cfb01bbf96dd5ad52fef3e53372916462143174c0f7997"},
 }
 
 func validateMigrationRegistry() error {
@@ -479,7 +481,7 @@ const (
 	humanAuthorityProjectionMigrationID                                      = "0047_human_authority_projection_revision"
 	mailboxObservationProjectionCutoverMigrationID                           = "0052_mailbox_observation_projection_cutover"
 	mailboxObservationProjectionCutoverMetaKey                               = "issue:mailbox_observation_projection_cutover"
-	mailboxObservationReplayRepairMigrationID                                = "0053_mailbox_observation_replay_repair"
+	mailboxObservationReplayRepairMigrationID                                = "0055_mailbox_observation_replay_repair"
 	decisionPropagationOutboxMigrationID                                     = "0048_decision_propagation_outbox"
 	issueObservationEventSearchMigrationID                                   = "0050_issue_observation_event_search"
 	contextualLearningMigrationID                                            = "0039_contextual_learning_activation"
@@ -982,11 +984,12 @@ func repairMailboxObservationReplayRows(ctx context.Context, tx *sql.Tx) error {
 		SELECT id, payload_json
 		FROM issue_observation_events
 		WHERE source_command = 'mailbox.cutover'
+		   OR (source_command = 'mail.send' AND json_type(payload_json, '$.mail_event') = 'object')
 		ORDER BY id ASC
 		LIMIT ?
 	`, mailboxObservationReplayRepairMaxRows+1)
 	if err != nil {
-		return fmt.Errorf("scan cutover observations: %w", err)
+		return fmt.Errorf("scan mailbox observations: %w", err)
 	}
 	type repair struct {
 		id      int64
@@ -1000,12 +1003,12 @@ func repairMailboxObservationReplayRows(ctx context.Context, tx *sql.Tx) error {
 		var raw string
 		if err := rows.Scan(&rowID, &raw); err != nil {
 			_ = rows.Close()
-			return fmt.Errorf("scan cutover observation: %w", err)
+			return fmt.Errorf("scan mailbox observation: %w", err)
 		}
 		repaired, changed, err := canonicalMailboxObservationJSON(raw)
 		if err != nil {
 			_ = rows.Close()
-			return fmt.Errorf("canonicalize cutover observation %d: %w", rowID, err)
+			return fmt.Errorf("canonicalize mailbox observation %d: %w", rowID, err)
 		}
 		if changed {
 			repairs = append(repairs, repair{id: rowID, payload: repaired})
@@ -1013,17 +1016,17 @@ func repairMailboxObservationReplayRows(ctx context.Context, tx *sql.Tx) error {
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return fmt.Errorf("scan cutover observations: %w", err)
+		return fmt.Errorf("scan mailbox observations: %w", err)
 	}
 	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close cutover observation scan: %w", err)
+		return fmt.Errorf("close mailbox observation scan: %w", err)
 	}
 	if scanned > mailboxObservationReplayRepairMaxRows {
-		return fmt.Errorf("mailbox observation replay repair exceeds bounded cutover observation limit %d", mailboxObservationReplayRepairMaxRows)
+		return fmt.Errorf("mailbox observation replay repair exceeds bounded observation limit %d", mailboxObservationReplayRepairMaxRows)
 	}
 	for _, repair := range repairs {
 		if _, err := tx.ExecContext(ctx, `UPDATE issue_observation_events SET payload_json = ? WHERE id = ?`, repair.payload, repair.id); err != nil {
-			return fmt.Errorf("update cutover observation %d: %w", repair.id, err)
+			return fmt.Errorf("update mailbox observation %d: %w", repair.id, err)
 		}
 	}
 	return nil
@@ -1040,6 +1043,7 @@ func validateMailboxObservationReplayRepair(ctx context.Context, db mailboxRepla
 		SELECT id, payload_json
 		FROM issue_observation_events
 		WHERE source_command = 'mailbox.cutover'
+		   OR (source_command = 'mail.send' AND json_type(payload_json, '$.mail_event') = 'object')
 		ORDER BY id ASC
 	`)
 	if err != nil {
@@ -1054,10 +1058,10 @@ func validateMailboxObservationReplayRepair(ctx context.Context, db mailboxRepla
 		}
 		_, changed, err := canonicalMailboxObservationJSON(raw)
 		if err != nil {
-			return fmt.Errorf("applied migration %s has invalid cutover observation %d: %w", mailboxObservationReplayRepairMigrationID, rowID, err)
+			return fmt.Errorf("applied migration %s has invalid mailbox observation %d: %w", mailboxObservationReplayRepairMigrationID, rowID, err)
 		}
 		if changed {
-			return fmt.Errorf("%w: applied migration %s cutover observation %d", errMailboxObservationReplayNonCanonical, mailboxObservationReplayRepairMigrationID, rowID)
+			return fmt.Errorf("%w: applied migration %s mailbox observation %d", errMailboxObservationReplayNonCanonical, mailboxObservationReplayRepairMigrationID, rowID)
 		}
 	}
 	return rows.Err()
