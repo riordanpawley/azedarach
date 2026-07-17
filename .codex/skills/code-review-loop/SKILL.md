@@ -29,6 +29,45 @@ A pass is clean only when it finds no new actionable correctness, regression, se
 
 Reset the clean-pass count to 0 after any code or test change. Do not reset it for notes, issue metadata, or formatting of the final report unless those edits change executable behavior or tests.
 
+## Revision Checkpoints
+
+Treat the review loop as revision-incremental, not as repeated full rereads.
+
+Before each pass, resolve and retain:
+
+- the exact current candidate `HEAD`
+- the exact merge-base revision and configured task scope
+- the last completed review checkpoint, if one exists
+- unresolved findings and the contracts or invariants they affect
+
+When this skill's helper is available, select the safe range with:
+
+```bash
+.codex/skills/code-review-loop/scripts/review-range --repo <worktree> --base-revision <exact-base> --head-revision <exact-head> --scope <configured-scope> [--checkpoint-head <reviewed-head> --checkpoint-base <reviewed-base> --checkpoint-scope <reviewed-scope>] [--broader-invalidated]
+```
+
+The helper only verifies and selects an intra-candidate Git range. It does not persist evidence or decide cross-base reuse.
+
+The first verifiable pass reviews the complete task diff from the resolved merge base to candidate `HEAD`. After every completed pass, retain a checkpoint in the task's existing review-fact channel (for example its issue record or native result channel) with:
+
+- `head_revision`, `diff_base_revision`, and stable `scope`
+- `mode` (`full` or `incremental`) and `delta_base_revision` for incremental passes
+- `verdict`, `unresolved_findings`, and `affected_invariants`
+- `clean_pass` and `clean_pass_target`
+- `fallback_reason` when a full pass replaced an unsafe incremental pass
+
+Do not invent a persistence or evidence schema for this skill. If the current workflow cannot recover a complete checkpoint from its existing review facts, treat it as absent and run a full pass.
+
+A later pass may inspect only `last-reviewed-revision..current-HEAD`, plus:
+
+- every unresolved finding
+- contracts and invariants affected by the delta
+- callers or tests whose assumptions the delta may have changed
+
+Use a full task-diff pass when the checkpoint is missing or malformed, the checkpoint revision cannot be resolved or is not an ancestor of current `HEAD`, the merge base or task scope changed, or the delta invalidates assumptions outside its changed lines. Re-resolve an invalid current base or head before reviewing; if either remains unverifiable, stop rather than emitting an unusable range. Record the reason; never silently widen or narrow the review.
+
+Incremental passes still count toward the configured two- or three-clean-pass target when they inspect a new delta or apply a distinct review angle to unresolved findings and affected contracts. An empty delta does not justify rereading unchanged lines: rotate to a materially different review angle and record what was rechecked, or do not count the pass as independent confidence evidence.
+
 ## Review Loop
 
 1. Establish scope.
@@ -37,7 +76,9 @@ Reset the clean-pass count to 0 after any code or test change. Do not reset it f
    - If the task is issue-tracked, keep status and notes current with concise evidence.
 
 2. Build a review baseline.
-   - Read the relevant diffs and nearby code before judging.
+   - Resolve the exact task diff base and candidate `HEAD` before judging.
+   - Select full or incremental mode using the checkpoint rules above and state the exact range.
+   - Read that range, unresolved findings, affected contracts, and nearby code before judging.
    - Run or identify the smallest meaningful validation command if the repo provides one.
    - Prefer direct evidence from code, tests, logs, and contracts over broad guesses.
 
@@ -61,7 +102,9 @@ Reset the clean-pass count to 0 after any code or test change. Do not reset it f
    - Record commands and key assertions for the final report and issue notes.
 
 6. Repeat.
-   - Start a fresh review pass after every fix.
+   - Start a fresh revision-bound review pass after every fix.
+   - When a fix advances `HEAD`, review the prior checkpoint revision through the new `HEAD`; uncommitted changes cannot form a verifiable incremental checkpoint and require a full task-diff pass.
+   - Persist the completed checkpoint before starting the next pass or handing off.
    - Count consecutive clean passes only after validation succeeds or the remaining unrun validation is explicitly justified.
    - Stop only when the clean-pass target is met, a blocker is genuine, or the user explicitly pauses the loop.
 

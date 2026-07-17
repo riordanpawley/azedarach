@@ -58,6 +58,46 @@ func TestProjectReviewQueuePrioritizesReviewAndExcludesForeignOwnedWork(t *testi
 	}
 }
 
+func TestReviewInspectionExposesExactDiffBaseAndHeadRevisions(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.git = git.NewClient(revisionReviewGitRunner{}, slog.Default())
+	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktrees := map[string]git.Worktree{issueID: {IssueID: issueID, Path: repoDir, Branch: "feature/review"}}
+
+	inspection := (daemonOrchestrationAuthority{daemon: d}).reviewInspection(ctx, "project", repoDir, "orchestrator", task, map[string]domain.Task{issueID: task}, worktrees)
+	if inspection.DiffBaseRevision != "base-revision" || inspection.HeadRevision != "head-revision" {
+		t.Fatalf("inspection revisions = base:%q head:%q", inspection.DiffBaseRevision, inspection.HeadRevision)
+	}
+	wantScope := "base-revision..head-revision"
+	if inspection.DiffScope != wantScope {
+		t.Fatalf("diff scope = %q, want %q", inspection.DiffScope, wantScope)
+	}
+}
+
+type revisionReviewGitRunner struct{}
+
+func (revisionReviewGitRunner) Run(_ context.Context, args ...string) (string, error) {
+	command := strings.Join(args, " ")
+	switch {
+	case strings.Contains(command, " merge-base ") && strings.HasSuffix(command, " head-revision"):
+		return "base-revision\n", nil
+	case strings.Contains(command, " rev-parse --verify HEAD"):
+		return "head-revision\n", nil
+	case strings.Contains(command, " diff "):
+		return "1 file changed, 1 insertion(+)\n", nil
+	default:
+		return "", fmt.Errorf("unexpected git command: %s", command)
+	}
+}
+
 func TestProjectReviewQueueUsesOneObservationQueryForLargeOrdinaryGraph(t *testing.T) {
 	repoDir := t.TempDir()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())

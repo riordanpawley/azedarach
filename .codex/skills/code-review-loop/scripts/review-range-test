@@ -1,0 +1,61 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+
+git -C "$fixture" init -q
+git -C "$fixture" config user.email review@example.test
+git -C "$fixture" config user.name "Review Fixture"
+printf 'one\n' > "$fixture/file.txt"
+git -C "$fixture" add file.txt
+git -C "$fixture" commit -qm base
+base=$(git -C "$fixture" rev-parse HEAD)
+printf 'two\n' >> "$fixture/file.txt"
+git -C "$fixture" commit -qam first
+first=$(git -C "$fixture" rev-parse HEAD)
+printf 'three\n' >> "$fixture/file.txt"
+git -C "$fixture" commit -qam second
+second=$(git -C "$fixture" rev-parse HEAD)
+
+run_range() {
+	"$script_dir/review-range" --repo "$fixture" --base-revision "$base" --head-revision "$second" --scope source "$@"
+}
+
+initial=$(run_range)
+printf '%s\n' "$initial" | grep -q '^mode=full$'
+printf '%s\n' "$initial" | grep -q '^reason=checkpoint-absent$'
+
+if "$script_dir/review-range" --repo "$fixture" --base-revision invalid --head-revision "$second" --scope source >/dev/null 2>&1; then
+	echo "invalid current base unexpectedly produced a review range" >&2
+	exit 1
+fi
+
+incremental=$(run_range --checkpoint-head "$first" --checkpoint-base "$base" --checkpoint-scope source)
+printf '%s\n' "$incremental" | grep -q '^mode=incremental$'
+printf '%s\n' "$incremental" | grep -q "^range=$first..$second$"
+
+scope_fallback=$(run_range --checkpoint-head "$first" --checkpoint-base "$base" --checkpoint-scope tests)
+printf '%s\n' "$scope_fallback" | grep -q '^reason=scope-changed$'
+
+invalid_fallback=$(run_range --checkpoint-head missing-revision --checkpoint-base "$base" --checkpoint-scope source)
+printf '%s\n' "$invalid_fallback" | grep -q '^reason=checkpoint-unverifiable$'
+
+broader_fallback=$(run_range --checkpoint-head "$first" --checkpoint-base "$base" --checkpoint-scope source --broader-invalidated)
+printf '%s\n' "$broader_fallback" | grep -q '^reason=broader-assumptions-invalidated$'
+
+git -C "$fixture" checkout -q --detach "$base"
+printf 'side\n' > "$fixture/side.txt"
+git -C "$fixture" add side.txt
+git -C "$fixture" commit -qm side
+side=$(git -C "$fixture" rev-parse HEAD)
+non_ancestor=$("$script_dir/review-range" --repo "$fixture" --base-revision "$base" --head-revision "$side" --scope source --checkpoint-head "$first" --checkpoint-base "$base" --checkpoint-scope source)
+printf '%s\n' "$non_ancestor" | grep -q '^reason=checkpoint-not-ancestor$'
+
+grep -q 'Use 2 consecutive clean review passes' "$script_dir/../SKILL.md"
+grep -q 'Use 3 consecutive clean review passes for high-risk changes' "$script_dir/../SKILL.md"
+grep -q 'every unresolved finding' "$script_dir/../SKILL.md"
+grep -q 'contracts and invariants affected by the delta' "$script_dir/../SKILL.md"
+
+echo "review-range contract: ok"

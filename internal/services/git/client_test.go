@@ -3487,6 +3487,26 @@ func TestMergeBase(t *testing.T) {
 	}
 }
 
+func TestMergeBaseForRevisionPinsCandidateHead(t *testing.T) {
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "main" && args[2] == "candidate-123" {
+				return "base-456\n", nil
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	mergeBase, err := client.MergeBaseForRevision(context.Background(), "/fake/worktree", "main", "candidate-123")
+	if err != nil {
+		t.Fatalf("MergeBaseForRevision() error = %v", err)
+	}
+	if mergeBase != "base-456" {
+		t.Fatalf("MergeBaseForRevision() = %q, want base-456", mergeBase)
+	}
+}
+
 func TestChangedFiles(t *testing.T) {
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {

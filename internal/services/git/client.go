@@ -953,11 +953,26 @@ func (c *Client) DiffStatTotalsWithBasePreference(ctx context.Context, worktree,
 
 // MergeBase resolves the merge base between base branch and HEAD.
 func (c *Client) MergeBase(ctx context.Context, worktree, baseBranch string) (string, error) {
-	return c.mergeBase(ctx, worktree, baseBranch, false)
+	return c.mergeBaseForRevision(ctx, worktree, baseBranch, "HEAD", false)
 }
 
 func (c *Client) mergeBase(ctx context.Context, worktree, baseBranch string, preferRemote bool) (string, error) {
+	return c.mergeBaseForRevision(ctx, worktree, baseBranch, "HEAD", preferRemote)
+}
+
+// MergeBaseForRevision resolves the merge base against one immutable candidate
+// revision rather than symbolic HEAD. Callers that publish an exact review
+// range should resolve HEAD once, then pass that revision here.
+func (c *Client) MergeBaseForRevision(ctx context.Context, worktree, baseBranch, headRevision string) (string, error) {
+	return c.mergeBaseForRevision(ctx, worktree, baseBranch, headRevision, false)
+}
+
+func (c *Client) mergeBaseForRevision(ctx context.Context, worktree, baseBranch, headRevision string, preferRemote bool) (string, error) {
 	baseBranch = strings.TrimSpace(baseBranch)
+	headRevision = strings.TrimSpace(headRevision)
+	if headRevision == "" {
+		return "", fmt.Errorf("head revision is empty")
+	}
 	candidates := c.baseRefCandidates(ctx, worktree, baseBranch, preferRemote)
 	if len(candidates) == 0 {
 		return "", fmt.Errorf("base branch is empty")
@@ -967,7 +982,7 @@ func (c *Client) mergeBase(ctx context.Context, worktree, baseBranch string, pre
 	attempted := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
 		attempted = append(attempted, candidate)
-		mergeBaseOutput, err := c.runInWorktree(ctx, worktree, "merge-base", candidate, "HEAD")
+		mergeBaseOutput, err := c.runInWorktree(ctx, worktree, "merge-base", candidate, headRevision)
 		if err != nil {
 			lastErr = err
 			continue

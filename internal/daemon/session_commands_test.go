@@ -9356,6 +9356,16 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "Worker integration evidence should be a structured JSON `worker_evidence.v1` packet") {
 		t.Fatalf("prompt = %q, want structured evidence guidance", prompt)
 	}
+	for _, want := range []string{
+		"Review revision contract",
+		"exact `diff_base_revision`, `head_revision`, and `diff_scope`",
+		"previous reviewed head through current head plus unresolved findings and affected contracts",
+		"Fall back to the full scope when the prior checkpoint cannot be verified, is not an ancestor, or its base/scope changed",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt = %q, want revision-incremental review guidance %q", prompt, want)
+		}
+	}
 	if !strings.Contains(prompt, "Trust hook-backed `activity=busy|idle|waiting` for worker idleness checks") {
 		t.Fatalf("prompt = %q, want bounded tmux observation guidance", prompt)
 	}
