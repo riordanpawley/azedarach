@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/sqlitemigration"
@@ -725,17 +726,12 @@ func validateGitHookRefreshIntentsSchema(ctx context.Context, db *sql.DB) error 
 	if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='daemon_git_hook_refresh_intents'`).Scan(&tableSQL); err != nil {
 		return fmt.Errorf("git hook refresh intents schema drifted: missing table definition: %w", err)
 	}
-	compactTableSQL := strings.NewReplacer(" ", "", "\n", "", "\t", "", "\r", "").Replace(strings.ToLower(tableSQL))
-	for name, expression := range map[string]string{
-		"project_id nonempty check":  "check(trim(project_id)<>'')",
-		"worktree nonempty check":    "check(trim(worktree)<>'')",
-		"requested generation check": "check(requested_generation>0)",
-		"completed generation check": "check(completed_generation>=0)",
-		"generation ordering check":  "check(completed_generation<=requested_generation)",
-	} {
-		if !strings.Contains(compactTableSQL, expression) {
-			return fmt.Errorf("git hook refresh intents schema drifted: missing %s", name)
-		}
+	canonicalTableSQL, err := gitHookRefreshIntentsCanonicalTableDDL()
+	if err != nil {
+		return err
+	}
+	if normalizeSQLiteDDL(tableSQL) != normalizeSQLiteDDL(canonicalTableSQL) {
+		return fmt.Errorf("git hook refresh intents schema drifted: table definition differs from immutable migration artifact")
 	}
 	indexRows, err := db.QueryContext(ctx, `PRAGMA index_list(daemon_git_hook_refresh_intents)`)
 	if err != nil {
@@ -800,6 +796,62 @@ func validateGitHookRefreshIntentsSchema(ctx context.Context, db *sql.DB) error 
 		return fmt.Errorf("git hook refresh intents schema drifted: pending index has %d columns, want %d", indexColumn, len(expectedIndexColumns))
 	}
 	return nil
+}
+
+func gitHookRefreshIntentsCanonicalTableDDL() (string, error) {
+	sqlText, err := loadMigrationSQL("migrations/0053_git_hook_refresh_intents.sql")
+	if err != nil {
+		return "", fmt.Errorf("load canonical git hook refresh intents schema: %w", err)
+	}
+	lower := strings.ToLower(sqlText)
+	const marker = "create table if not exists daemon_git_hook_refresh_intents"
+	start := strings.Index(lower, marker)
+	if start < 0 {
+		return "", fmt.Errorf("canonical git hook refresh intents schema is missing table definition")
+	}
+	end := strings.Index(lower[start:], "\n);")
+	if end < 0 {
+		return "", fmt.Errorf("canonical git hook refresh intents table definition is incomplete")
+	}
+	return sqlText[start : start+end+2], nil
+}
+
+func normalizeSQLiteDDL(sqlText string) string {
+	runes := []rune(strings.TrimSpace(sqlText))
+	var normalizedBuilder strings.Builder
+	normalizedBuilder.Grow(len(sqlText))
+	var quoteEnd rune
+	for index := 0; index < len(runes); index++ {
+		r := runes[index]
+		if quoteEnd != 0 {
+			normalizedBuilder.WriteRune(r)
+			if r == quoteEnd {
+				if quoteEnd != ']' && index+1 < len(runes) && runes[index+1] == quoteEnd {
+					index++
+					normalizedBuilder.WriteRune(runes[index])
+					continue
+				}
+				quoteEnd = 0
+			}
+			continue
+		}
+		if unicode.IsSpace(r) {
+			continue
+		}
+		switch r {
+		case '\'', '"', '`':
+			quoteEnd = r
+			normalizedBuilder.WriteRune(r)
+		case '[':
+			quoteEnd = ']'
+			normalizedBuilder.WriteRune(r)
+		default:
+			normalizedBuilder.WriteRune(unicode.ToLower(r))
+		}
+	}
+	normalized := normalizedBuilder.String()
+	normalized = strings.TrimSuffix(normalized, ";")
+	return strings.Replace(normalized, "createtableifnotexists", "createtable", 1)
 }
 
 func validateMailboxObservationProjectionCutover(ctx context.Context, db *sql.DB) error {

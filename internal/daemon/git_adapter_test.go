@@ -1392,21 +1392,25 @@ func TestGitServiceAdapterHookRefreshQueuesBurstWithoutWaiting(t *testing.T) {
 		onStatusUpdate:     func(context.Context, string, string, string, *git.GitStatus) {},
 	}
 
-	start := make(chan struct{})
 	type hookResult struct {
 		status *git.GitStatus
 		err    error
 	}
 	results := make(chan hookResult, 5)
-	for i := 0; i < 5; i++ {
+	go func() {
+		status, err := adapter.RefreshStatusForHook(ctx, projectID, worktree)
+		results <- hookResult{status: status, err: err}
+	}()
+	// The first durable generation is already being refreshed before later
+	// admissions advance it. This proves rescheduling without relying on which
+	// of five simultaneously released goroutines reaches the queue worker first.
+	<-statusEntered
+	for i := 0; i < 4; i++ {
 		go func() {
-			<-start
 			status, err := adapter.RefreshStatusForHook(ctx, projectID, worktree)
 			results <- hookResult{status: status, err: err}
 		}()
 	}
-	close(start)
-	<-statusEntered
 
 	for i := 0; i < 5; i++ {
 		result := <-results
@@ -1888,6 +1892,78 @@ func TestGitHookRefreshRetriesTransientFailureInSameDaemon(t *testing.T) {
 	}
 	if err := queue.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestGitHookRefreshPersistentFailureBurstHasOneRetryOwner(t *testing.T) {
+	ctx := context.Background()
+	projectID := "project-persistent-failure"
+	issueID := "az-persistent-failure"
+	worktree := t.TempDir()
+	store := newGitAdapterStore(t, projectID, issueID, worktree, cleanGitStatus())
+	statusEntered := make(chan struct{})
+	releaseStatus := make(chan struct{})
+	var statusEnteredOnce sync.Once
+	var statusCalls atomic.Int32
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		if len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "status" && args[3] == "--porcelain" {
+			statusCalls.Add(1)
+			statusEnteredOnce.Do(func() { close(statusEntered) })
+			<-releaseStatus
+			return "", errors.New("persistent status failure")
+		}
+		return "", fmt.Errorf("unexpected git args: %v", args)
+	}}
+	queue := newReconcileQueue[*git.GitStatus](reconcileQueueConfig{Name: "durable-persistent-failure", Workers: 1, Logger: slog.Default()})
+	retryEntered := make(chan struct{})
+	var retryEnteredOnce sync.Once
+	adapter := &gitServiceAdapter{
+		client: git.NewClient(runner, slog.Default()), runtimeStateStore: store,
+		statusRefreshQueue: queue, logger: slog.Default(),
+		hookRefreshRetryDelay: func(retryCtx context.Context, _ int) error {
+			retryEnteredOnce.Do(func() { close(retryEntered) })
+			<-retryCtx.Done()
+			return retryCtx.Err()
+		},
+	}
+	if _, _, err := adapter.queueDurableGitHookRefresh(ctx, projectID, worktree); err != nil {
+		t.Fatal(err)
+	}
+	<-statusEntered
+	const burst = 64
+	for i := 0; i < burst; i++ {
+		if _, _, err := adapter.queueDurableGitHookRefresh(ctx, projectID, worktree); err != nil {
+			t.Fatalf("burst admission %d: %v", i, err)
+		}
+	}
+	if active := adapter.activeGitHookRefreshSupervisorCount(); active != 1 {
+		t.Fatalf("active hook refresh supervisors=%d, want 1", active)
+	}
+	if counters := queue.snapshotCounters(); counters.Enqueued != 1 || counters.Deduped != burst {
+		t.Fatalf("persistent failure queue counters=%+v, want one execution and %d deduped admissions", counters, burst)
+	}
+	intent, pending, err := store.GetPendingGitHookRefresh(ctx, projectID, worktree)
+	if err != nil || !pending || intent.RequestedGeneration != burst+1 {
+		t.Fatalf("coalesced durable intent=%+v pending=%t err=%v", intent, pending, err)
+	}
+	close(releaseStatus)
+	<-retryEntered
+	if active := adapter.activeGitHookRefreshSupervisorCount(); active != 1 {
+		t.Fatalf("active retry supervisors after persistent failure=%d, want 1", active)
+	}
+	if got := statusCalls.Load(); got != 1 {
+		t.Fatalf("persistent failure status calls=%d, want one bounded queue execution", got)
+	}
+	adapter.stopGitHookRefreshReconciler()
+	if err := queue.Close(); err != nil {
+		t.Fatal(err)
+	}
+	adapter.waitForGitHookRefreshContinuations()
+	if active := adapter.activeGitHookRefreshSupervisorCount(); active != 0 {
+		t.Fatalf("active supervisors after shutdown=%d, want 0", active)
+	}
+	if entries := adapter.gitHookRefreshSupervisorCount(); entries != 0 {
+		t.Fatalf("retained supervisor entries after shutdown=%d, want 0", entries)
 	}
 }
 

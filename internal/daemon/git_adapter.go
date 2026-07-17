@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -54,11 +55,19 @@ type gitServiceAdapter struct {
 	runtimeSignalsCache map[string]runtimeSignalProjection
 
 	hookRefreshContinuationWG sync.WaitGroup
+	hookRefreshSupervisors    map[string]*gitHookRefreshSupervisor
 	hookRefreshRetryDelay     func(context.Context, int) error
 	hookRefreshLifecycleMu    sync.Mutex
 	hookRefreshContext        context.Context
 	hookRefreshCancel         context.CancelFunc
 	hookRefreshStopped        bool
+}
+
+type gitHookRefreshSupervisor struct {
+	mu      sync.Mutex
+	key     string
+	refs    int
+	running atomic.Bool
 }
 
 func (a *gitServiceAdapter) runtimeStore(projectID string) *daemonstate.RuntimeStateStore {
@@ -655,14 +664,17 @@ func (a *gitServiceAdapter) queueDurableGitHookRefresh(ctx context.Context, proj
 			Value:   &git.GitStatus{},
 		}), false, nil
 	}
+	supervisor := a.lockGitHookRefreshSupervisor(projectID, worktree)
+	defer a.unlockGitHookRefreshSupervisor(supervisor)
 	if _, err := store.AcceptGitHookRefresh(ctx, projectID, worktree, time.Now().UTC()); err != nil {
 		return reconcileQueueSubmission[*git.GitStatus]{}, false, err
 	}
 	submission, err := a.queuePersistedGitHookRefresh(projectID, worktree)
 	if err != nil {
+		a.startGitHookRefreshSupervisorLocked(supervisor, immediateReconcileSubmission(reconcileQueueResult[*git.GitStatus]{Err: err}), projectID, worktree)
 		return reconcileQueueSubmission[*git.GitStatus]{}, true, err
 	}
-	a.continuePendingGitHookRefreshAfter(submission, projectID, worktree)
+	a.startGitHookRefreshSupervisorLocked(supervisor, submission, projectID, worktree)
 	return submission, true, nil
 }
 
@@ -671,12 +683,32 @@ func (a *gitServiceAdapter) queuePersistedGitHookRefresh(projectID, worktree str
 }
 
 func (a *gitServiceAdapter) continuePendingGitHookRefreshAfter(submission reconcileQueueSubmission[*git.GitStatus], projectID, worktree string) {
+	supervisor := a.lockGitHookRefreshSupervisor(projectID, worktree)
+	defer a.unlockGitHookRefreshSupervisor(supervisor)
+	a.startGitHookRefreshSupervisorLocked(supervisor, submission, projectID, worktree)
+}
+
+func (a *gitServiceAdapter) startGitHookRefreshSupervisorLocked(supervisor *gitHookRefreshSupervisor, submission reconcileQueueSubmission[*git.GitStatus], projectID, worktree string) {
+	if supervisor == nil || supervisor.running.Load() {
+		return
+	}
 	reconcileCtx, ok := a.beginGitHookRefreshContinuation()
 	if !ok {
 		return
 	}
+	a.retainGitHookRefreshSupervisor(supervisor)
+	supervisor.running.Store(true)
 	go func() {
-		defer a.hookRefreshContinuationWG.Done()
+		released := false
+		defer func() {
+			if !released {
+				supervisor.mu.Lock()
+				supervisor.running.Store(false)
+				supervisor.mu.Unlock()
+				a.releaseGitHookRefreshSupervisor(supervisor)
+			}
+			a.hookRefreshContinuationWG.Done()
+		}()
 		attempt := 0
 		current := submission
 		for {
@@ -688,7 +720,21 @@ func (a *gitServiceAdapter) continuePendingGitHookRefreshAfter(submission reconc
 			_, pending, loadErr := a.pendingGitHookRefresh(checkCtx, projectID, worktree)
 			cancel()
 			if loadErr == nil && !pending {
-				return
+				// Serialize the final durable recheck with same-key admissions.
+				// An admission either advances the generation before this check,
+				// or observes running=false afterward and starts the next owner.
+				supervisor.mu.Lock()
+				checkCtx, cancel = context.WithTimeout(reconcileCtx, 2*time.Second)
+				_, pending, loadErr = a.pendingGitHookRefresh(checkCtx, projectID, worktree)
+				cancel()
+				if loadErr == nil && !pending {
+					supervisor.running.Store(false)
+					released = true
+					supervisor.mu.Unlock()
+					a.releaseGitHookRefreshSupervisor(supervisor)
+					return
+				}
+				supervisor.mu.Unlock()
 			}
 			if waitErr != nil || result.Err != nil || loadErr != nil {
 				attempt++
@@ -709,6 +755,61 @@ func (a *gitServiceAdapter) continuePendingGitHookRefreshAfter(submission reconc
 			current = next
 		}
 	}()
+}
+
+func (a *gitServiceAdapter) lockGitHookRefreshSupervisor(projectID, worktree string) *gitHookRefreshSupervisor {
+	key := gitStatusRefreshQueueKey(projectID, worktree)
+	a.hookRefreshLifecycleMu.Lock()
+	if a.hookRefreshSupervisors == nil {
+		a.hookRefreshSupervisors = make(map[string]*gitHookRefreshSupervisor)
+	}
+	supervisor := a.hookRefreshSupervisors[key]
+	if supervisor == nil {
+		supervisor = &gitHookRefreshSupervisor{key: key}
+		a.hookRefreshSupervisors[key] = supervisor
+	}
+	supervisor.refs++
+	a.hookRefreshLifecycleMu.Unlock()
+	supervisor.mu.Lock()
+	return supervisor
+}
+
+func (a *gitServiceAdapter) unlockGitHookRefreshSupervisor(supervisor *gitHookRefreshSupervisor) {
+	supervisor.mu.Unlock()
+	a.releaseGitHookRefreshSupervisor(supervisor)
+}
+
+func (a *gitServiceAdapter) retainGitHookRefreshSupervisor(supervisor *gitHookRefreshSupervisor) {
+	a.hookRefreshLifecycleMu.Lock()
+	supervisor.refs++
+	a.hookRefreshLifecycleMu.Unlock()
+}
+
+func (a *gitServiceAdapter) releaseGitHookRefreshSupervisor(supervisor *gitHookRefreshSupervisor) {
+	a.hookRefreshLifecycleMu.Lock()
+	supervisor.refs--
+	if supervisor.refs == 0 && !supervisor.running.Load() && a.hookRefreshSupervisors[supervisor.key] == supervisor {
+		delete(a.hookRefreshSupervisors, supervisor.key)
+	}
+	a.hookRefreshLifecycleMu.Unlock()
+}
+
+func (a *gitServiceAdapter) activeGitHookRefreshSupervisorCount() int {
+	a.hookRefreshLifecycleMu.Lock()
+	defer a.hookRefreshLifecycleMu.Unlock()
+	active := 0
+	for _, supervisor := range a.hookRefreshSupervisors {
+		if supervisor.running.Load() {
+			active++
+		}
+	}
+	return active
+}
+
+func (a *gitServiceAdapter) gitHookRefreshSupervisorCount() int {
+	a.hookRefreshLifecycleMu.Lock()
+	defer a.hookRefreshLifecycleMu.Unlock()
+	return len(a.hookRefreshSupervisors)
 }
 
 func (a *gitServiceAdapter) beginGitHookRefreshContinuation() (context.Context, bool) {
