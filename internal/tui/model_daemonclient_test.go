@@ -11759,7 +11759,7 @@ func TestOrchestrationLoopEventRefreshesVisibleOverview(t *testing.T) {
 		Revision:  5,
 		Event:     protocol.EventOrchestrationLoopUpdated,
 	}, false)
-	if result.cmd == nil {
+	if !result.refreshOrchestrator {
 		t.Fatal("orchestration loop event did not schedule overview refresh")
 	}
 	if m.daemonRevision != 5 {
@@ -11771,8 +11771,55 @@ func TestOrchestrationLoopEventRefreshesVisibleOverview(t *testing.T) {
 		Revision:  6,
 		Event:     protocol.EventOrchestrationLoopUpdated,
 	}, false)
-	if result.cmd == nil {
+	if !result.refreshOrchestrator {
 		t.Fatal("orchestration event did not refresh current-project snapshot")
+	}
+}
+
+func TestProjectOrchestratorProjectionEventsRefreshVisibleOverview(t *testing.T) {
+	taskBody, err := json.Marshal(protocol.TaskEventBody{
+		TaskID: naming.IssueID("az-1"),
+		Task:   &domain.Task{ID: "az-1", Title: "Updated", Status: domain.StatusInReview, Priority: domain.P1, Type: domain.TypeTask},
+	})
+	if err != nil {
+		t.Fatalf("marshal task event: %v", err)
+	}
+	sessionBody, err := json.Marshal(protocol.SessionProjectionEventBody{
+		Session: protocol.SessionProjection{
+			SessionID: naming.SessionID("session-1"),
+			IssueID:   naming.IssueID("az-1"),
+			Role:      protocol.SessionRoleWorker,
+			State:     protocol.SessionLifecycleStateRunning,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal session event: %v", err)
+	}
+
+	tests := []struct {
+		name  string
+		event string
+		body  []byte
+	}{
+		{name: "task", event: protocol.EventTaskUpdated, body: taskBody},
+		{name: "session", event: protocol.EventSessionUpdated, body: sessionBody},
+		{name: "interaction", event: protocol.EventInteractionResolved, body: []byte(`{}`)},
+		{name: "mail", event: protocol.EventMailAppended, body: []byte(`{}`)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestModel()
+			m.daemonRevision = 4
+			result := m.applyDaemonStreamEvent(protocol.EventEnvelope{
+				ProjectID: naming.ProjectID(m.daemonProjectID()),
+				Revision:  5,
+				Event:     tt.event,
+				Body:      tt.body,
+			}, false)
+			if !result.refreshOrchestrator {
+				t.Fatalf("%s event did not request project orchestrator refresh", tt.event)
+			}
+		})
 	}
 }
 

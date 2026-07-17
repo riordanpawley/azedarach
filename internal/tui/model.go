@@ -235,6 +235,9 @@ type Model struct {
 	selectedBoardViewID             string
 	boardViewScopeGeneration        uint64
 	projectOrchestrator             *projectOrchestratorSnapshot
+	projectOrchestratorRefreshSeq   uint64
+	projectOrchestratorRefreshBusy  bool
+	projectOrchestratorRefreshAgain bool
 	projectOrchestratorActionRunner projectOrchestratorActionRunner
 	jumpMode                        *overlay.JumpMode
 	jumpTargets                     []string
@@ -1311,6 +1314,7 @@ type boardViewMutatedMsg struct {
 
 type projectOrchestratorLoadedMsg struct {
 	project projectOrchestratorSnapshot
+	seq     uint64
 	err     error
 }
 
@@ -2517,6 +2521,7 @@ func (m *Model) rebindProjectContext(project config.Project, projectConfig *conf
 	m.repoDir = project.Path
 	m.refreshDaemonProjectRouteID()
 	m.rebuildProjectScopedServices()
+	m.reconcileProjectOrchestratorRoute()
 	if m.daemonClient != nil {
 		m.daemonClient.WithProjectRouteID(m.daemonProjectRouteIDValue())
 	}

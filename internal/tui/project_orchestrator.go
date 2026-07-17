@@ -16,7 +16,20 @@ import (
 	"github.com/riordanpawley/azedarach/internal/ui/overlay"
 )
 
-func (m Model) loadProjectOrchestratorSnapshotCmd() tea.Cmd {
+func (m *Model) scheduleProjectOrchestratorRefreshCmd() tea.Cmd {
+	if m.daemonClient == nil {
+		return nil
+	}
+	if m.projectOrchestratorRefreshBusy {
+		m.projectOrchestratorRefreshAgain = true
+		return nil
+	}
+	m.projectOrchestratorRefreshSeq++
+	m.projectOrchestratorRefreshBusy = true
+	return m.loadProjectOrchestratorSnapshotCmd(m.projectOrchestratorRefreshSeq)
+}
+
+func (m Model) loadProjectOrchestratorSnapshotCmd(seq uint64) tea.Cmd {
 	client := m.daemonClient
 	if client == nil {
 		return nil
@@ -39,7 +52,7 @@ func (m Model) loadProjectOrchestratorSnapshotCmd() tea.Cmd {
 			project.Session = &session
 		}
 		project.OrchestrationErr = errors.Join(snapshotErr, sessionErr)
-		return projectOrchestratorLoadedMsg{project: project, err: project.OrchestrationErr}
+		return projectOrchestratorLoadedMsg{project: project, seq: seq, err: project.OrchestrationErr}
 	}
 }
 
@@ -79,16 +92,37 @@ func (m Model) projectOrchestratorActionCmd(project projectOrchestratorSnapshot,
 	}
 }
 
-func (m Model) openProjectOrchestratorOverlay() tea.Cmd {
-	project := projectOrchestratorSnapshot{Name: strings.TrimSpace(m.currentProject), Path: strings.TrimSpace(m.activeProjectPath()), ProjectID: strings.TrimSpace(m.daemonProjectID())}
-	refresh := m.loadProjectOrchestratorSnapshotCmd()
-	if m.projectOrchestrator != nil {
+func (m Model) currentProjectOrchestratorRoute() projectOrchestratorSnapshot {
+	return projectOrchestratorSnapshot{
+		Name:      strings.TrimSpace(m.currentProject),
+		Path:      strings.TrimSpace(m.activeProjectPath()),
+		ProjectID: strings.TrimSpace(m.daemonProjectID()),
+	}
+}
+
+func (m *Model) reconcileProjectOrchestratorRoute() {
+	current := m.currentProjectOrchestratorRoute()
+	if m.projectOrchestrator != nil && strings.TrimSpace(m.projectOrchestrator.ProjectID) == current.ProjectID {
+		m.projectOrchestrator.Name = current.Name
+		m.projectOrchestrator.Path = current.Path
+		current = *m.projectOrchestrator
+	} else {
+		m.projectOrchestrator = nil
+	}
+	if active, ok := m.overlayStack.Current().(*overlay.ProjectOrchestratorOverlay); ok {
+		active.Sync(projectOrchestratorDetails(current))
+	}
+}
+
+func (m *Model) openProjectOrchestratorOverlay() tea.Cmd {
+	project := m.currentProjectOrchestratorRoute()
+	refresh := m.scheduleProjectOrchestratorRefreshCmd()
+	if m.projectOrchestrator != nil && strings.TrimSpace(m.projectOrchestrator.ProjectID) == project.ProjectID {
 		project = *m.projectOrchestrator
-		refresh = nil
 	}
 	details := projectOrchestratorDetails(project)
 	open := m.openOverlay(overlay.NewProjectOrchestratorOverlay(details, func(action string) tea.Cmd {
-		return m.projectOrchestratorActionCmd(project, action)
+		return m.projectOrchestratorActionCmd(m.currentProjectOrchestratorRoute(), action)
 	}))
 	return tea.Batch(open, refresh)
 }
