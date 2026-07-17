@@ -252,10 +252,7 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 			notifyCandidateValidation(ctx, attempt)
 			return attempt, true, fmt.Errorf("validate candidate %s: %w", candidateHead, ctxErr)
 		}
-		detail := strings.TrimSpace(stderr)
-		if detail == "" {
-			detail = strings.TrimSpace(stdout)
-		}
+		detail := candidateValidationOutput(stdout, stderr)
 		detail = boundedCandidateValidationDetail(detail)
 		attempt.Message = "candidate validation failed"
 		if detail != "" {
@@ -291,8 +288,23 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 	return attempt, true, nil
 }
 
+func candidateValidationOutput(stdout, stderr string) string {
+	stdout = strings.TrimSpace(stdout)
+	stderr = strings.TrimSpace(stderr)
+	switch {
+	case stdout == "":
+		return stderr
+	case stderr == "":
+		return stdout
+	default:
+		return stdout + "\n" + stderr
+	}
+}
+
 func boundedCandidateValidationDetail(detail string) string {
-	const maxRunes = 4096
+	// Keep the same practical envelope as durable validation failure summaries
+	// so task.close can surface every failed test retained by test-timing.
+	const maxRunes = 32 * 1024
 	detail = strings.TrimSpace(detail)
 	runes := []rune(detail)
 	if len(runes) <= maxRunes {
