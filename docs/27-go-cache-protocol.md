@@ -85,7 +85,8 @@ run their payload directly for compatibility. Internal `*_unleased` recipe
 names remain implementation details, while their ordinary child recipes no
 longer acquire nested leases.
 
-Defaults are a 10 GiB soft warning and a 28 GiB hard refusal. Configure exact
+Defaults are a 50 GiB soft warning and a 70 GiB hard refusal (binary GiB,
+`50 << 30` and `70 << 30` bytes). Configure exact
 byte values with `AZEDARACH_GO_CACHE_SOFT_LIMIT_BYTES` and
 `AZEDARACH_GO_CACHE_HARD_LIMIT_BYTES`. A command above the hard limit refuses
 before validation. `AZEDARACH_GO_CACHE_AUTO_MAINTAIN=1` permits supported
@@ -117,9 +118,11 @@ just go-cache-clean-owner dhc
 just go-cache-clean-legacy --confirm
 ```
 
-Inventory is JSON and includes the managed layout plus historical
-`build-cache`, `.gocache`, and `.gopath` locations. Legacy cleanup is always
-explicit. It uses `go clean -cache` for old build caches. The optional
+Inventory is JSON and reports the managed `caches/v1` family and each historical
+`build-cache`, `.gocache`, and `.gopath` location as separate items. Legacy
+bytes are excluded from managed soft/hard-limit accounting. Legacy cleanup is
+always explicit and is never triggered by validation or managed auto-maintenance.
+It uses `go clean -cache` for old build caches. The optional
 `--include-gopath-modcache` runs `go clean -modcache` for legacy module
 downloads, but intentionally preserves GOPATH binaries and unknown user files.
 
