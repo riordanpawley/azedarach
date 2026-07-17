@@ -4528,6 +4528,7 @@ func (d *Daemon) handleTaskSQLiteWAL(ctx context.Context, req protocol.RequestEn
 		OpenConnections:     diag.DBStats.OpenConnections,
 		InUse:               diag.DBStats.InUse,
 		Idle:                diag.DBStats.Idle,
+		Stores:              d.sqliteStoreDiagnostics(),
 	}
 	switch mode {
 	case "":

@@ -49,6 +49,34 @@ func TestCanonicalPathResolvesSymlinkedParentBeforeDatabaseExists(t *testing.T) 
 	}
 }
 
+func TestWriteLockResourceDiagnosticsAttributesHolder(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "consumer.db")
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	ctx := ContextWithWriteOperation(context.Background(), "runtime_state.test_consumer_write")
+	go func() {
+		done <- WithWriteLockContext(ctx, dbPath, func(context.Context) error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+
+	diagnostic := WriteLockResourceDiagnostics(dbPath)
+	if diagnostic.Holder != "runtime_state.test_consumer_write" {
+		t.Fatalf("write lock holder = %q, want runtime operation", diagnostic.Holder)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("release write lock: %v", err)
+	}
+	if holder := WriteLockResourceDiagnostics(dbPath).Holder; holder != "" {
+		t.Fatalf("released write lock holder = %q, want empty", holder)
+	}
+}
+
 func TestWithWriteLockContextBoundsLockAcquisitionByCallerDeadline(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
 	held := make(chan struct{})

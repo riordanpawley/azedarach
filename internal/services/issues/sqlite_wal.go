@@ -77,6 +77,7 @@ func (c *Client) CheckpointSQLiteWAL(ctx context.Context, mode SQLiteWALCheckpoi
 		return SQLiteWALCheckpointStats{}, err
 	}
 	var stats SQLiteWALCheckpointStats
+	ctx = sqliteutil.ContextWithWriteOperation(ctx, "issue_store.wal_checkpoint")
 	err = sqliteutil.WithWriteLockContext(ctx, c.dbPath, func(lockCtx context.Context) error {
 		var checkpointErr error
 		stats, checkpointErr = c.checkpointSQLiteWALLocked(lockCtx, db, mode)

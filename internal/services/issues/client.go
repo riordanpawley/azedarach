@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sqlite "modernc.org/sqlite"
@@ -416,9 +417,10 @@ type issueMutationLockWaitHookKey struct{}
 var issueOperationLocks sync.Map
 
 type issueOperationLock struct {
-	token  chan struct{}
-	mu     sync.RWMutex
-	holder string
+	token       chan struct{}
+	mu          sync.RWMutex
+	holder      string
+	holderSince time.Time
 }
 
 func newIssueOperationLock() *issueOperationLock {
@@ -431,6 +433,12 @@ func (l *issueOperationLock) currentHolder() string {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.holder
+}
+
+func (l *issueOperationLock) holderSnapshot() (string, time.Time) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.holder, l.holderSince
 }
 
 func (l *issueOperationLock) acquire(ctx context.Context, operation string) (string, error) {
@@ -447,6 +455,7 @@ func (l *issueOperationLock) acquire(ctx context.Context, operation string) (str
 		}
 		l.mu.Lock()
 		l.holder = operation
+		l.holderSince = time.Now()
 		l.mu.Unlock()
 		return "", nil
 	default:
@@ -465,6 +474,7 @@ func (l *issueOperationLock) acquire(ctx context.Context, operation string) (str
 		}
 		l.mu.Lock()
 		l.holder = operation
+		l.holderSince = time.Now()
 		l.mu.Unlock()
 		return holder, nil
 	}
@@ -473,6 +483,7 @@ func (l *issueOperationLock) acquire(ctx context.Context, operation string) (str
 func (l *issueOperationLock) release() {
 	l.mu.Lock()
 	l.holder = ""
+	l.holderSince = time.Time{}
 	l.mu.Unlock()
 	l.token <- struct{}{}
 }
@@ -842,6 +853,9 @@ type Client struct {
 	mailboxProjectionFailureHook       func(stage string) error
 	projectionDeltaChecksumRepairHook  func(stage string) error
 	projectionDeltaReadHook            func()
+	projectionWatchActive              atomic.Int64
+	projectionWatchStarted             atomic.Uint64
+	projectionWatchCompleted           atomic.Uint64
 	decisionOutboxMigrationFailureHook func(stage string) error
 	decisionIdempotencyFailureHook     func(stage string) error
 	eventSearchMigrationFailureHook    func(stage string) error
@@ -982,6 +996,7 @@ func (c *Client) withMutationLock(ctx context.Context, fn func(context.Context) 
 		return err
 	}
 	runWrite := func(lockCtx context.Context) error {
+		lockCtx = sqliteutil.ContextWithWriteOperation(lockCtx, mutationOperationFromContext(lockCtx))
 		return sqliteutil.WithWriteLockContext(lockCtx, c.dbPath, fn)
 	}
 	var spanErr error
@@ -1382,6 +1397,55 @@ func (c *Client) DBStats() (sql.DBStats, error) {
 		return sql.DBStats{}, err
 	}
 	return db.Stats(), nil
+}
+
+// StoreResourceDiagnostics reports the process-owned resources for one issue
+// store without opening a closed database as a side effect of diagnosis.
+type StoreResourceDiagnostics struct {
+	DBPath                   string
+	Open                     bool
+	DBStats                  sql.DBStats
+	MutationHolder           string
+	MutationHeldFor          time.Duration
+	SQLiteWriteHolder        string
+	SQLiteWriteHeldFor       time.Duration
+	ProjectionWatchesActive  int64
+	ProjectionWatchesStarted uint64
+	ProjectionWatchesDone    uint64
+}
+
+func (c *Client) ResourceDiagnostics() StoreResourceDiagnostics {
+	if c == nil {
+		return StoreResourceDiagnostics{}
+	}
+	c.mu.Lock()
+	db := c.db
+	dbPath := c.dbPath
+	c.mu.Unlock()
+
+	diagnostic := StoreResourceDiagnostics{
+		DBPath:                   dbPath,
+		Open:                     db != nil,
+		ProjectionWatchesActive:  c.projectionWatchActive.Load(),
+		ProjectionWatchesStarted: c.projectionWatchStarted.Load(),
+		ProjectionWatchesDone:    c.projectionWatchCompleted.Load(),
+	}
+	if db != nil {
+		diagnostic.DBStats = db.Stats()
+	}
+	diagnostic.MutationHolder, diagnostic.MutationHeldFor = issueOperationLockForPath(dbPath).holderDuration(time.Now())
+	writeLock := sqliteutil.WriteLockResourceDiagnostics(dbPath)
+	diagnostic.SQLiteWriteHolder = writeLock.Holder
+	diagnostic.SQLiteWriteHeldFor = writeLock.HeldFor
+	return diagnostic
+}
+
+func (l *issueOperationLock) holderDuration(now time.Time) (string, time.Duration) {
+	holder, since := l.holderSnapshot()
+	if holder == "" || since.IsZero() || now.Before(since) {
+		return holder, 0
+	}
+	return holder, now.Sub(since)
 }
 
 func (c *Client) configureSQLite(db *sql.DB) error {
