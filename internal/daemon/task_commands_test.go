@@ -4290,6 +4290,164 @@ func TestCommittedCloseAdvancesMaterializedTaskReadsWhileRuntimeEnrichmentIsBloc
 	}
 }
 
+func TestCommittedCreateSurvivesConcurrentWorktreeRefreshAndAdvancesMaterializedReads(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	projectID := "proj-committed-create-read-floor"
+	issuesClient, repoDir := newTestIssueClient(t)
+	dbPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "create read floor parent", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var hydrateCalls atomic.Int32
+	hydrateEntered := make(chan struct{})
+	releaseHydrate := make(chan struct{})
+	var releaseHydrateOnce sync.Once
+	release := func() { releaseHydrateOnce.Do(func() { close(releaseHydrate) }) }
+	t.Cleanup(release)
+	materializer := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(issuesClient), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		if hydrateCalls.Add(1) == 2 {
+			close(hydrateEntered)
+			<-releaseHydrate
+		}
+		return tasks, nil
+	})
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{
+		cfg:                   Config{RepoDir: repoDir, Logger: logger, BaseBranch: "main"},
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		materializers:        map[string]*projectReadMaterializer{projectID: materializer},
+		materializersStarted: true,
+		revision:             map[string]uint64{},
+		hub:                  publish.NewHub(16, 8, logger),
+	}
+
+	refreshDone := make(chan error, 1)
+	go func() {
+		refreshDone <- newRuntimeProjectionWriter(d).ReplaceWorktreeProjectionSnapshot(ctx, projectID, []daemonstate.WorktreeState{{
+			ProjectID: projectID,
+			IssueID:   parentID,
+			Path:      filepath.Join(repoDir, "parent-worktree"),
+			Branch:    "issue/" + parentID,
+			UpdatedAt: time.Date(2026, time.July, 18, 1, 0, 0, 0, time.UTC),
+		}})
+	}()
+	<-hydrateEntered
+
+	request := func(command string, body any) protocol.RequestEnvelope {
+		encoded, marshalErr := json.Marshal(body)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		return protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       naming.RequestID("req-" + command),
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         command,
+			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+			Body:            encoded,
+		}
+	}
+	createResp, err := d.handleTaskCreate(ctx, request("task.create", map[string]any{
+		"title": "created during worktree refresh", "type": domain.TypeBug, "priority": domain.P1, "parent_id": parentID,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !createResp.OK {
+		t.Fatalf("task.create response = %+v", createResp.Error)
+	}
+	var created struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(createResp.Body, &created); err != nil {
+		t.Fatal(err)
+	}
+	dependencyResp, err := d.handleTaskDependencyAdd(ctx, request("task.dependency.add", map[string]any{
+		"task_id": created.TaskID, "depends_on_id": parentID, "dependency_type": domain.DependencyCreatedIn,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dependencyResp.OK {
+		t.Fatalf("task.dependency.add response = %+v", dependencyResp.Error)
+	}
+
+	independentDB, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = independentDB.Close() })
+	var issueCount, dependencyCount, eventCount int
+	if err := independentDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id=?`, created.TaskID).Scan(&issueCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := independentDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_dependencies WHERE issue_id=?`, created.TaskID).Scan(&dependencyCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := independentDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_observation_events WHERE issue_id=?`, created.TaskID).Scan(&eventCount); err != nil {
+		t.Fatal(err)
+	}
+	if issueCount != 1 || dependencyCount != 2 || eventCount < 3 {
+		t.Fatalf("independent durable read = issue:%d dependencies:%d events:%d, want 1/2/at least 3", issueCount, dependencyCount, eventCount)
+	}
+
+	assertCreatedRead := func(name string, resp protocol.ResponseEnvelope) {
+		t.Helper()
+		if !resp.OK {
+			t.Fatalf("%s response = %+v", name, resp.Error)
+		}
+		payload, decodeErr := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+		if decodeErr != nil {
+			t.Fatalf("decode %s: %v", name, decodeErr)
+		}
+		for _, task := range payload.Tasks {
+			if task.ID.String() == created.TaskID {
+				return
+			}
+		}
+		t.Fatalf("%s omitted committed create %s", name, created.TaskID)
+	}
+	getResp, err := d.handleTaskGet(ctx, request("task.get", map[string]any{"task_id": created.TaskID}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCreatedRead("task.get", getResp)
+	getManyResp, err := d.handleTaskGetMany(ctx, request("task.get-many", map[string]any{"task_ids": []string{created.TaskID}, "metadata_only": true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCreatedRead("task.get-many", getManyResp)
+	listResp, err := d.handleTaskList(ctx, request("task.list", map[string]any{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCreatedRead("task.list", listResp)
+	projectTasks, _, err := d.projectReadSnapshot(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found := findDaemonTaskByID(projectTasks, created.TaskID); !found {
+		t.Fatalf("orchestration project snapshot source omitted committed create %s", created.TaskID)
+	}
+
+	release()
+	if err := <-refreshDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTaskCloseRepairsVerifiedStaleLegacyProjectSessionProjection(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
