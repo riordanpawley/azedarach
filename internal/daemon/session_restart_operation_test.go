@@ -38,13 +38,23 @@ type exactRestartRunner struct {
 }
 
 type realRestartRunner struct {
-	*isolatedTmuxTestRunner
+	tmuxPath           string
+	socketName         string
 	store              *daemonstate.RuntimeStateStore
 	projectID, session string
 }
 
 func (r *realRestartRunner) Run(ctx context.Context, args ...string) (string, error) {
-	output, err := r.isolatedTmuxTestRunner.Run(ctx, args...)
+	if strings.TrimSpace(r.socketName) == "" {
+		return "", errors.New("real restart fixture requires a private tmux socket name")
+	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+	}
+	outputBytes, err := exec.CommandContext(ctx, r.tmuxPath, append([]string{"-L", r.socketName}, args...)...).CombinedOutput()
+	output := string(outputBytes)
 	if err != nil || len(args) == 0 || args[0] != "respawn-pane" {
 		return output, err
 	}
@@ -61,7 +71,7 @@ func (r *realRestartRunner) Run(ctx context.Context, args ...string) (string, er
 	if len(incarnationMatch) != 2 {
 		return output, fmt.Errorf("restart incarnation missing from artifact")
 	}
-	metadata, metadataErr := r.isolatedTmuxTestRunner.Run(ctx, "display-message", "-p", "-t", r.session, "#{pane_id}\t#{pane_pid}")
+	metadata, metadataErr := r.Run(ctx, "display-message", "-p", "-t", r.session, "#{pane_id}\t#{pane_pid}")
 	if metadataErr != nil {
 		return output, metadataErr
 	}
@@ -467,16 +477,13 @@ cat >>"$AZ_TEST_INPUT_TRACE"
 
 	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(base, "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
-	tmuxDir, err := os.MkdirTemp("/tmp", "az-dla-tmux-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(tmuxDir) })
-	socketPath := filepath.Join(tmuxDir, "server.sock")
-	isolated := &isolatedTmuxTestRunner{tmuxPath: tmuxPath, socketPath: socketPath}
 	const projectID = "project-a"
 	const sessionID = "project-a-az-1"
-	runner := &realRestartRunner{isolatedTmuxTestRunner: isolated, store: store, projectID: projectID, session: sessionID}
+	socketName := "az-dla-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	if _, err := (&realRestartRunner{tmuxPath: tmuxPath}).Run(ctx, "list-sessions"); err == nil || !strings.Contains(err.Error(), "private tmux socket") {
+		t.Fatalf("default-socket guard error = %v", err)
+	}
+	runner := &realRestartRunner{tmuxPath: tmuxPath, socketName: socketName, store: store, projectID: projectID, session: sessionID}
 	if output, err := runner.Run(ctx, "-f", "/dev/null", "new-session", "-d", "-s", sessionID, "-c", repoDir, fakeAgent); err != nil {
 		t.Fatalf("start managed pane: %v (%s)", err, output)
 	}
