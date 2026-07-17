@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,11 +40,10 @@ type testOutputBarrier struct {
 	output strings.Builder
 }
 
-type testProcessExitBarrier struct {
+type testProcessReapBarrier struct {
 	path        string
 	dummyWriter *os.File
-	started     chan error
-	exited      chan error
+	reaped      chan error
 }
 
 func TestProcessOutputObserverRunsAfterCapture(t *testing.T) {
@@ -70,6 +68,27 @@ func TestProcessOutputObserverRunsAfterCapture(t *testing.T) {
 	if !observerCalled {
 		t.Fatal("output observer was not called")
 	}
+}
+
+func TestProcessReapSupervisor(t *testing.T) {
+	if os.Getenv("AZEDARACH_TEST_REAP_SUPERVISOR") != "1" {
+		return
+	}
+
+	managedProcessGroup := syscall.Getpgrp()
+	if err := syscall.Setpgid(0, 0); err != nil {
+		t.Fatalf("leave managed process group: %v", err)
+	}
+	child := exec.Command("sh", "-c", "trap '' TERM; exec sleep 30")
+	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: managedProcessGroup}
+	if err := child.Start(); err != nil {
+		t.Fatalf("start supervised process-group child: %v", err)
+	}
+	writeTestFIFO(t, os.Getenv("AZEDARACH_TEST_CHILD_PID_FILE"), strconv.Itoa(child.Process.Pid)+"\n")
+	if err := child.Wait(); err == nil {
+		t.Fatal("supervised process-group child exited without cancellation")
+	}
+	writeTestFIFO(t, os.Getenv("AZEDARACH_TEST_CHILD_REAP_FIFO"), "reaped\n")
 }
 
 func TestRealProcessProfileExecRunnerReturnsStdoutOnMergeTreeConflict(t *testing.T) {
@@ -155,11 +174,17 @@ func TestRealProcessProfileExecRunnerCancellationDrainsGitProcessGroup(t *testin
 	runGit(t, repo, "config", "user.email", "test@example.com")
 	runGit(t, repo, "config", "user.name", "Test User")
 	childReady := newTestProcessBarrier(t)
-	childExited := newTestProcessExitBarrier(t)
+	childReaped := newTestProcessReapBarrier(t)
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test binary: %v", err)
+	}
+	t.Setenv("AZEDARACH_TEST_REAP_SUPERVISOR", "1")
+	t.Setenv("AZEDARACH_TEST_REAP_SUPERVISOR_BINARY", testBinary)
 	t.Setenv("AZEDARACH_TEST_CHILD_PID_FILE", childReady.path)
-	t.Setenv("AZEDARACH_TEST_CHILD_EXIT_FIFO", childExited.path)
+	t.Setenv("AZEDARACH_TEST_CHILD_REAP_FIFO", childReaped.path)
 	hooksDir := filepath.Join(repo, ".git", "hooks")
-	hook := "#!/bin/sh\nsh -c 'printf x; exec sleep 30' >\"$AZEDARACH_TEST_CHILD_EXIT_FIFO\" &\nchild=$!\nkill -0 \"$child\"\nprintf 'exec-runner-child-ready\\n'\nprintf '%s\\n' \"$child\" >\"$AZEDARACH_TEST_CHILD_PID_FILE\"\nwait \"$child\"\n"
+	hook := "#!/bin/sh\n\"$AZEDARACH_TEST_REAP_SUPERVISOR_BINARY\" -test.run '^TestProcessReapSupervisor$' &\nsupervisor=$!\nprintf 'exec-runner-child-ready\\n'\nwait \"$supervisor\"\n"
 	if err := os.WriteFile(filepath.Join(hooksDir, "pre-commit"), []byte(hook), 0o755); err != nil {
 		t.Fatalf("write blocking pre-commit hook: %v", err)
 	}
@@ -181,17 +206,17 @@ func TestRealProcessProfileExecRunnerCancellationDrainsGitProcessGroup(t *testin
 	})
 
 	childReady.wait(t, done, &result)
-	childExited.waitStarted(t, done, &result)
 	outputReady.wait(t, done, &result)
 
 	cancel()
+	childReaped.wait(t)
 	<-done
-	childExited.waitExited(t)
 	if !errors.Is(result.err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want context cancellation", result.err)
 	}
-	if !strings.Contains(result.stdout, "exec-runner-child-ready") {
-		t.Fatalf("Run() stdout = %q, want preserved child readiness output", result.stdout)
+	publicEvidence := result.stdout + "\n" + result.err.Error()
+	if !strings.Contains(publicEvidence, "exec-runner-child-ready") {
+		t.Fatalf("Run() public output = %q, want preserved child readiness evidence", publicEvidence)
 	}
 }
 
@@ -221,8 +246,12 @@ func TestRealProcessProfileCandidateGateCancellationDrainsTimeoutDescendants(t *
 		t.Fatalf("write candidate gate wrapper: %v", err)
 	}
 	childReady := newTestProcessBarrier(t)
-	childExited := newTestProcessExitBarrier(t)
-	body := "#!/bin/sh\ntrap '' TERM\nsh -c 'trap \"\" TERM; printf x; exec sleep 30' >\"$AZEDARACH_TEST_CHILD_EXIT_FIFO\" &\nchild=$!\nkill -0 \"$child\"\nprintf 'candidate-gate-child-ready\\n'\nprintf '%s\\n' \"$child\" >\"$AZEDARACH_TEST_CHILD_PID_FILE\"\nwait \"$child\"\n"
+	childReaped := newTestProcessReapBarrier(t)
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test binary: %v", err)
+	}
+	body := "#!/bin/sh\ntrap '' TERM\n\"$AZEDARACH_TEST_REAP_SUPERVISOR_BINARY\" -test.run '^TestProcessReapSupervisor$' &\nsupervisor=$!\nprintf 'candidate-gate-child-ready\\n'\nwait \"$supervisor\"\n"
 	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate-body.sh"), []byte(body), 0o755); err != nil {
 		t.Fatalf("write candidate gate body: %v", err)
 	}
@@ -234,8 +263,10 @@ func TestRealProcessProfileCandidateGateCancellationDrainsTimeoutDescendants(t *
 	env := gitEnvWithOverrides(os.Environ(), []string{
 		"AZEDARACH_CANDIDATE_HEAD=" + strings.TrimSpace(runGitOutput(t, repo, "rev-parse", "HEAD")),
 		"AZEDARACH_MERGE_GATE_TIMEOUT=1h",
+		"AZEDARACH_TEST_REAP_SUPERVISOR=1",
+		"AZEDARACH_TEST_REAP_SUPERVISOR_BINARY=" + testBinary,
 		"AZEDARACH_TEST_CHILD_PID_FILE=" + childReady.path,
-		"AZEDARACH_TEST_CHILD_EXIT_FIFO=" + childExited.path,
+		"AZEDARACH_TEST_CHILD_REAP_FIFO=" + childReaped.path,
 	})
 	outputReady := newTestOutputBarrier("candidate-gate-child-ready")
 	go func() {
@@ -248,11 +279,10 @@ func TestRealProcessProfileCandidateGateCancellationDrainsTimeoutDescendants(t *
 	})
 
 	childReady.wait(t, done, &result)
-	childExited.waitStarted(t, done, &result)
 	outputReady.wait(t, done, &result)
 	cancel()
+	childReaped.wait(t)
 	<-done
-	childExited.waitExited(t)
 	if !errors.Is(result.err, context.Canceled) {
 		t.Fatalf("candidate gate error = %v, want context cancellation", result.err)
 	}
@@ -346,68 +376,65 @@ func (b *testOutputBarrier) wait(t *testing.T, processDone <-chan struct{}, resu
 	}
 }
 
-func newTestProcessExitBarrier(t *testing.T) *testProcessExitBarrier {
+func newTestProcessReapBarrier(t *testing.T) *testProcessReapBarrier {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "child-lifetime")
+	path := filepath.Join(t.TempDir(), "child-reaped")
 	if err := syscall.Mkfifo(path, 0o600); err != nil {
-		t.Fatalf("create child lifetime FIFO: %v", err)
+		t.Fatalf("create child reap FIFO: %v", err)
 	}
-	barrier := &testProcessExitBarrier{
-		path:    path,
-		started: make(chan error, 1),
-		exited:  make(chan error, 1),
+	barrier := &testProcessReapBarrier{
+		path:   path,
+		reaped: make(chan error, 1),
 	}
 	readerOpened := make(chan error, 1)
 	go func() {
 		reader, err := os.Open(path)
 		readerOpened <- err
 		if err != nil {
-			barrier.started <- err
-			barrier.exited <- err
+			barrier.reaped <- err
 			return
 		}
 		defer reader.Close()
-		_, err = bufio.NewReader(reader).ReadByte()
-		barrier.started <- err
-		if err != nil {
-			barrier.exited <- err
-			return
+		line, err := bufio.NewReader(reader).ReadString('\n')
+		if err == nil && strings.TrimSpace(line) != "reaped" {
+			err = errors.New("unexpected child reap acknowledgement")
 		}
-		_, err = io.Copy(io.Discard, reader)
-		barrier.exited <- err
+		barrier.reaped <- err
 	}()
 
 	dummyWriter, err := os.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
-		t.Fatalf("open child lifetime FIFO writer: %v", err)
+		t.Fatalf("open child reap FIFO writer: %v", err)
 	}
 	barrier.dummyWriter = dummyWriter
 	if err := <-readerOpened; err != nil {
 		_ = dummyWriter.Close()
-		t.Fatalf("open child lifetime FIFO reader: %v", err)
+		t.Fatalf("open child reap FIFO reader: %v", err)
 	}
 	t.Cleanup(func() { _ = barrier.dummyWriter.Close() })
 	return barrier
 }
 
-func (b *testProcessExitBarrier) waitStarted(t *testing.T, processDone <-chan struct{}, result *testProcessResult) {
+func (b *testProcessReapBarrier) wait(t *testing.T) {
 	t.Helper()
-	select {
-	case err := <-b.started:
-		_ = b.dummyWriter.Close()
-		if err != nil {
-			t.Fatalf("receive child lifetime start acknowledgement: %v", err)
-		}
-	case <-processDone:
-		_ = b.dummyWriter.Close()
-		t.Fatalf("process exited before child lifetime acknowledgement: %v\nstdout: %s\nstderr: %s", result.err, result.stdout, result.stderr)
+	if err := <-b.reaped; err != nil {
+		t.Fatalf("receive child reap acknowledgement: %v", err)
 	}
+	_ = b.dummyWriter.Close()
 }
 
-func (b *testProcessExitBarrier) waitExited(t *testing.T) {
+func writeTestFIFO(t *testing.T, path, value string) {
 	t.Helper()
-	if err := <-b.exited; err != nil {
-		t.Fatalf("receive child lifetime exit acknowledgement: %v", err)
+	if path == "" {
+		t.Fatal("test FIFO path is empty")
+	}
+	writer, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open test FIFO %s: %v", path, err)
+	}
+	defer writer.Close()
+	if _, err := writer.WriteString(value); err != nil {
+		t.Fatalf("write test FIFO %s: %v", path, err)
 	}
 }
 
