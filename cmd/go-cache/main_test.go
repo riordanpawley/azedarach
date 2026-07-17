@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/riordanpawley/azedarach/internal/gocache"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -35,6 +36,36 @@ func TestRunManagedRejectsUnknownKindAndMissingCommand(t *testing.T) {
 	configureCommandTestCacheFamily(t, repo)
 	assert.ErrorContains(t, runManaged(context.Background(), []string{"--kind", "instrumented", "--", "true"}), "unsupported")
 	assert.ErrorContains(t, runManaged(context.Background(), []string{"--kind", "normal"}), "requires")
+}
+
+func TestCollectInventoryReportsManagedAndLegacyPathsSeparately(t *testing.T) {
+	repo := initCommandTestRepo(t)
+	root := configureCommandTestCacheFamily(t, repo)
+	cfg := gocache.Config{Root: root, Owner: "main", Kind: gocache.KindNormal}
+	paths := append([]string{cfg.LayoutRoot()}, gocache.LegacyPaths(root)...)
+	for index, path := range paths[:3] {
+		require.NoError(t, os.MkdirAll(path, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(path, "entry"), make([]byte, index+1), 0o644))
+	}
+
+	items, err := collectInventory(cfg)
+	require.NoError(t, err)
+	require.Len(t, items, 4)
+	for index, item := range items {
+		assert.Equal(t, paths[index], item.Path)
+		if index < 3 {
+			assert.True(t, item.Exists)
+			assert.EqualValues(t, index+1, item.Stats.Bytes)
+		} else {
+			assert.False(t, item.Exists)
+			assert.Equal(t, gocache.Stats{}, item.Stats)
+		}
+		if index == 0 {
+			assert.Equal(t, "managed", item.Kind)
+		} else {
+			assert.Equal(t, "legacy", item.Kind)
+		}
+	}
 }
 
 func configureCommandTestCacheFamily(t *testing.T, repo string) string {

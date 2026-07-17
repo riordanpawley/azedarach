@@ -8,6 +8,7 @@ import (
 	"io"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -3949,6 +3950,97 @@ func TestLoadIssuesCmdUsesScopedChildBoardSnapshotWhenDrilledDown(t *testing.T) 
 	}
 }
 
+func TestColdPlanningSnapshotAllowsDoneOnlyChildDrillDown(t *testing.T) {
+	parentID := naming.IssueID("az-parent")
+	doneChildID := naming.IssueID("az-done-child")
+	parent := domain.Task{ID: parentID, Title: "Parent", Status: domain.StatusOpen, Priority: domain.P1, Type: domain.TypeEpic}
+	doneChild := domain.Task{ID: doneChildID, Title: "Done child", Status: domain.StatusDone, Priority: domain.P2, Type: domain.TypeTask, ParentID: &parentID}
+	planning := domain.PlanningBoardView()
+	planningProjection, err := domain.ProjectTasksByBoardView(planning, []domain.Task{parent, doneChild})
+	if err != nil {
+		t.Fatalf("project Planning board: %v", err)
+	}
+
+	transport := &recordingDaemonTransport{
+		replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			var body []byte
+			switch req.Command {
+			case daemonclient.CommandBoardFetch:
+				body, err = json.Marshal(protocol.BoardSnapshotPayload{
+					SchemaVersion:    protocol.BoardSnapshotSchemaVersion,
+					ProtocolVersion:  req.ProtocolVersion,
+					SnapshotRevision: 43,
+					ProjectID:        req.Meta.ProjectID,
+					LastCheckedAt:    daemonSnapshotCheckedAt(),
+					Freshness:        protocol.TaskListFreshnessFresh,
+					Projection:       protocol.BoardViewProjectionFromDomain(planningProjection),
+				})
+			case daemonclient.CommandTaskGetMany:
+				body, err = json.Marshal(protocol.TaskListSnapshotPayload{
+					SchemaVersion:    protocol.TaskListSnapshotSchemaVersion,
+					ProtocolVersion:  req.ProtocolVersion,
+					ProjectID:        req.Meta.ProjectID,
+					SnapshotRevision: 44,
+					LastCheckedAt:    daemonSnapshotCheckedAt(),
+					Freshness:        protocol.TaskListFreshnessFresh,
+					Tasks:            []domain.Task{parent, doneChild},
+				})
+			default:
+				t.Fatalf("command = %q, want board.fetch or task.get_many", req.Command)
+			}
+			if err != nil {
+				t.Fatalf("marshal %s response: %v", req.Command, err)
+			}
+			return protocol.ResponseEnvelope{
+				ProtocolVersion: req.ProtocolVersion,
+				RequestID:       req.RequestID,
+				Kind:            protocol.EnvelopeKindResponse,
+				Revision:        44,
+				OK:              true,
+				Body:            body,
+			}, nil
+		},
+	}
+	m := newDaemonTestModel(transport)
+
+	rootMsg := m.loadIssuesCmd()()
+	loaded, ok := rootMsg.(issuesLoadedMsg)
+	if !ok {
+		t.Fatalf("root snapshot message = %T, want issuesLoadedMsg", rootMsg)
+	}
+	rootAny, _ := m.Update(loaded)
+	root := rootAny.(Model)
+	if len(root.tasks) != 1 || root.tasks[0].ID != parentID {
+		t.Fatalf("decoded Planning tasks = %+v, want only parent", root.tasks)
+	}
+	if !root.boardProjectionHasDirectChildren(parentID.String()) {
+		t.Fatalf("decoded Planning child progress = %+v, want direct-child authority", root.boardProjection.ChildProgress)
+	}
+
+	enteredAny, scopedRefreshCmd := root.enterDrillDownByID(parentID.String())
+	drilled := enteredAny.(Model)
+	if !drilled.isDrillDownActive() || scopedRefreshCmd == nil {
+		t.Fatal("cold Planning drill-down did not activate and schedule scoped refresh")
+	}
+	if got, want := drilled.boardView.ID, domain.BoardViewDefaultID; got != want {
+		t.Fatalf("cold drill-down view = %q, want %q", got, want)
+	}
+
+	scopedMsg := drilled.loadIssuesCmd()()
+	childLoaded, ok := scopedMsg.(issuesLoadedMsg)
+	if !ok {
+		t.Fatalf("scoped snapshot message = %T, want issuesLoadedMsg", scopedMsg)
+	}
+	refreshedAny, _ := drilled.Update(childLoaded)
+	refreshed := refreshedAny.(Model)
+	if !slices.ContainsFunc(refreshed.tasks, func(task domain.Task) bool { return task.ID == doneChildID }) {
+		t.Fatalf("scoped Default tasks = %+v, want Done child %s", refreshed.tasks, doneChildID)
+	}
+	if got, want := refreshed.selectedBoardViewID, string(planning.ID); got != want {
+		t.Fatalf("root selected view = %q, want preserved %q", got, want)
+	}
+}
+
 func TestStaleIssuesLoadedMsgMarksManualDrillDownRefreshStale(t *testing.T) {
 	m := newTestModel()
 	m.loading = false
@@ -3959,8 +4051,9 @@ func TestStaleIssuesLoadedMsgMarksManualDrillDownRefreshStale(t *testing.T) {
 	m.taskSnapshotFreshness = protocol.TaskListFreshnessFresh
 
 	updatedAny, _ := m.Update(issuesLoadedMsg{
-		stale:         true,
-		freshnessHint: "Drill-down child-board refresh timed out during task snapshot read after 5s; keeping current local view",
+		scopedParentID: "az-parent",
+		stale:          true,
+		freshnessHint:  "Drill-down child-board refresh timed out during task snapshot read after 5s; keeping current local view",
 	})
 	updated, ok := updatedAny.(Model)
 	if !ok {
@@ -11759,7 +11852,7 @@ func TestOrchestrationLoopEventRefreshesVisibleOverview(t *testing.T) {
 		Revision:  5,
 		Event:     protocol.EventOrchestrationLoopUpdated,
 	}, false)
-	if result.cmd == nil {
+	if !result.refreshOrchestrator {
 		t.Fatal("orchestration loop event did not schedule overview refresh")
 	}
 	if m.daemonRevision != 5 {
@@ -11771,8 +11864,55 @@ func TestOrchestrationLoopEventRefreshesVisibleOverview(t *testing.T) {
 		Revision:  6,
 		Event:     protocol.EventOrchestrationLoopUpdated,
 	}, false)
-	if result.cmd == nil {
+	if !result.refreshOrchestrator {
 		t.Fatal("orchestration event did not refresh current-project snapshot")
+	}
+}
+
+func TestProjectOrchestratorProjectionEventsRefreshVisibleOverview(t *testing.T) {
+	taskBody, err := json.Marshal(protocol.TaskEventBody{
+		TaskID: naming.IssueID("az-1"),
+		Task:   &domain.Task{ID: "az-1", Title: "Updated", Status: domain.StatusInReview, Priority: domain.P1, Type: domain.TypeTask},
+	})
+	if err != nil {
+		t.Fatalf("marshal task event: %v", err)
+	}
+	sessionBody, err := json.Marshal(protocol.SessionProjectionEventBody{
+		Session: protocol.SessionProjection{
+			SessionID: naming.SessionID("session-1"),
+			IssueID:   naming.IssueID("az-1"),
+			Role:      protocol.SessionRoleWorker,
+			State:     protocol.SessionLifecycleStateRunning,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal session event: %v", err)
+	}
+
+	tests := []struct {
+		name  string
+		event string
+		body  []byte
+	}{
+		{name: "task", event: protocol.EventTaskUpdated, body: taskBody},
+		{name: "session", event: protocol.EventSessionUpdated, body: sessionBody},
+		{name: "interaction", event: protocol.EventInteractionResolved, body: []byte(`{}`)},
+		{name: "mail", event: protocol.EventMailAppended, body: []byte(`{}`)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestModel()
+			m.daemonRevision = 4
+			result := m.applyDaemonStreamEvent(protocol.EventEnvelope{
+				ProjectID: naming.ProjectID(m.daemonProjectID()),
+				Revision:  5,
+				Event:     tt.event,
+				Body:      tt.body,
+			}, false)
+			if !result.refreshOrchestrator {
+				t.Fatalf("%s event did not request project orchestrator refresh", tt.event)
+			}
+		})
 	}
 }
 
