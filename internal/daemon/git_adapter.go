@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -23,6 +25,7 @@ import (
 var (
 	daemonDiffStatInsertionsPattern = regexp.MustCompile(`(\d+)\s+insertion(?:s)?\(\+\)`)
 	daemonDiffStatDeletionsPattern  = regexp.MustCompile(`(\d+)\s+deletion(?:s)?\(-\)`)
+	errGitHookProjectionIneligible  = errors.New("durable git hook projection target is ineligible")
 )
 
 const runtimeSignalProjectionTTL = 15 * time.Second
@@ -52,11 +55,19 @@ type gitServiceAdapter struct {
 	runtimeSignalsCache map[string]runtimeSignalProjection
 
 	hookRefreshContinuationWG sync.WaitGroup
+	hookRefreshSupervisors    map[string]*gitHookRefreshSupervisor
 	hookRefreshRetryDelay     func(context.Context, int) error
 	hookRefreshLifecycleMu    sync.Mutex
 	hookRefreshContext        context.Context
 	hookRefreshCancel         context.CancelFunc
 	hookRefreshStopped        bool
+}
+
+type gitHookRefreshSupervisor struct {
+	mu      sync.Mutex
+	key     string
+	refs    int
+	running atomic.Bool
 }
 
 func (a *gitServiceAdapter) runtimeStore(projectID string) *daemonstate.RuntimeStateStore {
@@ -432,7 +443,8 @@ func (a *gitServiceAdapter) RefreshStatusForHook(ctx context.Context, projectID,
 		return &git.GitStatus{}, nil
 	}
 
-	if _, err := a.queueDurableGitHookRefresh(ctx, projectID, worktree); err != nil {
+	_, admitted, err := a.queueDurableGitHookRefresh(ctx, projectID, worktree)
+	if err != nil {
 		if a.logger != nil {
 			a.logger.Warn("daemon hook git status refresh enqueue failed",
 				"project_id", projectID,
@@ -443,9 +455,10 @@ func (a *gitServiceAdapter) RefreshStatusForHook(ctx context.Context, projectID,
 		return nil, err
 	}
 	if a.logger != nil {
-		a.logger.Info("daemon hook git status refresh enqueued",
+		a.logger.Info("daemon hook git status refresh admission completed",
 			"project_id", projectID,
 			"worktree", worktree,
+			"admitted", admitted,
 		)
 	}
 	return a.cachedGitStatus(ctx, projectID, worktree)
@@ -574,7 +587,16 @@ func (a *gitServiceAdapter) queueGitStatusRefresh(projectID, worktree string, pr
 					if !pending {
 						break
 					}
-					if _, _, refreshErr := a.refreshGitHookStatusWriteThroughResult(refreshCtx, projectID, worktree, intent.RequestedGeneration); refreshErr != nil {
+					if _, _, refreshErr := a.refreshGitHookStatusWriteThroughResult(refreshCtx, projectID, worktree, intent.RequestedGeneration); errors.Is(refreshErr, errGitHookProjectionIneligible) {
+						retired, retireErr := a.retireGitHookRefresh(refreshCtx, projectID, worktree)
+						if retireErr != nil {
+							return nil, retireErr
+						}
+						if retired {
+							return &git.GitStatus{}, nil
+						}
+						return nil, fmt.Errorf("durable git hook projection eligibility changed before retirement")
+					} else if refreshErr != nil {
 						return nil, refreshErr
 					}
 				}
@@ -623,22 +645,37 @@ func (a *gitServiceAdapter) queueGitStatusRefresh(projectID, worktree string, pr
 	return submission, nil
 }
 
-func (a *gitServiceAdapter) queueDurableGitHookRefresh(ctx context.Context, projectID, worktree string) (reconcileQueueSubmission[*git.GitStatus], error) {
+func (a *gitServiceAdapter) queueDurableGitHookRefresh(ctx context.Context, projectID, worktree string) (reconcileQueueSubmission[*git.GitStatus], bool, error) {
 	projectID = normalizeProjectID(projectID)
 	worktree = strings.TrimSpace(worktree)
 	store := a.runtimeStore(projectID)
 	if store == nil {
-		return reconcileQueueSubmission[*git.GitStatus]{}, fmt.Errorf("runtime state store unavailable for durable git hook refresh")
+		return reconcileQueueSubmission[*git.GitStatus]{}, false, fmt.Errorf("runtime state store unavailable for durable git hook refresh")
 	}
+	_, _, eligible, err := a.gitHookProjectionTarget(ctx, projectID, worktree)
+	if err != nil {
+		return reconcileQueueSubmission[*git.GitStatus]{}, false, err
+	}
+	if !eligible {
+		return immediateReconcileSubmission(reconcileQueueResult[*git.GitStatus]{
+			Key:     gitStatusRefreshQueueKey(projectID, worktree),
+			Skipped: true,
+			Reason:  "ineligible_worktree",
+			Value:   &git.GitStatus{},
+		}), false, nil
+	}
+	supervisor := a.lockGitHookRefreshSupervisor(projectID, worktree)
+	defer a.unlockGitHookRefreshSupervisor(supervisor)
 	if _, err := store.AcceptGitHookRefresh(ctx, projectID, worktree, time.Now().UTC()); err != nil {
-		return reconcileQueueSubmission[*git.GitStatus]{}, err
+		return reconcileQueueSubmission[*git.GitStatus]{}, false, err
 	}
 	submission, err := a.queuePersistedGitHookRefresh(projectID, worktree)
 	if err != nil {
-		return reconcileQueueSubmission[*git.GitStatus]{}, err
+		a.startGitHookRefreshSupervisorLocked(supervisor, immediateReconcileSubmission(reconcileQueueResult[*git.GitStatus]{Err: err}), projectID, worktree)
+		return reconcileQueueSubmission[*git.GitStatus]{}, true, err
 	}
-	a.continuePendingGitHookRefreshAfter(submission, projectID, worktree)
-	return submission, nil
+	a.startGitHookRefreshSupervisorLocked(supervisor, submission, projectID, worktree)
+	return submission, true, nil
 }
 
 func (a *gitServiceAdapter) queuePersistedGitHookRefresh(projectID, worktree string) (reconcileQueueSubmission[*git.GitStatus], error) {
@@ -646,12 +683,32 @@ func (a *gitServiceAdapter) queuePersistedGitHookRefresh(projectID, worktree str
 }
 
 func (a *gitServiceAdapter) continuePendingGitHookRefreshAfter(submission reconcileQueueSubmission[*git.GitStatus], projectID, worktree string) {
+	supervisor := a.lockGitHookRefreshSupervisor(projectID, worktree)
+	defer a.unlockGitHookRefreshSupervisor(supervisor)
+	a.startGitHookRefreshSupervisorLocked(supervisor, submission, projectID, worktree)
+}
+
+func (a *gitServiceAdapter) startGitHookRefreshSupervisorLocked(supervisor *gitHookRefreshSupervisor, submission reconcileQueueSubmission[*git.GitStatus], projectID, worktree string) {
+	if supervisor == nil || supervisor.running.Load() {
+		return
+	}
 	reconcileCtx, ok := a.beginGitHookRefreshContinuation()
 	if !ok {
 		return
 	}
+	a.retainGitHookRefreshSupervisor(supervisor)
+	supervisor.running.Store(true)
 	go func() {
-		defer a.hookRefreshContinuationWG.Done()
+		released := false
+		defer func() {
+			if !released {
+				supervisor.mu.Lock()
+				supervisor.running.Store(false)
+				supervisor.mu.Unlock()
+				a.releaseGitHookRefreshSupervisor(supervisor)
+			}
+			a.hookRefreshContinuationWG.Done()
+		}()
 		attempt := 0
 		current := submission
 		for {
@@ -663,7 +720,21 @@ func (a *gitServiceAdapter) continuePendingGitHookRefreshAfter(submission reconc
 			_, pending, loadErr := a.pendingGitHookRefresh(checkCtx, projectID, worktree)
 			cancel()
 			if loadErr == nil && !pending {
-				return
+				// Serialize the final durable recheck with same-key admissions.
+				// An admission either advances the generation before this check,
+				// or observes running=false afterward and starts the next owner.
+				supervisor.mu.Lock()
+				checkCtx, cancel = context.WithTimeout(reconcileCtx, 2*time.Second)
+				_, pending, loadErr = a.pendingGitHookRefresh(checkCtx, projectID, worktree)
+				cancel()
+				if loadErr == nil && !pending {
+					supervisor.running.Store(false)
+					released = true
+					supervisor.mu.Unlock()
+					a.releaseGitHookRefreshSupervisor(supervisor)
+					return
+				}
+				supervisor.mu.Unlock()
 			}
 			if waitErr != nil || result.Err != nil || loadErr != nil {
 				attempt++
@@ -684,6 +755,61 @@ func (a *gitServiceAdapter) continuePendingGitHookRefreshAfter(submission reconc
 			current = next
 		}
 	}()
+}
+
+func (a *gitServiceAdapter) lockGitHookRefreshSupervisor(projectID, worktree string) *gitHookRefreshSupervisor {
+	key := gitStatusRefreshQueueKey(projectID, worktree)
+	a.hookRefreshLifecycleMu.Lock()
+	if a.hookRefreshSupervisors == nil {
+		a.hookRefreshSupervisors = make(map[string]*gitHookRefreshSupervisor)
+	}
+	supervisor := a.hookRefreshSupervisors[key]
+	if supervisor == nil {
+		supervisor = &gitHookRefreshSupervisor{key: key}
+		a.hookRefreshSupervisors[key] = supervisor
+	}
+	supervisor.refs++
+	a.hookRefreshLifecycleMu.Unlock()
+	supervisor.mu.Lock()
+	return supervisor
+}
+
+func (a *gitServiceAdapter) unlockGitHookRefreshSupervisor(supervisor *gitHookRefreshSupervisor) {
+	supervisor.mu.Unlock()
+	a.releaseGitHookRefreshSupervisor(supervisor)
+}
+
+func (a *gitServiceAdapter) retainGitHookRefreshSupervisor(supervisor *gitHookRefreshSupervisor) {
+	a.hookRefreshLifecycleMu.Lock()
+	supervisor.refs++
+	a.hookRefreshLifecycleMu.Unlock()
+}
+
+func (a *gitServiceAdapter) releaseGitHookRefreshSupervisor(supervisor *gitHookRefreshSupervisor) {
+	a.hookRefreshLifecycleMu.Lock()
+	supervisor.refs--
+	if supervisor.refs == 0 && !supervisor.running.Load() && a.hookRefreshSupervisors[supervisor.key] == supervisor {
+		delete(a.hookRefreshSupervisors, supervisor.key)
+	}
+	a.hookRefreshLifecycleMu.Unlock()
+}
+
+func (a *gitServiceAdapter) activeGitHookRefreshSupervisorCount() int {
+	a.hookRefreshLifecycleMu.Lock()
+	defer a.hookRefreshLifecycleMu.Unlock()
+	active := 0
+	for _, supervisor := range a.hookRefreshSupervisors {
+		if supervisor.running.Load() {
+			active++
+		}
+	}
+	return active
+}
+
+func (a *gitServiceAdapter) gitHookRefreshSupervisorCount() int {
+	a.hookRefreshLifecycleMu.Lock()
+	defer a.hookRefreshLifecycleMu.Unlock()
+	return len(a.hookRefreshSupervisors)
 }
 
 func (a *gitServiceAdapter) beginGitHookRefreshContinuation() (context.Context, bool) {
@@ -762,6 +888,14 @@ func (a *gitServiceAdapter) pendingGitHookRefresh(ctx context.Context, projectID
 		return daemonstate.GitHookRefreshIntent{}, false, fmt.Errorf("runtime state store unavailable for durable git hook refresh")
 	}
 	return store.GetPendingGitHookRefresh(ctx, projectID, worktree)
+}
+
+func (a *gitServiceAdapter) retireGitHookRefresh(ctx context.Context, projectID, worktree string) (bool, error) {
+	store := a.runtimeStore(projectID)
+	if store == nil {
+		return false, fmt.Errorf("runtime state store unavailable for durable git hook refresh")
+	}
+	return store.RetireGitHookRefreshIfIneligible(ctx, projectID, worktree, time.Now().UTC())
 }
 
 func (a *gitServiceAdapter) gitStatusHeavySessionStartActive(projectID string) bool {
@@ -848,16 +982,25 @@ func (a *gitServiceAdapter) refreshGitHookStatusWriteThroughResult(ctx context.C
 	if worktree == "" || generation <= 0 {
 		return nil, 0, fmt.Errorf("git hook refresh requires worktree and generation")
 	}
+	issueID, branch, eligible, err := a.gitHookProjectionTarget(ctx, projectID, worktree)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !eligible {
+		return nil, 0, errGitHookProjectionIneligible
+	}
 	status, err := a.client.Status(ctx, worktree)
 	if err != nil {
+		cleanupCtx, cancel := gitStatusProjectionPersistContext(ctx)
+		if a.suppressStaleWorktreeGitRefresh(cleanupCtx, projectID, worktree, err) {
+			cancel()
+			return nil, 0, fmt.Errorf("%w: %v", errGitHookProjectionIneligible, err)
+		}
+		cancel()
 		return nil, 0, err
 	}
 	persistCtx, cancel := gitStatusProjectionPersistContext(ctx)
 	defer cancel()
-	issueID, branch := a.resolveWorktreeProjectionIdentity(persistCtx, projectID, worktree)
-	if issueID == "" {
-		return status, 0, fmt.Errorf("durable git hook projection target not found")
-	}
 	if a.runtimeProjectionWriter == nil {
 		rawStatus, marshalErr := json.Marshal(status)
 		if marshalErr != nil {
@@ -883,6 +1026,22 @@ func (a *gitServiceAdapter) refreshGitHookStatusWriteThroughResult(ctx context.C
 	rev, err := a.runtimeProjectionWriter.PersistGitHookStatusProjectionAndPublishResult(persistCtx, projectID, issueID, worktree, generation, status)
 	a.invalidateRuntimeSignalCache(projectID, worktree)
 	return status, rev, err
+}
+
+func (a *gitServiceAdapter) gitHookProjectionTarget(ctx context.Context, projectID, worktree string) (string, string, bool, error) {
+	store := a.runtimeStore(projectID)
+	if store == nil {
+		return "", "", false, fmt.Errorf("runtime state store unavailable for durable git hook refresh")
+	}
+	projection, found, err := store.GetWorktreeStateByPath(ctx, projectID, worktree)
+	if err != nil {
+		return "", "", false, fmt.Errorf("load durable git hook projection target: %w", err)
+	}
+	issueID := strings.TrimSpace(projection.IssueID)
+	if !found || issueID == "" {
+		return "", "", false, nil
+	}
+	return issueID, strings.TrimSpace(projection.Branch), true, nil
 }
 
 func (a *gitServiceAdapter) refreshGitStatusWriteThroughResult(ctx context.Context, projectID, worktree string, publishOnChange, forcePublish bool) (*git.GitStatus, error) {
