@@ -41,6 +41,10 @@ func (deterministicRuntimeSignalGitRunner) Run(_ context.Context, args ...string
 }
 
 func useDeterministicRuntimeSignalGitClient(d *Daemon) {
+	if d.runtimeProjectionCoalescer != nil {
+		d.runtimeProjectionCoalescer.Close()
+		d.runtimeProjectionCoalescer = nil
+	}
 	d.gitStatusAdapter.client = git.NewClient(deterministicRuntimeSignalGitRunner{}, d.cfg.Logger)
 	d.gitStatusAdapter.baseBranch = ""
 	d.gitStatusAdapter.baseBranchForProject = nil
@@ -60,8 +64,14 @@ func cleanupRuntimeSignalTestDaemon(d *Daemon) {
 	if d.runtimeReconcileQueue != nil {
 		_ = d.runtimeReconcileQueue.Close()
 	}
+	if d.gitStatusAdapter != nil {
+		d.gitStatusAdapter.stopGitHookRefreshReconciler()
+	}
 	if d.gitStatusRefreshQueue != nil {
 		_ = d.gitStatusRefreshQueue.Close()
+	}
+	if d.gitStatusAdapter != nil {
+		d.gitStatusAdapter.waitForGitHookRefreshContinuations()
 	}
 	d.stopUserProjectionWorkers()
 	d.closeIssueClients()
@@ -71,20 +81,36 @@ func cleanupRuntimeSignalTestDaemon(d *Daemon) {
 type runtimeSignalContextInspectingWriter struct {
 	*recordingRuntimeProjectionWriter
 	foreground chan string
+	delegate   runtimeProjectionWriter
 }
 
 func (w *runtimeSignalContextInspectingWriter) PersistWorktreeProjection(ctx context.Context, projectID, issueID, path, branch string) error {
 	if ctx.Value(runtimeSignalForegroundProjectionMarker{}) != nil {
 		w.foreground <- "worktree.persist"
 	}
+	if w.delegate != nil {
+		w.record("worktree.persist")
+		return w.delegate.PersistWorktreeProjection(ctx, projectID, issueID, path, branch)
+	}
 	return w.recordingRuntimeProjectionWriter.PersistWorktreeProjection(ctx, projectID, issueID, path, branch)
 }
 
-func (w *runtimeSignalContextInspectingWriter) PersistGitStatusProjectionAndPublish(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus, publishOnChange, forcePublish bool) uint64 {
+func (w *runtimeSignalContextInspectingWriter) PersistGitStatusProjectionAndPublish(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus, publishOnChange, forcePublish bool) (uint64, error) {
 	if ctx.Value(runtimeSignalForegroundProjectionMarker{}) != nil {
 		w.foreground <- "git_status.persist_publish"
 	}
 	return w.recordingRuntimeProjectionWriter.PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktree, status, publishOnChange, forcePublish)
+}
+
+func (w *runtimeSignalContextInspectingWriter) PersistGitHookStatusProjectionAndPublishResult(ctx context.Context, projectID, issueID, worktree string, generation int64, status *git.GitStatus) (uint64, error) {
+	if ctx.Value(runtimeSignalForegroundProjectionMarker{}) != nil {
+		w.foreground <- "git_status.hook_persist_publish"
+	}
+	if w.delegate != nil {
+		w.record("git.persist+publish")
+		return w.delegate.PersistGitHookStatusProjectionAndPublishResult(ctx, projectID, issueID, worktree, generation, status)
+	}
+	return w.recordingRuntimeProjectionWriter.PersistGitHookStatusProjectionAndPublishResult(ctx, projectID, issueID, worktree, generation, status)
 }
 
 func TestRuntimeSignalIngestGitHookQueuesWriteThroughProjection(t *testing.T) {
@@ -163,6 +189,7 @@ func TestRuntimeSignalIngestGitHookDoesNotPersistOnRequestContext(t *testing.T) 
 	writer := &runtimeSignalContextInspectingWriter{
 		recordingRuntimeProjectionWriter: &recordingRuntimeProjectionWriter{},
 		foreground:                       make(chan string, 2),
+		delegate:                         newRuntimeProjectionWriter(d),
 	}
 	d.runtimeProjectionWriter = writer
 	d.gitStatusAdapter.runtimeProjectionWriter = writer
@@ -214,7 +241,10 @@ func TestRuntimeSignalIngestGitHookAcknowledgesWhileWriterContended(t *testing.T
 		t.Fatalf("runtime projection writer = %T", d.runtimeProjectionStateWriter())
 	}
 	holderCtx := contextWithRuntimeProjectionWriterOperation(context.Background(), "worktree.replace_snapshot")
-	releaseWriter := writer.lockProjectionWriter(holderCtx, "proj-hook-contention", "fallback.holder")
+	releaseWriter, err := writer.lockProjectionWriter(holderCtx, "proj-hook-contention", "fallback.holder")
+	if err != nil {
+		t.Fatal(err)
+	}
 	released := false
 	defer func() {
 		if !released {
@@ -237,7 +267,7 @@ func TestRuntimeSignalIngestGitHookAcknowledgesWhileWriterContended(t *testing.T
 	if err != nil || !resp.OK {
 		t.Fatalf("runtime signal response=%+v err=%v", resp, err)
 	}
-	if holder := writer.currentHolderOperation(); holder != "worktree.replace_snapshot" {
+	if holder := writer.mu.currentHolder(); holder != "worktree.replace_snapshot" {
 		t.Fatalf("writer holder after acknowledgement = %q", holder)
 	}
 
@@ -299,10 +329,7 @@ func TestRuntimeProjectionWriterDoesNotHoldWriterLockAcrossRuntimeRefresh(t *tes
 	}()
 
 	<-refreshEntered
-	lockAvailable := writer.mu.TryLock()
-	if lockAvailable {
-		writer.mu.Unlock()
-	}
+	lockAvailable := writer.mu.currentHolder() == ""
 	if tasks, _ := materializer.snapshot(); len(tasks) != 1 || tasks[0].ID.String() != issueID {
 		t.Fatalf("board/graph snapshot unavailable during runtime refresh: %+v", tasks)
 	}

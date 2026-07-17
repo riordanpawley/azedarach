@@ -2140,7 +2140,9 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueIDString, worktreePath, worktreeBranch)
+	if _, err := d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueIDString, worktreePath, worktreeBranch); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist conflict worktree projection: %v", err)), nil
+	}
 
 	canonicalSessionID := naming.CanonicalSessionIDForIssue(d.sessionNamingScope(projectID), issueID).String()
 	sessionName, reusedSession, err := d.ensureConflictSession(ctx, projectID, issueIDString, canonicalSessionID, worktreePath)
@@ -2364,8 +2366,8 @@ func (d *Daemon) recordConflictSessionAttached(ctx context.Context, req protocol
 	if forceErr != nil {
 		return forceErr
 	}
-	d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(ctx, projectID, req.Meta, event.Session)
-	return nil
+	_, err = d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(ctx, projectID, req.Meta, event.Session)
+	return err
 }
 
 func normalizeConflictFiles(files []string) []string {
@@ -3145,8 +3147,8 @@ func (d *Daemon) upsertSessionAndPublish(projectID, sessionID, issueID string, s
 	if err != nil {
 		return err
 	}
-	d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(context.Background(), projectID, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, event.Session)
-	return nil
+	_, err = d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(context.Background(), projectID, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, event.Session)
+	return err
 }
 
 func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, sessionID string) (sessionRecoveryResult, error) {
@@ -3866,7 +3868,13 @@ func (d *Daemon) ensureSessionWorktreeProjection(ctx context.Context, projectID,
 			branch = strings.TrimSpace(currentBranch)
 		}
 	}
-	rev := d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktreePath, branch)
+	rev, err := d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktreePath, branch)
+	if err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("backfill session worktree projection failed", "project_id", projectID, "issue_id", issueID, "error", err)
+		}
+		return
+	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info(
 			"backfilled session worktree projection",

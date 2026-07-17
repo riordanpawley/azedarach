@@ -205,7 +205,8 @@ func (d *Daemon) ingestGitWorktreeSignal(ctx context.Context, projectID string, 
 		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_refresh_queued", OK: false, Message: "missing worktree"})
 		return
 	}
-	if _, err := d.gitStatusAdapter.queueGitStatusRefresh(projectID, cmd.Worktree, reconcilePriorityManual, "hook"); err != nil {
+	if _, err := d.gitStatusAdapter.queueDurableGitHookRefresh(ctx, projectID, cmd.Worktree); err != nil {
+		out.Accepted = false
 		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_refresh_queued", OK: false, Message: err.Error()})
 		return
 	}

@@ -4598,6 +4598,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0050_issue_observation_event_search",
 		"0051_decision_idempotency",
 		"0052_mailbox_observation_projection_cutover",
+		"0053_git_hook_refresh_intents",
 	}, got)
 }
 

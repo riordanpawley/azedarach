@@ -1469,7 +1469,10 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 
 	for issueID, status := range statusByIssue {
 		worktreePath := worktreePathByIssue[issueID]
-		rev := d.runtimeProjectionStateWriter().PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktreePath, status, true, false)
+		rev, persistErr := d.runtimeProjectionStateWriter().PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktreePath, status, true, false)
+		if persistErr != nil {
+			return len(rows), fmt.Errorf("persist git status projection %s: %w", issueID, persistErr)
+		}
 		if rev == 0 && d.worktreeRuntimeStateStore(projectID) != nil {
 			rawStatus, err := json.Marshal(status)
 			if err != nil {
@@ -1624,7 +1627,10 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 			continue
 		}
 		if !found || strings.TrimSpace(projection.Path) != worktreePath || strings.TrimSpace(projection.Branch) != branch {
-			d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktreePath, branch)
+			if _, persistErr := d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktreePath, branch); persistErr != nil {
+				errs = append(errs, fmt.Errorf("%s: persist worktree projection: %w", issueID, persistErr))
+				continue
+			}
 		}
 		refreshed++
 
@@ -1641,7 +1647,11 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 			errs = append(errs, fmt.Errorf("%s: refresh git status: %w", issueID, statusErr))
 			continue
 		}
-		rev := d.runtimeProjectionStateWriter().PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktreePath, status, true, false)
+		rev, persistErr := d.runtimeProjectionStateWriter().PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktreePath, status, true, false)
+		if persistErr != nil {
+			errs = append(errs, fmt.Errorf("%s: persist git status projection: %w", issueID, persistErr))
+			continue
+		}
 		if rev == 0 && d.worktreeRuntimeStateStore(projectID) != nil {
 			rawStatus, marshalErr := json.Marshal(status)
 			if marshalErr != nil {
@@ -2609,9 +2619,13 @@ func (d *Daemon) deferredTaskWorktreeCleanupShouldSkip(ctx context.Context, proj
 		return false
 	}
 	if fallbackPath != "" {
-		d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, fallbackPath, fallbackBranch)
+		if _, err := d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, fallbackPath, fallbackBranch); err != nil {
+			return false
+		}
 	} else {
-		d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, taskID)
+		if err := d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, taskID); err != nil {
+			return false
+		}
 	}
 	return true
 }
@@ -2728,16 +2742,17 @@ func (d *Daemon) compensateDeferredTaskWorktreeCleanup(ctx context.Context, proj
 	return nil
 }
 
-func (d *Daemon) restoreDeferredCleanupWorktreeProjection(ctx context.Context, projectID, taskID string) {
+func (d *Daemon) restoreDeferredCleanupWorktreeProjection(ctx context.Context, projectID, taskID string) error {
 	manager := d.worktreeManagerForProject(projectID)
 	if manager == nil {
-		return
+		return nil
 	}
 	worktree, err := manager.Get(ctx, taskID)
 	if err != nil || worktree == nil {
-		return
+		return err
 	}
-	d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, worktree.Path, worktree.Branch)
+	_, err = d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, worktree.Path, worktree.Branch)
+	return err
 }
 
 func (d *Daemon) liveWorktreePathSet(ctx context.Context, projectID string) (map[string]struct{}, bool, error) {
