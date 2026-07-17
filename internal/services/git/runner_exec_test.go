@@ -177,8 +177,10 @@ func TestRealProcessProfileCandidateGateCancellationDrainsTimeoutDescendants(t *
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	env := gitEnvWithOverrides(os.Environ(), []string{
+	env := gitEnvWithOverrides(sanitizedGitEnv(os.Environ()), []string{
 		"AZEDARACH_CANDIDATE_HEAD=" + strings.TrimSpace(runGitOutput(t, repo, "rev-parse", "HEAD")),
+		"AZEDARACH_MERGE_GATE_BODY=" + filepath.Join(scriptsDir, "git-merge-rebase-gate-body.sh"),
+		"AZEDARACH_SKIP_MERGE_REBASE_GATE=0",
 		"AZEDARACH_MERGE_GATE_TIMEOUT=1h",
 		"AZEDARACH_TEST_CHILD_PID_FILE=" + childPIDFile,
 	})

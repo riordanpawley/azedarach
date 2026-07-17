@@ -141,7 +141,7 @@ func runCandidateGate(t *testing.T, repo string) {
 	head := strings.TrimSpace(runCandidateHookGit(t, repo, nil, "rev-parse", "HEAD"))
 	cmd := exec.Command(filepath.Join(repo, "scripts", "git-merge-rebase-gate.sh"))
 	cmd.Dir = repo
-	cmd.Env = append(os.Environ(), "AZEDARACH_CANDIDATE_HEAD="+head)
+	cmd.Env = gitEnvWithOverrides(sanitizedGitEnv(os.Environ()), []string{"AZEDARACH_CANDIDATE_HEAD=" + head})
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("run explicit candidate gate: %v\n%s", err, output)
 	}
