@@ -22,11 +22,16 @@ type globalBoardLoadedMsg struct {
 }
 
 func (m Model) loadGlobalBoardCmd(seq uint64) tea.Cmd {
+	var showChildren *bool
+	if m.sessionTreeFilterOnly {
+		show := true
+		showChildren = &show
+	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		client := daemonclient.New(transport.NewClient(config.GlobalDaemonSocketPath()))
-		snapshot, err := client.GlobalViewSnapshot(ctx, protocol.GlobalSnapshotRequestBody{Consumer: protocol.GlobalViewConsumerBoard})
+		snapshot, err := client.GlobalViewSnapshot(ctx, protocol.GlobalSnapshotRequestBody{Consumer: protocol.GlobalViewConsumerBoard, ShowChildren: showChildren})
 		return globalBoardLoadedMsg{snapshot: snapshot, err: err, seq: seq}
 	}
 }

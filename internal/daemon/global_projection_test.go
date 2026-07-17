@@ -134,12 +134,27 @@ func TestProjectGlobalViewScopesProgressForChildrenOmittedByView(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(projection.Items) != 1 || projection.Items[0].Identity.IssueID != parentID {
+		t.Fatalf("default global view items = %+v, want parent only", projection.Items)
+	}
 	if len(projection.ChildProgress) != 1 {
 		t.Fatalf("child progress = %+v", projection.ChildProgress)
 	}
 	got := projection.ChildProgress[0]
 	if got.ParentID.ProjectID != "alpha" || got.ParentID.IssueID != parentID || got.Done != 1 || got.Total != 2 {
 		t.Fatalf("child progress = %+v, want alpha::parent 1/2", got)
+	}
+	showChildren := domain.DefaultBoardView()
+	showChildren.Options.ShowChildren = true
+	projection, err = projectGlobalView(showChildren, []protocol.GlobalProjectSnapshot{{ProjectID: "alpha", Tasks: []domain.Task{
+		{ID: parentID, Status: domain.StatusOpen},
+		{ID: "done", Status: domain.StatusDone, ParentID: &parentID},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Items) != 2 {
+		t.Fatalf("show-children global view items = %+v, want parent and child", projection.Items)
 	}
 }
 
