@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -22,6 +24,10 @@ const (
 	sessionRestartPrepareTimeout     = 3 * time.Second
 	sessionRestartReplaceTimeout     = 3 * time.Second
 	sessionRestartObservationTimeout = 8 * time.Second
+
+	sessionRestartPromptHandoffTypeNone              = "none"
+	sessionRestartPromptHandoffTypeOwnerOnlyArtifact = "owner_only_launch_artifact"
+	sessionRestartStageRootedInvalidateReady         = "rooted_invalidate_ready"
 )
 
 type sessionRestartExecution struct {
@@ -30,14 +36,17 @@ type sessionRestartExecution struct {
 }
 
 type sessionRestartRecoveryPlan struct {
-	ProjectID          string                           `json:"project_id"`
-	SessionID          string                           `json:"session_id"`
-	IssueID            string                           `json:"issue_id,omitempty"`
-	Activity           string                           `json:"activity"`
-	Old                daemonstate.ManagedAgentIdentity `json:"old"`
-	PlannedIncarnation string                           `json:"planned_incarnation"`
-	PromptPath         string                           `json:"prompt_path,omitempty"`
-	Stage              string                           `json:"stage"`
+	ProjectID             string                           `json:"project_id"`
+	SessionID             string                           `json:"session_id"`
+	IssueID               string                           `json:"issue_id,omitempty"`
+	Activity              string                           `json:"activity"`
+	Old                   daemonstate.ManagedAgentIdentity `json:"old"`
+	PlannedIncarnation    string                           `json:"planned_incarnation"`
+	PromptHandoffRequired bool                             `json:"prompt_handoff_required"`
+	PromptHandoffType     string                           `json:"prompt_handoff_type"`
+	PromptPath            string                           `json:"prompt_path,omitempty"`
+	RootedIdentity        *domain.OrchestratorIdentity     `json:"rooted_identity,omitempty"`
+	Stage                 string                           `json:"stage"`
 }
 
 type restartStageResult[T any] struct {
@@ -193,7 +202,24 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 		item.Outcome, item.Error = "partial_failure", err.Error()
 		return item
 	}
-	plan := sessionRestartRecoveryPlan{ProjectID: target.ProjectID, SessionID: target.SessionID, IssueID: target.IssueID, Activity: target.Activity, Old: old, PlannedIncarnation: incarnation, Stage: "prepare"}
+	launchPrompt := sessionRestartContinuePrompt
+	if rootedIdentity != nil {
+		launchPrompt = ""
+	}
+	promptHandoffRequired := strings.TrimSpace(launchPrompt) != "" && !strings.EqualFold(strings.TrimSpace(d.runtimeConfigForProject(target.ProjectID).CLITool), "codex")
+	promptHandoffType := sessionRestartPromptHandoffTypeNone
+	if promptHandoffRequired {
+		promptHandoffType = sessionRestartPromptHandoffTypeOwnerOnlyArtifact
+	}
+	plan := sessionRestartRecoveryPlan{
+		ProjectID: target.ProjectID, SessionID: target.SessionID, IssueID: target.IssueID, Activity: target.Activity,
+		Old: old, PlannedIncarnation: incarnation, PromptHandoffRequired: promptHandoffRequired,
+		PromptHandoffType: promptHandoffType, Stage: "prepare",
+	}
+	if rootedIdentity != nil {
+		identity := *rootedIdentity
+		plan.RootedIdentity = &identity
+	}
 	if err := reportSessionRestartProgress(ctx, plan); err != nil {
 		appendRestartStageFailure(&item, "persist_prepare", sessionRestartPreflightTimeout, err, false)
 		return item
@@ -201,10 +227,6 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 	type preparedRestart struct {
 		artifact sessionLaunchArtifact
 		worktree string
-	}
-	launchPrompt := sessionRestartContinuePrompt
-	if rootedIdentity != nil {
-		launchPrompt = ""
 	}
 	prepared, err, timedOut := runRestartStage(ctx, sessionRestartPrepareTimeout, func(stageCtx context.Context) (preparedRestart, error) {
 		artifact, prepareErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchResume, ProjectID: target.ProjectID, IssueID: target.IssueID, SessionID: target.SessionID, Yolo: body.Yolo, ImagePaths: body.ImagePaths, Prompt: launchPrompt, LogicalPaneID: old.LogicalPaneID, AgentIncarnation: incarnation})
@@ -232,7 +254,18 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 	}
 	item.Stages = append(item.Stages, restartStage("prepare", "complete", "canonical launch artifact and worktree prepared", sessionRestartPrepareTimeout))
 	plan.PromptPath = prepared.artifact.PromptHandoff.PromptPath
+	if (strings.TrimSpace(plan.PromptPath) != "") != plan.PromptHandoffRequired {
+		prepared.artifact.remove()
+		appendRestartStageFailure(&item, "prepare", sessionRestartPrepareTimeout, errors.New("prepared prompt handoff does not match persisted restart metadata"), false)
+		return item
+	}
 	if rootedIdentity != nil {
+		plan.Stage = sessionRestartStageRootedInvalidateReady
+		if err := reportSessionRestartProgress(ctx, plan); err != nil {
+			prepared.artifact.remove()
+			appendRestartStageFailure(&item, "persist_rooted_invalidate_ready", sessionRestartPreflightTimeout, err, errors.Is(err, context.DeadlineExceeded))
+			return item
+		}
 		authority := daemonstate.NewRootedBootstrapAcknowledgementAuthority(store)
 		acknowledgement, found, rootErr := authority.Get(ctx, *rootedIdentity)
 		if rootErr == nil && found {
@@ -369,6 +402,92 @@ func (d *Daemon) waitForSessionRestartPromptHandoff(ctx context.Context, handoff
 		return d.sessionRestartPromptHandoffWait(ctx, handoff)
 	}
 	return waitForSessionPromptHandoffConsumed(ctx, handoff)
+}
+
+func (d *Daemon) validateRecoveredSessionRestartPromptHandoff(plan sessionRestartRecoveryPlan) (sessionPromptHandoff, error) {
+	handoffType := strings.TrimSpace(plan.PromptHandoffType)
+	path := strings.TrimSpace(plan.PromptPath)
+	if !plan.PromptHandoffRequired {
+		if handoffType != sessionRestartPromptHandoffTypeNone || path != "" {
+			return sessionPromptHandoff{}, errors.New("restart recovery prompt handoff metadata is inconsistent")
+		}
+		return sessionPromptHandoff{}, nil
+	}
+	if handoffType != sessionRestartPromptHandoffTypeOwnerOnlyArtifact {
+		return sessionPromptHandoff{}, fmt.Errorf("unsupported restart recovery prompt handoff type %q", handoffType)
+	}
+	if path == "" {
+		return sessionPromptHandoff{}, errors.New("restart recovery prompt handoff path is required")
+	}
+	if path != plan.PromptPath || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return sessionPromptHandoff{}, errors.New("restart recovery prompt handoff path is not canonical")
+	}
+	dir, err := filepath.Abs(filepath.Clean(d.sessionLaunchArtifactDir()))
+	if err != nil {
+		return sessionPromptHandoff{}, fmt.Errorf("resolve session launch artifact directory: %w", err)
+	}
+	dirInfo, err := os.Lstat(dir)
+	if err != nil {
+		return sessionPromptHandoff{}, fmt.Errorf("inspect session launch artifact directory: %w", err)
+	}
+	if !dirInfo.IsDir() || dirInfo.Mode()&os.ModeSymlink != 0 || dirInfo.Mode().Perm() != 0o700 {
+		return sessionPromptHandoff{}, errors.New("session launch artifact directory is not owner-only")
+	}
+	if filepath.Dir(path) != dir {
+		return sessionPromptHandoff{}, errors.New("restart recovery prompt handoff is outside session launch artifact directory")
+	}
+	base := filepath.Base(path)
+	if !strings.HasPrefix(base, sessionLaunchArtifactPrefix) || !strings.HasSuffix(base, ".prompt") || len(base) <= len(sessionLaunchArtifactPrefix)+len(".prompt") {
+		return sessionPromptHandoff{}, errors.New("restart recovery prompt handoff is not an expected launch artifact")
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return sessionPromptHandoff{PromptPath: path}, nil
+	}
+	if err != nil {
+		return sessionPromptHandoff{}, fmt.Errorf("inspect restart recovery prompt handoff: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 {
+		return sessionPromptHandoff{}, errors.New("restart recovery prompt handoff is not an owner-only regular artifact")
+	}
+	return sessionPromptHandoff{PromptPath: path}, nil
+}
+
+func (d *Daemon) repairRecoveredSessionRestartRootedBootstrap(ctx context.Context, plan sessionRestartRecoveryPlan) error {
+	if plan.RootedIdentity == nil {
+		return nil
+	}
+	identity, err := domain.NewOrchestratorIdentity(plan.RootedIdentity.ProjectID, plan.RootedIdentity.Scope)
+	if err != nil {
+		return fmt.Errorf("validate recovered rooted orchestrator identity: %w", err)
+	}
+	if identity != *plan.RootedIdentity || identity.ProjectID != plan.ProjectID || identity.Scope.Kind != domain.OrchestrationScopeRooted {
+		return errors.New("recovered rooted orchestrator identity does not match restart target")
+	}
+	if d.sessionRestartRootedBootstrapRepair != nil {
+		err = d.sessionRestartRootedBootstrapRepair(ctx, identity, plan.SessionID)
+	} else {
+		var prompt string
+		prompt, err = d.rootedOrchestratorBootstrapPrompt(ctx, plan.ProjectID, identity.Scope)
+		if err == nil {
+			_, err = d.ensureRootedOrchestratorBootstrap(ctx, plan.ProjectID, identity.Scope, plan.SessionID, prompt, false)
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("repair recovered rooted orchestrator bootstrap: %w", err)
+	}
+	store := d.sessionRuntimeStateStoreIfConfigured(plan.ProjectID)
+	if store == nil {
+		return errors.New("verify recovered rooted bootstrap acknowledgement: store unavailable")
+	}
+	acknowledgement, found, err := daemonstate.NewRootedBootstrapAcknowledgementAuthority(store).Get(ctx, identity)
+	if err != nil {
+		return fmt.Errorf("verify recovered rooted bootstrap acknowledgement: %w", err)
+	}
+	if !found || acknowledgement.Identity != identity || acknowledgement.SessionID != plan.SessionID || strings.TrimSpace(acknowledgement.PromptHash) == "" || strings.TrimSpace(acknowledgement.RuntimeNonce) == "" || acknowledgement.AcknowledgedAt.IsZero() {
+		return errors.New("recovered rooted bootstrap acknowledgement is incomplete")
+	}
+	return nil
 }
 
 func sameManagedRestartIdentity(a, b daemonstate.ManagedAgentIdentity) bool {

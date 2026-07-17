@@ -19,6 +19,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
@@ -28,13 +29,16 @@ type exactRestartRunner struct {
 	project, session string
 	pid              int
 	respawns         int
-	respawnDelay     time.Duration
+	respawnEntered   chan struct{}
+	respawnRelease   <-chan struct{}
 	respawnErr       error
 	launchBody       string
 	respawnArgs      []string
 	extraPanes       string
 	blockListPanes   bool
 	paneMissing      bool
+	listPanesEntered chan struct{}
+	listPanesRelease <-chan struct{}
 }
 
 type realRestartRunner struct {
@@ -100,6 +104,19 @@ func (r *exactRestartRunner) Run(ctx context.Context, args ...string) (string, e
 	}
 	switch args[0] {
 	case "list-panes":
+		if r.listPanesEntered != nil {
+			select {
+			case r.listPanesEntered <- struct{}{}:
+			default:
+			}
+		}
+		if r.listPanesRelease != nil {
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-r.listPanesRelease:
+			}
+		}
 		if r.blockListPanes {
 			<-ctx.Done()
 			return "", ctx.Err()
@@ -111,11 +128,17 @@ func (r *exactRestartRunner) Run(ctx context.Context, args ...string) (string, e
 		}
 		return r.session + "\t%12\t" + fmt.Sprint(r.pid) + r.extraPanes, nil
 	case "respawn-pane":
-		if r.respawnDelay > 0 {
+		if r.respawnEntered != nil {
+			select {
+			case r.respawnEntered <- struct{}{}:
+			default:
+			}
+		}
+		if r.respawnRelease != nil {
 			select {
 			case <-ctx.Done():
 				return "", ctx.Err()
-			case <-time.After(r.respawnDelay):
+			case <-r.respawnRelease:
 			}
 		}
 		if r.respawnErr != nil {
@@ -205,7 +228,10 @@ func newExactRestartDaemon(t *testing.T, project, session, issue, activity strin
 
 func TestRestartManagedAgentPaneConcurrentDuplicateRespawnsOnce(t *testing.T) {
 	d, _, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
-	runner.respawnDelay = 75 * time.Millisecond
+	respawnEntered := make(chan struct{}, 1)
+	respawnRelease := make(chan struct{})
+	runner.respawnEntered = respawnEntered
+	runner.respawnRelease = respawnRelease
 	start := make(chan struct{})
 	results := make(chan protocol.SessionRestartAllItem, 2)
 	var wg sync.WaitGroup
@@ -218,6 +244,8 @@ func TestRestartManagedAgentPaneConcurrentDuplicateRespawnsOnce(t *testing.T) {
 		}()
 	}
 	close(start)
+	<-respawnEntered
+	close(respawnRelease)
 	wg.Wait()
 	close(results)
 	for result := range results {
@@ -330,12 +358,21 @@ func TestRestartManagedAgentPanePartialFailureAndBoundedTimeout(t *testing.T) {
 			t.Fatalf("result=%+v", result)
 		}
 	})
-	t.Run("preflight timeout", func(t *testing.T) {
+	t.Run("preflight cancellation is bounded", func(t *testing.T) {
 		d, _, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+		listPanesEntered := make(chan struct{}, 1)
+		runner.listPanesEntered = listPanesEntered
 		runner.blockListPanes = true
-		result := d.restartManagedAgentPane(context.Background(), target, protocol.SessionRestartAllRequestBody{}, protocol.SessionRestartAllItem{}, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		resultCh := make(chan protocol.SessionRestartAllItem, 1)
+		go func() {
+			resultCh <- d.restartManagedAgentPane(ctx, target, protocol.SessionRestartAllRequestBody{}, protocol.SessionRestartAllItem{}, nil)
+		}()
+		<-listPanesEntered
+		cancel()
+		result := <-resultCh
 		stage := result.Stages[len(result.Stages)-1]
-		if stage.Status != "timeout" || stage.TimeoutMS != sessionRestartPreflightTimeout.Milliseconds() {
+		if stage.Status != "failed" || !strings.Contains(stage.Message, context.Canceled.Error()) || stage.TimeoutMS != sessionRestartPreflightTimeout.Milliseconds() {
 			t.Fatalf("result=%+v", result)
 		}
 	})
@@ -385,7 +422,7 @@ func TestRestartManagedAgentPanePartialFailureAndBoundedTimeout(t *testing.T) {
 
 func TestRecoverInterruptedSessionRestartConvergesWithoutRespawn(t *testing.T) {
 	d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
-	plan := sessionRestartRecoveryPlan{ProjectID: target.ProjectID, SessionID: target.SessionID, IssueID: target.IssueID, Activity: target.Activity, Old: daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old"}, PlannedIncarnation: "planned", Stage: "observe"}
+	plan := sessionRestartRecoveryPlan{ProjectID: target.ProjectID, SessionID: target.SessionID, IssueID: target.IssueID, Activity: target.Activity, Old: daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old"}, PlannedIncarnation: "planned", PromptHandoffType: sessionRestartPromptHandoffTypeNone, Stage: "observe"}
 	body, _ := json.Marshal(plan)
 	record := daemonops.Record{Kind: protocol.CommandSessionRestartAll, Progress: &daemonops.Progress{Phase: "session.restart_all.observe", Message: string(body)}}
 	runner.mu.Lock()
@@ -413,10 +450,11 @@ func TestRecoverInterruptedSessionRestartConvergesWithoutRespawn(t *testing.T) {
 func TestRecoverInterruptedSessionRestartMatrix(t *testing.T) {
 	t.Run("replacement with unconsumed handoff remains partial", func(t *testing.T) {
 		d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
-		promptPath := filepath.Join(t.TempDir(), "restart.prompt")
-		if err := os.WriteFile(promptPath, []byte("continue"), 0o600); err != nil {
+		handoff, err := prepareSessionPromptHandoff(d.sessionLaunchArtifactDir(), "continue")
+		if err != nil {
 			t.Fatal(err)
 		}
+		promptPath := handoff.PromptPath
 		d.sessionRestartPromptHandoffWait = func(_ context.Context, handoff sessionPromptHandoff) error {
 			if handoff.PromptPath != promptPath {
 				t.Fatalf("handoff path=%q want %q", handoff.PromptPath, promptPath)
@@ -429,7 +467,7 @@ func TestRecoverInterruptedSessionRestartMatrix(t *testing.T) {
 		if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 101, AgentIncarnation: "planned", ObservedAt: time.Now()}); err != nil {
 			t.Fatal(err)
 		}
-		plan := sessionRestartRecoveryPlan{ProjectID: target.ProjectID, SessionID: target.SessionID, IssueID: target.IssueID, Activity: target.Activity, Old: daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old"}, PlannedIncarnation: "planned", PromptPath: promptPath, Stage: "observe"}
+		plan := sessionRestartRecoveryPlan{ProjectID: target.ProjectID, SessionID: target.SessionID, IssueID: target.IssueID, Activity: target.Activity, Old: daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old"}, PlannedIncarnation: "planned", PromptHandoffRequired: true, PromptHandoffType: sessionRestartPromptHandoffTypeOwnerOnlyArtifact, PromptPath: promptPath, Stage: "observe"}
 		body, err := json.Marshal(plan)
 		if err != nil {
 			t.Fatal(err)
@@ -451,55 +489,66 @@ func TestRecoverInterruptedSessionRestartMatrix(t *testing.T) {
 	})
 	t.Run("replace ready old pane waits for delayed replacement and hook", func(t *testing.T) {
 		d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+		listPanesEntered := make(chan struct{}, 1)
+		listPanesRelease := make(chan struct{})
+		runner.listPanesEntered = listPanesEntered
+		runner.listPanesRelease = listPanesRelease
 		type recoveryResult struct {
 			recovery interruptedOperationRecovery
 			ok       bool
 		}
 		resultCh := make(chan recoveryResult, 1)
 		record := restartRecoveryRecord(t, target, "replace_ready")
-		recoveryCtx, cancelRecovery := context.WithTimeout(context.Background(), 2*time.Second)
+		recoveryCtx, cancelRecovery := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancelRecovery()
 		go func() {
 			recovery, ok := d.recoverInterruptedSessionRestart(recoveryCtx, record)
 			resultCh <- recoveryResult{recovery: recovery, ok: ok}
 		}()
-		select {
-		case result := <-resultCh:
-			t.Fatalf("recovery terminalized while replace_ready old pane was still ambiguous: %+v", result)
-		case <-time.After(75 * time.Millisecond):
-		}
+		<-listPanesEntered
 		runner.mu.Lock()
 		runner.pid = 101
 		runner.mu.Unlock()
 		if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 101, AgentIncarnation: "planned", ObservedAt: time.Now()}); err != nil {
 			t.Fatal(err)
 		}
-		select {
-		case got := <-resultCh:
-			result := decodeRestartRecoveryResult(t, got.recovery)
-			respawns, _, _ := runner.snapshot()
-			if !got.ok || result.Restarted != 1 || result.Sessions[0].Outcome != restartSuccessOutcome(target.Activity) || respawns != 0 {
-				t.Fatalf("recovery=%+v result=%+v ok=%v respawns=%d", got.recovery, result, got.ok, respawns)
-			}
-		case <-time.After(time.Second):
-			t.Fatal("recovery did not converge after delayed replacement and hook")
+		close(listPanesRelease)
+		got := <-resultCh
+		result := decodeRestartRecoveryResult(t, got.recovery)
+		respawns, _, _ := runner.snapshot()
+		if !got.ok || result.Restarted != 1 || result.Sessions[0].Outcome != restartSuccessOutcome(target.Activity) || respawns != 0 {
+			t.Fatalf("recovery=%+v result=%+v ok=%v respawns=%d", got.recovery, result, got.ok, respawns)
 		}
 	})
 	t.Run("live replacement waits for delayed hook", func(t *testing.T) {
 		d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+		listPanesEntered := make(chan struct{}, 1)
+		listPanesRelease := make(chan struct{})
+		runner.listPanesEntered = listPanesEntered
+		runner.listPanesRelease = listPanesRelease
 		runner.mu.Lock()
 		runner.pid = 101
 		runner.mu.Unlock()
-		go func() {
-			time.Sleep(75 * time.Millisecond)
-			_ = store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 101, AgentIncarnation: "planned", ObservedAt: time.Now()})
-		}()
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		type recoveryResult struct {
+			recovery interruptedOperationRecovery
+			ok       bool
+		}
+		resultCh := make(chan recoveryResult, 1)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		recovery, ok := d.recoverInterruptedSessionRestart(ctx, restartRecoveryRecord(t, target, "observe"))
-		result := decodeRestartRecoveryResult(t, recovery)
-		if !ok || result.Restarted != 1 || result.Sessions[0].Stages[0].Status != "complete" {
-			t.Fatalf("recovery=%+v result=%+v ok=%v", recovery, result, ok)
+		go func() {
+			recovery, ok := d.recoverInterruptedSessionRestart(ctx, restartRecoveryRecord(t, target, "observe"))
+			resultCh <- recoveryResult{recovery: recovery, ok: ok}
+		}()
+		<-listPanesEntered
+		if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 101, AgentIncarnation: "planned", ObservedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+		close(listPanesRelease)
+		got := <-resultCh
+		result := decodeRestartRecoveryResult(t, got.recovery)
+		if !got.ok || result.Restarted != 1 || result.Sessions[0].Stages[0].Status != "complete" {
+			t.Fatalf("recovery=%+v result=%+v ok=%v", got.recovery, result, got.ok)
 		}
 	})
 	t.Run("missing pane is typed crashed", func(t *testing.T) {
@@ -515,23 +564,212 @@ func TestRecoverInterruptedSessionRestartMatrix(t *testing.T) {
 	})
 	t.Run("live replacement without hook times out typed partial", func(t *testing.T) {
 		d, _, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+		listPanesEntered := make(chan struct{}, 1)
+		runner.listPanesEntered = listPanesEntered
 		runner.mu.Lock()
 		runner.pid = 101
 		runner.mu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), 125*time.Millisecond)
-		defer cancel()
-		recovery, ok := d.recoverInterruptedSessionRestart(ctx, restartRecoveryRecord(t, target, "observe"))
-		result := decodeRestartRecoveryResult(t, recovery)
+		ctx, cancel := context.WithCancel(context.Background())
+		type recoveryResult struct {
+			recovery interruptedOperationRecovery
+			ok       bool
+		}
+		resultCh := make(chan recoveryResult, 1)
+		go func() {
+			recovery, ok := d.recoverInterruptedSessionRestart(ctx, restartRecoveryRecord(t, target, "observe"))
+			resultCh <- recoveryResult{recovery: recovery, ok: ok}
+		}()
+		<-listPanesEntered
+		cancel()
+		got := <-resultCh
+		result := decodeRestartRecoveryResult(t, got.recovery)
 		stage := result.Sessions[0].Stages[0]
-		if !ok || result.Failed != 1 || result.Sessions[0].Outcome != "partial_failure" || stage.Name != "recover_observe" || stage.Status != "timeout" || stage.TimeoutMS == 0 {
-			t.Fatalf("recovery=%+v result=%+v ok=%v", recovery, result, ok)
+		if !got.ok || result.Failed != 1 || result.Sessions[0].Outcome != "partial_failure" || stage.Name != "recover_observe" || stage.Status != "timeout" || stage.TimeoutMS == 0 {
+			t.Fatalf("recovery=%+v result=%+v ok=%v", got.recovery, result, got.ok)
 		}
 	})
 }
 
+func TestRecoverInterruptedSessionRestartValidatesPromptHandoffBeforeWaitOrRemoval(t *testing.T) {
+	t.Run("rejects path outside launch directory without touching it", func(t *testing.T) {
+		d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+		if err := ensureSessionLaunchArtifactDir(d.sessionLaunchArtifactDir()); err != nil {
+			t.Fatal(err)
+		}
+		outside := filepath.Join(t.TempDir(), sessionLaunchArtifactPrefix+"outside.prompt")
+		if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		seedRecoveredReplacement(t, store, runner, "planned")
+		plan := recoveryPlanForTarget(target, "observe")
+		plan.PromptHandoffRequired = true
+		plan.PromptHandoffType = sessionRestartPromptHandoffTypeOwnerOnlyArtifact
+		plan.PromptPath = outside
+		called := false
+		d.sessionRestartPromptHandoffWait = func(context.Context, sessionPromptHandoff) error {
+			called = true
+			return nil
+		}
+
+		result := decodeRestartRecoveryResult(t, mustRecoverRestartPlan(t, d, plan))
+		if result.Failed != 1 || !strings.Contains(result.Sessions[0].Error, "outside session launch artifact directory") || called {
+			t.Fatalf("result=%+v waiter_called=%t", result, called)
+		}
+		if body, err := os.ReadFile(outside); err != nil || string(body) != "secret" {
+			t.Fatalf("outside artifact changed: body=%q err=%v", body, err)
+		}
+	})
+
+	t.Run("validated owner-only artifact is removed after terminal wait failure", func(t *testing.T) {
+		d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+		if err := ensureSessionLaunchArtifactDir(d.sessionLaunchArtifactDir()); err != nil {
+			t.Fatal(err)
+		}
+		handoff, err := prepareSessionPromptHandoff(d.sessionLaunchArtifactDir(), "continue")
+		if err != nil {
+			t.Fatal(err)
+		}
+		seedRecoveredReplacement(t, store, runner, "planned")
+		plan := recoveryPlanForTarget(target, "observe")
+		plan.PromptHandoffRequired = true
+		plan.PromptHandoffType = sessionRestartPromptHandoffTypeOwnerOnlyArtifact
+		plan.PromptPath = handoff.PromptPath
+		d.sessionRestartPromptHandoffWait = func(_ context.Context, got sessionPromptHandoff) error {
+			if got.PromptPath != handoff.PromptPath {
+				t.Fatalf("handoff=%q want %q", got.PromptPath, handoff.PromptPath)
+			}
+			return errors.New("not consumed")
+		}
+
+		result := decodeRestartRecoveryResult(t, mustRecoverRestartPlan(t, d, plan))
+		if result.Failed != 1 || !strings.Contains(result.Sessions[0].Error, "not consumed") {
+			t.Fatalf("result=%+v", result)
+		}
+		if _, err := os.Lstat(handoff.PromptPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("validated terminal artifact remains: %v", err)
+		}
+	})
+
+	t.Run("rejects permissive artifact without removing it", func(t *testing.T) {
+		d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+		if err := ensureSessionLaunchArtifactDir(d.sessionLaunchArtifactDir()); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(d.sessionLaunchArtifactDir(), sessionLaunchArtifactPrefix+"permissive.prompt")
+		if err := os.WriteFile(path, []byte("secret"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		seedRecoveredReplacement(t, store, runner, "planned")
+		plan := recoveryPlanForTarget(target, "observe")
+		plan.PromptHandoffRequired = true
+		plan.PromptHandoffType = sessionRestartPromptHandoffTypeOwnerOnlyArtifact
+		plan.PromptPath = path
+
+		result := decodeRestartRecoveryResult(t, mustRecoverRestartPlan(t, d, plan))
+		if result.Failed != 1 || !strings.Contains(result.Sessions[0].Error, "owner-only") {
+			t.Fatalf("result=%+v", result)
+		}
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("invalid artifact was removed: %v", err)
+		}
+	})
+}
+
+func TestRecoverInterruptedRootedRestartRepairsBootstrapAcrossCrashWindows(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		stage       string
+		replacement bool
+		wantRestart bool
+	}{
+		{name: "after invalidation before replacement", stage: sessionRestartStageRootedInvalidateReady},
+		{name: "after replacement", stage: "observe", replacement: true, wantRestart: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+			scope, err := domain.RootedOrchestrationScope(target.IssueID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity, err := domain.NewOrchestratorIdentity(target.ProjectID, scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.replacement {
+				seedRecoveredReplacement(t, store, runner, "planned")
+			}
+			plan := recoveryPlanForTarget(target, tt.stage)
+			plan.RootedIdentity = &identity
+			called := 0
+			d.sessionRestartRootedBootstrapRepair = func(ctx context.Context, got domain.OrchestratorIdentity, sessionID string) error {
+				called++
+				if got != identity || sessionID != target.SessionID {
+					t.Fatalf("repair target identity=%+v session=%q", got, sessionID)
+				}
+				now := time.Now().UTC()
+				return daemonstate.NewRootedBootstrapAcknowledgementAuthority(store).Acknowledge(ctx, daemonstate.RootedBootstrapAcknowledgement{
+					Identity: got, SessionID: sessionID, PromptHash: "prompt", RuntimeNonce: "nonce", AcknowledgedAt: now, UpdatedAt: now,
+				})
+			}
+
+			result := decodeRestartRecoveryResult(t, mustRecoverRestartPlan(t, d, plan))
+			if called != 1 || (result.Restarted == 1) != tt.wantRestart {
+				t.Fatalf("result=%+v repair_calls=%d", result, called)
+			}
+			if tt.wantRestart {
+				if result.Failed != 0 {
+					t.Fatalf("replacement recovery=%+v", result)
+				}
+			} else if result.Failed != 1 || !strings.Contains(result.Sessions[0].Error, "before exact-pane replacement") {
+				t.Fatalf("pre-replacement recovery=%+v", result)
+			}
+			ack, found, err := daemonstate.NewRootedBootstrapAcknowledgementAuthority(store).Get(context.Background(), identity)
+			if err != nil || !found || ack.SessionID != target.SessionID || ack.RuntimeNonce == "" {
+				t.Fatalf("repaired acknowledgement=%+v found=%t err=%v", ack, found, err)
+			}
+		})
+	}
+}
+
+func seedRecoveredReplacement(t *testing.T, store *daemonstate.RuntimeStateStore, runner *exactRestartRunner, incarnation string) {
+	t.Helper()
+	runner.mu.Lock()
+	runner.pid = 101
+	runner.mu.Unlock()
+	if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{
+		ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 101,
+		AgentIncarnation: incarnation, ObservedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func recoveryPlanForTarget(target sessionRestartAllTarget, stage string) sessionRestartRecoveryPlan {
+	return sessionRestartRecoveryPlan{
+		ProjectID: target.ProjectID, SessionID: target.SessionID, IssueID: target.IssueID, Activity: target.Activity,
+		Old:                daemonstate.ManagedAgentIdentity{ProjectID: target.ProjectID, SessionID: target.SessionID, LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old"},
+		PlannedIncarnation: "planned", PromptHandoffType: sessionRestartPromptHandoffTypeNone, Stage: stage,
+	}
+}
+
+func mustRecoverRestartPlan(t *testing.T, d *Daemon, plan sessionRestartRecoveryPlan) interruptedOperationRecovery {
+	t.Helper()
+	body, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovery, ok := d.recoverInterruptedSessionRestart(context.Background(), daemonops.Record{
+		Kind: protocol.CommandSessionRestartAll, Progress: &daemonops.Progress{Phase: "session.restart_all." + plan.Stage, Message: string(body)},
+	})
+	if !ok {
+		t.Fatal("restart plan was not recognized")
+	}
+	return recovery
+}
+
 func restartRecoveryRecord(t *testing.T, target sessionRestartAllTarget, stage string) daemonops.Record {
 	t.Helper()
-	plan := sessionRestartRecoveryPlan{ProjectID: target.ProjectID, SessionID: target.SessionID, IssueID: target.IssueID, Activity: target.Activity, Old: daemonstate.ManagedAgentIdentity{ProjectID: target.ProjectID, SessionID: target.SessionID, LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old"}, PlannedIncarnation: "planned", Stage: stage}
+	plan := recoveryPlanForTarget(target, stage)
 	body, err := json.Marshal(plan)
 	if err != nil {
 		t.Fatal(err)
