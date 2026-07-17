@@ -60,6 +60,10 @@ func TestGlobalProjectionTerminalSessionSuppressionConvergesBootstrapAndIncremen
 	if err != nil {
 		t.Fatal(err)
 	}
+	closingID, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "stop then close", Type: domain.TypeBug, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
 	liveID, err := clientB.Create(ctx, issues.CreateTaskParams{Title: "live", Type: domain.TypeTask, Status: domain.StatusInProgress})
 	if err != nil {
 		t.Fatal(err)
@@ -69,6 +73,7 @@ func TestGlobalProjectionTerminalSessionSuppressionConvergesBootstrapAndIncremen
 	for _, session := range []daemonstate.Session{
 		{ID: closedSessionID, IssueID: closedID, Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: closedID, State: daemonstate.SessionStateStopped, ObservedState: daemonstate.SessionStateStopped, UpdatedAt: now},
 		{ID: closedSessionID + ".pane-12", IssueID: closedID, Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: closedID, State: daemonstate.SessionStatePaused, ObservedState: daemonstate.SessionStatePaused, Activity: "idle", ActivitySource: "hooks", UpdatedAt: now.Add(-time.Second)},
+		{ID: naming.CanonicalSessionID(projectAID, closingID), IssueID: closingID, Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: closingID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: now},
 	} {
 		if err := upsertSessionStateFixture(runtimeA, ctx, projectAID, session); err != nil {
 			t.Fatal(err)
@@ -97,7 +102,7 @@ func TestGlobalProjectionTerminalSessionSuppressionConvergesBootstrapAndIncremen
 		t.Fatal(err)
 	}
 
-	assertProjection := func(closedHasSession, liveHasSession bool) {
+	assertProjection := func(closedHasSession, closingHasSession, liveHasSession bool) {
 		t.Helper()
 		snapshot, err := userStore.Snapshot(ctx, "")
 		if err != nil {
@@ -117,6 +122,13 @@ func TestGlobalProjectionTerminalSessionSuppressionConvergesBootstrapAndIncremen
 		if got := closed.Session != nil || closed.HasTmuxSession; got != closedHasSession {
 			t.Fatalf("closed projection session=%+v has_tmux_session=%t, want presence=%t", closed.Session, closed.HasTmuxSession, closedHasSession)
 		}
+		closing, found := byProject[projectAID][closingID]
+		if !found {
+			t.Fatalf("stop-close issue %s/%s missing from global projection", projectAID, closingID)
+		}
+		if got := closing.Session != nil || closing.HasTmuxSession; got != closingHasSession {
+			t.Fatalf("stop-close projection session=%+v has_tmux_session=%t, want presence=%t", closing.Session, closing.HasTmuxSession, closingHasSession)
+		}
 		live, found := byProject[projectBID][liveID]
 		if !found {
 			t.Fatalf("live issue %s/%s missing from global projection", projectBID, liveID)
@@ -131,26 +143,25 @@ func TestGlobalProjectionTerminalSessionSuppressionConvergesBootstrapAndIncremen
 			t.Fatal(err)
 		}
 	}
-	assertProjection(false, true)
+	assertProjection(false, true, true)
 	// Full bootstrap/recovery is idempotent and remains project-scoped.
 	if err := d.refreshRegisteredUserProject(ctx, projectA); err != nil {
 		t.Fatal(err)
 	}
-	assertProjection(false, true)
+	assertProjection(false, true, true)
 
-	// Recreate the production corruption through the supported materialized
-	// current-state API, then consume observation-only deltas through the same
-	// bounded incremental hydration/apply path as the background consumer.
+	// Supported materialized current-state writes now reject the production
+	// corruption at the root-user projection boundary.
 	staleStartedAt := now.Add(-time.Hour)
 	stale := domain.Task{ID: naming.IssueID(closedID), Status: domain.StatusDone, Type: domain.TypeBug, UpdatedAt: now, HasTmuxSession: true, Session: &domain.Session{IssueID: naming.IssueID(closedID), State: domain.SessionPaused, Activity: "idle", ActivitySource: "hooks", StartedAt: &staleStartedAt, UpdatedAt: now.Add(-time.Second)}}
 	if err := userStore.ApplyProjectMaterializedIssues(ctx, projectAID, []userstore.ProjectDeltaChange{{IssueID: closedID, Issue: &stale}}); err != nil {
 		t.Fatal(err)
 	}
-	assertProjection(true, true)
+	assertProjection(false, true, true)
 
-	applyNextObservation := func() {
+	applyNextObservation := func(issueID string) {
 		t.Helper()
-		if _, err := clientA.AppendIssueObservationEvent(ctx, closedID, issues.IssueObservationEventParams{Type: domain.IssueEventProgressRecorded, Source: "test"}); err != nil {
+		if _, err := clientA.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventProgressRecorded, Source: "test"}); err != nil {
 			t.Fatal(err)
 		}
 		state, err := userStore.ProjectDeltaState(ctx, projectAID)
@@ -179,10 +190,25 @@ func TestGlobalProjectionTerminalSessionSuppressionConvergesBootstrapAndIncremen
 			t.Fatal(err)
 		}
 	}
-	applyNextObservation()
-	assertProjection(false, true)
-	applyNextObservation()
-	assertProjection(false, true)
+	applyNextObservation(closedID)
+	assertProjection(false, true, true)
+	applyNextObservation(closedID)
+	assertProjection(false, true, true)
+
+	// The active path must converge immediately when stop intent is persisted
+	// before lifecycle close, without needing a full project rebuild.
+	if err := upsertSessionStateFixture(runtimeA, ctx, projectAID, daemonstate.Session{
+		ID: naming.CanonicalSessionID(projectAID, closingID), IssueID: closingID,
+		Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: closingID,
+		State: daemonstate.SessionStateStopped, ObservedState: daemonstate.SessionStateStopped, UpdatedAt: now.Add(time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientA.Update(ctx, closingID, domain.StatusDone); err != nil {
+		t.Fatal(err)
+	}
+	applyNextObservation(closingID)
+	assertProjection(false, false, true)
 }
 
 func TestUserProjectionConsumerReplaysAndWatchesWithoutMutationFullExport(t *testing.T) {

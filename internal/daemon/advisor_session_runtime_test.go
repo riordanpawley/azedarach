@@ -113,6 +113,7 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 		t.Fatal("expected tmux commands")
 	}
 	projection.State, projection.ObservedState = daemonstate.SessionStatePaused, daemonstate.SessionStatePaused
+	projection.UpdatedAt = projection.UpdatedAt.Add(time.Second)
 	if err := d.sessionRuntimeStateStore(canonicalProjectID).UpsertSessionState(ctx, canonicalProjectID, projection); err != nil {
 		t.Fatal(err)
 	}
