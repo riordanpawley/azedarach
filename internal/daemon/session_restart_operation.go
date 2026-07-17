@@ -73,6 +73,12 @@ func appendRestartStageFailure(item *protocol.SessionRestartAllItem, name string
 }
 
 func (d *Daemon) restartManagedAgentPane(ctx context.Context, target sessionRestartAllTarget, body protocol.SessionRestartAllRequestBody, item protocol.SessionRestartAllItem, rootedIdentity *domain.OrchestratorIdentity) protocol.SessionRestartAllItem {
+	source := sourceForInvariant(daemonInvariantManagedAgentRestart)
+	if !usesProjectionSource(source) || !usesTmuxSource(source) {
+		item.Outcome = "partial_failure"
+		item.Error = fmt.Sprintf("managed-agent restart requires hybrid invariant source, got %s", source)
+		return item
+	}
 	store := d.sessionRuntimeStateStoreIfConfigured(target.ProjectID)
 	if store == nil {
 		item.Outcome, item.Error = "partial_failure", "managed identity store unavailable"

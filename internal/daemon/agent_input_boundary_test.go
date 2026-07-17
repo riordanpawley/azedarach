@@ -97,3 +97,26 @@ func TestAgentDeliveryImplementationContainsNoTerminalInferenceOrTmuxWrite(t *te
 		return true
 	})
 }
+
+func TestManagedAgentRestartContainsNoTerminalTextLifecycleControl(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "session_restart_operation.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forbidden := map[string]bool{
+		"CapturePane": true, "ObserveAgentInputTarget": true, "PasteAgentTextAndSubmit": true,
+		"PasteTextAndSubmit": true, "SendKey": true, "SendKeys": true, "Sleep": true,
+	}
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if ok && forbidden[sel.Sel.Name] {
+			t.Errorf("managed-agent restart uses forbidden terminal-text or fixed-delay operation %s", sel.Sel.Name)
+		}
+		return true
+	})
+}

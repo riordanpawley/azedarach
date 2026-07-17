@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -33,6 +35,53 @@ type exactRestartRunner struct {
 	extraPanes       string
 	blockListPanes   bool
 	paneMissing      bool
+}
+
+type realRestartRunner struct {
+	*isolatedTmuxTestRunner
+	store              *daemonstate.RuntimeStateStore
+	projectID, session string
+}
+
+func (r *realRestartRunner) Run(ctx context.Context, args ...string) (string, error) {
+	output, err := r.isolatedTmuxTestRunner.Run(ctx, args...)
+	if err != nil || len(args) == 0 || args[0] != "respawn-pane" {
+		return output, err
+	}
+	command := args[len(args)-1]
+	scriptMatch := regexp.MustCompile(`-i '([^']+)'`).FindStringSubmatch(command)
+	if len(scriptMatch) != 2 {
+		return output, fmt.Errorf("restart artifact path missing from %q", command)
+	}
+	script, readErr := os.ReadFile(scriptMatch[1])
+	if readErr != nil {
+		return output, readErr
+	}
+	incarnationMatch := regexp.MustCompile(`AZEDARACH_AGENT_INCARNATION='([^']+)'`).FindSubmatch(script)
+	if len(incarnationMatch) != 2 {
+		return output, fmt.Errorf("restart incarnation missing from artifact")
+	}
+	metadata, metadataErr := r.isolatedTmuxTestRunner.Run(ctx, "display-message", "-p", "-t", r.session, "#{pane_id}\t#{pane_pid}")
+	if metadataErr != nil {
+		return output, metadataErr
+	}
+	fields := strings.Split(strings.TrimSpace(metadata), "\t")
+	if len(fields) != 2 {
+		return output, fmt.Errorf("replacement metadata = %q", metadata)
+	}
+	pid, parseErr := strconv.Atoi(fields[1])
+	if parseErr != nil {
+		return output, parseErr
+	}
+	identity := daemonstate.ManagedAgentIdentity{
+		ProjectID: r.projectID, SessionID: r.session, LogicalPaneID: "agent",
+		TmuxPaneID: strings.TrimPrefix(fields[0], "%"), PanePID: pid,
+		AgentIncarnation: string(incarnationMatch[1]), ObservedAt: time.Now().UTC(),
+	}
+	if storeErr := r.store.UpsertManagedAgentIdentity(ctx, identity); storeErr != nil {
+		return output, storeErr
+	}
+	return output, nil
 }
 
 func (r *exactRestartRunner) Run(ctx context.Context, args ...string) (string, error) {
@@ -112,6 +161,18 @@ func TestRestartManagedAgentPaneRequiresForceAndAcknowledgesReplacement(t *testi
 	}
 	if got := strings.Join([]string{restarted.Stages[0].Name, restarted.Stages[len(restarted.Stages)-1].Name}, ","); got != "preflight,persist_complete" {
 		t.Fatalf("stage bounds=%s", got)
+	}
+}
+
+func TestRestartManagedAgentPaneRequiresHybridInvariantSource(t *testing.T) {
+	previous := daemonInvariantSourceMatrix[daemonInvariantManagedAgentRestart]
+	daemonInvariantSourceMatrix[daemonInvariantManagedAgentRestart] = daemonInvariantSourceProjection
+	t.Cleanup(func() { daemonInvariantSourceMatrix[daemonInvariantManagedAgentRestart] = previous })
+
+	d, _, _, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+	result := d.restartManagedAgentPane(context.Background(), target, protocol.SessionRestartAllRequestBody{}, protocol.SessionRestartAllItem{}, nil)
+	if result.Outcome != "partial_failure" || !strings.Contains(result.Error, "requires hybrid invariant source") {
+		t.Fatalf("restart result = %+v, want source-policy refusal", result)
 	}
 }
 
@@ -361,6 +422,140 @@ func TestRestartStateOutcomeClassification(t *testing.T) {
 	for activity, want := range map[string]string{"idle": "idle", "waiting_human": "waiting", "busy": "busy_forced", "unknown": "unknown"} {
 		if got := restartSuccessOutcome(activity); got != want {
 			t.Errorf("activity %s outcome=%s want=%s", activity, got, want)
+		}
+	}
+}
+
+func TestRealTmuxSupervisedRestartNeverSubmitsLifecycleTextAndPreservesOtherPane(t *testing.T) {
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux is not installed")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	base := t.TempDir()
+	repoDir := filepath.Join(base, "project")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inputTrace := filepath.Join(base, "agent-input")
+	argsTrace := filepath.Join(base, "agent-args")
+	managedReady := "managed-ready-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	auxReady := "aux-ready-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	t.Setenv("AZ_TEST_INPUT_TRACE", inputTrace)
+	t.Setenv("AZ_TEST_ARGS_TRACE", argsTrace)
+	t.Setenv("AZ_TEST_MANAGED_READY", managedReady)
+	t.Setenv("AZ_TEST_AUX_READY", auxReady)
+	fakeAgent := filepath.Join(base, "fakeagent")
+	fakeAgentScript := `#!/bin/sh
+if [ "$1" = "--aux" ]; then
+  label=auxiliary
+  channel="$AZ_TEST_AUX_READY"
+else
+  label=managed
+  channel="$AZ_TEST_MANAGED_READY"
+fi
+printf '%s|%s\n' "$label" "$*" >>"$AZ_TEST_ARGS_TRACE"
+printf 'assistant: existing conversation restored for %s\n' "$label"
+tmux wait-for -S "$channel"
+cat >>"$AZ_TEST_INPUT_TRACE"
+`
+	if err := os.WriteFile(fakeAgent, []byte(fakeAgentScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(base, "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	tmuxDir, err := os.MkdirTemp("/tmp", "az-dla-tmux-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmuxDir) })
+	socketPath := filepath.Join(tmuxDir, "server.sock")
+	isolated := &isolatedTmuxTestRunner{tmuxPath: tmuxPath, socketPath: socketPath}
+	const projectID = "project-a"
+	const sessionID = "project-a-az-1"
+	runner := &realRestartRunner{isolatedTmuxTestRunner: isolated, store: store, projectID: projectID, session: sessionID}
+	if output, err := runner.Run(ctx, "-f", "/dev/null", "new-session", "-d", "-s", sessionID, "-c", repoDir, fakeAgent); err != nil {
+		t.Fatalf("start managed pane: %v (%s)", err, output)
+	}
+	t.Cleanup(func() { _, _ = runner.Run(context.Background(), "kill-server") })
+	if output, err := runner.Run(ctx, "new-window", "-d", "-t", sessionID, "-n", "unrelated", fakeAgent, "--aux"); err != nil {
+		t.Fatalf("start unrelated pane: %v (%s)", err, output)
+	}
+	if output, err := runner.Run(ctx, "wait-for", managedReady); err != nil {
+		t.Fatalf("wait for managed fixture: %v (%s)", err, output)
+	}
+	if output, err := runner.Run(ctx, "wait-for", auxReady); err != nil {
+		t.Fatalf("wait for unrelated fixture: %v (%s)", err, output)
+	}
+
+	metadata := func(target string) (string, int) {
+		t.Helper()
+		output, err := runner.Run(ctx, "display-message", "-p", "-t", target, "#{pane_id}\t#{pane_pid}")
+		if err != nil {
+			t.Fatalf("read pane metadata for %s: %v (%s)", target, err, output)
+		}
+		fields := strings.Split(strings.TrimSpace(output), "\t")
+		if len(fields) != 2 {
+			t.Fatalf("pane metadata for %s = %q", target, output)
+		}
+		pid, err := strconv.Atoi(fields[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimPrefix(fields[0], "%"), pid
+	}
+	oldPane, oldPID := metadata(sessionID + ":0")
+	_, unrelatedPID := metadata(sessionID + ":unrelated")
+	if err := store.UpsertManagedAgentIdentity(ctx, daemonstate.ManagedAgentIdentity{
+		ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent",
+		TmuxPaneID: oldPane, PanePID: oldPID, AgentIncarnation: "original",
+		ObservedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := runner.Run(ctx, "send-keys", "-l", "-t", "%"+oldPane, "user: unfinished active conversation"); err != nil {
+		t.Fatalf("seed active composer: %v (%s)", err, output)
+	}
+	before, err := runner.Run(ctx, "capture-pane", "-p", "-t", "%"+oldPane)
+	if err != nil || !strings.Contains(before, "unfinished active conversation") {
+		t.Fatalf("active conversation fixture missing: err=%v output=%q", err, before)
+	}
+
+	d := &Daemon{
+		cfg:                    Config{RepoDir: repoDir, CLITool: fakeAgent, SessionShell: "/bin/sh", Logger: slog.Default()},
+		tmux:                   tmux.NewClient(runner, slog.Default()),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+	}
+	target := sessionRestartAllTarget{ProjectID: projectID, SessionID: sessionID, IssueID: "az-1", Activity: "busy", ActivitySource: "hooks", TmuxReady: true, ActiveIntent: true}
+	result := d.restartManagedAgentPane(ctx, target, protocol.SessionRestartAllRequestBody{ForceBusy: true}, sessionRestartAllItem(target), nil)
+	if !result.Restarted || result.Outcome != "busy_forced" || result.OldIdentity == nil || result.NewIdentity == nil {
+		t.Fatalf("restart result = %+v", result)
+	}
+	if result.OldIdentity.PanePID == result.NewIdentity.PanePID || result.OldIdentity.AgentIncarnation == result.NewIdentity.AgentIncarnation {
+		t.Fatalf("restart did not prove a distinct process incarnation: old=%+v new=%+v", result.OldIdentity, result.NewIdentity)
+	}
+	if output, err := runner.Run(ctx, "wait-for", managedReady); err != nil {
+		t.Fatalf("wait for replacement fixture: %v (%s)", err, output)
+	}
+	_, gotUnrelatedPID := metadata(sessionID + ":unrelated")
+	if gotUnrelatedPID != unrelatedPID {
+		t.Fatalf("unrelated pane pid changed: got %d want %d", gotUnrelatedPID, unrelatedPID)
+	}
+	if input, err := os.ReadFile(inputTrace); err == nil && len(input) > 0 {
+		t.Fatalf("lifecycle bytes reached agent stdin: %q", input)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(argsTrace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"export PATH=", "codex resume", "send-keys"} {
+		if strings.Contains(string(args), forbidden) {
+			t.Fatalf("legacy lifecycle payload %q reached agent launch input: %s", forbidden, args)
 		}
 	}
 }

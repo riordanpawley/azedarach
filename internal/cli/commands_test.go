@@ -1870,7 +1870,7 @@ func TestSessionRestartAllCommandPrintsFailuresBeforeReturningError(t *testing.T
 						IssueID:   naming.IssueID("az-1"),
 						SessionID: naming.SessionID("proj-az-1"),
 						Activity:  "idle",
-						Error:     "send-keys failed",
+						Error:     "replacement incarnation was not observed",
 					}},
 				})
 				if err != nil {
@@ -1900,7 +1900,7 @@ func TestSessionRestartAllCommandPrintsFailuresBeforeReturningError(t *testing.T
 	if commandErr == nil || !strings.Contains(commandErr.Error(), "failed to restart 1 session") {
 		t.Fatalf("error = %v, want failed restart error", commandErr)
 	}
-	if !strings.Contains(output, "az-1") || !strings.Contains(output, "failed: send-keys failed") {
+	if !strings.Contains(output, "az-1") || !strings.Contains(output, "failed: replacement incarnation was not observed") {
 		t.Fatalf("output = %q, want failed session detail", output)
 	}
 }
