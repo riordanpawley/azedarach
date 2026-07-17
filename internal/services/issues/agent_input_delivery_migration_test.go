@@ -613,16 +613,16 @@ func TestAgentInputDeliveryMigrationRejectsWeakenedStateConstraints(t *testing.T
 			replacement: `CHECK (state != 'leased' OR lease_token IS NOT NULL)`,
 		},
 	}
-	artifact, err := migrationFiles.ReadFile("migrations/0053_agent_input_delivery_fencing.sql")
+	artifact, err := migrationFiles.ReadFile("migrations/0054_agent_input_delivery_fencing.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
 	artifactText := string(artifact)
 	createStart := strings.Index(artifactText, "CREATE TABLE agent_input_delivery_intents (")
 	copyStart := strings.Index(artifactText, "INSERT INTO agent_input_delivery_intents(")
-	finishStart := strings.Index(artifactText, "DROP TABLE agent_input_delivery_intents_0052;")
+	finishStart := strings.Index(artifactText, "DROP TABLE agent_input_delivery_intents_0053;")
 	if createStart < 0 || copyStart <= createStart || finishStart <= copyStart {
-		t.Fatal("0053 artifact does not contain the expected rebuild phases")
+		t.Fatal("0054 artifact does not contain the expected rebuild phases")
 	}
 	canonicalTable := artifactText[createStart:copyStart]
 	finishSchema := artifactText[finishStart:]
@@ -645,7 +645,7 @@ func TestAgentInputDeliveryMigrationRejectsWeakenedStateConstraints(t *testing.T
 				`DROP INDEX idx_agent_input_delivery_incarnation`,
 				`DROP INDEX idx_agent_input_session_lease_expiry`,
 				`DROP TABLE agent_input_delivery_session_leases`,
-				`ALTER TABLE agent_input_delivery_intents RENAME TO agent_input_delivery_intents_0052`,
+				`ALTER TABLE agent_input_delivery_intents RENAME TO agent_input_delivery_intents_0053`,
 			} {
 				if _, err := db.Exec(statement); err != nil {
 					t.Fatal(err)
@@ -781,7 +781,7 @@ func TestAgentInputDeliveryMigrationHistoricalUpgradeRollsBackAndRetries(t *test
 		t.Fatal(err)
 	}
 	if previousMarker != 1 || currentMarker != 0 || currentTable != 0 {
-		t.Fatalf("previous production fixture marker0050=%d marker0052=%d table0052=%d", previousMarker, currentMarker, currentTable)
+		t.Fatalf("previous production fixture marker0050=%d marker0053=%d table0053=%d", previousMarker, currentMarker, currentTable)
 	}
 	if err = seed.CloseDB(); err != nil {
 		t.Fatal(err)
@@ -815,7 +815,7 @@ func TestAgentInputDeliveryMigrationHistoricalUpgradeRollsBackAndRetries(t *test
 	}
 }
 
-func TestAgentInputDeliveryFencingMigrationUpgradesImmutable0052AndRollsBack(t *testing.T) {
+func TestAgentInputDeliveryFencingMigrationUpgradesImmutable0053AndRollsBack(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
 	seed := NewClientAtPath(path, nil)
@@ -830,7 +830,7 @@ func TestAgentInputDeliveryFencingMigrationUpgradesImmutable0052AndRollsBack(t *
 	}
 	var checksum string
 	if err := db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&checksum); err != nil || checksum != agentInputDeliveryMigrationChecksum {
-		t.Fatalf("immutable 0052 checksum=%q err=%v", checksum, err)
+		t.Fatalf("immutable 0053 checksum=%q err=%v", checksum, err)
 	}
 	if err := seed.CloseDB(); err != nil {
 		t.Fatal(err)
@@ -857,7 +857,7 @@ func TestAgentInputDeliveryFencingMigrationUpgradesImmutable0052AndRollsBack(t *
 	_ = raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_input_delivery_session_leases'`).Scan(&sessionLeaseTable)
 	_ = raw.Close()
 	if marker != 0 || sentinel != 1 || sessionLeaseTable != 0 {
-		t.Fatalf("rollback marker0053=%d sentinel=%d lease_table=%d", marker, sentinel, sessionLeaseTable)
+		t.Fatalf("rollback marker0054=%d sentinel=%d lease_table=%d", marker, sentinel, sessionLeaseTable)
 	}
 
 	retried := NewClientAtPath(path, nil)
@@ -1055,7 +1055,7 @@ func TestAgentInputDeliveryFencingMigrationRejectsPredecessorDriftBeforeRebuild(
 			}
 
 			candidate := NewClientAtPath(path, nil)
-			if _, err := candidate.dbHandle(); err == nil || !strings.Contains(err.Error(), "validate migration 0053_agent_input_delivery_fencing predecessor") {
+			if _, err := candidate.dbHandle(); err == nil || !strings.Contains(err.Error(), "validate migration 0054_agent_input_delivery_fencing predecessor") {
 				t.Fatalf("candidate open error=%v, want predecessor drift refusal", err)
 			}
 			_ = candidate.CloseDB()
@@ -1083,7 +1083,7 @@ func TestAgentInputDeliveryFencingMigrationRejectsPredecessorDriftBeforeRebuild(
 				t.Fatal(err)
 			}
 			if marker != 0 || sentinel != 1 || !strings.Contains(schemaSQL, test.preservedSQL) {
-				t.Fatalf("rollback marker0053=%d sentinel=%d schema=%q", marker, sentinel, schemaSQL)
+				t.Fatalf("rollback marker0054=%d sentinel=%d schema=%q", marker, sentinel, schemaSQL)
 			}
 			if test.preservedValueSQL != "" {
 				var value string

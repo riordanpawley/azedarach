@@ -1,4 +1,4 @@
--- Migration 0053 manifest
+-- Migration 0054 manifest
 --
 -- Schema effects:
 --   Expand agent input delivery intents with the ambiguous submission state
@@ -6,26 +6,26 @@
 --   values and an expiry index.
 -- Data effects:
 --   Rebuild agent_input_delivery_intents transactionally and copy every
---   existing row without changing values. Existing 0052 states all satisfy
+--   existing row without changing values. Existing 0053 states all satisfy
 --   the expanded constraint. The new session lease table starts empty.
 -- Validation effects:
 --   The Go-assisted runner derives its schema contracts by executing the pinned
---   immutable 0052 artifact and this artifact in isolated SQLite databases.
+--   immutable 0053 artifact and this artifact in isolated SQLite databases.
 --   Before any destructive statement runs, it requires the live predecessor's
---   complete table/column/index/trigger inventory to equal that 0052 contract.
+--   complete table/column/index/trigger inventory to equal that 0053 contract.
 --   After executing this artifact transactionally, it requires the complete
---   final inventory to equal the derived 0053 contract before writing the
+--   final inventory to equal the derived 0054 contract before writing the
 --   ledger row or committing. Every later startup repeats the final validation.
 -- Ledger effects:
 --   After schema and data validation, the runner records exactly one
---   schema_migrations row for 0053_agent_input_delivery_fencing with this
+--   schema_migrations row for 0054_agent_input_delivery_fencing with this
 --   artifact's pinned SHA-256 checksum. Schema, copied data, validation, and
 --   ledger mutation roll back together on any failure.
 
 DROP INDEX idx_agent_input_delivery_pending;
 DROP INDEX idx_agent_input_delivery_incarnation;
 
-ALTER TABLE agent_input_delivery_intents RENAME TO agent_input_delivery_intents_0052;
+ALTER TABLE agent_input_delivery_intents RENAME TO agent_input_delivery_intents_0053;
 
 CREATE TABLE agent_input_delivery_intents (
   project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
@@ -64,9 +64,9 @@ SELECT
   agent_incarnation, tool, message_kind, payload, state, expires_at,
   lease_owner, lease_token, lease_expires_at, attempt_count,
   acknowledgement_token, acknowledged_at, created_at, updated_at
-FROM agent_input_delivery_intents_0052;
+FROM agent_input_delivery_intents_0053;
 
-DROP TABLE agent_input_delivery_intents_0052;
+DROP TABLE agent_input_delivery_intents_0053;
 
 CREATE INDEX idx_agent_input_delivery_pending
   ON agent_input_delivery_intents(project_id, state, expires_at, created_at)

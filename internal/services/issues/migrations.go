@@ -93,9 +93,9 @@ var orderedMigrations = []migration{
 	{id: "0049_managed_agent_incarnations", path: "migrations/0049_managed_agent_incarnations.sql"},
 	{id: issueObservationEventSearchMigrationID, path: "migrations/0050_issue_observation_event_search.sql"},
 	{id: decisionIdempotencyMigrationID, path: "migrations/0051_decision_idempotency.sql"},
-	{id: agentInputDeliveryMigrationID, path: "migrations/0052_agent_input_delivery.sql"},
-	{id: agentInputDeliveryFencingMigrationID, path: "migrations/0053_agent_input_delivery_fencing.sql"},
 	{id: mailboxObservationProjectionCutoverMigrationID, path: "migrations/0052_mailbox_observation_projection_cutover.sql"},
+	{id: agentInputDeliveryMigrationID, path: "migrations/0053_agent_input_delivery.sql"},
+	{id: agentInputDeliveryFencingMigrationID, path: "migrations/0054_agent_input_delivery_fencing.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -156,9 +156,9 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "0049_managed_agent_incarnations", Path: "migrations/0049_managed_agent_incarnations.sql", Checksum: "8364ceb9fad589df3f73c1fe0f0462c22b127510f1745e62fcc11e24757fe08d"},
 	{ID: "0050_issue_observation_event_search", Path: "migrations/0050_issue_observation_event_search.sql", Checksum: "e5a8efc20ddf313822576c4d6d42cd94e1837dfac810834957689d30b952005d"},
 	{ID: decisionIdempotencyMigrationID, Path: "migrations/0051_decision_idempotency.sql", Checksum: "86d5400fe33bbc19e7e848bc232335809f76d85e4d45a6e45f6bc7ff77547f47"},
-	{ID: agentInputDeliveryMigrationID, Path: "migrations/0052_agent_input_delivery.sql", Checksum: "92d3be503bc193101944f1bc1ecee38656f04c3be7399a1b88356ae6add42f55"},
-	{ID: agentInputDeliveryFencingMigrationID, Path: "migrations/0053_agent_input_delivery_fencing.sql", Checksum: agentInputDeliveryFencingMigrationChecksum},
 	{ID: mailboxObservationProjectionCutoverMigrationID, Path: "migrations/0052_mailbox_observation_projection_cutover.sql", Checksum: "fd86080f491210c169005c7f28bc778aca3eea2d70ce15a6c001bb960397e260"},
+	{ID: agentInputDeliveryMigrationID, Path: "migrations/0053_agent_input_delivery.sql", Checksum: agentInputDeliveryMigrationChecksum},
+	{ID: agentInputDeliveryFencingMigrationID, Path: "migrations/0054_agent_input_delivery_fencing.sql", Checksum: agentInputDeliveryFencingMigrationChecksum},
 }
 
 func validateMigrationRegistry() error {
@@ -446,25 +446,25 @@ func migrateIssueSessionLogicalIdentity(ctx context.Context, tx *sql.Tx) error {
 }
 
 const (
-	migrationArtifactAuthority                 sqlitemigration.Authority = "project.issues"
-	issueStateModelV2MigrationID                                         = "0029_issue_state_model_v2"
-	issueStateModelVersionMetaKey                                        = "issue:state_model_version"
-	issueStateModelV2CutoverMarkerKey                                    = "issue:state_model_v2_cutover"
-	issueStateModelV2Version                                             = "2"
-	boardViewsMigrationID                                                = "0031_board_views"
-	projectionDeltaAuthorityMigrationID                                  = "0047_projection_delta_authority"
-	projectionDeltaAuthorityChecksum                                     = "9f7bed54f9694c608c7ce081c4007539eb46ce67adc9127d5649a1dbb49b6c5a"
-	humanAuthorityProjectionMigrationID                                  = "0047_human_authority_projection_revision"
+	migrationArtifactAuthority                     sqlitemigration.Authority = "project.issues"
+	issueStateModelV2MigrationID                                             = "0029_issue_state_model_v2"
+	issueStateModelVersionMetaKey                                            = "issue:state_model_version"
+	issueStateModelV2CutoverMarkerKey                                        = "issue:state_model_v2_cutover"
+	issueStateModelV2Version                                                 = "2"
+	boardViewsMigrationID                                                    = "0031_board_views"
+	projectionDeltaAuthorityMigrationID                                      = "0047_projection_delta_authority"
+	projectionDeltaAuthorityChecksum                                         = "9f7bed54f9694c608c7ce081c4007539eb46ce67adc9127d5649a1dbb49b6c5a"
+	humanAuthorityProjectionMigrationID                                      = "0047_human_authority_projection_revision"
 	mailboxObservationProjectionCutoverMigrationID                           = "0052_mailbox_observation_projection_cutover"
 	mailboxObservationProjectionCutoverMetaKey                               = "issue:mailbox_observation_projection_cutover"
-	decisionPropagationOutboxMigrationID                                 = "0048_decision_propagation_outbox"
-	issueObservationEventSearchMigrationID                               = "0050_issue_observation_event_search"
-	agentInputDeliveryMigrationID                                        = "0052_agent_input_delivery"
-	agentInputDeliveryMigrationChecksum                                  = "92d3be503bc193101944f1bc1ecee38656f04c3be7399a1b88356ae6add42f55"
-	agentInputDeliveryFencingMigrationID                                 = "0053_agent_input_delivery_fencing"
-	agentInputDeliveryFencingMigrationChecksum                           = "39c5faf5c816e604d8826b8e6548d2b047234ea0340a490e4bfa2ae64d21de79"
-	contextualLearningMigrationID                                        = "0039_contextual_learning_activation"
-	legacyContextualLearningMigration                                    = "0038_contextual_learning_activation"
+	decisionPropagationOutboxMigrationID                                     = "0048_decision_propagation_outbox"
+	issueObservationEventSearchMigrationID                                   = "0050_issue_observation_event_search"
+	agentInputDeliveryMigrationID                                            = "0053_agent_input_delivery"
+	agentInputDeliveryMigrationChecksum                                      = "0ab79e683f8af50d532fc65792e984fe261ce4c3e0a3b63096aac81f5d6c2fdd"
+	agentInputDeliveryFencingMigrationID                                     = "0054_agent_input_delivery_fencing"
+	agentInputDeliveryFencingMigrationChecksum                               = "939375d24a268a26e77e5d60e7f46b0d84e86ba8dfaf13815c427b886eb9f3c8"
+	contextualLearningMigrationID                                            = "0039_contextual_learning_activation"
+	legacyContextualLearningMigration                                        = "0038_contextual_learning_activation"
 )
 
 type issueStateModelV2CutoverMarker struct {
@@ -626,8 +626,14 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := validateIssueObservationEventSearchSchema(ctx, db); err != nil {
 		return err
 	}
-	if err := validateMailboxObservationProjectionCutover(ctx, db); err != nil {
-		return err
+	mailboxCutoverApplied, err := isMigrationApplied(ctx, db, mailboxObservationProjectionCutoverMigrationID)
+	if err != nil {
+		return fmt.Errorf("check mailbox observation projection cutover migration: %w", err)
+	}
+	if mailboxCutoverApplied {
+		if err := validateMailboxObservationProjectionCutover(ctx, db); err != nil {
+			return err
+		}
 	}
 	if err := validateProjectionDeltaAuthoritySchema(ctx, db); err != nil {
 		return fmt.Errorf("validate projection delta authority schema: %w", err)
@@ -1210,7 +1216,7 @@ func deriveAgentInputDeliverySchemaContract(fenced bool) (*agentInputDeliverySch
 		return nil, err
 	}
 	if _, err := db.ExecContext(ctx, baseSQL); err != nil {
-		return nil, fmt.Errorf("execute pinned migration 0052 reference artifact: %w", err)
+		return nil, fmt.Errorf("execute pinned migration 0053 reference artifact: %w", err)
 	}
 	if fenced {
 		fencingSQL, err := loadRegisteredMigrationSQL(agentInputDeliveryFencingMigrationID)
@@ -1218,7 +1224,7 @@ func deriveAgentInputDeliverySchemaContract(fenced bool) (*agentInputDeliverySch
 			return nil, err
 		}
 		if _, err := db.ExecContext(ctx, fencingSQL); err != nil {
-			return nil, fmt.Errorf("execute pinned migration 0053 reference artifact: %w", err)
+			return nil, fmt.Errorf("execute pinned migration 0054 reference artifact: %w", err)
 		}
 	}
 	return inspectAgentInputDeliverySchemaContract(ctx, db)
@@ -2126,7 +2132,7 @@ func (c *Client) applyDecisionPropagationOutboxMigration(ctx context.Context, db
 }
 
 func (c *Client) applyAgentInputDeliveryMigration(ctx context.Context, db *sql.DB, id string) error {
-	sqlText, err := loadMigrationSQL("migrations/0052_agent_input_delivery.sql")
+	sqlText, err := loadMigrationSQL("migrations/0053_agent_input_delivery.sql")
 	if err != nil {
 		return fmt.Errorf("load migration %s: %w", id, err)
 	}
@@ -2156,7 +2162,7 @@ func (c *Client) applyAgentInputDeliveryMigration(ctx context.Context, db *sql.D
 }
 
 func (c *Client) applyAgentInputDeliveryFencingMigration(ctx context.Context, db *sql.DB, id string) error {
-	sqlText, err := loadMigrationSQL("migrations/0053_agent_input_delivery_fencing.sql")
+	sqlText, err := loadMigrationSQL("migrations/0054_agent_input_delivery_fencing.sql")
 	if err != nil {
 		return fmt.Errorf("load migration %s: %w", id, err)
 	}
@@ -2165,7 +2171,7 @@ func (c *Client) applyAgentInputDeliveryFencingMigration(ctx context.Context, db
 		return fmt.Errorf("begin migration %s: %w", id, err)
 	}
 	defer tx.Rollback()
-	// Migration 0053 rebuilds the 0052 table. Validate the exact immutable
+	// Migration 0054 rebuilds the 0053 table. Validate the exact immutable
 	// predecessor, including both indexes, before executing any destructive DDL
 	// so schema drift remains intact and diagnosable on failure.
 	if err := validateAgentInputDeliveryBaseSchema(ctx, tx); err != nil {

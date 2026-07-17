@@ -80,7 +80,7 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, decisionPropagationOutboxMigrationID).Scan(&checksum); err != nil || checksum != "a12c44ba35156d71fbcd88a9d78e4cdb234e75e7e4aef5f896c8b1182ada858d" {
 				t.Fatalf("decision outbox checksum=%q err=%v", checksum, err)
 			}
-			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&checksum); err != nil || checksum != "92d3be503bc193101944f1bc1ecee38656f04c3be7399a1b88356ae6add42f55" {
+			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&checksum); err != nil || checksum != agentInputDeliveryMigrationChecksum {
 				t.Fatalf("agent input checksum=%q err=%v", checksum, err)
 			}
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, agentInputDeliveryFencingMigrationID).Scan(&checksum); err != nil || checksum != agentInputDeliveryFencingMigrationChecksum {
@@ -179,7 +179,7 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, decisionIdempotencyMigrationID, "86d5400fe33bbc19e7e848bc232335809f76d85e4d45a6e45f6bc7ff77547f47").Scan(&ledgerRows); err != nil || ledgerRows != 1 {
 				t.Fatalf("decision idempotency ledger rows after reopen=%d err=%v", ledgerRows, err)
 			}
-			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, agentInputDeliveryMigrationID, "92d3be503bc193101944f1bc1ecee38656f04c3be7399a1b88356ae6add42f55").Scan(&ledgerRows); err != nil || ledgerRows != 1 {
+			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, agentInputDeliveryMigrationID, agentInputDeliveryMigrationChecksum).Scan(&ledgerRows); err != nil || ledgerRows != 1 {
 				t.Fatalf("agent input delivery ledger rows after reopen=%d err=%v", ledgerRows, err)
 			}
 			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, agentInputDeliveryFencingMigrationID, agentInputDeliveryFencingMigrationChecksum).Scan(&ledgerRows); err != nil || ledgerRows != 1 {
