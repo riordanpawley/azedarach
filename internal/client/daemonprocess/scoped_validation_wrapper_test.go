@@ -48,10 +48,14 @@ func TestRealProcessProfileScopedValidationWrapperReapsDaemon(t *testing.T) {
 		global        bool
 		wantHeartbeat bool
 		slowCleanup   bool
+		recoverGo     bool
+		missingGo     bool
 		wantExit      int
 		wantReaped    bool
 	}{
 		{name: "success with protocol-skewed heartbeat during cleanup", payload: []string{"/bin/sh", "-c", "exit 0"}, wantExit: 0, wantReaped: true, wantHeartbeat: true, slowCleanup: true},
+		{name: "missing explicit Go binding recovers before cleanup", recoverGo: true, wantExit: 0, wantReaped: true},
+		{name: "missing Go toolchain reports durable payload phase before cleanup", missingGo: true, wantExit: 78, wantReaped: true},
 		{name: "payload failure", payload: []string{"/bin/sh", "-c", "exit 23"}, wantExit: 23, wantReaped: true},
 		{name: "termination signal", payload: []string{"/bin/sh", "-c", "touch \"$AZEDARACH_SCOPED_VALIDATION_PAYLOAD_READY\"; while :; do sleep 1; done"}, signal: syscall.SIGTERM, wantExit: 143, wantReaped: true},
 		{name: "cleanup failure after success is durable", payload: []string{"/bin/sh", "-c", "exit 0"}, stopFails: true, wantExit: 78},
@@ -61,12 +65,32 @@ func TestRealProcessProfileScopedValidationWrapperReapsDaemon(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newScopedValidationFixture(t, test.stopFails, test.global, test.slowCleanup)
+			payload := test.payload
+			if test.recoverGo || test.missingGo {
+				repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+				if err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(repoRoot, "scripts", "validation-bin") + string(os.PathListSeparator) + os.Getenv("PATH")
+				if test.missingGo {
+					bash, lookupErr := exec.LookPath("bash")
+					if lookupErr != nil {
+						t.Fatal(lookupErr)
+					}
+					path = filepath.Join(repoRoot, "scripts", "validation-bin") + string(os.PathListSeparator) + filepath.Dir(bash)
+				}
+				payload = []string{
+					"/usr/bin/env", "-u", "AZEDARACH_REAL_GO_BIN",
+					"PATH=" + path,
+					"go", "version",
+				}
+			}
 			var pid int
 			if !test.global {
 				pid = fixture.startDaemon()
 				t.Cleanup(func() { stopTestProcessGroup(pid) })
 			}
-			cmd := fixture.wrapperCommand(test.payload...)
+			cmd := fixture.wrapperCommand(payload...)
 			var wrapperOutput bytes.Buffer
 			cmd.Stdout = &wrapperOutput
 			cmd.Stderr = &wrapperOutput
@@ -105,7 +129,7 @@ func TestRealProcessProfileScopedValidationWrapperReapsDaemon(t *testing.T) {
 			} else if !errors.Is(readErr, os.ErrNotExist) {
 				t.Fatalf("global/failed cleanup unexpectedly invoked stop: %q err=%v", stopCalls, readErr)
 			}
-			fixture.assertChannelSeparationAndFinishOrder(test.stopFails, test.global, test.signal != nil, test.wantHeartbeat, test.slowCleanup, test.payload, wrapperOutput.String())
+			fixture.assertChannelSeparationAndFinishOrder(test.stopFails, test.global, test.signal != nil, test.wantHeartbeat, test.slowCleanup, test.missingGo, payload, wrapperOutput.String())
 		})
 	}
 }
@@ -375,7 +399,7 @@ func stopScopedValidationTestDaemon() int {
 	return 0
 }
 
-func (f scopedValidationFixture) assertChannelSeparationAndFinishOrder(stopFails, global, interrupted, wantHeartbeat, slowCleanup bool, payload []string, wrapperOutput string) {
+func (f scopedValidationFixture) assertChannelSeparationAndFinishOrder(stopFails, global, interrupted, wantHeartbeat, slowCleanup, missingGo bool, payload []string, wrapperOutput string) {
 	f.t.Helper()
 	control := strings.Fields(string(readFileBestEffort(f.controlLog)))
 	joinedControl := strings.Join(control, " ")
@@ -421,7 +445,7 @@ func (f scopedValidationFixture) assertChannelSeparationAndFinishOrder(stopFails
 		wantState = "state=failed"
 	} else if interrupted {
 		wantState = "state=cancelled"
-	} else if strings.Contains(strings.Join(payload, " "), "exit 23") {
+	} else if missingGo || strings.Contains(strings.Join(payload, " "), "exit 23") {
 		wantState = "state=failed"
 	}
 	if !strings.Contains(finish, wantCleanup) || !strings.Contains(finish, wantState) {
@@ -432,12 +456,18 @@ func (f scopedValidationFixture) assertChannelSeparationAndFinishOrder(stopFails
 		wantPayload = "payload=143"
 	} else if strings.Contains(strings.Join(payload, " "), "exit 23") {
 		wantPayload = "payload=23"
+	} else if missingGo {
+		wantPayload = "payload=78"
 	}
 	if !strings.Contains(finish, wantPayload) {
 		f.t.Fatalf("finish record = %q, want original %s evidence", finish, wantPayload)
 	}
-	if stopFails && !strings.Contains(finish, "outcome=exit 78") {
-		f.t.Fatalf("finish record = %q, want cleanup failure outcome exit 78", finish)
+	wantOutcomePayload := strings.Replace(wantPayload, "payload=", "payload_exit=", 1)
+	if stopFails && (!strings.Contains(finish, "outcome=exit 78 phase=cleanup") || !strings.Contains(finish, wantOutcomePayload)) {
+		f.t.Fatalf("finish record = %q, want typed cleanup failure with original payload exit", finish)
+	}
+	if missingGo && !strings.Contains(finish, "outcome=exit 78 phase=toolchain_configuration") {
+		f.t.Fatalf("finish record = %q, want durable toolchain-configuration phase", finish)
 	}
 }
 

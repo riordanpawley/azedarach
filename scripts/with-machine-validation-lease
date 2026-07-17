@@ -480,7 +480,21 @@ if ($purpose eq 'capacity' && $class eq 'aggregate' && $overlap_detected && $exi
 my $terminal = $interrupted ? 'cancelled' : ($exit_code == 0 ? 'completed' : 'failed');
 kill 'TERM', $heartbeat;
 waitpid($heartbeat, 0);
-my @finish = ($control_az, 'validation', 'finish', '--request', $request_id, '--state', $terminal, '--outcome', "exit $exit_code");
+my $outcome = "exit $exit_code";
+my $fatal_evidence = read_json_file($evidence_file);
+if (($fatal_evidence->{fatal_phase} || '') ne '') {
+    my $phase = bounded_outcome_detail($fatal_evidence->{fatal_phase});
+    my $detail = bounded_outcome_detail($fatal_evidence->{fatal_detail} || 'validation payload configuration failed');
+    $outcome .= " phase=$phase detail=$detail";
+    if ($cleanup_error ne '') {
+        my $cleanup_detail = bounded_outcome_detail($cleanup_error);
+        $outcome .= " cleanup=failed cleanup_detail=$cleanup_detail";
+    }
+} elsif ($cleanup_error ne '') {
+    my $detail = bounded_outcome_detail($cleanup_error);
+    $outcome .= " phase=cleanup payload_exit=$payload_exit_code detail=$detail";
+}
+my @finish = ($control_az, 'validation', 'finish', '--request', $request_id, '--state', $terminal, '--outcome', $outcome);
 if (-s $evidence_file) {
     open my $final_evidence, '<', $evidence_file or die "open validation evidence: $!\n";
     local $/;
@@ -502,6 +516,24 @@ sub read_optional_file {
     close $fh;
     $value =~ s/\s+\z//;
     return $value;
+}
+
+sub read_json_file {
+    my ($path) = @_;
+    return {} unless -s $path;
+    open my $fh, '<', $path or return {};
+    local $/;
+    my $decoded = eval { decode_json(<$fh> // '{}') };
+    close $fh;
+    return $decoded && ref($decoded) eq 'HASH' ? $decoded : {};
+}
+
+sub bounded_outcome_detail {
+    my ($detail) = @_;
+    $detail = '' unless defined $detail;
+    $detail =~ s/\s+/ /g;
+    $detail =~ s/^\s+|\s+$//g;
+    return substr($detail, 0, 512);
 }
 
 sub authorize_nested {
@@ -570,6 +602,8 @@ sub merge_whole_gate_evidence {
     $whole->{external_go_processes} = ($existing->{external_go_processes} || 0) > $whole->{external_go_processes} ? $existing->{external_go_processes} : $whole->{external_go_processes};
     $whole->{report_path} = $existing->{report_path} if $existing->{report_path};
     $whole->{report_paths} = $existing->{report_paths} if $existing->{report_paths};
+    $whole->{fatal_phase} = $existing->{fatal_phase} if $existing->{fatal_phase};
+    $whole->{fatal_detail} = $existing->{fatal_detail} if $existing->{fatal_detail};
     open my $out, '>', $path or die "write whole-gate validation evidence: $!\n";
     print {$out} encode_json($whole) . "\n";
     close $out;
