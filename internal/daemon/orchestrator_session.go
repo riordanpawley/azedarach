@@ -385,7 +385,11 @@ func (d *Daemon) persistStoppedOrchestratorSessionProjection(ctx context.Context
 	projection.ObservedState = observed
 	projection.Activity, projection.ActivitySource = "", ""
 	projection.TmuxAttachedCount = 0
-	projection.UpdatedAt = time.Now().UTC()
+	updatedAt := time.Now().UTC()
+	if projection.UpdatedAt.After(updatedAt) {
+		updatedAt = projection.UpdatedAt
+	}
+	projection.UpdatedAt = updatedAt
 	writer := d.runtimeProjectionStateWriter()
 	if err := writer.PersistSessionProjection(ctx, projectID, projection); err != nil {
 		return fmt.Errorf("persist stopped orchestrator session projection: %w", err)

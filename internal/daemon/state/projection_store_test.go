@@ -113,6 +113,63 @@ func TestRuntimeStateStoreManagedAgentIdentityRejectsStaleAcrossStores(t *testin
 	}
 }
 
+func TestRuntimeStateStoreSessionIntentRejectsStaleDaemonReplay(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	first := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	second := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = first.Close(); _ = second.Close() })
+
+	base := time.Date(2026, time.July, 17, 3, 0, 0, 0, time.UTC)
+	staleRunning := Session{
+		ID: "az-ticket", IssueID: "ticket", Role: SessionRoleWorker,
+		ScopeKind: SessionScopeIssue, ScopeID: "ticket",
+		State: SessionStateRunning, UpdatedAt: base,
+	}
+	if err := first.UpsertSessionState(ctx, "p", staleRunning); err != nil {
+		t.Fatalf("seed running intent: %v", err)
+	}
+	stopped := staleRunning
+	stopped.State = SessionStateStopped
+	stopped.UpdatedAt = base.Add(time.Second)
+	if err := second.UpsertSessionState(ctx, "p", stopped); err != nil {
+		t.Fatalf("write stopped intent: %v", err)
+	}
+	if err := first.UpsertSessionState(ctx, "p", staleRunning); err != nil {
+		t.Fatalf("replay stale running intent: %v", err)
+	}
+
+	got, found, err := second.GetSessionState(ctx, "p", staleRunning.ID)
+	if err != nil || !found {
+		t.Fatalf("load intent after stale replay: found=%v err=%v", found, err)
+	}
+	if got.State != SessionStateStopped || !got.UpdatedAt.Equal(stopped.UpdatedAt) {
+		t.Fatalf("intent after stale replay = %+v, want stopped at %s", got, stopped.UpdatedAt)
+	}
+
+	// Equal timestamps cannot let a stale non-terminal writer reverse a stop.
+	equalRunning := staleRunning
+	equalRunning.UpdatedAt = stopped.UpdatedAt
+	if err := first.UpsertSessionState(ctx, "p", equalRunning); err != nil {
+		t.Fatalf("replay equal-time running intent: %v", err)
+	}
+	got, found, err = second.GetSessionState(ctx, "p", staleRunning.ID)
+	if err != nil || !found || got.State != SessionStateStopped {
+		t.Fatalf("intent after equal-time replay = %+v found=%v err=%v, want stopped", got, found, err)
+	}
+
+	// A genuinely newer start remains authoritative after issue reactivation.
+	restarted := staleRunning
+	restarted.UpdatedAt = stopped.UpdatedAt.Add(time.Second)
+	if err := first.UpsertSessionState(ctx, "p", restarted); err != nil {
+		t.Fatalf("write newer running intent: %v", err)
+	}
+	got, found, err = second.GetSessionState(ctx, "p", staleRunning.ID)
+	if err != nil || !found || got.State != SessionStateRunning || !got.UpdatedAt.Equal(restarted.UpdatedAt) {
+		t.Fatalf("intent after newer start = %+v found=%v err=%v", got, found, err)
+	}
+}
+
 func TestRetrySQLiteWriteDoesNotRetryPermanentFailure(t *testing.T) {
 	want := errors.New("constraint failed")
 	attempts := 0
