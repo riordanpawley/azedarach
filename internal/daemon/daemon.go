@@ -1488,10 +1488,19 @@ func (d *Daemon) recoverInterruptedOperation(ctx context.Context, record daemono
 		return interruptedOperationRecovery{}, false
 	}
 	canonicalID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), record.IssueID)
-	session, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, record.IssueID, canonicalID)
+	rootedScope, scopeErr := domain.RootedOrchestrationScope(record.IssueID)
+	if scopeErr != nil {
+		return interruptedOperationRecovery{}, false
+	}
+	rootedIdentity, identityErr := domain.NewOrchestratorIdentity(projectID, rootedScope)
+	if identityErr != nil {
+		return interruptedOperationRecovery{}, false
+	}
+	authority := daemonstate.NewOrchestratorLeaseAuthority(store)
+	lease, rootedOwned, err := authority.Get(ctx, rootedIdentity)
 	if err != nil {
 		if d.cfg.Logger != nil {
-			d.cfg.Logger.Warn("failed to inspect interrupted worker session.start projection",
+			d.cfg.Logger.Warn("failed to inspect interrupted session.start rooted ownership",
 				"operation_id", record.ID,
 				"project_id", projectID,
 				"issue_id", record.IssueID,
@@ -1499,6 +1508,72 @@ func (d *Daemon) recoverInterruptedOperation(ctx context.Context, record daemono
 			)
 		}
 		return interruptedOperationRecovery{}, false
+	}
+	var session daemonstate.Session
+	var found bool
+	if rootedOwned {
+		if strings.TrimSpace(lease.SessionID) != canonicalID {
+			return interruptedOperationRecovery{}, false
+		}
+		session, found, err = store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, record.IssueID)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("failed to inspect interrupted rooted orchestrator session.start projection",
+					"operation_id", record.ID,
+					"project_id", projectID,
+					"issue_id", record.IssueID,
+					"error", err,
+				)
+			}
+			return interruptedOperationRecovery{}, false
+		}
+		if !found {
+			session, found, err = store.GetWorkerSessionStateByIssueID(ctx, projectID, record.IssueID, canonicalID)
+			if err != nil || !found {
+				return interruptedOperationRecovery{}, false
+			}
+		}
+		if strings.TrimSpace(session.ID) != canonicalID {
+			return interruptedOperationRecovery{}, false
+		}
+		session.Role = daemonstate.SessionRoleOrchestrator
+		session.ScopeKind = daemonstate.SessionScopeOrchestration
+		session.ScopeID = record.IssueID
+		session.UpdatedAt = time.Now().UTC()
+		if _, err = authority.AcquireRooted(ctx, rootedIdentity, session, func(context.Context, string) (bool, error) { return true, nil }); err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("failed to converge interrupted rooted session.start authority",
+					"operation_id", record.ID,
+					"project_id", projectID,
+					"issue_id", record.IssueID,
+					"error", err,
+				)
+			}
+			return interruptedOperationRecovery{}, false
+		}
+		session, found, err = store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, record.IssueID)
+		if err != nil {
+			return interruptedOperationRecovery{}, false
+		}
+	} else {
+		session, found, err = store.GetWorkerSessionStateByIssueID(ctx, projectID, record.IssueID, canonicalID)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("failed to inspect interrupted worker session.start projection",
+					"operation_id", record.ID,
+					"project_id", projectID,
+					"issue_id", record.IssueID,
+					"error", err,
+				)
+			}
+			return interruptedOperationRecovery{}, false
+		}
+		if !found {
+			session, found, err = store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, record.IssueID)
+			if err != nil {
+				return interruptedOperationRecovery{}, false
+			}
+		}
 	}
 	if !found || strings.TrimSpace(session.IssueID) != strings.TrimSpace(record.IssueID) {
 		return interruptedOperationRecovery{}, false

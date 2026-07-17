@@ -14,6 +14,7 @@ import (
 	opstore "github.com/riordanpawley/azedarach/internal/daemon/operations/store"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
@@ -833,7 +834,7 @@ func TestDaemonRecoverInterruptedSessionStartUsesActiveProjection(t *testing.T) 
 	}
 }
 
-func TestWorkerLifecyclePathsIgnoreNewerNonWorkerSessions(t *testing.T) {
+func TestRootedOrchestratorIntentSupersedesWorkerLifecycleRecovery(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID, issueID := "proj-1", "AZ-2"
@@ -852,19 +853,9 @@ func TestWorkerLifecyclePathsIgnoreNewerNonWorkerSessions(t *testing.T) {
 		}
 	}
 	d := &Daemon{cfg: Config{RepoDir: repoDir}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store}, runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{}}
-	if err := d.persistSessionState(projectID, daemonstate.Session{ID: "foreign-worker", IssueID: issueID, State: daemonstate.SessionStatePaused, ObservedState: daemonstate.SessionStatePaused, UpdatedAt: now.Add(3 * time.Minute)}); err != nil {
-		t.Fatal(err)
-	}
 	worker, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, issueID, workerID)
-	if err != nil || !found || worker.ID != workerID || worker.State != daemonstate.SessionStatePaused {
-		t.Fatalf("worker persist selected %+v found=%t err=%v", worker, found, err)
-	}
-	if err := d.writeSessionStopProjection(projectID, "foreign-worker", issueID); err != nil {
-		t.Fatal(err)
-	}
-	worker, _, _ = store.GetWorkerSessionStateByIssueID(ctx, projectID, issueID, workerID)
-	if worker.ID != workerID || worker.State != daemonstate.SessionStateStopped {
-		t.Fatalf("worker stop selected %+v", worker)
+	if err != nil || found {
+		t.Fatalf("retired worker intent = %+v found=%t err=%v", worker, found, err)
 	}
 	intents, err := store.ListSessionIntentStates(ctx, projectID)
 	if err != nil {
@@ -879,13 +870,50 @@ func TestWorkerLifecyclePathsIgnoreNewerNonWorkerSessions(t *testing.T) {
 	if !preserved[daemonstate.SessionRoleAdvisor] || !preserved[daemonstate.SessionRoleOrchestrator] {
 		t.Fatalf("non-worker intents not preserved: %+v", intents)
 	}
-	worker.State, worker.ObservedState, worker.UpdatedAt = daemonstate.SessionStateRunning, daemonstate.SessionStateRunning, now.Add(4*time.Minute)
-	if err := upsertSessionStateFixture(store, ctx, projectID, worker); err != nil {
-		t.Fatal(err)
-	}
 	recovery, ok := d.recoverInterruptedOperation(ctx, daemonops.Record{ID: "op", ProjectID: projectID, IssueID: issueID, Kind: daemonhandlers.CommandSessionStart})
 	if !ok || recovery.State != daemonops.StateDone {
-		t.Fatalf("worker recovery=%+v ok=%t", recovery, ok)
+		t.Fatalf("rooted recovery=%+v ok=%t", recovery, ok)
+	}
+}
+
+func TestInterruptedSessionStartConvergesLeaseOwnedWorkerCrashState(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, issueID := "proj-1", "AZ-2"
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	store := daemonstate.NewRuntimeStateStore(t.TempDir(), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
+		ID:            sessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning,
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worker intent: %v", err)
+	}
+	scope, err := domain.RootedOrchestrationScope(issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AcquireOrchestratorScopeLease(ctx, identity, sessionID, func(context.Context, string) (bool, error) { return false, nil }); err != nil {
+		t.Fatalf("seed pre-atomic rooted lease: %v", err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store}, runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{}}
+	recovery, ok := d.recoverInterruptedOperation(ctx, daemonops.Record{ID: "op", ProjectID: projectID, IssueID: issueID, Kind: daemonhandlers.CommandSessionStart})
+	if !ok || recovery.State != daemonops.StateDone {
+		t.Fatalf("rooted crash-state recovery=%+v ok=%t", recovery, ok)
+	}
+	if _, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, issueID, sessionID); err != nil || found {
+		t.Fatalf("worker intent after recovery found=%t err=%v", found, err)
+	}
+	rooted, found, err := store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, issueID)
+	if err != nil || !found || rooted.ID != sessionID || rooted.State != daemonstate.SessionStateRunning {
+		t.Fatalf("rooted intent after recovery=%+v found=%t err=%v", rooted, found, err)
 	}
 }
 

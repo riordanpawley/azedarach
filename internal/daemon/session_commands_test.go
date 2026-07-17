@@ -5063,8 +5063,8 @@ func TestHandleSessionStopDirectFailsWhenStopIntentProjectionWriteFails(t *testi
 	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInternal {
 		t.Fatalf("stop error = %+v, want internal error", resp.Error)
 	}
-	if !strings.Contains(strings.ToLower(resp.Error.Message), "record session stop intent") {
-		t.Fatalf("stop error message = %q, want record session stop intent", resp.Error.Message)
+	if !strings.Contains(strings.ToLower(resp.Error.Message), "resolve rooted orchestrator session stop") {
+		t.Fatalf("stop error message = %q, want rooted-orchestrator preflight failure", resp.Error.Message)
 	}
 
 	snapshot := store.ReadSnapshot(projectID)
@@ -6119,8 +6119,8 @@ func TestHandleSessionStopDirectCanceledContextDoesNotContinueAfterFreshnessFail
 		t.Fatalf("expected tmux session %q to remain", sessionID)
 	}
 	snapshot := store.ReadSnapshot(projectID)
-	if got := snapshot.Sessions[sessionID].State; got != daemonstate.SessionStateStopped {
-		t.Fatalf("session state = %s, want %s", got, daemonstate.SessionStateStopped)
+	if got := snapshot.Sessions[sessionID].State; got != daemonstate.SessionStateRunning {
+		t.Fatalf("session state = %s, want %s", got, daemonstate.SessionStateRunning)
 	}
 
 	calls, projectIDs := recorder.snapshot()
@@ -6253,7 +6253,7 @@ func TestApplySessionLifecycleTransitionPreservesTypedIdentity(t *testing.T) {
 	}
 }
 
-func TestTypedLifecycleTransitionTargetsSharedRuntimeIntent(t *testing.T) {
+func TestTypedLifecycleTransitionTargetsExclusivePhysicalRuntimeIntent(t *testing.T) {
 	ctx := context.Background()
 	sharedID, issueID := "az-root", "root"
 	worker := daemonstate.Session{ID: sharedID, IssueID: issueID, Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueID, State: daemonstate.SessionStateStopped}
@@ -6263,29 +6263,21 @@ func TestTypedLifecycleTransitionTargetsSharedRuntimeIntent(t *testing.T) {
 			transient := daemonstate.NewStore()
 			runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 			t.Cleanup(func() { _ = runtimeStore.Close() })
-			for _, seed := range []daemonstate.Session{worker, rooted} {
-				seed.UpdatedAt = time.Now().UTC()
-				if err := upsertSessionStateFixture(runtimeStore, ctx, "p", seed); err != nil {
-					t.Fatal(err)
-				}
+			target.UpdatedAt = time.Now().UTC()
+			if err := upsertSessionStateFixture(runtimeStore, ctx, "p", target); err != nil {
+				t.Fatal(err)
 			}
 			d := &Daemon{cfg: Config{RepoDir: ".", Logger: slog.Default()}, sessionStore: transient, session: daemonhandlers.NewSessionHandler(transient), runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{".": runtimeStore}}
 			sel := sessionIntentSelector{Role: target.Role, ScopeKind: target.ScopeKind, ScopeID: target.ScopeID}
 			if err := d.applyTypedSessionLifecycleTransition(ctx, protocol.RequestEnvelope{}, "p", sharedID, issueID, daemonhandlers.CommandSessionStart, "", "", sel); err != nil {
 				t.Fatal(err)
 			}
-			for _, want := range []daemonstate.Session{worker, rooted} {
-				got, found, err := runtimeStore.GetSessionIntent(ctx, "p", want.Role, want.ScopeKind, want.ScopeID)
-				if err != nil || !found {
-					t.Fatalf("load %s: %v", want.Role, err)
-				}
-				expected := daemonstate.SessionStateStopped
-				if want.Role == target.Role {
-					expected = daemonstate.SessionStateStarting
-				}
-				if got.State != expected {
-					t.Fatalf("%s state=%s want %s", want.Role, got.State, expected)
-				}
+			got, found, err := runtimeStore.GetSessionIntent(ctx, "p", target.Role, target.ScopeKind, target.ScopeID)
+			if err != nil || !found {
+				t.Fatalf("load %s: %v", target.Role, err)
+			}
+			if got.State != daemonstate.SessionStateStarting {
+				t.Fatalf("%s state=%s want %s", target.Role, got.State, daemonstate.SessionStateStarting)
 			}
 		})
 	}
