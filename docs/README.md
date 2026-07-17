@@ -83,6 +83,7 @@ This directory primarily contains **developer/internal documentation**.
 - `investigation.waiting_human`: `projection` (durable investigation disposition and issue-specific acceptance/review evidence refreshed before human-authority evaluation).
 - `interaction.staleness`: `projection` (durable interaction requests refreshed before age evaluation and revision-safe stale/reminder/disposition/recovery audit writes).
 - `task.list` freshness/session timestamps: `projection` (refresh-then-cache).
+- `task.read_committed_revision`: `projection` (an authoritative issue commit advances or invalidates the daemon-local task materializer before mutation acknowledgement; runtime/Git enrichment may remain stale without rolling lifecycle fields back).
 - `cross_project.view_projection`: `projection` (the global daemon incrementally consumes verified per-project issue deltas and independently keyed current runtime/fact materializations into the user database, then evaluates typed cross-project views there; full export is limited to bootstrap, explicit rebuild, and isolated recovery, while stale and unavailable projects remain explicit).
 - `orchestration.scope_identity`: `projection` (durable project plus typed rooted/project scope; startup environment is not authority).
 - `orchestration.scope_singleton`: `hybrid` (refreshed durable scope lease compared with live tmux runtime).

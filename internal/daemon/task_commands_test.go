@@ -4167,6 +4167,129 @@ func TestTaskCloseRepairsLegacyProjectRuntimeProjectionBeforeFinalStatusUpdate(t
 	}
 }
 
+func TestCommittedCloseAdvancesMaterializedTaskReadsWhileRuntimeEnrichmentIsBlocked(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	projectID := "proj-committed-close-read-floor"
+	issuesClient, repoDir := newTestIssueClient(t)
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "committed close read floor", Type: domain.TypeTask, Priority: domain.P2, Status: domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hydrateCalls atomic.Int32
+	hydrateEntered := make(chan struct{})
+	releaseHydrate := make(chan struct{})
+	materializer := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(issuesClient), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		if hydrateCalls.Add(1) == 2 {
+			close(hydrateEntered)
+			<-releaseHydrate
+		}
+		return tasks, nil
+	})
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	refreshDone := make(chan error, 1)
+	go func() { refreshDone <- materializer.refreshRuntime(ctx, []string{taskID}) }()
+	<-hydrateEntered
+
+	d := &Daemon{
+		cfg:                   Config{RepoDir: repoDir, Logger: logger, BaseBranch: "main"},
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		materializers:        map[string]*projectReadMaterializer{projectID: materializer},
+		materializersStarted: true,
+		revision:             map[string]uint64{},
+		hub:                  publish.NewHub(16, 8, logger),
+	}
+	closeBody, err := json.Marshal(taskCloseRequest{TaskID: taskID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeResp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-close-read-floor",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.close",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            closeBody,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !closeResp.OK {
+		t.Fatalf("task.close response = %+v", closeResp.Error)
+	}
+
+	assertRead := func(name string, resp protocol.ResponseEnvelope) {
+		t.Helper()
+		if !resp.OK {
+			t.Fatalf("%s response = %+v", name, resp.Error)
+		}
+		payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+		if err != nil {
+			t.Fatalf("decode %s: %v", name, err)
+		}
+		found := false
+		for _, task := range payload.Tasks {
+			if task.ID.String() == taskID {
+				found = true
+				if task.Status != domain.StatusDone {
+					t.Fatalf("%s task status = %s, want %s", name, task.Status, domain.StatusDone)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("%s omitted committed issue %s", name, taskID)
+		}
+	}
+	request := func(command string, body any) protocol.RequestEnvelope {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: naming.RequestID("req-" + command), Kind: protocol.EnvelopeKindCommand, Command: command, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: encoded}
+	}
+	getResp, err := d.handleTaskGet(ctx, request("task.get", map[string]any{"task_id": taskID}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRead("task.get", getResp)
+	getManyResp, err := d.handleTaskGetMany(ctx, request("task.get-many", map[string]any{"task_ids": []string{taskID}, "metadata_only": true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRead("task.get-many", getManyResp)
+	listResp, err := d.handleTaskList(ctx, request("task.list", map[string]any{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRead("task.list", listResp)
+	searchResp, err := d.handleTaskList(ctx, request("task.search", map[string]any{"query": "committed close"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRead("task.search", searchResp)
+	projectTasks, _, err := d.projectReadSnapshot(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projectTasks) != 1 || projectTasks[0].Status != domain.StatusDone {
+		t.Fatalf("orchestration project snapshot source = %+v, want committed closed lifecycle", projectTasks)
+	}
+
+	close(releaseHydrate)
+	if err := <-refreshDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTaskCloseRepairsVerifiedStaleLegacyProjectSessionProjection(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

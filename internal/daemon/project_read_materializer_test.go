@@ -692,6 +692,106 @@ func TestProjectReadMaterializerSerializesRuntimeRefreshWithDeltaApply(t *testin
 	}
 }
 
+func TestProjectReadMaterializerPublishesCommittedCanonicalBeforeRuntimeEnrichment(t *testing.T) {
+	client, _ := newTestIssueClient(t)
+	ctx := context.Background()
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "committed lifecycle", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hydrateCalls atomic.Int32
+	hydrateEntered := make(chan struct{})
+	releaseHydrate := make(chan struct{})
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(client), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		if hydrateCalls.Add(1) == 2 {
+			close(hydrateEntered)
+			<-releaseHydrate
+		}
+		return tasks, nil
+	})
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	before := materializer.snapshotMetadata().DeliveryCursor
+	if _, err := client.CloseWithRuntime(ctx, "project", issueID, domain.StatusDone); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := materializer.authority.List(ctx, protocol.DefaultProjectID, before, projectReadMaterializerBatchSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyDone := make(chan error, 1)
+	go func() { applyDone <- materializer.apply(ctx, batch) }()
+	<-hydrateEntered
+
+	tasks, metadata := materializer.snapshot()
+	if len(tasks) != 1 || tasks[0].Status != domain.StatusDone {
+		t.Fatalf("snapshot during blocked enrichment = %+v, want committed closed lifecycle", tasks)
+	}
+	if metadata.DeliveryCursor != batch.DeliveryToCursor {
+		t.Fatalf("delivery cursor during blocked enrichment = %d, want %d", metadata.DeliveryCursor, batch.DeliveryToCursor)
+	}
+
+	close(releaseHydrate)
+	if err := <-applyDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProjectReadMaterializerRunAnnouncesCanonicalAdvanceBeforeRuntimeEnrichment(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	writer, repoDir := newTestIssueClient(t)
+	reader := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = reader.CloseDB() })
+	if err := reader.OpenProjectionDeltaStore(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	issueID, err := writer.Create(ctx, issues.CreateTaskParams{Title: "cross daemon lifecycle", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hydrateCalls atomic.Int32
+	hydrateEntered := make(chan struct{})
+	releaseHydrate := make(chan struct{})
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(reader), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		if hydrateCalls.Add(1) == 2 {
+			close(hydrateEntered)
+			<-releaseHydrate
+		}
+		return tasks, nil
+	})
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	advanced := make(chan protocol.MaterializedSnapshotMetadata, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		materializer.run(ctx, func(metadata protocol.MaterializedSnapshotMetadata) { advanced <- metadata })
+	}()
+	if _, err := writer.CloseWithRuntime(ctx, "project", issueID, domain.StatusDone); err != nil {
+		t.Fatal(err)
+	}
+	<-hydrateEntered
+	select {
+	case metadata := <-advanced:
+		if metadata.DeliveryCursor == 0 {
+			t.Fatalf("announced metadata = %+v", metadata)
+		}
+	default:
+		t.Fatal("canonical delta was not announced before runtime enrichment began")
+	}
+	tasks, _ := materializer.snapshot()
+	if len(tasks) != 1 || tasks[0].Status != domain.StatusDone {
+		t.Fatalf("cross-daemon snapshot = %+v, want committed closed lifecycle", tasks)
+	}
+	close(releaseHydrate)
+	cancel()
+	<-done
+}
+
 func TestProjectReadMaterializerRuntimeRefreshWaitIsCancelableAndAttributed(t *testing.T) {
 	const issueID = "az-refresh-contention"
 	canonical := map[string]domain.Task{issueID: {ID: issueID, Title: "contended refresh", Type: domain.TypeTask}}
@@ -768,6 +868,21 @@ func TestProjectReadSnapshotIsPureAtDeclaredChecksum(t *testing.T) {
 	}
 	if before != after || checksumJSON(tasksA) != checksumJSON(tasksB) || sourceA.SemanticChecksum != sourceB.SemanticChecksum {
 		t.Fatalf("pure read changed source: data_version %d->%d source %s/%s", before, after, sourceA.SemanticChecksum, sourceB.SemanticChecksum)
+	}
+}
+
+func TestProjectReadMaterializerClearsOnlyRecoveredMutationConvergenceFailure(t *testing.T) {
+	materializer := newProjectReadMaterializer("project", nil, nil)
+	materializer.metadata = protocol.MaterializedSnapshotMetadata{Health: "healthy"}
+	materializer.markUnhealthy(errors.New("committed mutation convergence: transient read failure"))
+	materializer.clearMutationConvergenceFailure()
+	if got := materializer.snapshotMetadata().Health; got != "healthy" {
+		t.Fatalf("recovered mutation convergence health = %q, want healthy", got)
+	}
+	materializer.markUnhealthy(errors.New("watch projection deltas: corrupt batch"))
+	materializer.clearMutationConvergenceFailure()
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "corrupt batch") {
+		t.Fatalf("unrelated health failure was cleared: %q", got)
 	}
 }
 

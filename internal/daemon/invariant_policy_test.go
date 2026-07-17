@@ -14,6 +14,7 @@ func TestInvariantSourceMatrixIncludesExpectedRuntimeInvariants(t *testing.T) {
 		daemonInvariantSessionActivityConverge:      daemonInvariantSourceHybrid,
 		daemonInvariantAdvisorSingleton:             daemonInvariantSourceHybrid,
 		daemonInvariantTaskListFreshness:            daemonInvariantSourceProjection,
+		daemonInvariantTaskReadAfterWrite:           daemonInvariantSourceProjection,
 		daemonInvariantTaskClose:                    daemonInvariantSourceHybrid,
 		daemonInvariantTaskClosePreflight:           daemonInvariantSourceHybrid,
 		daemonInvariantTaskDelete:                   daemonInvariantSourceHybrid,
