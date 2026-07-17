@@ -56,6 +56,7 @@ type gitServiceAdapter struct {
 	hookRefreshLifecycleMu    sync.Mutex
 	hookRefreshContext        context.Context
 	hookRefreshCancel         context.CancelFunc
+	hookRefreshStopped        bool
 }
 
 func (a *gitServiceAdapter) runtimeStore(projectID string) *daemonstate.RuntimeStateStore {
@@ -645,8 +646,10 @@ func (a *gitServiceAdapter) queuePersistedGitHookRefresh(projectID, worktree str
 }
 
 func (a *gitServiceAdapter) continuePendingGitHookRefreshAfter(submission reconcileQueueSubmission[*git.GitStatus], projectID, worktree string) {
-	reconcileCtx := a.gitHookRefreshReconcileContext()
-	a.hookRefreshContinuationWG.Add(1)
+	reconcileCtx, ok := a.beginGitHookRefreshContinuation()
+	if !ok {
+		return
+	}
 	go func() {
 		defer a.hookRefreshContinuationWG.Done()
 		attempt := 0
@@ -683,13 +686,19 @@ func (a *gitServiceAdapter) continuePendingGitHookRefreshAfter(submission reconc
 	}()
 }
 
-func (a *gitServiceAdapter) gitHookRefreshReconcileContext() context.Context {
+func (a *gitServiceAdapter) beginGitHookRefreshContinuation() (context.Context, bool) {
 	a.hookRefreshLifecycleMu.Lock()
 	defer a.hookRefreshLifecycleMu.Unlock()
+	if a.hookRefreshStopped {
+		return nil, false
+	}
 	if a.hookRefreshContext == nil {
 		a.hookRefreshContext, a.hookRefreshCancel = context.WithCancel(context.Background())
 	}
-	return a.hookRefreshContext
+	// Serialize positive Add calls with stopGitHookRefreshReconciler so shutdown
+	// cannot begin waiting while a late accepted hook starts a continuation.
+	a.hookRefreshContinuationWG.Add(1)
+	return a.hookRefreshContext, true
 }
 
 func (a *gitServiceAdapter) setGitHookRefreshReconcileContext(ctx context.Context) {
@@ -700,8 +709,8 @@ func (a *gitServiceAdapter) setGitHookRefreshReconcileContext(ctx context.Contex
 	if a.hookRefreshCancel != nil {
 		a.hookRefreshCancel()
 	}
-	a.hookRefreshContext = ctx
-	a.hookRefreshCancel = nil
+	a.hookRefreshContext, a.hookRefreshCancel = context.WithCancel(ctx)
+	a.hookRefreshStopped = false
 	a.hookRefreshLifecycleMu.Unlock()
 }
 
@@ -710,10 +719,12 @@ func (a *gitServiceAdapter) stopGitHookRefreshReconciler() {
 		return
 	}
 	a.hookRefreshLifecycleMu.Lock()
+	a.hookRefreshStopped = true
 	if a.hookRefreshCancel != nil {
 		a.hookRefreshCancel()
 	}
-	a.hookRefreshContext = nil
+	// Retain the canceled context so a late admission cannot recreate an
+	// unbounded background reconciler after daemon shutdown has started.
 	a.hookRefreshCancel = nil
 	a.hookRefreshLifecycleMu.Unlock()
 }

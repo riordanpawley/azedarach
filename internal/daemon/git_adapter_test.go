@@ -1618,6 +1618,20 @@ func TestGitHookRefreshAdmissionReplaysOnceAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestGitHookRefreshContinuationCannotRestartAfterShutdown(t *testing.T) {
+	adapter := &gitServiceAdapter{}
+	if _, ok := adapter.beginGitHookRefreshContinuation(); !ok {
+		t.Fatal("initial continuation was rejected")
+	}
+	adapter.hookRefreshContinuationWG.Done()
+
+	adapter.stopGitHookRefreshReconciler()
+	if _, ok := adapter.beginGitHookRefreshContinuation(); ok {
+		t.Fatal("continuation restarted after shutdown")
+	}
+	adapter.waitForGitHookRefreshContinuations()
+}
+
 func TestGitHookRefreshAcceptedDuringRunningJobIsRescheduled(t *testing.T) {
 	ctx := context.Background()
 	projectID := "project-handoff"
