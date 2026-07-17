@@ -126,6 +126,7 @@ func TestRuntimeSignalIngestGitHookQueuesWriteThroughProjection(t *testing.T) {
 	useDeterministicRuntimeSignalGitClient(d)
 	t.Cleanup(func() { cleanupRuntimeSignalTestDaemon(d) })
 	projectID := "proj-signals"
+	seedRuntimeSignalHookWorktree(t, d, projectID, repoDir)
 
 	resp, err := d.command(context.Background(), protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
@@ -195,6 +196,7 @@ func TestRuntimeSignalIngestGitHookDoesNotPersistOnRequestContext(t *testing.T) 
 	d.gitStatusAdapter.runtimeProjectionWriter = writer
 	ctx := context.WithValue(context.Background(), runtimeSignalForegroundProjectionMarker{}, true)
 	projectID := "proj-hook-admission"
+	seedRuntimeSignalHookWorktree(t, d, projectID, repoDir)
 	resp, err := d.command(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "runtime-signal-git-detached",
@@ -230,11 +232,52 @@ func TestRuntimeSignalIngestGitHookDoesNotPersistOnRequestContext(t *testing.T) 
 	}
 }
 
+func TestRuntimeSignalIngestGitHookIgnoresUnmanagedWorktreeWithoutEnrichment(t *testing.T) {
+	repoDir := initRuntimeSignalGitRepo(t)
+	d := New(Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	useDeterministicRuntimeSignalGitClient(d)
+	t.Cleanup(func() { cleanupRuntimeSignalTestDaemon(d) })
+	projectID := "proj-hook-unmanaged"
+	resp, err := d.command(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "runtime-signal-git-unmanaged",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         protocol.CommandRuntimeSignalIngest,
+		Body: mustMarshal(t, protocol.RuntimeSignalIngestCommandBody{
+			Source: protocol.RuntimeSignalSourceGitHook, Kind: protocol.RuntimeSignalKindGitWorktreeChanged,
+			Worktree: repoDir, Hook: "post-commit", Event: "post-commit",
+		}),
+	})
+	if err != nil || !resp.OK {
+		t.Fatalf("runtime signal response=%+v err=%v", resp, err)
+	}
+	var body protocol.RuntimeSignalIngestResponseBody
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Accepted || body.EnrichmentQueued {
+		t.Fatalf("unmanaged runtime signal body=%+v", body)
+	}
+	if len(body.Stages) == 0 || body.Stages[len(body.Stages)-1].Message != "ineligible worktree ignored" {
+		t.Fatalf("unmanaged runtime signal stages=%+v", body.Stages)
+	}
+	store := d.worktreeRuntimeStateStore(projectID)
+	if pending, err := store.ListPendingGitHookRefreshes(context.Background()); err != nil || len(pending) != 0 {
+		t.Fatalf("unmanaged pending intents=%+v err=%v, want none", pending, err)
+	}
+	if snapshot := d.gitStatusAdapter.ensureStatusRefreshQueue().snapshot(); len(snapshot.Pending) != 0 || len(snapshot.Running) != 0 {
+		t.Fatalf("unmanaged status queue=%+v, want empty", snapshot)
+	}
+}
+
 func TestRuntimeSignalIngestGitHookAcknowledgesWhileWriterContended(t *testing.T) {
 	repoDir := initRuntimeSignalGitRepo(t)
 	d := New(Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	useDeterministicRuntimeSignalGitClient(d)
 	t.Cleanup(func() { cleanupRuntimeSignalTestDaemon(d) })
+	projectID := "proj-hook-contention"
+	seedRuntimeSignalHookWorktree(t, d, projectID, repoDir)
 
 	writer, ok := d.runtimeProjectionStateWriter().(*daemonRuntimeProjectionWriter)
 	if !ok {
@@ -252,7 +295,6 @@ func TestRuntimeSignalIngestGitHookAcknowledgesWhileWriterContended(t *testing.T
 		}
 	}()
 
-	projectID := "proj-hook-contention"
 	resp, err := d.command(context.Background(), protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "runtime-signal-git-contended",
@@ -1341,6 +1383,19 @@ func initRuntimeSignalGitRepo(t *testing.T) string {
 	runRuntimeSignalGitCommand(t, repoDir, "-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-m", "seed")
 	runRuntimeSignalGitCommand(t, repoDir, "checkout", "-b", "riordan/az-42/runtime-signal")
 	return repoDir
+}
+
+func seedRuntimeSignalHookWorktree(t *testing.T, d *Daemon, projectID, worktree string) {
+	t.Helper()
+	if err := d.worktreeRuntimeStateStore(projectID).UpsertWorktreeState(context.Background(), daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   "az-42",
+		Path:      worktree,
+		Branch:    "tester/az-42/runtime-signal",
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed hook worktree projection: %v", err)
+	}
 }
 
 func runRuntimeSignalGitCommand(t *testing.T, repoDir string, args ...string) {

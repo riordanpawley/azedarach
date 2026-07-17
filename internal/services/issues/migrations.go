@@ -655,40 +655,71 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 }
 
 func validateGitHookRefreshIntentsSchema(ctx context.Context, db *sql.DB) error {
-	for _, column := range []string{"project_id", "worktree", "requested_generation", "completed_generation", "requested_at", "completed_at"} {
-		exists, err := columnExistsDB(ctx, db, "daemon_git_hook_refresh_intents", column)
-		if err != nil {
-			return err
-		}
-		if !exists {
-			return fmt.Errorf("git hook refresh intents schema drifted: missing column %s", column)
-		}
+	type expectedColumn struct {
+		name         string
+		columnType   string
+		notNull      int
+		defaultValue *string
+		primaryKey   int
+	}
+	zeroDefault := "0"
+	expectedColumns := []expectedColumn{
+		{name: "project_id", columnType: "TEXT", notNull: 1, primaryKey: 1},
+		{name: "worktree", columnType: "TEXT", notNull: 1, primaryKey: 2},
+		{name: "requested_generation", columnType: "INTEGER", notNull: 1},
+		{name: "completed_generation", columnType: "INTEGER", notNull: 1, defaultValue: &zeroDefault},
+		{name: "requested_at", columnType: "TEXT", notNull: 1},
+		{name: "completed_at", columnType: "TEXT"},
 	}
 	rows, err := db.QueryContext(ctx, `PRAGMA table_info(daemon_git_hook_refresh_intents)`)
 	if err != nil {
-		return fmt.Errorf("git hook refresh intents schema drifted: inspect primary key: %w", err)
+		return fmt.Errorf("git hook refresh intents schema drifted: inspect columns: %w", err)
 	}
-	primaryKey := map[string]int{}
+	columnIndex := 0
 	for rows.Next() {
 		var cid, notNull, pk int
 		var name, columnType string
-		var defaultValue any
+		var defaultValue sql.NullString
 		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
 			rows.Close()
 			return err
 		}
-		primaryKey[strings.ToLower(strings.TrimSpace(name))] = pk
+		if columnIndex >= len(expectedColumns) {
+			rows.Close()
+			return fmt.Errorf("git hook refresh intents schema drifted: unexpected column %s", name)
+		}
+		expected := expectedColumns[columnIndex]
+		if cid != columnIndex || strings.ToLower(strings.TrimSpace(name)) != expected.name {
+			rows.Close()
+			return fmt.Errorf("git hook refresh intents schema drifted: column %d must be %s", columnIndex, expected.name)
+		}
+		if strings.ToUpper(strings.TrimSpace(columnType)) != expected.columnType {
+			rows.Close()
+			return fmt.Errorf("git hook refresh intents schema drifted: column %s type must be %s", expected.name, expected.columnType)
+		}
+		if notNull != expected.notNull {
+			rows.Close()
+			return fmt.Errorf("git hook refresh intents schema drifted: column %s NOT NULL metadata must be %d", expected.name, expected.notNull)
+		}
+		if (expected.defaultValue == nil && defaultValue.Valid) || (expected.defaultValue != nil && (!defaultValue.Valid || strings.TrimSpace(defaultValue.String) != *expected.defaultValue)) {
+			rows.Close()
+			return fmt.Errorf("git hook refresh intents schema drifted: column %s default metadata is invalid", expected.name)
+		}
+		if pk != expected.primaryKey {
+			rows.Close()
+			return fmt.Errorf("git hook refresh intents schema drifted: column %s primary key ordinal must be %d", expected.name, expected.primaryKey)
+		}
+		columnIndex++
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
 	}
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	if primaryKey["project_id"] != 1 || primaryKey["worktree"] != 2 {
-		return fmt.Errorf("git hook refresh intents schema drifted: primary key must be (project_id, worktree)")
-	}
-	for column, ordinal := range primaryKey {
-		if column != "project_id" && column != "worktree" && ordinal != 0 {
-			return fmt.Errorf("git hook refresh intents schema drifted: unexpected primary key column %s", column)
-		}
+	if columnIndex != len(expectedColumns) {
+		return fmt.Errorf("git hook refresh intents schema drifted: found %d columns, want %d", columnIndex, len(expectedColumns))
 	}
 	var tableSQL string
 	if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='daemon_git_hook_refresh_intents'`).Scan(&tableSQL); err != nil {
@@ -706,15 +737,67 @@ func validateGitHookRefreshIntentsSchema(ctx context.Context, db *sql.DB) error 
 			return fmt.Errorf("git hook refresh intents schema drifted: missing %s", name)
 		}
 	}
-	var indexSQL string
-	if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_daemon_git_hook_refresh_intents_pending'`).Scan(&indexSQL); err != nil {
-		return fmt.Errorf("git hook refresh intents schema drifted: missing pending index: %w", err)
+	indexRows, err := db.QueryContext(ctx, `PRAGMA index_list(daemon_git_hook_refresh_intents)`)
+	if err != nil {
+		return fmt.Errorf("git hook refresh intents schema drifted: inspect pending index: %w", err)
 	}
-	normalized := strings.ToLower(strings.Join(strings.Fields(indexSQL), " "))
-	for _, fragment := range []string{"project_id", "requested_generation", "completed_generation"} {
-		if !strings.Contains(normalized, fragment) {
-			return fmt.Errorf("git hook refresh intents schema drifted: pending index missing %s", fragment)
+	indexFound := false
+	for indexRows.Next() {
+		var seq, unique, partial int
+		var name, origin string
+		if err := indexRows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+			indexRows.Close()
+			return err
 		}
+		if name == "idx_daemon_git_hook_refresh_intents_pending" {
+			indexFound = true
+			if unique != 0 || strings.ToLower(strings.TrimSpace(origin)) != "c" || partial != 0 {
+				indexRows.Close()
+				return fmt.Errorf("git hook refresh intents schema drifted: pending index metadata is invalid")
+			}
+		}
+	}
+	if err := indexRows.Err(); err != nil {
+		indexRows.Close()
+		return err
+	}
+	if err := indexRows.Close(); err != nil {
+		return err
+	}
+	if !indexFound {
+		return fmt.Errorf("git hook refresh intents schema drifted: missing pending index")
+	}
+	indexColumns, err := db.QueryContext(ctx, `PRAGMA index_xinfo(idx_daemon_git_hook_refresh_intents_pending)`)
+	if err != nil {
+		return fmt.Errorf("git hook refresh intents schema drifted: inspect pending index columns: %w", err)
+	}
+	expectedIndexColumns := []string{"project_id", "requested_generation", "completed_generation"}
+	indexColumn := 0
+	for indexColumns.Next() {
+		var seq, cid, descending, keyColumn int
+		var name, collation sql.NullString
+		if err := indexColumns.Scan(&seq, &cid, &name, &descending, &collation, &keyColumn); err != nil {
+			indexColumns.Close()
+			return err
+		}
+		if keyColumn == 0 {
+			continue
+		}
+		if indexColumn >= len(expectedIndexColumns) || seq != indexColumn || !name.Valid || strings.ToLower(strings.TrimSpace(name.String)) != expectedIndexColumns[indexColumn] || descending != 0 || !collation.Valid || strings.ToUpper(strings.TrimSpace(collation.String)) != "BINARY" {
+			indexColumns.Close()
+			return fmt.Errorf("git hook refresh intents schema drifted: pending index has invalid ordered column %d", indexColumn)
+		}
+		indexColumn++
+	}
+	if err := indexColumns.Err(); err != nil {
+		indexColumns.Close()
+		return err
+	}
+	if err := indexColumns.Close(); err != nil {
+		return err
+	}
+	if indexColumn != len(expectedIndexColumns) {
+		return fmt.Errorf("git hook refresh intents schema drifted: pending index has %d columns, want %d", indexColumn, len(expectedIndexColumns))
 	}
 	return nil
 }

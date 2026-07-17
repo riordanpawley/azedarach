@@ -2092,6 +2092,57 @@ func TestRuntimeStateStoreGitHookPublicationBindsGenerationToExactWorktree(t *te
 	}
 }
 
+func TestRuntimeStateStoreRetireGitHookRefreshConsumesOnlyAcceptedGenerations(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	projectID := "proj-retire"
+	worktree := "/repo/retired"
+	first, err := store.AcceptGitHookRefresh(ctx, projectID, worktree, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retired, err := store.RetireGitHookRefreshIfIneligible(ctx, projectID, worktree, time.Now().UTC()); err != nil || !retired {
+		t.Fatalf("retired=%t err=%v", retired, err)
+	}
+	if _, found, err := store.GetPendingGitHookRefresh(ctx, projectID, worktree); err != nil || found {
+		t.Fatalf("pending after retirement found=%t err=%v", found, err)
+	}
+	second, err := store.AcceptGitHookRefresh(ctx, projectID, worktree, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.RequestedGeneration != first.RequestedGeneration+1 || second.CompletedGeneration != first.RequestedGeneration {
+		t.Fatalf("post-retirement intent=%+v first=%+v", second, first)
+	}
+	if pending, found, err := store.GetPendingGitHookRefresh(ctx, projectID, worktree); err != nil || !found || pending.RequestedGeneration != second.RequestedGeneration {
+		t.Fatalf("new generation pending=%+v found=%t err=%v", pending, found, err)
+	}
+}
+
+func TestRuntimeStateStoreDoesNotRetireGitHookRefreshForConcurrentRegistration(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	projectID := "proj-register"
+	issueID := "az-register"
+	worktree := "/repo/registered"
+	if _, err := store.AcceptGitHookRefresh(ctx, projectID, worktree, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertWorktreeState(ctx, WorktreeState{
+		ProjectID: projectID, IssueID: issueID, Path: worktree, Branch: "az/register", UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if retired, err := store.RetireGitHookRefreshIfIneligible(ctx, projectID, worktree, time.Now().UTC()); err != nil || retired {
+		t.Fatalf("retired after registration=%t err=%v", retired, err)
+	}
+	if pending, found, err := store.GetPendingGitHookRefresh(ctx, projectID, worktree); err != nil || !found || pending.CompletedGeneration != 0 {
+		t.Fatalf("registered pending intent=%+v found=%t err=%v", pending, found, err)
+	}
+}
+
 func TestRuntimeStateStoreGitStatusRoundTrip(t *testing.T) {
 	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
 	t.Cleanup(func() {

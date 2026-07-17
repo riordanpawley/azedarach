@@ -1546,7 +1546,7 @@ func TestGitHookRefreshAdmissionReplaysOnceAcrossRestart(t *testing.T) {
 		client: git.NewClient(&recordingGitRunner{}, slog.Default()), runtimeStateStore: store,
 		statusRefreshQueue: queueBeforeStop, logger: slog.Default(),
 	}
-	if _, err := beforeStop.queueDurableGitHookRefresh(ctx, projectID, worktree); err != nil {
+	if _, _, err := beforeStop.queueDurableGitHookRefresh(ctx, projectID, worktree); err != nil {
 		t.Fatalf("durable admission: %v", err)
 	}
 	beforeStop.stopGitHookRefreshReconciler()
@@ -1618,6 +1618,166 @@ func TestGitHookRefreshAdmissionReplaysOnceAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestGitHookRefreshIgnoresUnmanagedWorktreeBeforeDurableAdmission(t *testing.T) {
+	ctx := context.Background()
+	projectID := "project-unmanaged"
+	worktree := "/repo/main"
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	var gitCalls atomic.Int32
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		gitCalls.Add(1)
+		return "", fmt.Errorf("unexpected git args: %v", args)
+	}}
+	queue := newReconcileQueue[*git.GitStatus](reconcileQueueConfig{Name: "unmanaged-hook", Workers: 1, Logger: slog.Default()})
+	t.Cleanup(func() { _ = queue.Close() })
+	adapter := &gitServiceAdapter{
+		client: git.NewClient(runner, slog.Default()), runtimeStateStore: store,
+		statusRefreshQueue: queue, logger: slog.Default(),
+	}
+
+	submission, admitted, err := adapter.queueDurableGitHookRefresh(ctx, projectID, worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admitted {
+		t.Fatal("unmanaged hook was durably admitted")
+	}
+	result, err := submission.Wait(ctx)
+	if err != nil || result.Err != nil || !result.Skipped || result.Reason != "ineligible_worktree" {
+		t.Fatalf("unmanaged hook result=%+v wait_err=%v", result, err)
+	}
+	if pending, err := store.ListPendingGitHookRefreshes(ctx); err != nil || len(pending) != 0 {
+		t.Fatalf("unmanaged pending intents=%+v err=%v, want none", pending, err)
+	}
+	if snapshot := queue.snapshot(); len(snapshot.Pending) != 0 || len(snapshot.Running) != 0 {
+		t.Fatalf("unmanaged hook queue=%+v, want empty", snapshot)
+	}
+	if got := gitCalls.Load(); got != 0 {
+		t.Fatalf("unmanaged git calls=%d, want zero", got)
+	}
+}
+
+func TestGitHookRefreshReplayRetiresDeletedWorktreeWithoutGit(t *testing.T) {
+	ctx := context.Background()
+	projectID := "project-deleted"
+	issueID := "az-deleted"
+	worktree := "/repo/az-deleted"
+	store := newGitAdapterStore(t, projectID, issueID, worktree, cleanGitStatus())
+	if _, err := store.AcceptGitHookRefresh(ctx, projectID, worktree, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteWorktreeState(ctx, projectID, issueID); err != nil {
+		t.Fatal(err)
+	}
+	var gitCalls atomic.Int32
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		gitCalls.Add(1)
+		return "", fmt.Errorf("unexpected git args: %v", args)
+	}}
+	queue := newReconcileQueue[*git.GitStatus](reconcileQueueConfig{Name: "deleted-hook-replay", Workers: 1, Logger: slog.Default()})
+	adapter := &gitServiceAdapter{
+		client: git.NewClient(runner, slog.Default()), runtimeStateStore: store,
+		statusRefreshQueue: queue, logger: slog.Default(),
+	}
+	d := &Daemon{
+		gitStatusAdapter:    adapter,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{"root": store},
+	}
+	if err := d.replayPendingGitHookRefreshes(ctx); err != nil {
+		t.Fatal(err)
+	}
+	joined, err := queue.Enqueue(reconcileQueueRequest[*git.GitStatus]{
+		Key: gitStatusRefreshQueueKey(projectID, worktree), Priority: reconcilePriorityManual, Reason: "join-retirement",
+		Work: func(context.Context) (*git.GitStatus, error) {
+			return nil, errors.New("retirement join unexpectedly executed")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := joined.Wait(ctx)
+	if err != nil || result.Err != nil {
+		t.Fatalf("deleted replay result err=%v work_err=%v", err, result.Err)
+	}
+	adapter.waitForGitHookRefreshContinuations()
+	if pending, err := store.ListPendingGitHookRefreshes(ctx); err != nil || len(pending) != 0 {
+		t.Fatalf("deleted replay pending intents=%+v err=%v, want none", pending, err)
+	}
+	if got := gitCalls.Load(); got != 0 {
+		t.Fatalf("deleted replay git calls=%d, want zero", got)
+	}
+	if err := queue.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	secondQueue := newReconcileQueue[*git.GitStatus](reconcileQueueConfig{Name: "deleted-hook-second-replay", Workers: 1, Logger: slog.Default()})
+	adapter.statusRefreshQueue = secondQueue
+	if err := d.replayPendingGitHookRefreshes(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot := secondQueue.snapshot(); len(snapshot.Pending) != 0 || len(snapshot.Running) != 0 {
+		t.Fatalf("deleted second replay queue=%+v, want empty", snapshot)
+	}
+	if err := secondQueue.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGitHookRefreshReplayRetiresProjectedDeletedWorktreeAfterOneProbe(t *testing.T) {
+	ctx := context.Background()
+	projectID := "project-stale-deleted"
+	issueID := "az-stale-deleted"
+	worktree := filepath.Join(t.TempDir(), "deleted-worktree")
+	store := newGitAdapterStore(t, projectID, issueID, worktree, cleanGitStatus())
+	if _, err := store.AcceptGitHookRefresh(ctx, projectID, worktree, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	var gitCalls atomic.Int32
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		gitCalls.Add(1)
+		return "", errors.New("worktree disappeared")
+	}}
+	queue := newReconcileQueue[*git.GitStatus](reconcileQueueConfig{Name: "stale-deleted-hook-replay", Workers: 1, Logger: slog.Default()})
+	adapter := &gitServiceAdapter{
+		client: git.NewClient(runner, slog.Default()), runtimeStateStore: store,
+		statusRefreshQueue: queue, logger: slog.Default(),
+	}
+	d := &Daemon{
+		gitStatusAdapter:    adapter,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{"root": store},
+	}
+	if err := d.replayPendingGitHookRefreshes(ctx); err != nil {
+		t.Fatal(err)
+	}
+	joined, err := queue.Enqueue(reconcileQueueRequest[*git.GitStatus]{
+		Key: gitStatusRefreshQueueKey(projectID, worktree), Priority: reconcilePriorityManual, Reason: "join-stale-retirement",
+		Work: func(context.Context) (*git.GitStatus, error) {
+			return nil, errors.New("stale retirement join unexpectedly executed")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := joined.Wait(ctx)
+	if err != nil || result.Err != nil {
+		t.Fatalf("stale deleted replay result err=%v work_err=%v", err, result.Err)
+	}
+	adapter.waitForGitHookRefreshContinuations()
+	if pending, err := store.ListPendingGitHookRefreshes(ctx); err != nil || len(pending) != 0 {
+		t.Fatalf("stale deleted pending intents=%+v err=%v, want none", pending, err)
+	}
+	if _, found, err := store.GetWorktreeStateByPath(ctx, projectID, worktree); err != nil || found {
+		t.Fatalf("stale deleted projection found=%t err=%v", found, err)
+	}
+	if got := gitCalls.Load(); got != 1 {
+		t.Fatalf("stale deleted git calls=%d, want one terminal probe", got)
+	}
+	if err := queue.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGitHookRefreshContinuationCannotRestartAfterShutdown(t *testing.T) {
 	adapter := &gitServiceAdapter{}
 	if _, ok := adapter.beginGitHookRefreshContinuation(); !ok {
@@ -1660,11 +1820,11 @@ func TestGitHookRefreshAcceptedDuringRunningJobIsRescheduled(t *testing.T) {
 		statusRefreshQueue: queue, logger: slog.Default(),
 		onStatusUpdate: func(context.Context, string, string, string, *git.GitStatus) { publications <- struct{}{} },
 	}
-	if _, err := adapter.queueDurableGitHookRefresh(ctx, projectID, worktree); err != nil {
+	if _, _, err := adapter.queueDurableGitHookRefresh(ctx, projectID, worktree); err != nil {
 		t.Fatal(err)
 	}
 	<-firstEnrichmentEntered
-	if _, err := adapter.queueDurableGitHookRefresh(ctx, projectID, worktree); err != nil {
+	if _, _, err := adapter.queueDurableGitHookRefresh(ctx, projectID, worktree); err != nil {
 		t.Fatal(err)
 	}
 	close(releaseFirstEnrichment)
@@ -1688,7 +1848,7 @@ func TestGitHookRefreshRetriesTransientFailureInSameDaemon(t *testing.T) {
 	ctx := context.Background()
 	projectID := "project-retry"
 	issueID := "az-retry"
-	worktree := "/tmp/az-retry"
+	worktree := t.TempDir()
 	store := newGitAdapterStore(t, projectID, issueID, worktree, cleanGitStatus())
 	var statusCalls atomic.Int32
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
@@ -1712,7 +1872,7 @@ func TestGitHookRefreshRetriesTransientFailureInSameDaemon(t *testing.T) {
 		},
 		onStatusUpdate: func(context.Context, string, string, string, *git.GitStatus) { published <- struct{}{} },
 	}
-	if _, err := adapter.queueDurableGitHookRefresh(ctx, projectID, worktree); err != nil {
+	if _, _, err := adapter.queueDurableGitHookRefresh(ctx, projectID, worktree); err != nil {
 		t.Fatal(err)
 	}
 	if attempt := <-retryObserved; attempt != 1 {

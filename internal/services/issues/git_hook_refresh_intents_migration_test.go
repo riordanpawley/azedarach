@@ -117,7 +117,7 @@ func TestGitHookRefreshIntentsMigrationRejectsIndexDrift(t *testing.T) {
 	_ = reopened.CloseDB()
 }
 
-func TestGitHookRefreshIntentsMigrationRejectsPrimaryKeyAndCheckDrift(t *testing.T) {
+func TestGitHookRefreshIntentsMigrationRejectsColumnConstraintAndIndexDrift(t *testing.T) {
 	canonical, err := loadMigrationSQL("migrations/0053_git_hook_refresh_intents.sql")
 	if err != nil {
 		t.Fatal(err)
@@ -128,11 +128,23 @@ func TestGitHookRefreshIntentsMigrationRejectsPrimaryKeyAndCheckDrift(t *testing
 		new  string
 	}{
 		{name: "primary key", old: "PRIMARY KEY (project_id, worktree)", new: "UNIQUE (project_id, worktree)"},
+		{name: "project id type", old: "project_id TEXT NOT NULL", new: "project_id BLOB NOT NULL"},
+		{name: "requested generation nullable", old: "requested_generation INTEGER NOT NULL", new: "requested_generation INTEGER"},
+		{name: "completed generation type", old: "completed_generation INTEGER NOT NULL", new: "completed_generation TEXT NOT NULL"},
+		{name: "completed generation nullable", old: "completed_generation INTEGER NOT NULL", new: "completed_generation INTEGER"},
+		{name: "completed generation missing default", old: " DEFAULT 0 CHECK (completed_generation >= 0)", new: " CHECK (completed_generation >= 0)"},
+		{name: "completed generation wrong default", old: "DEFAULT 0 CHECK (completed_generation >= 0)", new: "DEFAULT 1 CHECK (completed_generation >= 0)"},
+		{name: "requested at nullable", old: "requested_at TEXT NOT NULL", new: "requested_at TEXT"},
+		{name: "completed at not null", old: "completed_at TEXT,", new: "completed_at TEXT NOT NULL,"},
 		{name: "project id check", old: "CHECK (trim(project_id) <> '')", new: "CHECK (1)"},
 		{name: "worktree check", old: "CHECK (trim(worktree) <> '')", new: "CHECK (1)"},
 		{name: "requested generation check", old: "CHECK (requested_generation > 0)", new: "CHECK (1)"},
 		{name: "completed generation check", old: "CHECK (completed_generation >= 0)", new: "CHECK (1)"},
 		{name: "generation ordering check", old: "CHECK (completed_generation <= requested_generation)", new: "CHECK (1)"},
+		{name: "pending index order", old: "(project_id, requested_generation, completed_generation)", new: "(project_id, completed_generation, requested_generation)"},
+		{name: "pending index extra column", old: "(project_id, requested_generation, completed_generation)", new: "(project_id, requested_generation, completed_generation, worktree)"},
+		{name: "pending index descending", old: "requested_generation, completed_generation", new: "requested_generation DESC, completed_generation"},
+		{name: "pending index collation", old: "(project_id, requested_generation", new: "(project_id COLLATE NOCASE, requested_generation"},
 	}
 	for _, fixture := range fixtures {
 		t.Run(fixture.name, func(t *testing.T) {

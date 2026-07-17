@@ -98,6 +98,52 @@ func (s *RuntimeStateStore) AcceptGitHookRefresh(ctx context.Context, projectID,
 	return intent, nil
 }
 
+// RetireGitHookRefreshIfIneligible marks every currently accepted generation
+// complete without publication only while the same transaction can prove that
+// no issue-owned worktree projection exists. A concurrent registration wins
+// the predicate and leaves the intent pending for normal publication.
+func (s *RuntimeStateStore) RetireGitHookRefreshIfIneligible(ctx context.Context, projectID, worktree string, completedAt time.Time) (bool, error) {
+	projectID = normalizedProjectID(projectID)
+	worktree = strings.TrimSpace(worktree)
+	if projectID == "" || worktree == "" {
+		return false, fmt.Errorf("retire git hook refresh requires project and worktree")
+	}
+	if completedAt.IsZero() {
+		completedAt = time.Now().UTC()
+	}
+	completedAt = completedAt.UTC()
+	var retired bool
+	if err := s.withRetryingWriteLock(ctx, "retire_git_hook_refresh", func(writeCtx context.Context) error {
+		db, err := s.dbHandle()
+		if err != nil {
+			return err
+		}
+		result, err := db.ExecContext(writeCtx, `UPDATE `+gitHookRefreshIntentTable+`
+			SET completed_generation=requested_generation, completed_at=?
+			WHERE project_id=? AND worktree=?
+			  AND completed_generation < requested_generation
+			  AND NOT EXISTS (
+				SELECT 1 FROM `+worktreeStateTable+`
+				WHERE project_id=? AND path=? AND trim(issue_id) <> ''
+			  )`, completedAt.Format(time.RFC3339Nano), projectID, worktree, projectID, worktree)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected > 1 {
+			return fmt.Errorf("retire git hook refresh affected %d intents", affected)
+		}
+		retired = affected == 1
+		return nil
+	}); err != nil {
+		return false, fmt.Errorf("retire git hook refresh %s/%s: %w", projectID, worktree, err)
+	}
+	return retired, nil
+}
+
 // PersistGitHookRefreshPublication atomically persists the Git status snapshot
 // and advances the durable publication checkpoint for generation. The returned
 // boolean is true only for the transaction that first completes that generation.
