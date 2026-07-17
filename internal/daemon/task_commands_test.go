@@ -5429,7 +5429,7 @@ func TestTaskCloseCommandIntegrationIgnoresDuplicateIssueTargetWorktreeFromOther
 	}
 }
 
-func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved(t *testing.T) {
+func TestTaskCloseCommandRetryRepairsProjectionAndReleasesLeaseAfterIntegratedWorktreeWasRemoved(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	projectID := "proj-close-integrate-cleanup-fail-retry"
@@ -5448,6 +5448,13 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 	})
 	if err != nil {
 		t.Fatalf("create task: %v", err)
+	}
+	if _, err := issuesClient.ClaimOwnershipWithRuntime(ctx, projectID, taskID, issues.OwnershipClaimParams{
+		OwnerID:   "worker-a",
+		OwnerKind: "agent",
+		Purpose:   domain.CoordinationLeaseExecution,
+	}); err != nil {
+		t.Fatalf("claim execution lease: %v", err)
 	}
 	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
 	if err := os.MkdirAll(sourceWorktree, 0o755); err != nil {
@@ -5663,6 +5670,9 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 	if task.Status != domain.StatusInReview {
 		t.Fatalf("task status after failed close = %s, want %s", task.Status, domain.StatusInReview)
 	}
+	if task.Ownership == nil || task.Ownership.OwnerID != "worker-a" {
+		t.Fatalf("task ownership after failed close = %+v, want execution lease preserved", task.Ownership)
+	}
 	receipts, err := issuesClient.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{
 		Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted},
 	})
@@ -5716,6 +5726,9 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 	}
 	if closed.Status != domain.StatusDone {
 		t.Fatalf("task status after retry = %s, want %s", closed.Status, domain.StatusDone)
+	}
+	if closed.Ownership != nil || len(closed.CoordinationLeases) != 0 {
+		t.Fatalf("closed task leases = %+v ownership = %+v, want terminal retry to release execution lease", closed.CoordinationLeases, closed.Ownership)
 	}
 	joined := strings.Join(commands, "\n")
 	if got := strings.Count(joined, "merge --no-edit "+sourceBranch); got != 1 {
