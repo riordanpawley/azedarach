@@ -2042,6 +2042,54 @@ func TestProjectOrchestrationSnapshotRetriesAcrossPostExportInteractionResolutio
 	}
 }
 
+func TestProjectOrchestrationSnapshotRepreparesCandidateInsertedAfterPreparation(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	initialID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Initial", Description: "Executable", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	preparedIDs := make([][]string, 0, 2)
+	insertedID := ""
+	d.orchestrationSnapshotPrepared = func(_ uint64, issueIDs []string) {
+		preparedIDs = append(preparedIDs, append([]string(nil), issueIDs...))
+		if insertedID != "" {
+			return
+		}
+		insertedID, err = client.Create(ctx, issues.CreateTaskParams{Title: "Inserted", Description: "Added after preparation", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	snapshot, err := (daemonOrchestrationAuthority{daemon: d}).Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preparedIDs) != 2 {
+		t.Fatalf("preparation attempts = %d, want initial and post-insertion attempts", len(preparedIDs))
+	}
+	if !slices.Contains(preparedIDs[0], initialID) || slices.Contains(preparedIDs[0], insertedID) {
+		t.Fatalf("initial prepared candidates = %v, want only initial %s before insertion %s", preparedIDs[0], initialID, insertedID)
+	}
+	if !slices.Contains(preparedIDs[1], initialID) || !slices.Contains(preparedIDs[1], insertedID) {
+		t.Fatalf("retried prepared candidates = %v, want %s and inserted %s", preparedIDs[1], initialID, insertedID)
+	}
+	if got := candidateClass(snapshot.Candidates, insertedID); got != "runnable" {
+		t.Fatalf("inserted candidate class = %q, want runnable after re-preparation", got)
+	}
+	checkpoint, err := client.ProjectionSourceCheckpoint(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.ProjectionRevision != checkpoint {
+		t.Fatalf("accepted projection revision = %d, want final prepared checkpoint %d", snapshot.ProjectionRevision, checkpoint)
+	}
+}
+
 func TestProjectOrchestrationSnapshotRetriesPostExportReviewEvidenceMutation(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")

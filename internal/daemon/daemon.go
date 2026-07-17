@@ -212,6 +212,7 @@ type Daemon struct {
 	orchestrationSnapshotBuild           orchestrationSnapshotBuilder
 	snapshotAdmissionContext             func(context.Context) (context.Context, context.CancelFunc)
 	orchestrationProjectionExported      func()
+	orchestrationSnapshotPrepared        func(uint64, []string)
 	orchestrationSnapshotAuxiliaryRead   func(context.Context) error
 	taskGraphOperationList               func(context.Context, daemonops.Query) ([]daemonops.Record, error)
 	taskGraphUnresolvedInteractionIDs    func(context.Context, string) (map[string]struct{}, error)
