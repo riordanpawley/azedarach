@@ -858,32 +858,33 @@ type Client struct {
 	walMu          sync.Mutex
 	lastWALCheckAt time.Time
 
-	stateModelV2MigrationFailureHook   func(stage string) error
-	boardViewsMigrationFailureHook     func(stage string) error
-	humanAuthorityMigrationFailureHook func(stage string) error
-	mailboxProjectionFailureHook       func(stage string) error
+	stateModelV2MigrationFailureHook     func(stage string) error
+	boardViewsMigrationFailureHook       func(stage string) error
+	humanAuthorityMigrationFailureHook   func(stage string) error
+	mailboxProjectionFailureHook         func(stage string) error
 	mailboxReplayRepairFailureHook     func(stage string) error
-	projectionDeltaChecksumRepairHook  func(stage string) error
-	projectionDeltaReadHook            func()
+	projectionDeltaChecksumRepairHook    func(stage string) error
+	projectionDeltaReadHook              func()
 	projectionWatchBeforeSubscribeHook func()
 	projectionNotifierBeforeCloseHook  func()
 	projectionNotifierAfterClearHook   func()
 	projectionSnapshotSourceRowsHook   func(projectionDeltaRows) projectionDeltaRows
-	projectionWatchActive              atomic.Int64
-	projectionWatchStarted             atomic.Uint64
-	projectionWatchCompleted           atomic.Uint64
+	projectionWatchActive                atomic.Int64
+	projectionWatchStarted               atomic.Uint64
+	projectionWatchCompleted             atomic.Uint64
 	corruption                         atomic.Pointer[sqliteCorruptionState]
 	projectionNotifierMu               sync.Mutex
 	projectionNotifier                 projectionDeltaNotifier
 	projectionNotifierClose            *projectionDeltaNotifierCloseState
 	projectionNotifierSubscriptions    map[*projectionDeltaSubscription]struct{}
 	projectionNotifierWG               sync.WaitGroup
-	decisionOutboxMigrationFailureHook func(stage string) error
-	decisionIdempotencyFailureHook     func(stage string) error
-	eventSearchMigrationFailureHook    func(stage string) error
-	requireExistingDB                  bool
-	interactionMu                      sync.RWMutex
-	interactionCache                   map[string]domain.InteractionRequest
+	decisionOutboxMigrationFailureHook   func(stage string) error
+	decisionIdempotencyFailureHook       func(stage string) error
+	eventSearchMigrationFailureHook      func(stage string) error
+	legacyAttachmentMigrationFailureHook func(stage string) error
+	requireExistingDB                    bool
+	interactionMu                        sync.RWMutex
+	interactionCache                     map[string]domain.InteractionRequest
 }
 
 // ClientOption configures optional issue-store behavior while preserving

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/testisolation"
 )
 
@@ -29,7 +30,7 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var beforeIssues, beforeCustom, beforeSessionIntents, beforeRetirableWorkers, beforeDecisions, beforeDecisionAudits int
+			var beforeIssues, beforeCustom, beforeSessionIntents, beforeRetirableWorkers, beforeDecisions, beforeDecisionAudits, beforeAttachments int
 			if err = beforeDB.QueryRow(`SELECT COUNT(*) FROM issues`).Scan(&beforeIssues); err != nil {
 				t.Fatal(err)
 			}
@@ -50,6 +51,9 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			}
 			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM decisions`).Scan(&beforeDecisions)
 			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM decision_audit_log`).Scan(&beforeDecisionAudits)
+			if err = beforeDB.QueryRow(`SELECT COUNT(*) FROM issue_attachments`).Scan(&beforeAttachments); err != nil {
+				t.Fatal(err)
+			}
 			_ = beforeDB.Close()
 
 			client := NewClientAtPath(path, slog.Default())
@@ -73,6 +77,9 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 				t.Fatal(err)
 			}
 			if err = validateGitHookRefreshIntentsSchema(ctx, db); err != nil {
+				t.Fatal(err)
+			}
+			if err = validateLegacyAttachmentBlobForwardSchema(ctx, db); err != nil {
 				t.Fatal(err)
 			}
 			var checksum string
@@ -100,6 +107,9 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			}
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, gitHookRefreshIntentsMigrationID).Scan(&checksum); err != nil || checksum != "7eecd212c9b9a5907c425870ee861571d7654929d77067a1fc50c2e857c3335c" {
 				t.Fatalf("git hook refresh intents checksum=%q err=%v", checksum, err)
+			}
+			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, legacyAttachmentBlobForwardMigrationID).Scan(&checksum); err != nil || checksum != legacyAttachmentMigrationChecksum {
+				t.Fatalf("legacy attachment forward checksum=%q err=%v", checksum, err)
 			}
 			if !rootedBootstrapTableExists(t, db) {
 				t.Fatal("rooted bootstrap acknowledgement table missing after clone migration")
@@ -136,7 +146,7 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if _, err = client.ExportProjection(ctx, projectIDs[0]); err != nil {
 				t.Fatal(err)
 			}
-			var afterIssues, afterCustom, afterSessionIntents, afterDecisions, afterDecisionAudits int
+			var afterIssues, afterCustom, afterSessionIntents, afterDecisions, afterDecisionAudits, afterAttachments int
 			if err = db.QueryRow(`SELECT COUNT(*) FROM issues`).Scan(&afterIssues); err != nil {
 				t.Fatal(err)
 			}
@@ -152,11 +162,22 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = db.QueryRow(`SELECT COUNT(*) FROM decision_audit_log`).Scan(&afterDecisionAudits); err != nil {
 				t.Fatal(err)
 			}
-			if beforeIssues != afterIssues || beforeCustom != afterCustom || beforeDecisions != afterDecisions || beforeDecisionAudits != afterDecisionAudits {
-				t.Fatalf("row preservation issues=%d/%d custom_views=%d/%d decisions=%d/%d decision_audits=%d/%d", beforeIssues, afterIssues, beforeCustom, afterCustom, beforeDecisions, afterDecisions, beforeDecisionAudits, afterDecisionAudits)
+			if err = db.QueryRow(`SELECT COUNT(*) FROM issue_attachments`).Scan(&afterAttachments); err != nil {
+				t.Fatal(err)
+			}
+			if beforeIssues != afterIssues || beforeCustom != afterCustom || beforeDecisions != afterDecisions || beforeDecisionAudits != afterDecisionAudits || beforeAttachments != afterAttachments {
+				t.Fatalf("row preservation issues=%d/%d custom_views=%d/%d decisions=%d/%d decision_audits=%d/%d attachments=%d/%d", beforeIssues, afterIssues, beforeCustom, afterCustom, beforeDecisions, afterDecisions, beforeDecisionAudits, afterDecisionAudits, beforeAttachments, afterAttachments)
 			}
 			if want := beforeSessionIntents - beforeRetirableWorkers; afterSessionIntents != want {
 				t.Fatalf("session intent convergence before=%d retirable_workers=%d after=%d want=%d", beforeSessionIntents, beforeRetirableWorkers, afterSessionIntents, want)
+			}
+			var attachmentIssueID string
+			if err = db.QueryRow(`SELECT issue_id FROM issue_attachments ORDER BY issue_id LIMIT 1`).Scan(&attachmentIssueID); err == nil {
+				if _, err = attachment.NewService(filepath.Dir(path), slog.Default()).List(ctx, attachmentIssueID); err != nil {
+					t.Fatalf("active read-only attachment list after migration: %v", err)
+				}
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				t.Fatal(err)
 			}
 			if err = client.CloseDB(); err != nil {
 				t.Fatal(err)
@@ -192,6 +213,9 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			}
 			if err = validateMailboxObservationReplayRepair(ctx, reopenedDB); err != nil {
 				t.Fatal(err)
+			}
+			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, legacyAttachmentBlobForwardMigrationID, legacyAttachmentMigrationChecksum).Scan(&ledgerRows); err != nil || ledgerRows != 1 {
+				t.Fatalf("legacy attachment ledger rows after reopen=%d err=%v", ledgerRows, err)
 			}
 			_ = reopened.CloseDB()
 		})
