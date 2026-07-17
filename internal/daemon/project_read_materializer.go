@@ -23,12 +23,91 @@ import (
 
 const projectReadMaterializerBatchSize = 500
 
+type suppressSynchronousProjectReadRuntimeRefreshKey struct{}
+type projectReadUpdateWaitHookKey struct{}
+
+type projectReadUpdateLock struct {
+	once   sync.Once
+	token  chan struct{}
+	mu     sync.RWMutex
+	holder string
+}
+
+func (l *projectReadUpdateLock) init() {
+	l.once.Do(func() {
+		l.token = make(chan struct{}, 1)
+		l.token <- struct{}{}
+	})
+}
+
+func (l *projectReadUpdateLock) currentHolder() string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.holder
+}
+
+func (l *projectReadUpdateLock) acquire(ctx context.Context, operation string) (string, error) {
+	l.init()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-l.token:
+		if err := ctx.Err(); err != nil {
+			l.token <- struct{}{}
+			return "", err
+		}
+		l.mu.Lock()
+		l.holder = operation
+		l.mu.Unlock()
+		return "", nil
+	default:
+	}
+	holder := l.currentHolder()
+	if hook, _ := ctx.Value(projectReadUpdateWaitHookKey{}).(func(string, string)); hook != nil {
+		hook(operation, holder)
+	}
+	select {
+	case <-ctx.Done():
+		return holder, ctx.Err()
+	case <-l.token:
+		if err := ctx.Err(); err != nil {
+			l.token <- struct{}{}
+			return holder, err
+		}
+		l.mu.Lock()
+		l.holder = operation
+		l.mu.Unlock()
+		return holder, nil
+	}
+}
+
+func (l *projectReadUpdateLock) release() {
+	l.mu.Lock()
+	l.holder = ""
+	l.mu.Unlock()
+	l.token <- struct{}{}
+}
+
+func withProjectReadUpdateWaitHookForTest(ctx context.Context, hook func(string, string)) context.Context {
+	return context.WithValue(ctx, projectReadUpdateWaitHookKey{}, hook)
+}
+
+func withoutSynchronousProjectReadRuntimeRefresh(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, suppressSynchronousProjectReadRuntimeRefreshKey{}, true)
+}
+
 // projectReadMaterializer is a disposable daemon-local read model. Its cursor
 // is the upstream transitional delivery position; it is not an authority
 // revision and is never written back to the project database.
 type projectReadMaterializer struct {
 	mu          sync.RWMutex
-	updateMu    sync.Mutex
+	updateMu    projectReadUpdateLock
 	projectID   string
 	authority   *ProjectionDeltaAuthority
 	hydrate     func(context.Context, []domain.Task) ([]domain.Task, error)
@@ -87,12 +166,31 @@ func newProjectReadMaterializer(projectID string, authority *ProjectionDeltaAuth
 	return &projectReadMaterializer{projectID: strings.TrimSpace(projectID), authority: authority, hydrate: hydrate, canonical: map[string]domain.Task{}, tasks: map[string]domain.Task{}, worktrees: map[string]git.Worktree{}}
 }
 
+func (m *projectReadMaterializer) lockUpdate(ctx context.Context, fallbackOperation string) (func(), error) {
+	operation := runtimeProjectionWriterOperationFromContext(ctx, fallbackOperation)
+	holderOperation := m.updateMu.currentHolder()
+	ctx, endSpan := latencytrace.StartSpanWithEndAttributes(ctx, "daemon", "runtime_projection.writer_refresh_admission",
+		"refresh.waiter_operation", operation,
+		"refresh.holder_operation", holderOperation,
+	)
+	holderOperation, err := m.updateMu.acquire(ctx, operation)
+	if err != nil {
+		endSpan(err, "refresh.holder_operation", holderOperation)
+		return nil, err
+	}
+	endSpan(nil, "refresh.holder_operation", holderOperation)
+	return m.updateMu.release, nil
+}
+
 func (m *projectReadMaterializer) bootstrap(ctx context.Context) error {
 	if m == nil {
 		return errors.New("project read materializer authority unavailable")
 	}
-	m.updateMu.Lock()
-	defer m.updateMu.Unlock()
+	unlock, err := m.lockUpdate(ctx, "project_read.bootstrap")
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if m.authority == nil {
 		return errors.New("project read materializer authority unavailable")
 	}
@@ -199,8 +297,11 @@ func projectionVerificationRequiresRecovery(kind protocol.ProjectionVerification
 }
 
 func (m *projectReadMaterializer) apply(ctx context.Context, batch protocol.ProjectionDeltaBatch) error {
-	m.updateMu.Lock()
-	defer m.updateMu.Unlock()
+	unlock, err := m.lockUpdate(ctx, "project_read.delta_apply")
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	expected := m.snapshotMetadata().DeliveryCursor
 	if err := protocol.VerifyProjectionDeltaBatch(batch, expected, issueProjectionProjector()); err != nil {
 		return err
@@ -388,8 +489,11 @@ func (m *projectReadMaterializer) snapshotIssues(issueIDs map[string]struct{}) (
 }
 
 func (m *projectReadMaterializer) refreshRuntime(ctx context.Context, issueIDs []string) error {
-	m.updateMu.Lock()
-	defer m.updateMu.Unlock()
+	unlock, err := m.lockUpdate(ctx, "project_read.runtime_refresh")
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	wanted := make(map[string]struct{}, len(issueIDs))
 	for _, issueID := range issueIDs {
 		if issueID = strings.TrimSpace(issueID); issueID != "" {
@@ -431,8 +535,11 @@ func (m *projectReadMaterializer) refreshRuntime(ctx context.Context, issueIDs [
 }
 
 func (m *projectReadMaterializer) replaceWorktrees(worktrees map[string]git.Worktree) {
-	m.updateMu.Lock()
-	defer m.updateMu.Unlock()
+	unlock, err := m.lockUpdate(context.Background(), "project_read.worktree_replace")
+	if err != nil {
+		return
+	}
+	defer unlock()
 	m.mu.Lock()
 	runtimeKeys := m.runtimeKeys
 	for issueID, worktree := range m.worktrees {
@@ -449,8 +556,11 @@ func (m *projectReadMaterializer) replaceWorktrees(worktrees map[string]git.Work
 }
 
 func (m *projectReadMaterializer) replaceWorktreesForIssues(worktrees map[string]*git.Worktree) {
-	m.updateMu.Lock()
-	defer m.updateMu.Unlock()
+	unlock, err := m.lockUpdate(context.Background(), "project_read.worktree_replace_issues")
+	if err != nil {
+		return
+	}
+	defer unlock()
 	m.mu.Lock()
 	runtimeKeys := m.runtimeKeys
 	for issueID, worktree := range worktrees {
@@ -727,6 +837,9 @@ func (d *Daemon) configureProjectReadMaterializer(materializer *projectReadMater
 }
 
 func (d *Daemon) refreshProjectReadRuntime(ctx context.Context, projectID string, issueIDs ...string) {
+	if suppressed, _ := ctx.Value(suppressSynchronousProjectReadRuntimeRefreshKey{}).(bool); suppressed {
+		return
+	}
 	if err := d.refreshProjectReadRuntimeForIssues(ctx, projectID, issueIDs); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Warn("refresh project read runtime materialization", "project_id", d.canonicalProjectID(projectID), "issue_ids", uniqueStrings(issueIDs), "error", err)
 	}
