@@ -338,7 +338,7 @@ jaeger_schedule_published_expiry() {
 
 jaeger_schedule_published_expiry_locked() {
   local engine="$1" name="$2" expires="${JAEGER_PUBLISHED_EXPIRES_AT:-0}"
-  local record="${JAEGER_PUBLISHED_ENDPOINT_RECORD:-}" target worker_dir worker_key slot pid worker_shell nonce
+  local record="${JAEGER_PUBLISHED_ENDPOINT_RECORD:-}" target worker_dir worker_key slot pid worker_shell nonce initialized
   [[ "$expires" =~ ^[0-9]+$ ]] && (( expires > 0 )) || return 0
   [[ "${AZEDARACH_JAEGER_DISABLE_EXPIRY_WORKER:-0}" != "1" ]] || return 0
   target="$(jaeger_endpoint_file)" || return 1
@@ -374,6 +374,16 @@ jaeger_schedule_published_expiry_locked() {
   nohup "$worker_shell" "$jaeger_script_dir/jaeger-local.sh" expiry-worker \
     "$engine" "$name" "$expires" "$record" "$slot" "$nonce" </dev/null >/dev/null 2>&1 &
   pid=$!
+  if [[ -n "${AZEDARACH_JAEGER_TEST_WORKER_INITIALIZED_FIFO:-}" ]]; then
+    if [[ ! -p "$AZEDARACH_JAEGER_TEST_WORKER_INITIALIZED_FIFO" ]] ||
+      ! IFS= read -r initialized <"$AZEDARACH_JAEGER_TEST_WORKER_INITIALIZED_FIFO" ||
+      [[ "$initialized" != "initialized" ]]; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      jaeger_abort_fallback_expiry_locked "$engine" "$name" "$expires" "$record" "$slot"
+      return 1
+    fi
+  fi
   if jaeger_wait_expiry_ready "$slot" "$engine" "$name" "$expires" "$record" "$nonce"; then
     return 0
   fi
@@ -520,6 +530,10 @@ jaeger_expiry_worker() {
   ready_tmp="$slot/ready.tmp.$$"
   printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$$" "$start" "$nonce" "$engine" "$name" "$expires" "$record" "$slot" >"$ready_tmp" || return 1
   mv -f "$ready_tmp" "$slot/ready" || return 1
+  if [[ -n "${AZEDARACH_JAEGER_TEST_WORKER_INITIALIZED_FIFO:-}" ]]; then
+    [[ -p "$AZEDARACH_JAEGER_TEST_WORKER_INITIALIZED_FIFO" ]] || return 1
+    printf '%s\n' initialized >"$AZEDARACH_JAEGER_TEST_WORKER_INITIALIZED_FIFO" || return 1
+  fi
   if [[ -n "${AZEDARACH_JAEGER_TEST_EXPIRY_READY_FIFO:-}" ||
     -n "${AZEDARACH_JAEGER_TEST_EXPIRY_CONTINUE_FIFO:-}" ]]; then
     jaeger_test_barrier "${AZEDARACH_JAEGER_TEST_EXPIRY_READY_FIFO:-}" \

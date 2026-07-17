@@ -12,6 +12,50 @@ test_failure() {
 
 trap 'test_failure "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
+try_nonblocking_flock() {
+  local lock="$1" perl_bin
+  perl_bin="$(command -v "${AZEDARACH_JAEGER_PERL:-perl}")" || return 70
+  "$perl_bin" -MFcntl=:flock -MErrno=EWOULDBLOCK,EAGAIN -e '
+    use strict;
+    use warnings;
+    my ($lock) = @ARGV;
+    open my $fh, ">>", $lock or exit 70;
+    exit 0 if flock($fh, LOCK_EX | LOCK_NB);
+    my $errno = 0 + $!;
+    exit(($errno == EWOULDBLOCK || $errno == EAGAIN) ? 75 : 71);
+  ' "$lock"
+}
+
+assert_flock_blocked() {
+  local lock="$1" label="$2" probe_status
+  if try_nonblocking_flock "$lock"; then
+    probe_status=0
+  else
+    probe_status=$?
+  fi
+  case "$probe_status" in
+    75) return 0 ;;
+    0) echo "$label lock was acquirable while its owner was paused" >&2 ;;
+    *) echo "$label nonblocking lock probe failed with status $probe_status" >&2 ;;
+  esac
+  return 1
+}
+
+assert_flock_available() {
+  local lock="$1" label="$2" probe_status
+  if try_nonblocking_flock "$lock"; then
+    return 0
+  else
+    probe_status=$?
+  fi
+  if [[ "$probe_status" == "75" ]]; then
+    echo "$label lock remained held after owner release" >&2
+  else
+    echo "$label nonblocking lock probe failed with status $probe_status" >&2
+  fi
+  return 1
+}
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo_root/scripts/jaeger-local.sh"
 
@@ -278,9 +322,11 @@ IFS= read -r fallback_lock_signal <"$fallback_lock_acquired"
   printf '%s\n' "$?" >"$fallback_second_result"
 ) &
 fallback_second_pid=$!
+assert_flock_blocked "$AZEDARACH_JAEGER_LIFECYCLE_LOCK_FILE" "fallback lifecycle"
 printf '%s\n' continue >"$fallback_lock_continue"
 wait "$fallback_first_pid"
 wait "$fallback_second_pid"
+assert_flock_available "$AZEDARACH_JAEGER_LIFECYCLE_LOCK_FILE" "fallback lifecycle"
 [[ "$(<"$fallback_first_result")" == "0" && "$(<"$fallback_second_result")" == "0" ]]
 [[ "$(grep -c '^run ' "$stateful_calls")" == "1" ]]
 awk '
@@ -320,9 +366,11 @@ IFS= read -r primary_lock_signal <"$primary_lock_acquired"
   printf '%s\n' "$?" >"$primary_second_result"
 ) &
 primary_second_pid=$!
+assert_flock_blocked "$AZEDARACH_JAEGER_LIFECYCLE_LOCK_FILE" "primary lifecycle"
 printf '%s\n' continue >"$primary_lock_continue"
 wait "$primary_first_pid"
 wait "$primary_second_pid"
+assert_flock_available "$AZEDARACH_JAEGER_LIFECYCLE_LOCK_FILE" "primary lifecycle"
 [[ "$(<"$primary_first_result")" == "0" && "$(<"$primary_second_result")" == "0" ]]
 [[ "$(grep -c '^run ' "$stateful_calls")" == "1" ]]
 awk '
@@ -402,8 +450,10 @@ blocked_pid=$!
 IFS= read -r blocked_signal <"$blocked_entered"
 [[ "$blocked_signal" == "ready" ]]
 printf '%s\n%s\n' 88888888 replacement-looking >"${AZEDARACH_JAEGER_ENDPOINT_FILE}.state-lock"
+assert_flock_blocked "${AZEDARACH_JAEGER_ENDPOINT_FILE}.state-lock" "endpoint mutation"
 jaeger_endpoint_lock_release
 wait "$blocked_pid"
+assert_flock_available "${AZEDARACH_JAEGER_ENDPOINT_FILE}.state-lock" "endpoint mutation"
 [[ -e "$(sed -n '1p' "$tmp/blocked record")" ]]
 
 # macOS /bin/bash 3.2 does not expose BASHPID and keeps $$ equal to the
@@ -437,9 +487,11 @@ mkfifo "$bash32_contender_entered"
 bash32_contender=$!
 IFS= read -r bash32_contender_signal <"$bash32_contender_entered"
 [[ "$bash32_contender_signal" == "ready" ]]
+assert_flock_blocked "${bash32_endpoint}.state-lock" "Bash 3.2 endpoint"
 kill -9 "$bash32_owner"
 wait "$bash32_owner" 2>/dev/null || true
 wait "$bash32_contender"
+assert_flock_available "${bash32_endpoint}.state-lock" "Bash 3.2 endpoint"
 [[ -e "$(sed -n '1p' "$tmp/bash 3.2 record")" ]]
 if find "$tmp" -maxdepth 1 -name 'bash 3.2 endpoint.state-lock.control.*' -print -quit | grep -q .; then
   echo "dead Bash 3.2 lock owner left a helper control directory" >&2
@@ -561,6 +613,9 @@ rm -f "${AZEDARACH_JAEGER_ENDPOINT_FILE}.workers"
 # Stateful reuse relinks the established owner's immutable endpoint generation.
 # It must not replace the collector or owner, and the original deadline wins.
 : >"$calls"
+worker_initialized_fifo="$tmp/worker initialized fifo"
+mkfifo "$worker_initialized_fifo"
+export AZEDARACH_JAEGER_TEST_WORKER_INITIALIZED_FIFO="$worker_initialized_fifo"
 expiry_ready_fifo="$tmp/expiry ready fifo"
 expiry_continue_fifo="$tmp/expiry continue fifo"
 mkfifo "$expiry_ready_fifo" "$expiry_continue_fifo"
@@ -647,6 +702,7 @@ handoff_slot="$(dirname "$handoff_ready_file")"
 handoff_pid="$(sed -n '1p' "$handoff_slot/ready")"
 JAEGER_PUBLISHED_ENDPOINT_RECORD="$(jaeger_write_endpoint_state localhost:34318 "$JAEGER_PUBLISHED_EXPIRES_AT" successor-generation)"
 export AZEDARACH_JAEGER_EXPIRY_WORKER_FAIL_INIT=1
+unset AZEDARACH_JAEGER_TEST_WORKER_INITIALIZED_FIFO
 if jaeger_schedule_published_expiry "$fake_engine_executable" azedarach-jaeger-fallback; then
   echo "failed successor unexpectedly retained expiry ownership" >&2
   exit 1
@@ -656,6 +712,7 @@ if kill -0 "$handoff_pid" 2>/dev/null; then
   exit 1
 fi
 wait "$handoff_pid" 2>/dev/null || true
+export AZEDARACH_JAEGER_TEST_WORKER_INITIALIZED_FIFO="$worker_initialized_fifo"
 grep -q '^rm -f azedarach-jaeger-fallback ' "$calls"
 [[ ! -e "$JAEGER_PUBLISHED_ENDPOINT_RECORD" && ! -e "$AZEDARACH_JAEGER_ENDPOINT_FILE" ]]
 unset AZEDARACH_JAEGER_EXPIRY_WORKER_FAIL_INIT
@@ -723,7 +780,7 @@ IFS= read -r final_expiry_complete_signal <"$final_expiry_complete_fifo"
 grep -q '^rm -f azedarach-jaeger-fallback ' "$calls"
 [[ ! -e "$AZEDARACH_JAEGER_ENDPOINT_FILE" ]]
 unset AZEDARACH_JAEGER_TEST_EXPIRY_READY_FIFO AZEDARACH_JAEGER_TEST_EXPIRY_CONTINUE_FIFO \
-  AZEDARACH_JAEGER_TEST_EXPIRY_COMPLETE_FIFO
+  AZEDARACH_JAEGER_TEST_EXPIRY_COMPLETE_FIFO AZEDARACH_JAEGER_TEST_WORKER_INITIALIZED_FIFO
 export AZEDARACH_JAEGER_DISABLE_EXPIRY_WORKER=1
 
 echo "jaeger local lifecycle tests passed"
