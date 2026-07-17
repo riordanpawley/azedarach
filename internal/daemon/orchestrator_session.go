@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -70,15 +71,55 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 			}
 		}
-		acquired, acquireErr := authority.Acquire(ctx, identity, sessionID, d.tmux.HasSession)
+		var previousRootedProjection daemonstate.Session
+		previousRootedProjectionFound := false
+		if body.Scope.Kind == domain.OrchestrationScopeRooted {
+			previousRootedProjection, previousRootedProjectionFound, err = store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, body.Scope.RootIssueID.String())
+			if err != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("load rooted orchestrator projection before transition: %v", err)), nil
+			}
+		}
+		var acquired daemonstate.OrchestratorLeaseAcquireResult
+		var acquireErr error
+		if body.Scope.Kind == domain.OrchestrationScopeRooted {
+			startingProjection := previousRootedProjection
+			if !previousRootedProjectionFound {
+				startingProjection = daemonstate.Session{ID: sessionID, IssueID: body.Scope.RootIssueID.String()}
+			}
+			startingProjection.ID = sessionID
+			startingProjection.IssueID = body.Scope.RootIssueID.String()
+			startingProjection.Role = daemonstate.SessionRoleOrchestrator
+			startingProjection.ScopeKind = daemonstate.SessionScopeOrchestration
+			startingProjection.ScopeID = body.Scope.RootIssueID.String()
+			startingProjection.State = daemonstate.SessionStateStarting
+			startingProjection.UpdatedAt = time.Now().UTC()
+			acquired, acquireErr = authority.AcquireRooted(ctx, identity, startingProjection, d.tmux.HasSession)
+		} else {
+			acquired, acquireErr = authority.Acquire(ctx, identity, sessionID, d.tmux.HasSession)
+		}
 		if acquireErr != nil {
-			return d.errorResponse(req, protocol.ErrorCodeConflict, acquireErr.Error()), nil
+			code := protocol.ErrorCodeInternal
+			if errors.Is(acquireErr, daemonstate.ErrOrchestratorLeaseConflict) {
+				code = protocol.ErrorCodeConflict
+			}
+			return d.errorResponse(req, code, acquireErr.Error()), nil
 		}
 		result.Disposition = string(acquired.Disposition)
 		result.Lifecycle = acquired.Lease.Lifecycle
 		preserveLeaseOnFailure := acquired.Disposition == daemonstate.OrchestratorLeaseAttached
 		previousLifecycle := acquired.Lease.Lifecycle
+		restoreRootedProjectionAfterFailure := func() {
+			if body.Scope.Kind != domain.OrchestrationScopeRooted {
+				return
+			}
+			if previousRootedProjectionFound {
+				_ = d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, previousRootedProjection)
+				return
+			}
+			_ = d.transitionRootedOrchestratorSessionIntent(ctx, projectID, body.Scope.RootIssueID.String(), acquired.Lease.SessionID, daemonstate.SessionStateStopped)
+		}
 		restoreLeaseAfterProbeFailure := func() {
+			restoreRootedProjectionAfterFailure()
 			if preserveLeaseOnFailure {
 				_, _ = authority.SetLifecycle(ctx, identity, acquired.Lease.SessionID, previousLifecycle)
 				return
@@ -86,21 +127,17 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 			_ = authority.Release(ctx, identity, acquired.Lease.SessionID)
 		}
 		pauseOrReleaseLease := func() {
+			restoreRootedProjectionAfterFailure()
 			if preserveLeaseOnFailure {
 				_, _ = authority.SetLifecycle(ctx, identity, acquired.Lease.SessionID, domain.OrchestratorPaused)
 				return
 			}
 			_ = authority.Release(ctx, identity, acquired.Lease.SessionID)
 		}
-		if body.Scope.Kind == domain.OrchestrationScopeRooted {
-			if err := retireRootedWorkerSessionIntent(ctx, store, projectID, body.Scope.RootIssueID.String(), acquired.Lease.SessionID); err != nil {
-				restoreLeaseAfterProbeFailure()
-				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("retire rooted worker session intent: %v", err)), nil
-			}
-		}
 		if acquired.Lease.Lifecycle == domain.OrchestratorPaused {
 			acquired.Lease, err = authority.SetLifecycle(ctx, identity, acquired.Lease.SessionID, domain.OrchestratorWorking)
 			if err != nil {
+				restoreRootedProjectionAfterFailure()
 				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("resume orchestrator session lease: %v", err)), nil
 			}
 			result.Disposition = "resumed"
@@ -289,6 +326,11 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 			}
 			result.Lifecycle = lease.Lifecycle
 			result.Disposition = "attached"
+			if body.Scope.Kind == domain.OrchestrationScopeRooted {
+				if err := d.persistOrchestratorSessionProjection(ctx, req.Meta, projectID, body.Scope, lease.SessionID); err != nil {
+					return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist rooted orchestrator attach transition: %v", err)), nil
+				}
+			}
 		} else if !result.Live && lease.Lifecycle != domain.OrchestratorPaused {
 			result.Disposition = "stale-runtime"
 		}
@@ -397,15 +439,26 @@ func (d *Daemon) persistStoppedOrchestratorSessionProjection(ctx context.Context
 	return nil
 }
 
-func retireRootedWorkerSessionIntent(ctx context.Context, store *daemonstate.RuntimeStateStore, projectID, rootID, sessionID string) error {
+func (d *Daemon) transitionRootedOrchestratorSessionIntent(ctx context.Context, projectID, rootID, sessionID string, state daemonstate.SessionState) error {
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
 	if store == nil {
 		return nil
 	}
-	worker, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, rootID, sessionID)
-	if err != nil || !found {
+	projection, found, err := store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, rootID)
+	if err != nil {
 		return err
 	}
-	return store.DeleteSessionIntentState(ctx, projectID, worker)
+	if !found {
+		projection = daemonstate.Session{ID: sessionID, IssueID: rootID}
+	}
+	projection.ID = sessionID
+	projection.IssueID = rootID
+	projection.Role = daemonstate.SessionRoleOrchestrator
+	projection.ScopeKind = daemonstate.SessionScopeOrchestration
+	projection.ScopeID = rootID
+	projection.State = state
+	projection.UpdatedAt = time.Now().UTC()
+	return d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, projection)
 }
 
 func (d *Daemon) pauseEndedOrchestratorSession(ctx context.Context, meta protocol.Metadata, projectID, sessionID string) (bool, error) {

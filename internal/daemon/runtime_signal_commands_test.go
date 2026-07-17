@@ -554,7 +554,7 @@ func TestRuntimeSignalIngestAgentHookStoresObservationWithoutCreatingIntent(t *t
 	}
 }
 
-func TestRuntimeSignalIngestFansPhysicalObservationAcrossSharedLogicalIntents(t *testing.T) {
+func TestRuntimeSignalIngestUpdatesExclusiveRootedIntent(t *testing.T) {
 	repoDir := initRuntimeSignalGitRepo(t)
 	d := New(Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	ctx := context.Background()
@@ -613,25 +613,19 @@ func TestRuntimeSignalIngestFansPhysicalObservationAcrossSharedLogicalIntents(t 
 	if observation.ObservedState != daemonstate.SessionStateRunning || observation.Activity != "busy" {
 		t.Fatalf("physical observation = %+v", observation)
 	}
-	for _, want := range []struct {
-		role      daemonstate.SessionRole
-		scopeKind daemonstate.SessionScopeKind
-		state     daemonstate.SessionState
-	}{
-		{daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, daemonstate.SessionStateStopped},
-		{daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, daemonstate.SessionStatePaused},
-	} {
-		got, found, err := store.GetSessionIntent(ctx, projectID, want.role, want.scopeKind, issueID)
-		if err != nil || !found {
-			t.Fatalf("load %s intent found=%v err=%v", want.role, found, err)
-		}
-		if got.State != want.state || got.ObservedState != daemonstate.SessionStateRunning || got.Activity != "busy" || got.ActivitySource != "hooks" {
-			t.Fatalf("%s intent = %+v; desired state must remain %s", want.role, got, want.state)
-		}
+	if _, found, err := store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, issueID); err != nil || found {
+		t.Fatalf("retired worker intent found=%v err=%v", found, err)
+	}
+	got, found, err := store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, issueID)
+	if err != nil || !found {
+		t.Fatalf("load rooted intent found=%v err=%v", found, err)
+	}
+	if got.State != daemonstate.SessionStatePaused || got.ObservedState != daemonstate.SessionStateRunning || got.Activity != "busy" || got.ActivitySource != "hooks" {
+		t.Fatalf("rooted intent = %+v; desired state must remain paused", got)
 	}
 	published := projectionWriter.sessionSnapshot()
-	if len(published) != 2 {
-		t.Fatalf("published sessions = %+v, want both shared intents", published)
+	if len(published) != 1 {
+		t.Fatalf("published sessions = %+v, want exclusive rooted intent", published)
 	}
 	for _, eventSession := range published {
 		persisted, found, err := store.GetSessionIntent(ctx, projectID, eventSession.Role, eventSession.ScopeKind, eventSession.ScopeID)

@@ -830,6 +830,24 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 		return fmt.Errorf("begin upsert session state %s/%s: %w", projectID, session.ID, err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := s.upsertPreparedSessionStateTx(ctx, tx, projectID, session, targetTable); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit upsert session state %s/%s: %w", projectID, session.ID, err)
+	}
+	return nil
+}
+
+func (s *RuntimeStateStore) upsertPreparedSessionStateTx(ctx context.Context, tx *sql.Tx, projectID string, session Session, targetTable string) error {
+	if targetTable == sessionStateTable && rootedOrchestratorSessionIntent(session) {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+sessionStateTable+`
+			WHERE project_id=? AND session_id=?
+				AND role='worker' AND scope_kind='issue' AND issue_id=? AND scope_id=?`,
+			projectID, session.ID, session.IssueID, session.ScopeID); err != nil {
+			return fmt.Errorf("retire worker intent during rooted orchestrator transition %s/%s: %w", projectID, session.ID, err)
+		}
+	}
 	if targetTable == sessionStateTable {
 		var observedState, activity, activitySource, observedAt string
 		err := tx.QueryRowContext(ctx, `SELECT observed_state,activity,activity_source,updated_at
@@ -860,7 +878,7 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 		}
 	}
 	startedAt := nullableRuntimeStateTime(session.StartedAt)
-	_, err = tx.ExecContext(ctx, `
+	_, err := tx.ExecContext(ctx, `
 		INSERT INTO `+targetTable+` (
 			project_id,
 			session_id,
@@ -912,10 +930,16 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 			return fmt.Errorf("delete moved session intent %s/%s: %w", projectID, session.ID, err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit upsert session state %s/%s: %w", projectID, session.ID, err)
-	}
 	return nil
+}
+
+func rootedOrchestratorSessionIntent(session Session) bool {
+	return !isSessionObservationID(session.ID) &&
+		session.Role == SessionRoleOrchestrator &&
+		session.ScopeKind == SessionScopeOrchestration &&
+		strings.TrimSpace(session.ScopeID) != "" &&
+		strings.TrimSpace(session.ScopeID) != "project" &&
+		strings.TrimSpace(session.IssueID) == strings.TrimSpace(session.ScopeID)
 }
 
 func (s *RuntimeStateStore) DeleteSessionState(ctx context.Context, projectID, sessionID string) error {
@@ -1288,19 +1312,35 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 		}
 	}()
 
+	for index := range sessions {
+		session := &sessions[index]
+		metadataProvided := session.Role != "" || session.ScopeKind != "" || strings.TrimSpace(session.ScopeID) != ""
+		if metadataProvided {
+			continue
+		}
+		var roleRaw, scopeKindRaw, scopeID string
+		scanErr := tx.QueryRowContext(ctx, `SELECT COALESCE(role, 'worker'), COALESCE(scope_kind, 'issue'), COALESCE(scope_id, issue_id)
+			FROM `+sessionStorageTableForID(session.ID)+` WHERE project_id=? AND session_id=?
+			ORDER BY CASE WHEN role='worker' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1`, projectID, strings.TrimSpace(session.ID)).Scan(&roleRaw, &scopeKindRaw, &scopeID)
+		if scanErr == nil {
+			session.Role, session.ScopeKind, session.ScopeID = SessionRole(roleRaw), SessionScopeKind(scopeKindRaw), scopeID
+		} else if scanErr != sql.ErrNoRows {
+			return fmt.Errorf("load session metadata before authoritative replacement: %w", scanErr)
+		}
+	}
+	var normalizeErr error
+	sessions, normalizeErr = normalizePhysicalSessionIntents(sessions)
+	if normalizeErr != nil {
+		return normalizeErr
+	}
+	for _, table := range []string{sessionStateTable, sessionObservationTable} {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE project_id=?`, projectID); err != nil {
+			return fmt.Errorf("clear %s before authoritative session replacement: %w", table, err)
+		}
+	}
 	activeIntentSessions := make(map[string]struct{}, len(sessions))
 	activeObservationSessions := make(map[string]struct{}, len(sessions))
 	for _, session := range sessions {
-		metadataProvided := session.Role != "" || session.ScopeKind != "" || strings.TrimSpace(session.ScopeID) != ""
-		if !metadataProvided {
-			var roleRaw, scopeKindRaw, scopeID string
-			scanErr := tx.QueryRowContext(ctx, `SELECT COALESCE(role, 'worker'), COALESCE(scope_kind, 'issue'), COALESCE(scope_id, issue_id) FROM `+sessionStorageTableForID(session.ID)+` WHERE project_id = ? AND session_id = ? ORDER BY CASE WHEN role='worker' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1`, projectID, strings.TrimSpace(session.ID)).Scan(&roleRaw, &scopeKindRaw, &scopeID)
-			if scanErr == nil {
-				session.Role, session.ScopeKind, session.ScopeID = SessionRole(roleRaw), SessionScopeKind(scopeKindRaw), scopeID
-			} else if scanErr != sql.ErrNoRows {
-				return fmt.Errorf("load session metadata before replace: %w", scanErr)
-			}
-		}
 		session = NormalizeSessionMetadata(session)
 		sessionID := strings.TrimSpace(session.ID)
 		if sessionID == "" {
@@ -1413,6 +1453,45 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 	}
 	tx = nil
 	return nil
+}
+
+func normalizePhysicalSessionIntents(sessions []Session) ([]Session, error) {
+	byPhysicalID := make(map[string]int, len(sessions))
+	normalized := make([]Session, 0, len(sessions))
+	for _, session := range sessions {
+		if isSessionObservationID(session.ID) {
+			normalized = append(normalized, session)
+			continue
+		}
+		physicalID := strings.TrimSpace(session.ID)
+		if physicalID == "" {
+			normalized = append(normalized, session)
+			continue
+		}
+		index, found := byPhysicalID[physicalID]
+		if !found {
+			byPhysicalID[physicalID] = len(normalized)
+			normalized = append(normalized, session)
+			continue
+		}
+		existing := normalized[index]
+		switch {
+		case rootedOrchestratorSessionIntent(existing) && matchingRootedWorkerIntent(existing, session):
+			continue
+		case rootedOrchestratorSessionIntent(session) && matchingRootedWorkerIntent(session, existing):
+			normalized[index] = session
+		default:
+			return nil, fmt.Errorf("physical session %s has conflicting %s/%s and %s/%s intents", physicalID, existing.Role, existing.ScopeKind, session.Role, session.ScopeKind)
+		}
+	}
+	return normalized, nil
+}
+
+func matchingRootedWorkerIntent(rooted, candidate Session) bool {
+	return candidate.Role == SessionRoleWorker &&
+		candidate.ScopeKind == SessionScopeIssue &&
+		strings.TrimSpace(candidate.IssueID) == strings.TrimSpace(rooted.IssueID) &&
+		strings.TrimSpace(candidate.ScopeID) == strings.TrimSpace(rooted.ScopeID)
 }
 
 func deleteStaleSessionRows(ctx context.Context, tx *sql.Tx, tableName, projectID string, activeSessions map[string]struct{}) error {
@@ -2687,6 +2766,9 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB, runtimeLivenessPr
 	if err := migrateSessionObservations(ctx, db); err != nil {
 		return err
 	}
+	if err := ensurePhysicalSessionIntentIdentity(ctx, db); err != nil {
+		return err
+	}
 	if err := ensureRuntimeSessionProductConstraints(ctx, db, runtimeLivenessProbe, runtimeRepairDeleteHook); err != nil {
 		return err
 	}
@@ -2701,6 +2783,44 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB, runtimeLivenessPr
 	}
 	if err := ensureColumn(ctx, db, worktreeStateTable, "git_status_updated_at", "TEXT"); err != nil {
 		return err
+	}
+	return nil
+}
+
+func ensurePhysicalSessionIntentIdentity(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin physical session intent identity repair: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM `+sessionStateTable+` AS worker
+		WHERE worker.role='worker' AND worker.scope_kind='issue' AND instr(worker.session_id,'.pane-')=0
+			AND EXISTS (
+				SELECT 1 FROM `+sessionStateTable+` AS rooted
+				WHERE rooted.project_id=worker.project_id AND rooted.session_id=worker.session_id
+					AND rooted.role='orchestrator' AND rooted.scope_kind='orchestration'
+					AND rooted.scope_id<>'project' AND rooted.scope_id=worker.issue_id
+					AND worker.scope_id=worker.issue_id
+			)`); err != nil {
+		return fmt.Errorf("retire legacy rooted worker intent: %w", err)
+	}
+	var conflicts int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM (
+		SELECT project_id,session_id FROM `+sessionStateTable+`
+		WHERE instr(session_id,'.pane-')=0
+		GROUP BY project_id,session_id HAVING COUNT(*)>1
+	)`).Scan(&conflicts); err != nil {
+		return fmt.Errorf("validate physical session intent identity: %w", err)
+	}
+	if conflicts != 0 {
+		return fmt.Errorf("physical session intent identity has %d ambiguous conflicts", conflicts)
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_daemon_session_projections_physical_session_unique
+		ON `+sessionStateTable+`(project_id,session_id) WHERE instr(session_id,'.pane-')=0`); err != nil {
+		return fmt.Errorf("enforce physical session intent identity: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit physical session intent identity repair: %w", err)
 	}
 	return nil
 }
