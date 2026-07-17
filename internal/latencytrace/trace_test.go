@@ -106,6 +106,8 @@ func TestLogPhaseFiltersUnsafeSpanStringAttributes(t *testing.T) {
 
 	LogPhase(nil, "cli", "command_execute", time.Now().Add(-time.Millisecond),
 		"command_shape", "issue get cxk",
+		"writer.waiter_operation", "command.runtime.signal.ingest",
+		"writer.holder_operation", "worktree.replace_snapshot",
 		"repo_dir", "/Users/example/private/repo",
 		"socket", "/tmp/private.sock",
 		"body", "secret body",
@@ -130,6 +132,11 @@ func TestLogPhaseFiltersUnsafeSpanStringAttributes(t *testing.T) {
 	}
 	if !attrs["task_count"] {
 		t.Fatal("span missing numeric task_count attr")
+	}
+	for _, key := range []string{"writer.waiter_operation", "writer.holder_operation"} {
+		if !attrs[key] {
+			t.Fatalf("span missing bounded writer attribution attr %q", key)
+		}
 	}
 }
 

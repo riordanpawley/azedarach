@@ -1358,21 +1358,21 @@ func TestGitServiceAdapterHookRefreshQueuesBurstWithoutWaiting(t *testing.T) {
 	store := newGitAdapterStore(t, projectID, issueID, worktree, cleanGitStatus())
 
 	var statusCalls atomic.Int32
+	statusEntered := make(chan struct{})
+	var statusEnteredOnce sync.Once
 	releaseStatus := make(chan struct{})
-	var releaseStatusOnce sync.Once
-	releaseStatusFn := func() {
-		releaseStatusOnce.Do(func() {
-			close(releaseStatus)
-		})
-	}
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
-		if len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "status" && args[3] == "--porcelain" {
+		switch {
+		case len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "status" && args[3] == "--porcelain":
 			statusCalls.Add(1)
+			statusEnteredOnce.Do(func() { close(statusEntered) })
 			<-releaseStatus
 			return "", nil
+		case len(args) >= 4 && args[0] == "-C" && args[1] == worktree && args[2] == "branch" && args[3] == "--show-current":
+			return "tester/az-target/hook-refresh", nil
+		default:
+			return "", fmt.Errorf("unexpected git args: %v", args)
 		}
-		t.Fatalf("unexpected git args: %v", args)
-		return "", nil
 	}}
 
 	queue := newReconcileQueue[*git.GitStatus](reconcileQueueConfig{
@@ -1405,42 +1405,49 @@ func TestGitServiceAdapterHookRefreshQueuesBurstWithoutWaiting(t *testing.T) {
 		}()
 	}
 	close(start)
-	startDeadline := time.After(time.Second)
-	for statusCalls.Load() == 0 {
-		select {
-		case <-startDeadline:
-			releaseStatusFn()
-			t.Fatal("timed out waiting for queued hook refresh to start")
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
-	time.Sleep(20 * time.Millisecond)
+	<-statusEntered
 
 	for i := 0; i < 5; i++ {
-		select {
-		case result := <-results:
-			if result.err != nil {
-				releaseStatusFn()
-				t.Fatalf("RefreshStatusForHook error: %v", result.err)
-			}
-			if result.status == nil {
-				releaseStatusFn()
-				t.Fatal("RefreshStatusForHook returned nil status")
-			}
-		case <-time.After(time.Second):
-			releaseStatusFn()
-			t.Fatal("timed out waiting for non-blocking hook refresh callers")
+		result := <-results
+		if result.err != nil {
+			close(releaseStatus)
+			t.Fatalf("RefreshStatusForHook error: %v", result.err)
+		}
+		if result.status == nil {
+			close(releaseStatus)
+			t.Fatal("RefreshStatusForHook returned nil status")
 		}
 	}
-	releaseStatusFn()
 
 	if got := statusCalls.Load(); got != 1 {
-		t.Fatalf("status calls = %d, want 1 coalesced hook refresh", got)
+		close(releaseStatus)
+		t.Fatalf("status calls before release = %d, want 1 coalesced hook refresh", got)
 	}
 	counters := queue.snapshotCounters()
 	if counters.Enqueued != 1 || counters.Deduped != 4 {
+		close(releaseStatus)
 		t.Fatalf("queue counters = %+v, want one queued hook refresh and four deduped callers", counters)
+	}
+
+	joined, err := queue.Enqueue(reconcileQueueRequest[*git.GitStatus]{
+		Key:      gitStatusRefreshQueueKey(projectID, worktree),
+		Priority: reconcilePriorityManual,
+		Reason:   "test-join",
+		Work: func(context.Context) (*git.GitStatus, error) {
+			return nil, errors.New("joined queue request unexpectedly executed")
+		},
+	})
+	if err != nil {
+		close(releaseStatus)
+		t.Fatalf("join hook refresh: %v", err)
+	}
+	close(releaseStatus)
+	result, err := joined.Wait(context.Background())
+	if err != nil || result.Err != nil {
+		t.Fatalf("join hook refresh err=%v result_err=%v", err, result.Err)
+	}
+	if got := statusCalls.Load(); got != 2 {
+		t.Fatalf("status calls after enrichment = %d, want porcelain plus full status", got)
 	}
 }
 

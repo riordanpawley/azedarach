@@ -30,8 +30,11 @@ type runtimeProjectionWriter interface {
 }
 
 type daemonRuntimeProjectionWriter struct {
-	d  *Daemon
-	mu sync.Mutex
+	d *Daemon
+
+	mu       sync.Mutex
+	holderMu sync.RWMutex
+	holder   string
 }
 
 func (d *Daemon) persistObservedRuntimeProjection(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session) error {
@@ -62,6 +65,7 @@ func (d *Daemon) persistObservedRuntimeProjection(ctx context.Context, projectID
 }
 
 type runtimeProjectionWriterOperationContextKey struct{}
+type runtimeProjectionWriterWaitHookContextKey struct{}
 
 func newRuntimeProjectionWriter(d *Daemon) *daemonRuntimeProjectionWriter {
 	return &daemonRuntimeProjectionWriter{d: d}
@@ -89,14 +93,44 @@ func runtimeProjectionWriterOperationFromContext(ctx context.Context, fallback s
 	return fallback
 }
 
+func withRuntimeProjectionWriterWaitHookForTest(ctx context.Context, hook func(string, string)) context.Context {
+	return context.WithValue(ctx, runtimeProjectionWriterWaitHookContextKey{}, hook)
+}
+
+func (w *daemonRuntimeProjectionWriter) currentHolderOperation() string {
+	if w == nil {
+		return ""
+	}
+	w.holderMu.RLock()
+	defer w.holderMu.RUnlock()
+	return w.holder
+}
+
+func (w *daemonRuntimeProjectionWriter) setHolderOperation(operation string) {
+	w.holderMu.Lock()
+	w.holder = operation
+	w.holderMu.Unlock()
+}
+
 func (w *daemonRuntimeProjectionWriter) lockProjectionWriter(ctx context.Context, projectID, operation string) func() {
 	operation = runtimeProjectionWriterOperationFromContext(ctx, operation)
-	waitStartedAt := time.Now()
+	holderOperation := w.currentHolderOperation()
+	if holderOperation != "" {
+		if hook, _ := ctx.Value(runtimeProjectionWriterWaitHookContextKey{}).(func(string, string)); hook != nil {
+			hook(operation, holderOperation)
+		}
+	}
+	_, endWaitSpan := latencytrace.StartSpanWithEndAttributes(ctx, "daemon", "runtime_projection.writer_lock_wait",
+		"writer.waiter_operation", operation,
+		"writer.holder_operation", holderOperation,
+	)
 	w.mu.Lock()
-	latencytrace.LogPhaseContext(ctx, w.d.cfg.Logger, "daemon", "runtime_projection.writer_lock_wait", waitStartedAt, "project_id", projectID, "operation", operation)
+	endWaitSpan(nil, "writer.holder_operation", holderOperation)
+	w.setHolderOperation(operation)
 	holdStartedAt := time.Now()
 	return func() {
 		latencytrace.LogPhaseContext(ctx, w.d.cfg.Logger, "daemon", "runtime_projection.writer_lock_held", holdStartedAt, "project_id", projectID, "operation", operation)
+		w.setHolderOperation("")
 		w.mu.Unlock()
 	}
 }

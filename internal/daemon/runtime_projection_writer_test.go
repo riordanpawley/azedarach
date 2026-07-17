@@ -108,6 +108,32 @@ type statusRunner struct {
 	status string
 }
 
+func TestRuntimeProjectionWriterAttributesContendedHolderAndWaiter(t *testing.T) {
+	d := &Daemon{cfg: Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
+	writer := newRuntimeProjectionWriter(d)
+	holderCtx := contextWithRuntimeProjectionWriterOperation(context.Background(), "worktree.replace_snapshot")
+	releaseHolder := writer.lockProjectionWriter(holderCtx, "proj-attribution", "fallback.holder")
+
+	attributed := make(chan [2]string, 1)
+	waiterCtx := contextWithRuntimeProjectionWriterOperation(context.Background(), "command.runtime.signal.ingest")
+	waiterCtx = withRuntimeProjectionWriterWaitHookForTest(waiterCtx, func(waiter, holder string) {
+		attributed <- [2]string{waiter, holder}
+	})
+	waiterDone := make(chan struct{})
+	go func() {
+		releaseWaiter := writer.lockProjectionWriter(waiterCtx, "proj-attribution", "fallback.waiter")
+		releaseWaiter()
+		close(waiterDone)
+	}()
+
+	got := <-attributed
+	if got != [2]string{"command.runtime.signal.ingest", "worktree.replace_snapshot"} {
+		t.Fatalf("writer attribution = %q/%q", got[0], got[1])
+	}
+	releaseHolder()
+	<-waiterDone
+}
+
 func (r statusRunner) Run(_ context.Context, args ...string) (string, error) {
 	if len(args) >= 4 && args[0] == "-C" && args[2] == "status" && args[3] == "--porcelain" {
 		return r.status, nil

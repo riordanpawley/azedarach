@@ -771,6 +771,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	req.Meta.ProjectID = naming.ProjectID(projectID)
 	ctx = withDaemonProjectIDContext(ctx, projectID)
 	ctx = issues.ContextWithMutationOperation(ctx, "command."+req.Command)
+	ctx = contextWithRuntimeProjectionWriterOperation(ctx, "command."+req.Command)
 	ctx, endCommandSpan := latencytrace.StartSpan(ctx, "daemon", "command", "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
 	d.recordWatchClientRequest(projectID, req, startedAt.UTC())
 	defer func() {

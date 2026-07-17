@@ -548,8 +548,17 @@ func (a *gitServiceAdapter) queueGitStatusRefresh(projectID, worktree string, pr
 		Work: func(ctx context.Context) (*git.GitStatus, error) {
 			refreshCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 			defer cancel()
-			forcePublish := strings.EqualFold(strings.TrimSpace(reason), "hook")
-			status, refreshErr := a.refreshGitStatusWriteThroughResult(refreshCtx, projectID, worktree, true, forcePublish)
+			hookRefresh := strings.EqualFold(strings.TrimSpace(reason), "hook")
+			if hookRefresh {
+				// Git-hook admission must return before any projection writer wait.
+				// The detached queue first captures the cheap authoritative
+				// porcelain state (including worktree identity), then enriches it
+				// through the ordinary full-status path below.
+				if _, _, refreshErr := a.refreshGitStatusPorcelainWriteThroughResult(refreshCtx, projectID, worktree, true, true); refreshErr != nil {
+					return nil, refreshErr
+				}
+			}
+			status, refreshErr := a.refreshGitStatusWriteThroughResult(refreshCtx, projectID, worktree, true, false)
 			outcome := throttle.Record(key, gitStatusSignature(status), refreshErr)
 			if a.logger != nil {
 				counters := throttle.snapshotCounters()
