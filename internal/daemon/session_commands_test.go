@@ -165,9 +165,11 @@ func TestCodexAppServerLaunchUsesNativeDaemonAndSupervisedRemoteResume(t *testin
 	}}
 	command := d.buildSessionLaunchCommand(protocol.DefaultProjectID, "dbc", "az-dbc", true, nil, "start here")
 	for _, want := range []string{
-		"codex app-server daemon start",
-		"codex --remote unix:// --dangerously-bypass-approvals-and-sandbox",
-		"codex resume --remote unix:// --dangerously-bypass-approvals-and-sandbox --last",
+		"codex " + codexFloopFailOpenConfigExpansion + " app-server daemon start",
+		"codex " + codexFloopFailOpenConfigExpansion + " --remote unix:// --dangerously-bypass-approvals-and-sandbox",
+		"codex " + codexFloopFailOpenConfigExpansion + " resume --remote unix:// --dangerously-bypass-approvals-and-sandbox --last",
+		"codex mcp get --json floop",
+		codexFloopFailOpenConfig,
 		"__az_codex_remote_failures",
 	} {
 		if !strings.Contains(command, want) {
@@ -180,7 +182,7 @@ func TestCodexAppServerLaunchUsesNativeDaemonAndSupervisedRemoteResume(t *testin
 		t.Fatalf("supervisor shell syntax: %v\n%s\n%s", err, out, supervisor)
 	}
 	trace := filepath.Join(t.TempDir(), "trace")
-	fakeCodex := `codex() { printf '%s\n' "$*" >> "$TRACE"; case "$*" in "app-server daemon start") return 0 ;; "--remote unix://") return 1 ;; "resume --remote unix:// --last") return 0 ;; *) return 2 ;; esac; }; `
+	fakeCodex := `codex() { printf '%s\n' "$*" >> "$TRACE"; case "$*" in "mcp get --json floop") return 0 ;; "-c mcp_servers.floop.required=false app-server daemon start") return 0 ;; "--remote unix://") return 1 ;; "resume --remote unix:// --last") return 0 ;; *) return 2 ;; esac; }; `
 	cmd := exec.Command("sh", "-c", fakeCodex+supervisor)
 	cmd.Env = append(os.Environ(), "TRACE="+trace)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -193,6 +195,80 @@ func TestCodexAppServerLaunchUsesNativeDaemonAndSupervisedRemoteResume(t *testin
 	got := string(data)
 	if !strings.Contains(got, "--remote unix://") || !strings.Contains(got, "resume --remote unix:// --last") {
 		t.Fatalf("supervisor trace = %q", got)
+	}
+}
+
+func TestCodexFloopPolicyFailsOpenForAbsentAndBrokenServers(t *testing.T) {
+	for _, mode := range []string{"absent", "disabled", "unavailable", "crash", "timeout", "mid-handshake-close"} {
+		t.Run(mode, func(t *testing.T) {
+			trace := filepath.Join(t.TempDir(), "trace")
+			script := `codex() {
+  printf '%s\n' "$*" >> "$TRACE"
+  if [ "$*" = "mcp get --json floop" ]; then
+    [ "$MODE" != absent ]
+    return
+  fi
+  if [ "$MODE" = absent ]; then
+    [ "$*" = launch ]
+    return
+  fi
+  [ "$*" = "-c mcp_servers.floop.required=false launch" ] || return 91
+  [ "$MODE" = disabled ] && return
+  printf 'optional MCP server floop %s; continuing\n' "$MODE" >&2
+}
+` + codexFloopFailOpenProbe("codex") + `; codex ` + codexFloopFailOpenConfigExpansion + ` launch`
+			cmd := exec.Command("sh", "-c", script)
+			cmd.Env = append(os.Environ(), "TRACE="+trace, "MODE="+mode)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("fail-open simulation: %v (%s)", err, output)
+			}
+			got, err := os.ReadFile(trace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "absent" {
+				if strings.Contains(string(got), codexFloopFailOpenConfig) || !strings.Contains(string(got), "\nlaunch\n") {
+					t.Fatalf("absent Floop trace = %q, want launch without synthesized server config", got)
+				}
+				return
+			}
+			if !strings.Contains(string(got), "-c "+codexFloopFailOpenConfig+" launch") {
+				t.Fatalf("%s trace = %q, want optional Floop override", mode, got)
+			}
+			if mode == "disabled" {
+				if len(output) != 0 {
+					t.Fatalf("disabled Floop output = %q, want no failure diagnostic", output)
+				}
+				return
+			}
+			if !strings.Contains(string(output), "optional MCP server floop "+mode+"; continuing") {
+				t.Fatalf("%s output = %q, want concise mode-specific diagnostic", mode, output)
+			}
+		})
+	}
+}
+
+func TestManagedCodexSessionRolesCarryFloopFailOpenPolicy(t *testing.T) {
+	d := &Daemon{cfg: Config{CLITool: "codex", SessionShell: "sh"}}
+	prompts := map[string]string{
+		"ordinary-contributor": buildStartWorkPrompt("dsp", string(domain.TypeBug), "fix", false, ""),
+		"orchestrated-worker":  buildStartWorkPrompt("dsp", string(domain.TypeBug), "fix", true, "root"),
+		"root-orchestrator":    buildRootedOrchestratorPrompt("root", string(domain.TypeEpic), "coordinate"),
+	}
+	for role, prompt := range prompts {
+		t.Run(role, func(t *testing.T) {
+			command := d.buildCLIToolCommand(protocol.DefaultProjectID, "dsp", "az-dsp", false, nil, prompt)
+			for _, want := range []string{
+				"codex mcp get --json floop",
+				codexFloopFailOpenConfigVariable + "='-c " + codexFloopFailOpenConfig + "'",
+				"codex " + codexFloopFailOpenConfigExpansion,
+			} {
+				if !strings.Contains(command, want) {
+					t.Fatalf("%s launch missing %q: %s", role, want, command)
+				}
+			}
+		})
 	}
 }
 
@@ -962,7 +1038,7 @@ func TestSessionRestartAllRestartsBusySessionsByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read restart launch artifact: %v", err)
 	}
-	if got := string(artifactBody); !strings.Contains(got, "codex resume") || !strings.Contains(got, "--last") || strings.Contains(got, "Continue your prior task") {
+	if got := string(artifactBody); !strings.Contains(got, "codex "+codexFloopFailOpenConfigExpansion+" resume") || !strings.Contains(got, "--last") || strings.Contains(got, "Continue your prior task") {
 		t.Fatalf("resume artifact = %q, want codex resume --last without positional continuation prompt", got)
 	}
 	for _, sessionID := range []string{idleSession, busySession} {
@@ -3473,7 +3549,7 @@ func TestSessionStartInjectsIssueImageAttachments(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(worktreePath, ".azedarach", "azedarach.db")); !os.IsNotExist(err) {
 		t.Fatalf("session attachment read created worktree-local database: %v", err)
 	}
-	if !strings.Contains(launchScript, `codex --image "`) || !strings.Contains(launchScript, initialPromptShellVariable) {
+	if !strings.Contains(launchScript, `codex `+codexFloopFailOpenConfigExpansion+` --image "`) || !strings.Contains(launchScript, initialPromptShellVariable) {
 		t.Fatalf("launch script = %q, want image args with bounded file bootstrap", launchScript)
 	}
 }
@@ -9042,7 +9118,7 @@ func TestBuildSessionLaunchCommandDoesNotInjectCodexHookOverrides(t *testing.T) 
 	if !strings.Contains(command, initialPromptShellVariable+`=$(printf`) {
 		t.Fatalf("command = %q, want encoded initial prompt assignment", command)
 	}
-	if !strings.Contains(command, `codex --image "/tmp/a.png" --image "/tmp/with space/image.png" -- "$`+initialPromptShellVariable+`"`) {
+	if !strings.Contains(command, `codex `+codexFloopFailOpenConfigExpansion+` --image "/tmp/a.png" --image "/tmp/with space/image.png" -- "$`+initialPromptShellVariable+`"`) {
 		t.Fatalf("command = %q, want codex positional prompt after image args", command)
 	}
 	if strings.Contains(command, "Verify startup behavior") {
@@ -9079,7 +9155,7 @@ func TestBuildSessionLaunchCommandOmitsMultilinePromptForCodex(t *testing.T) {
 	if !strings.Contains(command, initialPromptShellVariable+`=$(printf`) {
 		t.Fatalf("command = %q, want encoded initial prompt assignment", command)
 	}
-	if !strings.Contains(command, `codex -- "$`+initialPromptShellVariable+`"`) {
+	if !strings.Contains(command, `codex `+codexFloopFailOpenConfigExpansion+` -- "$`+initialPromptShellVariable+`"`) {
 		t.Fatalf("command = %q, want codex positional prompt", command)
 	}
 	if !strings.Contains(command, `AZEDARACH_ISSUE_ID="az-42" codex`) {
@@ -9843,7 +9919,7 @@ func TestSessionLaunchArtifactPicksUpStableLinkSwitchWithoutEnvironmentReload(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != "v1\nv2\n" {
+	if string(got) != "v1\nv1\nv2\nv2\n" {
 		t.Fatalf("trace = %q, want stable link switch without PATH reload", got)
 	}
 }

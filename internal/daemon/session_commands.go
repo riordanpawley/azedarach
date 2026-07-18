@@ -4782,6 +4782,7 @@ func (d *Daemon) buildCodexResumeCommand(projectID, issueID string, yolo bool, i
 	parts := []string{
 		fmt.Sprintf(`AZEDARACH_ISSUE_ID="%s"`, escapeForShellDoubleQuotes(issueID)),
 		tool,
+		codexFloopFailOpenConfigExpansion,
 		"resume",
 	}
 	if projectCfg.CodexAppServer {
@@ -4803,6 +4804,8 @@ func (d *Daemon) buildCodexResumeCommand(projectID, issueID string, yolo bool, i
 	command := strings.Join(parts, " ")
 	if projectCfg.CodexAppServer {
 		command = codexAppServerSupervisedCommand(tool, command, command)
+	} else {
+		command = codexFloopFailOpenProbe(tool) + "; " + command
 	}
 	return command
 }
@@ -5713,6 +5716,7 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 	}
 
 	if strings.EqualFold(tool, "codex") {
+		parts = append(parts, codexFloopFailOpenConfigExpansion)
 		// Codex hook wiring lives entirely in <repo>/.codex/hooks.json, written
 		// by `az ai install --target=codex`. Launch-time `-c hooks.*` injection
 		// was removed because it duplicated those entries — Codex merged the
@@ -5757,6 +5761,9 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 			resume := d.codexAppServerResumeCommand(projectID, issueID, yolo)
 			return codexAppServerSupervisedCommand(tool, command, resume)
 		}
+		if strings.EqualFold(tool, "codex") {
+			return codexFloopFailOpenProbe(tool) + "; " + command
+		}
 		return command
 	}
 
@@ -5764,6 +5771,9 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 	if strings.EqualFold(tool, "codex") && projectCfg.CodexAppServer {
 		resume := d.codexAppServerResumeCommand(projectID, issueID, yolo)
 		return codexAppServerSupervisedCommand(tool, command, resume)
+	}
+	if strings.EqualFold(tool, "codex") {
+		return codexFloopFailOpenProbe(tool) + "; " + command
 	}
 	return command
 }
@@ -5773,6 +5783,7 @@ func (d *Daemon) codexAppServerResumeCommand(projectID, issueID string, yolo boo
 	parts := []string{
 		fmt.Sprintf(`AZEDARACH_ISSUE_ID="%s"`, escapeForShellDoubleQuotes(issueID)),
 		strings.TrimSpace(projectCfg.CLITool),
+		codexFloopFailOpenConfigExpansion,
 		"resume",
 		"--remote",
 		"unix://",
@@ -5784,8 +5795,26 @@ func (d *Daemon) codexAppServerResumeCommand(projectID, issueID string, yolo boo
 	return strings.Join(parts, " ")
 }
 
+const (
+	codexFloopFailOpenConfig          = "mcp_servers.floop.required=false"
+	codexFloopFailOpenConfigVariable  = "__az_codex_floop_config"
+	codexFloopFailOpenConfigExpansion = "$" + codexFloopFailOpenConfigVariable
+)
+
+// codexFloopFailOpenProbe asks Codex whether its merged effective config has a
+// Floop server before adding the required=false override. Applying the nested
+// override unconditionally would synthesize an invalid server without a
+// transport when Floop is not configured at all. The fixed expansion is left
+// intentionally unquoted so the two trusted words (-c and key=value) become
+// separate argv entries; no external text is interpolated into it.
+func codexFloopFailOpenProbe(tool string) string {
+	return codexFloopFailOpenConfigVariable + "=; if " + tool +
+		" mcp get --json floop >/dev/null 2>&1; then " +
+		codexFloopFailOpenConfigVariable + "='-c " + codexFloopFailOpenConfig + "'; fi"
+}
+
 func codexAppServerSupervisedCommand(tool, firstCommand, resumeCommand string) string {
-	startDaemon := tool + " app-server daemon start >/dev/null"
+	startDaemon := tool + " " + codexFloopFailOpenConfigExpansion + " app-server daemon start >/dev/null"
 	steps := []string{
 		"__az_codex_remote_started=$(date +%s)",
 		"if [ \"$__az_codex_remote_first\" -eq 1 ]; then __az_codex_remote_first=0; " + firstCommand + "; else " + resumeCommand + "; fi",
@@ -5797,7 +5826,7 @@ func codexAppServerSupervisedCommand(tool, firstCommand, resumeCommand string) s
 		startDaemon + " || exit $?",
 		"sleep 1",
 	}
-	return startDaemon + " || exit $?; __az_codex_remote_first=1; __az_codex_remote_failures=0; while :; do " + strings.Join(steps, "; ") + "; done"
+	return codexFloopFailOpenProbe(tool) + "; " + startDaemon + " || exit $?; __az_codex_remote_first=1; __az_codex_remote_failures=0; while :; do " + strings.Join(steps, "; ") + "; done"
 }
 
 const initialPromptShellVariable = "__AZEDARACH_INITIAL_PROMPT"
