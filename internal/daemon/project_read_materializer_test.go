@@ -922,12 +922,26 @@ func TestProjectReadMaterializerOlderConvergenceSuccessCannotClearNewerFailure(t
 		olderDone <- err
 	}()
 	<-olderEntered
-	if _, outcome, err := materializer.convergeMutation(context.Background(), 2); err == nil || outcome != "unavailable" {
-		t.Fatalf("newer convergence = outcome:%q error:%v, want unavailable failure", outcome, err)
+	type convergenceResult struct {
+		outcome string
+		err     error
 	}
+	newerQueued := make(chan struct{})
+	var newerQueuedOnce sync.Once
+	newerCtx := withProjectReadCanonicalQueuedHookForTest(context.Background(), func(string) { newerQueuedOnce.Do(func() { close(newerQueued) }) })
+	newerDone := make(chan convergenceResult, 1)
+	go func() {
+		_, outcome, err := materializer.convergeMutation(newerCtx, 2)
+		newerDone <- convergenceResult{outcome: outcome, err: err}
+	}()
+	<-newerQueued
 	close(releaseOlder)
 	if err := <-olderDone; err != nil {
 		t.Fatal(err)
+	}
+	newer := <-newerDone
+	if newer.err == nil || newer.outcome != "unavailable" {
+		t.Fatalf("newer convergence = outcome:%q error:%v, want unavailable failure", newer.outcome, newer.err)
 	}
 	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "newer failure") {
 		t.Fatalf("older success cleared newer failure: %q", got)
@@ -982,6 +996,69 @@ func TestProjectReadMaterializerBootstrapCannotOverwriteNewerCanonicalConvergenc
 	tasks, metadata := materializer.snapshot()
 	if metadata.DeliveryCursor == 0 || len(tasks) != 1 || tasks[0].Status != domain.StatusDone {
 		t.Fatalf("snapshot after bootstrap/convergence = metadata:%+v tasks:%+v, want newest closed lifecycle", metadata, tasks)
+	}
+}
+
+func TestProjectReadMaterializerBootstrapCannotClearNewerConvergenceFailure(t *testing.T) {
+	client, _ := newTestIssueClient(t)
+	ctx := context.Background()
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "bootstrap failure fence", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hydrateEntered := make(chan struct{})
+	releaseHydrate := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseHydrate) }) }
+	t.Cleanup(release)
+	convergenceListEntered := make(chan struct{})
+	var failConvergence atomic.Bool
+	var convergenceListOnce sync.Once
+	store := listErrorProjectionStore{
+		projectionDeltaStore: client,
+		list: func(ctx context.Context, projectID string, after uint64, limit int) ([]domain.ProjectionDelta, uint64, error) {
+			if failConvergence.Load() {
+				convergenceListOnce.Do(func() { close(convergenceListEntered) })
+				return nil, 0, errors.New("newer convergence failure")
+			}
+			return client.ListProjectionDeltas(ctx, projectID, after, limit)
+		},
+	}
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(store), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		close(hydrateEntered)
+		<-releaseHydrate
+		return tasks, nil
+	})
+	bootstrapDone := make(chan error, 1)
+	go func() { bootstrapDone <- materializer.bootstrap(ctx) }()
+	<-hydrateEntered
+	if _, err := client.CloseWithRuntime(ctx, "project", issueID, domain.StatusDone); err != nil {
+		t.Fatal(err)
+	}
+	failConvergence.Store(true)
+	queued := make(chan struct{})
+	var queuedOnce sync.Once
+	convergeCtx := withProjectReadCanonicalQueuedHookForTest(ctx, func(string) { queuedOnce.Do(func() { close(queued) }) })
+	convergeDone := make(chan error, 1)
+	go func() {
+		_, _, convergeErr := materializer.convergeMutation(convergeCtx, 2)
+		convergeDone <- convergeErr
+	}()
+	<-queued
+	select {
+	case <-convergenceListEntered:
+		t.Fatal("convergence read bypassed bootstrap canonical admission")
+	default:
+	}
+	release()
+	if err := <-bootstrapDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-convergeDone; err == nil || !strings.Contains(err.Error(), "newer convergence failure") {
+		t.Fatalf("convergence error = %v, want injected newer failure", err)
+	}
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "newer convergence failure") {
+		t.Fatalf("bootstrap cleared newer convergence failure: %q", got)
 	}
 }
 

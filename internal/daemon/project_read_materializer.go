@@ -327,6 +327,15 @@ func (m *projectReadMaterializer) convergeCanonical(ctx context.Context) (protoc
 	if m == nil || m.authority == nil {
 		return protocol.MaterializedSnapshotMetadata{}, errors.New("project read materializer authority unavailable")
 	}
+	unlock, err := m.lockCanonical(ctx, "project_read.converge")
+	if err != nil {
+		return m.snapshotMetadata(), err
+	}
+	defer unlock()
+	return m.convergeCanonicalLocked(ctx)
+}
+
+func (m *projectReadMaterializer) convergeCanonicalLocked(ctx context.Context) (protocol.MaterializedSnapshotMetadata, error) {
 	for {
 		cursor := m.snapshotMetadata().DeliveryCursor
 		batch, err := m.authority.List(ctx, protocol.DefaultProjectID, cursor, projectReadMaterializerBatchSize)
@@ -336,7 +345,7 @@ func (m *projectReadMaterializer) convergeCanonical(ctx context.Context) (protoc
 		if batch.DeliveryToCursor == cursor {
 			return m.snapshotMetadata(), nil
 		}
-		if _, err := m.applyCanonical(ctx, batch); err != nil {
+		if _, err := m.applyCanonicalBatch(ctx, batch); err != nil {
 			var verification *protocol.ProjectionVerificationError
 			if errors.As(err, &verification) && verification.Kind == protocol.ProjectionVerificationOverlap && m.snapshotMetadata().DeliveryCursor > cursor {
 				continue
