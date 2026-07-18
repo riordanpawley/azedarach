@@ -375,16 +375,24 @@ func (c *Client) ProjectionSnapshotAt(ctx context.Context, projectID string, cur
 	if err != nil {
 		return domain.ProjectionSnapshot{}, c.projectionReadError("read projection snapshot sources", err)
 	}
+	var sourceReader projectionDeltaRows = sourceRows
+	if c.projectionSnapshotSourceRowsHook != nil {
+		sourceReader = c.projectionSnapshotSourceRowsHook(sourceReader)
+	}
+	defer sourceReader.Close()
 	var sourceDeltas []domain.ProjectionDelta
-	for sourceRows.Next() {
-		delta, err := scanProjectionDelta(sourceRows)
+	for sourceReader.Next() {
+		delta, err := scanProjectionDelta(sourceReader)
 		if err != nil {
-			sourceRows.Close()
+			sourceReader.Close()
 			return domain.ProjectionSnapshot{}, c.projectionReadError("scan projection snapshot source", err)
 		}
 		sourceDeltas = append(sourceDeltas, delta)
 	}
-	if err := sourceRows.Close(); err != nil {
+	if err := sourceReader.Err(); err != nil {
+		return domain.ProjectionSnapshot{}, c.projectionReadError("iterate projection snapshot sources", err)
+	}
+	if err := sourceReader.Close(); err != nil {
 		return domain.ProjectionSnapshot{}, c.projectionReadError("close projection snapshot sources", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -533,6 +541,13 @@ func projectionHead(ctx context.Context, q interface {
 }
 
 type projectionDeltaScanner interface{ Scan(...any) error }
+
+type projectionDeltaRows interface {
+	projectionDeltaScanner
+	Next() bool
+	Err() error
+	Close() error
+}
 
 func scanProjectionDelta(scanner projectionDeltaScanner) (domain.ProjectionDelta, error) {
 	var delta domain.ProjectionDelta

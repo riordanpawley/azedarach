@@ -853,6 +853,7 @@ type Client struct {
 	mailboxProjectionFailureHook       func(stage string) error
 	projectionDeltaChecksumRepairHook  func(stage string) error
 	projectionDeltaReadHook            func()
+	projectionSnapshotSourceRowsHook   func(projectionDeltaRows) projectionDeltaRows
 	projectionWatchActive              atomic.Int64
 	projectionWatchStarted             atomic.Uint64
 	projectionWatchCompleted           atomic.Uint64
