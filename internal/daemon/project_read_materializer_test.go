@@ -1062,6 +1062,50 @@ func TestProjectReadMaterializerBootstrapCannotClearNewerConvergenceFailure(t *t
 	}
 }
 
+func TestProjectReadMaterializerBootstrapCannotClearCanceledQueuedConvergence(t *testing.T) {
+	client, _ := newTestIssueClient(t)
+	ctx := context.Background()
+	if _, err := client.Create(ctx, issues.CreateTaskParams{Title: "bootstrap cancellation fence", Type: domain.TypeTask, Status: domain.StatusInReview}); err != nil {
+		t.Fatal(err)
+	}
+	hydrateEntered := make(chan struct{})
+	releaseHydrate := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseHydrate) }) }
+	t.Cleanup(release)
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(client), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		close(hydrateEntered)
+		<-releaseHydrate
+		return tasks, nil
+	})
+	bootstrapDone := make(chan error, 1)
+	go func() { bootstrapDone <- materializer.bootstrap(ctx) }()
+	<-hydrateEntered
+	queued := make(chan struct{})
+	var queuedOnce sync.Once
+	convergeCtx, cancelConvergence := context.WithCancel(withProjectReadCanonicalQueuedHookForTest(ctx, func(string) { queuedOnce.Do(func() { close(queued) }) }))
+	convergeDone := make(chan error, 1)
+	go func() {
+		_, _, convergeErr := materializer.convergeMutation(convergeCtx, 2)
+		convergeDone <- convergeErr
+	}()
+	<-queued
+	cancelConvergence()
+	if err := <-convergeDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("queued convergence error = %v, want context canceled", err)
+	}
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, context.Canceled.Error()) {
+		t.Fatalf("queued convergence did not publish unavailable health: %q", got)
+	}
+	release()
+	if err := <-bootstrapDone; err != nil {
+		t.Fatal(err)
+	}
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, context.Canceled.Error()) {
+		t.Fatalf("bootstrap cleared canceled queued convergence: %q", got)
+	}
+}
+
 func TestSyncUserProjectionMaterializedIssuesPropagatesBoundedCurrentState(t *testing.T) {
 	ctx := context.Background()
 	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))

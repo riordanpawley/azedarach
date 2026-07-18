@@ -83,6 +83,7 @@ type projectReadMaterializer struct {
 	mutationConvergenceSequence uint64
 	mutationConvergenceRevision uint64
 	mutationConvergenceAttempt  uint64
+	mutationConvergenceResult   uint64
 	projectID        string
 	authority        *ProjectionDeltaAuthority
 	hydrate          func(context.Context, []domain.Task) ([]domain.Task, error)
@@ -178,6 +179,7 @@ func (m *projectReadMaterializer) bootstrap(ctx context.Context) error {
 	if m == nil {
 		return errors.New("project read materializer authority unavailable")
 	}
+	convergenceResult := m.mutationConvergenceResultEpoch()
 	unlock, err := m.lockUpdate(ctx, "project_read.bootstrap")
 	if err != nil {
 		return err
@@ -229,7 +231,7 @@ func (m *projectReadMaterializer) bootstrap(ctx context.Context) error {
 	}
 	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, hydrated)
 	metadata := materializedMetadata(snapshot.Cursor, snapshot.HeadCursor, snapshot.Projector, sources, issueKeys.sum(), runtimeKeys.sum(), snapshot.Health)
-	m.replaceBootstrap(canonical, hydrated, metadata, issueKeys, runtimeKeys)
+	m.replaceBootstrapAfterConvergenceResult(canonical, hydrated, metadata, issueKeys, runtimeKeys, convergenceResult)
 	return nil
 }
 
@@ -561,9 +563,16 @@ func checkpointMaterializedTasks(canonical, hydrated map[string]domain.Task) (ke
 }
 
 func (m *projectReadMaterializer) replaceBootstrap(canonical, tasks map[string]domain.Task, metadata protocol.MaterializedSnapshotMetadata, issueKeys, runtimeKeys keyedCheckpoint) {
+	m.replaceBootstrapAfterConvergenceResult(canonical, tasks, metadata, issueKeys, runtimeKeys, m.mutationConvergenceResultEpoch())
+}
+
+func (m *projectReadMaterializer) replaceBootstrapAfterConvergenceResult(canonical, tasks map[string]domain.Task, metadata protocol.MaterializedSnapshotMetadata, issueKeys, runtimeKeys keyedCheckpoint, convergenceResult uint64) {
 	m.mu.Lock()
 	for issueID, worktree := range m.worktrees {
 		runtimeKeys.add("worktree", issueID, worktree)
+	}
+	if m.mutationConvergenceResult > convergenceResult && strings.HasPrefix(m.metadata.Health, "stale: committed mutation convergence:") {
+		metadata.Health = m.metadata.Health
 	}
 	metadata.IssueChecksum = issueKeys.sum()
 	metadata.RuntimeChecksum = runtimeKeys.sum()
@@ -599,6 +608,7 @@ func (m *projectReadMaterializer) finishMutationConvergence(revision, attempt ui
 	if revision != m.mutationConvergenceRevision || attempt != m.mutationConvergenceAttempt {
 		return false
 	}
+	m.mutationConvergenceResult++
 	if convergenceErr != nil {
 		m.metadata.Health = "stale: committed mutation convergence: " + convergenceErr.Error()
 	} else if strings.HasPrefix(m.metadata.Health, "stale: committed mutation convergence:") {
@@ -606,6 +616,12 @@ func (m *projectReadMaterializer) finishMutationConvergence(revision, attempt ui
 	}
 	m.metadata.SemanticChecksum = joinedMaterializedChecksum(m.metadata)
 	return true
+}
+
+func (m *projectReadMaterializer) mutationConvergenceResultEpoch() uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.mutationConvergenceResult
 }
 
 func (m *projectReadMaterializer) snapshotMetadata() protocol.MaterializedSnapshotMetadata {
