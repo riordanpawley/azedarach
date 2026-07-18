@@ -1203,6 +1203,7 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist tmux-only launch plan: %v%s", err, cleanupNote)), nil
 		}
 	}
+	initialActivity, initialActivitySource := initialSessionStartActivity(cmd.StartWork)
 	if cmd.StartWork {
 		if err := d.tmux.NewSessionWithCommandAndEnvironment(ctx, cmd.SessionID, worktree.Path, launchCommand, nil); err != nil {
 			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
@@ -1210,27 +1211,27 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 		}
 		launchScriptHandedOff = true
 		if err := d.setSessionContextEnv(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID); err != nil {
-			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("set session context env: %v%s", err, cleanupNote)), nil
 		}
 		if err := d.setIssueResourceSessionEnv(ctx, cmd.ProjectID, resourceCtx); err != nil {
-			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("set issue resource env: %v%s", err, cleanupNote)), nil
 		}
 		if err := d.waitForInitialManagedAgentAcknowledgement(ctx, cmd.ProjectID, cmd.SessionID, plannedAgentIncarnation, launchArtifact.PromptHandoff); err != nil {
 			launchArtifact.remove()
-			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("confirm managed agent bootstrap: %v%s", err, cleanupNote)), nil
 		}
 		d.startSessionAsyncInitCommands(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktree.Path)
 		if len(d.runtimeConfigForProject(cmd.ProjectID).SessionSyncInitCommands) > 0 {
 			if err := reportSessionStartIncarnationProgress(ctx, "init_commands", "managed agent acknowledged; configured init commands still converging", 90, plannedAgentIncarnation, launchArtifact.PromptHandoff.PromptPath); err != nil {
-				cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+				cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
 				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist acknowledged managed agent progress: %v%s", err, cleanupNote)), nil
 			}
 		} else {
 			if err := reportSessionStartIncarnationProgress(ctx, "agent_launch", "managed agent incarnation acknowledged", 90, plannedAgentIncarnation, launchArtifact.PromptHandoff.PromptPath); err != nil {
-				cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+				cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
 				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist acknowledged managed agent progress: %v%s", err, cleanupNote)), nil
 			}
 		}
@@ -1248,22 +1249,21 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 			return d.errorResponse(req, protocol.ErrorCodeInternal, sessionStartLaunchFailureMessage("tmux_launch", cmd, worktree.Path, "", false, err, cleanupNote)), nil
 		}
 		if err := d.exportSessionContextEnv(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID); err != nil {
-			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("export session context env: %v%s", err, cleanupNote)), nil
 		}
 		if err := d.exportIssueResourceSessionEnv(ctx, cmd.ProjectID, resourceCtx); err != nil {
-			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("export issue resource env: %v%s", err, cleanupNote)), nil
 		}
 		reportSessionStartProgress(ctx, "tmux_launch", "tmux session created without agent launch", 90)
 	}
 	if cmd.StartWork && sessionInitMarker.AbsolutePath != "" {
 		if err := d.waitForSessionInitReady(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, sessionInitMarker); err != nil {
-			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
 		}
 	}
-	initialActivity, initialActivitySource := initialSessionStartActivity(cmd.StartWork)
 	if err := d.applyTypedSessionLifecycleTransition(
 		ctx,
 		req,

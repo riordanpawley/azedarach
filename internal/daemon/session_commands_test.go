@@ -4209,6 +4209,18 @@ func TestSessionStartImmediateAgentExitCompensatesAndRetries(t *testing.T) {
 	sessionID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
 	tmuxRunner.onNewSession = func(startedSessionID string) {
 		tmuxRunner.sessionsWithoutPanes[startedSessionID] = true
+		now := time.Now().UTC()
+		if projectionErr := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+			ID: startedSessionID, IssueID: issueID, State: daemonstate.SessionStateStarting, UpdatedAt: now,
+		}); projectionErr != nil {
+			t.Errorf("seed concurrent starting projection: %v", projectionErr)
+		}
+		if _, _, observationErr := runtimeStore.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+			ProjectID: projectID, SessionID: startedSessionID, ObservedState: daemonstate.SessionStateRunning,
+			Activity: "busy", ActivitySource: "tmux-observer", UpdatedAt: now, ObservedVersion: now.UnixNano(),
+		}); observationErr != nil {
+			t.Errorf("seed concurrent tmux observation: %v", observationErr)
+		}
 	}
 
 	failed, err := d.handleSessionStartDirect(ctx, req)
@@ -4221,8 +4233,8 @@ func TestSessionStartImmediateAgentExitCompensatesAndRetries(t *testing.T) {
 	if tmuxRunner.sessions[sessionID] {
 		t.Fatalf("failed bootstrap session %s survived compensation", sessionID)
 	}
-	if projection, found, projectionErr := runtimeStore.GetSessionState(ctx, projectID, sessionID); projectionErr != nil || (found && projection.ObservedState == daemonstate.SessionStateRunning) {
-		t.Fatalf("failed bootstrap projection = %+v, found=%t err=%v", projection, found, projectionErr)
+	if projection, found, projectionErr := runtimeStore.GetSessionState(ctx, projectID, sessionID); projectionErr != nil || !found || projection.State != daemonstate.SessionStateStopped || projection.ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("failed bootstrap projection = %+v, found=%t err=%v; want durable stopped compensation", projection, found, projectionErr)
 	}
 
 	tmuxRunner.onNewSession = nil
