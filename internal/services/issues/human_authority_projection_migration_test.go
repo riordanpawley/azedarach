@@ -38,21 +38,43 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = beforeDB.QueryRow(`SELECT COUNT(*) FROM daemon_session_projections`).Scan(&beforeSessionIntents); err != nil {
 				t.Fatal(err)
 			}
-			if err = beforeDB.QueryRow(`SELECT COUNT(*) FROM daemon_session_projections AS worker
-				WHERE worker.role='worker' AND worker.scope_kind='issue' AND instr(worker.session_id,'.pane-')=0
-					AND EXISTS (
-						SELECT 1 FROM daemon_session_projections AS rooted
-						WHERE rooted.project_id=worker.project_id AND rooted.session_id=worker.session_id
-							AND rooted.role='orchestrator' AND rooted.scope_kind='orchestration'
-							AND rooted.scope_id<>'project' AND rooted.scope_id=worker.issue_id
-							AND worker.scope_id=worker.issue_id
-					)`).Scan(&beforeRetirableWorkers); err != nil {
+			var rootedRoleColumns int
+			if err = beforeDB.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_session_projections') WHERE name IN ('role','scope_kind','scope_id')`).Scan(&rootedRoleColumns); err != nil {
 				t.Fatal(err)
+			}
+			if rootedRoleColumns == 3 {
+				if err = beforeDB.QueryRow(`SELECT COUNT(*) FROM daemon_session_projections AS worker
+					WHERE worker.role='worker' AND worker.scope_kind='issue' AND instr(worker.session_id,'.pane-')=0
+						AND EXISTS (
+							SELECT 1 FROM daemon_session_projections AS rooted
+							WHERE rooted.project_id=worker.project_id AND rooted.session_id=worker.session_id
+								AND rooted.role='orchestrator' AND rooted.scope_kind='orchestration'
+								AND rooted.scope_id<>'project' AND rooted.scope_id=worker.issue_id
+								AND worker.scope_id=worker.issue_id
+						)`).Scan(&beforeRetirableWorkers); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				// Pre-role root databases can contain legacy global session rows whose
+				// issue authority no longer exists. The canonical migration removes
+				// those stale derived rows; count them explicitly in the preservation
+				// baseline instead of treating removal as user-data loss.
+				if err = beforeDB.QueryRow(`SELECT COUNT(*) FROM daemon_session_projections AS projection
+					LEFT JOIN issues ON issues.id=projection.issue_id
+					WHERE issues.id IS NULL`).Scan(&beforeRetirableWorkers); err != nil {
+					t.Fatal(err)
+				}
 			}
 			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM decisions`).Scan(&beforeDecisions)
 			_ = beforeDB.QueryRow(`SELECT COUNT(*) FROM decision_audit_log`).Scan(&beforeDecisionAudits)
-			if err = beforeDB.QueryRow(`SELECT COUNT(*) FROM issue_attachments`).Scan(&beforeAttachments); err != nil {
+			var attachmentTableExists int
+			if err = beforeDB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='issue_attachments'`).Scan(&attachmentTableExists); err != nil {
 				t.Fatal(err)
+			}
+			if attachmentTableExists == 1 {
+				if err = beforeDB.QueryRow(`SELECT COUNT(*) FROM issue_attachments`).Scan(&beforeAttachments); err != nil {
+					t.Fatal(err)
+				}
 			}
 			_ = beforeDB.Close()
 
@@ -175,7 +197,7 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 				t.Fatalf("row preservation issues=%d/%d custom_views=%d/%d decisions=%d/%d decision_audits=%d/%d attachments=%d/%d", beforeIssues, afterIssues, beforeCustom, afterCustom, beforeDecisions, afterDecisions, beforeDecisionAudits, afterDecisionAudits, beforeAttachments, afterAttachments)
 			}
 			if want := beforeSessionIntents - beforeRetirableWorkers; afterSessionIntents != want {
-				t.Fatalf("session intent convergence before=%d retirable_workers=%d after=%d want=%d", beforeSessionIntents, beforeRetirableWorkers, afterSessionIntents, want)
+				t.Fatalf("session intent convergence before=%d repairable_rows=%d after=%d want=%d", beforeSessionIntents, beforeRetirableWorkers, afterSessionIntents, want)
 			}
 			var attachmentIssueID string
 			if err = db.QueryRow(`SELECT issue_id FROM issue_attachments ORDER BY issue_id LIMIT 1`).Scan(&attachmentIssueID); err == nil {

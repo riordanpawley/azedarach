@@ -1218,6 +1218,15 @@ func TestRuntimeStateStoreRealProjectDatabaseMigrationClones(t *testing.T) {
 			rowCounts := make(map[string]int)
 			retirableWorkers := 0
 			for _, table := range []string{sessionStateTable, sessionObservationTable} {
+				var exists int
+				if err := before.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&exists); err != nil {
+					_ = before.Close()
+					t.Fatalf("inspect %s before runtime-store open: %v", table, err)
+				}
+				if exists == 0 {
+					rowCounts[table] = 0
+					continue
+				}
 				var count int
 				if err := before.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
 					_ = before.Close()
@@ -1225,7 +1234,13 @@ func TestRuntimeStateStoreRealProjectDatabaseMigrationClones(t *testing.T) {
 				}
 				rowCounts[table] = count
 			}
-			if err := before.QueryRow(`SELECT COUNT(*) FROM ` + sessionStateTable + ` AS worker
+			var rootedRoleColumns int
+			if err := before.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('` + sessionStateTable + `') WHERE name IN ('role','scope_kind','scope_id')`).Scan(&rootedRoleColumns); err != nil {
+				_ = before.Close()
+				t.Fatalf("inspect rooted role columns before runtime-store open: %v", err)
+			}
+			if rootedRoleColumns == 3 {
+				if err := before.QueryRow(`SELECT COUNT(*) FROM ` + sessionStateTable + ` AS worker
 				WHERE worker.role='worker' AND worker.scope_kind='issue' AND instr(worker.session_id,'.pane-')=0
 					AND EXISTS (
 						SELECT 1 FROM ` + sessionStateTable + ` AS rooted
@@ -1234,8 +1249,9 @@ func TestRuntimeStateStoreRealProjectDatabaseMigrationClones(t *testing.T) {
 							AND rooted.scope_id<>'project' AND rooted.scope_id=worker.issue_id
 							AND worker.scope_id=worker.issue_id
 					)`).Scan(&retirableWorkers); err != nil {
-				_ = before.Close()
-				t.Fatalf("count retirable rooted worker intents: %v", err)
+					_ = before.Close()
+					t.Fatalf("count retirable rooted worker intents: %v", err)
+				}
 			}
 			if err := before.Close(); err != nil {
 				t.Fatalf("close project database clone read-only: %v", err)
