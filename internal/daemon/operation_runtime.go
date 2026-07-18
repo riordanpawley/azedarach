@@ -475,7 +475,7 @@ func (r *operationRuntime) handleOperationSubmit(ctx context.Context, req protoc
 		spanErr = err
 		return r.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error())
 	}
-	if recovered, found, recoverErr := r.reconcileMatchingInterruptedOperation(ctx, submitReq); recoverErr != nil {
+	if recovered, found, recoverErr := r.reconcileMatchingInterruptedOperation(ctx, submitReq, body.Payload); recoverErr != nil {
 		spanErr = recoverErr
 		return r.errorResponse(req, protocol.ErrorCodeInternal, recoverErr.Error())
 	} else if found {
@@ -522,8 +522,8 @@ func (r *operationRuntime) handleOperationSubmit(ctx context.Context, req protoc
 	return r.operationSubmitResponse(req, body.Payload, submitResult)
 }
 
-func (r *operationRuntime) reconcileMatchingInterruptedOperation(ctx context.Context, req daemonops.SubmitRequest) (daemonops.Record, bool, error) {
-	if req.Kind != protocol.CommandSessionRestartAll || req.DedupeKey == "" || r.recoverInterrupted == nil || r.operationStore == nil {
+func (r *operationRuntime) reconcileMatchingInterruptedOperation(ctx context.Context, req daemonops.SubmitRequest, payload []byte) (daemonops.Record, bool, error) {
+	if req.Kind != protocol.CommandSessionRestartAll || r.recoverInterrupted == nil || r.operationStore == nil {
 		return daemonops.Record{}, false, nil
 	}
 	r.interruptedMu.Lock()
@@ -541,7 +541,7 @@ func (r *operationRuntime) reconcileMatchingInterruptedOperation(ctx context.Con
 		if _, retryable := r.retryableInterrupted[record.ID]; !retryable {
 			continue
 		}
-		if record.DedupeKey != req.DedupeKey {
+		if !sessionRestartRecoveryRequestMatches(record, req.ProjectID, payload) {
 			conflictingID = record.ID
 			continue
 		}
@@ -576,6 +576,35 @@ func (r *operationRuntime) reconcileMatchingInterruptedOperation(ctx context.Con
 		return daemonops.Record{}, true, fmt.Errorf("interrupted restart operation %s must be recovered before a different restart request", conflictingID)
 	}
 	return daemonops.Record{}, false, nil
+}
+
+func sessionRestartRecoveryRequestMatches(record daemonops.Record, submittedProjectID string, payload []byte) bool {
+	batch, ok := decodeSessionRestartBatchPlan(record)
+	if !ok {
+		return false
+	}
+	var submitted protocol.SessionRestartAllRequestBody
+	if err := json.Unmarshal(payload, &submitted); err != nil {
+		return false
+	}
+	if strings.TrimSpace(submitted.ProjectID.String()) != "" {
+		submittedProjectID = submitted.ProjectID.String()
+	}
+	durableProjectID := batch.Request.ProjectID.String()
+	if strings.TrimSpace(durableProjectID) == "" {
+		durableProjectID = record.ProjectID
+	}
+	if protocol.NormalizeProjectID(submittedProjectID) != protocol.NormalizeProjectID(durableProjectID) ||
+		submitted.ForceBusy != batch.Request.ForceBusy || submitted.Yolo != batch.Request.Yolo ||
+		len(submitted.ImagePaths) != len(batch.Request.ImagePaths) {
+		return false
+	}
+	for i := range submitted.ImagePaths {
+		if submitted.ImagePaths[i] != batch.Request.ImagePaths[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *operationRuntime) operationSubmitResponse(req protocol.RequestEnvelope, payload []byte, submitResult daemonops.SubmitResult) protocol.ResponseEnvelope {

@@ -832,7 +832,8 @@ func TestOperationRuntimeResubmissionRetriesRecoveredProjectionWithoutSecondResp
 			return testResponse(req, protocol.SessionRestartAllResponseBody{}), nil
 		},
 	})
-	submitReq, err := first.buildSubmitRequest(protocol.CommandSessionRestartAll, target.ProjectID, payload, operationSubmitOverrides{})
+	const explicitDedupe = "known-restart-recovery"
+	submitReq, err := first.buildSubmitRequest(protocol.CommandSessionRestartAll, target.ProjectID, payload, operationSubmitOverrides{DedupeKey: explicitDedupe})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -878,14 +879,14 @@ func TestOperationRuntimeResubmissionRetriesRecoveredProjectionWithoutSecondResp
 	}
 	conflictingPayload := mustJSON(t, protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(target.ProjectID), ForceBusy: true})
 	conflictResp := restarted.Handle(context.Background(), testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
-		ProjectID: naming.ProjectID(target.ProjectID), Kind: protocol.CommandSessionRestartAll, Payload: conflictingPayload,
+		ProjectID: naming.ProjectID(target.ProjectID), Kind: protocol.CommandSessionRestartAll, Payload: conflictingPayload, DedupeKey: explicitDedupe,
 	}))
 	if conflictResp.OK || runnerCalls != 0 {
 		t.Fatalf("conflicting resubmission response=%+v runner_calls=%d, want fail-closed retained authority", conflictResp, runnerCalls)
 	}
 
 	resp := restarted.Handle(context.Background(), testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
-		ProjectID: naming.ProjectID(target.ProjectID), Kind: protocol.CommandSessionRestartAll, Payload: payload,
+		ProjectID: naming.ProjectID(target.ProjectID), Kind: protocol.CommandSessionRestartAll, Payload: payload, DedupeKey: explicitDedupe,
 	}))
 	if !resp.OK {
 		t.Fatalf("resubmit response=%+v", resp)
@@ -907,6 +908,40 @@ func TestOperationRuntimeResubmissionRetriesRecoveredProjectionWithoutSecondResp
 	respawns, _, _ := runner.snapshot()
 	if respawns != 0 {
 		t.Fatalf("respawns=%d, want no second respawn", respawns)
+	}
+}
+
+func TestSessionRestartRecoveryRequestMatchesExactDurableRequest(t *testing.T) {
+	target := sessionRestartAllTarget{ProjectID: "project", SessionID: "az-1", IssueID: "one", Activity: "idle"}
+	plan := recoveryPlanForTarget(target, "observe")
+	batch := sessionRestartBatchPlan{
+		Version: sessionRestartBatchPlanVersion, ProjectID: target.ProjectID, ProjectIDs: []string{target.ProjectID},
+		Request: protocol.SessionRestartAllRequestBody{
+			ProjectID: naming.ProjectID(target.ProjectID), ForceBusy: true, Yolo: true, ImagePaths: []string{"one.png", "two.png"},
+		},
+		Targets: []sessionRestartAllTarget{target}, Current: &plan, Stage: sessionRestartLifecycleVerifying,
+	}
+	record := restartRecoveryBatchRecord(t, batch)
+	tests := []struct {
+		name      string
+		projectID string
+		request   protocol.SessionRestartAllRequestBody
+		want      bool
+	}{
+		{name: "exact", projectID: target.ProjectID, request: batch.Request, want: true},
+		{name: "outer project supplies omitted payload project", projectID: target.ProjectID, request: protocol.SessionRestartAllRequestBody{ForceBusy: true, Yolo: true, ImagePaths: []string{"one.png", "two.png"}}, want: true},
+		{name: "project", projectID: "other", request: protocol.SessionRestartAllRequestBody{ForceBusy: true, Yolo: true, ImagePaths: []string{"one.png", "two.png"}}},
+		{name: "force busy", projectID: target.ProjectID, request: protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(target.ProjectID), Yolo: true, ImagePaths: []string{"one.png", "two.png"}}},
+		{name: "yolo", projectID: target.ProjectID, request: protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(target.ProjectID), ForceBusy: true, ImagePaths: []string{"one.png", "two.png"}}},
+		{name: "image order", projectID: target.ProjectID, request: protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(target.ProjectID), ForceBusy: true, Yolo: true, ImagePaths: []string{"two.png", "one.png"}}},
+		{name: "image count", projectID: target.ProjectID, request: protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(target.ProjectID), ForceBusy: true, Yolo: true, ImagePaths: []string{"one.png"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sessionRestartRecoveryRequestMatches(record, tt.projectID, mustJSON(t, tt.request)); got != tt.want {
+				t.Fatalf("request match=%t, want %t", got, tt.want)
+			}
+		})
 	}
 }
 
