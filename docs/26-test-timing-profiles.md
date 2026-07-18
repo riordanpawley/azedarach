@@ -193,7 +193,7 @@ and hardware differences, so a local budget violation is written to
 
 `.github/workflows/controlled-timing.yml` is deliberately manual and targets
 the versioned self-hosted label `azedarach-timing-v1`. The runner must be a
-dedicated 8-vCPU/16-GiB machine image with Go 1.24.7, no concurrent Go
+dedicated 8-vCPU/16-GiB machine image with Go 1.25.7, no concurrent Go
 validation, and a clean Go test-result cache before each sample. The daemon
 timing-capacity lease supplies exclusive capacity admission and rejects
 observed overlapping Go work.

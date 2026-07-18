@@ -69,6 +69,7 @@ func TestProjectReadMaterializerTransientWatchErrorRetainsLastGoodWithoutLegacyE
 		t.Fatal(err)
 	}
 	var watchCalls, legacyExports atomic.Int32
+	watchFailed := make(chan protocol.MaterializedSnapshotMetadata, 1)
 	store := watchErrorProjectionStore{projectionDeltaStore: client, watch: func(context.Context, string, uint64, int) ([]domain.ProjectionDelta, uint64, error) {
 		watchCalls.Add(1)
 		return nil, 0, fmt.Errorf("%w: transient watch", domain.ErrProjectionRetryable)
@@ -85,19 +86,34 @@ func TestProjectReadMaterializerTransientWatchErrorRetainsLastGoodWithoutLegacyE
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
-		materializer.run(runCtx, nil)
+		materializer.run(runCtx, func(metadata protocol.MaterializedSnapshotMetadata) {
+			select {
+			case watchFailed <- metadata:
+			default:
+			}
+		})
 		close(done)
 	}()
-	deadline := time.Now().Add(time.Second)
-	for watchCalls.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
+	failedMeta := <-watchFailed
 	after, afterMeta := materializer.snapshot()
 	if watchCalls.Load() == 0 || legacyExports.Load() != 1 {
 		t.Fatalf("watch calls=%d legacy exports=%d, want transient retry without re-export", watchCalls.Load(), legacyExports.Load())
 	}
 	if len(after) != 1 || after[0].ID.String() != created || checksumJSON(after) != checksumJSON(before) || afterMeta.DeliveryCursor != beforeMeta.DeliveryCursor || !strings.HasPrefix(afterMeta.Health, "stale:") {
 		t.Fatalf("transient watch changed last-good materialization: before=%+v/%+v after=%+v/%+v", before, beforeMeta, after, afterMeta)
+	}
+	if failedMeta.Health != afterMeta.Health {
+		t.Fatalf("callback health=%q snapshot health=%q", failedMeta.Health, afterMeta.Health)
+	}
+	d := &Daemon{materializers: map[string]*projectReadMaterializer{"project": materializer}, materializersStarted: true}
+	served, servedMeta, err := d.projectReadSnapshot("project")
+	if err != nil || len(served) != 1 || checksumJSON(served) != checksumJSON(before) || servedMeta.Health != afterMeta.Health {
+		t.Fatalf("retryable stale snapshot not served: tasks=%+v metadata=%+v err=%v", served, servedMeta, err)
+	}
+	materializer.markUnhealthy(errors.New("structural projection corruption"))
+	served, servedMeta, err = d.projectReadSnapshot("project")
+	if err == nil || served != nil || !strings.Contains(servedMeta.Health, "structural projection corruption") {
+		t.Fatalf("non-retryable failure did not fail closed: tasks=%+v metadata=%+v err=%v", served, servedMeta, err)
 	}
 	cancel()
 	<-done
