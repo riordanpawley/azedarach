@@ -27,12 +27,6 @@ import (
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/naming"
-	"github.com/riordanpawley/azedarach/internal/processidentity"
-)
-
-const (
-	daemonOwnerPIDEnv        = processidentity.OwnerPIDEnv
-	daemonOwnerStartTokenEnv = processidentity.OwnerStartTokenEnv
 )
 
 // Launcher starts/replaces the singleton daemon process for a user-global socket.
@@ -587,12 +581,6 @@ func (l *Launcher) startWithLifecycleLockModeRetained(ctx context.Context, daemo
 			return nil, errors.New("daemon lock owner appeared before replacement successor startup; refusing unverified recovery termination")
 		}
 	}
-	ownedCommand, err := l.commandWithScopedOwner(daemonCmd)
-	if err != nil {
-		return nil, err
-	}
-	daemonCmd = ownedCommand
-
 	openLogFile := l.openLogFile
 	if openLogFile == nil {
 		openLogFile = openDaemonLog
@@ -653,47 +641,6 @@ func (l *Launcher) startWithLifecycleLockModeRetained(ctx context.Context, daemo
 		}
 	}
 	return process, nil
-}
-
-func (l *Launcher) commandWithScopedOwner(command daemonCommand) (daemonCommand, error) {
-	if l == nil {
-		return command, nil
-	}
-	if !config.UseScopedDaemonRuntimeFor(l.RepoDir) {
-		environment := command.env
-		if environment == nil {
-			environment = os.Environ()
-		}
-		command.env = environmentWithoutKeys(environment, daemonOwnerPIDEnv, daemonOwnerStartTokenEnv)
-		return command, nil
-	}
-	ownerPIDText := strings.TrimSpace(os.Getenv(daemonOwnerPIDEnv))
-	if ownerPIDText == "" && strings.TrimSpace(os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")) == "managed-run" {
-		ownerPIDText = strconv.Itoa(os.Getpid())
-	}
-	if ownerPIDText == "" {
-		return command, nil
-	}
-	ownerPID, err := strconv.Atoi(ownerPIDText)
-	if err != nil || ownerPID <= 1 {
-		return daemonCommand{}, fmt.Errorf("invalid scoped daemon owner PID %q", ownerPIDText)
-	}
-	owner, present, err := processidentity.Capture(ownerPID)
-	if err != nil {
-		return daemonCommand{}, fmt.Errorf("capture scoped daemon owner %d: %w", ownerPID, err)
-	}
-	if !present {
-		return daemonCommand{}, fmt.Errorf("scoped daemon owner %d is not alive", ownerPID)
-	}
-	environment := command.env
-	if environment == nil {
-		environment = os.Environ()
-	}
-	command.env = environmentWithValues(environment, map[string]string{
-		daemonOwnerPIDEnv:        strconv.Itoa(owner.PID),
-		daemonOwnerStartTokenEnv: owner.StartToken,
-	})
-	return command, nil
 }
 
 func (l *Launcher) waitForSocketReadyWithin(timeout time.Duration) error {
@@ -1573,7 +1520,7 @@ func (l *Launcher) startReplacementWithRollback(ctx context.Context, daemonCmd, 
 }
 
 func preflightReplacementCommand(ctx context.Context, command daemonCommand) error {
-	args := append(append([]string(nil), command.args...), "--preflight")
+	args := append(append([]string(nil), command.args...), "--version")
 	probe := exec.CommandContext(ctx, command.executable, args...)
 	probe.Dir = command.dir
 	probe.Env = command.env
@@ -1595,12 +1542,8 @@ func preflightReplacementCommand(ctx context.Context, command daemonCommand) err
 	if err != nil {
 		return fmt.Errorf("run candidate compatibility preflight: %w (stdout %q, stderr %q)", err, strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()))
 	}
-	var report protocol.DaemonExecutablePreflight
-	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
-		return fmt.Errorf("decode candidate preflight report: %w (stdout %q, stderr %q)", err, strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()))
-	}
-	if !report.Accepts(protocol.CurrentVersion) {
-		return fmt.Errorf("candidate %q supports protocol %d..%d, incompatible with client protocol %d", report.DaemonVersion, report.MinProtocolVersion, report.MaxProtocolVersion, protocol.CurrentVersion)
+	if strings.TrimSpace(stdout.String()) == "" {
+		return fmt.Errorf("candidate version preflight returned empty output (stderr %q)", strings.TrimSpace(stderr.String()))
 	}
 	return nil
 }
@@ -1755,41 +1698,6 @@ func environmentWithPathPrefix(environment []string, prefix string) []string {
 		out = append(out, entry)
 	}
 	return append(out, "PATH="+config.PrependPathEntry(pathValue, prefix))
-}
-
-func environmentWithValues(environment []string, values map[string]string) []string {
-	out := make([]string, 0, len(environment)+len(values))
-	for _, entry := range environment {
-		key, _, found := strings.Cut(entry, "=")
-		if found {
-			if _, replaced := values[key]; replaced {
-				continue
-			}
-		}
-		out = append(out, entry)
-	}
-	for key, value := range values {
-		out = append(out, key+"="+value)
-	}
-	return out
-}
-
-func environmentWithoutKeys(environment []string, keys ...string) []string {
-	removed := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		removed[key] = struct{}{}
-	}
-	out := make([]string, 0, len(environment))
-	for _, entry := range environment {
-		key, _, found := strings.Cut(entry, "=")
-		if found {
-			if _, remove := removed[key]; remove {
-				continue
-			}
-		}
-		out = append(out, entry)
-	}
-	return out
 }
 
 func daemonBinaryNearCurrentExecutable() string {
