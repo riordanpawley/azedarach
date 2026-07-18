@@ -30,9 +30,10 @@ func (c *Client) subscribeProjectionDeltaNotifier(expectedGeneration uint64) (*p
 			return nil, nil, err
 		}
 		c.projectionNotifier = notifier
+		c.projectionNotifierClose = &projectionDeltaNotifierCloseState{}
 		c.projectionNotifierSubscriptions = make(map[*projectionDeltaSubscription]struct{})
 		c.projectionNotifierWG.Add(1)
-		go c.runProjectionDeltaNotifier(notifier)
+		go c.runProjectionDeltaNotifier(notifier, c.projectionNotifierClose)
 	}
 
 	subscription := &projectionDeltaSubscription{
@@ -48,18 +49,20 @@ func (c *Client) subscribeProjectionDeltaNotifier(expectedGeneration uint64) (*p
 	return subscription, unsubscribe, nil
 }
 
-func (c *Client) runProjectionDeltaNotifier(notifier projectionDeltaNotifier) {
+func (c *Client) runProjectionDeltaNotifier(notifier projectionDeltaNotifier, closeState *projectionDeltaNotifierCloseState) {
 	defer c.projectionNotifierWG.Done()
 	defer func() {
+		_ = closeProjectionDeltaNotifierInstance(notifier, closeState)
 		c.projectionNotifierMu.Lock()
 		if c.projectionNotifier == notifier {
 			c.projectionNotifier = nil
+			c.projectionNotifierClose = nil
+			for subscription := range c.projectionNotifierSubscriptions {
+				close(subscription.events)
+				close(subscription.errors)
+			}
+			c.projectionNotifierSubscriptions = nil
 		}
-		for subscription := range c.projectionNotifierSubscriptions {
-			close(subscription.events)
-			close(subscription.errors)
-		}
-		c.projectionNotifierSubscriptions = nil
 		c.projectionNotifierMu.Unlock()
 	}()
 
@@ -103,11 +106,27 @@ func (c *Client) broadcastProjectionDeltaNotification(notifierErr error) {
 func (c *Client) closeProjectionDeltaNotifier() error {
 	c.projectionNotifierMu.Lock()
 	notifier := c.projectionNotifier
+	closeState := c.projectionNotifierClose
+	if notifier != nil && closeState == nil {
+		closeState = &projectionDeltaNotifierCloseState{}
+		c.projectionNotifierClose = closeState
+	}
 	c.projectionNotifierMu.Unlock()
 	if notifier == nil {
 		return nil
 	}
-	err := notifier.Close()
+	err := closeProjectionDeltaNotifierInstance(notifier, closeState)
 	c.projectionNotifierWG.Wait()
 	return err
+}
+
+func closeProjectionDeltaNotifierInstance(notifier projectionDeltaNotifier, closeState *projectionDeltaNotifierCloseState) error {
+	if notifier == nil {
+		return nil
+	}
+	if closeState == nil {
+		closeState = &projectionDeltaNotifierCloseState{}
+	}
+	closeState.once.Do(func() { closeState.err = notifier.Close() })
+	return closeState.err
 }

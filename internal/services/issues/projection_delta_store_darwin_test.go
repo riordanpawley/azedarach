@@ -66,6 +66,73 @@ func TestProjectionDeltaWatchCancellationPreservesSQLiteProcessLocks(t *testing.
 	require.Equal(t, "acquired", runSQLiteWriteLockProbe(t, path), "second process must acquire the lock after the owner releases it")
 }
 
+func TestProjectionDeltaWatcherClosePreservesIndependentSQLitePoolLocks(t *testing.T) {
+	if os.Getenv("AZEDARACH_SQLITE_INDEPENDENT_LOCK_PROBE") == "1" {
+		probeSQLiteWriteLock(t, os.Getenv("AZEDARACH_PROJECTION_DB"))
+		return
+	}
+
+	for _, tt := range []struct {
+		name       string
+		lockDBPath func(string) string
+	}{
+		{name: "same database", lockDBPath: func(issuesDBPath string) string { return issuesDBPath }},
+		{name: "sibling database", lockDBPath: func(issuesDBPath string) string {
+			return filepath.Join(filepath.Dir(issuesDBPath), "runtime-state.db")
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			issuesDBPath := filepath.Join(dir, "azedarach.db")
+			client := NewClientAtPath(issuesDBPath, nil)
+			require.NoError(t, client.OpenProjectionDeltaStore())
+
+			lockDBPath := tt.lockDBPath(issuesDBPath)
+			lockDB, err := sql.Open("sqlite", "file:"+filepath.ToSlash(lockDBPath)+"?_pragma=busy_timeout(0)")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = lockDB.Close() })
+			lockDB.SetMaxOpenConns(1)
+			require.NoError(t, func() error {
+				_, execErr := lockDB.ExecContext(context.Background(), `CREATE TABLE lock_probe(id INTEGER PRIMARY KEY)`)
+				return execErr
+			}())
+			lockTx, err := lockDB.BeginTx(context.Background(), nil)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = lockTx.Rollback() })
+			_, err = lockTx.ExecContext(context.Background(), `INSERT INTO lock_probe(id) VALUES(1)`)
+			require.NoError(t, err)
+			require.Equal(t, "busy", runIndependentSQLiteWriteLockProbe(t, lockDBPath))
+
+			_, generation, err := client.projectionReadDBHandleWithGeneration()
+			require.NoError(t, err)
+			_, unsubscribe, err := client.subscribeProjectionDeltaNotifier(generation)
+			require.NoError(t, err)
+			unsubscribe()
+			require.NoError(t, client.CloseDB())
+
+			require.Equal(t, "busy", runIndependentSQLiteWriteLockProbe(t, lockDBPath),
+				"closing the issues watcher must not cancel locks owned by an independent live SQLite pool")
+			require.NoError(t, lockTx.Rollback())
+			require.Equal(t, "acquired", runIndependentSQLiteWriteLockProbe(t, lockDBPath))
+		})
+	}
+}
+
+func runIndependentSQLiteWriteLockProbe(t *testing.T, path string) string {
+	t.Helper()
+	command := exec.Command(os.Args[0], "-test.run=^TestProjectionDeltaWatcherClosePreservesIndependentSQLitePoolLocks$")
+	command.Env = append(os.Environ(), "AZEDARACH_SQLITE_INDEPENDENT_LOCK_PROBE=1", "AZEDARACH_PROJECTION_DB="+path)
+	output, err := command.CombinedOutput()
+	require.NoError(t, err, "lock probe failed: %s", output)
+	for _, result := range []string{"busy", "acquired"} {
+		if strings.Contains(string(output), "LOCK_RESULT="+result) {
+			return result
+		}
+	}
+	t.Fatalf("lock probe returned no result marker: %s", output)
+	return ""
+}
+
 func runSQLiteWriteLockProbe(t *testing.T, path string) string {
 	t.Helper()
 	command := exec.Command(os.Args[0], "-test.run=^TestProjectionDeltaWatchCancellationPreservesSQLiteProcessLocks$")
@@ -96,7 +163,7 @@ func probeSQLiteWriteLock(t *testing.T, path string) {
 	fmt.Println("LOCK_RESULT=acquired")
 }
 
-func TestProjectionDeltaWatchReusesDirectoryDescriptorsUntilClientClose(t *testing.T) {
+func TestProjectionDeltaWatchUsesBoundedDescriptorSafeNotifierUntilClientClose(t *testing.T) {
 	dir := t.TempDir()
 	for i := range 12 {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, fmt.Sprintf("consumer-%02d.state", i)), nil, 0o600))

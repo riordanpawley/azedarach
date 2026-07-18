@@ -866,6 +866,7 @@ type Client struct {
 	projectionDeltaChecksumRepairHook  func(stage string) error
 	projectionDeltaReadHook            func()
 	projectionWatchBeforeSubscribeHook func()
+	projectionNotifierBeforeCloseHook  func()
 	projectionSnapshotSourceRowsHook   func(projectionDeltaRows) projectionDeltaRows
 	projectionWatchActive              atomic.Int64
 	projectionWatchStarted             atomic.Uint64
@@ -873,6 +874,7 @@ type Client struct {
 	corruption                         atomic.Pointer[sqliteCorruptionState]
 	projectionNotifierMu               sync.Mutex
 	projectionNotifier                 projectionDeltaNotifier
+	projectionNotifierClose            *projectionDeltaNotifierCloseState
 	projectionNotifierSubscriptions    map[*projectionDeltaSubscription]struct{}
 	projectionNotifierWG               sync.WaitGroup
 	decisionOutboxMigrationFailureHook func(stage string) error
@@ -1003,6 +1005,9 @@ func (c *Client) withMutationLock(ctx context.Context, fn func(context.Context) 
 		spanErr = c.WithMutationLock(ctx, runWrite)
 	}
 	if spanErr == nil {
+		if err := signalProjectionDeltaNotification(c.dbPath); err != nil && c.logger != nil {
+			c.logger.Warn("failed to signal projection delta watchers after committed issue mutation", "db_path", sqliteutil.CanonicalPath(c.dbPath), "error", err)
+		}
 		c.maybeMaintainSQLiteWAL(ctx)
 	}
 	return spanErr
@@ -1437,11 +1442,12 @@ func (c *Client) CloseDB() error {
 		c.db = nil
 	}
 
-	// The shared watcher may own non-SQLite descriptors for the database,
-	// WAL, and SHM files on kqueue platforms. Close it only after every SQLite
-	// connection has released its locks and mappings. Keep the client lifecycle
-	// boundary held through notifier shutdown so a new pool generation cannot
-	// open while descriptors from the previous generation are closing.
+	// The descriptor-safe notifier watches only its dedicated signal sidecar.
+	// Keep the client lifecycle boundary held through notifier shutdown so a new
+	// pool generation cannot open while the previous notifier is closing.
+	if c.projectionNotifierBeforeCloseHook != nil {
+		c.projectionNotifierBeforeCloseHook()
+	}
 	notifierErr := c.closeProjectionDeltaNotifier()
 	if dbErr != nil {
 		return c.wrapError("close-db", "", dbErr)
