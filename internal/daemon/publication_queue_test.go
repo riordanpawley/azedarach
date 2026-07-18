@@ -1293,7 +1293,17 @@ func TestPublicationStoreRoutesRegisteredProjectIntentAtomically(t *testing.T) {
 	params := issues.IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "test", Payload: map[string]any{
 		"outcome": string(domain.ReviewOutcomeAccepted), "intent_key": operation.IntentKey, "request_fingerprint": operation.RequestFingerprint,
 	}}
-	if _, canonicalID, err := issueClient.AppendAcceptedReviewAndPublication(context.Background(), issueID, params, operation, "registered-candidate"); err != nil || canonicalID != operation.OperationID {
+	admission, err := issueClient.CaptureReviewAdmissionPin(context.Background(), issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := issueClient.ClaimOwnershipWithRuntime(context.Background(), registeredID, issueID, issues.OwnershipClaimParams{
+		OwnerID: "reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview,
+		ExpectedReviewAdmission: &admission, ReviewSourceOID: operation.SourceRevision,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, canonicalID, err := issueClient.AppendAcceptedReviewAndPublicationWithReviewAdmission(context.Background(), issueID, params, operation, "registered-candidate", admission, "", "reviewer"); err != nil || canonicalID != operation.OperationID {
 		t.Fatalf("registered atomic enqueue = (%q,%v)", canonicalID, err)
 	}
 	if _, found, err := registeredStore.PublicationOperation(context.Background(), operation.OperationID); err != nil || !found {

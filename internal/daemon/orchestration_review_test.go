@@ -432,9 +432,9 @@ func TestRequestedReviewCandidateMutationAfterExportFailsBeforeSideEffects(t *te
 	assertNoReviewAcceptanceSideEffects(t, ctx, client, issueID)
 }
 
-func TestRequestedReviewEpochReplacementFailsBeforeAcceptOrReturnSideEffects(t *testing.T) {
+func TestRequestedReviewAcceptEpochReplacementFailsBeforeSideEffects(t *testing.T) {
 	for _, rooted := range []bool{false, true} {
-		for _, kind := range []protocol.OrchestrationIntentKind{protocol.OrchestrationIntentReviewAccept, protocol.OrchestrationIntentReviewReturn} {
+		for _, kind := range []protocol.OrchestrationIntentKind{protocol.OrchestrationIntentReviewAccept} {
 			name := "project/" + string(kind)
 			if rooted {
 				name = "rooted-child/" + string(kind)
@@ -525,8 +525,8 @@ func TestRequestedReviewEpochReplacementFailsBeforeAcceptOrReturnSideEffects(t *
 	}
 }
 
-func TestRequestedReviewExactCandidateReplacementFailsBeforeAcceptOrReturnSideEffects(t *testing.T) {
-	for _, kind := range []protocol.OrchestrationIntentKind{protocol.OrchestrationIntentReviewAccept, protocol.OrchestrationIntentReviewReturn} {
+func TestRequestedReviewAcceptExactCandidateReplacementFailsBeforeSideEffects(t *testing.T) {
+	for _, kind := range []protocol.OrchestrationIntentKind{protocol.OrchestrationIntentReviewAccept} {
 		t.Run(string(kind), func(t *testing.T) {
 			ctx := context.Background()
 			repoDir := t.TempDir()

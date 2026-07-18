@@ -703,16 +703,22 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 			continue
 		}
 		if !activeValidationReturn {
-			admission, admissionErr := reviewAdmissionPinFromInspection(inspection)
-			if admissionErr != nil {
-				result.Skipped[issueID] = "claim-review: " + admissionErr.Error()
-				continue
+			claim := issues.OwnershipClaimParams{OwnerID: request.ActorID, OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview}
+			if request.Kind == protocol.OrchestrationIntentReviewAccept {
+				admission, admissionErr := reviewAdmissionPinFromInspection(inspection)
+				if admissionErr != nil {
+					result.Skipped[issueID] = "claim-review: " + admissionErr.Error()
+					continue
+				}
+				if err := a.validateReviewAdmissionInspection(ctx, projectID, inspection); err != nil {
+					result.Skipped[issueID] = "claim-review: " + err.Error()
+					continue
+				}
+				claim.ExpectedReviewAdmission = &admission
+				claim.ExpectedParentIssueID = inspection.ParentIssueID
+				claim.ReviewSourceOID = inspection.SourceOID
 			}
-			if err := a.validateReviewAdmissionInspection(ctx, projectID, inspection); err != nil {
-				result.Skipped[issueID] = "claim-review: " + err.Error()
-				continue
-			}
-			if _, err := issueClient.ClaimOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: request.ActorID, OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview, ExpectedReviewAdmission: &admission, ExpectedParentIssueID: inspection.ParentIssueID, ReviewSourceOID: inspection.SourceOID}); err != nil {
+			if _, err := issueClient.ClaimOwnershipWithRuntime(ctx, projectID, issueID, claim); err != nil {
 				result.Skipped[issueID] = "claim-review: " + err.Error()
 				continue
 			}
@@ -1267,7 +1273,7 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 		}
 	}
 	if queueAvailable && strings.EqualFold(strings.TrimSpace(target.TargetID), "base") {
-		publication, err := a.daemon.acceptAndEnqueueReviewPublication(ctx, projectID, request, inspection.IssueID, pin)
+		publication, err := a.daemon.acceptAndEnqueueReviewPublication(ctx, projectID, request, inspection.IssueID, pin, inspection)
 		if err != nil {
 			return false, fmt.Errorf("enqueue accepted review publication: %w", err)
 		}

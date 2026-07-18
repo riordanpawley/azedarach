@@ -235,8 +235,12 @@ func (d *Daemon) enqueueAcceptedReviewPublication(ctx context.Context, projectID
 	return d.startAcceptedReviewPublication(ctx, stored)
 }
 
-func (d *Daemon) acceptAndEnqueueReviewPublication(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, pin acceptedReviewPin) (domain.PublicationOperation, error) {
+func (d *Daemon) acceptAndEnqueueReviewPublication(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, pin acceptedReviewPin, inspection protocol.OrchestrationReview) (domain.PublicationOperation, error) {
 	operation, err := d.prepareAcceptedReviewPublication(ctx, projectID, request, issueID, pin)
+	if err != nil {
+		return domain.PublicationOperation{}, err
+	}
+	admission, err := reviewAdmissionPinFromInspection(inspection)
 	if err != nil {
 		return domain.PublicationOperation{}, err
 	}
@@ -259,10 +263,14 @@ func (d *Daemon) acceptAndEnqueueReviewPublication(ctx context.Context, projectI
 		"reviewed_source_oid": pin.SourceOID, "reviewed_evidence_source": pin.EvidenceSource,
 		"reviewed_evidence_event_id": pin.EvidenceEventID, "reviewed_evidence_seq": pin.EvidenceSeq,
 		"reviewed_evidence_digest": pin.EvidenceDigest, "publication_operation_id": operation.OperationID,
+		"review_epoch_event_id": inspection.ReviewEpochEventID, "review_parent_issue_id": strings.TrimSpace(inspection.ParentIssueID),
+		"review_source_oid": strings.TrimSpace(inspection.SourceOID), "review_evidence_source": strings.TrimSpace(inspection.EvidenceSource),
+		"review_evidence_event_id": inspection.EvidenceEventID, "review_evidence_seq": inspection.EvidenceSeq,
+		"review_evidence_digest": strings.TrimSpace(inspection.EvidenceDigest),
 	}
-	_, publicationOperationID, err := issueClient.AppendAcceptedReviewAndPublication(ctx, issueID, issues.IssueObservationEventParams{
+	_, publicationOperationID, err := issueClient.AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx, issueID, issues.IssueObservationEventParams{
 		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(request.Kind), Payload: payload,
-	}, operation, publicationCoalesceKey(operation))
+	}, operation, publicationCoalesceKey(operation), admission, inspection.ParentIssueID, request.ActorID)
 	if err != nil {
 		return domain.PublicationOperation{}, err
 	}

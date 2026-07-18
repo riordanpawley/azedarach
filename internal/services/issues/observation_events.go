@@ -460,7 +460,14 @@ func (c *Client) AppendIssueObservationEvent(ctx context.Context, issueID string
 // owned by the daemon-operations migration authority but shares this project
 // database specifically so no accepted base-target patch can exist without its
 // continuation intent (or vice versa).
-func (c *Client) AppendAcceptedReviewAndPublication(ctx context.Context, issueID string, params IssueObservationEventParams, operation domain.PublicationOperation, coalesceKey string) (domain.IssueObservationEvent, string, error) {
+// AppendAcceptedReviewAndPublicationWithReviewAdmission atomically requires
+// the immutable exported review episode and its reviewer lease while recording
+// both the accepted outcome and publication continuation.
+func (c *Client) AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx context.Context, issueID string, params IssueObservationEventParams, operation domain.PublicationOperation, coalesceKey string, expected ReviewAdmissionPin, expectedParentID, reviewerID string) (domain.IssueObservationEvent, string, error) {
+	return c.appendAcceptedReviewAndPublication(ctx, issueID, params, operation, coalesceKey, &expected, expectedParentID, reviewerID)
+}
+
+func (c *Client) appendAcceptedReviewAndPublication(ctx context.Context, issueID string, params IssueObservationEventParams, operation domain.PublicationOperation, coalesceKey string, expected *ReviewAdmissionPin, expectedParentID, reviewerID string) (domain.IssueObservationEvent, string, error) {
 	if params.Type != domain.IssueEventReviewCompleted || strings.TrimSpace(fmt.Sprint(params.Payload["outcome"])) != string(domain.ReviewOutcomeAccepted) {
 		return domain.IssueObservationEvent{}, "", c.wrapError("append-accepted-review-publication", issueID, errors.New("accepted review publication requires accepted review.completed event"))
 	}
@@ -486,6 +493,21 @@ func (c *Client) AppendAcceptedReviewAndPublication(ctx context.Context, issueID
 			defer func() { _ = tx.Rollback() }()
 			if err := c.requireIssueExists(ctx, tx, issueID, "append-accepted-review-publication"); err != nil {
 				return err
+			}
+			if expected != nil {
+				if err := validateReviewAdmissionPin(ctx, tx, issueID, *expected); err != nil {
+					return c.wrapError("append-accepted-review-publication", issueID, err)
+				}
+				if err := validateReviewAdmissionParent(ctx, tx, issueID, expectedParentID); err != nil {
+					return c.wrapError("append-accepted-review-publication", issueID, err)
+				}
+				lease, err := coordinationLeaseForUpdate(ctx, tx, issueID, domain.CoordinationLeaseReview)
+				if err != nil {
+					return c.wrapError("append-accepted-review-publication", issueID, err)
+				}
+				if lease == nil || lease.IsExpired(time.Now().UTC()) || !strings.EqualFold(strings.TrimSpace(lease.OwnerID), strings.TrimSpace(reviewerID)) {
+					return c.wrapError("append-accepted-review-publication", issueID, fmt.Errorf("%w: matching active review lease is required", domain.ErrConflict))
+				}
 			}
 			now := operation.CreatedAt.UTC()
 			if now.IsZero() {
