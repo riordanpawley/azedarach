@@ -388,6 +388,9 @@ type taskFollowOnMergeCandidateItem struct {
 }
 
 func (d *Daemon) sourceForTaskInvariant(invariant daemonInvariantID) daemonInvariantSource {
+	if d != nil && d.taskInvariantSourceOverride != nil {
+		return d.taskInvariantSourceOverride(invariant)
+	}
 	return sourceForInvariant(invariant)
 }
 
@@ -6208,6 +6211,10 @@ func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectI
 }
 
 func (d *Daemon) rootedOrchestrationAdmission(ctx context.Context, projectID, rootIssueID string) (domain.RootedOrchestrationAdmission, error) {
+	source := d.sourceForTaskInvariant(daemonInvariantOrchestrationRootBlockerGate)
+	if source != daemonInvariantSourceProjection {
+		return domain.RootedOrchestrationAdmission{}, fmt.Errorf("unsupported rooted dependency admission invariant source: %s", source)
+	}
 	tasks, err := d.loadTaskGraphReadinessDomainTasks(ctx, projectID, rootIssueID)
 	if err != nil {
 		return domain.RootedOrchestrationAdmission{}, fmt.Errorf("refresh rooted orchestration graph: %w", err)

@@ -850,6 +850,77 @@ func TestBlockedRootRejectsWorkerAndOrchestratorStartWithoutSideEffects(t *testi
 	}
 }
 
+func TestRootedStartRejectsUnsupportedAdmissionSourceWithoutSideEffects(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root with unsupported admission source", Type: domain.TypeEpic, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	tmuxRunner := newSessionStartTmuxRunner()
+	worktreeRunner := &worktreeCreateRunner{worktreePath: filepath.Join(t.TempDir(), rootID)}
+	manager := git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default())
+	d := &Daemon{
+		cfg:                       Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issues:                    issuesClient,
+		tmux:                      tmux.NewClient(tmuxRunner, slog.Default()),
+		session:                   daemonhandlers.NewSessionHandler(daemonstate.NewStore()),
+		sessionStore:              daemonstate.NewStore(),
+		runtimeStoresByRoot:       map[string]*daemonstate.RuntimeStateStore{repoDir: runtimeStore},
+		runtimeStoresByProject:    map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+		worktreeManagersByRoot:    map[string]*git.WorktreeManager{repoDir: manager},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager},
+		revision:                  map[string]uint64{},
+		taskInvariantSourceOverride: func(invariant daemonInvariantID) daemonInvariantSource {
+			if invariant == daemonInvariantOrchestrationRootBlockerGate {
+				return daemonInvariantSourceHybrid
+			}
+			return sourceForInvariant(invariant)
+		},
+	}
+
+	workerBody, _ := json.Marshal(sessionCommandBody{ProjectID: projectID, IssueID: rootID, SessionID: "az-" + rootID})
+	workerResp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{Command: daemonhandlers.CommandSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: workerBody})
+	if err != nil || workerResp.Error == nil || workerResp.Error.Code != protocol.ErrorCodeInternal || !strings.Contains(workerResp.Error.Message, "unsupported rooted dependency admission invariant source: hybrid") {
+		t.Fatalf("worker response=%+v err=%v", workerResp.Error, err)
+	}
+	scope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orchestratorBody, _ := json.Marshal(protocol.OrchestratorSessionRequest{Scope: scope})
+	orchestratorResp, err := d.handleOrchestratorSession(ctx, protocol.RequestEnvelope{Command: protocol.CommandOrchestratorSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: orchestratorBody})
+	if err != nil || orchestratorResp.Error == nil || orchestratorResp.Error.Code != protocol.ErrorCodeInternal || !strings.Contains(orchestratorResp.Error.Message, "unsupported rooted dependency admission invariant source: hybrid") {
+		t.Fatalf("orchestrator response=%+v err=%v", orchestratorResp.Error, err)
+	}
+
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(runtimeStore).Get(ctx, identity); err != nil || found {
+		t.Fatalf("lease=%+v found=%t err=%v", lease, found, err)
+	}
+	if intents, err := runtimeStore.ListSessionIntentStates(ctx, projectID); err != nil || len(intents) != 0 {
+		t.Fatalf("intents=%+v err=%v", intents, err)
+	}
+	if worktreeRunner.worktreeAddCalls != 0 || len(tmuxRunner.commands) != 0 {
+		t.Fatalf("unsupported source created side effects: worktree=%d tmux=%v", worktreeRunner.worktreeAddCalls, tmuxRunner.commands)
+	}
+	root, err := issuesClient.GetWithRuntime(ctx, projectID, rootID)
+	if err != nil || root.Status != domain.StatusOpen {
+		t.Fatalf("root lifecycle=%s err=%v", root.Status, err)
+	}
+}
+
 func TestAncestorRootBlockerPropagatesThroughSharedAuthorityAndActiveStartPaths(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	repoDir := t.TempDir()
