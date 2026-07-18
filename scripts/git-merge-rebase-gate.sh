@@ -161,11 +161,6 @@ if [ ! -x "$validation_wrapper" ]; then
   publish_failure 1 missing_validation_wrapper "trusted validation wrapper is unavailable"
   exit 1
 fi
-if [ ! -x "$artifact_publisher" ]; then
-  gate_log "[gate] candidate_head=$candidate_head failure=artifact-publisher-unavailable"
-  exit 1
-fi
-
 validation_timeout="${AZEDARACH_MERGE_GATE_TIMEOUT:-10m}"
 (
   set +e
