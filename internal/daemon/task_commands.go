@@ -5413,7 +5413,7 @@ func (d *Daemon) taskFollowOnMergeCandidates(ctx context.Context, projectID, tar
 	if targetIssueID == "" {
 		return taskFollowOnMergeCandidatesResult{}, fmt.Errorf("target issue id is required")
 	}
-	tasks, err := d.loadTaskGraphDomainTasks(ctx, projectID)
+	tasks, _, err := d.convergedProjectReadSnapshotForInvariant(ctx, projectID)
 	if err != nil {
 		return taskFollowOnMergeCandidatesResult{}, fmt.Errorf("resolve follow-on merge candidates task graph: %w", err)
 	}
