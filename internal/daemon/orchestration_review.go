@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -273,27 +274,7 @@ func (a daemonOrchestrationAuthority) latestTrustedReviewOutcomes(ctx context.Co
 }
 
 func (a daemonOrchestrationAuthority) reviewInspection(ctx context.Context, projectID, repoDir, actorID string, task domain.Task, tasks map[string]domain.Task, worktrees map[string]git.Worktree) protocol.OrchestrationReview {
-	inspection := protocol.OrchestrationReview{IssueID: task.ID.String(), Actionable: true}
-	if task.ParentID != nil {
-		inspection.ParentIssueID = task.ParentID.String()
-	}
-	if task.Ownership != nil && task.Ownership.IsActive(time.Now().UTC()) {
-		inspection.ExecutionOwner = task.Ownership.OwnerID
-	}
-	if lease := coordinationLease(task, domain.CoordinationLeaseOrchestration); lease != nil && !lease.IsExpired(time.Now().UTC()) {
-		inspection.OrchestrationOwner = lease.OwnerID
-		if !strings.EqualFold(strings.TrimSpace(lease.OwnerID), strings.TrimSpace(actorID)) {
-			inspection.Actionable = false
-			inspection.Reasons = append(inspection.Reasons, "orchestration-owned-by-"+lease.OwnerID)
-		}
-	}
-	if lease := coordinationLease(task, domain.CoordinationLeaseReview); lease != nil && !lease.IsExpired(time.Now().UTC()) {
-		inspection.ReviewOwner = lease.OwnerID
-		if !strings.EqualFold(strings.TrimSpace(lease.OwnerID), strings.TrimSpace(actorID)) {
-			inspection.Actionable = false
-			inspection.Reasons = append(inspection.Reasons, "review-owned-by-"+lease.OwnerID)
-		}
-	}
+	inspection := reviewCoordinationInspection(task, actorID)
 	candidatePath := ""
 	if candidate, ok := worktrees[task.ID.String()]; ok {
 		candidatePath = strings.TrimSpace(candidate.Path)
@@ -355,6 +336,93 @@ func (a daemonOrchestrationAuthority) reviewInspection(ctx context.Context, proj
 	return inspection
 }
 
+func reviewCoordinationInspection(task domain.Task, actorID string) protocol.OrchestrationReview {
+	inspection := protocol.OrchestrationReview{IssueID: task.ID.String(), Actionable: true}
+	if task.ParentID != nil {
+		inspection.ParentIssueID = task.ParentID.String()
+	}
+	now := time.Now().UTC()
+	if task.Ownership != nil && task.Ownership.IsActive(now) {
+		inspection.ExecutionOwner = task.Ownership.OwnerID
+	}
+	if lease := coordinationLease(task, domain.CoordinationLeaseOrchestration); lease != nil && !lease.IsExpired(now) {
+		inspection.OrchestrationOwner = lease.OwnerID
+		if !strings.EqualFold(strings.TrimSpace(lease.OwnerID), strings.TrimSpace(actorID)) {
+			inspection.Actionable = false
+			inspection.Reasons = append(inspection.Reasons, "orchestration-owned-by-"+lease.OwnerID)
+		}
+	}
+	if lease := coordinationLease(task, domain.CoordinationLeaseReview); lease != nil && !lease.IsExpired(now) {
+		inspection.ReviewOwner = lease.OwnerID
+		if !strings.EqualFold(strings.TrimSpace(lease.OwnerID), strings.TrimSpace(actorID)) {
+			inspection.Actionable = false
+			inspection.Reasons = append(inspection.Reasons, "review-owned-by-"+lease.OwnerID)
+		}
+	}
+	return inspection
+}
+
+// reviewReturnQueue reads only the exact durable issues named by the return
+// intent. Returning findings does not accept or integrate a Git candidate, so
+// it must not depend on a whole-project snapshot or synchronous candidate and
+// ancestor Git refreshes. The review lease claim below remains the atomic
+// current-review-state gate before any return side effect is published.
+func (a daemonOrchestrationAuthority) reviewReturnQueue(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest) ([]protocol.OrchestrationReview, error) {
+	issueClient := a.daemon.issueClientForProject(projectID)
+	if issueClient == nil {
+		return nil, fmt.Errorf("issue store unavailable")
+	}
+	queue := make([]protocol.OrchestrationReview, 0, len(request.IssueIDs))
+	for _, issueID := range stableRequestedReviewCandidates(request.IssueIDs, nil) {
+		task, err := issueClient.GetWithRuntime(ctx, projectID, issueID)
+		if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				continue
+			}
+			return nil, fmt.Errorf("load review return issue %s: %w", issueID, err)
+		}
+		if request.Scope.Kind == domain.OrchestrationScopeRooted && (task.ParentID == nil || task.ParentID.IsZero() || !naming.IssueIDsEqual(task.ParentID.String(), request.Scope.RootIssueID.String())) {
+			continue
+		}
+		reviewRequested, err := currentReviewRequested(ctx, issueClient, task)
+		if err != nil {
+			return nil, fmt.Errorf("load review return epoch %s: %w", issueID, err)
+		}
+		if !reviewRequested {
+			continue
+		}
+		inspection := reviewCoordinationInspection(task, request.ActorID)
+		if outcome, err := a.latestTrustedReviewOutcome(ctx, projectID, task.ID.String()); err != nil {
+			inspection.Actionable = false
+			inspection.Reasons = append(inspection.Reasons, "inspect-review-outcome: "+err.Error())
+		} else if outcome == "accepted" {
+			inspection.Actionable = false
+			inspection.Reasons = append(inspection.Reasons, "accepted-close-pending")
+		}
+		inspection.Reasons = uniqueNonEmpty(inspection.Reasons)
+		queue = append(queue, inspection)
+	}
+	return queue, nil
+}
+
+func currentReviewRequested(ctx context.Context, issueClient *issues.Client, task domain.Task) (bool, error) {
+	events, err := issueClient.ListIssueObservationEvents(ctx, task.ID.String(), issues.IssueObservationEventListOptions{
+		Types:         []domain.IssueObservationEventType{domain.IssueEventIssueStatusChanged},
+		NewestIDFirst: true,
+	})
+	if err != nil {
+		return false, err
+	}
+	for _, event := range events {
+		if strings.TrimSpace(event.Source) != "issue-store" {
+			continue
+		}
+		return domain.IsReviewRequestTransition(event), nil
+	}
+	facts := task.IssueFacts()
+	return task.Status == domain.StatusInReview || task.State.Review() == domain.IssueReviewRequested || facts.ReviewState == domain.IssueReviewRequested, nil
+}
+
 func (a daemonOrchestrationAuthority) latestTrustedReviewOutcome(ctx context.Context, projectID, issueID string) (string, error) {
 	outcomes, err := a.latestTrustedReviewOutcomes(ctx, projectID, []string{issueID})
 	if err != nil {
@@ -381,13 +449,21 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 	}
 	a.daemon.orchestrationMu.Lock()
 	defer a.daemon.orchestrationMu.Unlock()
-	snapshot, err := a.Snapshot(ctx, projectID, protocol.OrchestrationSnapshotRequest{Scope: request.Scope, ActorID: request.ActorID, RepoDir: request.RepoDir, ReviewIssueIDs: request.IssueIDs})
+	var reviews []protocol.OrchestrationReview
+	var err error
+	if request.Kind == protocol.OrchestrationIntentReviewReturn {
+		reviews, err = a.reviewReturnQueue(ctx, projectID, request)
+	} else {
+		var snapshot protocol.OrchestrationSnapshot
+		snapshot, err = a.Snapshot(ctx, projectID, protocol.OrchestrationSnapshotRequest{Scope: request.Scope, ActorID: request.ActorID, RepoDir: request.RepoDir, ReviewIssueIDs: request.IssueIDs})
+		reviews = snapshot.ReviewQueue
+	}
 	if err != nil {
 		return protocol.OrchestrationIntentResult{}, err
 	}
-	queue := make(map[string]protocol.OrchestrationReview, len(snapshot.ReviewQueue))
-	ordered := make([]string, 0, len(snapshot.ReviewQueue))
-	for _, review := range snapshot.ReviewQueue {
+	queue := make(map[string]protocol.OrchestrationReview, len(reviews))
+	ordered := make([]string, 0, len(reviews))
+	for _, review := range reviews {
 		queue[review.IssueID] = review
 		ordered = append(ordered, review.IssueID)
 	}
@@ -396,18 +472,33 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 		requested = ordered
 	}
 	result := protocol.OrchestrationIntentResult{Scope: request.Scope, Kind: request.Kind, IntentKey: request.IntentKey, Requested: requested, Skipped: map[string]string{}, Failed: map[string]string{}}
-	scopeTasks, _, err := a.daemon.projectReadSnapshot(projectID)
-	if err != nil {
-		return protocol.OrchestrationIntentResult{}, fmt.Errorf("refresh orchestration scope projection: %w", err)
+	var scopeTasks []domain.Task
+	if request.Kind != protocol.OrchestrationIntentReviewReturn {
+		scopeTasks, _, err = a.daemon.projectReadSnapshot(projectID)
+		if err != nil {
+			return protocol.OrchestrationIntentResult{}, fmt.Errorf("refresh orchestration scope projection: %w", err)
+		}
 	}
 	issueClient := a.daemon.issueClientForProject(projectID)
 	if issueClient == nil {
 		return protocol.OrchestrationIntentResult{}, fmt.Errorf("issue store unavailable")
 	}
 	for _, issueID := range requested {
-		if request.Scope.Kind == domain.OrchestrationScopeRooted && !directOrchestrationTarget(scopeTasks, request.Scope.RootIssueID.String(), issueID) {
-			result.Skipped[issueID] = "outside-root-direct-child-scope: delegate descendants to their direct parent orchestrator"
-			continue
+		if request.Scope.Kind == domain.OrchestrationScopeRooted {
+			if request.Kind == protocol.OrchestrationIntentReviewReturn {
+				task, taskErr := issueClient.GetWithRuntime(ctx, projectID, issueID)
+				if taskErr != nil {
+					result.Failed[issueID] = "refresh rooted review return scope: " + taskErr.Error()
+					continue
+				}
+				if task.ParentID == nil || task.ParentID.IsZero() || !naming.IssueIDsEqual(task.ParentID.String(), request.Scope.RootIssueID.String()) {
+					result.Skipped[issueID] = "outside-root-direct-child-scope: delegate descendants to their direct parent orchestrator"
+					continue
+				}
+			} else if !directOrchestrationTarget(scopeTasks, request.Scope.RootIssueID.String(), issueID) {
+				result.Skipped[issueID] = "outside-root-direct-child-scope: delegate descendants to their direct parent orchestrator"
+				continue
+			}
 		}
 		terminal, err := a.reviewIntentTerminalOutcome(ctx, projectID, issueID, request)
 		if err != nil {
