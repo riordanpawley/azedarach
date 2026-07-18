@@ -549,6 +549,17 @@ func TestOperationRuntimeSessionStartPersistsRunningProgress(t *testing.T) {
 	}
 }
 
+func TestStoredOperationProgressPreservesExplicitTmuxOnlyLaunchPlan(t *testing.T) {
+	required := false
+	payload := marshalOperationProgressJSON(&daemonops.Progress{
+		Phase: "tmux_launch", Percent: 70, AgentLaunchRequired: &required,
+	})
+	progress := unmarshalOperationProgress(payload)
+	if progress == nil || progress.AgentLaunchRequired == nil || *progress.AgentLaunchRequired {
+		t.Fatalf("round-trip progress = %+v, want explicit tmux-only launch plan", progress)
+	}
+}
+
 func TestOperationRuntimeDirectGitMergeWaitTimeoutReturnsPendingEnvelope(t *testing.T) {
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), nextRevision: sequentialRevision()})
 	runtime.gitHandler = daemonhandlers.NewGitHandler(runtimeGitService{})
@@ -979,6 +990,40 @@ func TestDaemonRecoverInterruptedSessionStartUsesActiveProjection(t *testing.T) 
 	})
 	if !ok || startingRecovery.State != daemonops.StateFailed {
 		t.Fatalf("starting-only recovery = %+v, ok=%t; want terminal failure", startingRecovery, ok)
+	}
+}
+
+func TestDaemonRecoverInterruptedTmuxOnlySessionStartWithoutAgentAcknowledgement(t *testing.T) {
+	ctx := context.Background()
+	projectID, issueID := "proj-tmux-only", "AZ-2"
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	store := daemonstate.NewRuntimeStateStore(t.TempDir(), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	runner := newSessionStartTmuxRunner()
+	runner.sessions[sessionID] = true
+	runner.panes[sessionID] = []string{"%7"}
+	runner.panePIDs[sessionID] = 123
+	runner.currentCommand = "zsh"
+	d := &Daemon{
+		cfg:  Config{RepoDir: t.TempDir(), SessionShell: "zsh", Logger: slog.Default()},
+		tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore(),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{}, revision: map[string]uint64{},
+	}
+	required := false
+	recovery, ok := d.recoverInterruptedOperation(ctx, daemonops.Record{
+		ID: "tmux-only-op", ProjectID: projectID, IssueID: issueID, Kind: daemonhandlers.CommandSessionStart,
+		Progress: &daemonops.Progress{Phase: "tmux_launch", AgentLaunchRequired: &required},
+	})
+	if !ok || recovery.State != daemonops.StateDone {
+		t.Fatalf("tmux-only recovery = %+v, ok=%t; want done", recovery, ok)
+	}
+	if !runner.sessions[sessionID] {
+		t.Fatalf("tmux-only session %s was compensated despite live runtime", sessionID)
+	}
+	projection, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, issueID, sessionID)
+	if err != nil || !found || projection.ObservedState != daemonstate.SessionStateRunning {
+		t.Fatalf("tmux-only projection = %+v, found=%t err=%v", projection, found, err)
 	}
 }
 

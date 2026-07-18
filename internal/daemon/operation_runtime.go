@@ -1974,7 +1974,8 @@ func marshalOperationProgressJSON(progress *daemonops.Progress) json.RawMessage 
 			Current: progress.Current, Total: progress.Total, Unit: strings.TrimSpace(progress.Unit),
 			Percent: progress.Percent, AgentIncarnation: strings.TrimSpace(progress.AgentIncarnation),
 		},
-		PromptHandoffPath: strings.TrimSpace(progress.PromptHandoffPath),
+		PromptHandoffPath:   strings.TrimSpace(progress.PromptHandoffPath),
+		AgentLaunchRequired: progress.AgentLaunchRequired,
 	})
 	if err != nil {
 		return nil
@@ -1991,16 +1992,17 @@ func unmarshalOperationProgress(payload []byte) *daemonops.Progress {
 		return nil
 	}
 	progress := daemonops.Progress{
-		Phase:             strings.TrimSpace(body.Phase),
-		Message:           strings.TrimSpace(body.Message),
-		Current:           body.Current,
-		Total:             body.Total,
-		Unit:              strings.TrimSpace(body.Unit),
-		Percent:           body.Percent,
-		AgentIncarnation:  strings.TrimSpace(body.AgentIncarnation),
-		PromptHandoffPath: strings.TrimSpace(body.PromptHandoffPath),
+		Phase:               strings.TrimSpace(body.Phase),
+		Message:             strings.TrimSpace(body.Message),
+		Current:             body.Current,
+		Total:               body.Total,
+		Unit:                strings.TrimSpace(body.Unit),
+		Percent:             body.Percent,
+		AgentIncarnation:    strings.TrimSpace(body.AgentIncarnation),
+		PromptHandoffPath:   strings.TrimSpace(body.PromptHandoffPath),
+		AgentLaunchRequired: body.AgentLaunchRequired,
 	}
-	if progress.Phase == "" && progress.Message == "" && progress.Current == 0 && progress.Total == 0 && progress.Unit == "" && progress.Percent == 0 && progress.AgentIncarnation == "" && progress.PromptHandoffPath == "" {
+	if progress.Phase == "" && progress.Message == "" && progress.Current == 0 && progress.Total == 0 && progress.Unit == "" && progress.Percent == 0 && progress.AgentIncarnation == "" && progress.PromptHandoffPath == "" && progress.AgentLaunchRequired == nil {
 		return nil
 	}
 	return &progress
@@ -2008,7 +2010,8 @@ func unmarshalOperationProgress(payload []byte) *daemonops.Progress {
 
 type storedOperationProgress struct {
 	protocol.OperationProgress
-	PromptHandoffPath string `json:"prompt_handoff_path,omitempty"`
+	PromptHandoffPath   string `json:"prompt_handoff_path,omitempty"`
+	AgentLaunchRequired *bool  `json:"agent_launch_required,omitempty"`
 }
 
 func sanitizeOperationResourceKeys(keys []string, kind string) []string {

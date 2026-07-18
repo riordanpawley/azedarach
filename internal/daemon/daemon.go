@@ -1597,33 +1597,51 @@ func (d *Daemon) recoverInterruptedOperation(ctx context.Context, record daemono
 	canonicalID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), record.IssueID)
 	plannedIncarnation := ""
 	promptHandoffPath := ""
+	agentLaunchRequired := true
 	if record.Progress != nil {
 		plannedIncarnation = strings.TrimSpace(record.Progress.AgentIncarnation)
 		promptHandoffPath = record.Progress.PromptHandoffPath
+		if record.Progress.AgentLaunchRequired != nil {
+			agentLaunchRequired = *record.Progress.AgentLaunchRequired
+		}
 	}
-	if plannedIncarnation == "" {
-		cleanupNote := d.compensateInterruptedSessionStart(ctx, store, projectID, canonicalID, record.IssueID)
-		return interruptedOperationRecovery{
-			State:        daemonops.StateFailed,
-			ErrorMessage: "session.start interrupted before durable managed-agent incarnation planning" + cleanupNote,
-		}, true
-	}
-	handoff, handoffErr := d.validateRecoveredSessionStartPromptHandoff(promptHandoffPath)
-	if handoffErr != nil {
-		cleanupNote := d.compensateInterruptedSessionStart(ctx, store, projectID, canonicalID, record.IssueID)
-		return interruptedOperationRecovery{
-			State:        daemonops.StateFailed,
-			ErrorMessage: fmt.Sprintf("validate recovered session start prompt handoff: %v%s", handoffErr, cleanupNote),
-		}, true
-	}
-	ackErr := d.waitForInitialManagedAgentAcknowledgement(ctx, projectID, canonicalID, plannedIncarnation, handoff)
-	if ackErr != nil {
-		handoff.remove()
-		cleanupNote := d.compensateInterruptedSessionStart(ctx, store, projectID, canonicalID, record.IssueID)
-		return interruptedOperationRecovery{
-			State:        daemonops.StateFailed,
-			ErrorMessage: fmt.Sprintf("recover managed agent bootstrap: %v%s", ackErr, cleanupNote),
-		}, true
+	if !agentLaunchRequired {
+		if d.tmux == nil {
+			return interruptedOperationRecovery{State: daemonops.StateFailed, ErrorMessage: "recover tmux-only session start: tmux adapter unavailable"}, true
+		}
+		live, liveErr := d.tmux.HasSession(ctx, canonicalID)
+		if liveErr != nil || !live {
+			cleanupNote := d.compensateInterruptedSessionStart(ctx, store, projectID, canonicalID, record.IssueID)
+			if liveErr != nil {
+				return interruptedOperationRecovery{State: daemonops.StateFailed, ErrorMessage: fmt.Sprintf("recover tmux-only session start: inspect tmux session: %v%s", liveErr, cleanupNote)}, true
+			}
+			return interruptedOperationRecovery{State: daemonops.StateFailed, ErrorMessage: "recover tmux-only session start: tmux session disappeared" + cleanupNote}, true
+		}
+	} else {
+		if plannedIncarnation == "" {
+			cleanupNote := d.compensateInterruptedSessionStart(ctx, store, projectID, canonicalID, record.IssueID)
+			return interruptedOperationRecovery{
+				State:        daemonops.StateFailed,
+				ErrorMessage: "session.start interrupted before durable managed-agent incarnation planning" + cleanupNote,
+			}, true
+		}
+		handoff, handoffErr := d.validateRecoveredSessionStartPromptHandoff(promptHandoffPath)
+		if handoffErr != nil {
+			cleanupNote := d.compensateInterruptedSessionStart(ctx, store, projectID, canonicalID, record.IssueID)
+			return interruptedOperationRecovery{
+				State:        daemonops.StateFailed,
+				ErrorMessage: fmt.Sprintf("validate recovered session start prompt handoff: %v%s", handoffErr, cleanupNote),
+			}, true
+		}
+		ackErr := d.waitForInitialManagedAgentAcknowledgement(ctx, projectID, canonicalID, plannedIncarnation, handoff)
+		if ackErr != nil {
+			handoff.remove()
+			cleanupNote := d.compensateInterruptedSessionStart(ctx, store, projectID, canonicalID, record.IssueID)
+			return interruptedOperationRecovery{
+				State:        daemonops.StateFailed,
+				ErrorMessage: fmt.Sprintf("recover managed agent bootstrap: %v%s", ackErr, cleanupNote),
+			}, true
+		}
 	}
 	rootedScope, scopeErr := domain.RootedOrchestrationScope(record.IssueID)
 	if scopeErr != nil {

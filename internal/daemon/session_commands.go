@@ -148,9 +148,18 @@ func reportSessionStartProgress(ctx context.Context, phase, message string, perc
 }
 
 func reportSessionStartIncarnationProgress(ctx context.Context, phase, message string, percent int, incarnation, promptHandoffPath string) error {
+	required := true
 	return daemonops.ReportProgress(ctx, daemonops.Progress{
 		Phase: phase, Message: message, Current: int64(percent), Total: 100,
-		Unit: "percent", Percent: percent, AgentIncarnation: strings.TrimSpace(incarnation), PromptHandoffPath: strings.TrimSpace(promptHandoffPath),
+		Unit: "percent", Percent: percent, AgentIncarnation: strings.TrimSpace(incarnation), PromptHandoffPath: strings.TrimSpace(promptHandoffPath), AgentLaunchRequired: &required,
+	})
+}
+
+func reportTmuxOnlySessionStartProgress(ctx context.Context, phase, message string, percent int) error {
+	required := false
+	return daemonops.ReportProgress(ctx, daemonops.Progress{
+		Phase: phase, Message: message, Current: int64(percent), Total: 100,
+		Unit: "percent", Percent: percent, AgentLaunchRequired: &required,
 	})
 }
 
@@ -1189,7 +1198,10 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist managed agent launch plan: %v%s", err, cleanupNote)), nil
 		}
 	} else {
-		reportSessionStartProgress(ctx, "tmux_launch", "creating tmux session", 70)
+		if err := reportTmuxOnlySessionStartProgress(ctx, "tmux_launch", "creating tmux session without agent launch", 70); err != nil {
+			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist tmux-only launch plan: %v%s", err, cleanupNote)), nil
+		}
 	}
 	if cmd.StartWork {
 		if err := d.tmux.NewSessionWithCommandAndEnvironment(ctx, cmd.SessionID, worktree.Path, launchCommand, nil); err != nil {

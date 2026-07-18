@@ -6,14 +6,15 @@ type progressReporterKey struct{}
 
 // Progress captures durable, user-visible progress for a long-running daemon operation.
 type Progress struct {
-	Phase             string
-	Message           string
-	Current           int64
-	Total             int64
-	Unit              string
-	Percent           int
-	AgentIncarnation  string
-	PromptHandoffPath string
+	Phase               string
+	Message             string
+	Current             int64
+	Total               int64
+	Unit                string
+	Percent             int
+	AgentIncarnation    string
+	PromptHandoffPath   string
+	AgentLaunchRequired *bool
 }
 
 type ProgressReporter func(context.Context, Progress) error

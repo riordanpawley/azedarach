@@ -43,6 +43,23 @@ func TestSessionStartLaunchPlanProgressMustPersistBeforeTmux(t *testing.T) {
 	if captured.AgentIncarnation != "inc-1" || captured.PromptHandoffPath != "/runtime/launch.prompt" || captured.Phase != "tmux_launch" {
 		t.Fatalf("captured progress = %+v", captured)
 	}
+	if captured.AgentLaunchRequired == nil || !*captured.AgentLaunchRequired {
+		t.Fatalf("captured progress = %+v, want agent launch required", captured)
+	}
+}
+
+func TestTmuxOnlySessionStartPlanPersistsBeforeTmux(t *testing.T) {
+	var captured daemonops.Progress
+	ctx := daemonops.WithProgressReporter(context.Background(), func(_ context.Context, progress daemonops.Progress) error {
+		captured = progress
+		return nil
+	})
+	if err := reportTmuxOnlySessionStartProgress(ctx, "tmux_launch", "planned", 70); err != nil {
+		t.Fatal(err)
+	}
+	if captured.AgentLaunchRequired == nil || *captured.AgentLaunchRequired {
+		t.Fatalf("captured progress = %+v, want explicit tmux-only plan", captured)
+	}
 }
 
 func TestSessionStartAcknowledgedProgressRetainsRecoveryFence(t *testing.T) {
@@ -60,7 +77,7 @@ func TestSessionStartAcknowledgedProgressRetainsRecoveryFence(t *testing.T) {
 		t.Fatalf("progress phases = %+v", phases)
 	}
 	for _, progress := range phases {
-		if progress.AgentIncarnation != "inc-1" || progress.PromptHandoffPath != "/runtime/launch.prompt" {
+		if progress.AgentIncarnation != "inc-1" || progress.PromptHandoffPath != "/runtime/launch.prompt" || progress.AgentLaunchRequired == nil || !*progress.AgentLaunchRequired {
 			t.Fatalf("progress lost recovery fence: %+v", progress)
 		}
 	}
