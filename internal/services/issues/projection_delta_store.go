@@ -432,6 +432,9 @@ func (c *Client) OpenProjectionDeltaStore() error {
 func (c *Client) projectionReadDBHandle() (*sql.DB, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.corruptionError(); err != nil {
+		return nil, fmt.Errorf("projection delta store quarantined: %w", err)
+	}
 	if c.db == nil {
 		return nil, fmt.Errorf("projection delta store is not open: %w", domain.ErrProjectionRetryable)
 	}
@@ -578,6 +581,9 @@ func projectionDeltaMatches(delta domain.ProjectionDelta, params ProjectionDelta
 
 func (c *Client) projectionReadError(op string, err error) error {
 	wrapped := sqliteutil.WrapError(c.dbPath, op, err)
+	if IsSQLiteCorrupt(err) {
+		return c.markSQLiteCorrupt(wrapped)
+	}
 	if IsSQLiteBusy(err) || sqliteutil.IsIOErrorShortRead(err) {
 		return &domain.ProjectionRetryableError{Cause: wrapped}
 	}

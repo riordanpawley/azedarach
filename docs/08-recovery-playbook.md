@@ -125,6 +125,12 @@ journal-mode, migration, normalization, or schema-repair writes. The preflight
 reads committed WAL state without checkpointing or changing the database or
 WAL authority files. A SQLite code-11 result, or any non-`ok` structural
 result, quarantines that client and marks the project issue store unavailable.
+During global-daemon startup, structural corruption is isolated to that
+canonical project: its materializer is suppressed and its commands return
+cached `Unavailable`, while IPC and healthy registered projects continue.
+Non-corruption startup failures remain fatal. Projection-delta reads apply the
+same latch before classifying transient busy or `SQLITE_IOERR_SHORT_READ`
+failures, so a corrupt source iteration cannot leave the write pool usable.
 The daemon command boundary translates the first runtime code-11 failure from
 any issue-store command into the same project-health quarantine; it does not
 expire until restart.
@@ -150,7 +156,8 @@ Executable regression checks:
 
 ```bash
 go test ./internal/services/issues -run 'TestClient(QuarantinesRuntimeSQLiteCorruption|RejectsCorrupt(DatabaseBeforeStartupWrites|WALDatabaseWithoutChangingAuthorityBytes))' -count=1
-go test ./internal/daemon -run 'Test(ProjectIssueStoreCorruptionIsCachedAsUnavailableFromAnyStorePath|CommandBoundaryQuarantinesFirstCorruptionFromEveryIssueMutationPath)' -count=1
+go test ./internal/services/issues -run 'Test(ProjectionReadErrorClassifiesOnlyShortReadIOErrorAsRetryable|ProjectionSnapshotSourceIterationErrorCannotCommitIncompleteVector)' -count=1
+go test ./internal/daemon -run 'Test(ProjectIssueStoreCorruptionIsCachedAsUnavailableFromAnyStorePath|CommandBoundaryQuarantinesFirstCorruptionFromEveryIssueMutationPath|ProjectionDeltaStartupQuarantinesOnlyCorruptRegisteredProject|ProjectReadMaterializerStartupSkipsQuarantinedDefaultStore)' -count=1
 ```
 
 ## Orchestration Integrate Safety Gate

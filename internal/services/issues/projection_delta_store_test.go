@@ -60,7 +60,9 @@ func TestProjectionReadErrorClassifiesOnlyShortReadIOErrorAsRetryable(t *testing
 
 	structural := client.projectionReadError("read projection delta head", projectionCodedError{code: 11})
 	require.NotErrorIs(t, structural, domain.ErrProjectionRetryable)
+	require.ErrorIs(t, structural, ErrSQLiteCorrupt)
 	require.ErrorContains(t, structural, "sqlite_symbol=SQLITE_CORRUPT")
+	require.ErrorIs(t, client.CorruptionError(), ErrSQLiteCorrupt)
 }
 
 func TestProjectionSnapshotSourceIterationErrorCannotCommitIncompleteVector(t *testing.T) {
@@ -95,6 +97,26 @@ func TestProjectionSnapshotSourceIterationErrorCannotCommitIncompleteVector(t *t
 			require.Equal(t, tt.retryable, errors.Is(err, domain.ErrProjectionRetryable))
 			require.ErrorContains(t, err, "iterate projection snapshot sources")
 			require.ErrorContains(t, err, fmt.Sprintf("sqlite_extended_code=%d", tt.code))
+			if tt.retryable {
+				require.NoError(t, client.CorruptionError())
+				_, mutationErr := client.CommitProjectionDelta(ctx, ProjectionDeltaParams{
+					ProjectID: "p", Kind: domain.ProjectionKindIssue, Key: "c",
+					Operation: domain.ProjectionDeltaUpsert, IdempotencyKey: "source-after-short-read",
+					Payload: json.RawMessage(`{"state":"open"}`),
+				}, nil)
+				require.NoError(t, mutationErr)
+			} else {
+				require.ErrorIs(t, client.CorruptionError(), ErrSQLiteCorrupt)
+				client.projectionSnapshotSourceRowsHook = nil
+				_, subsequentReadErr := client.ProjectionSnapshotAt(ctx, "p", 2)
+				require.ErrorIs(t, subsequentReadErr, ErrSQLiteCorrupt)
+				_, mutationErr := client.CommitProjectionDelta(ctx, ProjectionDeltaParams{
+					ProjectID: "p", Kind: domain.ProjectionKindIssue, Key: "c",
+					Operation: domain.ProjectionDeltaUpsert, IdempotencyKey: "source-after-corruption",
+					Payload: json.RawMessage(`{"state":"open"}`),
+				}, nil)
+				require.ErrorIs(t, mutationErr, ErrSQLiteCorrupt)
+			}
 		})
 	}
 }

@@ -308,7 +308,19 @@ func (d *Daemon) openProjectionDeltaStores(ctx context.Context) error {
 		}
 		seen[store.client] = struct{}{}
 		if err := store.client.OpenProjectionDeltaStore(); err != nil {
-			return fmt.Errorf("open projection delta store for project %q: %w", store.projectID, err)
+			wrapped := fmt.Errorf("open projection delta store for project %q: %w", store.projectID, err)
+			if !issues.IsSQLiteCorrupt(err) {
+				return wrapped
+			}
+			projectID := d.canonicalProjectID(store.projectID)
+			healthErr := d.recordProjectIssueStoreFailure(projectID, wrapped)
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.WarnContext(ctx, "registered project issue store quarantined during startup",
+					"project_id", projectID,
+					"error", healthErr,
+				)
+			}
+			continue
 		}
 	}
 	return nil
