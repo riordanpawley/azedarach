@@ -8842,8 +8842,9 @@ func TestSpaceOpensWorkspaceImmediatelyAndRefreshesInBackground(t *testing.T) {
 	if !strings.Contains(refreshedView, "Task fresh") {
 		t.Fatalf("workspace should refresh from daemon snapshot, got %q", refreshedView)
 	}
-	if !strings.Contains(refreshedView, "persisted description") {
-		t.Fatalf("workspace should render full task details after refresh, got %q", refreshedView)
+	refreshedTask, found := refreshed.TaskByID(issueID)
+	if !found || refreshedTask.Description != "persisted description" {
+		t.Fatalf("workspace full task after refresh = (%+v, %v), want persisted description", refreshedTask, found)
 	}
 	if !strings.Contains(refreshedView, "Related off-board task") {
 		t.Fatalf("workspace should render graph context omitted from the board projection, got %q", refreshedView)
