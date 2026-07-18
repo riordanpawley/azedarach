@@ -559,6 +559,13 @@ func TestClient_SpecLinksCRUDAndAuditOrdering(t *testing.T) {
 
 	require.NoError(t, client.RemoveSpecLink(ctx, issueID, "REQ-LINK"))
 
+	// Collapse timestamps deliberately: insertion ID is the total-order
+	// tiebreaker when several audit mutations share one clock tick.
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `UPDATE spec_audit_log SET created_at = ?`, "2026-01-01T00:00:00Z")
+	require.NoError(t, err)
+
 	entries, err := client.ListSpecAuditEntries(ctx, SpecAuditFilter{})
 	require.NoError(t, err)
 	require.Len(t, entries, 5)
