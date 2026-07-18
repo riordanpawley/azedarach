@@ -1248,6 +1248,17 @@ func (c *Client) insertIssueObservationEvent(ctx context.Context, execer sqlIssu
 			return 0, err
 		}
 		if affected == 0 {
+			var ownerKind string
+			leaseErr := execer.QueryRowContext(ctx, `
+				SELECT owner_kind
+				FROM issue_coordination_leases
+				WHERE issue_id=? AND purpose=? AND (expires_at IS NULL OR expires_at>?)
+				ORDER BY claimed_at DESC
+				LIMIT 1
+			`, issueID, domain.CoordinationLeaseReview, time.Now().UTC().Format(time.RFC3339Nano)).Scan(&ownerKind)
+			if leaseErr == nil && ownerKind == reviewEvidenceCloseFenceOwnerKind {
+				return 0, fmt.Errorf("%w: accepted review evidence is fenced for authoritative close", domain.ErrConflict)
+			}
 			return 0, fmt.Errorf("%w: active review admission lease fences evidence replacement", domain.ErrConflict)
 		}
 	}
