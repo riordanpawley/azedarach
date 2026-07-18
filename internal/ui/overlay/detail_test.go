@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/stretchr/testify/assert"
@@ -35,7 +36,7 @@ func TestDetailPanelView(t *testing.T) {
 	}
 
 	panel := NewDetailPanel(task)
-	view := panel.View()
+	view := ansi.Strip(panel.View())
 
 	// Check that key information is present
 	assert.Contains(t, view, "az-123")
