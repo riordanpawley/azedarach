@@ -3088,6 +3088,19 @@ func (c *Client) updateLockedWithPrecondition(ctx context.Context, id string, st
 			return c.wrapError("update", id, err)
 		}
 	}
+	if oldState.Engagement == domain.IssueEngagementReviewRequested && nextState.Engagement != domain.IssueEngagementReviewRequested {
+		var activeReviewLeases int
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM issue_coordination_leases
+			WHERE issue_id=? AND purpose=? AND (expires_at IS NULL OR expires_at>?)
+		`, id, domain.CoordinationLeaseReview, now).Scan(&activeReviewLeases); err != nil {
+			return c.wrapError("update", id, err)
+		}
+		if activeReviewLeases > 0 {
+			return c.wrapError("update", id, fmt.Errorf("%w: active review admission lease fences the current review epoch", domain.ErrConflict))
+		}
+	}
 	if nextState.Workflow() == domain.IssueWorkflowBacklog {
 		hasAdmittedAncestor, err := c.hasLiveAdmittedAncestor(ctx, tx, id)
 		if err != nil {
@@ -3323,12 +3336,15 @@ func validateTerminalReviewEvidencePin(ctx context.Context, tx *sql.Tx, issueID 
 }
 
 type OwnershipClaimParams struct {
-	OwnerID    string
-	OwnerKind  string
-	TTL        time.Duration
-	Force      bool
-	ReleasedBy string
-	Purpose    domain.CoordinationLeasePurpose
+	OwnerID                 string
+	OwnerKind               string
+	TTL                     time.Duration
+	Force                   bool
+	ReleasedBy              string
+	Purpose                 domain.CoordinationLeasePurpose
+	ExpectedReviewAdmission *ReviewAdmissionPin
+	ExpectedParentIssueID   string
+	ReviewSourceOID         string
 }
 
 func (c *Client) ClaimOwnershipWithRuntime(ctx context.Context, projectID, issueID string, params OwnershipClaimParams) (domain.Task, error) {
@@ -3362,6 +3378,9 @@ func (c *Client) claimOwnership(ctx context.Context, issueID string, params Owne
 	if !purpose.Valid() {
 		return c.wrapError("claim-ownership", issueID, fmt.Errorf("invalid ownership purpose %q", purpose))
 	}
+	if params.ExpectedReviewAdmission != nil && purpose != domain.CoordinationLeaseReview {
+		return c.wrapError("claim-ownership", issueID, errors.New("review admission pin requires review lease purpose"))
+	}
 	return c.withMutationLock(ctx, func(ctx context.Context) error {
 		db, err := c.dbHandle()
 		if err != nil {
@@ -3383,6 +3402,14 @@ func (c *Client) claimOwnership(ctx context.Context, issueID string, params Owne
 		}
 		if err := issueLeaseEligibilityForUpdate(ctx, tx, issueID, purpose); err != nil {
 			return c.wrapError("claim-ownership", issueID, err)
+		}
+		if params.ExpectedReviewAdmission != nil {
+			if err := validateReviewAdmissionPin(ctx, tx, issueID, *params.ExpectedReviewAdmission); err != nil {
+				return c.wrapError("claim-ownership", issueID, err)
+			}
+			if err := validateReviewAdmissionParent(ctx, tx, issueID, params.ExpectedParentIssueID); err != nil {
+				return c.wrapError("claim-ownership", issueID, err)
+			}
 		}
 		now := time.Now().UTC()
 		var lease *domain.CoordinationLease
@@ -3409,14 +3436,24 @@ func (c *Client) claimOwnership(ctx context.Context, issueID string, params Owne
 			issueID, purpose, ownerID, ownerKind, nowRaw, expiresAt); err != nil {
 			return c.wrapError("claim-ownership", issueID, err)
 		}
-		if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueOwnershipChanged, map[string]any{
+		claimPayload := map[string]any{
 			"action":           "claimed",
 			"owner_id":         ownerID,
 			"owner_kind":       ownerKind,
 			"owner_expires_at": expiresPayload,
 			"forced":           params.Force,
 			"purpose":          purpose,
-		}); err != nil {
+		}
+		if params.ExpectedReviewAdmission != nil {
+			claimPayload["review_epoch_event_id"] = params.ExpectedReviewAdmission.ReviewEpochEventID
+			claimPayload["review_parent_issue_id"] = strings.TrimSpace(params.ExpectedParentIssueID)
+			claimPayload["review_source_oid"] = strings.TrimSpace(params.ReviewSourceOID)
+			if params.ExpectedReviewAdmission.Evidence != nil {
+				claimPayload["review_evidence_event_id"] = params.ExpectedReviewAdmission.Evidence.EventID
+				claimPayload["review_evidence_digest"] = params.ExpectedReviewAdmission.Evidence.Digest
+			}
+		}
+		if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueOwnershipChanged, claimPayload); err != nil {
 			return c.wrapError("claim-ownership", issueID, err)
 		}
 		if err := tx.Commit(); err != nil {
@@ -3425,6 +3462,39 @@ func (c *Client) claimOwnership(ctx context.Context, issueID string, params Owne
 		tx = nil
 		return nil
 	})
+}
+
+func validateReviewAdmissionParent(ctx context.Context, tx *sql.Tx, issueID, expectedParentID string) error {
+	expectedParentID = strings.TrimSpace(expectedParentID)
+	rows, err := tx.QueryContext(ctx, `
+		SELECT depends_on_id
+		FROM issue_dependencies
+		WHERE issue_id=? AND tombstoned_at IS NULL
+		  AND dependency_type IN ('parent-child','parent_child')
+		ORDER BY depends_on_id
+	`, strings.TrimSpace(issueID))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	parents := make([]string, 0, 1)
+	for rows.Next() {
+		var parentID string
+		if err := rows.Scan(&parentID); err != nil {
+			return err
+		}
+		parents = append(parents, strings.TrimSpace(parentID))
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if expectedParentID == "" && len(parents) == 0 {
+		return nil
+	}
+	if len(parents) == 1 && naming.IssueIDsEqual(parents[0], expectedParentID) {
+		return nil
+	}
+	return fmt.Errorf("%w: review parent changed from %q to %v", domain.ErrConflict, expectedParentID, parents)
 }
 
 func issueLeaseEligibilityForUpdate(ctx context.Context, tx *sql.Tx, issueID string, purpose domain.CoordinationLeasePurpose) error {
@@ -4165,6 +4235,11 @@ func (c *Client) addDependency(ctx context.Context, issueID, dependsOnID, depend
 			_ = tx.Rollback()
 		}
 	}()
+	if canonicalType == string(domain.DependencyParentChild) {
+		if err := rejectActiveReviewAdmissionLease(ctx, tx, issueID); err != nil {
+			return c.wrapError("add-dependency", issueID, err)
+		}
+	}
 
 	if tombstoneOldParent != "" {
 		if _, err := tx.ExecContext(ctx, `
@@ -4543,6 +4618,11 @@ func (c *Client) removeDependency(ctx context.Context, issueID, dependsOnID, dep
 			_ = tx.Rollback()
 		}
 	}()
+	if canonicalType == string(domain.DependencyParentChild) {
+		if err := rejectActiveReviewAdmissionLease(ctx, tx, issueID); err != nil {
+			return c.wrapError("remove-dependency", issueID, err)
+		}
+	}
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE issue_dependencies
@@ -4573,6 +4653,23 @@ func (c *Client) removeDependency(ctx context.Context, issueID, dependsOnID, dep
 		return c.wrapError("remove-dependency", issueID, err)
 	}
 	committed = true
+	return nil
+}
+
+func rejectActiveReviewAdmissionLease(ctx context.Context, queryer sqlIssueQueryer, issueID string) error {
+	var active bool
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := queryer.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM issue_coordination_leases
+			WHERE issue_id=? AND purpose=? AND (expires_at IS NULL OR expires_at>?)
+		)
+	`, strings.TrimSpace(issueID), domain.CoordinationLeaseReview, now).Scan(&active); err != nil {
+		return err
+	}
+	if active {
+		return fmt.Errorf("%w: active review admission lease fences parent identity", domain.ErrConflict)
+	}
 	return nil
 }
 

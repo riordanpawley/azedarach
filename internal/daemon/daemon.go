@@ -259,6 +259,7 @@ type Daemon struct {
 	reviewLeaseReleasedBeforeClose       func(context.Context, string, string) error
 	reviewAcceptanceBeforeCandidateCheck func()
 	reviewCandidateCheck                 func(context.Context, string, protocol.OrchestrationReview) (string, string, error)
+	reviewAdmissionSnapshotLoaded        func()
 	reviewAcceptedSourceOID              func(context.Context, string, string) (string, error)
 	mailProjectedBeforeAppend            func(context.Context, daemonMailEvent) error
 	watchClientsMu                       sync.Mutex

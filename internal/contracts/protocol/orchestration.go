@@ -121,6 +121,11 @@ type OrchestrationReview struct {
 	Evidence           *domain.WorkerEvidencePacket   `json:"evidence,omitempty"`
 	ContextRisk        *domain.IssueContextRiskPacket `json:"context_risk,omitempty"`
 	EvidenceSource     string                         `json:"evidence_source,omitempty"`
+	ReviewEpochEventID int64                          `json:"review_epoch_event_id,omitempty"`
+	EvidenceEventID    int64                          `json:"evidence_event_id,omitempty"`
+	EvidenceSeq        int64                          `json:"evidence_seq,omitempty"`
+	EvidenceDigest     string                         `json:"evidence_digest,omitempty"`
+	SourceOID          string                         `json:"source_oid,omitempty"`
 	WorktreePath       string                         `json:"worktree_path,omitempty"`
 	Branch             string                         `json:"branch,omitempty"`
 	BaseBranch         string                         `json:"base_branch,omitempty"`
