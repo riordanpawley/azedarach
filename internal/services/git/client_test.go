@@ -1,6 +1,7 @@
 package git
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -2324,17 +2325,22 @@ func TestRealProcessProfileMergeCleanlyTransactionalSerializesTwoClientsAndPrese
 	runClientTestGit(t, repo, "checkout", "-q", "main")
 
 	gateSyncDir := t.TempDir()
+	readyPath := filepath.Join(gateSyncDir, "ready")
+	if err := syscall.Mkfifo(readyPath, 0o600); err != nil {
+		t.Fatalf("create integration gate readiness FIFO: %v", err)
+	}
 	scriptsDir := filepath.Join(repo, "scripts")
 	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
 		t.Fatalf("mkdir scripts: %v", err)
 	}
 	gate := `#!/bin/sh
 set -eu
-marker="$AZEDARACH_TEST_GATE_SYNC/$AZEDARACH_CANDIDATE_HEAD"
-: >"$marker"
-while [ "$(find "$AZEDARACH_TEST_GATE_SYNC" -type f | wc -l | tr -d ' ')" -lt 2 ]; do
-  sleep 0.01
-done
+release="$AZEDARACH_TEST_GATE_SYNC/release-$AZEDARACH_CANDIDATE_HEAD"
+mkfifo "$release"
+exec 3>"$AZEDARACH_TEST_GATE_SYNC/ready"
+printf '%s\n' "$AZEDARACH_CANDIDATE_HEAD" >&3
+IFS= read -r _ <"$release"
+exec 3>&-
 `
 	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"), []byte(gate), 0o755); err != nil {
 		t.Fatalf("write integration gate: %v", err)
@@ -2351,8 +2357,7 @@ done
 		t.Fatalf("write victim sentinel: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	ctx := t.Context()
 	type mergeOutcome struct {
 		branch string
 		result *MergeResult
@@ -2367,15 +2372,37 @@ done
 			outcomes <- mergeOutcome{branch: branch, result: result, err: err}
 		}()
 	}
+	ready, err := os.Open(readyPath)
+	if err != nil {
+		t.Fatalf("open integration gate readiness FIFO: %v", err)
+	}
+	readyReader := bufio.NewReader(ready)
+	candidateHeads := make([]string, 0, 2)
+	for len(candidateHeads) < 2 {
+		head, err := readyReader.ReadString('\n')
+		if err != nil {
+			_ = ready.Close()
+			t.Fatalf("wait for integration gate readiness: %v", err)
+		}
+		candidateHeads = append(candidateHeads, strings.TrimSpace(head))
+	}
+	_ = ready.Close()
+	for _, head := range candidateHeads {
+		releasePath := filepath.Join(gateSyncDir, "release-"+head)
+		release, err := os.OpenFile(releasePath, os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatalf("open integration gate release FIFO for %s: %v", head, err)
+		}
+		if _, err := release.Write([]byte("release\n")); err != nil {
+			_ = release.Close()
+			t.Fatalf("release integration gate for %s: %v", head, err)
+		}
+		_ = release.Close()
+	}
 
 	var got []mergeOutcome
 	for len(got) < 2 {
-		select {
-		case outcome := <-outcomes:
-			got = append(got, outcome)
-		case <-ctx.Done():
-			t.Fatalf("timed out waiting for two-client integration outcomes: %v", ctx.Err())
-		}
+		got = append(got, <-outcomes)
 	}
 	var winner, loser *mergeOutcome
 	for i := range got {

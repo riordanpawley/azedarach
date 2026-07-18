@@ -588,32 +588,49 @@ func TestProjectReadMaterializersConvergeAcrossDaemons(t *testing.T) {
 	writer := newMigratedIssueClient(t, repoDir, logger)
 	readers := []*issues.Client{issues.NewClient(repoDir, logger), issues.NewClient(repoDir, logger)}
 	materializers := make([]*projectReadMaterializer, 0, len(readers))
+	watchers := make([]*watchBarrierProjectionStore, 0, len(readers))
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	advanced := make(chan int, len(readers))
+	done := make(chan struct{}, len(readers))
 	for index, reader := range readers {
 		t.Cleanup(func() { _ = reader.CloseDB() })
 		if err := reader.OpenProjectionDeltaStore(); err != nil {
 			t.Fatal(err)
 		}
-		materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(reader), nil)
+		watcher := &watchBarrierProjectionStore{
+			projectionDeltaStore: reader,
+			entered:              make(chan struct{}),
+			release:              make(chan struct{}),
+		}
+		watchers = append(watchers, watcher)
+		materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(watcher), nil)
 		if err := materializer.bootstrap(ctx); err != nil {
 			t.Fatal(err)
 		}
 		materializers = append(materializers, materializer)
-		go materializer.run(ctx, func(protocol.MaterializedSnapshotMetadata) { advanced <- index })
+		go func() {
+			defer func() { done <- struct{}{} }()
+			materializer.run(ctx, func(protocol.MaterializedSnapshotMetadata) { advanced <- index })
+		}()
+	}
+	t.Cleanup(func() {
+		cancel()
+		for range readers {
+			<-done
+		}
+	})
+	for _, watcher := range watchers {
+		<-watcher.entered
 	}
 	if _, err := writer.Create(ctx, issues.CreateTaskParams{Title: "multi-daemon", Type: domain.TypeTask}); err != nil {
 		t.Fatal(err)
 	}
+	for _, watcher := range watchers {
+		close(watcher.release)
+	}
 	seen := map[int]bool{}
 	for len(seen) < len(materializers) {
-		select {
-		case index := <-advanced:
-			seen[index] = true
-		case <-time.After(5 * time.Second):
-			t.Fatalf("materializers did not converge: woke=%v", seen)
-		}
+		seen[<-advanced] = true
 	}
 	firstTasks, firstSource := materializers[0].snapshot()
 	secondTasks, secondSource := materializers[1].snapshot()

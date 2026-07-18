@@ -2008,55 +2008,22 @@ func TestLauncherStopWaitsForExactProcessAfterLockRelease(t *testing.T) {
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
 	repoDir := newLauncherTestWorktree(t)
 	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
-	runtimeDir := config.ScopedDaemonRuntimeDir(repoDir)
-	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(launcher.SocketPath, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cmd := exec.Command("/bin/sh", "-c", "trap 'rm -f \"$1\" \"$2\"; sleep 0.25; exit 0' TERM; while :; do sleep 1; done", "sh", launcher.LockPath, launcher.SocketPath)
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	pid := cmd.Process.Pid
-	waitDone := make(chan error, 1)
-	go func() { waitDone <- cmd.Wait() }()
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		select {
-		case <-waitDone:
-		default:
-		}
-	})
-	lockRecord, err := json.Marshal(map[string]any{"pid": pid, "created_at": time.Now().UTC()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(launcher.LockPath, lockRecord, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	predecessor := startLingeringDaemonProcess(t, launcher)
 	launcher.shutdownViaSocket = func(context.Context, string) error {
-		return cmd.Process.Signal(syscall.SIGTERM)
+		return predecessor.cmd.Process.Signal(syscall.SIGTERM)
 	}
 
-	started := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	if err := launcher.Stop(ctx); err != nil {
-		t.Fatalf("Stop() error = %v", err)
-	}
-	if elapsed := time.Since(started); elapsed < 200*time.Millisecond {
-		t.Fatalf("Stop() returned after %v, before delayed post-lock process exit", elapsed)
-	}
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- launcher.Stop(context.Background()) }()
+	predecessor.awaitShutdown(t)
 	select {
-	case err := <-waitDone:
-		if err != nil {
-			t.Fatalf("daemon child exit: %v", err)
-		}
+	case err := <-stopDone:
+		t.Fatalf("Stop returned before exact predecessor exit: %v", err)
 	default:
-		t.Fatalf("daemon child pid %d was not reaped before Stop returned", pid)
+	}
+	predecessor.release()
+	if err := <-stopDone; err != nil {
+		t.Fatalf("Stop() error = %v", err)
 	}
 }
 
@@ -2066,6 +2033,13 @@ func TestLauncherStopBoundsExactProcessExitWait(t *testing.T) {
 	repoDir := newLauncherTestWorktree(t)
 	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
 	launcher.processExitTimeout = 50 * time.Millisecond
+	var gotTimeout time.Duration
+	launcher.processExitContext = func(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+		gotTimeout = timeout
+		ctx, cancel := context.WithCancel(parent)
+		cancel()
+		return ctx, func() {}
+	}
 	runtimeDir := config.ScopedDaemonRuntimeDir(repoDir)
 	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -2079,13 +2053,12 @@ func TestLauncherStopBoundsExactProcessExitWait(t *testing.T) {
 	}
 	launcher.shutdownViaSocket = func(context.Context, string) error { return nil }
 
-	started := time.Now()
 	err = launcher.Stop(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "still alive after stop") {
 		t.Fatalf("Stop() error = %v, want bounded exact-process wait failure", err)
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("Stop() took %v, want bounded failure", elapsed)
+	if gotTimeout != launcher.processExitTimeout {
+		t.Fatalf("process exit timeout = %v, want %v", gotTimeout, launcher.processExitTimeout)
 	}
 }
 

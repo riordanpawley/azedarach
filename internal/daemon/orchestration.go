@@ -53,6 +53,7 @@ type daemonOrchestrationAuthority struct {
 	lookupOperation       func(context.Context, string) (protocol.OperationRecord, error)
 	releaseReviewLease    func(context.Context, string, string, string) error
 	reviewDeliveryTimeout time.Duration
+	reviewDeliveryContext func(context.Context, time.Duration) (context.Context, context.CancelFunc)
 }
 
 type invalidOrchestrationLaunchError struct {

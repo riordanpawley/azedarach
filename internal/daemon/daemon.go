@@ -98,12 +98,13 @@ type Config struct {
 
 // Daemon is the daemon runtime root.
 type Daemon struct {
-	cfg    Config
-	lock   daemonLockManager
-	hub    *publish.Hub
-	serve  daemonServer
-	router *daemonhandlers.Dispatcher
-	apply  *daemonhandlers.ApplyHandler
+	cfg      Config
+	lock     daemonLockManager
+	hub      *publish.Hub
+	serve    daemonServer
+	ipcReady <-chan struct{}
+	router   *daemonhandlers.Dispatcher
+	apply    *daemonhandlers.ApplyHandler
 
 	issues                               *issues.Client
 	userStore                            *userstore.Store
@@ -588,12 +589,22 @@ func New(cfg Config) *Daemon {
 	)
 	d.apply = daemonhandlers.NewApplyHandler(d, applyRevisionAdapter{daemon: d})
 
-	d.serve = transport.NewServer(cfg.SocketPath, transport.Handlers{
+	server := transport.NewServer(cfg.SocketPath, transport.Handlers{
 		Handshake: d.handshake,
 		Command:   d.command,
 		Subscribe: d.subscribe,
 	})
+	d.serve = server
+	d.ipcReady = server.Ready()
 	return d
+}
+
+// Ready closes after the daemon IPC listener is bound and accepting clients.
+func (d *Daemon) Ready() <-chan struct{} {
+	if d == nil {
+		return nil
+	}
+	return d.ipcReady
 }
 
 // Run acquires singleton lock and serves daemon IPC until context cancellation.

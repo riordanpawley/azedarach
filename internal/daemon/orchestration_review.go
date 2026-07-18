@@ -669,7 +669,11 @@ func (a daemonOrchestrationAuthority) returnReviewFindings(ctx context.Context, 
 	if deliveryTimeout <= 0 {
 		deliveryTimeout = orchestrationReviewDeliveryTimeout
 	}
-	deliveryCtx, cancelDelivery := context.WithTimeout(ctx, deliveryTimeout)
+	withTimeout := a.reviewDeliveryContext
+	if withTimeout == nil {
+		withTimeout = context.WithTimeout
+	}
+	deliveryCtx, cancelDelivery := withTimeout(ctx, deliveryTimeout)
 	if a.daemon.cfg.Logger != nil {
 		a.daemon.cfg.Logger.Info("orchestration review return stage started", "project_id", projectID, "issue_id", inspection.IssueID, "intent_key", request.IntentKey, "stage", "live_delivery", "target", inspection.IssueID, "timeout", deliveryTimeout)
 	}
