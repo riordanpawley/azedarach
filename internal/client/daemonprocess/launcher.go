@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -26,6 +27,12 @@ import (
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/logging"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/processidentity"
+)
+
+const (
+	daemonOwnerPIDEnv        = processidentity.OwnerPIDEnv
+	daemonOwnerStartTokenEnv = processidentity.OwnerStartTokenEnv
 )
 
 // Launcher starts/replaces the singleton daemon process for a user-global socket.
@@ -98,7 +105,14 @@ type daemonProcessStarter func(daemonProcessSpec) (daemonProcess, error)
 type execDaemonProcess struct {
 	cmd                *exec.Cmd
 	done               chan error
+	waitDone           chan struct{}
+	waitResult         chan error
+	reapAllowed        chan struct{}
+	reapOnce           sync.Once
+	waitMu             sync.Mutex
+	waitErr            error
 	signalProcessGroup func(syscall.Signal) error
+	processGroupAlive  func() (bool, error)
 }
 
 var errSpawnedDaemonExited = errors.New("spawned daemon process exited before readiness")
@@ -121,14 +135,36 @@ func startExecDaemonProcess(spec daemonProcessSpec) (daemonProcess, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	exitObserved, err := observePlatformProcessExit(cmd.Process.Pid)
+	if err != nil {
+		// The leader has not been reaped, so its PID still reserves the process
+		// group ID and makes this numeric group signal safe. Fail the launch
+		// closed rather than running without an exit-observation fence.
+		killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		waitErr := cmd.Wait()
+		return nil, fmt.Errorf("establish kernel-bound daemon exit observation: %w (cleanup: %v)", err, errors.Join(killErr, waitErr))
+	}
 	process := &execDaemonProcess{
-		cmd:  cmd,
-		done: make(chan error, 1),
+		cmd:         cmd,
+		done:        make(chan error, 1),
+		waitDone:    make(chan struct{}),
+		waitResult:  make(chan error, 1),
+		reapAllowed: make(chan struct{}),
 		signalProcessGroup: func(signal syscall.Signal) error {
 			return syscall.Kill(-cmd.Process.Pid, signal)
 		},
 	}
-	go func() { process.done <- cmd.Wait() }()
+	go func() {
+		observationErr := <-exitObserved
+		process.done <- observationErr
+		<-process.reapAllowed
+		waitErr := cmd.Wait()
+		process.waitMu.Lock()
+		process.waitErr = waitErr
+		process.waitMu.Unlock()
+		process.waitResult <- waitErr
+		close(process.waitDone)
+	}()
 	return process, nil
 }
 
@@ -166,10 +202,110 @@ func (p *execDaemonProcess) exited() <-chan error {
 	return p.done
 }
 
+func (p *execDaemonProcess) releaseCleanupAuthority() {
+	if p == nil || p.reapAllowed == nil {
+		return
+	}
+	p.reapOnce.Do(func() { close(p.reapAllowed) })
+}
+
+func (p *execDaemonProcess) reapedExitError() error {
+	p.waitMu.Lock()
+	defer p.waitMu.Unlock()
+	return p.waitErr
+}
+
+func releaseDaemonProcessCleanupAuthority(process daemonProcess) {
+	if retained, ok := process.(interface{ releaseCleanupAuthority() }); ok {
+		retained.releaseCleanupAuthority()
+	}
+}
+
+func refineSpawnedDaemonExitError(err error, process daemonProcess) error {
+	if err == nil || !errors.Is(err, errSpawnedDaemonExited) {
+		return err
+	}
+	reaped, ok := process.(interface{ reapedExitError() error })
+	if !ok {
+		return err
+	}
+	if waitErr := reaped.reapedExitError(); waitErr != nil {
+		return fmt.Errorf("%w (process wait: %v)", err, waitErr)
+	}
+	return err
+}
+
 func (p *execDaemonProcess) stopAndWait(ctx context.Context) error {
 	if p == nil || p.cmd == nil || p.cmd.Process == nil {
 		return nil
 	}
+	if p.waitDone != nil {
+		select {
+		case <-p.waitDone:
+			return errors.New("spawned daemon group leader was reaped before process-group cleanup; refusing numeric PGID signaling")
+		default:
+		}
+		if p.reapAllowed != nil {
+			return p.stopRetainedProcessGroupAndWait(ctx)
+		}
+		return p.stopProcessGroupAndWait(ctx)
+	}
+	return p.stopAndWaitLegacy(ctx)
+}
+
+func (p *execDaemonProcess) stopRetainedProcessGroupAndWait(ctx context.Context) error {
+	pid := p.cmd.Process.Pid
+	termErr := p.signal(syscall.SIGTERM)
+	if termErr != nil && !errors.Is(termErr, syscall.ESRCH) && !errors.Is(termErr, syscall.EPERM) {
+		return fmt.Errorf("terminate spawned daemon process group %d: %w", pid, termErr)
+	}
+	if errors.Is(termErr, syscall.ESRCH) || errors.Is(termErr, syscall.EPERM) {
+		return p.finishRetainedProcessGroupCleanup(pid)
+	}
+	// The unreaped leader reserves the PGID while descendants receive their
+	// graceful shutdown window. A group-level zero probe cannot report absence
+	// during this interval because it intentionally includes that leader.
+	<-ctx.Done()
+	if err := p.signal(syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) && !errors.Is(err, syscall.EPERM) {
+		return fmt.Errorf("force-kill retained spawned daemon process group %d after cleanup timeout: %w", pid, err)
+	}
+	return p.finishRetainedProcessGroupCleanup(pid)
+}
+
+func (p *execDaemonProcess) finishRetainedProcessGroupCleanup(pid int) error {
+	p.releaseCleanupAuthority()
+	forceCtx, forceCancel := context.WithTimeout(context.Background(), time.Second)
+	defer forceCancel()
+	if err := p.waitForLeaderReap(forceCtx); err != nil {
+		return fmt.Errorf("reap retained spawned daemon group leader %d after cleanup signaling: %w", pid, err)
+	}
+	// Reaping releases the PGID reservation. From this point onward probes are
+	// evidence only: a positive result may be a reused unrelated group and must
+	// never authorize another signal.
+	if err := p.waitForProcessGroupExit(forceCtx); err != nil {
+		return fmt.Errorf("prove spawned daemon process group %d disappeared after retained cleanup: %w", pid, err)
+	}
+	return nil
+}
+
+func (p *execDaemonProcess) waitForLeaderReap(ctx context.Context) error {
+	if p.waitResult == nil {
+		select {
+		case <-p.waitDone:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	select {
+	case <-p.waitResult:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (p *execDaemonProcess) stopAndWaitLegacy(ctx context.Context) error {
 	select {
 	case waitErr := <-p.done:
 		return spawnedDaemonExitError(waitErr)
@@ -212,6 +348,75 @@ func (p *execDaemonProcess) stopAndWait(ctx context.Context) error {
 		case <-time.After(time.Second):
 			return fmt.Errorf("spawned daemon process group %d did not reap after force-kill: %w", pid, ctx.Err())
 		}
+	}
+}
+
+func (p *execDaemonProcess) stopProcessGroupAndWait(ctx context.Context) error {
+	pid := p.cmd.Process.Pid
+	termErr := p.signal(syscall.SIGTERM)
+	if termErr != nil && !errors.Is(termErr, syscall.ESRCH) {
+		return fmt.Errorf("terminate spawned daemon process group %d: %w", pid, termErr)
+	}
+	if err := p.waitForProcessGroupExit(ctx); err == nil {
+		return nil
+	} else if ctx.Err() == nil {
+		return fmt.Errorf("prove spawned daemon process group %d cleanup after TERM: %w", pid, err)
+	}
+	if err := p.signal(syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("force-kill spawned daemon process group %d after cleanup timeout: %w", pid, err)
+	}
+	forceCtx, forceCancel := context.WithTimeout(context.Background(), time.Second)
+	defer forceCancel()
+	if err := p.waitForProcessGroupExit(forceCtx); err != nil {
+		return fmt.Errorf("spawned daemon process group %d did not exit after force-kill: %w", pid, err)
+	}
+	return nil
+}
+
+func (p *execDaemonProcess) waitForProcessGroupExit(ctx context.Context) error {
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
+	parentDone := (<-chan struct{})(p.waitDone)
+	parentExited := false
+	for {
+		if !parentExited {
+			select {
+			case <-parentDone:
+				parentExited = true
+				parentDone = nil
+			default:
+			}
+		}
+		alive, err := p.spawnedProcessGroupAlive()
+		if err != nil {
+			return err
+		}
+		if parentExited && !alive {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-parentDone:
+			parentExited = true
+			parentDone = nil
+		case <-poll.C:
+		}
+	}
+}
+
+func (p *execDaemonProcess) spawnedProcessGroupAlive() (bool, error) {
+	if p.processGroupAlive != nil {
+		return p.processGroupAlive()
+	}
+	err := syscall.Kill(-p.cmd.Process.Pid, 0)
+	switch {
+	case err == nil, errors.Is(err, syscall.EPERM):
+		return true, nil
+	case errors.Is(err, syscall.ESRCH):
+		return false, nil
+	default:
+		return false, fmt.Errorf("inspect spawned daemon process group %d: %w", p.cmd.Process.Pid, err)
 	}
 }
 
@@ -314,7 +519,21 @@ func (l *Launcher) startWithLifecycleLock(ctx context.Context, daemonCmd daemonC
 }
 
 func (l *Launcher) startWithLifecycleLockMode(ctx context.Context, daemonCmd daemonCommand, allowUnreadyOwnerRecovery bool) error {
-	_, err := l.startWithLifecycleLockModeRetained(ctx, daemonCmd, allowUnreadyOwnerRecovery)
+	process, err := l.startWithLifecycleLockModeRetained(ctx, daemonCmd, allowUnreadyOwnerRecovery)
+	if err != nil && process != nil {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		cleanupErr := process.stopAndWait(cleanupCtx)
+		cleanupCancel()
+		if cleanupErr != nil {
+			err = fmt.Errorf("wait for daemon readiness and cleanup spawned daemon: %w", errors.Join(err, cleanupErr))
+		} else {
+			err = refineSpawnedDaemonExitError(err, process)
+			err = fmt.Errorf("%w (spawned daemon cleaned up)", err)
+		}
+	}
+	if err == nil {
+		releaseDaemonProcessCleanupAuthority(process)
+	}
 	return err
 }
 
@@ -368,6 +587,11 @@ func (l *Launcher) startWithLifecycleLockModeRetained(ctx context.Context, daemo
 			return nil, errors.New("daemon lock owner appeared before replacement successor startup; refusing unverified recovery termination")
 		}
 	}
+	ownedCommand, err := l.commandWithScopedOwner(daemonCmd)
+	if err != nil {
+		return nil, err
+	}
+	daemonCmd = ownedCommand
 
 	openLogFile := l.openLogFile
 	if openLogFile == nil {
@@ -419,23 +643,57 @@ func (l *Launcher) startWithLifecycleLockModeRetained(ctx context.Context, daemo
 		case waitErr := <-process.exited():
 			cancel()
 			spanErr = spawnedDaemonExitError(waitErr)
-			return nil, fmt.Errorf("wait for daemon socket readiness: %w", spanErr)
+			return process, fmt.Errorf("wait for daemon socket readiness: %w", spanErr)
 		case err = <-readyResult:
 			cancel()
 		}
 		if err != nil {
-			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
-			cleanupErr := process.stopAndWait(cleanupCtx)
-			cleanupCancel()
-			if cleanupErr != nil {
-				spanErr = errors.Join(err, cleanupErr)
-				return process, fmt.Errorf("wait for daemon socket readiness and cleanup spawned daemon: %w", spanErr)
-			}
 			spanErr = err
-			return nil, fmt.Errorf("wait for daemon socket readiness: %w (spawned daemon cleaned up)", err)
+			return process, fmt.Errorf("wait for daemon socket readiness: %w", err)
 		}
 	}
 	return process, nil
+}
+
+func (l *Launcher) commandWithScopedOwner(command daemonCommand) (daemonCommand, error) {
+	if l == nil {
+		return command, nil
+	}
+	if !config.UseScopedDaemonRuntimeFor(l.RepoDir) {
+		environment := command.env
+		if environment == nil {
+			environment = os.Environ()
+		}
+		command.env = environmentWithoutKeys(environment, daemonOwnerPIDEnv, daemonOwnerStartTokenEnv)
+		return command, nil
+	}
+	ownerPIDText := strings.TrimSpace(os.Getenv(daemonOwnerPIDEnv))
+	if ownerPIDText == "" && strings.TrimSpace(os.Getenv("AZEDARACH_DAEMON_SCOPE_SOURCE")) == "managed-run" {
+		ownerPIDText = strconv.Itoa(os.Getpid())
+	}
+	if ownerPIDText == "" {
+		return command, nil
+	}
+	ownerPID, err := strconv.Atoi(ownerPIDText)
+	if err != nil || ownerPID <= 1 {
+		return daemonCommand{}, fmt.Errorf("invalid scoped daemon owner PID %q", ownerPIDText)
+	}
+	owner, present, err := processidentity.Capture(ownerPID)
+	if err != nil {
+		return daemonCommand{}, fmt.Errorf("capture scoped daemon owner %d: %w", ownerPID, err)
+	}
+	if !present {
+		return daemonCommand{}, fmt.Errorf("scoped daemon owner %d is not alive", ownerPID)
+	}
+	environment := command.env
+	if environment == nil {
+		environment = os.Environ()
+	}
+	command.env = environmentWithValues(environment, map[string]string{
+		daemonOwnerPIDEnv:        strconv.Itoa(owner.PID),
+		daemonOwnerStartTokenEnv: owner.StartToken,
+	})
+	return command, nil
 }
 
 func (l *Launcher) waitForSocketReadyWithin(timeout time.Duration) error {
@@ -829,7 +1087,12 @@ func (l *Launcher) startReplacementWithLifecycleLock(ctx context.Context, daemon
 		cleanupCancel()
 		if cleanupErr != nil {
 			err = errors.Join(err, fmt.Errorf("%w: %v", errReplacementCandidateCleanupUnproven, cleanupErr))
+		} else {
+			err = refineSpawnedDaemonExitError(err, process)
 		}
+	}
+	if err == nil {
+		releaseDaemonProcessCleanupAuthority(process)
 	}
 	if l.Logger == nil {
 		return err
@@ -1064,13 +1327,11 @@ func (l *Launcher) resolvePredecessorRollbackCommand(owner processIdentity, owne
 	if err := l.verifyCanonicalDaemonArguments(owner, "predecessor"); err != nil {
 		return daemonCommand{}, false, err
 	}
-	if config.UseScopedDaemonRuntimeFor(l.RepoDir) {
-		stagedExecutable, err := l.stageScopedExecutableCopy(owner, "predecessor")
-		if err != nil {
-			return daemonCommand{}, false, err
-		}
-		resolvedExecutable = stagedExecutable
+	stagedExecutable, err := l.stagePredecessorExecutableCopy(owner, "predecessor")
+	if err != nil {
+		return daemonCommand{}, false, err
 	}
+	resolvedExecutable = stagedExecutable
 	return l.commandForExecutable(resolvedExecutable), true, nil
 }
 
@@ -1129,7 +1390,11 @@ func (l *Launcher) materializeReplacementCommand(ctx context.Context, command da
 }
 
 func (l *Launcher) stageScopedExecutableCopy(owner processIdentity, purpose string) (string, error) {
-	stageDir, stagedExecutable, err := l.newScopedExecutableStage(purpose)
+	return l.stagePredecessorExecutableCopy(owner, purpose)
+}
+
+func (l *Launcher) stagePredecessorExecutableCopy(owner processIdentity, purpose string) (string, error) {
+	stageDir, stagedExecutable, err := l.newPredecessorExecutableStage(owner, purpose)
 	if err != nil {
 		return "", err
 	}
@@ -1141,21 +1406,21 @@ func (l *Launcher) stageScopedExecutableCopy(owner processIdentity, purpose stri
 	}()
 	source, err := openPlatformProcessExecutable(owner)
 	if err != nil {
-		return "", fmt.Errorf("open process-bound scoped daemon predecessor executable for rollback: %w", err)
+		return "", fmt.Errorf("open process-bound daemon predecessor executable for rollback: %w", err)
 	}
 	before, err := source.Stat()
 	if err != nil {
 		_ = source.Close()
-		return "", fmt.Errorf("inspect scoped daemon predecessor executable before staging: %w", err)
+		return "", fmt.Errorf("inspect daemon predecessor executable before staging: %w", err)
 	}
 	if !before.Mode().IsRegular() || before.Mode().Perm()&0o111 == 0 {
 		_ = source.Close()
-		return "", errors.New("scoped daemon predecessor executable is not a regular executable file")
+		return "", errors.New("daemon predecessor executable is not a regular executable file")
 	}
 	destination, err := os.OpenFile(stagedExecutable, os.O_CREATE|os.O_EXCL|os.O_WRONLY, before.Mode().Perm())
 	if err != nil {
 		_ = source.Close()
-		return "", fmt.Errorf("create staged scoped daemon predecessor executable: %w", err)
+		return "", fmt.Errorf("create staged daemon predecessor executable: %w", err)
 	}
 	copiedHash := sha256.New()
 	copiedBytes, copyErr := io.Copy(io.MultiWriter(destination, copiedHash), source)
@@ -1167,45 +1432,97 @@ func (l *Launcher) stageScopedExecutableCopy(owner processIdentity, purpose stri
 	after, statErr := source.Stat()
 	closeSourceErr := source.Close()
 	if copyErr != nil {
-		return "", fmt.Errorf("copy scoped daemon predecessor executable for rollback: %w", copyErr)
+		return "", fmt.Errorf("copy daemon predecessor executable for rollback: %w", copyErr)
 	}
 	if syncErr != nil {
-		return "", fmt.Errorf("sync staged scoped daemon predecessor executable: %w", syncErr)
+		return "", fmt.Errorf("sync staged daemon predecessor executable: %w", syncErr)
 	}
 	if closeDestinationErr != nil {
-		return "", fmt.Errorf("close staged scoped daemon predecessor executable: %w", closeDestinationErr)
+		return "", fmt.Errorf("close staged daemon predecessor executable: %w", closeDestinationErr)
 	}
 	if seekErr != nil {
-		return "", fmt.Errorf("rewind scoped daemon predecessor executable after staging: %w", seekErr)
+		return "", fmt.Errorf("rewind daemon predecessor executable after staging: %w", seekErr)
 	}
 	if hashErr != nil {
-		return "", fmt.Errorf("hash scoped daemon predecessor executable after staging: %w", hashErr)
+		return "", fmt.Errorf("hash daemon predecessor executable after staging: %w", hashErr)
 	}
 	if statErr != nil {
-		return "", fmt.Errorf("inspect scoped daemon predecessor executable after staging: %w", statErr)
+		return "", fmt.Errorf("inspect daemon predecessor executable after staging: %w", statErr)
 	}
 	if closeSourceErr != nil {
-		return "", fmt.Errorf("close scoped daemon predecessor executable: %w", closeSourceErr)
+		return "", fmt.Errorf("close daemon predecessor executable: %w", closeSourceErr)
 	}
 	if !os.SameFile(before, after) || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
-		return "", errors.New("scoped daemon predecessor executable changed while staging rollback copy")
+		return "", errors.New("daemon predecessor executable changed while staging rollback copy")
 	}
 	if copiedBytes != before.Size() || !bytes.Equal(copiedHash.Sum(nil), sourceHash.Sum(nil)) {
-		return "", errors.New("staged scoped daemon predecessor executable does not match the verified source bytes")
+		return "", errors.New("staged daemon predecessor executable does not match the verified source bytes")
 	}
 	confirmed, confirmedPresent, err := l.captureLockOwnerIdentity()
 	if err != nil {
-		return "", fmt.Errorf("recapture scoped daemon predecessor after staging rollback copy: %w", err)
+		return "", fmt.Errorf("recapture daemon predecessor after staging rollback copy: %w", err)
 	}
 	if !sameProcessIdentity(owner, true, confirmed, confirmedPresent) {
-		return "", errors.New("scoped daemon predecessor identity changed while staging rollback copy")
+		return "", errors.New("daemon predecessor identity changed while staging rollback copy")
 	}
 	resolvedExecutable, err := resolveCommandExecutable(daemonCommand{executable: stagedExecutable})
 	if err != nil {
-		return "", fmt.Errorf("resolve staged scoped daemon predecessor: %w", err)
+		return "", fmt.Errorf("resolve staged daemon predecessor: %w", err)
+	}
+	if !config.UseScopedDaemonRuntimeFor(l.RepoDir) {
+		if _, managed := config.ManagedGenerationBinDir(resolvedExecutable, "azd"); !managed {
+			return "", errors.New("staged global daemon predecessor is not a coherent managed generation")
+		}
 	}
 	keepStage = true
 	return resolvedExecutable, nil
+}
+
+func (l *Launcher) newPredecessorExecutableStage(owner processIdentity, purpose string) (string, string, error) {
+	if config.UseScopedDaemonRuntimeFor(l.RepoDir) {
+		return l.newScopedExecutableStage(purpose)
+	}
+	generationDir, managed := config.ManagedGenerationBinDir(owner.executable, "azd")
+	if !managed {
+		return "", "", errors.New("global daemon predecessor is not a coherent managed generation")
+	}
+	generationsRoot := filepath.Dir(generationDir)
+	stageDir, err := os.MkdirTemp(generationsRoot, "generation.rollback-")
+	if err != nil {
+		return "", "", fmt.Errorf("create managed predecessor rollback generation: %w", err)
+	}
+	stagedExecutable := filepath.Join(stageDir, "azd")
+	if err := copyExecutablePath(filepath.Join(generationDir, "az"), filepath.Join(stageDir, "az")); err != nil {
+		_ = os.RemoveAll(stageDir)
+		return "", "", fmt.Errorf("stage managed predecessor az companion: %w", err)
+	}
+	return stageDir, stagedExecutable, nil
+}
+
+func copyExecutablePath(sourcePath, destinationPath string) error {
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return err
+	}
+	info, err := source.Stat()
+	if err != nil {
+		_ = source.Close()
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		_ = source.Close()
+		return errors.New("source is not a regular executable file")
+	}
+	destination, err := os.OpenFile(destinationPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode().Perm())
+	if err != nil {
+		_ = source.Close()
+		return err
+	}
+	_, copyErr := io.Copy(destination, source)
+	syncErr := destination.Sync()
+	closeDestinationErr := destination.Close()
+	closeSourceErr := source.Close()
+	return errors.Join(copyErr, syncErr, closeDestinationErr, closeSourceErr)
 }
 
 func (l *Launcher) newScopedExecutableStage(purpose string) (string, string, error) {
@@ -1438,6 +1755,41 @@ func environmentWithPathPrefix(environment []string, prefix string) []string {
 		out = append(out, entry)
 	}
 	return append(out, "PATH="+config.PrependPathEntry(pathValue, prefix))
+}
+
+func environmentWithValues(environment []string, values map[string]string) []string {
+	out := make([]string, 0, len(environment)+len(values))
+	for _, entry := range environment {
+		key, _, found := strings.Cut(entry, "=")
+		if found {
+			if _, replaced := values[key]; replaced {
+				continue
+			}
+		}
+		out = append(out, entry)
+	}
+	for key, value := range values {
+		out = append(out, key+"="+value)
+	}
+	return out
+}
+
+func environmentWithoutKeys(environment []string, keys ...string) []string {
+	removed := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		removed[key] = struct{}{}
+	}
+	out := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		key, _, found := strings.Cut(entry, "=")
+		if found {
+			if _, remove := removed[key]; remove {
+				continue
+			}
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 func daemonBinaryNearCurrentExecutable() string {

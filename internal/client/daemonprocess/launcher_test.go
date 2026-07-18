@@ -78,6 +78,78 @@ func TestExecDaemonProcessStopAndWaitAcceptsProvenReapAfterKill(t *testing.T) {
 	}
 }
 
+func TestExecDaemonProcessStopAndWaitNeverSignalsReusedGroupAfterLeaderReaped(t *testing.T) {
+	waitDone := make(chan struct{})
+	close(waitDone)
+	replacementSignaled := make(chan syscall.Signal, 2)
+	process := &execDaemonProcess{
+		cmd:      &exec.Cmd{Process: &os.Process{Pid: 424242}},
+		done:     make(chan error, 1),
+		waitDone: waitDone,
+		// The original candidate group is already gone. This positive probe
+		// represents an unrelated process group that reused the numeric PGID
+		// after cmd.Wait reaped the original leader.
+		processGroupAlive: func() (bool, error) { return true, nil },
+		signalProcessGroup: func(signal syscall.Signal) error {
+			replacementSignaled <- signal
+			return nil
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := process.stopAndWait(ctx)
+	if err == nil {
+		t.Fatal("stopAndWait() error = nil, want fail-closed loss of candidate group authority")
+	}
+	select {
+	case signal := <-replacementSignaled:
+		t.Fatalf("replacement process group received %v after candidate leader reap", signal)
+	default:
+	}
+}
+
+func TestExecDaemonProcessRetainsLeaderUntilGroupSignalsComplete(t *testing.T) {
+	waitDone := make(chan struct{})
+	reapAllowed := make(chan struct{})
+	groupAlive := true
+	process := &execDaemonProcess{
+		cmd:         &exec.Cmd{Process: &os.Process{Pid: 424242}},
+		done:        make(chan error, 1),
+		waitDone:    waitDone,
+		reapAllowed: reapAllowed,
+		processGroupAlive: func() (bool, error) {
+			return groupAlive, nil
+		},
+	}
+	var signals []syscall.Signal
+	process.signalProcessGroup = func(signal syscall.Signal) error {
+		select {
+		case <-waitDone:
+			t.Fatalf("leader reaped before %v process-group signal", signal)
+		default:
+		}
+		signals = append(signals, signal)
+		if signal == syscall.SIGKILL {
+			groupAlive = false
+		}
+		return nil
+	}
+	go func() {
+		<-reapAllowed
+		close(waitDone)
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := process.stopAndWait(ctx); err != nil {
+		t.Fatalf("stopAndWait() error = %v", err)
+	}
+	if !reflect.DeepEqual(signals, []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL}) {
+		t.Fatalf("cleanup signals = %v, want TERM then KILL before leader reap", signals)
+	}
+}
+
 const lingeringDaemonHelperEnv = "AZEDARACH_TEST_LINGERING_DAEMON"
 
 const lingeringDaemonModeEnv = "AZEDARACH_TEST_LINGERING_DAEMON_MODE"
