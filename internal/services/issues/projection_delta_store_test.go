@@ -303,8 +303,12 @@ func TestProjectionDeltaWatchHasNoIdlePolling(t *testing.T) {
 	require.NoError(t, client.OpenProjectionDeltaStore())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	var reads atomic.Int32
-	client.projectionDeltaReadHook = func() { reads.Add(1) }
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	client.projectionDeltaReadHook = func() {
+		if reads.Add(1) == 2 {
+			cancel()
+		}
+	}
 	defer cancel()
 	_, _, err := client.WatchProjectionDeltas(ctx, "default", 0, 1)
 	require.ErrorIs(t, err, domain.ErrProjectionCanceled)
@@ -376,8 +380,8 @@ func TestProjectionDeltaWatchWakesForCrossProcessCommit(t *testing.T) {
 		err    error
 	}
 	resultCh := make(chan result, 1)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	go func() {
 		deltas, _, err := client.WatchProjectionDeltas(ctx, "p", 0, 100)
 		resultCh <- result{deltas: deltas, err: err}
