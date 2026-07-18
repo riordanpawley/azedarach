@@ -602,7 +602,10 @@ func TestRestartManagedAgentPaneArtifactFlagsWorktreeAndUnrelatedPanes(t *testin
 	if respawns != 1 || len(args) < 7 || args[3] != "%12" || args[5] != worktree {
 		t.Fatalf("respawns=%d args=%v", respawns, args)
 	}
-	if !strings.Contains(body, "codex resume") || !strings.Contains(body, "--dangerously-bypass-approvals-and-sandbox") || strings.Contains(body, "Continue your prior task") {
+	if !strings.Contains(body, "codex mcp get --json floop") ||
+		!strings.Contains(body, "codex "+codexFloopFailOpenConfigExpansion+" resume") ||
+		!strings.Contains(body, "--dangerously-bypass-approvals-and-sandbox") ||
+		strings.Contains(body, "Continue your prior task") {
 		t.Fatalf("launch body=%q", body)
 	}
 }
