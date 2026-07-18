@@ -11,6 +11,8 @@
 --   malformed mailbox.cutover envelopes remain a fail-closed cutover error.
 -- * Fail closed above the versioned 50,000-row mailbox observation bound.
 -- * Preserve every top-level observation field and immutable mail_event scalar.
+-- * Preserve JSON numeric lexemes, including integers above 2^53, while
+--   reconstructing only the nested producer payload.
 -- * Reconstruct mail_event.payload from producer-authored top-level fields.
 -- * Exclude mail_event, mail_delivery_id, worker_evidence, and
 --   worker_evidence_validation because they are durable envelope identity or
@@ -20,6 +22,8 @@
 -- Validation effects:
 -- * Every repaired mailbox row must have a JSON object mail_event whose nested
 --   payload exactly matches canonical producer-authored top-level fields.
+-- * Migration, applied-ledger reopen validation, and late-drift repair share
+--   the same versioned 50,000-row bounded scanner and fail closed above it.
 -- * Applied-ledger payload-shape drift is repaired through the same bounded,
 --   transactional path; malformed or missing mail_event envelopes fail startup.
 --

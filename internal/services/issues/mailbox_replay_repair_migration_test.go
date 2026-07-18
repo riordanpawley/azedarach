@@ -3,6 +3,7 @@ package issues
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"path/filepath"
@@ -100,6 +101,104 @@ func TestMailboxObservationReplayRepairMigrationUpgradesRollsBackAndRejectsDrift
 	require.ErrorContains(t, err, "mail_event payload is missing")
 }
 
+func TestMailboxObservationReplayRepairAppliedLedgerReopenEnforcesBound(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	client := NewClientAtPath(dbPath, slog.Default())
+	_, err := client.List(ctx)
+	require.NoError(t, err)
+	require.NoError(t, client.CloseDB())
+
+	raw, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath))
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+		WITH RECURSIVE seq(n) AS (
+			SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < ?
+		)
+		INSERT INTO issue_observation_events(issue_id, event_type, observed_at, source_command, payload_json)
+		SELECT 'bounded', 'worker-progress', '2026-07-18T00:00:00Z', 'mailbox.cutover',
+		       printf('{"mail_event":{"seq":%d}}', n)
+		FROM seq
+	`, mailboxObservationReplayRepairMaxRows)
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+
+	atBound := NewClientAtPath(dbPath, slog.Default())
+	_, err = atBound.List(ctx)
+	require.NoError(t, err, "canonical applied-ledger reopen at the bound")
+	require.NoError(t, atBound.CloseDB())
+
+	raw, err = sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath))
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+		UPDATE issue_observation_events
+		SET payload_json = json_set(payload_json, '$.mail_event.payload.late_drift', 1)
+		WHERE id = (SELECT MAX(id) FROM issue_observation_events WHERE source_command = 'mailbox.cutover')
+	`)
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+
+	driftAtBound := NewClientAtPath(dbPath, slog.Default())
+	_, err = driftAtBound.List(ctx)
+	require.NoError(t, err, "late drift at the bound is repaired through the same bounded scanner")
+	require.NoError(t, driftAtBound.CloseDB())
+
+	raw, err = sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath))
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+		INSERT INTO issue_observation_events(issue_id, event_type, observed_at, source_command, payload_json)
+		VALUES ('bounded', 'worker-progress', '2026-07-18T00:00:00Z', 'mailbox.cutover', '{"mail_event":{"seq":50001}}')
+	`)
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+
+	aboveBound := NewClientAtPath(dbPath, slog.Default())
+	_, err = aboveBound.List(ctx)
+	require.ErrorContains(t, err, "exceeds bounded observation limit 50000")
+	require.NoError(t, aboveBound.CloseDB())
+
+	raw, err = sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath))
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+		UPDATE issue_observation_events
+		SET payload_json = json_set(payload_json, '$.mail_event.payload.late_drift', 1)
+		WHERE id = (SELECT MAX(id) FROM issue_observation_events WHERE source_command = 'mailbox.cutover')
+	`)
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+
+	driftAboveBound := NewClientAtPath(dbPath, slog.Default())
+	_, err = driftAboveBound.List(ctx)
+	require.ErrorContains(t, err, "exceeds bounded observation limit 50000")
+	require.NoError(t, driftAboveBound.CloseDB())
+}
+
+func TestCanonicalMailboxObservationJSONPreservesNumericLexemes(t *testing.T) {
+	raw := `{"big":9007199254740993,"decimal":1.2300,"exponent":1e+09,"mail_delivery_id":9007199254740999,"worker_evidence":{"revision":9007199254740997},"mail_event":{"seq":9007199254740995,"attempt":2.500,"payload":{"stale":true}}}`
+	repaired, changed, err := canonicalMailboxObservationJSON(raw)
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	var before, after map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(raw), &before))
+	require.NoError(t, json.Unmarshal([]byte(repaired), &after))
+	for _, key := range []string{"big", "decimal", "exponent", "mail_delivery_id", "worker_evidence"} {
+		require.JSONEq(t, string(before[key]), string(after[key]), "top-level field %s", key)
+		require.Equal(t, string(before[key]), string(after[key]), "numeric lexemes in top-level field %s", key)
+	}
+
+	var beforeEnvelope, afterEnvelope map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(before["mail_event"], &beforeEnvelope))
+	require.NoError(t, json.Unmarshal(after["mail_event"], &afterEnvelope))
+	for _, key := range []string{"seq", "attempt"} {
+		require.Equal(t, string(beforeEnvelope[key]), string(afterEnvelope[key]), "immutable envelope scalar %s", key)
+	}
+	require.JSONEq(t, `{"big":9007199254740993,"decimal":1.2300,"exponent":1e+09}`, string(afterEnvelope["payload"]))
+	require.Contains(t, string(afterEnvelope["payload"]), `9007199254740993`)
+	require.Contains(t, string(afterEnvelope["payload"]), `1.2300`)
+	require.Contains(t, string(afterEnvelope["payload"]), `1e+09`)
+}
+
 func TestMailboxObservationReplayRepairManifestDescribesImmutableContract(t *testing.T) {
 	manifest, err := loadMigrationSQL("migrations/0055_mailbox_observation_replay_repair.manifest.sql")
 	require.NoError(t, err)
@@ -137,7 +236,7 @@ func assertMailboxReplayRepairState(t *testing.T, dbPath string, eventIDs []int6
 	if wantLedger {
 		var checksum string
 		require.NoError(t, raw.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id = ?`, mailboxObservationReplayRepairMigrationID).Scan(&checksum))
-		require.Equal(t, "d08cab5cab607c0c91cfb01bbf96dd5ad52fef3e53372916462143174c0f7997", checksum)
+		require.Equal(t, "c350a53fc470b54dfc90faa7674d22ad20d6c4b631a8f0d528962eb7f7df0966", checksum)
 	}
 	if wantPayload {
 		for _, eventID := range eventIDs {
