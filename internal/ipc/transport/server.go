@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"sync"
 	"syscall"
 	"time"
 
@@ -30,6 +31,8 @@ type Server struct {
 	codec      *codec.Codec
 	handlers   Handlers
 	listener   net.Listener
+	ready      chan struct{}
+	readyOnce  sync.Once
 }
 
 const serverFrameTimeout = 5 * time.Second
@@ -42,7 +45,13 @@ func NewServer(socketPath string, handlers Handlers) *Server {
 		socketPath: socketPath,
 		codec:      codec.NewCodec(),
 		handlers:   handlers,
+		ready:      make(chan struct{}),
 	}
+}
+
+// Ready closes after the server has bound its listener and can accept clients.
+func (s *Server) Ready() <-chan struct{} {
+	return s.ready
 }
 
 // Serve starts listening and blocks until context cancellation or fatal error.
@@ -69,6 +78,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		return fmt.Errorf("listen unix socket: %w", err)
 	}
 	s.listener = l
+	s.readyOnce.Do(func() { close(s.ready) })
 	defer func() {
 		_ = l.Close()
 		_ = os.Remove(s.socketPath)

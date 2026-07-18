@@ -39,6 +39,7 @@ type Launcher struct {
 	replaceReason      string
 	sleepFn            func(time.Duration)
 	processExitTimeout time.Duration
+	processExitContext func(context.Context, time.Duration) (context.Context, context.CancelFunc)
 	terminateLockOwner func(lockPath string) error
 	startProcess       daemonProcessStarter
 	beforeReplaceLock  func()
@@ -214,6 +215,7 @@ func NewLauncher(repoDir, socketPath string) *Launcher {
 		replaceReason:      "compatibility-replace",
 		sleepFn:            time.Sleep,
 		processExitTimeout: 10 * time.Second,
+		processExitContext: context.WithTimeout,
 		terminateLockOwner: lifecycle.TerminateLockOwner,
 	}
 }
@@ -672,7 +674,11 @@ func (l *Launcher) waitForCapturedOwnerExit(ctx context.Context, owner processId
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	waitCtx, cancel := context.WithTimeout(waitCtx, timeout)
+	withTimeout := l.processExitContext
+	if withTimeout == nil {
+		withTimeout = context.WithTimeout
+	}
+	waitCtx, cancel := withTimeout(waitCtx, timeout)
 	defer cancel()
 	if err := l.waitForProcessExit(waitCtx, owner); err != nil {
 		return fmt.Errorf("prove daemon predecessor exited before %s: %w", action, err)

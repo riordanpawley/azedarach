@@ -754,16 +754,25 @@ func TestReviewReturnBoundsBlockedLiveDeliveryAndPublishesFailure(t *testing.T) 
 		<-runCtx.Done()
 		return "", runCtx.Err()
 	}
-	authority := daemonOrchestrationAuthority{daemon: d, reviewDeliveryTimeout: 25 * time.Millisecond}
+	var gotDeliveryTimeout time.Duration
+	authority := daemonOrchestrationAuthority{
+		daemon:                d,
+		reviewDeliveryTimeout: 25 * time.Millisecond,
+		reviewDeliveryContext: func(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+			gotDeliveryTimeout = timeout
+			done := make(chan struct{})
+			close(done)
+			return deadlineExceededTestContext{Context: parent, done: done}, func() {}
+		},
+	}
 	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "review-return-blocked-delivery", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "delivery must be bounded"}}}
 
-	started := time.Now()
 	result, err := authority.Apply(ctx, "project", request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("review return elapsed %s, want bounded delivery", elapsed)
+	if gotDeliveryTimeout != authority.reviewDeliveryTimeout {
+		t.Fatalf("review delivery timeout = %v, want %v", gotDeliveryTimeout, authority.reviewDeliveryTimeout)
 	}
 	failure := result.Failed[issueID]
 	if !strings.Contains(failure, "stage=live_delivery") || !strings.Contains(failure, "target="+issueID) || !strings.Contains(failure, context.DeadlineExceeded.Error()) {
@@ -796,6 +805,15 @@ func TestReviewReturnBoundsBlockedLiveDeliveryAndPublishesFailure(t *testing.T) 
 		t.Fatalf("replayed mail events = %+v err=%v, want idempotent durable finding", replayedMail, err)
 	}
 }
+
+type deadlineExceededTestContext struct {
+	context.Context
+	done <-chan struct{}
+}
+
+func (c deadlineExceededTestContext) Deadline() (time.Time, bool) { return time.Time{}, true }
+func (c deadlineExceededTestContext) Done() <-chan struct{}       { return c.done }
+func (deadlineExceededTestContext) Err() error                    { return context.DeadlineExceeded }
 
 func TestReviewReturnRejectsFailedAggregateGateFromPriorReviewEpoch(t *testing.T) {
 	ctx := context.Background()
@@ -1614,9 +1632,6 @@ func TestReviewAcceptRetryRejectsBranchMutationAfterDurableAcceptance(t *testing
 		t.Fatal(err)
 	}
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
-	d.snapshotAdmissionContext = func(parent context.Context) (context.Context, context.CancelFunc) {
-		return context.WithCancel(parent)
-	}
 	sourceOID := "reviewed-source-a"
 	d.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) { return sourceOID, nil }
 	request := protocol.OrchestrationIntentRequest{
@@ -2247,6 +2262,9 @@ func newOrchestrationReviewTestDaemon(repoDir string, client *issues.Client) *Da
 		hub:                   publish.NewHub(16, 8, logger),
 		issueClientsByProject: map[string]*issues.Client{"project": client},
 		revision:              map[string]uint64{},
+		snapshotAdmissionContext: func(parent context.Context) (context.Context, context.CancelFunc) {
+			return context.WithCancel(parent)
+		},
 		reviewAcceptedSourceOID: func(context.Context, string, string) (string, error) {
 			return "reviewed-source-oid", nil
 		},

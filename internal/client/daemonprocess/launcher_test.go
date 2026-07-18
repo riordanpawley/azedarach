@@ -2066,6 +2066,13 @@ func TestLauncherStopBoundsExactProcessExitWait(t *testing.T) {
 	repoDir := newLauncherTestWorktree(t)
 	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
 	launcher.processExitTimeout = 50 * time.Millisecond
+	var gotTimeout time.Duration
+	launcher.processExitContext = func(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+		gotTimeout = timeout
+		ctx, cancel := context.WithCancel(parent)
+		cancel()
+		return ctx, func() {}
+	}
 	runtimeDir := config.ScopedDaemonRuntimeDir(repoDir)
 	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -2079,13 +2086,12 @@ func TestLauncherStopBoundsExactProcessExitWait(t *testing.T) {
 	}
 	launcher.shutdownViaSocket = func(context.Context, string) error { return nil }
 
-	started := time.Now()
 	err = launcher.Stop(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "still alive after stop") {
 		t.Fatalf("Stop() error = %v, want bounded exact-process wait failure", err)
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("Stop() took %v, want bounded failure", elapsed)
+	if gotTimeout != launcher.processExitTimeout {
+		t.Fatalf("process exit timeout = %v, want %v", gotTimeout, launcher.processExitTimeout)
 	}
 }
 

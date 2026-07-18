@@ -578,6 +578,9 @@ func TestPublicationQueueSerializesTargetAndCoalescesManagerWork(t *testing.T) {
 	close(releaseFirst)
 	<-secondStarted
 	seen := map[string]bool{<-merged: true, <-merged: true}
+	if err := runtime.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if !seen[first.OperationID] || !seen[second.OperationID] {
 		t.Fatalf("merged operations = %v", seen)
 	}
@@ -817,6 +820,9 @@ func TestPublicationStaleSuccessorSurvivesAtomicCommitCrashAndReopen(t *testing.
 			}
 			restarted.recoverPublicationOperations(context.Background())
 			got := <-merged
+			if err := restartedRuntime.Drain(context.Background()); err != nil {
+				t.Fatal(err)
+			}
 			if got.BaseRevision != "base-b" || got.OperationID == operation.OperationID {
 				t.Fatalf("recovered atomic successor = %+v", got)
 			}
