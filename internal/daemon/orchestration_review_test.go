@@ -619,6 +619,41 @@ func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T
 	}
 }
 
+func TestReviewReturnDoesNotRequireProjectSnapshotAdmission(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker-a")
+	tmuxRunner := newSessionStartTmuxRunner()
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.tmux = tmux.NewClient(tmuxRunner, slog.Default())
+	d.orchestrationSnapshotBuild = func(context.Context, string, protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		return protocol.OrchestrationSnapshot{}, fmt.Errorf("%w: injected unrelated project churn", errOrchestrationSnapshotAdmissionContended)
+	}
+	canonicalSessionID := naming.CanonicalSessionIDForIssue(d.sessionNamingScope("project"), naming.IssueID(issueID)).String()
+	tmuxRunner.sessions[canonicalSessionID] = true
+	request := protocol.OrchestrationIntentRequest{
+		Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn,
+		IntentKey: "review-return-with-project-churn", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir,
+		Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "repair the bounded worker issue"}},
+	}
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Returned) != 1 || result.Returned[0] != issueID || len(result.Failed) != 0 || len(result.Skipped) != 0 {
+		t.Fatalf("review return result = %+v, want bounded return despite unrelated project snapshot contention", result)
+	}
+	replayed, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replayed.Returned) != 1 || len(replayed.Failed) != 0 || len(replayed.Skipped) != 0 {
+		t.Fatalf("review return replay = %+v, want idempotent convergence without project snapshot admission", replayed)
+	}
+}
+
 func TestReviewReturnAcceptsFailedAggregateGateFromCurrentReviewEpochAfterWorkerMovesActive(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
