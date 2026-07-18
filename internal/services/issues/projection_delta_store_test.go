@@ -398,6 +398,68 @@ func TestProjectionDeltaWatchWakesForCrossProcessCommit(t *testing.T) {
 	require.Equal(t, uint64(1), got.deltas[0].Cursor)
 }
 
+func TestProjectionDeltaWatchWakesAcrossClientsWithoutFilesystemSignal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.db")
+	writer := NewClientAtPath(path, nil)
+	reader := NewClientAtPath(path, nil)
+	require.NoError(t, writer.OpenProjectionDeltaStore())
+	require.NoError(t, reader.OpenProjectionDeltaStore())
+	t.Cleanup(func() { _ = writer.CloseDB() })
+	t.Cleanup(func() { _ = reader.CloseDB() })
+
+	registered := make(chan struct{})
+	var reads atomic.Int32
+	reader.projectionDeltaReadHook = func() {
+		if reads.Add(1) == 2 {
+			close(registered)
+		}
+	}
+	type result struct {
+		deltas []domain.ProjectionDelta
+		err    error
+	}
+	resultCh := make(chan result, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() {
+		deltas, _, err := reader.WatchProjectionDeltas(ctx, "p", 0, 1)
+		resultCh <- result{deltas: deltas, err: err}
+	}()
+	<-registered
+
+	db, err := writer.dbHandle()
+	require.NoError(t, err)
+	tx, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer tx.Rollback()
+	_, err = appendProjectionDelta(ctx, tx, ProjectionDeltaParams{
+		ProjectID: "p", Kind: domain.ProjectionKindIssue, Key: "local-wake",
+		Operation: domain.ProjectionDeltaUpsert, IdempotencyKey: "local-wake", Payload: json.RawMessage(`{}`),
+	})
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+
+	signalLocalProjectionDeltaNotification(path)
+	got := <-resultCh
+	require.NoError(t, got.err)
+	require.Len(t, got.deltas, 1)
+	require.Equal(t, "local-wake", got.deltas[0].Key)
+}
+
+func TestProjectionDeltaLocalWakeSurvivesFilesystemSignalFailure(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "missing", "issues.db")
+	events := make(chan struct{}, 1)
+	unregister := registerLocalProjectionDeltaNotification(dbPath, events)
+	t.Cleanup(unregister)
+
+	require.Error(t, signalProjectionDeltaNotification(dbPath))
+	select {
+	case <-events:
+	default:
+		t.Fatal("filesystem signal failure suppressed the process-local wake")
+	}
+}
+
 func TestProjectionDeltaWatchWakesAcrossDatabasePathAliases(t *testing.T) {
 	for _, alias := range []string{"relative", "symlink"} {
 		t.Run(alias, func(t *testing.T) {
