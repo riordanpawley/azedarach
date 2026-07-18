@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 type fsnotifyProjectionDeltaNotifier struct {
@@ -92,7 +93,7 @@ func (n *fsnotifyProjectionDeltaNotifier) run() {
 }
 
 func projectionDeltaNotificationPath(dbPath string) string {
-	return filepath.Clean(dbPath) + ".projection-notify"
+	return sqliteutil.CanonicalPath(dbPath) + ".projection-notify"
 }
 
 func signalProjectionDeltaNotification(dbPath string) error {

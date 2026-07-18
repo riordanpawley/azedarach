@@ -398,6 +398,65 @@ func TestProjectionDeltaWatchWakesForCrossProcessCommit(t *testing.T) {
 	require.Equal(t, uint64(1), got.deltas[0].Cursor)
 }
 
+func TestProjectionDeltaWatchWakesAcrossDatabasePathAliases(t *testing.T) {
+	for _, alias := range []string{"relative", "symlink"} {
+		t.Run(alias, func(t *testing.T) {
+			realDir := t.TempDir()
+			realPath := filepath.Join(realDir, "issues.db")
+			var aliasPath string
+			switch alias {
+			case "relative":
+				workingDir, err := os.Getwd()
+				require.NoError(t, err)
+				aliasPath, err = filepath.Rel(workingDir, realPath)
+				require.NoError(t, err)
+			case "symlink":
+				aliasDir := filepath.Join(t.TempDir(), "database-alias")
+				require.NoError(t, os.Symlink(realDir, aliasDir))
+				aliasPath = filepath.Join(aliasDir, filepath.Base(realPath))
+			}
+			require.Equal(t, projectionDeltaNotificationPath(realPath), projectionDeltaNotificationPath(aliasPath))
+
+			reader := NewClientAtPath(realPath, nil)
+			require.NoError(t, reader.OpenProjectionDeltaStore())
+			t.Cleanup(func() { _ = reader.CloseDB() })
+			writer := NewClientAtPath(aliasPath, nil)
+			require.NoError(t, writer.OpenProjectionDeltaStore())
+			t.Cleanup(func() { _ = writer.CloseDB() })
+
+			registered := make(chan struct{})
+			var reads atomic.Int32
+			reader.projectionDeltaReadHook = func() {
+				if reads.Add(1) == 2 {
+					close(registered)
+				}
+			}
+			type result struct {
+				deltas []domain.ProjectionDelta
+				err    error
+			}
+			resultCh := make(chan result, 1)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			go func() {
+				deltas, _, err := reader.WatchProjectionDeltas(ctx, "alias-project", 0, 1)
+				resultCh <- result{deltas: deltas, err: err}
+			}()
+			<-registered
+
+			_, err := writer.CommitProjectionDelta(context.Background(), ProjectionDeltaParams{
+				ProjectID: "alias-project", Kind: domain.ProjectionKindIssue, Key: alias,
+				Operation: domain.ProjectionDeltaUpsert, IdempotencyKey: alias, Payload: json.RawMessage(`{}`),
+			}, nil)
+			require.NoError(t, err)
+			got := <-resultCh
+			require.NoError(t, got.err)
+			require.Len(t, got.deltas, 1)
+			require.Equal(t, alias, got.deltas[0].Key)
+		})
+	}
+}
+
 func TestProjectionDeltaNotifierFansOutAndReopensWithStore(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "issues.db")
 	client := NewClientAtPath(path, nil)
