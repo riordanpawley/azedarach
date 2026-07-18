@@ -4165,6 +4165,78 @@ func TestSessionStartDoesNotPersistTransitionWhenTmuxCreateFails(t *testing.T) {
 	}
 }
 
+func TestSessionStartImmediateAgentExitCompensatesAndRetries(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir .azedarach: %v", err)
+	}
+
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Retry failed bootstrap", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	worktreeRunner := &worktreeCreateRunner{
+		worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID),
+		branchName:   "testuser/" + issueID + "/retry-bootstrap",
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	store := daemonstate.NewStore()
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	d := &Daemon{
+		cfg:  Config{RepoDir: repoDir, BaseBranch: "main", CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+		tmux: tmux.NewClient(tmuxRunner, slog.Default()), issues: issuesClient,
+		session: daemonhandlers.NewSessionHandler(store), sessionStore: store, revision: map[string]uint64{},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{repoDir: runtimeStore},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+	req := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion, RequestID: "req-bootstrap-exit", Kind: protocol.EnvelopeKindCommand,
+		Command: daemonhandlers.CommandSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body: marshalJSON(map[string]string{"project_id": projectID, "session_id": issueID}),
+	}
+	sessionID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
+	tmuxRunner.onNewSession = func(startedSessionID string) {
+		tmuxRunner.sessionsWithoutPanes[startedSessionID] = true
+	}
+
+	failed, err := d.handleSessionStartDirect(ctx, req)
+	if err != nil {
+		t.Fatalf("failed bootstrap returned transport error: %v", err)
+	}
+	if failed.OK || !strings.Contains(failed.Error.Message, string(sessionStartBootstrapAgentExited)) {
+		t.Fatalf("failed bootstrap response = %+v, want typed agent exit", failed)
+	}
+	if tmuxRunner.sessions[sessionID] {
+		t.Fatalf("failed bootstrap session %s survived compensation", sessionID)
+	}
+	if projection, found, projectionErr := runtimeStore.GetSessionState(ctx, projectID, sessionID); projectionErr != nil || (found && projection.ObservedState == daemonstate.SessionStateRunning) {
+		t.Fatalf("failed bootstrap projection = %+v, found=%t err=%v", projection, found, projectionErr)
+	}
+
+	tmuxRunner.onNewSession = nil
+	delete(tmuxRunner.sessionsWithoutPanes, sessionID)
+	acknowledgeManagedAgentOnInitialLaunch(t, d, tmuxRunner, projectID)
+	retried, retryErr := d.handleSessionStartDirect(ctx, req)
+	if retryErr != nil || !retried.OK {
+		t.Fatalf("retry after failed bootstrap: resp=%+v err=%v", retried, retryErr)
+	}
+	if !tmuxRunner.sessions[sessionID] {
+		t.Fatalf("retry did not leave one live session %s", sessionID)
+	}
+}
+
 func TestSessionStartTmuxCreateFailureIncludesDiagnostics(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
