@@ -1981,7 +1981,8 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 		if compensationErr := d.compensateDeferredTaskWorktreeCleanup(ctx, projectID, cmd.TaskID, deferredCleanup); compensationErr != nil {
 			err = errors.Join(err, compensationErr)
 		}
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		err = d.recordProjectIssueStoreFailure(projectID, err)
+		return d.errorResponse(req, projectIssueStoreHealthErrorCode(err), err.Error()), nil
 	}
 	if deferredCleanup.Observed {
 		if err := d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, cmd.TaskID); err != nil {

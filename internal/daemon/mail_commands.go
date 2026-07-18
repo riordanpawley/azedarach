@@ -77,7 +77,7 @@ func (d *Daemon) handleMailSend(ctx context.Context, req protocol.RequestEnvelop
 	}
 	existing, err = d.reconcileProjectedMailboxEvents(ctx, d.projectID(req.Meta), repoDir, parentIssue, existing)
 	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("reconcile projected mailbox events: %v", err)), nil
+		return d.errorResponse(req, projectIssueStoreHealthErrorCode(err), fmt.Sprintf("reconcile projected mailbox events: %v", err)), nil
 	}
 	nextSeq := int64(1)
 	if len(existing) > 0 {
@@ -203,7 +203,7 @@ func (d *Daemon) reconcileProjectedMailboxEvents(ctx context.Context, projectID,
 	}
 	projected, err := issueClient.ListIssueObservationMailEvents(ctx, parentIssue)
 	if err != nil {
-		return nil, err
+		return nil, d.recordProjectIssueStoreFailure(projectID, err)
 	}
 	bySequence := make(map[int64]daemonMailEvent, len(existing))
 	for _, event := range existing {

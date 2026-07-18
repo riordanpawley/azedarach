@@ -826,12 +826,22 @@ func hasParentChildOrphanConfirmation(ctx context.Context) bool {
 const (
 	nextAlphaIssueIndexMetaKey  = "issue:id_next_alpha_index"
 	sqliteBusyPrimaryCode       = 5
+	sqliteCorruptPrimaryCode    = 11
 	defaultSQLiteBusyTimeout    = 5 * time.Second
 	defaultSQLiteBusyRetryDelay = 100 * time.Millisecond
 	// Keep at least one foreground reader available while Linear sync owns a write connection.
 	sqliteMaxOpenConns         = 4
 	issueGraphClosureProjectID = "default"
 )
+
+// ErrSQLiteCorrupt marks structural SQLite damage. Callers must preserve the
+// database and WAL and recover through a consistent clone instead of retrying
+// writes against the damaged authority.
+var ErrSQLiteCorrupt = errors.New("issue database structural corruption")
+
+type sqliteCorruptionState struct {
+	err error
+}
 
 // Client wraps local SQLite task store operations.
 type Client struct {
@@ -857,6 +867,7 @@ type Client struct {
 	projectionWatchActive              atomic.Int64
 	projectionWatchStarted             atomic.Uint64
 	projectionWatchCompleted           atomic.Uint64
+	corruption                         atomic.Pointer[sqliteCorruptionState]
 	decisionOutboxMigrationFailureHook func(stage string) error
 	decisionIdempotencyFailureHook     func(stage string) error
 	eventSearchMigrationFailureHook    func(stage string) error
@@ -1045,6 +1056,9 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if err := c.corruptionError(); err != nil {
+		return nil, &domain.TaskStoreError{Op: "open-db", Err: err}
+	}
 	if c.db != nil {
 		return c.db, nil
 	}
@@ -1095,6 +1109,10 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		return nil, c.wrapError("open-db", "", err)
 	}
 	pingDoneAt := time.Now()
+	if err := checkSQLiteStructuralIntegrity(db); err != nil {
+		_ = db.Close()
+		return nil, c.wrapError("open-db", "", err)
+	}
 	if err := c.configureSQLite(db); err != nil {
 		_ = db.Close()
 		return nil, c.wrapError("open-db", "", err)
@@ -1156,6 +1174,18 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		)
 	}
 	return c.db, nil
+}
+
+func checkSQLiteStructuralIntegrity(db *sql.DB) error {
+	var result string
+	if err := db.QueryRow(`PRAGMA quick_check(1)`).Scan(&result); err != nil {
+		return fmt.Errorf("pre-write SQLite integrity check: %w", err)
+	}
+	result = strings.TrimSpace(result)
+	if !strings.EqualFold(result, "ok") {
+		return fmt.Errorf("%w: pre-write SQLite integrity check returned %q", ErrSQLiteCorrupt, result)
+	}
+	return nil
 }
 
 func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
@@ -3793,6 +3823,22 @@ func IsSQLiteBusy(err error) bool {
 	for err != nil {
 		var sqliteErr *sqlite.Error
 		if errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == sqliteBusyPrimaryCode {
+			return true
+		}
+		err = errors.Unwrap(err)
+	}
+	return false
+}
+
+// IsSQLiteCorrupt reports whether err is a typed store quarantine or wraps a
+// SQLite result with primary code SQLITE_CORRUPT (11).
+func IsSQLiteCorrupt(err error) bool {
+	if errors.Is(err, ErrSQLiteCorrupt) {
+		return true
+	}
+	for err != nil {
+		var coded interface{ Code() int }
+		if errors.As(err, &coded) && coded.Code()&0xff == sqliteCorruptPrimaryCode {
 			return true
 		}
 		err = errors.Unwrap(err)
@@ -6668,6 +6714,9 @@ func resolveDBPath(repoDir string) (string, error) {
 }
 
 func (c *Client) wrapError(op string, issueID string, err error) error {
+	if IsSQLiteCorrupt(err) {
+		err = c.markSQLiteCorrupt(err)
+	}
 	storeErr := &domain.TaskStoreError{
 		Op:  op,
 		Err: err,
@@ -6676,4 +6725,28 @@ func (c *Client) wrapError(op string, issueID string, err error) error {
 		storeErr.TaskID = issueID
 	}
 	return storeErr
+}
+
+func (c *Client) markSQLiteCorrupt(cause error) error {
+	if existing := c.corruption.Load(); existing != nil {
+		return existing.err
+	}
+	quarantineErr := fmt.Errorf(
+		"%w detected; this issue store is quarantined in the current process. Preserve the database and WAL, create a consistent online-backup clone, and recover or replace the authority from validated clone evidence before retrying: %w",
+		ErrSQLiteCorrupt,
+		cause,
+	)
+	state := &sqliteCorruptionState{err: quarantineErr}
+	if c.corruption.CompareAndSwap(nil, state) {
+		return quarantineErr
+	}
+	return c.corruption.Load().err
+}
+
+func (c *Client) corruptionError() error {
+	state := c.corruption.Load()
+	if state == nil {
+		return nil
+	}
+	return state.err
 }
