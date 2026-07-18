@@ -476,6 +476,19 @@ if ($production_install_overlapped && $exit_code == 0) {
     $exit_code = 74;
 }
 
+merge_whole_gate_evidence($evidence_file, {
+    held => JSON::PP::true, request_id => $request_id, class => $class,
+    scope => $scope, purpose => $purpose, execution => 'executed',
+    authoritative_request_id => $request_id, override => $override,
+    profile => $profile, source_revision => $revision, present => JSON::PP::true,
+    overlap_detected => $overlap_detected ? JSON::PP::true : JSON::PP::false,
+    external_go_processes => $max_external_go,
+    cleanup_succeeded => $cleanup_error eq '' ? JSON::PP::true : JSON::PP::false,
+    cleanup_error => $cleanup_error,
+    payload_exit_code => $payload_exit_code,
+    production_install_overlapped => $production_install_overlapped ? JSON::PP::true : JSON::PP::false,
+});
+
 if ($exit_code != 0 && ($ENV{AZEDARACH_CANDIDATE_ARTIFACT_RESULT_FILE} || '') ne '') {
     my $publisher = "$candidate_root/scripts/publish-validation-artifacts";
     my @publish = ($publisher,
@@ -506,19 +519,6 @@ if ($exit_code != 0 && ($ENV{AZEDARACH_CANDIDATE_ARTIFACT_RESULT_FILE} || '') ne
         clear_validation_report_paths($evidence_file);
     }
 }
-
-merge_whole_gate_evidence($evidence_file, {
-    held => JSON::PP::true, request_id => $request_id, class => $class,
-    scope => $scope, purpose => $purpose, execution => 'executed',
-    authoritative_request_id => $request_id, override => $override,
-    profile => $profile, source_revision => $revision, present => JSON::PP::true,
-    overlap_detected => $overlap_detected ? JSON::PP::true : JSON::PP::false,
-    external_go_processes => $max_external_go,
-    cleanup_succeeded => $cleanup_error eq '' ? JSON::PP::true : JSON::PP::false,
-    cleanup_error => $cleanup_error,
-    payload_exit_code => $payload_exit_code,
-    production_install_overlapped => $production_install_overlapped ? JSON::PP::true : JSON::PP::false,
-});
 if ($purpose eq 'capacity' && $class eq 'aggregate' && $overlap_detected && $exit_code == 0) {
     warn "aggregate validation overlapped $max_external_go unleased Go process(es)\n";
     $exit_code = 75;

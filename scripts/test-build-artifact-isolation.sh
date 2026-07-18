@@ -255,6 +255,25 @@ grep -q 'example/broken::TestRetained' "$artifact_result"
 artifact_directory="$(cd "$(dirname "$artifact_manifest")" && pwd -P)"
 grep -F -q "artifacts=$artifact_directory" "$artifact_result"
 
+fatal_artifact_result="$fixture/fatal-candidate-artifact-result"
+fatal_gate_output="$fixture/fatal-candidate-gate-output"
+if env "${fresh_validation_environment[@]}" \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  AZEDARACH_CANDIDATE_ARTIFACT_RESULT_FILE="$fatal_artifact_result" \
+  AZEDARACH_CANDIDATE_GATE_OUTPUT_PATH="$fatal_gate_output" \
+  AZEDARACH_CANDIDATE_ISSUE_ID=dov \
+  AZEDARACH_TICKET_ID=fixture \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile fatal-candidate -- \
+  sh -c 'printf '\''fatal build configuration\n'\'' >"$AZEDARACH_CANDIDATE_GATE_OUTPUT_PATH"; printf '\''{"fatal_phase":"toolchain_configuration","fatal_detail":"required Go toolchain unavailable"}\n'\'' >"$AZEDARACH_VALIDATION_FATAL_EVIDENCE_FILE"; exit 76'; then
+  echo "fatal candidate validation unexpectedly passed" >&2
+  exit 1
+fi
+fatal_artifact_manifest="$(find "$fixture/.azedarach/validation-artifacts/failures/fixture-sha" -path '*/manifest.json' -exec grep -l 'required Go toolchain unavailable' {} + | head -n 1)"
+test -n "$fatal_artifact_manifest"
+grep -q 'required Go toolchain unavailable' "$fatal_artifact_result"
+fatal_artifact_directory="$(cd "$(dirname "$fatal_artifact_manifest")" && pwd -P)"
+grep -F -q "artifacts=$fatal_artifact_directory" "$fatal_artifact_result"
+
 failure_evidence="$fixture/failure-evidence.json"
 if env "${fresh_validation_environment[@]}" \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \

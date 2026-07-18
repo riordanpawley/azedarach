@@ -89,7 +89,7 @@ for my $path (glob(File::Spec->catfile($stage, 'reports', '*', '*')), File::Spec
 }
 die "failed validation did not produce publishable report or gate output\n" unless @artifacts;
 
-my $summary = failure_summary(\@measurements, $stage);
+my $summary = failure_summary(\@measurements, $evidence, $stage);
 my @references;
 push @references, {kind => 'issue', id => $arg{issue}}
     if ($arg{issue} // '') ne '';
@@ -213,7 +213,7 @@ sub artifact_metadata {
 }
 
 sub failure_summary {
-    my ($measurements, $stage) = @_;
+    my ($measurements, $evidence, $stage) = @_;
     for my $measurement (@$measurements) {
         my @failures = grep { ref($_) eq 'HASH' } @{$measurement->{failures} || []};
         @failures = sort { ($b->{test} ? 1 : 0) <=> ($a->{test} ? 1 : 0) } @failures;
@@ -224,6 +224,11 @@ sub failure_summary {
             my $detail = meaningful_line($failure->{output} || '');
             return $detail ne '' ? "$identity: $detail" : $identity;
         }
+    }
+    if (($evidence->{fatal_phase} || '') ne '' || ($evidence->{fatal_detail} || '') ne '') {
+        my $phase = one_line($evidence->{fatal_phase} || 'validation');
+        my $detail = one_line($evidence->{fatal_detail} || 'validation payload configuration failed');
+        return "$phase: $detail";
     }
     for my $path (glob(File::Spec->catfile($stage, 'reports', '*', 'stderr.txt'))) {
         next unless -f $path;
