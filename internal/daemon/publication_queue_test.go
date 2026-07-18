@@ -131,6 +131,98 @@ func TestReviewAcceptOwnsLeaseAndAutomaticallyContinuesBasePublicationWithoutAgg
 	<-merged
 }
 
+func TestReviewAcceptWithoutConfiguredGateFailsWithoutPublicationReadinessEvidence(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	runDaemonTestGit(t, repo, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repo, "config", "user.email", "test@example.com")
+	runDaemonTestGit(t, repo, "config", "user.name", "Test User")
+	canonicalRepo, err := appconfig.ResolveProjectRoot(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo = canonicalRepo
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDaemonTestGit(t, repo, "add", "README.md")
+	runDaemonTestGit(t, repo, "commit", "-q", "-m", "base")
+	if err := os.MkdirAll(filepath.Join(repo, ".azedarach"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".azedarach", "config.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	issueClient := newMigratedIssueClient(t, repo, slog.Default())
+	t.Cleanup(func() { _ = issueClient.CloseDB() })
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	t.Cleanup(func() { _ = runtime.Close() })
+	projectID := runtime.canonicalProject
+	issueID, err := issueClient.Create(ctx, issues.CreateTaskParams{Title: "publish without gate", Description: "consumer patch", Acceptance: "fail closed without configured validation", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := issueClient.ClaimOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: "worker", OwnerKind: "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := issueClient.Update(ctx, issueID, domain.StatusInReview); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := issueClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t)}); err != nil {
+		t.Fatal(err)
+	}
+
+	d := newOrchestrationReviewTestDaemon(repo, issueClient)
+	d.cfg.BaseBranch = "main"
+	d.issueClientsByProject = map[string]*issues.Client{projectID: issueClient}
+	d.operationRuntime = runtime
+	d.git = gitservice.NewClient(gitservice.NewExecRunner(repo), slog.Default())
+	d.worktreeAdapter = &worktreeServiceAdapter{manager: gitservice.NewWorktreeManager(gitservice.NewExecRunner(repo), repo, slog.Default())}
+	sourceOID := runDaemonTestGitOutput(t, repo, "rev-parse", "HEAD")
+	d.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) { return sourceOID, nil }
+
+	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-without-gate", ActorID: "reviewer", IssueIDs: []string{issueID}, RepoDir: repo}
+	result, err := d.orchestrationAuthority().Apply(ctx, projectID, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failure := result.Failed[issueID]; !strings.Contains(failure, "publication capability absent: configure gate.command") {
+		t.Fatalf("review acceptance = %+v, want explicit absent publication capability failure", result)
+	}
+	if len(result.Publications) != 0 || len(result.Closed) != 0 {
+		t.Fatalf("review acceptance = %+v, want no publication or accepted close", result)
+	}
+	operations, err := runtime.store.PublicationOperations(ctx, projectID, issueID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 0 {
+		t.Fatalf("publication operations = %+v, want none", operations)
+	}
+	reviewEvents, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reviewEvents) != 0 {
+		t.Fatalf("review completion evidence = %+v, want none", reviewEvents)
+	}
+	validation, err := runtime.store.LatestReviewValidation(ctx, projectID, issueID, time.Now().UTC(), defaultValidationLeaseTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if validation != nil {
+		t.Fatalf("aggregate validation evidence = %+v, want none", validation)
+	}
+	readiness, err := d.taskIntegrationReadiness(ctx, projectID, issueID, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readiness.Ready || !strings.Contains(strings.Join(readiness.Reasons, "; "), "no aggregate validation") {
+		t.Fatalf("integration readiness = %+v, want fail-closed absence of publication evidence", readiness)
+	}
+}
+
 func TestPublicationQueueRecoveryClaimsOnceAcrossDaemons(t *testing.T) {
 	repo := t.TempDir()
 	firstRuntime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
