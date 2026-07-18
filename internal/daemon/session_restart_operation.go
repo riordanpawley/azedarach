@@ -28,6 +28,15 @@ const (
 	sessionRestartPromptHandoffTypeNone              = "none"
 	sessionRestartPromptHandoffTypeOwnerOnlyArtifact = "owner_only_launch_artifact"
 	sessionRestartStageRootedInvalidateReady         = "rooted_invalidate_ready"
+	sessionRestartBatchPlanVersion                   = 1
+
+	sessionRestartLifecycleRequested   = protocol.SessionRestartStageRequested
+	sessionRestartLifecycleTerminating = protocol.SessionRestartStageTerminating
+	sessionRestartLifecycleLaunching   = protocol.SessionRestartStageLaunching
+	sessionRestartLifecycleVerifying   = protocol.SessionRestartStageVerifying
+	sessionRestartLifecycleCompleted   = protocol.SessionRestartStageCompleted
+	sessionRestartLifecycleFailed      = protocol.SessionRestartStageFailed
+	sessionRestartLifecycleCompensated = protocol.SessionRestartStageCompensated
 )
 
 type sessionRestartExecution struct {
@@ -49,13 +58,69 @@ type sessionRestartRecoveryPlan struct {
 	Stage                 string                           `json:"stage"`
 }
 
+// sessionRestartBatchPlan is the complete crash-recovery authority for one
+// restart-all operation. Targets are immutable once requested is persisted;
+// Cursor, Results, and Current advance together through durable progress
+// checkpoints.
+type sessionRestartBatchPlan struct {
+	Version     int                                   `json:"version"`
+	ProjectID   string                                `json:"project_id"`
+	ProjectIDs  []string                              `json:"project_ids"`
+	Request     protocol.SessionRestartAllRequestBody `json:"request"`
+	Targets     []sessionRestartAllTarget             `json:"targets"`
+	Cursor      int                                   `json:"cursor"`
+	Results     []protocol.SessionRestartAllItem      `json:"results"`
+	Current     *sessionRestartRecoveryPlan           `json:"current,omitempty"`
+	Recoverable []sessionRestartBatchRecovery         `json:"recoverable,omitempty"`
+	Stage       string                                `json:"stage"`
+}
+
+type sessionRestartBatchRecovery struct {
+	Index int                        `json:"index"`
+	Plan  sessionRestartRecoveryPlan `json:"plan"`
+}
+
+type sessionRestartBatchProgress struct {
+	plan *sessionRestartBatchPlan
+}
+
+type sessionRestartBatchProgressKey struct{}
+
 type restartStageResult[T any] struct {
 	value T
 	err   error
 }
 
-func restartStage(name, status, message string, timeout time.Duration) protocol.SessionRestartStage {
+func restartStage(detail, status, message string, timeout time.Duration) protocol.SessionRestartStage {
+	name := restartLifecycleStage(detail, status)
+	if detail = strings.TrimSpace(detail); detail != "" && detail != name {
+		message = detail + ": " + message
+	}
 	return protocol.SessionRestartStage{Name: name, Status: status, Message: message, TimeoutMS: timeout.Milliseconds()}
+}
+
+func restartLifecycleStage(detail, status string) string {
+	if status == "failed" || status == "timeout" {
+		return sessionRestartLifecycleFailed
+	}
+	if status == "refused" || detail == sessionRestartLifecycleCompensated {
+		return sessionRestartLifecycleCompensated
+	}
+	switch detail {
+	case "rooted_invalidate", "persist_rooted_invalidate_ready", "replace_preflight", "persist_replace_ready":
+		return sessionRestartLifecycleTerminating
+	case "replace":
+		return sessionRestartLifecycleLaunching
+	case "observe", "persist_observe", "prompt_handoff", "rooted_bootstrap":
+		return sessionRestartLifecycleVerifying
+	case "persist_complete", "recover", sessionRestartLifecycleCompleted:
+		return sessionRestartLifecycleCompleted
+	case sessionRestartLifecycleRequested, sessionRestartLifecycleTerminating, sessionRestartLifecycleLaunching,
+		sessionRestartLifecycleVerifying, sessionRestartLifecycleFailed:
+		return detail
+	default:
+		return sessionRestartLifecycleRequested
+	}
 }
 
 func runRestartStage[T any](ctx context.Context, timeout time.Duration, fn func(context.Context) (T, error)) (T, error, bool) {
@@ -342,7 +407,7 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 	plan.Stage = "observe"
 	observeProgressErr := reportSessionRestartProgress(reconcileCtx, plan)
 	if observeProgressErr != nil {
-		item.Stages = append(item.Stages, restartStage("persist_observe", "failed", observeProgressErr.Error(), sessionRestartPreflightTimeout))
+		item.Stages = append(item.Stages, restartStage("persist_observe", "warning", observeProgressErr.Error(), sessionRestartPreflightTimeout))
 	}
 
 	// replace_ready was durable before dispatch. Once dispatch is accepted or
@@ -390,13 +455,13 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 					}
 					item.Stages = append(item.Stages, restartStage("rooted_bootstrap", "complete", "replacement rooted orchestrator acknowledged bootstrap", sessionRestartObservationTimeout))
 				}
-				item.Restarted = true
 				item.Outcome = restartSuccessOutcome(target.Activity)
 				plan.Stage = "complete"
 				if err := reportSessionRestartProgress(reconcileCtx, plan); err != nil {
 					appendRestartStageFailure(&item, "persist_complete", sessionRestartPreflightTimeout, err, errors.Is(err, context.DeadlineExceeded))
 					return item
 				}
+				item.Restarted = true
 				item.Stages = append(item.Stages, restartStage("persist_complete", "complete", "restart completion checkpoint persisted", sessionRestartPreflightTimeout))
 				return item
 			}
@@ -540,6 +605,12 @@ func sameManagedRestartIdentity(a, b daemonstate.ManagedAgentIdentity) bool {
 }
 
 func reportSessionRestartProgress(ctx context.Context, plan sessionRestartRecoveryPlan) error {
+	if progress, ok := ctx.Value(sessionRestartBatchProgressKey{}).(*sessionRestartBatchProgress); ok && progress != nil && progress.plan != nil {
+		copyPlan := plan
+		progress.plan.Current = &copyPlan
+		progress.plan.Stage = restartBatchLifecycleStage(plan.Stage)
+		return reportSessionRestartBatchProgress(ctx, *progress.plan)
+	}
 	body, err := json.Marshal(plan)
 	if err != nil {
 		return err
@@ -547,6 +618,113 @@ func reportSessionRestartProgress(ctx context.Context, plan sessionRestartRecove
 	progressCtx, cancel := context.WithTimeout(ctx, sessionRestartPreflightTimeout)
 	defer cancel()
 	return daemonops.ReportProgress(progressCtx, daemonops.Progress{Phase: "session.restart_all." + plan.Stage, Message: string(body), Current: 1, Total: 1, Unit: "pane"})
+}
+
+func withSessionRestartBatchProgress(ctx context.Context, plan *sessionRestartBatchPlan) context.Context {
+	return context.WithValue(ctx, sessionRestartBatchProgressKey{}, &sessionRestartBatchProgress{plan: plan})
+}
+
+func reportSessionRestartBatchProgress(ctx context.Context, plan sessionRestartBatchPlan) error {
+	body, err := json.Marshal(plan)
+	if err != nil {
+		return err
+	}
+	progressCtx, cancel := context.WithTimeout(ctx, sessionRestartPreflightTimeout)
+	defer cancel()
+	total := int64(len(plan.Targets))
+	return daemonops.ReportProgress(progressCtx, daemonops.Progress{
+		Phase: "session.restart_all.batch." + plan.Stage, Message: string(body),
+		Current: int64(plan.Cursor), Total: total, Unit: "pane",
+	})
+}
+
+func restartBatchLifecycleStage(stage string) string {
+	switch stage {
+	case "replace_ready", sessionRestartStageRootedInvalidateReady:
+		return sessionRestartLifecycleTerminating
+	case "observe":
+		return sessionRestartLifecycleVerifying
+	case "complete":
+		return sessionRestartLifecycleCompleted
+	default:
+		return sessionRestartLifecycleRequested
+	}
+}
+
+func decodeSessionRestartBatchPlan(record daemonops.Record) (sessionRestartBatchPlan, bool) {
+	if record.Progress == nil || !strings.HasPrefix(record.Progress.Phase, "session.restart_all.batch.") {
+		return sessionRestartBatchPlan{}, false
+	}
+	var plan sessionRestartBatchPlan
+	if json.Unmarshal([]byte(record.Progress.Message), &plan) != nil || plan.Version != sessionRestartBatchPlanVersion || plan.ProjectID == "" {
+		return sessionRestartBatchPlan{}, false
+	}
+	phaseStage := strings.TrimPrefix(record.Progress.Phase, "session.restart_all.batch.")
+	if phaseStage == "" || phaseStage != plan.Stage || plan.Cursor < 0 || plan.Cursor > len(plan.Targets) || len(plan.Results) != plan.Cursor {
+		return sessionRestartBatchPlan{}, false
+	}
+	if !validSessionRestartLifecycleStage(plan.Stage) || protocol.NormalizeProjectID(plan.Request.ProjectID.String()) != protocol.NormalizeProjectID(plan.ProjectID) {
+		return sessionRestartBatchPlan{}, false
+	}
+	targetKeys := make(map[string]struct{}, len(plan.Targets))
+	for index, target := range plan.Targets {
+		key := strings.TrimSpace(target.ProjectID) + "\x00" + strings.TrimSpace(target.SessionID)
+		if strings.TrimSpace(target.ProjectID) == "" || strings.TrimSpace(target.SessionID) == "" {
+			return sessionRestartBatchPlan{}, false
+		}
+		if _, duplicate := targetKeys[key]; duplicate {
+			return sessionRestartBatchPlan{}, false
+		}
+		targetKeys[key] = struct{}{}
+		if index < plan.Cursor && !sessionRestartItemMatchesTarget(plan.Results[index], target) {
+			return sessionRestartBatchPlan{}, false
+		}
+	}
+	if plan.Cursor == len(plan.Targets) && plan.Current != nil {
+		return sessionRestartBatchPlan{}, false
+	}
+	if plan.Current != nil && (plan.Cursor >= len(plan.Targets) || !sessionRestartRecoveryPlanMatchesTarget(*plan.Current, plan.Targets[plan.Cursor])) {
+		return sessionRestartBatchPlan{}, false
+	}
+	seenRecoveries := make(map[int]struct{}, len(plan.Recoverable))
+	for _, pending := range plan.Recoverable {
+		if pending.Index < 0 || pending.Index >= plan.Cursor || pending.Index >= len(plan.Results) || !sessionRestartRecoveryPlanMatchesTarget(pending.Plan, plan.Targets[pending.Index]) {
+			return sessionRestartBatchPlan{}, false
+		}
+		if _, duplicate := seenRecoveries[pending.Index]; duplicate {
+			return sessionRestartBatchPlan{}, false
+		}
+		seenRecoveries[pending.Index] = struct{}{}
+	}
+	if recordProjectID := protocol.TrimProjectID(record.ProjectID); recordProjectID != "" && recordProjectID != protocol.NormalizeProjectID(plan.ProjectID) {
+		return sessionRestartBatchPlan{}, false
+	}
+	return plan, true
+}
+
+func validSessionRestartLifecycleStage(stage string) bool {
+	switch stage {
+	case sessionRestartLifecycleRequested, sessionRestartLifecycleTerminating, sessionRestartLifecycleLaunching,
+		sessionRestartLifecycleVerifying, sessionRestartLifecycleCompleted, sessionRestartLifecycleFailed,
+		sessionRestartLifecycleCompensated:
+		return true
+	default:
+		return false
+	}
+}
+
+func sessionRestartRecoveryPlanMatchesTarget(plan sessionRestartRecoveryPlan, target sessionRestartAllTarget) bool {
+	return strings.TrimSpace(plan.ProjectID) == strings.TrimSpace(target.ProjectID) &&
+		strings.TrimSpace(plan.SessionID) == strings.TrimSpace(target.SessionID) &&
+		strings.TrimSpace(plan.IssueID) == strings.TrimSpace(target.IssueID) &&
+		strings.TrimSpace(plan.Activity) == strings.TrimSpace(target.Activity) &&
+		strings.TrimSpace(plan.PlannedIncarnation) != "" && strings.TrimSpace(plan.Old.LogicalPaneID) != ""
+}
+
+func sessionRestartItemMatchesTarget(item protocol.SessionRestartAllItem, target sessionRestartAllTarget) bool {
+	return strings.TrimSpace(item.ProjectID.String()) == strings.TrimSpace(target.ProjectID) &&
+		strings.TrimSpace(item.SessionID.String()) == strings.TrimSpace(target.SessionID) &&
+		strings.TrimSpace(item.IssueID.String()) == strings.TrimSpace(target.IssueID)
 }
 func managedRestartIdentityLive(sessionID string, identity daemonstate.ManagedAgentIdentity, panes []tmux.PaneInfo) bool {
 	for _, pane := range panes {

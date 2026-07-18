@@ -1391,6 +1391,9 @@ func TestBuildSubmitRequestRoutesSessionRestartAllDurablyByProjectAndPayload(t *
 	if len(first.ResourceKeys) != 1 || first.ResourceKeys[0] != "project:proj-1:session-restart" {
 		t.Fatalf("resource keys = %v", first.ResourceKeys)
 	}
+	if first.RecentDedupeWindow != 0 {
+		t.Fatalf("restart retry dedupe window = %s, want active-operation dedupe only", first.RecentDedupeWindow)
+	}
 }
 
 func TestBuildSubmitRequestNormalizesWorktreeForConflictSerialization(t *testing.T) {

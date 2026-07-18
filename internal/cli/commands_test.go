@@ -1905,6 +1905,33 @@ func TestSessionRestartAllCommandPrintsFailuresBeforeReturningError(t *testing.T
 	}
 }
 
+func TestSessionRestartAllCommandDoesNotPrintSuccessAfterCheckpointFailure(t *testing.T) {
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID,
+					Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: false,
+					Error: &protocol.ErrorEnvelope{Code: protocol.ErrorCodeInternal, Message: "persist restart target completion: checkpoint unavailable"},
+				}, nil
+			},
+		}).WithProjectID("proj"),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), ProjectID: "proj",
+	}
+	var commandErr error
+	output := captureStdout(t, func() error {
+		commandErr = SessionRestartAllCommand(deps, SessionRestartAllOptions{})
+		return nil
+	})
+	if commandErr == nil || !strings.Contains(commandErr.Error(), "checkpoint unavailable") {
+		t.Fatalf("error=%v", commandErr)
+	}
+	if strings.Contains(output, "Restarted") {
+		t.Fatalf("false success output=%q", output)
+	}
+}
+
 func TestStatusCommandSkipsTaskValidationReadWait(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 

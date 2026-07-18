@@ -190,7 +190,14 @@ func reconcileInterruptedOperations(ctx context.Context, store daemonops.Store, 
 	for _, record := range records {
 		finished := time.Now().UTC()
 		if recover != nil {
-			if recovery, ok := recover(ctx, record); ok {
+			recoveryCtx := daemonops.WithProgressReporter(ctx, func(progressCtx context.Context, progress daemonops.Progress) error {
+				progressCopy := progress
+				_, updateErr := store.Update(progressCtx, daemonops.UpdateParams{
+					ID: record.ID, ToState: record.State, Progress: &progressCopy,
+				})
+				return updateErr
+			})
+			if recovery, ok := recover(recoveryCtx, record); ok {
 				if updateInterruptedOperation(ctx, store, record, recovery, finished, logger) {
 					continue
 				}
@@ -689,9 +696,10 @@ func (r *operationRuntime) buildSubmitRequest(kind, projectID string, payload []
 		resourceKeys = []string{"operation:" + kind}
 	}
 	recentDedupeWindow := 30 * time.Second
-	if kind == protocol.CommandTaskBulkCleanup {
+	if kind == protocol.CommandTaskBulkCleanup || kind == protocol.CommandSessionRestartAll {
 		// Coalesce identical concurrent submissions, but let a completed batch be
-		// retried immediately so per-item failures can make progress.
+		// retried immediately so per-item failures or a lost completion checkpoint
+		// can make progress. Active dedupe still returns the one complete batch.
 		recentDedupeWindow = 0
 	}
 	if kind == protocol.CommandGlobalProjectionRebuild {

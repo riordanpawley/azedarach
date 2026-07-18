@@ -621,7 +621,7 @@ func TestRootedRestartAfterCallerCancellationSerializesAndAcknowledgesReplacemen
 	if len(gotProgressPhases) == 0 {
 		t.Fatal("restart persisted no progress checkpoints")
 	}
-	if got := gotProgressPhases[len(gotProgressPhases)-1]; got != "session.restart_all.complete" {
+	if got := gotProgressPhases[len(gotProgressPhases)-1]; got != "session.restart_all.batch.completed" {
 		t.Fatalf("last progress phase = %q, want exact complete checkpoint; phases=%v", got, gotProgressPhases)
 	}
 }

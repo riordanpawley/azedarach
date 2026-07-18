@@ -889,7 +889,7 @@ func TestSessionRestartAllRefusesSessionsWithoutManagedIdentity(t *testing.T) {
 	tmuxRunner.sessions[busySession] = true
 	store := daemonstate.NewStore()
 	daemon := &Daemon{
-		cfg: Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", ManagedGenerationBinDir: managedDir, Logger: slog.Default()},
+		cfg:          Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", ManagedGenerationBinDir: managedDir, Logger: slog.Default()},
 		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
 		issues:       issuesClient,
 		session:      daemonhandlers.NewSessionHandler(store),
@@ -924,6 +924,40 @@ func TestSessionRestartAllRefusesSessionsWithoutManagedIdentity(t *testing.T) {
 	}
 	if tmuxRunner.sendKeysCalls != 0 {
 		t.Fatalf("send-keys calls = %d, want exact restart to fail closed before terminal input", tmuxRunner.sendKeysCalls)
+	}
+}
+
+func TestSessionRestartAllCompletionCheckpointFailureReturnsProtocolError(t *testing.T) {
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := naming.CanonicalSessionID(repoDir, "cph")
+	runner := newSessionStartTmuxRunner()
+	runner.sessions[sessionID] = true
+	d := &Daemon{
+		cfg:  Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+		tmux: tmux.NewClient(runner, slog.Default()),
+	}
+	writes := 0
+	ctx := daemonops.WithProgressReporter(context.Background(), func(context.Context, daemonops.Progress) error {
+		writes++
+		if writes == 3 {
+			return errors.New("completion checkpoint unavailable")
+		}
+		return nil
+	})
+	resp, err := d.handleSessionRestartAllDirect(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion, RequestID: "req-checkpoint-failure", Kind: protocol.EnvelopeKindCommand,
+		Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body: marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(projectID)}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "persist restart target completion") || !strings.Contains(resp.Error.Message, "checkpoint unavailable") {
+		t.Fatalf("response=%+v writes=%d", resp, writes)
 	}
 }
 
@@ -964,10 +998,10 @@ func TestSessionRestartAllForceBusyStillRequiresManagedIdentity(t *testing.T) {
 			SessionShell:               "zsh",
 			Logger:                     slog.Default(),
 		},
-		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
-		issues:            issuesClient,
-		session:           daemonhandlers.NewSessionHandler(store),
-		sessionStore:      store,
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       issuesClient,
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
 			projectID: runtimeStateStore,
 		},
@@ -1061,11 +1095,11 @@ func TestSessionRestartAllDiscoversKnownProjectSessionsAndReportsNoAgent(t *test
 	tmuxRunner.sendKeysErrOnCall = 4
 	stateStore := daemonstate.NewStore()
 	daemon := &Daemon{
-		cfg:               Config{RepoDir: repoA, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
-		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
-		issues:            newMigratedIssueClient(t, repoA, slog.Default()),
-		session:           daemonhandlers.NewSessionHandler(stateStore),
-		sessionStore:      stateStore,
+		cfg:          Config{RepoDir: repoA, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		issues:       newMigratedIssueClient(t, repoA, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(stateStore),
+		sessionStore: stateStore,
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
 			projectA: storeA,
 			projectB: storeB,
@@ -1137,10 +1171,10 @@ func TestSessionRestartAllSkipsTmuxSessionWithoutLivePane(t *testing.T) {
 	tmuxRunner.sessionsWithoutPanes[sessionID] = true
 	store := daemonstate.NewStore()
 	daemon := &Daemon{
-		cfg:               Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
-		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
-		session:           daemonhandlers.NewSessionHandler(store),
-		sessionStore:      store,
+		cfg:          Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
 			projectID: runtimeStateStore,
 		},
@@ -1205,10 +1239,10 @@ func TestSessionRestartAllClassifiesShellOnlyWithoutTerminalInput(t *testing.T) 
 	tmuxRunner.sessions[sessionID] = true
 	store := daemonstate.NewStore()
 	daemon := &Daemon{
-		cfg:               Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
-		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
-		session:           daemonhandlers.NewSessionHandler(store),
-		sessionStore:      store,
+		cfg:          Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
 			projectID: runtimeStateStore,
 		},
@@ -1281,10 +1315,10 @@ func TestSessionRestartAllClassifiesSessionSourcedBusyWithoutIdentity(t *testing
 	tmuxRunner.sessions[sessionID] = true
 	store := daemonstate.NewStore()
 	daemon := &Daemon{
-		cfg:               Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
-		tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
-		session:           daemonhandlers.NewSessionHandler(store),
-		sessionStore:      store,
+		cfg:          Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+		session:      daemonhandlers.NewSessionHandler(store),
+		sessionStore: store,
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
 			projectID: runtimeStateStore,
 		},
@@ -2860,11 +2894,11 @@ func TestSessionStartReportsFailedStartCleanupFailures(t *testing.T) {
 					},
 					Logger: slog.Default(),
 				},
-				tmux:              tmux.NewClient(tmuxRunner, slog.Default()),
-				issues:            issuesClient,
-				session:           daemonhandlers.NewSessionHandler(store),
-				sessionStore:      store,
-				revision:          map[string]uint64{},
+				tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
+				issues:       issuesClient,
+				session:      daemonhandlers.NewSessionHandler(store),
+				sessionStore: store,
+				revision:     map[string]uint64{},
 				worktreeManagersByRoot: map[string]*git.WorktreeManager{
 					repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
 				},

@@ -1450,10 +1450,17 @@ func (d *Daemon) recoverInterruptedOperation(ctx context.Context, record daemono
 }
 
 func (d *Daemon) recoverInterruptedSessionRestart(ctx context.Context, record daemonops.Record) (interruptedOperationRecovery, bool) {
+	if batch, ok := decodeSessionRestartBatchPlan(record); ok {
+		return d.recoverInterruptedSessionRestartBatch(ctx, batch), true
+	}
 	plan, ok := decodeSessionRestartRecoveryPlan(record)
 	if !ok {
 		return interruptedOperationRecovery{}, false
 	}
+	return d.recoverInterruptedSessionRestartPlan(ctx, plan)
+}
+
+func (d *Daemon) recoverInterruptedSessionRestartPlan(ctx context.Context, plan sessionRestartRecoveryPlan) (interruptedOperationRecovery, bool) {
 	store := d.sessionRuntimeStateStoreIfConfigured(plan.ProjectID)
 	if store == nil || d.tmux == nil {
 		return interruptedOperationRecovery{}, false
@@ -1480,6 +1487,87 @@ func (d *Daemon) recoverInterruptedSessionRestart(ctx context.Context, record da
 		return sessionRestartRecoveryResult(item), true
 	}
 	return recovery, recovered
+}
+
+func (d *Daemon) recoverInterruptedSessionRestartBatch(ctx context.Context, batch sessionRestartBatchPlan) interruptedOperationRecovery {
+	ctx = withSessionRestartBatchProgress(ctx, &batch)
+	checkpoint := func() error { return reportSessionRestartBatchProgress(ctx, batch) }
+	fail := func(err error) interruptedOperationRecovery {
+		return interruptedOperationRecovery{State: daemonops.StateFailed, ErrorMessage: err.Error()}
+	}
+	for len(batch.Recoverable) > 0 {
+		pending := batch.Recoverable[0]
+		recovered, ok := d.recoverInterruptedSessionRestartPlan(ctx, pending.Plan)
+		if !ok {
+			return fail(fmt.Errorf("recover restart target %d: durable plan could not be reconciled", pending.Index))
+		}
+		var recoveredResult protocol.SessionRestartAllResponseBody
+		if err := json.Unmarshal(recovered.ResultPayload, &recoveredResult); err != nil {
+			return fail(fmt.Errorf("decode recovered restart target %d result: %w", pending.Index, err))
+		}
+		if len(recoveredResult.Sessions) != 1 {
+			return fail(fmt.Errorf("decode recovered restart target %d result: got %d sessions", pending.Index, len(recoveredResult.Sessions)))
+		}
+		batch.Results[pending.Index] = recoveredResult.Sessions[0]
+		batch.Recoverable = batch.Recoverable[1:]
+		batch.Stage = restartItemTerminalStage(recoveredResult.Sessions[0])
+		if err := checkpoint(); err != nil {
+			return fail(fmt.Errorf("persist recovered restart target %d reconciliation: %w", pending.Index, err))
+		}
+	}
+	if batch.Current != nil {
+		recovered, ok := d.recoverInterruptedSessionRestartPlan(ctx, *batch.Current)
+		if !ok {
+			return fail(errors.New("recover current restart target: durable plan could not be reconciled"))
+		}
+		var current protocol.SessionRestartAllResponseBody
+		if err := json.Unmarshal(recovered.ResultPayload, &current); err != nil {
+			return fail(fmt.Errorf("decode recovered restart target result: %w", err))
+		}
+		if len(current.Sessions) != 1 {
+			return fail(fmt.Errorf("decode recovered restart target result: got %d sessions", len(current.Sessions)))
+		}
+		batch.Results = append(batch.Results, current.Sessions[0])
+		batch.Cursor++
+		batch.Current = nil
+		batch.Stage = restartItemTerminalStage(current.Sessions[0])
+		if err := checkpoint(); err != nil {
+			return fail(fmt.Errorf("persist recovered restart target completion: %w", err))
+		}
+	}
+	for batch.Cursor < len(batch.Targets) {
+		batch.Current = nil
+		batch.Stage = sessionRestartLifecycleRequested
+		if err := checkpoint(); err != nil {
+			return fail(fmt.Errorf("persist recovered restart target request: %w", err))
+		}
+		target := batch.Targets[batch.Cursor]
+		item := d.executeSessionRestartTarget(ctx, target, batch.Request)
+		currentPlan := batch.Current
+		batch.Results = append(batch.Results, item)
+		batch.Cursor++
+		batch.Current = nil
+		if !item.Restarted && !item.Skipped && currentPlan != nil && restartPlanMayHaveReplacedPane(currentPlan.Stage) {
+			batch.Recoverable = append(batch.Recoverable, sessionRestartBatchRecovery{Index: batch.Cursor - 1, Plan: *currentPlan})
+		}
+		batch.Stage = restartItemTerminalStage(item)
+		if err := checkpoint(); err != nil {
+			return fail(fmt.Errorf("persist recovered restart target completion: %w", err))
+		}
+	}
+	result := protocol.SessionRestartAllResponseBody{
+		ProjectID: naming.ProjectID(batch.ProjectID), ForceBusy: batch.Request.ForceBusy,
+		Sessions: append([]protocol.SessionRestartAllItem(nil), batch.Results...),
+	}
+	for _, projectID := range batch.ProjectIDs {
+		result.ProjectIDs = append(result.ProjectIDs, naming.ProjectID(projectID))
+	}
+	result.Restarted, result.Skipped, result.Failed = sessionRestartCounts(result.Sessions)
+	payload, err := json.Marshal(result)
+	if err != nil {
+		return fail(fmt.Errorf("marshal recovered restart batch response: %w", err))
+	}
+	return interruptedOperationRecovery{State: daemonops.StateDone, ResultPayload: payload}
 }
 
 func (d *Daemon) recoverInterruptedSessionRestartLocked(ctx context.Context, store *daemonstate.RuntimeStateStore, plan sessionRestartRecoveryPlan) (interruptedOperationRecovery, bool) {

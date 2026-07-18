@@ -20,6 +20,7 @@ import (
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 	"golang.org/x/sys/unix"
 )
@@ -220,7 +221,7 @@ func TestRestartManagedAgentPaneRequiresForceAndAcknowledgesReplacement(t *testi
 	if !restarted.Restarted || restarted.Outcome != "busy_forced" || restarted.OldIdentity.PanePID == restarted.NewIdentity.PanePID || runner.respawns != 1 {
 		t.Fatalf("restarted=%+v respawns=%d", restarted, runner.respawns)
 	}
-	if got := strings.Join([]string{restarted.Stages[0].Name, restarted.Stages[len(restarted.Stages)-1].Name}, ","); got != "preflight,persist_complete" {
+	if got := strings.Join([]string{restarted.Stages[0].Name, restarted.Stages[len(restarted.Stages)-1].Name}, ","); got != "requested,completed" {
 		t.Fatalf("stage bounds=%s", got)
 	}
 }
@@ -429,7 +430,7 @@ func TestRestartManagedAgentPaneParentCancellationAfterDispatchRemainsFencedAcro
 	runner.mu.Lock()
 	gotRespawnCalls := respawnCalls
 	runner.mu.Unlock()
-	if !first.Restarted || !handoffConsumed || second.Outcome != "superseded" || !second.Skipped || gotRespawnCalls != 1 || first.Stages[len(first.Stages)-1].Name != "persist_complete" {
+	if !first.Restarted || !handoffConsumed || second.Outcome != "superseded" || !second.Skipped || gotRespawnCalls != 1 || first.Stages[len(first.Stages)-1].Name != sessionRestartLifecycleCompleted {
 		t.Fatalf("first=%+v second=%+v respawn_calls=%d", first, second, gotRespawnCalls)
 	}
 }
@@ -545,7 +546,7 @@ func TestRestartManagedAgentPaneObserveProgressFailureRemainsFencedAcrossDaemons
 	runner.mu.Unlock()
 	foundProgressFailure := false
 	for _, stage := range first.Stages {
-		if stage.Name == "persist_observe" && stage.Status == "failed" && strings.Contains(stage.Message, "checkpoint unavailable") {
+		if stage.Name == sessionRestartLifecycleVerifying && stage.Status == "warning" && strings.Contains(stage.Message, "persist_observe") && strings.Contains(stage.Message, "checkpoint unavailable") {
 			foundProgressFailure = true
 		}
 	}
@@ -595,7 +596,7 @@ func TestRestartManagedAgentPanePartialFailureAndBoundedTimeout(t *testing.T) {
 			return errors.New("respawn failed"), false
 		}
 		result := d.restartManagedAgentPane(context.Background(), target, protocol.SessionRestartAllRequestBody{}, protocol.SessionRestartAllItem{}, nil)
-		if result.Outcome != "partial_failure" || !strings.Contains(result.Error, "respawn failed") || result.Stages[len(result.Stages)-1].Name != "replace" {
+		if result.Outcome != "partial_failure" || !strings.Contains(result.Error, "respawn failed") || result.Stages[len(result.Stages)-1].Name != sessionRestartLifecycleFailed {
 			t.Fatalf("result=%+v", result)
 		}
 	})
@@ -622,7 +623,7 @@ func TestRestartManagedAgentPanePartialFailureAndBoundedTimeout(t *testing.T) {
 		ctx := daemonops.WithProgressReporter(context.Background(), func(context.Context, daemonops.Progress) error { return errors.New("progress store unavailable") })
 		result := d.restartManagedAgentPane(ctx, target, protocol.SessionRestartAllRequestBody{}, protocol.SessionRestartAllItem{}, nil)
 		respawns, _, _ := runner.snapshot()
-		if result.Outcome != "partial_failure" || respawns != 0 || result.Stages[len(result.Stages)-1].Name != "persist_prepare" {
+		if result.Outcome != "partial_failure" || respawns != 0 || result.Stages[len(result.Stages)-1].Name != sessionRestartLifecycleFailed {
 			t.Fatalf("result=%+v respawns=%d", result, respawns)
 		}
 	})
@@ -637,7 +638,7 @@ func TestRestartManagedAgentPanePartialFailureAndBoundedTimeout(t *testing.T) {
 		result := d.restartManagedAgentPane(ctx, target, protocol.SessionRestartAllRequestBody{}, protocol.SessionRestartAllItem{}, nil)
 		respawns, _, _ := runner.snapshot()
 		stage := result.Stages[len(result.Stages)-1]
-		if result.Outcome != "partial_failure" || !strings.Contains(result.Error, "completion checkpoint unavailable") || stage.Name != "persist_complete" || respawns != 1 {
+		if result.Restarted || result.Outcome != "partial_failure" || !strings.Contains(result.Error, "completion checkpoint unavailable") || stage.Name != sessionRestartLifecycleFailed || respawns != 1 {
 			t.Fatalf("result=%+v respawns=%d", result, respawns)
 		}
 	})
@@ -652,7 +653,7 @@ func TestRestartManagedAgentPanePartialFailureAndBoundedTimeout(t *testing.T) {
 		result := d.restartManagedAgentPane(context.Background(), target, protocol.SessionRestartAllRequestBody{}, protocol.SessionRestartAllItem{}, nil)
 		respawns, _, _ := runner.snapshot()
 		stage := result.Stages[len(result.Stages)-1]
-		if result.Restarted || result.Outcome != "partial_failure" || !strings.Contains(result.Error, "not consumed") || stage.Name != "prompt_handoff" || respawns != 1 || promptPath == "" {
+		if result.Restarted || result.Outcome != "partial_failure" || !strings.Contains(result.Error, "not consumed") || stage.Name != sessionRestartLifecycleFailed || respawns != 1 || promptPath == "" {
 			t.Fatalf("result=%+v respawns=%d prompt_path=%q", result, respawns, promptPath)
 		}
 		if _, err := os.Stat(promptPath); !errors.Is(err, os.ErrNotExist) {
@@ -688,6 +689,115 @@ func TestRecoverInterruptedSessionRestartConvergesWithoutRespawn(t *testing.T) {
 	}
 }
 
+func TestRecoverInterruptedSessionRestartBatchResumesCurrentAndRemainingTargets(t *testing.T) {
+	d, store, runner, first := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+	seedRecoveredReplacement(t, store, runner, "planned")
+	second := sessionRestartAllTarget{ProjectID: "project", SessionID: "az-2", IssueID: "two", Activity: "idle", Projected: true}
+	current := recoveryPlanForTarget(first, "observe")
+	batch := sessionRestartBatchPlan{
+		Version: sessionRestartBatchPlanVersion, ProjectID: "project", ProjectIDs: []string{"project"},
+		Request: protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID("project")},
+		Targets: []sessionRestartAllTarget{first, second}, Current: &current,
+		Results: []protocol.SessionRestartAllItem{}, Stage: sessionRestartLifecycleVerifying,
+	}
+	body, err := json.Marshal(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := daemonops.Record{ProjectID: "project", Kind: protocol.CommandSessionRestartAll, Progress: &daemonops.Progress{
+		Phase: "session.restart_all.batch." + batch.Stage, Message: string(body),
+	}}
+	var checkpoints []sessionRestartBatchPlan
+	ctx := daemonops.WithProgressReporter(context.Background(), func(_ context.Context, progress daemonops.Progress) error {
+		var checkpoint sessionRestartBatchPlan
+		if err := json.Unmarshal([]byte(progress.Message), &checkpoint); err != nil {
+			return err
+		}
+		checkpoints = append(checkpoints, checkpoint)
+		return nil
+	})
+	recovery, ok := d.recoverInterruptedSessionRestart(ctx, record)
+	if !ok || recovery.State != daemonops.StateDone {
+		t.Fatalf("recovery=%+v ok=%t", recovery, ok)
+	}
+	var result protocol.SessionRestartAllResponseBody
+	if err := json.Unmarshal(recovery.ResultPayload, &result); err != nil {
+		t.Fatal(err)
+	}
+	respawns, _, _ := runner.snapshot()
+	if result.Restarted != 1 || result.Skipped != 1 || result.Failed != 0 || len(result.Sessions) != 2 || respawns != 0 {
+		t.Fatalf("result=%+v respawns=%d", result, respawns)
+	}
+	if len(checkpoints) < 3 || checkpoints[len(checkpoints)-1].Cursor != 2 || len(checkpoints[len(checkpoints)-1].Results) != 2 {
+		t.Fatalf("checkpoints=%+v", checkpoints)
+	}
+	assertRestartLifecycleVocabulary(t, result.Sessions[0].Stages, sessionRestartLifecycleCompleted)
+}
+
+func assertRestartLifecycleVocabulary(t *testing.T, stages []protocol.SessionRestartStage, wantTerminal string) {
+	t.Helper()
+	allowed := map[string]int{
+		sessionRestartLifecycleRequested: 0, sessionRestartLifecycleTerminating: 1,
+		sessionRestartLifecycleLaunching: 2, sessionRestartLifecycleVerifying: 3,
+		sessionRestartLifecycleCompleted: 4, sessionRestartLifecycleFailed: 4,
+		sessionRestartLifecycleCompensated: 4,
+	}
+	last := -1
+	for _, stage := range stages {
+		order, ok := allowed[stage.Name]
+		if !ok {
+			t.Fatalf("unknown restart lifecycle stage %q in %+v", stage.Name, stages)
+		}
+		if order < last {
+			t.Fatalf("restart lifecycle stage order regressed in %+v", stages)
+		}
+		last = order
+	}
+	if len(stages) == 0 || stages[len(stages)-1].Name != wantTerminal {
+		t.Fatalf("restart lifecycle terminal=%+v want=%s", stages, wantTerminal)
+	}
+}
+
+func TestDecodeSessionRestartBatchPlanRejectsTargetAuthorityMismatch(t *testing.T) {
+	target := sessionRestartAllTarget{ProjectID: "project", SessionID: "az-1", IssueID: "one", Activity: "idle", TmuxReady: true}
+	current := recoveryPlanForTarget(target, "observe")
+	base := sessionRestartBatchPlan{
+		Version: sessionRestartBatchPlanVersion, ProjectID: "project", ProjectIDs: []string{"project"},
+		Request: protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID("project")},
+		Targets: []sessionRestartAllTarget{target}, Current: &current, Stage: sessionRestartLifecycleVerifying,
+	}
+	for _, tt := range []struct {
+		name   string
+		mutate func(*sessionRestartBatchPlan)
+	}{
+		{name: "current session", mutate: func(plan *sessionRestartBatchPlan) { plan.Current.SessionID = "az-other" }},
+		{name: "duplicate target", mutate: func(plan *sessionRestartBatchPlan) { plan.Targets = append(plan.Targets, plan.Targets[0]) }},
+		{name: "completed result", mutate: func(plan *sessionRestartBatchPlan) {
+			plan.Cursor, plan.Current = 1, nil
+			plan.Results = []protocol.SessionRestartAllItem{{ProjectID: "project", SessionID: "az-other", IssueID: "one"}}
+			plan.Stage = sessionRestartLifecycleCompleted
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			plan := base
+			plan.Targets = append([]sessionRestartAllTarget(nil), base.Targets...)
+			if base.Current != nil {
+				copyCurrent := *base.Current
+				plan.Current = &copyCurrent
+			}
+			tt.mutate(&plan)
+			body, err := json.Marshal(plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := daemonops.Record{ProjectID: "project", Progress: &daemonops.Progress{Phase: "session.restart_all.batch." + plan.Stage, Message: string(body)}}
+			if _, ok := decodeSessionRestartBatchPlan(record); ok {
+				t.Fatalf("mismatched plan decoded: %+v", plan)
+			}
+		})
+	}
+}
+
 func TestRecoverInterruptedSessionRestartMatrix(t *testing.T) {
 	t.Run("replacement with unconsumed handoff remains partial", func(t *testing.T) {
 		d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
@@ -715,7 +825,7 @@ func TestRecoverInterruptedSessionRestartMatrix(t *testing.T) {
 		}
 		recovery, ok := d.recoverInterruptedSessionRestart(context.Background(), daemonops.Record{Kind: protocol.CommandSessionRestartAll, Progress: &daemonops.Progress{Phase: "session.restart_all.observe", Message: string(body)}})
 		result := decodeRestartRecoveryResult(t, recovery)
-		if !ok || result.Failed != 1 || result.Sessions[0].Restarted || result.Sessions[0].Stages[0].Name != "recover_prompt_handoff" {
+		if !ok || result.Failed != 1 || result.Sessions[0].Restarted || result.Sessions[0].Stages[0].Name != sessionRestartLifecycleFailed {
 			t.Fatalf("recovery=%+v result=%+v ok=%v", recovery, result, ok)
 		}
 	})
@@ -724,7 +834,7 @@ func TestRecoverInterruptedSessionRestartMatrix(t *testing.T) {
 		recovery, ok := d.recoverInterruptedSessionRestart(context.Background(), restartRecoveryRecord(t, target, "prepare"))
 		result := decodeRestartRecoveryResult(t, recovery)
 		respawns, _, _ := runner.snapshot()
-		if !ok || result.Failed != 1 || result.Sessions[0].Outcome != "partial_failure" || result.Sessions[0].Stages[0].Name != "recover_prepare" || respawns != 0 {
+		if !ok || result.Failed != 1 || result.Sessions[0].Outcome != "partial_failure" || result.Sessions[0].Stages[0].Name != sessionRestartLifecycleFailed || respawns != 0 {
 			t.Fatalf("recovery=%+v result=%+v ok=%v respawns=%d", recovery, result, ok, respawns)
 		}
 	})
@@ -825,7 +935,7 @@ func TestRecoverInterruptedSessionRestartMatrix(t *testing.T) {
 		got := <-resultCh
 		result := decodeRestartRecoveryResult(t, got.recovery)
 		stage := result.Sessions[0].Stages[0]
-		if !got.ok || result.Failed != 1 || result.Sessions[0].Outcome != "partial_failure" || stage.Name != "recover_observe" || stage.Status != "failed" || !strings.Contains(stage.Message, "canceled") || stage.TimeoutMS == 0 {
+		if !got.ok || result.Failed != 1 || result.Sessions[0].Outcome != "partial_failure" || stage.Name != sessionRestartLifecycleFailed || stage.Status != "failed" || !strings.Contains(stage.Message, "canceled") || stage.TimeoutMS == 0 {
 			t.Fatalf("recovery=%+v result=%+v ok=%v", got.recovery, result, got.ok)
 		}
 	})

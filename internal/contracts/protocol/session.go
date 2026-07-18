@@ -135,6 +135,16 @@ type SessionRestartStage struct {
 	TimeoutMS int64  `json:"timeout_ms,omitempty" msgpack:"timeout_ms,omitempty"`
 }
 
+const (
+	SessionRestartStageRequested   = "requested"
+	SessionRestartStageTerminating = "terminating"
+	SessionRestartStageLaunching   = "launching"
+	SessionRestartStageVerifying   = "verifying"
+	SessionRestartStageCompleted   = "completed"
+	SessionRestartStageFailed      = "failed"
+	SessionRestartStageCompensated = "compensated"
+)
+
 type SessionRestartAllResponseBody struct {
 	ProjectID  naming.ProjectID        `json:"project_id" msgpack:"project_id"`
 	ProjectIDs []naming.ProjectID      `json:"project_ids,omitempty" msgpack:"project_ids,omitempty"`

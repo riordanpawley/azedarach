@@ -1723,6 +1723,7 @@ func (d *Daemon) handleSessionRestartAllDirect(ctx context.Context, req protocol
 		projectID = req.Meta.ProjectID.String()
 	}
 	projectID = d.canonicalProjectID(projectID)
+	body.ProjectID = naming.ProjectID(projectID)
 	if d.tmux == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "tmux client unavailable"), nil
 	}
@@ -1800,64 +1801,40 @@ func (d *Daemon) handleSessionRestartAllDirect(ctx context.Context, req protocol
 		return restartTargets[i].SessionID < restartTargets[j].SessionID
 	})
 
-	for _, target := range restartTargets {
-		var item protocol.SessionRestartAllItem
-		serialized := false
-		if store := d.sessionRuntimeStateStoreIfConfigured(target.ProjectID); store != nil && strings.TrimSpace(target.IssueID) != "" {
-			scope, scopeErr := domain.RootedOrchestrationScope(target.IssueID)
-			if scopeErr != nil {
-				item = sessionRestartAllItem(target)
-				item.Error = fmt.Sprintf("resolve potential rooted restart scope: %v", scopeErr)
-			} else if identity, identityErr := domain.NewOrchestratorIdentity(target.ProjectID, scope); identityErr != nil {
-				item = sessionRestartAllItem(target)
-				item.Error = fmt.Sprintf("resolve potential rooted restart identity: %v", identityErr)
-			} else {
-				serialized = true
-				lockErr := store.WithOrchestratorScopeTransition(ctx, identity, func(lockCtx context.Context) error {
-					item = sessionRestartAllItem(target)
-					if !item.TmuxReady {
-						return nil
-					}
-					var rootedIdentity *domain.OrchestratorIdentity
-					lease, found, leaseErr := daemonstate.NewOrchestratorLeaseAuthority(store).FindBySession(lockCtx, target.ProjectID, target.SessionID)
-					if leaseErr != nil {
-						return fmt.Errorf("refresh orchestrator lease inside restart transition: %w", leaseErr)
-					}
-					if found && lease.Identity == identity {
-						rootedIdentity = &identity
-					}
-					item = d.restartManagedAgentPane(lockCtx, target, body, item, rootedIdentity)
-					return nil
-				})
-				if lockErr != nil {
-					item = sessionRestartAllItem(target)
-					item.Error = fmt.Sprintf("serialize potential rooted orchestrator replacement: %v", lockErr)
-				}
-			}
-		}
-		if !serialized && item.Error == "" {
-			item = sessionRestartAllItem(target)
-			if item.TmuxReady {
-				item = d.restartManagedAgentPane(ctx, target, body, item, nil)
-			}
-		}
-		if !item.TmuxReady && item.Error == "" {
-			item.Skipped = true
-			item.Reason = "no_tmux_pane"
-			item.Outcome = "crashed"
-		}
-		if item.Restarted {
-			result.Restarted++
-		} else if item.Skipped {
-			result.Skipped++
-		} else {
-			result.Failed++
-		}
-		if target.IssueID != "" && item.Restarted {
-			d.persistRestartedSessionProjection(ctx, target.ProjectID, target.SessionID, target.IssueID)
-		}
-		result.Sessions = append(result.Sessions, item)
+	batch := sessionRestartBatchPlan{
+		Version: sessionRestartBatchPlanVersion, ProjectID: projectID, Request: body,
+		Targets: restartTargets, Results: make([]protocol.SessionRestartAllItem, 0, len(restartTargets)),
+		Stage: sessionRestartLifecycleRequested,
 	}
+	for _, targetProjectID := range projectIDs {
+		batch.ProjectIDs = append(batch.ProjectIDs, targetProjectID)
+	}
+	ctx = withSessionRestartBatchProgress(ctx, &batch)
+	if err := reportSessionRestartBatchProgress(ctx, batch); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist restart batch plan: %v", err)), nil
+	}
+	for batch.Cursor < len(batch.Targets) {
+		target := batch.Targets[batch.Cursor]
+		batch.Current = nil
+		batch.Stage = sessionRestartLifecycleRequested
+		if err := reportSessionRestartBatchProgress(ctx, batch); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist restart target request: %v", err)), nil
+		}
+		item := d.executeSessionRestartTarget(ctx, target, body)
+		currentPlan := batch.Current
+		batch.Results = append(batch.Results, item)
+		batch.Cursor++
+		batch.Current = nil
+		if !item.Restarted && !item.Skipped && currentPlan != nil && restartPlanMayHaveReplacedPane(currentPlan.Stage) {
+			batch.Recoverable = append(batch.Recoverable, sessionRestartBatchRecovery{Index: batch.Cursor - 1, Plan: *currentPlan})
+		}
+		batch.Stage = restartItemTerminalStage(item)
+		if err := reportSessionRestartBatchProgress(ctx, batch); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist restart target completion: %v", err)), nil
+		}
+	}
+	result.Sessions = append(result.Sessions, batch.Results...)
+	result.Restarted, result.Skipped, result.Failed = sessionRestartCounts(result.Sessions)
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session restart-all completed",
 			"project_id", projectID,
@@ -1876,15 +1853,98 @@ func (d *Daemon) handleSessionRestartAllDirect(ctx context.Context, req protocol
 	return resp, nil
 }
 
+func (d *Daemon) executeSessionRestartTarget(ctx context.Context, target sessionRestartAllTarget, body protocol.SessionRestartAllRequestBody) protocol.SessionRestartAllItem {
+	var item protocol.SessionRestartAllItem
+	serialized := false
+	if store := d.sessionRuntimeStateStoreIfConfigured(target.ProjectID); store != nil && strings.TrimSpace(target.IssueID) != "" {
+		scope, scopeErr := domain.RootedOrchestrationScope(target.IssueID)
+		if scopeErr != nil {
+			item = sessionRestartAllItem(target)
+			item.Error = fmt.Sprintf("resolve potential rooted restart scope: %v", scopeErr)
+		} else if identity, identityErr := domain.NewOrchestratorIdentity(target.ProjectID, scope); identityErr != nil {
+			item = sessionRestartAllItem(target)
+			item.Error = fmt.Sprintf("resolve potential rooted restart identity: %v", identityErr)
+		} else {
+			serialized = true
+			lockErr := store.WithOrchestratorScopeTransition(ctx, identity, func(lockCtx context.Context) error {
+				item = sessionRestartAllItem(target)
+				if !item.TmuxReady {
+					return nil
+				}
+				var rootedIdentity *domain.OrchestratorIdentity
+				lease, found, leaseErr := daemonstate.NewOrchestratorLeaseAuthority(store).FindBySession(lockCtx, target.ProjectID, target.SessionID)
+				if leaseErr != nil {
+					return fmt.Errorf("refresh orchestrator lease inside restart transition: %w", leaseErr)
+				}
+				if found && lease.Identity == identity {
+					rootedIdentity = &identity
+				}
+				item = d.restartManagedAgentPane(lockCtx, target, body, item, rootedIdentity)
+				return nil
+			})
+			if lockErr != nil {
+				item = sessionRestartAllItem(target)
+				item.Error = fmt.Sprintf("serialize potential rooted orchestrator replacement: %v", lockErr)
+			}
+		}
+	}
+	if !serialized && item.Error == "" {
+		item = sessionRestartAllItem(target)
+		if item.TmuxReady {
+			item = d.restartManagedAgentPane(ctx, target, body, item, nil)
+		}
+	}
+	if !item.TmuxReady && item.Error == "" {
+		item.Skipped = true
+		item.Reason = "no_tmux_pane"
+		item.Outcome = "crashed"
+		item.Stages = append(item.Stages, restartStage(sessionRestartLifecycleCompensated, "complete", item.Reason, 0))
+	}
+	if item.Error != "" && len(item.Stages) == 0 {
+		item.Stages = append(item.Stages, restartStage(sessionRestartLifecycleFailed, "failed", item.Error, 0))
+	}
+	if target.IssueID != "" && item.Restarted {
+		d.persistRestartedSessionProjection(ctx, target.ProjectID, target.SessionID, target.IssueID)
+	}
+	return item
+}
+
+func restartItemTerminalStage(item protocol.SessionRestartAllItem) string {
+	if item.Restarted {
+		return sessionRestartLifecycleCompleted
+	}
+	if item.Skipped {
+		return sessionRestartLifecycleCompensated
+	}
+	return sessionRestartLifecycleFailed
+}
+
+func restartPlanMayHaveReplacedPane(stage string) bool {
+	return stage == "replace_ready" || stage == "observe" || stage == "complete"
+}
+
+func sessionRestartCounts(items []protocol.SessionRestartAllItem) (restarted, skipped, failed int) {
+	for _, item := range items {
+		if item.Restarted {
+			restarted++
+		} else if item.Skipped {
+			skipped++
+		} else {
+			failed++
+		}
+	}
+	return restarted, skipped, failed
+}
+
 type sessionRestartAllTarget struct {
-	ProjectID      string
-	SessionID      string
-	IssueID        string
-	Activity       string
-	ActivitySource string
-	Projected      bool
-	TmuxReady      bool
-	ActiveIntent   bool
+	ProjectID      string `json:"project_id"`
+	SessionID      string `json:"session_id"`
+	IssueID        string `json:"issue_id,omitempty"`
+	Activity       string `json:"activity"`
+	ActivitySource string `json:"activity_source,omitempty"`
+	Projected      bool   `json:"projected"`
+	TmuxReady      bool   `json:"tmux_ready"`
+	ActiveIntent   bool   `json:"active_intent"`
 }
 
 func sessionRestartAllItem(target sessionRestartAllTarget) protocol.SessionRestartAllItem {
