@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -194,14 +195,23 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 		return CandidateValidationAttempt{}, false, fmt.Errorf("target gate authority path must be absolute: %s", gateRoot)
 	}
 	gateRoot = filepath.Clean(gateRoot)
+	canonicalGateRoot, err := filepath.EvalSymlinks(gateRoot)
+	if err != nil {
+		return CandidateValidationAttempt{}, false, fmt.Errorf("resolve target gate root: %w", err)
+	}
+	gateRoot = canonicalGateRoot
 	gatePath := filepath.Join(gateRoot, "scripts", "git-merge-rebase-gate.sh")
 	attempt := CandidateValidationAttempt{
 		CandidateHead: candidateHead,
 		Status:        CandidateValidationRunning,
 		Canonical:     false,
 	}
-	if _, err := os.Stat(gatePath); err != nil {
+	gateInfo, err := os.Lstat(gatePath)
+	if err != nil {
 		if os.IsNotExist(err) {
+			attempt.Status = CandidateValidationFailed
+			attempt.Message = "candidate validation gate is unavailable"
+			notifyCandidateValidation(ctx, attempt)
 			return CandidateValidationAttempt{}, false, nil
 		}
 		attempt.Status = CandidateValidationFailed
@@ -209,39 +219,24 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 		notifyCandidateValidation(ctx, attempt)
 		return attempt, true, fmt.Errorf("inspect candidate validation gate: %w", err)
 	}
+	if !gateInfo.Mode().IsRegular() {
+		attempt.Status = CandidateValidationFailed
+		attempt.Message = "candidate validation gate is not a regular trusted file"
+		notifyCandidateValidation(ctx, attempt)
+		return attempt, true, errors.New(attempt.Message)
+	}
 	notifyCandidateValidation(ctx, attempt)
-
-	actualHead, err := c.revParseVerify(ctx, scratchPath, "HEAD")
-	if err != nil {
-		attempt.Status = CandidateValidationFailed
-		attempt.Message = "candidate HEAD could not be resolved before validation"
-		notifyCandidateValidation(ctx, attempt)
-		return attempt, true, fmt.Errorf("resolve candidate HEAD before validation: %w", err)
-	}
-	if actualHead != candidateHead {
-		attempt.Status = CandidateValidationSuperseded
-		attempt.Message = fmt.Sprintf("candidate HEAD changed before validation: expected %s, found %s", candidateHead, actualHead)
-		notifyCandidateValidation(ctx, attempt)
-		return attempt, true, errors.New(attempt.Message)
-	}
-	status, err := c.Status(ctx, scratchPath)
-	if err != nil {
-		attempt.Status = CandidateValidationFailed
-		attempt.Message = "candidate status could not be read before validation"
-		notifyCandidateValidation(ctx, attempt)
-		return attempt, true, fmt.Errorf("inspect candidate status before validation: %w", err)
-	}
-	if gitStatusDirty(status) {
-		attempt.Status = CandidateValidationFailed
-		attempt.Message = "candidate worktree was dirty before validation: " + gitStatusSummary(status)
-		notifyCandidateValidation(ctx, attempt)
-		return attempt, true, errors.New(attempt.Message)
-	}
 
 	env := gitEnvWithOverrides(sanitizedGitEnv(os.Environ()), []string{
 		"AZEDARACH_CANDIDATE_HEAD=" + candidateHead,
 		"AZEDARACH_MERGE_GATE_BODY=" + filepath.Join(gateRoot, "scripts", "git-merge-rebase-gate-body.sh"),
+		"AZEDARACH_TARGET_GATE_ROOT=" + gateRoot,
 		"AZEDARACH_SKIP_MERGE_REBASE_GATE=0",
+	})
+	review := candidateValidationReview(ctx)
+	env = gitEnvWithOverrides(env, []string{
+		"AZEDARACH_REVIEWER_ID=" + review.ReviewerID,
+		fmt.Sprintf("AZEDARACH_REVIEW_EPOCH_EVENT_ID=%d", review.ReviewEpochEventID),
 	})
 	if issueID := candidateValidationIssue(ctx); issueID != "" {
 		env = gitEnvWithOverrides(env, []string{"AZEDARACH_CANDIDATE_ISSUE_ID=" + issueID})
@@ -265,7 +260,7 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 		return attempt, true, fmt.Errorf("validate candidate %s: %s", candidateHead, attempt.Message)
 	}
 
-	actualHead, err = c.revParseVerify(ctx, scratchPath, "HEAD")
+	actualHead, err := c.revParseVerify(ctx, scratchPath, "HEAD")
 	if err != nil || actualHead != candidateHead {
 		attempt.Status = CandidateValidationSuperseded
 		attempt.Message = fmt.Sprintf("candidate HEAD changed during validation: expected %s, found %s", candidateHead, actualHead)
@@ -275,7 +270,7 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 		}
 		return attempt, true, errors.New(attempt.Message)
 	}
-	status, err = c.Status(ctx, scratchPath)
+	status, err := c.Status(ctx, scratchPath)
 	if err != nil || gitStatusDirty(status) {
 		attempt.Status = CandidateValidationFailed
 		attempt.Message = "candidate worktree was not clean after validation"
@@ -289,6 +284,66 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 	attempt.Message = "candidate validation passed; awaiting exact apply"
 	notifyCandidateValidation(ctx, attempt)
 	return attempt, true, nil
+}
+
+func publishCandidateValidationFailure(ctx context.Context, gateRoot, candidateRoot, revision, phase, detail string) error {
+	controlRoot, err := os.MkdirTemp("", "azedarach-candidate-validation-")
+	if err != nil {
+		return fmt.Errorf("create trusted control bundle: %w", err)
+	}
+	keepControl := false
+	defer func() {
+		if !keepControl {
+			_ = os.RemoveAll(controlRoot)
+		}
+	}()
+	review := candidateValidationReview(ctx)
+	request := "preflight-" + revision
+	nonceBytes := make([]byte, 16)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		return fmt.Errorf("create publication nonce: %w", err)
+	}
+	evidence := map[string]any{
+		"held": false, "present": true, "synthetic_request": true,
+		"request_id": request, "authoritative_request_id": request,
+		"source_revision": revision, "publication_nonce": hex.EncodeToString(nonceBytes),
+		"fatal_phase": phase, "fatal_detail": detail,
+		"reviewer_id": review.ReviewerID, "review_epoch_event_id": review.ReviewEpochEventID,
+	}
+	evidencePath := filepath.Join(controlRoot, "evidence.json")
+	evidenceJSON, err := json.Marshal(evidence)
+	if err != nil {
+		return fmt.Errorf("encode publication evidence: %w", err)
+	}
+	if err := os.WriteFile(evidencePath, append(evidenceJSON, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write publication evidence: %w", err)
+	}
+	gateOutput := filepath.Join(controlRoot, "gate-output.log")
+	if err := os.WriteFile(gateOutput, []byte("[gate] "+phase+": "+detail+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write publication gate output: %w", err)
+	}
+	publisher := filepath.Join(gateRoot, "scripts", "publish-validation-artifacts")
+	info, err := os.Lstat(publisher)
+	if err != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("trusted artifact publisher unavailable: %w", err)
+	}
+	gitCommonCmd := exec.CommandContext(ctx, "git", "-C", gateRoot, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	gitCommonOutput, err := gitCommonCmd.Output()
+	if err != nil {
+		return fmt.Errorf("resolve trusted project root: %w", err)
+	}
+	projectRoot := filepath.Dir(strings.TrimSpace(string(gitCommonOutput)))
+	cmd := exec.CommandContext(ctx, publisher,
+		"--project-root", projectRoot, "--candidate-root", candidateRoot,
+		"--control-root", controlRoot, "--evidence", evidencePath,
+		"--gate-output", gateOutput, "--request", request,
+		"--revision", revision, "--exit-code", "1",
+		"--fatal-phase", phase, "--fatal-detail", detail)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("publish candidate failure: %w: %s (control bundle %s)", err, strings.TrimSpace(string(output)), controlRoot)
+	}
+	keepControl = false
+	return nil
 }
 
 func candidateValidationOutput(stdout, stderr string) string {

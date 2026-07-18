@@ -7,11 +7,13 @@ if [ "${AZEDARACH_SKIP_MERGE_REBASE_GATE:-0}" = "1" ]; then
 fi
 
 repo_root="$(git rev-parse --show-toplevel)"
-git_common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
-project_root="$(dirname "$git_common_dir")"
+target_gate_root="${AZEDARACH_TARGET_GATE_ROOT:-$repo_root}"
+target_gate_root="$(cd "$target_gate_root" && pwd -P)"
+target_git_common_dir="$(git -C "$target_gate_root" rev-parse --path-format=absolute --git-common-dir)"
+project_root="$(dirname "$target_git_common_dir")"
 candidate_head="${AZEDARACH_CANDIDATE_HEAD:-$(git rev-parse --verify HEAD)}"
 validation_body="${AZEDARACH_MERGE_GATE_BODY:-$repo_root/scripts/git-merge-rebase-gate-body.sh}"
-trusted_scripts="$repo_root/scripts"
+trusted_scripts="$target_gate_root/scripts"
 validation_wrapper="$trusted_scripts/with-machine-validation-lease"
 artifact_publisher="$trusted_scripts/publish-validation-artifacts"
 control_dir="$(mktemp -d -t azedarach-merge-gate-control.XXXXXX)"
@@ -20,6 +22,7 @@ validation_status="$control_dir/status"
 validation_runner_pid="$control_dir/runner-pid"
 validation_gate_output="$control_dir/gate-output.log"
 validation_evidence="$control_dir/evidence.json"
+publication_failed=0
 umask 077
 : >"$validation_gate_output"
 
@@ -32,6 +35,10 @@ gate_log() {
 }
 
 cleanup() {
+  if [ "$publication_failed" -ne 0 ]; then
+    printf '%s\n' "[gate] trusted control bundle preserved at $control_dir" >&2
+    return
+  fi
   rm -rf "$control_dir"
 }
 
@@ -54,6 +61,7 @@ ensure_failure_evidence() {
     chmod 0600, $path;
     print {$out} encode_json({
       held=>JSON::PP::false, present=>JSON::PP::true,
+      synthetic_request=>JSON::PP::true,
       request_id=>$request, authoritative_request_id=>$request,
       source_revision=>$revision, issue_id=>$issue,
       reviewer_id=>($ENV{AZEDARACH_REVIEWER_ID}||""),
@@ -117,6 +125,7 @@ publish_failure() {
     printf '%s\n' "$publication_output" >&2
   fi
   if [ "$publication_status" -ne 0 ]; then
+    publication_failed=1
     gate_log "[gate] candidate_head=$candidate_head failure=artifact-publication-failed exit_status=$publication_status"
   fi
 }

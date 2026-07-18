@@ -149,6 +149,12 @@ const (
 
 type candidateValidationObserverKey struct{}
 type candidateValidationIssueKey struct{}
+type candidateValidationReviewKey struct{}
+
+type CandidateValidationReview struct {
+	ReviewerID         string
+	ReviewEpochEventID int64
+}
 
 type CandidateValidationObserver func(CandidateValidationAttempt)
 
@@ -182,6 +188,23 @@ func candidateValidationIssue(ctx context.Context) string {
 	}
 	issueID, _ := ctx.Value(candidateValidationIssueKey{}).(string)
 	return strings.TrimSpace(issueID)
+}
+
+func WithCandidateValidationReview(ctx context.Context, reviewerID string, reviewEpochEventID int64) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, candidateValidationReviewKey{}, CandidateValidationReview{
+		ReviewerID: strings.TrimSpace(reviewerID), ReviewEpochEventID: reviewEpochEventID,
+	})
+}
+
+func candidateValidationReview(ctx context.Context) CandidateValidationReview {
+	if ctx == nil {
+		return CandidateValidationReview{}
+	}
+	review, _ := ctx.Value(candidateValidationReviewKey{}).(CandidateValidationReview)
+	return review
 }
 
 func notifyCandidateValidation(ctx context.Context, attempt CandidateValidationAttempt) {

@@ -2207,6 +2207,12 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		recordPhase("integrate_before_close", phaseStartedAt, false)
 		return result, fmt.Errorf("phase integrate_before_close for issue %s: %w", taskID, integrationBudgetErr)
 	}
+	reviewerID := strings.TrimSpace(req.Meta.ClientActor)
+	reviewEpochEventID := int64(0)
+	if cmd.ExpectedReviewEvidence != nil {
+		reviewEpochEventID = cmd.ExpectedReviewEvidence.EventID
+	}
+	integrationCtx = git.WithCandidateValidationReview(integrationCtx, reviewerID, reviewEpochEventID)
 	integration, err := d.integrateTaskBeforeClose(integrationCtx, projectID, taskID, cmd.IntegrateBeforeClose, guard.MissingWorktree, cmd.ExpectedSourceOID)
 	cancelIntegration()
 	recordPhase("integrate_before_close", phaseStartedAt, !cmd.IntegrateBeforeClose)

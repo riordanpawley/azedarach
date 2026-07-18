@@ -44,6 +44,10 @@ die "--exit-code must be non-zero\n" unless $arg{'exit-code'} =~ /^\d+$/ && $arg
 my $evidence = read_json_nofollow($evidence_path, 'validation evidence');
 die "validation evidence request mismatch\n" if ($evidence->{request_id} // '') ne $request;
 die "validation evidence revision mismatch\n" if ($evidence->{source_revision} // '') ne $revision;
+if (($evidence->{purpose} // '') eq 'review_evidence' && !$evidence->{synthetic_request}) {
+    die "review evidence requires reviewer_id\n" if safe_identity($evidence->{reviewer_id} // '', 'reviewer id') eq '';
+    die "review evidence requires review_epoch_event_id\n" unless ($evidence->{review_epoch_event_id} // 0) =~ /^\d+$/ && 0 + $evidence->{review_epoch_event_id} > 0;
+}
 my $publication_nonce = safe_identity($evidence->{publication_nonce} // '', 'publication nonce');
 $evidence->{fatal_phase} = $arg{'fatal-phase'} if ($arg{'fatal-phase'} // '') ne '';
 $evidence->{fatal_detail} = $arg{'fatal-detail'} if ($arg{'fatal-detail'} // '') ne '';
@@ -60,7 +64,12 @@ die "artifact staging path already exists\n" if -e $stage || -l $stage;
 mkdir($stage, 0700) or die "create artifact staging directory: $!\n";
 my $reports_root = safe_directory_chain($stage, 'reports');
 
-my @source_reports = unique_nonempty(@{$evidence->{report_paths} || []}, $evidence->{report_path} || '');
+my @candidate_report_paths = ref($evidence->{report_paths}) eq 'ARRAY'
+    ? grep { !ref($_) } @{$evidence->{report_paths}}
+    : ();
+push @candidate_report_paths, $evidence->{report_path}
+    if !ref($evidence->{report_path}) && ($evidence->{report_path} // '') ne '';
+my @source_reports = unique_nonempty(@candidate_report_paths);
 my (@measurements, @report_dirs);
 for my $source_report (@source_reports) {
     my $source = safe_candidate_file($candidate_root, $source_report);
@@ -95,18 +104,22 @@ for my $directory (@report_dirs) {
 }
 push @artifacts, artifact_metadata($stage, File::Spec->catfile($stage, 'gate-output.log'));
 
-my @references = ({kind => 'validation_request', id => $request});
-push @references, {kind => 'issue', id => $evidence->{issue_id}}
-    if ($evidence->{issue_id} // '') ne '';
-push @references, {kind => 'reviewer', id => $evidence->{reviewer_id}}
-    if ($evidence->{reviewer_id} // '') ne '';
-push @references, {kind => 'review_epoch', id => 0 + $evidence->{review_epoch_event_id}}
-    if ($evidence->{review_epoch_event_id} // 0) > 0;
+my @references;
+unless ($evidence->{synthetic_request}) {
+    push @references, {kind => 'validation_request', id => $request};
+    push @references, {kind => 'issue', id => $evidence->{issue_id}}
+        if ($evidence->{issue_id} // '') ne '';
+    push @references, {kind => 'reviewer', id => $evidence->{reviewer_id}}
+        if ($evidence->{reviewer_id} // '') ne '';
+    push @references, {kind => 'review_epoch', id => 0 + $evidence->{review_epoch_event_id}}
+        if ($evidence->{review_epoch_event_id} // 0) > 0;
+}
 my $manifest = {
     schema => 'azedarach.validation_artifact_manifest.v1',
     request_id => $request,
     candidate_revision => $revision,
     publication_nonce => $publication_nonce,
+    synthetic_request => $evidence->{synthetic_request} ? JSON::PP::true : JSON::PP::false,
     exit_code => 0 + $arg{'exit-code'},
     created_at => strftime('%Y-%m-%dT%H:%M:%SZ', gmtime()),
     failure_summary => $summary,
@@ -131,6 +144,7 @@ finish_publication($final_dir, $evidence, $evidence_path, $request, $revision, $
 sub canonical_directory {
     my ($path) = @_;
     die "directory path must be absolute\n" unless File::Spec->file_name_is_absolute($path);
+    reject_symlink_components($path);
     my $canonical = abs_path($path) || '';
     die "directory is unavailable: $path\n" unless $canonical ne '' && safe_existing_directory($canonical);
     return $canonical;
@@ -173,6 +187,7 @@ sub path_within {
 sub trusted_control_path {
     my ($root, $path, $must_exist) = @_;
     die "control path must be absolute\n" unless File::Spec->file_name_is_absolute($path);
+    reject_symlink_components(dirname($path));
     my $parent = abs_path(dirname($path)) || '';
     die "control path escapes trusted directory\n" unless $parent ne '' && path_within($root, $parent) && safe_existing_directory($parent);
     my $resolved = File::Spec->catfile($parent, basename($path));
@@ -182,6 +197,22 @@ sub trusted_control_path {
         die "control output already exists: $resolved\n";
     }
     return $resolved;
+}
+
+sub reject_symlink_components {
+    my ($path) = @_;
+    die "path must be absolute\n" unless File::Spec->file_name_is_absolute($path);
+    my $cursor = File::Spec->rootdir;
+    for my $component (grep { $_ ne '' && $_ ne '.' } split(/[\\\/]+/, File::Spec->canonpath($path))) {
+        $cursor = File::Spec->catfile($cursor, $component);
+        my @stat = lstat($cursor);
+        die "path component is unavailable: $cursor\n" unless @stat;
+        if (-l _) {
+            my $link = readlink($cursor) // '';
+            next if $cursor eq '/var' && ($link eq '/private/var' || $link eq 'private/var');
+            die "path component is a symlink: $cursor\n";
+        }
+    }
 }
 
 sub safe_regular_file {
@@ -409,7 +440,8 @@ sub validate_existing_manifest {
     my $has_request_reference = grep {
         ref($_) eq 'HASH' && ($_->{kind} || '') eq 'validation_request' && ($_->{id} || '') eq $request_id
     } @{$manifest->{references} || []};
-    die "existing artifact manifest request reference missing\n" unless $has_request_reference;
+    die "existing artifact manifest request reference missing\n"
+        unless $manifest->{synthetic_request} || $has_request_reference;
     for my $artifact (@{$manifest->{artifacts} || []}) {
         die "invalid existing artifact metadata\n" unless ref($artifact) eq 'HASH';
         my $path = safe_existing_file($directory, File::Spec->catfile($directory, $artifact->{path} || ''));
