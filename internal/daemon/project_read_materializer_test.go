@@ -439,6 +439,9 @@ func TestProjectReadMaterializerRuntimeHydrationFailureReturnsTicketData(t *test
 	if err != nil {
 		t.Fatalf("bootstrap degraded runtime materializer: %v", err)
 	}
+	if err := materializer.refreshRuntimeDegraded(ctx, []string{id}); err != nil {
+		t.Fatalf("background degraded runtime refresh: %v", err)
+	}
 	tasks, _ := materializer.snapshot()
 	got, ok := findDaemonTaskByID(tasks, id)
 	if !ok || got.Title != "ticket survives degraded runtime" {

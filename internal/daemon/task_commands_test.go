@@ -4488,7 +4488,7 @@ func TestCommittedSessionStopAndParentRemovalRefreshCrossDaemonReadsAndClosePref
 		hub:                    publish.NewHub(16, 8, logger),
 	}
 	readerMaterializer := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(issuesClient), func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
-		return reader.hydrateProjectReadTasks(hydrateCtx, projectID, issuesClient, tasks), nil
+		return reader.hydrateProjectReadTasks(hydrateCtx, projectID, issuesClient, tasks)
 	})
 	reader.configureProjectReadMaterializer(readerMaterializer, projectID, issuesClient)
 	if err := readerMaterializer.bootstrap(ctx); err != nil {
@@ -4610,16 +4610,6 @@ func TestCommittedSessionStopFailsUnavailableWhenTaskRuntimeRefreshFails(t *test
 	tmuxRunner := newTestTmuxRunner(sessionID)
 	close(tmuxRunner.killRelease)
 	var failHydration atomic.Bool
-	materializer := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(issuesClient), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
-		if failHydration.Load() {
-			return nil, errors.New("injected runtime refresh failure")
-		}
-		return tasks, nil
-	})
-	if err := materializer.bootstrap(ctx); err != nil {
-		t.Fatal(err)
-	}
-	failHydration.Store(true)
 	d := &Daemon{
 		cfg:                    Config{RepoDir: repoDir, Logger: logger},
 		tmux:                   tmux.NewClient(tmuxRunner, logger),
@@ -4628,11 +4618,21 @@ func TestCommittedSessionStopFailsUnavailableWhenTaskRuntimeRefreshFails(t *test
 		session:                daemonhandlers.NewSessionHandler(sessionStore),
 		sessionStore:           sessionStore,
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
-		materializers:          map[string]*projectReadMaterializer{projectID: materializer},
+		materializers:          map[string]*projectReadMaterializer{},
 		materializersStarted:   true,
-		revision:               map[string]uint64{projectID: 1},
-		hub:                    publish.NewHub(16, 8, logger),
+		projectReadRuntimeHydrate: func(_ context.Context, _ string, tasks []domain.Task) ([]domain.Task, error) {
+			if failHydration.Load() {
+				return nil, errors.New("injected runtime refresh failure")
+			}
+			return tasks, nil
+		},
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
 	}
+	if _, err := d.ensureProjectReadMaterializer(ctx, projectID, issuesClient); err != nil {
+		t.Fatalf("bootstrap production materializer: %v", err)
+	}
+	failHydration.Store(true)
 	body, err := json.Marshal(map[string]string{"project_id": projectID, "session_id": issueID})
 	if err != nil {
 		t.Fatal(err)
@@ -4739,6 +4739,115 @@ func TestMaterializedTaskReadsFailUnavailableWithoutStalePayload(t *testing.T) {
 				t.Fatalf("body = %q, want no stale payload", resp.Body)
 			}
 		})
+	}
+}
+
+func TestProductionWiredRuntimeHydrationFailureFailsAuthoritativeReadsUnavailable(t *testing.T) {
+	ctx := context.Background()
+	const projectID = "proj-production-runtime-unavailable"
+	issuesClient, _ := newTestIssueClient(t)
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "runtime failure must fail closed", Status: domain.StatusInReview, Type: domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failHydration atomic.Bool
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issues:                issuesClient,
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		materializersStarted:  true,
+		materializers:         map[string]*projectReadMaterializer{},
+		projectReadRuntimeHydrate: func(_ context.Context, _ string, tasks []domain.Task) ([]domain.Task, error) {
+			if failHydration.Load() {
+				return nil, errors.New("injected production runtime hydration failure")
+			}
+			return tasks, nil
+		},
+		revision: map[string]uint64{projectID: 7},
+	}
+	if _, err := d.ensureProjectReadMaterializer(ctx, projectID, issuesClient); err != nil {
+		t.Fatalf("bootstrap production materializer: %v", err)
+	}
+	failHydration.Store(true)
+	request := func(command string, body any) protocol.RequestEnvelope {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion, RequestID: naming.RequestID("req-production-unavailable-" + command),
+			Kind: protocol.EnvelopeKindCommand, Command: command,
+			Meta: protocol.Metadata{ProjectID: projectID}, Body: encoded,
+		}
+	}
+	tests := []struct {
+		name   string
+		invoke func() (protocol.ResponseEnvelope, error)
+	}{
+		{name: "list", invoke: func() (protocol.ResponseEnvelope, error) {
+			return d.handleTaskList(ctx, request("task.list", map[string]any{}))
+		}},
+		{name: "search", invoke: func() (protocol.ResponseEnvelope, error) {
+			return d.handleTaskList(ctx, request("task.search", map[string]any{"query": "runtime failure"}))
+		}},
+		{name: "get", invoke: func() (protocol.ResponseEnvelope, error) {
+			return d.handleTaskGet(ctx, request("task.get", map[string]any{"task_id": taskID}))
+		}},
+		{name: "get-many", invoke: func() (protocol.ResponseEnvelope, error) {
+			return d.handleTaskGetMany(ctx, request("task.get-many", map[string]any{"task_ids": []string{taskID}, "metadata_only": true}))
+		}},
+		{name: "close-preflight", invoke: func() (protocol.ResponseEnvelope, error) {
+			return d.handleTaskClosePreflight(ctx, request("task.close_preflight", map[string]any{"task_id": taskID}))
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			resp, err := test.invoke()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeUnavailable || !resp.Error.Retryable {
+				t.Fatalf("response = %+v, want retryable unavailable", resp)
+			}
+			if !strings.Contains(resp.Error.Message, "injected production runtime hydration failure") || len(resp.Body) != 0 {
+				t.Fatalf("error/body = %+v/%q, want production hydration failure and no stale payload", resp.Error, resp.Body)
+			}
+		})
+	}
+}
+
+func TestEmbeddedAuthoritativeReadUsesStrictHydrationAfterBootstrap(t *testing.T) {
+	ctx := context.Background()
+	const projectID = "proj-embedded-runtime-unavailable"
+	issuesClient, _ := newTestIssueClient(t)
+	_, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "embedded strict runtime", Status: domain.StatusInProgress, Type: domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hydrateCalls atomic.Int32
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issues:                issuesClient,
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		materializers:         map[string]*projectReadMaterializer{},
+		projectReadRuntimeHydrate: func(_ context.Context, _ string, tasks []domain.Task) ([]domain.Task, error) {
+			if hydrateCalls.Add(1) > 1 {
+				return nil, errors.New("injected embedded strict hydration failure")
+			}
+			return tasks, nil
+		},
+		revision: map[string]uint64{projectID: 1},
+	}
+	tasks, _, err := d.convergedProjectReadSnapshot(ctx, projectID)
+	if err == nil || !isProjectReadUnavailableError(err) {
+		t.Fatalf("tasks/error = %+v/%v, want project-read unavailable", tasks, err)
+	}
+	if !strings.Contains(err.Error(), "injected embedded strict hydration failure") {
+		t.Fatalf("error = %v, want embedded strict failure", err)
 	}
 }
 

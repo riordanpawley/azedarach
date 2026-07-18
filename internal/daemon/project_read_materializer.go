@@ -87,6 +87,7 @@ type projectReadMaterializer struct {
 	projectID                   string
 	authority                   *ProjectionDeltaAuthority
 	hydrate                     func(context.Context, []domain.Task) ([]domain.Task, error)
+	hydrateDegraded             func(context.Context, []domain.Task) ([]domain.Task, error)
 	affected                    func(context.Context, protocol.ProjectionDeltaBatch) ([]string, error)
 	legacy                      func(context.Context) ([]domain.Task, error)
 	canonical                   map[string]domain.Task
@@ -233,7 +234,7 @@ func (m *projectReadMaterializer) bootstrap(ctx context.Context) error {
 		}
 		sources = append(sources, protocol.ProjectionSourceRange{Authority: "legacy_bootstrap_export", SourceFrom: "full-export", SourceTo: "full-export", Transitional: true})
 	}
-	hydrated, _, err := m.hydrateTasks(ctx, canonical)
+	hydrated, _, err := m.hydrateTasksDegraded(ctx, canonical)
 	if err != nil {
 		return fmt.Errorf("hydrate projection bootstrap: %w", err)
 	}
@@ -295,7 +296,7 @@ func (m *projectReadMaterializer) run(ctx context.Context, advanced func(protoco
 		if advanced != nil {
 			advanced(m.snapshotMetadata())
 		}
-		if err := m.refreshRuntime(ctx, affected); err != nil {
+		if err := m.refreshRuntimeDegraded(ctx, affected); err != nil {
 			m.markUnhealthy(fmt.Errorf("refresh runtime enrichment: %w", err), false)
 			if advanced != nil {
 				advanced(m.snapshotMetadata())
@@ -546,14 +547,26 @@ func decodeProjectionValues(values []protocol.ProjectionValue) (map[string]domai
 }
 
 func (m *projectReadMaterializer) hydrateTasks(ctx context.Context, canonical map[string]domain.Task) (map[string]domain.Task, string, error) {
+	return m.hydrateTasksWith(ctx, canonical, m.hydrate)
+}
+
+func (m *projectReadMaterializer) hydrateTasksDegraded(ctx context.Context, canonical map[string]domain.Task) (map[string]domain.Task, string, error) {
+	hydrate := m.hydrateDegraded
+	if hydrate == nil {
+		hydrate = m.hydrate
+	}
+	return m.hydrateTasksWith(ctx, canonical, hydrate)
+}
+
+func (m *projectReadMaterializer) hydrateTasksWith(ctx context.Context, canonical map[string]domain.Task, hydrate func(context.Context, []domain.Task) ([]domain.Task, error)) (map[string]domain.Task, string, error) {
 	tasks := make([]domain.Task, 0, len(canonical))
 	for _, task := range canonical {
 		tasks = append(tasks, task)
 	}
 	sortTasksDeterministically(tasks)
-	if m.hydrate != nil {
+	if hydrate != nil {
 		var err error
-		tasks, err = m.hydrate(ctx, tasks)
+		tasks, err = hydrate(ctx, tasks)
 		if err != nil {
 			return nil, "", err
 		}
@@ -717,6 +730,14 @@ func (m *projectReadMaterializer) snapshotIssues(issueIDs map[string]struct{}) (
 }
 
 func (m *projectReadMaterializer) refreshRuntime(ctx context.Context, issueIDs []string) error {
+	return m.refreshRuntimeWith(ctx, issueIDs, m.hydrateTasks)
+}
+
+func (m *projectReadMaterializer) refreshRuntimeDegraded(ctx context.Context, issueIDs []string) error {
+	return m.refreshRuntimeWith(ctx, issueIDs, m.hydrateTasksDegraded)
+}
+
+func (m *projectReadMaterializer) refreshRuntimeWith(ctx context.Context, issueIDs []string, hydrate func(context.Context, map[string]domain.Task) (map[string]domain.Task, string, error)) error {
 	wanted := make(map[string]struct{}, len(issueIDs))
 	for _, issueID := range issueIDs {
 		if issueID = strings.TrimSpace(issueID); issueID != "" {
@@ -746,7 +767,7 @@ func (m *projectReadMaterializer) refreshRuntime(ctx context.Context, issueIDs [
 	if len(canonical) == 0 {
 		return nil
 	}
-	hydrated, _, err := m.hydrateTasks(ctx, canonical)
+	hydrated, _, err := hydrate(ctx, canonical)
 	if err != nil {
 		return err
 	}
@@ -921,8 +942,11 @@ func (d *Daemon) ensureProjectReadMaterializer(ctx context.Context, projectID st
 		return nil, fmt.Errorf("project read materialization unavailable for %s", projectID)
 	}
 	materializer = newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(client), func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
-		return d.hydrateProjectReadTasks(hydrateCtx, projectID, client, tasks), nil
+		return d.hydrateProjectReadTasks(hydrateCtx, projectID, client, tasks)
 	})
+	materializer.hydrateDegraded = func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		return d.hydrateProjectReadTasksDegraded(hydrateCtx, projectID, client, tasks), nil
+	}
 	d.configureProjectReadMaterializer(materializer, projectID, client)
 	if err := materializer.bootstrap(ctx); err != nil {
 		return nil, fmt.Errorf("bootstrap project %s: %w", projectID, err)
@@ -1034,16 +1058,9 @@ func (d *Daemon) projectReadSnapshot(projectID string) ([]domain.Task, protocol.
 		// Embedded/unit daemons do not execute Run's startup boundary. Bootstrap
 		// their disposable read model on first use so tests and library users keep
 		// the same verified semantics. Production IPC cannot reach this path.
-		client := d.issueClientForProject(projectID)
-		if client == nil {
-			return nil, protocol.MaterializedSnapshotMetadata{}, newProjectReadUnavailableError("project read materialization unavailable for %s", projectID)
-		}
-		candidate := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(client), func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
-			return d.hydrateProjectReadTasks(hydrateCtx, projectID, client, tasks), nil
-		})
-		d.configureProjectReadMaterializer(candidate, projectID, client)
-		if err := candidate.bootstrap(context.Background()); err != nil {
-			return nil, protocol.MaterializedSnapshotMetadata{}, newProjectReadUnavailableError("bootstrap embedded project read materialization for %s: %w", projectID, err)
+		candidate, err := d.bootstrapEmbeddedProjectReadMaterializer(context.Background(), projectID)
+		if err != nil {
+			return nil, protocol.MaterializedSnapshotMetadata{}, err
 		}
 		tasks, metadata := candidate.snapshot()
 		if !strings.HasPrefix(metadata.Health, "healthy") {
@@ -1058,11 +1075,44 @@ func (d *Daemon) projectReadSnapshot(projectID string) ([]domain.Task, protocol.
 	return tasks, metadata, nil
 }
 
+func (d *Daemon) bootstrapEmbeddedProjectReadMaterializer(ctx context.Context, projectID string) (*projectReadMaterializer, error) {
+	client := d.issueClientForProject(projectID)
+	if client == nil {
+		return nil, newProjectReadUnavailableError("project read materialization unavailable for %s", projectID)
+	}
+	candidate := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(client), func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		return d.hydrateProjectReadTasks(hydrateCtx, projectID, client, tasks)
+	})
+	candidate.hydrateDegraded = func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		return d.hydrateProjectReadTasksDegraded(hydrateCtx, projectID, client, tasks), nil
+	}
+	d.configureProjectReadMaterializer(candidate, projectID, client)
+	if err := candidate.bootstrap(ctx); err != nil {
+		return nil, newProjectReadUnavailableError("bootstrap embedded project read materialization for %s: %w", projectID, err)
+	}
+	return candidate, nil
+}
+
 func (d *Daemon) convergedProjectReadSnapshot(ctx context.Context, projectID string) ([]domain.Task, protocol.MaterializedSnapshotMetadata, error) {
 	projectID = d.canonicalProjectID(projectID)
 	materializer := d.activeProjectReadMaterializer(projectID)
 	if materializer == nil {
-		return d.projectReadSnapshot(projectID)
+		d.materializersMu.RLock()
+		started := d.materializersStarted
+		d.materializersMu.RUnlock()
+		if started {
+			return d.projectReadSnapshot(projectID)
+		}
+		candidate, err := d.bootstrapEmbeddedProjectReadMaterializer(ctx, projectID)
+		if err != nil {
+			return nil, protocol.MaterializedSnapshotMetadata{}, err
+		}
+		tasks, metadata := candidate.snapshot()
+		if err := candidate.refreshRuntime(ctx, taskIDsFromTasks(tasks)); err != nil {
+			return nil, metadata, newProjectReadUnavailableError("refresh embedded project runtime facts for %s: %w", projectID, err)
+		}
+		tasks, metadata = candidate.snapshot()
+		return tasks, metadata, nil
 	}
 	healthEpoch := materializer.healthResultEpoch()
 	metadata, err := materializer.convergeCanonical(ctx)
@@ -1074,7 +1124,7 @@ func (d *Daemon) convergedProjectReadSnapshot(ctx context.Context, projectID str
 	return d.projectReadSnapshot(projectID)
 }
 
-func (d *Daemon) hydrateProjectReadTasks(ctx context.Context, projectID string, client *issues.Client, tasks []domain.Task) []domain.Task {
+func (d *Daemon) hydrateProjectReadTasks(ctx context.Context, projectID string, client *issues.Client, tasks []domain.Task) ([]domain.Task, error) {
 	hydrate := client.HydrateRuntime
 	if d.projectReadRuntimeHydrate != nil {
 		hydrate = func(ctx context.Context, projectID string, tasks []domain.Task) ([]domain.Task, error) {
@@ -1084,16 +1134,24 @@ func (d *Daemon) hydrateProjectReadTasks(ctx context.Context, projectID string, 
 	hydrateCtx, endHydration := latencytrace.StartSpanWithEndAttributes(ctx, "daemon", "project_read.runtime_hydration", "project_id", projectID, "task_count", len(tasks))
 	hydrated, err := hydrate(hydrateCtx, projectID, tasks)
 	if err != nil {
-		endHydration(err, "outcome", "degraded")
-		_, endFallback := latencytrace.StartSpanWithEndAttributes(ctx, "daemon", "project_read.degraded_fallback", "project_id", projectID, "reason", "session_hydration")
-		endFallback(nil, "outcome", "ticket_only")
-		if d.cfg.Logger != nil {
-			d.cfg.Logger.WarnContext(ctx, "project read materializer continuing without runtime session enrichment", "project_id", projectID, "error", err)
-		}
-		return tasks
+		endHydration(err, "outcome", "unavailable")
+		return nil, fmt.Errorf("hydrate project runtime: %w", err)
 	}
 	endHydration(nil, "outcome", "enriched")
-	return d.enrichTasksWithSessionState(ctx, projectID, hydrated)
+	return d.enrichTasksWithSessionState(ctx, projectID, hydrated), nil
+}
+
+func (d *Daemon) hydrateProjectReadTasksDegraded(ctx context.Context, projectID string, client *issues.Client, tasks []domain.Task) []domain.Task {
+	hydrated, err := d.hydrateProjectReadTasks(ctx, projectID, client, tasks)
+	if err == nil {
+		return hydrated
+	}
+	_, endFallback := latencytrace.StartSpanWithEndAttributes(ctx, "daemon", "project_read.degraded_fallback", "project_id", projectID, "reason", "session_hydration")
+	endFallback(nil, "outcome", "ticket_only")
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.WarnContext(ctx, "project read materializer continuing without runtime session enrichment", "project_id", projectID, "error", err)
+	}
+	return tasks
 }
 
 func (d *Daemon) refreshProjectReadWorktreesForBootstrap(ctx context.Context, projectID string, materializer *projectReadMaterializer) error {
