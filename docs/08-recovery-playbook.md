@@ -119,12 +119,15 @@ upgraded issue schema.
 
 ## SQLite Structural Corruption
 
-The issue-store startup path runs `PRAGMA quick_check(1)` before journal-mode,
-migration, normalization, or schema-repair writes. A SQLite code-11 result, or
-any non-`ok` structural result, quarantines that client and marks the project
-issue store unavailable. Runtime code-11 failures from lifecycle or mailbox
-paths install the same quarantine and a daemon project-health gate that does
-not expire until restart.
+The issue-store startup path opens an existing authority read-only and runs
+`PRAGMA quick_check(1)` before creating any read-write pool or applying
+journal-mode, migration, normalization, or schema-repair writes. The preflight
+reads committed WAL state without checkpointing or changing the database or
+WAL authority files. A SQLite code-11 result, or any non-`ok` structural
+result, quarantines that client and marks the project issue store unavailable.
+The daemon command boundary translates the first runtime code-11 failure from
+any issue-store command into the same project-health quarantine; it does not
+expire until restart.
 
 When this failure appears:
 
@@ -146,8 +149,8 @@ When this failure appears:
 Executable regression checks:
 
 ```bash
-go test ./internal/services/issues -run 'TestClient(QuarantinesRuntimeSQLiteCorruption|RejectsCorruptDatabaseBeforeStartupWrites)' -count=1
-go test ./internal/daemon -run TestProjectIssueStoreCorruptionIsCachedAsUnavailableFromAnyStorePath -count=1
+go test ./internal/services/issues -run 'TestClient(QuarantinesRuntimeSQLiteCorruption|RejectsCorrupt(DatabaseBeforeStartupWrites|WALDatabaseWithoutChangingAuthorityBytes))' -count=1
+go test ./internal/daemon -run 'Test(ProjectIssueStoreCorruptionIsCachedAsUnavailableFromAnyStorePath|CommandBoundaryQuarantinesFirstCorruptionFromEveryIssueMutationPath)' -count=1
 ```
 
 ## Orchestration Integrate Safety Gate

@@ -107,6 +107,92 @@ func TestLifecycleAndMailboxCorruptionFailProjectClosed(t *testing.T) {
 	}
 }
 
+func TestCommandBoundaryQuarantinesFirstCorruptionFromEveryIssueMutationPath(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		body    func(string) []byte
+	}{
+		{
+			name:    "create",
+			command: "task.create",
+			body: func(string) []byte {
+				return marshalJSON(map[string]any{"title": "new issue", "type": domain.TypeTask, "priority": domain.P2, "status": domain.StatusOpen})
+			},
+		},
+		{
+			name:    "event append",
+			command: "task.event.append",
+			body: func(issueID string) []byte {
+				return marshalJSON(map[string]any{"task_id": issueID, "event_type": domain.IssueEventProgressRecorded, "payload": map[string]any{"summary": "progress"}})
+			},
+		},
+		{
+			name:    "update details",
+			command: "task.update_details",
+			body: func(issueID string) []byte {
+				return marshalJSON(map[string]any{"task_id": issueID, "title": "updated", "description": "details", "type": domain.TypeBug, "priority": domain.P1})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			projectID := "corrupt-" + strings.ReplaceAll(tt.name, " ", "-")
+			repoDir := t.TempDir()
+			fixture := issues.NewClient(repoDir, slog.Default())
+			issueID, err := fixture.Create(ctx, issues.CreateTaskParams{Title: "corrupt target", Type: domain.TypeBug, Status: domain.StatusOpen})
+			if err != nil {
+				t.Fatalf("create fixture issue: %v", err)
+			}
+			if err := fixture.CloseDB(); err != nil {
+				t.Fatalf("close fixture issue store: %v", err)
+			}
+			dbPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
+			corruptDaemonSQLiteRootPage(t, dbPath, "issue_observation_events")
+			corruptClient := issues.NewClientAtPath(dbPath, slog.Default(), issues.WithExistingDatabaseOnly())
+			t.Cleanup(func() { _ = corruptClient.CloseDB() })
+			d := &Daemon{
+				cfg:                              Config{RepoDir: repoDir, Logger: slog.Default()},
+				issues:                           corruptClient,
+				issueClientsByProject:            map[string]*issues.Client{projectID: corruptClient},
+				issueClientsByRoot:               map[string]*issues.Client{daemonStoreRootKey(repoDir): corruptClient},
+				projectIssueStoreHealthByProject: map[string]projectIssueStoreHealthState{},
+			}
+
+			first, err := d.command(ctx, protocol.RequestEnvelope{
+				ProtocolVersion: protocol.CurrentVersion,
+				RequestID:       naming.RequestID("first-corruption-" + tt.command),
+				Kind:            protocol.EnvelopeKindCommand,
+				Command:         tt.command,
+				Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+				Body:            tt.body(issueID),
+			})
+			if err != nil || first.OK || first.Error == nil || first.Error.Code != protocol.ErrorCodeUnavailable {
+				t.Fatalf("first %s response=%+v err=%v, want unavailable", tt.command, first, err)
+			}
+			if !strings.Contains(first.Error.Message, "project issue store unhealthy") || !strings.Contains(first.Error.Message, "until daemon restart") {
+				t.Fatalf("first %s message=%q, want corruption quarantine", tt.command, first.Error.Message)
+			}
+
+			cached, err := d.command(ctx, protocol.RequestEnvelope{
+				ProtocolVersion: protocol.CurrentVersion,
+				RequestID:       naming.RequestID("cached-unrelated-task-list"),
+				Kind:            protocol.EnvelopeKindCommand,
+				Command:         "task.list",
+				Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+			})
+			if err != nil || cached.OK || cached.Error == nil || cached.Error.Code != protocol.ErrorCodeUnavailable {
+				t.Fatalf("cached task.list response=%+v err=%v, want unavailable", cached, err)
+			}
+			if !strings.Contains(cached.Error.Message, "project issue store unhealthy (cached)") {
+				t.Fatalf("cached task.list message=%q, want cached quarantine", cached.Error.Message)
+			}
+		})
+	}
+}
+
 func corruptDaemonSQLiteRootPage(t *testing.T, dbPath, object string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s?mode=rw", filepath.ToSlash(dbPath)))

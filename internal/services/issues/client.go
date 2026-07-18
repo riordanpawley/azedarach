@@ -1067,6 +1067,7 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 	}
 
 	dbDir := filepath.Dir(c.dbPath)
+	var existingDB bool
 	if c.requireExistingDB {
 		info, err := os.Stat(c.dbPath)
 		if err != nil {
@@ -1075,9 +1076,25 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		if !info.Mode().IsRegular() {
 			return nil, c.wrapError("open-db", "", fmt.Errorf("require existing database: %s is not a regular file", c.dbPath))
 		}
-	} else if dbDir != "" && dbDir != "." {
-		if err := os.MkdirAll(dbDir, 0o755); err != nil {
-			return nil, c.wrapError("open-db", "", fmt.Errorf("create db directory: %w", err))
+		existingDB = true
+	} else {
+		if info, err := os.Stat(c.dbPath); err == nil {
+			if !info.Mode().IsRegular() {
+				return nil, c.wrapError("open-db", "", fmt.Errorf("issue database path %s is not a regular file", c.dbPath))
+			}
+			existingDB = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, c.wrapError("open-db", "", fmt.Errorf("inspect issue database: %w", err))
+		}
+		if dbDir != "" && dbDir != "." {
+			if err := os.MkdirAll(dbDir, 0o755); err != nil {
+				return nil, c.wrapError("open-db", "", fmt.Errorf("create db directory: %w", err))
+			}
+		}
+	}
+	if existingDB {
+		if err := checkSQLitePathStructuralIntegrity(c.dbPath, c.sqliteBusyTimeout); err != nil {
+			return nil, c.wrapError("open-db", "", err)
 		}
 	}
 
@@ -1109,10 +1126,6 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		return nil, c.wrapError("open-db", "", err)
 	}
 	pingDoneAt := time.Now()
-	if err := checkSQLiteStructuralIntegrity(db); err != nil {
-		_ = db.Close()
-		return nil, c.wrapError("open-db", "", err)
-	}
 	if err := c.configureSQLite(db); err != nil {
 		_ = db.Close()
 		return nil, c.wrapError("open-db", "", err)
@@ -1186,6 +1199,27 @@ func checkSQLiteStructuralIntegrity(db *sql.DB) error {
 		return fmt.Errorf("%w: pre-write SQLite integrity check returned %q", ErrSQLiteCorrupt, result)
 	}
 	return nil
+}
+
+// checkSQLitePathStructuralIntegrity validates an existing authority through a
+// read-only connection before any read-write pool exists. In WAL mode SQLite
+// reads the committed database and WAL snapshot without checkpointing or
+// recovering either authority file.
+func checkSQLitePathStructuralIntegrity(dbPath string, busyTimeout time.Duration) error {
+	busyTimeoutMillis := max(busyTimeout.Milliseconds(), int64(1))
+	dsn := fmt.Sprintf(
+		"file:%s?mode=ro&_pragma=query_only(ON)&_pragma=busy_timeout(%d)",
+		filepath.ToSlash(dbPath),
+		busyTimeoutMillis,
+	)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return fmt.Errorf("open read-only SQLite integrity preflight: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	defer db.Close()
+	return checkSQLiteStructuralIntegrity(db)
 }
 
 func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
@@ -6749,4 +6783,13 @@ func (c *Client) corruptionError() error {
 		return nil
 	}
 	return state.err
+}
+
+// CorruptionError reports the process-local corruption quarantine, if any.
+// It does not open or inspect the database.
+func (c *Client) CorruptionError() error {
+	if c == nil {
+		return nil
+	}
+	return c.corruptionError()
 }
