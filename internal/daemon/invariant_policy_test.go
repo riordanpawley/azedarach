@@ -12,6 +12,7 @@ func TestInvariantSourceMatrixIncludesExpectedRuntimeInvariants(t *testing.T) {
 		daemonInvariantSessionReconcile:             daemonInvariantSourceHybrid,
 		daemonInvariantSessionIssueLifecycle:        daemonInvariantSourceHybrid,
 		daemonInvariantSessionActivityConverge:      daemonInvariantSourceHybrid,
+		daemonInvariantManagedAgentRestart:          daemonInvariantSourceHybrid,
 		daemonInvariantAdvisorSingleton:             daemonInvariantSourceHybrid,
 		daemonInvariantTaskListFreshness:            daemonInvariantSourceProjection,
 		daemonInvariantTaskReadAfterWrite:           daemonInvariantSourceProjection,

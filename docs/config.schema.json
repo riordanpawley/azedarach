@@ -169,7 +169,7 @@
         "codexAppServer": {
           "type": "boolean",
           "default": false,
-          "description": "Launch Codex TUI sessions through the native app-server daemon and supervise thin-client resume across daemon restarts."
+          "description": "Launch the stock Codex remote TUI and supervise exact-worktree resume across app-server restarts; automated turns use direct app-server submission behind the managed tmux input gate."
         },
         "shell": {
           "type": "string",

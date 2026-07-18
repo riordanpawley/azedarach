@@ -21,6 +21,8 @@ const (
 	daemonInvariantSessionIssueLifecycle   daemonInvariantID = "session.issue_lifecycle_runtime"
 	daemonInvariantSessionActivityConverge daemonInvariantID = "session.activity_convergence"
 	daemonInvariantManagedAgentIdentity    daemonInvariantID = "session.managed_agent_identity"
+	daemonInvariantManagedAgentRestart     daemonInvariantID = "session.managed_agent_restart"
+	daemonInvariantAgentInputDelivery      daemonInvariantID = "session.agent_input_delivery"
 	daemonInvariantAdvisorSingleton        daemonInvariantID = "session.advisor_singleton"
 
 	daemonInvariantTaskListFreshness    daemonInvariantID = "task.list_freshness"
@@ -70,8 +72,10 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantSessionReconcile:             daemonInvariantSourceHybrid,
 	daemonInvariantSessionIssueLifecycle:        daemonInvariantSourceHybrid,
 	daemonInvariantSessionActivityConverge:      daemonInvariantSourceHybrid,
+	daemonInvariantManagedAgentIdentity:         daemonInvariantSourceHybrid,
+	daemonInvariantManagedAgentRestart:          daemonInvariantSourceHybrid,
+	daemonInvariantAgentInputDelivery:           daemonInvariantSourceHybrid,
 	daemonInvariantTaskListFreshness:            daemonInvariantSourceProjection,
-	daemonInvariantTaskReadAfterWrite:           daemonInvariantSourceProjection,
 	daemonInvariantTaskClose:                    daemonInvariantSourceHybrid,
 	daemonInvariantTaskClosePreflight:           daemonInvariantSourceHybrid,
 	daemonInvariantTaskDelete:                   daemonInvariantSourceHybrid,
@@ -83,14 +87,12 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantTaskContextRisk:              daemonInvariantSourceProjection,
 	daemonInvariantTaskMergeBaseTarget:          daemonInvariantSourceProjection,
 	daemonInvariantTaskFollowOnMerge:            daemonInvariantSourceProjection,
-	daemonInvariantTaskPublicationQueue:         daemonInvariantSourceHybrid,
 	daemonInvariantWorkerObservation:            daemonInvariantSourceHybrid,
 	daemonInvariantRuntimeKnownProjectIDs:       daemonInvariantSourceProjection,
 	daemonInvariantCrossProjectViews:            daemonInvariantSourceProjection,
 	daemonInvariantIssueResourceLifecycle:       daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationScope:           daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationSingleton:       daemonInvariantSourceHybrid,
-	daemonInvariantOrchestrationRootedBootstrap: daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationCompletion:      daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationCandidates:      daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationParentWake:      daemonInvariantSourceHybrid,
@@ -103,11 +105,13 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantOrchestrationReview:          daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationClaimStart:      daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationLoop:            daemonInvariantSourceProjection,
-	daemonInvariantValidationCapacity:           daemonInvariantSourceProjection,
-	daemonInvariantPublicationEvidence:          daemonInvariantSourceProjection,
-	daemonInvariantManagedAgentIdentity:         daemonInvariantSourceHybrid,
 	daemonInvariantProjectionDeltaStream:        daemonInvariantSourceProjection,
 	daemonInvariantTmuxObservation:              daemonInvariantSourceTmux,
+	daemonInvariantValidationCapacity:           daemonInvariantSourceProjection,
+	daemonInvariantOrchestrationRootedBootstrap: daemonInvariantSourceHybrid,
+	daemonInvariantTaskReadAfterWrite:           daemonInvariantSourceProjection,
+	daemonInvariantTaskPublicationQueue:         daemonInvariantSourceHybrid,
+	daemonInvariantPublicationEvidence:          daemonInvariantSourceProjection,
 }
 
 func sourceForInvariant(id daemonInvariantID) daemonInvariantSource {

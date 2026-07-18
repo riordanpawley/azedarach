@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/riordanpawley/azedarach/internal/types"
+	"github.com/riordanpawley/azedarach/internal/ui/keybinds"
 	"github.com/riordanpawley/azedarach/internal/ui/styles"
 )
 
@@ -172,6 +173,115 @@ func TestStatusBar_RenderShowsCurrentProjectOnLeft(t *testing.T) {
 	}
 	if projectIdx > modeIdx {
 		t.Fatalf("expected current project to appear before mode badge, got: %s", result)
+	}
+}
+
+func TestStatusBar_LongIntegrationSandboxProjectPreservesEssentialStatus(t *testing.T) {
+	const project = "azedarach-dlb-accept-clone-118b"
+
+	tests := []struct {
+		name      string
+		width     int
+		configure func(*StatusBar)
+		wants     []string
+		unwants   []string
+	}{
+		{
+			name:  "normal hints",
+			width: 80,
+			wants: []string{"NORMAL", "?: help", "O: orchestrator"},
+		},
+		{
+			name:  "overlay close",
+			width: 80,
+			configure: func(sb *StatusBar) {
+				sb.SetHintBindings([]keybinds.Binding{{Key: "ctrl+g", Description: "close all"}})
+			},
+			wants: []string{"NORMAL", "ctrl+g: close all"},
+		},
+		{
+			name:  "orchestrator status and key",
+			width: 120,
+			configure: func(sb *StatusBar) {
+				sb.SetModeSuffix("orchestrator working live=true  workers 2/4")
+			},
+			wants: []string{"orchestrator working live=true", "workers 2/4", "O: orchestrator"},
+		},
+		{
+			name:  "compact mandatory state keeps hints",
+			width: 80,
+			configure: func(sb *StatusBar) {
+				sb.SetFilterSummary("F:q=integration-sandbox-status-filter,st:2,pr:3")
+				sb.SetSortSummary("S:project_orchestrator_activity/descending")
+			},
+			wants: []string{"NORMAL", "F/S", "?: help", "O: orchestrator"},
+		},
+		{
+			name:  "narrow mandatory state compacts mode for hints",
+			width: 40,
+			configure: func(sb *StatusBar) {
+				sb.SetFilterSummary("F:q=integration-sandbox-status-filter,st:2,pr:3")
+				sb.SetSortSummary("S:project_orchestrator_activity/descending")
+			},
+			wants:   []string{"N", "F/S", "?: help", "O: orchestrator"},
+			unwants: []string{"NORMAL"},
+		},
+		{
+			name:  "loading preserves essential hints",
+			width: 80,
+			configure: func(sb *StatusBar) {
+				sb.SetFilterSummary("F:q=integration-sandbox-status-filter,st:2,pr:3")
+				sb.SetSortSummary("S:project_orchestrator_activity/descending")
+				sb.SetLoadingIndicator("Loading")
+			},
+			wants: []string{"NORMAL", "F/S", "Loading", "?: help", "O: orchestrator"},
+		},
+		{
+			name:  "selection drives mandatory fallback",
+			width: 64,
+			configure: func(sb *StatusBar) {
+				sb.SetFilterSummary("F:q=board,st:2")
+				sb.SetSortSummary("S:updated/desc")
+				sb.SetSelectionSummary("Selected: 2 (2 hidden)")
+			},
+			wants:   []string{"NORMAL", "F/S", "Selected: 2 (2 hidden)"},
+			unwants: []string{"F:q=board,st:2", "S:updated/desc"},
+		},
+		{
+			name:  "hidden selection",
+			width: 80,
+			configure: func(sb *StatusBar) {
+				sb.SetSelectionSummary("Selected: 2 (2 hidden)")
+			},
+			wants: []string{"NORMAL", "Selected: 2 (2 hidden)"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sb := New(types.ModeNormal, tt.width, styles.New())
+			sb.SetCurrentProject(project)
+			sb.SetFilterSummary("F:none")
+			sb.SetSortSummary("S:git_diff/asc")
+			if tt.configure != nil {
+				tt.configure(&sb)
+			}
+
+			result := sb.Render()
+			for _, want := range tt.wants {
+				if !strings.Contains(result, want) {
+					t.Fatalf("status bar missing %q: %q", want, result)
+				}
+			}
+			for _, unwanted := range tt.unwants {
+				if strings.Contains(result, unwanted) {
+					t.Fatalf("status bar unexpectedly contains %q: %q", unwanted, result)
+				}
+			}
+			if got := lipgloss.Width(result); got != tt.width {
+				t.Fatalf("status bar width = %d, want %d: %q", got, tt.width, result)
+			}
+		})
 	}
 }
 

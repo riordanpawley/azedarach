@@ -1879,7 +1879,7 @@ func TestSessionRestartAllCommandPrintsFailuresBeforeReturningError(t *testing.T
 						IssueID:   naming.IssueID("az-1"),
 						SessionID: naming.SessionID("proj-az-1"),
 						Activity:  "idle",
-						Error:     "send-keys failed",
+						Error:     "replacement incarnation was not observed",
 					}},
 				})
 				if err != nil {
@@ -1909,8 +1909,35 @@ func TestSessionRestartAllCommandPrintsFailuresBeforeReturningError(t *testing.T
 	if commandErr == nil || !strings.Contains(commandErr.Error(), "failed to restart 1 session") {
 		t.Fatalf("error = %v, want failed restart error", commandErr)
 	}
-	if !strings.Contains(output, "az-1") || !strings.Contains(output, "failed: send-keys failed") {
+	if !strings.Contains(output, "az-1") || !strings.Contains(output, "failed: replacement incarnation was not observed") {
 		t.Fatalf("output = %q, want failed session detail", output)
+	}
+}
+
+func TestSessionRestartAllCommandDoesNotPrintSuccessAfterCheckpointFailure(t *testing.T) {
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID,
+					Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: false,
+					Error: &protocol.ErrorEnvelope{Code: protocol.ErrorCodeInternal, Message: "persist restart target completion: checkpoint unavailable"},
+				}, nil
+			},
+		}).WithProjectID("proj"),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), ProjectID: "proj",
+	}
+	var commandErr error
+	output := captureStdout(t, func() error {
+		commandErr = SessionRestartAllCommand(deps, SessionRestartAllOptions{})
+		return nil
+	})
+	if commandErr == nil || !strings.Contains(commandErr.Error(), "checkpoint unavailable") {
+		t.Fatalf("error=%v", commandErr)
+	}
+	if strings.Contains(output, "Restarted") {
+		t.Fatalf("false success output=%q", output)
 	}
 }
 

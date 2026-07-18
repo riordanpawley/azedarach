@@ -917,6 +917,7 @@ func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T
 	d.tmux = tmux.NewClient(tmuxRunner, slog.Default())
 	canonicalSessionID := naming.CanonicalSessionIDForIssue(d.sessionNamingScope("project"), naming.IssueID(issueID)).String()
 	tmuxRunner.sessions[canonicalSessionID] = true
+	seedReadyAgentInput(t, d, tmuxRunner, "project", canonicalSessionID)
 
 	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{
 		Scope:         domain.ProjectOrchestrationScope(),
@@ -1022,6 +1023,7 @@ func TestReviewReturnDoesNotRequireProjectSnapshotAdmission(t *testing.T) {
 	}
 	canonicalSessionID := naming.CanonicalSessionIDForIssue(d.sessionNamingScope("project"), naming.IssueID(issueID)).String()
 	tmuxRunner.sessions[canonicalSessionID] = true
+	seedReadyAgentInput(t, d, tmuxRunner, "project", canonicalSessionID)
 	request := protocol.OrchestrationIntentRequest{
 		Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn,
 		IntentKey: "review-return-with-project-churn", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir,
@@ -1066,10 +1068,13 @@ func TestReviewReturnAcceptsFailedAggregateGateFromCurrentReviewEpochAfterWorker
 	}
 	tmuxRunner := newSessionStartTmuxRunner()
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	attachIsolatedRuntimeStore(t, d, "project")
 	d.operationRuntime = runtime
 	d.git = git.NewClient(&recordingGitRunner{runFn: func(args ...string) (string, error) { return "candidate-a\n", nil }}, slog.Default())
 	d.tmux = tmux.NewClient(tmuxRunner, slog.Default())
-	tmuxRunner.sessions[naming.CanonicalSessionIDForIssue(d.sessionNamingScope("project"), naming.IssueID(issueID)).String()] = true
+	sessionID := naming.CanonicalSessionIDForIssue(d.sessionNamingScope("project"), naming.IssueID(issueID)).String()
+	tmuxRunner.sessions[sessionID] = true
+	seedReadyAgentInput(t, d, tmuxRunner, "project", sessionID)
 	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "failed-review-gate", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "gate found a regression"}}}
 
 	result, err := d.orchestrationAuthority().Apply(ctx, "project", request)
@@ -1172,12 +1177,23 @@ func TestReviewReturnBoundsBlockedLiveDeliveryAndPublishesFailure(t *testing.T) 
 	issueID := createReviewTask(t, ctx, client, domain.P1, "worker-a")
 	runner := newSessionStartTmuxRunner()
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	attachIsolatedRuntimeStore(t, d, "project")
 	d.tmux = tmux.NewClient(runner, slog.Default())
-	runner.sessions[naming.CanonicalSessionIDForIssue(d.sessionNamingScope("project"), naming.IssueID(issueID)).String()] = true
-	runner.onRunWithInput = func(runCtx context.Context, _ string, _ []string) (string, error) {
+	sessionID := naming.CanonicalSessionIDForIssue(d.sessionNamingScope("project"), naming.IssueID(issueID)).String()
+	runner.sessions[sessionID] = true
+	seedReadyAgentInput(t, d, runner, "project", sessionID)
+	deliver := func(runCtx context.Context, _ authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
 		<-runCtx.Done()
-		return "", runCtx.Err()
+		return authoritativeAgentInputAcknowledgement{}, runCtx.Err()
 	}
+	d.agentInput = newAgentInputDeliveryService(
+		d.sessionRuntimeStateStoreIfConfigured,
+		d.issueClientForProject,
+		scriptedAuthoritativeReceiver{deliver: func(ctx context.Context, request authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
+			return deliver(ctx, request)
+		}},
+		"review-test",
+	)
 	var gotDeliveryTimeout time.Duration
 	authority := daemonOrchestrationAuthority{
 		daemon:                d,
@@ -1214,8 +1230,11 @@ func TestReviewReturnBoundsBlockedLiveDeliveryAndPublishesFailure(t *testing.T) 
 		t.Fatalf("review events = %+v, want durable stage-aware delivery failure", reviewEvents)
 	}
 
-	runner.onRunWithInput = func(context.Context, string, []string) (string, error) {
-		return "", errors.New("delivery path unavailable")
+	deliver = func(context.Context, authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
+		return authoritativeAgentInputAcknowledgement{}, errors.New("delivery path unavailable")
+	}
+	authority.reviewDeliveryContext = func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
 	}
 	replayed, err := authority.Apply(ctx, "project", request)
 	if err != nil {
@@ -1287,6 +1306,7 @@ func TestReviewReturnReplayConvergesAfterReviewLeaseReleaseFailure(t *testing.T)
 	d.tmux = tmux.NewClient(tmuxRunner, slog.Default())
 	canonicalSessionID := naming.CanonicalSessionIDForIssue(d.sessionNamingScope("project"), naming.IssueID(issueID)).String()
 	tmuxRunner.sessions[canonicalSessionID] = true
+	seedReadyAgentInput(t, d, tmuxRunner, "project", canonicalSessionID)
 	authority := daemonOrchestrationAuthority{daemon: d}
 	releaseCalls := 0
 	authority.releaseReviewLease = func(ctx context.Context, projectID, issueID, actorID string) error {
@@ -2714,6 +2734,14 @@ func newOrchestrationReviewTestDaemon(repoDir string, client *issues.Client) *Da
 		return strings.TrimSpace(inspection.WorktreePath), strings.TrimSpace(oid), err
 	}
 	return d
+}
+
+type scriptedAuthoritativeReceiver struct {
+	deliver func(context.Context, authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error)
+}
+
+func (r scriptedAuthoritativeReceiver) DeliverAgentInput(ctx context.Context, request authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
+	return r.deliver(ctx, request)
 }
 
 func mustWorkerEvidencePayload(t *testing.T) map[string]any {
