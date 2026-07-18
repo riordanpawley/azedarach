@@ -2,21 +2,106 @@ package issues
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/stretchr/testify/require"
 )
 
-func TestProjectionDeltaWatchCancellationReleasesDirectoryDescriptors(t *testing.T) {
+func TestProjectionDeltaWatchCancellationPreservesSQLiteProcessLocks(t *testing.T) {
+	if os.Getenv("AZEDARACH_SQLITE_LOCK_PROBE") == "1" {
+		probeSQLiteWriteLock(t, os.Getenv("AZEDARACH_PROJECTION_DB"))
+		return
+	}
+
+	path := filepath.Join(t.TempDir(), "consumer.db")
+	client := NewClientAtPath(path, nil)
+	require.NoError(t, client.OpenProjectionDeltaStore())
+	t.Cleanup(func() { require.NoError(t, client.CloseDB()) })
+
+	db, err := client.dbHandle()
+	require.NoError(t, err)
+	require.NoError(t, func() error {
+		_, execErr := db.ExecContext(context.Background(), `CREATE TABLE lock_probe(id INTEGER PRIMARY KEY)`)
+		return execErr
+	}())
+
+	tx, err := db.BeginTx(context.Background(), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	_, err = tx.ExecContext(context.Background(), `INSERT INTO lock_probe(id) VALUES(1)`)
+	require.NoError(t, err)
+	require.Equal(t, "busy", runSQLiteWriteLockProbe(t, path), "live SQLite transaction must exclude a second process")
+
+	registered := make(chan struct{})
+	var reads int
+	client.projectionDeltaReadHook = func() {
+		reads++
+		if reads == 2 {
+			close(registered)
+		}
+	}
+	t.Cleanup(func() { client.projectionDeltaReadHook = nil })
+
+	watchCtx, cancelWatch := context.WithCancel(context.Background())
+	watchDone := make(chan error, 1)
+	go func() {
+		_, _, watchErr := client.WatchProjectionDeltas(watchCtx, "portable-consumer", 0, 1)
+		watchDone <- watchErr
+	}()
+	<-registered
+
+	cancelWatch()
+	require.ErrorIs(t, <-watchDone, domain.ErrProjectionCanceled)
+	require.Equal(t, "busy", runSQLiteWriteLockProbe(t, path), "watch teardown must not cancel SQLite's process-wide POSIX locks")
+
+	require.NoError(t, tx.Rollback())
+	require.Equal(t, "acquired", runSQLiteWriteLockProbe(t, path), "second process must acquire the lock after the owner releases it")
+}
+
+func runSQLiteWriteLockProbe(t *testing.T, path string) string {
+	t.Helper()
+	command := exec.Command(os.Args[0], "-test.run=^TestProjectionDeltaWatchCancellationPreservesSQLiteProcessLocks$")
+	command.Env = append(os.Environ(), "AZEDARACH_SQLITE_LOCK_PROBE=1", "AZEDARACH_PROJECTION_DB="+path)
+	output, err := command.CombinedOutput()
+	require.NoError(t, err, "lock probe failed: %s", output)
+	for _, result := range []string{"busy", "acquired"} {
+		if strings.Contains(string(output), "LOCK_RESULT="+result) {
+			return result
+		}
+	}
+	t.Fatalf("lock probe returned no result marker: %s", output)
+	return ""
+}
+
+func probeSQLiteWriteLock(t *testing.T, path string) {
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?_pragma=busy_timeout(0)&_txlock=immediate")
+	require.NoError(t, err)
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	tx, err := db.BeginTx(context.Background(), nil)
+	if IsSQLiteBusy(err) {
+		fmt.Println("LOCK_RESULT=busy")
+		return
+	}
+	require.NoError(t, err)
+	require.NoError(t, tx.Rollback())
+	fmt.Println("LOCK_RESULT=acquired")
+}
+
+func TestProjectionDeltaWatchReusesDirectoryDescriptorsUntilClientClose(t *testing.T) {
 	dir := t.TempDir()
 	for i := range 12 {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, fmt.Sprintf("consumer-%02d.state", i)), nil, 0o600))
 	}
+	require.Empty(t, openDescriptorsUnder(t, dir))
 
 	client := NewClientAtPath(filepath.Join(dir, "consumer.db"), nil)
 	require.NoError(t, client.OpenProjectionDeltaStore())
@@ -24,7 +109,7 @@ func TestProjectionDeltaWatchCancellationReleasesDirectoryDescriptors(t *testing
 	_, _, err := client.ListProjectionDeltas(context.Background(), "portable-consumer", 0, 1)
 	require.NoError(t, err)
 
-	baseline := openFileDescriptorCount(t)
+	var sharedWatcherDescriptors int
 	for cycle := range 4 {
 		ctx, cancel := context.WithCancel(context.Background())
 		reads := 0
@@ -37,10 +122,14 @@ func TestProjectionDeltaWatchCancellationReleasesDirectoryDescriptors(t *testing
 		_, _, err := client.WatchProjectionDeltas(ctx, "portable-consumer", 0, 1)
 		require.ErrorIs(t, err, domain.ErrProjectionCanceled, "cycle %d", cycle)
 		require.Equal(t, 2, reads, "cycle %d must cancel after watcher registration", cycle)
+		if cycle == 0 {
+			sharedWatcherDescriptors = len(openDescriptorsUnder(t, dir))
+		} else {
+			require.Equal(t, sharedWatcherDescriptors, len(openDescriptorsUnder(t, dir)), "logical watches must reuse one bounded store watcher")
+		}
 	}
 	client.projectionDeltaReadHook = nil
 
-	require.Equal(t, baseline, openFileDescriptorCount(t), "completed watches must not retain descriptors for files beside a consumer database")
 	committed, err := client.CommitProjectionDelta(context.Background(), ProjectionDeltaParams{
 		ProjectID:      "portable-consumer",
 		Kind:           domain.ProjectionKindIssue,
@@ -55,14 +144,29 @@ func TestProjectionDeltaWatchCancellationReleasesDirectoryDescriptors(t *testing
 	require.Zero(t, diagnostic.ProjectionWatchesActive)
 	require.Equal(t, uint64(4), diagnostic.ProjectionWatchesStarted)
 	require.Equal(t, diagnostic.ProjectionWatchesStarted, diagnostic.ProjectionWatchesDone)
+	require.NoError(t, client.CloseDB())
+	require.Empty(t, openDescriptorsUnder(t, dir), "closing the SQLite client must release its shared watcher after the pool")
 }
 
-func openFileDescriptorCount(t *testing.T) int {
+func openDescriptorsUnder(t *testing.T, root string) []string {
 	t.Helper()
-	dir, err := os.Open("/dev/fd")
+	resolvedRoot, err := filepath.EvalSymlinks(root)
 	require.NoError(t, err)
-	names, err := dir.Readdirnames(-1)
+	descriptorDir, err := os.Open("/dev/fd")
 	require.NoError(t, err)
-	require.NoError(t, dir.Close())
-	return len(names)
+	names, err := descriptorDir.Readdirnames(-1)
+	require.NoError(t, err)
+	require.NoError(t, descriptorDir.Close())
+	var paths []string
+	for _, name := range names {
+		path, readErr := os.Readlink(filepath.Join("/dev/fd", name))
+		if readErr != nil {
+			continue
+		}
+		path = filepath.Clean(path)
+		if path == resolvedRoot || strings.HasPrefix(path, resolvedRoot+string(filepath.Separator)) {
+			paths = append(paths, path)
+		}
+	}
+	return paths
 }

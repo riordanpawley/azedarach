@@ -7,11 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
@@ -252,68 +250,51 @@ func (c *Client) ListProjectionDeltas(ctx context.Context, projectID string, aft
 func (c *Client) WatchProjectionDeltas(ctx context.Context, projectID string, after uint64, limit int) ([]domain.ProjectionDelta, uint64, error) {
 	deltas, head, err := c.ListProjectionDeltas(ctx, projectID, after, limit)
 	if err != nil || len(deltas) > 0 {
-		return deltas, head, projectionWatchError(err)
+		return deltas, head, projectionWatchError(ctx, err)
 	}
-	watcher, err := fsnotify.NewWatcher()
+	subscription, unsubscribe, err := c.subscribeProjectionDeltaNotifier()
 	if err != nil {
 		return nil, head, fmt.Errorf("create projection cursor watcher: %w: %w", err, domain.ErrProjectionRetryable)
 	}
 	c.projectionWatchStarted.Add(1)
 	c.projectionWatchActive.Add(1)
 	defer func() {
-		closeProjectionDeltaWatcher(watcher)
+		unsubscribe()
 		c.projectionWatchActive.Add(-1)
 		c.projectionWatchCompleted.Add(1)
 	}()
-	if err := watcher.Add(filepath.Dir(c.dbPath)); err != nil {
-		return nil, head, fmt.Errorf("watch projection cursor directory: %w: %w", err, domain.ErrProjectionRetryable)
-	}
 	// Re-read after registration to close the commit-before-watch race. From
 	// here onward SQLite WAL/main-file notifications wake the reader without a
 	// periodic query loop, including commits from another daemon process.
 	deltas, head, err = c.ListProjectionDeltas(ctx, projectID, after, limit)
 	if err != nil || len(deltas) > 0 {
-		return deltas, head, projectionWatchError(err)
+		return deltas, head, projectionWatchError(ctx, err)
 	}
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, head, &domain.ProjectionCanceledError{Cause: ctx.Err()}
-		case watchErr, ok := <-watcher.Errors:
+		case watchErr, ok := <-subscription.errors:
 			if !ok {
 				return nil, head, fmt.Errorf("projection cursor watcher closed: %w", domain.ErrProjectionRetryable)
 			}
 			return nil, head, fmt.Errorf("projection cursor watcher failed: %w: %w", watchErr, domain.ErrProjectionRetryable)
-		case event, ok := <-watcher.Events:
+		case _, ok := <-subscription.events:
 			if !ok {
 				return nil, head, fmt.Errorf("projection cursor watcher closed: %w", domain.ErrProjectionRetryable)
 			}
-			if !projectionDBEvent(c.dbPath, event.Name) {
-				continue
-			}
 			deltas, head, err = c.ListProjectionDeltas(ctx, projectID, after, limit)
 			if err != nil || len(deltas) > 0 {
-				return deltas, head, projectionWatchError(err)
+				return deltas, head, projectionWatchError(ctx, err)
 			}
 		}
 	}
 }
 
-// closeProjectionDeltaWatcher waits for the backend read loop to finish so a
-// completed watch owns no asynchronous operating-system resources when it
-// returns to its caller.
-func closeProjectionDeltaWatcher(watcher *fsnotify.Watcher) {
-	_ = watcher.Close()
-	for range watcher.Errors {
+func projectionWatchError(ctx context.Context, err error) error {
+	if ctx != nil && ctx.Err() != nil {
+		return &domain.ProjectionCanceledError{Cause: ctx.Err()}
 	}
-}
-
-func projectionDBEvent(dbPath, eventPath string) bool {
-	dbPath, eventPath = filepath.Clean(dbPath), filepath.Clean(eventPath)
-	return eventPath == dbPath || eventPath == dbPath+"-wal" || eventPath == dbPath+"-shm"
-}
-
-func projectionWatchError(err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return &domain.ProjectionCanceledError{Cause: err}
 	}

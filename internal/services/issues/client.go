@@ -869,6 +869,10 @@ type Client struct {
 	projectionWatchStarted             atomic.Uint64
 	projectionWatchCompleted           atomic.Uint64
 	corruption                         atomic.Pointer[sqliteCorruptionState]
+	projectionNotifierMu               sync.Mutex
+	projectionNotifier                 projectionDeltaNotifier
+	projectionNotifierSubscriptions    map[*projectionDeltaSubscription]struct{}
+	projectionNotifierWG               sync.WaitGroup
 	decisionOutboxMigrationFailureHook func(stage string) error
 	decisionIdempotencyFailureHook     func(stage string) error
 	eventSearchMigrationFailureHook    func(stage string) error
@@ -1422,15 +1426,22 @@ func ensureSQLiteColumn(db *sql.DB, tableName, columnName, columnDDL string) err
 
 func (c *Client) CloseDB() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.db == nil {
-		return nil
+	var dbErr error
+	if c.db != nil {
+		dbErr = c.db.Close()
+		c.db = nil
 	}
-	err := c.db.Close()
-	c.db = nil
-	if err != nil {
-		return c.wrapError("close-db", "", err)
+	c.mu.Unlock()
+
+	// The shared watcher may own non-SQLite descriptors for the database,
+	// WAL, and SHM files on kqueue platforms. Close it only after every SQLite
+	// connection has released its locks and mappings.
+	notifierErr := c.closeProjectionDeltaNotifier()
+	if dbErr != nil {
+		return c.wrapError("close-db", "", dbErr)
+	}
+	if notifierErr != nil {
+		return c.wrapError("close-projection-notifier", "", notifierErr)
 	}
 	return nil
 }

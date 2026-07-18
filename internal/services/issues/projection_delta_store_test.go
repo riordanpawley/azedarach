@@ -318,6 +318,39 @@ func TestProjectionDeltaWatchWakesForCrossProcessCommit(t *testing.T) {
 	require.Equal(t, uint64(1), got.deltas[0].Cursor)
 }
 
+func TestProjectionDeltaNotifierFansOutAndReopensWithStore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.db")
+	client := NewClientAtPath(path, nil)
+	require.NoError(t, client.OpenProjectionDeltaStore())
+	t.Cleanup(func() { _ = client.CloseDB() })
+
+	first, unsubscribeFirst, err := client.subscribeProjectionDeltaNotifier()
+	require.NoError(t, err)
+	second, unsubscribeSecond, err := client.subscribeProjectionDeltaNotifier()
+	require.NoError(t, err)
+	_, err = client.CommitProjectionDelta(context.Background(), ProjectionDeltaParams{
+		ProjectID: "p", Kind: domain.ProjectionKindIssue, Key: "first",
+		Operation: domain.ProjectionDeltaUpsert, IdempotencyKey: "first", Payload: json.RawMessage(`{}`),
+	}, nil)
+	require.NoError(t, err)
+	<-first.events
+	<-second.events
+	unsubscribeFirst()
+	unsubscribeSecond()
+
+	require.NoError(t, client.CloseDB())
+	require.NoError(t, client.OpenProjectionDeltaStore())
+	reopened, unsubscribeReopened, err := client.subscribeProjectionDeltaNotifier()
+	require.NoError(t, err)
+	defer unsubscribeReopened()
+	_, err = client.CommitProjectionDelta(context.Background(), ProjectionDeltaParams{
+		ProjectID: "p", Kind: domain.ProjectionKindIssue, Key: "reopened",
+		Operation: domain.ProjectionDeltaUpsert, IdempotencyKey: "reopened", Payload: json.RawMessage(`{}`),
+	}, nil)
+	require.NoError(t, err)
+	<-reopened.events
+}
+
 func TestProjectionDeltaSubprocessWriter(t *testing.T) {
 	if os.Getenv("AZEDARACH_PROJECTION_SUBPROCESS") != "1" {
 		t.Skip("subprocess helper")
