@@ -171,7 +171,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: gitHookRefreshIntentsMigrationID, Path: "migrations/0053_git_hook_refresh_intents.sql", Checksum: "7eecd212c9b9a5907c425870ee861571d7654929d77067a1fc50c2e857c3335c"},
 	{ID: rootedSessionRoleExclusivityMigrationID, Path: "migrations/0054_rooted_session_role_exclusivity.sql", Checksum: rootedSessionRoleExclusivityChecksum},
 	{ID: mailboxObservationReplayRepairMigrationID, Path: "migrations/0055_mailbox_observation_replay_repair.manifest.sql", Checksum: "c350a53fc470b54dfc90faa7674d22ad20d6c4b631a8f0d528962eb7f7df0966"},
-	{ID: legacyAttachmentBlobForwardMigrationID, Path: "migrations/0056_legacy_attachment_blob_forward.manifest.sql", Checksum: "edeecf3319e6d856c3254fd955d3688c41dcee023809cb92090c8960338282d0"},
+	{ID: legacyAttachmentBlobForwardMigrationID, Path: "migrations/0056_legacy_attachment_blob_forward.manifest.sql", Checksum: "c6450a27423e68ebf4b662d485466a726ebcf3208c2858f2cb0f65c6efc6a62a"},
 }
 
 func validateMigrationRegistry() error {

@@ -12,7 +12,7 @@ import (
 	"unicode/utf8"
 )
 
-const legacyAttachmentMigrationChecksum = "edeecf3319e6d856c3254fd955d3688c41dcee023809cb92090c8960338282d0"
+const legacyAttachmentMigrationChecksum = "c6450a27423e68ebf4b662d485466a726ebcf3208c2858f2cb0f65c6efc6a62a"
 
 func TestLegacyAttachmentBlobForwardMigrationFreshHistoricalAndIdempotentReopen(t *testing.T) {
 	ctx := context.Background()
