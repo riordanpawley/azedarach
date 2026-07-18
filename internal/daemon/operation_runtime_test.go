@@ -3,6 +3,10 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -19,6 +23,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
 type runtimeGitService struct{}
@@ -477,12 +482,14 @@ func TestOperationRuntimeSessionStartPersistsRunningProgress(t *testing.T) {
 	defer close(release)
 	runtime.sessionStart = func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 		if err := daemonops.ReportProgress(ctx, daemonops.Progress{
-			Phase:   "worktree_preflight",
-			Message: "creating or reusing worktree",
-			Current: 25,
-			Total:   100,
-			Unit:    "percent",
-			Percent: 25,
+			Phase:             "worktree_preflight",
+			Message:           "creating or reusing worktree",
+			Current:           25,
+			Total:             100,
+			Unit:              "percent",
+			Percent:           25,
+			AgentIncarnation:  "planned-incarnation",
+			PromptHandoffPath: "/runtime/launch.prompt",
 		}); err != nil {
 			t.Fatalf("ReportProgress error: %v", err)
 		}
@@ -513,6 +520,9 @@ func TestOperationRuntimeSessionStartPersistsRunningProgress(t *testing.T) {
 	if record.State != daemonops.StateRunning {
 		t.Fatalf("record state = %s, want running", record.State)
 	}
+	if record.Progress == nil || record.Progress.PromptHandoffPath != "/runtime/launch.prompt" {
+		t.Fatalf("durable internal progress = %+v, want prompt handoff path", record.Progress)
+	}
 
 	getResp := runtime.Handle(context.Background(), testRequest(protocol.CommandOperationGet, protocol.OperationGetRequestBody{OperationID: submitBody.Operation.OperationID}))
 	if !getResp.OK {
@@ -522,7 +532,7 @@ func TestOperationRuntimeSessionStartPersistsRunningProgress(t *testing.T) {
 	if err := json.Unmarshal(getResp.Body, &getBody); err != nil {
 		t.Fatalf("unmarshal get body: %v", err)
 	}
-	if getBody.Operation.Progress == nil || getBody.Operation.Progress.Phase != "worktree_preflight" || getBody.Operation.Progress.Percent != 25 {
+	if getBody.Operation.Progress == nil || getBody.Operation.Progress.Phase != "worktree_preflight" || getBody.Operation.Progress.Percent != 25 || getBody.Operation.Progress.AgentIncarnation != "planned-incarnation" {
 		t.Fatalf("operation progress = %+v, want worktree_preflight 25%%", getBody.Operation.Progress)
 	}
 
@@ -910,6 +920,7 @@ func TestOperationRuntimeStartupRecoversInterruptedSessionStartWhenCompleted(t *
 func TestDaemonRecoverInterruptedSessionStartUsesActiveProjection(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-1"
+	managedSessionID := naming.CanonicalSessionID(projectID, "AZ-2")
 	store := daemonstate.NewRuntimeStateStore(t.TempDir(), nil)
 	t.Cleanup(func() { _ = store.Close() })
 	if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
@@ -921,6 +932,12 @@ func TestDaemonRecoverInterruptedSessionStartUsesActiveProjection(t *testing.T) 
 	}); err != nil {
 		t.Fatalf("upsert active session projection: %v", err)
 	}
+	if err := store.UpsertManagedAgentIdentity(ctx, daemonstate.ManagedAgentIdentity{
+		ProjectID: projectID, SessionID: managedSessionID, LogicalPaneID: "agent", TmuxPaneID: "7",
+		PanePID: 123, AgentIncarnation: "planned", ObservedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed exact managed agent identity: %v", err)
+	}
 	if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
 		ID:            "AZ-3",
 		IssueID:       "AZ-3",
@@ -931,8 +948,14 @@ func TestDaemonRecoverInterruptedSessionStartUsesActiveProjection(t *testing.T) 
 		t.Fatalf("upsert starting session projection: %v", err)
 	}
 
+	tmuxRunner := newSessionStartTmuxRunner()
+	tmuxRunner.sessions[managedSessionID] = true
+	tmuxRunner.panes[managedSessionID] = []string{"%7"}
+	tmuxRunner.panePIDs[managedSessionID] = 123
+	tmuxRunner.currentCommand = "codex"
 	daemon := &Daemon{
 		cfg:                    Config{RepoDir: t.TempDir()},
+		tmux:                   tmux.NewClient(tmuxRunner, slog.Default()),
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
 		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{},
 	}
@@ -942,18 +965,20 @@ func TestDaemonRecoverInterruptedSessionStartUsesActiveProjection(t *testing.T) 
 		ProjectID: projectID,
 		IssueID:   "AZ-2",
 		Kind:      "session.start",
+		Progress:  &daemonops.Progress{Phase: "tmux_launch", AgentIncarnation: "planned"},
 	})
 	if !ok || recovery.State != daemonops.StateDone {
 		t.Fatalf("active session recovery = %+v, ok=%t; want done", recovery, ok)
 	}
 
-	if _, ok := daemon.recoverInterruptedOperation(ctx, daemonops.Record{
+	startingRecovery, ok := daemon.recoverInterruptedOperation(ctx, daemonops.Record{
 		ID:        "op-starting",
 		ProjectID: projectID,
 		IssueID:   "AZ-3",
 		Kind:      "session.start",
-	}); ok {
-		t.Fatal("starting-only session projection should not prove completed session.start")
+	})
+	if !ok || startingRecovery.State != daemonops.StateFailed {
+		t.Fatalf("starting-only recovery = %+v, ok=%t; want terminal failure", startingRecovery, ok)
 	}
 }
 
@@ -994,12 +1019,12 @@ func TestRootedOrchestratorIntentSupersedesWorkerLifecycleRecovery(t *testing.T)
 		t.Fatalf("non-worker intents not preserved: %+v", intents)
 	}
 	recovery, ok := d.recoverInterruptedOperation(ctx, daemonops.Record{ID: "op", ProjectID: projectID, IssueID: issueID, Kind: daemonhandlers.CommandSessionStart})
-	if !ok || recovery.State != daemonops.StateDone {
-		t.Fatalf("rooted recovery=%+v ok=%t", recovery, ok)
+	if !ok || recovery.State != daemonops.StateFailed {
+		t.Fatalf("unplanned rooted recovery=%+v ok=%t, want terminal failure", recovery, ok)
 	}
 }
 
-func TestInterruptedSessionStartConvergesLeaseOwnedWorkerCrashState(t *testing.T) {
+func TestInterruptedSessionStartFailsClosedBeforeManagedIncarnationPlanning(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID, issueID := "proj-1", "AZ-2"
@@ -1028,15 +1053,187 @@ func TestInterruptedSessionStartConvergesLeaseOwnedWorkerCrashState(t *testing.T
 	}
 	d := &Daemon{cfg: Config{RepoDir: repoDir}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store}, runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{}}
 	recovery, ok := d.recoverInterruptedOperation(ctx, daemonops.Record{ID: "op", ProjectID: projectID, IssueID: issueID, Kind: daemonhandlers.CommandSessionStart})
-	if !ok || recovery.State != daemonops.StateDone {
-		t.Fatalf("rooted crash-state recovery=%+v ok=%t", recovery, ok)
+	if !ok || recovery.State != daemonops.StateFailed || !strings.Contains(recovery.ErrorMessage, "before durable managed-agent incarnation planning") {
+		t.Fatalf("rooted crash-state recovery=%+v ok=%t, want typed pre-planning failure", recovery, ok)
 	}
-	if _, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, issueID, sessionID); err != nil || found {
-		t.Fatalf("worker intent after recovery found=%t err=%v", found, err)
+	if _, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, issueID, sessionID); err != nil || !found {
+		t.Fatalf("worker intent after fail-closed recovery found=%t err=%v", found, err)
 	}
 	rooted, found, err := store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, issueID)
-	if err != nil || !found || rooted.ID != sessionID || rooted.State != daemonstate.SessionStateRunning {
-		t.Fatalf("rooted intent after recovery=%+v found=%t err=%v", rooted, found, err)
+	if err != nil || found {
+		t.Fatalf("rooted intent after fail-closed recovery=%+v found=%t err=%v", rooted, found, err)
+	}
+}
+
+func TestRecoverInterruptedLegacySessionStartCompensatesLiveShellRuntime(t *testing.T) {
+	ctx := context.Background()
+	projectID, issueID := "proj-legacy-start", "AZ-2"
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	runtimeStore := daemonstate.NewRuntimeStateStore(t.TempDir(), nil)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
+		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runner := newSessionStartTmuxRunner()
+	runner.sessions[sessionID] = true
+	runner.currentCommand = "zsh"
+	d := &Daemon{
+		cfg:  Config{RepoDir: t.TempDir(), SessionShell: "zsh", Logger: slog.Default()},
+		tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore(),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{},
+	}
+	recovery, ok := d.recoverInterruptedOperation(ctx, daemonops.Record{
+		ID: "legacy-op", ProjectID: projectID, IssueID: issueID, Kind: daemonhandlers.CommandSessionStart,
+	})
+	if !ok || recovery.State != daemonops.StateFailed || !strings.Contains(recovery.ErrorMessage, "before durable managed-agent incarnation planning") {
+		t.Fatalf("recovery = %+v, ok=%t", recovery, ok)
+	}
+	if runner.sessions[sessionID] {
+		t.Fatalf("legacy shell runtime %s survived compensation", sessionID)
+	}
+	projection, found, err := runtimeStore.GetSessionState(ctx, projectID, sessionID)
+	if err != nil || !found || projection.State != daemonstate.SessionStateStopped || projection.ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("compensated projection = %+v, found=%t err=%v", projection, found, err)
+	}
+}
+
+func TestRecoverInterruptedPlannedSessionStartRemovesUnconsumedPrompt(t *testing.T) {
+	ctx := context.Background()
+	projectID, issueID := "proj-planned-start", "AZ-3"
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	runtimeStore := daemonstate.NewRuntimeStateStore(t.TempDir(), nil)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	runner := newSessionStartTmuxRunner()
+	runner.sessions[sessionID] = true
+	runner.sessionsWithoutPanes[sessionID] = true
+	d := &Daemon{
+		cfg:  Config{RepoDir: t.TempDir(), Logger: slog.Default()},
+		tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore(),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{},
+	}
+	if err := ensureSessionLaunchArtifactDir(d.sessionLaunchArtifactDir()); err != nil {
+		t.Fatal(err)
+	}
+	promptPath := filepath.Join(d.sessionLaunchArtifactDir(), sessionLaunchArtifactPrefix+"planned.prompt")
+	if err := os.WriteFile(promptPath, []byte("owner-only worker instructions"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recovery, ok := d.recoverInterruptedOperation(ctx, daemonops.Record{
+		ID: "planned-op", ProjectID: projectID, IssueID: issueID, Kind: daemonhandlers.CommandSessionStart,
+		Progress: &daemonops.Progress{Phase: "tmux_launch", AgentIncarnation: "planned", PromptHandoffPath: promptPath},
+	})
+	if !ok || recovery.State != daemonops.StateFailed {
+		t.Fatalf("recovery = %+v, ok=%t", recovery, ok)
+	}
+	if _, err := os.Stat(promptPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prompt artifact survived failed recovery: %v", err)
+	}
+	if runner.sessions[sessionID] {
+		t.Fatalf("failed planned runtime %s survived compensation", sessionID)
+	}
+}
+
+func TestRecoverInterruptedSessionStartRejectsUnsafePromptPathWithoutRemovingIt(t *testing.T) {
+	ctx := context.Background()
+	projectID, issueID := "proj-unsafe-start", "AZ-3"
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	runtimeStore := daemonstate.NewRuntimeStateStore(t.TempDir(), nil)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	runner := newSessionStartTmuxRunner()
+	runner.sessions[sessionID] = true
+	runner.sessionsWithoutPanes[sessionID] = true
+	outsidePath := filepath.Join(t.TempDir(), "must-survive.prompt")
+	if err := os.WriteFile(outsidePath, []byte("unrelated owner data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{
+		cfg:  Config{RepoDir: t.TempDir(), Logger: slog.Default()},
+		tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore(),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{},
+	}
+	if err := ensureSessionLaunchArtifactDir(d.sessionLaunchArtifactDir()); err != nil {
+		t.Fatal(err)
+	}
+	recovery, ok := d.recoverInterruptedOperation(ctx, daemonops.Record{
+		ID: "unsafe-op", ProjectID: projectID, IssueID: issueID, Kind: daemonhandlers.CommandSessionStart,
+		Progress: &daemonops.Progress{Phase: "tmux_launch", AgentIncarnation: "planned", PromptHandoffPath: outsidePath},
+	})
+	if !ok || recovery.State != daemonops.StateFailed || !strings.Contains(recovery.ErrorMessage, "outside session launch artifact directory") {
+		t.Fatalf("recovery = %+v, ok=%t", recovery, ok)
+	}
+	if got, err := os.ReadFile(outsidePath); err != nil || string(got) != "unrelated owner data" {
+		t.Fatalf("unsafe target changed: contents=%q err=%v", got, err)
+	}
+	if runner.sessions[sessionID] {
+		t.Fatalf("runtime %s survived unsafe recovery compensation", sessionID)
+	}
+}
+
+func TestRecoverInterruptedAcknowledgedSessionStartReconstructsMissingProjection(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		selector sessionIntentSelector
+	}{
+		{name: "worker", selector: normalizeSessionIntentSelector(sessionIntentSelector{}, "AZ-4")},
+		{name: "rooted orchestrator", selector: sessionIntentSelector{Role: daemonstate.SessionRoleOrchestrator, ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: "AZ-4"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			projectID, issueID := "proj-ack-recovery", "AZ-4"
+			sessionID := naming.CanonicalSessionID(projectID, issueID)
+			runtimeStore := daemonstate.NewRuntimeStateStore(t.TempDir(), nil)
+			t.Cleanup(func() { _ = runtimeStore.Close() })
+			if tc.selector.Role == daemonstate.SessionRoleOrchestrator {
+				if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
+					ID: sessionID, IssueID: issueID, Role: tc.selector.Role, ScopeKind: tc.selector.ScopeKind,
+					ScopeID: tc.selector.ScopeID, State: daemonstate.SessionStateStarting, ObservedState: daemonstate.SessionStateStarting,
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := runtimeStore.UpsertManagedAgentIdentity(ctx, daemonstate.ManagedAgentIdentity{
+				ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: "7",
+				PanePID: 123, AgentIncarnation: "planned", ObservedAt: time.Now().UTC(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			runner := newSessionStartTmuxRunner()
+			runner.sessions[sessionID] = true
+			runner.panes[sessionID] = []string{"%7"}
+			runner.panePIDs[sessionID] = 123
+			runner.currentCommand = "codex"
+			d := &Daemon{
+				cfg:  Config{RepoDir: t.TempDir(), Logger: slog.Default()},
+				tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore(),
+				runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+				runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{}, revision: map[string]uint64{},
+			}
+			recovery, ok := d.recoverInterruptedOperation(ctx, daemonops.Record{
+				ID: "ack-op", ProjectID: projectID, IssueID: issueID, Kind: daemonhandlers.CommandSessionStart,
+				Progress: &daemonops.Progress{Phase: "agent_launch", AgentIncarnation: "planned"},
+			})
+			if !ok || recovery.State != daemonops.StateDone {
+				t.Fatalf("recovery = %+v, ok=%t", recovery, ok)
+			}
+			projection, found, err := runtimeStore.GetSessionIntent(ctx, projectID, tc.selector.Role, tc.selector.ScopeKind, tc.selector.ScopeID)
+			if err != nil || !found || projection.State != daemonstate.SessionStateStarting || projection.ObservedState != daemonstate.SessionStateRunning {
+				t.Fatalf("reconstructed projection = %+v, found=%t err=%v", projection, found, err)
+			}
+			if tc.selector.Role == daemonstate.SessionRoleOrchestrator {
+				scope, _ := domain.RootedOrchestrationScope(issueID)
+				identity, _ := domain.NewOrchestratorIdentity(projectID, scope)
+				lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(runtimeStore).Get(ctx, identity)
+				if err != nil || !found || lease.SessionID != sessionID {
+					t.Fatalf("reconstructed rooted lease = %+v, found=%t err=%v", lease, found, err)
+				}
+			}
+		})
 	}
 }
 

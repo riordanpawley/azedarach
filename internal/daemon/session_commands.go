@@ -147,6 +147,13 @@ func reportSessionStartProgress(ctx context.Context, phase, message string, perc
 	})
 }
 
+func reportSessionStartIncarnationProgress(ctx context.Context, phase, message string, percent int, incarnation, promptHandoffPath string) error {
+	return daemonops.ReportProgress(ctx, daemonops.Progress{
+		Phase: phase, Message: message, Current: int64(percent), Total: 100,
+		Unit: "percent", Percent: percent, AgentIncarnation: strings.TrimSpace(incarnation), PromptHandoffPath: strings.TrimSpace(promptHandoffPath),
+	})
+}
+
 type SessionLongRunningExecutor interface {
 	Execute(ctx context.Context, req protocol.RequestEnvelope, command string, exec func(context.Context) (protocol.ResponseEnvelope, error)) (protocol.ResponseEnvelope, error)
 }
@@ -1146,7 +1153,13 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 	launchArtifact := sessionLaunchArtifact{}
 	launchScriptHandedOff := false
 	initialPromptBytes := 0
+	plannedAgentIncarnation := ""
 	if cmd.StartWork {
+		plannedAgentIncarnation, err = newRestartIncarnation()
+		if err != nil {
+			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("plan managed agent incarnation: %v%s", err, cleanupNote)), nil
+		}
 		initialPrompt := strings.TrimSpace(cmd.Prompt)
 		if initialPrompt == "" {
 			parentIssueID := ""
@@ -1157,7 +1170,7 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 		}
 		initialPromptBytes = len(initialPrompt)
 		var launchArtifactErr error
-		launchArtifact, launchArtifactErr = d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: cmd.ProjectID, IssueID: cmd.IssueID, SessionID: cmd.SessionID, Yolo: cmd.Yolo, ImagePaths: cmd.ImagePaths, Prompt: initialPrompt, InitReadyPath: sessionInitMarker.RelativePath, StartupEnvCommands: d.sessionLaunchStartupExportCommands(d.runtimeConfigForProject(cmd.ProjectID), resourceCtx)})
+		launchArtifact, launchArtifactErr = d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: cmd.ProjectID, IssueID: cmd.IssueID, SessionID: cmd.SessionID, Yolo: cmd.Yolo, ImagePaths: cmd.ImagePaths, Prompt: initialPrompt, InitReadyPath: sessionInitMarker.RelativePath, StartupEnvCommands: d.sessionLaunchStartupExportCommands(d.runtimeConfigForProject(cmd.ProjectID), resourceCtx), LogicalPaneID: "agent", AgentIncarnation: plannedAgentIncarnation})
 		if launchArtifactErr != nil {
 			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare session launch artifact: %v%s", launchArtifactErr, cleanupNote)), nil
@@ -1170,7 +1183,14 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 			launchArtifact.remove()
 		}()
 	}
-	reportSessionStartProgress(ctx, "tmux_launch", "creating tmux session", 70)
+	if cmd.StartWork {
+		if err := reportSessionStartIncarnationProgress(ctx, "tmux_launch", "creating tmux session for planned managed agent incarnation", 70, plannedAgentIncarnation, launchArtifact.PromptHandoff.PromptPath); err != nil {
+			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist managed agent launch plan: %v%s", err, cleanupNote)), nil
+		}
+	} else {
+		reportSessionStartProgress(ctx, "tmux_launch", "creating tmux session", 70)
+	}
 	if cmd.StartWork {
 		if err := d.tmux.NewSessionWithCommandAndEnvironment(ctx, cmd.SessionID, worktree.Path, launchCommand, nil); err != nil {
 			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
@@ -1185,15 +1205,22 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("set issue resource env: %v%s", err, cleanupNote)), nil
 		}
-		if err := waitForSessionPromptHandoffConsumed(ctx, launchArtifact.PromptHandoff); err != nil {
+		if err := d.waitForInitialManagedAgentAcknowledgement(ctx, cmd.ProjectID, cmd.SessionID, plannedAgentIncarnation, launchArtifact.PromptHandoff); err != nil {
+			launchArtifact.remove()
 			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
-			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("confirm session bootstrap prompt delivery: %v%s", err, cleanupNote)), nil
+			return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("confirm managed agent bootstrap: %v%s", err, cleanupNote)), nil
 		}
 		d.startSessionAsyncInitCommands(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktree.Path)
 		if len(d.runtimeConfigForProject(cmd.ProjectID).SessionSyncInitCommands) > 0 {
-			reportSessionStartProgress(ctx, "init_commands", "launch sent; configured init commands likely running before agent hooks", 90)
+			if err := reportSessionStartIncarnationProgress(ctx, "init_commands", "managed agent acknowledged; configured init commands still converging", 90, plannedAgentIncarnation, launchArtifact.PromptHandoff.PromptPath); err != nil {
+				cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist acknowledged managed agent progress: %v%s", err, cleanupNote)), nil
+			}
 		} else {
-			reportSessionStartProgress(ctx, "agent_launch", "launch sent; waiting for agent activity", 90)
+			if err := reportSessionStartIncarnationProgress(ctx, "agent_launch", "managed agent incarnation acknowledged", 90, plannedAgentIncarnation, launchArtifact.PromptHandoff.PromptPath); err != nil {
+				cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist acknowledged managed agent progress: %v%s", err, cleanupNote)), nil
+			}
 		}
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Info("daemon session start launch command installed",
@@ -4942,7 +4969,18 @@ func (d *Daemon) buildSessionLaunchArtifactPayload(spec sessionLaunchSpec, promp
 		}
 		return shell, identityEnv + command + "; " + sessionAgentProcessExitCommand(tool) + "; exec " + singleQuoteForShell(shell)
 	}
-	return d.buildSessionLaunchComponentsWithInitReadyPathAndEnvPolicy(spec.ProjectID, spec.IssueID, spec.SessionID, spec.Yolo, spec.ImagePaths, promptHandoff.bootstrapPrompt(), spec.InitReadyPath, spec.StartupEnvCommands, false)
+	startupEnvCommands := append([]string(nil), spec.StartupEnvCommands...)
+	if strings.TrimSpace(spec.AgentIncarnation) != "" {
+		logicalPaneID := strings.TrimSpace(spec.LogicalPaneID)
+		if logicalPaneID == "" {
+			logicalPaneID = "agent"
+		}
+		startupEnvCommands = append(startupEnvCommands,
+			"export AZEDARACH_LOGICAL_PANE_ID="+singleQuoteForShell(logicalPaneID)+
+				" AZEDARACH_AGENT_INCARNATION="+singleQuoteForShell(spec.AgentIncarnation)+
+				" AZEDARACH_PANE_PID=$$")
+	}
+	return d.buildSessionLaunchComponentsWithInitReadyPathAndEnvPolicy(spec.ProjectID, spec.IssueID, spec.SessionID, spec.Yolo, spec.ImagePaths, promptHandoff.bootstrapPrompt(), spec.InitReadyPath, startupEnvCommands, false)
 }
 
 func (d *Daemon) buildSessionLaunchComponentsWithInitReadyPathAndEnvPolicy(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt, initReadyPath string, startupEnvCommands []string, allowLargePrompt bool) (string, string) {

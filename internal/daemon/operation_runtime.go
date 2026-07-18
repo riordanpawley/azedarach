@@ -1761,12 +1761,13 @@ func protocolOperationProgress(record daemonops.Record) protocol.OperationProgre
 		return fallback
 	}
 	progress := protocol.OperationProgress{
-		Phase:   strings.TrimSpace(record.Progress.Phase),
-		Message: strings.TrimSpace(record.Progress.Message),
-		Current: record.Progress.Current,
-		Total:   record.Progress.Total,
-		Unit:    strings.TrimSpace(record.Progress.Unit),
-		Percent: record.Progress.Percent,
+		Phase:            strings.TrimSpace(record.Progress.Phase),
+		Message:          strings.TrimSpace(record.Progress.Message),
+		Current:          record.Progress.Current,
+		Total:            record.Progress.Total,
+		Unit:             strings.TrimSpace(record.Progress.Unit),
+		Percent:          record.Progress.Percent,
+		AgentIncarnation: strings.TrimSpace(record.Progress.AgentIncarnation),
 	}
 	if progress.Phase == "" {
 		progress.Phase = fallback.Phase
@@ -1967,13 +1968,13 @@ func marshalOperationProgressJSON(progress *daemonops.Progress) json.RawMessage 
 	if progress == nil {
 		return nil
 	}
-	body, err := json.Marshal(protocol.OperationProgress{
-		Phase:   strings.TrimSpace(progress.Phase),
-		Message: strings.TrimSpace(progress.Message),
-		Current: progress.Current,
-		Total:   progress.Total,
-		Unit:    strings.TrimSpace(progress.Unit),
-		Percent: progress.Percent,
+	body, err := json.Marshal(storedOperationProgress{
+		OperationProgress: protocol.OperationProgress{
+			Phase: strings.TrimSpace(progress.Phase), Message: strings.TrimSpace(progress.Message),
+			Current: progress.Current, Total: progress.Total, Unit: strings.TrimSpace(progress.Unit),
+			Percent: progress.Percent, AgentIncarnation: strings.TrimSpace(progress.AgentIncarnation),
+		},
+		PromptHandoffPath: strings.TrimSpace(progress.PromptHandoffPath),
 	})
 	if err != nil {
 		return nil
@@ -1985,22 +1986,29 @@ func unmarshalOperationProgress(payload []byte) *daemonops.Progress {
 	if len(payload) == 0 {
 		return nil
 	}
-	var body protocol.OperationProgress
+	var body storedOperationProgress
 	if err := json.Unmarshal(payload, &body); err != nil {
 		return nil
 	}
 	progress := daemonops.Progress{
-		Phase:   strings.TrimSpace(body.Phase),
-		Message: strings.TrimSpace(body.Message),
-		Current: body.Current,
-		Total:   body.Total,
-		Unit:    strings.TrimSpace(body.Unit),
-		Percent: body.Percent,
+		Phase:             strings.TrimSpace(body.Phase),
+		Message:           strings.TrimSpace(body.Message),
+		Current:           body.Current,
+		Total:             body.Total,
+		Unit:              strings.TrimSpace(body.Unit),
+		Percent:           body.Percent,
+		AgentIncarnation:  strings.TrimSpace(body.AgentIncarnation),
+		PromptHandoffPath: strings.TrimSpace(body.PromptHandoffPath),
 	}
-	if progress.Phase == "" && progress.Message == "" && progress.Current == 0 && progress.Total == 0 && progress.Unit == "" && progress.Percent == 0 {
+	if progress.Phase == "" && progress.Message == "" && progress.Current == 0 && progress.Total == 0 && progress.Unit == "" && progress.Percent == 0 && progress.AgentIncarnation == "" && progress.PromptHandoffPath == "" {
 		return nil
 	}
 	return &progress
+}
+
+type storedOperationProgress struct {
+	protocol.OperationProgress
+	PromptHandoffPath string `json:"prompt_handoff_path,omitempty"`
 }
 
 func sanitizeOperationResourceKeys(keys []string, kind string) []string {

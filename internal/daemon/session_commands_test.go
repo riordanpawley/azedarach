@@ -1604,6 +1604,42 @@ func seedManagedRestartIdentity(t *testing.T, d *Daemon, runner *sessionStartTmu
 	}
 }
 
+func acknowledgeManagedAgentOnInitialLaunch(t *testing.T, d *Daemon, runner *sessionStartTmuxRunner, projectID string) {
+	t.Helper()
+	previous := runner.onNewSession
+	runner.onNewSession = func(sessionID string) {
+		if previous != nil {
+			previous(sessionID)
+		}
+		script := runner.launchScriptContents[sessionID]
+		incarnation := regexp.MustCompile(`AZEDARACH_AGENT_INCARNATION='([^']+)'`).FindStringSubmatch(script)
+		if len(incarnation) != 2 {
+			t.Errorf("initial launch artifact for %s has no planned incarnation", sessionID)
+			return
+		}
+		store := d.sessionRuntimeStateStore(projectID)
+		observedAt := time.Now().UTC()
+		if current, found, err := store.GetManagedAgentIdentity(context.Background(), d.canonicalProjectID(projectID), sessionID, "agent"); err != nil {
+			t.Errorf("load prior managed agent identity: %v", err)
+			return
+		} else if found && !observedAt.After(current.ObservedAt) {
+			// Restart fixtures deliberately seed future observations. Advance by a
+			// full second so SQLite's persisted RFC3339 timestamps retain ordering.
+			observedAt = current.ObservedAt.Add(time.Second)
+		}
+		panePID := runner.panePIDs[sessionID]
+		if panePID == 0 {
+			panePID = 123
+		}
+		if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{
+			ProjectID: d.canonicalProjectID(projectID), SessionID: sessionID, LogicalPaneID: "agent",
+			TmuxPaneID: "1", PanePID: panePID, AgentIncarnation: incarnation[1], ObservedAt: observedAt,
+		}); err != nil {
+			t.Errorf("acknowledge initial managed agent launch: %v", err)
+		}
+	}
+}
+
 func requireNewSessionLaunchCommand(t *testing.T, runner *sessionStartTmuxRunner, sessionID string) string {
 	t.Helper()
 	for _, command := range runner.commands {
@@ -1850,6 +1886,9 @@ func (r *sessionStartTmuxRunner) Run(ctx context.Context, args ...string) (strin
 				if slices.Contains(args, "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}\t#{session_attached}") {
 					currentCommand := runnerCommand(r.currentCommand)
 					lines = append(lines, fmt.Sprintf("%s\t%s\t%d\t%s\t0", name, pane, panePID, currentCommand))
+				} else if slices.Contains(args, "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}") {
+					currentCommand := runnerCommand(r.currentCommand)
+					lines = append(lines, fmt.Sprintf("%s\t%s\t%d\t%s", name, pane, panePID, currentCommand))
 				} else {
 					lines = append(lines, fmt.Sprintf("%s\t%s\t%d", name, pane, panePID))
 				}
@@ -2472,6 +2511,7 @@ func TestSessionStartIgnoresStaleProjectionWhenTmuxHasNoSession(t *testing.T) {
 		},
 	}
 
+	acknowledgeManagedAgentOnInitialLaunch(t, d, tmuxRunner, projectID)
 	req := protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-start-tmux-truth",
@@ -3099,6 +3139,7 @@ func TestSessionStartContinuesWhenFreshnessTimesOut(t *testing.T) {
 		}
 	})
 
+	acknowledgeManagedAgentOnInitialLaunch(t, d, tmuxRunner, projectID)
 	req := protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-start-timeout-continue",
@@ -3210,6 +3251,7 @@ func TestSessionStartWaitsForInitReadyMarkerBeforeCompleting(t *testing.T) {
 		},
 	}
 
+	acknowledgeManagedAgentOnInitialLaunch(t, d, tmuxRunner, projectID)
 	type startResult struct {
 		resp protocol.ResponseEnvelope
 		err  error
@@ -3442,6 +3484,7 @@ func TestSessionStartDefaultsAgentActivityToBusy(t *testing.T) {
 		},
 	}
 
+	acknowledgeManagedAgentOnInitialLaunch(t, d, tmuxRunner, projectID)
 	resp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-start-ai-worker",
@@ -3571,6 +3614,7 @@ func TestSessionStartInjectsIssueImageAttachments(t *testing.T) {
 		},
 	}
 
+	acknowledgeManagedAgentOnInitialLaunch(t, d, tmuxRunner, projectID)
 	resp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-start-image-worker",
@@ -3660,6 +3704,7 @@ func TestSessionStartLargeCodexPromptUsesFileBootstrap(t *testing.T) {
 	}
 
 	largePrompt := strings.Repeat("large prompt line\n", 32*1024)
+	acknowledgeManagedAgentOnInitialLaunch(t, d, tmuxRunner, projectID)
 	resp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-start-large-codex-prompt",
@@ -3743,6 +3788,7 @@ func TestSessionStartCodexPromptWithLargeEncodedLaunchUsesFileBootstrap(t *testi
 			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
 		},
 	}
+	acknowledgeManagedAgentOnInitialLaunch(t, d, tmuxRunner, projectID)
 
 	promptLine := "Codex orchestration bootstrap prompt.\n"
 	initialPrompt := strings.Repeat(promptLine, 180)
@@ -3854,6 +3900,7 @@ func TestSessionStartUsesClosestAncestorWorktreeBranchAsBase(t *testing.T) {
 		},
 	}
 
+	acknowledgeManagedAgentOnInitialLaunch(t, d, tmuxRunner, projectID)
 	req := protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-start-ancestor-base",
@@ -3937,6 +3984,7 @@ func TestSessionStartMaterializesMissingParentWorktreeBranchAsBase(t *testing.T)
 		},
 	}
 
+	acknowledgeManagedAgentOnInitialLaunch(t, d, tmuxRunner, projectID)
 	req := protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-start-create-parent-base",
@@ -4110,6 +4158,7 @@ func TestSessionStartDoesNotPersistTransitionWhenTmuxCreateFails(t *testing.T) {
 	}
 
 	tmuxRunner.newSessionErr = nil
+	acknowledgeManagedAgentOnInitialLaunch(t, d, tmuxRunner, projectID)
 	retryResp, retryErr := d.handleSessionStartDirect(ctx, req)
 	if retryErr != nil || !retryResp.OK {
 		t.Fatalf("retry after compensated launch failure: resp=%+v err=%v", retryResp, retryErr)
@@ -6973,6 +7022,7 @@ func TestReconcileRecoversRootedOrchestratorThroughOrchestratorAuthority(t *test
 			store := daemonstate.NewStore()
 			manager := git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/root"}, repoDir, slog.Default())
 			d := &Daemon{cfg: Config{RepoDir: repoDir, CLITool: "codex", Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()), session: daemonhandlers.NewSessionHandler(store), sessionStore: store, runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{repoDir: runtimeStore}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore}, worktreeManagersByRoot: map[string]*git.WorktreeManager{repoDir: manager}, worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager}}
+			acknowledgeManagedAgentOnInitialLaunch(t, d, runner, projectID)
 			targetIssue := issueID
 			if target == "full" {
 				targetIssue = ""

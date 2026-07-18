@@ -36,9 +36,10 @@ type SessionInfo struct {
 
 // PaneInfo captures the tmux session and pane identity for liveness checks.
 type PaneInfo struct {
-	SessionName string
-	PaneID      string
-	PanePID     int
+	SessionName    string
+	PaneID         string
+	PanePID        int
+	CurrentCommand string
 }
 
 // AttachedClientInfo captures the mutable input flag for one attached tmux
@@ -620,11 +621,11 @@ func (c *Client) ListSessions(ctx context.Context) ([]string, error) {
 }
 
 // ListPaneInfos returns all tmux panes with their owning session name.
-// Uses: tmux list-panes -a -F "#{session_name}\t#{pane_id}\t#{pane_pid}"
+// Uses: tmux list-panes -a -F "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}"
 func (c *Client) ListPaneInfos(ctx context.Context) ([]PaneInfo, error) {
 	c.logger.Debug("listing tmux panes")
 
-	out, err := c.runner.Run(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_id}\t#{pane_pid}")
+	out, err := c.runner.Run(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}")
 	if err != nil {
 		if isNoTmuxSessionsError(err) {
 			c.logger.Debug("no tmux panes found")
@@ -643,7 +644,7 @@ func (c *Client) ListPaneInfos(ctx context.Context) ([]PaneInfo, error) {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 3)
+		parts := strings.SplitN(line, "\t", 4)
 		if len(parts) < 2 {
 			continue
 		}
@@ -657,10 +658,19 @@ func (c *Client) ListPaneInfos(ctx context.Context) ([]PaneInfo, error) {
 			}
 			panePID = parsedPID
 		}
+		currentCommand := ""
+		if len(parts) == 4 {
+			parsedPID, err := strconv.Atoi(strings.TrimSpace(parts[2]))
+			if err != nil || parsedPID <= 0 {
+				continue
+			}
+			panePID = parsedPID
+			currentCommand = strings.TrimSpace(parts[3])
+		}
 		if sessionName == "" || paneID == "" {
 			continue
 		}
-		panes = append(panes, PaneInfo{SessionName: sessionName, PaneID: paneID, PanePID: panePID})
+		panes = append(panes, PaneInfo{SessionName: sessionName, PaneID: paneID, PanePID: panePID, CurrentCommand: currentCommand})
 	}
 
 	c.logger.Debug("tmux panes listed", "count", len(panes))

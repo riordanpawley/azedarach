@@ -238,6 +238,7 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 			ProjectID: projectID, IssueID: rootID, SessionID: rootedSessionID, StartWork: &startWork,
 		}),
 	}
+	acknowledgeManagedAgentOnInitialLaunch(t, d, tmuxRunner, projectID)
 	delegated, err := d.handleSessionStartDirect(ctx, genericStart)
 	if err != nil || delegated.Error != nil || !strings.Contains(string(delegated.Body), "Starting rooted orchestrator session for epic") {
 		t.Fatalf("generic epic start did not delegate: response=%+v body=%q err=%v", delegated.Error, delegated.Body, err)
@@ -553,6 +554,7 @@ func TestRootedRestartAfterCallerCancellationSerializesAndAcknowledgesReplacemen
 	}
 	body := marshalJSON(protocol.OrchestratorSessionRequest{Scope: scope})
 	startRequest := protocol.RequestEnvelope{Command: protocol.CommandOrchestratorSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body}
+	acknowledgeManagedAgentOnInitialLaunch(t, first, runner, projectID)
 	startResponse, err := first.handleOrchestratorSession(ctx, startRequest)
 	if err != nil || startResponse.Error != nil {
 		t.Fatalf("initial rooted start: response=%+v err=%v", startResponse.Error, err)
