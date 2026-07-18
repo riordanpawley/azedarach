@@ -53,8 +53,11 @@
 -- valid legacy basenames cannot exceed NAME_MAX. File conflicts fail closed.
 --
 -- Schema inspection, row reads, replacement, validation, and ledger insertion use
--- one immediate transaction. File installation is no-clobber and retry-safe.
--- Files created by ordinary pre-commit failure are removed; complete crash leftovers
--- are validated and reused. The ledger records this artifact's pinned checksum only
+-- one immediate transaction. File installation is no-clobber and retry-safe. Before
+-- blob installation, the .azedarach parent directory is synchronized after creating
+-- or observing the canonical attachments directory. After file links or cleanup,
+-- the attachments directory is synchronized before schema and ledger commit. Files
+-- created by ordinary pre-commit failure are removed; complete crash leftovers are
+-- validated and reused. The ledger records this artifact's pinned checksum only
 -- after the target validates. Startup revalidates the applied immutable schema.
 SELECT 1;

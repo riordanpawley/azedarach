@@ -868,11 +868,11 @@ type Client struct {
 	projectionWatchBeforeSubscribeHook func()
 	projectionNotifierBeforeCloseHook  func()
 	projectionNotifierAfterClearHook   func()
-	projectionSnapshotSourceRowsHook   func(projectionDeltaRows) projectionDeltaRows
+	projectionSnapshotSourceRowsHook     func(projectionDeltaRows) projectionDeltaRows
 	projectionWatchActive                atomic.Int64
 	projectionWatchStarted               atomic.Uint64
 	projectionWatchCompleted             atomic.Uint64
-	corruption                         atomic.Pointer[sqliteCorruptionState]
+	corruption                           atomic.Pointer[sqliteCorruptionState]
 	projectionNotifierMu               sync.Mutex
 	projectionNotifier                 projectionDeltaNotifier
 	projectionNotifierClose            *projectionDeltaNotifierCloseState
@@ -882,6 +882,7 @@ type Client struct {
 	decisionIdempotencyFailureHook       func(stage string) error
 	eventSearchMigrationFailureHook      func(stage string) error
 	legacyAttachmentMigrationFailureHook func(stage string) error
+	legacyAttachmentDirectorySyncHook    func(path string) error
 	requireExistingDB                    bool
 	interactionMu                        sync.RWMutex
 	interactionCache                     map[string]domain.InteractionRequest

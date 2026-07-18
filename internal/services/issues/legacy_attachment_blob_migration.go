@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -140,7 +141,7 @@ func (c *Client) applyLegacyAttachmentBlobForwardMigration(ctx context.Context, 
 			_ = os.Remove(createdFiles[i])
 		}
 		if len(createdFiles) > 0 {
-			_ = syncLegacyAttachmentDirectory(filepath.Dir(createdFiles[0]))
+			_ = c.syncLegacyAttachmentDirectory(filepath.Dir(createdFiles[0]))
 		}
 	}()
 
@@ -164,7 +165,7 @@ func (c *Client) applyLegacyAttachmentBlobForwardMigration(ctx context.Context, 
 			return err
 		}
 		if len(createdFiles) > 0 {
-			if err := syncLegacyAttachmentDirectory(filepath.Dir(createdFiles[0])); err != nil {
+			if err := c.syncLegacyAttachmentDirectory(filepath.Dir(createdFiles[0])); err != nil {
 				return fmt.Errorf("sync canonical attachment directory: %w", err)
 			}
 		}
@@ -200,7 +201,7 @@ func (c *Client) applyLegacyAttachmentBlobForwardMigration(ctx context.Context, 
 func (c *Client) materializeLegacyAttachmentRows(rows []legacyAttachmentRow) ([]string, error) {
 	attachmentDir := filepath.Join(filepath.Dir(c.dbPath), "attachments")
 	if len(rows) > 0 {
-		if err := os.MkdirAll(attachmentDir, 0o755); err != nil {
+		if err := c.ensureDurableLegacyAttachmentDirectory(attachmentDir); err != nil {
 			return nil, fmt.Errorf("create canonical attachment directory: %w", err)
 		}
 	}
@@ -214,6 +215,14 @@ func (c *Client) materializeLegacyAttachmentRows(rows []legacyAttachmentRow) ([]
 		if err != nil {
 			for j := len(created) - 1; j >= 0; j-- {
 				_ = os.Remove(created[j])
+			}
+			if len(created) > 0 {
+				if syncErr := c.syncLegacyAttachmentDirectory(attachmentDir); syncErr != nil {
+					return nil, errors.Join(
+						fmt.Errorf("materialize legacy attachment %q/%q: %w", rows[i].issueID, rows[i].attachmentID, err),
+						fmt.Errorf("sync canonical attachment directory after cleanup: %w", syncErr),
+					)
+				}
 			}
 			return nil, fmt.Errorf("materialize legacy attachment %q/%q: %w", rows[i].issueID, rows[i].attachmentID, err)
 		}
@@ -748,6 +757,31 @@ func syncLegacyAttachmentDirectory(path string) error {
 	}
 	defer directory.Close()
 	return directory.Sync()
+}
+
+func (c *Client) syncLegacyAttachmentDirectory(path string) error {
+	if c.legacyAttachmentDirectorySyncHook != nil {
+		return c.legacyAttachmentDirectorySyncHook(path)
+	}
+	return syncLegacyAttachmentDirectory(path)
+}
+
+func (c *Client) ensureDurableLegacyAttachmentDirectory(path string) error {
+	err := os.Mkdir(path, 0o755)
+	if err != nil && !os.IsExist(err) {
+		return err
+	}
+	info, statErr := os.Lstat(path)
+	if statErr != nil {
+		return statErr
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("attachment storage path is not a directory")
+	}
+	if err := c.syncLegacyAttachmentDirectory(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("sync attachment directory parent: %w", err)
+	}
+	return nil
 }
 
 func (c *Client) runLegacyAttachmentMigrationFailureHook(stage string) error {

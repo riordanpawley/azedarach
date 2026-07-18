@@ -57,14 +57,7 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 		gitStatusState := domain.GitFactsStatusMissing
 		var status git.GitStatus
 		if len(worktree.GitStatusRaw) > 0 {
-			trimmedStatus := bytes.TrimSpace(worktree.GitStatusRaw)
-			if len(trimmedStatus) == 0 || trimmedStatus[0] != '{' {
-				gitStatusState = domain.GitFactsStatusInvalid
-			} else if err := json.Unmarshal(trimmedStatus, &status); err != nil {
-				gitStatusState = domain.GitFactsStatusInvalid
-			} else {
-				gitStatusState = domain.GitFactsStatusValid
-			}
+			status, gitStatusState = decodeRuntimeGitStatus(worktree.GitStatusRaw)
 		}
 		gitFacts := domain.DeriveGitFactsObservation(path != "", gitStatusState, timeValue(worktree.GitStatusUpdated), timeNow().UTC(), domain.DefaultGitFactsStaleAfter)
 		projection.Worktree = protocol.RuntimeWorktreeProjection{
@@ -95,6 +88,45 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 	}
 
 	return projection
+}
+
+func decodeRuntimeGitStatus(raw []byte) (git.GitStatus, domain.GitFactsStatusState) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return git.GitStatus{}, domain.GitFactsStatusInvalid
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &envelope); err != nil {
+		return git.GitStatus{}, domain.GitFactsStatusInvalid
+	}
+	for _, field := range []string{"modified", "added", "deleted", "untracked", "staged"} {
+		value, ok := envelope[field]
+		if !ok || !isRuntimeGitStatusStringArray(value) {
+			return git.GitStatus{}, domain.GitFactsStatusInvalid
+		}
+	}
+	hasChanges, ok := envelope["has_changes"]
+	if !ok {
+		return git.GitStatus{}, domain.GitFactsStatusInvalid
+	}
+	var hasChangesValue *bool
+	if err := json.Unmarshal(hasChanges, &hasChangesValue); err != nil || hasChangesValue == nil {
+		return git.GitStatus{}, domain.GitFactsStatusInvalid
+	}
+	var status git.GitStatus
+	if err := json.Unmarshal(trimmed, &status); err != nil {
+		return git.GitStatus{}, domain.GitFactsStatusInvalid
+	}
+	return status, domain.GitFactsStatusValid
+}
+
+func isRuntimeGitStatusStringArray(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return false
+	}
+	var values []string
+	return json.Unmarshal(trimmed, &values) == nil
 }
 
 func timeValue(value *time.Time) time.Time {

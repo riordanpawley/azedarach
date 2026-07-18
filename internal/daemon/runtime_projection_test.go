@@ -306,6 +306,9 @@ func TestBuildRuntimeProjectionSurfacesGitFactAvailability(t *testing.T) {
 		{name: "malformed object", raw: []byte(`{"has_changes":`)},
 		{name: "null", raw: []byte(`null`)},
 		{name: "non-object", raw: []byte(`[]`)},
+		{name: "empty object", raw: []byte(`{}`)},
+		{name: "incomplete object", raw: []byte(`{"has_changes":false}`)},
+		{name: "wrong required type", raw: []byte(`{"modified":{},"added":[],"deleted":[],"untracked":[],"staged":[],"has_changes":false}`)},
 	} {
 		t.Run(invalidStatus.name, func(t *testing.T) {
 			malformed := buildRuntimeProjection("portable-project", nil, &daemonstate.WorktreeState{

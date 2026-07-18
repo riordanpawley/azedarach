@@ -12,7 +12,7 @@ import (
 	"unicode/utf8"
 )
 
-const legacyAttachmentMigrationChecksum = "d402580910f62087210727ca7fdf814d2c4cce819429c5bf68fa77f76fb11a3d"
+const legacyAttachmentMigrationChecksum = "edeecf3319e6d856c3254fd955d3688c41dcee023809cb92090c8960338282d0"
 
 func TestLegacyAttachmentBlobForwardMigrationFreshHistoricalAndIdempotentReopen(t *testing.T) {
 	ctx := context.Background()
@@ -146,6 +146,86 @@ func TestLegacyAttachmentBlobForwardMigrationRollsBackFilesSchemaAndLedger(t *te
 		t.Fatal(err)
 	}
 	defer retried.CloseDB()
+}
+
+func TestLegacyAttachmentBlobForwardMigrationDurablyCreatesAttachmentDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "azedarach.db")
+	seed := NewClientAtPath(path, slog.Default())
+	db, err := seed.dbHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedLegacyAttachmentBlobSchema(t, db, []byte("historical attachment"))
+	if err := seed.CloseDB(); err != nil {
+		t.Fatal(err)
+	}
+
+	parentDir := filepath.Dir(path)
+	attachmentDir := filepath.Join(parentDir, "attachments")
+	var barriers []string
+	candidate := NewClientAtPath(path, slog.Default())
+	candidate.legacyAttachmentDirectorySyncHook = func(path string) error {
+		barriers = append(barriers, path)
+		return nil
+	}
+	candidate.legacyAttachmentMigrationFailureHook = func(stage string) error {
+		if stage == "after_files" {
+			want := []string{parentDir, attachmentDir}
+			if len(barriers) != len(want) || barriers[0] != want[0] || barriers[1] != want[1] {
+				t.Fatalf("directory durability barriers=%v, want %v", barriers, want)
+			}
+		}
+		return nil
+	}
+	if _, err := candidate.dbHandle(); err != nil {
+		t.Fatal(err)
+	}
+	defer candidate.CloseDB()
+}
+
+func TestLegacyAttachmentBlobForwardMigrationRequiresParentDirectoryDurability(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "azedarach.db")
+	seed := NewClientAtPath(path, slog.Default())
+	db, err := seed.dbHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedLegacyAttachmentBlobSchema(t, db, []byte("historical attachment"))
+	if err := seed.CloseDB(); err != nil {
+		t.Fatal(err)
+	}
+
+	parentDir := filepath.Dir(path)
+	candidate := NewClientAtPath(path, slog.Default())
+	candidate.legacyAttachmentDirectorySyncHook = func(path string) error {
+		if path != parentDir {
+			t.Fatalf("unexpected durability barrier %q before parent %q", path, parentDir)
+		}
+		return errors.New("injected parent directory sync failure")
+	}
+	if _, err := candidate.dbHandle(); err == nil || !strings.Contains(err.Error(), "sync attachment directory parent") {
+		t.Fatalf("parent durability error=%v", err)
+	}
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var blobColumns, markers int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('issue_attachments') WHERE name='content_blob'`).Scan(&blobColumns); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=?`, legacyAttachmentBlobForwardMigrationID).Scan(&markers); err != nil {
+		t.Fatal(err)
+	}
+	if blobColumns != 1 || markers != 0 {
+		t.Fatalf("failed durability barrier blob_columns=%d markers=%d", blobColumns, markers)
+	}
+	entries, err := os.ReadDir(filepath.Join(parentDir, "attachments"))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("failed durability barrier attachment entries=%v err=%v", entries, err)
+	}
 }
 
 func TestLegacyAttachmentBlobForwardMigrationHandlesPreexistingContent(t *testing.T) {
