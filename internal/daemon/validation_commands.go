@@ -458,9 +458,13 @@ func (d *Daemon) taskClosePublicationProvenance(ctx context.Context, projectID, 
 	wantBranch := strings.TrimSpace(integration.TargetBranch)
 	wantCommand := strings.Join(strings.Fields(gateCommand), " ")
 	binding, bound := taskClosePublicationBindingFromContext(ctx)
+	recoveredOperationID := strings.TrimSpace(integration.PublicationOperationID)
+	if !bound && recoveredOperationID == "" {
+		return domain.PublicationOperation{}, domain.ValidationRequest{}, fmt.Errorf("exact synthetic merge %s recovery receipt is missing publication operation identity", wantTarget)
+	}
 	for _, operation := range operations {
 		activeExactOperation := bound && operation.OperationID == binding.operationID && operation.ClaimToken == binding.claimToken && operation.State == domain.PublicationOperationPassed
-		completedExactOperation := !bound && operation.State == domain.PublicationOperationMerged && operation.FinishedAt != nil
+		completedExactOperation := !bound && operation.OperationID == recoveredOperationID && operation.State == domain.PublicationOperationMerged && operation.FinishedAt != nil
 		if (!activeExactOperation && !completedExactOperation) || !strings.EqualFold(strings.TrimSpace(operation.TargetID), "base") ||
 			strings.TrimSpace(operation.CandidateRevision) != wantTarget || strings.TrimSpace(operation.SourceRevision) != wantSource || strings.TrimSpace(operation.BaseRevision) != wantBase ||
 			strings.TrimSpace(operation.TargetBranch) != wantBranch || strings.TrimSpace(operation.PolicyVersion) != strings.TrimSpace(policyVersion) ||

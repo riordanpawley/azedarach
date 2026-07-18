@@ -306,7 +306,7 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 		BaseOID: baseOID, SourceOID: sourceOID, TargetOID: targetOID, ValidationAttempts: merge.ValidationAttempts,
 	}
 	_, _, err = d.taskClosePublicationProvenance(ctx, projectID, issueID, integration, "portable-v1", "just merge-gate", "go-portable")
-	require.ErrorContains(t, err, "requires its completed non-emergency publication operation", "ticket-only review evidence must not authorize task close")
+	require.ErrorContains(t, err, "missing publication operation identity", "ticket-only review evidence must not authorize task close")
 	_, err = runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{
 		RequestID: "candidate-authority", LeaseToken: "candidate-authority-secret", ProjectID: projectID,
 		Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeRepository, Purpose: domain.ValidationPurposePushGate,
@@ -361,6 +361,7 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 		update.FinishedAt = &finished
 	})
 	require.NoError(t, err)
+	integration.PublicationOperationID = publication.OperationID
 	for name, mutate := range map[string]func(*taskCloseIntegrationResult) (string, string, string){
 		"wrong candidate": func(candidate *taskCloseIntegrationResult) (string, string, string) {
 			candidate.TargetOID = "wrong-target"
