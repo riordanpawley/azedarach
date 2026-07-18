@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -166,6 +167,141 @@ func TestReviewIntentValidationRejectsNonActionableOrConflictingOutcomes(t *test
 				t.Fatalf("error = %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestReviewIntentScopesSnapshotAndRetriesPreAdmissionFailureAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)}); err != nil {
+		t.Fatal(err)
+	}
+	request := protocol.OrchestrationIntentRequest{
+		Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept,
+		IntentKey: "retry-pre-admission-after-restart", ActorID: "orchestrator", IssueIDs: []string{strings.ToUpper(issueID)}, RepoDir: repoDir,
+	}
+
+	firstDaemon := newOrchestrationReviewTestDaemon(repoDir, client)
+	firstDaemon.orchestrationSnapshotBuild = func(_ context.Context, _ string, snapshotRequest protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		want := []string{naming.CanonicalIssueIDKey(issueID)}
+		if !slices.Equal(snapshotRequest.ReviewIssueIDs, want) {
+			return protocol.OrchestrationSnapshot{}, fmt.Errorf("review snapshot issue IDs = %v, want canonical requested ticket %v", snapshotRequest.ReviewIssueIDs, want)
+		}
+		return protocol.OrchestrationSnapshot{}, errors.New("transient pre-admission failure")
+	}
+	if _, err := firstDaemon.orchestrationAuthority().Apply(ctx, "project", request); err == nil || !strings.Contains(err.Error(), "transient pre-admission failure") {
+		t.Fatalf("first review acceptance error = %v, want transient pre-admission failure", err)
+	}
+	assertNoReviewAcceptanceSideEffects(t, ctx, client, issueID)
+
+	restarted := newOrchestrationReviewTestDaemon(repoDir, client)
+	result, err := restarted.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failure := result.Failed[issueID]; !strings.Contains(failure, "authoritative close") {
+		t.Fatalf("retried review acceptance = %+v, want progress through admission to expected close-adapter failure", result)
+	}
+	replayed, err := restarted.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failure := replayed.Failed[issueID]; !strings.Contains(failure, "authoritative close") {
+		t.Fatalf("replayed review acceptance = %+v, want idempotent accepted-close retry", replayed)
+	}
+	reviewEvents, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reviewEvents) != 1 || reviewEvents[0].Payload["outcome"] != "accepted" {
+		t.Fatalf("review events = %+v, want exactly one accepted outcome after retry and replay", reviewEvents)
+	}
+}
+
+func TestOrchestrationReviewRequestedTicketScopePreservesStandaloneAndRootedAuthority(t *testing.T) {
+	root := domain.Task{ID: naming.IssueID("root"), Status: domain.StatusInReview}
+	childParent := naming.IssueID("root")
+	child := domain.Task{ID: naming.IssueID("child"), ParentID: &childParent, Status: domain.StatusInReview}
+	standalone := domain.Task{ID: naming.IssueID("standalone"), Status: domain.StatusInReview, Dependencies: []domain.Dependency{{ID: naming.IssueID("root"), Type: domain.DependencyCreatedIn}}}
+	tasks := []domain.Task{root, child, standalone}
+
+	projectScoped := orchestrationReviewScopeTasks(tasks, domain.ProjectOrchestrationScope(), []string{"STANDALONE"})
+	if got := taskIDsFromTasks(projectScoped); !slices.Equal(got, []string{"standalone"}) {
+		t.Fatalf("project requested-ticket scope = %v, want standalone authoritative review", got)
+	}
+	if got := reviewWorktreeRefreshIssueIDs(projectScoped, tasks); !slices.Equal(got, []string{"standalone"}) {
+		t.Fatalf("standalone worktree refresh scope = %v, want unrelated worktrees excluded", got)
+	}
+	rootedScope, err := domain.RootedOrchestrationScope("root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootedChild := orchestrationReviewScopeTasks(tasks, rootedScope, []string{"child"})
+	if got := taskIDsFromTasks(rootedChild); !slices.Equal(got, []string{"child"}) {
+		t.Fatalf("rooted child scope = %v, want direct child", got)
+	}
+	if got := reviewWorktreeRefreshIssueIDs(rootedChild, tasks); !slices.Equal(got, []string{"child", "root"}) {
+		t.Fatalf("rooted child worktree refresh scope = %v, want child plus authoritative ancestor only", got)
+	}
+	for _, requested := range []string{"root", "standalone"} {
+		if got := orchestrationReviewScopeTasks(tasks, rootedScope, []string{requested}); len(got) != 0 {
+			t.Fatalf("rooted requested-ticket scope for %s = %v, want self/provenance-only rejection", requested, taskIDsFromTasks(got))
+		}
+	}
+}
+
+func TestRequestedTicketReviewSnapshotSkipsUnrelatedProjectEvaluation(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	requested := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	unrelatedReview := createReviewTask(t, ctx, client, domain.P2, "other-worker")
+	unrelatedOpen, err := client.Create(ctx, issues.CreateTaskParams{Title: "unrelated open root", Description: "Executable", Acceptance: "done", Type: domain.TypeTask, Priority: domain.P0, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	var preparedIDs []string
+	d.orchestrationSnapshotPrepared = func(_ uint64, issueIDs []string) {
+		preparedIDs = append([]string(nil), issueIDs...)
+	}
+
+	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{
+		Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", RepoDir: repoDir, ReviewIssueIDs: []string{strings.ToUpper(requested)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(preparedIDs, []string{requested}) {
+		t.Fatalf("review preparation IDs = %v, want only requested ticket %s", preparedIDs, requested)
+	}
+	if len(snapshot.ReviewQueue) != 1 || snapshot.ReviewQueue[0].IssueID != requested {
+		t.Fatalf("review queue = %+v, want only requested ticket; unrelated review=%s", snapshot.ReviewQueue, unrelatedReview)
+	}
+	if len(snapshot.Candidates) != 0 || len(snapshot.Roots) != 0 || len(snapshot.Runnable) != 0 {
+		t.Fatalf("review-only snapshot evaluated unrelated project candidates: candidates=%+v roots=%v runnable=%v unrelated=%s", snapshot.Candidates, snapshot.Roots, snapshot.Runnable, unrelatedOpen)
+	}
+}
+
+func assertNoReviewAcceptanceSideEffects(t *testing.T, ctx context.Context, client *issues.Client, issueID string) {
+	t.Helper()
+	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease := coordinationLease(task, domain.CoordinationLeaseReview); lease != nil {
+		t.Fatalf("pre-admission failure manufactured review lease: %+v", lease)
+	}
+	events, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted, domain.IssueEventReviewCloseFailed, domain.IssueEventTaskIntegrationCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("pre-admission failure manufactured review evidence: %+v", events)
 	}
 }
 

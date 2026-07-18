@@ -2496,6 +2496,29 @@ func TestOrchestrationSnapshotSingleflightCoalescesWatchAndFiniteReads(t *testin
 	}
 }
 
+func TestOrchestrationSnapshotKeysSeparateAndCanonicalizeReviewIssueScope(t *testing.T) {
+	base := protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", Limit: 50}
+	left := base
+	left.ReviewIssueIDs = normalizedReviewSnapshotIssueIDs([]string{"TICKET-B", "ticket-a", "Ticket-B"})
+	right := base
+	right.ReviewIssueIDs = normalizedReviewSnapshotIssueIDs([]string{"ticket-a", "ticket-b"})
+	other := base
+	other.ReviewIssueIDs = normalizedReviewSnapshotIssueIDs([]string{"ticket-c"})
+
+	if orchestrationSnapshotLoadKey("project", left) != orchestrationSnapshotLoadKey("project", right) {
+		t.Fatal("equivalent requested-ticket review scopes produced different singleflight keys")
+	}
+	if orchestrationSnapshotCacheKey("project", left) != orchestrationSnapshotCacheKey("project", right) {
+		t.Fatal("equivalent requested-ticket review scopes produced different cache keys")
+	}
+	if orchestrationSnapshotLoadKey("project", left) == orchestrationSnapshotLoadKey("project", other) {
+		t.Fatal("different requested-ticket review scopes shared a singleflight key")
+	}
+	if orchestrationSnapshotCacheKey("project", left) == orchestrationSnapshotCacheKey("project", other) {
+		t.Fatal("different requested-ticket review scopes shared a cache key")
+	}
+}
+
 func TestOrchestrationSnapshotSingleflightLeaderCancellationDoesNotPoisonJoiner(t *testing.T) {
 	d := &Daemon{}
 	started := make(chan struct{})

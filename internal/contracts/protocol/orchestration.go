@@ -49,6 +49,9 @@ type OrchestrationSnapshotRequest struct {
 	Limit          int    `json:"limit,omitempty"`
 	ObservedCursor int64  `json:"observed_cursor,omitempty"`
 	RepoDir        string `json:"repo_dir,omitempty"`
+	// ReviewIssueIDs is the daemon-internal admission selector derived from an
+	// intent's authoritative IssueIDs. Snapshot clients cannot set it directly.
+	ReviewIssueIDs []string `json:"-"`
 }
 
 type OrchestrationSnapshot struct {
@@ -57,13 +60,13 @@ type OrchestrationSnapshot struct {
 	Lifecycle              domain.OrchestratorLifecycle              `json:"lifecycle,omitempty"`
 	Scope                  domain.OrchestrationScope                 `json:"scope"`
 	Revision               uint64                                    `json:"revision"`
-	ProjectionRevision     uint64                       `json:"projection_revision,omitempty"`
-	ProjectionAuthority    string                       `json:"projection_authority,omitempty"`
-	Source                 MaterializedSnapshotMetadata `json:"source"`
+	ProjectionRevision     uint64                                    `json:"projection_revision,omitempty"`
+	ProjectionAuthority    string                                    `json:"projection_authority,omitempty"`
+	Source                 MaterializedSnapshotMetadata              `json:"source"`
 	GeneratedAt            time.Time                                 `json:"generated_at"`
 	Roots                  []string                                  `json:"roots,omitempty"`
 	Capacity               OrchestrationCapacity                     `json:"capacity"`
-	ValidationCapacity     *domain.ValidationSnapshot   `json:"validation_capacity,omitempty"`
+	ValidationCapacity     *domain.ValidationSnapshot                `json:"validation_capacity,omitempty"`
 	Runnable               []string                                  `json:"runnable"`
 	NestedRoots            []OrchestrationNestedRoot                 `json:"nested_roots,omitempty"`
 	Pending                []OrchestrationPending                    `json:"pending,omitempty"`

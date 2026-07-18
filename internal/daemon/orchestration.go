@@ -248,10 +248,11 @@ func (d *Daemon) loadOrchestrationSnapshot(
 }
 
 func orchestrationSnapshotCacheKey(projectID string, request protocol.OrchestrationSnapshotRequest) string {
-	return fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%s", strings.TrimSpace(projectID), request.Scope.Kind, request.Scope.RootIssueID, strings.TrimSpace(request.ActorID), request.Limit, strings.TrimSpace(request.RepoDir))
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%s\x00%s", strings.TrimSpace(projectID), request.Scope.Kind, request.Scope.RootIssueID, strings.TrimSpace(request.ActorID), request.Limit, strings.TrimSpace(request.RepoDir), strings.Join(request.ReviewIssueIDs, ","))
 }
 
 func (d *Daemon) normalizeOrchestrationSnapshotRequest(projectID string, request protocol.OrchestrationSnapshotRequest) protocol.OrchestrationSnapshotRequest {
+	request.ReviewIssueIDs = normalizedReviewSnapshotIssueIDs(request.ReviewIssueIDs)
 	repoDir := strings.TrimSpace(request.RepoDir)
 	if repoDir == "" {
 		repoDir = strings.TrimSpace(d.resolveRepoDirForProject(projectID))
@@ -404,6 +405,7 @@ func (d *Daemon) handleOrchestrationIntent(ctx context.Context, req protocol.Req
 
 func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID string, request protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
 	projectID = a.daemon.canonicalProjectID(projectID)
+	request.ReviewIssueIDs = normalizedReviewSnapshotIssueIDs(request.ReviewIssueIDs)
 	if request.Limit <= 0 {
 		request.Limit = a.inspectLimit()
 	}
@@ -450,7 +452,25 @@ func (a daemonOrchestrationAuthority) Snapshot(ctx context.Context, projectID st
 }
 
 func orchestrationSnapshotLoadKey(projectID string, request protocol.OrchestrationSnapshotRequest) string {
-	return fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%s", strings.TrimSpace(projectID), request.Scope.Kind, request.Scope.RootIssueID, strings.TrimSpace(request.ActorID), request.Limit, strings.TrimSpace(request.RepoDir))
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%s\x00%s", strings.TrimSpace(projectID), request.Scope.Kind, request.Scope.RootIssueID, strings.TrimSpace(request.ActorID), request.Limit, strings.TrimSpace(request.RepoDir), strings.Join(request.ReviewIssueIDs, ","))
+}
+
+func normalizedReviewSnapshotIssueIDs(issueIDs []string) []string {
+	seen := make(map[string]struct{}, len(issueIDs))
+	normalized := make([]string, 0, len(issueIDs))
+	for _, issueID := range issueIDs {
+		key := naming.CanonicalIssueIDKey(issueID)
+		if key == "" {
+			continue
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, key)
+	}
+	sort.Strings(normalized)
+	return normalized
 }
 
 func (d *Daemon) canonicalOrchestrationRepoDir(projectID, repoDir string) string {
@@ -504,6 +524,10 @@ func (a daemonOrchestrationAuthority) buildSnapshot(ctx context.Context, project
 				return protocol.OrchestrationSnapshot{}, admissionError(fmt.Errorf("prepare project orchestration projection: %w", err))
 			}
 			ids := taskIDsFromTasks(projection.Tasks)
+			if len(request.ReviewIssueIDs) > 0 {
+				reviewTasks := orchestrationReviewScopeTasks(projection.Tasks, request.Scope, request.ReviewIssueIDs)
+				ids = reviewWorktreeRefreshIssueIDs(reviewTasks, projection.Tasks)
+			}
 			if len(ids) > 0 {
 				if err := a.daemon.refreshIssueSessionRuntimeState(ctx, projectID, ids); err != nil && a.daemon.cfg.Logger != nil {
 					a.daemon.cfg.Logger.Debug("prepare project orchestration runtime projection", "project_id", projectID, "task_count", len(ids), "error", err)
@@ -587,7 +611,7 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 	}
 	var materializedTasks []domain.Task
 	projectOpenIssueCount := -1
-	if identity.Scope.Kind == domain.OrchestrationScopeProject {
+	if identity.Scope.Kind == domain.OrchestrationScopeProject || len(request.ReviewIssueIDs) > 0 {
 		projection, exportErr := issueClient.ExportOrchestrationProjection(ctx, projectID, limit)
 		if exportErr != nil {
 			return protocol.OrchestrationSnapshot{}, fmt.Errorf("load project orchestration projection: %w", exportErr)
@@ -627,6 +651,14 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 			return protocol.OrchestrationSnapshot{}, fmt.Errorf("load validation capacity projection: %w", err)
 		}
 		snapshot.ValidationCapacity = &validation
+	}
+	if len(request.ReviewIssueIDs) > 0 {
+		snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, materializedTasks)
+		if err != nil {
+			return protocol.OrchestrationSnapshot{}, err
+		}
+		finalizeOrchestrationSnapshotSource(&snapshot)
+		return snapshot, nil
 	}
 	if identity.Scope.Kind == domain.OrchestrationScopeRooted {
 		root := identity.Scope.RootIssueID.String()

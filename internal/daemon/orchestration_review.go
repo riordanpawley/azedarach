@@ -80,7 +80,7 @@ func (a daemonOrchestrationAuthority) reviewQueue(ctx context.Context, projectID
 	if !usesProjectionSource(sourceForInvariant(daemonInvariantOrchestrationReview)) {
 		return nil, nil
 	}
-	actionableTasks := orchestrationReviewScopeTasks(tasks, request.Scope)
+	actionableTasks := orchestrationReviewScopeTasks(tasks, request.Scope, request.ReviewIssueIDs)
 	acceptedCloseCandidates := make([]string, 0)
 	for _, task := range actionableTasks {
 		if reviewOutcomeLookupCandidate(task) {
@@ -180,17 +180,62 @@ func reviewWorktreeRefreshIssueIDs(reviewTasks, allTasks []domain.Task) []string
 	return ids
 }
 
-func orchestrationReviewScopeTasks(tasks []domain.Task, scope domain.OrchestrationScope) []domain.Task {
-	if scope.Kind != domain.OrchestrationScopeRooted {
-		return tasks
+func orchestrationReviewScopeTasks(tasks []domain.Task, scope domain.OrchestrationScope, requestedIssueIDs []string) []domain.Task {
+	requested := make(map[string]struct{}, len(requestedIssueIDs))
+	for _, issueID := range requestedIssueIDs {
+		requested[naming.CanonicalIssueIDKey(issueID)] = struct{}{}
 	}
 	out := make([]domain.Task, 0)
 	for _, task := range tasks {
-		if task.ParentID != nil && !task.ParentID.IsZero() && naming.IssueIDsEqual(task.ParentID.String(), scope.RootIssueID.String()) {
-			out = append(out, task)
+		if len(requested) > 0 {
+			if _, ok := requested[naming.CanonicalIssueIDKey(task.ID.String())]; !ok {
+				continue
+			}
 		}
+		if scope.Kind == domain.OrchestrationScopeRooted && (task.ParentID == nil || task.ParentID.IsZero() || !naming.IssueIDsEqual(task.ParentID.String(), scope.RootIssueID.String())) {
+			continue
+		}
+		out = append(out, task)
 	}
 	return out
+}
+
+func stableRequestedReviewCandidates(requested, ordered []string) []string {
+	wanted := make(map[string]struct{}, len(requested))
+	for _, issueID := range requested {
+		if key := naming.CanonicalIssueIDKey(issueID); key != "" {
+			wanted[key] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(wanted))
+	seen := make(map[string]struct{}, len(wanted))
+	for _, issueID := range ordered {
+		key := naming.CanonicalIssueIDKey(issueID)
+		if _, requested := wanted[key]; !requested {
+			continue
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, issueID)
+	}
+	remainder := make([]string, 0, len(wanted)-len(seen))
+	for _, issueID := range requested {
+		key := naming.CanonicalIssueIDKey(issueID)
+		if key == "" {
+			continue
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		remainder = append(remainder, strings.TrimSpace(issueID))
+	}
+	sort.SliceStable(remainder, func(i, j int) bool {
+		return naming.CanonicalIssueIDKey(remainder[i]) < naming.CanonicalIssueIDKey(remainder[j])
+	})
+	return append(out, remainder...)
 }
 
 func reviewOutcomeLookupCandidate(task domain.Task) bool {
@@ -320,7 +365,7 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 	}
 	a.daemon.orchestrationMu.Lock()
 	defer a.daemon.orchestrationMu.Unlock()
-	snapshot, err := a.Snapshot(ctx, projectID, protocol.OrchestrationSnapshotRequest{Scope: request.Scope, ActorID: request.ActorID, RepoDir: request.RepoDir})
+	snapshot, err := a.Snapshot(ctx, projectID, protocol.OrchestrationSnapshotRequest{Scope: request.Scope, ActorID: request.ActorID, RepoDir: request.RepoDir, ReviewIssueIDs: request.IssueIDs})
 	if err != nil {
 		return protocol.OrchestrationIntentResult{}, err
 	}
@@ -330,7 +375,7 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 		queue[review.IssueID] = review
 		ordered = append(ordered, review.IssueID)
 	}
-	requested := stableRequestedCandidates(request.IssueIDs, ordered)
+	requested := stableRequestedReviewCandidates(request.IssueIDs, ordered)
 	if len(request.IssueIDs) == 0 {
 		requested = ordered
 	}
