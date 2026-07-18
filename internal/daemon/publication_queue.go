@@ -157,6 +157,14 @@ func (d *Daemon) publicationStoreForProject(projectID string) (*operationstore.S
 }
 
 func (d *Daemon) closePublicationStores() {
+	d.publicationContinuationMu.Lock()
+	if d.publicationContinuationCancel != nil {
+		d.publicationContinuationCancel()
+	}
+	d.publicationContinuationCtx = nil
+	d.publicationContinuationCancel = nil
+	d.publicationContinuationRetrying = nil
+	d.publicationContinuationMu.Unlock()
 	d.publicationStoresMu.Lock()
 	stores := d.publicationStores
 	d.publicationStores = nil
@@ -350,18 +358,6 @@ func (d *Daemon) renewPublicationClaim(ctx context.Context, store *operationstor
 	return store.RenewPublicationOperationClaim(ctx, operationID, claimToken, now, ttl)
 }
 
-func (d *Daemon) enqueuePublicationRetry(store *operationstore.SQLiteStore, retry *publicationRetryError) error {
-	if retry == nil {
-		return nil
-	}
-	replacement, _, err := store.EnqueuePublication(context.Background(), retry.replacement, publicationCoalesceKey(retry.replacement))
-	if err != nil {
-		return err
-	}
-	d.publishPublicationOperationEvent(replacement)
-	return nil
-}
-
 func (d *Daemon) continuePublicationTarget(ctx context.Context, store *operationstore.SQLiteStore, terminal domain.PublicationOperation) error {
 	operations, err := store.PublicationOperations(ctx, terminal.ProjectID, "", true)
 	if err != nil {
@@ -369,10 +365,76 @@ func (d *Daemon) continuePublicationTarget(ctx context.Context, store *operation
 	}
 	for _, operation := range operations {
 		if operation.TargetBranch == terminal.TargetBranch {
+			if d.publicationContinuationSubmit != nil {
+				return d.publicationContinuationSubmit(ctx, operation)
+			}
 			return d.submitPublicationOperation(ctx, operation)
 		}
 	}
 	return nil
+}
+
+func (d *Daemon) publicationContinuationContext() context.Context {
+	d.publicationContinuationMu.Lock()
+	defer d.publicationContinuationMu.Unlock()
+	if d.publicationContinuationCtx == nil {
+		d.publicationContinuationCtx, d.publicationContinuationCancel = context.WithCancel(context.Background())
+	}
+	return d.publicationContinuationCtx
+}
+
+func (d *Daemon) ensurePublicationTargetContinuation(store *operationstore.SQLiteStore, terminal domain.PublicationOperation) {
+	ctx := d.publicationContinuationContext()
+	if err := d.continuePublicationTarget(ctx, store, terminal); err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("publication target continuation submit failed; scheduling retry", "operation_id", terminal.OperationID, "error", err)
+		}
+		d.schedulePublicationTargetContinuationRetry(ctx, store, terminal)
+	}
+}
+
+func (d *Daemon) schedulePublicationTargetContinuationRetry(ctx context.Context, store *operationstore.SQLiteStore, terminal domain.PublicationOperation) {
+	key := terminal.ProjectID + "\x00" + terminal.TargetBranch
+	d.publicationContinuationMu.Lock()
+	if d.publicationContinuationRetrying == nil {
+		d.publicationContinuationRetrying = make(map[string]bool)
+	}
+	if d.publicationContinuationRetrying[key] {
+		d.publicationContinuationMu.Unlock()
+		return
+	}
+	d.publicationContinuationRetrying[key] = true
+	d.publicationContinuationMu.Unlock()
+	go func() {
+		defer func() {
+			d.publicationContinuationMu.Lock()
+			delete(d.publicationContinuationRetrying, key)
+			d.publicationContinuationMu.Unlock()
+		}()
+		for {
+			if d.publicationContinuationWait != nil {
+				if err := d.publicationContinuationWait(ctx); err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					continue
+				}
+			} else {
+				timer := time.NewTimer(250 * time.Millisecond)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+			}
+			if err := d.continuePublicationTarget(ctx, store, terminal); err == nil {
+				return
+			} else if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("publication target continuation retry failed", "operation_id", terminal.OperationID, "error", err)
+			}
+		}
+	}()
 }
 
 func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operationID string) ([]byte, error) {
@@ -398,23 +460,23 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 			finished := time.Now().UTC()
 			state, kind := classifyPublicationFailure(identityErr)
 			artifact := d.writePublicationFailureArtifact(operation, state, identityErr)
-			terminal, transitionErr := d.transitionPublicationOperation(context.Background(), operation, claimToken, state, func(update *operationstore.PublicationOperationUpdate) {
+			mutate := func(update *operationstore.PublicationOperationUpdate) {
 				update.FailureKind, update.FailureDetail, update.FailureArtifact = kind, identityErr.Error(), artifact
 				update.ReleaseClaim = true
 				update.FinishedAt = &finished
-			})
+			}
 			var retry *publicationRetryError
+			var terminal domain.PublicationOperation
+			var transitionErr error
 			if errors.As(identityErr, &retry) {
-				enqueueErr := d.enqueuePublicationRetry(store, retry)
-				if enqueueErr != nil {
-					return nil, fmt.Errorf("%w; enqueue refreshed publication attempt: %v", identityErr, enqueueErr)
-				}
+				terminal, _, transitionErr = d.transitionPublicationWithRetry(context.Background(), store, operation, claimToken, state, mutate, retry)
+			} else {
+				terminal, transitionErr = d.transitionPublicationOperation(context.Background(), operation, claimToken, state, mutate)
 			}
-			if transitionErr == nil {
-				if continuationErr := d.continuePublicationTarget(context.Background(), store, terminal); continuationErr != nil && d.cfg.Logger != nil {
-					d.cfg.Logger.Warn("publication target continuation submit failed", "operation_id", terminal.OperationID, "error", continuationErr)
-				}
+			if transitionErr != nil {
+				return nil, fmt.Errorf("%w; persist terminal publication continuation: %v", identityErr, transitionErr)
 			}
+			d.ensurePublicationTargetContinuation(store, terminal)
 			return nil, identityErr
 		}
 	}
@@ -470,22 +532,23 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 		}
 		state, kind := classifyPublicationFailure(runErr)
 		artifact := d.writePublicationFailureArtifact(operation, state, runErr)
-		terminal, transitionErr := d.transitionPublicationOperation(context.Background(), current, claimToken, state, func(update *operationstore.PublicationOperationUpdate) {
+		mutate := func(update *operationstore.PublicationOperationUpdate) {
 			update.FailureKind, update.FailureDetail, update.FailureArtifact = kind, runErr.Error(), artifact
 			update.ReleaseClaim = true
 			update.FinishedAt = &finished
-		})
+		}
 		var retry *publicationRetryError
+		var terminal domain.PublicationOperation
+		var transitionErr error
 		if errors.As(runErr, &retry) {
-			if enqueueErr := d.enqueuePublicationRetry(store, retry); enqueueErr != nil {
-				return nil, fmt.Errorf("%w; enqueue refreshed publication attempt: %v", runErr, enqueueErr)
-			}
+			terminal, _, transitionErr = d.transitionPublicationWithRetry(context.Background(), store, current, claimToken, state, mutate, retry)
+		} else {
+			terminal, transitionErr = d.transitionPublicationOperation(context.Background(), current, claimToken, state, mutate)
 		}
-		if transitionErr == nil {
-			if continuationErr := d.continuePublicationTarget(context.Background(), store, terminal); continuationErr != nil && d.cfg.Logger != nil {
-				d.cfg.Logger.Warn("publication target continuation submit failed", "operation_id", terminal.OperationID, "error", continuationErr)
-			}
+		if transitionErr != nil {
+			return nil, fmt.Errorf("%w; persist terminal publication continuation: %v", runErr, transitionErr)
 		}
+		d.ensurePublicationTargetContinuation(store, terminal)
 		return nil, runErr
 	}
 	current, err = d.transitionPublicationOperation(context.Background(), current, claimToken, domain.PublicationOperationMerged, func(update *operationstore.PublicationOperationUpdate) {
@@ -495,9 +558,7 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 	if err != nil {
 		return nil, err
 	}
-	if continuationErr := d.continuePublicationTarget(context.Background(), store, current); continuationErr != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Warn("publication target continuation submit failed", "operation_id", current.OperationID, "error", continuationErr)
-	}
+	d.ensurePublicationTargetContinuation(store, current)
 	_ = daemonops.ReportProgress(ctx, daemonops.Progress{Phase: "merged", Message: "exact candidate merged and accepted issue closed", Current: 100, Total: 100, Unit: "percent", Percent: 100})
 	return json.Marshal(current)
 }
@@ -703,15 +764,7 @@ func (d *Daemon) transitionPublicationOperation(ctx context.Context, current dom
 	if err != nil {
 		return domain.PublicationOperation{}, err
 	}
-	update := operationstore.PublicationOperationUpdate{
-		ExpectedStates: []domain.PublicationOperationState{current.State}, ExpectedClaimToken: claimToken, State: state,
-		CandidateRevision: current.CandidateRevision, ValidationRequestID: current.ValidationRequestID,
-		ReusedEvidenceID: current.ReusedEvidenceID, FailureKind: current.FailureKind, FailureDetail: current.FailureDetail,
-		FailureArtifact: current.FailureArtifact, StartedAt: current.StartedAt, UpdatedAt: now,
-	}
-	if mutate != nil {
-		mutate(&update)
-	}
+	update := publicationOperationTransitionUpdate(current, claimToken, state, now, mutate)
 	store, err := d.publicationStoreForProject(current.ProjectID)
 	if err != nil {
 		return domain.PublicationOperation{}, err
@@ -724,6 +777,38 @@ func (d *Daemon) transitionPublicationOperation(ctx context.Context, current dom
 		}
 	}
 	return operation, err
+}
+
+func publicationOperationTransitionUpdate(current domain.PublicationOperation, claimToken string, state domain.PublicationOperationState, now time.Time, mutate func(*operationstore.PublicationOperationUpdate)) operationstore.PublicationOperationUpdate {
+	update := operationstore.PublicationOperationUpdate{
+		ExpectedStates: []domain.PublicationOperationState{current.State}, ExpectedClaimToken: claimToken, State: state,
+		CandidateRevision: current.CandidateRevision, ValidationRequestID: current.ValidationRequestID,
+		ReusedEvidenceID: current.ReusedEvidenceID, FailureKind: current.FailureKind, FailureDetail: current.FailureDetail,
+		FailureArtifact: current.FailureArtifact, StartedAt: current.StartedAt, UpdatedAt: now,
+	}
+	if mutate != nil {
+		mutate(&update)
+	}
+	return update
+}
+
+func (d *Daemon) transitionPublicationWithRetry(ctx context.Context, store *operationstore.SQLiteStore, current domain.PublicationOperation, claimToken string, state domain.PublicationOperationState, mutate func(*operationstore.PublicationOperationUpdate), retry *publicationRetryError) (domain.PublicationOperation, domain.PublicationOperation, error) {
+	_, now, _, err := d.publicationClaimIdentity()
+	if err != nil {
+		return domain.PublicationOperation{}, domain.PublicationOperation{}, err
+	}
+	update := publicationOperationTransitionUpdate(current, claimToken, state, now, mutate)
+	terminal, successor, err := store.TerminalizePublicationWithSuccessor(ctx, current.OperationID, update, retry.replacement, publicationCoalesceKey(retry.replacement))
+	if err != nil {
+		return domain.PublicationOperation{}, domain.PublicationOperation{}, err
+	}
+	d.publishPublicationOperationEvent(terminal)
+	d.publishPublicationOperationEvent(successor)
+	if d.publicationStateChanged != nil {
+		d.publicationStateChanged(terminal)
+		d.publicationStateChanged(successor)
+	}
+	return terminal, successor, nil
 }
 
 func (d *Daemon) publishPublicationOperationEvent(operation domain.PublicationOperation) {

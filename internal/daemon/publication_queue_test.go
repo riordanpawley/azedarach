@@ -498,6 +498,130 @@ func TestPublicationRetryAttemptGenerationSurvivesBaseIdentityCycles(t *testing.
 	}
 }
 
+func TestPublicationStaleSuccessorSurvivesAtomicCommitCrashAndReopen(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		configure func(*Daemon, domain.PublicationOperation)
+	}{
+		{name: "identity-check", configure: func(d *Daemon, operation domain.PublicationOperation) {
+			d.publicationIdentityCheck = func(context.Context, domain.PublicationOperation) error {
+				replacement := refreshedPublicationOperationAttempt(operation, "base-b", operation.ValidationCommand, operation.PolicyVersion, operation.EnvironmentFingerprint)
+				return &publicationRetryError{cause: errors.New("publication identity stale: base moved"), replacement: replacement}
+			}
+		}},
+		{name: "apply-time-expected-base", configure: func(d *Daemon, _ domain.PublicationOperation) {
+			d.publicationClose = func(_ context.Context, operation domain.PublicationOperation) error {
+				return &taskCloseExpectedBaseStaleError{Expected: operation.BaseRevision, Actual: "base-b"}
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repo := t.TempDir()
+			firstRuntime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+			operation := daemonTestPublicationOperation(firstRuntime.canonicalProject, "publication-atomic-crash-"+test.name, "issue", "intent", "source", time.Now().UTC())
+			if _, _, err := firstRuntime.store.EnqueuePublication(context.Background(), operation, publicationCoalesceKey(operation)); err != nil {
+				t.Fatal(err)
+			}
+			retryWaiting := make(chan struct{})
+			var waitOnce sync.Once
+			first := &Daemon{operationRuntime: firstRuntime, cfg: Config{RepoDir: repo}}
+			test.configure(first, operation)
+			first.publicationContinuationSubmit = func(context.Context, domain.PublicationOperation) error {
+				return errors.New("simulated crash after atomic stale successor commit")
+			}
+			first.publicationContinuationWait = func(ctx context.Context) error {
+				waitOnce.Do(func() { close(retryWaiting) })
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			if _, err := first.runPublicationOperation(context.Background(), operation.ProjectID, operation.OperationID); err == nil {
+				t.Fatal("stale predecessor returned success")
+			}
+			<-retryWaiting
+			predecessor, found, err := firstRuntime.store.PublicationOperation(context.Background(), operation.OperationID)
+			if err != nil || !found || predecessor.State != domain.PublicationOperationStale {
+				t.Fatalf("atomic predecessor = (%+v,%t,%v)", predecessor, found, err)
+			}
+			nonterminal, err := firstRuntime.store.PublicationOperations(context.Background(), operation.ProjectID, operation.IssueID, true)
+			if err != nil || len(nonterminal) != 1 || nonterminal[0].BaseRevision != "base-b" {
+				t.Fatalf("atomic successor before crash = (%+v,%v)", nonterminal, err)
+			}
+			first.closePublicationStores()
+			if err := firstRuntime.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			restartedRuntime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+			t.Cleanup(func() { _ = restartedRuntime.Close() })
+			merged := make(chan domain.PublicationOperation, 1)
+			restarted := &Daemon{operationRuntime: restartedRuntime, cfg: Config{RepoDir: repo}, publicationClose: func(context.Context, domain.PublicationOperation) error { return nil }}
+			restarted.publicationStateChanged = func(operation domain.PublicationOperation) {
+				if operation.State == domain.PublicationOperationMerged {
+					merged <- operation
+				}
+			}
+			restarted.recoverPublicationOperations(context.Background())
+			got := <-merged
+			if got.BaseRevision != "base-b" || got.OperationID == operation.OperationID {
+				t.Fatalf("recovered atomic successor = %+v", got)
+			}
+		})
+	}
+}
+
+func TestPublicationTargetContinuationRetriesTransientSubmitWithoutRestart(t *testing.T) {
+	repo := t.TempDir()
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	t.Cleanup(func() { _ = runtime.Close() })
+	now := time.Now().UTC()
+	firstOperation := daemonTestPublicationOperation(runtime.canonicalProject, "publication-retry-submit-first", "issue-first", "intent-first", "source-first", now)
+	secondOperation := daemonTestPublicationOperation(runtime.canonicalProject, "publication-retry-submit-second", "issue-second", "intent-second", "source-second", now.Add(time.Second))
+	for _, operation := range []domain.PublicationOperation{firstOperation, secondOperation} {
+		if _, _, err := runtime.store.EnqueuePublication(context.Background(), operation, publicationCoalesceKey(operation)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Daemon{operationRuntime: runtime, cfg: Config{RepoDir: repo}, publicationClose: func(context.Context, domain.PublicationOperation) error { return nil }}
+	retryWaiting := make(chan struct{})
+	releaseRetry := make(chan struct{})
+	secondMerged := make(chan struct{})
+	var waitOnce sync.Once
+	var submitAttempts atomic.Int32
+	d.publicationContinuationSubmit = func(ctx context.Context, operation domain.PublicationOperation) error {
+		if submitAttempts.Add(1) == 1 {
+			return errors.New("injected transient continuation submit failure")
+		}
+		return d.submitPublicationOperation(ctx, operation)
+	}
+	d.publicationContinuationWait = func(ctx context.Context) error {
+		waitOnce.Do(func() { close(retryWaiting) })
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-releaseRetry:
+			return nil
+		}
+	}
+	d.publicationStateChanged = func(operation domain.PublicationOperation) {
+		if operation.OperationID == secondOperation.OperationID && operation.State == domain.PublicationOperationMerged {
+			close(secondMerged)
+		}
+	}
+	if _, err := d.runPublicationOperation(context.Background(), firstOperation.ProjectID, firstOperation.OperationID); err != nil {
+		t.Fatal(err)
+	}
+	<-retryWaiting
+	queued, found, err := runtime.store.PublicationOperation(context.Background(), secondOperation.OperationID)
+	if err != nil || !found || queued.State != domain.PublicationOperationQueued {
+		t.Fatalf("queued successor during transient failure = (%+v,%t,%v)", queued, found, err)
+	}
+	close(releaseRetry)
+	<-secondMerged
+	if got := submitAttempts.Load(); got != 2 {
+		t.Fatalf("continuation submit attempts = %d, want one failure and one daemon retry", got)
+	}
+}
+
 func TestPublicationQueueRecoveryResubmitsNonterminalIntent(t *testing.T) {
 	for _, crashState := range []domain.PublicationOperationState{
 		domain.PublicationOperationQueued,

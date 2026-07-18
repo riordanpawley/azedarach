@@ -112,6 +112,41 @@ func TestPublicationQueueClaimFencesLiveAndExpiredAttempts(t *testing.T) {
 	}
 }
 
+func TestTerminalizePublicationWithSuccessorRollsBackPredecessorWhenInsertFails(t *testing.T) {
+	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	now := time.Now().UTC()
+	predecessor := testPublicationOperation("publication-predecessor", "issue", "intent", "source", now)
+	stored, _, err := store.EnqueuePublication(ctx, predecessor, "predecessor-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, acquired, err := store.ClaimPublicationOperation(ctx, stored.OperationID, PublicationOperationClaim{Owner: "daemon", Token: "claim", Now: now, TTL: time.Minute})
+	if err != nil || !acquired {
+		t.Fatalf("claim predecessor = (%+v,%t,%v)", claimed, acquired, err)
+	}
+	conflict := testPublicationOperation("publication-successor", "other-issue", "other-intent", "other-source", now.Add(time.Second))
+	conflict.TargetBranch = "other-target"
+	if _, _, err := store.EnqueuePublication(ctx, conflict, "conflict-key"); err != nil {
+		t.Fatal(err)
+	}
+	successor := testPublicationOperation(conflict.OperationID, predecessor.IssueID, "intent:publication-retry:next", predecessor.SourceRevision, now.Add(2*time.Second))
+	successor.BaseRevision = "base-next"
+	finished := now.Add(3 * time.Second)
+	_, _, err = store.TerminalizePublicationWithSuccessor(ctx, predecessor.OperationID, PublicationOperationUpdate{
+		ExpectedStates: []domain.PublicationOperationState{claimed.State}, ExpectedClaimToken: "claim",
+		State: domain.PublicationOperationStale, ReleaseClaim: true, FinishedAt: &finished, UpdatedAt: finished,
+	}, successor, "successor-key")
+	if err == nil {
+		t.Fatal("conflicting successor insert unexpectedly committed")
+	}
+	after, found, readErr := store.PublicationOperation(ctx, predecessor.OperationID)
+	if readErr != nil || !found || after.State != domain.PublicationOperationPreparing || after.ClaimToken != "claim" {
+		t.Fatalf("predecessor after atomic rollback = (%+v,%t,%v)", after, found, readErr)
+	}
+}
+
 func testPublicationOperation(id, issueID, intent, source string, created time.Time) domain.PublicationOperation {
 	return domain.PublicationOperation{
 		OperationID: id, ProjectID: "project", IssueID: issueID, IntentKey: intent,

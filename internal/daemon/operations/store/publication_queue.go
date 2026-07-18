@@ -269,6 +269,93 @@ func (s *SQLiteStore) UpdatePublicationOperation(ctx context.Context, operationI
 	return updated, nil
 }
 
+// TerminalizePublicationWithSuccessor atomically commits a claim-fenced stale
+// predecessor and its durable nonterminal successor. A crash can observe
+// neither change or both, never terminal history without continuation.
+func (s *SQLiteStore) TerminalizePublicationWithSuccessor(ctx context.Context, operationID string, update PublicationOperationUpdate, successor domain.PublicationOperation, coalesceKey string) (domain.PublicationOperation, domain.PublicationOperation, error) {
+	if !update.State.Terminal() || len(update.ExpectedStates) == 0 || strings.TrimSpace(update.ExpectedClaimToken) == "" {
+		return domain.PublicationOperation{}, domain.PublicationOperation{}, fmt.Errorf("atomic publication successor requires terminal state, expected state, and claim token")
+	}
+	successor.State = domain.PublicationOperationQueued
+	coalesceKey = strings.TrimSpace(coalesceKey)
+	if err := successor.ValidateIntent(); err != nil {
+		return domain.PublicationOperation{}, domain.PublicationOperation{}, err
+	}
+	if coalesceKey == "" {
+		return domain.PublicationOperation{}, domain.PublicationOperation{}, fmt.Errorf("atomic publication successor requires coalesce_key")
+	}
+	db, err := s.dbHandle()
+	if err != nil {
+		return domain.PublicationOperation{}, domain.PublicationOperation{}, err
+	}
+	now := update.UpdatedAt.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.PublicationOperation{}, domain.PublicationOperation{}, fmt.Errorf("begin atomic publication successor: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	predecessor, err := getPublicationOperationTx(ctx, tx, operationID)
+	if err != nil {
+		return domain.PublicationOperation{}, domain.PublicationOperation{}, err
+	}
+	if predecessor.ProjectID != successor.ProjectID || predecessor.IssueID != successor.IssueID || predecessor.TargetID != successor.TargetID || predecessor.TargetBranch != successor.TargetBranch || predecessor.SourceRevision != successor.SourceRevision || predecessor.RequestFingerprint != successor.RequestFingerprint {
+		return domain.PublicationOperation{}, domain.PublicationOperation{}, fmt.Errorf("publication successor identity does not match predecessor %s", operationID)
+	}
+	placeholders := make([]string, len(update.ExpectedStates))
+	args := []any{string(update.State), update.ReleaseClaim, update.ReleaseClaim, update.ReleaseClaim, strings.TrimSpace(update.CandidateRevision), strings.TrimSpace(update.ValidationRequestID), strings.TrimSpace(update.ReusedEvidenceID), strings.TrimSpace(update.FailureKind), strings.TrimSpace(update.FailureDetail), strings.TrimSpace(update.FailureArtifact), nullableTime(update.StartedAt), nullableTime(update.FinishedAt), now.Format(time.RFC3339Nano), strings.TrimSpace(operationID), strings.TrimSpace(update.ExpectedClaimToken), now.UnixNano()}
+	for i, state := range update.ExpectedStates {
+		placeholders[i] = "?"
+		args = append(args, string(state))
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE daemon_publication_operations SET state=?,lease_owner=CASE WHEN ? THEN '' ELSE lease_owner END,claim_token=CASE WHEN ? THEN '' ELSE claim_token END,claim_expires_at=CASE WHEN ? THEN NULL ELSE claim_expires_at END,candidate_revision=?,validation_request_id=?,reused_evidence_id=?,failure_kind=?,failure_detail=?,failure_artifact=?,started_at=COALESCE(?,started_at),finished_at=?,updated_at=? WHERE operation_id=? AND claim_token=? AND claim_expires_at>? AND state IN (`+strings.Join(placeholders, ",")+`)`, args...)
+	if err != nil {
+		return domain.PublicationOperation{}, domain.PublicationOperation{}, fmt.Errorf("terminalize publication predecessor: %w", err)
+	}
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		return domain.PublicationOperation{}, domain.PublicationOperation{}, fmt.Errorf("publication operation %s state changed concurrently", operationID)
+	}
+	createdAt := successor.CreatedAt.UTC()
+	if createdAt.IsZero() {
+		createdAt = now
+	}
+	_, insertErr := tx.ExecContext(ctx, `INSERT INTO daemon_publication_operations(
+		operation_id,project_id,issue_id,intent_key,request_fingerprint,actor_id,target_id,target_branch,
+		source_revision,base_revision,candidate_revision,policy_version,environment_fingerprint,
+		validation_command,evidence_source,evidence_event_id,evidence_seq,evidence_digest,coalesce_key,state,created_at,updated_at
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		successor.OperationID, successor.ProjectID, successor.IssueID, successor.IntentKey, successor.RequestFingerprint,
+		successor.ActorID, successor.TargetID, successor.TargetBranch, successor.SourceRevision, successor.BaseRevision,
+		successor.CandidateRevision, successor.PolicyVersion, successor.EnvironmentFingerprint, successor.ValidationCommand, successor.EvidenceSource,
+		successor.EvidenceEventID, successor.EvidenceSeq, successor.EvidenceDigest, coalesceKey, domain.PublicationOperationQueued,
+		createdAt.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	if insertErr != nil {
+		return domain.PublicationOperation{}, domain.PublicationOperation{}, fmt.Errorf("insert atomic publication successor: %w", insertErr)
+	}
+	terminal, err := getPublicationOperationTx(ctx, tx, operationID)
+	if err != nil {
+		return domain.PublicationOperation{}, domain.PublicationOperation{}, err
+	}
+	persistedSuccessor, err := getPublicationOperationTx(ctx, tx, successor.OperationID)
+	if err != nil {
+		return domain.PublicationOperation{}, domain.PublicationOperation{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.PublicationOperation{}, domain.PublicationOperation{}, fmt.Errorf("commit atomic publication successor: %w", err)
+	}
+	return terminal, persistedSuccessor, nil
+}
+
+func getPublicationOperationTx(ctx context.Context, tx *sql.Tx, operationID string) (domain.PublicationOperation, error) {
+	operation, err := scanPublicationOperation(tx.QueryRowContext(ctx, publicationOperationSelect+` WHERE operation_id=?`, strings.TrimSpace(operationID)))
+	if err != nil {
+		return domain.PublicationOperation{}, fmt.Errorf("read publication operation %s: %w", operationID, err)
+	}
+	return operation, nil
+}
+
 func (s *SQLiteStore) publicationQueuePosition(ctx context.Context, operation domain.PublicationOperation) (int, error) {
 	if operation.State != domain.PublicationOperationQueued {
 		return 0, nil

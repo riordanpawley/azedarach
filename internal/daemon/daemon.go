@@ -190,6 +190,12 @@ type Daemon struct {
 	publicationClaimNow                  func() time.Time
 	publicationClaimTTL                  time.Duration
 	publicationValidationWait            func(context.Context, string) error
+	publicationContinuationSubmit        func(context.Context, domain.PublicationOperation) error
+	publicationContinuationWait          func(context.Context) error
+	publicationContinuationMu            sync.Mutex
+	publicationContinuationCtx           context.Context
+	publicationContinuationCancel        context.CancelFunc
+	publicationContinuationRetrying      map[string]bool
 	publicationStoresMu                  sync.Mutex
 	publicationStores                    map[string]*operationstore.SQLiteStore
 	noticeService                        *daemonnotices.Service
