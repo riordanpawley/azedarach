@@ -76,22 +76,22 @@ func TestProjectionDeltaProtocolVersionClaimAndCompatibility(t *testing.T) {
 	if ProjectionDeltaProtocolVersion != 48 {
 		t.Fatalf("projection protocol first version=%d, want 48", ProjectionDeltaProtocolVersion)
 	}
-	if CurrentVersion != 56 {
-		t.Fatalf("current protocol version=%d, want 56", CurrentVersion)
+	if CurrentVersion != 57 {
+		t.Fatalf("current protocol version=%d, want 57", CurrentVersion)
 	}
-	if SupportsProjectionDeltaCommands(47) || !SupportsProjectionDeltaCommands(48) || !SupportsProjectionDeltaCommands(49) || !SupportsProjectionDeltaCommands(50) || !SupportsProjectionDeltaCommands(51) || !SupportsProjectionDeltaCommands(52) || !SupportsProjectionDeltaCommands(53) || !SupportsProjectionDeltaCommands(54) || !SupportsProjectionDeltaCommands(55) || !SupportsProjectionDeltaCommands(56) || SupportsProjectionDeltaCommands(57) {
-		t.Fatal("projection command support window does not span v48-v56")
+	if SupportsProjectionDeltaCommands(47) || !SupportsProjectionDeltaCommands(48) || !SupportsProjectionDeltaCommands(49) || !SupportsProjectionDeltaCommands(50) || !SupportsProjectionDeltaCommands(51) || !SupportsProjectionDeltaCommands(52) || !SupportsProjectionDeltaCommands(53) || !SupportsProjectionDeltaCommands(54) || !SupportsProjectionDeltaCommands(55) || !SupportsProjectionDeltaCommands(56) || !SupportsProjectionDeltaCommands(57) || SupportsProjectionDeltaCommands(58) {
+		t.Fatal("projection command support window does not span v48-v57")
 	}
-	if ack := NegotiateHello(Hello{ProtocolVersion: 48}, "daemon-v56"); ack.Accepted || ack.DaemonProtocolVersion != 56 || ack.ErrorCode != ErrorCodeUpgradeRequired {
+	if ack := NegotiateHello(Hello{ProtocolVersion: 48}, "daemon-v57"); ack.Accepted || ack.DaemonProtocolVersion != 57 || ack.ErrorCode != ErrorCodeUpgradeRequired {
 		t.Fatalf("v48 stale-client handshake=%+v", ack)
 	}
-	if ack := NegotiateHello(Hello{ProtocolVersion: 55}, "daemon-v56"); ack.Accepted || ack.DaemonProtocolVersion != 56 || ack.ErrorCode != ErrorCodeUpgradeRequired {
-		t.Fatalf("v54 stale-generation handshake=%+v", ack)
+	if ack := NegotiateHello(Hello{ProtocolVersion: 56}, "daemon-v57"); ack.Accepted || ack.DaemonProtocolVersion != 57 || ack.ErrorCode != ErrorCodeUpgradeRequired {
+		t.Fatalf("v56 stale-generation handshake=%+v", ack)
 	}
-	if ack := NegotiateHello(Hello{ProtocolVersion: 56}, "daemon-v56"); !ack.Accepted || ack.DaemonProtocolVersion != 56 {
-		t.Fatalf("v56 compatibility handshake=%+v", ack)
+	if ack := NegotiateHello(Hello{ProtocolVersion: 57}, "daemon-v57"); !ack.Accepted || ack.DaemonProtocolVersion != 57 {
+		t.Fatalf("v57 compatibility handshake=%+v", ack)
 	}
-	if ack := NegotiateHello(Hello{ProtocolVersion: 57}, "daemon-v56"); ack.Accepted || ack.ErrorCode != ErrorCodeIncompatible {
-		t.Fatalf("v56 compatibility handshake=%+v", ack)
+	if ack := NegotiateHello(Hello{ProtocolVersion: 58}, "daemon-v57"); ack.Accepted || ack.ErrorCode != ErrorCodeIncompatible {
+		t.Fatalf("v58 future-generation handshake=%+v", ack)
 	}
 }

@@ -502,7 +502,7 @@ const (
 	evidenceValidateUsage         = "Usage: az evidence validate [--body <json>|--file <path>] [--fix] [--template] [--json]"
 	observeUsage                  = "Usage: az observe [--root <issue-id>] [--project <project-id>] [--json]"
 	orchestrateStatusUsage        = "Usage: az orchestrate status [--root <issue-id>] [--project <project-id>] [--since <seq>] [--limit <n>] [--json] [--summary|--full]"
-	orchestrateStartUsage         = "Usage: az orchestrate start [--root <issue-id>] [--project <project-id>] [--limit <n>] [--issue <issue-id> ...] [--override-board-health] [--json]"
+	orchestrateStartUsage         = "Usage: az orchestrate start [--root <issue-id>] [--project <project-id>] [--limit <n>] [--issue <issue-id> ...] [--intent-key <key>] [--override-board-health] [--json]"
 	orchestrateReviewUsage        = "Usage: az orchestrate review <accept|return> --issue <issue-id> [--issue <issue-id> ...] [--root <issue-id>] [--project <project-id>] [--intent-key <key>] [--finding <text> ...] [--severity <level>] [--restart-worker] [--json]"
 	orchestrateGroupUsage         = "Usage: az orchestrate group --root <issue-id> --nested <issue-id> --issue <issue-id> ... [--project <project-id>] [--json]"
 	orchestrateWatchUsage         = "Usage: az orchestrate watch [--root <issue-id>] [--project <project-id>] [--since <seq>] [--jsonl] [--once] [--verbose|--full]"

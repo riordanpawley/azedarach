@@ -1309,6 +1309,24 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	if request.Scope.Kind != domain.OrchestrationScopeProject && len(request.Routes) > 0 {
 		return protocol.OrchestrationIntentResult{}, fmt.Errorf("candidate routing is available only for project orchestration scope")
 	}
+	projectID = a.daemon.canonicalProjectID(projectID)
+	result := protocol.OrchestrationIntentResult{Scope: request.Scope, Kind: request.Kind, IntentKey: request.IntentKey, Requested: normalizedRequestedStartIssueIDs(request.IssueIDs), Skipped: map[string]string{}, Failed: map[string]string{}}
+	issueClient := a.daemon.issueClientForProject(projectID)
+	if issueClient == nil {
+		return protocol.OrchestrationIntentResult{}, fmt.Errorf("issue store unavailable")
+	}
+	requestedIntents := make([]issues.RequestedOrchestrationStart, 0, len(result.Requested))
+	requestDigest, err := orchestrationStartRequestDigest(request, result.Requested)
+	if err != nil {
+		return protocol.OrchestrationIntentResult{}, err
+	}
+	for _, issueID := range result.Requested {
+		requested, err := issueClient.QueueRequestedOrchestrationStart(ctx, projectID, issueID, request.IntentKey, request.ActorID, orchestrationStartDedupeKey(issueID, request.IntentKey), requestDigest)
+		if err != nil {
+			return protocol.OrchestrationIntentResult{}, fmt.Errorf("queue requested orchestration start: %w", err)
+		}
+		requestedIntents = append(requestedIntents, requested)
+	}
 	// Keep readiness, capacity selection, claims, and operation submission in
 	// one daemon-authoritative critical section. Ownership claims remain the
 	// durable cross-process conflict gate for individual issues.
@@ -1316,11 +1334,22 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	defer a.daemon.orchestrationMu.Unlock()
 	snapshot, err := a.Snapshot(ctx, projectID, protocol.OrchestrationSnapshotRequest{Scope: request.Scope, ActorID: request.ActorID})
 	if err != nil {
-		return protocol.OrchestrationIntentResult{}, err
+		if len(requestedIntents) > 0 && errors.Is(err, errOrchestrationSnapshotAdmissionContended) {
+			phase := orchestrationStartAdmissionPhase(err)
+			for _, requested := range requestedIntents {
+				if updateErr := issueClient.UpdateRequestedOrchestrationStart(ctx, requested, "queued", string(phase), err); updateErr != nil {
+					return protocol.OrchestrationIntentResult{}, fmt.Errorf("record queued orchestration start phase: %w", updateErr)
+				}
+				result.Pending = append(result.Pending, protocol.OrchestrationPending{IssueID: requested.IssueID, Phase: phase, Message: err.Error(), Retryable: true})
+			}
+			return result, nil
+		}
+		return protocol.OrchestrationIntentResult{}, completeRequestedOrchestrationStarts(ctx, issueClient, requestedIntents, err)
 	}
 	if request.Scope.Kind == domain.OrchestrationScopeProject && !snapshot.Health.Healthy {
 		if !request.OverrideBoardHealth || !orchestrationHealthOverrideAllowed(snapshot.Health) {
-			return protocol.OrchestrationIntentResult{}, fmt.Errorf("project board health refused start: %s (only the open-issue threshold may be explicitly overridden)", strings.Join(snapshot.Health.Diagnostics, "; "))
+			refusal := fmt.Errorf("project board health refused start: %s (only the open-issue threshold may be explicitly overridden)", strings.Join(snapshot.Health.Diagnostics, "; "))
+			return protocol.OrchestrationIntentResult{}, completeRequestedOrchestrationStarts(ctx, issueClient, requestedIntents, refusal)
 		}
 	}
 	runnable := make(map[string]struct{}, len(snapshot.Runnable))
@@ -1345,17 +1374,13 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	} else {
 		requested = stableRequestedCandidates(requested, snapshot.Runnable)
 	}
-	result := protocol.OrchestrationIntentResult{Scope: request.Scope, Kind: request.Kind, IntentKey: request.IntentKey, Requested: requested, Skipped: map[string]string{}, Failed: map[string]string{}}
+	result.Requested = requested
 	scopeTasks, _, err := a.daemon.projectReadSnapshot(projectID)
 	if err != nil {
-		return protocol.OrchestrationIntentResult{}, fmt.Errorf("refresh orchestration scope projection: %w", err)
+		return protocol.OrchestrationIntentResult{}, completeRequestedOrchestrationStarts(ctx, issueClient, requestedIntents, fmt.Errorf("refresh orchestration scope projection: %w", err))
 	}
 	routedIssues := map[string]struct{}{}
 	if request.Scope.Kind == domain.OrchestrationScopeProject {
-		issueClient := a.daemon.issueClientForProject(projectID)
-		if issueClient == nil {
-			return protocol.OrchestrationIntentResult{}, fmt.Errorf("issue store unavailable")
-		}
 		candidateIDs := make(map[string]bool, len(snapshot.Candidates))
 		for _, candidate := range snapshot.Candidates {
 			candidateIDs[candidate.IssueID] = true
@@ -1449,7 +1474,80 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 		}
 		started++
 	}
+	if err := completeRequestedOrchestrationStarts(ctx, issueClient, requestedIntents, nil); err != nil {
+		return protocol.OrchestrationIntentResult{}, err
+	}
 	return result, nil
+}
+
+func completeRequestedOrchestrationStarts(ctx context.Context, issueClient *issues.Client, requestedIntents []issues.RequestedOrchestrationStart, cause error) error {
+	phase := "complete"
+	if cause != nil {
+		phase = "failed"
+	}
+	for _, requested := range requestedIntents {
+		if err := issueClient.UpdateRequestedOrchestrationStart(ctx, requested, "completed", phase, cause); err != nil {
+			completionErr := fmt.Errorf("complete requested orchestration start: %w", err)
+			if cause != nil {
+				return errors.Join(cause, completionErr)
+			}
+			return completionErr
+		}
+	}
+	return cause
+}
+
+func orchestrationStartRequestDigest(request protocol.OrchestrationIntentRequest, issueIDs []string) (string, error) {
+	request.IssueIDs = append([]string(nil), issueIDs...)
+	request.ActorID = strings.TrimSpace(request.ActorID)
+	request.IntentKey = strings.TrimSpace(request.IntentKey)
+	request.RepoDir = strings.TrimSpace(request.RepoDir)
+	request.BaseBranch = strings.TrimSpace(request.BaseBranch)
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		return "", fmt.Errorf("encode orchestration start intent identity: %w", err)
+	}
+	digest := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", digest), nil
+}
+
+func normalizedRequestedStartIssueIDs(issueIDs []string) []string {
+	seen := make(map[string]struct{}, len(issueIDs))
+	out := make([]string, 0, len(issueIDs))
+	for _, issueID := range issueIDs {
+		issueID = strings.TrimSpace(issueID)
+		key := naming.CanonicalIssueIDKey(issueID)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, issueID)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		left, right := naming.CanonicalIssueIDKey(out[i]), naming.CanonicalIssueIDKey(out[j])
+		if left == right {
+			return out[i] < out[j]
+		}
+		return left < right
+	})
+	return out
+}
+
+func orchestrationStartAdmissionPhase(err error) protocol.OrchestrationAdmissionPhase {
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "projection source checkpoint"), strings.Contains(message, "projection_source_checkpoint"):
+		return protocol.OrchestrationAdmissionProjectionCheckpoint
+	case strings.Contains(message, "operation"):
+		return protocol.OrchestrationAdmissionOperationsStore
+	case strings.Contains(message, "observation"):
+		return protocol.OrchestrationAdmissionObservationProjection
+	default:
+		return protocol.OrchestrationAdmissionSnapshot
+	}
 }
 
 func directOrchestrationTarget(tasks []domain.Task, rootIssueID, issueID string) bool {

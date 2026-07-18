@@ -40,6 +40,7 @@ type migration struct {
 
 const decisionIdempotencyMigrationID = "0051_decision_idempotency"
 const gitHookRefreshIntentsMigrationID = "0053_git_hook_refresh_intents"
+const orchestrationStartIntentsMigrationID = "0058_orchestration_start_intents"
 
 const mailboxObservationReplayRepairMaxRows = 50000
 const legacyAttachmentBlobForwardMigrationID = "0056_legacy_attachment_blob_forward"
@@ -107,6 +108,7 @@ var orderedMigrations = []migration{
 	{id: rootedSessionRoleExclusivityMigrationID, path: "migrations/0054_rooted_session_role_exclusivity.sql"},
 	{id: mailboxObservationReplayRepairMigrationID, path: "migrations/0055_mailbox_observation_replay_repair.manifest.sql"},
 	{id: legacyAttachmentBlobForwardMigrationID, path: "migrations/0056_legacy_attachment_blob_forward.manifest.sql"},
+	{id: orchestrationStartIntentsMigrationID, path: "migrations/0058_orchestration_start_intents.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -172,6 +174,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: rootedSessionRoleExclusivityMigrationID, Path: "migrations/0054_rooted_session_role_exclusivity.sql", Checksum: rootedSessionRoleExclusivityChecksum},
 	{ID: mailboxObservationReplayRepairMigrationID, Path: "migrations/0055_mailbox_observation_replay_repair.manifest.sql", Checksum: "c350a53fc470b54dfc90faa7674d22ad20d6c4b631a8f0d528962eb7f7df0966"},
 	{ID: legacyAttachmentBlobForwardMigrationID, Path: "migrations/0056_legacy_attachment_blob_forward.manifest.sql", Checksum: "c6450a27423e68ebf4b662d485466a726ebcf3208c2858f2cb0f65c6efc6a62a"},
+	{ID: orchestrationStartIntentsMigrationID, Path: "migrations/0058_orchestration_start_intents.sql", Checksum: "68b5ca7149782ade0701bd684e23379145b312805e022ad33e5f267c29cc3a00"},
 }
 
 func validateMigrationRegistry() error {
@@ -424,6 +427,46 @@ func applyIssueStateRuntimeConstraintsMigration(ctx context.Context, db *sql.DB,
 		return err
 	}
 	tx = nil
+	return nil
+}
+
+func validateOrchestrationStartIntentsSchema(ctx context.Context, db *sql.DB) error {
+	sqlText, err := loadMigrationSQL("migrations/0058_orchestration_start_intents.sql")
+	if err != nil {
+		return fmt.Errorf("load orchestration start intents schema: %w", err)
+	}
+	objects := []struct {
+		kind string
+		name string
+	}{
+		{kind: "table", name: "orchestration_start_intents"},
+		{kind: "index", name: "idx_orchestration_start_intents_dedupe"},
+		{kind: "index", name: "idx_orchestration_start_intents_recovery"},
+	}
+	statements := strings.Split(sqlText, ";")
+	for _, object := range objects {
+		canonical := ""
+		needle := strings.ToLower(object.name)
+		for _, statement := range statements {
+			if strings.Contains(strings.ToLower(statement), needle) {
+				canonical = strings.TrimSpace(statement)
+				break
+			}
+		}
+		if canonical == "" {
+			return fmt.Errorf("orchestration start intents schema drifted: immutable artifact is missing %s", object.name)
+		}
+		var actual string
+		if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type=? AND name=?`, object.kind, object.name).Scan(&actual); err != nil {
+			return fmt.Errorf("orchestration start intents schema drifted: missing %s: %w", object.name, err)
+		}
+		normalize := func(value string) string {
+			return strings.ReplaceAll(normalizeSQLiteDDL(value), "ifnotexists", "")
+		}
+		if normalize(actual) != normalize(canonical) {
+			return fmt.Errorf("orchestration start intents schema drifted: %s differs from immutable migration artifact: got %q want %q", object.name, normalize(actual), normalize(canonical))
+		}
+	}
 	return nil
 }
 
@@ -689,6 +732,15 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	}
 	if rootedRoleExclusivityApplied {
 		if err := validateRootedSessionRoleExclusivitySchema(ctx, db); err != nil {
+			return err
+		}
+	}
+	orchestrationStartIntentsApplied, err := isMigrationApplied(ctx, db, orchestrationStartIntentsMigrationID)
+	if err != nil {
+		return fmt.Errorf("check orchestration start intents migration: %w", err)
+	}
+	if orchestrationStartIntentsApplied {
+		if err := validateOrchestrationStartIntentsSchema(ctx, db); err != nil {
 			return err
 		}
 	}

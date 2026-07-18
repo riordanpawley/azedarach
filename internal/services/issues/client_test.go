@@ -4620,6 +4620,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0054_rooted_session_role_exclusivity",
 		"0055_mailbox_observation_replay_repair",
 		"0056_legacy_attachment_blob_forward",
+		"0058_orchestration_start_intents",
 	}, got)
 }
 
