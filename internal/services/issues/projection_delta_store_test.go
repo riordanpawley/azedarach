@@ -16,8 +16,27 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 	"github.com/stretchr/testify/require"
 )
+
+type projectionCodedError struct{ code int }
+
+func (e projectionCodedError) Error() string { return "injected sqlite read failure" }
+func (e projectionCodedError) Code() int     { return e.code }
+
+func TestProjectionReadErrorClassifiesOnlyShortReadIOErrorAsRetryable(t *testing.T) {
+	client := NewClientAtPath(filepath.Join(t.TempDir(), "consumer.db"), nil)
+	shortRead := client.projectionReadError("read projection delta head", projectionCodedError{code: sqliteutil.SQLiteIOErrorShortRead})
+	require.ErrorIs(t, shortRead, domain.ErrProjectionRetryable)
+	require.ErrorContains(t, shortRead, "db_path="+sqliteutil.CanonicalPath(client.dbPath))
+	require.ErrorContains(t, shortRead, "sqlite_extended_code=522")
+	require.ErrorContains(t, shortRead, "sqlite_symbol=SQLITE_IOERR_SHORT_READ")
+
+	structural := client.projectionReadError("read projection delta head", projectionCodedError{code: 11})
+	require.NotErrorIs(t, structural, domain.ErrProjectionRetryable)
+	require.ErrorContains(t, structural, "sqlite_symbol=SQLITE_CORRUPT")
+}
 
 func TestProjectionDeltaActiveIssueMutationEmits(t *testing.T) {
 	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)

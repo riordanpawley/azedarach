@@ -5938,6 +5938,7 @@ func (c *Client) logSQLiteRead(ctx context.Context, operation string, startedAt 
 		"service", "azedarach.issue_store",
 		"dependency.name", "sqlite",
 		"dependency.operation", operation,
+		"db.path", sqliteutil.CanonicalPath(c.dbPath),
 		"dependency.duration_ms", time.Since(startedAt).Milliseconds(),
 		"outcome", outcome,
 		"row_count", rowCount,
@@ -5945,6 +5946,13 @@ func (c *Client) logSQLiteRead(ctx context.Context, operation string, startedAt 
 	base = append(base, attrs...)
 	if err != nil {
 		base = append(base, "error_class", "sqlite_query")
+		if details, ok := sqliteutil.Details(err); ok {
+			base = append(base,
+				"sqlite.code", details.PrimaryCode,
+				"sqlite.extended_code", details.ExtendedCode,
+				"sqlite.symbol", details.Symbol,
+			)
+		}
 	}
 	latencytrace.LogPhaseContext(ctx, nil, "dependency", "sqlite."+operation, startedAt, base...)
 	if c.logger == nil {
