@@ -148,6 +148,9 @@ func isCachedProjectIssueStoreHealthErrorMessage(message string) bool {
 }
 
 func projectIssueStoreHealthErrorCode(err error) protocol.ErrorCode {
+	if isProjectReadUnavailableError(err) {
+		return protocol.ErrorCodeUnavailable
+	}
 	if issues.IsSQLiteCorrupt(err) {
 		return protocol.ErrorCodeUnavailable
 	}

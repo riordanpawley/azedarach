@@ -24,6 +24,7 @@ const (
 	daemonInvariantAdvisorSingleton        daemonInvariantID = "session.advisor_singleton"
 
 	daemonInvariantTaskListFreshness    daemonInvariantID = "task.list_freshness"
+	daemonInvariantTaskReadAfterWrite   daemonInvariantID = "task.read_committed_revision"
 	daemonInvariantTaskClose            daemonInvariantID = "task.close"
 	daemonInvariantTaskClosePreflight   daemonInvariantID = "task.close_preflight"
 	daemonInvariantTaskDelete           daemonInvariantID = "task.delete"
@@ -70,6 +71,7 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantSessionIssueLifecycle:        daemonInvariantSourceHybrid,
 	daemonInvariantSessionActivityConverge:      daemonInvariantSourceHybrid,
 	daemonInvariantTaskListFreshness:            daemonInvariantSourceProjection,
+	daemonInvariantTaskReadAfterWrite:           daemonInvariantSourceProjection,
 	daemonInvariantTaskClose:                    daemonInvariantSourceHybrid,
 	daemonInvariantTaskClosePreflight:           daemonInvariantSourceHybrid,
 	daemonInvariantTaskDelete:                   daemonInvariantSourceHybrid,

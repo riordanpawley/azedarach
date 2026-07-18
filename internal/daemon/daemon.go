@@ -2086,6 +2086,31 @@ func (d *Daemon) currentRevision(projectID string) uint64 {
 
 func (d *Daemon) publishTaskEvent(req protocol.RequestEnvelope, eventName string, rev uint64, bodies ...protocol.TaskEventBody) {
 	projectID := d.projectID(req.Meta)
+	convergenceCtx, endConvergence := latencytrace.StartSpanWithEndAttributes(context.Background(), "daemon", "task.mutation_read_convergence", "project_id", projectID)
+	cacheRevision := uint64(0)
+	convergenceOutcome := "not_active"
+	var convergenceErr error
+	d.materializersMu.RLock()
+	materializer := d.materializers[projectID]
+	d.materializersMu.RUnlock()
+	if materializer != nil {
+		boundedCtx, cancelConvergence := context.WithTimeout(convergenceCtx, projectReadMutationConvergenceTimeout)
+		metadata, outcome, err := materializer.convergeMutation(boundedCtx, rev)
+		cancelConvergence()
+		cacheRevision = metadata.DeliveryCursor
+		convergenceOutcome = outcome
+		if err != nil {
+			convergenceErr = err
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Error("committed task mutation failed to converge project read materializer", "project_id", projectID, "mutation_revision", rev, "cache_revision", cacheRevision, "convergence_outcome", convergenceOutcome, "error", err)
+			}
+		}
+	}
+	endConvergence(convergenceErr,
+		"mutation_revision", rev,
+		"cache_revision", cacheRevision,
+		"convergence_outcome", convergenceOutcome,
+	)
 	var body []byte
 	if len(bodies) > 0 {
 		eventBody := bodies[0]
