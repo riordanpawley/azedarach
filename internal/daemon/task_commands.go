@@ -4358,7 +4358,7 @@ func (d *Daemon) closeCleanDescendantsBeforeParent(ctx context.Context, projectI
 }
 
 func (d *Daemon) loadTaskClosePreflightDomainTasks(ctx context.Context, projectID, taskID string) ([]domain.Task, error) {
-	tasks, _, err := d.convergedProjectReadSnapshot(ctx, projectID)
+	tasks, _, err := d.convergedProjectReadSnapshotForInvariant(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -4366,7 +4366,7 @@ func (d *Daemon) loadTaskClosePreflightDomainTasks(ctx context.Context, projectI
 	if err := d.refreshProjectReadRuntimeForIssues(ctx, projectID, taskIDsFromTasks(closure)); err != nil {
 		return nil, newProjectReadUnavailableError("refresh close-preflight runtime facts: %w", err)
 	}
-	tasks, _, err = d.convergedProjectReadSnapshot(ctx, projectID)
+	tasks, _, err = d.convergedProjectReadSnapshotForInvariant(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}

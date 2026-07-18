@@ -1058,7 +1058,7 @@ func (d *Daemon) projectReadSnapshot(projectID string) ([]domain.Task, protocol.
 		// Embedded/unit daemons do not execute Run's startup boundary. Bootstrap
 		// their disposable read model on first use so tests and library users keep
 		// the same verified semantics. Production IPC cannot reach this path.
-		candidate, err := d.bootstrapEmbeddedProjectReadMaterializer(context.Background(), projectID)
+		candidate, err := d.bootstrapEmbeddedProjectReadMaterializer(context.Background(), projectID, false)
 		if err != nil {
 			return nil, protocol.MaterializedSnapshotMetadata{}, err
 		}
@@ -1075,17 +1075,25 @@ func (d *Daemon) projectReadSnapshot(projectID string) ([]domain.Task, protocol.
 	return tasks, metadata, nil
 }
 
-func (d *Daemon) bootstrapEmbeddedProjectReadMaterializer(ctx context.Context, projectID string) (*projectReadMaterializer, error) {
+func (d *Daemon) bootstrapEmbeddedProjectReadMaterializer(ctx context.Context, projectID string, includeRuntime bool) (*projectReadMaterializer, error) {
 	client := d.issueClientForProject(projectID)
 	if client == nil {
 		return nil, newProjectReadUnavailableError("project read materialization unavailable for %s", projectID)
 	}
-	candidate := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(client), func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
-		return d.hydrateProjectReadTasks(hydrateCtx, projectID, client, tasks)
-	})
-	candidate.hydrateDegraded = func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
-		return d.hydrateProjectReadTasksDegraded(hydrateCtx, projectID, client, tasks), nil
+	hydrate := func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		return tasks, nil
 	}
+	hydrateDegraded := hydrate
+	if includeRuntime {
+		hydrate = func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
+			return d.hydrateProjectReadTasks(hydrateCtx, projectID, client, tasks)
+		}
+		hydrateDegraded = func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
+			return d.hydrateProjectReadTasksDegraded(hydrateCtx, projectID, client, tasks), nil
+		}
+	}
+	candidate := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(client), hydrate)
+	candidate.hydrateDegraded = hydrateDegraded
 	d.configureProjectReadMaterializer(candidate, projectID, client)
 	if err := candidate.bootstrap(ctx); err != nil {
 		return nil, newProjectReadUnavailableError("bootstrap embedded project read materialization for %s: %w", projectID, err)
@@ -1094,6 +1102,14 @@ func (d *Daemon) bootstrapEmbeddedProjectReadMaterializer(ctx context.Context, p
 }
 
 func (d *Daemon) convergedProjectReadSnapshot(ctx context.Context, projectID string) ([]domain.Task, protocol.MaterializedSnapshotMetadata, error) {
+	return d.convergedProjectReadSnapshotMode(ctx, projectID, false)
+}
+
+func (d *Daemon) convergedProjectReadSnapshotForInvariant(ctx context.Context, projectID string) ([]domain.Task, protocol.MaterializedSnapshotMetadata, error) {
+	return d.convergedProjectReadSnapshotMode(ctx, projectID, true)
+}
+
+func (d *Daemon) convergedProjectReadSnapshotMode(ctx context.Context, projectID string, includeEmbeddedRuntime bool) ([]domain.Task, protocol.MaterializedSnapshotMetadata, error) {
 	projectID = d.canonicalProjectID(projectID)
 	materializer := d.activeProjectReadMaterializer(projectID)
 	if materializer == nil {
@@ -1103,15 +1119,17 @@ func (d *Daemon) convergedProjectReadSnapshot(ctx context.Context, projectID str
 		if started {
 			return d.projectReadSnapshot(projectID)
 		}
-		candidate, err := d.bootstrapEmbeddedProjectReadMaterializer(ctx, projectID)
+		candidate, err := d.bootstrapEmbeddedProjectReadMaterializer(ctx, projectID, includeEmbeddedRuntime)
 		if err != nil {
 			return nil, protocol.MaterializedSnapshotMetadata{}, err
 		}
 		tasks, metadata := candidate.snapshot()
-		if err := candidate.refreshRuntime(ctx, taskIDsFromTasks(tasks)); err != nil {
-			return nil, metadata, newProjectReadUnavailableError("refresh embedded project runtime facts for %s: %w", projectID, err)
+		if includeEmbeddedRuntime {
+			if err := candidate.refreshRuntime(ctx, taskIDsFromTasks(tasks)); err != nil {
+				return nil, metadata, newProjectReadUnavailableError("refresh embedded project runtime facts for %s: %w", projectID, err)
+			}
+			tasks, metadata = candidate.snapshot()
 		}
-		tasks, metadata = candidate.snapshot()
 		return tasks, metadata, nil
 	}
 	healthEpoch := materializer.healthResultEpoch()

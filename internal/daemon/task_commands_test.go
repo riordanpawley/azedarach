@@ -4826,7 +4826,43 @@ func TestProductionRuntimeHydrationFailureDoesNotBlockOrdinaryReads(t *testing.T
 	}
 }
 
-func TestEmbeddedAuthoritativeReadUsesStrictHydrationAfterBootstrap(t *testing.T) {
+func TestEmbeddedOrdinaryReadUsesCanonicalBootstrapOnly(t *testing.T) {
+	ctx := context.Background()
+	const projectID = "proj-embedded-canonical-only"
+	issuesClient, _ := newTestIssueClient(t)
+	if _, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "embedded canonical row", Status: domain.StatusInProgress, Type: domain.TypeTask,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var hydrateCalls atomic.Int32
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issues:                issuesClient,
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		materializers:         map[string]*projectReadMaterializer{},
+		projectReadRuntimeHydrate: func(_ context.Context, _ string, tasks []domain.Task) ([]domain.Task, error) {
+			hydrateCalls.Add(1)
+			return nil, errors.New("ordinary embedded read invoked runtime hydration")
+		},
+		revision: map[string]uint64{projectID: 1},
+	}
+	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-embedded-canonical-only",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.list",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+	})
+	if err != nil || !resp.OK {
+		t.Fatalf("task.list response = %+v, err = %v", resp.Error, err)
+	}
+	if got := hydrateCalls.Load(); got != 0 {
+		t.Fatalf("embedded ordinary read hydration calls = %d, want 0", got)
+	}
+}
+
+func TestEmbeddedInvariantReadUsesStrictHydrationAfterBootstrap(t *testing.T) {
 	ctx := context.Background()
 	const projectID = "proj-embedded-runtime-unavailable"
 	issuesClient, _ := newTestIssueClient(t)
@@ -4850,7 +4886,7 @@ func TestEmbeddedAuthoritativeReadUsesStrictHydrationAfterBootstrap(t *testing.T
 		},
 		revision: map[string]uint64{projectID: 1},
 	}
-	tasks, _, err := d.convergedProjectReadSnapshot(ctx, projectID)
+	tasks, _, err := d.convergedProjectReadSnapshotForInvariant(ctx, projectID)
 	if err == nil || !isProjectReadUnavailableError(err) {
 		t.Fatalf("tasks/error = %+v/%v, want project-read unavailable", tasks, err)
 	}
