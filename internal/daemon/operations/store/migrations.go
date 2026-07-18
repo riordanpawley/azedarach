@@ -29,7 +29,6 @@ var orderedMigrations = []migration{
 	{id: "daemon_operations_0005_validation_scope_purpose", path: "migrations/0005_validation_scope_purpose.sql"},
 	{id: "daemon_operations_0006_publication_validation_priority", path: "migrations/0006_publication_validation_priority.sql"},
 	{id: "daemon_operations_0007_layered_publication_evidence", path: "migrations/0007_layered_publication_evidence.sql"},
-	{id: "daemon_operations_0008_publication_queue", path: "migrations/0008_publication_queue.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -39,8 +38,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "daemon_operations_0004_review_validation_assignment", Path: "migrations/0004_review_validation_assignment.sql", Checksum: "6f5d54a3f27937ae9adcdd6a0b3f9b79ddd2814f32635eb2c3e5ca051c3268ca"},
 	{ID: "daemon_operations_0005_validation_scope_purpose", Path: "migrations/0005_validation_scope_purpose.sql", Checksum: "6cb59febaf88ccc7948f5289cbdc040bfa041fbd639ea88eb77766dfff15a192"},
 	{ID: "daemon_operations_0006_publication_validation_priority", Path: "migrations/0006_publication_validation_priority.sql", Checksum: "bbbf9fd51c2d9289a295a6aeb7427d65d04d3d3a897cc995d2d91ea4577713fd"},
-	{ID: "daemon_operations_0007_layered_publication_evidence", Path: "migrations/0007_layered_publication_evidence.sql", Checksum: "8085a1cf4fef3028e18e3d43a338a7b441382cd05862433fa4e074dc89bc19df"},
-	{ID: "daemon_operations_0008_publication_queue", Path: "migrations/0008_publication_queue.sql", Checksum: "79e75204af2ad892dae23831e0c096bea73c68e7947d655658a97a023d1a4c44"},
+	{ID: "daemon_operations_0007_layered_publication_evidence", Path: "migrations/0007_layered_publication_evidence.sql", Checksum: "59182365b3d9dd89464e1fdb2f0e5818d6d91bbcf0625bcfd4c3898f888a10ef"},
 }
 
 const migrationArtifactAuthority sqlitemigration.Authority = "project.daemon_operations"
@@ -91,7 +89,7 @@ func runMigrations(ctx context.Context, db *sql.DB) error {
 }
 
 func validatePublicationQueueSchema(ctx context.Context, db *sql.DB) error {
-	artifact, err := loadMigrationSQL("migrations/0008_publication_queue.sql")
+	artifact, err := loadMigrationSQL("migrations/0007_layered_publication_evidence.sql")
 	if err != nil {
 		return fmt.Errorf("load canonical publication queue schema: %w", err)
 	}
@@ -108,6 +106,7 @@ func validatePublicationQueueSchema(ctx context.Context, db *sql.DB) error {
 		{"table", "daemon_publication_operations"},
 		{"index", "idx_daemon_publication_operations_queue"},
 		{"index", "idx_daemon_publication_operations_issue"},
+		{"index", "idx_daemon_publication_operations_claim"},
 		{"trigger", "daemon_publication_operation_identity_immutable"},
 	} {
 		var expected, actual string

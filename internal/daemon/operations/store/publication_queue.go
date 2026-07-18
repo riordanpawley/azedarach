@@ -15,14 +15,16 @@ const publicationOperationSelect = `SELECT
 operation_id,project_id,issue_id,intent_key,request_fingerprint,actor_id,target_id,target_branch,
 source_revision,base_revision,candidate_revision,policy_version,environment_fingerprint,
 validation_command,evidence_source,evidence_event_id,evidence_seq,evidence_digest,state,lease_owner,
+claim_token,claim_expires_at,
 validation_request_id,reused_evidence_id,failure_kind,failure_detail,failure_artifact,
 created_at,updated_at,started_at,finished_at
 FROM daemon_publication_operations`
 
 type PublicationOperationUpdate struct {
 	ExpectedStates      []domain.PublicationOperationState
+	ExpectedClaimToken  string
 	State               domain.PublicationOperationState
-	LeaseOwner          string
+	ReleaseClaim        bool
 	CandidateRevision   string
 	ValidationRequestID string
 	ReusedEvidenceID    string
@@ -32,6 +34,82 @@ type PublicationOperationUpdate struct {
 	StartedAt           *time.Time
 	FinishedAt          *time.Time
 	UpdatedAt           time.Time
+}
+
+type PublicationOperationClaim struct {
+	Owner string
+	Token string
+	Now   time.Time
+	TTL   time.Duration
+}
+
+func (s *SQLiteStore) ClaimPublicationOperation(ctx context.Context, operationID string, claim PublicationOperationClaim) (domain.PublicationOperation, bool, error) {
+	operationID = strings.TrimSpace(operationID)
+	claim.Owner = strings.TrimSpace(claim.Owner)
+	claim.Token = strings.TrimSpace(claim.Token)
+	if operationID == "" || claim.Owner == "" || claim.Token == "" || claim.TTL <= 0 {
+		return domain.PublicationOperation{}, false, fmt.Errorf("publication claim requires operation, owner, token, and positive TTL")
+	}
+	now := claim.Now.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	expires := now.Add(claim.TTL)
+	db, err := s.dbHandle()
+	if err != nil {
+		return domain.PublicationOperation{}, false, err
+	}
+	result, err := db.ExecContext(ctx, `UPDATE daemon_publication_operations
+		SET state=CASE WHEN state='queued' THEN 'preparing' ELSE state END,
+			lease_owner=?,claim_token=?,claim_expires_at=?,started_at=COALESCE(started_at,?),updated_at=?
+		WHERE operation_id=? AND state IN ('queued','preparing','validating','passed')
+			AND (claim_token='' OR claim_expires_at IS NULL OR claim_expires_at<=?)`,
+		claim.Owner, claim.Token, expires.UnixNano(), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), operationID, now.UnixNano())
+	if err != nil {
+		return domain.PublicationOperation{}, false, fmt.Errorf("claim publication operation: %w", err)
+	}
+	changed, _ := result.RowsAffected()
+	operation, found, err := s.PublicationOperation(ctx, operationID)
+	if err != nil {
+		return domain.PublicationOperation{}, false, err
+	}
+	if !found {
+		return domain.PublicationOperation{}, false, fmt.Errorf("publication operation %s not found", operationID)
+	}
+	return operation, changed == 1, nil
+}
+
+func (s *SQLiteStore) RenewPublicationOperationClaim(ctx context.Context, operationID, claimToken string, now time.Time, ttl time.Duration) (domain.PublicationOperation, error) {
+	operationID, claimToken = strings.TrimSpace(operationID), strings.TrimSpace(claimToken)
+	if operationID == "" || claimToken == "" || ttl <= 0 {
+		return domain.PublicationOperation{}, fmt.Errorf("publication claim renewal requires operation, token, and positive TTL")
+	}
+	now = now.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	db, err := s.dbHandle()
+	if err != nil {
+		return domain.PublicationOperation{}, err
+	}
+	result, err := db.ExecContext(ctx, `UPDATE daemon_publication_operations SET claim_expires_at=?,updated_at=?
+		WHERE operation_id=? AND claim_token=? AND claim_expires_at>? AND state IN ('preparing','validating','passed')`,
+		now.Add(ttl).UnixNano(), now.Format(time.RFC3339Nano), operationID, claimToken, now.UnixNano())
+	if err != nil {
+		return domain.PublicationOperation{}, fmt.Errorf("renew publication claim: %w", err)
+	}
+	changed, _ := result.RowsAffected()
+	if changed != 1 {
+		return domain.PublicationOperation{}, fmt.Errorf("publication operation %s claim is no longer owned", operationID)
+	}
+	updated, found, err := s.PublicationOperation(ctx, operationID)
+	if err != nil {
+		return domain.PublicationOperation{}, err
+	}
+	if !found {
+		return domain.PublicationOperation{}, fmt.Errorf("publication operation %s disappeared after claim renewal", operationID)
+	}
+	return updated, nil
 }
 
 func (s *SQLiteStore) EnqueuePublication(ctx context.Context, operation domain.PublicationOperation, coalesceKey string) (domain.PublicationOperation, bool, error) {
@@ -147,6 +225,9 @@ func (s *SQLiteStore) UpdatePublicationOperation(ctx context.Context, operationI
 	if len(update.ExpectedStates) == 0 {
 		return domain.PublicationOperation{}, fmt.Errorf("publication update requires expected state")
 	}
+	if strings.TrimSpace(update.ExpectedClaimToken) == "" {
+		return domain.PublicationOperation{}, fmt.Errorf("publication update requires expected claim token")
+	}
 	db, err := s.dbHandle()
 	if err != nil {
 		return domain.PublicationOperation{}, err
@@ -156,12 +237,12 @@ func (s *SQLiteStore) UpdatePublicationOperation(ctx context.Context, operationI
 		now = time.Now().UTC()
 	}
 	placeholders := make([]string, len(update.ExpectedStates))
-	args := []any{string(update.State), strings.TrimSpace(update.LeaseOwner), strings.TrimSpace(update.CandidateRevision), strings.TrimSpace(update.ValidationRequestID), strings.TrimSpace(update.ReusedEvidenceID), strings.TrimSpace(update.FailureKind), strings.TrimSpace(update.FailureDetail), strings.TrimSpace(update.FailureArtifact), nullableTime(update.StartedAt), nullableTime(update.FinishedAt), now.Format(time.RFC3339Nano), strings.TrimSpace(operationID)}
+	args := []any{string(update.State), update.ReleaseClaim, update.ReleaseClaim, update.ReleaseClaim, strings.TrimSpace(update.CandidateRevision), strings.TrimSpace(update.ValidationRequestID), strings.TrimSpace(update.ReusedEvidenceID), strings.TrimSpace(update.FailureKind), strings.TrimSpace(update.FailureDetail), strings.TrimSpace(update.FailureArtifact), nullableTime(update.StartedAt), nullableTime(update.FinishedAt), now.Format(time.RFC3339Nano), strings.TrimSpace(operationID), strings.TrimSpace(update.ExpectedClaimToken), now.UnixNano()}
 	for i, state := range update.ExpectedStates {
 		placeholders[i] = "?"
 		args = append(args, string(state))
 	}
-	result, err := db.ExecContext(ctx, `UPDATE daemon_publication_operations SET state=?,lease_owner=?,candidate_revision=?,validation_request_id=?,reused_evidence_id=?,failure_kind=?,failure_detail=?,failure_artifact=?,started_at=COALESCE(?,started_at),finished_at=?,updated_at=? WHERE operation_id=? AND state IN (`+strings.Join(placeholders, ",")+`)`, args...)
+	result, err := db.ExecContext(ctx, `UPDATE daemon_publication_operations SET state=?,lease_owner=CASE WHEN ? THEN '' ELSE lease_owner END,claim_token=CASE WHEN ? THEN '' ELSE claim_token END,claim_expires_at=CASE WHEN ? THEN NULL ELSE claim_expires_at END,candidate_revision=?,validation_request_id=?,reused_evidence_id=?,failure_kind=?,failure_detail=?,failure_artifact=?,started_at=COALESCE(?,started_at),finished_at=?,updated_at=? WHERE operation_id=? AND claim_token=? AND claim_expires_at>? AND state IN (`+strings.Join(placeholders, ",")+`)`, args...)
 	if err != nil {
 		return domain.PublicationOperation{}, fmt.Errorf("update publication operation: %w", err)
 	}
@@ -196,7 +277,8 @@ func scanPublicationOperation(scanner validationScanner) (domain.PublicationOper
 	var operation domain.PublicationOperation
 	var created, updated string
 	var started, finished sql.NullString
-	err := scanner.Scan(&operation.OperationID, &operation.ProjectID, &operation.IssueID, &operation.IntentKey, &operation.RequestFingerprint, &operation.ActorID, &operation.TargetID, &operation.TargetBranch, &operation.SourceRevision, &operation.BaseRevision, &operation.CandidateRevision, &operation.PolicyVersion, &operation.EnvironmentFingerprint, &operation.ValidationCommand, &operation.EvidenceSource, &operation.EvidenceEventID, &operation.EvidenceSeq, &operation.EvidenceDigest, &operation.State, &operation.LeaseOwner, &operation.ValidationRequestID, &operation.ReusedEvidenceID, &operation.FailureKind, &operation.FailureDetail, &operation.FailureArtifact, &created, &updated, &started, &finished)
+	var claimExpiresAt sql.NullInt64
+	err := scanner.Scan(&operation.OperationID, &operation.ProjectID, &operation.IssueID, &operation.IntentKey, &operation.RequestFingerprint, &operation.ActorID, &operation.TargetID, &operation.TargetBranch, &operation.SourceRevision, &operation.BaseRevision, &operation.CandidateRevision, &operation.PolicyVersion, &operation.EnvironmentFingerprint, &operation.ValidationCommand, &operation.EvidenceSource, &operation.EvidenceEventID, &operation.EvidenceSeq, &operation.EvidenceDigest, &operation.State, &operation.LeaseOwner, &operation.ClaimToken, &claimExpiresAt, &operation.ValidationRequestID, &operation.ReusedEvidenceID, &operation.FailureKind, &operation.FailureDetail, &operation.FailureArtifact, &created, &updated, &started, &finished)
 	if err != nil {
 		return domain.PublicationOperation{}, err
 	}
@@ -214,6 +296,10 @@ func scanPublicationOperation(scanner validationScanner) (domain.PublicationOper
 			return domain.PublicationOperation{}, parseErr
 		}
 		operation.StartedAt = &value
+	}
+	if claimExpiresAt.Valid {
+		value := time.Unix(0, claimExpiresAt.Int64).UTC()
+		operation.ClaimExpiresAt = &value
 	}
 	if finished.Valid {
 		value, parseErr := time.Parse(time.RFC3339Nano, finished.String)

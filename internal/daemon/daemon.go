@@ -185,6 +185,10 @@ type Daemon struct {
 	publicationClose                     func(context.Context, domain.PublicationOperation) error
 	publicationIdentityCheck             func(context.Context, domain.PublicationOperation) error
 	publicationStateChanged              func(domain.PublicationOperation)
+	publicationClaimMu                   sync.Mutex
+	publicationClaimOwner                string
+	publicationClaimNow                  func() time.Time
+	publicationClaimTTL                  time.Duration
 	publicationStoresMu                  sync.Mutex
 	publicationStores                    map[string]*operationstore.SQLiteStore
 	noticeService                        *daemonnotices.Service

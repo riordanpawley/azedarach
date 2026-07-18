@@ -99,6 +99,20 @@ func TestRealProjectOperationsDatabaseMigrationClones(t *testing.T) {
 			if evidenceObjects != 11 {
 				t.Fatalf("publication evidence migration objects = %d, want 11", evidenceObjects)
 			}
+			var queueObjects int
+			if err = store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name IN (
+				'daemon_publication_operations','idx_daemon_publication_operations_queue',
+				'idx_daemon_publication_operations_issue','idx_daemon_publication_operations_claim',
+				'daemon_publication_operation_identity_immutable'
+			)`).Scan(&queueObjects); err != nil {
+				t.Fatal(err)
+			}
+			if queueObjects != 5 {
+				t.Fatalf("publication queue migration objects = %d, want 5", queueObjects)
+			}
+			if _, err = store.PublicationOperations(ctx, "migration-review", "", false); err != nil {
+				t.Fatal(err)
+			}
 			if err = store.db.QueryRow(`SELECT COUNT(*) FROM daemon_operations`).Scan(&afterOperations); err != nil {
 				t.Fatal(err)
 			}
@@ -118,6 +132,9 @@ func TestRealProjectOperationsDatabaseMigrationClones(t *testing.T) {
 
 			reopened := NewAtPath(path, slog.Default())
 			if _, err = reopened.ValidationSnapshot(ctx, "migration-review", time.Now().UTC(), time.Minute); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = reopened.PublicationOperations(ctx, "migration-review", "", false); err != nil {
 				t.Fatal(err)
 			}
 			var ledgerRows int
@@ -665,11 +682,11 @@ func TestLayeredPublicationEvidenceMigrationRollsBackAndRetries(t *testing.T) {
 		t.Fatal(err)
 	}
 	var tables int
-	if err = raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='daemon_publication_evidence'`).Scan(&tables); err != nil {
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('daemon_publication_evidence','daemon_publication_operations')`).Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
 	if tables != 0 {
-		t.Fatal("failed migration left publication evidence table")
+		t.Fatal("failed migration left publication evidence or queue table")
 	}
 	if _, err = raw.Exec(`DROP TRIGGER reject_layered_evidence_ledger`); err != nil {
 		t.Fatal(err)
@@ -680,6 +697,9 @@ func TestLayeredPublicationEvidenceMigrationRollsBackAndRetries(t *testing.T) {
 	retried := NewAtPath(dbPath, slog.Default())
 	defer retried.Close()
 	if _, err = retried.PublicationEvidenceSnapshot(context.Background(), "project", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = retried.PublicationOperations(context.Background(), "project", "", false); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -762,51 +782,9 @@ func TestLayeredPublicationEvidenceMigrationRejectsCanonicalDefinitionDrift(t *t
 	}
 }
 
-func TestPublicationQueueMigrationRollsBackAndRetries(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
-	seedOperationsMigrations(t, dbPath, 7)
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = db.Exec(`CREATE TRIGGER reject_publication_queue_ledger BEFORE INSERT ON schema_migrations WHEN NEW.id='daemon_operations_0008_publication_queue' BEGIN SELECT RAISE(ABORT, 'injected publication queue ledger failure'); END`); err != nil {
-		t.Fatal(err)
-	}
-	if err = db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	failed := NewAtPath(dbPath, slog.Default())
-	if _, err = failed.PublicationOperations(context.Background(), "project", "", false); err == nil || !strings.Contains(err.Error(), "injected publication queue ledger failure") {
-		t.Fatalf("migration error = %v", err)
-	}
-	_ = failed.Close()
-	raw, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var tables int
-	if err = raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='daemon_publication_operations'`).Scan(&tables); err != nil {
-		t.Fatal(err)
-	}
-	if tables != 0 {
-		t.Fatal("failed migration left publication queue table")
-	}
-	if _, err = raw.Exec(`DROP TRIGGER reject_publication_queue_ledger`); err != nil {
-		t.Fatal(err)
-	}
-	if err = raw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	retried := NewAtPath(dbPath, slog.Default())
-	defer retried.Close()
-	if _, err = retried.PublicationOperations(context.Background(), "project", "", false); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestPublicationQueueMigrationRejectsAppliedSchemaDrift(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
-	seedOperationsMigrations(t, dbPath, 8)
+	seedOperationsMigrations(t, dbPath, 7)
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)

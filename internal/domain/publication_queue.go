@@ -66,6 +66,8 @@ type PublicationOperation struct {
 	EvidenceDigest         string                    `json:"evidence_digest,omitempty"`
 	State                  PublicationOperationState `json:"state"`
 	LeaseOwner             string                    `json:"lease_owner,omitempty"`
+	ClaimToken             string                    `json:"-"`
+	ClaimExpiresAt         *time.Time                `json:"claim_expires_at,omitempty"`
 	ValidationRequestID    string                    `json:"validation_request_id,omitempty"`
 	ReusedEvidenceID       string                    `json:"reused_evidence_id,omitempty"`
 	FailureKind            string                    `json:"failure_kind,omitempty"`

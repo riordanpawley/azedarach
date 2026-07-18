@@ -1,7 +1,9 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -55,18 +57,58 @@ func TestPublicationQueueTransitionsAreCASAndIdentityIsImmutable(t *testing.T) {
 		t.Fatal(err)
 	}
 	started := time.Now().UTC()
-	preparing, err := store.UpdatePublicationOperation(ctx, stored.OperationID, PublicationOperationUpdate{
-		ExpectedStates: []domain.PublicationOperationState{domain.PublicationOperationQueued},
-		State:          domain.PublicationOperationPreparing, LeaseOwner: "daemon", StartedAt: &started,
+	preparing, acquired, err := store.ClaimPublicationOperation(ctx, stored.OperationID, PublicationOperationClaim{
+		Owner: "daemon-1", Token: "claim-1", Now: started, TTL: time.Minute,
 	})
+	if !acquired {
+		t.Fatal("publication claim was not acquired")
+	}
 	if err != nil || preparing.State != domain.PublicationOperationPreparing || preparing.StartedAt == nil {
 		t.Fatalf("preparing = (%+v,%v)", preparing, err)
 	}
-	if _, err := store.UpdatePublicationOperation(ctx, stored.OperationID, PublicationOperationUpdate{ExpectedStates: []domain.PublicationOperationState{domain.PublicationOperationQueued}, State: domain.PublicationOperationFailed}); err == nil {
+	if _, err := store.UpdatePublicationOperation(ctx, stored.OperationID, PublicationOperationUpdate{ExpectedStates: []domain.PublicationOperationState{domain.PublicationOperationQueued}, ExpectedClaimToken: "claim-1", State: domain.PublicationOperationFailed, UpdatedAt: started}); err == nil {
 		t.Fatal("stale state transition succeeded")
 	}
 	if _, err := store.db.ExecContext(ctx, `UPDATE daemon_publication_operations SET source_revision='mutated' WHERE operation_id=?`, stored.OperationID); err == nil {
 		t.Fatal("immutable publication identity update succeeded")
+	}
+}
+
+func TestPublicationQueueClaimFencesLiveAndExpiredAttempts(t *testing.T) {
+	ctx := context.Background()
+	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC)
+	operation := testPublicationOperation("publication-claim", "issue", "intent", "source", now)
+	stored, _, err := store.EnqueuePublication(ctx, operation, "candidate-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, acquired, err := store.ClaimPublicationOperation(ctx, stored.OperationID, PublicationOperationClaim{Owner: "daemon-1", Token: "claim-1", Now: now, TTL: time.Minute})
+	if err != nil || !acquired || first.ClaimToken != "claim-1" {
+		t.Fatalf("first claim = (%+v,%t,%v)", first, acquired, err)
+	}
+	encoded, err := json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("claim-1")) || bytes.Contains(encoded, []byte("claim_token")) {
+		t.Fatalf("publication projection exposed fencing token: %s", encoded)
+	}
+	second, acquired, err := store.ClaimPublicationOperation(ctx, stored.OperationID, PublicationOperationClaim{Owner: "daemon-2", Token: "claim-2", Now: now.Add(30 * time.Second), TTL: time.Minute})
+	if err != nil || acquired || second.ClaimToken != "claim-1" {
+		t.Fatalf("live claim contention = (%+v,%t,%v)", second, acquired, err)
+	}
+	second, acquired, err = store.ClaimPublicationOperation(ctx, stored.OperationID, PublicationOperationClaim{Owner: "daemon-2", Token: "claim-2", Now: now.Add(time.Minute), TTL: time.Minute})
+	if err != nil || !acquired || second.ClaimToken != "claim-2" {
+		t.Fatalf("expired claim recovery = (%+v,%t,%v)", second, acquired, err)
+	}
+	if _, err := store.UpdatePublicationOperation(ctx, stored.OperationID, PublicationOperationUpdate{ExpectedStates: []domain.PublicationOperationState{second.State}, ExpectedClaimToken: "claim-1", State: domain.PublicationOperationMerged, ReleaseClaim: true, UpdatedAt: now.Add(time.Minute)}); err == nil {
+		t.Fatal("expired owner finished after claim was reassigned")
+	}
+	merged, err := store.UpdatePublicationOperation(ctx, stored.OperationID, PublicationOperationUpdate{ExpectedStates: []domain.PublicationOperationState{second.State}, ExpectedClaimToken: "claim-2", State: domain.PublicationOperationMerged, ReleaseClaim: true, UpdatedAt: now.Add(time.Minute)})
+	if err != nil || merged.State != domain.PublicationOperationMerged || merged.ClaimToken != "" || merged.ClaimExpiresAt != nil {
+		t.Fatalf("claimed finish = (%+v,%v)", merged, err)
 	}
 }
 

@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,7 +25,39 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
-const publicationApplyOperationKind = "publication.apply"
+const (
+	publicationApplyOperationKind = "publication.apply"
+	defaultPublicationClaimTTL    = 5 * time.Minute
+)
+
+func publicationClaimToken() (string, error) {
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate publication claim token: %w", err)
+	}
+	return hex.EncodeToString(raw), nil
+}
+
+func (d *Daemon) publicationClaimIdentity() (string, time.Time, time.Duration, error) {
+	d.publicationClaimMu.Lock()
+	defer d.publicationClaimMu.Unlock()
+	if d.publicationClaimOwner == "" {
+		token, err := publicationClaimToken()
+		if err != nil {
+			return "", time.Time{}, 0, err
+		}
+		d.publicationClaimOwner = "daemon-" + token
+	}
+	now := time.Now().UTC()
+	if d.publicationClaimNow != nil {
+		now = d.publicationClaimNow().UTC()
+	}
+	ttl := d.publicationClaimTTL
+	if ttl <= 0 {
+		ttl = defaultPublicationClaimTTL
+	}
+	return d.publicationClaimOwner, now, ttl, nil
+}
 
 type publicationRetryError struct {
 	cause       error
@@ -237,21 +271,70 @@ func (d *Daemon) submitPublicationOperation(ctx context.Context, operation domai
 	return nil
 }
 
+func (d *Daemon) claimPublicationOperation(ctx context.Context, store *operationstore.SQLiteStore, operationID string) (domain.PublicationOperation, bool, string, time.Duration, error) {
+	owner, now, ttl, err := d.publicationClaimIdentity()
+	if err != nil {
+		return domain.PublicationOperation{}, false, "", 0, err
+	}
+	token, err := publicationClaimToken()
+	if err != nil {
+		return domain.PublicationOperation{}, false, "", 0, err
+	}
+	operation, acquired, err := store.ClaimPublicationOperation(ctx, operationID, operationstore.PublicationOperationClaim{
+		Owner: owner, Token: token, Now: now, TTL: ttl,
+	})
+	if err != nil || !acquired {
+		return operation, acquired, token, ttl, err
+	}
+	d.publishPublicationOperationEvent(operation)
+	if d.publicationStateChanged != nil {
+		d.publicationStateChanged(operation)
+	}
+	return operation, true, token, ttl, nil
+}
+
+func (d *Daemon) startPublicationClaimHeartbeat(store *operationstore.SQLiteStore, operationID, claimToken string, ttl time.Duration) func() {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		ticker := time.NewTicker(ttl / 3)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_, now, _, err := d.publicationClaimIdentity()
+				if err == nil {
+					_, _ = store.RenewPublicationOperationClaim(context.Background(), operationID, claimToken, now, ttl)
+				}
+			}
+		}
+	}()
+	return cancel
+}
+
+func (d *Daemon) renewPublicationClaim(ctx context.Context, store *operationstore.SQLiteStore, operationID, claimToken string, ttl time.Duration) (domain.PublicationOperation, error) {
+	_, now, _, err := d.publicationClaimIdentity()
+	if err != nil {
+		return domain.PublicationOperation{}, err
+	}
+	return store.RenewPublicationOperationClaim(ctx, operationID, claimToken, now, ttl)
+}
+
 func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operationID string) ([]byte, error) {
 	store, err := d.publicationStoreForProject(projectID)
 	if err != nil {
 		return nil, err
 	}
-	operation, found, err := store.PublicationOperation(context.Background(), operationID)
-	if err != nil || !found {
-		if err == nil {
-			err = fmt.Errorf("operation not found")
-		}
-		return nil, fmt.Errorf("load publication operation %s: %w", operationID, err)
+	operation, acquired, claimToken, claimTTL, err := d.claimPublicationOperation(context.Background(), store, operationID)
+	if err != nil {
+		return nil, fmt.Errorf("claim publication operation %s: %w", operationID, err)
 	}
-	if operation.State.Terminal() {
+	if !acquired {
 		return json.Marshal(operation)
 	}
+	stopClaimHeartbeat := d.startPublicationClaimHeartbeat(store, operationID, claimToken, claimTTL)
+	defer stopClaimHeartbeat()
 	identityCheck := d.publicationIdentityCheck
 	if identityCheck == nil && d.publicationClose == nil {
 		identityCheck = d.validatePublicationOperationIdentity
@@ -261,8 +344,9 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 			finished := time.Now().UTC()
 			state, kind := classifyPublicationFailure(identityErr)
 			artifact := d.writePublicationFailureArtifact(operation, state, identityErr)
-			_, _ = d.transitionPublicationOperation(context.Background(), operation, state, func(update *operationstore.PublicationOperationUpdate) {
+			_, _ = d.transitionPublicationOperation(context.Background(), operation, claimToken, state, func(update *operationstore.PublicationOperationUpdate) {
 				update.FailureKind, update.FailureDetail, update.FailureArtifact = kind, identityErr.Error(), artifact
+				update.ReleaseClaim = true
 				update.FinishedAt = &finished
 			})
 			var retry *publicationRetryError
@@ -279,14 +363,6 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 			return nil, identityErr
 		}
 	}
-	started := time.Now().UTC()
-	operation, err = d.transitionPublicationOperation(context.Background(), operation, domain.PublicationOperationPreparing, func(update *operationstore.PublicationOperationUpdate) {
-		update.LeaseOwner = "daemon"
-		update.StartedAt = &started
-	})
-	if err != nil {
-		return nil, err
-	}
 	_ = daemonops.ReportProgress(ctx, daemonops.Progress{Phase: "preparing", Message: "preparing exact synthetic merge candidate", Current: 20, Total: 100, Unit: "percent", Percent: 20})
 
 	ctx = git.WithCandidateValidationObserver(ctx, func(attempt git.CandidateValidationAttempt) {
@@ -296,7 +372,7 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 		}
 		current, found, readErr := store.PublicationOperation(context.Background(), operationID)
 		if readErr == nil && found && !current.State.Terminal() {
-			_, _ = d.transitionPublicationOperation(context.Background(), current, state, func(update *operationstore.PublicationOperationUpdate) {
+			_, _ = d.transitionPublicationOperation(context.Background(), current, claimToken, state, func(update *operationstore.PublicationOperationUpdate) {
 				update.CandidateRevision = attempt.CandidateHead
 			})
 		}
@@ -308,7 +384,7 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 		_ = daemonops.ReportProgress(ctx, daemonops.Progress{Phase: phase, Message: strings.TrimSpace(attempt.Message), Current: percent, Total: 100, Unit: "percent", Percent: int(percent)})
 	})
 	ctx = git.WithCandidateValidationCommand(ctx, operation.ValidationCommand)
-	ctx = git.WithCandidateValidationAdmission(ctx, d.publicationCandidateAdmission(operation.ProjectID, operationID))
+	ctx = git.WithCandidateValidationAdmission(ctx, d.publicationCandidateAdmission(operation.ProjectID, operationID, claimToken, claimTTL))
 
 	request := protocol.OrchestrationIntentRequest{
 		Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: operation.IntentKey, ActorID: operation.ActorID,
@@ -316,6 +392,10 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 	}
 	pin := acceptedReviewPin{SourceOID: operation.SourceRevision, EvidenceSource: operation.EvidenceSource, EvidenceEventID: operation.EvidenceEventID, EvidenceSeq: operation.EvidenceSeq, EvidenceDigest: operation.EvidenceDigest}
 	result := protocol.OrchestrationIntentResult{Scope: request.Scope, Kind: request.Kind, IntentKey: request.IntentKey, Requested: []string{operation.IssueID}}
+	operation, err = d.renewPublicationClaim(context.Background(), store, operationID, claimToken, claimTTL)
+	if err != nil {
+		return nil, fmt.Errorf("verify publication claim before apply: %w", err)
+	}
 	var runErr error
 	if d.publicationClose != nil {
 		runErr = d.publicationClose(ctx, operation)
@@ -330,14 +410,15 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 	if runErr != nil {
 		state, kind := classifyPublicationFailure(runErr)
 		artifact := d.writePublicationFailureArtifact(operation, state, runErr)
-		_, _ = d.transitionPublicationOperation(context.Background(), current, state, func(update *operationstore.PublicationOperationUpdate) {
+		_, _ = d.transitionPublicationOperation(context.Background(), current, claimToken, state, func(update *operationstore.PublicationOperationUpdate) {
 			update.FailureKind, update.FailureDetail, update.FailureArtifact = kind, runErr.Error(), artifact
+			update.ReleaseClaim = true
 			update.FinishedAt = &finished
 		})
 		return nil, runErr
 	}
-	current, err = d.transitionPublicationOperation(context.Background(), current, domain.PublicationOperationMerged, func(update *operationstore.PublicationOperationUpdate) {
-		update.LeaseOwner = ""
+	current, err = d.transitionPublicationOperation(context.Background(), current, claimToken, domain.PublicationOperationMerged, func(update *operationstore.PublicationOperationUpdate) {
+		update.ReleaseClaim = true
 		update.FinishedAt = &finished
 	})
 	if err != nil {
@@ -416,6 +497,8 @@ func refreshedPublicationOperationAttempt(operation domain.PublicationOperation,
 	operation.FailureDetail = ""
 	operation.FailureArtifact = ""
 	operation.LeaseOwner = ""
+	operation.ClaimToken = ""
+	operation.ClaimExpiresAt = nil
 	operation.State = domain.PublicationOperationQueued
 	operation.QueuePosition = 0
 	operation.CreatedAt = time.Now().UTC()
@@ -425,17 +508,14 @@ func refreshedPublicationOperationAttempt(operation domain.PublicationOperation,
 	return operation
 }
 
-func (d *Daemon) publicationCandidateAdmission(projectID, operationID string) git.CandidateValidationAdmission {
+func (d *Daemon) publicationCandidateAdmission(projectID, operationID, claimToken string, claimTTL time.Duration) git.CandidateValidationAdmission {
 	return func(_ context.Context, candidateRevision string) (bool, func(git.CandidateValidationAttempt) error, error) {
 		store, err := d.publicationStoreForProject(projectID)
 		if err != nil {
 			return false, nil, err
 		}
-		operation, found, err := store.PublicationOperation(context.Background(), operationID)
-		if err != nil || !found {
-			if err == nil {
-				err = fmt.Errorf("publication operation not found")
-			}
+		operation, err := d.renewPublicationClaim(context.Background(), store, operationID, claimToken, claimTTL)
+		if err != nil {
 			return false, nil, err
 		}
 		requestID := publicationValidationRequestIdentity(operation.OperationID, candidateRevision)
@@ -478,7 +558,7 @@ func (d *Daemon) publicationCandidateAdmission(projectID, operationID string) gi
 				reusedID = validation.RequestID
 			}
 		}
-		if _, err = d.transitionPublicationOperation(context.Background(), current, current.State, func(update *operationstore.PublicationOperationUpdate) {
+		if _, err = d.transitionPublicationOperation(context.Background(), current, claimToken, current.State, func(update *operationstore.PublicationOperationUpdate) {
 			update.CandidateRevision = candidateRevision
 			update.ValidationRequestID = validation.RequestID
 			update.ReusedEvidenceID = reusedID
@@ -510,6 +590,10 @@ func (d *Daemon) publicationCandidateAdmission(projectID, operationID string) gi
 		finish := func(attempt git.CandidateValidationAttempt) error {
 			finishOnce.Do(func() {
 				stopHeartbeat()
+				if _, renewErr := d.renewPublicationClaim(context.Background(), store, operationID, claimToken, claimTTL); renewErr != nil {
+					finishErr = renewErr
+					return
+				}
 				state := domain.ValidationRequestCompleted
 				if attempt.Status != git.CandidateValidationPassed {
 					state = domain.ValidationRequestFailed
@@ -530,12 +614,16 @@ func (d *Daemon) publicationCandidateAdmission(projectID, operationID string) gi
 	}
 }
 
-func (d *Daemon) transitionPublicationOperation(ctx context.Context, current domain.PublicationOperation, state domain.PublicationOperationState, mutate func(*operationstore.PublicationOperationUpdate)) (domain.PublicationOperation, error) {
+func (d *Daemon) transitionPublicationOperation(ctx context.Context, current domain.PublicationOperation, claimToken string, state domain.PublicationOperationState, mutate func(*operationstore.PublicationOperationUpdate)) (domain.PublicationOperation, error) {
+	_, now, _, err := d.publicationClaimIdentity()
+	if err != nil {
+		return domain.PublicationOperation{}, err
+	}
 	update := operationstore.PublicationOperationUpdate{
-		ExpectedStates: []domain.PublicationOperationState{current.State}, State: state, LeaseOwner: current.LeaseOwner,
+		ExpectedStates: []domain.PublicationOperationState{current.State}, ExpectedClaimToken: claimToken, State: state,
 		CandidateRevision: current.CandidateRevision, ValidationRequestID: current.ValidationRequestID,
 		ReusedEvidenceID: current.ReusedEvidenceID, FailureKind: current.FailureKind, FailureDetail: current.FailureDetail,
-		FailureArtifact: current.FailureArtifact, StartedAt: current.StartedAt,
+		FailureArtifact: current.FailureArtifact, StartedAt: current.StartedAt, UpdatedAt: now,
 	}
 	if mutate != nil {
 		mutate(&update)

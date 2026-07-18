@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,8 +18,186 @@ import (
 	operationstore "github.com/riordanpawley/azedarach/internal/daemon/operations/store"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	gitservice "github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
+
+func TestReviewAcceptOwnsLeaseAndAutomaticallyContinuesBasePublicationWithoutAggregate(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	runDaemonTestGit(t, repo, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repo, "config", "user.email", "test@example.com")
+	runDaemonTestGit(t, repo, "config", "user.name", "Test User")
+	canonicalRepo, err := appconfig.ResolveProjectRoot(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo = canonicalRepo
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDaemonTestGit(t, repo, "add", "README.md")
+	runDaemonTestGit(t, repo, "commit", "-q", "-m", "base")
+	if err := os.MkdirAll(filepath.Join(repo, ".azedarach"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".azedarach", "config.json"), []byte(`{"gate":{"command":"go test ./consumer/...","environmentFingerprint":"consumer-go"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	issueClient := newMigratedIssueClient(t, repo, slog.Default())
+	t.Cleanup(func() { _ = issueClient.CloseDB() })
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	t.Cleanup(func() { _ = runtime.Close() })
+	projectID := runtime.canonicalProject
+	issueID, err := issueClient.Create(ctx, issues.CreateTaskParams{Title: "publish reviewed patch", Description: "consumer patch", Acceptance: "validated on configured base", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := issueClient.ClaimOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: "worker", OwnerKind: "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := issueClient.Update(ctx, issueID, domain.StatusInReview); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := issueClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t)}); err != nil {
+		t.Fatal(err)
+	}
+
+	gitClient := gitservice.NewClient(gitservice.NewExecRunner(repo), slog.Default())
+	d := newOrchestrationReviewTestDaemon(repo, issueClient)
+	d.cfg.BaseBranch = "main"
+	d.issueClientsByProject = map[string]*issues.Client{projectID: issueClient}
+	d.operationRuntime = runtime
+	d.git = gitClient
+	d.worktreeAdapter = &worktreeServiceAdapter{manager: gitservice.NewWorktreeManager(gitservice.NewExecRunner(repo), repo, slog.Default())}
+	sourceOID := runDaemonTestGitOutput(t, repo, "rev-parse", "HEAD")
+	d.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) { return sourceOID, nil }
+	if resolved := d.resolveRepoDirForProjectExact(projectID); resolved != repo {
+		t.Fatalf("project %q resolved repo %q, want %q", projectID, resolved, repo)
+	}
+	applyEntered := make(chan domain.PublicationOperation, 1)
+	applyRelease := make(chan struct{})
+	merged := make(chan struct{})
+	d.publicationIdentityCheck = func(context.Context, domain.PublicationOperation) error { return nil }
+	d.publicationClose = func(_ context.Context, operation domain.PublicationOperation) error {
+		applyEntered <- operation
+		<-applyRelease
+		return nil
+	}
+	d.publicationStateChanged = func(operation domain.PublicationOperation) {
+		if operation.State == domain.PublicationOperationMerged {
+			close(merged)
+		}
+	}
+	integrationReadiness, err := d.taskIntegrationReadiness(ctx, projectID, issueID, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if integrationReadiness.Ready || !strings.Contains(strings.Join(integrationReadiness.Reasons, "; "), "no aggregate validation") {
+		t.Fatalf("pre-accept integration readiness = %+v, want aggregate gate preserved", integrationReadiness)
+	}
+
+	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-and-auto-publish", ActorID: "reviewer", IssueIDs: []string{issueID}, RepoDir: repo}
+	result, err := d.orchestrationAuthority().Apply(ctx, projectID, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Failed) != 0 || len(result.Publications) != 1 {
+		t.Fatalf("review acceptance = %+v, want one automatic publication", result)
+	}
+	operation := <-applyEntered
+	if operation.SourceRevision != sourceOID || operation.TargetBranch != "main" || operation.ValidationCommand != "go test ./consumer/..." {
+		t.Fatalf("continued publication = %+v", operation)
+	}
+	task, err := issueClient.GetWithRuntime(ctx, projectID, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := coordinationLease(task, domain.CoordinationLeaseReview)
+	if lease == nil || lease.OwnerID != "reviewer" {
+		t.Fatalf("review lease during publication = %+v, want reviewer-owned durable lease", lease)
+	}
+	validation, err := runtime.store.LatestReviewValidation(ctx, projectID, issueID, time.Now().UTC(), defaultValidationLeaseTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if validation != nil {
+		t.Fatalf("pre-accept aggregate validation = %+v, want none", validation)
+	}
+	close(applyRelease)
+	<-merged
+}
+
+func TestPublicationQueueRecoveryClaimsOnceAcrossDaemons(t *testing.T) {
+	repo := t.TempDir()
+	firstRuntime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	secondRuntime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	t.Cleanup(func() { _ = firstRuntime.Close() })
+	t.Cleanup(func() { _ = secondRuntime.Close() })
+
+	operation := daemonTestPublicationOperation(firstRuntime.canonicalProject, "publication-multi-daemon", "issue", "intent", "source", time.Now().UTC())
+	stored, _, err := firstRuntime.store.EnqueuePublication(context.Background(), operation, "candidate-multi-daemon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().UTC().Add(-2 * time.Minute)
+	stored, acquired, err := firstRuntime.store.ClaimPublicationOperation(context.Background(), stored.OperationID, operationstore.PublicationOperationClaim{Owner: "crashed-daemon", Token: "crashed-claim", Now: started, TTL: time.Minute})
+	if err != nil || !acquired {
+		t.Fatal(err)
+	}
+
+	enteredApply := make(chan struct{}, 2)
+	releaseApply := make(chan struct{})
+	var applyCount atomic.Int32
+	var validationCount atomic.Int32
+	identityCheck := func(context.Context, domain.PublicationOperation) error {
+		validationCount.Add(1)
+		return nil
+	}
+	closeFn := func(context.Context, domain.PublicationOperation) error {
+		applyCount.Add(1)
+		enteredApply <- struct{}{}
+		<-releaseApply
+		return nil
+	}
+	first := &Daemon{operationRuntime: firstRuntime, cfg: Config{RepoDir: repo}, publicationClose: closeFn, publicationIdentityCheck: identityCheck}
+	second := &Daemon{operationRuntime: secondRuntime, cfg: Config{RepoDir: repo}, publicationClose: closeFn, publicationIdentityCheck: identityCheck}
+	results := make(chan error, 2)
+	start := make(chan struct{})
+	for _, daemon := range []*Daemon{first, second} {
+		go func(d *Daemon) {
+			<-start
+			_, runErr := d.runPublicationOperation(context.Background(), operation.ProjectID, operation.OperationID)
+			results <- runErr
+		}(daemon)
+	}
+	close(start)
+	<-enteredApply
+	select {
+	case <-enteredApply:
+		close(releaseApply)
+		<-results
+		<-results
+		t.Fatalf("two daemons reached publication apply; count=%d", applyCount.Load())
+	case err := <-results:
+		if err != nil {
+			close(releaseApply)
+			<-results
+			t.Fatalf("non-owning daemon returned error: %v", err)
+		}
+		close(releaseApply)
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := applyCount.Load(); got != 1 {
+		t.Fatalf("publication apply count = %d, want 1", got)
+	}
+	if got := validationCount.Load(); got != 1 {
+		t.Fatalf("publication validation count = %d, want 1", got)
+	}
+}
 
 func TestPublicationQueueSerializesTargetAndCoalescesManagerWork(t *testing.T) {
 	repo := t.TempDir()
@@ -179,14 +358,20 @@ func TestPublicationQueueRecoveryResubmitsNonterminalIntent(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			started := time.Now().UTC()
-			for _, next := range []domain.PublicationOperationState{domain.PublicationOperationPreparing, domain.PublicationOperationValidating, domain.PublicationOperationPassed} {
-				if stored.State == crashState {
-					break
-				}
-				stored, err = firstRuntime.store.UpdatePublicationOperation(context.Background(), stored.OperationID, operationPublicationUpdate(stored.State, next, &started))
+			started := time.Now().UTC().Add(-10 * time.Minute)
+			if crashState != domain.PublicationOperationQueued {
+				stored, _, err = firstRuntime.store.ClaimPublicationOperation(context.Background(), stored.OperationID, operationstore.PublicationOperationClaim{Owner: "crashed-daemon", Token: "crashed-claim", Now: started, TTL: time.Minute})
 				if err != nil {
 					t.Fatal(err)
+				}
+				for _, next := range []domain.PublicationOperationState{domain.PublicationOperationValidating, domain.PublicationOperationPassed} {
+					if stored.State == crashState {
+						break
+					}
+					stored, err = firstRuntime.store.UpdatePublicationOperation(context.Background(), stored.OperationID, operationstore.PublicationOperationUpdate{ExpectedStates: []domain.PublicationOperationState{stored.State}, ExpectedClaimToken: "crashed-claim", State: next, StartedAt: &started, UpdatedAt: started.Add(time.Second)})
+					if err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 			if err := firstRuntime.Close(); err != nil {
@@ -222,7 +407,11 @@ func TestPublicationCandidateAdmissionRecordsAndReusesExactEvidence(t *testing.T
 	if _, _, err := runtime.store.EnqueuePublication(context.Background(), first, "candidate-admit-1"); err != nil {
 		t.Fatal(err)
 	}
-	reused, finish, err := d.publicationCandidateAdmission(first.ProjectID, first.OperationID)(context.Background(), "candidate-head")
+	firstStoredClaim, acquired, err := runtime.store.ClaimPublicationOperation(context.Background(), first.OperationID, operationstore.PublicationOperationClaim{Owner: "daemon", Token: "claim-first", Now: time.Now().UTC(), TTL: time.Minute})
+	if err != nil || !acquired {
+		t.Fatalf("claim first publication = (%+v,%t,%v)", firstStoredClaim, acquired, err)
+	}
+	reused, finish, err := d.publicationCandidateAdmission(first.ProjectID, first.OperationID, "claim-first", time.Minute)(context.Background(), "candidate-head")
 	if err != nil || reused || finish == nil {
 		t.Fatalf("first admission = (reused=%t, finish=%t, err=%v)", reused, finish != nil, err)
 	}
@@ -238,7 +427,11 @@ func TestPublicationCandidateAdmissionRecordsAndReusesExactEvidence(t *testing.T
 	if _, _, err := runtime.store.EnqueuePublication(context.Background(), second, "candidate-admit-2"); err != nil {
 		t.Fatal(err)
 	}
-	reused, finish, err = d.publicationCandidateAdmission(second.ProjectID, second.OperationID)(context.Background(), "candidate-head")
+	secondStoredClaim, acquired, err := runtime.store.ClaimPublicationOperation(context.Background(), second.OperationID, operationstore.PublicationOperationClaim{Owner: "daemon", Token: "claim-second", Now: time.Now().UTC(), TTL: time.Minute})
+	if err != nil || !acquired {
+		t.Fatalf("claim second publication = (%+v,%t,%v)", secondStoredClaim, acquired, err)
+	}
+	reused, finish, err = d.publicationCandidateAdmission(second.ProjectID, second.OperationID, "claim-second", time.Minute)(context.Background(), "candidate-head")
 	if err != nil || !reused || finish != nil {
 		t.Fatalf("reused admission = (reused=%t, finish=%t, err=%v)", reused, finish != nil, err)
 	}
@@ -266,7 +459,11 @@ func TestPublicationTransitionInvalidatesSnapshotsAndPublishesWatchEvent(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	updated, err := d.transitionPublicationOperation(context.Background(), stored, domain.PublicationOperationPreparing, nil)
+	claimed, acquired, err := runtime.store.ClaimPublicationOperation(context.Background(), stored.OperationID, operationstore.PublicationOperationClaim{Owner: "daemon", Token: "claim-event", Now: time.Now().UTC(), TTL: time.Minute})
+	if err != nil || !acquired {
+		t.Fatalf("claim event publication = (%+v,%t,%v)", claimed, acquired, err)
+	}
+	updated, err := d.transitionPublicationOperation(context.Background(), claimed, "claim-event", domain.PublicationOperationPreparing, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,8 +548,4 @@ func daemonTestPublicationOperation(projectID, operationID, issueID, intent, sou
 		SourceRevision: source, BaseRevision: "base", PolicyVersion: "policy", EnvironmentFingerprint: "go:test",
 		ValidationCommand: "npm test", EvidenceDigest: "evidence", State: domain.PublicationOperationQueued, CreatedAt: created,
 	}
-}
-
-func operationPublicationUpdate(from, to domain.PublicationOperationState, started *time.Time) operationstore.PublicationOperationUpdate {
-	return operationstore.PublicationOperationUpdate{ExpectedStates: []domain.PublicationOperationState{from}, State: to, StartedAt: started}
 }

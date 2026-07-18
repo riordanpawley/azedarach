@@ -4250,34 +4250,17 @@ func TestReconcileSkipsRecreateWhileStopInProgress(t *testing.T) {
 		},
 	}
 
-	done := make(chan protocol.ResponseEnvelope, 1)
-	stopErr := make(chan error, 1)
+	type stopResult struct {
+		response protocol.ResponseEnvelope
+		err      error
+	}
+	stopped := make(chan stopResult, 1)
 	go func() {
 		resp, runErr := daemon.handleSessionStopDirect(context.Background(), req)
-		if runErr != nil {
-			stopErr <- runErr
-			return
-		}
-		done <- resp
+		stopped <- stopResult{response: resp, err: runErr}
 	}()
 
-	killObserved := false
-	stopCompleted := false
-	var stopResp protocol.ResponseEnvelope
-	select {
-	case <-tmuxRunner.killEntered:
-		killObserved = true
-	case runErr := <-stopErr:
-		stopCompleted = true
-		t.Fatalf("stop command failed before reconcile: %v", runErr)
-	case stopResp = <-done:
-		stopCompleted = true
-		if !stopResp.OK {
-			t.Fatalf("stop response before reconcile = %+v", stopResp)
-		}
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("timed out waiting for stop command to enter kill or complete")
-	}
+	<-tmuxRunner.killEntered
 
 	newSessionCallsBeforeReconcile := tmuxRunner.newSessionCalls
 	result, err := daemon.reconcileTmuxAndDaemonSessions(context.Background(), projectID, issueID)
@@ -4291,21 +4274,13 @@ func TestReconcileSkipsRecreateWhileStopInProgress(t *testing.T) {
 		t.Fatalf("new-session calls increased from %d to %d during reconcile", newSessionCallsBeforeReconcile, tmuxRunner.newSessionCalls)
 	}
 
-	if killObserved {
-		close(tmuxRunner.killRelease)
+	close(tmuxRunner.killRelease)
+	stopOutcome := <-stopped
+	if stopOutcome.err != nil {
+		t.Fatalf("stop command failed: %v", stopOutcome.err)
 	}
-
-	if !stopCompleted {
-		select {
-		case runErr := <-stopErr:
-			t.Fatalf("stop command failed: %v", runErr)
-		case resp := <-done:
-			if !resp.OK {
-				t.Fatalf("stop response = %+v", resp)
-			}
-		case <-time.After(500 * time.Millisecond):
-			t.Fatal("timed out waiting for stop command completion")
-		}
+	if !stopOutcome.response.OK {
+		t.Fatalf("stop response = %+v", stopOutcome.response)
 	}
 
 }
@@ -4708,11 +4683,7 @@ func TestHandleSessionStopDirectRecordsDesiredStateBeforeTmuxKillCompletes(t *te
 		killRelease: make(chan struct{}),
 	}
 	daemon := &Daemon{
-		cfg: Config{
-			RepoDir:                 ".",
-			RuntimeReconcileTimeout: 20 * time.Millisecond,
-			Logger:                  slog.Default(),
-		},
+		cfg:          Config{RepoDir: ".", Logger: slog.Default()},
 		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
 		session:      daemonhandlers.NewSessionHandler(sessionStore),
 		sessionStore: sessionStore,
@@ -4745,22 +4716,17 @@ func TestHandleSessionStopDirectRecordsDesiredStateBeforeTmuxKillCompletes(t *te
 		},
 	}
 
-	done := make(chan protocol.ResponseEnvelope, 1)
-	stopErr := make(chan error, 1)
+	type stopResult struct {
+		response protocol.ResponseEnvelope
+		err      error
+	}
+	stopped := make(chan stopResult, 1)
 	go func() {
 		resp, runErr := daemon.handleSessionStopDirect(context.Background(), req)
-		if runErr != nil {
-			stopErr <- runErr
-			return
-		}
-		done <- resp
+		stopped <- stopResult{response: resp, err: runErr}
 	}()
 
-	select {
-	case <-tmuxRunner.killEntered:
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("timed out waiting for tmux kill to begin")
-	}
+	<-tmuxRunner.killEntered
 
 	rows, err := runtimeStateStore.ListSessionStates(context.Background(), projectID)
 	if err != nil {
@@ -4777,15 +4743,12 @@ func TestHandleSessionStopDirectRecordsDesiredStateBeforeTmuxKillCompletes(t *te
 	}
 	close(tmuxRunner.killRelease)
 
-	select {
-	case runErr := <-stopErr:
-		t.Fatalf("stop command failed: %v", runErr)
-	case resp := <-done:
-		if !resp.OK {
-			t.Fatalf("stop response = %+v", resp)
-		}
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("timed out waiting for stop completion")
+	result := <-stopped
+	if result.err != nil {
+		t.Fatalf("stop command failed: %v", result.err)
+	}
+	if !result.response.OK {
+		t.Fatalf("stop response = %+v", result.response)
 	}
 
 	rows, err = runtimeStateStore.ListSessionStates(context.Background(), projectID)

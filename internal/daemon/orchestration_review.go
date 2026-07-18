@@ -255,7 +255,7 @@ func (a daemonOrchestrationAuthority) reviewInspection(ctx context.Context, proj
 	} else {
 		inspection.Reasons = append(inspection.Reasons, "inspect-candidate: candidate_projection_missing: issue has no durable worktree projection")
 	}
-	readiness, err := a.daemon.taskIntegrationReadiness(ctx, projectID, task.ID.String(), candidatePath)
+	readiness, err := a.daemon.taskReviewAcceptanceReadiness(ctx, projectID, task.ID.String(), candidatePath)
 	if err != nil {
 		inspection.Reasons = append(inspection.Reasons, "inspect-evidence: "+err.Error())
 	} else {
@@ -941,20 +941,16 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 			return false, fmt.Errorf("accepted review requires complete worker_evidence.v1 or a declared internal_review investigation with a durable accepted/ratified review artifact")
 		}
 	}
-	if inspection.Evidence != nil && inspection.Evidence.AggregateValidation != nil {
-		// Snapshot inspection can race with a checkout mutation. Resolve the durable
-		// issue-worktree identity again and re-run exact revision/cleanliness binding
-		// immediately before recording the trusted acceptance decision.
-		candidatePath, err := a.daemon.exactReviewCandidateWorktree(ctx, projectID, inspection.IssueID)
-		if err != nil {
-			return false, fmt.Errorf("accepted review candidate rejected: %w", err)
-		}
-		refreshed, err := a.daemon.taskIntegrationReadiness(ctx, projectID, inspection.IssueID, candidatePath)
+	if inspection.Evidence != nil {
+		// Snapshot inspection can race with new evidence or decisions. Re-read the
+		// immutable patch-review inputs immediately before acceptance, while leaving
+		// exact aggregate validation to the durable publication continuation.
+		refreshed, err := a.daemon.taskReviewAcceptanceReadiness(ctx, projectID, inspection.IssueID, request.RepoDir)
 		if err != nil {
 			return false, fmt.Errorf("revalidate accepted review candidate: %w", err)
 		}
 		if !refreshed.Ready {
-			return false, fmt.Errorf("accepted review candidate is not integration-ready: %s", strings.Join(refreshed.Reasons, "; "))
+			return false, fmt.Errorf("accepted review candidate is not patch-review-ready: %s", strings.Join(refreshed.Reasons, "; "))
 		}
 		inspection.Evidence = refreshed.EvidencePacket
 		inspection.ContextRisk = refreshed.ContextRisk
@@ -1046,7 +1042,7 @@ func (a daemonOrchestrationAuthority) captureAcceptedReviewPin(ctx context.Conte
 		if repoDir == "" {
 			repoDir = strings.TrimSpace(a.daemon.cfg.RepoDir)
 		}
-		readiness, err := a.daemon.taskIntegrationReadiness(ctx, projectID, inspection.IssueID, repoDir)
+		readiness, err := a.daemon.taskReviewAcceptanceReadiness(ctx, projectID, inspection.IssueID, repoDir)
 		if err != nil {
 			return pin, fmt.Errorf("capture reviewed evidence identity: %w", err)
 		}

@@ -4837,6 +4837,17 @@ func (d *Daemon) handleTaskIntegrationReadiness(ctx context.Context, req protoco
 }
 
 func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueID, repoDir string) (taskIntegrationReadinessResult, error) {
+	return d.taskReadiness(ctx, projectID, issueID, repoDir, true)
+}
+
+// taskReviewAcceptanceReadiness evaluates the immutable patch-review inputs.
+// Aggregate validation is deliberately excluded: for configured-base targets
+// it is daemon-owned continuation work after the reviewer accepts this patch.
+func (d *Daemon) taskReviewAcceptanceReadiness(ctx context.Context, projectID, issueID, repoDir string) (taskIntegrationReadinessResult, error) {
+	return d.taskReadiness(ctx, projectID, issueID, repoDir, false)
+}
+
+func (d *Daemon) taskReadiness(ctx context.Context, projectID, issueID, repoDir string, requireAggregate bool) (taskIntegrationReadinessResult, error) {
 	tasks, err := d.loadTaskGraphDomainTasks(ctx, projectID)
 	if err != nil {
 		return taskIntegrationReadinessResult{}, fmt.Errorf("inspect issue integration readiness: %w", err)
@@ -4868,7 +4879,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 		return taskIntegrationReadinessResult{}, fmt.Errorf("inspect issue integration readiness: issue store unavailable")
 	}
 	var latestAggregate *domain.ValidationRequest
-	if d.operationRuntime != nil {
+	if requireAggregate && d.operationRuntime != nil {
 		validationStore, storeErr := d.validationProjectionStore()
 		if storeErr != nil {
 			return taskIntegrationReadinessResult{}, fmt.Errorf("inspect aggregate validation projection: %w", storeErr)
@@ -4933,7 +4944,9 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 	if evidence := domain.ReduceReviewReadyEvidence(reviewEvents).LatestEvidence; evidence != nil {
 		evt := evidence.SourceEvent
 		packet, validation := evidence.Evidence, evidence.Validation
-		validateWorkerAggregateRequest(&validation, packet, latestAggregate)
+		if requireAggregate {
+			validateWorkerAggregateRequest(&validation, packet, latestAggregate)
+		}
 		if validation.Complete {
 			return taskIntegrationReadinessResult{
 				IssueID:          task.ID.String(),
@@ -4998,7 +5011,9 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 				continue
 			}
 			packet, validation := domain.ParseWorkerEvidencePacketBody(evt.Body)
-			validateWorkerAggregateRequest(&validation, packet, latestAggregate)
+			if requireAggregate {
+				validateWorkerAggregateRequest(&validation, packet, latestAggregate)
+			}
 			if validation.Complete {
 				return taskIntegrationReadinessResult{
 					IssueID:          task.ID.String(),
