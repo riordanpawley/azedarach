@@ -36,6 +36,15 @@ type watchErrorProjectionStore struct {
 	watch func(context.Context, string, uint64, int) ([]domain.ProjectionDelta, uint64, error)
 }
 
+type listErrorProjectionStore struct {
+	projectionDeltaStore
+	list func(context.Context, string, uint64, int) ([]domain.ProjectionDelta, uint64, error)
+}
+
+func (s listErrorProjectionStore) ListProjectionDeltas(ctx context.Context, projectID string, after uint64, limit int) ([]domain.ProjectionDelta, uint64, error) {
+	return s.list(ctx, projectID, after, limit)
+}
+
 func (s watchErrorProjectionStore) WatchProjectionDeltas(ctx context.Context, projectID string, after uint64, limit int) ([]domain.ProjectionDelta, uint64, error) {
 	return s.watch(ctx, projectID, after, limit)
 }
@@ -874,15 +883,105 @@ func TestProjectReadSnapshotIsPureAtDeclaredChecksum(t *testing.T) {
 func TestProjectReadMaterializerClearsOnlyRecoveredMutationConvergenceFailure(t *testing.T) {
 	materializer := newProjectReadMaterializer("project", nil, nil)
 	materializer.metadata = protocol.MaterializedSnapshotMetadata{Health: "healthy"}
-	materializer.markUnhealthy(errors.New("committed mutation convergence: transient read failure"))
-	materializer.clearMutationConvergenceFailure()
+	attempt := materializer.beginMutationConvergence(1)
+	materializer.finishMutationConvergence(1, attempt, errors.New("transient read failure"))
+	recoveryAttempt := materializer.beginMutationConvergence(2)
+	materializer.finishMutationConvergence(2, recoveryAttempt, nil)
 	if got := materializer.snapshotMetadata().Health; got != "healthy" {
 		t.Fatalf("recovered mutation convergence health = %q, want healthy", got)
 	}
 	materializer.markUnhealthy(errors.New("watch projection deltas: corrupt batch"))
-	materializer.clearMutationConvergenceFailure()
+	unrelatedAttempt := materializer.beginMutationConvergence(3)
+	materializer.finishMutationConvergence(3, unrelatedAttempt, nil)
 	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "corrupt batch") {
 		t.Fatalf("unrelated health failure was cleared: %q", got)
+	}
+}
+
+func TestProjectReadMaterializerOlderConvergenceSuccessCannotClearNewerFailure(t *testing.T) {
+	olderEntered := make(chan struct{})
+	releaseOlder := make(chan struct{})
+	var calls atomic.Int32
+	store := listErrorProjectionStore{list: func(ctx context.Context, _ string, _ uint64, _ int) ([]domain.ProjectionDelta, uint64, error) {
+		if calls.Add(1) == 1 {
+			close(olderEntered)
+			select {
+			case <-releaseOlder:
+			case <-ctx.Done():
+				return nil, 0, ctx.Err()
+			}
+			return nil, 0, nil
+		}
+		return nil, 0, errors.New("newer failure")
+	}}
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(store), nil)
+	materializer.metadata = protocol.MaterializedSnapshotMetadata{Health: "healthy"}
+	olderDone := make(chan error, 1)
+	go func() {
+		_, _, err := materializer.convergeMutation(context.Background(), 1)
+		olderDone <- err
+	}()
+	<-olderEntered
+	if _, outcome, err := materializer.convergeMutation(context.Background(), 2); err == nil || outcome != "unavailable" {
+		t.Fatalf("newer convergence = outcome:%q error:%v, want unavailable failure", outcome, err)
+	}
+	close(releaseOlder)
+	if err := <-olderDone; err != nil {
+		t.Fatal(err)
+	}
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "newer failure") {
+		t.Fatalf("older success cleared newer failure: %q", got)
+	}
+}
+
+func TestProjectReadMaterializerBootstrapCannotOverwriteNewerCanonicalConvergence(t *testing.T) {
+	client, _ := newTestIssueClient(t)
+	ctx := context.Background()
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "bootstrap convergence fence", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hydrateEntered := make(chan struct{})
+	releaseHydrate := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseHydrate) }) }
+	t.Cleanup(release)
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(client), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		close(hydrateEntered)
+		<-releaseHydrate
+		return tasks, nil
+	})
+	bootstrapDone := make(chan error, 1)
+	go func() { bootstrapDone <- materializer.bootstrap(ctx) }()
+	<-hydrateEntered
+	if _, err := client.CloseWithRuntime(ctx, "project", issueID, domain.StatusDone); err != nil {
+		t.Fatal(err)
+	}
+	queued := make(chan struct{})
+	var queuedOnce sync.Once
+	convergeCtx := withProjectReadCanonicalQueuedHookForTest(ctx, func(string) { queuedOnce.Do(func() { close(queued) }) })
+	convergeDone := make(chan error, 1)
+	go func() {
+		_, convergeErr := materializer.convergeCanonical(convergeCtx)
+		convergeDone <- convergeErr
+	}()
+	select {
+	case <-queued:
+	case convergeErr := <-convergeDone:
+		release()
+		<-bootstrapDone
+		t.Fatalf("canonical convergence bypassed bootstrap serialization: %v", convergeErr)
+	}
+	release()
+	if err := <-bootstrapDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-convergeDone; err != nil {
+		t.Fatal(err)
+	}
+	tasks, metadata := materializer.snapshot()
+	if metadata.DeliveryCursor == 0 || len(tasks) != 1 || tasks[0].Status != domain.StatusDone {
+		t.Fatalf("snapshot after bootstrap/convergence = metadata:%+v tasks:%+v, want newest closed lifecycle", metadata, tasks)
 	}
 }
 

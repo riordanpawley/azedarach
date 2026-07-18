@@ -2094,24 +2094,16 @@ func (d *Daemon) publishTaskEvent(req protocol.RequestEnvelope, eventName string
 	materializer := d.materializers[projectID]
 	d.materializersMu.RUnlock()
 	if materializer != nil {
-		before := materializer.snapshotMetadata().DeliveryCursor
 		boundedCtx, cancelConvergence := context.WithTimeout(convergenceCtx, projectReadMutationConvergenceTimeout)
-		metadata, err := materializer.convergeCanonical(boundedCtx)
+		metadata, outcome, err := materializer.convergeMutation(boundedCtx, rev)
 		cancelConvergence()
 		cacheRevision = metadata.DeliveryCursor
+		convergenceOutcome = outcome
 		if err != nil {
-			convergenceOutcome = "unavailable"
 			convergenceErr = err
-			materializer.markUnhealthy(fmt.Errorf("committed mutation convergence: %w", err))
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Error("committed task mutation failed to converge project read materializer", "project_id", projectID, "mutation_revision", rev, "cache_revision", cacheRevision, "convergence_outcome", convergenceOutcome, "error", err)
 			}
-		} else if cacheRevision > before {
-			materializer.clearMutationConvergenceFailure()
-			convergenceOutcome = "advanced"
-		} else {
-			materializer.clearMutationConvergenceFailure()
-			convergenceOutcome = "current"
 		}
 	}
 	endConvergence(convergenceErr,

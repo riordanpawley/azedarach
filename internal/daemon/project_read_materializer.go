@@ -62,6 +62,10 @@ func withProjectReadUpdateQueuedHookForTest(ctx context.Context, hook func(strin
 	return withContextOperationLockQueuedHookForTest(ctx, hook)
 }
 
+func withProjectReadCanonicalQueuedHookForTest(ctx context.Context, hook func(string)) context.Context {
+	return withContextOperationLockQueuedHookForTest(ctx, hook)
+}
+
 func withoutSynchronousProjectReadRuntimeRefresh(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -75,7 +79,10 @@ func withoutSynchronousProjectReadRuntimeRefresh(ctx context.Context) context.Co
 type projectReadMaterializer struct {
 	mu               sync.RWMutex
 	updateMu         contextOperationLock
-	deltaMu          contextOperationLock
+	canonicalMu                 contextOperationLock
+	mutationConvergenceSequence uint64
+	mutationConvergenceRevision uint64
+	mutationConvergenceAttempt  uint64
 	projectID        string
 	authority        *ProjectionDeltaAuthority
 	hydrate          func(context.Context, []domain.Task) ([]domain.Task, error)
@@ -151,6 +158,22 @@ func (m *projectReadMaterializer) lockUpdate(ctx context.Context, fallbackOperat
 	return m.updateMu.release, nil
 }
 
+func (m *projectReadMaterializer) lockCanonical(ctx context.Context, fallbackOperation string) (func(), error) {
+	operation := runtimeProjectionWriterOperationFromContext(ctx, fallbackOperation)
+	holderOperation := m.canonicalMu.currentHolder()
+	ctx, endSpan := latencytrace.StartSpanWithEndAttributes(ctx, "daemon", "project_read.canonical_admission",
+		"canonical.waiter_operation", operation,
+		"canonical.holder_operation", holderOperation,
+	)
+	holderOperation, err := m.canonicalMu.acquire(ctx, operation)
+	if err != nil {
+		endSpan(err, "canonical.holder_operation", holderOperation)
+		return nil, err
+	}
+	endSpan(nil, "canonical.holder_operation", holderOperation)
+	return m.canonicalMu.release, nil
+}
+
 func (m *projectReadMaterializer) bootstrap(ctx context.Context) error {
 	if m == nil {
 		return errors.New("project read materializer authority unavailable")
@@ -160,6 +183,11 @@ func (m *projectReadMaterializer) bootstrap(ctx context.Context) error {
 		return err
 	}
 	defer unlock()
+	canonicalUnlock, err := m.lockCanonical(ctx, "project_read.bootstrap")
+	if err != nil {
+		return err
+	}
+	defer canonicalUnlock()
 	if m.authority == nil {
 		return errors.New("project read materializer authority unavailable")
 	}
@@ -287,14 +315,12 @@ func (m *projectReadMaterializer) apply(ctx context.Context, batch protocol.Proj
 }
 
 func (m *projectReadMaterializer) applyCanonical(ctx context.Context, batch protocol.ProjectionDeltaBatch) ([]string, error) {
-	operation := runtimeProjectionWriterOperationFromContext(ctx, "project_read.delta_apply")
-	_, err := m.deltaMu.acquire(ctx, operation)
+	unlock, err := m.lockCanonical(ctx, "project_read.delta_apply")
 	if err != nil {
 		return nil, err
 	}
-	affected, err := m.applyCanonicalBatch(ctx, batch)
-	m.deltaMu.release()
-	return affected, err
+	defer unlock()
+	return m.applyCanonicalBatch(ctx, batch)
 }
 
 func (m *projectReadMaterializer) convergeCanonical(ctx context.Context) (protocol.MaterializedSnapshotMetadata, error) {
@@ -321,6 +347,22 @@ func (m *projectReadMaterializer) convergeCanonical(ctx context.Context) (protoc
 			return m.snapshotMetadata(), nil
 		}
 	}
+}
+
+func (m *projectReadMaterializer) convergeMutation(ctx context.Context, revision uint64) (protocol.MaterializedSnapshotMetadata, string, error) {
+	attempt := m.beginMutationConvergence(revision)
+	before := m.snapshotMetadata().DeliveryCursor
+	metadata, err := m.convergeCanonical(ctx)
+	outcome := "current"
+	if err != nil {
+		outcome = "unavailable"
+	} else if metadata.DeliveryCursor > before {
+		outcome = "advanced"
+	}
+	if !m.finishMutationConvergence(revision, attempt, err) {
+		outcome = "superseded"
+	}
+	return metadata, outcome, err
 }
 
 func (m *projectReadMaterializer) applyCanonicalBatch(ctx context.Context, batch protocol.ProjectionDeltaBatch) ([]string, error) {
@@ -530,13 +572,31 @@ func (m *projectReadMaterializer) markUnhealthy(err error) {
 	m.mu.Unlock()
 }
 
-func (m *projectReadMaterializer) clearMutationConvergenceFailure() {
+func (m *projectReadMaterializer) beginMutationConvergence(revision uint64) uint64 {
 	m.mu.Lock()
-	if strings.HasPrefix(m.metadata.Health, "stale: committed mutation convergence:") {
-		m.metadata.Health = "healthy"
-		m.metadata.SemanticChecksum = joinedMaterializedChecksum(m.metadata)
+	defer m.mu.Unlock()
+	m.mutationConvergenceSequence++
+	attempt := m.mutationConvergenceSequence
+	if revision >= m.mutationConvergenceRevision {
+		m.mutationConvergenceRevision = revision
+		m.mutationConvergenceAttempt = attempt
 	}
-	m.mu.Unlock()
+	return attempt
+}
+
+func (m *projectReadMaterializer) finishMutationConvergence(revision, attempt uint64, convergenceErr error) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if revision != m.mutationConvergenceRevision || attempt != m.mutationConvergenceAttempt {
+		return false
+	}
+	if convergenceErr != nil {
+		m.metadata.Health = "stale: committed mutation convergence: " + convergenceErr.Error()
+	} else if strings.HasPrefix(m.metadata.Health, "stale: committed mutation convergence:") {
+		m.metadata.Health = "healthy"
+	}
+	m.metadata.SemanticChecksum = joinedMaterializedChecksum(m.metadata)
+	return true
 }
 
 func (m *projectReadMaterializer) snapshotMetadata() protocol.MaterializedSnapshotMetadata {
