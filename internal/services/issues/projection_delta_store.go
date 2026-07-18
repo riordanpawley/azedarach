@@ -182,25 +182,33 @@ func appendProjectionDelta(ctx context.Context, tx sqlIssueDBTX, params Projecti
 }
 
 func (c *Client) ListProjectionDeltas(ctx context.Context, projectID string, after uint64, limit int) ([]domain.ProjectionDelta, uint64, error) {
+	deltas, head, _, err := c.listProjectionDeltas(ctx, projectID, after, limit, 0)
+	return deltas, head, err
+}
+
+func (c *Client) listProjectionDeltas(ctx context.Context, projectID string, after uint64, limit int, expectedGeneration uint64) ([]domain.ProjectionDelta, uint64, uint64, error) {
 	if c.projectionDeltaReadHook != nil {
 		c.projectionDeltaReadHook()
 	}
-	db, err := c.projectionReadDBHandle()
+	db, generation, err := c.projectionReadDBHandleWithGeneration()
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
+	}
+	if expectedGeneration != 0 && generation != expectedGeneration {
+		return nil, 0, generation, fmt.Errorf("projection delta store generation changed from %d to %d: %w", expectedGeneration, generation, domain.ErrProjectionRetryable)
 	}
 	projectID = normalizeProjectionProjectID(projectID)
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, 0, c.projectionReadError("begin projection delta read", err)
+		return nil, 0, generation, c.projectionReadError("begin projection delta read", err)
 	}
 	defer tx.Rollback()
 	head, err := projectionHead(ctx, tx, projectID)
 	if err != nil {
-		return nil, 0, c.projectionReadError("read projection delta head", err)
+		return nil, 0, generation, c.projectionReadError("read projection delta head", err)
 	}
 	if after > head {
-		return nil, head, &domain.ProjectionGapError{ProjectID: projectID, Expected: head, Actual: after}
+		return nil, head, generation, &domain.ProjectionGapError{ProjectID: projectID, Expected: head, Actual: after}
 	}
 	if limit <= 0 {
 		limit = defaultProjectionDeltaLimit
@@ -210,49 +218,52 @@ func (c *Client) ListProjectionDeltas(ctx context.Context, projectID string, aft
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT project_id,cursor,kind,key,operation,idempotency_key,payload_json,committed_at FROM projection_deltas WHERE project_id=? AND cursor>? ORDER BY cursor LIMIT ?`, projectID, after, limit)
 	if err != nil {
-		return nil, head, c.projectionReadError("list projection deltas", err)
+		return nil, head, generation, c.projectionReadError("list projection deltas", err)
 	}
 	defer rows.Close()
 	deltas := make([]domain.ProjectionDelta, 0, min(limit, 64))
 	for rows.Next() {
 		delta, err := scanProjectionDelta(rows)
 		if err != nil {
-			return nil, head, err
+			return nil, head, generation, err
 		}
 		deltas = append(deltas, delta)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, head, c.projectionReadError("iterate projection deltas", err)
+		return nil, head, generation, c.projectionReadError("iterate projection deltas", err)
 	}
 	if err := rows.Close(); err != nil {
-		return nil, head, c.projectionReadError("close projection delta rows", err)
+		return nil, head, generation, c.projectionReadError("close projection delta rows", err)
 	}
 	if after < head {
 		if len(deltas) == 0 {
-			return nil, head, &domain.ProjectionGapError{ProjectID: projectID, Expected: after + 1, Actual: head + 1}
+			return nil, head, generation, &domain.ProjectionGapError{ProjectID: projectID, Expected: after + 1, Actual: head + 1}
 		}
 		expected := after + 1
 		for _, delta := range deltas {
 			if delta.Cursor != expected {
-				return nil, head, &domain.ProjectionGapError{ProjectID: projectID, Expected: expected, Actual: delta.Cursor}
+				return nil, head, generation, &domain.ProjectionGapError{ProjectID: projectID, Expected: expected, Actual: delta.Cursor}
 			}
 			expected++
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, head, c.projectionReadError("commit projection delta read", err)
+		return nil, head, generation, c.projectionReadError("commit projection delta read", err)
 	}
-	return deltas, head, nil
+	return deltas, head, generation, nil
 }
 
 // WatchProjectionDeltas blocks until at least one delta follows after. It only
 // performs read queries; context termination is returned as a typed error.
 func (c *Client) WatchProjectionDeltas(ctx context.Context, projectID string, after uint64, limit int) ([]domain.ProjectionDelta, uint64, error) {
-	deltas, head, err := c.ListProjectionDeltas(ctx, projectID, after, limit)
+	deltas, head, generation, err := c.listProjectionDeltas(ctx, projectID, after, limit, 0)
 	if err != nil || len(deltas) > 0 {
 		return deltas, head, projectionWatchError(ctx, err)
 	}
-	subscription, unsubscribe, err := c.subscribeProjectionDeltaNotifier()
+	if c.projectionWatchBeforeSubscribeHook != nil {
+		c.projectionWatchBeforeSubscribeHook()
+	}
+	subscription, unsubscribe, err := c.subscribeProjectionDeltaNotifier(generation)
 	if err != nil {
 		return nil, head, fmt.Errorf("create projection cursor watcher: %w: %w", err, domain.ErrProjectionRetryable)
 	}
@@ -266,7 +277,7 @@ func (c *Client) WatchProjectionDeltas(ctx context.Context, projectID string, af
 	// Re-read after registration to close the commit-before-watch race. From
 	// here onward SQLite WAL/main-file notifications wake the reader without a
 	// periodic query loop, including commits from another daemon process.
-	deltas, head, err = c.ListProjectionDeltas(ctx, projectID, after, limit)
+	deltas, head, _, err = c.listProjectionDeltas(ctx, projectID, after, limit, generation)
 	if err != nil || len(deltas) > 0 {
 		return deltas, head, projectionWatchError(ctx, err)
 	}
@@ -283,7 +294,7 @@ func (c *Client) WatchProjectionDeltas(ctx context.Context, projectID string, af
 			if !ok {
 				return nil, head, fmt.Errorf("projection cursor watcher closed: %w", domain.ErrProjectionRetryable)
 			}
-			deltas, head, err = c.ListProjectionDeltas(ctx, projectID, after, limit)
+			deltas, head, _, err = c.listProjectionDeltas(ctx, projectID, after, limit, generation)
 			if err != nil || len(deltas) > 0 {
 				return deltas, head, projectionWatchError(ctx, err)
 			}
@@ -411,15 +422,20 @@ func (c *Client) OpenProjectionDeltaStore() error {
 }
 
 func (c *Client) projectionReadDBHandle() (*sql.DB, error) {
+	db, _, err := c.projectionReadDBHandleWithGeneration()
+	return db, err
+}
+
+func (c *Client) projectionReadDBHandleWithGeneration() (*sql.DB, uint64, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.corruptionError(); err != nil {
-		return nil, fmt.Errorf("projection delta store quarantined: %w", err)
+		return nil, c.dbGeneration, fmt.Errorf("projection delta store quarantined: %w", err)
 	}
 	if c.db == nil {
-		return nil, fmt.Errorf("projection delta store is not open: %w", domain.ErrProjectionRetryable)
+		return nil, c.dbGeneration, fmt.Errorf("projection delta store is not open: %w", domain.ErrProjectionRetryable)
 	}
-	return c.db, nil
+	return c.db, c.dbGeneration, nil
 }
 
 // AdvanceProjectionConsumerCursor records exactly-once consumption after

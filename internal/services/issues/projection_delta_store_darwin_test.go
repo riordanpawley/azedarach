@@ -106,7 +106,9 @@ func TestProjectionDeltaWatchReusesDirectoryDescriptorsUntilClientClose(t *testi
 	client := NewClientAtPath(filepath.Join(dir, "consumer.db"), nil)
 	require.NoError(t, client.OpenProjectionDeltaStore())
 	t.Cleanup(func() { require.NoError(t, client.CloseDB()) })
-	_, _, err := client.ListProjectionDeltas(context.Background(), "portable-consumer", 0, 1)
+	_, generation, err := client.projectionReadDBHandleWithGeneration()
+	require.NoError(t, err)
+	_, _, err = client.ListProjectionDeltas(context.Background(), "portable-consumer", 0, 1)
 	require.NoError(t, err)
 
 	var sharedWatcherDescriptors int
@@ -146,6 +148,9 @@ func TestProjectionDeltaWatchReusesDirectoryDescriptorsUntilClientClose(t *testi
 	require.Equal(t, diagnostic.ProjectionWatchesStarted, diagnostic.ProjectionWatchesDone)
 	require.NoError(t, client.CloseDB())
 	require.Empty(t, openDescriptorsUnder(t, dir), "closing the SQLite client must release its shared watcher after the pool")
+	_, _, err = client.subscribeProjectionDeltaNotifier(generation)
+	require.ErrorIs(t, err, domain.ErrProjectionRetryable)
+	require.Empty(t, openDescriptorsUnder(t, dir), "a closed client must not recreate watcher descriptors")
 }
 
 func openDescriptorsUnder(t *testing.T, root string) []string {

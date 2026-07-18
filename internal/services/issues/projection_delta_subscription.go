@@ -1,13 +1,26 @@
 package issues
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/riordanpawley/azedarach/internal/domain"
+)
 
 type projectionDeltaSubscription struct {
 	events chan struct{}
 	errors chan error
 }
 
-func (c *Client) subscribeProjectionDeltaNotifier() (*projectionDeltaSubscription, func(), error) {
+func (c *Client) subscribeProjectionDeltaNotifier(expectedGeneration uint64) (*projectionDeltaSubscription, func(), error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.db == nil {
+		return nil, nil, fmt.Errorf("projection delta store is not open: %w", domain.ErrProjectionRetryable)
+	}
+	if expectedGeneration != c.dbGeneration {
+		return nil, nil, fmt.Errorf("projection delta store generation changed from %d to %d: %w", expectedGeneration, c.dbGeneration, domain.ErrProjectionRetryable)
+	}
+
 	c.projectionNotifierMu.Lock()
 	defer c.projectionNotifierMu.Unlock()
 

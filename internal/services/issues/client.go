@@ -854,6 +854,7 @@ type Client struct {
 
 	mu             sync.Mutex
 	db             *sql.DB
+	dbGeneration   uint64
 	walMu          sync.Mutex
 	lastWALCheckAt time.Time
 
@@ -864,6 +865,7 @@ type Client struct {
 	mailboxReplayRepairFailureHook     func(stage string) error
 	projectionDeltaChecksumRepairHook  func(stage string) error
 	projectionDeltaReadHook            func()
+	projectionWatchBeforeSubscribeHook func()
 	projectionSnapshotSourceRowsHook   func(projectionDeltaRows) projectionDeltaRows
 	projectionWatchActive              atomic.Int64
 	projectionWatchStarted             atomic.Uint64
@@ -1178,6 +1180,7 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 	specAuditDoneAt := time.Now()
 
 	c.db = db
+	c.dbGeneration++
 	if c.logger != nil {
 		c.logger.Info(
 			"issue store init timings",
@@ -1426,16 +1429,19 @@ func ensureSQLiteColumn(db *sql.DB, tableName, columnName, columnDDL string) err
 
 func (c *Client) CloseDB() error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	var dbErr error
 	if c.db != nil {
 		dbErr = c.db.Close()
 		c.db = nil
 	}
-	c.mu.Unlock()
 
 	// The shared watcher may own non-SQLite descriptors for the database,
 	// WAL, and SHM files on kqueue platforms. Close it only after every SQLite
-	// connection has released its locks and mappings.
+	// connection has released its locks and mappings. Keep the client lifecycle
+	// boundary held through notifier shutdown so a new pool generation cannot
+	// open while descriptors from the previous generation are closing.
 	notifierErr := c.closeProjectionDeltaNotifier()
 	if dbErr != nil {
 		return c.wrapError("close-db", "", dbErr)
