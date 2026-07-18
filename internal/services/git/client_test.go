@@ -968,6 +968,56 @@ func TestRealProcessProfileMergeCleanlyTransactionalAppliesScratchMergeToCleanTa
 	}
 }
 
+func TestMergeCleanlyTransactionalAtBaseFencesMovementBetweenOuterCheckAndLockedSnapshot(t *testing.T) {
+	repo := initDivergedRepo(t)
+	inner := NewExecRunner(repo)
+	lockedSnapshotPending := make(chan struct{})
+	releaseLockedSnapshot := make(chan struct{})
+	var barrierOnce sync.Once
+	var scratchAdds int
+	runner := &rawMockRunner{runFunc: func(ctx context.Context, args ...string) (string, error) {
+		if len(args) >= 3 && args[0] == "-C" && args[1] == repo && args[2] == "status" {
+			barrierOnce.Do(func() {
+				close(lockedSnapshotPending)
+				<-releaseLockedSnapshot
+			})
+		}
+		if len(args) >= 4 && args[0] == "-C" && args[1] == repo && args[2] == "worktree" && args[3] == "add" {
+			scratchAdds++
+		}
+		return inner.Run(ctx, args...)
+	}}
+	client := NewClient(runner, slog.Default())
+	expectedBase, err := client.ResolveCommit(context.Background(), repo, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type mergeOutcome struct {
+		result *MergeResult
+		err    error
+	}
+	outcome := make(chan mergeOutcome, 1)
+	go func() {
+		result, mergeErr := client.MergeCleanlyTransactionalAtBase(context.Background(), repo, "feature", expectedBase)
+		outcome <- mergeOutcome{result: result, err: mergeErr}
+	}()
+	<-lockedSnapshotPending
+	runClientTestGit(t, repo, "commit", "-q", "--allow-empty", "-m", "move target between outer check and locked snapshot")
+	actualBase := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+	close(releaseLockedSnapshot)
+	got := <-outcome
+	var stale *IntegrationTargetStaleError
+	if !errors.As(got.err, &stale) || stale.ExpectedHead != expectedBase || stale.ActualHead != actualBase {
+		t.Fatalf("locked snapshot outcome = (%+v,%v), want typed stale %s -> %s", got.result, got.err, expectedBase, actualBase)
+	}
+	if got.result != nil {
+		t.Fatalf("locked snapshot stale result = %+v, want nil before candidate creation", got.result)
+	}
+	if scratchAdds != 0 {
+		t.Fatalf("scratch candidate creations = %d, want 0", scratchAdds)
+	}
+}
+
 func TestCandidateValidationOutputRetainsStdoutWhenGateAlsoWritesStderr(t *testing.T) {
 	got := candidateValidationOutput("FAIL example.test/pkg::TestActionable\nexact assertion", "[gate] status=failed exit_status=1")
 	for _, want := range []string{"TestActionable", "exact assertion", "status=failed"} {

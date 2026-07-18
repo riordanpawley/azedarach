@@ -3632,11 +3632,15 @@ func (d *Daemon) mergeTaskBranchBeforeClose(ctx context.Context, projectID, task
 		var result *git.MergeResult
 		var err error
 		if configuredBaseTarget {
-			result, err = d.git.MergeCleanlyTransactional(ctx, targetWorktree, sourceBranch)
+			result, err = d.git.MergeCleanlyTransactionalAtBase(ctx, targetWorktree, sourceBranch, expectedBaseOID)
 		} else {
 			result, err = d.git.MergeCleanlyTransactionalComposition(ctx, targetWorktree, sourceBranch)
 		}
 		if err != nil {
+			var stale *git.IntegrationTargetStaleError
+			if errors.As(err, &stale) {
+				return nil, &taskCloseExpectedBaseStaleError{Expected: stale.ExpectedHead, Actual: stale.ActualHead}
+			}
 			return nil, fmt.Errorf("merge %s into %s: %w", sourceBranch, targetBranch, err)
 		}
 		if result == nil {

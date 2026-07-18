@@ -47,20 +47,40 @@ type integrationValidationReceipt struct {
 	AppliedAt      time.Time                  `json:"applied_at"`
 }
 
+// IntegrationTargetStaleError reports that the target HEAD observed under the
+// integration transaction lock no longer matches the caller's publication
+// identity. No scratch candidate has been created when this error is returned.
+type IntegrationTargetStaleError struct {
+	ExpectedHead string
+	ActualHead   string
+}
+
+func (e *IntegrationTargetStaleError) Error() string {
+	return fmt.Sprintf("integration target HEAD changed before candidate creation: expected=%s actual=%s", e.ExpectedHead, e.ActualHead)
+}
+
 // MergeCleanlyTransactional performs the merge in a disposable worktree and only
 // locks the target worktree for the base snapshot and final publication phases.
 func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch string) (*MergeResult, error) {
-	return c.mergeCleanlyTransactional(ctx, worktree, branch, true)
+	return c.mergeCleanlyTransactional(ctx, worktree, branch, true, "")
+}
+
+// MergeCleanlyTransactionalAtBase binds candidate creation to expectedBase.
+// The comparison is made under the same integration transaction lock as the
+// target HEAD snapshot, closing the gap between daemon preflight and scratch
+// creation.
+func (c *Client) MergeCleanlyTransactionalAtBase(ctx context.Context, worktree, branch, expectedBase string) (*MergeResult, error) {
+	return c.mergeCleanlyTransactional(ctx, worktree, branch, true, strings.TrimSpace(expectedBase))
 }
 
 // MergeCleanlyTransactionalComposition performs exact clean conflict-safe
 // compare/apply composition without invoking repository publication validation.
 // It is reserved for typed non-base integration targets.
 func (c *Client) MergeCleanlyTransactionalComposition(ctx context.Context, worktree, branch string) (*MergeResult, error) {
-	return c.mergeCleanlyTransactional(ctx, worktree, branch, false)
+	return c.mergeCleanlyTransactional(ctx, worktree, branch, false, "")
 }
 
-func (c *Client) mergeCleanlyTransactional(ctx context.Context, worktree, branch string, validatePublication bool) (*MergeResult, error) {
+func (c *Client) mergeCleanlyTransactional(ctx context.Context, worktree, branch string, validatePublication bool, expectedBase string) (*MergeResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -106,6 +126,9 @@ func (c *Client) mergeCleanlyTransactional(ctx context.Context, worktree, branch
 		targetHead, err = c.revParseVerify(ctx, worktree, "HEAD")
 		if err != nil {
 			return fmt.Errorf("resolve target HEAD before transactional merge: %w", err)
+		}
+		if expectedBase != "" && targetHead != expectedBase {
+			return &IntegrationTargetStaleError{ExpectedHead: expectedBase, ActualHead: targetHead}
 		}
 		return nil
 	}); err != nil {
