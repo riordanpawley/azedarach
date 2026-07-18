@@ -630,6 +630,64 @@ func TestMergeGateBudgetLeavesFinalizationReserve(t *testing.T) {
 	}
 }
 
+func TestMergeGateBodySanitizesOuterCandidateEnvironment(t *testing.T) {
+	repo := t.TempDir()
+	fakeBin := filepath.Join(repo, "fake-bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	evidence := filepath.Join(repo, "sanitized")
+	fakeGit := `#!/bin/sh
+case "$*" in
+  "rev-parse --show-toplevel") printf '%s\n' "$AZEDARACH_TEST_REPO" ;;
+  "rev-parse --verify HEAD") printf '%s\n' candidate ;;
+  *) echo "unexpected git command: $*" >&2; exit 64 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "git"), []byte(fakeGit), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	scriptsDir := filepath.Join(repo, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	fakeLeaseWrapper := `#!/bin/sh
+if [ "${AZEDARACH_CANDIDATE_HEAD+x}" = x ] ||
+   [ "${AZEDARACH_MERGE_GATE_BODY+x}" = x ] ||
+   [ "${AZEDARACH_SKIP_MERGE_REBASE_GATE+x}" = x ]; then
+  echo "outer candidate environment leaked into nested validation" >&2
+  exit 65
+fi
+printf sanitized >"$AZEDARACH_TEST_EVIDENCE"
+`
+	if err := os.WriteFile(filepath.Join(scriptsDir, "with-machine-validation-lease"), []byte(fakeLeaseWrapper), 0o755); err != nil {
+		t.Fatalf("write fake validation wrapper: %v", err)
+	}
+
+	bodyPath, err := filepath.Abs(filepath.Join("..", "..", "..", "scripts", "git-merge-rebase-gate-body.sh"))
+	if err != nil {
+		t.Fatalf("resolve merge gate body: %v", err)
+	}
+	cmd := exec.Command(bodyPath)
+	cmd.Dir = repo
+	cmd.Env = gitEnvWithOverrides(os.Environ(), []string{
+		"PATH=" + fakeBin + string(os.PathListSeparator) + "/usr/bin:/bin",
+		"AZEDARACH_TEST_REPO=" + repo,
+		"AZEDARACH_TEST_EVIDENCE=" + evidence,
+		"AZEDARACH_CANDIDATE_HEAD=outer-candidate",
+		"AZEDARACH_MERGE_GATE_BODY=/outer/body",
+		"AZEDARACH_SKIP_MERGE_REBASE_GATE=0",
+	})
+	if output, runErr := cmd.CombinedOutput(); runErr != nil {
+		t.Fatalf("run merge gate body: %v\n%s", runErr, output)
+	}
+	if contents, readErr := os.ReadFile(evidence); readErr != nil {
+		t.Fatalf("read sanitization evidence: %v", readErr)
+	} else if string(contents) != "sanitized" {
+		t.Fatalf("sanitization evidence = %q, want sanitized", contents)
+	}
+}
+
 func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
 	// A direct synthetic body isolates wrapper timeout/output semantics from
 	// task-runner and Go startup scheduling. Use a long safety budget, then

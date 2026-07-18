@@ -10,12 +10,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
+	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -328,11 +330,11 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 
 	// restart-all replaces and re-acknowledges the rooted agent while holding
 	// the same exact-scope transition lock used by rooted start/attach.
-	d.sessionResumeWait = immediateSessionResumeWait
+	tmuxRunner.onRespawnPane = seedManagedRestartIdentity(t, d, tmuxRunner, projectID, started.SessionID)
 	restartRequest := protocol.RequestEnvelope{
 		Command: protocol.CommandSessionRestartAll,
 		Meta:    protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-		Body:    marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(projectID)}),
+		Body:    marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(projectID), ForceBusy: true}),
 	}
 	inputsBefore = len(tmuxRunner.inputPayloads)
 	handoffsBefore := len(tmuxRunner.handoffPromptContents)
@@ -363,12 +365,10 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 		t.Fatalf("acknowledged restarted rooted agent was re-prompted")
 	}
 
-	// Cancellation after the interrupt leaves durable acknowledgement absent,
-	// so a later rooted start repairs whichever process survived.
-	var replacementWaits int
-	d.sessionResumeWait = func(context.Context, time.Duration) error {
-		replacementWaits++
-		return context.Canceled
+	// A failed exact replacement leaves durable acknowledgement absent, so a
+	// later rooted start repairs whichever process survived.
+	d.sessionRestartRespawn = func(context.Context, string, string, string) (error, bool) {
+		return context.Canceled, false
 	}
 	cancelledResponse, err := d.handleSessionRestartAll(ctx, restartRequest)
 	if err != nil || cancelledResponse.Error != nil {
@@ -378,8 +378,8 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if err := json.Unmarshal(cancelledResponse.Body, &cancelledResult); err != nil {
 		t.Fatal(err)
 	}
-	if replacementWaits != 1 || cancelledResult.Restarted != 0 || cancelledResult.Failed != 1 {
-		t.Fatalf("cancelled rooted replacement result = %+v waits=%d", cancelledResult, replacementWaits)
+	if cancelledResult.Restarted != 0 || cancelledResult.Failed != 1 {
+		t.Fatalf("cancelled rooted replacement result = %+v", cancelledResult)
 	}
 	cancelledNonce := tmuxRunner.env[started.SessionID][rootedOrchestratorBootstrapNonceEnvironment]
 	if cancelledNonce != "" {
@@ -388,7 +388,7 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if _, found, err := ackAuthority.Get(ctx, identity); err != nil || found {
 		t.Fatalf("cancelled replacement acknowledgement found=%t err=%v", found, err)
 	}
-	d.sessionResumeWait = immediateSessionResumeWait
+	d.sessionRestartRespawn = nil
 	inputsBefore = len(tmuxRunner.inputPayloads)
 	response, err = d.handleOrchestratorSession(ctx, request)
 	if err != nil || response.Error != nil {
@@ -516,7 +516,7 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	}
 }
 
-func TestRootedRestartSerializesAcrossDaemonsAndAcknowledgesReplacement(t *testing.T) {
+func TestRootedRestartAfterCallerCancellationSerializesAndAcknowledgesReplacement(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)
@@ -564,20 +564,34 @@ func TestRootedRestartSerializesAcrossDaemonsAndAcknowledgesReplacement(t *testi
 
 	replacementPaused := make(chan struct{})
 	releaseReplacement := make(chan struct{})
-	firstWait := true
-	first.sessionResumeWait = func(ctx context.Context, _ time.Duration) error {
-		if firstWait {
-			firstWait = false
-			close(replacementPaused)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-releaseReplacement:
-			}
+	restartBaseCtx, cancelRestart := context.WithCancel(context.Background())
+	t.Cleanup(cancelRestart)
+	var progressMu sync.Mutex
+	var progressPhases []string
+	restartCtx := daemonops.WithProgressReporter(restartBaseCtx, func(progressCtx context.Context, progress daemonops.Progress) error {
+		if progress.Phase == "session.restart_all.complete" && progressCtx.Err() != nil {
+			t.Errorf("complete progress used canceled caller context: %v", progressCtx.Err())
 		}
+		progressMu.Lock()
+		progressPhases = append(progressPhases, progress.Phase)
+		progressMu.Unlock()
 		return nil
+	})
+	updateReplacement := seedManagedRestartIdentity(t, first, runner, projectID, started.SessionID)
+	runner.onRespawnPane = func(ctx context.Context, args []string) error {
+		close(replacementPaused)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-releaseReplacement:
+		}
+		if err := updateReplacement(ctx, args); err != nil {
+			return err
+		}
+		cancelRestart()
+		return context.Canceled
 	}
-	restartRequest := protocol.RequestEnvelope{Command: protocol.CommandSessionRestartAll, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(projectID)})}
+	restartRequest := protocol.RequestEnvelope{Command: protocol.CommandSessionRestartAll, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(projectID), ForceBusy: true})}
 	type commandResult struct {
 		response protocol.ResponseEnvelope
 		err      error
@@ -585,7 +599,7 @@ func TestRootedRestartSerializesAcrossDaemonsAndAcknowledgesReplacement(t *testi
 	restartDone := make(chan commandResult, 1)
 	inputsBefore := len(runner.inputPayloads)
 	go func() {
-		response, err := first.handleSessionRestartAll(ctx, restartRequest)
+		response, err := first.handleSessionRestartAll(restartCtx, restartRequest)
 		restartDone <- commandResult{response: response, err: err}
 	}()
 	select {
@@ -593,40 +607,37 @@ func TestRootedRestartSerializesAcrossDaemonsAndAcknowledgesReplacement(t *testi
 	case <-time.After(5 * time.Second):
 		t.Fatal("restart did not reach replacement boundary")
 	}
-	attachDone := make(chan commandResult, 1)
-	go func() {
-		response, err := second.handleOrchestratorSession(ctx, startRequest)
-		attachDone <- commandResult{response: response, err: err}
-	}()
-	select {
-	case result := <-attachDone:
-		t.Fatalf("concurrent rooted start escaped exact-scope lock: response=%+v err=%v", result.response.Error, result.err)
-	case <-time.After(100 * time.Millisecond):
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockedCtx, cancelBlocked := context.WithCancel(ctx)
+	cancelBlocked()
+	enteredLockedTransition := false
+	blockedErr := secondStore.WithOrchestratorScopeTransition(blockedCtx, identity, func(context.Context) error {
+		enteredLockedTransition = true
+		return nil
+	})
+	if !errors.Is(blockedErr, context.Canceled) || enteredLockedTransition {
+		t.Fatalf("concurrent rooted transition exclusion: entered=%t err=%v", enteredLockedTransition, blockedErr)
 	}
 	close(releaseReplacement)
-	var restartResult, attachResult commandResult
+	var restartResult commandResult
 	select {
 	case restartResult = <-restartDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("restart did not finish")
 	}
-	select {
-	case attachResult = <-attachDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("concurrent rooted start did not resume")
-	}
 	if restartResult.err != nil || restartResult.response.Error != nil {
 		t.Fatalf("restart result: response=%+v err=%v", restartResult.response.Error, restartResult.err)
 	}
+	attachResponse, attachErr := second.handleOrchestratorSession(ctx, startRequest)
+	attachResult := commandResult{response: attachResponse, err: attachErr}
 	if attachResult.err != nil || attachResult.response.Error != nil {
 		t.Fatalf("attach result: response=%+v err=%v", attachResult.response.Error, attachResult.err)
 	}
 	if got := len(runner.inputPayloads) - inputsBefore; got != 1 {
 		t.Fatalf("rooted replacement prompt deliveries = %d, want one acknowledged replacement", got)
-	}
-	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
-	if err != nil {
-		t.Fatal(err)
 	}
 	ack, found, err := daemonstate.NewRootedBootstrapAcknowledgementAuthority(secondStore).Get(ctx, identity)
 	if err != nil || !found || ack.SessionID != started.SessionID || ack.RuntimeNonce == "" {
@@ -634,6 +645,15 @@ func TestRootedRestartSerializesAcrossDaemonsAndAcknowledgesReplacement(t *testi
 	}
 	if got := runner.env[started.SessionID][rootedOrchestratorBootstrapNonceEnvironment]; got != ack.RuntimeNonce {
 		t.Fatalf("live marker = %q, durable acknowledgement = %q", got, ack.RuntimeNonce)
+	}
+	progressMu.Lock()
+	gotProgressPhases := append([]string(nil), progressPhases...)
+	progressMu.Unlock()
+	if len(gotProgressPhases) == 0 {
+		t.Fatal("restart persisted no progress checkpoints")
+	}
+	if got := gotProgressPhases[len(gotProgressPhases)-1]; got != "session.restart_all.batch.completed" {
+		t.Fatalf("last progress phase = %q, want exact complete checkpoint; phases=%v", got, gotProgressPhases)
 	}
 }
 

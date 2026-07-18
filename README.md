@@ -123,11 +123,12 @@ azd --help
   configured `CODEX_HOME`. Unattributable or differently scoped processes are
   left running. Existing Claude and interactive Codex sessions still require
   `az session restart-all` or a manual restart.
-- Projects can opt into Codex's native client/server runtime with
+- Projects can opt into Codex's remote app-server runtime with
   `session.codexAppServer: true`. Azedarach ensures the managed app-server is
-  running, launches the stock TUI with `--remote unix://`, and supervises an
-  exact-worktree `resume --last` when a daemon restart disconnects the thin
-  client. Account activation prefers Codex's official scoped
+  running, launches the stock remote TUI, and supervises an exact-worktree
+  resume when an app-server restart disconnects the client. Automated turns
+  use direct app-server submission only while managed tmux clients are
+  input-gated. Account activation prefers Codex's official scoped
   `app-server daemon restart`; PID scanning remains a fallback for standalone
   legacy sessions.
 - Claude profiles include the primary credentials, account state, config auth,

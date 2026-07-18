@@ -2,6 +2,8 @@ package tmux
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -39,12 +41,225 @@ type PaneInfo struct {
 	PanePID     int
 }
 
+// AttachedClientInfo captures the mutable input flag for one attached tmux
+// client. ClientName is tmux's stable target for refresh-client while the
+// client remains attached.
+type AttachedClientInfo struct {
+	ClientName  string
+	SessionName string
+	Flags       string
+	ReadOnly    bool
+}
+
 // NewClient creates a new tmux client with dependency injection
 func NewClient(runner CommandRunner, logger *slog.Logger) *Client {
 	return &Client{
 		runner: runner,
 		logger: logger,
 	}
+}
+
+// ListAttachedClients returns clients currently attached to one exact session.
+// An empty session returns all attached clients so durable gate recovery can
+// restore a recorded client even after it switches to another session.
+func (c *Client) ListAttachedClients(ctx context.Context, session string) ([]AttachedClientInfo, error) {
+	out, err := c.runner.Run(ctx, "list-clients", "-F", "#{client_name}\t#{client_session}\t#{client_flags}\t#{client_readonly}")
+	if err != nil {
+		return nil, &domain.TmuxError{Op: "list-clients", Session: session, Err: err}
+	}
+	clients := make([]AttachedClientInfo, 0)
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) != 4 || (session != "" && fields[1] != session) || strings.TrimSpace(fields[0]) == "" {
+			continue
+		}
+		clients = append(clients, AttachedClientInfo{ClientName: fields[0], SessionName: fields[1], Flags: fields[2], ReadOnly: fields[3] == "1"})
+	}
+	return clients, nil
+}
+
+// SetClientReadOnly changes only the read-only flag, preserving every other
+// client flag. A leading ! is tmux's attached-client flag removal syntax.
+func (c *Client) SetClientReadOnly(ctx context.Context, clientName string, readOnly bool) error {
+	flag := "read-only"
+	if !readOnly {
+		flag = "!read-only"
+	}
+	if _, err := c.runner.Run(ctx, "refresh-client", "-t", clientName, "-f", flag); err != nil {
+		return &domain.TmuxError{Op: "refresh-client", Session: clientName, Err: err}
+	}
+	return nil
+}
+
+// SetPaneInputEnabled changes tmux's pane-wide input fence. Automated input
+// keeps this native fence closed from gate acquisition through submission and
+// restoration; asynchronous client hooks are not an input-exclusion boundary.
+func (c *Client) SetPaneInputEnabled(ctx context.Context, paneID string, enabled bool) error {
+	target := canonicalPaneTarget(paneID)
+	flag := "-d"
+	if enabled {
+		flag = "-e"
+	}
+	if _, err := c.runner.Run(ctx, "select-pane", flag, "-t", target); err != nil {
+		return &domain.TmuxError{Op: "select-pane", Session: paneID, Err: err}
+	}
+	return nil
+}
+
+// DisablePaneInputIfIdentity compares the exact tmux-owned pane identity and
+// disables input in the same server command queue item. This prevents a
+// respawned pane from being fenced after a stale client-side identity check.
+func (c *Client) DisablePaneInputIfIdentity(ctx context.Context, session, paneID string, panePID int) (bool, error) {
+	normalizedPane, err := normalizeInputGatePaneID(paneID)
+	if err != nil {
+		return false, err
+	}
+	if !isSafeTmuxFormatLiteral(session) || panePID <= 0 {
+		return false, fmt.Errorf("invalid managed pane identity")
+	}
+	const disabled = "az-input-gate-disabled"
+	const mismatch = "az-input-gate-identity-mismatch"
+	predicate := fmt.Sprintf("#{&&:#{==:#{session_name},%s},#{==:#{pane_id},%s},#{==:#{pane_pid},%d}}", session, normalizedPane, panePID)
+	onMatch := fmt.Sprintf("select-pane -d -t %s ; display-message -p %s", normalizedPane, disabled)
+	out, err := c.runner.Run(ctx, "if-shell", "-F", "-t", normalizedPane, predicate, onMatch, "display-message -p "+mismatch)
+	if err != nil {
+		return false, &domain.TmuxError{Op: "compare-and-disable-pane", Session: session, Err: err}
+	}
+	switch strings.TrimSpace(out) {
+	case disabled:
+		return true, nil
+	case mismatch:
+		return false, nil
+	default:
+		return false, &domain.TmuxError{Op: "compare-and-disable-pane", Session: session, Err: fmt.Errorf("unexpected result %q", strings.TrimSpace(out))}
+	}
+}
+
+func normalizeInputGatePaneID(paneID string) (string, error) {
+	value := strings.TrimPrefix(strings.TrimSpace(paneID), "%")
+	n, err := strconv.Atoi(value)
+	if err != nil || n < 0 || strconv.Itoa(n) != value {
+		return "", fmt.Errorf("invalid managed pane id %q", paneID)
+	}
+	return "%" + value, nil
+}
+
+func isSafeTmuxFormatLiteral(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && !strings.ContainsRune("-_.:", r) {
+			return false
+		}
+	}
+	return true
+}
+
+// PaneInputEnabled reports the current pane-wide input fence.
+func (c *Client) PaneInputEnabled(ctx context.Context, paneID string) (bool, error) {
+	out, err := c.runner.Run(ctx, "display-message", "-p", "-t", canonicalPaneTarget(paneID), "#{pane_input_off}")
+	if err != nil {
+		return false, &domain.TmuxError{Op: "display-message", Session: paneID, Err: err}
+	}
+	switch strings.TrimSpace(out) {
+	case "0":
+		return true, nil
+	case "1":
+		return false, nil
+	default:
+		return false, &domain.TmuxError{Op: "display-message", Session: paneID, Err: fmt.Errorf("unexpected pane_input_off value %q", strings.TrimSpace(out))}
+	}
+}
+
+func canonicalPaneTarget(paneID string) string {
+	trimmed := strings.TrimSpace(paneID)
+	value := strings.TrimPrefix(trimmed, "%")
+	if n, err := strconv.Atoi(value); err == nil && n >= 0 && strconv.Itoa(n) == value {
+		return "%" + value
+	}
+	return trimmed
+}
+
+// SetSessionReadOnlyAttachHooks installs or removes session-scoped hooks that
+// eventually make newly attached or switched-in clients read-only and record
+// their prior read-only flag for exact restoration. Callers must hold the
+// pane-wide input fence because run-shell hooks do not preempt client input.
+func (c *Client) SetSessionReadOnlyAttachHooks(ctx context.Context, session, hookID, recordPath string, enabled bool) error {
+	lock := sessionReadOnlyAttachHookLock(hookID, recordPath)
+	gateOption := sessionReadOnlyAttachHookGateOption(hookID, recordPath)
+	gateValue := "1"
+	if !enabled {
+		// Close the generation before removing either hook. A hook already
+		// dispatched on another tmux command queue may acquire the shared lock
+		// after restoration does; it must then observe closed and skip mutation.
+		gateValue = "0"
+	}
+	if _, err := c.runner.Run(ctx, "set-option", "-gq", gateOption, gateValue); err != nil {
+		return &domain.TmuxError{Op: "set-option", Session: session, Err: err}
+	}
+	for _, hook := range []string{"client-attached", "client-session-changed"} {
+		name := hook + "[" + hookID + "]"
+		args := []string{"set-hook", "-t", session}
+		if !enabled {
+			args = append(args, "-u", name)
+		} else {
+			release := "tmux wait-for -U " + lock
+			record := "umask 077; tmux wait-for -L " + lock + " || exit 1; trap " + shellSingleQuote(release) + " EXIT; trap 'exit 1' HUP INT TERM; [ \"$(tmux show-options -gqv " + gateOption + ")\" = 1 ] || exit 0; __az_client=#{q:hook_client}; printf '%s\\t%s\\n' \"$__az_client\" #{client_readonly} >> " + shellSingleQuote(recordPath) + "; tmux refresh-client -t \"$__az_client\" -f read-only; printf '\\tcomplete\\n' >> " + shellSingleQuote(recordPath)
+			// The hook shell owns the tmux-server lock across its final generation
+			// check and mutation. Restoration closes the generation first, then
+			// acquires the same lock: earlier mutations complete before restoration,
+			// while later dispatched shells observe closed and cannot mutate.
+			command := "run-shell " + tmuxDoubleQuote(record)
+			args = append(args, name, command)
+		}
+		if _, err := c.runner.Run(ctx, args...); err != nil {
+			return &domain.TmuxError{Op: "set-hook", Session: session, Err: err}
+		}
+	}
+	return nil
+}
+
+// LockSessionReadOnlyAttachHooks acquires or releases the exact gate's
+// tmux-server lock. Callers remove the hooks before acquiring it and retain it
+// through ledger merge and client restoration, so a dispatched hook cannot
+// apply read-only after restoration completes.
+func (c *Client) LockSessionReadOnlyAttachHooks(ctx context.Context, hookID, recordPath string, locked bool) error {
+	flag := "-L"
+	if !locked {
+		flag = "-U"
+	}
+	if _, err := c.runner.Run(ctx, "wait-for", flag, sessionReadOnlyAttachHookLock(hookID, recordPath)); err != nil {
+		return &domain.TmuxError{Op: "wait-for", Session: hookID, Err: err}
+	}
+	if !locked {
+		if _, err := c.runner.Run(ctx, "set-option", "-gu", sessionReadOnlyAttachHookGateOption(hookID, recordPath)); err != nil {
+			return &domain.TmuxError{Op: "set-option", Session: hookID, Err: err}
+		}
+	}
+	return nil
+}
+
+func sessionReadOnlyAttachHookLock(hookID, recordPath string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(hookID) + "\x00" + strings.TrimSpace(recordPath)))
+	return "az-codex-input-gate-" + hex.EncodeToString(sum[:12])
+}
+
+func sessionReadOnlyAttachHookGateOption(hookID, recordPath string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(hookID) + "\x00" + strings.TrimSpace(recordPath)))
+	return "@az_codex_input_gate_" + hex.EncodeToString(sum[:12])
+}
+
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+func tmuxDoubleQuote(value string) string {
+	replacer := strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "$", "\\$")
+	return "\"" + replacer.Replace(value) + "\""
 }
 
 // NewSession creates a new tmux session with the given name and working directory
@@ -148,6 +363,25 @@ func (c *Client) EnsureWindowWithCommand(ctx context.Context, sessionName, windo
 // EnsureWindowWithCommandAndEnvironment installs environment before creating or respawning command.
 func (c *Client) EnsureWindowWithCommandAndEnvironment(ctx context.Context, sessionName, windowName, workdir, command string, environment map[string]string) (bool, error) {
 	return c.ensureWindow(ctx, sessionName, windowName, workdir, command, environment)
+}
+
+// RespawnPane replaces exactly one pane process while preserving its session,
+// window, layout, and every unrelated pane. paneID is tmux's stable pane target
+// (for example %12), never a window or session name.
+func (c *Client) RespawnPane(ctx context.Context, paneID, workdir, command string) error {
+	paneID = strings.TrimSpace(paneID)
+	if paneID == "" || strings.TrimSpace(command) == "" {
+		return &domain.TmuxError{Op: "respawn-pane", Session: paneID, Err: errors.New("pane target and command are required")}
+	}
+	args := []string{"respawn-pane", "-k", "-t", paneID}
+	if strings.TrimSpace(workdir) != "" {
+		args = append(args, "-c", workdir)
+	}
+	args = append(args, command)
+	if _, err := c.runner.Run(ctx, args...); err != nil {
+		return &domain.TmuxError{Op: "respawn-pane", Session: paneID, Err: err}
+	}
+	return nil
 }
 
 func (c *Client) ensureWindow(ctx context.Context, sessionName, windowName, workdir, command string, environment map[string]string) (bool, error) {

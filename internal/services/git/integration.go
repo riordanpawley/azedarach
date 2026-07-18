@@ -22,6 +22,7 @@ const (
 	integrationJournalVersion   = integrationJournalVersionV2
 	integrationReceiptVersion   = 1
 )
+
 const (
 	integrationScratchPrefix          = "azedarach-integration-"
 	integrationScratchPattern         = integrationScratchPrefix + "*"
@@ -304,13 +305,6 @@ func (c *Client) mergeCleanlyTransactional(ctx context.Context, worktree, branch
 	return applied, err
 }
 
-func (c *Client) preserveCandidateValidationFailureArtifacts(ctx context.Context, scratchPath string, result *MergeResult, validationErr error) string {
-	if errors.Is(validationErr, context.Canceled) || errors.Is(validationErr, context.DeadlineExceeded) {
-		return ""
-	}
-	return c.preserveIntegrationFailureArtifacts(ctx, scratchPath, result, validationErr)
-}
-
 func (c *Client) preserveIntegrationFailureArtifacts(ctx context.Context, scratchPath string, result *MergeResult, mergeErr error) string {
 	if ctx != nil && ctx.Err() != nil {
 		return ""
@@ -370,6 +364,13 @@ func (c *Client) preserveIntegrationFailureArtifacts(ctx context.Context, scratc
 		}
 	}
 	return destination
+}
+
+func (c *Client) preserveCandidateValidationFailureArtifacts(ctx context.Context, scratchPath string, result *MergeResult, validationErr error) string {
+	if errors.Is(validationErr, context.Canceled) || errors.Is(validationErr, context.DeadlineExceeded) {
+		return ""
+	}
+	return c.preserveIntegrationFailureArtifacts(ctx, scratchPath, result, validationErr)
 }
 
 func pathWithinRoot(root, candidate string) bool {

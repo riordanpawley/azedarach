@@ -13,6 +13,7 @@ import (
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
@@ -50,6 +51,7 @@ func TestParallelWorkerMaterialDecisionPropagationAndAcknowledgement(t *testing.
 	secondSessionID := naming.CanonicalSessionIDForIssue(d.sessionNamingScope("project"), naming.IssueID(second)).String()
 	tmuxRunner.sessions[secondSessionID] = true
 	d.tmux = tmux.NewClient(tmuxRunner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	seedReadyAgentInput(t, d, tmuxRunner, "project", secondSessionID)
 	service := issueDecisionService{daemon: d}
 	serviceCtx := withDaemonProjectIDContext(ctx, "project")
 	benign, err := client.RecordDecision(ctx, issues.RecordDecisionParams{Title: "Naming note", Rationale: "nonmaterial"})
@@ -970,7 +972,7 @@ func TestDecisionScopeRemovalAndDeletionWithdrawPendingRevision(t *testing.T) {
 	assertPendingDecisionCount(t, ctx, client, second, 0)
 }
 
-func TestDecisionPropagationOutboxRecoversCrashPartialFanoutAndDeliveryFailure(t *testing.T) {
+func TestDecisionPropagationOutboxRecoversFanoutWithoutRetryingAmbiguousDelivery(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
@@ -1025,8 +1027,9 @@ func TestDecisionPropagationOutboxRecoversCrashPartialFanoutAndDeliveryFailure(t
 	failingRunner := newSessionStartTmuxRunner()
 	secondSessionID := naming.CanonicalSessionIDForIssue(failing.sessionNamingScope("project"), naming.IssueID(second)).String()
 	failingRunner.sessions[secondSessionID] = true
-	failingRunner.sendKeysErr = fmt.Errorf("injected delivery failure")
 	failing.tmux = tmux.NewClient(failingRunner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	seedReadyAgentInput(t, failing, failingRunner, "project", secondSessionID)
+	failing.agentInput.receiver.(*recordingAuthoritativeReceiver).failAfterAccept = true
 	if err := failing.reconcileDecisionPropagationOutbox(ctx, "project"); err != nil {
 		t.Fatal(err)
 	}
@@ -1040,9 +1043,13 @@ func TestDecisionPropagationOutboxRecoversCrashPartialFanoutAndDeliveryFailure(t
 	retryRunner := newSessionStartTmuxRunner()
 	retryRunner.sessions[secondSessionID] = true
 	restarted.tmux = tmux.NewClient(retryRunner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	seedReadyAgentInput(t, restarted, retryRunner, "project", secondSessionID)
 	restarted.reconcileAllDecisionPropagationOutboxes(ctx)
-	if len(retryRunner.inputPayloads) != 1 || !strings.Contains(retryRunner.inputPayloads[0], "az decision acknowledge") {
-		t.Fatalf("restart retry payloads=%#v, want pending exact-revision wake", retryRunner.inputPayloads)
+	if err := restarted.agentInput.RetryPending(ctx, "project", 100); err != nil {
+		t.Fatal(err)
+	}
+	if len(retryRunner.inputPayloads) != 0 {
+		t.Fatalf("restart retried transport-uncertain wake: %#v", retryRunner.inputPayloads)
 	}
 	events, err := client.ListIssueDecisionObservationEvents(ctx, second)
 	if err != nil {
@@ -1117,6 +1124,11 @@ func TestDecisionPropagationRestartDiscoversUnopenedRegisteredProject(t *testing
 	sessionID := naming.CanonicalSessionIDForIssue(restarted.sessionNamingScope(projectID), naming.IssueID(worker)).String()
 	runner.sessions[sessionID] = true
 	restarted.tmux = tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(projectRepo, ".azedarach", "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	restarted.runtimeStoresByProject[projectID] = runtimeStore
+	restarted.runtimeStoresByRoot[projectRepo] = runtimeStore
+	seedReadyAgentInput(t, restarted, runner, projectID, sessionID)
 	restarted.reconcileAllDecisionPropagationOutboxes(ctx)
 	if len(runner.inputPayloads) != 1 || !strings.Contains(runner.inputPayloads[0], decision.LocalID) {
 		t.Fatalf("restart discovery payloads=%#v, want registered project decision wake", runner.inputPayloads)
@@ -1255,8 +1267,10 @@ func TestDecisionPropagationReconcileSuppressesSupersededAndReactivatesPredecess
 	}
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
 	runner := newSessionStartTmuxRunner()
-	runner.sessions[naming.CanonicalSessionIDForIssue(d.sessionNamingScope("project"), naming.IssueID(worker)).String()] = true
+	workerSessionID := naming.CanonicalSessionIDForIssue(d.sessionNamingScope("project"), naming.IssueID(worker)).String()
+	runner.sessions[workerSessionID] = true
 	d.tmux = tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	seedReadyAgentInput(t, d, runner, "project", workerSessionID)
 	service := issueDecisionService{daemon: d}
 	serviceCtx := withDaemonProjectIDContext(ctx, "project")
 	first, err := client.RecordDecision(ctx, issues.RecordDecisionParams{Title: "v1", Rationale: "first"})
@@ -1281,8 +1295,8 @@ func TestDecisionPropagationReconcileSuppressesSupersededAndReactivatesPredecess
 	if _, err := service.RemoveDecisionLink(serviceCtx, protocol.DecisionLinkRemoveRequestBody{DecisionID: second.LocalID, TargetKind: protocol.DecisionTargetDecision, TargetID: first.LocalID}); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.inputPayloads) != 1 || !strings.Contains(runner.inputPayloads[0], first.LocalID) {
-		t.Fatalf("withdrawal delivery=%#v, want predecessor reactivated without withdrawn replacement delivery", runner.inputPayloads)
+	if len(runner.inputPayloads) != 0 {
+		t.Fatalf("withdrawal delivery=%#v, want the already acknowledged predecessor wake deduplicated", runner.inputPayloads)
 	}
 }
 

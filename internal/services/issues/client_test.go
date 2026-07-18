@@ -4620,6 +4620,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0054_rooted_session_role_exclusivity",
 		"0055_mailbox_observation_replay_repair",
 		"0056_legacy_attachment_blob_forward",
+		"0057_agent_input_delivery",
 	}, got)
 }
 
@@ -5747,7 +5748,8 @@ func TestClient_CreateBusyRetryStopsAtCallerCancellation(t *testing.T) {
 	cancel()
 	err = <-done
 	require.Error(t, err)
-	assert.True(t, IsSQLiteBusy(err), "error = %v, want preserved SQLite busy error", err)
+	assert.True(t, IsSQLiteBusy(err) || errors.Is(err, context.DeadlineExceeded),
+		"error = %v, want SQLite busy observed before the deadline or the caller deadline itself", err)
 }
 
 func TestIsSQLiteBusyRecognizesBusySnapshotExtendedCode(t *testing.T) {

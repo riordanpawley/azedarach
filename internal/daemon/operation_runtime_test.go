@@ -733,6 +733,76 @@ func TestOperationRuntimeCancelMapsCancelledErrorResponseToCancelled(t *testing.
 	}
 }
 
+func TestOperationRuntimeCancelAfterRestartDispatchPersistsTerminalAggregate(t *testing.T) {
+	d, _, runner, target := newExactRestartDaemon(t, "project", "az-1", "", "idle")
+	dispatched := make(chan struct{})
+	releaseDispatch := make(chan struct{})
+	d.sessionRestartRespawn = func(_ context.Context, paneTarget, worktree, command string) (error, bool) {
+		if _, err := runner.Run(context.Background(), "respawn-pane", "-k", "-c", worktree, "-t", paneTarget, command); err != nil {
+			return err, false
+		}
+		close(dispatched)
+		<-releaseDispatch
+		return nil, false
+	}
+
+	resultTemplate := protocol.SessionRestartAllResponseBody{
+		ProjectID: naming.ProjectID("project"), ProjectIDs: []naming.ProjectID{"project"},
+		Sessions: make([]protocol.SessionRestartAllItem, 0, 1),
+	}
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), nextRevision: sequentialRevision()})
+	defer runtime.Close()
+	runtime.sessionRestartAll = func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		var body protocol.SessionRestartAllRequestBody
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return protocol.ResponseEnvelope{}, err
+		}
+		return d.executeSessionRestartBatch(ctx, req, "project", []string{"project"}, body, []sessionRestartAllTarget{target}, resultTemplate)
+	}
+
+	payload := mustJSON(t, protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID("project")})
+	submitResp := runtime.Handle(context.Background(), testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
+		ProjectID: "project", Kind: protocol.CommandSessionRestartAll, Payload: payload,
+	}))
+	if !submitResp.OK {
+		t.Fatalf("submit response = %+v", submitResp)
+	}
+	var submitted protocol.OperationSubmitResponseBody
+	if err := json.Unmarshal(submitResp.Body, &submitted); err != nil {
+		t.Fatal(err)
+	}
+	<-dispatched
+	cancelResp := runtime.Handle(context.Background(), testRequest(protocol.CommandOperationCancel, protocol.OperationCancelRequestBody{
+		ProjectID: "project", OperationID: submitted.Operation.OperationID, Reason: "cancel after respawn dispatch",
+	}))
+	if !cancelResp.OK {
+		t.Fatalf("cancel response = %+v", cancelResp)
+	}
+	close(releaseDispatch)
+	if err := runtime.manager.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	record, err := runtime.manager.Get(context.Background(), submitted.Operation.OperationID.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.State != daemonops.StateDone {
+		t.Fatalf("operation state = %s, want done; error=%q progress=%+v", record.State, record.ErrorMessage, record.Progress)
+	}
+	var result protocol.SessionRestartAllResponseBody
+	if err := json.Unmarshal(record.ResultPayload, &result); err != nil {
+		t.Fatalf("decode aggregate result: %v", err)
+	}
+	respawns, _, _ := runner.snapshot()
+	if respawns != 1 || result.Restarted != 1 || result.Skipped != 0 || result.Failed != 0 || len(result.Sessions) != 1 || !result.Sessions[0].Restarted {
+		t.Fatalf("respawns=%d result=%+v, want one truthfully acknowledged restart", respawns, result)
+	}
+	batch, ok := decodeSessionRestartBatchPlan(record)
+	if !ok || batch.Cursor != 1 || batch.Current != nil || len(batch.Results) != 1 || !batch.Results[0].Restarted {
+		t.Fatalf("terminal aggregate checkpoint = %+v ok=%t", batch, ok)
+	}
+}
+
 func TestOperationRuntimeStartupFailsInterruptedOperations(t *testing.T) {
 	repoDir := t.TempDir()
 	first := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir, nextRevision: sequentialRevision()})
@@ -1455,6 +1525,25 @@ func TestBuildSubmitRequestRoutesSessionResolveConflictByIssueAndWorktree(t *tes
 		if req.ResourceKeys[i] != wantResources[i] {
 			t.Fatalf("resource key[%d] = %q, want %q", i, req.ResourceKeys[i], wantResources[i])
 		}
+	}
+}
+
+func TestBuildSubmitRequestRoutesSessionRestartAllDurablyByProjectAndPayload(t *testing.T) {
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), nextRevision: sequentialRevision()})
+	runtime.sessionRestartAll = func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		return testResponse(req, protocol.SessionRestartAllResponseBody{}), nil
+	}
+	body := mustJSON(t, protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID("proj-1"), ForceBusy: true})
+	first := runtime.buildSubmitRequestForTest(t, protocol.CommandSessionRestartAll, "proj-1", body)
+	second := runtime.buildSubmitRequestForTest(t, protocol.CommandSessionRestartAll, "proj-1", body)
+	if first.DedupeKey == "" || first.DedupeKey != second.DedupeKey {
+		t.Fatalf("dedupe keys = %q and %q, want stable payload identity", first.DedupeKey, second.DedupeKey)
+	}
+	if len(first.ResourceKeys) != 1 || first.ResourceKeys[0] != "project:proj-1:session-restart" {
+		t.Fatalf("resource keys = %v", first.ResourceKeys)
+	}
+	if first.RecentDedupeWindow != 0 {
+		t.Fatalf("restart retry dedupe window = %s, want active-operation dedupe only", first.RecentDedupeWindow)
 	}
 }
 
