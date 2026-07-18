@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	operationstore "github.com/riordanpawley/azedarach/internal/daemon/operations/store"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
+	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	gitservice "github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
@@ -134,6 +136,152 @@ func TestReviewAcceptOwnsLeaseAndAutomaticallyContinuesBasePublicationWithoutAgg
 	<-merged
 	if err := runtime.manager.Drain(ctx); err != nil {
 		t.Fatalf("drain accepted publication operation: %v", err)
+	}
+}
+
+func TestPublicationRecoversCrashAfterExactApplyBeforeTaskReceipt(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	runDaemonTestGit(t, repo, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repo, "config", "user.email", "test@example.com")
+	runDaemonTestGit(t, repo, "config", "user.name", "Test User")
+	requireNoError(t, os.MkdirAll(filepath.Join(repo, ".azedarach"), 0o755))
+	requireNoError(t, os.WriteFile(filepath.Join(repo, ".azedarach", "config.json"), []byte(`{"gate":{"command":"go test ./...","environmentFingerprint":"go-consumer"},"publicationEvidence":{"policyVersion":"consumer-v1"}}`), 0o644))
+	requireNoError(t, os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("issues.db*\n.azedarach/*.db*\n"), 0o644))
+	requireNoError(t, os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module example.test/consumer\n\ngo 1.24\n"), 0o644))
+	requireNoError(t, os.WriteFile(filepath.Join(repo, "consumer.go"), []byte("package consumer\n\nconst Value = 1\n"), 0o644))
+	runDaemonTestGit(t, repo, "add", ".")
+	runDaemonTestGit(t, repo, "commit", "-q", "-m", "base")
+	canonicalRepo, err := appconfig.ResolveProjectRoot(repo)
+	requireNoError(t, err)
+	repo = canonicalRepo
+	baseOID := runDaemonTestGitOutput(t, repo, "rev-parse", "HEAD")
+
+	issuePath := filepath.Join(repo, ".azedarach", "azedarach.db")
+	issueClient := newMigratedIssueClient(t, repo, slog.Default())
+	issueID := createReviewTask(t, ctx, issueClient, domain.P1, "worker")
+	_, err = issueClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t)})
+	requireNoError(t, err)
+	sourcePath := filepath.Join(t.TempDir(), "source")
+	sourceBranch := "riordan/" + issueID + "/publication-crash"
+	runDaemonTestGit(t, repo, "worktree", "add", "-q", "-b", sourceBranch, sourcePath, "main")
+	sourcePath, err = filepath.EvalSymlinks(sourcePath)
+	requireNoError(t, err)
+	requireNoError(t, os.WriteFile(filepath.Join(sourcePath, "consumer.go"), []byte("package consumer\n\nconst Value = 2\n"), 0o644))
+	runDaemonTestGit(t, sourcePath, "add", "consumer.go")
+	runDaemonTestGit(t, sourcePath, "commit", "-q", "-m", "reviewed patch")
+	sourceOID := runDaemonTestGitOutput(t, sourcePath, "rev-parse", "HEAD")
+
+	statePath := filepath.Join(t.TempDir(), "runtime.db")
+	firstState := daemonstate.NewRuntimeStateStoreAtPath(statePath, slog.Default())
+	firstRuntime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	projectID := firstRuntime.canonicalProject
+	requireNoError(t, firstState.UpsertWorktreeState(ctx, daemonstate.WorktreeState{ProjectID: projectID, IssueID: issueID, Path: sourcePath, Branch: sourceBranch, UpdatedAt: time.Now().UTC()}))
+	first := newOrchestrationReviewTestDaemon(repo, issueClient)
+	first.reviewCandidateCheck = nil
+	first.snapshotAdmissionContext = context.WithCancel
+	first.cfg.BaseBranch = "main"
+	first.issueClientsByProject = map[string]*issues.Client{projectID: issueClient}
+	first.operationRuntime = firstRuntime
+	first.git = gitservice.NewClient(gitservice.NewExecRunner(repo), slog.Default())
+	first.worktreeAdapter = &worktreeServiceAdapter{manager: gitservice.NewWorktreeManager(gitservice.NewExecRunner(repo), repo, slog.Default()), runtimeStateStore: firstState}
+	first.publicationClaimTTL = time.Minute
+	claimNow := time.Now().UTC()
+	first.publicationClaimNow = func() time.Time { return claimNow }
+	crashed := make(chan struct{})
+	first.publicationAppliedBeforeTaskReceipt = func(context.Context, taskCloseIntegrationResult) {
+		close(crashed)
+		goruntime.Goexit()
+	}
+	accepted, err := first.orchestrationAuthority().Apply(ctx, projectID, protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-crash-after-apply", ActorID: "reviewer", IssueIDs: []string{issueID}, RepoDir: repo})
+	requireNoError(t, err)
+	if len(accepted.Publications) != 1 || len(accepted.Failed) != 0 {
+		t.Fatalf("acceptance = %+v, want one publication", accepted)
+	}
+	<-crashed
+	requireNoError(t, firstRuntime.manager.Drain(ctx))
+	operations, err := firstRuntime.store.PublicationOperations(ctx, projectID, issueID, false)
+	requireNoError(t, err)
+	if len(operations) != 1 || operations[0].State != domain.PublicationOperationPassed || operations[0].CandidateRevision == "" {
+		t.Fatalf("post-crash operations = %+v, want one passed original", operations)
+	}
+	original := operations[0]
+	if original.BaseRevision != baseOID || original.SourceRevision != sourceOID || runDaemonTestGitOutput(t, repo, "rev-parse", "main") != original.CandidateRevision {
+		t.Fatalf("post-crash operation = %+v, want exact candidate applied", original)
+	}
+	before, err := firstRuntime.store.ValidationSnapshot(ctx, projectID, claimNow, defaultValidationLeaseTTL)
+	requireNoError(t, err)
+	beforeCount := len(before.Active) + len(before.Queued) + len(before.Recent)
+	receipts, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted}})
+	requireNoError(t, err)
+	if len(receipts) != 0 {
+		t.Fatalf("post-crash task receipts = %+v, want none", receipts)
+	}
+	first.closePublicationStores()
+	requireNoError(t, firstRuntime.Close())
+	requireNoError(t, firstState.Close())
+	requireNoError(t, issueClient.CloseDB())
+
+	restartedClient := newMigratedIssueClientAtPath(t, issuePath, slog.Default())
+	t.Cleanup(func() { _ = restartedClient.CloseDB() })
+	restartedState := daemonstate.NewRuntimeStateStoreAtPath(statePath, slog.Default())
+	t.Cleanup(func() { _ = restartedState.Close() })
+	restartedRuntime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	t.Cleanup(func() { _ = restartedRuntime.Close() })
+	restarted := newOrchestrationReviewTestDaemon(repo, restartedClient)
+	restarted.reviewCandidateCheck = nil
+	restarted.cfg.BaseBranch = "main"
+	restarted.issueClientsByProject = map[string]*issues.Client{projectID: restartedClient}
+	restarted.operationRuntime = restartedRuntime
+	restarted.git = gitservice.NewClient(gitservice.NewExecRunner(repo), slog.Default())
+	restarted.worktreeAdapter = &worktreeServiceAdapter{manager: gitservice.NewWorktreeManager(gitservice.NewExecRunner(repo), repo, slog.Default()), runtimeStateStore: restartedState}
+	restarted.publicationClaimTTL = time.Minute
+	restarted.publicationClaimNow = func() time.Time { return claimNow.Add(2 * time.Minute) }
+	merged := make(chan domain.PublicationOperation, 1)
+	restarted.publicationStateChanged = func(operation domain.PublicationOperation) {
+		if operation.State == domain.PublicationOperationMerged {
+			merged <- operation
+		}
+	}
+	restarted.recoverPublicationOperations(ctx)
+	recovered := <-merged
+	requireNoError(t, restartedRuntime.manager.Drain(ctx))
+	if recovered.OperationID != original.OperationID {
+		t.Fatalf("recovered operation = %+v, want original %s", recovered, original.OperationID)
+	}
+	all, err := restartedRuntime.store.PublicationOperations(ctx, projectID, issueID, false)
+	requireNoError(t, err)
+	if len(all) != 1 || all[0].State != domain.PublicationOperationMerged {
+		t.Fatalf("recovered operations = %+v, want one merged original and no successor", all)
+	}
+	after, err := restartedRuntime.store.ValidationSnapshot(ctx, projectID, claimNow.Add(2*time.Minute), defaultValidationLeaseTTL)
+	requireNoError(t, err)
+	afterCount := len(after.Active) + len(after.Queued) + len(after.Recent)
+	if afterCount != beforeCount {
+		t.Fatalf("validation request count = before %d after %d, want no revalidation", beforeCount, afterCount)
+	}
+	task, err := restartedClient.GetWithRuntime(ctx, projectID, issueID)
+	requireNoError(t, err)
+	if task.Status != domain.StatusDone {
+		t.Fatalf("recovered issue status = %s, want done", task.Status)
+	}
+	receipts, err = restartedClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted}})
+	requireNoError(t, err)
+	if len(receipts) != 1 {
+		t.Fatalf("recovered task receipts = %+v, want one exact integration receipt", receipts)
+	}
+	receipt := receipts[0]
+	if operationID := observationPayloadString(receipt.Payload, "publication_operation_id"); operationID != original.OperationID {
+		t.Fatalf("recovered receipt publication operation = %q, want %q", operationID, original.OperationID)
+	}
+	if got := observationPayloadString(receipt.Payload, "base_oid"); got != original.BaseRevision {
+		t.Fatalf("recovered receipt base OID = %q, want %q", got, original.BaseRevision)
+	}
+	if got := observationPayloadString(receipt.Payload, "source_oid"); got != original.SourceRevision {
+		t.Fatalf("recovered receipt source OID = %q, want %q", got, original.SourceRevision)
+	}
+	if got := observationPayloadString(receipt.Payload, "target_oid"); got != original.CandidateRevision {
+		t.Fatalf("recovered receipt target OID = %q, want %q", got, original.CandidateRevision)
 	}
 }
 

@@ -2273,6 +2273,11 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	if err != nil {
 		return result, fmt.Errorf("phase integrate_before_close for issue %s: %w", taskID, err)
 	}
+	if integration.Integrated {
+		if _, bound := taskClosePublicationBindingFromContext(ctx); bound && d.publicationAppliedBeforeTaskReceipt != nil {
+			d.publicationAppliedBeforeTaskReceipt(ctx, integration)
+		}
+	}
 	result.IntegrationRequested = integration.Requested
 	result.Integrated = integration.Integrated
 	result.IntegratedSourceBranch = integration.SourceBranch
@@ -3217,6 +3222,9 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 			targetWorktree = "."
 		}
 	}
+	if recovery, ok := taskCloseAppliedPublicationRecoveryFromContext(ctx); ok {
+		return d.recoverAppliedPublicationIntegration(ctx, projectID, taskID, source, target.TargetID, targetWorktree, targetBranch, configuredBaseTarget, expectedSourceOID, expectedBaseOID, recovery)
+	}
 
 	var integration taskCloseIntegrationResult
 	if daemonCloseIntegrationShouldUseOriginBase(d.workflowModeForProject(projectID), target) {
@@ -3391,6 +3399,53 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		ValidationAttempts:   append([]domain.IntegrationCandidateValidationAttempt(nil), merge.ValidationAttempts...),
 	}
 	return integration, nil
+}
+
+func (d *Daemon) recoverAppliedPublicationIntegration(ctx context.Context, projectID, taskID string, source git.Worktree, targetID, targetWorktree, targetBranch string, configuredBaseTarget bool, expectedSourceOID, expectedBaseOID string, operation domain.PublicationOperation) (taskCloseIntegrationResult, error) {
+	result := taskCloseIntegrationResult{Requested: true}
+	if protocol.NormalizeProjectID(operation.ProjectID) != protocol.NormalizeProjectID(projectID) || !naming.IssueIDsEqual(operation.IssueID, taskID) {
+		return result, fmt.Errorf("exact applied publication operation %s does not match task %s in project %s", operation.OperationID, taskID, projectID)
+	}
+	if !configuredBaseTarget || !strings.EqualFold(strings.TrimSpace(targetID), strings.TrimSpace(operation.TargetID)) || strings.TrimSpace(targetBranch) != strings.TrimSpace(operation.TargetBranch) {
+		return result, fmt.Errorf("exact applied publication operation %s target identity changed", operation.OperationID)
+	}
+	if strings.TrimSpace(expectedBaseOID) != strings.TrimSpace(operation.BaseRevision) || strings.TrimSpace(expectedSourceOID) != strings.TrimSpace(operation.SourceRevision) {
+		return result, fmt.Errorf("exact applied publication operation %s reviewed base or source identity changed", operation.OperationID)
+	}
+	sourceOID, err := d.git.ResolveCommit(ctx, targetWorktree, source.Branch)
+	if err != nil {
+		return result, fmt.Errorf("resolve exact applied publication source %s: %w", source.Branch, err)
+	}
+	if strings.TrimSpace(sourceOID) != strings.TrimSpace(operation.SourceRevision) {
+		return result, fmt.Errorf("exact applied publication source changed: current=%s reviewed=%s", strings.TrimSpace(sourceOID), strings.TrimSpace(operation.SourceRevision))
+	}
+	targetOID, err := d.git.ResolveCommit(ctx, targetWorktree, targetBranch)
+	if err != nil {
+		return result, fmt.Errorf("resolve exact applied publication target %s: %w", targetBranch, err)
+	}
+	if strings.TrimSpace(targetOID) != strings.TrimSpace(operation.CandidateRevision) {
+		return result, fmt.Errorf("exact applied publication target changed: current=%s candidate=%s", strings.TrimSpace(targetOID), strings.TrimSpace(operation.CandidateRevision))
+	}
+	contained, err := d.git.CommitContainedInRef(ctx, targetWorktree, sourceOID, targetBranch)
+	if err != nil || !contained {
+		if err == nil {
+			err = fmt.Errorf("source is not reachable from target")
+		}
+		return result, fmt.Errorf("verify exact applied publication containment: %w", err)
+	}
+	validationAttempts, err := d.canonicalIntegrationValidationAttempts(ctx, targetWorktree, targetOID)
+	if err != nil {
+		return result, err
+	}
+	if len(validationAttempts) != 1 || validationAttempts[0].Status != domain.IntegrationCandidateValidationPassed || !validationAttempts[0].Canonical || strings.TrimSpace(validationAttempts[0].CandidateHead) != strings.TrimSpace(targetOID) {
+		return result, fmt.Errorf("exact applied publication %s has no canonical validation receipt for %s", operation.OperationID, targetOID)
+	}
+	return taskCloseIntegrationResult{
+		Requested: true, Integrated: true, ConfiguredBaseTarget: true,
+		TargetID: strings.TrimSpace(targetID), SourceBranch: strings.TrimSpace(source.Branch), TargetBranch: strings.TrimSpace(targetBranch),
+		BaseOID: strings.TrimSpace(operation.BaseRevision), SourceOID: strings.TrimSpace(sourceOID), TargetOID: strings.TrimSpace(targetOID),
+		PublicationOperationID: strings.TrimSpace(operation.OperationID), ValidationAttempts: validationAttempts,
+	}, nil
 }
 
 func failedCandidateValidationAttempt(attempts []domain.IntegrationCandidateValidationAttempt) (domain.IntegrationCandidateValidationAttempt, bool) {

@@ -958,6 +958,17 @@ func (a daemonOrchestrationAuthority) reviewWorkerRestartAllowed(ctx context.Con
 }
 
 func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, inspection protocol.OrchestrationReview, result *protocol.OrchestrationIntentResult) (bool, error) {
+	if hook := a.daemon.reviewAcceptanceBeforeCandidateCheck; hook != nil {
+		hook()
+	}
+	candidatePath := ""
+	if inspection.Evidence != nil || strings.TrimSpace(inspection.WorktreePath) != "" {
+		var candidateErr error
+		candidatePath, _, candidateErr = a.daemon.exactReviewedCandidateRevision(ctx, projectID, inspection)
+		if candidateErr != nil {
+			return false, fmt.Errorf("revalidate accepted review candidate: %w", candidateErr)
+		}
+	}
 	if len(inspection.PendingDecisions) > 0 {
 		return false, fmt.Errorf("accepted review rejected by stale material decisions: %s", strings.Join(pendingDecisionReadinessReasons(inspection.PendingDecisions), "; "))
 	}
@@ -990,7 +1001,7 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 		// Snapshot inspection can race with new evidence or decisions. Re-read the
 		// immutable patch-review inputs immediately before acceptance, while leaving
 		// exact aggregate validation to the durable publication continuation.
-		refreshed, err := a.daemon.taskReviewAcceptanceReadiness(ctx, projectID, inspection.IssueID, request.RepoDir)
+		refreshed, err := a.daemon.taskReviewAcceptanceReadiness(ctx, projectID, inspection.IssueID, candidatePath)
 		if err != nil {
 			return false, fmt.Errorf("revalidate accepted review candidate: %w", err)
 		}
@@ -1005,7 +1016,7 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 		return false, fmt.Errorf("accepted review requires structured high-context-risk closeout evidence")
 	}
 	integrateBeforeClose := inspection.Evidence != nil || strings.TrimSpace(inspection.WorktreePath) != ""
-	pin, err := a.captureAcceptedReviewPin(ctx, projectID, request.RepoDir, inspection, integrateBeforeClose)
+	pin, err := a.captureAcceptedReviewPin(ctx, projectID, candidatePath, inspection, integrateBeforeClose)
 	if err != nil {
 		return false, err
 	}
@@ -1080,6 +1091,49 @@ func (d *Daemon) exactReviewCandidateWorktree(ctx context.Context, projectID, is
 	return "", fmt.Errorf("candidate_projection_stale: projected worktree %s for issue %s is absent from the live Git worktree registry", projectedPath, issueID)
 }
 
+func (d *Daemon) exactReviewedCandidateRevision(ctx context.Context, projectID string, inspection protocol.OrchestrationReview) (string, string, error) {
+	if d.reviewCandidateCheck != nil {
+		return d.reviewCandidateCheck(ctx, projectID, inspection)
+	}
+	candidatePath, err := d.exactReviewCandidateWorktree(ctx, projectID, inspection.IssueID)
+	if err != nil {
+		return "", "", err
+	}
+	inspectedPath := strings.TrimSpace(inspection.WorktreePath)
+	if inspectedPath == "" || filepath.Clean(inspectedPath) != candidatePath {
+		return "", "", fmt.Errorf("candidate_path_changed: inspected path %q does not match current exact path %q", inspectedPath, candidatePath)
+	}
+	inspectedHead := strings.TrimSpace(inspection.HeadRevision)
+	if inspectedHead == "" {
+		return "", "", fmt.Errorf("reviewed_patch_identity_missing: inspection has no immutable HEAD revision")
+	}
+	if d.git == nil {
+		return "", "", fmt.Errorf("candidate_git_unavailable: Git authority is unavailable")
+	}
+	var currentHead string
+	if err := d.git.WithWorktreeLock(ctx, candidatePath, func(lockCtx context.Context) error {
+		status, statusErr := d.git.Status(lockCtx, candidatePath)
+		if statusErr != nil {
+			return fmt.Errorf("inspect reviewed candidate tree: %w", statusErr)
+		}
+		if status.HasChanges {
+			return fmt.Errorf("reviewed candidate worktree is dirty and no longer matches immutable revision %s", inspectedHead)
+		}
+		currentHead, statusErr = d.git.HeadRevision(lockCtx, candidatePath)
+		if statusErr != nil {
+			return fmt.Errorf("resolve reviewed candidate revision: %w", statusErr)
+		}
+		return nil
+	}); err != nil {
+		return "", "", err
+	}
+	currentHead = strings.TrimSpace(currentHead)
+	if currentHead != inspectedHead {
+		return "", "", fmt.Errorf("reviewed candidate revision changed from %s to %s after inspection", inspectedHead, currentHead)
+	}
+	return candidatePath, currentHead, nil
+}
+
 func (a daemonOrchestrationAuthority) captureAcceptedReviewPin(ctx context.Context, projectID, repoDir string, inspection protocol.OrchestrationReview, integrateBeforeClose bool) (acceptedReviewPin, error) {
 	pin := acceptedReviewPin{}
 	if inspection.Evidence != nil {
@@ -1104,7 +1158,7 @@ func (a daemonOrchestrationAuthority) captureAcceptedReviewPin(ctx context.Conte
 		pin.EvidenceDigest = evidencePin.Digest
 	}
 	if integrateBeforeClose {
-		oid, err := a.resolveAcceptedReviewSourceOID(ctx, projectID, inspection.IssueID)
+		_, oid, err := a.daemon.exactReviewedCandidateRevision(ctx, projectID, inspection)
 		if err != nil {
 			return pin, fmt.Errorf("capture reviewed source commit: %w", err)
 		}

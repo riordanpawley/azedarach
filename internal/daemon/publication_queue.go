@@ -74,6 +74,8 @@ type taskClosePublicationBinding struct {
 
 type taskClosePublicationBindingContextKey struct{}
 
+type taskCloseAppliedPublicationRecoveryContextKey struct{}
+
 func withTaskClosePublicationBinding(ctx context.Context, operationID, claimToken string) context.Context {
 	return context.WithValue(ctx, taskClosePublicationBindingContextKey{}, taskClosePublicationBinding{
 		operationID: strings.TrimSpace(operationID),
@@ -87,6 +89,18 @@ func taskClosePublicationBindingFromContext(ctx context.Context) (taskClosePubli
 	}
 	binding, ok := ctx.Value(taskClosePublicationBindingContextKey{}).(taskClosePublicationBinding)
 	return binding, ok && binding.operationID != "" && binding.claimToken != ""
+}
+
+func withTaskCloseAppliedPublicationRecovery(ctx context.Context, operation domain.PublicationOperation) context.Context {
+	return context.WithValue(ctx, taskCloseAppliedPublicationRecoveryContextKey{}, operation)
+}
+
+func taskCloseAppliedPublicationRecoveryFromContext(ctx context.Context) (domain.PublicationOperation, bool) {
+	if ctx == nil {
+		return domain.PublicationOperation{}, false
+	}
+	operation, ok := ctx.Value(taskCloseAppliedPublicationRecoveryContextKey{}).(domain.PublicationOperation)
+	return operation, ok && strings.TrimSpace(operation.OperationID) != ""
 }
 
 func publicationOperationIdentity(projectID, issueID, intentKey string) string {
@@ -489,8 +503,15 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 	stopClaimHeartbeat := d.startPublicationClaimHeartbeat(store, operationID, claimToken, claimTTL)
 	defer stopClaimHeartbeat()
 	identityCheck := d.publicationIdentityCheck
+	appliedRecovery := false
 	if identityCheck == nil && d.publicationClose == nil {
-		identityCheck = d.validatePublicationOperationIdentity
+		appliedRecovery, err = d.publicationOperationAlreadyApplied(ctx, operation)
+		if err != nil {
+			return nil, fmt.Errorf("inspect exact applied publication recovery: %w", err)
+		}
+		if !appliedRecovery {
+			identityCheck = d.validatePublicationOperationIdentity
+		}
 	}
 	if identityCheck != nil {
 		if identityErr := identityCheck(ctx, operation); identityErr != nil {
@@ -552,6 +573,9 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 	}
 	var runErr error
 	ctx = withTaskClosePublicationBinding(ctx, operation.OperationID, claimToken)
+	if appliedRecovery {
+		ctx = withTaskCloseAppliedPublicationRecovery(ctx, operation)
+	}
 	if d.publicationClose != nil {
 		runErr = d.publicationClose(ctx, operation)
 	} else {
@@ -599,6 +623,51 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 	d.ensurePublicationTargetContinuation(store, current)
 	_ = daemonops.ReportProgress(ctx, daemonops.Progress{Phase: "merged", Message: "exact candidate merged and accepted issue closed", Current: 100, Total: 100, Unit: "percent", Percent: 100})
 	return json.Marshal(current)
+}
+
+func (d *Daemon) publicationOperationAlreadyApplied(ctx context.Context, operation domain.PublicationOperation) (bool, error) {
+	candidate := strings.TrimSpace(operation.CandidateRevision)
+	if operation.State != domain.PublicationOperationPassed || candidate == "" || strings.TrimSpace(operation.ValidationRequestID) == "" || d.git == nil {
+		return false, nil
+	}
+	repoDir := strings.TrimSpace(d.resolveRepoDirForProjectExact(operation.ProjectID))
+	if repoDir == "" {
+		return false, nil
+	}
+	currentBase, err := d.git.ResolveCommit(ctx, repoDir, operation.TargetBranch)
+	if err != nil {
+		return false, fmt.Errorf("resolve target %s: %w", operation.TargetBranch, err)
+	}
+	if strings.TrimSpace(currentBase) != candidate {
+		return false, nil
+	}
+	currentHead, err := d.git.HeadRevision(ctx, repoDir)
+	if err != nil {
+		return false, fmt.Errorf("resolve exact applied target HEAD: %w", err)
+	}
+	if strings.TrimSpace(currentHead) != candidate {
+		return false, nil
+	}
+	status, err := d.git.Status(ctx, repoDir)
+	if err != nil {
+		return false, fmt.Errorf("inspect exact applied target: %w", err)
+	}
+	if status.HasChanges {
+		return false, fmt.Errorf("exact applied target %s is dirty", candidate)
+	}
+	cfg, err := appconfig.LoadConfig(repoDir)
+	if err != nil {
+		return false, fmt.Errorf("reload project capability: %w", err)
+	}
+	gateCommand := strings.TrimSpace(cfg.Gate.Command)
+	if gateCommand != operation.ValidationCommand || publicationPolicyVersion(cfg, gateCommand) != operation.PolicyVersion || publicationEnvironmentFingerprint(cfg) != operation.EnvironmentFingerprint {
+		return false, nil
+	}
+	attempt, found, err := d.git.CanonicalIntegrationValidation(ctx, repoDir, candidate)
+	if err != nil {
+		return false, fmt.Errorf("read canonical validation receipt for %s: %w", candidate, err)
+	}
+	return found && attempt.Canonical && attempt.Status == domain.IntegrationCandidateValidationPassed && strings.TrimSpace(attempt.CandidateHead) == candidate, nil
 }
 
 func publicationPolicyVersion(cfg *appconfig.Config, gateCommand string) string {
