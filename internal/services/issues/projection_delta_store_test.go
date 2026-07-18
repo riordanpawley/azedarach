@@ -25,6 +25,62 @@ type projectionCodedError struct{ code int }
 func (e projectionCodedError) Error() string { return "injected sqlite read failure" }
 func (e projectionCodedError) Code() int     { return e.code }
 
+type blockingProjectionDeltaNotifier struct {
+	events       chan struct{}
+	errors       chan error
+	closeStarted chan struct{}
+	releaseClose chan struct{}
+	closeOnce    sync.Once
+}
+
+type selfTerminatingProjectionDeltaNotifier struct {
+	events       chan struct{}
+	errors       chan error
+	closeStarted chan struct{}
+	releaseClose chan struct{}
+	closeCalls   atomic.Int32
+	startedOnce  sync.Once
+}
+
+func newSelfTerminatingProjectionDeltaNotifier() *selfTerminatingProjectionDeltaNotifier {
+	return &selfTerminatingProjectionDeltaNotifier{
+		events:       make(chan struct{}),
+		errors:       make(chan error),
+		closeStarted: make(chan struct{}),
+		releaseClose: make(chan struct{}),
+	}
+}
+
+func (n *selfTerminatingProjectionDeltaNotifier) Events() <-chan struct{} { return n.events }
+func (n *selfTerminatingProjectionDeltaNotifier) Errors() <-chan error    { return n.errors }
+func (n *selfTerminatingProjectionDeltaNotifier) Close() error {
+	n.closeCalls.Add(1)
+	n.startedOnce.Do(func() { close(n.closeStarted) })
+	<-n.releaseClose
+	return nil
+}
+
+func newBlockingProjectionDeltaNotifier() *blockingProjectionDeltaNotifier {
+	return &blockingProjectionDeltaNotifier{
+		events:       make(chan struct{}),
+		errors:       make(chan error),
+		closeStarted: make(chan struct{}),
+		releaseClose: make(chan struct{}),
+	}
+}
+
+func (n *blockingProjectionDeltaNotifier) Events() <-chan struct{} { return n.events }
+func (n *blockingProjectionDeltaNotifier) Errors() <-chan error    { return n.errors }
+func (n *blockingProjectionDeltaNotifier) Close() error {
+	n.closeOnce.Do(func() {
+		close(n.closeStarted)
+		<-n.releaseClose
+		close(n.events)
+		close(n.errors)
+	})
+	return nil
+}
+
 type failingProjectionDeltaRows struct {
 	projectionDeltaRows
 	failAfter int
@@ -247,12 +303,36 @@ func TestProjectionDeltaWatchHasNoIdlePolling(t *testing.T) {
 	require.NoError(t, client.OpenProjectionDeltaStore())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	var reads atomic.Int32
-	client.projectionDeltaReadHook = func() { reads.Add(1) }
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	client.projectionDeltaReadHook = func() {
+		if reads.Add(1) == 2 {
+			cancel()
+		}
+	}
 	defer cancel()
 	_, _, err := client.WatchProjectionDeltas(ctx, "default", 0, 1)
 	require.ErrorIs(t, err, domain.ErrProjectionCanceled)
 	require.Equal(t, int32(2), reads.Load(), "idle watch must only read before and after event registration")
+}
+
+func TestProjectionDeltaWatchRereadsCommitBeforeNotifierRegistration(t *testing.T) {
+	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	require.NoError(t, client.OpenProjectionDeltaStore())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	client.projectionWatchBeforeSubscribeHook = func() {
+		client.projectionWatchBeforeSubscribeHook = nil
+		_, err := client.CommitProjectionDelta(context.Background(), ProjectionDeltaParams{
+			ProjectID: "portable-consumer", Kind: domain.ProjectionKindIssue, Key: "commit-before-register",
+			Operation: domain.ProjectionDeltaUpsert, IdempotencyKey: "commit-before-register", Payload: json.RawMessage(`{}`),
+		}, nil)
+		require.NoError(t, err)
+	}
+
+	deltas, head, err := client.WatchProjectionDeltas(context.Background(), "portable-consumer", 0, 1)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), head)
+	require.Len(t, deltas, 1)
+	require.Equal(t, "commit-before-register", deltas[0].Key)
 }
 
 func TestProjectionDeltaCrossProcessWritersAreGapFreeAndIdempotent(t *testing.T) {
@@ -300,8 +380,8 @@ func TestProjectionDeltaWatchWakesForCrossProcessCommit(t *testing.T) {
 		err    error
 	}
 	resultCh := make(chan result, 1)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	go func() {
 		deltas, _, err := client.WatchProjectionDeltas(ctx, "p", 0, 100)
 		resultCh <- result{deltas: deltas, err: err}
@@ -316,6 +396,281 @@ func TestProjectionDeltaWatchWakesForCrossProcessCommit(t *testing.T) {
 	require.NoError(t, got.err)
 	require.NotEmpty(t, got.deltas)
 	require.Equal(t, uint64(1), got.deltas[0].Cursor)
+}
+
+func TestProjectionDeltaWatchWakesAcrossDatabasePathAliases(t *testing.T) {
+	for _, alias := range []string{"relative", "symlink"} {
+		t.Run(alias, func(t *testing.T) {
+			realDir := t.TempDir()
+			realPath := filepath.Join(realDir, "issues.db")
+			var aliasPath string
+			switch alias {
+			case "relative":
+				workingDir, err := os.Getwd()
+				require.NoError(t, err)
+				aliasPath, err = filepath.Rel(workingDir, realPath)
+				require.NoError(t, err)
+			case "symlink":
+				aliasDir := filepath.Join(t.TempDir(), "database-alias")
+				require.NoError(t, os.Symlink(realDir, aliasDir))
+				aliasPath = filepath.Join(aliasDir, filepath.Base(realPath))
+			}
+			require.Equal(t, projectionDeltaNotificationPath(realPath), projectionDeltaNotificationPath(aliasPath))
+
+			reader := NewClientAtPath(realPath, nil)
+			require.NoError(t, reader.OpenProjectionDeltaStore())
+			t.Cleanup(func() { _ = reader.CloseDB() })
+			writer := NewClientAtPath(aliasPath, nil)
+			require.NoError(t, writer.OpenProjectionDeltaStore())
+			t.Cleanup(func() { _ = writer.CloseDB() })
+
+			registered := make(chan struct{})
+			var reads atomic.Int32
+			reader.projectionDeltaReadHook = func() {
+				if reads.Add(1) == 2 {
+					close(registered)
+				}
+			}
+			type result struct {
+				deltas []domain.ProjectionDelta
+				err    error
+			}
+			resultCh := make(chan result, 1)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			go func() {
+				deltas, _, err := reader.WatchProjectionDeltas(ctx, "alias-project", 0, 1)
+				resultCh <- result{deltas: deltas, err: err}
+			}()
+			<-registered
+
+			_, err := writer.CommitProjectionDelta(context.Background(), ProjectionDeltaParams{
+				ProjectID: "alias-project", Kind: domain.ProjectionKindIssue, Key: alias,
+				Operation: domain.ProjectionDeltaUpsert, IdempotencyKey: alias, Payload: json.RawMessage(`{}`),
+			}, nil)
+			require.NoError(t, err)
+			got := <-resultCh
+			require.NoError(t, got.err)
+			require.Len(t, got.deltas, 1)
+			require.Equal(t, alias, got.deltas[0].Key)
+		})
+	}
+}
+
+func TestProjectionDeltaNotifierFansOutAndReopensWithStore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.db")
+	client := NewClientAtPath(path, nil)
+	require.NoError(t, client.OpenProjectionDeltaStore())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	_, generation, err := client.projectionReadDBHandleWithGeneration()
+	require.NoError(t, err)
+
+	first, unsubscribeFirst, err := client.subscribeProjectionDeltaNotifier(generation)
+	require.NoError(t, err)
+	second, unsubscribeSecond, err := client.subscribeProjectionDeltaNotifier(generation)
+	require.NoError(t, err)
+	_, err = client.CommitProjectionDelta(context.Background(), ProjectionDeltaParams{
+		ProjectID: "p", Kind: domain.ProjectionKindIssue, Key: "first",
+		Operation: domain.ProjectionDeltaUpsert, IdempotencyKey: "first", Payload: json.RawMessage(`{}`),
+	}, nil)
+	require.NoError(t, err)
+	<-first.events
+	<-second.events
+	unsubscribeFirst()
+	unsubscribeSecond()
+
+	require.NoError(t, client.CloseDB())
+	require.NoError(t, client.OpenProjectionDeltaStore())
+	_, generation, err = client.projectionReadDBHandleWithGeneration()
+	require.NoError(t, err)
+	reopened, unsubscribeReopened, err := client.subscribeProjectionDeltaNotifier(generation)
+	require.NoError(t, err)
+	defer unsubscribeReopened()
+	_, err = client.CommitProjectionDelta(context.Background(), ProjectionDeltaParams{
+		ProjectID: "p", Kind: domain.ProjectionKindIssue, Key: "reopened",
+		Operation: domain.ProjectionDeltaUpsert, IdempotencyKey: "reopened", Payload: json.RawMessage(`{}`),
+	}, nil)
+	require.NoError(t, err)
+	<-reopened.events
+}
+
+func TestProjectionDeltaCloseHoldsLifecycleBoundaryThroughNotifierTeardown(t *testing.T) {
+	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	require.NoError(t, client.OpenProjectionDeltaStore())
+
+	notifier := newBlockingProjectionDeltaNotifier()
+	closeState := &projectionDeltaNotifierCloseState{}
+	client.projectionNotifierMu.Lock()
+	client.projectionNotifier = notifier
+	client.projectionNotifierClose = closeState
+	client.projectionNotifierSubscriptions = make(map[*projectionDeltaSubscription]struct{})
+	client.projectionNotifierWG.Add(1)
+	go client.runProjectionDeltaNotifier(notifier, closeState)
+	client.projectionNotifierMu.Unlock()
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- client.CloseDB() }()
+	<-notifier.closeStarted
+
+	lifecycleAvailable := client.mu.TryLock()
+	if lifecycleAvailable {
+		client.mu.Unlock()
+	}
+	reopenDone := make(chan error, 1)
+	go func() { reopenDone <- client.OpenProjectionDeltaStore() }()
+	close(notifier.releaseClose)
+	require.NoError(t, <-closeDone)
+	require.NoError(t, <-reopenDone)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	require.False(t, lifecycleAvailable, "reopen must not enter while notifier teardown still owns the client lifecycle")
+}
+
+func TestProjectionDeltaNotifierSelfTerminationClosesBackendExactlyOnceWithConcurrentCloseDB(t *testing.T) {
+	for _, closedChannel := range []string{"events", "errors"} {
+		t.Run(closedChannel, func(t *testing.T) {
+			client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+			require.NoError(t, client.OpenProjectionDeltaStore())
+
+			notifier := newSelfTerminatingProjectionDeltaNotifier()
+			closeState := &projectionDeltaNotifierCloseState{}
+			client.projectionNotifierMu.Lock()
+			client.projectionNotifier = notifier
+			client.projectionNotifierClose = closeState
+			client.projectionNotifierSubscriptions = make(map[*projectionDeltaSubscription]struct{})
+			client.projectionNotifierWG.Add(1)
+			go client.runProjectionDeltaNotifier(notifier, closeState)
+			client.projectionNotifierMu.Unlock()
+
+			if closedChannel == "events" {
+				close(notifier.events)
+			} else {
+				close(notifier.errors)
+			}
+			<-notifier.closeStarted
+			closeDBAtNotifier := make(chan struct{})
+			client.projectionNotifierBeforeCloseHook = func() { close(closeDBAtNotifier) }
+			closeDone := make(chan error, 1)
+			go func() { closeDone <- client.CloseDB() }()
+			<-closeDBAtNotifier
+			close(notifier.releaseClose)
+			require.NoError(t, <-closeDone)
+			require.Equal(t, int32(1), notifier.closeCalls.Load())
+			client.projectionNotifierMu.Lock()
+			require.Nil(t, client.projectionNotifier)
+			require.Nil(t, client.projectionNotifierClose)
+			require.Nil(t, client.projectionNotifierSubscriptions)
+			client.projectionNotifierMu.Unlock()
+		})
+	}
+}
+
+func TestProjectionDeltaCloseJoinsSpontaneouslyClearedNotifierBeforeReopen(t *testing.T) {
+	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	require.NoError(t, client.OpenProjectionDeltaStore())
+
+	notifier := newSelfTerminatingProjectionDeltaNotifier()
+	close(notifier.releaseClose)
+	closeState := &projectionDeltaNotifierCloseState{}
+	ownerCleared := make(chan struct{})
+	releaseOwner := make(chan struct{})
+	client.projectionNotifierAfterClearHook = func() {
+		close(ownerCleared)
+		<-releaseOwner
+	}
+	client.projectionNotifierMu.Lock()
+	client.projectionNotifier = notifier
+	client.projectionNotifierClose = closeState
+	client.projectionNotifierSubscriptions = make(map[*projectionDeltaSubscription]struct{})
+	client.projectionNotifierWG.Add(1)
+	go client.runProjectionDeltaNotifier(notifier, closeState)
+	client.projectionNotifierMu.Unlock()
+
+	close(notifier.events)
+	<-ownerCleared
+	client.projectionNotifierMu.Lock()
+	require.Nil(t, client.projectionNotifier)
+	client.projectionNotifierMu.Unlock()
+
+	closeEntered := make(chan struct{})
+	releaseCloseHook := make(chan struct{})
+	client.projectionNotifierBeforeCloseHook = func() {
+		close(closeEntered)
+		<-releaseCloseHook
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- client.CloseDB() }()
+	<-closeEntered
+	reopenDone := make(chan error, 1)
+	go func() { reopenDone <- client.OpenProjectionDeltaStore() }()
+	close(releaseCloseHook)
+
+	// The owner is still between ownership clear and WaitGroup.Done. CloseDB
+	// retains the client lifecycle boundary while joining it, so reopen cannot
+	// enter that boundary either.
+	require.False(t, client.mu.TryLock())
+	select {
+	case err := <-closeDone:
+		require.Failf(t, "CloseDB returned before notifier owner exited", "error: %v", err)
+	default:
+	}
+	select {
+	case err := <-reopenDone:
+		require.Failf(t, "reopen returned before notifier owner exited", "error: %v", err)
+	default:
+	}
+
+	close(releaseOwner)
+	require.NoError(t, <-closeDone)
+	require.NoError(t, <-reopenDone)
+	require.Equal(t, int32(1), notifier.closeCalls.Load())
+	client.projectionNotifierAfterClearHook = nil
+	client.projectionNotifierBeforeCloseHook = nil
+	require.NoError(t, client.CloseDB())
+}
+
+func TestProjectionDeltaWatchRejectsCloseBetweenInitialReadAndSubscription(t *testing.T) {
+	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	require.NoError(t, client.OpenProjectionDeltaStore())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	_, initialGeneration, err := client.projectionReadDBHandleWithGeneration()
+	require.NoError(t, err)
+	var reopenedGeneration uint64
+	client.projectionWatchBeforeSubscribeHook = func() {
+		require.NoError(t, client.CloseDB())
+		require.NoError(t, client.OpenProjectionDeltaStore())
+		_, reopenedGeneration, err = client.projectionReadDBHandleWithGeneration()
+		require.NoError(t, err)
+	}
+	defer func() { client.projectionWatchBeforeSubscribeHook = nil }()
+
+	_, _, err = client.WatchProjectionDeltas(context.Background(), "p", 0, 1)
+	require.ErrorIs(t, err, domain.ErrProjectionRetryable)
+	require.Greater(t, reopenedGeneration, initialGeneration)
+	client.projectionNotifierMu.Lock()
+	notifier := client.projectionNotifier
+	client.projectionNotifierMu.Unlock()
+	require.Nil(t, notifier, "a stale watch must not install a notifier in the reopened database generation")
+}
+
+func TestProjectionDeltaClosedClientRejectsNotifierSubscription(t *testing.T) {
+	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	require.NoError(t, client.OpenProjectionDeltaStore())
+	_, generation, err := client.projectionReadDBHandleWithGeneration()
+	require.NoError(t, err)
+	_, unsubscribe, err := client.subscribeProjectionDeltaNotifier(generation)
+	require.NoError(t, err)
+	unsubscribe()
+	require.NoError(t, client.CloseDB())
+	t.Cleanup(func() { _ = client.CloseDB() })
+
+	_, _, err = client.subscribeProjectionDeltaNotifier(generation)
+	require.ErrorIs(t, err, domain.ErrProjectionRetryable)
+	client.projectionNotifierMu.Lock()
+	notifier := client.projectionNotifier
+	subscriptionCount := len(client.projectionNotifierSubscriptions)
+	client.projectionNotifierMu.Unlock()
+	require.Nil(t, notifier)
+	require.Zero(t, subscriptionCount)
 }
 
 func TestProjectionDeltaSubprocessWriter(t *testing.T) {

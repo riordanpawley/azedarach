@@ -854,6 +854,7 @@ type Client struct {
 
 	mu             sync.Mutex
 	db             *sql.DB
+	dbGeneration   uint64
 	walMu          sync.Mutex
 	lastWALCheckAt time.Time
 
@@ -864,11 +865,19 @@ type Client struct {
 	mailboxReplayRepairFailureHook     func(stage string) error
 	projectionDeltaChecksumRepairHook  func(stage string) error
 	projectionDeltaReadHook            func()
+	projectionWatchBeforeSubscribeHook func()
+	projectionNotifierBeforeCloseHook  func()
+	projectionNotifierAfterClearHook   func()
 	projectionSnapshotSourceRowsHook   func(projectionDeltaRows) projectionDeltaRows
 	projectionWatchActive              atomic.Int64
 	projectionWatchStarted             atomic.Uint64
 	projectionWatchCompleted           atomic.Uint64
 	corruption                         atomic.Pointer[sqliteCorruptionState]
+	projectionNotifierMu               sync.Mutex
+	projectionNotifier                 projectionDeltaNotifier
+	projectionNotifierClose            *projectionDeltaNotifierCloseState
+	projectionNotifierSubscriptions    map[*projectionDeltaSubscription]struct{}
+	projectionNotifierWG               sync.WaitGroup
 	decisionOutboxMigrationFailureHook func(stage string) error
 	decisionIdempotencyFailureHook     func(stage string) error
 	eventSearchMigrationFailureHook    func(stage string) error
@@ -997,6 +1006,9 @@ func (c *Client) withMutationLock(ctx context.Context, fn func(context.Context) 
 		spanErr = c.WithMutationLock(ctx, runWrite)
 	}
 	if spanErr == nil {
+		if err := signalProjectionDeltaNotification(c.dbPath); err != nil && c.logger != nil {
+			c.logger.Warn("failed to signal projection delta watchers after committed issue mutation", "db_path", sqliteutil.CanonicalPath(c.dbPath), "error", err)
+		}
 		c.maybeMaintainSQLiteWAL(ctx)
 	}
 	return spanErr
@@ -1174,6 +1186,7 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 	specAuditDoneAt := time.Now()
 
 	c.db = db
+	c.dbGeneration++
 	if c.logger != nil {
 		c.logger.Info(
 			"issue store init timings",
@@ -1424,13 +1437,24 @@ func (c *Client) CloseDB() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.db == nil {
-		return nil
+	var dbErr error
+	if c.db != nil {
+		dbErr = c.db.Close()
+		c.db = nil
 	}
-	err := c.db.Close()
-	c.db = nil
-	if err != nil {
-		return c.wrapError("close-db", "", err)
+
+	// The descriptor-safe notifier watches only its dedicated signal sidecar.
+	// Keep the client lifecycle boundary held through notifier shutdown so a new
+	// pool generation cannot open while the previous notifier is closing.
+	if c.projectionNotifierBeforeCloseHook != nil {
+		c.projectionNotifierBeforeCloseHook()
+	}
+	notifierErr := c.closeProjectionDeltaNotifier()
+	if dbErr != nil {
+		return c.wrapError("close-db", "", dbErr)
+	}
+	if notifierErr != nil {
+		return c.wrapError("close-projection-notifier", "", notifierErr)
 	}
 	return nil
 }
