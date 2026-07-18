@@ -850,7 +850,7 @@ func TestBlockedRootRejectsWorkerAndOrchestratorStartWithoutSideEffects(t *testi
 	}
 }
 
-func TestDGVBlocksDNRThroughSharedDaemonAuthorityAndActiveStartPaths(t *testing.T) {
+func TestAncestorRootBlockerPropagatesThroughSharedAuthorityAndActiveStartPaths(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	repoDir := t.TempDir()
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)
@@ -862,14 +862,14 @@ func TestDGVBlocksDNRThroughSharedDaemonAuthorityAndActiveStartPaths(t *testing.
 	t.Cleanup(func() { _ = writer.CloseDB() })
 	if _, err := issuefixture.SeedPath(ctx, dbPath, issuefixture.Fixture{
 		Issues: []issuefixture.Issue{
-			{ID: "dgv", Title: "Active DGV blocker", Type: domain.TypeEpic, Status: domain.StatusInProgress},
-			{ID: "dnr", Title: "Blocked DNR root", Type: domain.TypeEpic, Status: domain.StatusOpen},
-			{ID: "dnr-nested", Title: "Nested DNR root", Type: domain.TypeEpic, Status: domain.StatusOpen},
-			{ID: "dnr-child", Title: "Otherwise runnable DNR child", Type: domain.TypeTask, Status: domain.StatusOpen},
+			{ID: "upstream-blocker", Title: "Active upstream blocker", Type: domain.TypeEpic, Status: domain.StatusInProgress},
+			{ID: "parent-root", Title: "Blocked parent root", Type: domain.TypeEpic, Status: domain.StatusOpen},
+			{ID: "nested-root", Title: "Nested root", Type: domain.TypeEpic, Status: domain.StatusOpen},
+			{ID: "runnable-child", Title: "Otherwise runnable child", Type: domain.TypeTask, Status: domain.StatusOpen},
 		},
 		Dependencies: []issuefixture.Dependency{
-			{IssueID: "dnr-nested", DependsOnID: "dnr", Type: domain.DependencyParentChild},
-			{IssueID: "dnr-child", DependsOnID: "dnr", Type: domain.DependencyParentChild},
+			{IssueID: "nested-root", DependsOnID: "parent-root", Type: domain.DependencyParentChild},
+			{IssueID: "runnable-child", DependsOnID: "parent-root", Type: domain.DependencyParentChild},
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -884,7 +884,7 @@ func TestDGVBlocksDNRThroughSharedDaemonAuthorityAndActiveStartPaths(t *testing.
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, "runtime.db"), slog.Default())
 	t.Cleanup(func() { _ = runtimeStore.Close() })
 	tmuxRunner := newSessionStartTmuxRunner()
-	worktreeRunner := &worktreeCreateRunner{worktreePath: filepath.Join(t.TempDir(), "dnr")}
+	worktreeRunner := &worktreeCreateRunner{worktreePath: filepath.Join(t.TempDir(), "parent-root")}
 	manager := git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default())
 	dReader := &Daemon{
 		cfg:                       Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
@@ -918,7 +918,7 @@ func TestDGVBlocksDNRThroughSharedDaemonAuthorityAndActiveStartPaths(t *testing.
 	<-watchStore.entered
 
 	dWriter := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, issues: writer, revision: map[string]uint64{}, hub: publish.NewHub(16, 8, slog.Default())}
-	dependencyBody, _ := json.Marshal(map[string]any{"task_id": "dnr", "depends_on_id": "dgv", "dependency_type": string(domain.DependencyBlocks)})
+	dependencyBody, _ := json.Marshal(map[string]any{"task_id": "parent-root", "depends_on_id": "upstream-blocker", "dependency_type": string(domain.DependencyBlocks)})
 	dependencyResp, err := dWriter.handleTaskDependencyAdd(ctx, protocol.RequestEnvelope{Command: "task.dependency.add", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: dependencyBody})
 	if err != nil || dependencyResp.Error != nil {
 		t.Fatalf("second daemon dependency write: response=%+v err=%v", dependencyResp.Error, err)
@@ -932,7 +932,7 @@ func TestDGVBlocksDNRThroughSharedDaemonAuthorityAndActiveStartPaths(t *testing.
 		waiting <- struct{}{}
 	})
 	readinessDone := make(chan protocol.ResponseEnvelope, 1)
-	readinessBody, _ := json.Marshal(map[string]string{"task_id": "dnr"})
+	readinessBody, _ := json.Marshal(map[string]string{"task_id": "parent-root"})
 	go func() {
 		resp, _ := dReader.handleTaskGraphReadiness(readCtx, protocol.RequestEnvelope{Command: "task.graph_readiness", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: readinessBody})
 		readinessDone <- resp
@@ -947,22 +947,22 @@ func TestDGVBlocksDNRThroughSharedDaemonAuthorityAndActiveStartPaths(t *testing.
 	if err := json.Unmarshal(readinessResp.Body, &readiness); err != nil {
 		t.Fatal(err)
 	}
-	if len(readiness.Runnable) != 0 || !slices.Equal(readiness.RootBlockers, []string{"dgv"}) || !strings.Contains(readiness.Blocked["dnr-child"], "root waiting on dgv") || !strings.Contains(readiness.Blocked["dnr-nested"], "root waiting on dgv") {
-		t.Fatalf("DGV-to-DNR readiness = %+v", readiness)
+	if len(readiness.Runnable) != 0 || !slices.Equal(readiness.RootBlockers, []string{"upstream-blocker"}) || !strings.Contains(readiness.Blocked["runnable-child"], "root waiting on upstream-blocker") || !strings.Contains(readiness.Blocked["nested-root"], "root waiting on upstream-blocker") {
+		t.Fatalf("ancestor-blocked readiness = %+v", readiness)
 	}
 
-	nestedScope, err := domain.RootedOrchestrationScope("dnr-nested")
+	nestedScope, err := domain.RootedOrchestrationScope("nested-root")
 	if err != nil {
 		t.Fatal(err)
 	}
 	nestedBody, _ := json.Marshal(protocol.OrchestratorSessionRequest{Scope: nestedScope})
-	nestedWorkerBody, _ := json.Marshal(sessionCommandBody{ProjectID: projectID, IssueID: "dnr-nested", SessionID: "az-dnr-nested"})
+	nestedWorkerBody, _ := json.Marshal(sessionCommandBody{ProjectID: projectID, IssueID: "nested-root", SessionID: "az-nested-root"})
 	nestedWorkerResp, err := dReader.handleSessionStartDirect(ctx, protocol.RequestEnvelope{Command: daemonhandlers.CommandSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: nestedWorkerBody})
-	if err != nil || nestedWorkerResp.Error == nil || nestedWorkerResp.Error.Code != protocol.ErrorCodeConflict || !strings.Contains(nestedWorkerResp.Error.Message, "requested=dnr-nested root=dnr blockers=dgv") {
+	if err != nil || nestedWorkerResp.Error == nil || nestedWorkerResp.Error.Code != protocol.ErrorCodeConflict || !strings.Contains(nestedWorkerResp.Error.Message, "requested=nested-root root=parent-root blockers=upstream-blocker") {
 		t.Fatalf("nested worker response=%+v err=%v", nestedWorkerResp.Error, err)
 	}
 	nestedResp, err := dReader.handleOrchestratorSession(ctx, protocol.RequestEnvelope{Command: protocol.CommandOrchestratorSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: nestedBody})
-	if err != nil || nestedResp.Error == nil || nestedResp.Error.Code != protocol.ErrorCodeConflict || !strings.Contains(nestedResp.Error.Message, "requested=dnr-nested root=dnr blockers=dgv") {
+	if err != nil || nestedResp.Error == nil || nestedResp.Error.Code != protocol.ErrorCodeConflict || !strings.Contains(nestedResp.Error.Message, "requested=nested-root root=parent-root blockers=upstream-blocker") {
 		t.Fatalf("nested orchestrator response=%+v err=%v", nestedResp.Error, err)
 	}
 	nestedIdentity, err := domain.NewOrchestratorIdentity(projectID, nestedScope)
@@ -975,11 +975,11 @@ func TestDGVBlocksDNRThroughSharedDaemonAuthorityAndActiveStartPaths(t *testing.
 	if intents, err := runtimeStore.ListSessionIntentStates(ctx, projectID); err != nil || len(intents) != 0 {
 		t.Fatalf("blocked nested intents=%+v err=%v", intents, err)
 	}
-	nestedTask, err := reader.GetWithRuntime(ctx, projectID, "dnr-nested")
+	nestedTask, err := reader.GetWithRuntime(ctx, projectID, "nested-root")
 	if err != nil || nestedTask.Status != domain.StatusOpen {
 		t.Fatalf("blocked nested lifecycle=%s err=%v", nestedTask.Status, err)
 	}
-	rootTask, err := reader.GetWithRuntime(ctx, projectID, "dnr")
+	rootTask, err := reader.GetWithRuntime(ctx, projectID, "parent-root")
 	if err != nil || rootTask.Status != domain.StatusOpen {
 		t.Fatalf("blocked ancestor lifecycle=%s err=%v", rootTask.Status, err)
 	}
@@ -987,21 +987,21 @@ func TestDGVBlocksDNRThroughSharedDaemonAuthorityAndActiveStartPaths(t *testing.
 		t.Fatalf("blocked nested start created side effects: worktree=%d tmux=%v", worktreeRunner.worktreeAddCalls, tmuxRunner.commands)
 	}
 
-	workerBody, _ := json.Marshal(sessionCommandBody{ProjectID: projectID, IssueID: "dnr", SessionID: "az-dnr"})
+	workerBody, _ := json.Marshal(sessionCommandBody{ProjectID: projectID, IssueID: "parent-root", SessionID: "az-parent-root"})
 	workerResp, err := dReader.handleSessionStartDirect(ctx, protocol.RequestEnvelope{Command: daemonhandlers.CommandSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: workerBody})
-	if err != nil || workerResp.Error == nil || workerResp.Error.Code != protocol.ErrorCodeConflict || !strings.Contains(workerResp.Error.Message, "root=dnr blockers=dgv") {
+	if err != nil || workerResp.Error == nil || workerResp.Error.Code != protocol.ErrorCodeConflict || !strings.Contains(workerResp.Error.Message, "root=parent-root blockers=upstream-blocker") {
 		t.Fatalf("worker response=%+v err=%v", workerResp.Error, err)
 	}
-	scope, _ := domain.RootedOrchestrationScope("dnr")
+	scope, _ := domain.RootedOrchestrationScope("parent-root")
 	orchestratorBody, _ := json.Marshal(protocol.OrchestratorSessionRequest{Scope: scope})
 	orchestratorResp, err := dReader.handleOrchestratorSession(ctx, protocol.RequestEnvelope{Command: protocol.CommandOrchestratorSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: orchestratorBody})
-	if err != nil || orchestratorResp.Error == nil || orchestratorResp.Error.Code != protocol.ErrorCodeConflict || !strings.Contains(orchestratorResp.Error.Message, "root=dnr blockers=dgv") {
+	if err != nil || orchestratorResp.Error == nil || orchestratorResp.Error.Code != protocol.ErrorCodeConflict || !strings.Contains(orchestratorResp.Error.Message, "root=parent-root blockers=upstream-blocker") {
 		t.Fatalf("orchestrator response=%+v err=%v", orchestratorResp.Error, err)
 	}
 	if worktreeRunner.worktreeAddCalls != 0 || len(tmuxRunner.commands) != 0 {
 		t.Fatalf("blocked starts created side effects: worktree=%d tmux=%v", worktreeRunner.worktreeAddCalls, tmuxRunner.commands)
 	}
-	if err := writer.Update(ctx, "dgv", domain.StatusDone); err != nil {
+	if err := writer.Update(ctx, "upstream-blocker", domain.StatusDone); err != nil {
 		t.Fatal(err)
 	}
 	settledResp, err := dReader.handleTaskGraphReadiness(ctx, protocol.RequestEnvelope{Command: "task.graph_readiness", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: readinessBody})
@@ -1012,8 +1012,8 @@ func TestDGVBlocksDNRThroughSharedDaemonAuthorityAndActiveStartPaths(t *testing.
 	if err := json.Unmarshal(settledResp.Body, &settled); err != nil {
 		t.Fatal(err)
 	}
-	if len(settled.RootBlockers) != 0 || !slices.Equal(settled.Runnable, []string{"dnr-child"}) {
-		t.Fatalf("settled DGV-to-DNR readiness = %+v", settled)
+	if len(settled.RootBlockers) != 0 || !slices.Equal(settled.Runnable, []string{"runnable-child"}) {
+		t.Fatalf("settled ancestor-blocked readiness = %+v", settled)
 	}
 	nestedWorkerResp, err = dReader.handleSessionStartDirect(ctx, protocol.RequestEnvelope{Command: daemonhandlers.CommandSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: nestedWorkerBody})
 	if err != nil || nestedWorkerResp.Error != nil {
