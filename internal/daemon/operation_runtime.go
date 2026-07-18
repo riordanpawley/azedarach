@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
@@ -55,7 +56,11 @@ type operationRuntime struct {
 	hub                     *publish.Hub
 	nextRevision            func(string) uint64
 	store                   *opstore.SQLiteStore
+	operationStore          daemonops.Store
 	manager                 *opmanager.Manager
+	recoverInterrupted      func(context.Context, daemonops.Record) (interruptedOperationRecovery, bool)
+	interruptedMu           sync.Mutex
+	retryableInterrupted    map[string]struct{}
 	sessionStart            func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	sessionStop             func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	sessionResolveConflict  func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
@@ -152,13 +157,24 @@ func newOperationRuntime(cfg operationRuntimeConfig) *operationRuntime {
 		onTerminal:            cfg.onTerminal,
 	}
 	reconcileInterruptedOperations(context.Background(), adapter, logger, cfg.recoverInterrupted)
+	retryableInterrupted := make(map[string]struct{})
+	if records, err := adapter.List(context.Background(), daemonops.Query{States: []daemonops.State{daemonops.StateQueued, daemonops.StateRunning}}); err != nil {
+		logger.Warn("failed to index retryable interrupted daemon operations", "error", err)
+	} else {
+		for _, record := range records {
+			retryableInterrupted[record.ID] = struct{}{}
+		}
+	}
 	manager := opmanager.New(adapter, opmanager.Config{Logger: logger})
 	return &operationRuntime{
 		logger:                  logger,
 		hub:                     cfg.hub,
 		nextRevision:            cfg.nextRevision,
 		store:                   store,
+		operationStore:          adapter,
 		manager:                 manager,
+		recoverInterrupted:      cfg.recoverInterrupted,
+		retryableInterrupted:    retryableInterrupted,
 		sessionStart:            cfg.sessionStart,
 		sessionStop:             cfg.sessionStop,
 		sessionResolveConflict:  cfg.sessionResolveConflict,
@@ -280,6 +296,12 @@ func updateInterruptedOperation(ctx context.Context, store daemonops.Store, reco
 			}
 			return false
 		}
+		return true
+	case daemonops.StateQueued, daemonops.StateRunning:
+		// Recovery can deliberately retain an interrupted operation as active when
+		// its exact side effect is complete but a retryable acknowledgement write
+		// has not converged. A matching submission will retry recovery against this
+		// durable record before any new runner is admitted.
 		return true
 	default:
 		return false
@@ -453,6 +475,12 @@ func (r *operationRuntime) handleOperationSubmit(ctx context.Context, req protoc
 		spanErr = err
 		return r.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error())
 	}
+	if recovered, found, recoverErr := r.reconcileMatchingInterruptedOperation(ctx, submitReq); recoverErr != nil {
+		spanErr = recoverErr
+		return r.errorResponse(req, protocol.ErrorCodeInternal, recoverErr.Error())
+	} else if found {
+		return r.operationSubmitResponse(req, body.Payload, daemonops.SubmitResult{Record: recovered, Deduped: true})
+	}
 	submitResult, submitErr := r.manager.Submit(ctx, submitReq, func(runCtx context.Context) ([]byte, error) {
 		runCtx, endRunSpan := latencytrace.StartSpan(runCtx, "daemon", "operation.run", "command", body.Kind, "project_id", projectID)
 		var runSpanErr error
@@ -491,22 +519,81 @@ func (r *operationRuntime) handleOperationSubmit(ctx context.Context, req protoc
 		return r.errorResponse(req, mapOperationSubmitErrorCode(submitErr), submitErr.Error())
 	}
 
+	return r.operationSubmitResponse(req, body.Payload, submitResult)
+}
+
+func (r *operationRuntime) reconcileMatchingInterruptedOperation(ctx context.Context, req daemonops.SubmitRequest) (daemonops.Record, bool, error) {
+	if req.Kind != protocol.CommandSessionRestartAll || req.DedupeKey == "" || r.recoverInterrupted == nil || r.operationStore == nil {
+		return daemonops.Record{}, false, nil
+	}
+	r.interruptedMu.Lock()
+	defer r.interruptedMu.Unlock()
+	records, err := r.operationStore.List(ctx, daemonops.Query{
+		ProjectID: req.ProjectID,
+		Kind:      req.Kind,
+		States:    []daemonops.State{daemonops.StateQueued, daemonops.StateRunning},
+	})
+	if err != nil {
+		return daemonops.Record{}, false, fmt.Errorf("list retryable interrupted operations: %w", err)
+	}
+	var conflictingID string
+	for _, record := range records {
+		if _, retryable := r.retryableInterrupted[record.ID]; !retryable {
+			continue
+		}
+		if record.DedupeKey != req.DedupeKey {
+			conflictingID = record.ID
+			continue
+		}
+		recoveryCtx := daemonops.WithProgressReporter(ctx, func(progressCtx context.Context, progress daemonops.Progress) error {
+			progressCopy := progress
+			_, updateErr := r.operationStore.Update(progressCtx, daemonops.UpdateParams{
+				ID: record.ID, ToState: record.State, Progress: &progressCopy,
+			})
+			return updateErr
+		})
+		recovery, ok := r.recoverInterrupted(recoveryCtx, record)
+		if !ok {
+			return record, true, nil
+		}
+		if !updateInterruptedOperation(ctx, r.operationStore, record, recovery, time.Now().UTC(), r.logger) {
+			if current, readErr := r.operationStore.Get(ctx, record.ID); readErr == nil && (current.State == daemonops.StateDone || current.State == daemonops.StateFailed || current.State == daemonops.StateCancelled) {
+				delete(r.retryableInterrupted, record.ID)
+				return current, true, nil
+			}
+			return daemonops.Record{}, true, fmt.Errorf("persist retried interrupted operation %s", record.ID)
+		}
+		updated, err := r.operationStore.Get(ctx, record.ID)
+		if err != nil {
+			return daemonops.Record{}, true, fmt.Errorf("read retried interrupted operation %s: %w", record.ID, err)
+		}
+		if updated.State == daemonops.StateDone || updated.State == daemonops.StateFailed || updated.State == daemonops.StateCancelled {
+			delete(r.retryableInterrupted, record.ID)
+		}
+		return updated, true, nil
+	}
+	if conflictingID != "" {
+		return daemonops.Record{}, true, fmt.Errorf("interrupted restart operation %s must be recovered before a different restart request", conflictingID)
+	}
+	return daemonops.Record{}, false, nil
+}
+
+func (r *operationRuntime) operationSubmitResponse(req protocol.RequestEnvelope, payload []byte, submitResult daemonops.SubmitResult) protocol.ResponseEnvelope {
 	resp := r.successResponse(req)
 	record := r.toProtocolRecord(submitResult.Record)
-	record.Payload = append(json.RawMessage(nil), body.Payload...)
+	record.Payload = append(json.RawMessage(nil), payload...)
 	encoded, err := json.Marshal(protocol.OperationSubmitResponseBody{
 		Created:   !submitResult.Deduped,
 		Operation: record,
 	})
 	if err != nil {
-		spanErr = err
 		return r.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("marshal operation submit response: %v", err))
 	}
 	resp.Body = encoded
 	if r.logger != nil {
 		r.logger.Info("daemon operation submit completed",
-			"project_id", projectID,
-			"kind", body.Kind,
+			"project_id", submitResult.Record.ProjectID,
+			"kind", submitResult.Record.Kind,
 			"operation_id", record.OperationID,
 			"created", !submitResult.Deduped,
 			"state", record.State,

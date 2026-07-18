@@ -1725,7 +1725,7 @@ func (d *Daemon) recoverInterruptedSessionRestartPlan(ctx context.Context, plan 
 			recovery, recovered = d.recoverInterruptedSessionRestartLocked(paneCtx, store, plan)
 			if recovered && recovery.State == daemonops.StateDone {
 				if err := d.persistRecoveredSessionRestartProjection(paneCtx, plan, recovery); err != nil {
-					recovery = interruptedOperationRecovery{State: daemonops.StateFailed, ErrorMessage: err.Error()}
+					recovery = interruptedOperationRecovery{State: daemonops.StateRunning, ErrorMessage: err.Error()}
 				}
 			}
 			return nil
@@ -1784,6 +1784,9 @@ func (d *Daemon) recoverInterruptedSessionRestartBatch(ctx context.Context, batc
 		if !ok {
 			return fail(fmt.Errorf("recover restart target %d: durable plan could not be reconciled", pending.Index))
 		}
+		if recovered.State == daemonops.StateRunning || recovered.State == daemonops.StateQueued {
+			return recovered
+		}
 		if recovered.State != daemonops.StateDone {
 			return fail(fmt.Errorf("recover restart target %d: %s", pending.Index, recovered.ErrorMessage))
 		}
@@ -1805,6 +1808,9 @@ func (d *Daemon) recoverInterruptedSessionRestartBatch(ctx context.Context, batc
 		recovered, ok := d.recoverInterruptedSessionRestartPlan(ctx, *batch.Current)
 		if !ok {
 			return fail(errors.New("recover current restart target: durable plan could not be reconciled"))
+		}
+		if recovered.State == daemonops.StateRunning || recovered.State == daemonops.StateQueued {
+			return recovered
 		}
 		if recovered.State != daemonops.StateDone {
 			return fail(fmt.Errorf("recover current restart target: %s", recovered.ErrorMessage))

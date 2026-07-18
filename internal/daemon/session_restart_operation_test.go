@@ -779,7 +779,7 @@ func TestRecoverInterruptedSessionRestartBatchPersistsUnprojectedWorker(t *testi
 	}
 }
 
-func TestRecoverInterruptedSessionRestartBatchRetriesRecoverableProjectionFailure(t *testing.T) {
+func TestRecoverInterruptedSessionRestartBatchRetainsRecoverableProjectionFailure(t *testing.T) {
 	d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
 	seedRecoveredReplacement(t, store, runner, "planned")
 	plan := recoveryPlanForTarget(target, "observe")
@@ -795,7 +795,7 @@ func TestRecoverInterruptedSessionRestartBatchRetriesRecoverableProjectionFailur
 	d.runtimeProjectionWriter = &failOnceSessionProjectionWriter{runtimeProjectionWriter: baseWriter, remaining: 1}
 
 	first, ok := d.recoverInterruptedSessionRestart(context.Background(), record)
-	if !ok || first.State != daemonops.StateFailed || !strings.Contains(first.ErrorMessage, "injected recovered projection failure") {
+	if !ok || first.State != daemonops.StateRunning || !strings.Contains(first.ErrorMessage, "injected recovered projection failure") {
 		t.Fatalf("first recovery=%+v ok=%t", first, ok)
 	}
 	if _, found, err := store.GetSessionIntent(context.Background(), target.ProjectID, daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, target.IssueID); err != nil || found {
@@ -811,6 +811,102 @@ func TestRecoverInterruptedSessionRestartBatchRetriesRecoverableProjectionFailur
 	respawns, _, _ := runner.snapshot()
 	if respawns != 0 {
 		t.Fatalf("respawns=%d, want projection retry without replacement", respawns)
+	}
+}
+
+func TestOperationRuntimeResubmissionRetriesRecoveredProjectionWithoutSecondRespawn(t *testing.T) {
+	d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+	seedRecoveredReplacement(t, store, runner, "planned")
+	plan := recoveryPlanForTarget(target, "observe")
+	batch := sessionRestartBatchPlan{
+		Version: sessionRestartBatchPlanVersion, ProjectID: target.ProjectID, ProjectIDs: []string{target.ProjectID},
+		Request: protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(target.ProjectID)},
+		Targets: []sessionRestartAllTarget{target}, Current: &plan, Stage: sessionRestartLifecycleVerifying,
+	}
+	progressRecord := restartRecoveryBatchRecord(t, batch)
+	payload := mustJSON(t, batch.Request)
+	repoDir := t.TempDir()
+	first := newOperationRuntime(operationRuntimeConfig{
+		repoDir: repoDir, nextRevision: sequentialRevision(),
+		sessionRestartAll: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			return testResponse(req, protocol.SessionRestartAllResponseBody{}), nil
+		},
+	})
+	submitReq, err := first.buildSubmitRequest(protocol.CommandSessionRestartAll, target.ProjectID, payload, operationSubmitOverrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := first.operationStore.Create(context.Background(), daemonops.Record{
+		ID: "op-recovered-projection", ProjectID: submitReq.ProjectID, IssueID: target.IssueID,
+		Kind: submitReq.Kind, DedupeKey: submitReq.DedupeKey, ResourceKeys: submitReq.ResourceKeys,
+		State: daemonops.StateQueued, CreatedAt: time.Now().UTC(), Progress: progressRecord.Progress,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().UTC()
+	if _, err := first.operationStore.Update(context.Background(), daemonops.UpdateParams{
+		ID: created.ID, ToState: daemonops.StateRunning, StartedAt: &started, Progress: progressRecord.Progress,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	baseWriter := d.runtimeProjectionStateWriter()
+	d.runtimeProjectionWriter = &failOnceSessionProjectionWriter{runtimeProjectionWriter: baseWriter, remaining: 1}
+	runnerCalls := 0
+	restarted := newOperationRuntime(operationRuntimeConfig{
+		repoDir: repoDir, nextRevision: sequentialRevision(), recoverInterrupted: d.recoverInterruptedOperation,
+		sessionRestartAll: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			runnerCalls++
+			return testResponse(req, protocol.SessionRestartAllResponseBody{}), nil
+		},
+	})
+	t.Cleanup(func() { _ = restarted.Close() })
+
+	afterStartup, err := restarted.manager.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterStartup.State != daemonops.StateRunning {
+		t.Fatalf("startup recovery record=%+v, want retryable running projection failure", afterStartup)
+	}
+	if _, found, err := store.GetSessionIntent(context.Background(), target.ProjectID, daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, target.IssueID); err != nil || found {
+		t.Fatalf("worker projection after startup failure found=%t err=%v", found, err)
+	}
+	conflictingPayload := mustJSON(t, protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(target.ProjectID), ForceBusy: true})
+	conflictResp := restarted.Handle(context.Background(), testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
+		ProjectID: naming.ProjectID(target.ProjectID), Kind: protocol.CommandSessionRestartAll, Payload: conflictingPayload,
+	}))
+	if conflictResp.OK || runnerCalls != 0 {
+		t.Fatalf("conflicting resubmission response=%+v runner_calls=%d, want fail-closed retained authority", conflictResp, runnerCalls)
+	}
+
+	resp := restarted.Handle(context.Background(), testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
+		ProjectID: naming.ProjectID(target.ProjectID), Kind: protocol.CommandSessionRestartAll, Payload: payload,
+	}))
+	if !resp.OK {
+		t.Fatalf("resubmit response=%+v", resp)
+	}
+	var submitted protocol.OperationSubmitResponseBody
+	if err := json.Unmarshal(resp.Body, &submitted); err != nil {
+		t.Fatal(err)
+	}
+	if submitted.Created || submitted.Operation.OperationID.String() != created.ID || submitted.Operation.State != protocol.OperationStateDone {
+		t.Fatalf("resubmission=%+v, want original operation completed without creation", submitted)
+	}
+	if runnerCalls != 0 {
+		t.Fatalf("restart-all runner calls=%d, want projection-only recovery", runnerCalls)
+	}
+	projection, found, err := store.GetSessionIntent(context.Background(), target.ProjectID, daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, target.IssueID)
+	if err != nil || !found || projection.ID != target.SessionID || projection.State != daemonstate.SessionStateRunning {
+		t.Fatalf("worker projection after resubmission=%+v found=%t err=%v", projection, found, err)
+	}
+	respawns, _, _ := runner.snapshot()
+	if respawns != 0 {
+		t.Fatalf("respawns=%d, want no second respawn", respawns)
 	}
 }
 
