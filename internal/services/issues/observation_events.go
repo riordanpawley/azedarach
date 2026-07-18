@@ -460,23 +460,39 @@ func (c *Client) AppendIssueObservationEvent(ctx context.Context, issueID string
 // owned by the daemon-operations migration authority but shares this project
 // database specifically so no accepted base-target patch can exist without its
 // continuation intent (or vice versa).
+// AcceptedReviewPublicationCommit identifies both sides of the atomic durable
+// acceptance boundary without requiring a fallible post-commit read.
+type AcceptedReviewPublicationCommit struct {
+	EventID                int64
+	PublicationOperationID string
+}
+
+type acceptedReviewPublicationCommitHookKey struct{}
+
+// WithAcceptedReviewPublicationCommitHookForTest installs a deterministic
+// barrier immediately after the acceptance transaction commits. Production
+// callers should not use it.
+func WithAcceptedReviewPublicationCommitHookForTest(ctx context.Context, hook func()) context.Context {
+	return context.WithValue(ctx, acceptedReviewPublicationCommitHookKey{}, hook)
+}
+
 // AppendAcceptedReviewAndPublicationWithReviewAdmission atomically requires
 // the immutable exported review episode and its reviewer lease while recording
 // both the accepted outcome and publication continuation.
-func (c *Client) AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx context.Context, issueID string, params IssueObservationEventParams, operation domain.PublicationOperation, coalesceKey string, expected ReviewAdmissionPin, expectedParentID, reviewerID string) (domain.IssueObservationEvent, string, error) {
+func (c *Client) AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx context.Context, issueID string, params IssueObservationEventParams, operation domain.PublicationOperation, coalesceKey string, expected ReviewAdmissionPin, expectedParentID, reviewerID string) (AcceptedReviewPublicationCommit, error) {
 	return c.appendAcceptedReviewAndPublication(ctx, issueID, params, operation, coalesceKey, &expected, expectedParentID, reviewerID)
 }
 
-func (c *Client) appendAcceptedReviewAndPublication(ctx context.Context, issueID string, params IssueObservationEventParams, operation domain.PublicationOperation, coalesceKey string, expected *ReviewAdmissionPin, expectedParentID, reviewerID string) (domain.IssueObservationEvent, string, error) {
+func (c *Client) appendAcceptedReviewAndPublication(ctx context.Context, issueID string, params IssueObservationEventParams, operation domain.PublicationOperation, coalesceKey string, expected *ReviewAdmissionPin, expectedParentID, reviewerID string) (AcceptedReviewPublicationCommit, error) {
 	if params.Type != domain.IssueEventReviewCompleted || strings.TrimSpace(fmt.Sprint(params.Payload["outcome"])) != string(domain.ReviewOutcomeAccepted) {
-		return domain.IssueObservationEvent{}, "", c.wrapError("append-accepted-review-publication", issueID, errors.New("accepted review publication requires accepted review.completed event"))
+		return AcceptedReviewPublicationCommit{}, c.wrapError("append-accepted-review-publication", issueID, errors.New("accepted review publication requires accepted review.completed event"))
 	}
 	if err := operation.ValidateIntent(); err != nil {
-		return domain.IssueObservationEvent{}, "", c.wrapError("append-accepted-review-publication", issueID, err)
+		return AcceptedReviewPublicationCommit{}, c.wrapError("append-accepted-review-publication", issueID, err)
 	}
 	coalesceKey = strings.TrimSpace(coalesceKey)
 	if coalesceKey == "" {
-		return domain.IssueObservationEvent{}, "", c.wrapError("append-accepted-review-publication", issueID, errors.New("coalesce key is required"))
+		return AcceptedReviewPublicationCommit{}, c.wrapError("append-accepted-review-publication", issueID, errors.New("coalesce key is required"))
 	}
 	var eventID int64
 	var publicationOperationID string
@@ -567,13 +583,16 @@ func (c *Client) appendAcceptedReviewAndPublication(ctx context.Context, issueID
 		})
 	})
 	if err != nil {
-		return domain.IssueObservationEvent{}, "", err
+		return AcceptedReviewPublicationCommit{}, err
 	}
-	event, err := c.getIssueObservationEventByID(ctx, eventID)
-	if err != nil {
-		return domain.IssueObservationEvent{}, "", c.wrapError("append-accepted-review-publication", issueID, err)
+	if hook, _ := ctx.Value(acceptedReviewPublicationCommitHookKey{}).(func()); hook != nil {
+		hook()
 	}
-	return event, publicationOperationID, nil
+	// The immutable receipt is fully determined inside the committed
+	// transaction. Do not perform a caller-context read after this boundary:
+	// cancellation or a transient projection read must not turn durable queue
+	// ownership into an apparent acceptance failure.
+	return AcceptedReviewPublicationCommit{EventID: eventID, PublicationOperationID: publicationOperationID}, nil
 }
 
 // IssueObservationMailEventExists supports idempotent filesystem-mail mirroring

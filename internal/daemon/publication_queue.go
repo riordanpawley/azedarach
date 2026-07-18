@@ -268,18 +268,26 @@ func (d *Daemon) acceptAndEnqueueReviewPublication(ctx context.Context, projectI
 		"review_evidence_event_id": inspection.EvidenceEventID, "review_evidence_seq": inspection.EvidenceSeq,
 		"review_evidence_digest": strings.TrimSpace(inspection.EvidenceDigest),
 	}
-	_, publicationOperationID, err := issueClient.AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx, issueID, issues.IssueObservationEventParams{
+	receipt, err := issueClient.AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx, issueID, issues.IssueObservationEventParams{
 		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(request.Kind), Payload: payload,
 	}, operation, publicationCoalesceKey(operation), admission, inspection.ParentIssueID, request.ActorID)
 	if err != nil {
 		return domain.PublicationOperation{}, err
 	}
-	stored, found, err := store.PublicationOperation(ctx, publicationOperationID)
+	operation.OperationID = receipt.PublicationOperationID
+	read := func(_ string, readCtx context.Context, projectID, operationID string) (domain.PublicationOperation, bool, error) {
+		return store.PublicationOperation(readCtx, operationID)
+	}
+	if d.publicationCommittedQueueRead != nil {
+		read = d.publicationCommittedQueueRead
+	}
+	stored, found, err := read("committed-queue-read", ctx, projectID, receipt.PublicationOperationID)
 	if err != nil || !found {
-		if err == nil {
-			err = fmt.Errorf("atomically enqueued publication operation is unavailable")
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("accepted review publication is durable but queue refresh failed; scheduling retry", "operation_id", receipt.PublicationOperationID, "found", found, "error", err)
 		}
-		return domain.PublicationOperation{}, err
+		d.schedulePublicationRecoveryRetry(d.publicationContinuationContext(), operation)
+		return operation, nil
 	}
 	return d.startAcceptedReviewPublication(ctx, stored)
 }
@@ -342,11 +350,26 @@ func (d *Daemon) startAcceptedReviewPublication(ctx context.Context, stored doma
 	}
 	store, storeErr := d.publicationStoreForProject(stored.ProjectID)
 	if storeErr != nil {
-		return domain.PublicationOperation{}, storeErr
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("accepted review publication submit succeeded but queue store refresh failed; scheduling reconciliation", "operation_id", stored.OperationID, "error", storeErr)
+		}
+		d.schedulePublicationRecoveryRetry(d.publicationContinuationContext(), stored)
+		return stored, nil
 	}
-	fresh, found, err := store.PublicationOperation(ctx, stored.OperationID)
+	read := func(_ string, readCtx context.Context, _, operationID string) (domain.PublicationOperation, bool, error) {
+		return store.PublicationOperation(readCtx, operationID)
+	}
+	if d.publicationCommittedQueueRead != nil {
+		read = d.publicationCommittedQueueRead
+	}
+	fresh, found, err := read("post-submit-refresh", ctx, stored.ProjectID, stored.OperationID)
 	if err == nil && found {
 		stored = fresh
+	} else {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("accepted review publication submit succeeded but queue refresh failed; scheduling reconciliation", "operation_id", stored.OperationID, "found", found, "error", err)
+		}
+		d.schedulePublicationRecoveryRetry(d.publicationContinuationContext(), stored)
 	}
 	return stored, nil
 }

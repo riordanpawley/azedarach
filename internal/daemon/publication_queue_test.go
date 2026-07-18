@@ -26,158 +26,178 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
-func TestReviewAcceptRetainsLeaseWhenInitialPublicationSubmitFailsAndRecoveryConvergesOnce(t *testing.T) {
-	ctx := context.Background()
-	repo := t.TempDir()
-	runDaemonTestGit(t, repo, "init", "-q", "-b", "main")
-	runDaemonTestGit(t, repo, "config", "user.email", "test@example.com")
-	runDaemonTestGit(t, repo, "config", "user.name", "Test User")
-	canonicalRepo, err := appconfig.ResolveProjectRoot(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repo = canonicalRepo
-	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runDaemonTestGit(t, repo, "add", "README.md")
-	runDaemonTestGit(t, repo, "commit", "-q", "-m", "base")
-	if err := os.MkdirAll(filepath.Join(repo, ".azedarach"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(repo, ".azedarach", "config.json"), []byte(`{"gate":{"command":"go test ./consumer/...","environmentFingerprint":"consumer-go"}}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+func TestReviewAcceptRetainsLeaseAcrossCommittedPublicationContinuationFailures(t *testing.T) {
+	for _, failureStage := range []string{"post-commit-cancellation", "initial-submit", "committed-queue-read", "post-submit-refresh"} {
+		t.Run(failureStage, func(t *testing.T) {
+			ctx := context.Background()
+			repo := t.TempDir()
+			runDaemonTestGit(t, repo, "init", "-q", "-b", "main")
+			runDaemonTestGit(t, repo, "config", "user.email", "test@example.com")
+			runDaemonTestGit(t, repo, "config", "user.name", "Test User")
+			canonicalRepo, err := appconfig.ResolveProjectRoot(repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			repo = canonicalRepo
+			if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			runDaemonTestGit(t, repo, "add", "README.md")
+			runDaemonTestGit(t, repo, "commit", "-q", "-m", "base")
+			if err := os.MkdirAll(filepath.Join(repo, ".azedarach"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(repo, ".azedarach", "config.json"), []byte(`{"gate":{"command":"go test ./consumer/...","environmentFingerprint":"consumer-go"}}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
 
-	issueClient := newMigratedIssueClient(t, repo, slog.Default())
-	t.Cleanup(func() { _ = issueClient.CloseDB() })
-	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
-	t.Cleanup(func() { _ = runtime.Close() })
-	projectID := runtime.canonicalProject
-	issueID, err := issueClient.Create(ctx, issues.CreateTaskParams{Title: "publish reviewed patch", Description: "consumer patch", Acceptance: "validated on configured base", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := issueClient.ClaimOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: "worker", OwnerKind: "agent"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := issueClient.Update(ctx, issueID, domain.StatusInReview); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := issueClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t)}); err != nil {
-		t.Fatal(err)
-	}
+			issueClient := newMigratedIssueClient(t, repo, slog.Default())
+			t.Cleanup(func() { _ = issueClient.CloseDB() })
+			runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+			t.Cleanup(func() { _ = runtime.Close() })
+			projectID := runtime.canonicalProject
+			issueID, err := issueClient.Create(ctx, issues.CreateTaskParams{Title: "publish reviewed patch", Description: "consumer patch", Acceptance: "validated on configured base", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := issueClient.ClaimOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: "worker", OwnerKind: "agent"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := issueClient.Update(ctx, issueID, domain.StatusInReview); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := issueClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t)}); err != nil {
+				t.Fatal(err)
+			}
 
-	gitClient := gitservice.NewClient(gitservice.NewExecRunner(repo), slog.Default())
-	d := newOrchestrationReviewTestDaemon(repo, issueClient)
-	d.snapshotAdmissionContext = func(parent context.Context) (context.Context, context.CancelFunc) {
-		return context.WithCancel(parent)
-	}
-	d.cfg.BaseBranch = "main"
-	d.issueClientsByProject = map[string]*issues.Client{projectID: issueClient}
-	d.operationRuntime = runtime
-	d.git = gitClient
-	d.worktreeAdapter = &worktreeServiceAdapter{manager: gitservice.NewWorktreeManager(gitservice.NewExecRunner(repo), repo, slog.Default())}
-	sourceOID := runDaemonTestGitOutput(t, repo, "rev-parse", "HEAD")
-	d.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) { return sourceOID, nil }
-	if resolved := d.resolveRepoDirForProjectExact(projectID); resolved != repo {
-		t.Fatalf("project %q resolved repo %q, want %q", projectID, resolved, repo)
-	}
-	applyEntered := make(chan domain.PublicationOperation, 1)
-	applyRelease := make(chan struct{})
-	merged := make(chan struct{})
-	retryWaiting := make(chan struct{})
-	retryRelease := make(chan struct{})
-	var retryWaitOnce sync.Once
-	var mergedOnce sync.Once
-	var applyCount atomic.Int32
-	d.publicationInitialSubmit = func(context.Context, domain.PublicationOperation) error {
-		return errors.New("injected initial publication submit failure")
-	}
-	d.publicationRecoveryWait = func(ctx context.Context) error {
-		retryWaitOnce.Do(func() { close(retryWaiting) })
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-retryRelease:
-			return nil
-		}
-	}
-	d.publicationIdentityCheck = func(context.Context, domain.PublicationOperation) error { return nil }
-	d.publicationClose = func(_ context.Context, operation domain.PublicationOperation) error {
-		applyCount.Add(1)
-		applyEntered <- operation
-		<-applyRelease
-		return nil
-	}
-	d.publicationStateChanged = func(operation domain.PublicationOperation) {
-		if operation.State == domain.PublicationOperationMerged {
-			mergedOnce.Do(func() { close(merged) })
-		}
-	}
-	integrationReadiness, err := d.taskIntegrationReadiness(ctx, projectID, issueID, repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if integrationReadiness.Ready || !strings.Contains(strings.Join(integrationReadiness.Reasons, "; "), "no aggregate validation") {
-		t.Fatalf("pre-accept integration readiness = %+v, want aggregate gate preserved", integrationReadiness)
-	}
+			gitClient := gitservice.NewClient(gitservice.NewExecRunner(repo), slog.Default())
+			d := newOrchestrationReviewTestDaemon(repo, issueClient)
+			d.snapshotAdmissionContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+				return context.WithCancel(parent)
+			}
+			d.cfg.BaseBranch = "main"
+			d.issueClientsByProject = map[string]*issues.Client{projectID: issueClient}
+			d.operationRuntime = runtime
+			d.git = gitClient
+			d.worktreeAdapter = &worktreeServiceAdapter{manager: gitservice.NewWorktreeManager(gitservice.NewExecRunner(repo), repo, slog.Default())}
+			sourceOID := runDaemonTestGitOutput(t, repo, "rev-parse", "HEAD")
+			d.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) { return sourceOID, nil }
+			if resolved := d.resolveRepoDirForProjectExact(projectID); resolved != repo {
+				t.Fatalf("project %q resolved repo %q, want %q", projectID, resolved, repo)
+			}
+			applyEntered := make(chan domain.PublicationOperation, 1)
+			applyRelease := make(chan struct{})
+			merged := make(chan struct{})
+			retryWaiting := make(chan struct{})
+			retryRelease := make(chan struct{})
+			var retryWaitOnce sync.Once
+			var mergedOnce sync.Once
+			var applyCount atomic.Int32
+			switch failureStage {
+			case "initial-submit":
+				d.publicationInitialSubmit = func(context.Context, domain.PublicationOperation) error {
+					return errors.New("injected initial publication submit failure")
+				}
+			case "committed-queue-read", "post-submit-refresh":
+				d.publicationCommittedQueueRead = func(stage string, readCtx context.Context, _ string, operationID string) (domain.PublicationOperation, bool, error) {
+					if stage == failureStage {
+						return domain.PublicationOperation{}, false, fmt.Errorf("injected %s failure", failureStage)
+					}
+					return runtime.store.PublicationOperation(readCtx, operationID)
+				}
+			}
+			d.publicationRecoveryWait = func(ctx context.Context) error {
+				retryWaitOnce.Do(func() { close(retryWaiting) })
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-retryRelease:
+					return nil
+				}
+			}
+			d.publicationIdentityCheck = func(context.Context, domain.PublicationOperation) error { return nil }
+			d.publicationClose = func(_ context.Context, operation domain.PublicationOperation) error {
+				applyCount.Add(1)
+				applyEntered <- operation
+				<-applyRelease
+				return nil
+			}
+			d.publicationStateChanged = func(operation domain.PublicationOperation) {
+				if operation.State == domain.PublicationOperationMerged {
+					mergedOnce.Do(func() { close(merged) })
+				}
+			}
+			integrationReadiness, err := d.taskIntegrationReadiness(ctx, projectID, issueID, repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if integrationReadiness.Ready || !strings.Contains(strings.Join(integrationReadiness.Reasons, "; "), "no aggregate validation") {
+				t.Fatalf("pre-accept integration readiness = %+v, want aggregate gate preserved", integrationReadiness)
+			}
 
-	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-and-auto-publish", ActorID: "reviewer", IssueIDs: []string{issueID}, RepoDir: repo}
-	result, err := d.orchestrationAuthority().Apply(ctx, projectID, request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(result.Failed) != 0 || len(result.Publications) != 1 {
-		t.Fatalf("review acceptance = %+v, want one automatic publication", result)
-	}
-	<-retryWaiting
-	queued, found, err := runtime.store.PublicationOperation(ctx, result.Publications[0].OperationID)
-	if err != nil || !found || queued.State != domain.PublicationOperationQueued {
-		t.Fatalf("durable publication after submit failure = (%+v,%t,%v)", queued, found, err)
-	}
-	task, err := issueClient.GetWithRuntime(ctx, projectID, issueID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lease := coordinationLease(task, domain.CoordinationLeaseReview)
-	if lease == nil || lease.OwnerID != "reviewer" {
-		t.Fatalf("review lease during publication = %+v, want reviewer-owned durable lease", lease)
-	}
-	replacementEvidence := mustWorkerEvidencePayload(t)
-	replacementEvidence["summary"] = "must remain fenced after committed enqueue"
-	if _, err := issueClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: replacementEvidence}); !errors.Is(err, domain.ErrConflict) {
-		t.Fatalf("evidence mutation after committed enqueue error = %v, want conflict", err)
-	}
-	if err := issueClient.Update(ctx, issueID, domain.StatusInProgress); !errors.Is(err, domain.ErrConflict) {
-		t.Fatalf("epoch mutation after committed enqueue error = %v, want conflict", err)
-	}
-	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
-	if err != nil || len(events) != 1 {
-		t.Fatalf("accepted review events after submit failure = (%+v,%v), want exactly one", events, err)
-	}
-	// A restart recovery scan may race the immediate retry. Operation-manager
-	// dedupe and the durable publication claim must still admit one apply only.
-	d.recoverPublicationOperations(ctx)
-	close(retryRelease)
-	operation := <-applyEntered
-	if operation.SourceRevision != sourceOID || operation.TargetBranch != "main" || operation.ValidationCommand != "go test ./consumer/..." {
-		t.Fatalf("continued publication = %+v", operation)
-	}
-	validation, err := runtime.store.LatestReviewValidation(ctx, projectID, issueID, time.Now().UTC(), defaultValidationLeaseTTL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if validation != nil {
-		t.Fatalf("pre-accept aggregate validation = %+v, want none", validation)
-	}
-	close(applyRelease)
-	<-merged
-	if err := runtime.manager.Drain(ctx); err != nil {
-		t.Fatalf("drain accepted publication operation: %v", err)
-	}
-	if got := applyCount.Load(); got != 1 {
-		t.Fatalf("publication apply count = %d, want exactly one", got)
+			request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-and-auto-publish", ActorID: "reviewer", IssueIDs: []string{issueID}, RepoDir: repo}
+			applyCtx := ctx
+			if failureStage == "post-commit-cancellation" {
+				var cancel context.CancelFunc
+				applyCtx, cancel = context.WithCancel(ctx)
+				applyCtx = issues.WithAcceptedReviewPublicationCommitHookForTest(applyCtx, cancel)
+			}
+			result, err := d.orchestrationAuthority().Apply(applyCtx, projectID, request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Failed) != 0 || len(result.Publications) != 1 {
+				t.Fatalf("review acceptance = %+v, want one automatic publication", result)
+			}
+			<-retryWaiting
+			queued, found, err := runtime.store.PublicationOperation(ctx, result.Publications[0].OperationID)
+			if err != nil || !found || queued.State != domain.PublicationOperationQueued {
+				t.Fatalf("durable publication after submit failure = (%+v,%t,%v)", queued, found, err)
+			}
+			task, err := issueClient.GetWithRuntime(ctx, projectID, issueID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lease := coordinationLease(task, domain.CoordinationLeaseReview)
+			if lease == nil || lease.OwnerID != "reviewer" {
+				t.Fatalf("review lease during publication = %+v, want reviewer-owned durable lease", lease)
+			}
+			replacementEvidence := mustWorkerEvidencePayload(t)
+			replacementEvidence["summary"] = "must remain fenced after committed enqueue"
+			if _, err := issueClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: replacementEvidence}); !errors.Is(err, domain.ErrConflict) {
+				t.Fatalf("evidence mutation after committed enqueue error = %v, want conflict", err)
+			}
+			if err := issueClient.Update(ctx, issueID, domain.StatusInProgress); !errors.Is(err, domain.ErrConflict) {
+				t.Fatalf("epoch mutation after committed enqueue error = %v, want conflict", err)
+			}
+			events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+			if err != nil || len(events) != 1 {
+				t.Fatalf("accepted review events after submit failure = (%+v,%v), want exactly one", events, err)
+			}
+			// A restart recovery scan may race the immediate retry. Operation-manager
+			// dedupe and the durable publication claim must still admit one apply only.
+			d.recoverPublicationOperations(ctx)
+			close(retryRelease)
+			operation := <-applyEntered
+			if operation.SourceRevision != sourceOID || operation.TargetBranch != "main" || operation.ValidationCommand != "go test ./consumer/..." {
+				t.Fatalf("continued publication = %+v", operation)
+			}
+			validation, err := runtime.store.LatestReviewValidation(ctx, projectID, issueID, time.Now().UTC(), defaultValidationLeaseTTL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if validation != nil {
+				t.Fatalf("pre-accept aggregate validation = %+v, want none", validation)
+			}
+			close(applyRelease)
+			<-merged
+			if err := runtime.manager.Drain(ctx); err != nil {
+				t.Fatalf("drain accepted publication operation: %v", err)
+			}
+			if got := applyCount.Load(); got != 1 {
+				t.Fatalf("publication apply count = %d, want exactly one", got)
+			}
+		})
 	}
 }
 
@@ -1345,8 +1365,9 @@ func TestPublicationStoreRoutesRegisteredProjectIntentAtomically(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, canonicalID, err := issueClient.AppendAcceptedReviewAndPublicationWithReviewAdmission(context.Background(), issueID, params, operation, "registered-candidate", admission, "", "reviewer"); err != nil || canonicalID != operation.OperationID {
-		t.Fatalf("registered atomic enqueue = (%q,%v)", canonicalID, err)
+	receipt, err := issueClient.AppendAcceptedReviewAndPublicationWithReviewAdmission(context.Background(), issueID, params, operation, "registered-candidate", admission, "", "reviewer")
+	if err != nil || receipt.PublicationOperationID != operation.OperationID {
+		t.Fatalf("registered atomic enqueue = (%q,%v)", receipt.PublicationOperationID, err)
 	}
 	if _, found, err := registeredStore.PublicationOperation(context.Background(), operation.OperationID); err != nil || !found {
 		t.Fatalf("registered publication = (found=%t, err=%v)", found, err)
