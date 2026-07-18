@@ -191,10 +191,23 @@ type OrchestrationStartFailure struct {
 	OperationState string `json:"operation_state,omitempty"`
 	Message        string `json:"message,omitempty"`
 }
+
+type OrchestrationAdmissionPhase string
+
+const (
+	OrchestrationAdmissionSnapshot              OrchestrationAdmissionPhase = "snapshot_admission"
+	OrchestrationAdmissionProjectionCheckpoint  OrchestrationAdmissionPhase = "projection_source_checkpoint"
+	OrchestrationAdmissionOperationsStore       OrchestrationAdmissionPhase = "operations_store"
+	OrchestrationAdmissionObservationProjection OrchestrationAdmissionPhase = "project_observation_projection"
+)
+
 type OrchestrationPending struct {
-	IssueID        string `json:"issue_id"`
-	OperationID    string `json:"operation_id,omitempty"`
-	OperationState string `json:"operation_state,omitempty"`
+	IssueID        string                      `json:"issue_id"`
+	OperationID    string                      `json:"operation_id,omitempty"`
+	OperationState string                      `json:"operation_state,omitempty"`
+	Phase          OrchestrationAdmissionPhase `json:"phase,omitempty"`
+	Message        string                      `json:"message,omitempty"`
+	Retryable      bool                        `json:"retryable,omitempty"`
 }
 type OrchestrationSession struct {
 	IssueID           string                 `json:"issue_id"`

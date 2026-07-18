@@ -60,6 +60,38 @@ func TestBeginOrchestrationStartIsCrossProcessAtomic(t *testing.T) {
 	}
 }
 
+func TestRequestedOrchestrationStartIsDurableIdempotentAndCompletable(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "issues.db")
+	first := NewClientAtPath(path, slog.Default())
+	issueID, err := first.Create(ctx, CreateTaskParams{Title: "queued start", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requested, err := first.QueueRequestedOrchestrationStart(ctx, "project", issueID, "intent", "actor", "dedupe", "request-digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := NewClientAtPath(path, slog.Default())
+	t.Cleanup(func() { _ = first.CloseDB(); _ = second.CloseDB() })
+	replayed, err := second.QueueRequestedOrchestrationStart(ctx, "project", issueID, "intent", "actor", "dedupe", "request-digest")
+	if err != nil || replayed != requested {
+		t.Fatalf("replayed=%+v requested=%+v err=%v", replayed, requested, err)
+	}
+	if _, err := second.QueueRequestedOrchestrationStart(ctx, "project", issueID, "intent", "other", "dedupe", "request-digest"); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("identity conflict=%v", err)
+	}
+	if _, err := second.QueueRequestedOrchestrationStart(ctx, "project", issueID, "intent", "actor", "dedupe", "changed-request"); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("request digest conflict=%v", err)
+	}
+	if err := second.UpdateRequestedOrchestrationStart(ctx, replayed, "completed", "complete", nil); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := first.PendingRequestedOrchestrationStarts(ctx, "project"); err != nil || len(pending) != 0 {
+		t.Fatalf("pending=%+v err=%v", pending, err)
+	}
+}
+
 func TestCompensateOrchestrationStartDurablyReleasesOnlyAcquiredClaim(t *testing.T) {
 	parallelIssueStoreTest(t)
 	ctx := context.Background()

@@ -37,6 +37,7 @@ type OrchestrateStartOptions struct {
 	JSON                bool
 	BaseBranchOverride  string
 	OverrideBoardHealth bool
+	IntentKey           string
 }
 
 type OrchestrateGroupOptions struct {
@@ -236,6 +237,7 @@ type orchestrateObservationGroup struct {
 
 type orchestrateStartResult struct {
 	RootIssueID string                    `json:"root_issue_id"`
+	IntentKey   string                    `json:"intent_key"`
 	Limit       int                       `json:"limit"`
 	Requested   []string                  `json:"requested"`
 	NestedRoots []string                  `json:"nested_roots,omitempty"`
@@ -547,6 +549,7 @@ func ParseOrchestrateStartArgs(args []string) (OrchestrateStartOptions, error) {
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&opts.RootIssueID, "root", "", "root issue id")
 	fs.IntVar(&opts.Limit, "limit", 3, "maximum runnable issues to start")
+	fs.StringVar(&opts.IntentKey, "intent-key", "", "stable key to reuse when retrying the same start request")
 	fs.BoolVar(&opts.OverrideBoardHealth, "override-board-health", false, "allow project-wide start despite board health refusal")
 	fs.Func("issue", "specific runnable issue id (repeatable)", func(value string) error {
 		trimmed := strings.TrimSpace(value)
@@ -567,6 +570,7 @@ func ParseOrchestrateStartArgs(args []string) (OrchestrateStartOptions, error) {
 		return OrchestrateStartOptions{}, fmt.Errorf("limit must be >= 1")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
+	opts.IntentKey = strings.TrimSpace(opts.IntentKey)
 	opts.IssueIDs = dedupeSortedStrings(opts.IssueIDs)
 	return opts, nil
 }
@@ -1333,17 +1337,20 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	if err != nil {
 		return orchestrateStartResult{}, err
 	}
-	ready, err := deps.DaemonClient.TaskGraphReadinessForActor(ctx, opts.RootIssueID, ownerID)
-	if err != nil {
-		return orchestrateStartResult{}, err
-	}
-	intentKey, err := newCLIOrchestrationStartIntentKey()
-	if err != nil {
-		return orchestrateStartResult{}, err
+	intentKey := strings.TrimSpace(opts.IntentKey)
+	if intentKey == "" {
+		intentKey, err = newCLIOrchestrationStartIntentKey()
+		if err != nil {
+			return orchestrateStartResult{}, err
+		}
 	}
 	applied, err := deps.DaemonClient.ApplyOrchestrationIntent(ctx, protocol.OrchestrationIntentRequest{Scope: scope, Kind: protocol.OrchestrationIntentStart, IntentKey: intentKey, ActorID: ownerID, IssueIDs: opts.IssueIDs, Limit: opts.Limit, RepoDir: deps.RepoDir, BaseBranch: opts.BaseBranchOverride, OverrideBoardHealth: opts.OverrideBoardHealth})
 	if err != nil {
 		return orchestrateStartResult{}, err
+	}
+	ready, readinessErr := deps.DaemonClient.TaskGraphReadinessForActor(ctx, opts.RootIssueID, ownerID)
+	if readinessErr != nil && len(applied.Pending) == 0 {
+		return orchestrateStartResult{}, readinessErr
 	}
 	nestedRootIDs := make([]string, 0, len(ready.NestedRoots))
 	for _, nested := range ready.NestedRoots {
@@ -1352,6 +1359,7 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 
 	result := orchestrateStartResult{
 		RootIssueID: opts.RootIssueID,
+		IntentKey:   intentKey,
 		Limit:       opts.Limit,
 		Requested:   append([]string(nil), applied.Requested...),
 		NestedRoots: nestedRootIDs,
@@ -1359,12 +1367,27 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 		Launched:    make([]orchestrateStartLaunch, 0, len(applied.Launched)),
 		Skipped:     cloneOrchestrateStartDetails(applied.Skipped),
 		Failed:      cloneOrchestrateStartDetails(applied.Failed),
-		Warnings:    orchestrateStartWarnings(ctx, deps, ready, len(applied.Launched)),
 		Advice: orchestrateStartAdvice{
 			WatchCommand:     fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", opts.RootIssueID),
 			StatusCommand:    fmt.Sprintf("az orchestrate status --root %s --json", opts.RootIssueID),
 			WatchInstruction: "Start this watch command in another pane/session and leave it running while workers are active; use active_sessions activity before considering pane capture. Do not add --once for orchestration monitoring.",
 		},
+	}
+	if readinessErr == nil {
+		result.Warnings = orchestrateStartWarnings(ctx, deps, ready, len(applied.Launched))
+	} else {
+		result.Warnings = append(result.Warnings, "durable start intent is queued; readiness projection remains unavailable: "+readinessErr.Error())
+	}
+	for _, pending := range applied.Pending {
+		reason := strings.TrimSpace(string(pending.Phase))
+		if pending.Message != "" {
+			if reason != "" {
+				reason += ": "
+			}
+			reason += pending.Message
+		}
+		retry := orchestrateStartRetryCommand(opts, intentKey)
+		result.Pending = append(result.Pending, orchestrateStartPending{IssueID: pending.IssueID, OperationID: pending.OperationID, OperationState: pending.OperationState, Reason: reason, FollowUpCommands: []string{retry}})
 	}
 
 	for _, daemonLaunch := range applied.Launched {
@@ -1393,6 +1416,24 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	}
 
 	return result, nil
+}
+
+func orchestrateStartRetryCommand(opts OrchestrateStartOptions, intentKey string) string {
+	parts := []string{"az", "orchestrate", "start"}
+	if opts.Project != "" {
+		parts = append(parts, "--project", shellSingleQuote(opts.Project))
+	}
+	if opts.RootIssueID != "" {
+		parts = append(parts, "--root", shellSingleQuote(opts.RootIssueID))
+	}
+	parts = append(parts, "--limit", fmt.Sprintf("%d", opts.Limit), "--intent-key", shellSingleQuote(intentKey))
+	for _, issueID := range opts.IssueIDs {
+		parts = append(parts, "--issue", shellSingleQuote(issueID))
+	}
+	if opts.OverrideBoardHealth {
+		parts = append(parts, "--override-board-health")
+	}
+	return strings.Join(parts, " ")
 }
 
 func cloneOrchestrateStartDetails(in map[string]string) map[string]string {
@@ -1976,6 +2017,7 @@ func formatMillisDuration(ms int64) string {
 
 func printOrchestrateStartResult(result orchestrateStartResult) {
 	fmt.Printf("Root issue: %s\n", result.RootIssueID)
+	fmt.Printf("Intent key: %s\n", result.IntentKey)
 	fmt.Printf("Start limit: %d\n", result.Limit)
 	fmt.Println("Started sessions:")
 	if len(result.Started) == 0 {
