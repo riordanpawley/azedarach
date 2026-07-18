@@ -247,10 +247,17 @@ func TestPublicationRecoversCrashAfterExactApplyBeforeTaskReceipt(t *testing.T) 
 	first.operationRuntime = firstRuntime
 	first.git = gitservice.NewClient(gitservice.NewExecRunner(repo), slog.Default())
 	first.worktreeAdapter = &worktreeServiceAdapter{manager: gitservice.NewWorktreeManager(gitservice.NewExecRunner(repo), repo, slog.Default()), runtimeStateStore: firstState}
+	first.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) { return sourceOID, nil }
 	first.publicationClaimTTL = time.Minute
 	claimNow := time.Now().UTC()
 	first.publicationClaimNow = func() time.Time { return claimNow }
 	crashed := make(chan struct{})
+	failed := make(chan domain.PublicationOperation, 1)
+	first.publicationStateChanged = func(operation domain.PublicationOperation) {
+		if operation.State.Terminal() && operation.State != domain.PublicationOperationMerged {
+			failed <- operation
+		}
+	}
 	first.publicationAppliedBeforeTaskReceipt = func(context.Context, taskCloseIntegrationResult) {
 		close(crashed)
 		goruntime.Goexit()
@@ -260,7 +267,11 @@ func TestPublicationRecoversCrashAfterExactApplyBeforeTaskReceipt(t *testing.T) 
 	if len(accepted.Publications) != 1 || len(accepted.Failed) != 0 {
 		t.Fatalf("acceptance = %+v, want one publication", accepted)
 	}
-	<-crashed
+	select {
+	case <-crashed:
+	case operation := <-failed:
+		t.Fatalf("publication failed before deterministic crash barrier: state=%s kind=%s detail=%s", operation.State, operation.FailureKind, operation.FailureDetail)
+	}
 	requireNoError(t, firstRuntime.manager.Drain(ctx))
 	operations, err := firstRuntime.store.PublicationOperations(ctx, projectID, issueID, false)
 	requireNoError(t, err)
