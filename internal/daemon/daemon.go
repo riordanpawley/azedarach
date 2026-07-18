@@ -196,6 +196,10 @@ type Daemon struct {
 	publicationContinuationCtx           context.Context
 	publicationContinuationCancel        context.CancelFunc
 	publicationContinuationRetrying      map[string]bool
+	publicationContinuationStopping      bool
+	publicationContinuationWG            sync.WaitGroup
+	publicationRecoverySubmit            func(context.Context, domain.PublicationOperation) error
+	publicationRecoveryWait              func(context.Context) error
 	publicationStoresMu                  sync.Mutex
 	publicationStores                    map[string]*operationstore.SQLiteStore
 	noticeService                        *daemonnotices.Service

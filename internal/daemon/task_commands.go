@@ -2923,31 +2923,33 @@ func (d *Daemon) liveTmuxSessionSet(ctx context.Context) (map[string]struct{}, b
 }
 
 type taskCloseIntegrationResult struct {
-	Requested            bool
-	Integrated           bool
-	NoChanges            bool
-	ReceiptRecovered     bool
-	ConfiguredBaseTarget bool
-	TargetID             string
-	SourceBranch         string
-	TargetBranch         string
-	BaseOID              string
-	SourceOID            string
-	TargetOID            string
-	HookDiagnostics      []git.GitHookDiagnostic
-	ValidationAttempts   []domain.IntegrationCandidateValidationAttempt
+	Requested              bool
+	Integrated             bool
+	NoChanges              bool
+	ReceiptRecovered       bool
+	ConfiguredBaseTarget   bool
+	TargetID               string
+	SourceBranch           string
+	TargetBranch           string
+	BaseOID                string
+	SourceOID              string
+	TargetOID              string
+	PublicationOperationID string
+	HookDiagnostics        []git.GitHookDiagnostic
+	ValidationAttempts     []domain.IntegrationCandidateValidationAttempt
 }
 
 type taskCloseIntegrationReceipt struct {
-	ProjectID            string
-	SourceBranch         string
-	TargetBranch         string
-	Integrated           bool
-	ConfiguredBaseTarget bool
-	TargetID             string
-	BaseOID              string
-	SourceOID            string
-	TargetOID            string
+	ProjectID              string
+	SourceBranch           string
+	TargetBranch           string
+	Integrated             bool
+	ConfiguredBaseTarget   bool
+	TargetID               string
+	BaseOID                string
+	SourceOID              string
+	TargetOID              string
+	PublicationOperationID string
 }
 
 const taskCloseSlowGitHookThreshold = 1 * time.Second
@@ -2991,15 +2993,19 @@ func (d *Daemon) persistTaskCloseIntegrationReceipt(ctx context.Context, project
 		return fmt.Errorf("issue store unavailable")
 	}
 	receipt := taskCloseIntegrationReceipt{
-		ProjectID:            protocol.NormalizeProjectID(projectID),
-		SourceBranch:         strings.TrimSpace(integration.SourceBranch),
-		TargetBranch:         strings.TrimSpace(integration.TargetBranch),
-		Integrated:           integration.Integrated,
-		ConfiguredBaseTarget: integration.ConfiguredBaseTarget,
-		TargetID:             strings.TrimSpace(integration.TargetID),
-		BaseOID:              strings.TrimSpace(integration.BaseOID),
-		SourceOID:            strings.TrimSpace(integration.SourceOID),
-		TargetOID:            strings.TrimSpace(integration.TargetOID),
+		ProjectID:              protocol.NormalizeProjectID(projectID),
+		SourceBranch:           strings.TrimSpace(integration.SourceBranch),
+		TargetBranch:           strings.TrimSpace(integration.TargetBranch),
+		Integrated:             integration.Integrated,
+		ConfiguredBaseTarget:   integration.ConfiguredBaseTarget,
+		TargetID:               strings.TrimSpace(integration.TargetID),
+		BaseOID:                strings.TrimSpace(integration.BaseOID),
+		SourceOID:              strings.TrimSpace(integration.SourceOID),
+		TargetOID:              strings.TrimSpace(integration.TargetOID),
+		PublicationOperationID: strings.TrimSpace(integration.PublicationOperationID),
+	}
+	if binding, ok := taskClosePublicationBindingFromContext(ctx); ok {
+		receipt.PublicationOperationID = binding.operationID
 	}
 	if receipt.TargetID == "" || receipt.SourceBranch == "" || receipt.TargetBranch == "" || receipt.BaseOID == "" || receipt.SourceOID == "" || receipt.TargetOID == "" {
 		return fmt.Errorf("integration result is missing exact typed target, base/source/target branch, or OID")
@@ -3010,15 +3016,16 @@ func (d *Daemon) persistTaskCloseIntegrationReceipt(ctx context.Context, project
 		SourceCommand: "integrate-before-close",
 		WorktreePath:  strings.TrimSpace(worktreePath),
 		Payload: map[string]any{
-			"project_id":             receipt.ProjectID,
-			"source_branch":          receipt.SourceBranch,
-			"target_branch":          receipt.TargetBranch,
-			"integrated":             receipt.Integrated,
-			"configured_base_target": receipt.ConfiguredBaseTarget,
-			"target_id":              receipt.TargetID,
-			"base_oid":               receipt.BaseOID,
-			"source_oid":             receipt.SourceOID,
-			"target_oid":             receipt.TargetOID,
+			"project_id":               receipt.ProjectID,
+			"source_branch":            receipt.SourceBranch,
+			"target_branch":            receipt.TargetBranch,
+			"integrated":               receipt.Integrated,
+			"configured_base_target":   receipt.ConfiguredBaseTarget,
+			"target_id":                receipt.TargetID,
+			"base_oid":                 receipt.BaseOID,
+			"source_oid":               receipt.SourceOID,
+			"target_oid":               receipt.TargetOID,
+			"publication_operation_id": receipt.PublicationOperationID,
 		},
 	})
 	if err != nil {
@@ -3067,15 +3074,16 @@ func (d *Daemon) latestTaskCloseIntegrationReceipt(ctx context.Context, projectI
 	targetBranch = strings.TrimSpace(targetBranch)
 	for _, event := range events {
 		receipt := taskCloseIntegrationReceipt{
-			ProjectID:            observationPayloadString(event.Payload, "project_id"),
-			SourceBranch:         observationPayloadString(event.Payload, "source_branch"),
-			TargetBranch:         observationPayloadString(event.Payload, "target_branch"),
-			Integrated:           observationPayloadBool(event.Payload, "integrated"),
-			ConfiguredBaseTarget: observationPayloadBool(event.Payload, "configured_base_target"),
-			TargetID:             observationPayloadString(event.Payload, "target_id"),
-			BaseOID:              observationPayloadString(event.Payload, "base_oid"),
-			SourceOID:            observationPayloadString(event.Payload, "source_oid"),
-			TargetOID:            observationPayloadString(event.Payload, "target_oid"),
+			ProjectID:              observationPayloadString(event.Payload, "project_id"),
+			SourceBranch:           observationPayloadString(event.Payload, "source_branch"),
+			TargetBranch:           observationPayloadString(event.Payload, "target_branch"),
+			Integrated:             observationPayloadBool(event.Payload, "integrated"),
+			ConfiguredBaseTarget:   observationPayloadBool(event.Payload, "configured_base_target"),
+			TargetID:               observationPayloadString(event.Payload, "target_id"),
+			BaseOID:                observationPayloadString(event.Payload, "base_oid"),
+			SourceOID:              observationPayloadString(event.Payload, "source_oid"),
+			TargetOID:              observationPayloadString(event.Payload, "target_oid"),
+			PublicationOperationID: observationPayloadString(event.Payload, "publication_operation_id"),
 		}
 		if protocol.NormalizeProjectID(receipt.ProjectID) != projectID || receipt.SourceBranch != sourceBranch || receipt.TargetBranch != targetBranch {
 			continue
@@ -3113,17 +3121,18 @@ func (d *Daemon) recoverPublishedTaskCloseIntegration(ctx context.Context, proje
 		return taskCloseIntegrationResult{}, false, err
 	}
 	return taskCloseIntegrationResult{
-		Requested:            true,
-		NoChanges:            true,
-		ReceiptRecovered:     true,
-		ConfiguredBaseTarget: true,
-		TargetID:             receipt.TargetID,
-		SourceBranch:         receipt.SourceBranch,
-		TargetBranch:         receipt.TargetBranch,
-		BaseOID:              receipt.BaseOID,
-		SourceOID:            receipt.SourceOID,
-		TargetOID:            receipt.TargetOID,
-		ValidationAttempts:   validationAttempts,
+		Requested:              true,
+		NoChanges:              true,
+		ReceiptRecovered:       true,
+		ConfiguredBaseTarget:   true,
+		TargetID:               receipt.TargetID,
+		SourceBranch:           receipt.SourceBranch,
+		TargetBranch:           receipt.TargetBranch,
+		BaseOID:                receipt.BaseOID,
+		SourceOID:              receipt.SourceOID,
+		TargetOID:              receipt.TargetOID,
+		PublicationOperationID: receipt.PublicationOperationID,
+		ValidationAttempts:     validationAttempts,
 	}, true, nil
 }
 
@@ -3285,17 +3294,18 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 			receipt.BaseOID = receipt.TargetOID
 		}
 		return taskCloseIntegrationResult{
-			Requested:            true,
-			NoChanges:            true,
-			ReceiptRecovered:     receipt.Integrated,
-			ConfiguredBaseTarget: configuredBaseTarget,
-			TargetID:             receipt.TargetID,
-			SourceBranch:         source.Branch,
-			TargetBranch:         targetBranch,
-			BaseOID:              receipt.BaseOID,
-			SourceOID:            receipt.SourceOID,
-			TargetOID:            receipt.TargetOID,
-			ValidationAttempts:   validationAttempts,
+			Requested:              true,
+			NoChanges:              true,
+			ReceiptRecovered:       receipt.Integrated,
+			ConfiguredBaseTarget:   configuredBaseTarget,
+			TargetID:               receipt.TargetID,
+			SourceBranch:           source.Branch,
+			TargetBranch:           targetBranch,
+			BaseOID:                receipt.BaseOID,
+			SourceOID:              receipt.SourceOID,
+			TargetOID:              receipt.TargetOID,
+			PublicationOperationID: receipt.PublicationOperationID,
+			ValidationAttempts:     validationAttempts,
 		}, nil
 	}
 	if sourceOIDErr != nil {

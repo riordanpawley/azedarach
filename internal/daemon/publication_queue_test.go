@@ -132,6 +132,9 @@ func TestReviewAcceptOwnsLeaseAndAutomaticallyContinuesBasePublicationWithoutAgg
 	}
 	close(applyRelease)
 	<-merged
+	if err := runtime.manager.Drain(ctx); err != nil {
+		t.Fatalf("drain accepted publication operation: %v", err)
+	}
 }
 
 func TestReviewAcceptWithoutConfiguredGateFailsWithoutPublicationReadinessEvidence(t *testing.T) {
@@ -375,6 +378,9 @@ func TestPublicationQueueSerializesDistinctTargetOperationsAcrossDaemons(t *test
 	}
 	close(releaseSecond)
 	<-secondMerged
+	if err := firstRuntime.manager.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestPublicationQueueSerializesTargetAndCoalescesManagerWork(t *testing.T) {
@@ -426,6 +432,9 @@ func TestPublicationQueueSerializesTargetAndCoalescesManagerWork(t *testing.T) {
 	seen := map[string]bool{<-merged: true, <-merged: true}
 	if !seen[first.OperationID] || !seen[second.OperationID] {
 		t.Fatalf("merged operations = %v", seen)
+	}
+	if err := runtime.manager.Drain(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -663,6 +672,9 @@ func TestPublicationStaleSuccessorSurvivesAtomicCommitCrashAndReopen(t *testing.
 			if got.BaseRevision != "base-b" || got.OperationID == operation.OperationID {
 				t.Fatalf("recovered atomic successor = %+v", got)
 			}
+			if err := restartedRuntime.manager.Drain(context.Background()); err != nil {
+				t.Fatal(err)
+			}
 		})
 	}
 }
@@ -718,6 +730,92 @@ func TestPublicationTargetContinuationRetriesTransientSubmitWithoutRestart(t *te
 	if got := submitAttempts.Load(); got != 2 {
 		t.Fatalf("continuation submit attempts = %d, want one failure and one daemon retry", got)
 	}
+	if err := runtime.manager.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPublicationRecoveryRetriesTransientSubmitOnceWithoutRestart(t *testing.T) {
+	repo := t.TempDir()
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	t.Cleanup(func() { _ = runtime.Close() })
+	operation := daemonTestPublicationOperation(runtime.canonicalProject, "publication-recovery-retry", "issue", "intent", "source", time.Now().UTC())
+	if _, _, err := runtime.store.EnqueuePublication(context.Background(), operation, publicationCoalesceKey(operation)); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{operationRuntime: runtime, cfg: Config{RepoDir: repo}, publicationClose: func(context.Context, domain.PublicationOperation) error { return nil }}
+	retryWaiting := make(chan struct{})
+	releaseRetry := make(chan struct{})
+	merged := make(chan struct{})
+	var waitOnce sync.Once
+	var mergeOnce sync.Once
+	var attempts atomic.Int32
+	d.publicationRecoverySubmit = func(ctx context.Context, recovered domain.PublicationOperation) error {
+		if attempts.Add(1) <= 2 {
+			return errors.New("injected transient startup submit failure")
+		}
+		return d.submitPublicationOperation(ctx, recovered)
+	}
+	d.publicationRecoveryWait = func(ctx context.Context) error {
+		waitOnce.Do(func() { close(retryWaiting) })
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-releaseRetry:
+			return nil
+		}
+	}
+	d.publicationStateChanged = func(current domain.PublicationOperation) {
+		if current.OperationID == operation.OperationID && current.State == domain.PublicationOperationMerged {
+			mergeOnce.Do(func() { close(merged) })
+		}
+	}
+	d.recoverPublicationOperations(context.Background())
+	<-retryWaiting
+	d.recoverPublicationOperations(context.Background())
+	if got := attempts.Load(); got != 2 {
+		// The second recovery scan may submit through the operation manager, but
+		// the durable claim and manager dedupe still fence execution to one runner.
+		t.Fatalf("recovery submit attempts before retry release = %d, want 2 scans with one fenced retry runner", got)
+	}
+	close(releaseRetry)
+	<-merged
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("recovery submit attempts = %d, want two startup scans and one retry", got)
+	}
+	if err := runtime.manager.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	d.closePublicationStores()
+}
+
+func TestPublicationRecoveryRetryStopsOnShutdown(t *testing.T) {
+	repo := t.TempDir()
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	t.Cleanup(func() { _ = runtime.Close() })
+	operation := daemonTestPublicationOperation(runtime.canonicalProject, "publication-recovery-shutdown", "issue", "intent", "source", time.Now().UTC())
+	if _, _, err := runtime.store.EnqueuePublication(context.Background(), operation, publicationCoalesceKey(operation)); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{operationRuntime: runtime, cfg: Config{RepoDir: repo}}
+	retryWaiting := make(chan struct{})
+	var waitOnce sync.Once
+	var attempts atomic.Int32
+	d.publicationRecoverySubmit = func(context.Context, domain.PublicationOperation) error {
+		attempts.Add(1)
+		return errors.New("injected persistent startup submit failure")
+	}
+	d.publicationRecoveryWait = func(ctx context.Context) error {
+		waitOnce.Do(func() { close(retryWaiting) })
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	d.recoverPublicationOperations(context.Background())
+	<-retryWaiting
+	d.closePublicationStores()
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("recovery submit attempts after shutdown = %d, want initial attempt only", got)
+	}
 }
 
 func TestPublicationQueueRecoveryResubmitsNonterminalIntent(t *testing.T) {
@@ -770,6 +868,9 @@ func TestPublicationQueueRecoveryResubmitsNonterminalIntent(t *testing.T) {
 			recovered, found, err := restarted.store.PublicationOperation(context.Background(), operation.OperationID)
 			if err != nil || !found || recovered.State != domain.PublicationOperationMerged {
 				t.Fatalf("recovered operation = (%+v,%t,%v)", recovered, found, err)
+			}
+			if err := restarted.manager.Drain(context.Background()); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}

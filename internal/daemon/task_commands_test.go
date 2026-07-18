@@ -7366,6 +7366,8 @@ func TestTaskCloseRemovedWorktreeRejectsStaleReceiptAfterSameBranchAncestorRetar
 			ancestryReuseReached.Store(true)
 		}
 		switch {
+		case len(args) >= 5 && args[0] == "-C" && args[1] == currentParentWorktree && args[2] == "merge-base" && args[3] == "--is-ancestor":
+			return "", nil
 		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
 			return fmt.Sprintf("worktree %s\nHEAD parent-b-head\nbranch refs/heads/%s\n\n", currentParentWorktree, sharedBranch), nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == currentParentWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == childBranch+"^{commit}":
@@ -7404,6 +7406,29 @@ func TestTaskCloseRemovedWorktreeRejectsStaleReceiptAfterSameBranchAncestorRetar
 	}
 	if ancestryReuseReached.Load() {
 		t.Fatal("stale receipt reached ancestry reuse before typed target rejection")
+	}
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, childID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close", SourceCommand: "integrate-before-close",
+		Payload: map[string]any{
+			"project_id": projectID, "source_branch": childBranch, "target_branch": sharedBranch,
+			"target_id": parentB, "configured_base_target": false, "integrated": true,
+			"base_oid": "parent-b-before", "source_oid": "child-source", "target_oid": "parent-b-result",
+			"publication_operation_id": "publication-parent-b",
+		},
+	}); err != nil {
+		t.Fatalf("seed current ancestor integration receipt: %v", err)
+	}
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID, IssueID: childID, Path: missingChildWorktree, Branch: childBranch, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("restore removed child projection for receipt retry: %v", err)
+	}
+	recovered, err := d.integrateTaskBeforeClose(ctx, projectID, childID, true, true, "", "")
+	if err != nil {
+		t.Fatalf("integrateTaskBeforeClose() current receipt error = %v", err)
+	}
+	if !recovered.ReceiptRecovered || recovered.PublicationOperationID != "publication-parent-b" {
+		t.Fatalf("recovered integration = %+v, want exact publication operation identity", recovered)
 	}
 }
 

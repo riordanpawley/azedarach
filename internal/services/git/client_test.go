@@ -3,6 +3,7 @@ package git
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,6 +46,20 @@ func (m *rawMockRunner) Run(ctx context.Context, args ...string) (string, error)
 		return m.runFunc(ctx, args...)
 	}
 	return "", nil
+}
+
+type patchDigestRawRunner struct {
+	rawOutput string
+	rawArgs   []string
+}
+
+func (r *patchDigestRawRunner) Run(context.Context, ...string) (string, error) {
+	return "normalized output must not be used", nil
+}
+
+func (r *patchDigestRawRunner) RunRaw(_ context.Context, args ...string) (string, error) {
+	r.rawArgs = append([]string(nil), args...)
+	return r.rawOutput, nil
 }
 
 func clientTestArgsForWorktree(args []string, worktree string, want ...string) bool {
@@ -3837,6 +3852,33 @@ func TestChangedFilesBetweenRefTreesDoesNotUseMergeBase(t *testing.T) {
 	joined := strings.Join(gotArgs, " ")
 	if strings.Contains(joined, "...") || strings.Contains(joined, "merge-base") {
 		t.Fatalf("ChangedFilesBetweenRefTrees() used ancestry comparison: %v", gotArgs)
+	}
+}
+
+func TestPatchDigestHashesRawGitDiffBytes(t *testing.T) {
+	raw := "diff --git a/text.txt b/text.txt\n+line with trailing space \n" +
+		"diff --git a/image.bin b/image.bin\nGIT binary patch\nliteral 3\n\x00\xff\x7f\n"
+	runner := &patchDigestRawRunner{rawOutput: raw}
+	digest, err := NewClient(runner, slog.Default()).PatchDigest(context.Background(), "/worktree", "base", "head")
+	if err != nil {
+		t.Fatalf("PatchDigest() error = %v", err)
+	}
+	want := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(raw)))
+	if digest != want {
+		t.Fatalf("PatchDigest() = %q, want raw-byte digest %q", digest, want)
+	}
+	wantArgs := []string{"-C", "/worktree", "diff", "--binary", "--no-ext-diff", "base", "head", "--"}
+	if !reflect.DeepEqual(runner.rawArgs, wantArgs) {
+		t.Fatalf("PatchDigest() args = %v, want %v", runner.rawArgs, wantArgs)
+	}
+
+	trimmedRunner := &patchDigestRawRunner{rawOutput: strings.TrimSpace(raw)}
+	trimmedDigest, err := NewClient(trimmedRunner, slog.Default()).PatchDigest(context.Background(), "/worktree", "base", "head")
+	if err != nil {
+		t.Fatalf("PatchDigest(trimmed) error = %v", err)
+	}
+	if trimmedDigest == digest {
+		t.Fatal("PatchDigest() ignored trailing whitespace in raw Git output")
 	}
 }
 
