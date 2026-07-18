@@ -141,8 +141,37 @@ type taskCloseRequest struct {
 	AllowActiveSession        bool                      `json:"allow_active_session,omitempty"`
 	CloseOutcome              string                    `json:"closed_outcome,omitempty"`
 	ExpectedSourceOID         string                    `json:"expected_source_oid,omitempty"`
+	ExpectedBaseOID           string                    `json:"expected_base_oid,omitempty"`
 	ExpectedReviewEvidence    *issues.ReviewEvidencePin `json:"expected_review_evidence,omitempty"`
 	PromoteBacklogBeforeClose bool                      `json:"-"`
+}
+
+type taskCloseExpectedBaseStaleError struct {
+	Expected string
+	Actual   string
+}
+
+func (e *taskCloseExpectedBaseStaleError) Error() string {
+	return fmt.Sprintf("configured base changed during authoritative publication: expected=%s actual=%s", e.Expected, e.Actual)
+}
+
+func taskCloseFenceExpectedBase(expected, actual string) error {
+	expected, actual = strings.TrimSpace(expected), strings.TrimSpace(actual)
+	if expected != "" && actual != expected {
+		return &taskCloseExpectedBaseStaleError{Expected: expected, Actual: actual}
+	}
+	return nil
+}
+
+func (d *Daemon) fenceTaskCloseExpectedBase(ctx context.Context, targetWorktree, targetBranch, expectedBaseOID string) error {
+	if strings.TrimSpace(expectedBaseOID) == "" {
+		return nil
+	}
+	currentBaseOID, err := d.git.ResolveCommit(ctx, targetWorktree, targetBranch)
+	if err != nil {
+		return fmt.Errorf("resolve configured base for publication fence: %w", err)
+	}
+	return taskCloseFenceExpectedBase(expectedBaseOID, currentBaseOID)
 }
 
 type taskStatusUpdateOptions struct {
@@ -2217,7 +2246,7 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 		recordPhase("integrate_before_close", phaseStartedAt, false)
 		return result, fmt.Errorf("phase integrate_before_close for issue %s: %w", taskID, integrationBudgetErr)
 	}
-	integration, err := d.integrateTaskBeforeClose(integrationCtx, projectID, taskID, cmd.IntegrateBeforeClose, guard.MissingWorktree, cmd.ExpectedSourceOID)
+	integration, err := d.integrateTaskBeforeClose(integrationCtx, projectID, taskID, cmd.IntegrateBeforeClose, guard.MissingWorktree, cmd.ExpectedSourceOID, cmd.ExpectedBaseOID)
 	cancelIntegration()
 	recordPhase("integrate_before_close", phaseStartedAt, !cmd.IntegrateBeforeClose)
 	recordTaskCloseHookPhases(ctx, &result, d.cfg.Logger, req, projectID, taskID, integration.HookDiagnostics)
@@ -3094,11 +3123,12 @@ func observationPayloadBool(payload map[string]any, key string) bool {
 	return value
 }
 
-func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID string, requested, allowMissingSource bool, expectedSourceOID string) (taskCloseIntegrationResult, error) {
+func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID string, requested, allowMissingSource bool, expectedSourceOID, expectedBaseOID string) (taskCloseIntegrationResult, error) {
 	if !requested {
 		return taskCloseIntegrationResult{}, nil
 	}
 	expectedSourceOID = strings.TrimSpace(expectedSourceOID)
+	expectedBaseOID = strings.TrimSpace(expectedBaseOID)
 	if d.worktreeAdapter == nil {
 		return taskCloseIntegrationResult{}, fmt.Errorf("worktree adapter unavailable")
 	}
@@ -3150,7 +3180,12 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 
 	var integration taskCloseIntegrationResult
 	if daemonCloseIntegrationShouldUseOriginBase(d.workflowModeForProject(projectID), target) {
-		return d.integrateTaskBeforeCloseOriginBase(ctx, projectID, taskID, source, targetWorktree, targetBranch, allowMissingSource, expectedSourceOID)
+		return d.integrateTaskBeforeCloseOriginBase(ctx, projectID, taskID, source, targetWorktree, targetBranch, allowMissingSource, expectedSourceOID, expectedBaseOID)
+	}
+	if expectedBaseOID != "" {
+		if fenceErr := d.fenceTaskCloseExpectedBase(ctx, targetWorktree, targetBranch, expectedBaseOID); fenceErr != nil {
+			return taskCloseIntegrationResult{Requested: true}, fenceErr
+		}
 	}
 	sourceOID, sourceOIDErr := d.git.ResolveCommit(ctx, targetWorktree, source.Branch)
 	if expectedSourceOID != "" && sourceOIDErr == nil && sourceOID != expectedSourceOID {
@@ -3165,6 +3200,9 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		targetOID, targetOIDErr := d.git.ResolveCommit(ctx, targetWorktree, targetBranch)
 		if targetOIDErr != nil {
 			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve target commit before no-op close integration: %w", targetOIDErr)
+		}
+		if fenceErr := taskCloseFenceExpectedBase(expectedBaseOID, targetOID); fenceErr != nil {
+			return taskCloseIntegrationResult{Requested: true}, fenceErr
 		}
 		if configuredBaseTarget {
 			if recovered, found, recoverErr := d.recoverPublishedTaskCloseIntegration(ctx, projectID, taskID, targetWorktree, target.TargetID, source.Branch, targetBranch, sourceOID, targetOID); recoverErr != nil {
@@ -3244,6 +3282,9 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		if targetOIDErr != nil {
 			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve target commit before no-op close integration: %w", targetOIDErr)
 		}
+		if fenceErr := taskCloseFenceExpectedBase(expectedBaseOID, targetOID); fenceErr != nil {
+			return taskCloseIntegrationResult{Requested: true}, fenceErr
+		}
 		return d.taskCloseNoChangesIntegrationResult(ctx, targetWorktree, target.TargetID, source.Branch, targetBranch, sourceOID, targetOID, configuredBaseTarget)
 	}
 	preflight, err := d.git.MergePreflight(ctx, source.Path, targetWorktree, targetBranch, sourceRef)
@@ -3268,7 +3309,10 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 	if baseOIDErr != nil {
 		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve target commit before close integration: %w", baseOIDErr)
 	}
-	merge, err := d.mergeTaskBranchBeforeClose(ctx, projectID, taskID, targetWorktree, targetBranch, sourceRef, configuredBaseTarget)
+	if fenceErr := taskCloseFenceExpectedBase(expectedBaseOID, baseOID); fenceErr != nil {
+		return taskCloseIntegrationResult{Requested: true}, fenceErr
+	}
+	merge, err := d.mergeTaskBranchBeforeClose(ctx, projectID, taskID, targetWorktree, targetBranch, sourceRef, configuredBaseTarget, expectedBaseOID)
 	if err != nil {
 		return taskCloseIntegrationResult{Requested: true}, err
 	}
@@ -3369,7 +3413,7 @@ func daemonCloseIntegrationShouldUseOriginBase(workflowMode string, target taskM
 		strings.TrimSpace(target.WorktreePath) == ""
 }
 
-func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, projectID, taskID string, source git.Worktree, targetWorktree, targetBranch string, allowMissingSource bool, expectedSourceOID string) (taskCloseIntegrationResult, error) {
+func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, projectID, taskID string, source git.Worktree, targetWorktree, targetBranch string, allowMissingSource bool, expectedSourceOID, expectedBaseOID string) (taskCloseIntegrationResult, error) {
 	remoteBaseRef := daemonRemoteTrackingBaseRef(targetBranch)
 	result := taskCloseIntegrationResult{
 		Requested:            true,
@@ -3402,6 +3446,9 @@ func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, project
 			targetOID, err := d.git.ResolveCommit(ctx, targetWorktree, remoteBaseRef)
 			if err != nil {
 				return result, fmt.Errorf("resolve %s during origin-mode close integration retry for %s: %w", remoteBaseRef, source.IssueID, err)
+			}
+			if err := taskCloseFenceExpectedBase(expectedBaseOID, targetOID); err != nil {
+				return result, err
 			}
 			result.NoChanges = true
 			result.BaseOID = targetOID
@@ -3458,6 +3505,9 @@ func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, project
 	targetOID, err := d.git.ResolveCommit(ctx, targetWorktree, remoteBaseRef)
 	if err != nil {
 		return result, fmt.Errorf("resolve %s before origin-mode close integration for %s: %w", remoteBaseRef, source.IssueID, err)
+	}
+	if err := taskCloseFenceExpectedBase(expectedBaseOID, targetOID); err != nil {
+		return result, err
 	}
 	result.SourceOID = sourceOID
 	result.BaseOID = targetOID
@@ -3573,9 +3623,12 @@ func recordTaskCloseHookPhases(ctx context.Context, result *taskCloseResult, log
 	}
 }
 
-func (d *Daemon) mergeTaskBranchBeforeClose(ctx context.Context, projectID, taskID, targetWorktree, targetBranch, sourceBranch string, configuredBaseTarget bool) (*git.MergeResult, error) {
+func (d *Daemon) mergeTaskBranchBeforeClose(ctx context.Context, projectID, taskID, targetWorktree, targetBranch, sourceBranch string, configuredBaseTarget bool, expectedBaseOID string) (*git.MergeResult, error) {
 	var validationAttempts []git.CandidateValidationAttempt
 	for attempt := 1; ; attempt++ {
+		if err := d.fenceTaskCloseExpectedBase(ctx, targetWorktree, targetBranch, expectedBaseOID); err != nil {
+			return nil, err
+		}
 		var result *git.MergeResult
 		var err error
 		if configuredBaseTarget {
@@ -3594,6 +3647,13 @@ func (d *Daemon) mergeTaskBranchBeforeClose(ctx context.Context, projectID, task
 		if result.Success || !git.IsTransactionalMergeStaleTarget(result) {
 			result.ValidationAttempts = validationAttempts
 			return result, nil
+		}
+		if strings.TrimSpace(expectedBaseOID) != "" {
+			actualBaseOID, resolveErr := d.git.ResolveCommit(ctx, targetWorktree, targetBranch)
+			if resolveErr != nil {
+				return nil, fmt.Errorf("resolve configured base after stale transactional apply: %w", resolveErr)
+			}
+			return nil, &taskCloseExpectedBaseStaleError{Expected: strings.TrimSpace(expectedBaseOID), Actual: strings.TrimSpace(actualBaseOID)}
 		}
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("merge %s into %s retry stopped after target HEAD moved during scratch validation: %w", sourceBranch, targetBranch, err)

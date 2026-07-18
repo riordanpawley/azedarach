@@ -189,6 +189,7 @@ type Daemon struct {
 	publicationClaimOwner                string
 	publicationClaimNow                  func() time.Time
 	publicationClaimTTL                  time.Duration
+	publicationValidationWait            func(context.Context, string) error
 	publicationStoresMu                  sync.Mutex
 	publicationStores                    map[string]*operationstore.SQLiteStore
 	noticeService                        *daemonnotices.Service

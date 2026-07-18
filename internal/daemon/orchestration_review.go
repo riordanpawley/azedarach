@@ -429,7 +429,7 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 				result.Publications = append(result.Publications, publication)
 				continue
 			}
-			if _, err := a.releaseAndCloseAcceptedReview(ctx, projectID, request, issueID, integrateBeforeClose, storedPin, &result); err != nil {
+			if _, err := a.releaseAndCloseAcceptedReview(ctx, projectID, request, issueID, integrateBeforeClose, storedPin, "", &result); err != nil {
 				result.Failed[issueID] = err.Error()
 			}
 			continue
@@ -986,7 +986,7 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 	if err := a.recordAcceptedReviewOutcome(ctx, projectID, inspection.IssueID, request, pin); err != nil {
 		return false, err
 	}
-	return a.releaseAndCloseAcceptedReview(ctx, projectID, request, inspection.IssueID, integrateBeforeClose, pin, result)
+	return a.releaseAndCloseAcceptedReview(ctx, projectID, request, inspection.IssueID, integrateBeforeClose, pin, "", result)
 }
 
 // exactReviewCandidateWorktree implements the hybrid project-review invariant:
@@ -1175,7 +1175,7 @@ func reviewPayloadInt64(value any) int64 {
 	}
 }
 
-func (a daemonOrchestrationAuthority) releaseAndCloseAcceptedReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, integrateBeforeClose bool, pin acceptedReviewPin, result *protocol.OrchestrationIntentResult) (bool, error) {
+func (a daemonOrchestrationAuthority) releaseAndCloseAcceptedReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, integrateBeforeClose bool, pin acceptedReviewPin, expectedBaseOID string, result *protocol.OrchestrationIntentResult) (bool, error) {
 	issueClient := a.daemon.issueClientForProject(projectID)
 	if issueClient == nil {
 		return false, fmt.Errorf("issue store unavailable")
@@ -1200,16 +1200,16 @@ func (a daemonOrchestrationAuthority) releaseAndCloseAcceptedReview(ctx context.
 			return true, fmt.Errorf("after review lease release: %w", err)
 		}
 	}
-	return true, a.closeAcceptedReview(ctx, projectID, request, issueID, integrateBeforeClose, pin, result)
+	return true, a.closeAcceptedReview(ctx, projectID, request, issueID, integrateBeforeClose, pin, expectedBaseOID, result)
 }
 
-func (a daemonOrchestrationAuthority) closeAcceptedReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, integrateBeforeClose bool, pin acceptedReviewPin, result *protocol.OrchestrationIntentResult) error {
+func (a daemonOrchestrationAuthority) closeAcceptedReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, integrateBeforeClose bool, pin acceptedReviewPin, expectedBaseOID string, result *protocol.OrchestrationIntentResult) error {
 	var evidencePin *issues.ReviewEvidencePin
 	if strings.TrimSpace(pin.EvidenceDigest) != "" {
 		evidencePin = &issues.ReviewEvidencePin{Source: pin.EvidenceSource, EventID: pin.EvidenceEventID, Seq: pin.EvidenceSeq, Digest: pin.EvidenceDigest}
 	}
 	body, err := json.Marshal(taskCloseRequest{
-		TaskID: issueID, IntegrateBeforeClose: integrateBeforeClose, ExpectedSourceOID: strings.TrimSpace(pin.SourceOID), ExpectedReviewEvidence: evidencePin,
+		TaskID: issueID, IntegrateBeforeClose: integrateBeforeClose, ExpectedSourceOID: strings.TrimSpace(pin.SourceOID), ExpectedBaseOID: strings.TrimSpace(expectedBaseOID), ExpectedReviewEvidence: evidencePin,
 	})
 	if err != nil {
 		return err

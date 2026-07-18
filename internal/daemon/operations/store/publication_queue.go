@@ -63,7 +63,16 @@ func (s *SQLiteStore) ClaimPublicationOperation(ctx context.Context, operationID
 		SET state=CASE WHEN state='queued' THEN 'preparing' ELSE state END,
 			lease_owner=?,claim_token=?,claim_expires_at=?,started_at=COALESCE(started_at,?),updated_at=?
 		WHERE operation_id=? AND state IN ('queued','preparing','validating','passed')
-			AND (claim_token='' OR claim_expires_at IS NULL OR claim_expires_at<=?)`,
+			AND (claim_token='' OR claim_expires_at IS NULL OR claim_expires_at<=?)
+			AND NOT EXISTS (
+				SELECT 1 FROM daemon_publication_operations AS earlier
+				WHERE earlier.project_id=daemon_publication_operations.project_id
+					AND earlier.target_branch=daemon_publication_operations.target_branch
+					AND earlier.operation_id<>daemon_publication_operations.operation_id
+					AND earlier.state IN ('queued','preparing','validating','passed')
+					AND (earlier.created_at<daemon_publication_operations.created_at
+						OR (earlier.created_at=daemon_publication_operations.created_at AND earlier.operation_id<daemon_publication_operations.operation_id))
+			)`,
 		claim.Owner, claim.Token, expires.UnixNano(), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), operationID, now.UnixNano())
 	if err != nil {
 		return domain.PublicationOperation{}, false, fmt.Errorf("claim publication operation: %w", err)

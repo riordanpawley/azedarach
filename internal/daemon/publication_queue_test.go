@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -199,6 +200,85 @@ func TestPublicationQueueRecoveryClaimsOnceAcrossDaemons(t *testing.T) {
 	}
 }
 
+func TestPublicationQueueSerializesDistinctTargetOperationsAcrossDaemons(t *testing.T) {
+	repo := t.TempDir()
+	firstRuntime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	secondRuntime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	t.Cleanup(func() { _ = firstRuntime.Close() })
+	t.Cleanup(func() { _ = secondRuntime.Close() })
+	now := time.Now().UTC()
+	firstOperation := daemonTestPublicationOperation(firstRuntime.canonicalProject, "publication-target-first", "issue-first", "intent-first", "source-first", now)
+	secondOperation := daemonTestPublicationOperation(firstRuntime.canonicalProject, "publication-target-second", "issue-second", "intent-second", "source-second", now.Add(time.Second))
+	for _, operation := range []domain.PublicationOperation{firstOperation, secondOperation} {
+		if _, _, err := firstRuntime.store.EnqueuePublication(context.Background(), operation, publicationCoalesceKey(operation)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	firstApplyEntered := make(chan struct{})
+	secondApplyEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	var validationCount atomic.Int32
+	var applyCount atomic.Int32
+	identityCheck := func(context.Context, domain.PublicationOperation) error {
+		validationCount.Add(1)
+		return nil
+	}
+	closeFn := func(_ context.Context, operation domain.PublicationOperation) error {
+		applyCount.Add(1)
+		switch operation.OperationID {
+		case firstOperation.OperationID:
+			close(firstApplyEntered)
+			<-releaseFirst
+		case secondOperation.OperationID:
+			close(secondApplyEntered)
+			<-releaseSecond
+		}
+		return nil
+	}
+	first := &Daemon{operationRuntime: firstRuntime, cfg: Config{RepoDir: repo}, publicationClose: closeFn, publicationIdentityCheck: identityCheck}
+	second := &Daemon{operationRuntime: secondRuntime, cfg: Config{RepoDir: repo}, publicationClose: closeFn, publicationIdentityCheck: identityCheck}
+	firstResult := make(chan error, 1)
+	go func() {
+		_, runErr := first.runPublicationOperation(context.Background(), firstOperation.ProjectID, firstOperation.OperationID)
+		firstResult <- runErr
+	}()
+	<-firstApplyEntered
+	if _, err := second.runPublicationOperation(context.Background(), secondOperation.ProjectID, secondOperation.OperationID); err != nil {
+		t.Fatal(err)
+	}
+	if got := validationCount.Load(); got != 1 {
+		t.Fatalf("validation count before first terminal = %d, want 1", got)
+	}
+	if got := applyCount.Load(); got != 1 {
+		t.Fatalf("apply count before first terminal = %d, want 1", got)
+	}
+	queued, found, err := secondRuntime.store.PublicationOperation(context.Background(), secondOperation.OperationID)
+	if err != nil || !found || queued.State != domain.PublicationOperationQueued {
+		t.Fatalf("second operation while first active = (%+v,%t,%v), want queued", queued, found, err)
+	}
+	close(releaseFirst)
+	if err := <-firstResult; err != nil {
+		t.Fatal(err)
+	}
+	secondResult := make(chan error, 1)
+	go func() {
+		_, runErr := second.runPublicationOperation(context.Background(), secondOperation.ProjectID, secondOperation.OperationID)
+		secondResult <- runErr
+	}()
+	<-secondApplyEntered
+	if got := validationCount.Load(); got != 2 {
+		t.Fatalf("validation count after first terminal = %d, want 2", got)
+	}
+	if got := applyCount.Load(); got != 2 {
+		t.Fatalf("apply count after first terminal = %d, want 2", got)
+	}
+	close(releaseSecond)
+	if err := <-secondResult; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPublicationQueueSerializesTargetAndCoalescesManagerWork(t *testing.T) {
 	repo := t.TempDir()
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
@@ -343,6 +423,40 @@ func TestPublicationQueueAutomaticallyRecomputesChangedBaseAttempt(t *testing.T)
 	}
 }
 
+func TestPublicationQueueRefreshesExpectedBaseStaleAtAuthoritativeApply(t *testing.T) {
+	repo := t.TempDir()
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	t.Cleanup(func() { _ = runtime.Close() })
+	merged := make(chan domain.PublicationOperation, 1)
+	d := &Daemon{operationRuntime: runtime, cfg: Config{RepoDir: repo}}
+	d.publicationClose = func(_ context.Context, operation domain.PublicationOperation) error {
+		if operation.OperationID == "publication-authoritative-base-fence" {
+			return &taskCloseExpectedBaseStaleError{Expected: operation.BaseRevision, Actual: "base-b"}
+		}
+		return nil
+	}
+	d.publicationStateChanged = func(operation domain.PublicationOperation) {
+		if operation.State == domain.PublicationOperationMerged {
+			merged <- operation
+		}
+	}
+	operation := daemonTestPublicationOperation(runtime.canonicalProject, "publication-authoritative-base-fence", "issue", "intent", "source", time.Now().UTC())
+	if _, _, err := runtime.store.EnqueuePublication(context.Background(), operation, "candidate-authoritative-base-fence"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.runPublicationOperation(context.Background(), operation.ProjectID, operation.OperationID); err == nil {
+		t.Fatal("authoritative expected-base movement returned success")
+	}
+	replacement := <-merged
+	if replacement.OperationID == operation.OperationID || replacement.BaseRevision != "base-b" {
+		t.Fatalf("replacement publication = %+v", replacement)
+	}
+	stale, found, err := runtime.store.PublicationOperation(context.Background(), operation.OperationID)
+	if err != nil || !found || stale.State != domain.PublicationOperationStale || stale.FailureKind != "identity_changed" {
+		t.Fatalf("stale authoritative predecessor = (%+v,%t,%v)", stale, found, err)
+	}
+}
+
 func TestPublicationQueueRecoveryResubmitsNonterminalIntent(t *testing.T) {
 	for _, crashState := range []domain.PublicationOperationState{
 		domain.PublicationOperationQueued,
@@ -422,6 +536,11 @@ func TestPublicationCandidateAdmissionRecordsAndReusesExactEvidence(t *testing.T
 	if err != nil || !found || firstStored.ValidationRequestID == "" {
 		t.Fatalf("first publication validation identity = (%+v,%t,%v)", firstStored, found, err)
 	}
+	if _, err := d.transitionPublicationOperation(context.Background(), firstStored, "claim-first", domain.PublicationOperationMerged, func(update *operationstore.PublicationOperationUpdate) {
+		update.ReleaseClaim = true
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	second := daemonTestPublicationOperation(runtime.canonicalProject, "publication-admit-2", "issue-2", "intent-2", "source", time.Now().UTC().Add(time.Second))
 	if _, _, err := runtime.store.EnqueuePublication(context.Background(), second, "candidate-admit-2"); err != nil {
@@ -438,6 +557,98 @@ func TestPublicationCandidateAdmissionRecordsAndReusesExactEvidence(t *testing.T
 	secondStored, found, err := runtime.store.PublicationOperation(context.Background(), second.OperationID)
 	if err != nil || !found || secondStored.ReusedEvidenceID != firstStored.ValidationRequestID {
 		t.Fatalf("reused publication validation identity = (%+v,%t,%v), want %s", secondStored, found, err, firstStored.ValidationRequestID)
+	}
+}
+
+func TestPublicationValidationClaimGenerationFencesExpiryOverlap(t *testing.T) {
+	repo := t.TempDir()
+	firstRuntime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	secondRuntime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	t.Cleanup(func() { _ = firstRuntime.Close() })
+	t.Cleanup(func() { _ = secondRuntime.Close() })
+
+	now := time.Now().UTC()
+	claimTTL := time.Minute
+	claimNow := now
+	operation := daemonTestPublicationOperation(firstRuntime.canonicalProject, "publication-validation-generation", "issue", "intent", "source", now)
+	stored, _, err := firstRuntime.store.EnqueuePublication(context.Background(), operation, "candidate-validation-generation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimedA, acquired, err := firstRuntime.store.ClaimPublicationOperation(context.Background(), stored.OperationID, operationstore.PublicationOperationClaim{Owner: "daemon-a", Token: "claim-a", Now: claimNow, TTL: claimTTL})
+	if err != nil || !acquired {
+		t.Fatalf("claim generation A = (%+v,%t,%v)", claimedA, acquired, err)
+	}
+
+	first := &Daemon{operationRuntime: firstRuntime, cfg: Config{RepoDir: repo}, publicationClaimNow: func() time.Time { return claimNow }}
+	second := &Daemon{operationRuntime: secondRuntime, cfg: Config{RepoDir: repo}, publicationClaimNow: func() time.Time { return claimNow }}
+	var commandCount atomic.Int32
+	var applyCount atomic.Int32
+	reusedA, finishA, err := first.publicationCandidateAdmission(operation.ProjectID, operation.OperationID, "claim-a", claimTTL)(context.Background(), "candidate-head")
+	if err != nil || reusedA || finishA == nil {
+		t.Fatalf("generation A admission = (reused=%t, finish=%t, err=%v)", reusedA, finishA != nil, err)
+	}
+	commandCount.Add(1) // Generation A is now inside the configured validator.
+
+	claimNow = now.Add(claimTTL)
+	claimedB, acquired, err := secondRuntime.store.ClaimPublicationOperation(context.Background(), stored.OperationID, operationstore.PublicationOperationClaim{Owner: "daemon-b", Token: "claim-b", Now: claimNow, TTL: claimTTL})
+	if err != nil || !acquired {
+		t.Fatalf("reclaim generation B = (%+v,%t,%v)", claimedB, acquired, err)
+	}
+	waiting := make(chan struct{})
+	releaseWait := make(chan struct{})
+	var waitOnce sync.Once
+	second.publicationValidationWait = func(ctx context.Context, _ string) error {
+		waitOnce.Do(func() { close(waiting) })
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-releaseWait:
+			return nil
+		}
+	}
+	type admissionResult struct {
+		reused bool
+		finish func(gitservice.CandidateValidationAttempt) error
+		err    error
+	}
+	admittedB := make(chan admissionResult, 1)
+	go func() {
+		reused, finish, admissionErr := second.publicationCandidateAdmission(operation.ProjectID, operation.OperationID, "claim-b", claimTTL)(context.Background(), "candidate-head")
+		admittedB <- admissionResult{reused: reused, finish: finish, err: admissionErr}
+	}()
+	<-waiting // Deterministic barrier: B observed A's active generation and cannot enter its command.
+	if got := commandCount.Load(); got != 1 {
+		t.Fatalf("validator command count while B awaits A = %d, want 1", got)
+	}
+
+	if err := finishA(domain.IntegrationCandidateValidationAttempt{CandidateHead: "candidate-head", Status: domain.IntegrationCandidateValidationPassed}); err == nil {
+		t.Fatal("generation A was not fenced after publishing terminal validation evidence")
+	}
+	close(releaseWait)
+	resultB := <-admittedB
+	if resultB.err != nil || !resultB.reused || resultB.finish != nil {
+		t.Fatalf("generation B admission after A terminal = (reused=%t, finish=%t, err=%v)", resultB.reused, resultB.finish != nil, resultB.err)
+	}
+	if got := commandCount.Load(); got != 1 {
+		t.Fatalf("validator command count = %d, want 1", got)
+	}
+	if _, err := first.renewPublicationClaim(context.Background(), firstRuntime.store, operation.OperationID, "claim-a", claimTTL); err == nil {
+		applyCount.Add(1)
+		t.Fatal("expired generation A retained publication apply authority")
+	}
+	current, err := second.renewPublicationClaim(context.Background(), secondRuntime.store, operation.OperationID, "claim-b", claimTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyCount.Add(1)
+	if _, err := second.transitionPublicationOperation(context.Background(), current, "claim-b", domain.PublicationOperationMerged, func(update *operationstore.PublicationOperationUpdate) {
+		update.ReleaseClaim = true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := applyCount.Load(); got != 1 {
+		t.Fatalf("publication apply count = %d, want 1", got)
 	}
 }
 

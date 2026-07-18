@@ -6158,7 +6158,7 @@ func TestTaskCloseIntegrationRetriesRepeatedlyWhenTargetHeadMovesAfterScratchVal
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "", "")
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6174,6 +6174,88 @@ func TestTaskCloseIntegrationRetriesRepeatedlyWhenTargetHeadMovesAfterScratchVal
 	joined := strings.Join(commands, "\n")
 	if !strings.Contains(joined, "worktree add --detach ") || !strings.Contains(joined, " target-sha-3") {
 		t.Fatalf("git commands missing retry scratch from moved target:\n%s", joined)
+	}
+}
+
+func TestTaskCloseExpectedBaseFenceRejectsPostCheckMovement(t *testing.T) {
+	repo := t.TempDir()
+	runDaemonTestGit(t, repo, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repo, "config", "user.email", "test@example.com")
+	runDaemonTestGit(t, repo, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDaemonTestGit(t, repo, "add", "tracked.txt")
+	runDaemonTestGit(t, repo, "commit", "-q", "-m", "base")
+	expectedBase := runDaemonTestGitOutput(t, repo, "rev-parse", "main")
+	runDaemonTestGit(t, repo, "checkout", "-q", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDaemonTestGit(t, repo, "commit", "-q", "-am", "feature")
+	runDaemonTestGit(t, repo, "checkout", "-q", "main")
+	baseChecked := make(chan struct{})
+	baseMoved := make(chan struct{})
+	moveErr := make(chan error, 1)
+	go func() {
+		<-baseChecked
+		output, err := exec.Command("git", "-C", repo, "commit", "-q", "--allow-empty", "-m", "move base after publication check").CombinedOutput()
+		if err != nil {
+			err = fmt.Errorf("move base: %w: %s", err, strings.TrimSpace(string(output)))
+		}
+		moveErr <- err
+		close(baseMoved)
+	}()
+	close(baseChecked)
+	<-baseMoved
+	if err := <-moveErr; err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{git: git.NewClient(git.NewExecRunner(repo), slog.Default())}
+	_, err := d.mergeTaskBranchBeforeClose(context.Background(), "project", "issue", repo, "main", "feature", true, expectedBase)
+	var stale *taskCloseExpectedBaseStaleError
+	if !errors.As(err, &stale) || stale.Expected != expectedBase || stale.Actual == expectedBase {
+		t.Fatalf("expected-base fence error = %#v, want typed stale after post-check movement", err)
+	}
+}
+
+func TestTaskCloseExpectedBaseFenceRejectsMovementDuringCandidateValidation(t *testing.T) {
+	repo := t.TempDir()
+	runDaemonTestGit(t, repo, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repo, "config", "user.email", "test@example.com")
+	runDaemonTestGit(t, repo, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDaemonTestGit(t, repo, "add", "tracked.txt")
+	runDaemonTestGit(t, repo, "commit", "-q", "-m", "base")
+	expectedBase := runDaemonTestGitOutput(t, repo, "rev-parse", "main")
+	runDaemonTestGit(t, repo, "checkout", "-q", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDaemonTestGit(t, repo, "commit", "-q", "-am", "feature")
+	runDaemonTestGit(t, repo, "checkout", "-q", "main")
+	d := &Daemon{git: git.NewClient(git.NewExecRunner(repo), slog.Default())}
+	var moveOnce sync.Once
+	ctx := git.WithCandidateValidationCommand(context.Background(), "true")
+	ctx = git.WithCandidateValidationObserver(ctx, func(attempt git.CandidateValidationAttempt) {
+		if attempt.Status == git.CandidateValidationPassed {
+			moveOnce.Do(func() {
+				runDaemonTestGit(t, repo, "commit", "-q", "--allow-empty", "-m", "move base during validation")
+			})
+		}
+	})
+	_, err := d.mergeTaskBranchBeforeClose(ctx, "project", "issue", repo, "main", "feature", true, expectedBase)
+	var stale *taskCloseExpectedBaseStaleError
+	if !errors.As(err, &stale) || stale.Expected != expectedBase || stale.Actual == expectedBase {
+		t.Fatalf("merge error = %#v, want typed stale after during-validation movement", err)
+	}
+	if runDaemonTestGitOutput(t, repo, "rev-parse", "main") != stale.Actual {
+		t.Fatalf("typed stale actual = %s, want current target", stale.Actual)
+	}
+	if count := runDaemonTestGitOutput(t, repo, "rev-list", "--count", "main..feature"); count != "1" {
+		t.Fatalf("feature commits remaining after fenced apply = %s, want 1", count)
 	}
 }
 
@@ -6304,7 +6386,7 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "", "")
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6415,7 +6497,7 @@ func TestTaskCloseIntegrationOriginBaseSkipsLocalMergeWhenRemoteTreeMatches(t *t
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "", "")
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6535,7 +6617,7 @@ func TestTaskCloseIntegrationOriginBaseAllowsRemoteAheadWhenSourceContained(t *t
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "", "")
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6603,7 +6685,7 @@ func TestTaskCloseIntegrationOriginBaseRetryUsesExactReceiptAfterSourceRemoval(t
 	}
 	result, err := d.integrateTaskBeforeCloseOriginBase(ctx, projectID, taskID, git.Worktree{
 		IssueID: taskID, Path: filepath.Join(repoDir, "removed-worktree"), Branch: sourceBranch,
-	}, repoDir, "preview", true, "")
+	}, repoDir, "preview", true, "", "")
 	if err != nil {
 		t.Fatalf("origin retry exact receipt error: %v", err)
 	}
@@ -6709,7 +6791,7 @@ func TestTaskCloseIntegrationOriginBaseRefusesLocalMergeWhenRemoteDiffRemains(t 
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "", "")
 	if err == nil {
 		t.Fatalf("integrateTaskBeforeClose error = nil, result = %+v; want origin-mode refusal", result)
 	}
@@ -7310,7 +7392,7 @@ func TestTaskCloseRemovedWorktreeRejectsStaleReceiptAfterSameBranchAncestorRetar
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, childID, true, true, "")
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, childID, true, true, "", "")
 	if err == nil || !strings.Contains(err.Error(), "target identity changed: recorded="+parentA+" current="+parentB) {
 		t.Fatalf("integrateTaskBeforeClose() = (%+v, %v), want stale same-branch target identity rejection", result, err)
 	}
