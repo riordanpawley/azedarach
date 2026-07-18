@@ -167,11 +167,11 @@ func printValidationValue(value any, asJSON bool) error {
 	}
 	switch value := value.(type) {
 	case protocol.ValidationRequestResponse:
-		fmt.Printf("%s %s %s scope=%s purpose=%s execution=%s source=%s override=%s ticket=%s\n", value.Request.RequestID, value.Request.State, value.Request.Profile, value.Request.Scope, value.Request.Purpose, value.Request.Execution, value.Request.AuthoritativeRequestID, value.Request.Override, value.Request.IssueID)
+		fmt.Printf("%s %s %s priority=%s order=%s scope=%s purpose=%s execution=%s source=%s override=%s ticket=%s\n", value.Request.RequestID, value.Request.State, value.Request.Profile, value.Request.IssuePriority.String(), value.Request.OrderingReason, value.Request.Scope, value.Request.Purpose, value.Request.Execution, value.Request.AuthoritativeRequestID, value.Request.Override, value.Request.IssueID)
 	case domain.ValidationSnapshot:
 		fmt.Printf("active=%d queued=%d revision=%d\n", len(value.Active), len(value.Queued), value.Revision)
 		for _, request := range append(append(append([]domain.ValidationRequest{}, value.Active...), value.Queued...), value.Recent...) {
-			fmt.Printf("%s %s class=%s scope=%s purpose=%s execution=%s source=%s override=%s ticket=%s revision=%s\n", request.RequestID, request.State, request.Class, request.Scope, request.Purpose, request.Execution, request.AuthoritativeRequestID, request.Override, request.IssueID, request.SourceRevision)
+			fmt.Printf("%s %s class=%s priority=%s queue_position=%d order=%s bypasses=%d scope=%s purpose=%s execution=%s source=%s override=%s ticket=%s revision=%s\n", request.RequestID, request.State, request.Class, request.IssuePriority.String(), request.QueuePosition, request.OrderingReason, request.PriorityBypassCount, request.Scope, request.Purpose, request.Execution, request.AuthoritativeRequestID, request.Override, request.IssueID, request.SourceRevision)
 		}
 	default:
 		return fmt.Errorf("unsupported validation output %T", value)

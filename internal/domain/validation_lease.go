@@ -3,6 +3,7 @@ package domain
 import (
 	"crypto/sha256"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -53,6 +54,7 @@ func (c ValidationClass) Valid() bool {
 }
 
 type ValidationRequestState string
+type ValidationOrderingReason string
 
 const (
 	ValidationRequestQueued    ValidationRequestState = "queued"
@@ -63,35 +65,50 @@ const (
 	ValidationRequestFailed    ValidationRequestState = "failed"
 )
 
+const (
+	ValidationOrderingPriorityFIFO    ValidationOrderingReason = "priority_fifo"
+	ValidationOrderingBoundedFairness ValidationOrderingReason = "bounded_fairness"
+	ValidationOrderingPublication     ValidationOrderingReason = "publication_immediate"
+	ValidationOrderingSafe            ValidationOrderingReason = "safe_parallel"
+	ValidationOrderingAggregate       ValidationOrderingReason = "aggregate_exclusive"
+	ValidationOrderingShared          ValidationOrderingReason = "shared_capacity"
+
+	ValidationPriorityBypassLimit = 1
+)
+
 type ValidationRequest struct {
-	Sequence               int64                  `json:"sequence"`
-	RequestID              string                 `json:"request_id"`
-	ProjectID              string                 `json:"project_id"`
-	IssueID                string                 `json:"issue_id"`
-	Class                  ValidationClass        `json:"class"`
-	Scope                  ValidationScope        `json:"scope"`
-	Purpose                ValidationPurpose      `json:"purpose"`
-	Execution              ValidationExecution    `json:"execution"`
-	AuthoritativeRequestID string                 `json:"authoritative_request_id,omitempty"`
-	CompatibilityKey       string                 `json:"compatibility_key"`
-	IsolationMode          string                 `json:"isolation_mode"`
-	EnvironmentFingerprint string                 `json:"environment_fingerprint"`
-	Override               ValidationOverride     `json:"override"`
-	OverrideActor          string                 `json:"override_actor,omitempty"`
-	OverrideReason         string                 `json:"override_reason,omitempty"`
-	Profile                string                 `json:"profile"`
-	Command                string                 `json:"command"`
-	SourceRevision         string                 `json:"source_revision"`
-	ReviewerID             string                 `json:"reviewer_id,omitempty"`
-	ReviewEpochEventID     int64                  `json:"review_epoch_event_id,omitempty"`
-	State                  ValidationRequestState `json:"state"`
-	QueuedAt               time.Time              `json:"queued_at"`
-	StartedAt              *time.Time             `json:"started_at,omitempty"`
-	HeartbeatAt            *time.Time             `json:"heartbeat_at,omitempty"`
-	ExpiresAt              *time.Time             `json:"expires_at,omitempty"`
-	FinishedAt             *time.Time             `json:"finished_at,omitempty"`
-	Outcome                string                 `json:"outcome,omitempty"`
-	Evidence               ValidationEvidence     `json:"evidence"`
+	Sequence               int64                    `json:"sequence"`
+	RequestID              string                   `json:"request_id"`
+	ProjectID              string                   `json:"project_id"`
+	IssueID                string                   `json:"issue_id"`
+	IssuePriority          Priority                 `json:"issue_priority"`
+	PriorityBypassCount    int                      `json:"priority_bypass_count"`
+	Class                  ValidationClass          `json:"class"`
+	Scope                  ValidationScope          `json:"scope"`
+	Purpose                ValidationPurpose        `json:"purpose"`
+	Execution              ValidationExecution      `json:"execution"`
+	AuthoritativeRequestID string                   `json:"authoritative_request_id,omitempty"`
+	CompatibilityKey       string                   `json:"compatibility_key"`
+	IsolationMode          string                   `json:"isolation_mode"`
+	EnvironmentFingerprint string                   `json:"environment_fingerprint"`
+	Override               ValidationOverride       `json:"override"`
+	OverrideActor          string                   `json:"override_actor,omitempty"`
+	OverrideReason         string                   `json:"override_reason,omitempty"`
+	Profile                string                   `json:"profile"`
+	Command                string                   `json:"command"`
+	SourceRevision         string                   `json:"source_revision"`
+	ReviewerID             string                   `json:"reviewer_id,omitempty"`
+	ReviewEpochEventID     int64                    `json:"review_epoch_event_id,omitempty"`
+	State                  ValidationRequestState   `json:"state"`
+	QueuedAt               time.Time                `json:"queued_at"`
+	StartedAt              *time.Time               `json:"started_at,omitempty"`
+	HeartbeatAt            *time.Time               `json:"heartbeat_at,omitempty"`
+	ExpiresAt              *time.Time               `json:"expires_at,omitempty"`
+	FinishedAt             *time.Time               `json:"finished_at,omitempty"`
+	Outcome                string                   `json:"outcome,omitempty"`
+	Evidence               ValidationEvidence       `json:"evidence"`
+	QueuePosition          int                      `json:"queue_position,omitempty"`
+	OrderingReason         ValidationOrderingReason `json:"ordering_reason,omitempty"`
 }
 
 type ValidationEvidence struct {
@@ -157,6 +174,8 @@ type ValidationAcquire struct {
 	LeaseToken             string
 	ProjectID              string
 	IssueID                string
+	IssuePriority          Priority
+	IssuePriorityResolved  bool
 	Class                  ValidationClass
 	Scope                  ValidationScope
 	Purpose                ValidationPurpose
@@ -179,6 +198,9 @@ func (a ValidationAcquire) Validate() error {
 	}
 	if !a.Class.Valid() {
 		return fmt.Errorf("unsupported validation class %q", a.Class)
+	}
+	if a.IssuePriority < P0 || a.IssuePriority > P4 {
+		return fmt.Errorf("validation request requires issue priority P0 through P4")
 	}
 	if !a.Scope.Valid() || !a.Purpose.Valid() {
 		return fmt.Errorf("validation request requires supported scope and purpose")
@@ -228,6 +250,33 @@ func (a ValidationAcquire) Validate() error {
 		return fmt.Errorf("validation request TTL must be positive")
 	}
 	return nil
+}
+
+// OrderValidationQueue returns the effective priority-aware admission order.
+// A request that has already been overtaken by the configured bound is chosen
+// first by durable sequence; otherwise lower numeric priority wins with FIFO
+// preserved inside each priority.
+func OrderValidationQueue(requests []ValidationRequest) []ValidationRequest {
+	ordered := append([]ValidationRequest(nil), requests...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		leftProtected := ordered[i].PriorityBypassCount >= ValidationPriorityBypassLimit
+		rightProtected := ordered[j].PriorityBypassCount >= ValidationPriorityBypassLimit
+		if leftProtected != rightProtected {
+			return leftProtected
+		}
+		if leftProtected || ordered[i].IssuePriority == ordered[j].IssuePriority {
+			return ordered[i].Sequence < ordered[j].Sequence
+		}
+		return ordered[i].IssuePriority < ordered[j].IssuePriority
+	})
+	for i := range ordered {
+		ordered[i].QueuePosition = i + 1
+		ordered[i].OrderingReason = ValidationOrderingPriorityFIFO
+		if ordered[i].PriorityBypassCount >= ValidationPriorityBypassLimit {
+			ordered[i].OrderingReason = ValidationOrderingBoundedFairness
+		}
+	}
+	return ordered
 }
 
 func (a ValidationAcquire) CompatibilityKey() string {

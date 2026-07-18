@@ -101,6 +101,27 @@ func TestValidationAcquireBindsReviewAssignmentToDurableLease(t *testing.T) {
 	}
 }
 
+func TestValidationAcquireCapturesDaemonAuthoritativeIssuePriority(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Urgent focused retry", Type: domain.TypeBug, Priority: domain.P0, Status: domain.StatusInProgress})
+	require.NoError(t, err)
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = runtime.Close() })
+	d := &Daemon{operationRuntime: runtime, revision: map[string]uint64{"project": 1}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+
+	body, err := json.Marshal(protocol.ValidationAcquireRequest{RequestID: "urgent", LeaseToken: "secret", IssueID: issueID, Class: domain.ValidationClassShared, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeCapacity, IsolationMode: "worktree", EnvironmentFingerprint: "toolchain-a", Override: domain.ValidationOverrideNone, Profile: "focused", Command: "go test ./internal/daemon", SourceRevision: "candidate-a", TTLSeconds: 30})
+	require.NoError(t, err)
+	resp, err := d.handleValidationCommand(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "rpc-urgent", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandValidationAcquire, Meta: protocol.Metadata{ProjectID: "project"}, Body: body})
+	require.NoError(t, err)
+	require.True(t, resp.OK, "response=%+v", resp)
+	var result protocol.ValidationRequestResponse
+	require.NoError(t, json.Unmarshal(resp.Body, &result))
+	assert.Equal(t, domain.P0, result.Request.IssuePriority)
+}
+
 func TestValidationAcquireTicketScopeFailsClosedForMissingTicket(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
