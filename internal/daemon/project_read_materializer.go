@@ -1177,7 +1177,12 @@ func (d *Daemon) refreshProjectReadRuntime(ctx context.Context, projectID string
 	if suppressed, _ := ctx.Value(suppressSynchronousProjectReadRuntimeRefreshKey{}).(bool); suppressed {
 		return
 	}
-	if err := d.refreshProjectReadRuntimeForIssues(ctx, projectID, issueIDs); err != nil && d.cfg.Logger != nil {
+	projectID = d.canonicalProjectID(projectID)
+	materializer := d.activeProjectReadMaterializer(projectID)
+	if materializer == nil {
+		return
+	}
+	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, projectID, materializer, issueIDs); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Warn("refresh project read runtime materialization", "project_id", d.canonicalProjectID(projectID), "issue_ids", uniqueStrings(issueIDs), "error", err)
 	}
 }
@@ -1186,10 +1191,22 @@ func (d *Daemon) refreshProjectReadRuntimeForIssues(ctx context.Context, project
 	projectID = d.canonicalProjectID(projectID)
 	d.materializersMu.RLock()
 	materializer := d.materializers[projectID]
+	started := d.materializersStarted
 	d.materializersMu.RUnlock()
 	if materializer == nil {
-		return nil
+		if !started {
+			return nil
+		}
+		var err error
+		materializer, err = d.ensureProjectReadMaterializer(ctx, projectID, nil)
+		if err != nil {
+			return newProjectReadUnavailableError("ensure authoritative project read materialization for %s: %w", projectID, err)
+		}
 	}
+	return d.refreshActiveProjectReadRuntimeForIssues(ctx, projectID, materializer, issueIDs)
+}
+
+func (d *Daemon) refreshActiveProjectReadRuntimeForIssues(ctx context.Context, projectID string, materializer *projectReadMaterializer, issueIDs []string) error {
 	issueIDs = uniqueStrings(issueIDs)
 	healthEpoch := materializer.healthResultEpoch()
 	if err := materializer.refreshRuntime(ctx, issueIDs); err != nil {

@@ -450,6 +450,34 @@ func TestProjectReadMaterializerRuntimeHydrationFailureReturnsTicketData(t *test
 	assertProjectReadSpans(t, recorder, "daemon.project_read.runtime_hydration", "daemon.project_read.degraded_fallback")
 }
 
+func TestBackgroundProjectReadRuntimeRefreshDoesNotEnsureMaterializer(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestIssueClient(t)
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "background refresh remains best effort", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hydrateCalls atomic.Int32
+	d := &Daemon{
+		issues:               client,
+		materializers:        map[string]*projectReadMaterializer{},
+		materializersStarted: true,
+		projectReadRuntimeHydrate: func(_ context.Context, _ string, tasks []domain.Task) ([]domain.Task, error) {
+			hydrateCalls.Add(1)
+			return tasks, nil
+		},
+	}
+
+	d.refreshProjectReadRuntime(ctx, protocol.DefaultProjectID, issueID)
+
+	if got := hydrateCalls.Load(); got != 0 {
+		t.Fatalf("background hydration calls = %d, want no on-demand materializer ensure", got)
+	}
+	if materializer := d.activeProjectReadMaterializer(protocol.DefaultProjectID); materializer != nil {
+		t.Fatal("background refresh installed a project read materializer")
+	}
+}
+
 func TestProjectReadMaterializerWorktreeFailureDoesNotAbortBootstrap(t *testing.T) {
 	recorder := newProjectReadTraceRecorder(t)
 	ctx := context.Background()

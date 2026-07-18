@@ -4609,7 +4609,6 @@ func TestCommittedSessionStopFailsUnavailableWhenTaskRuntimeRefreshFails(t *test
 	}
 	tmuxRunner := newTestTmuxRunner(sessionID)
 	close(tmuxRunner.killRelease)
-	var failHydration atomic.Bool
 	d := &Daemon{
 		cfg:                    Config{RepoDir: repoDir, Logger: logger},
 		tmux:                   tmux.NewClient(tmuxRunner, logger),
@@ -4621,18 +4620,11 @@ func TestCommittedSessionStopFailsUnavailableWhenTaskRuntimeRefreshFails(t *test
 		materializers:          map[string]*projectReadMaterializer{},
 		materializersStarted:   true,
 		projectReadRuntimeHydrate: func(_ context.Context, _ string, tasks []domain.Task) ([]domain.Task, error) {
-			if failHydration.Load() {
-				return nil, errors.New("injected runtime refresh failure")
-			}
-			return tasks, nil
+			return nil, errors.New("injected runtime refresh failure")
 		},
 		revision: map[string]uint64{projectID: 1},
 		hub:      publish.NewHub(16, 8, logger),
 	}
-	if _, err := d.ensureProjectReadMaterializer(ctx, projectID, issuesClient); err != nil {
-		t.Fatalf("bootstrap production materializer: %v", err)
-	}
-	failHydration.Store(true)
 	body, err := json.Marshal(map[string]string{"project_id": projectID, "session_id": issueID})
 	if err != nil {
 		t.Fatal(err)
