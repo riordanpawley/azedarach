@@ -304,6 +304,7 @@ func TestRealProcessProfileCandidateGateCancellationDrainsTimeoutDescendants(t *
 	if err := os.WriteFile(gatePath, wrapper, 0o755); err != nil {
 		t.Fatalf("write candidate gate wrapper: %v", err)
 	}
+	writeMergeGateFixtureSupport(t, scriptsDir)
 	childReady := newTestProcessBarrier(t)
 	childReaped := newTestProcessReapBarrier(t)
 	testBinary, err := os.Executable()
