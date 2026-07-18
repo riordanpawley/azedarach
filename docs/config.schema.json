@@ -31,6 +31,15 @@
           "type": "string",
           "description": "Project-owned toolchain/environment identity used to decide whether exact candidate gate evidence remains reusable. Change it whenever the gate's effective toolchain changes.",
           "default": ""
+        },
+        "failureArtifactPaths": {
+          "type": "array",
+          "description": "Project-relative directories to preserve from a failed transactional integration candidate. Empty or omitted disables artifact preservation; Azedarach never infers consumer layouts.",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "default": []
         }
       },
       "default": {}

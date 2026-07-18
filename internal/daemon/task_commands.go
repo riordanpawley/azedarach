@@ -3696,6 +3696,7 @@ func recordTaskCloseHookPhases(ctx context.Context, result *taskCloseResult, log
 }
 
 func (d *Daemon) mergeTaskBranchBeforeClose(ctx context.Context, projectID, taskID, targetWorktree, targetBranch, sourceBranch string, configuredBaseTarget bool, expectedBaseOID string) (*git.MergeResult, error) {
+	ctx = git.WithIntegrationFailureArtifactPaths(ctx, d.runtimeConfigForProject(projectID).GateFailureArtifactPaths)
 	var validationAttempts []git.CandidateValidationAttempt
 	for attempt := 1; ; attempt++ {
 		if err := d.fenceTaskCloseExpectedBase(ctx, targetWorktree, targetBranch, expectedBaseOID); err != nil {

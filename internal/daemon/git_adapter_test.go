@@ -170,9 +170,14 @@ func TestGitServiceAdapterMergeForcesStatusUpdatePublish(t *testing.T) {
 	}
 
 	updates := 0
+	artifactCapabilityProject := ""
 	adapter := &gitServiceAdapter{
 		client:            git.NewClient(runner, slog.Default()),
 		runtimeStateStore: store,
+		failureArtifactPathsForProject: func(gotProjectID string) []string {
+			artifactCapabilityProject = gotProjectID
+			return []string{"build/test-results"}
+		},
 		onStatusUpdate: func(_ context.Context, gotProjectID, gotIssueID, gotWorktree string, status *git.GitStatus) {
 			updates++
 			if gotProjectID != projectID {
@@ -199,6 +204,9 @@ func TestGitServiceAdapterMergeForcesStatusUpdatePublish(t *testing.T) {
 	}
 	if updates != 1 {
 		t.Fatalf("status update publishes = %d, want 1", updates)
+	}
+	if artifactCapabilityProject != projectID {
+		t.Fatalf("failure artifact capability project = %q, want %q", artifactCapabilityProject, projectID)
 	}
 }
 

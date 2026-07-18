@@ -42,15 +42,17 @@ const (
 
 // Client provides high-level git operations.
 type Client struct {
-	runner          CommandRunner
-	logger          *slog.Logger
-	worktreeLocksMu sync.Mutex
-	worktreeLocks   map[string]*worktreeLock
-	diffStatMu      sync.Mutex
-	diffStatBackoff map[string]diffStatBackoffState
-	now             func() time.Time
-	removeJournal   func(string) error
-	syncJournalDir  func(string) error
+	runner                 CommandRunner
+	logger                 *slog.Logger
+	worktreeLocksMu        sync.Mutex
+	worktreeLocks          map[string]*worktreeLock
+	diffStatMu             sync.Mutex
+	diffStatBackoff        map[string]diffStatBackoffState
+	now                    func() time.Time
+	removeJournal          func(string) error
+	syncJournalDir         func(string) error
+	artifactFailureTempDir string
+	artifactCopyChunk      func(string, int)
 }
 
 type diffStatBackoffState struct {
@@ -472,7 +474,7 @@ func (c *Client) mergeCleanlyWithEnv(ctx context.Context, worktree, branch strin
 
 	result, err := c.mergeWithEnv(ctx, worktree, branch, extraEnv, forceNoFF)
 	if err != nil {
-		preservedArtifacts := c.preserveIntegrationFailureArtifacts(worktree, nil, err)
+		preservedArtifacts := c.preserveIntegrationFailureArtifacts(ctx, worktree, nil, err)
 		cleanedResult, cleanErr := c.cleanFailedMergeSideEffects(ctx, worktree, branch, targetWasClean, preStatusErr, err)
 		if preservedArtifacts != "" {
 			if cleanedResult != nil {
@@ -488,7 +490,7 @@ func (c *Client) mergeCleanlyWithEnv(ctx context.Context, worktree, branch strin
 		return result, err
 	}
 	if !result.Success {
-		preservedArtifacts := c.preserveIntegrationFailureArtifacts(worktree, result, nil)
+		preservedArtifacts := c.preserveIntegrationFailureArtifacts(ctx, worktree, result, nil)
 		cleanedResult, cleanErr := c.cleanUnsuccessfulMergeSideEffects(ctx, worktree, branch, targetWasClean, preStatusErr, result)
 		if preservedArtifacts != "" && cleanedResult != nil {
 			cleanedResult.Message = appendMergeResultDetail(cleanedResult.Message, "preserved integration failure artifacts at "+preservedArtifacts)

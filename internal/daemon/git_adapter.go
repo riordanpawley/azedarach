@@ -31,22 +31,23 @@ var (
 const runtimeSignalProjectionTTL = 15 * time.Second
 
 type gitServiceAdapter struct {
-	client                      *git.Client
-	runtimeStateStore           *daemonstate.RuntimeStateStore
-	runtimeStateStoreForProject func(string) *daemonstate.RuntimeStateStore
-	runtimeProjectionWriter     runtimeProjectionWriter
-	statusRefreshQueue          *reconcileQueue[*git.GitStatus]
-	statusRefreshThrottle       *reconcileThrottle
-	logger                      *slog.Logger
-	pollInterval                time.Duration
-	onStatusUpdate              func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus)
-	baseBranch                  string
-	workflowMode                string
-	baseBranchForProject        func(string) string
-	workflowModeForProject      func(string) string
-	baseBranchForWorktree       func(context.Context, string, string) string
-	heavySessionStartActive     func(context.Context, string) bool
+	client                         *git.Client
+	runtimeStateStore              *daemonstate.RuntimeStateStore
+	runtimeStateStoreForProject    func(string) *daemonstate.RuntimeStateStore
+	runtimeProjectionWriter        runtimeProjectionWriter
+	statusRefreshQueue             *reconcileQueue[*git.GitStatus]
+	statusRefreshThrottle          *reconcileThrottle
+	logger                         *slog.Logger
+	pollInterval                   time.Duration
+	onStatusUpdate                 func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus)
+	baseBranch                     string
+	workflowMode                   string
+	baseBranchForProject           func(string) string
+	workflowModeForProject         func(string) string
+	baseBranchForWorktree          func(context.Context, string, string) string
+	heavySessionStartActive        func(context.Context, string) bool
 	mergeTyped                  func(context.Context, string, daemonhandlers.GitMergeRequest) (*daemonhandlers.GitMergeResult, error)
+	failureArtifactPathsForProject func(string) []string
 
 	refreshMu      sync.Mutex
 	refreshRunning map[string]bool
@@ -134,6 +135,9 @@ func (a *gitServiceAdapter) Push(ctx context.Context, projectID, worktree, remot
 }
 
 func (a *gitServiceAdapter) Merge(ctx context.Context, projectID, worktree, branch string) (*git.MergeResult, error) {
+	if a.failureArtifactPathsForProject != nil {
+		ctx = git.WithIntegrationFailureArtifactPaths(ctx, a.failureArtifactPathsForProject(projectID))
+	}
 	ctx = a.withCandidateValidationProgress(ctx, projectID, worktree)
 	result, err := a.client.MergeCleanlyTransactional(ctx, worktree, branch)
 	if err != nil {

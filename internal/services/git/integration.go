@@ -23,7 +23,46 @@ const (
 	integrationReceiptVersion   = 1
 )
 
-const integrationFailureArtifactsPrefix = "azedarach-integration-failure-"
+const (
+	integrationScratchPrefix          = "azedarach-integration-"
+	integrationScratchPattern         = integrationScratchPrefix + "*"
+	integrationFailureArtifactsPrefix = "azedarach-integration-failure-"
+)
+
+type integrationFailureArtifactPathsKey struct{}
+
+// WithIntegrationFailureArtifactPaths configures project-owned relative
+// directories that may be preserved from a failed transactional merge.
+func WithIntegrationFailureArtifactPaths(ctx context.Context, paths []string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cleaned := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		path = filepath.Clean(strings.TrimSpace(path))
+		if path == "." || !filepath.IsLocal(path) {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		cleaned = append(cleaned, path)
+	}
+	if len(cleaned) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, integrationFailureArtifactPathsKey{}, cleaned)
+}
+
+func integrationFailureArtifactPaths(ctx context.Context) []string {
+	if ctx == nil {
+		return nil
+	}
+	paths, _ := ctx.Value(integrationFailureArtifactPathsKey{}).([]string)
+	return paths
+}
 
 type integrationJournal struct {
 	Version         int                         `json:"version"`
@@ -173,7 +212,7 @@ func (c *Client) mergeCleanlyTransactional(ctx context.Context, worktree, branch
 	if earlyResult != nil {
 		return earlyResult, nil
 	}
-	scratchPath, err := os.MkdirTemp("", "azedarach-integration-*")
+	scratchPath, err := os.MkdirTemp("", integrationScratchPattern)
 	if err != nil {
 		return nil, fmt.Errorf("create scratch integration directory: %w", err)
 	}
@@ -248,10 +287,15 @@ func (c *Client) mergeCleanlyTransactional(ctx context.Context, worktree, branch
 		}
 		if validationErr != nil {
 			if errors.Is(validationErr, context.Canceled) || errors.Is(validationErr, context.DeadlineExceeded) {
+				// Cancellation is not a completed gate failure. Return the context
+				// error and let deferred scratch cleanup discard partial output.
 				return nil, validationErr
 			}
 			result.Success = false
 			result.Message = appendMergeResultDetail(result.Message, validationErr.Error())
+			if preservedArtifacts := c.preserveCandidateValidationFailureArtifacts(ctx, scratchPath, result, validationErr); preservedArtifacts != "" {
+				result.Message = appendMergeResultDetail(result.Message, "preserved integration failure artifacts at "+preservedArtifacts)
+			}
 			return result, nil
 		}
 	}
@@ -261,37 +305,86 @@ func (c *Client) mergeCleanlyTransactional(ctx context.Context, worktree, branch
 	return applied, err
 }
 
-func (c *Client) preserveIntegrationFailureArtifacts(scratchPath string, result *MergeResult, mergeErr error) string {
+func (c *Client) preserveIntegrationFailureArtifacts(ctx context.Context, scratchPath string, result *MergeResult, mergeErr error) string {
+	if ctx != nil && ctx.Err() != nil {
+		return ""
+	}
 	if mergeErr == nil && (result == nil || result.Success) {
 		return ""
 	}
-	if !strings.HasPrefix(filepath.Base(scratchPath), "azedarach-integration-") {
+	if !strings.HasPrefix(filepath.Base(scratchPath), integrationScratchPrefix) {
 		return ""
 	}
-	source := filepath.Join(scratchPath, ".tmp", "test-timing")
-	if info, err := os.Stat(source); err != nil || !info.IsDir() {
+	configuredPaths := integrationFailureArtifactPaths(ctx)
+	if len(configuredPaths) == 0 {
 		return ""
 	}
-	destination, err := os.MkdirTemp("", integrationFailureArtifactsPrefix)
+	evaluatedScratch, err := filepath.EvalSymlinks(scratchPath)
+	if err != nil {
+		return ""
+	}
+	type artifactSource struct {
+		path     string
+		relative string
+	}
+	sources := make([]artifactSource, 0, len(configuredPaths))
+	for _, relative := range configuredPaths {
+		source := filepath.Join(scratchPath, relative)
+		info, statErr := os.Stat(source)
+		if statErr != nil || !info.IsDir() {
+			continue
+		}
+		evaluatedSource, evalErr := filepath.EvalSymlinks(source)
+		if evalErr != nil || !pathWithinRoot(evaluatedScratch, evaluatedSource) {
+			if c.logger != nil {
+				c.logger.Warn("refusing integration failure artifact path outside scratch worktree", "source", source, "error", evalErr)
+			}
+			continue
+		}
+		sources = append(sources, artifactSource{path: evaluatedSource, relative: relative})
+	}
+	if len(sources) == 0 {
+		return ""
+	}
+	destination, err := os.MkdirTemp(c.artifactFailureTempDir, integrationFailureArtifactsPrefix)
 	if err != nil {
 		if c.logger != nil {
-			c.logger.Warn("failed to create integration failure artifact directory", "source", source, "error", err)
+			c.logger.Warn("failed to create integration failure artifact directory", "error", err)
 		}
 		return ""
 	}
-	target := filepath.Join(destination, "test-timing")
-	if err := copyDirectory(source, target); err != nil {
-		_ = os.RemoveAll(destination)
-		if c.logger != nil {
-			c.logger.Warn("failed to preserve integration failure artifacts", "source", source, "error", err)
+	for _, source := range sources {
+		target := filepath.Join(destination, source.relative)
+		if err := c.copyDirectory(ctx, source.path, target); err != nil {
+			_ = os.RemoveAll(destination)
+			if c.logger != nil {
+				c.logger.Warn("failed to preserve integration failure artifacts", "source", source.path, "error", err)
+			}
+			return ""
 		}
-		return ""
 	}
 	return destination
 }
 
-func copyDirectory(source, destination string) error {
+func (c *Client) preserveCandidateValidationFailureArtifacts(ctx context.Context, scratchPath string, result *MergeResult, validationErr error) string {
+	if errors.Is(validationErr, context.Canceled) || errors.Is(validationErr, context.DeadlineExceeded) {
+		return ""
+	}
+	return c.preserveIntegrationFailureArtifacts(ctx, scratchPath, result, validationErr)
+}
+
+func pathWithinRoot(root, candidate string) bool {
+	relative, err := filepath.Rel(root, candidate)
+	return err == nil && (relative == "." || filepath.IsLocal(relative))
+}
+
+func (c *Client) copyDirectory(ctx context.Context, source, destination string) error {
 	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
 		if walkErr != nil {
 			return walkErr
 		}
@@ -309,29 +402,82 @@ func copyDirectory(source, destination string) error {
 		if !entry.Type().IsRegular() {
 			return nil
 		}
-		input, err := os.Open(path)
-		if err != nil {
-			return fmt.Errorf("open artifact %s: %w", path, err)
-		}
-		output, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-		if err != nil {
-			_ = input.Close()
-			return fmt.Errorf("create preserved artifact %s: %w", target, err)
-		}
-		_, copyErr := io.Copy(output, input)
-		inputCloseErr := input.Close()
-		closeErr := output.Close()
-		if copyErr != nil {
-			return fmt.Errorf("copy artifact %s: %w", path, copyErr)
-		}
-		if inputCloseErr != nil {
-			return fmt.Errorf("close artifact %s: %w", path, inputCloseErr)
-		}
-		if closeErr != nil {
-			return fmt.Errorf("close preserved artifact %s: %w", target, closeErr)
-		}
-		return nil
+		return c.copyArtifactFile(ctx, path, target)
 	})
+}
+
+func (c *Client) copyArtifactFile(ctx context.Context, source, destination string) error {
+	input, err := os.Open(source)
+	if err != nil {
+		return fmt.Errorf("open artifact %s: %w", source, err)
+	}
+	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		_ = input.Close()
+		return fmt.Errorf("create preserved artifact %s: %w", destination, err)
+	}
+	buffer := make([]byte, 32*1024)
+	var copyErr error
+	for copyErr == nil {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				copyErr = err
+				break
+			}
+		}
+		readCount, readErr := input.Read(buffer)
+		for written := 0; written < readCount; {
+			if ctx != nil {
+				if err := ctx.Err(); err != nil {
+					copyErr = err
+					break
+				}
+			}
+			writeCount, writeErr := output.Write(buffer[written:readCount])
+			if writeErr != nil {
+				copyErr = writeErr
+				break
+			}
+			if writeCount == 0 {
+				copyErr = io.ErrShortWrite
+				break
+			}
+			written += writeCount
+			if c.artifactCopyChunk != nil {
+				c.artifactCopyChunk(source, writeCount)
+			}
+			if ctx != nil {
+				if err := ctx.Err(); err != nil {
+					copyErr = err
+					break
+				}
+			}
+		}
+		if copyErr != nil {
+			break
+		}
+		switch {
+		case errors.Is(readErr, io.EOF):
+			copyErr = nil
+			goto copyComplete
+		case readErr != nil:
+			copyErr = readErr
+		}
+	}
+
+copyComplete:
+	inputCloseErr := input.Close()
+	closeErr := output.Close()
+	if copyErr != nil {
+		return fmt.Errorf("copy artifact %s: %w", source, copyErr)
+	}
+	if inputCloseErr != nil {
+		return fmt.Errorf("close artifact %s: %w", source, inputCloseErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close preserved artifact %s: %w", destination, closeErr)
+	}
+	return nil
 }
 
 func (c *Client) requireIntegrationTargetBranch(ctx context.Context, worktree, expectedBranch string) error {
@@ -516,7 +662,7 @@ func candidateValidationOutput(stdout, stderr string) string {
 
 func boundedCandidateValidationDetail(detail string) string {
 	// Keep the same practical envelope as durable validation failure summaries
-	// so task.close can surface every failed test retained by test-timing.
+	// so task.close can surface actionable output alongside configured artifacts.
 	const maxRunes = 32 * 1024
 	detail = strings.TrimSpace(detail)
 	runes := []rune(detail)
@@ -799,7 +945,7 @@ func (c *Client) proveIntegrationScratchWorktree(ctx context.Context, worktree, 
 	scratchPath = normalizeWorktreeLockKey(scratchPath)
 	tempRoot := normalizeWorktreeLockKey(os.TempDir())
 	scratchParent := normalizeWorktreeLockKey(filepath.Dir(scratchPath))
-	if scratchParent != tempRoot || !strings.HasPrefix(filepath.Base(scratchPath), "azedarach-integration-") {
+	if scratchParent != tempRoot || !strings.HasPrefix(filepath.Base(scratchPath), integrationScratchPrefix) {
 		return "", fmt.Errorf("scratch path %s is outside the managed integration temp namespace", scratchPath)
 	}
 	if scratchPath == normalizeWorktreeLockKey(worktree) {

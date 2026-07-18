@@ -11,7 +11,10 @@
     "latencyTrace": true
   },
   "gate": {
-    "command": "just review-gate"
+    "command": "just review-gate",
+    "failureArtifactPaths": [
+      ".tmp/test-timing"
+    ]
   },
   "git": {
     "baseBranch": "main",

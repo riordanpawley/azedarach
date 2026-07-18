@@ -86,6 +86,7 @@ type Config struct {
 	SessionAsyncInitCommands   []string
 	WorktreeInitCommands       []string
 	WorktreeAsyncInitCommands  []string
+	GateFailureArtifactPaths   []string
 	IssueResources             appconfig.IssueResourcesConfig
 	IssueAutoArchive           appconfig.IssueAutoArchiveConfig
 	ScheduledScripts           appconfig.ScheduledScriptsConfig
@@ -148,6 +149,8 @@ type Daemon struct {
 	worktreeInitCommandsByRoot           map[string][]string
 	worktreeAsyncInitCommandsByProject   map[string][]string
 	worktreeAsyncInitCommandsByRoot      map[string][]string
+	gateFailureArtifactPathsByProject    map[string][]string
+	gateFailureArtifactPathsByRoot       map[string][]string
 	issueResourcesByProject              map[string]appconfig.IssueResourcesConfig
 	issueResourcesByRoot                 map[string]appconfig.IssueResourcesConfig
 	issueAutoArchiveByProject            map[string]appconfig.IssueAutoArchiveConfig
@@ -405,6 +408,8 @@ func New(cfg Config) *Daemon {
 		worktreeInitCommandsByRoot:         map[string][]string{},
 		worktreeAsyncInitCommandsByProject: map[string][]string{},
 		worktreeAsyncInitCommandsByRoot:    map[string][]string{},
+		gateFailureArtifactPathsByProject:  map[string][]string{},
+		gateFailureArtifactPathsByRoot:     map[string][]string{},
 		issueResourcesByProject:            map[string]appconfig.IssueResourcesConfig{},
 		issueResourcesByRoot:               map[string]appconfig.IssueResourcesConfig{},
 		issueAutoArchiveByProject:          map[string]appconfig.IssueAutoArchiveConfig{},
@@ -443,6 +448,9 @@ func New(cfg Config) *Daemon {
 		revision:                           map[string]uint64{},
 		userProjectionConsumers:            map[string]*userProjectionConsumerHandle{},
 		shutdownReqCh:                      make(chan struct{}),
+	}
+	gitService.failureArtifactPathsForProject = func(projectID string) []string {
+		return append([]string(nil), d.runtimeConfigForProject(projectID).GateFailureArtifactPaths...)
 	}
 	d.codexAgentInput = newCodexAppServerInputAuthority(d.tmux, cfg.SocketPath, cfg.Logger, func(projectID string) daemonProjectRuntimeConfig {
 		return d.runtimeConfigForProject(projectID)

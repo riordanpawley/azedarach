@@ -1159,7 +1159,7 @@ func TestRealProcessProfileCandidateFailureRetainsActionableStdoutAndStderr(t *t
 	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
 		t.Fatalf("mkdir scripts: %v", err)
 	}
-	gate := "#!/bin/sh\necho 'FAIL make-verify::consumer-check'\necho 'exact consumer failure'\necho '[gate] status=failed exit_status=1' >&2\nexit 1\n"
+	gate := "#!/bin/sh\necho 'FAIL consumer-suite::check'\necho 'exact consumer failure'\necho '[gate] status=failed exit_status=1' >&2\nexit 1\n"
 	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"), []byte(gate), 0o755); err != nil {
 		t.Fatalf("write candidate gate: %v", err)
 	}
@@ -1174,7 +1174,7 @@ func TestRealProcessProfileCandidateFailureRetainsActionableStdoutAndStderr(t *t
 	if result == nil || result.Success || len(result.ValidationAttempts) != 1 {
 		t.Fatalf("MergeCleanlyTransactional() = %+v, want typed candidate failure", result)
 	}
-	for _, want := range []string{"FAIL make-verify::consumer-check", "exact consumer failure", "status=failed"} {
+	for _, want := range []string{"FAIL consumer-suite::check", "exact consumer failure", "status=failed"} {
 		if !strings.Contains(result.Message, want) || !strings.Contains(result.ValidationAttempts[0].Message, want) {
 			t.Fatalf("candidate failure = %+v, want %q", result, want)
 		}
@@ -1311,6 +1311,137 @@ func TestRealProcessProfileMergeCleanlyTransactionalRunsConfiguredConsumerGate(t
 	attempt := result.ValidationAttempts[0]
 	if attempt.Status != CandidateValidationPassed || !attempt.Canonical || attempt.CandidateHead == "" {
 		t.Fatalf("configured candidate validation = %+v", attempt)
+	}
+}
+
+func TestRealProcessProfileConfiguredConsumerGateFailurePreservesArtifacts(t *testing.T) {
+	repo := initDivergedRepo(t)
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	ctx := WithCandidateValidationCommand(context.Background(), `
+		mkdir -p build/junit/failed-run
+		printf '# configured gate report\n' > build/junit/failed-run/report.md
+		echo configured consumer gate failed >&2
+		exit 42
+	`)
+	ctx = WithIntegrationFailureArtifactPaths(ctx, []string{"build/junit"})
+
+	result, err := client.MergeCleanlyTransactional(ctx, repo, "feature")
+	if err != nil {
+		t.Fatalf("configured candidate merge: %v", err)
+	}
+	if result == nil || result.Success || len(result.ValidationAttempts) != 1 {
+		t.Fatalf("configured candidate merge = %+v, want failed validation", result)
+	}
+	if !strings.Contains(result.ValidationAttempts[0].Message, "configured consumer gate failed") {
+		t.Fatalf("configured candidate attempt = %+v, want gate failure detail", result.ValidationAttempts[0])
+	}
+	const marker = "preserved integration failure artifacts at "
+	markerIndex := strings.Index(result.Message, marker)
+	if markerIndex < 0 {
+		t.Fatalf("configured candidate message = %q, want preserved artifact path", result.Message)
+	}
+	preserved := strings.TrimSpace(result.Message[markerIndex+len(marker):])
+	t.Cleanup(func() { _ = os.RemoveAll(preserved) })
+	content, readErr := os.ReadFile(filepath.Join(preserved, "build", "junit", "failed-run", "report.md"))
+	if readErr != nil {
+		t.Fatalf("read configured gate artifact: %v", readErr)
+	}
+	if got, want := string(content), "# configured gate report\n"; got != want {
+		t.Fatalf("configured gate artifact = %q, want %q", got, want)
+	}
+}
+
+func TestPreserveCandidateValidationFailureArtifactsSkipsCancellation(t *testing.T) {
+	scratch, err := os.MkdirTemp("", integrationScratchPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(scratch) })
+	artifactDir := filepath.Join(scratch, "build", "junit")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactDir, "partial.txt"), []byte("partial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithIntegrationFailureArtifactPaths(context.Background(), []string{"build/junit"})
+	client := NewClient(NewExecRunner(scratch), slog.Default())
+	for _, validationErr := range []error{context.Canceled, context.DeadlineExceeded} {
+		if preserved := client.preserveCandidateValidationFailureArtifacts(ctx, scratch, &MergeResult{Success: false}, validationErr); preserved != "" {
+			t.Cleanup(func() { _ = os.RemoveAll(preserved) })
+			t.Fatalf("preserved cancellation artifacts at %q for %v", preserved, validationErr)
+		}
+	}
+}
+
+func TestPreserveIntegrationFailureArtifactsSkipsCanceledMergeOrHook(t *testing.T) {
+	scratch, err := os.MkdirTemp("", integrationScratchPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(scratch) })
+	artifactDir := filepath.Join(scratch, "build", "junit")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactDir, "partial.txt"), []byte("partial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	baseCtx := WithIntegrationFailureArtifactPaths(context.Background(), []string{"build/junit"})
+	ctx, cancel := context.WithCancel(baseCtx)
+	cancel()
+	client := NewClient(NewExecRunner(scratch), slog.Default())
+	if preserved := client.preserveIntegrationFailureArtifacts(ctx, scratch, nil, errors.New("merge hook canceled")); preserved != "" {
+		t.Cleanup(func() { _ = os.RemoveAll(preserved) })
+		t.Fatalf("preserved canceled merge or hook artifacts at %q", preserved)
+	}
+}
+
+func TestPreserveIntegrationFailureArtifactsCancelsAfterCopyBegins(t *testing.T) {
+	scratchParent := t.TempDir()
+	scratch, err := os.MkdirTemp(scratchParent, integrationScratchPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactDir := filepath.Join(scratch, "build", "junit")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactDir, "large.bin"), bytes.Repeat([]byte("x"), 3*32*1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	failureRoot := t.TempDir()
+	copyStarted := make(chan struct{})
+	releaseCopy := make(chan struct{})
+	var firstChunk sync.Once
+	client := NewClient(NewExecRunner(scratch), slog.Default())
+	client.artifactFailureTempDir = failureRoot
+	client.artifactCopyChunk = func(string, int) {
+		firstChunk.Do(func() {
+			close(copyStarted)
+			<-releaseCopy
+		})
+	}
+	baseCtx := WithIntegrationFailureArtifactPaths(context.Background(), []string{"build/junit"})
+	ctx, cancel := context.WithCancel(baseCtx)
+	resultCh := make(chan string, 1)
+	go func() {
+		resultCh <- client.preserveIntegrationFailureArtifacts(ctx, scratch, nil, errors.New("merge hook failed"))
+	}()
+
+	<-copyStarted
+	cancel()
+	close(releaseCopy)
+	if preserved := <-resultCh; preserved != "" {
+		t.Cleanup(func() { _ = os.RemoveAll(preserved) })
+		t.Fatalf("preserved canceled in-flight artifacts at %q", preserved)
+	}
+	matches, err := filepath.Glob(filepath.Join(failureRoot, integrationFailureArtifactsPrefix+"*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("partial preservation destinations remain after cancellation: %v", matches)
 	}
 }
 
@@ -1543,10 +1674,48 @@ func TestRealProcessProfileMergeCleanlyTransactionalRunsScratchHooksAndKeepsTarg
 	}
 }
 
-func TestRealProcessProfileMergeCleanlyTransactionalPreservesFailedGateArtifacts(t *testing.T) {
+func TestRealProcessProfileMergeCleanlyTransactionalPreservesConfiguredFailureArtifacts(t *testing.T) {
 	repo := initDivergedRepo(t)
 	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
-	hook := "#!/bin/sh\nset -eu\nartifact=.tmp/test-timing/cold-sentinel\nmkdir -p \"$artifact\"\nprintf '# sentinel report\\n' > \"$artifact/report.md\"\nprintf '{\"Action\":\"fail\"}\\n' > \"$artifact/events.jsonl\"\necho merge gate failed >&2\nexit 1\n"
+	hook := "#!/bin/sh\nset -eu\nartifact=build/junit/failed-run\nmkdir -p \"$artifact\"\nprintf '# sentinel report\\n' > \"$artifact/report.md\"\nprintf '{\"Action\":\"fail\"}\\n' > \"$artifact/events.jsonl\"\necho merge gate failed >&2\nexit 1\n"
+	if err := os.WriteFile(hookPath, []byte(hook), 0o755); err != nil {
+		t.Fatalf("write commit-msg hook: %v", err)
+	}
+
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	ctx := WithIntegrationFailureArtifactPaths(context.Background(), []string{"build/junit"})
+	result, err := client.MergeCleanlyTransactional(ctx, repo, "feature")
+	if err != nil {
+		t.Fatalf("MergeCleanlyTransactional() error = %v", err)
+	}
+	if result == nil || result.Success {
+		t.Fatalf("MergeCleanlyTransactional() result = %+v, want failed gate", result)
+	}
+	const marker = "preserved integration failure artifacts at "
+	markerIndex := strings.Index(result.Message, marker)
+	if markerIndex < 0 {
+		t.Fatalf("MergeCleanlyTransactional() message = %q, want preserved artifact path", result.Message)
+	}
+	preserved := strings.TrimSpace(result.Message[markerIndex+len(marker):])
+	t.Cleanup(func() { _ = os.RemoveAll(preserved) })
+	for name, want := range map[string]string{
+		"report.md":    "# sentinel report\n",
+		"events.jsonl": "{\"Action\":\"fail\"}\n",
+	} {
+		content, readErr := os.ReadFile(filepath.Join(preserved, "build", "junit", "failed-run", name))
+		if readErr != nil {
+			t.Fatalf("read preserved %s: %v", name, readErr)
+		}
+		if string(content) != want {
+			t.Fatalf("preserved %s = %q, want %q", name, content, want)
+		}
+	}
+}
+
+func TestRealProcessProfileMergeCleanlyTransactionalDoesNotInferFailureArtifacts(t *testing.T) {
+	repo := initDivergedRepo(t)
+	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
+	hook := "#!/bin/sh\nset -eu\nmkdir -p build/junit\nprintf failure > build/junit/report.txt\necho merge gate failed >&2\nexit 1\n"
 	if err := os.WriteFile(hookPath, []byte(hook), 0o755); err != nil {
 		t.Fatalf("write commit-msg hook: %v", err)
 	}
@@ -1559,24 +1728,26 @@ func TestRealProcessProfileMergeCleanlyTransactionalPreservesFailedGateArtifacts
 	if result == nil || result.Success {
 		t.Fatalf("MergeCleanlyTransactional() result = %+v, want failed gate", result)
 	}
-	const marker = "preserved integration failure artifacts at "
-	markerIndex := strings.LastIndex(result.Message, marker)
-	if markerIndex < 0 {
-		t.Fatalf("MergeCleanlyTransactional() message = %q, want preserved artifact path", result.Message)
+	if strings.Contains(result.Message, "preserved integration failure artifacts") {
+		t.Fatalf("MergeCleanlyTransactional() message = %q, inferred an unconfigured artifact layout", result.Message)
 	}
-	preserved := strings.TrimSpace(result.Message[markerIndex+len(marker):])
-	t.Cleanup(func() { _ = os.RemoveAll(preserved) })
-	for name, want := range map[string]string{
-		"report.md":    "# sentinel report\n",
-		"events.jsonl": "{\"Action\":\"fail\"}\n",
-	} {
-		content, readErr := os.ReadFile(filepath.Join(preserved, "test-timing", "cold-sentinel", name))
-		if readErr != nil {
-			t.Fatalf("read preserved %s: %v", name, readErr)
-		}
-		if string(content) != want {
-			t.Fatalf("preserved %s = %q, want %q", name, content, want)
-		}
+}
+
+func TestPreserveIntegrationFailureArtifactsRejectsSymlinkEscape(t *testing.T) {
+	scratch, err := os.MkdirTemp("", "azedarach-integration-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(scratch) })
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(scratch, "reports")); err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithIntegrationFailureArtifactPaths(context.Background(), []string{"reports"})
+	client := NewClient(NewExecRunner(scratch), slog.Default())
+	if preserved := client.preserveIntegrationFailureArtifacts(ctx, scratch, &MergeResult{Success: false}, nil); preserved != "" {
+		t.Cleanup(func() { _ = os.RemoveAll(preserved) })
+		t.Fatalf("preserved path = %q, want symlink escape rejected", preserved)
 	}
 }
 
