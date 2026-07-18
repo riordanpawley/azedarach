@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	operationstore "github.com/riordanpawley/azedarach/internal/daemon/operations/store"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -249,7 +250,7 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 	runPublicationGit(t, repoDir, "config", "user.email", "test@example.com")
 	runPublicationGit(t, repoDir, "config", "user.name", "Test")
 	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755))
-	configJSON := "{\n  \"publicationEvidence\": {\n    \"policyVersion\": \"portable-v1\",\n    \"activePathProfiles\": [\"consumer-integration\"],\n    \"exactBaseSurfaces\": {\"wire\": [\"src/wire\"]},\n    \"dependencies\": {\"api\": [\"src/api.ts\"]}\n  }\n}"
+	configJSON := "{\n  \"gate\": {\"command\": \"just merge-gate\", \"environmentFingerprint\": \"go-portable\"},\n  \"publicationEvidence\": {\n    \"policyVersion\": \"portable-v1\",\n    \"activePathProfiles\": [\"consumer-integration\"],\n    \"exactBaseSurfaces\": {\"wire\": [\"src/wire\"]},\n    \"dependencies\": {\"api\": [\"src/api.ts\"]}\n  }\n}"
 	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".azedarach", "config.json"), []byte(configJSON), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte(".azedarach/*\n!.azedarach/config.json\nissues.db*\n"), 0o644))
 	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, "src"), 0o755))
@@ -271,13 +272,14 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
 	t.Cleanup(func() { _ = runtime.Close() })
+	projectID := protocol.DefaultProjectID
 	issueClient := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = issueClient.CloseDB() })
 	issueID, err := issueClient.Create(ctx, issues.CreateTaskParams{Title: "portable merge", Type: domain.TypeFeature, Priority: domain.P1, Status: domain.StatusInProgress})
 	require.NoError(t, err)
 	started := time.Now().UTC()
 	_, err = runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{
-		RequestID: "merge-review", LeaseToken: "secret", ProjectID: "project", IssueID: issueID,
+		RequestID: "merge-review", LeaseToken: "secret", ProjectID: projectID, IssueID: issueID,
 		Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence,
 		IsolationMode: "worktree", EnvironmentFingerprint: "go-portable", Profile: "consumer-integration", Command: "go test ./...",
 		SourceRevision: sourceOID, ReviewerID: "reviewer", ReviewEpochEventID: 1, TTL: time.Minute,
@@ -295,17 +297,104 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 	targetOID := runPublicationGit(t, repoDir, "rev-parse", "HEAD")
 	d := &Daemon{
 		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()}, operationRuntime: runtime, git: gitClient,
-		publicationEvidenceCache: map[string]domain.PublicationEvidenceSnapshot{}, issueClientsByProject: map[string]*issues.Client{"project": issueClient},
+		publicationEvidenceCache: map[string]domain.PublicationEvidenceSnapshot{}, issues: issueClient,
+		issueClientsByProject: map[string]*issues.Client{projectID: issueClient, runtime.canonicalProject: issueClient},
+		issueClientsByRoot:    map[string]*issues.Client{repoDir: issueClient, daemonStoreRootKey(repoDir): issueClient},
 	}
 	integration := taskCloseIntegrationResult{
 		Requested: true, Integrated: true, ConfiguredBaseTarget: true, TargetID: "base", SourceBranch: "feature", TargetBranch: "main",
 		BaseOID: baseOID, SourceOID: sourceOID, TargetOID: targetOID, ValidationAttempts: merge.ValidationAttempts,
 	}
+	_, _, err = d.taskClosePublicationProvenance(ctx, projectID, issueID, integration, "portable-v1", "just merge-gate", "go-portable")
+	require.ErrorContains(t, err, "requires its completed non-emergency publication operation", "ticket-only review evidence must not authorize task close")
+	_, err = runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{
+		RequestID: "candidate-authority", LeaseToken: "candidate-authority-secret", ProjectID: projectID,
+		Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeRepository, Purpose: domain.ValidationPurposePushGate,
+		IsolationMode: "synthetic-worktree", EnvironmentFingerprint: "go-portable", Override: domain.ValidationOverrideNone,
+		Profile: "publication:portable-v1", Command: "just merge-gate", SourceRevision: targetOID,
+		TTL: time.Minute,
+	}, started.Add(2*time.Second))
+	require.NoError(t, err)
+	_, err = runtime.store.FinishValidation(ctx, "candidate-authority", "candidate-authority-secret", domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{
+		Held: true, RequestID: "candidate-authority", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeRepository,
+		Purpose: domain.ValidationPurposePushGate, Execution: domain.ValidationExecutionExecuted, Profile: "publication:portable-v1",
+		SourceRevision: targetOID, Present: true,
+	}, started.Add(3*time.Second), time.Minute)
+	require.NoError(t, err)
+	push, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{
+		RequestID: "candidate-push", LeaseToken: "candidate-push-secret", ProjectID: projectID,
+		Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeRepository, Purpose: domain.ValidationPurposePushGate,
+		IsolationMode: "synthetic-worktree", EnvironmentFingerprint: "go-portable", Override: domain.ValidationOverrideNone,
+		Profile: "publication:portable-v1", Command: "just merge-gate", SourceRevision: targetOID, TTL: time.Minute,
+	}, started.Add(4*time.Second))
+	require.NoError(t, err)
+	require.Equal(t, domain.ValidationExecutionReused, push.Execution)
+	publication := domain.PublicationOperation{
+		OperationID: "publication-close-exact", ProjectID: projectID, IssueID: issueID, IntentKey: "review-accept",
+		RequestFingerprint: "fingerprint", ActorID: "reviewer", TargetID: "base", TargetBranch: "main",
+		SourceRevision: sourceOID, BaseRevision: baseOID, PolicyVersion: "portable-v1", EnvironmentFingerprint: "go-portable",
+		ValidationCommand: "just merge-gate", State: domain.PublicationOperationQueued, CreatedAt: started,
+	}
+	storedPublication, _, err := runtime.store.EnqueuePublication(ctx, publication, publicationCoalesceKey(publication))
+	require.NoError(t, err)
+	claimedPublication, acquired, err := runtime.store.ClaimPublicationOperation(ctx, storedPublication.OperationID, operationstore.PublicationOperationClaim{
+		Owner: "daemon", Token: "publication-claim", Now: started.Add(5 * time.Second), TTL: time.Minute,
+	})
+	require.NoError(t, err)
+	require.True(t, acquired)
+	passedPublication, err := d.transitionPublicationOperation(ctx, claimedPublication, "publication-claim", domain.PublicationOperationPassed, func(update *operationstore.PublicationOperationUpdate) {
+		update.CandidateRevision = targetOID
+		update.ValidationRequestID = push.RequestID
+		update.ReusedEvidenceID = push.AuthoritativeRequestID
+	})
+	require.NoError(t, err)
+	_, _, err = d.taskClosePublicationProvenance(ctx, projectID, issueID, integration, "portable-v1", "just merge-gate", "go-portable")
+	require.Error(t, err, "an unbound close must not adopt another in-flight publication")
+	boundCtx := withTaskClosePublicationBinding(ctx, passedPublication.OperationID, "publication-claim")
+	boundOperation, boundValidation, err := d.taskClosePublicationProvenance(boundCtx, projectID, issueID, integration, "portable-v1", "just merge-gate", "go-portable")
+	require.NoError(t, err)
+	assert.Equal(t, publication.OperationID, boundOperation.OperationID)
+	assert.Equal(t, push.RequestID, boundValidation.RequestID)
+	finished := started.Add(6 * time.Second)
+	_, err = d.transitionPublicationOperation(ctx, passedPublication, "publication-claim", domain.PublicationOperationMerged, func(update *operationstore.PublicationOperationUpdate) {
+		update.ReleaseClaim = true
+		update.FinishedAt = &finished
+	})
+	require.NoError(t, err)
+	for name, mutate := range map[string]func(*taskCloseIntegrationResult) (string, string, string){
+		"wrong candidate": func(candidate *taskCloseIntegrationResult) (string, string, string) {
+			candidate.TargetOID = "wrong-target"
+			return "portable-v1", "just merge-gate", "go-portable"
+		},
+		"wrong policy": func(*taskCloseIntegrationResult) (string, string, string) {
+			return "portable-v2", "just merge-gate", "go-portable"
+		},
+		"wrong command": func(*taskCloseIntegrationResult) (string, string, string) {
+			return "portable-v1", "just other-gate", "go-portable"
+		},
+		"wrong environment": func(*taskCloseIntegrationResult) (string, string, string) {
+			return "portable-v1", "just merge-gate", "go-other"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := integration
+			policy, command, environment := mutate(&candidate)
+			_, _, provenanceErr := d.taskClosePublicationProvenance(ctx, projectID, issueID, candidate, policy, command, environment)
+			require.ErrorContains(t, provenanceErr, "requires its completed non-emergency publication operation")
+		})
+	}
+	resolvedOperation, resolvedValidation, err := d.taskClosePublicationProvenance(ctx, projectID, issueID, integration, "portable-v1", "just merge-gate", "go-portable")
+	require.NoError(t, err)
+	assert.Equal(t, publication.OperationID, resolvedOperation.OperationID)
+	assert.Equal(t, push.RequestID, resolvedValidation.RequestID)
+	assert.Equal(t, domain.ValidationExecutionReused, resolvedValidation.Execution)
+	_, _, fallbackErr := d.taskClosePublicationProvenance(ctx, "unrouted-project", issueID, integration, "portable-v1", "just merge-gate", "go-portable")
+	require.Error(t, fallbackErr, "unrouted project fallback must not authorize publication provenance")
 	// Model the durable state after integration receipt succeeds but publication
 	// evidence fails. The retry sees source already contained by target.
-	err = d.persistTaskCloseIntegrationReceipt(ctx, "project", issueID, repoDir, integration)
+	err = d.persistTaskCloseIntegrationReceipt(ctx, projectID, issueID, repoDir, integration)
 	require.NoError(t, err)
-	recovered, found, err := d.recoverPublishedTaskCloseIntegration(ctx, "project", issueID, repoDir, "base", "feature", "main", sourceOID, targetOID)
+	recovered, found, err := d.recoverPublishedTaskCloseIntegration(ctx, projectID, issueID, repoDir, "base", "feature", "main", sourceOID, targetOID)
 	require.NoError(t, err)
 	require.True(t, found)
 	require.True(t, recovered.NoChanges)
@@ -313,12 +402,12 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 	require.False(t, recovered.Integrated)
 	require.Equal(t, baseOID, recovered.BaseOID)
 	require.NotEmpty(t, recovered.ValidationAttempts)
-	err = d.persistTaskCloseIntegrationPublication(ctx, "project", issueID, repoDir, recovered)
+	err = d.persistTaskCloseIntegrationPublication(ctx, projectID, issueID, repoDir, recovered)
 	require.NoError(t, err, "merge=%+v target=%s", merge, targetOID)
 	receipts, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted}, Limit: 10})
 	require.NoError(t, err)
 	require.Len(t, receipts, 1, "retry must reuse the exact receipt rather than append a generic no-change receipt")
-	snapshot, err := runtime.store.PublicationEvidenceSnapshot(ctx, "project", issueID)
+	snapshot, err := runtime.store.PublicationEvidenceSnapshot(ctx, projectID, issueID)
 	require.NoError(t, err)
 	require.Len(t, snapshot.Evidence, 1)
 	assert.Equal(t, domain.PublicationEvidenceMergeResult, snapshot.Evidence[0].Layer)
@@ -326,7 +415,7 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 	assert.Equal(t, sourceOID, snapshot.Evidence[0].SourceRevision)
 	assert.Equal(t, targetOID, snapshot.Evidence[0].ResultRevision)
 	assert.Equal(t, []string{"src/api.ts"}, snapshot.Evidence[0].Coverage.Paths)
-	_, assessments, err := d.evaluateCurrentPublicationEvidence(ctx, "project", issueID, time.Now().UTC())
+	_, assessments, err := d.evaluateCurrentPublicationEvidence(ctx, projectID, issueID, time.Now().UTC())
 	require.NoError(t, err)
 	require.Len(t, assessments, 1)
 	assert.True(t, assessments[0].Retained, "exact synthetic merge must remain active after the issue worktree is gone: %+v", assessments[0])

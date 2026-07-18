@@ -67,6 +67,28 @@ type publicationRetryError struct {
 func (e *publicationRetryError) Error() string { return e.cause.Error() }
 func (e *publicationRetryError) Unwrap() error { return e.cause }
 
+type taskClosePublicationBinding struct {
+	operationID string
+	claimToken  string
+}
+
+type taskClosePublicationBindingContextKey struct{}
+
+func withTaskClosePublicationBinding(ctx context.Context, operationID, claimToken string) context.Context {
+	return context.WithValue(ctx, taskClosePublicationBindingContextKey{}, taskClosePublicationBinding{
+		operationID: strings.TrimSpace(operationID),
+		claimToken:  strings.TrimSpace(claimToken),
+	})
+}
+
+func taskClosePublicationBindingFromContext(ctx context.Context) (taskClosePublicationBinding, bool) {
+	if ctx == nil {
+		return taskClosePublicationBinding{}, false
+	}
+	binding, ok := ctx.Value(taskClosePublicationBindingContextKey{}).(taskClosePublicationBinding)
+	return binding, ok && binding.operationID != "" && binding.claimToken != ""
+}
+
 func publicationOperationIdentity(projectID, issueID, intentKey string) string {
 	digest := sha256.Sum256([]byte(strings.Join([]string{projectID, issueID, intentKey}, "\x00")))
 	return fmt.Sprintf("publication-%x", digest[:12])
@@ -158,11 +180,15 @@ func (d *Daemon) publicationStoreForProject(projectID string) (*operationstore.S
 
 func (d *Daemon) closePublicationStores() {
 	d.publicationContinuationMu.Lock()
+	d.publicationContinuationStopping = true
 	if d.publicationContinuationCancel != nil {
 		d.publicationContinuationCancel()
 	}
 	d.publicationContinuationCtx = nil
 	d.publicationContinuationCancel = nil
+	d.publicationContinuationMu.Unlock()
+	d.publicationContinuationWG.Wait()
+	d.publicationContinuationMu.Lock()
 	d.publicationContinuationRetrying = nil
 	d.publicationContinuationMu.Unlock()
 	d.publicationStoresMu.Lock()
@@ -377,6 +403,11 @@ func (d *Daemon) continuePublicationTarget(ctx context.Context, store *operation
 func (d *Daemon) publicationContinuationContext() context.Context {
 	d.publicationContinuationMu.Lock()
 	defer d.publicationContinuationMu.Unlock()
+	if d.publicationContinuationStopping {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx
+	}
 	if d.publicationContinuationCtx == nil {
 		d.publicationContinuationCtx, d.publicationContinuationCancel = context.WithCancel(context.Background())
 	}
@@ -394,8 +425,12 @@ func (d *Daemon) ensurePublicationTargetContinuation(store *operationstore.SQLit
 }
 
 func (d *Daemon) schedulePublicationTargetContinuationRetry(ctx context.Context, store *operationstore.SQLiteStore, terminal domain.PublicationOperation) {
-	key := terminal.ProjectID + "\x00" + terminal.TargetBranch
+	key := "target\x00" + terminal.ProjectID + "\x00" + terminal.TargetBranch
 	d.publicationContinuationMu.Lock()
+	if d.publicationContinuationStopping {
+		d.publicationContinuationMu.Unlock()
+		return
+	}
 	if d.publicationContinuationRetrying == nil {
 		d.publicationContinuationRetrying = make(map[string]bool)
 	}
@@ -404,12 +439,14 @@ func (d *Daemon) schedulePublicationTargetContinuationRetry(ctx context.Context,
 		return
 	}
 	d.publicationContinuationRetrying[key] = true
+	d.publicationContinuationWG.Add(1)
 	d.publicationContinuationMu.Unlock()
 	go func() {
 		defer func() {
 			d.publicationContinuationMu.Lock()
 			delete(d.publicationContinuationRetrying, key)
 			d.publicationContinuationMu.Unlock()
+			d.publicationContinuationWG.Done()
 		}()
 		for {
 			if d.publicationContinuationWait != nil {
@@ -514,6 +551,7 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 		return nil, fmt.Errorf("verify publication claim before apply: %w", err)
 	}
 	var runErr error
+	ctx = withTaskClosePublicationBinding(ctx, operation.OperationID, claimToken)
 	if d.publicationClose != nil {
 		runErr = d.publicationClose(ctx, operation)
 	} else {
@@ -883,11 +921,71 @@ func (d *Daemon) recoverPublicationOperations(ctx context.Context) {
 			continue
 		}
 		for _, operation := range operations {
-			if err := d.submitPublicationOperation(ctx, operation); err != nil && d.cfg.Logger != nil {
-				d.cfg.Logger.Warn("publication operation recovery submit failed", "operation_id", operation.OperationID, "error", err)
+			if err := d.submitRecoveredPublicationOperation(ctx, operation); err != nil {
+				if d.cfg.Logger != nil {
+					d.cfg.Logger.Warn("publication operation recovery submit failed; scheduling retry", "operation_id", operation.OperationID, "error", err)
+				}
+				d.schedulePublicationRecoveryRetry(d.publicationContinuationContext(), operation)
 			}
 		}
 	}
+}
+
+func (d *Daemon) submitRecoveredPublicationOperation(ctx context.Context, operation domain.PublicationOperation) error {
+	if d.publicationRecoverySubmit != nil {
+		return d.publicationRecoverySubmit(ctx, operation)
+	}
+	return d.submitPublicationOperation(ctx, operation)
+}
+
+func (d *Daemon) schedulePublicationRecoveryRetry(ctx context.Context, operation domain.PublicationOperation) {
+	key := "recovery\x00" + operation.ProjectID + "\x00" + operation.OperationID
+	d.publicationContinuationMu.Lock()
+	if d.publicationContinuationStopping {
+		d.publicationContinuationMu.Unlock()
+		return
+	}
+	if d.publicationContinuationRetrying == nil {
+		d.publicationContinuationRetrying = make(map[string]bool)
+	}
+	if d.publicationContinuationRetrying[key] {
+		d.publicationContinuationMu.Unlock()
+		return
+	}
+	d.publicationContinuationRetrying[key] = true
+	d.publicationContinuationWG.Add(1)
+	d.publicationContinuationMu.Unlock()
+	go func() {
+		defer func() {
+			d.publicationContinuationMu.Lock()
+			delete(d.publicationContinuationRetrying, key)
+			d.publicationContinuationMu.Unlock()
+			d.publicationContinuationWG.Done()
+		}()
+		for {
+			if d.publicationRecoveryWait != nil {
+				if err := d.publicationRecoveryWait(ctx); err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					continue
+				}
+			} else {
+				timer := time.NewTimer(250 * time.Millisecond)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+			}
+			if err := d.submitRecoveredPublicationOperation(ctx, operation); err == nil {
+				return
+			} else if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("publication operation recovery retry failed", "operation_id", operation.OperationID, "error", err)
+			}
+		}
+	}()
 }
 
 func (d *Daemon) publicationProjectIDs() []string {

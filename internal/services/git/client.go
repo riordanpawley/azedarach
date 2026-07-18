@@ -1510,7 +1510,7 @@ func (c *Client) PatchDigest(ctx context.Context, worktree, baseRef, headRef str
 	if baseRef == "" || headRef == "" {
 		return "", fmt.Errorf("patch digest requires base and head revisions")
 	}
-	output, err := c.runInWorktree(ctx, worktree, "diff", "--binary", "--no-ext-diff", baseRef, headRef, "--")
+	output, err := c.runInWorktreeRaw(ctx, worktree, "diff", "--binary", "--no-ext-diff", baseRef, headRef, "--")
 	if err != nil {
 		return "", fmt.Errorf("derive patch digest for %s..%s: %w", baseRef, headRef, err)
 	}

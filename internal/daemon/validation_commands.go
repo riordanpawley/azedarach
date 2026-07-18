@@ -377,23 +377,23 @@ func (d *Daemon) recordTaskCloseMergeResultEvidence(ctx context.Context, project
 	if err != nil {
 		return err
 	}
-	store, err := d.publicationEvidenceProjectionStore()
-	if err != nil {
-		return err
-	}
-	validation, err := store.LatestReviewValidation(ctx, projectID, issueID, time.Now().UTC(), defaultValidationLeaseTTL)
-	if err != nil {
-		return err
-	}
-	if validation == nil || validation.State != domain.ValidationRequestCompleted || !validation.Evidence.Present || validation.Override == domain.ValidationOverrideEmergency || strings.TrimSpace(validation.SourceRevision) != strings.TrimSpace(integration.SourceOID) {
-		return fmt.Errorf("exact synthetic merge requires completed non-overridden review evidence for source %s", integration.SourceOID)
-	}
 	targetWorktree := strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID))
 	if targetWorktree == "" {
-		targetWorktree = strings.TrimSpace(d.resolveRepoDirForProject(projectID))
+		return fmt.Errorf("exact synthetic merge target worktree unavailable without exact project routing")
 	}
-	if targetWorktree == "" {
-		return fmt.Errorf("exact synthetic merge target worktree unavailable")
+	projectCfg, err := appconfig.LoadConfig(targetWorktree)
+	if err != nil {
+		return fmt.Errorf("load exact synthetic merge publication capability: %w", err)
+	}
+	gateCommand := strings.TrimSpace(projectCfg.Gate.Command)
+	if gateCommand == "" {
+		return fmt.Errorf("exact synthetic merge requires configured repository push gate command")
+	}
+	policyVersion := publicationPolicyVersion(projectCfg, gateCommand)
+	environmentFingerprint := publicationEnvironmentFingerprint(projectCfg)
+	operation, validation, err := d.taskClosePublicationProvenance(ctx, projectID, issueID, integration, policyVersion, gateCommand, environmentFingerprint)
+	if err != nil {
+		return err
 	}
 	currentTarget, err := d.git.ResolveCommit(ctx, targetWorktree, integration.TargetBranch)
 	if err != nil {
@@ -425,18 +425,75 @@ func (d *Daemon) recordTaskCloseMergeResultEvidence(ctx context.Context, project
 	if err != nil {
 		return err
 	}
-	identity := sha256.Sum256([]byte(strings.Join([]string{projectID, issueID, integration.BaseOID, integration.SourceOID, integration.TargetOID, policy.Version, validation.EnvironmentFingerprint}, "\x00")))
+	identity := sha256.Sum256([]byte(strings.Join([]string{projectID, issueID, operation.OperationID, validation.RequestID, integration.BaseOID, integration.SourceOID, integration.TargetOID, policy.Version, validation.EnvironmentFingerprint}, "\x00")))
 	evidence := domain.PublicationEvidence{
 		EvidenceID: "merge-" + fmt.Sprintf("%x", identity[:16]), ProjectID: projectID, IssueID: issueID, Layer: domain.PublicationEvidenceMergeResult,
 		PatchDigest: patchDigest, SourceRevision: strings.TrimSpace(integration.SourceOID), BaseRevision: strings.TrimSpace(integration.BaseOID),
 		ResultRevision: strings.TrimSpace(integration.TargetOID), Producer: "daemon:task.close", PolicyVersion: policy.Version,
 		EnvironmentFingerprint: validation.EnvironmentFingerprint, Coverage: coverage, CreatedAt: time.Now().UTC(),
 	}
+	store, err := d.publicationEvidenceProjectionStore()
+	if err != nil {
+		return err
+	}
 	if _, err = store.RecordPublicationEvidence(ctx, evidence); err != nil {
 		return fmt.Errorf("record exact synthetic merge evidence: %w", err)
 	}
 	_, err = d.publicationEvidenceSnapshot(ctx, projectID, issueID)
 	return err
+}
+
+func (d *Daemon) taskClosePublicationProvenance(ctx context.Context, projectID, issueID string, integration taskCloseIntegrationResult, policyVersion, gateCommand, environmentFingerprint string) (domain.PublicationOperation, domain.ValidationRequest, error) {
+	publicationStore, err := d.publicationStoreForProject(projectID)
+	if err != nil {
+		return domain.PublicationOperation{}, domain.ValidationRequest{}, fmt.Errorf("load exact publication operation store: %w", err)
+	}
+	operations, err := publicationStore.PublicationOperations(ctx, projectID, issueID, false)
+	if err != nil {
+		return domain.PublicationOperation{}, domain.ValidationRequest{}, fmt.Errorf("load exact publication operations: %w", err)
+	}
+	wantTarget := strings.TrimSpace(integration.TargetOID)
+	wantSource := strings.TrimSpace(integration.SourceOID)
+	wantBase := strings.TrimSpace(integration.BaseOID)
+	wantBranch := strings.TrimSpace(integration.TargetBranch)
+	wantCommand := strings.Join(strings.Fields(gateCommand), " ")
+	binding, bound := taskClosePublicationBindingFromContext(ctx)
+	for _, operation := range operations {
+		activeExactOperation := bound && operation.OperationID == binding.operationID && operation.ClaimToken == binding.claimToken && operation.State == domain.PublicationOperationPassed
+		completedExactOperation := !bound && operation.State == domain.PublicationOperationMerged && operation.FinishedAt != nil
+		if (!activeExactOperation && !completedExactOperation) || !strings.EqualFold(strings.TrimSpace(operation.TargetID), "base") ||
+			strings.TrimSpace(operation.CandidateRevision) != wantTarget || strings.TrimSpace(operation.SourceRevision) != wantSource || strings.TrimSpace(operation.BaseRevision) != wantBase ||
+			strings.TrimSpace(operation.TargetBranch) != wantBranch || strings.TrimSpace(operation.PolicyVersion) != strings.TrimSpace(policyVersion) ||
+			strings.TrimSpace(operation.EnvironmentFingerprint) != strings.TrimSpace(environmentFingerprint) || strings.Join(strings.Fields(operation.ValidationCommand), " ") != wantCommand ||
+			strings.TrimSpace(operation.ValidationRequestID) == "" {
+			continue
+		}
+		if d.operationRuntime == nil || d.operationRuntime.store == nil {
+			return domain.PublicationOperation{}, domain.ValidationRequest{}, fmt.Errorf("exact publication validation store unavailable")
+		}
+		validation, validationErr := d.operationRuntime.store.ValidationRequest(ctx, projectID, operation.ValidationRequestID)
+		if validationErr != nil {
+			continue
+		}
+		if validation.State != domain.ValidationRequestCompleted || validation.FinishedAt == nil || !validation.Evidence.Present || validation.Override != domain.ValidationOverrideNone ||
+			validation.Class != domain.ValidationClassAggregate || validation.Scope != domain.ValidationScopeRepository || validation.Purpose != domain.ValidationPurposePushGate ||
+			(validation.Execution != domain.ValidationExecutionExecuted && validation.Execution != domain.ValidationExecutionReused) ||
+			strings.TrimSpace(validation.SourceRevision) != wantTarget || strings.TrimSpace(validation.Evidence.SourceRevision) != wantTarget ||
+			strings.TrimSpace(validation.Profile) != "publication:"+strings.TrimSpace(policyVersion) || strings.Join(strings.Fields(validation.Command), " ") != wantCommand ||
+			strings.TrimSpace(validation.IsolationMode) != "synthetic-worktree" || strings.TrimSpace(validation.EnvironmentFingerprint) != strings.TrimSpace(environmentFingerprint) {
+			continue
+		}
+		if validation.Execution == domain.ValidationExecutionReused {
+			authoritative := strings.TrimSpace(validation.AuthoritativeRequestID)
+			if authoritative == "" || strings.TrimSpace(operation.ReusedEvidenceID) != authoritative {
+				continue
+			}
+		} else if reused := strings.TrimSpace(operation.ReusedEvidenceID); reused != "" && reused != validation.RequestID {
+			continue
+		}
+		return operation, validation, nil
+	}
+	return domain.PublicationOperation{}, domain.ValidationRequest{}, fmt.Errorf("exact synthetic merge %s requires its completed non-emergency publication operation and repository push-gate request for policy %s, command %q, and environment %s", wantTarget, strings.TrimSpace(policyVersion), wantCommand, strings.TrimSpace(environmentFingerprint))
 }
 
 func (d *Daemon) evaluateCurrentPublicationEvidence(ctx context.Context, projectID, issueID string, now time.Time) (domain.PublicationEvidenceSnapshot, []domain.PublicationEvidenceAssessment, error) {
