@@ -80,7 +80,7 @@ func (a daemonOrchestrationAuthority) reviewQueue(ctx context.Context, projectID
 	if !usesProjectionSource(sourceForInvariant(daemonInvariantOrchestrationReview)) {
 		return nil, nil
 	}
-	actionableTasks := orchestrationReviewScopeTasks(tasks, request.Scope)
+	actionableTasks := orchestrationReviewScopeTasks(tasks, request.Scope, request.ReviewIssueIDs)
 	acceptedCloseCandidates := make([]string, 0)
 	for _, task := range actionableTasks {
 		if reviewOutcomeLookupCandidate(task) {
@@ -180,15 +180,22 @@ func reviewWorktreeRefreshIssueIDs(reviewTasks, allTasks []domain.Task) []string
 	return ids
 }
 
-func orchestrationReviewScopeTasks(tasks []domain.Task, scope domain.OrchestrationScope) []domain.Task {
-	if scope.Kind != domain.OrchestrationScopeRooted {
-		return tasks
+func orchestrationReviewScopeTasks(tasks []domain.Task, scope domain.OrchestrationScope, requestedIssueIDs []string) []domain.Task {
+	requested := make(map[string]struct{}, len(requestedIssueIDs))
+	for _, issueID := range requestedIssueIDs {
+		requested[strings.TrimSpace(issueID)] = struct{}{}
 	}
 	out := make([]domain.Task, 0)
 	for _, task := range tasks {
-		if task.ParentID != nil && !task.ParentID.IsZero() && naming.IssueIDsEqual(task.ParentID.String(), scope.RootIssueID.String()) {
-			out = append(out, task)
+		if len(requested) > 0 {
+			if _, ok := requested[task.ID.String()]; !ok {
+				continue
+			}
 		}
+		if scope.Kind == domain.OrchestrationScopeRooted && (task.ParentID == nil || task.ParentID.IsZero() || !naming.IssueIDsEqual(task.ParentID.String(), scope.RootIssueID.String())) {
+			continue
+		}
+		out = append(out, task)
 	}
 	return out
 }
@@ -320,7 +327,7 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 	}
 	a.daemon.orchestrationMu.Lock()
 	defer a.daemon.orchestrationMu.Unlock()
-	snapshot, err := a.Snapshot(ctx, projectID, protocol.OrchestrationSnapshotRequest{Scope: request.Scope, ActorID: request.ActorID, RepoDir: request.RepoDir})
+	snapshot, err := a.Snapshot(ctx, projectID, protocol.OrchestrationSnapshotRequest{Scope: request.Scope, ActorID: request.ActorID, RepoDir: request.RepoDir, ReviewIssueIDs: request.IssueIDs})
 	if err != nil {
 		return protocol.OrchestrationIntentResult{}, err
 	}
