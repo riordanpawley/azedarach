@@ -95,6 +95,9 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			if err = validateAgentInputDeliverySchema(ctx, db); err != nil {
 				t.Fatal(err)
 			}
+			if err = validateOrchestrationStartIntentsSchema(ctx, db); err != nil {
+				t.Fatal(err)
+			}
 			if err = validateProjectionDeltaAuthoritySchema(ctx, db); err != nil {
 				t.Fatal(err)
 			}
@@ -129,6 +132,9 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			}
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, agentInputDeliveryMigrationID).Scan(&checksum); err != nil || checksum != agentInputDeliveryMigrationChecksum {
 				t.Fatalf("agent input checksum=%q err=%v", checksum, err)
+			}
+			if err = db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, orchestrationStartIntentsMigrationID, orchestrationStartIntentsMigrationChecksum).Scan(&ledgerRows); err != nil || ledgerRows != 1 {
+				t.Fatalf("orchestration start intents ledger rows=%d err=%v", ledgerRows, err)
 			}
 			if err = db.QueryRow(`SELECT artifact_checksum FROM schema_migrations WHERE id=?`, decisionIdempotencyMigrationID).Scan(&checksum); err != nil || checksum != "86d5400fe33bbc19e7e848bc232335809f76d85e4d45a6e45f6bc7ff77547f47" {
 				t.Fatalf("decision idempotency checksum=%q err=%v", checksum, err)
@@ -238,6 +244,12 @@ func TestRealProjectDatabaseMigrationClones(t *testing.T) {
 			}
 			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, agentInputDeliveryMigrationID, agentInputDeliveryMigrationChecksum).Scan(&ledgerRows); err != nil || ledgerRows != 1 {
 				t.Fatalf("agent input delivery ledger rows after reopen=%d err=%v", ledgerRows, err)
+			}
+			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, orchestrationStartIntentsMigrationID, orchestrationStartIntentsMigrationChecksum).Scan(&ledgerRows); err != nil || ledgerRows != 1 {
+				t.Fatalf("orchestration start intents ledger rows after reopen=%d err=%v", ledgerRows, err)
+			}
+			if err = validateOrchestrationStartIntentsSchema(ctx, reopenedDB); err != nil {
+				t.Fatal(err)
 			}
 			if err = reopenedDB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, mailboxObservationReplayRepairMigrationID, "c350a53fc470b54dfc90faa7674d22ad20d6c4b631a8f0d528962eb7f7df0966").Scan(&ledgerRows); err != nil || ledgerRows != 1 {
 				t.Fatalf("mailbox replay repair ledger rows after reopen=%d err=%v", ledgerRows, err)

@@ -42,6 +42,7 @@ type migration struct {
 const decisionIdempotencyMigrationID = "0051_decision_idempotency"
 const gitHookRefreshIntentsMigrationID = "0053_git_hook_refresh_intents"
 const orchestrationStartIntentsMigrationID = "0058_orchestration_start_intents"
+const orchestrationStartIntentsMigrationChecksum = "68b5ca7149782ade0701bd684e23379145b312805e022ad33e5f267c29cc3a00"
 
 const mailboxObservationReplayRepairMaxRows = 50000
 const legacyAttachmentBlobForwardMigrationID = "0056_legacy_attachment_blob_forward"
@@ -177,7 +178,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: mailboxObservationReplayRepairMigrationID, Path: "migrations/0055_mailbox_observation_replay_repair.manifest.sql", Checksum: "c350a53fc470b54dfc90faa7674d22ad20d6c4b631a8f0d528962eb7f7df0966"},
 	{ID: legacyAttachmentBlobForwardMigrationID, Path: "migrations/0056_legacy_attachment_blob_forward.manifest.sql", Checksum: "c6450a27423e68ebf4b662d485466a726ebcf3208c2858f2cb0f65c6efc6a62a"},
 	{ID: agentInputDeliveryMigrationID, Path: "migrations/0057_agent_input_delivery.sql", Checksum: agentInputDeliveryMigrationChecksum},
-	{ID: orchestrationStartIntentsMigrationID, Path: "migrations/0058_orchestration_start_intents.sql", Checksum: "68b5ca7149782ade0701bd684e23379145b312805e022ad33e5f267c29cc3a00"},
+	{ID: orchestrationStartIntentsMigrationID, Path: "migrations/0058_orchestration_start_intents.sql", Checksum: orchestrationStartIntentsMigrationChecksum},
 }
 
 func validateMigrationRegistry() error {
