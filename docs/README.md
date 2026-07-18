@@ -42,6 +42,7 @@ This directory primarily contains **developer/internal documentation**.
 - [26-test-timing-profiles.md](26-test-timing-profiles.md)
 - [27-go-cache-protocol.md](27-go-cache-protocol.md) — bounded worktree-aware Go cache ownership, validation, and maintenance
 - [28-decision-markdown-sync.md](28-decision-markdown-sync.md) — worktree-safe decision store/export authority and recovery workflow
+- [29-native-agent-input-authority.md](29-native-agent-input-authority.md) — exact-incarnation native delivery and fail-closed tool capability contract
 - [29-ticket-event-history-query.md](29-ticket-event-history-query.md) — searchable, cursor-pageable ticket observation history
 - [adr/1-daemon-ownership-adr.md](adr/1-daemon-ownership-adr.md)
 - [adr/2-daemon-owned-async-notices.md](adr/2-daemon-owned-async-notices.md)
@@ -62,6 +63,8 @@ This directory primarily contains **developer/internal documentation**.
 - `session.issue_lifecycle_runtime`: `hybrid` (refreshed factored issue state + live tmux; ready+idle is repaired to working, while backlog/terminal/archived divergence is preserved for explicit reconciliation).
 - `session.activity_convergence`: `hybrid` (refreshed durable activity/runtime projections + bounded live tmux prompt probe; newer hook evidence wins races).
 - `session.managed_agent_identity`: `hybrid` (refreshed durable logical-pane/process incarnation + exact live tmux pane/PID comparison; stale or reused identities fail closed).
+- `session.managed_agent_restart`: `hybrid` (refreshed durable managed-agent identity + exact live tmux pane/PID preflight, followed by canonical exact-pane replacement and distinct hook-acknowledged live incarnation proof before success).
+- `session.agent_input_delivery`: `hybrid` (durable incarnation-bound intent/lease + refreshed identity and hook readiness + direct exact-thread app-server submission behind a daemon-managed tmux attached-client read-only gate; tmux capture/send/paste cannot acknowledge delivery, uncertain submissions remain ambiguous without automatic retry, and missing gate/app-server proof remains queued).
 - `session.advisor_singleton`: `hybrid` (refreshed interaction/session-role projection + tmux runtime); reconcile recreates missing discussion runtimes, resumes paused projections, removes terminal/orphan reservations, and project removal runs daemon cleanup before unregistering the project.
 - `task.close`, `task.close_preflight`, `task.delete`, `task.delete_preflight`, `task.graph_readiness`, and `task.complete_check`: `hybrid` (durable issue graph/v2 lifecycle and investigation disposition/acceptance evidence projection + live runtime attachment state). Missing investigation disposition remains human-facing; declared internal reviews require accepted reviewer evidence with no later returned findings.
 - `orchestration.project_candidates`: `projection` (bounded durable lifecycle/graph, ownership, session activity, and interaction candidate projection).

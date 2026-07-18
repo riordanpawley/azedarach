@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
@@ -40,6 +41,7 @@ type operationRuntimeConfig struct {
 	sessionStart            func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	sessionStop             func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	sessionResolveConflict  func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	sessionRestartAll       func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	taskBulkCleanup         func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	globalProjectionRebuild func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	onTerminal              func(context.Context, daemonops.Record)
@@ -54,10 +56,15 @@ type operationRuntime struct {
 	hub                     *publish.Hub
 	nextRevision            func(string) uint64
 	store                   *opstore.SQLiteStore
+	operationStore          daemonops.Store
 	manager                 *opmanager.Manager
+	recoverInterrupted      func(context.Context, daemonops.Record) (interruptedOperationRecovery, bool)
+	interruptedMu           sync.Mutex
+	retryableInterrupted    map[string]struct{}
 	sessionStart            func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	sessionStop             func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	sessionResolveConflict  func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	sessionRestartAll       func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	taskBulkCleanup         func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	globalProjectionRebuild func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
 	gitHandler              *daemonhandlers.GitHandler
@@ -150,16 +157,28 @@ func newOperationRuntime(cfg operationRuntimeConfig) *operationRuntime {
 		onTerminal:            cfg.onTerminal,
 	}
 	reconcileInterruptedOperations(context.Background(), adapter, logger, cfg.recoverInterrupted)
+	retryableInterrupted := make(map[string]struct{})
+	if records, err := adapter.List(context.Background(), daemonops.Query{States: []daemonops.State{daemonops.StateQueued, daemonops.StateRunning}}); err != nil {
+		logger.Warn("failed to index retryable interrupted daemon operations", "error", err)
+	} else {
+		for _, record := range records {
+			retryableInterrupted[record.ID] = struct{}{}
+		}
+	}
 	manager := opmanager.New(adapter, opmanager.Config{Logger: logger})
 	return &operationRuntime{
 		logger:                  logger,
 		hub:                     cfg.hub,
 		nextRevision:            cfg.nextRevision,
 		store:                   store,
+		operationStore:          adapter,
 		manager:                 manager,
+		recoverInterrupted:      cfg.recoverInterrupted,
+		retryableInterrupted:    retryableInterrupted,
 		sessionStart:            cfg.sessionStart,
 		sessionStop:             cfg.sessionStop,
 		sessionResolveConflict:  cfg.sessionResolveConflict,
+		sessionRestartAll:       cfg.sessionRestartAll,
 		taskBulkCleanup:         cfg.taskBulkCleanup,
 		globalProjectionRebuild: cfg.globalProjectionRebuild,
 		gitHandler:              cfg.gitHandler,
@@ -187,7 +206,14 @@ func reconcileInterruptedOperations(ctx context.Context, store daemonops.Store, 
 	for _, record := range records {
 		finished := time.Now().UTC()
 		if recover != nil {
-			if recovery, ok := recover(ctx, record); ok {
+			recoveryCtx := daemonops.WithProgressReporter(ctx, func(progressCtx context.Context, progress daemonops.Progress) error {
+				progressCopy := progress
+				_, updateErr := store.Update(progressCtx, daemonops.UpdateParams{
+					ID: record.ID, ToState: record.State, Progress: &progressCopy,
+				})
+				return updateErr
+			})
+			if recovery, ok := recover(recoveryCtx, record); ok {
 				if updateInterruptedOperation(ctx, store, record, recovery, finished, logger) {
 					continue
 				}
@@ -270,6 +296,12 @@ func updateInterruptedOperation(ctx context.Context, store daemonops.Store, reco
 			}
 			return false
 		}
+		return true
+	case daemonops.StateQueued, daemonops.StateRunning:
+		// Recovery can deliberately retain an interrupted operation as active when
+		// its exact side effect is complete but a retryable acknowledgement write
+		// has not converged. A matching submission will retry recovery against this
+		// durable record before any new runner is admitted.
 		return true
 	default:
 		return false
@@ -443,6 +475,12 @@ func (r *operationRuntime) handleOperationSubmit(ctx context.Context, req protoc
 		spanErr = err
 		return r.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error())
 	}
+	if recovered, found, recoverErr := r.reconcileMatchingInterruptedOperation(ctx, submitReq, body.Payload); recoverErr != nil {
+		spanErr = recoverErr
+		return r.errorResponse(req, protocol.ErrorCodeInternal, recoverErr.Error())
+	} else if found {
+		return r.operationSubmitResponse(req, body.Payload, daemonops.SubmitResult{Record: recovered, Deduped: true})
+	}
 	submitResult, submitErr := r.manager.Submit(ctx, submitReq, func(runCtx context.Context) ([]byte, error) {
 		runCtx, endRunSpan := latencytrace.StartSpan(runCtx, "daemon", "operation.run", "command", body.Kind, "project_id", projectID)
 		var runSpanErr error
@@ -481,22 +519,109 @@ func (r *operationRuntime) handleOperationSubmit(ctx context.Context, req protoc
 		return r.errorResponse(req, mapOperationSubmitErrorCode(submitErr), submitErr.Error())
 	}
 
+	return r.operationSubmitResponse(req, body.Payload, submitResult)
+}
+
+func (r *operationRuntime) reconcileMatchingInterruptedOperation(ctx context.Context, req daemonops.SubmitRequest, payload []byte) (daemonops.Record, bool, error) {
+	if req.Kind != protocol.CommandSessionRestartAll || r.recoverInterrupted == nil || r.operationStore == nil {
+		return daemonops.Record{}, false, nil
+	}
+	r.interruptedMu.Lock()
+	defer r.interruptedMu.Unlock()
+	records, err := r.operationStore.List(ctx, daemonops.Query{
+		Kind:   req.Kind,
+		States: []daemonops.State{daemonops.StateQueued, daemonops.StateRunning},
+	})
+	if err != nil {
+		return daemonops.Record{}, false, fmt.Errorf("list retryable interrupted operations: %w", err)
+	}
+	var conflictingID string
+	for _, record := range records {
+		if _, retryable := r.retryableInterrupted[record.ID]; !retryable {
+			continue
+		}
+		if !r.sessionRestartRecoveryRequestMatches(record, req.ProjectID, payload) {
+			conflictingID = record.ID
+			continue
+		}
+		recoveryCtx := daemonops.WithProgressReporter(ctx, func(progressCtx context.Context, progress daemonops.Progress) error {
+			progressCopy := progress
+			_, updateErr := r.operationStore.Update(progressCtx, daemonops.UpdateParams{
+				ID: record.ID, ToState: record.State, Progress: &progressCopy,
+			})
+			return updateErr
+		})
+		recovery, ok := r.recoverInterrupted(recoveryCtx, record)
+		if !ok {
+			return record, true, nil
+		}
+		if !updateInterruptedOperation(ctx, r.operationStore, record, recovery, time.Now().UTC(), r.logger) {
+			if current, readErr := r.operationStore.Get(ctx, record.ID); readErr == nil && (current.State == daemonops.StateDone || current.State == daemonops.StateFailed || current.State == daemonops.StateCancelled) {
+				delete(r.retryableInterrupted, record.ID)
+				return current, true, nil
+			}
+			return daemonops.Record{}, true, fmt.Errorf("persist retried interrupted operation %s", record.ID)
+		}
+		updated, err := r.operationStore.Get(ctx, record.ID)
+		if err != nil {
+			return daemonops.Record{}, true, fmt.Errorf("read retried interrupted operation %s: %w", record.ID, err)
+		}
+		if updated.State == daemonops.StateDone || updated.State == daemonops.StateFailed || updated.State == daemonops.StateCancelled {
+			delete(r.retryableInterrupted, record.ID)
+		}
+		return updated, true, nil
+	}
+	if conflictingID != "" {
+		return daemonops.Record{}, true, fmt.Errorf("interrupted restart operation %s must be recovered before a different restart request", conflictingID)
+	}
+	return daemonops.Record{}, false, nil
+}
+
+func (r *operationRuntime) sessionRestartRecoveryRequestMatches(record daemonops.Record, submittedProjectID string, payload []byte) bool {
+	batch, ok := decodeSessionRestartBatchPlan(record)
+	if !ok {
+		return false
+	}
+	var submitted protocol.SessionRestartAllRequestBody
+	if err := json.Unmarshal(payload, &submitted); err != nil {
+		return false
+	}
+	if strings.TrimSpace(submitted.ProjectID.String()) != "" {
+		submittedProjectID = submitted.ProjectID.String()
+	}
+	durableProjectID := batch.Request.ProjectID.String()
+	if strings.TrimSpace(durableProjectID) == "" {
+		durableProjectID = record.ProjectID
+	}
+	if r.canonicalizeProjectID(submittedProjectID) != r.canonicalizeProjectID(durableProjectID) ||
+		submitted.ForceBusy != batch.Request.ForceBusy || submitted.Yolo != batch.Request.Yolo ||
+		len(submitted.ImagePaths) != len(batch.Request.ImagePaths) {
+		return false
+	}
+	for i := range submitted.ImagePaths {
+		if submitted.ImagePaths[i] != batch.Request.ImagePaths[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *operationRuntime) operationSubmitResponse(req protocol.RequestEnvelope, payload []byte, submitResult daemonops.SubmitResult) protocol.ResponseEnvelope {
 	resp := r.successResponse(req)
 	record := r.toProtocolRecord(submitResult.Record)
-	record.Payload = append(json.RawMessage(nil), body.Payload...)
+	record.Payload = append(json.RawMessage(nil), payload...)
 	encoded, err := json.Marshal(protocol.OperationSubmitResponseBody{
 		Created:   !submitResult.Deduped,
 		Operation: record,
 	})
 	if err != nil {
-		spanErr = err
 		return r.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("marshal operation submit response: %v", err))
 	}
 	resp.Body = encoded
 	if r.logger != nil {
 		r.logger.Info("daemon operation submit completed",
-			"project_id", projectID,
-			"kind", body.Kind,
+			"project_id", submitResult.Record.ProjectID,
+			"kind", submitResult.Record.Kind,
 			"operation_id", record.OperationID,
 			"created", !submitResult.Deduped,
 			"state", record.State,
@@ -686,10 +811,11 @@ func (r *operationRuntime) buildSubmitRequest(kind, projectID string, payload []
 		resourceKeys = []string{"operation:" + kind}
 	}
 	recentDedupeWindow := 30 * time.Second
-	if kind == protocol.CommandTaskBulkCleanup || kind == daemonhandlers.CommandGitMerge {
+	if kind == protocol.CommandTaskBulkCleanup || kind == protocol.CommandSessionRestartAll || kind == daemonhandlers.CommandGitMerge {
 		// Coalesce identical concurrent submissions, but let a completed batch be
-		// retried immediately so per-item failures and revision-sensitive typed
-		// merges can make progress against refreshed authority.
+		// retried immediately so per-item failures, lost restart completion checkpoints,
+		// and revision-sensitive typed merges can make progress against refreshed authority.
+		// Active dedupe still returns the one in-flight operation.
 		recentDedupeWindow = 0
 	}
 	if kind == protocol.CommandGlobalProjectionRebuild {
@@ -764,6 +890,14 @@ func (r *operationRuntime) deriveOperationRouting(kind, projectID string, payloa
 		}
 		dedupeKey = kind + ":" + issueID
 		return issueID, resourceKeys, dedupeKey, nil
+	case protocol.CommandSessionRestartAll:
+		var body protocol.SessionRestartAllRequestBody
+		if err = json.Unmarshal(payload, &body); err != nil {
+			return "", nil, "", fmt.Errorf("decode %s payload: %w", kind, err)
+		}
+		projectID = r.coalesceProjectID(body.ProjectID.String(), projectID)
+		digest := sha256.Sum256(payload)
+		return "", []string{"project:" + projectID + ":session-restart"}, fmt.Sprintf("%s:%x", kind, digest), nil
 	case daemonhandlers.CommandGitFetch, daemonhandlers.CommandGitPullBase, daemonhandlers.CommandGitPush:
 		var body struct {
 			Worktree   string `json:"worktree"`
@@ -972,6 +1106,11 @@ func (r *operationRuntime) directRunnerForKind(kind string) (operationDirectRunn
 			return nil, errors.New("session.resolve_conflict handler unavailable")
 		}
 		return r.sessionResolveConflict, nil
+	case protocol.CommandSessionRestartAll:
+		if r.sessionRestartAll == nil {
+			return nil, errors.New("session.restart_all handler unavailable")
+		}
+		return r.sessionRestartAll, nil
 	case daemonhandlers.CommandGitFetch,
 		daemonhandlers.CommandGitPullBase,
 		daemonhandlers.CommandGitPush,

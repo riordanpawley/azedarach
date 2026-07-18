@@ -517,6 +517,12 @@ func TestCommandRuntimeReconcileRoutesToManualRepair(t *testing.T) {
 	if got := out.InvariantSources[string(daemonInvariantManagedAgentIdentity)]; got != string(daemonInvariantSourceHybrid) {
 		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantManagedAgentIdentity, got, daemonInvariantSourceHybrid)
 	}
+	if got := out.InvariantSources[string(daemonInvariantManagedAgentRestart)]; got != string(daemonInvariantSourceHybrid) {
+		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantManagedAgentRestart, got, daemonInvariantSourceHybrid)
+	}
+	if got := out.InvariantSources[string(daemonInvariantAgentInputDelivery)]; got != string(daemonInvariantSourceHybrid) {
+		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantAgentInputDelivery, got, daemonInvariantSourceHybrid)
+	}
 	if got := out.InvariantSources[string(daemonInvariantValidationCapacity)]; got != string(daemonInvariantSourceProjection) {
 		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantValidationCapacity, got, daemonInvariantSourceProjection)
 	}

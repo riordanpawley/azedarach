@@ -879,6 +879,8 @@ type Client struct {
 	projectionNotifierSubscriptions      map[*projectionDeltaSubscription]struct{}
 	projectionNotifierWG                 sync.WaitGroup
 	decisionOutboxMigrationFailureHook   func(stage string) error
+	agentInputMigrationFailureHook     func(stage string) error
+	migrationCeiling                   string // test-only historical startup seam; empty in production
 	decisionIdempotencyFailureHook       func(stage string) error
 	eventSearchMigrationFailureHook      func(stage string) error
 	legacyAttachmentMigrationFailureHook func(stage string) error

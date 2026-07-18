@@ -111,6 +111,18 @@ func TestClient_NewSession(t *testing.T) {
 	}
 }
 
+func TestClientRespawnPaneTargetsOnlyExactPane(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(runner, slog.Default())
+	if err := client.RespawnPane(context.Background(), "%12", "/tmp/worktree", "exec /tmp/restart.sh"); err != nil {
+		t.Fatalf("RespawnPane: %v", err)
+	}
+	want := [][]string{{"respawn-pane", "-k", "-t", "%12", "-c", "/tmp/worktree", "exec /tmp/restart.sh"}}
+	if !reflect.DeepEqual(runner.commands, want) {
+		t.Fatalf("commands = %#v, want %#v", runner.commands, want)
+	}
+}
+
 func TestClient_NewSessionWithCommand(t *testing.T) {
 	runner := &recordingRunner{}
 	client := NewClient(runner, slog.Default())
