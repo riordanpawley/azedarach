@@ -890,6 +890,15 @@ func (f *fakeDaemonTransport) Handshake(ctx context.Context, hello protocol.Hell
 
 func (f *fakeDaemonTransport) Command(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	if req.Command == protocol.CommandOrchestrationIntent && !f.passOrchestrationIntent {
+		if len(f.lastGraphReadiness.Runnable) == 0 && len(f.lastGraphReadiness.Active) == 0 && len(f.lastGraphReadiness.NestedRoots) == 0 && len(f.lastGraphReadiness.Blocked) == 0 && f.commandFn != nil {
+			readinessReq := req
+			readinessReq.Command = daemonclient.CommandTaskGraphReadiness
+			if resp, err := f.commandFn(ctx, readinessReq); err != nil {
+				return protocol.ResponseEnvelope{}, err
+			} else if resp.OK {
+				_ = json.Unmarshal(resp.Body, &f.lastGraphReadiness)
+			}
+		}
 		return f.emulateOrchestrationIntent(ctx, req)
 	}
 	if f.commandFn != nil {

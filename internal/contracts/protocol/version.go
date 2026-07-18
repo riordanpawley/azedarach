@@ -5,5 +5,5 @@ type Version uint16
 
 const (
 	// CurrentVersion is the latest protocol contract supported by this build.
-	CurrentVersion Version = 57
+	CurrentVersion Version = 58
 )

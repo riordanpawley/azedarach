@@ -7,9 +7,9 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
-func TestProtocolV57PreservesCombinedOrchestrationViewProjectionDecisionLearningAndTypedMergeContracts(t *testing.T) {
-	if CurrentVersion != 57 {
-		t.Fatalf("protocol version = %d, want 57", CurrentVersion)
+func TestProtocolV58PreservesCombinedOrchestrationViewProjectionDecisionLearningAndTypedMergeContracts(t *testing.T) {
+	if CurrentVersion != 58 {
+		t.Fatalf("protocol version = %d, want 58", CurrentVersion)
 	}
 	if CommandOrchestratorSessionStart == "" || CommandOrchestratorSessionAttach == "" || CommandOrchestratorSessionStop == "" || CommandOrchestratorSessionStatus == "" || EventOrchestrationLoopUpdated == "" || EventBoardViewChanged == "" {
 		t.Fatal("combined orchestration and board-view protocol contracts must remain registered")
@@ -64,6 +64,20 @@ func TestProtocolV57PreservesCombinedOrchestrationViewProjectionDecisionLearning
 	for _, key := range []string{"findings", "restart_worker", "routes"} {
 		if _, ok := shape[key]; !ok {
 			t.Fatalf("combined intent omitted %q: %s", key, encoded)
+		}
+	}
+	pending := OrchestrationPending{IssueID: "candidate", Phase: "operations_store", Message: "queued", Retryable: true}
+	encoded, err = json.Marshal(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shape = map[string]json.RawMessage{}
+	if err := json.Unmarshal(encoded, &shape); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"phase", "message", "retryable"} {
+		if _, ok := shape[key]; !ok {
+			t.Fatalf("queued start progress omitted %q: %s", key, encoded)
 		}
 	}
 

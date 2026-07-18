@@ -65,15 +65,56 @@ func TestParseOrchestrateStatusArgs_AllowsResolvedScope(t *testing.T) {
 }
 
 func TestParseOrchestrateStartArgs_DefaultLimitAndIssues(t *testing.T) {
-	opts, err := ParseOrchestrateStartArgs([]string{"--root", "az-123", "--issue", "az-3", "--issue", "az-2", "--issue", "az-3"})
+	opts, err := ParseOrchestrateStartArgs([]string{"--root", "az-123", "--intent-key", " retry-start ", "--issue", "az-3", "--issue", "az-2", "--issue", "az-3"})
 	if err != nil {
 		t.Fatalf("ParseOrchestrateStartArgs error = %v", err)
 	}
 	if opts.Limit != 3 {
 		t.Fatalf("Limit = %d, want 3", opts.Limit)
 	}
+	if opts.IntentKey != "retry-start" {
+		t.Fatalf("IntentKey = %q", opts.IntentKey)
+	}
 	if len(opts.IssueIDs) != 2 || opts.IssueIDs[0] != "az-2" || opts.IssueIDs[1] != "az-3" {
 		t.Fatalf("IssueIDs = %+v, want [az-2 az-3]", opts.IssueIDs)
+	}
+}
+
+func TestOrchestrateStartRetryCommandPreservesExplicitScope(t *testing.T) {
+	got := orchestrateStartRetryCommand(OrchestrateStartOptions{Project: "project one", RootIssueID: "az-root", Limit: 2, IssueIDs: []string{"az-2", "az-3"}, OverrideBoardHealth: true}, "intent 'one'")
+	want := "az orchestrate start --project 'project one' --root 'az-root' --limit 2 --intent-key 'intent '\"'\"'one'\"'\"'' --issue 'az-2' --issue 'az-3' --override-board-health"
+	if got != want {
+		t.Fatalf("retry command=%q want=%q", got, want)
+	}
+}
+
+func TestOrchestrateStartQueuesIntentBeforeContendedReadiness(t *testing.T) {
+	commands := []string{}
+	transport := &fakeDaemonTransport{
+		passOrchestrationIntent: true,
+		commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			commands = append(commands, req.Command)
+			switch req.Command {
+			case protocol.CommandOrchestrationIntent:
+				return responseWithJSON(req, protocol.OrchestrationIntentResult{IntentKey: "stable", Requested: []string{"az-2"}, Pending: []protocol.OrchestrationPending{{IssueID: "az-2", Phase: protocol.OrchestrationAdmissionOperationsStore, Retryable: true}}}), nil
+			case daemonclient.CommandTaskGraphReadiness:
+				return protocol.ResponseEnvelope{ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID, Kind: protocol.EnvelopeKindResponse, OK: false, Error: &protocol.ErrorEnvelope{Code: protocol.ErrorCodeUnavailable, Message: "operations store contended", Retryable: true}}, nil
+			default:
+				t.Fatalf("unexpected command: %s", req.Command)
+			}
+			return protocol.ResponseEnvelope{}, nil
+		},
+	}
+	deps := &Dependencies{RepoDir: "/repo", ProjectID: protocol.DefaultProjectID, DaemonClient: daemonclient.New(transport)}
+	result, err := orchestrateStart(deps, OrchestrateStartOptions{RootIssueID: "az-1", IssueIDs: []string{"az-2"}, Limit: 1, IntentKey: "stable"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commands) < 2 || commands[0] != protocol.CommandOrchestrationIntent || commands[1] != daemonclient.CommandTaskGraphReadiness {
+		t.Fatalf("command order=%v", commands)
+	}
+	if len(result.Pending) != 1 || !strings.Contains(result.Pending[0].Reason, "operations_store") || len(result.Warnings) == 0 || !strings.Contains(result.Warnings[len(result.Warnings)-1], "readiness projection remains unavailable") {
+		t.Fatalf("result=%+v", result)
 	}
 }
 
