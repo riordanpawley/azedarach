@@ -614,6 +614,38 @@ func TestMergeGateBudgetLeavesFinalizationReserve(t *testing.T) {
 	}
 }
 
+func writeMergeGateFixtureSupport(t *testing.T, scriptsDir string) {
+	t.Helper()
+	publisher, err := os.ReadFile(filepath.Join("..", "..", "..", "scripts", "publish-validation-artifacts"))
+	if err != nil {
+		t.Fatalf("read validation artifact publisher: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scriptsDir, "publish-validation-artifacts"), publisher, 0o755); err != nil {
+		t.Fatalf("write validation artifact publisher: %v", err)
+	}
+	wrapper := `#!/bin/sh
+set -eu
+publication="${AZEDARACH_VALIDATION_PUBLICATION_EVIDENCE:?}"
+issue="${AZEDARACH_CANDIDATE_ISSUE_ID:-}"
+request="${AZEDARACH_VALIDATION_REQUEST_ID:-req-123}"
+revision="$(git rev-parse HEAD)"
+temporary="$publication.tmp.$$"
+printf '{"held":true,"request_id":"%s","source_revision":"%s","publication_nonce":"fixture-nonce","issue_id":"%s"}\n' "$request" "$revision" "$issue" >"$temporary"
+mv "$temporary" "$publication"
+unset AZEDARACH_VALIDATION_PUBLICATION_EVIDENCE AZEDARACH_CANDIDATE_ISSUE_ID
+export AZEDARACH_VALIDATION_REQUEST_ID="$request"
+export AZEDARACH_VALIDATION_SOURCE_REVISION="$revision"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--" ]; then shift; break; fi
+  shift
+done
+exec "$@"
+`
+	if err := os.WriteFile(filepath.Join(scriptsDir, "with-machine-validation-lease"), []byte(wrapper), 0o755); err != nil {
+		t.Fatalf("write validation wrapper fixture: %v", err)
+	}
+}
+
 func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
 	// A direct synthetic body isolates wrapper timeout/output semantics from
 	// task-runner and Go startup scheduling. Use a long safety budget, then
@@ -658,6 +690,7 @@ func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
 			t.Fatalf("write %s: %v", name, writeErr)
 		}
 	}
+	writeMergeGateFixtureSupport(t, scriptsDir)
 	fakeBin := filepath.Join(repo, "fake-bin")
 	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
 		t.Fatalf("mkdir fake bin: %v", err)
@@ -824,7 +857,12 @@ func TestMergeGateFailsClosedOnCandidateMismatch(t *testing.T) {
 	if err := os.WriteFile(gatePath, gate, 0o755); err != nil {
 		t.Fatalf("write merge gate: %v", err)
 	}
+	writeMergeGateFixtureSupport(t, scriptsDir)
 	observedHead := strings.TrimSpace(runGitOutput(t, repo, "rev-parse", "HEAD"))
+	canonicalRepo, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatalf("canonicalize fixture repository: %v", err)
+	}
 	cmd := exec.Command(gatePath)
 	cmd.Dir = repo
 	cmd.Env = gitEnvWithOverrides(sanitizedGitEnv(os.Environ()), []string{
@@ -837,9 +875,10 @@ func TestMergeGateFailsClosedOnCandidateMismatch(t *testing.T) {
 	}
 	for _, want := range []string{
 		"candidate_head=" + candidateHead,
-		"observed_head=" + observedHead,
+		"observed HEAD " + observedHead,
 		"canonical=false",
-		"reason=head-mismatch-before-start",
+		"phase=head_mismatch_before_start",
+		"artifacts=" + filepath.Join(canonicalRepo, ".azedarach", "validation-artifacts", "failures", candidateHead),
 	} {
 		if !strings.Contains(string(output), want) {
 			t.Fatalf("merge gate output = %q, want %q", output, want)
@@ -871,7 +910,8 @@ func TestMergeGateFailureSurfacesPublishedArtifactReference(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"), gate, 0o755); err != nil {
 		t.Fatalf("write merge gate: %v", err)
 	}
-	body := "#!/bin/sh\nset -eu\nprintf '[gate] validation_request=req-123 candidate_head=candidate-123 failure=example/broken::TestRetained artifacts=/durable/artifacts/req-123\\n' >\"$AZEDARACH_CANDIDATE_ARTIFACT_RESULT_FILE\"\nexit 1\n"
+	writeMergeGateFixtureSupport(t, scriptsDir)
+	body := "#!/bin/sh\nset -eu\necho exact synthetic validation failure\nexit 1\n"
 	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate-body.sh"), []byte(body), 0o755); err != nil {
 		t.Fatalf("write merge gate body: %v", err)
 	}
@@ -885,7 +925,12 @@ func TestMergeGateFailureSurfacesPublishedArtifactReference(t *testing.T) {
 	if runErr == nil {
 		t.Fatalf("merge gate error = nil, output=%s", output)
 	}
-	for _, detail := range []string{"validation_request=req-123", "failure=example/broken::TestRetained", "artifacts=/durable/artifacts/req-123"} {
+	canonicalRepo, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatalf("canonicalize fixture repository: %v", err)
+	}
+	wantArtifactRoot := filepath.Join(canonicalRepo, ".azedarach", "validation-artifacts", "failures")
+	for _, detail := range []string{"validation_request=req-123", "failure=validation_payload: validation payload exited 1", "artifacts=" + wantArtifactRoot} {
 		if !strings.Contains(string(output), detail) {
 			t.Fatalf("merge gate output = %q, want %q", output, detail)
 		}

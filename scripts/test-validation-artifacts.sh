@@ -2,159 +2,163 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+publisher="$repo_root/scripts/publish-validation-artifacts"
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/azedarach-validation-artifacts.XXXXXX")"
 fixture="$(cd "$fixture" && pwd -P)"
 trap 'rm -rf "$fixture"' EXIT
 
 project_root="$fixture/project"
 scratch_root="$fixture/scratch"
+control_root="$fixture/control"
 report_dir="$scratch_root/.tmp/test-timing/cold-run"
-mkdir -p "$project_root/.azedarach/validation-artifacts/failures" "$report_dir"
+mkdir -m 700 -p "$project_root" "$scratch_root" "$control_root" "$report_dir"
 
 cat >"$report_dir/report.json" <<EOF
-{
-  "exit_code": 1,
-  "raw_json_path": "$report_dir/events.jsonl",
-  "stderr_path": "$report_dir/stderr.txt",
-  "failures": [
-    {"package": "example/broken", "output": "FAIL example/broken"},
-    {"package": "example/broken", "test": "TestRetained", "output": "retained assertion failed"}
-  ]
-}
+{"exit_code":1,"raw_json_path":"$report_dir/events.jsonl","stderr_path":"$report_dir/stderr.txt","failures":[{"package":"example/broken","test":"TestRetained","output":"retained assertion failed"}]}
 EOF
-printf '# failed report\n\nRaw events: `%s`; stderr: `%s`\n' "$report_dir/events.jsonl" "$report_dir/stderr.txt" >"$report_dir/report.md"
+printf '# failed report\n' >"$report_dir/report.md"
 printf '{"Action":"fail","Package":"example/broken","Test":"TestRetained"}\n' >"$report_dir/events.jsonl"
 printf 'test stderr detail\n' >"$report_dir/stderr.txt"
-printf '[gate] build started\n[gate] failing boundary detail\n' >"$scratch_root/gate-output.log"
+printf '[gate] build started\n[gate] failing boundary detail\n' >"$control_root/gate-output.log"
 
 request_id="dov-123-request"
 revision="0123456789abcdef0123456789abcdef01234567"
-evidence="$fixture/evidence.json"
-result="$fixture/result.txt"
+evidence="$control_root/evidence.json"
 cat >"$evidence" <<EOF
-{"held":true,"request_id":"$request_id","class":"aggregate","profile":"merge-gate","source_revision":"$revision","present":true,"report_path":"$report_dir/report.json","report_paths":["$report_dir/report.json"],"overlap_detected":false,"external_go_processes":0}
+{"held":true,"request_id":"$request_id","source_revision":"$revision","publication_nonce":"fixture-nonce","issue_id":"dov","reviewer_id":"reviewer-1","review_epoch_event_id":42,"report_path":"$report_dir/report.json","report_paths":["$report_dir/report.json"]}
 EOF
 
-"$repo_root/scripts/publish-validation-artifacts" \
+result="$($publisher \
   --project-root "$project_root" \
   --candidate-root "$scratch_root" \
+  --control-root "$control_root" \
   --evidence "$evidence" \
-  --gate-output "$scratch_root/gate-output.log" \
+  --gate-output "$control_root/gate-output.log" \
   --request "$request_id" \
   --revision "$revision" \
-  --issue dov \
-  --exit-code 1 \
-  --result "$result"
+  --exit-code 1)"
 
 artifact_dir="$project_root/.azedarach/validation-artifacts/failures/$revision/$request_id"
 test -f "$artifact_dir/manifest.json"
-
-non_test_request="dov-non-test-request"
-non_test_evidence="$fixture/non-test-evidence.json"
-non_test_result="$fixture/non-test-result.txt"
-printf 'fatal boundary command exploded\n' >"$scratch_root/non-test-gate-output.log"
-cat >"$non_test_evidence" <<EOF
-{"held":true,"request_id":"$non_test_request","class":"aggregate","profile":"merge-gate","source_revision":"$revision","present":true,"report_paths":[],"overlap_detected":false,"external_go_processes":0}
-EOF
-"$repo_root/scripts/publish-validation-artifacts" \
-  --project-root "$project_root" \
-  --candidate-root "$scratch_root" \
-  --evidence "$non_test_evidence" \
-  --gate-output "$scratch_root/non-test-gate-output.log" \
-  --request "$non_test_request" \
-  --revision "$revision" \
-  --exit-code 76 \
-  --result "$non_test_result"
-non_test_dir="$project_root/.azedarach/validation-artifacts/failures/$revision/$non_test_request"
-test -f "$non_test_dir/manifest.json"
-grep -q 'failure=fatal boundary command exploded' "$non_test_result"
-grep -q "$non_test_dir/manifest.json" "$non_test_evidence"
-
-failed_publish_request="dov-empty-request"
-failed_publish_evidence="$fixture/failed-publish-evidence.json"
-cat >"$failed_publish_evidence" <<EOF
-{"held":true,"request_id":"$failed_publish_request","class":"aggregate","profile":"merge-gate","source_revision":"$revision","present":true,"report_paths":[],"overlap_detected":false,"external_go_processes":0}
-EOF
-if "$repo_root/scripts/publish-validation-artifacts" \
-  --project-root "$project_root" \
-  --candidate-root "$scratch_root" \
-  --evidence "$failed_publish_evidence" \
-  --gate-output "$scratch_root/missing-gate-output.log" \
-  --request "$failed_publish_request" \
-  --revision "$revision" \
-  --exit-code 1 \
-  --result "$fixture/failed-publish-result.txt" 2>"$fixture/failed-publish.stderr"; then
-  echo "empty failed validation unexpectedly published" >&2
-  exit 1
-fi
-grep -q 'did not produce publishable report or gate output' "$fixture/failed-publish.stderr"
-empty_dir="$project_root/.azedarach/validation-artifacts/failures/$revision/$failed_publish_request"
-test ! -e "$empty_dir"
-test -z "$(find "$(dirname "$empty_dir")" -maxdepth 1 -name "$failed_publish_request.tmp.*" -print -quit)"
-
-outside="$fixture/outside"
-symlink_report_dir="$scratch_root/.tmp/test-timing/symlink-run"
-mkdir -p "$outside" "$symlink_report_dir"
-printf '{"secret":"must-not-copy"}\n' >"$outside/report.json"
-ln -s "$outside/report.json" "$symlink_report_dir/report.json"
-symlink_request="dov-symlink-request"
-symlink_evidence="$fixture/symlink-evidence.json"
-symlink_result="$fixture/symlink-result.txt"
-cat >"$symlink_evidence" <<EOF
-{"held":true,"request_id":"$symlink_request","class":"aggregate","profile":"merge-gate","source_revision":"$revision","present":true,"report_path":"$symlink_report_dir/report.json","report_paths":["$symlink_report_dir/report.json"],"overlap_detected":false,"external_go_processes":0}
-EOF
-"$repo_root/scripts/publish-validation-artifacts" \
-  --project-root "$project_root" \
-  --candidate-root "$scratch_root" \
-  --evidence "$symlink_evidence" \
-  --gate-output "$scratch_root/non-test-gate-output.log" \
-  --request "$symlink_request" \
-  --revision "$revision" \
-  --exit-code 1 \
-  --result "$symlink_result"
-symlink_dir="$project_root/.azedarach/validation-artifacts/failures/$revision/$symlink_request"
-test ! -e "$symlink_dir/reports/001/report.json"
-! grep -R -q 'must-not-copy' "$symlink_dir"
-test -f "$artifact_dir/gate-output.log"
 for name in report.json report.md events.jsonl stderr.txt; do
   test -f "$artifact_dir/reports/001/$name"
 done
-grep -q '"request_id":"dov-123-request"' "$artifact_dir/manifest.json"
-grep -q '"candidate_revision":"0123456789abcdef0123456789abcdef01234567"' "$artifact_dir/manifest.json"
+test -f "$artifact_dir/gate-output.log"
 grep -q 'example/broken::TestRetained' "$artifact_dir/manifest.json"
-grep -q "validation_request=$request_id" "$result"
-grep -q 'failure=example/broken::TestRetained: retained assertion failed' "$result"
-grep -q "artifacts=$artifact_dir" "$result"
-grep -q "$artifact_dir/reports/001/report.json" "$evidence"
+grep -q '"kind":"validation_request"' "$artifact_dir/manifest.json"
 grep -q '"kind":"issue"' "$artifact_dir/manifest.json"
-grep -q '"id":"dov"' "$artifact_dir/manifest.json"
-grep -F -q "\"raw_json_path\":\"$artifact_dir/reports/001/events.jsonl\"" "$artifact_dir/reports/001/report.json"
-grep -F -q "\"stderr_path\":\"$artifact_dir/reports/001/stderr.txt\"" "$artifact_dir/reports/001/report.json"
-grep -q "$artifact_dir/reports/001/events.jsonl" "$artifact_dir/reports/001/report.md"
-grep -q "$artifact_dir/reports/001/stderr.txt" "$artifact_dir/reports/001/report.md"
-! grep -q "$scratch_root" "$artifact_dir/reports/001/report.md"
+grep -q '"kind":"reviewer"' "$artifact_dir/manifest.json"
+grep -q '"kind":"review_epoch"' "$artifact_dir/manifest.json"
+grep -q "validation_request=$request_id" <<<"$result"
+grep -q "artifacts=$artifact_dir" <<<"$result"
+grep -q "$artifact_dir/reports/001/report.json" "$evidence"
 
-orphan="$project_root/.azedarach/validation-artifacts/failures/$revision/orphan-request"
-referenced="$project_root/.azedarach/validation-artifacts/failures/$revision/referenced-request"
-mkdir -p "$orphan" "$referenced"
-printf '{"request_id":"orphan-request","candidate_revision":"%s","created_at":"2000-01-01T00:00:00Z","references":[]}\n' "$revision" >"$orphan/manifest.json"
-printf '{"request_id":"referenced-request","candidate_revision":"%s","created_at":"2000-01-01T00:00:00Z","references":[{"kind":"issue","id":"dov"}]}\n' "$revision" >"$referenced/manifest.json"
+# Repeated publication validates the committed manifest and repairs the control
+# evidence rather than accepting an unverified destination.
+idempotent="$($publisher \
+  --project-root "$project_root" --candidate-root "$scratch_root" \
+  --control-root "$control_root" --evidence "$evidence" \
+  --gate-output "$control_root/gate-output.log" --request "$request_id" \
+  --revision "$revision" --exit-code 1)"
+grep -q "artifacts=$artifact_dir" <<<"$idempotent"
 
-"$repo_root/scripts/publish-validation-artifacts" \
-  --project-root "$project_root" \
-  --prune-only
-
-test ! -e "$orphan"
-test -f "$referenced/manifest.json"
-test -f "$artifact_dir/manifest.json"
-
-for index in $(seq 1 22); do
-  fresh="$project_root/.azedarach/validation-artifacts/failures/$revision/fresh-orphan-$index"
-  mkdir -p "$fresh"
-  printf '{"request_id":"fresh-orphan-%s","candidate_revision":"%s","created_at":"2099-01-01T00:00:00Z","references":[]}\n' "$index" "$revision" >"$fresh/manifest.json"
+# A non-test fatal failure still receives the complete standard bundle.
+fatal_request="dov-fatal-request"
+fatal_evidence="$control_root/fatal-evidence.json"
+cat >"$fatal_evidence" <<EOF
+{"held":true,"request_id":"$fatal_request","source_revision":"$revision","publication_nonce":"fatal-nonce","issue_id":"dov","fatal_phase":"toolchain_configuration","fatal_detail":"required Go toolchain unavailable","report_paths":[]}
+EOF
+fatal_result="$($publisher \
+  --project-root "$project_root" --candidate-root "$scratch_root" \
+  --control-root "$control_root" --evidence "$fatal_evidence" \
+  --gate-output "$control_root/gate-output.log" --request "$fatal_request" \
+  --revision "$revision" --exit-code 76)"
+fatal_dir="$project_root/.azedarach/validation-artifacts/failures/$revision/$fatal_request"
+for name in report.json report.md events.jsonl stderr.txt; do
+  test -f "$fatal_dir/reports/001/$name"
 done
-"$repo_root/scripts/publish-validation-artifacts" --project-root "$project_root" --prune-only
-fresh_count="$(find "$project_root/.azedarach/validation-artifacts/failures/$revision" -maxdepth 1 -type d -name 'fresh-orphan-*' | wc -l | tr -d ' ')"
-test "$fresh_count" = 20
+grep -q 'required Go toolchain unavailable' <<<"$fatal_result"
+grep -q 'required Go toolchain unavailable' "$fatal_dir/reports/001/report.json"
+
+# Candidate-controlled source symlinks are ignored and cannot escape the
+# candidate root; the trusted gate output still produces a standard bundle.
+outside="$fixture/outside"
+mkdir "$outside"
+printf 'must-not-copy\n' >"$outside/report.json"
+symlink_dir="$scratch_root/.tmp/test-timing/symlink-run"
+mkdir -p "$symlink_dir"
+ln -s "$outside/report.json" "$symlink_dir/report.json"
+symlink_request="dov-source-symlink"
+symlink_evidence="$control_root/symlink-evidence.json"
+cat >"$symlink_evidence" <<EOF
+{"request_id":"$symlink_request","source_revision":"$revision","publication_nonce":"symlink-nonce","issue_id":"dov","report_path":"$symlink_dir/report.json"}
+EOF
+$publisher --project-root "$project_root" --candidate-root "$scratch_root" \
+  --control-root "$control_root" --evidence "$symlink_evidence" \
+  --gate-output "$control_root/gate-output.log" --request "$symlink_request" \
+  --revision "$revision" --exit-code 1 >/dev/null
+symlink_bundle="$project_root/.azedarach/validation-artifacts/failures/$revision/$symlink_request/reports/001"
+! grep -R -q 'must-not-copy' "$symlink_bundle"
+
+# Trusted control inputs reject symlinks rather than following them.
+printf 'outside-evidence\n' >"$outside/evidence.json"
+ln -s "$outside/evidence.json" "$control_root/evidence-link.json"
+if $publisher --project-root "$project_root" --candidate-root "$scratch_root" \
+  --control-root "$control_root" --evidence "$control_root/evidence-link.json" \
+  --gate-output "$control_root/gate-output.log" --request bad-control \
+  --revision "$revision" --exit-code 1 2>"$fixture/control-symlink.stderr"; then
+  echo "symlinked control evidence unexpectedly accepted" >&2
+  exit 1
+fi
+grep -q 'control file is unsafe' "$fixture/control-symlink.stderr"
+grep -q 'outside-evidence' "$outside/evidence.json"
+
+# Artifact-root and final-destination symlinks are rejected without touching
+# their targets.
+unsafe_project="$fixture/unsafe-project"
+unsafe_target="$fixture/unsafe-target"
+mkdir "$unsafe_project" "$unsafe_target"
+ln -s "$unsafe_target" "$unsafe_project/.azedarach"
+if $publisher --project-root "$unsafe_project" --prune-only 2>"$fixture/root-symlink.stderr"; then
+  echo "symlinked artifact root unexpectedly accepted" >&2
+  exit 1
+fi
+grep -q 'not a real directory' "$fixture/root-symlink.stderr"
+
+destination_request="dov-destination-symlink"
+destination_evidence="$control_root/destination-evidence.json"
+cat >"$destination_evidence" <<EOF
+{"request_id":"$destination_request","source_revision":"$revision","publication_nonce":"destination-nonce","issue_id":"dov"}
+EOF
+ln -s "$unsafe_target" "$project_root/.azedarach/validation-artifacts/failures/$revision/$destination_request"
+if $publisher --project-root "$project_root" --candidate-root "$scratch_root" \
+  --control-root "$control_root" --evidence "$destination_evidence" \
+  --gate-output "$control_root/gate-output.log" --request "$destination_request" \
+  --revision "$revision" --exit-code 1 2>"$fixture/destination-symlink.stderr"; then
+  echo "symlinked final destination unexpectedly accepted" >&2
+  exit 1
+fi
+grep -q 'existing artifact destination is unsafe' "$fixture/destination-symlink.stderr"
+test -z "$(find "$unsafe_target" -mindepth 1 -print -quit)"
+
+# Existing destinations are checksum-validated on retry.
+printf 'tampered\n' >>"$artifact_dir/reports/001/stderr.txt"
+if $publisher --project-root "$project_root" --candidate-root "$scratch_root" \
+  --control-root "$control_root" --evidence "$evidence" \
+  --gate-output "$control_root/gate-output.log" --request "$request_id" \
+  --revision "$revision" --exit-code 1 2>"$fixture/tamper.stderr"; then
+  echo "tampered committed artifact unexpectedly accepted" >&2
+  exit 1
+fi
+grep -q 'checksum mismatch' "$fixture/tamper.stderr"
+
+# Only unreferenced manual fixtures are pruned; durable request references are
+# always retained.
+orphan="$project_root/.azedarach/validation-artifacts/failures/$revision/orphan-request"
+mkdir "$orphan"
+printf '{"request_id":"orphan-request","candidate_revision":"%s","created_at":"2000-01-01T00:00:00Z","references":[]}\n' "$revision" >"$orphan/manifest.json"
+$publisher --project-root "$project_root" --prune-only
+test ! -e "$orphan"
+test -f "$fatal_dir/manifest.json"
 
 echo "validation artifact retention contract: PASS"

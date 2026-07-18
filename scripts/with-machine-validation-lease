@@ -1,8 +1,9 @@
 #!/usr/bin/env perl
 use strict;
 use warnings;
-use Fcntl qw(F_GETFD F_SETFD FD_CLOEXEC);
+use Fcntl qw(F_GETFD F_SETFD FD_CLOEXEC O_WRONLY O_CREAT O_EXCL);
 use File::Basename qw(basename dirname);
+use File::Spec;
 use File::Temp qw(tempfile);
 use File::Path qw(remove_tree);
 use IO::Select;
@@ -274,6 +275,8 @@ if ($execution eq 'reused' || $execution eq 'joined' || $execution eq 'skipped')
     exit 1;
 }
 die "validation request became $acquired->{state} before execution\n" unless $acquired->{state} eq 'active';
+my $publication_evidence_path = delete($ENV{AZEDARACH_VALIDATION_PUBLICATION_EVIDENCE}) || '';
+my $candidate_issue_id = delete($ENV{AZEDARACH_CANDIDATE_ISSUE_ID}) || ($acquired->{issue_id} || '');
 $ENV{AZEDARACH_VALIDATION_REQUEST_ID} = $request_id;
 $ENV{AZEDARACH_VALIDATION_CLASS} = $class;
 $ENV{AZEDARACH_VALIDATION_PROFILE} = $profile;
@@ -487,38 +490,12 @@ merge_whole_gate_evidence($evidence_file, {
     cleanup_error => $cleanup_error,
     payload_exit_code => $payload_exit_code,
     production_install_overlapped => $production_install_overlapped ? JSON::PP::true : JSON::PP::false,
+    issue_id => $candidate_issue_id,
+    reviewer_id => $acquired->{reviewer_id} || '',
+    review_epoch_event_id => 0 + ($acquired->{review_epoch_event_id} || 0),
+    publication_nonce => sha256_hex(join(':', $request_id, $revision, $$, time(), rand())),
 });
-
-if ($exit_code != 0 && ($ENV{AZEDARACH_CANDIDATE_ARTIFACT_RESULT_FILE} || '') ne '') {
-    my $publisher = "$candidate_root/scripts/publish-validation-artifacts";
-    my @publish = ($publisher,
-        '--project-root', $project_root,
-        '--candidate-root', $candidate_root,
-        '--evidence', $evidence_file,
-        '--gate-output', ($ENV{AZEDARACH_CANDIDATE_GATE_OUTPUT_PATH} || ''),
-        '--request', $request_id,
-        '--revision', $revision,
-        '--exit-code', $exit_code,
-        '--result', $ENV{AZEDARACH_CANDIDATE_ARTIFACT_RESULT_FILE},
-    );
-    my $artifact_issue = $ENV{AZEDARACH_CANDIDATE_ISSUE_ID} || '';
-    push @publish, '--issue', $artifact_issue if $artifact_issue ne '';
-    my $publish_status;
-    {
-        local %ENV = %ENV;
-        delete $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN};
-        $publish_status = system(@publish);
-    }
-    if ($publish_status != 0) {
-        my $detail = $publish_status == -1 ? $! : 'exit ' . wait_status_code($publish_status);
-        warn "failed to publish candidate validation artifacts: $detail\n";
-        if (open my $result, '>', $ENV{AZEDARACH_CANDIDATE_ARTIFACT_RESULT_FILE}) {
-            print {$result} "[gate] validation_request=$request_id candidate_head=$revision failure=artifact-publication-failed:$detail\n";
-            close $result;
-        }
-        clear_validation_report_paths($evidence_file);
-    }
-}
+write_publication_evidence($evidence_file, $publication_evidence_path) if $publication_evidence_path ne '';
 if ($purpose eq 'capacity' && $class eq 'aggregate' && $overlap_detected && $exit_code == 0) {
     warn "aggregate validation overlapped $max_external_go unleased Go process(es)\n";
     $exit_code = 75;
@@ -566,21 +543,6 @@ sub read_optional_file {
     return $value;
 }
 
-sub clear_validation_report_paths {
-    my ($path) = @_;
-    return unless -s $path;
-    open my $in, '<', $path or return;
-    local $/;
-    my $evidence = eval { decode_json(<$in> // '{}') };
-    close $in;
-    return unless ref($evidence) eq 'HASH';
-    delete $evidence->{report_path};
-    delete $evidence->{report_paths};
-    open my $out, '>', $path or return;
-    print {$out} encode_json($evidence) . "\n";
-    close $out;
-}
-
 sub read_json_file {
     my ($path) = @_;
     return {} unless -s $path;
@@ -589,6 +551,25 @@ sub read_json_file {
     my $decoded = eval { decode_json(<$fh> // '{}') };
     close $fh;
     return $decoded && ref($decoded) eq 'HASH' ? $decoded : {};
+}
+
+sub write_publication_evidence {
+    my ($source, $target) = @_;
+    die "publication evidence path must be absolute\n" unless File::Spec->file_name_is_absolute($target);
+    my $parent = dirname($target);
+    my @parent_stat = lstat($parent);
+    die "publication evidence parent is unsafe\n" unless @parent_stat && -d _ && !-l _;
+    die "publication evidence target is a symlink\n" if -l $target;
+    open my $in, '<', $source or die "open publication evidence source: $!\n";
+    local $/;
+    my $contents = <$in> // '';
+    close $in;
+    my $temporary = "$target.tmp.$$";
+    sysopen(my $out, $temporary, O_WRONLY | O_CREAT | O_EXCL, 0600)
+        or die "create publication evidence atomically: $!\n";
+    print {$out} $contents;
+    close $out or die "close publication evidence: $!\n";
+    rename($temporary, $target) or die "commit publication evidence: $!\n";
 }
 
 sub bounded_outcome_detail {

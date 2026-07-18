@@ -234,45 +234,36 @@ env "${fresh_validation_environment[@]}" \
   sh -c 'touch "$1"' sh "$repository_payload"
 test -e "$repository_payload"
 
-artifact_result="$fixture/candidate-artifact-result"
-artifact_gate_output="$fixture/candidate-gate-output"
+publication_control="$fixture/publication-control"
+mkdir -m 700 "$publication_control"
+publication_evidence="$publication_control/evidence.json"
 if env "${fresh_validation_environment[@]}" \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
-  AZEDARACH_CANDIDATE_ARTIFACT_RESULT_FILE="$artifact_result" \
-  AZEDARACH_CANDIDATE_GATE_OUTPUT_PATH="$artifact_gate_output" \
+  AZEDARACH_VALIDATION_PUBLICATION_EVIDENCE="$publication_evidence" \
   AZEDARACH_CANDIDATE_ISSUE_ID=dov \
   AZEDARACH_TICKET_ID=fixture \
   "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile failed-candidate -- \
-  sh -c 'report_dir="$1/.tmp/test-timing/failed-candidate"; mkdir -p "$report_dir"; printf '\''{"failures":[{"package":"example/broken","test":"TestRetained","output":"assertion failed"}]}\n'\'' >"$report_dir/report.json"; printf '\''failed gate\n'\'' >"$AZEDARACH_CANDIDATE_GATE_OUTPUT_PATH"; printf '\''{"request_id":"%s","source_revision":"%s","report_path":"%s/report.json","report_paths":["%s/report.json"]}\n'\'' "$AZEDARACH_VALIDATION_REQUEST_ID" "$AZEDARACH_VALIDATION_SOURCE_REVISION" "$report_dir" "$report_dir" >"$AZEDARACH_VALIDATION_EVIDENCE_FILE"; exit 1' sh "$fixture"; then
+  sh -c 'test -z "${AZEDARACH_VALIDATION_PUBLICATION_EVIDENCE:-}"; test -z "${AZEDARACH_CANDIDATE_ISSUE_ID:-}"; report_dir="$1/.tmp/test-timing/failed-candidate"; mkdir -p "$report_dir"; printf '\''{"failures":[{"package":"example/broken","test":"TestRetained","output":"assertion failed"}]}\n'\'' >"$report_dir/report.json"; printf '\''{"request_id":"%s","source_revision":"%s","report_path":"%s/report.json","report_paths":["%s/report.json"]}\n'\'' "$AZEDARACH_VALIDATION_REQUEST_ID" "$AZEDARACH_VALIDATION_SOURCE_REVISION" "$report_dir" "$report_dir" >"$AZEDARACH_VALIDATION_EVIDENCE_FILE"; exit 1' sh "$fixture"; then
   echo "failed candidate validation unexpectedly passed" >&2
   exit 1
 fi
-artifact_manifest="$(find "$fixture/.azedarach/validation-artifacts/failures/fixture-sha" -name manifest.json -print -quit)"
-test -n "$artifact_manifest"
-grep -q '"kind":"issue"' "$artifact_manifest"
-grep -q '"id":"dov"' "$artifact_manifest"
-grep -q 'example/broken::TestRetained' "$artifact_result"
-artifact_directory="$(cd "$(dirname "$artifact_manifest")" && pwd -P)"
-grep -F -q "artifacts=$artifact_directory" "$artifact_result"
+grep -q '"issue_id":"dov"' "$publication_evidence"
+grep -q '"source_revision":"fixture-sha"' "$publication_evidence"
+grep -q 'failed-candidate/report.json' "$publication_evidence"
 
-fatal_artifact_result="$fixture/fatal-candidate-artifact-result"
-fatal_gate_output="$fixture/fatal-candidate-gate-output"
+fatal_publication_evidence="$publication_control/fatal-evidence.json"
 if env "${fresh_validation_environment[@]}" \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
-  AZEDARACH_CANDIDATE_ARTIFACT_RESULT_FILE="$fatal_artifact_result" \
-  AZEDARACH_CANDIDATE_GATE_OUTPUT_PATH="$fatal_gate_output" \
+  AZEDARACH_VALIDATION_PUBLICATION_EVIDENCE="$fatal_publication_evidence" \
   AZEDARACH_CANDIDATE_ISSUE_ID=dov \
   AZEDARACH_TICKET_ID=fixture \
   "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile fatal-candidate -- \
-  sh -c 'printf '\''fatal build configuration\n'\'' >"$AZEDARACH_CANDIDATE_GATE_OUTPUT_PATH"; printf '\''{"fatal_phase":"toolchain_configuration","fatal_detail":"required Go toolchain unavailable"}\n'\'' >"$AZEDARACH_VALIDATION_FATAL_EVIDENCE_FILE"; exit 76'; then
+  sh -c 'test -z "${AZEDARACH_VALIDATION_PUBLICATION_EVIDENCE:-}"; printf '\''{"fatal_phase":"toolchain_configuration","fatal_detail":"required Go toolchain unavailable"}\n'\'' >"$AZEDARACH_VALIDATION_FATAL_EVIDENCE_FILE"; exit 76'; then
   echo "fatal candidate validation unexpectedly passed" >&2
   exit 1
 fi
-fatal_artifact_manifest="$(find "$fixture/.azedarach/validation-artifacts/failures/fixture-sha" -path '*/manifest.json' -exec grep -l 'required Go toolchain unavailable' {} + | head -n 1)"
-test -n "$fatal_artifact_manifest"
-grep -q 'required Go toolchain unavailable' "$fatal_artifact_result"
-fatal_artifact_directory="$(cd "$(dirname "$fatal_artifact_manifest")" && pwd -P)"
-grep -F -q "artifacts=$fatal_artifact_directory" "$fatal_artifact_result"
+grep -q '"fatal_phase":"toolchain_configuration"' "$fatal_publication_evidence"
+grep -q 'required Go toolchain unavailable' "$fatal_publication_evidence"
 
 failure_evidence="$fixture/failure-evidence.json"
 if env "${fresh_validation_environment[@]}" \

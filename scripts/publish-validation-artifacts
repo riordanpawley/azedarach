@@ -1,20 +1,20 @@
 #!/usr/bin/env perl
 use strict;
 use warnings;
+use Cwd qw(abs_path);
 use Digest::SHA;
-use File::Basename qw(dirname);
-use File::Copy qw(copy);
-use File::Path qw(make_path remove_tree);
+use Fcntl qw(:DEFAULT O_NOFOLLOW);
+use File::Basename qw(dirname basename);
+use File::Path qw(remove_tree);
 use File::Spec;
 use JSON::PP qw(decode_json encode_json);
 use POSIX qw(strftime);
-use Cwd qw(abs_path);
 use Time::Piece;
 
 my %arg;
 my $stage;
 END {
-    remove_tree($stage) if defined($stage) && -e $stage;
+    remove_tree($stage) if defined($stage) && safe_existing_directory($stage);
 }
 while (@ARGV) {
     my $flag = shift @ARGV;
@@ -24,117 +24,116 @@ while (@ARGV) {
     $arg{$name} = shift(@ARGV) // die "$flag requires a value\n";
 }
 
-my $project_root = clean_absolute_dir($arg{'project-root'} // die "--project-root is required\n");
-my $artifact_root = File::Spec->catdir($project_root, '.azedarach', 'validation-artifacts');
-make_path(File::Spec->catdir($artifact_root, 'failures'), {mode => 0700});
-prune_unreferenced($artifact_root);
+my $project_root = canonical_directory($arg{'project-root'} // die "--project-root is required\n");
+my $artifact_root = safe_directory_chain($project_root, qw(.azedarach validation-artifacts));
+my $failure_root = safe_directory_chain($artifact_root, 'failures');
+prune_unreferenced($failure_root);
 exit 0 if $arg{'prune-only'};
 
-for my $required (qw(candidate-root evidence gate-output request revision exit-code result)) {
+for my $required (qw(candidate-root control-root evidence gate-output request revision exit-code)) {
     die "--$required is required\n" unless defined($arg{$required}) && $arg{$required} ne '';
 }
-my $candidate_root = clean_absolute_dir($arg{'candidate-root'});
+my $candidate_root = canonical_directory($arg{'candidate-root'});
+my $control_root = canonical_directory($arg{'control-root'});
+my $evidence_path = trusted_control_path($control_root, $arg{evidence}, 1);
+my $gate_output_path = trusted_control_path($control_root, $arg{'gate-output'}, 1);
 my $request = safe_identity($arg{request}, 'request');
 my $revision = safe_identity($arg{revision}, 'revision');
 die "--exit-code must be non-zero\n" unless $arg{'exit-code'} =~ /^\d+$/ && $arg{'exit-code'} != 0;
 
-my $evidence = read_json($arg{evidence}, 'validation evidence');
-die "validation evidence request mismatch\n"
-    if ($evidence->{request_id} // '') ne $request;
-die "validation evidence revision mismatch\n"
-    if ($evidence->{source_revision} // '') ne $revision;
+my $evidence = read_json_nofollow($evidence_path, 'validation evidence');
+die "validation evidence request mismatch\n" if ($evidence->{request_id} // '') ne $request;
+die "validation evidence revision mismatch\n" if ($evidence->{source_revision} // '') ne $revision;
+my $publication_nonce = safe_identity($evidence->{publication_nonce} // '', 'publication nonce');
+$evidence->{fatal_phase} = $arg{'fatal-phase'} if ($arg{'fatal-phase'} // '') ne '';
+$evidence->{fatal_detail} = $arg{'fatal-detail'} if ($arg{'fatal-detail'} // '') ne '';
+
+my $revision_dir = safe_directory_chain($failure_root, $revision);
+my $final_dir = File::Spec->catdir($revision_dir, $request);
+if (-e $final_dir || -l $final_dir) {
+    recover_existing($final_dir, $evidence, $evidence_path, $request, $revision, 0 + $arg{'exit-code'}, $publication_nonce);
+    exit 0;
+}
+
+$stage = File::Spec->catdir($revision_dir, ".${request}.tmp.$$" );
+die "artifact staging path already exists\n" if -e $stage || -l $stage;
+mkdir($stage, 0700) or die "create artifact staging directory: $!\n";
+my $reports_root = safe_directory_chain($stage, 'reports');
 
 my @source_reports = unique_nonempty(@{$evidence->{report_paths} || []}, $evidence->{report_path} || '');
-my $final_dir = File::Spec->catdir($artifact_root, 'failures', $revision, $request);
-my $parent_dir = dirname($final_dir);
-make_path($parent_dir, {mode => 0700});
-$stage = $final_dir . '.tmp.' . $$;
-remove_tree($stage) if -e $stage;
-make_path(File::Spec->catdir($stage, 'reports'), {mode => 0700});
-
-my (@published_reports, @artifacts, @measurements);
-my $report_index = 0;
+my (@measurements, @report_dirs);
 for my $source_report (@source_reports) {
-    $source_report = File::Spec->catfile($candidate_root, $source_report)
-        unless File::Spec->file_name_is_absolute($source_report);
-    $source_report = abs_path($source_report) || '';
-    next unless $source_report ne '' && path_within($candidate_root, $source_report) && -f $source_report && !-l $source_report;
-    $report_index++;
-    my $destination = File::Spec->catdir($stage, 'reports', sprintf('%03d', $report_index));
-    make_path($destination, {mode => 0700});
-    my $source_dir = dirname($source_report);
+    my $source = safe_candidate_file($candidate_root, $source_report);
+    next unless $source;
+    my $source_dir = dirname($source);
+    my $index = @report_dirs + 1;
+    my $destination = safe_directory_chain($reports_root, sprintf('%03d', $index));
     for my $name (qw(report.json report.md events.jsonl stderr.txt)) {
-        my $source = File::Spec->catfile($source_dir, $name);
-        next unless -f $source && !-l $source;
-        my $resolved_source = abs_path($source) || '';
-        next unless $resolved_source ne '' && path_within($candidate_root, $resolved_source);
-        my $target = File::Spec->catfile($destination, $name);
-        copy_file($resolved_source, $target);
+        my $candidate = File::Spec->catfile($source_dir, $name);
+        my $safe = safe_existing_file($candidate_root, $candidate);
+        copy_nofollow($safe, File::Spec->catfile($destination, $name)) if $safe;
     }
-    my $published_report = File::Spec->catfile($final_dir, 'reports', sprintf('%03d', $report_index), 'report.json');
-    push @published_reports, $published_report if -f File::Spec->catfile($destination, 'report.json');
-    my $measurement = eval { read_json(File::Spec->catfile($destination, 'report.json'), 'timing report') };
-    if ($measurement) {
-        rewrite_report_paths($destination, dirname($published_report), $measurement);
-        push @measurements, $measurement;
+    my $measurement = eval { read_json_nofollow(File::Spec->catfile($destination, 'report.json'), 'timing report') };
+    push @measurements, $measurement if $measurement;
+    push @report_dirs, $destination;
+}
+push @report_dirs, safe_directory_chain($reports_root, '001') unless @report_dirs;
+
+my $summary = failure_summary(\@measurements, $evidence, $gate_output_path);
+for my $index (0 .. $#report_dirs) {
+    complete_standard_bundle($report_dirs[$index], $summary, $request, $revision, $index + 1);
+    my $published_dir = File::Spec->catdir($final_dir, 'reports', sprintf('%03d', $index + 1));
+    rewrite_report_paths($report_dirs[$index], $published_dir);
+}
+copy_nofollow($gate_output_path, File::Spec->catfile($stage, 'gate-output.log'));
+
+my @artifacts;
+for my $directory (@report_dirs) {
+    for my $name (qw(report.json report.md events.jsonl stderr.txt)) {
+        push @artifacts, artifact_metadata($stage, File::Spec->catfile($directory, $name));
     }
 }
+push @artifacts, artifact_metadata($stage, File::Spec->catfile($stage, 'gate-output.log'));
 
-if (-f $arg{'gate-output'}) {
-    my $target = File::Spec->catfile($stage, 'gate-output.log');
-    copy_file($arg{'gate-output'}, $target);
-}
-for my $path (glob(File::Spec->catfile($stage, 'reports', '*', '*')), File::Spec->catfile($stage, 'gate-output.log')) {
-    push @artifacts, artifact_metadata($stage, $path) if -f $path;
-}
-die "failed validation did not produce publishable report or gate output\n" unless @artifacts;
-
-my $summary = failure_summary(\@measurements, $evidence, $stage);
-my @references;
-push @references, {kind => 'issue', id => $arg{issue}}
-    if ($arg{issue} // '') ne '';
+my @references = ({kind => 'validation_request', id => $request});
+push @references, {kind => 'issue', id => $evidence->{issue_id}}
+    if ($evidence->{issue_id} // '') ne '';
+push @references, {kind => 'reviewer', id => $evidence->{reviewer_id}}
+    if ($evidence->{reviewer_id} // '') ne '';
+push @references, {kind => 'review_epoch', id => 0 + $evidence->{review_epoch_event_id}}
+    if ($evidence->{review_epoch_event_id} // 0) > 0;
 my $manifest = {
     schema => 'azedarach.validation_artifact_manifest.v1',
     request_id => $request,
     candidate_revision => $revision,
+    publication_nonce => $publication_nonce,
     exit_code => 0 + $arg{'exit-code'},
     created_at => strftime('%Y-%m-%dT%H:%M:%SZ', gmtime()),
     failure_summary => $summary,
     references => \@references,
     artifacts => \@artifacts,
 };
-write_json(File::Spec->catfile($stage, 'manifest.json'), $manifest, 0600);
+write_json_exclusive(File::Spec->catfile($stage, 'manifest.json'), $manifest, 0600);
 
-if (-e $final_dir) {
-    remove_tree($stage);
-} else {
-    rename $stage, $final_dir or die "publish validation artifact directory: $!\n";
+if (!rename($stage, $final_dir)) {
+    my $rename_error = $!;
+    remove_tree($stage) if safe_existing_directory($stage);
+    undef $stage;
+    die "publish validation artifact directory: $rename_error\n" unless -e $final_dir;
+    recover_existing($final_dir, $evidence, $evidence_path, $request, $revision, 0 + $arg{'exit-code'}, $publication_nonce);
+    exit 0;
 }
 undef $stage;
+print STDERR "[gate] committed validation artifacts=$final_dir\n";
+validate_existing_manifest($final_dir, $request, $revision, 0 + $arg{'exit-code'}, $publication_nonce);
+finish_publication($final_dir, $evidence, $evidence_path, $request, $revision, $summary);
 
-@published_reports = (File::Spec->catfile($final_dir, 'manifest.json')) unless @published_reports;
-$evidence->{report_path} = $published_reports[0];
-$evidence->{report_paths} = \@published_reports;
-write_json($arg{evidence}, $evidence, 0600);
-
-my $message = join(' ',
-    '[gate]',
-    'validation_request=' . $request,
-    'candidate_head=' . $revision,
-    'failure=' . one_line($summary),
-    'artifacts=' . $final_dir,
-);
-open my $result, '>', $arg{result} or die "write artifact result: $!\n";
-chmod 0600, $arg{result};
-print {$result} $message . "\n";
-close $result or die "close artifact result: $!\n";
-
-sub clean_absolute_dir {
+sub canonical_directory {
     my ($path) = @_;
-    die "project root must be absolute\n" unless File::Spec->file_name_is_absolute($path);
-    $path = abs_path($path) || File::Spec->canonpath($path);
-    die "project root is not a directory: $path\n" unless -d $path;
-    return $path;
+    die "directory path must be absolute\n" unless File::Spec->file_name_is_absolute($path);
+    my $canonical = abs_path($path) || '';
+    die "directory is unavailable: $path\n" unless $canonical ne '' && safe_existing_directory($canonical);
+    return $canonical;
 }
 
 sub safe_identity {
@@ -143,10 +142,72 @@ sub safe_identity {
     return $value;
 }
 
+sub safe_existing_directory {
+    my ($path) = @_;
+    my @stat = lstat($path);
+    return @stat && -d _ && !-l _;
+}
+
+sub safe_directory_chain {
+    my ($root, @components) = @_;
+    my $path = $root;
+    die "unsafe directory root: $root\n" unless safe_existing_directory($path);
+    for my $component (@components) {
+        die "unsafe directory component\n" unless $component =~ /^[A-Za-z0-9_.-]+$/ && $component ne '..';
+        $path = File::Spec->catdir($path, $component);
+        if (-e $path || -l $path) {
+            die "artifact path component is not a real directory: $path\n" unless safe_existing_directory($path);
+        } else {
+            mkdir($path, 0700) or die "create artifact directory $path: $!\n";
+        }
+    }
+    return $path;
+}
+
 sub path_within {
     my ($root, $path) = @_;
     my $relative = File::Spec->abs2rel($path, $root);
     return !File::Spec->file_name_is_absolute($relative) && $relative !~ /^\.\.(?:[\\\/]|$)/;
+}
+
+sub trusted_control_path {
+    my ($root, $path, $must_exist) = @_;
+    die "control path must be absolute\n" unless File::Spec->file_name_is_absolute($path);
+    my $parent = abs_path(dirname($path)) || '';
+    die "control path escapes trusted directory\n" unless $parent ne '' && path_within($root, $parent) && safe_existing_directory($parent);
+    my $resolved = File::Spec->catfile($parent, basename($path));
+    if ($must_exist) {
+        die "control file is unsafe: $resolved\n" unless safe_regular_file($resolved);
+    } elsif (-e $resolved || -l $resolved) {
+        die "control output already exists: $resolved\n";
+    }
+    return $resolved;
+}
+
+sub safe_regular_file {
+    my ($path) = @_;
+    my @stat = lstat($path);
+    return @stat && -f _ && !-l _;
+}
+
+sub safe_existing_file {
+    my ($root, $path) = @_;
+    return '' unless File::Spec->file_name_is_absolute($path);
+    my $relative = File::Spec->abs2rel(File::Spec->canonpath($path), $root);
+    return '' if File::Spec->file_name_is_absolute($relative) || $relative =~ /^\.\.(?:[\\\/]|$)/;
+    my $cursor = $root;
+    my @parts = File::Spec->splitdir($relative);
+    for my $index (0 .. $#parts - 1) {
+        $cursor = File::Spec->catdir($cursor, $parts[$index]);
+        return '' unless safe_existing_directory($cursor);
+    }
+    return safe_regular_file($path) ? $path : '';
+}
+
+sub safe_candidate_file {
+    my ($root, $path) = @_;
+    $path = File::Spec->catfile($root, $path) unless File::Spec->file_name_is_absolute($path);
+    return safe_existing_file($root, File::Spec->canonpath($path));
 }
 
 sub unique_nonempty {
@@ -154,9 +215,15 @@ sub unique_nonempty {
     return grep { defined($_) && $_ ne '' && !$seen{$_}++ } @_;
 }
 
-sub read_json {
+sub open_read_nofollow {
+    my ($path) = @_;
+    sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW) or die "open $path without symlink following: $!\n";
+    return $fh;
+}
+
+sub read_json_nofollow {
     my ($path, $label) = @_;
-    open my $in, '<', $path or die "read $label $path: $!\n";
+    my $in = open_read_nofollow($path);
     local $/;
     my $decoded = eval { decode_json(<$in> // '') };
     close $in;
@@ -164,97 +231,130 @@ sub read_json {
     return $decoded;
 }
 
-sub write_json {
+sub write_json_exclusive {
     my ($path, $value, $mode) = @_;
-    open my $out, '>', $path or die "write $path: $!\n";
-    chmod $mode, $path;
+    sysopen(my $out, $path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, $mode)
+        or die "create $path exclusively: $!\n";
     print {$out} encode_json($value) . "\n";
     close $out or die "close $path: $!\n";
 }
 
-sub copy_file {
+sub atomic_write_json {
+    my ($path, $value, $mode) = @_;
+    my $parent = dirname($path);
+    die "unsafe atomic output parent\n" unless safe_existing_directory($parent);
+    die "atomic output target is a symlink\n" if -l $path;
+    my $temporary = File::Spec->catfile($parent, '.' . basename($path) . ".tmp.$$" );
+    unlink($temporary) if safe_regular_file($temporary);
+    write_json_exclusive($temporary, $value, $mode);
+    rename($temporary, $path) or die "replace $path atomically: $!\n";
+}
+
+sub copy_nofollow {
     my ($source, $target) = @_;
-    copy($source, $target) or die "copy $source to $target: $!\n";
-    chmod 0600, $target;
+    my $in = open_read_nofollow($source);
+    sysopen(my $out, $target, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
+        or die "create artifact $target exclusively: $!\n";
+    my $buffer;
+    while (1) {
+        my $read = sysread($in, $buffer, 64 * 1024);
+        die "read artifact $source: $!\n" unless defined $read;
+        last if $read == 0;
+        my $offset = 0;
+        while ($offset < $read) {
+            my $written = syswrite($out, $buffer, $read - $offset, $offset);
+            die "write artifact $target: $!\n" unless defined $written;
+            $offset += $written;
+        }
+    }
+    close $in;
+    close $out or die "close artifact $target: $!\n";
+}
+
+sub write_text_exclusive {
+    my ($path, $text) = @_;
+    sysopen(my $out, $path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
+        or die "create $path exclusively: $!\n";
+    print {$out} $text;
+    close $out or die "close $path: $!\n";
+}
+
+sub complete_standard_bundle {
+    my ($directory, $summary, $request_id, $candidate_revision, $index) = @_;
+    my $report_json = File::Spec->catfile($directory, 'report.json');
+    unless (safe_regular_file($report_json)) {
+        write_json_exclusive($report_json, {
+            schema => 'azedarach.validation_failure_report.v1',
+            exit_code => 1,
+            failures => [{package => 'validation', output => $summary}],
+            request_id => $request_id,
+            source_revision => $candidate_revision,
+            bundle_index => $index,
+        }, 0600);
+    }
+    my $report_md = File::Spec->catfile($directory, 'report.md');
+    write_text_exclusive($report_md, "# Candidate validation failure\n\n$summary\n") unless safe_regular_file($report_md);
+    my $events = File::Spec->catfile($directory, 'events.jsonl');
+    write_text_exclusive($events, encode_json({Action => 'fail', Package => 'validation', Output => $summary}) . "\n") unless safe_regular_file($events);
+    my $stderr = File::Spec->catfile($directory, 'stderr.txt');
+    write_text_exclusive($stderr, "$summary\n") unless safe_regular_file($stderr);
 }
 
 sub rewrite_report_paths {
-    my ($destination, $published_dir, $measurement) = @_;
-    my $raw_source = $measurement->{raw_json_path} || '';
-    my $stderr_source = $measurement->{stderr_path} || '';
-    my $raw_published = File::Spec->catfile($published_dir, 'events.jsonl');
-    my $stderr_published = File::Spec->catfile($published_dir, 'stderr.txt');
-    $measurement->{raw_json_path} = $raw_published if -f File::Spec->catfile($destination, 'events.jsonl');
-    $measurement->{stderr_path} = $stderr_published if -f File::Spec->catfile($destination, 'stderr.txt');
-    write_json(File::Spec->catfile($destination, 'report.json'), $measurement, 0600);
-
-    my $markdown_path = File::Spec->catfile($destination, 'report.md');
-    return unless -f $markdown_path;
-    open my $in, '<', $markdown_path or die "read $markdown_path: $!\n";
-    local $/;
-    my $markdown = <$in> // '';
-    close $in;
-    $markdown =~ s/\Q$raw_source\E/$raw_published/g if $raw_source ne '';
-    $markdown =~ s/\Q$stderr_source\E/$stderr_published/g if $stderr_source ne '';
-    open my $out, '>', $markdown_path or die "rewrite $markdown_path: $!\n";
-    chmod 0600, $markdown_path;
-    print {$out} $markdown;
-    close $out or die "close $markdown_path: $!\n";
+    my ($directory, $published_dir) = @_;
+    my $report_path = File::Spec->catfile($directory, 'report.json');
+    my $measurement = read_json_nofollow($report_path, 'timing report');
+    my $old_raw = $measurement->{raw_json_path} || '';
+    my $old_stderr = $measurement->{stderr_path} || '';
+    $measurement->{raw_json_path} = File::Spec->catfile($published_dir, 'events.jsonl');
+    $measurement->{stderr_path} = File::Spec->catfile($published_dir, 'stderr.txt');
+    atomic_write_json($report_path, $measurement, 0600);
+    my $markdown_path = File::Spec->catfile($directory, 'report.md');
+    my $markdown = read_file_nofollow($markdown_path, 1024 * 1024);
+    my $published_events = File::Spec->catfile($published_dir, 'events.jsonl');
+    my $published_stderr = File::Spec->catfile($published_dir, 'stderr.txt');
+    $markdown =~ s/\Q$old_raw\E/$published_events/g if $old_raw ne '';
+    $markdown =~ s/\Q$old_stderr\E/$published_stderr/g if $old_stderr ne '';
+    $markdown .= "\nRaw events: `" . File::Spec->catfile($published_dir, 'events.jsonl') . "`\n";
+    $markdown .= "Stderr: `" . File::Spec->catfile($published_dir, 'stderr.txt') . "`\n";
+    my $replacement = "$markdown_path.rewrite.$$";
+    write_text_exclusive($replacement, $markdown);
+    rename($replacement, $markdown_path) or die "replace report markdown: $!\n";
 }
 
 sub artifact_metadata {
     my ($root, $path) = @_;
-    open my $in, '<:raw', $path or die "hash artifact $path: $!\n";
+    my $in = open_read_nofollow($path);
     my $digest = Digest::SHA->new(256);
     $digest->addfile($in);
     close $in;
-    my $relative = File::Spec->abs2rel($path, $root);
-    return {path => $relative, bytes => (-s $path || 0), sha256 => $digest->hexdigest};
+    return {path => File::Spec->abs2rel($path, $root), bytes => (-s $path || 0), sha256 => $digest->hexdigest};
 }
 
 sub failure_summary {
-    my ($measurements, $evidence, $stage) = @_;
+    my ($measurements, $evidence_value, $gate_output) = @_;
     for my $measurement (@$measurements) {
         my @failures = grep { ref($_) eq 'HASH' } @{$measurement->{failures} || []};
         @failures = sort { ($b->{test} ? 1 : 0) <=> ($a->{test} ? 1 : 0) } @failures;
         for my $failure (@failures) {
-            next unless ref($failure) eq 'HASH';
             my $identity = $failure->{package} || 'validation';
             $identity .= '::' . $failure->{test} if $failure->{test};
             my $detail = meaningful_line($failure->{output} || '');
             return $detail ne '' ? "$identity: $detail" : $identity;
         }
     }
-    if (($evidence->{fatal_phase} || '') ne '' || ($evidence->{fatal_detail} || '') ne '') {
-        my $phase = one_line($evidence->{fatal_phase} || 'validation');
-        my $detail = one_line($evidence->{fatal_detail} || 'validation payload configuration failed');
-        return "$phase: $detail";
+    if (($evidence_value->{fatal_phase} || '') ne '' || ($evidence_value->{fatal_detail} || '') ne '') {
+        return one_line($evidence_value->{fatal_phase} || 'validation') . ': ' .
+            one_line($evidence_value->{fatal_detail} || 'validation payload configuration failed');
     }
-    for my $path (glob(File::Spec->catfile($stage, 'reports', '*', 'stderr.txt'))) {
-        next unless -f $path;
-        my $detail = meaningful_line(read_file_prefix($path, 64 * 1024));
-        return $detail if $detail ne '';
-    }
-    my $gate_output = File::Spec->catfile($stage, 'gate-output.log');
-    if (-f $gate_output) {
-        my $detail = meaningful_last_line(read_file_tail($gate_output, 64 * 1024));
-        return $detail if $detail ne '';
-    }
+    my $detail = meaningful_last_line(read_file_nofollow($gate_output, 64 * 1024));
+    return $detail if $detail ne '';
     return 'validation command exited without a structured failure';
 }
 
-sub read_file_prefix {
+sub read_file_nofollow {
     my ($path, $limit) = @_;
-    open my $in, '<:raw', $path or return '';
-    my $value = '';
-    read($in, $value, $limit);
-    close $in;
-    return $value;
-}
-
-sub read_file_tail {
-    my ($path, $limit) = @_;
-    open my $in, '<:raw', $path or return '';
+    my $in = open_read_nofollow($path);
     my $size = -s $path || 0;
     seek($in, $size - $limit, 0) if $size > $limit;
     my $value = '';
@@ -292,26 +392,74 @@ sub one_line {
     return substr($value, 0, 1000);
 }
 
-# Failed artifacts with explicit durable references are evidence and remain
-# protected. Orphans are retained for at most 30 days and the newest 20 orphan
-# directories, bounding recoverable-but-unreferenced data.
+sub validate_existing_manifest {
+    my ($directory, $request_id, $candidate_revision, $exit_code, $nonce) = @_;
+    die "existing artifact destination is unsafe\n" unless safe_existing_directory($directory);
+    my $manifest_path = File::Spec->catfile($directory, 'manifest.json');
+    my $manifest = read_json_nofollow($manifest_path, 'artifact manifest');
+    die "existing artifact manifest schema mismatch\n" unless ($manifest->{schema} || '') eq 'azedarach.validation_artifact_manifest.v1';
+    die "existing artifact manifest request mismatch\n" unless ($manifest->{request_id} || '') eq $request_id;
+    die "existing artifact manifest revision mismatch\n" unless ($manifest->{candidate_revision} || '') eq $candidate_revision;
+    die "existing artifact manifest exit mismatch\n" unless ($manifest->{exit_code} || 0) == $exit_code;
+    die "existing artifact manifest nonce mismatch\n" unless ($manifest->{publication_nonce} || '') eq $nonce;
+    my %artifact_paths = map { ($_->{path} || '') => 1 } grep { ref($_) eq 'HASH' } @{$manifest->{artifacts} || []};
+    for my $required (qw(gate-output.log reports/001/report.json reports/001/report.md reports/001/events.jsonl reports/001/stderr.txt)) {
+        die "existing artifact manifest bundle incomplete\n" unless $artifact_paths{$required};
+    }
+    my $has_request_reference = grep {
+        ref($_) eq 'HASH' && ($_->{kind} || '') eq 'validation_request' && ($_->{id} || '') eq $request_id
+    } @{$manifest->{references} || []};
+    die "existing artifact manifest request reference missing\n" unless $has_request_reference;
+    for my $artifact (@{$manifest->{artifacts} || []}) {
+        die "invalid existing artifact metadata\n" unless ref($artifact) eq 'HASH';
+        my $path = safe_existing_file($directory, File::Spec->catfile($directory, $artifact->{path} || ''));
+        die "existing artifact is missing or unsafe\n" unless $path;
+        my $metadata = artifact_metadata($directory, $path);
+        die "existing artifact checksum mismatch\n" unless ($artifact->{sha256} || '') eq $metadata->{sha256};
+    }
+    return $manifest;
+}
+
+sub recover_existing {
+    my ($directory, $evidence_value, $evidence_output, $request_id, $candidate_revision, $exit_code, $nonce) = @_;
+    my $manifest = validate_existing_manifest($directory, $request_id, $candidate_revision, $exit_code, $nonce);
+    print STDERR "[gate] recovered committed validation artifacts=$directory\n";
+    finish_publication($directory, $evidence_value, $evidence_output, $request_id, $candidate_revision, $manifest->{failure_summary} || 'validation failed');
+}
+
+sub finish_publication {
+    my ($directory, $evidence_value, $evidence_output, $request_id, $candidate_revision, $summary) = @_;
+    my @reports = grep { safe_existing_file($directory, $_) }
+        sort glob(File::Spec->catfile($directory, 'reports', '*', 'report.json'));
+    @reports = (File::Spec->catfile($directory, 'manifest.json')) unless @reports;
+    $evidence_value->{report_path} = $reports[0];
+    $evidence_value->{report_paths} = \@reports;
+    $evidence_value->{failure_summary} = $summary;
+    atomic_write_json($evidence_output, $evidence_value, 0600);
+    print join(' ', '[gate]', 'validation_request=' . $request_id,
+        'candidate_head=' . $candidate_revision, 'failure=' . one_line($summary),
+        'artifacts=' . $directory) . "\n";
+}
+
 sub prune_unreferenced {
     my ($root) = @_;
-    my @manifests = glob(File::Spec->catfile($root, 'failures', '*', '*', 'manifest.json'));
+    my @manifests = glob(File::Spec->catfile($root, '*', '*', 'manifest.json'));
     my @orphans;
     for my $path (@manifests) {
-        my $manifest = eval { read_json($path, 'artifact manifest') };
+        my $directory = dirname($path);
+        next unless safe_existing_directory(dirname($directory)) && safe_existing_directory($directory) && safe_regular_file($path);
+        my $manifest = eval { read_json_nofollow($path, 'artifact manifest') };
         next unless $manifest;
         my $references = $manifest->{references};
         next if ref($references) eq 'ARRAY' && @$references;
         my $created = eval { Time::Piece->strptime($manifest->{created_at} || '', '%Y-%m-%dT%H:%M:%SZ')->epoch };
         $created ||= (stat($path))[9] || 0;
-        push @orphans, {dir => dirname($path), created => $created};
+        push @orphans, {dir => $directory, created => $created};
     }
     @orphans = sort { $b->{created} <=> $a->{created} } @orphans;
     my $cutoff = time() - 30 * 24 * 60 * 60;
     for my $index (0 .. $#orphans) {
         next if $index < 20 && $orphans[$index]{created} >= $cutoff;
-        remove_tree($orphans[$index]{dir});
+        remove_tree($orphans[$index]{dir}) if safe_existing_directory($orphans[$index]{dir});
     }
 }
