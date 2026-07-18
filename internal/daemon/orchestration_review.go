@@ -472,30 +472,18 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 		requested = ordered
 	}
 	result := protocol.OrchestrationIntentResult{Scope: request.Scope, Kind: request.Kind, IntentKey: request.IntentKey, Requested: requested, Skipped: map[string]string{}, Failed: map[string]string{}}
-	var scopeTasks []domain.Task
-	if request.Kind != protocol.OrchestrationIntentReviewReturn {
-		scopeTasks, _, err = a.daemon.projectReadSnapshot(projectID)
-		if err != nil {
-			return protocol.OrchestrationIntentResult{}, fmt.Errorf("refresh orchestration scope projection: %w", err)
-		}
-	}
 	issueClient := a.daemon.issueClientForProject(projectID)
 	if issueClient == nil {
 		return protocol.OrchestrationIntentResult{}, fmt.Errorf("issue store unavailable")
 	}
 	for _, issueID := range requested {
 		if request.Scope.Kind == domain.OrchestrationScopeRooted {
-			if request.Kind == protocol.OrchestrationIntentReviewReturn {
-				task, taskErr := issueClient.GetWithRuntime(ctx, projectID, issueID)
-				if taskErr != nil {
-					result.Failed[issueID] = "refresh rooted review return scope: " + taskErr.Error()
-					continue
-				}
-				if task.ParentID == nil || task.ParentID.IsZero() || !naming.IssueIDsEqual(task.ParentID.String(), request.Scope.RootIssueID.String()) {
-					result.Skipped[issueID] = "outside-root-direct-child-scope: delegate descendants to their direct parent orchestrator"
-					continue
-				}
-			} else if !directOrchestrationTarget(scopeTasks, request.Scope.RootIssueID.String(), issueID) {
+			task, err := issueClient.GetWithRuntime(ctx, projectID, issueID)
+			if err != nil {
+				result.Failed[issueID] = "refresh rooted review scope: " + err.Error()
+				continue
+			}
+			if task.ParentID == nil || task.ParentID.IsZero() || !naming.IssueIDsEqual(task.ParentID.String(), request.Scope.RootIssueID.String()) {
 				result.Skipped[issueID] = "outside-root-direct-child-scope: delegate descendants to their direct parent orchestrator"
 				continue
 			}
