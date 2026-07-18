@@ -115,18 +115,36 @@ if [[ "$validator_one_event" != oom\|* || "$validator_two_event" != oom\|* ]]; t
 fi
 IFS='|' read -r _ validator_one_oom_tmp validator_one_lock validator_one_endpoint <<<"$validator_one_event"
 IFS='|' read -r _ validator_two_oom_tmp validator_two_lock validator_two_endpoint <<<"$validator_two_event"
+if [[ "${AZEDARACH_JAEGER_TEST_INJECT_RESOURCE_COLLISION:-0}" == "1" ]]; then
+  validator_two_lock="$validator_one_lock"
+fi
 if [[ "$validator_one_oom_tmp" == "$validator_two_oom_tmp" ||
   "$validator_one_lock" == "$validator_two_lock" ||
   "$validator_one_endpoint" == "$validator_two_endpoint" ]]; then
   echo "concurrent OOM validators shared a fixture, lifecycle lock, or endpoint resource" >&2
-  echo "one: $validator_one_oom" >&2
-  echo "two: $validator_two_oom" >&2
+  printf 'one resources: %s|%s|%s\n' "$validator_one_oom_tmp" \
+    "$validator_one_lock" "$validator_one_endpoint" >&2
+  printf 'two resources: %s|%s|%s\n' "$validator_two_oom_tmp" \
+    "$validator_two_lock" "$validator_two_endpoint" >&2
+  dump_validator_logs
   exit 1
 fi
 [[ -d "$validator_one_oom_tmp" && -d "$validator_two_oom_tmp" ]]
-if [[ "${AZEDARACH_JAEGER_TEST_TERMINATE_AT_OOM:-0}" == "1" ]]; then
-  echo "terminating concurrent Jaeger harness at OOM barrier for cleanup regression" >&2
-  exit 75
+if [[ -n "${AZEDARACH_JAEGER_TEST_PARENT_OOM_READY_FIFO:-}" ||
+  -n "${AZEDARACH_JAEGER_TEST_PARENT_OOM_CONTINUE_FIFO:-}" ]]; then
+  if [[ ! -p "${AZEDARACH_JAEGER_TEST_PARENT_OOM_READY_FIFO:-}" ||
+    ! -p "${AZEDARACH_JAEGER_TEST_PARENT_OOM_CONTINUE_FIFO:-}" ]]; then
+    echo "parent OOM signal barrier requires ready and continue FIFOs" >&2
+    exit 1
+  fi
+  printf 'ready|%s|%s|%s|%s|%s|%s\n' "$$" "$validator_one_pid" \
+    "$validator_two_pid" "$validator_one_oom_tmp" "$validator_two_oom_tmp" \
+    "$harness_dir" >"$AZEDARACH_JAEGER_TEST_PARENT_OOM_READY_FIFO"
+  IFS= read -r parent_oom_release <"$AZEDARACH_JAEGER_TEST_PARENT_OOM_CONTINUE_FIFO"
+  if [[ "$parent_oom_release" != "continue" ]]; then
+    echo "parent OOM signal barrier received invalid release '$parent_oom_release'" >&2
+    exit 1
+  fi
 fi
 printf '%s\n' continue >"$harness_dir/one.oom-continue"
 printf '%s\n' continue >"$harness_dir/two.oom-continue"
