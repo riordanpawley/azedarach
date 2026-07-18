@@ -68,6 +68,9 @@ func TestReviewAcceptOwnsLeaseAndAutomaticallyContinuesBasePublicationWithoutAgg
 
 	gitClient := gitservice.NewClient(gitservice.NewExecRunner(repo), slog.Default())
 	d := newOrchestrationReviewTestDaemon(repo, issueClient)
+	d.snapshotAdmissionContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}
 	d.cfg.BaseBranch = "main"
 	d.issueClientsByProject = map[string]*issues.Client{projectID: issueClient}
 	d.operationRuntime = runtime
@@ -174,6 +177,9 @@ func TestReviewAcceptWithoutConfiguredGateFailsWithoutPublicationReadinessEviden
 	}
 
 	d := newOrchestrationReviewTestDaemon(repo, issueClient)
+	d.snapshotAdmissionContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}
 	d.cfg.BaseBranch = "main"
 	d.issueClientsByProject = map[string]*issues.Client{projectID: issueClient}
 	d.operationRuntime = runtime
