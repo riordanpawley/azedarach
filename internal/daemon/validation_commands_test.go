@@ -335,10 +335,32 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 		SourceRevision: sourceOID, BaseRevision: baseOID, PolicyVersion: "portable-v1", EnvironmentFingerprint: "node-consumer",
 		ValidationCommand: "npm run verify-publication", State: domain.PublicationOperationQueued, CreatedAt: started,
 	}
+	mergedA := publication
+	mergedA.OperationID = "publication-merged-a"
+	mergedA.IntentKey = "review-accept-a"
+	storedMergedA, _, err := runtime.store.EnqueuePublication(ctx, mergedA, "publication-merged-a")
+	require.NoError(t, err)
+	claimedMergedA, acquired, err := runtime.store.ClaimPublicationOperation(ctx, storedMergedA.OperationID, operationstore.PublicationOperationClaim{
+		Owner: "daemon", Token: "publication-claim-a", Now: started.Add(5 * time.Second), TTL: time.Minute,
+	})
+	require.NoError(t, err)
+	require.True(t, acquired)
+	passedMergedA, err := d.transitionPublicationOperation(ctx, claimedMergedA, "publication-claim-a", domain.PublicationOperationPassed, func(update *operationstore.PublicationOperationUpdate) {
+		update.CandidateRevision = targetOID
+		update.ValidationRequestID = push.RequestID
+		update.ReusedEvidenceID = push.AuthoritativeRequestID
+	})
+	require.NoError(t, err)
+	mergedAFinished := started.Add(6 * time.Second)
+	_, err = d.transitionPublicationOperation(ctx, passedMergedA, "publication-claim-a", domain.PublicationOperationMerged, func(update *operationstore.PublicationOperationUpdate) {
+		update.ReleaseClaim = true
+		update.FinishedAt = &mergedAFinished
+	})
+	require.NoError(t, err)
 	storedPublication, _, err := runtime.store.EnqueuePublication(ctx, publication, publicationCoalesceKey(publication))
 	require.NoError(t, err)
 	claimedPublication, acquired, err := runtime.store.ClaimPublicationOperation(ctx, storedPublication.OperationID, operationstore.PublicationOperationClaim{
-		Owner: "daemon", Token: "publication-claim", Now: started.Add(5 * time.Second), TTL: time.Minute,
+		Owner: "daemon", Token: "publication-claim", Now: started.Add(7 * time.Second), TTL: time.Minute,
 	})
 	require.NoError(t, err)
 	require.True(t, acquired)
@@ -365,7 +387,17 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 	require.NoError(t, err)
 	assert.Equal(t, publication.OperationID, boundOperation.OperationID)
 	assert.Equal(t, push.RequestID, boundValidation.RequestID)
-	finished := started.Add(6 * time.Second)
+	foreignRecovery := integration
+	foreignRecovery.PublicationOperationID = mergedA.OperationID
+	_, _, err = d.taskClosePublicationProvenance(boundCtx, projectID, issueID, foreignRecovery, "portable-v1", "npm run verify-publication", "node-consumer")
+	require.ErrorContains(t, err, "does not match active publication binding")
+	sameOperationRecovery := integration
+	sameOperationRecovery.PublicationOperationID = passedPublication.OperationID
+	boundOperation, boundValidation, err = d.taskClosePublicationProvenance(boundCtx, projectID, issueID, sameOperationRecovery, "portable-v1", "npm run verify-publication", "node-consumer")
+	require.NoError(t, err)
+	assert.Equal(t, publication.OperationID, boundOperation.OperationID)
+	assert.Equal(t, push.RequestID, boundValidation.RequestID)
+	finished := started.Add(8 * time.Second)
 	_, err = d.transitionPublicationOperation(ctx, passedPublication, "publication-claim", domain.PublicationOperationMerged, func(update *operationstore.PublicationOperationUpdate) {
 		update.ReleaseClaim = true
 		update.FinishedAt = &finished

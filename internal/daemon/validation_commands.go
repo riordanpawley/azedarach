@@ -459,6 +459,9 @@ func (d *Daemon) taskClosePublicationProvenance(ctx context.Context, projectID, 
 	wantCommand := strings.Join(strings.Fields(gateCommand), " ")
 	binding, bound := taskClosePublicationBindingFromContext(ctx)
 	recoveredOperationID := strings.TrimSpace(integration.PublicationOperationID)
+	if bound && recoveredOperationID != "" && recoveredOperationID != binding.operationID {
+		return domain.PublicationOperation{}, domain.ValidationRequest{}, fmt.Errorf("recovered publication operation %s does not match active publication binding %s", recoveredOperationID, binding.operationID)
+	}
 	if !bound && recoveredOperationID == "" {
 		return domain.PublicationOperation{}, domain.ValidationRequest{}, fmt.Errorf("exact synthetic merge %s recovery receipt is missing publication operation identity", wantTarget)
 	}
