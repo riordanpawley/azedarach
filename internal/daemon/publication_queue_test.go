@@ -283,6 +283,11 @@ func TestPublicationRecoversCrashAfterExactApplyBeforeTaskReceipt(t *testing.T) 
 	if got := observationPayloadString(receipt.Payload, "target_oid"); got != original.CandidateRevision {
 		t.Fatalf("recovered receipt target OID = %q, want %q", got, original.CandidateRevision)
 	}
+	evidence, err := restartedRuntime.store.PublicationEvidenceSnapshot(ctx, projectID, issueID)
+	requireNoError(t, err)
+	if len(evidence.Evidence) != 1 || evidence.Evidence[0].Layer != domain.PublicationEvidenceMergeResult || evidence.Evidence[0].BaseRevision != original.BaseRevision || evidence.Evidence[0].SourceRevision != original.SourceRevision || evidence.Evidence[0].ResultRevision != original.CandidateRevision {
+		t.Fatalf("recovered merge-result evidence = %+v, want exact publication identity", evidence.Evidence)
+	}
 }
 
 func TestReviewAcceptWithoutConfiguredGateFailsWithoutPublicationReadinessEvidence(t *testing.T) {
@@ -687,6 +692,7 @@ func TestPublicationQueueRefreshesExpectedBaseStaleAtAuthoritativeApply(t *testi
 	t.Cleanup(func() { _ = runtime.Close() })
 	merged := make(chan domain.PublicationOperation, 1)
 	d := &Daemon{operationRuntime: runtime, cfg: Config{RepoDir: repo}}
+	t.Cleanup(d.closePublicationStores)
 	d.publicationClose = func(_ context.Context, operation domain.PublicationOperation) error {
 		if operation.OperationID == "publication-authoritative-base-fence" {
 			return &taskCloseExpectedBaseStaleError{Expected: operation.BaseRevision, Actual: "base-b"}

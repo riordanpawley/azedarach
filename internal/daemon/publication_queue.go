@@ -337,8 +337,9 @@ func (d *Daemon) submitPublicationOperation(ctx context.Context, operation domai
 	}
 	_, err := d.operationRuntime.manager.Submit(ctx, daemonops.SubmitRequest{
 		ProjectID: operation.ProjectID, IssueID: operation.IssueID, Kind: publicationApplyOperationKind,
-		DedupeKey:    "publication:" + operation.OperationID,
-		ResourceKeys: []string{"publication-target:" + operation.ProjectID + ":" + operation.TargetBranch},
+		DedupeKey:          "publication:" + operation.OperationID,
+		ResourceKeys:       []string{"publication-target:" + operation.ProjectID + ":" + operation.TargetBranch},
+		RecentDedupeWindow: 0,
 	}, func(runCtx context.Context) ([]byte, error) {
 		return d.runPublicationOperation(runCtx, operation.ProjectID, operation.OperationID)
 	})
@@ -587,6 +588,18 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 		return nil, fmt.Errorf("reload publication operation after apply: %w", readErr)
 	}
 	if runErr != nil {
+		if applied, appliedErr := d.publicationOperationAlreadyApplied(context.Background(), current); appliedErr == nil && applied {
+			recoverable, transitionErr := d.transitionPublicationOperation(context.Background(), current, claimToken, domain.PublicationOperationPassed, func(update *operationstore.PublicationOperationUpdate) {
+				update.FailureKind = "post_apply_persistence_failed"
+				update.FailureDetail = runErr.Error()
+				update.ReleaseClaim = true
+			})
+			if transitionErr != nil {
+				return nil, fmt.Errorf("%w; preserve recoverable applied publication: %v", runErr, transitionErr)
+			}
+			d.schedulePublicationRecoveryRetry(context.Background(), recoverable)
+			return nil, runErr
+		}
 		var baseStale *taskCloseExpectedBaseStaleError
 		if errors.As(runErr, &baseStale) {
 			replacement := refreshedPublicationOperationAttempt(operation, baseStale.Actual, operation.ValidationCommand, operation.PolicyVersion, operation.EnvironmentFingerprint)

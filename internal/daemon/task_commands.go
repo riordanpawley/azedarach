@@ -3728,7 +3728,7 @@ func (d *Daemon) mergeTaskBranchBeforeClose(ctx context.Context, projectID, task
 		var result *git.MergeResult
 		var err error
 		if configuredBaseTarget {
-			result, err = d.git.MergeCleanlyTransactionalAtBase(ctx, targetWorktree, sourceBranch, expectedBaseOID)
+			result, err = d.git.MergeCleanlyTransactionalAtTarget(ctx, targetWorktree, sourceBranch, expectedBaseOID, targetBranch)
 		} else {
 			result, err = d.git.MergeCleanlyTransactionalComposition(ctx, targetWorktree, sourceBranch)
 		}

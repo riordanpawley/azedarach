@@ -5083,6 +5083,8 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 			return integrationTestWorktreeList(worktreeListOutput, scratchWorktree, "merged-sha"), nil
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
 			return "", nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "branch" && args[3] == "--show-current":
+			return "main", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
 			return filepath.Join(repoDir, ".git"), nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == sourceBranch+"^{commit}":
@@ -5317,6 +5319,8 @@ func TestTaskCloseCommandIntegrationIgnoresDuplicateIssueTargetWorktreeFromOther
 			return "A  domain/commerce/tsconfig.json\n", nil
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
 			return "", nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "branch" && args[3] == "--show-current":
+			return "main", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
 			return filepath.Join(repoDir, ".git"), nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == sourceBranch+"^{commit}":
@@ -5499,6 +5503,8 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 			return "", fmt.Errorf("cannot change to %s: no such file or directory", sourceWorktree)
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
 			return "", nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "branch" && args[3] == "--show-current":
+			return "main", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
 			return filepath.Join(repoDir, ".git"), nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == sourceBranch+"^{commit}":
@@ -6083,6 +6089,8 @@ func TestTaskCloseIntegrationRetriesRepeatedlyWhenTargetHeadMovesAfterScratchVal
 			return integrationTestWorktreeList(worktreeListOutput, scratchWorktree, scratchDesiredHeads[scratchWorktree]), nil
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
 			return "", nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "branch" && args[3] == "--show-current":
+			return "main", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
 			return filepath.Join(repoDir, ".git"), nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
@@ -6322,6 +6330,8 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 			return integrationTestWorktreeList(worktreeListOutput, scratchWorktree, "merged-sha"), nil
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
 			return "", nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == projectRepo && args[2] == "branch" && args[3] == "--show-current":
+			return "main", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == projectRepo && args[2] == "rev-parse" && args[3] == "--git-common-dir":
 			return filepath.Join(projectRepo, ".git"), nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == projectRepo && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
@@ -6888,6 +6898,8 @@ func TestTaskCloseCommandKeepsTargetCleanWhenScratchMergeDirties(t *testing.T) {
 			return "", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "status":
 			return "", nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "branch" && args[3] == "--show-current":
+			return "main", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "status":
 			scratchStatusReads++
 			if scratchStatusReads >= 2 {

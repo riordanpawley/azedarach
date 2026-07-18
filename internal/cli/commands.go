@@ -2274,7 +2274,7 @@ func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (br
 		recordPhase("checkout", phaseStartedAt)
 	}
 	phaseStartedAt = time.Now()
-	result, err := deps.DaemonClient.GitMerge(ctx, baseWorktree, source.Branch)
+	result, err := deps.DaemonClient.GitMergeTyped(ctx, source.IssueID, target.TargetID)
 	if err != nil {
 		recordPhase("merge", phaseStartedAt)
 		return branchMergeToBaseCommandResult{}, wrapPhaseErr("merge", wrapPendingGitOperation("merge", err))

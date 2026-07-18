@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"reflect"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +24,23 @@ import (
 type runtimeGitService struct{}
 
 type unsuccessfulMergeRuntimeGitService struct{ runtimeGitService }
+
+type revisionTypedMergeRuntimeGitService struct {
+	runtimeGitService
+	mu    sync.Mutex
+	calls int
+}
+
+func (s *revisionTypedMergeRuntimeGitService) MergeTyped(_ context.Context, _ string, req daemonhandlers.GitMergeRequest) (*daemonhandlers.GitMergeResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	oid := "source-revision-one"
+	if s.calls > 1 {
+		oid = "source-revision-two"
+	}
+	return &daemonhandlers.GitMergeResult{SourceID: req.SourceID, TargetID: req.TargetID, SourceOID: oid, TargetOID: "target-" + oid, ReceiptRecorded: true, Result: git.MergeResult{Success: true}}, nil
+}
 
 func (unsuccessfulMergeRuntimeGitService) Merge(context.Context, string, string, string) (*git.MergeResult, error) {
 	return &git.MergeResult{Success: false, Message: "hook rejected merge"}, nil
@@ -268,7 +287,7 @@ func TestOperationRuntimeGitMergePublishesLifecycleEvents(t *testing.T) {
 	payload := mustJSON(t, map[string]string{"worktree": "/tmp/wt", "branch": "main"})
 	submitReq := testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
 		ProjectID: "proj-1",
-		Kind:      daemonhandlers.CommandGitMerge,
+		Kind:      daemonhandlers.CommandGitMergeRef,
 		Payload:   payload,
 	})
 	ch, cancel := runtime.hub.Subscribe("proj-1", 0)
@@ -287,8 +306,8 @@ func TestOperationRuntimeGitMergePublishesLifecycleEvents(t *testing.T) {
 	}
 
 	record := waitForRuntimeState(t, runtime, submitBody.Operation.OperationID.String(), daemonops.StateDone)
-	if record.Kind != daemonhandlers.CommandGitMerge {
-		t.Fatalf("operation kind = %s, want %s", record.Kind, daemonhandlers.CommandGitMerge)
+	if record.Kind != daemonhandlers.CommandGitMergeRef {
+		t.Fatalf("operation kind = %s, want %s", record.Kind, daemonhandlers.CommandGitMergeRef)
 	}
 
 	events := collectOperationEvents(t, ch, 6)
@@ -321,9 +340,43 @@ func TestOperationRuntimeGitMergePublishesLifecycleEvents(t *testing.T) {
 		if body.Operation.OperationID != submitBody.Operation.OperationID {
 			t.Fatalf("event operation id = %s, want %s", body.Operation.OperationID, submitBody.Operation.OperationID)
 		}
-		if body.Operation.Kind != daemonhandlers.CommandGitMerge {
-			t.Fatalf("event operation kind = %s, want %s", body.Operation.Kind, daemonhandlers.CommandGitMerge)
+		if body.Operation.Kind != daemonhandlers.CommandGitMergeRef {
+			t.Fatalf("event operation kind = %s, want %s", body.Operation.Kind, daemonhandlers.CommandGitMergeRef)
 		}
+	}
+}
+
+func TestOperationRuntimeTypedGitMergeReexecutesSameIDsAfterCompletion(t *testing.T) {
+	service := &revisionTypedMergeRuntimeGitService{}
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), nextRevision: sequentialRevision()})
+	runtime.gitHandler = daemonhandlers.NewGitHandler(service)
+	payload := mustJSON(t, map[string]string{"source_id": "az-child", "target_id": "az-parent"})
+	submit := func() (protocol.OperationSubmitResponseBody, daemonops.Record) {
+		t.Helper()
+		resp := runtime.Handle(context.Background(), testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{ProjectID: "proj-1", Kind: daemonhandlers.CommandGitMerge, Payload: payload}))
+		if !resp.OK {
+			t.Fatalf("submit response = %+v", resp)
+		}
+		var body protocol.OperationSubmitResponseBody
+		if err := json.Unmarshal(resp.Body, &body); err != nil {
+			t.Fatal(err)
+		}
+		return body, waitForRuntimeState(t, runtime, body.Operation.OperationID.String(), daemonops.StateDone)
+	}
+
+	first, firstRecord := submit()
+	second, secondRecord := submit()
+	if first.Operation.OperationID == second.Operation.OperationID || !second.Created {
+		t.Fatalf("completed typed merge was deduped: first=%+v second=%+v", first.Operation, second.Operation)
+	}
+	service.mu.Lock()
+	calls := service.calls
+	service.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("typed merge executions = %d, want 2", calls)
+	}
+	if !strings.Contains(string(firstRecord.ResultPayload), "source-revision-one") || !strings.Contains(string(secondRecord.ResultPayload), "source-revision-two") {
+		t.Fatalf("typed merge results did not bind refreshed source revisions: first=%s second=%s", firstRecord.ResultPayload, secondRecord.ResultPayload)
 	}
 }
 
@@ -332,7 +385,7 @@ func TestOperationRuntimeMarksUnsuccessfulGitMergeFailed(t *testing.T) {
 	runtime.gitHandler = daemonhandlers.NewGitHandler(unsuccessfulMergeRuntimeGitService{})
 	resp := runtime.Handle(context.Background(), testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
 		ProjectID: "proj-1",
-		Kind:      daemonhandlers.CommandGitMerge,
+		Kind:      daemonhandlers.CommandGitMergeRef,
 		Payload:   mustJSON(t, map[string]string{"worktree": "/tmp/wt", "branch": "source"}),
 	}))
 	if !resp.OK {
@@ -495,14 +548,14 @@ func TestOperationRuntimeDirectGitMergeWaitTimeoutReturnsPendingEnvelope(t *test
 	release := make(chan struct{})
 	defer close(release)
 
-	req := testRequest(daemonhandlers.CommandGitMerge, map[string]string{"worktree": "/tmp/wt", "branch": "main"})
+	req := testRequest(daemonhandlers.CommandGitMergeRef, map[string]string{"worktree": "/tmp/wt", "branch": "main"})
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		<-started
 		cancel()
 	}()
 	defer cancel()
-	resp := executor.Execute(ctx, req, daemonhandlers.CommandGitMerge, func(_ context.Context) protocol.ResponseEnvelope {
+	resp := executor.Execute(ctx, req, daemonhandlers.CommandGitMergeRef, func(_ context.Context) protocol.ResponseEnvelope {
 		close(started)
 		<-release
 		return testResponse(req, map[string]string{"worktree": "/tmp/wt", "branch": "main"})
@@ -964,7 +1017,7 @@ func TestCommandExecutorWrapsGitAndWorktreeResults(t *testing.T) {
 	}{
 		{
 			name:    "git merge",
-			command: daemonhandlers.CommandGitMerge,
+			command: daemonhandlers.CommandGitMergeRef,
 			body:    map[string]string{"worktree": "/tmp/wt", "branch": "main"},
 			result:  map[string]string{"worktree": "/tmp/wt", "branch": "main"},
 		},
@@ -1414,7 +1467,7 @@ func TestBuildSubmitRequestNormalizesWorktreeForConflictSerialization(t *testing
 
 	firstReq := runtime.buildSubmitRequestForTest(
 		t,
-		daemonhandlers.CommandGitMerge,
+		daemonhandlers.CommandGitMergeRef,
 		"proj-1",
 		mustJSON(t, map[string]string{
 			"worktree": "/tmp/az-1/",
@@ -1423,7 +1476,7 @@ func TestBuildSubmitRequestNormalizesWorktreeForConflictSerialization(t *testing
 	)
 	secondReq := runtime.buildSubmitRequestForTest(
 		t,
-		daemonhandlers.CommandGitMerge,
+		daemonhandlers.CommandGitMergeRef,
 		"proj-1",
 		mustJSON(t, map[string]string{
 			"worktree": "/tmp/az-1",

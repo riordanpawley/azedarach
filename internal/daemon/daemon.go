@@ -202,6 +202,8 @@ type Daemon struct {
 	publicationContinuationWG            sync.WaitGroup
 	publicationRecoverySubmit            func(context.Context, domain.PublicationOperation) error
 	publicationRecoveryWait              func(context.Context) error
+	typedMergePublicationWait            func(context.Context, string) error
+	typedMergeStopTarget                 func(context.Context, string, string) error
 	publicationStoresMu                  sync.Mutex
 	publicationStores                    map[string]*operationstore.SQLiteStore
 	noticeService                        *daemonnotices.Service
@@ -562,6 +564,7 @@ func New(cfg Config) *Daemon {
 		},
 	}
 	d.worktreeAdapter = worktreeAdapter
+	gitService.mergeTyped = d.mergeTypedGitBranches
 	worktreeHandler := daemonhandlers.NewWorktreeHandler(
 		worktreeAdapter,
 		daemonhandlers.WithWorktreeLongRunningExecutor(commandExecutor),

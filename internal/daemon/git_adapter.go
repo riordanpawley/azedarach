@@ -46,6 +46,7 @@ type gitServiceAdapter struct {
 	workflowModeForProject      func(string) string
 	baseBranchForWorktree       func(context.Context, string, string) string
 	heavySessionStartActive     func(context.Context, string) bool
+	mergeTyped                  func(context.Context, string, daemonhandlers.GitMergeRequest) (*daemonhandlers.GitMergeResult, error)
 
 	refreshMu      sync.Mutex
 	refreshRunning map[string]bool
@@ -89,6 +90,7 @@ type runtimeSignalProjection struct {
 
 var (
 	_ daemonhandlers.GitService                  = (*gitServiceAdapter)(nil)
+	_ daemonhandlers.GitTypedMergeService        = (*gitServiceAdapter)(nil)
 	_ daemonhandlers.GitMergePreflightService    = (*gitServiceAdapter)(nil)
 	_ daemonhandlers.GitStatusHookRefreshService = (*gitServiceAdapter)(nil)
 	_ daemonhandlers.GitDiscardChangesService    = (*gitServiceAdapter)(nil)
@@ -140,6 +142,23 @@ func (a *gitServiceAdapter) Merge(ctx context.Context, projectID, worktree, bran
 	// Merge completion should always trigger an update notification so clients
 	// refresh runtime git signals even when porcelain status stays clean.
 	if _, refreshErr := a.refreshGitStatusWriteThroughResult(ctx, projectID, worktree, true, true); refreshErr != nil {
+		return nil, refreshErr
+	}
+	return result, nil
+}
+
+func (a *gitServiceAdapter) MergeTyped(ctx context.Context, projectID string, req daemonhandlers.GitMergeRequest) (*daemonhandlers.GitMergeResult, error) {
+	if a.mergeTyped == nil {
+		return nil, fmt.Errorf("typed git merge authority unavailable")
+	}
+	result, err := a.mergeTyped(ctx, projectID, req)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, fmt.Errorf("typed git merge returned no result")
+	}
+	if _, refreshErr := a.refreshGitStatusWriteThroughResult(ctx, projectID, result.Worktree, true, true); refreshErr != nil {
 		return nil, refreshErr
 	}
 	return result, nil
