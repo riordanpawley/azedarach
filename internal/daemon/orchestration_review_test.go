@@ -2692,9 +2692,9 @@ func newOrchestrationReviewTestDaemon(repoDir string, client *issues.Client) *Da
 		hub:                   publish.NewHub(16, 8, logger),
 		issueClientsByProject: map[string]*issues.Client{"project": client},
 		revision:              map[string]uint64{},
-		snapshotAdmissionContext: func(parent context.Context) (context.Context, context.CancelFunc) {
-			return context.WithCancel(parent)
-		},
+		// Review fixtures use explicit cancellation hooks; local correctness must
+		// never depend on the production admission timeout or machine load.
+		snapshotAdmissionContext: context.WithCancel,
 		reviewAcceptedSourceOID: func(context.Context, string, string) (string, error) {
 			return "reviewed-source-oid", nil
 		},
