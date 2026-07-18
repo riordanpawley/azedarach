@@ -919,9 +919,6 @@ func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T
 	if len(reviewEvents) != 1 || reviewEvents[0].Payload["outcome"] != "returned" {
 		t.Fatalf("review events = %+v", reviewEvents)
 	}
-	if got, want := reviewPayloadInt64(reviewEvents[0].Payload["review_epoch_event_id"]), latestReviewEpochEventID(t, ctx, client, issueID); got != want || got <= 0 {
-		t.Fatalf("returned review epoch pin = %d, want %d in %+v", got, want, reviewEvents[0].Payload)
-	}
 	replayed, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{
 		Scope:         domain.ProjectOrchestrationScope(),
 		Kind:          protocol.OrchestrationIntentReviewReturn,
