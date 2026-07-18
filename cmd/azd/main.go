@@ -105,6 +105,7 @@ func main() {
 		Logger:                     logger,
 		WorktreeInitCommands:       cfg.Worktree.SyncInitCommands,
 		WorktreeAsyncInitCommands:  cfg.Worktree.AsyncInitCommands,
+		GateFailureArtifactPaths:   cfg.Gate.FailureArtifactPaths,
 		IssueResources:             cfg.IssueResources,
 		IssueAutoArchive:           cfg.Issues.AutoArchive,
 		ScheduledScripts:           cfg.ScheduledScripts,

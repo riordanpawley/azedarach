@@ -86,6 +86,7 @@ type Config struct {
 	SessionAsyncInitCommands   []string
 	WorktreeInitCommands       []string
 	WorktreeAsyncInitCommands  []string
+	GateFailureArtifactPaths   []string
 	IssueResources             appconfig.IssueResourcesConfig
 	IssueAutoArchive           appconfig.IssueAutoArchiveConfig
 	ScheduledScripts           appconfig.ScheduledScriptsConfig
@@ -148,6 +149,8 @@ type Daemon struct {
 	worktreeInitCommandsByRoot           map[string][]string
 	worktreeAsyncInitCommandsByProject   map[string][]string
 	worktreeAsyncInitCommandsByRoot      map[string][]string
+	gateFailureArtifactPathsByProject    map[string][]string
+	gateFailureArtifactPathsByRoot       map[string][]string
 	issueResourcesByProject              map[string]appconfig.IssueResourcesConfig
 	issueResourcesByRoot                 map[string]appconfig.IssueResourcesConfig
 	issueAutoArchiveByProject            map[string]appconfig.IssueAutoArchiveConfig
@@ -399,6 +402,8 @@ func New(cfg Config) *Daemon {
 		worktreeInitCommandsByRoot:         map[string][]string{},
 		worktreeAsyncInitCommandsByProject: map[string][]string{},
 		worktreeAsyncInitCommandsByRoot:    map[string][]string{},
+		gateFailureArtifactPathsByProject:  map[string][]string{},
+		gateFailureArtifactPathsByRoot:     map[string][]string{},
 		issueResourcesByProject:            map[string]appconfig.IssueResourcesConfig{},
 		issueResourcesByRoot:               map[string]appconfig.IssueResourcesConfig{},
 		issueAutoArchiveByProject:          map[string]appconfig.IssueAutoArchiveConfig{},
@@ -437,6 +442,9 @@ func New(cfg Config) *Daemon {
 		revision:                           map[string]uint64{},
 		userProjectionConsumers:            map[string]*userProjectionConsumerHandle{},
 		shutdownReqCh:                      make(chan struct{}),
+	}
+	gitService.failureArtifactPathsForProject = func(projectID string) []string {
+		return append([]string(nil), d.runtimeConfigForProject(projectID).GateFailureArtifactPaths...)
 	}
 	if !cfg.ScopedRuntime && strings.TrimSpace(os.Getenv("AZEDARACH_DISABLE_USER_DB")) != "1" {
 		if store, err := userstore.Open(userstore.DefaultPath()); err != nil {
