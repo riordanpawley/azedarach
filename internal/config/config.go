@@ -36,6 +36,7 @@ type Config struct {
 type GateConfig struct {
 	Command                string `json:"command"`
 	EnvironmentFingerprint string `json:"environmentFingerprint,omitempty"`
+	FailureArtifactPaths []string `json:"failureArtifactPaths"`
 }
 
 type IssueTrackerConfig struct {
@@ -346,7 +347,7 @@ func DefaultConfig() *Config {
 			SyncInitCommands:  []string{},
 			AsyncInitCommands: []string{},
 		},
-		Gate: GateConfig{},
+		Gate: GateConfig{FailureArtifactPaths: []string{}},
 		IssueResources: IssueResourcesConfig{
 			Env:                        map[string]string{},
 			PrepareCommands:            []string{},
@@ -463,7 +464,21 @@ func LoadConfig(projectPath string) (*Config, error) {
 		}
 	}
 
-	return MergeWithDefaults(cfg), nil
+	cfg = MergeWithDefaults(cfg)
+	if err := validateGateConfig(cfg.Gate); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func validateGateConfig(cfg GateConfig) error {
+	for index, path := range cfg.FailureArtifactPaths {
+		path = strings.TrimSpace(path)
+		if path == "" || path == "." || !filepath.IsLocal(path) {
+			return fmt.Errorf("gate.failureArtifactPaths[%d] must be a non-empty project-relative path below the project root", index)
+		}
+	}
+	return nil
 }
 
 func loadConfigLayer(cfg *Config, configPath string) error {
@@ -698,6 +713,9 @@ func MergeWithDefaults(cfg *Config) *Config {
 	}
 	if cfg.IssueTracker.Linear.Webhooks.Events == nil {
 		cfg.IssueTracker.Linear.Webhooks.Events = defaults.IssueTracker.Linear.Webhooks.Events
+	}
+	if cfg.Gate.FailureArtifactPaths == nil {
+		cfg.Gate.FailureArtifactPaths = defaults.Gate.FailureArtifactPaths
 	}
 
 	// Merge Git config

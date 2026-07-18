@@ -20,6 +20,7 @@ type daemonProjectRuntimeConfig struct {
 	SessionAsyncInitCommands   []string
 	WorktreeInitCommands       []string
 	WorktreeAsyncInitCommands  []string
+	GateFailureArtifactPaths   []string
 	IssueResources             appconfig.IssueResourcesConfig
 	IssueAutoArchive           appconfig.IssueAutoArchiveConfig
 	ScheduledScripts           appconfig.ScheduledScriptsConfig
@@ -56,6 +57,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		SessionAsyncInitCommands:   append([]string(nil), d.cfg.SessionAsyncInitCommands...),
 		WorktreeInitCommands:       append([]string(nil), d.cfg.WorktreeInitCommands...),
 		WorktreeAsyncInitCommands:  append([]string(nil), d.cfg.WorktreeAsyncInitCommands...),
+		GateFailureArtifactPaths:   append([]string(nil), d.cfg.GateFailureArtifactPaths...),
 		IssueResources:             cloneIssueResourcesConfig(d.cfg.IssueResources),
 		IssueAutoArchive:           cloneIssueAutoArchiveConfig(d.cfg.IssueAutoArchive),
 		ScheduledScripts:           cloneScheduledScriptsConfig(d.cfg.ScheduledScripts),
@@ -129,6 +131,12 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	if d.worktreeAsyncInitCommandsByRoot == nil {
 		d.worktreeAsyncInitCommandsByRoot = map[string][]string{}
 	}
+	if d.gateFailureArtifactPathsByProject == nil {
+		d.gateFailureArtifactPathsByProject = map[string][]string{}
+	}
+	if d.gateFailureArtifactPathsByRoot == nil {
+		d.gateFailureArtifactPathsByRoot = map[string][]string{}
+	}
 	if d.issueResourcesByProject == nil {
 		d.issueResourcesByProject = map[string]appconfig.IssueResourcesConfig{}
 	}
@@ -178,6 +186,9 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		if cmds, ok := d.worktreeAsyncInitCommandsByProject[projectID]; ok {
 			cfg.WorktreeAsyncInitCommands = append([]string(nil), cmds...)
 		}
+		if paths, ok := d.gateFailureArtifactPathsByProject[projectID]; ok {
+			cfg.GateFailureArtifactPaths = append([]string(nil), paths...)
+		}
 		if resources, ok := d.issueResourcesByProject[projectID]; ok {
 			cfg.IssueResources = cloneIssueResourcesConfig(resources)
 		}
@@ -197,6 +208,11 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 
 	repoDir := d.resolveRepoDirForProject(projectID)
 	cfg := defaultConfig
+	if repoDir != "" && daemonStoreRootKey(repoDir) != daemonStoreRootKey(d.cfg.RepoDir) {
+		// Capabilities are project-owned. A registered project with no explicit
+		// artifact configuration must not inherit the daemon root consumer's paths.
+		cfg.GateFailureArtifactPaths = []string{}
+	}
 
 	if repoDir != "" {
 		d.projectConfigMu.Lock()
@@ -224,6 +240,9 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 			if cmds, ok := d.worktreeAsyncInitCommandsByRoot[repoDir]; ok {
 				cfg.WorktreeAsyncInitCommands = append([]string(nil), cmds...)
 			}
+			if paths, ok := d.gateFailureArtifactPathsByRoot[repoDir]; ok {
+				cfg.GateFailureArtifactPaths = append([]string(nil), paths...)
+			}
 			if resources, ok := d.issueResourcesByRoot[repoDir]; ok {
 				cfg.IssueResources = cloneIssueResourcesConfig(resources)
 			}
@@ -245,6 +264,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 			d.sessionAsyncInitCommandsByProject[projectID] = append([]string(nil), cfg.SessionAsyncInitCommands...)
 			d.worktreeInitCommandsByProject[projectID] = append([]string(nil), cfg.WorktreeInitCommands...)
 			d.worktreeAsyncInitCommandsByProject[projectID] = append([]string(nil), cfg.WorktreeAsyncInitCommands...)
+			d.gateFailureArtifactPathsByProject[projectID] = append([]string(nil), cfg.GateFailureArtifactPaths...)
 			d.issueResourcesByProject[projectID] = cloneIssueResourcesConfig(cfg.IssueResources)
 			d.issueAutoArchiveByProject[projectID] = cloneIssueAutoArchiveConfig(cfg.IssueAutoArchive)
 			d.scheduledScriptsByProject[projectID] = cloneScheduledScriptsConfig(cfg.ScheduledScripts)
@@ -275,6 +295,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 				cfg.SessionAsyncInitCommands = append([]string(nil), loaded.Session.AsyncInitCommands...)
 				cfg.WorktreeInitCommands = append([]string(nil), loaded.Worktree.SyncInitCommands...)
 				cfg.WorktreeAsyncInitCommands = append([]string(nil), loaded.Worktree.AsyncInitCommands...)
+				cfg.GateFailureArtifactPaths = append([]string(nil), loaded.Gate.FailureArtifactPaths...)
 				cfg.IssueResources = cloneIssueResourcesConfig(loaded.IssueResources)
 				cfg.IssueAutoArchive = cloneIssueAutoArchiveConfig(loaded.Issues.AutoArchive)
 				cfg.ScheduledScripts = cloneScheduledScriptsConfig(loaded.ScheduledScripts)
@@ -296,6 +317,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 	d.sessionAsyncInitCommandsByProject[projectID] = append([]string(nil), cfg.SessionAsyncInitCommands...)
 	d.worktreeInitCommandsByProject[projectID] = append([]string(nil), cfg.WorktreeInitCommands...)
 	d.worktreeAsyncInitCommandsByProject[projectID] = append([]string(nil), cfg.WorktreeAsyncInitCommands...)
+	d.gateFailureArtifactPathsByProject[projectID] = append([]string(nil), cfg.GateFailureArtifactPaths...)
 	d.issueResourcesByProject[projectID] = cloneIssueResourcesConfig(cfg.IssueResources)
 	d.issueAutoArchiveByProject[projectID] = cloneIssueAutoArchiveConfig(cfg.IssueAutoArchive)
 	d.scheduledScriptsByProject[projectID] = cloneScheduledScriptsConfig(cfg.ScheduledScripts)
@@ -313,6 +335,7 @@ func (d *Daemon) runtimeConfigForProject(projectID string) daemonProjectRuntimeC
 		d.sessionAsyncInitCommandsByRoot[repoDir] = append([]string(nil), cfg.SessionAsyncInitCommands...)
 		d.worktreeInitCommandsByRoot[repoDir] = append([]string(nil), cfg.WorktreeInitCommands...)
 		d.worktreeAsyncInitCommandsByRoot[repoDir] = append([]string(nil), cfg.WorktreeAsyncInitCommands...)
+		d.gateFailureArtifactPathsByRoot[repoDir] = append([]string(nil), cfg.GateFailureArtifactPaths...)
 		d.issueResourcesByRoot[repoDir] = cloneIssueResourcesConfig(cfg.IssueResources)
 		d.issueAutoArchiveByRoot[repoDir] = cloneIssueAutoArchiveConfig(cfg.IssueAutoArchive)
 		d.scheduledScriptsByRoot[repoDir] = cloneScheduledScriptsConfig(cfg.ScheduledScripts)
