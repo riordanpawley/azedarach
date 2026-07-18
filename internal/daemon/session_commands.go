@@ -1661,13 +1661,11 @@ func (d *Daemon) handleSessionStopDirectWithOptions(ctx context.Context, req pro
 			}
 		}
 	}
-	if err := d.refreshStoppedSessionRuntimeState(ctx, cmd.ProjectID, cmd.IssueID, append([]string{cmd.SessionID}, sessionNamesToKill...)); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("daemon session stop post-kill issue refresh failed",
-			"project_id", cmd.ProjectID,
-			"issue_id", cmd.IssueID,
-			"session_id", cmd.SessionID,
-			"error", err,
-		)
+	if err := d.refreshStoppedSessionRuntimeState(ctx, cmd.ProjectID, cmd.IssueID, append([]string{cmd.SessionID}, sessionNamesToKill...)); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("session stopped but durable runtime refresh is unavailable: %v", err)), nil
+	}
+	if err := d.refreshProjectReadRuntimeForIssues(ctx, cmd.ProjectID, []string{cmd.IssueID}); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("session stopped but task runtime refresh is unavailable: %v", err)), nil
 	}
 	outputLines := []string{
 		fmt.Sprintf("Killing session: %s", strings.Join(sessionNamesToKill, ", ")),

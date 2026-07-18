@@ -579,9 +579,15 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 	if !d.materializedReadsEnabled() {
 		return d.buildLegacyTaskListSnapshot(ctx, req, projectID, query, includeDependencies, archiveMode)
 	}
-	_ = ctx
 	_ = req
-	tasks, source, err := d.projectReadSnapshot(projectID)
+	tasks, source, err := d.convergedProjectReadSnapshot(ctx, projectID)
+	if err != nil {
+		return taskListSnapshotLoadResult{}, err
+	}
+	if err := d.refreshProjectReadRuntimeForIssues(ctx, projectID, taskIDsFromTasks(tasks)); err != nil {
+		return taskListSnapshotLoadResult{}, newProjectReadUnavailableError("refresh task-list runtime facts: %w", err)
+	}
+	tasks, source, err = d.convergedProjectReadSnapshot(ctx, projectID)
 	if err != nil {
 		return taskListSnapshotLoadResult{}, err
 	}
@@ -701,11 +707,19 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
 	}
 	if d.materializedReadsEnabled() {
-		materialized, source, err := d.projectReadSnapshot(projectID)
+		materialized, source, err := d.convergedProjectReadSnapshot(ctx, projectID)
 		if err != nil {
 			return d.errorResponse(req, taskReadErrorCode(err), err.Error()), nil
 		}
 		tasks := materializedTaskContext(materialized, []string{taskID}, true, false, true, false, archiveMode)
+		if err := d.refreshProjectReadRuntimeForIssues(ctx, projectID, taskIDsFromTasks(tasks)); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("refresh issue runtime facts: %v", err)), nil
+		}
+		materialized, source, err = d.convergedProjectReadSnapshot(ctx, projectID)
+		if err != nil {
+			return d.errorResponse(req, taskReadErrorCode(err), err.Error()), nil
+		}
+		tasks = materializedTaskContext(materialized, []string{taskID}, true, false, true, false, archiveMode)
 		found := false
 		for _, task := range tasks {
 			if task.ID.String() == taskID {
@@ -844,16 +858,24 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "task_ids is required"), nil
 	}
 	if d.materializedReadsEnabled() {
-		materialized, source, err := d.projectReadSnapshot(projectID)
+		materialized, source, err := d.convergedProjectReadSnapshot(ctx, projectID)
 		if err != nil {
 			return d.errorResponse(req, taskReadErrorCode(err), err.Error()), nil
 		}
 		tasks := materializedTaskContext(materialized, taskIDs, !cmd.MetadataOnly, cmd.IncludeAncestors, !cmd.ExcludeDependents, cmd.DirectDependents, protocol.ArchiveModeExclude)
+		if err := d.refreshProjectReadRuntimeForIssues(ctx, projectID, taskIDsFromTasks(tasks)); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("refresh issue runtime facts: %v", err)), nil
+		}
+		materialized, source, err = d.convergedProjectReadSnapshot(ctx, projectID)
+		if err != nil {
+			return d.errorResponse(req, taskReadErrorCode(err), err.Error()), nil
+		}
+		tasks = materializedTaskContext(materialized, taskIDs, !cmd.MetadataOnly, cmd.IncludeAncestors, !cmd.ExcludeDependents, cmd.DirectDependents, protocol.ArchiveModeExclude)
 		if !cmd.MetadataOnly {
 			if err := d.refreshFiniteWorktreeGitFacts(ctx, projectID, taskIDsFromTasks(tasks)); err != nil {
 				return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("refresh issue worktree git facts: %v", err)), nil
 			}
-			materialized, source, err = d.projectReadSnapshot(projectID)
+			materialized, source, err = d.convergedProjectReadSnapshot(ctx, projectID)
 			if err != nil {
 				return d.errorResponse(req, taskReadErrorCode(err), err.Error()), nil
 			}
@@ -4212,12 +4234,12 @@ func (d *Daemon) handleTaskClosePreflight(ctx context.Context, req protocol.Requ
 	}
 	if taskID := strings.TrimSpace(cmd.TaskID); taskID != "" {
 		if err := d.refreshTaskCloseSessionRuntime(ctx, projectID, taskID); err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("refresh session runtime before close preflight: %v", err)), nil
+			return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("refresh session runtime before close preflight: %v", err)), nil
 		}
 	}
 	result, err := d.validateTaskClosePreflight(ctx, projectID, cmd.TaskID, cmd.taskClosePreflightOptions, req)
 	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		return d.errorResponse(req, taskReadErrorCode(err), err.Error()), nil
 	}
 	body, err := json.Marshal(result)
 	if err != nil {
@@ -4380,7 +4402,15 @@ func (d *Daemon) closeCleanDescendantsBeforeParent(ctx context.Context, projectI
 }
 
 func (d *Daemon) loadTaskClosePreflightDomainTasks(ctx context.Context, projectID, taskID string) ([]domain.Task, error) {
-	tasks, _, err := d.projectReadSnapshot(projectID)
+	tasks, _, err := d.convergedProjectReadSnapshot(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	closure := materializedParentChildClosure(tasks, taskID)
+	if err := d.refreshProjectReadRuntimeForIssues(ctx, projectID, taskIDsFromTasks(closure)); err != nil {
+		return nil, newProjectReadUnavailableError("refresh close-preflight runtime facts: %w", err)
+	}
+	tasks, _, err = d.convergedProjectReadSnapshot(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
