@@ -578,12 +578,22 @@ func (d *Daemon) startProjectReadMaterializers(ctx context.Context) error {
 	if d.issues == nil {
 		return nil
 	}
-	_, err := d.ensureProjectReadMaterializer(ctx, d.canonicalProjectID(protocol.DefaultProjectID), d.issues)
+	projectID := d.canonicalProjectID(protocol.DefaultProjectID)
+	if healthErr, unhealthy := d.projectIssueStoreHealthError(projectID); unhealthy {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.WarnContext(ctx, "project read materializer skipped for quarantined startup store", "project_id", projectID, "error", healthErr)
+		}
+		return nil
+	}
+	_, err := d.ensureProjectReadMaterializer(ctx, projectID, d.issues)
 	return err
 }
 
 func (d *Daemon) ensureProjectReadMaterializer(ctx context.Context, projectID string, client *issues.Client) (*projectReadMaterializer, error) {
 	projectID = d.canonicalProjectID(projectID)
+	if healthErr, unhealthy := d.projectIssueStoreHealthError(projectID); unhealthy {
+		return nil, fmt.Errorf("project read materialization unavailable for %s: %w", projectID, healthErr)
+	}
 	d.materializersInitMu.Lock()
 	defer d.materializersInitMu.Unlock()
 	d.materializersMu.Lock()

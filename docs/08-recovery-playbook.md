@@ -117,6 +117,49 @@ Do not delete the cutover marker to force startup. The marker refusal happens
 before generic schema repair so later migrations cannot run against a partially
 upgraded issue schema.
 
+## SQLite Structural Corruption
+
+The issue-store startup path opens an existing authority read-only and runs
+`PRAGMA quick_check(1)` before creating any read-write pool or applying
+journal-mode, migration, normalization, or schema-repair writes. The preflight
+reads committed WAL state without checkpointing or changing the database or
+WAL authority files. A SQLite code-11 result, or any non-`ok` structural
+result, quarantines that client and marks the project issue store unavailable.
+During global-daemon startup, structural corruption is isolated to that
+canonical project: its materializer is suppressed and its commands return
+cached `Unavailable`, while IPC and healthy registered projects continue.
+Non-corruption startup failures remain fatal. Projection-delta reads apply the
+same latch before classifying transient busy or `SQLITE_IOERR_SHORT_READ`
+failures, so a corrupt source iteration cannot leave the write pool usable.
+The daemon command boundary translates the first runtime code-11 failure from
+any issue-store command into the same project-health quarantine; it does not
+expire until restart.
+
+When this failure appears:
+
+1. Stop retrying mutations. Do not run repair SQL, `REINDEX`, `VACUUM`, or
+   candidate migrations against the original database.
+2. Preserve the database and its current `-wal` and `-shm` companions. While
+   the daemon is live, obtain a consistent clone with SQLite's online-backup
+   API; otherwise stop it cleanly before copying the complete database state.
+3. Run `PRAGMA integrity_check` and affected active-path reads only against the
+   clone. Map reported root pages through the clone's `sqlite_master` catalog.
+4. Recover or salvage only another disposable clone, then prove integrity,
+   foreign keys, row preservation, migrations, reopen/idempotency, lifecycle,
+   mailbox, orchestration, and representative reads.
+5. Replace the authority only through an explicit operator recovery after the
+   validated replacement and rollback copy are both preserved. Restarting the
+   daemon clears the in-process quarantine but must not be used to bypass a
+   still-corrupt database.
+
+Executable regression checks:
+
+```bash
+go test ./internal/services/issues -run 'TestClient(QuarantinesRuntimeSQLiteCorruption|RejectsCorrupt(DatabaseBeforeStartupWrites|WALDatabaseWithoutChangingAuthorityBytes))' -count=1
+go test ./internal/services/issues -run 'Test(ProjectionReadErrorClassifiesOnlyShortReadIOErrorAsRetryable|ProjectionSnapshotSourceIterationErrorCannotCommitIncompleteVector)' -count=1
+go test ./internal/daemon -run 'Test(ProjectIssueStoreCorruptionIsCachedAsUnavailableFromAnyStorePath|CommandBoundaryQuarantinesFirstCorruptionFromEveryIssueMutationPath|ProjectionDeltaStartupQuarantinesOnlyCorruptRegisteredProject|ProjectReadMaterializerStartupSkipsQuarantinedDefaultStore)' -count=1
+```
+
 ## Orchestration Integrate Safety Gate
 
 Accepted review completion should normally use

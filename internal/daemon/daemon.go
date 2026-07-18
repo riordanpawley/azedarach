@@ -931,6 +931,21 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 			d.cfg.Logger.Log(ctx, daemonCommandSuccessLogLevel(req.Command), "daemon command completed", attrs...)
 		}
 	}()
+	defer func() {
+		if err == nil && resp.Error == nil {
+			return
+		}
+		issueClient := d.existingIssueClientForProject(projectID)
+		if issueClient == nil || issueClient.CorruptionError() == nil {
+			return
+		}
+		healthErr, unhealthy := d.projectIssueStoreHealthError(projectID)
+		if !unhealthy {
+			healthErr = d.recordProjectIssueStoreFailure(projectID, issueClient.CorruptionError())
+		}
+		resp = d.errorResponse(req, protocol.ErrorCodeUnavailable, healthErr.Error())
+		err = nil
+	}()
 
 	beginStartedAt := time.Now()
 	if err := d.beginCommand(); err != nil {
