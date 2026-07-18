@@ -10974,39 +10974,44 @@ func TestTaskGraphReadinessReportsStaleChildBranchContainmentRisk(t *testing.T) 
 	activeBranch := "riordan/" + activeID.String() + "/reconcile"
 
 	repoDir := t.TempDir()
-	runDaemonTestGit(t, repoDir, "init", "-q", "-b", "main")
-	runDaemonTestGit(t, repoDir, "config", "user.email", "test@example.com")
-	runDaemonTestGit(t, repoDir, "config", "user.name", "Test User")
-	if err := os.WriteFile(filepath.Join(repoDir, "rpc.go"), []byte("package rpc\n\nfunc materialize() string { return \"base\" }\n"), 0o644); err != nil {
-		t.Fatalf("write base file: %v", err)
+	tasks, err := issuesClient.GetManyWithRuntime(ctx, projectID, []string{rootID.String(), closedID.String(), activeID.String()})
+	if err != nil {
+		t.Fatalf("load projected tasks: %v", err)
 	}
-	runDaemonTestGit(t, repoDir, "add", "rpc.go")
-	runDaemonTestGit(t, repoDir, "commit", "-q", "-m", "base")
-	runDaemonTestGit(t, repoDir, "checkout", "-q", "-b", activeBranch)
-	if err := os.WriteFile(filepath.Join(repoDir, "rpc.go"), []byte("package rpc\n\nfunc materialize() string { return \"generic\" }\n"), 0o644); err != nil {
-		t.Fatalf("write active file: %v", err)
+	materializer := newProjectReadMaterializer(projectID, nil, nil)
+	for i := range tasks {
+		task := tasks[i]
+		switch task.ID {
+		case rootID:
+			task.HasWorktree = true
+		case activeID:
+			task.HasWorktree = true
+			task.GitBehindCount = 1
+		}
+		materializer.canonical[task.ID.String()] = task
+		materializer.tasks[task.ID.String()] = task
 	}
-	runDaemonTestGit(t, repoDir, "commit", "-am", activeID.String()+": keep generic materializer")
-	runDaemonTestGit(t, repoDir, "checkout", "-q", "main")
-	runDaemonTestGit(t, repoDir, "checkout", "-q", "-b", rootBranch)
-	if err := os.WriteFile(filepath.Join(repoDir, "rpc.go"), []byte("package rpc\n\nfunc materializeTyped() string { return \"typed\" }\n"), 0o644); err != nil {
-		t.Fatalf("write evidence file: %v", err)
-	}
-	runDaemonTestGit(t, repoDir, "commit", "-am", closedID.String()+": generate typed materializer rpc")
-	evidenceCommit := runDaemonTestGitOutput(t, repoDir, "rev-parse", "HEAD")
-
+	materializer.metadata.Health = "healthy"
+	materializer.replaceWorktrees(map[string]git.Worktree{
+		rootID.String():   {IssueID: rootID.String(), Path: repoDir, Branch: rootBranch},
+		activeID.String(): {IssueID: activeID.String(), Path: repoDir, Branch: activeBranch},
+	})
+	gitCalls := 0
 	d := &Daemon{
 		cfg: Config{RepoDir: repoDir, Logger: logger},
-		git: git.NewClient(git.NewExecRunner(repoDir), logger),
+		git: git.NewClient(&recordingGitRunner{runFn: func(args ...string) (string, error) {
+			gitCalls++
+			return "", errors.New("Git must not run from graph readiness")
+		}}, logger),
 		issueClientsByProject: map[string]*issues.Client{
 			projectID: issuesClient,
 		},
+		materializersStarted: true,
+		materializers:        map[string]*projectReadMaterializer{projectID: materializer},
 	}
 	d.taskGraphWorktrees = func(context.Context, string) ([]git.Worktree, error) {
-		return []git.Worktree{
-			{IssueID: rootID.String(), Path: repoDir, Branch: rootBranch},
-			{IssueID: activeID.String(), Path: repoDir, Branch: activeBranch},
-		}, nil
+		t.Fatal("graph readiness must consume projected worktrees")
+		return nil, nil
 	}
 
 	ready, err := d.taskGraphReadiness(ctx, projectID, rootID.String())
@@ -11017,20 +11022,17 @@ func TestTaskGraphReadinessReportsStaleChildBranchContainmentRisk(t *testing.T) 
 		t.Fatalf("containment risks = %+v, want one stale child risk", ready.ContainmentRisks)
 	}
 	risk := ready.ContainmentRisks[0]
-	if risk.Classification != "stale_child_branch" || risk.IssueID != activeID.String() || risk.ClosedChildIssueID != closedID.String() {
-		t.Fatalf("risk identity = %+v, want stale child risk for active %s closed %s", risk, activeID, closedID)
+	if risk.Classification != "stale_child_branch" || risk.IssueID != activeID.String() || risk.RootBranch != rootBranch {
+		t.Fatalf("risk identity = %+v, want projected stale child risk for active %s", risk, activeID)
 	}
-	if !risk.RootContainsEvidence || risk.ActiveContainsEvidence {
-		t.Fatalf("risk containment = root:%t active:%t, want root true active false", risk.RootContainsEvidence, risk.ActiveContainsEvidence)
+	if risk.ClosedChildIssueID != "" || risk.EvidenceCommit != "" || risk.RootContainsEvidence || risk.ActiveContainsEvidence {
+		t.Fatalf("risk = %+v, must not fabricate exact Git containment evidence", risk)
 	}
-	if risk.EvidenceCommit != evidenceCommit {
-		t.Fatalf("evidence commit = %s, want %s", risk.EvidenceCommit, evidenceCommit)
+	if !strings.Contains(risk.Message, "behind ancestor branch") || !strings.Contains(risk.Message, "mutation preflight") {
+		t.Fatalf("risk message = %q, want projected authority wording", risk.Message)
 	}
-	if !slices.Contains(risk.OverlapFiles, "rpc.go") {
-		t.Fatalf("overlap files = %+v, want rpc.go", risk.OverlapFiles)
-	}
-	if !strings.Contains(risk.Message, "stale child branch") || !strings.Contains(risk.Message, "parent branch") {
-		t.Fatalf("risk message = %q, want stale child branch parent wording", risk.Message)
+	if gitCalls != 0 {
+		t.Fatalf("Git calls = %d, want zero from graph readiness", gitCalls)
 	}
 }
 

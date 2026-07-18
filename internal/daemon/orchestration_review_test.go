@@ -116,7 +116,7 @@ func (r *revisionReviewGitRunner) Run(_ context.Context, args ...string) (string
 	}
 }
 
-func TestProjectReviewQueueConsumesProjectionWithoutGitRefresh(t *testing.T) {
+func TestProjectReviewQueueConsumesProjectionWithoutGitStatusRefresh(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
@@ -134,10 +134,18 @@ func TestProjectReviewQueueConsumesProjectionWithoutGitRefresh(t *testing.T) {
 	materializer.metadata.Health = "healthy"
 	materializer.replaceWorktrees(map[string]git.Worktree{issueID: {IssueID: issueID, Path: filepath.Join(repoDir, "review-worktree"), Branch: "worker/review"}})
 
-	gitCalls := 0
+	gitCalls := make([]string, 0, 2)
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
-		gitCalls++
-		return "", errors.New("Git must not run from orchestration snapshot")
+		command := strings.Join(args, " ")
+		gitCalls = append(gitCalls, command)
+		switch {
+		case strings.Contains(command, " rev-parse --verify HEAD"):
+			return "projected-review-head\n", nil
+		case strings.Contains(command, " merge-base "):
+			return "projected-review-base\n", nil
+		default:
+			return "", errors.New("Git status/diff refresh must not run from orchestration snapshot")
+		}
 	}}
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
 	d.git = git.NewClient(runner, slog.Default())
@@ -152,8 +160,10 @@ func TestProjectReviewQueueConsumesProjectionWithoutGitRefresh(t *testing.T) {
 	if len(snapshot.ReviewQueue) != 1 || snapshot.ReviewQueue[0].IssueID != issueID {
 		t.Fatalf("reviews = %+v, want projected review %s", snapshot.ReviewQueue, issueID)
 	}
-	if gitCalls != 0 {
-		t.Fatalf("Git calls = %d, want 0", gitCalls)
+	for _, command := range gitCalls {
+		if strings.Contains(command, " status ") || strings.Contains(command, " diff ") || strings.Contains(command, " rev-list ") || strings.Contains(command, " log ") || strings.Contains(command, " worktree ") {
+			t.Fatalf("Git calls = %+v, want only immutable review identity pinning", gitCalls)
+		}
 	}
 }
 

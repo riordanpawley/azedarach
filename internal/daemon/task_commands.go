@@ -5872,17 +5872,21 @@ func (d *Daemon) captureTaskGraphReadinessContext(ctx context.Context, projectID
 	captured.startProgressByIssue = d.sessionStartProgressByIssueAt(ctx, projectID, captured.capturedAt)
 	captured.failedStartsByIssue = d.failedSessionStartByIssue(ctx, projectID)
 	var worktrees []git.Worktree
-	if d != nil && d.taskGraphWorktrees != nil {
+	if d != nil && d.materializedReadsEnabled() {
+		projected := d.projectReadWorktrees(projectID)
+		worktrees = make([]git.Worktree, 0, len(projected))
+		for _, worktree := range projected {
+			worktrees = append(worktrees, worktree)
+		}
+	} else if d != nil && d.taskGraphWorktrees != nil {
 		worktrees, err = d.taskGraphWorktrees(ctx, projectID)
-	} else if d != nil && d.worktreeAdapter != nil {
-		worktrees, err = d.worktreeAdapter.List(ctx, projectID)
 	}
 	if err != nil {
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Debug("readiness context worktree list failed", "project_id", projectID, "error", err)
 		}
 	}
-	captured.containmentRisksByRoot = d.captureTaskGraphContainmentRisks(ctx, projectID, tasks, roots, worktrees, err)
+	captured.containmentRisksByRoot = captureProjectedTaskGraphContainmentRisks(tasks, roots, worktrees, err)
 	completionIssueIDs := make([]naming.IssueID, 0, len(tasks))
 	for _, task := range tasks {
 		if !task.ID.IsZero() {
@@ -6330,24 +6334,23 @@ func (d *Daemon) taskGraphDurableCompletionEvidence(ctx context.Context, project
 	return out, nil
 }
 
-func (d *Daemon) captureTaskGraphContainmentRisks(ctx context.Context, projectID string, tasks []domain.Task, roots []string, worktrees []git.Worktree, worktreeListErr error) map[string][]taskContainmentRisk {
+// captureProjectedTaskGraphContainmentRisks derives readability diagnostics
+// exclusively from materialized issue, worktree, and Git status projections.
+// Exact containment remains mutation-preflight authority; ordinary readiness
+// and orchestration snapshots must never execute Git while building a response.
+func captureProjectedTaskGraphContainmentRisks(tasks []domain.Task, roots []string, worktrees []git.Worktree, worktreeListErr error) map[string][]taskContainmentRisk {
 	out := make(map[string][]taskContainmentRisk, len(roots))
-	if d == nil {
-		return out
-	}
 	type activeInput struct {
 		issueID  naming.IssueID
+		task     domain.Task
 		worktree git.Worktree
 	}
 	type rootInputs struct {
 		rootID       naming.IssueID
 		rootWorktree git.Worktree
 		active       []activeInput
-		closed       []naming.IssueID
+		closedCount  int
 	}
-	inputs := make([]rootInputs, 0, len(roots))
-	refs := make([]string, 0, len(roots)*2)
-	worktreePath := ""
 	appendIncomplete := func(input rootInputs, active activeInput, incompleteRefs []string, detail string) {
 		refDescription := strings.Join(uniqueNonEmpty(incompleteRefs), ", ")
 		if refDescription == "" {
@@ -6371,6 +6374,11 @@ func (d *Daemon) captureTaskGraphContainmentRisks(ctx context.Context, projectID
 			SuggestedCommand: fmt.Sprintf("inspect or refresh containment for %s before relying on a negative result", suggestedTarget),
 		})
 	}
+	tasksByID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		tasksByID[task.ID.String()] = task
+	}
+	worktreeRefs := daemonIssueWorktreeRefs(worktrees)
 	for _, rootIssueID := range uniqueNonEmpty(roots) {
 		rootID, byID, children, err := daemonTaskGraphIndexes(rootIssueID, tasks)
 		if err != nil {
@@ -6385,14 +6393,14 @@ func (d *Daemon) captureTaskGraphContainmentRisks(ctx context.Context, projectID
 				continue
 			}
 			if task.IssueClosed() {
-				input.closed = append(input.closed, id)
+				input.closedCount++
 			} else if worktree, found := daemonWorktreeForIssue(worktrees, id.String()); found {
-				input.active = append(input.active, activeInput{issueID: id, worktree: worktree})
+				input.active = append(input.active, activeInput{issueID: id, task: task, worktree: worktree})
 			} else if task.HasWorktree {
-				input.active = append(input.active, activeInput{issueID: id})
+				input.active = append(input.active, activeInput{issueID: id, task: task})
 			}
 		}
-		if len(input.active) == 0 || len(input.closed) == 0 {
+		if len(input.active) == 0 || input.closedCount == 0 {
 			continue
 		}
 		if worktreeListErr != nil {
@@ -6409,143 +6417,31 @@ func (d *Daemon) captureTaskGraphContainmentRisks(ctx context.Context, projectID
 			}
 			continue
 		}
-		validActive := input.active[:0]
 		for _, active := range input.active {
 			if strings.TrimSpace(active.worktree.Path) == "" || strings.TrimSpace(active.worktree.Branch) == "" {
 				appendIncomplete(input, active, []string{rootWorktree.Branch}, "expected active worktree projection is missing")
 				continue
 			}
-			validActive = append(validActive, active)
-		}
-		input.active = validActive
-		if len(input.active) == 0 {
-			continue
-		}
-		if worktreePath == "" {
-			worktreePath = rootWorktree.Path
-		}
-		refs = append(refs, rootWorktree.Branch)
-		for _, active := range input.active {
-			refs = append(refs, active.worktree.Branch)
-		}
-		inputs = append(inputs, input)
-	}
-	if len(inputs) == 0 || d.git == nil {
-		return out
-	}
-	graph, err := d.git.SnapshotRefGraph(ctx, worktreePath, refs)
-	if err != nil {
-		if d.cfg.Logger != nil {
-			d.cfg.Logger.Debug("capture containment ref graph failed", "project_id", projectID, "root_count", len(inputs), "error", err)
-		}
-		for _, input := range inputs {
-			for _, active := range input.active {
-				appendIncomplete(input, active, []string{input.rootWorktree.Branch, active.worktree.Branch}, "graph capture failed")
-			}
-		}
-		return out
-	}
-	if graph.Truncated && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("containment ref graph reached snapshot bound", "project_id", projectID)
-	}
-	for _, input := range inputs {
-		rootRef := input.rootWorktree.Branch
-		seen := make(map[string]struct{})
-		rootComplete := graph.RefComplete(rootRef)
-		for _, active := range input.active {
-			activeComplete := graph.RefComplete(active.worktree.Branch)
-			if rootComplete && activeComplete {
+			if active.task.GitBehindCount <= 0 {
 				continue
 			}
-			incompleteRefs := make([]string, 0, 2)
-			if !rootComplete {
-				incompleteRefs = append(incompleteRefs, rootRef)
+			baseBranch := strings.TrimSpace(rootWorktree.Branch)
+			if target, ok := domain.ClosestAncestorWithWorktree(active.issueID.String(), tasksByID, worktreeRefs); ok {
+				baseBranch = target.Branch
 			}
-			if !activeComplete {
-				incompleteRefs = append(incompleteRefs, active.worktree.Branch)
-			}
-			appendIncomplete(input, active, incompleteRefs, "")
-		}
-		closedIssueIDs := make([]string, 0, len(input.closed))
-		for _, closedID := range input.closed {
-			closedIssueIDs = append(closedIssueIDs, closedID.String())
-		}
-		evidenceByIssue := graph.IssueEvidenceByIssue(rootRef, closedIssueIDs)
-		activeFilesByBranch := make(map[string]map[string]struct{}, len(input.active))
-		for _, active := range input.active {
-			activeFilesByBranch[active.worktree.Branch] = stringStructSet(graph.ChangedFilesExclusive(rootRef, active.worktree.Branch))
-		}
-		for _, closedID := range input.closed {
-			for _, commit := range evidenceByIssue[closedID.String()] {
-				changedFiles := graph.Commits[commit.Hash].ChangedFiles
-				for _, active := range input.active {
-					if graph.Contains(active.worktree.Branch, commit.Hash) {
-						continue
-					}
-					key := active.issueID.String() + "\x00" + closedID.String() + "\x00" + commit.Hash
-					if _, exists := seen[key]; exists {
-						continue
-					}
-					seen[key] = struct{}{}
-					out[input.rootID.String()] = append(out[input.rootID.String()], taskContainmentRisk{
-						IssueID: active.issueID.String(), ActiveBranch: active.worktree.Branch, RootIssueID: input.rootID.String(), RootBranch: rootRef,
-						ClosedChildIssueID: closedID.String(), EvidenceCommit: commit.Hash, EvidenceSubject: commit.Subject,
-						RootContainsEvidence: true, ActiveContainsEvidence: false, Classification: "stale_child_branch",
-						Message:      fmt.Sprintf("stale child branch: parent branch %s contains closed child evidence %s from %s, but active branch %s for %s does not", rootRef, shortCommitHash(commit.Hash), closedID.String(), active.worktree.Branch, active.issueID.String()),
-						ChangedFiles: changedFiles, OverlapFiles: overlapStrings(changedFiles, activeFilesByBranch[active.worktree.Branch]),
-						SuggestedCommand: fmt.Sprintf("merge or rebase %s into %s before continuing, or record explicit supersession evidence", rootRef, active.worktree.Branch),
-					})
-				}
-			}
+			out[input.rootID.String()] = append(out[input.rootID.String()], taskContainmentRisk{
+				IssueID: active.issueID.String(), ActiveBranch: active.worktree.Branch, RootIssueID: input.rootID.String(), RootBranch: baseBranch,
+				Classification:   "stale_child_branch",
+				Message:          fmt.Sprintf("stale child branch: projected active branch %s for %s is behind ancestor branch %s by %d commit(s); exact closed-child containment is verified only by mutation preflight", active.worktree.Branch, active.issueID.String(), baseBranch, active.task.GitBehindCount),
+				SuggestedCommand: fmt.Sprintf("merge or rebase %s into %s before continuing, or record explicit supersession evidence", baseBranch, active.worktree.Branch),
+			})
 		}
 		sort.SliceStable(out[input.rootID.String()], func(i, j int) bool {
 			left, right := out[input.rootID.String()][i], out[input.rootID.String()][j]
-			if left.IssueID != right.IssueID {
-				return left.IssueID < right.IssueID
-			}
-			if left.ClosedChildIssueID != right.ClosedChildIssueID {
-				return left.ClosedChildIssueID < right.ClosedChildIssueID
-			}
-			return left.EvidenceCommit < right.EvidenceCommit
+			return left.IssueID < right.IssueID
 		})
 	}
 	return out
-}
-
-func stringStructSet(values []string) map[string]struct{} {
-	out := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			out[value] = struct{}{}
-		}
-	}
-	return out
-}
-
-func overlapStrings(values []string, set map[string]struct{}) []string {
-	if len(values) == 0 || len(set) == 0 {
-		return nil
-	}
-	out := make([]string, 0)
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		if _, ok := set[value]; ok {
-			out = append(out, value)
-		}
-	}
-	return uniqueNonEmpty(out)
-}
-
-func shortCommitHash(hash string) string {
-	hash = strings.TrimSpace(hash)
-	if len(hash) > 12 {
-		return hash[:12]
-	}
-	return hash
 }
 
 func daemonTaskGraphNestedRoots(
