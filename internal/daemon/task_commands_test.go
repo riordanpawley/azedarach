@@ -4862,6 +4862,45 @@ func TestEmbeddedOrdinaryReadUsesCanonicalBootstrapOnly(t *testing.T) {
 	}
 }
 
+func TestOrdinaryReadDoesNotInitializeMissingProductionMaterializer(t *testing.T) {
+	ctx := context.Background()
+	const projectID = "proj-missing-production-materializer"
+	issuesClient, _ := newTestIssueClient(t)
+	if _, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "durable but not initialized", Status: domain.StatusInProgress, Type: domain.TypeTask,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var hydrateCalls atomic.Int32
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		materializersStarted:  true,
+		materializers:         map[string]*projectReadMaterializer{},
+		projectReadRuntimeHydrate: func(_ context.Context, _ string, tasks []domain.Task) ([]domain.Task, error) {
+			hydrateCalls.Add(1)
+			return tasks, nil
+		},
+		revision: map[string]uint64{projectID: 1},
+	}
+	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-missing-production-materializer",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.list",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeUnavailable {
+		t.Fatalf("task.list response = %+v, want unavailable materializer", resp)
+	}
+	if got := hydrateCalls.Load(); got != 0 {
+		t.Fatalf("ordinary read initialized runtime projection %d times, want 0", got)
+	}
+}
+
 func TestEmbeddedInvariantReadUsesStrictHydrationAfterBootstrap(t *testing.T) {
 	ctx := context.Background()
 	const projectID = "proj-embedded-runtime-unavailable"

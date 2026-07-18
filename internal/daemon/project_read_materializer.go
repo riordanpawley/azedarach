@@ -1117,7 +1117,7 @@ func (d *Daemon) convergedProjectReadSnapshotMode(ctx context.Context, projectID
 		started := d.materializersStarted
 		d.materializersMu.RUnlock()
 		if started {
-			return d.projectReadSnapshot(projectID)
+			return nil, protocol.MaterializedSnapshotMetadata{}, newProjectReadUnavailableError("project read materialization not initialized for %s", projectID)
 		}
 		candidate, err := d.bootstrapEmbeddedProjectReadMaterializer(ctx, projectID, includeEmbeddedRuntime)
 		if err != nil {
