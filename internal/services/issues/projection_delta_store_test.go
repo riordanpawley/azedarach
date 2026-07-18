@@ -501,6 +501,70 @@ func TestProjectionDeltaNotifierSelfTerminationClosesBackendExactlyOnceWithConcu
 	}
 }
 
+func TestProjectionDeltaCloseJoinsSpontaneouslyClearedNotifierBeforeReopen(t *testing.T) {
+	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
+	require.NoError(t, client.OpenProjectionDeltaStore())
+
+	notifier := newSelfTerminatingProjectionDeltaNotifier()
+	close(notifier.releaseClose)
+	closeState := &projectionDeltaNotifierCloseState{}
+	ownerCleared := make(chan struct{})
+	releaseOwner := make(chan struct{})
+	client.projectionNotifierAfterClearHook = func() {
+		close(ownerCleared)
+		<-releaseOwner
+	}
+	client.projectionNotifierMu.Lock()
+	client.projectionNotifier = notifier
+	client.projectionNotifierClose = closeState
+	client.projectionNotifierSubscriptions = make(map[*projectionDeltaSubscription]struct{})
+	client.projectionNotifierWG.Add(1)
+	go client.runProjectionDeltaNotifier(notifier, closeState)
+	client.projectionNotifierMu.Unlock()
+
+	close(notifier.events)
+	<-ownerCleared
+	client.projectionNotifierMu.Lock()
+	require.Nil(t, client.projectionNotifier)
+	client.projectionNotifierMu.Unlock()
+
+	closeEntered := make(chan struct{})
+	releaseCloseHook := make(chan struct{})
+	client.projectionNotifierBeforeCloseHook = func() {
+		close(closeEntered)
+		<-releaseCloseHook
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- client.CloseDB() }()
+	<-closeEntered
+	reopenDone := make(chan error, 1)
+	go func() { reopenDone <- client.OpenProjectionDeltaStore() }()
+	close(releaseCloseHook)
+
+	// The owner is still between ownership clear and WaitGroup.Done. CloseDB
+	// retains the client lifecycle boundary while joining it, so reopen cannot
+	// enter that boundary either.
+	require.False(t, client.mu.TryLock())
+	select {
+	case err := <-closeDone:
+		require.Failf(t, "CloseDB returned before notifier owner exited", "error: %v", err)
+	default:
+	}
+	select {
+	case err := <-reopenDone:
+		require.Failf(t, "reopen returned before notifier owner exited", "error: %v", err)
+	default:
+	}
+
+	close(releaseOwner)
+	require.NoError(t, <-closeDone)
+	require.NoError(t, <-reopenDone)
+	require.Equal(t, int32(1), notifier.closeCalls.Load())
+	client.projectionNotifierAfterClearHook = nil
+	client.projectionNotifierBeforeCloseHook = nil
+	require.NoError(t, client.CloseDB())
+}
+
 func TestProjectionDeltaWatchRejectsCloseBetweenInitialReadAndSubscription(t *testing.T) {
 	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)
 	require.NoError(t, client.OpenProjectionDeltaStore())

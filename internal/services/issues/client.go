@@ -867,6 +867,7 @@ type Client struct {
 	projectionDeltaReadHook            func()
 	projectionWatchBeforeSubscribeHook func()
 	projectionNotifierBeforeCloseHook  func()
+	projectionNotifierAfterClearHook   func()
 	projectionSnapshotSourceRowsHook   func(projectionDeltaRows) projectionDeltaRows
 	projectionWatchActive              atomic.Int64
 	projectionWatchStarted             atomic.Uint64

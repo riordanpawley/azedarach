@@ -53,6 +53,7 @@ func (c *Client) runProjectionDeltaNotifier(notifier projectionDeltaNotifier, cl
 	defer c.projectionNotifierWG.Done()
 	defer func() {
 		_ = closeProjectionDeltaNotifierInstance(notifier, closeState)
+		cleared := false
 		c.projectionNotifierMu.Lock()
 		if c.projectionNotifier == notifier {
 			c.projectionNotifier = nil
@@ -62,8 +63,12 @@ func (c *Client) runProjectionDeltaNotifier(notifier projectionDeltaNotifier, cl
 				close(subscription.errors)
 			}
 			c.projectionNotifierSubscriptions = nil
+			cleared = true
 		}
 		c.projectionNotifierMu.Unlock()
+		if cleared && c.projectionNotifierAfterClearHook != nil {
+			c.projectionNotifierAfterClearHook()
+		}
 	}()
 
 	for {
@@ -112,10 +117,13 @@ func (c *Client) closeProjectionDeltaNotifier() error {
 		c.projectionNotifierClose = closeState
 	}
 	c.projectionNotifierMu.Unlock()
-	if notifier == nil {
-		return nil
+	var err error
+	if notifier != nil {
+		err = closeProjectionDeltaNotifierInstance(notifier, closeState)
 	}
-	err := closeProjectionDeltaNotifierInstance(notifier, closeState)
+	// A spontaneously terminated owner clears projectionNotifier before its
+	// deferred Done runs. Always join the owner generation, including when the
+	// pointer snapshot is nil, so CloseDB cannot reopen across that gap.
 	c.projectionNotifierWG.Wait()
 	return err
 }
