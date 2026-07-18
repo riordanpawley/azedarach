@@ -26,7 +26,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
-func TestReviewAcceptOwnsLeaseAndAutomaticallyContinuesBasePublicationWithoutAggregate(t *testing.T) {
+func TestReviewAcceptRetainsLeaseWhenInitialPublicationSubmitFailsAndRecoveryConvergesOnce(t *testing.T) {
 	ctx := context.Background()
 	repo := t.TempDir()
 	runDaemonTestGit(t, repo, "init", "-q", "-b", "main")
@@ -86,15 +86,33 @@ func TestReviewAcceptOwnsLeaseAndAutomaticallyContinuesBasePublicationWithoutAgg
 	applyEntered := make(chan domain.PublicationOperation, 1)
 	applyRelease := make(chan struct{})
 	merged := make(chan struct{})
+	retryWaiting := make(chan struct{})
+	retryRelease := make(chan struct{})
+	var retryWaitOnce sync.Once
+	var mergedOnce sync.Once
+	var applyCount atomic.Int32
+	d.publicationInitialSubmit = func(context.Context, domain.PublicationOperation) error {
+		return errors.New("injected initial publication submit failure")
+	}
+	d.publicationRecoveryWait = func(ctx context.Context) error {
+		retryWaitOnce.Do(func() { close(retryWaiting) })
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-retryRelease:
+			return nil
+		}
+	}
 	d.publicationIdentityCheck = func(context.Context, domain.PublicationOperation) error { return nil }
 	d.publicationClose = func(_ context.Context, operation domain.PublicationOperation) error {
+		applyCount.Add(1)
 		applyEntered <- operation
 		<-applyRelease
 		return nil
 	}
 	d.publicationStateChanged = func(operation domain.PublicationOperation) {
 		if operation.State == domain.PublicationOperationMerged {
-			close(merged)
+			mergedOnce.Do(func() { close(merged) })
 		}
 	}
 	integrationReadiness, err := d.taskIntegrationReadiness(ctx, projectID, issueID, repo)
@@ -113,9 +131,10 @@ func TestReviewAcceptOwnsLeaseAndAutomaticallyContinuesBasePublicationWithoutAgg
 	if len(result.Failed) != 0 || len(result.Publications) != 1 {
 		t.Fatalf("review acceptance = %+v, want one automatic publication", result)
 	}
-	operation := <-applyEntered
-	if operation.SourceRevision != sourceOID || operation.TargetBranch != "main" || operation.ValidationCommand != "go test ./consumer/..." {
-		t.Fatalf("continued publication = %+v", operation)
+	<-retryWaiting
+	queued, found, err := runtime.store.PublicationOperation(ctx, result.Publications[0].OperationID)
+	if err != nil || !found || queued.State != domain.PublicationOperationQueued {
+		t.Fatalf("durable publication after submit failure = (%+v,%t,%v)", queued, found, err)
 	}
 	task, err := issueClient.GetWithRuntime(ctx, projectID, issueID)
 	if err != nil {
@@ -124,6 +143,26 @@ func TestReviewAcceptOwnsLeaseAndAutomaticallyContinuesBasePublicationWithoutAgg
 	lease := coordinationLease(task, domain.CoordinationLeaseReview)
 	if lease == nil || lease.OwnerID != "reviewer" {
 		t.Fatalf("review lease during publication = %+v, want reviewer-owned durable lease", lease)
+	}
+	replacementEvidence := mustWorkerEvidencePayload(t)
+	replacementEvidence["summary"] = "must remain fenced after committed enqueue"
+	if _, err := issueClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: replacementEvidence}); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("evidence mutation after committed enqueue error = %v, want conflict", err)
+	}
+	if err := issueClient.Update(ctx, issueID, domain.StatusInProgress); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("epoch mutation after committed enqueue error = %v, want conflict", err)
+	}
+	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("accepted review events after submit failure = (%+v,%v), want exactly one", events, err)
+	}
+	// A restart recovery scan may race the immediate retry. Operation-manager
+	// dedupe and the durable publication claim must still admit one apply only.
+	d.recoverPublicationOperations(ctx)
+	close(retryRelease)
+	operation := <-applyEntered
+	if operation.SourceRevision != sourceOID || operation.TargetBranch != "main" || operation.ValidationCommand != "go test ./consumer/..." {
+		t.Fatalf("continued publication = %+v", operation)
 	}
 	validation, err := runtime.store.LatestReviewValidation(ctx, projectID, issueID, time.Now().UTC(), defaultValidationLeaseTTL)
 	if err != nil {
@@ -136,6 +175,9 @@ func TestReviewAcceptOwnsLeaseAndAutomaticallyContinuesBasePublicationWithoutAgg
 	<-merged
 	if err := runtime.manager.Drain(ctx); err != nil {
 		t.Fatalf("drain accepted publication operation: %v", err)
+	}
+	if got := applyCount.Load(); got != 1 {
+		t.Fatalf("publication apply count = %d, want exactly one", got)
 	}
 }
 

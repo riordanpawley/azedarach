@@ -325,8 +325,20 @@ func (d *Daemon) prepareAcceptedReviewPublication(ctx context.Context, projectID
 }
 
 func (d *Daemon) startAcceptedReviewPublication(ctx context.Context, stored domain.PublicationOperation) (domain.PublicationOperation, error) {
-	if err := d.submitPublicationOperation(ctx, stored); err != nil {
-		return domain.PublicationOperation{}, err
+	submit := d.submitPublicationOperation
+	if d.publicationInitialSubmit != nil {
+		submit = d.publicationInitialSubmit
+	}
+	if err := submit(ctx, stored); err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("accepted review publication is durable but initial submit failed; scheduling retry", "operation_id", stored.OperationID, "error", err)
+		}
+		d.schedulePublicationRecoveryRetry(d.publicationContinuationContext(), stored)
+		// Acceptance and queue ownership committed atomically before submission.
+		// Report that durable state as success so the review loop retains its
+		// lease and evidence/parent fences while immediate or restart recovery
+		// retries the idempotent operation.
+		return stored, nil
 	}
 	store, storeErr := d.publicationStoreForProject(stored.ProjectID)
 	if storeErr != nil {

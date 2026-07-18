@@ -192,6 +192,7 @@ type Daemon struct {
 	publicationClaimNow                  func() time.Time
 	publicationClaimTTL                  time.Duration
 	publicationValidationWait            func(context.Context, string) error
+	publicationInitialSubmit             func(context.Context, domain.PublicationOperation) error
 	publicationContinuationSubmit        func(context.Context, domain.PublicationOperation) error
 	publicationContinuationWait          func(context.Context) error
 	publicationContinuationMu            sync.Mutex
