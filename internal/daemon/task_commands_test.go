@@ -4825,6 +4825,23 @@ func TestProductionRuntimeHydrationFailureDoesNotBlockOrdinaryReads(t *testing.T
 	if !strings.Contains(preflight.Error.Message, "injected production runtime hydration failure") || len(preflight.Body) != 0 {
 		t.Fatalf("close preflight error/body = %+v/%q, want strict hydration failure", preflight.Error, preflight.Body)
 	}
+	deletePreflight, err := d.handleTaskDeletePreflight(ctx, request("task.delete_preflight", map[string]any{"task_id": taskID}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deletePreflight.OK || deletePreflight.Error == nil || deletePreflight.Error.Code != protocol.ErrorCodeUnavailable || !deletePreflight.Error.Retryable || len(deletePreflight.Body) != 0 {
+		t.Fatalf("delete preflight response = %+v, want retryable unavailable without payload", deletePreflight)
+	}
+	deleteResp, err := d.handleTaskDelete(ctx, request("task.delete", taskDeleteRequest{TaskID: taskID}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleteResp.OK || deleteResp.Error == nil || deleteResp.Error.Code != protocol.ErrorCodeUnavailable || !deleteResp.Error.Retryable || len(deleteResp.Body) != 0 {
+		t.Fatalf("task.delete response = %+v, want retryable unavailable without payload", deleteResp)
+	}
+	if _, err := issuesClient.GetWithRuntime(ctx, projectID, taskID); err != nil {
+		t.Fatalf("task mutated after unavailable delete preflight: %v", err)
+	}
 }
 
 func TestEmbeddedOrdinaryReadUsesCanonicalBootstrapOnly(t *testing.T) {

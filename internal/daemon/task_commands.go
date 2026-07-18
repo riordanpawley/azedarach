@@ -4794,7 +4794,7 @@ func (d *Daemon) handleTaskDeletePreflight(ctx context.Context, req protocol.Req
 	}
 	result, err := d.validateTaskDeletePreflight(ctx, projectID, cmd.TaskID)
 	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		return d.errorResponse(req, taskReadErrorCode(err), err.Error()), nil
 	}
 	body, err := json.Marshal(result)
 	if err != nil {
@@ -7989,6 +7989,9 @@ func (d *Daemon) handleTaskUnarchive(ctx context.Context, req protocol.RequestEn
 }
 
 func daemonTaskMutationErrorCode(err error) protocol.ErrorCode {
+	if isProjectReadUnavailableError(err) {
+		return protocol.ErrorCodeUnavailable
+	}
 	if errors.Is(err, issues.ErrIssueHasLiveChildren) || errors.Is(err, issues.ErrIssueHasArchivedParents) {
 		return protocol.ErrorCodeConflict
 	}
