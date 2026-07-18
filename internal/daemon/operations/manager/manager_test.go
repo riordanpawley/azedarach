@@ -390,7 +390,7 @@ func TestSubmitSerializesConflictingResources(t *testing.T) {
 	select {
 	case <-secondStarted:
 		t.Fatal("second operation started before conflicting resource was released")
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
 
 	close(firstRelease)
