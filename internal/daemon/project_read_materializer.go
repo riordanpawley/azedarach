@@ -1255,6 +1255,9 @@ func (d *Daemon) refreshProjectReadWorktreesForIssues(ctx context.Context, proje
 }
 
 func (d *Daemon) syncUserProjectionMaterializedIssues(ctx context.Context, projectID string, issueIDs []string) error {
+	if d != nil && d.projectReadUserProjectionSync != nil {
+		return d.projectReadUserProjectionSync(ctx, projectID, issueIDs)
+	}
 	if d == nil || d.userStore == nil || d.cfg.ScopedRuntime || len(issueIDs) == 0 {
 		return nil
 	}

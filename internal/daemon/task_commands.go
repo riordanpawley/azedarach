@@ -444,29 +444,31 @@ func (d *Daemon) handleBoardFetch(ctx context.Context, req protocol.RequestEnvel
 	}
 	startedAt := time.Now()
 	cacheStartedAt := time.Now()
-	if cached, ok := d.readFreshTaskListSnapshotCache(projectID); ok {
-		hydrated, hydrateErr := d.hydrateTaskListSnapshotCache(ctx, projectID, cached.Tasks)
-		if hydrateErr != nil {
-			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_hydrate", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", false, "error", hydrateErr)
-		} else {
-			cached.Tasks = hydrated
-			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", true)
-			payload, err := buildBoardSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks, viewRecord.View)
-			if err != nil {
-				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	if !d.materializedReadsEnabled() {
+		if cached, ok := d.readFreshTaskListSnapshotCache(projectID); ok {
+			hydrated, hydrateErr := d.hydrateTaskListSnapshotCache(ctx, projectID, cached.Tasks)
+			if hydrateErr != nil {
+				latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_hydrate", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", false, "error", hydrateErr)
+			} else {
+				cached.Tasks = hydrated
+				latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", true)
+				payload, err := buildBoardSnapshotPayload(projectID, cached.Revision, cached.LastCheckedAt, cached.Freshness, cached.Tasks, viewRecord.View)
+				if err != nil {
+					return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+				}
+				marshalStartedAt := time.Now()
+				body, err := json.Marshal(payload)
+				latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "board.fetch.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(cached.Tasks), "cache_hit", true)
+				if err != nil {
+					return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+				}
+				resp.Body = body
+				resp.Revision = payload.SnapshotRevision
+				if d.cfg.Logger != nil {
+					d.cfg.Logger.Info("daemon board fetch completed", "project_id", projectID, "task_count", len(cached.Tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "cache_hit", true)
+				}
+				return resp, nil
 			}
-			marshalStartedAt := time.Now()
-			body, err := json.Marshal(payload)
-			latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "board.fetch.marshal_snapshot", marshalStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_count", len(cached.Tasks), "cache_hit", true)
-			if err != nil {
-				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-			}
-			resp.Body = body
-			resp.Revision = payload.SnapshotRevision
-			if d.cfg.Logger != nil {
-				d.cfg.Logger.Info("daemon board fetch completed", "project_id", projectID, "task_count", len(cached.Tasks), "revision", resp.Revision, "elapsed_ms", time.Since(startedAt).Milliseconds(), "cache_hit", true)
-			}
-			return resp, nil
 		}
 	}
 	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "board.fetch.snapshot_cache_read", cacheStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "cache_hit", false)
@@ -581,13 +583,6 @@ func (d *Daemon) buildTaskListSnapshot(ctx context.Context, req protocol.Request
 	}
 	_ = req
 	tasks, source, err := d.convergedProjectReadSnapshot(ctx, projectID)
-	if err != nil {
-		return taskListSnapshotLoadResult{}, err
-	}
-	if err := d.refreshProjectReadRuntimeForIssues(ctx, projectID, taskIDsFromTasks(tasks)); err != nil {
-		return taskListSnapshotLoadResult{}, newProjectReadUnavailableError("refresh task-list runtime facts: %w", err)
-	}
-	tasks, source, err = d.convergedProjectReadSnapshot(ctx, projectID)
 	if err != nil {
 		return taskListSnapshotLoadResult{}, err
 	}
@@ -712,14 +707,6 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 			return d.errorResponse(req, taskReadErrorCode(err), err.Error()), nil
 		}
 		tasks := materializedTaskContext(materialized, []string{taskID}, true, false, true, false, archiveMode)
-		if err := d.refreshProjectReadRuntimeForIssues(ctx, projectID, taskIDsFromTasks(tasks)); err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("refresh issue runtime facts: %v", err)), nil
-		}
-		materialized, source, err = d.convergedProjectReadSnapshot(ctx, projectID)
-		if err != nil {
-			return d.errorResponse(req, taskReadErrorCode(err), err.Error()), nil
-		}
-		tasks = materializedTaskContext(materialized, []string{taskID}, true, false, true, false, archiveMode)
 		found := false
 		for _, task := range tasks {
 			if task.ID.String() == taskID {
@@ -859,7 +846,7 @@ func (d *Daemon) handleTaskGetMany(ctx context.Context, req protocol.RequestEnve
 	}
 	if d.materializedReadsEnabled() {
 		projectionStartedAt := time.Now()
-		materialized, source, err := d.projectReadSnapshot(projectID)
+		materialized, source, err := d.convergedProjectReadSnapshot(ctx, projectID)
 		if err != nil {
 			return d.errorResponse(req, taskReadErrorCode(err), err.Error()), nil
 		}
