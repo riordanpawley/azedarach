@@ -556,10 +556,10 @@ func TestProjectReadMaterializerWatchBlocksAndWakesAcrossClients(t *testing.T) {
 		t.Fatal("watch returned without source advancement")
 	default:
 	}
-	close(watchStore.release)
 	if _, err := writer.Create(context.Background(), issues.CreateTaskParams{Title: "cross-client", Type: domain.TypeTask}); err != nil {
 		t.Fatal(err)
 	}
+	close(watchStore.release)
 	metadata := <-advanced
 	if metadata.DeliveryCursor == 0 {
 		t.Fatalf("watch metadata = %+v", metadata)
