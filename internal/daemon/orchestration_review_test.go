@@ -1405,6 +1405,9 @@ func TestReviewAcceptRetryRejectsBranchMutationAfterDurableAcceptance(t *testing
 		t.Fatal(err)
 	}
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.snapshotAdmissionContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}
 	sourceOID := "reviewed-source-a"
 	d.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) { return sourceOID, nil }
 	request := protocol.OrchestrationIntentRequest{
