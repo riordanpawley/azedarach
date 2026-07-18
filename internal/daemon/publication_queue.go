@@ -74,7 +74,7 @@ func publicationOperationIdentity(projectID, issueID, intentKey string) string {
 
 func publicationCoalesceKey(operation domain.PublicationOperation) string {
 	digest := sha256.Sum256([]byte(strings.Join([]string{
-		operation.IssueID, operation.SourceRevision, operation.BaseRevision, operation.TargetBranch,
+		operation.IssueID, operation.IntentKey, operation.SourceRevision, operation.BaseRevision, operation.TargetBranch,
 		operation.PolicyVersion, operation.EnvironmentFingerprint, operation.EvidenceDigest,
 		operation.ValidationCommand,
 	}, "\x00")))
@@ -350,7 +350,7 @@ func (d *Daemon) renewPublicationClaim(ctx context.Context, store *operationstor
 	return store.RenewPublicationOperationClaim(ctx, operationID, claimToken, now, ttl)
 }
 
-func (d *Daemon) submitPublicationRetry(store *operationstore.SQLiteStore, retry *publicationRetryError) error {
+func (d *Daemon) enqueuePublicationRetry(store *operationstore.SQLiteStore, retry *publicationRetryError) error {
 	if retry == nil {
 		return nil
 	}
@@ -359,7 +359,20 @@ func (d *Daemon) submitPublicationRetry(store *operationstore.SQLiteStore, retry
 		return err
 	}
 	d.publishPublicationOperationEvent(replacement)
-	return d.submitPublicationOperation(context.Background(), replacement)
+	return nil
+}
+
+func (d *Daemon) continuePublicationTarget(ctx context.Context, store *operationstore.SQLiteStore, terminal domain.PublicationOperation) error {
+	operations, err := store.PublicationOperations(ctx, terminal.ProjectID, "", true)
+	if err != nil {
+		return fmt.Errorf("list publication target continuation: %w", err)
+	}
+	for _, operation := range operations {
+		if operation.TargetBranch == terminal.TargetBranch {
+			return d.submitPublicationOperation(ctx, operation)
+		}
+	}
+	return nil
 }
 
 func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operationID string) ([]byte, error) {
@@ -385,16 +398,21 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 			finished := time.Now().UTC()
 			state, kind := classifyPublicationFailure(identityErr)
 			artifact := d.writePublicationFailureArtifact(operation, state, identityErr)
-			_, _ = d.transitionPublicationOperation(context.Background(), operation, claimToken, state, func(update *operationstore.PublicationOperationUpdate) {
+			terminal, transitionErr := d.transitionPublicationOperation(context.Background(), operation, claimToken, state, func(update *operationstore.PublicationOperationUpdate) {
 				update.FailureKind, update.FailureDetail, update.FailureArtifact = kind, identityErr.Error(), artifact
 				update.ReleaseClaim = true
 				update.FinishedAt = &finished
 			})
 			var retry *publicationRetryError
 			if errors.As(identityErr, &retry) {
-				enqueueErr := d.submitPublicationRetry(store, retry)
+				enqueueErr := d.enqueuePublicationRetry(store, retry)
 				if enqueueErr != nil {
 					return nil, fmt.Errorf("%w; enqueue refreshed publication attempt: %v", identityErr, enqueueErr)
+				}
+			}
+			if transitionErr == nil {
+				if continuationErr := d.continuePublicationTarget(context.Background(), store, terminal); continuationErr != nil && d.cfg.Logger != nil {
+					d.cfg.Logger.Warn("publication target continuation submit failed", "operation_id", terminal.OperationID, "error", continuationErr)
 				}
 			}
 			return nil, identityErr
@@ -452,15 +470,20 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 		}
 		state, kind := classifyPublicationFailure(runErr)
 		artifact := d.writePublicationFailureArtifact(operation, state, runErr)
-		_, _ = d.transitionPublicationOperation(context.Background(), current, claimToken, state, func(update *operationstore.PublicationOperationUpdate) {
+		terminal, transitionErr := d.transitionPublicationOperation(context.Background(), current, claimToken, state, func(update *operationstore.PublicationOperationUpdate) {
 			update.FailureKind, update.FailureDetail, update.FailureArtifact = kind, runErr.Error(), artifact
 			update.ReleaseClaim = true
 			update.FinishedAt = &finished
 		})
 		var retry *publicationRetryError
 		if errors.As(runErr, &retry) {
-			if enqueueErr := d.submitPublicationRetry(store, retry); enqueueErr != nil {
+			if enqueueErr := d.enqueuePublicationRetry(store, retry); enqueueErr != nil {
 				return nil, fmt.Errorf("%w; enqueue refreshed publication attempt: %v", runErr, enqueueErr)
+			}
+		}
+		if transitionErr == nil {
+			if continuationErr := d.continuePublicationTarget(context.Background(), store, terminal); continuationErr != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("publication target continuation submit failed", "operation_id", terminal.OperationID, "error", continuationErr)
 			}
 		}
 		return nil, runErr
@@ -471,6 +494,9 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 	})
 	if err != nil {
 		return nil, err
+	}
+	if continuationErr := d.continuePublicationTarget(context.Background(), store, current); continuationErr != nil && d.cfg.Logger != nil {
+		d.cfg.Logger.Warn("publication target continuation submit failed", "operation_id", current.OperationID, "error", continuationErr)
 	}
 	_ = daemonops.ReportProgress(ctx, daemonops.Progress{Phase: "merged", Message: "exact candidate merged and accepted issue closed", Current: 100, Total: 100, Unit: "percent", Percent: 100})
 	return json.Marshal(current)
@@ -531,7 +557,7 @@ func (d *Daemon) validatePublicationOperationIdentity(ctx context.Context, opera
 
 func refreshedPublicationOperationAttempt(operation domain.PublicationOperation, baseRevision, validationCommand, policyVersion, environmentFingerprint string) domain.PublicationOperation {
 	rootIntent := strings.Split(operation.IntentKey, ":publication-retry:")[0]
-	identity := sha256.Sum256([]byte(strings.Join([]string{baseRevision, validationCommand, policyVersion, environmentFingerprint}, "\x00")))
+	identity := sha256.Sum256([]byte(strings.Join([]string{operation.OperationID, baseRevision, validationCommand, policyVersion, environmentFingerprint}, "\x00")))
 	operation.IntentKey = fmt.Sprintf("%s:publication-retry:%x", rootIntent, identity[:8])
 	operation.OperationID = publicationOperationIdentity(operation.ProjectID, operation.IssueID, operation.IntentKey)
 	operation.BaseRevision = baseRevision

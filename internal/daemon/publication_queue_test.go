@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -216,6 +217,7 @@ func TestPublicationQueueSerializesDistinctTargetOperationsAcrossDaemons(t *test
 	}
 	firstApplyEntered := make(chan struct{})
 	secondApplyEntered := make(chan struct{})
+	secondMerged := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	releaseSecond := make(chan struct{})
 	var validationCount atomic.Int32
@@ -237,6 +239,11 @@ func TestPublicationQueueSerializesDistinctTargetOperationsAcrossDaemons(t *test
 		return nil
 	}
 	first := &Daemon{operationRuntime: firstRuntime, cfg: Config{RepoDir: repo}, publicationClose: closeFn, publicationIdentityCheck: identityCheck}
+	first.publicationStateChanged = func(operation domain.PublicationOperation) {
+		if operation.OperationID == secondOperation.OperationID && operation.State == domain.PublicationOperationMerged {
+			close(secondMerged)
+		}
+	}
 	second := &Daemon{operationRuntime: secondRuntime, cfg: Config{RepoDir: repo}, publicationClose: closeFn, publicationIdentityCheck: identityCheck}
 	firstResult := make(chan error, 1)
 	go func() {
@@ -261,11 +268,6 @@ func TestPublicationQueueSerializesDistinctTargetOperationsAcrossDaemons(t *test
 	if err := <-firstResult; err != nil {
 		t.Fatal(err)
 	}
-	secondResult := make(chan error, 1)
-	go func() {
-		_, runErr := second.runPublicationOperation(context.Background(), secondOperation.ProjectID, secondOperation.OperationID)
-		secondResult <- runErr
-	}()
 	<-secondApplyEntered
 	if got := validationCount.Load(); got != 2 {
 		t.Fatalf("validation count after first terminal = %d, want 2", got)
@@ -274,9 +276,7 @@ func TestPublicationQueueSerializesDistinctTargetOperationsAcrossDaemons(t *test
 		t.Fatalf("apply count after first terminal = %d, want 2", got)
 	}
 	close(releaseSecond)
-	if err := <-secondResult; err != nil {
-		t.Fatal(err)
-	}
+	<-secondMerged
 }
 
 func TestPublicationQueueSerializesTargetAndCoalescesManagerWork(t *testing.T) {
@@ -454,6 +454,47 @@ func TestPublicationQueueRefreshesExpectedBaseStaleAtAuthoritativeApply(t *testi
 	stale, found, err := runtime.store.PublicationOperation(context.Background(), operation.OperationID)
 	if err != nil || !found || stale.State != domain.PublicationOperationStale || stale.FailureKind != "identity_changed" {
 		t.Fatalf("stale authoritative predecessor = (%+v,%t,%v)", stale, found, err)
+	}
+}
+
+func TestPublicationRetryAttemptGenerationSurvivesBaseIdentityCycles(t *testing.T) {
+	repo := t.TempDir()
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	t.Cleanup(func() { _ = runtime.Close() })
+	d := &Daemon{operationRuntime: runtime, cfg: Config{RepoDir: repo}}
+	current := daemonTestPublicationOperation(runtime.canonicalProject, "publication-base-cycle", "issue", "intent", "source", time.Now().UTC())
+	current.BaseRevision = "A"
+	stored, created, err := runtime.store.EnqueuePublication(context.Background(), current, publicationCoalesceKey(current))
+	if err != nil || !created {
+		t.Fatalf("enqueue initial A attempt = (%+v,%t,%v)", stored, created, err)
+	}
+	current = stored
+	seen := map[string]struct{}{current.OperationID: {}}
+	for index, nextBase := range []string{"B", "A", "C", "A"} {
+		claimToken := fmt.Sprintf("cycle-claim-%d", index)
+		claimed, acquired, claimErr := runtime.store.ClaimPublicationOperation(context.Background(), current.OperationID, operationstore.PublicationOperationClaim{Owner: "cycle-daemon", Token: claimToken, Now: time.Now().UTC(), TTL: time.Minute})
+		if claimErr != nil || !acquired {
+			t.Fatalf("claim %s attempt = (%+v,%t,%v)", current.BaseRevision, claimed, acquired, claimErr)
+		}
+		terminal, transitionErr := d.transitionPublicationOperation(context.Background(), claimed, claimToken, domain.PublicationOperationStale, func(update *operationstore.PublicationOperationUpdate) {
+			update.ReleaseClaim = true
+		})
+		if transitionErr != nil {
+			t.Fatal(transitionErr)
+		}
+		next := refreshedPublicationOperationAttempt(terminal, nextBase, terminal.ValidationCommand, terminal.PolicyVersion, terminal.EnvironmentFingerprint)
+		if _, duplicate := seen[next.OperationID]; duplicate {
+			t.Fatalf("base cycle generated duplicate operation %s for %s -> %s", next.OperationID, terminal.BaseRevision, nextBase)
+		}
+		seen[next.OperationID] = struct{}{}
+		stored, created, err = runtime.store.EnqueuePublication(context.Background(), next, publicationCoalesceKey(next))
+		if err != nil || !created || stored.State != domain.PublicationOperationQueued || stored.BaseRevision != nextBase {
+			t.Fatalf("enqueue cycle successor %s = (%+v,%t,%v)", nextBase, stored, created, err)
+		}
+		current = stored
+	}
+	if len(seen) != 5 {
+		t.Fatalf("attempt generations = %d, want A-B-A-C-A five distinct rows", len(seen))
 	}
 }
 
