@@ -38,7 +38,7 @@ cleanup() {
 ensure_failure_evidence() {
   phase="$1"
   detail="$2"
-  if [ -s "$validation_evidence" ] && [ ! -L "$validation_evidence" ]; then
+  if [ -s "$validation_evidence" ] && [ ! -L "$validation_evidence" ] && valid_failure_evidence; then
     return 0
   fi
   rm -f "$validation_evidence"
@@ -64,6 +64,20 @@ ensure_failure_evidence() {
     close $out or die $!;
   ' "$temporary" "$synthetic_request" "$candidate_head" "${AZEDARACH_CANDIDATE_ISSUE_ID:-}" "$phase" "$detail"
   mv "$temporary" "$validation_evidence"
+}
+
+valid_failure_evidence() {
+  perl -MJSON::PP -e '
+    my ($path, $revision)=@ARGV;
+    open my $in, "<", $path or exit 1;
+    local $/;
+    my $value=eval { decode_json(<$in>||"{}") };
+    close $in;
+    exit 1 unless ref($value) eq "HASH";
+    exit 1 unless ($value->{request_id}||"") =~ /^[A-Za-z0-9_.-]+$/;
+    exit 1 unless ($value->{source_revision}||"") eq $revision;
+    exit 1 unless ($value->{publication_nonce}||"") =~ /^[A-Za-z0-9_.-]+$/;
+  ' "$validation_evidence" "$candidate_head"
 }
 
 evidence_field() {
