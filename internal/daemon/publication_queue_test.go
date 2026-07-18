@@ -378,6 +378,9 @@ func TestPublicationQueueSerializesDistinctTargetOperationsAcrossDaemons(t *test
 	}
 	close(releaseSecond)
 	<-secondMerged
+	if err := firstRuntime.manager.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestPublicationQueueSerializesTargetAndCoalescesManagerWork(t *testing.T) {
@@ -429,6 +432,9 @@ func TestPublicationQueueSerializesTargetAndCoalescesManagerWork(t *testing.T) {
 	seen := map[string]bool{<-merged: true, <-merged: true}
 	if !seen[first.OperationID] || !seen[second.OperationID] {
 		t.Fatalf("merged operations = %v", seen)
+	}
+	if err := runtime.manager.Drain(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -666,6 +672,9 @@ func TestPublicationStaleSuccessorSurvivesAtomicCommitCrashAndReopen(t *testing.
 			if got.BaseRevision != "base-b" || got.OperationID == operation.OperationID {
 				t.Fatalf("recovered atomic successor = %+v", got)
 			}
+			if err := restartedRuntime.manager.Drain(context.Background()); err != nil {
+				t.Fatal(err)
+			}
 		})
 	}
 }
@@ -721,6 +730,9 @@ func TestPublicationTargetContinuationRetriesTransientSubmitWithoutRestart(t *te
 	if got := submitAttempts.Load(); got != 2 {
 		t.Fatalf("continuation submit attempts = %d, want one failure and one daemon retry", got)
 	}
+	if err := runtime.manager.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestPublicationRecoveryRetriesTransientSubmitOnceWithoutRestart(t *testing.T) {
@@ -770,6 +782,9 @@ func TestPublicationRecoveryRetriesTransientSubmitOnceWithoutRestart(t *testing.
 	<-merged
 	if got := attempts.Load(); got != 3 {
 		t.Fatalf("recovery submit attempts = %d, want two startup scans and one retry", got)
+	}
+	if err := runtime.manager.Drain(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 	d.closePublicationStores()
 }
@@ -853,6 +868,9 @@ func TestPublicationQueueRecoveryResubmitsNonterminalIntent(t *testing.T) {
 			recovered, found, err := restarted.store.PublicationOperation(context.Background(), operation.OperationID)
 			if err != nil || !found || recovered.State != domain.PublicationOperationMerged {
 				t.Fatalf("recovered operation = (%+v,%t,%v)", recovered, found, err)
+			}
+			if err := restarted.manager.Drain(context.Background()); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}
