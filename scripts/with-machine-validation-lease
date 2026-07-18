@@ -491,8 +491,8 @@ merge_whole_gate_evidence($evidence_file, {
     payload_exit_code => $payload_exit_code,
     production_install_overlapped => $production_install_overlapped ? JSON::PP::true : JSON::PP::false,
     issue_id => $candidate_issue_id,
-    reviewer_id => $acquired->{reviewer_id} || '',
-    review_epoch_event_id => 0 + ($acquired->{review_epoch_event_id} || 0),
+    reviewer_id => $ENV{AZEDARACH_REVIEWER_ID} || $acquired->{reviewer_id} || '',
+    review_epoch_event_id => 0 + ($ENV{AZEDARACH_REVIEW_EPOCH_EVENT_ID} || $acquired->{review_epoch_event_id} || 0),
     publication_nonce => sha256_hex(join(':', $request_id, $revision, $$, time(), rand())),
 });
 write_publication_evidence($evidence_file, $publication_evidence_path) if $publication_evidence_path ne '';

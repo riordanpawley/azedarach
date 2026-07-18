@@ -8,6 +8,17 @@ fi
 
 repo_root="$(git rev-parse --show-toplevel)"
 target_gate_root="${AZEDARACH_TARGET_GATE_ROOT:-$repo_root}"
+reject_symlink_path() {
+  path="$1"; cur="/"
+  oldifs="$IFS"; IFS=/; set -- $path; IFS="$oldifs"
+  for part in "$@"; do
+    [ -z "$part" ] && continue
+    cur="${cur%/}/$part"
+    [ "$cur" = "/var" ] && continue
+    [ ! -L "$cur" ] || { echo "trusted path component is symlink: $cur" >&2; return 1; }
+  done
+}
+reject_symlink_path "$target_gate_root"
 target_gate_root="$(cd "$target_gate_root" && pwd -P)"
 target_git_common_dir="$(git -C "$target_gate_root" rev-parse --path-format=absolute --git-common-dir)"
 project_root="$(dirname "$target_git_common_dir")"
@@ -16,6 +27,7 @@ validation_body="${AZEDARACH_MERGE_GATE_BODY:-$repo_root/scripts/git-merge-rebas
 trusted_scripts="$target_gate_root/scripts"
 validation_wrapper="$trusted_scripts/with-machine-validation-lease"
 artifact_publisher="$trusted_scripts/publish-validation-artifacts"
+reject_symlink_path "$trusted_scripts"
 control_dir="$(mktemp -d -t azedarach-merge-gate-control.XXXXXX)"
 chmod 700 "$control_dir"
 validation_status="$control_dir/status"

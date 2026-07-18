@@ -201,6 +201,9 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 	}
 	gateRoot = canonicalGateRoot
 	gatePath := filepath.Join(gateRoot, "scripts", "git-merge-rebase-gate.sh")
+	if err := rejectTrustedPathComponents(filepath.Clean(gateRoot)); err != nil {
+		return CandidateValidationAttempt{}, false, fmt.Errorf("reject unsafe target gate root: %w", err)
+	}
 	attempt := CandidateValidationAttempt{
 		CandidateHead: candidateHead,
 		Status:        CandidateValidationRunning,
@@ -217,13 +220,15 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 		attempt.Status = CandidateValidationFailed
 		attempt.Message = "candidate validation gate could not be inspected"
 		notifyCandidateValidation(ctx, attempt)
-		return attempt, true, fmt.Errorf("inspect candidate validation gate: %w", err)
+		pubErr := publishCandidateValidationFailure(ctx, gateRoot, scratchPath, candidateHead, "gate_inspection", attempt.Message)
+		return attempt, true, fmt.Errorf("inspect candidate validation gate: %w (publication: %v)", err, pubErr)
 	}
 	if !gateInfo.Mode().IsRegular() {
 		attempt.Status = CandidateValidationFailed
 		attempt.Message = "candidate validation gate is not a regular trusted file"
 		notifyCandidateValidation(ctx, attempt)
-		return attempt, true, errors.New(attempt.Message)
+		pubErr := publishCandidateValidationFailure(ctx, gateRoot, scratchPath, candidateHead, "gate_inspection", attempt.Message)
+		return attempt, true, fmt.Errorf("%s (publication: %v)", attempt.Message, pubErr)
 	}
 	notifyCandidateValidation(ctx, attempt)
 
@@ -266,9 +271,11 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 		attempt.Message = fmt.Sprintf("candidate HEAD changed during validation: expected %s, found %s", candidateHead, actualHead)
 		notifyCandidateValidation(ctx, attempt)
 		if err != nil {
-			return attempt, true, fmt.Errorf("resolve candidate HEAD after validation: %w", err)
+			pubErr := publishCandidateValidationFailure(ctx, gateRoot, scratchPath, candidateHead, "post_head", attempt.Message)
+			return attempt, true, fmt.Errorf("resolve candidate HEAD after validation: %w (publication: %v)", err, pubErr)
 		}
-		return attempt, true, errors.New(attempt.Message)
+		pubErr := publishCandidateValidationFailure(ctx, gateRoot, scratchPath, candidateHead, "post_head", attempt.Message)
+		return attempt, true, fmt.Errorf("%s (publication: %v)", attempt.Message, pubErr)
 	}
 	status, err := c.Status(ctx, scratchPath)
 	if err != nil || gitStatusDirty(status) {
@@ -276,9 +283,11 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 		attempt.Message = "candidate worktree was not clean after validation"
 		notifyCandidateValidation(ctx, attempt)
 		if err != nil {
-			return attempt, true, fmt.Errorf("inspect candidate status after validation: %w", err)
+			pubErr := publishCandidateValidationFailure(ctx, gateRoot, scratchPath, candidateHead, "post_status", attempt.Message)
+			return attempt, true, fmt.Errorf("inspect candidate status after validation: %w (publication: %v)", err, pubErr)
 		}
-		return attempt, true, fmt.Errorf("%s: %s", attempt.Message, gitStatusSummary(status))
+		pubErr := publishCandidateValidationFailure(ctx, gateRoot, scratchPath, candidateHead, "post_status", attempt.Message)
+		return attempt, true, fmt.Errorf("%s: %s (publication: %v)", attempt.Message, gitStatusSummary(status), pubErr)
 	}
 	attempt.Status = CandidateValidationPassed
 	attempt.Message = "candidate validation passed; awaiting exact apply"
@@ -291,7 +300,7 @@ func publishCandidateValidationFailure(ctx context.Context, gateRoot, candidateR
 	if err != nil {
 		return fmt.Errorf("create trusted control bundle: %w", err)
 	}
-	keepControl := false
+	keepControl := true
 	defer func() {
 		if !keepControl {
 			_ = os.RemoveAll(controlRoot)
@@ -325,7 +334,7 @@ func publishCandidateValidationFailure(ctx context.Context, gateRoot, candidateR
 	publisher := filepath.Join(gateRoot, "scripts", "publish-validation-artifacts")
 	info, err := os.Lstat(publisher)
 	if err != nil || !info.Mode().IsRegular() {
-		return fmt.Errorf("trusted artifact publisher unavailable: %w", err)
+		return fmt.Errorf("trusted artifact publisher unavailable: %w (control bundle %s)", err, controlRoot)
 	}
 	gitCommonCmd := exec.CommandContext(ctx, "git", "-C", gateRoot, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	gitCommonOutput, err := gitCommonCmd.Output()
@@ -343,6 +352,31 @@ func publishCandidateValidationFailure(ctx context.Context, gateRoot, candidateR
 		return fmt.Errorf("publish candidate failure: %w: %s (control bundle %s)", err, strings.TrimSpace(string(output)), controlRoot)
 	}
 	keepControl = false
+	return nil
+}
+
+func rejectTrustedPathComponents(path string) error {
+	path = filepath.Clean(path)
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("path must be absolute")
+	}
+	cur := string(filepath.Separator)
+	for _, part := range strings.Split(strings.TrimPrefix(path, cur), string(filepath.Separator)) {
+		if part == "" {
+			continue
+		}
+		cur = filepath.Join(cur, part)
+		info, err := os.Lstat(cur)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			if cur == "/var" {
+				continue
+			}
+			return fmt.Errorf("path component is symlink: %s", cur)
+		}
+	}
 	return nil
 }
 

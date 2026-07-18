@@ -44,7 +44,7 @@ die "--exit-code must be non-zero\n" unless $arg{'exit-code'} =~ /^\d+$/ && $arg
 my $evidence = read_json_nofollow($evidence_path, 'validation evidence');
 die "validation evidence request mismatch\n" if ($evidence->{request_id} // '') ne $request;
 die "validation evidence revision mismatch\n" if ($evidence->{source_revision} // '') ne $revision;
-if (($evidence->{purpose} // '') eq 'review_evidence' && !$evidence->{synthetic_request}) {
+if ((($evidence->{purpose} // '') eq 'review_evidence' || (($evidence->{purpose} // '') eq 'push_gate' && (($evidence->{issue_id} // '') ne '' || ($evidence->{reviewer_id} // '') ne ''))) && !$evidence->{synthetic_request}) {
     die "review evidence requires reviewer_id\n" if safe_identity($evidence->{reviewer_id} // '', 'reviewer id') eq '';
     die "review evidence requires review_epoch_event_id\n" unless ($evidence->{review_epoch_event_id} // 0) =~ /^\d+$/ && 0 + $evidence->{review_epoch_event_id} > 0;
 }
