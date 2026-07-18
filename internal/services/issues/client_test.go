@@ -24,6 +24,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 	"github.com/riordanpawley/azedarach/internal/testutil/sqlitetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -2406,9 +2407,26 @@ func TestClient_SQLiteReadLogsIncludeStableAttribution(t *testing.T) {
 	assert.Contains(t, got, `"service":"azedarach.issue_store"`)
 	assert.Contains(t, got, `"dependency.name":"sqlite"`)
 	assert.Contains(t, got, `"dependency.operation":"issue.runtime_projection"`)
+	assert.Contains(t, got, `"db.path":"`+sqliteutil.CanonicalPath(client.dbPath)+`"`)
 	assert.Contains(t, got, `"dependency.duration_ms":`)
 	assert.Contains(t, got, `"outcome":"success"`)
 	assert.Contains(t, got, `"row_count":1`)
+}
+
+func TestClient_SQLiteReadErrorLogsExtendedResultCode(t *testing.T) {
+	parallelIssueStoreTest(t)
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	client := newTestClientWithLogger(t, logger)
+
+	client.logSQLiteRead(context.Background(), "projection.delta_head", time.Now(), 0, projectionCodedError{code: sqliteutil.SQLiteIOErrorShortRead})
+
+	got := logs.String()
+	assert.Contains(t, got, `"dependency.operation":"projection.delta_head"`)
+	assert.Contains(t, got, `"db.path":"`+sqliteutil.CanonicalPath(client.dbPath)+`"`)
+	assert.Contains(t, got, `"sqlite.code":10`)
+	assert.Contains(t, got, `"sqlite.extended_code":522`)
+	assert.Contains(t, got, `"sqlite.symbol":"SQLITE_IOERR_SHORT_READ"`)
 }
 
 func TestClient_UpdateWithRuntimeReturnsChangedTask(t *testing.T) {

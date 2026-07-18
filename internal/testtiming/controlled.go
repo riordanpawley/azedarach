@@ -10,7 +10,7 @@ import (
 const (
 	ControlledTimingSamples   = 3
 	ControlledTimingRunner    = "azedarach-timing-v1"
-	ControlledTimingToolchain = "go1.24.7"
+	ControlledTimingToolchain = "go1.25.7"
 	ControlledTimingResources = "8-vcpu-16-gib-exclusive"
 )
 
