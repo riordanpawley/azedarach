@@ -3294,17 +3294,18 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 			receipt.BaseOID = receipt.TargetOID
 		}
 		return taskCloseIntegrationResult{
-			Requested:            true,
-			NoChanges:            true,
-			ReceiptRecovered:     receipt.Integrated,
-			ConfiguredBaseTarget: configuredBaseTarget,
-			TargetID:             receipt.TargetID,
-			SourceBranch:         source.Branch,
-			TargetBranch:         targetBranch,
-			BaseOID:              receipt.BaseOID,
-			SourceOID:            receipt.SourceOID,
-			TargetOID:            receipt.TargetOID,
-			ValidationAttempts:   validationAttempts,
+			Requested:              true,
+			NoChanges:              true,
+			ReceiptRecovered:       receipt.Integrated,
+			ConfiguredBaseTarget:   configuredBaseTarget,
+			TargetID:               receipt.TargetID,
+			SourceBranch:           source.Branch,
+			TargetBranch:           targetBranch,
+			BaseOID:                receipt.BaseOID,
+			SourceOID:              receipt.SourceOID,
+			TargetOID:              receipt.TargetOID,
+			PublicationOperationID: receipt.PublicationOperationID,
+			ValidationAttempts:     validationAttempts,
 		}, nil
 	}
 	if sourceOIDErr != nil {
