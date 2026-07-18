@@ -557,6 +557,15 @@ func (a daemonOrchestrationAuthority) buildSnapshot(ctx context.Context, project
 		if snapshot.ProjectionAuthority != protocol.OrchestrationProjectionAuthoritySQLite {
 			return snapshot, nil
 		}
+		if len(request.ReviewIssueIDs) > 0 {
+			// ExportOrchestrationProjection reads the requested review facts from
+			// one SQLite transaction. Review admission then revalidates the exact
+			// review epoch, evidence, worktree, and live Git pin at their owning
+			// side-effect boundaries. Unrelated project mutations after that
+			// coherent export must not force the requested decision to find a
+			// globally write-free window.
+			return snapshot, nil
+		}
 		if prepareProjectAttempt && snapshot.ProjectionRevision != preparedCheckpoint {
 			if attempt == maxProjectionSnapshotAttempts {
 				return protocol.OrchestrationSnapshot{}, fmt.Errorf("%w: project orchestration preparation changed before export after %d attempts (prepared %d, exported %d)", errOrchestrationSnapshotAdmissionContended, attempt, preparedCheckpoint, snapshot.ProjectionRevision)

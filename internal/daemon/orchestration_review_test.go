@@ -255,9 +255,24 @@ func TestReviewIntentScopesSnapshotAndRetriesPreAdmissionFailureAfterRestart(t *
 	assertNoReviewAcceptanceSideEffects(t, ctx, client, issueID)
 
 	restarted := newOrchestrationReviewTestDaemon(repoDir, client)
+	churn := 0
+	var churnErr error
+	restarted.orchestrationProjectionExported = func() {
+		churn++
+		_, churnErr = client.Create(ctx, issues.CreateTaskParams{
+			Title: "Unrelated restart churn", Description: "Advance projection during requested review admission", Acceptance: "Recorded",
+			Type: domain.TypeTask, Priority: domain.P4, Status: domain.StatusOpen,
+		})
+	}
 	result, err := restarted.orchestrationAuthority().Apply(ctx, "project", request)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if churn != 1 {
+		t.Fatalf("restarted requested-review exports = %d, want one coherent export", churn)
+	}
+	if churnErr != nil {
+		t.Fatalf("advance unrelated projection after restart: %v", churnErr)
 	}
 	if failure := result.Failed[issueID]; !strings.Contains(failure, "authoritative close") {
 		t.Fatalf("retried review acceptance = %+v, want progress through admission to expected close-adapter failure", result)
@@ -341,6 +356,329 @@ func TestRequestedTicketReviewSnapshotSkipsUnrelatedProjectEvaluation(t *testing
 	}
 	if len(snapshot.Candidates) != 0 || len(snapshot.Roots) != 0 || len(snapshot.Runnable) != 0 {
 		t.Fatalf("review-only snapshot evaluated unrelated project candidates: candidates=%+v roots=%v runnable=%v unrelated=%s", snapshot.Candidates, snapshot.Roots, snapshot.Runnable, unrelatedOpen)
+	}
+}
+
+func TestRequestedTicketReviewSnapshotConvergesDuringUnrelatedProjectionChurn(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	reader := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
+	writer := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
+	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
+	requested := createReviewTask(t, ctx, reader, domain.P1, "orchestrator")
+	d := newOrchestrationReviewTestDaemon(filepath.Dir(dbPath), reader)
+	exports := 0
+	var churnErr error
+	d.orchestrationProjectionExported = func() {
+		exports++
+		_, churnErr = writer.Create(ctx, issues.CreateTaskParams{
+			Title:       fmt.Sprintf("Unrelated churn %d", exports),
+			Description: "Advance the project projection after the requested review export",
+			Acceptance:  "Recorded",
+			Type:        domain.TypeTask,
+			Priority:    domain.P4,
+			Status:      domain.StatusOpen,
+		})
+	}
+
+	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{
+		Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", ReviewIssueIDs: []string{requested},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exports != 1 {
+		t.Fatalf("requested review projection exports = %d, want one coherent export", exports)
+	}
+	if churnErr != nil {
+		t.Fatalf("advance unrelated projection: %v", churnErr)
+	}
+	if len(snapshot.ReviewQueue) != 1 || snapshot.ReviewQueue[0].IssueID != requested {
+		t.Fatalf("review queue = %+v, want only requested ticket %s", snapshot.ReviewQueue, requested)
+	}
+}
+
+func TestRequestedReviewCandidateMutationAfterExportFailsBeforeSideEffects(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	var mutationErr error
+	d.orchestrationProjectionExported = func() {
+		d.orchestrationProjectionExported = nil
+		mutationErr = client.Update(ctx, issueID, domain.StatusInProgress)
+	}
+
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{
+		Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept,
+		IntentKey: "candidate-mutated-after-export", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mutationErr != nil {
+		t.Fatalf("advance requested candidate after export: %v", mutationErr)
+	}
+	if slices.Contains(result.Closed, issueID) {
+		t.Fatalf("mutated candidate was accepted: %+v", result)
+	}
+	assertNoReviewAcceptanceSideEffects(t, ctx, client, issueID)
+}
+
+func TestRequestedReviewAcceptEpochReplacementFailsBeforeSideEffects(t *testing.T) {
+	for _, rooted := range []bool{false, true} {
+		for _, kind := range []protocol.OrchestrationIntentKind{protocol.OrchestrationIntentReviewAccept} {
+			name := "project/" + string(kind)
+			if rooted {
+				name = "rooted-child/" + string(kind)
+			}
+			t.Run(name, func(t *testing.T) {
+				ctx := context.Background()
+				repoDir := t.TempDir()
+				client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+				t.Cleanup(func() { _ = client.CloseDB() })
+				issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+				if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+					Type: domain.IssueEventEvidenceSubmitted, Source: "first-worker", Payload: mustWorkerEvidencePayload(t),
+				}); err != nil {
+					t.Fatal(err)
+				}
+				scope := domain.ProjectOrchestrationScope()
+				mailParent := issueID
+				if rooted {
+					rootID, err := client.Create(ctx, issues.CreateTaskParams{Title: "root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := client.AddDependencyWithParentChange(ctx, issueID, rootID, string(domain.DependencyParentChild), false); err != nil {
+						t.Fatal(err)
+					}
+					scope, err = domain.RootedOrchestrationScope(rootID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					mailParent = rootID
+				}
+				oldEpoch := latestReviewEpochEventID(t, ctx, client, issueID)
+				sourceOID := "first-source"
+				d := newOrchestrationReviewTestDaemon(repoDir, client)
+				d.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) { return sourceOID, nil }
+				var replacementErr error
+				d.reviewAdmissionSnapshotLoaded = func() {
+					d.reviewAdmissionSnapshotLoaded = nil
+					if err := client.Update(ctx, issueID, domain.StatusInProgress); err != nil {
+						replacementErr = err
+						return
+					}
+					replacement := mustWorkerEvidencePayload(t)
+					replacement["summary"] = "replacement epoch evidence"
+					if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "replacement-worker", Payload: replacement}); err != nil {
+						replacementErr = err
+						return
+					}
+					if err := client.Update(ctx, issueID, domain.StatusInReview); err != nil {
+						replacementErr = err
+						return
+					}
+					sourceOID = "replacement-source"
+				}
+				request := protocol.OrchestrationIntentRequest{
+					Scope: scope, Kind: kind, IntentKey: "epoch-replacement-" + string(kind), ActorID: "orchestrator",
+					IssueIDs: []string{issueID}, RepoDir: repoDir, RestartWorker: true,
+				}
+				if kind == protocol.OrchestrationIntentReviewReturn {
+					request.Findings = []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "stale return must not escape"}}
+				}
+				result, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if replacementErr != nil {
+					t.Fatalf("replace exported review epoch: %v", replacementErr)
+				}
+				if newEpoch := latestReviewEpochEventID(t, ctx, client, issueID); newEpoch == oldEpoch {
+					t.Fatalf("review epoch remained %d, want replacement", oldEpoch)
+				}
+				if slices.Contains(result.Closed, issueID) || slices.Contains(result.Returned, issueID) || len(result.Launched) != 0 || len(result.Pending) != 0 {
+					t.Fatalf("stale review escaped admission fence: %+v", result)
+				}
+				if got := result.Skipped[issueID]; !strings.Contains(got, "review epoch changed") && !strings.Contains(got, "epoch or evidence identity changed") {
+					t.Fatalf("result = %+v, want exact epoch/evidence mismatch", result)
+				}
+				assertNoReviewAcceptanceSideEffects(t, ctx, client, issueID)
+				mail, err := readMailboxEvents(repoDir, mailParent)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(mail) != 0 {
+					t.Fatalf("stale review manufactured findings mail: %+v", mail)
+				}
+			})
+		}
+	}
+}
+
+func TestRequestedReviewAcceptExactCandidateReplacementFailsBeforeSideEffects(t *testing.T) {
+	for _, kind := range []protocol.OrchestrationIntentKind{protocol.OrchestrationIntentReviewAccept} {
+		t.Run(string(kind), func(t *testing.T) {
+			ctx := context.Background()
+			repoDir := t.TempDir()
+			client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+			t.Cleanup(func() { _ = client.CloseDB() })
+			issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+			if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t)}); err != nil {
+				t.Fatal(err)
+			}
+			sourceOID := "exported-source"
+			d := newOrchestrationReviewTestDaemon(repoDir, client)
+			d.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) { return sourceOID, nil }
+			d.reviewAdmissionSnapshotLoaded = func() {
+				d.reviewAdmissionSnapshotLoaded = nil
+				sourceOID = "replacement-source"
+			}
+			request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: kind, IntentKey: "candidate-replacement-" + string(kind), ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir, RestartWorker: true}
+			if kind == protocol.OrchestrationIntentReviewReturn {
+				request.Findings = []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "stale candidate return"}}
+			}
+			result, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := result.Skipped[issueID]; !strings.Contains(got, "review candidate changed") {
+				t.Fatalf("result = %+v, want exact candidate mismatch", result)
+			}
+			assertNoReviewAcceptanceSideEffects(t, ctx, client, issueID)
+			mail, err := readMailboxEvents(repoDir, issueID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(mail) != 0 || len(result.Launched) != 0 || len(result.Pending) != 0 {
+				t.Fatalf("stale exact candidate manufactured side effects: result=%+v mail=%+v", result, mail)
+			}
+		})
+	}
+}
+
+func TestActiveReviewAdmissionLeaseFreezesEpochEvidenceAndParentIdentity(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	rootA, err := client.Create(ctx, issues.CreateTaskParams{Title: "root a", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootB, err := client.Create(ctx, issues.CreateTaskParams{Title: "root b", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	if err := client.AddDependencyWithParentChange(ctx, issueID, rootA, string(domain.DependencyParentChild), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t)}); err != nil {
+		t.Fatal(err)
+	}
+	admission, err := client.CaptureReviewAdmissionPin(ctx, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: "reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview, ExpectedReviewAdmission: &admission, ExpectedParentIssueID: rootA, ReviewSourceOID: "source"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusInProgress); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("review epoch mutation error = %v, want conflict", err)
+	}
+	replacement := mustWorkerEvidencePayload(t)
+	replacement["summary"] = "replacement"
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: replacement}); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("review evidence mutation error = %v, want conflict", err)
+	}
+	if err := client.AddDependencyWithParentChange(ctx, issueID, rootB, string(domain.DependencyParentChild), true); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("review parent mutation error = %v, want conflict", err)
+	}
+	current, err := client.CaptureReviewAdmissionPin(ctx, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.ReviewEpochEventID != admission.ReviewEpochEventID || current.Evidence == nil || admission.Evidence == nil || *current.Evidence != *admission.Evidence {
+		t.Fatalf("review admission identity changed under lease: before=%+v after=%+v", admission, current)
+	}
+}
+
+func TestRootedRequestedReviewRevalidatesDirectParentAfterExport(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	firstRoot, err := client.Create(ctx, issues.CreateTaskParams{Title: "first root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRoot, err := client.Create(ctx, issues.CreateTaskParams{Title: "second root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{
+		Title: "rooted internal review", Description: "read-only findings", Acceptance: "consumed",
+		Type: domain.TypeInvestigation, Priority: domain.P1, Status: domain.StatusInReview, ParentID: &firstRoot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []issues.IssueObservationEventParams{
+		{Type: domain.IssueEventInvestigationDisposition, Source: "agent", Payload: map[string]any{"disposition": "internal_review"}},
+		{Type: domain.IssueEventReviewCompleted, Source: "agent", Payload: map[string]any{"outcome": "accepted", "consumer": firstRoot}},
+	} {
+		if _, err := client.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scope, err := domain.RootedOrchestrationScope(firstRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	var reparentErr error
+	d.orchestrationProjectionExported = func() {
+		d.orchestrationProjectionExported = nil
+		reparentErr = client.AddDependencyWithParentChange(ctx, issueID, secondRoot, string(domain.DependencyParentChild), true)
+	}
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{
+		Scope: scope, Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "rooted-reparent-after-export",
+		ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reparentErr != nil {
+		t.Fatalf("reparent requested review after export: %v", reparentErr)
+	}
+	if !strings.Contains(result.Skipped[issueID], "outside-root-direct-child-scope") {
+		t.Fatalf("reparented candidate result = %+v, want exact rooted-scope rejection", result)
+	}
+	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease := coordinationLease(task, domain.CoordinationLeaseReview); lease != nil {
+		t.Fatalf("reparented candidate manufactured review lease: %+v", lease)
+	}
+	events, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Source == "daemon-orchestration" {
+			t.Fatalf("reparented candidate manufactured daemon review outcome: %+v", event)
+		}
 	}
 }
 
@@ -1552,6 +1890,15 @@ func TestReviewAcceptClosesMultipleInternalReviewsBeforeDependentCompletion(t *t
 		ids = append(ids, id)
 	}
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	churn := 0
+	var churnErr error
+	d.orchestrationProjectionExported = func() {
+		churn++
+		_, churnErr = client.Create(ctx, issues.CreateTaskParams{
+			Title: "Unrelated rooted churn", Description: "Advance projection during rooted requested review admission", Acceptance: "Recorded",
+			Type: domain.TypeTask, Priority: domain.P4, Status: domain.StatusOpen,
+		})
+	}
 	rootedScope, err := domain.RootedOrchestrationScope(rootID)
 	if err != nil {
 		t.Fatal(err)
@@ -1568,6 +1915,13 @@ func TestReviewAcceptClosesMultipleInternalReviewsBeforeDependentCompletion(t *t
 	if len(result.Failed) != 0 || len(result.Skipped) != 0 || len(result.Closed) != 2 {
 		t.Fatalf("batch result = %+v", result)
 	}
+	if churn != 1 {
+		t.Fatalf("rooted requested-review exports = %d, want one coherent export", churn)
+	}
+	if churnErr != nil {
+		t.Fatalf("advance unrelated rooted projection: %v", churnErr)
+	}
+	d.orchestrationProjectionExported = nil
 	for _, id := range ids {
 		task, err := client.GetWithRuntime(ctx, "project", id)
 		if err != nil {

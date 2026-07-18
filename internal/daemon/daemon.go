@@ -192,6 +192,8 @@ type Daemon struct {
 	publicationClaimNow                  func() time.Time
 	publicationClaimTTL                  time.Duration
 	publicationValidationWait            func(context.Context, string) error
+	publicationInitialSubmit             func(context.Context, domain.PublicationOperation) error
+	publicationCommittedQueueRead        func(string, context.Context, string, string) (domain.PublicationOperation, bool, error)
 	publicationContinuationSubmit        func(context.Context, domain.PublicationOperation) error
 	publicationContinuationWait          func(context.Context) error
 	publicationContinuationMu            sync.Mutex
@@ -259,6 +261,7 @@ type Daemon struct {
 	reviewLeaseReleasedBeforeClose       func(context.Context, string, string) error
 	reviewAcceptanceBeforeCandidateCheck func()
 	reviewCandidateCheck                 func(context.Context, string, protocol.OrchestrationReview) (string, string, error)
+	reviewAdmissionSnapshotLoaded        func()
 	reviewAcceptedSourceOID              func(context.Context, string, string) (string, error)
 	mailProjectedBeforeAppend            func(context.Context, daemonMailEvent) error
 	watchClientsMu                       sync.Mutex

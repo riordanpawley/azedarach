@@ -2519,6 +2519,45 @@ func TestOrchestrationSnapshotKeysSeparateAndCanonicalizeReviewIssueScope(t *tes
 	}
 }
 
+func TestRequestedReviewSnapshotDoesNotJoinActiveProjectWatchLoad(t *testing.T) {
+	d := &Daemon{}
+	watchStarted := make(chan struct{})
+	releaseWatch := make(chan struct{})
+	d.orchestrationSnapshotBuild = func(_ context.Context, _ string, request protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		if len(request.ReviewIssueIDs) > 0 {
+			return protocol.OrchestrationSnapshot{
+				Scope: request.Scope, ReviewQueue: []protocol.OrchestrationReview{{IssueID: request.ReviewIssueIDs[0]}},
+			}, nil
+		}
+		close(watchStarted)
+		<-releaseWatch
+		return protocol.OrchestrationSnapshot{Scope: request.Scope}, nil
+	}
+	authority := d.orchestrationAuthority()
+	watchDone := make(chan error, 1)
+	go func() {
+		_, err := authority.Snapshot(context.Background(), "project", protocol.OrchestrationSnapshotRequest{
+			Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator",
+		})
+		watchDone <- err
+	}()
+	<-watchStarted
+
+	review, err := authority.Snapshot(context.Background(), "project", protocol.OrchestrationSnapshotRequest{
+		Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", ReviewIssueIDs: []string{"review-me"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(review.ReviewQueue) != 1 || !naming.IssueIDsEqual(review.ReviewQueue[0].IssueID, "review-me") {
+		t.Fatalf("requested review snapshot = %+v, want independent bounded load", review.ReviewQueue)
+	}
+	close(releaseWatch)
+	if err := <-watchDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOrchestrationSnapshotSingleflightLeaderCancellationDoesNotPoisonJoiner(t *testing.T) {
 	d := &Daemon{}
 	started := make(chan struct{})
