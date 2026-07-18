@@ -183,6 +183,7 @@ type Daemon struct {
 	publicationEvidenceCache             map[string]domain.PublicationEvidenceSnapshot
 	publicationEvidenceAfterRefresh      func(domain.PublicationEvidenceSnapshot)
 	publicationClose                     func(context.Context, domain.PublicationOperation) error
+	publicationAppliedBeforeTaskReceipt  func(context.Context, taskCloseIntegrationResult)
 	publicationIdentityCheck             func(context.Context, domain.PublicationOperation) error
 	publicationStateChanged              func(domain.PublicationOperation)
 	publicationClaimMu                   sync.Mutex
@@ -253,6 +254,8 @@ type Daemon struct {
 	projectReadRuntimeHydrate            func(context.Context, string, []domain.Task) ([]domain.Task, error)
 	projectReadWorktreeRefresh           func(context.Context, string, *projectReadMaterializer) error
 	reviewLeaseReleasedBeforeClose       func(context.Context, string, string) error
+	reviewAcceptanceBeforeCandidateCheck func()
+	reviewCandidateCheck                 func(context.Context, string, protocol.OrchestrationReview) (string, string, error)
 	reviewAcceptedSourceOID              func(context.Context, string, string) (string, error)
 	mailProjectedBeforeAppend            func(context.Context, daemonMailEvent) error
 	watchClientsMu                       sync.Mutex

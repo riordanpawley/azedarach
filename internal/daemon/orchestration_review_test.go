@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -401,6 +402,78 @@ func TestExactReviewCandidateWorktreeBindsProjectionToLiveIdentity(t *testing.T)
 	runner.output = ""
 	if _, err := d.exactReviewCandidateWorktree(ctx, projectID, issueID); err == nil || !strings.Contains(err.Error(), "candidate_projection_stale") {
 		t.Fatalf("stale projection error=%v, want typed candidate_projection_stale diagnostic", err)
+	}
+}
+
+func TestReviewAcceptRejectsCandidateMutationAfterInspection(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, string, string)
+		want   string
+	}{
+		{name: "head", mutate: func(t *testing.T, repo, candidate string) {
+			requireNoError(t, os.WriteFile(filepath.Join(candidate, "late.go"), []byte("package consumer\n"), 0o644))
+			runDaemonTestGit(t, candidate, "add", "late.go")
+			runDaemonTestGit(t, candidate, "commit", "-q", "-m", "late candidate")
+		}, want: "reviewed candidate revision changed"},
+		{name: "dirty", mutate: func(t *testing.T, _, candidate string) {
+			requireNoError(t, os.WriteFile(filepath.Join(candidate, "dirty.txt"), []byte("unreviewed\n"), 0o644))
+		}, want: "reviewed candidate worktree is dirty"},
+		{name: "path-reused", mutate: func(t *testing.T, repo, candidate string) {
+			runDaemonTestGit(t, repo, "worktree", "remove", "--force", candidate)
+			runDaemonTestGit(t, repo, "worktree", "add", "-q", "-b", "riordan/foreign/reused", candidate, "main")
+		}, want: "candidate_path_reused"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			repo := t.TempDir()
+			runDaemonTestGit(t, repo, "init", "-q", "-b", "main")
+			runDaemonTestGit(t, repo, "config", "user.email", "test@example.com")
+			runDaemonTestGit(t, repo, "config", "user.name", "Test User")
+			requireNoError(t, os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\n"), 0o644))
+			runDaemonTestGit(t, repo, "add", "base.txt")
+			runDaemonTestGit(t, repo, "commit", "-q", "-m", "base")
+			client := newMigratedIssueClientAtPath(t, filepath.Join(repo, "issues.db"), slog.Default())
+			t.Cleanup(func() { _ = client.CloseDB() })
+			issueID := createReviewTask(t, ctx, client, domain.P1, "worker")
+			_, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t)})
+			requireNoError(t, err)
+			candidate := filepath.Join(t.TempDir(), "candidate")
+			branch := "riordan/" + issueID + "/review-candidate"
+			runDaemonTestGit(t, repo, "worktree", "add", "-q", "-b", branch, candidate, "main")
+			candidate, err = filepath.EvalSymlinks(candidate)
+			requireNoError(t, err)
+			requireNoError(t, os.WriteFile(filepath.Join(candidate, "patch.txt"), []byte("reviewed\n"), 0o644))
+			runDaemonTestGit(t, candidate, "add", "patch.txt")
+			runDaemonTestGit(t, candidate, "commit", "-q", "-m", "reviewed patch")
+			state := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+			t.Cleanup(func() { _ = state.Close() })
+			requireNoError(t, state.UpsertWorktreeState(ctx, daemonstate.WorktreeState{ProjectID: "project", IssueID: issueID, Path: candidate, Branch: branch, UpdatedAt: time.Now().UTC()}))
+			d := newOrchestrationReviewTestDaemon(repo, client)
+			d.reviewCandidateCheck = nil
+			d.git = git.NewClient(git.NewExecRunner(repo), slog.Default())
+			d.worktreeAdapter = &worktreeServiceAdapter{manager: git.NewWorktreeManager(git.NewExecRunner(repo), repo, slog.Default()), runtimeStateStore: state}
+			task, err := client.GetWithRuntime(ctx, "project", issueID)
+			requireNoError(t, err)
+			authority := daemonOrchestrationAuthority{daemon: d}
+			inspection := authority.reviewInspection(ctx, "project", repo, "reviewer", task, map[string]domain.Task{issueID: task}, map[string]git.Worktree{issueID: {IssueID: issueID, Path: candidate, Branch: branch}})
+			if inspection.HeadRevision == "" || inspection.Evidence == nil {
+				t.Fatalf("inspection = %+v, want immutable candidate and evidence", inspection)
+			}
+			d.reviewAcceptanceBeforeCandidateCheck = func() { test.mutate(t, repo, candidate) }
+			_, acceptErr := authority.acceptReview(ctx, "project", protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-mutated-" + test.name, ActorID: "reviewer", RepoDir: repo}, inspection, &protocol.OrchestrationIntentResult{})
+			if acceptErr == nil || !strings.Contains(acceptErr.Error(), test.want) {
+				t.Fatalf("accept error = %v, want %q", acceptErr, test.want)
+			}
+			assertNoReviewAcceptanceSideEffects(t, ctx, client, issueID)
+		})
+	}
+}
+
+func requireNoError(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -2169,7 +2242,7 @@ func latestReviewEpochEventID(t *testing.T, ctx context.Context, client *issues.
 
 func newOrchestrationReviewTestDaemon(repoDir string, client *issues.Client) *Daemon {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return &Daemon{
+	d := &Daemon{
 		cfg:                   Config{RepoDir: repoDir, Logger: logger},
 		hub:                   publish.NewHub(16, 8, logger),
 		issueClientsByProject: map[string]*issues.Client{"project": client},
@@ -2178,6 +2251,11 @@ func newOrchestrationReviewTestDaemon(repoDir string, client *issues.Client) *Da
 			return "reviewed-source-oid", nil
 		},
 	}
+	d.reviewCandidateCheck = func(ctx context.Context, projectID string, inspection protocol.OrchestrationReview) (string, string, error) {
+		oid, err := (daemonOrchestrationAuthority{daemon: d}).resolveAcceptedReviewSourceOID(ctx, projectID, inspection.IssueID)
+		return strings.TrimSpace(inspection.WorktreePath), strings.TrimSpace(oid), err
+	}
+	return d
 }
 
 func mustWorkerEvidencePayload(t *testing.T) map[string]any {
