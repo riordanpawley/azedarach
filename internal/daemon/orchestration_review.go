@@ -919,7 +919,7 @@ func (a daemonOrchestrationAuthority) returnReviewFindings(ctx context.Context, 
 		switch protocol.OperationState(launch.OperationState) {
 		case protocol.OperationStateQueued, protocol.OperationStateRunning:
 			result.Pending = append(result.Pending, protocol.OrchestrationPending{IssueID: inspection.IssueID, OperationID: launch.OperationID, OperationState: launch.OperationState})
-			if err := a.recordReviewRestartSubmitted(ctx, projectID, inspection.IssueID, request, launch); err != nil {
+			if err := a.recordReviewRestartSubmitted(ctx, projectID, inspection.IssueID, request, launch, inspection); err != nil {
 				return err
 			}
 			return nil
@@ -927,7 +927,7 @@ func (a daemonOrchestrationAuthority) returnReviewFindings(ctx context.Context, 
 			delivered = true
 		case protocol.OperationStateFailed, protocol.OperationStateCancelled:
 			failure := fmt.Sprintf("restart operation %s reached terminal %s", launch.OperationID, launch.OperationState)
-			if err := a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "delivery_failed", failure); err != nil {
+			if err := a.recordReviewOutcomePinned(ctx, projectID, inspection.IssueID, request, "delivery_failed", failure, inspection); err != nil {
 				return fmt.Errorf("review findings recorded but delivery failed: %v; %s; record failure: %w", deliveryErr, failure, err)
 			}
 			return fmt.Errorf("review findings recorded but delivery failed: %v; %s", deliveryErr, failure)
@@ -942,7 +942,7 @@ func (a daemonOrchestrationAuthority) returnReviewFindings(ctx context.Context, 
 				return fmt.Errorf("return review admission changed before failure outcome: %w", err)
 			}
 		}
-		if err := a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "delivery_failed", failure); err != nil {
+		if err := a.recordReviewOutcomePinned(ctx, projectID, inspection.IssueID, request, "delivery_failed", failure, inspection); err != nil {
 			return fmt.Errorf("review findings recorded but active delivery failed: %s; publish durable failure: %w", failure, err)
 		}
 		return fmt.Errorf("review findings recorded but active delivery failed: %s", failure)
@@ -952,7 +952,7 @@ func (a daemonOrchestrationAuthority) returnReviewFindings(ctx context.Context, 
 			return fmt.Errorf("return review admission changed before outcome: %w", err)
 		}
 	}
-	if err := a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "returned", ""); err != nil {
+	if err := a.recordReviewOutcomePinned(ctx, projectID, inspection.IssueID, request, "returned", "", inspection); err != nil {
 		return err
 	}
 	return nil
@@ -1280,7 +1280,7 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 	if err := a.validateReviewAdmissionInspection(ctx, projectID, inspection); err != nil {
 		return false, fmt.Errorf("accept review admission changed before outcome: %w", err)
 	}
-	if err := a.recordAcceptedReviewOutcome(ctx, projectID, inspection.IssueID, request, pin); err != nil {
+	if err := a.recordAcceptedReviewOutcome(ctx, projectID, inspection.IssueID, request, pin, inspection); err != nil {
 		return false, err
 	}
 	return a.releaseAndCloseAcceptedReview(ctx, projectID, request, inspection.IssueID, integrateBeforeClose, pin, "", result)
@@ -1582,10 +1582,17 @@ func (a daemonOrchestrationAuthority) recordReviewCloseFailure(ctx context.Conte
 }
 
 func (a daemonOrchestrationAuthority) recordReviewOutcome(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, outcome, failure string) error {
-	return a.recordReviewOutcomeWithRestart(ctx, projectID, issueID, request, outcome, failure, nil, nil)
+	return a.recordReviewOutcomeWithRestart(ctx, projectID, issueID, request, outcome, failure, nil, nil, nil)
 }
 
-func (a daemonOrchestrationAuthority) recordAcceptedReviewOutcome(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, pin acceptedReviewPin) error {
+func (a daemonOrchestrationAuthority) recordReviewOutcomePinned(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, outcome, failure string, inspection protocol.OrchestrationReview) error {
+	if inspection.ReviewEpochEventID <= 0 {
+		return a.recordReviewOutcome(ctx, projectID, issueID, request, outcome, failure)
+	}
+	return a.recordReviewOutcomeWithRestart(ctx, projectID, issueID, request, outcome, failure, nil, nil, &inspection)
+}
+
+func (a daemonOrchestrationAuthority) recordAcceptedReviewOutcome(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, pin acceptedReviewPin, inspection protocol.OrchestrationReview) error {
 	metadata := map[string]any{
 		"reviewed_source_oid":        pin.SourceOID,
 		"reviewed_evidence_source":   pin.EvidenceSource,
@@ -1593,10 +1600,10 @@ func (a daemonOrchestrationAuthority) recordAcceptedReviewOutcome(ctx context.Co
 		"reviewed_evidence_seq":      pin.EvidenceSeq,
 		"reviewed_evidence_digest":   pin.EvidenceDigest,
 	}
-	return a.recordReviewOutcomeWithRestart(ctx, projectID, issueID, request, string(domain.ReviewOutcomeAccepted), "", nil, metadata)
+	return a.recordReviewOutcomeWithRestart(ctx, projectID, issueID, request, string(domain.ReviewOutcomeAccepted), "", nil, metadata, &inspection)
 }
 
-func (a daemonOrchestrationAuthority) recordReviewRestartSubmitted(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, launch protocol.OrchestrationLaunch) error {
+func (a daemonOrchestrationAuthority) recordReviewRestartSubmitted(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, launch protocol.OrchestrationLaunch, inspection protocol.OrchestrationReview) error {
 	operationID, err := naming.ParseOperationID(launch.OperationID)
 	if err != nil {
 		return fmt.Errorf("record restart submission operation: %w", err)
@@ -1606,13 +1613,29 @@ func (a daemonOrchestrationAuthority) recordReviewRestartSubmitted(ctx context.C
 		return fmt.Errorf("record restart submission operation %s with non-pending state %q", operationID, state)
 	}
 	restart := &domain.ReviewRestartSubmission{OperationID: operationID, State: domain.ReviewRestartOperationState(state), SessionID: strings.TrimSpace(launch.SessionID), ActorID: strings.TrimSpace(request.ActorID)}
-	return a.recordReviewOutcomeWithRestart(ctx, projectID, issueID, request, "restart_submitted", "", restart, nil)
+	var admission *protocol.OrchestrationReview
+	if inspection.ReviewEpochEventID > 0 {
+		admission = &inspection
+	}
+	return a.recordReviewOutcomeWithRestart(ctx, projectID, issueID, request, "restart_submitted", "", restart, nil, admission)
 }
 
-func (a daemonOrchestrationAuthority) recordReviewOutcomeWithRestart(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, outcome, failure string, restart *domain.ReviewRestartSubmission, metadata map[string]any) error {
+func (a daemonOrchestrationAuthority) recordReviewOutcomeWithRestart(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, outcome, failure string, restart *domain.ReviewRestartSubmission, metadata map[string]any, inspection *protocol.OrchestrationReview) error {
 	issueClient := a.daemon.issueClientForProject(projectID)
 	if issueClient == nil {
 		return fmt.Errorf("issue store unavailable")
+	}
+	if inspection != nil {
+		if metadata == nil {
+			metadata = make(map[string]any)
+		}
+		metadata["review_epoch_event_id"] = inspection.ReviewEpochEventID
+		metadata["review_parent_issue_id"] = strings.TrimSpace(inspection.ParentIssueID)
+		metadata["review_source_oid"] = strings.TrimSpace(inspection.SourceOID)
+		metadata["review_evidence_source"] = strings.TrimSpace(inspection.EvidenceSource)
+		metadata["review_evidence_event_id"] = inspection.EvidenceEventID
+		metadata["review_evidence_seq"] = inspection.EvidenceSeq
+		metadata["review_evidence_digest"] = strings.TrimSpace(inspection.EvidenceDigest)
 	}
 	fingerprint := reviewRequestFingerprint(request)
 	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}, NewestFirst: true})
@@ -1656,7 +1679,15 @@ func (a daemonOrchestrationAuthority) recordReviewOutcomeWithRestart(ctx context
 		payload["operation_id"] = restart.OperationID.String()
 		payload["operation_state"] = string(restart.State)
 	}
-	_, err = issueClient.AppendIssueObservationEvent(ctx, parsed.String(), params)
+	if inspection != nil {
+		admission, admissionErr := reviewAdmissionPinFromInspection(*inspection)
+		if admissionErr != nil {
+			return admissionErr
+		}
+		_, err = issueClient.AppendIssueObservationEventWithReviewAdmission(ctx, parsed.String(), params, admission, inspection.ParentIssueID, request.ActorID)
+	} else {
+		_, err = issueClient.AppendIssueObservationEvent(ctx, parsed.String(), params)
+	}
 	if err != nil {
 		return fmt.Errorf("record review outcome: %w", err)
 	}

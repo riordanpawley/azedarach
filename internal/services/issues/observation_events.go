@@ -60,6 +60,46 @@ func (c *Client) CaptureReviewAdmissionPin(ctx context.Context, issueID string) 
 	return pin, nil
 }
 
+// AppendIssueObservationEventWithReviewAdmission publishes a review side
+// effect only while the exact exported admission and matching reviewer lease
+// still hold in the same SQLite transaction.
+func (c *Client) AppendIssueObservationEventWithReviewAdmission(ctx context.Context, issueID string, params IssueObservationEventParams, expected ReviewAdmissionPin, expectedParentID, reviewerID string) (int64, error) {
+	var eventID int64
+	err := c.withMutationLock(ctx, func(ctx context.Context) error {
+		db, err := c.dbHandle()
+		if err != nil {
+			return err
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return c.wrapError("append-review-outcome", strings.TrimSpace(issueID), err)
+		}
+		defer tx.Rollback()
+		if err := validateReviewAdmissionPin(ctx, tx, issueID, expected); err != nil {
+			return c.wrapError("append-review-outcome", strings.TrimSpace(issueID), err)
+		}
+		if err := validateReviewAdmissionParent(ctx, tx, issueID, expectedParentID); err != nil {
+			return c.wrapError("append-review-outcome", strings.TrimSpace(issueID), err)
+		}
+		lease, err := coordinationLeaseForUpdate(ctx, tx, issueID, domain.CoordinationLeaseReview)
+		if err != nil {
+			return c.wrapError("append-review-outcome", strings.TrimSpace(issueID), err)
+		}
+		if lease == nil || lease.IsExpired(time.Now().UTC()) || !strings.EqualFold(strings.TrimSpace(lease.OwnerID), strings.TrimSpace(reviewerID)) {
+			return c.wrapError("append-review-outcome", strings.TrimSpace(issueID), fmt.Errorf("%w: matching active review lease is required", domain.ErrConflict))
+		}
+		eventID, err = c.insertIssueObservationEvent(ctx, tx, issueID, params)
+		if err != nil {
+			return c.wrapError("append-review-outcome", strings.TrimSpace(issueID), err)
+		}
+		if err := tx.Commit(); err != nil {
+			return c.wrapError("append-review-outcome", strings.TrimSpace(issueID), err)
+		}
+		return nil
+	})
+	return eventID, err
+}
+
 func captureReviewAdmissionPin(ctx context.Context, tx *sql.Tx, issueID string) (ReviewAdmissionPin, error) {
 	issueID = strings.TrimSpace(issueID)
 	var disposition, engagement, visibility string
