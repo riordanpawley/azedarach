@@ -731,6 +731,11 @@ func (m *projectReadMaterializer) snapshotWithFailureDisposition() ([]domain.Tas
 }
 
 func (m *projectReadMaterializer) snapshotIssues(issueIDs map[string]struct{}) ([]domain.Task, protocol.MaterializedSnapshotMetadata) {
+	tasks, metadata, _ := m.snapshotIssuesForAuthoritativeRefresh(issueIDs, authoritativeReadRefreshAttempt{})
+	return tasks, metadata
+}
+
+func (m *projectReadMaterializer) snapshotIssuesForAuthoritativeRefresh(issueIDs map[string]struct{}, attempt authoritativeReadRefreshAttempt) ([]domain.Task, protocol.MaterializedSnapshotMetadata, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	tasks := make([]domain.Task, 0, len(issueIDs))
@@ -740,7 +745,11 @@ func (m *projectReadMaterializer) snapshotIssues(issueIDs map[string]struct{}) (
 		}
 	}
 	sortTasksDeterministically(tasks)
-	return cloneTasks(tasks), cloneMaterializedMetadata(m.metadata)
+	recoveryAuthorized := attempt.sequence != 0 &&
+		attempt.sequence == m.authoritativeRefreshSequence &&
+		attempt.healthEpoch == m.healthEpoch &&
+		strings.HasPrefix(m.metadata.Health, "stale: authoritative read refresh:")
+	return cloneTasks(tasks), cloneMaterializedMetadata(m.metadata), recoveryAuthorized
 }
 
 func (m *projectReadMaterializer) refreshRuntime(ctx context.Context, issueIDs []string) error {
@@ -1290,7 +1299,7 @@ func (d *Daemon) refreshActiveProjectReadRuntimeForIssues(ctx context.Context, p
 		materializer.finishAuthoritativeReadRefresh(attempt, err, true)
 		return fmt.Errorf("refresh runtime worktrees: %w", err)
 	}
-	if err := d.syncUserProjectionMaterializedIssues(ctx, projectID, issueIDs); err != nil {
+	if err := d.syncUserProjectionMaterializedIssuesForRefresh(ctx, projectID, issueIDs, materializer, attempt); err != nil {
 		materializer.finishAuthoritativeReadRefresh(attempt, err, true)
 		return fmt.Errorf("sync user projection issues: %w", err)
 	}
@@ -1329,6 +1338,10 @@ func (d *Daemon) refreshProjectReadWorktreesForIssues(ctx context.Context, proje
 }
 
 func (d *Daemon) syncUserProjectionMaterializedIssues(ctx context.Context, projectID string, issueIDs []string) error {
+	return d.syncUserProjectionMaterializedIssuesForRefresh(ctx, projectID, issueIDs, nil, authoritativeReadRefreshAttempt{})
+}
+
+func (d *Daemon) syncUserProjectionMaterializedIssuesForRefresh(ctx context.Context, projectID string, issueIDs []string, refreshMaterializer *projectReadMaterializer, attempt authoritativeReadRefreshAttempt) error {
 	if d != nil && d.projectReadUserProjectionSync != nil {
 		return d.projectReadUserProjectionSync(ctx, projectID, issueIDs)
 	}
@@ -1348,8 +1361,11 @@ func (d *Daemon) syncUserProjectionMaterializedIssues(ctx context.Context, proje
 	if materializer == nil {
 		return nil
 	}
-	tasks, metadata := materializer.snapshotIssues(wanted)
-	if !strings.HasPrefix(metadata.Health, "healthy") {
+	if refreshMaterializer != nil && materializer != refreshMaterializer {
+		return newProjectReadUnavailableError("project read materializer changed during authoritative refresh")
+	}
+	tasks, metadata, recoveryAuthorized := materializer.snapshotIssuesForAuthoritativeRefresh(wanted, attempt)
+	if !strings.HasPrefix(metadata.Health, "healthy") && !recoveryAuthorized {
 		return newProjectReadUnavailableError("project read materialization unhealthy: %s", metadata.Health)
 	}
 	changes := make([]userstore.ProjectDeltaChange, 0, len(wanted))

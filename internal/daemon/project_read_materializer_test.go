@@ -1422,6 +1422,65 @@ func TestSyncUserProjectionMaterializedIssuesPropagatesBoundedCurrentState(t *te
 	}
 }
 
+func TestRefreshActiveProjectReadRuntimeRecoversAuthoritativeHealthBeforeUserProjectionSync(t *testing.T) {
+	ctx := context.Background()
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	now := time.Now().UTC()
+	canonical := domain.Task{ID: "issue", Title: "canonical", Status: domain.StatusInProgress, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}
+	state := userstore.ProjectDeltaState{ProjectID: "p", Cursor: 4, Hash: "four", Initialized: true, Projector: issueProjectionProjector()}
+	if err := store.ReplaceProject(ctx, userstore.ProjectInput{ProjectID: "p", Name: "P", Path: "/p", DBPath: "/p/db", Tasks: []domain.Task{canonical}, Delta: &state}); err != nil {
+		t.Fatal(err)
+	}
+
+	var hydrateCalls atomic.Int32
+	reader := newProjectReadMaterializer("p", nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		if hydrateCalls.Add(1) == 1 {
+			return nil, errors.New("transient runtime hydration failure")
+		}
+		tasks[0].Session = &domain.Session{IssueID: "issue", State: domain.SessionBusy, Activity: "recovered", UpdatedAt: now.Add(time.Second)}
+		tasks[0].HasTmuxSession = true
+		return tasks, nil
+	})
+	canonicalByID := map[string]domain.Task{canonical.ID.String(): canonical}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonicalByID, canonicalByID)
+	reader.replaceBootstrap(canonicalByID, canonicalByID, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+	d := &Daemon{cfg: Config{}, userStore: store, materializers: map[string]*projectReadMaterializer{"p": reader}}
+
+	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, "p", reader, []string{"issue"}); err == nil || !strings.Contains(err.Error(), "transient runtime hydration failure") {
+		t.Fatalf("failed refresh error = %v", err)
+	}
+	if got := reader.snapshotMetadata().Health; !strings.Contains(got, "stale: authoritative read refresh:") {
+		t.Fatalf("failed refresh health = %q, want authoritative stale health", got)
+	}
+	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, "p", reader, []string{"issue"}); err != nil {
+		t.Fatalf("recovered refresh: %v", err)
+	}
+	if got := reader.snapshotMetadata().Health; got != "healthy" {
+		t.Fatalf("recovered refresh health = %q, want healthy", got)
+	}
+	snapshot, err := store.Snapshot(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Projects) != 1 || len(snapshot.Projects[0].Tasks) != 1 || snapshot.Projects[0].Tasks[0].Session == nil || snapshot.Projects[0].Tasks[0].Session.Activity != "recovered" {
+		t.Fatalf("recovered user projection = %+v", snapshot.Projects)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, "p", reader, []string{"issue"}); err == nil || !strings.Contains(err.Error(), "sync user projection issues") {
+		t.Fatalf("failed user projection sync error = %v", err)
+	}
+	if got := reader.snapshotMetadata().Health; !strings.Contains(got, "stale: authoritative read refresh:") {
+		t.Fatalf("failed user projection sync health = %q, want authoritative stale health", got)
+	}
+}
+
 func TestStopAllProjectReadMaterializersCancelsAndJoinsConsumers(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
