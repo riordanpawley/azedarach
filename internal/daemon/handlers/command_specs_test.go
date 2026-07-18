@@ -190,6 +190,7 @@ func TestCommandSpecRegistryCoversKnownDaemonCommands(t *testing.T) {
 		CommandGitPullBase,
 		CommandGitPush,
 		CommandGitMerge,
+		CommandGitMergeRef,
 		CommandGitCheckout,
 		CommandGitAbortMerge,
 		CommandGitDiffStat,

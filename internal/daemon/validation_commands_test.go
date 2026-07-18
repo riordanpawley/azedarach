@@ -437,16 +437,17 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 	// evidence fails. The retry sees source already contained by target.
 	err = d.persistTaskCloseIntegrationReceipt(ctx, projectID, issueID, repoDir, integration)
 	require.NoError(t, err)
-	recovered, found, err := d.recoverPublishedTaskCloseIntegration(ctx, projectID, issueID, repoDir, "base", "feature", "main", sourceOID, targetOID)
+	_, err = issueClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
+		Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "intent_key": publication.IntentKey, "request_fingerprint": publication.RequestFingerprint, "reviewed_source_oid": sourceOID, "publication_operation_id": publication.OperationID},
+	})
 	require.NoError(t, err)
-	require.True(t, found)
-	require.True(t, recovered.NoChanges)
-	require.True(t, recovered.ReceiptRecovered)
-	require.False(t, recovered.Integrated)
-	require.Equal(t, baseOID, recovered.BaseOID)
-	require.NotEmpty(t, recovered.ValidationAttempts)
-	err = d.persistTaskCloseIntegrationPublication(ctx, projectID, issueID, repoDir, recovered)
+	typedResult, err := d.mergeTypedConfiguredBaseThroughPublication(ctx, projectID, issueID, gitservice.Worktree{IssueID: issueID, Path: repoDir, Branch: "feature"}, repoDir, "main", sourceOID, targetOID)
 	require.NoError(t, err, "merge=%+v target=%s", merge, targetOID)
+	require.True(t, typedResult.ReceiptRecorded)
+	require.Equal(t, baseOID, typedResult.BaseOID)
+	require.Equal(t, targetOID, typedResult.TargetOID)
+	require.NotEmpty(t, typedResult.Result.ValidationAttempts)
 	receipts, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted}, Limit: 10})
 	require.NoError(t, err)
 	require.Len(t, receipts, 1, "retry must reuse the exact receipt rather than append a generic no-change receipt")

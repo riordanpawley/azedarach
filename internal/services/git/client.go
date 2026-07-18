@@ -335,16 +335,16 @@ func (c *Client) Fetch(ctx context.Context, worktree, remote string) error {
 // Merge merges the specified branch into the current branch.
 // It detects merge conflicts and returns detailed information.
 func (c *Client) Merge(ctx context.Context, worktree, branch string) (*MergeResult, error) {
-	return c.mergeWithEnv(ctx, worktree, branch, nil)
+	return c.mergeWithEnv(ctx, worktree, branch, nil, false)
 }
 
-func (c *Client) mergeWithEnv(ctx context.Context, worktree, branch string, extraEnv []string) (*MergeResult, error) {
+func (c *Client) mergeWithEnv(ctx context.Context, worktree, branch string, extraEnv []string, forceNoFF bool) (*MergeResult, error) {
 	c.logger.Info("merging branch", "worktree", worktree, "branch", branch)
 
 	runCtx, cancel := mergeCommandContext(ctx)
 	defer cancel()
 
-	output, err, hookDiagnostics := c.runMergeWithHookDiagnostics(runCtx, worktree, branch, extraEnv)
+	output, err, hookDiagnostics := c.runMergeWithHookDiagnostics(runCtx, worktree, branch, extraEnv, forceNoFF)
 
 	result := &MergeResult{
 		Success:      err == nil,
@@ -395,10 +395,15 @@ func mergeCommandContext(ctx context.Context) (context.Context, context.CancelFu
 	return context.WithTimeout(ctx, domain.IntegrationMergeTimeout)
 }
 
-func (c *Client) runMergeWithHookDiagnostics(ctx context.Context, worktree, branch string, extraEnv []string) (string, error, []GitHookDiagnostic) {
+func (c *Client) runMergeWithHookDiagnostics(ctx context.Context, worktree, branch string, extraEnv []string, forceNoFF bool) (string, error, []GitHookDiagnostic) {
+	args := []string{"merge", "--no-edit"}
+	if forceNoFF {
+		args = append(args, "--no-ff")
+	}
+	args = append(args, branch)
 	traceFile, err := os.CreateTemp("", "azedarach-git-trace2-*.json")
 	if err != nil {
-		output, runErr := c.runInWorktreeWithEnv(ctx, worktree, extraEnv, "merge", "--no-edit", branch)
+		output, runErr := c.runInWorktreeWithEnv(ctx, worktree, extraEnv, args...)
 		return output, runErr, nil
 	}
 	tracePath := traceFile.Name()
@@ -408,14 +413,18 @@ func (c *Client) runMergeWithHookDiagnostics(ctx context.Context, worktree, bran
 	startedAt := time.Now()
 	mergeEnv := append([]string(nil), extraEnv...)
 	mergeEnv = append(mergeEnv, "GIT_TRACE2_EVENT="+tracePath)
-	output, runErr := c.runInWorktreeWithEnv(ctx, worktree, mergeEnv, "merge", "--no-edit", branch)
+	output, runErr := c.runInWorktreeWithEnv(ctx, worktree, mergeEnv, args...)
 	elapsed := time.Since(startedAt)
-	diagnostics := parseGitMergeHookDiagnostics(tracePath, mergeCommandShape(), startedAt.Add(elapsed), errors.Is(ctx.Err(), context.DeadlineExceeded))
+	diagnostics := parseGitMergeHookDiagnostics(tracePath, mergeCommandShape(forceNoFF), startedAt.Add(elapsed), errors.Is(ctx.Err(), context.DeadlineExceeded))
 	return output, runErr, diagnostics
 }
 
-func mergeCommandShape() string {
-	return "git " + latencytrace.CommandShape([]string{"merge", "--no-edit", "<branch>"})
+func mergeCommandShape(forceNoFF bool) string {
+	args := []string{"merge", "--no-edit"}
+	if forceNoFF {
+		args = append(args, "--no-ff")
+	}
+	return "git " + latencytrace.CommandShape(append(args, "<branch>"))
 }
 
 // MergeCleanly merges a branch and verifies the target worktree is clean after
@@ -424,10 +433,10 @@ func mergeCommandShape() string {
 // result is reported as unsuccessful so higher-level integration can halt
 // without leaving the target branch dirty.
 func (c *Client) MergeCleanly(ctx context.Context, worktree, branch string) (*MergeResult, error) {
-	return c.mergeCleanlyWithEnv(ctx, worktree, branch, nil)
+	return c.mergeCleanlyWithEnv(ctx, worktree, branch, nil, false)
 }
 
-func (c *Client) mergeCleanlyWithEnv(ctx context.Context, worktree, branch string, extraEnv []string) (*MergeResult, error) {
+func (c *Client) mergeCleanlyWithEnv(ctx context.Context, worktree, branch string, extraEnv []string, forceNoFF bool) (*MergeResult, error) {
 	preStatus, preStatusErr := c.Status(ctx, worktree)
 	targetWasClean := preStatusErr == nil && !gitStatusDirty(preStatus)
 	if preStatusErr != nil {
@@ -438,7 +447,7 @@ func (c *Client) mergeCleanlyWithEnv(ctx context.Context, worktree, branch strin
 		)
 	}
 
-	result, err := c.mergeWithEnv(ctx, worktree, branch, extraEnv)
+	result, err := c.mergeWithEnv(ctx, worktree, branch, extraEnv, forceNoFF)
 	if err != nil {
 		return c.cleanFailedMergeSideEffects(ctx, worktree, branch, targetWasClean, preStatusErr, err)
 	}

@@ -7,9 +7,9 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
 
-func TestProtocolV55PreservesCombinedOrchestrationViewProjectionDecisionAndLearningContracts(t *testing.T) {
-	if CurrentVersion != 55 {
-		t.Fatalf("protocol version = %d, want 55", CurrentVersion)
+func TestProtocolV56PreservesCombinedOrchestrationViewProjectionDecisionLearningAndTypedMergeContracts(t *testing.T) {
+	if CurrentVersion != 56 {
+		t.Fatalf("protocol version = %d, want 56", CurrentVersion)
 	}
 	if CommandOrchestratorSessionStart == "" || CommandOrchestratorSessionAttach == "" || CommandOrchestratorSessionStop == "" || CommandOrchestratorSessionStatus == "" || EventOrchestrationLoopUpdated == "" || EventBoardViewChanged == "" {
 		t.Fatal("combined orchestration and board-view protocol contracts must remain registered")

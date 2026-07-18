@@ -1340,6 +1340,108 @@ func TestRealProcessProfileMergeCleanlyTransactionalCompositionSkipsPublicationG
 	}
 }
 
+func TestMergeCleanlyTransactionalCompositionAtBaseRejectsStaleTargetBeforeScratchMerge(t *testing.T) {
+	repo := t.TempDir()
+	runClientTestGit(t, repo, "init", "-q", "-b", "main")
+	runClientTestGit(t, repo, "config", "user.email", "test@example.com")
+	runClientTestGit(t, repo, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runClientTestGit(t, repo, "add", ".")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "base")
+	staleBase := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+	runClientTestGit(t, repo, "checkout", "-q", "-b", "child")
+	if err := os.WriteFile(filepath.Join(repo, "child.txt"), []byte("child\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runClientTestGit(t, repo, "add", "child.txt")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "child")
+	runClientTestGit(t, repo, "checkout", "-q", "main")
+	if err := os.WriteFile(filepath.Join(repo, "advanced.txt"), []byte("advanced\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runClientTestGit(t, repo, "add", "advanced.txt")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "advance target")
+	current := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+
+	_, err := NewClient(NewExecRunner(repo), slog.Default()).MergeCleanlyTransactionalCompositionAtBase(context.Background(), repo, "child", staleBase)
+	var stale *IntegrationTargetStaleError
+	if !errors.As(err, &stale) || stale.ExpectedHead != staleBase || stale.ActualHead != current {
+		t.Fatalf("stale composition error = %v (%+v), want expected=%s actual=%s", err, stale, staleBase, current)
+	}
+	if got := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); got != current {
+		t.Fatalf("stale composition mutated target: got=%s want=%s", got, current)
+	}
+}
+
+func TestMergeCleanlyTransactionalCompositionAtTargetRejectsBranchSwitchAtSameHead(t *testing.T) {
+	repo := t.TempDir()
+	runClientTestGit(t, repo, "init", "-q", "-b", "main")
+	runClientTestGit(t, repo, "config", "user.email", "test@example.com")
+	runClientTestGit(t, repo, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runClientTestGit(t, repo, "add", ".")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "base")
+	targetHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+	runClientTestGit(t, repo, "checkout", "-q", "-b", "source")
+	if err := os.WriteFile(filepath.Join(repo, "source.txt"), []byte("source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runClientTestGit(t, repo, "add", "source.txt")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "source")
+	runClientTestGit(t, repo, "checkout", "-q", "-b", "wrong-target", targetHead)
+
+	_, err := NewClient(NewExecRunner(repo), slog.Default()).MergeCleanlyTransactionalCompositionAtTarget(context.Background(), repo, "source", targetHead, "main")
+	var stale *IntegrationTargetBranchStaleError
+	if !errors.As(err, &stale) || stale.ExpectedBranch != "main" || stale.ActualBranch != "wrong-target" {
+		t.Fatalf("stale target branch error = %v (%+v)", err, stale)
+	}
+	if got := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); got != targetHead {
+		t.Fatalf("branch-switched target mutated: got=%s want=%s", got, targetHead)
+	}
+}
+
+func TestMergeCleanlyTransactionalAtTargetRejectsBranchSwitchBeforeFinalApply(t *testing.T) {
+	repo := t.TempDir()
+	runClientTestGit(t, repo, "init", "-q", "-b", "main")
+	runClientTestGit(t, repo, "config", "user.email", "test@example.com")
+	runClientTestGit(t, repo, "config", "user.name", "Test User")
+	if err := os.MkdirAll(filepath.Join(repo, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gate := "#!/bin/sh\ngit -C \"$AZEDARACH_TEST_TARGET_REPO\" checkout -q wrong-target\n"
+	if err := os.WriteFile(filepath.Join(repo, "scripts", "git-merge-rebase-gate.sh"), []byte(gate), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runClientTestGit(t, repo, "add", ".")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "base")
+	targetHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+	runClientTestGit(t, repo, "branch", "wrong-target", targetHead)
+	runClientTestGit(t, repo, "checkout", "-q", "-b", "source")
+	if err := os.WriteFile(filepath.Join(repo, "source.txt"), []byte("source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runClientTestGit(t, repo, "add", "source.txt")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "source")
+	runClientTestGit(t, repo, "checkout", "-q", "main")
+	t.Setenv("AZEDARACH_TEST_TARGET_REPO", repo)
+
+	_, err := NewClient(NewExecRunner(repo), slog.Default()).MergeCleanlyTransactionalAtTarget(context.Background(), repo, "source", targetHead, "main")
+	var stale *IntegrationTargetBranchStaleError
+	if !errors.As(err, &stale) || stale.ExpectedBranch != "main" || stale.ActualBranch != "wrong-target" {
+		t.Fatalf("final-apply target branch error = %v (%+v)", err, stale)
+	}
+	if got := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); got != targetHead {
+		t.Fatalf("branch-switched target mutated: got=%s want=%s", got, targetHead)
+	}
+}
+
 func TestRealProcessProfileMergeCleanlyTransactionalRunsScratchHooksAndKeepsTargetCleanWhenHookFails(t *testing.T) {
 	repo := initDivergedRepo(t)
 	originalHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")

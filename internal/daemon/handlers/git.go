@@ -17,6 +17,7 @@ const (
 	CommandGitPullBase          = "git.pull_base"
 	CommandGitPush              = "git.push"
 	CommandGitMerge             = "git.merge"
+	CommandGitMergeRef          = "git.merge_ref"
 	CommandGitCheckout          = "git.checkout"
 	CommandGitAbortMerge        = "git.abort_merge"
 	CommandGitDiffStat          = "git.diff_stat"
@@ -40,6 +41,32 @@ type GitService interface {
 	Status(ctx context.Context, projectID, worktree string) (*git.GitStatus, error)
 	RuntimeSignals(ctx context.Context, projectID string, targets []GitRuntimeSignalsTarget, baseBranch string, compareRemote bool, remote string, refresh bool) ([]GitRuntimeSignalsResult, int, error)
 	WorktreePathForBranch(ctx context.Context, projectID, branch string) (string, bool, error)
+}
+
+// GitTypedMergeService owns issue-aware integration. Transport identifiers are
+// untrusted; implementations must resolve both sides from authoritative daemon
+// projections before selecting composition or configured-base publication.
+type GitTypedMergeService interface {
+	MergeTyped(ctx context.Context, projectID string, req GitMergeRequest) (*GitMergeResult, error)
+}
+
+type GitMergeRequest struct {
+	SourceID          string `json:"source_id"`
+	TargetID          string `json:"target_id"`
+	StopTargetSession bool   `json:"stop_target_session,omitempty"`
+}
+
+type GitMergeResult struct {
+	Worktree             string          `json:"worktree"`
+	Branch               string          `json:"branch"`
+	SourceID             string          `json:"source_id"`
+	TargetID             string          `json:"target_id"`
+	ConfiguredBaseTarget bool            `json:"configured_base_target"`
+	BaseOID              string          `json:"base_oid"`
+	SourceOID            string          `json:"source_oid"`
+	TargetOID            string          `json:"target_oid"`
+	ReceiptRecorded      bool            `json:"receipt_recorded"`
+	Result               git.MergeResult `json:"result"`
 }
 
 type GitMergePreflightService interface {
@@ -92,15 +119,18 @@ func NewGitHandler(service GitService, opts ...GitHandlerOption) *GitHandler {
 }
 
 type gitCommandBody struct {
-	ProjectID     string                    `json:"project_id,omitempty"`
-	Worktree      string                    `json:"worktree"`
-	Remote        string                    `json:"remote,omitempty"`
-	Branch        string                    `json:"branch,omitempty"`
-	BaseBranch    string                    `json:"base_branch,omitempty"`
-	Targets       []GitRuntimeSignalsTarget `json:"targets,omitempty"`
-	CompareRemote bool                      `json:"compare_remote,omitempty"`
-	Refresh       bool                      `json:"refresh,omitempty"`
-	HookTriggered bool                      `json:"hook_triggered,omitempty"`
+	ProjectID         string                    `json:"project_id,omitempty"`
+	Worktree          string                    `json:"worktree"`
+	SourceID          string                    `json:"source_id,omitempty"`
+	TargetID          string                    `json:"target_id,omitempty"`
+	StopTargetSession bool                      `json:"stop_target_session,omitempty"`
+	Remote            string                    `json:"remote,omitempty"`
+	Branch            string                    `json:"branch,omitempty"`
+	BaseBranch        string                    `json:"base_branch,omitempty"`
+	Targets           []GitRuntimeSignalsTarget `json:"targets,omitempty"`
+	CompareRemote     bool                      `json:"compare_remote,omitempty"`
+	Refresh           bool                      `json:"refresh,omitempty"`
+	HookTriggered     bool                      `json:"hook_triggered,omitempty"`
 }
 
 type GitRuntimeSignalsTarget struct {
@@ -237,6 +267,12 @@ func (h *GitHandler) HandleDirect(ctx context.Context, req protocol.RequestEnvel
 		if !ok {
 			return resp
 		}
+		return h.handleTypedMerge(ctx, resp, cmd)
+	case CommandGitMergeRef:
+		cmd, ok := decodeGitCommandBody(&resp, req)
+		if !ok {
+			return resp
+		}
 		return h.handleMerge(ctx, resp, cmd)
 	case CommandGitCheckout:
 		cmd, ok := decodeGitCommandBody(&resp, req)
@@ -292,11 +328,42 @@ func (h *GitHandler) HandleDirect(ctx context.Context, req protocol.RequestEnvel
 
 func isGitLongRunningCommand(command string) bool {
 	switch command {
-	case CommandGitFetch, CommandGitPullBase, CommandGitPush, CommandGitMerge, CommandGitCheckout, CommandGitAbortMerge, CommandGitDiscardChanges, CommandGitCheckpoint:
+	case CommandGitFetch, CommandGitPullBase, CommandGitPush, CommandGitMerge, CommandGitMergeRef, CommandGitCheckout, CommandGitAbortMerge, CommandGitDiscardChanges, CommandGitCheckpoint:
 		return true
 	default:
 		return false
 	}
+}
+
+func (h *GitHandler) handleTypedMerge(ctx context.Context, resp protocol.ResponseEnvelope, cmd gitCommandBody) protocol.ResponseEnvelope {
+	cmd.SourceID = strings.TrimSpace(cmd.SourceID)
+	cmd.TargetID = strings.TrimSpace(cmd.TargetID)
+	if cmd.SourceID == "" || cmd.TargetID == "" {
+		resp.Error = &protocol.ErrorEnvelope{Code: protocol.ErrorCodeInvalidRequest, Message: "git.merge requires authoritative source_id and target_id", Retryable: false}
+		return resp
+	}
+	service, ok := h.service.(GitTypedMergeService)
+	if !ok {
+		resp.Error = &protocol.ErrorEnvelope{Code: protocol.ErrorCodeUnavailable, Message: "typed git merge service unavailable", Retryable: false}
+		return resp
+	}
+	result, err := service.MergeTyped(ctx, cmd.ProjectID, GitMergeRequest{SourceID: cmd.SourceID, TargetID: cmd.TargetID, StopTargetSession: cmd.StopTargetSession})
+	if err != nil {
+		resp.Error = mapGitError(err)
+		return resp
+	}
+	if result == nil {
+		resp.Error = &protocol.ErrorEnvelope{Code: protocol.ErrorCodeInternal, Message: "typed git merge returned no result", Retryable: false}
+		return resp
+	}
+	body, err := json.Marshal(result)
+	if err != nil {
+		resp.Error = &protocol.ErrorEnvelope{Code: protocol.ErrorCodeInternal, Message: fmt.Sprintf("marshal response body: %v", err), Retryable: false}
+		return resp
+	}
+	resp.OK = true
+	resp.Body = body
+	return resp
 }
 
 func (h *GitHandler) handleWorktreeForBranch(ctx context.Context, resp protocol.ResponseEnvelope, cmd gitCommandBody) protocol.ResponseEnvelope {
