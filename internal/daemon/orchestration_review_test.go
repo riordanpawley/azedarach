@@ -181,13 +181,14 @@ func TestReviewIntentScopesSnapshotAndRetriesPreAdmissionFailureAfterRestart(t *
 	}
 	request := protocol.OrchestrationIntentRequest{
 		Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept,
-		IntentKey: "retry-pre-admission-after-restart", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir,
+		IntentKey: "retry-pre-admission-after-restart", ActorID: "orchestrator", IssueIDs: []string{strings.ToUpper(issueID)}, RepoDir: repoDir,
 	}
 
 	firstDaemon := newOrchestrationReviewTestDaemon(repoDir, client)
 	firstDaemon.orchestrationSnapshotBuild = func(_ context.Context, _ string, snapshotRequest protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
-		if !slices.Equal(snapshotRequest.ReviewIssueIDs, []string{issueID}) {
-			t.Fatalf("review snapshot issue IDs = %v, want only requested ticket %s", snapshotRequest.ReviewIssueIDs, issueID)
+		want := []string{naming.CanonicalIssueIDKey(issueID)}
+		if !slices.Equal(snapshotRequest.ReviewIssueIDs, want) {
+			return protocol.OrchestrationSnapshot{}, fmt.Errorf("review snapshot issue IDs = %v, want canonical requested ticket %v", snapshotRequest.ReviewIssueIDs, want)
 		}
 		return protocol.OrchestrationSnapshot{}, errors.New("transient pre-admission failure")
 	}
@@ -227,7 +228,7 @@ func TestOrchestrationReviewRequestedTicketScopePreservesStandaloneAndRootedAuth
 	standalone := domain.Task{ID: naming.IssueID("standalone"), Status: domain.StatusInReview, Dependencies: []domain.Dependency{{ID: naming.IssueID("root"), Type: domain.DependencyCreatedIn}}}
 	tasks := []domain.Task{root, child, standalone}
 
-	projectScoped := orchestrationReviewScopeTasks(tasks, domain.ProjectOrchestrationScope(), []string{"standalone"})
+	projectScoped := orchestrationReviewScopeTasks(tasks, domain.ProjectOrchestrationScope(), []string{"STANDALONE"})
 	if got := taskIDsFromTasks(projectScoped); !slices.Equal(got, []string{"standalone"}) {
 		t.Fatalf("project requested-ticket scope = %v, want standalone authoritative review", got)
 	}
@@ -270,7 +271,7 @@ func TestRequestedTicketReviewSnapshotSkipsUnrelatedProjectEvaluation(t *testing
 	}
 
 	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{
-		Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", RepoDir: repoDir, ReviewIssueIDs: []string{requested},
+		Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", RepoDir: repoDir, ReviewIssueIDs: []string{strings.ToUpper(requested)},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -2499,7 +2499,7 @@ func TestOrchestrationSnapshotSingleflightCoalescesWatchAndFiniteReads(t *testin
 func TestOrchestrationSnapshotKeysSeparateAndCanonicalizeReviewIssueScope(t *testing.T) {
 	base := protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", Limit: 50}
 	left := base
-	left.ReviewIssueIDs = normalizedReviewSnapshotIssueIDs([]string{"ticket-b", "ticket-a", "ticket-b"})
+	left.ReviewIssueIDs = normalizedReviewSnapshotIssueIDs([]string{"TICKET-B", "ticket-a", "Ticket-B"})
 	right := base
 	right.ReviewIssueIDs = normalizedReviewSnapshotIssueIDs([]string{"ticket-a", "ticket-b"})
 	other := base

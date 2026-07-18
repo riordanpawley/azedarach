@@ -456,9 +456,21 @@ func orchestrationSnapshotLoadKey(projectID string, request protocol.Orchestrati
 }
 
 func normalizedReviewSnapshotIssueIDs(issueIDs []string) []string {
-	issueIDs = uniqueTrimmedTaskIDs(issueIDs)
-	sort.Strings(issueIDs)
-	return issueIDs
+	seen := make(map[string]struct{}, len(issueIDs))
+	normalized := make([]string, 0, len(issueIDs))
+	for _, issueID := range issueIDs {
+		key := naming.CanonicalIssueIDKey(issueID)
+		if key == "" {
+			continue
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, key)
+	}
+	sort.Strings(normalized)
+	return normalized
 }
 
 func (d *Daemon) canonicalOrchestrationRepoDir(projectID, repoDir string) string {

@@ -183,12 +183,12 @@ func reviewWorktreeRefreshIssueIDs(reviewTasks, allTasks []domain.Task) []string
 func orchestrationReviewScopeTasks(tasks []domain.Task, scope domain.OrchestrationScope, requestedIssueIDs []string) []domain.Task {
 	requested := make(map[string]struct{}, len(requestedIssueIDs))
 	for _, issueID := range requestedIssueIDs {
-		requested[strings.TrimSpace(issueID)] = struct{}{}
+		requested[naming.CanonicalIssueIDKey(issueID)] = struct{}{}
 	}
 	out := make([]domain.Task, 0)
 	for _, task := range tasks {
 		if len(requested) > 0 {
-			if _, ok := requested[task.ID.String()]; !ok {
+			if _, ok := requested[naming.CanonicalIssueIDKey(task.ID.String())]; !ok {
 				continue
 			}
 		}
@@ -198,6 +198,44 @@ func orchestrationReviewScopeTasks(tasks []domain.Task, scope domain.Orchestrati
 		out = append(out, task)
 	}
 	return out
+}
+
+func stableRequestedReviewCandidates(requested, ordered []string) []string {
+	wanted := make(map[string]struct{}, len(requested))
+	for _, issueID := range requested {
+		if key := naming.CanonicalIssueIDKey(issueID); key != "" {
+			wanted[key] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(wanted))
+	seen := make(map[string]struct{}, len(wanted))
+	for _, issueID := range ordered {
+		key := naming.CanonicalIssueIDKey(issueID)
+		if _, requested := wanted[key]; !requested {
+			continue
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, issueID)
+	}
+	remainder := make([]string, 0, len(wanted)-len(seen))
+	for _, issueID := range requested {
+		key := naming.CanonicalIssueIDKey(issueID)
+		if key == "" {
+			continue
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		remainder = append(remainder, strings.TrimSpace(issueID))
+	}
+	sort.SliceStable(remainder, func(i, j int) bool {
+		return naming.CanonicalIssueIDKey(remainder[i]) < naming.CanonicalIssueIDKey(remainder[j])
+	})
+	return append(out, remainder...)
 }
 
 func reviewOutcomeLookupCandidate(task domain.Task) bool {
@@ -337,7 +375,7 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 		queue[review.IssueID] = review
 		ordered = append(ordered, review.IssueID)
 	}
-	requested := stableRequestedCandidates(request.IssueIDs, ordered)
+	requested := stableRequestedReviewCandidates(request.IssueIDs, ordered)
 	if len(request.IssueIDs) == 0 {
 		requested = ordered
 	}
