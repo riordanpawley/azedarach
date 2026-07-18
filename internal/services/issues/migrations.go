@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -39,6 +40,8 @@ type migration struct {
 
 const decisionIdempotencyMigrationID = "0051_decision_idempotency"
 const gitHookRefreshIntentsMigrationID = "0053_git_hook_refresh_intents"
+
+const mailboxObservationReplayRepairMaxRows = 50000
 
 var orderedMigrations = []migration{
 	{id: "0001_bootstrap_tables", path: "migrations/0001_bootstrap_tables.sql"},
@@ -101,6 +104,7 @@ var orderedMigrations = []migration{
 	{id: mailboxObservationProjectionCutoverMigrationID, path: "migrations/0052_mailbox_observation_projection_cutover.sql"},
 	{id: gitHookRefreshIntentsMigrationID, path: "migrations/0053_git_hook_refresh_intents.sql"},
 	{id: rootedSessionRoleExclusivityMigrationID, path: "migrations/0054_rooted_session_role_exclusivity.sql"},
+	{id: mailboxObservationReplayRepairMigrationID, path: "migrations/0055_mailbox_observation_replay_repair.manifest.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -164,6 +168,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: mailboxObservationProjectionCutoverMigrationID, Path: "migrations/0052_mailbox_observation_projection_cutover.sql", Checksum: "fd86080f491210c169005c7f28bc778aca3eea2d70ce15a6c001bb960397e260"},
 	{ID: gitHookRefreshIntentsMigrationID, Path: "migrations/0053_git_hook_refresh_intents.sql", Checksum: "7eecd212c9b9a5907c425870ee861571d7654929d77067a1fc50c2e857c3335c"},
 	{ID: rootedSessionRoleExclusivityMigrationID, Path: "migrations/0054_rooted_session_role_exclusivity.sql", Checksum: rootedSessionRoleExclusivityChecksum},
+	{ID: mailboxObservationReplayRepairMigrationID, Path: "migrations/0055_mailbox_observation_replay_repair.manifest.sql", Checksum: "c350a53fc470b54dfc90faa7674d22ad20d6c4b631a8f0d528962eb7f7df0966"},
 }
 
 func validateMigrationRegistry() error {
@@ -475,6 +480,7 @@ const (
 	humanAuthorityProjectionMigrationID                                      = "0047_human_authority_projection_revision"
 	mailboxObservationProjectionCutoverMigrationID                           = "0052_mailbox_observation_projection_cutover"
 	mailboxObservationProjectionCutoverMetaKey                               = "issue:mailbox_observation_projection_cutover"
+	mailboxObservationReplayRepairMigrationID                                = "0055_mailbox_observation_replay_repair"
 	decisionPropagationOutboxMigrationID                                     = "0048_decision_propagation_outbox"
 	issueObservationEventSearchMigrationID                                   = "0050_issue_observation_event_search"
 	contextualLearningMigrationID                                            = "0039_contextual_learning_activation"
@@ -585,6 +591,12 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 				}
 				continue
 			}
+			if m.id == mailboxObservationReplayRepairMigrationID {
+				if err := c.applyMailboxObservationReplayRepairMigration(ctx, db, m.id); err != nil {
+					return err
+				}
+				continue
+			}
 			if m.apply != nil {
 				if err := m.apply(ctx, db, m.id); err != nil {
 					return err
@@ -615,6 +627,12 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if err := validateMailboxObservationProjectionCutover(ctx, db); err != nil {
+		return err
+	}
+	if err := c.repairMailboxObservationReplayDrift(ctx, db); err != nil {
+		return err
+	}
+	if err := validateMailboxObservationReplayRepair(ctx, db); err != nil {
 		return err
 	}
 	if err := validateProjectionDeltaAuthoritySchema(ctx, db); err != nil {
@@ -898,6 +916,189 @@ func validateMailboxObservationProjectionCutover(ctx context.Context, db *sql.DB
 		return fmt.Errorf("applied migration %s has unsupported cutover marker state=%q version=%d", mailboxObservationProjectionCutoverMigrationID, marker.State, marker.Version)
 	}
 	return nil
+}
+
+func (c *Client) applyMailboxObservationReplayRepairMigration(ctx context.Context, db *sql.DB, id string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer tx.Rollback()
+	if err := repairMailboxObservationReplayRows(ctx, tx); err != nil {
+		return fmt.Errorf("repair migration %s: %w", id, err)
+	}
+	if c.mailboxReplayRepairFailureHook != nil {
+		if err := c.mailboxReplayRepairFailureHook("after_repair"); err != nil {
+			return fmt.Errorf("migration %s rolled back: %w", id, err)
+		}
+	}
+	if err := validateMailboxObservationReplayRepair(ctx, tx); err != nil {
+		return fmt.Errorf("validate migration %s: %w", id, err)
+	}
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	return nil
+}
+
+func (c *Client) repairMailboxObservationReplayDrift(ctx context.Context, db *sql.DB) error {
+	err := validateMailboxObservationReplayRepair(ctx, db)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, errMailboxObservationReplayNonCanonical) {
+		return err
+	}
+	return c.retrySQLiteBusy(ctx, func() error {
+		// Another process may have completed the same idempotent repair while
+		// this opener waited for SQLite write authority.
+		if err := validateMailboxObservationReplayRepair(ctx, db); err == nil {
+			return nil
+		} else if !errors.Is(err, errMailboxObservationReplayNonCanonical) {
+			return err
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin mailbox observation replay drift repair: %w", err)
+		}
+		defer tx.Rollback()
+		if err := repairMailboxObservationReplayRows(ctx, tx); err != nil {
+			return fmt.Errorf("repair mailbox observation replay drift: %w", err)
+		}
+		if err := validateMailboxObservationReplayRepair(ctx, tx); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit mailbox observation replay drift repair: %w", err)
+		}
+		return nil
+	})
+}
+
+func repairMailboxObservationReplayRows(ctx context.Context, tx *sql.Tx) error {
+	type repair struct {
+		id      int64
+		payload string
+	}
+	repairs := make([]repair, 0)
+	if err := scanMailboxObservationReplayRows(ctx, tx, func(rowID int64, raw string) error {
+		repaired, changed, err := canonicalMailboxObservationJSON(raw)
+		if err != nil {
+			return fmt.Errorf("canonicalize mailbox observation %d: %w", rowID, err)
+		}
+		if changed {
+			repairs = append(repairs, repair{id: rowID, payload: repaired})
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, repair := range repairs {
+		if _, err := tx.ExecContext(ctx, `UPDATE issue_observation_events SET payload_json = ? WHERE id = ?`, repair.payload, repair.id); err != nil {
+			return fmt.Errorf("update mailbox observation %d: %w", repair.id, err)
+		}
+	}
+	return nil
+}
+
+type mailboxReplayRepairQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+var errMailboxObservationReplayNonCanonical = errors.New("non-canonical mailbox observation replay")
+
+func validateMailboxObservationReplayRepair(ctx context.Context, db mailboxReplayRepairQueryer) error {
+	return scanMailboxObservationReplayRows(ctx, db, func(rowID int64, raw string) error {
+		_, changed, err := canonicalMailboxObservationJSON(raw)
+		if err != nil {
+			return fmt.Errorf("applied migration %s has invalid mailbox observation %d: %w", mailboxObservationReplayRepairMigrationID, rowID, err)
+		}
+		if changed {
+			return fmt.Errorf("%w: applied migration %s mailbox observation %d", errMailboxObservationReplayNonCanonical, mailboxObservationReplayRepairMigrationID, rowID)
+		}
+		return nil
+	})
+}
+
+func scanMailboxObservationReplayRows(ctx context.Context, db mailboxReplayRepairQueryer, visit func(int64, string) error) error {
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, payload_json
+		FROM issue_observation_events
+		WHERE source_command = 'mailbox.cutover'
+		   OR (source_command = 'mail.send' AND json_type(payload_json, '$.mail_event') = 'object')
+		ORDER BY id ASC
+		LIMIT ?
+	`, mailboxObservationReplayRepairMaxRows+1)
+	if err != nil {
+		return fmt.Errorf("scan mailbox observations: %w", err)
+	}
+	defer rows.Close()
+	scanned := 0
+	for rows.Next() {
+		scanned++
+		var rowID int64
+		var raw string
+		if err := rows.Scan(&rowID, &raw); err != nil {
+			return fmt.Errorf("scan mailbox observation: %w", err)
+		}
+		if scanned > mailboxObservationReplayRepairMaxRows {
+			return fmt.Errorf("mailbox observation replay repair exceeds bounded observation limit %d", mailboxObservationReplayRepairMaxRows)
+		}
+		if err := visit(rowID, raw); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("scan mailbox observations: %w", err)
+	}
+	return nil
+}
+
+func canonicalMailboxObservationJSON(raw string) (string, bool, error) {
+	var payload map[string]any
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&payload); err != nil {
+		return "", false, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("multiple JSON values")
+		}
+		return "", false, err
+	}
+	mailEvent, ok := payload["mail_event"].(map[string]any)
+	if !ok {
+		return "", false, errors.New("mail_event payload is missing or not an object")
+	}
+	producerPayload := make(map[string]any, len(payload))
+	for key, value := range payload {
+		switch key {
+		case "mail_event", "mail_delivery_id":
+			continue
+		default:
+			producerPayload[key] = value
+		}
+	}
+	canonical := domain.CanonicalMailboxProducerPayload(producerPayload)
+	currentValue, payloadPresent := mailEvent["payload"]
+	current, payloadObject := currentValue.(map[string]any)
+	if (!payloadPresent && canonical == nil) || (payloadObject && reflect.DeepEqual(current, canonical)) {
+		return raw, false, nil
+	}
+	if len(canonical) == 0 {
+		delete(mailEvent, "payload")
+	} else {
+		mailEvent["payload"] = canonical
+	}
+	repaired, err := json.Marshal(payload)
+	if err != nil {
+		return "", false, err
+	}
+	return string(repaired), true, nil
 }
 
 func (c *Client) applyDecisionIdempotencyMigration(ctx context.Context, db *sql.DB, id string) error {

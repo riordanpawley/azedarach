@@ -4618,6 +4618,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0052_mailbox_observation_projection_cutover",
 		"0053_git_hook_refresh_intents",
 		"0054_rooted_session_role_exclusivity",
+		"0055_mailbox_observation_replay_repair",
 	}, got)
 }
 

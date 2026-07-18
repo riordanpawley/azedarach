@@ -1016,6 +1016,7 @@ func projectedMailEvent(event domain.IssueObservationEvent) (protocol.MailEvent,
 	if err := json.Unmarshal(encoded, &projected); err != nil || projected.Seq <= 0 || strings.TrimSpace(projected.ParentIssue) == "" || strings.TrimSpace(projected.Type) == "" {
 		return protocol.MailEvent{}, false
 	}
+	projected.Payload = enrichMailEventPayload(projected.Payload, projected.Body)
 	return projected, true
 }
 

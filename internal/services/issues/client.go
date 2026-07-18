@@ -861,6 +861,7 @@ type Client struct {
 	boardViewsMigrationFailureHook     func(stage string) error
 	humanAuthorityMigrationFailureHook func(stage string) error
 	mailboxProjectionFailureHook       func(stage string) error
+	mailboxReplayRepairFailureHook     func(stage string) error
 	projectionDeltaChecksumRepairHook  func(stage string) error
 	projectionDeltaReadHook            func()
 	projectionSnapshotSourceRowsHook   func(projectionDeltaRows) projectionDeltaRows
