@@ -439,6 +439,9 @@ func (d *Daemon) handleBoardFetch(ctx context.Context, req protocol.RequestEnvel
 	if err != nil {
 		return d.boardViewErrorResponse(req, err), nil
 	}
+	if boardReq.ShowChildren != nil {
+		viewRecord.View.Options.ShowChildren = *boardReq.ShowChildren
+	}
 	startedAt := time.Now()
 	cacheStartedAt := time.Now()
 	if cached, ok := d.readFreshTaskListSnapshotCache(projectID); ok {
@@ -1527,7 +1530,10 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 
 	for issueID, status := range statusByIssue {
 		worktreePath := worktreePathByIssue[issueID]
-		rev := d.runtimeProjectionStateWriter().PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktreePath, status, true, false)
+		rev, err := d.runtimeProjectionStateWriter().PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktreePath, status, true, false)
+		if err != nil {
+			return len(rows), fmt.Errorf("%s: persist refreshed git status projection: %w", issueID, err)
+		}
 		if rev == 0 && d.worktreeRuntimeStateStore(projectID) != nil {
 			rawStatus, err := json.Marshal(status)
 			if err != nil {
@@ -1663,11 +1669,15 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 	for _, issueID := range issueIDs {
 		wt, ok := worktreeByIssue[issueID]
 		if !ok || strings.TrimSpace(wt.Path) == "" {
-			d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID)
+			if _, err := d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID); err != nil {
+				errs = append(errs, fmt.Errorf("%s: delete missing worktree projection: %w", issueID, err))
+			}
 			continue
 		}
 		if !runtimeWorktreeIssueEligible(issueID, taskByIssue) {
-			d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID)
+			if _, err := d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID); err != nil {
+				errs = append(errs, fmt.Errorf("%s: delete ineligible worktree projection: %w", issueID, err))
+			}
 			continue
 		}
 
@@ -1682,7 +1692,10 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 			continue
 		}
 		if !found || strings.TrimSpace(projection.Path) != worktreePath || strings.TrimSpace(projection.Branch) != branch {
-			d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktreePath, branch)
+			if _, err := d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktreePath, branch); err != nil {
+				errs = append(errs, fmt.Errorf("%s: persist worktree projection: %w", issueID, err))
+				continue
+			}
 		}
 		refreshed++
 
@@ -1699,7 +1712,11 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 			errs = append(errs, fmt.Errorf("%s: refresh git status: %w", issueID, statusErr))
 			continue
 		}
-		rev := d.runtimeProjectionStateWriter().PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktreePath, status, true, false)
+		rev, persistErr := d.runtimeProjectionStateWriter().PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktreePath, status, true, false)
+		if persistErr != nil {
+			errs = append(errs, fmt.Errorf("%s: persist git status projection: %w", issueID, persistErr))
+			continue
+		}
 		if rev == 0 && d.worktreeRuntimeStateStore(projectID) != nil {
 			rawStatus, marshalErr := json.Marshal(status)
 			if marshalErr != nil {
@@ -2022,10 +2039,13 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 		if compensationErr := d.compensateDeferredTaskWorktreeCleanup(ctx, projectID, cmd.TaskID, deferredCleanup); compensationErr != nil {
 			err = errors.Join(err, compensationErr)
 		}
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		err = d.recordProjectIssueStoreFailure(projectID, err)
+		return d.errorResponse(req, projectIssueStoreHealthErrorCode(err), err.Error()), nil
 	}
 	if deferredCleanup.Observed {
-		d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, cmd.TaskID)
+		if err := d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, cmd.TaskID); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
 	}
 	resp := d.successResponse(req)
 	resp.Revision = d.nextRevision(projectID)
@@ -2586,7 +2606,9 @@ func (d *Daemon) deferTaskWorktreeCleanupForClose(ctx context.Context, projectID
 			return deferredTaskWorktreeCleanupPlan{}, fmt.Errorf("clear worktree projection before close: %w", err)
 		}
 	}
-	d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, projectID, taskID)
+	if _, err := d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, projectID, taskID); err != nil {
+		return deferredTaskWorktreeCleanupPlan{}, fmt.Errorf("publish cleared worktree projection: %w", err)
+	}
 	return deferredTaskWorktreeCleanupPlan{Path: fallbackPath, Branch: fallbackBranch}, nil
 }
 
@@ -2618,7 +2640,11 @@ func (d *Daemon) submitDeferredTaskWorktreeCleanup(ctx context.Context, projectI
 	}, func(runCtx context.Context) ([]byte, error) {
 		runCtx, cancel := context.WithTimeout(runCtx, taskDeferredWorktreeCleanupTimeout)
 		defer cancel()
-		if d.deferredTaskWorktreeCleanupShouldSkip(runCtx, projectID, taskID, fallbackPath, fallbackBranch) {
+		skip, err := d.deferredTaskWorktreeCleanupShouldSkip(runCtx, projectID, taskID, fallbackPath, fallbackBranch)
+		if err != nil {
+			return nil, err
+		}
+		if skip {
 			return json.Marshal(deferredTaskWorktreeCleanupResult{
 				ProjectID: projectID,
 				TaskID:    taskID,
@@ -2657,21 +2683,25 @@ func (d *Daemon) submitDeferredTaskWorktreeCleanup(ctx context.Context, projectI
 	return submitResult.Record.ID, nil
 }
 
-func (d *Daemon) deferredTaskWorktreeCleanupShouldSkip(ctx context.Context, projectID, taskID, fallbackPath, fallbackBranch string) bool {
+func (d *Daemon) deferredTaskWorktreeCleanupShouldSkip(ctx context.Context, projectID, taskID, fallbackPath, fallbackBranch string) (bool, error) {
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
-		return false
+		return false, nil
 	}
 	task, err := issueClient.GetWithRuntime(ctx, projectID, taskID)
 	if err != nil || task.IssueClosed() {
-		return false
+		return false, nil
 	}
 	if fallbackPath != "" {
-		d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, fallbackPath, fallbackBranch)
+		if _, err := d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, fallbackPath, fallbackBranch); err != nil {
+			return false, fmt.Errorf("restore deferred worktree projection: %w", err)
+		}
 	} else {
-		d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, taskID)
+		if err := d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, taskID); err != nil {
+			return false, err
+		}
 	}
-	return true
+	return true, nil
 }
 
 type deferredCleanupOperationManager interface {
@@ -2780,22 +2810,23 @@ func (d *Daemon) compensateDeferredTaskWorktreeCleanup(ctx context.Context, proj
 	compensationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	if _, err := d.submitDeferredTaskWorktreeCleanup(compensationCtx, projectID, taskID, cancellation.FallbackPath, cancellation.FallbackBranch); err != nil {
-		d.restoreDeferredCleanupWorktreeProjection(compensationCtx, projectID, taskID)
-		return fmt.Errorf("requeue deferred worktree cleanup after failed lifecycle change: %w", err)
+		restoreErr := d.restoreDeferredCleanupWorktreeProjection(compensationCtx, projectID, taskID)
+		return errors.Join(fmt.Errorf("requeue deferred worktree cleanup after failed lifecycle change: %w", err), restoreErr)
 	}
 	return nil
 }
 
-func (d *Daemon) restoreDeferredCleanupWorktreeProjection(ctx context.Context, projectID, taskID string) {
+func (d *Daemon) restoreDeferredCleanupWorktreeProjection(ctx context.Context, projectID, taskID string) error {
 	manager := d.worktreeManagerForProject(projectID)
 	if manager == nil {
-		return
+		return nil
 	}
 	worktree, err := manager.Get(ctx, taskID)
 	if err != nil || worktree == nil {
-		return
+		return nil
 	}
-	d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, worktree.Path, worktree.Branch)
+	_, err = d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, worktree.Path, worktree.Branch)
+	return err
 }
 
 func (d *Daemon) liveWorktreePathSet(ctx context.Context, projectID string) (map[string]struct{}, bool, error) {
@@ -4781,6 +4812,7 @@ func (d *Daemon) handleTaskSQLiteWAL(ctx context.Context, req protocol.RequestEn
 		OpenConnections:     diag.DBStats.OpenConnections,
 		InUse:               diag.DBStats.InUse,
 		Idle:                diag.DBStats.Idle,
+		Stores:              d.sqliteStoreDiagnostics(),
 	}
 	switch mode {
 	case "":
@@ -7753,7 +7785,9 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	if deferredCleanup.Observed {
-		d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, cmd.TaskID)
+		if err := d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, cmd.TaskID); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
 		task, err = issueClient.GetWithRuntime(ctx, projectID, cmd.TaskID)
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil

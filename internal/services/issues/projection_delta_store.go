@@ -13,6 +13,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 const (
@@ -193,12 +194,12 @@ func (c *Client) ListProjectionDeltas(ctx context.Context, projectID string, aft
 	projectID = normalizeProjectionProjectID(projectID)
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, 0, projectionReadError("begin projection delta read", err)
+		return nil, 0, c.projectionReadError("begin projection delta read", err)
 	}
 	defer tx.Rollback()
 	head, err := projectionHead(ctx, tx, projectID)
 	if err != nil {
-		return nil, 0, projectionReadError("read projection delta head", err)
+		return nil, 0, c.projectionReadError("read projection delta head", err)
 	}
 	if after > head {
 		return nil, head, &domain.ProjectionGapError{ProjectID: projectID, Expected: head, Actual: after}
@@ -211,7 +212,7 @@ func (c *Client) ListProjectionDeltas(ctx context.Context, projectID string, aft
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT project_id,cursor,kind,key,operation,idempotency_key,payload_json,committed_at FROM projection_deltas WHERE project_id=? AND cursor>? ORDER BY cursor LIMIT ?`, projectID, after, limit)
 	if err != nil {
-		return nil, head, projectionReadError("list projection deltas", err)
+		return nil, head, c.projectionReadError("list projection deltas", err)
 	}
 	defer rows.Close()
 	deltas := make([]domain.ProjectionDelta, 0, min(limit, 64))
@@ -223,10 +224,10 @@ func (c *Client) ListProjectionDeltas(ctx context.Context, projectID string, aft
 		deltas = append(deltas, delta)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, head, projectionReadError("iterate projection deltas", err)
+		return nil, head, c.projectionReadError("iterate projection deltas", err)
 	}
 	if err := rows.Close(); err != nil {
-		return nil, head, projectionReadError("close projection delta rows", err)
+		return nil, head, c.projectionReadError("close projection delta rows", err)
 	}
 	if after < head {
 		if len(deltas) == 0 {
@@ -241,7 +242,7 @@ func (c *Client) ListProjectionDeltas(ctx context.Context, projectID string, aft
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, head, projectionReadError("commit projection delta read", err)
+		return nil, head, c.projectionReadError("commit projection delta read", err)
 	}
 	return deltas, head, nil
 }
@@ -257,7 +258,13 @@ func (c *Client) WatchProjectionDeltas(ctx context.Context, projectID string, af
 	if err != nil {
 		return nil, head, fmt.Errorf("create projection cursor watcher: %w: %w", err, domain.ErrProjectionRetryable)
 	}
-	defer watcher.Close()
+	c.projectionWatchStarted.Add(1)
+	c.projectionWatchActive.Add(1)
+	defer func() {
+		closeProjectionDeltaWatcher(watcher)
+		c.projectionWatchActive.Add(-1)
+		c.projectionWatchCompleted.Add(1)
+	}()
 	if err := watcher.Add(filepath.Dir(c.dbPath)); err != nil {
 		return nil, head, fmt.Errorf("watch projection cursor directory: %w: %w", err, domain.ErrProjectionRetryable)
 	}
@@ -292,6 +299,15 @@ func (c *Client) WatchProjectionDeltas(ctx context.Context, projectID string, af
 	}
 }
 
+// closeProjectionDeltaWatcher waits for the backend read loop to finish so a
+// completed watch owns no asynchronous operating-system resources when it
+// returns to its caller.
+func closeProjectionDeltaWatcher(watcher *fsnotify.Watcher) {
+	_ = watcher.Close()
+	for range watcher.Errors {
+	}
+}
+
 func projectionDBEvent(dbPath, eventPath string) bool {
 	dbPath, eventPath = filepath.Clean(dbPath), filepath.Clean(eventPath)
 	return eventPath == dbPath || eventPath == dbPath+"-wal" || eventPath == dbPath+"-shm"
@@ -314,19 +330,19 @@ func (c *Client) ProjectionSnapshotAt(ctx context.Context, projectID string, cur
 	projectID = normalizeProjectionProjectID(projectID)
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return domain.ProjectionSnapshot{}, projectionReadError("begin projection snapshot", err)
+		return domain.ProjectionSnapshot{}, c.projectionReadError("begin projection snapshot", err)
 	}
 	defer tx.Rollback()
 	head, err := projectionHead(ctx, tx, projectID)
 	if err != nil {
-		return domain.ProjectionSnapshot{}, projectionReadError("read projection snapshot head", err)
+		return domain.ProjectionSnapshot{}, c.projectionReadError("read projection snapshot head", err)
 	}
 	if cursor > head {
 		return domain.ProjectionSnapshot{}, &domain.ProjectionGapError{ProjectID: projectID, Expected: head, Actual: cursor}
 	}
 	var materializedCount uint64
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM projection_deltas WHERE project_id=? AND cursor<=?`, projectID, cursor).Scan(&materializedCount); err != nil {
-		return domain.ProjectionSnapshot{}, projectionReadError("validate projection snapshot cursor", err)
+		return domain.ProjectionSnapshot{}, c.projectionReadError("validate projection snapshot cursor", err)
 	}
 	if materializedCount != cursor {
 		return domain.ProjectionSnapshot{}, &domain.ProjectionGapError{ProjectID: projectID, Expected: cursor, Actual: materializedCount}
@@ -336,7 +352,7 @@ func (c *Client) ProjectionSnapshotAt(ctx context.Context, projectID string, cur
 		FROM projection_deltas WHERE project_id=? AND cursor<=? AND kind<>?
 	) SELECT kind,key,payload_json FROM ranked WHERE rank=1 AND operation='upsert' ORDER BY kind,key`, projectID, cursor, domain.ProjectionKindSourceAdvance)
 	if err != nil {
-		return domain.ProjectionSnapshot{}, projectionReadError("read projection snapshot", err)
+		return domain.ProjectionSnapshot{}, c.projectionReadError("read projection snapshot", err)
 	}
 	defer rows.Close()
 	values := []domain.ProjectionValue{}
@@ -344,35 +360,43 @@ func (c *Client) ProjectionSnapshotAt(ctx context.Context, projectID string, cur
 		var value domain.ProjectionValue
 		var payload string
 		if err := rows.Scan(&value.Kind, &value.Key, &payload); err != nil {
-			return domain.ProjectionSnapshot{}, projectionReadError("scan projection snapshot", err)
+			return domain.ProjectionSnapshot{}, c.projectionReadError("scan projection snapshot", err)
 		}
 		value.Payload = json.RawMessage(payload)
 		values = append(values, value)
 	}
 	if err := rows.Err(); err != nil {
-		return domain.ProjectionSnapshot{}, projectionReadError("iterate projection snapshot", err)
+		return domain.ProjectionSnapshot{}, c.projectionReadError("iterate projection snapshot", err)
 	}
 	if err := rows.Close(); err != nil {
-		return domain.ProjectionSnapshot{}, projectionReadError("close projection snapshot values", err)
+		return domain.ProjectionSnapshot{}, c.projectionReadError("close projection snapshot values", err)
 	}
 	sourceRows, err := tx.QueryContext(ctx, `SELECT project_id,cursor,kind,key,operation,idempotency_key,payload_json,committed_at FROM projection_deltas WHERE project_id=? AND cursor<=? ORDER BY cursor`, projectID, cursor)
 	if err != nil {
-		return domain.ProjectionSnapshot{}, projectionReadError("read projection snapshot sources", err)
+		return domain.ProjectionSnapshot{}, c.projectionReadError("read projection snapshot sources", err)
 	}
+	var sourceReader projectionDeltaRows = sourceRows
+	if c.projectionSnapshotSourceRowsHook != nil {
+		sourceReader = c.projectionSnapshotSourceRowsHook(sourceReader)
+	}
+	defer sourceReader.Close()
 	var sourceDeltas []domain.ProjectionDelta
-	for sourceRows.Next() {
-		delta, err := scanProjectionDelta(sourceRows)
+	for sourceReader.Next() {
+		delta, err := scanProjectionDelta(sourceReader)
 		if err != nil {
-			sourceRows.Close()
-			return domain.ProjectionSnapshot{}, projectionReadError("scan projection snapshot source", err)
+			sourceReader.Close()
+			return domain.ProjectionSnapshot{}, c.projectionReadError("scan projection snapshot source", err)
 		}
 		sourceDeltas = append(sourceDeltas, delta)
 	}
-	if err := sourceRows.Close(); err != nil {
-		return domain.ProjectionSnapshot{}, projectionReadError("close projection snapshot sources", err)
+	if err := sourceReader.Err(); err != nil {
+		return domain.ProjectionSnapshot{}, c.projectionReadError("iterate projection snapshot sources", err)
+	}
+	if err := sourceReader.Close(); err != nil {
+		return domain.ProjectionSnapshot{}, c.projectionReadError("close projection snapshot sources", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return domain.ProjectionSnapshot{}, projectionReadError("commit projection snapshot read", err)
+		return domain.ProjectionSnapshot{}, c.projectionReadError("commit projection snapshot read", err)
 	}
 	return domain.ProjectionSnapshot{ProjectID: projectID, Cursor: cursor, Head: head, Values: values, Sources: domain.MergeProjectionSourceRanges(sourceDeltas)}, nil
 }
@@ -392,7 +416,7 @@ func (c *Client) ProjectionConsumerCursor(ctx context.Context, projectID, consum
 		return 0, nil
 	}
 	if err != nil {
-		return 0, projectionReadError("read projection consumer cursor", err)
+		return 0, c.projectionReadError("read projection consumer cursor", err)
 	}
 	return cursor, nil
 }
@@ -408,6 +432,9 @@ func (c *Client) OpenProjectionDeltaStore() error {
 func (c *Client) projectionReadDBHandle() (*sql.DB, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.corruptionError(); err != nil {
+		return nil, fmt.Errorf("projection delta store quarantined: %w", err)
+	}
 	if c.db == nil {
 		return nil, fmt.Errorf("projection delta store is not open: %w", domain.ErrProjectionRetryable)
 	}
@@ -518,6 +545,13 @@ func projectionHead(ctx context.Context, q interface {
 
 type projectionDeltaScanner interface{ Scan(...any) error }
 
+type projectionDeltaRows interface {
+	projectionDeltaScanner
+	Next() bool
+	Err() error
+	Close() error
+}
+
 func scanProjectionDelta(scanner projectionDeltaScanner) (domain.ProjectionDelta, error) {
 	var delta domain.ProjectionDelta
 	var operation, payload, committedAt string
@@ -545,9 +579,12 @@ func projectionDeltaMatches(delta domain.ProjectionDelta, params ProjectionDelta
 	return delta.Kind == params.Kind && delta.Key == params.Key && delta.Operation == params.Operation && bytes.Equal(bytes.TrimSpace(delta.Payload), bytes.TrimSpace(normalizedProjectionPayload(params.Payload)))
 }
 
-func projectionReadError(op string, err error) error {
-	wrapped := fmt.Errorf("%s: %w", op, err)
-	if IsSQLiteBusy(err) {
+func (c *Client) projectionReadError(op string, err error) error {
+	wrapped := sqliteutil.WrapError(c.dbPath, op, err)
+	if IsSQLiteCorrupt(err) {
+		return c.markSQLiteCorrupt(wrapped)
+	}
+	if IsSQLiteBusy(err) || sqliteutil.IsIOErrorShortRead(err) {
 		return &domain.ProjectionRetryableError{Cause: wrapped}
 	}
 	return wrapped

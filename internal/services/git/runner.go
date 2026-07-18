@@ -29,7 +29,24 @@ type envCommandRunner interface {
 
 // ExecRunner implements CommandRunner using os/exec.
 type ExecRunner struct {
-	workDir string // Working directory for git commands
+	workDir        string // Working directory for git commands
+	outputObserver processOutputObserver
+}
+
+type processOutputObserver func(stream string, output []byte)
+
+type processOutputWriter struct {
+	stream   string
+	dst      *bytes.Buffer
+	observer processOutputObserver
+}
+
+func (w processOutputWriter) Write(output []byte) (int, error) {
+	written, err := w.dst.Write(output)
+	if written > 0 && w.observer != nil {
+		w.observer(w.stream, output[:written])
+	}
+	return written, err
 }
 
 // NewExecRunner creates a new ExecRunner that runs commands in the given working directory.
@@ -64,10 +81,11 @@ func (e *ExecRunner) run(ctx context.Context, extraEnv []string, preserveStdout 
 	)
 	defer func() { endSpan(err) }()
 
-	stdoutText, stderrText, err := runProcessGroupCommandRaw(
+	stdoutText, stderrText, err := runProcessGroupCommandRawWithObserver(
 		ctx,
 		e.workDir,
 		gitEnvWithOverrides(sanitizedGitEnv(os.Environ()), extraEnv),
+		e.outputObserver,
 		"git",
 		args...,
 	)
@@ -93,11 +111,19 @@ func (e *ExecRunner) run(ctx context.Context, extraEnv []string, preserveStdout 
 // child, which prevents Git hooks, task runners, and their descendants from
 // surviving an obsolete integration attempt.
 func runProcessGroupCommand(ctx context.Context, dir string, env []string, name string, args ...string) (stdoutText, stderrText string, err error) {
-	stdoutText, stderrText, err = runProcessGroupCommandRaw(ctx, dir, env, name, args...)
-	return strings.TrimSpace(stdoutText), stderrText, err
+	return runProcessGroupCommandWithObserver(ctx, dir, env, nil, name, args...)
 }
 
 func runProcessGroupCommandRaw(ctx context.Context, dir string, env []string, name string, args ...string) (stdoutText, stderrText string, err error) {
+	return runProcessGroupCommandRawWithObserver(ctx, dir, env, nil, name, args...)
+}
+
+func runProcessGroupCommandWithObserver(ctx context.Context, dir string, env []string, observer processOutputObserver, name string, args ...string) (stdoutText, stderrText string, err error) {
+	stdoutText, stderrText, err = runProcessGroupCommandRawWithObserver(ctx, dir, env, observer, name, args...)
+	return strings.TrimSpace(stdoutText), stderrText, err
+}
+
+func runProcessGroupCommandRawWithObserver(ctx context.Context, dir string, env []string, observer processOutputObserver, name string, args ...string) (stdoutText, stderrText string, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -127,8 +153,8 @@ func runProcessGroupCommandRaw(ctx context.Context, dir string, env []string, na
 	}
 
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stdout = processOutputWriter{stream: "stdout", dst: &stdout, observer: observer}
+	cmd.Stderr = processOutputWriter{stream: "stderr", dst: &stderr, observer: observer}
 	err = cmd.Run()
 	stdoutText = stdout.String()
 	stderrText = strings.TrimSpace(stderr.String())

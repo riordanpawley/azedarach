@@ -29,6 +29,10 @@ func withProjectReadUpdateWaitHookForTest(ctx context.Context, hook func(string,
 	return withContextOperationLockWaitHookForTest(ctx, hook)
 }
 
+func withProjectReadUpdateQueuedHookForTest(ctx context.Context, hook func(string)) context.Context {
+	return withContextOperationLockQueuedHookForTest(ctx, hook)
+}
+
 func withoutSynchronousProjectReadRuntimeRefresh(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -40,21 +44,22 @@ func withoutSynchronousProjectReadRuntimeRefresh(ctx context.Context) context.Co
 // is the upstream transitional delivery position; it is not an authority
 // revision and is never written back to the project database.
 type projectReadMaterializer struct {
-	mu          sync.RWMutex
-	updateMu    contextOperationLock
-	projectID   string
-	authority   *ProjectionDeltaAuthority
-	hydrate     func(context.Context, []domain.Task) ([]domain.Task, error)
-	affected    func(context.Context, protocol.ProjectionDeltaBatch) ([]string, error)
-	legacy      func(context.Context) ([]domain.Task, error)
-	canonical   map[string]domain.Task
-	tasks       map[string]domain.Task
-	worktrees   map[string]git.Worktree
-	metadata    protocol.MaterializedSnapshotMetadata
-	issueKeys   keyedCheckpoint
-	runtimeKeys keyedCheckpoint
-	cancel      context.CancelFunc
-	done        chan struct{}
+	mu               sync.RWMutex
+	updateMu         contextOperationLock
+	projectID        string
+	authority        *ProjectionDeltaAuthority
+	hydrate          func(context.Context, []domain.Task) ([]domain.Task, error)
+	affected         func(context.Context, protocol.ProjectionDeltaBatch) ([]string, error)
+	legacy           func(context.Context) ([]domain.Task, error)
+	canonical        map[string]domain.Task
+	tasks            map[string]domain.Task
+	worktrees        map[string]git.Worktree
+	metadata         protocol.MaterializedSnapshotMetadata
+	retryableFailure bool
+	issueKeys        keyedCheckpoint
+	runtimeKeys      keyedCheckpoint
+	cancel           context.CancelFunc
+	done             chan struct{}
 }
 
 type keyedCheckpoint struct {
@@ -314,6 +319,7 @@ func (m *projectReadMaterializer) apply(ctx context.Context, batch protocol.Proj
 	m.issueKeys, m.runtimeKeys = issueKeys, runtimeKeys
 	sources := mergeRootProjectionSources(m.metadata.SourceVector, batch.SourceVector)
 	m.metadata = materializedMetadata(batch.DeliveryToCursor, batch.HeadCursor, batch.Projector, sources, issueKeys.sum(), runtimeKeys.sum(), batch.Health)
+	m.retryableFailure = false
 	m.mu.Unlock()
 	return nil
 }
@@ -383,12 +389,14 @@ func (m *projectReadMaterializer) replaceBootstrap(canonical, tasks map[string]d
 	metadata.RuntimeChecksum = runtimeKeys.sum()
 	metadata.SemanticChecksum = joinedMaterializedChecksum(metadata)
 	m.canonical, m.tasks, m.metadata, m.issueKeys, m.runtimeKeys = canonical, tasks, metadata, issueKeys, runtimeKeys
+	m.retryableFailure = false
 	m.mu.Unlock()
 }
 
 func (m *projectReadMaterializer) markUnhealthy(err error) {
 	m.mu.Lock()
 	m.metadata.Health = "stale: " + err.Error()
+	m.retryableFailure = errors.Is(err, domain.ErrProjectionRetryable)
 	m.mu.Unlock()
 }
 
@@ -399,6 +407,11 @@ func (m *projectReadMaterializer) snapshotMetadata() protocol.MaterializedSnapsh
 }
 
 func (m *projectReadMaterializer) snapshot() ([]domain.Task, protocol.MaterializedSnapshotMetadata) {
+	tasks, metadata, _ := m.snapshotWithFailureDisposition()
+	return tasks, metadata
+}
+
+func (m *projectReadMaterializer) snapshotWithFailureDisposition() ([]domain.Task, protocol.MaterializedSnapshotMetadata, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	tasks := make([]domain.Task, 0, len(m.tasks))
@@ -406,7 +419,7 @@ func (m *projectReadMaterializer) snapshot() ([]domain.Task, protocol.Materializ
 		tasks = append(tasks, task)
 	}
 	sortTasksDeterministically(tasks)
-	return cloneTasks(tasks), cloneMaterializedMetadata(m.metadata)
+	return cloneTasks(tasks), cloneMaterializedMetadata(m.metadata), m.retryableFailure
 }
 
 func (m *projectReadMaterializer) snapshotIssues(issueIDs map[string]struct{}) ([]domain.Task, protocol.MaterializedSnapshotMetadata) {
@@ -565,12 +578,22 @@ func (d *Daemon) startProjectReadMaterializers(ctx context.Context) error {
 	if d.issues == nil {
 		return nil
 	}
-	_, err := d.ensureProjectReadMaterializer(ctx, d.canonicalProjectID(protocol.DefaultProjectID), d.issues)
+	projectID := d.canonicalProjectID(protocol.DefaultProjectID)
+	if healthErr, unhealthy := d.projectIssueStoreHealthError(projectID); unhealthy {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.WarnContext(ctx, "project read materializer skipped for quarantined startup store", "project_id", projectID, "error", healthErr)
+		}
+		return nil
+	}
+	_, err := d.ensureProjectReadMaterializer(ctx, projectID, d.issues)
 	return err
 }
 
 func (d *Daemon) ensureProjectReadMaterializer(ctx context.Context, projectID string, client *issues.Client) (*projectReadMaterializer, error) {
 	projectID = d.canonicalProjectID(projectID)
+	if healthErr, unhealthy := d.projectIssueStoreHealthError(projectID); unhealthy {
+		return nil, fmt.Errorf("project read materialization unavailable for %s: %w", projectID, healthErr)
+	}
 	d.materializersInitMu.Lock()
 	defer d.materializersInitMu.Unlock()
 	d.materializersMu.Lock()
@@ -722,8 +745,8 @@ func (d *Daemon) projectReadSnapshot(projectID string) ([]domain.Task, protocol.
 		}
 		return tasks, metadata, nil
 	}
-	tasks, metadata := materializer.snapshot()
-	if !strings.HasPrefix(metadata.Health, "healthy") {
+	tasks, metadata, retryableFailure := materializer.snapshotWithFailureDisposition()
+	if !strings.HasPrefix(metadata.Health, "healthy") && !retryableFailure {
 		return nil, metadata, fmt.Errorf("project read materialization unhealthy: %s", metadata.Health)
 	}
 	return tasks, metadata, nil

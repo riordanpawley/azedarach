@@ -45,6 +45,7 @@ type GlobalSnapshotRequestBody struct {
 	Consumer       GlobalViewConsumer `json:"consumer,omitempty"`
 	Scope          GlobalViewScope    `json:"scope,omitempty"`
 	HydrateTaskIDs []ScopedIssueID    `json:"hydrate_task_ids,omitempty"`
+	ShowChildren   *bool              `json:"show_children,omitempty"`
 }
 
 type GlobalViewScopeKind string

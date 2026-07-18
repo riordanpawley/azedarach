@@ -6527,6 +6527,7 @@ func issueDoctorSQLiteWALDiagnostics(ctx context.Context, deps *Dependencies, op
 		"open_connections":           diag.OpenConnections,
 		"in_use":                     diag.InUse,
 		"idle":                       diag.Idle,
+		"stores":                     diag.Stores,
 	}
 	checkpoint := diag.Checkpoint
 	if checkpoint != nil {

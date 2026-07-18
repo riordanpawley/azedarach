@@ -50,6 +50,9 @@ type OrchestrationSnapshotRequest struct {
 	Limit          int    `json:"limit,omitempty"`
 	ObservedCursor int64  `json:"observed_cursor,omitempty"`
 	RepoDir        string `json:"repo_dir,omitempty"`
+	// ReviewIssueIDs is the daemon-internal admission selector derived from an
+	// intent's authoritative IssueIDs. Snapshot clients cannot set it directly.
+	ReviewIssueIDs []string `json:"-"`
 }
 
 type OrchestrationSnapshot struct {

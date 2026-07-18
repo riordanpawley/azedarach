@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sqlite "modernc.org/sqlite"
@@ -416,9 +417,10 @@ type issueMutationLockWaitHookKey struct{}
 var issueOperationLocks sync.Map
 
 type issueOperationLock struct {
-	token  chan struct{}
-	mu     sync.RWMutex
-	holder string
+	token       chan struct{}
+	mu          sync.RWMutex
+	holder      string
+	holderSince time.Time
 }
 
 func newIssueOperationLock() *issueOperationLock {
@@ -431,6 +433,12 @@ func (l *issueOperationLock) currentHolder() string {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.holder
+}
+
+func (l *issueOperationLock) holderSnapshot() (string, time.Time) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.holder, l.holderSince
 }
 
 func (l *issueOperationLock) acquire(ctx context.Context, operation string) (string, error) {
@@ -447,6 +455,7 @@ func (l *issueOperationLock) acquire(ctx context.Context, operation string) (str
 		}
 		l.mu.Lock()
 		l.holder = operation
+		l.holderSince = time.Now()
 		l.mu.Unlock()
 		return "", nil
 	default:
@@ -465,6 +474,7 @@ func (l *issueOperationLock) acquire(ctx context.Context, operation string) (str
 		}
 		l.mu.Lock()
 		l.holder = operation
+		l.holderSince = time.Now()
 		l.mu.Unlock()
 		return holder, nil
 	}
@@ -473,6 +483,7 @@ func (l *issueOperationLock) acquire(ctx context.Context, operation string) (str
 func (l *issueOperationLock) release() {
 	l.mu.Lock()
 	l.holder = ""
+	l.holderSince = time.Time{}
 	l.mu.Unlock()
 	l.token <- struct{}{}
 }
@@ -815,12 +826,22 @@ func hasParentChildOrphanConfirmation(ctx context.Context) bool {
 const (
 	nextAlphaIssueIndexMetaKey  = "issue:id_next_alpha_index"
 	sqliteBusyPrimaryCode       = 5
+	sqliteCorruptPrimaryCode    = 11
 	defaultSQLiteBusyTimeout    = 5 * time.Second
 	defaultSQLiteBusyRetryDelay = 100 * time.Millisecond
 	// Keep at least one foreground reader available while Linear sync owns a write connection.
 	sqliteMaxOpenConns         = 4
 	issueGraphClosureProjectID = "default"
 )
+
+// ErrSQLiteCorrupt marks structural SQLite damage. Callers must preserve the
+// database and WAL and recover through a consistent clone instead of retrying
+// writes against the damaged authority.
+var ErrSQLiteCorrupt = errors.New("issue database structural corruption")
+
+type sqliteCorruptionState struct {
+	err error
+}
 
 // Client wraps local SQLite task store operations.
 type Client struct {
@@ -840,8 +861,14 @@ type Client struct {
 	boardViewsMigrationFailureHook     func(stage string) error
 	humanAuthorityMigrationFailureHook func(stage string) error
 	mailboxProjectionFailureHook       func(stage string) error
+	mailboxReplayRepairFailureHook     func(stage string) error
 	projectionDeltaChecksumRepairHook  func(stage string) error
 	projectionDeltaReadHook            func()
+	projectionSnapshotSourceRowsHook   func(projectionDeltaRows) projectionDeltaRows
+	projectionWatchActive              atomic.Int64
+	projectionWatchStarted             atomic.Uint64
+	projectionWatchCompleted           atomic.Uint64
+	corruption                         atomic.Pointer[sqliteCorruptionState]
 	decisionOutboxMigrationFailureHook func(stage string) error
 	decisionIdempotencyFailureHook     func(stage string) error
 	eventSearchMigrationFailureHook    func(stage string) error
@@ -960,6 +987,7 @@ func (c *Client) withMutationLock(ctx context.Context, fn func(context.Context) 
 		return err
 	}
 	runWrite := func(lockCtx context.Context) error {
+		lockCtx = sqliteutil.ContextWithWriteOperation(lockCtx, mutationOperationFromContext(lockCtx))
 		return sqliteutil.WithWriteLockContext(lockCtx, c.dbPath, fn)
 	}
 	var spanErr error
@@ -1029,6 +1057,9 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if err := c.corruptionError(); err != nil {
+		return nil, &domain.TaskStoreError{Op: "open-db", Err: err}
+	}
 	if c.db != nil {
 		return c.db, nil
 	}
@@ -1037,6 +1068,7 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 	}
 
 	dbDir := filepath.Dir(c.dbPath)
+	var existingDB bool
 	if c.requireExistingDB {
 		info, err := os.Stat(c.dbPath)
 		if err != nil {
@@ -1045,9 +1077,25 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		if !info.Mode().IsRegular() {
 			return nil, c.wrapError("open-db", "", fmt.Errorf("require existing database: %s is not a regular file", c.dbPath))
 		}
-	} else if dbDir != "" && dbDir != "." {
-		if err := os.MkdirAll(dbDir, 0o755); err != nil {
-			return nil, c.wrapError("open-db", "", fmt.Errorf("create db directory: %w", err))
+		existingDB = true
+	} else {
+		if info, err := os.Stat(c.dbPath); err == nil {
+			if !info.Mode().IsRegular() {
+				return nil, c.wrapError("open-db", "", fmt.Errorf("issue database path %s is not a regular file", c.dbPath))
+			}
+			existingDB = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, c.wrapError("open-db", "", fmt.Errorf("inspect issue database: %w", err))
+		}
+		if dbDir != "" && dbDir != "." {
+			if err := os.MkdirAll(dbDir, 0o755); err != nil {
+				return nil, c.wrapError("open-db", "", fmt.Errorf("create db directory: %w", err))
+			}
+		}
+	}
+	if existingDB {
+		if err := checkSQLitePathStructuralIntegrity(c.dbPath, c.sqliteBusyTimeout); err != nil {
+			return nil, c.wrapError("open-db", "", err)
 		}
 	}
 
@@ -1140,6 +1188,39 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		)
 	}
 	return c.db, nil
+}
+
+func checkSQLiteStructuralIntegrity(db *sql.DB) error {
+	var result string
+	if err := db.QueryRow(`PRAGMA quick_check(1)`).Scan(&result); err != nil {
+		return fmt.Errorf("pre-write SQLite integrity check: %w", err)
+	}
+	result = strings.TrimSpace(result)
+	if !strings.EqualFold(result, "ok") {
+		return fmt.Errorf("%w: pre-write SQLite integrity check returned %q", ErrSQLiteCorrupt, result)
+	}
+	return nil
+}
+
+// checkSQLitePathStructuralIntegrity validates an existing authority through a
+// read-only connection before any read-write pool exists. In WAL mode SQLite
+// reads the committed database and WAL snapshot without checkpointing or
+// recovering either authority file.
+func checkSQLitePathStructuralIntegrity(dbPath string, busyTimeout time.Duration) error {
+	busyTimeoutMillis := max(busyTimeout.Milliseconds(), int64(1))
+	dsn := fmt.Sprintf(
+		"file:%s?mode=ro&_pragma=query_only(ON)&_pragma=busy_timeout(%d)",
+		filepath.ToSlash(dbPath),
+		busyTimeoutMillis,
+	)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return fmt.Errorf("open read-only SQLite integrity preflight: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	defer db.Close()
+	return checkSQLiteStructuralIntegrity(db)
 }
 
 func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
@@ -1360,6 +1441,55 @@ func (c *Client) DBStats() (sql.DBStats, error) {
 		return sql.DBStats{}, err
 	}
 	return db.Stats(), nil
+}
+
+// StoreResourceDiagnostics reports the process-owned resources for one issue
+// store without opening a closed database as a side effect of diagnosis.
+type StoreResourceDiagnostics struct {
+	DBPath                   string
+	Open                     bool
+	DBStats                  sql.DBStats
+	MutationHolder           string
+	MutationHeldFor          time.Duration
+	SQLiteWriteHolder        string
+	SQLiteWriteHeldFor       time.Duration
+	ProjectionWatchesActive  int64
+	ProjectionWatchesStarted uint64
+	ProjectionWatchesDone    uint64
+}
+
+func (c *Client) ResourceDiagnostics() StoreResourceDiagnostics {
+	if c == nil {
+		return StoreResourceDiagnostics{}
+	}
+	c.mu.Lock()
+	db := c.db
+	dbPath := c.dbPath
+	c.mu.Unlock()
+
+	diagnostic := StoreResourceDiagnostics{
+		DBPath:                   dbPath,
+		Open:                     db != nil,
+		ProjectionWatchesActive:  c.projectionWatchActive.Load(),
+		ProjectionWatchesStarted: c.projectionWatchStarted.Load(),
+		ProjectionWatchesDone:    c.projectionWatchCompleted.Load(),
+	}
+	if db != nil {
+		diagnostic.DBStats = db.Stats()
+	}
+	diagnostic.MutationHolder, diagnostic.MutationHeldFor = issueOperationLockForPath(dbPath).holderDuration(time.Now())
+	writeLock := sqliteutil.WriteLockResourceDiagnostics(dbPath)
+	diagnostic.SQLiteWriteHolder = writeLock.Holder
+	diagnostic.SQLiteWriteHeldFor = writeLock.HeldFor
+	return diagnostic
+}
+
+func (l *issueOperationLock) holderDuration(now time.Time) (string, time.Duration) {
+	holder, since := l.holderSnapshot()
+	if holder == "" || since.IsZero() || now.Before(since) {
+		return holder, 0
+	}
+	return holder, now.Sub(since)
 }
 
 func (c *Client) configureSQLite(db *sql.DB) error {
@@ -3735,6 +3865,22 @@ func IsSQLiteBusy(err error) bool {
 	return false
 }
 
+// IsSQLiteCorrupt reports whether err is a typed store quarantine or wraps a
+// SQLite result with primary code SQLITE_CORRUPT (11).
+func IsSQLiteCorrupt(err error) bool {
+	if errors.Is(err, ErrSQLiteCorrupt) {
+		return true
+	}
+	for err != nil {
+		var coded interface{ Code() int }
+		if errors.As(err, &coded) && coded.Code()&0xff == sqliteCorruptPrimaryCode {
+			return true
+		}
+		err = errors.Unwrap(err)
+	}
+	return false
+}
+
 func (c *Client) UpsertExternalIssueRef(ctx context.Context, params UpsertExternalIssueRefParams) (domain.ExternalIssueRef, error) {
 	var out domain.ExternalIssueRef
 	err := c.withMutationLock(ctx, func(lockCtx context.Context) error {
@@ -5874,6 +6020,7 @@ func (c *Client) logSQLiteRead(ctx context.Context, operation string, startedAt 
 		"service", "azedarach.issue_store",
 		"dependency.name", "sqlite",
 		"dependency.operation", operation,
+		"db.path", sqliteutil.CanonicalPath(c.dbPath),
 		"dependency.duration_ms", time.Since(startedAt).Milliseconds(),
 		"outcome", outcome,
 		"row_count", rowCount,
@@ -5881,6 +6028,13 @@ func (c *Client) logSQLiteRead(ctx context.Context, operation string, startedAt 
 	base = append(base, attrs...)
 	if err != nil {
 		base = append(base, "error_class", "sqlite_query")
+		if details, ok := sqliteutil.Details(err); ok {
+			base = append(base,
+				"sqlite.code", details.PrimaryCode,
+				"sqlite.extended_code", details.ExtendedCode,
+				"sqlite.symbol", details.Symbol,
+			)
+		}
 	}
 	latencytrace.LogPhaseContext(ctx, nil, "dependency", "sqlite."+operation, startedAt, base...)
 	if c.logger == nil {
@@ -6595,6 +6749,9 @@ func resolveDBPath(repoDir string) (string, error) {
 }
 
 func (c *Client) wrapError(op string, issueID string, err error) error {
+	if IsSQLiteCorrupt(err) {
+		err = c.markSQLiteCorrupt(err)
+	}
 	storeErr := &domain.TaskStoreError{
 		Op:  op,
 		Err: err,
@@ -6603,4 +6760,37 @@ func (c *Client) wrapError(op string, issueID string, err error) error {
 		storeErr.TaskID = issueID
 	}
 	return storeErr
+}
+
+func (c *Client) markSQLiteCorrupt(cause error) error {
+	if existing := c.corruption.Load(); existing != nil {
+		return existing.err
+	}
+	quarantineErr := fmt.Errorf(
+		"%w detected; this issue store is quarantined in the current process. Preserve the database and WAL, create a consistent online-backup clone, and recover or replace the authority from validated clone evidence before retrying: %w",
+		ErrSQLiteCorrupt,
+		cause,
+	)
+	state := &sqliteCorruptionState{err: quarantineErr}
+	if c.corruption.CompareAndSwap(nil, state) {
+		return quarantineErr
+	}
+	return c.corruption.Load().err
+}
+
+func (c *Client) corruptionError() error {
+	state := c.corruption.Load()
+	if state == nil {
+		return nil
+	}
+	return state.err
+}
+
+// CorruptionError reports the process-local corruption quarantine, if any.
+// It does not open or inspect the database.
+func (c *Client) CorruptionError() error {
+	if c == nil {
+		return nil
+	}
+	return c.corruptionError()
 }

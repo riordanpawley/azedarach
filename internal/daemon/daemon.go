@@ -232,7 +232,8 @@ type Daemon struct {
 	orchestrationSnapshotBuild           orchestrationSnapshotBuilder
 	snapshotAdmissionContext             func(context.Context) (context.Context, context.CancelFunc)
 	orchestrationProjectionExported      func()
-	orchestrationSnapshotAuxiliaryRead   func(context.Context)
+	orchestrationSnapshotPrepared        func(uint64, []string)
+	orchestrationSnapshotAuxiliaryRead   func(context.Context) error
 	taskGraphOperationList               func(context.Context, daemonops.Query) ([]daemonops.Record, error)
 	taskGraphUnresolvedInteractionIDs    func(context.Context, string) (map[string]struct{}, error)
 	taskGraphObservationEvents           func(context.Context, string, []string) issues.ProjectIssueObservationCapture
@@ -255,6 +256,7 @@ type Daemon struct {
 	terminalFailureProbeMu               sync.Mutex
 	terminalFailureProbes                map[string]terminalFailureProbeState
 	tmuxObservationWG                    sync.WaitGroup
+	gitHookReplayWG                      sync.WaitGroup
 	tmuxObservationCursorMu              sync.Mutex
 	tmuxObservationCursor                int
 	reviewReadyRecoveryMu                sync.Mutex
@@ -485,7 +487,9 @@ func New(cfg Config) *Daemon {
 		return active
 	}
 	gitService.onStatusUpdate = func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) {
-		d.runtimeProjectionStateWriter().PublishGitStatusProjectionEvent(ctx, projectID, issueID, worktree, status)
+		if _, err := d.runtimeProjectionStateWriter().PublishGitStatusProjectionEvent(ctx, projectID, issueID, worktree, status); err != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("publish observed git status projection failed", "project_id", projectID, "issue_id", issueID, "error", err)
+		}
 	}
 	noticeService := daemonnotices.NewService(daemonnotices.ServiceConfig{
 		Repository:   daemonnotices.New(cfg.RepoDir, cfg.Logger),
@@ -541,7 +545,9 @@ func New(cfg Config) *Daemon {
 		startWorktreeAsyncInit: d.startWorktreeAsyncInitCommands,
 		logger:                 cfg.Logger,
 		onProjectionUpdate: func(ctx context.Context, projectID, issueID, path string) {
-			d.runtimeProjectionStateWriter().PublishWorktreeProjectionEvent(ctx, projectID, issueID, path)
+			if _, err := d.runtimeProjectionStateWriter().PublishWorktreeProjectionEvent(ctx, projectID, issueID, path); err != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("publish observed worktree projection failed", "project_id", projectID, "issue_id", issueID, "error", err)
+			}
 		},
 		onWorktreeObserved: func(_ context.Context, projectID, _ string, path string) {
 			gitService.refreshGitStatusAsync(projectID, path)
@@ -653,10 +659,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 				d.cfg.Logger.Warn("failed to close runtime reconcile queue", "error", closeErr)
 			}
 		}
+		if d.gitStatusAdapter != nil {
+			d.gitStatusAdapter.stopGitHookRefreshReconciler()
+		}
 		if d.gitStatusRefreshQueue != nil {
 			if closeErr := d.gitStatusRefreshQueue.Close(); closeErr != nil && d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("failed to close git status refresh queue", "error", closeErr)
 			}
+		}
+		d.gitHookReplayWG.Wait()
+		if d.gitStatusAdapter != nil {
+			d.gitStatusAdapter.waitForGitHookRefreshContinuations()
 		}
 		d.stopUserProjectionWorkers()
 		d.closeIssueClients()
@@ -683,10 +696,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.cfg.Logger.Info("daemon startup phase", "phase", "projection_delta_stores_open", "duration_ms", time.Since(projectionStartedAt).Milliseconds())
 
 	serveErrCh := make(chan error, 1)
+	if d.gitStatusAdapter != nil {
+		d.gitStatusAdapter.setGitHookRefreshReconcileContext(serveCtx)
+	}
 	go func() {
 		serveErrCh <- d.serve.Serve(serveCtx)
 	}()
 	d.cfg.Logger.Info("daemon startup phase", "phase", "ipc_serve_start", "duration_ms", time.Since(startedAt).Milliseconds())
+	d.startGitHookRefreshReplay(serveCtx)
 	waitForShutdown := func() {
 		if ctx.Err() != nil {
 			<-shutdownDone
@@ -759,6 +776,82 @@ func (d *Daemon) Run(ctx context.Context) error {
 	return err
 }
 
+func (d *Daemon) startGitHookRefreshReplay(ctx context.Context) {
+	if d == nil {
+		return
+	}
+	d.gitHookReplayWG.Add(1)
+	go func() {
+		defer d.gitHookReplayWG.Done()
+		if err := d.prepareRuntimeStoresForGitHookReplay(); err != nil {
+			if d.cfg.Logger != nil && ctx.Err() == nil {
+				d.cfg.Logger.Warn("open runtime stores for git hook replay failed", "error", err)
+			}
+			return
+		}
+		if err := d.replayPendingGitHookRefreshes(ctx); err != nil && d.cfg.Logger != nil && ctx.Err() == nil {
+			d.cfg.Logger.Warn("replay pending git hook refreshes failed", "error", err)
+		}
+	}()
+}
+
+func (d *Daemon) prepareRuntimeStoresForGitHookReplay() error {
+	registry, err := appconfig.LoadProjectsRegistry()
+	if err != nil {
+		return err
+	}
+	projectIDs := []string{d.canonicalProjectID(protocol.DefaultProjectID)}
+	for _, project := range registry.Projects {
+		projectID := strings.TrimSpace(project.ID)
+		if projectID == "" {
+			projectID = strings.TrimSpace(project.Name)
+		}
+		if projectID != "" {
+			projectIDs = append(projectIDs, projectID)
+		}
+	}
+	for _, projectID := range projectIDs {
+		if store := d.runtimeStateStoreForProject(projectID); store == nil {
+			return fmt.Errorf("runtime state store unavailable for project %q", projectID)
+		}
+	}
+	return nil
+}
+
+func (d *Daemon) replayPendingGitHookRefreshes(ctx context.Context) error {
+	if d == nil || d.gitStatusAdapter == nil {
+		return nil
+	}
+	d.runtimeStoresMu.Lock()
+	stores := make([]*daemonstate.RuntimeStateStore, 0, len(d.runtimeStoresByRoot))
+	for _, store := range d.runtimeStoresByRoot {
+		stores = append(stores, store)
+	}
+	d.runtimeStoresMu.Unlock()
+	seen := make(map[*daemonstate.RuntimeStateStore]struct{}, len(stores))
+	for _, store := range stores {
+		if store == nil {
+			continue
+		}
+		if _, ok := seen[store]; ok {
+			continue
+		}
+		seen[store] = struct{}{}
+		intents, err := store.ListPendingGitHookRefreshes(ctx)
+		if err != nil {
+			return err
+		}
+		for _, intent := range intents {
+			submission, err := d.gitStatusAdapter.queuePersistedGitHookRefresh(intent.ProjectID, intent.Worktree)
+			if err != nil {
+				return err
+			}
+			d.gitStatusAdapter.continuePendingGitHookRefreshAfter(submission, intent.ProjectID, intent.Worktree)
+		}
+	}
+	return nil
+}
+
 func (d *Daemon) prepareRunShutdownState() {
 	d.shutdownMu.Lock()
 	defer d.shutdownMu.Unlock()
@@ -795,6 +888,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	req.Meta.ProjectID = naming.ProjectID(projectID)
 	ctx = withDaemonProjectIDContext(ctx, projectID)
 	ctx = issues.ContextWithMutationOperation(ctx, "command."+req.Command)
+	ctx = contextWithRuntimeProjectionWriterOperation(ctx, "command."+req.Command)
 	ctx, endCommandSpan := latencytrace.StartSpan(ctx, "daemon", "command", "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
 	d.recordWatchClientRequest(projectID, req, startedAt.UTC())
 	defer func() {
@@ -859,6 +953,21 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		default:
 			d.cfg.Logger.Log(ctx, daemonCommandSuccessLogLevel(req.Command), "daemon command completed", attrs...)
 		}
+	}()
+	defer func() {
+		if err == nil && resp.Error == nil {
+			return
+		}
+		issueClient := d.existingIssueClientForProject(projectID)
+		if issueClient == nil || issueClient.CorruptionError() == nil {
+			return
+		}
+		healthErr, unhealthy := d.projectIssueStoreHealthError(projectID)
+		if !unhealthy {
+			healthErr = d.recordProjectIssueStoreFailure(projectID, issueClient.CorruptionError())
+		}
+		resp = d.errorResponse(req, protocol.ErrorCodeUnavailable, healthErr.Error())
+		err = nil
 	}()
 
 	beginStartedAt := time.Now()
@@ -1287,8 +1396,8 @@ func (d *Daemon) applyTypedSessionLifecycleTransition(ctx context.Context, req p
 			session = persisted
 		}
 	}
-	writer.PublishSessionProjectionEvent(ctx, projectID, req.Meta, session)
-	return nil
+	_, err = writer.PublishSessionProjectionEvent(ctx, projectID, req.Meta, session)
+	return err
 }
 
 func (d *Daemon) sessionLifecycleTransitionNeeded(projectID, sessionID, issueID string, state daemonstate.SessionState) bool {
@@ -1418,10 +1527,19 @@ func (d *Daemon) recoverInterruptedOperation(ctx context.Context, record daemono
 		return interruptedOperationRecovery{}, false
 	}
 	canonicalID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), record.IssueID)
-	session, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, record.IssueID, canonicalID)
+	rootedScope, scopeErr := domain.RootedOrchestrationScope(record.IssueID)
+	if scopeErr != nil {
+		return interruptedOperationRecovery{}, false
+	}
+	rootedIdentity, identityErr := domain.NewOrchestratorIdentity(projectID, rootedScope)
+	if identityErr != nil {
+		return interruptedOperationRecovery{}, false
+	}
+	authority := daemonstate.NewOrchestratorLeaseAuthority(store)
+	lease, rootedOwned, err := authority.Get(ctx, rootedIdentity)
 	if err != nil {
 		if d.cfg.Logger != nil {
-			d.cfg.Logger.Warn("failed to inspect interrupted worker session.start projection",
+			d.cfg.Logger.Warn("failed to inspect interrupted session.start rooted ownership",
 				"operation_id", record.ID,
 				"project_id", projectID,
 				"issue_id", record.IssueID,
@@ -1429,6 +1547,72 @@ func (d *Daemon) recoverInterruptedOperation(ctx context.Context, record daemono
 			)
 		}
 		return interruptedOperationRecovery{}, false
+	}
+	var session daemonstate.Session
+	var found bool
+	if rootedOwned {
+		if strings.TrimSpace(lease.SessionID) != canonicalID {
+			return interruptedOperationRecovery{}, false
+		}
+		session, found, err = store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, record.IssueID)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("failed to inspect interrupted rooted orchestrator session.start projection",
+					"operation_id", record.ID,
+					"project_id", projectID,
+					"issue_id", record.IssueID,
+					"error", err,
+				)
+			}
+			return interruptedOperationRecovery{}, false
+		}
+		if !found {
+			session, found, err = store.GetWorkerSessionStateByIssueID(ctx, projectID, record.IssueID, canonicalID)
+			if err != nil || !found {
+				return interruptedOperationRecovery{}, false
+			}
+		}
+		if strings.TrimSpace(session.ID) != canonicalID {
+			return interruptedOperationRecovery{}, false
+		}
+		session.Role = daemonstate.SessionRoleOrchestrator
+		session.ScopeKind = daemonstate.SessionScopeOrchestration
+		session.ScopeID = record.IssueID
+		session.UpdatedAt = time.Now().UTC()
+		if _, err = authority.AcquireRooted(ctx, rootedIdentity, session, func(context.Context, string) (bool, error) { return true, nil }); err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("failed to converge interrupted rooted session.start authority",
+					"operation_id", record.ID,
+					"project_id", projectID,
+					"issue_id", record.IssueID,
+					"error", err,
+				)
+			}
+			return interruptedOperationRecovery{}, false
+		}
+		session, found, err = store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, record.IssueID)
+		if err != nil {
+			return interruptedOperationRecovery{}, false
+		}
+	} else {
+		session, found, err = store.GetWorkerSessionStateByIssueID(ctx, projectID, record.IssueID, canonicalID)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("failed to inspect interrupted worker session.start projection",
+					"operation_id", record.ID,
+					"project_id", projectID,
+					"issue_id", record.IssueID,
+					"error", err,
+				)
+			}
+			return interruptedOperationRecovery{}, false
+		}
+		if !found {
+			session, found, err = store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, record.IssueID)
+			if err != nil {
+				return interruptedOperationRecovery{}, false
+			}
+		}
 	}
 	if !found || strings.TrimSpace(session.IssueID) != strings.TrimSpace(record.IssueID) {
 		return interruptedOperationRecovery{}, false
@@ -1465,9 +1649,13 @@ func (d *Daemon) recoverInterruptedDeferredWorktreeCleanup(ctx context.Context, 
 		task, err := issueClient.GetWithRuntime(ctx, projectID, taskID)
 		if err == nil && !task.IssueClosed() {
 			if fallbackPath != "" {
-				d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, fallbackPath, fallbackBranch)
+				if _, err := d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, fallbackPath, fallbackBranch); err != nil {
+					return interruptedOperationRecovery{}, false
+				}
 			} else {
-				d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, taskID)
+				if err := d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, taskID); err != nil {
+					return interruptedOperationRecovery{}, false
+				}
 			}
 			payload, _ := json.Marshal(deferredTaskWorktreeCleanupResult{
 				ProjectID: projectID,

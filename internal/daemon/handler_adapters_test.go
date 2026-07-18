@@ -1273,6 +1273,14 @@ branch refs/heads/riordan/bvx/worktree-delete
 	}
 }
 
+func TestFinalizeDeletedWorktreePropagatesProjectionPublicationFailure(t *testing.T) {
+	writer := &recordingRuntimeProjectionWriter{publishErr: context.Canceled}
+	err := finalizeDeletedWorktree(context.Background(), "project", "issue", nil, nil, writer)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("finalize deleted worktree error = %v, want context.Canceled", err)
+	}
+}
+
 func TestFinalizeDeletedWorktreeCleanupUsesAuthoritativeRootDespiteOverride(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()

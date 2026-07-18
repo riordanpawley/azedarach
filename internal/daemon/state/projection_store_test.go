@@ -544,12 +544,13 @@ func TestRuntimeStateStoreContentionDiagnosticNamesOperation(t *testing.T) {
 	if _, err := store.dbHandle(); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	err := store.withRetryingWriteLock(ctx, "delete_worktree_state", func(context.Context) error {
+		cancel()
 		return codedSQLiteTestError{code: 517}
 	})
-	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "runtime projection write delete_worktree_state failed on attempt 1") {
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "runtime projection write delete_worktree_state failed on attempt 1") {
 		t.Fatalf("diagnostic error = %v", err)
 	}
 	if got := logs.String(); !strings.Contains(got, `"operation":"delete_worktree_state"`) || !strings.Contains(got, `"attempt":1`) {
@@ -1215,6 +1216,7 @@ func TestRuntimeStateStoreRealProjectDatabaseMigrationClones(t *testing.T) {
 				t.Fatalf("open project database clone read-only: %v", err)
 			}
 			rowCounts := make(map[string]int)
+			retirableWorkers := 0
 			for _, table := range []string{sessionStateTable, sessionObservationTable} {
 				var count int
 				if err := before.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
@@ -1222,6 +1224,18 @@ func TestRuntimeStateStoreRealProjectDatabaseMigrationClones(t *testing.T) {
 					t.Fatalf("count %s before runtime-store open: %v", table, err)
 				}
 				rowCounts[table] = count
+			}
+			if err := before.QueryRow(`SELECT COUNT(*) FROM ` + sessionStateTable + ` AS worker
+				WHERE worker.role='worker' AND worker.scope_kind='issue' AND instr(worker.session_id,'.pane-')=0
+					AND EXISTS (
+						SELECT 1 FROM ` + sessionStateTable + ` AS rooted
+						WHERE rooted.project_id=worker.project_id AND rooted.session_id=worker.session_id
+							AND rooted.role='orchestrator' AND rooted.scope_kind='orchestration'
+							AND rooted.scope_id<>'project' AND rooted.scope_id=worker.issue_id
+							AND worker.scope_id=worker.issue_id
+					)`).Scan(&retirableWorkers); err != nil {
+				_ = before.Close()
+				t.Fatalf("count retirable rooted worker intents: %v", err)
 			}
 			if err := before.Close(); err != nil {
 				t.Fatalf("close project database clone read-only: %v", err)
@@ -1250,9 +1264,13 @@ func TestRuntimeStateStoreRealProjectDatabaseMigrationClones(t *testing.T) {
 						_ = store.Close()
 						t.Fatalf("count %s after runtime-store open: %v", table, err)
 					}
-					if count != rowCounts[table] {
+					want := rowCounts[table]
+					if table == sessionStateTable {
+						want -= retirableWorkers
+					}
+					if count != want {
 						_ = store.Close()
-						t.Fatalf("%s rows = %d after runtime-store open, want %d", table, count, rowCounts[table])
+						t.Fatalf("%s rows = %d after runtime-store open, want %d (retirable workers=%d)", table, count, want, retirableWorkers)
 					}
 				}
 				if err := store.Close(); err != nil {
@@ -2068,6 +2086,80 @@ func TestRuntimeStateStoreWorktreeGitStatusUpdateGuardrail(t *testing.T) {
 	}
 }
 
+func TestRuntimeStateStoreGitHookPublicationBindsGenerationToExactWorktree(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	projectID := "proj-hook-binding"
+	issueID := "az-hook-binding"
+	projectedPath := "/repo/current-worktree"
+	acceptedPath := "/repo/stale-worktree"
+	if err := store.UpsertWorktreeState(ctx, WorktreeState{ProjectID: projectID, IssueID: issueID, Path: projectedPath, Branch: "az/hook-binding", UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	intent, err := store.AcceptGitHookRefresh(ctx, projectID, acceptedPath, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if published, err := store.PersistGitHookRefreshPublication(ctx, projectID, issueID, acceptedPath, intent.RequestedGeneration, json.RawMessage(`{"has_changes":true}`), time.Now().UTC()); err == nil || published {
+		t.Fatalf("stale-path publication published=%t err=%v, want transactional failure", published, err)
+	}
+	if pending, found, err := store.GetPendingGitHookRefresh(ctx, projectID, acceptedPath); err != nil || !found || pending.CompletedGeneration != 0 {
+		t.Fatalf("pending intent after rolled-back stale path = %+v found=%t err=%v", pending, found, err)
+	}
+}
+
+func TestRuntimeStateStoreRetireGitHookRefreshConsumesOnlyAcceptedGenerations(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	projectID := "proj-retire"
+	worktree := "/repo/retired"
+	first, err := store.AcceptGitHookRefresh(ctx, projectID, worktree, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retired, err := store.RetireGitHookRefreshIfIneligible(ctx, projectID, worktree, time.Now().UTC()); err != nil || !retired {
+		t.Fatalf("retired=%t err=%v", retired, err)
+	}
+	if _, found, err := store.GetPendingGitHookRefresh(ctx, projectID, worktree); err != nil || found {
+		t.Fatalf("pending after retirement found=%t err=%v", found, err)
+	}
+	second, err := store.AcceptGitHookRefresh(ctx, projectID, worktree, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.RequestedGeneration != first.RequestedGeneration+1 || second.CompletedGeneration != first.RequestedGeneration {
+		t.Fatalf("post-retirement intent=%+v first=%+v", second, first)
+	}
+	if pending, found, err := store.GetPendingGitHookRefresh(ctx, projectID, worktree); err != nil || !found || pending.RequestedGeneration != second.RequestedGeneration {
+		t.Fatalf("new generation pending=%+v found=%t err=%v", pending, found, err)
+	}
+}
+
+func TestRuntimeStateStoreDoesNotRetireGitHookRefreshForConcurrentRegistration(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	projectID := "proj-register"
+	issueID := "az-register"
+	worktree := "/repo/registered"
+	if _, err := store.AcceptGitHookRefresh(ctx, projectID, worktree, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertWorktreeState(ctx, WorktreeState{
+		ProjectID: projectID, IssueID: issueID, Path: worktree, Branch: "az/register", UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if retired, err := store.RetireGitHookRefreshIfIneligible(ctx, projectID, worktree, time.Now().UTC()); err != nil || retired {
+		t.Fatalf("retired after registration=%t err=%v", retired, err)
+	}
+	if pending, found, err := store.GetPendingGitHookRefresh(ctx, projectID, worktree); err != nil || !found || pending.CompletedGeneration != 0 {
+		t.Fatalf("registered pending intent=%+v found=%t err=%v", pending, found, err)
+	}
+}
+
 func TestRuntimeStateStoreGitStatusRoundTrip(t *testing.T) {
 	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
 	t.Cleanup(func() {
@@ -2205,7 +2297,7 @@ func TestRuntimeStateStoreTmuxAttachmentObservationIsOptionalAndPreservedAcrossH
 	}
 }
 
-func TestRuntimeStateStoreUntypedSharedRuntimeMutationFailsClosed(t *testing.T) {
+func TestRuntimeStateStoreRootedTransitionRetiresWorkerAndUntypedMutationPreservesRole(t *testing.T) {
 	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
 	ctx := context.Background()
@@ -2218,8 +2310,46 @@ func TestRuntimeStateStoreUntypedSharedRuntimeMutationFailsClosed(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	if err := store.UpsertSessionState(ctx, "p", Session{ID: "az-root", IssueID: "root", State: SessionStatePaused, UpdatedAt: now}); err == nil {
-		t.Fatal("untyped mutation of shared physical runtime succeeded")
+	if worker, found, err := store.GetSessionIntent(ctx, "p", SessionRoleWorker, SessionScopeIssue, "root"); err != nil || found {
+		t.Fatalf("worker intent survived rooted transition: %+v found=%v err=%v", worker, found, err)
+	}
+	if err := store.UpsertSessionState(ctx, "p", Session{ID: "az-root", IssueID: "root", State: SessionStatePaused, UpdatedAt: now.Add(time.Second)}); err != nil {
+		t.Fatalf("untyped mutation of single rooted runtime failed: %v", err)
+	}
+	rooted, found, err := store.GetSessionIntent(ctx, "p", SessionRoleOrchestrator, SessionScopeOrchestration, "root")
+	if err != nil || !found || rooted.State != SessionStatePaused {
+		t.Fatalf("rooted intent=%+v found=%v err=%v", rooted, found, err)
+	}
+}
+
+func TestRuntimeStateStoreRootedTransitionRejectsStaleWorkerAcrossStores(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	first := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	second := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = first.Close() })
+	t.Cleanup(func() { _ = second.Close() })
+	ctx := context.Background()
+	now := time.Now().UTC()
+	worker := Session{ID: "az-root", IssueID: "root", Role: SessionRoleWorker, ScopeKind: SessionScopeIssue, ScopeID: "root", State: SessionStateRunning, UpdatedAt: now}
+	if err := first.UpsertSessionState(ctx, "p", worker); err != nil {
+		t.Fatal(err)
+	}
+	staleWorker, found, err := second.GetSessionIntent(ctx, "p", SessionRoleWorker, SessionScopeIssue, "root")
+	if err != nil || !found {
+		t.Fatalf("stale worker snapshot=%+v found=%v err=%v", staleWorker, found, err)
+	}
+	rooted := Session{ID: "az-root", IssueID: "root", Role: SessionRoleOrchestrator, ScopeKind: SessionScopeOrchestration, ScopeID: "root", State: SessionStateRunning, UpdatedAt: now.Add(time.Second)}
+	if err := first.UpsertSessionState(ctx, "p", rooted); err != nil {
+		t.Fatal(err)
+	}
+	staleWorker.State = SessionStatePaused
+	staleWorker.UpdatedAt = now.Add(2 * time.Second)
+	if err := second.UpsertSessionState(ctx, "p", staleWorker); err == nil {
+		t.Fatal("stale worker writer recreated a second role for rooted runtime")
+	}
+	rows, err := second.ListSessionIntentStates(ctx, "p")
+	if err != nil || len(rows) != 1 || !rootedOrchestratorSessionIntent(rows[0]) {
+		t.Fatalf("final intents=%+v err=%v", rows, err)
 	}
 }
 
@@ -2263,18 +2393,12 @@ func TestRuntimeStateStorePhysicalObservationFanoutIsMonotonicAcrossStores(t *te
 	if err != nil || !found || observation.ObservedState != SessionStateRunning || observation.Activity != "busy" {
 		t.Fatalf("physical observation=%+v found=%v err=%v", observation, found, err)
 	}
-	for _, role := range []SessionRole{SessionRoleWorker, SessionRoleOrchestrator} {
-		scope := SessionScopeIssue
-		if role == SessionRoleOrchestrator {
-			scope = SessionScopeOrchestration
-		}
-		intent, found, err := stores[0].GetSessionIntent(ctx, "p", role, scope, "root")
-		if err != nil || !found || intent.ObservedState != SessionStateRunning || intent.Activity != "busy" || !intent.UpdatedAt.Equal(newer.UpdatedAt) {
-			t.Fatalf("%s intent=%+v found=%v err=%v", role, intent, found, err)
-		}
-		if role == SessionRoleWorker && intent.State != SessionStateStopped {
-			t.Fatalf("worker desired state changed: %+v", intent)
-		}
+	if worker, found, err := stores[0].GetSessionIntent(ctx, "p", SessionRoleWorker, SessionScopeIssue, "root"); err != nil || found {
+		t.Fatalf("worker intent survived rooted transition: %+v found=%v err=%v", worker, found, err)
+	}
+	intent, found, err := stores[0].GetSessionIntent(ctx, "p", SessionRoleOrchestrator, SessionScopeOrchestration, "root")
+	if err != nil || !found || intent.ObservedState != SessionStateRunning || intent.Activity != "busy" || !intent.UpdatedAt.Equal(newer.UpdatedAt) {
+		t.Fatalf("rooted intent=%+v found=%v err=%v", intent, found, err)
 	}
 	changed, applied, err := stores[0].ApplyPhysicalSessionObservation(ctx, older)
 	if err != nil || applied || len(changed) != 0 {
@@ -2439,15 +2563,11 @@ func TestRuntimeStateStorePhysicalObservationFanoutRollsBackTogether(t *testing.
 	if observation, found, err := store.GetPhysicalSessionObservation(ctx, "p", "az-root"); err != nil || found {
 		t.Fatalf("physical observation escaped rollback: %+v found=%v err=%v", observation, found, err)
 	}
-	for _, role := range []SessionRole{SessionRoleWorker, SessionRoleOrchestrator} {
-		scope := SessionScopeIssue
-		wantObserved := SessionState("")
-		if role == SessionRoleOrchestrator {
-			scope = SessionScopeOrchestration
-		}
-		intent, found, err := store.GetSessionIntent(ctx, "p", role, scope, "root")
-		if err != nil || !found || intent.ObservedState != wantObserved {
-			t.Fatalf("%s intent escaped rollback: %+v found=%v err=%v", role, intent, found, err)
-		}
+	if worker, found, err := store.GetSessionIntent(ctx, "p", SessionRoleWorker, SessionScopeIssue, "root"); err != nil || found {
+		t.Fatalf("worker intent survived rooted transition: %+v found=%v err=%v", worker, found, err)
+	}
+	intent, found, err := store.GetSessionIntent(ctx, "p", SessionRoleOrchestrator, SessionScopeOrchestration, "root")
+	if err != nil || !found || intent.ObservedState != SessionState("") {
+		t.Fatalf("rooted intent escaped rollback: %+v found=%v err=%v", intent, found, err)
 	}
 }

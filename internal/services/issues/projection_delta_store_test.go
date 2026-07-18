@@ -16,8 +16,110 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 	"github.com/stretchr/testify/require"
 )
+
+type projectionCodedError struct{ code int }
+
+func (e projectionCodedError) Error() string { return "injected sqlite read failure" }
+func (e projectionCodedError) Code() int     { return e.code }
+
+type failingProjectionDeltaRows struct {
+	projectionDeltaRows
+	failAfter int
+	read      int
+	err       error
+}
+
+func (r *failingProjectionDeltaRows) Next() bool {
+	if r.read == r.failAfter {
+		return false
+	}
+	if !r.projectionDeltaRows.Next() {
+		return false
+	}
+	r.read++
+	return true
+}
+
+func (r *failingProjectionDeltaRows) Err() error {
+	if r.read == r.failAfter {
+		return r.err
+	}
+	return r.projectionDeltaRows.Err()
+}
+
+func TestProjectionReadErrorClassifiesOnlyShortReadIOErrorAsRetryable(t *testing.T) {
+	client := NewClientAtPath(filepath.Join(t.TempDir(), "consumer.db"), nil)
+	shortRead := client.projectionReadError("read projection delta head", projectionCodedError{code: sqliteutil.SQLiteIOErrorShortRead})
+	require.ErrorIs(t, shortRead, domain.ErrProjectionRetryable)
+	require.ErrorContains(t, shortRead, "db_path="+sqliteutil.CanonicalPath(client.dbPath))
+	require.ErrorContains(t, shortRead, "sqlite_extended_code=522")
+	require.ErrorContains(t, shortRead, "sqlite_symbol=SQLITE_IOERR_SHORT_READ")
+
+	structural := client.projectionReadError("read projection delta head", projectionCodedError{code: 11})
+	require.NotErrorIs(t, structural, domain.ErrProjectionRetryable)
+	require.ErrorIs(t, structural, ErrSQLiteCorrupt)
+	require.ErrorContains(t, structural, "sqlite_symbol=SQLITE_CORRUPT")
+	require.ErrorIs(t, client.CorruptionError(), ErrSQLiteCorrupt)
+}
+
+func TestProjectionSnapshotSourceIterationErrorCannotCommitIncompleteVector(t *testing.T) {
+	tests := []struct {
+		name      string
+		code      int
+		retryable bool
+	}{
+		{name: "short read", code: sqliteutil.SQLiteIOErrorShortRead, retryable: true},
+		{name: "structural corruption", code: 11, retryable: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			client := NewClientAtPath(filepath.Join(t.TempDir(), "consumer.db"), nil)
+			t.Cleanup(func() { require.NoError(t, client.CloseDB()) })
+			for index, key := range []string{"a", "b"} {
+				_, err := client.CommitProjectionDelta(ctx, ProjectionDeltaParams{
+					ProjectID: "p", Kind: domain.ProjectionKindIssue, Key: key,
+					Operation: domain.ProjectionDeltaUpsert, IdempotencyKey: fmt.Sprintf("source-%d", index),
+					Payload: json.RawMessage(`{"state":"open"}`),
+				}, nil)
+				require.NoError(t, err)
+			}
+			client.projectionSnapshotSourceRowsHook = func(rows projectionDeltaRows) projectionDeltaRows {
+				return &failingProjectionDeltaRows{projectionDeltaRows: rows, failAfter: 1, err: projectionCodedError{code: tt.code}}
+			}
+
+			snapshot, err := client.ProjectionSnapshotAt(ctx, "p", 2)
+			require.Error(t, err)
+			require.Empty(t, snapshot.Sources)
+			require.Equal(t, tt.retryable, errors.Is(err, domain.ErrProjectionRetryable))
+			require.ErrorContains(t, err, "iterate projection snapshot sources")
+			require.ErrorContains(t, err, fmt.Sprintf("sqlite_extended_code=%d", tt.code))
+			if tt.retryable {
+				require.NoError(t, client.CorruptionError())
+				_, mutationErr := client.CommitProjectionDelta(ctx, ProjectionDeltaParams{
+					ProjectID: "p", Kind: domain.ProjectionKindIssue, Key: "c",
+					Operation: domain.ProjectionDeltaUpsert, IdempotencyKey: "source-after-short-read",
+					Payload: json.RawMessage(`{"state":"open"}`),
+				}, nil)
+				require.NoError(t, mutationErr)
+			} else {
+				require.ErrorIs(t, client.CorruptionError(), ErrSQLiteCorrupt)
+				client.projectionSnapshotSourceRowsHook = nil
+				_, subsequentReadErr := client.ProjectionSnapshotAt(ctx, "p", 2)
+				require.ErrorIs(t, subsequentReadErr, ErrSQLiteCorrupt)
+				_, mutationErr := client.CommitProjectionDelta(ctx, ProjectionDeltaParams{
+					ProjectID: "p", Kind: domain.ProjectionKindIssue, Key: "c",
+					Operation: domain.ProjectionDeltaUpsert, IdempotencyKey: "source-after-corruption",
+					Payload: json.RawMessage(`{"state":"open"}`),
+				}, nil)
+				require.ErrorIs(t, mutationErr, ErrSQLiteCorrupt)
+			}
+		})
+	}
+}
 
 func TestProjectionDeltaActiveIssueMutationEmits(t *testing.T) {
 	client := NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), nil)

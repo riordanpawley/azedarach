@@ -63,6 +63,10 @@ type TaskBulkCleanupResult = protocol.TaskBulkCleanupResult
 type TaskCloseResult = protocol.TaskCloseResult
 type TaskClosePhaseTiming = protocol.TaskClosePhaseTiming
 
+type TaskEventsRequest = protocol.TaskEventsRequest
+type TaskEventPayloadFilter = protocol.TaskEventPayloadFilter
+type TaskEventsPage = protocol.TaskEventsPage
+
 // TaskCreateParams contains the payload used to create a task through the shared daemon client.
 type TaskCreateParams struct {
 	Title           string               `json:"title"`
@@ -374,10 +378,6 @@ type TaskIDsRequest struct {
 	DirectDependents  bool             `json:"direct_dependents,omitempty"`
 	MetadataOnly      bool             `json:"metadata_only,omitempty"`
 }
-
-type TaskEventsRequest = protocol.TaskEventsRequest
-type TaskEventPayloadFilter = protocol.TaskEventPayloadFilter
-type TaskEventsPage = protocol.TaskEventsPage
 
 // TaskEventAppendRequest contains the payload used to append one issue observation event.
 type TaskEventAppendRequest struct {
@@ -887,15 +887,26 @@ func (c *Client) BoardSnapshotWithMode(ctx context.Context, mode ReadWaitMode) (
 	return c.BoardSnapshotForViewWithMode(ctx, "", mode)
 }
 
+type BoardSnapshotOptions struct {
+	ViewID       string
+	ShowChildren *bool
+}
+
 // BoardSnapshotForViewWithMode fetches a board snapshot grouped by the requested view.
 func (c *Client) BoardSnapshotForViewWithMode(ctx context.Context, viewID string, mode ReadWaitMode) (TaskSnapshot, error) {
+	return c.BoardSnapshotWithOptions(ctx, BoardSnapshotOptions{ViewID: viewID}, mode)
+}
+
+// BoardSnapshotWithOptions fetches a board snapshot with transient projection overrides.
+// Overrides affect only this read and never mutate the persisted view definition.
+func (c *Client) BoardSnapshotWithOptions(ctx context.Context, opts BoardSnapshotOptions, mode ReadWaitMode) (TaskSnapshot, error) {
 	startedAt := time.Now()
 	waitCtx, cancel, budget := c.readWait.contextWithBudget(ctx, mode)
 	defer cancel()
 
 	var body any
-	if strings.TrimSpace(viewID) != "" {
-		body = protocol.BoardSnapshotRequestBody{ViewID: strings.TrimSpace(viewID)}
+	if strings.TrimSpace(opts.ViewID) != "" || opts.ShowChildren != nil {
+		body = protocol.BoardSnapshotRequestBody{ViewID: strings.TrimSpace(opts.ViewID), ShowChildren: opts.ShowChildren}
 	}
 	resp, err := c.commandJSONResponse(waitCtx, CommandBoardFetch, body)
 	if err != nil {

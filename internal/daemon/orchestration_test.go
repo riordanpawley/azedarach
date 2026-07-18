@@ -1574,56 +1574,6 @@ func TestProjectOrchestrationSnapshotUsesExactSQLiteEpochInsteadOfStaleMateriali
 	}
 }
 
-func TestProjectOrchestrationSnapshotReturnsUnavailableWhenMutationAdmissionIsContended(t *testing.T) {
-	ctx := context.Background()
-	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
-	t.Cleanup(func() { _ = client.CloseDB() })
-	if _, err := client.Create(ctx, issues.CreateTaskParams{Title: "Candidate", Description: "Executable", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen}); err != nil {
-		t.Fatal(err)
-	}
-
-	holderEntered := make(chan struct{})
-	releaseHolder := make(chan struct{})
-	holderDone := make(chan error, 1)
-	go func() {
-		holderCtx := issues.ContextWithMutationOperation(ctx, "background.projection")
-		holderDone <- client.WithMutationLock(holderCtx, func(context.Context) error {
-			close(holderEntered)
-			<-releaseHolder
-			return nil
-		})
-	}()
-	<-holderEntered
-
-	fenceWaiting := make(chan struct{})
-	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
-	d.snapshotAdmissionContext = func(parent context.Context) (context.Context, context.CancelFunc) {
-		admissionCtx, cancel := context.WithCancel(parent)
-		admissionCtx = issues.WithMutationLockWaitHookForTest(admissionCtx, func(_, holderOperation string) {
-			if holderOperation != "background.projection" {
-				t.Errorf("snapshot mutation holder = %q, want background.projection", holderOperation)
-			}
-			close(fenceWaiting)
-			cancel()
-		})
-		return admissionCtx, cancel
-	}
-	body := mustMarshal(t, protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
-	resp, err := d.handleOrchestrationSnapshot(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, Command: protocol.CommandOrchestrationSnapshot, Meta: protocol.Metadata{ProjectID: "proj"}, Body: body})
-	if err != nil {
-		t.Fatal(err)
-	}
-	<-fenceWaiting
-	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeUnavailable || !resp.Error.Retryable {
-		t.Fatalf("contended snapshot error = %+v, want retryable unavailable", resp.Error)
-	}
-
-	close(releaseHolder)
-	if err := <-holderDone; err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestProjectOrchestrationSnapshotDoesNotHoldIssueMutationLockWhileRuntimeWriterIsBlocked(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
@@ -1634,6 +1584,7 @@ func TestProjectOrchestrationSnapshotDoesNotHoldIssueMutationLockWhileRuntimeWri
 		t.Fatal(err)
 	}
 	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	d.snapshotAdmissionContext = context.WithCancel
 	writer := newRuntimeProjectionWriter(d)
 	releaseWriter, err := writer.lockProjectionWriter(ctx, "proj", "background.projection_refresh")
 	if err != nil {
@@ -1642,13 +1593,14 @@ func TestProjectOrchestrationSnapshotDoesNotHoldIssueMutationLockWhileRuntimeWri
 
 	snapshotWaiting := make(chan struct{})
 	var waitOnce sync.Once
-	d.orchestrationSnapshotAuxiliaryRead = func(waitCtx context.Context) {
+	d.orchestrationSnapshotAuxiliaryRead = func(waitCtx context.Context) error {
 		waitOnce.Do(func() { close(snapshotWaiting) })
 		unlock, lockErr := writer.lockProjectionWriter(waitCtx, "proj", "orchestration.snapshot")
 		if lockErr != nil {
-			return
+			return lockErr
 		}
 		unlock()
+		return nil
 	}
 	snapshotDone := make(chan error, 1)
 	go func() {
@@ -1686,6 +1638,8 @@ func TestProjectOrchestrationSnapshotDoesNotHoldIssueMutationLockWhileRuntimeWri
 	}
 
 	blockedBySnapshot := ""
+	mutationFailure := ""
+	var blockedMutationDone <-chan error
 	for _, mutation := range mutations {
 		mutationWaited := make(chan struct{}, 1)
 		mutationCtx := issues.WithMutationLockWaitHookForTest(ctx, func(_, _ string) {
@@ -1696,25 +1650,88 @@ func TestProjectOrchestrationSnapshotDoesNotHoldIssueMutationLockWhileRuntimeWri
 		select {
 		case err := <-mutationDone:
 			if err != nil {
-				t.Fatalf("concurrent %s: %v", mutation.name, err)
+				mutationFailure = fmt.Sprintf("concurrent %s: %v", mutation.name, err)
 			}
 		case <-mutationWaited:
 			blockedBySnapshot = mutation.name
+			blockedMutationDone = mutationDone
 		}
 		if blockedBySnapshot != "" {
-			releaseWriter()
-			if err := <-mutationDone; err != nil {
-				t.Fatalf("blocked %s: %v", mutation.name, err)
-			}
-			if err := <-snapshotDone; err != nil {
-				t.Fatalf("project snapshot: %v", err)
-			}
-			t.Fatalf("project snapshot held the issue mutation lock while waiting for the runtime projection writer; blocked %s", blockedBySnapshot)
+			break
+		}
+		if mutationFailure != "" {
+			break
 		}
 	}
 	releaseWriter()
-	if err := <-snapshotDone; err != nil {
-		t.Fatalf("project snapshot: %v", err)
+	snapshotErr := <-snapshotDone
+	if blockedMutationDone != nil {
+		if err := <-blockedMutationDone; err != nil {
+			mutationFailure = fmt.Sprintf("blocked %s: %v", blockedBySnapshot, err)
+		}
+	}
+	if blockedBySnapshot != "" {
+		t.Fatalf("project snapshot held the issue mutation lock while waiting for the runtime projection writer; blocked %s", blockedBySnapshot)
+	}
+	if mutationFailure != "" {
+		t.Fatal(mutationFailure)
+	}
+	if snapshotErr != nil {
+		t.Fatalf("project snapshot: %v", snapshotErr)
+	}
+}
+
+func TestProjectOrchestrationSnapshotMapsCanceledRuntimeWriterAdmissionToUnavailable(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	if _, err := client.Create(ctx, issues.CreateTaskParams{Title: "Candidate", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen}); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	writer := newRuntimeProjectionWriter(d)
+	releaseWriter, err := writer.lockProjectionWriter(ctx, "proj", "background.projection_refresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	writerWaited := make(chan struct{})
+	d.snapshotAdmissionContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+		admissionCtx, cancel := context.WithCancel(parent)
+		admissionCtx = withRuntimeProjectionWriterQueuedHookForTest(admissionCtx, func(waiterOperation string) {
+			if waiterOperation != "orchestration.snapshot" {
+				t.Errorf("runtime writer queued waiter=%q", waiterOperation)
+			}
+			close(writerWaited)
+			cancel()
+		})
+		return admissionCtx, cancel
+	}
+	d.orchestrationSnapshotAuxiliaryRead = func(waitCtx context.Context) error {
+		unlock, lockErr := writer.lockProjectionWriter(waitCtx, "proj", "orchestration.snapshot")
+		if lockErr != nil {
+			return lockErr
+		}
+		unlock()
+		return nil
+	}
+
+	body := mustMarshal(t, protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
+	resp, handleErr := d.handleOrchestrationSnapshot(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, Command: protocol.CommandOrchestrationSnapshot, Meta: protocol.Metadata{ProjectID: "proj"}, Body: body})
+	select {
+	case <-writerWaited:
+	default:
+		releaseWriter()
+		t.Fatalf("runtime writer wait hook was not observed; response error = %+v, handler error = %v", resp.Error, handleErr)
+	}
+	releaseWriter()
+	if handleErr != nil {
+		t.Fatal(handleErr)
+	}
+	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeUnavailable || !resp.Error.Retryable {
+		t.Fatalf("canceled runtime-writer admission response = %+v, want retryable unavailable", resp.Error)
 	}
 }
 
@@ -1943,6 +1960,7 @@ func TestProjectOrchestrationSnapshotRetriesAcrossPostExportInteractionResolutio
 		t.Fatal(err)
 	}
 	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}}
+	d.snapshotAdmissionContext = context.WithCancel
 	d.orchestrationProjectionExported = func() {
 		resolvedAt := now.Add(time.Second)
 		request.FinalAnswer = &domain.InteractionAnswerAudit{Answer: domain.InteractionAnswerPayload{SelectedOption: "safe", Rationale: "preserve constraints", SignificanceRecommendation: domain.InteractionSignificanceMaterial, Revision: request.Revision}, Actor: "human", CreatedAt: resolvedAt}
@@ -1980,6 +1998,55 @@ func TestProjectOrchestrationSnapshotRetriesAcrossPostExportInteractionResolutio
 	}
 }
 
+func TestProjectOrchestrationSnapshotRepreparesCandidateInsertedAfterPreparation(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	initialID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Initial", Description: "Executable", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	d.snapshotAdmissionContext = context.WithCancel
+	preparedIDs := make([][]string, 0, 2)
+	insertedID := ""
+	d.orchestrationSnapshotPrepared = func(_ uint64, issueIDs []string) {
+		preparedIDs = append(preparedIDs, append([]string(nil), issueIDs...))
+		if insertedID != "" {
+			return
+		}
+		insertedID, err = client.Create(ctx, issues.CreateTaskParams{Title: "Inserted", Description: "Added after preparation", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	snapshot, err := (daemonOrchestrationAuthority{daemon: d}).Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "self", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preparedIDs) != 2 {
+		t.Fatalf("preparation attempts = %d, want initial and post-insertion attempts", len(preparedIDs))
+	}
+	if !slices.Contains(preparedIDs[0], initialID) || slices.Contains(preparedIDs[0], insertedID) {
+		t.Fatalf("initial prepared candidates = %v, want only initial %s before insertion %s", preparedIDs[0], initialID, insertedID)
+	}
+	if !slices.Contains(preparedIDs[1], initialID) || !slices.Contains(preparedIDs[1], insertedID) {
+		t.Fatalf("retried prepared candidates = %v, want %s and inserted %s", preparedIDs[1], initialID, insertedID)
+	}
+	if got := candidateClass(snapshot.Candidates, insertedID); got != "runnable" {
+		t.Fatalf("inserted candidate class = %q, want runnable after re-preparation", got)
+	}
+	checkpoint, err := client.ProjectionSourceCheckpoint(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.ProjectionRevision != checkpoint {
+		t.Fatalf("accepted projection revision = %d, want final prepared checkpoint %d", snapshot.ProjectionRevision, checkpoint)
+	}
+}
+
 func TestProjectOrchestrationSnapshotRetriesPostExportReviewEvidenceMutation(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
@@ -1991,6 +2058,7 @@ func TestProjectOrchestrationSnapshotRetriesPostExportReviewEvidenceMutation(t *
 		t.Fatal(err)
 	}
 	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}}
+	d.snapshotAdmissionContext = context.WithCancel
 	var appended domain.IssueObservationEvent
 	d.orchestrationProjectionExported = func() {
 		d.orchestrationProjectionExported = nil
@@ -2035,6 +2103,7 @@ func TestProjectOrchestrationSnapshotReturnsUnavailableAfterBoundedRevisionChurn
 		t.Fatal(err)
 	}
 	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}}
+	d.snapshotAdmissionContext = context.WithCancel
 	exports := 0
 	d.orchestrationProjectionExported = func() {
 		exports++
@@ -2270,17 +2339,19 @@ func TestProjectOrchestrationRealBuilderRemainsCoherentDuringProjectionChurn(t *
 		t.Fatal(err)
 	}
 	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}}
+	d.snapshotAdmissionContext = context.WithCancel
 	mutateAfterExport := false
 	mutation := 0
-	d.orchestrationSnapshotAuxiliaryRead = func(context.Context) {
+	d.orchestrationSnapshotAuxiliaryRead = func(context.Context) error {
 		if !mutateAfterExport {
-			return
+			return nil
 		}
 		mutateAfterExport = false
 		mutation++
 		if _, createErr := writer.Create(ctx, issues.CreateTaskParams{Title: fmt.Sprintf("Churn %d", mutation), Description: "Revision churn", Acceptance: "Recorded", Type: domain.TypeTask, Priority: domain.P4, Status: domain.StatusOpen}); createErr != nil {
-			t.Fatal(createErr)
+			return createErr
 		}
+		return nil
 	}
 	for i := range 25 {
 		mutateAfterExport = true
@@ -2422,6 +2493,29 @@ func TestOrchestrationSnapshotSingleflightCoalescesWatchAndFiniteReads(t *testin
 	defer buildsMu.Unlock()
 	if builds != 1 {
 		t.Fatalf("snapshot builds = %d, want one shared build", builds)
+	}
+}
+
+func TestOrchestrationSnapshotKeysSeparateAndCanonicalizeReviewIssueScope(t *testing.T) {
+	base := protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", Limit: 50}
+	left := base
+	left.ReviewIssueIDs = normalizedReviewSnapshotIssueIDs([]string{"TICKET-B", "ticket-a", "Ticket-B"})
+	right := base
+	right.ReviewIssueIDs = normalizedReviewSnapshotIssueIDs([]string{"ticket-a", "ticket-b"})
+	other := base
+	other.ReviewIssueIDs = normalizedReviewSnapshotIssueIDs([]string{"ticket-c"})
+
+	if orchestrationSnapshotLoadKey("project", left) != orchestrationSnapshotLoadKey("project", right) {
+		t.Fatal("equivalent requested-ticket review scopes produced different singleflight keys")
+	}
+	if orchestrationSnapshotCacheKey("project", left) != orchestrationSnapshotCacheKey("project", right) {
+		t.Fatal("equivalent requested-ticket review scopes produced different cache keys")
+	}
+	if orchestrationSnapshotLoadKey("project", left) == orchestrationSnapshotLoadKey("project", other) {
+		t.Fatal("different requested-ticket review scopes shared a singleflight key")
+	}
+	if orchestrationSnapshotCacheKey("project", left) == orchestrationSnapshotCacheKey("project", other) {
+		t.Fatal("different requested-ticket review scopes shared a cache key")
 	}
 }
 
