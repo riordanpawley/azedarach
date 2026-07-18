@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -4448,7 +4449,7 @@ func TestCommittedCreateSurvivesConcurrentWorktreeRefreshAndAdvancesMaterialized
 	}
 }
 
-func TestCommittedSessionStopAndParentRemovalRefreshCrossDaemonReadsAndClosePreflight(t *testing.T) {
+func TestCrossDaemonReadsConvergeCommittedLifecycleWithoutRuntimeRefresh(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	const projectID = "proj-cross-daemon-close-preflight"
@@ -4487,7 +4488,9 @@ func TestCommittedSessionStopAndParentRemovalRefreshCrossDaemonReadsAndClosePref
 		revision:               map[string]uint64{projectID: 1},
 		hub:                    publish.NewHub(16, 8, logger),
 	}
+	var readerHydrateCalls atomic.Int32
 	readerMaterializer := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(issuesClient), func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		readerHydrateCalls.Add(1)
 		return reader.hydrateProjectReadTasks(hydrateCtx, projectID, issuesClient, tasks)
 	})
 	reader.configureProjectReadMaterializer(readerMaterializer, projectID, issuesClient)
@@ -4495,6 +4498,12 @@ func TestCommittedSessionStopAndParentRemovalRefreshCrossDaemonReadsAndClosePref
 		t.Fatal(err)
 	}
 	reader.materializers[projectID] = readerMaterializer
+	readerHydrateCalls.Store(0)
+	var readerUserSyncCalls atomic.Int32
+	reader.projectReadUserProjectionSync = func(context.Context, string, []string) error {
+		readerUserSyncCalls.Add(1)
+		return nil
+	}
 
 	tmuxRunner := newTestTmuxRunner(sessionID)
 	close(tmuxRunner.killRelease)
@@ -4561,8 +4570,8 @@ func TestCommittedSessionStopAndParentRemovalRefreshCrossDaemonReadsAndClosePref
 		if !found {
 			t.Fatalf("cross-daemon %s omitted %s", name, childID)
 		}
-		if child.ParentID != nil || daemonCloseGuardTaskHasSession(child) {
-			t.Fatalf("cross-daemon %s child = parent:%v session:%+v has_tmux:%t, want detached terminal child", name, child.ParentID, child.Session, child.HasTmuxSession)
+		if child.ParentID != nil {
+			t.Fatalf("cross-daemon %s child parent = %v, want committed parent removal from canonical delta", name, child.ParentID)
 		}
 	}
 	getResp, getErr := reader.handleTaskGet(ctx, request("task.get", map[string]any{"task_id": childID}))
@@ -4573,6 +4582,12 @@ func TestCommittedSessionStopAndParentRemovalRefreshCrossDaemonReadsAndClosePref
 	assertDetachedTerminalChild("task.list", listResp, listErr)
 	searchResp, searchErr := reader.handleTaskList(ctx, request("task.search", map[string]any{"query": "terminal child"}))
 	assertDetachedTerminalChild("task.search", searchResp, searchErr)
+	if got := readerHydrateCalls.Load(); got != 0 {
+		t.Fatalf("ordinary cross-daemon reads invoked runtime hydration %d times", got)
+	}
+	if got := readerUserSyncCalls.Load(); got != 0 {
+		t.Fatalf("ordinary cross-daemon reads invoked user projection sync %d times", got)
+	}
 
 	preflightResp, err := reader.handleTaskClosePreflight(ctx, request("task.close_preflight", map[string]any{"task_id": parentID}))
 	if err != nil {
@@ -4580,6 +4595,9 @@ func TestCommittedSessionStopAndParentRemovalRefreshCrossDaemonReadsAndClosePref
 	}
 	if !preflightResp.OK {
 		t.Fatalf("cross-daemon close preflight response = %+v, want removed child/session facts refreshed", preflightResp.Error)
+	}
+	if readerHydrateCalls.Load() == 0 || readerUserSyncCalls.Load() == 0 {
+		t.Fatalf("strict close preflight did not refresh runtime/user projections: hydration=%d user_sync=%d", readerHydrateCalls.Load(), readerUserSyncCalls.Load())
 	}
 }
 
@@ -4651,7 +4669,9 @@ func TestCommittedSessionStopFailsUnavailableWhenTaskRuntimeRefreshFails(t *test
 
 func TestMaterializedTaskReadsFailUnavailableWithoutStalePayload(t *testing.T) {
 	ctx := context.Background()
-	const projectID = "proj-materializer-unavailable"
+	const (
+		projectID = "proj-materializer-unavailable"
+	)
 	issuesClient, _ := newTestIssueClient(t)
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "stale payload must not escape", Status: domain.StatusInProgress, Type: domain.TypeTask,
@@ -4659,18 +4679,11 @@ func TestMaterializedTaskReadsFailUnavailableWithoutStalePayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var failConvergence atomic.Bool
-	store := listErrorProjectionStore{projectionDeltaStore: issuesClient, list: func(ctx context.Context, projectID string, after uint64, limit int) ([]domain.ProjectionDelta, uint64, error) {
-		if failConvergence.Load() {
-			return nil, 0, fmt.Errorf("%w: injected convergence failure", domain.ErrProjectionRetryable)
-		}
-		return issuesClient.ListProjectionDeltas(ctx, projectID, after, limit)
-	}}
-	materializer := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(store), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) { return tasks, nil })
+	materializer := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(issuesClient), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) { return tasks, nil })
 	if err := materializer.bootstrap(ctx); err != nil {
 		t.Fatal(err)
 	}
-	failConvergence.Store(true)
+	materializer.metadata.Health = "stale: injected structural failure"
 	d := &Daemon{
 		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
 		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
@@ -4724,8 +4737,8 @@ func TestMaterializedTaskReadsFailUnavailableWithoutStalePayload(t *testing.T) {
 			if resp.Error.Code != protocol.ErrorCodeUnavailable || !resp.Error.Retryable {
 				t.Fatalf("error = %+v, want retryable unavailable", resp.Error)
 			}
-			if !strings.Contains(resp.Error.Message, "injected convergence failure") {
-				t.Fatalf("error message = %q, want injected convergence failure", resp.Error.Message)
+			if !strings.Contains(resp.Error.Message, "injected structural failure") {
+				t.Fatalf("error message = %q, want injected structural failure", resp.Error.Message)
 			}
 			if len(resp.Body) != 0 {
 				t.Fatalf("body = %q, want no stale payload", resp.Body)
@@ -4734,7 +4747,7 @@ func TestMaterializedTaskReadsFailUnavailableWithoutStalePayload(t *testing.T) {
 	}
 }
 
-func TestProductionWiredRuntimeHydrationFailureFailsAuthoritativeReadsUnavailable(t *testing.T) {
+func TestProductionRuntimeHydrationFailureDoesNotBlockOrdinaryReads(t *testing.T) {
 	ctx := context.Background()
 	const projectID = "proj-production-runtime-unavailable"
 	issuesClient, _ := newTestIssueClient(t)
@@ -4774,7 +4787,7 @@ func TestProductionWiredRuntimeHydrationFailureFailsAuthoritativeReadsUnavailabl
 			Meta: protocol.Metadata{ProjectID: projectID}, Body: encoded,
 		}
 	}
-	tests := []struct {
+	ordinaryReads := []struct {
 		name   string
 		invoke func() (protocol.ResponseEnvelope, error)
 	}{
@@ -4790,27 +4803,147 @@ func TestProductionWiredRuntimeHydrationFailureFailsAuthoritativeReadsUnavailabl
 		{name: "get-many", invoke: func() (protocol.ResponseEnvelope, error) {
 			return d.handleTaskGetMany(ctx, request("task.get-many", map[string]any{"task_ids": []string{taskID}, "metadata_only": true}))
 		}},
-		{name: "close-preflight", invoke: func() (protocol.ResponseEnvelope, error) {
-			return d.handleTaskClosePreflight(ctx, request("task.close_preflight", map[string]any{"task_id": taskID}))
-		}},
 	}
-	for _, test := range tests {
+	for _, test := range ordinaryReads {
 		t.Run(test.name, func(t *testing.T) {
 			resp, err := test.invoke()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeUnavailable || !resp.Error.Retryable {
-				t.Fatalf("response = %+v, want retryable unavailable", resp)
-			}
-			if !strings.Contains(resp.Error.Message, "injected production runtime hydration failure") || len(resp.Body) != 0 {
-				t.Fatalf("error/body = %+v/%q, want production hydration failure and no stale payload", resp.Error, resp.Body)
+			if !resp.OK || resp.Error != nil || len(resp.Body) == 0 {
+				t.Fatalf("response = %+v, want last verified projected payload without synchronous hydration", resp)
 			}
 		})
 	}
+	preflight, err := d.handleTaskClosePreflight(ctx, request("task.close_preflight", map[string]any{"task_id": taskID}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preflight.OK || preflight.Error == nil || preflight.Error.Code != protocol.ErrorCodeUnavailable || !preflight.Error.Retryable {
+		t.Fatalf("close preflight response = %+v, want strict invariant refresh failure", preflight)
+	}
+	if !strings.Contains(preflight.Error.Message, "injected production runtime hydration failure") || len(preflight.Body) != 0 {
+		t.Fatalf("close preflight error/body = %+v/%q, want strict hydration failure", preflight.Error, preflight.Body)
+	}
+	deletePreflight, err := d.handleTaskDeletePreflight(ctx, request("task.delete_preflight", map[string]any{"task_id": taskID}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deletePreflight.OK || deletePreflight.Error == nil || deletePreflight.Error.Code != protocol.ErrorCodeUnavailable || !deletePreflight.Error.Retryable || len(deletePreflight.Body) != 0 {
+		t.Fatalf("delete preflight response = %+v, want retryable unavailable without payload", deletePreflight)
+	}
+	deleteResp, err := d.handleTaskDelete(ctx, request("task.delete", taskDeleteRequest{TaskID: taskID}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleteResp.OK || deleteResp.Error == nil || deleteResp.Error.Code != protocol.ErrorCodeUnavailable || !deleteResp.Error.Retryable || len(deleteResp.Body) != 0 {
+		t.Fatalf("task.delete response = %+v, want retryable unavailable without payload", deleteResp)
+	}
+	if _, err := issuesClient.GetWithRuntime(ctx, projectID, taskID); err != nil {
+		t.Fatalf("task mutated after unavailable delete preflight: %v", err)
+	}
 }
 
-func TestEmbeddedAuthoritativeReadUsesStrictHydrationAfterBootstrap(t *testing.T) {
+func TestEmbeddedOrdinaryReadUsesCanonicalBootstrapOnly(t *testing.T) {
+	ctx := context.Background()
+	const projectID = "proj-embedded-canonical-only"
+	issuesClient, repoDir := newTestIssueClient(t)
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "embedded canonical row", Status: domain.StatusInProgress, Type: domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "archived canonical child", Status: domain.StatusOpen, Type: domain.TypeTask, ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := issuesClient.Archive(ctx, childID); err != nil {
+		t.Fatal(err)
+	}
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
+		ID: naming.CanonicalSessionID(projectID, parentID), IssueID: parentID,
+		State: daemonstate.SessionStateAttached, ObservedState: daemonstate.SessionStateAttached, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var hydrateCalls atomic.Int32
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issues:                issuesClient,
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		materializers:         map[string]*projectReadMaterializer{},
+		projectReadRuntimeHydrate: func(_ context.Context, _ string, tasks []domain.Task) ([]domain.Task, error) {
+			hydrateCalls.Add(1)
+			return nil, errors.New("ordinary embedded read invoked runtime hydration")
+		},
+		revision: map[string]uint64{projectID: 1},
+	}
+	tasks, _, err := d.convergedProjectReadSnapshot(ctx, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hydrateCalls.Load(); got != 0 {
+		t.Fatalf("embedded ordinary read hydration calls = %d, want 0", got)
+	}
+	byID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID.String()] = task
+	}
+	parent, parentFound := byID[parentID]
+	child, childFound := byID[childID]
+	if !parentFound || !childFound || !child.State.IsArchived() || child.ParentID == nil || child.ParentID.String() != parentID {
+		t.Fatalf("canonical bootstrap tasks = %+v, want active parent plus archived dependent child", tasks)
+	}
+	if parent.Session != nil || parent.HasTmuxSession || parent.HasWorktree {
+		t.Fatalf("canonical bootstrap leaked runtime projection: %+v", parent)
+	}
+}
+
+func TestOrdinaryReadDoesNotInitializeMissingProductionMaterializer(t *testing.T) {
+	ctx := context.Background()
+	const projectID = "proj-missing-production-materializer"
+	issuesClient, _ := newTestIssueClient(t)
+	if _, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "durable but not initialized", Status: domain.StatusInProgress, Type: domain.TypeTask,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var hydrateCalls atomic.Int32
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		materializersStarted:  true,
+		materializers:         map[string]*projectReadMaterializer{},
+		projectReadRuntimeHydrate: func(_ context.Context, _ string, tasks []domain.Task) ([]domain.Task, error) {
+			hydrateCalls.Add(1)
+			return tasks, nil
+		},
+		revision: map[string]uint64{projectID: 1},
+	}
+	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-missing-production-materializer",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.list",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeUnavailable {
+		t.Fatalf("task.list response = %+v, want unavailable materializer", resp)
+	}
+	if got := hydrateCalls.Load(); got != 0 {
+		t.Fatalf("ordinary read initialized runtime projection %d times, want 0", got)
+	}
+}
+
+func TestEmbeddedInvariantReadUsesStrictHydrationAfterBootstrap(t *testing.T) {
 	ctx := context.Background()
 	const projectID = "proj-embedded-runtime-unavailable"
 	issuesClient, _ := newTestIssueClient(t)
@@ -4834,7 +4967,7 @@ func TestEmbeddedAuthoritativeReadUsesStrictHydrationAfterBootstrap(t *testing.T
 		},
 		revision: map[string]uint64{projectID: 1},
 	}
-	tasks, _, err := d.convergedProjectReadSnapshot(ctx, projectID)
+	tasks, _, err := d.convergedProjectReadSnapshotForInvariant(ctx, projectID)
 	if err == nil || !isProjectReadUnavailableError(err) {
 		t.Fatalf("tasks/error = %+v/%v, want project-read unavailable", tasks, err)
 	}
@@ -10974,39 +11107,47 @@ func TestTaskGraphReadinessReportsStaleChildBranchContainmentRisk(t *testing.T) 
 	activeBranch := "riordan/" + activeID.String() + "/reconcile"
 
 	repoDir := t.TempDir()
-	runDaemonTestGit(t, repoDir, "init", "-q", "-b", "main")
-	runDaemonTestGit(t, repoDir, "config", "user.email", "test@example.com")
-	runDaemonTestGit(t, repoDir, "config", "user.name", "Test User")
-	if err := os.WriteFile(filepath.Join(repoDir, "rpc.go"), []byte("package rpc\n\nfunc materialize() string { return \"base\" }\n"), 0o644); err != nil {
-		t.Fatalf("write base file: %v", err)
+	tasks, err := issuesClient.GetManyWithRuntime(ctx, projectID, []string{rootID.String(), closedID.String(), activeID.String()})
+	if err != nil {
+		t.Fatalf("load projected tasks: %v", err)
 	}
-	runDaemonTestGit(t, repoDir, "add", "rpc.go")
-	runDaemonTestGit(t, repoDir, "commit", "-q", "-m", "base")
-	runDaemonTestGit(t, repoDir, "checkout", "-q", "-b", activeBranch)
-	if err := os.WriteFile(filepath.Join(repoDir, "rpc.go"), []byte("package rpc\n\nfunc materialize() string { return \"generic\" }\n"), 0o644); err != nil {
-		t.Fatalf("write active file: %v", err)
+	materializer := newProjectReadMaterializer(projectID, nil, nil)
+	materializer.authority = NewProjectionDeltaAuthority(listErrorProjectionStore{list: func(context.Context, string, uint64, int) ([]domain.ProjectionDelta, uint64, error) {
+		return nil, 0, nil
+	}})
+	for i := range tasks {
+		task := tasks[i]
+		switch task.ID {
+		case rootID:
+			task.HasWorktree = true
+		case activeID:
+			task.HasWorktree = true
+			task.GitBehindCount = 1
+		}
+		materializer.canonical[task.ID.String()] = task
+		materializer.tasks[task.ID.String()] = task
 	}
-	runDaemonTestGit(t, repoDir, "commit", "-am", activeID.String()+": keep generic materializer")
-	runDaemonTestGit(t, repoDir, "checkout", "-q", "main")
-	runDaemonTestGit(t, repoDir, "checkout", "-q", "-b", rootBranch)
-	if err := os.WriteFile(filepath.Join(repoDir, "rpc.go"), []byte("package rpc\n\nfunc materializeTyped() string { return \"typed\" }\n"), 0o644); err != nil {
-		t.Fatalf("write evidence file: %v", err)
-	}
-	runDaemonTestGit(t, repoDir, "commit", "-am", closedID.String()+": generate typed materializer rpc")
-	evidenceCommit := runDaemonTestGitOutput(t, repoDir, "rev-parse", "HEAD")
-
+	materializer.metadata.Health = "healthy"
+	materializer.replaceWorktrees(map[string]git.Worktree{
+		rootID.String():   {IssueID: rootID.String(), Path: repoDir, Branch: rootBranch},
+		activeID.String(): {IssueID: activeID.String(), Path: repoDir, Branch: activeBranch},
+	})
+	gitCalls := 0
 	d := &Daemon{
 		cfg: Config{RepoDir: repoDir, Logger: logger},
-		git: git.NewClient(git.NewExecRunner(repoDir), logger),
+		git: git.NewClient(&recordingGitRunner{runFn: func(args ...string) (string, error) {
+			gitCalls++
+			return "", errors.New("Git must not run from graph readiness")
+		}}, logger),
 		issueClientsByProject: map[string]*issues.Client{
 			projectID: issuesClient,
 		},
+		materializersStarted: true,
+		materializers:        map[string]*projectReadMaterializer{projectID: materializer},
 	}
 	d.taskGraphWorktrees = func(context.Context, string) ([]git.Worktree, error) {
-		return []git.Worktree{
-			{IssueID: rootID.String(), Path: repoDir, Branch: rootBranch},
-			{IssueID: activeID.String(), Path: repoDir, Branch: activeBranch},
-		}, nil
+		t.Fatal("graph readiness must consume projected worktrees")
+		return nil, nil
 	}
 
 	ready, err := d.taskGraphReadiness(ctx, projectID, rootID.String())
@@ -11017,20 +11158,17 @@ func TestTaskGraphReadinessReportsStaleChildBranchContainmentRisk(t *testing.T) 
 		t.Fatalf("containment risks = %+v, want one stale child risk", ready.ContainmentRisks)
 	}
 	risk := ready.ContainmentRisks[0]
-	if risk.Classification != "stale_child_branch" || risk.IssueID != activeID.String() || risk.ClosedChildIssueID != closedID.String() {
-		t.Fatalf("risk identity = %+v, want stale child risk for active %s closed %s", risk, activeID, closedID)
+	if risk.Classification != "stale_child_branch" || risk.IssueID != activeID.String() || risk.RootBranch != rootBranch {
+		t.Fatalf("risk identity = %+v, want projected stale child risk for active %s", risk, activeID)
 	}
-	if !risk.RootContainsEvidence || risk.ActiveContainsEvidence {
-		t.Fatalf("risk containment = root:%t active:%t, want root true active false", risk.RootContainsEvidence, risk.ActiveContainsEvidence)
+	if risk.ClosedChildIssueID != "" || risk.EvidenceCommit != "" || risk.RootContainsEvidence || risk.ActiveContainsEvidence {
+		t.Fatalf("risk = %+v, must not fabricate exact Git containment evidence", risk)
 	}
-	if risk.EvidenceCommit != evidenceCommit {
-		t.Fatalf("evidence commit = %s, want %s", risk.EvidenceCommit, evidenceCommit)
+	if !strings.Contains(risk.Message, "behind ancestor branch") || !strings.Contains(risk.Message, "mutation preflight") {
+		t.Fatalf("risk message = %q, want projected authority wording", risk.Message)
 	}
-	if !slices.Contains(risk.OverlapFiles, "rpc.go") {
-		t.Fatalf("overlap files = %+v, want rpc.go", risk.OverlapFiles)
-	}
-	if !strings.Contains(risk.Message, "stale child branch") || !strings.Contains(risk.Message, "parent branch") {
-		t.Fatalf("risk message = %q, want stale child branch parent wording", risk.Message)
+	if gitCalls != 0 {
+		t.Fatalf("Git calls = %d, want zero from graph readiness", gitCalls)
 	}
 }
 
@@ -14994,7 +15132,7 @@ func TestRefreshWorktreeRuntimeStateForIssuesDoesNotPublishUnchangedGitStatus(t 
 	}
 }
 
-func TestRefreshFiniteWorktreeGitFactsConvergesStaleDirtyAndStaleCleanBoundedly(t *testing.T) {
+func TestRefreshExactReviewWorktreeGitFactsConvergesStaleDirtyAndStaleCleanBoundedly(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	const projectID = "proj-finite-refresh"
@@ -15069,7 +15207,7 @@ func TestRefreshFiniteWorktreeGitFactsConvergesStaleDirtyAndStaleCleanBoundedly(
 	}
 
 	initialRevision := d.currentRevision(projectID)
-	if err := d.refreshFiniteWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
+	if err := d.refreshExactReviewWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
 		t.Fatal(err)
 	}
 	assertConverged(cleanID, false)
@@ -15079,7 +15217,7 @@ func TestRefreshFiniteWorktreeGitFactsConvergesStaleDirtyAndStaleCleanBoundedly(
 		t.Fatalf("first refresh revision delta = %d, want one changed status update per worktree", got)
 	}
 
-	if err := d.refreshFiniteWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
+	if err := d.refreshExactReviewWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
 		t.Fatal(err)
 	}
 	if got := d.currentRevision(projectID) - firstRevision; got != 0 {
@@ -15095,7 +15233,7 @@ func TestRefreshFiniteWorktreeGitFactsConvergesStaleDirtyAndStaleCleanBoundedly(
 		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: git.NewWorktreeManager(runner, ".", logger)},
 		git:                       git.NewClient(runner, logger),
 	}
-	if err := restarted.refreshFiniteWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
+	if err := restarted.refreshExactReviewWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
 		t.Fatal(err)
 	}
 	assertConverged(cleanID, false)
@@ -15645,7 +15783,7 @@ func TestHandleTaskSnapshotExportUsesProjectionSessions(t *testing.T) {
 	}
 }
 
-func TestHandleTaskGetDoesNotEnqueueWorktreeRefresh(t *testing.T) {
+func TestHandleTaskReadsDoNotEnqueueWorktreeRefresh(t *testing.T) {
 	ctx := context.Background()
 	projectID := protocol.DefaultProjectID
 	repoDir := t.TempDir()
@@ -15718,41 +15856,50 @@ func TestHandleTaskGetDoesNotEnqueueWorktreeRefresh(t *testing.T) {
 			projectID: store,
 		},
 	}
-	reqBody, err := json.Marshal(map[string]string{"task_id": targetID})
-	if err != nil {
-		t.Fatalf("marshal task get request: %v", err)
+	reads := []struct {
+		name    string
+		command string
+		body    any
+		handle  func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	}{
+		{name: "get", command: "task.get", body: map[string]string{"task_id": targetID}, handle: d.handleTaskGet},
+		{name: "get many", command: "task.get_many", body: map[string]any{"task_ids": []string{targetID}}, handle: d.handleTaskGetMany},
 	}
-	resp, err := d.handleTaskGet(ctx, protocol.RequestEnvelope{
-		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       "req-task-get-projection-only",
-		Kind:            protocol.EnvelopeKindCommand,
-		Command:         "task.get",
-		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-		Body:            reqBody,
-	})
-	if err != nil {
-		t.Fatalf("handleTaskGet returned error: %v", err)
-	}
-	if !resp.OK {
-		t.Fatalf("task.get response not OK: %+v", resp.Error)
-	}
-
-	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
-	if err != nil {
-		t.Fatalf("decode task.get body: %v", err)
-	}
-	if len(payload.Tasks) != 1 {
-		t.Fatalf("response task count = %d, want 1", len(payload.Tasks))
+	for _, read := range reads {
+		t.Run(read.name, func(t *testing.T) {
+			reqBody, err := json.Marshal(read.body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := read.handle(ctx, protocol.RequestEnvelope{
+				ProtocolVersion: protocol.CurrentVersion,
+				RequestID:       "req-task-read-projection-only",
+				Kind:            protocol.EnvelopeKindCommand,
+				Command:         read.command,
+				Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+				Body:            reqBody,
+			})
+			if err != nil || !resp.OK {
+				t.Fatalf("%s response = %+v, err = %v", read.command, resp.Error, err)
+			}
+			payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(payload.Tasks) == 0 || payload.Tasks[0].ID.String() != targetID {
+				t.Fatalf("%s tasks = %+v, want target %s", read.command, payload.Tasks, targetID)
+			}
+		})
 	}
 	if counters := queue.snapshotCounters(); counters.Enqueued != 0 {
-		t.Fatalf("task.get enqueued worktree refresh: %+v", counters)
+		t.Fatalf("task reads enqueued worktree refresh: %+v", counters)
 	}
 	if statusCalls != 0 {
-		t.Fatalf("task.get invoked git status %d times", statusCalls)
+		t.Fatalf("task reads invoked git status %d times", statusCalls)
 	}
 }
 
-func TestHandleTaskGetMaterializedReadRefreshesRuntimeWithoutExternalGit(t *testing.T) {
+func TestHandleTaskGetMaterializedReadDoesNotRefreshRuntimeOrGit(t *testing.T) {
 	ctx := context.Background()
 	const (
 		projectID = "proj-detail-read"
@@ -15768,6 +15915,11 @@ func TestHandleTaskGetMaterializedReadRefreshesRuntimeWithoutExternalGit(t *test
 		t.Fatalf("create durable detail: %v", err)
 	}
 	worktree := filepath.Join(repoDir, "worktrees", issueID)
+	if err := os.WriteFile(filepath.Join(repoDir, ".azedarach", "config.json"), []byte(`{
+		"publicationEvidence": {"policyVersion":"portable-v1","activePathProfiles":["consumer-integration"]}
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
@@ -15802,8 +15954,28 @@ func TestHandleTaskGetMaterializedReadRefreshesRuntimeWithoutExternalGit(t *test
 		t.Fatalf("bootstrap materializer: %v", err)
 	}
 	hydrateCalls = 0
+	operationRuntime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = operationRuntime.Close() })
+	evidence := domain.PublicationEvidence{
+		EvidenceID: "merge-detail", ProjectID: projectID, IssueID: issueID, Layer: domain.PublicationEvidenceMergeResult,
+		SourceRevision: "source", BaseRevision: "base", ResultRevision: "result", Producer: "reviewer",
+		PolicyVersion: "portable-v1", EnvironmentFingerprint: "env", CreatedAt: time.Unix(1, 0).UTC(),
+	}
+	if _, err := operationRuntime.store.RecordPublicationEvidence(ctx, evidence); err != nil {
+		t.Fatal(err)
+	}
+	beforeEvidence, err := operationRuntime.store.PublicationEvidenceSnapshot(ctx, projectID, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var publicationGitCalls atomic.Int32
 	d := &Daemon{
-		cfg:              Config{BaseBranch: "main", Logger: slog.Default()},
+		cfg:              Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
+		operationRuntime: operationRuntime,
+		git: git.NewClient(&recordingGitRunner{runFn: func(args ...string) (string, error) {
+			publicationGitCalls.Add(1)
+			return "", errors.New("task.get publication diagnostic must not invoke Git")
+		}}, slog.Default()),
 		gitStatusAdapter: gitAdapter,
 		issueClientsByProject: map[string]*issues.Client{
 			projectID: issuesClient,
@@ -15835,8 +16007,8 @@ func TestHandleTaskGetMaterializedReadRefreshesRuntimeWithoutExternalGit(t *test
 	if counters := queue.snapshotCounters(); counters.Enqueued != 0 {
 		t.Fatalf("task.get enqueued external Git refreshes: %+v", counters)
 	}
-	if hydrateCalls != 1 {
-		t.Fatalf("task.get synchronously refreshed runtime enrichment %d times, want one bounded refresh", hydrateCalls)
+	if hydrateCalls != 0 {
+		t.Fatalf("task.get synchronously refreshed runtime enrichment %d times, want projection-only read", hydrateCalls)
 	}
 	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
 	if err != nil {
@@ -15844,6 +16016,275 @@ func TestHandleTaskGetMaterializedReadRefreshesRuntimeWithoutExternalGit(t *test
 	}
 	if len(payload.Tasks) != 1 || payload.Tasks[0].Description != "Return without external Git" {
 		t.Fatalf("task.get payload = %+v, want durable detail", payload.Tasks)
+	}
+	if payload.Tasks[0].PublicationEvidence == nil || payload.Tasks[0].PublicationEvidence.State != "recorded" {
+		t.Fatalf("task.get publication diagnostic = %+v, want recorded projection", payload.Tasks[0].PublicationEvidence)
+	}
+	if got := publicationGitCalls.Load(); got != 0 {
+		t.Fatalf("task.get publication diagnostic Git calls = %d, want 0", got)
+	}
+	afterEvidence, err := operationRuntime.store.PublicationEvidenceSnapshot(ctx, projectID, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(afterEvidence, beforeEvidence) {
+		t.Fatalf("task.get wrote publication evidence: before=%+v after=%+v", beforeEvidence, afterEvidence)
+	}
+}
+
+func TestHandleTaskListMaterializedReadDoesNotRefreshRuntime(t *testing.T) {
+	ctx := context.Background()
+	const projectID = "proj-list-projection-only"
+	issuesClient, _ := newTestIssueClient(t)
+	if _, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "durable list row", Status: domain.StatusInProgress, Type: domain.TypeTask,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	hydrateCalls := 0
+	materializer := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(issuesClient), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		hydrateCalls++
+		return tasks, nil
+	})
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	hydrateCalls = 0
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		materializersStarted:  true,
+		materializers:         map[string]*projectReadMaterializer{projectID: materializer},
+		revision:              map[string]uint64{projectID: 1},
+	}
+	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-list-projection-only",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.list",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            []byte(`{}`),
+	})
+	if err != nil || !resp.OK {
+		t.Fatalf("task.list response = %+v, err = %v", resp.Error, err)
+	}
+	if hydrateCalls != 0 {
+		t.Fatalf("task.list synchronously refreshed runtime enrichment %d times, want projection-only read", hydrateCalls)
+	}
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Tasks) != 1 || payload.Tasks[0].Title != "durable list row" {
+		t.Fatalf("task.list tasks = %+v, want durable projected row", payload.Tasks)
+	}
+}
+
+func TestHandleBoardFetchMaterializedReadBypassesLegacyRuntimeCache(t *testing.T) {
+	ctx := context.Background()
+	const projectID = "proj-board-projection-only"
+	issuesClient, _ := newTestIssueClient(t)
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "canonical board row", Status: domain.StatusInProgress, Type: domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hydrateCalls := 0
+	materializer := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(issuesClient), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		hydrateCalls++
+		return tasks, nil
+	})
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	hydrateCalls = 0
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		materializersStarted:  true,
+		materializers:         map[string]*projectReadMaterializer{projectID: materializer},
+		revision:              map[string]uint64{projectID: 1},
+	}
+	d.storeTaskListSnapshotCache(projectID, 1, time.Now().UTC(), protocol.TaskListFreshnessFresh, []domain.Task{{
+		ID: naming.IssueID(issueID), Title: "legacy cached row", Status: domain.StatusOpen, Type: domain.TypeTask,
+	}}, false)
+
+	resp, err := d.handleBoardFetch(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-board-projection-only",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "board.fetch",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+	})
+	if err != nil || !resp.OK {
+		t.Fatalf("board.fetch response = %+v, err = %v", resp.Error, err)
+	}
+	if hydrateCalls != 0 {
+		t.Fatalf("board.fetch synchronously refreshed runtime enrichment %d times, want projection-only read", hydrateCalls)
+	}
+	payload, err := protocol.DecodeBoardSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := payload.Projection.TaskSummaries()
+	if len(tasks) != 1 || tasks[0].Title != "canonical board row" {
+		t.Fatalf("board.fetch tasks = %+v, want canonical materialized row", tasks)
+	}
+}
+
+func TestOrdinaryTaskReadsBypassBlockedRuntimeAndUserProjection(t *testing.T) {
+	for _, command := range []string{"task.list", "task.get"} {
+		for _, blockedPhase := range []string{"runtime hydration", "user projection sync"} {
+			t.Run(command+"/"+blockedPhase, func(t *testing.T) {
+				ctx := context.Background()
+				projectID := "proj-blocked-read-" + strings.NewReplacer(".", "-", " ", "-").Replace(command+"-"+blockedPhase)
+				issuesClient, _ := newTestIssueClient(t)
+				issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+					Title: "projected while writers are blocked", Status: domain.StatusInProgress, Type: domain.TypeTask,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				var blockRuntime atomic.Bool
+				runtimeEntered, releaseRuntime := make(chan struct{}, 1), make(chan struct{})
+				materializer := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(issuesClient), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+					if blockRuntime.Load() {
+						runtimeEntered <- struct{}{}
+						<-releaseRuntime
+					}
+					return tasks, nil
+				})
+				if err := materializer.bootstrap(ctx); err != nil {
+					t.Fatal(err)
+				}
+				userSyncEntered, releaseUserSync := make(chan struct{}, 1), make(chan struct{})
+				d := &Daemon{
+					cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+					issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+					materializersStarted:  true,
+					materializers:         map[string]*projectReadMaterializer{projectID: materializer},
+					projectReadUserProjectionSync: func(context.Context, string, []string) error {
+						userSyncEntered <- struct{}{}
+						<-releaseUserSync
+						return nil
+					},
+					revision: map[string]uint64{projectID: 1},
+				}
+				if blockedPhase == "runtime hydration" {
+					blockRuntime.Store(true)
+				}
+				body := []byte(`{}`)
+				if command == "task.get" {
+					body, err = json.Marshal(map[string]string{"task_id": issueID})
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				type readResult struct {
+					resp protocol.ResponseEnvelope
+					err  error
+				}
+				result := make(chan readResult, 1)
+				go func() {
+					req := protocol.RequestEnvelope{
+						ProtocolVersion: protocol.CurrentVersion, RequestID: "req-blocked-projection-read",
+						Kind: protocol.EnvelopeKindCommand, Command: command,
+						Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body,
+					}
+					var resp protocol.ResponseEnvelope
+					var callErr error
+					if command == "task.list" {
+						resp, callErr = d.handleTaskList(ctx, req)
+					} else {
+						resp, callErr = d.handleTaskGet(ctx, req)
+					}
+					result <- readResult{resp: resp, err: callErr}
+				}()
+
+				var got readResult
+				if blockedPhase == "runtime hydration" {
+					select {
+					case got = <-result:
+					case <-runtimeEntered:
+						close(releaseRuntime)
+						<-result
+						t.Fatal("ordinary read entered blocked runtime hydration")
+					}
+				} else {
+					select {
+					case got = <-result:
+					case <-userSyncEntered:
+						close(releaseUserSync)
+						<-result
+						t.Fatal("ordinary read entered blocked user projection sync")
+					}
+				}
+				if got.err != nil || !got.resp.OK {
+					t.Fatalf("%s response = %+v, err = %v", command, got.resp.Error, got.err)
+				}
+			})
+		}
+	}
+}
+
+func TestHandleTaskGetManyMaterializedReadDoesNotInvokeGit(t *testing.T) {
+	ctx := context.Background()
+	const projectID = "portable-go-consumer"
+	issueID := naming.IssueID("go-1")
+	materializer := newProjectReadMaterializer(projectID, nil, nil)
+	materializer.authority = NewProjectionDeltaAuthority(listErrorProjectionStore{
+		list: func(_ context.Context, _ string, after uint64, _ int) ([]domain.ProjectionDelta, uint64, error) {
+			return nil, after, nil
+		},
+	})
+	for i := 0; i < 800; i++ {
+		id := naming.IssueID(fmt.Sprintf("go-%d", i+1))
+		task := domain.Task{ID: id, Title: "portable durable task " + id.String(), Status: domain.StatusOpen, Type: domain.TypeTask}
+		materializer.canonical[id.String()] = task
+		materializer.tasks[id.String()] = task
+	}
+	materializer.metadata.Health = "healthy"
+
+	gitCalls := 0
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		gitCalls++
+		return "", errors.New("Git must not run from task.get_many")
+	}}
+	d := &Daemon{
+		cfg:                  Config{Logger: slog.Default()},
+		git:                  git.NewClient(runner, slog.Default()),
+		materializersStarted: true,
+		materializers:        map[string]*projectReadMaterializer{projectID: materializer},
+		revision:             map[string]uint64{projectID: 4},
+	}
+	body, err := json.Marshal(map[string]any{"task_ids": []string{issueID.String()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := d.handleTaskGetMany(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-projection-only-get-many",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.get_many",
+		Meta:            protocol.Metadata{ProjectID: projectID},
+		Body:            body,
+	})
+	if err != nil || !resp.OK {
+		t.Fatalf("task.get_many response = %+v, err = %v", resp.Error, err)
+	}
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Tasks) != 1 || payload.Tasks[0].Title != "portable durable task go-1" {
+		t.Fatalf("tasks = %+v, want durable portable task", payload.Tasks)
+	}
+	if gitCalls != 0 {
+		t.Fatalf("Git calls = %d, want 0", gitCalls)
 	}
 }
 
@@ -16905,14 +17346,27 @@ func integrationTestIsWorktreeList(args []string) bool {
 
 func TestTaskDetailAttachesPublicationEvidenceDiagnostic(t *testing.T) {
 	ctx := context.Background()
-	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir()})
+	repoDir := t.TempDir()
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
 	t.Cleanup(func() { _ = runtime.Close() })
-	d := &Daemon{operationRuntime: runtime}
+	var gitCalls atomic.Int32
+	d := &Daemon{
+		cfg:              Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		operationRuntime: runtime,
+		git: git.NewClient(&recordingGitRunner{runFn: func(args ...string) (string, error) {
+			gitCalls.Add(1)
+			return "", errors.New("publication diagnostic must not invoke Git")
+		}}, slog.New(slog.NewTextHandler(io.Discard, nil))),
+	}
 	evidence := domain.PublicationEvidence{
-		EvidenceID: "review-1", ProjectID: "project", IssueID: "issue", Layer: domain.PublicationEvidencePatchReview,
-		PatchDigest: "patch", SourceRevision: "source", Producer: "reviewer", PolicyVersion: "policy", EnvironmentFingerprint: "env", CreatedAt: time.Unix(1, 0).UTC(),
+		EvidenceID: "merge-1", ProjectID: "project", IssueID: "issue", Layer: domain.PublicationEvidenceMergeResult,
+		SourceRevision: "source", BaseRevision: "base", ResultRevision: "result", Producer: "reviewer", PolicyVersion: "policy", EnvironmentFingerprint: "env", CreatedAt: time.Unix(1, 0).UTC(),
 	}
 	if _, err := runtime.store.RecordPublicationEvidence(ctx, evidence); err != nil {
+		t.Fatal(err)
+	}
+	before, err := runtime.store.PublicationEvidenceSnapshot(ctx, "project", "issue")
+	if err != nil {
 		t.Fatal(err)
 	}
 	tasks := d.attachPublicationEvidenceDiagnostic(ctx, "project", "issue", []domain.Task{{ID: "issue"}, {ID: "related"}})
@@ -16921,5 +17375,15 @@ func TestTaskDetailAttachesPublicationEvidenceDiagnostic(t *testing.T) {
 	}
 	if tasks[1].PublicationEvidence != nil {
 		t.Fatalf("related task received selected-task publication diagnostic: %+v", tasks[1].PublicationEvidence)
+	}
+	if got := gitCalls.Load(); got != 0 {
+		t.Fatalf("publication diagnostic Git calls = %d, want 0", got)
+	}
+	after, err := runtime.store.PublicationEvidenceSnapshot(ctx, "project", "issue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("publication evidence changed during task detail read: before=%+v after=%+v", before, after)
 	}
 }

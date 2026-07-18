@@ -116,6 +116,57 @@ func (r *revisionReviewGitRunner) Run(_ context.Context, args ...string) (string
 	}
 }
 
+func TestProjectReviewQueueConsumesProjectionWithoutGitStatusRefresh(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker")
+	tasks, err := client.GetManyWithRuntime(ctx, "project", []string{issueID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	materializer := newProjectReadMaterializer("project", nil, nil)
+	for _, task := range tasks {
+		materializer.canonical[task.ID.String()] = task
+		materializer.tasks[task.ID.String()] = task
+	}
+	materializer.metadata.Health = "healthy"
+	materializer.replaceWorktrees(map[string]git.Worktree{issueID: {IssueID: issueID, Path: filepath.Join(repoDir, "review-worktree"), Branch: "worker/review"}})
+
+	gitCalls := make([]string, 0, 2)
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		command := strings.Join(args, " ")
+		gitCalls = append(gitCalls, command)
+		switch {
+		case strings.Contains(command, " rev-parse --verify HEAD"):
+			return "projected-review-head\n", nil
+		case strings.Contains(command, " merge-base "):
+			return "projected-review-base\n", nil
+		default:
+			return "", errors.New("Git status/diff refresh must not run from orchestration snapshot")
+		}
+	}}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.git = git.NewClient(runner, slog.Default())
+	d.materializersStarted = true
+	d.materializers = map[string]*projectReadMaterializer{"project": materializer}
+	d.worktreeManagersByProject = map[string]*git.WorktreeManager{"project": git.NewWorktreeManager(runner, repoDir, slog.Default())}
+
+	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", RepoDir: repoDir})
+	if err != nil {
+		t.Fatalf("orchestration snapshot: %v", err)
+	}
+	if len(snapshot.ReviewQueue) != 1 || snapshot.ReviewQueue[0].IssueID != issueID {
+		t.Fatalf("reviews = %+v, want projected review %s", snapshot.ReviewQueue, issueID)
+	}
+	for _, command := range gitCalls {
+		if strings.Contains(command, " status ") || strings.Contains(command, " diff ") || strings.Contains(command, " rev-list ") || strings.Contains(command, " log ") || strings.Contains(command, " worktree ") {
+			t.Fatalf("Git calls = %+v, want only immutable review identity pinning", gitCalls)
+		}
+	}
+}
+
 func TestProjectReviewQueueUsesOneObservationQueryForLargeOrdinaryGraph(t *testing.T) {
 	repoDir := t.TempDir()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
@@ -2651,9 +2702,9 @@ func newOrchestrationReviewTestDaemon(repoDir string, client *issues.Client) *Da
 		hub:                   publish.NewHub(16, 8, logger),
 		issueClientsByProject: map[string]*issues.Client{"project": client},
 		revision:              map[string]uint64{},
-		snapshotAdmissionContext: func(parent context.Context) (context.Context, context.CancelFunc) {
-			return context.WithCancel(parent)
-		},
+		// Review fixtures use explicit cancellation hooks; local correctness must
+		// never depend on the production admission timeout or machine load.
+		snapshotAdmissionContext: context.WithCancel,
 		reviewAcceptedSourceOID: func(context.Context, string, string) (string, error) {
 			return "reviewed-source-oid", nil
 		},

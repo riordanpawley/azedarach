@@ -4619,6 +4619,7 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0053_git_hook_refresh_intents",
 		"0054_rooted_session_role_exclusivity",
 		"0055_mailbox_observation_replay_repair",
+		"0056_legacy_attachment_blob_forward",
 	}, got)
 }
 
@@ -4825,7 +4826,6 @@ func TestClient_RepairsLegacyIssueColumnsBeforeSearchFTSMigration(t *testing.T) 
 		"0012_blocked_status_to_open",
 		"0013_closed_runtime_invariants",
 		"0014_linear_sync_external_refs_backfill",
-		"0015_issue_attachments",
 	} {
 		_, err = db.ExecContext(ctx, `INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)`, id, now)
 		require.NoError(t, err)

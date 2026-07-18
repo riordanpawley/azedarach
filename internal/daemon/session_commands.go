@@ -1097,7 +1097,7 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue resource reconcile present failed for %s: %v%s%s", cmd.IssueID, err, cleanupNote, worktreeCleanupNote)), nil
 	}
-	imagePaths, imageErr := d.prepareSessionStartImagePaths(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, cmd.ImagePaths)
+	imagePaths, imageErr := d.prepareSessionStartImagePaths(ctx, cmd.ProjectID, cmd.IssueID, worktreeManager.RepoDir(), worktree.Path, cmd.ImagePaths)
 	if imageErr != nil {
 		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
 		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
@@ -5206,14 +5206,11 @@ func (d *Daemon) issueResourceLifecycleContext(projectID, issueID, sessionID, wo
 	}
 }
 
-func (d *Daemon) prepareSessionStartImagePaths(ctx context.Context, projectID, issueID, worktreePath string, explicitPaths []string) ([]string, error) {
+func (d *Daemon) prepareSessionStartImagePaths(ctx context.Context, projectID, issueID, rootPath, worktreePath string, explicitPaths []string) ([]string, error) {
 	explicitPaths = dedupeSessionStartImagePaths(explicitPaths)
-	rootPath := strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID))
+	rootPath = strings.TrimSpace(rootPath)
 	if rootPath == "" {
-		rootPath = strings.TrimSpace(d.resolveRepoDirForProject(projectID))
-	}
-	if rootPath == "" {
-		rootPath = strings.TrimSpace(d.cfg.RepoDir)
+		return nil, fmt.Errorf("resolve canonical attachment store for project %s: routed project root unavailable", strings.TrimSpace(projectID))
 	}
 	worktreePath = strings.TrimSpace(worktreePath)
 	if rootPath == "" || worktreePath == "" {

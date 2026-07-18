@@ -57,8 +57,12 @@ func TestListTasksSnapshot_UsesSQLiteIssueStore(t *testing.T) {
 	stop := startDaemonForTest(t, repoDir, socketPath, lockPath)
 	defer stop()
 
+	projectID, err := config.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("derive fixture project ID: %v", err)
+	}
 	client := New(transport.NewClient(socketPath).WithTimeout(20 * time.Second)).
-		WithProjectID("proj-sqlite").
+		WithProjectID(projectID).
 		WithReadWaitPolicy(ReadWaitPolicy{
 			Default:  15 * time.Second,
 			Explicit: 20 * time.Second,

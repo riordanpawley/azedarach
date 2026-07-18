@@ -98,6 +98,29 @@ type GitStatus struct {
 	hasTrackedChanges bool
 }
 
+// MarshalJSON preserves the complete status envelope consumed by runtime
+// projections. Required list fields are always JSON arrays, including for a
+// clean repository.
+func (s GitStatus) MarshalJSON() ([]byte, error) {
+	type gitStatusJSON GitStatus
+	if s.Modified == nil {
+		s.Modified = []string{}
+	}
+	if s.Added == nil {
+		s.Added = []string{}
+	}
+	if s.Deleted == nil {
+		s.Deleted = []string{}
+	}
+	if s.Untracked == nil {
+		s.Untracked = []string{}
+	}
+	if s.Staged == nil {
+		s.Staged = []string{}
+	}
+	return json.Marshal(gitStatusJSON(s))
+}
+
 // EvidenceCommit is an issue-scoped commit found on a branch.
 type EvidenceCommit struct {
 	Hash    string
