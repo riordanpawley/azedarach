@@ -38,12 +38,14 @@ type projectionStartupIsolationResult struct {
 type projectionStartupIsolationServer struct {
 	daemon           *Daemon
 	cancel           context.CancelFunc
+	started          chan struct{}
 	result           chan projectionStartupIsolationResult
 	corruptProjectID string
 	healthyProjectID string
 }
 
 func (s *projectionStartupIsolationServer) Serve(ctx context.Context) error {
+	close(s.started)
 	corrupt, _ := s.daemon.command(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		Command:         "task.list",
@@ -170,7 +172,7 @@ func TestProjectionDeltaStartupQuarantinesOnlyCorruptRegisteredProject(t *testin
 
 	ctx, cancel := context.WithCancel(context.Background())
 	server := &projectionStartupIsolationServer{
-		cancel: cancel, result: make(chan projectionStartupIsolationResult, 1),
+		cancel: cancel, started: make(chan struct{}), result: make(chan projectionStartupIsolationResult, 1),
 		corruptProjectID: corruptProjectID, healthyProjectID: healthyProjectID,
 	}
 	d := &Daemon{
@@ -185,6 +187,11 @@ func TestProjectionDeltaStartupQuarantinesOnlyCorruptRegisteredProject(t *testin
 	server.daemon = d
 	errCh := make(chan error, 1)
 	go func() { errCh <- d.Run(ctx) }()
+	select {
+	case <-server.started:
+	case err := <-errCh:
+		t.Fatalf("daemon exited before IPC serve: %v", err)
+	}
 
 	result := <-server.result
 	if result.corrupt.OK || result.corrupt.Error == nil || result.corrupt.Error.Code != protocol.ErrorCodeUnavailable || !strings.Contains(result.corrupt.Error.Message, "project issue store unhealthy (cached)") {
