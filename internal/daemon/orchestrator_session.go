@@ -525,11 +525,15 @@ func (d *Daemon) persistOrchestratorSessionProjection(ctx context.Context, meta 
 	if !found {
 		projection = daemonstate.Session{ID: sessionID, IssueID: scope.RootIssueID.String(), State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "runtime", UpdatedAt: time.Now().UTC()}
 	}
+	projection.ID = sessionID
+	projection.IssueID = scope.RootIssueID.String()
 	projection.Role = daemonstate.SessionRoleOrchestrator
 	projection.ScopeKind = daemonstate.SessionScopeOrchestration
 	projection.ScopeID = orchestrationScopeID(scope)
 	projection.State = daemonstate.SessionStateRunning
 	projection.ObservedState = daemonstate.SessionStateRunning
+	projection.Activity = "busy"
+	projection.ActivitySource = "runtime"
 	projection.UpdatedAt = time.Now().UTC()
 	writer := d.runtimeProjectionStateWriter()
 	if err := writer.PersistSessionProjection(ctx, projectID, projection); err != nil {

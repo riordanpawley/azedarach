@@ -44,6 +44,23 @@ type exactRestartRunner struct {
 	environment      map[string]string
 }
 
+type failOnceSessionProjectionWriter struct {
+	runtimeProjectionWriter
+	mu        sync.Mutex
+	remaining int
+}
+
+func (w *failOnceSessionProjectionWriter) PersistSessionProjection(ctx context.Context, projectID string, session daemonstate.Session) error {
+	w.mu.Lock()
+	if w.remaining > 0 {
+		w.remaining--
+		w.mu.Unlock()
+		return errors.New("injected recovered projection failure")
+	}
+	w.mu.Unlock()
+	return w.runtimeProjectionWriter.PersistSessionProjection(ctx, projectID, session)
+}
+
 type realRestartRunner struct {
 	tmuxPath           string
 	socketName         string
@@ -734,6 +751,132 @@ func TestRecoverInterruptedSessionRestartBatchResumesCurrentAndRemainingTargets(
 	assertRestartLifecycleVocabulary(t, result.Sessions[0].Stages, sessionRestartLifecycleCompleted)
 }
 
+func TestRecoverInterruptedSessionRestartBatchPersistsUnprojectedWorker(t *testing.T) {
+	d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+	seedRecoveredReplacement(t, store, runner, "planned")
+	current := recoveryPlanForTarget(target, "observe")
+	batch := sessionRestartBatchPlan{
+		Version: sessionRestartBatchPlanVersion, ProjectID: target.ProjectID, ProjectIDs: []string{target.ProjectID},
+		Request: protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(target.ProjectID)},
+		Targets: []sessionRestartAllTarget{target}, Current: &current, Stage: sessionRestartLifecycleVerifying,
+	}
+	record := restartRecoveryBatchRecord(t, batch)
+
+	if _, found, err := store.GetSessionIntent(context.Background(), target.ProjectID, daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, target.IssueID); err != nil || found {
+		t.Fatalf("worker projection before recovery found=%t err=%v", found, err)
+	}
+	recovery, ok := d.recoverInterruptedSessionRestart(context.Background(), record)
+	if !ok || recovery.State != daemonops.StateDone {
+		t.Fatalf("recovery=%+v ok=%t", recovery, ok)
+	}
+	projection, found, err := store.GetSessionIntent(context.Background(), target.ProjectID, daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, target.IssueID)
+	if err != nil || !found || projection.ID != target.SessionID || projection.State != daemonstate.SessionStateRunning {
+		t.Fatalf("worker projection after recovery=%+v found=%t err=%v", projection, found, err)
+	}
+	respawns, _, _ := runner.snapshot()
+	if respawns != 0 {
+		t.Fatalf("respawns=%d, want projection-only recovery", respawns)
+	}
+}
+
+func TestRecoverInterruptedSessionRestartBatchRetriesRecoverableProjectionFailure(t *testing.T) {
+	d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+	seedRecoveredReplacement(t, store, runner, "planned")
+	plan := recoveryPlanForTarget(target, "observe")
+	batch := sessionRestartBatchPlan{
+		Version: sessionRestartBatchPlanVersion, ProjectID: target.ProjectID, ProjectIDs: []string{target.ProjectID},
+		Request: protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(target.ProjectID)},
+		Targets: []sessionRestartAllTarget{target}, Cursor: 1,
+		Results:     []protocol.SessionRestartAllItem{{ProjectID: naming.ProjectID(target.ProjectID), SessionID: naming.SessionID(target.SessionID), IssueID: naming.IssueID(target.IssueID), Error: "projection unavailable"}},
+		Recoverable: []sessionRestartBatchRecovery{{Index: 0, Plan: plan}}, Stage: sessionRestartLifecycleFailed,
+	}
+	record := restartRecoveryBatchRecord(t, batch)
+	baseWriter := d.runtimeProjectionStateWriter()
+	d.runtimeProjectionWriter = &failOnceSessionProjectionWriter{runtimeProjectionWriter: baseWriter, remaining: 1}
+
+	first, ok := d.recoverInterruptedSessionRestart(context.Background(), record)
+	if !ok || first.State != daemonops.StateFailed || !strings.Contains(first.ErrorMessage, "injected recovered projection failure") {
+		t.Fatalf("first recovery=%+v ok=%t", first, ok)
+	}
+	if _, found, err := store.GetSessionIntent(context.Background(), target.ProjectID, daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, target.IssueID); err != nil || found {
+		t.Fatalf("worker projection after failed recovery found=%t err=%v", found, err)
+	}
+	second, ok := d.recoverInterruptedSessionRestart(context.Background(), record)
+	if !ok || second.State != daemonops.StateDone {
+		t.Fatalf("second recovery=%+v ok=%t", second, ok)
+	}
+	if _, found, err := store.GetSessionIntent(context.Background(), target.ProjectID, daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, target.IssueID); err != nil || !found {
+		t.Fatalf("worker projection after retry found=%t err=%v", found, err)
+	}
+	respawns, _, _ := runner.snapshot()
+	if respawns != 0 {
+		t.Fatalf("respawns=%d, want projection retry without replacement", respawns)
+	}
+}
+
+func TestRecoverInterruptedSessionRestartBatchPersistsRootedProjection(t *testing.T) {
+	d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+	seedRecoveredReplacement(t, store, runner, "planned")
+	scope, err := domain.RootedOrchestrationScope(target.IssueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := domain.NewOrchestratorIdentity(target.ProjectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := upsertSessionStateFixture(store, context.Background(), target.ProjectID, daemonstate.Session{
+		ID: "az-stale", IssueID: target.IssueID,
+		Role: daemonstate.SessionRoleOrchestrator, ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: target.IssueID,
+		State: daemonstate.SessionStatePaused, ObservedState: daemonstate.SessionStateRunning,
+		Activity: "waiting", ActivitySource: "stale", UpdatedAt: time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	current := recoveryPlanForTarget(target, "observe")
+	current.RootedIdentity = &identity
+	d.sessionRestartRootedBootstrapRepair = func(ctx context.Context, got domain.OrchestratorIdentity, sessionID string) error {
+		if got != identity || sessionID != target.SessionID {
+			t.Fatalf("rooted repair identity=%+v session=%q", got, sessionID)
+		}
+		now := time.Now().UTC()
+		if err := d.tmux.SetEnvironment(ctx, sessionID, rootedOrchestratorBootstrapNonceEnvironment, "nonce"); err != nil {
+			return err
+		}
+		return daemonstate.NewRootedBootstrapAcknowledgementAuthority(store).Acknowledge(ctx, daemonstate.RootedBootstrapAcknowledgement{
+			Identity: got, SessionID: sessionID, PromptHash: "prompt", RuntimeNonce: "nonce", AcknowledgedAt: now, UpdatedAt: now,
+		})
+	}
+	batch := sessionRestartBatchPlan{
+		Version: sessionRestartBatchPlanVersion, ProjectID: target.ProjectID, ProjectIDs: []string{target.ProjectID},
+		Request: protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(target.ProjectID)},
+		Targets: []sessionRestartAllTarget{target}, Current: &current, Stage: sessionRestartLifecycleVerifying,
+	}
+	recovery, ok := d.recoverInterruptedSessionRestart(context.Background(), restartRecoveryBatchRecord(t, batch))
+	if !ok || recovery.State != daemonops.StateDone {
+		t.Fatalf("recovery=%+v ok=%t", recovery, ok)
+	}
+	projection, found, err := store.GetSessionIntent(context.Background(), target.ProjectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, target.IssueID)
+	if err != nil || !found || projection.ID != target.SessionID || projection.IssueID != target.IssueID || projection.State != daemonstate.SessionStateRunning || projection.ObservedState != daemonstate.SessionStateRunning || projection.Activity != "busy" || projection.ActivitySource != "runtime" {
+		t.Fatalf("rooted projection after recovery=%+v found=%t err=%v", projection, found, err)
+	}
+	respawns, _, _ := runner.snapshot()
+	if respawns != 0 {
+		t.Fatalf("respawns=%d, want rooted projection-only recovery", respawns)
+	}
+}
+
+func restartRecoveryBatchRecord(t *testing.T, batch sessionRestartBatchPlan) daemonops.Record {
+	t.Helper()
+	body, err := json.Marshal(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return daemonops.Record{ProjectID: batch.ProjectID, Kind: protocol.CommandSessionRestartAll, Progress: &daemonops.Progress{
+		Phase: "session.restart_all.batch." + batch.Stage, Message: string(body),
+	}}
+}
+
 func assertRestartLifecycleVocabulary(t *testing.T, stages []protocol.SessionRestartStage, wantTerminal string) {
 	t.Helper()
 	allowed := map[string]int{
@@ -1287,6 +1430,53 @@ func TestDecodeSessionRestartRecoveryPlanBindsDuplicatedAuthority(t *testing.T) 
 		t.Run(name, func(t *testing.T) {
 			if _, ok := decodeSessionRestartRecoveryPlan(record); ok {
 				t.Fatalf("mismatched recovery authority was accepted: %+v", record)
+			}
+		})
+	}
+}
+
+func TestSessionRestartRecoveryPlanRejectsIncompleteOrMismatchedExactIdentity(t *testing.T) {
+	target := sessionRestartAllTarget{ProjectID: "project", SessionID: "az-1", IssueID: "one", Activity: "idle"}
+	base := recoveryPlanForTarget(target, "observe")
+	for _, tt := range []struct {
+		name   string
+		mutate func(*sessionRestartRecoveryPlan)
+	}{
+		{name: "empty project", mutate: func(plan *sessionRestartRecoveryPlan) { plan.ProjectID = "" }},
+		{name: "empty session", mutate: func(plan *sessionRestartRecoveryPlan) { plan.SessionID = "" }},
+		{name: "empty issue", mutate: func(plan *sessionRestartRecoveryPlan) { plan.IssueID = "" }},
+		{name: "old project mismatch", mutate: func(plan *sessionRestartRecoveryPlan) { plan.Old.ProjectID = "other" }},
+		{name: "old project empty", mutate: func(plan *sessionRestartRecoveryPlan) { plan.Old.ProjectID = "" }},
+		{name: "old session mismatch", mutate: func(plan *sessionRestartRecoveryPlan) { plan.Old.SessionID = "az-other" }},
+		{name: "old session empty", mutate: func(plan *sessionRestartRecoveryPlan) { plan.Old.SessionID = "" }},
+		{name: "old logical pane empty", mutate: func(plan *sessionRestartRecoveryPlan) { plan.Old.LogicalPaneID = "" }},
+		{name: "old tmux pane empty", mutate: func(plan *sessionRestartRecoveryPlan) { plan.Old.TmuxPaneID = "" }},
+		{name: "old pane pid zero", mutate: func(plan *sessionRestartRecoveryPlan) { plan.Old.PanePID = 0 }},
+		{name: "old pane pid negative", mutate: func(plan *sessionRestartRecoveryPlan) { plan.Old.PanePID = -1 }},
+		{name: "old incarnation empty", mutate: func(plan *sessionRestartRecoveryPlan) { plan.Old.AgentIncarnation = "" }},
+		{name: "planned incarnation empty", mutate: func(plan *sessionRestartRecoveryPlan) { plan.PlannedIncarnation = "" }},
+		{name: "planned incarnation unchanged", mutate: func(plan *sessionRestartRecoveryPlan) { plan.PlannedIncarnation = plan.Old.AgentIncarnation }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			plan := base
+			tt.mutate(&plan)
+			body, err := json.Marshal(plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			direct := daemonops.Record{ProjectID: target.ProjectID, Kind: protocol.CommandSessionRestartAll, Progress: &daemonops.Progress{
+				Phase: "session.restart_all." + plan.Stage, Message: string(body),
+			}}
+			if _, ok := decodeSessionRestartRecoveryPlan(direct); ok {
+				t.Fatalf("direct decoder accepted invalid recovery plan: %+v", plan)
+			}
+			batch := sessionRestartBatchPlan{
+				Version: sessionRestartBatchPlanVersion, ProjectID: target.ProjectID, ProjectIDs: []string{target.ProjectID},
+				Request: protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(target.ProjectID)},
+				Targets: []sessionRestartAllTarget{target}, Current: &plan, Stage: sessionRestartLifecycleVerifying,
+			}
+			if _, ok := decodeSessionRestartBatchPlan(restartRecoveryBatchRecord(t, batch)); ok {
+				t.Fatalf("batch decoder accepted invalid recovery plan: %+v", plan)
 			}
 		})
 	}

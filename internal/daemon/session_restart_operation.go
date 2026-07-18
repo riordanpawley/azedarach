@@ -714,11 +714,31 @@ func validSessionRestartLifecycleStage(stage string) bool {
 }
 
 func sessionRestartRecoveryPlanMatchesTarget(plan sessionRestartRecoveryPlan, target sessionRestartAllTarget) bool {
-	return strings.TrimSpace(plan.ProjectID) == strings.TrimSpace(target.ProjectID) &&
+	return validExactSessionRestartRecoveryPlan(plan) &&
+		strings.TrimSpace(plan.ProjectID) == strings.TrimSpace(target.ProjectID) &&
 		strings.TrimSpace(plan.SessionID) == strings.TrimSpace(target.SessionID) &&
 		strings.TrimSpace(plan.IssueID) == strings.TrimSpace(target.IssueID) &&
-		strings.TrimSpace(plan.Activity) == strings.TrimSpace(target.Activity) &&
-		strings.TrimSpace(plan.PlannedIncarnation) != "" && strings.TrimSpace(plan.Old.LogicalPaneID) != ""
+		strings.TrimSpace(plan.Activity) == strings.TrimSpace(target.Activity)
+}
+
+func validExactSessionRestartRecoveryPlan(plan sessionRestartRecoveryPlan) bool {
+	projectID := strings.TrimSpace(plan.ProjectID)
+	sessionID := strings.TrimSpace(plan.SessionID)
+	issueID := strings.TrimSpace(plan.IssueID)
+	oldIncarnation := strings.TrimSpace(plan.Old.AgentIncarnation)
+	plannedIncarnation := strings.TrimSpace(plan.PlannedIncarnation)
+	if projectID == "" || sessionID == "" || issueID == "" || strings.TrimSpace(plan.Activity) == "" ||
+		strings.TrimSpace(plan.Old.ProjectID) != projectID || strings.TrimSpace(plan.Old.SessionID) != sessionID ||
+		strings.TrimSpace(plan.Old.LogicalPaneID) == "" || strings.TrimSpace(plan.Old.TmuxPaneID) == "" || plan.Old.PanePID <= 0 ||
+		oldIncarnation == "" || plannedIncarnation == "" || plannedIncarnation == oldIncarnation {
+		return false
+	}
+	if plan.RootedIdentity == nil {
+		return true
+	}
+	identity, err := domain.NewOrchestratorIdentity(plan.RootedIdentity.ProjectID, plan.RootedIdentity.Scope)
+	return err == nil && identity == *plan.RootedIdentity && identity.ProjectID == protocol.NormalizeProjectID(projectID) &&
+		identity.Scope.Kind == domain.OrchestrationScopeRooted && identity.Scope.RootIssueID.String() == issueID
 }
 
 func sessionRestartItemMatchesTarget(item protocol.SessionRestartAllItem, target sessionRestartAllTarget) bool {
@@ -739,7 +759,7 @@ func decodeSessionRestartRecoveryPlan(record daemonops.Record) (sessionRestartRe
 		return sessionRestartRecoveryPlan{}, false
 	}
 	var plan sessionRestartRecoveryPlan
-	if json.Unmarshal([]byte(record.Progress.Message), &plan) != nil || plan.ProjectID == "" || plan.SessionID == "" || plan.PlannedIncarnation == "" {
+	if json.Unmarshal([]byte(record.Progress.Message), &plan) != nil || !validExactSessionRestartRecoveryPlan(plan) {
 		return sessionRestartRecoveryPlan{}, false
 	}
 	phaseStage := strings.TrimPrefix(record.Progress.Phase, "session.restart_all.")
@@ -748,13 +768,6 @@ func decodeSessionRestartRecoveryPlan(record daemonops.Record) (sessionRestartRe
 	}
 	if recordProjectID := protocol.TrimProjectID(record.ProjectID); recordProjectID != "" && recordProjectID != protocol.NormalizeProjectID(plan.ProjectID) {
 		return sessionRestartRecoveryPlan{}, false
-	}
-	if plan.RootedIdentity != nil {
-		identity, err := domain.NewOrchestratorIdentity(plan.RootedIdentity.ProjectID, plan.RootedIdentity.Scope)
-		if err != nil || identity != *plan.RootedIdentity || identity.ProjectID != protocol.NormalizeProjectID(plan.ProjectID) ||
-			identity.Scope.Kind != domain.OrchestrationScopeRooted || identity.Scope.RootIssueID.String() != strings.TrimSpace(plan.IssueID) {
-			return sessionRestartRecoveryPlan{}, false
-		}
 	}
 	return plan, true
 }

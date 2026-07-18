@@ -1723,6 +1723,11 @@ func (d *Daemon) recoverInterruptedSessionRestartPlan(ctx context.Context, plan 
 	recoverWithPaneLock := func(lockCtx context.Context) error {
 		return store.WithManagedAgentRestartTransition(lockCtx, plan.ProjectID, plan.SessionID, plan.Old.LogicalPaneID, func(paneCtx context.Context) error {
 			recovery, recovered = d.recoverInterruptedSessionRestartLocked(paneCtx, store, plan)
+			if recovered && recovery.State == daemonops.StateDone {
+				if err := d.persistRecoveredSessionRestartProjection(paneCtx, plan, recovery); err != nil {
+					recovery = interruptedOperationRecovery{State: daemonops.StateFailed, ErrorMessage: err.Error()}
+				}
+			}
 			return nil
 		})
 	}
@@ -1742,6 +1747,31 @@ func (d *Daemon) recoverInterruptedSessionRestartPlan(ctx context.Context, plan 
 	return recovery, recovered
 }
 
+func (d *Daemon) persistRecoveredSessionRestartProjection(ctx context.Context, plan sessionRestartRecoveryPlan, recovery interruptedOperationRecovery) error {
+	var result protocol.SessionRestartAllResponseBody
+	if err := json.Unmarshal(recovery.ResultPayload, &result); err != nil {
+		return fmt.Errorf("decode recovered restart result before projection persistence: %w", err)
+	}
+	if len(result.Sessions) != 1 {
+		return fmt.Errorf("decode recovered restart result before projection persistence: got %d sessions", len(result.Sessions))
+	}
+	if !result.Sessions[0].Restarted {
+		return nil
+	}
+	projectionCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionRestartPreflightTimeout)
+	defer cancel()
+	if plan.RootedIdentity != nil {
+		if err := d.persistOrchestratorSessionProjection(projectionCtx, protocol.Metadata{ProjectID: naming.ProjectID(plan.ProjectID)}, plan.ProjectID, plan.RootedIdentity.Scope, plan.SessionID); err != nil {
+			return fmt.Errorf("persist recovered rooted orchestrator projection: %w", err)
+		}
+		return nil
+	}
+	if err := d.persistRestartedSessionProjection(projectionCtx, plan.ProjectID, plan.SessionID, plan.IssueID); err != nil {
+		return fmt.Errorf("persist recovered worker session projection: %w", err)
+	}
+	return nil
+}
+
 func (d *Daemon) recoverInterruptedSessionRestartBatch(ctx context.Context, batch sessionRestartBatchPlan) interruptedOperationRecovery {
 	ctx = withSessionRestartBatchProgress(ctx, &batch)
 	checkpoint := func() error { return reportSessionRestartBatchProgress(ctx, batch) }
@@ -1753,6 +1783,9 @@ func (d *Daemon) recoverInterruptedSessionRestartBatch(ctx context.Context, batc
 		recovered, ok := d.recoverInterruptedSessionRestartPlan(ctx, pending.Plan)
 		if !ok {
 			return fail(fmt.Errorf("recover restart target %d: durable plan could not be reconciled", pending.Index))
+		}
+		if recovered.State != daemonops.StateDone {
+			return fail(fmt.Errorf("recover restart target %d: %s", pending.Index, recovered.ErrorMessage))
 		}
 		var recoveredResult protocol.SessionRestartAllResponseBody
 		if err := json.Unmarshal(recovered.ResultPayload, &recoveredResult); err != nil {
@@ -1772,6 +1805,9 @@ func (d *Daemon) recoverInterruptedSessionRestartBatch(ctx context.Context, batc
 		recovered, ok := d.recoverInterruptedSessionRestartPlan(ctx, *batch.Current)
 		if !ok {
 			return fail(errors.New("recover current restart target: durable plan could not be reconciled"))
+		}
+		if recovered.State != daemonops.StateDone {
+			return fail(fmt.Errorf("recover current restart target: %s", recovered.ErrorMessage))
 		}
 		var current protocol.SessionRestartAllResponseBody
 		if err := json.Unmarshal(recovered.ResultPayload, &current); err != nil {
