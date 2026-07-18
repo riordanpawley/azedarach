@@ -652,6 +652,34 @@ func TestPublicationValidationClaimGenerationFencesExpiryOverlap(t *testing.T) {
 	}
 }
 
+func TestPublicationValidationWaitReconcilesExpiredPriorExecutor(t *testing.T) {
+	repo := t.TempDir()
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	t.Cleanup(func() { _ = runtime.Close() })
+	ttl := time.Minute
+	request, err := runtime.store.AcquireValidation(context.Background(), domain.ValidationAcquire{
+		RequestID: "expired-prior-publication", LeaseToken: "expired-prior-token", ProjectID: runtime.canonicalProject,
+		Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeRepository, Purpose: domain.ValidationPurposePushGate,
+		IsolationMode: "synthetic-worktree", EnvironmentFingerprint: "test", Override: domain.ValidationOverrideNone,
+		Profile: "publication:test", Command: "go test ./consumer/...", SourceRevision: "candidate", TTL: ttl,
+	}, time.Now().UTC().Add(-2*ttl))
+	if err != nil || request.State != domain.ValidationRequestActive {
+		t.Fatalf("seed expired prior validation = (%+v,%v)", request, err)
+	}
+	d := &Daemon{operationRuntime: runtime, cfg: Config{RepoDir: repo}}
+	d.publicationValidationWait = func(context.Context, string) error {
+		t.Fatal("expired prior executor remained active after reconciliation")
+		return nil
+	}
+	if err := d.awaitPriorPublicationValidation(context.Background(), runtime.canonicalProject, request.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	reconciled, err := runtime.store.ValidationRequest(context.Background(), runtime.canonicalProject, request.RequestID)
+	if err != nil || reconciled.State != domain.ValidationRequestExpired {
+		t.Fatalf("reconciled prior validation = (%+v,%v), want expired", reconciled, err)
+	}
+}
+
 func TestPublicationTransitionInvalidatesSnapshotsAndPublishesWatchEvent(t *testing.T) {
 	repo := t.TempDir()
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})

@@ -93,6 +93,9 @@ func publicationValidationLeaseToken(operationID, candidateRevision, claimToken 
 
 func (d *Daemon) awaitPriorPublicationValidation(ctx context.Context, projectID, requestID string) error {
 	for {
+		if _, err := d.operationRuntime.store.ValidationSnapshot(ctx, projectID, time.Now().UTC(), defaultValidationLeaseTTL); err != nil {
+			return err
+		}
 		validation, err := d.operationRuntime.store.ValidationRequest(ctx, projectID, requestID)
 		if err != nil {
 			return err
