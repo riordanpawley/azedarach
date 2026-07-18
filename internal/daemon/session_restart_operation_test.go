@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
@@ -912,6 +913,7 @@ func TestOperationRuntimeResubmissionRetriesRecoveredProjectionWithoutSecondResp
 }
 
 func TestSessionRestartRecoveryRequestMatchesExactDurableRequest(t *testing.T) {
+	runtime := &operationRuntime{canonicalProject: "project", repoNameProject: "repo-name"}
 	target := sessionRestartAllTarget{ProjectID: "project", SessionID: "az-1", IssueID: "one", Activity: "idle"}
 	plan := recoveryPlanForTarget(target, "observe")
 	batch := sessionRestartBatchPlan{
@@ -938,8 +940,117 @@ func TestSessionRestartRecoveryRequestMatchesExactDurableRequest(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := sessionRestartRecoveryRequestMatches(record, tt.projectID, mustJSON(t, tt.request)); got != tt.want {
+			if got := runtime.sessionRestartRecoveryRequestMatches(record, tt.projectID, mustJSON(t, tt.request)); got != tt.want {
 				t.Fatalf("request match=%t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOperationRuntimeRestartRecoveryAcceptsCanonicalProjectAliases(t *testing.T) {
+	for _, scope := range []string{"omitted", "default", "repo-name", "canonical"} {
+		t.Run(scope, func(t *testing.T) {
+			repoDir := filepath.Join(t.TempDir(), "restart-alias-project")
+			if err := os.MkdirAll(repoDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			canonicalProject, err := appconfig.ProjectIDForRoot(repoDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payloadProject := canonicalProject
+			outerProject := canonicalProject
+			switch scope {
+			case "omitted":
+				payloadProject = ""
+			case "default":
+				payloadProject = protocol.DefaultProjectID
+				outerProject = protocol.DefaultProjectID
+			case "repo-name":
+				payloadProject = filepath.Base(repoDir)
+				outerProject = filepath.Base(repoDir)
+			}
+
+			d, store, runner, target := newExactRestartDaemon(t, canonicalProject, "az-1", "one", "idle")
+			seedRecoveredReplacement(t, store, runner, "planned")
+			plan := recoveryPlanForTarget(target, "observe")
+			batch := sessionRestartBatchPlan{
+				Version: sessionRestartBatchPlanVersion, ProjectID: canonicalProject, ProjectIDs: []string{canonicalProject},
+				Request: protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(canonicalProject)},
+				Targets: []sessionRestartAllTarget{target}, Current: &plan, Stage: sessionRestartLifecycleVerifying,
+			}
+			progressRecord := restartRecoveryBatchRecord(t, batch)
+			payload := mustJSON(t, protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(payloadProject)})
+			const explicitDedupe = "known-alias-recovery"
+			first := newOperationRuntime(operationRuntimeConfig{
+				repoDir: repoDir, nextRevision: sequentialRevision(),
+				sessionRestartAll: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+					return testResponse(req, protocol.SessionRestartAllResponseBody{}), nil
+				},
+			})
+			submitReq, err := first.buildSubmitRequest(protocol.CommandSessionRestartAll, outerProject, payload, operationSubmitOverrides{DedupeKey: explicitDedupe})
+			if err != nil {
+				t.Fatal(err)
+			}
+			created, err := first.operationStore.Create(context.Background(), daemonops.Record{
+				ID: "op-alias-" + scope, ProjectID: submitReq.ProjectID, IssueID: target.IssueID,
+				Kind: submitReq.Kind, DedupeKey: submitReq.DedupeKey, ResourceKeys: submitReq.ResourceKeys,
+				State: daemonops.StateQueued, CreatedAt: time.Now().UTC(), Progress: progressRecord.Progress,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			started := time.Now().UTC()
+			if _, err := first.operationStore.Update(context.Background(), daemonops.UpdateParams{
+				ID: created.ID, ToState: daemonops.StateRunning, StartedAt: &started, Progress: progressRecord.Progress,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := first.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			baseWriter := d.runtimeProjectionStateWriter()
+			d.runtimeProjectionWriter = &failOnceSessionProjectionWriter{runtimeProjectionWriter: baseWriter, remaining: 1}
+			runnerCalls := 0
+			restarted := newOperationRuntime(operationRuntimeConfig{
+				repoDir: repoDir, nextRevision: sequentialRevision(), recoverInterrupted: d.recoverInterruptedOperation,
+				sessionRestartAll: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+					runnerCalls++
+					return testResponse(req, protocol.SessionRestartAllResponseBody{}), nil
+				},
+			})
+			t.Cleanup(func() { _ = restarted.Close() })
+			if got, err := restarted.manager.Get(context.Background(), created.ID); err != nil || got.State != daemonops.StateRunning {
+				t.Fatalf("startup record=%+v err=%v, want retryable running", got, err)
+			}
+			if scope == "canonical" {
+				differentPayload := mustJSON(t, protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID("genuinely-different-project")})
+				differentResp := restarted.Handle(context.Background(), testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
+					ProjectID: naming.ProjectID(canonicalProject), Kind: protocol.CommandSessionRestartAll, Payload: differentPayload, DedupeKey: explicitDedupe,
+				}))
+				respawns, _, _ := runner.snapshot()
+				if differentResp.OK || runnerCalls != 0 || respawns != 0 {
+					t.Fatalf("different-project response=%+v runner_calls=%d respawns=%d, want fail-closed survivor authority", differentResp, runnerCalls, respawns)
+				}
+			}
+
+			resp := restarted.Handle(context.Background(), testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
+				ProjectID: naming.ProjectID(outerProject), Kind: protocol.CommandSessionRestartAll, Payload: payload, DedupeKey: explicitDedupe,
+			}))
+			if !resp.OK {
+				t.Fatalf("alias resubmit response=%+v", resp)
+			}
+			var submitted protocol.OperationSubmitResponseBody
+			if err := json.Unmarshal(resp.Body, &submitted); err != nil {
+				t.Fatal(err)
+			}
+			if submitted.Created || submitted.Operation.OperationID.String() != created.ID || submitted.Operation.State != protocol.OperationStateDone {
+				t.Fatalf("alias resubmission=%+v, want original operation done", submitted)
+			}
+			respawns, _, _ := runner.snapshot()
+			if runnerCalls != 0 || respawns != 0 {
+				t.Fatalf("runner_calls=%d respawns=%d, want projection-only alias recovery", runnerCalls, respawns)
 			}
 		})
 	}
@@ -1481,7 +1592,7 @@ func seedRecoveredReplacement(t *testing.T, store *daemonstate.RuntimeStateStore
 	runner.pid = 101
 	runner.mu.Unlock()
 	if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{
-		ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 101,
+		ProjectID: runner.project, SessionID: runner.session, LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 101,
 		AgentIncarnation: incarnation, ObservedAt: time.Now(),
 	}); err != nil {
 		t.Fatal(err)

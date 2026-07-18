@@ -529,9 +529,8 @@ func (r *operationRuntime) reconcileMatchingInterruptedOperation(ctx context.Con
 	r.interruptedMu.Lock()
 	defer r.interruptedMu.Unlock()
 	records, err := r.operationStore.List(ctx, daemonops.Query{
-		ProjectID: req.ProjectID,
-		Kind:      req.Kind,
-		States:    []daemonops.State{daemonops.StateQueued, daemonops.StateRunning},
+		Kind:   req.Kind,
+		States: []daemonops.State{daemonops.StateQueued, daemonops.StateRunning},
 	})
 	if err != nil {
 		return daemonops.Record{}, false, fmt.Errorf("list retryable interrupted operations: %w", err)
@@ -541,7 +540,7 @@ func (r *operationRuntime) reconcileMatchingInterruptedOperation(ctx context.Con
 		if _, retryable := r.retryableInterrupted[record.ID]; !retryable {
 			continue
 		}
-		if !sessionRestartRecoveryRequestMatches(record, req.ProjectID, payload) {
+		if !r.sessionRestartRecoveryRequestMatches(record, req.ProjectID, payload) {
 			conflictingID = record.ID
 			continue
 		}
@@ -578,7 +577,7 @@ func (r *operationRuntime) reconcileMatchingInterruptedOperation(ctx context.Con
 	return daemonops.Record{}, false, nil
 }
 
-func sessionRestartRecoveryRequestMatches(record daemonops.Record, submittedProjectID string, payload []byte) bool {
+func (r *operationRuntime) sessionRestartRecoveryRequestMatches(record daemonops.Record, submittedProjectID string, payload []byte) bool {
 	batch, ok := decodeSessionRestartBatchPlan(record)
 	if !ok {
 		return false
@@ -594,7 +593,7 @@ func sessionRestartRecoveryRequestMatches(record daemonops.Record, submittedProj
 	if strings.TrimSpace(durableProjectID) == "" {
 		durableProjectID = record.ProjectID
 	}
-	if protocol.NormalizeProjectID(submittedProjectID) != protocol.NormalizeProjectID(durableProjectID) ||
+	if r.canonicalizeProjectID(submittedProjectID) != r.canonicalizeProjectID(durableProjectID) ||
 		submitted.ForceBusy != batch.Request.ForceBusy || submitted.Yolo != batch.Request.Yolo ||
 		len(submitted.ImagePaths) != len(batch.Request.ImagePaths) {
 		return false
