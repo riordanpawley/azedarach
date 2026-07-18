@@ -278,6 +278,16 @@ func TestProjectReviewQueueRefreshesCrossProcessReviewLease(t *testing.T) {
 	issueID := createReviewTask(t, ctx, reader, domain.P1, "orchestrator")
 	d := newOrchestrationReviewTestDaemon(repoDir, reader)
 	authority := d.orchestrationAuthority()
+	if err := d.ensureLegacyMailboxObservationProjection(ctx, "project", repoDir); err != nil {
+		t.Fatal(err)
+	}
+	cutover, err := reader.MailboxObservationProjectionCutoverState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cutover.State != "complete" {
+		t.Fatalf("legacy mailbox cutover state = %q, want complete before snapshot admission", cutover.State)
+	}
 
 	before, err := authority.Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", RepoDir: repoDir})
 	if err != nil {
