@@ -1045,7 +1045,12 @@ func TestRootedOrchestratorIntentSupersedesWorkerLifecycleRecovery(t *testing.T)
 			t.Fatalf("seed %s: %v", seed.ID, err)
 		}
 	}
-	d := &Daemon{cfg: Config{RepoDir: repoDir}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store}, runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{}}
+	runner := newSessionStartTmuxRunner()
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir}, tmux: tmux.NewClient(runner, slog.Default()),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{},
+	}
 	worker, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, issueID, workerID)
 	if err != nil || found {
 		t.Fatalf("retired worker intent = %+v found=%t err=%v", worker, found, err)
@@ -1096,17 +1101,38 @@ func TestInterruptedSessionStartFailsClosedBeforeManagedIncarnationPlanning(t *t
 	if _, err := store.AcquireOrchestratorScopeLease(ctx, identity, sessionID, func(context.Context, string) (bool, error) { return false, nil }); err != nil {
 		t.Fatalf("seed pre-atomic rooted lease: %v", err)
 	}
-	d := &Daemon{cfg: Config{RepoDir: repoDir}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store}, runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{}}
+	runner := newSessionStartTmuxRunner()
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir}, tmux: tmux.NewClient(runner, slog.Default()),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{},
+	}
 	recovery, ok := d.recoverInterruptedOperation(ctx, daemonops.Record{ID: "op", ProjectID: projectID, IssueID: issueID, Kind: daemonhandlers.CommandSessionStart})
 	if !ok || recovery.State != daemonops.StateFailed || !strings.Contains(recovery.ErrorMessage, "before durable managed-agent incarnation planning") {
 		t.Fatalf("rooted crash-state recovery=%+v ok=%t, want typed pre-planning failure", recovery, ok)
 	}
-	if _, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, issueID, sessionID); err != nil || !found {
-		t.Fatalf("worker intent after fail-closed recovery found=%t err=%v", found, err)
+	if _, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, issueID, sessionID); err != nil || found {
+		t.Fatalf("worker intent after rooted compensation found=%t err=%v", found, err)
 	}
 	rooted, found, err := store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, issueID)
-	if err != nil || found {
+	if err != nil || !found || rooted.State != daemonstate.SessionStateStopped || rooted.ObservedState != daemonstate.SessionStateStopped {
 		t.Fatalf("rooted intent after fail-closed recovery=%+v found=%t err=%v", rooted, found, err)
+	}
+	if lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(store).Get(ctx, identity); err != nil || found {
+		t.Fatalf("rooted lease after fail-closed recovery=%+v found=%t err=%v", lease, found, err)
+	}
+
+	second, ok := d.recoverInterruptedOperation(ctx, daemonops.Record{ID: "op-retry", ProjectID: projectID, IssueID: issueID, Kind: daemonhandlers.CommandSessionStart})
+	if !ok || second.State != daemonops.StateFailed || !strings.Contains(second.ErrorMessage, "before durable managed-agent incarnation planning") {
+		t.Fatalf("second rooted crash-state recovery=%+v ok=%t, want identical typed failure", second, ok)
+	}
+	rooted, found, err = store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, issueID)
+	if err != nil || !found || rooted.State != daemonstate.SessionStateStopped || rooted.ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("rooted intent after repeated compensation=%+v found=%t err=%v", rooted, found, err)
+	}
+	rooted.State, rooted.ObservedState, rooted.UpdatedAt = daemonstate.SessionStateStarting, "", time.Now().UTC()
+	if _, err := daemonstate.NewOrchestratorLeaseAuthority(store).AcquireRooted(ctx, identity, rooted, func(context.Context, string) (bool, error) { return false, nil }); err != nil {
+		t.Fatalf("retry rooted acquisition after idempotent compensation: %v", err)
 	}
 }
 

@@ -105,6 +105,9 @@ func (d *Daemon) waitForInitialManagedAgentAcknowledgement(ctx context.Context, 
 		}
 		last = sample
 		if sample.promptConsumed && sample.identityFound && sample.paneFound && managedAgentIdentityMatchesPane(sample.identity, sample.pane, incarnation) {
+			if sessionStartPaneIsShellFallback(d.runtimeConfigForProject(projectID).SessionShell, sample.pane.CurrentCommand) {
+				return d.initialSessionBootstrapFailure(waitCtx, sessionID, incarnation, sample, sessionStartBootstrapShellFallback, errors.New("managed agent exited to a shell before acknowledgement"))
+			}
 			return nil
 		}
 		if !sample.paneFound {

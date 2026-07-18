@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 func TestOperationStateValid(t *testing.T) {
@@ -104,12 +105,13 @@ func TestOperationProgressEventBodyJSONRoundTrip(t *testing.T) {
 		ProjectID:   "proj",
 		State:       OperationStateRunning,
 		Progress: OperationProgress{
-			Phase:   "worktree_preflight",
-			Message: "fetching origin",
-			Current: 2,
-			Total:   4,
-			Unit:    "steps",
-			Percent: 50,
+			Phase:            "worktree_preflight",
+			Message:          "fetching origin",
+			Current:          2,
+			Total:            4,
+			Unit:             "steps",
+			Percent:          50,
+			AgentIncarnation: "restart-exact",
 		},
 	}
 
@@ -129,7 +131,33 @@ func TestOperationProgressEventBodyJSONRoundTrip(t *testing.T) {
 	if got.State != OperationStateRunning {
 		t.Fatalf("State = %q, want %q", got.State, OperationStateRunning)
 	}
-	if got.Progress.Phase != want.Progress.Phase || got.Progress.Message != want.Progress.Message || got.Progress.Percent != 50 {
+	if got.Progress.Phase != want.Progress.Phase || got.Progress.Message != want.Progress.Message || got.Progress.Percent != 50 || got.Progress.AgentIncarnation != "restart-exact" {
 		t.Fatalf("Progress = %+v, want %+v", got.Progress, want.Progress)
+	}
+}
+
+func TestOperationProgressAgentIncarnationWireContract(t *testing.T) {
+	want := OperationProgress{
+		Phase: "agent_launch", Message: "acknowledged", Current: 3, Total: 4,
+		Unit: "steps", Percent: 75, AgentIncarnation: "restart-exact",
+	}
+	data, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal operation progress JSON: %v", err)
+	}
+	if got, golden := string(data), readGoldenText(t, "operation_progress_v59.json.golden"); got != golden {
+		t.Fatalf("operation progress JSON=%s, want %s", got, golden)
+	}
+
+	packed, err := msgpack.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal operation progress msgpack: %v", err)
+	}
+	var got OperationProgress
+	if err := msgpack.Unmarshal(packed, &got); err != nil {
+		t.Fatalf("unmarshal operation progress msgpack: %v", err)
+	}
+	if got != want {
+		t.Fatalf("operation progress msgpack=%+v, want %+v", got, want)
 	}
 }

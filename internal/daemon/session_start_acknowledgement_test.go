@@ -102,6 +102,26 @@ func TestInitialManagedAgentAcknowledgementRequiresExactIncarnationAndConsumedPr
 	}
 }
 
+func TestInitialManagedAgentAcknowledgementRejectsExactIdentityAfterShellFallback(t *testing.T) {
+	d, store, runner := newSessionStartAcknowledgementTestDaemon(t)
+	runner.sessions["az-1"] = true
+	runner.panes["az-1"] = []string{"%7"}
+	runner.panePIDs["az-1"] = 123
+	runner.currentCommand = "zsh"
+	if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{
+		ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "7",
+		PanePID: 123, AgentIncarnation: "planned", ObservedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	prompt := filepath.Join(t.TempDir(), "consumed.prompt")
+	err := d.waitForInitialManagedAgentAcknowledgement(context.Background(), "project", "az-1", "planned", sessionPromptHandoff{PromptPath: prompt})
+	var bootstrapErr *sessionStartBootstrapError
+	if !errors.As(err, &bootstrapErr) || bootstrapErr.Reason != sessionStartBootstrapShellFallback {
+		t.Fatalf("error = %#v, want exact identity rejected as shell fallback", err)
+	}
+}
+
 func TestInitialManagedAgentAcknowledgementClassifiesBootstrapFailuresDeterministically(t *testing.T) {
 	for _, tc := range []struct {
 		name          string

@@ -183,7 +183,15 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 			} else {
 				workdir := d.resolveRepoDirForProject(projectID)
 				prompt := "You are the project orchestrator for this Azedarach project. Run `az prime`, then remain in the active orchestration loop until project completion."
-				artifact, artifactErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: projectID, SessionID: acquired.Lease.SessionID, Prompt: prompt})
+				plannedIncarnation, incarnationErr := newRestartIncarnation()
+				if incarnationErr != nil {
+					pauseOrReleaseLease()
+					return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("plan project orchestrator managed agent incarnation: %v", incarnationErr)), nil
+				}
+				artifact, artifactErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{
+					Mode: sessionLaunchInitial, ProjectID: projectID, SessionID: acquired.Lease.SessionID,
+					Prompt: prompt, LogicalPaneID: "agent", AgentIncarnation: plannedIncarnation,
+				})
 				if artifactErr != nil {
 					pauseOrReleaseLease()
 					return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare project orchestrator launch artifact: %v", artifactErr)), nil
@@ -197,15 +205,25 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 					}
 					result.Disposition = string(daemonstate.OrchestratorLeaseAttached)
 					live = true
+					launchedHere = true
 				} else {
 					launchedHere = true
 				}
 				if err := d.setSessionContextEnv(ctx, projectID, "", acquired.Lease.SessionID); err != nil {
 					if launchedHere {
+						artifact.remove()
 						_ = d.tmux.KillSession(ctx, acquired.Lease.SessionID)
 						pauseOrReleaseLease()
 					}
 					return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("set project orchestrator session context: %v", err)), nil
+				}
+				if launchedHere {
+					if err := d.waitForInitialManagedAgentAcknowledgement(ctx, projectID, acquired.Lease.SessionID, plannedIncarnation, artifact.PromptHandoff); err != nil {
+						artifact.remove()
+						_ = d.tmux.KillSession(ctx, acquired.Lease.SessionID)
+						pauseOrReleaseLease()
+						return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("confirm project orchestrator managed agent bootstrap: %v", err)), nil
+					}
 				}
 			}
 		}

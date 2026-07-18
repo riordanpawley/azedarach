@@ -1797,7 +1797,74 @@ func (d *Daemon) compensateInterruptedSessionStart(ctx context.Context, store *d
 	worktree, _, _ := store.GetWorktreeStateByIssueID(cleanupCtx, projectID, issueID)
 	resourceCtx := d.issueResourceLifecycleContext(projectID, issueID, sessionID, worktree.Path, worktree.Branch)
 	req := protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}}
-	return d.compensateSessionStartFailure(cleanupCtx, req, projectID, sessionID, issueID, resourceCtx, "busy", "hooks")
+	selector, rootedIdentity, rooted, resolveErr := d.interruptedSessionStartIntent(cleanupCtx, store, projectID, sessionID, issueID)
+	note := ""
+	if resolveErr != nil {
+		note = fmt.Sprintf("; failed-start rooted ownership resolution also failed: %v", resolveErr)
+	}
+	if rooted {
+		rootedProjection := daemonstate.Session{
+			ID: sessionID, IssueID: issueID, Role: daemonstate.SessionRoleOrchestrator,
+			ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: issueID,
+			State: daemonstate.SessionStateStarting, UpdatedAt: time.Now().UTC(),
+		}
+		if existing, found, err := store.GetSessionIntent(cleanupCtx, projectID, selector.Role, selector.ScopeKind, selector.ScopeID); err == nil && found {
+			rootedProjection = existing
+			rootedProjection.State = daemonstate.SessionStateStarting
+			rootedProjection.UpdatedAt = time.Now().UTC()
+		}
+		if _, err := daemonstate.NewOrchestratorLeaseAuthority(store).AcquireRooted(cleanupCtx, rootedIdentity, rootedProjection, func(context.Context, string) (bool, error) { return true, nil }); err != nil {
+			note += fmt.Sprintf("; failed-start rooted projection retirement preparation also failed: %v", err)
+		}
+	}
+	note += d.compensateSessionStartFailureWithSelector(cleanupCtx, req, projectID, sessionID, issueID, resourceCtx, "busy", "hooks", selector)
+	if rooted {
+		if err := daemonstate.NewOrchestratorLeaseAuthority(store).Release(cleanupCtx, rootedIdentity, sessionID); err != nil {
+			note += fmt.Sprintf("; failed-start rooted lease retirement also failed: %v", err)
+		}
+	}
+	return note
+}
+
+func (d *Daemon) interruptedSessionStartIntent(ctx context.Context, store *daemonstate.RuntimeStateStore, projectID, sessionID, issueID string) (sessionIntentSelector, domain.OrchestratorIdentity, bool, error) {
+	worker := normalizeSessionIntentSelector(sessionIntentSelector{}, issueID)
+	scope, err := domain.RootedOrchestrationScope(issueID)
+	if err != nil {
+		return worker, domain.OrchestratorIdentity{}, false, err
+	}
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		return worker, domain.OrchestratorIdentity{}, false, err
+	}
+	rooted := false
+	lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(store).Get(ctx, identity)
+	if err != nil {
+		return worker, identity, false, err
+	}
+	if found {
+		if strings.TrimSpace(lease.SessionID) != strings.TrimSpace(sessionID) {
+			return worker, identity, false, fmt.Errorf("rooted scope belongs to session %s, not interrupted session %s", lease.SessionID, sessionID)
+		}
+		rooted = true
+	}
+	if !rooted {
+		projection, projectionFound, loadErr := store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, issueID)
+		if loadErr != nil {
+			return worker, identity, false, loadErr
+		}
+		rooted = projectionFound && strings.TrimSpace(projection.ID) == strings.TrimSpace(sessionID)
+	}
+	if !rooted {
+		if issueClient := d.issueClientForProject(projectID); issueClient != nil {
+			if task, taskErr := issueClient.GetWithRuntime(ctx, projectID, issueID); taskErr == nil {
+				rooted = task.Type == domain.TypeEpic
+			}
+		}
+	}
+	if !rooted {
+		return worker, identity, false, nil
+	}
+	return sessionIntentSelector{Role: daemonstate.SessionRoleOrchestrator, ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: issueID}, identity, true, nil
 }
 
 func (d *Daemon) recoverInterruptedSessionRestart(ctx context.Context, record daemonops.Record) (interruptedOperationRecovery, bool) {

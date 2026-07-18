@@ -42,6 +42,7 @@ func TestProjectOrchestratorSessionStartAttachesExactScopeSingleton(t *testing.T
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
 		tmux:                   tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil))),
 	}
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, projectID)
 	body, err := json.Marshal(protocol.OrchestratorSessionRequest{Scope: domain.ProjectOrchestrationScope()})
 	if err != nil {
 		t.Fatal(err)
@@ -176,6 +177,59 @@ func TestProjectOrchestratorSessionStartAttachesExactScopeSingleton(t *testing.T
 	}
 	if projection.State != daemonstate.SessionStateRunning || projection.ObservedState != daemonstate.SessionStateRunning {
 		t.Fatalf("projection lifecycle = %+v", projection)
+	}
+}
+
+func TestProjectOrchestratorSessionStartRejectsImmediateManagedAgentExitAndRetries(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "project-session-exit"
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	runner := newSessionStartTmuxRunner()
+	d := &Daemon{
+		cfg:                    Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+		tmux:                   tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil))),
+	}
+	body, err := json.Marshal(protocol.OrchestratorSessionRequest{Scope: domain.ProjectOrchestrationScope()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := protocol.RequestEnvelope{Command: protocol.CommandOrchestratorSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body}
+	runner.onNewSession = func(sessionID string) { runner.sessionsWithoutPanes[sessionID] = true }
+	failed, err := d.handleOrchestratorSession(ctx, request)
+	if err != nil || failed.Error == nil || failed.Error.Code != protocol.ErrorCodeUnavailable {
+		t.Fatalf("immediate-exit start response=%+v err=%v", failed.Error, err)
+	}
+	identity, err := domain.NewOrchestratorIdentity(projectID, domain.ProjectOrchestrationScope())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(store).Get(ctx, identity); err != nil || found {
+		t.Fatalf("lease after rejected launch=%+v found=%t err=%v", lease, found, err)
+	}
+	sessionID := d.orchestratorSessionID(projectID, domain.ProjectOrchestrationScope())
+	if live, err := d.tmux.HasSession(ctx, sessionID); err != nil || live {
+		t.Fatalf("runtime after rejected launch live=%t err=%v", live, err)
+	}
+	if projection, found, err := store.GetSessionState(ctx, projectID, sessionID); err != nil || found {
+		t.Fatalf("projection after rejected launch=%+v found=%t err=%v", projection, found, err)
+	}
+
+	runner.onNewSession = nil
+	delete(runner.sessionsWithoutPanes, sessionID)
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, projectID)
+	retried, err := d.handleOrchestratorSession(ctx, request)
+	if err != nil || retried.Error != nil {
+		t.Fatalf("retry start response=%+v err=%v", retried.Error, err)
+	}
+	var result protocol.OrchestratorSessionResult
+	if err := json.Unmarshal(retried.Body, &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Live || result.Lifecycle != domain.OrchestratorWorking {
+		t.Fatalf("retry result=%+v", result)
 	}
 }
 
@@ -761,6 +815,7 @@ func TestProjectOrchestratorLaunchUsesInheritedAzForInitialHookAndBackgroundComm
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
 		tmux:                   tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil))),
 	}
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, projectID)
 	body, err := json.Marshal(protocol.OrchestratorSessionRequest{Scope: domain.ProjectOrchestrationScope()})
 	if err != nil {
 		t.Fatal(err)
@@ -817,6 +872,7 @@ func TestOrchestratorSessionStopPausesPreservesCursorAndIsolatesScopes(t *testin
 		orchestratorStopPollInterval: time.Millisecond,
 		hub:                          publish.NewHub(32, 32, slog.Default()),
 	}
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, projectID)
 	events, cancelEvents := d.hub.Subscribe(projectID, 0)
 	defer cancelEvents()
 	projectScope := domain.ProjectOrchestrationScope()
@@ -977,6 +1033,7 @@ func TestConcurrentStopThenStartAcrossDaemonsConvergesToStartWinner(t *testing.T
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: secondStore},
 		tmux:                   tmux.NewClient(runner, slog.Default()),
 	}
+	acknowledgeManagedAgentOnInitialLaunch(t, second, runner, projectID)
 	scope := domain.ProjectOrchestrationScope()
 	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
 	if err != nil {
@@ -1257,6 +1314,7 @@ func TestFullReconcileRecoversMissingProjectOrchestratorThroughAuthority(t *test
 	cache := daemonstate.NewStore()
 	manager := git.NewWorktreeManager(&testGitRunner{}, repoDir, slog.Default())
 	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{repoDir: store}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store}, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: cache, worktreeManagersByRoot: map[string]*git.WorktreeManager{repoDir: manager}, worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager}}
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, projectID)
 	body, _ := json.Marshal(protocol.OrchestratorSessionRequest{Scope: domain.ProjectOrchestrationScope()})
 	request := protocol.RequestEnvelope{Command: protocol.CommandOrchestratorSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body}
 	response, err := d.handleOrchestratorSession(ctx, request)
