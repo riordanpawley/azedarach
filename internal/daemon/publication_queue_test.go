@@ -179,6 +179,7 @@ func TestPublicationRecoversCrashAfterExactApplyBeforeTaskReceipt(t *testing.T) 
 	requireNoError(t, firstState.UpsertWorktreeState(ctx, daemonstate.WorktreeState{ProjectID: projectID, IssueID: issueID, Path: sourcePath, Branch: sourceBranch, UpdatedAt: time.Now().UTC()}))
 	first := newOrchestrationReviewTestDaemon(repo, issueClient)
 	first.reviewCandidateCheck = nil
+	first.snapshotAdmissionContext = context.WithCancel
 	first.cfg.BaseBranch = "main"
 	first.issueClientsByProject = map[string]*issues.Client{projectID: issueClient}
 	first.operationRuntime = firstRuntime
@@ -263,6 +264,24 @@ func TestPublicationRecoversCrashAfterExactApplyBeforeTaskReceipt(t *testing.T) 
 	requireNoError(t, err)
 	if task.Status != domain.StatusDone {
 		t.Fatalf("recovered issue status = %s, want done", task.Status)
+	}
+	receipts, err = restartedClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted}})
+	requireNoError(t, err)
+	if len(receipts) != 1 {
+		t.Fatalf("recovered task receipts = %+v, want one exact integration receipt", receipts)
+	}
+	receipt := receipts[0]
+	if operationID := observationPayloadString(receipt.Payload, "publication_operation_id"); operationID != original.OperationID {
+		t.Fatalf("recovered receipt publication operation = %q, want %q", operationID, original.OperationID)
+	}
+	if got := observationPayloadString(receipt.Payload, "base_oid"); got != original.BaseRevision {
+		t.Fatalf("recovered receipt base OID = %q, want %q", got, original.BaseRevision)
+	}
+	if got := observationPayloadString(receipt.Payload, "source_oid"); got != original.SourceRevision {
+		t.Fatalf("recovered receipt source OID = %q, want %q", got, original.SourceRevision)
+	}
+	if got := observationPayloadString(receipt.Payload, "target_oid"); got != original.CandidateRevision {
+		t.Fatalf("recovered receipt target OID = %q, want %q", got, original.CandidateRevision)
 	}
 }
 
