@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -605,12 +606,7 @@ func TestProjectReadMaterializerWatchBlocksAndWakesAcrossClients(t *testing.T) {
 	if err := reader.OpenProjectionDeltaStore(); err != nil {
 		t.Fatal(err)
 	}
-	watchStore := &watchBarrierProjectionStore{
-		projectionDeltaStore: reader,
-		entered:              make(chan struct{}),
-		release:              make(chan struct{}),
-	}
-	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(watchStore), nil)
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(reader), nil)
 	if err := materializer.bootstrap(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -625,7 +621,9 @@ func TestProjectReadMaterializerWatchBlocksAndWakesAcrossClients(t *testing.T) {
 		cancel()
 		<-done
 	})
-	<-watchStore.entered
+	for reader.ResourceDiagnostics().ProjectionWatchesActive == 0 {
+		runtime.Gosched()
+	}
 	select {
 	case <-advanced:
 		t.Fatal("watch returned without source advancement")
@@ -634,7 +632,6 @@ func TestProjectReadMaterializerWatchBlocksAndWakesAcrossClients(t *testing.T) {
 	if _, err := writer.Create(context.Background(), issues.CreateTaskParams{Title: "cross-client", Type: domain.TypeTask}); err != nil {
 		t.Fatal(err)
 	}
-	close(watchStore.release)
 	metadata := <-advanced
 	if metadata.DeliveryCursor == 0 {
 		t.Fatalf("watch metadata = %+v", metadata)

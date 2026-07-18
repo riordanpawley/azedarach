@@ -10,13 +10,14 @@ import (
 )
 
 type fsnotifyProjectionDeltaNotifier struct {
-	signalPath string
-	watcher    *fsnotify.Watcher
-	events     chan struct{}
-	errors     chan error
-	done       chan struct{}
-	once       sync.Once
-	wg         sync.WaitGroup
+	signalPath      string
+	watcher         *fsnotify.Watcher
+	events          chan struct{}
+	errors          chan error
+	done            chan struct{}
+	once            sync.Once
+	wg              sync.WaitGroup
+	unregisterLocal func()
 }
 
 func newProjectionDeltaNotifier(dbPath string) (projectionDeltaNotifier, error) {
@@ -43,6 +44,7 @@ func newProjectionDeltaNotifier(dbPath string) (projectionDeltaNotifier, error) 
 		errors:     make(chan error, 1),
 		done:       make(chan struct{}),
 	}
+	n.unregisterLocal = registerLocalProjectionDeltaNotification(dbPath, n.events)
 	n.wg.Add(1)
 	go n.run()
 	return n, nil
@@ -54,6 +56,7 @@ func (n *fsnotifyProjectionDeltaNotifier) Errors() <-chan error    { return n.er
 func (n *fsnotifyProjectionDeltaNotifier) Close() error {
 	var err error
 	n.once.Do(func() {
+		n.unregisterLocal()
 		close(n.done)
 		err = n.watcher.Close()
 		n.wg.Wait()
@@ -65,6 +68,7 @@ func (n *fsnotifyProjectionDeltaNotifier) run() {
 	defer n.wg.Done()
 	defer close(n.events)
 	defer close(n.errors)
+	defer n.unregisterLocal()
 	for {
 		select {
 		case <-n.done:
@@ -97,6 +101,9 @@ func projectionDeltaNotificationPath(dbPath string) string {
 }
 
 func signalProjectionDeltaNotification(dbPath string) error {
+	// A sidecar failure must not suppress reliable same-process wakeups after
+	// the authoritative SQLite transaction has already committed.
+	defer signalLocalProjectionDeltaNotification(dbPath)
 	signalFile, err := os.OpenFile(projectionDeltaNotificationPath(dbPath), os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
