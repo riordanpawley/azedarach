@@ -1479,6 +1479,17 @@ func TestRefreshActiveProjectReadRuntimeRecoversAuthoritativeHealthBeforeUserPro
 	if got := reader.snapshotMetadata().Health; !strings.Contains(got, "stale: authoritative read refresh:") {
 		t.Fatalf("failed user projection sync health = %q, want authoritative stale health", got)
 	}
+	reader.markUnhealthy(errors.New("structural projection failure"), false)
+	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, "p", reader, []string{"issue"}); err == nil || !strings.Contains(err.Error(), "structural projection failure") {
+		t.Fatalf("unrelated unhealthy refresh error = %v", err)
+	}
+	if got := reader.snapshotMetadata().Health; !strings.Contains(got, "structural projection failure") {
+		t.Fatalf("unrelated health was cleared: %q", got)
+	}
+	d.materializers = map[string]*projectReadMaterializer{}
+	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, "p", reader, []string{"issue"}); err == nil || !strings.Contains(err.Error(), "no longer active") {
+		t.Fatalf("removed materializer refresh error = %v", err)
+	}
 }
 
 func TestStopAllProjectReadMaterializersCancelsAndJoinsConsumers(t *testing.T) {

@@ -1359,6 +1359,9 @@ func (d *Daemon) syncUserProjectionMaterializedIssuesForRefresh(ctx context.Cont
 	}
 	materializer := d.activeProjectReadMaterializer(projectID)
 	if materializer == nil {
+		if refreshMaterializer != nil {
+			return newProjectReadUnavailableError("project read materializer is no longer active during authoritative refresh")
+		}
 		return nil
 	}
 	if refreshMaterializer != nil && materializer != refreshMaterializer {
