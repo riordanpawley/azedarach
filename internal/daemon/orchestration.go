@@ -33,6 +33,40 @@ const (
 
 var errOrchestrationSnapshotAdmissionContended = errors.New("orchestration snapshot admission contended")
 
+type orchestrationSnapshotAdmissionError struct {
+	Phase protocol.OrchestrationAdmissionPhase
+	Cause error
+}
+
+func (e *orchestrationSnapshotAdmissionError) Error() string {
+	return fmt.Sprintf("%s (%s): %v", errOrchestrationSnapshotAdmissionContended, e.Phase, e.Cause)
+}
+
+func (e *orchestrationSnapshotAdmissionError) Unwrap() error { return e.Cause }
+
+func (e *orchestrationSnapshotAdmissionError) Is(target error) bool {
+	return target == errOrchestrationSnapshotAdmissionContended
+}
+
+type orchestrationSnapshotAdmissionBoundaryError struct {
+	Phase protocol.OrchestrationAdmissionPhase
+	Cause error
+}
+
+func (e *orchestrationSnapshotAdmissionBoundaryError) Error() string { return e.Cause.Error() }
+func (e *orchestrationSnapshotAdmissionBoundaryError) Unwrap() error { return e.Cause }
+
+func orchestrationAdmissionBoundaryError(phase protocol.OrchestrationAdmissionPhase, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &orchestrationSnapshotAdmissionBoundaryError{Phase: phase, Cause: err}
+}
+
+func orchestrationAdmissionContentionError(phase protocol.OrchestrationAdmissionPhase, err error) error {
+	return &orchestrationSnapshotAdmissionError{Phase: phase, Cause: err}
+}
+
 // orchestrationAuthority is the deliberately small daemon boundary for all
 // rooted and project-wide orchestration clients.
 type orchestrationAuthority interface {
@@ -502,7 +536,12 @@ func (a daemonOrchestrationAuthority) buildSnapshot(ctx context.Context, project
 		defer cancel()
 		admissionError = func(err error) error {
 			if err != nil && parentCtx.Err() == nil && ctx.Err() != nil {
-				return fmt.Errorf("%w: %v", errOrchestrationSnapshotAdmissionContended, err)
+				phase := protocol.OrchestrationAdmissionSnapshot
+				var boundaryErr *orchestrationSnapshotAdmissionBoundaryError
+				if errors.As(err, &boundaryErr) {
+					phase = boundaryErr.Phase
+				}
+				return orchestrationAdmissionContentionError(phase, err)
 			}
 			return err
 		}
@@ -522,7 +561,7 @@ func (a daemonOrchestrationAuthority) buildSnapshot(ctx context.Context, project
 			}
 			projection, err := issueClient.ExportOrchestrationProjection(ctx, projectID, limit)
 			if err != nil {
-				return protocol.OrchestrationSnapshot{}, admissionError(fmt.Errorf("prepare project orchestration projection: %w", err))
+				return protocol.OrchestrationSnapshot{}, admissionError(orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionProjectionCheckpoint, fmt.Errorf("prepare project orchestration projection: %w", err)))
 			}
 			ids := taskIDsFromTasks(projection.Tasks)
 			if len(request.ReviewIssueIDs) > 0 {
@@ -536,10 +575,10 @@ func (a daemonOrchestrationAuthority) buildSnapshot(ctx context.Context, project
 			}
 			repoDir := strings.TrimSpace(a.daemon.resolveRepoDirForProject(projectID))
 			if err := a.daemon.ensureLegacyMailboxObservationProjection(ctx, projectID, repoDir); err != nil {
-				return protocol.OrchestrationSnapshot{}, admissionError(fmt.Errorf("prepare project legacy mailbox observation projection: %w", err))
+				return protocol.OrchestrationSnapshot{}, admissionError(orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionObservationProjection, fmt.Errorf("prepare project legacy mailbox observation projection: %w", err)))
 			}
 			if err := a.daemon.reconcileDecisionPropagationOutbox(ctx, projectID); err != nil {
-				return protocol.OrchestrationSnapshot{}, admissionError(fmt.Errorf("prepare project decision propagation projection: %w", err))
+				return protocol.OrchestrationSnapshot{}, admissionError(orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionObservationProjection, fmt.Errorf("prepare project decision propagation projection: %w", err)))
 			}
 			preparedCheckpoint = projection.Checkpoint
 			if a.daemon.orchestrationSnapshotPrepared != nil {
@@ -568,7 +607,7 @@ func (a daemonOrchestrationAuthority) buildSnapshot(ctx context.Context, project
 		}
 		if prepareProjectAttempt && snapshot.ProjectionRevision != preparedCheckpoint {
 			if attempt == maxProjectionSnapshotAttempts {
-				return protocol.OrchestrationSnapshot{}, fmt.Errorf("%w: project orchestration preparation changed before export after %d attempts (prepared %d, exported %d)", errOrchestrationSnapshotAdmissionContended, attempt, preparedCheckpoint, snapshot.ProjectionRevision)
+				return protocol.OrchestrationSnapshot{}, orchestrationAdmissionContentionError(protocol.OrchestrationAdmissionProjectionCheckpoint, fmt.Errorf("project orchestration preparation changed before export after %d attempts (prepared %d, exported %d)", attempt, preparedCheckpoint, snapshot.ProjectionRevision))
 			}
 			continue
 		}
@@ -578,13 +617,13 @@ func (a daemonOrchestrationAuthority) buildSnapshot(ctx context.Context, project
 		}
 		checkpoint, err := issueClient.ProjectionSourceCheckpoint(ctx)
 		if err != nil {
-			return protocol.OrchestrationSnapshot{}, admissionError(fmt.Errorf("revalidate project orchestration projection: %w", err))
+			return protocol.OrchestrationSnapshot{}, admissionError(orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionProjectionCheckpoint, fmt.Errorf("revalidate project orchestration projection: %w", err)))
 		}
 		if checkpoint == snapshot.ProjectionRevision {
 			return snapshot, nil
 		}
 		if attempt == maxProjectionSnapshotAttempts {
-			return protocol.OrchestrationSnapshot{}, fmt.Errorf("%w: project orchestration projection changed while building snapshot after %d attempts (exported %d, current %d)", errOrchestrationSnapshotAdmissionContended, attempt, snapshot.ProjectionRevision, checkpoint)
+			return protocol.OrchestrationSnapshot{}, orchestrationAdmissionContentionError(protocol.OrchestrationAdmissionProjectionCheckpoint, fmt.Errorf("project orchestration projection changed while building snapshot after %d attempts (exported %d, current %d)", attempt, snapshot.ProjectionRevision, checkpoint))
 		}
 	}
 	return protocol.OrchestrationSnapshot{}, errors.New("project orchestration snapshot retry exhausted")
@@ -624,7 +663,7 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 	if identity.Scope.Kind == domain.OrchestrationScopeProject || len(request.ReviewIssueIDs) > 0 {
 		projection, exportErr := issueClient.ExportOrchestrationProjection(ctx, projectID, limit)
 		if exportErr != nil {
-			return protocol.OrchestrationSnapshot{}, fmt.Errorf("load project orchestration projection: %w", exportErr)
+			return protocol.OrchestrationSnapshot{}, orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionProjectionCheckpoint, fmt.Errorf("load project orchestration projection: %w", exportErr))
 		}
 		if a.daemon.orchestrationProjectionExported != nil {
 			a.daemon.orchestrationProjectionExported()
@@ -654,27 +693,27 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 	if a.daemon.operationRuntime != nil {
 		validationStore, err := a.daemon.validationProjectionStore()
 		if err != nil {
-			return protocol.OrchestrationSnapshot{}, fmt.Errorf("load validation capacity projection: %w", err)
+			return protocol.OrchestrationSnapshot{}, orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionOperationsStore, fmt.Errorf("load validation capacity projection: %w", err))
 		}
 		validation, err := validationStore.ValidationSnapshot(ctx, projectID, snapshot.GeneratedAt, defaultValidationLeaseTTL)
 		if err != nil {
-			return protocol.OrchestrationSnapshot{}, fmt.Errorf("load validation capacity projection: %w", err)
+			return protocol.OrchestrationSnapshot{}, orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionOperationsStore, fmt.Errorf("load validation capacity projection: %w", err))
 		}
 		snapshot.ValidationCapacity = &validation
 		publicationStore, err := a.daemon.publicationStoreForProject(projectID)
 		if err != nil {
-			return protocol.OrchestrationSnapshot{}, fmt.Errorf("resolve publication queue projection: %w", err)
+			return protocol.OrchestrationSnapshot{}, orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionOperationsStore, fmt.Errorf("resolve publication queue projection: %w", err))
 		}
 		publications, err := publicationStore.PublicationOperations(ctx, projectID, "", true)
 		if err != nil {
-			return protocol.OrchestrationSnapshot{}, fmt.Errorf("load publication queue projection: %w", err)
+			return protocol.OrchestrationSnapshot{}, orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionOperationsStore, fmt.Errorf("load publication queue projection: %w", err))
 		}
 		snapshot.PublicationQueue = publications
 	}
 	if len(request.ReviewIssueIDs) > 0 {
 		snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, materializedTasks)
 		if err != nil {
-			return protocol.OrchestrationSnapshot{}, err
+			return protocol.OrchestrationSnapshot{}, orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionObservationProjection, err)
 		}
 		finalizeOrchestrationSnapshotSource(&snapshot)
 		return snapshot, nil
@@ -693,13 +732,13 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 		tasks := materializedParentChildClosure(materializedTasks, root)
 		snapshot.PublicationQueue = publicationOperationsForTasks(snapshot.PublicationQueue, tasks)
 		if err := a.enrichPendingDecisions(ctx, projectID, issueClient, &snapshot, tasks); err != nil {
-			return protocol.OrchestrationSnapshot{}, err
+			return protocol.OrchestrationSnapshot{}, orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionObservationProjection, err)
 		}
 		// reviewQueue retains the closure as integration-base context while
 		// selecting only this rooted orchestrator's direct children for action.
 		snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, tasks)
 		if err != nil {
-			return protocol.OrchestrationSnapshot{}, err
+			return protocol.OrchestrationSnapshot{}, orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionObservationProjection, err)
 		}
 		finalizeOrchestrationSnapshotSource(&snapshot)
 		return snapshot, nil
@@ -715,11 +754,11 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 	candidateRoots := projectOrchestrationCandidateRoots(projectRoots, limit)
 	tasks := materializedProjectOrchestrationContextForCandidates(projectTasks, candidateRoots)
 	if err := a.enrichPendingDecisions(ctx, projectID, issueClient, &snapshot, projectRoots); err != nil {
-		return protocol.OrchestrationSnapshot{}, err
+		return protocol.OrchestrationSnapshot{}, orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionObservationProjection, err)
 	}
 	snapshot.ReviewQueue, err = a.reviewQueue(ctx, projectID, request, projectTasks)
 	if err != nil {
-		return protocol.OrchestrationSnapshot{}, err
+		return protocol.OrchestrationSnapshot{}, orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionObservationProjection, err)
 	}
 	tasksByID := make(map[string]domain.Task, len(tasks))
 	for _, task := range tasks {
@@ -1537,17 +1576,11 @@ func normalizedRequestedStartIssueIDs(issueIDs []string) []string {
 }
 
 func orchestrationStartAdmissionPhase(err error) protocol.OrchestrationAdmissionPhase {
-	message := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(message, "projection source checkpoint"), strings.Contains(message, "projection_source_checkpoint"):
-		return protocol.OrchestrationAdmissionProjectionCheckpoint
-	case strings.Contains(message, "operation"):
-		return protocol.OrchestrationAdmissionOperationsStore
-	case strings.Contains(message, "observation"):
-		return protocol.OrchestrationAdmissionObservationProjection
-	default:
-		return protocol.OrchestrationAdmissionSnapshot
+	var admissionErr *orchestrationSnapshotAdmissionError
+	if errors.As(err, &admissionErr) && admissionErr.Phase != "" {
+		return admissionErr.Phase
 	}
+	return protocol.OrchestrationAdmissionSnapshot
 }
 
 func directOrchestrationTarget(tasks []domain.Task, rootIssueID, issueID string) bool {

@@ -741,7 +741,7 @@ func TestProjectOrchestrationExplicitStartQueuesBeforeSnapshotAdmissionContentio
 	}
 	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
 	d.orchestrationSnapshotBuild = func(context.Context, string, protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
-		return protocol.OrchestrationSnapshot{}, fmt.Errorf("%w: projection_source_checkpoint", errOrchestrationSnapshotAdmissionContended)
+		return protocol.OrchestrationSnapshot{}, orchestrationAdmissionContentionError(protocol.OrchestrationAdmissionProjectionCheckpoint, errors.New("checkpoint unavailable"))
 	}
 	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentStart, IntentKey: "explicit-contended", ActorID: "steward", IssueIDs: []string{issueID}}
 	result, err := d.orchestrationAuthority().Apply(ctx, "proj", request)
@@ -787,19 +787,19 @@ func TestProjectOrchestrationExplicitStartCompletesIntentOnTerminalAdmissionRefu
 
 func TestOrchestrationStartAdmissionPhaseIsTyped(t *testing.T) {
 	tests := []struct {
-		name  string
-		error string
-		phase protocol.OrchestrationAdmissionPhase
+		name string
+		err  error
+		want protocol.OrchestrationAdmissionPhase
 	}{
-		{name: "projection checkpoint", error: "read projection source checkpoint: context canceled", phase: "projection_source_checkpoint"},
-		{name: "operations store", error: "list operations: database is locked", phase: "operations_store"},
-		{name: "observation projection", error: "capture project observation events: context canceled", phase: "project_observation_projection"},
-		{name: "unknown", error: "runtime projection writer: context canceled", phase: "snapshot_admission"},
+		{name: "projection checkpoint", err: orchestrationAdmissionContentionError(protocol.OrchestrationAdmissionProjectionCheckpoint, errors.New("context canceled")), want: protocol.OrchestrationAdmissionProjectionCheckpoint},
+		{name: "operations store", err: fmt.Errorf("outer active-path wrapper: %w", orchestrationAdmissionContentionError(protocol.OrchestrationAdmissionOperationsStore, errors.New("database is locked"))), want: protocol.OrchestrationAdmissionOperationsStore},
+		{name: "observation projection", err: orchestrationAdmissionContentionError(protocol.OrchestrationAdmissionObservationProjection, errors.New("context canceled")), want: protocol.OrchestrationAdmissionObservationProjection},
+		{name: "misleading untyped wording is not inferred", err: fmt.Errorf("operation observation projection source checkpoint: %w", errOrchestrationSnapshotAdmissionContended), want: protocol.OrchestrationAdmissionSnapshot},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := orchestrationStartAdmissionPhase(errors.New(test.error)); got != test.phase {
-				t.Fatalf("phase=%q want=%q", got, test.phase)
+			if got := orchestrationStartAdmissionPhase(test.err); got != test.want {
+				t.Fatalf("phase=%q want=%q", got, test.want)
 			}
 		})
 	}
@@ -815,12 +815,11 @@ func TestNormalizedRequestedStartIssueIDsPreservesStoredIdentity(t *testing.T) {
 func TestProjectOrchestrationExplicitStartIsDurableBeforeContendedAdmissionPhases(t *testing.T) {
 	tests := []struct {
 		name  string
-		error string
 		phase protocol.OrchestrationAdmissionPhase
 	}{
-		{name: "projection checkpoint", error: "read projection source checkpoint: context canceled", phase: "projection_source_checkpoint"},
-		{name: "operations store", error: "list operations: database is locked", phase: "operations_store"},
-		{name: "observation projection", error: "capture project observation events: context canceled", phase: "project_observation_projection"},
+		{name: "projection checkpoint", phase: protocol.OrchestrationAdmissionProjectionCheckpoint},
+		{name: "operations store", phase: protocol.OrchestrationAdmissionOperationsStore},
+		{name: "observation projection", phase: protocol.OrchestrationAdmissionObservationProjection},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -837,7 +836,7 @@ func TestProjectOrchestrationExplicitStartIsDurableBeforeContendedAdmissionPhase
 			d.orchestrationSnapshotBuild = func(context.Context, string, protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
 				close(admissionEntered)
 				<-releaseAdmission
-				return protocol.OrchestrationSnapshot{}, fmt.Errorf("%w: %s", errOrchestrationSnapshotAdmissionContended, test.error)
+				return protocol.OrchestrationSnapshot{}, orchestrationAdmissionContentionError(test.phase, errors.New("active-path admission unavailable"))
 			}
 			type applyResult struct {
 				result protocol.OrchestrationIntentResult
@@ -890,7 +889,7 @@ func TestProjectOrchestrationExplicitStartIntentWaitsForObservationWriterThenQue
 
 	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
 	d.orchestrationSnapshotBuild = func(context.Context, string, protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
-		return protocol.OrchestrationSnapshot{}, fmt.Errorf("%w: capture project observation events", errOrchestrationSnapshotAdmissionContended)
+		return protocol.OrchestrationSnapshot{}, orchestrationAdmissionContentionError(protocol.OrchestrationAdmissionObservationProjection, errors.New("capture project observation events"))
 	}
 	queuedAtLock := make(chan struct{}, 1)
 	applyCtx := issues.WithMutationLockWaitHookForTest(ctx, func(waiter, holder string) {
@@ -917,6 +916,73 @@ func TestProjectOrchestrationExplicitStartIntentWaitsForObservationWriterThenQue
 	got := <-resultDone
 	if got.err != nil || len(got.result.Pending) != 1 || got.result.Pending[0].Phase != "project_observation_projection" {
 		t.Fatalf("result=%+v err=%v", got.result, got.err)
+	}
+}
+
+func TestProjectOrchestrationExplicitStartRealBuilderCarriesTypedAdmissionPhase(t *testing.T) {
+	tests := []struct {
+		name      string
+		wantPhase protocol.OrchestrationAdmissionPhase
+		configure func(*Daemon, *context.CancelFunc)
+	}{
+		{
+			name:      "projection checkpoint wrapper",
+			wantPhase: protocol.OrchestrationAdmissionProjectionCheckpoint,
+			configure: func(_ *Daemon, cancel *context.CancelFunc) { (*cancel)() },
+		},
+		{
+			name:      "operations store wrapper",
+			wantPhase: protocol.OrchestrationAdmissionOperationsStore,
+			configure: func(d *Daemon, cancel *context.CancelFunc) {
+				d.taskGraphOperationList = func(ctx context.Context, _ daemonops.Query) ([]daemonops.Record, error) {
+					(*cancel)()
+					return nil, ctx.Err()
+				}
+			},
+		},
+		{
+			name:      "observation projection wrapper",
+			wantPhase: protocol.OrchestrationAdmissionObservationProjection,
+			configure: func(d *Daemon, cancel *context.CancelFunc) {
+				d.taskGraphOperationList = func(context.Context, daemonops.Query) ([]daemonops.Record, error) {
+					(*cancel)()
+					return nil, nil
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+			t.Cleanup(func() { _ = client.CloseDB() })
+			issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Requested", Description: "Executable", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+			if err != nil {
+				t.Fatal(err)
+			}
+			d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+			var admissionCancel context.CancelFunc = func() {}
+			d.snapshotAdmissionContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+				admissionCtx, cancel := context.WithCancel(parent)
+				admissionCancel = cancel
+				return admissionCtx, cancel
+			}
+			test.configure(d, &admissionCancel)
+			if test.wantPhase == protocol.OrchestrationAdmissionProjectionCheckpoint {
+				d.snapshotAdmissionContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+					admissionCtx, cancel := context.WithCancel(parent)
+					cancel()
+					return admissionCtx, cancel
+				}
+			}
+			result, applyErr := d.orchestrationAuthority().Apply(ctx, "proj", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentStart, IntentKey: "real-" + string(test.wantPhase), ActorID: "steward", IssueIDs: []string{issueID}})
+			if applyErr != nil {
+				t.Fatalf("explicit start should queue typed progress: %v", applyErr)
+			}
+			if len(result.Pending) != 1 || result.Pending[0].Phase != test.wantPhase || !result.Pending[0].Retryable {
+				t.Fatalf("typed queued progress = %+v, want phase %q", result.Pending, test.wantPhase)
+			}
+		})
 	}
 }
 

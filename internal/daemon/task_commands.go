@@ -5861,7 +5861,7 @@ func (d *Daemon) captureTaskGraphReadinessContext(ctx context.Context, projectID
 	}
 	captured.pendingStarts, err = d.taskGraphPendingSessionStarts(ctx, projectID)
 	if err != nil {
-		return taskGraphReadinessContext{}, err
+		return taskGraphReadinessContext{}, orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionOperationsStore, fmt.Errorf("list pending session-start operations: %w", err))
 	}
 	captured.startProgressByIssue = d.sessionStartProgressByIssueAt(ctx, projectID, captured.capturedAt)
 	captured.failedStartsByIssue = d.failedSessionStartByIssue(ctx, projectID)
@@ -5889,7 +5889,7 @@ func (d *Daemon) captureTaskGraphReadinessContext(ctx context.Context, projectID
 	}
 	captured.completionByIssue, err = d.taskGraphDurableCompletionEvidence(ctx, projectID, completionIssueIDs)
 	if err != nil {
-		return taskGraphReadinessContext{}, err
+		return taskGraphReadinessContext{}, orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionObservationProjection, fmt.Errorf("load durable completion evidence: %w", err))
 	}
 	if includeMailbox {
 		for _, rootIssueID := range uniqueNonEmpty(roots) {
@@ -5898,7 +5898,7 @@ func (d *Daemon) captureTaskGraphReadinessContext(ctx context.Context, projectID
 	} else if d.taskGraphObservationEvents == nil && !orchestrationSnapshotPrepared(ctx) {
 		repoDir := strings.TrimSpace(d.resolveRepoDirForProject(projectID))
 		if err := d.ensureLegacyMailboxObservationProjection(ctx, projectID, repoDir); err != nil {
-			return taskGraphReadinessContext{}, fmt.Errorf("project legacy mailbox observation projection: %w", err)
+			return taskGraphReadinessContext{}, orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionObservationProjection, fmt.Errorf("project legacy mailbox observation projection: %w", err))
 		}
 	}
 	taskIDs := taskIDsFromTasks(tasks)
@@ -5912,7 +5912,7 @@ func (d *Daemon) captureTaskGraphReadinessContext(ctx context.Context, projectID
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Debug("readiness context observation capture failed", "project_id", projectID, "issue_count", len(taskIDs), "error", captureErr)
 			}
-			return taskGraphReadinessContext{}, fmt.Errorf("capture project observation projection: %w", captureErr)
+			return taskGraphReadinessContext{}, orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionObservationProjection, fmt.Errorf("capture project observation projection: %w", captureErr))
 		}
 		captured.issueEventsByIssue = observationCapture.RecentByIssue
 		captured.stewardshipByIssue = observationCapture.StewardshipByIssue
