@@ -101,7 +101,9 @@ func ensureAncestorWorktrees(
 		parentIssueID = ancestorID
 		parentWorktreePath = worktree.Path
 		if projectionWriter != nil {
-			projectionWriter.PersistWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), worktree.IssueID, worktree.Path, worktree.Branch)
+			if _, err := projectionWriter.PersistWorktreeProjectionAndPublish(ctx, normalizedProjectID(projectID), worktree.IssueID, worktree.Path, worktree.Branch); err != nil {
+				return ensureAncestorWorktreesResult{}, fmt.Errorf("persist ancestor worktree projection %s: %w", ancestorID, err)
+			}
 		}
 	}
 	result.BaseBranch = currentBase

@@ -360,6 +360,20 @@ func (d *DetailPanel) buildLines() ([]string, int) {
 		addLine(labelStyle.Render("Session:") + "  " + d.formatSessionSummary())
 		addLine(labelStyle.Render("Worktree:") + "  " + valueStyle.Render(d.formatGitWorktreeSummary()))
 	}
+	if evidence := d.task.PublicationEvidence; evidence != nil {
+		addLine("")
+		addLine(headerStyle.Render("Publication Evidence"))
+		addLine(labelStyle.Render("State:") + "  " + valueStyle.Render(evidence.State))
+		addLine(labelStyle.Render("Layers:") + "  " + valueStyle.Render(fmt.Sprintf("patch=%d active-path=%d merge-result=%d invalidated=%d", evidence.PatchReview, evidence.ActivePath, evidence.MergeResult, evidence.Invalidated)))
+		if len(evidence.Reasons) > 0 {
+			parts := make([]string, 0, len(evidence.Reasons))
+			for _, reason := range evidence.Reasons {
+				parts = append(parts, string(reason))
+			}
+			addWrappedField("Reasons", strings.Join(parts, ", "))
+		}
+		addWrappedField("Evidence", evidence.Detail)
+	}
 
 	d.addTextSectionLines(&lines, headerStyle, valueStyle, "Design", d.task.Design)
 	d.addTextSectionLines(&lines, headerStyle, valueStyle, "Acceptance", d.task.Acceptance)

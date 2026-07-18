@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -55,6 +57,113 @@ func TestProjectReviewQueuePrioritizesReviewAndExcludesForeignOwnedWork(t *testi
 	}
 	if got := candidateClass(snapshot.Candidates, open); got != "runnable" {
 		t.Fatalf("open candidate class = %q, want runnable while review queue remains separately prioritized", got)
+	}
+}
+
+func TestReviewInspectionKeepsStableScopeAcrossCandidateRevisions(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	runner := &revisionReviewGitRunner{headRevision: "head-revision-1"}
+	d.git = git.NewClient(runner, slog.Default())
+	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktrees := map[string]git.Worktree{issueID: {IssueID: issueID, Path: repoDir, Branch: "feature/review"}}
+
+	authority := daemonOrchestrationAuthority{daemon: d}
+	first := authority.reviewInspection(ctx, "project", repoDir, "orchestrator", task, map[string]domain.Task{issueID: task}, worktrees)
+	runner.headRevision = "head-revision-2"
+	second := authority.reviewInspection(ctx, "project", repoDir, "orchestrator", task, map[string]domain.Task{issueID: task}, worktrees)
+
+	if first.DiffBaseRevision != "base-revision" || first.HeadRevision != "head-revision-1" {
+		t.Fatalf("first revisions = base:%q head:%q", first.DiffBaseRevision, first.HeadRevision)
+	}
+	if second.DiffBaseRevision != "base-revision" || second.HeadRevision != "head-revision-2" {
+		t.Fatalf("second revisions = base:%q head:%q", second.DiffBaseRevision, second.HeadRevision)
+	}
+	wantScope := "issue:" + issueID + ":base:main@base-revision"
+	if first.DiffScope != wantScope || second.DiffScope != wantScope {
+		t.Fatalf("diff scopes = first:%q second:%q, want stable %q", first.DiffScope, second.DiffScope, wantScope)
+	}
+	if first.DiffRange != "base-revision..head-revision-1" || second.DiffRange != "base-revision..head-revision-2" {
+		t.Fatalf("diff ranges = first:%q second:%q", first.DiffRange, second.DiffRange)
+	}
+	if incremental := first.HeadRevision + ".." + second.HeadRevision; incremental != "head-revision-1..head-revision-2" {
+		t.Fatalf("incremental range = %q, want prior reviewed head through current head", incremental)
+	}
+}
+
+type revisionReviewGitRunner struct {
+	headRevision string
+}
+
+func (r *revisionReviewGitRunner) Run(_ context.Context, args ...string) (string, error) {
+	command := strings.Join(args, " ")
+	switch {
+	case strings.Contains(command, " merge-base ") && strings.HasSuffix(command, " "+r.headRevision):
+		return "base-revision\n", nil
+	case strings.Contains(command, " rev-parse --verify HEAD"):
+		return r.headRevision + "\n", nil
+	case strings.Contains(command, " diff "):
+		return "1 file changed, 1 insertion(+)\n", nil
+	default:
+		return "", fmt.Errorf("unexpected git command: %s", command)
+	}
+}
+
+func TestProjectReviewQueueConsumesProjectionWithoutGitStatusRefresh(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker")
+	tasks, err := client.GetManyWithRuntime(ctx, "project", []string{issueID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	materializer := newProjectReadMaterializer("project", nil, nil)
+	for _, task := range tasks {
+		materializer.canonical[task.ID.String()] = task
+		materializer.tasks[task.ID.String()] = task
+	}
+	materializer.metadata.Health = "healthy"
+	materializer.replaceWorktrees(map[string]git.Worktree{issueID: {IssueID: issueID, Path: filepath.Join(repoDir, "review-worktree"), Branch: "worker/review"}})
+
+	gitCalls := make([]string, 0, 2)
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		command := strings.Join(args, " ")
+		gitCalls = append(gitCalls, command)
+		switch {
+		case strings.Contains(command, " rev-parse --verify HEAD"):
+			return "projected-review-head\n", nil
+		case strings.Contains(command, " merge-base "):
+			return "projected-review-base\n", nil
+		default:
+			return "", errors.New("Git status/diff refresh must not run from orchestration snapshot")
+		}
+	}}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.git = git.NewClient(runner, slog.Default())
+	d.materializersStarted = true
+	d.materializers = map[string]*projectReadMaterializer{"project": materializer}
+	d.worktreeManagersByProject = map[string]*git.WorktreeManager{"project": git.NewWorktreeManager(runner, repoDir, slog.Default())}
+
+	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", RepoDir: repoDir})
+	if err != nil {
+		t.Fatalf("orchestration snapshot: %v", err)
+	}
+	if len(snapshot.ReviewQueue) != 1 || snapshot.ReviewQueue[0].IssueID != issueID {
+		t.Fatalf("reviews = %+v, want projected review %s", snapshot.ReviewQueue, issueID)
+	}
+	for _, command := range gitCalls {
+		if strings.Contains(command, " status ") || strings.Contains(command, " diff ") || strings.Contains(command, " rev-list ") || strings.Contains(command, " log ") || strings.Contains(command, " worktree ") {
+			t.Fatalf("Git calls = %+v, want only immutable review identity pinning", gitCalls)
+		}
 	}
 }
 
@@ -169,6 +278,479 @@ func TestReviewIntentValidationRejectsNonActionableOrConflictingOutcomes(t *test
 	}
 }
 
+func TestReviewIntentScopesSnapshotAndRetriesPreAdmissionFailureAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t)}); err != nil {
+		t.Fatal(err)
+	}
+	request := protocol.OrchestrationIntentRequest{
+		Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept,
+		IntentKey: "retry-pre-admission-after-restart", ActorID: "orchestrator", IssueIDs: []string{strings.ToUpper(issueID)}, RepoDir: repoDir,
+	}
+
+	firstDaemon := newOrchestrationReviewTestDaemon(repoDir, client)
+	firstDaemon.orchestrationSnapshotBuild = func(_ context.Context, _ string, snapshotRequest protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		want := []string{naming.CanonicalIssueIDKey(issueID)}
+		if !slices.Equal(snapshotRequest.ReviewIssueIDs, want) {
+			return protocol.OrchestrationSnapshot{}, fmt.Errorf("review snapshot issue IDs = %v, want canonical requested ticket %v", snapshotRequest.ReviewIssueIDs, want)
+		}
+		return protocol.OrchestrationSnapshot{}, errors.New("transient pre-admission failure")
+	}
+	if _, err := firstDaemon.orchestrationAuthority().Apply(ctx, "project", request); err == nil || !strings.Contains(err.Error(), "transient pre-admission failure") {
+		t.Fatalf("first review acceptance error = %v, want transient pre-admission failure", err)
+	}
+	assertNoReviewAcceptanceSideEffects(t, ctx, client, issueID)
+
+	restarted := newOrchestrationReviewTestDaemon(repoDir, client)
+	churn := 0
+	var churnErr error
+	restarted.orchestrationProjectionExported = func() {
+		churn++
+		_, churnErr = client.Create(ctx, issues.CreateTaskParams{
+			Title: "Unrelated restart churn", Description: "Advance projection during requested review admission", Acceptance: "Recorded",
+			Type: domain.TypeTask, Priority: domain.P4, Status: domain.StatusOpen,
+		})
+	}
+	result, err := restarted.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if churn != 1 {
+		t.Fatalf("restarted requested-review exports = %d, want one coherent export", churn)
+	}
+	if churnErr != nil {
+		t.Fatalf("advance unrelated projection after restart: %v", churnErr)
+	}
+	if failure := result.Failed[issueID]; !strings.Contains(failure, "authoritative close") {
+		t.Fatalf("retried review acceptance = %+v, want progress through admission to expected close-adapter failure", result)
+	}
+	replayed, err := restarted.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failure := replayed.Failed[issueID]; !strings.Contains(failure, "authoritative close") {
+		t.Fatalf("replayed review acceptance = %+v, want idempotent accepted-close retry", replayed)
+	}
+	reviewEvents, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reviewEvents) != 1 || reviewEvents[0].Payload["outcome"] != "accepted" {
+		t.Fatalf("review events = %+v, want exactly one accepted outcome after retry and replay", reviewEvents)
+	}
+}
+
+func TestOrchestrationReviewRequestedTicketScopePreservesStandaloneAndRootedAuthority(t *testing.T) {
+	root := domain.Task{ID: naming.IssueID("root"), Status: domain.StatusInReview}
+	childParent := naming.IssueID("root")
+	child := domain.Task{ID: naming.IssueID("child"), ParentID: &childParent, Status: domain.StatusInReview}
+	standalone := domain.Task{ID: naming.IssueID("standalone"), Status: domain.StatusInReview, Dependencies: []domain.Dependency{{ID: naming.IssueID("root"), Type: domain.DependencyCreatedIn}}}
+	tasks := []domain.Task{root, child, standalone}
+
+	projectScoped := orchestrationReviewScopeTasks(tasks, domain.ProjectOrchestrationScope(), []string{"STANDALONE"})
+	if got := taskIDsFromTasks(projectScoped); !slices.Equal(got, []string{"standalone"}) {
+		t.Fatalf("project requested-ticket scope = %v, want standalone authoritative review", got)
+	}
+	if got := reviewWorktreeRefreshIssueIDs(projectScoped, tasks); !slices.Equal(got, []string{"standalone"}) {
+		t.Fatalf("standalone worktree refresh scope = %v, want unrelated worktrees excluded", got)
+	}
+	rootedScope, err := domain.RootedOrchestrationScope("root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootedChild := orchestrationReviewScopeTasks(tasks, rootedScope, []string{"child"})
+	if got := taskIDsFromTasks(rootedChild); !slices.Equal(got, []string{"child"}) {
+		t.Fatalf("rooted child scope = %v, want direct child", got)
+	}
+	if got := reviewWorktreeRefreshIssueIDs(rootedChild, tasks); !slices.Equal(got, []string{"child", "root"}) {
+		t.Fatalf("rooted child worktree refresh scope = %v, want child plus authoritative ancestor only", got)
+	}
+	for _, requested := range []string{"root", "standalone"} {
+		if got := orchestrationReviewScopeTasks(tasks, rootedScope, []string{requested}); len(got) != 0 {
+			t.Fatalf("rooted requested-ticket scope for %s = %v, want self/provenance-only rejection", requested, taskIDsFromTasks(got))
+		}
+	}
+}
+
+func TestRequestedTicketReviewSnapshotSkipsUnrelatedProjectEvaluation(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	requested := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	unrelatedReview := createReviewTask(t, ctx, client, domain.P2, "other-worker")
+	unrelatedOpen, err := client.Create(ctx, issues.CreateTaskParams{Title: "unrelated open root", Description: "Executable", Acceptance: "done", Type: domain.TypeTask, Priority: domain.P0, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	var preparedIDs []string
+	d.orchestrationSnapshotPrepared = func(_ uint64, issueIDs []string) {
+		preparedIDs = append([]string(nil), issueIDs...)
+	}
+
+	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{
+		Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", RepoDir: repoDir, ReviewIssueIDs: []string{strings.ToUpper(requested)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(preparedIDs, []string{requested}) {
+		t.Fatalf("review preparation IDs = %v, want only requested ticket %s", preparedIDs, requested)
+	}
+	if len(snapshot.ReviewQueue) != 1 || snapshot.ReviewQueue[0].IssueID != requested {
+		t.Fatalf("review queue = %+v, want only requested ticket; unrelated review=%s", snapshot.ReviewQueue, unrelatedReview)
+	}
+	if len(snapshot.Candidates) != 0 || len(snapshot.Roots) != 0 || len(snapshot.Runnable) != 0 {
+		t.Fatalf("review-only snapshot evaluated unrelated project candidates: candidates=%+v roots=%v runnable=%v unrelated=%s", snapshot.Candidates, snapshot.Roots, snapshot.Runnable, unrelatedOpen)
+	}
+}
+
+func TestRequestedTicketReviewSnapshotConvergesDuringUnrelatedProjectionChurn(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "issues.db")
+	reader := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
+	writer := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
+	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
+	requested := createReviewTask(t, ctx, reader, domain.P1, "orchestrator")
+	d := newOrchestrationReviewTestDaemon(filepath.Dir(dbPath), reader)
+	exports := 0
+	var churnErr error
+	d.orchestrationProjectionExported = func() {
+		exports++
+		_, churnErr = writer.Create(ctx, issues.CreateTaskParams{
+			Title:       fmt.Sprintf("Unrelated churn %d", exports),
+			Description: "Advance the project projection after the requested review export",
+			Acceptance:  "Recorded",
+			Type:        domain.TypeTask,
+			Priority:    domain.P4,
+			Status:      domain.StatusOpen,
+		})
+	}
+
+	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{
+		Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", ReviewIssueIDs: []string{requested},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exports != 1 {
+		t.Fatalf("requested review projection exports = %d, want one coherent export", exports)
+	}
+	if churnErr != nil {
+		t.Fatalf("advance unrelated projection: %v", churnErr)
+	}
+	if len(snapshot.ReviewQueue) != 1 || snapshot.ReviewQueue[0].IssueID != requested {
+		t.Fatalf("review queue = %+v, want only requested ticket %s", snapshot.ReviewQueue, requested)
+	}
+}
+
+func TestRequestedReviewCandidateMutationAfterExportFailsBeforeSideEffects(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventEvidenceSubmitted, Source: "test", Payload: mustWorkerEvidencePayload(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	var mutationErr error
+	d.orchestrationProjectionExported = func() {
+		d.orchestrationProjectionExported = nil
+		mutationErr = client.Update(ctx, issueID, domain.StatusInProgress)
+	}
+
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{
+		Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewAccept,
+		IntentKey: "candidate-mutated-after-export", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mutationErr != nil {
+		t.Fatalf("advance requested candidate after export: %v", mutationErr)
+	}
+	if slices.Contains(result.Closed, issueID) {
+		t.Fatalf("mutated candidate was accepted: %+v", result)
+	}
+	assertNoReviewAcceptanceSideEffects(t, ctx, client, issueID)
+}
+
+func TestRequestedReviewAcceptEpochReplacementFailsBeforeSideEffects(t *testing.T) {
+	for _, rooted := range []bool{false, true} {
+		for _, kind := range []protocol.OrchestrationIntentKind{protocol.OrchestrationIntentReviewAccept} {
+			name := "project/" + string(kind)
+			if rooted {
+				name = "rooted-child/" + string(kind)
+			}
+			t.Run(name, func(t *testing.T) {
+				ctx := context.Background()
+				repoDir := t.TempDir()
+				client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+				t.Cleanup(func() { _ = client.CloseDB() })
+				issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+				if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+					Type: domain.IssueEventEvidenceSubmitted, Source: "first-worker", Payload: mustWorkerEvidencePayload(t),
+				}); err != nil {
+					t.Fatal(err)
+				}
+				scope := domain.ProjectOrchestrationScope()
+				mailParent := issueID
+				if rooted {
+					rootID, err := client.Create(ctx, issues.CreateTaskParams{Title: "root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := client.AddDependencyWithParentChange(ctx, issueID, rootID, string(domain.DependencyParentChild), false); err != nil {
+						t.Fatal(err)
+					}
+					scope, err = domain.RootedOrchestrationScope(rootID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					mailParent = rootID
+				}
+				oldEpoch := latestReviewEpochEventID(t, ctx, client, issueID)
+				sourceOID := "first-source"
+				d := newOrchestrationReviewTestDaemon(repoDir, client)
+				d.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) { return sourceOID, nil }
+				var replacementErr error
+				d.reviewAdmissionSnapshotLoaded = func() {
+					d.reviewAdmissionSnapshotLoaded = nil
+					if err := client.Update(ctx, issueID, domain.StatusInProgress); err != nil {
+						replacementErr = err
+						return
+					}
+					replacement := mustWorkerEvidencePayload(t)
+					replacement["summary"] = "replacement epoch evidence"
+					if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "replacement-worker", Payload: replacement}); err != nil {
+						replacementErr = err
+						return
+					}
+					if err := client.Update(ctx, issueID, domain.StatusInReview); err != nil {
+						replacementErr = err
+						return
+					}
+					sourceOID = "replacement-source"
+				}
+				request := protocol.OrchestrationIntentRequest{
+					Scope: scope, Kind: kind, IntentKey: "epoch-replacement-" + string(kind), ActorID: "orchestrator",
+					IssueIDs: []string{issueID}, RepoDir: repoDir, RestartWorker: true,
+				}
+				if kind == protocol.OrchestrationIntentReviewReturn {
+					request.Findings = []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "stale return must not escape"}}
+				}
+				result, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if replacementErr != nil {
+					t.Fatalf("replace exported review epoch: %v", replacementErr)
+				}
+				if newEpoch := latestReviewEpochEventID(t, ctx, client, issueID); newEpoch == oldEpoch {
+					t.Fatalf("review epoch remained %d, want replacement", oldEpoch)
+				}
+				if slices.Contains(result.Closed, issueID) || slices.Contains(result.Returned, issueID) || len(result.Launched) != 0 || len(result.Pending) != 0 {
+					t.Fatalf("stale review escaped admission fence: %+v", result)
+				}
+				if got := result.Skipped[issueID]; !strings.Contains(got, "review epoch changed") && !strings.Contains(got, "epoch or evidence identity changed") {
+					t.Fatalf("result = %+v, want exact epoch/evidence mismatch", result)
+				}
+				assertNoReviewAcceptanceSideEffects(t, ctx, client, issueID)
+				mail, err := readMailboxEvents(repoDir, mailParent)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(mail) != 0 {
+					t.Fatalf("stale review manufactured findings mail: %+v", mail)
+				}
+			})
+		}
+	}
+}
+
+func TestRequestedReviewAcceptExactCandidateReplacementFailsBeforeSideEffects(t *testing.T) {
+	for _, kind := range []protocol.OrchestrationIntentKind{protocol.OrchestrationIntentReviewAccept} {
+		t.Run(string(kind), func(t *testing.T) {
+			ctx := context.Background()
+			repoDir := t.TempDir()
+			client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+			t.Cleanup(func() { _ = client.CloseDB() })
+			issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+			if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t)}); err != nil {
+				t.Fatal(err)
+			}
+			sourceOID := "exported-source"
+			d := newOrchestrationReviewTestDaemon(repoDir, client)
+			d.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) { return sourceOID, nil }
+			d.reviewAdmissionSnapshotLoaded = func() {
+				d.reviewAdmissionSnapshotLoaded = nil
+				sourceOID = "replacement-source"
+			}
+			request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: kind, IntentKey: "candidate-replacement-" + string(kind), ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir, RestartWorker: true}
+			if kind == protocol.OrchestrationIntentReviewReturn {
+				request.Findings = []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "stale candidate return"}}
+			}
+			result, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := result.Skipped[issueID]; !strings.Contains(got, "review candidate changed") {
+				t.Fatalf("result = %+v, want exact candidate mismatch", result)
+			}
+			assertNoReviewAcceptanceSideEffects(t, ctx, client, issueID)
+			mail, err := readMailboxEvents(repoDir, issueID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(mail) != 0 || len(result.Launched) != 0 || len(result.Pending) != 0 {
+				t.Fatalf("stale exact candidate manufactured side effects: result=%+v mail=%+v", result, mail)
+			}
+		})
+	}
+}
+
+func TestActiveReviewAdmissionLeaseFreezesEpochEvidenceAndParentIdentity(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	rootA, err := client.Create(ctx, issues.CreateTaskParams{Title: "root a", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootB, err := client.Create(ctx, issues.CreateTaskParams{Title: "root b", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueID := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	if err := client.AddDependencyWithParentChange(ctx, issueID, rootA, string(domain.DependencyParentChild), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t)}); err != nil {
+		t.Fatal(err)
+	}
+	admission, err := client.CaptureReviewAdmissionPin(ctx, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: "reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview, ExpectedReviewAdmission: &admission, ExpectedParentIssueID: rootA, ReviewSourceOID: "source"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusInProgress); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("review epoch mutation error = %v, want conflict", err)
+	}
+	replacement := mustWorkerEvidencePayload(t)
+	replacement["summary"] = "replacement"
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: replacement}); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("review evidence mutation error = %v, want conflict", err)
+	}
+	if err := client.AddDependencyWithParentChange(ctx, issueID, rootB, string(domain.DependencyParentChild), true); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("review parent mutation error = %v, want conflict", err)
+	}
+	current, err := client.CaptureReviewAdmissionPin(ctx, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.ReviewEpochEventID != admission.ReviewEpochEventID || current.Evidence == nil || admission.Evidence == nil || *current.Evidence != *admission.Evidence {
+		t.Fatalf("review admission identity changed under lease: before=%+v after=%+v", admission, current)
+	}
+}
+
+func TestRootedRequestedReviewRevalidatesDirectParentAfterExport(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	firstRoot, err := client.Create(ctx, issues.CreateTaskParams{Title: "first root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRoot, err := client.Create(ctx, issues.CreateTaskParams{Title: "second root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{
+		Title: "rooted internal review", Description: "read-only findings", Acceptance: "consumed",
+		Type: domain.TypeInvestigation, Priority: domain.P1, Status: domain.StatusInReview, ParentID: &firstRoot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []issues.IssueObservationEventParams{
+		{Type: domain.IssueEventInvestigationDisposition, Source: "agent", Payload: map[string]any{"disposition": "internal_review"}},
+		{Type: domain.IssueEventReviewCompleted, Source: "agent", Payload: map[string]any{"outcome": "accepted", "consumer": firstRoot}},
+	} {
+		if _, err := client.AppendIssueObservationEvent(ctx, issueID, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scope, err := domain.RootedOrchestrationScope(firstRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	var reparentErr error
+	d.orchestrationProjectionExported = func() {
+		d.orchestrationProjectionExported = nil
+		reparentErr = client.AddDependencyWithParentChange(ctx, issueID, secondRoot, string(domain.DependencyParentChild), true)
+	}
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{
+		Scope: scope, Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "rooted-reparent-after-export",
+		ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reparentErr != nil {
+		t.Fatalf("reparent requested review after export: %v", reparentErr)
+	}
+	if !strings.Contains(result.Skipped[issueID], "outside-root-direct-child-scope") {
+		t.Fatalf("reparented candidate result = %+v, want exact rooted-scope rejection", result)
+	}
+	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease := coordinationLease(task, domain.CoordinationLeaseReview); lease != nil {
+		t.Fatalf("reparented candidate manufactured review lease: %+v", lease)
+	}
+	events, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Source == "daemon-orchestration" {
+			t.Fatalf("reparented candidate manufactured daemon review outcome: %+v", event)
+		}
+	}
+}
+
+func assertNoReviewAcceptanceSideEffects(t *testing.T, ctx context.Context, client *issues.Client, issueID string) {
+	t.Helper()
+	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease := coordinationLease(task, domain.CoordinationLeaseReview); lease != nil {
+		t.Fatalf("pre-admission failure manufactured review lease: %+v", lease)
+	}
+	events, err := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted, domain.IssueEventReviewCloseFailed, domain.IssueEventTaskIntegrationCompleted}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("pre-admission failure manufactured review evidence: %+v", events)
+	}
+}
+
 func TestExactReviewCandidateWorktreeBindsProjectionToLiveIdentity(t *testing.T) {
 	ctx := context.Background()
 	projectID, issueID := "project", "dlc"
@@ -212,6 +794,78 @@ func TestExactReviewCandidateWorktreeBindsProjectionToLiveIdentity(t *testing.T)
 	}
 }
 
+func TestReviewAcceptRejectsCandidateMutationAfterInspection(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, string, string)
+		want   string
+	}{
+		{name: "head", mutate: func(t *testing.T, repo, candidate string) {
+			requireNoError(t, os.WriteFile(filepath.Join(candidate, "late.go"), []byte("package consumer\n"), 0o644))
+			runDaemonTestGit(t, candidate, "add", "late.go")
+			runDaemonTestGit(t, candidate, "commit", "-q", "-m", "late candidate")
+		}, want: "reviewed candidate revision changed"},
+		{name: "dirty", mutate: func(t *testing.T, _, candidate string) {
+			requireNoError(t, os.WriteFile(filepath.Join(candidate, "dirty.txt"), []byte("unreviewed\n"), 0o644))
+		}, want: "reviewed candidate worktree is dirty"},
+		{name: "path-reused", mutate: func(t *testing.T, repo, candidate string) {
+			runDaemonTestGit(t, repo, "worktree", "remove", "--force", candidate)
+			runDaemonTestGit(t, repo, "worktree", "add", "-q", "-b", "riordan/foreign/reused", candidate, "main")
+		}, want: "candidate_path_reused"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			repo := t.TempDir()
+			runDaemonTestGit(t, repo, "init", "-q", "-b", "main")
+			runDaemonTestGit(t, repo, "config", "user.email", "test@example.com")
+			runDaemonTestGit(t, repo, "config", "user.name", "Test User")
+			requireNoError(t, os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\n"), 0o644))
+			runDaemonTestGit(t, repo, "add", "base.txt")
+			runDaemonTestGit(t, repo, "commit", "-q", "-m", "base")
+			client := newMigratedIssueClientAtPath(t, filepath.Join(repo, "issues.db"), slog.Default())
+			t.Cleanup(func() { _ = client.CloseDB() })
+			issueID := createReviewTask(t, ctx, client, domain.P1, "worker")
+			_, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t)})
+			requireNoError(t, err)
+			candidate := filepath.Join(t.TempDir(), "candidate")
+			branch := "riordan/" + issueID + "/review-candidate"
+			runDaemonTestGit(t, repo, "worktree", "add", "-q", "-b", branch, candidate, "main")
+			candidate, err = filepath.EvalSymlinks(candidate)
+			requireNoError(t, err)
+			requireNoError(t, os.WriteFile(filepath.Join(candidate, "patch.txt"), []byte("reviewed\n"), 0o644))
+			runDaemonTestGit(t, candidate, "add", "patch.txt")
+			runDaemonTestGit(t, candidate, "commit", "-q", "-m", "reviewed patch")
+			state := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+			t.Cleanup(func() { _ = state.Close() })
+			requireNoError(t, state.UpsertWorktreeState(ctx, daemonstate.WorktreeState{ProjectID: "project", IssueID: issueID, Path: candidate, Branch: branch, UpdatedAt: time.Now().UTC()}))
+			d := newOrchestrationReviewTestDaemon(repo, client)
+			d.reviewCandidateCheck = nil
+			d.git = git.NewClient(git.NewExecRunner(repo), slog.Default())
+			d.worktreeAdapter = &worktreeServiceAdapter{manager: git.NewWorktreeManager(git.NewExecRunner(repo), repo, slog.Default()), runtimeStateStore: state}
+			task, err := client.GetWithRuntime(ctx, "project", issueID)
+			requireNoError(t, err)
+			authority := daemonOrchestrationAuthority{daemon: d}
+			inspection := authority.reviewInspection(ctx, "project", repo, "reviewer", task, map[string]domain.Task{issueID: task}, map[string]git.Worktree{issueID: {IssueID: issueID, Path: candidate, Branch: branch}})
+			if inspection.HeadRevision == "" || inspection.Evidence == nil {
+				t.Fatalf("inspection = %+v, want immutable candidate and evidence", inspection)
+			}
+			d.reviewAcceptanceBeforeCandidateCheck = func() { test.mutate(t, repo, candidate) }
+			_, acceptErr := authority.acceptReview(ctx, "project", protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: "accept-mutated-" + test.name, ActorID: "reviewer", RepoDir: repo}, inspection, &protocol.OrchestrationIntentResult{})
+			if acceptErr == nil || !strings.Contains(acceptErr.Error(), test.want) {
+				t.Fatalf("accept error = %v, want %q", acceptErr, test.want)
+			}
+			assertNoReviewAcceptanceSideEffects(t, ctx, client, issueID)
+		})
+	}
+}
+
+func requireNoError(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProjectReviewQueueRefreshesCrossProcessReviewLease(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
@@ -222,6 +876,16 @@ func TestProjectReviewQueueRefreshesCrossProcessReviewLease(t *testing.T) {
 	issueID := createReviewTask(t, ctx, reader, domain.P1, "orchestrator")
 	d := newOrchestrationReviewTestDaemon(repoDir, reader)
 	authority := d.orchestrationAuthority()
+	if err := d.ensureLegacyMailboxObservationProjection(ctx, "project", repoDir); err != nil {
+		t.Fatal(err)
+	}
+	cutover, err := reader.MailboxObservationProjectionCutoverState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cutover.State != "complete" {
+		t.Fatalf("legacy mailbox cutover state = %q, want complete before snapshot admission", cutover.State)
+	}
 
 	before, err := authority.Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", RepoDir: repoDir})
 	if err != nil {
@@ -342,6 +1006,42 @@ func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T
 	}
 	if !strings.Contains(conflict.Failed[issueID], "different review request") {
 		t.Fatalf("conflicting replay = %+v, want explicit idempotency conflict", conflict)
+	}
+}
+
+func TestReviewReturnDoesNotRequireProjectSnapshotAdmission(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker-a")
+	tmuxRunner := newSessionStartTmuxRunner()
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.tmux = tmux.NewClient(tmuxRunner, slog.Default())
+	d.orchestrationSnapshotBuild = func(context.Context, string, protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+		return protocol.OrchestrationSnapshot{}, fmt.Errorf("%w: injected unrelated project churn", errOrchestrationSnapshotAdmissionContended)
+	}
+	canonicalSessionID := naming.CanonicalSessionIDForIssue(d.sessionNamingScope("project"), naming.IssueID(issueID)).String()
+	tmuxRunner.sessions[canonicalSessionID] = true
+	seedReadyAgentInput(t, d, tmuxRunner, "project", canonicalSessionID)
+	request := protocol.OrchestrationIntentRequest{
+		Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn,
+		IntentKey: "review-return-with-project-churn", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir,
+		Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "repair the bounded worker issue"}},
+	}
+	result, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Returned) != 1 || result.Returned[0] != issueID || len(result.Failed) != 0 || len(result.Skipped) != 0 {
+		t.Fatalf("review return result = %+v, want bounded return despite unrelated project snapshot contention", result)
+	}
+	replayed, err := d.orchestrationAuthority().Apply(ctx, "project", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replayed.Returned) != 1 || len(replayed.Failed) != 0 || len(replayed.Skipped) != 0 {
+		t.Fatalf("review return replay = %+v, want idempotent convergence without project snapshot admission", replayed)
 	}
 }
 
@@ -486,19 +1186,33 @@ func TestReviewReturnBoundsBlockedLiveDeliveryAndPublishesFailure(t *testing.T) 
 		<-runCtx.Done()
 		return authoritativeAgentInputAcknowledgement{}, runCtx.Err()
 	}
-	d.agentInput.receiver = scriptedAuthoritativeReceiver{deliver: func(ctx context.Context, request authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
-		return deliver(ctx, request)
-	}}
-	authority := daemonOrchestrationAuthority{daemon: d, reviewDeliveryTimeout: 25 * time.Millisecond}
+	d.agentInput = newAgentInputDeliveryService(
+		d.sessionRuntimeStateStoreIfConfigured,
+		d.issueClientForProject,
+		scriptedAuthoritativeReceiver{deliver: func(ctx context.Context, request authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
+			return deliver(ctx, request)
+		}},
+		"review-test",
+	)
+	var gotDeliveryTimeout time.Duration
+	authority := daemonOrchestrationAuthority{
+		daemon:                d,
+		reviewDeliveryTimeout: 25 * time.Millisecond,
+		reviewDeliveryContext: func(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+			gotDeliveryTimeout = timeout
+			done := make(chan struct{})
+			close(done)
+			return deadlineExceededTestContext{Context: parent, done: done}, func() {}
+		},
+	}
 	request := protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "review-return-blocked-delivery", ActorID: "orchestrator", IssueIDs: []string{issueID}, RepoDir: repoDir, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "delivery must be bounded"}}}
 
-	started := time.Now()
 	result, err := authority.Apply(ctx, "project", request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("review return elapsed %s, want bounded delivery", elapsed)
+	if gotDeliveryTimeout != authority.reviewDeliveryTimeout {
+		t.Fatalf("review delivery timeout = %v, want %v", gotDeliveryTimeout, authority.reviewDeliveryTimeout)
 	}
 	failure := result.Failed[issueID]
 	if !strings.Contains(failure, "stage=live_delivery") || !strings.Contains(failure, "target="+issueID) || !strings.Contains(failure, context.DeadlineExceeded.Error()) {
@@ -519,6 +1233,9 @@ func TestReviewReturnBoundsBlockedLiveDeliveryAndPublishesFailure(t *testing.T) 
 	deliver = func(context.Context, authoritativeAgentInputRequest) (authoritativeAgentInputAcknowledgement, error) {
 		return authoritativeAgentInputAcknowledgement{}, errors.New("delivery path unavailable")
 	}
+	authority.reviewDeliveryContext = func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithCancel(parent)
+	}
 	replayed, err := authority.Apply(ctx, "project", request)
 	if err != nil {
 		t.Fatal(err)
@@ -531,6 +1248,15 @@ func TestReviewReturnBoundsBlockedLiveDeliveryAndPublishesFailure(t *testing.T) 
 		t.Fatalf("replayed mail events = %+v err=%v, want idempotent durable finding", replayedMail, err)
 	}
 }
+
+type deadlineExceededTestContext struct {
+	context.Context
+	done <-chan struct{}
+}
+
+func (c deadlineExceededTestContext) Deadline() (time.Time, bool) { return time.Time{}, true }
+func (c deadlineExceededTestContext) Done() <-chan struct{}       { return c.done }
+func (deadlineExceededTestContext) Err() error                    { return context.DeadlineExceeded }
 
 func TestReviewReturnRejectsFailedAggregateGateFromPriorReviewEpoch(t *testing.T) {
 	ctx := context.Background()
@@ -1235,6 +1961,15 @@ func TestReviewAcceptClosesMultipleInternalReviewsBeforeDependentCompletion(t *t
 		ids = append(ids, id)
 	}
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	churn := 0
+	var churnErr error
+	d.orchestrationProjectionExported = func() {
+		churn++
+		_, churnErr = client.Create(ctx, issues.CreateTaskParams{
+			Title: "Unrelated rooted churn", Description: "Advance projection during rooted requested review admission", Acceptance: "Recorded",
+			Type: domain.TypeTask, Priority: domain.P4, Status: domain.StatusOpen,
+		})
+	}
 	rootedScope, err := domain.RootedOrchestrationScope(rootID)
 	if err != nil {
 		t.Fatal(err)
@@ -1251,6 +1986,13 @@ func TestReviewAcceptClosesMultipleInternalReviewsBeforeDependentCompletion(t *t
 	if len(result.Failed) != 0 || len(result.Skipped) != 0 || len(result.Closed) != 2 {
 		t.Fatalf("batch result = %+v", result)
 	}
+	if churn != 1 {
+		t.Fatalf("rooted requested-review exports = %d, want one coherent export", churn)
+	}
+	if churnErr != nil {
+		t.Fatalf("advance unrelated rooted projection: %v", churnErr)
+	}
+	d.orchestrationProjectionExported = nil
 	for _, id := range ids {
 		task, err := client.GetWithRuntime(ctx, "project", id)
 		if err != nil {
@@ -1975,15 +2717,23 @@ func latestReviewEpochEventID(t *testing.T, ctx context.Context, client *issues.
 
 func newOrchestrationReviewTestDaemon(repoDir string, client *issues.Client) *Daemon {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return &Daemon{
+	d := &Daemon{
 		cfg:                   Config{RepoDir: repoDir, Logger: logger},
 		hub:                   publish.NewHub(16, 8, logger),
 		issueClientsByProject: map[string]*issues.Client{"project": client},
 		revision:              map[string]uint64{},
+		// Review fixtures use explicit cancellation hooks; local correctness must
+		// never depend on the production admission timeout or machine load.
+		snapshotAdmissionContext: context.WithCancel,
 		reviewAcceptedSourceOID: func(context.Context, string, string) (string, error) {
 			return "reviewed-source-oid", nil
 		},
 	}
+	d.reviewCandidateCheck = func(ctx context.Context, projectID string, inspection protocol.OrchestrationReview) (string, string, error) {
+		oid, err := (daemonOrchestrationAuthority{daemon: d}).resolveAcceptedReviewSourceOID(ctx, projectID, inspection.IssueID)
+		return strings.TrimSpace(inspection.WorktreePath), strings.TrimSpace(oid), err
+	}
+	return d
 }
 
 type scriptedAuthoritativeReceiver struct {

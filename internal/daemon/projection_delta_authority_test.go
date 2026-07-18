@@ -30,6 +30,42 @@ type projectionFirstRequestServer struct {
 	projectID string
 }
 
+type projectionStartupIsolationResult struct {
+	corrupt protocol.ResponseEnvelope
+	healthy protocol.ResponseEnvelope
+}
+
+type projectionStartupIsolationServer struct {
+	daemon           *Daemon
+	cancel           context.CancelFunc
+	started          chan struct{}
+	result           chan projectionStartupIsolationResult
+	corruptProjectID string
+	healthyProjectID string
+}
+
+func (s *projectionStartupIsolationServer) Serve(ctx context.Context) error {
+	close(s.started)
+	corrupt, _ := s.daemon.command(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		Command:         "task.list",
+		RequestID:       "corrupt-project-first-request",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(s.corruptProjectID)},
+	})
+	body, _ := json.Marshal(protocol.ProjectionDeltaReadRequest{ProjectID: naming.ProjectID(s.healthyProjectID), Limit: 10})
+	healthy, _ := s.daemon.command(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		Command:         protocol.CommandProjectionDeltaList,
+		RequestID:       "healthy-project-first-request",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(s.healthyProjectID)},
+		Body:            body,
+	})
+	s.result <- projectionStartupIsolationResult{corrupt: corrupt, healthy: healthy}
+	s.cancel()
+	<-ctx.Done()
+	return nil
+}
+
 func (s *projectionFirstRequestServer) Serve(ctx context.Context) error {
 	projectID := s.projectID
 	if projectID == "" {
@@ -97,6 +133,105 @@ func TestProjectionDeltaRegisteredProjectOpensBeforeFirstRequest(t *testing.T) {
 	}
 	if _, err := os.Stat(registeredDB); err != nil {
 		t.Fatalf("startup did not open registered projection store: %v", err)
+	}
+}
+
+func TestProjectionDeltaStartupQuarantinesOnlyCorruptRegisteredProject(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	baseRepo := t.TempDir()
+	corruptRepo := t.TempDir()
+	healthyRepo := t.TempDir()
+	const corruptProjectID = "registered-corrupt"
+	const healthyProjectID = "registered-healthy"
+	if err := appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{Projects: []appconfig.Project{
+		{ID: corruptProjectID, Name: "Corrupt", Path: corruptRepo},
+		{ID: healthyProjectID, Name: "Healthy", Path: healthyRepo},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	corruptClient := issues.NewClient(corruptRepo, slog.Default())
+	if _, err := corruptClient.Create(context.Background(), issues.CreateTaskParams{Title: "corrupt", Type: domain.TypeTask}); err != nil {
+		t.Fatal(err)
+	}
+	if err := corruptClient.CloseDB(); err != nil {
+		t.Fatal(err)
+	}
+	corruptDaemonSQLiteRootPage(t, filepath.Join(corruptRepo, ".azedarach", "azedarach.db"), "issue_observation_events")
+	healthyClient := issues.NewClient(healthyRepo, slog.Default())
+	if _, err := healthyClient.Create(context.Background(), issues.CreateTaskParams{Title: "healthy", Type: domain.TypeTask}); err != nil {
+		t.Fatal(err)
+	}
+	if err := healthyClient.CloseDB(); err != nil {
+		t.Fatal(err)
+	}
+	primary := issues.NewClient(baseRepo, slog.Default())
+	if _, err := primary.Create(context.Background(), issues.CreateTaskParams{Title: "primary", Type: domain.TypeTask}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	server := &projectionStartupIsolationServer{
+		cancel: cancel, started: make(chan struct{}), result: make(chan projectionStartupIsolationResult, 1),
+		corruptProjectID: corruptProjectID, healthyProjectID: healthyProjectID,
+	}
+	d := &Daemon{
+		cfg:                              Config{RepoDir: baseRepo, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		lock:                             bootstrapRecordingLock{},
+		issues:                           primary,
+		issueClientsByProject:            map[string]*issues.Client{},
+		issueClientsByRoot:               map[string]*issues.Client{daemonStoreRootKey(baseRepo): primary},
+		projectIssueStoreHealthByProject: map[string]projectIssueStoreHealthState{},
+		serve:                            server,
+	}
+	server.daemon = d
+	errCh := make(chan error, 1)
+	go func() { errCh <- d.Run(ctx) }()
+	select {
+	case <-server.started:
+	case err := <-errCh:
+		t.Fatalf("daemon exited before IPC serve: %v", err)
+	}
+
+	result := <-server.result
+	if result.corrupt.OK || result.corrupt.Error == nil || result.corrupt.Error.Code != protocol.ErrorCodeUnavailable || !strings.Contains(result.corrupt.Error.Message, "project issue store unhealthy (cached)") {
+		t.Fatalf("corrupt project response=%+v, want cached unavailable", result.corrupt)
+	}
+	if !result.healthy.OK {
+		t.Fatalf("healthy project response=%+v, want success", result.healthy.Error)
+	}
+	var batch protocol.ProjectionDeltaBatch
+	if err := json.Unmarshal(result.healthy.Body, &batch); err != nil {
+		t.Fatal(err)
+	}
+	if batch.HeadCursor != 1 || len(batch.Deltas) != 1 {
+		t.Fatalf("healthy project batch=%+v, want one delta", batch)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	corruptCanonical, _ := appconfig.ProjectIDForRoot(corruptRepo)
+	healthyCanonical, _ := appconfig.ProjectIDForRoot(healthyRepo)
+	if _, unhealthy := d.projectIssueStoreHealthError(corruptCanonical); !unhealthy {
+		t.Fatal("corrupt registered project did not retain cached health")
+	}
+	if healthErr, unhealthy := d.projectIssueStoreHealthError(healthyCanonical); unhealthy {
+		t.Fatalf("healthy registered project marked unhealthy: %v", healthErr)
+	}
+}
+
+func TestProjectReadMaterializerStartupSkipsQuarantinedDefaultStore(t *testing.T) {
+	d := &Daemon{
+		cfg:                              Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issues:                           issues.NewClientAtPath(filepath.Join(t.TempDir(), "issues.db"), slog.Default()),
+		projectIssueStoreHealthByProject: map[string]projectIssueStoreHealthState{},
+	}
+	d.recordProjectIssueStoreFailure(protocol.DefaultProjectID, &domain.TaskStoreError{Op: "open-db", Err: corruptSQLiteDaemonTestError{}})
+	if err := d.startProjectReadMaterializers(context.Background()); err != nil {
+		t.Fatalf("quarantined materializer startup returned global error: %v", err)
+	}
+	if materializer := d.activeProjectReadMaterializer(protocol.DefaultProjectID); materializer != nil {
+		t.Fatalf("quarantined default store started materializer: %+v", materializer)
 	}
 }
 

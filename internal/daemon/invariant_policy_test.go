@@ -15,6 +15,7 @@ func TestInvariantSourceMatrixIncludesExpectedRuntimeInvariants(t *testing.T) {
 		daemonInvariantManagedAgentRestart:          daemonInvariantSourceHybrid,
 		daemonInvariantAdvisorSingleton:             daemonInvariantSourceHybrid,
 		daemonInvariantTaskListFreshness:            daemonInvariantSourceProjection,
+		daemonInvariantTaskReadAfterWrite:           daemonInvariantSourceProjection,
 		daemonInvariantTaskClose:                    daemonInvariantSourceHybrid,
 		daemonInvariantTaskClosePreflight:           daemonInvariantSourceHybrid,
 		daemonInvariantTaskDelete:                   daemonInvariantSourceHybrid,
@@ -26,6 +27,7 @@ func TestInvariantSourceMatrixIncludesExpectedRuntimeInvariants(t *testing.T) {
 		daemonInvariantTaskContextRisk:              daemonInvariantSourceProjection,
 		daemonInvariantTaskMergeBaseTarget:          daemonInvariantSourceProjection,
 		daemonInvariantTaskFollowOnMerge:            daemonInvariantSourceProjection,
+		daemonInvariantTaskPublicationQueue:         daemonInvariantSourceHybrid,
 		daemonInvariantWorkerObservation:            daemonInvariantSourceHybrid,
 		daemonInvariantInteractionWaiting:           daemonInvariantSourceProjection,
 		daemonInvariantInvestigationWaiting:         daemonInvariantSourceProjection,
@@ -45,6 +47,7 @@ func TestInvariantSourceMatrixIncludesExpectedRuntimeInvariants(t *testing.T) {
 		daemonInvariantProjectionDeltaStream:        daemonInvariantSourceProjection,
 		daemonInvariantTmuxObservation:              daemonInvariantSourceTmux,
 		daemonInvariantValidationCapacity:           daemonInvariantSourceProjection,
+		daemonInvariantPublicationEvidence:          daemonInvariantSourceProjection,
 	}
 	for id, want := range expected {
 		got, ok := matrix[id]

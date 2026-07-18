@@ -46,9 +46,11 @@ var spanStringAttributeKeys = map[string]struct{}{
 	"reason":                    {},
 	"request_id":                {},
 	"root_issue_id":             {},
-	"standalone.reason":    {},
+	"standalone.reason":         {},
 	"transport":                 {},
 	"task_id":                   {},
+	"writer.holder_operation":   {},
+	"writer.waiter_operation":   {},
 }
 
 // SetConfigEnabled sets the persisted config default for latency phase logging.

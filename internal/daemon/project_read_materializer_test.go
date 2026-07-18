@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -35,8 +36,38 @@ type watchErrorProjectionStore struct {
 	watch func(context.Context, string, uint64, int) ([]domain.ProjectionDelta, uint64, error)
 }
 
+type listErrorProjectionStore struct {
+	projectionDeltaStore
+	list func(context.Context, string, uint64, int) ([]domain.ProjectionDelta, uint64, error)
+}
+
+func (s listErrorProjectionStore) ListProjectionDeltas(ctx context.Context, projectID string, after uint64, limit int) ([]domain.ProjectionDelta, uint64, error) {
+	return s.list(ctx, projectID, after, limit)
+}
+
 func (s watchErrorProjectionStore) WatchProjectionDeltas(ctx context.Context, projectID string, after uint64, limit int) ([]domain.ProjectionDelta, uint64, error) {
 	return s.watch(ctx, projectID, after, limit)
+}
+
+type watchBarrierProjectionStore struct {
+	projectionDeltaStore
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *watchBarrierProjectionStore) WatchProjectionDeltas(ctx context.Context, projectID string, after uint64, limit int) ([]domain.ProjectionDelta, uint64, error) {
+	s.once.Do(func() {
+		close(s.entered)
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+		}
+	})
+	if err := ctx.Err(); err != nil {
+		return nil, 0, &domain.ProjectionCanceledError{Cause: err}
+	}
+	return s.projectionDeltaStore.WatchProjectionDeltas(ctx, projectID, after, limit)
 }
 
 func TestProjectReadMaterializerTransientWatchErrorRetainsLastGoodWithoutLegacyExport(t *testing.T) {
@@ -47,6 +78,7 @@ func TestProjectReadMaterializerTransientWatchErrorRetainsLastGoodWithoutLegacyE
 		t.Fatal(err)
 	}
 	var watchCalls, legacyExports atomic.Int32
+	watchFailed := make(chan protocol.MaterializedSnapshotMetadata, 1)
 	store := watchErrorProjectionStore{projectionDeltaStore: client, watch: func(context.Context, string, uint64, int) ([]domain.ProjectionDelta, uint64, error) {
 		watchCalls.Add(1)
 		return nil, 0, fmt.Errorf("%w: transient watch", domain.ErrProjectionRetryable)
@@ -63,13 +95,15 @@ func TestProjectReadMaterializerTransientWatchErrorRetainsLastGoodWithoutLegacyE
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
-		materializer.run(runCtx, nil)
+		materializer.run(runCtx, func(metadata protocol.MaterializedSnapshotMetadata) {
+			select {
+			case watchFailed <- metadata:
+			default:
+			}
+		})
 		close(done)
 	}()
-	deadline := time.Now().Add(time.Second)
-	for watchCalls.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
+	failedMeta := <-watchFailed
 	after, afterMeta := materializer.snapshot()
 	if watchCalls.Load() == 0 || legacyExports.Load() != 1 {
 		t.Fatalf("watch calls=%d legacy exports=%d, want transient retry without re-export", watchCalls.Load(), legacyExports.Load())
@@ -77,8 +111,40 @@ func TestProjectReadMaterializerTransientWatchErrorRetainsLastGoodWithoutLegacyE
 	if len(after) != 1 || after[0].ID.String() != created || checksumJSON(after) != checksumJSON(before) || afterMeta.DeliveryCursor != beforeMeta.DeliveryCursor || !strings.HasPrefix(afterMeta.Health, "stale:") {
 		t.Fatalf("transient watch changed last-good materialization: before=%+v/%+v after=%+v/%+v", before, beforeMeta, after, afterMeta)
 	}
+	if failedMeta.Health != afterMeta.Health {
+		t.Fatalf("callback health=%q snapshot health=%q", failedMeta.Health, afterMeta.Health)
+	}
+	d := &Daemon{materializers: map[string]*projectReadMaterializer{"project": materializer}, materializersStarted: true}
+	served, servedMeta, err := d.projectReadSnapshot("project")
+	if err != nil || len(served) != 1 || checksumJSON(served) != checksumJSON(before) || servedMeta.Health != afterMeta.Health {
+		t.Fatalf("retryable stale snapshot not served: tasks=%+v metadata=%+v err=%v", served, servedMeta, err)
+	}
+	materializer.markUnhealthy(errors.New("structural projection corruption"), false)
+	served, servedMeta, err = d.projectReadSnapshot("project")
+	if err == nil || served != nil || !strings.Contains(servedMeta.Health, "structural projection corruption") {
+		t.Fatalf("non-retryable failure did not fail closed: tasks=%+v metadata=%+v err=%v", served, servedMeta, err)
+	}
 	cancel()
 	<-done
+}
+
+func TestAuthoritativeReadResultCannotClearNewerMutationConvergenceFailure(t *testing.T) {
+	materializer := newProjectReadMaterializer("project", nil, nil)
+	readHealthEpoch := materializer.healthResultEpoch()
+	mutationAttempt := materializer.beginMutationConvergence(7)
+	if !materializer.finishMutationConvergence(7, mutationAttempt, errors.New("newer mutation failure")) {
+		t.Fatal("newer mutation convergence result was not recorded")
+	}
+	if materializer.finishAuthoritativeReadRefresh(readHealthEpoch, nil, false) {
+		t.Fatal("older authoritative read result cleared a newer health result")
+	}
+	if materializer.finishAuthoritativeReadRefresh(readHealthEpoch, errors.New("older runtime failure"), true) {
+		t.Fatal("older authoritative read failure overwrote a newer health result")
+	}
+	metadata := materializer.snapshotMetadata()
+	if !strings.Contains(metadata.Health, "newer mutation failure") {
+		t.Fatalf("health = %q, want newer mutation failure retained", metadata.Health)
+	}
 }
 
 func TestProjectReadMaterializerGapWatchPerformsVerifiedBootstrapRecovery(t *testing.T) {
@@ -373,12 +439,43 @@ func TestProjectReadMaterializerRuntimeHydrationFailureReturnsTicketData(t *test
 	if err != nil {
 		t.Fatalf("bootstrap degraded runtime materializer: %v", err)
 	}
+	if err := materializer.refreshRuntimeDegraded(ctx, []string{id}); err != nil {
+		t.Fatalf("background degraded runtime refresh: %v", err)
+	}
 	tasks, _ := materializer.snapshot()
 	got, ok := findDaemonTaskByID(tasks, id)
 	if !ok || got.Title != "ticket survives degraded runtime" {
 		t.Fatalf("degraded ticket = %+v found=%t", got, ok)
 	}
 	assertProjectReadSpans(t, recorder, "daemon.project_read.runtime_hydration", "daemon.project_read.degraded_fallback")
+}
+
+func TestBackgroundProjectReadRuntimeRefreshDoesNotEnsureMaterializer(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestIssueClient(t)
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "background refresh remains best effort", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hydrateCalls atomic.Int32
+	d := &Daemon{
+		issues:               client,
+		materializers:        map[string]*projectReadMaterializer{},
+		materializersStarted: true,
+		projectReadRuntimeHydrate: func(_ context.Context, _ string, tasks []domain.Task) ([]domain.Task, error) {
+			hydrateCalls.Add(1)
+			return tasks, nil
+		},
+	}
+
+	d.refreshProjectReadRuntime(ctx, protocol.DefaultProjectID, issueID)
+
+	if got := hydrateCalls.Load(); got != 0 {
+		t.Fatalf("background hydration calls = %d, want no on-demand materializer ensure", got)
+	}
+	if materializer := d.activeProjectReadMaterializer(protocol.DefaultProjectID); materializer != nil {
+		t.Fatal("background refresh installed a project read materializer")
+	}
 }
 
 func TestProjectReadMaterializerWorktreeFailureDoesNotAbortBootstrap(t *testing.T) {
@@ -508,29 +605,39 @@ func TestProjectReadMaterializerWatchBlocksAndWakesAcrossClients(t *testing.T) {
 	if err := reader.OpenProjectionDeltaStore(); err != nil {
 		t.Fatal(err)
 	}
-	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(reader), nil)
+	watchStore := &watchBarrierProjectionStore{
+		projectionDeltaStore: reader,
+		entered:              make(chan struct{}),
+		release:              make(chan struct{}),
+	}
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(watchStore), nil)
 	if err := materializer.bootstrap(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	advanced := make(chan protocol.MaterializedSnapshotMetadata, 1)
-	go materializer.run(ctx, func(metadata protocol.MaterializedSnapshotMetadata) { advanced <- metadata })
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		materializer.run(ctx, func(metadata protocol.MaterializedSnapshotMetadata) { advanced <- metadata })
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	<-watchStore.entered
 	select {
 	case <-advanced:
 		t.Fatal("watch returned without source advancement")
-	case <-time.After(75 * time.Millisecond):
+	default:
 	}
 	if _, err := writer.Create(context.Background(), issues.CreateTaskParams{Title: "cross-client", Type: domain.TypeTask}); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case metadata := <-advanced:
-		if metadata.DeliveryCursor == 0 {
-			t.Fatalf("watch metadata = %+v", metadata)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("materializer watch did not wake on cross-client source advancement")
+	close(watchStore.release)
+	metadata := <-advanced
+	if metadata.DeliveryCursor == 0 {
+		t.Fatalf("watch metadata = %+v", metadata)
 	}
 }
 
@@ -540,32 +647,49 @@ func TestProjectReadMaterializersConvergeAcrossDaemons(t *testing.T) {
 	writer := newMigratedIssueClient(t, repoDir, logger)
 	readers := []*issues.Client{issues.NewClient(repoDir, logger), issues.NewClient(repoDir, logger)}
 	materializers := make([]*projectReadMaterializer, 0, len(readers))
+	watchers := make([]*watchBarrierProjectionStore, 0, len(readers))
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	advanced := make(chan int, len(readers))
+	done := make(chan struct{}, len(readers))
 	for index, reader := range readers {
 		t.Cleanup(func() { _ = reader.CloseDB() })
 		if err := reader.OpenProjectionDeltaStore(); err != nil {
 			t.Fatal(err)
 		}
-		materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(reader), nil)
+		watcher := &watchBarrierProjectionStore{
+			projectionDeltaStore: reader,
+			entered:              make(chan struct{}),
+			release:              make(chan struct{}),
+		}
+		watchers = append(watchers, watcher)
+		materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(watcher), nil)
 		if err := materializer.bootstrap(ctx); err != nil {
 			t.Fatal(err)
 		}
 		materializers = append(materializers, materializer)
-		go materializer.run(ctx, func(protocol.MaterializedSnapshotMetadata) { advanced <- index })
+		go func() {
+			defer func() { done <- struct{}{} }()
+			materializer.run(ctx, func(protocol.MaterializedSnapshotMetadata) { advanced <- index })
+		}()
+	}
+	t.Cleanup(func() {
+		cancel()
+		for range readers {
+			<-done
+		}
+	})
+	for _, watcher := range watchers {
+		<-watcher.entered
 	}
 	if _, err := writer.Create(ctx, issues.CreateTaskParams{Title: "multi-daemon", Type: domain.TypeTask}); err != nil {
 		t.Fatal(err)
 	}
+	for _, watcher := range watchers {
+		close(watcher.release)
+	}
 	seen := map[int]bool{}
 	for len(seen) < len(materializers) {
-		select {
-		case index := <-advanced:
-			seen[index] = true
-		case <-time.After(5 * time.Second):
-			t.Fatalf("materializers did not converge: woke=%v", seen)
-		}
+		seen[<-advanced] = true
 	}
 	firstTasks, firstSource := materializers[0].snapshot()
 	secondTasks, secondSource := materializers[1].snapshot()
@@ -574,7 +698,7 @@ func TestProjectReadMaterializersConvergeAcrossDaemons(t *testing.T) {
 	}
 }
 
-func TestProjectReadMaterializerSerializesRuntimeRefreshWithDeltaApply(t *testing.T) {
+func TestProjectReadMaterializerPublishesDeltaWhileRuntimeRefreshHydrationIsBlocked(t *testing.T) {
 	client, _ := newTestIssueClient(t)
 	ctx := context.Background()
 	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "serialized", Type: domain.TypeTask})
@@ -586,6 +710,7 @@ func TestProjectReadMaterializerSerializesRuntimeRefreshWithDeltaApply(t *testin
 	releaseRefresh := make(chan struct{})
 	hydrate := func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
 		if hydrateCalls.Add(1) == 2 {
+			tasks[0].HasTmuxSession = true
 			close(refreshEntered)
 			<-releaseRefresh
 		}
@@ -609,32 +734,137 @@ func TestProjectReadMaterializerSerializesRuntimeRefreshWithDeltaApply(t *testin
 	<-refreshEntered
 	applyDone := make(chan error, 1)
 	go func() { applyDone <- materializer.apply(ctx, batch) }()
-	select {
-	case err := <-applyDone:
-		t.Fatalf("delta apply bypassed blocked refresh serialization: %v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-	close(releaseRefresh)
-	if err := <-refreshDone; err != nil {
-		t.Fatal(err)
-	}
 	if err := <-applyDone; err != nil {
 		t.Fatal(err)
 	}
 	tasks, _ := materializer.snapshot()
 	if len(tasks) != 1 || tasks[0].Status != domain.StatusInProgress {
-		t.Fatalf("serialized snapshot = %+v, want latest delta status", tasks)
+		t.Fatalf("snapshot during blocked runtime hydration = %+v, want latest delta status", tasks)
+	}
+	close(releaseRefresh)
+	if err := <-refreshDone; err != nil {
+		t.Fatal(err)
+	}
+	tasks, _ = materializer.snapshot()
+	if len(tasks) != 1 || tasks[0].Status != domain.StatusInProgress || tasks[0].HasTmuxSession {
+		t.Fatalf("serialized snapshot = %+v, want latest delta status without superseded runtime overlay", tasks)
 	}
 }
 
-func TestProjectReadMaterializerRuntimeRefreshWaitIsCancelableAndAttributed(t *testing.T) {
+func TestProjectReadMaterializerPublishesCommittedCanonicalBeforeRuntimeEnrichment(t *testing.T) {
+	client, _ := newTestIssueClient(t)
+	ctx := context.Background()
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "committed lifecycle", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hydrateCalls atomic.Int32
+	hydrateEntered := make(chan struct{})
+	releaseHydrate := make(chan struct{})
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(client), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		if hydrateCalls.Add(1) == 2 {
+			close(hydrateEntered)
+			<-releaseHydrate
+		}
+		return tasks, nil
+	})
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	before := materializer.snapshotMetadata().DeliveryCursor
+	if _, err := client.CloseWithRuntime(ctx, "project", issueID, domain.StatusDone); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := materializer.authority.List(ctx, protocol.DefaultProjectID, before, projectReadMaterializerBatchSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyDone := make(chan error, 1)
+	go func() { applyDone <- materializer.apply(ctx, batch) }()
+	<-hydrateEntered
+
+	tasks, metadata := materializer.snapshot()
+	if len(tasks) != 1 || tasks[0].Status != domain.StatusDone {
+		t.Fatalf("snapshot during blocked enrichment = %+v, want committed closed lifecycle", tasks)
+	}
+	if metadata.DeliveryCursor != batch.DeliveryToCursor {
+		t.Fatalf("delivery cursor during blocked enrichment = %d, want %d", metadata.DeliveryCursor, batch.DeliveryToCursor)
+	}
+
+	close(releaseHydrate)
+	if err := <-applyDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProjectReadMaterializerRunAnnouncesCanonicalAdvanceBeforeRuntimeEnrichment(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	writer, repoDir := newTestIssueClient(t)
+	reader := issues.NewClient(repoDir, logger)
+	t.Cleanup(func() { _ = reader.CloseDB() })
+	if err := reader.OpenProjectionDeltaStore(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	issueID, err := writer.Create(ctx, issues.CreateTaskParams{Title: "cross daemon lifecycle", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hydrateCalls atomic.Int32
+	hydrateEntered := make(chan struct{})
+	releaseHydrate := make(chan struct{})
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(reader), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		if hydrateCalls.Add(1) == 2 {
+			close(hydrateEntered)
+			<-releaseHydrate
+		}
+		return tasks, nil
+	})
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	advanced := make(chan protocol.MaterializedSnapshotMetadata, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		materializer.run(ctx, func(metadata protocol.MaterializedSnapshotMetadata) { advanced <- metadata })
+	}()
+	if _, err := writer.CloseWithRuntime(ctx, "project", issueID, domain.StatusDone); err != nil {
+		t.Fatal(err)
+	}
+	<-hydrateEntered
+	select {
+	case metadata := <-advanced:
+		if metadata.DeliveryCursor == 0 {
+			t.Fatalf("announced metadata = %+v", metadata)
+		}
+	default:
+		t.Fatal("canonical delta was not announced before runtime enrichment began")
+	}
+	tasks, _ := materializer.snapshot()
+	if len(tasks) != 1 || tasks[0].Status != domain.StatusDone {
+		t.Fatalf("cross-daemon snapshot = %+v, want committed closed lifecycle", tasks)
+	}
+	close(releaseHydrate)
+	cancel()
+	<-done
+}
+
+func TestProjectReadMaterializerNewerRuntimeRefreshSupersedesBlockedOlderResult(t *testing.T) {
 	const issueID = "az-refresh-contention"
 	canonical := map[string]domain.Task{issueID: {ID: issueID, Title: "contended refresh", Type: domain.TypeTask}}
 	hydrateEntered := make(chan struct{})
 	releaseHydrate := make(chan struct{})
+	var hydrateCalls atomic.Int32
 	materializer := newProjectReadMaterializer("project", nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
-		close(hydrateEntered)
-		<-releaseHydrate
+		if hydrateCalls.Add(1) == 1 {
+			close(hydrateEntered)
+			<-releaseHydrate
+			tasks[0].Session = &domain.Session{Activity: "older"}
+			return tasks, nil
+		}
+		tasks[0].Session = &domain.Session{Activity: "newer"}
 		return tasks, nil
 	})
 	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, canonical)
@@ -647,26 +877,21 @@ func TestProjectReadMaterializerRuntimeRefreshWaitIsCancelableAndAttributed(t *t
 	}()
 	<-hydrateEntered
 
-	waitObserved := make(chan struct{})
-	waitCtx, cancelWait := context.WithCancel(context.Background())
-	waitCtx = contextWithRuntimeProjectionWriterOperation(waitCtx, "orchestration.snapshot")
-	waitCtx = withProjectReadUpdateWaitHookForTest(waitCtx, func(waiterOperation, holderOperation string) {
-		if waiterOperation != "orchestration.snapshot" || holderOperation != "background.projection_refresh" {
-			t.Errorf("refresh attribution waiter=%q holder=%q", waiterOperation, holderOperation)
-		}
-		close(waitObserved)
-	})
-	waitDone := make(chan error, 1)
-	go func() { waitDone <- materializer.refreshRuntime(waitCtx, []string{issueID}) }()
-	<-waitObserved
-	cancelWait()
-	if err := <-waitDone; !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled refresh wait error = %v, want context.Canceled", err)
+	if err := materializer.refreshRuntime(context.Background(), []string{issueID}); err != nil {
+		t.Fatalf("newer refresh: %v", err)
+	}
+	tasks, _ := materializer.snapshot()
+	if len(tasks) != 1 || tasks[0].Session == nil || tasks[0].Session.Activity != "newer" {
+		t.Fatalf("snapshot after newer refresh = %+v, want newer runtime result", tasks)
 	}
 
 	close(releaseHydrate)
 	if err := <-holderDone; err != nil {
 		t.Fatalf("holder refresh: %v", err)
+	}
+	tasks, _ = materializer.snapshot()
+	if len(tasks) != 1 || tasks[0].Session == nil || tasks[0].Session.Activity != "newer" {
+		t.Fatalf("older blocked refresh overwrote newer result: %+v", tasks)
 	}
 }
 
@@ -703,6 +928,232 @@ func TestProjectReadSnapshotIsPureAtDeclaredChecksum(t *testing.T) {
 	}
 	if before != after || checksumJSON(tasksA) != checksumJSON(tasksB) || sourceA.SemanticChecksum != sourceB.SemanticChecksum {
 		t.Fatalf("pure read changed source: data_version %d->%d source %s/%s", before, after, sourceA.SemanticChecksum, sourceB.SemanticChecksum)
+	}
+}
+
+func TestProjectReadMaterializerClearsOnlyRecoveredMutationConvergenceFailure(t *testing.T) {
+	materializer := newProjectReadMaterializer("project", nil, nil)
+	materializer.metadata = protocol.MaterializedSnapshotMetadata{Health: "healthy"}
+	attempt := materializer.beginMutationConvergence(1)
+	materializer.finishMutationConvergence(1, attempt, errors.New("transient read failure"))
+	recoveryAttempt := materializer.beginMutationConvergence(2)
+	materializer.finishMutationConvergence(2, recoveryAttempt, nil)
+	if got := materializer.snapshotMetadata().Health; got != "healthy" {
+		t.Fatalf("recovered mutation convergence health = %q, want healthy", got)
+	}
+	materializer.markUnhealthy(errors.New("watch projection deltas: corrupt batch"), false)
+	unrelatedAttempt := materializer.beginMutationConvergence(3)
+	materializer.finishMutationConvergence(3, unrelatedAttempt, nil)
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "corrupt batch") {
+		t.Fatalf("unrelated health failure was cleared: %q", got)
+	}
+}
+
+func TestProjectReadMaterializerOlderConvergenceSuccessCannotClearNewerFailure(t *testing.T) {
+	olderEntered := make(chan struct{})
+	releaseOlder := make(chan struct{})
+	var calls atomic.Int32
+	store := listErrorProjectionStore{list: func(ctx context.Context, _ string, _ uint64, _ int) ([]domain.ProjectionDelta, uint64, error) {
+		if calls.Add(1) == 1 {
+			close(olderEntered)
+			select {
+			case <-releaseOlder:
+			case <-ctx.Done():
+				return nil, 0, ctx.Err()
+			}
+			return nil, 0, nil
+		}
+		return nil, 0, errors.New("newer failure")
+	}}
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(store), nil)
+	materializer.metadata = protocol.MaterializedSnapshotMetadata{Health: "healthy"}
+	olderDone := make(chan error, 1)
+	go func() {
+		_, _, err := materializer.convergeMutation(context.Background(), 1)
+		olderDone <- err
+	}()
+	<-olderEntered
+	type convergenceResult struct {
+		outcome string
+		err     error
+	}
+	newerQueued := make(chan struct{})
+	var newerQueuedOnce sync.Once
+	newerCtx := withProjectReadCanonicalQueuedHookForTest(context.Background(), func(string) { newerQueuedOnce.Do(func() { close(newerQueued) }) })
+	newerDone := make(chan convergenceResult, 1)
+	go func() {
+		_, outcome, err := materializer.convergeMutation(newerCtx, 2)
+		newerDone <- convergenceResult{outcome: outcome, err: err}
+	}()
+	<-newerQueued
+	close(releaseOlder)
+	if err := <-olderDone; err != nil {
+		t.Fatal(err)
+	}
+	newer := <-newerDone
+	if newer.err == nil || newer.outcome != "unavailable" {
+		t.Fatalf("newer convergence = outcome:%q error:%v, want unavailable failure", newer.outcome, newer.err)
+	}
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "newer failure") {
+		t.Fatalf("older success cleared newer failure: %q", got)
+	}
+}
+
+func TestProjectReadMaterializerBootstrapCannotOverwriteNewerCanonicalConvergence(t *testing.T) {
+	client, _ := newTestIssueClient(t)
+	ctx := context.Background()
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "bootstrap convergence fence", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hydrateEntered := make(chan struct{})
+	releaseHydrate := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseHydrate) }) }
+	t.Cleanup(release)
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(client), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		close(hydrateEntered)
+		<-releaseHydrate
+		return tasks, nil
+	})
+	bootstrapDone := make(chan error, 1)
+	go func() { bootstrapDone <- materializer.bootstrap(ctx) }()
+	<-hydrateEntered
+	if _, err := client.CloseWithRuntime(ctx, "project", issueID, domain.StatusDone); err != nil {
+		t.Fatal(err)
+	}
+	queued := make(chan struct{})
+	var queuedOnce sync.Once
+	convergeCtx := withProjectReadCanonicalQueuedHookForTest(ctx, func(string) { queuedOnce.Do(func() { close(queued) }) })
+	convergeDone := make(chan error, 1)
+	go func() {
+		_, convergeErr := materializer.convergeCanonical(convergeCtx)
+		convergeDone <- convergeErr
+	}()
+	select {
+	case <-queued:
+	case convergeErr := <-convergeDone:
+		release()
+		<-bootstrapDone
+		t.Fatalf("canonical convergence bypassed bootstrap serialization: %v", convergeErr)
+	}
+	release()
+	if err := <-bootstrapDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-convergeDone; err != nil {
+		t.Fatal(err)
+	}
+	tasks, metadata := materializer.snapshot()
+	if metadata.DeliveryCursor == 0 || len(tasks) != 1 || tasks[0].Status != domain.StatusDone {
+		t.Fatalf("snapshot after bootstrap/convergence = metadata:%+v tasks:%+v, want newest closed lifecycle", metadata, tasks)
+	}
+}
+
+func TestProjectReadMaterializerBootstrapCannotClearNewerConvergenceFailure(t *testing.T) {
+	client, _ := newTestIssueClient(t)
+	ctx := context.Background()
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "bootstrap failure fence", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hydrateEntered := make(chan struct{})
+	releaseHydrate := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseHydrate) }) }
+	t.Cleanup(release)
+	convergenceListEntered := make(chan struct{})
+	var failConvergence atomic.Bool
+	var convergenceListOnce sync.Once
+	store := listErrorProjectionStore{
+		projectionDeltaStore: client,
+		list: func(ctx context.Context, projectID string, after uint64, limit int) ([]domain.ProjectionDelta, uint64, error) {
+			if failConvergence.Load() {
+				convergenceListOnce.Do(func() { close(convergenceListEntered) })
+				return nil, 0, errors.New("newer convergence failure")
+			}
+			return client.ListProjectionDeltas(ctx, projectID, after, limit)
+		},
+	}
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(store), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		close(hydrateEntered)
+		<-releaseHydrate
+		return tasks, nil
+	})
+	bootstrapDone := make(chan error, 1)
+	go func() { bootstrapDone <- materializer.bootstrap(ctx) }()
+	<-hydrateEntered
+	if _, err := client.CloseWithRuntime(ctx, "project", issueID, domain.StatusDone); err != nil {
+		t.Fatal(err)
+	}
+	failConvergence.Store(true)
+	queued := make(chan struct{})
+	var queuedOnce sync.Once
+	convergeCtx := withProjectReadCanonicalQueuedHookForTest(ctx, func(string) { queuedOnce.Do(func() { close(queued) }) })
+	convergeDone := make(chan error, 1)
+	go func() {
+		_, _, convergeErr := materializer.convergeMutation(convergeCtx, 2)
+		convergeDone <- convergeErr
+	}()
+	<-queued
+	select {
+	case <-convergenceListEntered:
+		t.Fatal("convergence read bypassed bootstrap canonical admission")
+	default:
+	}
+	release()
+	if err := <-bootstrapDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-convergeDone; err == nil || !strings.Contains(err.Error(), "newer convergence failure") {
+		t.Fatalf("convergence error = %v, want injected newer failure", err)
+	}
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "newer convergence failure") {
+		t.Fatalf("bootstrap cleared newer convergence failure: %q", got)
+	}
+}
+
+func TestProjectReadMaterializerBootstrapCannotClearCanceledQueuedConvergence(t *testing.T) {
+	client, _ := newTestIssueClient(t)
+	ctx := context.Background()
+	if _, err := client.Create(ctx, issues.CreateTaskParams{Title: "bootstrap cancellation fence", Type: domain.TypeTask, Status: domain.StatusInReview}); err != nil {
+		t.Fatal(err)
+	}
+	hydrateEntered := make(chan struct{})
+	releaseHydrate := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseHydrate) }) }
+	t.Cleanup(release)
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(client), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		close(hydrateEntered)
+		<-releaseHydrate
+		return tasks, nil
+	})
+	bootstrapDone := make(chan error, 1)
+	go func() { bootstrapDone <- materializer.bootstrap(ctx) }()
+	<-hydrateEntered
+	queued := make(chan struct{})
+	var queuedOnce sync.Once
+	convergeCtx, cancelConvergence := context.WithCancel(withProjectReadCanonicalQueuedHookForTest(ctx, func(string) { queuedOnce.Do(func() { close(queued) }) }))
+	convergeDone := make(chan error, 1)
+	go func() {
+		_, _, convergeErr := materializer.convergeMutation(convergeCtx, 2)
+		convergeDone <- convergeErr
+	}()
+	<-queued
+	cancelConvergence()
+	if err := <-convergeDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("queued convergence error = %v, want context canceled", err)
+	}
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, context.Canceled.Error()) {
+		t.Fatalf("queued convergence did not publish unavailable health: %q", got)
+	}
+	release()
+	if err := <-bootstrapDone; err != nil {
+		t.Fatal(err)
+	}
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, context.Canceled.Error()) {
+		t.Fatalf("bootstrap cleared canceled queued convergence: %q", got)
 	}
 }
 

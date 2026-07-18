@@ -1,4 +1,4 @@
--- Migration 0053 manifest
+-- Migration 0057 manifest
 --
 -- Schema effects:
 --   Create the final agent_input_delivery_intents schema, including the
@@ -14,7 +14,7 @@
 --   the same schema validation when the ledger records this migration applied.
 -- Ledger effects:
 --   After schema validation, the runner records exactly one
---   schema_migrations row for 0053_agent_input_delivery with this artifact's
+--   schema_migrations row for 0057_agent_input_delivery with this artifact's
 --   pinned SHA-256 checksum. Schema, validation, and ledger mutation roll back
 --   together on any failure.
 

@@ -2900,7 +2900,7 @@ func TestBranchMergeToBaseCommandUsesAttachedTargetBranchWorktree(t *testing.T) 
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal git merge body: %v", err)
 					}
-					if body.Worktree != targetWorktree || body.Branch != "riordan/az-123/some-change" {
+					if body.SourceID != "az-123" || body.TargetID != "base" || body.Worktree != "" || body.Branch != "" {
 						t.Fatalf("merge body = %+v", body)
 					}
 					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
@@ -2977,8 +2977,11 @@ func TestBranchMergeCommandExplicitDescendantTargetIgnoresCallerWorktree(t *test
 	if err := BranchMergeToBaseCommandWithOptions(deps, BranchMergeToBaseOptions{IssueID: "ancestor", Target: "descendant"}); err != nil {
 		t.Fatalf("explicit descendant merge: %v", err)
 	}
-	if mergeBody.Worktree != descendantWorktree || mergeBody.Branch != "riordan/ancestor/work" {
-		t.Fatalf("merge body = %+v, want source branch merged in named descendant worktree %q", mergeBody, descendantWorktree)
+	if mergeBody.SourceID != "ancestor" || mergeBody.TargetID != "descendant" {
+		t.Fatalf("merge body = %+v, want authoritative typed ancestor-to-descendant target", mergeBody)
+	}
+	if mergeBody.Worktree != "" || mergeBody.Branch != "" {
+		t.Fatalf("merge body = %+v, want daemon-resolved worktree and branch identities", mergeBody)
 	}
 }
 
@@ -3302,7 +3305,10 @@ func TestBranchMergeToBaseCommandUsesNearestNonClosedAncestorBranch(t *testing.T
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal git merge body: %v", err)
 					}
-					mergedIn = body.Worktree
+					if body.SourceID != "az-child" {
+						t.Fatalf("merge source = %+v", body)
+					}
+					mergedIn = body.TargetID
 					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
 						Worktree: body.Worktree,
 						Branch:   "riordan/az-child/work",
@@ -3321,8 +3327,8 @@ func TestBranchMergeToBaseCommandUsesNearestNonClosedAncestorBranch(t *testing.T
 	if err := BranchMergeToBaseCommand(deps, "az-child"); err != nil {
 		t.Fatalf("BranchMergeToBaseCommand error = %v", err)
 	}
-	if mergedIn != "/tmp/az-parent" {
-		t.Fatalf("merge worktree = %q, want /tmp/az-parent", mergedIn)
+	if mergedIn != "az-parent" {
+		t.Fatalf("merge target = %q, want az-parent", mergedIn)
 	}
 }
 

@@ -696,10 +696,11 @@ func (r *operationRuntime) buildSubmitRequest(kind, projectID string, payload []
 		resourceKeys = []string{"operation:" + kind}
 	}
 	recentDedupeWindow := 30 * time.Second
-	if kind == protocol.CommandTaskBulkCleanup || kind == protocol.CommandSessionRestartAll {
+	if kind == protocol.CommandTaskBulkCleanup || kind == protocol.CommandSessionRestartAll || kind == daemonhandlers.CommandGitMerge {
 		// Coalesce identical concurrent submissions, but let a completed batch be
-		// retried immediately so per-item failures or a lost completion checkpoint
-		// can make progress. Active dedupe still returns the one complete batch.
+		// retried immediately so per-item failures, lost restart completion checkpoints,
+		// and revision-sensitive typed merges can make progress against refreshed authority.
+		// Active dedupe still returns the one in-flight operation.
 		recentDedupeWindow = 0
 	}
 	if kind == protocol.CommandGlobalProjectionRebuild {
@@ -822,7 +823,34 @@ func (r *operationRuntime) deriveOperationRouting(kind, projectID string, payloa
 			dedupeKey = kind + ":" + body.Worktree + ":" + body.Remote
 		}
 		return "", resourceKeys, dedupeKey, nil
-	case daemonhandlers.CommandGitMerge, daemonhandlers.CommandGitCheckout:
+	case daemonhandlers.CommandGitMerge:
+		var body struct {
+			SourceID string `json:"source_id"`
+			TargetID string `json:"target_id"`
+		}
+		if err = json.Unmarshal(payload, &body); err != nil {
+			return "", nil, "", fmt.Errorf("decode %s payload: %w", kind, err)
+		}
+		sourceID, sourceErr := naming.ParseIssueID(strings.TrimSpace(body.SourceID))
+		if sourceErr != nil || strings.TrimSpace(body.TargetID) == "" {
+			return "", nil, "", errors.New("missing required fields: source_id/target_id")
+		}
+		issueID = sourceID.String()
+		resourceKeys = []string{"issue:" + projectID + ":" + issueID}
+		if strings.EqualFold(strings.TrimSpace(body.TargetID), "base") {
+			body.TargetID = "base"
+			resourceKeys = append(resourceKeys, "repository:"+projectID)
+		} else {
+			targetID, targetErr := naming.ParseIssueID(strings.TrimSpace(body.TargetID))
+			if targetErr != nil {
+				return "", nil, "", errors.New("invalid target_id")
+			}
+			body.TargetID = targetID.String()
+			resourceKeys = append(resourceKeys, "issue:"+projectID+":"+body.TargetID)
+		}
+		dedupeKey = kind + ":" + issueID + ":" + body.TargetID
+		return issueID, resourceKeys, dedupeKey, nil
+	case daemonhandlers.CommandGitMergeRef, daemonhandlers.CommandGitCheckout:
 		var body struct {
 			Worktree string `json:"worktree"`
 			Branch   string `json:"branch"`
@@ -972,6 +1000,7 @@ func (r *operationRuntime) directRunnerForKind(kind string) (operationDirectRunn
 		daemonhandlers.CommandGitPullBase,
 		daemonhandlers.CommandGitPush,
 		daemonhandlers.CommandGitMerge,
+		daemonhandlers.CommandGitMergeRef,
 		daemonhandlers.CommandGitCheckout,
 		daemonhandlers.CommandGitAbortMerge:
 		if r.gitHandler == nil {
@@ -1546,6 +1575,8 @@ func operationDisplayName(kind string) string {
 		return "Git push"
 	case daemonhandlers.CommandGitMerge:
 		return "Git merge"
+	case daemonhandlers.CommandGitMergeRef:
+		return "Git ref merge"
 	case daemonhandlers.CommandGitCheckout:
 		return "Git checkout"
 	case daemonhandlers.CommandGitAbortMerge:

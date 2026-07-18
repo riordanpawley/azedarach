@@ -1,0 +1,38 @@
+-- Migration manifest: 0055_mailbox_observation_replay_repair
+-- Authority: project issue-store SQLite observation history.
+--
+-- Schema effects:
+-- * No table, column, trigger, or index changes.
+--
+-- Data effects (Go-assisted, one transaction):
+-- * Select canonical mailbox envelopes produced by source_command=mailbox.cutover
+--   or source_command=mail.send observations.
+-- * Preserve legacy mail.send rows without a canonical mail_event envelope;
+--   malformed mailbox.cutover envelopes remain a fail-closed cutover error.
+-- * Fail closed above the versioned 50,000-row mailbox observation bound.
+-- * Preserve every top-level observation field and immutable mail_event scalar.
+-- * Preserve JSON numeric lexemes, including integers above 2^53, while
+--   reconstructing only the nested producer payload.
+-- * Reconstruct mail_event.payload from producer-authored top-level fields.
+-- * Exclude mail_event, mail_delivery_id, worker_evidence, and
+--   worker_evidence_validation because they are durable envelope identity or
+--   recomputable parser indexes, not producer-authored mailbox payload.
+-- * Existing source mailbox JSONL is never read, rewritten, or deleted.
+--
+-- Validation effects:
+-- * Every repaired mailbox row must have a JSON object mail_event whose nested
+--   payload exactly matches canonical producer-authored top-level fields.
+-- * Migration, applied-ledger reopen validation, and late-drift repair share
+--   the same versioned 50,000-row bounded scanner and fail closed above it.
+-- * Applied-ledger payload-shape drift is repaired through the same bounded,
+--   transactional path; malformed or missing mail_event envelopes fail startup.
+--
+-- Rollback and idempotency effects:
+-- * Row repairs and the schema_migrations ledger record share one transaction.
+-- * Any decode, validation, injected-test, or commit failure rolls back all
+--   payload changes and leaves the migration unapplied for a safe retry.
+-- * Reopen after a successful application validates and performs no writes.
+--
+-- Ledger effects:
+-- * The immutable artifact checksum is pinned in the project.issues catalog.
+-- * Exactly one 0055_mailbox_observation_replay_repair row is recorded.

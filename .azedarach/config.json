@@ -105,6 +105,45 @@
     "draftByDefault": true,
     "notifyAfterCreate": true
   },
+  "publicationEvidence": {
+    "activePathProfiles": [
+      "merge-gate",
+      "cold"
+    ],
+    "dependencies": {
+      "daemon-operations-store": [
+        "internal/daemon/operations/store"
+      ],
+      "protocol-contract": [
+        "internal/contracts/protocol"
+      ]
+    },
+    "exactBaseSurfaces": {
+      "authority_boundary": [
+        "internal/client",
+        "internal/daemon",
+        "internal/tui"
+      ],
+      "generated_artifact": [
+        "internal/contracts/protocol/testdata",
+        "internal/ipc/codec/testdata"
+      ],
+      "migration": [
+        "internal/daemon/operations/store/migrations",
+        "internal/services/issues/migrations"
+      ],
+      "protocol": [
+        "internal/contracts/protocol"
+      ],
+      "schema": [
+        "docs/config.schema.json"
+      ],
+      "shared_invariant": [
+        "internal/daemon/invariant_policy.go"
+      ]
+    },
+    "policyVersion": "azedarach-publication-evidence-v1"
+  },
   "scheduledScripts": {
     "env": {},
     "scripts": []

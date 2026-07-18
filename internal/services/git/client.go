@@ -3,6 +3,7 @@ package git
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -97,6 +98,29 @@ type GitStatus struct {
 	hasTrackedChanges bool
 }
 
+// MarshalJSON preserves the complete status envelope consumed by runtime
+// projections. Required list fields are always JSON arrays, including for a
+// clean repository.
+func (s GitStatus) MarshalJSON() ([]byte, error) {
+	type gitStatusJSON GitStatus
+	if s.Modified == nil {
+		s.Modified = []string{}
+	}
+	if s.Added == nil {
+		s.Added = []string{}
+	}
+	if s.Deleted == nil {
+		s.Deleted = []string{}
+	}
+	if s.Untracked == nil {
+		s.Untracked = []string{}
+	}
+	if s.Staged == nil {
+		s.Staged = []string{}
+	}
+	return json.Marshal(gitStatusJSON(s))
+}
+
 // EvidenceCommit is an issue-scoped commit found on a branch.
 type EvidenceCommit struct {
 	Hash    string
@@ -148,8 +172,15 @@ const (
 )
 
 type candidateValidationObserverKey struct{}
+type candidateValidationCommandKey struct{}
+type candidateValidationAdmissionKey struct{}
 
 type CandidateValidationObserver func(CandidateValidationAttempt)
+
+// CandidateValidationAdmission lets the daemon bind exact synthetic-candidate
+// execution to its durable validation authority. A reused admission skips the
+// command; otherwise finish must be called with the terminal attempt.
+type CandidateValidationAdmission func(context.Context, string) (reused bool, finish func(CandidateValidationAttempt) error, err error)
 
 func WithCandidateValidationObserver(ctx context.Context, observer CandidateValidationObserver) context.Context {
 	if ctx == nil {
@@ -159,6 +190,26 @@ func WithCandidateValidationObserver(ctx context.Context, observer CandidateVali
 		return ctx
 	}
 	return context.WithValue(ctx, candidateValidationObserverKey{}, observer)
+}
+
+// WithCandidateValidationCommand binds the project-owned configured command
+// used to validate an exact synthetic merge candidate. The command executes in
+// the detached candidate worktree with AZEDARACH_CANDIDATE_HEAD set.
+func WithCandidateValidationCommand(ctx context.Context, command string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, candidateValidationCommandKey{}, strings.TrimSpace(command))
+}
+
+func WithCandidateValidationAdmission(ctx context.Context, admission CandidateValidationAdmission) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if admission == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, candidateValidationAdmissionKey{}, admission)
 }
 
 func notifyCandidateValidation(ctx context.Context, attempt CandidateValidationAttempt) {
@@ -307,16 +358,16 @@ func (c *Client) Fetch(ctx context.Context, worktree, remote string) error {
 // Merge merges the specified branch into the current branch.
 // It detects merge conflicts and returns detailed information.
 func (c *Client) Merge(ctx context.Context, worktree, branch string) (*MergeResult, error) {
-	return c.mergeWithEnv(ctx, worktree, branch, nil)
+	return c.mergeWithEnv(ctx, worktree, branch, nil, false)
 }
 
-func (c *Client) mergeWithEnv(ctx context.Context, worktree, branch string, extraEnv []string) (*MergeResult, error) {
+func (c *Client) mergeWithEnv(ctx context.Context, worktree, branch string, extraEnv []string, forceNoFF bool) (*MergeResult, error) {
 	c.logger.Info("merging branch", "worktree", worktree, "branch", branch)
 
 	runCtx, cancel := mergeCommandContext(ctx)
 	defer cancel()
 
-	output, err, hookDiagnostics := c.runMergeWithHookDiagnostics(runCtx, worktree, branch, extraEnv)
+	output, err, hookDiagnostics := c.runMergeWithHookDiagnostics(runCtx, worktree, branch, extraEnv, forceNoFF)
 
 	result := &MergeResult{
 		Success:      err == nil,
@@ -367,10 +418,15 @@ func mergeCommandContext(ctx context.Context) (context.Context, context.CancelFu
 	return context.WithTimeout(ctx, domain.IntegrationMergeTimeout)
 }
 
-func (c *Client) runMergeWithHookDiagnostics(ctx context.Context, worktree, branch string, extraEnv []string) (string, error, []GitHookDiagnostic) {
+func (c *Client) runMergeWithHookDiagnostics(ctx context.Context, worktree, branch string, extraEnv []string, forceNoFF bool) (string, error, []GitHookDiagnostic) {
+	args := []string{"merge", "--no-edit"}
+	if forceNoFF {
+		args = append(args, "--no-ff")
+	}
+	args = append(args, branch)
 	traceFile, err := os.CreateTemp("", "azedarach-git-trace2-*.json")
 	if err != nil {
-		output, runErr := c.runInWorktreeWithEnv(ctx, worktree, extraEnv, "merge", "--no-edit", branch)
+		output, runErr := c.runInWorktreeWithEnv(ctx, worktree, extraEnv, args...)
 		return output, runErr, nil
 	}
 	tracePath := traceFile.Name()
@@ -380,14 +436,18 @@ func (c *Client) runMergeWithHookDiagnostics(ctx context.Context, worktree, bran
 	startedAt := time.Now()
 	mergeEnv := append([]string(nil), extraEnv...)
 	mergeEnv = append(mergeEnv, "GIT_TRACE2_EVENT="+tracePath)
-	output, runErr := c.runInWorktreeWithEnv(ctx, worktree, mergeEnv, "merge", "--no-edit", branch)
+	output, runErr := c.runInWorktreeWithEnv(ctx, worktree, mergeEnv, args...)
 	elapsed := time.Since(startedAt)
-	diagnostics := parseGitMergeHookDiagnostics(tracePath, mergeCommandShape(), startedAt.Add(elapsed), errors.Is(ctx.Err(), context.DeadlineExceeded))
+	diagnostics := parseGitMergeHookDiagnostics(tracePath, mergeCommandShape(forceNoFF), startedAt.Add(elapsed), errors.Is(ctx.Err(), context.DeadlineExceeded))
 	return output, runErr, diagnostics
 }
 
-func mergeCommandShape() string {
-	return "git " + latencytrace.CommandShape([]string{"merge", "--no-edit", "<branch>"})
+func mergeCommandShape(forceNoFF bool) string {
+	args := []string{"merge", "--no-edit"}
+	if forceNoFF {
+		args = append(args, "--no-ff")
+	}
+	return "git " + latencytrace.CommandShape(append(args, "<branch>"))
 }
 
 // MergeCleanly merges a branch and verifies the target worktree is clean after
@@ -396,10 +456,10 @@ func mergeCommandShape() string {
 // result is reported as unsuccessful so higher-level integration can halt
 // without leaving the target branch dirty.
 func (c *Client) MergeCleanly(ctx context.Context, worktree, branch string) (*MergeResult, error) {
-	return c.mergeCleanlyWithEnv(ctx, worktree, branch, nil)
+	return c.mergeCleanlyWithEnv(ctx, worktree, branch, nil, false)
 }
 
-func (c *Client) mergeCleanlyWithEnv(ctx context.Context, worktree, branch string, extraEnv []string) (*MergeResult, error) {
+func (c *Client) mergeCleanlyWithEnv(ctx context.Context, worktree, branch string, extraEnv []string, forceNoFF bool) (*MergeResult, error) {
 	preStatus, preStatusErr := c.Status(ctx, worktree)
 	targetWasClean := preStatusErr == nil && !gitStatusDirty(preStatus)
 	if preStatusErr != nil {
@@ -410,7 +470,7 @@ func (c *Client) mergeCleanlyWithEnv(ctx context.Context, worktree, branch strin
 		)
 	}
 
-	result, err := c.mergeWithEnv(ctx, worktree, branch, extraEnv)
+	result, err := c.mergeWithEnv(ctx, worktree, branch, extraEnv, forceNoFF)
 	if err != nil {
 		preservedArtifacts := c.preserveIntegrationFailureArtifacts(worktree, nil, err)
 		cleanedResult, cleanErr := c.cleanFailedMergeSideEffects(ctx, worktree, branch, targetWasClean, preStatusErr, err)
@@ -968,11 +1028,26 @@ func (c *Client) DiffStatTotalsWithBasePreference(ctx context.Context, worktree,
 
 // MergeBase resolves the merge base between base branch and HEAD.
 func (c *Client) MergeBase(ctx context.Context, worktree, baseBranch string) (string, error) {
-	return c.mergeBase(ctx, worktree, baseBranch, false)
+	return c.mergeBaseForRevision(ctx, worktree, baseBranch, "HEAD", false)
 }
 
 func (c *Client) mergeBase(ctx context.Context, worktree, baseBranch string, preferRemote bool) (string, error) {
+	return c.mergeBaseForRevision(ctx, worktree, baseBranch, "HEAD", preferRemote)
+}
+
+// MergeBaseForRevision resolves the merge base against one immutable candidate
+// revision rather than symbolic HEAD. Callers that publish an exact review
+// range should resolve HEAD once, then pass that revision here.
+func (c *Client) MergeBaseForRevision(ctx context.Context, worktree, baseBranch, headRevision string) (string, error) {
+	return c.mergeBaseForRevision(ctx, worktree, baseBranch, headRevision, false)
+}
+
+func (c *Client) mergeBaseForRevision(ctx context.Context, worktree, baseBranch, headRevision string, preferRemote bool) (string, error) {
 	baseBranch = strings.TrimSpace(baseBranch)
+	headRevision = strings.TrimSpace(headRevision)
+	if headRevision == "" {
+		return "", fmt.Errorf("head revision is empty")
+	}
 	candidates := c.baseRefCandidates(ctx, worktree, baseBranch, preferRemote)
 	if len(candidates) == 0 {
 		return "", fmt.Errorf("base branch is empty")
@@ -982,7 +1057,7 @@ func (c *Client) mergeBase(ctx context.Context, worktree, baseBranch string, pre
 	attempted := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
 		attempted = append(attempted, candidate)
-		mergeBaseOutput, err := c.runInWorktree(ctx, worktree, "merge-base", candidate, "HEAD")
+		mergeBaseOutput, err := c.runInWorktree(ctx, worktree, "merge-base", candidate, headRevision)
 		if err != nil {
 			lastErr = err
 			continue
@@ -1016,6 +1091,25 @@ func (c *Client) MergeBaseLocal(ctx context.Context, worktree, baseBranch string
 		return baseBranch, nil
 	}
 	return mergeBase, nil
+}
+
+// MergeBaseBetween resolves the common ancestor of two explicit immutable
+// revisions without consulting HEAD or remote-tracking policy.
+func (c *Client) MergeBaseBetween(ctx context.Context, worktree, leftRevision, rightRevision string) (string, error) {
+	leftRevision = strings.TrimSpace(leftRevision)
+	rightRevision = strings.TrimSpace(rightRevision)
+	if leftRevision == "" || rightRevision == "" {
+		return "", fmt.Errorf("merge-base requires two explicit revisions")
+	}
+	output, err := c.runInWorktree(ctx, worktree, "merge-base", leftRevision, rightRevision)
+	if err != nil {
+		return "", fmt.Errorf("resolve merge-base between %s and %s: %w", leftRevision, rightRevision, err)
+	}
+	resolved := strings.TrimSpace(output)
+	if resolved == "" {
+		return "", fmt.Errorf("merge-base between %s and %s was empty", leftRevision, rightRevision)
+	}
+	return resolved, nil
 }
 
 // ChangedFiles returns changed files from merge-base..HEAD.
@@ -1395,11 +1489,11 @@ func (c *Client) CommitChangedFiles(ctx context.Context, worktree, commit string
 	if commit == "" {
 		return nil, fmt.Errorf("commit is required")
 	}
-	output, err := c.runInWorktree(ctx, worktree, "diff-tree", "--no-commit-id", "--name-only", "-r", commit)
+	output, err := c.runInWorktreeRaw(ctx, worktree, "diff-tree", "--no-commit-id", "--name-only", "-z", "-r", commit)
 	if err != nil {
 		return nil, fmt.Errorf("list files changed by commit %s: %w", commit, err)
 	}
-	return splitNonEmptyLines(output), nil
+	return parseNULTerminatedGitPaths(output)
 }
 
 // ChangedFilesBetweenRefs returns files changed between baseRef and headRef.
@@ -1412,11 +1506,11 @@ func (c *Client) ChangedFilesBetweenRefs(ctx context.Context, worktree, baseRef,
 	if headRef == "" {
 		return nil, fmt.Errorf("head ref is required")
 	}
-	output, err := c.runInWorktree(ctx, worktree, "diff", "--name-only", baseRef+"..."+headRef, "--")
+	output, err := c.runInWorktreeRaw(ctx, worktree, "diff", "--name-only", "-z", baseRef+"..."+headRef, "--")
 	if err != nil {
 		return nil, fmt.Errorf("list files changed between %s and %s: %w", baseRef, headRef, err)
 	}
-	return splitNonEmptyLines(output), nil
+	return parseNULTerminatedGitPaths(output)
 }
 
 // ChangedFilesBetweenRefTrees returns files whose final tree differs between
@@ -1430,11 +1524,44 @@ func (c *Client) ChangedFilesBetweenRefTrees(ctx context.Context, worktree, base
 	if headRef == "" {
 		return nil, fmt.Errorf("head ref is required")
 	}
-	output, err := c.runInWorktree(ctx, worktree, "diff", "--name-only", baseRef, headRef, "--")
+	output, err := c.runInWorktreeRaw(ctx, worktree, "diff", "--name-only", "-z", baseRef, headRef, "--")
 	if err != nil {
 		return nil, fmt.Errorf("list files with different trees between %s and %s: %w", baseRef, headRef, err)
 	}
-	return splitNonEmptyLines(output), nil
+	return parseNULTerminatedGitPaths(output)
+}
+
+func parseNULTerminatedGitPaths(output string) ([]string, error) {
+	if output == "" {
+		return nil, nil
+	}
+	if !strings.HasSuffix(output, "\x00") {
+		return nil, fmt.Errorf("Git path output is not NUL terminated")
+	}
+	values := strings.Split(output[:len(output)-1], "\x00")
+	for _, value := range values {
+		if value == "" {
+			return nil, fmt.Errorf("Git path output contains an empty path")
+		}
+	}
+	return values, nil
+}
+
+// PatchDigest returns a stable SHA-256 identity for the exact tree delta
+// between two verified revisions. The digest is independent of later movement
+// on the configured integration branch because callers retain the original
+// base revision as part of evidence provenance.
+func (c *Client) PatchDigest(ctx context.Context, worktree, baseRef, headRef string) (string, error) {
+	baseRef = strings.TrimSpace(baseRef)
+	headRef = strings.TrimSpace(headRef)
+	if baseRef == "" || headRef == "" {
+		return "", fmt.Errorf("patch digest requires base and head revisions")
+	}
+	output, err := c.runInWorktreeRaw(ctx, worktree, "diff", "--binary", "--no-ext-diff", baseRef, headRef, "--")
+	if err != nil {
+		return "", fmt.Errorf("derive patch digest for %s..%s: %w", baseRef, headRef, err)
+	}
+	return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(output))), nil
 }
 
 // BranchAheadBehind reports commit deltas for HEAD relative to the base branch.
@@ -1554,6 +1681,21 @@ func (c *Client) runInWorktree(ctx context.Context, worktree string, args ...str
 	prefixed = append(prefixed, "-C", worktree)
 	prefixed = append(prefixed, args...)
 	return c.runner.Run(ctx, prefixed...)
+}
+
+func (c *Client) runInWorktreeRaw(ctx context.Context, worktree string, args ...string) (string, error) {
+	runner, ok := c.runner.(rawCommandRunner)
+	if !ok {
+		return c.runInWorktree(ctx, worktree, args...)
+	}
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return runner.RunRaw(ctx, args...)
+	}
+	prefixed := make([]string, 0, len(args)+2)
+	prefixed = append(prefixed, "-C", worktree)
+	prefixed = append(prefixed, args...)
+	return runner.RunRaw(ctx, prefixed...)
 }
 
 func (c *Client) runInWorktreeWithEnv(ctx context.Context, worktree string, extraEnv []string, args ...string) (string, error) {

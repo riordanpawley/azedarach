@@ -10,30 +10,32 @@ import (
 
 // Config represents the full Azedarach configuration
 type Config struct {
-	CLITool          string                 `json:"cliTool"`
-	IssueTracker     IssueTrackerConfig     `json:"issueTracker"`
-	Gate             GateConfig             `json:"gate"`
-	Git              GitConfig              `json:"git"`
-	GitHooks         GitHooksConfig         `json:"githooks"`
-	Keyboard         KeyboardConfig         `json:"keyboard"`
-	Session          SessionConfig          `json:"session"`
-	PR               PRConfig               `json:"pr"`
-	Merge            MergeConfig            `json:"merge"`
-	Notifications    NotifyConfig           `json:"notifications"`
-	Issues           IssuesConfig           `json:"issues"`
-	Network          NetworkConfig          `json:"network"`
-	DevServer        DevServerConfig        `json:"devServer"`
-	Worktree         WorktreeConfig         `json:"worktree"`
-	IssueResources   IssueResourcesConfig   `json:"issueResources"`
-	ScheduledScripts ScheduledScriptsConfig `json:"scheduledScripts"`
-	Spec             SpecConfig             `json:"spec"`
-	Orchestration    OrchestrationConfig    `json:"orchestration"`
-	Diagnostics      DiagnosticsConfig      `json:"diagnostics"`
+	CLITool             string                    `json:"cliTool"`
+	IssueTracker        IssueTrackerConfig        `json:"issueTracker"`
+	Gate                GateConfig                `json:"gate"`
+	Git                 GitConfig                 `json:"git"`
+	GitHooks            GitHooksConfig            `json:"githooks"`
+	Keyboard            KeyboardConfig            `json:"keyboard"`
+	Session             SessionConfig             `json:"session"`
+	PR                  PRConfig                  `json:"pr"`
+	Merge               MergeConfig               `json:"merge"`
+	Notifications       NotifyConfig              `json:"notifications"`
+	Issues              IssuesConfig              `json:"issues"`
+	Network             NetworkConfig             `json:"network"`
+	DevServer           DevServerConfig           `json:"devServer"`
+	Worktree            WorktreeConfig            `json:"worktree"`
+	IssueResources      IssueResourcesConfig      `json:"issueResources"`
+	ScheduledScripts    ScheduledScriptsConfig    `json:"scheduledScripts"`
+	Spec                SpecConfig                `json:"spec"`
+	Orchestration       OrchestrationConfig       `json:"orchestration"`
+	PublicationEvidence PublicationEvidenceConfig `json:"publicationEvidence"`
+	Diagnostics         DiagnosticsConfig         `json:"diagnostics"`
 }
 
 // GateConfig selects the project-owned command run by `az gate`.
 type GateConfig struct {
-	Command string `json:"command"`
+	Command                string `json:"command"`
+	EnvironmentFingerprint string `json:"environmentFingerprint,omitempty"`
 }
 
 type IssueTrackerConfig struct {
@@ -227,6 +229,17 @@ type OrchestrationConfig struct {
 	OpenIssueLimit int    `json:"openIssueLimit"`
 }
 
+// PublicationEvidenceConfig is project-owned capability discovery for
+// authoritative layered publication evidence. Path prefixes use canonical
+// repository-relative slash form and are never inferred from Azedarach's own
+// repository layout.
+type PublicationEvidenceConfig struct {
+	PolicyVersion      string              `json:"policyVersion"`
+	ActivePathProfiles []string            `json:"activePathProfiles"`
+	ExactBaseSurfaces  map[string][]string `json:"exactBaseSurfaces"`
+	Dependencies       map[string][]string `json:"dependencies"`
+}
+
 type DiagnosticsConfig struct {
 	LatencyTrace bool `json:"latencyTrace"`
 }
@@ -356,6 +369,11 @@ func DefaultConfig() *Config {
 			StartLimit:     3,
 			AgentCapacity:  12,
 			OpenIssueLimit: 100,
+		},
+		PublicationEvidence: PublicationEvidenceConfig{
+			ActivePathProfiles: []string{},
+			ExactBaseSurfaces:  map[string][]string{},
+			Dependencies:       map[string][]string{},
 		},
 		Diagnostics: DiagnosticsConfig{
 			LatencyTrace: false,

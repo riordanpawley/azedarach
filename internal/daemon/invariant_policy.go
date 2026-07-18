@@ -26,6 +26,7 @@ const (
 	daemonInvariantAdvisorSingleton        daemonInvariantID = "session.advisor_singleton"
 
 	daemonInvariantTaskListFreshness    daemonInvariantID = "task.list_freshness"
+	daemonInvariantTaskReadAfterWrite   daemonInvariantID = "task.read_committed_revision"
 	daemonInvariantTaskClose            daemonInvariantID = "task.close"
 	daemonInvariantTaskClosePreflight   daemonInvariantID = "task.close_preflight"
 	daemonInvariantTaskDelete           daemonInvariantID = "task.delete"
@@ -37,6 +38,7 @@ const (
 	daemonInvariantTaskContextRisk      daemonInvariantID = "task.context_risk_closeout"
 	daemonInvariantTaskMergeBaseTarget  daemonInvariantID = "task.merge_base_target"
 	daemonInvariantTaskFollowOnMerge    daemonInvariantID = "task.follow_on_merge_candidates"
+	daemonInvariantTaskPublicationQueue daemonInvariantID = "task.publication_queue"
 	daemonInvariantWorkerObservation    daemonInvariantID = "worker.observation_projection"
 	daemonInvariantInteractionWaiting   daemonInvariantID = "interaction.waiting_human"
 	daemonInvariantInvestigationWaiting daemonInvariantID = "investigation.waiting_human"
@@ -59,6 +61,7 @@ const (
 	daemonInvariantProjectionDeltaStream        daemonInvariantID = "projection.delta_stream"
 	daemonInvariantTmuxObservation              daemonInvariantID = "external.tmux_observation"
 	daemonInvariantValidationCapacity           daemonInvariantID = "validation.machine_capacity"
+	daemonInvariantPublicationEvidence          daemonInvariantID = "validation.publication_evidence"
 )
 
 var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
@@ -106,6 +109,9 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantTmuxObservation:              daemonInvariantSourceTmux,
 	daemonInvariantValidationCapacity:           daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationRootedBootstrap: daemonInvariantSourceHybrid,
+	daemonInvariantTaskReadAfterWrite:           daemonInvariantSourceProjection,
+	daemonInvariantTaskPublicationQueue:         daemonInvariantSourceHybrid,
+	daemonInvariantPublicationEvidence:          daemonInvariantSourceProjection,
 }
 
 func sourceForInvariant(id daemonInvariantID) daemonInvariantSource {

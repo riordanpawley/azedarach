@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -1228,8 +1227,7 @@ func TestPendingDecisionEnrichmentComposesAndDeduplicatesExistingBlockers(t *tes
 }
 
 func TestProjectOrchestrationSnapshotEnrichesPendingDecisionsInsideProjectionFence(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	ctx := context.Background()
 	repoDir := t.TempDir()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
@@ -1244,6 +1242,7 @@ func TestProjectOrchestrationSnapshotEnrichesPendingDecisionsInsideProjectionFen
 		t.Fatal(err)
 	}
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.snapshotAdmissionContext = context.WithCancel
 	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", RepoDir: repoDir, Limit: 10})
 	if err != nil {
 		t.Fatal(err)

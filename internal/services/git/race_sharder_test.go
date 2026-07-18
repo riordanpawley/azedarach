@@ -9,13 +9,23 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
-	"time"
 )
 
 type raceShardRecord struct {
 	Action string `json:"Action"`
 	Output string `json:"Output"`
+}
+
+type raceShardFIFO struct {
+	path   string
+	file   *os.File
+	reader *bufio.Reader
+}
+
+type raceSharderProcessResult struct {
+	err error
 }
 
 func prepareRaceSharder(t *testing.T) (string, string) {
@@ -68,42 +78,144 @@ case "${FAKE_GO_SCENARIO:-success}" in
     exit 9
     ;;
   timeout)
-    (
-	  trap 'printf term-ignored >"$FAKE_GO_CHILD_TERM"' TERM INT HUP
-      while :; do sleep 1; done
-    ) &
+	"${0%/*}/fake-go-timeout-child" &
     child=$!
-    printf '%s\n' "$child" >"$FAKE_GO_CHILD_PID"
-	trap 'printf '\''{"Action":"output","Output":"late-term"}\n'\''; wait "$child"' TERM INT HUP
+	signal_timeout() {
+	  printf '{"Action":"output","Output":"late-term"}\n'
+	  read -r _ <"$FAKE_GO_CHILD_TERM_FIFO"
+	  printf 'term\n' >"$FAKE_GO_TERM_FIFO"
+	  wait "$child"
+	}
+	trap signal_timeout TERM INT HUP
     wait "$child"
     ;;
 	concurrency)
-	  while ! mkdir "$FAKE_GO_CONCURRENCY_DIR/lock" 2>/dev/null; do sleep 0.01; done
-	  active=0
-	  [ ! -s "$FAKE_GO_CONCURRENCY_DIR/active" ] || active="$(cat "$FAKE_GO_CONCURRENCY_DIR/active")"
-	  active=$((active + 1))
-	  printf '%s\n' "$active" >"$FAKE_GO_CONCURRENCY_DIR/active"
-	  maximum=0
-	  [ ! -s "$FAKE_GO_CONCURRENCY_DIR/max" ] || maximum="$(cat "$FAKE_GO_CONCURRENCY_DIR/max")"
-	  if [ "$active" -gt "$maximum" ]; then printf '%s\n' "$active" >"$FAKE_GO_CONCURRENCY_DIR/max"; fi
-	  rmdir "$FAKE_GO_CONCURRENCY_DIR/lock"
-	  sleep 0.3
-	  while ! mkdir "$FAKE_GO_CONCURRENCY_DIR/lock" 2>/dev/null; do sleep 0.01; done
-	  active="$(cat "$FAKE_GO_CONCURRENCY_DIR/active")"
-	  printf '%s\n' $((active - 1)) >"$FAKE_GO_CONCURRENCY_DIR/active"
-	  rmdir "$FAKE_GO_CONCURRENCY_DIR/lock"
+	  printf 'arrive %s\n' "$pattern" >"$FAKE_GO_CONCURRENCY_EVENT_FIFO"
+	  read -r _ <"$FAKE_GO_CONCURRENCY_RELEASE_FIFO"
+	  printf 'depart %s\n' "$pattern" >"$FAKE_GO_CONCURRENCY_EVENT_FIFO"
+	  read -r _ <"$FAKE_GO_CONCURRENCY_DEPART_ACK_FIFO"
 	  ;;
 esac
 `
 	if err := os.WriteFile(filepath.Join(fakeBin, "go"), []byte(fakeGo), 0o755); err != nil {
 		t.Fatalf("write fake go: %v", err)
 	}
+	fakeTimeoutChild := `#!/bin/sh
+signal_term() {
+  printf term-ignored >"$FAKE_GO_CHILD_TERM"
+  printf 'child-term\n' >"$FAKE_GO_CHILD_TERM_FIFO"
+}
+trap signal_term TERM INT HUP
+if [ -n "${FAKE_GO_READY_FIFO:-}" ]; then
+  printf '%s\n' "$$" >"$FAKE_GO_READY_FIFO"
+fi
+while ! read -r _ <"$FAKE_GO_BLOCK_FIFO"; do :; done
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "fake-go-timeout-child"), []byte(fakeTimeoutChild), 0o755); err != nil {
+		t.Fatalf("write fake timeout child: %v", err)
+	}
 	return repo, script
+}
+
+func newRaceShardFIFO(t *testing.T, name string) *raceShardFIFO {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatalf("create %s FIFO: %v", name, err)
+	}
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open %s FIFO: %v", name, err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	return &raceShardFIFO{path: path, file: file, reader: bufio.NewReader(file)}
+}
+
+func (f *raceShardFIFO) readLine(t *testing.T, processDone <-chan struct{}, result *raceSharderProcessResult) string {
+	t.Helper()
+	type readResult struct {
+		line string
+		err  error
+	}
+	read := make(chan readResult, 1)
+	go func() {
+		line, err := f.reader.ReadString('\n')
+		read <- readResult{line: strings.TrimSpace(line), err: err}
+	}()
+	select {
+	case got := <-read:
+		if got.err != nil {
+			t.Fatalf("read subprocess barrier %s: %v", f.path, got.err)
+		}
+		return got.line
+	case <-processDone:
+		t.Fatalf("race sharder exited before subprocess barrier %s: %v", f.path, result.err)
+		return ""
+	}
+}
+
+func (f *raceShardFIFO) writeLine(t *testing.T, value string) {
+	t.Helper()
+	if _, err := f.file.WriteString(value + "\n"); err != nil {
+		t.Fatalf("release subprocess barrier %s: %v", f.path, err)
+	}
+}
+
+func installRaceSharderTimeoutWrapper(t *testing.T, repo, timeoutPath string) {
+	t.Helper()
+	wrapper := `#!/bin/sh
+printf '%s\n' "$$" >"$AZEDARACH_DAEMON_RACE_TEST_TIMEOUT_READY_FIFO"
+exec "$AZEDARACH_DAEMON_RACE_TEST_TIMEOUT_PATH" "$@"
+`
+	if err := os.WriteFile(filepath.Join(repo, "fake-bin", "timeout"), []byte(wrapper), 0o755); err != nil {
+		t.Fatalf("write timeout wrapper: %v", err)
+	}
+}
+
+func startRaceSharder(t *testing.T, repo, script string, extraEnv ...string) (*exec.Cmd, *strings.Builder, *strings.Builder, <-chan struct{}, *raceSharderProcessResult) {
+	t.Helper()
+	stdout := new(strings.Builder)
+	stderr := new(strings.Builder)
+	cmd := exec.Command(script)
+	cmd.Dir = repo
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.Env = append(os.Environ(), append([]string{
+		"PATH=" + filepath.Join(repo, "fake-bin") + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}, extraEnv...)...)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start race sharder: %v", err)
+	}
+	result := new(raceSharderProcessResult)
+	done := make(chan struct{})
+	go func() {
+		result.err = cmd.Wait()
+		close(done)
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-done
+	})
+	return cmd, stdout, stderr, done, result
 }
 
 func runRaceSharder(t *testing.T, repo, script string, extraEnv ...string) ([]byte, []byte, error) {
 	t.Helper()
-	cmd := exec.Command(script)
+	cmd := exec.CommandContext(t.Context(), script)
+	inner := false
+	for _, value := range extraEnv {
+		inner = inner || value == "AZEDARACH_DAEMON_RACE_INNER=1"
+	}
+	if inner {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+	} else {
+		cmd.Cancel = func() error {
+			return cmd.Process.Signal(os.Interrupt)
+		}
+	}
 	cmd.Dir = repo
 	stdout := new(strings.Builder)
 	stderr := new(strings.Builder)
@@ -114,6 +226,23 @@ func runRaceSharder(t *testing.T, repo, script string, extraEnv ...string) ([]by
 	}, extraEnv...)...)
 	err := cmd.Run()
 	return []byte(stdout.String()), []byte(stderr.String()), err
+}
+
+func assertRaceSharderProcessStopped(t *testing.T, pid string) {
+	t.Helper()
+	output, err := exec.Command("ps", "-o", "stat=", "-p", pid).Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return
+		}
+		t.Fatalf("inspect shard descendant %s: %v", pid, err)
+	}
+	state := strings.TrimSpace(string(output))
+	if strings.HasPrefix(state, "Z") {
+		return
+	}
+	t.Fatalf("shard descendant %s still running after cancellation (state %q)", pid, state)
 }
 
 func decodeRaceShardOutput(t *testing.T, output []byte) []raceShardRecord {
@@ -164,42 +293,77 @@ func TestDaemonRaceSharderAssignsEveryTestExactlyOnceAndSkipsEmptyShards(t *test
 func TestDaemonRaceSharderCapsConcurrentProcesses(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
-		shards      string
 		parallelism string
-		want        string
+		waves       []int
 	}{
-		{name: "sequential by default", want: "1"},
-		{name: "explicit bounded parallelism", shards: "4", parallelism: "2", want: "2"},
+		{name: "sequential by default", waves: []int{1, 1, 1, 1}},
+		{name: "explicit bounded parallelism", parallelism: "2", waves: []int{2, 2}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo, script := prepareRaceSharder(t)
-			concurrencyDir := filepath.Join(repo, "concurrency")
-			if err := os.MkdirAll(concurrencyDir, 0o755); err != nil {
-				t.Fatalf("mkdir concurrency state: %v", err)
-			}
+			events := newRaceShardFIFO(t, "concurrency-events")
+			release := newRaceShardFIFO(t, "concurrency-release")
+			departAck := newRaceShardFIFO(t, "concurrency-depart-ack")
 			env := []string{
 				"AZEDARACH_DAEMON_RACE_INNER=1",
 				"FAKE_GO_SCENARIO=concurrency",
-				"FAKE_GO_CONCURRENCY_DIR=" + concurrencyDir,
-			}
-			if tc.shards != "" {
-				env = append(env, "AZEDARACH_DAEMON_RACE_SHARDS="+tc.shards)
+				"FAKE_GO_CONCURRENCY_EVENT_FIFO=" + events.path,
+				"FAKE_GO_CONCURRENCY_RELEASE_FIFO=" + release.path,
+				"FAKE_GO_CONCURRENCY_DEPART_ACK_FIFO=" + departAck.path,
 			}
 			if tc.parallelism != "" {
 				env = append(env, "AZEDARACH_DAEMON_RACE_PARALLELISM="+tc.parallelism)
 			}
-			stdout, stderr, err := runRaceSharder(t, repo, script, env...)
-			if err != nil {
-				t.Fatalf("race sharder failed: %v\nstdout=%q\nstderr=%q", err, stdout, stderr)
+			_, stdout, stderr, done, result := startRaceSharder(t, repo, script, env...)
+			t.Cleanup(func() {
+				for range 4 {
+					release.writeLine(t, "cleanup")
+					departAck.writeLine(t, "cleanup")
+				}
+			})
+
+			arrived := make(map[string]struct{}, 4)
+			for waveIndex, waveSize := range tc.waves {
+				wave := make(map[string]struct{}, waveSize)
+				for range waveSize {
+					event := events.readLine(t, done, result)
+					pattern, ok := strings.CutPrefix(event, "arrive ")
+					if !ok {
+						t.Fatalf("wave %d event = %q, want shard arrival", waveIndex, event)
+					}
+					if _, duplicate := arrived[pattern]; duplicate {
+						t.Fatalf("wave %d duplicate shard arrival %q", waveIndex, pattern)
+					}
+					arrived[pattern] = struct{}{}
+					wave[pattern] = struct{}{}
+				}
+				for range waveSize {
+					release.writeLine(t, "release")
+				}
+				for range waveSize {
+					event := events.readLine(t, done, result)
+					pattern, ok := strings.CutPrefix(event, "depart ")
+					if !ok {
+						t.Fatalf("wave %d event = %q, want shard departure", waveIndex, event)
+					}
+					if _, belongs := wave[pattern]; !belongs {
+						t.Fatalf("wave %d unexpected shard departure %q", waveIndex, pattern)
+					}
+					delete(wave, pattern)
+					departAck.writeLine(t, "ack")
+				}
 			}
-			maximum, err := os.ReadFile(filepath.Join(concurrencyDir, "max"))
-			if err != nil {
-				t.Fatalf("read maximum concurrency: %v", err)
+			<-done
+			if result.err != nil {
+				t.Fatalf("race sharder failed: %v\nstdout=%q\nstderr=%q", result.err, stdout.String(), stderr.String())
 			}
-			if got := strings.TrimSpace(string(maximum)); got != tc.want {
-				t.Fatalf("maximum shard concurrency = %s, want %s", got, tc.want)
+			if len(arrived) != 4 {
+				t.Fatalf("arrived shards = %d, want 4: %v", len(arrived), arrived)
 			}
-			if tc.name == "sequential by default" && !strings.Contains(string(stderr), "across 4 shards") {
+			if records := decodeRaceShardOutput(t, []byte(stdout.String())); len(records) != 4 {
+				t.Fatalf("race sharder records = %d, want 4", len(records))
+			}
+			if tc.name == "sequential by default" && !strings.Contains(stderr.String(), "across 4 shards") {
 				t.Fatalf("default shard count not reported as 4: %q", stderr)
 			}
 		})
@@ -253,48 +417,62 @@ func TestDaemonRaceSharderDropsIncompleteJSONRecord(t *testing.T) {
 }
 
 func TestDaemonRaceSharderAggregateTimeoutKillsDescendantsAndKeepsJSONL(t *testing.T) {
-	if _, err := exec.LookPath("timeout"); err != nil {
-		if _, err = exec.LookPath("gtimeout"); err != nil {
+	timeoutPath, err := exec.LookPath("timeout")
+	if err != nil {
+		timeoutPath, err = exec.LookPath("gtimeout")
+		if err != nil {
 			t.Skip("GNU timeout unavailable")
 		}
 	}
 	repo, script := prepareRaceSharder(t)
+	installRaceSharderTimeoutWrapper(t, repo, timeoutPath)
 	termMarker := filepath.Join(repo, "child-terminated")
-	pidFile := filepath.Join(repo, "child-pid")
-	stdout, stderr, err := runRaceSharder(t, repo, script,
-		"AZEDARACH_DAEMON_RACE_TIMEOUT=2s",
-		"AZEDARACH_DAEMON_RACE_KILL_AFTER=1s",
+	timeoutReady := newRaceShardFIFO(t, "timeout-ready")
+	childReady := newRaceShardFIFO(t, "child-ready")
+	termReady := newRaceShardFIFO(t, "term-ready")
+	childTerm := newRaceShardFIFO(t, "child-term")
+	childBlock := newRaceShardFIFO(t, "child-block")
+	_, stdout, stderr, done, result := startRaceSharder(t, repo, script,
+		"AZEDARACH_DAEMON_RACE_TIMEOUT=1h",
+		"AZEDARACH_DAEMON_RACE_KILL_AFTER=1h",
 		"AZEDARACH_DAEMON_RACE_SHARDS=1",
+		"AZEDARACH_DAEMON_RACE_TEST_TIMEOUT_PATH="+timeoutPath,
+		"AZEDARACH_DAEMON_RACE_TEST_TIMEOUT_READY_FIFO="+timeoutReady.path,
 		"FAKE_GO_SCENARIO=timeout",
 		"FAKE_GO_CHILD_TERM="+termMarker,
-		"FAKE_GO_CHILD_PID="+pidFile,
+		"FAKE_GO_READY_FIFO="+childReady.path,
+		"FAKE_GO_TERM_FIFO="+termReady.path,
+		"FAKE_GO_CHILD_TERM_FIFO="+childTerm.path,
+		"FAKE_GO_BLOCK_FIFO="+childBlock.path,
 	)
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || (exitErr.ExitCode() != 124 && exitErr.ExitCode() != 137) {
-		t.Fatalf("aggregate timeout err=%v stdout=%q stderr=%q", err, stdout, stderr)
-	}
-	records := decodeRaceShardOutput(t, stdout)
-	if len(records) != 2 || records[1].Output != "late-term" {
-		t.Fatalf("timeout records = %+v, want initial and late TERM diagnostics; output=%q", records, stdout)
-	}
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if _, statErr := os.Stat(termMarker); statErr == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timeout did not terminate shard descendant; stderr=%q", stderr)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	pidBytes, err := os.ReadFile(pidFile)
+	timeoutPID, err := strconv.Atoi(timeoutReady.readLine(t, done, result))
 	if err != nil {
-		t.Fatalf("read child pid: %v", err)
+		t.Fatalf("parse timeout supervisor PID: %v", err)
 	}
-	pid := strings.TrimSpace(string(pidBytes))
-	if killErr := exec.Command("kill", "-0", pid).Run(); killErr == nil {
-		t.Fatalf("shard descendant %s still running after aggregate timeout", pid)
+	t.Cleanup(func() { _ = exec.Command("kill", "-KILL", "-"+strconv.Itoa(timeoutPID)).Run() })
+	childPID := childReady.readLine(t, done, result)
+	if err := syscall.Kill(timeoutPID, syscall.SIGALRM); err != nil {
+		t.Fatalf("trigger aggregate timeout: %v", err)
 	}
+	if got := termReady.readLine(t, done, result); got != "term" {
+		t.Fatalf("descendant TERM acknowledgement = %q, want term", got)
+	}
+	if err := syscall.Kill(timeoutPID, syscall.SIGALRM); err != nil {
+		t.Fatalf("trigger aggregate timeout escalation: %v", err)
+	}
+	<-done
+	var exitErr *exec.ExitError
+	if !errors.As(result.err, &exitErr) || (exitErr.ExitCode() != 124 && exitErr.ExitCode() != 137) {
+		t.Fatalf("aggregate timeout err=%v stdout=%q stderr=%q", result.err, stdout, stderr)
+	}
+	records := decodeRaceShardOutput(t, []byte(stdout.String()))
+	if len(records) != 2 || records[1].Output != "late-term" {
+		t.Fatalf("timeout records = %+v, want initial and late TERM diagnostics; output=%q", records, stdout.String())
+	}
+	if _, statErr := os.Stat(termMarker); statErr != nil {
+		t.Fatalf("timeout did not signal shard descendant: %v; stderr=%q", statErr, stderr.String())
+	}
+	assertRaceSharderProcessStopped(t, childPID)
 }
 
 func TestDaemonRaceSharderInteractiveCancelKillsSupervisedProcessGroup(t *testing.T) {
@@ -303,85 +481,67 @@ func TestDaemonRaceSharderInteractiveCancelKillsSupervisedProcessGroup(t *testin
 			t.Skip("GNU timeout unavailable")
 		}
 	}
-	if _, err := exec.LookPath("pgrep"); err != nil {
-		t.Skip("pgrep unavailable")
-	}
 	repo, script := prepareRaceSharder(t)
+	timeoutPath, err := exec.LookPath("timeout")
+	if err != nil {
+		timeoutPath, err = exec.LookPath("gtimeout")
+	}
+	installRaceSharderTimeoutWrapper(t, repo, timeoutPath)
 	termMarker := filepath.Join(repo, "cancel-child-term")
-	pidFile := filepath.Join(repo, "cancel-child-pid")
-	stdout := new(strings.Builder)
-	stderr := new(strings.Builder)
-	cmd := exec.Command(script)
-	cmd.Dir = repo
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	cmd.Env = append(os.Environ(),
-		"PATH="+filepath.Join(repo, "fake-bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"AZEDARACH_DAEMON_RACE_TIMEOUT=30s",
-		"AZEDARACH_DAEMON_RACE_KILL_AFTER=30s",
-		"AZEDARACH_DAEMON_RACE_CANCEL_GRACE=1",
-		"AZEDARACH_DAEMON_RACE_SUPERVISOR_START_DELAY=2",
+	timeoutReady := newRaceShardFIFO(t, "timeout-ready")
+	childReady := newRaceShardFIFO(t, "child-ready")
+	supervisorRelease := newRaceShardFIFO(t, "supervisor-release")
+	cancelReady := newRaceShardFIFO(t, "cancel-ready")
+	cancelRelease := newRaceShardFIFO(t, "cancel-release")
+	termReady := newRaceShardFIFO(t, "term-ready")
+	childTerm := newRaceShardFIFO(t, "child-term")
+	childBlock := newRaceShardFIFO(t, "child-block")
+	cmd, stdout, stderr, done, result := startRaceSharder(t, repo, script,
+		"AZEDARACH_DAEMON_RACE_TIMEOUT=1h",
+		"AZEDARACH_DAEMON_RACE_KILL_AFTER=1h",
+		"AZEDARACH_DAEMON_RACE_CANCEL_GRACE=3600",
 		"AZEDARACH_DAEMON_RACE_SHARDS=1",
+		"AZEDARACH_DAEMON_RACE_TEST_TIMEOUT_PATH="+timeoutPath,
+		"AZEDARACH_DAEMON_RACE_TEST_TIMEOUT_READY_FIFO="+timeoutReady.path,
+		"AZEDARACH_DAEMON_RACE_TEST_SUPERVISOR_RELEASE_FIFO="+supervisorRelease.path,
+		"AZEDARACH_DAEMON_RACE_TEST_CANCEL_READY_FIFO="+cancelReady.path,
+		"AZEDARACH_DAEMON_RACE_TEST_CANCEL_RELEASE_FIFO="+cancelRelease.path,
+		"AZEDARACH_DAEMON_RACE_TEST_TERM_ACK_FIFO="+termReady.path,
 		"FAKE_GO_SCENARIO=timeout",
 		"FAKE_GO_CHILD_TERM="+termMarker,
-		"FAKE_GO_CHILD_PID="+pidFile,
+		"FAKE_GO_READY_FIFO="+childReady.path,
+		"FAKE_GO_TERM_FIFO="+termReady.path,
+		"FAKE_GO_CHILD_TERM_FIFO="+childTerm.path,
+		"FAKE_GO_BLOCK_FIFO="+childBlock.path,
 	)
-	timeoutPID := ""
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start race sharder: %v", err)
-	}
+	timeoutPID := timeoutReady.readLine(t, done, result)
+	childPID := childReady.readLine(t, done, result)
 	t.Cleanup(func() {
 		if timeoutPID != "" {
 			_ = exec.Command("kill", "-KILL", "-"+timeoutPID).Run()
 		}
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
 	})
-
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, err := os.Stat(pidFile); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("race shard did not start")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	timeoutPIDBytes, err := exec.Command("pgrep", "-P", strconv.Itoa(cmd.Process.Pid)).Output()
-	if err != nil {
-		t.Fatalf("find timeout supervisor child: %v", err)
-	}
-	timeoutPID = strings.Fields(string(timeoutPIDBytes))[0]
 	if err := cmd.Process.Signal(os.Interrupt); err != nil {
 		t.Fatalf("interrupt race sharder: %v", err)
 	}
-	time.Sleep(100 * time.Millisecond)
-	if err := cmd.Process.Signal(os.Interrupt); err != nil {
-		t.Fatalf("repeat interrupt during cancellation grace: %v", err)
+	supervisorRelease.writeLine(t, "release")
+	if got := cancelReady.readLine(t, done, result); got != "ready" {
+		t.Fatalf("cancellation acknowledgement = %q, want ready", got)
 	}
-	waitResult := make(chan error, 1)
-	go func() { waitResult <- cmd.Wait() }()
-	select {
-	case err := <-waitResult:
-		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 130 {
-			t.Fatalf("interactive cancellation err=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("interactive cancellation did not finish within bounded grace")
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatalf("repeat interrupt during cancellation: %v", err)
+	}
+	cancelRelease.writeLine(t, "release")
+	<-done
+	var exitErr *exec.ExitError
+	if !errors.As(result.err, &exitErr) || exitErr.ExitCode() != 130 {
+		t.Fatalf("interactive cancellation err=%v stdout=%q stderr=%q", result.err, stdout.String(), stderr.String())
 	}
 	records := decodeRaceShardOutput(t, []byte(stdout.String()))
 	if len(records) != 2 || records[1].Output != "late-term" {
 		t.Fatalf("cancel records = %+v, want initial and late TERM diagnostics", records)
 	}
-	childPIDBytes, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatalf("read child pid: %v", err)
-	}
-	if killErr := exec.Command("kill", "-0", strings.TrimSpace(string(childPIDBytes))).Run(); killErr == nil {
-		t.Fatalf("TERM-ignoring shard descendant still alive after interactive cancellation")
-	}
+	assertRaceSharderProcessStopped(t, childPID)
 	if killErr := exec.Command("kill", "-0", "-"+timeoutPID).Run(); killErr == nil {
 		t.Fatalf("timeout process group %s still alive after interactive cancellation", timeoutPID)
 	}

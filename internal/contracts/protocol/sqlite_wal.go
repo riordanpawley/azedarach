@@ -16,7 +16,28 @@ type TaskSQLiteWALResponse struct {
 	OpenConnections     int                          `json:"open_connections" msgpack:"open_connections"`
 	InUse               int                          `json:"in_use" msgpack:"in_use"`
 	Idle                int                          `json:"idle" msgpack:"idle"`
+	Stores              []TaskSQLiteStoreInfo        `json:"stores" msgpack:"stores"`
 	Checkpoint          *TaskSQLiteWALCheckpointInfo `json:"checkpoint,omitempty" msgpack:"checkpoint,omitempty"`
+}
+
+type TaskSQLiteStoreInfo struct {
+	ProjectIDs                 []string `json:"project_ids" msgpack:"project_ids"`
+	Owner                      string   `json:"owner" msgpack:"owner"`
+	DBPath                     string   `json:"db_path" msgpack:"db_path"`
+	Open                       bool     `json:"open" msgpack:"open"`
+	MaxOpenConnections         int      `json:"max_open_connections" msgpack:"max_open_connections"`
+	OpenConnections            int      `json:"open_connections" msgpack:"open_connections"`
+	InUse                      int      `json:"in_use" msgpack:"in_use"`
+	Idle                       int      `json:"idle" msgpack:"idle"`
+	WaitCount                  int64    `json:"wait_count" msgpack:"wait_count"`
+	WaitDurationMillisecond    int64    `json:"wait_duration_ms" msgpack:"wait_duration_ms"`
+	MutationHolder             string   `json:"mutation_holder,omitempty" msgpack:"mutation_holder,omitempty"`
+	MutationHeldMillisecond    int64    `json:"mutation_held_ms,omitempty" msgpack:"mutation_held_ms,omitempty"`
+	SQLiteWriteHolder          string   `json:"sqlite_write_holder,omitempty" msgpack:"sqlite_write_holder,omitempty"`
+	SQLiteWriteHeldMillisecond int64    `json:"sqlite_write_held_ms,omitempty" msgpack:"sqlite_write_held_ms,omitempty"`
+	ProjectionWatchesActive    int64    `json:"projection_watches_active,omitempty" msgpack:"projection_watches_active,omitempty"`
+	ProjectionWatchesStarted   uint64   `json:"projection_watches_started,omitempty" msgpack:"projection_watches_started,omitempty"`
+	ProjectionWatchesDone      uint64   `json:"projection_watches_completed,omitempty" msgpack:"projection_watches_completed,omitempty"`
 }
 
 type TaskSQLiteWALCheckpointInfo struct {

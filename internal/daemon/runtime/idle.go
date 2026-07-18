@@ -22,27 +22,52 @@ type ShutdownHooks struct {
 	Logger         *slog.Logger
 }
 
+// IdleTimer is the resettable timer used to begin idle shutdown.
+type IdleTimer interface {
+	Reset(time.Duration) bool
+}
+
+// IdleSupervisorOption configures optional idle supervisor behavior.
+type IdleSupervisorOption func(*IdleSupervisor)
+
+// WithIdleTimerFactory supplies the timer implementation used by Start. Tests
+// can use this seam to advance the idle transition with an explicit barrier.
+func WithIdleTimerFactory(factory func(time.Duration, func()) IdleTimer) IdleSupervisorOption {
+	return func(s *IdleSupervisor) {
+		if factory != nil {
+			s.timerFactory = factory
+		}
+	}
+}
+
 // IdleSupervisor coordinates idle shutdown and graceful draining.
 type IdleSupervisor struct {
 	timeout time.Duration
 	hooks   ShutdownHooks
 
-	mu       sync.Mutex
-	cond     *sync.Cond
-	timer    *time.Timer
-	inFlight int
-	stopping bool
-	stopped  bool
+	mu           sync.Mutex
+	cond         *sync.Cond
+	timer        IdleTimer
+	timerFactory func(time.Duration, func()) IdleTimer
+	inFlight     int
+	stopping     bool
+	stopped      bool
 
 	stoppedCh chan struct{}
 }
 
 // NewIdleSupervisor returns an idle shutdown supervisor.
-func NewIdleSupervisor(timeout time.Duration, hooks ShutdownHooks) *IdleSupervisor {
+func NewIdleSupervisor(timeout time.Duration, hooks ShutdownHooks, opts ...IdleSupervisorOption) *IdleSupervisor {
 	s := &IdleSupervisor{
 		timeout:   timeout,
 		hooks:     hooks,
 		stoppedCh: make(chan struct{}),
+		timerFactory: func(timeout time.Duration, callback func()) IdleTimer {
+			return time.AfterFunc(timeout, callback)
+		},
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 	s.cond = sync.NewCond(&s.mu)
 	return s
@@ -55,7 +80,7 @@ func (s *IdleSupervisor) Start() {
 	if s.timer != nil || s.stopped {
 		return
 	}
-	s.timer = time.AfterFunc(s.timeout, s.shutdown)
+	s.timer = s.timerFactory(s.timeout, s.shutdown)
 }
 
 // RecordActivity resets the idle timer while running.

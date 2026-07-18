@@ -26,6 +26,11 @@
           "type": "string",
           "description": "Shell command to run. Empty or omitted means this project has no configured gate.",
           "default": ""
+        },
+        "environmentFingerprint": {
+          "type": "string",
+          "description": "Project-owned toolchain/environment identity used to decide whether exact candidate gate evidence remains reusable. Change it whenever the gate's effective toolchain changes.",
+          "default": ""
         }
       },
       "default": {}
@@ -532,6 +537,35 @@
         "openIssueLimit": {
           "type": "integer", "minimum": 1, "default": 100,
           "description": "Open-issue threshold above which project-wide autostart requires an explicit override."
+        }
+      }
+    },
+    "publicationEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Project-owned capability and policy mapping for layered publication evidence.",
+      "properties": {
+        "policyVersion": {"type": "string", "minLength": 1},
+        "activePathProfiles": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "default": []
+        },
+        "exactBaseSurfaces": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "default": {}
+        },
+        "dependencies": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "default": {}
         }
       }
     },

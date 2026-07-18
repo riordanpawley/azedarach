@@ -3,8 +3,8 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -14,24 +14,26 @@ import (
 )
 
 type runtimeProjectionWriter interface {
+	ApplyPhysicalSessionObservationAndPublish(context.Context, string, protocol.Metadata, daemonstate.PhysicalSessionObservation) ([]daemonstate.Session, bool, []uint64, error)
 	PersistSessionProjection(context.Context, string, daemonstate.Session) error
-	PersistSessionProjectionAndPublish(context.Context, string, protocol.Metadata, daemonstate.Session) uint64
-	PublishSessionProjectionEvent(context.Context, string, protocol.Metadata, daemonstate.Session) uint64
+	PersistSessionProjectionAndPublish(context.Context, string, protocol.Metadata, daemonstate.Session) (uint64, error)
+	PublishSessionProjectionEvent(context.Context, string, protocol.Metadata, daemonstate.Session) (uint64, error)
 	ReplaceSessionProjectionSnapshot(context.Context, string, []daemonstate.Session) error
 
 	PersistWorktreeProjection(context.Context, string, string, string, string) error
-	PersistWorktreeProjectionAndPublish(context.Context, string, string, string, string) uint64
-	DeleteWorktreeProjectionAndPublish(context.Context, string, string) uint64
-	PublishWorktreeProjectionEvent(context.Context, string, string, string) uint64
+	PersistWorktreeProjectionAndPublish(context.Context, string, string, string, string) (uint64, error)
+	DeleteWorktreeProjectionAndPublish(context.Context, string, string) (uint64, error)
+	PublishWorktreeProjectionEvent(context.Context, string, string, string) (uint64, error)
 	ReplaceWorktreeProjectionSnapshot(context.Context, string, []daemonstate.WorktreeState) error
 
-	PersistGitStatusProjectionAndPublish(context.Context, string, string, string, *git.GitStatus, bool, bool) uint64
-	PublishGitStatusProjectionEvent(context.Context, string, string, string, *git.GitStatus) uint64
+	PersistGitStatusProjectionAndPublish(context.Context, string, string, string, *git.GitStatus, bool, bool) (uint64, error)
+	PersistGitHookStatusProjectionAndPublishResult(context.Context, string, string, string, int64, *git.GitStatus) (uint64, error)
+	PublishGitStatusProjectionEvent(context.Context, string, string, string, *git.GitStatus) (uint64, error)
 }
 
 type daemonRuntimeProjectionWriter struct {
 	d  *Daemon
-	mu sync.Mutex
+	mu contextOperationLock
 }
 
 func (d *Daemon) persistObservedRuntimeProjection(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session) error {
@@ -47,18 +49,11 @@ func (d *Daemon) persistObservedRuntimeProjection(ctx context.Context, projectID
 	if daemonstate.NormalizeSessionState(session.ObservedState) == daemonstate.SessionStateStopped {
 		activity, source = "", ""
 	}
-	changed, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+	_, _, _, err := d.runtimeProjectionStateWriter().ApplyPhysicalSessionObservationAndPublish(ctx, projectID, meta, daemonstate.PhysicalSessionObservation{
 		ProjectID: projectID, SessionID: session.ID, ObservedState: session.ObservedState,
 		Activity: activity, ActivitySource: source, UpdatedAt: observedAt,
 	})
-	if err != nil {
-		return err
-	}
-	writer := d.runtimeProjectionStateWriter()
-	for _, row := range changed {
-		writer.PublishSessionProjectionEvent(ctx, projectID, meta, row)
-	}
-	return nil
+	return err
 }
 
 type runtimeProjectionWriterOperationContextKey struct{}
@@ -89,16 +84,35 @@ func runtimeProjectionWriterOperationFromContext(ctx context.Context, fallback s
 	return fallback
 }
 
-func (w *daemonRuntimeProjectionWriter) lockProjectionWriter(ctx context.Context, projectID, operation string) func() {
+func withRuntimeProjectionWriterWaitHookForTest(ctx context.Context, hook func(string, string)) context.Context {
+	return withContextOperationLockWaitHookForTest(ctx, hook)
+}
+
+func withRuntimeProjectionWriterQueuedHookForTest(ctx context.Context, hook func(string)) context.Context {
+	return withContextOperationLockQueuedHookForTest(ctx, hook)
+}
+
+func (w *daemonRuntimeProjectionWriter) lockProjectionWriter(ctx context.Context, projectID, operation string) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	operation = runtimeProjectionWriterOperationFromContext(ctx, operation)
 	waitStartedAt := time.Now()
-	w.mu.Lock()
-	latencytrace.LogPhaseContext(ctx, w.d.cfg.Logger, "daemon", "runtime_projection.writer_lock_wait", waitStartedAt, "project_id", projectID, "operation", operation)
+	holderOperation, err := w.mu.acquire(ctx, operation)
+	latencytrace.LogPhaseContext(ctx, w.d.cfg.Logger, "daemon", "runtime_projection.writer_lock_wait", waitStartedAt,
+		"project_id", projectID,
+		"operation", operation,
+		"writer.waiter_operation", operation,
+		"writer.holder_operation", holderOperation,
+	)
+	if err != nil {
+		return nil, err
+	}
 	holdStartedAt := time.Now()
 	return func() {
 		latencytrace.LogPhaseContext(ctx, w.d.cfg.Logger, "daemon", "runtime_projection.writer_lock_held", holdStartedAt, "project_id", projectID, "operation", operation)
-		w.mu.Unlock()
-	}
+		w.mu.release()
+	}, nil
 }
 
 func (w *daemonRuntimeProjectionWriter) logPhase(ctx context.Context, projectID, operation, phase string, startedAt time.Time, err error) {
@@ -109,15 +123,56 @@ func (w *daemonRuntimeProjectionWriter) logPhase(ctx context.Context, projectID,
 	latencytrace.LogPhaseContext(ctx, w.d.cfg.Logger, "daemon", "runtime_projection.writer_"+phase, startedAt, attrs...)
 }
 
+func (w *daemonRuntimeProjectionWriter) ApplyPhysicalSessionObservationAndPublish(ctx context.Context, projectID string, meta protocol.Metadata, observation daemonstate.PhysicalSessionObservation) ([]daemonstate.Session, bool, []uint64, error) {
+	if w == nil || w.d == nil {
+		return nil, false, nil, nil
+	}
+	projectID = w.d.canonicalProjectID(projectID)
+	store := w.d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		return nil, false, nil, nil
+	}
+	operation := "session.observe_publish"
+	unlock, err := w.lockProjectionWriter(ctx, projectID, operation)
+	if err != nil {
+		return nil, false, nil, err
+	}
+	persistStartedAt := time.Now()
+	changed, applied, err := store.ApplyPhysicalSessionObservation(ctx, observation)
+	revisions := make([]uint64, len(changed))
+	if err == nil && applied && w.d.runtimeProjectionCoalescer == nil {
+		for i := range changed {
+			revisions[i] = w.d.nextRevision(projectID)
+		}
+	}
+	unlock()
+	w.logPhase(ctx, projectID, operation, "persist", persistStartedAt, err)
+	if err != nil || !applied {
+		return changed, applied, nil, err
+	}
+	for i, row := range changed {
+		w.d.refreshProjectReadRuntime(ctx, projectID, row.IssueID)
+		if w.d.runtimeProjectionCoalescer != nil {
+			revisions[i] = w.d.runtimeProjectionCoalescer.ScheduleSession(ctx, projectID, meta, row)
+		} else {
+			w.d.publishSessionProjectionEventAtRevision(ctx, projectID, meta, row, revisions[i])
+		}
+	}
+	return changed, true, revisions, nil
+}
+
 func (w *daemonRuntimeProjectionWriter) PersistSessionProjection(ctx context.Context, projectID string, session daemonstate.Session) error {
 	if w == nil || w.d == nil {
 		return nil
 	}
 	projectID = w.d.canonicalProjectID(projectID)
 	operation := "session.persist"
-	unlock := w.lockProjectionWriter(ctx, projectID, operation)
+	unlock, err := w.lockProjectionWriter(ctx, projectID, operation)
+	if err != nil {
+		return err
+	}
 	persistStartedAt := time.Now()
-	err := w.d.persistSessionState(projectID, session)
+	err = w.d.persistSessionState(projectID, session)
 	unlock()
 	w.logPhase(ctx, projectID, operation, "persist", persistStartedAt, err)
 	if err == nil {
@@ -128,15 +183,18 @@ func (w *daemonRuntimeProjectionWriter) PersistSessionProjection(ctx context.Con
 	return err
 }
 
-func (w *daemonRuntimeProjectionWriter) PersistSessionProjectionAndPublish(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session) uint64 {
+func (w *daemonRuntimeProjectionWriter) PersistSessionProjectionAndPublish(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session) (uint64, error) {
 	if w == nil || w.d == nil {
-		return 0
+		return 0, nil
 	}
 	projectID = w.d.canonicalProjectID(projectID)
 	operation := "session.persist_publish"
-	unlock := w.lockProjectionWriter(ctx, projectID, operation)
+	unlock, err := w.lockProjectionWriter(ctx, projectID, operation)
+	if err != nil {
+		return 0, err
+	}
 	persistStartedAt := time.Now()
-	err := w.d.persistSessionState(projectID, session)
+	err = w.d.persistSessionState(projectID, session)
 	var rev uint64
 	if err == nil && w.d.runtimeProjectionCoalescer == nil {
 		rev = w.d.nextRevision(projectID)
@@ -144,7 +202,7 @@ func (w *daemonRuntimeProjectionWriter) PersistSessionProjectionAndPublish(ctx c
 	unlock()
 	w.logPhase(ctx, projectID, operation, "persist", persistStartedAt, err)
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	refreshStartedAt := time.Now()
 	w.d.refreshProjectReadRuntime(ctx, projectID, session.IssueID)
@@ -156,12 +214,12 @@ func (w *daemonRuntimeProjectionWriter) PersistSessionProjectionAndPublish(ctx c
 		w.d.publishSessionProjectionEventAtRevision(ctx, projectID, meta, session, rev)
 	}
 	w.logPhase(ctx, projectID, operation, "publish", publishStartedAt, nil)
-	return rev
+	return rev, nil
 }
 
-func (w *daemonRuntimeProjectionWriter) PublishSessionProjectionEvent(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session) uint64 {
+func (w *daemonRuntimeProjectionWriter) PublishSessionProjectionEvent(ctx context.Context, projectID string, meta protocol.Metadata, session daemonstate.Session) (uint64, error) {
 	if w == nil || w.d == nil {
-		return 0
+		return 0, nil
 	}
 	projectID = w.d.canonicalProjectID(projectID)
 	operation := "session.publish"
@@ -173,13 +231,16 @@ func (w *daemonRuntimeProjectionWriter) PublishSessionProjectionEvent(ctx contex
 	if w.d.runtimeProjectionCoalescer != nil {
 		rev = w.d.runtimeProjectionCoalescer.ScheduleSession(ctx, projectID, meta, session)
 	} else {
-		unlock := w.lockProjectionWriter(ctx, projectID, operation)
+		unlock, err := w.lockProjectionWriter(ctx, projectID, operation)
+		if err != nil {
+			return 0, err
+		}
 		rev = w.d.nextRevision(projectID)
 		unlock()
 		w.d.publishSessionProjectionEventAtRevision(ctx, projectID, meta, session, rev)
 	}
 	w.logPhase(ctx, projectID, operation, "publish", publishStartedAt, nil)
-	return rev
+	return rev, nil
 }
 
 func (w *daemonRuntimeProjectionWriter) ReplaceSessionProjectionSnapshot(ctx context.Context, projectID string, sessions []daemonstate.Session) error {
@@ -189,7 +250,10 @@ func (w *daemonRuntimeProjectionWriter) ReplaceSessionProjectionSnapshot(ctx con
 	projectID = w.d.canonicalProjectID(projectID)
 	operation := "session.replace_snapshot"
 	store := w.d.sessionRuntimeStateStore(projectID)
-	unlock := w.lockProjectionWriter(ctx, projectID, operation)
+	unlock, err := w.lockProjectionWriter(ctx, projectID, operation)
+	if err != nil {
+		return err
+	}
 	persistStartedAt := time.Now()
 	previous, err := store.ListSessionStates(ctx, projectID)
 	if err == nil {
@@ -218,9 +282,12 @@ func (w *daemonRuntimeProjectionWriter) PersistWorktreeProjection(ctx context.Co
 	}
 	projectID = w.d.canonicalProjectID(projectID)
 	operation := "worktree.persist"
-	unlock := w.lockProjectionWriter(ctx, projectID, operation)
+	unlock, err := w.lockProjectionWriter(ctx, projectID, operation)
+	if err != nil {
+		return err
+	}
 	persistStartedAt := time.Now()
-	err := w.d.persistWorktreeState(ctx, projectID, issueID, path, branch)
+	err = w.d.persistWorktreeState(ctx, projectID, issueID, path, branch)
 	unlock()
 	w.logPhase(ctx, projectID, operation, "persist", persistStartedAt, err)
 	if err == nil {
@@ -231,15 +298,18 @@ func (w *daemonRuntimeProjectionWriter) PersistWorktreeProjection(ctx context.Co
 	return err
 }
 
-func (w *daemonRuntimeProjectionWriter) PersistWorktreeProjectionAndPublish(ctx context.Context, projectID, issueID, path, branch string) uint64 {
+func (w *daemonRuntimeProjectionWriter) PersistWorktreeProjectionAndPublish(ctx context.Context, projectID, issueID, path, branch string) (uint64, error) {
 	if w == nil || w.d == nil {
-		return 0
+		return 0, nil
 	}
 	projectID = w.d.canonicalProjectID(projectID)
 	operation := "worktree.persist_publish"
-	unlock := w.lockProjectionWriter(ctx, projectID, operation)
+	unlock, err := w.lockProjectionWriter(ctx, projectID, operation)
+	if err != nil {
+		return 0, err
+	}
 	persistStartedAt := time.Now()
-	err := w.d.persistWorktreeState(ctx, projectID, issueID, path, branch)
+	err = w.d.persistWorktreeState(ctx, projectID, issueID, path, branch)
 	var rev uint64
 	if err == nil && w.d.runtimeProjectionCoalescer == nil {
 		rev = w.d.nextRevision(projectID)
@@ -247,7 +317,7 @@ func (w *daemonRuntimeProjectionWriter) PersistWorktreeProjectionAndPublish(ctx 
 	unlock()
 	w.logPhase(ctx, projectID, operation, "persist", persistStartedAt, err)
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	refreshStartedAt := time.Now()
 	w.d.refreshProjectReadRuntime(ctx, projectID, issueID)
@@ -259,16 +329,19 @@ func (w *daemonRuntimeProjectionWriter) PersistWorktreeProjectionAndPublish(ctx 
 		w.d.publishWorktreeProjectionEventAtRevision(ctx, projectID, issueID, path, rev)
 	}
 	w.logPhase(ctx, projectID, operation, "publish", publishStartedAt, nil)
-	return rev
+	return rev, nil
 }
 
-func (w *daemonRuntimeProjectionWriter) DeleteWorktreeProjectionAndPublish(ctx context.Context, projectID, issueID string) uint64 {
+func (w *daemonRuntimeProjectionWriter) DeleteWorktreeProjectionAndPublish(ctx context.Context, projectID, issueID string) (uint64, error) {
 	if w == nil || w.d == nil {
-		return 0
+		return 0, nil
 	}
 	projectID = w.d.canonicalProjectID(projectID)
 	operation := "worktree.delete_publish"
-	unlock := w.lockProjectionWriter(ctx, projectID, operation)
+	unlock, err := w.lockProjectionWriter(ctx, projectID, operation)
+	if err != nil {
+		return 0, err
+	}
 	persistStartedAt := time.Now()
 	var persistErr error
 	if w.d.worktreeRuntimeStateStore(projectID) != nil {
@@ -283,6 +356,9 @@ func (w *daemonRuntimeProjectionWriter) DeleteWorktreeProjectionAndPublish(ctx c
 	}
 	unlock()
 	w.logPhase(ctx, projectID, operation, "persist", persistStartedAt, persistErr)
+	if persistErr != nil {
+		return 0, persistErr
+	}
 	refreshStartedAt := time.Now()
 	w.d.refreshProjectReadRuntime(ctx, projectID, issueID)
 	w.logPhase(ctx, projectID, operation, "refresh", refreshStartedAt, nil)
@@ -293,12 +369,12 @@ func (w *daemonRuntimeProjectionWriter) DeleteWorktreeProjectionAndPublish(ctx c
 		w.d.publishWorktreeProjectionEventAtRevision(ctx, projectID, issueID, "", rev)
 	}
 	w.logPhase(ctx, projectID, operation, "publish", publishStartedAt, nil)
-	return rev
+	return rev, nil
 }
 
-func (w *daemonRuntimeProjectionWriter) PublishWorktreeProjectionEvent(ctx context.Context, projectID, issueID, path string) uint64 {
+func (w *daemonRuntimeProjectionWriter) PublishWorktreeProjectionEvent(ctx context.Context, projectID, issueID, path string) (uint64, error) {
 	if w == nil || w.d == nil {
-		return 0
+		return 0, nil
 	}
 	projectID = w.d.canonicalProjectID(projectID)
 	operation := "worktree.publish"
@@ -310,13 +386,16 @@ func (w *daemonRuntimeProjectionWriter) PublishWorktreeProjectionEvent(ctx conte
 	if w.d.runtimeProjectionCoalescer != nil {
 		rev = w.d.runtimeProjectionCoalescer.ScheduleWorktree(ctx, projectID, issueID, path)
 	} else {
-		unlock := w.lockProjectionWriter(ctx, projectID, operation)
+		unlock, err := w.lockProjectionWriter(ctx, projectID, operation)
+		if err != nil {
+			return 0, err
+		}
 		rev = w.d.nextRevision(projectID)
 		unlock()
 		w.d.publishWorktreeProjectionEventAtRevision(ctx, projectID, issueID, path, rev)
 	}
 	w.logPhase(ctx, projectID, operation, "publish", publishStartedAt, nil)
-	return rev
+	return rev, nil
 }
 
 func (w *daemonRuntimeProjectionWriter) ReplaceWorktreeProjectionSnapshot(ctx context.Context, projectID string, rows []daemonstate.WorktreeState) error {
@@ -326,7 +405,10 @@ func (w *daemonRuntimeProjectionWriter) ReplaceWorktreeProjectionSnapshot(ctx co
 	projectID = w.d.canonicalProjectID(projectID)
 	operation := "worktree.replace_snapshot"
 	store := w.d.worktreeRuntimeStateStore(projectID)
-	unlock := w.lockProjectionWriter(ctx, projectID, operation)
+	unlock, err := w.lockProjectionWriter(ctx, projectID, operation)
+	if err != nil {
+		return err
+	}
 	persistStartedAt := time.Now()
 	previous, err := store.ListWorktreeStates(ctx, projectID)
 	if err == nil {
@@ -354,23 +436,23 @@ func (w *daemonRuntimeProjectionWriter) PersistGitStatusProjectionAndPublish(
 	projectID, issueID, worktree string,
 	status *git.GitStatus,
 	publishOnChange, forcePublish bool,
-) uint64 {
+) (uint64, error) {
 	if w == nil || w.d == nil || w.d.worktreeRuntimeStateStore(projectID) == nil || status == nil {
-		return 0
+		return 0, nil
 	}
 	projectID = w.d.canonicalProjectID(projectID)
 	issueID = strings.TrimSpace(issueID)
 	operation := "git_status.persist_publish"
 	worktree = strings.TrimSpace(worktree)
 	if issueID == "" && worktree == "" {
-		return 0
+		return 0, nil
 	}
 	rawStatus, err := json.Marshal(status)
 	if err != nil {
 		if w.d.cfg.Logger != nil {
 			w.d.cfg.Logger.Warn("marshal worktree runtime-state git status failed", "project_id", projectID, "issue_id", issueID, "worktree", worktree, "error", err)
 		}
-		return 0
+		return 0, err
 	}
 	var (
 		projection daemonstate.WorktreeState
@@ -382,7 +464,11 @@ func (w *daemonRuntimeProjectionWriter) PersistGitStatusProjectionAndPublish(
 	)
 	var persistStartedAt time.Time
 	func() {
-		unlock := w.lockProjectionWriter(ctx, projectID, operation)
+		unlock, lockErr := w.lockProjectionWriter(ctx, projectID, operation)
+		if lockErr != nil {
+			persistErr = lockErr
+			return
+		}
 		defer unlock()
 		persistStartedAt = time.Now()
 		if issueID != "" {
@@ -418,13 +504,13 @@ func (w *daemonRuntimeProjectionWriter) PersistGitStatusProjectionAndPublish(
 	}()
 	w.logPhase(ctx, projectID, operation, "persist", persistStartedAt, persistErr)
 	if !persisted {
-		return 0
+		return 0, persistErr
 	}
 	refreshStartedAt := time.Now()
 	w.d.refreshProjectReadRuntime(ctx, projectID, projection.IssueID)
 	w.logPhase(ctx, projectID, operation, "refresh", refreshStartedAt, nil)
 	if !(forcePublish || (publishOnChange && changed)) {
-		return 0
+		return 0, nil
 	}
 	publishStartedAt := time.Now()
 	if w.d.runtimeProjectionCoalescer != nil {
@@ -433,12 +519,79 @@ func (w *daemonRuntimeProjectionWriter) PersistGitStatusProjectionAndPublish(
 		w.d.publishGitStatusProjectionEventAtRevision(ctx, projectID, projection.IssueID, worktree, status, rev)
 	}
 	w.logPhase(ctx, projectID, operation, "publish", publishStartedAt, nil)
-	return rev
+	return rev, nil
 }
 
-func (w *daemonRuntimeProjectionWriter) PublishGitStatusProjectionEvent(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) uint64 {
+func (w *daemonRuntimeProjectionWriter) PersistGitHookStatusProjectionAndPublishResult(
+	ctx context.Context,
+	projectID, issueID, worktree string,
+	generation int64,
+	status *git.GitStatus,
+) (uint64, error) {
+	if w == nil || w.d == nil || status == nil {
+		return 0, fmt.Errorf("git hook status projection writer unavailable")
+	}
+	projectID = w.d.canonicalProjectID(projectID)
+	store := w.d.worktreeRuntimeStateStore(projectID)
+	if store == nil {
+		return 0, fmt.Errorf("git hook runtime state store unavailable")
+	}
+	issueID = strings.TrimSpace(issueID)
+	worktree = strings.TrimSpace(worktree)
+	rawStatus, err := json.Marshal(status)
+	if err != nil {
+		return 0, err
+	}
+	operation := "git_status.hook_persist_publish"
+	unlock, err := w.lockProjectionWriter(ctx, projectID, operation)
+	if err != nil {
+		return 0, err
+	}
+	persistStartedAt := time.Now()
+	published, persistErr := store.PersistGitHookRefreshPublication(ctx, projectID, issueID, worktree, generation, rawStatus, time.Now().UTC())
+	var rev uint64
+	if published && w.d.runtimeProjectionCoalescer == nil {
+		rev = w.d.nextRevision(projectID)
+	}
+	unlock()
+	w.logPhase(ctx, projectID, operation, "persist", persistStartedAt, persistErr)
+	if persistErr != nil {
+		return 0, persistErr
+	}
+	if !published {
+		return 0, nil
+	}
+	w.d.refreshProjectReadRuntime(ctx, projectID, issueID)
+	if hook := gitHookPublicationCommittedHookFromContext(ctx); hook != nil {
+		if err := hook(); err != nil {
+			return 0, err
+		}
+	}
+	if w.d.runtimeProjectionCoalescer != nil {
+		rev = w.d.runtimeProjectionCoalescer.ScheduleGitStatus(ctx, projectID, issueID, worktree, status)
+	} else {
+		w.d.publishGitStatusProjectionEventAtRevision(ctx, projectID, issueID, worktree, status, rev)
+	}
+	return rev, nil
+}
+
+type gitHookPublicationCommittedHookKey struct{}
+
+func withGitHookPublicationCommittedHookForTest(ctx context.Context, hook func() error) context.Context {
+	return context.WithValue(ctx, gitHookPublicationCommittedHookKey{}, hook)
+}
+
+func gitHookPublicationCommittedHookFromContext(ctx context.Context) func() error {
+	if ctx == nil {
+		return nil
+	}
+	hook, _ := ctx.Value(gitHookPublicationCommittedHookKey{}).(func() error)
+	return hook
+}
+
+func (w *daemonRuntimeProjectionWriter) PublishGitStatusProjectionEvent(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) (uint64, error) {
 	if w == nil || w.d == nil {
-		return 0
+		return 0, nil
 	}
 	projectID = w.d.canonicalProjectID(projectID)
 	operation := "git_status.publish"
@@ -450,11 +603,14 @@ func (w *daemonRuntimeProjectionWriter) PublishGitStatusProjectionEvent(ctx cont
 	if w.d.runtimeProjectionCoalescer != nil {
 		rev = w.d.runtimeProjectionCoalescer.ScheduleGitStatus(ctx, projectID, issueID, worktree, status)
 	} else {
-		unlock := w.lockProjectionWriter(ctx, projectID, operation)
+		unlock, err := w.lockProjectionWriter(ctx, projectID, operation)
+		if err != nil {
+			return 0, err
+		}
 		rev = w.d.nextRevision(projectID)
 		unlock()
 		w.d.publishGitStatusProjectionEventAtRevision(ctx, projectID, issueID, worktree, status, rev)
 	}
 	w.logPhase(ctx, projectID, operation, "publish", publishStartedAt, nil)
-	return rev
+	return rev, nil
 }

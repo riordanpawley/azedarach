@@ -190,7 +190,7 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "Coordinate a rooted migration without implementing it",
-		Type:  domain.TypeTask,
+		Type:  domain.TypeEpic,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -219,9 +219,34 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	}
 	body, _ := json.Marshal(protocol.OrchestratorSessionRequest{Scope: scope})
 	request := protocol.RequestEnvelope{Command: protocol.CommandOrchestratorSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body}
-	response, err := d.handleOrchestratorSession(ctx, request)
+	// Upgrade/recovery may encounter the legacy worker intent before the rooted
+	// role has ever been materialized. The first exact-scope transition must
+	// replace it atomically.
+	rootedSessionID := d.orchestratorSessionID(projectID, scope)
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
+		ID: rootedSessionID, IssueID: rootID, Role: daemonstate.SessionRoleWorker,
+		ScopeKind: daemonstate.SessionScopeIssue, ScopeID: rootID,
+		State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	startWork := true
+	genericStart := protocol.RequestEnvelope{
+		Command: daemonhandlers.CommandSessionStart,
+		Meta:    protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body: marshalJSON(sessionCommandBody{
+			ProjectID: projectID, IssueID: rootID, SessionID: rootedSessionID, StartWork: &startWork,
+		}),
+	}
+	delegated, err := d.handleSessionStartDirect(ctx, genericStart)
+	if err != nil || delegated.Error != nil || !strings.Contains(string(delegated.Body), "Starting rooted orchestrator session for epic") {
+		t.Fatalf("generic epic start did not delegate: response=%+v body=%q err=%v", delegated.Error, delegated.Body, err)
+	}
+	statusRequest := request
+	statusRequest.Command = protocol.CommandOrchestratorSessionStatus
+	response, err := d.handleOrchestratorSession(ctx, statusRequest)
 	if err != nil || response.Error != nil {
-		t.Fatalf("start rooted orchestrator: response=%+v err=%v", response.Error, err)
+		t.Fatalf("status delegated rooted orchestrator: response=%+v err=%v", response.Error, err)
 	}
 	var started protocol.OrchestratorSessionResult
 	if err := json.Unmarshal(response.Body, &started); err != nil {
@@ -280,15 +305,6 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	if err != nil || !found || lease.SessionID != started.SessionID || lease.Lifecycle != domain.OrchestratorWorking || lease.AcquiredAt.After(acknowledgement.AcknowledgedAt) {
 		t.Fatalf("rooted lease = %+v found=%t err=%v acknowledgement=%+v", lease, found, err, acknowledgement)
 	}
-	// Upgrade/recovery may encounter the legacy dual-intent product. Exact-scope
-	// rooted start must retire it before accepting the live runtime.
-	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
-		ID: started.SessionID, IssueID: rootID, Role: daemonstate.SessionRoleWorker,
-		ScopeKind: daemonstate.SessionScopeIssue, ScopeID: rootID,
-		State: daemonstate.SessionStateRunning, UpdatedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatal(err)
-	}
 	inputsBefore := len(tmuxRunner.inputPayloads)
 	response, err = d.handleOrchestratorSession(ctx, request)
 	if err != nil || response.Error != nil {
@@ -299,6 +315,17 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	}
 	if worker, found, err := runtimeStore.GetWorkerSessionStateByIssueID(ctx, projectID, rootID, started.SessionID); err != nil || found {
 		t.Fatalf("legacy rooted worker intent = %+v found=%t err=%v", worker, found, err)
+	}
+	attached, err := d.handleSessionAttach(ctx, protocol.RequestEnvelope{
+		Command: daemonhandlers.CommandSessionAttach,
+		Meta:    protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:    genericStart.Body,
+	})
+	if err != nil || attached.Error != nil || !strings.Contains(string(attached.Body), "Attaching to rooted orchestrator session") {
+		t.Fatalf("generic rooted attach did not delegate: response=%+v body=%q err=%v", attached.Error, attached.Body, err)
+	}
+	if worker, found, err := runtimeStore.GetWorkerSessionStateByIssueID(ctx, projectID, rootID, started.SessionID); err != nil || found {
+		t.Fatalf("generic rooted attach recreated worker intent: %+v found=%t err=%v", worker, found, err)
 	}
 
 	// restart-all replaces and re-acknowledges the rooted agent while holding
@@ -438,12 +465,17 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 		Meta:    protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 		Body:    workerBody,
 	})
-	if err != nil || workerResponse.Error == nil || workerResponse.Error.Code != protocol.ErrorCodeConflict {
-		t.Fatalf("generic worker recovery response=%+v err=%v", workerResponse.Error, err)
+	if err != nil || workerResponse.Error != nil || !strings.Contains(string(workerResponse.Body), "Starting rooted orchestrator session for epic") {
+		t.Fatalf("generic epic recovery did not delegate: response=%+v body=%q err=%v", workerResponse.Error, workerResponse.Body, err)
 	}
-	if tmuxRunner.sessions[started.SessionID] {
-		t.Fatal("generic worker recovery recreated rooted runtime")
+	if !tmuxRunner.sessions[started.SessionID] {
+		t.Fatal("generic epic recovery did not recreate rooted runtime")
 	}
+	if worker, found, err := runtimeStore.GetWorkerSessionStateByIssueID(ctx, projectID, rootID, started.SessionID); err != nil || found {
+		t.Fatalf("generic epic recovery recreated worker intent: %+v found=%t err=%v", worker, found, err)
+	}
+	delete(tmuxRunner.sessions, started.SessionID)
+	delete(tmuxRunner.env, started.SessionID)
 	launchesBefore := len(tmuxRunner.launchPromptContents)
 	recovery, err := d.reconcileTmuxAndDaemonSessions(ctx, projectID, rootID)
 	if err != nil {
@@ -467,11 +499,10 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	// relaunch the rooted runtime nor fall back to generic worker recovery.
 	d.orchestratorStopGracePeriod = time.Millisecond
 	d.orchestratorStopPollInterval = time.Millisecond
-	stopRequest := request
-	stopRequest.Command = protocol.CommandOrchestratorSessionStop
-	stopResponse, err := d.handleOrchestratorSession(ctx, stopRequest)
-	if err != nil || stopResponse.Error != nil {
-		t.Fatalf("stop rooted orchestrator: response=%+v err=%v", stopResponse.Error, err)
+	stopRequest := protocol.RequestEnvelope{Command: daemonhandlers.CommandSessionStop, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: genericStart.Body}
+	stopResponse, err := d.handleSessionStopDirect(ctx, stopRequest)
+	if err != nil || stopResponse.Error != nil || !strings.Contains(string(stopResponse.Body), "Stopped rooted orchestrator session") {
+		t.Fatalf("generic rooted stop did not delegate: response=%+v body=%q err=%v", stopResponse.Error, stopResponse.Body, err)
 	}
 	recovery, err = d.reconcileTmuxAndDaemonSessions(ctx, projectID, rootID)
 	if err != nil {

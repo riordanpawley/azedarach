@@ -95,7 +95,9 @@ func (d *Daemon) suppressStaleWorktreeGitRefresh(ctx context.Context, projectID,
 		}
 	}
 	if issueID != "" {
-		d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID)
+		if _, err := d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID); err != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("delete stale worktree projection failed; observation will be retried", "project_id", projectID, "issue_id", issueID, "error", err)
+		}
 	}
 	logStaleWorktreeGitRefreshSuppressed(d.cfg.Logger, projectID, issueID, worktree, reason, cause)
 	return true
@@ -146,7 +148,9 @@ func suppressStaleWorktreeGitRefreshProjection(
 	}
 	if issueID != "" {
 		if writer != nil {
-			writer.DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID)
+			if _, err := writer.DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID); err != nil && logger != nil {
+				logger.Warn("delete stale worktree projection failed; observation will be retried", "project_id", projectID, "issue_id", issueID, "error", err)
+			}
 		} else if store != nil {
 			if err := store.DeleteWorktreeState(ctx, projectID, issueID); err != nil && logger != nil {
 				logger.Warn("delete stale worktree runtime state failed",

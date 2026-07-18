@@ -20,6 +20,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	daemonnotices "github.com/riordanpawley/azedarach/internal/daemon/notices"
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
+	operationstore "github.com/riordanpawley/azedarach/internal/daemon/operations/store"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/daemon/userstore"
@@ -61,6 +62,9 @@ const (
 	defaultRuntimeProjectionCoalesceWindow = 25 * time.Millisecond
 	defaultTmuxObservationInterval         = 2 * time.Second
 	defaultTmuxObservationTimeout          = 5 * time.Second
+	defaultGitObservationInterval          = 5 * time.Second
+	defaultGitObservationTimeout           = 5 * time.Second
+	defaultGitObservationProjectLimit      = 64
 )
 
 // Config configures daemon runtime wiring.
@@ -92,17 +96,20 @@ type Config struct {
 	RuntimeReconcileTimeout    time.Duration
 	TmuxObservationInterval    time.Duration
 	TmuxObservationTimeout     time.Duration
+	GitObservationInterval     time.Duration
+	GitObservationTimeout      time.Duration
 	scheduledScriptRunner      scheduledScriptCommandRunner
 }
 
 // Daemon is the daemon runtime root.
 type Daemon struct {
-	cfg    Config
-	lock   daemonLockManager
-	hub    *publish.Hub
-	serve  daemonServer
-	router *daemonhandlers.Dispatcher
-	apply  *daemonhandlers.ApplyHandler
+	cfg      Config
+	lock     daemonLockManager
+	hub      *publish.Hub
+	serve    daemonServer
+	ipcReady <-chan struct{}
+	router   *daemonhandlers.Dispatcher
+	apply    *daemonhandlers.ApplyHandler
 
 	issues                               *issues.Client
 	userStore                            *userstore.Store
@@ -179,6 +186,34 @@ type Daemon struct {
 	worktreeGitProbeThrottle             *reconcileThrottle
 	queueMu                              sync.Mutex
 	operationRuntime                     *operationRuntime
+	publicationEvidenceMu                sync.RWMutex
+	publicationEvidenceCache             map[string]domain.PublicationEvidenceSnapshot
+	publicationEvidenceAfterRefresh      func(domain.PublicationEvidenceSnapshot)
+	publicationClose                     func(context.Context, domain.PublicationOperation) error
+	publicationAppliedBeforeTaskReceipt  func(context.Context, taskCloseIntegrationResult)
+	publicationIdentityCheck             func(context.Context, domain.PublicationOperation) error
+	publicationStateChanged              func(domain.PublicationOperation)
+	publicationClaimMu                   sync.Mutex
+	publicationClaimOwner                string
+	publicationClaimNow                  func() time.Time
+	publicationClaimTTL                  time.Duration
+	publicationValidationWait            func(context.Context, string) error
+	publicationInitialSubmit             func(context.Context, domain.PublicationOperation) error
+	publicationCommittedQueueRead        func(string, context.Context, string, string) (domain.PublicationOperation, bool, error)
+	publicationContinuationSubmit        func(context.Context, domain.PublicationOperation) error
+	publicationContinuationWait          func(context.Context) error
+	publicationContinuationMu            sync.Mutex
+	publicationContinuationCtx           context.Context
+	publicationContinuationCancel        context.CancelFunc
+	publicationContinuationRetrying      map[string]bool
+	publicationContinuationStopping      bool
+	publicationContinuationWG            sync.WaitGroup
+	publicationRecoverySubmit            func(context.Context, domain.PublicationOperation) error
+	publicationRecoveryWait              func(context.Context) error
+	typedMergePublicationWait            func(context.Context, string) error
+	typedMergeStopTarget                 func(context.Context, string, string) error
+	publicationStoresMu                  sync.Mutex
+	publicationStores                    map[string]*operationstore.SQLiteStore
 	noticeService                        *daemonnotices.Service
 	runtimeProjectionCoalescer           *runtimeProjectionEventCoalescer
 	scheduledScripts                     *scheduledScriptManager
@@ -218,6 +253,8 @@ type Daemon struct {
 	orchestrationSnapshotBuild           orchestrationSnapshotBuilder
 	snapshotAdmissionContext             func(context.Context) (context.Context, context.CancelFunc)
 	orchestrationProjectionExported      func()
+	orchestrationSnapshotPrepared        func(uint64, []string)
+	orchestrationSnapshotAuxiliaryRead   func(context.Context) error
 	taskGraphOperationList               func(context.Context, daemonops.Query) ([]daemonops.Record, error)
 	taskGraphUnresolvedInteractionIDs    func(context.Context, string) (map[string]struct{}, error)
 	taskGraphObservationEvents           func(context.Context, string, []string) issues.ProjectIssueObservationCapture
@@ -232,7 +269,11 @@ type Daemon struct {
 	materializersContext                 context.Context
 	projectReadRuntimeHydrate            func(context.Context, string, []domain.Task) ([]domain.Task, error)
 	projectReadWorktreeRefresh           func(context.Context, string, *projectReadMaterializer) error
+	projectReadUserProjectionSync        func(context.Context, string, []string) error
 	reviewLeaseReleasedBeforeClose       func(context.Context, string, string) error
+	reviewAcceptanceBeforeCandidateCheck func()
+	reviewCandidateCheck                 func(context.Context, string, protocol.OrchestrationReview) (string, string, error)
+	reviewAdmissionSnapshotLoaded        func()
 	reviewAcceptedSourceOID              func(context.Context, string, string) (string, error)
 	mailProjectedBeforeAppend            func(context.Context, daemonMailEvent) error
 	watchClientsMu                       sync.Mutex
@@ -240,8 +281,13 @@ type Daemon struct {
 	terminalFailureProbeMu               sync.Mutex
 	terminalFailureProbes                map[string]terminalFailureProbeState
 	tmuxObservationWG                    sync.WaitGroup
+	gitHookReplayWG                      sync.WaitGroup
 	tmuxObservationCursorMu              sync.Mutex
 	tmuxObservationCursor                int
+	gitObservationWG                     sync.WaitGroup
+	gitObservationCursorMu               sync.Mutex
+	gitObservationCursor                 int
+	gitObservationIssueCursor            map[string]int
 	reviewReadyRecoveryMu                sync.Mutex
 	reviewReadyRecoveryCursor            map[string]int64
 	reviewReadyRecoveryBeforeLoad        func()
@@ -392,6 +438,7 @@ func New(cfg Config) *Daemon {
 		taskGraphRuntimeValidations:        map[string]taskGraphRuntimeValidationEntry{},
 		taskGraphRuntimeValidationLoads:    map[string]*taskGraphRuntimeValidationLoad{},
 		orchestrationSnapshotCache:         map[string]orchestrationSnapshotCacheEntry{},
+		publicationEvidenceCache:           map[string]domain.PublicationEvidenceSnapshot{},
 		materializers:                      map[string]*projectReadMaterializer{},
 		revision:                           map[string]uint64{},
 		userProjectionConsumers:            map[string]*userProjectionConsumerHandle{},
@@ -476,7 +523,9 @@ func New(cfg Config) *Daemon {
 		return active
 	}
 	gitService.onStatusUpdate = func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus) {
-		d.runtimeProjectionStateWriter().PublishGitStatusProjectionEvent(ctx, projectID, issueID, worktree, status)
+		if _, err := d.runtimeProjectionStateWriter().PublishGitStatusProjectionEvent(ctx, projectID, issueID, worktree, status); err != nil && d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("publish observed git status projection failed", "project_id", projectID, "issue_id", issueID, "error", err)
+		}
 	}
 	noticeService := daemonnotices.NewService(daemonnotices.ServiceConfig{
 		Repository:   daemonnotices.New(cfg.RepoDir, cfg.Logger),
@@ -533,13 +582,16 @@ func New(cfg Config) *Daemon {
 		startWorktreeAsyncInit: d.startWorktreeAsyncInitCommands,
 		logger:                 cfg.Logger,
 		onProjectionUpdate: func(ctx context.Context, projectID, issueID, path string) {
-			d.runtimeProjectionStateWriter().PublishWorktreeProjectionEvent(ctx, projectID, issueID, path)
+			if _, err := d.runtimeProjectionStateWriter().PublishWorktreeProjectionEvent(ctx, projectID, issueID, path); err != nil && d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("publish observed worktree projection failed", "project_id", projectID, "issue_id", issueID, "error", err)
+			}
 		},
 		onWorktreeObserved: func(_ context.Context, projectID, _ string, path string) {
 			gitService.refreshGitStatusAsync(projectID, path)
 		},
 	}
 	d.worktreeAdapter = worktreeAdapter
+	gitService.mergeTyped = d.mergeTypedGitBranches
 	worktreeHandler := daemonhandlers.NewWorktreeHandler(
 		worktreeAdapter,
 		daemonhandlers.WithWorktreeLongRunningExecutor(commandExecutor),
@@ -567,12 +619,22 @@ func New(cfg Config) *Daemon {
 	)
 	d.apply = daemonhandlers.NewApplyHandler(d, applyRevisionAdapter{daemon: d})
 
-	d.serve = transport.NewServer(cfg.SocketPath, transport.Handlers{
+	server := transport.NewServer(cfg.SocketPath, transport.Handlers{
 		Handshake: d.handshake,
 		Command:   d.command,
 		Subscribe: d.subscribe,
 	})
+	d.serve = server
+	d.ipcReady = server.Ready()
 	return d
+}
+
+// Ready closes after the daemon IPC listener is bound and accepting clients.
+func (d *Daemon) Ready() <-chan struct{} {
+	if d == nil {
+		return nil
+	}
+	return d.ipcReady
 }
 
 // Run acquires singleton lock and serves daemon IPC until context cancellation.
@@ -630,6 +692,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 				d.cfg.Logger.Warn("failed to close operation runtime", "error", closeErr)
 			}
 		}
+		d.closePublicationStores()
 		if d.noticeService != nil {
 			if closeErr := d.noticeService.Close(); closeErr != nil {
 				d.cfg.Logger.Warn("failed to close notice service", "error", closeErr)
@@ -649,10 +712,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 				d.cfg.Logger.Warn("failed to close runtime reconcile queue", "error", closeErr)
 			}
 		}
+		if d.gitStatusAdapter != nil {
+			d.gitStatusAdapter.stopGitHookRefreshReconciler()
+		}
 		if d.gitStatusRefreshQueue != nil {
 			if closeErr := d.gitStatusRefreshQueue.Close(); closeErr != nil && d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("failed to close git status refresh queue", "error", closeErr)
 			}
+		}
+		d.gitHookReplayWG.Wait()
+		if d.gitStatusAdapter != nil {
+			d.gitStatusAdapter.waitForGitHookRefreshContinuations()
 		}
 		d.stopUserProjectionWorkers()
 		d.closeIssueClients()
@@ -679,10 +749,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.cfg.Logger.Info("daemon startup phase", "phase", "projection_delta_stores_open", "duration_ms", time.Since(projectionStartedAt).Milliseconds())
 
 	serveErrCh := make(chan error, 1)
+	if d.gitStatusAdapter != nil {
+		d.gitStatusAdapter.setGitHookRefreshReconcileContext(serveCtx)
+	}
 	go func() {
 		serveErrCh <- d.serve.Serve(serveCtx)
 	}()
 	d.cfg.Logger.Info("daemon startup phase", "phase", "ipc_serve_start", "duration_ms", time.Since(startedAt).Milliseconds())
+	d.startGitHookRefreshReplay(serveCtx)
 	waitForShutdown := func() {
 		if ctx.Err() != nil {
 			<-shutdownDone
@@ -737,8 +811,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return nil
 	}
 	d.reconcileAllDecisionPropagationOutboxes(ctx)
+	d.recoverPublicationOperations(serveCtx)
 	d.startRuntimeReconcileWorker(serveCtx)
 	d.startTmuxObservationWorker(serveCtx)
+	d.startGitObservationWorker(serveCtx)
 	d.startDecisionPropagationReconcileWorker(serveCtx)
 	d.startLinearSyncWorker(serveCtx)
 	d.startScheduledScriptWorker(serveCtx)
@@ -753,7 +829,84 @@ func (d *Daemon) Run(ctx context.Context) error {
 		<-shutdownDone
 	}
 	d.tmuxObservationWG.Wait()
+	d.gitObservationWG.Wait()
 	return err
+}
+
+func (d *Daemon) startGitHookRefreshReplay(ctx context.Context) {
+	if d == nil {
+		return
+	}
+	d.gitHookReplayWG.Add(1)
+	go func() {
+		defer d.gitHookReplayWG.Done()
+		if err := d.prepareRuntimeStoresForGitHookReplay(); err != nil {
+			if d.cfg.Logger != nil && ctx.Err() == nil {
+				d.cfg.Logger.Warn("open runtime stores for git hook replay failed", "error", err)
+			}
+			return
+		}
+		if err := d.replayPendingGitHookRefreshes(ctx); err != nil && d.cfg.Logger != nil && ctx.Err() == nil {
+			d.cfg.Logger.Warn("replay pending git hook refreshes failed", "error", err)
+		}
+	}()
+}
+
+func (d *Daemon) prepareRuntimeStoresForGitHookReplay() error {
+	registry, err := appconfig.LoadProjectsRegistry()
+	if err != nil {
+		return err
+	}
+	projectIDs := []string{d.canonicalProjectID(protocol.DefaultProjectID)}
+	for _, project := range registry.Projects {
+		projectID := strings.TrimSpace(project.ID)
+		if projectID == "" {
+			projectID = strings.TrimSpace(project.Name)
+		}
+		if projectID != "" {
+			projectIDs = append(projectIDs, projectID)
+		}
+	}
+	for _, projectID := range projectIDs {
+		if store := d.runtimeStateStoreForProject(projectID); store == nil {
+			return fmt.Errorf("runtime state store unavailable for project %q", projectID)
+		}
+	}
+	return nil
+}
+
+func (d *Daemon) replayPendingGitHookRefreshes(ctx context.Context) error {
+	if d == nil || d.gitStatusAdapter == nil {
+		return nil
+	}
+	d.runtimeStoresMu.Lock()
+	stores := make([]*daemonstate.RuntimeStateStore, 0, len(d.runtimeStoresByRoot))
+	for _, store := range d.runtimeStoresByRoot {
+		stores = append(stores, store)
+	}
+	d.runtimeStoresMu.Unlock()
+	seen := make(map[*daemonstate.RuntimeStateStore]struct{}, len(stores))
+	for _, store := range stores {
+		if store == nil {
+			continue
+		}
+		if _, ok := seen[store]; ok {
+			continue
+		}
+		seen[store] = struct{}{}
+		intents, err := store.ListPendingGitHookRefreshes(ctx)
+		if err != nil {
+			return err
+		}
+		for _, intent := range intents {
+			submission, err := d.gitStatusAdapter.queuePersistedGitHookRefresh(intent.ProjectID, intent.Worktree)
+			if err != nil {
+				return err
+			}
+			d.gitStatusAdapter.continuePendingGitHookRefreshAfter(submission, intent.ProjectID, intent.Worktree)
+		}
+	}
+	return nil
 }
 
 func (d *Daemon) prepareRunShutdownState() {
@@ -792,6 +945,7 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 	req.Meta.ProjectID = naming.ProjectID(projectID)
 	ctx = withDaemonProjectIDContext(ctx, projectID)
 	ctx = issues.ContextWithMutationOperation(ctx, "command."+req.Command)
+	ctx = contextWithRuntimeProjectionWriterOperation(ctx, "command."+req.Command)
 	ctx, endCommandSpan := latencytrace.StartSpan(ctx, "daemon", "command", "command", req.Command, "request_id", req.RequestID, "project_id", projectID)
 	d.recordWatchClientRequest(projectID, req, startedAt.UTC())
 	defer func() {
@@ -857,6 +1011,21 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 			d.cfg.Logger.Log(ctx, daemonCommandSuccessLogLevel(req.Command), "daemon command completed", attrs...)
 		}
 	}()
+	defer func() {
+		if err == nil && resp.Error == nil {
+			return
+		}
+		issueClient := d.existingIssueClientForProject(projectID)
+		if issueClient == nil || issueClient.CorruptionError() == nil {
+			return
+		}
+		healthErr, unhealthy := d.projectIssueStoreHealthError(projectID)
+		if !unhealthy {
+			healthErr = d.recordProjectIssueStoreFailure(projectID, issueClient.CorruptionError())
+		}
+		resp = d.errorResponse(req, protocol.ErrorCodeUnavailable, healthErr.Error())
+		err = nil
+	}()
 
 	beginStartedAt := time.Now()
 	if err := d.beginCommand(); err != nil {
@@ -896,7 +1065,8 @@ func (d *Daemon) command(ctx context.Context, req protocol.RequestEnvelope) (res
 		return d.handleHookLogList(ctx, req)
 	case protocol.CommandRuntimeSignalIngest:
 		return d.handleRuntimeSignalIngest(ctx, req)
-	case protocol.CommandValidationAcquire, protocol.CommandValidationHeartbeat, protocol.CommandValidationNested, protocol.CommandValidationFinish, protocol.CommandValidationStatus:
+	case protocol.CommandValidationAcquire, protocol.CommandValidationHeartbeat, protocol.CommandValidationNested, protocol.CommandValidationFinish, protocol.CommandValidationStatus,
+		protocol.CommandPublicationEvidenceRecord, protocol.CommandPublicationEvidenceStatus, protocol.CommandPublicationEvidenceEvaluate:
 		return d.handleValidationCommand(ctx, req)
 	case protocol.CommandUIOpenTaskWorkspace, protocol.CommandUIOpenTaskDrillDown:
 		return d.handleUIIssueCommand(ctx, req)
@@ -1283,8 +1453,8 @@ func (d *Daemon) applyTypedSessionLifecycleTransition(ctx context.Context, req p
 			session = persisted
 		}
 	}
-	writer.PublishSessionProjectionEvent(ctx, projectID, req.Meta, session)
-	return nil
+	_, err = writer.PublishSessionProjectionEvent(ctx, projectID, req.Meta, session)
+	return err
 }
 
 func (d *Daemon) sessionLifecycleTransitionNeeded(projectID, sessionID, issueID string, state daemonstate.SessionState) bool {
@@ -1417,10 +1587,19 @@ func (d *Daemon) recoverInterruptedOperation(ctx context.Context, record daemono
 		return interruptedOperationRecovery{}, false
 	}
 	canonicalID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), record.IssueID)
-	session, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, record.IssueID, canonicalID)
+	rootedScope, scopeErr := domain.RootedOrchestrationScope(record.IssueID)
+	if scopeErr != nil {
+		return interruptedOperationRecovery{}, false
+	}
+	rootedIdentity, identityErr := domain.NewOrchestratorIdentity(projectID, rootedScope)
+	if identityErr != nil {
+		return interruptedOperationRecovery{}, false
+	}
+	authority := daemonstate.NewOrchestratorLeaseAuthority(store)
+	lease, rootedOwned, err := authority.Get(ctx, rootedIdentity)
 	if err != nil {
 		if d.cfg.Logger != nil {
-			d.cfg.Logger.Warn("failed to inspect interrupted worker session.start projection",
+			d.cfg.Logger.Warn("failed to inspect interrupted session.start rooted ownership",
 				"operation_id", record.ID,
 				"project_id", projectID,
 				"issue_id", record.IssueID,
@@ -1428,6 +1607,72 @@ func (d *Daemon) recoverInterruptedOperation(ctx context.Context, record daemono
 			)
 		}
 		return interruptedOperationRecovery{}, false
+	}
+	var session daemonstate.Session
+	var found bool
+	if rootedOwned {
+		if strings.TrimSpace(lease.SessionID) != canonicalID {
+			return interruptedOperationRecovery{}, false
+		}
+		session, found, err = store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, record.IssueID)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("failed to inspect interrupted rooted orchestrator session.start projection",
+					"operation_id", record.ID,
+					"project_id", projectID,
+					"issue_id", record.IssueID,
+					"error", err,
+				)
+			}
+			return interruptedOperationRecovery{}, false
+		}
+		if !found {
+			session, found, err = store.GetWorkerSessionStateByIssueID(ctx, projectID, record.IssueID, canonicalID)
+			if err != nil || !found {
+				return interruptedOperationRecovery{}, false
+			}
+		}
+		if strings.TrimSpace(session.ID) != canonicalID {
+			return interruptedOperationRecovery{}, false
+		}
+		session.Role = daemonstate.SessionRoleOrchestrator
+		session.ScopeKind = daemonstate.SessionScopeOrchestration
+		session.ScopeID = record.IssueID
+		session.UpdatedAt = time.Now().UTC()
+		if _, err = authority.AcquireRooted(ctx, rootedIdentity, session, func(context.Context, string) (bool, error) { return true, nil }); err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("failed to converge interrupted rooted session.start authority",
+					"operation_id", record.ID,
+					"project_id", projectID,
+					"issue_id", record.IssueID,
+					"error", err,
+				)
+			}
+			return interruptedOperationRecovery{}, false
+		}
+		session, found, err = store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, record.IssueID)
+		if err != nil {
+			return interruptedOperationRecovery{}, false
+		}
+	} else {
+		session, found, err = store.GetWorkerSessionStateByIssueID(ctx, projectID, record.IssueID, canonicalID)
+		if err != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("failed to inspect interrupted worker session.start projection",
+					"operation_id", record.ID,
+					"project_id", projectID,
+					"issue_id", record.IssueID,
+					"error", err,
+				)
+			}
+			return interruptedOperationRecovery{}, false
+		}
+		if !found {
+			session, found, err = store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, record.IssueID)
+			if err != nil {
+				return interruptedOperationRecovery{}, false
+			}
+		}
 	}
 	if !found || strings.TrimSpace(session.IssueID) != strings.TrimSpace(record.IssueID) {
 		return interruptedOperationRecovery{}, false
@@ -1736,9 +1981,13 @@ func (d *Daemon) recoverInterruptedDeferredWorktreeCleanup(ctx context.Context, 
 		task, err := issueClient.GetWithRuntime(ctx, projectID, taskID)
 		if err == nil && !task.IssueClosed() {
 			if fallbackPath != "" {
-				d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, fallbackPath, fallbackBranch)
+				if _, err := d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, fallbackPath, fallbackBranch); err != nil {
+					return interruptedOperationRecovery{}, false
+				}
 			} else {
-				d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, taskID)
+				if err := d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, taskID); err != nil {
+					return interruptedOperationRecovery{}, false
+				}
 			}
 			payload, _ := json.Marshal(deferredTaskWorktreeCleanupResult{
 				ProjectID: projectID,
@@ -2006,37 +2255,6 @@ func (d *Daemon) triggerWorktreeStateRefresh(projectID string) {
 	}()
 }
 
-func (d *Daemon) refreshIssueWorktreeState(ctx context.Context, projectID, issueID string) {
-	if d == nil || d.gitStatusAdapter == nil {
-		return
-	}
-	projectID = strings.TrimSpace(projectID)
-	if projectID == "" {
-		projectID = protocol.DefaultProjectID
-	}
-	issueID = strings.TrimSpace(issueID)
-	if issueID == "" {
-		return
-	}
-	store := d.worktreeRuntimeStateStoreIfConfigured(projectID)
-	if store == nil {
-		return
-	}
-	projection, found, err := store.GetWorktreeStateByIssueID(ctx, projectID, issueID)
-	if err != nil {
-		if d.cfg.Logger != nil {
-			d.cfg.Logger.Debug("issue worktree refresh lookup failed", "project_id", projectID, "issue_id", issueID, "error", err)
-		}
-		return
-	}
-	if !found || strings.TrimSpace(projection.Path) == "" {
-		return
-	}
-	if _, err := d.gitStatusAdapter.queueGitStatusRefresh(projectID, projection.Path, reconcilePriorityVisible, "issue-read"); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("issue worktree refresh failed", "project_id", projectID, "issue_id", issueID, "worktree", projection.Path, "error", err)
-	}
-}
-
 func (d *Daemon) persistWorktreeState(ctx context.Context, projectID, issueID, path, branch string) error {
 	if d.worktreeRuntimeStateStore(projectID) == nil {
 		return nil
@@ -2145,6 +2363,31 @@ func (d *Daemon) currentRevision(projectID string) uint64 {
 
 func (d *Daemon) publishTaskEvent(req protocol.RequestEnvelope, eventName string, rev uint64, bodies ...protocol.TaskEventBody) {
 	projectID := d.projectID(req.Meta)
+	convergenceCtx, endConvergence := latencytrace.StartSpanWithEndAttributes(context.Background(), "daemon", "task.mutation_read_convergence", "project_id", projectID)
+	cacheRevision := uint64(0)
+	convergenceOutcome := "not_active"
+	var convergenceErr error
+	d.materializersMu.RLock()
+	materializer := d.materializers[projectID]
+	d.materializersMu.RUnlock()
+	if materializer != nil {
+		boundedCtx, cancelConvergence := context.WithTimeout(convergenceCtx, projectReadMutationConvergenceTimeout)
+		metadata, outcome, err := materializer.convergeMutation(boundedCtx, rev)
+		cancelConvergence()
+		cacheRevision = metadata.DeliveryCursor
+		convergenceOutcome = outcome
+		if err != nil {
+			convergenceErr = err
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Error("committed task mutation failed to converge project read materializer", "project_id", projectID, "mutation_revision", rev, "cache_revision", cacheRevision, "convergence_outcome", convergenceOutcome, "error", err)
+			}
+		}
+	}
+	endConvergence(convergenceErr,
+		"mutation_revision", rev,
+		"cache_revision", cacheRevision,
+		"convergence_outcome", convergenceOutcome,
+	)
 	var body []byte
 	if len(bodies) > 0 {
 		eventBody := bodies[0]

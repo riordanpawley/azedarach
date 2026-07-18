@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"reflect"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	opstore "github.com/riordanpawley/azedarach/internal/daemon/operations/store"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
@@ -21,6 +24,23 @@ import (
 type runtimeGitService struct{}
 
 type unsuccessfulMergeRuntimeGitService struct{ runtimeGitService }
+
+type revisionTypedMergeRuntimeGitService struct {
+	runtimeGitService
+	mu    sync.Mutex
+	calls int
+}
+
+func (s *revisionTypedMergeRuntimeGitService) MergeTyped(_ context.Context, _ string, req daemonhandlers.GitMergeRequest) (*daemonhandlers.GitMergeResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	oid := "source-revision-one"
+	if s.calls > 1 {
+		oid = "source-revision-two"
+	}
+	return &daemonhandlers.GitMergeResult{SourceID: req.SourceID, TargetID: req.TargetID, SourceOID: oid, TargetOID: "target-" + oid, ReceiptRecorded: true, Result: git.MergeResult{Success: true}}, nil
+}
 
 func (unsuccessfulMergeRuntimeGitService) Merge(context.Context, string, string, string) (*git.MergeResult, error) {
 	return &git.MergeResult{Success: false, Message: "hook rejected merge"}, nil
@@ -267,7 +287,7 @@ func TestOperationRuntimeGitMergePublishesLifecycleEvents(t *testing.T) {
 	payload := mustJSON(t, map[string]string{"worktree": "/tmp/wt", "branch": "main"})
 	submitReq := testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
 		ProjectID: "proj-1",
-		Kind:      daemonhandlers.CommandGitMerge,
+		Kind:      daemonhandlers.CommandGitMergeRef,
 		Payload:   payload,
 	})
 	ch, cancel := runtime.hub.Subscribe("proj-1", 0)
@@ -286,8 +306,8 @@ func TestOperationRuntimeGitMergePublishesLifecycleEvents(t *testing.T) {
 	}
 
 	record := waitForRuntimeState(t, runtime, submitBody.Operation.OperationID.String(), daemonops.StateDone)
-	if record.Kind != daemonhandlers.CommandGitMerge {
-		t.Fatalf("operation kind = %s, want %s", record.Kind, daemonhandlers.CommandGitMerge)
+	if record.Kind != daemonhandlers.CommandGitMergeRef {
+		t.Fatalf("operation kind = %s, want %s", record.Kind, daemonhandlers.CommandGitMergeRef)
 	}
 
 	events := collectOperationEvents(t, ch, 6)
@@ -320,9 +340,43 @@ func TestOperationRuntimeGitMergePublishesLifecycleEvents(t *testing.T) {
 		if body.Operation.OperationID != submitBody.Operation.OperationID {
 			t.Fatalf("event operation id = %s, want %s", body.Operation.OperationID, submitBody.Operation.OperationID)
 		}
-		if body.Operation.Kind != daemonhandlers.CommandGitMerge {
-			t.Fatalf("event operation kind = %s, want %s", body.Operation.Kind, daemonhandlers.CommandGitMerge)
+		if body.Operation.Kind != daemonhandlers.CommandGitMergeRef {
+			t.Fatalf("event operation kind = %s, want %s", body.Operation.Kind, daemonhandlers.CommandGitMergeRef)
 		}
+	}
+}
+
+func TestOperationRuntimeTypedGitMergeReexecutesSameIDsAfterCompletion(t *testing.T) {
+	service := &revisionTypedMergeRuntimeGitService{}
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), nextRevision: sequentialRevision()})
+	runtime.gitHandler = daemonhandlers.NewGitHandler(service)
+	payload := mustJSON(t, map[string]string{"source_id": "az-child", "target_id": "az-parent"})
+	submit := func() (protocol.OperationSubmitResponseBody, daemonops.Record) {
+		t.Helper()
+		resp := runtime.Handle(context.Background(), testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{ProjectID: "proj-1", Kind: daemonhandlers.CommandGitMerge, Payload: payload}))
+		if !resp.OK {
+			t.Fatalf("submit response = %+v", resp)
+		}
+		var body protocol.OperationSubmitResponseBody
+		if err := json.Unmarshal(resp.Body, &body); err != nil {
+			t.Fatal(err)
+		}
+		return body, waitForRuntimeState(t, runtime, body.Operation.OperationID.String(), daemonops.StateDone)
+	}
+
+	first, firstRecord := submit()
+	second, secondRecord := submit()
+	if first.Operation.OperationID == second.Operation.OperationID || !second.Created {
+		t.Fatalf("completed typed merge was deduped: first=%+v second=%+v", first.Operation, second.Operation)
+	}
+	service.mu.Lock()
+	calls := service.calls
+	service.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("typed merge executions = %d, want 2", calls)
+	}
+	if !strings.Contains(string(firstRecord.ResultPayload), "source-revision-one") || !strings.Contains(string(secondRecord.ResultPayload), "source-revision-two") {
+		t.Fatalf("typed merge results did not bind refreshed source revisions: first=%s second=%s", firstRecord.ResultPayload, secondRecord.ResultPayload)
 	}
 }
 
@@ -331,7 +385,7 @@ func TestOperationRuntimeMarksUnsuccessfulGitMergeFailed(t *testing.T) {
 	runtime.gitHandler = daemonhandlers.NewGitHandler(unsuccessfulMergeRuntimeGitService{})
 	resp := runtime.Handle(context.Background(), testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
 		ProjectID: "proj-1",
-		Kind:      daemonhandlers.CommandGitMerge,
+		Kind:      daemonhandlers.CommandGitMergeRef,
 		Payload:   mustJSON(t, map[string]string{"worktree": "/tmp/wt", "branch": "source"}),
 	}))
 	if !resp.OK {
@@ -494,14 +548,14 @@ func TestOperationRuntimeDirectGitMergeWaitTimeoutReturnsPendingEnvelope(t *test
 	release := make(chan struct{})
 	defer close(release)
 
-	req := testRequest(daemonhandlers.CommandGitMerge, map[string]string{"worktree": "/tmp/wt", "branch": "main"})
+	req := testRequest(daemonhandlers.CommandGitMergeRef, map[string]string{"worktree": "/tmp/wt", "branch": "main"})
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		<-started
 		cancel()
 	}()
 	defer cancel()
-	resp := executor.Execute(ctx, req, daemonhandlers.CommandGitMerge, func(_ context.Context) protocol.ResponseEnvelope {
+	resp := executor.Execute(ctx, req, daemonhandlers.CommandGitMergeRef, func(_ context.Context) protocol.ResponseEnvelope {
 		close(started)
 		<-release
 		return testResponse(req, map[string]string{"worktree": "/tmp/wt", "branch": "main"})
@@ -679,6 +733,76 @@ func TestOperationRuntimeCancelMapsCancelledErrorResponseToCancelled(t *testing.
 	}
 }
 
+func TestOperationRuntimeCancelAfterRestartDispatchPersistsTerminalAggregate(t *testing.T) {
+	d, _, runner, target := newExactRestartDaemon(t, "project", "az-1", "", "idle")
+	dispatched := make(chan struct{})
+	releaseDispatch := make(chan struct{})
+	d.sessionRestartRespawn = func(_ context.Context, paneTarget, worktree, command string) (error, bool) {
+		if _, err := runner.Run(context.Background(), "respawn-pane", "-k", "-c", worktree, "-t", paneTarget, command); err != nil {
+			return err, false
+		}
+		close(dispatched)
+		<-releaseDispatch
+		return nil, false
+	}
+
+	resultTemplate := protocol.SessionRestartAllResponseBody{
+		ProjectID: naming.ProjectID("project"), ProjectIDs: []naming.ProjectID{"project"},
+		Sessions: make([]protocol.SessionRestartAllItem, 0, 1),
+	}
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), nextRevision: sequentialRevision()})
+	defer runtime.Close()
+	runtime.sessionRestartAll = func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		var body protocol.SessionRestartAllRequestBody
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return protocol.ResponseEnvelope{}, err
+		}
+		return d.executeSessionRestartBatch(ctx, req, "project", []string{"project"}, body, []sessionRestartAllTarget{target}, resultTemplate)
+	}
+
+	payload := mustJSON(t, protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID("project")})
+	submitResp := runtime.Handle(context.Background(), testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
+		ProjectID: "project", Kind: protocol.CommandSessionRestartAll, Payload: payload,
+	}))
+	if !submitResp.OK {
+		t.Fatalf("submit response = %+v", submitResp)
+	}
+	var submitted protocol.OperationSubmitResponseBody
+	if err := json.Unmarshal(submitResp.Body, &submitted); err != nil {
+		t.Fatal(err)
+	}
+	<-dispatched
+	cancelResp := runtime.Handle(context.Background(), testRequest(protocol.CommandOperationCancel, protocol.OperationCancelRequestBody{
+		ProjectID: "project", OperationID: submitted.Operation.OperationID, Reason: "cancel after respawn dispatch",
+	}))
+	if !cancelResp.OK {
+		t.Fatalf("cancel response = %+v", cancelResp)
+	}
+	close(releaseDispatch)
+	if err := runtime.manager.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	record, err := runtime.manager.Get(context.Background(), submitted.Operation.OperationID.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.State != daemonops.StateDone {
+		t.Fatalf("operation state = %s, want done; error=%q progress=%+v", record.State, record.ErrorMessage, record.Progress)
+	}
+	var result protocol.SessionRestartAllResponseBody
+	if err := json.Unmarshal(record.ResultPayload, &result); err != nil {
+		t.Fatalf("decode aggregate result: %v", err)
+	}
+	respawns, _, _ := runner.snapshot()
+	if respawns != 1 || result.Restarted != 1 || result.Skipped != 0 || result.Failed != 0 || len(result.Sessions) != 1 || !result.Sessions[0].Restarted {
+		t.Fatalf("respawns=%d result=%+v, want one truthfully acknowledged restart", respawns, result)
+	}
+	batch, ok := decodeSessionRestartBatchPlan(record)
+	if !ok || batch.Cursor != 1 || batch.Current != nil || len(batch.Results) != 1 || !batch.Results[0].Restarted {
+		t.Fatalf("terminal aggregate checkpoint = %+v ok=%t", batch, ok)
+	}
+}
+
 func TestOperationRuntimeStartupFailsInterruptedOperations(t *testing.T) {
 	repoDir := t.TempDir()
 	first := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir, nextRevision: sequentialRevision()})
@@ -833,7 +957,7 @@ func TestDaemonRecoverInterruptedSessionStartUsesActiveProjection(t *testing.T) 
 	}
 }
 
-func TestWorkerLifecyclePathsIgnoreNewerNonWorkerSessions(t *testing.T) {
+func TestRootedOrchestratorIntentSupersedesWorkerLifecycleRecovery(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID, issueID := "proj-1", "AZ-2"
@@ -852,19 +976,9 @@ func TestWorkerLifecyclePathsIgnoreNewerNonWorkerSessions(t *testing.T) {
 		}
 	}
 	d := &Daemon{cfg: Config{RepoDir: repoDir}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store}, runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{}}
-	if err := d.persistSessionState(projectID, daemonstate.Session{ID: "foreign-worker", IssueID: issueID, State: daemonstate.SessionStatePaused, ObservedState: daemonstate.SessionStatePaused, UpdatedAt: now.Add(3 * time.Minute)}); err != nil {
-		t.Fatal(err)
-	}
 	worker, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, issueID, workerID)
-	if err != nil || !found || worker.ID != workerID || worker.State != daemonstate.SessionStatePaused {
-		t.Fatalf("worker persist selected %+v found=%t err=%v", worker, found, err)
-	}
-	if err := d.writeSessionStopProjection(projectID, "foreign-worker", issueID); err != nil {
-		t.Fatal(err)
-	}
-	worker, _, _ = store.GetWorkerSessionStateByIssueID(ctx, projectID, issueID, workerID)
-	if worker.ID != workerID || worker.State != daemonstate.SessionStateStopped {
-		t.Fatalf("worker stop selected %+v", worker)
+	if err != nil || found {
+		t.Fatalf("retired worker intent = %+v found=%t err=%v", worker, found, err)
 	}
 	intents, err := store.ListSessionIntentStates(ctx, projectID)
 	if err != nil {
@@ -879,13 +993,50 @@ func TestWorkerLifecyclePathsIgnoreNewerNonWorkerSessions(t *testing.T) {
 	if !preserved[daemonstate.SessionRoleAdvisor] || !preserved[daemonstate.SessionRoleOrchestrator] {
 		t.Fatalf("non-worker intents not preserved: %+v", intents)
 	}
-	worker.State, worker.ObservedState, worker.UpdatedAt = daemonstate.SessionStateRunning, daemonstate.SessionStateRunning, now.Add(4*time.Minute)
-	if err := upsertSessionStateFixture(store, ctx, projectID, worker); err != nil {
-		t.Fatal(err)
-	}
 	recovery, ok := d.recoverInterruptedOperation(ctx, daemonops.Record{ID: "op", ProjectID: projectID, IssueID: issueID, Kind: daemonhandlers.CommandSessionStart})
 	if !ok || recovery.State != daemonops.StateDone {
-		t.Fatalf("worker recovery=%+v ok=%t", recovery, ok)
+		t.Fatalf("rooted recovery=%+v ok=%t", recovery, ok)
+	}
+}
+
+func TestInterruptedSessionStartConvergesLeaseOwnedWorkerCrashState(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, issueID := "proj-1", "AZ-2"
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	store := daemonstate.NewRuntimeStateStore(t.TempDir(), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
+		ID:            sessionID,
+		IssueID:       issueID,
+		State:         daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning,
+		UpdatedAt:     time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worker intent: %v", err)
+	}
+	scope, err := domain.RootedOrchestrationScope(issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AcquireOrchestratorScopeLease(ctx, identity, sessionID, func(context.Context, string) (bool, error) { return false, nil }); err != nil {
+		t.Fatalf("seed pre-atomic rooted lease: %v", err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: repoDir}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store}, runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{}}
+	recovery, ok := d.recoverInterruptedOperation(ctx, daemonops.Record{ID: "op", ProjectID: projectID, IssueID: issueID, Kind: daemonhandlers.CommandSessionStart})
+	if !ok || recovery.State != daemonops.StateDone {
+		t.Fatalf("rooted crash-state recovery=%+v ok=%t", recovery, ok)
+	}
+	if _, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, issueID, sessionID); err != nil || found {
+		t.Fatalf("worker intent after recovery found=%t err=%v", found, err)
+	}
+	rooted, found, err := store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, issueID)
+	if err != nil || !found || rooted.ID != sessionID || rooted.State != daemonstate.SessionStateRunning {
+		t.Fatalf("rooted intent after recovery=%+v found=%t err=%v", rooted, found, err)
 	}
 }
 
@@ -936,7 +1087,7 @@ func TestCommandExecutorWrapsGitAndWorktreeResults(t *testing.T) {
 	}{
 		{
 			name:    "git merge",
-			command: daemonhandlers.CommandGitMerge,
+			command: daemonhandlers.CommandGitMergeRef,
 			body:    map[string]string{"worktree": "/tmp/wt", "branch": "main"},
 			result:  map[string]string{"worktree": "/tmp/wt", "branch": "main"},
 		},
@@ -1405,7 +1556,7 @@ func TestBuildSubmitRequestNormalizesWorktreeForConflictSerialization(t *testing
 
 	firstReq := runtime.buildSubmitRequestForTest(
 		t,
-		daemonhandlers.CommandGitMerge,
+		daemonhandlers.CommandGitMergeRef,
 		"proj-1",
 		mustJSON(t, map[string]string{
 			"worktree": "/tmp/az-1/",
@@ -1414,7 +1565,7 @@ func TestBuildSubmitRequestNormalizesWorktreeForConflictSerialization(t *testing
 	)
 	secondReq := runtime.buildSubmitRequestForTest(
 		t,
-		daemonhandlers.CommandGitMerge,
+		daemonhandlers.CommandGitMergeRef,
 		"proj-1",
 		mustJSON(t, map[string]string{
 			"worktree": "/tmp/az-1",

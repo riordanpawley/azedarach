@@ -8,7 +8,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,7 +37,7 @@ func TestLoadIssuesCmd_UsesDaemonSQLiteSnapshot(t *testing.T) {
 
 	model := newTestModel()
 	model.repoDir = repoDir
-	model.daemonClient = newModelTestDaemonClient(socketPath)
+	model.daemonClient = newModelTestDaemonClient(t, socketPath, repoDir)
 	msg := model.loadIssuesCmd()()
 
 	loaded, ok := msg.(issuesLoadedMsg)
@@ -104,7 +103,7 @@ func TestLoadIssuesCmd_HidesParentChildTasksFromBoardByDefault(t *testing.T) {
 
 	model := newTestModel()
 	model.repoDir = repoDir
-	model.daemonClient = newModelTestDaemonClient(socketPath)
+	model.daemonClient = newModelTestDaemonClient(t, socketPath, repoDir)
 	msg := model.loadIssuesCmd()()
 	loaded, ok := msg.(issuesLoadedMsg)
 	if !ok {
@@ -144,7 +143,7 @@ func TestIssueSnapshotParityAcrossCLIAndTUIBoard(t *testing.T) {
 	stop := startModelTestDaemon(t, repoDir, socketPath, lockPath)
 	defer stop()
 
-	client := newModelTestDaemonClient(socketPath)
+	client := newModelTestDaemonClient(t, socketPath, repoDir)
 	cliDeps := &cli.Dependencies{
 		Config:       config.DefaultConfig(),
 		DaemonClient: client,
@@ -232,7 +231,7 @@ func TestIssueSnapshotParityAcrossCLIAndTUIJSONListFields(t *testing.T) {
 	stop := startModelTestDaemon(t, repoDir, socketPath, lockPath)
 	defer stop()
 
-	client := newModelTestDaemonClient(socketPath)
+	client := newModelTestDaemonClient(t, socketPath, repoDir)
 	cliDeps := &cli.Dependencies{
 		Config:       config.DefaultConfig(),
 		DaemonClient: client,
@@ -447,54 +446,24 @@ func startModelTestDaemon(t *testing.T, repoDir, socketPath, lockPath string) fu
 		errCh <- d.Run(ctx)
 	}()
 
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		select {
-		case err := <-errCh:
-			if isSocketPermissionError(err) {
-				t.Skipf("sandbox does not permit unix socket bind: %v", err)
-			}
-			if err != nil {
-				t.Fatalf("daemon failed to start: %v", err)
-			}
-			t.Fatalf("daemon exited before socket became ready")
-		default:
+	select {
+	case <-d.Ready():
+	case err := <-errCh:
+		if isSocketPermissionError(err) {
+			t.Skipf("sandbox does not permit unix socket bind: %v", err)
 		}
-		if modelDaemonSocketReady(socketPath) {
-			break
+		if err != nil {
+			t.Fatalf("daemon failed to start: %v", err)
 		}
-		if time.Now().After(deadline) {
-			cancel()
-			select {
-			case err := <-errCh:
-				t.Fatalf("daemon failed to start (socket timeout): %v", err)
-			default:
-				t.Fatalf("daemon socket not ready at %s", socketPath)
-			}
-		}
-		time.Sleep(20 * time.Millisecond)
+		t.Fatalf("daemon exited before socket became ready")
 	}
 
 	return func() {
 		cancel()
-		select {
-		case err := <-errCh:
-			if err != nil {
-				t.Fatalf("daemon shutdown error: %v", err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("daemon shutdown timed out")
+		if err := <-errCh; err != nil {
+			t.Fatalf("daemon shutdown error: %v", err)
 		}
 	}
-}
-
-func modelDaemonSocketReady(socketPath string) bool {
-	conn, err := net.DialTimeout("unix", socketPath, 50*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
 }
 
 func captureStdoutForParity(t *testing.T, fn func() error) string {
@@ -537,9 +506,14 @@ func newModelTestRuntimePaths(t *testing.T) (string, string) {
 	return filepath.Join(runtimeDir, "s.sock"), filepath.Join(runtimeDir, "l.lock")
 }
 
-func newModelTestDaemonClient(socketPath string) *daemonclient.Client {
+func newModelTestDaemonClient(t *testing.T, socketPath, repoDir string) *daemonclient.Client {
+	t.Helper()
+	projectID, err := config.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("derive fixture project ID: %v", err)
+	}
 	return daemonclient.New(transport.NewClient(socketPath)).
-		WithProjectID("proj-model").
+		WithProjectID(projectID).
 		WithReadWaitPolicy(daemonclient.ReadWaitPolicy{
 			Default:  15 * time.Second,
 			Explicit: 15 * time.Second,

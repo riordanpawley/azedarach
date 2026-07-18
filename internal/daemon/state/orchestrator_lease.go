@@ -66,11 +66,25 @@ type OrchestratorScopeLeaseStore interface {
 	GetOrchestratorScopeLease(context.Context, domain.OrchestratorIdentity) (OrchestratorScopeLease, bool, error)
 	ListOrchestratorScopeLeases(context.Context, string) ([]OrchestratorScopeLease, error)
 	AcquireOrchestratorScopeLease(context.Context, domain.OrchestratorIdentity, string, SessionRuntimeProbe) (OrchestratorLeaseAcquireResult, error)
+	AcquireRootedOrchestratorScopeLease(context.Context, domain.OrchestratorIdentity, Session, SessionRuntimeProbe) (OrchestratorLeaseAcquireResult, error)
 	SetOrchestratorScopeLeaseLifecycle(context.Context, domain.OrchestratorIdentity, string, domain.OrchestratorLifecycle) (OrchestratorScopeLease, error)
 	EvaluateOrchestratorScopeLease(context.Context, domain.OrchestratorIdentity, string, time.Time, domain.OrchestratorLifecycleFacts, domain.OrchestratorLifecyclePolicy) (OrchestratorScopeLease, error)
 	WakeOrchestratorScopeLease(context.Context, domain.OrchestratorIdentity, time.Time, domain.OrchestratorWakeReason, domain.OrchestratorLifecyclePolicy) (OrchestratorScopeLease, bool, error)
 	AdvanceOrchestratorScopeCursor(context.Context, domain.OrchestratorIdentity, int64) (OrchestratorScopeLease, error)
 	ReleaseOrchestratorScopeLease(context.Context, domain.OrchestratorIdentity, string) error
+}
+
+type rootedOrchestratorTransitionHookKey struct{}
+
+// WithRootedOrchestratorTransitionHookForTest injects a deterministic failure
+// after the lease mutation and before the desired-role replacement. The hook
+// runs inside the shared SQLite transaction and exists only for crash-boundary
+// regression tests.
+func WithRootedOrchestratorTransitionHookForTest(ctx context.Context, hook func(string) error) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, rootedOrchestratorTransitionHookKey{}, hook)
 }
 
 // OrchestratorLeaseAuthority is the refresh-then-cache authority used by
@@ -147,6 +161,29 @@ func (a *OrchestratorLeaseAuthority) Acquire(ctx context.Context, identity domai
 		}
 		var acquireErr error
 		result, acquireErr = a.store.AcquireOrchestratorScopeLease(lockCtx, identity, sessionID, probe)
+		if refreshErr := a.Refresh(lockCtx, identity.ProjectID); refreshErr != nil && acquireErr == nil {
+			return refreshErr
+		}
+		return acquireErr
+	})
+	return result, err
+}
+
+// AcquireRooted atomically acquires the exact rooted scope and replaces the
+// matching physical session's legacy worker intent with rooted-orchestrator
+// intent. Neither durable half is externally visible without the other.
+func (a *OrchestratorLeaseAuthority) AcquireRooted(ctx context.Context, identity domain.OrchestratorIdentity, session Session, probe SessionRuntimeProbe) (OrchestratorLeaseAcquireResult, error) {
+	identity, err := normalizeOrchestratorIdentity(identity)
+	if err != nil {
+		return OrchestratorLeaseAcquireResult{}, err
+	}
+	var result OrchestratorLeaseAcquireResult
+	err = a.store.WithOrchestratorScopeTransition(ctx, identity, func(lockCtx context.Context) error {
+		if refreshErr := a.Refresh(lockCtx, identity.ProjectID); refreshErr != nil {
+			return refreshErr
+		}
+		var acquireErr error
+		result, acquireErr = a.store.AcquireRootedOrchestratorScopeLease(lockCtx, identity, session, probe)
 		if refreshErr := a.Refresh(lockCtx, identity.ProjectID); refreshErr != nil && acquireErr == nil {
 			return refreshErr
 		}
@@ -312,43 +349,116 @@ func (s *RuntimeStateStore) AcquireOrchestratorScopeLease(ctx context.Context, i
 	}
 	err = s.withRetryingWriteLock(ctx, "acquire_orchestrator_scope_lease", func(writeCtx context.Context) error {
 		result = OrchestratorLeaseAcquireResult{}
-		existing, found, loadErr := s.GetOrchestratorScopeLease(writeCtx, identity)
-		if loadErr != nil {
-			return loadErr
+		db, dbErr := s.dbHandle()
+		if dbErr != nil {
+			return dbErr
 		}
-		disposition := OrchestratorLeaseAcquired
-		acquiredAt := time.Now().UTC()
-		if found {
-			acquiredAt = existing.AcquiredAt
-			if existing.SessionID == sessionID {
-				result = OrchestratorLeaseAcquireResult{Lease: existing, Disposition: OrchestratorLeaseAttached}
-				return nil
-			}
-			if existing.Lifecycle == domain.OrchestratorPaused {
-				return &OrchestratorLeaseConflictError{Lease: existing}
-			}
-			live, probeErr := probe(writeCtx, existing.SessionID)
-			if probeErr != nil {
-				return fmt.Errorf("probe orchestrator session %s: %w", existing.SessionID, probeErr)
-			}
-			if live {
-				return &OrchestratorLeaseConflictError{Lease: existing}
-			}
-			disposition = OrchestratorLeaseRecoveredStale
-			acquiredAt = time.Now().UTC()
+		result, dbErr = acquireOrchestratorScopeLeaseWith(writeCtx, db, identity, sessionID, probe)
+		return dbErr
+	})
+	return result, err
+}
+
+func (s *RuntimeStateStore) AcquireRootedOrchestratorScopeLease(ctx context.Context, identity domain.OrchestratorIdentity, session Session, probe SessionRuntimeProbe) (result OrchestratorLeaseAcquireResult, err error) {
+	identity, err = normalizeOrchestratorIdentity(identity)
+	if err != nil {
+		return result, err
+	}
+	if identity.Scope.Kind != domain.OrchestrationScopeRooted {
+		return result, fmt.Errorf("acquire rooted orchestrator scope lease: rooted scope is required")
+	}
+	session.ID = strings.TrimSpace(session.ID)
+	session.IssueID = identity.Scope.RootIssueID.String()
+	session.Role = SessionRoleOrchestrator
+	session.ScopeKind = SessionScopeOrchestration
+	session.ScopeID = identity.Scope.RootIssueID.String()
+	session.State = NormalizeSessionState(session.State)
+	session.ObservedState = NormalizeSessionState(session.ObservedState)
+	session.Activity = strings.ToLower(strings.TrimSpace(session.Activity))
+	session.ActivitySource = strings.ToLower(strings.TrimSpace(session.ActivitySource))
+	if session.UpdatedAt.IsZero() {
+		session.UpdatedAt = time.Now().UTC()
+	}
+	if session.StartedAt == nil && session.State != SessionStateStopped {
+		started := session.UpdatedAt.UTC()
+		session.StartedAt = &started
+	}
+	normalizeSessionProjectionActivity(&session)
+	if err := ValidateSessionProduct(session); err != nil {
+		return result, fmt.Errorf("acquire rooted orchestrator scope lease: %w", err)
+	}
+	if probe == nil {
+		return result, fmt.Errorf("acquire rooted orchestrator scope lease: runtime probe is required")
+	}
+	err = s.withRetryingWriteLock(ctx, "acquire_rooted_orchestrator_scope_lease", func(writeCtx context.Context) error {
+		db, dbErr := s.dbHandle()
+		if dbErr != nil {
+			return dbErr
 		}
-		now := time.Now().UTC()
-		lease := OrchestratorScopeLease{Identity: identity, SessionID: sessionID, Lifecycle: domain.OrchestratorWorking, AcquiredAt: acquiredAt, UpdatedAt: now}
-		if found {
-			lease.Cursor, lease.LastWakeAt, lease.LastWakeReason = existing.Cursor, existing.LastWakeAt, existing.LastWakeReason
+		tx, txErr := db.BeginTx(writeCtx, nil)
+		if txErr != nil {
+			return fmt.Errorf("begin rooted orchestrator scope transition: %w", txErr)
 		}
-		if writeErr := s.upsertOrchestratorLease(writeCtx, lease); writeErr != nil {
-			return writeErr
+		defer func() { _ = tx.Rollback() }()
+		result, txErr = acquireOrchestratorScopeLeaseWith(writeCtx, tx, identity, session.ID, probe)
+		if txErr != nil {
+			return txErr
 		}
-		result = OrchestratorLeaseAcquireResult{Lease: lease, Disposition: disposition}
+		if hook, _ := writeCtx.Value(rootedOrchestratorTransitionHookKey{}).(func(string) error); hook != nil {
+			if hookErr := hook("after_lease_acquire"); hookErr != nil {
+				return hookErr
+			}
+		}
+		if txErr = s.upsertPreparedSessionStateTx(writeCtx, tx, identity.ProjectID, session, sessionStateTable); txErr != nil {
+			return txErr
+		}
+		if txErr = tx.Commit(); txErr != nil {
+			return fmt.Errorf("commit rooted orchestrator scope transition: %w", txErr)
+		}
 		return nil
 	})
 	return result, err
+}
+
+type orchestratorLeaseQueryExecer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func acquireOrchestratorScopeLeaseWith(ctx context.Context, db orchestratorLeaseQueryExecer, identity domain.OrchestratorIdentity, sessionID string, probe SessionRuntimeProbe) (OrchestratorLeaseAcquireResult, error) {
+	existing, found, err := scanOrchestratorLease(db.QueryRowContext(ctx, `SELECT session_id, lifecycle, acquired_at, updated_at, complete_since, last_wake_at, last_wake_reason, cursor FROM `+orchestratorLeaseTable+` WHERE project_id = ? AND scope_kind = ? AND root_issue_id = ?`, identity.ProjectID, identity.Scope.Kind, identity.Scope.RootIssueID), identity)
+	if err != nil {
+		return OrchestratorLeaseAcquireResult{}, err
+	}
+	disposition := OrchestratorLeaseAcquired
+	acquiredAt := time.Now().UTC()
+	if found {
+		acquiredAt = existing.AcquiredAt
+		if existing.SessionID == sessionID {
+			return OrchestratorLeaseAcquireResult{Lease: existing, Disposition: OrchestratorLeaseAttached}, nil
+		}
+		if existing.Lifecycle == domain.OrchestratorPaused {
+			return OrchestratorLeaseAcquireResult{}, &OrchestratorLeaseConflictError{Lease: existing}
+		}
+		live, probeErr := probe(ctx, existing.SessionID)
+		if probeErr != nil {
+			return OrchestratorLeaseAcquireResult{}, fmt.Errorf("probe orchestrator session %s: %w", existing.SessionID, probeErr)
+		}
+		if live {
+			return OrchestratorLeaseAcquireResult{}, &OrchestratorLeaseConflictError{Lease: existing}
+		}
+		disposition = OrchestratorLeaseRecoveredStale
+		acquiredAt = time.Now().UTC()
+	}
+	now := time.Now().UTC()
+	lease := OrchestratorScopeLease{Identity: identity, SessionID: sessionID, Lifecycle: domain.OrchestratorWorking, AcquiredAt: acquiredAt, UpdatedAt: now}
+	if found {
+		lease.Cursor, lease.LastWakeAt, lease.LastWakeReason = existing.Cursor, existing.LastWakeAt, existing.LastWakeReason
+	}
+	if err := upsertOrchestratorLeaseWith(ctx, db, lease); err != nil {
+		return OrchestratorLeaseAcquireResult{}, err
+	}
+	return OrchestratorLeaseAcquireResult{Lease: lease, Disposition: disposition}, nil
 }
 
 func (s *RuntimeStateStore) SetOrchestratorScopeLeaseLifecycle(ctx context.Context, identity domain.OrchestratorIdentity, sessionID string, lifecycle domain.OrchestratorLifecycle) (lease OrchestratorScopeLease, err error) {
@@ -512,7 +622,11 @@ func (s *RuntimeStateStore) upsertOrchestratorLease(ctx context.Context, lease O
 	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, `INSERT INTO `+orchestratorLeaseTable+` (project_id, scope_kind, root_issue_id, session_id, lifecycle, acquired_at, updated_at, complete_since, last_wake_at, last_wake_reason, cursor) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(project_id, scope_kind, root_issue_id) DO UPDATE SET session_id=excluded.session_id, lifecycle=excluded.lifecycle, acquired_at=excluded.acquired_at, updated_at=excluded.updated_at, complete_since=excluded.complete_since, last_wake_at=excluded.last_wake_at, last_wake_reason=excluded.last_wake_reason, cursor=excluded.cursor`, lease.Identity.ProjectID, lease.Identity.Scope.Kind, lease.Identity.Scope.RootIssueID, lease.SessionID, lease.Lifecycle, lease.AcquiredAt.Format(time.RFC3339Nano), lease.UpdatedAt.Format(time.RFC3339Nano), nullableLeaseTime(lease.CompleteSince), nullableLeaseTime(lease.LastWakeAt), lease.LastWakeReason, lease.Cursor)
+	return upsertOrchestratorLeaseWith(ctx, db, lease)
+}
+
+func upsertOrchestratorLeaseWith(ctx context.Context, db orchestratorLeaseQueryExecer, lease OrchestratorScopeLease) error {
+	_, err := db.ExecContext(ctx, `INSERT INTO `+orchestratorLeaseTable+` (project_id, scope_kind, root_issue_id, session_id, lifecycle, acquired_at, updated_at, complete_since, last_wake_at, last_wake_reason, cursor) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(project_id, scope_kind, root_issue_id) DO UPDATE SET session_id=excluded.session_id, lifecycle=excluded.lifecycle, acquired_at=excluded.acquired_at, updated_at=excluded.updated_at, complete_since=excluded.complete_since, last_wake_at=excluded.last_wake_at, last_wake_reason=excluded.last_wake_reason, cursor=excluded.cursor`, lease.Identity.ProjectID, lease.Identity.Scope.Kind, lease.Identity.Scope.RootIssueID, lease.SessionID, lease.Lifecycle, lease.AcquiredAt.Format(time.RFC3339Nano), lease.UpdatedAt.Format(time.RFC3339Nano), nullableLeaseTime(lease.CompleteSince), nullableLeaseTime(lease.LastWakeAt), lease.LastWakeReason, lease.Cursor)
 	if err != nil {
 		return fmt.Errorf("upsert orchestrator scope lease: %w", err)
 	}
