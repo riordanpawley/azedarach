@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -4829,9 +4830,27 @@ func TestProductionRuntimeHydrationFailureDoesNotBlockOrdinaryReads(t *testing.T
 func TestEmbeddedOrdinaryReadUsesCanonicalBootstrapOnly(t *testing.T) {
 	ctx := context.Background()
 	const projectID = "proj-embedded-canonical-only"
-	issuesClient, _ := newTestIssueClient(t)
-	if _, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+	issuesClient, repoDir := newTestIssueClient(t)
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "embedded canonical row", Status: domain.StatusInProgress, Type: domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "archived canonical child", Status: domain.StatusOpen, Type: domain.TypeTask, ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := issuesClient.Archive(ctx, childID); err != nil {
+		t.Fatal(err)
+	}
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
+		ID: naming.CanonicalSessionID(projectID, parentID), IssueID: parentID,
+		State: daemonstate.SessionStateAttached, ObservedState: daemonstate.SessionStateAttached, UpdatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -4847,18 +4866,24 @@ func TestEmbeddedOrdinaryReadUsesCanonicalBootstrapOnly(t *testing.T) {
 		},
 		revision: map[string]uint64{projectID: 1},
 	}
-	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
-		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       "req-embedded-canonical-only",
-		Kind:            protocol.EnvelopeKindCommand,
-		Command:         "task.list",
-		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-	})
-	if err != nil || !resp.OK {
-		t.Fatalf("task.list response = %+v, err = %v", resp.Error, err)
+	tasks, _, err := d.convergedProjectReadSnapshot(ctx, projectID)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if got := hydrateCalls.Load(); got != 0 {
 		t.Fatalf("embedded ordinary read hydration calls = %d, want 0", got)
+	}
+	byID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID.String()] = task
+	}
+	parent, parentFound := byID[parentID]
+	child, childFound := byID[childID]
+	if !parentFound || !childFound || !child.State.IsArchived() || child.ParentID == nil || child.ParentID.String() != parentID {
+		t.Fatalf("canonical bootstrap tasks = %+v, want active parent plus archived dependent child", tasks)
+	}
+	if parent.Session != nil || parent.HasTmuxSession || parent.HasWorktree {
+		t.Fatalf("canonical bootstrap leaked runtime projection: %+v", parent)
 	}
 }
 
@@ -15873,6 +15898,11 @@ func TestHandleTaskGetMaterializedReadDoesNotRefreshRuntimeOrGit(t *testing.T) {
 		t.Fatalf("create durable detail: %v", err)
 	}
 	worktree := filepath.Join(repoDir, "worktrees", issueID)
+	if err := os.WriteFile(filepath.Join(repoDir, ".azedarach", "config.json"), []byte(`{
+		"publicationEvidence": {"policyVersion":"portable-v1","activePathProfiles":["consumer-integration"]}
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
@@ -15907,8 +15937,28 @@ func TestHandleTaskGetMaterializedReadDoesNotRefreshRuntimeOrGit(t *testing.T) {
 		t.Fatalf("bootstrap materializer: %v", err)
 	}
 	hydrateCalls = 0
+	operationRuntime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = operationRuntime.Close() })
+	evidence := domain.PublicationEvidence{
+		EvidenceID: "merge-detail", ProjectID: projectID, IssueID: issueID, Layer: domain.PublicationEvidenceMergeResult,
+		SourceRevision: "source", BaseRevision: "base", ResultRevision: "result", Producer: "reviewer",
+		PolicyVersion: "portable-v1", EnvironmentFingerprint: "env", CreatedAt: time.Unix(1, 0).UTC(),
+	}
+	if _, err := operationRuntime.store.RecordPublicationEvidence(ctx, evidence); err != nil {
+		t.Fatal(err)
+	}
+	beforeEvidence, err := operationRuntime.store.PublicationEvidenceSnapshot(ctx, projectID, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var publicationGitCalls atomic.Int32
 	d := &Daemon{
-		cfg:              Config{BaseBranch: "main", Logger: slog.Default()},
+		cfg:              Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
+		operationRuntime: operationRuntime,
+		git: git.NewClient(&recordingGitRunner{runFn: func(args ...string) (string, error) {
+			publicationGitCalls.Add(1)
+			return "", errors.New("task.get publication diagnostic must not invoke Git")
+		}}, slog.Default()),
 		gitStatusAdapter: gitAdapter,
 		issueClientsByProject: map[string]*issues.Client{
 			projectID: issuesClient,
@@ -15949,6 +15999,19 @@ func TestHandleTaskGetMaterializedReadDoesNotRefreshRuntimeOrGit(t *testing.T) {
 	}
 	if len(payload.Tasks) != 1 || payload.Tasks[0].Description != "Return without external Git" {
 		t.Fatalf("task.get payload = %+v, want durable detail", payload.Tasks)
+	}
+	if payload.Tasks[0].PublicationEvidence == nil || payload.Tasks[0].PublicationEvidence.State != "recorded" {
+		t.Fatalf("task.get publication diagnostic = %+v, want recorded projection", payload.Tasks[0].PublicationEvidence)
+	}
+	if got := publicationGitCalls.Load(); got != 0 {
+		t.Fatalf("task.get publication diagnostic Git calls = %d, want 0", got)
+	}
+	afterEvidence, err := operationRuntime.store.PublicationEvidenceSnapshot(ctx, projectID, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(afterEvidence, beforeEvidence) {
+		t.Fatalf("task.get wrote publication evidence: before=%+v after=%+v", beforeEvidence, afterEvidence)
 	}
 }
 
@@ -17266,14 +17329,27 @@ func integrationTestIsWorktreeList(args []string) bool {
 
 func TestTaskDetailAttachesPublicationEvidenceDiagnostic(t *testing.T) {
 	ctx := context.Background()
-	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir()})
+	repoDir := t.TempDir()
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
 	t.Cleanup(func() { _ = runtime.Close() })
-	d := &Daemon{operationRuntime: runtime}
+	var gitCalls atomic.Int32
+	d := &Daemon{
+		cfg:              Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		operationRuntime: runtime,
+		git: git.NewClient(&recordingGitRunner{runFn: func(args ...string) (string, error) {
+			gitCalls.Add(1)
+			return "", errors.New("publication diagnostic must not invoke Git")
+		}}, slog.New(slog.NewTextHandler(io.Discard, nil))),
+	}
 	evidence := domain.PublicationEvidence{
-		EvidenceID: "review-1", ProjectID: "project", IssueID: "issue", Layer: domain.PublicationEvidencePatchReview,
-		PatchDigest: "patch", SourceRevision: "source", Producer: "reviewer", PolicyVersion: "policy", EnvironmentFingerprint: "env", CreatedAt: time.Unix(1, 0).UTC(),
+		EvidenceID: "merge-1", ProjectID: "project", IssueID: "issue", Layer: domain.PublicationEvidenceMergeResult,
+		SourceRevision: "source", BaseRevision: "base", ResultRevision: "result", Producer: "reviewer", PolicyVersion: "policy", EnvironmentFingerprint: "env", CreatedAt: time.Unix(1, 0).UTC(),
 	}
 	if _, err := runtime.store.RecordPublicationEvidence(ctx, evidence); err != nil {
+		t.Fatal(err)
+	}
+	before, err := runtime.store.PublicationEvidenceSnapshot(ctx, "project", "issue")
+	if err != nil {
 		t.Fatal(err)
 	}
 	tasks := d.attachPublicationEvidenceDiagnostic(ctx, "project", "issue", []domain.Task{{ID: "issue"}, {ID: "related"}})
@@ -17282,5 +17358,15 @@ func TestTaskDetailAttachesPublicationEvidenceDiagnostic(t *testing.T) {
 	}
 	if tasks[1].PublicationEvidence != nil {
 		t.Fatalf("related task received selected-task publication diagnostic: %+v", tasks[1].PublicationEvidence)
+	}
+	if got := gitCalls.Load(); got != 0 {
+		t.Fatalf("publication diagnostic Git calls = %d, want 0", got)
+	}
+	after, err := runtime.store.PublicationEvidenceSnapshot(ctx, "project", "issue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("publication evidence changed during task detail read: before=%+v after=%+v", before, after)
 	}
 }

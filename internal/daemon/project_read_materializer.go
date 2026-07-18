@@ -1095,6 +1095,11 @@ func (d *Daemon) bootstrapEmbeddedProjectReadMaterializer(ctx context.Context, p
 	candidate := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(client), hydrate)
 	candidate.hydrateDegraded = hydrateDegraded
 	d.configureProjectReadMaterializer(candidate, projectID, client)
+	if !includeRuntime {
+		candidate.legacy = func(exportCtx context.Context) ([]domain.Task, error) {
+			return client.ListCanonicalArchiveMode(exportCtx, issues.ArchiveInclude)
+		}
+	}
 	if err := candidate.bootstrap(ctx); err != nil {
 		return nil, newProjectReadUnavailableError("bootstrap embedded project read materialization for %s: %w", projectID, err)
 	}

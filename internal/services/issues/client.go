@@ -862,22 +862,22 @@ type Client struct {
 	boardViewsMigrationFailureHook       func(stage string) error
 	humanAuthorityMigrationFailureHook   func(stage string) error
 	mailboxProjectionFailureHook         func(stage string) error
-	mailboxReplayRepairFailureHook     func(stage string) error
+	mailboxReplayRepairFailureHook       func(stage string) error
 	projectionDeltaChecksumRepairHook    func(stage string) error
 	projectionDeltaReadHook              func()
-	projectionWatchBeforeSubscribeHook func()
-	projectionNotifierBeforeCloseHook  func()
-	projectionNotifierAfterClearHook   func()
+	projectionWatchBeforeSubscribeHook   func()
+	projectionNotifierBeforeCloseHook    func()
+	projectionNotifierAfterClearHook     func()
 	projectionSnapshotSourceRowsHook     func(projectionDeltaRows) projectionDeltaRows
 	projectionWatchActive                atomic.Int64
 	projectionWatchStarted               atomic.Uint64
 	projectionWatchCompleted             atomic.Uint64
 	corruption                           atomic.Pointer[sqliteCorruptionState]
-	projectionNotifierMu               sync.Mutex
-	projectionNotifier                 projectionDeltaNotifier
-	projectionNotifierClose            *projectionDeltaNotifierCloseState
-	projectionNotifierSubscriptions    map[*projectionDeltaSubscription]struct{}
-	projectionNotifierWG               sync.WaitGroup
+	projectionNotifierMu                 sync.Mutex
+	projectionNotifier                   projectionDeltaNotifier
+	projectionNotifierClose              *projectionDeltaNotifierCloseState
+	projectionNotifierSubscriptions      map[*projectionDeltaSubscription]struct{}
+	projectionNotifierWG                 sync.WaitGroup
 	decisionOutboxMigrationFailureHook   func(stage string) error
 	decisionIdempotencyFailureHook       func(stage string) error
 	eventSearchMigrationFailureHook      func(stage string) error
@@ -1860,11 +1860,17 @@ func isLinearDisplayKeyIssueID(id string) bool {
 
 // List fetches all active issues from local SQLite store.
 func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
+	return c.ListCanonicalArchiveMode(ctx, ArchiveExclude)
+}
+
+// ListCanonicalArchiveMode fetches full issue bodies and dependency edges
+// without joining disposable runtime, session, or worktree projections.
+func (c *Client) ListCanonicalArchiveMode(ctx context.Context, archiveMode ArchiveMode) ([]domain.Task, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return nil, err
 	}
-	tasks, err := c.queryTasks(ctx, db, `
+	tasks, err := c.queryTasks(ctx, db, fmt.Sprintf(`
 		SELECT
 			id,
 			title,
@@ -1885,12 +1891,12 @@ func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
 			COALESCE(implementations_json, '[]'),
 			created_at,
 			updated_at
-		FROM issues
-		WHERE visibility = 'live'
+		FROM issues i
+		WHERE %s
 		ORDER BY updated_at DESC
-	`)
+	`, archiveWhere("i", archiveMode)))
 	if err != nil {
-		return nil, c.wrapError("list", "", err)
+		return nil, c.wrapError("list-canonical", "", err)
 	}
 	return tasks, nil
 }

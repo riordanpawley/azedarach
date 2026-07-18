@@ -805,17 +805,11 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 func (d *Daemon) attachPublicationEvidenceDiagnostic(ctx context.Context, projectID, taskID string, tasks []domain.Task) []domain.Task {
 	out := append([]domain.Task(nil), tasks...)
 	diagnostic := domain.PublicationEvidenceDiagnostic{State: "unavailable", Availability: "unavailable", Detail: "publication evidence projection is unavailable"}
-	snapshot, assessments, err := d.evaluateCurrentPublicationEvidence(ctx, projectID, taskID, time.Now().UTC())
+	snapshot, err := d.publicationEvidenceSnapshot(ctx, projectID, taskID)
 	if err == nil {
-		diagnostic = domain.SummarizePublicationEvidence(snapshot, assessments)
-	}
-	if err != nil {
-		if recorded, readErr := d.publicationEvidenceSnapshot(ctx, projectID, taskID); readErr == nil && len(recorded.Evidence) > 0 {
-			diagnostic = domain.SummarizePublicationEvidence(recorded, nil)
-			diagnostic.Detail += ": " + err.Error()
-		} else {
-			diagnostic.Detail = err.Error()
-		}
+		diagnostic = domain.SummarizePublicationEvidence(snapshot, nil)
+	} else {
+		diagnostic.Detail = err.Error()
 	}
 	for i := range out {
 		if out[i].ID.String() == taskID {
@@ -4813,7 +4807,7 @@ func (d *Daemon) handleTaskDeletePreflight(ctx context.Context, req protocol.Req
 }
 
 func (d *Daemon) validateTaskDeletePreflight(ctx context.Context, projectID, taskID string) (taskDeletePreflightResult, error) {
-	tasks, err := d.loadTaskGraphDomainTasks(ctx, projectID)
+	tasks, err := d.loadTaskDeletePreflightDomainTasks(ctx, projectID, taskID)
 	if err != nil {
 		return taskDeletePreflightResult{}, fmt.Errorf("inspect runtime attachments before deleting %s: %w", taskID, err)
 	}
@@ -4822,6 +4816,18 @@ func (d *Daemon) validateTaskDeletePreflight(ctx context.Context, projectID, tas
 		return taskDeletePreflightResult{}, fmt.Errorf("issue not found: %s", taskID)
 	}
 	return taskDeletePreflightResult{Task: task, Blockers: daemonTaskDeleteRuntimeBlockers(task)}, nil
+}
+
+func (d *Daemon) loadTaskDeletePreflightDomainTasks(ctx context.Context, projectID, taskID string) ([]domain.Task, error) {
+	tasks, _, err := d.convergedProjectReadSnapshotForInvariant(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if err := d.refreshProjectReadRuntimeForIssues(ctx, projectID, []string{taskID}); err != nil {
+		return nil, newProjectReadUnavailableError("refresh delete-preflight runtime facts: %w", err)
+	}
+	tasks, _, err = d.convergedProjectReadSnapshotForInvariant(ctx, projectID)
+	return tasks, err
 }
 
 func daemonTaskDeleteRuntimeBlockers(task domain.Task) []string {
