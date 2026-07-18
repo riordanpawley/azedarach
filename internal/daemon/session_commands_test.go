@@ -5040,8 +5040,8 @@ func TestHandleSessionStopDirectFailsWhenStopIntentProjectionWriteFails(t *testi
 	if resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInternal {
 		t.Fatalf("stop error = %+v, want internal error", resp.Error)
 	}
-	if !strings.Contains(strings.ToLower(resp.Error.Message), "record session stop intent") {
-		t.Fatalf("stop error message = %q, want record session stop intent", resp.Error.Message)
+	if !strings.Contains(strings.ToLower(resp.Error.Message), "resolve rooted orchestrator session stop") {
+		t.Fatalf("stop error message = %q, want rooted-orchestrator preflight failure", resp.Error.Message)
 	}
 
 	snapshot := store.ReadSnapshot(projectID)
@@ -6096,8 +6096,8 @@ func TestHandleSessionStopDirectCanceledContextDoesNotContinueAfterFreshnessFail
 		t.Fatalf("expected tmux session %q to remain", sessionID)
 	}
 	snapshot := store.ReadSnapshot(projectID)
-	if got := snapshot.Sessions[sessionID].State; got != daemonstate.SessionStateStopped {
-		t.Fatalf("session state = %s, want %s", got, daemonstate.SessionStateStopped)
+	if got := snapshot.Sessions[sessionID].State; got != daemonstate.SessionStateRunning {
+		t.Fatalf("session state = %s, want %s", got, daemonstate.SessionStateRunning)
 	}
 
 	calls, projectIDs := recorder.snapshot()
@@ -6230,7 +6230,7 @@ func TestApplySessionLifecycleTransitionPreservesTypedIdentity(t *testing.T) {
 	}
 }
 
-func TestTypedLifecycleTransitionTargetsSharedRuntimeIntent(t *testing.T) {
+func TestTypedLifecycleTransitionTargetsExclusivePhysicalRuntimeIntent(t *testing.T) {
 	ctx := context.Background()
 	sharedID, issueID := "az-root", "root"
 	worker := daemonstate.Session{ID: sharedID, IssueID: issueID, Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueID, State: daemonstate.SessionStateStopped}
@@ -6240,29 +6240,21 @@ func TestTypedLifecycleTransitionTargetsSharedRuntimeIntent(t *testing.T) {
 			transient := daemonstate.NewStore()
 			runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
 			t.Cleanup(func() { _ = runtimeStore.Close() })
-			for _, seed := range []daemonstate.Session{worker, rooted} {
-				seed.UpdatedAt = time.Now().UTC()
-				if err := upsertSessionStateFixture(runtimeStore, ctx, "p", seed); err != nil {
-					t.Fatal(err)
-				}
+			target.UpdatedAt = time.Now().UTC()
+			if err := upsertSessionStateFixture(runtimeStore, ctx, "p", target); err != nil {
+				t.Fatal(err)
 			}
 			d := &Daemon{cfg: Config{RepoDir: ".", Logger: slog.Default()}, sessionStore: transient, session: daemonhandlers.NewSessionHandler(transient), runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{".": runtimeStore}}
 			sel := sessionIntentSelector{Role: target.Role, ScopeKind: target.ScopeKind, ScopeID: target.ScopeID}
 			if err := d.applyTypedSessionLifecycleTransition(ctx, protocol.RequestEnvelope{}, "p", sharedID, issueID, daemonhandlers.CommandSessionStart, "", "", sel); err != nil {
 				t.Fatal(err)
 			}
-			for _, want := range []daemonstate.Session{worker, rooted} {
-				got, found, err := runtimeStore.GetSessionIntent(ctx, "p", want.Role, want.ScopeKind, want.ScopeID)
-				if err != nil || !found {
-					t.Fatalf("load %s: %v", want.Role, err)
-				}
-				expected := daemonstate.SessionStateStopped
-				if want.Role == target.Role {
-					expected = daemonstate.SessionStateStarting
-				}
-				if got.State != expected {
-					t.Fatalf("%s state=%s want %s", want.Role, got.State, expected)
-				}
+			got, found, err := runtimeStore.GetSessionIntent(ctx, "p", target.Role, target.ScopeKind, target.ScopeID)
+			if err != nil || !found {
+				t.Fatalf("load %s: %v", target.Role, err)
+			}
+			if got.State != daemonstate.SessionStateStarting {
+				t.Fatalf("%s state=%s want %s", target.Role, got.State, daemonstate.SessionStateStarting)
 			}
 		})
 	}
@@ -11436,6 +11428,76 @@ func TestEnrichTasksWithSessionStateDoesNotTreatLaunchBusyAsHookActivity(t *test
 	}
 	if tasks[0].Session.Activity != "unknown" || tasks[0].Session.ActivitySource != "none" {
 		t.Fatalf("session activity = %s/%s, want unknown/none", tasks[0].Session.Activity, tasks[0].Session.ActivitySource)
+	}
+}
+
+func TestEnrichTasksWithSessionStateClearsStalePaneRuntimeBehindStoppedIntent(t *testing.T) {
+	ctx := context.Background()
+	const (
+		projectID = "proj-stopped-pane"
+		issueID   = "closed-ticket"
+	)
+
+	now := time.Date(2026, time.July, 17, 0, 18, 45, 0, time.UTC)
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	runtimeStateStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStateStore.Close() })
+	for _, session := range []daemonstate.Session{
+		{
+			ID: sessionID, IssueID: issueID,
+			Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueID,
+			State: daemonstate.SessionStateStopped, ObservedState: daemonstate.SessionStateStopped,
+			UpdatedAt: now,
+		},
+		{
+			ID: sessionID + ".pane-12", IssueID: issueID,
+			Role: daemonstate.SessionRoleWorker, ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueID,
+			State: daemonstate.SessionStatePaused, ObservedState: daemonstate.SessionStatePaused,
+			Activity: "idle", ActivitySource: "hooks", UpdatedAt: now.Add(-time.Second),
+		},
+	} {
+		if err := upsertSessionStateFixture(runtimeStateStore, ctx, projectID, session); err != nil {
+			t.Fatalf("seed runtime state %+v: %v", session, err)
+		}
+	}
+
+	sessionStore := daemonstate.NewStore()
+	if _, err := sessionStore.UpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateRunning); err != nil {
+		t.Fatalf("seed contradictory exact live session: %v", err)
+	}
+	d := &Daemon{
+		cfg:          Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		sessionStore: sessionStore,
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStateStore,
+		},
+	}
+	staleStartedAt := now.Add(-time.Hour)
+	tasks := d.enrichTasksWithSessionState(ctx, projectID, []domain.Task{
+		{
+			ID:     naming.IssueID(issueID),
+			Title:  "Already closed",
+			Status: domain.StatusDone,
+			Session: &domain.Session{
+				IssueID: naming.IssueID(issueID), State: domain.SessionPaused,
+				Activity: "idle", ActivitySource: "hooks", StartedAt: &staleStartedAt, UpdatedAt: now.Add(-time.Second),
+			},
+			HasTmuxSession: true,
+		},
+		{
+			ID: naming.IssueID("projection-gap"), Title: "Projection temporarily unavailable", Status: domain.StatusInProgress,
+			Session:        &domain.Session{IssueID: naming.IssueID("projection-gap"), State: domain.SessionBusy, Activity: "busy", ActivitySource: "hooks", UpdatedAt: now},
+			HasTmuxSession: true,
+		},
+	})
+	if len(tasks) != 2 {
+		t.Fatalf("tasks = %+v, want two tasks", tasks)
+	}
+	if tasks[0].Session != nil || tasks[0].HasTmuxSession {
+		t.Fatalf("stopped logical intent retained stale pane runtime: session=%+v has_tmux_session=%t", tasks[0].Session, tasks[0].HasTmuxSession)
+	}
+	if tasks[1].Session == nil || !tasks[1].HasTmuxSession {
+		t.Fatalf("missing runtime authority erased pre-hydrated session: %+v", tasks[1])
 	}
 }
 

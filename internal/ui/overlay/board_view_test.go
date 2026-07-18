@@ -154,17 +154,17 @@ func TestBoardViewOverlayEditLocksRecordIDButAllowsTitleRename(t *testing.T) {
 func TestBoardViewOverlayGuidedConfiguratorCoversLayoutsAndOptions(t *testing.T) {
 	o := NewBoardViewOverlay(nil, "")
 	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 6; i++ {
 		_, _ = o.Update(tea.KeyMsg{Type: tea.KeyTab})
 	}
 	_, _ = o.Update(tea.KeyMsg{Type: tea.KeyRight})
 	_, cmd := o.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	saved := cmd().(SelectionMsg).Value.(BoardViewSaveMsg).View
-	if saved.Layout != domain.BoardViewLayoutColumnBoard || !saved.Options.HideEmptyColumns || len(saved.Sort) == 0 {
+	if saved.Layout != domain.BoardViewLayoutColumnBoard || !saved.Options.ShowChildren || len(saved.Sort) == 0 {
 		t.Fatalf("guided view = %+v", saved)
 	}
 	view := o.View()
-	for _, want := range []string{"View Configurator", "Layout", "Filters", "Grouping", "Ordered sorting", "advanced JSON"} {
+	for _, want := range []string{"View Configurator", "Layout", "Filters", "Grouping", "Ordered sorting", "Show children", "advanced JSON"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("configurator missing %q:\n%s", want, view)
 		}

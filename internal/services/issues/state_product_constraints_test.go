@@ -299,6 +299,13 @@ func TestCanonicalStateRepairRunsAfterRecordedBroken0045(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := validateRootedSessionRoleExclusivitySchema(ctx, repairedDB); err != nil {
+		t.Fatalf("downstream rooted role exclusivity was not restored atomically: %v", err)
+	}
+	var rootedRoleChecksum string
+	if err := repairedDB.QueryRowContext(ctx, `SELECT artifact_checksum FROM schema_migrations WHERE id=?`, rootedSessionRoleExclusivityMigrationID).Scan(&rootedRoleChecksum); err != nil || rootedRoleChecksum != rootedSessionRoleExclusivityChecksum {
+		t.Fatalf("downstream rooted role ledger checksum=%q err=%v", rootedRoleChecksum, err)
+	}
 	var disposition, engagement, visibility, status string
 	if err := repairedDB.QueryRowContext(ctx, `SELECT disposition,engagement,visibility,status FROM issues WHERE id=?`, id).Scan(&disposition, &engagement, &visibility, &status); err != nil {
 		t.Fatal(err)

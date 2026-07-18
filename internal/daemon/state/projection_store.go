@@ -29,6 +29,7 @@ const (
 	physicalSessionObservationTable = "daemon_physical_session_observations"
 	managedAgentIdentityTable       = "daemon_managed_agent_incarnations"
 	worktreeStateTable              = "daemon_worktree_projections"
+	gitHookRefreshIntentTable       = "daemon_git_hook_refresh_intents"
 	orchestratorLeaseTable          = "daemon_orchestrator_scope_leases"
 	rootedBootstrapAckTable         = "daemon_rooted_bootstrap_acknowledgements"
 	advisorSessionTable             = "daemon_advisor_sessions"
@@ -50,6 +51,239 @@ type WorktreeState struct {
 	UpdatedAt        time.Time
 	GitStatusRaw     json.RawMessage
 	GitStatusUpdated *time.Time
+}
+
+// GitHookRefreshIntent is a coalesced durable request to force-publish the
+// authoritative Git status projection for one worktree. RequestedGeneration
+// advances before hook acknowledgement; CompletedGeneration advances only
+// after the corresponding forced publication succeeds.
+type GitHookRefreshIntent struct {
+	ProjectID           string
+	Worktree            string
+	RequestedGeneration int64
+	CompletedGeneration int64
+	RequestedAt         time.Time
+	CompletedAt         *time.Time
+}
+
+func (s *RuntimeStateStore) AcceptGitHookRefresh(ctx context.Context, projectID, worktree string, requestedAt time.Time) (GitHookRefreshIntent, error) {
+	projectID = normalizedProjectID(projectID)
+	worktree = strings.TrimSpace(worktree)
+	if projectID == "" || worktree == "" {
+		return GitHookRefreshIntent{}, fmt.Errorf("git hook refresh intent requires project and worktree")
+	}
+	if requestedAt.IsZero() {
+		requestedAt = time.Now().UTC()
+	}
+	requestedAt = requestedAt.UTC()
+	var intent GitHookRefreshIntent
+	err := s.withRetryingWriteLock(ctx, "accept_git_hook_refresh", func(writeCtx context.Context) error {
+		db, err := s.dbHandle()
+		if err != nil {
+			return err
+		}
+		row := db.QueryRowContext(writeCtx, `INSERT INTO `+gitHookRefreshIntentTable+`
+			(project_id,worktree,requested_generation,completed_generation,requested_at,completed_at)
+			VALUES(?,?,1,0,?,NULL)
+			ON CONFLICT(project_id,worktree) DO UPDATE SET
+				requested_generation=`+gitHookRefreshIntentTable+`.requested_generation+1,
+				requested_at=excluded.requested_at
+			RETURNING project_id,worktree,requested_generation,completed_generation,requested_at,completed_at`,
+			projectID, worktree, requestedAt.Format(time.RFC3339Nano))
+		return scanGitHookRefreshIntent(row, &intent)
+	})
+	if err != nil {
+		return GitHookRefreshIntent{}, fmt.Errorf("accept git hook refresh %s/%s: %w", projectID, worktree, err)
+	}
+	return intent, nil
+}
+
+// RetireGitHookRefreshIfIneligible marks every currently accepted generation
+// complete without publication only while the same transaction can prove that
+// no issue-owned worktree projection exists. A concurrent registration wins
+// the predicate and leaves the intent pending for normal publication.
+func (s *RuntimeStateStore) RetireGitHookRefreshIfIneligible(ctx context.Context, projectID, worktree string, completedAt time.Time) (bool, error) {
+	projectID = normalizedProjectID(projectID)
+	worktree = strings.TrimSpace(worktree)
+	if projectID == "" || worktree == "" {
+		return false, fmt.Errorf("retire git hook refresh requires project and worktree")
+	}
+	if completedAt.IsZero() {
+		completedAt = time.Now().UTC()
+	}
+	completedAt = completedAt.UTC()
+	var retired bool
+	if err := s.withRetryingWriteLock(ctx, "retire_git_hook_refresh", func(writeCtx context.Context) error {
+		db, err := s.dbHandle()
+		if err != nil {
+			return err
+		}
+		result, err := db.ExecContext(writeCtx, `UPDATE `+gitHookRefreshIntentTable+`
+			SET completed_generation=requested_generation, completed_at=?
+			WHERE project_id=? AND worktree=?
+			  AND completed_generation < requested_generation
+			  AND NOT EXISTS (
+				SELECT 1 FROM `+worktreeStateTable+`
+				WHERE project_id=? AND path=? AND trim(issue_id) <> ''
+			  )`, completedAt.Format(time.RFC3339Nano), projectID, worktree, projectID, worktree)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected > 1 {
+			return fmt.Errorf("retire git hook refresh affected %d intents", affected)
+		}
+		retired = affected == 1
+		return nil
+	}); err != nil {
+		return false, fmt.Errorf("retire git hook refresh %s/%s: %w", projectID, worktree, err)
+	}
+	return retired, nil
+}
+
+// PersistGitHookRefreshPublication atomically persists the Git status snapshot
+// and advances the durable publication checkpoint for generation. The returned
+// boolean is true only for the transaction that first completes that generation.
+func (s *RuntimeStateStore) PersistGitHookRefreshPublication(ctx context.Context, projectID, issueID, worktree string, generation int64, statusRaw json.RawMessage, completedAt time.Time) (bool, error) {
+	projectID = normalizedProjectID(projectID)
+	issueID = strings.TrimSpace(issueID)
+	worktree = strings.TrimSpace(worktree)
+	if projectID == "" || issueID == "" || worktree == "" || generation <= 0 || len(statusRaw) == 0 {
+		return false, fmt.Errorf("persist git hook publication requires project, issue, worktree, generation, and payload")
+	}
+	if completedAt.IsZero() {
+		completedAt = time.Now().UTC()
+	}
+	completedAt = completedAt.UTC()
+	var published bool
+	err := s.withRetryingWriteLock(ctx, "persist_git_hook_publication", func(writeCtx context.Context) error {
+		db, err := s.dbHandle()
+		if err != nil {
+			return err
+		}
+		tx, err := db.BeginTx(writeCtx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		result, err := tx.ExecContext(writeCtx, `UPDATE `+gitHookRefreshIntentTable+`
+			SET completed_generation=?, completed_at=?
+			WHERE project_id=? AND worktree=?
+			  AND requested_generation>=? AND completed_generation<?`,
+			generation, completedAt.Format(time.RFC3339Nano), projectID, worktree, generation, generation)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			var requestedGeneration, completedGeneration int64
+			if err := tx.QueryRowContext(writeCtx, `SELECT requested_generation,completed_generation
+				FROM `+gitHookRefreshIntentTable+` WHERE project_id=? AND worktree=?`, projectID, worktree).
+				Scan(&requestedGeneration, &completedGeneration); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("git hook publication intent not found")
+				}
+				return err
+			}
+			if completedGeneration < generation {
+				return fmt.Errorf("git hook publication generation %d exceeds requested generation %d", generation, requestedGeneration)
+			}
+			return tx.Commit()
+		}
+		if affected != 1 {
+			return fmt.Errorf("persist git hook publication %s/%s generation %d: affected %d intents", projectID, worktree, generation, affected)
+		}
+		result, err = tx.ExecContext(writeCtx, `UPDATE `+worktreeStateTable+`
+			SET git_status_json=?, git_status_updated_at=?
+			WHERE project_id=? AND issue_id=? AND path=?`, string(statusRaw), completedAt.Format(time.RFC3339Nano), projectID, issueID, worktree)
+		if err != nil {
+			return err
+		}
+		if err := requireAffectedRows(result, 1, "persist git hook status", projectID, issueID); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		published = true
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("persist git hook publication %s/%s generation %d: %w", projectID, worktree, generation, err)
+	}
+	return published, nil
+}
+
+func (s *RuntimeStateStore) ListPendingGitHookRefreshes(ctx context.Context) ([]GitHookRefreshIntent, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT project_id,worktree,requested_generation,completed_generation,requested_at,completed_at
+		FROM `+gitHookRefreshIntentTable+` WHERE completed_generation < requested_generation
+		ORDER BY project_id,worktree`)
+	if err != nil {
+		return nil, fmt.Errorf("list pending git hook refreshes: %w", err)
+	}
+	defer rows.Close()
+	var intents []GitHookRefreshIntent
+	for rows.Next() {
+		var intent GitHookRefreshIntent
+		if err := scanGitHookRefreshIntent(rows, &intent); err != nil {
+			return nil, err
+		}
+		intents = append(intents, intent)
+	}
+	return intents, rows.Err()
+}
+
+func (s *RuntimeStateStore) GetPendingGitHookRefresh(ctx context.Context, projectID, worktree string) (GitHookRefreshIntent, bool, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return GitHookRefreshIntent{}, false, err
+	}
+	var intent GitHookRefreshIntent
+	err = scanGitHookRefreshIntent(db.QueryRowContext(ctx, `SELECT project_id,worktree,requested_generation,completed_generation,requested_at,completed_at
+		FROM `+gitHookRefreshIntentTable+` WHERE project_id=? AND worktree=? AND completed_generation < requested_generation`,
+		normalizedProjectID(projectID), strings.TrimSpace(worktree)), &intent)
+	if errors.Is(err, sql.ErrNoRows) {
+		return GitHookRefreshIntent{}, false, nil
+	}
+	if err != nil {
+		return GitHookRefreshIntent{}, false, fmt.Errorf("get pending git hook refresh: %w", err)
+	}
+	return intent, true, nil
+}
+
+type gitHookRefreshIntentScanner interface {
+	Scan(...any) error
+}
+
+func scanGitHookRefreshIntent(scanner gitHookRefreshIntentScanner, intent *GitHookRefreshIntent) error {
+	var requestedAt string
+	var completedAt sql.NullString
+	if err := scanner.Scan(&intent.ProjectID, &intent.Worktree, &intent.RequestedGeneration, &intent.CompletedGeneration, &requestedAt, &completedAt); err != nil {
+		return err
+	}
+	var err error
+	intent.RequestedAt, err = parseRuntimeStateTime(requestedAt)
+	if err != nil {
+		return err
+	}
+	if completedAt.Valid {
+		parsed, err := parseRuntimeStateTime(completedAt.String)
+		if err != nil {
+			return err
+		}
+		intent.CompletedAt = &parsed
+	}
+	return nil
 }
 
 // SessionActivityEvidence records durable activity evidence before it is
@@ -733,6 +967,22 @@ func (s *RuntimeStateStore) Close() error {
 	return err
 }
 
+// StoreResourceDiagnostics reports the runtime store's process-owned pool
+// without opening a closed store as a side effect of diagnosis.
+func (s *RuntimeStateStore) StoreResourceDiagnostics() (string, bool, sql.DBStats) {
+	if s == nil {
+		return "", false, sql.DBStats{}
+	}
+	s.mu.Lock()
+	db := s.db
+	dbPath := s.dbPath
+	s.mu.Unlock()
+	if db == nil {
+		return dbPath, false, sql.DBStats{}
+	}
+	return dbPath, true, db.Stats()
+}
+
 func (s *RuntimeStateStore) UpsertSessionState(ctx context.Context, projectID string, session Session) error {
 	return s.withRetryingWriteLock(ctx, "upsert_session_state", func(writeCtx context.Context) error {
 		return s.upsertSessionStateLocked(writeCtx, projectID, session)
@@ -830,6 +1080,42 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 		return fmt.Errorf("begin upsert session state %s/%s: %w", projectID, session.ID, err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	logicalID := logicalSessionIntentID(session)
+	var currentState SessionState
+	var currentUpdatedAtRaw string
+	if err := tx.QueryRowContext(ctx, `SELECT state,updated_at FROM `+targetTable+` WHERE project_id=? AND logical_id=?`, projectID, logicalID).Scan(&currentState, &currentUpdatedAtRaw); err == nil {
+		currentUpdatedAt, parseErr := parseRuntimeStateTime(currentUpdatedAtRaw)
+		if parseErr != nil {
+			return fmt.Errorf("parse existing session freshness for %s/%s: %w", projectID, logicalID, parseErr)
+		}
+		currentState = NormalizeSessionState(currentState)
+		incomingState := NormalizeSessionState(session.State)
+		stale := session.UpdatedAt.Before(currentUpdatedAt) ||
+			(session.UpdatedAt.Equal(currentUpdatedAt) && currentState == SessionStateStopped && incomingState != SessionStateStopped)
+		if stale {
+			return tx.Commit()
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("read existing session freshness for %s/%s: %w", projectID, logicalID, err)
+	}
+	if err := s.upsertPreparedSessionStateTx(ctx, tx, projectID, session, targetTable); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit upsert session state %s/%s: %w", projectID, session.ID, err)
+	}
+	return nil
+}
+
+func (s *RuntimeStateStore) upsertPreparedSessionStateTx(ctx context.Context, tx *sql.Tx, projectID string, session Session, targetTable string) error {
+	if targetTable == sessionStateTable && rootedOrchestratorSessionIntent(session) {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+sessionStateTable+`
+			WHERE project_id=? AND session_id=?
+				AND role='worker' AND scope_kind='issue' AND issue_id=? AND scope_id=?`,
+			projectID, session.ID, session.IssueID, session.ScopeID); err != nil {
+			return fmt.Errorf("retire worker intent during rooted orchestrator transition %s/%s: %w", projectID, session.ID, err)
+		}
+	}
 	if targetTable == sessionStateTable {
 		var observedState, activity, activitySource, observedAt string
 		err := tx.QueryRowContext(ctx, `SELECT observed_state,activity,activity_source,updated_at
@@ -860,7 +1146,7 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 		}
 	}
 	startedAt := nullableRuntimeStateTime(session.StartedAt)
-	_, err = tx.ExecContext(ctx, `
+	_, err := tx.ExecContext(ctx, `
 		INSERT INTO `+targetTable+` (
 			project_id,
 			session_id,
@@ -912,10 +1198,16 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 			return fmt.Errorf("delete moved session intent %s/%s: %w", projectID, session.ID, err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit upsert session state %s/%s: %w", projectID, session.ID, err)
-	}
 	return nil
+}
+
+func rootedOrchestratorSessionIntent(session Session) bool {
+	return !isSessionObservationID(session.ID) &&
+		session.Role == SessionRoleOrchestrator &&
+		session.ScopeKind == SessionScopeOrchestration &&
+		strings.TrimSpace(session.ScopeID) != "" &&
+		strings.TrimSpace(session.ScopeID) != "project" &&
+		strings.TrimSpace(session.IssueID) == strings.TrimSpace(session.ScopeID)
 }
 
 func (s *RuntimeStateStore) DeleteSessionState(ctx context.Context, projectID, sessionID string) error {
@@ -1288,19 +1580,35 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 		}
 	}()
 
+	for index := range sessions {
+		session := &sessions[index]
+		metadataProvided := session.Role != "" || session.ScopeKind != "" || strings.TrimSpace(session.ScopeID) != ""
+		if metadataProvided {
+			continue
+		}
+		var roleRaw, scopeKindRaw, scopeID string
+		scanErr := tx.QueryRowContext(ctx, `SELECT COALESCE(role, 'worker'), COALESCE(scope_kind, 'issue'), COALESCE(scope_id, issue_id)
+			FROM `+sessionStorageTableForID(session.ID)+` WHERE project_id=? AND session_id=?
+			ORDER BY CASE WHEN role='worker' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1`, projectID, strings.TrimSpace(session.ID)).Scan(&roleRaw, &scopeKindRaw, &scopeID)
+		if scanErr == nil {
+			session.Role, session.ScopeKind, session.ScopeID = SessionRole(roleRaw), SessionScopeKind(scopeKindRaw), scopeID
+		} else if scanErr != sql.ErrNoRows {
+			return fmt.Errorf("load session metadata before authoritative replacement: %w", scanErr)
+		}
+	}
+	var normalizeErr error
+	sessions, normalizeErr = normalizePhysicalSessionIntents(sessions)
+	if normalizeErr != nil {
+		return normalizeErr
+	}
+	for _, table := range []string{sessionStateTable, sessionObservationTable} {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE project_id=?`, projectID); err != nil {
+			return fmt.Errorf("clear %s before authoritative session replacement: %w", table, err)
+		}
+	}
 	activeIntentSessions := make(map[string]struct{}, len(sessions))
 	activeObservationSessions := make(map[string]struct{}, len(sessions))
 	for _, session := range sessions {
-		metadataProvided := session.Role != "" || session.ScopeKind != "" || strings.TrimSpace(session.ScopeID) != ""
-		if !metadataProvided {
-			var roleRaw, scopeKindRaw, scopeID string
-			scanErr := tx.QueryRowContext(ctx, `SELECT COALESCE(role, 'worker'), COALESCE(scope_kind, 'issue'), COALESCE(scope_id, issue_id) FROM `+sessionStorageTableForID(session.ID)+` WHERE project_id = ? AND session_id = ? ORDER BY CASE WHEN role='worker' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1`, projectID, strings.TrimSpace(session.ID)).Scan(&roleRaw, &scopeKindRaw, &scopeID)
-			if scanErr == nil {
-				session.Role, session.ScopeKind, session.ScopeID = SessionRole(roleRaw), SessionScopeKind(scopeKindRaw), scopeID
-			} else if scanErr != sql.ErrNoRows {
-				return fmt.Errorf("load session metadata before replace: %w", scanErr)
-			}
-		}
 		session = NormalizeSessionMetadata(session)
 		sessionID := strings.TrimSpace(session.ID)
 		if sessionID == "" {
@@ -1413,6 +1721,45 @@ func (s *RuntimeStateStore) replaceSessionStatesLocked(ctx context.Context, proj
 	}
 	tx = nil
 	return nil
+}
+
+func normalizePhysicalSessionIntents(sessions []Session) ([]Session, error) {
+	byPhysicalID := make(map[string]int, len(sessions))
+	normalized := make([]Session, 0, len(sessions))
+	for _, session := range sessions {
+		if isSessionObservationID(session.ID) {
+			normalized = append(normalized, session)
+			continue
+		}
+		physicalID := strings.TrimSpace(session.ID)
+		if physicalID == "" {
+			normalized = append(normalized, session)
+			continue
+		}
+		index, found := byPhysicalID[physicalID]
+		if !found {
+			byPhysicalID[physicalID] = len(normalized)
+			normalized = append(normalized, session)
+			continue
+		}
+		existing := normalized[index]
+		switch {
+		case rootedOrchestratorSessionIntent(existing) && matchingRootedWorkerIntent(existing, session):
+			continue
+		case rootedOrchestratorSessionIntent(session) && matchingRootedWorkerIntent(session, existing):
+			normalized[index] = session
+		default:
+			return nil, fmt.Errorf("physical session %s has conflicting %s/%s and %s/%s intents", physicalID, existing.Role, existing.ScopeKind, session.Role, session.ScopeKind)
+		}
+	}
+	return normalized, nil
+}
+
+func matchingRootedWorkerIntent(rooted, candidate Session) bool {
+	return candidate.Role == SessionRoleWorker &&
+		candidate.ScopeKind == SessionScopeIssue &&
+		strings.TrimSpace(candidate.IssueID) == strings.TrimSpace(rooted.IssueID) &&
+		strings.TrimSpace(candidate.ScopeID) == strings.TrimSpace(rooted.ScopeID)
 }
 
 func deleteStaleSessionRows(ctx context.Context, tx *sql.Tx, tableName, projectID string, activeSessions map[string]struct{}) error {
@@ -2366,6 +2713,7 @@ func (s *RuntimeStateStore) withRetryingWriteLock(ctx context.Context, operation
 	if _, err := s.dbHandle(); err != nil {
 		return err
 	}
+	ctx = sqliteutil.ContextWithWriteOperation(ctx, "runtime_state."+operation)
 	return sqliteutil.WithWriteLockContext(ctx, s.dbPath, func(lockCtx context.Context) error {
 		attempts := 0
 		err := retrySQLiteWrite(lockCtx, runtimeSQLiteRetryBudget, runtimeSQLiteRetryDelay, func(waitCtx context.Context, delay time.Duration) error {
@@ -2613,6 +2961,18 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB, runtimeLivenessPr
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_daemon_worktree_projections_project_path
 			ON ` + worktreeStateTable + ` (project_id, path)`,
+		`CREATE TABLE IF NOT EXISTS ` + gitHookRefreshIntentTable + ` (
+			project_id TEXT NOT NULL CHECK (trim(project_id) <> ''),
+			worktree TEXT NOT NULL CHECK (trim(worktree) <> ''),
+			requested_generation INTEGER NOT NULL CHECK (requested_generation > 0),
+			completed_generation INTEGER NOT NULL DEFAULT 0 CHECK (completed_generation >= 0),
+			requested_at TEXT NOT NULL,
+			completed_at TEXT,
+			PRIMARY KEY (project_id, worktree),
+			CHECK (completed_generation <= requested_generation)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_daemon_git_hook_refresh_intents_pending
+			ON ` + gitHookRefreshIntentTable + ` (project_id, requested_generation, completed_generation)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
@@ -2687,6 +3047,9 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB, runtimeLivenessPr
 	if err := migrateSessionObservations(ctx, db); err != nil {
 		return err
 	}
+	if err := ensurePhysicalSessionIntentIdentity(ctx, db); err != nil {
+		return err
+	}
 	if err := ensureRuntimeSessionProductConstraints(ctx, db, runtimeLivenessProbe, runtimeRepairDeleteHook); err != nil {
 		return err
 	}
@@ -2701,6 +3064,44 @@ func ensureRuntimeStateSchema(ctx context.Context, db *sql.DB, runtimeLivenessPr
 	}
 	if err := ensureColumn(ctx, db, worktreeStateTable, "git_status_updated_at", "TEXT"); err != nil {
 		return err
+	}
+	return nil
+}
+
+func ensurePhysicalSessionIntentIdentity(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin physical session intent identity repair: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM `+sessionStateTable+` AS worker
+		WHERE worker.role='worker' AND worker.scope_kind='issue' AND instr(worker.session_id,'.pane-')=0
+			AND EXISTS (
+				SELECT 1 FROM `+sessionStateTable+` AS rooted
+				WHERE rooted.project_id=worker.project_id AND rooted.session_id=worker.session_id
+					AND rooted.role='orchestrator' AND rooted.scope_kind='orchestration'
+					AND rooted.scope_id<>'project' AND rooted.scope_id=worker.issue_id
+					AND worker.scope_id=worker.issue_id
+			)`); err != nil {
+		return fmt.Errorf("retire legacy rooted worker intent: %w", err)
+	}
+	var conflicts int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM (
+		SELECT project_id,session_id FROM `+sessionStateTable+`
+		WHERE instr(session_id,'.pane-')=0
+		GROUP BY project_id,session_id HAVING COUNT(*)>1
+	)`).Scan(&conflicts); err != nil {
+		return fmt.Errorf("validate physical session intent identity: %w", err)
+	}
+	if conflicts != 0 {
+		return fmt.Errorf("physical session intent identity has %d ambiguous conflicts", conflicts)
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_daemon_session_projections_physical_session_unique
+		ON `+sessionStateTable+`(project_id,session_id) WHERE instr(session_id,'.pane-')=0`); err != nil {
+		return fmt.Errorf("enforce physical session intent identity: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit physical session intent identity repair: %w", err)
 	}
 	return nil
 }

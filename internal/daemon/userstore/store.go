@@ -822,6 +822,14 @@ func insertTask(ctx context.Context, tx *sql.Tx, projectID string, task domain.T
 	if task.Type == "" {
 		task.Type = domain.TypeTask
 	}
+	// Terminal lifecycle is incompatible with a healthy projected worker in
+	// the root-user read model. Exact live divergence remains visible through
+	// project lifecycle/readiness diagnostics, while every global publication
+	// source fails closed instead of resurrecting the terminal card.
+	if task.IssueClosed() {
+		task.Session = nil
+		task.HasTmuxSession = false
+	}
 	state, err := task.IssueState()
 	if err != nil {
 		return fmt.Errorf("normalize issue %s state: %w", task.ID, err)

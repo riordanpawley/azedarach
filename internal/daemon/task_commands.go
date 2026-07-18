@@ -133,16 +133,16 @@ type taskClosePreflightRequest struct {
 }
 
 type taskCloseRequest struct {
-	TaskID                 string                    `json:"task_id"`
-	ForceWorktree          bool                      `json:"force_worktree,omitempty"`
-	IgnoreAhead            bool                      `json:"ignore_ahead,omitempty"`
-	IntegrateBeforeClose   bool                      `json:"integrate_before_close,omitempty"`
-	CloseCleanChildren     bool                      `json:"close_clean_children,omitempty"`
-	AllowActiveSession     bool                      `json:"allow_active_session,omitempty"`
-	CloseOutcome           string                    `json:"closed_outcome,omitempty"`
-	ExpectedSourceOID      string                    `json:"expected_source_oid,omitempty"`
-	ExpectedReviewEvidence *issues.ReviewEvidencePin `json:"expected_review_evidence,omitempty"`
-	PromoteBacklogBeforeClose bool   `json:"-"`
+	TaskID                    string                    `json:"task_id"`
+	ForceWorktree             bool                      `json:"force_worktree,omitempty"`
+	IgnoreAhead               bool                      `json:"ignore_ahead,omitempty"`
+	IntegrateBeforeClose      bool                      `json:"integrate_before_close,omitempty"`
+	CloseCleanChildren        bool                      `json:"close_clean_children,omitempty"`
+	AllowActiveSession        bool                      `json:"allow_active_session,omitempty"`
+	CloseOutcome              string                    `json:"closed_outcome,omitempty"`
+	ExpectedSourceOID         string                    `json:"expected_source_oid,omitempty"`
+	ExpectedReviewEvidence    *issues.ReviewEvidencePin `json:"expected_review_evidence,omitempty"`
+	PromoteBacklogBeforeClose bool                      `json:"-"`
 }
 
 type taskStatusUpdateOptions struct {
@@ -408,6 +408,9 @@ func (d *Daemon) handleBoardFetch(ctx context.Context, req protocol.RequestEnvel
 	viewRecord, err := d.boardViewRecord(ctx, projectID, viewID)
 	if err != nil {
 		return d.boardViewErrorResponse(req, err), nil
+	}
+	if boardReq.ShowChildren != nil {
+		viewRecord.View.Options.ShowChildren = *boardReq.ShowChildren
 	}
 	startedAt := time.Now()
 	cacheStartedAt := time.Now()
@@ -683,14 +686,6 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 		if !found {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue not found: %s", taskID)), nil
 		}
-		if err := d.refreshFiniteWorktreeGitFacts(ctx, projectID, taskIDsFromTasks(tasks)); err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("refresh issue worktree git facts: %v", err)), nil
-		}
-		materialized, source, err = d.projectReadSnapshot(projectID)
-		if err != nil {
-			return d.errorResponse(req, protocol.ErrorCodeUnavailable, err.Error()), nil
-		}
-		tasks = materializedTaskContext(materialized, []string{taskID}, true, false, true, false, archiveMode)
 		lastCheckedAt := materializedLastCheckedAt(tasks)
 		payload := buildTaskListSnapshotPayload(projectID, d.currentRevision(projectID), lastCheckedAt, protocol.TaskListFreshnessFresh, tasks, false)
 		payload.Source = source
@@ -735,9 +730,6 @@ func (d *Daemon) handleTaskGet(ctx context.Context, req protocol.RequestEnvelope
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon task get requested", "project_id", projectID, "task_id", taskID)
 	}
-	refreshIssueStartedAt := time.Now()
-	d.refreshIssueWorktreeState(ctx, projectID, taskID)
-	latencytrace.LogPhaseContext(ctx, d.cfg.Logger, "daemon", "task.get.issue_worktree_refresh", refreshIssueStartedAt, "command", req.Command, "request_id", req.RequestID, "project_id", projectID, "task_id", taskID)
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
@@ -1480,7 +1472,10 @@ func (d *Daemon) refreshWorktreeRuntimeState(ctx context.Context, projectID stri
 
 	for issueID, status := range statusByIssue {
 		worktreePath := worktreePathByIssue[issueID]
-		rev := d.runtimeProjectionStateWriter().PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktreePath, status, true, false)
+		rev, err := d.runtimeProjectionStateWriter().PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktreePath, status, true, false)
+		if err != nil {
+			return len(rows), fmt.Errorf("%s: persist refreshed git status projection: %w", issueID, err)
+		}
 		if rev == 0 && d.worktreeRuntimeStateStore(projectID) != nil {
 			rawStatus, err := json.Marshal(status)
 			if err != nil {
@@ -1616,11 +1611,15 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 	for _, issueID := range issueIDs {
 		wt, ok := worktreeByIssue[issueID]
 		if !ok || strings.TrimSpace(wt.Path) == "" {
-			d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID)
+			if _, err := d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID); err != nil {
+				errs = append(errs, fmt.Errorf("%s: delete missing worktree projection: %w", issueID, err))
+			}
 			continue
 		}
 		if !runtimeWorktreeIssueEligible(issueID, taskByIssue) {
-			d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID)
+			if _, err := d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, projectID, issueID); err != nil {
+				errs = append(errs, fmt.Errorf("%s: delete ineligible worktree projection: %w", issueID, err))
+			}
 			continue
 		}
 
@@ -1635,7 +1634,10 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 			continue
 		}
 		if !found || strings.TrimSpace(projection.Path) != worktreePath || strings.TrimSpace(projection.Branch) != branch {
-			d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktreePath, branch)
+			if _, err := d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktreePath, branch); err != nil {
+				errs = append(errs, fmt.Errorf("%s: persist worktree projection: %w", issueID, err))
+				continue
+			}
 		}
 		refreshed++
 
@@ -1652,7 +1654,11 @@ func (d *Daemon) refreshWorktreeRuntimeStateForIssues(ctx context.Context, proje
 			errs = append(errs, fmt.Errorf("%s: refresh git status: %w", issueID, statusErr))
 			continue
 		}
-		rev := d.runtimeProjectionStateWriter().PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktreePath, status, true, false)
+		rev, persistErr := d.runtimeProjectionStateWriter().PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktreePath, status, true, false)
+		if persistErr != nil {
+			errs = append(errs, fmt.Errorf("%s: persist git status projection: %w", issueID, persistErr))
+			continue
+		}
 		if rev == 0 && d.worktreeRuntimeStateStore(projectID) != nil {
 			rawStatus, marshalErr := json.Marshal(status)
 			if marshalErr != nil {
@@ -1978,7 +1984,9 @@ func (d *Daemon) handleTaskUpdateStatus(ctx context.Context, req protocol.Reques
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	if deferredCleanup.Observed {
-		d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, cmd.TaskID)
+		if err := d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, cmd.TaskID); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
 	}
 	resp := d.successResponse(req)
 	resp.Revision = d.nextRevision(projectID)
@@ -2539,7 +2547,9 @@ func (d *Daemon) deferTaskWorktreeCleanupForClose(ctx context.Context, projectID
 			return deferredTaskWorktreeCleanupPlan{}, fmt.Errorf("clear worktree projection before close: %w", err)
 		}
 	}
-	d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, projectID, taskID)
+	if _, err := d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, projectID, taskID); err != nil {
+		return deferredTaskWorktreeCleanupPlan{}, fmt.Errorf("publish cleared worktree projection: %w", err)
+	}
 	return deferredTaskWorktreeCleanupPlan{Path: fallbackPath, Branch: fallbackBranch}, nil
 }
 
@@ -2571,7 +2581,11 @@ func (d *Daemon) submitDeferredTaskWorktreeCleanup(ctx context.Context, projectI
 	}, func(runCtx context.Context) ([]byte, error) {
 		runCtx, cancel := context.WithTimeout(runCtx, taskDeferredWorktreeCleanupTimeout)
 		defer cancel()
-		if d.deferredTaskWorktreeCleanupShouldSkip(runCtx, projectID, taskID, fallbackPath, fallbackBranch) {
+		skip, err := d.deferredTaskWorktreeCleanupShouldSkip(runCtx, projectID, taskID, fallbackPath, fallbackBranch)
+		if err != nil {
+			return nil, err
+		}
+		if skip {
 			return json.Marshal(deferredTaskWorktreeCleanupResult{
 				ProjectID: projectID,
 				TaskID:    taskID,
@@ -2610,21 +2624,25 @@ func (d *Daemon) submitDeferredTaskWorktreeCleanup(ctx context.Context, projectI
 	return submitResult.Record.ID, nil
 }
 
-func (d *Daemon) deferredTaskWorktreeCleanupShouldSkip(ctx context.Context, projectID, taskID, fallbackPath, fallbackBranch string) bool {
+func (d *Daemon) deferredTaskWorktreeCleanupShouldSkip(ctx context.Context, projectID, taskID, fallbackPath, fallbackBranch string) (bool, error) {
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
-		return false
+		return false, nil
 	}
 	task, err := issueClient.GetWithRuntime(ctx, projectID, taskID)
 	if err != nil || task.IssueClosed() {
-		return false
+		return false, nil
 	}
 	if fallbackPath != "" {
-		d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, fallbackPath, fallbackBranch)
+		if _, err := d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, fallbackPath, fallbackBranch); err != nil {
+			return false, fmt.Errorf("restore deferred worktree projection: %w", err)
+		}
 	} else {
-		d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, taskID)
+		if err := d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, taskID); err != nil {
+			return false, err
+		}
 	}
-	return true
+	return true, nil
 }
 
 type deferredCleanupOperationManager interface {
@@ -2733,22 +2751,23 @@ func (d *Daemon) compensateDeferredTaskWorktreeCleanup(ctx context.Context, proj
 	compensationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	if _, err := d.submitDeferredTaskWorktreeCleanup(compensationCtx, projectID, taskID, cancellation.FallbackPath, cancellation.FallbackBranch); err != nil {
-		d.restoreDeferredCleanupWorktreeProjection(compensationCtx, projectID, taskID)
-		return fmt.Errorf("requeue deferred worktree cleanup after failed lifecycle change: %w", err)
+		restoreErr := d.restoreDeferredCleanupWorktreeProjection(compensationCtx, projectID, taskID)
+		return errors.Join(fmt.Errorf("requeue deferred worktree cleanup after failed lifecycle change: %w", err), restoreErr)
 	}
 	return nil
 }
 
-func (d *Daemon) restoreDeferredCleanupWorktreeProjection(ctx context.Context, projectID, taskID string) {
+func (d *Daemon) restoreDeferredCleanupWorktreeProjection(ctx context.Context, projectID, taskID string) error {
 	manager := d.worktreeManagerForProject(projectID)
 	if manager == nil {
-		return
+		return nil
 	}
 	worktree, err := manager.Get(ctx, taskID)
 	if err != nil || worktree == nil {
-		return
+		return nil
 	}
-	d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, worktree.Path, worktree.Branch)
+	_, err = d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, taskID, worktree.Path, worktree.Branch)
+	return err
 }
 
 func (d *Daemon) liveWorktreePathSet(ctx context.Context, projectID string) (map[string]struct{}, bool, error) {
@@ -3122,6 +3141,9 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge %s into %s returned no result", source.Branch, targetBranch)
 	}
 	if !merge.Success {
+		if message, ok := candidateValidationFailureMessage(merge.ValidationAttempts); ok {
+			return taskCloseIntegrationResult{Requested: true, ValidationAttempts: append([]domain.IntegrationCandidateValidationAttempt(nil), merge.ValidationAttempts...)}, errors.New(message)
+		}
 		details := strings.TrimSpace(merge.Message)
 		if len(merge.ConflictFiles) > 0 {
 			details = strings.TrimSpace(details + "\nconflicts: " + strings.Join(merge.ConflictFiles, ", "))
@@ -3146,6 +3168,27 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		ValidationAttempts: append([]domain.IntegrationCandidateValidationAttempt(nil), merge.ValidationAttempts...),
 	}
 	return integration, nil
+}
+
+func failedCandidateValidationAttempt(attempts []domain.IntegrationCandidateValidationAttempt) (domain.IntegrationCandidateValidationAttempt, bool) {
+	for i := len(attempts) - 1; i >= 0; i-- {
+		if attempts[i].Status == domain.IntegrationCandidateValidationFailed {
+			return attempts[i], true
+		}
+	}
+	return domain.IntegrationCandidateValidationAttempt{}, false
+}
+
+func candidateValidationFailureMessage(attempts []domain.IntegrationCandidateValidationAttempt) (string, bool) {
+	attempt, ok := failedCandidateValidationAttempt(attempts)
+	if !ok {
+		return "", false
+	}
+	details := strings.TrimSpace(attempt.Message)
+	if details == "" {
+		details = "candidate validation gate failed without diagnostic output"
+	}
+	return fmt.Sprintf("candidate validation for revision %s failed: %s", attempt.CandidateHead, details), true
 }
 
 func (d *Daemon) canonicalIntegrationValidationAttempts(ctx context.Context, targetWorktree, targetOID string) ([]domain.IntegrationCandidateValidationAttempt, error) {
@@ -4513,6 +4556,7 @@ func (d *Daemon) handleTaskSQLiteWAL(ctx context.Context, req protocol.RequestEn
 		OpenConnections:     diag.DBStats.OpenConnections,
 		InUse:               diag.DBStats.InUse,
 		Idle:                diag.DBStats.Idle,
+		Stores:              d.sqliteStoreDiagnostics(),
 	}
 	switch mode {
 	case "":
@@ -4711,7 +4755,7 @@ func (d *Daemon) taskIntegrationReadiness(ctx context.Context, projectID, issueI
 		}
 		latestAggregate = aggregate
 	}
-	if !orchestrationProjectionSnapshotFenceHeld(ctx) {
+	if !orchestrationSnapshotPrepared(ctx) {
 		if err := d.reconcileDecisionPropagationOutbox(ctx, projectID); err != nil {
 			return taskIntegrationReadinessResult{}, fmt.Errorf("reconcile issue decision propagation: %w", err)
 		}
@@ -5495,7 +5539,7 @@ func (d *Daemon) captureTaskGraphReadinessContext(ctx context.Context, projectID
 		for _, rootIssueID := range uniqueNonEmpty(roots) {
 			captured.mailEventsByRoot[rootIssueID] = d.workerObservationMailboxEvents(rootIssueID)
 		}
-	} else if d.taskGraphObservationEvents == nil && !orchestrationProjectionSnapshotFenceHeld(ctx) {
+	} else if d.taskGraphObservationEvents == nil && !orchestrationSnapshotPrepared(ctx) {
 		repoDir := strings.TrimSpace(d.resolveRepoDirForProject(projectID))
 		if err := d.ensureLegacyMailboxObservationProjection(ctx, projectID, repoDir); err != nil {
 			return taskGraphReadinessContext{}, fmt.Errorf("project legacy mailbox observation projection: %w", err)
@@ -7450,7 +7494,9 @@ func (d *Daemon) handleTaskUpdateDetails(ctx context.Context, req protocol.Reque
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
 	if deferredCleanup.Observed {
-		d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, cmd.TaskID)
+		if err := d.restoreDeferredCleanupWorktreeProjection(ctx, projectID, cmd.TaskID); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+		}
 		task, err = issueClient.GetWithRuntime(ctx, projectID, cmd.TaskID)
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil

@@ -59,6 +59,57 @@ func TestBoardViewSortPolicyJSONRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBoardViewShowChildrenJSONRoundTrip(t *testing.T) {
+	view := DefaultBoardView()
+	view.Options.ShowChildren = true
+	encoded, err := EncodeBoardViewDefinitionJSON(view)
+	if err != nil {
+		t.Fatalf("EncodeBoardViewDefinitionJSON: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"show_children":true`) {
+		t.Fatalf("encoded definition missing show_children: %s", encoded)
+	}
+	decoded, err := DecodeBoardViewDefinitionJSON(encoded)
+	if err != nil {
+		t.Fatalf("DecodeBoardViewDefinitionJSON: %v", err)
+	}
+	if !decoded.Options.ShowChildren {
+		t.Fatal("decoded show_children = false, want true")
+	}
+}
+
+func TestProjectTasksByBoardViewHidesChildrenUnlessViewOptsIn(t *testing.T) {
+	parentID := Task{ID: "parent"}.ID
+	tasks := []Task{
+		{ID: parentID, Status: StatusOpen, Priority: P2},
+		{ID: "child", ParentID: &parentID, Status: StatusOpen, Priority: P2},
+	}
+
+	projection, err := ProjectTasksByBoardView(DefaultBoardView(), tasks)
+	if err != nil {
+		t.Fatalf("ProjectTasksByBoardView(default): %v", err)
+	}
+	if got := projection.OrderedTasks(); len(got) != 1 || got[0].ID != parentID {
+		t.Fatalf("default ordered tasks = %+v, want parent only", got)
+	}
+	if len(projection.ChildProgress) != 1 || projection.ChildProgress[0].Total != 1 {
+		t.Fatalf("child progress = %+v, want complete-set aggregate", projection.ChildProgress)
+	}
+
+	view := DefaultBoardView()
+	view.Options.ShowChildren = true
+	projection, err = ProjectTasksByBoardView(view, tasks)
+	if err != nil {
+		t.Fatalf("ProjectTasksByBoardView(show children): %v", err)
+	}
+	if got := projection.OrderedTasks(); len(got) != 2 {
+		t.Fatalf("show-children ordered tasks = %+v, want parent and child", got)
+	}
+	if !TreeBoardView().Options.ShowChildren {
+		t.Fatal("built-in Tree view must explicitly show children")
+	}
+}
+
 func TestBoardViewSchemaV1MigratesToColumnLayoutAndAttentionSort(t *testing.T) {
 	legacy := []byte(`{"schema_version":1,"id":"legacy","title":"Legacy","columns":[{"id":"active","title":"Active","predicates":[{"kind":"lifecycle","lifecycle":["active"]}]}],"options":{"sort_policy":"human_attention"}}`)
 	view, err := DecodeBoardViewDefinitionJSON(legacy)
@@ -85,6 +136,7 @@ func TestProjectTasksByBoardViewAppliesFiltersOrderedRulesAndTreeLayout(t *testi
 	parentID := Task{ID: "parent"}.ID
 	view := DefaultBoardView()
 	view.Layout = BoardViewLayoutTreeList
+	view.Options.ShowChildren = true
 	view.Filters = []BoardColumnPredicate{{Kind: BoardPredicateLifecycle, Lifecycle: []IssueWorkflow{IssueWorkflowActive}}}
 	view.Sort = []BoardViewSortRule{
 		{Key: BoardViewSortKeyPriority, Direction: BoardViewSortAscending},
@@ -111,6 +163,7 @@ func TestTreeProjectionPromotesChildWhenParentIsFiltered(t *testing.T) {
 	parentID := Task{ID: "parent"}.ID
 	view := DefaultBoardView()
 	view.Layout = BoardViewLayoutTreeList
+	view.Options.ShowChildren = true
 	view.Filters = []BoardColumnPredicate{{Kind: BoardPredicateLifecycle, Lifecycle: []IssueWorkflow{IssueWorkflowActive}}}
 	projection, err := ProjectTasksByBoardView(view, []Task{
 		{ID: parentID, Status: StatusOpen},

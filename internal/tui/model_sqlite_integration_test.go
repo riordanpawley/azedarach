@@ -257,6 +257,9 @@ func TestIssueSnapshotParityAcrossCLIAndTUIJSONListFields(t *testing.T) {
 	model := newTestModel()
 	model.repoDir = repoDir
 	model.daemonClient = client
+	// This parity check compares the complete list shape, so request the TUI's
+	// transient child-inclusive projection rather than the default root board.
+	model.sessionTreeFilterOnly = true
 	msg := model.loadIssuesCmd()()
 	loaded, ok := msg.(issuesLoadedMsg)
 	if !ok {

@@ -27,10 +27,11 @@ fake_engine() {
           ;;
         *expires_at*) echo "${FAKE_EXPIRES_AT:-$((now + 3600))}" ;;
         *azedarach.jaeger.fallback*) echo true ;;
+        *azedarach.jaeger.max_traces*) echo "${FAKE_LIVE_MAX_TRACES:-${AZEDARACH_JAEGER_MAX_TRACES:-40000}}" ;;
         *Config.Labels*)
           echo "azedarach.jaeger.managed = true"
           echo "azedarach.jaeger.storage = ${AZEDARACH_JAEGER_STORAGE:-memory}"
-          echo "azedarach.jaeger.max_traces = ${AZEDARACH_JAEGER_MAX_TRACES:-2000}"
+          echo "azedarach.jaeger.max_traces = ${AZEDARACH_JAEGER_MAX_TRACES:-40000}"
           echo "azedarach.jaeger.badger_ttl = ${AZEDARACH_JAEGER_BADGER_TTL:-24h}"
           ;;
       esac
@@ -91,12 +92,13 @@ stateful_engine() {
         *azedarach.jaeger.fallback*)
           [[ "$name" == "azedarach-jaeger-fallback" ]] && echo true
           ;;
+        *azedarach.jaeger.max_traces*) echo 40000 ;;
         *Config.Labels*)
           echo "azedarach.jaeger.managed = true"
           echo "azedarach.jaeger.image = cr.jaegertracing.io/jaegertracing/jaeger:2.19.0"
           echo "azedarach.jaeger.storage = memory"
           echo "azedarach.jaeger.volume = azedarach-jaeger-data"
-          echo "azedarach.jaeger.max_traces = 2000"
+          echo "azedarach.jaeger.max_traces = 40000"
           echo "azedarach.jaeger.badger_ttl = 24h"
           ;;
       esac
@@ -164,6 +166,8 @@ grep -q -- '--rm' "$calls"
 grep -q 'azedarach.jaeger.fallback=true' "$calls"
 grep -q 'jaeger:2.19.0' "$calls"
 grep -q 'jaeger-memory.yaml' "$calls"
+grep -q 'JAEGER_MAX_TRACES=40000' "$calls"
+grep -q 'azedarach.jaeger.max_traces=40000' "$calls"
 if grep -q ':/badger' "$calls"; then
   echo "memory fallback unexpectedly mounted Badger" >&2
   exit 1
@@ -175,6 +179,13 @@ AZEDARACH_JAEGER_STORAGE=badger AZEDARACH_JAEGER_VOLUME=chosen-store \
 grep -q 'chosen-store:/badger' "$calls"
 [[ "$(grep -c 'chosen-store:/badger' "$calls")" == "1" ]]
 grep -q 'jaeger-badger.yaml' "$calls"
+
+inventory="$(FAKE_PRIMARY_EXISTS=1 jaeger_inventory fake_engine)"
+grep -q '^Configured Jaeger trace limit: 40000$' <<<"$inventory"
+grep -q '^Primary effective trace limit: 40000$' <<<"$inventory"
+stale_inventory="$(FAKE_PRIMARY_EXISTS=1 FAKE_LIVE_MAX_TRACES=2000 jaeger_inventory fake_engine 2>&1)"
+grep -q '^Primary effective trace limit: 2000$' <<<"$stale_inventory"
+grep -q 'primary trace limit is stale' <<<"$stale_inventory"
 
 # A successful container run followed by failed readiness is failure-atomic:
 # the just-created fallback is removed before returning, and publication never

@@ -105,7 +105,7 @@ func TestRightMousePressAttachesBoardCard(t *testing.T) {
 	if len(updated.toasts) == 0 {
 		t.Fatal("expected attach feedback toast")
 	}
-	if got := updated.toasts[len(updated.toasts)-1].Message; got != "Attach queued for az-2" {
+	if got := updated.toasts[len(updated.toasts)-1].Message; got != "Attaching to az-2" {
 		t.Fatalf("toast = %q, want attach feedback for az-2", got)
 	}
 }
@@ -144,7 +144,7 @@ func TestDoubleTapAttachesBoardCard(t *testing.T) {
 	if len(updated.toasts) == 0 {
 		t.Fatal("expected attach feedback toast")
 	}
-	if got := updated.toasts[len(updated.toasts)-1].Message; got != "Attach queued for az-2" {
+	if got := updated.toasts[len(updated.toasts)-1].Message; got != "Attaching to az-2" {
 		t.Fatalf("toast = %q, want attach feedback for az-2", got)
 	}
 }
@@ -281,7 +281,7 @@ func TestRightMousePressAttachesTreeRow(t *testing.T) {
 	if len(updated.toasts) == 0 {
 		t.Fatal("expected attach feedback toast")
 	}
-	if got := updated.toasts[len(updated.toasts)-1].Message; got != "Attach queued for "+rendered[0].ID.String() {
+	if got := updated.toasts[len(updated.toasts)-1].Message; got != "Attaching to "+rendered[0].ID.String() {
 		t.Fatalf("toast = %q, want attach feedback for %s", got, rendered[0].ID)
 	}
 }
@@ -323,7 +323,7 @@ func TestDoubleTapAttachesTreeRow(t *testing.T) {
 	if len(updated.toasts) == 0 {
 		t.Fatal("expected attach feedback toast")
 	}
-	if got := updated.toasts[len(updated.toasts)-1].Message; got != "Attach queued for "+rendered[0].ID.String() {
+	if got := updated.toasts[len(updated.toasts)-1].Message; got != "Attaching to "+rendered[0].ID.String() {
 		t.Fatalf("toast = %q, want attach feedback for %s", got, rendered[0].ID)
 	}
 }

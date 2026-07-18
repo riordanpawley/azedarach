@@ -661,7 +661,7 @@ func (m Model) boardVisibleTasks(tasks []domain.Task) []domain.Task {
 	}
 	if m.boardProjection.View.ID != "" {
 		filter := *m.editor.GetFilter()
-		filter.HideEpicChildren = false
+		filter.HideEpicChildren = !m.boardProjection.View.Options.ShowChildren
 		return m.applySessionTreeFilter(filter.Apply(tasks))
 	}
 
@@ -1281,6 +1281,14 @@ func (m *Model) enterDrillDown(parentID, parentName string) {
 			parentID:   strings.TrimSpace(m.drillDownParentID),
 			parentName: strings.TrimSpace(m.drillDownParentName),
 		})
+	} else {
+		m.drillDownRootBoard = &drillDownRootBoardState{
+			view:       m.boardView,
+			columns:    cloneBoardViewColumnSnapshots(m.boardColumns),
+			ordered:    append([]domain.Task(nil), m.boardOrdered...),
+			projection: m.boardProjection,
+		}
+		m.useDefaultDrillDownBoardView()
 	}
 	m.drillDownParentID = id
 	m.drillDownParentName = strings.TrimSpace(parentName)
@@ -1289,7 +1297,14 @@ func (m *Model) enterDrillDown(parentID, parentName string) {
 func (m *Model) exitCurrentDrillDown() string {
 	exitedParentID := strings.TrimSpace(m.drillDownParentID)
 	if len(m.drillDownTrail) == 0 {
+		rootBoard := m.drillDownRootBoard
 		m.clearDrillDown()
+		if rootBoard != nil {
+			m.boardView = rootBoard.view
+			m.boardColumns = cloneBoardViewColumnSnapshots(rootBoard.columns)
+			m.boardOrdered = append([]domain.Task(nil), rootBoard.ordered...)
+			m.boardProjection = rootBoard.projection
+		}
 		return exitedParentID
 	}
 
@@ -1304,6 +1319,19 @@ func (m *Model) clearDrillDown() {
 	m.drillDownParentID = ""
 	m.drillDownParentName = ""
 	m.drillDownTrail = nil
+	m.drillDownRootBoard = nil
+}
+
+func (m *Model) useDefaultDrillDownBoardView() {
+	view := domain.DefaultBoardView()
+	// Drill-down snapshots are already scoped to the selected parent's direct
+	// children. Opt this transient projection in without changing the persisted
+	// Default view's child-hidden semantics.
+	view.Options.ShowChildren = true
+	m.boardView = view
+	m.boardColumns = nil
+	m.boardOrdered = nil
+	m.boardProjection = domain.BoardViewProjection{View: view}
 }
 
 func (m Model) renderDrillDownToolbar() string {

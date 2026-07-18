@@ -17,9 +17,8 @@ import (
 	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
-const runtimeSignalFastGitStatusTimeout = 1500 * time.Millisecond
-
 func (d *Daemon) handleRuntimeSignalIngest(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	ctx = withoutSynchronousProjectReadRuntimeRefresh(ctx)
 	var cmd protocol.RuntimeSignalIngestCommandBody
 	if err := json.Unmarshal(req.Body, &cmd); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -199,28 +198,25 @@ func runtimeSignalHookLogEvent(projectID string, cmd protocol.RuntimeSignalInges
 
 func (d *Daemon) ingestGitWorktreeSignal(ctx context.Context, projectID string, cmd protocol.RuntimeSignalIngestCommandBody, out *protocol.RuntimeSignalIngestResponseBody) {
 	if d.gitStatusAdapter == nil {
-		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_fast", OK: false, Message: "git status adapter unavailable"})
+		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_refresh_queued", OK: false, Message: "git status adapter unavailable"})
 		return
 	}
 	if cmd.Worktree == "" {
-		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_fast", OK: false, Message: "missing worktree"})
+		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_refresh_queued", OK: false, Message: "missing worktree"})
 		return
 	}
-	statusCtx, cancel := context.WithTimeout(ctx, runtimeSignalFastGitStatusTimeout)
-	defer cancel()
-	_, rev, err := d.gitStatusAdapter.refreshGitStatusPorcelainWriteThroughResult(statusCtx, projectID, cmd.Worktree, true, true)
+	_, admitted, err := d.gitStatusAdapter.queueDurableGitHookRefresh(ctx, projectID, cmd.Worktree)
 	if err != nil {
-		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_fast", OK: false, Message: err.Error()})
+		out.Accepted = false
+		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_refresh_queued", OK: false, Message: err.Error()})
 		return
 	}
-	out.ProjectionRevisions = appendRevision(out.ProjectionRevisions, rev)
-	out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_fast", OK: true, Revision: rev})
-	if _, err := d.gitStatusAdapter.queueGitStatusRefresh(projectID, cmd.Worktree, reconcilePriorityBackground, "runtime-signal-enrichment"); err != nil {
-		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_enrichment", OK: false, Message: err.Error()})
+	if !admitted {
+		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_refresh_queued", OK: true, Message: "ineligible worktree ignored"})
 		return
 	}
 	out.EnrichmentQueued = true
-	out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_enrichment", OK: true})
+	out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "git_status_refresh_queued", OK: true})
 }
 
 func (d *Daemon) ingestAgentActivitySignal(ctx context.Context, req protocol.RequestEnvelope, projectID string, cmd protocol.RuntimeSignalIngestCommandBody, out *protocol.RuntimeSignalIngestResponseBody) {
@@ -375,7 +371,7 @@ func (d *Daemon) recordPhysicalSessionObservation(ctx context.Context, meta prot
 	if observedState == daemonstate.SessionStateStopped {
 		activity, activitySource = "", ""
 	}
-	changed, applied, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+	_, applied, revisions, err := d.runtimeProjectionStateWriter().ApplyPhysicalSessionObservationAndPublish(ctx, projectID, meta, daemonstate.PhysicalSessionObservation{
 		ProjectID: projectID, SessionID: sessionID, ObservedState: observedState,
 		Activity: activity, ActivitySource: activitySource, UpdatedAt: now,
 	})
@@ -384,11 +380,6 @@ func (d *Daemon) recordPhysicalSessionObservation(ctx context.Context, meta prot
 	}
 	if !applied {
 		return nil, nil
-	}
-	revisions := make([]uint64, 0, len(changed))
-	writer := d.runtimeProjectionStateWriter()
-	for _, row := range changed {
-		revisions = appendRevision(revisions, writer.PublishSessionProjectionEvent(ctx, projectID, meta, row))
 	}
 	return revisions, nil
 }

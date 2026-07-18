@@ -621,6 +621,10 @@ func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
 	// its diagnostic. The separate budget test inspects the production body, and
 	// the merge hook executes it end to end.
 	const timeoutBudget = "1h"
+	t.Setenv("AZEDARACH_CANDIDATE_HEAD", "outer-validation-candidate")
+	t.Setenv("AZEDARACH_MERGE_GATE_BODY", "/outer/validation/gate-body")
+	t.Setenv("AZEDARACH_SKIP_MERGE_REBASE_GATE", "1")
+	t.Setenv("AZEDARACH_VALIDATION_REQUEST_ID", "outer-validation-request")
 
 	timeoutPath, err := exec.LookPath("timeout")
 	if err != nil {
@@ -665,7 +669,7 @@ func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
 	}
 	childPIDFile := filepath.Join(repo, "timeout-child.pid")
 	diagnosticEmittedFile := filepath.Join(repo, "diagnostic-emitted")
-	fakeBody := "#!/bin/sh\nsleep 30 &\nchild_pid=$!\nprintf '%s\\n' \"$child_pid\" >\"$AZEDARACH_TEST_CHILD_PID_FILE\"\necho retained-timeout-marker\nprintf 'emitted\\n' >\"$AZEDARACH_TEST_DIAGNOSTIC_EMITTED_FILE\"\nwait \"$child_pid\"\n"
+	fakeBody := "#!/bin/sh\nset -eu\ntest \"$AZEDARACH_VALIDATION_REQUEST_ID\" = outer-validation-request\ntest \"$AZEDARACH_VALIDATION_SCOPE\" = repository\ntest \"$AZEDARACH_VALIDATION_PURPOSE\" = push_gate\nsleep 30 &\nchild_pid=$!\nprintf '%s\\n' \"$child_pid\" >\"$AZEDARACH_TEST_CHILD_PID_FILE\"\necho retained-timeout-marker\nprintf 'emitted\\n' >\"$AZEDARACH_TEST_DIAGNOSTIC_EMITTED_FILE\"\nwait \"$child_pid\"\n"
 	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate-body.sh"), []byte(fakeBody), 0o755); err != nil {
 		t.Fatalf("write fake gate body: %v", err)
 	}
@@ -673,14 +677,18 @@ func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
 	cmd := exec.Command(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"))
 	cmd.Dir = repo
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = append(os.Environ(),
-		"AZEDARACH_MERGE_GATE_TIMEOUT="+timeoutBudget,
-		"AZEDARACH_TEST_CHILD_PID_FILE="+childPIDFile,
-		"AZEDARACH_TEST_DIAGNOSTIC_EMITTED_FILE="+diagnosticEmittedFile,
-		"AZEDARACH_TEST_TIMEOUT_PATH="+timeoutPath,
-		"AZEDARACH_TEST_TIMEOUT_PID_FILE="+timeoutPIDFile,
-		"PATH="+fakeBin+string(os.PathListSeparator)+filepath.Dir(timeoutPath)+string(os.PathListSeparator)+os.Getenv("PATH"),
-	)
+	fixtureHead := strings.TrimSpace(runGitOutput(t, repo, "rev-parse", "HEAD"))
+	cmd.Env = gitEnvWithOverrides(sanitizedGitEnv(os.Environ()), []string{
+		"AZEDARACH_CANDIDATE_HEAD=" + fixtureHead,
+		"AZEDARACH_MERGE_GATE_BODY=" + filepath.Join(scriptsDir, "git-merge-rebase-gate-body.sh"),
+		"AZEDARACH_SKIP_MERGE_REBASE_GATE=0",
+		"AZEDARACH_MERGE_GATE_TIMEOUT=" + timeoutBudget,
+		"AZEDARACH_TEST_CHILD_PID_FILE=" + childPIDFile,
+		"AZEDARACH_TEST_DIAGNOSTIC_EMITTED_FILE=" + diagnosticEmittedFile,
+		"AZEDARACH_TEST_TIMEOUT_PATH=" + timeoutPath,
+		"AZEDARACH_TEST_TIMEOUT_PID_FILE=" + timeoutPIDFile,
+		"PATH=" + fakeBin + string(os.PathListSeparator) + filepath.Dir(timeoutPath) + string(os.PathListSeparator) + os.Getenv("PATH"),
+	})
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
@@ -792,6 +800,50 @@ func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
 			t.Fatalf("timed-out child process %d still running after merge gate returned", childPID)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestMergeGateFailsClosedOnCandidateMismatch(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	runGit(t, repo, "config", "user.email", "test@example.com")
+	runGit(t, repo, "config", "user.name", "Test User")
+	runGit(t, repo, "config", "status.showUntrackedFiles", "no")
+	runGit(t, repo, "commit", "--allow-empty", "-m", "candidate")
+	candidateHead := strings.TrimSpace(runGitOutput(t, repo, "rev-parse", "HEAD"))
+	runGit(t, repo, "commit", "--allow-empty", "-m", "integration result")
+	scriptsDir := filepath.Join(repo, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	gatePath := filepath.Join(scriptsDir, "git-merge-rebase-gate.sh")
+	gate, err := os.ReadFile(filepath.Join("..", "..", "..", "scripts", "git-merge-rebase-gate.sh"))
+	if err != nil {
+		t.Fatalf("read merge gate: %v", err)
+	}
+	if err := os.WriteFile(gatePath, gate, 0o755); err != nil {
+		t.Fatalf("write merge gate: %v", err)
+	}
+	observedHead := strings.TrimSpace(runGitOutput(t, repo, "rev-parse", "HEAD"))
+	cmd := exec.Command(gatePath)
+	cmd.Dir = repo
+	cmd.Env = gitEnvWithOverrides(sanitizedGitEnv(os.Environ()), []string{
+		"AZEDARACH_CANDIDATE_HEAD=" + candidateHead,
+		"AZEDARACH_SKIP_MERGE_REBASE_GATE=0",
+	})
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("merge gate error = nil, output=%s", output)
+	}
+	for _, want := range []string{
+		"candidate_head=" + candidateHead,
+		"observed_head=" + observedHead,
+		"canonical=false",
+		"reason=head-mismatch-before-start",
+	} {
+		if !strings.Contains(string(output), want) {
+			t.Fatalf("merge gate output = %q, want %q", output, want)
+		}
 	}
 }
 
@@ -1011,6 +1063,43 @@ func TestRealProcessProfileMergeCleanlyTransactionalAppliesScratchMergeToCleanTa
 	}
 	if worktrees := runClientTestGitOutput(t, repo, "worktree", "list", "--porcelain"); strings.Contains(worktrees, "azedarach-integration-") {
 		t.Fatalf("worktree list contains scratch integration worktree after cleanup:\n%s", worktrees)
+	}
+}
+
+func TestCandidateValidationOutputRetainsStdoutWhenGateAlsoWritesStderr(t *testing.T) {
+	got := candidateValidationOutput("FAIL example.test/pkg::TestActionable\nexact assertion", "[gate] status=failed exit_status=1")
+	for _, want := range []string{"TestActionable", "exact assertion", "status=failed"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("candidateValidationOutput() = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestRealProcessProfileCandidateFailureRetainsActionableStdoutAndStderr(t *testing.T) {
+	repo := initDivergedRepo(t)
+	scriptsDir := filepath.Join(repo, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	gate := "#!/bin/sh\necho 'FAIL make-verify::consumer-check'\necho 'exact consumer failure'\necho '[gate] status=failed exit_status=1' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"), []byte(gate), 0o755); err != nil {
+		t.Fatalf("write candidate gate: %v", err)
+	}
+	runClientTestGit(t, repo, "add", "scripts/git-merge-rebase-gate.sh")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "add failing candidate gate")
+
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	result, err := client.MergeCleanlyTransactional(context.Background(), repo, "feature")
+	if err != nil {
+		t.Fatalf("MergeCleanlyTransactional() error = %v", err)
+	}
+	if result == nil || result.Success || len(result.ValidationAttempts) != 1 {
+		t.Fatalf("MergeCleanlyTransactional() = %+v, want typed candidate failure", result)
+	}
+	for _, want := range []string{"FAIL make-verify::consumer-check", "exact consumer failure", "status=failed"} {
+		if !strings.Contains(result.Message, want) || !strings.Contains(result.ValidationAttempts[0].Message, want) {
+			t.Fatalf("candidate failure = %+v, want %q", result, want)
+		}
 	}
 }
 

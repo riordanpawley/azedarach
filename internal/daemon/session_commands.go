@@ -789,6 +789,19 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 	if !ok {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
 	}
+	// Bare handler fixtures and partially initialized daemons have no issue
+	// authority. Preserve the existing session validation path in that case;
+	// production daemons always install the issue client before serving commands.
+	if d.issues != nil {
+		issueClient := d.issueClientForProject(cmd.ProjectID)
+		task, loadErr := issueClient.GetWithRuntime(ctx, cmd.ProjectID, cmd.IssueID)
+		if loadErr != nil && !errors.Is(loadErr, domain.ErrNotFound) {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, loadErr.Error()), nil
+		}
+		if loadErr == nil && task.Type == domain.TypeEpic {
+			return d.delegateIssueSessionCommandToRootedOrchestrator(ctx, req, cmd.IssueID, cmd.SessionID, protocol.CommandOrchestratorSessionStart)
+		}
+	}
 	store := d.sessionRuntimeStateStoreIfConfigured(cmd.ProjectID)
 	if store == nil {
 		return d.handleSessionStartDirectWithOptions(ctx, req, sessionStartOptions{})
@@ -810,6 +823,64 @@ func (d *Daemon) handleSessionStartDirect(ctx context.Context, req protocol.Requ
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("serialize worker session start: %v", lockErr)), nil
 	}
 	return resp, commandErr
+}
+
+func (d *Daemon) delegateIssueSessionCommandToRootedOrchestrator(ctx context.Context, req protocol.RequestEnvelope, issueID, sessionID, command string) (protocol.ResponseEnvelope, error) {
+	scope, err := domain.RootedOrchestrationScope(issueID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
+	}
+	body := protocol.OrchestratorSessionRequest{Scope: scope}
+	if command == protocol.CommandOrchestratorSessionStop {
+		body.ExpectedSessionID = sessionID
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	orchestratorReq := req
+	orchestratorReq.Command = command
+	orchestratorReq.Body = encoded
+	response, err := d.handleOrchestratorSession(ctx, orchestratorReq)
+	if err != nil || response.Error != nil {
+		return response, err
+	}
+	var result protocol.OrchestratorSessionResult
+	if err := json.Unmarshal(response.Body, &result); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("decode rooted orchestrator session result: %v", err)), nil
+	}
+	var output string
+	switch command {
+	case protocol.CommandOrchestratorSessionStart:
+		output = fmt.Sprintf("Starting rooted orchestrator session for epic: %s\nDisposition: %s\n  To attach: az orchestrator-session attach --root %s\n", issueID, result.Disposition, issueID)
+	case protocol.CommandOrchestratorSessionAttach:
+		output = fmt.Sprintf("Attaching to rooted orchestrator session: %s\n(Press Ctrl+B then D to detach)\n", result.SessionID)
+	case protocol.CommandOrchestratorSessionStop:
+		output = fmt.Sprintf("Stopped rooted orchestrator session: %s (%s)\n", result.SessionID, result.Disposition)
+	default:
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("unsupported rooted orchestrator delegation: %s", command)), nil
+	}
+	return d.commandOutput(req, output), nil
+}
+
+func (d *Daemon) rootedOrchestratorOwnsIssueSession(ctx context.Context, projectID, issueID, sessionID string) (bool, error) {
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		return false, nil
+	}
+	scope, err := domain.RootedOrchestrationScope(issueID)
+	if err != nil {
+		return false, err
+	}
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		return false, err
+	}
+	lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(store).Get(ctx, identity)
+	if err != nil || !found {
+		return false, err
+	}
+	return strings.TrimSpace(lease.SessionID) == strings.TrimSpace(sessionID), nil
 }
 
 type sessionStartOptions struct {
@@ -912,7 +983,9 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 	defer func() {
 		if rollbackIssueLifecycle && (err != nil || !resp.OK) {
 			if worktreeProjectionPersisted && !startedWorktreeReused && startedWorktreePath != "" {
-				d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID)
+				if _, projectionErr := d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID); projectionErr != nil && d.cfg.Logger != nil {
+					d.cfg.Logger.Warn("rollback session-start worktree projection failed", "project_id", cmd.ProjectID, "issue_id", cmd.IssueID, "error", projectionErr)
+				}
 				_ = d.cleanupNewWorktreeAfterInitFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, startedWorktreePath, startedWorktreeReused)
 			}
 			d.rollbackSessionStartIssueLifecycle(ctx, issueClient, cmd.IssueID, originalIssueStatus)
@@ -1058,7 +1131,9 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist worktree runtime projection for %s: %v%s%s", cmd.IssueID, err, cleanupNote, worktreeCleanupNote)), nil
 	}
 	worktreeProjectionPersisted = true
-	projectionWriter.PublishWorktreeProjectionEvent(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path)
+	if _, err := projectionWriter.PublishWorktreeProjectionEvent(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("publish worktree runtime projection for %s: %v", cmd.IssueID, err)), nil
+	}
 	sessionInitMarker := sessionInitReadyMarker{}
 	if cmd.StartWork {
 		var markerErr error
@@ -1174,12 +1249,6 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 	}); err != nil {
 		cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("record session runtime observation: %v%s", err, cleanupNote)), nil
-	}
-	if task.Type == domain.TypeEpic && !options.rootedOrchestrator {
-		if err := d.acquireRootedOrchestratorLease(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID); err != nil {
-			cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
-			return d.errorResponse(req, protocol.ErrorCodeConflict, fmt.Sprintf("acquire rooted orchestrator lease: %v%s", err, cleanupNote)), nil
-		}
 	}
 	rollbackIssueLifecycle = false
 	worktreeLine := fmt.Sprintf("Worktree created: %s", worktree.Path)
@@ -1327,7 +1396,9 @@ func (d *Daemon) compensateSessionStartFailureWithSelector(ctx context.Context, 
 			alignTransient = true
 			writer := d.runtimeProjectionStateWriter()
 			for _, row := range rows {
-				writer.PublishSessionProjectionEvent(ctx, projectID, req.Meta, row)
+				if _, publishErr := writer.PublishSessionProjectionEvent(ctx, projectID, req.Meta, row); publishErr != nil {
+					note += fmt.Sprintf("; failed-start session compensation publication also failed: %v", publishErr)
+				}
 			}
 		}
 	}
@@ -1355,6 +1426,13 @@ func (d *Daemon) handleSessionAttach(ctx context.Context, req protocol.RequestEn
 	cmd, _, ok := d.decodeSessionRequest(req, true)
 	if !ok {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
+	}
+	rooted, err := d.rootedOrchestratorOwnsIssueSession(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("resolve rooted orchestrator session attach: %v", err)), nil
+	}
+	if rooted {
+		return d.delegateIssueSessionCommandToRootedOrchestrator(ctx, req, cmd.IssueID, cmd.SessionID, protocol.CommandOrchestratorSessionAttach)
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session attach requested",
@@ -1517,6 +1595,13 @@ func (d *Daemon) handleSessionStopDirectWithOptions(ctx context.Context, req pro
 	cmd, _, ok := d.decodeSessionRequest(req, true)
 	if !ok {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "invalid session request"), nil
+	}
+	rooted, err := d.rootedOrchestratorOwnsIssueSession(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("resolve rooted orchestrator session stop: %v", err)), nil
+	}
+	if rooted {
+		return d.delegateIssueSessionCommandToRootedOrchestrator(ctx, req, cmd.IssueID, cmd.SessionID, protocol.CommandOrchestratorSessionStop)
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session stop requested",
@@ -1931,8 +2016,18 @@ func (d *Daemon) restartAllTarget(ctx context.Context, target sessionRestartAllT
 		}
 	}
 	item.Restarted = true
-	if target.IssueID != "" {
-		d.persistRestartedSessionProjection(ctx, target.ProjectID, target.SessionID, target.IssueID)
+	if rootedIdentity != nil {
+		if err := d.persistOrchestratorSessionProjection(ctx, protocol.Metadata{ProjectID: naming.ProjectID(target.ProjectID)}, target.ProjectID, rootedIdentity.Scope, target.SessionID); err != nil {
+			item.Restarted = false
+			item.Error = fmt.Sprintf("persist restarted rooted orchestrator projection: %v", err)
+			return item
+		}
+	} else if target.IssueID != "" {
+		if err := d.persistRestartedSessionProjection(ctx, target.ProjectID, target.SessionID, target.IssueID); err != nil {
+			item.Restarted = false
+			item.Error = fmt.Sprintf("persist restarted worker projection: %v", err)
+			return item
+		}
 	}
 	return item
 }
@@ -2076,7 +2171,7 @@ func (d *Daemon) waitBeforeSessionResume(ctx context.Context, delay time.Duratio
 	return waitBeforeSessionResume(ctx, delay)
 }
 
-func (d *Daemon) persistRestartedSessionProjection(ctx context.Context, projectID, sessionID, issueID string) {
+func (d *Daemon) persistRestartedSessionProjection(ctx context.Context, projectID, sessionID, issueID string) error {
 	session := daemonstate.Session{
 		ID:             sessionID,
 		IssueID:        issueID,
@@ -2086,17 +2181,13 @@ func (d *Daemon) persistRestartedSessionProjection(ctx context.Context, projectI
 		ActivitySource: "session",
 		UpdatedAt:      time.Now().UTC(),
 	}
-	if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, session); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("persist restarted session projection failed",
-			"project_id", projectID,
-			"session_id", sessionID,
-			"issue_id", issueID,
-			"error", err,
-		)
+	if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, session); err != nil {
+		return err
 	}
-	if err := d.persistObservedRuntimeProjection(ctx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, session); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("persist restarted physical runtime observation failed", "project_id", projectID, "session_id", sessionID, "error", err)
+	if err := d.persistObservedRuntimeProjection(ctx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, session); err != nil {
+		return err
 	}
+	return nil
 }
 
 func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
@@ -2140,7 +2231,9 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 	}
-	d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueIDString, worktreePath, worktreeBranch)
+	if _, err := d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueIDString, worktreePath, worktreeBranch); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("persist conflict worktree projection: %v", err)), nil
+	}
 
 	canonicalSessionID := naming.CanonicalSessionIDForIssue(d.sessionNamingScope(projectID), issueID).String()
 	sessionName, reusedSession, err := d.ensureConflictSession(ctx, projectID, issueIDString, canonicalSessionID, worktreePath)
@@ -2364,8 +2457,8 @@ func (d *Daemon) recordConflictSessionAttached(ctx context.Context, req protocol
 	if forceErr != nil {
 		return forceErr
 	}
-	d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(ctx, projectID, req.Meta, event.Session)
-	return nil
+	_, err = d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(ctx, projectID, req.Meta, event.Session)
+	return err
 }
 
 func normalizeConflictFiles(files []string) []string {
@@ -2426,14 +2519,20 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 	}
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
 	canonicalID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
+	var current daemonstate.Session
 	if existing, found, err := store.GetWorkerSessionStateByIssueID(context.Background(), projectID, issueID, canonicalID); err != nil {
 		return fmt.Errorf("load logical session before stop projection: %w", err)
 	} else if found && !isAgentScopedSessionID(existing.ID) {
+		current = existing
 		sessionID = existing.ID
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+	updatedAt := time.Now().UTC()
+	if current.UpdatedAt.After(updatedAt) {
+		updatedAt = current.UpdatedAt
+	}
 	session := daemonstate.Session{
 		ID:            sessionID,
 		IssueID:       issueID,
@@ -2442,7 +2541,7 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 		ScopeID:       issueID,
 		State:         daemonstate.SessionStateStopped,
 		ObservedState: daemonstate.SessionStateStopped,
-		UpdatedAt:     time.Now().UTC(),
+		UpdatedAt:     updatedAt,
 	}
 	if err := store.UpsertSessionState(ctx, projectID, session); err != nil {
 		if d.cfg.Logger != nil {
@@ -3139,8 +3238,8 @@ func (d *Daemon) upsertSessionAndPublish(projectID, sessionID, issueID string, s
 	if err != nil {
 		return err
 	}
-	d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(context.Background(), projectID, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, event.Session)
-	return nil
+	_, err = d.runtimeProjectionStateWriter().PersistSessionProjectionAndPublish(context.Background(), projectID, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, event.Session)
+	return err
 }
 
 func (d *Daemon) reconcileTmuxAndDaemonSessions(ctx context.Context, projectID, sessionID string) (sessionRecoveryResult, error) {
@@ -3680,7 +3779,9 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 			continue
 		}
 
-		d.ensureSessionWorktreeProjection(ctx, projectID, issueID)
+		if err := d.ensureSessionWorktreeProjection(ctx, projectID, issueID); err != nil {
+			return result, fmt.Errorf("ensure session worktree projection for %s: %w", issueID, err)
+		}
 
 		switch session.State {
 		case daemonstate.SessionStateStarting:
@@ -3831,27 +3932,27 @@ func (d *Daemon) sessionSnapshotForReconcile(ctx context.Context, projectID stri
 	return d.sessionRuntimeStateStoreIfConfigured(projectID).ListSessionIntentStates(ctx, projectID)
 }
 
-func (d *Daemon) ensureSessionWorktreeProjection(ctx context.Context, projectID, issueID string) {
+func (d *Daemon) ensureSessionWorktreeProjection(ctx context.Context, projectID, issueID string) error {
 	if d == nil || d.worktreeRuntimeStateStore(projectID) == nil {
-		return
+		return nil
 	}
 	projectID = protocol.NormalizeProjectID(projectID)
 	issueID = strings.TrimSpace(issueID)
 	if issueID == "" {
-		return
+		return nil
 	}
 	if _, found, err := d.worktreeRuntimeStateStore(projectID).GetWorktreeStateByIssueID(ctx, projectID, issueID); err == nil && found {
-		return
+		return nil
 	}
 
 	repoDir := strings.TrimSpace(d.resolveRepoDirForProjectLocked(projectID))
 	if repoDir == "" {
-		return
+		return nil
 	}
 	worktreePath := filepath.Join(filepath.Dir(repoDir), fmt.Sprintf("%s-%s", filepath.Base(repoDir), issueID))
 	info, err := os.Stat(worktreePath)
 	if err != nil || !info.IsDir() {
-		return
+		return nil
 	}
 
 	branch := ""
@@ -3860,7 +3961,10 @@ func (d *Daemon) ensureSessionWorktreeProjection(ctx context.Context, projectID,
 			branch = strings.TrimSpace(currentBranch)
 		}
 	}
-	rev := d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktreePath, branch)
+	rev, err := d.runtimeProjectionStateWriter().PersistWorktreeProjectionAndPublish(ctx, projectID, issueID, worktreePath, branch)
+	if err != nil {
+		return err
+	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info(
 			"backfilled session worktree projection",
@@ -3871,6 +3975,7 @@ func (d *Daemon) ensureSessionWorktreeProjection(ctx context.Context, projectID,
 			"revision", rev,
 		)
 	}
+	return nil
 }
 
 func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID string, tasks []domain.Task) []domain.Task {
@@ -3955,20 +4060,30 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 	for i := range tasks {
 		taskID := tasks[i].ID
 		taskKey := sessionKey(taskID.String())
-		if _, ok := activeIssueKeys[taskKey]; !ok {
+		session, sessionOK := sessionByKey[taskKey]
+		_, active := activeIssueKeys[taskKey]
+		if !active && (!sessionOK || !daemonSessionProjectionStopped(session)) {
+			continue
+		}
+		// Runtime hydration may carry an older session row than the daemon's
+		// logical-intent projection. Rebuild active session presence from the
+		// refreshed daemon state, and let an explicit stopped intent clear stale
+		// pane-derived activity instead of preserving it by omission.
+		worktree := ""
+		if tasks[i].Session != nil {
+			worktree = strings.TrimSpace(tasks[i].Session.Worktree)
+		}
+		tasks[i].Session = nil
+		tasks[i].HasTmuxSession = false
+		if !active {
 			continue
 		}
 
 		state := domain.SessionBusy
 		var startedAt *time.Time
-		worktree := ""
-		if tasks[i].Session != nil {
-			worktree = strings.TrimSpace(tasks[i].Session.Worktree)
-		}
 		snapshotSession, snapshotOK := snapshotByKey[taskKey]
 		projectionSession, projectionOK := projectionByKey[taskKey]
-		session, ok := sessionByKey[taskKey]
-		if ok {
+		if sessionOK {
 			startedAt = sessionProjectionStartedAtForTaskDisplay(snapshotSession, snapshotOK, projectionSession, projectionOK)
 			switch session.State {
 			case daemonstate.SessionStatePaused:
@@ -4009,6 +4124,7 @@ func (d *Daemon) enrichTasksWithSessionState(ctx context.Context, projectID stri
 			UpdatedAt:         session.UpdatedAt,
 			Worktree:          worktree,
 		}
+		tasks[i].HasTmuxSession = true
 	}
 
 	return tasks

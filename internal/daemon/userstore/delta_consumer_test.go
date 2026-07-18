@@ -195,6 +195,34 @@ func TestApplyProjectMaterializedIssuesUpdatesCurrentStateWithoutOrderingItByDel
 	}
 }
 
+func TestRootUserProjectionSuppressesTerminalSessionAcrossPublicationPaths(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, time.July, 17, 3, 0, 0, 0, time.UTC)
+	state := testDeltaState("p", 1, "terminal-bootstrap")
+	terminal := domain.Task{
+		ID: "closed", Title: "closed", Status: domain.StatusDone, Type: domain.TypeBug,
+		CreatedAt: now.Add(-time.Hour), UpdatedAt: now,
+		Session:        &domain.Session{IssueID: "closed", State: domain.SessionBusy, Activity: "idle", ActivitySource: "hooks", UpdatedAt: now},
+		HasTmuxSession: true,
+	}
+	if err := store.ReplaceProject(ctx, ProjectInput{ProjectID: "p", Name: "P", Path: "/p", DBPath: "/p/db", Tasks: []domain.Task{terminal}, Delta: &state}); err != nil {
+		t.Fatal(err)
+	}
+	assertSuppressed := func() {
+		t.Helper()
+		project := projectSnapshot(t, store, "p")
+		if len(project.Tasks) != 1 || project.Tasks[0].Session != nil || project.Tasks[0].HasTmuxSession {
+			t.Fatalf("terminal root projection exposed healthy session: %+v", project.Tasks)
+		}
+	}
+	assertSuppressed()
+	if err := store.ApplyProjectMaterializedIssues(ctx, "p", []ProjectDeltaChange{{IssueID: terminal.ID.String(), Issue: &terminal}}); err != nil {
+		t.Fatal(err)
+	}
+	assertSuppressed()
+}
+
 func TestApplyProjectDeltaAtomicallyAdvancesEmptySourceAndAffectedCurrentIssue(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()

@@ -12,6 +12,7 @@ const (
 	CommandMailSend         = "mail.send"
 	CommandMailList         = "mail.list"
 	CommandMailWatch        = "mail.watch"
+	EventMailAppended       = "mail.appended"
 )
 
 type FanoutCommandBody struct {

@@ -6527,6 +6527,7 @@ func issueDoctorSQLiteWALDiagnostics(ctx context.Context, deps *Dependencies, op
 		"open_connections":           diag.OpenConnections,
 		"in_use":                     diag.InUse,
 		"idle":                       diag.Idle,
+		"stores":                     diag.Stores,
 	}
 	checkpoint := diag.Checkpoint
 	if checkpoint != nil {
@@ -9498,8 +9499,11 @@ func renderPrimeOrchestrationSection(snapshot protocol.OrchestrationSnapshot) st
 		b.WriteString("- Runtime persistence guard: daemon-enforced; idle/turn completion wakes this parent while direct nested roots remain, except after complete-check passes or while explicit human acceptance is pending.\n")
 	}
 	fmt.Fprintf(&b, "- Capacity: active=%d runnable=%d total=%d/%d; wave limit=%d.\n", snapshot.Capacity.DirectActiveCount, snapshot.Capacity.DirectRunnableCount, snapshot.Capacity.TotalCountingCapacityCount, snapshot.Constraints.AgentCapacity, snapshot.Constraints.StartLimit)
-	if validation := snapshot.ValidationCapacity; validation != nil && (len(validation.Active) > 0 || len(validation.Queued) > 0) {
-		fmt.Fprintf(&b, "- Validation capacity: active=%d queued=%d revision=%d; inspect with `az validation status`.\n", len(validation.Active), len(validation.Queued), validation.Revision)
+	if validation := snapshot.ValidationCapacity; validation != nil && (validation.Freshness != domain.ValidationSnapshotFresh || len(validation.Active) > 0 || len(validation.Queued) > 0) {
+		fmt.Fprintf(&b, "- Validation capacity: freshness=%s active=%d queued=%d revision=%d; inspect with `az validation status`.\n", validation.Freshness, len(validation.Active), len(validation.Queued), validation.Revision)
+		if validation.DegradedReason != "" {
+			fmt.Fprintf(&b, "  - degraded: %s\n", validation.DegradedReason)
+		}
 	}
 	renderCandidates := func(label string, candidates []protocol.OrchestrationCandidate) {
 		if len(candidates) == 0 {

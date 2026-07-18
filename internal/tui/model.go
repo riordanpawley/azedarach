@@ -114,6 +114,13 @@ type drillDownContext struct {
 	parentName string
 }
 
+type drillDownRootBoardState struct {
+	view       domain.BoardView
+	columns    []domain.BoardViewColumnSnapshot
+	ordered    []domain.Task
+	projection domain.BoardViewProjection
+}
+
 type pendingTaskStatus struct {
 	previousStatus domain.Status
 	targetStatus   domain.Status
@@ -235,6 +242,9 @@ type Model struct {
 	selectedBoardViewID             string
 	boardViewScopeGeneration        uint64
 	projectOrchestrator             *projectOrchestratorSnapshot
+	projectOrchestratorRefreshSeq   uint64
+	projectOrchestratorRefreshBusy  bool
+	projectOrchestratorRefreshAgain bool
 	projectOrchestratorActionRunner projectOrchestratorActionRunner
 	jumpMode                        *overlay.JumpMode
 	jumpTargets                     []string
@@ -246,6 +256,7 @@ type Model struct {
 	drillDownParentID               string
 	drillDownParentName             string
 	drillDownTrail                  []drillDownContext
+	drillDownRootBoard              *drillDownRootBoardState
 	pendingCreatedTaskID            string
 	pendingCreatedWorkspaceTaskID   string
 	pendingUIOpenTaskID             string
@@ -253,6 +264,8 @@ type Model struct {
 	openCreatedTaskInWorkspace      bool
 	openSessionSelectorOnLoad       bool
 	sessionTreeFilterOnly           bool
+	childVisibilityGeneration       uint64
+	taskWorkspaceRefreshSeq         uint64
 	runtimeSignalsByTask            map[string]board.RuntimeSignals
 	runtimeSignalWorktreeByTask     map[string]string
 	runtimeSignalBranchByTask       map[string]string
@@ -539,7 +552,8 @@ func (m Model) openTaskWorkspaceByID(taskID string) (tea.Model, tea.Cmd) {
 		if m.daemonClient == nil {
 			return m, nil
 		}
-		return m, m.refreshTaskWorkspaceInBackgroundCmd(taskID)
+		cmd := m.refreshTaskWorkspaceInBackgroundCmd(taskID)
+		return m, cmd
 	}
 
 	m.overlayStack.RemoveTaskWorkspaces()
@@ -548,9 +562,11 @@ func (m Model) openTaskWorkspaceByID(taskID string) (tea.Model, tea.Cmd) {
 	if m.daemonClient == nil {
 		return m, m.openOverlay(workspace)
 	}
+	workspace.BeginRefresh(taskIDKey(taskID) != "main")
+	refreshCmd := m.refreshTaskWorkspaceInBackgroundCmd(taskID)
 	return m, tea.Batch(
 		m.openOverlay(workspace),
-		m.refreshTaskWorkspaceInBackgroundCmd(taskID),
+		refreshCmd,
 	)
 }
 
@@ -609,7 +625,7 @@ func (m Model) enterDrillDownByID(taskID string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	children := m.getTaskChildren(task.ID.String())
-	if len(children) == 0 {
+	if len(children) == 0 && !m.boardProjectionHasDirectChildren(task.ID.String()) {
 		m.addToast(Toast{
 			Level:   ToastInfo,
 			Message: "No children to drill into (use Space for details/actions)",
@@ -620,7 +636,9 @@ func (m Model) enterDrillDownByID(taskID string) (tea.Model, tea.Cmd) {
 	m.overlayStack.Pop()
 	m.enterDrillDown(task.ID.String(), task.Title)
 	columns := m.buildColumns()
-	m.nav.JumpToTaskByID(columns, children[0].ID.String())
+	if len(children) > 0 {
+		m.nav.JumpToTaskByID(columns, children[0].ID.String())
+	}
 	m.ensureCursorVisible(columns)
 	issueIDs := make([]string, 0, len(children)+1)
 	issueIDs = append(issueIDs, task.ID.String())
@@ -682,6 +700,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.nav.JumpToTaskByID(columns, exitedParentID)
 			}
 			m.ensureCursorVisible(columns)
+			if !m.isDrillDownActive() && !m.scope.IsGlobal() {
+				m.boardRefreshing = true
+				return m, m.scheduleIssuesRefreshCmd()
+			}
 			return m, nil
 		}
 		if m.editor.IsSelect() {
@@ -699,10 +721,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.editor.IsFilterActive() || m.sessionTreeFilterOnly {
+			refreshSessionTreeProjection := m.sessionTreeFilterOnly
 			m.editor.ClearFilters()
 			m.sessionTreeFilterOnly = false
+			if refreshSessionTreeProjection {
+				m.childVisibilityGeneration++
+			}
 			columns := m.buildColumns()
 			m.ensureCursorVisible(columns)
+			if refreshSessionTreeProjection {
+				cmd := m.refreshSessionTreeProjectionCmd()
+				return m, cmd
+			}
 		}
 		return m, nil
 	}
@@ -797,6 +827,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case keybinds.ActionToggleSessionTreeFilter:
 		m.sessionTreeFilterOnly = !m.sessionTreeFilterOnly
+		m.childVisibilityGeneration++
 		columns := m.buildColumns()
 		m.ensureCursorVisible(columns)
 		if m.sessionTreeFilterOnly {
@@ -812,7 +843,8 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				Expires: time.Now().Add(2 * time.Second),
 			})
 		}
-		return m, nil
+		cmd := m.refreshSessionTreeProjectionCmd()
+		return m, cmd
 
 	case keybinds.ActionOpenSort: // Sort menu
 		return m, m.openOverlay(overlay.NewSortMenu(m.editor.GetSort()))
@@ -836,7 +868,7 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if task == nil {
 			return m, nil
 		}
-		m.beginMutationFeedback(fmt.Sprintf("Attach queued for %s", task.ID))
+		m.beginMutationFeedback(fmt.Sprintf("Attaching to %s", task.ID))
 		return m, m.attachSessionCmd(task.ID.String())
 
 	case keybinds.ActionCreateTask: // Create task
@@ -1188,6 +1220,8 @@ type issuesLoadedMsg struct {
 	stale           bool
 	freshnessHint   string
 	reconcileWarn   error
+	visibilityGen   uint64
+	visibilitySet   bool
 }
 
 type issuesErrorMsg struct {
@@ -1307,6 +1341,7 @@ type boardViewMutatedMsg struct {
 
 type projectOrchestratorLoadedMsg struct {
 	project projectOrchestratorSnapshot
+	seq     uint64
 	err     error
 }
 
@@ -1740,6 +1775,8 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 					refreshSeq:     refreshSeq,
 					projectID:      projectID,
 					scopedParentID: scopedParentID,
+					visibilityGen:  m.childVisibilityGeneration,
+					visibilitySet:  true,
 					stale:          true,
 					freshnessHint:  m.taskSnapshotTimeoutHint(timeoutErr),
 				}
@@ -1750,6 +1787,8 @@ func (m Model) loadIssuesCmd() tea.Cmd {
 			refreshSeq:      refreshSeq,
 			projectID:       projectID,
 			scopedParentID:  scopedParentID,
+			visibilityGen:   m.childVisibilityGeneration,
+			visibilitySet:   true,
 			tasks:           snapshot.Tasks,
 			boardView:       snapshot.View,
 			boardColumns:    snapshot.Columns,
@@ -1987,6 +2026,8 @@ func (m Model) loadIssuesAfterRuntimeReconcileCmd() tea.Cmd {
 					refreshSeq:     refreshSeq,
 					projectID:      projectID,
 					scopedParentID: scopedParentID,
+					visibilityGen:  m.childVisibilityGeneration,
+					visibilitySet:  true,
 					stale:          true,
 					freshnessHint:  m.taskSnapshotTimeoutHint(timeoutErr),
 					reconcileWarn:  reconcileWarn,
@@ -1999,6 +2040,8 @@ func (m Model) loadIssuesAfterRuntimeReconcileCmd() tea.Cmd {
 			refreshSeq:      refreshSeq,
 			projectID:       projectID,
 			scopedParentID:  scopedParentID,
+			visibilityGen:   m.childVisibilityGeneration,
+			visibilitySet:   true,
 			tasks:           snapshot.Tasks,
 			boardView:       snapshot.View,
 			boardColumns:    snapshot.Columns,
@@ -2056,6 +2099,8 @@ func (m Model) loadIssuesAfterIssueReconcileCmd(issueIDs []string) tea.Cmd {
 					refreshSeq:     refreshSeq,
 					projectID:      projectID,
 					scopedParentID: scopedParentID,
+					visibilityGen:  m.childVisibilityGeneration,
+					visibilitySet:  true,
 					stale:          true,
 					freshnessHint:  m.taskSnapshotTimeoutHint(timeoutErr),
 					reconcileWarn:  reconcileWarn,
@@ -2068,6 +2113,8 @@ func (m Model) loadIssuesAfterIssueReconcileCmd(issueIDs []string) tea.Cmd {
 			refreshSeq:      refreshSeq,
 			projectID:       projectID,
 			scopedParentID:  scopedParentID,
+			visibilityGen:   m.childVisibilityGeneration,
+			visibilitySet:   true,
 			tasks:           snapshot.Tasks,
 			boardView:       snapshot.View,
 			boardColumns:    snapshot.Columns,
@@ -2222,7 +2269,20 @@ func (m Model) readTaskSnapshot(ctx context.Context, client *daemonclient.Client
 	if parentID := strings.TrimSpace(m.drillDownParentID); parentID != "" {
 		return client.GetChildBoardSnapshotWithMode(ctx, parentID, daemonclient.ReadWaitModeExplicit)
 	}
-	return client.BoardSnapshotWithMode(ctx, daemonclient.ReadWaitModeExplicit)
+	var showChildren *bool
+	if m.sessionTreeFilterOnly {
+		show := true
+		showChildren = &show
+	}
+	return client.BoardSnapshotWithOptions(ctx, daemonclient.BoardSnapshotOptions{ShowChildren: showChildren}, daemonclient.ReadWaitModeExplicit)
+}
+
+func (m *Model) refreshSessionTreeProjectionCmd() tea.Cmd {
+	if m.scope.IsGlobal() {
+		m.globalLoadSeq++
+		return m.loadGlobalBoardCmd(m.globalLoadSeq)
+	}
+	return m.scheduleIssuesRefreshCmd()
 }
 
 func (m Model) taskSnapshotTimeoutHint(timeoutErr *daemonclient.ReadWaitTimeoutError) string {
@@ -2474,6 +2534,8 @@ func (m Model) attachDaemonCmd() tea.Cmd {
 
 		return issuesLoadedMsg{
 			projectID:       projectID,
+			visibilityGen:   m.childVisibilityGeneration,
+			visibilitySet:   true,
 			tasks:           snapshot.Tasks,
 			boardView:       snapshot.View,
 			boardColumns:    snapshot.Columns,
@@ -2513,6 +2575,7 @@ func (m *Model) rebindProjectContext(project config.Project, projectConfig *conf
 	m.repoDir = project.Path
 	m.refreshDaemonProjectRouteID()
 	m.rebuildProjectScopedServices()
+	m.reconcileProjectOrchestratorRoute()
 	if m.daemonClient != nil {
 		m.daemonClient.WithProjectRouteID(m.daemonProjectRouteIDValue())
 	}
@@ -3597,6 +3660,7 @@ type closeCleanupTaskSummary struct {
 
 type refreshTaskWorkspaceResultMsg struct {
 	projectID     string
+	refreshSeq    uint64
 	revision      uint64
 	taskID        string
 	hasTask       bool
@@ -3604,32 +3668,46 @@ type refreshTaskWorkspaceResultMsg struct {
 	tasks         []domain.Task
 	lastCheckedAt time.Time
 	freshness     protocol.TaskListFreshness
-	reconcileErr  error
 	snapshotErr   error
-	decisionLinks []overlay.DecisionLinkSummary
-	decisionErr   error
 }
 
-func (m Model) refreshTaskWorkspaceInBackgroundCmd(taskID string) tea.Cmd {
+type refreshTaskWorkspaceReconcileResultMsg struct {
+	projectID  string
+	refreshSeq uint64
+	taskID     string
+	err        error
+}
+
+type refreshTaskWorkspaceDecisionResultMsg struct {
+	projectID     string
+	refreshSeq    uint64
+	taskID        string
+	decisionLinks []overlay.DecisionLinkSummary
+	err           error
+}
+
+func (m *Model) refreshTaskWorkspaceInBackgroundCmd(taskID string) tea.Cmd {
+	if m == nil {
+		return nil
+	}
 	projectID := m.daemonProjectID()
-	return func() tea.Msg {
-		msg := refreshTaskWorkspaceResultMsg{projectID: projectID, taskID: taskID}
-		if m.daemonClient == nil {
+	client := m.daemonClient
+	issueID := strings.TrimSpace(taskID)
+	includeRuntimeAndDecisions := issueID != "" && taskIDKey(issueID) != "main" && client != nil
+	if workspace, ok := m.overlayStack.Current().(*overlay.TaskWorkspaceOverlay); ok && naming.IssueIDsEqual(workspace.TaskID(), taskID) {
+		workspace.BeginRefresh(includeRuntimeAndDecisions)
+	}
+	m.taskWorkspaceRefreshSeq++
+	refreshSeq := m.taskWorkspaceRefreshSeq
+	detailCmd := func() tea.Msg {
+		msg := refreshTaskWorkspaceResultMsg{projectID: projectID, refreshSeq: refreshSeq, taskID: taskID}
+		if client == nil {
+			msg.snapshotErr = fmt.Errorf("daemon client unavailable")
 			return msg
 		}
-
-		issueID := strings.TrimSpace(taskID)
-		if issueID != "" && taskIDKey(issueID) != "main" {
-			reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 8*time.Second)
-			if _, err := m.daemonClient.ReconcileRuntimeIssues(reconcileCtx, []string{issueID}); err != nil {
-				msg.reconcileErr = err
-			}
-			reconcileCancel()
-		}
-
 		snapshotCtx, snapshotCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer snapshotCancel()
-		snapshot, err := m.daemonClient.GetTaskSnapshotWithMode(snapshotCtx, msg.taskID, daemonclient.ReadWaitModeExplicit)
+		snapshot, err := client.GetTaskSnapshotWithMode(snapshotCtx, msg.taskID, daemonclient.ReadWaitModeExplicit)
 		if err != nil {
 			msg.snapshotErr = err
 			return msg
@@ -3643,27 +3721,8 @@ func (m Model) refreshTaskWorkspaceInBackgroundCmd(taskID string) tea.Cmd {
 		msg.revision = snapshot.Revision
 		msg.lastCheckedAt = snapshot.LastCheckedAt
 		msg.freshness = snapshot.Freshness
-
-		// Fetch decision links for this issue. Failure here is non-fatal — the rest of the
-		// refresh continues without a Decisions section. The decision feature is new and
-		// the daemon may not yet expose it on older builds.
-		if issueID != "" && taskIDKey(issueID) != "main" {
-			decisionCtx, decisionCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			result, decisionErr := m.daemonClient.ListDecisionLinks(decisionCtx, daemonclient.DecisionLinkListRequest{
-				TargetKind:       daemonclient.DecisionTargetIssue,
-				TargetID:         issueID,
-				IncludeDecisions: true,
-			})
-			decisionCancel()
-			if decisionErr != nil {
-				msg.decisionErr = decisionErr
-			} else {
-				msg.decisionLinks = decisionLinkSummariesFrom(result)
-			}
-		}
-
 		for _, candidate := range snapshot.Tasks {
-			if candidate.ID.String() == msg.taskID {
+			if naming.IssueIDsEqual(candidate.ID.String(), msg.taskID) {
 				msg.hasTask = true
 				msg.task = candidate
 				return msg
@@ -3672,6 +3731,35 @@ func (m Model) refreshTaskWorkspaceInBackgroundCmd(taskID string) tea.Cmd {
 		msg.snapshotErr = fmt.Errorf("task %s not found in refreshed snapshot", msg.taskID)
 		return msg
 	}
+	cmds := []tea.Cmd{detailCmd}
+	if !includeRuntimeAndDecisions {
+		return tea.Batch(cmds...)
+	}
+	cmds = append(cmds,
+		func() tea.Msg {
+			msg := refreshTaskWorkspaceReconcileResultMsg{projectID: projectID, refreshSeq: refreshSeq, taskID: issueID}
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			_, msg.err = client.ReconcileRuntimeIssues(ctx, []string{issueID})
+			return msg
+		},
+		func() tea.Msg {
+			msg := refreshTaskWorkspaceDecisionResultMsg{projectID: projectID, refreshSeq: refreshSeq, taskID: issueID}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			result, err := client.ListDecisionLinks(ctx, daemonclient.DecisionLinkListRequest{
+				TargetKind:       daemonclient.DecisionTargetIssue,
+				TargetID:         issueID,
+				IncludeDecisions: true,
+			})
+			msg.err = err
+			if err == nil {
+				msg.decisionLinks = decisionLinkSummariesFrom(result)
+			}
+			return msg
+		},
+	)
+	return tea.Batch(cmds...)
 }
 
 // decisionLinkSummariesFrom maps a daemonclient response into the overlay-local
@@ -6628,6 +6716,15 @@ func (m Model) getTaskChildren(parentID string) []domain.Task {
 		}
 	}
 	return children
+}
+
+func (m Model) boardProjectionHasDirectChildren(parentID string) bool {
+	for _, progress := range m.boardProjection.ChildProgress {
+		if progress.Total > 0 && naming.IssueIDsEqual(progress.ParentID.String(), parentID) {
+			return true
+		}
+	}
+	return false
 }
 
 type taskCreatedResultMsg struct {

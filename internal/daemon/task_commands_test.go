@@ -2642,12 +2642,18 @@ func TestHandleTaskListIncludesDependenciesOnlyWhenRequested(t *testing.T) {
 		t.Fatalf("full dependencies = %+v, want blocker %s", fullTask.Dependencies, blockerID)
 	}
 
+	showChildren := true
+	boardBody, err := json.Marshal(protocol.BoardSnapshotRequestBody{ShowChildren: &showChildren})
+	if err != nil {
+		t.Fatalf("marshal board child-visibility override: %v", err)
+	}
 	boardResp, err := d.handleBoardFetch(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "req-list-deps-board",
 		Kind:            protocol.EnvelopeKindCommand,
 		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
 		Command:         "board.fetch",
+		Body:            boardBody,
 	})
 	if err != nil {
 		t.Fatalf("handle board.fetch error: %v", err)
@@ -5645,7 +5651,7 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 	if resp.OK || resp.Error == nil {
 		t.Fatalf("first handleTaskClose response = %+v, want cleanup failure", resp)
 	}
-	for _, want := range []string{"phase runtime_projection_repair", "Integration already completed", sourceBranch, "landed on main", "cleanup/status remains", "Next:"} {
+	for _, want := range []string{"phase worktree_cleanup", "Integration already completed", sourceBranch, "landed on main", "cleanup/status remains", "Next:"} {
 		if !strings.Contains(resp.Error.Message, want) {
 			t.Fatalf("first close error = %q, missing %q", resp.Error.Message, want)
 		}
@@ -7168,6 +7174,21 @@ func TestTaskCloseNoChangesIntegrationResultCarriesRecoveredCanonicalValidation(
 	attempt := result.ValidationAttempts[0]
 	if attempt.CandidateHead != targetOID || attempt.Status != domain.IntegrationCandidateValidationPassed || !attempt.Canonical {
 		t.Fatalf("validation attempt = %+v, want canonical exact target %s", attempt, targetOID)
+	}
+}
+
+func TestFailedCandidateValidationAttemptSelectsLatestTypedFailure(t *testing.T) {
+	attempt, ok := failedCandidateValidationAttempt([]domain.IntegrationCandidateValidationAttempt{
+		{CandidateHead: "old", Status: domain.IntegrationCandidateValidationFailed, Message: "old failure"},
+		{CandidateHead: "cancelled", Status: domain.IntegrationCandidateValidationCancelled},
+		{CandidateHead: "exact", Status: domain.IntegrationCandidateValidationFailed, Message: "actionable failure"},
+	})
+	if !ok || attempt.CandidateHead != "exact" || attempt.Message != "actionable failure" {
+		t.Fatalf("failedCandidateValidationAttempt() = (%+v, %t), want latest typed failure", attempt, ok)
+	}
+	message, ok := candidateValidationFailureMessage([]domain.IntegrationCandidateValidationAttempt{attempt})
+	if !ok || !strings.Contains(message, "candidate validation for revision exact failed") || !strings.Contains(message, "actionable failure") || strings.Contains(message, "merge failed") {
+		t.Fatalf("candidateValidationFailureMessage() = (%q, %t), want typed actionable classification", message, ok)
 	}
 }
 
@@ -14681,7 +14702,7 @@ func TestHandleTaskSnapshotExportUsesProjectionSessions(t *testing.T) {
 	}
 }
 
-func TestHandleTaskGetEnqueuesOnlyRequestedIssueWorktreeRefreshAsync(t *testing.T) {
+func TestHandleTaskGetDoesNotEnqueueWorktreeRefresh(t *testing.T) {
 	ctx := context.Background()
 	projectID := protocol.DefaultProjectID
 	repoDir := t.TempDir()
@@ -14719,12 +14740,10 @@ func TestHandleTaskGetEnqueuesOnlyRequestedIssueWorktreeRefreshAsync(t *testing.
 		}
 	}
 
-	statusPaths := make(chan string, 4)
-	statusRelease := make(chan struct{})
+	statusCalls := 0
 	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
 		if len(args) >= 4 && args[0] == "-C" && args[2] == "status" && args[3] == "--porcelain" {
-			statusPaths <- args[1]
-			<-statusRelease
+			statusCalls++
 			return " M changed.go\n", nil
 		}
 		return "", nil
@@ -14760,58 +14779,122 @@ func TestHandleTaskGetEnqueuesOnlyRequestedIssueWorktreeRefreshAsync(t *testing.
 	if err != nil {
 		t.Fatalf("marshal task get request: %v", err)
 	}
-	type taskGetResult struct {
-		resp protocol.ResponseEnvelope
-		err  error
+	resp, err := d.handleTaskGet(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-get-projection-only",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.get",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            reqBody,
+	})
+	if err != nil {
+		t.Fatalf("handleTaskGet returned error: %v", err)
 	}
-	resultCh := make(chan taskGetResult, 1)
-	go func() {
-		resp, err := d.handleTaskGet(ctx, protocol.RequestEnvelope{
-			ProtocolVersion: protocol.CurrentVersion,
-			RequestID:       "req-task-get-refresh",
-			Kind:            protocol.EnvelopeKindCommand,
-			Command:         "task.get",
-			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-			Body:            reqBody,
-		})
-		resultCh <- taskGetResult{resp: resp, err: err}
-	}()
-
-	select {
-	case got := <-statusPaths:
-		if got != targetWorktree {
-			t.Fatalf("refreshed worktree = %q, want %q", got, targetWorktree)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for target issue worktree refresh")
+	if !resp.OK {
+		t.Fatalf("task.get response not OK: %+v", resp.Error)
 	}
 
-	var result taskGetResult
-	select {
-	case result = <-resultCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("task.get did not return while git status refresh was still running")
-	}
-	if result.err != nil {
-		t.Fatalf("handleTaskGet returned error: %v", result.err)
-	}
-	if !result.resp.OK {
-		t.Fatalf("task.get response not OK: %+v", result.resp.Error)
-	}
-
-	payload, err := protocol.DecodeTaskListSnapshotPayload(result.resp.Body)
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
 	if err != nil {
 		t.Fatalf("decode task.get body: %v", err)
 	}
 	if len(payload.Tasks) != 1 {
 		t.Fatalf("response task count = %d, want 1", len(payload.Tasks))
 	}
-	close(statusRelease)
+	if counters := queue.snapshotCounters(); counters.Enqueued != 0 {
+		t.Fatalf("task.get enqueued worktree refresh: %+v", counters)
+	}
+	if statusCalls != 0 {
+		t.Fatalf("task.get invoked git status %d times", statusCalls)
+	}
+}
 
-	select {
-	case got := <-statusPaths:
-		t.Fatalf("unexpected extra worktree refresh for %q", got)
-	case <-time.After(100 * time.Millisecond):
+func TestHandleTaskGetMaterializedReadDoesNotRefreshRuntimeOrGit(t *testing.T) {
+	ctx := context.Background()
+	const (
+		projectID = "proj-detail-read"
+		issueID   = "az-1"
+		worktree  = "/tmp/proj-detail-read-az-1"
+	)
+
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   issueID,
+		Path:      worktree,
+		Branch:    "az/az-1",
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed worktree state: %v", err)
+	}
+
+	queue := newReconcileQueue[*git.GitStatus](reconcileQueueConfig{Name: "detail_read_git_status", Workers: 1, Logger: slog.Default()})
+	t.Cleanup(func() { _ = queue.Close() })
+	gitAdapter := &gitServiceAdapter{
+		client:             git.NewClient(&recordingGitRunner{}, slog.Default()),
+		runtimeStateStore:  store,
+		statusRefreshQueue: queue,
+		logger:             slog.Default(),
+		baseBranch:         "main",
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore {
+			return store
+		},
+	}
+	hydrateCalls := 0
+	materializer := newProjectReadMaterializer(projectID, nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		hydrateCalls++
+		return tasks, nil
+	})
+	detailTask := domain.Task{
+		ID:          issueID,
+		Title:       "Durable detail",
+		Description: "Return without external Git",
+		Status:      domain.StatusInProgress,
+		Type:        domain.TypeTask,
+	}
+	materializer.canonical[issueID] = detailTask
+	materializer.tasks[issueID] = detailTask
+	materializer.metadata.Health = "healthy"
+	d := &Daemon{
+		cfg:              Config{BaseBranch: "main", Logger: slog.Default()},
+		gitStatusAdapter: gitAdapter,
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: store,
+		},
+		materializersStarted: true,
+		materializers: map[string]*projectReadMaterializer{
+			projectID: materializer,
+		},
+		revision: map[string]uint64{projectID: 7},
+	}
+	body, err := json.Marshal(map[string]string{"task_id": issueID})
+	if err != nil {
+		t.Fatalf("marshal task get: %v", err)
+	}
+	resp, err := d.handleTaskGet(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-detail-projection-only",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.get",
+		Meta:            protocol.Metadata{ProjectID: projectID},
+		Body:            body,
+	})
+	if err != nil || !resp.OK {
+		t.Fatalf("task.get response = %+v, err = %v", resp.Error, err)
+	}
+	if counters := queue.snapshotCounters(); counters.Enqueued != 0 {
+		t.Fatalf("task.get enqueued external Git refreshes: %+v", counters)
+	}
+	if hydrateCalls != 0 {
+		t.Fatalf("task.get synchronously refreshed runtime enrichment %d times, want projection-only read", hydrateCalls)
+	}
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatalf("decode task.get response: %v", err)
+	}
+	if len(payload.Tasks) != 1 || payload.Tasks[0].Description != "Return without external Git" {
+		t.Fatalf("task.get payload = %+v, want durable detail", payload.Tasks)
 	}
 }
 

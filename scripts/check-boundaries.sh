@@ -6,6 +6,7 @@ cd "$repo_root"
 
 module_path="$(go list -m -f '{{.Path}}')"
 prefix="${module_path}/internal"
+cmd_az="${module_path}/cmd/az"
 
 violations=0
 
@@ -26,6 +27,9 @@ has_prefix() {
 
 is_authority_service_import() {
   local pkg="$1"
+  if is_project_authority_service_import "$pkg"; then
+    return 0
+  fi
   case "$pkg" in
     "$prefix/services/git"|"$prefix/services/git/"*|\
     "$prefix/services/issues"|"$prefix/services/issues/"*|\
@@ -33,6 +37,33 @@ is_authority_service_import() {
     "$prefix/services/tmux"|"$prefix/services/tmux/"*|\
     "$prefix/services/devserver"|"$prefix/services/devserver/"*|\
     "$prefix/services/pr"|"$prefix/services/pr/"*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+is_project_authority_service_import() {
+  local pkg="$1"
+  case "$pkg" in
+    "$prefix/services/project"|"$prefix/services/project/"*|\
+    "$prefix/services/projects"|"$prefix/services/projects/"*|\
+    "$prefix/projectservice"|"$prefix/projectservice/"*|\
+    "$prefix/project_service"|"$prefix/project_service/"*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+is_config_authority_import() {
+  local pkg="$1"
+  case "$pkg" in
+    "$prefix/client"|"$prefix/client/"*|\
+    "$prefix/daemon"|"$prefix/daemon/"*|\
+    "$prefix/services"|"$prefix/services/"*|\
+    "$prefix/tui"|"$prefix/tui/"*|\
+    "$prefix/ui"|"$prefix/ui/"*)
       return 0
       ;;
   esac
@@ -72,6 +103,16 @@ while IFS= read -r line; do
       fail "$importer imports authority service $imported"
     fi
 
+    if has_prefix "$importer" "$prefix/config" \
+      && is_config_authority_import "$imported"; then
+      fail "$importer imports runtime/authority package $imported"
+    fi
+
+    if [[ "$importer" == "$cmd_az" ]] \
+      && is_project_authority_service_import "$imported"; then
+      fail "$importer imports project-authority service $imported"
+    fi
+
     if has_prefix "$importer" "$prefix/ui" \
       && is_ui_authority_service_import "$imported"; then
       fail "$importer imports authority service $imported"
@@ -82,7 +123,13 @@ while IFS= read -r line; do
       fail "$importer imports forbidden runtime package $imported"
     fi
   done
-done < <(go list -f '{{.ImportPath}} -> {{range .Imports}}{{.}} {{end}}' ./internal/...)
+done < <(go list -f '{{.ImportPath}} -> {{range .Imports}}{{.}} {{end}}' ./internal/... ./cmd/az)
+
+if rg -n --no-heading --glob '*.go' --glob '!**/*_test.go' \
+  '\bProjectService\b' \
+  internal/config internal/cli cmd/az >/dev/null; then
+  fail "CLI/config project resolution depends on a shared ProjectService abstraction"
+fi
 
 if rg -n --no-heading --glob '!**/*_test.go' \
   'exec\.Command(Context)?\([^)]*"git"|runGitCommand\(|newGitCommand\(' \

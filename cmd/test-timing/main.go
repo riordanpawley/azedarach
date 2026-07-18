@@ -94,6 +94,9 @@ func run() error {
 		fmt.Printf("aggregate=median samples=%d\n", *samples)
 	}
 	fmt.Printf("report=%s\nartifacts=%s\n", reportPath, outputDir)
+	if failureSummary := testtiming.FailureSummary(measurement.Failures); failureSummary != "" {
+		fmt.Fprintf(os.Stderr, "actionable test failures:\n%s\n", failureSummary)
+	}
 	return runErr
 }
 

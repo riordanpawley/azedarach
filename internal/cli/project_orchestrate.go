@@ -53,6 +53,12 @@ func printProjectOrchestrationSnapshot(s protocol.OrchestrationSnapshot) {
 	fmt.Printf("Capacity: workers=%d/%d runnable=%d wave-limit=%d\n", s.Capacity.TotalCountingCapacityCount, s.Constraints.AgentCapacity, len(s.Runnable), s.Constraints.StartLimit)
 	fmt.Printf("Queues: ready=%d review=%d waiting-human=%d owned-elsewhere=%d\n", len(s.Runnable), len(s.Reviews), len(s.Interactions), len(s.OwnershipConflicts))
 	fmt.Printf("Board health: healthy=%t open=%d inspected=%d/%d\n", s.Health.Healthy, s.Health.OpenIssueCount, s.Health.InspectedCount, s.Health.InspectLimit)
+	if validation := s.ValidationCapacity; validation != nil {
+		fmt.Printf("Validation capacity: freshness=%s active=%d queued=%d revision=%d\n", validation.Freshness, len(validation.Active), len(validation.Queued), validation.Revision)
+		if validation.DegradedReason != "" {
+			fmt.Printf("- validation capacity: %s\n", validation.DegradedReason)
+		}
+	}
 	for _, diagnostic := range s.Health.Diagnostics {
 		fmt.Printf("- health: %s\n", diagnostic)
 	}
