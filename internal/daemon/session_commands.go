@@ -5384,13 +5384,7 @@ func sessionLaunchContextEnvAssignments(projectID, issueID, sessionID string) []
 func sessionLaunchContextExportCommand(projectID, issueID, sessionID string) string {
 	assignments := make([]string, 0, 3)
 	for _, assignment := range sessionLaunchContextEnvAssignments(projectID, issueID, sessionID) {
-		if assignment.Value == "" {
-			continue
-		}
 		assignments = append(assignments, assignment.Key+"="+singleQuoteForShell(assignment.Value))
-	}
-	if len(assignments) == 0 {
-		return ""
 	}
 	return "export " + strings.Join(assignments, " ")
 }
@@ -5741,9 +5735,6 @@ func (d *Daemon) exportSessionContextEnv(ctx context.Context, projectID, issueID
 
 func (d *Daemon) setSessionContextEnv(ctx context.Context, projectID, issueID, sessionID string) error {
 	for _, assignment := range sessionLaunchContextEnvAssignments(projectID, issueID, sessionID) {
-		if assignment.Value == "" {
-			continue
-		}
 		if err := d.tmux.SetEnvironment(ctx, sessionID, assignment.Key, assignment.Value); err != nil {
 			return err
 		}

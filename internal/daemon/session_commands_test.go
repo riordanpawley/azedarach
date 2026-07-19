@@ -9702,6 +9702,23 @@ func TestSessionContextPreservesInheritedPath(t *testing.T) {
 	}
 }
 
+func TestSessionContextClearsInheritedIssueForProjectOrchestrator(t *testing.T) {
+	runner := newSessionStartTmuxRunner()
+	runner.env["az-orchestrator-project"] = map[string]string{
+		"AZEDARACH_ISSUE_ID": "stale-parent-issue",
+	}
+	d := &Daemon{tmux: tmux.NewClient(runner, slog.Default())}
+
+	if err := d.setSessionContextEnv(context.Background(), "project-id", "", "az-orchestrator-project"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := runner.env["az-orchestrator-project"]
+	if got["AZEDARACH_PROJECT_ID"] != "project-id" || got["AZEDARACH_ISSUE_ID"] != "" || got["AZEDARACH_SESSION_ID"] != "az-orchestrator-project" {
+		t.Fatalf("session context = %#v, want exact issue-less orchestrator identity", got)
+	}
+}
+
 func TestBuildSessionLaunchCommandDoesNotSerializeAsyncInitCommandsBeforeToolLaunch(t *testing.T) {
 	d := &Daemon{
 		cfg: Config{
@@ -10705,7 +10722,11 @@ fi
 	t.Cleanup(artifact.remove)
 
 	cmd := exec.Command("/bin/sh", "-c", artifact.Command)
-	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+"/usr/bin:/bin", "TRACE="+trace)
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+string(os.PathListSeparator)+"/usr/bin:/bin",
+		"TRACE="+trace,
+		"AZEDARACH_ISSUE_ID=stale-parent-issue",
+	)
 	cmd.Stdin = strings.NewReader("exit\n")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("execute orchestrator launch artifact: %v\n%s", err, out)
