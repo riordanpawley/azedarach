@@ -182,6 +182,119 @@ func TestRuntimeStateStoreManagedAgentIdentityAcknowledgementConvergesAcrossStor
 	}
 }
 
+func TestRuntimeStateStoreManagedAgentExactBindReplayPreservesAcknowledgement(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	first := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	second := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = first.Close(); _ = second.Close() })
+	observedAt := time.Date(2026, time.July, 19, 3, 24, 0, 0, time.UTC)
+	identity := ManagedAgentIdentity{ProjectID: "project", SessionID: "az-dtp", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "restart-exact", ObservedAt: observedAt}
+	if err := first.UpsertManagedAgentIdentity(ctx, identity); err != nil {
+		t.Fatal(err)
+	}
+	acknowledgedAt := observedAt.Add(time.Millisecond)
+	if acknowledged, err := first.AcknowledgeManagedAgentIdentity(ctx, identity, acknowledgedAt); err != nil || !acknowledged {
+		t.Fatalf("acknowledge identity=%t err=%v", acknowledged, err)
+	}
+	replay := identity
+	replay.ObservedAt = observedAt.Add(time.Second)
+	if err := second.UpsertManagedAgentIdentity(ctx, replay); err != nil {
+		t.Fatalf("replay exact bind: %v", err)
+	}
+	got, found, err := second.GetManagedAgentIdentity(ctx, identity.ProjectID, identity.SessionID, identity.LogicalPaneID)
+	if err != nil || !found || !got.ObservedAt.Equal(observedAt) || !got.UpdatedAt.Equal(acknowledgedAt) || !got.UpdatedAt.After(got.ObservedAt) {
+		t.Fatalf("exact replay regressed acknowledgement: %+v found=%t err=%v", got, found, err)
+	}
+}
+
+func TestRuntimeStateStoreManagedAgentReplayOverlappingAcknowledgementStaysReady(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	first := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	second := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = first.Close(); _ = second.Close() })
+	observedAt := time.Date(2026, time.July, 19, 3, 24, 0, 0, time.UTC)
+	identity := ManagedAgentIdentity{ProjectID: "project", SessionID: "az-dtp", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "restart-exact", ObservedAt: observedAt}
+	if err := first.UpsertManagedAgentIdentity(context.Background(), identity); err != nil {
+		t.Fatal(err)
+	}
+
+	ackEntered := make(chan struct{})
+	releaseAck := make(chan struct{})
+	ackCtx := WithSQLiteWriteAttemptHookForTest(context.Background(), func(operation string, _ int) error {
+		if operation == "acknowledge_managed_agent_identity" {
+			close(ackEntered)
+			<-releaseAck
+		}
+		return nil
+	})
+	type result struct {
+		acknowledged bool
+		err          error
+	}
+	ackResult := make(chan result, 1)
+	go func() {
+		acknowledged, err := first.AcknowledgeManagedAgentIdentity(ackCtx, identity, observedAt.Add(time.Millisecond))
+		ackResult <- result{acknowledged: acknowledged, err: err}
+	}()
+	<-ackEntered
+	replayStarted := make(chan struct{})
+	replayResult := make(chan error, 1)
+	go func() {
+		close(replayStarted)
+		replay := identity
+		replay.ObservedAt = observedAt.Add(time.Second)
+		replayResult <- second.UpsertManagedAgentIdentity(context.Background(), replay)
+	}()
+	<-replayStarted
+	close(releaseAck)
+	if got := <-ackResult; got.err != nil || !got.acknowledged {
+		t.Fatalf("overlapped acknowledgement=%t err=%v", got.acknowledged, got.err)
+	}
+	if err := <-replayResult; err != nil {
+		t.Fatalf("overlapped exact replay: %v", err)
+	}
+	got, found, err := second.GetManagedAgentIdentity(context.Background(), identity.ProjectID, identity.SessionID, identity.LogicalPaneID)
+	if err != nil || !found || !got.UpdatedAt.After(got.ObservedAt) {
+		t.Fatalf("overlapped replay erased readiness: %+v found=%t err=%v", got, found, err)
+	}
+}
+
+func TestRuntimeStateStoreManagedAgentNewIncarnationClearsAcknowledgementAndFencesStale(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	observedAt := time.Date(2026, time.July, 19, 3, 24, 0, 0, time.UTC)
+	old := ManagedAgentIdentity{ProjectID: "project", SessionID: "az-dtp", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "restart-old", ObservedAt: observedAt}
+	if err := store.UpsertManagedAgentIdentity(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	if acknowledged, err := store.AcknowledgeManagedAgentIdentity(ctx, old, observedAt.Add(time.Millisecond)); err != nil || !acknowledged {
+		t.Fatalf("acknowledge old identity=%t err=%v", acknowledged, err)
+	}
+	current := old
+	current.PanePID = 200
+	current.AgentIncarnation = "restart-new"
+	current.ObservedAt = observedAt.Add(time.Second)
+	current.UpdatedAt = time.Time{}
+	if err := store.UpsertManagedAgentIdentity(ctx, current); err != nil {
+		t.Fatalf("bind new incarnation: %v", err)
+	}
+	got, found, err := store.GetManagedAgentIdentity(ctx, current.ProjectID, current.SessionID, current.LogicalPaneID)
+	if err != nil || !found || got.AgentIncarnation != current.AgentIncarnation || !got.UpdatedAt.Equal(got.ObservedAt) {
+		t.Fatalf("new incarnation should be unacknowledged: %+v found=%t err=%v", got, found, err)
+	}
+	stale := old
+	stale.ObservedAt = observedAt.Add(500 * time.Millisecond)
+	if err := store.UpsertManagedAgentIdentity(ctx, stale); !errors.Is(err, ErrStaleManagedAgentIdentity) {
+		t.Fatalf("stale identity replay error=%v", err)
+	}
+	after, found, err := store.GetManagedAgentIdentity(ctx, current.ProjectID, current.SessionID, current.LogicalPaneID)
+	if err != nil || !found || after.AgentIncarnation != current.AgentIncarnation || after.PanePID != current.PanePID {
+		t.Fatalf("stale replay replaced current identity: %+v found=%t err=%v", after, found, err)
+	}
+}
+
 func TestRuntimeStateStoreSessionIntentRejectsStaleDaemonReplay(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "runtime.db")

@@ -354,7 +354,10 @@ func (s *RuntimeStateStore) UpsertManagedAgentIdentity(ctx context.Context, iden
 			ON CONFLICT(project_id,session_id,logical_pane_id) DO UPDATE SET
 				tmux_pane_id=excluded.tmux_pane_id,pane_pid=excluded.pane_pid,
 				agent_incarnation=excluded.agent_incarnation,observed_at=excluded.observed_at,updated_at=excluded.updated_at
-			WHERE excluded.observed_at > `+managedAgentIdentityTable+`.observed_at`,
+			WHERE excluded.observed_at > `+managedAgentIdentityTable+`.observed_at
+				AND (excluded.tmux_pane_id <> `+managedAgentIdentityTable+`.tmux_pane_id
+					OR excluded.pane_pid <> `+managedAgentIdentityTable+`.pane_pid
+					OR excluded.agent_incarnation <> `+managedAgentIdentityTable+`.agent_incarnation)`,
 			identity.ProjectID, identity.SessionID, identity.LogicalPaneID, identity.TmuxPaneID,
 			identity.PanePID, identity.AgentIncarnation, identity.ObservedAt.Format(time.RFC3339Nano), identity.UpdatedAt.Format(time.RFC3339Nano))
 		if err != nil {

@@ -228,7 +228,12 @@ func (d *Daemon) ingestAgentActivitySignal(ctx context.Context, req protocol.Req
 		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "agent_activity", OK: false, Message: "missing session_id"})
 		return
 	}
-	if cmd.LogicalPaneID != "" || cmd.AgentIncarnation != "" {
+	identityRequired, identityRequirementErr := d.managedAgentSignalIdentityRequired(ctx, projectID, sessionID, cmd)
+	if identityRequirementErr != nil {
+		out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "managed_agent_identity", OK: false, Message: identityRequirementErr.Error()})
+		return
+	}
+	if identityRequired {
 		accepted, message, err := d.validateManagedAgentSignalIdentity(ctx, projectID, sessionID, cmd)
 		if err != nil {
 			out.Stages = append(out.Stages, protocol.RuntimeSignalStageOutcome{Name: "managed_agent_identity", OK: false, Message: err.Error()})
@@ -305,8 +310,27 @@ func (d *Daemon) ingestAgentActivitySignal(ctx context.Context, req protocol.Req
 	}
 }
 
+func (d *Daemon) managedAgentSignalIdentityRequired(ctx context.Context, projectID, sessionID string, cmd protocol.RuntimeSignalIngestCommandBody) (bool, error) {
+	if strings.TrimSpace(cmd.LogicalPaneID) != "" || strings.TrimSpace(cmd.TmuxPane) != "" || cmd.PanePID != 0 || strings.TrimSpace(cmd.AgentIncarnation) != "" {
+		return true, nil
+	}
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		return false, nil
+	}
+	physicalSessionID := strings.TrimSpace(sessionID)
+	if parent, _, ok := agentScopedSessionParentAndPane(physicalSessionID); ok {
+		physicalSessionID = parent
+	}
+	identities, err := store.ListManagedAgentIdentities(ctx, projectID, physicalSessionID)
+	if err != nil {
+		return false, fmt.Errorf("load managed agent identities: %w", err)
+	}
+	return len(identities) > 0, nil
+}
+
 func (d *Daemon) validateManagedAgentSignalIdentity(ctx context.Context, projectID, sessionID string, cmd protocol.RuntimeSignalIngestCommandBody) (bool, string, error) {
-	if cmd.LogicalPaneID == "" || cmd.TmuxPane == "" || cmd.AgentIncarnation == "" {
+	if cmd.LogicalPaneID == "" || cmd.TmuxPane == "" || cmd.PanePID <= 0 || cmd.AgentIncarnation == "" {
 		return false, "incomplete managed agent identity", nil
 	}
 	if d.tmux == nil {
@@ -331,7 +355,7 @@ func (d *Daemon) validateManagedAgentSignalIdentity(ctx context.Context, project
 	if livePanePID <= 0 {
 		return false, "managed tmux pane is not live", nil
 	}
-	if cmd.PanePID > 0 && cmd.PanePID != livePanePID {
+	if cmd.PanePID != livePanePID {
 		return false, "stale or reused tmux pane process", nil
 	}
 	identity := daemonstate.ManagedAgentIdentity{ProjectID: projectID, SessionID: physicalSessionID, LogicalPaneID: cmd.LogicalPaneID,
