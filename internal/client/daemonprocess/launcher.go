@@ -57,6 +57,7 @@ type Launcher struct {
 	preflightReplace             func(context.Context, daemonCommand) error
 	preflightRollback            func(context.Context, daemonCommand) error
 	captureOwner                 func() (processIdentity, bool, error)
+	verifyDaemonArguments        func(processIdentity, string) error
 }
 
 type daemonCommand struct {
@@ -65,6 +66,7 @@ type daemonCommand struct {
 	dir            string
 	env            []string
 	sourceFallback bool
+	candidateStage string
 	rollbackStage  string
 }
 
@@ -854,34 +856,10 @@ func (l *Launcher) verifyCapturedPredecessor(ctx context.Context, owner processI
 	if !successorManaged || filepath.Clean(filepath.Dir(predecessorGeneration)) != filepath.Clean(filepath.Dir(successorGeneration)) {
 		return errors.New("refuse forced predecessor termination across unrelated install roots")
 	}
-	for _, required := range []struct {
-		flag  string
-		value string
-	}{
-		{flag: "--repo", value: l.RepoDir},
-		{flag: "--socket", value: l.SocketPath},
-		{flag: "--lock", value: l.LockPath},
-	} {
-		if !hasExactProcessArgument(current.arguments, required.flag, required.value) {
-			return fmt.Errorf("refuse forced predecessor termination: command does not match canonical %s", strings.TrimPrefix(required.flag, "--"))
-		}
+	if err := l.verifyCanonicalDaemonArguments(current, "forced predecessor termination"); err != nil {
+		return err
 	}
 	return nil
-}
-
-func hasExactProcessArgument(arguments []string, flag, value string) bool {
-	occurrences := 0
-	matches := 0
-	for i := 0; i < len(arguments); i++ {
-		if arguments[i] != flag {
-			continue
-		}
-		occurrences++
-		if i+1 < len(arguments) && arguments[i+1] == value {
-			matches++
-		}
-	}
-	return occurrences == 1 && matches == 1
 }
 
 func (l *Launcher) signalCapturedPredecessor(ctx context.Context, owner processIdentity, daemonCmd daemonCommand, signal syscall.Signal) error {
@@ -1199,6 +1177,12 @@ func (l *Launcher) Replace(ctx context.Context) (resultErr error) {
 	if err != nil {
 		return fmt.Errorf("resolve daemon replacement candidate: %w", err)
 	}
+	candidateStageOwned := strings.TrimSpace(daemonCmd.candidateStage) != ""
+	defer func() {
+		if candidateStageOwned {
+			resultErr = errors.Join(resultErr, l.cleanupInactiveCandidateStage(daemonCmd))
+		}
+	}()
 	preflight := l.preflightReplace
 	if preflight == nil {
 		preflight = preflightReplacementCommand
@@ -1225,6 +1209,10 @@ func (l *Launcher) Replace(ctx context.Context) (resultErr error) {
 			return fmt.Errorf("preflight daemon predecessor rollback %s before stopping predecessor: %w", predecessorCmd.displayName(), err)
 		}
 	}
+	// Preflight is the last point where the predecessor is guaranteed healthy.
+	// From the first shutdown request onward, retain the verified rollback stage
+	// across every failure; only verified candidate success may remove it.
+	rollbackStageOwned = false
 	if strings.TrimSpace(l.SocketPath) != "" && (ownerPresent || !l.ownsCanonicalRuntime()) {
 		reason := strings.TrimSpace(l.replaceReason)
 		if reason == "" {
@@ -1236,7 +1224,7 @@ func (l *Launcher) Replace(ctx context.Context) (resultErr error) {
 					return err
 				}
 			}
-			rollbackStageOwned = false
+			candidateStageOwned = false
 			return l.startReplacementWithRollback(ctx, daemonCmd, predecessorCmd, predecessorPresent)
 		} else if l.Logger != nil {
 			l.Logger.Warn("graceful daemon socket shutdown failed before replace; evaluating verified predecessor escalation",
@@ -1266,7 +1254,7 @@ func (l *Launcher) Replace(ctx context.Context) (resultErr error) {
 			return fmt.Errorf("inspect daemon socket before replacement start: %w", socketErr)
 		}
 	}
-	rollbackStageOwned = false
+	candidateStageOwned = false
 	return l.startReplacementWithRollback(ctx, daemonCmd, predecessorCmd, predecessorPresent)
 }
 
@@ -1328,6 +1316,27 @@ func (l *Launcher) cleanupInactiveRollbackStage(command daemonCommand) error {
 	return nil
 }
 
+func (l *Launcher) cleanupInactiveCandidateStage(command daemonCommand) error {
+	stageDir := filepath.Clean(strings.TrimSpace(command.candidateStage))
+	if stageDir == "." || stageDir == "" {
+		return nil
+	}
+	if filepath.Clean(filepath.Dir(command.executable)) != stageDir {
+		return errors.New("refuse candidate cleanup whose executable is outside its retained stage")
+	}
+	executableRoot := filepath.Clean(filepath.Join(config.ScopedDaemonRuntimeDir(l.RepoDir), "executables"))
+	if resolvedRoot, err := filepath.EvalSymlinks(executableRoot); err == nil {
+		executableRoot = filepath.Clean(resolvedRoot)
+	}
+	if !strings.HasPrefix(filepath.Base(stageDir), "candidate-") || filepath.Clean(filepath.Dir(stageDir)) != executableRoot {
+		return fmt.Errorf("refuse candidate cleanup outside the scoped executable root: %s", stageDir)
+	}
+	if err := os.RemoveAll(stageDir); err != nil {
+		return fmt.Errorf("remove inactive daemon replacement candidate stage: %w", err)
+	}
+	return nil
+}
+
 func (l *Launcher) materializeReplacementCommand(ctx context.Context, command daemonCommand) (daemonCommand, error) {
 	if !command.sourceFallback {
 		resolvedExecutable, err := resolveCommandExecutable(command)
@@ -1379,7 +1388,7 @@ func (l *Launcher) materializeReplacementCommand(ctx context.Context, command da
 		return daemonCommand{}, fmt.Errorf("resolve staged scoped daemon candidate: %w", err)
 	}
 	keepStage = true
-	return daemonCommand{executable: resolvedExecutable, env: command.env}, nil
+	return daemonCommand{executable: resolvedExecutable, env: command.env, candidateStage: filepath.Dir(resolvedExecutable)}, nil
 }
 
 func (l *Launcher) stageScopedExecutableCopy(owner processIdentity, purpose string) (string, error) {
@@ -1531,16 +1540,40 @@ func (l *Launcher) newScopedExecutableStage(purpose string) (string, string, err
 }
 
 func (l *Launcher) verifyCanonicalDaemonArguments(identity processIdentity, label string) error {
-	for _, required := range []struct {
-		flag  string
-		value string
-	}{
-		{flag: "--repo", value: l.RepoDir},
-		{flag: "--socket", value: l.SocketPath},
-		{flag: "--lock", value: l.LockPath},
-	} {
-		if !hasExactProcessArgument(identity.arguments, required.flag, required.value) {
-			return fmt.Errorf("%s executable arguments do not match canonical %s", label, strings.TrimPrefix(required.flag, "--"))
+	if l.verifyDaemonArguments != nil {
+		return l.verifyDaemonArguments(identity, label)
+	}
+	want := map[string]string{"repo": l.RepoDir, "socket": l.SocketPath, "lock": l.LockPath}
+	parsed := make(map[string]string, len(want))
+	arguments := identity.arguments
+	for i := 1; i < len(arguments); i++ {
+		argument := arguments[i]
+		if argument == "--" || argument == "-" || !strings.HasPrefix(argument, "-") {
+			return fmt.Errorf("%s executable arguments contain positional or trailing argument %q", label, argument)
+		}
+		nameValue := strings.TrimPrefix(argument, "-")
+		nameValue = strings.TrimPrefix(nameValue, "-")
+		name, value, hasValue := strings.Cut(nameValue, "=")
+		_, known := want[name]
+		if !known {
+			return fmt.Errorf("%s executable arguments contain unexpected flag %q", label, argument)
+		}
+		if _, duplicate := parsed[name]; duplicate {
+			return fmt.Errorf("%s executable arguments contain ambiguous duplicate --%s", label, name)
+		}
+		if !hasValue {
+			i++
+			if i >= len(arguments) {
+				return fmt.Errorf("%s executable arguments omit canonical %s value", label, name)
+			}
+			value = arguments[i]
+		}
+		parsed[name] = value
+	}
+	for name, expected := range want {
+		value, present := parsed[name]
+		if !present || value != expected {
+			return fmt.Errorf("%s executable arguments do not match canonical %s", label, name)
 		}
 	}
 	return nil
@@ -1554,6 +1587,7 @@ func (l *Launcher) startReplacementWithRollback(ctx context.Context, daemonCmd, 
 	if errors.Is(startErr, errReplacementCandidateCleanupUnproven) {
 		return fmt.Errorf("start replacement daemon: %w; refusing predecessor restore while rejected candidate cleanup is unproven", startErr)
 	}
+	startErr = errors.Join(startErr, l.cleanupInactiveCandidateStage(daemonCmd))
 	if !predecessorPresent {
 		return fmt.Errorf("start replacement daemon: %w; no predecessor was present to restore", startErr)
 	}

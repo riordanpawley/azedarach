@@ -154,6 +154,8 @@ const lingeringDaemonHelperEnv = "AZEDARACH_TEST_LINGERING_DAEMON"
 
 const lingeringDaemonModeEnv = "AZEDARACH_TEST_LINGERING_DAEMON_MODE"
 
+const lingeringDaemonParentPIDEnv = "AZEDARACH_TEST_LINGERING_PARENT_PID"
+
 // TestLauncherReplaceLingeringDaemonHelper is a real predecessor process for
 // replacement tests. On TERM it removes the runtime socket and lock exactly as
 // azd does, reports that authority assets are gone, then deliberately remains
@@ -170,11 +172,24 @@ func TestLauncherReplaceLingeringDaemonHelper(t *testing.T) {
 	}
 	signals := make(chan os.Signal, 4)
 	signal.Notify(signals, syscall.SIGTERM, syscall.SIGUSR1)
+	parentPID, err := strconv.Atoi(os.Getenv(lingeringDaemonParentPIDEnv))
+	if err != nil || parentPID <= 0 {
+		os.Exit(10)
+	}
+	parentExited, err := observePlatformProcessExit(parentPID)
+	if err != nil {
+		os.Exit(11)
+	}
 	if _, err := ready.Write([]byte{1}); err != nil {
 		os.Exit(7)
 	}
 	mode := os.Getenv(lingeringDaemonModeEnv)
-	shutdownSignal := <-signals
+	var shutdownSignal os.Signal
+	select {
+	case shutdownSignal = <-signals:
+	case <-parentExited:
+		os.Exit(0)
+	}
 	if mode != "" && shutdownSignal != syscall.SIGUSR1 {
 		os.Exit(8)
 	}
@@ -191,8 +206,13 @@ func TestLauncherReplaceLingeringDaemonHelper(t *testing.T) {
 		os.Exit(0)
 	}
 	if mode == "term" {
-		if signal := <-signals; signal != syscall.SIGTERM {
-			os.Exit(9)
+		select {
+		case signal := <-signals:
+			if signal != syscall.SIGTERM {
+				os.Exit(9)
+			}
+		case <-parentExited:
+			os.Exit(0)
 		}
 		os.Exit(0)
 	}
@@ -200,13 +220,24 @@ func TestLauncherReplaceLingeringDaemonHelper(t *testing.T) {
 		for {
 			select {
 			case <-signals:
-			case <-time.After(time.Hour):
+			case <-parentExited:
+				os.Exit(0)
 			}
 		}
 	}
 	var release [1]byte
-	if _, err := exitBarrier.Read(release[:]); err != nil {
-		os.Exit(6)
+	released := make(chan error, 1)
+	go func() {
+		_, readErr := exitBarrier.Read(release[:])
+		released <- readErr
+	}()
+	select {
+	case err := <-released:
+		if err != nil {
+			os.Exit(6)
+		}
+	case <-parentExited:
+		os.Exit(0)
 	}
 	os.Exit(0)
 }
@@ -237,6 +268,7 @@ func TestCaptureProcessIdentityRejectsPIDReuseDuringSnapshot(t *testing.T) {
 
 type lingeringDaemonProcess struct {
 	cmd              *exec.Cmd
+	identity         processIdentity
 	shutdownObserved *os.File
 	exitBarrier      *os.File
 	waitDone         chan error
@@ -298,6 +330,19 @@ func startLingeringDaemonProcessWith(t *testing.T, launcher *Launcher, executabl
 	t.Helper()
 	launcher.preflightReplace = func(context.Context, daemonCommand) error { return nil }
 	launcher.preflightRollback = func(context.Context, daemonCommand) error { return nil }
+	expectedRepo, expectedSocket, expectedLock := launcher.RepoDir, launcher.SocketPath, launcher.LockPath
+	launcher.verifyDaemonArguments = func(_ processIdentity, label string) error {
+		for _, required := range []struct{ name, got, want string }{
+			{name: "repo", got: launcher.RepoDir, want: expectedRepo},
+			{name: "socket", got: launcher.SocketPath, want: expectedSocket},
+			{name: "lock", got: launcher.LockPath, want: expectedLock},
+		} {
+			if required.got != required.want {
+				return fmt.Errorf("%s executable arguments do not match canonical %s", label, required.name)
+			}
+		}
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(launcher.LockPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -321,26 +366,12 @@ func startLingeringDaemonProcessWith(t *testing.T, launcher *Launcher, executabl
 	cmd.Env = append(os.Environ(),
 		lingeringDaemonHelperEnv+"=1",
 		lingeringDaemonModeEnv+"="+mode,
+		lingeringDaemonParentPIDEnv+"="+strconv.Itoa(os.Getpid()),
 		"AZEDARACH_TEST_DAEMON_SOCKET="+launcher.SocketPath,
 		"AZEDARACH_TEST_DAEMON_LOCK="+launcher.LockPath,
 	)
 	cmd.ExtraFiles = []*os.File{readyWriter, observedWriter, exitReader}
 	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	_ = readyWriter.Close()
-	_ = observedWriter.Close()
-	_ = exitReader.Close()
-	var ready [1]byte
-	if _, err := io.ReadFull(readyReader, ready[:]); err != nil {
-		t.Fatalf("await lingering daemon helper readiness: %v", err)
-	}
-	_ = readyReader.Close()
-	record, err := json.Marshal(map[string]any{"pid": cmd.Process.Pid, "created_at": time.Now().UTC()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(launcher.LockPath, record, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	process := &lingeringDaemonProcess{
@@ -359,7 +390,35 @@ func startLingeringDaemonProcessWith(t *testing.T, launcher *Launcher, executabl
 		_ = cmd.Process.Kill()
 		<-process.waitDone
 		_ = observedReader.Close()
+		if process.identity.pid == 0 {
+			return
+		}
+		if alive, err := processIdentityAlive(process.identity); err != nil {
+			t.Errorf("inspect lingering daemon helper after cleanup: %v", err)
+		} else if alive {
+			t.Errorf("lingering daemon helper remains live after cleanup: %+v", process.identity)
+		}
 	})
+	_ = readyWriter.Close()
+	_ = observedWriter.Close()
+	_ = exitReader.Close()
+	var ready [1]byte
+	if _, err := io.ReadFull(readyReader, ready[:]); err != nil {
+		t.Fatalf("await lingering daemon helper readiness: %v", err)
+	}
+	_ = readyReader.Close()
+	identity, present, err := captureProcessIdentity(cmd.Process.Pid)
+	if err != nil || !present {
+		t.Fatalf("capture lingering daemon helper identity = (%+v, %t, %v)", identity, present, err)
+	}
+	process.identity = identity
+	record, err := json.Marshal(map[string]any{"pid": cmd.Process.Pid, "created_at": time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcher.LockPath, record, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return process
 }
 
@@ -566,6 +625,43 @@ func TestLauncherReplaceRemovesInactiveRollbackStageOnPreShutdownAbort(t *testin
 	}
 	if _, present, captureErr := captureProcessIdentity(predecessor.cmd.Process.Pid); captureErr != nil || !present {
 		t.Fatalf("predecessor present = %t, %v, want healthy authority retained", present, captureErr)
+	}
+}
+
+func TestLauncherReplaceRetainsRollbackStageAfterPredecessorExitFailure(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
+	predecessor := startManagedLingeringDaemonProcess(t, launcher, "graceful")
+	generationsRoot := filepath.Dir(filepath.Dir(launcher.BinPath))
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		if err := predecessor.cmd.Process.Signal(syscall.SIGUSR1); err != nil {
+			return err
+		}
+		predecessor.awaitShutdown(t)
+		<-predecessor.exited
+		return os.WriteFile(launcher.SocketPath, nil, 0o600)
+	}
+	launcher.waitForOwnerExit = func(context.Context, processIdentity) error { return nil }
+	startCalls := 0
+	launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+		startCalls++
+		return &recordingDaemonProcess{exitCh: make(chan error)}, nil
+	}
+
+	err := launcher.Replace(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "canonical socket remains") {
+		t.Fatalf("Replace() error = %v, want post-exit stale-socket failure", err)
+	}
+	if startCalls != 0 {
+		t.Fatalf("candidate starts = %d, want none before cleanup proof", startCalls)
+	}
+	stages, globErr := filepath.Glob(filepath.Join(generationsRoot, "generation.rollback-*"))
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(stages) != 1 || !executableFile(filepath.Join(stages[0], "azd")) {
+		t.Fatalf("retained rollback stages = %v, want one verified recovery generation", stages)
 	}
 }
 
@@ -1432,6 +1528,81 @@ func TestLauncherReplace_ScopedSourceFallbackStagesDirectExecutable(t *testing.T
 	}
 	if started.command.executable == "" {
 		t.Fatal("Replace() did not start the staged daemon")
+	}
+	if _, err := os.Stat(filepath.Dir(started.command.executable)); err != nil {
+		t.Fatalf("active candidate stage stat error = %v, want retained live authority", err)
+	}
+}
+
+func TestLauncherReplace_ScopedSourceFallbackCleansCandidateAfterPreflightAbort(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv("AZEDARACH_DAEMON_BIN", "")
+	repoDir := writeScopedSourceFallbackDaemon(t)
+	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
+	launcher.preflightReplace = func(context.Context, daemonCommand) error { return errors.New("reject candidate") }
+
+	err := launcher.Replace(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "reject candidate") {
+		t.Fatalf("Replace() error = %v, want candidate preflight abort", err)
+	}
+	stages, globErr := filepath.Glob(filepath.Join(config.ScopedDaemonRuntimeDir(repoDir), "executables", "candidate-*"))
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(stages) != 0 {
+		t.Fatalf("inactive candidate stages = %v, want cleanup after preflight abort", stages)
+	}
+}
+
+func TestLauncherSourceFallbackCandidateStageOwnershipFollowsCleanupProof(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		cleanupErr error
+		wantStage  bool
+	}{
+		{name: "proven retired"},
+		{name: "unproven remains authority", cleanupErr: errors.New("candidate cleanup denied"), wantStage: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+			t.Setenv("AZEDARACH_DAEMON_BIN", "")
+			repoDir := writeScopedSourceFallbackDaemon(t)
+			launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
+			command, err := launcher.resolveCommand()
+			if err != nil {
+				t.Fatal(err)
+			}
+			command, err = launcher.materializeReplacementCommand(context.Background(), command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			candidateStage := command.candidateStage
+			launcher.openLogFile = func(string) (io.WriteCloser, error) { return &trackingWriteCloser{}, nil }
+			launcher.waitForReady = func(context.Context, string) error { return context.DeadlineExceeded }
+			launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+				if testCase.cleanupErr == nil {
+					return nil, errors.New("candidate start rejected")
+				}
+				return &recordingDaemonProcess{exitCh: make(chan error), stopErr: testCase.cleanupErr}, nil
+			}
+			if testCase.cleanupErr != nil {
+				launcher.replacementSuccessorVerifier = func(daemonCommand) error { return errors.New("candidate identity rejected") }
+			}
+
+			err = launcher.startReplacementWithRollback(context.Background(), command, daemonCommand{}, false)
+			if err == nil {
+				t.Fatal("startReplacementWithRollback() error = nil")
+			}
+			_, statErr := os.Stat(candidateStage)
+			if testCase.wantStage && statErr != nil {
+				t.Fatalf("candidate stage stat error = %v, want retained unproven authority", statErr)
+			}
+			if !testCase.wantStage && !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("candidate stage stat error = %v, want removed after proven retirement", statErr)
+			}
+		})
 	}
 }
 
@@ -2772,22 +2943,33 @@ func TestLauncherVerifyCapturedPredecessorFailsClosed(t *testing.T) {
 	})
 }
 
-func TestHasExactProcessArgumentRejectsAmbiguousFlags(t *testing.T) {
+func TestLauncherVerifyCanonicalDaemonArgumentsModelsEffectiveFlagSemantics(t *testing.T) {
+	launcher := NewLauncher("/project", "/runtime/daemon.sock")
+	launcher.LockPath = "/runtime/daemon.lock"
 	for _, testCase := range []struct {
 		name      string
 		arguments []string
-		want      bool
+		wantErr   string
 	}{
-		{name: "exact", arguments: []string{"azd", "--repo", "/project"}, want: true},
-		{name: "wrong value", arguments: []string{"azd", "--repo", "/other"}},
-		{name: "missing value", arguments: []string{"azd", "--repo"}},
-		{name: "duplicate same", arguments: []string{"azd", "--repo", "/project", "--repo", "/project"}},
-		{name: "duplicate conflicting", arguments: []string{"azd", "--repo", "/project", "--repo", "/other"}},
-		{name: "equals form", arguments: []string{"azd", "--repo=/project"}},
+		{name: "separate values", arguments: []string{"azd", "--repo", "/project", "--socket", "/runtime/daemon.sock", "--lock", "/runtime/daemon.lock"}},
+		{name: "equals values", arguments: []string{"azd", "--repo=/project", "--socket=/runtime/daemon.sock", "--lock=/runtime/daemon.lock"}},
+		{name: "single hyphen like Go flag", arguments: []string{"azd", "-repo=/project", "-socket", "/runtime/daemon.sock", "-lock=/runtime/daemon.lock"}},
+		{name: "triple hyphen is unknown", arguments: []string{"azd", "---repo=/project", "--socket=/runtime/daemon.sock", "--lock=/runtime/daemon.lock"}, wantErr: "unexpected flag"},
+		{name: "wrong value", arguments: []string{"azd", "--repo", "/other", "--socket", "/runtime/daemon.sock", "--lock", "/runtime/daemon.lock"}, wantErr: "canonical repo"},
+		{name: "missing value", arguments: []string{"azd", "--repo"}, wantErr: "omit canonical repo value"},
+		{name: "duplicate same", arguments: []string{"azd", "--repo", "/project", "--repo", "/project", "--socket", "/runtime/daemon.sock", "--lock", "/runtime/daemon.lock"}, wantErr: "ambiguous duplicate --repo"},
+		{name: "mixed override bypass", arguments: []string{"azd", "--repo=/other", "--repo", "/project", "--socket", "/runtime/daemon.sock", "--lock", "/runtime/daemon.lock"}, wantErr: "ambiguous duplicate --repo"},
+		{name: "ignored after positional", arguments: []string{"azd", "positional", "--repo", "/project", "--socket", "/runtime/daemon.sock", "--lock", "/runtime/daemon.lock"}, wantErr: "positional or trailing"},
+		{name: "trailing positional", arguments: []string{"azd", "--repo", "/project", "--socket", "/runtime/daemon.sock", "--lock", "/runtime/daemon.lock", "trailing"}, wantErr: "positional or trailing"},
+		{name: "terminator before flags", arguments: []string{"azd", "--", "--repo", "/project", "--socket", "/runtime/daemon.sock", "--lock", "/runtime/daemon.lock"}, wantErr: "positional or trailing"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			if got := hasExactProcessArgument(testCase.arguments, "--repo", "/project"); got != testCase.want {
-				t.Fatalf("hasExactProcessArgument(%v) = %t, want %t", testCase.arguments, got, testCase.want)
+			err := launcher.verifyCanonicalDaemonArguments(processIdentity{arguments: testCase.arguments}, "candidate")
+			if testCase.wantErr == "" && err != nil {
+				t.Fatalf("verifyCanonicalDaemonArguments(%v) error = %v", testCase.arguments, err)
+			}
+			if testCase.wantErr != "" && (err == nil || !strings.Contains(err.Error(), testCase.wantErr)) {
+				t.Fatalf("verifyCanonicalDaemonArguments(%v) error = %v, want %q", testCase.arguments, err, testCase.wantErr)
 			}
 		})
 	}
@@ -3288,17 +3470,20 @@ func TestLauncherStart_RechecksSocketWhenLockRecoveryFails(t *testing.T) {
 	}
 }
 
-func TestLauncherStartHonorsCallerContextDeadlineForReadyWait(t *testing.T) {
+func TestLauncherStartHonorsCallerCancellationForReadyWait(t *testing.T) {
 	repoDir := t.TempDir()
 	socketPath := filepath.Join(t.TempDir(), "daemon.sock")
 
 	launcher := NewLauncher(repoDir, socketPath)
 	starter := useRecordingDaemonStarter(launcher)
 	launcher.BinPath = "true"
+	waitEntered := make(chan struct{})
+	var readyCalls atomic.Int32
 	launcher.waitForReady = func(ctx context.Context, _ string) error {
-		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) > 100*time.Millisecond {
+		if readyCalls.Add(1) <= 2 {
 			return context.DeadlineExceeded
 		}
+		close(waitEntered)
 		<-ctx.Done()
 		return ctx.Err()
 	}
@@ -3307,16 +3492,14 @@ func TestLauncherStartHonorsCallerContextDeadlineForReadyWait(t *testing.T) {
 		return &trackingWriteCloser{}, nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-
-	started := time.Now()
-	err := launcher.Start(ctx)
-	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Start() error = %v, want context deadline exceeded", err)
-	}
-	if elapsed := time.Since(started); elapsed > 700*time.Millisecond {
-		t.Fatalf("Start() elapsed = %s, want < 700ms", elapsed)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- launcher.Start(ctx) }()
+	<-waitEntered
+	cancel()
+	err := <-result
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start() error = %v, want context canceled", err)
 	}
 	if got := starter.process.stopCalls.Load(); got != 1 {
 		t.Fatalf("spawn cleanup calls = %d, want 1", got)
@@ -3582,21 +3765,8 @@ func TestLauncherStopWaitsForExactProcessAfterLockRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("/bin/sh", "-c", "trap 'rm -f \"$1\" \"$2\"; sleep 0.25; exit 0' TERM; while :; do sleep 1; done", "sh", launcher.LockPath, launcher.SocketPath)
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	pid := cmd.Process.Pid
-	waitDone := make(chan error, 1)
-	go func() { waitDone <- cmd.Wait() }()
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		select {
-		case <-waitDone:
-		default:
-		}
-	})
-	lockRecord, err := json.Marshal(map[string]any{"pid": pid, "created_at": time.Now().UTC()})
+	owner := processIdentity{pid: 4242, startToken: "exact-owner"}
+	lockRecord, err := json.Marshal(map[string]any{"pid": owner.pid, "created_at": time.Now().UTC()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3604,39 +3774,44 @@ func TestLauncherStopWaitsForExactProcessAfterLockRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	launcher.shutdownViaSocket = func(context.Context, string) error {
-		return cmd.Process.Signal(syscall.SIGTERM)
+		return errors.Join(os.Remove(launcher.LockPath), os.Remove(launcher.SocketPath))
 	}
-
-	started := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	if err := launcher.Stop(ctx); err != nil {
+	launcher.captureOwner = func() (processIdentity, bool, error) { return owner, true, nil }
+	waitEntered := make(chan struct{})
+	allowExit := make(chan struct{})
+	launcher.waitForOwnerExit = func(context.Context, processIdentity) error {
+		close(waitEntered)
+		<-allowExit
+		return nil
+	}
+	result := make(chan error, 1)
+	go func() { result <- launcher.Stop(context.Background()) }()
+	<-waitEntered
+	select {
+	case err := <-result:
+		t.Fatalf("Stop() returned before exact process exit proof: %v", err)
+	default:
+	}
+	close(allowExit)
+	if err := <-result; err != nil {
 		t.Fatalf("Stop() error = %v", err)
 	}
-	if elapsed := time.Since(started); elapsed < 200*time.Millisecond {
-		t.Fatalf("Stop() returned after %v, before delayed post-lock process exit", elapsed)
-	}
-	select {
-	case err := <-waitDone:
-		if err != nil {
-			t.Fatalf("daemon child exit: %v", err)
-		}
-	default:
-		t.Fatalf("daemon child pid %d was not reaped before Stop returned", pid)
+	if _, err := os.Stat(runtimeDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("scoped runtime dir stat error = %v, want cleanup after exit proof", err)
 	}
 }
 
-func TestLauncherStopBoundsExactProcessExitWait(t *testing.T) {
+func TestLauncherStopPropagatesCancellationDuringExactProcessExitWait(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
 	repoDir := newLauncherTestWorktree(t)
 	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
-	launcher.processExitTimeout = 50 * time.Millisecond
 	runtimeDir := config.ScopedDaemonRuntimeDir(repoDir)
 	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	lockRecord, err := json.Marshal(map[string]any{"pid": os.Getppid(), "created_at": time.Now().UTC()})
+	owner := processIdentity{pid: 4242, startToken: "exact-owner"}
+	lockRecord, err := json.Marshal(map[string]any{"pid": owner.pid, "created_at": time.Now().UTC()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3644,14 +3819,21 @@ func TestLauncherStopBoundsExactProcessExitWait(t *testing.T) {
 		t.Fatal(err)
 	}
 	launcher.shutdownViaSocket = func(context.Context, string) error { return nil }
-
-	started := time.Now()
-	err = launcher.Stop(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "still alive after stop") {
-		t.Fatalf("Stop() error = %v, want bounded exact-process wait failure", err)
+	launcher.captureOwner = func() (processIdentity, bool, error) { return owner, true, nil }
+	waitEntered := make(chan struct{})
+	launcher.waitForOwnerExit = func(ctx context.Context, _ processIdentity) error {
+		close(waitEntered)
+		<-ctx.Done()
+		return ctx.Err()
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("Stop() took %v, want bounded failure", elapsed)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- launcher.Stop(ctx) }()
+	<-waitEntered
+	cancel()
+	err = <-result
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Stop() error = %v, want caller cancellation", err)
 	}
 }
 
@@ -3899,7 +4081,8 @@ func TestLauncherStopWaitsForGracefulScopedProcessExit(t *testing.T) {
 	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	lockRecord, err := json.Marshal(map[string]any{"pid": os.Getpid()})
+	owner := processIdentity{pid: 4242, startToken: "graceful-owner"}
+	lockRecord, err := json.Marshal(map[string]any{"pid": owner.pid})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3907,14 +4090,24 @@ func TestLauncherStopWaitsForGracefulScopedProcessExit(t *testing.T) {
 		t.Fatal(err)
 	}
 	launcher.shutdownViaSocket = func(context.Context, string) error {
-		go func() {
-			time.Sleep(30 * time.Millisecond)
-			_ = os.Remove(launcher.LockPath)
-		}()
+		return os.Remove(launcher.LockPath)
+	}
+	launcher.captureOwner = func() (processIdentity, bool, error) { return owner, true, nil }
+	waitEntered := make(chan struct{})
+	allowExit := make(chan struct{})
+	launcher.waitForOwnerExit = func(context.Context, processIdentity) error {
+		close(waitEntered)
+		<-allowExit
 		return nil
 	}
-
-	if err := launcher.Stop(context.Background()); err != nil {
+	result := make(chan error, 1)
+	go func() { result <- launcher.Stop(context.Background()) }()
+	<-waitEntered
+	if _, err := os.Stat(runtimeDir); err != nil {
+		t.Fatalf("scoped runtime removed before graceful process exit proof: %v", err)
+	}
+	close(allowExit)
+	if err := <-result; err != nil {
 		t.Fatalf("Stop() error = %v", err)
 	}
 	if _, err := os.Stat(runtimeDir); !errors.Is(err, os.ErrNotExist) {
