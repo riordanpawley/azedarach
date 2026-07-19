@@ -333,6 +333,9 @@ func testSessionRestartAllPreservesProjectOrchestratorAuthority(t *testing.T, ap
 	if err := d.persistOrchestratorSessionProjection(ctx, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, scope, sessionID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := daemonstate.NewOrchestratorLeaseAuthority(store).SetLifecycle(ctx, identity, sessionID, domain.OrchestratorQuiescent); err != nil {
+		t.Fatal(err)
+	}
 	beforeLease, found, err := daemonstate.NewOrchestratorLeaseAuthority(store).Get(ctx, identity)
 	if err != nil || !found {
 		t.Fatalf("load project orchestrator lease: found=%t err=%v", found, err)
