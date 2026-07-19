@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -39,6 +40,78 @@ func TestListProjectIssueObservationEventsProvidesDurableCursor(t *testing.T) {
 	}
 	if len(after) != len(events)-1 || after[0].ID <= cursor {
 		t.Fatalf("after cursor %d = %+v", cursor, after)
+	}
+}
+
+func TestBindTaskIntegrationPublicationOperationConvergesAcrossClients(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "issues.db")
+	clients := []*Client{newTestClientAtPath(t, path, slog.Default()), newTestClientAtPath(t, path, slog.Default())}
+	t.Cleanup(func() {
+		for _, client := range clients {
+			_ = client.CloseDB()
+		}
+	})
+	issueID, err := clients[0].Create(ctx, CreateTaskParams{Title: "publication recovery", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := TaskIntegrationPublicationBinding{
+		ProjectID: "project", SourceBranch: "feature", TargetBranch: "main", TargetID: "base",
+		BaseOID: "base-a", SourceOID: "source-a", TargetOID: "result-a", PublicationOperationID: "publication-a",
+	}
+	if _, err := clients[0].AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{
+		Type: domain.IssueEventTaskIntegrationCompleted, Source: "test",
+		Payload: map[string]any{
+			"project_id": binding.ProjectID, "source_branch": binding.SourceBranch, "target_branch": binding.TargetBranch,
+			"target_id": binding.TargetID, "configured_base_target": true, "integrated": true,
+			"base_oid": binding.BaseOID, "source_oid": binding.SourceOID, "target_oid": binding.TargetOID,
+			"publication_operation_id": "",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ready := make(chan struct{}, len(clients))
+	start := make(chan struct{})
+	errs := make(chan error, len(clients))
+	var appended atomic.Int32
+	for _, client := range clients {
+		client := client
+		go func() {
+			ready <- struct{}{}
+			<-start
+			created, bindErr := client.BindTaskIntegrationPublicationOperation(ctx, issueID, binding)
+			if created {
+				appended.Add(1)
+			}
+			errs <- bindErr
+		}()
+	}
+	for range clients {
+		<-ready
+	}
+	close(start)
+	for range clients {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := appended.Load(); got != 1 {
+		t.Fatalf("corrected receipt appends = %d, want 1", got)
+	}
+	events, err := clients[0].ListIssueObservationEvents(ctx, issueID, IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted}, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[1].Payload["publication_operation_id"] != binding.PublicationOperationID {
+		t.Fatalf("integration receipts = %+v, want original plus exact corrected binding", events)
+	}
+	mismatch := binding
+	mismatch.TargetOID = "result-other"
+	if _, err := clients[0].BindTaskIntegrationPublicationOperation(ctx, issueID, mismatch); err == nil {
+		t.Fatal("exact revision mismatch unexpectedly rebound integration receipt")
 	}
 }
 

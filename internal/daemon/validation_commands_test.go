@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -403,7 +404,15 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 		update.FinishedAt = &finished
 	})
 	require.NoError(t, err)
-	integration.PublicationOperationID = publication.OperationID
+	_, err = issueClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
+		Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "intent_key": publication.IntentKey, "request_fingerprint": publication.RequestFingerprint, "reviewed_source_oid": sourceOID, "publication_operation_id": publication.OperationID},
+	})
+	require.NoError(t, err)
+	resolvedOperation, resolvedValidation, err := d.taskClosePublicationProvenance(ctx, projectID, issueID, integration, "portable-v1", "npm run verify-publication", "node-consumer")
+	require.NoError(t, err, "a missing receipt identity must recover from the authoritative accepted publication binding")
+	assert.Equal(t, publication.OperationID, resolvedOperation.OperationID)
+	assert.Equal(t, push.RequestID, resolvedValidation.RequestID)
 	for name, mutate := range map[string]func(*taskCloseIntegrationResult) (string, string, string){
 		"wrong candidate": func(candidate *taskCloseIntegrationResult) (string, string, string) {
 			candidate.TargetOID = "wrong-target"
@@ -423,25 +432,33 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 			candidate := integration
 			policy, command, environment := mutate(&candidate)
 			_, _, provenanceErr := d.taskClosePublicationProvenance(ctx, projectID, issueID, candidate, policy, command, environment)
-			require.ErrorContains(t, provenanceErr, "requires its completed non-emergency publication operation")
+			require.Error(t, provenanceErr, "mismatched exact publication identity must fail closed")
 		})
 	}
-	resolvedOperation, resolvedValidation, err := d.taskClosePublicationProvenance(ctx, projectID, issueID, integration, "portable-v1", "npm run verify-publication", "node-consumer")
-	require.NoError(t, err)
-	assert.Equal(t, publication.OperationID, resolvedOperation.OperationID)
-	assert.Equal(t, push.RequestID, resolvedValidation.RequestID)
 	assert.Equal(t, domain.ValidationExecutionReused, resolvedValidation.Execution)
 	_, _, fallbackErr := d.taskClosePublicationProvenance(ctx, "unrouted-project", issueID, integration, "portable-v1", "npm run verify-publication", "node-consumer")
 	require.Error(t, fallbackErr, "unrouted project fallback must not authorize publication provenance")
 	// Model the durable state after integration receipt succeeds but publication
-	// evidence fails. The retry sees source already contained by target.
+	// identity/evidence persistence fails. Concurrent retries must append one
+	// corrected binding and one merge-result evidence record without reapplying.
 	err = d.persistTaskCloseIntegrationReceipt(ctx, projectID, issueID, repoDir, integration)
 	require.NoError(t, err)
-	_, err = issueClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
-		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
-		Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "intent_key": publication.IntentKey, "request_fingerprint": publication.RequestFingerprint, "reviewed_source_oid": sourceOID, "publication_operation_id": publication.OperationID},
-	})
-	require.NoError(t, err)
+	recoveredIntegration := integration
+	recoveredIntegration.ReceiptRecovered = true
+	var retryWG sync.WaitGroup
+	retryErrs := make(chan error, 2)
+	for range 2 {
+		retryWG.Add(1)
+		go func() {
+			defer retryWG.Done()
+			retryErrs <- d.persistTaskCloseIntegrationPublication(ctx, projectID, issueID, repoDir, recoveredIntegration)
+		}()
+	}
+	retryWG.Wait()
+	close(retryErrs)
+	for retryErr := range retryErrs {
+		require.NoError(t, retryErr)
+	}
 	typedResult, err := d.mergeTypedConfiguredBaseThroughPublication(ctx, projectID, issueID, gitservice.Worktree{IssueID: issueID, Path: repoDir, Branch: "feature"}, repoDir, "main", sourceOID, targetOID)
 	require.NoError(t, err, "merge=%+v target=%s", merge, targetOID)
 	require.True(t, typedResult.ReceiptRecorded)
@@ -450,7 +467,9 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 	require.NotEmpty(t, typedResult.Result.ValidationAttempts)
 	receipts, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted}, Limit: 10})
 	require.NoError(t, err)
-	require.Len(t, receipts, 1, "retry must reuse the exact receipt rather than append a generic no-change receipt")
+	require.Len(t, receipts, 2, "concurrent retries must append exactly one corrected publication binding")
+	assert.Empty(t, observationPayloadString(receipts[0].Payload, "publication_operation_id"))
+	assert.Equal(t, publication.OperationID, observationPayloadString(receipts[1].Payload, "publication_operation_id"))
 	snapshot, err := runtime.store.PublicationEvidenceSnapshot(ctx, projectID, issueID)
 	require.NoError(t, err)
 	require.Len(t, snapshot.Evidence, 1)

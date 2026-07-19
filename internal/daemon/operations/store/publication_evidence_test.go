@@ -65,6 +65,11 @@ func TestPublicationEvidenceWritesAreImmutableAndIdempotent(t *testing.T) {
 	if _, err := store.RecordPublicationEvidence(ctx, evidence); err != nil {
 		t.Fatalf("idempotent replay: %v", err)
 	}
+	evidence.Coverage.Dependencies = []string{}
+	evidence.Coverage.Surfaces = []string{}
+	if _, err := store.RecordPublicationEvidence(ctx, evidence); err != nil {
+		t.Fatalf("idempotent replay with canonical empty coverage: %v", err)
+	}
 	conflict := evidence
 	conflict.Producer = "different-reviewer"
 	if _, err := store.RecordPublicationEvidence(ctx, conflict); err == nil {

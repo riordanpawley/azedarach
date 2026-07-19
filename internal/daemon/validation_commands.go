@@ -430,7 +430,7 @@ func (d *Daemon) recordTaskCloseMergeResultEvidence(ctx context.Context, project
 		EvidenceID: "merge-" + fmt.Sprintf("%x", identity[:16]), ProjectID: projectID, IssueID: issueID, Layer: domain.PublicationEvidenceMergeResult,
 		PatchDigest: patchDigest, SourceRevision: strings.TrimSpace(integration.SourceOID), BaseRevision: strings.TrimSpace(integration.BaseOID),
 		ResultRevision: strings.TrimSpace(integration.TargetOID), Producer: "daemon:task.close", PolicyVersion: policy.Version,
-		EnvironmentFingerprint: validation.EnvironmentFingerprint, Coverage: coverage, CreatedAt: time.Now().UTC(),
+		EnvironmentFingerprint: validation.EnvironmentFingerprint, Coverage: coverage, CreatedAt: validation.FinishedAt.UTC(),
 	}
 	store, err := d.publicationEvidenceProjectionStore()
 	if err != nil {
@@ -463,7 +463,11 @@ func (d *Daemon) taskClosePublicationProvenance(ctx context.Context, projectID, 
 		return domain.PublicationOperation{}, domain.ValidationRequest{}, fmt.Errorf("recovered publication operation %s does not match active publication binding %s", recoveredOperationID, binding.operationID)
 	}
 	if !bound && recoveredOperationID == "" {
-		return domain.PublicationOperation{}, domain.ValidationRequest{}, fmt.Errorf("exact synthetic merge %s recovery receipt is missing publication operation identity", wantTarget)
+		accepted, acceptedErr := d.typedMergeAcceptedPublicationBinding(ctx, projectID, issueID, wantBranch, wantSource, wantTarget)
+		if acceptedErr != nil {
+			return domain.PublicationOperation{}, domain.ValidationRequest{}, fmt.Errorf("exact synthetic merge %s recovery receipt is missing publication operation identity: %w", wantTarget, acceptedErr)
+		}
+		recoveredOperationID = strings.TrimSpace(accepted.OperationID)
 	}
 	for _, operation := range operations {
 		activeExactOperation := bound && operation.OperationID == binding.operationID && operation.ClaimToken == binding.claimToken && operation.State == domain.PublicationOperationPassed
