@@ -65,8 +65,10 @@ side=$(git -C "$fixture" rev-parse HEAD)
 non_ancestor=$("$script_dir/review-range" --repo "$fixture" --base-revision "$base" --head-revision "$side" --scope source --checkpoint-head "$first" --checkpoint-base "$base" --checkpoint-scope source)
 printf '%s\n' "$non_ancestor" | grep -q '^reason=checkpoint-not-ancestor$'
 
-grep -q 'Use 2 consecutive clean review passes' "$script_dir/../SKILL.md"
-grep -q 'Use 3 consecutive clean review passes for high-risk changes' "$script_dir/../SKILL.md"
+grep -q 'Use 1 complete worker review pass for a non-migration change' "$script_dir/../SKILL.md"
+grep -q 'retain 3 clean passes after the final migration-affecting edit' "$script_dir/../SKILL.md"
+grep -q 'Do not count mechanized build, test, static-analysis, or boundary gates as semantic review passes' "$script_dir/../SKILL.md"
+grep -q 'the local delta cannot establish completeness' "$script_dir/../SKILL.md"
 grep -q 'every unresolved finding' "$script_dir/../SKILL.md"
 grep -q 'contracts and invariants affected by the delta' "$script_dir/../SKILL.md"
 

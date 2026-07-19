@@ -193,7 +193,10 @@ If merge guidance is blocked, recover with:
 3. Ask the worker to publish `worker-integration-ready` once evidence is ready
    with a JSON body containing `schema`, `summary`, `commands_run`,
    `key_assertions`, `files_changed`, `review`, `risks`, and optional
-   `artifact_links`.
+   `artifact_links`. New review evidence should also bind `review.revision`,
+   `review.angle`, deduplicated findings, reused layers, pass count/target, and
+   a typed matrix with covered cells plus deliberately skipped cells and their
+   reasons. Historical v1 packets without these review details remain readable.
 4. Re-run `az orchestrate integrate --issue <issue-id>`.
 
 Use `az branch merge --source <issue-id> --target <ancestor-issue-id|base>` only for manual conflict or close-repair. Use `--source <ancestor> --target <descendant>` when materializing accepted ancestor work into a follow-on worktree; the current worktree is never an implicit target. Root-to-base merges require durable human acceptance recorded on the root issue.
