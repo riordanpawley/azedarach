@@ -180,6 +180,352 @@ func TestProjectOrchestratorSessionStartAttachesExactScopeSingleton(t *testing.T
 	}
 }
 
+func TestSessionRestartAllPreservesProjectOrchestratorAuthority(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		appServer bool
+	}{
+		{name: "standalone"},
+		{name: "app_server", appServer: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			testSessionRestartAllPreservesProjectOrchestratorAuthority(t, test.appServer)
+		})
+	}
+}
+
+func TestSessionRestartAllProjectOrchestratorReadsNewAuthorityAcrossDaemons(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(repoDir, "runtime.db")
+	storeA := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	storeB := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = storeB.Close() })
+	t.Cleanup(func() { _ = storeA.Close() })
+	runner := newSessionStartTmuxRunner()
+	newDaemon := func(store *daemonstate.RuntimeStateStore) *Daemon {
+		return &Daemon{
+			cfg:                    Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "/bin/sh", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+			runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+			tmux:                   tmux.NewClient(runner, slog.Default()),
+		}
+	}
+	daemonA, daemonB := newDaemon(storeA), newDaemon(storeB)
+	scope := domain.ProjectOrchestrationScope()
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := daemonA.orchestratorSessionID(projectID, scope)
+	runner.sessions[sessionID] = true
+	if _, err := daemonstate.NewOrchestratorLeaseAuthority(storeA).Acquire(ctx, identity, sessionID, daemonA.tmux.HasSession); err != nil {
+		t.Fatal(err)
+	}
+	if err := daemonA.persistOrchestratorSessionProjection(ctx, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, scope, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	runner.onRespawnPane = seedManagedRestartIdentity(t, daemonB, runner, projectID, sessionID)
+
+	resp, err := daemonB.handleSessionRestartAll(ctx, protocol.RequestEnvelope{
+		Command: protocol.CommandSessionRestartAll,
+		Meta:    protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:    marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(projectID), ForceBusy: true}),
+	})
+	if err != nil || resp.Error != nil {
+		t.Fatalf("cross-daemon project orchestrator restart: response=%+v err=%v", resp.Error, err)
+	}
+	var result protocol.SessionRestartAllResponseBody
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Restarted != 1 || result.Failed != 0 || len(result.Sessions) != 1 || result.Sessions[0].IssueID != "" {
+		t.Fatalf("cross-daemon restart result = %+v", result)
+	}
+	projection, found, err := storeA.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, "project")
+	if err != nil || !found || projection.ID != sessionID || projection.IssueID != "" {
+		t.Fatalf("cross-daemon project projection = %+v found=%t err=%v", projection, found, err)
+	}
+}
+
+func TestSessionRestartAllProjectOrchestratorRejectsProjectionLeaseDisagreement(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	runner := newSessionStartTmuxRunner()
+	d := &Daemon{
+		cfg:                    Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "/bin/sh", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+		tmux:                   tmux.NewClient(runner, slog.Default()),
+	}
+	scope := domain.ProjectOrchestrationScope()
+	sessionID := d.orchestratorSessionID(projectID, scope)
+	runner.sessions[sessionID] = true
+	if err := d.persistOrchestratorSessionProjection(ctx, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, scope, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	runner.onRespawnPane = seedManagedRestartIdentity(t, d, runner, projectID, sessionID)
+
+	resp, err := d.handleSessionRestartAll(ctx, protocol.RequestEnvelope{
+		Command: protocol.CommandSessionRestartAll,
+		Meta:    protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:    marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(projectID), ForceBusy: true}),
+	})
+	if err != nil || resp.Error != nil {
+		t.Fatalf("disagreement response=%+v err=%v", resp.Error, err)
+	}
+	var result protocol.SessionRestartAllResponseBody
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Restarted != 0 || result.Failed != 1 || len(result.Sessions) != 1 || !strings.Contains(result.Sessions[0].Error, "conflicts with exact scope lease authority") {
+		t.Fatalf("disagreement result = %+v", result)
+	}
+	for _, command := range runner.commands {
+		if len(command) > 0 && command[0] == "respawn-pane" {
+			t.Fatalf("authority disagreement reached destructive replacement: %v", command)
+		}
+	}
+	if worker, found, err := store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, "orchestrator-project"); err != nil || found {
+		t.Fatalf("disagreement wrote fake worker projection = %+v found=%t err=%v", worker, found, err)
+	}
+}
+
+func testSessionRestartAllPreservesProjectOrchestratorAuthority(t *testing.T, appServer bool) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	runner := newSessionStartTmuxRunner()
+	d := &Daemon{
+		cfg: Config{
+			RepoDir:        repoDir,
+			CLITool:        "codex",
+			CodexAppServer: appServer,
+			SessionShell:   "/bin/sh",
+			Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+		tmux:                   tmux.NewClient(runner, slog.Default()),
+	}
+	scope := domain.ProjectOrchestrationScope()
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := d.orchestratorSessionID(projectID, scope)
+	runner.sessions[sessionID] = true
+	if _, err := daemonstate.NewOrchestratorLeaseAuthority(store).Acquire(ctx, identity, sessionID, d.tmux.HasSession); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.persistOrchestratorSessionProjection(ctx, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, scope, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	beforeLease, found, err := daemonstate.NewOrchestratorLeaseAuthority(store).Get(ctx, identity)
+	if err != nil || !found {
+		t.Fatalf("load project orchestrator lease: found=%t err=%v", found, err)
+	}
+	runner.onRespawnPane = seedManagedRestartIdentity(t, d, runner, projectID, sessionID)
+
+	req := protocol.RequestEnvelope{
+		Command: protocol.CommandSessionRestartAll,
+		Meta:    protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:    marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(projectID), ForceBusy: true}),
+	}
+	resp, err := d.handleSessionRestartAll(ctx, req)
+	if err != nil || resp.Error != nil {
+		t.Fatalf("restart project orchestrator: response=%+v err=%v", resp.Error, err)
+	}
+	var result protocol.SessionRestartAllResponseBody
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Restarted != 1 || result.Failed != 0 || len(result.Sessions) != 1 {
+		t.Fatalf("restart project orchestrator result = %+v", result)
+	}
+	if result.Sessions[0].IssueID != "" {
+		t.Fatalf("project orchestrator restart was classified as issue %q", result.Sessions[0].IssueID)
+	}
+	projection, found, err := store.GetSessionState(ctx, projectID, sessionID)
+	if err != nil || !found {
+		t.Fatalf("load restarted project orchestrator projection: found=%t err=%v", found, err)
+	}
+	if projection.Role != daemonstate.SessionRoleOrchestrator || projection.ScopeKind != daemonstate.SessionScopeOrchestration || projection.ScopeID != "project" || projection.IssueID != "" {
+		t.Fatalf("restarted project orchestrator projection = %+v", projection)
+	}
+	if worker, found, err := store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, "orchestrator-project"); err != nil || found {
+		t.Fatalf("fake project orchestrator worker projection = %+v found=%t err=%v", worker, found, err)
+	}
+	afterLease, found, err := daemonstate.NewOrchestratorLeaseAuthority(store).Get(ctx, identity)
+	if err != nil || !found || afterLease.SessionID != beforeLease.SessionID || afterLease.Identity != beforeLease.Identity || afterLease.Lifecycle != beforeLease.Lifecycle || !afterLease.AcquiredAt.Equal(beforeLease.AcquiredAt) {
+		t.Fatalf("project orchestrator lease changed: before=%+v after=%+v found=%t err=%v", beforeLease, afterLease, found, err)
+	}
+	var respawn []string
+	for _, command := range runner.commands {
+		if len(command) > 0 && command[0] == "respawn-pane" {
+			respawn = command
+		}
+	}
+	if len(respawn) < 7 || respawn[5] != repoDir {
+		t.Fatalf("project orchestrator respawn command = %v, want project root %q", respawn, repoDir)
+	}
+	launchScript := runner.launchScriptContents[sessionID]
+	if appServer {
+		if !strings.Contains(launchScript, "app-server daemon start") || !strings.Contains(launchScript, "resume --remote unix:// --last") {
+			t.Fatalf("project orchestrator app-server restart script = %q", launchScript)
+		}
+	} else if !strings.Contains(launchScript, "codex "+codexFloopFailOpenConfigExpansion+" resume") || strings.Contains(launchScript, "app-server") || strings.Contains(launchScript, "--remote") {
+		t.Fatalf("project orchestrator standalone restart script = %q", launchScript)
+	}
+}
+
+func TestSessionRestartAllProjectOrchestratorRejectsStaleAuthorityAcrossDaemons(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(repoDir, "runtime.db")
+	storeA := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	storeB := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = storeB.Close() })
+	t.Cleanup(func() { _ = storeA.Close() })
+	runner := newSessionStartTmuxRunner()
+	newDaemon := func(store *daemonstate.RuntimeStateStore) *Daemon {
+		return &Daemon{
+			cfg:                    Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "/bin/sh", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+			runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+			tmux:                   tmux.NewClient(runner, slog.Default()),
+		}
+	}
+	daemonA, daemonB := newDaemon(storeA), newDaemon(storeB)
+	scope := domain.ProjectOrchestrationScope()
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := daemonA.orchestratorSessionID(projectID, scope)
+	runner.sessions[sessionID] = true
+	if _, err := daemonstate.NewOrchestratorLeaseAuthority(storeB).Acquire(ctx, identity, sessionID, daemonB.tmux.HasSession); err != nil {
+		t.Fatal(err)
+	}
+	if err := daemonB.persistOrchestratorSessionProjection(ctx, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, scope, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	valid := sessionRestartAllTarget{
+		ProjectID: projectID, SessionID: sessionID, Role: daemonstate.SessionRoleOrchestrator,
+		ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: string(domain.OrchestrationScopeProject), Activity: "busy",
+	}
+	if err := daemonA.validateSessionRestartTargetAuthority(ctx, valid); err != nil {
+		t.Fatalf("warm daemon A authority: %v", err)
+	}
+	runner.onRespawnPane = seedManagedRestartIdentity(t, daemonA, runner, projectID, sessionID)
+	stale := daemonstate.Session{
+		ID: sessionID + "-stale", Role: daemonstate.SessionRoleOrchestrator,
+		ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: string(domain.OrchestrationScopeProject),
+		State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: time.Now().UTC().Add(time.Second),
+	}
+	if err := daemonB.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, stale); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := daemonA.handleSessionRestartAll(ctx, protocol.RequestEnvelope{
+		Command: protocol.CommandSessionRestartAll,
+		Meta:    protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:    marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(projectID), ForceBusy: true}),
+	})
+	if err != nil || resp.Error != nil {
+		t.Fatalf("stale-cache restart response=%+v err=%v", resp.Error, err)
+	}
+	var result protocol.SessionRestartAllResponseBody
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Failed != 1 || result.Restarted != 0 || len(result.Sessions) != 1 || !strings.Contains(result.Sessions[0].Error, "no matching durable session role/scope projection") {
+		t.Fatalf("stale-cache restart result=%+v", result)
+	}
+	for _, command := range runner.commands {
+		if len(command) > 0 && command[0] == "respawn-pane" {
+			t.Fatalf("stale daemon respawned project orchestrator: %v", command)
+		}
+	}
+}
+
+func TestProjectOrchestratorRestartRejectsStaleCrossDaemonAuthority(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(repoDir, "runtime.db")
+	firstStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	secondStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() {
+		_ = firstStore.Close()
+		_ = secondStore.Close()
+	})
+	runner := newSessionStartTmuxRunner()
+	first := &Daemon{
+		cfg:                    Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "/bin/sh", Logger: slog.Default()},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: firstStore},
+		tmux:                   tmux.NewClient(runner, slog.Default()),
+	}
+	second := &Daemon{
+		cfg:                    Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "/bin/sh", Logger: slog.Default()},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: secondStore},
+		tmux:                   tmux.NewClient(runner, slog.Default()),
+	}
+	scope := domain.ProjectOrchestrationScope()
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := first.orchestratorSessionID(projectID, scope)
+	runner.sessions[sessionID] = true
+	if _, err := daemonstate.NewOrchestratorLeaseAuthority(firstStore).Acquire(ctx, identity, sessionID, first.tmux.HasSession); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.persistOrchestratorSessionProjection(ctx, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, scope, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	projection, found, err := secondStore.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, "project")
+	if err != nil || !found {
+		t.Fatalf("load second-daemon projection: found=%t err=%v", found, err)
+	}
+	target := sessionRestartTargetFromProjection(sessionRestartAllTarget{ProjectID: projectID, SessionID: sessionID, TmuxReady: true}, projection)
+	if err := second.validateSessionRestartTargetAuthority(ctx, target); err != nil {
+		t.Fatalf("initial second-daemon authority: %v", err)
+	}
+	runner.onRespawnPane = seedManagedRestartIdentity(t, first, runner, projectID, sessionID)
+	if err := firstStore.DeleteSessionIntentState(ctx, projectID, projection); err != nil {
+		t.Fatal(err)
+	}
+
+	result := second.executeSessionRestartTarget(ctx, target, protocol.SessionRestartAllRequestBody{ForceBusy: true})
+	if result.Error == "" || !strings.Contains(result.Error, "durable session role/scope changed") || result.Restarted {
+		t.Fatalf("stale cross-daemon restart result = %+v", result)
+	}
+	for _, command := range runner.commands {
+		if len(command) > 0 && command[0] == "respawn-pane" {
+			t.Fatalf("stale cross-daemon authority reached destructive replacement: %v", command)
+		}
+	}
+}
+
 func TestProjectOrchestratorSessionStartRejectsImmediateManagedAgentExitAndRetries(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()

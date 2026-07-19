@@ -54,8 +54,14 @@ type sessionRestartRecoveryPlan struct {
 	PromptHandoffRequired bool                             `json:"prompt_handoff_required"`
 	PromptHandoffType     string                           `json:"prompt_handoff_type"`
 	PromptPath            string                           `json:"prompt_path,omitempty"`
-	RootedIdentity        *domain.OrchestratorIdentity     `json:"rooted_identity,omitempty"`
-	Stage                 string                           `json:"stage"`
+	Role                  daemonstate.SessionRole          `json:"role,omitempty"`
+	ScopeKind             daemonstate.SessionScopeKind     `json:"scope_kind,omitempty"`
+	ScopeID               string                           `json:"scope_id,omitempty"`
+	OrchestratorIdentity  *domain.OrchestratorIdentity     `json:"orchestrator_identity,omitempty"`
+	// RootedIdentity is retained so an operation written by an older daemon can
+	// still be recovered after upgrade. New checkpoints use OrchestratorIdentity.
+	RootedIdentity *domain.OrchestratorIdentity `json:"rooted_identity,omitempty"`
+	Stage          string                       `json:"stage"`
 }
 
 // sessionRestartBatchPlan is the complete crash-recovery authority for one
@@ -147,7 +153,7 @@ func appendRestartStageFailure(item *protocol.SessionRestartAllItem, name string
 	item.Stages = append(item.Stages, restartStage(name, status, item.Error, timeout))
 }
 
-func (d *Daemon) restartManagedAgentPane(ctx context.Context, target sessionRestartAllTarget, body protocol.SessionRestartAllRequestBody, item protocol.SessionRestartAllItem, rootedIdentity *domain.OrchestratorIdentity) protocol.SessionRestartAllItem {
+func (d *Daemon) restartManagedAgentPane(ctx context.Context, target sessionRestartAllTarget, body protocol.SessionRestartAllRequestBody, item protocol.SessionRestartAllItem, orchestratorIdentity *domain.OrchestratorIdentity) protocol.SessionRestartAllItem {
 	source := sourceForInvariant(daemonInvariantManagedAgentRestart)
 	if !usesProjectionSource(source) || !usesTmuxSource(source) {
 		item.Outcome = "partial_failure"
@@ -209,14 +215,14 @@ func (d *Daemon) restartManagedAgentPane(ctx context.Context, target sessionRest
 		delete(d.sessionRestartPending, item.OperationID)
 		d.sessionRestartMu.Unlock()
 	}()
-	item = d.restartManagedAgentPaneWithIdentity(ctx, store, old, target, body, item, rootedIdentity)
+	item = d.restartManagedAgentPaneWithIdentity(ctx, store, old, target, body, item, orchestratorIdentity)
 	return item
 }
 
-func (d *Daemon) restartManagedAgentPaneWithIdentity(ctx context.Context, store *daemonstate.RuntimeStateStore, old daemonstate.ManagedAgentIdentity, target sessionRestartAllTarget, body protocol.SessionRestartAllRequestBody, item protocol.SessionRestartAllItem, rootedIdentity *domain.OrchestratorIdentity) protocol.SessionRestartAllItem {
+func (d *Daemon) restartManagedAgentPaneWithIdentity(ctx context.Context, store *daemonstate.RuntimeStateStore, old daemonstate.ManagedAgentIdentity, target sessionRestartAllTarget, body protocol.SessionRestartAllRequestBody, item protocol.SessionRestartAllItem, orchestratorIdentity *domain.OrchestratorIdentity) protocol.SessionRestartAllItem {
 	var lockedItem protocol.SessionRestartAllItem
 	lockErr := store.WithManagedAgentRestartTransition(ctx, target.ProjectID, target.SessionID, old.LogicalPaneID, func(lockCtx context.Context) error {
-		lockedItem = d.restartManagedAgentPaneLocked(lockCtx, store, old, target, body, item, rootedIdentity)
+		lockedItem = d.restartManagedAgentPaneLocked(lockCtx, store, old, target, body, item, orchestratorIdentity)
 		return nil
 	})
 	if lockErr != nil {
@@ -226,7 +232,7 @@ func (d *Daemon) restartManagedAgentPaneWithIdentity(ctx context.Context, store 
 	return lockedItem
 }
 
-func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemonstate.RuntimeStateStore, old daemonstate.ManagedAgentIdentity, target sessionRestartAllTarget, body protocol.SessionRestartAllRequestBody, item protocol.SessionRestartAllItem, rootedIdentity *domain.OrchestratorIdentity) protocol.SessionRestartAllItem {
+func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemonstate.RuntimeStateStore, old daemonstate.ManagedAgentIdentity, target sessionRestartAllTarget, body protocol.SessionRestartAllRequestBody, item protocol.SessionRestartAllItem, orchestratorIdentity *domain.OrchestratorIdentity) protocol.SessionRestartAllItem {
 	current, found, err := store.GetManagedAgentIdentity(ctx, target.ProjectID, target.SessionID, old.LogicalPaneID)
 	if err != nil {
 		appendRestartStageFailure(&item, "identity_refresh", sessionRestartPreflightTimeout, err, errors.Is(err, context.DeadlineExceeded))
@@ -268,7 +274,7 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 		return item
 	}
 	launchPrompt := sessionRestartContinuePrompt
-	if rootedIdentity != nil {
+	if isRootedRestartIdentity(orchestratorIdentity) {
 		launchPrompt = ""
 	}
 	promptHandoffRequired := strings.TrimSpace(launchPrompt) != "" && !strings.EqualFold(strings.TrimSpace(d.runtimeConfigForProject(target.ProjectID).CLITool), "codex")
@@ -279,11 +285,11 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 	plan := sessionRestartRecoveryPlan{
 		ProjectID: target.ProjectID, SessionID: target.SessionID, IssueID: target.IssueID, Activity: target.Activity,
 		Old: old, PlannedIncarnation: incarnation, PromptHandoffRequired: promptHandoffRequired,
-		PromptHandoffType: promptHandoffType, Stage: "prepare",
+		PromptHandoffType: promptHandoffType, Role: target.Role, ScopeKind: target.ScopeKind, ScopeID: target.ScopeID, Stage: "prepare",
 	}
-	if rootedIdentity != nil {
-		identity := *rootedIdentity
-		plan.RootedIdentity = &identity
+	if orchestratorIdentity != nil {
+		identity := *orchestratorIdentity
+		plan.OrchestratorIdentity = &identity
 	}
 	if err := reportSessionRestartProgress(ctx, plan); err != nil {
 		appendRestartStageFailure(&item, "persist_prepare", sessionRestartPreflightTimeout, err, false)
@@ -298,7 +304,7 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 		if prepareErr != nil {
 			return preparedRestart{}, prepareErr
 		}
-		worktree := d.cfg.RepoDir
+		worktree := d.resolveRepoDirForProject(target.ProjectID)
 		if worktreeStore := d.worktreeRuntimeStateStoreIfConfigured(target.ProjectID); worktreeStore != nil && strings.TrimSpace(target.IssueID) != "" {
 			if projected, found, projectErr := worktreeStore.GetWorktreeStateByIssueID(stageCtx, target.ProjectID, target.IssueID); projectErr != nil {
 				artifact.remove()
@@ -324,7 +330,7 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 		appendRestartStageFailure(&item, "prepare", sessionRestartPrepareTimeout, errors.New("prepared prompt handoff does not match persisted restart metadata"), false)
 		return item
 	}
-	if rootedIdentity != nil {
+	if isRootedRestartIdentity(orchestratorIdentity) {
 		plan.Stage = sessionRestartStageRootedInvalidateReady
 		if err := reportSessionRestartProgress(ctx, plan); err != nil {
 			prepared.artifact.remove()
@@ -332,7 +338,7 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 			return item
 		}
 		authority := daemonstate.NewRootedBootstrapAcknowledgementAuthority(store)
-		acknowledgement, found, rootErr := authority.Get(ctx, *rootedIdentity)
+		acknowledgement, found, rootErr := authority.Get(ctx, *orchestratorIdentity)
 		if rootErr == nil && found {
 			rootErr = d.invalidateRootedBootstrapAcknowledgement(ctx, acknowledgement)
 		}
@@ -444,10 +450,10 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 				if strings.TrimSpace(prepared.artifact.PromptHandoff.PromptPath) != "" {
 					item.Stages = append(item.Stages, restartStage("prompt_handoff", "complete", "replacement consumed continuation handoff", sessionRestartObservationTimeout))
 				}
-				if rootedIdentity != nil {
-					prompt, promptErr := d.rootedOrchestratorBootstrapPrompt(reconcileCtx, target.ProjectID, rootedIdentity.Scope)
+				if isRootedRestartIdentity(orchestratorIdentity) {
+					prompt, promptErr := d.rootedOrchestratorBootstrapPrompt(reconcileCtx, target.ProjectID, orchestratorIdentity.Scope)
 					if promptErr == nil {
-						_, promptErr = d.ensureRootedOrchestratorBootstrap(reconcileCtx, target.ProjectID, rootedIdentity.Scope, target.SessionID, prompt, false)
+						_, promptErr = d.ensureRootedOrchestratorBootstrap(reconcileCtx, target.ProjectID, orchestratorIdentity.Scope, target.SessionID, prompt, false)
 					}
 					if promptErr != nil {
 						appendRestartStageFailure(&item, "rooted_bootstrap", sessionRestartObservationTimeout, promptErr, errors.Is(promptErr, context.DeadlineExceeded))
@@ -467,6 +473,10 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 			}
 		}
 	}
+}
+
+func isRootedRestartIdentity(identity *domain.OrchestratorIdentity) bool {
+	return identity != nil && identity.Scope.Kind == domain.OrchestrationScopeRooted
 }
 
 func (d *Daemon) respawnManagedAgentPane(ctx context.Context, paneTarget, worktree, command string) (error, bool) {
@@ -556,14 +566,15 @@ func (d *Daemon) validateRecoveredSessionRestartPromptHandoff(plan sessionRestar
 }
 
 func (d *Daemon) repairRecoveredSessionRestartRootedBootstrap(ctx context.Context, plan sessionRestartRecoveryPlan) error {
-	if plan.RootedIdentity == nil {
+	storedIdentity := sessionRestartPlanOrchestratorIdentity(plan)
+	if storedIdentity == nil || storedIdentity.Scope.Kind != domain.OrchestrationScopeRooted {
 		return nil
 	}
-	identity, err := domain.NewOrchestratorIdentity(plan.RootedIdentity.ProjectID, plan.RootedIdentity.Scope)
+	identity, err := domain.NewOrchestratorIdentity(storedIdentity.ProjectID, storedIdentity.Scope)
 	if err != nil {
 		return fmt.Errorf("validate recovered rooted orchestrator identity: %w", err)
 	}
-	if identity != *plan.RootedIdentity || identity.ProjectID != plan.ProjectID || identity.Scope.Kind != domain.OrchestrationScopeRooted {
+	if identity != *storedIdentity || identity.ProjectID != plan.ProjectID || identity.Scope.Kind != domain.OrchestrationScopeRooted {
 		return errors.New("recovered rooted orchestrator identity does not match restart target")
 	}
 	if d.sessionRestartRootedBootstrapRepair != nil {
@@ -714,11 +725,22 @@ func validSessionRestartLifecycleStage(stage string) bool {
 }
 
 func sessionRestartRecoveryPlanMatchesTarget(plan sessionRestartRecoveryPlan, target sessionRestartAllTarget) bool {
-	return validExactSessionRestartRecoveryPlan(plan) &&
-		strings.TrimSpace(plan.ProjectID) == strings.TrimSpace(target.ProjectID) &&
-		strings.TrimSpace(plan.SessionID) == strings.TrimSpace(target.SessionID) &&
-		strings.TrimSpace(plan.IssueID) == strings.TrimSpace(target.IssueID) &&
-		strings.TrimSpace(plan.Activity) == strings.TrimSpace(target.Activity)
+	if !validExactSessionRestartRecoveryPlan(plan) ||
+		strings.TrimSpace(plan.ProjectID) != strings.TrimSpace(target.ProjectID) ||
+		strings.TrimSpace(plan.SessionID) != strings.TrimSpace(target.SessionID) ||
+		strings.TrimSpace(plan.IssueID) != strings.TrimSpace(target.IssueID) ||
+		strings.TrimSpace(plan.Activity) != strings.TrimSpace(target.Activity) {
+		return false
+	}
+	// Role/scope were added to restart targets with durable classification.
+	// Legacy in-flight batch targets omitted them, so their exact recovery plan
+	// remains the compatibility authority after upgrade.
+	if target.Role == "" && target.ScopeKind == "" && strings.TrimSpace(target.ScopeID) == "" {
+		return true
+	}
+	return restartPlanRole(plan) == restartTargetRole(target) &&
+		restartPlanScopeKind(plan) == restartTargetScopeKind(target) &&
+		restartPlanScopeID(plan) == restartTargetScopeID(target)
 }
 
 func validExactSessionRestartRecoveryPlan(plan sessionRestartRecoveryPlan) bool {
@@ -727,18 +749,112 @@ func validExactSessionRestartRecoveryPlan(plan sessionRestartRecoveryPlan) bool 
 	issueID := strings.TrimSpace(plan.IssueID)
 	oldIncarnation := strings.TrimSpace(plan.Old.AgentIncarnation)
 	plannedIncarnation := strings.TrimSpace(plan.PlannedIncarnation)
-	if projectID == "" || sessionID == "" || issueID == "" || strings.TrimSpace(plan.Activity) == "" ||
+	if projectID == "" || sessionID == "" || strings.TrimSpace(plan.Activity) == "" ||
 		strings.TrimSpace(plan.Old.ProjectID) != projectID || strings.TrimSpace(plan.Old.SessionID) != sessionID ||
 		strings.TrimSpace(plan.Old.LogicalPaneID) == "" || strings.TrimSpace(plan.Old.TmuxPaneID) == "" || plan.Old.PanePID <= 0 ||
 		oldIncarnation == "" || plannedIncarnation == "" || plannedIncarnation == oldIncarnation {
 		return false
 	}
-	if plan.RootedIdentity == nil {
-		return true
+	identity := sessionRestartPlanOrchestratorIdentity(plan)
+	role := restartPlanRole(plan)
+	if role == daemonstate.SessionRoleWorker {
+		return issueID != "" && restartPlanScopeKind(plan) == daemonstate.SessionScopeIssue && restartPlanScopeID(plan) == issueID && identity == nil
 	}
-	identity, err := domain.NewOrchestratorIdentity(plan.RootedIdentity.ProjectID, plan.RootedIdentity.Scope)
-	return err == nil && identity == *plan.RootedIdentity && identity.ProjectID == protocol.NormalizeProjectID(projectID) &&
+	if role != daemonstate.SessionRoleOrchestrator || restartPlanScopeKind(plan) != daemonstate.SessionScopeOrchestration || identity == nil {
+		return false
+	}
+	normalized, err := domain.NewOrchestratorIdentity(identity.ProjectID, identity.Scope)
+	if err != nil || normalized != *identity || identity.ProjectID != protocol.NormalizeProjectID(projectID) || restartPlanScopeID(plan) != orchestrationScopeID(identity.Scope) {
+		return false
+	}
+	return identity.Scope.Kind == domain.OrchestrationScopeProject && issueID == "" ||
 		identity.Scope.Kind == domain.OrchestrationScopeRooted && identity.Scope.RootIssueID.String() == issueID
+}
+
+func sessionRestartPlanOrchestratorIdentity(plan sessionRestartRecoveryPlan) *domain.OrchestratorIdentity {
+	if plan.OrchestratorIdentity != nil {
+		return plan.OrchestratorIdentity
+	}
+	return plan.RootedIdentity
+}
+
+func sessionRestartPlanTransitionIdentity(plan sessionRestartRecoveryPlan) (*domain.OrchestratorIdentity, error) {
+	stored := sessionRestartPlanOrchestratorIdentity(plan)
+	if stored != nil {
+		identity, err := domain.NewOrchestratorIdentity(stored.ProjectID, stored.Scope)
+		if err != nil {
+			return nil, fmt.Errorf("validate interrupted orchestrator restart identity: %w", err)
+		}
+		if identity != *stored || identity.ProjectID != protocol.NormalizeProjectID(plan.ProjectID) {
+			return nil, errors.New("interrupted orchestrator restart identity does not match restart project")
+		}
+		return &identity, nil
+	}
+	if restartPlanRole(plan) != daemonstate.SessionRoleWorker {
+		return nil, nil
+	}
+	scope, err := domain.RootedOrchestrationScope(plan.IssueID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve potential rooted recovery scope: %w", err)
+	}
+	identity, err := domain.NewOrchestratorIdentity(plan.ProjectID, scope)
+	if err != nil {
+		return nil, fmt.Errorf("resolve potential rooted recovery identity: %w", err)
+	}
+	return &identity, nil
+}
+
+func restartPlanRole(plan sessionRestartRecoveryPlan) daemonstate.SessionRole {
+	if plan.Role == "" {
+		if sessionRestartPlanOrchestratorIdentity(plan) != nil {
+			return daemonstate.SessionRoleOrchestrator
+		}
+		return daemonstate.SessionRoleWorker
+	}
+	return plan.Role
+}
+
+func restartPlanScopeKind(plan sessionRestartRecoveryPlan) daemonstate.SessionScopeKind {
+	if plan.ScopeKind == "" {
+		if sessionRestartPlanOrchestratorIdentity(plan) != nil {
+			return daemonstate.SessionScopeOrchestration
+		}
+		return daemonstate.SessionScopeIssue
+	}
+	return plan.ScopeKind
+}
+
+func restartPlanScopeID(plan sessionRestartRecoveryPlan) string {
+	if strings.TrimSpace(plan.ScopeID) == "" {
+		if identity := sessionRestartPlanOrchestratorIdentity(plan); identity != nil {
+			return orchestrationScopeID(identity.Scope)
+		}
+	}
+	if strings.TrimSpace(plan.ScopeID) == "" && restartPlanScopeKind(plan) == daemonstate.SessionScopeIssue {
+		return strings.TrimSpace(plan.IssueID)
+	}
+	return strings.TrimSpace(plan.ScopeID)
+}
+
+func restartTargetRole(target sessionRestartAllTarget) daemonstate.SessionRole {
+	if target.Role == "" {
+		return daemonstate.SessionRoleWorker
+	}
+	return target.Role
+}
+
+func restartTargetScopeKind(target sessionRestartAllTarget) daemonstate.SessionScopeKind {
+	if target.ScopeKind == "" {
+		return daemonstate.SessionScopeIssue
+	}
+	return target.ScopeKind
+}
+
+func restartTargetScopeID(target sessionRestartAllTarget) string {
+	if strings.TrimSpace(target.ScopeID) == "" && restartTargetScopeKind(target) == daemonstate.SessionScopeIssue {
+		return strings.TrimSpace(target.IssueID)
+	}
+	return strings.TrimSpace(target.ScopeID)
 }
 
 func sessionRestartItemMatchesTarget(item protocol.SessionRestartAllItem, target sessionRestartAllTarget) bool {
