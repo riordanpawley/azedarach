@@ -1398,15 +1398,26 @@ func TestRecoverInterruptedSessionRestartValidatesPromptHandoffBeforeWaitOrRemov
 		if err := os.WriteFile(path, []byte("secret"), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		// WriteFile applies the process umask when creating a file. Set the
+		// fixture's effective mode explicitly so a restrictive test-runner umask
+		// cannot turn this invalid artifact into a valid owner-only handoff.
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
 		seedRecoveredReplacement(t, store, runner, "planned")
 		plan := recoveryPlanForTarget(target, "observe")
 		plan.PromptHandoffRequired = true
 		plan.PromptHandoffType = sessionRestartPromptHandoffTypeOwnerOnlyArtifact
 		plan.PromptPath = path
+		called := false
+		d.sessionRestartPromptHandoffWait = func(context.Context, sessionPromptHandoff) error {
+			called = true
+			return errors.New("waiter called for invalid artifact")
+		}
 
 		result := decodeRestartRecoveryResult(t, mustRecoverRestartPlan(t, d, plan))
-		if result.Failed != 1 || !strings.Contains(result.Sessions[0].Error, "owner-only") {
-			t.Fatalf("result=%+v", result)
+		if result.Failed != 1 || !strings.Contains(result.Sessions[0].Error, "owner-only") || called {
+			t.Fatalf("result=%+v waiter_called=%t", result, called)
 		}
 		if _, err := os.Lstat(path); err != nil {
 			t.Fatalf("invalid artifact was removed: %v", err)
