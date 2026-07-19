@@ -173,6 +173,13 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 			}
 		}
 	}
+	// Session start needs only the target issue's durable worktree/session intent
+	// reconciled with live tmux. Interaction aging, activity convergence, and
+	// resource hooks are unrelated maintenance and must not make bootstrap
+	// unavailable when those subsystems are busy or degraded.
+	if isSessionStartRuntimeFreshnessRequest(ctx) {
+		return result, errors.Join(errs...)
+	}
 	if shouldReconcileInteractionStaleness && d.tmux != nil && d.sessionRuntimeStateStoreIfConfigured(result.ProjectID.String()) != nil {
 		recovered, cleaned, err := d.reconcileAdvisorSessionRuntimes(ctx, result.ProjectID.String(), issueIDs)
 		result.AdvisorSessionsRecovered += recovered
@@ -246,8 +253,12 @@ func (d *Daemon) hasConfiguredInteractionStore() bool {
 }
 
 func shouldRunIssueResourceReconcileForRuntimeRequest(ctx context.Context) bool {
+	return !isSessionStartRuntimeFreshnessRequest(ctx)
+}
+
+func isSessionStartRuntimeFreshnessRequest(ctx context.Context) bool {
 	request := runtimeReconcileRequestFromContext(ctx)
-	return strings.TrimSpace(request.Reason) != "mutation-issue:"+daemonhandlers.CommandSessionStart
+	return strings.TrimSpace(request.Reason) == "mutation-issue:"+daemonhandlers.CommandSessionStart
 }
 
 func (d *Daemon) reconcileIssueResourcesPresent(ctx context.Context, projectID string, issueIDs []string) error {

@@ -701,7 +701,10 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 		}
 	} else {
 		var source protocol.MaterializedSnapshotMetadata
-		materializedTasks, source, err = a.daemon.projectReadSnapshot(projectID)
+		// Rooted orchestration depends on canonical issue graph authority, not
+		// embedded runtime enrichment. Recover canonical convergence here so a
+		// failed runtime/worktree refresh cannot strand worker admission.
+		materializedTasks, source, err = a.daemon.convergedProjectReadSnapshot(ctx, projectID)
 		if err != nil {
 			return protocol.OrchestrationSnapshot{}, err
 		}
@@ -1437,7 +1440,7 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 		requested = stableRequestedCandidates(requested, snapshot.Runnable)
 	}
 	result.Requested = requested
-	scopeTasks, _, err := a.daemon.projectReadSnapshot(projectID)
+	scopeTasks, _, err := a.daemon.convergedProjectReadSnapshot(ctx, projectID)
 	if err != nil {
 		return protocol.OrchestrationIntentResult{}, completeRequestedOrchestrationStarts(ctx, issueClient, requestedIntents, fmt.Errorf("refresh orchestration scope projection: %w", err))
 	}

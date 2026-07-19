@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -99,6 +100,10 @@ func TestInitialManagedAgentAcknowledgementRequiresExactIncarnationAndConsumedPr
 	prompt := filepath.Join(t.TempDir(), "consumed.prompt")
 	if err := d.waitForInitialManagedAgentAcknowledgement(context.Background(), "project", "az-1", "planned", sessionPromptHandoff{PromptPath: prompt}); err != nil {
 		t.Fatalf("exact acknowledgement rejected: %v", err)
+	}
+	commands := runner.commands
+	if len(commands) == 0 || !slices.Contains(commands[len(commands)-1], "-t") || !slices.Contains(commands[len(commands)-1], "az-1") || slices.Contains(commands[len(commands)-1], "-a") {
+		t.Fatalf("bootstrap pane probe = %v, want exact-session list-panes", commands)
 	}
 }
 

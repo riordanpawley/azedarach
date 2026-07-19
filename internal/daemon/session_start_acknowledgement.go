@@ -149,7 +149,7 @@ func (d *Daemon) sampleInitialManagedAgentAcknowledgement(ctx context.Context, s
 	if err != nil {
 		return sessionStartAcknowledgementSample{}, fmt.Errorf("load managed agent acknowledgement: %w", err)
 	}
-	panes, err := d.tmux.ListPaneInfos(ctx)
+	panes, err := d.tmux.ListPaneInfosForSession(ctx, sessionID)
 	if err != nil {
 		return sessionStartAcknowledgementSample{}, fmt.Errorf("inspect managed agent pane: %w", err)
 	}
@@ -177,7 +177,7 @@ func (d *Daemon) validateExistingManagedAgentReadiness(ctx context.Context, proj
 	if !found || strings.TrimSpace(identity.AgentIncarnation) == "" {
 		return &sessionStartBootstrapError{Reason: sessionStartBootstrapAcknowledgementLost, SessionID: sessionID, Cause: errors.New("durable managed agent identity is missing")}
 	}
-	panes, err := d.tmux.ListPaneInfos(ctx)
+	panes, err := d.tmux.ListPaneInfosForSession(ctx, sessionID)
 	if err != nil {
 		return &sessionStartBootstrapError{Reason: sessionStartBootstrapAcknowledgementLost, SessionID: sessionID, Incarnation: identity.AgentIncarnation, Cause: err}
 	}

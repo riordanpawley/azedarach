@@ -31,10 +31,11 @@ func (d *Daemon) mergeTypedGitBranches(ctx context.Context, projectID string, re
 	if d.git == nil || d.worktreeAdapter == nil {
 		return nil, fmt.Errorf("typed git merge authority unavailable")
 	}
-	if err := d.ensureFreshRuntimeForMutation(ctx, projectID, daemonhandlers.CommandGitMerge); err != nil {
-		return nil, fmt.Errorf("refresh authoritative runtime before git.merge: %w", err)
-	}
-	tasks, err := d.loadTaskGraphDomainTasks(ctx, projectID)
+	// Merge target authority is the durable issue graph plus the exact live Git
+	// worktree identities read below. A whole runtime reconcile also probes tmux,
+	// interactions, activity, and resource hooks that are unrelated to branch
+	// composition and can make Git unavailable under repository-family load.
+	tasks, _, err := d.convergedProjectReadSnapshot(ctx, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve authoritative git.merge issue graph: %w", err)
 	}

@@ -655,6 +655,26 @@ func (c *Client) ListPaneInfos(ctx context.Context) ([]PaneInfo, error) {
 	c.logger.Debug("listing tmux panes")
 
 	out, err := c.runner.Run(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}")
+	return c.parsePaneInfos(out, err)
+}
+
+// ListPaneInfosForSession returns panes owned by one exact tmux session. Hot
+// bootstrap paths use this targeted probe so their cost and availability do
+// not depend on the number of unrelated repository-family sessions.
+func (c *Client) ListPaneInfosForSession(ctx context.Context, session string) ([]PaneInfo, error) {
+	session = strings.TrimSpace(session)
+	if session == "" {
+		return nil, fmt.Errorf("tmux session is required")
+	}
+	c.logger.Debug("listing tmux panes for session", "session", session)
+	out, err := c.runner.Run(ctx, "list-panes", "-t", session, "-F", "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}")
+	if isTmuxTargetMissingError(err) {
+		return []PaneInfo{}, nil
+	}
+	return c.parsePaneInfos(out, err)
+}
+
+func (c *Client) parsePaneInfos(out string, err error) ([]PaneInfo, error) {
 	if err != nil {
 		if isNoTmuxSessionsError(err) {
 			c.logger.Debug("no tmux panes found")
@@ -791,6 +811,14 @@ func isNoTmuxSessionsError(err error) bool {
 	}
 	msg := strings.ToLower(strings.TrimSpace(err.Error()))
 	return strings.Contains(msg, "no server running") || strings.Contains(msg, "no sessions") || strings.Contains(msg, "no tmux sessions")
+}
+
+func isTmuxTargetMissingError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "can't find session") || strings.Contains(msg, "can't find pane")
 }
 
 func parseTmuxInt(raw string) int {

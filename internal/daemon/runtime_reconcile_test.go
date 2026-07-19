@@ -1963,6 +1963,28 @@ func TestRuntimeReconcileIssuesSkipsIssueResourceHookForSessionStartFreshness(t 
 	}
 }
 
+func TestRuntimeReconcileIssuesSessionStartSkipsUnrelatedMaintenance(t *testing.T) {
+	called := false
+	d := &Daemon{
+		cfg: Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		reconcileInteractionStalenessFn: func(context.Context, string) error {
+			called = true
+			return errors.New("unrelated interaction maintenance unavailable")
+		},
+	}
+	ctx := context.WithValue(context.Background(), runtimeReconcileRequestContextKey{}, runtimeReconcileRequestContext{
+		Priority: reconcilePriorityManual,
+		Reason:   "mutation-issue:" + daemonhandlers.CommandSessionStart,
+	})
+
+	if _, err := newRuntimeReconcileService(d).ReconcileIssues(ctx, "project", []string{"az-1"}); err != nil {
+		t.Fatalf("session.start scoped reconciliation inherited unrelated failure: %v", err)
+	}
+	if called {
+		t.Fatal("session.start scoped reconciliation ran unrelated interaction maintenance")
+	}
+}
+
 func TestRuntimeReconcileRefreshesSessionProjectionWithoutWorktreeManager(t *testing.T) {
 	const projectID = "proj-runtime"
 	const issueID = "az-1"

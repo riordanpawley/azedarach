@@ -701,6 +701,41 @@ func TestRootedOrchestrationReviewQueueStopsAtDirectChildren(t *testing.T) {
 	}
 }
 
+func TestRootedOrchestrationSnapshotRecoversCanonicalProjectionWithoutRuntimeRefresh(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	rootID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Child", Description: "ready", Acceptance: "done", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	materializer, err := d.bootstrapEmbeddedProjectReadMaterializer(ctx, "proj", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedRefresh := materializer.beginAuthoritativeReadRefresh()
+	materializer.finishAuthoritativeReadRefresh(failedRefresh, errors.New("unrelated runtime refresh deadline"), true)
+	d.materializers = map[string]*projectReadMaterializer{"proj": materializer}
+	d.materializersStarted = true
+	scope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: scope, ActorID: "parent-orchestrator", Limit: 20})
+	if err != nil {
+		t.Fatalf("rooted orchestration inherited unrelated runtime health: %v", err)
+	}
+	if !slices.Contains(snapshot.Runnable, childID) {
+		t.Fatalf("runnable = %v, want canonically refreshed child %s", snapshot.Runnable, childID)
+	}
+}
+
 func TestProjectOrchestrationExplicitIssueRoutesOnlyRequestedRoot(t *testing.T) {
 	ctx := context.Background()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
