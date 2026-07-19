@@ -42,10 +42,24 @@ func (r WorkflowRole) Valid() bool {
 // a workflow phase. It is independent of runtime lifecycle fields, so starting
 // a session does not invalidate an otherwise identical prompt.
 func WorkflowIssueContextRevision(task Task) string {
-	material := strings.Join([]string{
-		task.ID.String(), task.Title, task.Description, task.Design, task.Acceptance, task.Type.String(),
-	}, "\x00")
-	sum := sha256.Sum256([]byte(material))
+	parentID := ""
+	if task.ParentID != nil {
+		parentID = task.ParentID.String()
+	}
+	material, _ := json.Marshal(struct {
+		Schema      string `json:"schema"`
+		IssueID     string `json:"issue_id"`
+		ParentID    string `json:"parent_id,omitempty"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Design      string `json:"design"`
+		Acceptance  string `json:"acceptance"`
+		Type        string `json:"type"`
+	}{
+		Schema: "workflow_issue_context_revision.v1", IssueID: task.ID.String(), ParentID: parentID,
+		Title: task.Title, Description: task.Description, Design: task.Design, Acceptance: task.Acceptance, Type: task.Type.String(),
+	})
+	sum := sha256.Sum256(material)
 	return "issue-context-sha256:" + hex.EncodeToString(sum[:])
 }
 
@@ -103,9 +117,12 @@ func BuildWorkflowContextPacket(input WorkflowContextInput) (WorkflowContextPack
 	if workflowUnsafePacketValue(input.IssueID) || workflowUnsafePacketValue(input.ScopeID) || workflowUnsafePacketValue(input.SourceRevision) {
 		return WorkflowContextPacket{}, fmt.Errorf("workflow context provenance contains a sensitive or local value")
 	}
-	issueID := workflowSafeInline(input.IssueID, 200)
-	scopeID := workflowSafeInline(input.ScopeID, 200)
-	revision := workflowSafeInline(input.SourceRevision, 200)
+	issueID := workflowSafeInline(input.IssueID, 0)
+	scopeID := workflowSafeInline(input.ScopeID, 0)
+	revision := workflowSafeInline(input.SourceRevision, 0)
+	if len(issueID) > 200 || len(scopeID) > 200 || len(revision) > 200 {
+		return WorkflowContextPacket{}, fmt.Errorf("workflow context provenance identity exceeds 200 bytes")
+	}
 	if revision == "" || (issueID == "") == (scopeID == "") {
 		return WorkflowContextPacket{}, fmt.Errorf("workflow context requires one exact issue or scope identity and a source revision")
 	}
@@ -243,7 +260,7 @@ func BuildWorkflowResultSummary(input WorkflowResultInput) (WorkflowResultSummar
 }
 
 func workflowProvenanceHash(issueID, scopeID, revision string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(issueID) + "\x00" + strings.TrimSpace(scopeID) + "\x00" + strings.TrimSpace(revision)))
+	sum := sha256.Sum256([]byte(issueID + "\x00" + scopeID + "\x00" + revision))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -372,7 +389,7 @@ func workflowUnsafePacketValue(value string) bool {
 
 func workflowContainsLocalPath(value string) bool {
 	lower := strings.ToLower(value)
-	if strings.Contains(value, "/Users/") || strings.Contains(value, "/home/") || strings.Contains(value, "/tmp/") || strings.Contains(value, "/var/folders/") || strings.Contains(lower, `c:\users\`) {
+	if strings.Contains(value, "/Users/") || strings.Contains(value, "/home/") || strings.Contains(value, "/tmp/") || strings.Contains(value, "/var/folders/") || strings.Contains(value, `:\`) || strings.Contains(value, `\\`) || strings.Contains(lower, `c:\users\`) {
 		return true
 	}
 	for _, field := range strings.Fields(value) {

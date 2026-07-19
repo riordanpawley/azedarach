@@ -41,14 +41,14 @@ func TestBuildWorkflowContextPacketIsBoundedDeterministicAndRevisionBound(t *tes
 func TestWorkflowContextExcludesSensitiveLocalAndIrrelevantSources(t *testing.T) {
 	packet, err := BuildWorkflowContextPacket(WorkflowContextInput{
 		Role: WorkflowRoleWorker, IssueID: "npm-7", SourceRevision: "deadbeef",
-		Summary: "portable consumer", Requirements: []string{"npm test", "token=secret", "inspect /Users/alice/private"},
+		Summary: "portable consumer", Requirements: []string{"npm test", "token=secret", "inspect /Users/alice/private", `inspect D:\private\output`},
 		ArtifactLinks: []WorkflowArtifactReference{{Label: "CI", Reference: "https://ci.example.test/run/7"}, {Label: "local", Reference: "/tmp/output.log"}, {Label: "token=secret", Reference: "https://ci.example.test/private"}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, _ := json.Marshal(packet)
-	for _, forbidden := range []string{"secret", "/Users/", "/tmp/"} {
+	for _, forbidden := range []string{"secret", "/Users/", "/tmp/", `D:\private`} {
 		if strings.Contains(string(body), forbidden) {
 			t.Fatalf("packet leaked %q: %s", forbidden, body)
 		}
@@ -149,5 +149,12 @@ func TestWorkflowIssueContextRevisionIgnoresLifecycleChanges(t *testing.T) {
 	task.Acceptance = "npm run test:ci passes"
 	if got := WorkflowIssueContextRevision(task); got == want {
 		t.Fatal("requirement change did not alter semantic revision")
+	}
+}
+
+func TestWorkflowContextRejectsOversizedExactProvenance(t *testing.T) {
+	_, err := BuildWorkflowContextPacket(WorkflowContextInput{Role: WorkflowRoleWorker, IssueID: "consumer-12", SourceRevision: strings.Repeat("a", 201)})
+	if err == nil {
+		t.Fatal("oversized source revision was silently truncated")
 	}
 }
