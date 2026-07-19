@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -227,6 +228,23 @@ func TestListLatestIssueObservationEventsByIssueScopesAndRanksCandidates(t *test
 	}
 	if len(events) != 1 || events[first].Payload["outcome"] != "returned" {
 		t.Fatalf("latest scoped events = %+v, want newest valid first-issue return only", events)
+	}
+	events, err = client.ListLatestIssueObservationEventsByIssue(ctx, LatestIssueObservationEventOptions{
+		IssueIDs:          []string{first},
+		Type:              domain.IssueEventReviewCompleted,
+		PayloadTextEquals: map[string]string{"actor_id": "reviewer"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[first].Payload["outcome"] != "accepted" {
+		t.Fatalf("latest payload-matched event = %+v, want newest reviewer event before newer nonmatching payload", events)
+	}
+	if _, err := client.ListLatestIssueObservationEventsByIssue(ctx, LatestIssueObservationEventOptions{
+		IssueIDs: []string{first}, Type: domain.IssueEventReviewCompleted,
+		PayloadTextEquals: map[string]string{"actor_id": "reviewer", " actor_id ": "other"},
+	}); err == nil || !strings.Contains(err.Error(), "conflicting payload text equality filters") {
+		t.Fatalf("conflicting normalized payload filters error = %v", err)
 	}
 }
 

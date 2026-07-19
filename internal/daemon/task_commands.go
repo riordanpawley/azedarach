@@ -3098,53 +3098,51 @@ func (d *Daemon) persistTaskCloseIntegrationPublication(ctx context.Context, pro
 	return nil
 }
 
-func (d *Daemon) latestTaskCloseIntegrationReceipt(ctx context.Context, projectID, taskID, sourceBranch, targetBranch string) (taskCloseIntegrationReceipt, bool, error) {
+func (d *Daemon) latestTaskCloseIntegrationReceipt(ctx context.Context, projectID, taskID, sourceBranch string) (taskCloseIntegrationReceipt, bool, error) {
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
 		return taskCloseIntegrationReceipt{}, false, fmt.Errorf("issue store unavailable")
 	}
-	events, err := issueClient.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{
-		Types:         []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted},
-		Limit:         20,
-		NewestIDFirst: true,
+	events, err := issueClient.ListLatestIssueObservationEventsByIssue(ctx, issues.LatestIssueObservationEventOptions{
+		IssueIDs:          []string{taskID},
+		Type:              domain.IssueEventTaskIntegrationCompleted,
+		PayloadTextEquals: map[string]string{"source_branch": strings.TrimSpace(sourceBranch)},
 	})
 	if err != nil {
 		return taskCloseIntegrationReceipt{}, false, fmt.Errorf("read exact integration receipts: %w", err)
 	}
-	projectID = protocol.NormalizeProjectID(projectID)
-	sourceBranch = strings.TrimSpace(sourceBranch)
-	targetBranch = strings.TrimSpace(targetBranch)
-	for _, event := range events {
-		receipt := taskCloseIntegrationReceipt{
-			ProjectID:              observationPayloadString(event.Payload, "project_id"),
-			SourceBranch:           observationPayloadString(event.Payload, "source_branch"),
-			TargetBranch:           observationPayloadString(event.Payload, "target_branch"),
-			Integrated:             observationPayloadBool(event.Payload, "integrated"),
-			ConfiguredBaseTarget:   observationPayloadBool(event.Payload, "configured_base_target"),
-			TargetID:               observationPayloadString(event.Payload, "target_id"),
-			BaseOID:                observationPayloadString(event.Payload, "base_oid"),
-			SourceOID:              observationPayloadString(event.Payload, "source_oid"),
-			TargetOID:              observationPayloadString(event.Payload, "target_oid"),
-			PublicationOperationID: observationPayloadString(event.Payload, "publication_operation_id"),
-		}
-		if protocol.NormalizeProjectID(receipt.ProjectID) != projectID || receipt.SourceBranch != sourceBranch || receipt.TargetBranch != targetBranch {
-			continue
-		}
-		if receipt.SourceOID == "" || receipt.TargetOID == "" {
-			return taskCloseIntegrationReceipt{}, false, fmt.Errorf("exact integration receipt %d is missing source_oid or target_oid", event.ID)
-		}
-		return receipt, true, nil
+	event, found := events[strings.TrimSpace(taskID)]
+	if !found {
+		return taskCloseIntegrationReceipt{}, false, nil
 	}
-	return taskCloseIntegrationReceipt{}, false, nil
+	receipt := taskCloseIntegrationReceipt{
+		ProjectID:              observationPayloadString(event.Payload, "project_id"),
+		SourceBranch:           observationPayloadString(event.Payload, "source_branch"),
+		TargetBranch:           observationPayloadString(event.Payload, "target_branch"),
+		Integrated:             observationPayloadBool(event.Payload, "integrated"),
+		ConfiguredBaseTarget:   observationPayloadBool(event.Payload, "configured_base_target"),
+		TargetID:               observationPayloadString(event.Payload, "target_id"),
+		BaseOID:                observationPayloadString(event.Payload, "base_oid"),
+		SourceOID:              observationPayloadString(event.Payload, "source_oid"),
+		TargetOID:              observationPayloadString(event.Payload, "target_oid"),
+		PublicationOperationID: observationPayloadString(event.Payload, "publication_operation_id"),
+	}
+	if receipt.SourceOID == "" || receipt.TargetOID == "" {
+		return taskCloseIntegrationReceipt{}, false, fmt.Errorf("exact integration receipt %d is missing source_oid or target_oid", event.ID)
+	}
+	return receipt, true, nil
 }
 
 func (d *Daemon) recoverPublishedTaskCloseIntegration(ctx context.Context, projectID, taskID, targetWorktree, targetID, sourceBranch, targetBranch, sourceOID, targetOID string) (taskCloseIntegrationResult, bool, error) {
-	receipt, found, err := d.latestTaskCloseIntegrationReceipt(ctx, projectID, taskID, sourceBranch, targetBranch)
-	if err != nil || !found || !receipt.Integrated {
+	receipt, found, err := d.latestTaskCloseIntegrationReceipt(ctx, projectID, taskID, sourceBranch)
+	if err != nil || !found {
 		return taskCloseIntegrationResult{}, false, err
 	}
-	if err := validateTaskCloseIntegrationReceiptTarget(receipt, targetID, true); err != nil {
+	if err := validateTaskCloseIntegrationReceiptIdentity(receipt, projectID, targetID, targetBranch, true); err != nil {
 		return taskCloseIntegrationResult{}, false, err
+	}
+	if !receipt.Integrated {
+		return taskCloseIntegrationResult{}, false, nil
 	}
 	if receipt.BaseOID == "" {
 		return taskCloseIntegrationResult{}, false, fmt.Errorf("exact integrated receipt is missing pre-integration base OID")
@@ -3175,7 +3173,14 @@ func (d *Daemon) recoverPublishedTaskCloseIntegration(ctx context.Context, proje
 	}, true, nil
 }
 
-func validateTaskCloseIntegrationReceiptTarget(receipt taskCloseIntegrationReceipt, targetID string, configuredBaseTarget bool) error {
+func validateTaskCloseIntegrationReceiptIdentity(receipt taskCloseIntegrationReceipt, projectID, targetID, targetBranch string, configuredBaseTarget bool) error {
+	projectID = protocol.NormalizeProjectID(projectID)
+	if projectID == "" {
+		return fmt.Errorf("fresh integration project identity is unavailable")
+	}
+	if protocol.NormalizeProjectID(receipt.ProjectID) != projectID {
+		return fmt.Errorf("exact integration receipt project identity changed: recorded=%s current=%s", receipt.ProjectID, projectID)
+	}
 	targetID = strings.TrimSpace(targetID)
 	if targetID == "" {
 		return fmt.Errorf("fresh typed integration target identity is unavailable")
@@ -3188,6 +3193,13 @@ func validateTaskCloseIntegrationReceiptTarget(receipt taskCloseIntegrationRecei
 	}
 	if receipt.ConfiguredBaseTarget != configuredBaseTarget {
 		return fmt.Errorf("exact integration receipt configured-base identity does not match typed target %s", targetID)
+	}
+	targetBranch = strings.TrimSpace(targetBranch)
+	if targetBranch == "" {
+		return fmt.Errorf("fresh integration target branch identity is unavailable")
+	}
+	if strings.TrimSpace(receipt.TargetBranch) != targetBranch {
+		return fmt.Errorf("exact integration receipt target branch changed: recorded=%s current=%s", receipt.TargetBranch, targetBranch)
 	}
 	return nil
 }
@@ -3306,7 +3318,7 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 			}
 			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("source worktree for %s is already removed and integration of current branch %s at %s into %s could not be verified: %w", taskID, source.Branch, sourceOID, targetBranch, containmentErr)
 		}
-		receipt, found, receiptErr := d.latestTaskCloseIntegrationReceipt(ctx, projectID, taskID, source.Branch, targetBranch)
+		receipt, found, receiptErr := d.latestTaskCloseIntegrationReceipt(ctx, projectID, taskID, source.Branch)
 		if receiptErr != nil {
 			return taskCloseIntegrationResult{Requested: true}, receiptErr
 		}
@@ -3316,7 +3328,7 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		if expectedSourceOID != "" && receipt.SourceOID != expectedSourceOID {
 			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("exact integration receipt source does not match reviewed commit: recorded=%s reviewed=%s", receipt.SourceOID, expectedSourceOID)
 		}
-		if err := validateTaskCloseIntegrationReceiptTarget(receipt, target.TargetID, configuredBaseTarget); err != nil {
+		if err := validateTaskCloseIntegrationReceiptIdentity(receipt, projectID, target.TargetID, targetBranch, configuredBaseTarget); err != nil {
 			return taskCloseIntegrationResult{Requested: true}, err
 		}
 		if err := verifyTaskCloseIntegrationReceipt(ctx, d.git, targetWorktree, receipt, projectID, source.Branch, targetBranch); err != nil {
@@ -3595,14 +3607,14 @@ func (d *Daemon) integrateTaskBeforeCloseOriginBase(ctx context.Context, project
 			result.TargetOID = targetOID
 			return result, nil
 		}
-		receipt, found, err := d.latestTaskCloseIntegrationReceipt(ctx, projectID, taskID, source.Branch, remoteBaseRef)
+		receipt, found, err := d.latestTaskCloseIntegrationReceipt(ctx, projectID, taskID, source.Branch)
 		if err != nil {
 			return result, err
 		}
 		if !found {
 			return result, fmt.Errorf("source worktree and branch for %s are already removed, but no exact integration receipt exists for %s into %s", taskID, source.Branch, remoteBaseRef)
 		}
-		if err := validateTaskCloseIntegrationReceiptTarget(receipt, "base", true); err != nil {
+		if err := validateTaskCloseIntegrationReceiptIdentity(receipt, projectID, "base", remoteBaseRef, true); err != nil {
 			return result, err
 		}
 		if expectedSourceOID != "" && receipt.SourceOID != expectedSourceOID {
