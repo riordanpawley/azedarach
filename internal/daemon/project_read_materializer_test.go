@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -145,6 +146,18 @@ func TestAuthoritativeReadResultCannotClearNewerMutationConvergenceFailure(t *te
 	metadata := materializer.snapshotMetadata()
 	if !strings.Contains(metadata.Health, "newer mutation failure") {
 		t.Fatalf("health = %q, want newer mutation failure retained", metadata.Health)
+	}
+}
+
+func TestAuthoritativeReadResultCannotClearConcurrentStructuralFailure(t *testing.T) {
+	materializer := newProjectReadMaterializer("project", nil, nil)
+	attempt := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+	materializer.markUnhealthy(errors.New("structural projection failure"), false)
+	if materializer.finishAuthoritativeReadRefresh(attempt, nil) {
+		t.Fatal("authoritative read cleared a concurrent structural failure")
+	}
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "structural projection failure") {
+		t.Fatalf("health = %q, want structural failure retained", got)
 	}
 }
 
@@ -298,6 +311,64 @@ func TestAuthoritativeComponentsRecoverIndependently(t *testing.T) {
 				t.Fatalf("complete recovery health = %q, want healthy", got)
 			}
 		})
+	}
+}
+
+func TestRuntimeRecoveryExportFailsClosedWhileCanonicalComponentIsUnhealthy(t *testing.T) {
+	ctx := context.Background()
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	task := domain.Task{ID: "issue", Title: "canonical", Status: domain.StatusOpen, Type: domain.TypeTask}
+	reader := newProjectReadMaterializer("p", nil, nil)
+	canonical := map[string]domain.Task{task.ID.String(): task}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, canonical)
+	reader.replaceBootstrap(canonical, canonical, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+	canonicalFailure := reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+	reader.finishAuthoritativeReadRefresh(canonicalFailure, errors.New("canonical projection unavailable"))
+	runtimeFailure := reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	reader.finishAuthoritativeReadRefresh(runtimeFailure, errors.New("runtime projection unavailable"))
+	runtimeRecovery := reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	d := &Daemon{cfg: Config{}, userStore: store, materializers: map[string]*projectReadMaterializer{"p": reader}}
+
+	err = d.syncUserProjectionMaterializedIssuesForRefresh(ctx, "p", []string{"issue"}, reader, runtimeRecovery)
+	if err == nil || !strings.Contains(err.Error(), "canonical projection unavailable") {
+		t.Fatalf("dual-failure runtime export error = %v, want canonical health fence", err)
+	}
+}
+
+func TestCanonicalFailureRecoversAfterCommittedDeltaInSingleRead(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestIssueClient(t)
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(client), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		return tasks, nil
+	})
+	materializer.legacy = func(exportCtx context.Context) ([]domain.Task, error) {
+		return client.ListCanonicalArchiveMode(exportCtx, issues.ArchiveInclude)
+	}
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	failed := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+	materializer.finishAuthoritativeReadRefresh(failed, errors.New("canonical projection unavailable"))
+	created, err := client.Create(ctx, issues.CreateTaskParams{Title: "committed", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{materializers: map[string]*projectReadMaterializer{"project": materializer}, materializersStarted: true}
+
+	tasks, metadata, err := d.convergedCanonicalProjectReadSnapshot(ctx, "project")
+	if err != nil {
+		t.Fatalf("single canonical recovery read: %v", err)
+	}
+	if metadata.Health != "healthy" {
+		t.Fatalf("single canonical recovery health = %q, want healthy", metadata.Health)
+	}
+	if !slices.Contains(taskIDsFromTasks(tasks), created) {
+		t.Fatalf("canonical recovery tasks = %v, want committed issue %s", taskIDsFromTasks(tasks), created)
 	}
 }
 

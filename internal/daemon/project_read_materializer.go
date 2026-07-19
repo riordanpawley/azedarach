@@ -489,7 +489,10 @@ func (m *projectReadMaterializer) applyCanonicalBatch(ctx context.Context, batch
 	m.baseHealth = batch.Health
 	m.baseRetryableFailure = false
 	m.aggregateHealthLocked()
-	m.healthEpoch++
+	// Applying a verified canonical delta is part of an authoritative canonical
+	// read, not a competing health result. Mutation convergence, structural
+	// failures, and materializer replacement advance healthEpoch separately and
+	// still fence an in-flight read completion.
 	m.mu.Unlock()
 	ids := make([]string, 0, len(affected))
 	for issueID := range affected {
@@ -836,6 +839,7 @@ func (m *projectReadMaterializer) snapshotIssuesForAuthoritativeRefresh(issueIDs
 		attempt.healthEpoch == m.healthEpoch &&
 		attempt.component == authoritativeReadRefreshRuntime &&
 		(strings.TrimSpace(m.baseHealth) == "" || m.baseHealth == "healthy") &&
+		m.authoritativeRefreshFailures[authoritativeReadRefreshCanonical] == "" &&
 		m.authoritativeRefreshFailures[authoritativeReadRefreshRuntime] != ""
 	return cloneTasks(tasks), cloneMaterializedMetadata(m.metadata), recoveryAuthorized
 }
