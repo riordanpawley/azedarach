@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
 	daemonops "github.com/riordanpawley/azedarach/internal/daemon/operations"
@@ -3031,6 +3032,33 @@ func (d *Daemon) persistTaskCloseIntegrationPublication(ctx context.Context, pro
 	if !configured {
 		return nil
 	}
+	if integration.ReceiptRecovered && strings.TrimSpace(integration.PublicationOperationID) == "" {
+		targetWorktree := strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID))
+		if targetWorktree == "" {
+			return fmt.Errorf("recover merge-result publication binding: exact project routing unavailable")
+		}
+		projectCfg, configErr := appconfig.LoadConfig(targetWorktree)
+		if configErr != nil {
+			return fmt.Errorf("recover merge-result publication binding: load publication capability: %w", configErr)
+		}
+		gateCommand := strings.TrimSpace(projectCfg.Gate.Command)
+		operation, _, provenanceErr := d.taskClosePublicationProvenance(ctx, projectID, taskID, integration, publicationPolicyVersion(projectCfg, gateCommand), gateCommand, publicationEnvironmentFingerprint(projectCfg))
+		if provenanceErr != nil {
+			return fmt.Errorf("recover merge-result publication binding: %w", provenanceErr)
+		}
+		integration.PublicationOperationID = strings.TrimSpace(operation.OperationID)
+		issueClient := d.issueClientForProject(projectID)
+		if issueClient == nil {
+			return fmt.Errorf("recover merge-result publication binding: issue store unavailable")
+		}
+		if _, bindErr := issueClient.BindTaskIntegrationPublicationOperation(ctx, taskID, issues.TaskIntegrationPublicationBinding{
+			ProjectID: protocol.NormalizeProjectID(projectID), SourceBranch: integration.SourceBranch, TargetBranch: integration.TargetBranch,
+			TargetID: integration.TargetID, BaseOID: integration.BaseOID, SourceOID: integration.SourceOID, TargetOID: integration.TargetOID,
+			PublicationOperationID: integration.PublicationOperationID, WorktreePath: worktreePath,
+		}); bindErr != nil {
+			return fmt.Errorf("recover merge-result publication binding: %w", bindErr)
+		}
+	}
 	if err := d.recordTaskCloseMergeResultEvidence(ctx, projectID, taskID, integration); err != nil {
 		return fmt.Errorf("record merge-result evidence: %w", err)
 	}
@@ -3322,6 +3350,15 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 			reasons = append(reasons, "unknown")
 		}
 		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge preflight failed: predicted conflicts %s", strings.Join(reasons, ", "))
+	}
+	if configuredBaseTarget {
+		publicationConfigured, publicationErr := d.publicationEvidenceConfigured(projectID)
+		if publicationErr != nil {
+			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve configured-base publication authority before integration: %w", publicationErr)
+		}
+		if _, bound := taskClosePublicationBindingFromContext(ctx); publicationConfigured && !bound {
+			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("configured-base integration requires an accepted publication operation before synthetic merge or apply")
+		}
 	}
 	if !branchAttached {
 		if err := d.git.WithWorktreeLock(ctx, targetWorktree, func(ctx context.Context) error {

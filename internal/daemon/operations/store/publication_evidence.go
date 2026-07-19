@@ -259,6 +259,8 @@ func scanPublicationInvalidation(scanner validationScanner) (domain.PublicationE
 
 func publicationEvidenceSemanticallyEqual(left, right domain.PublicationEvidence) bool {
 	left.CreatedAt, right.CreatedAt = time.Time{}, time.Time{}
+	left.Coverage, _ = domain.CanonicalizePublicationCoverage(left.Coverage)
+	right.Coverage, _ = domain.CanonicalizePublicationCoverage(right.Coverage)
 	return reflect.DeepEqual(left, right)
 }
 
