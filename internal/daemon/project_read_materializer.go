@@ -488,7 +488,7 @@ func (m *projectReadMaterializer) applyCanonicalBatch(ctx context.Context, batch
 	}
 	for issueID, task := range canonical {
 		if _, authoritativeReplacement := replaced[issueID]; authoritativeReplacement {
-			m.retireAuthoritativeRuntimeIssueLocked(issueID)
+			m.retireSettledAuthoritativeRuntimeIssueLocked(issueID)
 		}
 		m.runtimeRefreshEpoch[issueID] = canonicalEpoch
 		m.runtimePublishedEpoch[issueID] = canonicalEpoch
@@ -939,6 +939,17 @@ func (m *projectReadMaterializer) retireAuthoritativeRuntimeIssueLocked(issueID 
 	delete(m.authoritativeRuntimeIssueSequence, issueID)
 	delete(m.authoritativeRuntimePending, issueID)
 	delete(m.authoritativeRuntimeFailures, issueID)
+}
+
+// retireSettledAuthoritativeRuntimeIssueLocked clears completed ownership while
+// preserving failures and in-flight attempts that still require an exact-
+// generation retry. Deletion uses the stronger retirement above because a
+// removed issue has no future runtime projection to converge.
+func (m *projectReadMaterializer) retireSettledAuthoritativeRuntimeIssueLocked(issueID string) {
+	if m.authoritativeRuntimePending[issueID] != 0 {
+		return
+	}
+	delete(m.authoritativeRuntimeIssueSequence, issueID)
 }
 
 func (m *projectReadMaterializer) runtimeRefreshAttemptSuperseded(attempt authoritativeReadRefreshAttempt) bool {

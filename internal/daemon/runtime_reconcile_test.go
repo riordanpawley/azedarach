@@ -273,6 +273,7 @@ type scriptedRuntimeReconciler struct {
 	current       int
 	maxConcurrent int
 	resultsByID   map[string]protocol.RuntimeReconcileResponseBody
+	requestsByID  map[string][]runtimeReconcileRequestContext
 }
 
 func (r *scriptedRuntimeReconciler) Reconcile(ctx context.Context, projectID string) (protocol.RuntimeReconcileResponseBody, error) {
@@ -281,6 +282,10 @@ func (r *scriptedRuntimeReconciler) Reconcile(ctx context.Context, projectID str
 		r.callCountByID = map[string]int{}
 	}
 	r.callCountByID[projectID]++
+	if r.requestsByID == nil {
+		r.requestsByID = map[string][]runtimeReconcileRequestContext{}
+	}
+	r.requestsByID[projectID] = append(r.requestsByID[projectID], runtimeReconcileRequestFromContext(ctx))
 	r.startOrder = append(r.startOrder, projectID)
 	r.current++
 	if r.current > r.maxConcurrent {
@@ -338,6 +343,12 @@ func (r *scriptedRuntimeReconciler) snapshot() (order []string, callCount map[st
 		outCounts[key] = value
 	}
 	return append([]string(nil), r.startOrder...), outCounts, r.maxConcurrent
+}
+
+func (r *scriptedRuntimeReconciler) requests(projectID string) []runtimeReconcileRequestContext {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]runtimeReconcileRequestContext(nil), r.requestsByID[projectID]...)
 }
 
 type dedupedTimeoutRuntimeReconciler struct {
@@ -965,6 +976,10 @@ func TestCommandRuntimeReconcileReprioritizesPendingQueuedProject(t *testing.T) 
 		if got := callCounts[projectID]; got != 1 {
 			t.Fatalf("reconcile calls for %s = %d, want 1", projectID, got)
 		}
+	}
+	requests := recorder.requests("proj-runtime")
+	if len(requests) != 1 || requests[0].Priority != reconcilePriorityManual || requests[0].Reason != "manual" {
+		t.Fatalf("reprioritized request context = %+v, want one manual request", requests)
 	}
 }
 
