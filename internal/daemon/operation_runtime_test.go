@@ -560,6 +560,58 @@ func TestStoredOperationProgressPreservesExplicitTmuxOnlyLaunchPlan(t *testing.T
 	}
 }
 
+func TestOperationRuntimePersistsFinalTmuxOnlyFenceForRecovery(t *testing.T) {
+	projectID, issueID := "proj-tmux-final", "AZ-2"
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), hub: publish.NewHub(32, 16, nil), nextRevision: sequentialRevision()})
+	progressed := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	runtime.sessionStart = func(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		if err := reportTmuxOnlySessionStartProgress(ctx, "tmux_launch", "creating tmux session without agent launch", 70); err != nil {
+			return protocol.ResponseEnvelope{}, err
+		}
+		if err := reportTmuxOnlySessionStartProgress(ctx, "tmux_launch", "tmux session created without agent launch", 90); err != nil {
+			return protocol.ResponseEnvelope{}, err
+		}
+		close(progressed)
+		<-release
+		return testResponse(req, map[string]string{"output": "session started"}), nil
+	}
+	payload := mustJSON(t, map[string]any{"project_id": projectID, "session_id": issueID, "start_work": false})
+	response := runtime.Handle(context.Background(), testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
+		ProjectID: naming.ProjectID(projectID), Kind: daemonhandlers.CommandSessionStart, IssueID: naming.IssueID(issueID), Payload: payload,
+	}))
+	if !response.OK {
+		t.Fatalf("submit tmux-only start: %+v", response)
+	}
+	var submitted protocol.OperationSubmitResponseBody
+	if err := json.Unmarshal(response.Body, &submitted); err != nil {
+		t.Fatal(err)
+	}
+	<-progressed
+	record := waitForRuntimeProgress(t, runtime, submitted.Operation.OperationID.String(), "tmux_launch")
+	if record.Progress == nil || record.Progress.Percent != 90 || record.Progress.AgentLaunchRequired == nil || *record.Progress.AgentLaunchRequired {
+		t.Fatalf("persisted final tmux-only progress=%+v", record.Progress)
+	}
+
+	store := daemonstate.NewRuntimeStateStore(t.TempDir(), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	runner := newSessionStartTmuxRunner()
+	runner.sessions[sessionID] = true
+	runner.currentCommand = "zsh"
+	d := &Daemon{
+		cfg:  Config{RepoDir: t.TempDir(), SessionShell: "zsh", Logger: slog.Default()},
+		tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore(),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{}, revision: map[string]uint64{},
+	}
+	recovery, ok := d.recoverInterruptedOperation(context.Background(), record)
+	if !ok || recovery.State != daemonops.StateDone || !runner.sessions[sessionID] {
+		t.Fatalf("persisted final tmux-only recovery=%+v ok=%t live=%t", recovery, ok, runner.sessions[sessionID])
+	}
+}
+
 func TestOperationRuntimeDirectGitMergeWaitTimeoutReturnsPendingEnvelope(t *testing.T) {
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir(), nextRevision: sequentialRevision()})
 	runtime.gitHandler = daemonhandlers.NewGitHandler(runtimeGitService{})
@@ -1024,6 +1076,30 @@ func TestDaemonRecoverInterruptedTmuxOnlySessionStartWithoutAgentAcknowledgement
 	projection, found, err := store.GetWorkerSessionStateByIssueID(ctx, projectID, issueID, sessionID)
 	if err != nil || !found || projection.ObservedState != daemonstate.SessionStateRunning {
 		t.Fatalf("tmux-only projection = %+v, found=%t err=%v", projection, found, err)
+	}
+}
+
+func TestDaemonRecoverInterruptedLegacyV58TmuxOnlyFinalProgress(t *testing.T) {
+	ctx := context.Background()
+	projectID, issueID := "proj-v58-tmux-only", "AZ-2"
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	store := daemonstate.NewRuntimeStateStore(t.TempDir(), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	runner := newSessionStartTmuxRunner()
+	runner.sessions[sessionID] = true
+	runner.currentCommand = "zsh"
+	d := &Daemon{
+		cfg:  Config{RepoDir: t.TempDir(), SessionShell: "zsh", Logger: slog.Default()},
+		tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore(),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{}, revision: map[string]uint64{},
+	}
+	recovery, ok := d.recoverInterruptedOperation(ctx, daemonops.Record{
+		ID: "legacy-v58-tmux-only", ProjectID: projectID, IssueID: issueID, Kind: daemonhandlers.CommandSessionStart,
+		Progress: &daemonops.Progress{Phase: "tmux_launch", Message: "tmux session created without agent launch", Percent: 90},
+	})
+	if !ok || recovery.State != daemonops.StateDone || !runner.sessions[sessionID] {
+		t.Fatalf("legacy v58 tmux-only recovery=%+v ok=%t live=%t", recovery, ok, runner.sessions[sessionID])
 	}
 }
 

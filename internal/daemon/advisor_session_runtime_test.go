@@ -38,6 +38,7 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 	managedDir := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.current")
 	t.Setenv("PATH", filepath.Join(repoDir, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
 	d := &Daemon{cfg: Config{RepoDir: repoDir, ManagedGenerationBinDir: managedDir, Logger: slog.Default()}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore()}
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, protocol.DefaultProjectID)
 	service := issueInteractionService{daemon: d}
 
 	first, err := service.MutateInteraction(ctx, protocol.CommandInteractionDiscuss, protocol.InteractionMutationRequestBody{ID: request.ID, ExpectedRevision: 1, Actor: "human"})
@@ -55,11 +56,10 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 	if len(quoted) < 4 {
 		t.Fatalf("advisor launch does not use artifact: %s", launch)
 	}
-	body, err := os.ReadFile(quoted[len(quoted)-2])
-	if err != nil {
-		t.Fatal(err)
+	launchPayload := runner.launchScriptContents[first.Request.SessionID]
+	if launchPayload == "" {
+		t.Fatalf("advisor launch artifact was not captured: %s", quoted[len(quoted)-2])
 	}
-	launchPayload := string(body)
 	if !strings.Contains(launchPayload, "AZEDARACH_SESSION_ROLE=advisor") || !strings.Contains(launchPayload, "AZEDARACH_INTERACTION_ID") || !strings.Contains(launchPayload, "AZEDARACH_ISSUE_ID=\"\"") {
 		t.Fatalf("advisor launch payload = %s", launchPayload)
 	}
@@ -102,6 +102,9 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 		t.Fatalf("human CLI without advisor session metadata rejected: %v", err)
 	}
 
+	// Attaching an already-live, exactly acknowledged advisor must not rebuild a
+	// launch artifact or revalidate launch-tool configuration.
+	d.cfg.CLITool = "unsupported-live-attach"
 	second, err := service.MutateInteraction(ctx, protocol.CommandInteractionDiscuss, protocol.InteractionMutationRequestBody{ID: request.ID, ExpectedRevision: first.Request.Revision, Actor: "human"})
 	if err != nil {
 		t.Fatal(err)
@@ -124,6 +127,7 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 	if !resumed.SessionAttached || !resumed.SessionResumed || resumed.SessionStarted {
 		t.Fatalf("paused discuss = %+v", resumed)
 	}
+	d.cfg.CLITool = "claude"
 	delete(runner.sessions, first.Request.SessionID)
 	restarted, err := service.MutateInteraction(ctx, protocol.CommandInteractionDiscuss, protocol.InteractionMutationRequestBody{ID: request.ID, ExpectedRevision: second.Request.Revision, Actor: "human"})
 	if err != nil {
@@ -158,6 +162,39 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 	}
 }
 
+func TestAdvisorInitialLaunchRejectsImmediateExitAndRetries(t *testing.T) {
+	ctx := withDaemonProjectIDContext(context.Background(), protocol.DefaultProjectID)
+	repoDir := t.TempDir()
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "advisor immediate exit", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	request := domain.InteractionRequest{ID: "request-advisor-exit", IssueID: issueID, DecisionKey: "choice", OrchestrationScope: "project", Question: "Which option?", Why: "Human judgment", Options: []domain.InteractionOption{{Key: "a", Label: "A"}}, Significance: domain.InteractionSignificanceRoutine, Respondent: "human", DecisionPacket: domain.InteractionDecisionPacket{Summary: "Choose"}, State: domain.InteractionDiscussing, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := client.CreateInteraction(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	runner := newSessionStartTmuxRunner()
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore()}
+	runner.onNewSession = func(sessionID string) { runner.sessionsWithoutPanes[sessionID] = true }
+	if result, err := d.ensureAdvisorSessionRuntime(ctx, protocol.DefaultProjectID, request); err == nil {
+		t.Fatalf("immediate-exit advisor result=%+v, want error", result)
+	}
+	sessionID := advisorSessionID(request.ID)
+	if runner.sessions[sessionID] {
+		t.Fatalf("immediate-exit advisor session %s survived", sessionID)
+	}
+
+	runner.onNewSession = nil
+	delete(runner.sessionsWithoutPanes, sessionID)
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, protocol.DefaultProjectID)
+	result, err := d.ensureAdvisorSessionRuntime(ctx, protocol.DefaultProjectID, request)
+	if err != nil || !result.Started || !runner.sessions[sessionID] {
+		t.Fatalf("advisor retry result=%+v err=%v live=%t", result, err, runner.sessions[sessionID])
+	}
+}
+
 func TestRuntimeReconcileRecoversAndCleansAdvisorSessionsFromDurableRequests(t *testing.T) {
 	ctx := withDaemonProjectIDContext(context.Background(), protocol.DefaultProjectID)
 	repoDir := t.TempDir()
@@ -173,6 +210,7 @@ func TestRuntimeReconcileRecoversAndCleansAdvisorSessionsFromDurableRequests(t *
 	}
 	runner := newSessionStartTmuxRunner()
 	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore(), hub: publish.NewHub(32, 8, slog.Default()), revision: map[string]uint64{}}
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, protocol.DefaultProjectID)
 	service := issueInteractionService{daemon: d}
 	discussed, err := service.MutateInteraction(ctx, protocol.CommandInteractionDiscuss, protocol.InteractionMutationRequestBody{ID: request.ID, ExpectedRevision: 1, Actor: "human"})
 	if err != nil {
@@ -245,6 +283,7 @@ func TestRuntimeReconcileIssuesLeavesUnrelatedAdvisorSessionsUntouched(t *testin
 	unrelated := createRequest("unrelated advisor cleanup", "request-unrelated-reconcile")
 	runner := newSessionStartTmuxRunner()
 	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore(), hub: publish.NewHub(32, 8, slog.Default()), revision: map[string]uint64{}}
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, protocol.DefaultProjectID)
 	service := issueInteractionService{daemon: d}
 	targetDiscussed, err := service.MutateInteraction(ctx, protocol.CommandInteractionDiscuss, protocol.InteractionMutationRequestBody{ID: target.ID, ExpectedRevision: target.Revision, Actor: "human"})
 	if err != nil {
@@ -342,6 +381,7 @@ func TestAdvisorRecoveryCleansRuntimeWhenTerminalRequestWinsCrossDaemonRace(t *t
 			t.Errorf("persist racing interaction: %v", updateErr)
 		}
 	}
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, projectID)
 
 	recovered, cleaned, err := d.reconcileAdvisorSessionRuntimes(ctx, projectID, nil)
 	if err != nil {
@@ -405,6 +445,7 @@ func TestAdvisorRecoveryRetriesWhenNonTerminalMutationWinsCrossDaemonRace(t *tes
 			t.Errorf("persist racing interaction: %v", updateErr)
 		}
 	}
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, projectID)
 
 	recovered, cleaned, err := d.reconcileAdvisorSessionRuntimes(ctx, projectID, nil)
 	if err != nil {

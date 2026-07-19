@@ -242,6 +242,12 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Info("rooted orchestrator bootstrap confirmed", "project_id", projectID, "root_id", body.Scope.RootIssueID, "session_id", acquired.Lease.SessionID, "disposition", bootstrapDisposition)
 			}
+		} else if !launchedHere {
+			if err := d.validateExistingManagedAgentReadiness(ctx, projectID, acquired.Lease.SessionID, "agent"); err != nil {
+				_ = d.tmux.KillSession(ctx, acquired.Lease.SessionID)
+				pauseOrReleaseLease()
+				return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("validate existing project orchestrator managed agent: %v", err)), nil
+			}
 		}
 		if err := d.persistOrchestratorSessionProjection(ctx, req.Meta, projectID, body.Scope, acquired.Lease.SessionID); err != nil {
 			if launchedHere {

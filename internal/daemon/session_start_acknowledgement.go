@@ -78,6 +78,10 @@ func (d *Daemon) validateRecoveredSessionStartPromptHandoff(path string) (sessio
 }
 
 func (d *Daemon) waitForInitialManagedAgentAcknowledgement(ctx context.Context, projectID, sessionID, incarnation string, handoff sessionPromptHandoff) error {
+	return d.waitForInitialManagedAgentAcknowledgementForPane(ctx, projectID, sessionID, "agent", incarnation, handoff)
+}
+
+func (d *Daemon) waitForInitialManagedAgentAcknowledgementForPane(ctx context.Context, projectID, sessionID, logicalPaneID, incarnation string, handoff sessionPromptHandoff) error {
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
 	if store == nil {
 		return &sessionStartBootstrapError{Reason: sessionStartBootstrapAcknowledgementLost, SessionID: sessionID, Incarnation: incarnation, Cause: errors.New("session runtime store unavailable")}
@@ -96,7 +100,7 @@ func (d *Daemon) waitForInitialManagedAgentAcknowledgement(ctx context.Context, 
 		if waitCtx.Err() != nil {
 			sampleCtx, sampleCancel = context.WithTimeout(context.WithoutCancel(waitCtx), time.Second)
 		}
-		sample, err := d.sampleInitialManagedAgentAcknowledgement(sampleCtx, store, projectID, sessionID, incarnation, handoff)
+		sample, err := d.sampleInitialManagedAgentAcknowledgement(sampleCtx, store, projectID, sessionID, logicalPaneID, incarnation, handoff)
 		if sampleCancel != nil {
 			sampleCancel()
 		}
@@ -125,12 +129,12 @@ func (d *Daemon) waitForInitialManagedAgentAcknowledgement(ctx context.Context, 
 	}
 }
 
-func (d *Daemon) sampleInitialManagedAgentAcknowledgement(ctx context.Context, store *daemonstate.RuntimeStateStore, projectID, sessionID, incarnation string, handoff sessionPromptHandoff) (sessionStartAcknowledgementSample, error) {
+func (d *Daemon) sampleInitialManagedAgentAcknowledgement(ctx context.Context, store *daemonstate.RuntimeStateStore, projectID, sessionID, logicalPaneID, incarnation string, handoff sessionPromptHandoff) (sessionStartAcknowledgementSample, error) {
 	consumed, err := sessionPromptHandoffConsumed(handoff)
 	if err != nil {
 		return sessionStartAcknowledgementSample{}, err
 	}
-	identity, found, err := store.GetManagedAgentIdentity(ctx, projectID, sessionID, "agent")
+	identity, found, err := store.GetManagedAgentIdentity(ctx, projectID, sessionID, strings.TrimSpace(logicalPaneID))
 	if err != nil {
 		return sessionStartAcknowledgementSample{}, fmt.Errorf("load managed agent acknowledgement: %w", err)
 	}
@@ -140,12 +144,41 @@ func (d *Daemon) sampleInitialManagedAgentAcknowledgement(ctx context.Context, s
 	}
 	sample := sessionStartAcknowledgementSample{promptConsumed: consumed, identity: identity, identityFound: found}
 	for _, pane := range panes {
-		if strings.TrimSpace(pane.SessionName) == strings.TrimSpace(sessionID) {
+		if strings.TrimSpace(pane.SessionName) == strings.TrimSpace(sessionID) &&
+			(!found || sanitizeRuntimePaneID(pane.PaneID) == sanitizeRuntimePaneID(identity.TmuxPaneID)) {
 			sample.pane, sample.paneFound = pane, true
 			break
 		}
 	}
 	return sample, nil
+}
+
+func (d *Daemon) validateExistingManagedAgentReadiness(ctx context.Context, projectID, sessionID, logicalPaneID string) error {
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil || d.tmux == nil {
+		return &sessionStartBootstrapError{Reason: sessionStartBootstrapAcknowledgementLost, SessionID: sessionID, Cause: errors.New("managed agent readiness authority unavailable")}
+	}
+	identity, found, err := store.GetManagedAgentIdentity(ctx, projectID, sessionID, strings.TrimSpace(logicalPaneID))
+	if err != nil {
+		return &sessionStartBootstrapError{Reason: sessionStartBootstrapAcknowledgementLost, SessionID: sessionID, Cause: err}
+	}
+	if !found || strings.TrimSpace(identity.AgentIncarnation) == "" {
+		return &sessionStartBootstrapError{Reason: sessionStartBootstrapAcknowledgementLost, SessionID: sessionID, Cause: errors.New("durable managed agent identity is missing")}
+	}
+	panes, err := d.tmux.ListPaneInfos(ctx)
+	if err != nil {
+		return &sessionStartBootstrapError{Reason: sessionStartBootstrapAcknowledgementLost, SessionID: sessionID, Incarnation: identity.AgentIncarnation, Cause: err}
+	}
+	for _, pane := range panes {
+		if strings.TrimSpace(pane.SessionName) != strings.TrimSpace(sessionID) || !managedAgentIdentityMatchesPane(identity, pane, identity.AgentIncarnation) {
+			continue
+		}
+		if sessionStartPaneIsShellFallback(d.runtimeConfigForProject(projectID).SessionShell, pane.CurrentCommand) {
+			return &sessionStartBootstrapError{Reason: sessionStartBootstrapShellFallback, SessionID: sessionID, Incarnation: identity.AgentIncarnation, CurrentCommand: pane.CurrentCommand, Cause: errors.New("managed agent exited to a shell")}
+		}
+		return nil
+	}
+	return &sessionStartBootstrapError{Reason: sessionStartBootstrapAgentExited, SessionID: sessionID, Incarnation: identity.AgentIncarnation, Cause: errors.New("exact managed agent pane is not live")}
 }
 
 func managedAgentIdentityMatchesPane(identity daemonstate.ManagedAgentIdentity, pane tmux.PaneInfo, incarnation string) bool {

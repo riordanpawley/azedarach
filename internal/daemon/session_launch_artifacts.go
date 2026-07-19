@@ -75,7 +75,7 @@ func (d *Daemon) prepareSessionLaunchArtifact(spec sessionLaunchSpec) (sessionLa
 	}
 	shell, payload := d.buildSessionLaunchArtifactPayload(spec, handoff)
 	if strings.TrimSpace(spec.CommandPayload) != "" {
-		payload = spec.CommandPayload
+		payload = sessionLaunchIdentityExport(spec) + spec.CommandPayload
 	}
 	if strings.TrimSpace(spec.Shell) != "" {
 		shell = spec.Shell
@@ -89,6 +89,19 @@ func (d *Daemon) prepareSessionLaunchArtifact(spec sessionLaunchSpec) (sessionLa
 		command = "exec " + singleQuoteForShell(advisorEnvExecutable) + " -u BASH_ENV -u ENV -u ZDOTDIR -u ZSH_ENV -u FISH_CONFIG_DIR " + singleQuoteForShell(advisorShellExecutable) + " " + singleQuoteForShell(filepath.ToSlash(path))
 	}
 	return sessionLaunchArtifact{Command: command, ScriptPath: path, PromptHandoff: handoff}, nil
+}
+
+func sessionLaunchIdentityExport(spec sessionLaunchSpec) string {
+	if strings.TrimSpace(spec.AgentIncarnation) == "" {
+		return ""
+	}
+	logicalPaneID := strings.TrimSpace(spec.LogicalPaneID)
+	if logicalPaneID == "" {
+		logicalPaneID = "agent"
+	}
+	return "export AZEDARACH_LOGICAL_PANE_ID=" + singleQuoteForShell(logicalPaneID) +
+		" AZEDARACH_AGENT_INCARNATION=" + singleQuoteForShell(spec.AgentIncarnation) +
+		" AZEDARACH_PANE_PID=$$; "
 }
 func (d *Daemon) sessionLaunchArtifactDir() string {
 	base := ""

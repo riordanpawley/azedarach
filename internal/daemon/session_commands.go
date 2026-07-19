@@ -1206,7 +1206,7 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 	initialActivity, initialActivitySource := initialSessionStartActivity(cmd.StartWork)
 	if cmd.StartWork {
 		if err := d.tmux.NewSessionWithCommandAndEnvironment(ctx, cmd.SessionID, worktree.Path, launchCommand, nil); err != nil {
-			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+			cleanupNote := d.reconcileAmbiguousSessionStartCreateError(ctx, req, cmd, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, sessionStartLaunchFailureMessage("tmux_launch", cmd, worktree.Path, launchCommand, true, err, cleanupNote)), nil
 		}
 		launchScriptHandedOff = true
@@ -1245,7 +1245,7 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 		}
 	} else {
 		if err := d.tmux.NewSessionWithEnvironment(ctx, cmd.SessionID, worktree.Path, nil); err != nil {
-			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+			cleanupNote := d.reconcileAmbiguousSessionStartCreateError(ctx, req, cmd, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, sessionStartLaunchFailureMessage("tmux_launch", cmd, worktree.Path, "", false, err, cleanupNote)), nil
 		}
 		if err := d.exportSessionContextEnv(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID); err != nil {
@@ -1256,7 +1256,7 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 			cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("export issue resource env: %v%s", err, cleanupNote)), nil
 		}
-		reportSessionStartProgress(ctx, "tmux_launch", "tmux session created without agent launch", 90)
+		_ = reportTmuxOnlySessionStartProgress(ctx, "tmux_launch", "tmux session created without agent launch", 90)
 	}
 	if cmd.StartWork && sessionInitMarker.AbsolutePath != "" {
 		if err := d.waitForSessionInitReady(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, sessionInitMarker); err != nil {
@@ -1392,6 +1392,29 @@ func (d *Daemon) rollbackSessionStartLifecycle(projectID, sessionID, issueID str
 
 func (d *Daemon) compensateSessionStartFailure(ctx context.Context, req protocol.RequestEnvelope, projectID, sessionID, issueID string, resourceCtx issueResourceLifecycleContext, liveActivity, liveActivitySource string) string {
 	return d.compensateSessionStartFailureWithSelector(ctx, req, projectID, sessionID, issueID, resourceCtx, liveActivity, liveActivitySource, normalizeSessionIntentSelector(sessionIntentSelector{}, issueID))
+}
+
+func (d *Daemon) reconcileAmbiguousSessionStartCreateError(ctx context.Context, req protocol.RequestEnvelope, cmd resolvedSessionTarget, resourceCtx issueResourceLifecycleContext, liveActivity, liveActivitySource string, selector sessionIntentSelector) string {
+	live, probeErr := d.tmux.HasSession(ctx, cmd.SessionID)
+	if probeErr != nil {
+		note := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+		return note + fmt.Sprintf("; failed-start tmux creation reconciliation also failed: %v", probeErr)
+	}
+	if !live {
+		return d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+	}
+
+	note := ""
+	if err := d.applyTypedSessionLifecycleTransition(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonhandlers.CommandSessionStart, liveActivity, liveActivitySource, selector); err != nil {
+		note += fmt.Sprintf("; ambiguous tmux creation durable intent recording also failed: %v", err)
+	}
+	if err := d.persistObservedRuntimeProjection(ctx, cmd.ProjectID, req.Meta, daemonstate.Session{
+		ID: cmd.SessionID, ObservedState: daemonstate.SessionStateRunning,
+		Activity: liveActivity, ActivitySource: liveActivitySource, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		note += fmt.Sprintf("; ambiguous tmux creation runtime observation also failed: %v", err)
+	}
+	return note + d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, liveActivity, liveActivitySource, selector)
 }
 
 func (d *Daemon) compensateSessionStartFailureWithSelector(ctx context.Context, req protocol.RequestEnvelope, projectID, sessionID, issueID string, resourceCtx issueResourceLifecycleContext, liveActivity, liveActivitySource string, selector sessionIntentSelector) string {
@@ -2322,7 +2345,12 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 	if prompt == "" {
 		prompt = buildConflictResolutionPrompt(issueIDString, conflictFiles)
 	}
-	artifact, artifactErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: projectID, IssueID: issueIDString, SessionID: canonicalSessionID, Yolo: body.Yolo, ImagePaths: body.ImagePaths, Prompt: prompt})
+	incarnation, incarnationErr := newRestartIncarnation()
+	if incarnationErr != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("plan conflict resolver managed agent incarnation: %v", incarnationErr)), nil
+	}
+	const conflictLogicalPaneID = "conflict-resolver"
+	artifact, artifactErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: projectID, IssueID: issueIDString, SessionID: canonicalSessionID, Yolo: body.Yolo, ImagePaths: body.ImagePaths, Prompt: prompt, LogicalPaneID: conflictLogicalPaneID, AgentIncarnation: incarnation})
 	if artifactErr != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare conflict resolver launch artifact: %v", artifactErr)), nil
 	}
@@ -2330,6 +2358,11 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 	if err != nil {
 		artifact.remove()
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("launch conflict resolver window: %v", err)), nil
+	}
+	if err := d.waitForInitialManagedAgentAcknowledgementForPane(ctx, projectID, canonicalSessionID, conflictLogicalPaneID, incarnation, artifact.PromptHandoff); err != nil {
+		artifact.remove()
+		_ = d.tmux.KillWindow(ctx, sessionName, sessionConflictWindowName)
+		return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("confirm conflict resolver managed agent bootstrap: %v", err)), nil
 	}
 	resp := d.successResponse(req)
 	out := protocol.SessionResolveConflictResponseBody{
@@ -3743,7 +3776,14 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 			continue
 		}
 		canonicalSessionID := naming.CanonicalSessionID(namingScope, issueID)
-		launchArtifact, artifactErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: projectID, IssueID: issueID, SessionID: canonicalSessionID})
+		incarnation, incarnationErr := newRestartIncarnation()
+		if incarnationErr != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("session reconciliation failed to plan managed agent incarnation", "project_id", projectID, "issue_id", issueID, "error", incarnationErr)
+			}
+			continue
+		}
+		launchArtifact, artifactErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: projectID, IssueID: issueID, SessionID: canonicalSessionID, LogicalPaneID: "agent", AgentIncarnation: incarnation})
 		if artifactErr != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("session reconciliation failed to prepare launch artifact", "project_id", projectID, "issue_id", issueID, "error", artifactErr)
@@ -3752,6 +3792,9 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 		}
 		if newErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, canonicalSessionID, wt.Path, launchArtifact.Command, nil); newErr != nil {
 			launchArtifact.remove()
+			if live, probeErr := d.tmux.HasSession(ctx, canonicalSessionID); probeErr == nil && live {
+				_ = d.tmux.KillSession(ctx, canonicalSessionID)
+			}
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("session reconciliation failed to recreate tmux session",
 					"project_id", projectID,
@@ -3764,6 +3807,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 			continue
 		}
 		if envErr := d.setSessionContextEnv(ctx, projectID, issueID, canonicalSessionID); envErr != nil {
+			launchArtifact.remove()
 			_ = d.tmux.KillSession(ctx, canonicalSessionID)
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("session reconciliation failed to install session environment",
@@ -3772,6 +3816,17 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 					"session_id", canonicalSessionID,
 					"error", envErr,
 				)
+			}
+			continue
+		}
+		if ackErr := d.waitForInitialManagedAgentAcknowledgement(ctx, projectID, canonicalSessionID, incarnation, launchArtifact.PromptHandoff); ackErr != nil {
+			launchArtifact.remove()
+			_ = d.tmux.KillSession(ctx, canonicalSessionID)
+			_ = d.persistObservedRuntimeProjection(ctx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, daemonstate.Session{
+				ID: canonicalSessionID, ObservedState: daemonstate.SessionStateStopped, UpdatedAt: time.Now().UTC(),
+			})
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("session reconciliation rejected unacknowledged managed agent", "project_id", projectID, "issue_id", issueID, "session_id", canonicalSessionID, "error", ackErr)
 			}
 			continue
 		}

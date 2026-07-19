@@ -366,6 +366,18 @@ func (c *Client) EnsureWindowWithCommandAndEnvironment(ctx context.Context, sess
 	return c.ensureWindow(ctx, sessionName, windowName, workdir, command, environment)
 }
 
+// KillWindow removes one exact window without terminating unrelated panes in the session.
+func (c *Client) KillWindow(ctx context.Context, sessionName, windowName string) error {
+	target := strings.TrimSpace(sessionName) + ":" + strings.TrimSpace(windowName)
+	if strings.TrimSpace(sessionName) == "" || strings.TrimSpace(windowName) == "" {
+		return &domain.TmuxError{Op: "kill-window", Session: sessionName, Err: errors.New("session and window are required")}
+	}
+	if _, err := c.runner.Run(ctx, "kill-window", "-t", target); err != nil {
+		return &domain.TmuxError{Op: "kill-window", Session: sessionName, Err: err}
+	}
+	return nil
+}
+
 // RespawnPane replaces exactly one pane process while preserving its session,
 // window, layout, and every unrelated pane. paneID is tmux's stable pane target
 // (for example %12), never a window or session name.

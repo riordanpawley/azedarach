@@ -70,32 +70,56 @@ func (d *Daemon) ensureAdvisorSessionRuntime(ctx context.Context, projectID stri
 	if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, starting); err != nil {
 		return advisorSessionRuntimeResult{}, err
 	}
+	var plannedIncarnation string
+	var artifact sessionLaunchArtifact
 	advisor, attached, err := store.EnsureAdvisorSession(ctx, projectID, request.ID, request.IssueID, sessionID,
-		func(ctx context.Context, sessionID string) (bool, error) { return d.tmux.HasSession(ctx, sessionID) },
+		func(ctx context.Context, sessionID string) (bool, error) {
+			live, liveErr := d.tmux.HasSession(ctx, sessionID)
+			if liveErr != nil || !live {
+				return live, liveErr
+			}
+			if readinessErr := d.validateExistingManagedAgentReadiness(ctx, projectID, sessionID, "agent"); readinessErr == nil {
+				return true, nil
+			}
+			if killErr := d.tmux.KillSession(ctx, sessionID); killErr != nil {
+				return false, fmt.Errorf("retire unready advisor runtime: %w", killErr)
+			}
+			return false, nil
+		},
 		func(ctx context.Context, advisor daemonstate.AdvisorSession) error {
 			pack, packErr := d.buildAdvisorContextPack(ctx, projectID, request)
 			if packErr != nil {
 				return fmt.Errorf("build advisor context pack: %w", packErr)
 			}
 			prompt := buildAdvisorSessionPrompt(request, pack)
-			command, buildErr := d.buildAdvisorLaunchCommand(projectID, advisor, prompt)
-			if buildErr != nil {
-				return buildErr
+			command, commandErr := d.buildAdvisorLaunchCommand(projectID, advisor, prompt)
+			if commandErr != nil {
+				return commandErr
 			}
 			if len(command.Args) == 0 {
 				return errors.New("advisor launch command has no payload")
 			}
-			artifact, artifactErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: projectID, SessionID: advisor.SessionID, CommandPayload: command.Args[len(command.Args)-1], Shell: advisorShellExecutable, SanitizeEnvironment: true})
-			if artifactErr != nil {
-				return fmt.Errorf("prepare advisor launch artifact: %w", artifactErr)
+			plannedIncarnation, commandErr = newRestartIncarnation()
+			if commandErr != nil {
+				return fmt.Errorf("plan advisor managed agent incarnation: %w", commandErr)
+			}
+			artifact, commandErr = d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: projectID, SessionID: advisor.SessionID, CommandPayload: command.Args[len(command.Args)-1], Shell: advisorShellExecutable, SanitizeEnvironment: true, LogicalPaneID: "agent", AgentIncarnation: plannedIncarnation})
+			if commandErr != nil {
+				return fmt.Errorf("prepare advisor launch artifact: %w", commandErr)
 			}
 			if launchErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, advisor.SessionID, workdir, artifact.Command, nil); launchErr != nil {
 				artifact.remove()
 				return launchErr
 			}
+			if ackErr := d.waitForInitialManagedAgentAcknowledgement(ctx, projectID, advisor.SessionID, plannedIncarnation, artifact.PromptHandoff); ackErr != nil {
+				artifact.remove()
+				_ = d.tmux.KillSession(ctx, advisor.SessionID)
+				return fmt.Errorf("confirm advisor managed agent bootstrap: %w", ackErr)
+			}
 			return nil
 		})
 	if err != nil {
+		artifact.remove()
 		return advisorSessionRuntimeResult{Session: advisor, Attached: attached}, err
 	}
 	projection := daemonstate.Session{ID: advisor.SessionID, IssueID: advisor.IssueID, Role: daemonstate.SessionRoleAdvisor, ScopeKind: daemonstate.SessionScopeInteraction, ScopeID: advisor.RequestID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "runtime", UpdatedAt: time.Now().UTC()}

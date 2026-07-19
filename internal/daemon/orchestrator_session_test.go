@@ -233,6 +233,58 @@ func TestProjectOrchestratorSessionStartRejectsImmediateManagedAgentExitAndRetri
 	}
 }
 
+func TestProjectOrchestratorSessionRetryRejectsCrashOrphanedShell(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID := "project-session-orphan"
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	runner := newSessionStartTmuxRunner()
+	runner.currentCommand = "zsh"
+	d := &Daemon{
+		cfg:                    Config{RepoDir: repoDir, SessionShell: "zsh", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+		tmux:                   tmux.NewClient(runner, slog.Default()),
+	}
+	scope := domain.ProjectOrchestrationScope()
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := d.orchestratorSessionID(projectID, scope)
+	runner.sessions[sessionID] = true
+	if _, err := daemonstate.NewOrchestratorLeaseAuthority(store).Acquire(ctx, identity, sessionID, d.tmux.HasSession); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(protocol.OrchestratorSessionRequest{Scope: scope})
+	request := protocol.RequestEnvelope{Command: protocol.CommandOrchestratorSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body}
+	failed, err := d.handleOrchestratorSession(ctx, request)
+	if err != nil || failed.Error == nil || failed.Error.Code != protocol.ErrorCodeUnavailable {
+		t.Fatalf("orphan retry response=%+v err=%v", failed.Error, err)
+	}
+	if runner.sessions[sessionID] {
+		t.Fatalf("crash-orphaned shell %s survived readiness rejection", sessionID)
+	}
+	lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(store).Get(ctx, identity)
+	if err != nil || !found || lease.Lifecycle != domain.OrchestratorPaused {
+		t.Fatalf("orphan lease=%+v found=%t err=%v", lease, found, err)
+	}
+
+	runner.currentCommand = "codex"
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, projectID)
+	retried, err := d.handleOrchestratorSession(ctx, request)
+	if err != nil || retried.Error != nil {
+		t.Fatalf("retry after orphan cleanup response=%+v err=%v", retried.Error, err)
+	}
+	var result protocol.OrchestratorSessionResult
+	if err := json.Unmarshal(retried.Body, &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Live || result.Lifecycle != domain.OrchestratorWorking {
+		t.Fatalf("retry result=%+v", result)
+	}
+}
+
 func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()

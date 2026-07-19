@@ -1480,36 +1480,38 @@ func TestSessionRestartActiveIntentOnlyForRunningWork(t *testing.T) {
 }
 
 type sessionStartTmuxRunner struct {
-	sessions              map[string]bool
-	sessionsWithoutPanes  map[string]bool
-	panes                 map[string][]string
-	panePIDs              map[string]int
-	windows               map[string]map[string]bool
-	commands              [][]string
-	inputPayloads         []string
-	handoffPromptContents []string
-	env                   map[string]map[string]string
-	sendKeysCalls         int
-	sendKeysTargets       []string
-	sendKeysPayloads      []string
-	newSessionErr         error
-	onNewSession          func(string)
-	maxNewSessionCommand  int
-	launchScriptPaths     map[string]string
-	launchScriptContents  map[string]string
-	launchScriptModes     map[string]os.FileMode
-	launchPromptPaths     map[string]string
-	launchPromptContents  map[string]string
-	launchPromptModes     map[string]os.FileMode
-	launchArtifactModes   map[string]os.FileMode
-	sendKeysErr           error
-	sendKeysErrOnCall     int
-	captureOutput         string
-	currentCommand        string
-	onSendKeys            func(string, string)
-	onRunWithInput        func(context.Context, string, []string) (string, error)
-	onRespawnPane         func(context.Context, []string) error
-	respawnErr            error
+	sessions                    map[string]bool
+	sessionsWithoutPanes        map[string]bool
+	panes                       map[string][]string
+	panePIDs                    map[string]int
+	windows                     map[string]map[string]bool
+	commands                    [][]string
+	inputPayloads               []string
+	handoffPromptContents       []string
+	env                         map[string]map[string]string
+	sendKeysCalls               int
+	sendKeysTargets             []string
+	sendKeysPayloads            []string
+	newSessionErr               error
+	createBeforeNewSessionError bool
+	onNewSession                func(string)
+	onNewWindow                 func(string, string)
+	maxNewSessionCommand        int
+	launchScriptPaths           map[string]string
+	launchScriptContents        map[string]string
+	launchScriptModes           map[string]os.FileMode
+	launchPromptPaths           map[string]string
+	launchPromptContents        map[string]string
+	launchPromptModes           map[string]os.FileMode
+	launchArtifactModes         map[string]os.FileMode
+	sendKeysErr                 error
+	sendKeysErrOnCall           int
+	captureOutput               string
+	currentCommand              string
+	onSendKeys                  func(string, string)
+	onRunWithInput              func(context.Context, string, []string) (string, error)
+	onRespawnPane               func(context.Context, []string) error
+	respawnErr                  error
 }
 
 func newSessionStartTmuxRunner() *sessionStartTmuxRunner {
@@ -1744,40 +1746,47 @@ func (r *sessionStartTmuxRunner) Run(ctx context.Context, args ...string) (strin
 		if len(args) > 4 {
 			command := args[len(args)-1]
 			const scriptArg = " -i '"
-			if start := strings.LastIndex(command, scriptArg); strings.HasPrefix(command, "exec ") && start >= 0 && strings.HasSuffix(command, "'") {
-				path := strings.TrimSuffix(command[start+len(scriptArg):], "'")
-				if contents, readErr := os.ReadFile(path); readErr == nil {
-					r.launchScriptPaths[args[3]] = path
-					r.launchScriptContents[args[3]] = string(contents)
-					if info, statErr := os.Stat(path); statErr == nil {
-						r.launchScriptModes[args[3]] = info.Mode()
-					}
-					if info, statErr := os.Stat(filepath.Dir(path)); statErr == nil {
-						r.launchArtifactModes[args[3]] = info.Mode()
-					}
-					promptPath := ""
-					if entries, entriesErr := os.ReadDir(filepath.Dir(path)); entriesErr == nil {
-						for _, entry := range entries {
-							if strings.HasPrefix(entry.Name(), sessionLaunchArtifactPrefix) && strings.HasSuffix(entry.Name(), ".prompt") {
-								promptPath = filepath.Join(filepath.Dir(path), entry.Name())
-								break
+			if start := strings.LastIndex(command, scriptArg); strings.HasPrefix(command, "exec ") && strings.HasSuffix(command, "'") {
+				path := ""
+				if start >= 0 {
+					path = strings.TrimSuffix(command[start+len(scriptArg):], "'")
+				} else if match := regexp.MustCompile(`'([^']+)'$`).FindStringSubmatch(command); len(match) == 2 {
+					path = match[1]
+				}
+				if path != "" {
+					if contents, readErr := os.ReadFile(path); readErr == nil {
+						r.launchScriptPaths[args[3]] = path
+						r.launchScriptContents[args[3]] = string(contents)
+						if info, statErr := os.Stat(path); statErr == nil {
+							r.launchScriptModes[args[3]] = info.Mode()
+						}
+						if info, statErr := os.Stat(filepath.Dir(path)); statErr == nil {
+							r.launchArtifactModes[args[3]] = info.Mode()
+						}
+						promptPath := ""
+						if entries, entriesErr := os.ReadDir(filepath.Dir(path)); entriesErr == nil {
+							for _, entry := range entries {
+								if strings.HasPrefix(entry.Name(), sessionLaunchArtifactPrefix) && strings.HasSuffix(entry.Name(), ".prompt") {
+									promptPath = filepath.Join(filepath.Dir(path), entry.Name())
+									break
+								}
 							}
 						}
-					}
-					if promptPath != "" {
-						r.launchPromptPaths[args[3]] = promptPath
-						if prompt, promptErr := os.ReadFile(promptPath); promptErr == nil {
-							r.launchPromptContents[args[3]] = string(prompt)
+						if promptPath != "" {
+							r.launchPromptPaths[args[3]] = promptPath
+							if prompt, promptErr := os.ReadFile(promptPath); promptErr == nil {
+								r.launchPromptContents[args[3]] = string(prompt)
+							}
+							if info, statErr := os.Stat(promptPath); statErr == nil {
+								r.launchPromptModes[args[3]] = info.Mode()
+							}
+							_ = os.Remove(promptPath)
 						}
-						if info, statErr := os.Stat(promptPath); statErr == nil {
-							r.launchPromptModes[args[3]] = info.Mode()
-						}
-						_ = os.Remove(promptPath)
 					}
 				}
 			}
 		}
-		if r.newSessionErr != nil {
+		if r.newSessionErr != nil && !r.createBeforeNewSessionError {
 			return "", r.newSessionErr
 		}
 		if path := r.launchScriptPaths[args[3]]; path != "" {
@@ -1789,6 +1798,9 @@ func (r *sessionStartTmuxRunner) Run(ctx context.Context, args ...string) (strin
 		r.sessions[args[3]] = true
 		if r.windows[args[3]] == nil {
 			r.windows[args[3]] = map[string]bool{"shell": true}
+		}
+		if r.newSessionErr != nil {
+			return "", r.newSessionErr
 		}
 		return "", nil
 	case "kill-session":
@@ -1819,6 +1831,18 @@ func (r *sessionStartTmuxRunner) Run(ctx context.Context, args ...string) (strin
 			r.windows[session] = map[string]bool{}
 		}
 		r.windows[session][window] = true
+		if r.onNewWindow != nil {
+			r.onNewWindow(session, args[len(args)-1])
+		}
+		return "", nil
+	case "kill-window":
+		if len(args) < 3 {
+			return "", errors.New("missing window target")
+		}
+		parts := strings.SplitN(args[2], ":", 2)
+		if len(parts) == 2 && r.windows[parts[0]] != nil {
+			delete(r.windows[parts[0]], parts[1])
+		}
 		return "", nil
 	case "send-keys":
 		r.sendKeysCalls++
@@ -4165,6 +4189,72 @@ func TestSessionStartDoesNotPersistTransitionWhenTmuxCreateFails(t *testing.T) {
 	}
 }
 
+func TestSessionStartCreateThenErrorCompensatesAndRetries(t *testing.T) {
+	for _, startWork := range []bool{false, true} {
+		t.Run(fmt.Sprintf("start_work_%t", startWork), func(t *testing.T) {
+			ctx := context.Background()
+			repoDir := t.TempDir()
+			projectID := "proj"
+			if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+			t.Cleanup(func() { _ = issuesClient.CloseDB() })
+			issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Create then error", Type: domain.TypeTask})
+			if err != nil {
+				t.Fatal(err)
+			}
+			worktreeRunner := &worktreeCreateRunner{
+				worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID),
+				branchName:   "testuser/" + issueID + "/create-then-error",
+			}
+			tmuxRunner := newSessionStartTmuxRunner()
+			tmuxRunner.newSessionErr = errors.New("tmux create returned ambiguous error")
+			tmuxRunner.createBeforeNewSessionError = true
+			memoryStore := daemonstate.NewStore()
+			d := &Daemon{
+				cfg:  Config{RepoDir: repoDir, BaseBranch: "main", CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+				tmux: tmux.NewClient(tmuxRunner, slog.Default()), issues: issuesClient,
+				session: daemonhandlers.NewSessionHandler(memoryStore), sessionStore: memoryStore, revision: map[string]uint64{},
+				worktreeManagersByRoot: map[string]*git.WorktreeManager{
+					repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+				},
+				worktreeManagersByProject: map[string]*git.WorktreeManager{
+					projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+				},
+			}
+			attachIsolatedRuntimeStore(t, d, projectID)
+			req := protocol.RequestEnvelope{
+				ProtocolVersion: protocol.CurrentVersion, RequestID: "req-create-then-error", Kind: protocol.EnvelopeKindCommand,
+				Command: daemonhandlers.CommandSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+				Body: marshalJSON(map[string]any{"project_id": projectID, "session_id": issueID, "start_work": startWork}),
+			}
+			sessionID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
+			failed, err := d.handleSessionStartDirect(ctx, req)
+			if err != nil || failed.OK || failed.Error == nil || !strings.Contains(failed.Error.Message, "ambiguous error") {
+				t.Fatalf("create-then-error response=%+v err=%v", failed, err)
+			}
+			if tmuxRunner.sessions[sessionID] {
+				t.Fatalf("ambiguous create left live session %s", sessionID)
+			}
+			projection, found, err := d.sessionRuntimeStateStore(projectID).GetWorkerSessionStateByIssueID(ctx, projectID, issueID, sessionID)
+			if err != nil || !found || projection.State != daemonstate.SessionStateStopped || projection.ObservedState != daemonstate.SessionStateStopped {
+				t.Fatalf("compensated projection=%+v found=%t err=%v", projection, found, err)
+			}
+
+			tmuxRunner.newSessionErr = nil
+			tmuxRunner.createBeforeNewSessionError = false
+			if startWork {
+				acknowledgeManagedAgentOnInitialLaunch(t, d, tmuxRunner, projectID)
+			}
+			retried, err := d.handleSessionStartDirect(ctx, req)
+			if err != nil || !retried.OK || !tmuxRunner.sessions[sessionID] {
+				t.Fatalf("retry response=%+v err=%v live=%t", retried, err, tmuxRunner.sessions[sessionID])
+			}
+		})
+	}
+}
+
 func TestSessionStartImmediateAgentExitCompensatesAndRetries(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
@@ -4382,6 +4472,37 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 		sessionStore: store,
 		revision:     map[string]uint64{},
 	}
+	attachIsolatedRuntimeStore(t, daemon, projectID)
+	tmuxRunner.onNewWindow = func(sessionID, command string) {
+		pathMatch := regexp.MustCompile(` -i '([^']+)'$`).FindStringSubmatch(command)
+		if len(pathMatch) != 2 {
+			t.Errorf("conflict launch command has no artifact path: %s", command)
+			return
+		}
+		script, err := os.ReadFile(pathMatch[1])
+		if err != nil {
+			t.Errorf("read conflict launch artifact: %v", err)
+			return
+		}
+		incarnation := regexp.MustCompile(`AZEDARACH_AGENT_INCARNATION='([^']+)'`).FindStringSubmatch(string(script))
+		if len(incarnation) != 2 {
+			t.Errorf("conflict launch artifact has no incarnation")
+			return
+		}
+		entries, _ := os.ReadDir(filepath.Dir(pathMatch[1]))
+		for _, entry := range entries {
+			if strings.HasSuffix(entry.Name(), ".prompt") {
+				_ = os.Remove(filepath.Join(filepath.Dir(pathMatch[1]), entry.Name()))
+			}
+		}
+		tmuxRunner.panes[sessionID] = []string{"%1", "%2"}
+		if err := daemon.sessionRuntimeStateStore(projectID).UpsertManagedAgentIdentity(ctx, daemonstate.ManagedAgentIdentity{
+			ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "conflict-resolver", TmuxPaneID: "%2",
+			PanePID: 123, AgentIncarnation: incarnation[1], ObservedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Errorf("acknowledge conflict resolver: %v", err)
+		}
+	}
 	worktreePath := filepath.Join(t.TempDir(), "project-'quoted'\nand-newline-"+issueID)
 	largePrompt := "Resolve 'quoted' conflict\n" + strings.Repeat("inspect this conflict carefully\n", 1024) + "finish"
 	req := protocol.RequestEnvelope{
@@ -4481,6 +4602,91 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 	}
 	if session.State != daemonstate.SessionStateStarting {
 		t.Fatalf("session state = %s, want %s", session.State, daemonstate.SessionStateStarting)
+	}
+}
+
+func TestSessionResolveConflictRejectsUnacknowledgedInitialWindow(t *testing.T) {
+	baseCtx := context.Background()
+	ctx, cancel := context.WithCancel(baseCtx)
+	repoDir := t.TempDir()
+	projectID := "proj-conflict-exit"
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(baseCtx, issues.CreateTaskParams{Title: "Conflict agent exits", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := newSessionStartTmuxRunner()
+	runner.onNewWindow = func(string, string) { cancel() }
+	memoryStore := daemonstate.NewStore()
+	d := &Daemon{
+		cfg:  Config{RepoDir: repoDir, BaseBranch: "main", CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+		tmux: tmux.NewClient(runner, slog.Default()), issues: issuesClient,
+		session: daemonhandlers.NewSessionHandler(memoryStore), sessionStore: memoryStore, revision: map[string]uint64{},
+	}
+	attachIsolatedRuntimeStore(t, d, projectID)
+	request := protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion, RequestID: "conflict-exit", Kind: protocol.EnvelopeKindCommand,
+		Command: protocol.CommandSessionResolveConflict, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body: marshalJSON(protocol.SessionResolveConflictRequestBody{
+			ProjectID: naming.ProjectID(projectID), IssueID: naming.IssueID(issueID), Worktree: t.TempDir(), Prompt: "resolve",
+		}),
+	}
+	response, err := d.handleSessionResolveConflictDirect(ctx, request)
+	if err != nil || response.Error == nil || response.Error.Code != protocol.ErrorCodeUnavailable {
+		t.Fatalf("unacknowledged conflict response=%+v err=%v", response.Error, err)
+	}
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	if runner.windows[sessionID][sessionConflictWindowName] {
+		t.Fatalf("unacknowledged conflict window survived: %+v", runner.windows[sessionID])
+	}
+}
+
+func TestRuntimeReconcileRejectsImmediateExitDuringRecreation(t *testing.T) {
+	baseCtx := context.Background()
+	ctx, cancel := context.WithCancel(baseCtx)
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	issueID, err := issuesClient.Create(baseCtx, issues.CreateTaskParams{Title: "Reconcile agent exits", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := naming.CanonicalSessionID(repoDir, issueID)
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	if err := upsertSessionStateFixture(runtimeStore, baseCtx, projectID, daemonstate.Session{
+		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateAttached, ObservedState: daemonstate.SessionStateStopped, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runner := newSessionStartTmuxRunner()
+	runner.onNewSession = func(started string) {
+		runner.sessionsWithoutPanes[started] = true
+		cancel()
+	}
+	memoryStore := daemonstate.NewStore()
+	manager := git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/reconcile-exit"}, repoDir, slog.Default())
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, CLITool: "codex", Logger: slog.Default()}, issues: issuesClient,
+		tmux: tmux.NewClient(runner, slog.Default()), session: daemonhandlers.NewSessionHandler(memoryStore), sessionStore: memoryStore,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{repoDir: runtimeStore}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{repoDir: manager}, worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager},
+	}
+	result, err := d.reconcileTmuxAndDaemonSessions(ctx, projectID, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RecreatedTmuxSessions != 0 || runner.sessions[sessionID] {
+		t.Fatalf("immediate-exit reconcile result=%+v live=%t", result, runner.sessions[sessionID])
+	}
+	projection, found, err := runtimeStore.GetWorkerSessionStateByIssueID(baseCtx, projectID, issueID, sessionID)
+	if err != nil || !found || projection.State != daemonstate.SessionStateAttached || projection.ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("reconcile projection=%+v found=%t err=%v", projection, found, err)
 	}
 }
 
@@ -7253,11 +7459,7 @@ func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 		t.Fatalf("seed durable session projection: %v", err)
 	}
 
-	tmuxRunner := &testTmuxRunner{
-		sessions:    map[string]bool{},
-		killEntered: make(chan struct{}),
-		killRelease: make(chan struct{}),
-	}
+	tmuxRunner := newSessionStartTmuxRunner()
 	store := daemonstate.NewStore()
 	daemon := &Daemon{
 		cfg: Config{
@@ -7279,6 +7481,7 @@ func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 			repoDir: runtimeStateStore,
 		},
 	}
+	acknowledgeManagedAgentOnInitialLaunch(t, daemon, tmuxRunner, projectID)
 
 	result, err := daemon.reconcileTmuxAndDaemonSessions(context.Background(), projectID, issueID)
 	if err != nil {
@@ -7288,10 +7491,13 @@ func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 		t.Fatalf("recreated tmux sessions = %d, want 1", result.RecreatedTmuxSessions)
 	}
 
-	tmuxRunner.mu.Lock()
-	created := tmuxRunner.newSessionCalls
+	created := 0
+	for _, command := range tmuxRunner.commands {
+		if len(command) > 0 && command[0] == "new-session" {
+			created++
+		}
+	}
 	sessionExists := tmuxRunner.sessions[sessionID]
-	tmuxRunner.mu.Unlock()
 	if created != 1 {
 		t.Fatalf("new-session calls = %d, want 1", created)
 	}
@@ -7345,11 +7551,7 @@ func TestReconcileRecreatesObservedStoppedDesiredActiveSession(t *testing.T) {
 		t.Fatalf("seed observed stopped session projection: %v", err)
 	}
 
-	tmuxRunner := &testTmuxRunner{
-		sessions:    map[string]bool{},
-		killEntered: make(chan struct{}),
-		killRelease: make(chan struct{}),
-	}
+	tmuxRunner := newSessionStartTmuxRunner()
 	store := daemonstate.NewStore()
 	daemon := &Daemon{
 		cfg: Config{
@@ -7370,6 +7572,7 @@ func TestReconcileRecreatesObservedStoppedDesiredActiveSession(t *testing.T) {
 			repoDir: runtimeStateStore,
 		},
 	}
+	acknowledgeManagedAgentOnInitialLaunch(t, daemon, tmuxRunner, projectID)
 
 	result, err := daemon.reconcileTmuxAndDaemonSessions(context.Background(), projectID, issueID)
 	if err != nil {
@@ -7378,10 +7581,13 @@ func TestReconcileRecreatesObservedStoppedDesiredActiveSession(t *testing.T) {
 	if result.RecreatedTmuxSessions != 1 {
 		t.Fatalf("recreated tmux sessions = %d, want 1", result.RecreatedTmuxSessions)
 	}
-	tmuxRunner.mu.Lock()
-	created := tmuxRunner.newSessionCalls
+	created := 0
+	for _, command := range tmuxRunner.commands {
+		if len(command) > 0 && command[0] == "new-session" {
+			created++
+		}
+	}
 	sessionExists := tmuxRunner.sessions[sessionID]
-	tmuxRunner.mu.Unlock()
 	if created != 1 {
 		t.Fatalf("new-session calls = %d, want 1", created)
 	}

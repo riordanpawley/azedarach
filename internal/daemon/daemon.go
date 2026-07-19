@@ -1601,9 +1601,7 @@ func (d *Daemon) recoverInterruptedOperation(ctx context.Context, record daemono
 	if record.Progress != nil {
 		plannedIncarnation = strings.TrimSpace(record.Progress.AgentIncarnation)
 		promptHandoffPath = record.Progress.PromptHandoffPath
-		if record.Progress.AgentLaunchRequired != nil {
-			agentLaunchRequired = *record.Progress.AgentLaunchRequired
-		}
+		agentLaunchRequired = interruptedSessionStartAgentLaunchRequired(record.Progress)
 	}
 	if !agentLaunchRequired {
 		if d.tmux == nil {
@@ -1789,6 +1787,21 @@ func (d *Daemon) recoverInterruptedOperation(ctx context.Context, record daemono
 		State:         daemonops.StateDone,
 		ResultPayload: result,
 	}, true
+}
+
+func interruptedSessionStartAgentLaunchRequired(progress *daemonops.Progress) bool {
+	if progress == nil {
+		return true
+	}
+	if progress.AgentLaunchRequired != nil {
+		return *progress.AgentLaunchRequired
+	}
+	// Protocols before v59 could only identify a completed tmux-only launch by
+	// its final production progress message. Keep that exact compatibility path
+	// so an upgraded daemon does not mistake the valid shell for a dead agent.
+	return !(strings.TrimSpace(progress.Phase) == "tmux_launch" &&
+		progress.Percent >= 90 &&
+		strings.TrimSpace(progress.Message) == "tmux session created without agent launch")
 }
 
 func (d *Daemon) compensateInterruptedSessionStart(ctx context.Context, store *daemonstate.RuntimeStateStore, projectID, sessionID, issueID string) string {
