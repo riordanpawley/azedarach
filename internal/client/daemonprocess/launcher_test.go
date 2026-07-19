@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -155,6 +157,130 @@ const lingeringDaemonHelperEnv = "AZEDARACH_TEST_LINGERING_DAEMON"
 const lingeringDaemonModeEnv = "AZEDARACH_TEST_LINGERING_DAEMON_MODE"
 
 const lingeringDaemonParentPIDEnv = "AZEDARACH_TEST_LINGERING_PARENT_PID"
+
+const (
+	ownedExecutableHelperEnv         = "AZEDARACH_TEST_OWNED_EXECUTABLE"
+	ownedExecutableModeEnv           = "AZEDARACH_TEST_OWNED_EXECUTABLE_MODE"
+	ownedExecutableIdentityPathEnv   = "AZEDARACH_TEST_OWNED_EXECUTABLE_IDENTITY"
+	ownedExecutableControlSocketEnv  = "AZEDARACH_TEST_OWNED_EXECUTABLE_CONTROL"
+	ownedExecutableParentPIDEnv      = "AZEDARACH_TEST_OWNED_EXECUTABLE_PARENT_PID"
+	ownedExecutableHelperTestPattern = "^TestLauncherOwnedExecutableHelper$"
+)
+
+type ownedExecutableIdentity struct {
+	PID        int      `json:"pid"`
+	StartToken string   `json:"start_token"`
+	Executable string   `json:"executable"`
+	Arguments  []string `json:"arguments"`
+}
+
+func TestLauncherOwnedExecutableHelper(t *testing.T) {
+	if os.Getenv(ownedExecutableHelperEnv) != "1" {
+		return
+	}
+	parentPID, err := strconv.Atoi(os.Getenv(ownedExecutableParentPIDEnv))
+	if err != nil || parentPID <= 0 {
+		os.Exit(20)
+	}
+	parentExited, err := observePlatformProcessExit(parentPID)
+	if err != nil {
+		os.Exit(21)
+	}
+	identity, present, err := captureProcessIdentity(os.Getpid())
+	if err != nil || !present {
+		os.Exit(22)
+	}
+	record, err := json.Marshal(ownedExecutableIdentity{
+		PID:        identity.pid,
+		StartToken: identity.startToken,
+		Executable: identity.executable,
+		Arguments:  identity.arguments,
+	})
+	if err != nil || os.WriteFile(os.Getenv(ownedExecutableIdentityPathEnv), record, 0o600) != nil {
+		os.Exit(23)
+	}
+
+	switch os.Getenv(ownedExecutableModeEnv) {
+	case "incompatible":
+		for _, argument := range os.Args[1:] {
+			switch argument {
+			case "--preflight":
+				fmt.Printf("{\"daemon_version\":\"incompatible-fixture\",\"min_protocol_version\":%d,\"max_protocol_version\":%d}\n", protocol.CurrentVersion+1, protocol.CurrentVersion+1)
+				os.Exit(0)
+			case "--version":
+				fmt.Println("incompatible-fixture")
+				os.Exit(0)
+			}
+		}
+		os.Exit(24)
+	case "compatible":
+		fmt.Printf("{\"daemon_version\":\"compatible-fixture\",\"min_protocol_version\":%d,\"max_protocol_version\":%d}\n", protocol.CurrentVersion, protocol.CurrentVersion)
+		os.Exit(0)
+	case "readiness-failure":
+		connection, err := net.Dial("unix", os.Getenv(ownedExecutableControlSocketEnv))
+		if err != nil {
+			os.Exit(25)
+		}
+		if _, err := connection.Write([]byte{1}); err != nil {
+			os.Exit(26)
+		}
+		_ = connection.Close()
+		signals := make(chan os.Signal, 1)
+		signal.Notify(signals, syscall.SIGTERM)
+		defer signal.Stop(signals)
+		select {
+		case <-signals:
+			os.Exit(0)
+		case <-parentExited:
+			os.Exit(0)
+		}
+	default:
+		os.Exit(27)
+	}
+}
+
+func writeOwnedExecutableWrapper(t *testing.T, path string) {
+	t.Helper()
+	script := fmt.Sprintf("#!/bin/sh\nexec %q -test.run=%s -- \"$@\"\n", os.Args[0], ownedExecutableHelperTestPattern)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func configureOwnedExecutableHelper(t *testing.T, mode string) string {
+	t.Helper()
+	identityPath := filepath.Join(t.TempDir(), "identity.json")
+	t.Setenv(ownedExecutableHelperEnv, "1")
+	t.Setenv(ownedExecutableModeEnv, mode)
+	t.Setenv(ownedExecutableIdentityPathEnv, identityPath)
+	t.Setenv(ownedExecutableParentPIDEnv, strconv.Itoa(os.Getpid()))
+	return identityPath
+}
+
+func readOwnedExecutableIdentity(t *testing.T, identityPath string) processIdentity {
+	t.Helper()
+	record, err := os.ReadFile(identityPath)
+	if err != nil {
+		t.Fatalf("read owned executable identity: %v", err)
+	}
+	var stored ownedExecutableIdentity
+	if err := json.Unmarshal(record, &stored); err != nil {
+		t.Fatalf("decode owned executable identity: %v", err)
+	}
+	return processIdentity{pid: stored.PID, startToken: stored.StartToken, executable: stored.Executable, arguments: stored.Arguments}
+}
+
+func assertOwnedExecutableRetired(t *testing.T, identityPath string) {
+	t.Helper()
+	identity := readOwnedExecutableIdentity(t, identityPath)
+	alive, err := processIdentityAlive(identity)
+	if err != nil {
+		t.Fatalf("inspect owned executable identity: %v", err)
+	}
+	if alive {
+		t.Fatalf("owned executable remains live after path completion: %+v", identity)
+	}
+}
 
 // TestLauncherReplaceLingeringDaemonHelper is a real predecessor process for
 // replacement tests. On TERM it removes the runtime socket and lock exactly as
@@ -561,9 +687,8 @@ func TestLauncherReplaceRejectsIncompatibleLiveCandidateBeforeShutdown(t *testin
 	repoDir := makeScopedDaemonLauncherRepo(t)
 	launcher := NewLauncher(repoDir, filepath.Join(t.TempDir(), "daemon.sock"))
 	incompatible := filepath.Join(t.TempDir(), "incompatible-azd")
-	if err := os.WriteFile(incompatible, []byte("#!/bin/sh\ncase \" $* \" in *' --preflight '*) echo '{\"daemon_version\":\"old\",\"min_protocol_version\":999,\"max_protocol_version\":999}'; exit 0;; *' --version '*) echo old; exit 0;; esac\nwhile :; do sleep 60; done\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeOwnedExecutableWrapper(t, incompatible)
+	identityPath := configureOwnedExecutableHelper(t, "incompatible")
 	launcher.BinPath = incompatible
 	shutdownCalls := 0
 	launcher.shutdownViaSocket = func(context.Context, string) error {
@@ -594,6 +719,18 @@ func TestLauncherReplaceRejectsIncompatibleLiveCandidateBeforeShutdown(t *testin
 	if shutdownCalls != 0 || startCalls != 0 {
 		t.Fatalf("shutdown/start calls = %d/%d, want incompatibility rejected before lifecycle mutation", shutdownCalls, startCalls)
 	}
+	assertOwnedExecutableRetired(t, identityPath)
+}
+
+func TestPreflightRollbackVersionProbeOwnsAndReapsIncompatibleHelper(t *testing.T) {
+	incompatible := filepath.Join(t.TempDir(), "incompatible-azd")
+	writeOwnedExecutableWrapper(t, incompatible)
+	identityPath := configureOwnedExecutableHelper(t, "incompatible")
+
+	if err := preflightPredecessorRollbackCommand(context.Background(), daemonCommand{executable: incompatible}); err != nil {
+		t.Fatalf("preflightPredecessorRollbackCommand() error = %v", err)
+	}
+	assertOwnedExecutableRetired(t, identityPath)
 }
 
 func TestLauncherReplaceRemovesInactiveRollbackStageOnPreShutdownAbort(t *testing.T) {
@@ -1552,6 +1689,35 @@ func TestLauncherReplace_ScopedSourceFallbackCleansCandidateAfterPreflightAbort(
 	}
 	if len(stages) != 0 {
 		t.Fatalf("inactive candidate stages = %v, want cleanup after preflight abort", stages)
+	}
+}
+
+func TestLauncherScopedCandidateValidationOwnsAndReapsHelper(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	repoDir := newLauncherTestWorktree(t)
+	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
+	stageDir, executable, err := launcher.newScopedExecutableStage("candidate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeOwnedExecutableWrapper(t, executable)
+	identityPath := configureOwnedExecutableHelper(t, "compatible")
+	resolvedExecutable, err := resolveCommandExecutable(daemonCommand{executable: executable})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := daemonCommand{executable: resolvedExecutable, candidateStage: filepath.Dir(resolvedExecutable)}
+
+	if err := preflightReplacementCommand(context.Background(), command); err != nil {
+		t.Fatalf("preflightReplacementCommand() error = %v", err)
+	}
+	assertOwnedExecutableRetired(t, identityPath)
+	if err := launcher.cleanupInactiveCandidateStage(command); err != nil {
+		t.Fatalf("cleanupInactiveCandidateStage() error = %v", err)
+	}
+	if _, err := os.Stat(stageDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("scoped validation candidate stage stat error = %v, want removed", err)
 	}
 }
 
@@ -3595,14 +3761,21 @@ func TestRealProcessProfileLauncherReadinessFailureCleansExactLaunch(t *testing.
 	if err := os.MkdirAll(repoDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	pidPath := filepath.Join(root, "pid")
-	argsPath := filepath.Join(root, "args")
-	readyPath := filepath.Join(root, "ready")
 	executable := filepath.Join(root, "azd-test")
-	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$$\" > %q\nprintf '%%s\\n' \"$@\" > %q\n: > %q\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n", pidPath, argsPath, readyPath)
-	if err := os.WriteFile(executable, []byte(script), 0o755); err != nil {
+	writeOwnedExecutableWrapper(t, executable)
+	identityPath := configureOwnedExecutableHelper(t, "readiness-failure")
+	controlDir, err := os.MkdirTemp("/tmp", "azedarach-ready-")
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(controlDir) })
+	controlPath := filepath.Join(controlDir, "ready.sock")
+	listener, err := net.Listen("unix", controlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	t.Setenv(ownedExecutableControlSocketEnv, controlPath)
 	launcher := NewLauncher(repoDir, filepath.Join(root, "daemon.sock"))
 	launcher.BinPath = executable
 	readyCalls := 0
@@ -3611,44 +3784,31 @@ func TestRealProcessProfileLauncherReadinessFailureCleansExactLaunch(t *testing.
 		if readyCalls < 3 {
 			return context.DeadlineExceeded
 		}
-		for {
-			if _, err := os.Stat(readyPath); err == nil {
-				return context.DeadlineExceeded
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(time.Millisecond):
-			}
+		connection, err := listener.Accept()
+		if err != nil {
+			return err
 		}
+		defer connection.Close()
+		var ready [1]byte
+		if _, err := io.ReadFull(connection, ready[:]); err != nil {
+			return err
+		}
+		return context.DeadlineExceeded
 	}
 	launcher.openLogFile = func(string) (io.WriteCloser, error) {
 		return os.OpenFile(filepath.Join(root, "daemon.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	}
 
-	err := launcher.Start(context.Background())
+	err = launcher.Start(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "spawned daemon cleaned up") {
 		t.Fatalf("Start() error = %v, want observable spawned-process cleanup", err)
 	}
-	pidText, readErr := os.ReadFile(pidPath)
-	if readErr != nil {
-		t.Fatalf("read spawned pid: %v", readErr)
+	identity := readOwnedExecutableIdentity(t, identityPath)
+	wantArgs := []string{"--repo", repoDir, "--socket", launcher.SocketPath, "--lock", launcher.LockPath}
+	if len(identity.arguments) < len(wantArgs) || !slices.Equal(identity.arguments[len(identity.arguments)-len(wantArgs):], wantArgs) {
+		t.Fatalf("spawned args = %q, want canonical suffix %q", identity.arguments, wantArgs)
 	}
-	pid, parseErr := strconv.Atoi(strings.TrimSpace(string(pidText)))
-	if parseErr != nil {
-		t.Fatalf("parse spawned pid %q: %v", pidText, parseErr)
-	}
-	if signalErr := syscall.Kill(pid, 0); !errors.Is(signalErr, syscall.ESRCH) {
-		t.Fatalf("spawned daemon pid %d still exists after readiness failure: %v", pid, signalErr)
-	}
-	argsText, readErr := os.ReadFile(argsPath)
-	if readErr != nil {
-		t.Fatalf("read spawned args: %v", readErr)
-	}
-	wantArgs := strings.Join([]string{"--repo", repoDir, "--socket", launcher.SocketPath, "--lock", launcher.LockPath}, "\n") + "\n"
-	if string(argsText) != wantArgs {
-		t.Fatalf("spawned args = %q, want exact isolated launch %q", argsText, wantArgs)
-	}
+	assertOwnedExecutableRetired(t, identityPath)
 }
 
 func TestLauncherStart_SocketReadySkipsSpawnWithoutLock(t *testing.T) {
