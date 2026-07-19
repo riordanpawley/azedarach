@@ -68,6 +68,11 @@ func TestScopedValidationDaemonProcess(t *testing.T) {
 		var marker [1]byte
 		for {
 			if _, err := owner.Read(marker[:]); err != nil {
+				if runtimeDir := os.Getenv("AZEDARACH_SCOPED_VALIDATION_RUNTIME"); runtimeDir != "" {
+					if err := os.RemoveAll(runtimeDir); err != nil {
+						os.Exit(96)
+					}
+				}
 				os.Exit(0)
 			}
 		}
@@ -300,6 +305,9 @@ func TestRealProcessProfileScopedValidationFixtureReapsDaemonAfterParentGroupTer
 		t.Fatalf("await exact scoped validation daemon exit: data=%q err=%v; output:\n%s", observed, err, output.String())
 	}
 	daemonRunning = false
+	if _, err := os.Stat(filepath.Join(root, "runtime")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("scoped validation runtime survived owner death: %v; output:\n%s", err, output.String())
+	}
 }
 
 func TestScopedValidationWrapperRequiresDedicatedCleanupClient(t *testing.T) {
