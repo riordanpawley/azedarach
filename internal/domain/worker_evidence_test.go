@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -14,6 +15,12 @@ func TestWorkerEvidencePacketTemplateIsProjectAgnostic(t *testing.T) {
 	if len(packet.FilesChanged) != 1 || packet.FilesChanged[0] != "path/to/changed-file" {
 		t.Fatalf("files_changed = %v, want project-agnostic placeholder", packet.FilesChanged)
 	}
+	if packet.Review.Revision == "" || packet.Review.Angle == "" || packet.Review.CleanPassTarget != 1 {
+		t.Fatalf("review = %+v, want default one-pass revision-bound review", packet.Review)
+	}
+	if packet.Review.Matrix == nil || len(packet.Review.Matrix.CoveredCells) == 0 || packet.Review.Matrix.SkippedCells == nil {
+		t.Fatalf("review matrix = %+v, want explicit covered and skipped cells", packet.Review.Matrix)
+	}
 }
 
 func TestParseWorkerEvidencePacketBodyValidDirectPacket(t *testing.T) {
@@ -23,7 +30,12 @@ func TestParseWorkerEvidencePacketBodyValidDirectPacket(t *testing.T) {
 		"commands_run": ["go test ./internal/domain"],
 		"key_assertions": ["packet parser accepts the v1 shape"],
 		"files_changed": ["internal/domain/worker_evidence.go"],
-		"review": {"status": "clean", "findings": []},
+		"review": {
+			"status": "clean", "findings": [],
+			"revision": "0123456789abcdef", "angle": "complete worker review",
+			"reused_layers": ["none"], "clean_pass": 1, "clean_pass_target": 1,
+			"matrix": {"type": "stateful/concurrent", "covered_cells": ["state", "recovery"], "skipped_cells": [{"cell": "authorization", "reason": "no authorization boundary"}]}
+		},
 		"risks": ["none"],
 		"artifact_links": [{"label": "CI", "url": "https://example.test/run/1"}]
 	}`
@@ -35,8 +47,46 @@ func TestParseWorkerEvidencePacketBodyValidDirectPacket(t *testing.T) {
 	if packet.Schema != WorkerEvidenceSchemaV1 || packet.Summary == "" || len(packet.CommandsRun) != 1 {
 		t.Fatalf("packet = %+v", packet)
 	}
+	if packet.Review.Revision != "0123456789abcdef" || packet.Review.Matrix == nil || len(packet.Review.Matrix.SkippedCells) != 1 {
+		t.Fatalf("review evidence = %+v, want revision and matrix coverage preserved", packet.Review)
+	}
 	if result.Storage != "mailbox_body_json_v1" {
 		t.Fatalf("storage = %q", result.Storage)
+	}
+}
+
+func TestParseWorkerEvidencePacketBodyRejectsPartialStructuredReview(t *testing.T) {
+	body := `{
+		"schema":"worker_evidence.v1","summary":"Ready","commands_run":["just test"],
+		"key_assertions":["tests pass"],"files_changed":["file.go"],"risks":["none"],
+		"review":{"status":"clean","findings":[],"revision":"abc","angle":"repair","reused_layers":["worker"],"clean_pass":1,"clean_pass_target":2,"matrix":{"type":"stateful/concurrent","covered_cells":["state"]}}
+	}`
+
+	_, result := ParseWorkerEvidencePacketBody(body)
+	if !result.Found || result.Complete {
+		t.Fatalf("parse result = %+v, want incomplete structured review", result)
+	}
+	problems := strings.Join(result.Problems(), "\n")
+	for _, want := range []string{"review.matrix.skipped_cells", "review.extra_pass_reason"} {
+		if !strings.Contains(problems, want) {
+			t.Fatalf("problems = %q, missing %q", problems, want)
+		}
+	}
+}
+
+func TestParseWorkerEvidencePacketBodyRejectsDuplicateStructuredFindings(t *testing.T) {
+	body := `{
+		"schema":"worker_evidence.v1","summary":"Ready","commands_run":["just test"],
+		"key_assertions":["tests pass"],"files_changed":["file.go"],"risks":["none"],
+		"review":{"status":"findings","findings":["stale cache"," Stale Cache "],"revision":"abc","angle":"state review","reused_layers":["none"],"clean_pass":0,"clean_pass_target":1,"matrix":{"type":"stateful/concurrent","covered_cells":["state"],"skipped_cells":[]}}
+	}`
+
+	_, result := ParseWorkerEvidencePacketBody(body)
+	if !result.Found || result.Complete {
+		t.Fatalf("parse result = %+v, want duplicate finding rejected", result)
+	}
+	if problems := strings.Join(result.Problems(), "\n"); !strings.Contains(problems, "review.findings must be deduplicated") {
+		t.Fatalf("problems = %q, want duplicate-finding diagnostic", problems)
 	}
 }
 
@@ -59,6 +109,13 @@ func TestParseWorkerEvidencePacketBodyValidEnvelope(t *testing.T) {
 	}
 	if packet.Review.Status != "findings" || len(packet.Review.Findings) != 1 {
 		t.Fatalf("review = %+v", packet.Review)
+	}
+	encoded, err := json.Marshal(packet)
+	if err != nil {
+		t.Fatalf("marshal legacy packet: %v", err)
+	}
+	if strings.Contains(string(encoded), `"matrix"`) || strings.Contains(string(encoded), `"revision"`) {
+		t.Fatalf("legacy packet gained structured review fields: %s", encoded)
 	}
 }
 

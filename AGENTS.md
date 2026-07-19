@@ -331,7 +331,15 @@ If any are missing, keep issue state `in_progress` or `open`.
 
 Before declaring implementation work done, moving an issue to `in_review`, or handing off code changes, run `$code-review-loop`.
 
-The review loop must review the actual change set, fix actionable findings, validate, and repeat until it reaches its clean-pass target. Do not wait for the user to request a separate code review/fix/re-review cycle.
+The review loop must review the actual change set, fix actionable findings, validate, and rerun invalidated layers until it reaches its risk-tiered target. Do not wait for the user to request a separate code review/fix/re-review cycle.
+
+For a default non-migration change, require one complete revision-bound worker review pass followed by one independent integrator review. Mechanized build, test, static-analysis, and boundary gates are validation evidence, not semantic review passes. Require extra worker passes only when the user, issue/spec, these instructions, or a domain review skill explicitly names the high-risk class and pass target; database migrations retain their mandatory three clean post-final-edit passes.
+
+A material edit or actionable independent finding invalidates the affected review layer and requires another targeted pass. Reuse unchanged layers explicitly. Repair review must fall back to the complete affected invariant, including callers and adjacent consumers, whenever the local delta cannot establish completeness.
+
+Select compact typed review matrices rather than generic pass counts. Stateful or concurrent work covers state, attempt/completion ordering, success/failure combinations, authorization/bypass paths, side effects, recovery, and adjacent consumers. Subprocess work covers every lifecycle ending and portability. Persistence work uses the specialized migration gate. Evidence records exact revision, review angle, unique findings, reused layers, covered and deliberately skipped matrix cells, and why any extra pass or full-invariant fallback was required.
+
+Independent review inspects the complete assigned revision and returns one consolidated actionable finding batch before yielding. Confirming the requested repair or finding the first defect is not a stop condition unless missing authority/input blocks inspection or an immediate safety issue requires an early return.
 
 Skip this gate only for work that did not change code or executable behavior, such as pure explanation, read-only investigation, or issue-tracker updates. If docs, tests, config, scripts, or tooling changed in a way that can affect users or developers, run the gate.
 

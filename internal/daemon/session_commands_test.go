@@ -10344,8 +10344,12 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	for _, want := range []string{
 		"Review revision contract",
 		"exact `diff_base_revision`, `head_revision`, stable `diff_scope`, and executable `diff_range`",
-		"previous reviewed head through current head plus unresolved findings and affected contracts",
-		"Fall back to the full `diff_range` when the prior checkpoint cannot be verified, is not an ancestor, or its base/scope changed",
+		"independent review inspects the complete assigned revision and returns one consolidated actionable finding batch before yielding",
+		"finding the first defect is not a stop condition",
+		"falls back to the complete affected invariant when the local delta cannot establish completeness",
+		"covered and deliberately skipped typed risk-matrix cells",
+		"stateful/concurrent work covers state, attempt/completion ordering",
+		"subprocess work covers every lifecycle ending and portability",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt = %q, want revision-incremental review guidance %q", prompt, want)
@@ -10395,6 +10399,29 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "Continue the parent loop until `az orchestrate complete-check --root <issue-id>` and final validation pass; only then set the root `in_review` and hand it to the human") {
 		t.Fatalf("prompt = %q, want complete-check-gated human handoff", prompt)
+	}
+}
+
+func TestBuildStartWorkPromptUsesRiskTieredWorkerReview(t *testing.T) {
+	for _, prompt := range []string{
+		buildStartWorkPrompt("az-standalone", "task", "Standalone", false, ""),
+		buildStartWorkPrompt("az-worker", "task", "Worker", true, "az-root"),
+	} {
+		for _, want := range []string{
+			"for a default non-migration change, run one complete revision-bound worker review pass",
+			"Build/test/boundary gates do not count as review passes",
+			"Extra worker passes require an explicitly named high-risk class and reason",
+			"database migrations retain three clean post-final-edit passes",
+			"`review.revision`",
+			"`review.reused_layers`",
+			"deliberately skipped cells with reasons",
+			"authorization/bypass paths",
+			"fall back to the complete affected invariant when a local delta cannot establish completeness",
+		} {
+			if !strings.Contains(prompt, want) {
+				t.Fatalf("prompt missing risk-tiered review guidance %q:\n%s", want, prompt)
+			}
+		}
 	}
 }
 
