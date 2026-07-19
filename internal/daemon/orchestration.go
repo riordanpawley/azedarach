@@ -701,10 +701,17 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 		}
 	} else {
 		var source protocol.MaterializedSnapshotMetadata
-		// Rooted orchestration depends on canonical issue graph authority, not
-		// embedded runtime enrichment. Recover canonical convergence here so a
-		// failed runtime/worktree refresh cannot strand worker admission.
-		materializedTasks, source, err = a.daemon.convergedProjectReadSnapshot(ctx, projectID)
+		// Converge durable issue facts first, but do not authorize rooted
+		// classification while runtime/worktree health is stale: the joined
+		// materialization still retains those overlays until their own refresh.
+		_, source, err = a.daemon.convergedCanonicalProjectReadSnapshot(ctx, projectID)
+		if err != nil {
+			return protocol.OrchestrationSnapshot{}, err
+		}
+		if source.Health != "healthy" {
+			return protocol.OrchestrationSnapshot{}, newProjectReadUnavailableError("rooted orchestration runtime projection unhealthy for %s: %s", projectID, source.Health)
+		}
+		materializedTasks, source, err = a.daemon.projectReadSnapshot(projectID)
 		if err != nil {
 			return protocol.OrchestrationSnapshot{}, err
 		}

@@ -131,15 +131,15 @@ func TestProjectReadMaterializerTransientWatchErrorRetainsLastGoodWithoutLegacyE
 
 func TestAuthoritativeReadResultCannotClearNewerMutationConvergenceFailure(t *testing.T) {
 	materializer := newProjectReadMaterializer("project", nil, nil)
-	readAttempt := materializer.beginAuthoritativeReadRefresh()
+	readAttempt := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
 	mutationAttempt := materializer.beginMutationConvergence(7)
 	if !materializer.finishMutationConvergence(7, mutationAttempt, errors.New("newer mutation failure")) {
 		t.Fatal("newer mutation convergence result was not recorded")
 	}
-	if materializer.finishAuthoritativeReadRefresh(readAttempt, nil, false) {
+	if materializer.finishAuthoritativeReadRefresh(readAttempt, nil) {
 		t.Fatal("older authoritative read result cleared a newer health result")
 	}
-	if materializer.finishAuthoritativeReadRefresh(readAttempt, errors.New("older runtime failure"), true) {
+	if materializer.finishAuthoritativeReadRefresh(readAttempt, errors.New("older canonical failure")) {
 		t.Fatal("older authoritative read failure overwrote a newer health result")
 	}
 	metadata := materializer.snapshotMetadata()
@@ -151,16 +151,41 @@ func TestAuthoritativeReadResultCannotClearNewerMutationConvergenceFailure(t *te
 func TestNewestAuthoritativeReadFailureWinsOlderConcurrentSuccess(t *testing.T) {
 	materializer := newProjectReadMaterializer("project", nil, nil)
 	materializer.metadata.Health = "healthy"
-	older := materializer.beginAuthoritativeReadRefresh()
-	newer := materializer.beginAuthoritativeReadRefresh()
-	if materializer.finishAuthoritativeReadRefresh(older, nil, true) {
+	older := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	newer := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	if materializer.finishAuthoritativeReadRefresh(older, nil) {
 		t.Fatal("older authoritative success published while newer refresh owned completion")
 	}
-	if !materializer.finishAuthoritativeReadRefresh(newer, errors.New("newer runtime failure"), true) {
+	if !materializer.finishAuthoritativeReadRefresh(newer, errors.New("newer runtime failure")) {
 		t.Fatal("newer authoritative failure was not published")
 	}
 	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "newer runtime failure") {
 		t.Fatalf("health = %q, want newer runtime failure", got)
+	}
+}
+
+func TestCanonicalRefreshDoesNotClearRuntimeRefreshFailure(t *testing.T) {
+	materializer := newProjectReadMaterializer("project", nil, nil)
+	materializer.metadata.Health = "healthy"
+
+	runtimeAttempt := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	if !materializer.finishAuthoritativeReadRefresh(runtimeAttempt, errors.New("runtime projection unavailable")) {
+		t.Fatal("runtime refresh failure was not published")
+	}
+	canonicalAttempt := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+	if !materializer.finishAuthoritativeReadRefresh(canonicalAttempt, nil) {
+		t.Fatal("canonical refresh success was not published")
+	}
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "runtime projection unavailable") {
+		t.Fatalf("canonical refresh cleared runtime health: %q", got)
+	}
+
+	runtimeRecovery := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	if !materializer.finishAuthoritativeReadRefresh(runtimeRecovery, nil) {
+		t.Fatal("runtime refresh recovery was not published")
+	}
+	if got := materializer.snapshotMetadata().Health; got != "healthy" {
+		t.Fatalf("runtime recovery health = %q, want healthy", got)
 	}
 }
 
@@ -1454,7 +1479,7 @@ func TestRefreshActiveProjectReadRuntimeRecoversAuthoritativeHealthBeforeUserPro
 	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, "p", reader, []string{"issue"}); err == nil || !strings.Contains(err.Error(), "transient runtime hydration failure") {
 		t.Fatalf("failed refresh error = %v", err)
 	}
-	if got := reader.snapshotMetadata().Health; !strings.Contains(got, "stale: authoritative read refresh:") {
+	if got := reader.snapshotMetadata().Health; !strings.Contains(got, "stale: authoritative runtime refresh:") {
 		t.Fatalf("failed refresh health = %q, want authoritative stale health", got)
 	}
 	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, "p", reader, []string{"issue"}); err != nil {
@@ -1476,7 +1501,7 @@ func TestRefreshActiveProjectReadRuntimeRecoversAuthoritativeHealthBeforeUserPro
 	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, "p", reader, []string{"issue"}); err == nil || !strings.Contains(err.Error(), "sync user projection issues") {
 		t.Fatalf("failed user projection sync error = %v", err)
 	}
-	if got := reader.snapshotMetadata().Health; !strings.Contains(got, "stale: authoritative read refresh:") {
+	if got := reader.snapshotMetadata().Health; !strings.Contains(got, "stale: authoritative runtime refresh:") {
 		t.Fatalf("failed user projection sync health = %q, want authoritative stale health", got)
 	}
 	reader.markUnhealthy(errors.New("structural projection failure"), false)

@@ -701,7 +701,7 @@ func TestRootedOrchestrationReviewQueueStopsAtDirectChildren(t *testing.T) {
 	}
 }
 
-func TestRootedOrchestrationSnapshotRecoversCanonicalProjectionWithoutRuntimeRefresh(t *testing.T) {
+func TestRootedOrchestrationSnapshotRejectsStaleRuntimeOverlayAfterCanonicalConvergence(t *testing.T) {
 	ctx := context.Background()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
@@ -718,8 +718,18 @@ func TestRootedOrchestrationSnapshotRecoversCanonicalProjectionWithoutRuntimeRef
 	if err != nil {
 		t.Fatal(err)
 	}
-	failedRefresh := materializer.beginAuthoritativeReadRefresh()
-	materializer.finishAuthoritativeReadRefresh(failedRefresh, errors.New("unrelated runtime refresh deadline"), true)
+	materializer.mu.Lock()
+	staleChild := materializer.tasks[childID]
+	materializer.runtimeKeys.remove("task-runtime", childID, staleChild)
+	staleChild.HasTmuxSession = true
+	staleChild.Session = &domain.Session{IssueID: naming.IssueID(childID), State: domain.SessionBusy, Activity: "stale-live", UpdatedAt: time.Now().UTC()}
+	materializer.tasks[childID] = staleChild
+	materializer.runtimeKeys.add("task-runtime", childID, staleChild)
+	materializer.metadata.RuntimeChecksum = materializer.runtimeKeys.sum()
+	materializer.metadata.SemanticChecksum = joinedMaterializedChecksum(materializer.metadata)
+	materializer.mu.Unlock()
+	failedRefresh := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	materializer.finishAuthoritativeReadRefresh(failedRefresh, errors.New("unrelated runtime refresh deadline"))
 	d.materializers = map[string]*projectReadMaterializer{"proj": materializer}
 	d.materializersStarted = true
 	scope, err := domain.RootedOrchestrationScope(rootID)
@@ -728,11 +738,14 @@ func TestRootedOrchestrationSnapshotRecoversCanonicalProjectionWithoutRuntimeRef
 	}
 
 	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: scope, ActorID: "parent-orchestrator", Limit: 20})
-	if err != nil {
-		t.Fatalf("rooted orchestration inherited unrelated runtime health: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "runtime refresh deadline") {
+		t.Fatalf("rooted orchestration snapshot = %+v err=%v, want fail-visible stale runtime health", snapshot, err)
 	}
-	if !slices.Contains(snapshot.Runnable, childID) {
-		t.Fatalf("runnable = %v, want canonically refreshed child %s", snapshot.Runnable, childID)
+	if len(snapshot.Runnable) != 0 || len(snapshot.Active) != 0 {
+		t.Fatalf("stale runtime overlay produced classification: runnable=%v active=%v", snapshot.Runnable, snapshot.Active)
+	}
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "runtime refresh deadline") {
+		t.Fatalf("canonical convergence falsely cleared runtime health: %q", got)
 	}
 }
 

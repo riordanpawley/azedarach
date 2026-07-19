@@ -35,7 +35,7 @@ func (d *Daemon) mergeTypedGitBranches(ctx context.Context, projectID string, re
 	// worktree identities read below. A whole runtime reconcile also probes tmux,
 	// interactions, activity, and resource hooks that are unrelated to branch
 	// composition and can make Git unavailable under repository-family load.
-	tasks, _, err := d.convergedProjectReadSnapshot(ctx, projectID)
+	tasks, _, err := d.convergedCanonicalProjectReadSnapshot(ctx, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve authoritative git.merge issue graph: %w", err)
 	}

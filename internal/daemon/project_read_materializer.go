@@ -644,25 +644,38 @@ func (m *projectReadMaterializer) markUnhealthy(err error, serveLastGood bool) {
 type authoritativeReadRefreshAttempt struct {
 	sequence    uint64
 	healthEpoch uint64
+	component   authoritativeReadRefreshComponent
 }
 
-func (m *projectReadMaterializer) beginAuthoritativeReadRefresh() authoritativeReadRefreshAttempt {
+type authoritativeReadRefreshComponent string
+
+const (
+	authoritativeReadRefreshCanonical authoritativeReadRefreshComponent = "canonical"
+	authoritativeReadRefreshRuntime   authoritativeReadRefreshComponent = "runtime"
+)
+
+func authoritativeReadRefreshHealthPrefix(component authoritativeReadRefreshComponent) string {
+	return "stale: authoritative " + string(component) + " refresh:"
+}
+
+func (m *projectReadMaterializer) beginAuthoritativeReadRefresh(component authoritativeReadRefreshComponent) authoritativeReadRefreshAttempt {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.authoritativeRefreshSequence++
-	return authoritativeReadRefreshAttempt{sequence: m.authoritativeRefreshSequence, healthEpoch: m.healthEpoch}
+	return authoritativeReadRefreshAttempt{sequence: m.authoritativeRefreshSequence, healthEpoch: m.healthEpoch, component: component}
 }
 
-func (m *projectReadMaterializer) finishAuthoritativeReadRefresh(attempt authoritativeReadRefreshAttempt, err error, runtimeRefreshed bool) bool {
+func (m *projectReadMaterializer) finishAuthoritativeReadRefresh(attempt authoritativeReadRefreshAttempt, err error) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if attempt.sequence != m.authoritativeRefreshSequence || m.healthEpoch != attempt.healthEpoch {
 		return false
 	}
+	prefix := authoritativeReadRefreshHealthPrefix(attempt.component)
 	if err != nil {
-		m.metadata.Health = "stale: authoritative read refresh: " + err.Error()
+		m.metadata.Health = prefix + " " + err.Error()
 		m.retryableFailure = false
-	} else if runtimeRefreshed || m.retryableFailure || strings.HasPrefix(m.metadata.Health, "stale: committed mutation convergence:") || strings.HasPrefix(m.metadata.Health, "stale: authoritative read refresh:") {
+	} else if strings.HasPrefix(m.metadata.Health, prefix) || (attempt.component == authoritativeReadRefreshCanonical && (m.retryableFailure || strings.HasPrefix(m.metadata.Health, "stale: committed mutation convergence:"))) {
 		m.metadata.Health = "healthy"
 		m.retryableFailure = false
 	}
@@ -719,6 +732,17 @@ func (m *projectReadMaterializer) snapshot() ([]domain.Task, protocol.Materializ
 	return tasks, metadata
 }
 
+func (m *projectReadMaterializer) snapshotCanonical() ([]domain.Task, protocol.MaterializedSnapshotMetadata) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	tasks := make([]domain.Task, 0, len(m.canonical))
+	for _, task := range m.canonical {
+		tasks = append(tasks, task)
+	}
+	sortTasksDeterministically(tasks)
+	return cloneTasks(tasks), cloneMaterializedMetadata(m.metadata)
+}
+
 func (m *projectReadMaterializer) snapshotWithFailureDisposition() ([]domain.Task, protocol.MaterializedSnapshotMetadata, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -748,7 +772,8 @@ func (m *projectReadMaterializer) snapshotIssuesForAuthoritativeRefresh(issueIDs
 	recoveryAuthorized := attempt.sequence != 0 &&
 		attempt.sequence == m.authoritativeRefreshSequence &&
 		attempt.healthEpoch == m.healthEpoch &&
-		strings.HasPrefix(m.metadata.Health, "stale: authoritative read refresh:")
+		attempt.component == authoritativeReadRefreshRuntime &&
+		strings.HasPrefix(m.metadata.Health, authoritativeReadRefreshHealthPrefix(authoritativeReadRefreshRuntime))
 	return cloneTasks(tasks), cloneMaterializedMetadata(m.metadata), recoveryAuthorized
 }
 
@@ -1173,6 +1198,41 @@ func (d *Daemon) convergedProjectReadSnapshotForInvariant(ctx context.Context, p
 	return d.convergedProjectReadSnapshotMode(ctx, projectID, true)
 }
 
+// convergedCanonicalProjectReadSnapshot refreshes and returns only durable issue
+// facts. Runtime and worktree overlays are intentionally excluded, and a stale
+// runtime health result is preserved so callers must explicitly decide whether
+// their operation can proceed without those components.
+func (d *Daemon) convergedCanonicalProjectReadSnapshot(ctx context.Context, projectID string) ([]domain.Task, protocol.MaterializedSnapshotMetadata, error) {
+	projectID = d.canonicalProjectID(projectID)
+	materializer := d.activeProjectReadMaterializer(projectID)
+	if materializer == nil {
+		d.materializersMu.RLock()
+		started := d.materializersStarted
+		d.materializersMu.RUnlock()
+		if started {
+			return nil, protocol.MaterializedSnapshotMetadata{}, newProjectReadUnavailableError("project read materialization not initialized for %s", projectID)
+		}
+		candidate, err := d.bootstrapEmbeddedProjectReadMaterializer(ctx, projectID, false)
+		if err != nil {
+			return nil, protocol.MaterializedSnapshotMetadata{}, err
+		}
+		tasks, metadata := candidate.snapshotCanonical()
+		return tasks, metadata, nil
+	}
+	attempt := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+	metadata, err := materializer.convergeCanonical(ctx)
+	if err != nil {
+		materializer.finishAuthoritativeReadRefresh(attempt, err)
+		return nil, metadata, newProjectReadUnavailableError("project read convergence unavailable for %s: %w", projectID, err)
+	}
+	materializer.finishAuthoritativeReadRefresh(attempt, nil)
+	tasks, metadata := materializer.snapshotCanonical()
+	if metadata.Health != "healthy" && !strings.HasPrefix(metadata.Health, authoritativeReadRefreshHealthPrefix(authoritativeReadRefreshRuntime)) {
+		return nil, metadata, newProjectReadUnavailableError("project read materialization unhealthy for %s: %s", projectID, metadata.Health)
+	}
+	return tasks, metadata, nil
+}
+
 func (d *Daemon) convergedProjectReadSnapshotMode(ctx context.Context, projectID string, includeEmbeddedRuntime bool) ([]domain.Task, protocol.MaterializedSnapshotMetadata, error) {
 	projectID = d.canonicalProjectID(projectID)
 	materializer := d.activeProjectReadMaterializer(projectID)
@@ -1196,13 +1256,13 @@ func (d *Daemon) convergedProjectReadSnapshotMode(ctx context.Context, projectID
 		}
 		return tasks, metadata, nil
 	}
-	attempt := materializer.beginAuthoritativeReadRefresh()
+	attempt := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
 	metadata, err := materializer.convergeCanonical(ctx)
 	if err != nil {
-		materializer.finishAuthoritativeReadRefresh(attempt, err, false)
+		materializer.finishAuthoritativeReadRefresh(attempt, err)
 		return nil, metadata, newProjectReadUnavailableError("project read convergence unavailable for %s: %w", projectID, err)
 	}
-	materializer.finishAuthoritativeReadRefresh(attempt, nil, false)
+	materializer.finishAuthoritativeReadRefresh(attempt, nil)
 	return d.projectReadSnapshot(projectID)
 }
 
@@ -1290,20 +1350,20 @@ func (d *Daemon) refreshProjectReadRuntimeForIssues(ctx context.Context, project
 
 func (d *Daemon) refreshActiveProjectReadRuntimeForIssues(ctx context.Context, projectID string, materializer *projectReadMaterializer, issueIDs []string) error {
 	issueIDs = uniqueStrings(issueIDs)
-	attempt := materializer.beginAuthoritativeReadRefresh()
+	attempt := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
 	if err := materializer.refreshRuntime(ctx, issueIDs); err != nil {
-		materializer.finishAuthoritativeReadRefresh(attempt, err, true)
+		materializer.finishAuthoritativeReadRefresh(attempt, err)
 		return fmt.Errorf("refresh runtime issues: %w", err)
 	}
 	if err := d.refreshProjectReadWorktreesForIssues(ctx, projectID, materializer, issueIDs); err != nil {
-		materializer.finishAuthoritativeReadRefresh(attempt, err, true)
+		materializer.finishAuthoritativeReadRefresh(attempt, err)
 		return fmt.Errorf("refresh runtime worktrees: %w", err)
 	}
 	if err := d.syncUserProjectionMaterializedIssuesForRefresh(ctx, projectID, issueIDs, materializer, attempt); err != nil {
-		materializer.finishAuthoritativeReadRefresh(attempt, err, true)
+		materializer.finishAuthoritativeReadRefresh(attempt, err)
 		return fmt.Errorf("sync user projection issues: %w", err)
 	}
-	materializer.finishAuthoritativeReadRefresh(attempt, nil, true)
+	materializer.finishAuthoritativeReadRefresh(attempt, nil)
 	return nil
 }
 
