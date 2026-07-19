@@ -7143,6 +7143,7 @@ func daemonWorkerObservationLastEvent(issueEvents []domain.IssueObservationEvent
 			At:        evt.ObservedAt,
 			Source:    strings.TrimSpace(evt.Source),
 			Summary:   issueObservationEventSummary(*evt),
+			Seq:       evt.ID,
 			SessionID: strings.TrimSpace(evt.SessionID),
 			Worktree:  strings.TrimSpace(evt.WorktreePath),
 		}

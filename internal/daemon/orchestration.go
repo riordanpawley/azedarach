@@ -398,8 +398,12 @@ func orchestratorActionableContinuation(scope domain.OrchestrationScope, snapsho
 		IssueStatus string `json:"issue_status"`
 		Failure     string `json:"failure,omitempty"`
 	}
+	type blockerRevision struct {
+		IssueID  string `json:"issue_id"`
+		Sequence int64  `json:"sequence"`
+	}
 	reviews := make([]reviewRevision, 0, len(snapshot.ReviewQueue))
-	issueIDs := make([]string, 0, len(snapshot.ReviewQueue)+len(snapshot.Runnable)+len(snapshot.NestedRoots))
+	issueIDs := make([]string, 0, len(snapshot.ReviewQueue)+len(snapshot.Runnable)+len(snapshot.NestedRoots)+len(snapshot.WorkerObservations))
 	for _, review := range snapshot.ReviewQueue {
 		if !review.Actionable {
 			continue
@@ -429,6 +433,43 @@ func orchestratorActionableContinuation(scope domain.OrchestrationScope, snapsho
 			issueIDs = append(issueIDs, item.IssueID)
 		}
 	}
+	blockers := make([]blockerRevision, 0, len(snapshot.WorkerObservations)+len(snapshot.RecentEvents))
+	seenBlockers := make(map[string]struct{}, len(snapshot.WorkerObservations)+len(snapshot.RecentEvents))
+	addBlocker := func(issueID string, sequence int64) {
+		issueID = strings.TrimSpace(issueID)
+		if issueID == "" || sequence <= 0 {
+			return
+		}
+		key := fmt.Sprintf("%s\x00%d", issueID, sequence)
+		if _, duplicate := seenBlockers[key]; duplicate {
+			return
+		}
+		seenBlockers[key] = struct{}{}
+		blockers = append(blockers, blockerRevision{IssueID: issueID, Sequence: sequence})
+		issueIDs = append(issueIDs, issueID)
+	}
+	if scope.Kind == domain.OrchestrationScopeProject {
+		for _, event := range snapshot.RecentEvents {
+			projectedType, visible := projectStewardshipEventType(domain.IssueObservationEventType(event.Type))
+			if visible && projectedType == "worker-blocked" {
+				addBlocker(event.IssueID.String(), event.Seq)
+			}
+		}
+	} else {
+		// Rooted snapshots already constrain worker observations to their
+		// materialized parent-child closure. LastEvent carries the exact durable
+		// observation ID, independent of the legacy mailbox file projection.
+		for _, observation := range snapshot.WorkerObservations {
+			event := observation.LastEvent
+			if event == nil {
+				continue
+			}
+			projectedType, visible := projectStewardshipEventType(domain.IssueObservationEventType(event.Type))
+			if visible && projectedType == "worker-blocked" {
+				addBlocker(observation.IssueID, event.Seq)
+			}
+		}
+	}
 	sort.Slice(reviews, func(i, j int) bool {
 		if reviews[i].IssueID != reviews[j].IssueID {
 			return reviews[i].IssueID < reviews[j].IssueID
@@ -454,16 +495,24 @@ func orchestratorActionableContinuation(scope domain.OrchestrationScope, snapsho
 		}
 		return nested[i].Failure < nested[j].Failure
 	})
-	if len(reviews) == 0 && len(runnable) == 0 && len(nested) == 0 {
+	sort.Slice(blockers, func(i, j int) bool {
+		if blockers[i].IssueID != blockers[j].IssueID {
+			return blockers[i].IssueID < blockers[j].IssueID
+		}
+		return blockers[i].Sequence < blockers[j].Sequence
+	})
+	if len(reviews) == 0 && len(runnable) == 0 && len(nested) == 0 && len(blockers) == 0 {
 		return orchestratorActionableState{}, false
 	}
 	sort.Strings(issueIDs)
+	issueIDs = slices.Compact(issueIDs)
 	signature := struct {
 		Scope    domain.OrchestrationScope `json:"scope"`
 		Reviews  []reviewRevision          `json:"reviews,omitempty"`
 		Runnable []string                  `json:"runnable,omitempty"`
 		Nested   []nestedRevision          `json:"nested,omitempty"`
-	}{Scope: scope, Reviews: reviews, Runnable: runnable, Nested: nested}
+		Blockers []blockerRevision         `json:"blockers,omitempty"`
+	}{Scope: scope, Reviews: reviews, Runnable: runnable, Nested: nested, Blockers: blockers}
 	encoded, _ := json.Marshal(signature)
 	digest := sha256.Sum256(encoded)
 	kind, reason := "coordinate", "actionable orchestration projection transition"
@@ -473,6 +522,8 @@ func orchestratorActionableContinuation(scope domain.OrchestrationScope, snapsho
 		kind, reason = "start", "direct runnable work is ready"
 	} else if len(nested) > 0 {
 		kind, reason = "nested-root", "direct nested-root coordination is ready"
+	} else if len(blockers) > 0 {
+		kind, reason = "blocked", "new worker blocker requires coordination"
 	}
 	return orchestratorActionableState{Kind: kind, Reason: reason, IssueIDs: issueIDs, Revision: fmt.Sprintf("%x", digest[:12])}, true
 }

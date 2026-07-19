@@ -19,9 +19,14 @@ requests, open/active issues, or unresolved interactions. After the configurable
 Wake events are new open work, review requests, accepted human answers, and
 recovery events. The daemon derives a scope-local semantic revision from the
 actionable projection, enqueues one durable managed-agent input intent for that
-revision, and coalesces equivalent state. Busy agents keep the intent queued;
-restart recovery retries an unacknowledged intent without creating a second
-turn. Rooted scopes advance a durable generation on each action/idle semantic
+revision, and coalesces equivalent state. Direct scoped `worker-blocked`
+observations contribute their exact durable event identity; progress-only
+observations do not wake a model turn. The delivery key also binds the current
+orchestrator session and managed-agent incarnation, so a replacement can receive
+an unchanged actionable semantic revision without conflicting with its prior
+target. Busy agents keep the intent queued; restart recovery retries an
+unacknowledged intent without creating a second turn. Rooted scopes advance a
+durable generation on each action/idle semantic
 transition, so the same action may recur after quiescence without duplicating an
 equivalent active revision. The debounce remains a lifecycle-write guard, not
 prompt identity.

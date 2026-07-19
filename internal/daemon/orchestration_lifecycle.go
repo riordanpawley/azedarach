@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"strings"
 	"time"
@@ -146,7 +147,7 @@ func (d *Daemon) enforceOrchestratorContinuation(ctx context.Context, authority 
 		ProjectID: projectID, SessionID: woken.SessionID, Target: target,
 		Tool: d.runtimeConfigForProject(projectID).CLITool, Kind: domain.AgentInputMessageOrchestratorWake,
 		Payload:   snapshot.ContinuationContract,
-		IntentKey: fmt.Sprintf("orchestrator-wake:%s:%s:%s", woken.Identity.Scope.Kind, woken.Identity.Scope.RootIssueID, action.Revision),
+		IntentKey: orchestratorWakeIntentKey(woken.Identity.Scope, action.Revision, woken.SessionID, target),
 	})
 	if err != nil {
 		return fmt.Errorf("deliver orchestrator continuation wake: %w", err)
@@ -155,6 +156,11 @@ func (d *Daemon) enforceOrchestratorContinuation(ctx context.Context, authority 
 		return nil // fail closed; durable wake is retried by reconciliation
 	}
 	return nil
+}
+
+func orchestratorWakeIntentKey(scope domain.OrchestrationScope, actionRevision, sessionID string, target domain.ManagedAgentRuntimeIdentity) string {
+	targetDigest := sha256.Sum256([]byte(strings.TrimSpace(sessionID) + "\x00" + strings.TrimSpace(target.AgentIncarnation)))
+	return fmt.Sprintf("orchestrator-wake:%s:%s:%s:%x", scope.Kind, scope.RootIssueID, strings.TrimSpace(actionRevision), targetDigest[:12])
 }
 
 func checkpointRootedOrchestratorAction(ctx context.Context, store *daemonstate.RuntimeStateStore, lease daemonstate.OrchestratorScopeLease, action orchestratorActionableState, actionable bool, now time.Time) (int64, error) {
@@ -203,8 +209,8 @@ func (d *Daemon) agentInputDeliveryEligible(ctx context.Context, request domain.
 	if key == request.IntentKey {
 		return false, nil
 	}
-	parts := strings.SplitN(key, ":", 3)
-	if len(parts) != 3 || strings.TrimSpace(parts[2]) == "" {
+	parts := strings.SplitN(key, ":", 4)
+	if len(parts) != 4 || strings.TrimSpace(parts[2]) == "" || strings.TrimSpace(parts[3]) == "" {
 		return false, nil
 	}
 	lease, found, err := d.resolveOrchestratorSession(ctx, request.ProjectID, request.SessionID)
@@ -212,6 +218,9 @@ func (d *Daemon) agentInputDeliveryEligible(ctx context.Context, request domain.
 		return false, err
 	}
 	if string(lease.Identity.Scope.Kind) != parts[0] || lease.Identity.Scope.RootIssueID.String() != parts[1] {
+		return false, nil
+	}
+	if request.IntentKey != orchestratorWakeIntentKey(lease.Identity.Scope, parts[2], request.SessionID, request.Target) {
 		return false, nil
 	}
 	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, request.ProjectID, protocol.OrchestrationSnapshotRequest{Scope: lease.Identity.Scope})

@@ -310,6 +310,125 @@ func TestBootstrapRecoveryResumesReplacedRootedOrchestratorOnceWithDurableCursor
 	}
 }
 
+func TestOrchestratorReplacementReceivesUnchangedActionableWake(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		scopeFor func(t *testing.T, client *issues.Client) domain.OrchestrationScope
+		snapshot func(scope domain.OrchestrationScope) protocol.OrchestrationSnapshot
+	}{
+		{
+			name: "project",
+			scopeFor: func(t *testing.T, _ *issues.Client) domain.OrchestrationScope {
+				t.Helper()
+				return domain.ProjectOrchestrationScope()
+			},
+			snapshot: func(scope domain.OrchestrationScope) protocol.OrchestrationSnapshot {
+				return protocol.OrchestrationSnapshot{Scope: scope, ReviewQueue: []protocol.OrchestrationReview{{IssueID: "review", Actionable: true, ReviewEpochEventID: 7, EvidenceDigest: "digest", HeadRevision: "head"}}}
+			},
+		},
+		{
+			name: "rooted",
+			scopeFor: func(t *testing.T, client *issues.Client) domain.OrchestrationScope {
+				t.Helper()
+				ctx := context.Background()
+				root, err := client.Create(ctx, issues.CreateTaskParams{Title: "root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := client.Create(ctx, issues.CreateTaskParams{Title: "nested", Type: domain.TypeEpic, Status: domain.StatusInProgress, ParentID: &root}); err != nil {
+					t.Fatal(err)
+				}
+				scope, err := domain.RootedOrchestrationScope(root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return scope
+			},
+			snapshot: func(scope domain.OrchestrationScope) protocol.OrchestrationSnapshot {
+				return protocol.OrchestrationSnapshot{Scope: scope, NestedRoots: []protocol.OrchestrationNestedRoot{{IssueID: "nested", Status: "startable", IssueStatus: string(domain.StatusInProgress)}}}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			const projectID = "project"
+			repoDir := t.TempDir()
+			client := newMigratedIssueClient(t, repoDir, slog.Default())
+			t.Cleanup(func() { _ = client.CloseDB() })
+			store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+			t.Cleanup(func() { _ = store.Close() })
+			scope := tt.scopeFor(t, client)
+			identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := newSessionStartTmuxRunner()
+			runner.sessions["old-orchestrator"] = true
+			runner.sessions["replacement-orchestrator"] = true
+			d := &Daemon{
+				cfg:    Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+				issues: client, issueClientsByProject: map[string]*issues.Client{projectID: client},
+				runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+				tmux:                   tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil))),
+			}
+			snapshot := tt.snapshot(scope)
+			d.orchestrationSnapshotBuild = func(context.Context, string, protocol.OrchestrationSnapshotRequest) (protocol.OrchestrationSnapshot, error) {
+				return snapshot, nil
+			}
+			authority := daemonstate.NewOrchestratorLeaseAuthority(store)
+			acquired, err := authority.Acquire(ctx, identity, "old-orchestrator", d.tmux.HasSession)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.persistOrchestratorSessionProjection(ctx, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, scope, "old-orchestrator"); err != nil {
+				t.Fatal(err)
+			}
+			seedReadyAgentInput(t, d, runner, projectID, "old-orchestrator")
+			base := time.Date(2026, 7, 20, 4, 0, 0, 0, time.UTC)
+			if _, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{ProjectID: projectID, SessionID: "old-orchestrator", ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: base, ObservedVersion: base.UnixNano()}); err != nil {
+				t.Fatal(err)
+			}
+			policy, err := domain.ParseOrchestratorLifecyclePolicy("", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.enforceOrchestratorContinuation(ctx, authority, acquired.Lease, projectID, base, policy); err != nil {
+				t.Fatal(err)
+			}
+			if len(runner.inputPayloads) != 0 {
+				t.Fatalf("busy original received %d payloads, want 0", len(runner.inputPayloads))
+			}
+
+			runner.sessions["old-orchestrator"] = false
+			replaced, err := authority.Acquire(ctx, identity, "replacement-orchestrator", d.tmux.HasSession)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.persistOrchestratorSessionProjection(ctx, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, scope, "replacement-orchestrator"); err != nil {
+				t.Fatal(err)
+			}
+			replacementTarget := daemonstate.ManagedAgentIdentity{ProjectID: projectID, SessionID: "replacement-orchestrator", LogicalPaneID: "agent", TmuxPaneID: "2", PanePID: 456, AgentIncarnation: "replacement-incarnation", ObservedAt: base.Add(time.Second)}
+			if err := store.UpsertManagedAgentIdentity(ctx, replacementTarget); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{ProjectID: projectID, SessionID: "replacement-orchestrator", ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: base.Add(time.Second), ObservedVersion: base.Add(time.Second).UnixNano()}); err != nil {
+				t.Fatal(err)
+			}
+			receiver := &recordingAuthoritativeReceiver{accepted: map[string]string{}, sink: func(payload string) {
+				runner.inputPayloads = append(runner.inputPayloads, payload)
+			}}
+			d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, receiver, "replacement-daemon")
+			d.agentInput.deliveryEligible = d.agentInputDeliveryEligible
+			if err := d.enforceOrchestratorContinuation(ctx, authority, replaced.Lease, projectID, base.Add(time.Second), policy); err != nil {
+				t.Fatal(err)
+			}
+			if len(runner.inputPayloads) != 1 {
+				t.Fatalf("replacement continuation payloads = %d, want exactly 1", len(runner.inputPayloads))
+			}
+		})
+	}
+}
+
 func TestRootedOrchestratorContinuationSuppressesCompleteAndBacklogButNotUnrelatedHumanWait(t *testing.T) {
 	nested := protocol.OrchestrationSnapshot{NestedRoots: []protocol.OrchestrationNestedRoot{{IssueID: "nested", Status: "startable"}}}
 	if rootedOrchestratorContinuationRequired(true, nested) {
@@ -381,6 +500,106 @@ func TestOrchestratorActionableContinuationChangesWithReviewEpochAndIgnoresBusyN
 	snapshot.ReviewQueue = nil
 	if action, actionable := orchestratorActionableContinuation(scope, snapshot); actionable {
 		t.Fatalf("busy nested root produced duplicate parent action: %+v", action)
+	}
+}
+
+func TestOrchestratorActionableContinuationIncludesOnlyNewScopedBlockers(t *testing.T) {
+	projected := daemonWorkerObservationLastEvent([]domain.IssueObservationEvent{{ID: 11, Type: domain.IssueEventBlockerReported}}, nil)
+	if projected == nil || projected.Seq != 11 {
+		t.Fatalf("durable blocker identity = %+v, want observation event 11", projected)
+	}
+	rooted, _ := domain.RootedOrchestrationScope("root")
+	for _, scope := range []domain.OrchestrationScope{domain.ProjectOrchestrationScope(), rooted} {
+		t.Run(string(scope.Kind), func(t *testing.T) {
+			blocked := protocol.OrchestrationSnapshot{}
+			if scope.Kind == domain.OrchestrationScopeProject {
+				blocked.RecentEvents = []protocol.MailEvent{{IssueID: "worker", Seq: 11, Type: "worker-blocked"}}
+			} else {
+				blocked.WorkerObservations = []domain.WorkerObservation{{IssueID: "worker", LastEvent: &domain.WorkerObservationEventSummary{Seq: 11, Type: "worker-blocked"}}}
+			}
+			first, actionable := orchestratorActionableContinuation(scope, blocked)
+			if !actionable || first.Kind != "blocked" || !slices.Contains(first.IssueIDs, "worker") {
+				t.Fatalf("blocker action = %+v actionable=%t", first, actionable)
+			}
+			equivalent, actionable := orchestratorActionableContinuation(scope, blocked)
+			if !actionable || equivalent.Revision != first.Revision {
+				t.Fatalf("equivalent blocker revision = %q, want %q", equivalent.Revision, first.Revision)
+			}
+			if scope.Kind == domain.OrchestrationScopeProject {
+				blocked.RecentEvents[0].Seq++
+			} else {
+				blocked.WorkerObservations[0].LastEvent.Seq++
+			}
+			newBlocker, actionable := orchestratorActionableContinuation(scope, blocked)
+			if !actionable || newBlocker.Revision == first.Revision {
+				t.Fatalf("new blocker reused revision %q", first.Revision)
+			}
+			progress := protocol.OrchestrationSnapshot{}
+			if scope.Kind == domain.OrchestrationScopeProject {
+				progress.RecentEvents = []protocol.MailEvent{{IssueID: "worker", Seq: 12, Type: "worker-progress"}}
+			} else {
+				progress.WorkerObservations = []domain.WorkerObservation{{IssueID: "worker", LastEvent: &domain.WorkerObservationEventSummary{Seq: 12, Type: "worker-progress"}}}
+			}
+			if action, actionable := orchestratorActionableContinuation(scope, progress); actionable {
+				t.Fatalf("progress-only event produced action: %+v", action)
+			}
+		})
+	}
+}
+
+func TestOrchestratorBlockerWakeUsesDurableScopeFilteredObservations(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	createRoot := func(title string) (string, string) {
+		root, err := client.Create(ctx, issues.CreateTaskParams{Title: title, Type: domain.TypeEpic, Status: domain.StatusOpen})
+		if err != nil {
+			t.Fatal(err)
+		}
+		child, err := client.Create(ctx, issues.CreateTaskParams{Title: title + " worker", Type: domain.TypeTask, Status: domain.StatusInProgress, ParentID: &root})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return root, child
+	}
+	rootA, workerA := createRoot("root a")
+	rootB, workerB := createRoot("root b")
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issues: client, issueClientsByProject: map[string]*issues.Client{"project": client}}
+	for _, event := range []protocol.MailSendCommandBody{
+		{RepoDir: repoDir, ParentIssue: rootA, IssueID: naming.IssueID(workerA), Type: "worker-blocked", From: "worker", To: "orchestrator", Body: "blocked on authority"},
+		{RepoDir: repoDir, ParentIssue: rootB, IssueID: naming.IssueID(workerB), Type: "worker-progress", From: "worker", To: "orchestrator", Body: "still working"},
+	} {
+		response, err := d.handleMailSend(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: "project"}, Body: mustMarshal(t, event)})
+		if err != nil || !response.OK {
+			t.Fatalf("mail send %s: response=%+v err=%v", event.Type, response, err)
+		}
+	}
+	authority := d.orchestrationAuthority()
+	rootAScope, _ := domain.RootedOrchestrationScope(rootA)
+	rootBScope, _ := domain.RootedOrchestrationScope(rootB)
+	for _, tt := range []struct {
+		name       string
+		scope      domain.OrchestrationScope
+		wantAction bool
+	}{
+		{name: "project", scope: domain.ProjectOrchestrationScope(), wantAction: true},
+		{name: "root-a", scope: rootAScope, wantAction: true},
+		{name: "root-b", scope: rootBScope, wantAction: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			snapshot, err := authority.Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: tt.scope, ActorID: "orchestrator", Limit: 10})
+			if err != nil {
+				t.Fatal(err)
+			}
+			action, actionable := orchestratorActionableContinuation(tt.scope, protocol.OrchestrationSnapshot{WorkerObservations: snapshot.WorkerObservations, RecentEvents: snapshot.RecentEvents})
+			if actionable != tt.wantAction {
+				t.Fatalf("action = %+v actionable=%t, want %t; observations=%+v", action, actionable, tt.wantAction, snapshot.WorkerObservations)
+			}
+			if actionable && (!slices.Contains(action.IssueIDs, workerA) || slices.Contains(action.IssueIDs, workerB)) {
+				t.Fatalf("scope-filtered blocker action = %+v", action)
+			}
+		})
 	}
 }
 
