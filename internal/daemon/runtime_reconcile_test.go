@@ -1119,6 +1119,133 @@ func TestBackgroundRuntimeReconcileDeadlineStartsWhenQueuedWorkBegins(t *testing
 	}
 }
 
+func TestStartupRuntimeReconcileSeparatesPhaseCapFromQueuedExecutionDeadline(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	queue := newReconcileQueue[protocol.RuntimeReconcileResponseBody](reconcileQueueConfig{
+		Name:    "runtime_reconcile_startup_deadline_test",
+		Workers: 1,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	t.Cleanup(func() { _ = queue.Close() })
+	busyStarted := make(chan struct{})
+	releaseBusy := make(chan struct{})
+	busy, err := queue.Enqueue(reconcileQueueRequest[protocol.RuntimeReconcileResponseBody]{
+		Key:      "busy",
+		Priority: reconcilePriorityManual,
+		Work: func(context.Context) (protocol.RuntimeReconcileResponseBody, error) {
+			close(busyStarted)
+			<-releaseBusy
+			return protocol.RuntimeReconcileResponseBody{ProjectID: "busy"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("enqueue busy reconcile: %v", err)
+	}
+	<-busyStarted
+
+	deadlineStarted := make(chan struct{})
+	finished := make(chan struct{}, 1)
+	var deadlineCalls atomic.Int32
+	d := &Daemon{
+		cfg:                   Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeReconciler:     &runtimeReconcileRecorder{finished: finished},
+		runtimeReconcileQueue: queue,
+		runtimeReconcilePhaseContext: func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+			phaseCtx, cancel := context.WithCancel(parent)
+			cancel()
+			return phaseCtx, func() {}
+		},
+		runtimeReconcileWorkContext: func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+			if err := parent.Err(); err != nil {
+				t.Errorf("queued startup execution inherited expired phase context: %v", err)
+			}
+			deadlineCalls.Add(1)
+			close(deadlineStarted)
+			return context.WithCancel(parent)
+		},
+	}
+	if _, err := d.runStartupRuntimeReconcile(context.Background()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("startup phase error = %v, want canceled phase cap", err)
+	}
+	if got := deadlineCalls.Load(); got != 0 {
+		t.Fatalf("startup project deadline started while queued: calls=%d", got)
+	}
+	if snapshot := queue.snapshot(); len(snapshot.Pending) != 1 {
+		t.Fatalf("startup pending jobs = %v, want one project", snapshot.Pending)
+	}
+
+	close(releaseBusy)
+	<-deadlineStarted
+	<-finished
+	if _, err := busy.Wait(context.Background()); err != nil {
+		t.Fatalf("wait busy reconcile: %v", err)
+	}
+	if got := deadlineCalls.Load(); got != 1 {
+		t.Fatalf("startup project deadline calls = %d, want 1", got)
+	}
+}
+
+func TestAsyncIssueRuntimeReconcileDeadlineStartsWhenQueuedWorkBegins(t *testing.T) {
+	queue := newReconcileQueue[protocol.RuntimeReconcileResponseBody](reconcileQueueConfig{
+		Name:    "runtime_reconcile_issue_deadline_test",
+		Workers: 1,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	t.Cleanup(func() { _ = queue.Close() })
+	busyStarted := make(chan struct{})
+	releaseBusy := make(chan struct{})
+	busy, err := queue.Enqueue(reconcileQueueRequest[protocol.RuntimeReconcileResponseBody]{
+		Key:      "busy",
+		Priority: reconcilePriorityManual,
+		Work: func(context.Context) (protocol.RuntimeReconcileResponseBody, error) {
+			close(busyStarted)
+			<-releaseBusy
+			return protocol.RuntimeReconcileResponseBody{ProjectID: "busy"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("enqueue busy reconcile: %v", err)
+	}
+	<-busyStarted
+
+	deadlineStarted := make(chan struct{})
+	finished := make(chan struct{}, 1)
+	var deadlineCalls atomic.Int32
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeReconciler:     &runtimeReconcileRecorder{finished: finished},
+		runtimeReconcileQueue: queue,
+		runtimeReconcileWorkContext: func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+			deadlineCalls.Add(1)
+			close(deadlineStarted)
+			return context.WithCancel(parent)
+		},
+	}
+	d.refreshRuntimeForIssueMutationAsync("project", "issue", "mutation")
+	if got := deadlineCalls.Load(); got != 0 {
+		t.Fatalf("async issue deadline started while queued: calls=%d", got)
+	}
+	if snapshot := queue.snapshot(); len(snapshot.Pending) != 1 || snapshot.Pending[0] != runtimeReconcileIssueQueueKey("project", []string{"issue"}) {
+		t.Fatalf("async issue pending jobs = %v, want issue-scoped job", snapshot.Pending)
+	}
+
+	close(releaseBusy)
+	<-deadlineStarted
+	<-finished
+	if _, err := busy.Wait(context.Background()); err != nil {
+		t.Fatalf("wait busy reconcile: %v", err)
+	}
+	if got := deadlineCalls.Load(); got != 1 {
+		t.Fatalf("async issue deadline calls = %d, want 1", got)
+	}
+	if got := d.runtimeReconciler.(*runtimeReconcileRecorder).issueSnapshot(); !reflect.DeepEqual(got, [][]string{{"issue"}}) {
+		t.Fatalf("async issue reconcile calls = %v, want [[issue]]", got)
+	}
+}
+
 func TestRunRuntimeReconcileSweepDefersProjectsWhenBudgetExhausted(t *testing.T) {
 	now := time.Date(2026, time.April, 3, 14, 0, 0, 0, time.UTC)
 	recorder := &runtimeReconcileRecorder{

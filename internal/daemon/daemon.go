@@ -189,6 +189,7 @@ type Daemon struct {
 	runtimeReconciler                    runtimeReconciler
 	runtimeReconcileQueue                *reconcileQueue[protocol.RuntimeReconcileResponseBody]
 	runtimeReconcileWorkContext          func(context.Context, time.Duration) (context.Context, context.CancelFunc)
+	runtimeReconcilePhaseContext         func(context.Context, time.Duration) (context.Context, context.CancelFunc)
 	gitStatusRefreshQueue                *reconcileQueue[*git.GitStatus]
 	runtimeReconcileThrottle             *reconcileThrottle
 	worktreeGitProbeThrottle             *reconcileThrottle

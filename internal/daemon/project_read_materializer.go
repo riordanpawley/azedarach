@@ -104,6 +104,8 @@ type projectReadMaterializer struct {
 	baseHealth                            string
 	baseRetryableFailure                  bool
 	authoritativeRefreshFailures          map[authoritativeReadRefreshComponent]string
+	authoritativeRuntimeIssueSequence     map[string]uint64
+	authoritativeRuntimeFailures          map[string]string
 	healthEpoch                           uint64
 	canonicalGeneration                   uint64
 	runtimeRefreshSequence                uint64
@@ -168,6 +170,7 @@ func newProjectReadMaterializer(projectID string, authority *ProjectionDeltaAuth
 		canonical: map[string]domain.Task{}, tasks: map[string]domain.Task{}, worktrees: map[string]git.Worktree{},
 		runtimeRefreshEpoch: map[string]uint64{}, runtimePublishedEpoch: map[string]uint64{}, runtimeRefreshOwners: map[string]map[uint64]struct{}{},
 		baseHealth: "healthy", authoritativeRefreshFailures: map[authoritativeReadRefreshComponent]string{},
+		authoritativeRuntimeIssueSequence: map[string]uint64{}, authoritativeRuntimeFailures: map[string]string{},
 	}
 }
 
@@ -645,6 +648,8 @@ func (m *projectReadMaterializer) replaceBootstrapAfterConvergenceResult(canonic
 	m.baseHealth = metadata.Health
 	m.baseRetryableFailure = false
 	m.authoritativeRefreshFailures = map[authoritativeReadRefreshComponent]string{}
+	m.authoritativeRuntimeIssueSequence = map[string]uint64{}
+	m.authoritativeRuntimeFailures = map[string]string{}
 	m.aggregateHealthLocked()
 	m.healthEpoch++
 	m.runtimeRefreshSequence++
@@ -674,6 +679,7 @@ type authoritativeReadRefreshAttempt struct {
 	healthEpoch         uint64
 	canonicalGeneration uint64
 	component           authoritativeReadRefreshComponent
+	runtimeIssueIDs     []string
 }
 
 type authoritativeReadRefreshComponent string
@@ -726,13 +732,27 @@ func (m *projectReadMaterializer) authoritativeReadRefreshSequence(component aut
 }
 
 func (m *projectReadMaterializer) beginAuthoritativeReadRefresh(component authoritativeReadRefreshComponent) authoritativeReadRefreshAttempt {
+	return m.beginAuthoritativeReadRefreshForIssues(component, nil)
+}
+
+func (m *projectReadMaterializer) beginAuthoritativeReadRefreshForIssues(component authoritativeReadRefreshComponent, issueIDs []string) authoritativeReadRefreshAttempt {
 	m.lockTransition()
 	defer m.transitionMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	sequence := m.authoritativeReadRefreshSequence(component)
 	*sequence++
-	return authoritativeReadRefreshAttempt{sequence: *sequence, healthEpoch: m.healthEpoch, canonicalGeneration: m.canonicalGeneration, component: component}
+	normalizedIssueIDs := uniqueStrings(issueIDs)
+	sort.Strings(normalizedIssueIDs)
+	if component == authoritativeReadRefreshRuntime && len(normalizedIssueIDs) > 0 {
+		if m.authoritativeRuntimeIssueSequence == nil {
+			m.authoritativeRuntimeIssueSequence = map[string]uint64{}
+		}
+		for _, issueID := range normalizedIssueIDs {
+			m.authoritativeRuntimeIssueSequence[issueID] = *sequence
+		}
+	}
+	return authoritativeReadRefreshAttempt{sequence: *sequence, healthEpoch: m.healthEpoch, canonicalGeneration: m.canonicalGeneration, component: component, runtimeIssueIDs: normalizedIssueIDs}
 }
 
 func (m *projectReadMaterializer) finishAuthoritativeReadRefresh(attempt authoritativeReadRefreshAttempt, err error) bool {
@@ -760,6 +780,30 @@ func (m *projectReadMaterializer) finishAuthoritativeReadRefreshLocked(attempt a
 		m.aggregateHealthLocked()
 		return false
 	}
+	if attempt.component == authoritativeReadRefreshRuntime && len(attempt.runtimeIssueIDs) > 0 {
+		ownedIssueIDs := make([]string, 0, len(attempt.runtimeIssueIDs))
+		for _, issueID := range attempt.runtimeIssueIDs {
+			if m.authoritativeRuntimeIssueSequence[issueID] == attempt.sequence {
+				ownedIssueIDs = append(ownedIssueIDs, issueID)
+			}
+		}
+		if len(ownedIssueIDs) == 0 {
+			return false
+		}
+		if m.authoritativeRuntimeFailures == nil {
+			m.authoritativeRuntimeFailures = map[string]string{}
+		}
+		for _, issueID := range ownedIssueIDs {
+			if err != nil {
+				m.authoritativeRuntimeFailures[issueID] = err.Error()
+			} else {
+				delete(m.authoritativeRuntimeFailures, issueID)
+			}
+		}
+		m.syncAuthoritativeRuntimeFailureLocked()
+		m.aggregateHealthLocked()
+		return true
+	}
 	if attempt.sequence != *m.authoritativeReadRefreshSequence(attempt.component) {
 		return false
 	}
@@ -779,14 +823,42 @@ func (m *projectReadMaterializer) finishAuthoritativeReadRefreshLocked(attempt a
 	return true
 }
 
+func (m *projectReadMaterializer) syncAuthoritativeRuntimeFailureLocked() {
+	if m.authoritativeRefreshFailures == nil {
+		m.authoritativeRefreshFailures = map[authoritativeReadRefreshComponent]string{}
+	}
+	issueIDs := make([]string, 0, len(m.authoritativeRuntimeFailures))
+	for issueID := range m.authoritativeRuntimeFailures {
+		issueIDs = append(issueIDs, issueID)
+	}
+	sort.Strings(issueIDs)
+	parts := make([]string, 0, len(issueIDs))
+	for _, issueID := range issueIDs {
+		parts = append(parts, issueID+": "+m.authoritativeRuntimeFailures[issueID])
+	}
+	if len(parts) == 0 {
+		delete(m.authoritativeRefreshFailures, authoritativeReadRefreshRuntime)
+		return
+	}
+	m.authoritativeRefreshFailures[authoritativeReadRefreshRuntime] = strings.Join(parts, "; ")
+}
+
 func (m *projectReadMaterializer) runtimeRefreshAttemptSuperseded(attempt authoritativeReadRefreshAttempt) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return attempt.component == authoritativeReadRefreshRuntime &&
-		attempt.sequence != 0 &&
-		attempt.sequence < m.authoritativeRuntimeRefreshSequence &&
-		attempt.healthEpoch == m.healthEpoch &&
-		attempt.canonicalGeneration == m.canonicalGeneration
+	if attempt.component != authoritativeReadRefreshRuntime || attempt.sequence == 0 ||
+		attempt.healthEpoch != m.healthEpoch || attempt.canonicalGeneration != m.canonicalGeneration {
+		return false
+	}
+	if len(attempt.runtimeIssueIDs) == 0 {
+		return attempt.sequence < m.authoritativeRuntimeRefreshSequence
+	}
+	for _, issueID := range attempt.runtimeIssueIDs {
+		if m.authoritativeRuntimeIssueSequence[issueID] <= attempt.sequence {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *projectReadMaterializer) canonicalReadHealthAvailable() bool {
@@ -1492,7 +1564,7 @@ func (d *Daemon) refreshProjectReadRuntimeForIssues(ctx context.Context, project
 
 func (d *Daemon) refreshActiveProjectReadRuntimeForIssues(ctx context.Context, projectID string, materializer *projectReadMaterializer, issueIDs []string) error {
 	issueIDs = uniqueStrings(issueIDs)
-	attempt := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	attempt := materializer.beginAuthoritativeReadRefreshForIssues(authoritativeReadRefreshRuntime, issueIDs)
 	if err := materializer.refreshRuntime(ctx, issueIDs); err != nil {
 		materializer.finishAuthoritativeReadRefresh(attempt, err)
 		return fmt.Errorf("refresh runtime issues: %w", err)

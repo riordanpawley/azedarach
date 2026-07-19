@@ -691,6 +691,105 @@ func TestConcurrentSameIssueRuntimeRefreshCoalescesPendingOlderSync(t *testing.T
 	}
 }
 
+func TestConcurrentDisjointRuntimeRefreshFailureRetainsPerKeyHealth(t *testing.T) {
+	ctx := context.Background()
+	const (
+		projectID = "project"
+		issueA    = "issue-a"
+		issueB    = "issue-b"
+	)
+	tasks := map[string]domain.Task{
+		issueA: {ID: issueA, Title: "A", Status: domain.StatusInProgress, Type: domain.TypeTask},
+		issueB: {ID: issueB, Title: "B", Status: domain.StatusInProgress, Type: domain.TypeTask},
+	}
+	aEntered := make(chan struct{})
+	releaseA := make(chan struct{})
+	reader := newProjectReadMaterializer(projectID, nil, func(_ context.Context, hydrated []domain.Task) ([]domain.Task, error) {
+		if len(hydrated) == 1 && hydrated[0].ID.String() == issueA {
+			close(aEntered)
+			<-releaseA
+			return nil, errors.New("issue-a runtime failed")
+		}
+		return hydrated, nil
+	})
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(tasks, tasks)
+	reader.replaceBootstrap(tasks, tasks, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+	d := &Daemon{
+		cfg:                           Config{},
+		materializers:                 map[string]*projectReadMaterializer{projectID: reader},
+		projectReadUserProjectionSync: func(context.Context, string, []string) error { return nil },
+	}
+
+	aDone := make(chan error, 1)
+	go func() {
+		aDone <- d.refreshActiveProjectReadRuntimeForIssues(ctx, projectID, reader, []string{issueA})
+	}()
+	<-aEntered
+	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, projectID, reader, []string{issueB}); err != nil {
+		t.Fatalf("newer disjoint refresh: %v", err)
+	}
+	close(releaseA)
+	if err := <-aDone; err == nil || !strings.Contains(err.Error(), "issue-a runtime failed") {
+		t.Fatalf("older disjoint refresh error = %v, want issue-a failure", err)
+	}
+	if got := reader.snapshotMetadata().Health; !strings.Contains(got, "issue-a runtime failed") {
+		t.Fatalf("materializer health = %q, want disjoint issue-a failure retained", got)
+	}
+}
+
+func TestConcurrentSameIssueOlderRuntimeFailureIsSuperseded(t *testing.T) {
+	ctx := context.Background()
+	const (
+		projectID = "project"
+		issueID   = "issue"
+	)
+	task := domain.Task{ID: issueID, Title: "Issue", Status: domain.StatusInProgress, Type: domain.TypeTask}
+	firstEntered := make(chan struct{})
+	secondEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var calls atomic.Int32
+	reader := newProjectReadMaterializer(projectID, nil, func(_ context.Context, hydrated []domain.Task) ([]domain.Task, error) {
+		switch calls.Add(1) {
+		case 1:
+			close(firstEntered)
+			<-releaseFirst
+			return nil, errors.New("superseded runtime failure")
+		case 2:
+			close(secondEntered)
+		}
+		return hydrated, nil
+	})
+	tasks := map[string]domain.Task{issueID: task}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(tasks, tasks)
+	reader.replaceBootstrap(tasks, tasks, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+	d := &Daemon{
+		cfg:                           Config{},
+		materializers:                 map[string]*projectReadMaterializer{projectID: reader},
+		projectReadUserProjectionSync: func(context.Context, string, []string) error { return nil },
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- d.refreshActiveProjectReadRuntimeForIssues(ctx, projectID, reader, []string{issueID})
+	}()
+	<-firstEntered
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- d.refreshActiveProjectReadRuntimeForIssues(ctx, projectID, reader, []string{issueID})
+	}()
+	<-secondEntered
+	if err := <-secondDone; err != nil {
+		t.Fatalf("newer same-key refresh: %v", err)
+	}
+	close(releaseFirst)
+	if err := <-firstDone; err == nil || !strings.Contains(err.Error(), "superseded runtime failure") {
+		t.Fatalf("older same-key refresh error = %v, want caller-local failure", err)
+	}
+	if got := reader.snapshotMetadata().Health; got != "healthy" {
+		t.Fatalf("materializer health = %q, want superseded same-key failure suppressed", got)
+	}
+}
+
 func TestRefreshOwnedSyncFencesMutationAndStructuralHealthTransitions(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
