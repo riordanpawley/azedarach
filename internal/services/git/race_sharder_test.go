@@ -78,15 +78,19 @@ case "${FAKE_GO_SCENARIO:-success}" in
     exit 9
     ;;
   timeout)
-	"${0%/*}/fake-go-timeout-child" &
+    "${0%/*}/fake-go-timeout-child" &
     child=$!
-	signal_timeout() {
-	  printf '{"Action":"output","Output":"late-term"}\n'
-	  read -r _ <"$FAKE_GO_CHILD_TERM_FIFO"
-	  printf 'term\n' >"$FAKE_GO_TERM_FIFO"
-	  wait "$child"
-	}
-	trap signal_timeout TERM INT HUP
+    signal_timeout() {
+      trap '' TERM INT HUP
+      printf '{"Action":"output","Output":"late-term"}\n'
+      read -r _ <"$FAKE_GO_CHILD_TERM_FIFO"
+      wait "$child"
+      printf 'term-and-child-reaped\n' >"$FAKE_GO_TERM_FIFO"
+    }
+    trap signal_timeout TERM INT HUP
+    if [ -n "${FAKE_GO_PROCESS_READY_FIFO:-}" ]; then
+      printf '%s\n' "$$" >"$FAKE_GO_PROCESS_READY_FIFO"
+    fi
     wait "$child"
     ;;
 	concurrency)
@@ -104,10 +108,11 @@ esac
 signal_term() {
   printf term-ignored >"$FAKE_GO_CHILD_TERM"
   printf 'child-term\n' >"$FAKE_GO_CHILD_TERM_FIFO"
+  exit 0
 }
 trap signal_term TERM INT HUP
-if [ -n "${FAKE_GO_READY_FIFO:-}" ]; then
-  printf '%s\n' "$$" >"$FAKE_GO_READY_FIFO"
+if [ -n "${FAKE_GO_CHILD_READY_FIFO:-}" ]; then
+  printf '%s\n' "$$" >"$FAKE_GO_CHILD_READY_FIFO"
 fi
 while ! read -r _ <"$FAKE_GO_BLOCK_FIFO"; do :; done
 `
@@ -164,12 +169,95 @@ func (f *raceShardFIFO) writeLine(t *testing.T, value string) {
 func installRaceSharderTimeoutWrapper(t *testing.T, repo, timeoutPath string) {
 	t.Helper()
 	wrapper := `#!/bin/sh
+if [ -n "${AZEDARACH_DAEMON_RACE_TEST_TIMEOUT_SUPERVISOR:-}" ]; then
+  exec "$AZEDARACH_DAEMON_RACE_TEST_TIMEOUT_SUPERVISOR" -test.run '^TestRaceSharderTimeoutSupervisor$' -- "$@"
+fi
 printf '%s\n' "$$" >"$AZEDARACH_DAEMON_RACE_TEST_TIMEOUT_READY_FIFO"
 exec "$AZEDARACH_DAEMON_RACE_TEST_TIMEOUT_PATH" "$@"
 `
 	if err := os.WriteFile(filepath.Join(repo, "fake-bin", "timeout"), []byte(wrapper), 0o755); err != nil {
 		t.Fatalf("write timeout wrapper: %v", err)
 	}
+}
+
+func TestRaceSharderTimeoutSupervisor(t *testing.T) {
+	if os.Getenv("AZEDARACH_DAEMON_RACE_TEST_TIMEOUT_SUPERVISOR") == "" {
+		return
+	}
+
+	separator := -1
+	for index, arg := range os.Args {
+		if arg == "--" {
+			separator = index
+			break
+		}
+	}
+	if separator < 0 {
+		t.Fatal("timeout supervisor arguments missing separator")
+	}
+	args := os.Args[separator+1:]
+	commandIndex := -1
+	for index, arg := range args {
+		if arg == "env" {
+			commandIndex = index
+			break
+		}
+	}
+	if commandIndex < 0 {
+		t.Fatalf("timeout supervisor command missing env boundary: %v", args)
+	}
+
+	cmd := exec.Command(args[commandIndex], args[commandIndex+1:]...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start supervised timeout command: %v", err)
+	}
+	childWaited := false
+	defer func() {
+		if childWaited {
+			return
+		}
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = cmd.Wait()
+	}()
+
+	writeTestFIFO(t, os.Getenv("AZEDARACH_DAEMON_RACE_TEST_TIMEOUT_READY_FIFO"), strconv.Itoa(os.Getpid())+"\n")
+	control, err := os.Open(os.Getenv("AZEDARACH_DAEMON_RACE_TEST_TIMEOUT_CONTROL_FIFO"))
+	if err != nil {
+		t.Fatalf("open timeout supervisor control: %v", err)
+	}
+	defer control.Close()
+	reader := bufio.NewReader(control)
+	for _, phase := range []struct {
+		command string
+		signal  syscall.Signal
+	}{
+		{command: "term", signal: syscall.SIGTERM},
+		{command: "kill", signal: syscall.SIGKILL},
+	} {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatalf("read timeout supervisor %s command: %v", phase.command, readErr)
+		}
+		got := strings.TrimSpace(line)
+		if got == "kill" {
+			if signalErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); signalErr != nil {
+				t.Fatalf("force-kill timeout process group: %v", signalErr)
+			}
+			break
+		}
+		if got != phase.command {
+			t.Fatalf("timeout supervisor command = %q, want %q", got, phase.command)
+		}
+		if signalErr := syscall.Kill(-cmd.Process.Pid, phase.signal); signalErr != nil {
+			t.Fatalf("signal timeout process group with %s: %v", phase.command, signalErr)
+		}
+	}
+	_ = cmd.Wait()
+	childWaited = true
+	os.Exit(124)
 }
 
 func startRaceSharder(t *testing.T, repo, script string, extraEnv ...string) (*exec.Cmd, *strings.Builder, *strings.Builder, <-chan struct{}, *raceSharderProcessResult) {
@@ -238,11 +326,7 @@ func assertRaceSharderProcessStopped(t *testing.T, pid string) {
 		}
 		t.Fatalf("inspect shard descendant %s: %v", pid, err)
 	}
-	state := strings.TrimSpace(string(output))
-	if strings.HasPrefix(state, "Z") {
-		return
-	}
-	t.Fatalf("shard descendant %s still running after cancellation (state %q)", pid, state)
+	t.Fatalf("shard process %s was not reaped after cancellation (state %q)", pid, strings.TrimSpace(string(output)))
 }
 
 func decodeRaceShardOutput(t *testing.T, output []byte) []raceShardRecord {
@@ -417,49 +501,63 @@ func TestDaemonRaceSharderDropsIncompleteJSONRecord(t *testing.T) {
 }
 
 func TestDaemonRaceSharderAggregateTimeoutKillsDescendantsAndKeepsJSONL(t *testing.T) {
-	timeoutPath, err := exec.LookPath("timeout")
+	testBinary, err := os.Executable()
 	if err != nil {
-		timeoutPath, err = exec.LookPath("gtimeout")
-		if err != nil {
-			t.Skip("GNU timeout unavailable")
-		}
+		t.Fatalf("resolve timeout supervisor test binary: %v", err)
 	}
 	repo, script := prepareRaceSharder(t)
-	installRaceSharderTimeoutWrapper(t, repo, timeoutPath)
+	installRaceSharderTimeoutWrapper(t, repo, "")
 	termMarker := filepath.Join(repo, "child-terminated")
 	timeoutReady := newRaceShardFIFO(t, "timeout-ready")
+	timeoutControl := newRaceShardFIFO(t, "timeout-control")
+	innerReady := newRaceShardFIFO(t, "inner-ready")
+	fakeGoReady := newRaceShardFIFO(t, "fake-go-ready")
 	childReady := newRaceShardFIFO(t, "child-ready")
 	termReady := newRaceShardFIFO(t, "term-ready")
 	childTerm := newRaceShardFIFO(t, "child-term")
+	descendantsReaped := newRaceShardFIFO(t, "descendants-reaped")
 	childBlock := newRaceShardFIFO(t, "child-block")
 	_, stdout, stderr, done, result := startRaceSharder(t, repo, script,
 		"AZEDARACH_DAEMON_RACE_TIMEOUT=1h",
 		"AZEDARACH_DAEMON_RACE_KILL_AFTER=1h",
 		"AZEDARACH_DAEMON_RACE_SHARDS=1",
-		"AZEDARACH_DAEMON_RACE_TEST_TIMEOUT_PATH="+timeoutPath,
+		"AZEDARACH_DAEMON_RACE_TEST_TIMEOUT_SUPERVISOR="+testBinary,
 		"AZEDARACH_DAEMON_RACE_TEST_TIMEOUT_READY_FIFO="+timeoutReady.path,
+		"AZEDARACH_DAEMON_RACE_TEST_TIMEOUT_CONTROL_FIFO="+timeoutControl.path,
 		"FAKE_GO_SCENARIO=timeout",
 		"FAKE_GO_CHILD_TERM="+termMarker,
-		"FAKE_GO_READY_FIFO="+childReady.path,
+		"AZEDARACH_DAEMON_RACE_TEST_INNER_READY_FIFO="+innerReady.path,
+		"FAKE_GO_PROCESS_READY_FIFO="+fakeGoReady.path,
+		"FAKE_GO_CHILD_READY_FIFO="+childReady.path,
 		"FAKE_GO_TERM_FIFO="+termReady.path,
 		"FAKE_GO_CHILD_TERM_FIFO="+childTerm.path,
 		"FAKE_GO_BLOCK_FIFO="+childBlock.path,
+		"AZEDARACH_DAEMON_RACE_TEST_DESCENDANTS_REAPED_FIFO="+descendantsReaped.path,
 	)
+	t.Cleanup(func() {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		timeoutControl.writeLine(t, "kill")
+		<-done
+	})
 	timeoutPID, err := strconv.Atoi(timeoutReady.readLine(t, done, result))
 	if err != nil {
 		t.Fatalf("parse timeout supervisor PID: %v", err)
 	}
-	t.Cleanup(func() { _ = exec.Command("kill", "-KILL", "-"+strconv.Itoa(timeoutPID)).Run() })
+	innerPID := innerReady.readLine(t, done, result)
+	fakeGoPID := fakeGoReady.readLine(t, done, result)
 	childPID := childReady.readLine(t, done, result)
-	if err := syscall.Kill(timeoutPID, syscall.SIGALRM); err != nil {
-		t.Fatalf("trigger aggregate timeout: %v", err)
+	timeoutControl.writeLine(t, "term")
+	if got := termReady.readLine(t, done, result); got != "term-and-child-reaped" {
+		t.Fatalf("descendant TERM acknowledgement = %q, want term-and-child-reaped", got)
 	}
-	if got := termReady.readLine(t, done, result); got != "term" {
-		t.Fatalf("descendant TERM acknowledgement = %q, want term", got)
+	if got := descendantsReaped.readLine(t, done, result); got != "reaped" {
+		t.Fatalf("sharder descendant reap acknowledgement = %q, want reaped", got)
 	}
-	if err := syscall.Kill(timeoutPID, syscall.SIGALRM); err != nil {
-		t.Fatalf("trigger aggregate timeout escalation: %v", err)
-	}
+	timeoutControl.writeLine(t, "kill")
 	<-done
 	var exitErr *exec.ExitError
 	if !errors.As(result.err, &exitErr) || (exitErr.ExitCode() != 124 && exitErr.ExitCode() != 137) {
@@ -472,7 +570,10 @@ func TestDaemonRaceSharderAggregateTimeoutKillsDescendantsAndKeepsJSONL(t *testi
 	if _, statErr := os.Stat(termMarker); statErr != nil {
 		t.Fatalf("timeout did not signal shard descendant: %v; stderr=%q", statErr, stderr.String())
 	}
+	assertRaceSharderProcessStopped(t, fakeGoPID)
 	assertRaceSharderProcessStopped(t, childPID)
+	assertRaceSharderProcessStopped(t, innerPID)
+	assertRaceSharderProcessStopped(t, strconv.Itoa(timeoutPID))
 }
 
 func TestDaemonRaceSharderInteractiveCancelKillsSupervisedProcessGroup(t *testing.T) {
@@ -509,7 +610,7 @@ func TestDaemonRaceSharderInteractiveCancelKillsSupervisedProcessGroup(t *testin
 		"AZEDARACH_DAEMON_RACE_TEST_TERM_ACK_FIFO="+termReady.path,
 		"FAKE_GO_SCENARIO=timeout",
 		"FAKE_GO_CHILD_TERM="+termMarker,
-		"FAKE_GO_READY_FIFO="+childReady.path,
+		"FAKE_GO_CHILD_READY_FIFO="+childReady.path,
 		"FAKE_GO_TERM_FIFO="+termReady.path,
 		"FAKE_GO_CHILD_TERM_FIFO="+childTerm.path,
 		"FAKE_GO_BLOCK_FIFO="+childBlock.path,
