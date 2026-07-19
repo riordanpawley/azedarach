@@ -55,6 +55,29 @@ type recordingDaemonStarter struct {
 	specs   []daemonProcessSpec
 }
 
+func TestStartExecDaemonProcessFallsBackWhenExitObservationIsUnsupported(t *testing.T) {
+	observer := func(int) (<-chan error, error) {
+		return nil, errProcessExitObservationUnsupported
+	}
+	process, err := startExecDaemonProcessWithObserver(daemonProcessSpec{
+		command: daemonCommand{executable: "/usr/bin/true"},
+	}, observer)
+	if err != nil {
+		t.Fatalf("ordinary start error = %v, want portable Wait fallback", err)
+	}
+	if exitErr := <-process.exited(); exitErr != nil {
+		t.Fatalf("ordinary fallback exit error = %v", exitErr)
+	}
+
+	_, err = startExecDaemonProcessWithObserver(daemonProcessSpec{
+		command:                  daemonCommand{executable: "/usr/bin/true"},
+		requireGroupCleanupProof: true,
+	}, observer)
+	if err == nil || !errors.Is(err, errProcessExitObservationUnsupported) {
+		t.Fatalf("replacement start error = %v, want fail-closed unsupported observation", err)
+	}
+}
+
 func TestExecDaemonProcessStopAndWaitAcceptsProvenReapAfterKill(t *testing.T) {
 	done := make(chan error, 1)
 	process := &execDaemonProcess{
@@ -164,6 +187,8 @@ const (
 	ownedExecutableIdentityPathEnv   = "AZEDARACH_TEST_OWNED_EXECUTABLE_IDENTITY"
 	ownedExecutableControlSocketEnv  = "AZEDARACH_TEST_OWNED_EXECUTABLE_CONTROL"
 	ownedExecutableParentPIDEnv      = "AZEDARACH_TEST_OWNED_EXECUTABLE_PARENT_PID"
+	ownedExecutableDescendantEnv     = "AZEDARACH_TEST_OWNED_EXECUTABLE_DESCENDANT"
+	ownedExecutableDescendantPathEnv = "AZEDARACH_TEST_OWNED_EXECUTABLE_DESCENDANT_IDENTITY"
 	ownedExecutableHelperTestPattern = "^TestLauncherOwnedExecutableHelper$"
 )
 
@@ -199,8 +224,17 @@ func TestLauncherOwnedExecutableHelper(t *testing.T) {
 	if err != nil || os.WriteFile(os.Getenv(ownedExecutableIdentityPathEnv), record, 0o600) != nil {
 		os.Exit(23)
 	}
+	if os.Getenv(ownedExecutableDescendantEnv) == "1" {
+		parent, err := strconv.Atoi(os.Getenv("AZEDARACH_TEST_OWNED_EXECUTABLE_LEADER_PID"))
+		if err != nil || syscall.Kill(parent, syscall.SIGUSR1) != nil {
+			os.Exit(28)
+		}
+		<-parentExited
+		os.Exit(0)
+	}
 
-	switch os.Getenv(ownedExecutableModeEnv) {
+	mode := os.Getenv(ownedExecutableModeEnv)
+	switch mode {
 	case "incompatible":
 		for _, argument := range os.Args[1:] {
 			switch argument {
@@ -230,6 +264,31 @@ func TestLauncherOwnedExecutableHelper(t *testing.T) {
 		defer signal.Stop(signals)
 		select {
 		case <-signals:
+			os.Exit(0)
+		case <-parentExited:
+			os.Exit(0)
+		}
+	case "probe-descendant", "probe-descendant-failure":
+		ready := make(chan os.Signal, 1)
+		signal.Notify(ready, syscall.SIGUSR1)
+		defer signal.Stop(ready)
+		descendant := exec.Command(os.Args[0], "-test.run="+ownedExecutableHelperTestPattern, "--")
+		descendant.Env = append(os.Environ(),
+			ownedExecutableDescendantEnv+"=1",
+			ownedExecutableIdentityPathEnv+"="+os.Getenv(ownedExecutableDescendantPathEnv),
+			"AZEDARACH_TEST_OWNED_EXECUTABLE_LEADER_PID="+strconv.Itoa(os.Getpid()),
+		)
+		descendant.Stdout = nil
+		descendant.Stderr = nil
+		if err := descendant.Start(); err != nil {
+			os.Exit(29)
+		}
+		select {
+		case <-ready:
+			if mode == "probe-descendant-failure" {
+				os.Exit(31)
+			}
+			fmt.Printf("{\"daemon_version\":\"descendant-fixture\",\"min_protocol_version\":%d,\"max_protocol_version\":%d}\n", protocol.CurrentVersion, protocol.CurrentVersion)
 			os.Exit(0)
 		case <-parentExited:
 			os.Exit(0)
@@ -731,6 +790,35 @@ func TestPreflightRollbackVersionProbeOwnsAndReapsIncompatibleHelper(t *testing.
 		t.Fatalf("preflightPredecessorRollbackCommand() error = %v", err)
 	}
 	assertOwnedExecutableRetired(t, identityPath)
+}
+
+func TestPreflightProbeReapsDescendantThatClosesStdio(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		mode    string
+		wantErr bool
+	}{
+		{name: "successful probe", mode: "probe-descendant"},
+		{name: "failed probe", mode: "probe-descendant-failure", wantErr: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			executable := filepath.Join(t.TempDir(), "descendant-probe-azd")
+			writeOwnedExecutableWrapper(t, executable)
+			identityPath := configureOwnedExecutableHelper(t, testCase.mode)
+			descendantIdentityPath := filepath.Join(t.TempDir(), "descendant-identity.json")
+			t.Setenv(ownedExecutableDescendantPathEnv, descendantIdentityPath)
+
+			err := preflightReplacementCommand(context.Background(), daemonCommand{executable: executable})
+			if testCase.wantErr && err == nil {
+				t.Fatal("preflightReplacementCommand() error = nil, want failed probe")
+			}
+			if !testCase.wantErr && err != nil {
+				t.Fatalf("preflightReplacementCommand() error = %v", err)
+			}
+			assertOwnedExecutableRetired(t, identityPath)
+			assertOwnedExecutableRetired(t, descendantIdentityPath)
+		})
+	}
 }
 
 func TestLauncherReplaceRemovesInactiveRollbackStageOnPreShutdownAbort(t *testing.T) {
@@ -1718,6 +1806,131 @@ func TestLauncherScopedCandidateValidationOwnsAndReapsHelper(t *testing.T) {
 	}
 	if _, err := os.Stat(stageDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("scoped validation candidate stage stat error = %v, want removed", err)
+	}
+}
+
+func TestLauncherSuccessiveScopedReplacementRetiresPreviousCandidateStage(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	t.Setenv("AZEDARACH_DAEMON_BIN", "")
+	repoDir := writeScopedSourceFallbackDaemon(t)
+	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return &trackingWriteCloser{}, nil }
+	previousStage, previousExecutable, err := launcher.newScopedExecutableStage("candidate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	testBinary, err := os.ReadFile(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(previousExecutable, testBinary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	predecessor := startLingeringDaemonProcessWith(
+		t,
+		launcher,
+		previousExecutable,
+		"",
+		[]string{"--", "--repo", launcher.RepoDir, "--socket", launcher.SocketPath, "--lock", launcher.LockPath},
+	)
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		if err := predecessor.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			return err
+		}
+		predecessor.awaitShutdown(t)
+		predecessor.release()
+		return nil
+	}
+	ready := false
+	launcher.waitForReady = func(context.Context, string) error {
+		if ready {
+			return nil
+		}
+		return context.DeadlineExceeded
+	}
+	var successor daemonCommand
+	launcher.startProcess = func(spec daemonProcessSpec) (daemonProcess, error) {
+		successor = spec.command
+		ready = true
+		return &recordingDaemonProcess{exitCh: make(chan error)}, nil
+	}
+	launcher.replacementSuccessorVerifier = func(daemonCommand) error { return nil }
+
+	if err := launcher.Replace(context.Background()); err != nil {
+		t.Fatalf("second Replace() error = %v", err)
+	}
+	if _, err := os.Stat(previousStage); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("previous active candidate stage stat error = %v, want retired after successor convergence", err)
+	}
+	if successor.candidateStage == "" {
+		t.Fatal("second replacement did not carry candidate stage ownership")
+	}
+	if _, err := os.Stat(successor.candidateStage); err != nil {
+		t.Fatalf("current active candidate stage stat error = %v, want retained", err)
+	}
+}
+
+func TestLauncherScopedRollbackConvergenceRetiresPreviousCandidateStage(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	repoDir := newLauncherTestWorktree(t)
+	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return &trackingWriteCloser{}, nil }
+	previousStage, previousExecutable, err := launcher.newScopedExecutableStage("candidate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollbackStage, rollbackExecutable, err := launcher.newScopedExecutableStage("predecessor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, executable := range []string{previousExecutable, rollbackExecutable} {
+		if err := os.WriteFile(executable, []byte("fixture"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resolvedPreviousStage, err := filepath.EvalSymlinks(previousStage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(t.TempDir(), "candidate-azd")
+	if err := os.WriteFile(candidate, []byte("fixture"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ready := false
+	launcher.waitForReady = func(context.Context, string) error {
+		if ready {
+			return nil
+		}
+		return context.DeadlineExceeded
+	}
+	launcher.startProcess = func(spec daemonProcessSpec) (daemonProcess, error) {
+		if spec.command.executable == candidate {
+			return nil, errors.New("candidate start rejected")
+		}
+		if spec.command.executable != rollbackExecutable {
+			return nil, fmt.Errorf("unexpected rollback executable %s", spec.command.executable)
+		}
+		ready = true
+		return &recordingDaemonProcess{exitCh: make(chan error)}, nil
+	}
+	launcher.replacementSuccessorVerifier = func(daemonCommand) error { return nil }
+	predecessorCmd := daemonCommand{
+		executable:              rollbackExecutable,
+		rollbackStage:           rollbackStage,
+		retiredPredecessorStage: resolvedPreviousStage,
+	}
+
+	err = launcher.startReplacementWithRollback(context.Background(), daemonCommand{executable: candidate}, predecessorCmd, true)
+	if err == nil || !strings.Contains(err.Error(), "restored predecessor") {
+		t.Fatalf("startReplacementWithRollback() error = %v, want rollback convergence", err)
+	}
+	if _, err := os.Stat(previousStage); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("previous candidate stage stat error = %v, want retired after rollback convergence", err)
+	}
+	if _, err := os.Stat(rollbackStage); err != nil {
+		t.Fatalf("active rollback stage stat error = %v, want retained", err)
 	}
 }
 

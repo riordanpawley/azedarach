@@ -61,13 +61,14 @@ type Launcher struct {
 }
 
 type daemonCommand struct {
-	executable     string
-	args           []string
-	dir            string
-	env            []string
-	sourceFallback bool
-	candidateStage string
-	rollbackStage  string
+	executable              string
+	args                    []string
+	dir                     string
+	env                     []string
+	sourceFallback          bool
+	candidateStage          string
+	rollbackStage           string
+	retiredPredecessorStage string
 }
 
 type boundedOutput struct {
@@ -87,10 +88,11 @@ func (b *boundedOutput) Write(p []byte) (int, error) {
 }
 
 type daemonProcessSpec struct {
-	command daemonCommand
-	args    []string
-	stdout  io.Writer
-	stderr  io.Writer
+	command                  daemonCommand
+	args                     []string
+	stdout                   io.Writer
+	stderr                   io.Writer
+	requireGroupCleanupProof bool
 }
 
 type daemonProcess interface {
@@ -116,10 +118,15 @@ type execDaemonProcess struct {
 var errSpawnedDaemonExited = errors.New("spawned daemon process exited before readiness")
 var errPairedDaemonUnavailable = errors.New("paired daemon executable unavailable")
 var errReplacementCandidateCleanupUnproven = errors.New("exact rejected replacement candidate cleanup was not proven")
+var errProcessExitObservationUnsupported = errors.New("kernel-bound non-reaping process exit observation is unsupported")
 
 var currentExecutable = os.Executable
 
 func startExecDaemonProcess(spec daemonProcessSpec) (daemonProcess, error) {
+	return startExecDaemonProcessWithObserver(spec, observePlatformProcessExit)
+}
+
+func startExecDaemonProcessWithObserver(spec daemonProcessSpec, observe func(int) (<-chan error, error)) (daemonProcess, error) {
 	cmd := exec.Command(spec.command.executable, spec.args...)
 	if strings.TrimSpace(spec.command.dir) != "" {
 		cmd.Dir = spec.command.dir
@@ -133,8 +140,19 @@ func startExecDaemonProcess(spec daemonProcessSpec) (daemonProcess, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	exitObserved, err := observePlatformProcessExit(cmd.Process.Pid)
+	exitObserved, err := observe(cmd.Process.Pid)
 	if err != nil {
+		if errors.Is(err, errProcessExitObservationUnsupported) && !spec.requireGroupCleanupProof {
+			process := &execDaemonProcess{
+				cmd:  cmd,
+				done: make(chan error, 1),
+				signalProcessGroup: func(signal syscall.Signal) error {
+					return syscall.Kill(-cmd.Process.Pid, signal)
+				},
+			}
+			go func() { process.done <- cmd.Wait() }()
+			return process, nil
+		}
 		// The leader has not been reaped, so its PID still reserves the process
 		// group ID and makes this numeric group signal safe. Fail the launch
 		// closed rather than running without an exit-observation fence.
@@ -518,7 +536,7 @@ func (l *Launcher) startWithLifecycleLock(ctx context.Context, daemonCmd daemonC
 }
 
 func (l *Launcher) startWithLifecycleLockMode(ctx context.Context, daemonCmd daemonCommand, allowUnreadyOwnerRecovery bool) error {
-	process, err := l.startWithLifecycleLockModeRetained(ctx, daemonCmd, allowUnreadyOwnerRecovery)
+	process, err := l.startWithLifecycleLockModeRetained(ctx, daemonCmd, allowUnreadyOwnerRecovery, false)
 	if err != nil && process != nil {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		cleanupErr := process.stopAndWait(cleanupCtx)
@@ -540,7 +558,7 @@ func (l *Launcher) startWithLifecycleLockMode(ctx context.Context, daemonCmd dae
 // this call spawned the daemon. Replacement keeps that handle until runtime
 // identity verification finishes, so a rejected candidate can be cleaned up
 // without addressing whichever process later owns the shared lock or socket.
-func (l *Launcher) startWithLifecycleLockModeRetained(ctx context.Context, daemonCmd daemonCommand, allowUnreadyOwnerRecovery bool) (daemonProcess, error) {
+func (l *Launcher) startWithLifecycleLockModeRetained(ctx context.Context, daemonCmd daemonCommand, allowUnreadyOwnerRecovery, requireGroupCleanupProof bool) (daemonProcess, error) {
 	// Re-check after acquiring start lock to avoid duplicate spawns from racing
 	// clients.
 	if err := l.waitForSocketReadyWithin(500 * time.Millisecond); err == nil {
@@ -613,10 +631,11 @@ func (l *Launcher) startWithLifecycleLockModeRetained(ctx context.Context, daemo
 		startProcess = startExecDaemonProcess
 	}
 	process, err := startProcess(daemonProcessSpec{
-		command: daemonCmd,
-		args:    args,
-		stdout:  logFile,
-		stderr:  logFile,
+		command:                  daemonCmd,
+		args:                     args,
+		stdout:                   logFile,
+		stderr:                   logFile,
+		requireGroupCleanupProof: requireGroupCleanupProof,
 	})
 	if err != nil {
 		spanErr = err
@@ -1001,7 +1020,7 @@ func (l *Launcher) logPredecessorReapStage(action, stage, outcome string) {
 }
 
 func (l *Launcher) startReplacementWithLifecycleLock(ctx context.Context, daemonCmd daemonCommand) error {
-	process, err := l.startWithLifecycleLockModeRetained(ctx, daemonCmd, false)
+	process, err := l.startWithLifecycleLockModeRetained(ctx, daemonCmd, false, true)
 	if err == nil && (l.startProcess == nil || l.replacementSuccessorVerifier != nil) {
 		verifySuccessor := l.replacementSuccessorVerifier
 		if verifySuccessor == nil {
@@ -1277,6 +1296,7 @@ func (l *Launcher) resolvePredecessorRollbackCommand(owner processIdentity, owne
 	if err := l.verifyCanonicalDaemonArguments(owner, "predecessor"); err != nil {
 		return daemonCommand{}, false, err
 	}
+	retiredPredecessorStage, _ := l.scopedCandidateStage(owner.executable)
 	stagedExecutable, err := l.stagePredecessorExecutableCopy(owner, "predecessor")
 	if err != nil {
 		return daemonCommand{}, false, err
@@ -1284,7 +1304,28 @@ func (l *Launcher) resolvePredecessorRollbackCommand(owner processIdentity, owne
 	resolvedExecutable = stagedExecutable
 	command := l.commandForExecutable(resolvedExecutable)
 	command.rollbackStage = filepath.Dir(resolvedExecutable)
+	command.retiredPredecessorStage = retiredPredecessorStage
 	return command, true, nil
+}
+
+func (l *Launcher) scopedCandidateStage(executable string) (string, bool) {
+	if !config.UseScopedDaemonRuntimeFor(l.RepoDir) {
+		return "", false
+	}
+	resolvedExecutable, err := filepath.EvalSymlinks(strings.TrimSpace(executable))
+	if err != nil || filepath.Base(resolvedExecutable) != "azd" {
+		return "", false
+	}
+	stageDir := filepath.Clean(filepath.Dir(resolvedExecutable))
+	executableRoot := filepath.Join(config.ScopedDaemonRuntimeDir(l.RepoDir), "executables")
+	resolvedRoot, err := filepath.EvalSymlinks(executableRoot)
+	if err != nil {
+		return "", false
+	}
+	if filepath.Clean(filepath.Dir(stageDir)) != filepath.Clean(resolvedRoot) || !strings.HasPrefix(filepath.Base(stageDir), "candidate-") {
+		return "", false
+	}
+	return stageDir, true
 }
 
 func (l *Launcher) cleanupInactiveRollbackStage(command daemonCommand) error {
@@ -1304,6 +1345,9 @@ func (l *Launcher) cleanupInactiveRollbackStage(command daemonCommand) error {
 		}
 	case strings.HasPrefix(base, "predecessor-"):
 		executableRoot := filepath.Clean(filepath.Join(config.ScopedDaemonRuntimeDir(l.RepoDir), "executables"))
+		if resolvedRoot, err := filepath.EvalSymlinks(executableRoot); err == nil {
+			executableRoot = filepath.Clean(resolvedRoot)
+		}
 		if filepath.Clean(filepath.Dir(stageDir)) != executableRoot {
 			return fmt.Errorf("refuse rollback cleanup outside the scoped executable root: %s", stageDir)
 		}
@@ -1333,6 +1377,25 @@ func (l *Launcher) cleanupInactiveCandidateStage(command daemonCommand) error {
 	}
 	if err := os.RemoveAll(stageDir); err != nil {
 		return fmt.Errorf("remove inactive daemon replacement candidate stage: %w", err)
+	}
+	return nil
+}
+
+func (l *Launcher) cleanupRetiredPredecessorStage(command daemonCommand) error {
+	stageDir := filepath.Clean(strings.TrimSpace(command.retiredPredecessorStage))
+	if stageDir == "." || stageDir == "" {
+		return nil
+	}
+	executableRoot := filepath.Join(config.ScopedDaemonRuntimeDir(l.RepoDir), "executables")
+	resolvedRoot, err := filepath.EvalSymlinks(executableRoot)
+	if err != nil {
+		return fmt.Errorf("resolve scoped executable root for retired predecessor cleanup: %w", err)
+	}
+	if filepath.Clean(filepath.Dir(stageDir)) != filepath.Clean(resolvedRoot) || !strings.HasPrefix(filepath.Base(stageDir), "candidate-") {
+		return fmt.Errorf("refuse retired predecessor cleanup outside the scoped executable root: %s", stageDir)
+	}
+	if err := os.RemoveAll(stageDir); err != nil {
+		return fmt.Errorf("remove retired daemon predecessor candidate stage: %w", err)
 	}
 	return nil
 }
@@ -1582,7 +1645,7 @@ func (l *Launcher) verifyCanonicalDaemonArguments(identity processIdentity, labe
 func (l *Launcher) startReplacementWithRollback(ctx context.Context, daemonCmd, predecessorCmd daemonCommand, predecessorPresent bool) error {
 	startErr := l.startReplacementWithLifecycleLock(ctx, daemonCmd)
 	if startErr == nil {
-		return l.cleanupInactiveRollbackStage(predecessorCmd)
+		return errors.Join(l.cleanupInactiveRollbackStage(predecessorCmd), l.cleanupRetiredPredecessorStage(predecessorCmd))
 	}
 	if errors.Is(startErr, errReplacementCandidateCleanupUnproven) {
 		return fmt.Errorf("start replacement daemon: %w; refusing predecessor restore while rejected candidate cleanup is unproven", startErr)
@@ -1596,7 +1659,8 @@ func (l *Launcher) startReplacementWithRollback(ctx context.Context, daemonCmd, 
 	if rollbackErr := l.startReplacementWithLifecycleLock(rollbackCtx, predecessorCmd); rollbackErr != nil {
 		return fmt.Errorf("start replacement daemon: %w; restore predecessor %s: %v", startErr, predecessorCmd.displayName(), rollbackErr)
 	}
-	return fmt.Errorf("start replacement daemon: %w; restored predecessor %s", startErr, predecessorCmd.displayName())
+	retiredCleanupErr := l.cleanupRetiredPredecessorStage(predecessorCmd)
+	return errors.Join(fmt.Errorf("start replacement daemon: %w; restored predecessor %s", startErr, predecessorCmd.displayName()), retiredCleanupErr)
 }
 
 func preflightReplacementCommand(ctx context.Context, command daemonCommand) error {
@@ -1648,11 +1712,73 @@ func runDaemonExecutableProbe(ctx context.Context, command daemonCommand, probeF
 	stderr := boundedOutput{remaining: 64 << 10}
 	probe.Stdout = &stdout
 	probe.Stderr = &stderr
-	err := probe.Run()
-	if err != nil {
+	if err := probe.Start(); err != nil {
 		return stdout.String(), stderr.String(), err
 	}
-	return stdout.String(), stderr.String(), nil
+	pid := probe.Process.Pid
+	exitObserved, observeErr := observePlatformProcessExit(pid)
+	if observeErr != nil {
+		killErr := syscall.Kill(-pid, syscall.SIGKILL)
+		waitErr := probe.Wait()
+		proofCtx, proofCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		groupErr := waitForNumericProcessGroupExit(proofCtx, pid)
+		proofCancel()
+		return stdout.String(), stderr.String(), fmt.Errorf("establish probe process-group exit observation: %w (cleanup: %v)", observeErr, errors.Join(ignoreAbsentProcessGroupSignal(killErr), waitErr, groupErr))
+	}
+	var observationErr error
+	select {
+	case observationErr = <-exitObserved:
+	case <-ctx.Done():
+		if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			observationErr = errors.Join(ctx.Err(), fmt.Errorf("cancel daemon executable probe group %d: %w", pid, err))
+		} else {
+			observationErr = ctx.Err()
+		}
+		observationErr = errors.Join(observationErr, <-exitObserved)
+	}
+	// The exited-but-unreaped leader still reserves its numeric PGID. Signal the
+	// exact group before Wait releases that reservation, then reap the leader and
+	// use group-zero probes only as disappearance evidence.
+	killErr := ignoreAbsentProcessGroupSignal(syscall.Kill(-pid, syscall.SIGKILL))
+	waitErr := probe.Wait()
+	proofCtx, proofCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	groupErr := waitForNumericProcessGroupExit(proofCtx, pid)
+	proofCancel()
+	err := errors.Join(observationErr, killErr, waitErr, groupErr)
+	return stdout.String(), stderr.String(), err
+}
+
+func ignoreNoSuchProcess(err error) error {
+	if errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	return err
+}
+
+func ignoreAbsentProcessGroupSignal(err error) error {
+	if errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EPERM) {
+		return nil
+	}
+	return err
+}
+
+func waitForNumericProcessGroupExit(ctx context.Context, pid int) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		err := syscall.Kill(-pid, 0)
+		switch {
+		case errors.Is(err, syscall.ESRCH):
+			return nil
+		case err != nil && !errors.Is(err, syscall.EPERM):
+			return fmt.Errorf("inspect daemon executable probe process group %d: %w", pid, err)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("prove daemon executable probe process group %d disappeared: %w", pid, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func resolveCommandExecutable(command daemonCommand) (string, error) {

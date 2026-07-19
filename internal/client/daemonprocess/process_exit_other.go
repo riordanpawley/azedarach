@@ -5,5 +5,5 @@ package daemonprocess
 import "fmt"
 
 func observePlatformProcessExit(pid int) (<-chan error, error) {
-	return nil, fmt.Errorf("kernel-bound non-reaping process exit observation is unsupported for pid %d", pid)
+	return nil, fmt.Errorf("%w for pid %d", errProcessExitObservationUnsupported, pid)
 }
