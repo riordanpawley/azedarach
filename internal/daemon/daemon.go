@@ -188,6 +188,7 @@ type Daemon struct {
 	sessionShellRun                      func(context.Context, string, string, string, []string) ([]byte, error)
 	runtimeReconciler                    runtimeReconciler
 	runtimeReconcileQueue                *reconcileQueue[protocol.RuntimeReconcileResponseBody]
+	runtimeReconcileWorkContext          func(context.Context, time.Duration) (context.Context, context.CancelFunc)
 	gitStatusRefreshQueue                *reconcileQueue[*git.GitStatus]
 	runtimeReconcileThrottle             *reconcileThrottle
 	worktreeGitProbeThrottle             *reconcileThrottle

@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1044,6 +1045,77 @@ func TestCommandRuntimeReconcileRetriesQueuedWhenDedupedBackgroundTimesOut(t *te
 	}
 	if !errors.Is(outcome.Err, context.DeadlineExceeded) {
 		t.Fatalf("background outcome error = %v, want context deadline exceeded", outcome.Err)
+	}
+}
+
+func TestBackgroundRuntimeReconcileDeadlineStartsWhenQueuedWorkBegins(t *testing.T) {
+	queue := newReconcileQueue[protocol.RuntimeReconcileResponseBody](reconcileQueueConfig{
+		Name:    "runtime_reconcile_deadline_start_test",
+		Workers: 1,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	t.Cleanup(func() { _ = queue.Close() })
+
+	busyStarted := make(chan struct{})
+	releaseBusy := make(chan struct{})
+	busy, err := queue.Enqueue(reconcileQueueRequest[protocol.RuntimeReconcileResponseBody]{
+		Key:      "busy",
+		Priority: reconcilePriorityManual,
+		Work: func(context.Context) (protocol.RuntimeReconcileResponseBody, error) {
+			close(busyStarted)
+			<-releaseBusy
+			return protocol.RuntimeReconcileResponseBody{ProjectID: "busy"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("enqueue busy reconcile: %v", err)
+	}
+	<-busyStarted
+
+	deadlineStarted := make(chan struct{})
+	var deadlineCalls atomic.Int32
+	wantTimeout := 37 * time.Second
+	d := &Daemon{
+		cfg: Config{
+			Logger:                  slog.New(slog.NewTextHandler(io.Discard, nil)),
+			RuntimeReconcileTimeout: wantTimeout,
+		},
+		runtimeReconciler:     &runtimeReconcileRecorder{},
+		runtimeReconcileQueue: queue,
+		runtimeReconcileWorkContext: func(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+			if timeout != wantTimeout {
+				t.Errorf("runtime reconcile timeout = %s, want %s", timeout, wantTimeout)
+			}
+			deadlineCalls.Add(1)
+			close(deadlineStarted)
+			return context.WithCancel(parent)
+		},
+	}
+	background, err := d.queueRuntimeReconcile(context.Background(), "later", reconcilePriorityBackground, "periodic")
+	if err != nil {
+		t.Fatalf("queue background reconcile: %v", err)
+	}
+	if got := deadlineCalls.Load(); got != 0 {
+		t.Fatalf("background deadline started while work was pending: calls=%d", got)
+	}
+	if snapshot := queue.snapshot(); len(snapshot.Pending) != 1 || snapshot.Pending[0] != "later" {
+		t.Fatalf("pending reconciles = %v, want [later]", snapshot.Pending)
+	}
+
+	close(releaseBusy)
+	<-deadlineStarted
+	if _, err := busy.Wait(context.Background()); err != nil {
+		t.Fatalf("wait busy reconcile: %v", err)
+	}
+	result, err := background.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("wait background reconcile: %v", err)
+	}
+	if result.Err != nil {
+		t.Fatalf("background reconcile: %v", result.Err)
+	}
+	if got := deadlineCalls.Load(); got != 1 {
+		t.Fatalf("background deadline calls = %d, want 1", got)
 	}
 }
 

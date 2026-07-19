@@ -451,6 +451,19 @@ func (d *Daemon) queueRuntimeReconcile(ctx context.Context, projectID string, pr
 		Reason:      reason,
 		ExecContext: ctx,
 		Work: func(workCtx context.Context) (protocol.RuntimeReconcileResponseBody, error) {
+			if priority <= reconcilePriorityBackground {
+				timeout := d.runtimeReconcileTimeout()
+				if timeout <= 0 {
+					timeout = defaultRuntimeReconcileTimeout
+				}
+				withTimeout := d.runtimeReconcileWorkContext
+				if withTimeout == nil {
+					withTimeout = context.WithTimeout
+				}
+				var cancel context.CancelFunc
+				workCtx, cancel = withTimeout(workCtx, timeout)
+				defer cancel()
+			}
 			workCtx = context.WithValue(workCtx, runtimeReconcileRequestContextKey{}, runtimeReconcileRequestContext{
 				Priority: priority,
 				Reason:   reason,
@@ -775,14 +788,9 @@ func (d *Daemon) runRuntimeReconcileCycle(ctx context.Context) {
 	if d == nil {
 		return
 	}
-	timeout := d.runtimeReconcileTimeout()
-	if timeout <= 0 {
-		timeout = defaultRuntimeReconcileTimeout
-	}
-	reconcileCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	results, metrics, err := d.runRuntimeReconcileSweepWithPriority(reconcileCtx, reconcilePriorityBackground, "periodic")
+	// Each queued project owns its deadline. A single slow project must not
+	// expire every other project in the periodic sweep.
+	results, metrics, err := d.runRuntimeReconcileSweepWithPriority(ctx, reconcilePriorityBackground, "periodic")
 	result := summarizeRuntimeReconcileSweep(results)
 	projectCount := len(results)
 	if projectCount == 0 {

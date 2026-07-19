@@ -422,12 +422,17 @@ func (w *daemonRuntimeProjectionWriter) ReplaceWorktreeProjectionSnapshot(ctx co
 	}
 	persistStartedAt := time.Now()
 	previous, err := store.ListWorktreeStates(ctx, projectID)
+	unchanged := err == nil && sameWorktreeProjectionIdentity(previous, rows)
 	if err == nil {
-		err = store.ReplaceWorktreeStates(ctx, projectID, rows)
+		if unchanged {
+			err = store.TouchWorktreeStates(ctx, projectID, latestWorktreeObservation(rows))
+		} else {
+			err = store.ReplaceWorktreeStates(ctx, projectID, rows)
+		}
 	}
 	unlock()
 	w.logPhase(ctx, projectID, operation, "persist", persistStartedAt, err)
-	if err == nil {
+	if err == nil && !unchanged {
 		issueIDs := make([]string, 0, len(previous)+len(rows))
 		for _, row := range previous {
 			issueIDs = append(issueIDs, row.IssueID)
@@ -440,6 +445,52 @@ func (w *daemonRuntimeProjectionWriter) ReplaceWorktreeProjectionSnapshot(ctx co
 		w.logPhase(ctx, projectID, operation, "refresh", refreshStartedAt, nil)
 	}
 	return err
+}
+
+func sameWorktreeProjectionIdentity(left, right []daemonstate.WorktreeState) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	identities := make(map[string]struct {
+		path   string
+		branch string
+	}, len(left))
+	for _, row := range left {
+		issueID := strings.TrimSpace(row.IssueID)
+		if issueID == "" {
+			return false
+		}
+		identities[issueID] = struct {
+			path   string
+			branch string
+		}{path: row.Path, branch: row.Branch}
+	}
+	if len(identities) != len(right) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(right))
+	for _, row := range right {
+		issueID := strings.TrimSpace(row.IssueID)
+		if _, duplicate := seen[issueID]; duplicate {
+			return false
+		}
+		seen[issueID] = struct{}{}
+		identity, ok := identities[issueID]
+		if !ok || identity.path != row.Path || identity.branch != row.Branch {
+			return false
+		}
+	}
+	return true
+}
+
+func latestWorktreeObservation(rows []daemonstate.WorktreeState) time.Time {
+	var latest time.Time
+	for _, row := range rows {
+		if row.UpdatedAt.After(latest) {
+			latest = row.UpdatedAt
+		}
+	}
+	return latest
 }
 
 func (w *daemonRuntimeProjectionWriter) PersistGitStatusProjectionAndPublish(
@@ -516,6 +567,9 @@ func (w *daemonRuntimeProjectionWriter) PersistGitStatusProjectionAndPublish(
 	w.logPhase(ctx, projectID, operation, "persist", persistStartedAt, persistErr)
 	if !persisted {
 		return 0, persistErr
+	}
+	if !changed && !forcePublish {
+		return 0, nil
 	}
 	refreshStartedAt := time.Now()
 	w.d.refreshProjectReadRuntime(ctx, projectID, projection.IssueID)

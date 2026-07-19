@@ -560,10 +560,135 @@ func TestRefreshOwnedSyncAuthorizationMatrix(t *testing.T) {
 		reader := newReader()
 		older := reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
 		reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
-		if authorized(reader, older) {
-			t.Fatal("superseded runtime sequence was authorized")
+		if !authorized(reader, older) {
+			t.Fatal("healthy disjoint runtime refresh was rejected by project-global sequence")
 		}
 	})
+}
+
+func TestConcurrentDisjointRuntimeRefreshesBothSyncUserProjection(t *testing.T) {
+	ctx := context.Background()
+	const (
+		projectID = "project"
+		issueA    = "issue-a"
+		issueB    = "issue-b"
+	)
+	tasks := map[string]domain.Task{
+		issueA: {ID: issueA, Title: "A", Status: domain.StatusInProgress, Type: domain.TypeTask},
+		issueB: {ID: issueB, Title: "B", Status: domain.StatusInProgress, Type: domain.TypeTask},
+	}
+	aEntered := make(chan struct{})
+	releaseA := make(chan struct{})
+	reader := newProjectReadMaterializer(projectID, nil, func(_ context.Context, hydrated []domain.Task) ([]domain.Task, error) {
+		if len(hydrated) == 1 && hydrated[0].ID.String() == issueA {
+			close(aEntered)
+			<-releaseA
+		}
+		return hydrated, nil
+	})
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(tasks, tasks)
+	reader.replaceBootstrap(tasks, tasks, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+
+	var (
+		syncMu sync.Mutex
+		synced []string
+	)
+	d := &Daemon{
+		cfg:           Config{},
+		materializers: map[string]*projectReadMaterializer{projectID: reader},
+		projectReadUserProjectionSync: func(_ context.Context, _ string, issueIDs []string) error {
+			syncMu.Lock()
+			synced = append(synced, issueIDs...)
+			syncMu.Unlock()
+			return nil
+		},
+	}
+
+	aDone := make(chan error, 1)
+	go func() {
+		aDone <- d.refreshActiveProjectReadRuntimeForIssues(ctx, projectID, reader, []string{issueA})
+	}()
+	<-aEntered
+	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, projectID, reader, []string{issueB}); err != nil {
+		t.Fatalf("newer disjoint refresh: %v", err)
+	}
+	close(releaseA)
+	if err := <-aDone; err != nil {
+		t.Fatalf("older disjoint refresh: %v", err)
+	}
+
+	syncMu.Lock()
+	defer syncMu.Unlock()
+	slices.Sort(synced)
+	if !slices.Equal(synced, []string{issueA, issueB}) {
+		t.Fatalf("synced issues = %v, want both disjoint updates", synced)
+	}
+	if got := reader.snapshotMetadata().Health; got != "healthy" {
+		t.Fatalf("materializer health = %q, want healthy", got)
+	}
+}
+
+func TestConcurrentSameIssueRuntimeRefreshCoalescesPendingOlderSync(t *testing.T) {
+	ctx := context.Background()
+	const (
+		projectID = "project"
+		issueID   = "issue"
+	)
+	task := domain.Task{ID: issueID, Title: "Issue", Status: domain.StatusInProgress, Type: domain.TypeTask}
+	firstEntered, secondEntered := make(chan struct{}), make(chan struct{})
+	releaseFirst, releaseSecond := make(chan struct{}), make(chan struct{})
+	var hydrateCalls atomic.Int32
+	reader := newProjectReadMaterializer(projectID, nil, func(_ context.Context, hydrated []domain.Task) ([]domain.Task, error) {
+		switch hydrateCalls.Add(1) {
+		case 1:
+			close(firstEntered)
+			<-releaseFirst
+		case 2:
+			close(secondEntered)
+			<-releaseSecond
+		}
+		return hydrated, nil
+	})
+	tasks := map[string]domain.Task{issueID: task}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(tasks, tasks)
+	reader.replaceBootstrap(tasks, tasks, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+
+	var syncCalls atomic.Int32
+	d := &Daemon{
+		cfg:           Config{},
+		materializers: map[string]*projectReadMaterializer{projectID: reader},
+		projectReadUserProjectionSync: func(context.Context, string, []string) error {
+			syncCalls.Add(1)
+			return nil
+		},
+	}
+
+	firstDone, secondDone := make(chan error, 1), make(chan error, 1)
+	go func() {
+		firstDone <- d.refreshActiveProjectReadRuntimeForIssues(ctx, projectID, reader, []string{issueID})
+	}()
+	<-firstEntered
+	go func() {
+		secondDone <- d.refreshActiveProjectReadRuntimeForIssues(ctx, projectID, reader, []string{issueID})
+	}()
+	<-secondEntered
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("coalesced older refresh: %v", err)
+	}
+	if got := syncCalls.Load(); got != 0 {
+		t.Fatalf("older refresh synced while newer owner was pending: calls=%d", got)
+	}
+	close(releaseSecond)
+	if err := <-secondDone; err != nil {
+		t.Fatalf("newer refresh: %v", err)
+	}
+	if got := syncCalls.Load(); got != 1 {
+		t.Fatalf("user projection sync calls = %d, want one coalesced sync", got)
+	}
+	if got := reader.snapshotMetadata().Health; got != "healthy" {
+		t.Fatalf("materializer health = %q, want healthy", got)
+	}
 }
 
 func TestRefreshOwnedSyncFencesMutationAndStructuralHealthTransitions(t *testing.T) {
