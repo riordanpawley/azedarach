@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 const (
@@ -509,6 +511,14 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 		Status:        CandidateValidationRunning,
 		Canonical:     false,
 	}
+	if ticketID, ticketScoped := ctx.Value(candidateValidationTicketKey{}).(naming.TicketID); ticketScoped {
+		if _, err := naming.ParseTicketID(ticketID.String()); err != nil {
+			attempt.Status = CandidateValidationFailed
+			attempt.Message = "ticket-scoped candidate validation requires a valid durable ticket identity"
+			notifyCandidateValidation(ctx, attempt)
+			return attempt, true, fmt.Errorf("%s: %w", attempt.Message, err)
+		}
+	}
 	if configuredCommand == "" {
 		if _, err := os.Stat(gatePath); err != nil {
 			if os.IsNotExist(err) {
@@ -571,6 +581,7 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 		"AZEDARACH_MERGE_GATE_BODY=" + filepath.Join(gateRoot, "scripts", "git-merge-rebase-gate-body.sh"),
 		"AZEDARACH_SKIP_MERGE_REBASE_GATE=0",
 	})
+	env = candidateValidationTicketEnv(env, ctx)
 	var stdout, stderr string
 	var runErr error
 	if configuredCommand != "" {
@@ -645,6 +656,32 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 	// reusing completed evidence instead of executing the same gate again.
 	notifyCandidateValidation(ctx, attempt)
 	return attempt, true, nil
+}
+
+func candidateValidationTicketEnv(env []string, ctx context.Context) []string {
+	filtered := make([]string, 0, len(env)+2)
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && (key == "AZEDARACH_TICKET_ID" || key == "AZEDARACH_ISSUE_ID") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	ticketID, ticketScoped := ctx.Value(candidateValidationTicketKey{}).(naming.TicketID)
+	if !ticketScoped {
+		return filtered
+	}
+	identity := strings.TrimSpace(ticketID.String())
+	if identity == "" {
+		return gitEnvWithOverrides(filtered, []string{
+			"AZEDARACH_TICKET_ID=",
+			"AZEDARACH_ISSUE_ID=",
+		})
+	}
+	return gitEnvWithOverrides(filtered, []string{
+		"AZEDARACH_TICKET_ID=" + identity,
+		"AZEDARACH_ISSUE_ID=" + identity,
+	})
 }
 
 func candidateValidationOutput(stdout, stderr string) string {
