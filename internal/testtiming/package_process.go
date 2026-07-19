@@ -17,6 +17,27 @@ type processExecution struct {
 	PeakRSSBytes     int64
 }
 
+func runProcessGroup(command *exec.Cmd) error {
+	if err := startProcessGroup(command, func(command *exec.Cmd) error { return command.Start() }); err != nil {
+		return err
+	}
+	return errors.Join(command.Wait(), waitForProcessGroupExit(command))
+}
+
+func waitForStartedProcessGroups(commands []*exec.Cmd) []error {
+	outcomes := make([]error, len(commands))
+	var waiters sync.WaitGroup
+	waiters.Add(len(commands))
+	for index, command := range commands {
+		go func() {
+			defer waiters.Done()
+			outcomes[index] = errors.Join(command.Wait(), waitForProcessGroupExit(command))
+		}()
+	}
+	waiters.Wait()
+	return outcomes
+}
+
 // runConcurrentCommands starts every command before waiting for any of them.
 // This ordering is the package-overlap contract used by migration-clone runs.
 
@@ -33,14 +54,18 @@ func runConcurrentCommandsWithStarter(ctx context.Context, commands []*exec.Cmd,
 		stderrWriter := &atomicLineWriter{destination: stderr}
 		command.Stdout = stdoutWriter
 		command.Stderr = stderrWriter
-		if err := start(command); err != nil {
+		if err := startProcessGroup(command, start); err != nil {
 			var outcomes []error
 			outcomes = append(outcomes, fmt.Errorf("start package command %d: %w", index, err))
+			for _, notStarted := range commands[index+1:] {
+				outcomes = append(outcomes, discardProcessGroup(notStarted))
+			}
 			for _, running := range started {
 				outcomes = append(outcomes, terminateProcessGroup(running))
 			}
-			for startedIndex, running := range started {
-				outcomes = append(outcomes, running.Wait(), waitForProcessGroupExit(running))
+			waitOutcomes := waitForStartedProcessGroups(started)
+			for startedIndex := range started {
+				outcomes = append(outcomes, waitOutcomes[startedIndex])
 				outcomes = append(outcomes, stdoutWriters[startedIndex].Finish(), stderrWriters[startedIndex].Finish())
 			}
 			return processExecution{ExitCode: 1}, errors.Join(outcomes...)
@@ -51,11 +76,8 @@ func runConcurrentCommandsWithStarter(ctx context.Context, commands []*exec.Cmd,
 	}
 	var execution processExecution
 	var outcomes []error
+	waitOutcomes := waitForStartedProcessGroups(started)
 	for index, command := range started {
-		err := command.Wait()
-		if ctx.Err() != nil {
-			outcomes = append(outcomes, waitForProcessGroupExit(command))
-		}
 		if flushErr := stdoutWriters[index].Finish(); flushErr != nil {
 			outcomes = append(outcomes, fmt.Errorf("flush package command %d stdout: %w", index, flushErr))
 		}
@@ -70,8 +92,8 @@ func runConcurrentCommandsWithStarter(ctx context.Context, commands []*exec.Cmd,
 				execution.ExitCode = code
 			}
 		}
-		if err != nil {
-			outcomes = append(outcomes, fmt.Errorf("package command %d: %w", index, err))
+		if waitOutcomes[index] != nil {
+			outcomes = append(outcomes, fmt.Errorf("package command %d: %w", index, waitOutcomes[index]))
 		}
 	}
 	if ctx.Err() != nil {

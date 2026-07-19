@@ -1,6 +1,7 @@
 package testtiming
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -116,13 +117,18 @@ func runLocked(ctx context.Context, opts RunOptions, cacheConfig gocache.Config,
 		cmd := exec.CommandContext(ctx, "go", "clean", "-testcache")
 		cmd.Dir = opts.WorkingDir
 		cmd.Env = withEnv(os.Environ(), "GOCACHE", cacheConfig.CachePath())
-		configureProcessGroup(cmd)
-		output, cleanErr := cmd.CombinedOutput()
+		if err := configureProcessGroup(cmd); err != nil {
+			return Measurement{}, fmt.Errorf("configure Go test cache cleanup process: %w", err)
+		}
+		var output bytes.Buffer
+		cmd.Stdout = &output
+		cmd.Stderr = &output
+		cleanErr := runProcessGroup(cmd)
 		if ctx.Err() != nil {
-			cleanErr = errors.Join(cleanErr, waitForProcessGroupExit(cmd), ctx.Err())
+			cleanErr = errors.Join(cleanErr, ctx.Err())
 		}
 		if cleanErr != nil {
-			return Measurement{}, fmt.Errorf("clean Go test cache: %w: %s", cleanErr, output)
+			return Measurement{}, fmt.Errorf("clean Go test cache: %w: %s", cleanErr, output.Bytes())
 		}
 	}
 	command := opts.Profile.Command()
@@ -161,7 +167,13 @@ func runLocked(ctx context.Context, opts RunOptions, cacheConfig gocache.Config,
 			cmd := exec.CommandContext(ctx, packageCommand[0], packageCommand[1:]...)
 			cmd.Dir = opts.WorkingDir
 			cmd.Env = packageEnvironment.Env
-			configureProcessGroup(cmd)
+			if err := configureProcessGroup(cmd); err != nil {
+				var cleanupErrs []error
+				for _, configured := range commands {
+					cleanupErrs = append(cleanupErrs, discardProcessGroup(configured))
+				}
+				return Measurement{}, errors.Join(fmt.Errorf("configure package command %s: %w", packageEnvironment.Package, err), errors.Join(cleanupErrs...))
+			}
 			commands = append(commands, cmd)
 		}
 		execution, runErr = runConcurrentCommands(ctx, commands, collector, stderr)
@@ -169,12 +181,14 @@ func runLocked(ctx context.Context, opts RunOptions, cacheConfig gocache.Config,
 		cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 		cmd.Dir = opts.WorkingDir
 		cmd.Env = baseEnv
-		configureProcessGroup(cmd)
+		if err := configureProcessGroup(cmd); err != nil {
+			return Measurement{}, fmt.Errorf("configure Go test command: %w", err)
+		}
 		cmd.Stdout = collector
 		cmd.Stderr = stderr
-		runErr = cmd.Run()
+		runErr = runProcessGroup(cmd)
 		if ctx.Err() != nil {
-			runErr = errors.Join(runErr, waitForProcessGroupExit(cmd), ctx.Err())
+			runErr = errors.Join(runErr, ctx.Err())
 		}
 		if cmd.ProcessState != nil {
 			execution.UserCPUSeconds = cmd.ProcessState.UserTime().Seconds()

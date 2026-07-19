@@ -140,8 +140,10 @@ failures or reports only the last failing package.
 
 The command root handles interrupt and SIGTERM through context cancellation.
 Managed Go commands run in dedicated process groups; cancellation and partial
-startup kill the complete group and verify its exit before temporary private
-database roots are removed. Cleanup failures are returned rather than ignored.
+startup kill the complete group. An inherited lifecycle pipe then blocks on one
+OS read until the command and its descendants close their writers; there is no
+process-table polling. Temporary private database roots are removed only after
+that lifecycle completes, and cleanup failures are returned rather than ignored.
 
 ## Profile semantics
 

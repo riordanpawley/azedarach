@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 
@@ -22,6 +23,31 @@ import (
 func processExists(pid int) bool {
 	err := syscall.Kill(pid, 0)
 	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+type barrierLifecycleReader struct {
+	entered chan struct{}
+	release chan struct{}
+	reads   atomic.Int32
+}
+
+func (reader *barrierLifecycleReader) Read([]byte) (int, error) {
+	reader.reads.Add(1)
+	close(reader.entered)
+	<-reader.release
+	return 0, io.EOF
+}
+
+func TestWaitForProcessGroupLifetimeBlocksOnOSLifecycleBarrier(t *testing.T) {
+	reader := &barrierLifecycleReader{entered: make(chan struct{}), release: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() {
+		done <- waitForProcessGroupLifetime(reader)
+	}()
+	<-reader.entered
+	close(reader.release)
+	require.NoError(t, <-done)
+	assert.Equal(t, int32(1), reader.reads.Load(), "lifecycle wait must block in one OS-backed read instead of polling")
 }
 
 func TestRunConcurrentCommandsStartFailureKillsStartedDescendants(t *testing.T) {
@@ -38,9 +64,9 @@ func TestRunConcurrentCommandsStartFailureKillsStartedDescendants(t *testing.T) 
 	started := exec.CommandContext(context.Background(), os.Args[0], "-test.run=^TestPackageProcessDescendantHelper$")
 	started.Env = append(os.Environ(), "AZEDARACH_TEST_PACKAGE_DESCENDANT_HELPER=parent")
 	started.ExtraFiles = []*os.File{readyWrite, releaseRead}
-	configureProcessGroup(started)
+	require.NoError(t, configureProcessGroup(started))
 	notStarted := exec.CommandContext(context.Background(), os.Args[0], "-test.run=^TestPackageProcessDescendantHelper$")
-	configureProcessGroup(notStarted)
+	require.NoError(t, configureProcessGroup(notStarted))
 	var descendantPID int
 	startFailure := errors.New("deterministic second-command start failure")
 
