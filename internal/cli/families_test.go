@@ -1067,6 +1067,39 @@ func TestRunAgentHookCarriesProcessExitStatus(t *testing.T) {
 	}
 }
 
+func TestRunAgentHookPreservesGeneratedCodexManagedLaunchIdentity(t *testing.T) {
+	t.Setenv("TMUX_PANE", "%1355")
+	t.Setenv("AZEDARACH_LOGICAL_PANE_ID", "agent")
+	t.Setenv("AZEDARACH_AGENT_INCARNATION", "restart-3cbc597c2f0cdd43c1150e278683e052")
+	t.Setenv("AZEDARACH_PANE_PID", "97371")
+	if command := buildCodexHookJSONCommand("user-prompt-submit"); !strings.Contains(command, "az ai hook run --agent=codex --json user-prompt-submit") {
+		t.Fatalf("generated Codex hook command = %q", command)
+	}
+	var signal protocol.RuntimeSignalIngestCommandBody
+	transport := &fakeDaemonTransport{commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+		if req.Command != protocol.CommandRuntimeSignalIngest {
+			return responseWithJSON(req, map[string]any{}), nil
+		}
+		if err := json.Unmarshal(req.Body, &signal); err != nil {
+			t.Fatalf("decode runtime signal: %v", err)
+		}
+		return responseWithJSON(req, protocol.RuntimeSignalIngestResponseBody{Accepted: true}), nil
+	}}
+	deps := &Dependencies{DaemonClient: daemonclient.New(transport).WithProjectID("project"), ProjectID: "project"}
+	projectDir := t.TempDir()
+	_, err := RunAgentHook(context.Background(), deps, AgentHookContext{
+		Agent: AgentCodex, Event: hookEventUserPromptSubmit, IssueID: "dtl", ProjectDir: projectDir,
+		Payload: map[string]any{"session_id": "019f784d-2171-7c81-ad10-7b6b735809ab"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signal.TmuxPane != "%1355" || signal.LogicalPaneID != "agent" || signal.PanePID != 97371 ||
+		signal.AgentIncarnation != "restart-3cbc597c2f0cdd43c1150e278683e052" {
+		t.Fatalf("generated Codex managed identity signal = %+v", signal)
+	}
+}
+
 func TestAIHookRunCommandSendsSingleRuntimeSignalForLifecycleAndHookLog(t *testing.T) {
 	projectDir := t.TempDir()
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-1")

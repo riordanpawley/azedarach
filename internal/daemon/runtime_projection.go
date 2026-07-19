@@ -1,12 +1,14 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
 )
@@ -52,31 +54,86 @@ func buildRuntimeProjection(projectID string, session *daemonstate.Session, work
 		if projection.IssueID == "" {
 			projection.IssueID = parseIssueIDOrZero(worktree.IssueID)
 		}
+		gitStatusState := domain.GitFactsStatusMissing
+		var status git.GitStatus
+		if len(worktree.GitStatusRaw) > 0 {
+			status, gitStatusState = decodeRuntimeGitStatus(worktree.GitStatusRaw)
+		}
+		gitFacts := domain.DeriveGitFactsObservation(path != "", gitStatusState, timeValue(worktree.GitStatusUpdated), timeNow().UTC(), domain.DefaultGitFactsStaleAfter)
 		projection.Worktree = protocol.RuntimeWorktreeProjection{
-			Exists:             path != "",
-			Path:               path,
-			Branch:             branch,
-			Healthy:            path != "" && branch != "",
-			GitStatusUpdatedAt: timePtrFrom(worktree.GitStatusUpdated),
+			Exists:               path != "",
+			Path:                 path,
+			Branch:               branch,
+			Healthy:              path != "" && branch != "",
+			GitStatusUpdatedAt:   timePtrFrom(worktree.GitStatusUpdated),
+			GitFactsAvailability: string(gitFacts.Availability),
+			GitFactsReason:       gitFacts.Reason,
 		}
 		if projection.Session.SessionID != "" && projection.Session.Worktree == "" {
 			projection.Session.Worktree = path
 		}
-		if len(worktree.GitStatusRaw) > 0 {
-			var status git.GitStatus
-			if err := json.Unmarshal(worktree.GitStatusRaw, &status); err == nil {
-				projection.Git.HasUncommittedChanges = status.HasChanges
-				projection.Git.HasConflicts = status.HasConflicts
-				projection.Git.ConflictFiles = append([]string(nil), status.Conflicted...)
-				projection.Git.GitAdditions = status.GitAdditions
-				projection.Git.GitDeletions = status.GitDeletions
-				projection.Git.GitAheadCount = status.GitAheadCount
-				projection.Git.GitBehindCount = status.GitBehindCount
-			}
+		if gitStatusState == domain.GitFactsStatusValid {
+			projection.Git.HasUncommittedChanges = status.HasChanges
+			projection.Git.HasConflicts = status.HasConflicts
+			projection.Git.ConflictFiles = append([]string(nil), status.Conflicted...)
+			projection.Git.GitAdditions = status.GitAdditions
+			projection.Git.GitDeletions = status.GitDeletions
+			projection.Git.GitAheadCount = status.GitAheadCount
+			projection.Git.GitBehindCount = status.GitBehindCount
 		}
+	}
+	if worktree == nil {
+		projection.Worktree.GitFactsAvailability = string(domain.GitFactsUnavailable)
+		projection.Worktree.GitFactsReason = "worktree_unavailable"
 	}
 
 	return projection
+}
+
+func decodeRuntimeGitStatus(raw []byte) (git.GitStatus, domain.GitFactsStatusState) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return git.GitStatus{}, domain.GitFactsStatusInvalid
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &envelope); err != nil {
+		return git.GitStatus{}, domain.GitFactsStatusInvalid
+	}
+	for _, field := range []string{"modified", "added", "deleted", "untracked", "staged"} {
+		value, ok := envelope[field]
+		if !ok || !isRuntimeGitStatusStringArray(value) {
+			return git.GitStatus{}, domain.GitFactsStatusInvalid
+		}
+	}
+	hasChanges, ok := envelope["has_changes"]
+	if !ok {
+		return git.GitStatus{}, domain.GitFactsStatusInvalid
+	}
+	var hasChangesValue *bool
+	if err := json.Unmarshal(hasChanges, &hasChangesValue); err != nil || hasChangesValue == nil {
+		return git.GitStatus{}, domain.GitFactsStatusInvalid
+	}
+	var status git.GitStatus
+	if err := json.Unmarshal(trimmed, &status); err != nil {
+		return git.GitStatus{}, domain.GitFactsStatusInvalid
+	}
+	return status, domain.GitFactsStatusValid
+}
+
+func isRuntimeGitStatusStringArray(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return false
+	}
+	var values []string
+	return json.Unmarshal(trimmed, &values) == nil
+}
+
+func timeValue(value *time.Time) time.Time {
+	if value == nil {
+		return time.Time{}
+	}
+	return value.UTC()
 }
 
 func projectionSessionState(desired, observed daemonstate.SessionState) daemonstate.SessionState {

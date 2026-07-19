@@ -19,6 +19,10 @@ type CommandRunner interface {
 	Run(ctx context.Context, args ...string) (string, error)
 }
 
+type rawCommandRunner interface {
+	RunRaw(ctx context.Context, args ...string) (string, error)
+}
+
 type envCommandRunner interface {
 	RunWithEnv(ctx context.Context, extraEnv []string, args ...string) (string, error)
 }
@@ -54,14 +58,21 @@ func NewExecRunner(workDir string) *ExecRunner {
 
 // Run executes a git command with the given arguments.
 func (e *ExecRunner) Run(ctx context.Context, args ...string) (out string, err error) {
-	return e.run(ctx, nil, args...)
+	return e.run(ctx, nil, false, args...)
+}
+
+// RunRaw preserves stdout byte-for-byte for machine-delimited Git output.
+// Callers must opt in explicitly; ordinary text commands retain Run's
+// whitespace normalization contract.
+func (e *ExecRunner) RunRaw(ctx context.Context, args ...string) (out string, err error) {
+	return e.run(ctx, nil, true, args...)
 }
 
 func (e *ExecRunner) RunWithEnv(ctx context.Context, extraEnv []string, args ...string) (out string, err error) {
-	return e.run(ctx, extraEnv, args...)
+	return e.run(ctx, extraEnv, false, args...)
 }
 
-func (e *ExecRunner) run(ctx context.Context, extraEnv []string, args ...string) (out string, err error) {
+func (e *ExecRunner) run(ctx context.Context, extraEnv []string, preserveStdout bool, args ...string) (out string, err error) {
 	operation := gitOperation(args)
 	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "git",
 		"dependency.name", "git",
@@ -70,7 +81,7 @@ func (e *ExecRunner) run(ctx context.Context, extraEnv []string, args ...string)
 	)
 	defer func() { endSpan(err) }()
 
-	stdoutText, stderrText, err := runProcessGroupCommandWithObserver(
+	stdoutText, stderrText, err := runProcessGroupCommandRawWithObserver(
 		ctx,
 		e.workDir,
 		gitEnvWithOverrides(sanitizedGitEnv(os.Environ()), extraEnv),
@@ -78,6 +89,9 @@ func (e *ExecRunner) run(ctx context.Context, extraEnv []string, args ...string)
 		"git",
 		args...,
 	)
+	if !preserveStdout {
+		stdoutText = strings.TrimSpace(stdoutText)
+	}
 	if err != nil {
 		detail := stderrText
 		if detail == "" {
@@ -100,7 +114,16 @@ func runProcessGroupCommand(ctx context.Context, dir string, env []string, name 
 	return runProcessGroupCommandWithObserver(ctx, dir, env, nil, name, args...)
 }
 
+func runProcessGroupCommandRaw(ctx context.Context, dir string, env []string, name string, args ...string) (stdoutText, stderrText string, err error) {
+	return runProcessGroupCommandRawWithObserver(ctx, dir, env, nil, name, args...)
+}
+
 func runProcessGroupCommandWithObserver(ctx context.Context, dir string, env []string, observer processOutputObserver, name string, args ...string) (stdoutText, stderrText string, err error) {
+	stdoutText, stderrText, err = runProcessGroupCommandRawWithObserver(ctx, dir, env, observer, name, args...)
+	return strings.TrimSpace(stdoutText), stderrText, err
+}
+
+func runProcessGroupCommandRawWithObserver(ctx context.Context, dir string, env []string, observer processOutputObserver, name string, args ...string) (stdoutText, stderrText string, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -133,7 +156,7 @@ func runProcessGroupCommandWithObserver(ctx context.Context, dir string, env []s
 	cmd.Stdout = processOutputWriter{stream: "stdout", dst: &stdout, observer: observer}
 	cmd.Stderr = processOutputWriter{stream: "stderr", dst: &stderr, observer: observer}
 	err = cmd.Run()
-	stdoutText = strings.TrimSpace(stdout.String())
+	stdoutText = stdout.String()
 	stderrText = strings.TrimSpace(stderr.String())
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		err = ctxErr

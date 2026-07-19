@@ -113,6 +113,198 @@ func TestRuntimeStateStoreManagedAgentIdentityRejectsStaleAcrossStores(t *testin
 	}
 }
 
+func TestRuntimeStateStoreManagedAgentIdentityAcknowledgementIsExactAndDurable(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	observedAt := time.Date(2026, time.July, 19, 2, 46, 6, 531478000, time.UTC)
+	identity := ManagedAgentIdentity{ProjectID: "project", SessionID: "az-dtl", LogicalPaneID: "agent", TmuxPaneID: "1355", PanePID: 97371, AgentIncarnation: "restart-exact", ObservedAt: observedAt}
+	if err := store.UpsertManagedAgentIdentity(ctx, identity); err != nil {
+		t.Fatal(err)
+	}
+	stale := identity
+	stale.PanePID++
+	if acknowledged, err := store.AcknowledgeManagedAgentIdentity(ctx, stale, observedAt.Add(time.Millisecond)); err != nil || acknowledged {
+		t.Fatalf("stale acknowledgement = %t err=%v", acknowledged, err)
+	}
+	acknowledgedAt := observedAt.Add(155 * time.Millisecond)
+	if acknowledged, err := store.AcknowledgeManagedAgentIdentity(ctx, identity, acknowledgedAt); err != nil || !acknowledged {
+		t.Fatalf("exact acknowledgement = %t err=%v", acknowledged, err)
+	}
+	got, found, err := store.GetManagedAgentIdentity(ctx, "project", "az-dtl", "agent")
+	if err != nil || !found || !got.ObservedAt.Equal(observedAt) || !got.UpdatedAt.Equal(acknowledgedAt) {
+		t.Fatalf("durable acknowledgement = %+v found=%t err=%v", got, found, err)
+	}
+	if acknowledged, err := store.AcknowledgeManagedAgentIdentity(ctx, identity, observedAt.Add(-time.Hour)); err != nil || !acknowledged {
+		t.Fatalf("idempotent clock-rollback acknowledgement = %t err=%v", acknowledged, err)
+	}
+	replayed, _, err := store.GetManagedAgentIdentity(ctx, "project", "az-dtl", "agent")
+	if err != nil || !replayed.UpdatedAt.Equal(acknowledgedAt) {
+		t.Fatalf("clock-rollback acknowledgement regressed timestamp: %+v err=%v", replayed, err)
+	}
+}
+
+func TestRuntimeStateStoreManagedAgentIdentityAcknowledgementConvergesAcrossStores(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	first := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	second := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = first.Close(); _ = second.Close() })
+	observedAt := time.Date(2026, time.July, 19, 2, 46, 6, 531478000, time.UTC)
+	identity := ManagedAgentIdentity{ProjectID: "project", SessionID: "az-dtl", LogicalPaneID: "agent", TmuxPaneID: "1355", PanePID: 97371, AgentIncarnation: "restart-exact", ObservedAt: observedAt}
+	if err := first.UpsertManagedAgentIdentity(ctx, identity); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	type result struct {
+		acknowledged bool
+		err          error
+	}
+	results := make(chan result, 2)
+	for _, store := range []*RuntimeStateStore{first, second} {
+		store := store
+		go func() {
+			<-start
+			acknowledged, err := store.AcknowledgeManagedAgentIdentity(ctx, identity, observedAt.Add(155*time.Millisecond))
+			results <- result{acknowledged: acknowledged, err: err}
+		}()
+	}
+	close(start)
+	for range 2 {
+		got := <-results
+		if got.err != nil || !got.acknowledged {
+			t.Fatalf("concurrent acknowledgement = %t err=%v", got.acknowledged, got.err)
+		}
+	}
+	identity, found, err := second.GetManagedAgentIdentity(ctx, "project", "az-dtl", "agent")
+	if err != nil || !found || !identity.UpdatedAt.After(identity.ObservedAt) {
+		t.Fatalf("converged acknowledgement = %+v found=%t err=%v", identity, found, err)
+	}
+}
+
+func TestRuntimeStateStoreManagedAgentExactBindReplayPreservesAcknowledgement(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	first := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	second := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = first.Close(); _ = second.Close() })
+	observedAt := time.Date(2026, time.July, 19, 3, 24, 0, 0, time.UTC)
+	identity := ManagedAgentIdentity{ProjectID: "project", SessionID: "az-dtp", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "restart-exact", ObservedAt: observedAt}
+	if err := first.UpsertManagedAgentIdentity(ctx, identity); err != nil {
+		t.Fatal(err)
+	}
+	acknowledgedAt := observedAt.Add(time.Millisecond)
+	if acknowledged, err := first.AcknowledgeManagedAgentIdentity(ctx, identity, acknowledgedAt); err != nil || !acknowledged {
+		t.Fatalf("acknowledge identity=%t err=%v", acknowledged, err)
+	}
+	replay := identity
+	replay.ObservedAt = observedAt.Add(time.Second)
+	if err := second.UpsertManagedAgentIdentity(ctx, replay); err != nil {
+		t.Fatalf("replay exact bind: %v", err)
+	}
+	got, found, err := second.GetManagedAgentIdentity(ctx, identity.ProjectID, identity.SessionID, identity.LogicalPaneID)
+	if err != nil || !found || !got.ObservedAt.Equal(observedAt) || !got.UpdatedAt.Equal(acknowledgedAt) || !got.UpdatedAt.After(got.ObservedAt) {
+		t.Fatalf("exact replay regressed acknowledgement: %+v found=%t err=%v", got, found, err)
+	}
+}
+
+func TestRuntimeStateStoreManagedAgentReplayOverlappingAcknowledgementStaysReady(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	first := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	second := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = first.Close(); _ = second.Close() })
+	observedAt := time.Date(2026, time.July, 19, 3, 24, 0, 0, time.UTC)
+	identity := ManagedAgentIdentity{ProjectID: "project", SessionID: "az-dtp", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "restart-exact", ObservedAt: observedAt}
+	if err := first.UpsertManagedAgentIdentity(context.Background(), identity); err != nil {
+		t.Fatal(err)
+	}
+
+	ackEntered := make(chan struct{})
+	releaseAck := make(chan struct{})
+	ackCtx := WithSQLiteWriteAttemptHookForTest(context.Background(), func(operation string, _ int) error {
+		if operation == "acknowledge_managed_agent_identity" {
+			close(ackEntered)
+			<-releaseAck
+		}
+		return nil
+	})
+	type result struct {
+		acknowledged bool
+		err          error
+	}
+	ackResult := make(chan result, 1)
+	go func() {
+		acknowledged, err := first.AcknowledgeManagedAgentIdentity(ackCtx, identity, observedAt.Add(time.Millisecond))
+		ackResult <- result{acknowledged: acknowledged, err: err}
+	}()
+	<-ackEntered
+	replayStarted := make(chan struct{})
+	replayResult := make(chan error, 1)
+	go func() {
+		close(replayStarted)
+		replay := identity
+		replay.ObservedAt = observedAt.Add(time.Second)
+		replayResult <- second.UpsertManagedAgentIdentity(context.Background(), replay)
+	}()
+	<-replayStarted
+	close(releaseAck)
+	if got := <-ackResult; got.err != nil || !got.acknowledged {
+		t.Fatalf("overlapped acknowledgement=%t err=%v", got.acknowledged, got.err)
+	}
+	if err := <-replayResult; err != nil {
+		t.Fatalf("overlapped exact replay: %v", err)
+	}
+	got, found, err := second.GetManagedAgentIdentity(context.Background(), identity.ProjectID, identity.SessionID, identity.LogicalPaneID)
+	if err != nil || !found || !got.UpdatedAt.After(got.ObservedAt) {
+		t.Fatalf("overlapped replay erased readiness: %+v found=%t err=%v", got, found, err)
+	}
+}
+
+func TestRuntimeStateStoreManagedAgentNewIncarnationClearsAcknowledgementAndFencesStale(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	observedAt := time.Date(2026, time.July, 19, 3, 24, 0, 0, time.UTC)
+	old := ManagedAgentIdentity{ProjectID: "project", SessionID: "az-dtp", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "restart-old", ObservedAt: observedAt}
+	if err := store.UpsertManagedAgentIdentity(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	if acknowledged, err := store.AcknowledgeManagedAgentIdentity(ctx, old, observedAt.Add(time.Millisecond)); err != nil || !acknowledged {
+		t.Fatalf("acknowledge old identity=%t err=%v", acknowledged, err)
+	}
+	reused := old
+	reused.PanePID = 101
+	reused.ObservedAt = observedAt.Add(500 * time.Millisecond)
+	if err := store.UpsertManagedAgentIdentity(ctx, reused); !errors.Is(err, ErrStaleManagedAgentIdentity) {
+		t.Fatalf("same-incarnation process replacement error=%v", err)
+	}
+	preserved, found, err := store.GetManagedAgentIdentity(ctx, old.ProjectID, old.SessionID, old.LogicalPaneID)
+	if err != nil || !found || preserved.PanePID != old.PanePID || !preserved.UpdatedAt.After(preserved.ObservedAt) {
+		t.Fatalf("same-incarnation process replacement changed authority: %+v found=%t err=%v", preserved, found, err)
+	}
+	current := old
+	current.PanePID = 200
+	current.AgentIncarnation = "restart-new"
+	current.ObservedAt = observedAt.Add(time.Second)
+	current.UpdatedAt = time.Time{}
+	if err := store.UpsertManagedAgentIdentity(ctx, current); err != nil {
+		t.Fatalf("bind new incarnation: %v", err)
+	}
+	got, found, err := store.GetManagedAgentIdentity(ctx, current.ProjectID, current.SessionID, current.LogicalPaneID)
+	if err != nil || !found || got.AgentIncarnation != current.AgentIncarnation || !got.UpdatedAt.Equal(got.ObservedAt) {
+		t.Fatalf("new incarnation should be unacknowledged: %+v found=%t err=%v", got, found, err)
+	}
+	stale := old
+	stale.ObservedAt = observedAt.Add(500 * time.Millisecond)
+	if err := store.UpsertManagedAgentIdentity(ctx, stale); !errors.Is(err, ErrStaleManagedAgentIdentity) {
+		t.Fatalf("stale identity replay error=%v", err)
+	}
+	after, found, err := store.GetManagedAgentIdentity(ctx, current.ProjectID, current.SessionID, current.LogicalPaneID)
+	if err != nil || !found || after.AgentIncarnation != current.AgentIncarnation || after.PanePID != current.PanePID {
+		t.Fatalf("stale replay replaced current identity: %+v found=%t err=%v", after, found, err)
+	}
+}
+
 func TestRuntimeStateStoreSessionIntentRejectsStaleDaemonReplay(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "runtime.db")
@@ -770,15 +962,75 @@ func TestApplySessionCompensationPreservesRootedOrchestratorIntent(t *testing.T)
 	if err := store.ReplaceSessionStates(ctx, "project", []Session{rooted}); err != nil {
 		t.Fatal(err)
 	}
-	changed, winner, err := store.ApplySessionCompensation(ctx, "project", rooted, SessionStateStopped, SessionStateStopped, "", "", now.Add(time.Second))
+	changed, winner, applied, err := store.ApplySessionCompensation(ctx, "project", rooted, SessionStateStopped, SessionStateStopped, "", "", now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if winner != SessionStateStopped || len(changed) != 1 || changed[0].Role != SessionRoleOrchestrator || changed[0].State != SessionStateStopped || changed[0].ObservedState != SessionStateStopped {
-		t.Fatalf("typed compensation changed=%+v winner=%s", changed, winner)
+	if !applied || winner != SessionStateStopped || len(changed) != 1 || changed[0].Role != SessionRoleOrchestrator || changed[0].State != SessionStateStopped || changed[0].ObservedState != SessionStateStopped {
+		t.Fatalf("typed compensation changed=%+v winner=%s applied=%t", changed, winner, applied)
 	}
 	if worker, found, err := store.GetWorkerSessionStateByIssueID(ctx, "project", "root", "az-root"); err != nil || found {
 		t.Fatalf("typed compensation worker=%+v found=%t err=%v", worker, found, err)
+	}
+}
+
+func TestApplySessionCompensationIsIdempotentWhenDesiredIntentAlreadyAbsent(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.July, 19, 2, 46, 14, 0, time.UTC)
+	intent := Session{
+		ID: "az-dtl", IssueID: "dtl", Role: SessionRoleWorker,
+		ScopeKind: SessionScopeIssue, ScopeID: "dtl", State: SessionStateStarting, UpdatedAt: now,
+	}
+	changed, winner, applied, err := store.ApplySessionCompensation(ctx, "project", intent, SessionStateStopped, SessionStateStopped, "", "", now)
+	if err != nil {
+		t.Fatalf("idempotent compensation for absent desired intent: %v", err)
+	}
+	if applied || len(changed) != 0 || winner != "" {
+		t.Fatalf("absent compensation changed=%+v winner=%s applied=%t", changed, winner, applied)
+	}
+	observation, found, err := store.GetPhysicalSessionObservation(ctx, "project", "az-dtl")
+	if err != nil || !found || observation.ObservedState != SessionStateStopped {
+		t.Fatalf("physical compensation = %+v found=%t err=%v", observation, found, err)
+	}
+	if _, _, applied, err := store.ApplySessionCompensation(ctx, "project", intent, SessionStateStopped, SessionStateStopped, "", "", now); err != nil || applied {
+		t.Fatalf("replayed absent compensation: %v", err)
+	}
+}
+
+func TestApplySessionCompensationAbsentTargetFansOnlyPhysicalObservationToLinkedIntent(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.July, 19, 3, 43, 20, 0, time.UTC)
+	rooted := Session{
+		ID: "az-root", IssueID: "root", Role: SessionRoleOrchestrator,
+		ScopeKind: SessionScopeOrchestration, ScopeID: "root", State: SessionStateStarting, UpdatedAt: now,
+	}
+	if err := store.ReplaceSessionStates(ctx, "project", []Session{rooted}); err != nil {
+		t.Fatal(err)
+	}
+	absentWorker := Session{
+		ID: "az-root", IssueID: "root", Role: SessionRoleWorker,
+		ScopeKind: SessionScopeIssue, ScopeID: "root", State: SessionStateStarting, UpdatedAt: now,
+	}
+	changed, winner, applied, err := store.ApplySessionCompensation(ctx, "project", absentWorker, SessionStateStopped, SessionStateStopped, "", "", now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied || winner != "" || len(changed) != 1 {
+		t.Fatalf("absent target changed=%+v winner=%s applied=%t", changed, winner, applied)
+	}
+	if changed[0].Role != SessionRoleOrchestrator || changed[0].State != SessionStateStarting || changed[0].ObservedState != SessionStateStopped {
+		t.Fatalf("linked publication row=%+v", changed[0])
+	}
+	got, found, loadErr := store.GetSessionIntent(ctx, "project", SessionRoleOrchestrator, SessionScopeOrchestration, "root")
+	if loadErr != nil || !found || got.State != SessionStateStarting || got.ObservedState != SessionStateStopped {
+		t.Fatalf("linked rooted intent=%+v found=%t err=%v", got, found, loadErr)
+	}
+	if observation, found, loadErr := store.GetPhysicalSessionObservation(ctx, "project", "az-root"); loadErr != nil || !found || observation.ObservedState != SessionStateStopped {
+		t.Fatalf("physical cleanup=%+v found=%t err=%v", observation, found, loadErr)
 	}
 }
 
@@ -1218,6 +1470,15 @@ func TestRuntimeStateStoreRealProjectDatabaseMigrationClones(t *testing.T) {
 			rowCounts := make(map[string]int)
 			retirableWorkers := 0
 			for _, table := range []string{sessionStateTable, sessionObservationTable} {
+				var exists int
+				if err := before.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&exists); err != nil {
+					_ = before.Close()
+					t.Fatalf("inspect %s before runtime-store open: %v", table, err)
+				}
+				if exists == 0 {
+					rowCounts[table] = 0
+					continue
+				}
 				var count int
 				if err := before.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
 					_ = before.Close()
@@ -1225,7 +1486,13 @@ func TestRuntimeStateStoreRealProjectDatabaseMigrationClones(t *testing.T) {
 				}
 				rowCounts[table] = count
 			}
-			if err := before.QueryRow(`SELECT COUNT(*) FROM ` + sessionStateTable + ` AS worker
+			var rootedRoleColumns int
+			if err := before.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('` + sessionStateTable + `') WHERE name IN ('role','scope_kind','scope_id')`).Scan(&rootedRoleColumns); err != nil {
+				_ = before.Close()
+				t.Fatalf("inspect rooted role columns before runtime-store open: %v", err)
+			}
+			if rootedRoleColumns == 3 {
+				if err := before.QueryRow(`SELECT COUNT(*) FROM ` + sessionStateTable + ` AS worker
 				WHERE worker.role='worker' AND worker.scope_kind='issue' AND instr(worker.session_id,'.pane-')=0
 					AND EXISTS (
 						SELECT 1 FROM ` + sessionStateTable + ` AS rooted
@@ -1234,8 +1501,9 @@ func TestRuntimeStateStoreRealProjectDatabaseMigrationClones(t *testing.T) {
 							AND rooted.scope_id<>'project' AND rooted.scope_id=worker.issue_id
 							AND worker.scope_id=worker.issue_id
 					)`).Scan(&retirableWorkers); err != nil {
-				_ = before.Close()
-				t.Fatalf("count retirable rooted worker intents: %v", err)
+					_ = before.Close()
+					t.Fatalf("count retirable rooted worker intents: %v", err)
+				}
 			}
 			if err := before.Close(); err != nil {
 				t.Fatalf("close project database clone read-only: %v", err)

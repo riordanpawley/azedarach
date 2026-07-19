@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -40,8 +41,11 @@ type migration struct {
 
 const decisionIdempotencyMigrationID = "0051_decision_idempotency"
 const gitHookRefreshIntentsMigrationID = "0053_git_hook_refresh_intents"
+const orchestrationStartIntentsMigrationID = "0058_orchestration_start_intents"
+const orchestrationStartIntentsMigrationChecksum = "68b5ca7149782ade0701bd684e23379145b312805e022ad33e5f267c29cc3a00"
 
 const mailboxObservationReplayRepairMaxRows = 50000
+const legacyAttachmentBlobForwardMigrationID = "0056_legacy_attachment_blob_forward"
 
 var orderedMigrations = []migration{
 	{id: "0001_bootstrap_tables", path: "migrations/0001_bootstrap_tables.sql"},
@@ -105,6 +109,9 @@ var orderedMigrations = []migration{
 	{id: gitHookRefreshIntentsMigrationID, path: "migrations/0053_git_hook_refresh_intents.sql"},
 	{id: rootedSessionRoleExclusivityMigrationID, path: "migrations/0054_rooted_session_role_exclusivity.sql"},
 	{id: mailboxObservationReplayRepairMigrationID, path: "migrations/0055_mailbox_observation_replay_repair.manifest.sql"},
+	{id: legacyAttachmentBlobForwardMigrationID, path: "migrations/0056_legacy_attachment_blob_forward.manifest.sql"},
+	{id: agentInputDeliveryMigrationID, path: "migrations/0057_agent_input_delivery.sql"},
+	{id: orchestrationStartIntentsMigrationID, path: "migrations/0058_orchestration_start_intents.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -169,6 +176,9 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: gitHookRefreshIntentsMigrationID, Path: "migrations/0053_git_hook_refresh_intents.sql", Checksum: "7eecd212c9b9a5907c425870ee861571d7654929d77067a1fc50c2e857c3335c"},
 	{ID: rootedSessionRoleExclusivityMigrationID, Path: "migrations/0054_rooted_session_role_exclusivity.sql", Checksum: rootedSessionRoleExclusivityChecksum},
 	{ID: mailboxObservationReplayRepairMigrationID, Path: "migrations/0055_mailbox_observation_replay_repair.manifest.sql", Checksum: "c350a53fc470b54dfc90faa7674d22ad20d6c4b631a8f0d528962eb7f7df0966"},
+	{ID: legacyAttachmentBlobForwardMigrationID, Path: "migrations/0056_legacy_attachment_blob_forward.manifest.sql", Checksum: "c6450a27423e68ebf4b662d485466a726ebcf3208c2858f2cb0f65c6efc6a62a"},
+	{ID: agentInputDeliveryMigrationID, Path: "migrations/0057_agent_input_delivery.sql", Checksum: agentInputDeliveryMigrationChecksum},
+	{ID: orchestrationStartIntentsMigrationID, Path: "migrations/0058_orchestration_start_intents.sql", Checksum: orchestrationStartIntentsMigrationChecksum},
 }
 
 func validateMigrationRegistry() error {
@@ -198,7 +208,7 @@ func applyIssueStateRuntimeConstraintsRepairMigration(ctx context.Context, db *s
 	return nil
 }
 
-func columnExistsDB(ctx context.Context, db *sql.DB, table, column string) (bool, error) {
+func columnExistsDB(ctx context.Context, db sqlIssueQueryer, table, column string) (bool, error) {
 	rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
 	if err != nil {
 		return false, err
@@ -424,6 +434,46 @@ func applyIssueStateRuntimeConstraintsMigration(ctx context.Context, db *sql.DB,
 	return nil
 }
 
+func validateOrchestrationStartIntentsSchema(ctx context.Context, db *sql.DB) error {
+	sqlText, err := loadMigrationSQL("migrations/0058_orchestration_start_intents.sql")
+	if err != nil {
+		return fmt.Errorf("load orchestration start intents schema: %w", err)
+	}
+	objects := []struct {
+		kind string
+		name string
+	}{
+		{kind: "table", name: "orchestration_start_intents"},
+		{kind: "index", name: "idx_orchestration_start_intents_dedupe"},
+		{kind: "index", name: "idx_orchestration_start_intents_recovery"},
+	}
+	statements := strings.Split(sqlText, ";")
+	for _, object := range objects {
+		canonical := ""
+		needle := strings.ToLower(object.name)
+		for _, statement := range statements {
+			if strings.Contains(strings.ToLower(statement), needle) {
+				canonical = strings.TrimSpace(statement)
+				break
+			}
+		}
+		if canonical == "" {
+			return fmt.Errorf("orchestration start intents schema drifted: immutable artifact is missing %s", object.name)
+		}
+		var actual string
+		if err := db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type=? AND name=?`, object.kind, object.name).Scan(&actual); err != nil {
+			return fmt.Errorf("orchestration start intents schema drifted: missing %s: %w", object.name, err)
+		}
+		normalize := func(value string) string {
+			return strings.ReplaceAll(normalizeSQLiteDDL(value), "ifnotexists", "")
+		}
+		if normalize(actual) != normalize(canonical) {
+			return fmt.Errorf("orchestration start intents schema drifted: %s differs from immutable migration artifact: got %q want %q", object.name, normalize(actual), normalize(canonical))
+		}
+	}
+	return nil
+}
+
 func migrateIssueSessionLogicalIdentity(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE logical_runtime_winners AS
 		SELECT DISTINCT project_id,role,scope_kind,scope_id,
@@ -483,6 +533,8 @@ const (
 	mailboxObservationReplayRepairMigrationID                                = "0055_mailbox_observation_replay_repair"
 	decisionPropagationOutboxMigrationID                                     = "0048_decision_propagation_outbox"
 	issueObservationEventSearchMigrationID                                   = "0050_issue_observation_event_search"
+	agentInputDeliveryMigrationID                                            = "0057_agent_input_delivery"
+	agentInputDeliveryMigrationChecksum                                      = "7ed1c1c05bd81b464161be4df4eee5cdb725ed1f984e1865c8e12b1bc5ed513f"
 	contextualLearningMigrationID                                            = "0039_contextual_learning_activation"
 	legacyContextualLearningMigration                                        = "0038_contextual_learning_activation"
 )
@@ -533,7 +585,21 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("repair spec schema: %w", err)
 	}
 
-	for _, m := range orderedMigrations {
+	migrations := orderedMigrations
+	if c.migrationCeiling != "" {
+		ceiling := -1
+		for i, migration := range orderedMigrations {
+			if migration.id == c.migrationCeiling {
+				ceiling = i
+				break
+			}
+		}
+		if ceiling < 0 {
+			return fmt.Errorf("migration ceiling %s is not registered", c.migrationCeiling)
+		}
+		migrations = orderedMigrations[:ceiling+1]
+	}
+	for _, m := range migrations {
 		applied, err := isMigrationApplied(ctx, db, m.id)
 		if err != nil {
 			return fmt.Errorf("check migration %s: %w", m.id, err)
@@ -551,6 +617,12 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 		}
 
 		if shouldApply {
+			if m.id == legacyAttachmentBlobForwardMigrationID {
+				if err := c.applyLegacyAttachmentBlobForwardMigration(ctx, db, m.id); err != nil {
+					return err
+				}
+				continue
+			}
 			if m.id == issueStateModelV2MigrationID {
 				if err := c.applyIssueStateModelV2Migration(ctx, db, m.id); err != nil {
 					return err
@@ -575,6 +647,12 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 			}
 			if m.id == decisionPropagationOutboxMigrationID {
 				if err := c.applyDecisionPropagationOutboxMigration(ctx, db, m.id); err != nil {
+					return err
+				}
+				continue
+			}
+			if m.id == agentInputDeliveryMigrationID {
+				if err := c.applyAgentInputDeliveryMigration(ctx, db, m.id); err != nil {
 					return err
 				}
 				continue
@@ -626,8 +704,14 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := validateIssueObservationEventSearchSchema(ctx, db); err != nil {
 		return err
 	}
-	if err := validateMailboxObservationProjectionCutover(ctx, db); err != nil {
-		return err
+	mailboxCutoverApplied, err := isMigrationApplied(ctx, db, mailboxObservationProjectionCutoverMigrationID)
+	if err != nil {
+		return fmt.Errorf("check mailbox observation projection cutover migration: %w", err)
+	}
+	if mailboxCutoverApplied {
+		if err := validateMailboxObservationProjectionCutover(ctx, db); err != nil {
+			return err
+		}
 	}
 	if err := c.repairMailboxObservationReplayDrift(ctx, db); err != nil {
 		return err
@@ -644,6 +728,15 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 	}
 	if managedIdentityApplied {
 		if err := validateManagedAgentIdentitySchema(ctx, db); err != nil {
+			return err
+		}
+	}
+	agentInputApplied, err := isMigrationApplied(ctx, db, agentInputDeliveryMigrationID)
+	if err != nil {
+		return fmt.Errorf("check agent input delivery migration: %w", err)
+	}
+	if agentInputApplied {
+		if err := validateAgentInputDeliverySchema(ctx, db); err != nil {
 			return err
 		}
 	}
@@ -665,12 +758,30 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	}
+	legacyAttachmentForwardApplied, err := isMigrationApplied(ctx, db, legacyAttachmentBlobForwardMigrationID)
+	if err != nil {
+		return fmt.Errorf("check legacy attachment forward migration: %w", err)
+	}
+	if legacyAttachmentForwardApplied {
+		if err := validateLegacyAttachmentBlobForwardSchema(ctx, db); err != nil {
+			return err
+		}
+	}
 	rootedRoleExclusivityApplied, err := isMigrationApplied(ctx, db, rootedSessionRoleExclusivityMigrationID)
 	if err != nil {
 		return fmt.Errorf("check rooted session role exclusivity migration: %w", err)
 	}
 	if rootedRoleExclusivityApplied {
 		if err := validateRootedSessionRoleExclusivitySchema(ctx, db); err != nil {
+			return err
+		}
+	}
+	orchestrationStartIntentsApplied, err := isMigrationApplied(ctx, db, orchestrationStartIntentsMigrationID)
+	if err != nil {
+		return fmt.Errorf("check orchestration start intents migration: %w", err)
+	}
+	if orchestrationStartIntentsApplied {
+		if err := validateOrchestrationStartIntentsSchema(ctx, db); err != nil {
 			return err
 		}
 	}
@@ -1549,6 +1660,264 @@ func validateManagedAgentIdentitySchema(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+func validateAgentInputDeliverySchema(ctx context.Context, db sqlIssueQueryer) error {
+	contract, err := cachedAgentInputDeliverySchemaContract()
+	if err != nil {
+		return fmt.Errorf("derive agent input delivery schema from pinned artifact: %w", err)
+	}
+	return validateAgentInputDeliverySchemaContract(ctx, db, contract)
+}
+
+type exactSQLiteColumn struct {
+	name       string
+	columnType string
+	notNull    int
+	defaultSQL string
+	primaryKey int
+}
+
+type exactSQLiteSchemaObject struct {
+	objectType string
+	name       string
+	tableName  string
+	sql        string
+}
+
+type exactSQLiteIndexColumn struct {
+	sequence   int
+	columnID   int
+	name       string
+	descending int
+	collation  string
+	key        int
+}
+
+type exactSQLiteIndex struct {
+	unique  int
+	origin  string
+	partial int
+	columns []exactSQLiteIndexColumn
+}
+
+type agentInputDeliverySchemaContract struct {
+	objects []exactSQLiteSchemaObject
+	columns map[string][]exactSQLiteColumn
+	indexes map[string]exactSQLiteIndex
+}
+
+var cachedAgentInputDeliverySchemaContract = sync.OnceValues(deriveAgentInputDeliverySchemaContract)
+
+func deriveAgentInputDeliverySchemaContract() (*agentInputDeliverySchemaContract, error) {
+	if err := validateMigrationRegistry(); err != nil {
+		return nil, fmt.Errorf("authenticate pinned migration artifacts: %w", err)
+	}
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		return nil, fmt.Errorf("open reference database: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+	ctx := context.Background()
+	baseSQL, err := loadRegisteredMigrationSQL(agentInputDeliveryMigrationID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := db.ExecContext(ctx, baseSQL); err != nil {
+		return nil, fmt.Errorf("execute pinned migration 0053 reference artifact: %w", err)
+	}
+	return inspectAgentInputDeliverySchemaContract(ctx, db)
+}
+
+func loadRegisteredMigrationSQL(id string) (string, error) {
+	for _, migration := range orderedMigrations {
+		if migration.id == id {
+			return loadMigrationSQL(migration.path)
+		}
+	}
+	return "", fmt.Errorf("migration %s is not registered", id)
+}
+
+func inspectAgentInputDeliverySchemaContract(ctx context.Context, db sqlIssueQueryer) (*agentInputDeliverySchemaContract, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT type, name, tbl_name, COALESCE(sql, '')
+		FROM sqlite_master
+		WHERE type IN ('table','index','trigger')
+		  AND (name GLOB 'agent_input_delivery_*' OR tbl_name GLOB 'agent_input_delivery_*')
+		ORDER BY type, name
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("inspect agent input delivery schema objects: %w", err)
+	}
+	contract := &agentInputDeliverySchemaContract{
+		columns: make(map[string][]exactSQLiteColumn),
+		indexes: make(map[string]exactSQLiteIndex),
+	}
+	for rows.Next() {
+		var object exactSQLiteSchemaObject
+		if err := rows.Scan(&object.objectType, &object.name, &object.tableName, &object.sql); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan agent input delivery schema object: %w", err)
+		}
+		contract.objects = append(contract.objects, object)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("iterate agent input delivery schema objects: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close agent input delivery schema object inspection: %w", err)
+	}
+	for _, object := range contract.objects {
+		switch object.objectType {
+		case "table":
+			columns, err := inspectExactSQLiteColumns(ctx, db, object.name)
+			if err != nil {
+				return nil, err
+			}
+			contract.columns[object.name] = columns
+		case "index":
+			index, err := inspectExactSQLiteIndex(ctx, db, object.tableName, object.name)
+			if err != nil {
+				return nil, err
+			}
+			contract.indexes[object.name] = index
+		}
+	}
+	return contract, nil
+}
+
+func validateAgentInputDeliverySchemaContract(ctx context.Context, db sqlIssueQueryer, expected *agentInputDeliverySchemaContract) error {
+	actual, err := inspectAgentInputDeliverySchemaContract(ctx, db)
+	if err != nil {
+		return fmt.Errorf("agent input delivery schema drifted: %w", err)
+	}
+	if len(actual.objects) != len(expected.objects) {
+		return fmt.Errorf("agent input delivery schema drifted: schema object inventory has %d objects, want %d", len(actual.objects), len(expected.objects))
+	}
+	for i := range expected.objects {
+		got, want := actual.objects[i], expected.objects[i]
+		if got.objectType != want.objectType || got.name != want.name || got.tableName != want.tableName {
+			return fmt.Errorf("agent input delivery schema drifted: schema object inventory entry %d is %s %s on %s, want %s %s on %s", i, got.objectType, got.name, got.tableName, want.objectType, want.name, want.tableName)
+		}
+		if normalizeExactSQLiteDDL(got.sql) != normalizeExactSQLiteDDL(want.sql) {
+			return fmt.Errorf("agent input delivery schema drifted: %s %s has non-canonical definition", got.objectType, got.name)
+		}
+	}
+	if !reflect.DeepEqual(actual.columns, expected.columns) {
+		return errors.New("agent input delivery schema drifted: table column metadata is non-canonical")
+	}
+	if !reflect.DeepEqual(actual.indexes, expected.indexes) {
+		return errors.New("agent input delivery schema drifted: index metadata is non-canonical")
+	}
+	return nil
+}
+
+func inspectExactSQLiteColumns(ctx context.Context, db sqlIssueQueryer, table string) ([]exactSQLiteColumn, error) {
+	rows, err := db.QueryContext(ctx, `SELECT cid, name, type, [notnull], dflt_value, pk, hidden FROM pragma_table_xinfo(?) ORDER BY cid`, table)
+	if err != nil {
+		return nil, fmt.Errorf("inspect table %s columns: %w", table, err)
+	}
+	defer rows.Close()
+	var columns []exactSQLiteColumn
+	for rows.Next() {
+		var column exactSQLiteColumn
+		var cid, hidden int
+		var defaultSQL sql.NullString
+		if err := rows.Scan(&cid, &column.name, &column.columnType, &column.notNull, &defaultSQL, &column.primaryKey, &hidden); err != nil {
+			return nil, fmt.Errorf("inspect table %s columns: %w", table, err)
+		}
+		if cid != len(columns) || hidden != 0 {
+			return nil, fmt.Errorf("table %s column %s has cid=%d hidden=%d", table, column.name, cid, hidden)
+		}
+		if defaultSQL.Valid {
+			column.defaultSQL = defaultSQL.String
+		}
+		columns = append(columns, column)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("inspect table %s columns: %w", table, err)
+	}
+	return columns, nil
+}
+
+func inspectExactSQLiteIndex(ctx context.Context, db sqlIssueQueryer, table, indexName string) (exactSQLiteIndex, error) {
+	var index exactSQLiteIndex
+	if err := db.QueryRowContext(ctx, `
+		SELECT [unique], origin, partial
+		FROM pragma_index_list(?)
+		WHERE name=?
+	`, table, indexName).Scan(&index.unique, &index.origin, &index.partial); err != nil {
+		return exactSQLiteIndex{}, fmt.Errorf("inspect index %s metadata: %w", indexName, err)
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT seqno, cid, name, [desc], coll, key
+		FROM pragma_index_xinfo(?)
+		ORDER BY seqno
+	`, indexName)
+	if err != nil {
+		return exactSQLiteIndex{}, fmt.Errorf("inspect index %s columns: %w", indexName, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var column exactSQLiteIndexColumn
+		var name, collation sql.NullString
+		if err := rows.Scan(&column.sequence, &column.columnID, &name, &column.descending, &collation, &column.key); err != nil {
+			return exactSQLiteIndex{}, fmt.Errorf("scan index %s columns: %w", indexName, err)
+		}
+		if name.Valid {
+			column.name = name.String
+		}
+		if collation.Valid {
+			column.collation = collation.String
+		}
+		index.columns = append(index.columns, column)
+	}
+	if err := rows.Err(); err != nil {
+		return exactSQLiteIndex{}, fmt.Errorf("iterate index %s columns: %w", indexName, err)
+	}
+	return index, nil
+}
+
+func normalizeExactSQLiteDDL(ddl string) string {
+	var normalized strings.Builder
+	normalized.Grow(len(ddl))
+	var quote byte
+	for i := 0; i < len(ddl); i++ {
+		character := ddl[i]
+		if quote != 0 {
+			normalized.WriteByte(character)
+			if quote == '[' {
+				if character == ']' {
+					quote = 0
+				}
+				continue
+			}
+			if character == quote {
+				if i+1 < len(ddl) && ddl[i+1] == quote {
+					i++
+					normalized.WriteByte(ddl[i])
+					continue
+				}
+				quote = 0
+			}
+			continue
+		}
+		switch character {
+		case '\'', '"', '`', '[':
+			quote = character
+			normalized.WriteByte(character)
+		case ' ', '\n', '\t', '\r', '\f', '\v':
+			continue
+		default:
+			if character >= 'A' && character <= 'Z' {
+				character += 'a' - 'A'
+			}
+			normalized.WriteByte(character)
+		}
+	}
+	return normalized.String()
+}
+
 func repairIssueIDAllocationSchema(ctx context.Context, db *sql.DB) error {
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS issue_id_allocations (
@@ -2078,6 +2447,36 @@ func (c *Client) applyDecisionPropagationOutboxMigration(ctx context.Context, db
 		}
 	}
 	if err := validateDecisionPropagationOutboxSchema(ctx, tx); err != nil {
+		return fmt.Errorf("validate migration %s: %w", id, err)
+	}
+	if err := recordAppliedMigration(ctx, tx, id); err != nil {
+		return fmt.Errorf("record migration %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", id, err)
+	}
+	return nil
+}
+
+func (c *Client) applyAgentInputDeliveryMigration(ctx context.Context, db *sql.DB, id string) error {
+	sqlText, err := loadMigrationSQL("migrations/0057_agent_input_delivery.sql")
+	if err != nil {
+		return fmt.Errorf("load migration %s: %w", id, err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", id, err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+		return fmt.Errorf("apply migration %s: %w", id, err)
+	}
+	if c.agentInputMigrationFailureHook != nil {
+		if err := c.agentInputMigrationFailureHook("after_schema"); err != nil {
+			return fmt.Errorf("migration %s rolled back: %w", id, err)
+		}
+	}
+	if err := validateAgentInputDeliverySchema(ctx, tx); err != nil {
 		return fmt.Errorf("validate migration %s: %w", id, err)
 	}
 	if err := recordAppliedMigration(ctx, tx, id); err != nil {

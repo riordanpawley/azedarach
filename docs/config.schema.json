@@ -26,6 +26,20 @@
           "type": "string",
           "description": "Shell command to run. Empty or omitted means this project has no configured gate.",
           "default": ""
+        },
+        "environmentFingerprint": {
+          "type": "string",
+          "description": "Project-owned toolchain/environment identity used to decide whether exact candidate gate evidence remains reusable. Change it whenever the gate's effective toolchain changes.",
+          "default": ""
+        },
+        "failureArtifactPaths": {
+          "type": "array",
+          "description": "Project-relative directories to preserve from a failed transactional integration candidate. Empty or omitted disables artifact preservation; Azedarach never infers consumer layouts.",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "default": []
         }
       },
       "default": {}
@@ -155,7 +169,7 @@
         "codexAppServer": {
           "type": "boolean",
           "default": false,
-          "description": "Launch Codex TUI sessions through the native app-server daemon and supervise thin-client resume across daemon restarts."
+          "description": "Launch the stock Codex remote TUI and supervise exact-worktree resume across app-server restarts; automated turns use direct app-server submission behind the managed tmux input gate."
         },
         "shell": {
           "type": "string",
@@ -532,6 +546,35 @@
         "openIssueLimit": {
           "type": "integer", "minimum": 1, "default": 100,
           "description": "Open-issue threshold above which project-wide autostart requires an explicit override."
+        }
+      }
+    },
+    "publicationEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Project-owned capability and policy mapping for layered publication evidence.",
+      "properties": {
+        "policyVersion": {"type": "string", "minLength": 1},
+        "activePathProfiles": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "default": []
+        },
+        "exactBaseSurfaces": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "default": {}
+        },
+        "dependencies": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "default": {}
         }
       }
     },

@@ -4619,6 +4619,9 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0053_git_hook_refresh_intents",
 		"0054_rooted_session_role_exclusivity",
 		"0055_mailbox_observation_replay_repair",
+		"0056_legacy_attachment_blob_forward",
+		"0057_agent_input_delivery",
+		"0058_orchestration_start_intents",
 	}, got)
 }
 
@@ -4825,7 +4828,6 @@ func TestClient_RepairsLegacyIssueColumnsBeforeSearchFTSMigration(t *testing.T) 
 		"0012_blocked_status_to_open",
 		"0013_closed_runtime_invariants",
 		"0014_linear_sync_external_refs_backfill",
-		"0015_issue_attachments",
 	} {
 		_, err = db.ExecContext(ctx, `INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)`, id, now)
 		require.NoError(t, err)
@@ -5721,8 +5723,8 @@ func TestClient_CreateBusyRetryIsBoundedWithoutCallerDeadline(t *testing.T) {
 	_, _ = lockDB.Exec(`ROLLBACK`)
 }
 
-func TestClient_CreateBusyRetryStopsAtEarlierCallerDeadline(t *testing.T) {
-	client := newTestClient(t, WithSQLiteBusyPolicy(time.Second, 10*time.Millisecond))
+func TestClient_CreateBusyRetryStopsAtCallerCancellation(t *testing.T) {
+	client, retryStarted, _ := newBusyRetryTestClient(t)
 	_, err := client.Create(context.Background(), CreateTaskParams{Title: "warmup", Type: domain.TypeTask, Priority: domain.P3})
 	require.NoError(t, err)
 	lockDB, err := sql.Open("sqlite", "file:"+client.dbPath)
@@ -5732,13 +5734,23 @@ func TestClient_CreateBusyRetryStopsAtEarlierCallerDeadline(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _, _ = lockDB.Exec(`ROLLBACK`) }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
-	defer cancel()
-	started := time.Now()
-	_, err = client.Create(ctx, CreateTaskParams{Title: "cancelled-busy-retry", Type: domain.TypeTask, Priority: domain.P3})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, createErr := client.Create(ctx, CreateTaskParams{Title: "cancelled-busy-retry", Type: domain.TypeTask, Priority: domain.P3})
+		done <- createErr
+	}()
+
+	select {
+	case <-retryStarted:
+	case err = <-done:
+		t.Fatalf("Create returned before SQLite busy retry: %v", err)
+	}
+	cancel()
+	err = <-done
 	require.Error(t, err)
-	assert.True(t, IsSQLiteBusy(err), "error = %v, want preserved SQLite busy error", err)
-	assert.Less(t, time.Since(started), 500*time.Millisecond)
+	assert.True(t, IsSQLiteBusy(err) || errors.Is(err, context.DeadlineExceeded),
+		"error = %v, want SQLite busy observed before the deadline or the caller deadline itself", err)
 }
 
 func TestIsSQLiteBusyRecognizesBusySnapshotExtendedCode(t *testing.T) {

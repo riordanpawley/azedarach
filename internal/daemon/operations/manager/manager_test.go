@@ -23,6 +23,56 @@ type toggleUpdateErrorStore struct {
 	updateErr error
 }
 
+type blockingProgressStore struct {
+	*memoryStore
+	deadlineObserved chan struct{}
+}
+
+type controlledTerminalStore struct {
+	*memoryStore
+	attempted chan struct{}
+	allow     chan struct{}
+}
+
+func (s *controlledTerminalStore) Update(ctx context.Context, params daemonops.UpdateParams) (daemonops.Record, error) {
+	if params.FinishedAt != nil {
+		select {
+		case s.attempted <- struct{}{}:
+		default:
+		}
+		select {
+		case <-s.allow:
+			return s.memoryStore.Update(ctx, params)
+		case <-ctx.Done():
+			return daemonops.Record{}, ctx.Err()
+		}
+	}
+	return s.memoryStore.Update(ctx, params)
+}
+
+type blockingStartStore struct {
+	*memoryStore
+	deadlineObserved chan struct{}
+}
+
+func (s *blockingStartStore) Update(ctx context.Context, params daemonops.UpdateParams) (daemonops.Record, error) {
+	if params.StartedAt != nil {
+		<-ctx.Done()
+		close(s.deadlineObserved)
+		return daemonops.Record{}, ctx.Err()
+	}
+	return s.memoryStore.Update(ctx, params)
+}
+
+func (s *blockingProgressStore) Update(ctx context.Context, params daemonops.UpdateParams) (daemonops.Record, error) {
+	if params.Progress != nil {
+		<-ctx.Done()
+		close(s.deadlineObserved)
+		return daemonops.Record{}, ctx.Err()
+	}
+	return s.memoryStore.Update(ctx, params)
+}
+
 func (s *toggleUpdateErrorStore) setUpdateError(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -108,8 +158,139 @@ func (s *memoryStore) Update(_ context.Context, params daemonops.UpdateParams) (
 	if params.ResultPayload != nil {
 		record.ResultPayload = append([]byte(nil), params.ResultPayload...)
 	}
+	if params.Progress != nil {
+		progress := *params.Progress
+		record.Progress = &progress
+	}
 	s.records[record.ID] = cloneRecord(record)
 	return cloneRecord(record), nil
+}
+
+func TestProgressReporterPreservesCallerDeadlineForDurableWrite(t *testing.T) {
+	store := &blockingProgressStore{memoryStore: newMemoryStore(), deadlineObserved: make(chan struct{})}
+	mgr := New(store, Config{NewID: func() string { return "op-progress-timeout" }})
+	result, err := mgr.Submit(context.Background(), daemonops.SubmitRequest{Kind: "bounded-progress"}, func(ctx context.Context) ([]byte, error) {
+		progressCtx, cancel := context.WithTimeout(ctx, 25*time.Millisecond)
+		defer cancel()
+		return nil, daemonops.ReportProgress(progressCtx, daemonops.Progress{Phase: "persist"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-store.deadlineObserved:
+	default:
+		t.Fatal("durable progress store did not observe caller deadline")
+	}
+	record, err := store.Get(context.Background(), result.Record.ID)
+	if err != nil || record.State != daemonops.StateFailed || !strings.Contains(record.ErrorMessage, context.DeadlineExceeded.Error()) {
+		t.Fatalf("record=%+v err=%v", record, err)
+	}
+}
+
+func TestLifecycleStartWriteIsBounded(t *testing.T) {
+	store := &blockingStartStore{memoryStore: newMemoryStore(), deadlineObserved: make(chan struct{})}
+	mgr := New(store, Config{NewID: func() string { return "op-start-timeout" }, LifecycleWriteTimeout: 25 * time.Millisecond})
+	result, err := mgr.Submit(context.Background(), daemonops.SubmitRequest{Kind: "bounded-start"}, func(context.Context) ([]byte, error) {
+		t.Fatal("runner started without durable running state")
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-store.deadlineObserved:
+	default:
+		t.Fatal("start store did not observe lifecycle deadline")
+	}
+	record, err := store.Get(context.Background(), result.Record.ID)
+	if err != nil || record.State != daemonops.StateFailed || !strings.Contains(record.ErrorMessage, context.DeadlineExceeded.Error()) {
+		t.Fatalf("record=%+v err=%v", record, err)
+	}
+}
+
+func TestTerminalPersistenceFailureRetainsAuthorityUntilRetrySucceeds(t *testing.T) {
+	store := &controlledTerminalStore{memoryStore: newMemoryStore(), attempted: make(chan struct{}, 1), allow: make(chan struct{})}
+	ids := []string{"op-first", "op-second"}
+	var idMu sync.Mutex
+	mgr := New(store, Config{
+		NewID: func() string {
+			idMu.Lock()
+			defer idMu.Unlock()
+			id := ids[0]
+			ids = ids[1:]
+			return id
+		},
+		LifecycleWriteTimeout:  25 * time.Millisecond,
+		LifecycleRetryInterval: 10 * time.Millisecond,
+	})
+	if _, err := mgr.Submit(context.Background(), daemonops.SubmitRequest{Kind: "first", ResourceKeys: []string{"session:one"}}, func(context.Context) ([]byte, error) {
+		return []byte("first"), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-store.attempted:
+	case <-time.After(time.Second):
+		t.Fatal("terminal persistence was not attempted")
+	}
+	secondStarted := make(chan struct{})
+	if _, err := mgr.Submit(context.Background(), daemonops.SubmitRequest{Kind: "second", ResourceKeys: []string{"session:one"}}, func(context.Context) ([]byte, error) {
+		close(secondStarted)
+		return []byte("second"), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	queue := mgr.Queue(daemonops.Query{})
+	if len(queue.Running) != 1 || queue.Running[0].Record.ID != "op-first" || len(queue.Queued) != 1 || queue.Queued[0].Record.ID != "op-second" || !containsString(queue.Queued[0].BlockingOperationIDs, "op-first") {
+		t.Fatalf("terminal retry authority snapshot=%+v, want op-first blocking op-second", queue)
+	}
+	select {
+	case <-secondStarted:
+		t.Fatal("resource authority released while first operation remained durably running")
+	default:
+	}
+	close(store.allow)
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("queued operation did not start after terminal persistence retry succeeded")
+	}
+	if err := mgr.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTerminalPersistenceFailurePropagatesAndRetainsAuthorityOnShutdown(t *testing.T) {
+	base, stop := context.WithCancel(context.Background())
+	store := &controlledTerminalStore{memoryStore: newMemoryStore(), attempted: make(chan struct{}, 1), allow: make(chan struct{})}
+	mgr := New(store, Config{BaseContext: base, NewID: func() string { return "op-terminal-failure" }, LifecycleWriteTimeout: 25 * time.Millisecond, LifecycleRetryInterval: 10 * time.Millisecond})
+	if _, err := mgr.Submit(context.Background(), daemonops.SubmitRequest{Kind: "terminal-failure", ResourceKeys: []string{"session:held"}, DedupeKey: "held"}, func(context.Context) ([]byte, error) {
+		return []byte("result"), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-store.attempted:
+	case <-time.After(time.Second):
+		t.Fatal("terminal persistence was not attempted")
+	}
+	stop()
+	drainCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := mgr.Drain(drainCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("drain error=%v, want propagated terminal deadline", err)
+	}
+	queue := mgr.Queue(daemonops.Query{})
+	if len(queue.Running) != 1 || queue.Running[0].Record.ID != "op-terminal-failure" {
+		t.Fatalf("running authority=%+v, want failed terminal operation retained", queue.Running)
+	}
 }
 
 func cloneRecord(record daemonops.Record) daemonops.Record {
@@ -387,10 +568,14 @@ func TestSubmitSerializesConflictingResources(t *testing.T) {
 		t.Fatalf("second submit error: %v", err)
 	}
 
+	queue := mgr.Queue(daemonops.Query{})
+	if len(queue.Running) != 1 || len(queue.Queued) != 1 || queue.Queued[0].Record.Kind != "worktree.cleanup" || !containsString(queue.Queued[0].BlockingOperationIDs, queue.Running[0].Record.ID) {
+		t.Fatalf("conflicting resource snapshot=%+v, want queued cleanup blocked by running merge", queue)
+	}
 	select {
 	case <-secondStarted:
 		t.Fatal("second operation started before conflicting resource was released")
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
 
 	close(firstRelease)

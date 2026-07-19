@@ -45,6 +45,9 @@ func TestIsReviewRequestTransitionRequiresIssueStoreProvenance(t *testing.T) {
 	if !IsReviewRequestTransition(IssueObservationEvent{Type: IssueEventIssueStatusChanged, Source: "issue-store", Payload: payload}) {
 		t.Fatal("issue-store status transition must start a review-request epoch")
 	}
+	if !IsReviewRequestTransition(IssueObservationEvent{Type: IssueEventIssueCreated, Source: "issue-store", Payload: map[string]any{"status": "in_review"}}) {
+		t.Fatal("issue-store review-ready creation must start its initial review-request epoch")
+	}
 }
 
 func TestDeriveReviewReadyPublicationsDoesNotPublishEvidenceUntilReviewReady(t *testing.T) {

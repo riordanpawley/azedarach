@@ -201,7 +201,21 @@ func startRaceSharder(t *testing.T, repo, script string, extraEnv ...string) (*e
 
 func runRaceSharder(t *testing.T, repo, script string, extraEnv ...string) ([]byte, []byte, error) {
 	t.Helper()
-	cmd := exec.Command(script)
+	cmd := exec.CommandContext(t.Context(), script)
+	inner := false
+	for _, value := range extraEnv {
+		inner = inner || value == "AZEDARACH_DAEMON_RACE_INNER=1"
+	}
+	if inner {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+	} else {
+		cmd.Cancel = func() error {
+			return cmd.Process.Signal(os.Interrupt)
+		}
+	}
 	cmd.Dir = repo
 	stdout := new(strings.Builder)
 	stderr := new(strings.Builder)
@@ -212,6 +226,23 @@ func runRaceSharder(t *testing.T, repo, script string, extraEnv ...string) ([]by
 	}, extraEnv...)...)
 	err := cmd.Run()
 	return []byte(stdout.String()), []byte(stderr.String()), err
+}
+
+func assertRaceSharderProcessStopped(t *testing.T, pid string) {
+	t.Helper()
+	output, err := exec.Command("ps", "-o", "stat=", "-p", pid).Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return
+		}
+		t.Fatalf("inspect shard descendant %s: %v", pid, err)
+	}
+	state := strings.TrimSpace(string(output))
+	if strings.HasPrefix(state, "Z") {
+		return
+	}
+	t.Fatalf("shard descendant %s still running after cancellation (state %q)", pid, state)
 }
 
 func decodeRaceShardOutput(t *testing.T, output []byte) []raceShardRecord {
@@ -441,9 +472,7 @@ func TestDaemonRaceSharderAggregateTimeoutKillsDescendantsAndKeepsJSONL(t *testi
 	if _, statErr := os.Stat(termMarker); statErr != nil {
 		t.Fatalf("timeout did not signal shard descendant: %v; stderr=%q", statErr, stderr.String())
 	}
-	if killErr := exec.Command("kill", "-0", childPID).Run(); killErr == nil {
-		t.Fatalf("shard descendant %s still running after aggregate timeout", childPID)
-	}
+	assertRaceSharderProcessStopped(t, childPID)
 }
 
 func TestDaemonRaceSharderInteractiveCancelKillsSupervisedProcessGroup(t *testing.T) {
@@ -512,9 +541,7 @@ func TestDaemonRaceSharderInteractiveCancelKillsSupervisedProcessGroup(t *testin
 	if len(records) != 2 || records[1].Output != "late-term" {
 		t.Fatalf("cancel records = %+v, want initial and late TERM diagnostics", records)
 	}
-	if killErr := exec.Command("kill", "-0", childPID).Run(); killErr == nil {
-		t.Fatalf("TERM-ignoring shard descendant still alive after interactive cancellation")
-	}
+	assertRaceSharderProcessStopped(t, childPID)
 	if killErr := exec.Command("kill", "-0", "-"+timeoutPID).Run(); killErr == nil {
 		t.Fatalf("timeout process group %s still alive after interactive cancellation", timeoutPID)
 	}

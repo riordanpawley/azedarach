@@ -466,6 +466,18 @@ func (s *SQLiteStore) LatestReviewValidation(ctx context.Context, projectID, iss
 	return &request, nil
 }
 
+func (s *SQLiteStore) ValidationRequest(ctx context.Context, projectID, requestID string) (domain.ValidationRequest, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return domain.ValidationRequest{}, err
+	}
+	request, err := scanValidationRequest(db.QueryRowContext(ctx, validationSelect+` WHERE project_id=? AND request_id=?`, strings.TrimSpace(projectID), strings.TrimSpace(requestID)))
+	if err != nil {
+		return domain.ValidationRequest{}, fmt.Errorf("resolve validation request %s: %w", requestID, err)
+	}
+	return request, nil
+}
+
 // LatestAggregateValidation remains as a compatibility name for callers that
 // have not yet adopted the authority-oriented method name. It intentionally
 // returns only explicit review evidence; legacy aggregate rows are excluded.

@@ -87,6 +87,33 @@ func TestRealProjectOperationsDatabaseMigrationClones(t *testing.T) {
 			if objects != 10 {
 				t.Fatalf("validation migration objects = %d, want 10", objects)
 			}
+			var evidenceObjects int
+			if err = store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name IN (
+				'daemon_publication_evidence','daemon_publication_evidence_invalidations','daemon_publication_evidence_state',
+				'idx_daemon_publication_evidence_issue_layer','idx_daemon_publication_evidence_invalidations',
+				'daemon_publication_evidence_immutable_update','daemon_publication_evidence_immutable_delete',
+				'daemon_publication_invalidation_immutable_update','daemon_publication_invalidation_immutable_delete',
+				'daemon_publication_evidence_insert_revision','daemon_publication_invalidation_insert_revision'
+			)`).Scan(&evidenceObjects); err != nil {
+				t.Fatal(err)
+			}
+			if evidenceObjects != 11 {
+				t.Fatalf("publication evidence migration objects = %d, want 11", evidenceObjects)
+			}
+			var queueObjects int
+			if err = store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name IN (
+				'daemon_publication_operations','idx_daemon_publication_operations_queue',
+				'idx_daemon_publication_operations_issue','idx_daemon_publication_operations_claim',
+				'daemon_publication_operation_identity_immutable'
+			)`).Scan(&queueObjects); err != nil {
+				t.Fatal(err)
+			}
+			if queueObjects != 5 {
+				t.Fatalf("publication queue migration objects = %d, want 5", queueObjects)
+			}
+			if _, err = store.PublicationOperations(ctx, "migration-review", "", false); err != nil {
+				t.Fatal(err)
+			}
 			if err = store.db.QueryRow(`SELECT COUNT(*) FROM daemon_operations`).Scan(&afterOperations); err != nil {
 				t.Fatal(err)
 			}
@@ -106,6 +133,9 @@ func TestRealProjectOperationsDatabaseMigrationClones(t *testing.T) {
 
 			reopened := NewAtPath(path, slog.Default())
 			if _, err = reopened.ValidationSnapshot(ctx, "migration-review", time.Now().UTC(), time.Minute); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = reopened.PublicationOperations(ctx, "migration-review", "", false); err != nil {
 				t.Fatal(err)
 			}
 			var ledgerRows int
@@ -747,6 +777,149 @@ func TestValidationPriorityFairnessMigrationRejectsLedgerSchemaDrift(t *testing.
 	drifted := NewAtPath(dbPath, slog.Default())
 	defer drifted.Close()
 	if _, err = drifted.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err == nil || !strings.Contains(err.Error(), "issue_priority") {
+		t.Fatalf("schema drift error = %v", err)
+	}
+}
+
+func TestLayeredPublicationEvidenceMigrationRollsBackAndRetries(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 6)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TRIGGER reject_layered_evidence_ledger BEFORE INSERT ON schema_migrations WHEN NEW.id='daemon_operations_0007_layered_publication_evidence' BEGIN SELECT RAISE(ABORT, 'injected layered evidence ledger failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	failed := NewAtPath(dbPath, slog.Default())
+	if _, err = failed.PublicationEvidenceSnapshot(context.Background(), "project", ""); err == nil || !strings.Contains(err.Error(), "injected layered evidence ledger failure") {
+		t.Fatalf("migration error = %v", err)
+	}
+	_ = failed.Close()
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tables int
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('daemon_publication_evidence','daemon_publication_operations')`).Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if tables != 0 {
+		t.Fatal("failed migration left publication evidence or queue table")
+	}
+	if _, err = raw.Exec(`DROP TRIGGER reject_layered_evidence_ledger`); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	retried := NewAtPath(dbPath, slog.Default())
+	defer retried.Close()
+	if _, err = retried.PublicationEvidenceSnapshot(context.Background(), "project", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = retried.PublicationOperations(context.Background(), "project", "", false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLayeredPublicationEvidenceMigrationRejectsAppliedSchemaDrift(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 7)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`DROP TRIGGER daemon_publication_evidence_immutable_update`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	drifted := NewAtPath(dbPath, slog.Default())
+	defer drifted.Close()
+	if _, err = drifted.PublicationEvidenceSnapshot(context.Background(), "project", ""); err == nil || !strings.Contains(err.Error(), "missing trigger daemon_publication_evidence_immutable_update") {
+		t.Fatalf("schema drift error = %v", err)
+	}
+}
+
+func TestLayeredPublicationEvidenceMigrationRejectsCanonicalDefinitionDrift(t *testing.T) {
+	tests := []struct {
+		name, objectType, objectName, old, replacement string
+	}{
+		{
+			name: "invalidation enum removal", objectType: "table", objectName: "daemon_publication_evidence_invalidations",
+			old: ",'capability_absent','impact_unknown'", replacement: ",'capability_absent'",
+		},
+		{
+			name: "merge result constraint removal", objectType: "table", objectName: "daemon_publication_evidence",
+			old: "CHECK (layer != 'merge_result' OR (length(base_revision) > 0 AND length(result_revision) > 0)),", replacement: "",
+		},
+		{
+			name: "reuse foreign key removal", objectType: "table", objectName: "daemon_publication_evidence",
+			old: " REFERENCES daemon_publication_evidence(evidence_id)", replacement: "",
+		},
+		{
+			name: "revision trigger semantic change", objectType: "trigger", objectName: "daemon_publication_evidence_insert_revision",
+			old: "revision = revision + 1", replacement: "revision = revision + 2",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+			seedOperationsMigrations(t, dbPath, 7)
+			db, err := sql.Open("sqlite", dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var definition string
+			if err = db.QueryRow(`SELECT sql FROM sqlite_master WHERE type=? AND name=?`, tc.objectType, tc.objectName).Scan(&definition); err != nil {
+				t.Fatal(err)
+			}
+			driftedDefinition := strings.Replace(definition, tc.old, tc.replacement, 1)
+			if driftedDefinition == definition {
+				t.Fatalf("fixture did not alter %s %s: %q absent", tc.objectType, tc.objectName, tc.old)
+			}
+			if _, err = db.Exec(`PRAGMA writable_schema=ON`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.Exec(`UPDATE sqlite_master SET sql=? WHERE type=? AND name=?`, driftedDefinition, tc.objectType, tc.objectName); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.Exec(`PRAGMA schema_version=9876`); err != nil {
+				t.Fatal(err)
+			}
+			if err = db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			drifted := NewAtPath(dbPath, slog.Default())
+			defer drifted.Close()
+			if _, err = drifted.PublicationEvidenceSnapshot(context.Background(), "project", ""); err == nil || !strings.Contains(err.Error(), "differs from immutable artifact") {
+				t.Fatalf("schema drift error = %v", err)
+			}
+		})
+	}
+}
+
+func TestPublicationQueueMigrationRejectsAppliedSchemaDrift(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 7)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`DROP TRIGGER daemon_publication_operation_identity_immutable`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	drifted := NewAtPath(dbPath, slog.Default())
+	defer drifted.Close()
+	if _, err = drifted.PublicationOperations(context.Background(), "project", "", false); err == nil || !strings.Contains(err.Error(), "missing trigger daemon_publication_operation_identity_immutable") {
 		t.Fatalf("schema drift error = %v", err)
 	}
 }

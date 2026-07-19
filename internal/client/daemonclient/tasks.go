@@ -63,6 +63,10 @@ type TaskBulkCleanupResult = protocol.TaskBulkCleanupResult
 type TaskCloseResult = protocol.TaskCloseResult
 type TaskClosePhaseTiming = protocol.TaskClosePhaseTiming
 
+type TaskEventsRequest = protocol.TaskEventsRequest
+type TaskEventPayloadFilter = protocol.TaskEventPayloadFilter
+type TaskEventsPage = protocol.TaskEventsPage
+
 // TaskCreateParams contains the payload used to create a task through the shared daemon client.
 type TaskCreateParams struct {
 	Title           string               `json:"title"`
@@ -171,6 +175,7 @@ type TaskGraphReadiness struct {
 	Runnable               []string                              `json:"runnable"`
 	NestedRoots            []TaskNestedRoot                      `json:"nested_roots,omitempty"`
 	Pending                []TaskPendingStart                    `json:"pending,omitempty"`
+	PublicationQueue       []domain.PublicationOperation         `json:"publication_queue,omitempty"`
 	Active                 []string                              `json:"active,omitempty"`
 	ActiveSessions         []TaskActiveSession                   `json:"active_sessions,omitempty"`
 	SessionStartProgress   []TaskSessionStartProgress            `json:"session_start_progress,omitempty"`
@@ -373,10 +378,6 @@ type TaskIDsRequest struct {
 	DirectDependents  bool             `json:"direct_dependents,omitempty"`
 	MetadataOnly      bool             `json:"metadata_only,omitempty"`
 }
-
-type TaskEventsRequest = protocol.TaskEventsRequest
-type TaskEventPayloadFilter = protocol.TaskEventPayloadFilter
-type TaskEventsPage = protocol.TaskEventsPage
 
 // TaskEventAppendRequest contains the payload used to append one issue observation event.
 type TaskEventAppendRequest struct {

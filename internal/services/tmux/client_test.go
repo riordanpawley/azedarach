@@ -111,6 +111,18 @@ func TestClient_NewSession(t *testing.T) {
 	}
 }
 
+func TestClientRespawnPaneTargetsOnlyExactPane(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(runner, slog.Default())
+	if err := client.RespawnPane(context.Background(), "%12", "/tmp/worktree", "exec /tmp/restart.sh"); err != nil {
+		t.Fatalf("RespawnPane: %v", err)
+	}
+	want := [][]string{{"respawn-pane", "-k", "-t", "%12", "-c", "/tmp/worktree", "exec /tmp/restart.sh"}}
+	if !reflect.DeepEqual(runner.commands, want) {
+		t.Fatalf("commands = %#v, want %#v", runner.commands, want)
+	}
+}
+
 func TestClient_NewSessionWithCommand(t *testing.T) {
 	runner := &recordingRunner{}
 	client := NewClient(runner, slog.Default())
@@ -360,6 +372,29 @@ func TestClient_KillSession(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestClient_KillWindowTargetsExactSessionWindow(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(runner, slog.Default())
+	if err := client.KillWindow(context.Background(), "worker", "resolve-conflict"); err != nil {
+		t.Fatal(err)
+	}
+	require.Equal(t, [][]string{{"kill-window", "-t", "worker:resolve-conflict"}}, runner.commands)
+
+	if err := client.KillWindow(context.Background(), "worker", " "); err == nil {
+		t.Fatal("blank window target unexpectedly accepted")
+	}
+}
+
+func TestClient_HasWindowMatchesExactName(t *testing.T) {
+	runner := &recordingOutputRunner{outputs: []string{"shell\nresolve-conflict-old\nresolve-conflict\n"}}
+	client := NewClient(runner, slog.Default())
+	found, err := client.HasWindow(context.Background(), "worker", "resolve-conflict")
+	if err != nil || !found {
+		t.Fatalf("exact window found=%t err=%v", found, err)
+	}
+	require.Equal(t, [][]string{{"list-windows", "-t", "worker", "-F", "#{window_name}"}}, runner.commands)
 }
 
 func TestClient_SendKeys(t *testing.T) {

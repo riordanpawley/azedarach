@@ -14,6 +14,7 @@ const (
 	CommandOrchestratorSessionStop         = "orchestration.session.stop"
 	CommandOrchestratorSessionStatus       = "orchestration.session.status"
 	EventOrchestrationLoopUpdated          = "orchestration.loop.updated"
+	EventPublicationOperationUpdated       = "publication.operation.updated"
 	OrchestrationProjectionAuthoritySQLite = "sqlite"
 )
 
@@ -67,6 +68,7 @@ type OrchestrationSnapshot struct {
 	Roots                  []string                                  `json:"roots,omitempty"`
 	Capacity               OrchestrationCapacity                     `json:"capacity"`
 	ValidationCapacity     *domain.ValidationSnapshot                `json:"validation_capacity,omitempty"`
+	PublicationQueue       []domain.PublicationOperation             `json:"publication_queue,omitempty"`
 	Runnable               []string                                  `json:"runnable"`
 	NestedRoots            []OrchestrationNestedRoot                 `json:"nested_roots,omitempty"`
 	Pending                []OrchestrationPending                    `json:"pending,omitempty"`
@@ -119,9 +121,18 @@ type OrchestrationReview struct {
 	Evidence           *domain.WorkerEvidencePacket   `json:"evidence,omitempty"`
 	ContextRisk        *domain.IssueContextRiskPacket `json:"context_risk,omitempty"`
 	EvidenceSource     string                         `json:"evidence_source,omitempty"`
+	ReviewEpochEventID int64                          `json:"review_epoch_event_id,omitempty"`
+	EvidenceEventID    int64                          `json:"evidence_event_id,omitempty"`
+	EvidenceSeq        int64                          `json:"evidence_seq,omitempty"`
+	EvidenceDigest     string                         `json:"evidence_digest,omitempty"`
+	SourceOID          string                         `json:"source_oid,omitempty"`
 	WorktreePath       string                         `json:"worktree_path,omitempty"`
 	Branch             string                         `json:"branch,omitempty"`
 	BaseBranch         string                         `json:"base_branch,omitempty"`
+	DiffBaseRevision   string                         `json:"diff_base_revision,omitempty"`
+	HeadRevision       string                         `json:"head_revision,omitempty"`
+	DiffScope          string                         `json:"diff_scope,omitempty"`
+	DiffRange          string                         `json:"diff_range,omitempty"`
 	DiffStat           string                         `json:"diff_stat,omitempty"`
 	ExecutionOwner     string                         `json:"execution_owner,omitempty"`
 	OrchestrationOwner string                         `json:"orchestration_owner,omitempty"`
@@ -180,10 +191,23 @@ type OrchestrationStartFailure struct {
 	OperationState string `json:"operation_state,omitempty"`
 	Message        string `json:"message,omitempty"`
 }
+
+type OrchestrationAdmissionPhase string
+
+const (
+	OrchestrationAdmissionSnapshot              OrchestrationAdmissionPhase = "snapshot_admission"
+	OrchestrationAdmissionProjectionCheckpoint  OrchestrationAdmissionPhase = "projection_source_checkpoint"
+	OrchestrationAdmissionOperationsStore       OrchestrationAdmissionPhase = "operations_store"
+	OrchestrationAdmissionObservationProjection OrchestrationAdmissionPhase = "project_observation_projection"
+)
+
 type OrchestrationPending struct {
-	IssueID        string `json:"issue_id"`
-	OperationID    string `json:"operation_id,omitempty"`
-	OperationState string `json:"operation_state,omitempty"`
+	IssueID        string                      `json:"issue_id"`
+	OperationID    string                      `json:"operation_id,omitempty"`
+	OperationState string                      `json:"operation_state,omitempty"`
+	Phase          OrchestrationAdmissionPhase `json:"phase,omitempty"`
+	Message        string                      `json:"message,omitempty"`
+	Retryable      bool                        `json:"retryable,omitempty"`
 }
 type OrchestrationSession struct {
 	IssueID           string                 `json:"issue_id"`
@@ -263,19 +287,20 @@ type OrchestrationIntentRequest struct {
 }
 
 type OrchestrationIntentResult struct {
-	Scope     domain.OrchestrationScope  `json:"scope"`
-	Kind      OrchestrationIntentKind    `json:"kind"`
-	IntentKey string                     `json:"intent_key"`
-	Revision  uint64                     `json:"revision"`
-	Requested []string                   `json:"requested"`
-	Started   []string                   `json:"started,omitempty"`
-	Returned  []string                   `json:"returned,omitempty"`
-	Closed    []string                   `json:"closed,omitempty"`
-	Launched  []OrchestrationLaunch      `json:"launched,omitempty"`
-	Pending   []OrchestrationPending     `json:"pending,omitempty"`
-	Routed    []OrchestrationRouteResult `json:"routed,omitempty"`
-	Skipped   map[string]string          `json:"skipped,omitempty"`
-	Failed    map[string]string          `json:"failed,omitempty"`
+	Scope        domain.OrchestrationScope     `json:"scope"`
+	Kind         OrchestrationIntentKind       `json:"kind"`
+	IntentKey    string                        `json:"intent_key"`
+	Revision     uint64                        `json:"revision"`
+	Requested    []string                      `json:"requested"`
+	Started      []string                      `json:"started,omitempty"`
+	Returned     []string                      `json:"returned,omitempty"`
+	Closed       []string                      `json:"closed,omitempty"`
+	Launched     []OrchestrationLaunch         `json:"launched,omitempty"`
+	Pending      []OrchestrationPending        `json:"pending,omitempty"`
+	Publications []domain.PublicationOperation `json:"publications,omitempty"`
+	Routed       []OrchestrationRouteResult    `json:"routed,omitempty"`
+	Skipped      map[string]string             `json:"skipped,omitempty"`
+	Failed       map[string]string             `json:"failed,omitempty"`
 }
 
 type OrchestrationRouteResult struct {

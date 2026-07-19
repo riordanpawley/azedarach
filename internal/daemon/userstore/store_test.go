@@ -77,6 +77,7 @@ func TestRealUserDatabaseMigrationClone(t *testing.T) {
 	if beforeProjects != afterProjects || beforeIssues != afterIssues || beforeCustom != afterCustom || beforeSelections != afterSelections {
 		t.Fatalf("row preservation projects=%d/%d issues=%d/%d custom=%d/%d selections=%d/%d", beforeProjects, afterProjects, beforeIssues, afterIssues, beforeCustom, afterCustom, beforeSelections, afterSelections)
 	}
+	t.Logf("real user clone summary path=%s projects=%d issues=%d custom_views=%d selections=%d", path, afterProjects, afterIssues, afterCustom, afterSelections)
 	if err = store.Close(); err != nil {
 		t.Fatal(err)
 	}

@@ -479,27 +479,134 @@ func TestManagedAgentSignalIdentityRejectsStaleAndReusedIncarnations(t *testing.
 	d.tmux = tmux.NewClient(runner, slog.Default())
 	t.Cleanup(d.closeRuntimeStateStores)
 	ctx := context.Background()
-	start := protocol.RuntimeSignalIngestCommandBody{TmuxPane: "%12", LogicalPaneID: "agent", AgentIncarnation: "old", Event: "session_start"}
+	start := protocol.RuntimeSignalIngestCommandBody{TmuxPane: "%12", LogicalPaneID: "agent", PanePID: 100, AgentIncarnation: "old", Event: "session_start"}
 	accepted, _, err := d.validateManagedAgentSignalIdentity(ctx, "p", "az-1.pane-12", start)
 	if err != nil || !accepted {
 		t.Fatalf("bind initial identity accepted=%v err=%v", accepted, err)
 	}
 	runner.pid = 200
+	start.PanePID = 200
 	start.AgentIncarnation = "new"
 	accepted, _, err = d.validateManagedAgentSignalIdentity(ctx, "p", "az-1.pane-12", start)
 	if err != nil || !accepted {
 		t.Fatalf("bind replacement identity accepted=%v err=%v", accepted, err)
 	}
+	prompt := start
+	prompt.Event = "user_prompt_submit"
+	accepted, message, err := d.validateManagedAgentSignalIdentity(ctx, "p", "az-1.pane-12", prompt)
+	if err != nil || !accepted || !strings.Contains(message, "prompt submission acknowledged") {
+		t.Fatalf("prompt acknowledgement accepted=%v message=%q err=%v", accepted, message, err)
+	}
+	identity, found, err := d.sessionRuntimeStateStore("p").GetManagedAgentIdentity(ctx, "p", "az-1", "agent")
+	if err != nil || !found || !identity.UpdatedAt.After(identity.ObservedAt) {
+		t.Fatalf("durable prompt acknowledgement = %+v found=%t err=%v", identity, found, err)
+	}
 	stale := start
 	stale.AgentIncarnation = "old"
 	stale.PanePID = 100
 	stale.Event = "idle_prompt"
-	accepted, message, err := d.validateManagedAgentSignalIdentity(ctx, "p", "az-1.pane-12", stale)
+	accepted, message, err = d.validateManagedAgentSignalIdentity(ctx, "p", "az-1.pane-12", stale)
 	if err != nil {
 		t.Fatalf("validate stale identity: %v", err)
 	}
 	if accepted || !strings.Contains(message, "stale or reused") {
 		t.Fatalf("stale identity accepted=%v message=%q", accepted, message)
+	}
+}
+
+func TestManagedAgentSignalAdmissionRequiresCompleteIdentityAfterBinding(t *testing.T) {
+	tests := []struct {
+		name       string
+		managed    bool
+		mutate     func(*protocol.RuntimeSignalIngestCommandBody)
+		wantAccept bool
+	}{
+		{name: "managed exact tuple", managed: true, wantAccept: true},
+		{name: "managed mismatched incarnation", managed: true, mutate: func(cmd *protocol.RuntimeSignalIngestCommandBody) { cmd.AgentIncarnation = "restart-stale" }},
+		{name: "managed whole tuple omitted", managed: true, mutate: func(cmd *protocol.RuntimeSignalIngestCommandBody) {
+			cmd.LogicalPaneID, cmd.TmuxPane, cmd.PanePID, cmd.AgentIncarnation = "", "", 0, ""
+		}},
+		{name: "managed logical pane omitted", managed: true, mutate: func(cmd *protocol.RuntimeSignalIngestCommandBody) { cmd.LogicalPaneID = "" }},
+		{name: "managed tmux pane omitted", managed: true, mutate: func(cmd *protocol.RuntimeSignalIngestCommandBody) { cmd.TmuxPane = "" }},
+		{name: "managed pane pid omitted", managed: true, mutate: func(cmd *protocol.RuntimeSignalIngestCommandBody) { cmd.PanePID = 0 }},
+		{name: "managed incarnation omitted", managed: true, mutate: func(cmd *protocol.RuntimeSignalIngestCommandBody) { cmd.AgentIncarnation = "" }},
+		{name: "unmanaged absent capability", wantAccept: true, mutate: func(cmd *protocol.RuntimeSignalIngestCommandBody) {
+			cmd.LogicalPaneID, cmd.TmuxPane, cmd.PanePID, cmd.AgentIncarnation = "", "", 0, ""
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := newRuntimeProjectionStore(t)
+			t.Cleanup(func() { _ = store.Close() })
+			const projectID, sessionID, issueID = "project", "az-managed", "managed"
+			boundAt := time.Date(2026, time.July, 19, 3, 24, 0, 0, time.UTC)
+			if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
+				ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning,
+				ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: boundAt,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if tt.managed {
+				if err := store.UpsertManagedAgentIdentity(ctx, daemonstate.ManagedAgentIdentity{
+					ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: "12",
+					PanePID: 100, AgentIncarnation: "restart-current", ObservedAt: boundAt,
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runner := &managedIdentityTmuxRunner{session: sessionID, pane: "%12", pid: 100}
+			d := &Daemon{
+				cfg:          Config{RepoDir: ".", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+				sessionStore: daemonstate.NewStore(), runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{".": store},
+			}
+			d.tmux = tmux.NewClient(runner, slog.Default())
+			d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
+			cmd := protocol.RuntimeSignalIngestCommandBody{
+				Source: protocol.RuntimeSignalSourceAgentHook, Kind: protocol.RuntimeSignalKindAgentActivityChanged,
+				ProjectID: projectID, IssueID: issueID, SessionID: sessionID, Agent: "codex", Event: "pre_tool_use",
+				LogicalPaneID: "agent", TmuxPane: "%12", PanePID: 100, AgentIncarnation: "restart-current",
+			}
+			if tt.mutate != nil {
+				tt.mutate(&cmd)
+			}
+			out := protocol.RuntimeSignalIngestResponseBody{Accepted: true}
+			d.ingestAgentActivitySignal(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: projectID}}, projectID, cmd, &out)
+
+			identityStageFound := false
+			identityStageOK := false
+			for _, stage := range out.Stages {
+				if stage.Name == "managed_agent_identity" {
+					identityStageFound, identityStageOK = true, stage.OK
+				}
+			}
+			observation, observationFound, err := store.GetPhysicalSessionObservation(ctx, projectID, sessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			session, sessionFound, err := store.GetSessionState(ctx, projectID, sessionID)
+			if err != nil || !sessionFound {
+				t.Fatalf("session found=%t err=%v", sessionFound, err)
+			}
+			if tt.wantAccept {
+				if !runtimeSignalStageOK(out.Stages, "agent_activity") || !observationFound || observation.Activity != "busy" || session.Activity != "busy" {
+					t.Fatalf("accepted stages=%+v observation=%+v found=%t session=%+v", out.Stages, observation, observationFound, session)
+				}
+				if tt.managed && (!identityStageFound || !identityStageOK) {
+					t.Fatalf("managed exact identity stage found=%t ok=%t stages=%+v", identityStageFound, identityStageOK, out.Stages)
+				}
+				if !tt.managed && identityStageFound {
+					t.Fatalf("unmanaged hook unexpectedly entered identity gate: %+v", out.Stages)
+				}
+				return
+			}
+			if !identityStageFound || identityStageOK || runtimeSignalStageOK(out.Stages, "agent_activity") {
+				t.Fatalf("rejected identity stages=%+v", out.Stages)
+			}
+			if !observationFound || observation.Activity != "idle" || session.Activity != "idle" {
+				t.Fatalf("rejected identity mutated observation=%+v found=%t session=%+v", observation, observationFound, session)
+			}
+		})
 	}
 }
 

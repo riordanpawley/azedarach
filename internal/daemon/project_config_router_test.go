@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 )
 
 func TestRuntimeConfigForProjectLoadsWorkflowMode(t *testing.T) {
@@ -55,6 +57,37 @@ func TestRuntimeConfigForProjectLoadsCodexAppServer(t *testing.T) {
 	d := New(Config{RepoDir: repoDir, CLITool: "codex"})
 	if cfg := d.runtimeConfigForProject(filepath.Base(repoDir)); !cfg.CodexAppServer {
 		t.Fatal("CodexAppServer = false, want true")
+	}
+}
+
+func TestRuntimeConfigForProjectLoadsGateFailureArtifactPaths(t *testing.T) {
+	t.Parallel()
+	repoDir := t.TempDir()
+	configDir := filepath.Join(repoDir, ".azedarach")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configJSON := `{"$version":11,"gate":{"failureArtifactPaths":["build/junit","coverage/raw"]}}`
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d := New(Config{RepoDir: repoDir})
+	got := d.runtimeConfigForProject(filepath.Base(repoDir)).GateFailureArtifactPaths
+	if strings.Join(got, ",") != "build/junit,coverage/raw" {
+		t.Fatalf("GateFailureArtifactPaths = %v", got)
+	}
+}
+
+func TestRuntimeConfigForProjectDoesNotInheritRootFailureArtifactPaths(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	rootRepo := t.TempDir()
+	consumerRepo := t.TempDir()
+	if err := appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{Projects: []appconfig.Project{{ID: "consumer", Name: "Consumer", Path: consumerRepo}}}); err != nil {
+		t.Fatal(err)
+	}
+	d := New(Config{RepoDir: rootRepo, GateFailureArtifactPaths: []string{".tmp/root-only"}})
+	if got := d.runtimeConfigForProject("consumer").GateFailureArtifactPaths; len(got) != 0 {
+		t.Fatalf("registered consumer inherited root failure artifact paths: %v", got)
 	}
 }
 

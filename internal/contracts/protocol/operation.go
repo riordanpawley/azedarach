@@ -35,12 +35,13 @@ const (
 )
 
 type OperationProgress struct {
-	Phase   string `json:"phase,omitempty" msgpack:"phase,omitempty"`
-	Message string `json:"message,omitempty" msgpack:"message,omitempty"`
-	Current int64  `json:"current,omitempty" msgpack:"current,omitempty"`
-	Total   int64  `json:"total,omitempty" msgpack:"total,omitempty"`
-	Unit    string `json:"unit,omitempty" msgpack:"unit,omitempty"`
-	Percent int    `json:"percent,omitempty" msgpack:"percent,omitempty"`
+	Phase            string `json:"phase,omitempty" msgpack:"phase,omitempty"`
+	Message          string `json:"message,omitempty" msgpack:"message,omitempty"`
+	Current          int64  `json:"current,omitempty" msgpack:"current,omitempty"`
+	Total            int64  `json:"total,omitempty" msgpack:"total,omitempty"`
+	Unit             string `json:"unit,omitempty" msgpack:"unit,omitempty"`
+	Percent          int    `json:"percent,omitempty" msgpack:"percent,omitempty"`
+	AgentIncarnation string `json:"agent_incarnation,omitempty" msgpack:"agent_incarnation,omitempty"`
 }
 
 type OperationError struct {

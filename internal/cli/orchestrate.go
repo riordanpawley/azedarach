@@ -37,6 +37,7 @@ type OrchestrateStartOptions struct {
 	JSON                bool
 	BaseBranchOverride  string
 	OverrideBoardHealth bool
+	IntentKey           string
 }
 
 type OrchestrateGroupOptions struct {
@@ -179,6 +180,7 @@ type orchestrateStatusResult struct {
 	Runnable               []string                             `json:"runnable"`
 	NestedRoots            []orchestrateNestedRoot              `json:"nested_roots,omitempty"`
 	Pending                []orchestratePendingStart            `json:"pending,omitempty"`
+	PublicationQueue       []domain.PublicationOperation        `json:"publication_queue,omitempty"`
 	Active                 []string                             `json:"active,omitempty"`
 	ActiveSessions         []orchestrateActiveSession           `json:"active_sessions,omitempty"`
 	SessionStartProgress   []orchestrateSessionStartProgress    `json:"session_start_progress,omitempty"`
@@ -235,6 +237,7 @@ type orchestrateObservationGroup struct {
 
 type orchestrateStartResult struct {
 	RootIssueID string                    `json:"root_issue_id"`
+	IntentKey   string                    `json:"intent_key"`
 	Limit       int                       `json:"limit"`
 	Requested   []string                  `json:"requested"`
 	NestedRoots []string                  `json:"nested_roots,omitempty"`
@@ -310,6 +313,7 @@ type orchestrateWatchFrame struct {
 	Runnable               []string                             `json:"runnable"`
 	NestedRoots            []orchestrateNestedRoot              `json:"nested_roots,omitempty"`
 	Pending                []orchestratePendingStart            `json:"pending,omitempty"`
+	PublicationQueue       []domain.PublicationOperation        `json:"publication_queue,omitempty"`
 	Active                 []string                             `json:"active,omitempty"`
 	ActiveSessions         []orchestrateActiveSession           `json:"active_sessions,omitempty"`
 	SessionStartProgress   []orchestrateSessionStartProgress    `json:"session_start_progress,omitempty"`
@@ -345,6 +349,7 @@ type orchestrateCompactReadiness struct {
 	Active                 []orchestrateCompactActiveSession    `json:"active,omitempty"`
 	Blocked                map[string]string                    `json:"blocked,omitempty"`
 	Pending                []orchestratePendingStart            `json:"pending,omitempty"`
+	PublicationQueue       []domain.PublicationOperation        `json:"publication_queue,omitempty"`
 	NestedRoots            []orchestrateCompactNestedRoot       `json:"nested_roots,omitempty"`
 	SessionStartProgress   []orchestrateCompactSessionProgress  `json:"session_start_progress,omitempty"`
 	StaleCloseableChildren []orchestrateStaleCloseableCandidate `json:"stale_closeable_children,omitempty"`
@@ -544,6 +549,7 @@ func ParseOrchestrateStartArgs(args []string) (OrchestrateStartOptions, error) {
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&opts.RootIssueID, "root", "", "root issue id")
 	fs.IntVar(&opts.Limit, "limit", 3, "maximum runnable issues to start")
+	fs.StringVar(&opts.IntentKey, "intent-key", "", "stable key to reuse when retrying the same start request")
 	fs.BoolVar(&opts.OverrideBoardHealth, "override-board-health", false, "allow project-wide start despite board health refusal")
 	fs.Func("issue", "specific runnable issue id (repeatable)", func(value string) error {
 		trimmed := strings.TrimSpace(value)
@@ -564,6 +570,7 @@ func ParseOrchestrateStartArgs(args []string) (OrchestrateStartOptions, error) {
 		return OrchestrateStartOptions{}, fmt.Errorf("limit must be >= 1")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
+	opts.IntentKey = strings.TrimSpace(opts.IntentKey)
 	opts.IssueIDs = dedupeSortedStrings(opts.IssueIDs)
 	return opts, nil
 }
@@ -905,6 +912,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		Runnable:               ready.Runnable,
 		NestedRoots:            orchestrateNestedRootsFromDaemon(ready.NestedRoots),
 		Pending:                orchestratePendingStartsFromDaemon(ready.Pending),
+		PublicationQueue:       append([]domain.PublicationOperation(nil), ready.PublicationQueue...),
 		Active:                 ready.Active,
 		ActiveSessions:         orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
 		SessionStartProgress:   orchestrateSessionStartProgressFromDaemon(ready.SessionStartProgress),
@@ -948,6 +956,22 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		fmt.Println("Pending starts:")
 		for _, pending := range result.Pending {
 			fmt.Printf("- %s operation=%s state=%s\n", pending.IssueID, pending.OperationID, pending.OperationState)
+		}
+	}
+	if len(result.PublicationQueue) > 0 {
+		fmt.Println("Publication queue:")
+		for _, publication := range result.PublicationQueue {
+			fmt.Printf("- %s issue=%s intent=%s state=%s position=%d source=%s base=%s candidate=%s lease=%s evidence=%s validation=%s reused=%s",
+				publication.OperationID, publication.IssueID, publication.IntentKey, publication.State, publication.QueuePosition,
+				publication.SourceRevision, publication.BaseRevision, publication.CandidateRevision, publication.LeaseOwner,
+				publication.EvidenceSource, publication.ValidationRequestID, publication.ReusedEvidenceID)
+			if publication.FailureKind != "" {
+				fmt.Printf(" failure=%s", publication.FailureKind)
+			}
+			if publication.FailureArtifact != "" {
+				fmt.Printf(" artifact=%s", publication.FailureArtifact)
+			}
+			fmt.Println()
 		}
 	}
 	if len(result.NestedRoots) > 0 {
@@ -1313,17 +1337,20 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	if err != nil {
 		return orchestrateStartResult{}, err
 	}
-	ready, err := deps.DaemonClient.TaskGraphReadinessForActor(ctx, opts.RootIssueID, ownerID)
-	if err != nil {
-		return orchestrateStartResult{}, err
-	}
-	intentKey, err := newCLIOrchestrationStartIntentKey()
-	if err != nil {
-		return orchestrateStartResult{}, err
+	intentKey := strings.TrimSpace(opts.IntentKey)
+	if intentKey == "" {
+		intentKey, err = newCLIOrchestrationStartIntentKey()
+		if err != nil {
+			return orchestrateStartResult{}, err
+		}
 	}
 	applied, err := deps.DaemonClient.ApplyOrchestrationIntent(ctx, protocol.OrchestrationIntentRequest{Scope: scope, Kind: protocol.OrchestrationIntentStart, IntentKey: intentKey, ActorID: ownerID, IssueIDs: opts.IssueIDs, Limit: opts.Limit, RepoDir: deps.RepoDir, BaseBranch: opts.BaseBranchOverride, OverrideBoardHealth: opts.OverrideBoardHealth})
 	if err != nil {
 		return orchestrateStartResult{}, err
+	}
+	ready, readinessErr := deps.DaemonClient.TaskGraphReadinessForActor(ctx, opts.RootIssueID, ownerID)
+	if readinessErr != nil && len(applied.Pending) == 0 {
+		return orchestrateStartResult{}, readinessErr
 	}
 	nestedRootIDs := make([]string, 0, len(ready.NestedRoots))
 	for _, nested := range ready.NestedRoots {
@@ -1332,6 +1359,7 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 
 	result := orchestrateStartResult{
 		RootIssueID: opts.RootIssueID,
+		IntentKey:   intentKey,
 		Limit:       opts.Limit,
 		Requested:   append([]string(nil), applied.Requested...),
 		NestedRoots: nestedRootIDs,
@@ -1339,12 +1367,27 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 		Launched:    make([]orchestrateStartLaunch, 0, len(applied.Launched)),
 		Skipped:     cloneOrchestrateStartDetails(applied.Skipped),
 		Failed:      cloneOrchestrateStartDetails(applied.Failed),
-		Warnings:    orchestrateStartWarnings(ctx, deps, ready, len(applied.Launched)),
 		Advice: orchestrateStartAdvice{
 			WatchCommand:     fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", opts.RootIssueID),
 			StatusCommand:    fmt.Sprintf("az orchestrate status --root %s --json", opts.RootIssueID),
 			WatchInstruction: "Start this watch command in another pane/session and leave it running while workers are active; use active_sessions activity before considering pane capture. Do not add --once for orchestration monitoring.",
 		},
+	}
+	if readinessErr == nil {
+		result.Warnings = orchestrateStartWarnings(ctx, deps, ready, len(applied.Launched))
+	} else {
+		result.Warnings = append(result.Warnings, "durable start intent is queued; readiness projection remains unavailable: "+readinessErr.Error())
+	}
+	for _, pending := range applied.Pending {
+		reason := strings.TrimSpace(string(pending.Phase))
+		if pending.Message != "" {
+			if reason != "" {
+				reason += ": "
+			}
+			reason += pending.Message
+		}
+		retry := orchestrateStartRetryCommand(opts, intentKey)
+		result.Pending = append(result.Pending, orchestrateStartPending{IssueID: pending.IssueID, OperationID: pending.OperationID, OperationState: pending.OperationState, Reason: reason, FollowUpCommands: []string{retry}})
 	}
 
 	for _, daemonLaunch := range applied.Launched {
@@ -1373,6 +1416,24 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	}
 
 	return result, nil
+}
+
+func orchestrateStartRetryCommand(opts OrchestrateStartOptions, intentKey string) string {
+	parts := []string{"az", "orchestrate", "start"}
+	if opts.Project != "" {
+		parts = append(parts, "--project", shellSingleQuote(opts.Project))
+	}
+	if opts.RootIssueID != "" {
+		parts = append(parts, "--root", shellSingleQuote(opts.RootIssueID))
+	}
+	parts = append(parts, "--limit", fmt.Sprintf("%d", opts.Limit), "--intent-key", shellSingleQuote(intentKey))
+	for _, issueID := range opts.IssueIDs {
+		parts = append(parts, "--issue", shellSingleQuote(issueID))
+	}
+	if opts.OverrideBoardHealth {
+		parts = append(parts, "--override-board-health")
+	}
+	return strings.Join(parts, " ")
 }
 
 func cloneOrchestrateStartDetails(in map[string]string) map[string]string {
@@ -1956,6 +2017,7 @@ func formatMillisDuration(ms int64) string {
 
 func printOrchestrateStartResult(result orchestrateStartResult) {
 	fmt.Printf("Root issue: %s\n", result.RootIssueID)
+	fmt.Printf("Intent key: %s\n", result.IntentKey)
 	fmt.Printf("Start limit: %d\n", result.Limit)
 	fmt.Println("Started sessions:")
 	if len(result.Started) == 0 {
@@ -2174,6 +2236,7 @@ func orchestrateWatchFrameFromReadiness(ready daemonclient.TaskGraphReadiness, e
 		Runnable:               ready.Runnable,
 		NestedRoots:            orchestrateNestedRootsFromDaemon(ready.NestedRoots),
 		Pending:                orchestratePendingStartsFromDaemon(ready.Pending),
+		PublicationQueue:       append([]domain.PublicationOperation(nil), ready.PublicationQueue...),
 		Active:                 ready.Active,
 		ActiveSessions:         orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
 		SessionStartProgress:   orchestrateSessionStartProgressFromDaemon(ready.SessionStartProgress),
@@ -2191,6 +2254,7 @@ func orchestrateWatchFrameSnapshotKey(frame orchestrateWatchFrame) string {
 		Runnable               []string                             `json:"runnable"`
 		NestedRoots            []orchestrateNestedRoot              `json:"nested_roots,omitempty"`
 		Pending                []orchestratePendingStart            `json:"pending,omitempty"`
+		PublicationQueue       []domain.PublicationOperation        `json:"publication_queue,omitempty"`
 		Active                 []string                             `json:"active,omitempty"`
 		ActiveSessions         []orchestrateActiveSession           `json:"active_sessions,omitempty"`
 		SessionStartProgress   []orchestrateSessionStartProgress    `json:"session_start_progress,omitempty"`
@@ -2216,6 +2280,7 @@ func orchestrateWatchFrameSnapshotKey(frame orchestrateWatchFrame) string {
 		Runnable:               frame.Runnable,
 		NestedRoots:            nestedRoots,
 		Pending:                frame.Pending,
+		PublicationQueue:       frame.PublicationQueue,
 		Active:                 frame.Active,
 		ActiveSessions:         activeSessions,
 		SessionStartProgress:   sessionStartProgress,
@@ -2763,6 +2828,7 @@ func compactFrameFromStatusResult(result orchestrateStatusResult, since, nextSin
 		Runnable:               result.Runnable,
 		NestedRoots:            result.NestedRoots,
 		Pending:                result.Pending,
+		PublicationQueue:       result.PublicationQueue,
 		Active:                 result.Active,
 		ActiveSessions:         result.ActiveSessions,
 		SessionStartProgress:   result.SessionStartProgress,
@@ -2804,6 +2870,7 @@ func compactFrameFromWatchFrame(frame orchestrateWatchFrame) orchestrateCompactF
 			Active:                 compactActiveSessions(frame.ActiveSessions),
 			Blocked:                compactBlocked(frame.Blocked),
 			Pending:                append([]orchestratePendingStart(nil), frame.Pending...),
+			PublicationQueue:       append([]domain.PublicationOperation(nil), frame.PublicationQueue...),
 			NestedRoots:            compactNestedRoots(frame.NestedRoots),
 			SessionStartProgress:   compactSessionStartProgress(frame.SessionStartProgress),
 			StaleCloseableChildren: append([]orchestrateStaleCloseableCandidate(nil), frame.StaleCloseableChildren...),

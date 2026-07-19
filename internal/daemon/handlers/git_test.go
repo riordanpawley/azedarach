@@ -17,6 +17,7 @@ type fakeGitService struct {
 	pullBaseFn          func(context.Context, string, string, string, string) error
 	pushFn              func(context.Context, string, string, string, string) error
 	mergeFn             func(context.Context, string, string, string) (*git.MergeResult, error)
+	mergeTypedFn        func(context.Context, string, GitMergeRequest) (*GitMergeResult, error)
 	checkoutFn          func(context.Context, string, string, string) error
 	abortMergeFn        func(context.Context, string, string) error
 	diffStatFn          func(context.Context, string, string, string) (string, error)
@@ -75,11 +76,41 @@ func TestGitPushRoutesTypedArguments(t *testing.T) {
 	}
 }
 
+func TestGitHandlerRoutesTypedMergeAndRejectsLegacyEmptyIdentity(t *testing.T) {
+	called := false
+	h := NewGitHandler(&fakeGitService{mergeTypedFn: func(_ context.Context, projectID string, req GitMergeRequest) (*GitMergeResult, error) {
+		called = true
+		if projectID != "project-1" || req.SourceID != "child" || req.TargetID != "parent" || !req.StopTargetSession {
+			t.Fatalf("typed merge args = %q %+v", projectID, req)
+		}
+		return &GitMergeResult{SourceID: req.SourceID, TargetID: req.TargetID, ReceiptRecorded: true, Result: git.MergeResult{Success: true}}, nil
+	}})
+	req := gitRequest(t, CommandGitMerge, gitCommandBody{ProjectID: "project-1", SourceID: "child", TargetID: "parent", StopTargetSession: true, Worktree: "/untrusted", Branch: "untrusted"})
+	resp := h.HandleDirect(context.Background(), req)
+	if !resp.OK || resp.Error != nil || !called {
+		t.Fatalf("typed response = %+v called=%t", resp, called)
+	}
+
+	legacy := gitRequest(t, CommandGitMerge, gitCommandBody{Worktree: "/tmp/target", Branch: "source"})
+	legacy.ProtocolVersion = 55
+	resp = h.HandleDirect(context.Background(), legacy)
+	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest || !strings.Contains(resp.Error.Message, "source_id and target_id") {
+		t.Fatalf("legacy v55-shaped merge response = %+v", resp)
+	}
+}
+
 func (f *fakeGitService) Merge(ctx context.Context, projectID, worktree, branch string) (*git.MergeResult, error) {
 	if f.mergeFn != nil {
 		return f.mergeFn(ctx, projectID, worktree, branch)
 	}
 	return &git.MergeResult{Success: true}, nil
+}
+
+func (f *fakeGitService) MergeTyped(ctx context.Context, projectID string, req GitMergeRequest) (*GitMergeResult, error) {
+	if f.mergeTypedFn != nil {
+		return f.mergeTypedFn(ctx, projectID, req)
+	}
+	return &GitMergeResult{SourceID: req.SourceID, TargetID: req.TargetID, Result: git.MergeResult{Success: true}}, nil
 }
 
 func (f *fakeGitService) Checkout(ctx context.Context, projectID, worktree, branch string) error {
@@ -308,9 +339,9 @@ func TestGitHandlerRoutesCommands(t *testing.T) {
 			wantCmd: CommandGitFetch,
 		},
 		{
-			name:    "merge",
-			req:     gitRequest(t, CommandGitMerge, gitCommandBody{Worktree: "/tmp/az-1", Branch: "main"}),
-			wantCmd: CommandGitMerge,
+			name:    "merge ref",
+			req:     gitRequest(t, CommandGitMergeRef, gitCommandBody{Worktree: "/tmp/az-1", Branch: "main"}),
+			wantCmd: CommandGitMergeRef,
 		},
 		{
 			name:    "checkout",
@@ -374,7 +405,7 @@ func TestGitHandlerRoutesCommands(t *testing.T) {
 				if body.Worktree != "/tmp/az-1" || body.Remote != "origin" {
 					t.Fatalf("response body = %+v", body)
 				}
-			case CommandGitMerge:
+			case CommandGitMergeRef:
 				var body gitMergeResultBody
 				if err := json.Unmarshal(resp.Body, &body); err != nil {
 					t.Fatalf("unmarshal response: %v", err)
@@ -621,7 +652,7 @@ func TestGitHandlerValidationAndErrorMapping(t *testing.T) {
 		t.Fatalf("unexpected timeout mapping: %+v", resp.Error)
 	}
 
-	resp = handler.Handle(context.Background(), gitRequest(t, CommandGitMerge, gitCommandBody{Worktree: "/tmp/az-1", Branch: "main"}))
+	resp = handler.Handle(context.Background(), gitRequest(t, CommandGitMergeRef, gitCommandBody{Worktree: "/tmp/az-1", Branch: "main"}))
 	if resp.OK {
 		t.Fatal("expected merge failure")
 	}
@@ -725,12 +756,12 @@ func TestGitHandlerUsesLongRunningExecutorForMutatingCommands(t *testing.T) {
 	executor := &recordingGitLongRunningExecutor{}
 	handler := NewGitHandler(&fakeGitService{}, WithGitLongRunningExecutor(executor))
 
-	resp := handler.Handle(context.Background(), gitRequest(t, CommandGitMerge, gitCommandBody{Worktree: "/tmp/az-1", Branch: "main"}))
+	resp := handler.Handle(context.Background(), gitRequest(t, CommandGitMergeRef, gitCommandBody{Worktree: "/tmp/az-1", Branch: "main"}))
 	if !resp.OK {
 		t.Fatalf("response = %+v", resp)
 	}
-	if len(executor.commands) != 1 || executor.commands[0] != CommandGitMerge {
-		t.Fatalf("commands = %v, want [%s]", executor.commands, CommandGitMerge)
+	if len(executor.commands) != 1 || executor.commands[0] != CommandGitMergeRef {
+		t.Fatalf("commands = %v, want [%s]", executor.commands, CommandGitMergeRef)
 	}
 
 	_ = handler.Handle(context.Background(), gitRequest(t, CommandGitStatus, gitCommandBody{Worktree: "/tmp/az-1"}))
@@ -752,7 +783,7 @@ func TestGitHandlerRejectsUnsuccessfulMergeResult(t *testing.T) {
 	handler := NewGitHandler(&fakeGitService{mergeFn: func(context.Context, string, string, string) (*git.MergeResult, error) {
 		return &git.MergeResult{Success: false, Message: "hook rejected merge"}, nil
 	}})
-	resp := handler.Handle(context.Background(), gitRequest(t, CommandGitMerge, gitCommandBody{Worktree: "/tmp/az-1", Branch: "source"}))
+	resp := handler.Handle(context.Background(), gitRequest(t, CommandGitMergeRef, gitCommandBody{Worktree: "/tmp/az-1", Branch: "source"}))
 	if resp.OK || resp.Error == nil || !strings.Contains(resp.Error.Message, "hook rejected merge") {
 		t.Fatalf("response = %+v, want unsuccessful result surfaced as command failure", resp)
 	}

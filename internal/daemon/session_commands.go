@@ -118,7 +118,6 @@ const (
 
 	sessionConflictWindowName         = "resolve-conflict"
 	sessionActivityStartupGrace       = 45 * time.Second
-	sessionRestartContinuePromptDelay = 500 * time.Millisecond
 	sessionRestartContinuePrompt      = "Continue your prior task. Start by running `az prime` if you need to refresh issue context, then keep working from the existing conversation without waiting for further instruction."
 	sessionCaptureDefaultLines        = 120
 	sessionCaptureMaxLines            = 1000
@@ -145,6 +144,22 @@ func reportSessionStartProgress(ctx context.Context, phase, message string, perc
 		Total:   100,
 		Unit:    "percent",
 		Percent: percent,
+	})
+}
+
+func reportSessionStartIncarnationProgress(ctx context.Context, phase, message string, percent int, incarnation, promptHandoffPath string) error {
+	required := true
+	return daemonops.ReportProgress(ctx, daemonops.Progress{
+		Phase: phase, Message: message, Current: int64(percent), Total: 100,
+		Unit: "percent", Percent: percent, AgentIncarnation: strings.TrimSpace(incarnation), PromptHandoffPath: strings.TrimSpace(promptHandoffPath), AgentLaunchRequired: &required,
+	})
+}
+
+func reportTmuxOnlySessionStartProgress(ctx context.Context, phase, message string, percent int) error {
+	required := false
+	return daemonops.ReportProgress(ctx, daemonops.Progress{
+		Phase: phase, Message: message, Current: int64(percent), Total: 100,
+		Unit: "percent", Percent: percent, AgentLaunchRequired: &required,
 	})
 }
 
@@ -1097,7 +1112,7 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("issue resource reconcile present failed for %s: %v%s%s", cmd.IssueID, err, cleanupNote, worktreeCleanupNote)), nil
 	}
-	imagePaths, imageErr := d.prepareSessionStartImagePaths(ctx, cmd.ProjectID, cmd.IssueID, worktree.Path, cmd.ImagePaths)
+	imagePaths, imageErr := d.prepareSessionStartImagePaths(ctx, cmd.ProjectID, cmd.IssueID, worktreeManager.RepoDir(), worktree.Path, cmd.ImagePaths)
 	if imageErr != nil {
 		cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
 		worktreeCleanupNote := d.cleanupNewWorktreeAfterInitFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, worktree.Path, reusedWorktree)
@@ -1147,7 +1162,13 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 	launchArtifact := sessionLaunchArtifact{}
 	launchScriptHandedOff := false
 	initialPromptBytes := 0
+	plannedAgentIncarnation := ""
 	if cmd.StartWork {
+		plannedAgentIncarnation, err = newRestartIncarnation()
+		if err != nil {
+			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("plan managed agent incarnation: %v%s", err, cleanupNote)), nil
+		}
 		initialPrompt := strings.TrimSpace(cmd.Prompt)
 		if initialPrompt == "" {
 			parentIssueID := ""
@@ -1158,7 +1179,7 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 		}
 		initialPromptBytes = len(initialPrompt)
 		var launchArtifactErr error
-		launchArtifact, launchArtifactErr = d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: cmd.ProjectID, IssueID: cmd.IssueID, SessionID: cmd.SessionID, Yolo: cmd.Yolo, ImagePaths: cmd.ImagePaths, Prompt: initialPrompt, InitReadyPath: sessionInitMarker.RelativePath, StartupEnvCommands: d.sessionLaunchStartupExportCommands(d.runtimeConfigForProject(cmd.ProjectID), resourceCtx)})
+		launchArtifact, launchArtifactErr = d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: cmd.ProjectID, IssueID: cmd.IssueID, SessionID: cmd.SessionID, Yolo: cmd.Yolo, ImagePaths: cmd.ImagePaths, Prompt: initialPrompt, InitReadyPath: sessionInitMarker.RelativePath, StartupEnvCommands: d.sessionLaunchStartupExportCommands(d.runtimeConfigForProject(cmd.ProjectID), resourceCtx), LogicalPaneID: "agent", AgentIncarnation: plannedAgentIncarnation})
 		if launchArtifactErr != nil {
 			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare session launch artifact: %v%s", launchArtifactErr, cleanupNote)), nil
@@ -1171,30 +1192,48 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 			launchArtifact.remove()
 		}()
 	}
-	reportSessionStartProgress(ctx, "tmux_launch", "creating tmux session", 70)
+	if cmd.StartWork {
+		if err := reportSessionStartIncarnationProgress(ctx, "tmux_launch", "creating tmux session for planned managed agent incarnation", 70, plannedAgentIncarnation, launchArtifact.PromptHandoff.PromptPath); err != nil {
+			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist managed agent launch plan: %v%s", err, cleanupNote)), nil
+		}
+	} else {
+		if err := reportTmuxOnlySessionStartProgress(ctx, "tmux_launch", "creating tmux session without agent launch", 70); err != nil {
+			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist tmux-only launch plan: %v%s", err, cleanupNote)), nil
+		}
+	}
+	initialActivity, initialActivitySource := initialSessionStartActivity(cmd.StartWork)
 	if cmd.StartWork {
 		if err := d.tmux.NewSessionWithCommandAndEnvironment(ctx, cmd.SessionID, worktree.Path, launchCommand, nil); err != nil {
-			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+			cleanupNote := d.reconcileAmbiguousSessionStartCreateError(ctx, req, cmd, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, sessionStartLaunchFailureMessage("tmux_launch", cmd, worktree.Path, launchCommand, true, err, cleanupNote)), nil
 		}
 		launchScriptHandedOff = true
 		if err := d.setSessionContextEnv(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID); err != nil {
-			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("set session context env: %v%s", err, cleanupNote)), nil
 		}
 		if err := d.setIssueResourceSessionEnv(ctx, cmd.ProjectID, resourceCtx); err != nil {
-			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("set issue resource env: %v%s", err, cleanupNote)), nil
 		}
-		if err := waitForSessionPromptHandoffConsumed(ctx, launchArtifact.PromptHandoff); err != nil {
-			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
-			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("confirm session bootstrap prompt delivery: %v%s", err, cleanupNote)), nil
+		if err := d.waitForInitialManagedAgentAcknowledgement(ctx, cmd.ProjectID, cmd.SessionID, plannedAgentIncarnation, launchArtifact.PromptHandoff); err != nil {
+			launchArtifact.remove()
+			cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
+			return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("confirm managed agent bootstrap: %v%s", err, cleanupNote)), nil
 		}
 		d.startSessionAsyncInitCommands(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, worktree.Path)
 		if len(d.runtimeConfigForProject(cmd.ProjectID).SessionSyncInitCommands) > 0 {
-			reportSessionStartProgress(ctx, "init_commands", "launch sent; configured init commands likely running before agent hooks", 90)
+			if err := reportSessionStartIncarnationProgress(ctx, "init_commands", "managed agent acknowledged; configured init commands still converging", 90, plannedAgentIncarnation, launchArtifact.PromptHandoff.PromptPath); err != nil {
+				cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
+				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist acknowledged managed agent progress: %v%s", err, cleanupNote)), nil
+			}
 		} else {
-			reportSessionStartProgress(ctx, "agent_launch", "launch sent; waiting for agent activity", 90)
+			if err := reportSessionStartIncarnationProgress(ctx, "agent_launch", "managed agent incarnation acknowledged", 90, plannedAgentIncarnation, launchArtifact.PromptHandoff.PromptPath); err != nil {
+				cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
+				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist acknowledged managed agent progress: %v%s", err, cleanupNote)), nil
+			}
 		}
 		if d.cfg.Logger != nil {
 			d.cfg.Logger.Info("daemon session start launch command installed",
@@ -1206,26 +1245,25 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 		}
 	} else {
 		if err := d.tmux.NewSessionWithEnvironment(ctx, cmd.SessionID, worktree.Path, nil); err != nil {
-			cleanupNote := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+			cleanupNote := d.reconcileAmbiguousSessionStartCreateError(ctx, req, cmd, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, sessionStartLaunchFailureMessage("tmux_launch", cmd, worktree.Path, "", false, err, cleanupNote)), nil
 		}
 		if err := d.exportSessionContextEnv(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID); err != nil {
-			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("export session context env: %v%s", err, cleanupNote)), nil
 		}
 		if err := d.exportIssueResourceSessionEnv(ctx, cmd.ProjectID, resourceCtx); err != nil {
-			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("export issue resource env: %v%s", err, cleanupNote)), nil
 		}
-		reportSessionStartProgress(ctx, "tmux_launch", "tmux session created without agent launch", 90)
+		_ = reportTmuxOnlySessionStartProgress(ctx, "tmux_launch", "tmux session created without agent launch", 90)
 	}
 	if cmd.StartWork && sessionInitMarker.AbsolutePath != "" {
 		if err := d.waitForSessionInitReady(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, sessionInitMarker); err != nil {
-			cleanupNote := d.issueResourceFailedStartRollbackNote(ctx, cmd.ProjectID, cmd.SessionID, resourceCtx)
+			cleanupNote := d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote), nil
 		}
 	}
-	initialActivity, initialActivitySource := initialSessionStartActivity(cmd.StartWork)
 	if err := d.applyTypedSessionLifecycleTransition(
 		ctx,
 		req,
@@ -1356,6 +1394,29 @@ func (d *Daemon) compensateSessionStartFailure(ctx context.Context, req protocol
 	return d.compensateSessionStartFailureWithSelector(ctx, req, projectID, sessionID, issueID, resourceCtx, liveActivity, liveActivitySource, normalizeSessionIntentSelector(sessionIntentSelector{}, issueID))
 }
 
+func (d *Daemon) reconcileAmbiguousSessionStartCreateError(ctx context.Context, req protocol.RequestEnvelope, cmd resolvedSessionTarget, resourceCtx issueResourceLifecycleContext, liveActivity, liveActivitySource string, selector sessionIntentSelector) string {
+	live, probeErr := d.tmux.HasSession(ctx, cmd.SessionID)
+	if probeErr != nil {
+		note := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+		return note + fmt.Sprintf("; failed-start tmux creation reconciliation also failed: %v", probeErr)
+	}
+	if !live {
+		return d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
+	}
+
+	note := ""
+	if err := d.applyTypedSessionLifecycleTransition(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonhandlers.CommandSessionStart, liveActivity, liveActivitySource, selector); err != nil {
+		note += fmt.Sprintf("; ambiguous tmux creation durable intent recording also failed: %v", err)
+	}
+	if err := d.persistObservedRuntimeProjection(ctx, cmd.ProjectID, req.Meta, daemonstate.Session{
+		ID: cmd.SessionID, ObservedState: daemonstate.SessionStateRunning,
+		Activity: liveActivity, ActivitySource: liveActivitySource, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		note += fmt.Sprintf("; ambiguous tmux creation runtime observation also failed: %v", err)
+	}
+	return note + d.compensateSessionStartFailureWithSelector(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, resourceCtx, liveActivity, liveActivitySource, selector)
+}
+
 func (d *Daemon) compensateSessionStartFailureWithSelector(ctx context.Context, req protocol.RequestEnvelope, projectID, sessionID, issueID string, resourceCtx issueResourceLifecycleContext, liveActivity, liveActivitySource string, selector sessionIntentSelector) string {
 	note := d.issueResourceFailedStartCleanupNote(ctx, projectID, resourceCtx)
 	live := true
@@ -1382,7 +1443,7 @@ func (d *Daemon) compensateSessionStartFailureWithSelector(ctx context.Context, 
 	alignTransient := false
 	if store != nil {
 		intent := daemonstate.Session{ID: sessionID, IssueID: issueID, Role: selector.Role, ScopeKind: selector.ScopeKind, ScopeID: selector.ScopeID}
-		rows, winner, err := store.ApplySessionCompensation(ctx, projectID, intent, desired, observed, activity, source, updatedAt)
+		rows, winner, applied, err := store.ApplySessionCompensation(ctx, projectID, intent, desired, observed, activity, source, updatedAt)
 		if err != nil {
 			note += fmt.Sprintf("; failed-start durable session compensation also failed: %v", err)
 			if durable, found, loadErr := store.GetSessionIntent(ctx, projectID, selector.Role, selector.ScopeKind, selector.ScopeID); loadErr == nil && found {
@@ -1392,8 +1453,10 @@ func (d *Daemon) compensateSessionStartFailureWithSelector(ctx context.Context, 
 				note += fmt.Sprintf("; failed-start durable session reload also failed: %v", loadErr)
 			}
 		} else {
-			desired = winner
-			alignTransient = true
+			if applied {
+				desired = winner
+				alignTransient = true
+			}
 			writer := d.runtimeProjectionStateWriter()
 			for _, row := range rows {
 				if _, publishErr := writer.PublishSessionProjectionEvent(ctx, projectID, req.Meta, row); publishErr != nil {
@@ -1661,13 +1724,11 @@ func (d *Daemon) handleSessionStopDirectWithOptions(ctx context.Context, req pro
 			}
 		}
 	}
-	if err := d.refreshStoppedSessionRuntimeState(ctx, cmd.ProjectID, cmd.IssueID, append([]string{cmd.SessionID}, sessionNamesToKill...)); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Debug("daemon session stop post-kill issue refresh failed",
-			"project_id", cmd.ProjectID,
-			"issue_id", cmd.IssueID,
-			"session_id", cmd.SessionID,
-			"error", err,
-		)
+	if err := d.refreshStoppedSessionRuntimeState(ctx, cmd.ProjectID, cmd.IssueID, append([]string{cmd.SessionID}, sessionNamesToKill...)); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("session stopped but durable runtime refresh is unavailable: %v", err)), nil
+	}
+	if err := d.refreshProjectReadRuntimeForIssues(ctx, cmd.ProjectID, []string{cmd.IssueID}); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("session stopped but task runtime refresh is unavailable: %v", err)), nil
 	}
 	outputLines := []string{
 		fmt.Sprintf("Killing session: %s", strings.Join(sessionNamesToKill, ", ")),
@@ -1791,6 +1852,15 @@ func (d *Daemon) handleSessionResolveConflict(ctx context.Context, req protocol.
 }
 
 func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+	if d.sessionLongRunning != nil {
+		return d.sessionLongRunning.Execute(ctx, req, req.Command, func(execCtx context.Context) (protocol.ResponseEnvelope, error) {
+			return d.handleSessionRestartAllDirect(execCtx, req)
+		})
+	}
+	return d.handleSessionRestartAllDirect(ctx, req)
+}
+
+func (d *Daemon) handleSessionRestartAllDirect(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	var body protocol.SessionRestartAllRequestBody
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
@@ -1800,6 +1870,7 @@ func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.Reque
 		projectID = req.Meta.ProjectID.String()
 	}
 	projectID = d.canonicalProjectID(projectID)
+	body.ProjectID = naming.ProjectID(projectID)
 	if d.tmux == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "tmux client unavailable"), nil
 	}
@@ -1876,51 +1947,82 @@ func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.Reque
 		}
 		return restartTargets[i].SessionID < restartTargets[j].SessionID
 	})
+	return d.executeSessionRestartBatch(ctx, req, projectID, projectIDs, body, restartTargets, result)
+}
 
-	for _, target := range restartTargets {
-		var item protocol.SessionRestartAllItem
-		serialized := false
-		if store := d.sessionRuntimeStateStoreIfConfigured(target.ProjectID); store != nil && strings.TrimSpace(target.IssueID) != "" {
-			scope, scopeErr := domain.RootedOrchestrationScope(target.IssueID)
-			if scopeErr != nil {
-				item = sessionRestartAllItem(target)
-				item.Error = fmt.Sprintf("resolve potential rooted restart scope: %v", scopeErr)
-			} else if identity, identityErr := domain.NewOrchestratorIdentity(target.ProjectID, scope); identityErr != nil {
-				item = sessionRestartAllItem(target)
-				item.Error = fmt.Sprintf("resolve potential rooted restart identity: %v", identityErr)
-			} else {
-				serialized = true
-				lockErr := store.WithOrchestratorScopeTransition(ctx, identity, func(lockCtx context.Context) error {
-					var rootedIdentity *domain.OrchestratorIdentity
-					lease, found, leaseErr := daemonstate.NewOrchestratorLeaseAuthority(store).FindBySession(lockCtx, target.ProjectID, target.SessionID)
-					if leaseErr != nil {
-						return fmt.Errorf("refresh orchestrator lease inside restart transition: %w", leaseErr)
-					}
-					if found && lease.Identity == identity {
-						rootedIdentity = &identity
-					}
-					item = d.restartAllTarget(lockCtx, target, body, rootedIdentity)
-					return nil
-				})
-				if lockErr != nil {
-					item = sessionRestartAllItem(target)
-					item.Error = fmt.Sprintf("serialize potential rooted orchestrator replacement: %v", lockErr)
-				}
-			}
-		}
-		if !serialized && item.Error == "" {
-			item = d.restartAllTarget(ctx, target, body, nil)
-		}
-		switch {
-		case item.Restarted:
-			result.Restarted++
-		case item.Skipped:
-			result.Skipped++
-		case item.Error != "":
-			result.Failed++
-		}
-		result.Sessions = append(result.Sessions, item)
+func (d *Daemon) executeSessionRestartBatch(
+	ctx context.Context,
+	req protocol.RequestEnvelope,
+	projectID string,
+	projectIDs []string,
+	body protocol.SessionRestartAllRequestBody,
+	restartTargets []sessionRestartAllTarget,
+	result protocol.SessionRestartAllResponseBody,
+) (protocol.ResponseEnvelope, error) {
+	batch := sessionRestartBatchPlan{
+		Version: sessionRestartBatchPlanVersion, ProjectID: projectID, Request: body,
+		Targets: restartTargets, Results: make([]protocol.SessionRestartAllItem, 0, len(restartTargets)),
+		Stage: sessionRestartLifecycleRequested,
 	}
+	for _, targetProjectID := range projectIDs {
+		batch.ProjectIDs = append(batch.ProjectIDs, targetProjectID)
+	}
+	ctx = withSessionRestartBatchProgress(ctx, &batch)
+	if err := reportSessionRestartBatchProgress(ctx, batch); err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist restart batch plan: %v", err)), nil
+	}
+	for batch.Cursor < len(batch.Targets) {
+		target := batch.Targets[batch.Cursor]
+		batch.Current = nil
+		batch.Stage = sessionRestartLifecycleRequested
+		if err := reportSessionRestartBatchProgress(ctx, batch); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist restart target request: %v", err)), nil
+		}
+		item := d.executeSessionRestartTarget(ctx, target, body)
+		currentPlan := batch.Current
+		batch.Results = append(batch.Results, item)
+		batch.Cursor++
+		batch.Current = nil
+		if !item.Restarted && !item.Skipped && currentPlan != nil && restartPlanMayHaveReplacedPane(currentPlan.Stage) {
+			batch.Recoverable = append(batch.Recoverable, sessionRestartBatchRecovery{Index: batch.Cursor - 1, Plan: *currentPlan})
+		}
+		batch.Stage = restartItemTerminalStage(item)
+		checkpointCtx := ctx
+		cancelCheckpoint := func() {}
+		if currentPlan != nil && currentPlan.Stage == "complete" {
+			// A complete per-pane checkpoint proves the destructive replacement
+			// crossed its acknowledgement boundary. Persist the aggregate cursor
+			// independently of caller cancellation so the terminal operation cannot
+			// lose that result and invite an automatic retry of the new pane.
+			checkpointCtx, cancelCheckpoint = context.WithTimeout(context.WithoutCancel(ctx), sessionRestartPreflightTimeout)
+		}
+		checkpointErr := reportSessionRestartBatchProgress(checkpointCtx, batch)
+		cancelCheckpoint()
+		if checkpointErr != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist restart target completion: %v", checkpointErr)), nil
+		}
+		if ctx.Err() != nil && item.Restarted {
+			for batch.Cursor < len(batch.Targets) {
+				cancelled := sessionRestartAllItem(batch.Targets[batch.Cursor])
+				cancelled.Skipped = true
+				cancelled.Outcome = "cancelled"
+				cancelled.Reason = "batch_cancelled_before_dispatch"
+				cancelled.Stages = append(cancelled.Stages, restartStage(sessionRestartLifecycleCompensated, "refused", cancelled.Reason, 0))
+				batch.Results = append(batch.Results, cancelled)
+				batch.Cursor++
+			}
+			batch.Stage = sessionRestartLifecycleCompleted
+			finalCtx, cancelFinal := context.WithTimeout(context.WithoutCancel(ctx), sessionRestartPreflightTimeout)
+			finalErr := reportSessionRestartBatchProgress(finalCtx, batch)
+			cancelFinal()
+			if finalErr != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist cancelled restart batch completion: %v", finalErr)), nil
+			}
+			break
+		}
+	}
+	result.Sessions = append(result.Sessions, batch.Results...)
+	result.Restarted, result.Skipped, result.Failed = sessionRestartCounts(result.Sessions)
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session restart-all completed",
 			"project_id", projectID,
@@ -1939,97 +2041,112 @@ func (d *Daemon) handleSessionRestartAll(ctx context.Context, req protocol.Reque
 	return resp, nil
 }
 
-type sessionRestartAllTarget struct {
-	ProjectID      string
-	SessionID      string
-	IssueID        string
-	Activity       string
-	ActivitySource string
-	Projected      bool
-	TmuxReady      bool
-	ActiveIntent   bool
-}
-
-func (d *Daemon) restartAllTarget(ctx context.Context, target sessionRestartAllTarget, body protocol.SessionRestartAllRequestBody, rootedIdentity *domain.OrchestratorIdentity) protocol.SessionRestartAllItem {
-	item := sessionRestartAllItem(target)
-	if !item.TmuxReady {
-		item.Skipped, item.Reason = true, "no_tmux_pane"
-		return item
-	}
-	if rootedIdentity != nil {
-		acknowledgement, found, err := daemonstate.NewRootedBootstrapAcknowledgementAuthority(d.sessionRuntimeStateStoreIfConfigured(target.ProjectID)).Get(ctx, *rootedIdentity)
-		if err != nil {
-			item.Error = fmt.Sprintf("refresh rooted bootstrap acknowledgement before replacement: %v", err)
-			return item
+func (d *Daemon) executeSessionRestartTarget(ctx context.Context, target sessionRestartAllTarget, body protocol.SessionRestartAllRequestBody) protocol.SessionRestartAllItem {
+	var item protocol.SessionRestartAllItem
+	var rootedIdentity *domain.OrchestratorIdentity
+	serialized := false
+	if store := d.sessionRuntimeStateStoreIfConfigured(target.ProjectID); store != nil && strings.TrimSpace(target.IssueID) != "" {
+		scope, scopeErr := domain.RootedOrchestrationScope(target.IssueID)
+		if scopeErr != nil {
+			item = sessionRestartAllItem(target)
+			item.Error = fmt.Sprintf("resolve potential rooted restart scope: %v", scopeErr)
+		} else if identity, identityErr := domain.NewOrchestratorIdentity(target.ProjectID, scope); identityErr != nil {
+			item = sessionRestartAllItem(target)
+			item.Error = fmt.Sprintf("resolve potential rooted restart identity: %v", identityErr)
+		} else {
+			serialized = true
+			lockErr := store.WithOrchestratorScopeTransition(ctx, identity, func(lockCtx context.Context) error {
+				item = sessionRestartAllItem(target)
+				if !item.TmuxReady {
+					return nil
+				}
+				lease, found, leaseErr := daemonstate.NewOrchestratorLeaseAuthority(store).FindBySession(lockCtx, target.ProjectID, target.SessionID)
+				if leaseErr != nil {
+					return fmt.Errorf("refresh orchestrator lease inside restart transition: %w", leaseErr)
+				}
+				if found && lease.Identity == identity {
+					rootedIdentity = &identity
+				}
+				item = d.restartManagedAgentPane(lockCtx, target, body, item, rootedIdentity)
+				return nil
+			})
+			if lockErr != nil {
+				item = sessionRestartAllItem(target)
+				item.Error = fmt.Sprintf("serialize potential rooted orchestrator replacement: %v", lockErr)
+			}
 		}
-		if found {
-			if err := d.invalidateRootedBootstrapAcknowledgement(ctx, acknowledgement); err != nil {
-				item.Error = fmt.Sprintf("invalidate rooted bootstrap acknowledgement: %v", err)
+	}
+	if !serialized && item.Error == "" {
+		item = sessionRestartAllItem(target)
+		if item.TmuxReady {
+			item = d.restartManagedAgentPane(ctx, target, body, item, nil)
+		}
+	}
+	if !item.TmuxReady && item.Error == "" {
+		item.Skipped = true
+		item.Reason = "no_tmux_pane"
+		item.Outcome = "crashed"
+		item.Stages = append(item.Stages, restartStage(sessionRestartLifecycleCompensated, "complete", item.Reason, 0))
+	}
+	if item.Error != "" && len(item.Stages) == 0 {
+		item.Stages = append(item.Stages, restartStage(sessionRestartLifecycleFailed, "failed", item.Error, 0))
+	}
+	if item.Restarted {
+		projectionCtx, cancelProjection := context.WithTimeout(context.WithoutCancel(ctx), sessionRestartPreflightTimeout)
+		defer cancelProjection()
+		if rootedIdentity != nil {
+			if err := d.persistOrchestratorSessionProjection(projectionCtx, protocol.Metadata{ProjectID: naming.ProjectID(target.ProjectID)}, target.ProjectID, rootedIdentity.Scope, target.SessionID); err != nil {
+				item.Restarted = false
+				item.Error = fmt.Sprintf("persist restarted rooted orchestrator projection: %v", err)
+				return item
+			}
+		} else if target.IssueID != "" {
+			if err := d.persistRestartedSessionProjection(projectionCtx, target.ProjectID, target.SessionID, target.IssueID); err != nil {
+				item.Restarted = false
+				item.Error = fmt.Sprintf("persist restarted worker projection: %v", err)
 				return item
 			}
 		}
-		if err := d.tmux.SetEnvironment(ctx, target.SessionID, rootedOrchestratorBootstrapNonceEnvironment, ""); err != nil {
-			item.Error = fmt.Sprintf("invalidate rooted bootstrap runtime marker: %v", err)
-			return item
-		}
-	}
-	if err := d.tmux.SendKey(ctx, target.SessionID, "C-c"); err != nil {
-		item.Error = err.Error()
-		return item
-	}
-	if err := d.waitBeforeSessionResume(ctx, 250*time.Millisecond); err != nil {
-		item.Error = err.Error()
-		return item
-	}
-	artifact, artifactErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchResume, ProjectID: target.ProjectID, IssueID: target.IssueID, SessionID: target.SessionID, Yolo: body.Yolo, ImagePaths: body.ImagePaths})
-	if artifactErr != nil {
-		item.Error = artifactErr.Error()
-		return item
-	}
-	if err := d.tmux.SendKeys(ctx, target.SessionID, artifact.Command); err != nil {
-		artifact.remove()
-		item.Error = err.Error()
-		return item
-	}
-	if rootedIdentity != nil {
-		if err := d.waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
-			item.Error = err.Error()
-			return item
-		}
-		prompt, err := d.rootedOrchestratorBootstrapPrompt(ctx, target.ProjectID, rootedIdentity.Scope)
-		if err != nil {
-			item.Error = err.Error()
-			return item
-		}
-		if _, err := d.ensureRootedOrchestratorBootstrap(ctx, target.ProjectID, rootedIdentity.Scope, target.SessionID, prompt, false); err != nil {
-			item.Error = fmt.Sprintf("acknowledge restarted rooted orchestrator bootstrap: %v", err)
-			return item
-		}
-	} else if item.ActiveIntent && d.sessionRestartNeedsPostLaunchPrompt(target.ProjectID) {
-		if err := d.waitBeforeSessionResume(ctx, sessionRestartContinuePromptDelay); err != nil {
-			item.Error = err.Error()
-			return item
-		}
-		if err := d.tmux.PasteTextAndSubmit(ctx, target.SessionID, sessionRestartContinuePrompt); err != nil {
-			item.Error = err.Error()
-			return item
-		}
-	}
-	item.Restarted = true
-	if rootedIdentity != nil {
-		if err := d.persistOrchestratorSessionProjection(ctx, protocol.Metadata{ProjectID: naming.ProjectID(target.ProjectID)}, target.ProjectID, rootedIdentity.Scope, target.SessionID); err != nil {
-			item.Restarted = false
-			item.Error = fmt.Sprintf("persist restarted rooted orchestrator projection: %v", err)
-			return item
-		}
-	} else if target.IssueID != "" {
-		if err := d.persistRestartedSessionProjection(ctx, target.ProjectID, target.SessionID, target.IssueID); err != nil {
-			item.Restarted = false
-			item.Error = fmt.Sprintf("persist restarted worker projection: %v", err)
-			return item
-		}
 	}
 	return item
+}
+
+func restartItemTerminalStage(item protocol.SessionRestartAllItem) string {
+	if item.Restarted {
+		return sessionRestartLifecycleCompleted
+	}
+	if item.Skipped {
+		return sessionRestartLifecycleCompensated
+	}
+	return sessionRestartLifecycleFailed
+}
+
+func restartPlanMayHaveReplacedPane(stage string) bool {
+	return stage == "replace_ready" || stage == "observe" || stage == "complete"
+}
+
+func sessionRestartCounts(items []protocol.SessionRestartAllItem) (restarted, skipped, failed int) {
+	for _, item := range items {
+		if item.Restarted {
+			restarted++
+		} else if item.Skipped {
+			skipped++
+		} else {
+			failed++
+		}
+	}
+	return restarted, skipped, failed
+}
+
+type sessionRestartAllTarget struct {
+	ProjectID      string `json:"project_id"`
+	SessionID      string `json:"session_id"`
+	IssueID        string `json:"issue_id,omitempty"`
+	Activity       string `json:"activity"`
+	ActivitySource string `json:"activity_source,omitempty"`
+	Projected      bool   `json:"projected"`
+	TmuxReady      bool   `json:"tmux_ready"`
+	ActiveIntent   bool   `json:"active_intent"`
 }
 
 func sessionRestartAllItem(target sessionRestartAllTarget) protocol.SessionRestartAllItem {
@@ -2153,24 +2270,6 @@ func (d *Daemon) sessionRestartAllProjectIDs(requestProjectID string) []string {
 	return projectIDs
 }
 
-func waitBeforeSessionResume(ctx context.Context, delay time.Duration) error {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-func (d *Daemon) waitBeforeSessionResume(ctx context.Context, delay time.Duration) error {
-	if d != nil && d.sessionResumeWait != nil {
-		return d.sessionResumeWait(ctx, delay)
-	}
-	return waitBeforeSessionResume(ctx, delay)
-}
-
 func (d *Daemon) persistRestartedSessionProjection(ctx context.Context, projectID, sessionID, issueID string) error {
 	session := daemonstate.Session{
 		ID:             sessionID,
@@ -2248,14 +2347,25 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 	if prompt == "" {
 		prompt = buildConflictResolutionPrompt(issueIDString, conflictFiles)
 	}
-	artifact, artifactErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: projectID, IssueID: issueIDString, SessionID: canonicalSessionID, Yolo: body.Yolo, ImagePaths: body.ImagePaths, Prompt: prompt})
+	incarnation, incarnationErr := newRestartIncarnation()
+	if incarnationErr != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("plan conflict resolver managed agent incarnation: %v", incarnationErr)), nil
+	}
+	const conflictLogicalPaneID = "conflict-resolver"
+	artifact, artifactErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: projectID, IssueID: issueIDString, SessionID: canonicalSessionID, Yolo: body.Yolo, ImagePaths: body.ImagePaths, Prompt: prompt, LogicalPaneID: conflictLogicalPaneID, AgentIncarnation: incarnation})
 	if artifactErr != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare conflict resolver launch artifact: %v", artifactErr)), nil
 	}
 	reusedWindow, err := d.tmux.EnsureWindowWithCommandAndEnvironment(ctx, sessionName, sessionConflictWindowName, worktreePath, artifact.Command, nil)
 	if err != nil {
 		artifact.remove()
-		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("launch conflict resolver window: %v", err)), nil
+		cleanupNote := d.retireAmbiguousConflictResolverWindow(ctx, sessionName, sessionConflictWindowName)
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("launch conflict resolver window: %v%s", err, cleanupNote)), nil
+	}
+	if err := d.waitForInitialManagedAgentAcknowledgementForPane(ctx, projectID, canonicalSessionID, conflictLogicalPaneID, incarnation, artifact.PromptHandoff); err != nil {
+		artifact.remove()
+		_ = d.tmux.KillWindow(ctx, sessionName, sessionConflictWindowName)
+		return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("confirm conflict resolver managed agent bootstrap: %v", err)), nil
 	}
 	resp := d.successResponse(req)
 	out := protocol.SessionResolveConflictResponseBody{
@@ -2287,6 +2397,22 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 		)
 	}
 	return resp, nil
+}
+
+func (d *Daemon) retireAmbiguousConflictResolverWindow(ctx context.Context, sessionName, windowName string) string {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+	defer cancel()
+	appeared, err := d.tmux.HasWindow(cleanupCtx, sessionName, windowName)
+	if err != nil {
+		return fmt.Sprintf("; exact conflict window reconciliation failed: %v", err)
+	}
+	if !appeared {
+		return ""
+	}
+	if err := d.tmux.KillWindow(cleanupCtx, sessionName, windowName); err != nil {
+		return fmt.Sprintf("; appeared conflict window cleanup failed: %v", err)
+	}
+	return "; appeared conflict window was removed"
 }
 
 func (d *Daemon) ensureConflictWorktree(ctx context.Context, projectID, issueID, issueTitle, requestedWorktree string) (path, branch string, reused bool, err error) {
@@ -2604,8 +2730,27 @@ func (d *Daemon) handleSessionMessage(ctx context.Context, req protocol.RequestE
 	if !exists {
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("session not found in tmux: %s", cmd.IssueID)), nil
 	}
-	if err := d.tmux.PasteTextAndSubmit(ctx, cmd.SessionID, cmd.Message); err != nil {
+	target, found, err := d.currentAgentInputTarget(ctx, cmd.ProjectID, cmd.SessionID)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("resolve session message target: %v", err)), nil
+	}
+	if !found || d.agentInputService() == nil {
+		return d.errorResponse(req, protocol.ErrorCodeConflict, "session message queued: managed agent identity unavailable"), nil
+	}
+	messageKind := domain.AgentInputMessageSessionMessage
+	if req.Meta.ClientActor == "daemon-decision" {
+		messageKind = domain.AgentInputMessageDecisionChange
+	}
+	result, err := d.agentInputService().Deliver(ctx, domain.AgentInputDeliveryRequest{
+		ProjectID: cmd.ProjectID, SessionID: cmd.SessionID, Target: target,
+		Tool: d.runtimeConfigForProject(cmd.ProjectID).CLITool, Kind: messageKind,
+		Payload: cmd.Message, IntentKey: req.RequestID.String(), ExpiresAt: time.Now().Add(5 * time.Minute),
+	})
+	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("send session message: %v", err)), nil
+	}
+	if result.Outcome != domain.AgentInputDelivered {
+		return d.errorResponse(req, protocol.ErrorCodeConflict, fmt.Sprintf("session message queued: %s", result.Outcome)), nil
 	}
 	if d.cfg.Logger != nil {
 		d.cfg.Logger.Info("daemon session message sent",
@@ -3650,7 +3795,14 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 			continue
 		}
 		canonicalSessionID := naming.CanonicalSessionID(namingScope, issueID)
-		launchArtifact, artifactErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: projectID, IssueID: issueID, SessionID: canonicalSessionID})
+		incarnation, incarnationErr := newRestartIncarnation()
+		if incarnationErr != nil {
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("session reconciliation failed to plan managed agent incarnation", "project_id", projectID, "issue_id", issueID, "error", incarnationErr)
+			}
+			continue
+		}
+		launchArtifact, artifactErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: projectID, IssueID: issueID, SessionID: canonicalSessionID, LogicalPaneID: "agent", AgentIncarnation: incarnation})
 		if artifactErr != nil {
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("session reconciliation failed to prepare launch artifact", "project_id", projectID, "issue_id", issueID, "error", artifactErr)
@@ -3659,6 +3811,9 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 		}
 		if newErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, canonicalSessionID, wt.Path, launchArtifact.Command, nil); newErr != nil {
 			launchArtifact.remove()
+			if live, probeErr := d.tmux.HasSession(ctx, canonicalSessionID); probeErr == nil && live {
+				_ = d.tmux.KillSession(ctx, canonicalSessionID)
+			}
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("session reconciliation failed to recreate tmux session",
 					"project_id", projectID,
@@ -3671,6 +3826,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 			continue
 		}
 		if envErr := d.setSessionContextEnv(ctx, projectID, issueID, canonicalSessionID); envErr != nil {
+			launchArtifact.remove()
 			_ = d.tmux.KillSession(ctx, canonicalSessionID)
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Warn("session reconciliation failed to install session environment",
@@ -3679,6 +3835,17 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 					"session_id", canonicalSessionID,
 					"error", envErr,
 				)
+			}
+			continue
+		}
+		if ackErr := d.waitForInitialManagedAgentAcknowledgement(ctx, projectID, canonicalSessionID, incarnation, launchArtifact.PromptHandoff); ackErr != nil {
+			launchArtifact.remove()
+			_ = d.tmux.KillSession(ctx, canonicalSessionID)
+			_ = d.persistObservedRuntimeProjection(ctx, projectID, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, daemonstate.Session{
+				ID: canonicalSessionID, ObservedState: daemonstate.SessionStateStopped, UpdatedAt: time.Now().UTC(),
+			})
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.Warn("session reconciliation rejected unacknowledged managed agent", "project_id", projectID, "issue_id", issueID, "session_id", canonicalSessionID, "error", ackErr)
 			}
 			continue
 		}
@@ -4780,14 +4947,16 @@ func prepareSessionLaunchScript(artifactDir, shell, launchPayload string) (strin
 func (d *Daemon) buildCodexResumeCommand(projectID, issueID string, yolo bool, imagePaths []string) string {
 	projectCfg := d.runtimeConfigForProject(projectID)
 	tool := strings.TrimSpace(projectCfg.CLITool)
+	if projectCfg.CodexAppServer {
+		resume := d.codexAppServerResumeCommand(projectID, issueID, yolo)
+		return codexAppServerSupervisedCommand(tool, resume, resume)
+	}
 
 	parts := []string{
 		fmt.Sprintf(`AZEDARACH_ISSUE_ID="%s"`, escapeForShellDoubleQuotes(issueID)),
 		tool,
+		codexFloopFailOpenConfigExpansion,
 		"resume",
-	}
-	if projectCfg.CodexAppServer {
-		parts = append(parts, "--remote", "unix://")
 	}
 	for _, imagePath := range imagePaths {
 		trimmedPath := strings.TrimSpace(imagePath)
@@ -4803,15 +4972,8 @@ func (d *Daemon) buildCodexResumeCommand(projectID, issueID string, yolo bool, i
 	// Codex's cwd filter makes --last target this worktree's latest session.
 	parts = append(parts, "--last")
 	command := strings.Join(parts, " ")
-	if projectCfg.CodexAppServer {
-		command = codexAppServerSupervisedCommand(tool, command, command)
-	}
+	command = codexFloopFailOpenProbe(tool) + "; " + command
 	return command
-}
-
-func (d *Daemon) sessionRestartNeedsPostLaunchPrompt(projectID string) bool {
-	tool := strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool)
-	return strings.EqualFold(tool, "codex")
 }
 
 func codexLaunchPromptArgAllowed(prompt string) bool {
@@ -4881,9 +5043,30 @@ func (d *Daemon) buildSessionLaunchArtifactPayload(spec sessionLaunchSpec, promp
 		if shell == "" {
 			shell = appconfig.DefaultSessionShell()
 		}
-		return shell, command + "; " + sessionAgentProcessExitCommand(tool) + "; exec " + singleQuoteForShell(shell)
+		identityEnv := ""
+		if strings.TrimSpace(spec.AgentIncarnation) != "" {
+			logicalPaneID := strings.TrimSpace(spec.LogicalPaneID)
+			if logicalPaneID == "" {
+				logicalPaneID = "agent"
+			}
+			identityEnv = "export AZEDARACH_LOGICAL_PANE_ID=" + singleQuoteForShell(logicalPaneID) +
+				" AZEDARACH_AGENT_INCARNATION=" + singleQuoteForShell(spec.AgentIncarnation) +
+				" AZEDARACH_PANE_PID=$$; "
+		}
+		return shell, identityEnv + command + "; " + sessionAgentProcessExitCommand(tool) + "; exec " + singleQuoteForShell(shell)
 	}
-	return d.buildSessionLaunchComponentsWithInitReadyPathAndEnvPolicy(spec.ProjectID, spec.IssueID, spec.SessionID, spec.Yolo, spec.ImagePaths, promptHandoff.bootstrapPrompt(), spec.InitReadyPath, spec.StartupEnvCommands, false)
+	startupEnvCommands := append([]string(nil), spec.StartupEnvCommands...)
+	if strings.TrimSpace(spec.AgentIncarnation) != "" {
+		logicalPaneID := strings.TrimSpace(spec.LogicalPaneID)
+		if logicalPaneID == "" {
+			logicalPaneID = "agent"
+		}
+		startupEnvCommands = append(startupEnvCommands,
+			"export AZEDARACH_LOGICAL_PANE_ID="+singleQuoteForShell(logicalPaneID)+
+				" AZEDARACH_AGENT_INCARNATION="+singleQuoteForShell(spec.AgentIncarnation)+
+				" AZEDARACH_PANE_PID=$$")
+	}
+	return d.buildSessionLaunchComponentsWithInitReadyPathAndEnvPolicy(spec.ProjectID, spec.IssueID, spec.SessionID, spec.Yolo, spec.ImagePaths, promptHandoff.bootstrapPrompt(), spec.InitReadyPath, startupEnvCommands, false)
 }
 
 func (d *Daemon) buildSessionLaunchComponentsWithInitReadyPathAndEnvPolicy(projectID, issueID, sessionID string, yolo bool, imagePaths []string, initialPrompt, initReadyPath string, startupEnvCommands []string, allowLargePrompt bool) (string, string) {
@@ -5119,7 +5302,7 @@ func sessionLaunchContextExportCommand(projectID, issueID, sessionID string) str
 }
 
 func (d *Daemon) sessionLaunchStartupExportCommands(projectCfg daemonProjectRuntimeConfig, resourceCtx issueResourceLifecycleContext) []string {
-	commands := make([]string, 0, 1)
+	commands := make([]string, 0, 2)
 	assignments := issueResourceShellExports(projectCfg.IssueResources, resourceCtx)
 	if len(assignments) > 0 {
 		commands = append(commands, "export "+strings.Join(assignments, " "))
@@ -5208,14 +5391,11 @@ func (d *Daemon) issueResourceLifecycleContext(projectID, issueID, sessionID, wo
 	}
 }
 
-func (d *Daemon) prepareSessionStartImagePaths(ctx context.Context, projectID, issueID, worktreePath string, explicitPaths []string) ([]string, error) {
+func (d *Daemon) prepareSessionStartImagePaths(ctx context.Context, projectID, issueID, rootPath, worktreePath string, explicitPaths []string) ([]string, error) {
 	explicitPaths = dedupeSessionStartImagePaths(explicitPaths)
-	rootPath := strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID))
+	rootPath = strings.TrimSpace(rootPath)
 	if rootPath == "" {
-		rootPath = strings.TrimSpace(d.resolveRepoDirForProject(projectID))
-	}
-	if rootPath == "" {
-		rootPath = strings.TrimSpace(d.cfg.RepoDir)
+		return nil, fmt.Errorf("resolve canonical attachment store for project %s: routed project root unavailable", strings.TrimSpace(projectID))
 	}
 	worktreePath = strings.TrimSpace(worktreePath)
 	if rootPath == "" || worktreePath == "" {
@@ -5711,13 +5891,13 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 	if tool == "" {
 		tool = "claude"
 	}
-
 	parts := []string{
 		fmt.Sprintf(`AZEDARACH_ISSUE_ID="%s"`, escapeForShellDoubleQuotes(issueID)),
 		tool,
 	}
 
 	if strings.EqualFold(tool, "codex") {
+		parts = append(parts, codexFloopFailOpenConfigExpansion)
 		// Codex hook wiring lives entirely in <repo>/.codex/hooks.json, written
 		// by `az ai install --target=codex`. Launch-time `-c hooks.*` injection
 		// was removed because it duplicated those entries — Codex merged the
@@ -5762,6 +5942,9 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 			resume := d.codexAppServerResumeCommand(projectID, issueID, yolo)
 			return codexAppServerSupervisedCommand(tool, command, resume)
 		}
+		if strings.EqualFold(tool, "codex") {
+			return codexFloopFailOpenProbe(tool) + "; " + command
+		}
 		return command
 	}
 
@@ -5769,6 +5952,9 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 	if strings.EqualFold(tool, "codex") && projectCfg.CodexAppServer {
 		resume := d.codexAppServerResumeCommand(projectID, issueID, yolo)
 		return codexAppServerSupervisedCommand(tool, command, resume)
+	}
+	if strings.EqualFold(tool, "codex") {
+		return codexFloopFailOpenProbe(tool) + "; " + command
 	}
 	return command
 }
@@ -5778,6 +5964,7 @@ func (d *Daemon) codexAppServerResumeCommand(projectID, issueID string, yolo boo
 	parts := []string{
 		fmt.Sprintf(`AZEDARACH_ISSUE_ID="%s"`, escapeForShellDoubleQuotes(issueID)),
 		strings.TrimSpace(projectCfg.CLITool),
+		codexFloopFailOpenConfigExpansion,
 		"resume",
 		"--remote",
 		"unix://",
@@ -5789,8 +5976,26 @@ func (d *Daemon) codexAppServerResumeCommand(projectID, issueID string, yolo boo
 	return strings.Join(parts, " ")
 }
 
+const (
+	codexFloopFailOpenConfig          = "mcp_servers.floop.required=false"
+	codexFloopFailOpenConfigVariable  = "__az_codex_floop_config"
+	codexFloopFailOpenConfigExpansion = "$" + codexFloopFailOpenConfigVariable
+)
+
+// codexFloopFailOpenProbe asks Codex whether its merged effective config has a
+// Floop server before adding the required=false override. Applying the nested
+// override unconditionally would synthesize an invalid server without a
+// transport when Floop is not configured at all. The fixed expansion is left
+// intentionally unquoted so the two trusted words (-c and key=value) become
+// separate argv entries; no external text is interpolated into it.
+func codexFloopFailOpenProbe(tool string) string {
+	return codexFloopFailOpenConfigVariable + "=; if " + tool +
+		" mcp get --json floop >/dev/null 2>&1; then " +
+		codexFloopFailOpenConfigVariable + "='-c " + codexFloopFailOpenConfig + "'; fi"
+}
+
 func codexAppServerSupervisedCommand(tool, firstCommand, resumeCommand string) string {
-	startDaemon := tool + " app-server daemon start >/dev/null"
+	startDaemon := tool + " " + codexFloopFailOpenConfigExpansion + " app-server daemon start >/dev/null"
 	steps := []string{
 		"__az_codex_remote_started=$(date +%s)",
 		"if [ \"$__az_codex_remote_first\" -eq 1 ]; then __az_codex_remote_first=0; " + firstCommand + "; else " + resumeCommand + "; fi",
@@ -5802,7 +6007,7 @@ func codexAppServerSupervisedCommand(tool, firstCommand, resumeCommand string) s
 		startDaemon + " || exit $?",
 		"sleep 1",
 	}
-	return startDaemon + " || exit $?; __az_codex_remote_first=1; __az_codex_remote_failures=0; while :; do " + strings.Join(steps, "; ") + "; done"
+	return codexFloopFailOpenProbe(tool) + "; " + startDaemon + " || exit $?; __az_codex_remote_first=1; __az_codex_remote_failures=0; while :; do " + strings.Join(steps, "; ") + "; done"
 }
 
 const initialPromptShellVariable = "__AZEDARACH_INITIAL_PROMPT"
@@ -5878,6 +6083,7 @@ func buildRootedOrchestratorPrompt(issueID, issueType, title string) string {
 func buildOrchestratorRolePrompt(base string) string {
 	base += "\n\nReview closeout contract: resolve accepted review tickets with `az orchestrate review accept --root <root-issue> --issue <review-issue>` so trusted acceptance and authoritative terminal close finish before dependent results are used or presented. Return unresolved findings with `az orchestrate review return --root <root-issue> --issue <review-issue> --finding \"...\"`. Reuse the reported `--intent-key` when retrying the same decision. Pending, returned, and human-gated reviews remain non-terminal."
 	base += "\nThis review contract supersedes generic manual-close wording below for review decisions; `az issue close` remains only a repair/manual-close path, not reviewer acceptance authority."
+	base += "\nReview revision contract: use each review queue packet's exact `diff_base_revision`, `head_revision`, stable `diff_scope`, and executable `diff_range` when delegating inspection. The first pass reviews `diff_range`; later intra-candidate passes inspect only the previous reviewed head through current head plus unresolved findings and affected contracts. Fall back to the full `diff_range` when the prior checkpoint cannot be verified, is not an ancestor, or its base/scope changed."
 	return base + "\n\nRole: orchestrator\n- Chain of command is strict: orchestrate only this root's direct children. Never launch, message, inspect for intervention, review, integrate, stop, or take over grandchildren or deeper descendants.\n- Use `az orchestrate status --root <issue-id>` for readiness snapshots including active worker activity (`busy|idle|waiting|no-agent|unknown`).\n- Use `az orchestrate watch --root <issue-id> --since <seq> --jsonl` for continuous observe-only mailbox/runnable/activity updates; start it in another pane/session and leave it running while workers are active. Remain in this active turn/loop and continuously consume its events; starting sessions and a background watch is not a completed handoff to the human.\n- Do not use `--once` for orchestration monitoring; reserve it for diagnostic single polls.\n- Trust hook-backed `activity=busy|idle|waiting` for worker idleness checks and treat `activity=no-agent` as an intentional session-only shell. If activity is `unknown`, inspect hooks with `az ai status --target=auto`; run `az ai install --target=auto` only when hooks are missing, outdated, or not installed. Use `az orchestrate capture --issue <worker-issue>` only when watch/status look stale, failed, or contradictory, or when you need a sparse progress spot-check. Do not poll panes on a fixed interval.\n- Start this root's direct runnable leaf workers manually with `az orchestrate start --root <issue-id> --limit 4`, then immediately ensure the continuous watch is running. Queued reviews do not block unrelated starts when managed agent capacity remains.\n- Nested epic/root rule: start a direct child root's own orchestrator session with `az orchestrator-session start --root <child-root>` and let it run `az prime` and `az orchestrate start --root <child-root>`; supervise that orchestrator as a direct child while it exclusively owns its descendants.\n- Send running-worker nudges with `az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\"`; workers reporting to this active parent orchestrator/watch should use `az mail send --parent <issue-id> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`; non-orchestrated progress, follow-ups, validation, risks, or completion evidence should use `az issue record` instead. Bare `az mail send` is durable mailbox-only.\n- React to progress, blocked, and integration-ready evidence; review and integrate accepted children/epics, advance newly unblocked work, and repeat status/start/watch/review while graph work remains.\n- Worker integration evidence should be a structured JSON `worker_evidence.v1` packet with `summary`, `commands_run`, `key_assertions`, `files_changed`, `review.status`, `review.findings`, and `risks`; use `az issue record --type evidence.submitted --data '<json>'` when mailbox delivery is irrelevant, and use `worker-integration-ready` mail only for active parent coordination. Omit `artifact_links` unless needed, and when present use objects like `[{\"label\":\"CI\",\"url\":\"https://example.test/run\"}]`, not a string array. Run `az evidence validate --body '<json>'` before recording or sending, `az evidence validate --fix --body '<json>'` for repairable schema aliases, or `az evidence validate --template` for the canonical template.\n- Delegate every non-trivial diff inspection to a fresh ephemeral review subagent; use bounded parallel delegates for distinct review-ready issues. Give each delegate the issue acceptance context, worker evidence, context risk, exact worktree, and diff base. Delegates are read-only: they must not edit, mutate issue/session state, send findings, accept/return reviews, integrate, or close. Require a structured clean-or-findings verdict with commands and risks. Validate the packet and spot-check high-risk or contradictory results; keep durable review-return, review-accept, integration, and close authority in this orchestrator.\n- Treat blocked work as graph state from unresolved `blocks` dependencies or active worker-blocked mailbox evidence, not as an issue status.\n- Treat `in_review` workers as ready for orchestrator validation; inspect evidence, delegate diff review, run parent checks, then close accepted worker issues with `az issue close --id <issue-id>`.\n- Parent/tracker completion includes child lifecycle cleanup: close accepted completed children with `az issue close --id <child-issue>`, and leave any child `open` or `in_progress` only with an explicit blocker, dependency, or remaining-scope rationale.\n- Use `az orchestrate integrate --issue <issue-id>` for worker result inspection or repair guidance, not as the normal merge authority.\n- Use `az orchestrate close-session --issue <issue-id>` only for exceptional session cleanup when a worker must be stopped without closing the issue; never use it for ordinary review handoff.\n- Keep orchestration authority centralized inside each root session while delegating read-only review inspection; delegate explicit nested epic/root issues to their own orchestrator sessions rather than flattening their children into this session.\n- Continue the parent loop until `az orchestrate complete-check --root <issue-id>` and final validation pass; only then set the root `in_review` and hand it to the human while keeping its tmux session/worktree alive. Close/integrate the root only after explicit human acceptance."
 }
 
