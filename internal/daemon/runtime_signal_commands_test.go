@@ -490,11 +490,21 @@ func TestManagedAgentSignalIdentityRejectsStaleAndReusedIncarnations(t *testing.
 	if err != nil || !accepted {
 		t.Fatalf("bind replacement identity accepted=%v err=%v", accepted, err)
 	}
+	prompt := start
+	prompt.Event = "user_prompt_submit"
+	accepted, message, err := d.validateManagedAgentSignalIdentity(ctx, "p", "az-1.pane-12", prompt)
+	if err != nil || !accepted || !strings.Contains(message, "prompt submission acknowledged") {
+		t.Fatalf("prompt acknowledgement accepted=%v message=%q err=%v", accepted, message, err)
+	}
+	identity, found, err := d.sessionRuntimeStateStore("p").GetManagedAgentIdentity(ctx, "p", "az-1", "agent")
+	if err != nil || !found || !identity.UpdatedAt.After(identity.ObservedAt) {
+		t.Fatalf("durable prompt acknowledgement = %+v found=%t err=%v", identity, found, err)
+	}
 	stale := start
 	stale.AgentIncarnation = "old"
 	stale.PanePID = 100
 	stale.Event = "idle_prompt"
-	accepted, message, err := d.validateManagedAgentSignalIdentity(ctx, "p", "az-1.pane-12", stale)
+	accepted, message, err = d.validateManagedAgentSignalIdentity(ctx, "p", "az-1.pane-12", stale)
 	if err != nil {
 		t.Fatalf("validate stale identity: %v", err)
 	}

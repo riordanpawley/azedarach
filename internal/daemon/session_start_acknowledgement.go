@@ -57,11 +57,12 @@ func (e *sessionStartBootstrapError) Error() string {
 func (e *sessionStartBootstrapError) Unwrap() error { return e.Cause }
 
 type sessionStartAcknowledgementSample struct {
-	promptConsumed bool
-	identity       daemonstate.ManagedAgentIdentity
-	identityFound  bool
-	pane           tmux.PaneInfo
-	paneFound      bool
+	promptConsumed  bool
+	promptSubmitted bool
+	identity        daemonstate.ManagedAgentIdentity
+	identityFound   bool
+	pane            tmux.PaneInfo
+	paneFound       bool
 }
 
 func (d *Daemon) validateRecoveredSessionStartPromptHandoff(path string) (sessionPromptHandoff, error) {
@@ -108,7 +109,7 @@ func (d *Daemon) waitForInitialManagedAgentAcknowledgementForPane(ctx context.Co
 			return &sessionStartBootstrapError{Reason: sessionStartBootstrapAcknowledgementLost, SessionID: sessionID, Incarnation: incarnation, Cause: err}
 		}
 		last = sample
-		if sample.promptConsumed && sample.identityFound && sample.paneFound && managedAgentIdentityMatchesPane(sample.identity, sample.pane, incarnation) {
+		if (sample.promptConsumed || sample.promptSubmitted) && sample.identityFound && sample.paneFound && managedAgentIdentityMatchesPane(sample.identity, sample.pane, incarnation) {
 			if sessionStartPaneIsShellFallback(d.runtimeConfigForProject(projectID).SessionShell, sample.pane.CurrentCommand) {
 				return d.initialSessionBootstrapFailure(waitCtx, sessionID, incarnation, sample, sessionStartBootstrapShellFallback, errors.New("managed agent exited to a shell before acknowledgement"))
 			}
@@ -142,7 +143,8 @@ func (d *Daemon) sampleInitialManagedAgentAcknowledgement(ctx context.Context, s
 	if err != nil {
 		return sessionStartAcknowledgementSample{}, fmt.Errorf("inspect managed agent pane: %w", err)
 	}
-	sample := sessionStartAcknowledgementSample{promptConsumed: consumed, identity: identity, identityFound: found}
+	submitted := found && identity.UpdatedAt.After(identity.ObservedAt)
+	sample := sessionStartAcknowledgementSample{promptConsumed: consumed, promptSubmitted: submitted, identity: identity, identityFound: found}
 	for _, pane := range panes {
 		if strings.TrimSpace(pane.SessionName) == strings.TrimSpace(sessionID) &&
 			(!found || sanitizeRuntimePaneID(pane.PaneID) == sanitizeRuntimePaneID(identity.TmuxPaneID)) {

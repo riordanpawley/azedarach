@@ -353,6 +353,16 @@ func (d *Daemon) validateManagedAgentSignalIdentity(ctx context.Context, project
 	if !matched {
 		return false, "stale or reused managed agent incarnation", nil
 	}
+	if strings.TrimSpace(cmd.Event) == "user_prompt_submit" {
+		acknowledged, acknowledgeErr := store.AcknowledgeManagedAgentIdentity(ctx, identity, time.Now().UTC())
+		if acknowledgeErr != nil {
+			return false, "", acknowledgeErr
+		}
+		if !acknowledged {
+			return false, "stale or reused managed agent incarnation", nil
+		}
+		return true, "managed agent prompt submission acknowledged", nil
+	}
 	return true, "managed agent incarnation matched", nil
 }
 
