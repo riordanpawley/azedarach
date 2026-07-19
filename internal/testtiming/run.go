@@ -24,6 +24,7 @@ type RunOptions struct {
 	CheckBudgets              bool
 	PublishValidationEvidence bool
 	Now                       func() time.Time
+	closeIsolation            func(*testisolation.Environment) error
 }
 
 func Run(ctx context.Context, opts RunOptions) (Measurement, error) {
@@ -94,7 +95,7 @@ func writeRefusalArtifacts(opts RunOptions, telemetry gocache.Telemetry, refusal
 	return measurement, refusal
 }
 
-func runLocked(ctx context.Context, opts RunOptions, cacheConfig gocache.Config, cacheTelemetry gocache.Telemetry) (Measurement, error) {
+func runLocked(ctx context.Context, opts RunOptions, cacheConfig gocache.Config, cacheTelemetry gocache.Telemetry) (measurement Measurement, resultErr error) {
 	if err := os.MkdirAll(opts.OutputDir, 0o755); err != nil {
 		return Measurement{}, fmt.Errorf("create output directory: %w", err)
 	}
@@ -102,13 +103,26 @@ func runLocked(ctx context.Context, opts RunOptions, cacheConfig gocache.Config,
 	if err != nil {
 		return Measurement{}, fmt.Errorf("prepare test database isolation: %w", err)
 	}
-	defer isolation.Close()
+	closeIsolation := opts.closeIsolation
+	if closeIsolation == nil {
+		closeIsolation = func(environment *testisolation.Environment) error { return environment.Close() }
+	}
+	defer func() {
+		if err := closeIsolation(isolation); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("remove temporary test isolation root %s: %w", isolation.Root, err))
+		}
+	}()
 	if opts.Profile.CleanCache {
 		cmd := exec.CommandContext(ctx, "go", "clean", "-testcache")
 		cmd.Dir = opts.WorkingDir
 		cmd.Env = withEnv(os.Environ(), "GOCACHE", cacheConfig.CachePath())
-		if output, err := cmd.CombinedOutput(); err != nil {
-			return Measurement{}, fmt.Errorf("clean Go test cache: %w: %s", err, output)
+		configureProcessGroup(cmd)
+		output, cleanErr := cmd.CombinedOutput()
+		if ctx.Err() != nil {
+			cleanErr = errors.Join(cleanErr, waitForProcessGroupExit(cmd), ctx.Err())
+		}
+		if cleanErr != nil {
+			return Measurement{}, fmt.Errorf("clean Go test cache: %w: %s", cleanErr, output)
 		}
 	}
 	command := opts.Profile.Command()
@@ -147,16 +161,21 @@ func runLocked(ctx context.Context, opts RunOptions, cacheConfig gocache.Config,
 			cmd := exec.CommandContext(ctx, packageCommand[0], packageCommand[1:]...)
 			cmd.Dir = opts.WorkingDir
 			cmd.Env = packageEnvironment.Env
+			configureProcessGroup(cmd)
 			commands = append(commands, cmd)
 		}
-		execution, runErr = runConcurrentCommands(commands, collector, stderr)
+		execution, runErr = runConcurrentCommands(ctx, commands, collector, stderr)
 	} else {
 		cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 		cmd.Dir = opts.WorkingDir
 		cmd.Env = baseEnv
+		configureProcessGroup(cmd)
 		cmd.Stdout = collector
 		cmd.Stderr = stderr
 		runErr = cmd.Run()
+		if ctx.Err() != nil {
+			runErr = errors.Join(runErr, waitForProcessGroupExit(cmd), ctx.Err())
+		}
 		if cmd.ProcessState != nil {
 			execution.UserCPUSeconds = cmd.ProcessState.UserTime().Seconds()
 			execution.SystemCPUSeconds = cmd.ProcessState.SystemTime().Seconds()

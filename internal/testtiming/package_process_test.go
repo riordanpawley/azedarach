@@ -71,7 +71,7 @@ func TestRunConcurrentCommandsStartsEveryPackageBeforeWaiting(t *testing.T) {
 	}
 	done := make(chan outcome, 1)
 	go func() {
-		execution, err := runConcurrentCommands(commands, io.Discard, io.Discard)
+		execution, err := runConcurrentCommands(context.Background(), commands, io.Discard, io.Discard)
 		done <- outcome{execution: execution, err: err}
 	}()
 

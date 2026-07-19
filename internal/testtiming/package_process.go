@@ -2,6 +2,7 @@ package testtiming
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -18,7 +19,12 @@ type processExecution struct {
 
 // runConcurrentCommands starts every command before waiting for any of them.
 // This ordering is the package-overlap contract used by migration-clone runs.
-func runConcurrentCommands(commands []*exec.Cmd, stdout, stderr io.Writer) (processExecution, error) {
+
+func runConcurrentCommands(ctx context.Context, commands []*exec.Cmd, stdout, stderr io.Writer) (processExecution, error) {
+	return runConcurrentCommandsWithStarter(ctx, commands, stdout, stderr, func(command *exec.Cmd) error { return command.Start() })
+}
+
+func runConcurrentCommandsWithStarter(ctx context.Context, commands []*exec.Cmd, stdout, stderr io.Writer, start func(*exec.Cmd) error) (processExecution, error) {
 	started := make([]*exec.Cmd, 0, len(commands))
 	stdoutWriters := make([]*atomicLineWriter, 0, len(commands))
 	stderrWriters := make([]*atomicLineWriter, 0, len(commands))
@@ -27,14 +33,17 @@ func runConcurrentCommands(commands []*exec.Cmd, stdout, stderr io.Writer) (proc
 		stderrWriter := &atomicLineWriter{destination: stderr}
 		command.Stdout = stdoutWriter
 		command.Stderr = stderrWriter
-		if err := command.Start(); err != nil {
+		if err := start(command); err != nil {
+			var outcomes []error
+			outcomes = append(outcomes, fmt.Errorf("start package command %d: %w", index, err))
 			for _, running := range started {
-				_ = running.Process.Kill()
+				outcomes = append(outcomes, terminateProcessGroup(running))
 			}
-			for _, running := range started {
-				_ = running.Wait()
+			for startedIndex, running := range started {
+				outcomes = append(outcomes, running.Wait(), waitForProcessGroupExit(running))
+				outcomes = append(outcomes, stdoutWriters[startedIndex].Finish(), stderrWriters[startedIndex].Finish())
 			}
-			return processExecution{ExitCode: 1}, fmt.Errorf("start package command %d: %w", index, err)
+			return processExecution{ExitCode: 1}, errors.Join(outcomes...)
 		}
 		started = append(started, command)
 		stdoutWriters = append(stdoutWriters, stdoutWriter)
@@ -44,6 +53,9 @@ func runConcurrentCommands(commands []*exec.Cmd, stdout, stderr io.Writer) (proc
 	var outcomes []error
 	for index, command := range started {
 		err := command.Wait()
+		if ctx.Err() != nil {
+			outcomes = append(outcomes, waitForProcessGroupExit(command))
+		}
 		if flushErr := stdoutWriters[index].Finish(); flushErr != nil {
 			outcomes = append(outcomes, fmt.Errorf("flush package command %d stdout: %w", index, flushErr))
 		}
@@ -61,6 +73,9 @@ func runConcurrentCommands(commands []*exec.Cmd, stdout, stderr io.Writer) (proc
 		if err != nil {
 			outcomes = append(outcomes, fmt.Errorf("package command %d: %w", index, err))
 		}
+	}
+	if ctx.Err() != nil {
+		outcomes = append(outcomes, ctx.Err())
 	}
 	if len(outcomes) > 0 && execution.ExitCode == 0 {
 		execution.ExitCode = 1

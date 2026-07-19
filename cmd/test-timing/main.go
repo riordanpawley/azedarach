@@ -7,8 +7,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/testtiming"
@@ -27,6 +29,12 @@ func main() {
 }
 
 func run() error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runContext(ctx)
+}
+
+func runContext(ctx context.Context) error {
 	var packages packageList
 	profileName := flag.String("profile", "focused", "profile: "+strings.Join(testtiming.ProfileNames(), ", "))
 	baselinePath := flag.String("baseline", "testdata/test-timing-baseline-2026-07-13.json", "committed baseline and budgets")
@@ -66,10 +74,13 @@ func run() error {
 		if *samples > 1 {
 			sampleDir = filepath.Join(outputDir, fmt.Sprintf("sample-%02d", i))
 		}
-		measurement, err := testtiming.Run(context.Background(), testtiming.RunOptions{Profile: profile, Baseline: baseline, OutputDir: sampleDir, WorkingDir: ".", CheckBudgets: false, PublishValidationEvidence: true})
+		measurement, err := testtiming.Run(ctx, testtiming.RunOptions{Profile: profile, Baseline: baseline, OutputDir: sampleDir, WorkingDir: ".", CheckBudgets: false, PublishValidationEvidence: true})
 		measurements = append(measurements, measurement)
 		if err != nil {
 			runErr = errors.Join(runErr, err)
+		}
+		if ctx.Err() != nil {
+			break
 		}
 	}
 	measurement := measurements[0]

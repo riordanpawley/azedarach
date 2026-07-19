@@ -3,6 +3,7 @@ package testtiming
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/riordanpawley/azedarach/internal/dbpathguard"
+	"github.com/riordanpawley/azedarach/internal/testisolation"
 )
 
 func TestRunWritesCompleteArtifactsBeforeReturningTestFailure(t *testing.T) {
@@ -234,4 +236,26 @@ func TestRunWritesMachineReadableArtifactsWhenBuildCacheHardLimitRefuses(t *test
 	raw, readErr := os.ReadFile(filepath.Join(output, "events.jsonl"))
 	require.NoError(t, readErr)
 	assert.Empty(t, raw, "refused validation must not execute go test")
+}
+
+func TestRunPropagatesIsolationCleanupError(t *testing.T) {
+	module := t.TempDir()
+	configureTestCacheFamily(t, module)
+	require.NoError(t, os.WriteFile(filepath.Join(module, "go.mod"), []byte("module example.test/cleanup\n\ngo 1.24.2\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(module, "cleanup_test.go"), []byte("package cleanup\nimport \"testing\"\nfunc TestPass(t *testing.T) {}\n"), 0o644))
+	cleanupFailure := errors.New("injected isolation cleanup failure")
+	var isolationRoot string
+
+	_, err := Run(context.Background(), RunOptions{
+		Profile:    Profile{Name: "cleanup-fixture", Packages: []string{"./..."}, GoTestArgs: []string{"-json", "-count=1"}},
+		OutputDir:  filepath.Join(t.TempDir(), "artifacts"),
+		WorkingDir: module,
+		closeIsolation: func(environment *testisolation.Environment) error {
+			isolationRoot = environment.Root
+			return errors.Join(environment.Close(), cleanupFailure)
+		},
+	})
+	require.ErrorIs(t, err, cleanupFailure)
+	require.NotEmpty(t, isolationRoot)
+	assert.NoDirExists(t, isolationRoot)
 }

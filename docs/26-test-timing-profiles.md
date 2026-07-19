@@ -138,6 +138,11 @@ The runner writes all artifacts before returning the test command's exit status
 or a budget failure. Do not replace it with a shell pipeline that loses earlier
 failures or reports only the last failing package.
 
+The command root handles interrupt and SIGTERM through context cancellation.
+Managed Go commands run in dedicated process groups; cancellation and partial
+startup kill the complete group and verify its exit before temporary private
+database roots are removed. Cleanup failures are returned rather than ignored.
+
 ## Profile semantics
 
 | Profile | Test-result cache | Build-cache namespace | Scope | Purpose |
