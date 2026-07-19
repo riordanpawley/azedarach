@@ -68,7 +68,7 @@ func (m Model) projectOrchestratorActionCmd(project projectOrchestratorSnapshot,
 		readPolicy = m.daemonClient.ReadWaitPolicy()
 	}
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), projectOrchestratorActionTimeout(action))
 		defer cancel()
 		request := protocol.OrchestratorSessionRequest{Scope: domain.ProjectOrchestrationScope()}
 		runner := m.projectOrchestratorActionRunner
@@ -90,6 +90,13 @@ func (m Model) projectOrchestratorActionCmd(project projectOrchestratorSnapshot,
 		result, err := runner(ctx, target, action, request)
 		return projectOrchestratorActionMsg{projectID: projectID, action: action, result: result, err: err}
 	}
+}
+
+func projectOrchestratorActionTimeout(action string) time.Duration {
+	if action == "start" {
+		return protocol.OrchestratorSessionStartClientBudget
+	}
+	return 12 * time.Second
 }
 
 func (m Model) currentProjectOrchestratorRoute() projectOrchestratorSnapshot {
