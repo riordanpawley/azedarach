@@ -2765,7 +2765,7 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 		}
 		return err
 	}
-	if _, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+	if _, _, err := d.applyPhysicalSessionObservationWithProjectionCleanup(ctx, store, projectID, daemonstate.PhysicalSessionObservation{
 		ProjectID: projectID, SessionID: session.ID, ObservedState: daemonstate.SessionStateStopped, UpdatedAt: session.UpdatedAt,
 	}); err != nil {
 		return err
@@ -2785,13 +2785,12 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 		if err := store.UpsertSessionState(ctx, projectID, row); err != nil {
 			return fmt.Errorf("stop session observation %s: %w", row.ID, err)
 		}
-		if _, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+		if _, _, err := d.applyPhysicalSessionObservationWithProjectionCleanup(ctx, store, projectID, daemonstate.PhysicalSessionObservation{
 			ProjectID: projectID, SessionID: row.ID, ObservedState: daemonstate.SessionStateStopped, UpdatedAt: row.UpdatedAt,
 		}); err != nil {
 			return fmt.Errorf("stop physical session observation %s: %w", row.ID, err)
 		}
 	}
-	d.purgeManagedAgentIdentityProjectionForSession(projectID, sessionID)
 	return nil
 }
 

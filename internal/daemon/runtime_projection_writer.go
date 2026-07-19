@@ -62,6 +62,17 @@ func newRuntimeProjectionWriter(d *Daemon) *daemonRuntimeProjectionWriter {
 	return &daemonRuntimeProjectionWriter{d: d}
 }
 
+func (d *Daemon) applyPhysicalSessionObservationWithProjectionCleanup(ctx context.Context, store *daemonstate.RuntimeStateStore, projectID string, observation daemonstate.PhysicalSessionObservation) ([]daemonstate.Session, bool, error) {
+	changed, applied, err := store.ApplyPhysicalSessionObservation(ctx, observation)
+	if err == nil && applied && daemonstate.NormalizeSessionState(observation.ObservedState) == daemonstate.SessionStateStopped {
+		d.purgeManagedAgentIdentityProjectionForSession(projectID, observation.SessionID)
+		if canonicalProjectID := d.canonicalProjectID(projectID); canonicalProjectID != protocol.NormalizeProjectID(projectID) {
+			d.purgeManagedAgentIdentityProjectionForSession(canonicalProjectID, observation.SessionID)
+		}
+	}
+	return changed, applied, err
+}
+
 func contextWithRuntimeProjectionWriterOperation(ctx context.Context, operation string) context.Context {
 	operation = strings.TrimSpace(operation)
 	if operation == "" {
@@ -138,7 +149,7 @@ func (w *daemonRuntimeProjectionWriter) ApplyPhysicalSessionObservationAndPublis
 		return nil, false, nil, err
 	}
 	persistStartedAt := time.Now()
-	changed, applied, err := store.ApplyPhysicalSessionObservation(ctx, observation)
+	changed, applied, err := w.d.applyPhysicalSessionObservationWithProjectionCleanup(ctx, store, projectID, observation)
 	revisions := make([]uint64, len(changed))
 	if err == nil && applied && w.d.runtimeProjectionCoalescer == nil {
 		for i := range changed {
@@ -147,9 +158,6 @@ func (w *daemonRuntimeProjectionWriter) ApplyPhysicalSessionObservationAndPublis
 	}
 	unlock()
 	w.logPhase(ctx, projectID, operation, "persist", persistStartedAt, err)
-	if err == nil && applied && daemonstate.NormalizeSessionState(observation.ObservedState) == daemonstate.SessionStateStopped {
-		w.d.purgeManagedAgentIdentityProjectionForSession(projectID, observation.SessionID)
-	}
 	if err != nil || !applied {
 		return changed, applied, nil, err
 	}

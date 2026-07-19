@@ -24,9 +24,46 @@ import (
 const rootProjectionDeltaBatchLimit = 500
 
 type userProjectionConsumerHandle struct {
-	path   string
-	cancel context.CancelFunc
-	done   chan struct{}
+	path                           string
+	managedAgentIdentityProjectIDs []string
+	cancel                         context.CancelFunc
+	done                           chan struct{}
+}
+
+func managedAgentIdentityProjectIDsForRegisteredProject(project appconfig.Project) []string {
+	ids := []string{protocol.NormalizeProjectID(appconfig.RegisteredProjectID(project))}
+	if canonicalID, err := appconfig.ProjectIDForRoot(project.Path); err == nil {
+		ids = append(ids, protocol.NormalizeProjectID(canonicalID))
+	}
+	return uniqueManagedAgentIdentityProjectIDs(ids)
+}
+
+func managedAgentIdentityProjectIDsForConsumer(projectID string, handle *userProjectionConsumerHandle) []string {
+	ids := []string{protocol.NormalizeProjectID(projectID)}
+	if handle != nil {
+		ids = append(ids, handle.managedAgentIdentityProjectIDs...)
+		if canonicalID, err := appconfig.ProjectIDForRoot(handle.path); err == nil {
+			ids = append(ids, protocol.NormalizeProjectID(canonicalID))
+		}
+	}
+	return uniqueManagedAgentIdentityProjectIDs(ids)
+}
+
+func uniqueManagedAgentIdentityProjectIDs(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	result := make([]string, 0, len(ids))
+	for _, projectID := range ids {
+		if strings.TrimSpace(projectID) == "" {
+			continue
+		}
+		projectID = protocol.NormalizeProjectID(projectID)
+		if _, found := seen[projectID]; found {
+			continue
+		}
+		seen[projectID] = struct{}{}
+		result = append(result, projectID)
+	}
+	return result
 }
 
 func (d *Daemon) ensureUserProjectionConsumers(ctx context.Context, projects []appconfig.Project) {
@@ -53,6 +90,7 @@ func (d *Daemon) ensureUserProjectionConsumers(ctx context.Context, projects []a
 	d.userProjectionConsumerMu.Lock()
 	var stopped []*userProjectionConsumerHandle
 	var stoppedProjectIDs []string
+	var stoppedManagedIdentityProjectIDs [][]string
 	for projectID, handle := range d.userProjectionConsumers {
 		project, exists := desired[projectID]
 		if exists && filepath.Clean(project.Path) == handle.path {
@@ -62,10 +100,13 @@ func (d *Daemon) ensureUserProjectionConsumers(ctx context.Context, projects []a
 		delete(d.userProjectionConsumers, projectID)
 		stopped = append(stopped, handle)
 		stoppedProjectIDs = append(stoppedProjectIDs, projectID)
+		stoppedManagedIdentityProjectIDs = append(stoppedManagedIdentityProjectIDs, managedAgentIdentityProjectIDsForConsumer(projectID, handle))
 	}
 	d.userProjectionConsumerMu.Unlock()
-	for _, projectID := range stoppedProjectIDs {
-		d.purgeManagedAgentIdentityProjectionForProject(projectID)
+	for _, projectIDs := range stoppedManagedIdentityProjectIDs {
+		for _, projectID := range projectIDs {
+			d.purgeManagedAgentIdentityProjectionForProject(projectID)
+		}
 	}
 	for _, handle := range stopped {
 		if handle.done == nil {
@@ -94,7 +135,10 @@ func (d *Daemon) ensureUserProjectionConsumers(ctx context.Context, projects []a
 			continue
 		}
 		consumerCtx, consumerCancel := context.WithCancel(workerCtx)
-		handle := &userProjectionConsumerHandle{path: filepath.Clean(project.Path), cancel: consumerCancel, done: make(chan struct{})}
+		handle := &userProjectionConsumerHandle{
+			path: filepath.Clean(project.Path), managedAgentIdentityProjectIDs: managedAgentIdentityProjectIDsForRegisteredProject(project),
+			cancel: consumerCancel, done: make(chan struct{}),
+		}
 		d.userProjectionConsumers[projectID] = handle
 		d.userProjectionConsumerMu.Unlock()
 
