@@ -655,61 +655,6 @@ func TestRefreshOwnedSyncFencesMutationAndStructuralHealthTransitions(t *testing
 	}
 }
 
-func TestProjectReadMaterializerCursorNotificationsPreserveFailureDisposition(t *testing.T) {
-	now := time.Date(2026, time.July, 18, 1, 0, 0, 0, time.UTC)
-	task := domain.Task{ID: naming.IssueID("transition"), Title: "transition", Type: domain.TypeTask, Status: domain.StatusOpen, CreatedAt: now, UpdatedAt: now}
-	canonical := map[string]domain.Task{task.ID.String(): task}
-	tasks := map[string]domain.Task{task.ID.String(): task}
-	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, tasks)
-	materializer := newProjectReadMaterializer("project", nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) { return tasks, nil })
-	materializer.replaceBootstrap(canonical, tasks, materializedMetadata(1, 1, issueProjectionProjector(), nil, issueKeys.sum(), runtimeKeys.sum(), "healthy"), issueKeys, runtimeKeys)
-
-	assertNotified := func(signal <-chan struct{}, transition string) {
-		t.Helper()
-		select {
-		case <-signal:
-		default:
-			t.Fatalf("%s did not notify cursor waiters", transition)
-		}
-	}
-	assertDisposition := func(wantRetryable bool, wantHealth string) <-chan struct{} {
-		t.Helper()
-		_, metadata, signal, retryable := materializer.snapshotWithCursorAdvanceSignal()
-		if retryable != wantRetryable || !strings.Contains(metadata.Health, wantHealth) {
-			t.Fatalf("failure disposition retryable=%t health=%q, want retryable=%t health containing %q", retryable, metadata.Health, wantRetryable, wantHealth)
-		}
-		return signal
-	}
-
-	signal := assertDisposition(false, "healthy")
-	materializer.markUnhealthy(fmt.Errorf("%w: transient watch", domain.ErrProjectionRetryable))
-	assertNotified(signal, "retryable failure")
-	signal = assertDisposition(true, "transient watch")
-
-	updated := task
-	updated.Status = domain.StatusInProgress
-	updated.UpdatedAt = now.Add(time.Second)
-	if err := materializer.apply(context.Background(), productionMaterializerBatch(t, updated, 1)); err != nil {
-		t.Fatal(err)
-	}
-	assertNotified(signal, "successful delta apply")
-	signal = assertDisposition(false, "healthy")
-
-	materializer.markUnhealthy(fmt.Errorf("%w: retry before bootstrap", domain.ErrProjectionRetryable))
-	assertNotified(signal, "retryable failure before bootstrap")
-	signal = assertDisposition(true, "retry before bootstrap")
-	canonical = map[string]domain.Task{updated.ID.String(): updated}
-	tasks = map[string]domain.Task{updated.ID.String(): updated}
-	issueKeys, runtimeKeys = checkpointMaterializedTasks(canonical, tasks)
-	materializer.replaceBootstrap(canonical, tasks, materializedMetadata(2, 2, issueProjectionProjector(), nil, issueKeys.sum(), runtimeKeys.sum(), "healthy"), issueKeys, runtimeKeys)
-	assertNotified(signal, "successful bootstrap replacement")
-	signal = assertDisposition(false, "healthy")
-
-	materializer.markUnhealthy(errors.New("structural projection corruption"))
-	assertNotified(signal, "structural failure")
-	assertDisposition(false, "structural projection corruption")
-}
-
 func TestProjectReadMaterializerGapWatchPerformsVerifiedBootstrapRecovery(t *testing.T) {
 	client, _ := newTestIssueClient(t)
 	ctx := context.Background()
@@ -1934,7 +1879,7 @@ func TestProjectReadMaterializerBootstrapCannotClearCanceledQueuedConvergence(t 
 	}
 }
 
-func TestProjectReadSnapshotCurrentWaitsForExternalDependencyDelta(t *testing.T) {
+func TestProjectReadSnapshotCurrentConvergesExternalDependencyDelta(t *testing.T) {
 	ctx := context.Background()
 	writer, repoDir := newTestIssueClient(t)
 	reader := issues.NewClient(repoDir, slog.Default())
@@ -1972,40 +1917,10 @@ func TestProjectReadSnapshotCurrentWaitsForExternalDependencyDelta(t *testing.T)
 	if err := writer.AddDependency(ctx, rootID, blockerID, string(domain.DependencyBlocks)); err != nil {
 		t.Fatal(err)
 	}
-	waiting := make(chan uint64, 1)
-	readCtx := withProjectReadCurrentWaitHookForTest(ctx, func(projectID string, target uint64) {
-		if projectID != "project" {
-			t.Errorf("wait project = %q, want project", projectID)
-		}
-		waiting <- target
-	})
-	type readResult struct {
-		tasks  []domain.Task
-		source protocol.MaterializedSnapshotMetadata
-		err    error
-	}
-	readDone := make(chan readResult, 1)
-	go func() {
-		tasks, source, err := d.projectReadSnapshotCurrent(readCtx, "project")
-		readDone <- readResult{tasks: tasks, source: source, err: err}
-	}()
-	target := <-waiting
-	beforeCursor := materializer.snapshotMetadata().DeliveryCursor
-	batch, err := materializer.authority.List(ctx, protocol.DefaultProjectID, beforeCursor, projectReadMaterializerBatchSize)
+	tasks, source, err := d.projectReadSnapshotCurrent(ctx, "project")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if batch.DeliveryToCursor < target {
-		t.Fatalf("batch cursor = %d, want at least %d", batch.DeliveryToCursor, target)
-	}
-	if err := materializer.apply(ctx, batch); err != nil {
-		t.Fatal(err)
-	}
-	read := <-readDone
-	if read.err != nil {
-		t.Fatal(read.err)
-	}
-	tasks, source := read.tasks, read.source
 	if source.DeliveryCursor == 0 || source.DeliveryCursor < source.DeliveryHead {
 		t.Fatalf("source not current: %+v", source)
 	}

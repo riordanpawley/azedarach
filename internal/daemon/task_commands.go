@@ -6822,6 +6822,7 @@ func daemonTaskGraphCapacitySummary(ready taskGraphReadinessResult) taskGraphCap
 }
 
 func cloneTaskGraphReadinessResult(result taskGraphReadinessResult) taskGraphReadinessResult {
+	result.RootBlockers = append([]string(nil), result.RootBlockers...)
 	result.Runnable = append([]string(nil), result.Runnable...)
 	result.Pending = append([]taskGraphPendingStart(nil), result.Pending...)
 	result.Active = append([]string(nil), result.Active...)

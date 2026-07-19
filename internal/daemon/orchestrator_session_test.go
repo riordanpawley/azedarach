@@ -957,6 +957,7 @@ func TestAncestorRootBlockerPropagatesThroughSharedAuthorityAndActiveStartPaths(
 	tmuxRunner := newSessionStartTmuxRunner()
 	worktreeRunner := &worktreeCreateRunner{worktreePath: filepath.Join(t.TempDir(), "parent-root")}
 	manager := git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default())
+	reconciler := &runtimeReconcileRecorder{}
 	dReader := &Daemon{
 		cfg:                       Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
 		issues:                    reader,
@@ -967,12 +968,14 @@ func TestAncestorRootBlockerPropagatesThroughSharedAuthorityAndActiveStartPaths(
 		runtimeStoresByProject:    map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
 		worktreeManagersByRoot:    map[string]*git.WorktreeManager{repoDir: manager},
 		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager},
+		runtimeReconciler:         reconciler,
 		materializers:             map[string]*projectReadMaterializer{projectID: materializer},
 		materializersStarted:      true,
 		revision:                  map[string]uint64{},
 		taskGraphReadinessCache:   map[string]taskGraphReadinessCacheEntry{},
 		taskGraphReadinessLoads:   map[string]*taskGraphReadinessLoad{},
 	}
+	acknowledgeManagedAgentOnInitialLaunch(t, dReader, tmuxRunner, projectID)
 	dReader.configureProjectReadMaterializer(materializer, projectID, reader)
 	if err := materializer.bootstrap(ctx); err != nil {
 		t.Fatal(err)
@@ -995,22 +998,9 @@ func TestAncestorRootBlockerPropagatesThroughSharedAuthorityAndActiveStartPaths(
 		t.Fatalf("second daemon dependency write: response=%+v err=%v", dependencyResp.Error, err)
 	}
 
-	waiting := make(chan struct{}, 1)
-	readCtx := withProjectReadCurrentWaitHookForTest(ctx, func(gotProject string, _ uint64) {
-		if gotProject != projectID {
-			t.Errorf("wait project = %q, want %q", gotProject, projectID)
-		}
-		waiting <- struct{}{}
-	})
-	readinessDone := make(chan protocol.ResponseEnvelope, 1)
 	readinessBody, _ := json.Marshal(map[string]string{"task_id": "parent-root"})
-	go func() {
-		resp, _ := dReader.handleTaskGraphReadiness(readCtx, protocol.RequestEnvelope{Command: "task.graph_readiness", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: readinessBody})
-		readinessDone <- resp
-	}()
-	<-waiting
+	readinessResp, _ := dReader.handleTaskGraphReadiness(ctx, protocol.RequestEnvelope{Command: "task.graph_readiness", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: readinessBody})
 	close(watchStore.release)
-	readinessResp := <-readinessDone
 	if readinessResp.Error != nil {
 		t.Fatalf("readiness response = %+v", readinessResp.Error)
 	}
@@ -1071,6 +1061,9 @@ func TestAncestorRootBlockerPropagatesThroughSharedAuthorityAndActiveStartPaths(
 	}
 	if worktreeRunner.worktreeAddCalls != 0 || len(tmuxRunner.commands) != 0 {
 		t.Fatalf("blocked starts created side effects: worktree=%d tmux=%v", worktreeRunner.worktreeAddCalls, tmuxRunner.commands)
+	}
+	if calls, _ := reconciler.snapshot(); calls != 0 {
+		t.Fatalf("blocked starts entered runtime reconciliation %d time(s)", calls)
 	}
 	if err := writer.Update(ctx, "upstream-blocker", domain.StatusDone); err != nil {
 		t.Fatal(err)

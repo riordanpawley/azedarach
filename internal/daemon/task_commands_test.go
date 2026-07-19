@@ -9825,6 +9825,15 @@ func TestTaskGraphReadinessPropagatesRootBlockersToDescendantsAndNestedRoots(t *
 	}
 }
 
+func TestCloneTaskGraphReadinessResultCopiesRootBlockers(t *testing.T) {
+	original := taskGraphReadinessResult{RootBlockers: []string{"upstream-blocker"}}
+	cloned := cloneTaskGraphReadinessResult(original)
+	cloned.RootBlockers[0] = "changed"
+	if original.RootBlockers[0] != "upstream-blocker" {
+		t.Fatalf("clone mutated cached root blockers: %v", original.RootBlockers)
+	}
+}
+
 func TestTaskGraphReadinessSkipsForeignOwnedRunnableIssues(t *testing.T) {
 	root := naming.IssueID("az-root")
 	leaf := naming.IssueID("az-owned")
