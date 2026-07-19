@@ -18,7 +18,10 @@ import (
 
 const defaultValidationLeaseTTL = 30 * time.Second
 
-var errPublicationEvidenceAssessmentChanged = fmt.Errorf("publication evidence changed during authoritative assessment")
+var (
+	errPublicationEvidenceAssessmentChanged          = fmt.Errorf("publication evidence changed during authoritative assessment")
+	errHistoricalPublicationOperationIdentityMissing = fmt.Errorf("historical publication operation identity is missing")
+)
 
 func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	var store *operationstore.SQLiteStore
@@ -523,7 +526,7 @@ func (d *Daemon) taskClosePublicationProvenance(ctx context.Context, projectID, 
 	if !bound && recoveredOperationID == "" {
 		accepted, acceptedErr := d.typedMergeAcceptedPublicationBinding(ctx, projectID, issueID, wantBranch, wantSource, wantTarget)
 		if acceptedErr != nil {
-			return domain.PublicationOperation{}, domain.ValidationRequest{}, fmt.Errorf("exact synthetic merge %s recovery receipt is missing publication operation identity: %w", wantTarget, acceptedErr)
+			return domain.PublicationOperation{}, domain.ValidationRequest{}, fmt.Errorf("%w: exact synthetic merge %s recovery receipt is missing publication operation identity: %v", errHistoricalPublicationOperationIdentityMissing, wantTarget, acceptedErr)
 		}
 		recoveredOperationID = strings.TrimSpace(accepted.OperationID)
 	}

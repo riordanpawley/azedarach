@@ -810,7 +810,7 @@ func main() {
 		case "close":
 			opts, err := cli.ParseIssueCloseArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [--historical-authorization <json>] [<ticket-id>]\n")
 				fmt.Fprintf(os.Stderr, "Note: close integrates the issue branch, cleans session/worktree attachments, then writes closed status.\n")
 				fmt.Fprintf(os.Stderr, "Note: --force-worktree forces worktree removal after integration.\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)

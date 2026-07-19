@@ -134,17 +134,18 @@ type taskClosePreflightRequest struct {
 }
 
 type taskCloseRequest struct {
-	TaskID                    string                    `json:"task_id"`
-	ForceWorktree             bool                      `json:"force_worktree,omitempty"`
-	IgnoreAhead               bool                      `json:"ignore_ahead,omitempty"`
-	IntegrateBeforeClose      bool                      `json:"integrate_before_close,omitempty"`
-	CloseCleanChildren        bool                      `json:"close_clean_children,omitempty"`
-	AllowActiveSession        bool                      `json:"allow_active_session,omitempty"`
-	CloseOutcome              string                    `json:"closed_outcome,omitempty"`
-	ExpectedSourceOID         string                    `json:"expected_source_oid,omitempty"`
-	ExpectedBaseOID           string                    `json:"expected_base_oid,omitempty"`
-	ExpectedReviewEvidence    *issues.ReviewEvidencePin `json:"expected_review_evidence,omitempty"`
-	PromoteBacklogBeforeClose bool                      `json:"-"`
+	TaskID                    string                                     `json:"task_id"`
+	ForceWorktree             bool                                       `json:"force_worktree,omitempty"`
+	IgnoreAhead               bool                                       `json:"ignore_ahead,omitempty"`
+	IntegrateBeforeClose      bool                                       `json:"integrate_before_close,omitempty"`
+	CloseCleanChildren        bool                                       `json:"close_clean_children,omitempty"`
+	AllowActiveSession        bool                                       `json:"allow_active_session,omitempty"`
+	CloseOutcome              string                                     `json:"closed_outcome,omitempty"`
+	ExpectedSourceOID         string                                     `json:"expected_source_oid,omitempty"`
+	ExpectedBaseOID           string                                     `json:"expected_base_oid,omitempty"`
+	ExpectedReviewEvidence    *issues.ReviewEvidencePin                  `json:"expected_review_evidence,omitempty"`
+	HistoricalAuthorization   *domain.HistoricalPublicationAuthorization `json:"historical_authorization,omitempty"`
+	PromoteBacklogBeforeClose bool                                       `json:"-"`
 }
 
 type taskCloseExpectedBaseStaleError struct {
@@ -2180,6 +2181,15 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	if closeOutcome == domain.IssueCloseCancelled {
 		cmd.IntegrateBeforeClose = false
 	}
+	if cmd.HistoricalAuthorization != nil {
+		if !cmd.IntegrateBeforeClose || closeOutcome != domain.IssueCloseCompleted {
+			return taskCloseResult{}, fmt.Errorf("historical authorization is valid only for completed integration close")
+		}
+		if err := cmd.HistoricalAuthorization.Validate(); err != nil {
+			return taskCloseResult{}, fmt.Errorf("invalid historical authorization: %w", err)
+		}
+		ctx = withTaskCloseHistoricalAuthorization(ctx, *cmd.HistoricalAuthorization)
+	}
 	result := taskCloseResult{
 		TaskID:         taskID,
 		Status:         string(closeStatus),
@@ -2905,33 +2915,43 @@ func (d *Daemon) liveTmuxSessionSet(ctx context.Context) (map[string]struct{}, b
 }
 
 type taskCloseIntegrationResult struct {
-	Requested              bool
-	Integrated             bool
-	NoChanges              bool
-	ReceiptRecovered       bool
-	ConfiguredBaseTarget   bool
-	TargetID               string
-	SourceBranch           string
-	TargetBranch           string
-	BaseOID                string
-	SourceOID              string
-	TargetOID              string
-	PublicationOperationID string
-	HookDiagnostics        []git.GitHookDiagnostic
-	ValidationAttempts     []domain.IntegrationCandidateValidationAttempt
+	Requested                        bool
+	Integrated                       bool
+	NoChanges                        bool
+	ReceiptRecovered                 bool
+	ConfiguredBaseTarget             bool
+	TargetID                         string
+	SourceBranch                     string
+	TargetBranch                     string
+	BaseOID                          string
+	SourceOID                        string
+	TargetOID                        string
+	PublicationOperationID           string
+	ReceiptEventID                   int64
+	HistoricalBindingID              string
+	HistoricalAuthorizationEventID   int64
+	HistoricalOriginalReceiptEventID int64
+	HookDiagnostics                  []git.GitHookDiagnostic
+	ValidationAttempts               []domain.IntegrationCandidateValidationAttempt
 }
 
 type taskCloseIntegrationReceipt struct {
-	ProjectID              string
-	SourceBranch           string
-	TargetBranch           string
-	Integrated             bool
-	ConfiguredBaseTarget   bool
-	TargetID               string
-	BaseOID                string
-	SourceOID              string
-	TargetOID              string
-	PublicationOperationID string
+	EventID                          int64
+	Source                           string
+	SourceCommand                    string
+	ProjectID                        string
+	SourceBranch                     string
+	TargetBranch                     string
+	Integrated                       bool
+	ConfiguredBaseTarget             bool
+	TargetID                         string
+	BaseOID                          string
+	SourceOID                        string
+	TargetOID                        string
+	PublicationOperationID           string
+	HistoricalBindingID              string
+	HistoricalAuthorizationEventID   int64
+	HistoricalOriginalReceiptEventID int64
 }
 
 const taskCloseSlowGitHookThreshold = 1 * time.Second
@@ -3040,10 +3060,19 @@ func (d *Daemon) persistTaskCloseIntegrationPublication(ctx context.Context, pro
 	if !configured {
 		return nil
 	}
+	if integration.ReceiptRecovered && strings.TrimSpace(integration.PublicationOperationID) != "" && strings.TrimSpace(integration.HistoricalBindingID) != "" {
+		return fmt.Errorf("recovered integration receipt contains mixed modern and historical publication authority")
+	}
 	if integration.ReceiptRecovered && strings.TrimSpace(integration.PublicationOperationID) == "" {
 		targetWorktree := strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID))
 		if targetWorktree == "" {
 			return fmt.Errorf("recover merge-result publication binding: exact project routing unavailable")
+		}
+		if strings.TrimSpace(integration.HistoricalBindingID) != "" {
+			if _, historicalErr := d.recoverHistoricalTaskClosePublication(ctx, projectID, taskID, targetWorktree, integration); historicalErr != nil {
+				return fmt.Errorf("recover merge-result historical publication binding: %w", historicalErr)
+			}
+			return nil
 		}
 		projectCfg, configErr := appconfig.LoadConfig(targetWorktree)
 		if configErr != nil {
@@ -3052,7 +3081,17 @@ func (d *Daemon) persistTaskCloseIntegrationPublication(ctx context.Context, pro
 		gateCommand := strings.TrimSpace(projectCfg.Gate.Command)
 		operation, _, provenanceErr := d.taskClosePublicationProvenance(ctx, projectID, taskID, integration, publicationPolicyVersion(projectCfg, gateCommand), gateCommand, publicationEnvironmentFingerprint(projectCfg))
 		if provenanceErr != nil {
-			return fmt.Errorf("recover merge-result publication binding: %w", provenanceErr)
+			if !errors.Is(provenanceErr, errHistoricalPublicationOperationIdentityMissing) {
+				return fmt.Errorf("recover merge-result publication binding: %w", provenanceErr)
+			}
+			if _, historicalErr := d.recoverHistoricalTaskClosePublication(ctx, projectID, taskID, targetWorktree, integration); historicalErr != nil {
+				return fmt.Errorf("recover merge-result publication binding: modern authority: %v; historical authority: %w", provenanceErr, historicalErr)
+			}
+			// Historical integrations predate publication operations and merge-
+			// result evidence. Their append-only binding is the durable authority;
+			// every replay revalidates its exact review/validation events and live
+			// typed-target containment before returning here.
+			return nil
 		}
 		integration.PublicationOperationID = strings.TrimSpace(operation.OperationID)
 		issueClient := d.issueClientForProject(projectID)
@@ -3116,16 +3155,22 @@ func (d *Daemon) latestTaskCloseIntegrationReceipt(ctx context.Context, projectI
 		return taskCloseIntegrationReceipt{}, false, nil
 	}
 	receipt := taskCloseIntegrationReceipt{
-		ProjectID:              observationPayloadString(event.Payload, "project_id"),
-		SourceBranch:           observationPayloadString(event.Payload, "source_branch"),
-		TargetBranch:           observationPayloadString(event.Payload, "target_branch"),
-		Integrated:             observationPayloadBool(event.Payload, "integrated"),
-		ConfiguredBaseTarget:   observationPayloadBool(event.Payload, "configured_base_target"),
-		TargetID:               observationPayloadString(event.Payload, "target_id"),
-		BaseOID:                observationPayloadString(event.Payload, "base_oid"),
-		SourceOID:              observationPayloadString(event.Payload, "source_oid"),
-		TargetOID:              observationPayloadString(event.Payload, "target_oid"),
-		PublicationOperationID: observationPayloadString(event.Payload, "publication_operation_id"),
+		EventID:                          event.ID,
+		Source:                           event.Source,
+		SourceCommand:                    event.SourceCommand,
+		ProjectID:                        observationPayloadString(event.Payload, "project_id"),
+		SourceBranch:                     observationPayloadString(event.Payload, "source_branch"),
+		TargetBranch:                     observationPayloadString(event.Payload, "target_branch"),
+		Integrated:                       observationPayloadBool(event.Payload, "integrated"),
+		ConfiguredBaseTarget:             observationPayloadBool(event.Payload, "configured_base_target"),
+		TargetID:                         observationPayloadString(event.Payload, "target_id"),
+		BaseOID:                          observationPayloadString(event.Payload, "base_oid"),
+		SourceOID:                        observationPayloadString(event.Payload, "source_oid"),
+		TargetOID:                        observationPayloadString(event.Payload, "target_oid"),
+		PublicationOperationID:           observationPayloadString(event.Payload, "publication_operation_id"),
+		HistoricalBindingID:              observationPayloadString(event.Payload, "historical_recovery_binding_id"),
+		HistoricalAuthorizationEventID:   observationPayloadInt64(event.Payload["historical_authorization_event_id"]),
+		HistoricalOriginalReceiptEventID: observationPayloadInt64(event.Payload["historical_original_receipt_event_id"]),
 	}
 	if receipt.SourceOID == "" || receipt.TargetOID == "" {
 		return taskCloseIntegrationReceipt{}, false, fmt.Errorf("exact integration receipt %d is missing source_oid or target_oid", event.ID)
@@ -3137,6 +3182,15 @@ func (d *Daemon) recoverPublishedTaskCloseIntegration(ctx context.Context, proje
 	receipt, found, err := d.latestTaskCloseIntegrationReceipt(ctx, projectID, taskID, sourceBranch)
 	if err != nil || !found {
 		return taskCloseIntegrationResult{}, false, err
+	}
+	if receipt.Source != "daemon-task-close" || (receipt.SourceCommand != "integrate-before-close" && receipt.SourceCommand != "historical-integration-recovery") {
+		return taskCloseIntegrationResult{}, false, fmt.Errorf("exact integration receipt %d has untrusted provenance %s/%s", receipt.EventID, receipt.Source, receipt.SourceCommand)
+	}
+	if strings.TrimSpace(receipt.PublicationOperationID) != "" && strings.TrimSpace(receipt.HistoricalBindingID) != "" {
+		return taskCloseIntegrationResult{}, false, fmt.Errorf("exact integration receipt %d contains mixed modern and historical authority", receipt.EventID)
+	}
+	if receipt.SourceCommand == "historical-integration-recovery" && (strings.TrimSpace(receipt.HistoricalBindingID) == "" || receipt.HistoricalAuthorizationEventID <= 0 || receipt.HistoricalOriginalReceiptEventID <= 0) {
+		return taskCloseIntegrationResult{}, false, fmt.Errorf("exact historical integration receipt %d is missing binding authority", receipt.EventID)
 	}
 	if err := validateTaskCloseIntegrationReceiptIdentity(receipt, projectID, targetID, targetBranch, true); err != nil {
 		return taskCloseIntegrationResult{}, false, err
@@ -3158,18 +3212,23 @@ func (d *Daemon) recoverPublishedTaskCloseIntegration(ctx context.Context, proje
 		return taskCloseIntegrationResult{}, false, err
 	}
 	return taskCloseIntegrationResult{
-		Requested:              true,
-		NoChanges:              true,
-		ReceiptRecovered:       true,
-		ConfiguredBaseTarget:   true,
-		TargetID:               receipt.TargetID,
-		SourceBranch:           receipt.SourceBranch,
-		TargetBranch:           receipt.TargetBranch,
-		BaseOID:                receipt.BaseOID,
-		SourceOID:              receipt.SourceOID,
-		TargetOID:              receipt.TargetOID,
-		PublicationOperationID: receipt.PublicationOperationID,
-		ValidationAttempts:     validationAttempts,
+		Requested:                        true,
+		Integrated:                       true,
+		NoChanges:                        true,
+		ReceiptRecovered:                 true,
+		ConfiguredBaseTarget:             true,
+		TargetID:                         receipt.TargetID,
+		SourceBranch:                     receipt.SourceBranch,
+		TargetBranch:                     receipt.TargetBranch,
+		BaseOID:                          receipt.BaseOID,
+		SourceOID:                        receipt.SourceOID,
+		TargetOID:                        receipt.TargetOID,
+		PublicationOperationID:           receipt.PublicationOperationID,
+		ReceiptEventID:                   receipt.EventID,
+		HistoricalBindingID:              receipt.HistoricalBindingID,
+		HistoricalAuthorizationEventID:   receipt.HistoricalAuthorizationEventID,
+		HistoricalOriginalReceiptEventID: receipt.HistoricalOriginalReceiptEventID,
+		ValidationAttempts:               validationAttempts,
 	}, true, nil
 }
 
