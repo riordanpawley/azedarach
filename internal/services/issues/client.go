@@ -49,6 +49,8 @@ type OrchestrationProjectionExport struct {
 	UnresolvedInteractionIDs map[string]struct{}
 	Interactions             []domain.InteractionRequest
 	InvestigationAcceptances map[string]domain.InvestigationAcceptance
+	ObservationEvents        ProjectIssueObservationCapture
+	CompletionEvents         map[string]domain.IssueObservationEvent
 }
 
 // ExportOrchestrationProjection reads a bounded project graph plus its durable
@@ -94,6 +96,21 @@ func (c *Client) ExportOrchestrationProjection(ctx context.Context, projectID st
 	if err != nil {
 		return OrchestrationProjectionExport{}, err
 	}
+	observationEvents, err := c.captureProjectIssueObservationEvents(ctx, tx, issueIDs, 50, 20)
+	if err != nil {
+		return OrchestrationProjectionExport{}, err
+	}
+	completionEvents, err := c.listLatestIssueObservationEventsByIssue(ctx, tx, LatestIssueObservationEventOptions{
+		IssueIDs:                issueIDs,
+		Type:                    domain.IssueEventTaskIntegrationCompleted,
+		Source:                  "daemon-task-close",
+		SourceCommands:          []string{"integrate-before-close"},
+		RequiredPayloadTextKeys: []string{"project_id", "source_branch", "target_branch", "source_oid", "target_oid"},
+		InvalidatedByStatuses:   []domain.Status{domain.StatusOpen, domain.StatusInProgress},
+	})
+	if err != nil {
+		return OrchestrationProjectionExport{}, err
+	}
 	var openIssueCount int
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM issues
@@ -120,6 +137,8 @@ func (c *Client) ExportOrchestrationProjection(ctx context.Context, projectID st
 		UnresolvedInteractionIDs: unresolvedInteractionIDs,
 		Interactions:             interactions,
 		InvestigationAcceptances: investigationAcceptances,
+		ObservationEvents:        observationEvents,
+		CompletionEvents:         completionEvents,
 	}, nil
 }
 
@@ -879,8 +898,8 @@ type Client struct {
 	projectionNotifierSubscriptions      map[*projectionDeltaSubscription]struct{}
 	projectionNotifierWG                 sync.WaitGroup
 	decisionOutboxMigrationFailureHook   func(stage string) error
-	agentInputMigrationFailureHook     func(stage string) error
-	migrationCeiling                   string // test-only historical startup seam; empty in production
+	agentInputMigrationFailureHook       func(stage string) error
+	migrationCeiling                     string // test-only historical startup seam; empty in production
 	decisionIdempotencyFailureHook       func(stage string) error
 	eventSearchMigrationFailureHook      func(stage string) error
 	legacyAttachmentMigrationFailureHook func(stage string) error
@@ -1481,6 +1500,7 @@ type StoreResourceDiagnostics struct {
 	MutationHeldFor          time.Duration
 	SQLiteWriteHolder        string
 	SQLiteWriteHeldFor       time.Duration
+	SQLiteWriteWaiters       int
 	ProjectionWatchesActive  int64
 	ProjectionWatchesStarted uint64
 	ProjectionWatchesDone    uint64
@@ -1509,6 +1529,7 @@ func (c *Client) ResourceDiagnostics() StoreResourceDiagnostics {
 	writeLock := sqliteutil.WriteLockResourceDiagnostics(dbPath)
 	diagnostic.SQLiteWriteHolder = writeLock.Holder
 	diagnostic.SQLiteWriteHeldFor = writeLock.HeldFor
+	diagnostic.SQLiteWriteWaiters = writeLock.Waiters
 	return diagnostic
 }
 

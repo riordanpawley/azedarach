@@ -12,6 +12,7 @@ import (
 
 func (d *Daemon) sqliteStoreDiagnostics() []protocol.TaskSQLiteStoreInfo {
 	stores := append(d.issueStoreDiagnostics(), d.runtimeStoreDiagnostics()...)
+	stores = append(stores, d.userProjectionStoreDiagnostics()...)
 	sort.Slice(stores, func(i, j int) bool {
 		if stores[i].DBPath != stores[j].DBPath {
 			return stores[i].DBPath < stores[j].DBPath
@@ -47,6 +48,7 @@ func (d *Daemon) issueStoreDiagnostics() []protocol.TaskSQLiteStoreInfo {
 		info.MutationHeldMillisecond = diagnostic.MutationHeldFor.Milliseconds()
 		info.SQLiteWriteHolder = diagnostic.SQLiteWriteHolder
 		info.SQLiteWriteHeldMillisecond = diagnostic.SQLiteWriteHeldFor.Milliseconds()
+		info.SQLiteWriteWaiters = diagnostic.SQLiteWriteWaiters
 		info.ProjectionWatchesActive = diagnostic.ProjectionWatchesActive
 		info.ProjectionWatchesStarted = diagnostic.ProjectionWatchesStarted
 		info.ProjectionWatchesDone = diagnostic.ProjectionWatchesDone
@@ -80,9 +82,23 @@ func (d *Daemon) runtimeStoreDiagnostics() []protocol.TaskSQLiteStoreInfo {
 		writeLock := sqliteutil.WriteLockResourceDiagnostics(dbPath)
 		info.SQLiteWriteHolder = writeLock.Holder
 		info.SQLiteWriteHeldMillisecond = writeLock.HeldFor.Milliseconds()
+		info.SQLiteWriteWaiters = writeLock.Waiters
 		out = append(out, info)
 	}
 	return out
+}
+
+func (d *Daemon) userProjectionStoreDiagnostics() []protocol.TaskSQLiteStoreInfo {
+	if d == nil || d.userStore == nil {
+		return nil
+	}
+	dbPath, open, stats := d.userStore.ResourceDiagnostics()
+	info := sqlitePoolInfo("user_projection", nil, dbPath, open, stats)
+	writeLock := sqliteutil.WriteLockResourceDiagnostics(dbPath)
+	info.SQLiteWriteHolder = writeLock.Holder
+	info.SQLiteWriteHeldMillisecond = writeLock.HeldFor.Milliseconds()
+	info.SQLiteWriteWaiters = writeLock.Waiters
+	return []protocol.TaskSQLiteStoreInfo{info}
 }
 
 func sqlitePoolInfo(owner string, projectIDs []string, dbPath string, open bool, stats sql.DBStats) protocol.TaskSQLiteStoreInfo {

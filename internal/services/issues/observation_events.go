@@ -932,6 +932,10 @@ func (c *Client) CaptureProjectIssueObservationEvents(ctx context.Context, issue
 	if err != nil {
 		return ProjectIssueObservationCapture{}, err
 	}
+	return c.captureProjectIssueObservationEvents(ctx, db, issueIDs, perIssueLimit, stewardshipPerIssueLimit)
+}
+
+func (c *Client) captureProjectIssueObservationEvents(ctx context.Context, q sqlIssueDBTX, issueIDs []string, perIssueLimit, stewardshipPerIssueLimit int) (ProjectIssueObservationCapture, error) {
 	issueIDs = uniqueIssueIDStrings(issueIDs)
 	out := ProjectIssueObservationCapture{
 		RecentByIssue:      make(map[string][]domain.IssueObservationEvent, len(issueIDs)),
@@ -964,7 +968,7 @@ func (c *Client) CaptureProjectIssueObservationEvents(ctx context.Context, issue
 	if err != nil {
 		return ProjectIssueObservationCapture{}, c.wrapError("list-project-observation-events", "", err)
 	}
-	rows, err := db.QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 		WITH candidate_issues(issue_id) AS (
 			SELECT DISTINCT TRIM(CAST(value AS TEXT))
 			FROM json_each(?)
@@ -1160,6 +1164,10 @@ func (c *Client) ListLatestIssueObservationEventsByIssue(ctx context.Context, op
 	if err != nil {
 		return nil, err
 	}
+	return c.listLatestIssueObservationEventsByIssue(ctx, db, opts)
+}
+
+func (c *Client) listLatestIssueObservationEventsByIssue(ctx context.Context, q sqlIssueDBTX, opts LatestIssueObservationEventOptions) (map[string]domain.IssueObservationEvent, error) {
 	eventType := strings.TrimSpace(string(opts.Type))
 	if eventType == "" {
 		return nil, c.wrapError("list-latest-observation-events-by-issue", "", errors.New("event type is required"))
@@ -1266,7 +1274,7 @@ func (c *Client) ListLatestIssueObservationEventsByIssue(ctx context.Context, op
 			args = append(args, status)
 		}
 	}
-	rows, err := db.QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 		WITH candidate_issues(issue_id) AS (
 			SELECT DISTINCT TRIM(CAST(value AS TEXT))
 			FROM json_each(?)

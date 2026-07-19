@@ -926,11 +926,6 @@ func TestProjectOrchestrationExplicitStartRealBuilderCarriesTypedAdmissionPhase(
 		configure func(*Daemon, *context.CancelFunc)
 	}{
 		{
-			name:      "projection checkpoint wrapper",
-			wantPhase: protocol.OrchestrationAdmissionProjectionCheckpoint,
-			configure: func(_ *Daemon, cancel *context.CancelFunc) { (*cancel)() },
-		},
-		{
 			name:      "operations store wrapper",
 			wantPhase: protocol.OrchestrationAdmissionOperationsStore,
 			configure: func(d *Daemon, cancel *context.CancelFunc) {
@@ -944,9 +939,9 @@ func TestProjectOrchestrationExplicitStartRealBuilderCarriesTypedAdmissionPhase(
 			name:      "observation projection wrapper",
 			wantPhase: protocol.OrchestrationAdmissionObservationProjection,
 			configure: func(d *Daemon, cancel *context.CancelFunc) {
-				d.taskGraphOperationList = func(context.Context, daemonops.Query) ([]daemonops.Record, error) {
+				d.orchestrationSnapshotAuxiliaryRead = func(context.Context) error {
 					(*cancel)()
-					return nil, nil
+					return orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionObservationProjection, context.Canceled)
 				}
 			},
 		},
@@ -968,13 +963,6 @@ func TestProjectOrchestrationExplicitStartRealBuilderCarriesTypedAdmissionPhase(
 				return admissionCtx, cancel
 			}
 			test.configure(d, &admissionCancel)
-			if test.wantPhase == protocol.OrchestrationAdmissionProjectionCheckpoint {
-				d.snapshotAdmissionContext = func(parent context.Context) (context.Context, context.CancelFunc) {
-					admissionCtx, cancel := context.WithCancel(parent)
-					cancel()
-					return admissionCtx, cancel
-				}
-			}
 			result, applyErr := d.orchestrationAuthority().Apply(ctx, "proj", protocol.OrchestrationIntentRequest{Scope: domain.ProjectOrchestrationScope(), Kind: protocol.OrchestrationIntentStart, IntentKey: "real-" + string(test.wantPhase), ActorID: "steward", IssueIDs: []string{issueID}})
 			if applyErr != nil {
 				t.Fatalf("explicit start should queue typed progress: %v", applyErr)
@@ -2202,7 +2190,7 @@ func TestProjectOrchestrationSnapshotRefreshesCrossProcessInteractions(t *testin
 	}
 }
 
-func TestProjectOrchestrationSnapshotRetriesAcrossPostExportInteractionResolution(t *testing.T) {
+func TestProjectOrchestrationSnapshotCapturesPostPreparationInteractionState(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
 	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
@@ -2215,6 +2203,10 @@ func TestProjectOrchestrationSnapshotRetriesAcrossPostExportInteractionResolutio
 	now := time.Now().UTC()
 	request := domain.InteractionRequest{ID: "barrier-resolution", IssueID: issueID, DecisionKey: "policy", OrchestrationScope: "project", Question: "Which policy?", Why: "Human choice required", RequiredDecisions: []string{"select policy"}, Significance: domain.InteractionSignificanceMaterial, Respondent: "human", DecisionPacket: domain.InteractionDecisionPacket{Summary: "Choose policy"}, State: domain.InteractionOpen, Revision: 1, CreatedAt: now, UpdatedAt: now}
 	if err := reader.CreateInteraction(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	exportedCheckpoint, err := reader.ProjectionSourceCheckpoint(ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
 	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": reader}}
@@ -2236,27 +2228,27 @@ func TestProjectOrchestrationSnapshotRetriesAcrossPostExportInteractionResolutio
 		t.Fatal(err)
 	}
 	if got := candidateClass(snapshot.Candidates, issueID); got != "runnable" {
-		t.Fatalf("candidate class = %q, want runnable from retried checkpoint", got)
+		t.Fatalf("candidate class = %q, want runnable from final coherent export", got)
 	}
-	if reason := snapshot.Blocked[issueID]; strings.Contains(reason, "unresolved interaction") {
+	if reason := snapshot.Blocked[issueID]; strings.Contains(reason, "decision") {
 		t.Fatalf("blocked reason = %q, must not retain superseded interaction", reason)
 	}
 	if !slices.Contains(snapshot.Runnable, issueID) {
-		t.Fatalf("runnable = %v, want issue from retried checkpoint", snapshot.Runnable)
+		t.Fatalf("runnable = %v, want resolved candidate", snapshot.Runnable)
 	}
 	if len(snapshot.Interactions) != 0 {
-		t.Fatalf("interactions = %+v, want resolved request absent after whole-snapshot retry", snapshot.Interactions)
+		t.Fatalf("interactions = %+v, want resolved request absent", snapshot.Interactions)
 	}
 	checkpoint, err := reader.ProjectionSourceCheckpoint(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.ProjectionRevision != checkpoint {
-		t.Fatalf("projection revision = %d, want retried checkpoint %d", snapshot.ProjectionRevision, checkpoint)
+	if snapshot.ProjectionRevision != checkpoint || checkpoint == exportedCheckpoint {
+		t.Fatalf("projection revision = %d, initial=%d current=%d; want final coherent cursor", snapshot.ProjectionRevision, exportedCheckpoint, checkpoint)
 	}
 }
 
-func TestProjectOrchestrationSnapshotRepreparesCandidateInsertedAfterPreparation(t *testing.T) {
+func TestProjectOrchestrationSnapshotCapturesCandidateInsertedAfterPreparation(t *testing.T) {
 	ctx := context.Background()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
@@ -2284,34 +2276,35 @@ func TestProjectOrchestrationSnapshotRepreparesCandidateInsertedAfterPreparation
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(preparedIDs) != 2 {
-		t.Fatalf("preparation attempts = %d, want initial and post-insertion attempts", len(preparedIDs))
+	if len(preparedIDs) != 1 {
+		t.Fatalf("preparation attempts = %d, want one coherent export", len(preparedIDs))
 	}
 	if !slices.Contains(preparedIDs[0], initialID) || slices.Contains(preparedIDs[0], insertedID) {
 		t.Fatalf("initial prepared candidates = %v, want only initial %s before insertion %s", preparedIDs[0], initialID, insertedID)
 	}
-	if !slices.Contains(preparedIDs[1], initialID) || !slices.Contains(preparedIDs[1], insertedID) {
-		t.Fatalf("retried prepared candidates = %v, want %s and inserted %s", preparedIDs[1], initialID, insertedID)
-	}
 	if got := candidateClass(snapshot.Candidates, insertedID); got != "runnable" {
-		t.Fatalf("inserted candidate class = %q, want runnable after re-preparation", got)
+		t.Fatalf("inserted candidate class = %q, want final coherent candidate", got)
 	}
 	checkpoint, err := client.ProjectionSourceCheckpoint(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if snapshot.ProjectionRevision != checkpoint {
-		t.Fatalf("accepted projection revision = %d, want final prepared checkpoint %d", snapshot.ProjectionRevision, checkpoint)
+		t.Fatalf("accepted projection revision = %d, want final cursor %d", snapshot.ProjectionRevision, checkpoint)
 	}
 }
 
-func TestProjectOrchestrationSnapshotRetriesPostExportReviewEvidenceMutation(t *testing.T) {
+func TestProjectOrchestrationSnapshotCapturesPostPreparationReviewEvidence(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
 	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
 	writer := newMigratedIssueClientAtPath(t, path, slog.Default())
 	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
 	issueID, err := reader.Create(ctx, issues.CreateTaskParams{Title: "Review candidate", Description: "Executable", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exportedCheckpoint, err := reader.ProjectionSourceCheckpoint(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2335,28 +2328,32 @@ func TestProjectOrchestrationSnapshotRetriesPostExportReviewEvidenceMutation(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.ProjectionRevision != checkpoint || appended.ID == 0 {
-		t.Fatalf("snapshot revision=%d checkpoint=%d appended=%d, want one retried authoritative checkpoint", snapshot.ProjectionRevision, checkpoint, appended.ID)
+	if snapshot.ProjectionRevision != checkpoint || checkpoint == exportedCheckpoint || appended.ID == 0 {
+		t.Fatalf("snapshot revision=%d initial=%d current=%d appended=%d, want final coherent cursor", snapshot.ProjectionRevision, exportedCheckpoint, checkpoint, appended.ID)
 	}
 	if len(snapshot.ReviewQueue) != 1 || snapshot.ReviewQueue[0].IssueID != issueID || snapshot.ReviewQueue[0].Evidence == nil {
-		t.Fatalf("review queue = %+v, want post-export evidence from retried snapshot", snapshot.ReviewQueue)
+		t.Fatalf("review queue = %+v, want independently revalidated exact review admission", snapshot.ReviewQueue)
 	}
 	foundRecent := false
 	for _, event := range snapshot.RecentEvents {
 		foundRecent = foundRecent || event.Seq == appended.ID
 	}
 	if !foundRecent {
-		t.Fatalf("recent events = %+v, want post-export event %d", snapshot.RecentEvents, appended.ID)
+		t.Fatalf("recent events = %+v, want final exported event %d", snapshot.RecentEvents, appended.ID)
 	}
 }
 
-func TestProjectOrchestrationSnapshotReturnsUnavailableAfterBoundedRevisionChurn(t *testing.T) {
+func TestProjectOrchestrationSnapshotRemainsAvailableDuringPostExportRevisionChurn(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")
 	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
 	writer := newMigratedIssueClientAtPath(t, path, slog.Default())
 	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
 	issueID, err := reader.Create(ctx, issues.CreateTaskParams{Title: "Candidate", Description: "Executable", Acceptance: "Done", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exportedCheckpoint, err := reader.ProjectionSourceCheckpoint(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2376,11 +2373,22 @@ func TestProjectOrchestrationSnapshotReturnsUnavailableAfterBoundedRevisionChurn
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeUnavailable || !resp.Error.Retryable {
-		t.Fatalf("churning snapshot error = %+v, want retryable unavailable", resp.Error)
+	if !resp.OK || resp.Error != nil {
+		t.Fatalf("churning snapshot response = %+v, want available coherent export", resp.Error)
 	}
-	if exports != 5 {
-		t.Fatalf("projection export attempts = %d, want bounded 5", exports)
+	if exports != 1 {
+		t.Fatalf("projection export attempts = %d, want one", exports)
+	}
+	var snapshot protocol.OrchestrationSnapshot
+	if err := json.Unmarshal(resp.Body, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	currentCheckpoint, checkpointErr := reader.ProjectionSourceCheckpoint(ctx)
+	if checkpointErr != nil {
+		t.Fatal(checkpointErr)
+	}
+	if snapshot.ProjectionRevision != currentCheckpoint || currentCheckpoint == exportedCheckpoint {
+		t.Fatalf("projection revision = %d, initial=%d current=%d; want final coherent cursor", snapshot.ProjectionRevision, exportedCheckpoint, currentCheckpoint)
 	}
 }
 
