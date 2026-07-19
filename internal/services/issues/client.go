@@ -3322,6 +3322,9 @@ func (c *Client) CloseWithRuntimeReviewLease(ctx context.Context, projectID, id 
 	if err := c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
 			return c.updateLockedWithPrecondition(ctx, id, status, true, func(ctx context.Context, tx *sql.Tx) error {
+				if err := validateAcceptedReviewerOutcome(ctx, tx, id, reviewerID, nil); err != nil {
+					return err
+				}
 				return consumeAcceptedReviewerLease(ctx, tx, id, reviewerID)
 			})
 		})
@@ -3349,6 +3352,9 @@ func (c *Client) CloseWithRuntimeReviewEvidenceFence(ctx context.Context, projec
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
 			return c.updateLockedWithPrecondition(ctx, id, status, true, func(ctx context.Context, tx *sql.Tx) error {
 				if err := validateTerminalReviewEvidencePin(ctx, tx, id, pin); err != nil {
+					return err
+				}
+				if err := validateAcceptedReviewerOutcome(ctx, tx, id, reviewerID, &pin); err != nil {
 					return err
 				}
 				return consumeAcceptedReviewerLease(ctx, tx, id, reviewerID)

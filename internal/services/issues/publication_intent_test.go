@@ -134,8 +134,8 @@ func TestAcceptedReviewAndPublicationReturnsCommittedReceiptAfterCallerCancellat
 		SourceRevision: "source", BaseRevision: "base", PolicyVersion: "policy", EnvironmentFingerprint: "toolchain",
 		ValidationCommand: "npm test", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
 	}
-	params := IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", Payload: map[string]any{
-		"outcome": string(domain.ReviewOutcomeAccepted), "intent_key": operation.IntentKey, "request_fingerprint": operation.RequestFingerprint,
+	params := IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{
+		"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "intent_key": operation.IntentKey, "request_fingerprint": operation.RequestFingerprint,
 	}}
 	ctx, cancel := context.WithCancel(baseCtx)
 	ctx = WithAcceptedReviewPublicationCommitHookForTest(ctx, cancel)
@@ -209,9 +209,14 @@ func TestAcceptedReviewPublicationFencePreservesReviewerIdentity(t *testing.T) {
 		SourceRevision: "source", BaseRevision: "base", PolicyVersion: "policy", EnvironmentFingerprint: "toolchain",
 		ValidationCommand: "make verify", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
 	}
-	params := IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", Payload: map[string]any{
-		"outcome": string(domain.ReviewOutcomeAccepted), "intent_key": operation.IntentKey, "request_fingerprint": operation.RequestFingerprint,
+	params := IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{
+		"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "intent_key": operation.IntentKey, "request_fingerprint": operation.RequestFingerprint,
+		"reviewed_evidence_source": admission.Evidence.Source, "reviewed_evidence_event_id": admission.Evidence.EventID,
+		"reviewed_evidence_seq": admission.Evidence.Seq, "reviewed_evidence_digest": admission.Evidence.Digest,
 	}}
+	if _, err := client.BeginReviewEvidenceClose(ctx, issueID, *admission.Evidence, "reviewer"); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("pre-accept reviewer fence error = %v, want conflict", err)
+	}
 	if _, err := client.AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx, issueID, params, operation, "candidate", admission, "", "reviewer"); err != nil {
 		t.Fatal(err)
 	}
@@ -259,6 +264,50 @@ func TestAcceptedReviewPublicationFencePreservesReviewerIdentity(t *testing.T) {
 	}
 	if reviewLease == nil || reviewLease.OwnerID != "reviewer" || reviewLease.OwnerKind != "orchestrator" {
 		t.Fatalf("recovered legacy publication review lease = %+v, want authoritative reviewer identity", reviewLease)
+	}
+}
+
+func TestCloseWithRuntimeReviewLeaseRequiresTrustedAcceptedActor(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".azedarach"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(repo, nil)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, CreateTaskParams{Title: "internal review", Type: domain.TypeInvestigation, Priority: domain.P1, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission, err := client.CaptureReviewAdmissionPin(ctx, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{
+		OwnerID: "reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview, ExpectedReviewAdmission: &admission,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CloseWithRuntimeReviewLease(ctx, "project", issueID, domain.StatusDone, "reviewer"); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("close without accepted outcome error = %v, want conflict", err)
+	}
+	for _, actor := range []string{"other-reviewer", "reviewer"} {
+		if _, err := client.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{
+			Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept",
+			Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": actor},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		closed, closeErr := client.CloseWithRuntimeReviewLease(ctx, "project", issueID, domain.StatusDone, "reviewer")
+		if actor == "other-reviewer" {
+			if !errors.Is(closeErr, domain.ErrConflict) {
+				t.Fatalf("mismatched accepted actor error = %v, want conflict", closeErr)
+			}
+			continue
+		}
+		if closeErr != nil || closed.Status != domain.StatusDone {
+			t.Fatalf("matching accepted reviewer close = (%+v,%v)", closed, closeErr)
+		}
 	}
 }
 

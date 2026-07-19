@@ -2579,7 +2579,7 @@ func TestReviewAcceptResumesDurableEvidenceFenceAfterCloseCrash(t *testing.T) {
 			"outcome": "accepted", "actor_id": request.ActorID, "intent_key": request.IntentKey,
 			"request_fingerprint": reviewRequestFingerprint(request), "reviewed_source_oid": "reviewed-source-oid",
 			"reviewed_evidence_source": evidencePin.Source, "reviewed_evidence_event_id": evidencePin.EventID,
-			"reviewed_evidence_digest": evidencePin.Digest,
+			"reviewed_evidence_seq": evidencePin.Seq, "reviewed_evidence_digest": evidencePin.Digest,
 		},
 	}); err != nil {
 		t.Fatal(err)

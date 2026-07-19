@@ -237,6 +237,9 @@ func (c *Client) BeginReviewEvidenceClose(ctx context.Context, issueID string, p
 			if err := validateTerminalReviewEvidencePin(ctx, tx, issueID, pin); err != nil {
 				return c.wrapError("begin-review-evidence-close", issueID, err)
 			}
+			if err := validateAcceptedReviewerOutcome(ctx, tx, issueID, reviewerID, &pin); err != nil {
+				return c.wrapError("begin-review-evidence-close", issueID, err)
+			}
 			lease, err := coordinationLeaseForUpdate(ctx, tx, issueID, domain.CoordinationLeaseReview)
 			if err != nil {
 				return c.wrapError("begin-review-evidence-close", issueID, err)
@@ -267,6 +270,52 @@ func (c *Client) BeginReviewEvidenceClose(ctx context.Context, issueID string, p
 		return "", err
 	}
 	return reviewerID, nil
+}
+
+func validateAcceptedReviewerOutcome(ctx context.Context, tx *sql.Tx, issueID, reviewerID string, pin *ReviewEvidencePin) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
+		FROM issue_observation_events
+		WHERE issue_id=? AND event_type IN (?,?)
+		ORDER BY id DESC
+	`, strings.TrimSpace(issueID), domain.IssueEventReviewCompleted, domain.IssueEventIssueStatusChanged)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		event, err := scanIssueObservationEvent(rows)
+		if err != nil {
+			return err
+		}
+		if domain.IsReviewRequestTransition(event) {
+			break
+		}
+		outcome, trusted := domain.TrustedReviewOutcome(event)
+		if !trusted {
+			continue
+		}
+		if outcome == domain.ReviewOutcomeIntegrationFailed {
+			continue
+		}
+		if outcome != domain.ReviewOutcomeAccepted {
+			return fmt.Errorf("%w: current review outcome is %s", domain.ErrConflict, outcome)
+		}
+		if !strings.EqualFold(strings.TrimSpace(fmt.Sprint(event.Payload["actor_id"])), strings.TrimSpace(reviewerID)) {
+			return fmt.Errorf("%w: accepted review actor does not match reviewer lease", domain.ErrConflict)
+		}
+		if pin != nil && (strings.TrimSpace(fmt.Sprint(event.Payload["reviewed_evidence_source"])) != strings.TrimSpace(pin.Source) ||
+			strings.TrimSpace(fmt.Sprint(event.Payload["reviewed_evidence_event_id"])) != strconv.FormatInt(pin.EventID, 10) ||
+			strings.TrimSpace(fmt.Sprint(event.Payload["reviewed_evidence_seq"])) != strconv.FormatInt(pin.Seq, 10) ||
+			strings.TrimSpace(fmt.Sprint(event.Payload["reviewed_evidence_digest"])) != strings.TrimSpace(pin.Digest)) {
+			return fmt.Errorf("%w: accepted review evidence does not match close fence", domain.ErrConflict)
+		}
+		return nil
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return fmt.Errorf("%w: current review epoch has no matching accepted reviewer outcome", domain.ErrConflict)
 }
 
 type IssueObservationEventParams struct {
