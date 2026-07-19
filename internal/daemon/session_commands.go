@@ -2173,6 +2173,14 @@ func (d *Daemon) executeSessionRestartTarget(ctx context.Context, target session
 				orchestratorIdentity = &identity
 				if item.TmuxReady {
 					item = d.restartManagedAgentPane(lockCtx, target, body, item, orchestratorIdentity)
+					if item.Restarted {
+						projectionCtx, cancelProjection := context.WithTimeout(context.WithoutCancel(lockCtx), sessionRestartPreflightTimeout)
+						defer cancelProjection()
+						if persistErr := d.persistOrchestratorSessionProjection(projectionCtx, protocol.Metadata{ProjectID: naming.ProjectID(target.ProjectID)}, target.ProjectID, identity.Scope, target.SessionID); persistErr != nil {
+							item.Restarted = false
+							item.Error = fmt.Sprintf("persist restarted orchestrator projection: %v", persistErr)
+						}
+					}
 				}
 				return nil
 			})
@@ -2212,13 +2220,7 @@ func (d *Daemon) executeSessionRestartTarget(ctx context.Context, target session
 	if item.Restarted {
 		projectionCtx, cancelProjection := context.WithTimeout(context.WithoutCancel(ctx), sessionRestartPreflightTimeout)
 		defer cancelProjection()
-		if orchestratorIdentity != nil {
-			if err := d.persistOrchestratorSessionProjection(projectionCtx, protocol.Metadata{ProjectID: naming.ProjectID(target.ProjectID)}, target.ProjectID, orchestratorIdentity.Scope, target.SessionID); err != nil {
-				item.Restarted = false
-				item.Error = fmt.Sprintf("persist restarted orchestrator projection: %v", err)
-				return item
-			}
-		} else if target.Role == daemonstate.SessionRoleWorker && target.IssueID != "" {
+		if orchestratorIdentity == nil && target.Role == daemonstate.SessionRoleWorker && target.IssueID != "" {
 			if err := d.persistRestartedSessionProjection(projectionCtx, target.ProjectID, target.SessionID, target.IssueID); err != nil {
 				item.Restarted = false
 				item.Error = fmt.Sprintf("persist restarted worker projection: %v", err)

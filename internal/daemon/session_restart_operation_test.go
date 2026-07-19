@@ -1070,8 +1070,11 @@ func TestRecoverInterruptedSessionRestartBatchPersistsRootedProjection(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := daemonstate.NewOrchestratorLeaseAuthority(store).Acquire(context.Background(), identity, target.SessionID, func(context.Context, string) (bool, error) { return true, nil }); err != nil {
+		t.Fatal(err)
+	}
 	if err := upsertSessionStateFixture(store, context.Background(), target.ProjectID, daemonstate.Session{
-		ID: "az-stale", IssueID: target.IssueID,
+		ID: target.SessionID, IssueID: target.IssueID,
 		Role: daemonstate.SessionRoleOrchestrator, ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: target.IssueID,
 		State: daemonstate.SessionStatePaused, ObservedState: daemonstate.SessionStateRunning,
 		Activity: "waiting", ActivitySource: "stale", UpdatedAt: time.Now().Add(-time.Hour),
@@ -1112,6 +1115,19 @@ func TestRecoverInterruptedSessionRestartBatchPersistsRootedProjection(t *testin
 	respawns, _, _ := runner.snapshot()
 	if respawns != 0 {
 		t.Fatalf("respawns=%d, want rooted projection-only recovery", respawns)
+	}
+}
+
+func seedRootedRestartAuthority(t *testing.T, d *Daemon, store *daemonstate.RuntimeStateStore, target sessionRestartAllTarget, identity domain.OrchestratorIdentity) {
+	t.Helper()
+	if _, err := daemonstate.NewOrchestratorLeaseAuthority(store).Acquire(context.Background(), identity, target.SessionID, func(context.Context, string) (bool, error) { return true, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := upsertSessionStateFixture(store, context.Background(), target.ProjectID, daemonstate.Session{
+		ID: target.SessionID, IssueID: target.IssueID, Role: daemonstate.SessionRoleOrchestrator,
+		ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: target.IssueID, State: daemonstate.SessionStateRunning,
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1438,6 +1454,7 @@ func TestRecoverInterruptedRootedRestartRepairsBootstrapAcrossCrashWindows(t *te
 			if err != nil {
 				t.Fatal(err)
 			}
+			seedRootedRestartAuthority(t, d, store, target, identity)
 			if tt.replacement {
 				seedRecoveredReplacement(t, store, runner, "planned")
 			}
@@ -1497,6 +1514,7 @@ func TestRecoverInterruptedRootedRestartHoldsRootedThenPaneLocksAgainstLiveResta
 	if err != nil {
 		t.Fatal(err)
 	}
+	seedRootedRestartAuthority(t, d, store, target, identity)
 	plan := recoveryPlanForTarget(target, sessionRestartStageRootedInvalidateReady)
 	plan.RootedIdentity = &identity
 	repairEntered := make(chan struct{})
@@ -1668,6 +1686,7 @@ func TestRecoverInterruptedRootedRestartRejectsDurableRuntimeNonceMismatch(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
+	seedRootedRestartAuthority(t, d, store, target, identity)
 	seedRecoveredReplacement(t, store, runner, "planned")
 	plan := recoveryPlanForTarget(target, "observe")
 	plan.RootedIdentity = &identity
