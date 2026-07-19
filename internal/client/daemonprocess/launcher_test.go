@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/lifecycle"
 	"github.com/riordanpawley/azedarach/internal/logging"
 )
@@ -296,6 +297,7 @@ func writeManagedTestGeneration(t *testing.T, generationsRoot, generationName st
 func startLingeringDaemonProcessWith(t *testing.T, launcher *Launcher, executable, mode string, extraArgs []string) *lingeringDaemonProcess {
 	t.Helper()
 	launcher.preflightReplace = func(context.Context, daemonCommand) error { return nil }
+	launcher.preflightRollback = func(context.Context, daemonCommand) error { return nil }
 	if err := os.MkdirAll(filepath.Dir(launcher.LockPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -463,27 +465,155 @@ func newRollbackPreflightLauncher(t *testing.T, owner processIdentity) (*Launche
 	return launcher, &shutdownCalls
 }
 
-func TestPreflightReplacementCommandRejectsMissingAndInvalidCandidate(t *testing.T) {
+func TestPreflightReplacementCommandRejectsMissingAndIncompatibleCandidate(t *testing.T) {
 	missing := daemonCommand{executable: filepath.Join(t.TempDir(), "missing-azd")}
 	if _, err := resolveCommandExecutable(missing); err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("missing preflight error = %v", err)
 	}
 
-	invalid := filepath.Join(t.TempDir(), "azd")
-	if err := os.WriteFile(invalid, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	incompatible := filepath.Join(t.TempDir(), "azd")
+	if err := os.WriteFile(incompatible, []byte("#!/bin/sh\necho '{\"daemon_version\":\"old\",\"min_protocol_version\":999,\"max_protocol_version\":999}'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := preflightReplacementCommand(context.Background(), daemonCommand{executable: invalid}); err == nil || !strings.Contains(err.Error(), "empty output") {
-		t.Fatalf("invalid preflight error = %v", err)
+	if err := preflightReplacementCommand(context.Background(), daemonCommand{executable: incompatible}); err == nil || !strings.Contains(err.Error(), "incompatible") {
+		t.Fatalf("incompatible preflight error = %v", err)
 	}
 
 	compatible := filepath.Join(t.TempDir(), "azd")
-	script := "#!/bin/sh\nprintf '%s\\n' 'candidate'\n"
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' '{\"daemon_version\":\"candidate\",\"min_protocol_version\":%d,\"max_protocol_version\":%d}'\n", protocol.CurrentVersion, protocol.CurrentVersion)
 	if err := os.WriteFile(compatible, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := preflightReplacementCommand(context.Background(), daemonCommand{executable: compatible}); err != nil {
 		t.Fatalf("compatible preflight error = %v", err)
+	}
+
+	legacyPredecessor := filepath.Join(t.TempDir(), "azd")
+	if err := os.WriteFile(legacyPredecessor, []byte("#!/bin/sh\ncase \" $* \" in *' --version '*) echo legacy-current-authority; exit 0;; esac\nexit 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := preflightPredecessorRollbackCommand(context.Background(), daemonCommand{executable: legacyPredecessor}); err != nil {
+		t.Fatalf("legacy predecessor viability preflight error = %v", err)
+	}
+}
+
+func TestLauncherReplaceRejectsIncompatibleLiveCandidateBeforeShutdown(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	repoDir := makeScopedDaemonLauncherRepo(t)
+	launcher := NewLauncher(repoDir, filepath.Join(t.TempDir(), "daemon.sock"))
+	incompatible := filepath.Join(t.TempDir(), "incompatible-azd")
+	if err := os.WriteFile(incompatible, []byte("#!/bin/sh\ncase \" $* \" in *' --preflight '*) echo '{\"daemon_version\":\"old\",\"min_protocol_version\":999,\"max_protocol_version\":999}'; exit 0;; *' --version '*) echo old; exit 0;; esac\nwhile :; do sleep 60; done\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	launcher.BinPath = incompatible
+	shutdownCalls := 0
+	launcher.shutdownViaSocket = func(context.Context, string) error {
+		shutdownCalls++
+		return errors.New("no live predecessor")
+	}
+	startCalls := 0
+	ready := false
+	launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+		startCalls++
+		ready = true
+		return &recordingDaemonProcess{exitCh: make(chan error)}, nil
+	}
+	launcher.waitForReady = func(context.Context, string) error {
+		if ready {
+			return nil
+		}
+		return context.DeadlineExceeded
+	}
+	launcher.preflightReplace = preflightReplacementCommand
+
+	// The candidate would remain live if launched, but advertises an
+	// intentionally incompatible protocol range from its preflight mode.
+	err := launcher.Replace(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "incompatible") {
+		t.Fatalf("Replace() error = %v, want incompatible protocol rejection", err)
+	}
+	if shutdownCalls != 0 || startCalls != 0 {
+		t.Fatalf("shutdown/start calls = %d/%d, want incompatibility rejected before lifecycle mutation", shutdownCalls, startCalls)
+	}
+}
+
+func TestLauncherReplaceRemovesInactiveRollbackStageOnPreShutdownAbort(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
+	predecessor := startManagedLingeringDaemonProcess(t, launcher, "kill")
+	generationsRoot := filepath.Dir(filepath.Dir(launcher.BinPath))
+	preflightCalls := 0
+	launcher.preflightReplace = func(context.Context, daemonCommand) error {
+		preflightCalls++
+		return nil
+	}
+	launcher.preflightRollback = func(context.Context, daemonCommand) error {
+		preflightCalls++
+		return errors.New("rollback preflight rejected")
+	}
+
+	err := launcher.Replace(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "rollback preflight rejected") {
+		t.Fatalf("Replace() error = %v, want predecessor preflight abort", err)
+	}
+	stages, globErr := filepath.Glob(filepath.Join(generationsRoot, "generation.rollback-*"))
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(stages) != 0 {
+		t.Fatalf("inactive rollback stages = %v, want cleanup after pre-shutdown abort", stages)
+	}
+	if _, present, captureErr := captureProcessIdentity(predecessor.cmd.Process.Pid); captureErr != nil || !present {
+		t.Fatalf("predecessor present = %t, %v, want healthy authority retained", present, captureErr)
+	}
+}
+
+func TestLauncherReplacementSuccessRemovesInactiveRollbackStage(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "")
+	launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
+	startManagedLingeringDaemonProcess(t, launcher, "kill")
+	owner, present, err := launcher.captureLockOwnerIdentity()
+	if err != nil || !present {
+		t.Fatalf("capture predecessor = (%+v, %t, %v)", owner, present, err)
+	}
+	predecessorCmd, present, err := launcher.resolvePredecessorRollbackCommand(owner, true)
+	if err != nil || !present {
+		t.Fatalf("resolve rollback = (%+v, %t, %v)", predecessorCmd, present, err)
+	}
+	stageDir := filepath.Dir(predecessorCmd.executable)
+	launcher.waitForReady = func(context.Context, string) error { return nil }
+	launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+		return &recordingDaemonProcess{exitCh: make(chan error)}, nil
+	}
+	launcher.replacementSuccessorVerifier = func(daemonCommand) error { return nil }
+
+	if err := launcher.startReplacementWithRollback(context.Background(), launcher.commandForExecutable(launcher.BinPath), predecessorCmd, true); err != nil {
+		t.Fatalf("startReplacementWithRollback() error = %v", err)
+	}
+	if _, err := os.Stat(stageDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("inactive rollback stage stat error = %v, want removed", err)
+	}
+}
+
+func TestLauncherInactiveRollbackCleanupRejectsOutsideCanonicalRoots(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	repoDir := makeScopedDaemonLauncherRepo(t)
+	launcher := NewLauncher(repoDir, filepath.Join(t.TempDir(), "daemon.sock"))
+	stageDir := filepath.Join(t.TempDir(), "predecessor-forged")
+	if err := os.MkdirAll(stageDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := daemonCommand{
+		executable:    filepath.Join(stageDir, "azd"),
+		rollbackStage: stageDir,
+	}
+	if err := launcher.cleanupInactiveRollbackStage(command); err == nil || !strings.Contains(err.Error(), "outside the scoped executable root") {
+		t.Fatalf("cleanup error = %v, want canonical-root refusal", err)
+	}
+	if _, err := os.Stat(stageDir); err != nil {
+		t.Fatalf("forged rollback stage stat error = %v, want untouched", err)
 	}
 }
 
@@ -619,9 +749,11 @@ func TestLauncherRollbackCleansRejectedCandidateAndVerifiesRestoredPredecessor(t
 	launcher := NewLauncher(t.TempDir(), config.GlobalDaemonSocketPath())
 	generationsRoot := filepath.Join(t.TempDir(), ".azedarach-generations")
 	candidate := filepath.Join(writeManagedTestGeneration(t, generationsRoot, "generation.candidate"), "azd")
-	predecessor := filepath.Join(writeManagedTestGeneration(t, generationsRoot, "generation.predecessor"), "azd")
+	rollbackStage := writeManagedTestGeneration(t, generationsRoot, "generation.rollback-active")
+	predecessor := filepath.Join(rollbackStage, "azd")
 	candidateCmd := launcher.commandForExecutable(candidate)
 	predecessorCmd := launcher.commandForExecutable(predecessor)
+	predecessorCmd.rollbackStage = rollbackStage
 	launcher.openLogFile = func(string) (io.WriteCloser, error) { return &trackingWriteCloser{}, nil }
 
 	var authority atomic.Int32
@@ -673,6 +805,9 @@ func TestLauncherRollbackCleansRejectedCandidateAndVerifiesRestoredPredecessor(t
 	}
 	if !reflect.DeepEqual(verified, []string{candidate, predecessor}) {
 		t.Fatalf("verified executables = %v, want candidate then predecessor", verified)
+	}
+	if _, err := os.Stat(rollbackStage); err != nil {
+		t.Fatalf("active rollback stage stat error = %v, want retained authority", err)
 	}
 }
 
@@ -730,11 +865,19 @@ func TestLauncherRollbackRefusesRestoreWhenExactCandidateCleanupFails(t *testing
 	launcher.replacementSuccessorVerifier = func(daemonCommand) error {
 		return errors.New("candidate identity rejected")
 	}
+	rollbackStage := filepath.Join(t.TempDir(), "generation.rollback-unproven")
+	if err := os.MkdirAll(rollbackStage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	predecessorCmd := daemonCommand{
+		executable:    filepath.Join(rollbackStage, "azd"),
+		rollbackStage: rollbackStage,
+	}
 
 	err := launcher.startReplacementWithRollback(
 		context.Background(),
 		daemonCommand{executable: "candidate-azd"},
-		daemonCommand{executable: "predecessor-azd"},
+		predecessorCmd,
 		true,
 	)
 	if err == nil || !errors.Is(err, errReplacementCandidateCleanupUnproven) || !strings.Contains(err.Error(), "refusing predecessor restore") {
@@ -745,6 +888,9 @@ func TestLauncherRollbackRefusesRestoreWhenExactCandidateCleanupFails(t *testing
 	}
 	if got := candidateProcess.stopCalls.Load(); got != 1 {
 		t.Fatalf("rejected candidate cleanup calls = %d, want 1", got)
+	}
+	if _, err := os.Stat(rollbackStage); err != nil {
+		t.Fatalf("unproven-cleanup rollback stage stat error = %v, want retained recovery authority", err)
 	}
 }
 
@@ -1438,14 +1584,14 @@ import (
 
 func main() {
 	for _, arg := range os.Args[1:] {
-		if arg == "--version" {
+		if arg == "--preflight" {
 			fmt.Println(%q)
 			return
 		}
 	}
 	select {}
 }
-`, "scoped-source-fixture")
+`, fmt.Sprintf("{\"daemon_version\":\"scoped-source-fixture\",\"min_protocol_version\":%d,\"max_protocol_version\":%d}", protocol.CurrentVersion, protocol.CurrentVersion))
 	if err := os.WriteFile(filepath.Join(commandDir, "main.go"), []byte(source), 0o644); err != nil {
 		t.Fatal(err)
 	}

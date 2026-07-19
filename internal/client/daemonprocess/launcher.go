@@ -55,6 +55,7 @@ type Launcher struct {
 	startProcess                 daemonProcessStarter
 	beforeReplaceLock            func()
 	preflightReplace             func(context.Context, daemonCommand) error
+	preflightRollback            func(context.Context, daemonCommand) error
 	captureOwner                 func() (processIdentity, bool, error)
 }
 
@@ -64,6 +65,7 @@ type daemonCommand struct {
 	dir            string
 	env            []string
 	sourceFallback bool
+	rollbackStage  string
 }
 
 type boundedOutput struct {
@@ -453,6 +455,7 @@ func NewLauncher(repoDir, socketPath string) *Launcher {
 		terminateLockOwner:      lifecycle.TerminateLockOwner,
 		openProcessSignalHandle: openPlatformProcessSignalHandle,
 		preflightReplace:        preflightReplacementCommand,
+		preflightRollback:       preflightPredecessorRollbackCommand,
 	}
 }
 
@@ -1153,7 +1156,7 @@ func (l *Launcher) scopedLifecycleLockPath() string {
 }
 
 // Replace attempts to stop an existing daemon process, then starts daemon.
-func (l *Launcher) Replace(ctx context.Context) error {
+func (l *Launcher) Replace(ctx context.Context) (resultErr error) {
 	// Observe the caller-visible predecessor before queueing. A concurrent
 	// Replace that wins the lifecycle lock may replace this exact incarnation;
 	// after we acquire the lock, that identity change lets us coalesce onto its
@@ -1207,8 +1210,18 @@ func (l *Launcher) Replace(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("preflight daemon predecessor rollback before stopping predecessor: %w", err)
 	}
+	rollbackStageOwned := predecessorPresent && strings.TrimSpace(predecessorCmd.rollbackStage) != ""
+	defer func() {
+		if rollbackStageOwned {
+			resultErr = errors.Join(resultErr, l.cleanupInactiveRollbackStage(predecessorCmd))
+		}
+	}()
 	if predecessorPresent {
-		if err := preflight(ctx, predecessorCmd); err != nil {
+		rollbackPreflight := l.preflightRollback
+		if rollbackPreflight == nil {
+			rollbackPreflight = preflightPredecessorRollbackCommand
+		}
+		if err := rollbackPreflight(ctx, predecessorCmd); err != nil {
 			return fmt.Errorf("preflight daemon predecessor rollback %s before stopping predecessor: %w", predecessorCmd.displayName(), err)
 		}
 	}
@@ -1223,6 +1236,7 @@ func (l *Launcher) Replace(ctx context.Context) error {
 					return err
 				}
 			}
+			rollbackStageOwned = false
 			return l.startReplacementWithRollback(ctx, daemonCmd, predecessorCmd, predecessorPresent)
 		} else if l.Logger != nil {
 			l.Logger.Warn("graceful daemon socket shutdown failed before replace; evaluating verified predecessor escalation",
@@ -1252,6 +1266,7 @@ func (l *Launcher) Replace(ctx context.Context) error {
 			return fmt.Errorf("inspect daemon socket before replacement start: %w", socketErr)
 		}
 	}
+	rollbackStageOwned = false
 	return l.startReplacementWithRollback(ctx, daemonCmd, predecessorCmd, predecessorPresent)
 }
 
@@ -1279,7 +1294,38 @@ func (l *Launcher) resolvePredecessorRollbackCommand(owner processIdentity, owne
 		return daemonCommand{}, false, err
 	}
 	resolvedExecutable = stagedExecutable
-	return l.commandForExecutable(resolvedExecutable), true, nil
+	command := l.commandForExecutable(resolvedExecutable)
+	command.rollbackStage = filepath.Dir(resolvedExecutable)
+	return command, true, nil
+}
+
+func (l *Launcher) cleanupInactiveRollbackStage(command daemonCommand) error {
+	stageDir := filepath.Clean(strings.TrimSpace(command.rollbackStage))
+	if stageDir == "." || stageDir == "" {
+		return nil
+	}
+	if filepath.Clean(filepath.Dir(command.executable)) != stageDir {
+		return errors.New("refuse rollback cleanup whose executable is outside its retained stage")
+	}
+	base := filepath.Base(stageDir)
+	switch {
+	case strings.HasPrefix(base, "generation.rollback-"):
+		generationDir, managed := config.ManagedGenerationBinDir(command.executable, "azd")
+		if !managed || filepath.Clean(generationDir) != stageDir {
+			return fmt.Errorf("refuse rollback cleanup outside a managed daemon generation: %s", stageDir)
+		}
+	case strings.HasPrefix(base, "predecessor-"):
+		executableRoot := filepath.Clean(filepath.Join(config.ScopedDaemonRuntimeDir(l.RepoDir), "executables"))
+		if filepath.Clean(filepath.Dir(stageDir)) != executableRoot {
+			return fmt.Errorf("refuse rollback cleanup outside the scoped executable root: %s", stageDir)
+		}
+	default:
+		return fmt.Errorf("refuse rollback cleanup for unrecognized stage %s", stageDir)
+	}
+	if err := os.RemoveAll(stageDir); err != nil {
+		return fmt.Errorf("remove inactive daemon predecessor rollback stage: %w", err)
+	}
+	return nil
 }
 
 func (l *Launcher) materializeReplacementCommand(ctx context.Context, command daemonCommand) (daemonCommand, error) {
@@ -1503,7 +1549,7 @@ func (l *Launcher) verifyCanonicalDaemonArguments(identity processIdentity, labe
 func (l *Launcher) startReplacementWithRollback(ctx context.Context, daemonCmd, predecessorCmd daemonCommand, predecessorPresent bool) error {
 	startErr := l.startReplacementWithLifecycleLock(ctx, daemonCmd)
 	if startErr == nil {
-		return nil
+		return l.cleanupInactiveRollbackStage(predecessorCmd)
 	}
 	if errors.Is(startErr, errReplacementCandidateCleanupUnproven) {
 		return fmt.Errorf("start replacement daemon: %w; refusing predecessor restore while rejected candidate cleanup is unproven", startErr)
@@ -1520,7 +1566,37 @@ func (l *Launcher) startReplacementWithRollback(ctx context.Context, daemonCmd, 
 }
 
 func preflightReplacementCommand(ctx context.Context, command daemonCommand) error {
-	args := append(append([]string(nil), command.args...), "--version")
+	stdout, stderr, err := runDaemonExecutableProbe(ctx, command, "--preflight")
+	if err != nil {
+		return fmt.Errorf("run candidate compatibility preflight: %w (stdout %q, stderr %q)", err, strings.TrimSpace(stdout), strings.TrimSpace(stderr))
+	}
+	var report protocol.DaemonExecutablePreflight
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		return fmt.Errorf("decode candidate preflight report: %w (stdout %q, stderr %q)", err, strings.TrimSpace(stdout), strings.TrimSpace(stderr))
+	}
+	if !report.Accepts(protocol.CurrentVersion) {
+		return fmt.Errorf("candidate %q supports protocol %d..%d, incompatible with client protocol %d", report.DaemonVersion, report.MinProtocolVersion, report.MaxProtocolVersion, protocol.CurrentVersion)
+	}
+	return nil
+}
+
+func preflightPredecessorRollbackCommand(ctx context.Context, command daemonCommand) error {
+	// The predecessor is the exact executable/argv identity of the live daemon
+	// that already serves this client's protocol. Probe the process-bound staged
+	// bytes for loader/executable viability without requiring the new --preflight
+	// flag, so the first upgrade from a pre-contract daemon remains recoverable.
+	stdout, stderr, err := runDaemonExecutableProbe(ctx, command, "--version")
+	if err != nil {
+		return fmt.Errorf("run verified predecessor rollback viability preflight: %w (stdout %q, stderr %q)", err, strings.TrimSpace(stdout), strings.TrimSpace(stderr))
+	}
+	if strings.TrimSpace(stdout) == "" {
+		return fmt.Errorf("verified predecessor rollback viability preflight returned empty output (stderr %q)", strings.TrimSpace(stderr))
+	}
+	return nil
+}
+
+func runDaemonExecutableProbe(ctx context.Context, command daemonCommand, probeFlag string) (string, string, error) {
+	args := append(append([]string(nil), command.args...), probeFlag)
 	probe := exec.CommandContext(ctx, command.executable, args...)
 	probe.Dir = command.dir
 	probe.Env = command.env
@@ -1540,12 +1616,9 @@ func preflightReplacementCommand(ctx context.Context, command daemonCommand) err
 	probe.Stderr = &stderr
 	err := probe.Run()
 	if err != nil {
-		return fmt.Errorf("run candidate compatibility preflight: %w (stdout %q, stderr %q)", err, strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()))
+		return stdout.String(), stderr.String(), err
 	}
-	if strings.TrimSpace(stdout.String()) == "" {
-		return fmt.Errorf("candidate version preflight returned empty output (stderr %q)", strings.TrimSpace(stderr.String()))
-	}
-	return nil
+	return stdout.String(), stderr.String(), nil
 }
 
 func resolveCommandExecutable(command daemonCommand) (string, error) {
