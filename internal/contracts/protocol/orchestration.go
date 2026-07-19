@@ -83,6 +83,7 @@ type OrchestrationSnapshot struct {
 	StaleCloseableChildren []OrchestrationCloseable                  `json:"stale_closeable_children,omitempty"`
 	ContainmentRisks       []OrchestrationRisk                       `json:"containment_risks,omitempty"`
 	WorkerObservations     []domain.WorkerObservation                `json:"worker_observations,omitempty"`
+	ActionableBlockers     []OrchestrationActionableBlocker          `json:"actionable_blockers,omitempty"`
 	Blocked                map[string]string                         `json:"blocked"`
 	Candidates             []OrchestrationCandidate                  `json:"candidates,omitempty"`
 	Reviews                []OrchestrationCandidate                  `json:"reviews,omitempty"`
@@ -98,6 +99,13 @@ type OrchestrationSnapshot struct {
 	PendingDecisions       map[string][]domain.PendingDecisionChange `json:"pending_decisions,omitempty"`
 	Health                 OrchestrationHealth                       `json:"health"`
 	Completion             OrchestrationCompletion                   `json:"completion"`
+}
+
+// OrchestrationActionableBlocker identifies the latest durable worker-blocked
+// observation for one direct issue in the exact orchestration scope.
+type OrchestrationActionableBlocker struct {
+	IssueID string `json:"issue_id"`
+	EventID int64  `json:"event_id"`
 }
 
 type OrchestrationCompletion struct {

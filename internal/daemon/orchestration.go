@@ -403,7 +403,7 @@ func orchestratorActionableContinuation(scope domain.OrchestrationScope, snapsho
 		Sequence int64  `json:"sequence"`
 	}
 	reviews := make([]reviewRevision, 0, len(snapshot.ReviewQueue))
-	issueIDs := make([]string, 0, len(snapshot.ReviewQueue)+len(snapshot.Runnable)+len(snapshot.NestedRoots)+len(snapshot.WorkerObservations))
+	issueIDs := make([]string, 0, len(snapshot.ReviewQueue)+len(snapshot.Runnable)+len(snapshot.NestedRoots)+len(snapshot.ActionableBlockers))
 	for _, review := range snapshot.ReviewQueue {
 		if !review.Actionable {
 			continue
@@ -433,8 +433,8 @@ func orchestratorActionableContinuation(scope domain.OrchestrationScope, snapsho
 			issueIDs = append(issueIDs, item.IssueID)
 		}
 	}
-	blockers := make([]blockerRevision, 0, len(snapshot.WorkerObservations)+len(snapshot.RecentEvents))
-	seenBlockers := make(map[string]struct{}, len(snapshot.WorkerObservations)+len(snapshot.RecentEvents))
+	blockers := make([]blockerRevision, 0, len(snapshot.ActionableBlockers))
+	seenBlockers := make(map[string]struct{}, len(snapshot.ActionableBlockers))
 	addBlocker := func(issueID string, sequence int64) {
 		issueID = strings.TrimSpace(issueID)
 		if issueID == "" || sequence <= 0 {
@@ -448,29 +448,8 @@ func orchestratorActionableContinuation(scope domain.OrchestrationScope, snapsho
 		blockers = append(blockers, blockerRevision{IssueID: issueID, Sequence: sequence})
 		issueIDs = append(issueIDs, issueID)
 	}
-	if scope.Kind == domain.OrchestrationScopeProject {
-		for _, event := range snapshot.RecentEvents {
-			projectedType, visible := projectStewardshipEventType(domain.IssueObservationEventType(event.Type))
-			// Project orchestration owns only unparented/direct issues. Descendant
-			// blocker events belong to their exact rooted orchestrator.
-			if visible && projectedType == "worker-blocked" && naming.IssueIDsEqual(event.ParentIssue, event.IssueID.String()) {
-				addBlocker(event.IssueID.String(), event.Seq)
-			}
-		}
-	} else {
-		// Rooted snapshots already constrain worker observations to their
-		// materialized parent-child closure. LastEvent carries the exact durable
-		// observation ID, independent of the legacy mailbox file projection.
-		for _, observation := range snapshot.WorkerObservations {
-			event := observation.LastEvent
-			if event == nil {
-				continue
-			}
-			projectedType, visible := projectStewardshipEventType(domain.IssueObservationEventType(event.Type))
-			if visible && projectedType == "worker-blocked" {
-				addBlocker(observation.IssueID, event.Seq)
-			}
-		}
+	for _, blocker := range snapshot.ActionableBlockers {
+		addBlocker(blocker.IssueID, blocker.EventID)
 	}
 	sort.Slice(reviews, func(i, j int) bool {
 		if reviews[i].IssueID != reviews[j].IssueID {
@@ -906,6 +885,7 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 		}
 		snapshot.Scope, snapshot.Roots, snapshot.GeneratedAt = identity.Scope, []string{root}, time.Now().UTC()
 		a.enrichStewardshipContext(ctx, projectID, &snapshot)
+		snapshot.ActionableBlockers = actionableWorkerBlockersFromObservations(snapshot.WorkerObservations)
 		tasks := materializedParentChildClosure(materializedTasks, root)
 		snapshot.PublicationQueue = publicationOperationsForTasks(snapshot.PublicationQueue, tasks)
 		if err := a.enrichPendingDecisions(ctx, projectID, issueClient, &snapshot, tasks); err != nil {
@@ -973,6 +953,7 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 		return protocol.OrchestrationSnapshot{}, fmt.Errorf("capture project readiness context: %w", err)
 	}
 	snapshot.RecentEvents = projectRecentObservationEvents(projectTasks, readinessContext.stewardshipByIssue)
+	snapshot.ActionableBlockers = projectActionableWorkerBlockers(projectRoots, readinessContext.stewardshipByIssue)
 	for _, rootTask := range candidateRoots {
 		root := rootTask.ID.String()
 		snapshot.Roots = append(snapshot.Roots, root)
@@ -1163,6 +1144,44 @@ func finalizeOrchestrationSnapshotSource(snapshot *protocol.OrchestrationSnapsho
 	normalized.Revision = 0
 	normalized.Source.SemanticChecksum = ""
 	snapshot.Source.SemanticChecksum = checksumJSON(normalized)
+}
+
+func projectActionableWorkerBlockers(roots []domain.Task, eventsByIssue map[string][]domain.IssueObservationEvent) []protocol.OrchestrationActionableBlocker {
+	blockers := make([]protocol.OrchestrationActionableBlocker, 0, len(roots))
+	for _, root := range roots {
+		issueID := root.ID.String()
+		last := daemonWorkerObservationLastEvent(eventsByIssue[issueID], nil)
+		if last == nil || last.Seq <= 0 {
+			continue
+		}
+		projectedType, visible := projectStewardshipEventType(domain.IssueObservationEventType(last.Type))
+		if visible && projectedType == "worker-blocked" {
+			blockers = append(blockers, protocol.OrchestrationActionableBlocker{IssueID: issueID, EventID: last.Seq})
+		}
+	}
+	sort.Slice(blockers, func(i, j int) bool { return blockers[i].IssueID < blockers[j].IssueID })
+	return blockers
+}
+
+func actionableWorkerBlockersFromObservations(observations []domain.WorkerObservation) []protocol.OrchestrationActionableBlocker {
+	blockers := make([]protocol.OrchestrationActionableBlocker, 0, len(observations))
+	for _, observation := range observations {
+		last := observation.LastEvent
+		if last == nil || last.Seq <= 0 {
+			continue
+		}
+		projectedType, visible := projectStewardshipEventType(domain.IssueObservationEventType(last.Type))
+		if visible && projectedType == "worker-blocked" {
+			blockers = append(blockers, protocol.OrchestrationActionableBlocker{IssueID: observation.IssueID, EventID: last.Seq})
+		}
+	}
+	sort.Slice(blockers, func(i, j int) bool {
+		if blockers[i].IssueID != blockers[j].IssueID {
+			return blockers[i].IssueID < blockers[j].IssueID
+		}
+		return blockers[i].EventID < blockers[j].EventID
+	})
+	return blockers
 }
 
 func projectRecentObservationEvents(tasks []domain.Task, eventsByIssue map[string][]domain.IssueObservationEvent) []protocol.MailEvent {

@@ -7203,7 +7203,8 @@ func workerObservationIssueEventMeaningful(evt domain.IssueObservationEvent) boo
 	case domain.IssueEventIssueDependencyAdded, domain.IssueEventIssueDependencyRemoved:
 		return workerObservationDependencyEventMeaningful(evt)
 	default:
-		return false
+		_, stewardship := projectStewardshipEventType(evt.Type)
+		return stewardship
 	}
 }
 

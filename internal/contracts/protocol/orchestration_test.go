@@ -24,6 +24,7 @@ func TestProtocolV59PreservesCombinedOrchestrationViewProjectionDecisionLearning
 		ProjectionAuthority:  OrchestrationProjectionAuthoritySQLite,
 		Cursor:               17,
 		ContinuationRequired: true,
+		ActionableBlockers:   []OrchestrationActionableBlocker{{IssueID: "blocked-worker", EventID: 42}},
 		Completion:           OrchestrationCompletion{Pass: false, Reasons: []string{"work remains"}},
 		ReviewQueue:          []OrchestrationReview{{IssueID: "review", Actionable: true}},
 		Candidates: []OrchestrationCandidate{{
@@ -39,7 +40,7 @@ func TestProtocolV59PreservesCombinedOrchestrationViewProjectionDecisionLearning
 	if err := json.Unmarshal(encoded, &shape); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"role", "session_id", "lifecycle", "projection_revision", "projection_authority", "cursor", "continuation_required", "completion", "review_queue", "candidates"} {
+	for _, key := range []string{"role", "session_id", "lifecycle", "projection_revision", "projection_authority", "cursor", "continuation_required", "actionable_blockers", "completion", "review_queue", "candidates"} {
 		if _, ok := shape[key]; !ok {
 			t.Fatalf("combined snapshot omitted %q: %s", key, encoded)
 		}

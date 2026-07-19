@@ -511,12 +511,7 @@ func TestOrchestratorActionableContinuationIncludesOnlyNewScopedBlockers(t *test
 	rooted, _ := domain.RootedOrchestrationScope("root")
 	for _, scope := range []domain.OrchestrationScope{domain.ProjectOrchestrationScope(), rooted} {
 		t.Run(string(scope.Kind), func(t *testing.T) {
-			blocked := protocol.OrchestrationSnapshot{}
-			if scope.Kind == domain.OrchestrationScopeProject {
-				blocked.RecentEvents = []protocol.MailEvent{{ParentIssue: "worker", IssueID: "worker", Seq: 11, Type: "worker-blocked"}}
-			} else {
-				blocked.WorkerObservations = []domain.WorkerObservation{{IssueID: "worker", LastEvent: &domain.WorkerObservationEventSummary{Seq: 11, Type: "worker-blocked"}}}
-			}
+			blocked := protocol.OrchestrationSnapshot{ActionableBlockers: []protocol.OrchestrationActionableBlocker{{IssueID: "worker", EventID: 11}}}
 			first, actionable := orchestratorActionableContinuation(scope, blocked)
 			if !actionable || first.Kind != "blocked" || !slices.Contains(first.IssueIDs, "worker") {
 				t.Fatalf("blocker action = %+v actionable=%t", first, actionable)
@@ -525,21 +520,12 @@ func TestOrchestratorActionableContinuationIncludesOnlyNewScopedBlockers(t *test
 			if !actionable || equivalent.Revision != first.Revision {
 				t.Fatalf("equivalent blocker revision = %q, want %q", equivalent.Revision, first.Revision)
 			}
-			if scope.Kind == domain.OrchestrationScopeProject {
-				blocked.RecentEvents[0].Seq++
-			} else {
-				blocked.WorkerObservations[0].LastEvent.Seq++
-			}
+			blocked.ActionableBlockers[0].EventID++
 			newBlocker, actionable := orchestratorActionableContinuation(scope, blocked)
 			if !actionable || newBlocker.Revision == first.Revision {
 				t.Fatalf("new blocker reused revision %q", first.Revision)
 			}
 			progress := protocol.OrchestrationSnapshot{}
-			if scope.Kind == domain.OrchestrationScopeProject {
-				progress.RecentEvents = []protocol.MailEvent{{ParentIssue: "worker", IssueID: "worker", Seq: 12, Type: "worker-progress"}}
-			} else {
-				progress.WorkerObservations = []domain.WorkerObservation{{IssueID: "worker", LastEvent: &domain.WorkerObservationEventSummary{Seq: 12, Type: "worker-progress"}}}
-			}
 			if action, actionable := orchestratorActionableContinuation(scope, progress); actionable {
 				t.Fatalf("progress-only event produced action: %+v", action)
 			}
@@ -565,7 +551,7 @@ func TestOrchestratorBlockerWakeUsesDurableScopeFilteredObservations(t *testing.
 	}
 	rootA, workerA := createRoot("root a")
 	rootB, workerB := createRoot("root b")
-	directProjectWorker, err := client.Create(ctx, issues.CreateTaskParams{Title: "direct project worker", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	directProjectWorker, err := client.Create(ctx, issues.CreateTaskParams{Title: "direct project worker", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -578,6 +564,11 @@ func TestOrchestratorBlockerWakeUsesDurableScopeFilteredObservations(t *testing.
 		response, err := d.handleMailSend(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: "project"}, Body: mustMarshal(t, event)})
 		if err != nil || !response.OK {
 			t.Fatalf("mail send %s: response=%+v err=%v", event.Type, response, err)
+		}
+	}
+	for i := range 25 {
+		if _, err := client.AppendIssueObservationEvent(ctx, workerB, issues.IssueObservationEventParams{Type: domain.IssueEventProgressRecorded, ObservedAt: time.Now().UTC().Add(time.Duration(i+1) * time.Second), Source: "worker", Payload: map[string]any{"summary": "unrelated progress"}}); err != nil {
+			t.Fatal(err)
 		}
 	}
 	authority := d.orchestrationAuthority()
@@ -598,7 +589,7 @@ func TestOrchestratorBlockerWakeUsesDurableScopeFilteredObservations(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
-			action, actionable := orchestratorActionableContinuation(tt.scope, protocol.OrchestrationSnapshot{WorkerObservations: snapshot.WorkerObservations, RecentEvents: snapshot.RecentEvents})
+			action, actionable := orchestratorActionableContinuation(tt.scope, protocol.OrchestrationSnapshot{ActionableBlockers: snapshot.ActionableBlockers})
 			if actionable != tt.wantAction {
 				t.Fatalf("action = %+v actionable=%t, want %t; observations=%+v", action, actionable, tt.wantAction, snapshot.WorkerObservations)
 			}
@@ -606,6 +597,16 @@ func TestOrchestratorBlockerWakeUsesDurableScopeFilteredObservations(t *testing.
 				t.Fatalf("scope-filtered blocker action = %+v", action)
 			}
 		})
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, directProjectWorker, issues.IssueObservationEventParams{Type: domain.IssueEventProgressRecorded, ObservedAt: time.Now().UTC().Add(time.Minute), Source: "worker", Payload: map[string]any{"summary": "unblocked"}}); err != nil {
+		t.Fatal(err)
+	}
+	projectAfterProgress, err := authority.Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action, actionable := orchestratorActionableContinuation(domain.ProjectOrchestrationScope(), projectAfterProgress); actionable && action.Kind == "blocked" {
+		t.Fatalf("later direct progress retained stale blocker action: %+v", action)
 	}
 }
 
