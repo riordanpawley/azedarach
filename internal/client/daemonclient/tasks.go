@@ -1056,12 +1056,13 @@ func (c *Client) CloseTask(ctx context.Context, taskID string, opts TaskStatusOp
 	if opts.CloseOutcome == domain.IssueCloseCancelled {
 		expectedStatus = string(domain.StatusCancelled)
 	}
-	if out.TaskID != parsedTaskID.String() || out.Status != expectedStatus {
+	if out.TaskID != parsedTaskID.String() || out.Status != expectedStatus || out.Revision == 0 {
 		return TaskCloseResult{}, fmt.Errorf(
-			"%s returned invalid successful response: task_id=%q status=%q, want task_id=%q status=%q",
+			"%s returned invalid successful response: task_id=%q status=%q revision=%d, want task_id=%q status=%q with nonzero revision",
 			CommandTaskClose,
 			out.TaskID,
 			out.Status,
+			out.Revision,
 			parsedTaskID,
 			expectedStatus,
 		)

@@ -124,6 +124,18 @@ type IssueObservationEventParams struct {
 	Payload       map[string]any
 }
 
+// TaskIntegrationReceipt identifies one exact source revision integrated into
+// a target branch. TargetOID is evidence about the resulting target state, but
+// is not part of the idempotency identity: retrying the same source integration
+// must reuse the original durable receipt.
+type TaskIntegrationReceipt struct {
+	ProjectID    string
+	SourceBranch string
+	TargetBranch string
+	SourceOID    string
+	TargetOID    string
+}
+
 type IssueObservationEventListOptions struct {
 	Types         []domain.IssueObservationEventType
 	Limit         int
@@ -287,6 +299,81 @@ func (c *Client) AppendIssueObservationEvent(ctx context.Context, issueID string
 		return domain.IssueObservationEvent{}, c.wrapError("append-observation-event", issueID, err)
 	}
 	return event, nil
+}
+
+// AppendTaskIntegrationReceiptIfAbsent atomically persists one exact
+// integration receipt. The semantic existence check and insert share one
+// SQLite write statement so independent daemon processes cannot both observe
+// absence and append duplicate receipts.
+func (c *Client) AppendTaskIntegrationReceiptIfAbsent(ctx context.Context, issueID string, receipt TaskIntegrationReceipt, worktreePath string) (bool, error) {
+	issueID = strings.TrimSpace(issueID)
+	receipt.ProjectID = strings.TrimSpace(receipt.ProjectID)
+	receipt.SourceBranch = strings.TrimSpace(receipt.SourceBranch)
+	receipt.TargetBranch = strings.TrimSpace(receipt.TargetBranch)
+	receipt.SourceOID = strings.TrimSpace(receipt.SourceOID)
+	receipt.TargetOID = strings.TrimSpace(receipt.TargetOID)
+	if issueID == "" {
+		return false, errors.New("issue id is required")
+	}
+	if receipt.ProjectID == "" || receipt.SourceBranch == "" || receipt.TargetBranch == "" || receipt.SourceOID == "" || receipt.TargetOID == "" {
+		return false, c.wrapError("append-task-integration-receipt", issueID, errors.New("project, source/target branch, and source/target OID are required"))
+	}
+	params := IssueObservationEventParams{
+		Type:          domain.IssueEventTaskIntegrationCompleted,
+		Source:        "daemon-task-close",
+		SourceCommand: "integrate-before-close",
+		WorktreePath:  strings.TrimSpace(worktreePath),
+		Payload: map[string]any{
+			"project_id":    receipt.ProjectID,
+			"source_branch": receipt.SourceBranch,
+			"target_branch": receipt.TargetBranch,
+			"source_oid":    receipt.SourceOID,
+			"target_oid":    receipt.TargetOID,
+		},
+	}
+	var inserted bool
+	err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			var err error
+			inserted, err = c.appendTaskIntegrationReceiptTransaction(ctx, issueID, receipt, params)
+			return err
+		})
+	})
+	if err != nil {
+		return false, err
+	}
+	return inserted, nil
+}
+
+func (c *Client) appendTaskIntegrationReceiptTransaction(ctx context.Context, issueID string, receipt TaskIntegrationReceipt, params IssueObservationEventParams) (bool, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return false, err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, c.wrapError("append-task-integration-receipt", issueID, err)
+	}
+	defer tx.Rollback()
+	if err := c.requireIssueExists(ctx, tx, issueID, "append-task-integration-receipt"); err != nil {
+		return false, err
+	}
+	_, inserted, err := c.insertIssueObservationEventConditional(ctx, tx, issueID, params, `NOT EXISTS (
+				SELECT 1
+				FROM issue_observation_events
+				WHERE issue_id = ? AND event_type = ?
+				  AND COALESCE(NULLIF(TRIM(json_extract(payload_json, '$.project_id')), ''), 'default') = ?
+				  AND TRIM(COALESCE(json_extract(payload_json, '$.source_branch'), '')) = ?
+				  AND TRIM(COALESCE(json_extract(payload_json, '$.target_branch'), '')) = ?
+				  AND TRIM(COALESCE(json_extract(payload_json, '$.source_oid'), '')) = ?
+			)`, []any{issueID, domain.IssueEventTaskIntegrationCompleted, receipt.ProjectID, receipt.SourceBranch, receipt.TargetBranch, receipt.SourceOID})
+	if err != nil {
+		return false, c.wrapError("append-task-integration-receipt", issueID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, c.wrapError("append-task-integration-receipt", issueID, err)
+	}
+	return inserted, nil
 }
 
 // IssueObservationMailEventExists supports idempotent filesystem-mail mirroring
@@ -970,13 +1057,24 @@ func (c *Client) appendIssueObservationEvent(ctx context.Context, execer sqlIssu
 }
 
 func (c *Client) insertIssueObservationEvent(ctx context.Context, execer sqlIssueDBTX, issueID string, params IssueObservationEventParams) (int64, error) {
+	id, inserted, err := c.insertIssueObservationEventConditional(ctx, execer, issueID, params, "", nil)
+	if err != nil {
+		return 0, err
+	}
+	if !inserted {
+		return 0, errors.New("observation event insert unexpectedly affected no rows")
+	}
+	return id, nil
+}
+
+func (c *Client) insertIssueObservationEventConditional(ctx context.Context, execer sqlIssueDBTX, issueID string, params IssueObservationEventParams, conditionSQL string, conditionArgs []any) (int64, bool, error) {
 	issueID = strings.TrimSpace(issueID)
 	if issueID == "" {
-		return 0, errors.New("issue id is required")
+		return 0, false, errors.New("issue id is required")
 	}
 	eventType := strings.TrimSpace(string(params.Type))
 	if eventType == "" {
-		return 0, errors.New("event type is required")
+		return 0, false, errors.New("event type is required")
 	}
 	observedAt := params.ObservedAt
 	if observedAt.IsZero() {
@@ -984,7 +1082,7 @@ func (c *Client) insertIssueObservationEvent(ctx context.Context, execer sqlIssu
 	}
 	payloadJSON, err := marshalObservationPayload(params.Payload)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	insertSQL := `
 		INSERT INTO issue_observation_events (
@@ -1000,7 +1098,18 @@ func (c *Client) insertIssueObservationEvent(ctx context.Context, execer sqlIssu
 		)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	args := []any{issueID, eventType, observedAt.UTC().Format(time.RFC3339Nano), strings.TrimSpace(params.Source), strings.TrimSpace(params.SourceCommand), strings.TrimSpace(params.OperationID), strings.TrimSpace(params.SessionID), strings.TrimSpace(params.WorktreePath), payloadJSON}
-	if isReviewEvidenceEventType(params.Type) {
+	if strings.TrimSpace(conditionSQL) != "" {
+		if isReviewEvidenceEventType(params.Type) {
+			return 0, false, errors.New("conditional review evidence insert is unsupported")
+		}
+		insertSQL = `
+			INSERT INTO issue_observation_events (
+				issue_id,event_type,observed_at,source,source_command,operation_id,session_id,worktree_path,payload_json
+			)
+			SELECT ?,?,?,?,?,?,?,?,?
+			WHERE ` + conditionSQL
+		args = append(args, conditionArgs...)
+	} else if isReviewEvidenceEventType(params.Type) {
 		insertSQL = `
 			INSERT INTO issue_observation_events (
 				issue_id,event_type,observed_at,source,source_command,operation_id,session_id,worktree_path,payload_json
@@ -1014,20 +1123,21 @@ func (c *Client) insertIssueObservationEvent(ctx context.Context, execer sqlIssu
 	}
 	result, err := execer.ExecContext(ctx, insertSQL, args...)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	if isReviewEvidenceEventType(params.Type) {
-		affected, err := result.RowsAffected()
-		if err != nil {
-			return 0, err
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, false, err
+	}
+	if affected == 0 {
+		if isReviewEvidenceEventType(params.Type) {
+			return 0, false, fmt.Errorf("%w: accepted review evidence is fenced for authoritative close", domain.ErrConflict)
 		}
-		if affected == 0 {
-			return 0, fmt.Errorf("%w: accepted review evidence is fenced for authoritative close", domain.ErrConflict)
-		}
+		return 0, false, nil
 	}
 	id, err := result.LastInsertId()
 	if err != nil {
-		return 0, fmt.Errorf("read observation event id: %w", err)
+		return 0, false, fmt.Errorf("read observation event id: %w", err)
 	}
 	operation := domain.ProjectionDeltaUpsert
 	if params.Type == domain.IssueEventIssueDeleted {
@@ -1038,13 +1148,13 @@ func (c *Client) insertIssueObservationEvent(ctx context.Context, execer sqlIssu
 			ProjectID: "default", SourceAuthority: "legacy_issue_observation", SourcePosition: fmt.Sprint(id),
 			IdempotencyKey: fmt.Sprintf("issue-observation:%d", id), CommittedAt: observedAt,
 		}); err != nil {
-			return 0, fmt.Errorf("append issue observation empty projection advance: %w", err)
+			return 0, false, fmt.Errorf("append issue observation empty projection advance: %w", err)
 		}
-		return id, nil
+		return id, true, nil
 	}
 	deltaPayload, err := c.issueProjectionDeltaPayload(ctx, execer, issueID, operation)
 	if err != nil {
-		return 0, fmt.Errorf("build issue projection delta: %w", err)
+		return 0, false, fmt.Errorf("build issue projection delta: %w", err)
 	}
 	if _, err := appendProjectionDelta(ctx, execer, ProjectionDeltaParams{
 		ProjectID:      "default",
@@ -1055,9 +1165,9 @@ func (c *Client) insertIssueObservationEvent(ctx context.Context, execer sqlIssu
 		Payload:        deltaPayload,
 		CommittedAt:    observedAt,
 	}); err != nil {
-		return 0, fmt.Errorf("append issue observation projection delta: %w", err)
+		return 0, false, fmt.Errorf("append issue observation projection delta: %w", err)
 	}
-	return id, nil
+	return id, true, nil
 }
 
 func isReviewEvidenceEventType(eventType domain.IssueObservationEventType) bool {

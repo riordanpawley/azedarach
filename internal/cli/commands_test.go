@@ -8893,8 +8893,9 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 							body = payload
 						} else if req.Command == daemonclient.CommandTaskClose {
 							payload, err := json.Marshal(daemonclient.TaskCloseResult{
-								TaskID: "az-9",
-								Status: string(domain.StatusDone),
+								TaskID:   "az-9",
+								Status:   string(domain.StatusDone),
+								Revision: 1,
 							})
 							if err != nil {
 								t.Fatalf("marshal task close response: %v", err)
@@ -9066,6 +9067,7 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 					return responseWithJSON(req, daemonclient.TaskCloseResult{
 						TaskID:                 "az-9",
 						Status:                 string(domain.StatusDone),
+						Revision:               1,
 						IntegrationRequested:   true,
 						Integrated:             true,
 						IntegratedSourceBranch: "riordan/az-9/finish-flow",
@@ -11298,8 +11300,9 @@ func TestIssueUpdateCommandRoutesCancelledThroughCloseWithoutIntegration(t *test
 					}
 					gotCloseReq = req
 					return responseWithJSON(req, daemonclient.TaskCloseResult{
-						TaskID: "az-1",
-						Status: string(domain.StatusCancelled),
+						TaskID:   "az-1",
+						Status:   string(domain.StatusCancelled),
+						Revision: 1,
 					}), nil
 				default:
 					return protocol.ResponseEnvelope{
@@ -11760,6 +11763,7 @@ func TestIssueUpdateCommandConfirmedClosedCleansBeforeStatus(t *testing.T) {
 					return responseWithJSON(req, daemonclient.TaskCloseResult{
 						TaskID:                 "az-1",
 						Status:                 string(domain.StatusDone),
+						Revision:               1,
 						IntegrationRequested:   true,
 						Integrated:             true,
 						IntegratedSourceBranch: "riordan/az-1/ready",

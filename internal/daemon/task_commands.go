@@ -2933,50 +2933,16 @@ func (d *Daemon) persistTaskCloseIntegrationReceipt(ctx context.Context, project
 	if receipt.SourceBranch == "" || receipt.TargetBranch == "" || receipt.SourceOID == "" || receipt.TargetOID == "" {
 		return fmt.Errorf("integration result is missing exact source/target branch or OID")
 	}
-	return issueClient.WithMutationLock(ctx, func(lockCtx context.Context) error {
-		found, err := taskCloseIntegrationReceiptAlreadyPersisted(lockCtx, issueClient, taskID, receipt)
-		if err != nil {
-			return fmt.Errorf("inspect existing exact integration receipt: %w", err)
-		}
-		if found {
-			return nil
-		}
-		if _, err := issueClient.AppendIssueObservationEvent(lockCtx, taskID, issues.IssueObservationEventParams{
-			Type:          domain.IssueEventTaskIntegrationCompleted,
-			Source:        "daemon-task-close",
-			SourceCommand: "integrate-before-close",
-			WorktreePath:  strings.TrimSpace(worktreePath),
-			Payload: map[string]any{
-				"project_id":    receipt.ProjectID,
-				"source_branch": receipt.SourceBranch,
-				"target_branch": receipt.TargetBranch,
-				"source_oid":    receipt.SourceOID,
-				"target_oid":    receipt.TargetOID,
-			},
-		}); err != nil {
-			return fmt.Errorf("persist exact integration receipt: %w", err)
-		}
-		return nil
-	})
-}
-
-func taskCloseIntegrationReceiptAlreadyPersisted(ctx context.Context, issueClient *issues.Client, taskID string, receipt taskCloseIntegrationReceipt) (bool, error) {
-	events, err := issueClient.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{
-		Types:         []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted},
-		NewestIDFirst: true,
-	})
-	if err != nil {
-		return false, err
+	if _, err := issueClient.AppendTaskIntegrationReceiptIfAbsent(ctx, taskID, issues.TaskIntegrationReceipt{
+		ProjectID:    receipt.ProjectID,
+		SourceBranch: receipt.SourceBranch,
+		TargetBranch: receipt.TargetBranch,
+		SourceOID:    receipt.SourceOID,
+		TargetOID:    receipt.TargetOID,
+	}, worktreePath); err != nil {
+		return fmt.Errorf("persist exact integration receipt: %w", err)
 	}
-	for _, event := range events {
-		if protocol.NormalizeProjectID(observationPayloadString(event.Payload, "project_id")) == receipt.ProjectID &&
-			observationPayloadString(event.Payload, "source_branch") == receipt.SourceBranch &&
-			observationPayloadString(event.Payload, "target_branch") == receipt.TargetBranch &&
-			observationPayloadString(event.Payload, "source_oid") == receipt.SourceOID {
-			return true, nil
-		}
-	}
-	return false, nil
+	return nil
 }
 
 func (d *Daemon) latestTaskCloseIntegrationReceipt(ctx context.Context, projectID, taskID, sourceBranch, targetBranch string) (taskCloseIntegrationReceipt, bool, error) {
