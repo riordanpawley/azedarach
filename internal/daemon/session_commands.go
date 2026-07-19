@@ -1521,6 +1521,12 @@ func (d *Daemon) compensateSessionStartFailureWithSelector(ctx context.Context, 
 				note += fmt.Sprintf("; failed-start durable session reload also failed: %v", loadErr)
 			}
 		} else {
+			if daemonstate.NormalizeSessionState(winner) == daemonstate.SessionStateStopped {
+				d.purgeManagedAgentIdentityProjectionForSession(projectID, sessionID)
+				if canonicalProjectID := d.canonicalProjectID(projectID); canonicalProjectID != protocol.NormalizeProjectID(projectID) {
+					d.purgeManagedAgentIdentityProjectionForSession(canonicalProjectID, sessionID)
+				}
+			}
 			if applied {
 				desired = winner
 				alignTransient = true

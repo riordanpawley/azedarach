@@ -1059,7 +1059,7 @@ func TestApplySessionCompensationIsIdempotentWhenDesiredIntentAlreadyAbsent(t *t
 	if err != nil {
 		t.Fatalf("idempotent compensation for absent desired intent: %v", err)
 	}
-	if applied || len(changed) != 0 || winner != "" {
+	if applied || len(changed) != 0 || winner != SessionStateStopped {
 		t.Fatalf("absent compensation changed=%+v winner=%s applied=%t", changed, winner, applied)
 	}
 	observation, found, err := store.GetPhysicalSessionObservation(ctx, "project", "az-dtl")
@@ -1091,7 +1091,7 @@ func TestApplySessionCompensationAbsentTargetFansOnlyPhysicalObservationToLinked
 	if err != nil {
 		t.Fatal(err)
 	}
-	if applied || winner != "" || len(changed) != 1 {
+	if applied || winner != SessionStateStopped || len(changed) != 1 {
 		t.Fatalf("absent target changed=%+v winner=%s applied=%t", changed, winner, applied)
 	}
 	if changed[0].Role != SessionRoleOrchestrator || changed[0].State != SessionStateStarting || changed[0].ObservedState != SessionStateStopped {
