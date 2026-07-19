@@ -962,12 +962,12 @@ func TestApplySessionCompensationPreservesRootedOrchestratorIntent(t *testing.T)
 	if err := store.ReplaceSessionStates(ctx, "project", []Session{rooted}); err != nil {
 		t.Fatal(err)
 	}
-	changed, winner, err := store.ApplySessionCompensation(ctx, "project", rooted, SessionStateStopped, SessionStateStopped, "", "", now.Add(time.Second))
+	changed, winner, applied, err := store.ApplySessionCompensation(ctx, "project", rooted, SessionStateStopped, SessionStateStopped, "", "", now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if winner != SessionStateStopped || len(changed) != 1 || changed[0].Role != SessionRoleOrchestrator || changed[0].State != SessionStateStopped || changed[0].ObservedState != SessionStateStopped {
-		t.Fatalf("typed compensation changed=%+v winner=%s", changed, winner)
+	if !applied || winner != SessionStateStopped || len(changed) != 1 || changed[0].Role != SessionRoleOrchestrator || changed[0].State != SessionStateStopped || changed[0].ObservedState != SessionStateStopped {
+		t.Fatalf("typed compensation changed=%+v winner=%s applied=%t", changed, winner, applied)
 	}
 	if worker, found, err := store.GetWorkerSessionStateByIssueID(ctx, "project", "root", "az-root"); err != nil || found {
 		t.Fatalf("typed compensation worker=%+v found=%t err=%v", worker, found, err)
@@ -983,19 +983,54 @@ func TestApplySessionCompensationIsIdempotentWhenDesiredIntentAlreadyAbsent(t *t
 		ID: "az-dtl", IssueID: "dtl", Role: SessionRoleWorker,
 		ScopeKind: SessionScopeIssue, ScopeID: "dtl", State: SessionStateStarting, UpdatedAt: now,
 	}
-	changed, winner, err := store.ApplySessionCompensation(ctx, "project", intent, SessionStateStopped, SessionStateStopped, "", "", now)
+	changed, winner, applied, err := store.ApplySessionCompensation(ctx, "project", intent, SessionStateStopped, SessionStateStopped, "", "", now)
 	if err != nil {
 		t.Fatalf("idempotent compensation for absent desired intent: %v", err)
 	}
-	if len(changed) != 0 || winner != SessionStateStopped {
-		t.Fatalf("absent compensation changed=%+v winner=%s", changed, winner)
+	if applied || len(changed) != 0 || winner != "" {
+		t.Fatalf("absent compensation changed=%+v winner=%s applied=%t", changed, winner, applied)
 	}
 	observation, found, err := store.GetPhysicalSessionObservation(ctx, "project", "az-dtl")
 	if err != nil || !found || observation.ObservedState != SessionStateStopped {
 		t.Fatalf("physical compensation = %+v found=%t err=%v", observation, found, err)
 	}
-	if _, _, err := store.ApplySessionCompensation(ctx, "project", intent, SessionStateStopped, SessionStateStopped, "", "", now); err != nil {
+	if _, _, applied, err := store.ApplySessionCompensation(ctx, "project", intent, SessionStateStopped, SessionStateStopped, "", "", now); err != nil || applied {
 		t.Fatalf("replayed absent compensation: %v", err)
+	}
+}
+
+func TestApplySessionCompensationAbsentTargetFansOnlyPhysicalObservationToLinkedIntent(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.July, 19, 3, 43, 20, 0, time.UTC)
+	rooted := Session{
+		ID: "az-root", IssueID: "root", Role: SessionRoleOrchestrator,
+		ScopeKind: SessionScopeOrchestration, ScopeID: "root", State: SessionStateStarting, UpdatedAt: now,
+	}
+	if err := store.ReplaceSessionStates(ctx, "project", []Session{rooted}); err != nil {
+		t.Fatal(err)
+	}
+	absentWorker := Session{
+		ID: "az-root", IssueID: "root", Role: SessionRoleWorker,
+		ScopeKind: SessionScopeIssue, ScopeID: "root", State: SessionStateStarting, UpdatedAt: now,
+	}
+	changed, winner, applied, err := store.ApplySessionCompensation(ctx, "project", absentWorker, SessionStateStopped, SessionStateStopped, "", "", now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied || winner != "" || len(changed) != 1 {
+		t.Fatalf("absent target changed=%+v winner=%s applied=%t", changed, winner, applied)
+	}
+	if changed[0].Role != SessionRoleOrchestrator || changed[0].State != SessionStateStarting || changed[0].ObservedState != SessionStateStopped {
+		t.Fatalf("linked publication row=%+v", changed[0])
+	}
+	got, found, loadErr := store.GetSessionIntent(ctx, "project", SessionRoleOrchestrator, SessionScopeOrchestration, "root")
+	if loadErr != nil || !found || got.State != SessionStateStarting || got.ObservedState != SessionStateStopped {
+		t.Fatalf("linked rooted intent=%+v found=%t err=%v", got, found, loadErr)
+	}
+	if observation, found, loadErr := store.GetPhysicalSessionObservation(ctx, "project", "az-root"); loadErr != nil || !found || observation.ObservedState != SessionStateStopped {
+		t.Fatalf("physical cleanup=%+v found=%t err=%v", observation, found, loadErr)
 	}
 }
 

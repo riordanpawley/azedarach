@@ -635,13 +635,17 @@ func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context,
 }
 
 // ApplySessionCompensation atomically aligns one typed desired intent and its
-// physical runtime observation after a failed start cleanup attempt.
-func (s *RuntimeStateStore) ApplySessionCompensation(ctx context.Context, projectID string, intent Session, desiredState, observedState SessionState, activity, activitySource string, updatedAt time.Time) ([]Session, SessionState, error) {
+// physical runtime observation after a failed start cleanup attempt. The
+// returned bool reports whether the transaction produced a durable desired
+// winner; an absent desired intent is an idempotent success with no winner.
+func (s *RuntimeStateStore) ApplySessionCompensation(ctx context.Context, projectID string, intent Session, desiredState, observedState SessionState, activity, activitySource string, updatedAt time.Time) ([]Session, SessionState, bool, error) {
 	var changed []Session
 	effectiveState := NormalizeSessionState(desiredState)
+	applied := false
 	err := s.withRetryingWriteLock(ctx, "apply_session_compensation", func(writeCtx context.Context) error {
 		changed = nil
 		effectiveState = NormalizeSessionState(desiredState)
+		applied = false
 		db, err := s.dbHandle()
 		if err != nil {
 			return err
@@ -708,6 +712,22 @@ func (s *RuntimeStateStore) ApplySessionCompensation(ctx context.Context, projec
 			if affected != 0 {
 				return fmt.Errorf("update compensated desired session: affected=%d err=%v", affected, err)
 			}
+			var durableState string
+			loadErr := tx.QueryRowContext(writeCtx, `SELECT state FROM `+sessionStateTable+` WHERE project_id=? AND logical_id=?`, observation.ProjectID, logicalID).Scan(&durableState)
+			switch {
+			case errors.Is(loadErr, sql.ErrNoRows):
+				// There is no durable desired winner to project into transient
+				// state. Physical cleanup and any real linked-intent observation
+				// fan-out remain idempotent and commit below.
+				effectiveState = ""
+			case loadErr != nil:
+				return fmt.Errorf("load compensated desired session winner: %w", loadErr)
+			default:
+				effectiveState = NormalizeSessionState(SessionState(durableState))
+				applied = true
+			}
+		} else {
+			applied = true
 		}
 		linked, err := listSessionIntentsByPhysicalIDTx(writeCtx, tx, observation.ProjectID, observation.SessionID)
 		if err != nil {
@@ -727,7 +747,7 @@ func (s *RuntimeStateStore) ApplySessionCompensation(ctx context.Context, projec
 		}
 		return tx.Commit()
 	})
-	return changed, effectiveState, err
+	return changed, effectiveState, applied, err
 }
 
 func normalizePhysicalSessionObservation(observation PhysicalSessionObservation) (PhysicalSessionObservation, error) {
