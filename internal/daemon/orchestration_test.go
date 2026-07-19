@@ -571,6 +571,9 @@ func TestOrchestratorBlockerWakeUsesDurableScopeFilteredObservations(t *testing.
 			t.Fatal(err)
 		}
 	}
+	if _, err := client.AppendIssueObservationEvent(ctx, workerA, issues.IssueObservationEventParams{Type: domain.IssueEventAgentActivityChanged, ObservedAt: time.Now().UTC().Add(30 * time.Second), Source: "hooks", Payload: map[string]any{"activity": "idle"}}); err != nil {
+		t.Fatal(err)
+	}
 	authority := d.orchestrationAuthority()
 	rootAScope, _ := domain.RootedOrchestrationScope(rootA)
 	rootBScope, _ := domain.RootedOrchestrationScope(rootB)
@@ -607,6 +610,16 @@ func TestOrchestratorBlockerWakeUsesDurableScopeFilteredObservations(t *testing.
 	}
 	if action, actionable := orchestratorActionableContinuation(domain.ProjectOrchestrationScope(), projectAfterProgress); actionable && action.Kind == "blocked" {
 		t.Fatalf("later direct progress retained stale blocker action: %+v", action)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, workerA, issues.IssueObservationEventParams{Type: domain.IssueEventProgressRecorded, ObservedAt: time.Now().UTC().Add(2 * time.Minute), Source: "worker", Payload: map[string]any{"summary": "rooted worker unblocked"}}); err != nil {
+		t.Fatal(err)
+	}
+	rootAfterProgress, err := authority.Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: rootAScope, ActorID: "orchestrator", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action, actionable := orchestratorActionableContinuation(rootAScope, rootAfterProgress); actionable && action.Kind == "blocked" {
+		t.Fatalf("later rooted progress retained stale blocker action: %+v", action)
 	}
 }
 

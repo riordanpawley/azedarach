@@ -885,8 +885,18 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 		}
 		snapshot.Scope, snapshot.Roots, snapshot.GeneratedAt = identity.Scope, []string{root}, time.Now().UTC()
 		a.enrichStewardshipContext(ctx, projectID, &snapshot)
-		snapshot.ActionableBlockers = actionableWorkerBlockersFromObservations(snapshot.WorkerObservations)
 		tasks := materializedParentChildClosure(materializedTasks, root)
+		workerIDs := make([]string, 0, len(snapshot.WorkerObservations))
+		for _, observation := range snapshot.WorkerObservations {
+			workerIDs = append(workerIDs, observation.IssueID)
+		}
+		if len(workerIDs) > 0 {
+			observationCapture, captureErr := issueClient.CaptureProjectIssueObservationEvents(ctx, workerIDs, 1, 20)
+			if captureErr != nil {
+				return protocol.OrchestrationSnapshot{}, orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionObservationProjection, fmt.Errorf("capture rooted blocker projection: %w", captureErr))
+			}
+			snapshot.ActionableBlockers = actionableWorkerBlockersForIssues(workerIDs, observationCapture.StewardshipByIssue)
+		}
 		snapshot.PublicationQueue = publicationOperationsForTasks(snapshot.PublicationQueue, tasks)
 		if err := a.enrichPendingDecisions(ctx, projectID, issueClient, &snapshot, tasks); err != nil {
 			return protocol.OrchestrationSnapshot{}, orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionObservationProjection, err)
@@ -1147,9 +1157,20 @@ func finalizeOrchestrationSnapshotSource(snapshot *protocol.OrchestrationSnapsho
 }
 
 func projectActionableWorkerBlockers(roots []domain.Task, eventsByIssue map[string][]domain.IssueObservationEvent) []protocol.OrchestrationActionableBlocker {
-	blockers := make([]protocol.OrchestrationActionableBlocker, 0, len(roots))
+	issueIDs := make([]string, 0, len(roots))
 	for _, root := range roots {
-		issueID := root.ID.String()
+		issueIDs = append(issueIDs, root.ID.String())
+	}
+	return actionableWorkerBlockersForIssues(issueIDs, eventsByIssue)
+}
+
+func actionableWorkerBlockersForIssues(issueIDs []string, eventsByIssue map[string][]domain.IssueObservationEvent) []protocol.OrchestrationActionableBlocker {
+	blockers := make([]protocol.OrchestrationActionableBlocker, 0, len(issueIDs))
+	for _, issueID := range issueIDs {
+		issueID = strings.TrimSpace(issueID)
+		if issueID == "" {
+			continue
+		}
 		last := daemonWorkerObservationLastEvent(eventsByIssue[issueID], nil)
 		if last == nil || last.Seq <= 0 {
 			continue
@@ -1160,27 +1181,6 @@ func projectActionableWorkerBlockers(roots []domain.Task, eventsByIssue map[stri
 		}
 	}
 	sort.Slice(blockers, func(i, j int) bool { return blockers[i].IssueID < blockers[j].IssueID })
-	return blockers
-}
-
-func actionableWorkerBlockersFromObservations(observations []domain.WorkerObservation) []protocol.OrchestrationActionableBlocker {
-	blockers := make([]protocol.OrchestrationActionableBlocker, 0, len(observations))
-	for _, observation := range observations {
-		last := observation.LastEvent
-		if last == nil || last.Seq <= 0 {
-			continue
-		}
-		projectedType, visible := projectStewardshipEventType(domain.IssueObservationEventType(last.Type))
-		if visible && projectedType == "worker-blocked" {
-			blockers = append(blockers, protocol.OrchestrationActionableBlocker{IssueID: observation.IssueID, EventID: last.Seq})
-		}
-	}
-	sort.Slice(blockers, func(i, j int) bool {
-		if blockers[i].IssueID != blockers[j].IssueID {
-			return blockers[i].IssueID < blockers[j].IssueID
-		}
-		return blockers[i].EventID < blockers[j].EventID
-	})
 	return blockers
 }
 
