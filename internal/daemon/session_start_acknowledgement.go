@@ -16,6 +16,7 @@ import (
 const (
 	sessionStartAcknowledgementTimeout = 8 * time.Second
 	sessionStartAcknowledgementPoll    = 50 * time.Millisecond
+	sessionStartCompensationTimeout    = 8 * time.Second
 )
 
 type sessionStartBootstrapFailureReason string

@@ -400,6 +400,46 @@ func TestSubmitDedupesActiveOperation(t *testing.T) {
 	}
 }
 
+func TestSubmitRetriesFailedOperationWithoutRecentDedupeDelay(t *testing.T) {
+	store := newMemoryStore()
+	ids := []string{"op-failed", "op-retry"}
+	mgr := New(store, Config{NewID: func() string {
+		id := ids[0]
+		ids = ids[1:]
+		return id
+	}})
+	request := daemonops.SubmitRequest{
+		ProjectID: "p1", Kind: "session.start", DedupeKey: "session.start:a",
+		ResourceKeys: []string{"session:a"}, RecentDedupeWindow: time.Hour,
+	}
+	first, err := mgr.Submit(context.Background(), request, func(context.Context) ([]byte, error) {
+		return nil, errors.New("launch failed")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := mgr.Get(context.Background(), first.Record.ID)
+	if err != nil || failed.State != daemonops.StateFailed {
+		t.Fatalf("failed record=%+v err=%v", failed, err)
+	}
+
+	retried, err := mgr.Submit(context.Background(), request, func(context.Context) ([]byte, error) {
+		return []byte("started"), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Deduped || retried.Record.ID != "op-retry" {
+		t.Fatalf("retry result=%+v, want new op-retry", retried)
+	}
+	if err := mgr.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestManagerLogsBacklogDiagnosticsForBlockedOperation(t *testing.T) {
 	store := newMemoryStore()
 	logs := &captureHandler{}

@@ -23,6 +23,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
@@ -236,6 +237,187 @@ func TestOperationRuntimeReportsTerminalSessionStartFailure(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("terminal callback not invoked")
+	}
+}
+
+type sessionStartOperationFixture struct {
+	daemon         *Daemon
+	runtime        *operationRuntime
+	issueID        string
+	projectID      string
+	tmuxRunner     *sessionStartTmuxRunner
+	worktreeRunner *worktreeCreateRunner
+	terminal       chan daemonops.Record
+}
+
+func newSessionStartOperationFixture(t *testing.T) *sessionStartOperationFixture {
+	t.Helper()
+	repoDir := t.TempDir()
+	projectID := "proj"
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	issueClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issueClient.CloseDB() })
+	issueID, err := issueClient.Create(context.Background(), issues.CreateTaskParams{
+		Title: "Terminalize failed session start",
+		Type:  domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktreeRunner := &worktreeCreateRunner{
+		worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID),
+		branchName:   "testuser/" + issueID + "/terminalize-start",
+	}
+	tmuxRunner := newSessionStartTmuxRunner()
+	memoryStore := daemonstate.NewStore()
+	d := &Daemon{
+		cfg: Config{
+			RepoDir: repoDir, BaseBranch: "main", CLITool: "codex", SessionShell: "zsh", Logger: slog.Default(),
+		},
+		tmux: tmux.NewClient(tmuxRunner, slog.Default()), issues: issueClient,
+		session: daemonhandlers.NewSessionHandler(memoryStore), sessionStore: memoryStore,
+		revision: map[string]uint64{},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{
+			repoDir: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{
+			projectID: git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default()),
+		},
+	}
+	attachIsolatedRuntimeStore(t, d, projectID)
+	terminal := make(chan daemonops.Record, 4)
+	runtime := newOperationRuntime(operationRuntimeConfig{
+		repoDir: repoDir,
+		onTerminal: func(_ context.Context, record daemonops.Record) {
+			terminal <- record
+		},
+	})
+	runtime.sessionStart = d.handleSessionStart
+	t.Cleanup(func() { _ = runtime.Close() })
+	return &sessionStartOperationFixture{
+		daemon: d, runtime: runtime, issueID: issueID, projectID: projectID,
+		tmuxRunner: tmuxRunner, worktreeRunner: worktreeRunner, terminal: terminal,
+	}
+}
+
+func (f *sessionStartOperationFixture) submit(t *testing.T) protocol.OperationSubmitResponseBody {
+	t.Helper()
+	sessionID := naming.CanonicalSessionID(f.daemon.sessionNamingScope(f.projectID), f.issueID)
+	resp := f.runtime.Handle(context.Background(), testRequest(protocol.CommandOperationSubmit, protocol.OperationSubmitRequestBody{
+		ProjectID: naming.ProjectID(f.projectID), Kind: daemonhandlers.CommandSessionStart,
+		IssueID: naming.IssueID(f.issueID), DedupeKey: daemonhandlers.CommandSessionStart + ":" + f.issueID,
+		ResourceKeys: []string{"issue:" + f.projectID + ":" + f.issueID, "session:" + sessionID, "worktree:" + f.issueID},
+		Payload:      mustJSON(t, map[string]any{"project_id": f.projectID, "session_id": f.issueID, "start_work": true}),
+	}))
+	if !resp.OK {
+		t.Fatalf("submit response = %+v", resp)
+	}
+	var body protocol.OperationSubmitResponseBody
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func (f *sessionStartOperationFixture) assertNoStartLeak(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	sessionID := naming.CanonicalSessionID(f.daemon.sessionNamingScope(f.projectID), f.issueID)
+	if f.tmuxRunner.sessions[sessionID] {
+		t.Fatalf("failed start leaked tmux session %s", sessionID)
+	}
+	store := f.daemon.sessionRuntimeStateStore(f.projectID)
+	if worktree, found, err := store.GetWorktreeStateByIssueID(ctx, f.projectID, f.issueID); err != nil || found {
+		t.Fatalf("failed start worktree projection = %+v found=%t err=%v", worktree, found, err)
+	}
+	if session, found, err := store.GetWorkerSessionStateByIssueID(ctx, f.projectID, f.issueID, sessionID); err != nil || (found && (session.State != daemonstate.SessionStateStopped || session.ObservedState != daemonstate.SessionStateStopped)) {
+		t.Fatalf("failed start session projection = %+v found=%t err=%v", session, found, err)
+	}
+	scope, err := domain.RootedOrchestrationScope(f.issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := domain.NewOrchestratorIdentity(f.projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(store).Get(ctx, identity); err != nil || found {
+		t.Fatalf("failed worker start rooted lease = %+v found=%t err=%v", lease, found, err)
+	}
+}
+
+func TestSessionStartOperationFailedLaunchTerminalizesAndRetriesAfterBoundedCompensation(t *testing.T) {
+	f := newSessionStartOperationFixture(t)
+	f.tmuxRunner.newSessionErr = errors.New("tmux new-session concrete failure")
+	var cancelCompensation context.CancelFunc
+	f.daemon.sessionStartCompensationContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
+		cancelCompensation = cancel
+		return ctx, cancel
+	}
+	f.worktreeRunner.onWorktreeRemove = func() {
+		cancelCompensation()
+	}
+
+	first := f.submit(t)
+	failed := <-f.terminal
+	if failed.ID != first.Operation.OperationID.String() || failed.State != daemonops.StateFailed {
+		t.Fatalf("terminal record = %+v, want failed %s", failed, first.Operation.OperationID)
+	}
+	if !strings.Contains(failed.ErrorMessage, "tmux new-session concrete failure") {
+		t.Fatalf("terminal error = %q, want concrete tmux cause", failed.ErrorMessage)
+	}
+	if !f.worktreeRunner.worktreeRemoved {
+		t.Fatal("failed start did not compensate the new worktree")
+	}
+	f.assertNoStartLeak(t)
+
+	f.daemon.sessionStartCompensationContext = nil
+	f.worktreeRunner.onWorktreeRemove = nil
+	f.tmuxRunner.newSessionErr = nil
+	acknowledgeManagedAgentOnInitialLaunch(t, f.daemon, f.tmuxRunner, f.projectID)
+	second := f.submit(t)
+	done := <-f.terminal
+	if !second.Created || second.Operation.OperationID == first.Operation.OperationID || done.ID != second.Operation.OperationID.String() || done.State != daemonops.StateDone {
+		t.Fatalf("retry submit=%+v terminal=%+v first=%s", second, done, first.Operation.OperationID)
+	}
+}
+
+func TestSessionStartOperationCancellationTerminalizesAndAllowsRetry(t *testing.T) {
+	f := newSessionStartOperationFixture(t)
+	launchEntered := make(chan struct{})
+	f.tmuxRunner.onNewSessionCommand = func(ctx context.Context, _ string) error {
+		close(launchEntered)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	first := f.submit(t)
+	<-launchEntered
+	cancelResp := f.runtime.Handle(context.Background(), testRequest(protocol.CommandOperationCancel, protocol.OperationCancelRequestBody{
+		OperationID: first.Operation.OperationID,
+		Reason:      "cancel deterministic blocked launch",
+	}))
+	if !cancelResp.OK {
+		t.Fatalf("cancel response = %+v", cancelResp)
+	}
+	cancelled := <-f.terminal
+	if cancelled.ID != first.Operation.OperationID.String() || cancelled.State != daemonops.StateCancelled || cancelled.ErrorMessage != "cancel deterministic blocked launch" {
+		t.Fatalf("cancelled record = %+v", cancelled)
+	}
+	if !f.worktreeRunner.worktreeRemoved {
+		t.Fatal("cancelled start did not compensate the new worktree")
+	}
+	f.assertNoStartLeak(t)
+
+	f.tmuxRunner.onNewSessionCommand = nil
+	acknowledgeManagedAgentOnInitialLaunch(t, f.daemon, f.tmuxRunner, f.projectID)
+	second := f.submit(t)
+	done := <-f.terminal
+	if second.Operation.OperationID == first.Operation.OperationID || done.ID != second.Operation.OperationID.String() || done.State != daemonops.StateDone {
+		t.Fatalf("retry submit=%+v terminal=%+v first=%s", second, done, first.Operation.OperationID)
 	}
 }
 

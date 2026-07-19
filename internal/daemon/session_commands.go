@@ -997,13 +997,15 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 	rollbackIssueLifecycle := originalIssueStatus != domain.StatusInProgress
 	defer func() {
 		if rollbackIssueLifecycle && (err != nil || !resp.OK) {
+			cleanupCtx, cancelCleanup := d.newSessionStartCompensationContext(ctx)
+			defer cancelCleanup()
 			if worktreeProjectionPersisted && !startedWorktreeReused && startedWorktreePath != "" {
-				if _, projectionErr := d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID); projectionErr != nil && d.cfg.Logger != nil {
+				if _, projectionErr := d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(cleanupCtx, cmd.ProjectID, cmd.IssueID); projectionErr != nil && d.cfg.Logger != nil {
 					d.cfg.Logger.Warn("rollback session-start worktree projection failed", "project_id", cmd.ProjectID, "issue_id", cmd.IssueID, "error", projectionErr)
 				}
-				_ = d.cleanupNewWorktreeAfterInitFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, startedWorktreePath, startedWorktreeReused)
+				_ = d.cleanupNewWorktreeAfterInitFailure(cleanupCtx, cmd.ProjectID, worktreeManager, cmd.IssueID, startedWorktreePath, startedWorktreeReused)
 			}
-			d.rollbackSessionStartIssueLifecycle(ctx, issueClient, cmd.IssueID, originalIssueStatus)
+			d.rollbackSessionStartIssueLifecycle(cleanupCtx, issueClient, cmd.IssueID, originalIssueStatus)
 		}
 	}()
 	task.Status = domain.StatusInProgress
@@ -1331,6 +1333,17 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 	}
 	d.reconcileDecisionPropagationBestEffort(ctx, cmd.ProjectID)
 	return d.commandOutput(req, output), nil
+}
+
+func (d *Daemon) newSessionStartCompensationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if d != nil && d.sessionStartCompensationContext != nil {
+		return d.sessionStartCompensationContext(ctx)
+	}
+	// A failed launch must return its concrete cause to the operation manager
+	// even when a best-effort rollback dependency stops making progress. Keep
+	// cleanup independent of request cancellation so cancellation cannot strand
+	// physical or durable resources, but bound the entire compensation unit.
+	return context.WithTimeout(context.WithoutCancel(ctx), sessionStartCompensationTimeout)
 }
 
 func (d *Daemon) acquireRootedOrchestratorLease(ctx context.Context, projectID, issueID, sessionID string) error {

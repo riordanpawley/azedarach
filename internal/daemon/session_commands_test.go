@@ -464,6 +464,7 @@ type worktreeCreateRunner struct {
 	worktreeAddCalls int
 	worktreeRemoved  bool
 	branchDeleted    bool
+	onWorktreeRemove func()
 }
 
 func (r *worktreeCreateRunner) Run(_ context.Context, args ...string) (string, error) {
@@ -490,6 +491,7 @@ func (r *worktreeCreateRunner) Run(_ context.Context, args ...string) (string, e
 	}
 	if len(args) >= 3 && args[0] == "worktree" && args[1] == "add" && args[2] == "-b" {
 		r.worktreeAddCalls++
+		r.worktreeRemoved = false
 		_ = os.MkdirAll(r.worktreePath, 0o755)
 		if r.failCreate {
 			return "", fmt.Errorf("git worktree add -b failed: exit status 1: hook failed")
@@ -499,6 +501,9 @@ func (r *worktreeCreateRunner) Run(_ context.Context, args ...string) (string, e
 	if len(args) >= 3 && args[0] == "worktree" && args[1] == "remove" {
 		r.worktreeRemoved = true
 		_ = os.RemoveAll(r.worktreePath)
+		if r.onWorktreeRemove != nil {
+			r.onWorktreeRemove()
+		}
 		return "", nil
 	}
 	if len(args) >= 3 && args[0] == "branch" && args[1] == "-D" {
@@ -1495,6 +1500,7 @@ type sessionStartTmuxRunner struct {
 	newSessionErr               error
 	createBeforeNewSessionError bool
 	onNewSession                func(string)
+	onNewSessionCommand         func(context.Context, string) error
 	onNewWindow                 func(string, string)
 	newWindowErr                error
 	createBeforeNewWindowError  bool
@@ -1763,6 +1769,11 @@ func (r *sessionStartTmuxRunner) Run(ctx context.Context, args ...string) (strin
 		}
 		if r.maxNewSessionCommand > 0 && len(args) > 4 && len(args[len(args)-1]) > r.maxNewSessionCommand {
 			return "", errors.New("command too long")
+		}
+		if r.onNewSessionCommand != nil {
+			if err := r.onNewSessionCommand(ctx, args[3]); err != nil {
+				return "", err
+			}
 		}
 		if len(args) > 4 {
 			command := args[len(args)-1]
