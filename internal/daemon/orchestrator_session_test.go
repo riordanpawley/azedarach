@@ -299,6 +299,62 @@ func TestSessionRestartAllProjectOrchestratorRejectsProjectionLeaseDisagreement(
 	}
 }
 
+func TestSessionRestartAllProjectOrchestratorRejectsPausedLeaseWithLiveRuntime(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	runner := newSessionStartTmuxRunner()
+	d := &Daemon{
+		cfg:                    Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "/bin/sh", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+		tmux:                   tmux.NewClient(runner, slog.Default()),
+	}
+	scope := domain.ProjectOrchestrationScope()
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := d.orchestratorSessionID(projectID, scope)
+	runner.sessions[sessionID] = true
+	authority := daemonstate.NewOrchestratorLeaseAuthority(store)
+	if _, err := authority.Acquire(ctx, identity, sessionID, d.tmux.HasSession); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.persistOrchestratorSessionProjection(ctx, protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, projectID, scope, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authority.SetLifecycle(ctx, identity, sessionID, domain.OrchestratorPaused); err != nil {
+		t.Fatal(err)
+	}
+	runner.onRespawnPane = seedManagedRestartIdentity(t, d, runner, projectID, sessionID)
+
+	resp, err := d.handleSessionRestartAll(ctx, protocol.RequestEnvelope{
+		Command: protocol.CommandSessionRestartAll,
+		Meta:    protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:    marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(projectID), ForceBusy: true}),
+	})
+	if err != nil || resp.Error != nil {
+		t.Fatalf("paused disagreement response=%+v err=%v", resp.Error, err)
+	}
+	var result protocol.SessionRestartAllResponseBody
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Restarted != 0 || result.Failed != 1 || len(result.Sessions) != 1 || !strings.Contains(result.Sessions[0].Error, "paused orchestrator lease conflicts with live restart target") {
+		t.Fatalf("paused disagreement result = %+v", result)
+	}
+	for _, command := range runner.commands {
+		if len(command) > 0 && command[0] == "respawn-pane" {
+			t.Fatalf("paused authority disagreement reached destructive replacement: %v", command)
+		}
+	}
+}
+
 func testSessionRestartAllPreservesProjectOrchestratorAuthority(t *testing.T, appServer bool) {
 	ctx := context.Background()
 	repoDir := t.TempDir()

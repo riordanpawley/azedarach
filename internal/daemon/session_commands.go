@@ -2363,6 +2363,9 @@ func (d *Daemon) validateSessionRestartTargetAuthority(ctx context.Context, targ
 		if !leaseFound || lease.Identity != identity || strings.TrimSpace(lease.SessionID) != strings.TrimSpace(target.SessionID) {
 			return errors.New("durable orchestrator session projection conflicts with exact scope lease authority")
 		}
+		if lease.Lifecycle == domain.OrchestratorPaused {
+			return errors.New("paused orchestrator lease conflicts with live restart target")
+		}
 		if expected := d.orchestratorSessionID(target.ProjectID, scope); expected != target.SessionID {
 			return fmt.Errorf("live tmux session %s does not match canonical orchestrator scope session %s", target.SessionID, expected)
 		}
