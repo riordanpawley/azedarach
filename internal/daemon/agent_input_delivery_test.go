@@ -192,7 +192,7 @@ func TestAgentInputRetryContinuesAfterUnrelatedEligibilityFailure(t *testing.T) 
 	}
 	receiver := &recordingAuthoritativeReceiver{accepted: map[string]string{}}
 	service := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, receiver, "retry")
-	service.deliveryEligible = func(_ context.Context, request domain.AgentInputDeliveryRequest) (bool, error) {
+	service.deliveryEligible = func(_ context.Context, request domain.AgentInputDeliveryRequest, _ time.Time) (bool, error) {
 		if request.IntentKey == first.IntentKey {
 			return false, errors.New("projection unavailable")
 		}
@@ -212,7 +212,7 @@ func TestAgentInputDeliveryRejectsSupersededActionAtFinalFence(t *testing.T) {
 	receiver := &recordingAuthoritativeReceiver{accepted: map[string]string{}}
 	service := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, receiver, "supersede")
 	checks := 0
-	service.deliveryEligible = func(context.Context, domain.AgentInputDeliveryRequest) (bool, error) {
+	service.deliveryEligible = func(context.Context, domain.AgentInputDeliveryRequest, time.Time) (bool, error) {
 		checks++
 		return checks < 3, nil
 	}

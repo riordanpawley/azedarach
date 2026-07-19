@@ -75,7 +75,7 @@ type agentInputDeliveryService struct {
 	now                   func() time.Time
 	sessionLeaseDuration  time.Duration
 	sessionLeaseHeartbeat time.Duration
-	deliveryEligible      func(context.Context, domain.AgentInputDeliveryRequest) (bool, error)
+	deliveryEligible      func(context.Context, domain.AgentInputDeliveryRequest, time.Time) (bool, error)
 }
 
 func newAgentInputDeliveryService(stores func(string) *state.RuntimeStateStore, issueClients func(string) *issues.Client, receiver authoritativeAgentInputReceiver, owner string) *agentInputDeliveryService {
@@ -130,7 +130,7 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 		_ = client.ReleaseAgentInputDeliveryIntent(context.WithoutCancel(ctx), request.ProjectID, request.IntentKey, claimed.LeaseToken, stale, s.now())
 	}
 	if s.deliveryEligible != nil {
-		eligible, eligibilityErr := s.deliveryEligible(ctx, request)
+		eligible, eligibilityErr := s.deliveryEligible(ctx, request, s.now())
 		if eligibilityErr != nil {
 			release(false)
 			return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputFailed, Reason: "validate delivery eligibility"}, eligibilityErr
@@ -231,7 +231,7 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 	}
 	beginSubmission := func(beginCtx context.Context) (time.Time, error) {
 		if s.deliveryEligible != nil {
-			eligible, eligibilityErr := s.deliveryEligible(beginCtx, request)
+			eligible, eligibilityErr := s.deliveryEligible(beginCtx, request, s.now())
 			if eligibilityErr != nil {
 				return time.Time{}, fmt.Errorf("validate delivery eligibility before submission: %w", eligibilityErr)
 			}
@@ -263,7 +263,7 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 	}
 	revalidateSubmissionFence := func(revalidateCtx context.Context) (time.Time, error) {
 		if s.deliveryEligible != nil {
-			eligible, eligibilityErr := s.deliveryEligible(revalidateCtx, request)
+			eligible, eligibilityErr := s.deliveryEligible(revalidateCtx, request, s.now())
 			if eligibilityErr != nil {
 				return time.Time{}, fmt.Errorf("revalidate delivery eligibility: %w", eligibilityErr)
 			}

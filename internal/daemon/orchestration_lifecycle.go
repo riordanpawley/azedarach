@@ -103,6 +103,9 @@ func (d *Daemon) enforceOrchestratorContinuation(ctx context.Context, authority 
 			return fmt.Errorf("evaluate parent orchestrator complete-check: %w", err)
 		}
 		if complete.Pass {
+			if _, checkpointErr := checkpointRootedOrchestratorAction(ctx, store, lease, orchestratorActionableState{}, false, now); checkpointErr != nil {
+				return checkpointErr
+			}
 			return nil
 		}
 	}
@@ -191,7 +194,7 @@ func orchestratorActivityWakeRequired(activity string) bool {
 	}
 }
 
-func (d *Daemon) agentInputDeliveryEligible(ctx context.Context, request domain.AgentInputDeliveryRequest) (bool, error) {
+func (d *Daemon) agentInputDeliveryEligible(ctx context.Context, request domain.AgentInputDeliveryRequest, now time.Time) (bool, error) {
 	if request.Kind != domain.AgentInputMessageOrchestratorWake {
 		return true, nil
 	}
@@ -216,13 +219,14 @@ func (d *Daemon) agentInputDeliveryEligible(ctx context.Context, request domain.
 		return false, err
 	}
 	action, actionable := orchestratorActionableContinuation(lease.Identity.Scope, snapshot)
-	if !actionable {
-		return false, nil
-	}
 	if lease.Identity.Scope.Kind == domain.OrchestrationScopeRooted {
 		store := d.sessionRuntimeStateStoreIfConfigured(request.ProjectID)
 		if store == nil {
 			return false, nil
+		}
+		if !actionable {
+			_, checkpointErr := checkpointRootedOrchestratorAction(ctx, store, lease, action, false, now)
+			return false, checkpointErr
 		}
 		checkpoint, found, checkpointErr := store.GetOrchestratorLoopCheckpoint(ctx, lease.Identity)
 		if checkpointErr != nil || !found {
@@ -232,6 +236,9 @@ func (d *Daemon) agentInputDeliveryEligible(ctx context.Context, request domain.
 			return false, nil
 		}
 		action.Revision = fmt.Sprintf("%d-%s", checkpoint.WatchCursor, action.Revision)
+	}
+	if !actionable {
+		return false, nil
 	}
 	return action.Revision == parts[2], nil
 }

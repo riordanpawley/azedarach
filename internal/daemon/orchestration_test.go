@@ -116,6 +116,10 @@ func TestRootedOrchestratorBusyWakeQueuesAndEquivalentStateDeliversOnce(t *testi
 	if len(runner.inputPayloads) != 0 {
 		t.Fatalf("superseded actionable revision delivered %d payloads, want 0", len(runner.inputPayloads))
 	}
+	checkpoint, found, err := store.GetOrchestratorLoopCheckpoint(ctx, identity)
+	if err != nil || !found || checkpoint.LastActionStatus != "idle" {
+		t.Fatalf("quiescent retry checkpoint found=%t status=%q err=%v", found, checkpoint.LastActionStatus, err)
+	}
 	replacementNestedID, err := issueClient.Create(ctx, issues.CreateTaskParams{Title: "Replacement nested", Type: domain.TypeEpic, Status: domain.StatusInProgress, ParentID: &rootID})
 	if err != nil {
 		t.Fatal(err)
