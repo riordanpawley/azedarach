@@ -158,6 +158,53 @@ func TestSessionStartFailureCompensationMatchesActualRuntime(t *testing.T) {
 	}
 }
 
+func TestSessionStartFailureCompensationGivesLaterStagesIndependentContexts(t *testing.T) {
+	runner := &sessionStartCompensationTmuxRunner{live: true}
+	contextCalls := 0
+	cleanupEntered := false
+	d := &Daemon{
+		cfg: Config{
+			RepoDir: t.TempDir(),
+			IssueResources: appconfig.IssueResourcesConfig{
+				FailedStartCleanupCommands: []string{"blocked cleanup"},
+			},
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		tmux: tmux.NewClient(runner, slog.Default()),
+		sessionStartCompensationContext: func(parent context.Context) (context.Context, context.CancelFunc) {
+			contextCalls++
+			stageCtx, cancel := context.WithCancel(context.WithoutCancel(parent))
+			if contextCalls == 1 {
+				cancel()
+			}
+			return stageCtx, cancel
+		},
+		sessionShellRun: func(ctx context.Context, _, _, command string, _ []string) ([]byte, error) {
+			if command != "blocked cleanup" {
+				t.Fatalf("cleanup command = %q", command)
+			}
+			cleanupEntered = true
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+
+	note := d.compensateSessionStartFailure(
+		context.Background(),
+		protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: protocol.DefaultProjectID}},
+		protocol.DefaultProjectID, "az-a", "a", issueResourceLifecycleContext{}, "busy", "hooks",
+	)
+	if !cleanupEntered || !strings.Contains(note, "context canceled") {
+		t.Fatalf("early cleanup note = %q entered=%t", note, cleanupEntered)
+	}
+	if runner.live {
+		t.Fatal("later tmux cleanup did not execute after the early stage exhausted its context")
+	}
+	if contextCalls < 2 {
+		t.Fatalf("compensation context calls = %d, want independent contexts for later stages", contextCalls)
+	}
+}
+
 func TestCodexAppServerLaunchUsesStockRemoteTUIAndSupervisedResume(t *testing.T) {
 	d := &Daemon{cfg: Config{
 		CLITool:                    "codex",

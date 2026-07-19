@@ -243,6 +243,7 @@ func TestOperationRuntimeReportsTerminalSessionStartFailure(t *testing.T) {
 type sessionStartOperationFixture struct {
 	daemon         *Daemon
 	runtime        *operationRuntime
+	issueClient    *issues.Client
 	issueID        string
 	projectID      string
 	tmuxRunner     *sessionStartTmuxRunner
@@ -297,8 +298,19 @@ func newSessionStartOperationFixture(t *testing.T) *sessionStartOperationFixture
 	runtime.sessionStart = d.handleSessionStart
 	t.Cleanup(func() { _ = runtime.Close() })
 	return &sessionStartOperationFixture{
-		daemon: d, runtime: runtime, issueID: issueID, projectID: projectID,
+		daemon: d, runtime: runtime, issueClient: issueClient, issueID: issueID, projectID: projectID,
 		tmuxRunner: tmuxRunner, worktreeRunner: worktreeRunner, terminal: terminal,
+	}
+}
+
+func (f *sessionStartOperationFixture) assertIssueStatus(t *testing.T, want domain.Status) {
+	t.Helper()
+	task, err := f.issueClient.GetWithRuntime(context.Background(), f.projectID, f.issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != want {
+		t.Fatalf("issue status = %s, want %s", task.Status, want)
 	}
 }
 
@@ -373,6 +385,7 @@ func TestSessionStartOperationFailedLaunchTerminalizesAndRetriesAfterBoundedComp
 		t.Fatal("failed start did not compensate the new worktree")
 	}
 	f.assertNoStartLeak(t)
+	f.assertIssueStatus(t, domain.StatusOpen)
 
 	f.daemon.sessionStartCompensationContext = nil
 	f.worktreeRunner.onWorktreeRemove = nil
@@ -383,6 +396,22 @@ func TestSessionStartOperationFailedLaunchTerminalizesAndRetriesAfterBoundedComp
 	if !second.Created || second.Operation.OperationID == first.Operation.OperationID || done.ID != second.Operation.OperationID.String() || done.State != daemonops.StateDone {
 		t.Fatalf("retry submit=%+v terminal=%+v first=%s", second, done, first.Operation.OperationID)
 	}
+}
+
+func TestSessionStartOperationFailedLaunchCleansResourcesForInitiallyWorkingIssue(t *testing.T) {
+	f := newSessionStartOperationFixture(t)
+	if err := f.issueClient.Update(context.Background(), f.issueID, domain.StatusInProgress); err != nil {
+		t.Fatal(err)
+	}
+	f.tmuxRunner.newSessionErr = errors.New("tmux new-session concrete failure")
+
+	started := f.submit(t)
+	failed := <-f.terminal
+	if failed.ID != started.Operation.OperationID.String() || failed.State != daemonops.StateFailed {
+		t.Fatalf("terminal record = %+v, want failed %s", failed, started.Operation.OperationID)
+	}
+	f.assertNoStartLeak(t)
+	f.assertIssueStatus(t, domain.StatusInProgress)
 }
 
 func TestSessionStartOperationCancellationTerminalizesAndAllowsRetry(t *testing.T) {
