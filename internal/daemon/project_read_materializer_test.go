@@ -433,6 +433,139 @@ func TestCanonicalDeltaFencesConcurrentRuntimeRecoveryExport(t *testing.T) {
 	}
 }
 
+func TestHealthyRuntimeRefreshFailsClosedAcrossCanonicalDelta(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestIssueClient(t)
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "existing", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hydrateEntered := make(chan struct{})
+	releaseHydrate := make(chan struct{})
+	var hydrateCalls atomic.Int32
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(client), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		if hydrateCalls.Add(1) == 1 {
+			return tasks, nil
+		}
+		close(hydrateEntered)
+		<-releaseHydrate
+		return tasks, nil
+	})
+	materializer.legacy = func(exportCtx context.Context) ([]domain.Task, error) {
+		return client.ListCanonicalArchiveMode(exportCtx, issues.ArchiveInclude)
+	}
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	initial, initialMetadata := materializer.snapshotCanonical()
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	state := userstore.ProjectDeltaState{ProjectID: "project", Cursor: initialMetadata.DeliveryCursor, Hash: "initial", Initialized: true, Projector: issueProjectionProjector()}
+	if err := store.ReplaceProject(ctx, userstore.ProjectInput{ProjectID: "project", Name: "Project", Path: "/project", DBPath: "/project/db", Tasks: initial, Delta: &state}); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{}, userStore: store, materializers: map[string]*projectReadMaterializer{"project": materializer}}
+	done := make(chan error, 1)
+	go func() {
+		done <- d.refreshActiveProjectReadRuntimeForIssues(ctx, "project", materializer, []string{issueID})
+	}()
+	<-hydrateEntered
+	if err := client.Update(ctx, issueID, domain.StatusInProgress); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := materializer.convergeCanonical(ctx); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseHydrate)
+
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "ownership changed") {
+		t.Fatalf("healthy stale runtime refresh error = %v, want ownership failure", err)
+	}
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "canonical generation advanced during runtime refresh") {
+		t.Fatalf("healthy stale runtime refresh health = %q, want generation failure", got)
+	}
+	snapshot, err := store.Snapshot(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Projects) != 1 || len(snapshot.Projects[0].Tasks) != 1 || snapshot.Projects[0].Tasks[0].Status != domain.StatusOpen {
+		t.Fatalf("healthy stale runtime refresh exported canonical delta globally: %+v", snapshot.Projects)
+	}
+}
+
+func TestRefreshOwnedSyncAuthorizationMatrix(t *testing.T) {
+	newReader := func() *projectReadMaterializer {
+		task := domain.Task{ID: "issue", Title: "canonical", Status: domain.StatusOpen, Type: domain.TypeTask}
+		reader := newProjectReadMaterializer("project", nil, nil)
+		canonical := map[string]domain.Task{task.ID.String(): task}
+		issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, canonical)
+		reader.replaceBootstrap(canonical, canonical, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+		return reader
+	}
+	authorized := func(reader *projectReadMaterializer, attempt authoritativeReadRefreshAttempt) bool {
+		_, _, allowed := reader.snapshotIssuesForAuthoritativeRefresh(map[string]struct{}{"issue": {}}, attempt)
+		return allowed
+	}
+
+	t.Run("healthy exact runtime normal", func(t *testing.T) {
+		reader := newReader()
+		if !authorized(reader, reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)) {
+			t.Fatal("healthy exact runtime refresh was rejected")
+		}
+	})
+	t.Run("healthy exact runtime recovery", func(t *testing.T) {
+		reader := newReader()
+		failed := reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+		reader.finishAuthoritativeReadRefresh(failed, errors.New("runtime unavailable"))
+		if !authorized(reader, reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)) {
+			t.Fatal("exact runtime recovery was rejected")
+		}
+	})
+	t.Run("base unhealthy", func(t *testing.T) {
+		reader := newReader()
+		attempt := reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+		reader.markUnhealthy(errors.New("structural failure"), false)
+		if authorized(reader, attempt) {
+			t.Fatal("structurally unhealthy refresh was authorized")
+		}
+	})
+	t.Run("canonical component unhealthy", func(t *testing.T) {
+		reader := newReader()
+		failed := reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+		reader.finishAuthoritativeReadRefresh(failed, errors.New("canonical unavailable"))
+		if authorized(reader, reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)) {
+			t.Fatal("runtime refresh bypassed canonical failure")
+		}
+	})
+	t.Run("canonical generation mismatch", func(t *testing.T) {
+		reader := newReader()
+		attempt := reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+		reader.mu.Lock()
+		reader.canonicalGeneration++
+		reader.mu.Unlock()
+		if authorized(reader, attempt) {
+			t.Fatal("stale canonical generation was authorized")
+		}
+	})
+	t.Run("wrong component", func(t *testing.T) {
+		reader := newReader()
+		if authorized(reader, reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)) {
+			t.Fatal("canonical component was authorized for runtime sync")
+		}
+	})
+	t.Run("superseded runtime sequence", func(t *testing.T) {
+		reader := newReader()
+		older := reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+		reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+		if authorized(reader, older) {
+			t.Fatal("superseded runtime sequence was authorized")
+		}
+	})
+}
+
 func TestProjectReadMaterializerGapWatchPerformsVerifiedBootstrapRecovery(t *testing.T) {
 	client, _ := newTestIssueClient(t)
 	ctx := context.Background()

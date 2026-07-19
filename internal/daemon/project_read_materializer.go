@@ -725,6 +725,13 @@ func (m *projectReadMaterializer) finishAuthoritativeReadRefresh(attempt authori
 		return false
 	}
 	if attempt.component == authoritativeReadRefreshRuntime && attempt.canonicalGeneration != m.canonicalGeneration {
+		if m.authoritativeRefreshFailures == nil {
+			m.authoritativeRefreshFailures = map[authoritativeReadRefreshComponent]string{}
+		}
+		if m.authoritativeRefreshFailures[authoritativeReadRefreshRuntime] == "" {
+			m.authoritativeRefreshFailures[authoritativeReadRefreshRuntime] = "canonical generation advanced during runtime refresh"
+		}
+		m.aggregateHealthLocked()
 		return false
 	}
 	if m.authoritativeRefreshFailures == nil {
@@ -838,15 +845,14 @@ func (m *projectReadMaterializer) snapshotIssuesForAuthoritativeRefresh(issueIDs
 		}
 	}
 	sortTasksDeterministically(tasks)
-	recoveryAuthorized := attempt.sequence != 0 &&
+	refreshAuthorized := attempt.sequence != 0 &&
 		attempt.sequence == *m.authoritativeReadRefreshSequence(attempt.component) &&
 		attempt.healthEpoch == m.healthEpoch &&
 		attempt.canonicalGeneration == m.canonicalGeneration &&
 		attempt.component == authoritativeReadRefreshRuntime &&
 		(strings.TrimSpace(m.baseHealth) == "" || m.baseHealth == "healthy") &&
-		m.authoritativeRefreshFailures[authoritativeReadRefreshCanonical] == "" &&
-		m.authoritativeRefreshFailures[authoritativeReadRefreshRuntime] != ""
-	return cloneTasks(tasks), cloneMaterializedMetadata(m.metadata), recoveryAuthorized
+		m.authoritativeRefreshFailures[authoritativeReadRefreshCanonical] == ""
+	return cloneTasks(tasks), cloneMaterializedMetadata(m.metadata), refreshAuthorized
 }
 
 func (m *projectReadMaterializer) refreshRuntime(ctx context.Context, issueIDs []string) error {
@@ -1431,11 +1437,19 @@ func (d *Daemon) refreshActiveProjectReadRuntimeForIssues(ctx context.Context, p
 		materializer.finishAuthoritativeReadRefresh(attempt, err)
 		return fmt.Errorf("refresh runtime worktrees: %w", err)
 	}
+	unlockCanonical, err := materializer.lockCanonical(ctx, "project_read.runtime_projection_sync")
+	if err != nil {
+		materializer.finishAuthoritativeReadRefresh(attempt, err)
+		return fmt.Errorf("lock runtime projection sync: %w", err)
+	}
+	defer unlockCanonical()
 	if err := d.syncUserProjectionMaterializedIssuesForRefresh(ctx, projectID, issueIDs, materializer, attempt); err != nil {
 		materializer.finishAuthoritativeReadRefresh(attempt, err)
 		return fmt.Errorf("sync user projection issues: %w", err)
 	}
-	materializer.finishAuthoritativeReadRefresh(attempt, nil)
+	if !materializer.finishAuthoritativeReadRefresh(attempt, nil) {
+		return newProjectReadUnavailableError("runtime refresh ownership changed before completion for %s", projectID)
+	}
 	return nil
 }
 
@@ -1474,10 +1488,7 @@ func (d *Daemon) syncUserProjectionMaterializedIssues(ctx context.Context, proje
 }
 
 func (d *Daemon) syncUserProjectionMaterializedIssuesForRefresh(ctx context.Context, projectID string, issueIDs []string, refreshMaterializer *projectReadMaterializer, attempt authoritativeReadRefreshAttempt) error {
-	if d != nil && d.projectReadUserProjectionSync != nil {
-		return d.projectReadUserProjectionSync(ctx, projectID, issueIDs)
-	}
-	if d == nil || d.userStore == nil || d.cfg.ScopedRuntime || len(issueIDs) == 0 {
+	if d == nil || d.cfg.ScopedRuntime || len(issueIDs) == 0 {
 		return nil
 	}
 	wanted := make(map[string]struct{}, len(issueIDs))
@@ -1494,14 +1505,26 @@ func (d *Daemon) syncUserProjectionMaterializedIssuesForRefresh(ctx context.Cont
 		if refreshMaterializer != nil {
 			return newProjectReadUnavailableError("project read materializer is no longer active during authoritative refresh")
 		}
+		if d.projectReadUserProjectionSync != nil {
+			return d.projectReadUserProjectionSync(ctx, projectID, issueIDs)
+		}
 		return nil
 	}
 	if refreshMaterializer != nil && materializer != refreshMaterializer {
 		return newProjectReadUnavailableError("project read materializer changed during authoritative refresh")
 	}
-	tasks, metadata, recoveryAuthorized := materializer.snapshotIssuesForAuthoritativeRefresh(wanted, attempt)
-	if !strings.HasPrefix(metadata.Health, "healthy") && !recoveryAuthorized {
+	tasks, metadata, refreshAuthorized := materializer.snapshotIssuesForAuthoritativeRefresh(wanted, attempt)
+	if refreshMaterializer != nil && !refreshAuthorized {
+		return newProjectReadUnavailableError("project read refresh ownership changed before user projection sync: %s", metadata.Health)
+	}
+	if refreshMaterializer == nil && !strings.HasPrefix(metadata.Health, "healthy") {
 		return newProjectReadUnavailableError("project read materialization unhealthy: %s", metadata.Health)
+	}
+	if d.projectReadUserProjectionSync != nil {
+		return d.projectReadUserProjectionSync(ctx, projectID, issueIDs)
+	}
+	if d.userStore == nil {
+		return nil
 	}
 	changes := make([]userstore.ProjectDeltaChange, 0, len(wanted))
 	for i := range tasks {
