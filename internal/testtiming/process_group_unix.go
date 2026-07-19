@@ -84,7 +84,7 @@ func startProcessGroupAnchor(lifecycle *processGroupLifecycle) error {
 		return fmt.Errorf("create process-group anchor control pipe: %w", err)
 	}
 	anchor := exec.Command(os.Args[0])
-	anchor.Env = append(os.Environ(), processGroupAnchorEnvironment+"=1")
+	anchor.Env = withEnv(os.Environ(), processGroupAnchorEnvironment, "1")
 	anchor.Stdin = controlReader
 	anchor.ExtraFiles = []*os.File{lifecycle.writer}
 	anchor.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
