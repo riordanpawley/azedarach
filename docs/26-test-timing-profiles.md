@@ -66,7 +66,11 @@ through a clone variable. The `migration-clone` profile snapshots every supplied
 clone independently for each package before starting package processes, then
 runs those processes in parallel with package-local HOME, config, and default
 database roots. Its status line and v5 report identify the
-`package-isolated-parallel` mode and the exact package-local clone paths.
+`package-isolated-parallel` mode and the exact package-local clone paths. Clone
+authority mappings fail closed for unknown packages, invalid authorities, and
+configured user or project sources without a consuming package. The focused
+contract reproduces the former shared-identity `SQLITE_BUSY` failure before
+proving that concurrent private snapshots succeed without changing the source.
 
 ## Commands
 
@@ -139,11 +143,13 @@ or a budget failure. Do not replace it with a shell pipeline that loses earlier
 failures or reports only the last failing package.
 
 The command root handles interrupt and SIGTERM through context cancellation.
-Managed Go commands run in dedicated process groups; cancellation and partial
-startup kill the complete group. An inherited lifecycle pipe then blocks on one
-OS read until the command and its descendants close their writers; there is no
-process-table polling. Temporary private database roots are removed only after
-that lifecycle completes, and cleanup failures are returned rather than ignored.
+Managed Go commands join a runner-owned anchor process group. When the direct
+leader exits, the still-live anchor preserves the exact group identity while
+the runner kills surviving descendants, drains lifecycle and output pipes, and
+reaps the anchor. The same sequence handles cancellation and partial startup;
+there is no process-table polling. Temporary private database roots are removed
+only after supervision completes, and cleanup failures are returned rather than
+ignored.
 
 ## Profile semantics
 

@@ -42,6 +42,9 @@ func preparePackageCloneEnvironments(ctx context.Context, profile Profile, root,
 		Mode:       cloneIsolationPackageIsolatedParallel,
 		Configured: userSource != "" || len(projectSources) > 0,
 	}
+	if err := validatePackageCloneAuthorities(profile, userSource != "", len(projectSources) > 0); err != nil {
+		return nil, evidence, err
+	}
 	environments := make([]packageEnvironment, 0, len(profile.Packages))
 	for packageIndex, packageName := range profile.Packages {
 		authorities := profile.PackageCloneAuthorities[packageName]
@@ -74,11 +77,42 @@ func preparePackageCloneEnvironments(ctx context.Context, profile Profile, root,
 			identity.ProjectDBs = projectDestinations
 		}
 		environments = append(environments, packageEnvironment{Package: packageName, Env: env})
-		if evidence.Configured {
+		if identity.UserDB != "" || len(identity.ProjectDBs) > 0 {
 			evidence.Packages = append(evidence.Packages, identity)
 		}
 	}
 	return environments, evidence, nil
+}
+
+func validatePackageCloneAuthorities(profile Profile, userConfigured, projectConfigured bool) error {
+	packages := make(map[string]struct{}, len(profile.Packages))
+	for _, packageName := range profile.Packages {
+		packages[packageName] = struct{}{}
+	}
+	consumers := map[CloneAuthority]int{}
+	for packageName, authorities := range profile.PackageCloneAuthorities {
+		if _, listed := packages[packageName]; !listed {
+			return fmt.Errorf("clone authority mapping names unknown package %q", packageName)
+		}
+		seen := map[CloneAuthority]struct{}{}
+		for _, authority := range authorities {
+			if authority != CloneAuthorityUser && authority != CloneAuthorityProject {
+				return fmt.Errorf("clone authority mapping for %s contains invalid authority %q", packageName, authority)
+			}
+			if _, duplicate := seen[authority]; duplicate {
+				return fmt.Errorf("clone authority mapping for %s repeats authority %q", packageName, authority)
+			}
+			seen[authority] = struct{}{}
+			consumers[authority]++
+		}
+	}
+	if userConfigured && consumers[CloneAuthorityUser] == 0 {
+		return fmt.Errorf("configured user clone authority has no consuming package")
+	}
+	if projectConfigured && consumers[CloneAuthorityProject] == 0 {
+		return fmt.Errorf("configured project clone authority has no consuming package")
+	}
+	return nil
 }
 
 func environmentValue(env []string, key string) string {
