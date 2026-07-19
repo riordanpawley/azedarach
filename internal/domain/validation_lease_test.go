@@ -36,7 +36,9 @@ func TestValidationReviewEvidenceRequiresFullAuthorityIdentity(t *testing.T) {
 	a := validValidationAcquire()
 	a.Scope, a.Purpose, a.IssueID = ValidationScopeTicket, ValidationPurposeReviewEvidence, "dmm"
 	require.ErrorContains(t, a.Validate(), "reviewer identity")
-	a.ReviewerID, a.ReviewEpochEventID = "reviewer", 42
+	a.ReviewerID, a.ReviewerKind, a.ReviewEpochEventID = "reviewer", ReviewerOwnerKindOrchestrator, 42
+	a.PublicationOperationID, a.AcceptedReviewEventID = "publication", 43
+	a.AcceptedPublicationOperationID = "publication"
 	assert.NoError(t, a.Validate())
 }
 

@@ -30,6 +30,7 @@ var orderedMigrations = []migration{
 	{id: "daemon_operations_0006_publication_validation_priority", path: "migrations/0006_publication_validation_priority.sql"},
 	{id: "daemon_operations_0007_layered_publication_evidence", path: "migrations/0007_layered_publication_evidence.sql"},
 	{id: "daemon_operations_0008_validation_priority_fairness", path: "migrations/0008_validation_priority_fairness.sql"},
+	{id: "daemon_operations_0009_publication_review_authority", path: "migrations/0009_publication_review_authority.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -41,6 +42,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "daemon_operations_0006_publication_validation_priority", Path: "migrations/0006_publication_validation_priority.sql", Checksum: "bbbf9fd51c2d9289a295a6aeb7427d65d04d3d3a897cc995d2d91ea4577713fd"},
 	{ID: "daemon_operations_0007_layered_publication_evidence", Path: "migrations/0007_layered_publication_evidence.sql", Checksum: "59182365b3d9dd89464e1fdb2f0e5818d6d91bbcf0625bcfd4c3898f888a10ef"},
 	{ID: "daemon_operations_0008_validation_priority_fairness", Path: "migrations/0008_validation_priority_fairness.sql", Checksum: "9f6a4ae4af768b433880a310b1d4c5bb79453224c1c93bd9c7b7696d4cf476bf"},
+	{ID: "daemon_operations_0009_publication_review_authority", Path: "migrations/0009_publication_review_authority.sql", Checksum: "645af760b30317d26d72ddcccf7a3a5934c009923c8f77260a503e48a39565b2"},
 }
 
 const migrationArtifactAuthority sqlitemigration.Authority = "project.daemon_operations"
@@ -103,6 +105,20 @@ func validatePublicationQueueSchema(ctx context.Context, db *sql.DB) error {
 	canonicalDB.SetMaxOpenConns(1)
 	if _, err = canonicalDB.ExecContext(ctx, artifact); err != nil {
 		return fmt.Errorf("build canonical publication queue schema: %w", err)
+	}
+	if _, err = canonicalDB.ExecContext(ctx, `
+		CREATE TABLE issue_observation_events(id INTEGER PRIMARY KEY, issue_id TEXT, event_type TEXT, source TEXT, source_command TEXT, payload_json TEXT);
+		CREATE TABLE issue_coordination_leases(issue_id TEXT, purpose TEXT, owner_id TEXT, owner_kind TEXT);
+		CREATE TABLE daemon_validation_requests(request_id TEXT PRIMARY KEY);
+	`); err != nil {
+		return fmt.Errorf("build canonical publication authority dependencies: %w", err)
+	}
+	authorityArtifact, err := loadMigrationSQL("migrations/0009_publication_review_authority.sql")
+	if err != nil {
+		return fmt.Errorf("load canonical publication review authority schema: %w", err)
+	}
+	if _, err = canonicalDB.ExecContext(ctx, authorityArtifact); err != nil {
+		return fmt.Errorf("build canonical publication review authority schema: %w", err)
 	}
 	for _, object := range []struct{ typeName, name string }{
 		{"table", "daemon_publication_operations"},
@@ -191,6 +207,10 @@ func validateValidationLeaseSchema(ctx context.Context, db *sql.DB) error {
 			"source_revision text not null",
 			"reviewer_id text not null default ''",
 			"review_epoch_event_id integer not null default 0 check (review_epoch_event_id >= 0)",
+			"reviewer_kind text not null default ''",
+			"publication_operation_id text not null default ''",
+			"accepted_review_event_id integer not null default 0 check (accepted_review_event_id >= 0)",
+			"accepted_publication_operation_id text not null default ''",
 			"scope text not null default 'ticket' check (scope in ('repository','ticket'))",
 			"purpose text not null default 'legacy' check (purpose in ('legacy','capacity','development','push_gate','review_evidence'))",
 			"execution text not null default 'executed' check (execution in ('executed','joined','reused','skipped'))",

@@ -1330,8 +1330,18 @@ func TestRealProcessProfileTicketCandidateUsesDurableIdentity(t *testing.T) {
 		test "$AZEDARACH_CANDIDATE_HEAD" = "$(git rev-parse HEAD)"
 		test "$AZEDARACH_TICKET_ID" = consumer-42
 		test "$AZEDARACH_ISSUE_ID" = consumer-42
+		test "$AZEDARACH_REVIEWER_ID" = reviewer
+		test "$AZEDARACH_REVIEWER_KIND" = orchestrator
+		test "$AZEDARACH_REVIEW_EPOCH_EVENT_ID" = 41
+		test "$AZEDARACH_PUBLICATION_OPERATION_ID" = publication-retry
+		test "$AZEDARACH_ACCEPTED_REVIEW_EVENT_ID" = 42
+		test "$AZEDARACH_ACCEPTED_PUBLICATION_OPERATION_ID" = publication-root
 	`)
 	ctx = WithCandidateValidationTicket(ctx, naming.TicketID("consumer-42"))
+	ctx = WithCandidateValidationReviewAuthority(ctx, CandidateValidationReviewAuthority{
+		ReviewerID: "reviewer", ReviewerKind: "orchestrator", ReviewEpochEventID: 41,
+		PublicationOperationID: "publication-retry", AcceptedReviewEventID: 42, AcceptedPublicationOperationID: "publication-root",
+	})
 	result, err := client.MergeCleanlyTransactional(ctx, repo, "feature")
 	if err != nil {
 		t.Fatalf("ticket candidate merge: %v", err)

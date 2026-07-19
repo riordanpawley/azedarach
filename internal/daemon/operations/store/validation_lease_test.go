@@ -540,7 +540,7 @@ func TestLatestAggregateValidationRetainsMachineEvidence(t *testing.T) {
 	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
 	t.Cleanup(func() { _ = store.Close() })
 	now := time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC)
-	_, err := store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "aggregate", LeaseToken: testValidationToken, ProjectID: "project", IssueID: "dkg", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence, Profile: "cold", Command: "just test", SourceRevision: "abc123", ReviewerID: "reviewer", ReviewEpochEventID: 1, TTL: time.Minute}, now)
+	_, err := store.AcquireValidation(ctx, domain.ValidationAcquire{RequestID: "aggregate", LeaseToken: testValidationToken, ProjectID: "project", IssueID: "dkg", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence, Profile: "cold", Command: "just test", SourceRevision: "abc123", ReviewerID: "reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: 1, PublicationOperationID: "publication", AcceptedReviewEventID: 2, AcceptedPublicationOperationID: "publication", TTL: time.Minute}, now)
 	require.NoError(t, err)
 	want := domain.ValidationEvidence{Held: true, RequestID: "aggregate", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence, Execution: domain.ValidationExecutionExecuted, AuthoritativeRequestID: "aggregate", Profile: "cold", SourceRevision: "abc123", Present: true, ReportPath: ".tmp/report.json", FailureSummary: "FAIL make-verify::consumer-check\nexact consumer failure", OverlapDetected: true, ExternalGoProcesses: 3}
 	_, err = store.FinishValidation(ctx, "aggregate", testValidationToken, domain.ValidationRequestCompleted, "passed", want, now.Add(time.Second), time.Minute)
@@ -735,7 +735,11 @@ func TestValidationLeaseCompatibilityPolicyAllowsReviewEvidenceToSatisfyReposito
 	review := reusableValidationAcquire("review")
 	review.Purpose = domain.ValidationPurposeReviewEvidence
 	review.ReviewerID = "reviewer"
+	review.ReviewerKind = domain.ReviewerOwnerKindOrchestrator
 	review.ReviewEpochEventID = 42
+	review.PublicationOperationID = "publication"
+	review.AcceptedReviewEventID = 43
+	review.AcceptedPublicationOperationID = "publication"
 	source, err := store.AcquireValidation(ctx, review, now)
 	require.NoError(t, err)
 	reviewEvidence := validationEvidenceFor(source)

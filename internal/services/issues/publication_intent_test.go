@@ -14,6 +14,123 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func TestReviewPublicationAuthorityFencesTypedOwnerAndExactEpoch(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".azedarach"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(repo, nil)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	queue := operationstore.New(repo, nil)
+	t.Cleanup(func() { _ = queue.Close() })
+	if _, err := queue.PublicationOperations(ctx, "project", "", false); err != nil {
+		t.Fatal(err)
+	}
+	issueID, err := client.Create(ctx, CreateTaskParams{Title: "typed authority", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	accept := func(intent, operationID, ownerID string) (ReviewAdmissionPin, AcceptedReviewPublicationCommit) {
+		t.Helper()
+		admission, err := client.CaptureReviewAdmissionPin(ctx, issueID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{
+			OwnerID: ownerID, OwnerKind: domain.ReviewerOwnerKindOrchestrator, Purpose: domain.CoordinationLeaseReview,
+			ExpectedReviewAdmission: &admission, ReviewSourceOID: "source",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		reviewer, err := domain.CanonicalReviewerIdentity(ownerID, domain.ReviewerOwnerKindOrchestrator)
+		if err != nil {
+			t.Fatal(err)
+		}
+		operation := domain.PublicationOperation{
+			OperationID: operationID, ProjectID: "project", IssueID: issueID, IntentKey: intent,
+			RequestFingerprint: "fingerprint-" + intent, ActorID: reviewer.OwnerID, ActorKind: reviewer.OwnerKind,
+			ReviewEpochEventID: admission.ReviewEpochEventID, TargetID: "base", TargetBranch: "main",
+			SourceRevision: "source", BaseRevision: "base", ValidationCommand: "go test ./...", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
+		}
+		receipt, err := client.AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx, issueID, IssueObservationEventParams{
+			Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept",
+			Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "intent_key": intent, "request_fingerprint": operation.RequestFingerprint},
+		}, operation, "candidate-"+intent, admission, "", ownerID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return admission, receipt
+	}
+
+	epochA, acceptedA := accept("accept-a", "publication-a", "Reviewer")
+	authorityA := ReviewPublicationAuthority{
+		Reviewer:           domain.ReviewerIdentity{OwnerID: "reviewer", OwnerKind: domain.ReviewerOwnerKindOrchestrator},
+		ReviewEpochEventID: epochA.ReviewEpochEventID, AcceptedReviewEventID: acceptedA.EventID, PublicationOperationID: acceptedA.PublicationOperationID,
+		AcceptedPublicationOperationID: acceptedA.PublicationOperationID,
+	}
+	if err := client.BeginReviewPublicationClose(ctx, issueID, authorityA, nil); err != nil {
+		t.Fatalf("canonical typed authority: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", filepath.Join(repo, ".azedarach", "azedarach.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`UPDATE issue_coordination_leases SET owner_kind='agent' WHERE issue_id=? AND purpose='review'`, issueID); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.BeginReviewPublicationClose(ctx, issueID, authorityA, nil); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("same owner_id with agent kind error = %v", err)
+	}
+	if _, err := client.CloseWithRuntimeReviewPublicationAuthority(ctx, "project", issueID, domain.StatusDone, authorityA, nil); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("wrong typed close error = %v", err)
+	}
+	var kind string
+	if err := db.QueryRow(`SELECT owner_kind FROM issue_coordination_leases WHERE issue_id=? AND purpose='review'`, issueID).Scan(&kind); err != nil || kind != "agent" {
+		t.Fatalf("rejected close consumed wrong row: kind=%q err=%v", kind, err)
+	}
+	if _, err := db.Exec(`UPDATE issue_coordination_leases SET owner_kind='orchestrator' WHERE issue_id=? AND purpose='review'`, issueID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE issue_observation_events SET payload_json=json_set(payload_json,'$.actor_kind','agent') WHERE id=?`, acceptedA.EventID); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.BeginReviewPublicationClose(ctx, issueID, authorityA, nil); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("forged accepted actor_kind error = %v", err)
+	}
+	if _, err := db.Exec(`UPDATE issue_observation_events SET payload_json=json_set(payload_json,'$.actor_kind','orchestrator') WHERE id=?`, acceptedA.EventID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.Exec(`UPDATE daemon_publication_operations SET state='canceled' WHERE operation_id=?`, acceptedA.PublicationOperationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ReleaseOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer", Purpose: domain.CoordinationLeaseReview}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusInProgress); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusInReview); err != nil {
+		t.Fatal(err)
+	}
+	epochB, acceptedB := accept("accept-b", "publication-b", "reviewer")
+	authorityB := ReviewPublicationAuthority{
+		Reviewer: authorityA.Reviewer, ReviewEpochEventID: epochB.ReviewEpochEventID,
+		AcceptedReviewEventID: acceptedB.EventID, PublicationOperationID: acceptedB.PublicationOperationID,
+		AcceptedPublicationOperationID: acceptedB.PublicationOperationID,
+	}
+	if err := client.BeginReviewPublicationClose(ctx, issueID, authorityA, nil); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("stale epoch A authority error = %v", err)
+	}
+	if err := client.BeginReviewPublicationClose(ctx, issueID, authorityB, nil); err != nil {
+		t.Fatalf("current epoch B authority: %v", err)
+	}
+}
+
 func TestAcceptedReviewAndPublicationRejectsReplacedEpochBeforeAnySideEffect(t *testing.T) {
 	for _, rooted := range []bool{false, true} {
 		name := "project"
@@ -72,7 +189,7 @@ func TestAcceptedReviewAndPublicationRejectsReplacedEpochBeforeAnySideEffect(t *
 			}
 			operation := domain.PublicationOperation{
 				OperationID: "publication-replaced-" + name, ProjectID: "project", IssueID: issueID, IntentKey: "accept-replaced",
-				RequestFingerprint: "fingerprint", ActorID: "reviewer", TargetID: "base", TargetBranch: "main",
+				RequestFingerprint: "fingerprint", ActorID: "reviewer", ActorKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: stale.ReviewEpochEventID, TargetID: "base", TargetBranch: "main",
 				SourceRevision: "source", BaseRevision: "base", PolicyVersion: "policy", EnvironmentFingerprint: "toolchain",
 				ValidationCommand: "npm test", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
 			}
@@ -130,7 +247,7 @@ func TestAcceptedReviewAndPublicationReturnsCommittedReceiptAfterCallerCancellat
 	}
 	operation := domain.PublicationOperation{
 		OperationID: "publication-cancelled-receipt", ProjectID: "project", IssueID: issueID, IntentKey: "accept-cancelled-receipt",
-		RequestFingerprint: "fingerprint", ActorID: "reviewer", TargetID: "base", TargetBranch: "main",
+		RequestFingerprint: "fingerprint", ActorID: "reviewer", ActorKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: admission.ReviewEpochEventID, TargetID: "base", TargetBranch: "main",
 		SourceRevision: "source", BaseRevision: "base", PolicyVersion: "policy", EnvironmentFingerprint: "toolchain",
 		ValidationCommand: "npm test", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
 	}
@@ -205,7 +322,7 @@ func TestAcceptedReviewPublicationFencePreservesReviewerIdentity(t *testing.T) {
 	}
 	operation := domain.PublicationOperation{
 		OperationID: "publication-reviewer-fence", ProjectID: "project", IssueID: issueID, IntentKey: "accept-reviewer-fence",
-		RequestFingerprint: "fingerprint", ActorID: "reviewer", TargetID: "base", TargetBranch: "main",
+		RequestFingerprint: "fingerprint", ActorID: "reviewer", ActorKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: admission.ReviewEpochEventID, TargetID: "base", TargetBranch: "main",
 		SourceRevision: "source", BaseRevision: "base", PolicyVersion: "policy", EnvironmentFingerprint: "toolchain",
 		ValidationCommand: "make verify", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
 	}
@@ -331,7 +448,7 @@ func TestAcceptedReviewAndPublicationIntentCommitAtomically(t *testing.T) {
 	}
 	operation := domain.PublicationOperation{
 		OperationID: "publication-atomic", ProjectID: "project", IssueID: task, IntentKey: "accept-1",
-		RequestFingerprint: "fingerprint", ActorID: "reviewer", TargetID: "base", TargetBranch: "main",
+		RequestFingerprint: "fingerprint", ActorID: "reviewer", ActorKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: 1, TargetID: "base", TargetBranch: "main",
 		SourceRevision: "source", BaseRevision: "base", PolicyVersion: "policy", EnvironmentFingerprint: "toolchain",
 		ValidationCommand: "npm test", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
 	}
@@ -388,7 +505,7 @@ func TestAcceptedReviewAndPublicationCoalescesCanonicalOperation(t *testing.T) {
 	}
 	first := domain.PublicationOperation{
 		OperationID: "publication-first", ProjectID: "project", IssueID: task, IntentKey: "accept-1",
-		RequestFingerprint: "fingerprint", ActorID: "reviewer", TargetID: "base", TargetBranch: "main",
+		RequestFingerprint: "fingerprint", ActorID: "reviewer", ActorKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: 1, TargetID: "base", TargetBranch: "main",
 		SourceRevision: "source", BaseRevision: "base", PolicyVersion: "policy", EnvironmentFingerprint: "toolchain",
 		ValidationCommand: "npm test", EvidenceDigest: "evidence", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
 	}
@@ -402,8 +519,6 @@ func TestAcceptedReviewAndPublicationCoalescesCanonicalOperation(t *testing.T) {
 		t.Fatalf("first canonical publication = (%q,%v)", firstReceipt.PublicationOperationID, err)
 	}
 	second := first
-	second.OperationID = "publication-second"
-	second.IntentKey = "accept-2"
 	receipt, err := client.appendAcceptedReviewAndPublication(ctx, task, params(second), second, "candidate", nil, "", "")
 	if err != nil {
 		t.Fatal(err)
@@ -412,7 +527,7 @@ func TestAcceptedReviewAndPublicationCoalescesCanonicalOperation(t *testing.T) {
 		t.Fatalf("coalesced publication receipt = %+v", receipt)
 	}
 	events, err := client.ListIssueObservationEvents(ctx, task, IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
-	if err != nil || len(events) != 2 || events[0].Payload["publication_operation_id"] != first.OperationID || events[1].Payload["publication_operation_id"] != first.OperationID {
+	if err != nil || len(events) != 1 || events[0].Payload["publication_operation_id"] != first.OperationID {
 		t.Fatalf("coalesced publication events = (%+v,%v)", events, err)
 	}
 	operations, err := queueStore.PublicationOperations(ctx, "project", task, false)
@@ -442,7 +557,7 @@ func TestAcceptedReviewAndPublicationConcurrentClientsCoalesceOneExecution(t *te
 	operation := func(id, intent string) domain.PublicationOperation {
 		return domain.PublicationOperation{
 			OperationID: id, ProjectID: "project", IssueID: task, IntentKey: intent,
-			RequestFingerprint: "fingerprint", ActorID: "reviewer", TargetID: "base", TargetBranch: "main",
+			RequestFingerprint: "fingerprint", ActorID: "reviewer", ActorKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: 1, TargetID: "base", TargetBranch: "main",
 			SourceRevision: "source", BaseRevision: "base", PolicyVersion: "policy", EnvironmentFingerprint: "toolchain",
 			ValidationCommand: "npm test", EvidenceDigest: "evidence", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
 		}
@@ -453,11 +568,11 @@ func TestAcceptedReviewAndPublicationConcurrentClientsCoalesceOneExecution(t *te
 	}
 	start := make(chan struct{})
 	results := make(chan result, 2)
-	for index, client := range []*Client{firstClient, secondClient} {
-		op := operation([]string{"publication-concurrent-1", "publication-concurrent-2"}[index], []string{"accept-concurrent-1", "accept-concurrent-2"}[index])
+	for _, client := range []*Client{firstClient, secondClient} {
+		op := operation("publication-concurrent", "accept-concurrent")
 		go func(client *Client, op domain.PublicationOperation) {
 			<-start
-			params := IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "test", Payload: map[string]any{
+			params := IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{
 				"outcome": string(domain.ReviewOutcomeAccepted), "intent_key": op.IntentKey, "request_fingerprint": op.RequestFingerprint,
 			}}
 			receipt, appendErr := client.appendAcceptedReviewAndPublication(ctx, task, params, op, "concurrent-candidate", nil, "", "")
@@ -474,7 +589,7 @@ func TestAcceptedReviewAndPublicationConcurrentClientsCoalesceOneExecution(t *te
 		t.Fatalf("concurrent operations = (%+v,%v)", operations, err)
 	}
 	events, err := firstClient.ListIssueObservationEvents(ctx, task, IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
-	if err != nil || len(events) != 2 {
+	if err != nil || len(events) != 1 {
 		t.Fatalf("concurrent accepted review events = (%+v,%v)", events, err)
 	}
 }

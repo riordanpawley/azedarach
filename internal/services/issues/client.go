@@ -3366,6 +3366,46 @@ func (c *Client) CloseWithRuntimeReviewEvidenceFence(ctx context.Context, projec
 	return c.GetWithRuntime(ctx, projectID, id)
 }
 
+// CloseWithRuntimeReviewPublicationAuthority atomically revalidates and
+// consumes the exact typed review/publication authority with terminal state.
+func (c *Client) CloseWithRuntimeReviewPublicationAuthority(ctx context.Context, projectID, id string, status domain.Status, authority ReviewPublicationAuthority, pin *ReviewEvidencePin) (domain.Task, error) {
+	nextState, err := issueStateFromStatus(status)
+	if err != nil {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), err)
+	}
+	if nextState.Workflow() != domain.IssueWorkflowClosed {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), fmt.Errorf("status %s is not terminal", status))
+	}
+	if err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			return c.updateLockedWithPrecondition(ctx, id, status, true, func(ctx context.Context, tx *sql.Tx) error {
+				if pin != nil {
+					if err := validateTerminalReviewEvidencePin(ctx, tx, id, *pin); err != nil {
+						return err
+					}
+				}
+				if err := validateReviewPublicationAuthority(ctx, tx, id, authority); err != nil {
+					return err
+				}
+				result, err := tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases
+					WHERE issue_id=? AND purpose=? AND LOWER(owner_id)=? AND owner_kind=?`,
+					strings.TrimSpace(id), domain.CoordinationLeaseReview, strings.ToLower(strings.TrimSpace(authority.Reviewer.OwnerID)), authority.Reviewer.OwnerKind)
+				if err != nil {
+					return err
+				}
+				removed, _ := result.RowsAffected()
+				if removed != 1 {
+					return fmt.Errorf("%w: exact typed reviewer lease is missing or changed", domain.ErrConflict)
+				}
+				return nil
+			})
+		})
+	}); err != nil {
+		return domain.Task{}, err
+	}
+	return c.GetWithRuntime(ctx, projectID, id)
+}
+
 func consumeAcceptedReviewerLease(ctx context.Context, tx *sql.Tx, issueID, reviewerID string) error {
 	result, err := tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases
 		WHERE issue_id=? AND purpose=? AND LOWER(owner_id)=LOWER(?)`, strings.TrimSpace(issueID), domain.CoordinationLeaseReview, strings.TrimSpace(reviewerID))

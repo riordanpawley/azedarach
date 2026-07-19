@@ -12337,7 +12337,7 @@ func reviewValidationAcquire(requestID, token, projectID, issueID, revision stri
 		RequestID: requestID, LeaseToken: token, ProjectID: projectID, IssueID: issueID,
 		Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence,
 		IsolationMode: "repository-family", EnvironmentFingerprint: "test-toolchain", Override: domain.ValidationOverrideNone,
-		Profile: "cold", Command: "just test", SourceRevision: revision, ReviewerID: "reviewer", ReviewEpochEventID: 1, TTL: time.Minute,
+		Profile: "cold", Command: "just test", SourceRevision: revision, ReviewerID: "reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: 1, PublicationOperationID: "publication", AcceptedReviewEventID: 2, AcceptedPublicationOperationID: "publication", TTL: time.Minute,
 	}
 }
 

@@ -90,16 +90,25 @@ func TestValidationAcquireBindsReviewAssignmentToDurableLease(t *testing.T) {
 	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: "assigned-reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview, ExpectedReviewAdmission: &admission, ReviewSourceOID: "candidate-a"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+	publication := domain.PublicationOperation{
+		OperationID: "publication-validation-authority", ProjectID: "project", IssueID: issueID, IntentKey: "accepted-validation",
+		RequestFingerprint: "fingerprint", ActorID: "assigned-reviewer", ActorKind: domain.ReviewerOwnerKindOrchestrator,
+		ReviewEpochEventID: admission.ReviewEpochEventID, TargetID: "base", TargetBranch: "main", SourceRevision: "candidate-a",
+		BaseRevision: "base", ValidationCommand: "just test", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
+	}
+	queueStore := operationstore.NewAtPath(filepath.Join(repoDir, "issues.db"), nil)
+	t.Cleanup(func() { _ = queueStore.Close() })
+	if _, err := queueStore.PublicationOperations(ctx, "project", "", false); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := client.AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx, issueID, issues.IssueObservationEventParams{
 		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{
-			"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "assigned-reviewer",
+			"outcome": string(domain.ReviewOutcomeAccepted), "intent_key": publication.IntentKey, "request_fingerprint": publication.RequestFingerprint,
 			"reviewed_evidence_source": admission.Evidence.Source, "reviewed_evidence_event_id": admission.Evidence.EventID,
 			"reviewed_evidence_seq": admission.Evidence.Seq, "reviewed_evidence_digest": admission.Evidence.Digest,
 		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := client.BeginReviewEvidenceClose(ctx, issueID, *admission.Evidence, "assigned-reviewer"); err != nil {
+	}, publication, "candidate-a", admission, "", "assigned-reviewer")
+	if err != nil {
 		t.Fatal(err)
 	}
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
@@ -108,7 +117,7 @@ func TestValidationAcquireBindsReviewAssignmentToDurableLease(t *testing.T) {
 
 	acquire := func(requestID, reviewer string) protocol.ResponseEnvelope {
 		t.Helper()
-		body, err := json.Marshal(protocol.ValidationAcquireRequest{RequestID: requestID, LeaseToken: "secret", IssueID: issueID, Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence, IsolationMode: "worktree", EnvironmentFingerprint: "toolchain-a", Override: domain.ValidationOverrideNone, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", ReviewerID: reviewer, TTLSeconds: 30})
+		body, err := json.Marshal(protocol.ValidationAcquireRequest{RequestID: requestID, LeaseToken: "secret", IssueID: issueID, Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence, IsolationMode: "worktree", EnvironmentFingerprint: "toolchain-a", Override: domain.ValidationOverrideNone, Profile: "cold", Command: "just test", SourceRevision: "candidate-a", ReviewerID: reviewer, ReviewerKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: admission.ReviewEpochEventID, PublicationOperationID: receipt.PublicationOperationID, AcceptedReviewEventID: receipt.EventID, AcceptedPublicationOperationID: receipt.PublicationOperationID, TTLSeconds: 30})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -120,7 +129,7 @@ func TestValidationAcquireBindsReviewAssignmentToDurableLease(t *testing.T) {
 	}
 
 	wrong := acquire("wrong-reviewer", "other-reviewer")
-	if wrong.OK || !strings.Contains(wrong.Error.Message, "does not own review lease") {
+	if wrong.OK || !strings.Contains(wrong.Error.Message, "does not own typed review lease") {
 		t.Fatalf("wrong reviewer response = %+v", wrong)
 	}
 	correct := acquire("assigned-reviewer", "assigned-reviewer")
@@ -131,7 +140,7 @@ func TestValidationAcquireBindsReviewAssignmentToDurableLease(t *testing.T) {
 	if err := json.Unmarshal(correct.Body, &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Request.ReviewerID != "assigned-reviewer" || result.Request.ReviewEpochEventID != latestReviewEpochEventID(t, ctx, client, issueID) {
+	if result.Request.ReviewerID != "assigned-reviewer" || result.Request.ReviewerKind != domain.ReviewerOwnerKindOrchestrator || result.Request.ReviewEpochEventID != latestReviewEpochEventID(t, ctx, client, issueID) || result.Request.PublicationOperationID != receipt.PublicationOperationID || result.Request.AcceptedReviewEventID != receipt.EventID {
 		t.Fatalf("durable assignment = %+v", result.Request)
 	}
 }
@@ -243,7 +252,7 @@ func TestPublicationEvidenceCommandsRetainPatchAcrossUnrelatedBaseMovement(t *te
 		RequestID: "review-validation", LeaseToken: "secret", ProjectID: "project", IssueID: issueID,
 		Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence,
 		IsolationMode: "worktree", EnvironmentFingerprint: "node-22", Profile: "consumer-integration", Command: "npm test",
-		SourceRevision: sourceRevision, ReviewerID: "reviewer", ReviewEpochEventID: 1, TTL: time.Minute,
+		SourceRevision: sourceRevision, ReviewerID: "reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: 1, PublicationOperationID: "publication", AcceptedReviewEventID: 2, AcceptedPublicationOperationID: "publication", TTL: time.Minute,
 	}, started)
 	require.NoError(t, err)
 	_, err = runtime.store.FinishValidation(ctx, "review-validation", "secret", domain.ValidationRequestCompleted, "passed", domain.ValidationEvidence{

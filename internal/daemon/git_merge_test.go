@@ -272,7 +272,8 @@ func TestTypedGitMergeRootToBaseRejectsStalePublicationBindingBeforeMutation(t *
 	f.daemon.operationRuntime = runtime
 	operation := domain.PublicationOperation{
 		OperationID: "publication-stale-binding", ProjectID: f.projectID, IssueID: rootID, IntentKey: "accepted-root",
-		RequestFingerprint: "fingerprint", ActorID: "reviewer", TargetID: "base", TargetBranch: "main",
+		RequestFingerprint: "fingerprint", ActorID: "reviewer", ActorKind: domain.ReviewerOwnerKindOrchestrator,
+		ReviewEpochEventID: 1, AcceptedReviewEventID: 2, AcceptedPublicationOperationID: "publication-stale-binding", TargetID: "base", TargetBranch: "main",
 		SourceRevision: sourceOID, BaseRevision: "stale-base", ValidationCommand: "consumer verify", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
 	}
 	store, err := f.daemon.publicationStoreForProject(f.projectID)
@@ -284,7 +285,7 @@ func TestTypedGitMergeRootToBaseRejectsStalePublicationBindingBeforeMutation(t *
 	}
 	if _, err := f.issues.AppendIssueObservationEvent(f.ctx, rootID, issues.IssueObservationEventParams{
 		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
-		Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "intent_key": operation.IntentKey, "request_fingerprint": operation.RequestFingerprint, "reviewed_source_oid": sourceOID, "publication_operation_id": operation.OperationID},
+		Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator, "review_epoch_event_id": operation.ReviewEpochEventID, "intent_key": operation.IntentKey, "request_fingerprint": operation.RequestFingerprint, "reviewed_source_oid": sourceOID, "publication_operation_id": operation.OperationID},
 	}); err != nil {
 		t.Fatal(err)
 	}

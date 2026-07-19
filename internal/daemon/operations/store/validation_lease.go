@@ -107,10 +107,10 @@ func (s *SQLiteStore) AcquireValidation(ctx context.Context, request domain.Vali
 		outcome = "emergency skip: " + request.OverrideReason
 	}
 	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO daemon_validation_requests
-		(request_id,lease_token_hash,project_id,issue_id,issue_priority,priority_bypass_count,class,scope,purpose,execution,authoritative_request_id,compatibility_key,isolation_mode,environment_fingerprint,override_kind,override_actor,override_reason,profile,command,source_revision,reviewer_id,review_epoch_event_id,state,queued_at,heartbeat_at,expires_at,finished_at,outcome,evidence_json)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, request.RequestID, validationTokenHash(request.LeaseToken), request.ProjectID, request.IssueID, request.IssuePriority, 0, request.Class, request.Scope, request.Purpose,
+		(request_id,lease_token_hash,project_id,issue_id,issue_priority,priority_bypass_count,class,scope,purpose,execution,authoritative_request_id,compatibility_key,isolation_mode,environment_fingerprint,override_kind,override_actor,override_reason,profile,command,source_revision,reviewer_id,reviewer_kind,review_epoch_event_id,publication_operation_id,accepted_review_event_id,accepted_publication_operation_id,state,queued_at,heartbeat_at,expires_at,finished_at,outcome,evidence_json)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, request.RequestID, validationTokenHash(request.LeaseToken), request.ProjectID, request.IssueID, request.IssuePriority, 0, request.Class, request.Scope, request.Purpose,
 		execution, authoritativeRequestID, compatibilityKey, request.IsolationMode, request.EnvironmentFingerprint, request.Override, request.OverrideActor, request.OverrideReason,
-		request.Profile, request.Command, request.SourceRevision, request.ReviewerID, request.ReviewEpochEventID, state, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), nullableValidationExpiry(execution, now, request.TTL), finishedAt, outcome, evidenceJSON)
+		request.Profile, request.Command, request.SourceRevision, request.ReviewerID, request.ReviewerKind, request.ReviewEpochEventID, request.PublicationOperationID, request.AcceptedReviewEventID, request.AcceptedPublicationOperationID, state, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), nullableValidationExpiry(execution, now, request.TTL), finishedAt, outcome, evidenceJSON)
 	if err != nil {
 		return domain.ValidationRequest{}, fmt.Errorf("queue validation request: %w", err)
 	}
@@ -121,7 +121,7 @@ func (s *SQLiteStore) AcquireValidation(ctx context.Context, request domain.Vali
 	if err := authenticateValidationRequestTx(ctx, tx, request.RequestID, request.LeaseToken); err != nil {
 		return domain.ValidationRequest{}, err
 	}
-	if current.ProjectID != request.ProjectID || current.IssueID != request.IssueID || current.IssuePriority != request.IssuePriority || current.Class != request.Class || current.Scope != request.Scope || current.Purpose != request.Purpose || current.Profile != request.Profile || current.Command != request.Command || current.SourceRevision != request.SourceRevision || current.ReviewerID != request.ReviewerID || current.ReviewEpochEventID != request.ReviewEpochEventID || current.IsolationMode != request.IsolationMode || current.EnvironmentFingerprint != request.EnvironmentFingerprint || current.Override != request.Override || current.OverrideActor != request.OverrideActor || current.OverrideReason != request.OverrideReason {
+	if current.ProjectID != request.ProjectID || current.IssueID != request.IssueID || current.IssuePriority != request.IssuePriority || current.Class != request.Class || current.Scope != request.Scope || current.Purpose != request.Purpose || current.Profile != request.Profile || current.Command != request.Command || current.SourceRevision != request.SourceRevision || current.ReviewerID != request.ReviewerID || current.ReviewerKind != request.ReviewerKind || current.ReviewEpochEventID != request.ReviewEpochEventID || current.PublicationOperationID != request.PublicationOperationID || current.AcceptedReviewEventID != request.AcceptedReviewEventID || current.AcceptedPublicationOperationID != request.AcceptedPublicationOperationID || current.IsolationMode != request.IsolationMode || current.EnvironmentFingerprint != request.EnvironmentFingerprint || current.Override != request.Override || current.OverrideActor != request.OverrideActor || current.OverrideReason != request.OverrideReason {
 		return domain.ValidationRequest{}, fmt.Errorf("validation request id %s already exists with different identity", request.RequestID)
 	}
 	if current.State == domain.ValidationRequestQueued {
@@ -666,7 +666,7 @@ func activateValidationRequestsTx(ctx context.Context, tx *sql.Tx, projectID str
 
 const validationAggregateSharedBypassLimit = 1
 
-const validationSelect = `SELECT sequence,request_id,project_id,issue_id,issue_priority,priority_bypass_count,class,scope,purpose,execution,authoritative_request_id,compatibility_key,isolation_mode,environment_fingerprint,override_kind,override_actor,override_reason,profile,command,source_revision,reviewer_id,review_epoch_event_id,state,queued_at,started_at,heartbeat_at,expires_at,finished_at,outcome,evidence_json FROM daemon_validation_requests`
+const validationSelect = `SELECT sequence,request_id,project_id,issue_id,issue_priority,priority_bypass_count,class,scope,purpose,execution,authoritative_request_id,compatibility_key,isolation_mode,environment_fingerprint,override_kind,override_actor,override_reason,profile,command,source_revision,reviewer_id,reviewer_kind,review_epoch_event_id,publication_operation_id,accepted_review_event_id,accepted_publication_operation_id,state,queued_at,started_at,heartbeat_at,expires_at,finished_at,outcome,evidence_json FROM daemon_validation_requests`
 
 type validationScanner interface{ Scan(...any) error }
 
@@ -702,7 +702,7 @@ func scanValidationRequest(scanner validationScanner) (domain.ValidationRequest,
 	var queued string
 	var started, heartbeat, expires, finished sql.NullString
 	var evidenceJSON string
-	if err := scanner.Scan(&request.Sequence, &request.RequestID, &request.ProjectID, &request.IssueID, &request.IssuePriority, &request.PriorityBypassCount, &request.Class, &request.Scope, &request.Purpose, &request.Execution, &request.AuthoritativeRequestID, &request.CompatibilityKey, &request.IsolationMode, &request.EnvironmentFingerprint, &request.Override, &request.OverrideActor, &request.OverrideReason, &request.Profile, &request.Command, &request.SourceRevision, &request.ReviewerID, &request.ReviewEpochEventID, &request.State, &queued, &started, &heartbeat, &expires, &finished, &request.Outcome, &evidenceJSON); err != nil {
+	if err := scanner.Scan(&request.Sequence, &request.RequestID, &request.ProjectID, &request.IssueID, &request.IssuePriority, &request.PriorityBypassCount, &request.Class, &request.Scope, &request.Purpose, &request.Execution, &request.AuthoritativeRequestID, &request.CompatibilityKey, &request.IsolationMode, &request.EnvironmentFingerprint, &request.Override, &request.OverrideActor, &request.OverrideReason, &request.Profile, &request.Command, &request.SourceRevision, &request.ReviewerID, &request.ReviewerKind, &request.ReviewEpochEventID, &request.PublicationOperationID, &request.AcceptedReviewEventID, &request.AcceptedPublicationOperationID, &request.State, &queued, &started, &heartbeat, &expires, &finished, &request.Outcome, &evidenceJSON); err != nil {
 		return request, err
 	}
 	if err := json.Unmarshal([]byte(evidenceJSON), &request.Evidence); err != nil {
