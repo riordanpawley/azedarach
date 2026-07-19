@@ -667,7 +667,7 @@ func (c *Client) ListPaneInfosForSession(ctx context.Context, session string) ([
 		return nil, fmt.Errorf("tmux session is required")
 	}
 	c.logger.Debug("listing tmux panes for session", "session", session)
-	out, err := c.runner.Run(ctx, "list-panes", "-t", session, "-F", "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}")
+	out, err := c.runner.Run(ctx, "list-panes", "-s", "-t", session, "-F", "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}")
 	if isTmuxTargetMissingError(err) {
 		return []PaneInfo{}, nil
 	}

@@ -686,7 +686,7 @@ func TestClient_ListPaneInfosForSessionTargetsOnlyRequestedSession(t *testing.T)
 	panes, err := client.ListPaneInfosForSession(context.Background(), "az-1")
 	require.NoError(t, err)
 	require.Equal(t, []PaneInfo{{SessionName: "az-1", PaneID: "7", PanePID: 123, CurrentCommand: "codex"}}, panes)
-	require.Equal(t, [][]string{{"list-panes", "-t", "az-1", "-F", "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}"}}, runner.commands)
+	require.Equal(t, [][]string{{"list-panes", "-s", "-t", "az-1", "-F", "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}"}}, runner.commands)
 }
 
 func TestClient_ListPaneInfosForSessionReturnsEmptyWhenTargetDisappears(t *testing.T) {
