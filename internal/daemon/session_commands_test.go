@@ -1637,7 +1637,7 @@ func acknowledgeManagedAgentOnInitialLaunch(t *testing.T, d *Daemon, runner *ses
 		if panePID == 0 {
 			panePID = 123
 		}
-		if signal := regexp.MustCompile(`'([^']*advisor-bootstrap-[^']+\.signal)'`).FindStringSubmatch(script); len(signal) == 2 {
+		if bundle := regexp.MustCompile(`'([^']*advisor-bootstrap-[^'/]+)/(?:claude-settings\.json|codex-home|work)'`).FindStringSubmatch(script); len(bundle) == 2 {
 			runner.currentCommand = strings.ToLower(strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool))
 			if runner.currentCommand == "" {
 				runner.currentCommand = "claude"
@@ -1646,7 +1646,8 @@ func acknowledgeManagedAgentOnInitialLaunch(t *testing.T, d *Daemon, runner *ses
 			if panes := runner.panes[sessionID]; len(panes) > 0 {
 				paneID = panes[0]
 			}
-			if err := os.WriteFile(signal[1], []byte(fmt.Sprintf("%s\t%s\t%d\n", incarnation[1], paneID, panePID)), 0o600); err != nil {
+			signalPath := filepath.Join(bundle[1], "ready.signal")
+			if err := os.WriteFile(signalPath, []byte(fmt.Sprintf("%s\t%s\t%d\n", incarnation[1], paneID, panePID)), 0o600); err != nil {
 				t.Errorf("write advisor bootstrap signal: %v", err)
 			}
 			return

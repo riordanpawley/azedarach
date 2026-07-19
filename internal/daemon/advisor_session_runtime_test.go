@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -177,13 +178,25 @@ func TestAdvisorInitialLaunchRejectsImmediateExitAndRetries(t *testing.T) {
 	}
 	runner := newSessionStartTmuxRunner()
 	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore()}
-	runner.onNewSession = func(sessionID string) { runner.sessionsWithoutPanes[sessionID] = true }
-	if result, err := d.ensureAdvisorSessionRuntime(ctx, protocol.DefaultProjectID, request); err == nil {
+	failureCtx, cancelFailure := context.WithCancel(ctx)
+	runner.onNewSession = func(sessionID string) {
+		runner.sessionsWithoutPanes[sessionID] = true
+		cancelFailure()
+	}
+	if result, err := d.ensureAdvisorSessionRuntime(failureCtx, protocol.DefaultProjectID, request); err == nil {
 		t.Fatalf("immediate-exit advisor result=%+v, want error", result)
 	}
 	sessionID := advisorSessionID(request.ID)
 	if runner.sessions[sessionID] {
 		t.Fatalf("immediate-exit advisor session %s survived", sessionID)
+	}
+	store := d.sessionRuntimeStateStore(protocol.DefaultProjectID)
+	if _, found, err := store.GetManagedAgentIdentity(ctx, d.canonicalProjectID(protocol.DefaultProjectID), sessionID, "agent"); err != nil || found {
+		t.Fatalf("pre-readiness failure recorded advisor identity: found=%t err=%v", found, err)
+	}
+	projection, found, err := store.GetSessionIntent(ctx, d.canonicalProjectID(protocol.DefaultProjectID), daemonstate.SessionRoleAdvisor, daemonstate.SessionScopeInteraction, request.ID)
+	if err != nil || !found || projection.State != daemonstate.SessionStateStopped {
+		t.Fatalf("pre-readiness compensation projection=%+v found=%t err=%v", projection, found, err)
 	}
 
 	runner.onNewSession = nil
@@ -230,27 +243,22 @@ func TestAdvisorInitialLaunchRetiresSessionAfterAmbiguousCreateError(t *testing.
 	}
 }
 
-func TestAdvisorBootstrapWrapperSignalsExactLivePane(t *testing.T) {
+func TestAdvisorBootstrapRequiresPostInitializationSignalAndExactLivePane(t *testing.T) {
 	ctx := context.Background()
-	binDir := t.TempDir()
-	tmuxPath := filepath.Join(binDir, "tmux")
-	if err := os.WriteFile(tmuxPath, []byte("#!/bin/sh\nprintf 'claude\\n'\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	fence, err := prepareAdvisorBootstrapFence(t.TempDir(), "advisor-incarnation")
+	fence, err := prepareAdvisorBootstrapFence(t.TempDir(), "advisor-incarnation", "claude")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer fence.remove()
-	fence.ExpectedCommand = "claude"
-	command := exec.Command(advisorShellExecutable, "-c", advisorBootstrapObserverCommand(fence)+"wait")
-	command.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"), "TMUX_PANE=%7", "AZEDARACH_AGENT_INCARNATION="+fence.Incarnation, "AZEDARACH_PANE_PID=321")
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("run advisor bootstrap wrapper: %v: %s", err, output)
+
+	// A controllable advisor that dies during setup never invokes the isolated
+	// SessionStart hook, even though tmux may already report its process name.
+	preInitFailure := exec.Command(advisorShellExecutable, "-c", "exit 42")
+	if err := preInitFailure.Run(); err == nil {
+		t.Fatal("pre-initialization advisor unexpectedly succeeded")
 	}
-	body, err := os.ReadFile(fence.SignalPath)
-	if err != nil || strings.TrimSpace(string(body)) != "advisor-incarnation\t%7\t321" {
-		t.Fatalf("advisor bootstrap signal=%q err=%v", body, err)
+	if _, err := os.Stat(fence.SignalPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pre-initialization failure produced readiness signal: %v", err)
 	}
 
 	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
@@ -261,12 +269,52 @@ func TestAdvisorBootstrapWrapperSignalsExactLivePane(t *testing.T) {
 	runner.panePIDs["advisor-session"] = 321
 	runner.currentCommand = "claude"
 	d := &Daemon{cfg: Config{RepoDir: t.TempDir(), CLITool: "claude", Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()), runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{"project": store}}
+	processNameOnlyCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := d.waitForAdvisorBootstrapAcknowledgement(processNameOnlyCtx, "project", "advisor-session", fence); err == nil {
+		t.Fatal("process-name-only observation authorized advisor readiness")
+	}
+	if _, found, err := store.GetManagedAgentIdentity(ctx, "project", "advisor-session", "agent"); err != nil || found {
+		t.Fatalf("process-name-only observation recorded identity: found=%t err=%v", found, err)
+	}
+
+	// The fake advisor crosses its initialization boundary by invoking the
+	// daemon-owned hook. Only then can the exact live pane be acknowledged.
+	initialized := exec.Command(fence.HookPath)
+	initialized.Env = append(os.Environ(), "TMUX_PANE=%7", "AZEDARACH_PANE_PID=321")
+	if output, err := initialized.CombinedOutput(); err != nil {
+		t.Fatalf("run post-initialization advisor hook: %v: %s", err, output)
+	}
 	if err := d.waitForAdvisorBootstrapAcknowledgement(ctx, "project", "advisor-session", fence); err != nil {
 		t.Fatal(err)
+	}
+	fence.removeSignal()
+	if _, err := os.Stat(fence.WorkDir); err != nil {
+		t.Fatalf("advisor isolation bundle removed while live: %v", err)
 	}
 	identity, found, err := store.GetManagedAgentIdentity(ctx, "project", "advisor-session", "agent")
 	if err != nil || !found || identity.TmuxPaneID != "7" || identity.PanePID != 321 || identity.AgentIncarnation != fence.Incarnation {
 		t.Fatalf("advisor identity=%+v found=%t err=%v", identity, found, err)
+	}
+
+	exitedFence, err := prepareAdvisorBootstrapFence(t.TempDir(), "advisor-exited", "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exitedFence.remove()
+	exited := exec.Command(exitedFence.HookPath)
+	exited.Env = append(os.Environ(), "TMUX_PANE=%8", "AZEDARACH_PANE_PID=654")
+	if output, err := exited.CombinedOutput(); err != nil {
+		t.Fatalf("run exit-after-readiness advisor hook: %v: %s", err, output)
+	}
+	delete(runner.sessions, "advisor-exited")
+	exitedCtx, exitedCancel := context.WithCancel(ctx)
+	exitedCancel()
+	if err := d.waitForAdvisorBootstrapAcknowledgement(exitedCtx, "project", "advisor-exited", exitedFence); err == nil {
+		t.Fatal("advisor exit after readiness was reported healthy")
+	}
+	if _, found, err := store.GetManagedAgentIdentity(ctx, "project", "advisor-exited", "agent"); err != nil || found {
+		t.Fatalf("exit-after-readiness recorded identity: found=%t err=%v", found, err)
 	}
 }
 
@@ -552,6 +600,20 @@ func TestAdvisorSessionIDDoesNotCollideAfterSanitization(t *testing.T) {
 	}
 }
 
+func buildAdvisorLaunchCommandForTest(t *testing.T, d *Daemon, projectID string, advisor daemonstate.AdvisorSession, prompt string) (advisorLaunchCommand, error) {
+	t.Helper()
+	tool := strings.ToLower(strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool))
+	if tool == "" {
+		tool = "claude"
+	}
+	fence, err := prepareAdvisorBootstrapFence(t.TempDir(), "test-advisor-incarnation", tool)
+	if err != nil {
+		return advisorLaunchCommand{}, err
+	}
+	t.Cleanup(fence.remove)
+	return d.buildAdvisorLaunchCommandWithFence(projectID, advisor, prompt, fence)
+}
+
 func TestBuildAdvisorLaunchCommandForcesReadOnlyPermissions(t *testing.T) {
 	advisor := daemonstate.AdvisorSession{RequestID: "request-1", SessionID: "advisor-request-1"}
 	for _, test := range []struct {
@@ -560,9 +622,9 @@ func TestBuildAdvisorLaunchCommandForcesReadOnlyPermissions(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		{name: "codex", tool: "codex", want: []string{"codex", "--sandbox read-only", "--ask-for-approval never", "--disable plugins", "--disable apps", "--disable hooks", "--disable multi_agent", "--disable computer_use", "--disable browser_use", "--disable goals", "--disable workspace_dependencies", "mcp_servers={}", `web_search="disabled"`, `history.persistence="none"`, "project_doc_max_bytes=0", "project_doc_fallback_filenames=[]"}},
-		{name: "claude", tool: "claude", want: []string{"claude", "--permission-mode plan", `--tools "Read,Glob,Grep"`, `--disallowed-tools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task,Agent,mcp__*"`, `--setting-sources ""`, "--strict-mcp-config", `--mcp-config`, `{"mcpServers":{}}`, "--disable-slash-commands", "--no-chrome"}},
-		{name: "opencode", tool: "opencode", want: []string{"command mktemp -d", "XDG_CONFIG_HOME=", "OPENCODE_CONFIG=", "OPENCODE_CONFIG_DIR=", "OPENCODE_TUI_CONFIG=", "OPENCODE_CONFIG_CONTENT=", `cd "$__azedarach_advisor_dir"`, "command rm -rf", "opencode", `"*":"deny"`, `"read":"allow"`, `"edit":"deny"`, `"bash":"deny"`, `"advisor"`, `"mode":"primary"`, "--pure", "--agent advisor", "--prompt"}},
+		{name: "codex", tool: "codex", want: []string{"codex", "--sandbox read-only", "--ask-for-approval never", "--disable plugins", "--disable apps", "--dangerously-bypass-hook-trust", "CODEX_HOME=", "--disable multi_agent", "--disable computer_use", "--disable browser_use", "--disable goals", "--disable workspace_dependencies", "mcp_servers={}", `web_search="disabled"`, `history.persistence="none"`, "project_doc_max_bytes=0", "project_doc_fallback_filenames=[]"}},
+		{name: "claude", tool: "claude", want: []string{"claude", "--permission-mode plan", `--tools "Read,Glob,Grep"`, `--disallowed-tools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task,Agent,mcp__*"`, `--setting-sources ""`, "--settings", "claude-settings.json", "--strict-mcp-config", `--mcp-config`, `{"mcpServers":{}}`, "--disable-slash-commands", "--no-chrome"}},
+		{name: "opencode", tool: "opencode", want: []string{"advisor-bootstrap-", "XDG_CONFIG_HOME=", "OPENCODE_CONFIG=", "OPENCODE_CONFIG_DIR=", "OPENCODE_TUI_CONFIG=", "OPENCODE_CONFIG_CONTENT=", `cd "$__azedarach_advisor_dir"`, "opencode", `"*":"deny"`, `"read":"allow"`, `"edit":"deny"`, `"bash":"deny"`, `"advisor"`, `"mode":"primary"`, "--agent advisor", "--prompt"}},
 		{name: "unsupported", tool: "unknown", wantErr: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -574,7 +636,7 @@ func TestBuildAdvisorLaunchCommandForcesReadOnlyPermissions(t *testing.T) {
 				t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			}
 			d := &Daemon{cfg: Config{CLITool: test.tool, DangerouslySkipPermissions: true, CodexAppServer: true, SessionShell: "sh"}}
-			command, err := d.buildAdvisorLaunchCommand(protocol.DefaultProjectID, advisor, "prompt")
+			command, err := buildAdvisorLaunchCommandForTest(t, d, protocol.DefaultProjectID, advisor, "prompt")
 			if test.wantErr {
 				if err == nil {
 					t.Fatalf("buildAdvisorLaunchCommand() command = %q, want error", command)
@@ -590,7 +652,7 @@ func TestBuildAdvisorLaunchCommandForcesReadOnlyPermissions(t *testing.T) {
 					t.Fatalf("command = %q, want %q", commandText, want)
 				}
 			}
-			for _, forbidden := range []string{"dangerously-bypass", "dangerously-skip", "--remote", "--chrome", "; exec sh", "; exec zsh"} {
+			for _, forbidden := range []string{"dangerously-bypass-approvals-and-sandbox", "dangerously-skip-permissions", "--remote", "--chrome", "; exec sh", "; exec zsh"} {
 				if strings.Contains(commandText, forbidden) {
 					t.Fatalf("command = %q, contains forbidden %q", commandText, forbidden)
 				}
@@ -693,7 +755,7 @@ func TestRealProcessProfileAdvisorExactLaunchDoesNotSourceStartupFiles(t *testin
 						t.Fatal(err)
 					}
 					d := &Daemon{cfg: Config{RepoDir: repoDir, CLITool: tool, SessionShell: shellCase.path}}
-					command, err := d.buildAdvisorLaunchCommand(protocol.DefaultProjectID, daemonstate.AdvisorSession{RequestID: "request-1", SessionID: "advisor-request-1"}, "prompt")
+					command, err := buildAdvisorLaunchCommandForTest(t, d, protocol.DefaultProjectID, daemonstate.AdvisorSession{RequestID: "request-1", SessionID: "advisor-request-1"}, "prompt")
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -762,7 +824,7 @@ func TestRealProcessProfileOpenCodeAdvisorExactLaunchIgnoresInvalidProjectAndInh
 	hookCalled := filepath.Join(t.TempDir(), "az-hook-called")
 	// Execute the exact generated launch shell while replacing only the final
 	// interactive process with the installed CLI's config/agent parser.
-	wrapper := "#!/bin/sh\nexec " + singleQuoteForShell(opencode) + " --pure agent list\n"
+	wrapper := "#!/bin/sh\nexec " + singleQuoteForShell(opencode) + " agent list\n"
 	if err := os.WriteFile(filepath.Join(binDir, "opencode"), []byte(wrapper), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -775,7 +837,7 @@ func TestRealProcessProfileOpenCodeAdvisorExactLaunchIgnoresInvalidProjectAndInh
 	t.Setenv("OPENCODE_TUI_CONFIG", inheritedConfig)
 
 	d := &Daemon{cfg: Config{RepoDir: repoDir, CLITool: "opencode", SessionShell: "sh"}}
-	command, err := d.buildAdvisorLaunchCommand(protocol.DefaultProjectID, daemonstate.AdvisorSession{RequestID: "request-1", SessionID: "advisor-request-1"}, "prompt")
+	command, err := buildAdvisorLaunchCommandForTest(t, d, protocol.DefaultProjectID, daemonstate.AdvisorSession{RequestID: "request-1", SessionID: "advisor-request-1"}, "prompt")
 	if err != nil {
 		t.Fatal(err)
 	}
