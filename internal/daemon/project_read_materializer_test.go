@@ -927,6 +927,9 @@ func TestCanonicalChangeRetiresOnlyAffectedRuntimeHealth(t *testing.T) {
 				if _, err := reader.applyCanonicalBatch(context.Background(), batch); err != nil {
 					t.Fatalf("apply canonical %s: %v", operation, err)
 				}
+				if reader.finishAuthoritativeReadRefresh(failedA, errors.New("late issue-a failure")) {
+					t.Fatalf("%s accepted late completion for retired issue-a", operation)
+				}
 
 				reader.mu.RLock()
 				_, hasSequenceA := reader.authoritativeRuntimeIssueSequence[issueA]
@@ -939,7 +942,7 @@ func TestCanonicalChangeRetiresOnlyAffectedRuntimeHealth(t *testing.T) {
 				}
 				health := reader.snapshotMetadata().Health
 				if unrelatedFailure {
-					if !hasSequenceB || !hasFailureB || !strings.Contains(health, "issue-b retained failure") || strings.Contains(health, "issue-a stale failure") {
+					if !hasSequenceB || !hasFailureB || !strings.Contains(health, "issue-b retained failure") || strings.Contains(health, "issue-a stale failure") || strings.Contains(health, "late issue-a failure") || strings.Contains(health, "canonical generation advanced") {
 						t.Fatalf("%s health = %q sequenceB=%t failureB=%t, want only issue-b state", operation, health, hasSequenceB, hasFailureB)
 					}
 				} else if health != "healthy" {

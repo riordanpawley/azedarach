@@ -800,6 +800,21 @@ func (m *projectReadMaterializer) finishAuthoritativeReadRefreshLocked(attempt a
 		if m.authoritativeRefreshFailures == nil {
 			m.authoritativeRefreshFailures = map[authoritativeReadRefreshComponent]string{}
 		}
+		if len(attempt.runtimeIssueIDs) > 0 {
+			ownedIssueIDs := m.ownedAuthoritativeRuntimeIssueIDsLocked(attempt)
+			if len(ownedIssueIDs) == 0 {
+				return false
+			}
+			if m.authoritativeRuntimeFailures == nil {
+				m.authoritativeRuntimeFailures = map[string]string{}
+			}
+			for _, issueID := range ownedIssueIDs {
+				m.authoritativeRuntimeFailures[issueID] = "canonical generation advanced during runtime refresh"
+			}
+			m.syncAuthoritativeRuntimeFailureLocked()
+			m.aggregateHealthLocked()
+			return false
+		}
 		if m.authoritativeRuntimeUnscopedFailure == "" {
 			m.authoritativeRuntimeUnscopedFailure = "canonical generation advanced during runtime refresh"
 		}
@@ -808,12 +823,7 @@ func (m *projectReadMaterializer) finishAuthoritativeReadRefreshLocked(attempt a
 		return false
 	}
 	if attempt.component == authoritativeReadRefreshRuntime && len(attempt.runtimeIssueIDs) > 0 {
-		ownedIssueIDs := make([]string, 0, len(attempt.runtimeIssueIDs))
-		for _, issueID := range attempt.runtimeIssueIDs {
-			if m.authoritativeRuntimeIssueSequence[issueID] == attempt.sequence {
-				ownedIssueIDs = append(ownedIssueIDs, issueID)
-			}
-		}
+		ownedIssueIDs := m.ownedAuthoritativeRuntimeIssueIDsLocked(attempt)
 		if len(ownedIssueIDs) == 0 {
 			return false
 		}
@@ -858,6 +868,16 @@ func (m *projectReadMaterializer) finishAuthoritativeReadRefreshLocked(attempt a
 	}
 	m.aggregateHealthLocked()
 	return true
+}
+
+func (m *projectReadMaterializer) ownedAuthoritativeRuntimeIssueIDsLocked(attempt authoritativeReadRefreshAttempt) []string {
+	ownedIssueIDs := make([]string, 0, len(attempt.runtimeIssueIDs))
+	for _, issueID := range attempt.runtimeIssueIDs {
+		if m.authoritativeRuntimeIssueSequence[issueID] == attempt.sequence {
+			ownedIssueIDs = append(ownedIssueIDs, issueID)
+		}
+	}
+	return ownedIssueIDs
 }
 
 func (m *projectReadMaterializer) syncAuthoritativeRuntimeFailureLocked() {
