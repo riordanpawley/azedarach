@@ -1277,6 +1277,43 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("close task rejects empty success response", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				assertTaskProjectID(t, req, wantProjectID)
+				if req.Command != CommandTaskClose {
+					t.Fatalf("command = %q, want %q", req.Command, CommandTaskClose)
+				}
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion,
+					RequestID:       req.RequestID,
+					Kind:            protocol.EnvelopeKindResponse,
+					OK:              true,
+				}, nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		_, err := client.CloseTask(context.Background(), "az-3", TaskStatusOptions{IntegrateBeforeClose: true})
+		if err == nil || !strings.Contains(err.Error(), "invalid successful response") {
+			t.Fatalf("CloseTask error = %v, want invalid successful response", err)
+		}
+	})
+
+	t.Run("close task rejects nonterminal success response", func(t *testing.T) {
+		transport := &taskRecordingTransport{
+			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				return responseWithJSON(t, req, TaskCloseResult{TaskID: "az-3", Status: string(domain.StatusInReview)}), nil
+			},
+		}
+
+		client := New(transport).WithProjectID(wantProjectID)
+		_, err := client.CloseTask(context.Background(), "az-3", TaskStatusOptions{IntegrateBeforeClose: true})
+		if err == nil || !strings.Contains(err.Error(), "invalid successful response") {
+			t.Fatalf("CloseTask error = %v, want invalid successful response", err)
+		}
+	})
+
 	t.Run("status update uses lightweight command for non-closed status", func(t *testing.T) {
 		commands := []string{}
 		var statusBody TaskStatusRequest

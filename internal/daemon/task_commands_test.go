@@ -7424,6 +7424,13 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
+	if _, err := issuesClient.ClaimOwnershipWithRuntime(ctx, projectID, taskID, issues.OwnershipClaimParams{
+		OwnerID:   "worker-a",
+		OwnerKind: "agent",
+		Purpose:   domain.CoordinationLeaseExecution,
+	}); err != nil {
+		t.Fatalf("claim execution lease: %v", err)
+	}
 	evidenceEvent, err := issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
 		Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t),
 	})
@@ -7583,6 +7590,9 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	}
 	if closed.Status != domain.StatusDone {
 		t.Fatalf("task status = %s, want %s", closed.Status, domain.StatusDone)
+	}
+	if closed.Ownership != nil || len(closed.CoordinationLeases) != 0 {
+		t.Fatalf("closed task leases = %+v ownership = %+v, want already-contained close to release execution lease", closed.CoordinationLeases, closed.Ownership)
 	}
 	joined := strings.Join(commands, "\n")
 	for _, blocked := range []string{
