@@ -2937,6 +2937,10 @@ type taskCloseIntegrationReceipt struct {
 const taskCloseSlowGitHookThreshold = 1 * time.Second
 
 func verifyTaskCloseIntegrationReceipt(ctx context.Context, gitClient *git.Client, targetWorktree string, receipt taskCloseIntegrationReceipt, projectID, sourceBranch, targetBranch string) error {
+	return verifyTaskCloseIntegrationReceiptAtRef(ctx, gitClient, targetWorktree, receipt, projectID, sourceBranch, targetBranch, targetBranch)
+}
+
+func verifyTaskCloseIntegrationReceiptAtRef(ctx context.Context, gitClient *git.Client, targetWorktree string, receipt taskCloseIntegrationReceipt, projectID, sourceBranch, targetBranch, targetRef string) error {
 	if gitClient == nil {
 		return fmt.Errorf("git adapter unavailable")
 	}
@@ -2952,19 +2956,23 @@ func verifyTaskCloseIntegrationReceipt(ctx context.Context, gitClient *git.Clien
 	if strings.TrimSpace(receipt.SourceOID) == "" || strings.TrimSpace(receipt.TargetOID) == "" {
 		return fmt.Errorf("integration receipt is missing exact source or target OID")
 	}
-	sourceReachable, err := gitClient.CommitContainedInRef(ctx, targetWorktree, receipt.SourceOID, targetBranch)
+	targetRef = strings.TrimSpace(targetRef)
+	if targetRef == "" {
+		return fmt.Errorf("current integration target ref is unavailable")
+	}
+	sourceReachable, err := gitClient.CommitContainedInRef(ctx, targetWorktree, receipt.SourceOID, targetRef)
 	if err != nil {
-		return fmt.Errorf("verify recorded source OID %s against %s: %w", receipt.SourceOID, targetBranch, err)
+		return fmt.Errorf("verify recorded source OID %s against %s: %w", receipt.SourceOID, targetRef, err)
 	}
 	if !sourceReachable {
-		return fmt.Errorf("recorded source OID is not reachable from %s: %s", targetBranch, receipt.SourceOID)
+		return fmt.Errorf("recorded source OID is not reachable from %s: %s", targetRef, receipt.SourceOID)
 	}
-	targetReachable, err := gitClient.CommitContainedInRef(ctx, targetWorktree, receipt.TargetOID, targetBranch)
+	targetReachable, err := gitClient.CommitContainedInRef(ctx, targetWorktree, receipt.TargetOID, targetRef)
 	if err != nil {
-		return fmt.Errorf("verify recorded target OID %s against %s: %w", receipt.TargetOID, targetBranch, err)
+		return fmt.Errorf("verify recorded target OID %s against %s: %w", receipt.TargetOID, targetRef, err)
 	}
 	if !targetReachable {
-		return fmt.Errorf("recorded target OID is not reachable from %s: %s", targetBranch, receipt.TargetOID)
+		return fmt.Errorf("recorded target OID is not reachable from %s: %s", targetRef, receipt.TargetOID)
 	}
 	return nil
 }
@@ -3059,6 +3067,31 @@ func (d *Daemon) persistTaskCloseIntegrationPublication(ctx context.Context, pro
 			return fmt.Errorf("recover merge-result publication binding: %w", bindErr)
 		}
 	}
+	if integration.ReceiptRecovered {
+		targetWorktree := strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID))
+		if targetWorktree == "" {
+			return fmt.Errorf("verify recovered merge-result publication: exact project routing unavailable")
+		}
+		currentTarget, resolveErr := d.git.ResolveCommit(ctx, targetWorktree, integration.TargetBranch)
+		if resolveErr != nil {
+			return fmt.Errorf("verify recovered merge-result publication target: %w", resolveErr)
+		}
+		if strings.TrimSpace(currentTarget) != strings.TrimSpace(integration.TargetOID) {
+			receipt := taskCloseIntegrationReceipt{
+				ProjectID: projectID, SourceBranch: integration.SourceBranch, TargetBranch: integration.TargetBranch,
+				Integrated: true, ConfiguredBaseTarget: true, TargetID: integration.TargetID,
+				BaseOID: integration.BaseOID, SourceOID: integration.SourceOID, TargetOID: integration.TargetOID,
+				PublicationOperationID: integration.PublicationOperationID,
+			}
+			if err := verifyTaskCloseIntegrationReceiptAtRef(ctx, d.git, targetWorktree, receipt, projectID, integration.SourceBranch, integration.TargetBranch, currentTarget); err != nil {
+				return fmt.Errorf("verify recovered merge-result publication target ancestry: %w", err)
+			}
+			if err := d.verifyRecoveredTaskClosePublication(ctx, projectID, taskID, integration); err != nil {
+				return fmt.Errorf("verify recovered merge-result publication: %w", err)
+			}
+			return nil
+		}
+	}
 	if err := d.recordTaskCloseMergeResultEvidence(ctx, projectID, taskID, integration); err != nil {
 		return fmt.Errorf("record merge-result evidence: %w", err)
 	}
@@ -3119,10 +3152,7 @@ func (d *Daemon) recoverPublishedTaskCloseIntegration(ctx context.Context, proje
 	if receipt.SourceOID != strings.TrimSpace(sourceOID) {
 		return taskCloseIntegrationResult{}, false, fmt.Errorf("exact integrated receipt source changed: recorded=%s current=%s", receipt.SourceOID, sourceOID)
 	}
-	if receipt.TargetOID != strings.TrimSpace(targetOID) {
-		return taskCloseIntegrationResult{}, false, fmt.Errorf("exact integrated receipt target changed: recorded=%s current=%s", receipt.TargetOID, targetOID)
-	}
-	if err := verifyTaskCloseIntegrationReceipt(ctx, d.git, targetWorktree, receipt, projectID, sourceBranch, targetBranch); err != nil {
+	if err := verifyTaskCloseIntegrationReceiptAtRef(ctx, d.git, targetWorktree, receipt, projectID, sourceBranch, targetBranch, targetOID); err != nil {
 		return taskCloseIntegrationResult{}, false, fmt.Errorf("exact integrated receipt is not valid: %w", err)
 	}
 	validationAttempts, err := d.canonicalIntegrationValidationAttempts(ctx, targetWorktree, receipt.TargetOID)
