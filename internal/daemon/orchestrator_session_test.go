@@ -512,12 +512,15 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 		"Rooted startup contract (root " + rootID + ")",
 		"`az prime`",
 		"az orchestrate status --root " + rootID,
-		"az orchestrate watch --root " + rootID + " --since 0 --jsonl",
+		"daemon will deliver one revision-bound continuation",
 		"never implement the root's worker scope",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("rooted prompt missing %q:\n%s", want, prompt)
 		}
+	}
+	if strings.Contains(prompt, "az orchestrate watch --root "+rootID) {
+		t.Fatalf("rooted prompt retained active model watch instruction:\n%s", prompt)
 	}
 	if strings.Contains(prompt, "Role: contributor") || strings.Contains(prompt, "Role: worker") {
 		t.Fatalf("rooted prompt contains worker role:\n%s", prompt)

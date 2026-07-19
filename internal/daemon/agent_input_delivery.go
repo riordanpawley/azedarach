@@ -75,6 +75,7 @@ type agentInputDeliveryService struct {
 	now                   func() time.Time
 	sessionLeaseDuration  time.Duration
 	sessionLeaseHeartbeat time.Duration
+	retryEligible         func(context.Context, domain.AgentInputDeliveryRequest) (bool, error)
 }
 
 func newAgentInputDeliveryService(stores func(string) *state.RuntimeStateStore, issueClients func(string) *issues.Client, receiver authoritativeAgentInputReceiver, owner string) *agentInputDeliveryService {
@@ -322,6 +323,15 @@ func (s *agentInputDeliveryService) RetryPending(ctx context.Context, projectID 
 		return fmt.Errorf("list pending agent input intents: %w", err)
 	}
 	for _, intent := range intents {
+		if s.retryEligible != nil {
+			eligible, eligibilityErr := s.retryEligible(ctx, intent.Request)
+			if eligibilityErr != nil {
+				return fmt.Errorf("validate pending agent input intent %s: %w", intent.Request.IntentKey, eligibilityErr)
+			}
+			if !eligible {
+				continue
+			}
+		}
 		if _, err := s.Deliver(ctx, intent.Request); err != nil && !errors.Is(err, errAuthoritativeAgentInputUnavailable) {
 			return fmt.Errorf("retry agent input intent %s: %w", intent.Request.IntentKey, err)
 		}

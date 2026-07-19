@@ -30,7 +30,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
-func TestRootedOrchestratorIdleWakeCarriesDurableCursorAndDirectNestedRoots(t *testing.T) {
+func TestRootedOrchestratorBusyWakeQueuesAndEquivalentStateDeliversOnce(t *testing.T) {
 	ctx := context.Background()
 	projectID := "proj-continuation"
 	repoDir := t.TempDir()
@@ -89,20 +89,63 @@ func TestRootedOrchestratorIdleWakeCarriesDurableCursorAndDirectNestedRoots(t *t
 		tmux:                   tmux.NewClient(runner, slog.New(slog.NewTextHandler(io.Discard, nil))),
 	}
 	seedReadyAgentInput(t, d, runner, projectID, parentSession)
+	busyAt := time.Now().UTC().Add(time.Second)
+	if _, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{ProjectID: projectID, SessionID: parentSession, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: busyAt, ObservedVersion: busyAt.UnixNano()}); err != nil {
+		t.Fatal(err)
+	}
 	if err := d.reconcileOrchestratorLifecycles(ctx, projectID, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.inputPayloads) != 0 {
+		t.Fatalf("busy orchestrator received %d continuation payloads, want 0", len(runner.inputPayloads))
+	}
+	if err := issueClient.Update(ctx, leafID, domain.StatusDone); err != nil {
+		t.Fatal(err)
+	}
+	if err := issueClient.Update(ctx, nestedID, domain.StatusDone); err != nil {
+		t.Fatal(err)
+	}
+	d.nextRevision(projectID)
+	idleAt := busyAt.Add(time.Second)
+	if _, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{ProjectID: projectID, SessionID: parentSession, ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: idleAt, ObservedVersion: idleAt.UnixNano()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.agentInput.RetryPending(ctx, projectID, 10); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.inputPayloads) != 0 {
+		t.Fatalf("superseded actionable revision delivered %d payloads, want 0", len(runner.inputPayloads))
+	}
+	if err := issueClient.Update(ctx, nestedID, domain.StatusInProgress); err != nil {
+		t.Fatal(err)
+	}
+	d.nextRevision(projectID)
+	if err := d.agentInput.RetryPending(ctx, projectID, 10); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.inputPayloads) != 1 {
 		t.Fatalf("continuation payloads = %d, want 1", len(runner.inputPayloads))
 	}
 	prompt := runner.inputPayloads[0]
-	for _, want := range []string{"cursor=7", "--since 7", nestedID, "without flattening"} {
+	for _, want := range []string{"scope=rooted", "revision=", nestedID, "bounded snapshot"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q: %s", want, prompt)
 		}
 	}
+	if strings.Contains(prompt, "orchestrate watch") || strings.Contains(prompt, "--since 7") {
+		t.Fatalf("prompt retained model-mediated watch instruction: %s", prompt)
+	}
 	if strings.Contains(prompt, "direct nested roots ["+leafID+"]") || strings.Contains(prompt, ","+leafID+"]") {
 		t.Fatalf("prompt flattened nested descendant %s: %s", leafID, prompt)
+	}
+	if err := d.reconcileOrchestratorLifecycles(ctx, projectID, idleAt.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.agentInput.RetryPending(ctx, projectID, 10); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.inputPayloads) != 1 {
+		t.Fatalf("equivalent actionable state delivered %d payloads, want exactly 1", len(runner.inputPayloads))
 	}
 }
 
@@ -181,27 +224,80 @@ func TestBootstrapRecoveryResumesReplacedRootedOrchestratorOnceWithDurableCursor
 		t.Fatalf("recovery continuation payloads = %d, want exactly 1", len(runner.inputPayloads))
 	}
 	prompt := runner.inputPayloads[0]
-	for _, want := range []string{"cursor=23", "--since 23", nestedID} {
+	for _, want := range []string{"scope=rooted", "revision=", nestedID} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("recovery prompt missing %q: %s", want, prompt)
 		}
 	}
+	if strings.Contains(prompt, "orchestrate watch") {
+		t.Fatalf("recovery prompt retained watch instruction: %s", prompt)
+	}
 }
 
-func TestRootedOrchestratorContinuationSuppressesCompleteAndHumanWait(t *testing.T) {
+func TestRootedOrchestratorContinuationSuppressesCompleteAndBacklogButNotUnrelatedHumanWait(t *testing.T) {
 	nested := protocol.OrchestrationSnapshot{NestedRoots: []protocol.OrchestrationNestedRoot{{IssueID: "nested", Status: "startable"}}}
 	if rootedOrchestratorContinuationRequired(true, nested) {
 		t.Fatal("complete-check pass still requires continuation")
 	}
 	nested.Interactions = []domain.InteractionRequest{{ID: "human-acceptance"}}
-	if rootedOrchestratorContinuationRequired(false, nested) {
-		t.Fatal("unresolved human acceptance still requires continuation")
+	if !rootedOrchestratorContinuationRequired(false, nested) {
+		t.Fatal("unresolved human acceptance globally suppressed independent nested-root work")
 	}
 	nested.Interactions = nil
 	nested.NestedRoots[0].Status = "not_counting_capacity"
 	nested.NestedRoots[0].ExclusionReasons = []string{"lifecycle-backlog"}
 	if rootedOrchestratorContinuationRequired(false, nested) {
 		t.Fatal("non-actionable backlog-contained nested root still requires continuation")
+	}
+}
+
+func TestOrchestratorActionableContinuationIsSemanticAndScopeBound(t *testing.T) {
+	rootA, _ := domain.RootedOrchestrationScope("root-a")
+	rootB, _ := domain.RootedOrchestrationScope("root-b")
+	base := protocol.OrchestrationSnapshot{
+		GeneratedAt: time.Date(2026, 7, 20, 1, 0, 0, 0, time.UTC),
+		Revision:    41,
+		Runnable:    []string{"worker-a"},
+	}
+	first, actionable := orchestratorActionableContinuation(rootA, base)
+	if !actionable || first.Kind != "start" {
+		t.Fatalf("first action = %+v actionable=%t", first, actionable)
+	}
+	equivalent := base
+	equivalent.GeneratedAt = base.GeneratedAt.Add(time.Hour)
+	equivalent.Revision = 99
+	second, actionable := orchestratorActionableContinuation(rootA, equivalent)
+	if !actionable || second.Revision != first.Revision {
+		t.Fatalf("equivalent revision = %q, want %q", second.Revision, first.Revision)
+	}
+	otherScope, actionable := orchestratorActionableContinuation(rootB, equivalent)
+	if !actionable || otherScope.Revision == first.Revision {
+		t.Fatalf("scope-isolated revision = %q, must differ from %q", otherScope.Revision, first.Revision)
+	}
+	project, actionable := orchestratorActionableContinuation(domain.ProjectOrchestrationScope(), equivalent)
+	if actionable || project.Kind != "" || project.Revision != "" || len(project.IssueIDs) != 0 {
+		t.Fatalf("project model wake treated daemon-owned start as actionable: %+v", project)
+	}
+}
+
+func TestOrchestratorActionableContinuationChangesWithReviewEpochAndIgnoresBusyNestedRoot(t *testing.T) {
+	scope, _ := domain.RootedOrchestrationScope("root")
+	snapshot := protocol.OrchestrationSnapshot{
+		ReviewQueue: []protocol.OrchestrationReview{{IssueID: "review", Actionable: true, ReviewEpochEventID: 7, EvidenceDigest: "digest", HeadRevision: "head"}},
+		NestedRoots: []protocol.OrchestrationNestedRoot{{IssueID: "nested", Status: "active", ActiveSession: &protocol.OrchestrationSession{IssueID: "nested", Activity: "busy", ActivitySource: "hooks"}}},
+	}
+	first, actionable := orchestratorActionableContinuation(scope, snapshot)
+	if !actionable || first.Kind != "review" || len(first.IssueIDs) != 1 || first.IssueIDs[0] != "review" {
+		t.Fatalf("review action = %+v actionable=%t", first, actionable)
+	}
+	snapshot.ReviewQueue[0].ReviewEpochEventID++
+	second, actionable := orchestratorActionableContinuation(scope, snapshot)
+	if !actionable || second.Revision == first.Revision {
+		t.Fatalf("new review epoch reused revision %q", first.Revision)
+	}
+	snapshot.ReviewQueue = nil
+	if action, actionable := orchestratorActionableContinuation(scope, snapshot); actionable {
+		t.Fatalf("busy nested root produced duplicate parent action: %+v", action)
 	}
 }
 

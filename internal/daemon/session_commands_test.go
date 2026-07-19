@@ -1819,6 +1819,7 @@ func seedReadyAgentInput(t *testing.T, d *Daemon, runner *sessionStartTmuxRunner
 		runner.inputPayloads = append(runner.inputPayloads, payload)
 	}}
 	d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, receiver, "test-daemon")
+	d.agentInput.retryEligible = d.agentInputRetryEligible
 }
 
 func seedManagedRestartIdentity(t *testing.T, d *Daemon, runner *sessionStartTmuxRunner, projectID, sessionID string) func(context.Context, []string) error {
@@ -10306,14 +10307,11 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "az orchestrate status --root <issue-id>") {
 		t.Fatalf("prompt = %q, want orchestrate status instruction", prompt)
 	}
-	if !strings.Contains(prompt, "leave it running while workers are active") {
-		t.Fatalf("prompt = %q, want continuous watch instruction", prompt)
+	if !strings.Contains(prompt, "checkpoint and yield when no immediate action remains") {
+		t.Fatalf("prompt = %q, want quiescent checkpoint instruction", prompt)
 	}
-	if !strings.Contains(prompt, "Remain in this active turn/loop and continuously consume its events; starting sessions and a background watch is not a completed handoff to the human") {
-		t.Fatalf("prompt = %q, want persistent watch-consumption duty", prompt)
-	}
-	if !strings.Contains(prompt, "Do not use `--once` for orchestration monitoring") {
-		t.Fatalf("prompt = %q, want --once diagnostic warning", prompt)
+	if strings.Contains(prompt, "leave it running while workers are active") || strings.Contains(prompt, "continuously consume its events") {
+		t.Fatalf("prompt = %q, retained model-mediated watch loop", prompt)
 	}
 	if !strings.Contains(prompt, "az orchestrate complete-check --root <issue-id>") {
 		t.Fatalf("prompt = %q, want complete-check instruction", prompt)
@@ -10343,8 +10341,8 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "supervise that orchestrator as a direct child while it exclusively owns its descendants") {
 		t.Fatalf("prompt = %q, want no-flattening guidance", prompt)
 	}
-	if !strings.Contains(prompt, "React to progress, blocked, and integration-ready evidence; review and integrate accepted children/epics, advance newly unblocked work, and repeat status/start/watch/review while graph work remains") {
-		t.Fatalf("prompt = %q, want active parent coordination loop", prompt)
+	if !strings.Contains(prompt, "repeat bounded status/start/review steps only while immediate work remains") {
+		t.Fatalf("prompt = %q, want bounded parent coordination loop", prompt)
 	}
 	if !strings.Contains(prompt, "az orchestrate message --root <issue-id> --issue <worker-issue> --body \"...\"") {
 		t.Fatalf("prompt = %q, want active worker message instruction", prompt)
@@ -10352,7 +10350,7 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "Bare `az mail send` is durable mailbox-only") {
 		t.Fatalf("prompt = %q, want passive mailbox warning", prompt)
 	}
-	if !strings.Contains(prompt, "workers reporting to this active parent orchestrator/watch should use `az mail send --parent <issue-id> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`") {
+	if !strings.Contains(prompt, "workers reporting to this parent orchestrator should use `az mail send --parent <issue-id> --issue <worker-issue> --type worker-progress|worker-blocked|worker-integration-ready --body \"...\"`") {
 		t.Fatalf("prompt = %q, want safe worker reporting guidance", prompt)
 	}
 	if !strings.Contains(prompt, "Worker integration evidence should be a structured JSON `worker_evidence.v1` packet") {
@@ -10382,7 +10380,7 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 		t.Fatalf("prompt = %q, want hook status/install fallback guidance", prompt)
 	}
 	if !strings.Contains(prompt, "az orchestrate capture --issue <worker-issue>") ||
-		!strings.Contains(prompt, "Do not poll panes on a fixed interval") {
+		!strings.Contains(prompt, "only when a bounded status snapshot is stale, failed, or contradictory") {
 		t.Fatalf("prompt = %q, want daemon-backed capture guardrail", prompt)
 	}
 	if !strings.Contains(prompt, "az orchestrate integrate --issue <issue-id>") {
@@ -10414,7 +10412,7 @@ func TestBuildStartWorkPromptIncludesOrchestratorPrimerForEpic(t *testing.T) {
 	if !strings.Contains(prompt, "leave any child `open` or `in_progress` only with an explicit blocker, dependency, or remaining-scope rationale") {
 		t.Fatalf("prompt = %q, want unresolved child rationale guidance", prompt)
 	}
-	if !strings.Contains(prompt, "Continue the parent loop until `az orchestrate complete-check --root <issue-id>` and final validation pass; only then set the root `in_review` and hand it to the human") {
+	if !strings.Contains(prompt, "Continue bounded orchestration steps until `az orchestrate complete-check --root <issue-id>` and final validation pass; only then set the root `in_review` and hand it to the human") {
 		t.Fatalf("prompt = %q, want complete-check-gated human handoff", prompt)
 	}
 }

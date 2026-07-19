@@ -354,38 +354,106 @@ func orchestrationSnapshotRuntimeIssueIDs(snapshot protocol.OrchestrationSnapsho
 }
 
 func applyOrchestratorContinuationProjection(snapshot *protocol.OrchestrationSnapshot, lease daemonstate.OrchestratorScopeLease) {
-	if snapshot == nil || lease.Identity.Scope.Kind != domain.OrchestrationScopeRooted || !rootedOrchestratorContinuationRequired(false, *snapshot) {
+	if snapshot == nil {
+		return
+	}
+	action, actionable := orchestratorActionableContinuation(lease.Identity.Scope, *snapshot)
+	if !actionable {
 		return
 	}
 	snapshot.ContinuationRequired = true
-	snapshot.ContinuationReason = "root complete-check has not passed while direct nested roots still require orchestration"
-	snapshot.ContinuationContract = orchestratorContinuationPrompt(lease, snapshot.NestedRoots)
+	snapshot.ContinuationReason = action.Reason
+	snapshot.ContinuationContract = orchestratorContinuationPrompt(lease.Identity.Scope, action)
 }
 
 func rootedOrchestratorContinuationRequired(completeCheckPassed bool, snapshot protocol.OrchestrationSnapshot) bool {
-	if completeCheckPassed || len(snapshot.Interactions) > 0 {
+	if completeCheckPassed {
 		return false
 	}
-	for _, nested := range snapshot.NestedRoots {
-		if !slices.Contains(nested.ExclusionReasons, "lifecycle-backlog") {
-			return true
-		}
-	}
-	return false
+	_, actionable := orchestratorActionableContinuation(domain.OrchestrationScope{Kind: domain.OrchestrationScopeRooted}, snapshot)
+	return actionable
 }
 
-func orchestratorContinuationPrompt(lease daemonstate.OrchestratorScopeLease, nested []protocol.OrchestrationNestedRoot) string {
-	ids := make([]string, 0, len(nested))
-	for _, item := range nested {
-		if slices.Contains(item.ExclusionReasons, "lifecycle-backlog") {
+type orchestratorActionableState struct {
+	Kind     string   `json:"kind"`
+	Reason   string   `json:"reason"`
+	IssueIDs []string `json:"issue_ids"`
+	Revision string   `json:"revision"`
+}
+
+func orchestratorActionableContinuation(scope domain.OrchestrationScope, snapshot protocol.OrchestrationSnapshot) (orchestratorActionableState, bool) {
+	type reviewRevision struct {
+		IssueID string `json:"issue_id"`
+		Epoch   int64  `json:"epoch"`
+		Digest  string `json:"digest"`
+		Head    string `json:"head"`
+	}
+	type nestedRevision struct {
+		IssueID     string `json:"issue_id"`
+		Status      string `json:"status"`
+		IssueStatus string `json:"issue_status"`
+		Failure     string `json:"failure,omitempty"`
+	}
+	reviews := make([]reviewRevision, 0, len(snapshot.ReviewQueue))
+	issueIDs := make([]string, 0, len(snapshot.ReviewQueue)+len(snapshot.Runnable)+len(snapshot.NestedRoots))
+	for _, review := range snapshot.ReviewQueue {
+		if !review.Actionable {
 			continue
 		}
-		if id := strings.TrimSpace(item.IssueID); id != "" {
-			ids = append(ids, id)
+		reviews = append(reviews, reviewRevision{IssueID: review.IssueID, Epoch: review.ReviewEpochEventID, Digest: review.EvidenceDigest, Head: review.HeadRevision})
+		issueIDs = append(issueIDs, review.IssueID)
+	}
+	runnable := append([]string(nil), snapshot.Runnable...)
+	if scope.Kind == domain.OrchestrationScopeProject {
+		// Project-scope starts and candidate routing are daemon-owned. The model
+		// is needed only for bounded review judgment.
+		runnable = nil
+	} else {
+		issueIDs = append(issueIDs, runnable...)
+	}
+	nested := make([]nestedRevision, 0, len(snapshot.NestedRoots))
+	if scope.Kind == domain.OrchestrationScopeRooted {
+		for _, item := range snapshot.NestedRoots {
+			if slices.Contains(item.ExclusionReasons, "lifecycle-backlog") || item.Status == "active" {
+				continue
+			}
+			failure := ""
+			if item.StartFailure != nil {
+				failure = item.StartFailure.OperationID + ":" + item.StartFailure.OperationState + ":" + item.StartFailure.Message
+			}
+			nested = append(nested, nestedRevision{IssueID: item.IssueID, Status: item.Status, IssueStatus: item.IssueStatus, Failure: failure})
+			issueIDs = append(issueIDs, item.IssueID)
 		}
 	}
-	sort.Strings(ids)
-	return fmt.Sprintf("Persistent parent orchestration wake (root=%s cursor=%d). Continue now: consume `az orchestrate watch --root %s --since %d --jsonl`; coordinate only direct nested roots [%s] without flattening their descendants; review and integrate accepted epic results; advance cross-epic dependencies; repeat status/start/watch/review until `az orchestrate complete-check --root %s` passes, then validate and set the root in_review for human handoff. Do not emit a handoff response while this continuation remains required.", lease.Identity.Scope.RootIssueID, lease.Cursor, lease.Identity.Scope.RootIssueID, lease.Cursor, strings.Join(ids, ","), lease.Identity.Scope.RootIssueID)
+	if len(reviews) == 0 && len(runnable) == 0 && len(nested) == 0 {
+		return orchestratorActionableState{}, false
+	}
+	sort.Strings(issueIDs)
+	signature := struct {
+		Scope    domain.OrchestrationScope `json:"scope"`
+		Reviews  []reviewRevision          `json:"reviews,omitempty"`
+		Runnable []string                  `json:"runnable,omitempty"`
+		Nested   []nestedRevision          `json:"nested,omitempty"`
+	}{Scope: scope, Reviews: reviews, Runnable: runnable, Nested: nested}
+	encoded, _ := json.Marshal(signature)
+	digest := sha256.Sum256(encoded)
+	kind, reason := "coordinate", "actionable orchestration projection transition"
+	if len(reviews) > 0 {
+		kind, reason = "review", "revision-bound review judgment is ready"
+	} else if len(runnable) > 0 {
+		kind, reason = "start", "direct runnable work is ready"
+	} else if len(nested) > 0 {
+		kind, reason = "nested-root", "direct nested-root coordination is ready"
+	}
+	return orchestratorActionableState{Kind: kind, Reason: reason, IssueIDs: issueIDs, Revision: fmt.Sprintf("%x", digest[:12])}, true
+}
+
+func orchestratorContinuationPrompt(scope domain.OrchestrationScope, action orchestratorActionableState) string {
+	rootFlag := ""
+	if scope.Kind == domain.OrchestrationScopeRooted {
+		rootFlag = " --root " + scope.RootIssueID.String()
+	}
+	return fmt.Sprintf("Actionable orchestration transition (scope=%s revision=%s kind=%s issues=[%s]). Inspect the current bounded snapshot with `az orchestrate status%s --json --summary`, make only the immediate judgment or mutation it requires, then yield when no immediate action remains. Do not run a continuous watch or poll inside this model turn; the daemon will deliver one new continuation when the scope's actionable projection changes.", scope.Kind, action.Revision, action.Kind, strings.Join(action.IssueIDs, ","), rootFlag)
 }
 
 func (d *Daemon) resolveOrchestratorSession(ctx context.Context, projectID, sessionID string) (daemonstate.OrchestratorScopeLease, bool, error) {

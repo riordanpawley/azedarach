@@ -1978,8 +1978,8 @@ func TestOrchestrateStartSubmitsOperationAndWarnsOnDirtyParent(t *testing.T) {
 	if len(result.Launched) != 1 || result.Launched[0].OperationID != "op-1" || result.Launched[0].OperationState != string(protocol.OperationStateDone) {
 		t.Fatalf("launched = %+v", result.Launched)
 	}
-	if !strings.Contains(result.Advice.WatchInstruction, "leave it running") || strings.Contains(result.Advice.WatchCommand, "--once") {
-		t.Fatalf("watch advice = %+v, want continuous watch instruction without --once", result.Advice)
+	if !strings.Contains(result.Advice.WatchInstruction, "external observer only") || !strings.Contains(result.Advice.WatchInstruction, "yield") || strings.Contains(result.Advice.WatchCommand, "--once") {
+		t.Fatalf("watch advice = %+v, want external-observer-only guidance without --once", result.Advice)
 	}
 	if len(result.Warnings) != 2 || !strings.Contains(strings.Join(result.Warnings, "\n"), "az worktree create az-1") || !strings.Contains(strings.Join(result.Warnings, "\n"), "uncommitted tracked changes") {
 		t.Fatalf("warnings = %+v", result.Warnings)

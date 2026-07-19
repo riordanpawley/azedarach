@@ -463,6 +463,7 @@ func New(cfg Config) *Daemon {
 	d.codexAgentInput.issueClients = d.issueClientForProject
 	d.codexAgentInput.recoveryOwner = agentInputOwner + ":recovery"
 	d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, d.codexAgentInput, agentInputOwner)
+	d.agentInput.retryEligible = d.agentInputRetryEligible
 	if !cfg.ScopedRuntime && strings.TrimSpace(os.Getenv("AZEDARACH_DISABLE_USER_DB")) != "1" {
 		if store, err := userstore.Open(userstore.DefaultPath()); err != nil {
 			cfg.Logger.Warn("initialize user cross-project projection", "error", err)
