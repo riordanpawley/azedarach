@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
@@ -73,7 +74,7 @@ type managedAgentIdentityProjection struct {
 }
 
 func managedAgentIdentityProjectionKey(projectID, sessionID, logicalPaneID string) string {
-	return strings.Join([]string{strings.TrimSpace(projectID), strings.TrimSpace(sessionID), strings.TrimSpace(logicalPaneID)}, "\x00")
+	return strings.Join([]string{protocol.NormalizeProjectID(projectID), strings.TrimSpace(sessionID), strings.TrimSpace(logicalPaneID)}, "\x00")
 }
 
 func (d *Daemon) recordManagedAgentIdentityProjection(identity daemonstate.ManagedAgentIdentity, acknowledged bool) {
@@ -106,6 +107,34 @@ func (d *Daemon) projectedManagedAgentIdentity(projectID, sessionID, logicalPane
 	projection, found := d.managedAgentIdentityProjection[managedAgentIdentityProjectionKey(projectID, sessionID, logicalPaneID)]
 	d.managedAgentIdentityMu.RUnlock()
 	return projection, found
+}
+
+func (d *Daemon) purgeManagedAgentIdentityProjectionForSession(projectID, sessionID string) {
+	if d == nil {
+		return
+	}
+	prefix := strings.Join([]string{protocol.NormalizeProjectID(projectID), strings.TrimSpace(sessionID), ""}, "\x00")
+	d.managedAgentIdentityMu.Lock()
+	for key := range d.managedAgentIdentityProjection {
+		if strings.HasPrefix(key, prefix) {
+			delete(d.managedAgentIdentityProjection, key)
+		}
+	}
+	d.managedAgentIdentityMu.Unlock()
+}
+
+func (d *Daemon) purgeManagedAgentIdentityProjectionForProject(projectID string) {
+	if d == nil {
+		return
+	}
+	prefix := protocol.NormalizeProjectID(projectID) + "\x00"
+	d.managedAgentIdentityMu.Lock()
+	for key := range d.managedAgentIdentityProjection {
+		if strings.HasPrefix(key, prefix) {
+			delete(d.managedAgentIdentityProjection, key)
+		}
+	}
+	d.managedAgentIdentityMu.Unlock()
 }
 
 func (d *Daemon) readManagedAgentIdentity(ctx context.Context, store *daemonstate.RuntimeStateStore, projectID, sessionID, logicalPaneID string) (daemonstate.ManagedAgentIdentity, bool, error) {
@@ -209,11 +238,12 @@ func (d *Daemon) sampleInitialManagedAgentAcknowledgement(ctx context.Context, s
 	}
 	logicalPaneID = strings.TrimSpace(logicalPaneID)
 	projection, projected := d.projectedManagedAgentIdentity(projectID, sessionID, logicalPaneID)
-	identity, found, submitted := projection.identity, projected, projection.acknowledged
-	if !projected || !projection.acknowledged {
+	projectionMatchesIncarnation := projected && strings.TrimSpace(projection.identity.AgentIncarnation) == strings.TrimSpace(incarnation)
+	identity, found, submitted := projection.identity, projectionMatchesIncarnation, projectionMatchesIncarnation && projection.acknowledged
+	if !projectionMatchesIncarnation || !projection.acknowledged {
 		durableIdentity, durableFound, err := d.readManagedAgentIdentity(ctx, store, projectID, sessionID, logicalPaneID)
 		if err != nil {
-			if !projected {
+			if !projectionMatchesIncarnation {
 				return sessionStartAcknowledgementSample{}, fmt.Errorf("load managed agent acknowledgement: %w", err)
 			}
 		} else if durableFound {

@@ -147,6 +147,9 @@ func (w *daemonRuntimeProjectionWriter) ApplyPhysicalSessionObservationAndPublis
 	}
 	unlock()
 	w.logPhase(ctx, projectID, operation, "persist", persistStartedAt, err)
+	if err == nil && applied && daemonstate.NormalizeSessionState(observation.ObservedState) == daemonstate.SessionStateStopped {
+		w.d.purgeManagedAgentIdentityProjectionForSession(projectID, observation.SessionID)
+	}
 	if err != nil || !applied {
 		return changed, applied, nil, err
 	}

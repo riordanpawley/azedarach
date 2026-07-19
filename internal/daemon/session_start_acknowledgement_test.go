@@ -179,6 +179,40 @@ func TestInitialManagedAgentAcknowledgementConvergesFromProjectionWhenDurableRea
 	}
 }
 
+func TestInitialManagedAgentAcknowledgementIgnoresStaleAcknowledgedProjectionFromOtherIncarnation(t *testing.T) {
+	d, store, runner := newSessionStartAcknowledgementTestDaemon(t)
+	runner.sessions["az-1"] = true
+	runner.panes["az-1"] = []string{"%7"}
+	runner.panePIDs["az-1"] = 222
+	runner.currentCommand = "codex"
+	boundAt := time.Date(2026, time.July, 19, 10, 30, 0, 0, time.UTC)
+	d.recordManagedAgentIdentityProjection(daemonstate.ManagedAgentIdentity{
+		ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "7",
+		PanePID: 111, AgentIncarnation: "incarnation-a", ObservedAt: boundAt, UpdatedAt: boundAt.Add(time.Second),
+	}, true)
+	current := daemonstate.ManagedAgentIdentity{
+		ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "7",
+		PanePID: 222, AgentIncarnation: "incarnation-b", ObservedAt: boundAt.Add(2 * time.Second),
+	}
+	if err := store.UpsertManagedAgentIdentity(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+	acknowledgedAt := current.ObservedAt.Add(time.Second)
+	acknowledged, err := store.AcknowledgeManagedAgentIdentity(context.Background(), current, acknowledgedAt)
+	if err != nil || !acknowledged {
+		t.Fatalf("durable B acknowledgement: acknowledged=%t err=%v", acknowledged, err)
+	}
+	waitCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := d.waitForInitialManagedAgentAcknowledgementWithPoll(waitCtx, store, "project", "az-1", "agent", "incarnation-b", sessionPromptHandoff{PromptPath: filepath.Join(t.TempDir(), "consumed.prompt")}, make(chan time.Time)); err != nil {
+		t.Fatalf("durable B acknowledgement hidden by stale local A: %v", err)
+	}
+	projected, found := d.projectedManagedAgentIdentity("project", "az-1", "agent")
+	if !found || !projected.acknowledged || projected.identity.AgentIncarnation != "incarnation-b" {
+		t.Fatalf("converged projection = %+v found=%t", projected, found)
+	}
+}
+
 func TestInitialManagedAgentAcknowledgementDoesNotTreatFirstInventoryOmissionAsExit(t *testing.T) {
 	d, store, runner := newSessionStartAcknowledgementTestDaemon(t)
 	runner.sessions["az-1"] = true

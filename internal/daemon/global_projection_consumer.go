@@ -64,6 +64,9 @@ func (d *Daemon) ensureUserProjectionConsumers(ctx context.Context, projects []a
 		stoppedProjectIDs = append(stoppedProjectIDs, projectID)
 	}
 	d.userProjectionConsumerMu.Unlock()
+	for _, projectID := range stoppedProjectIDs {
+		d.purgeManagedAgentIdentityProjectionForProject(projectID)
+	}
 	for _, handle := range stopped {
 		if handle.done == nil {
 			continue

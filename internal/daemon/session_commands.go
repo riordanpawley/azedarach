@@ -2791,6 +2791,7 @@ func (d *Daemon) writeSessionStopProjection(projectID, sessionID, issueID string
 			return fmt.Errorf("stop physical session observation %s: %w", row.ID, err)
 		}
 	}
+	d.purgeManagedAgentIdentityProjectionForSession(projectID, sessionID)
 	return nil
 }
 

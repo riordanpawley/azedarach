@@ -603,6 +603,14 @@ func TestEnsureUserProjectionConsumersCancelsRemovedProject(t *testing.T) {
 			"removed": {path: "/removed", cancel: consumerCancel, done: done},
 		},
 	}
+	d.recordManagedAgentIdentityProjection(daemonstate.ManagedAgentIdentity{
+		ProjectID: "removed", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "7",
+		PanePID: 123, AgentIncarnation: "removed-incarnation", ObservedAt: time.Now().UTC(),
+	}, true)
+	d.recordManagedAgentIdentityProjection(daemonstate.ManagedAgentIdentity{
+		ProjectID: "retained", SessionID: "az-2", LogicalPaneID: "agent", TmuxPaneID: "8",
+		PanePID: 456, AgentIncarnation: "retained-incarnation", ObservedAt: time.Now().UTC(),
+	}, true)
 	d.ensureUserProjectionConsumers(context.Background(), nil)
 	select {
 	case <-drained:
@@ -616,6 +624,12 @@ func TestEnsureUserProjectionConsumersCancelsRemovedProject(t *testing.T) {
 	}
 	if d.activeProjectReadMaterializer("removed") != nil {
 		t.Fatal("removed project current-state materializer survived")
+	}
+	if _, found := d.projectedManagedAgentIdentity("removed", "az-1", "agent"); found {
+		t.Fatal("removed project retained managed-agent identity projection")
+	}
+	if _, found := d.projectedManagedAgentIdentity("retained", "az-2", "agent"); !found {
+		t.Fatal("project-prefix purge removed unrelated project projection")
 	}
 }
 
