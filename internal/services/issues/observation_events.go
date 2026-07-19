@@ -304,6 +304,7 @@ type LatestIssueObservationEventOptions struct {
 	SourceCommands          []string
 	CommandOutcomePairs     []IssueObservationCommandOutcomePair
 	RequiredPayloadTextKeys []string
+	PayloadTextEquals       map[string]string
 	CurrentReviewEpoch      bool
 	InvalidatedByStatuses   []domain.Status
 }
@@ -1231,6 +1232,29 @@ func (c *Client) ListLatestIssueObservationEventsByIssue(ctx context.Context, op
 		path := `$."` + strings.ReplaceAll(key, `"`, `\"`) + `"`
 		clauses = append(clauses, "json_type(payload_json, ?) = 'text' AND NULLIF(TRIM(CAST(json_extract(payload_json, ?) AS TEXT)), '') IS NOT NULL")
 		args = append(args, path, path)
+	}
+	payloadEquals := make(map[string]string, len(opts.PayloadTextEquals))
+	for rawKey, rawValue := range opts.PayloadTextEquals {
+		key := strings.TrimSpace(rawKey)
+		if key == "" {
+			continue
+		}
+		value := strings.TrimSpace(rawValue)
+		if existing, found := payloadEquals[key]; found && existing != value {
+			return nil, c.wrapError("list-latest-observation-events-by-issue", "", fmt.Errorf("conflicting payload text equality filters for %q", key))
+		}
+		payloadEquals[key] = value
+	}
+	payloadEqualsKeys := make([]string, 0, len(payloadEquals))
+	for key := range payloadEquals {
+		payloadEqualsKeys = append(payloadEqualsKeys, key)
+	}
+	sort.Strings(payloadEqualsKeys)
+	for _, key := range payloadEqualsKeys {
+		value := payloadEquals[key]
+		path := `$."` + strings.ReplaceAll(key, `"`, `\"`) + `"`
+		clauses = append(clauses, "json_type(payload_json, ?) = 'text' AND TRIM(CAST(json_extract(payload_json, ?) AS TEXT)) = ?")
+		args = append(args, path, path, value)
 	}
 	epochStatuses := make([]string, 0, len(opts.InvalidatedByStatuses)+1)
 	seenEpochStatuses := make(map[string]struct{}, len(opts.InvalidatedByStatuses)+1)
