@@ -138,6 +138,11 @@ type OrchestrationReview struct {
 	HeadRevision       string                         `json:"head_revision,omitempty"`
 	DiffScope          string                         `json:"diff_scope,omitempty"`
 	DiffRange          string                         `json:"diff_range,omitempty"`
+	ReviewMode         string                         `json:"review_mode,omitempty"`
+	DeltaBaseRevision  string                         `json:"delta_base_revision,omitempty"`
+	ReviewFallback     string                         `json:"review_fallback_reason,omitempty"`
+	PriorFindings      []OrchestrationReviewFinding   `json:"prior_findings,omitempty"`
+	AffectedInvariants []string                       `json:"affected_invariants,omitempty"`
 	DiffStat           string                         `json:"diff_stat,omitempty"`
 	ExecutionOwner     string                         `json:"execution_owner,omitempty"`
 	OrchestrationOwner string                         `json:"orchestration_owner,omitempty"`

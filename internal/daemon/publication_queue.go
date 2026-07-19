@@ -836,11 +836,12 @@ func (d *Daemon) publicationCandidateAdmission(projectID, operationID, claimToke
 			}
 		}
 		acquire := func(id string) (domain.ValidationRequest, error) {
+			profile := d.publicationValidationProfile(context.Background(), operation, candidateRevision)
 			return d.operationRuntime.store.AcquireValidation(context.Background(), domain.ValidationAcquire{
 				RequestID: id, LeaseToken: leaseToken, ProjectID: operation.ProjectID,
 				Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeRepository, Purpose: domain.ValidationPurposePushGate,
 				IsolationMode: "synthetic-worktree", EnvironmentFingerprint: operation.EnvironmentFingerprint,
-				Override: domain.ValidationOverrideNone, Profile: "publication:" + operation.PolicyVersion,
+				Override: domain.ValidationOverrideNone, Profile: profile,
 				Command: operation.ValidationCommand, SourceRevision: candidateRevision, TTL: defaultValidationLeaseTTL,
 			}, time.Now().UTC())
 		}
@@ -928,6 +929,31 @@ func (d *Daemon) publicationCandidateAdmission(projectID, operationID, claimToke
 		}
 		return false, finish, nil
 	}
+}
+
+// publicationValidationProfile preserves the queue's policy-derived profile
+// unless an exact completed reviewer-owned execution proves that the same
+// command and environment already ran for this candidate. Selecting that
+// execution's profile lets validation admission apply its existing typed
+// ticket-review-to-repository-publication compatibility rule; no looser
+// command, revision, environment, or authority match is introduced here.
+func (d *Daemon) publicationValidationProfile(ctx context.Context, operation domain.PublicationOperation, candidateRevision string) string {
+	fallback := "publication:" + operation.PolicyVersion
+	if d == nil || d.operationRuntime == nil || d.operationRuntime.store == nil {
+		return fallback
+	}
+	review, err := d.operationRuntime.store.LatestReviewValidation(ctx, operation.ProjectID, operation.IssueID, time.Now().UTC(), defaultValidationLeaseTTL)
+	if err != nil || review == nil || review.State != domain.ValidationRequestCompleted || !review.Evidence.Present {
+		return fallback
+	}
+	if review.SourceRevision != strings.TrimSpace(candidateRevision) ||
+		strings.Join(strings.Fields(review.Command), " ") != strings.Join(strings.Fields(operation.ValidationCommand), " ") ||
+		review.EnvironmentFingerprint != operation.EnvironmentFingerprint || review.Override == domain.ValidationOverrideEmergency ||
+		review.Scope != domain.ValidationScopeTicket || review.Purpose != domain.ValidationPurposeReviewEvidence ||
+		strings.TrimSpace(review.ReviewerID) == "" || review.ReviewEpochEventID <= 0 {
+		return fallback
+	}
+	return review.Profile
 }
 
 func (d *Daemon) transitionPublicationOperation(ctx context.Context, current domain.PublicationOperation, claimToken string, state domain.PublicationOperationState, mutate func(*operationstore.PublicationOperationUpdate)) (domain.PublicationOperation, error) {

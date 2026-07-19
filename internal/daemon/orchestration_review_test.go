@@ -31,7 +31,7 @@ func TestProjectReviewQueuePrioritizesReviewAndExcludesForeignOwnedWork(t *testi
 	repoDir := t.TempDir()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
-	first := createReviewTask(t, ctx, client, domain.P1, "orchestrator")
+	first := createReviewTask(t, ctx, client, domain.P1, "worker-a")
 	foreign := createReviewTask(t, ctx, client, domain.P2, "worker-b")
 	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", foreign, issues.OwnershipClaimParams{OwnerID: "another-orchestrator", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseOrchestration}); err != nil {
 		t.Fatal(err)
@@ -93,8 +93,72 @@ func TestReviewInspectionKeepsStableScopeAcrossCandidateRevisions(t *testing.T) 
 	if first.DiffRange != "base-revision..head-revision-1" || second.DiffRange != "base-revision..head-revision-2" {
 		t.Fatalf("diff ranges = first:%q second:%q", first.DiffRange, second.DiffRange)
 	}
+	if first.ReviewMode != "full" || first.ReviewFallback != "initial_review" {
+		t.Fatalf("initial review selection = mode:%q fallback:%q", first.ReviewMode, first.ReviewFallback)
+	}
 	if incremental := first.HeadRevision + ".." + second.HeadRevision; incremental != "head-revision-1..head-revision-2" {
 		t.Fatalf("incremental range = %q, want prior reviewed head through current head", incremental)
+	}
+}
+
+func TestReviewInspectionUsesVerifiedReturnedCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker")
+	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission, err := client.CaptureReviewAdmissionPin(ctx, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: "reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview, ExpectedReviewAdmission: &admission, ReviewSourceOID: "head-revision-1"}); err != nil {
+		t.Fatal(err)
+	}
+	oldScope := "issue:" + issueID + ":base:main@base-revision"
+	returned, err := client.AppendIssueObservationEventWithReviewAdmission(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-return",
+		Payload: map[string]any{
+			"outcome": "returned", "actor_id": "reviewer", "review_diff_base_revision": "base-revision",
+			"review_head_revision": "head-revision-1", "review_diff_scope": oldScope,
+			"findings": []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "repair", Validation: []string{"session.activity_convergence"}}},
+		},
+	}, admission, "", "reviewer")
+	if err != nil || returned == 0 {
+		t.Fatalf("record returned review = (%+v,%v)", returned, err)
+	}
+	if _, err := client.ReleaseOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: "reviewer", Purpose: domain.CoordinationLeaseReview}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusInProgress); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Update(ctx, issueID, domain.StatusInReview); err != nil {
+		t.Fatal(err)
+	}
+	task, err = client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.git = git.NewClient(&revisionReviewGitRunner{headRevision: "head-revision-2"}, slog.Default())
+	inspection := (daemonOrchestrationAuthority{daemon: d}).reviewInspection(ctx, "project", repoDir, "reviewer", task, map[string]domain.Task{issueID: task}, map[string]git.Worktree{issueID: {IssueID: issueID, Path: repoDir, Branch: "feature/review"}})
+	if inspection.ReviewMode != "incremental" || inspection.DeltaBaseRevision != "head-revision-1" || inspection.DiffRange != "head-revision-1..head-revision-2" || inspection.ReviewFallback != "" {
+		t.Fatalf("incremental selection = %+v", inspection)
+	}
+	if len(inspection.PriorFindings) != 1 || !slices.Contains(inspection.AffectedInvariants, "session.activity_convergence") {
+		t.Fatalf("checkpoint context = findings:%+v invariants:%v", inspection.PriorFindings, inspection.AffectedInvariants)
+	}
+}
+
+func TestReviewCoordinationRequiresIndependentActor(t *testing.T) {
+	now := time.Now().UTC()
+	inspection := reviewCoordinationInspection(domain.Task{ID: "issue", Ownership: &domain.IssueOwnership{OwnerID: "worker", OwnerKind: "agent", ClaimedAt: now}}, "WORKER")
+	if inspection.Actionable || !strings.Contains(strings.Join(inspection.Reasons, " "), "independent-review-required") {
+		t.Fatalf("same-actor inspection = %+v", inspection)
 	}
 }
 
@@ -109,6 +173,10 @@ func (r *revisionReviewGitRunner) Run(_ context.Context, args ...string) (string
 		return "base-revision\n", nil
 	case strings.Contains(command, " rev-parse --verify HEAD"):
 		return r.headRevision + "\n", nil
+	case strings.Contains(command, " rev-parse --verify head-revision-1^{commit}"):
+		return "head-revision-1\n", nil
+	case strings.Contains(command, " merge-base --is-ancestor head-revision-1 "+r.headRevision):
+		return "", nil
 	case strings.Contains(command, " diff "):
 		return "1 file changed, 1 insertion(+)\n", nil
 	default:
@@ -873,7 +941,7 @@ func TestProjectReviewQueueRefreshesCrossProcessReviewLease(t *testing.T) {
 	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
 	writer := newMigratedIssueClientAtPath(t, path, slog.Default())
 	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
-	issueID := createReviewTask(t, ctx, reader, domain.P1, "orchestrator")
+	issueID := createReviewTask(t, ctx, reader, domain.P1, "worker")
 	d := newOrchestrationReviewTestDaemon(repoDir, reader)
 	authority := d.orchestrationAuthority()
 	if err := d.ensureLegacyMailboxObservationProjection(ctx, "project", repoDir); err != nil {

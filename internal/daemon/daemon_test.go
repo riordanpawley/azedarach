@@ -96,7 +96,7 @@ func TestCommandLogsFailure(t *testing.T) {
 }
 
 func TestCommandRejectsStaleClientProtocolWithRefreshPath(t *testing.T) {
-	if protocol.CurrentVersion != 59 {
+	if protocol.CurrentVersion != 60 {
 		t.Fatalf("protocol version = %d, want 59", protocol.CurrentVersion)
 	}
 	d := &Daemon{}

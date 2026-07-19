@@ -358,7 +358,15 @@ func TestPublicationRecoversCrashAfterExactApplyBeforeTaskReceipt(t *testing.T) 
 	}
 	evidence, err := restartedRuntime.store.PublicationEvidenceSnapshot(ctx, projectID, issueID)
 	requireNoError(t, err)
-	if len(evidence.Evidence) != 1 || evidence.Evidence[0].Layer != domain.PublicationEvidenceMergeResult || evidence.Evidence[0].BaseRevision != original.BaseRevision || evidence.Evidence[0].SourceRevision != original.SourceRevision || evidence.Evidence[0].ResultRevision != original.CandidateRevision {
+	var mergeEvidence domain.PublicationEvidence
+	found := false
+	for _, candidate := range evidence.Evidence {
+		if candidate.Layer == domain.PublicationEvidenceMergeResult {
+			mergeEvidence, found = candidate, true
+			break
+		}
+	}
+	if !found || mergeEvidence.BaseRevision != original.BaseRevision || mergeEvidence.SourceRevision != original.SourceRevision || mergeEvidence.ResultRevision != original.CandidateRevision {
 		t.Fatalf("recovered merge-result evidence = %+v, want exact publication identity", evidence.Evidence)
 	}
 }
@@ -1344,6 +1352,36 @@ func TestPublicationValidationWaitReconcilesExpiredPriorExecutor(t *testing.T) {
 	reconciled, err := runtime.store.ValidationRequest(context.Background(), runtime.canonicalProject, request.RequestID)
 	if err != nil || reconciled.State != domain.ValidationRequestExpired {
 		t.Fatalf("reconciled prior validation = (%+v,%v), want expired", reconciled, err)
+	}
+}
+
+func TestPublicationValidationProfileReusesCompatibleExactReviewEvidence(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	t.Cleanup(func() { _ = runtime.Close() })
+	now := time.Now().UTC()
+	request, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{
+		RequestID: "review-exact", LeaseToken: "review-token", ProjectID: runtime.canonicalProject, IssueID: "issue",
+		IssuePriority: domain.P1, IssuePriorityResolved: true, Class: domain.ValidationClassAggregate,
+		Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence,
+		IsolationMode: "synthetic-worktree", EnvironmentFingerprint: "portable-env", Override: domain.ValidationOverrideNone,
+		Profile: "portable-review", Command: "npm run verify", SourceRevision: "candidate", ReviewerID: "reviewer", ReviewEpochEventID: 42, TTL: time.Minute,
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := domain.ValidationEvidence{Held: true, Present: true, RequestID: request.RequestID, Class: request.Class, Scope: request.Scope, Purpose: request.Purpose, Execution: request.Execution, Profile: request.Profile, SourceRevision: request.SourceRevision}
+	if _, err := runtime.store.FinishValidation(ctx, request.RequestID, "review-token", domain.ValidationRequestCompleted, "clean", evidence, now.Add(time.Second), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{operationRuntime: runtime}
+	operation := domain.PublicationOperation{ProjectID: runtime.canonicalProject, IssueID: "issue", PolicyVersion: "v1", ValidationCommand: "npm run verify", EnvironmentFingerprint: "portable-env"}
+	if got := d.publicationValidationProfile(ctx, operation, "candidate"); got != "portable-review" {
+		t.Fatalf("compatible profile = %q, want portable-review", got)
+	}
+	if got := d.publicationValidationProfile(ctx, operation, "different"); got != "publication:v1" {
+		t.Fatalf("incompatible revision profile = %q, want publication:v1", got)
 	}
 }
 

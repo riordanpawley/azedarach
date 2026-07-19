@@ -266,6 +266,49 @@ func TestPublicationEvidenceCommandsRetainPatchAcrossUnrelatedBaseMovement(t *te
 	assert.True(t, evaluated.Assessments[0].BaseMovementOnly)
 }
 
+func TestAcceptedIndependentReviewRecordsPatchEvidenceIdempotently(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	runPublicationGit(t, repoDir, "init", "-b", "main")
+	runPublicationGit(t, repoDir, "config", "user.email", "test@example.com")
+	runPublicationGit(t, repoDir, "config", "user.name", "Test")
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".azedarach", "config.json"), []byte(`{
+  "publicationEvidence": {"policyVersion":"portable-v1","activePathProfiles":[],"exactBaseSurfaces":{},"dependencies":{}}
+}`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("issues.db*\n.azedarach/*\n!.azedarach/config.json\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "base.txt"), []byte("base\n"), 0o644))
+	runPublicationGit(t, repoDir, "add", ".")
+	runPublicationGit(t, repoDir, "commit", "-m", "base")
+	base := runPublicationGit(t, repoDir, "rev-parse", "HEAD")
+	runPublicationGit(t, repoDir, "checkout", "-b", "feature")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "feature.txt"), []byte("portable\n"), 0o644))
+	runPublicationGit(t, repoDir, "add", "feature.txt")
+	runPublicationGit(t, repoDir, "commit", "-m", "feature")
+	head := runPublicationGit(t, repoDir, "rev-parse", "HEAD")
+
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "portable review", Type: domain.TypeFeature, Priority: domain.P1, Status: domain.StatusInReview})
+	require.NoError(t, err)
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = runtime.Close() })
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()}, operationRuntime: runtime,
+		issueClientsByProject: map[string]*issues.Client{"project": client}, publicationEvidenceCache: map[string]domain.PublicationEvidenceSnapshot{},
+		git: gitservice.NewClient(gitservice.NewExecRunner(repoDir), slog.Default()),
+	}
+	inspection := protocol.OrchestrationReview{IssueID: issueID, ReviewEpochEventID: 17, WorktreePath: repoDir, SourceOID: head, DiffBaseRevision: base}
+	require.NoError(t, d.recordAcceptedPatchReviewEvidence(ctx, "project", "independent-reviewer", inspection))
+	require.NoError(t, d.recordAcceptedPatchReviewEvidence(ctx, "project", "independent-reviewer", inspection))
+	snapshot, err := runtime.store.PublicationEvidenceSnapshot(ctx, "project", issueID)
+	require.NoError(t, err)
+	require.Len(t, snapshot.Evidence, 1)
+	assert.Equal(t, domain.PublicationEvidencePatchReview, snapshot.Evidence[0].Layer)
+	assert.Equal(t, "reviewer:independent-reviewer", snapshot.Evidence[0].Producer)
+	assert.Equal(t, []string{"feature.txt"}, snapshot.Evidence[0].Coverage.Paths)
+}
+
 func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
