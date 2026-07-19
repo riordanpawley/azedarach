@@ -2424,6 +2424,7 @@ func (d *Daemon) repairStaleSessionRuntimeProjections(ctx context.Context, proje
 		return err
 	}
 	for _, projectionProjectID := range projectIDs {
+		canonicalProjectionProjectID := d.canonicalProjectID(projectionProjectID)
 		sessions, err := store.ListSessionStates(ctx, projectionProjectID)
 		if err != nil {
 			return err
@@ -2439,7 +2440,7 @@ func (d *Daemon) repairStaleSessionRuntimeProjections(ctx context.Context, proje
 			if err := store.UpsertSessionState(ctx, projectionProjectID, session); err != nil {
 				return err
 			}
-			if _, _, err := d.applyPhysicalSessionObservationWithProjectionCleanup(ctx, store, projectionProjectID, daemonstate.PhysicalSessionObservation{
+			if _, _, err := d.applyPhysicalSessionObservationWithProjectionCleanup(ctx, store, projectionProjectID, canonicalProjectionProjectID, daemonstate.PhysicalSessionObservation{
 				ProjectID: projectionProjectID, SessionID: session.ID,
 				ObservedState: daemonstate.SessionStateStopped, UpdatedAt: session.UpdatedAt,
 			}); err != nil {
@@ -2478,6 +2479,7 @@ func (d *Daemon) repairStaleRuntimeProjections(ctx context.Context, projectID, t
 	worktreePathsLoaded := false
 	worktreePathsLoadAttempted := false
 	for _, projectionProjectID := range projectIDs {
+		canonicalProjectionProjectID := d.canonicalProjectID(projectionProjectID)
 		worktrees, err := store.ListWorktreeStates(ctx, projectionProjectID)
 		if err != nil {
 			return err
@@ -2529,7 +2531,7 @@ func (d *Daemon) repairStaleRuntimeProjections(ctx context.Context, projectID, t
 					if err := store.UpsertSessionState(ctx, projectionProjectID, session); err != nil {
 						return err
 					}
-					if _, _, err := d.applyPhysicalSessionObservationWithProjectionCleanup(ctx, store, projectionProjectID, daemonstate.PhysicalSessionObservation{
+					if _, _, err := d.applyPhysicalSessionObservationWithProjectionCleanup(ctx, store, projectionProjectID, canonicalProjectionProjectID, daemonstate.PhysicalSessionObservation{
 						ProjectID: projectionProjectID, SessionID: session.ID,
 						ObservedState: daemonstate.SessionStateStopped, UpdatedAt: session.UpdatedAt,
 					}); err != nil {

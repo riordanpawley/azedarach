@@ -62,11 +62,11 @@ func newRuntimeProjectionWriter(d *Daemon) *daemonRuntimeProjectionWriter {
 	return &daemonRuntimeProjectionWriter{d: d}
 }
 
-func (d *Daemon) applyPhysicalSessionObservationWithProjectionCleanup(ctx context.Context, store *daemonstate.RuntimeStateStore, projectID string, observation daemonstate.PhysicalSessionObservation) ([]daemonstate.Session, bool, error) {
+func (d *Daemon) applyPhysicalSessionObservationWithProjectionCleanup(ctx context.Context, store *daemonstate.RuntimeStateStore, projectID, canonicalProjectID string, observation daemonstate.PhysicalSessionObservation) ([]daemonstate.Session, bool, error) {
 	changed, applied, err := store.ApplyPhysicalSessionObservation(ctx, observation)
 	if err == nil && applied && daemonstate.NormalizeSessionState(observation.ObservedState) == daemonstate.SessionStateStopped {
 		d.purgeManagedAgentIdentityProjectionForSession(projectID, observation.SessionID)
-		if canonicalProjectID := d.canonicalProjectID(projectID); canonicalProjectID != protocol.NormalizeProjectID(projectID) {
+		if canonicalProjectID = protocol.NormalizeProjectID(canonicalProjectID); canonicalProjectID != protocol.NormalizeProjectID(projectID) {
 			d.purgeManagedAgentIdentityProjectionForSession(canonicalProjectID, observation.SessionID)
 		}
 	}
@@ -149,7 +149,7 @@ func (w *daemonRuntimeProjectionWriter) ApplyPhysicalSessionObservationAndPublis
 		return nil, false, nil, err
 	}
 	persistStartedAt := time.Now()
-	changed, applied, err := w.d.applyPhysicalSessionObservationWithProjectionCleanup(ctx, store, projectID, observation)
+	changed, applied, err := w.d.applyPhysicalSessionObservationWithProjectionCleanup(ctx, store, projectID, projectID, observation)
 	revisions := make([]uint64, len(changed))
 	if err == nil && applied && w.d.runtimeProjectionCoalescer == nil {
 		for i := range changed {
