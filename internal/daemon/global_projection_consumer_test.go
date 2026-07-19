@@ -815,7 +815,8 @@ func TestGlobalProjectionRealPathsDrainCanceledContentionAndConverge(t *testing.
 	missingRoot := t.TempDir()
 	missingProject := projectForRoot(missingRoot, "missing-source")
 	missingID := appconfig.RegisteredProjectID(missingProject)
-	missingClient := issues.NewClientAtPath(filepath.Join(missingRoot, ".azedarach", "azedarach.db"), logger)
+	missingDBPath := filepath.Join(missingRoot, ".azedarach", "azedarach.db")
+	missingClient := issues.NewClientAtPath(missingDBPath, logger)
 	if err := missingClient.OpenProjectionDeltaStore(); err != nil {
 		t.Fatal(err)
 	}
@@ -840,10 +841,31 @@ func TestGlobalProjectionRealPathsDrainCanceledContentionAndConverge(t *testing.
 	}
 
 	diagnostics := d.sqliteStoreDiagnostics()
-	if len(diagnostics) != 6 {
-		t.Fatalf("SQLite handle count = %d, want 6 registered authority handles", len(diagnostics))
+	projectADBPath := filepath.Join(rootA, ".azedarach", "azedarach.db")
+	projectBDBPath := filepath.Join(rootB, ".azedarach", "azedarach.db")
+	expectedAuthorities := map[string][]string{
+		projectADBPath + "\x00issues":                   {projectAID},
+		projectADBPath + "\x00runtime":                  {projectAID},
+		projectADBPath + "\x00runtime-managed-identity": {projectAID},
+		projectBDBPath + "\x00issues":                   {projectBID},
+		projectBDBPath + "\x00runtime":                  {projectBID},
+		projectBDBPath + "\x00runtime-managed-identity": {projectBID},
+		missingDBPath + "\x00issues":                    {missingID},
+		userDBPath + "\x00user_projection":              nil,
+	}
+	if len(diagnostics) != len(expectedAuthorities) {
+		t.Fatalf("SQLite authority count = %d, want %d: %+v", len(diagnostics), len(expectedAuthorities), diagnostics)
 	}
 	for _, diagnostic := range diagnostics {
+		key := diagnostic.DBPath + "\x00" + diagnostic.Owner
+		expectedProjects, found := expectedAuthorities[key]
+		if !found {
+			t.Fatalf("unexpected SQLite authority %q: %+v", key, diagnostic)
+		}
+		if strings.Join(diagnostic.ProjectIDs, "\x00") != strings.Join(expectedProjects, "\x00") {
+			t.Fatalf("SQLite authority %q projects = %v, want %v", key, diagnostic.ProjectIDs, expectedProjects)
+		}
+		delete(expectedAuthorities, key)
 		if diagnostic.InUse != 0 || (diagnostic.Open && (diagnostic.MaxOpenConnections <= 0 || diagnostic.OpenConnections > diagnostic.MaxOpenConnections)) || (!diagnostic.Open && diagnostic.OpenConnections != 0) {
 			t.Fatalf("unbounded or retained SQLite handles: %+v", diagnostic)
 		}
