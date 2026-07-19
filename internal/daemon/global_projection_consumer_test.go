@@ -2,12 +2,14 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,11 +17,13 @@ import (
 
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/daemon/userstore"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
+	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 func TestGlobalProjectionTerminalSessionSuppressionConvergesBootstrapAndIncremental(t *testing.T) {
@@ -612,6 +616,284 @@ func TestEnsureUserProjectionConsumersCancelsRemovedProject(t *testing.T) {
 	}
 	if d.activeProjectReadMaterializer("removed") != nil {
 		t.Fatal("removed project current-state materializer survived")
+	}
+}
+
+func TestGlobalProjectionRealPathsDrainCanceledContentionAndConverge(t *testing.T) {
+	ctx := context.Background()
+	home, rootA, rootB := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	projectForRoot := func(root, name string) appconfig.Project {
+		t.Helper()
+		projectID, err := appconfig.ProjectIDForRoot(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return appconfig.Project{ID: projectID, Name: name, Path: root}
+	}
+	projectA, projectB := projectForRoot(rootA, "contention-a"), projectForRoot(rootB, "contention-b")
+	projectAID, projectBID := appconfig.RegisteredProjectID(projectA), appconfig.RegisteredProjectID(projectB)
+
+	openProject := func(root string) (*issues.Client, *daemonstate.RuntimeStateStore) {
+		t.Helper()
+		dbPath := filepath.Join(root, ".azedarach", "azedarach.db")
+		client := issues.NewClientAtPath(dbPath, logger)
+		if err := client.OpenProjectionDeltaStore(); err != nil {
+			t.Fatal(err)
+		}
+		runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, logger)
+		t.Cleanup(func() {
+			_ = runtimeStore.Close()
+			_ = client.CloseDB()
+		})
+		return client, runtimeStore
+	}
+	clientA, runtimeA := openProject(rootA)
+	clientB, runtimeB := openProject(rootB)
+	issueA, err := clientA.Create(ctx, issues.CreateTaskParams{Title: "session observation", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueB, err := clientB.Create(ctx, issues.CreateTaskParams{Title: "worktree observation", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	userDBPath := filepath.Join(home, ".azedarach", "azedarach.db")
+	rootStore, err := userstore.Open(userDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rootStore.Close() })
+	d := &Daemon{
+		cfg:                    Config{RepoDir: rootA, Logger: logger},
+		hub:                    publish.NewHub(16, 8, logger),
+		userStore:              rootStore,
+		sessionStore:           daemonstate.NewStore(),
+		issues:                 clientA,
+		issueClientsByProject:  map[string]*issues.Client{projectAID: clientA, projectBID: clientB},
+		issueClientsByRoot:     map[string]*issues.Client{daemonStoreRootKey(rootA): clientA, daemonStoreRootKey(rootB): clientB},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectAID: runtimeA, projectBID: runtimeB},
+		runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{daemonStoreRootKey(rootA): runtimeA, daemonStoreRootKey(rootB): runtimeB},
+		materializers:          map[string]*projectReadMaterializer{},
+		materializersStarted:   true,
+		materializersContext:   ctx,
+	}
+	for _, project := range []appconfig.Project{projectA, projectB} {
+		if err := d.refreshRegisteredUserProject(ctx, project); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for projectID, client := range map[string]*issues.Client{projectAID: clientA, projectBID: clientB} {
+		if _, err := d.ensureProjectReadMaterializer(ctx, projectID, client); err != nil {
+			t.Fatalf("bootstrap materializer %s: %v", projectID, err)
+		}
+	}
+
+	sessionID := naming.CanonicalSessionID(projectAID, issueA)
+	now := time.Date(2026, time.July, 19, 11, 12, 13, 0, time.UTC)
+	if err := runtimeA.UpsertSessionState(ctx, projectAID, daemonstate.Session{
+		ID: sessionID, IssueID: issueA, Role: daemonstate.SessionRoleWorker,
+		ScopeKind: daemonstate.SessionScopeIssue, ScopeID: issueA,
+		State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning,
+		Activity: "idle", ActivitySource: "hooks", UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	holderEntered := make(chan struct{})
+	releaseHolder := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-releaseHolder:
+		default:
+			close(releaseHolder)
+		}
+	})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderCtx := sqliteutil.ContextWithWriteOperation(ctx, "test.root_projection_holder")
+		holderDone <- sqliteutil.WithWriteLockContext(holderCtx, userDBPath, func(context.Context) error {
+			close(holderEntered)
+			<-releaseHolder
+			return nil
+		})
+	}()
+	<-holderEntered
+
+	staleReconcileCtx, cancelStaleReconcile := context.WithCancel(ctx)
+	staleMaterializeCtx, cancelStaleMaterialize := context.WithCancel(ctx)
+	staleReconcileDone := make(chan error, 1)
+	staleMaterializeDone := make(chan error, 1)
+	go func() { staleReconcileDone <- d.refreshRegisteredUserProject(staleReconcileCtx, projectA) }()
+	go func() {
+		staleMaterializeDone <- d.refreshProjectReadRuntimeForIssues(staleMaterializeCtx, projectBID, []string{issueB})
+	}()
+	for sqliteutil.WriteLockResourceDiagnostics(userDBPath).Waiters != 2 {
+		runtime.Gosched()
+	}
+	cancelStaleReconcile()
+	cancelStaleMaterialize()
+	for name, result := range map[string]<-chan error{
+		"startup reconcile":       staleReconcileDone,
+		"runtime materialization": staleMaterializeDone,
+	} {
+		if err := <-result; !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled %s error = %v, want context.Canceled", name, err)
+		}
+	}
+	if diagnostic := sqliteutil.WriteLockResourceDiagnostics(userDBPath); diagnostic.Waiters != 0 || diagnostic.Holder != "test.root_projection_holder" {
+		t.Fatalf("canceled real-path waiters remained: %+v", diagnostic)
+	}
+
+	// Production daemon construction installs this writer before concurrent
+	// observation loops start; mirror that lifecycle in the hand-built fixture.
+	runtimeWriter := d.runtimeProjectionStateWriter()
+	observationDone := make(chan error, 2)
+	go func() {
+		observationDone <- d.persistObservedRuntimeProjection(ctx, projectAID, protocol.Metadata{ProjectID: naming.ProjectID(projectAID)}, daemonstate.Session{
+			ID: sessionID, IssueID: issueA, ObservedState: daemonstate.SessionStateRunning,
+			Activity: "busy", ActivitySource: "hooks", UpdatedAt: now.Add(time.Second),
+		})
+	}()
+	worktreePath := filepath.Join(rootB, ".azedarach", "worktrees", issueB)
+	go func() {
+		observationDone <- runtimeWriter.PersistWorktreeProjection(ctx, projectBID, issueB, worktreePath, "review/"+issueB)
+	}()
+	for sqliteutil.WriteLockResourceDiagnostics(userDBPath).Waiters != 2 {
+		runtime.Gosched()
+	}
+	close(releaseHolder)
+	if err := <-holderDone; err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := <-observationDone; err != nil {
+			t.Fatalf("runtime observation: %v", err)
+		}
+	}
+	if diagnostic := sqliteutil.WriteLockResourceDiagnostics(userDBPath); diagnostic.Waiters != 0 || diagnostic.Holder != "" {
+		t.Fatalf("released root writer retained waiters: %+v", diagnostic)
+	}
+
+	if session, found, err := runtimeA.GetSessionState(ctx, projectAID, sessionID); err != nil || !found || session.Activity != "busy" {
+		t.Fatalf("session observation = %+v found=%t err=%v", session, found, err)
+	}
+	if worktree, found, err := runtimeB.GetWorktreeStateByIssueID(ctx, projectBID, issueB); err != nil || !found || worktree.Path != worktreePath {
+		t.Fatalf("worktree observation = %+v found=%t err=%v", worktree, found, err)
+	}
+
+	// Fresh startup work and the next recurring materialization cycle must both
+	// succeed after the canceled backlog, for both projects.
+	for _, project := range []appconfig.Project{projectA, projectB} {
+		if err := d.refreshRegisteredUserProject(ctx, project); err != nil {
+			t.Fatalf("fresh startup reconcile %s: %v", project.Name, err)
+		}
+	}
+	for projectID, issueID := range map[string]string{projectAID: issueA, projectBID: issueB} {
+		if err := d.refreshProjectReadRuntimeForIssues(ctx, projectID, []string{issueID}); err != nil {
+			t.Fatalf("next recurring materialization %s: %v", projectID, err)
+		}
+	}
+	snapshot, err := rootStore.Snapshot(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seenSession, seenWorktree := false, false
+	for _, project := range snapshot.Projects {
+		for _, task := range project.Tasks {
+			seenSession = seenSession || project.ProjectID == projectAID && task.ID.String() == issueA && task.Session != nil && task.Session.Activity == "busy"
+			seenWorktree = seenWorktree || project.ProjectID == projectBID && task.ID.String() == issueB && task.HasWorktree
+		}
+	}
+	if !seenSession || !seenWorktree {
+		t.Fatalf("root projection did not converge observations: session=%t worktree=%t", seenSession, seenWorktree)
+	}
+
+	missingRoot := t.TempDir()
+	missingProject := projectForRoot(missingRoot, "missing-source")
+	missingID := appconfig.RegisteredProjectID(missingProject)
+	missingClient := issues.NewClientAtPath(filepath.Join(missingRoot, ".azedarach", "azedarach.db"), logger)
+	if err := missingClient.OpenProjectionDeltaStore(); err != nil {
+		t.Fatal(err)
+	}
+	if err := missingClient.CloseDB(); err != nil {
+		t.Fatal(err)
+	}
+	d.issueClientsByProject[missingID] = missingClient
+	d.issueClientsByRoot[daemonStoreRootKey(missingRoot)] = missingClient
+	if err := d.refreshRegisteredUserProject(ctx, missingProject); err == nil || !strings.Contains(err.Error(), "projection delta store is not open") {
+		t.Fatalf("closed source error = %v, want visible projection-store failure", err)
+	}
+	snapshot, err = rootStore.Snapshot(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	failureVisible := false
+	for _, project := range snapshot.Projects {
+		failureVisible = failureVisible || project.ProjectID == missingID && project.Freshness == protocol.GlobalProjectionFreshnessUnavailable && strings.Contains(project.LastError, "projection delta store is not open")
+	}
+	if !failureVisible {
+		t.Fatalf("genuine source failure absent from root projection: %+v", snapshot.Projects)
+	}
+
+	diagnostics := d.sqliteStoreDiagnostics()
+	if len(diagnostics) != 6 {
+		t.Fatalf("SQLite handle count = %d, want 6 registered authority handles", len(diagnostics))
+	}
+	for _, diagnostic := range diagnostics {
+		if diagnostic.InUse != 0 || (diagnostic.Open && (diagnostic.MaxOpenConnections <= 0 || diagnostic.OpenConnections > diagnostic.MaxOpenConnections)) || (!diagnostic.Open && diagnostic.OpenConnections != 0) {
+			t.Fatalf("unbounded or retained SQLite handles: %+v", diagnostic)
+		}
+		if diagnostic.SQLiteWriteWaiters != 0 || diagnostic.SQLiteWriteHolder != "" {
+			t.Fatalf("retained SQLite writer state: %+v", diagnostic)
+		}
+	}
+
+	// This connection bypasses the process-local writer lock, matching a second
+	// daemon/process contending through SQLite itself.
+	externalDB, err := sql.Open("sqlite", "file:"+filepath.ToSlash(userDBPath)+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = externalDB.Close() })
+	externalConn, err := externalDB.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer externalConn.Close()
+	if _, err := externalConn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	externalRefreshCtx, cancelExternalRefresh := context.WithCancel(ctx)
+	externalRefreshDone := make(chan error, 1)
+	go func() { externalRefreshDone <- d.refreshRegisteredUserProject(externalRefreshCtx, projectA) }()
+	for {
+		diagnostic := sqliteutil.WriteLockResourceDiagnostics(userDBPath)
+		if diagnostic.Holder == "user_projection.begin_project_refresh" {
+			break
+		}
+		select {
+		case err := <-externalRefreshDone:
+			t.Fatalf("external SQLite contender returned before cancellation: %v", err)
+		default:
+			runtime.Gosched()
+		}
+	}
+	cancelExternalRefresh()
+	if err := <-externalRefreshDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("external SQLite contention cancellation = %v, want context.Canceled", err)
+	}
+	if _, err := externalConn.ExecContext(ctx, `ROLLBACK`); err != nil {
+		t.Fatal(err)
+	}
+	if diagnostic := sqliteutil.WriteLockResourceDiagnostics(userDBPath); diagnostic.Waiters != 0 || diagnostic.Holder != "" {
+		t.Fatalf("external contention retained process writer state: %+v", diagnostic)
+	}
+	if err := d.refreshRegisteredUserProject(ctx, projectA); err != nil {
+		t.Fatalf("fresh reconcile after external SQLite writer: %v", err)
 	}
 }
 

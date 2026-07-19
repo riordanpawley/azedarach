@@ -5227,9 +5227,14 @@ func (d *Daemon) taskReadiness(ctx context.Context, projectID, issueID, repoDir 
 			return taskIntegrationReadinessResult{}, fmt.Errorf("reconcile issue decision propagation: %w", err)
 		}
 	}
-	decisionEvents, err := issueClient.ListIssueDecisionObservationEvents(ctx, task.ID.String())
-	if err != nil {
-		return taskIntegrationReadinessResult{}, fmt.Errorf("inspect issue decision acknowledgements: %w", err)
+	var decisionEvents []domain.IssueObservationEvent
+	if projection, prepared := orchestrationSnapshotProjection(ctx); prepared {
+		decisionEvents = projection.DecisionEvents[task.ID.String()]
+	} else {
+		decisionEvents, err = issueClient.ListIssueDecisionObservationEvents(ctx, task.ID.String())
+		if err != nil {
+			return taskIntegrationReadinessResult{}, fmt.Errorf("inspect issue decision acknowledgements: %w", err)
+		}
 	}
 	pendingDecisions := domain.ReducePendingDecisionChanges(decisionEvents)
 	decisionReasons := pendingDecisionReadinessReasons(pendingDecisions)
@@ -5988,6 +5993,7 @@ type taskGraphReadinessContext struct {
 
 func (d *Daemon) captureTaskGraphReadinessContext(ctx context.Context, projectID string, tasks []domain.Task, roots []string, waitingIssues map[string]struct{}, includeMailbox bool) (taskGraphReadinessContext, error) {
 	var err error
+	preparedProjection, hasPreparedProjection := orchestrationSnapshotProjection(ctx)
 	captured := taskGraphReadinessContext{
 		capturedAt:             time.Now().UTC(),
 		waitingIssues:          cloneStringStructMap(waitingIssues),
@@ -6025,7 +6031,11 @@ func (d *Daemon) captureTaskGraphReadinessContext(ctx context.Context, projectID
 			completionIssueIDs = append(completionIssueIDs, task.ID)
 		}
 	}
-	captured.completionByIssue, err = d.taskGraphDurableCompletionEvidence(ctx, projectID, completionIssueIDs)
+	if hasPreparedProjection {
+		captured.completionByIssue = taskCompletionEvidenceFromEvents(projectID, completionIssueIDs, preparedProjection.CompletionEvents)
+	} else {
+		captured.completionByIssue, err = d.taskGraphDurableCompletionEvidence(ctx, projectID, completionIssueIDs)
+	}
 	if err != nil {
 		return taskGraphReadinessContext{}, orchestrationAdmissionBoundaryError(protocol.OrchestrationAdmissionObservationProjection, fmt.Errorf("load durable completion evidence: %w", err))
 	}
@@ -6044,6 +6054,9 @@ func (d *Daemon) captureTaskGraphReadinessContext(ctx context.Context, projectID
 		observationCapture := d.taskGraphObservationEvents(ctx, projectID, taskIDs)
 		captured.issueEventsByIssue = observationCapture.RecentByIssue
 		captured.stewardshipByIssue = observationCapture.StewardshipByIssue
+	} else if hasPreparedProjection {
+		captured.issueEventsByIssue = preparedProjection.ObservationEvents.RecentByIssue
+		captured.stewardshipByIssue = preparedProjection.ObservationEvents.StewardshipByIssue
 	} else if issueClient := d.issueClientForProject(projectID); issueClient != nil {
 		observationCapture, captureErr := issueClient.CaptureProjectIssueObservationEvents(ctx, taskIDs, 50, 20)
 		if captureErr != nil {
@@ -6444,6 +6457,10 @@ func (d *Daemon) taskGraphDurableCompletionEvidence(ctx context.Context, project
 	if err != nil {
 		return nil, fmt.Errorf("inspect durable task completion evidence: %w", err)
 	}
+	return taskCompletionEvidenceFromEvents(projectID, issueIDs, events), nil
+}
+
+func taskCompletionEvidenceFromEvents(projectID string, issueIDs []naming.IssueID, events map[string]domain.IssueObservationEvent) map[string]taskDurableCompletionEvidence {
 	out := make(map[string]taskDurableCompletionEvidence)
 	for _, issueID := range issueIDs {
 		event, found := events[issueID.String()]
@@ -6463,7 +6480,7 @@ func (d *Daemon) taskGraphDurableCompletionEvidence(ctx context.Context, project
 		}
 		out[issueID.String()] = taskDurableCompletionEvidence{EventID: event.ID, Kind: string(event.Type)}
 	}
-	return out, nil
+	return out
 }
 
 // captureProjectedTaskGraphContainmentRisks derives readability diagnostics

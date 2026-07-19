@@ -35,6 +35,7 @@ type TaskSQLiteStoreInfo struct {
 	MutationHeldMillisecond    int64    `json:"mutation_held_ms,omitempty" msgpack:"mutation_held_ms,omitempty"`
 	SQLiteWriteHolder          string   `json:"sqlite_write_holder,omitempty" msgpack:"sqlite_write_holder,omitempty"`
 	SQLiteWriteHeldMillisecond int64    `json:"sqlite_write_held_ms,omitempty" msgpack:"sqlite_write_held_ms,omitempty"`
+	SQLiteWriteWaiters         int      `json:"sqlite_write_waiters,omitempty" msgpack:"sqlite_write_waiters,omitempty"`
 	ProjectionWatchesActive    int64    `json:"projection_watches_active,omitempty" msgpack:"projection_watches_active,omitempty"`
 	ProjectionWatchesStarted   uint64   `json:"projection_watches_started,omitempty" msgpack:"projection_watches_started,omitempty"`
 	ProjectionWatchesDone      uint64   `json:"projection_watches_completed,omitempty" msgpack:"projection_watches_completed,omitempty"`
