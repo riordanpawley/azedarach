@@ -15,7 +15,10 @@ import (
 )
 
 const (
-	sessionStartAcknowledgementTimeout       = 8 * time.Second
+	// The acknowledgement state is authoritative; this deadline only contains a
+	// wedged external agent startup. Keep enough cold-start margin that host
+	// reboot load is not mistaken for a semantic bootstrap failure.
+	sessionStartAcknowledgementTimeout       = 30 * time.Second
 	sessionStartAcknowledgementPoll          = 50 * time.Millisecond
 	sessionStartAcknowledgementSampleTimeout = 500 * time.Millisecond
 	sessionStartCompensationTimeout          = 8 * time.Second

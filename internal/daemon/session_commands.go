@@ -5144,9 +5144,12 @@ func (d *Daemon) buildSessionLaunchArtifactPayload(spec sessionLaunchSpec, promp
 				" AZEDARACH_AGENT_INCARNATION=" + singleQuoteForShell(spec.AgentIncarnation) +
 				" AZEDARACH_PANE_PID=$$; "
 		}
-		return shell, identityEnv + command + "; " + sessionAgentProcessExitCommand(tool) + "; exec " + singleQuoteForShell(shell)
+		return shell, sessionLaunchContextExport(spec) + identityEnv + command + "; " + sessionAgentProcessExitCommand(tool) + "; exec " + singleQuoteForShell(shell)
 	}
 	startupEnvCommands := append([]string(nil), spec.StartupEnvCommands...)
+	if contextExport := sessionLaunchContextExportCommand(spec.ProjectID, spec.IssueID, spec.SessionID); contextExport != "" {
+		startupEnvCommands = append(startupEnvCommands, contextExport)
+	}
 	if strings.TrimSpace(spec.AgentIncarnation) != "" {
 		logicalPaneID := strings.TrimSpace(spec.LogicalPaneID)
 		if logicalPaneID == "" {

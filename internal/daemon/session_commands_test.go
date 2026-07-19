@@ -10676,6 +10676,56 @@ func TestSessionLaunchArtifactAdaptersCoverConfiguredTools(t *testing.T) {
 	}
 }
 
+func TestSessionLaunchArtifactExportsManagedContextBeforeProjectOrchestratorAgentStarts(t *testing.T) {
+	binDir := t.TempDir()
+	trace := filepath.Join(t.TempDir(), "trace")
+	tool := filepath.Join(binDir, "codex")
+	toolScript := `#!/bin/sh
+if [ "${1:-}" != mcp ]; then
+  printf '%s|%s|%s|%s|%s|%s' "$AZEDARACH_PROJECT_ID" "$AZEDARACH_ISSUE_ID" "$AZEDARACH_SESSION_ID" "$AZEDARACH_LOGICAL_PANE_ID" "$AZEDARACH_AGENT_INCARNATION" "$AZEDARACH_PANE_PID" > "$TRACE"
+fi
+`
+	if err := os.WriteFile(tool, []byte(toolScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "az"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{RepoDir: t.TempDir(), CLITool: "codex", SessionShell: "/bin/sh"}}
+	artifact, err := d.prepareSessionLaunchArtifact(sessionLaunchSpec{
+		Mode:             sessionLaunchInitial,
+		ProjectID:        "project-id",
+		SessionID:        "az-orchestrator-project",
+		LogicalPaneID:    "agent",
+		AgentIncarnation: "restart-exact",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(artifact.remove)
+
+	cmd := exec.Command("/bin/sh", "-c", artifact.Command)
+	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+"/usr/bin:/bin", "TRACE="+trace)
+	cmd.Stdin = strings.NewReader("exit\n")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("execute orchestrator launch artifact: %v\n%s", err, out)
+	}
+	got, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.Split(string(got), "|")
+	if len(parts) != 6 {
+		t.Fatalf("managed context = %q, want six fields", got)
+	}
+	if parts[0] != "project-id" || parts[1] != "" || parts[2] != "az-orchestrator-project" || parts[3] != "agent" || parts[4] != "restart-exact" {
+		t.Fatalf("managed context = %q, want exact project orchestrator identity", got)
+	}
+	if panePID, err := strconv.Atoi(parts[5]); err != nil || panePID <= 0 {
+		t.Fatalf("managed pane pid = %q, want positive launch-shell pid", parts[5])
+	}
+}
+
 func TestSessionLaunchArtifactPicksUpStableLinkSwitchWithoutEnvironmentReload(t *testing.T) {
 	binDir := t.TempDir()
 	trace := filepath.Join(t.TempDir(), "trace")
