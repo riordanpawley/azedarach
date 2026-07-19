@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -18,6 +19,15 @@ import (
 )
 
 const scopedValidationHelperEnv = "AZEDARACH_SCOPED_VALIDATION_HELPER"
+
+const (
+	scopedValidationOwnerFDEnv          = "AZEDARACH_SCOPED_VALIDATION_OWNER_FD"
+	scopedValidationExitFDEnv           = "AZEDARACH_SCOPED_VALIDATION_EXIT_FD"
+	scopedValidationOwnerDeathDriverEnv = "AZEDARACH_SCOPED_VALIDATION_OWNER_DEATH_DRIVER"
+	scopedValidationDriverReadyFDEnv    = "AZEDARACH_SCOPED_VALIDATION_DRIVER_READY_FD"
+)
+
+var scopedValidationExitObserver *os.File
 
 func TestScopedValidationFakeAZProcess(t *testing.T) {
 	channel := os.Getenv(scopedValidationHelperEnv)
@@ -35,12 +45,62 @@ func TestScopedValidationDaemonProcess(t *testing.T) {
 	if err := os.WriteFile(readyPath, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
 		os.Exit(91)
 	}
+	if exitFDText := os.Getenv(scopedValidationExitFDEnv); exitFDText != "" {
+		exitFD, err := strconv.Atoi(exitFDText)
+		if err != nil || exitFD < 3 {
+			os.Exit(94)
+		}
+		scopedValidationExitObserver = os.NewFile(uintptr(exitFD), "scoped-validation-exit-observer")
+		if scopedValidationExitObserver == nil {
+			os.Exit(95)
+		}
+	}
+	if ownerFDText := os.Getenv(scopedValidationOwnerFDEnv); ownerFDText != "" {
+		ownerFD, err := strconv.Atoi(ownerFDText)
+		if err != nil || ownerFD < 3 {
+			os.Exit(92)
+		}
+		owner := os.NewFile(uintptr(ownerFD), "scoped-validation-owner")
+		if owner == nil {
+			os.Exit(93)
+		}
+		defer owner.Close()
+		var marker [1]byte
+		for {
+			if _, err := owner.Read(marker[:]); err != nil {
+				os.Exit(0)
+			}
+		}
+	}
 	for {
 		time.Sleep(time.Second)
 	}
 }
 
 func TestRealProcessProfileScopedValidationWrapperReapsDaemon(t *testing.T) {
+	if os.Getenv(scopedValidationOwnerDeathDriverEnv) == "1" {
+		root := os.Getenv("AZEDARACH_SCOPED_VALIDATION_DRIVER_ROOT")
+		if root == "" {
+			t.Fatal("owner-death driver requires fixture root")
+		}
+		fixture := newScopedValidationFixtureAtRoot(t, root, false, false, false, false, false, false)
+		pid := fixture.startDaemon()
+		readyFD, err := strconv.Atoi(os.Getenv(scopedValidationDriverReadyFDEnv))
+		if err != nil || readyFD < 3 {
+			t.Fatalf("invalid owner-death driver readiness fd: %q", os.Getenv(scopedValidationDriverReadyFDEnv))
+		}
+		ready := os.NewFile(uintptr(readyFD), "scoped-validation-driver-ready")
+		if ready == nil {
+			t.Fatal("open owner-death driver readiness fd")
+		}
+		if _, err := fmt.Fprintf(ready, "%d\n", pid); err != nil {
+			t.Fatal(err)
+		}
+		if err := ready.Close(); err != nil {
+			t.Fatal(err)
+		}
+		select {}
+	}
 	tests := []struct {
 		name                     string
 		payload                  []string
@@ -172,6 +232,76 @@ func TestRealProcessProfileScopedValidationWrapperReapsDaemon(t *testing.T) {
 	}
 }
 
+func TestRealProcessProfileScopedValidationFixtureReapsDaemonAfterParentGroupTermination(t *testing.T) {
+	root := t.TempDir()
+	readyReader, readyWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readyReader.Close()
+	exitReader, exitWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exitReader.Close()
+	cmd := exec.Command(os.Args[0], "-test.run", "^TestRealProcessProfileScopedValidationWrapperReapsDaemon$")
+	cmd.Env = append(withoutEnvironment(os.Environ(),
+		scopedValidationOwnerDeathDriverEnv,
+		scopedValidationDriverReadyFDEnv,
+		scopedValidationExitFDEnv,
+		"AZEDARACH_SCOPED_VALIDATION_DRIVER_ROOT",
+	),
+		scopedValidationOwnerDeathDriverEnv+"=1",
+		scopedValidationDriverReadyFDEnv+"=3",
+		scopedValidationExitFDEnv+"=4",
+		"AZEDARACH_SCOPED_VALIDATION_DRIVER_ROOT="+root,
+	)
+	cmd.ExtraFiles = []*os.File{readyWriter, exitWriter}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = readyWriter.Close()
+	_ = exitWriter.Close()
+	driverRunning := true
+	t.Cleanup(func() {
+		if driverRunning {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = cmd.Wait()
+		}
+	})
+
+	readyData, err := io.ReadAll(readyReader)
+	if err != nil {
+		t.Fatalf("await owner-death driver readiness: %v; output:\n%s", err, output.String())
+	}
+	daemonPID, err := strconv.Atoi(strings.TrimSpace(string(readyData)))
+	if err != nil || daemonPID <= 1 {
+		t.Fatalf("owner-death driver daemon PID = %q: %v; output:\n%s", readyData, err, output.String())
+	}
+	daemonRunning := true
+	t.Cleanup(func() {
+		if daemonRunning {
+			stopTestProcessGroup(daemonPID)
+		}
+	})
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	waitErr := cmd.Wait()
+	driverRunning = false
+	if waitErr == nil {
+		t.Fatal("owner-death driver exited successfully after SIGTERM")
+	}
+	if observed, err := io.ReadAll(exitReader); err != nil || len(observed) != 0 {
+		t.Fatalf("await exact scoped validation daemon exit: data=%q err=%v; output:\n%s", observed, err, output.String())
+	}
+	daemonRunning = false
+}
+
 func TestScopedValidationWrapperRequiresDedicatedCleanupClient(t *testing.T) {
 	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
 	if err != nil {
@@ -294,12 +424,41 @@ type scopedValidationFixture struct {
 	cleanupPID           string
 	cleanupDescendantPID string
 	cleanupRelease       string
+	ownerReader          *os.File
+	ownerWriter          *os.File
+	exitObserver         *os.File
 	env                  []string
 }
 
 func newScopedValidationFixture(t *testing.T, stopFails, global, slowCleanup, hangingCleanup, cleanupLeaderExitsOnTERM, signalDuringCleanup bool) scopedValidationFixture {
 	t.Helper()
-	root := t.TempDir()
+	return newScopedValidationFixtureAtRoot(t, t.TempDir(), stopFails, global, slowCleanup, hangingCleanup, cleanupLeaderExitsOnTERM, signalDuringCleanup)
+}
+
+func newScopedValidationFixtureAtRoot(t *testing.T, root string, stopFails, global, slowCleanup, hangingCleanup, cleanupLeaderExitsOnTERM, signalDuringCleanup bool) scopedValidationFixture {
+	t.Helper()
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ownerReader, ownerWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = ownerReader.Close()
+		_ = ownerWriter.Close()
+	})
+	var exitObserver *os.File
+	if exitFDText := os.Getenv(scopedValidationExitFDEnv); exitFDText != "" {
+		exitFD, parseErr := strconv.Atoi(exitFDText)
+		if parseErr != nil || exitFD < 3 {
+			t.Fatalf("invalid scoped validation exit fd %q", exitFDText)
+		}
+		exitObserver = os.NewFile(uintptr(exitFD), "scoped-validation-exit-observer")
+		if exitObserver == nil {
+			t.Fatalf("open scoped validation exit fd %d", exitFD)
+		}
+	}
 	controlShim := filepath.Join(root, "production-az")
 	cleanupShim := filepath.Join(root, "candidate-az")
 	daemonShim := filepath.Join(root, "azd")
@@ -323,6 +482,8 @@ func newScopedValidationFixture(t *testing.T, stopFails, global, slowCleanup, ha
 		"AZEDARACH_VALIDATION_CLASS",
 		"AZEDARACH_VALIDATION_PROFILE",
 		"AZEDARACH_VALIDATION_SOURCE_REVISION",
+		scopedValidationOwnerFDEnv,
+		scopedValidationExitFDEnv,
 	),
 		"AZEDARACH_VALIDATION_CONTROL_AZ_BIN="+controlShim,
 		"AZEDARACH_VALIDATION_CLEANUP_AZ_BIN="+cleanupShim,
@@ -376,6 +537,9 @@ func newScopedValidationFixture(t *testing.T, stopFails, global, slowCleanup, ha
 		cleanupPID:           filepath.Join(root, "cleanup.pid"),
 		cleanupDescendantPID: filepath.Join(root, "cleanup-descendant.pid"),
 		cleanupRelease:       filepath.Join(root, "cleanup.release"),
+		ownerReader:          ownerReader,
+		ownerWriter:          ownerWriter,
+		exitObserver:         exitObserver,
 		env:                  env,
 	}
 }
@@ -474,7 +638,12 @@ func runScopedValidationFakeAZ(channel string, args []string) int {
 func (f scopedValidationFixture) startDaemon() int {
 	f.t.Helper()
 	cmd := exec.Command(f.cleanupShim, "daemon", "start")
-	cmd.Env = f.env
+	cmd.Env = append(slices.Clone(f.env), scopedValidationOwnerFDEnv+"=3")
+	cmd.ExtraFiles = []*os.File{f.ownerReader}
+	if f.exitObserver != nil {
+		cmd.Env = append(cmd.Env, scopedValidationExitFDEnv+"=4")
+		cmd.ExtraFiles = append(cmd.ExtraFiles, f.exitObserver)
+	}
 	if output, err := cmd.CombinedOutput(); err != nil {
 		f.t.Fatalf("start fixture daemon: %v: %s", err, output)
 	}
@@ -499,6 +668,32 @@ func startScopedValidationTestDaemon() error {
 	}
 	cmd := exec.Command(os.Getenv("AZEDARACH_SCOPED_VALIDATION_DAEMON_BIN"), "-test.run", "^TestScopedValidationDaemonProcess$")
 	cmd.Env = append(os.Environ(), scopedValidationHelperEnv+"=daemon")
+	if ownerFDText := os.Getenv(scopedValidationOwnerFDEnv); ownerFDText != "" {
+		ownerFD, err := strconv.Atoi(ownerFDText)
+		if err != nil || ownerFD < 3 {
+			return fmt.Errorf("invalid scoped validation owner fd %q", ownerFDText)
+		}
+		owner := os.NewFile(uintptr(ownerFD), "scoped-validation-owner")
+		if owner == nil {
+			return fmt.Errorf("open scoped validation owner fd %d", ownerFD)
+		}
+		defer owner.Close()
+		cmd.ExtraFiles = []*os.File{owner}
+		cmd.Env = append(cmd.Env, scopedValidationOwnerFDEnv+"=3")
+	}
+	if exitFDText := os.Getenv(scopedValidationExitFDEnv); exitFDText != "" {
+		exitFD, err := strconv.Atoi(exitFDText)
+		if err != nil || exitFD < 3 {
+			return fmt.Errorf("invalid scoped validation exit fd %q", exitFDText)
+		}
+		exitObserver := os.NewFile(uintptr(exitFD), "scoped-validation-exit-observer")
+		if exitObserver == nil {
+			return fmt.Errorf("open scoped validation exit fd %d", exitFD)
+		}
+		defer exitObserver.Close()
+		cmd.ExtraFiles = append(cmd.ExtraFiles, exitObserver)
+		cmd.Env = append(cmd.Env, scopedValidationExitFDEnv+"=4")
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return err
