@@ -339,6 +339,63 @@ func TestRuntimeProjectionHelpersRouteThroughSingleWriter(t *testing.T) {
 	}
 }
 
+func TestWriteSessionStopProjectionPurgesOnlyExactManagedAgentSession(t *testing.T) {
+	store := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": store,
+		},
+	}
+	for _, sessionID := range []string{"az-1", "az-2"} {
+		d.recordManagedAgentIdentityProjection(daemonstate.ManagedAgentIdentity{
+			ProjectID: "project", SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: "7",
+			PanePID: 123, AgentIncarnation: "incarnation-" + sessionID, ObservedAt: time.Now().UTC(),
+		}, true)
+	}
+	if err := d.writeSessionStopProjection("project", "az-1", "az-1"); err != nil {
+		t.Fatalf("write terminal session projection: %v", err)
+	}
+	if _, found := d.projectedManagedAgentIdentity("project", "az-1", "agent"); found {
+		t.Fatal("terminal session retained managed-agent identity projection")
+	}
+	if _, found := d.projectedManagedAgentIdentity("project", "az-2", "agent"); !found {
+		t.Fatal("terminal session purge removed unrelated session projection")
+	}
+}
+
+func TestPersistObservedStoppedSessionPurgesManagedAgentIdentityProjection(t *testing.T) {
+	store := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{
+		cfg:          Config{RepoDir: ".", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		sessionStore: daemonstate.NewStore(),
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": store,
+		},
+	}
+	d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
+	for _, sessionID := range []string{"az-1", "az-2"} {
+		d.recordManagedAgentIdentityProjection(daemonstate.ManagedAgentIdentity{
+			ProjectID: "project", SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: "7",
+			PanePID: 123, AgentIncarnation: "incarnation-" + sessionID, ObservedAt: time.Date(2026, time.July, 19, 11, 0, 0, 0, time.UTC),
+		}, true)
+	}
+	if err := d.persistObservedRuntimeProjection(context.Background(), "project", protocol.Metadata{ProjectID: "project"}, daemonstate.Session{
+		ID: "az-1", ObservedState: daemonstate.SessionStateStopped, UpdatedAt: time.Date(2026, time.July, 19, 11, 1, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("persist stopped runtime observation: %v", err)
+	}
+	if _, found := d.projectedManagedAgentIdentity("project", "az-1", "agent"); found {
+		t.Fatal("stopped runtime observation retained managed-agent identity projection")
+	}
+	if _, found := d.projectedManagedAgentIdentity("project", "az-2", "agent"); !found {
+		t.Fatal("stopped runtime observation removed unrelated session projection")
+	}
+}
+
 func TestActiveSessionAndGitCallersPropagateProjectionPublicationFailure(t *testing.T) {
 	ctx := context.Background()
 	projectionErr := context.Canceled

@@ -165,6 +165,9 @@ type Daemon struct {
 	runtimeStoresMu                      sync.Mutex
 	runtimeStoresByProject               map[string]*daemonstate.RuntimeStateStore
 	runtimeStoresByRoot                  map[string]*daemonstate.RuntimeStateStore
+	managedAgentIdentityMu               sync.RWMutex
+	managedAgentIdentityProjection       map[string]managedAgentIdentityProjection
+	managedAgentIdentityRead             func(context.Context, *daemonstate.RuntimeStateStore, string, string, string) (daemonstate.ManagedAgentIdentity, bool, error)
 	hookLogMu                            sync.Mutex
 	hookLogByProject                     map[string][]protocol.HookLogEvent
 	uiStateMu                            sync.RWMutex

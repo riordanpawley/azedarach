@@ -166,3 +166,31 @@ func TestTmuxObserverDoesNotCreateDesiredIntentForUnprojectedRuntime(t *testing.
 		t.Fatalf("observer invented desired session intent: %+v", rows)
 	}
 }
+
+func TestTmuxObserverPurgesManagedIdentityWhenSessionDisappears(t *testing.T) {
+	ctx := context.Background()
+	const projectID, issueID, sessionID = "observer-project", "obs", "observer-session"
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	observedAt := time.Date(2026, time.July, 19, 12, 0, 0, 0, time.UTC)
+	if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
+		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning,
+		ObservedState: daemonstate.SessionStateRunning, UpdatedAt: observedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{
+		cfg: Config{Logger: slog.Default()}, hub: publish.NewHub(8, 8, slog.Default()),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store}, revision: map[string]uint64{},
+	}
+	d.recordManagedAgentIdentityProjection(daemonstate.ManagedAgentIdentity{
+		ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: "7",
+		PanePID: 123, AgentIncarnation: "observer-incarnation", ObservedAt: observedAt,
+	}, true)
+	if err := d.observeTmuxProject(ctx, projectID, newTmuxRuntimeLiveness(nil, nil), domain.CurrentTmuxObservationProvenance(observedAt.Add(time.Second))); err != nil {
+		t.Fatalf("observe disappeared tmux session: %v", err)
+	}
+	if _, found := d.projectedManagedAgentIdentity(projectID, sessionID, "agent"); found {
+		t.Fatal("tmux disappearance retained managed-agent identity projection")
+	}
+}

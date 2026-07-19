@@ -603,6 +603,14 @@ func TestEnsureUserProjectionConsumersCancelsRemovedProject(t *testing.T) {
 			"removed": {path: "/removed", cancel: consumerCancel, done: done},
 		},
 	}
+	d.recordManagedAgentIdentityProjection(daemonstate.ManagedAgentIdentity{
+		ProjectID: "removed", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "7",
+		PanePID: 123, AgentIncarnation: "removed-incarnation", ObservedAt: time.Now().UTC(),
+	}, true)
+	d.recordManagedAgentIdentityProjection(daemonstate.ManagedAgentIdentity{
+		ProjectID: "retained", SessionID: "az-2", LogicalPaneID: "agent", TmuxPaneID: "8",
+		PanePID: 456, AgentIncarnation: "retained-incarnation", ObservedAt: time.Now().UTC(),
+	}, true)
 	d.ensureUserProjectionConsumers(context.Background(), nil)
 	select {
 	case <-drained:
@@ -616,6 +624,70 @@ func TestEnsureUserProjectionConsumersCancelsRemovedProject(t *testing.T) {
 	}
 	if d.activeProjectReadMaterializer("removed") != nil {
 		t.Fatal("removed project current-state materializer survived")
+	}
+	if _, found := d.projectedManagedAgentIdentity("removed", "az-1", "agent"); found {
+		t.Fatal("removed project retained managed-agent identity projection")
+	}
+	if _, found := d.projectedManagedAgentIdentity("retained", "az-2", "agent"); !found {
+		t.Fatal("project-prefix purge removed unrelated project projection")
+	}
+}
+
+func TestEnsureUserProjectionConsumersExplicitIDUnregisterPurgesCanonicalIdentity(t *testing.T) {
+	root := t.TempDir()
+	canonicalID, err := appconfig.ProjectIDForRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	d := &Daemon{
+		userStore: &userstore.Store{},
+		userProjectionConsumers: map[string]*userProjectionConsumerHandle{
+			"stable-alias": {path: filepath.Clean(root), cancel: func() { close(done) }, done: done},
+		},
+	}
+	d.recordManagedAgentIdentityProjection(daemonstate.ManagedAgentIdentity{
+		ProjectID: canonicalID, SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "7",
+		PanePID: 123, AgentIncarnation: "canonical-incarnation", ObservedAt: time.Date(2026, time.July, 19, 13, 0, 0, 0, time.UTC),
+	}, true)
+	d.ensureUserProjectionConsumers(context.Background(), nil)
+	if _, found := d.projectedManagedAgentIdentity(canonicalID, "az-1", "agent"); found {
+		t.Fatal("explicit-ID unregister retained path-canonical managed identity")
+	}
+}
+
+func TestEnsureUserProjectionConsumersPathChangePurgesOldCanonicalIdentityOnly(t *testing.T) {
+	oldRoot, newRoot := t.TempDir(), t.TempDir()
+	oldCanonicalID, err := appconfig.ProjectIDForRoot(oldRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newCanonicalID, err := appconfig.ProjectIDForRoot(newRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	d := &Daemon{
+		userStore: &userstore.Store{},
+		userProjectionConsumers: map[string]*userProjectionConsumerHandle{
+			"stable-alias": {path: filepath.Clean(oldRoot), cancel: func() { close(done) }, done: done},
+		},
+	}
+	for projectID, sessionID := range map[string]string{oldCanonicalID: "old-session", newCanonicalID: "new-session"} {
+		d.recordManagedAgentIdentityProjection(daemonstate.ManagedAgentIdentity{
+			ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: "7",
+			PanePID: 123, AgentIncarnation: projectID + "-incarnation", ObservedAt: time.Date(2026, time.July, 19, 13, 30, 0, 0, time.UTC),
+		}, true)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	d.ensureUserProjectionConsumers(ctx, []appconfig.Project{{ID: "stable-alias", Name: "moved", Path: newRoot}})
+	d.userStoreRefreshWG.Wait()
+	if _, found := d.projectedManagedAgentIdentity(oldCanonicalID, "old-session", "agent"); found {
+		t.Fatal("path change retained old path-canonical managed identity")
+	}
+	if _, found := d.projectedManagedAgentIdentity(newCanonicalID, "new-session", "agent"); !found {
+		t.Fatal("path change purged new path-canonical managed identity")
 	}
 }
 

@@ -636,15 +636,18 @@ func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context,
 
 // ApplySessionCompensation atomically aligns one typed desired intent and its
 // physical runtime observation after a failed start cleanup attempt. The
-// returned bool reports whether the transaction produced a durable desired
-// winner; an absent desired intent is an idempotent success with no winner.
+// returned state reports the effective physical winner. The returned bool
+// separately reports whether the transaction produced a durable desired
+// winner; an absent desired intent is an idempotent success without one.
 func (s *RuntimeStateStore) ApplySessionCompensation(ctx context.Context, projectID string, intent Session, desiredState, observedState SessionState, activity, activitySource string, updatedAt time.Time) ([]Session, SessionState, bool, error) {
 	var changed []Session
-	effectiveState := NormalizeSessionState(desiredState)
+	desiredWriteState := NormalizeSessionState(desiredState)
+	physicalWinner := NormalizeSessionState(observedState)
 	applied := false
 	err := s.withRetryingWriteLock(ctx, "apply_session_compensation", func(writeCtx context.Context) error {
 		changed = nil
-		effectiveState = NormalizeSessionState(desiredState)
+		desiredWriteState = NormalizeSessionState(desiredState)
+		physicalWinner = NormalizeSessionState(observedState)
 		applied = false
 		db, err := s.dbHandle()
 		if err != nil {
@@ -657,9 +660,8 @@ func (s *RuntimeStateStore) ApplySessionCompensation(ctx context.Context, projec
 		if err != nil {
 			return err
 		}
-		desiredState = NormalizeSessionState(desiredState)
-		if !validSessionProductState(desiredState, false) {
-			return fmt.Errorf("session compensation: invalid desired state %q", desiredState)
+		if !validSessionProductState(desiredWriteState, false) {
+			return fmt.Errorf("session compensation: invalid desired state %q", desiredWriteState)
 		}
 		tx, err := db.BeginTx(writeCtx, nil)
 		if err != nil {
@@ -692,12 +694,12 @@ func (s *RuntimeStateStore) ApplySessionCompensation(ctx context.Context, projec
 			if err != nil {
 				return fmt.Errorf("parse winning compensated physical observation: %w", err)
 			}
-			effectiveState = observation.ObservedState
+			physicalWinner = observation.ObservedState
 		}
 		intent = NormalizeSessionMetadata(intent)
 		logicalID := logicalSessionIntentID(intent)
 		result, err = tx.ExecContext(writeCtx, `UPDATE `+sessionStateTable+` SET state=?,updated_at=? WHERE project_id=? AND logical_id=?`,
-			effectiveState, observation.UpdatedAt.Format(time.RFC3339Nano), observation.ProjectID, logicalID)
+			desiredWriteState, observation.UpdatedAt.Format(time.RFC3339Nano), observation.ProjectID, logicalID)
 		if err != nil {
 			return fmt.Errorf("update compensated desired session: %w", err)
 		}
@@ -718,12 +720,11 @@ func (s *RuntimeStateStore) ApplySessionCompensation(ctx context.Context, projec
 			case errors.Is(loadErr, sql.ErrNoRows):
 				// There is no durable desired winner to project into transient
 				// state. Physical cleanup and any real linked-intent observation
-				// fan-out remain idempotent and commit below.
-				effectiveState = ""
+				// fan-out remain idempotent and commit below. Preserve the
+				// effective physical winner for callers that own runtime cleanup.
 			case loadErr != nil:
 				return fmt.Errorf("load compensated desired session winner: %w", loadErr)
 			default:
-				effectiveState = NormalizeSessionState(SessionState(durableState))
 				applied = true
 			}
 		} else {
@@ -747,7 +748,7 @@ func (s *RuntimeStateStore) ApplySessionCompensation(ctx context.Context, projec
 		}
 		return tx.Commit()
 	})
-	return changed, effectiveState, applied, err
+	return changed, physicalWinner, applied, err
 }
 
 func normalizePhysicalSessionObservation(observation PhysicalSessionObservation) (PhysicalSessionObservation, error) {

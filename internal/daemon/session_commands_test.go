@@ -85,10 +85,11 @@ func TestSessionStartFailureCompensationMatchesActualRuntime(t *testing.T) {
 		noEvent       bool
 		killErr       error
 		want          daemonstate.SessionState
+		wantDesired   daemonstate.SessionState
 	}{
 		{name: "physical write failure cleanup succeeds", failure: "physical-write", want: daemonstate.SessionStateStopped},
 		{name: "post-observation lease failure cleanup fails", failure: "lease", seedPhysical: true, killErr: errors.New("kill failed"), want: daemonstate.SessionStateRunning},
-		{name: "newer physical winner defeats stopped compensation", failure: "higher-version-race", seedPhysical: true, winnerAhead: true, want: daemonstate.SessionStateRunning},
+		{name: "newer physical winner defeats stopped compensation", failure: "higher-version-race", seedPhysical: true, winnerAhead: true, want: daemonstate.SessionStateRunning, wantDesired: daemonstate.SessionStateStopped},
 		{name: "durable transaction failure reloads existing desired", failure: "transaction-failure", seedPhysical: true, durableFail: true, noEvent: true, want: daemonstate.SessionStateStarting},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -97,14 +98,15 @@ func TestSessionStartFailureCompensationMatchesActualRuntime(t *testing.T) {
 			runtimeDBPath := filepath.Join(t.TempDir(), "runtime.db")
 			runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(runtimeDBPath, slog.Default())
 			t.Cleanup(func() { _ = runtimeStore.Close() })
-			seed := daemonstate.Session{ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateStarting, UpdatedAt: time.Now().UTC().Add(-time.Second)}
+			seedAt := time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
+			seed := daemonstate.Session{ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateStarting, UpdatedAt: seedAt}
 			if err := runtimeStore.UpsertSessionState(ctx, projectID, seed); err != nil {
 				t.Fatal(err)
 			}
 			if tc.seedPhysical {
-				physicalAt := time.Now().UTC().Add(-500 * time.Millisecond)
+				physicalAt := seedAt.Add(time.Second)
 				if tc.winnerAhead {
-					physicalAt = time.Now().UTC().Add(time.Hour)
+					physicalAt = time.Date(2200, time.January, 1, 0, 0, 0, 0, time.UTC)
 				}
 				if _, _, err := runtimeStore.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{ProjectID: projectID, SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "session", UpdatedAt: physicalAt}); err != nil {
 					t.Fatal(err)
@@ -129,11 +131,15 @@ func TestSessionStartFailureCompensationMatchesActualRuntime(t *testing.T) {
 			defer cancel()
 			d.compensateSessionStartFailure(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: projectID}}, projectID, sessionID, issueID, issueResourceLifecycleContext{}, "busy", "session")
 			intent, found, err := runtimeStore.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, issueID)
+			wantDesired := tc.wantDesired
+			if wantDesired == "" {
+				wantDesired = tc.want
+			}
 			wantObserved := tc.want
 			if tc.durableFail {
 				wantObserved = daemonstate.SessionStateRunning
 			}
-			if err != nil || !found || intent.State != tc.want || intent.ObservedState != wantObserved {
+			if err != nil || !found || intent.State != wantDesired || intent.ObservedState != wantObserved {
 				t.Fatalf("%s durable intent=%+v found=%v err=%v", tc.failure, intent, found, err)
 			}
 			physical, found, err := runtimeStore.GetPhysicalSessionObservation(ctx, projectID, sessionID)
@@ -154,8 +160,89 @@ func TestSessionStartFailureCompensationMatchesActualRuntime(t *testing.T) {
 			}
 			events := collectSessionProjectionEvents(t, ch, 1)
 			var body protocol.SessionProjectionEventBody
-			if len(events) != 1 || json.Unmarshal(events[0].Body, &body) != nil || daemonstate.SessionState(body.Session.State) != tc.want {
+			if len(events) != 1 || json.Unmarshal(events[0].Body, &body) != nil || daemonstate.SessionState(body.Session.State) != wantDesired {
 				t.Fatalf("%s final events=%+v", tc.failure, events)
+			}
+		})
+	}
+}
+
+func TestSessionStartFailureCompensationPurgesManagedIdentityOnlyForStoppedWinner(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		seedIntent        bool
+		seedNewerRunning  bool
+		injectStoreError  bool
+		wantObserved      daemonstate.SessionState
+		wantIdentityFound bool
+	}{
+		{name: "stopped with intent", seedIntent: true, wantObserved: daemonstate.SessionStateStopped},
+		{name: "stopped without intent is idempotent", wantObserved: daemonstate.SessionStateStopped},
+		{name: "newer running winner", seedIntent: true, seedNewerRunning: true, wantObserved: daemonstate.SessionStateRunning, wantIdentityFound: true},
+		{name: "store error", seedIntent: true, injectStoreError: true, wantIdentityFound: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			const projectID, issueID, sessionID = "compensation-project", "compensation-issue", "az-compensation"
+			runtimeDBPath := filepath.Join(t.TempDir(), "runtime.db")
+			runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(runtimeDBPath, slog.Default())
+			t.Cleanup(func() { _ = runtimeStore.Close() })
+			if tc.seedIntent {
+				if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+					ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateStarting,
+					UpdatedAt: time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC),
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.seedNewerRunning {
+				if _, _, err := runtimeStore.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+					ProjectID: projectID, SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning,
+					Activity: "busy", ActivitySource: "session",
+					UpdatedAt: time.Date(2200, time.December, 31, 23, 59, 59, 0, time.UTC),
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.injectStoreError {
+				db, err := sql.Open("sqlite", runtimeDBPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = db.Close() })
+				if _, err := db.Exec(`CREATE TRIGGER inject_identity_compensation_failure BEFORE UPDATE ON daemon_session_projections BEGIN SELECT RAISE(ABORT,'injected compensation failure'); END`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			d := &Daemon{
+				cfg:                    Config{RepoDir: ".", Logger: slog.Default()},
+				tmux:                   tmux.NewClient(&sessionStartCompensationTmuxRunner{live: true}, slog.Default()),
+				runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+				runtimeStoresByRoot:    map[string]*daemonstate.RuntimeStateStore{".": runtimeStore},
+				hub:                    publish.NewHub(8, 8, slog.Default()),
+			}
+			d.recordManagedAgentIdentityProjection(daemonstate.ManagedAgentIdentity{
+				ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: "7",
+				PanePID: 123, AgentIncarnation: "compensation-incarnation",
+				ObservedAt: time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC),
+			}, true)
+
+			note := d.compensateSessionStartFailure(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: projectID}},
+				projectID, sessionID, issueID, issueResourceLifecycleContext{}, "busy", "session")
+			if tc.injectStoreError {
+				if !strings.Contains(note, "failed-start durable session compensation also failed") {
+					t.Fatalf("compensation note = %q, want durable failure", note)
+				}
+			} else {
+				observation, found, err := runtimeStore.GetPhysicalSessionObservation(ctx, projectID, sessionID)
+				if err != nil || !found || observation.ObservedState != tc.wantObserved {
+					t.Fatalf("physical winner = %+v found=%t err=%v, want %s", observation, found, err, tc.wantObserved)
+				}
+			}
+
+			_, found := d.projectedManagedAgentIdentity(projectID, sessionID, "agent")
+			if found != tc.wantIdentityFound {
+				t.Fatalf("managed identity found = %t, want %t", found, tc.wantIdentityFound)
 			}
 		})
 	}

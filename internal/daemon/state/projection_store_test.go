@@ -1046,6 +1046,59 @@ func TestApplySessionCompensationPreservesRootedOrchestratorIntent(t *testing.T)
 	}
 }
 
+func TestApplySessionCompensationSeparatesDesiredWriteFromPhysicalWinner(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		desired          SessionState
+		observed         SessionState
+		seedNewerRunning bool
+		wantWinner       SessionState
+	}{
+		{name: "physical write wins", desired: SessionStateStopped, observed: SessionStateRunning, wantWinner: SessionStateRunning},
+		{name: "stored physical observation wins", desired: SessionStatePaused, observed: SessionStateStopped, seedNewerRunning: true, wantWinner: SessionStateRunning},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+			t.Cleanup(func() { _ = store.Close() })
+			base := time.Date(2026, time.July, 19, 4, 0, 0, 0, time.UTC)
+			intent := Session{
+				ID: "az-divergent", IssueID: "divergent", Role: SessionRoleWorker,
+				ScopeKind: SessionScopeIssue, ScopeID: "divergent", State: SessionStateStarting, UpdatedAt: base,
+			}
+			if err := store.UpsertSessionState(ctx, "project", intent); err != nil {
+				t.Fatal(err)
+			}
+			if tc.seedNewerRunning {
+				if _, _, err := store.ApplyPhysicalSessionObservation(ctx, PhysicalSessionObservation{
+					ProjectID: "project", SessionID: intent.ID, ObservedState: SessionStateRunning,
+					Activity: "busy", ActivitySource: "session", UpdatedAt: base.Add(2 * time.Second),
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			activity, source := "busy", "session"
+			if tc.observed == SessionStateStopped {
+				activity, source = "", ""
+			}
+			changed, winner, applied, err := store.ApplySessionCompensation(ctx, "project", intent, tc.desired, tc.observed, activity, source, base.Add(time.Second))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !applied || winner != tc.wantWinner || len(changed) != 1 {
+				t.Fatalf("compensation changed=%+v winner=%s applied=%t", changed, winner, applied)
+			}
+			if changed[0].State != tc.desired || changed[0].ObservedState != tc.wantWinner {
+				t.Fatalf("desired/observed row = %s/%s, want %s/%s", changed[0].State, changed[0].ObservedState, tc.desired, tc.wantWinner)
+			}
+			got, found, err := store.GetSessionIntent(ctx, "project", SessionRoleWorker, SessionScopeIssue, "divergent")
+			if err != nil || !found || got.State != tc.desired || got.ObservedState != tc.wantWinner {
+				t.Fatalf("durable desired/observed = %+v found=%t err=%v, want %s/%s", got, found, err, tc.desired, tc.wantWinner)
+			}
+		})
+	}
+}
+
 func TestApplySessionCompensationIsIdempotentWhenDesiredIntentAlreadyAbsent(t *testing.T) {
 	ctx := context.Background()
 	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
@@ -1059,7 +1112,7 @@ func TestApplySessionCompensationIsIdempotentWhenDesiredIntentAlreadyAbsent(t *t
 	if err != nil {
 		t.Fatalf("idempotent compensation for absent desired intent: %v", err)
 	}
-	if applied || len(changed) != 0 || winner != "" {
+	if applied || len(changed) != 0 || winner != SessionStateStopped {
 		t.Fatalf("absent compensation changed=%+v winner=%s applied=%t", changed, winner, applied)
 	}
 	observation, found, err := store.GetPhysicalSessionObservation(ctx, "project", "az-dtl")
@@ -1091,7 +1144,7 @@ func TestApplySessionCompensationAbsentTargetFansOnlyPhysicalObservationToLinked
 	if err != nil {
 		t.Fatal(err)
 	}
-	if applied || winner != "" || len(changed) != 1 {
+	if applied || winner != SessionStateStopped || len(changed) != 1 {
 		t.Fatalf("absent target changed=%+v winner=%s applied=%t", changed, winner, applied)
 	}
 	if changed[0].Role != SessionRoleOrchestrator || changed[0].State != SessionStateStarting || changed[0].ObservedState != SessionStateStopped {

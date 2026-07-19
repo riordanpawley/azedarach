@@ -1327,6 +1327,48 @@ func TestHandleTaskListConsumesAsynchronousMissingTmuxObservation(t *testing.T) 
 	}
 }
 
+func TestTaskRuntimeCleanupRepairsPurgeManagedIdentityForMissingSession(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		repair func(*Daemon, context.Context, string, string) error
+	}{
+		{name: "close preflight", repair: (*Daemon).repairStaleSessionRuntimeProjections},
+		{name: "post cleanup", repair: (*Daemon).repairStaleRuntimeProjections},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			const projectID, taskID, sessionID = "cleanup-project", "az-1", "cleanup-session"
+			store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+			t.Cleanup(func() { _ = store.Close() })
+			observedAt := time.Date(2026, time.January, 1, 12, 30, 0, 0, time.UTC)
+			if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
+				ID: sessionID, IssueID: taskID, State: daemonstate.SessionStateRunning,
+				ObservedState: daemonstate.SessionStateRunning, UpdatedAt: observedAt,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			d := &Daemon{
+				cfg: Config{Logger: slog.Default()}, tmux: tmux.NewClient(&testTmuxRunner{sessions: map[string]bool{}}, slog.Default()),
+				runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+			}
+			d.recordManagedAgentIdentityProjection(daemonstate.ManagedAgentIdentity{
+				ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: "7",
+				PanePID: 123, AgentIncarnation: "cleanup-incarnation", ObservedAt: observedAt,
+			}, true)
+			if err := tt.repair(d, ctx, projectID, taskID); err != nil {
+				t.Fatalf("repair missing task session: %v", err)
+			}
+			projected, found, err := store.GetSessionState(ctx, projectID, sessionID)
+			if err != nil || !found || projected.ObservedState != daemonstate.SessionStateStopped {
+				t.Fatalf("terminal task session projection = %+v found=%t err=%v", projected, found, err)
+			}
+			if _, found := d.projectedManagedAgentIdentity(projectID, sessionID, "agent"); found {
+				t.Fatal("task runtime cleanup retained managed-agent identity projection")
+			}
+		})
+	}
+}
+
 func TestHandleTaskListThrottlesSessionRuntimeRefresh(t *testing.T) {
 	originalNow := timeNow
 	now := time.Date(2026, time.July, 7, 3, 30, 0, 0, time.UTC)
