@@ -78,9 +78,6 @@ case "${FAKE_GO_SCENARIO:-success}" in
     exit 9
     ;;
   timeout)
-    if [ -n "${FAKE_GO_PROCESS_READY_FIFO:-}" ]; then
-      printf '%s\n' "$$" >"$FAKE_GO_PROCESS_READY_FIFO"
-    fi
     "${0%/*}/fake-go-timeout-child" &
     child=$!
     signal_timeout() {
@@ -90,7 +87,10 @@ case "${FAKE_GO_SCENARIO:-success}" in
       wait "$child"
       printf 'term-and-child-reaped\n' >"$FAKE_GO_TERM_FIFO"
     }
-	trap signal_timeout TERM INT HUP
+    trap signal_timeout TERM INT HUP
+    if [ -n "${FAKE_GO_PROCESS_READY_FIFO:-}" ]; then
+      printf '%s\n' "$$" >"$FAKE_GO_PROCESS_READY_FIFO"
+    fi
     wait "$child"
     ;;
 	concurrency)
@@ -534,10 +534,6 @@ func TestDaemonRaceSharderAggregateTimeoutKillsDescendantsAndKeepsJSONL(t *testi
 		"FAKE_GO_BLOCK_FIFO="+childBlock.path,
 		"AZEDARACH_DAEMON_RACE_TEST_DESCENDANTS_REAPED_FIFO="+descendantsReaped.path,
 	)
-	timeoutPID, err := strconv.Atoi(timeoutReady.readLine(t, done, result))
-	if err != nil {
-		t.Fatalf("parse timeout supervisor PID: %v", err)
-	}
 	t.Cleanup(func() {
 		select {
 		case <-done:
@@ -545,7 +541,12 @@ func TestDaemonRaceSharderAggregateTimeoutKillsDescendantsAndKeepsJSONL(t *testi
 		default:
 		}
 		timeoutControl.writeLine(t, "kill")
+		<-done
 	})
+	timeoutPID, err := strconv.Atoi(timeoutReady.readLine(t, done, result))
+	if err != nil {
+		t.Fatalf("parse timeout supervisor PID: %v", err)
+	}
 	innerPID := innerReady.readLine(t, done, result)
 	fakeGoPID := fakeGoReady.readLine(t, done, result)
 	childPID := childReady.readLine(t, done, result)
