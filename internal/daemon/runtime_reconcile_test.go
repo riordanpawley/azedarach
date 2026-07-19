@@ -1985,6 +1985,43 @@ func TestRuntimeReconcileIssuesSessionStartSkipsUnrelatedMaintenance(t *testing.
 	}
 }
 
+func TestRuntimeReconcileIssuesSessionStartReturnsWithoutCrossProjectHealthRead(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"), userstore.WithSnapshotAfterProjectsForTest(func() {
+		close(entered)
+		<-release
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{
+		cfg:       Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		userStore: store,
+	}
+	ctx := context.WithValue(context.Background(), runtimeReconcileRequestContextKey{}, runtimeReconcileRequestContext{
+		Priority: reconcilePriorityManual,
+		Reason:   "mutation-issue:" + daemonhandlers.CommandSessionStart,
+	})
+	done := make(chan error, 1)
+	go func() {
+		_, reconcileErr := newRuntimeReconcileService(d).ReconcileIssues(ctx, "project", []string{"az-1"})
+		done <- reconcileErr
+	}()
+
+	select {
+	case reconcileErr := <-done:
+		if reconcileErr != nil {
+			t.Fatalf("session.start scoped reconciliation: %v", reconcileErr)
+		}
+	case <-entered:
+		close(release)
+		<-done
+		t.Fatal("session.start scoped reconciliation entered unrelated cross-project health read")
+	}
+}
+
 func TestRuntimeReconcileRefreshesSessionProjectionWithoutWorktreeManager(t *testing.T) {
 	const projectID = "proj-runtime"
 	const issueID = "az-1"

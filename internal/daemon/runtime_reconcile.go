@@ -145,7 +145,9 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 		return result, nil
 	}
 	ctx = withDaemonProjectIDContext(ctx, result.ProjectID.String())
-	defer d.readCrossProjectProjectionHealth(ctx, result.ProjectID.String(), &result)
+	if !isSessionStartRuntimeFreshnessRequest(ctx) {
+		defer d.readCrossProjectProjectionHealth(ctx, result.ProjectID.String(), &result)
+	}
 	shouldReconcileInteractionStaleness := d.reconcileInteractionStalenessFn != nil || d.hasConfiguredInteractionStore()
 	issueIDs = normalizeRuntimeReconcileIssueIDs(issueIDs)
 	if len(issueIDs) == 0 {

@@ -85,6 +85,12 @@ func withSnapshotAfterProjects(hook func()) Option {
 	return func(s *Store) { s.snapshotAfterProjects = hook }
 }
 
+// WithSnapshotAfterProjectsForTest installs a deterministic snapshot barrier.
+// Production callers must not use this option.
+func WithSnapshotAfterProjectsForTest(hook func()) Option {
+	return withSnapshotAfterProjects(hook)
+}
+
 func DefaultPath() string {
 	path, _ := config.UserDBPath()
 	return path
