@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"syscall"
@@ -12,6 +13,7 @@ import (
 
 const (
 	terminationGrace = 500 * time.Millisecond
+	terminationPoll  = 10 * time.Millisecond
 	pipeWaitDelay    = 2 * time.Second
 )
 
@@ -42,7 +44,7 @@ func Run(ctx context.Context, dir string, env []string, observer OutputObserver,
 	cmd := newCommand(ctx, dir, env, name, args...)
 	cmd.Stdout = observingWriter{stream: "stdout", dst: &stdout, observer: observer}
 	cmd.Stderr = observingWriter{stream: "stderr", dst: &stderr, observer: observer}
-	err = cmd.Run()
+	err = runCommand(cmd)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		err = ctxErr
 	}
@@ -57,7 +59,7 @@ func RunCombined(ctx context.Context, dir string, env []string, name string, arg
 	cmd := newCommand(ctx, dir, env, name, args...)
 	cmd.Stdout = &combined
 	cmd.Stderr = &combined
-	err = cmd.Run()
+	err = runCommand(cmd)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		err = ctxErr
 	}
@@ -74,22 +76,84 @@ func newCommand(ctx context.Context, dir string, env []string, name string, args
 		if cmd.Process == nil {
 			return os.ErrProcessDone
 		}
-		pid := cmd.Process.Pid
-		if signalErr := syscall.Kill(-pid, syscall.SIGTERM); signalErr != nil {
-			if errors.Is(signalErr, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return signalErr
-		}
-		timer := time.NewTimer(terminationGrace)
-		defer timer.Stop()
-		<-timer.C
-		if syscall.Kill(-pid, 0) == nil {
-			_ = syscall.Kill(-pid, syscall.SIGKILL)
-		}
-		return nil
+		return terminateProcessGroup(cmd.Process.Pid)
 	}
 	return cmd
+}
+
+func runCommand(cmd *exec.Cmd) error {
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	pid := cmd.Process.Pid
+	exited, observeErr := observeProcessExit(pid)
+	if observeErr != nil {
+		cleanupErr := terminateProcessGroup(pid)
+		waitErr := cmd.Wait()
+		return errors.Join(fmt.Errorf("observe process-group leader %d exit: %w", pid, observeErr), cleanupErr, waitErr)
+	}
+	observeErr = <-exited
+	cleanupErr := cleanupRetainedProcessGroup(pid)
+	waitErr := cmd.Wait()
+	return errors.Join(observeErr, cleanupErr, waitErr)
+}
+
+// cleanupRetainedProcessGroup runs before Wait reaps the direct child. The
+// unreaped leader therefore reserves both its PID and PGID while descendants
+// are inspected and signaled, preventing a recycled group from being killed.
+func cleanupRetainedProcessGroup(pgid int) error {
+	retained, err := processGroupHasLiveDescendants(pgid, pgid)
+	if err != nil {
+		return errors.Join(fmt.Errorf("inspect process group %d: %w", pgid, err), terminateProcessGroup(pgid))
+	}
+	if !retained {
+		return nil
+	}
+	if err := signalProcessGroup(pgid, syscall.SIGTERM); err != nil {
+		return err
+	}
+
+	timer := time.NewTimer(terminationGrace)
+	defer timer.Stop()
+	ticker := time.NewTicker(terminationPoll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			retained, inspectErr := processGroupHasLiveDescendants(pgid, pgid)
+			if inspectErr != nil {
+				return errors.Join(fmt.Errorf("inspect terminating process group %d: %w", pgid, inspectErr), signalProcessGroup(pgid, syscall.SIGKILL))
+			}
+			if !retained {
+				return nil
+			}
+		case <-timer.C:
+			return signalProcessGroup(pgid, syscall.SIGKILL)
+		}
+	}
+}
+
+func terminateProcessGroup(pgid int) error {
+	if err := signalProcessGroup(pgid, syscall.SIGTERM); err != nil {
+		return err
+	}
+	timer := time.NewTimer(terminationGrace)
+	defer timer.Stop()
+	<-timer.C
+	if syscall.Kill(-pgid, 0) == nil {
+		return signalProcessGroup(pgid, syscall.SIGKILL)
+	}
+	return nil
+}
+
+func signalProcessGroup(pgid int, signal syscall.Signal) error {
+	if err := syscall.Kill(-pgid, signal); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func commandContext(ctx context.Context) context.Context {
