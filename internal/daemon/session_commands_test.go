@@ -1512,6 +1512,8 @@ type sessionStartTmuxRunner struct {
 	sendKeysErrOnCall           int
 	captureOutput               string
 	currentCommand              string
+	listPanesCalls              int
+	onListPanes                 func(int)
 	onSendKeys                  func(string, string)
 	onRunWithInput              func(context.Context, string, []string) (string, error)
 	onRespawnPane               func(context.Context, []string) error
@@ -1935,6 +1937,10 @@ func (r *sessionStartTmuxRunner) Run(ctx context.Context, args ...string) (strin
 		}
 		return strings.Join(names, "\n"), nil
 	case "list-panes":
+		r.listPanesCalls++
+		if r.onListPanes != nil {
+			r.onListPanes(r.listPanesCalls)
+		}
 		lines := make([]string, 0, len(r.sessions))
 		for name := range r.sessions {
 			if r.sessionsWithoutPanes[name] {
