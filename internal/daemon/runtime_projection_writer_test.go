@@ -1006,13 +1006,7 @@ func TestRuntimeProjectionWriterRetriesFailedRefreshForUnchangedGitStatus(t *tes
 		t.Fatal(err)
 	}
 	task := domain.Task{ID: naming.IssueID(issueID), Title: "retry unchanged git", Status: domain.StatusInProgress, Type: domain.TypeTask}
-	var hydrateCalls atomic.Int32
-	reader := newProjectReadMaterializer(projectID, nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
-		if hydrateCalls.Add(1) == 1 {
-			return nil, errors.New("injected git hydration failure")
-		}
-		return tasks, nil
-	})
+	reader := newProjectReadMaterializer(projectID, nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) { return tasks, nil })
 	tasks := map[string]domain.Task{issueID: task}
 	issueKeys, runtimeKeys := checkpointMaterializedTasks(tasks, tasks)
 	reader.replaceBootstrap(tasks, tasks, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
@@ -1021,19 +1015,26 @@ func TestRuntimeProjectionWriterRetriesFailedRefreshForUnchangedGitStatus(t *tes
 		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{".": store},
 		materializers:       map[string]*projectReadMaterializer{projectID: reader},
 	}
+	var syncCalls atomic.Int32
+	d.projectReadUserProjectionSync = func(context.Context, string, []string) error {
+		if syncCalls.Add(1) == 1 {
+			return errors.New("injected git user projection sync failure")
+		}
+		return nil
+	}
 	status := &git.GitStatus{Modified: []string{"changed.go"}, HasChanges: true, GitAdditions: 2}
 	writer := newRuntimeProjectionWriter(d)
 	if _, err := writer.PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktree, status, true, false); err != nil {
 		t.Fatal(err)
 	}
-	if got := reader.snapshotMetadata().Health; !strings.Contains(got, "injected git hydration failure") {
+	if got := reader.snapshotMetadata().Health; !strings.Contains(got, "injected git user projection sync failure") {
 		t.Fatalf("health after failed refresh = %q", got)
 	}
 	if _, err := writer.PersistGitStatusProjectionAndPublish(ctx, projectID, issueID, worktree, status, true, false); err != nil {
 		t.Fatal(err)
 	}
-	if got := hydrateCalls.Load(); got != 2 {
-		t.Fatalf("hydration calls = %d, want failed attempt plus unchanged retry", got)
+	if got := syncCalls.Load(); got != 2 {
+		t.Fatalf("user projection sync calls = %d, want failed attempt plus unchanged retry", got)
 	}
 	if got := reader.snapshotMetadata().Health; got != "healthy" {
 		t.Fatalf("health after unchanged retry = %q, want healthy", got)
