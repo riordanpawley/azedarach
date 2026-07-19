@@ -68,15 +68,81 @@ func TestManagedOTLPEndpoint(t *testing.T) {
 	}
 }
 
-func TestConfiguredEndpointPrefersExplicitEnvironment(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "jaeger-endpoint")
-	if err := os.WriteFile(path, []byte("localhost:34318\n0\n"), 0o600); err != nil {
-		t.Fatalf("write endpoint state: %v", err)
+func TestConfiguredEndpointSummaryPrecedence(t *testing.T) {
+	const (
+		parentTracesEndpoint  = "http://parent.example:4318/v1/traces"
+		parentGenericEndpoint = "http://parent.example:4318"
+		parentManagedFile     = "/parent/managed-endpoint"
+	)
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", parentTracesEndpoint)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", parentGenericEndpoint)
+	t.Setenv(managedEndpointFileEnv, parentManagedFile)
+
+	tests := []struct {
+		name            string
+		tracesEndpoint  string
+		genericEndpoint string
+		managedContent  string
+		want            string
+	}{
+		{
+			name:            "traces-specific over generic and managed",
+			tracesEndpoint:  "http://localhost:64318/v1/traces",
+			genericEndpoint: "http://localhost:54318",
+			managedContent:  "localhost:34318\n0\n",
+			want:            "http://localhost:64318/v1/traces",
+		},
+		{
+			name:            "generic over managed",
+			genericEndpoint: "http://localhost:54318",
+			managedContent:  "localhost:34318\n0\n",
+			want:            "http://localhost:54318",
+		},
+		{
+			name:           "managed over default",
+			managedContent: "localhost:34318\n0\n",
+			want:           "http://localhost:34318/v1/traces",
+		},
+		{
+			name:            "whitespace environment falls through to managed",
+			tracesEndpoint:  " \t ",
+			genericEndpoint: "\n",
+			managedContent:  "localhost:34318\n0\n",
+			want:            "http://localhost:34318/v1/traces",
+		},
+		{
+			name:            "empty and whitespace sources use default",
+			tracesEndpoint:  "",
+			genericEndpoint: " ",
+			managedContent:  " \n",
+			want:            defaultOTLPURL,
+		},
 	}
-	t.Setenv(managedEndpointFileEnv, path)
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:54318")
-	if got := configuredEndpointSummary(); got != "http://localhost:54318" {
-		t.Fatalf("configuredEndpointSummary() = %q", got)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "jaeger-endpoint")
+			if err := os.WriteFile(path, []byte(tt.managedContent), 0o600); err != nil {
+				t.Fatalf("write endpoint state: %v", err)
+			}
+			t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", tt.tracesEndpoint)
+			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", tt.genericEndpoint)
+			t.Setenv(managedEndpointFileEnv, path)
+
+			if got := configuredEndpointSummary(); got != tt.want {
+				t.Fatalf("configuredEndpointSummary() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	for env, want := range map[string]string{
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": parentTracesEndpoint,
+		"OTEL_EXPORTER_OTLP_ENDPOINT":        parentGenericEndpoint,
+		managedEndpointFileEnv:               parentManagedFile,
+	} {
+		if got := os.Getenv(env); got != want {
+			t.Fatalf("%s leaked from subtest: got %q, want parent value %q", env, got, want)
+		}
 	}
 }
 
