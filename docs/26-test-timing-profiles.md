@@ -62,7 +62,11 @@ not substitute a bare `go test ./...` when claiming the safe broad-suite
 contract. Real-database migration checks require explicit
 `AZEDARACH_USER_DB_CLONE` or `AZEDARACH_PROJECT_DB_CLONES` paths to safe
 temporary clones. Configured originals remain refused even if one is supplied
-through a clone variable.
+through a clone variable. The `migration-clone` profile snapshots every supplied
+clone independently for each package before starting package processes, then
+runs those processes in parallel with package-local HOME, config, and default
+database roots. Its status line and v5 report identify the
+`package-isolated-parallel` mode and the exact package-local clone paths.
 
 ## Commands
 
@@ -121,7 +125,7 @@ replayed package/test durations are reported but excluded from current pathology
 budgets; the cached profile's current wall time remains budgeted. The raw stream
 remains authoritative.
 
-Every v4 report records `test_result_cache_mode` as `cleared-and-bypassed`,
+Every v5 report records `test_result_cache_mode` as `cleared-and-bypassed`,
 `bypassed`, or `permitted`. The compatibility `cache_mode` field has the same
 test-result meaning. Neither field describes compiled build objects. The
 `build_cache` object separately records its namespace and retention policy,
@@ -143,7 +147,7 @@ failures or reports only the last failing package.
 | `cached` | explicitly permitted | normal / lifecycle owner | `./...` | Measures normal repeat developer feedback; cached packages remain visible in the JSON stream. |
 | `focused` | bypassed with `-count=1` | normal / lifecycle owner | defaults to `./internal/testtiming`; override with repeated `--package` | Fast development checks without pretending to be complete coverage. |
 | `integration` | bypassed with `-count=1` | normal / lifecycle owner | daemon, daemon-process, Git, and tmux tests named `RealProcessProfile…` | Real subprocess and lifecycle contracts only. |
-| `migration-clone` | bypassed with `-count=1` | normal / lifecycle owner | issue, user-store, runtime-state, and daemon migration/repair tests | Fresh, historical-upgrade, rollback, drift, repair, reopen, and clone-isolation execution paths. |
+| `migration-clone` | bypassed with `-count=1` | normal / lifecycle owner | issue, user-store, runtime-state, operations-store, and daemon migration/repair tests in package-isolated parallel processes | Fresh, historical-upgrade, rollback, drift, repair, reopen, and clone-isolation execution paths without sharing mutable clone identity. |
 | `race` | bypassed with `-count=1` | race / lifecycle owner | selected SQLite-clone, daemon-process, and concurrent Git contracts under `-race` | Focused shared-state validation that remains useful on ordinary developer hosts. |
 | `boundary` | bypassed with `-count=1` | normal / lifecycle owner | CLI/TUI executable boundary guards | Thin-client, transport-shim, and session-projection regressions; static graph checks remain in `just check-boundaries`. |
 

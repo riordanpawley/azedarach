@@ -90,6 +90,10 @@ func run() error {
 	}
 	fmt.Printf("profile=%s wall=%.2fs packages=%d tests=%d failures=%d violations=%d\n", measurement.Profile, measurement.WallSeconds, len(measurement.Packages), len(measurement.Tests), len(measurement.Failures), len(measurement.Comparison.Violations))
 	fmt.Printf("build_cache_namespace=%s before_bytes=%d after_bytes=%d delta_bytes=%d family_bytes=%d decision=%s\n", measurement.BuildCache.Namespace, measurement.BuildCache.Before.Bytes, measurement.BuildCache.After.Bytes, measurement.BuildCache.DeltaBytes, measurement.BuildCache.FamilyBytes, measurement.BuildCache.Decision)
+	fmt.Printf("clone_isolation_mode=%s configured=%t package_identities=%d\n", measurement.CloneIsolation.Mode, measurement.CloneIsolation.Configured, len(measurement.CloneIsolation.Packages))
+	for _, identity := range measurement.CloneIsolation.Packages {
+		fmt.Printf("clone_package=%s user=%s projects=%s\n", identity.Package, identity.UserDB, strings.Join(identity.ProjectDBs, string(os.PathListSeparator)))
+	}
 	if enforce {
 		fmt.Printf("aggregate=median samples=%d\n", *samples)
 	}

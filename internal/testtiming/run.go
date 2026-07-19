@@ -81,6 +81,7 @@ func writeRefusalArtifacts(opts RunOptions, telemetry gocache.Telemetry, refusal
 		StderrPath:          stderrPath,
 		Command:             opts.Profile.Command(),
 		Comparison:          Comparison{BaselineRecordedAt: opts.Baseline.RecordedAt, PackageDeltas: []Delta{}, Violations: []Violation{}},
+		CloneIsolation:      cloneIsolationBeforeExecution(opts.Profile, os.Environ()),
 	}
 	if err := writeArtifacts(opts.OutputDir, measurement); err != nil {
 		return measurement, errors.Join(refusal, err)
@@ -110,6 +111,13 @@ func runLocked(ctx context.Context, opts RunOptions, cacheConfig gocache.Config,
 			return Measurement{}, fmt.Errorf("clean Go test cache: %w: %s", err, output)
 		}
 	}
+	command := opts.Profile.Command()
+	baseEnv := isolation.Environ(withEnv(os.Environ(), "GOCACHE", cacheConfig.CachePath()))
+	packageEnvironments, cloneIsolation, err := preparePackageCloneEnvironments(ctx, opts.Profile, isolation.Root, opts.WorkingDir, baseEnv)
+	if err != nil {
+		refusal := fmt.Errorf("prepare package-isolated migration clones: %w", err)
+		return writeRefusalArtifacts(opts, cacheTelemetry, refusal)
+	}
 
 	rawPath := filepath.Join(opts.OutputDir, "events.jsonl")
 	stderrPath := filepath.Join(opts.OutputDir, "stderr.txt")
@@ -124,35 +132,48 @@ func runLocked(ctx context.Context, opts RunOptions, cacheConfig gocache.Config,
 	}
 	defer stderr.Close()
 
-	command := opts.Profile.Command()
-	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
-	cmd.Dir = opts.WorkingDir
-	cmd.Env = isolation.Environ(withEnv(os.Environ(), "GOCACHE", cacheConfig.CachePath()))
 	collector := NewEventCollector(raw)
-	cmd.Stdout = collector
-	cmd.Stderr = stderr
 	loadSampler := startProcessLoadSampler(500 * time.Millisecond)
 	startedAt := opts.Now().UTC()
 	started := time.Now()
-	runErr := cmd.Run()
+	resourceMethod := "direct-go-command-process-state-v1"
+	var execution processExecution
+	var runErr error
+	if opts.Profile.PackageIsolatedDBClones {
+		resourceMethod = "parallel-go-package-command-process-state-v1"
+		commands := make([]*exec.Cmd, 0, len(packageEnvironments))
+		for _, packageEnvironment := range packageEnvironments {
+			packageCommand := opts.Profile.commandForPackage(packageEnvironment.Package)
+			cmd := exec.CommandContext(ctx, packageCommand[0], packageCommand[1:]...)
+			cmd.Dir = opts.WorkingDir
+			cmd.Env = packageEnvironment.Env
+			commands = append(commands, cmd)
+		}
+		execution, runErr = runConcurrentCommands(commands, collector, stderr)
+	} else {
+		cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+		cmd.Dir = opts.WorkingDir
+		cmd.Env = baseEnv
+		cmd.Stdout = collector
+		cmd.Stderr = stderr
+		runErr = cmd.Run()
+		if cmd.ProcessState != nil {
+			execution.UserCPUSeconds = cmd.ProcessState.UserTime().Seconds()
+			execution.SystemCPUSeconds = cmd.ProcessState.SystemTime().Seconds()
+			execution.PeakRSSBytes = peakRSSBytes(cmd.ProcessState)
+			execution.ExitCode = cmd.ProcessState.ExitCode()
+		}
+	}
 	processLoad := loadSampler.finish()
 	wall := time.Since(started).Seconds()
 	collector.Finish()
 	packages, tests, failures, invalid := collector.Results()
-	exitCode := 0
-	if runErr != nil {
+	exitCode := execution.ExitCode
+	if runErr != nil && exitCode == 0 {
 		exitCode = 1
-		if exitErr, ok := runErr.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		}
 	}
 	cacheTelemetry, cacheErr := gocache.Finish(cacheConfig, cacheTelemetry)
-	m := Measurement{Schema: ReportSchema, Profile: opts.Profile.Name, CacheMode: opts.Profile.CachePolicy(), TestResultCacheMode: opts.Profile.CachePolicy(), TimingBudgetPolicy: timingBudgetPolicy(opts.CheckBudgets), BuildCache: cacheTelemetry, ResourceMethod: "direct-go-command-process-state-v1", StartedAt: startedAt, WallSeconds: wall, ProcessLoad: processLoad, ValidationLease: validationLeaseEvidence(), ExitCode: exitCode, Packages: packages, Tests: tests, Failures: failures, InvalidEvents: invalid, RawJSONPath: rawPath, StderrPath: stderrPath, Command: command}
-	if cmd.ProcessState != nil {
-		m.UserCPUSeconds = cmd.ProcessState.UserTime().Seconds()
-		m.SystemCPUSeconds = cmd.ProcessState.SystemTime().Seconds()
-		m.PeakRSSBytes = peakRSSBytes(cmd.ProcessState)
-	}
+	m := Measurement{Schema: ReportSchema, Profile: opts.Profile.Name, CacheMode: opts.Profile.CachePolicy(), TestResultCacheMode: opts.Profile.CachePolicy(), TimingBudgetPolicy: timingBudgetPolicy(opts.CheckBudgets), BuildCache: cacheTelemetry, ResourceMethod: resourceMethod, StartedAt: startedAt, WallSeconds: wall, UserCPUSeconds: execution.UserCPUSeconds, SystemCPUSeconds: execution.SystemCPUSeconds, PeakRSSBytes: execution.PeakRSSBytes, ProcessLoad: processLoad, ValidationLease: validationLeaseEvidence(), CloneIsolation: cloneIsolation, ExitCode: exitCode, Packages: packages, Tests: tests, Failures: failures, InvalidEvents: invalid, RawJSONPath: rawPath, StderrPath: stderrPath, Command: command}
 	m.Comparison = Compare(m, opts.Baseline)
 	if err := writeArtifacts(opts.OutputDir, m); err != nil {
 		return m, err

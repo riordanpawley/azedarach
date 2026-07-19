@@ -159,6 +159,42 @@ func TestEnvironment(t *testing.T) {
 	assert.Zero(t, measurement.ExitCode)
 }
 
+func TestRunWritesRefusalArtifactsBeforeOpeningConfiguredOriginalClone(t *testing.T) {
+	home := t.TempDir()
+	configuredOriginal := filepath.Join(home, ".azedarach", "azedarach.db")
+	require.NoError(t, os.MkdirAll(filepath.Dir(configuredOriginal), 0o700))
+	require.NoError(t, os.WriteFile(configuredOriginal, []byte("must not open"), 0o600))
+	t.Setenv("HOME", home)
+	t.Setenv("AZEDARACH_USER_DB_PATH", "")
+	t.Setenv("AZEDARACH_DB_PATH", "")
+	t.Setenv("AZEDARACH_REFUSE_DB_PATHS", "")
+	t.Setenv("AZEDARACH_REFUSE_DB_PATH", "")
+	t.Setenv("AZEDARACH_USER_DB_CLONE", configuredOriginal)
+	module := t.TempDir()
+	configureTestCacheFamily(t, module)
+	require.NoError(t, os.WriteFile(filepath.Join(module, "go.mod"), []byte("module example.test/refusal\n\ngo 1.24.2\n"), 0o644))
+	output := filepath.Join(t.TempDir(), "artifacts")
+	profile := Profile{
+		Name:                    "migration-refusal-fixture",
+		Packages:                []string{"./..."},
+		GoTestArgs:              []string{"-json", "-count=1"},
+		PackageIsolatedDBClones: true,
+		PackageCloneAuthorities: map[string][]CloneAuthority{"./...": {CloneAuthorityUser}},
+	}
+
+	measurement, err := Run(context.Background(), RunOptions{Profile: profile, OutputDir: output, WorkingDir: module})
+	require.ErrorContains(t, err, "refusing configured original database clone")
+	assert.Equal(t, 1, measurement.ExitCode)
+	assert.Equal(t, cloneIsolationPackageIsolatedParallel, measurement.CloneIsolation.Mode)
+	assert.True(t, measurement.CloneIsolation.Configured)
+	for _, name := range []string{"events.jsonl", "stderr.txt", "report.json", "report.md"} {
+		assert.FileExists(t, filepath.Join(output, name))
+	}
+	stderr, readErr := os.ReadFile(measurement.StderrPath)
+	require.NoError(t, readErr)
+	assert.Contains(t, string(stderr), "refusing configured original database clone")
+}
+
 func configureTestCacheFamily(t *testing.T, workingDir string) {
 	t.Helper()
 	t.Setenv("AZEDARACH_GO_CACHE_ROOT", filepath.Join(workingDir, ".azedarach", "go"))
