@@ -1809,7 +1809,7 @@ func interruptedSessionStartAgentLaunchRequired(progress *daemonops.Progress) bo
 }
 
 func (d *Daemon) compensateInterruptedSessionStart(ctx context.Context, store *daemonstate.RuntimeStateStore, projectID, sessionID, issueID string) string {
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionStartAcknowledgementTimeout)
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionStartCompensationTimeout)
 	defer cancel()
 	worktree, _, _ := store.GetWorktreeStateByIssueID(cleanupCtx, projectID, issueID)
 	resourceCtx := d.issueResourceLifecycleContext(projectID, issueID, sessionID, worktree.Path, worktree.Branch)

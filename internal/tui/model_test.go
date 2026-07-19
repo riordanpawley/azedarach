@@ -8641,6 +8641,19 @@ func TestProjectOrchestratorStopActionUsesProjectTarget(t *testing.T) {
 	}
 }
 
+func TestProjectOrchestratorStartActionOutlivesDaemonAcknowledgementBudget(t *testing.T) {
+	startBudget := projectOrchestratorActionTimeout("start")
+	if startBudget != protocol.OrchestratorSessionStartClientBudget {
+		t.Fatalf("start action budget = %s, want shared client budget %s", startBudget, protocol.OrchestratorSessionStartClientBudget)
+	}
+	if startBudget <= protocol.OrchestratorSessionStartAcknowledgementBudget {
+		t.Fatalf("start action budget = %s, must exceed daemon acknowledgement budget %s", startBudget, protocol.OrchestratorSessionStartAcknowledgementBudget)
+	}
+	if got := projectOrchestratorActionTimeout("stop"); got != 12*time.Second {
+		t.Fatalf("stop action budget = %s, want 12s", got)
+	}
+}
+
 func TestProjectOrchestratorRefreshFailurePreservesLastKnownSnapshot(t *testing.T) {
 	m := newTestModel()
 	known := projectOrchestratorSnapshot{ProjectID: m.daemonProjectID(), Snapshot: &protocol.OrchestrationSnapshot{Lifecycle: domain.OrchestratorWorking}}
