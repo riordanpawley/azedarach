@@ -57,7 +57,7 @@ func TestParseWorkerEvidencePacketBodyValidDirectPacket(t *testing.T) {
 
 func TestParseWorkerEvidencePacketBodyRejectsPartialStructuredReview(t *testing.T) {
 	body := `{
-		"schema":"worker_evidence.v1","summary":"Ready","commands_run":["just test"],
+		"schema":"worker_evidence.v1","summary":"Ready","commands_run":["project-check test"],
 		"key_assertions":["tests pass"],"files_changed":["file.go"],"risks":["none"],
 		"review":{"status":"clean","findings":[],"revision":"abc","angle":"repair","reused_layers":["worker"],"clean_pass":1,"clean_pass_target":2,"matrix":{"type":"stateful/concurrent","covered_cells":["state"]}}
 	}`
@@ -76,7 +76,7 @@ func TestParseWorkerEvidencePacketBodyRejectsPartialStructuredReview(t *testing.
 
 func TestParseWorkerEvidencePacketBodyRejectsDuplicateStructuredFindings(t *testing.T) {
 	body := `{
-		"schema":"worker_evidence.v1","summary":"Ready","commands_run":["just test"],
+		"schema":"worker_evidence.v1","summary":"Ready","commands_run":["project-check test"],
 		"key_assertions":["tests pass"],"files_changed":["file.go"],"risks":["none"],
 		"review":{"status":"findings","findings":["stale cache"," Stale Cache "],"revision":"abc","angle":"state review","reused_layers":["none"],"clean_pass":0,"clean_pass_target":1,"matrix":{"type":"stateful/concurrent","covered_cells":["state"],"skipped_cells":[]}}
 	}`
@@ -92,7 +92,7 @@ func TestParseWorkerEvidencePacketBodyRejectsDuplicateStructuredFindings(t *test
 
 func TestParseWorkerEvidencePacketBodyPreservesExplicitZeroCleanPass(t *testing.T) {
 	body := `{
-		"schema":"worker_evidence.v1","summary":"Review found work","commands_run":["just test"],
+		"schema":"worker_evidence.v1","summary":"Review found work","commands_run":["project-check test"],
 		"key_assertions":["review completed"],"files_changed":["file.go"],"risks":["finding unresolved"],
 		"review":{"status":"findings","findings":["stale cache"],"revision":"abc","angle":"state review","reused_layers":["none"],"clean_pass":0,"clean_pass_target":1,"matrix":{"type":"stateful/concurrent","covered_cells":["state"],"skipped_cells":[]}}
 	}`
@@ -253,6 +253,89 @@ func TestValidateWorkerEvidencePacketBodyReportsPointerDiagnostics(t *testing.T)
 	}
 	if !found {
 		t.Fatalf("diagnostics = %+v, want review.status pointer with allowed values", result.Diagnostics)
+	}
+}
+
+func TestValidateWorkerEvidencePacketBodyReportsReviewDetailDiagnostics(t *testing.T) {
+	tests := []struct {
+		name           string
+		review         string
+		wantPath       string
+		wantMessage    string
+		wantSuggestion string
+	}{
+		{
+			name:           "negative clean pass",
+			review:         `{"status":"findings","findings":["repair"],"revision":"abc","angle":"repair","reused_layers":["none"],"clean_pass":-1,"clean_pass_target":1,"matrix":{"type":"general","covered_cells":["repair"],"skipped_cells":[]}}`,
+			wantPath:       "/review/clean_pass",
+			wantMessage:    "review.clean_pass cannot be negative",
+			wantSuggestion: "use 0 before a clean pass",
+		},
+		{
+			name:           "clean verdict needs a completed pass",
+			review:         `{"status":"clean","findings":[],"revision":"abc","angle":"complete","reused_layers":["none"],"clean_pass":0,"clean_pass_target":1,"matrix":{"type":"general","covered_cells":["complete"],"skipped_cells":[]}}`,
+			wantPath:       "/review/clean_pass",
+			wantMessage:    "review.clean_pass must be at least 1 for a clean review",
+			wantSuggestion: "use findings, not_run, or blocked",
+		},
+		{
+			name:           "clean pass is required",
+			review:         `{"status":"findings","findings":["repair"],"revision":"abc","angle":"repair","reused_layers":["none"],"clean_pass_target":1,"matrix":{"type":"general","covered_cells":["repair"],"skipped_cells":[]}}`,
+			wantPath:       "/review/clean_pass",
+			wantMessage:    "required field is missing or empty",
+			wantSuggestion: "completed worker review-pass count",
+		},
+		{
+			name:           "target must be positive",
+			review:         `{"status":"findings","findings":["repair"],"revision":"abc","angle":"repair","reused_layers":["none"],"clean_pass":0,"clean_pass_target":0,"matrix":{"type":"general","covered_cells":["repair"],"skipped_cells":[]}}`,
+			wantPath:       "/review/clean_pass_target",
+			wantMessage:    "review.clean_pass_target must be at least 1",
+			wantSuggestion: "required worker review-pass count",
+		},
+		{
+			name:           "clean pass target is required",
+			review:         `{"status":"findings","findings":["repair"],"revision":"abc","angle":"repair","reused_layers":["none"],"clean_pass":0,"matrix":{"type":"general","covered_cells":["repair"],"skipped_cells":[]}}`,
+			wantPath:       "/review/clean_pass_target",
+			wantMessage:    "required field is missing or empty",
+			wantSuggestion: "required worker review-pass count",
+		},
+		{
+			name:           "completed passes cannot exceed target",
+			review:         `{"status":"findings","findings":["repair"],"revision":"abc","angle":"repair","reused_layers":["none"],"clean_pass":2,"clean_pass_target":1,"matrix":{"type":"general","covered_cells":["repair"],"skipped_cells":[]}}`,
+			wantPath:       "/review/clean_pass",
+			wantMessage:    "review.clean_pass cannot exceed review.clean_pass_target",
+			wantSuggestion: "completed passes do not exceed the required target",
+		},
+		{
+			name:           "extra pass target requires a reason",
+			review:         `{"status":"findings","findings":["repair"],"revision":"abc","angle":"repair","reused_layers":["none"],"clean_pass":0,"clean_pass_target":2,"matrix":{"type":"general","covered_cells":["repair"],"skipped_cells":[]}}`,
+			wantPath:       "/review/extra_pass_reason",
+			wantMessage:    "required field is missing or empty",
+			wantSuggestion: "explicit high-risk contract",
+		},
+		{
+			name:           "provided fallback reason cannot be empty",
+			review:         `{"status":"findings","findings":["repair"],"revision":"abc","angle":"repair","reused_layers":["none"],"fallback_reason":"","clean_pass":0,"clean_pass_target":1,"matrix":{"type":"general","covered_cells":["repair"],"skipped_cells":[]}}`,
+			wantPath:       "/review/fallback_reason",
+			wantMessage:    "required field is missing or empty",
+			wantSuggestion: "widened from the local delta",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"schema":"worker_evidence.v1","summary":"Ready","commands_run":["project-check test"],"key_assertions":["validation passed"],"files_changed":["path/to/file"],"review":%s,"risks":["none"]}`, tc.review)
+			result := ValidateWorkerEvidencePacketBody(body, false)
+			if result.Complete {
+				t.Fatalf("validation = %+v, want incomplete", result)
+			}
+			for _, diagnostic := range result.Diagnostics {
+				if diagnostic.Path == tc.wantPath && strings.Contains(diagnostic.Message, tc.wantMessage) && strings.Contains(diagnostic.Suggestion, tc.wantSuggestion) {
+					return
+				}
+			}
+			t.Fatalf("diagnostics = %+v, want path=%q message~%q suggestion~%q", result.Diagnostics, tc.wantPath, tc.wantMessage, tc.wantSuggestion)
+		})
 	}
 }
 

@@ -395,6 +395,9 @@ func validateWorkerEvidenceReviewDetails(review WorkerEvidenceReview, fields map
 			}
 		}
 	}
+	if _, ok := fields["fallback_reason"]; ok && strings.TrimSpace(review.FallbackReason) == "" {
+		missing = appendMissing(missing, "review.fallback_reason")
+	}
 	if review.Matrix != nil {
 		for i, skipped := range review.Matrix.SkippedCells {
 			if strings.TrimSpace(skipped.Cell) == "" {
@@ -774,6 +777,20 @@ func diagnosticsForInvalidWorkerEvidence(invalid []string) []WorkerEvidenceDiagn
 			Message:    reason,
 			Suggestion: "run `az mail validate-evidence --fix` to preview a canonical packet when the mismatch is repairable",
 		}
+		switch reason {
+		case "review.clean_pass cannot be negative":
+			diagnostic.Path = "/review/clean_pass"
+			diagnostic.Suggestion = "use 0 before a clean pass or a positive completed-pass count"
+		case "review.clean_pass must be at least 1 for a clean review":
+			diagnostic.Path = "/review/clean_pass"
+			diagnostic.Suggestion = "set clean_pass to at least 1, or use findings, not_run, or blocked until the review is clean"
+		case "review.clean_pass_target must be at least 1":
+			diagnostic.Path = "/review/clean_pass_target"
+			diagnostic.Suggestion = "set clean_pass_target to the required worker review-pass count"
+		case "review.clean_pass cannot exceed review.clean_pass_target":
+			diagnostic.Path = "/review/clean_pass"
+			diagnostic.Suggestion = "lower clean_pass or increase clean_pass_target so completed passes do not exceed the required target"
+		}
 		switch {
 		case strings.Contains(reason, "review.status"):
 			diagnostic.Path = "/review/status"
@@ -841,6 +858,12 @@ func workerEvidenceSuggestionForField(field string) string {
 		return "use an empty array or objects with cell and reason"
 	case "review.extra_pass_reason":
 		return "name the explicit high-risk contract requiring more than one worker pass"
+	case "review.clean_pass":
+		return "record the completed worker review-pass count, using 0 before the first clean pass"
+	case "review.clean_pass_target":
+		return "record the required worker review-pass count, which must be at least 1"
+	case "review.fallback_reason":
+		return "describe why repair review widened from the local delta to the complete affected invariant"
 	case "risks":
 		return `use ["none"] when there are no known risks`
 	case "summary":
