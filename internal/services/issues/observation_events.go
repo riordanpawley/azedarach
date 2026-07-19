@@ -455,6 +455,109 @@ func (c *Client) AppendIssueObservationEvent(ctx context.Context, issueID string
 	return event, nil
 }
 
+// TaskIntegrationPublicationBinding identifies one already-committed exact
+// configured-base integration receipt and the publication operation that owns
+// its validation and acceptance continuation.
+type TaskIntegrationPublicationBinding struct {
+	ProjectID              string
+	SourceBranch           string
+	TargetBranch           string
+	TargetID               string
+	BaseOID                string
+	SourceOID              string
+	TargetOID              string
+	PublicationOperationID string
+	WorktreePath           string
+}
+
+// BindTaskIntegrationPublicationOperation appends one corrected receipt when
+// the latest exact integration receipt predates its publication-operation
+// binding. The read and append share one SQLite transaction so concurrent
+// daemon retries converge on one append-only correction.
+func (c *Client) BindTaskIntegrationPublicationOperation(ctx context.Context, issueID string, binding TaskIntegrationPublicationBinding) (bool, error) {
+	issueID = strings.TrimSpace(issueID)
+	binding.ProjectID = strings.TrimSpace(binding.ProjectID)
+	binding.SourceBranch = strings.TrimSpace(binding.SourceBranch)
+	binding.TargetBranch = strings.TrimSpace(binding.TargetBranch)
+	binding.TargetID = strings.TrimSpace(binding.TargetID)
+	binding.BaseOID = strings.TrimSpace(binding.BaseOID)
+	binding.SourceOID = strings.TrimSpace(binding.SourceOID)
+	binding.TargetOID = strings.TrimSpace(binding.TargetOID)
+	binding.PublicationOperationID = strings.TrimSpace(binding.PublicationOperationID)
+	binding.WorktreePath = strings.TrimSpace(binding.WorktreePath)
+	if issueID == "" || binding.ProjectID == "" || binding.SourceBranch == "" || binding.TargetBranch == "" || binding.TargetID == "" ||
+		binding.BaseOID == "" || binding.SourceOID == "" || binding.TargetOID == "" || binding.PublicationOperationID == "" {
+		return false, errors.New("exact task integration publication binding is incomplete")
+	}
+	appended := false
+	err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			db, err := c.dbHandle()
+			if err != nil {
+				return err
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				return c.wrapError("bind-task-integration-publication", issueID, err)
+			}
+			defer tx.Rollback()
+			if err := c.requireIssueExists(ctx, tx, issueID, "bind-task-integration-publication"); err != nil {
+				return err
+			}
+			var payloadJSON string
+			err = tx.QueryRowContext(ctx, `SELECT payload_json FROM issue_observation_events
+				WHERE issue_id=? AND event_type=?
+				  AND json_extract(payload_json,'$.project_id')=?
+				  AND json_extract(payload_json,'$.source_branch')=?
+				  AND json_extract(payload_json,'$.target_branch')=?
+				ORDER BY id DESC LIMIT 1`, issueID, string(domain.IssueEventTaskIntegrationCompleted), binding.ProjectID, binding.SourceBranch, binding.TargetBranch).Scan(&payloadJSON)
+			if errors.Is(err, sql.ErrNoRows) {
+				return c.wrapError("bind-task-integration-publication", issueID, errors.New("exact task integration receipt is absent"))
+			}
+			if err != nil {
+				return c.wrapError("bind-task-integration-publication", issueID, err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+				return c.wrapError("bind-task-integration-publication", issueID, fmt.Errorf("decode exact task integration receipt: %w", err))
+			}
+			payloadString := func(key string) string { return strings.TrimSpace(fmt.Sprint(payload[key])) }
+			integrated, _ := payload["integrated"].(bool)
+			configuredBase, _ := payload["configured_base_target"].(bool)
+			if !integrated || !configuredBase ||
+				payloadString("target_id") != binding.TargetID || payloadString("base_oid") != binding.BaseOID ||
+				payloadString("source_oid") != binding.SourceOID || payloadString("target_oid") != binding.TargetOID {
+				return c.wrapError("bind-task-integration-publication", issueID, errors.New("latest task integration receipt does not match exact publication revisions and target identity"))
+			}
+			existingOperationID := payloadString("publication_operation_id")
+			if existingOperationID != "" {
+				if existingOperationID != binding.PublicationOperationID {
+					return c.wrapError("bind-task-integration-publication", issueID, fmt.Errorf("task integration receipt is already bound to publication operation %s", existingOperationID))
+				}
+				return nil
+			}
+			_, err = c.insertIssueObservationEvent(ctx, tx, issueID, IssueObservationEventParams{
+				Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close", SourceCommand: "integrate-before-close", WorktreePath: binding.WorktreePath,
+				Payload: map[string]any{
+					"project_id": binding.ProjectID, "source_branch": binding.SourceBranch, "target_branch": binding.TargetBranch,
+					"integrated": true, "configured_base_target": true, "target_id": binding.TargetID,
+					"base_oid": binding.BaseOID, "source_oid": binding.SourceOID, "target_oid": binding.TargetOID,
+					"publication_operation_id": binding.PublicationOperationID,
+				},
+			})
+			if err != nil {
+				return c.wrapError("bind-task-integration-publication", issueID, err)
+			}
+			if err := tx.Commit(); err != nil {
+				return c.wrapError("bind-task-integration-publication", issueID, err)
+			}
+			appended = true
+			return nil
+		})
+	})
+	return appended, err
+}
+
 // AppendAcceptedReviewAndPublication atomically records the immutable accepted
 // review decision and its daemon-owned publication intent. The queue table is
 // owned by the daemon-operations migration authority but shares this project
