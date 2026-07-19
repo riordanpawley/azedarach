@@ -1508,15 +1508,13 @@ func (a daemonOrchestrationAuthority) releaseAndCloseAcceptedReview(ctx context.
 		return false, fmt.Errorf("inspect review lease before authoritative close: %w", err)
 	}
 	reviewLease := coordinationLease(task, domain.CoordinationLeaseReview)
-	resumingEvidenceFence := evidencePin != nil && issues.ReviewEvidenceCloseFenceMatches(reviewLease, *evidencePin)
-	if reviewLease != nil && !resumingEvidenceFence {
-		if _, err := issueClient.ReleaseOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: request.ActorID, Purpose: domain.CoordinationLeaseReview}); err != nil {
-			return false, fmt.Errorf("release review lease before authoritative close: %w", err)
-		}
+	if reviewLease == nil || (evidencePin != nil && !issues.ReviewEvidenceCloseFenceMatches(reviewLease, *evidencePin, request.ActorID)) ||
+		(evidencePin == nil && !strings.EqualFold(strings.TrimSpace(reviewLease.OwnerID), strings.TrimSpace(request.ActorID))) {
+		return false, fmt.Errorf("accepted reviewer %s does not own the durable review lease", request.ActorID)
 	}
-	if hook := a.daemon.reviewLeaseReleasedBeforeClose; hook != nil {
+	if hook := a.daemon.reviewLeaseFencedBeforeClose; hook != nil {
 		if err := hook(ctx, projectID, issueID); err != nil {
-			return true, fmt.Errorf("after review lease release: %w", err)
+			return true, fmt.Errorf("after review lease fence: %w", err)
 		}
 	}
 	return true, a.closeAcceptedReview(ctx, projectID, request, issueID, integrateBeforeClose, pin, expectedBaseOID, result)
@@ -1528,7 +1526,7 @@ func (a daemonOrchestrationAuthority) closeAcceptedReview(ctx context.Context, p
 		evidencePin = &issues.ReviewEvidencePin{Source: pin.EvidenceSource, EventID: pin.EvidenceEventID, Seq: pin.EvidenceSeq, Digest: pin.EvidenceDigest}
 	}
 	body, err := json.Marshal(taskCloseRequest{
-		TaskID: issueID, IntegrateBeforeClose: integrateBeforeClose, ExpectedSourceOID: strings.TrimSpace(pin.SourceOID), ExpectedBaseOID: strings.TrimSpace(expectedBaseOID), ExpectedReviewEvidence: evidencePin,
+		TaskID: issueID, IntegrateBeforeClose: integrateBeforeClose, ExpectedSourceOID: strings.TrimSpace(pin.SourceOID), ExpectedBaseOID: strings.TrimSpace(expectedBaseOID), ExpectedReviewEvidence: evidencePin, ExpectedReviewerID: request.ActorID,
 	})
 	if err != nil {
 		return err

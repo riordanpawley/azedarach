@@ -144,6 +144,7 @@ type taskCloseRequest struct {
 	ExpectedSourceOID         string                                     `json:"expected_source_oid,omitempty"`
 	ExpectedBaseOID           string                                     `json:"expected_base_oid,omitempty"`
 	ExpectedReviewEvidence    *issues.ReviewEvidencePin                  `json:"expected_review_evidence,omitempty"`
+	ExpectedReviewerID        string                                     `json:"expected_reviewer_id,omitempty"`
 	HistoricalAuthorization   *domain.HistoricalPublicationAuthorization `json:"historical_authorization,omitempty"`
 	PromoteBacklogBeforeClose bool                                       `json:"-"`
 }
@@ -2201,17 +2202,10 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	}
 	reviewEvidenceFence := ""
 	if cmd.ExpectedReviewEvidence != nil {
-		reviewEvidenceFence, err = issueClient.BeginReviewEvidenceClose(ctx, taskID, *cmd.ExpectedReviewEvidence)
+		reviewEvidenceFence, err = issueClient.BeginReviewEvidenceClose(ctx, taskID, *cmd.ExpectedReviewEvidence, cmd.ExpectedReviewerID)
 		if err != nil {
 			return result, fmt.Errorf("reviewed evidence close fence for issue %s: %w", taskID, err)
 		}
-		defer func() {
-			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			defer cancel()
-			if releaseErr := issueClient.ReleaseReviewEvidenceClose(releaseCtx, taskID, reviewEvidenceFence); releaseErr != nil && d.cfg.Logger != nil {
-				d.cfg.Logger.Error("release review evidence close fence", "project_id", projectID, "task_id", taskID, "error", releaseErr)
-			}
-		}()
 	}
 	recordPhase := func(name string, startedAt time.Time, skipped bool) {
 		result.Phases = append(result.Phases, taskClosePhaseTiming{
@@ -2339,6 +2333,8 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	var task domain.Task
 	if cmd.ExpectedReviewEvidence != nil {
 		task, err = issueClient.CloseWithRuntimeReviewEvidenceFence(ctx, projectID, taskID, closeStatus, *cmd.ExpectedReviewEvidence, reviewEvidenceFence)
+	} else if strings.TrimSpace(cmd.ExpectedReviewerID) != "" {
+		task, err = issueClient.CloseWithRuntimeReviewLease(ctx, projectID, taskID, closeStatus, cmd.ExpectedReviewerID)
 	} else {
 		task, err = issueClient.CloseWithRuntime(ctx, projectID, taskID, closeStatus)
 	}

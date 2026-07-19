@@ -18,7 +18,7 @@ import (
 
 const defaultIssueObservationEventLimit = 500
 
-const reviewEvidenceCloseFenceOwnerKind = "review-evidence-close-fence"
+const legacyReviewEvidenceCloseFenceOwnerKind = "review-evidence-close-fence"
 
 // ReviewEvidencePin identifies the exact durable evidence accepted by a
 // reviewer. Terminal close supports only issue-event evidence so the pin can
@@ -199,22 +199,29 @@ func reviewEvidenceCloseFenceToken(pin ReviewEvidencePin) string {
 	return fmt.Sprintf("review-evidence:%d:%s", pin.EventID, strings.TrimSpace(pin.Digest))
 }
 
-// ReviewEvidenceCloseFenceMatches reports whether lease is the durable fence
-// for this exact accepted evidence epoch. Accepted-intent replay uses it to
-// resume a close after a daemon crash without dropping the write fence.
-func ReviewEvidenceCloseFenceMatches(lease *domain.CoordinationLease, pin ReviewEvidencePin) bool {
+// ReviewEvidenceCloseFenceMatches reports whether lease preserves the accepted
+// reviewer identity or is a legacy synthetic fence for the exact evidence pin.
+// Accepted-intent replay uses the legacy match only to restore reviewer
+// identity after upgrading a close that crashed under the old representation.
+func ReviewEvidenceCloseFenceMatches(lease *domain.CoordinationLease, pin ReviewEvidencePin, reviewerID string) bool {
 	return lease != nil && lease.Purpose == domain.CoordinationLeaseReview &&
-		lease.OwnerKind == reviewEvidenceCloseFenceOwnerKind && lease.OwnerID == reviewEvidenceCloseFenceToken(pin)
+		(strings.EqualFold(strings.TrimSpace(lease.OwnerID), strings.TrimSpace(reviewerID)) ||
+			(lease.OwnerKind == legacyReviewEvidenceCloseFenceOwnerKind && lease.OwnerID == reviewEvidenceCloseFenceToken(pin)))
 }
 
-// BeginReviewEvidenceClose installs a durable, cross-process write fence for
+// BeginReviewEvidenceClose verifies the durable reviewer-owned write fence for
 // one accepted evidence epoch. Evidence producers cannot supersede the pin
-// while external integration and resource cleanup are in flight.
-func (c *Client) BeginReviewEvidenceClose(ctx context.Context, issueID string, pin ReviewEvidencePin) (string, error) {
+// while external integration and resource cleanup are in flight. Legacy
+// synthetic fences are atomically restored to the accepted reviewer so a
+// daemon restart can recover operations created by older versions.
+func (c *Client) BeginReviewEvidenceClose(ctx context.Context, issueID string, pin ReviewEvidencePin, reviewerID string) (string, error) {
 	issueID = strings.TrimSpace(issueID)
-	token := reviewEvidenceCloseFenceToken(pin)
+	reviewerID = strings.TrimSpace(reviewerID)
 	if strings.TrimSpace(pin.Source) != "issue_event" || pin.EventID <= 0 || pin.Seq != 0 || strings.TrimSpace(pin.Digest) == "" {
 		return "", c.wrapError("begin-review-evidence-close", issueID, errors.New("review evidence pin must identify one durable issue event"))
+	}
+	if reviewerID == "" {
+		return "", c.wrapError("begin-review-evidence-close", issueID, errors.New("accepted reviewer id is required"))
 	}
 	err := c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
@@ -234,16 +241,21 @@ func (c *Client) BeginReviewEvidenceClose(ctx context.Context, issueID string, p
 			if err != nil {
 				return c.wrapError("begin-review-evidence-close", issueID, err)
 			}
-			if lease != nil && (lease.OwnerKind != reviewEvidenceCloseFenceOwnerKind || lease.OwnerID != token) {
-				return c.wrapError("begin-review-evidence-close", issueID, fmt.Errorf("%w: review lease owned by %s", domain.ErrConflict, lease.OwnerID))
+			if lease == nil || lease.IsExpired(time.Now().UTC()) {
+				return c.wrapError("begin-review-evidence-close", issueID, fmt.Errorf("%w: active accepted reviewer lease is required", domain.ErrConflict))
 			}
-			if lease == nil {
-				now := time.Now().UTC().Format(time.RFC3339Nano)
-				if _, err := tx.ExecContext(ctx, `INSERT INTO issue_coordination_leases
-					(issue_id,purpose,owner_id,owner_kind,claimed_at,expires_at)
-					VALUES(?,?,?,?,?,NULL)`, issueID, domain.CoordinationLeaseReview, token, reviewEvidenceCloseFenceOwnerKind, now); err != nil {
+			if strings.EqualFold(strings.TrimSpace(lease.OwnerID), reviewerID) {
+				// The accepted reviewer already is the durable fence. Preserve the
+				// exact lease identity used by validation authorization.
+			} else if lease.OwnerKind == legacyReviewEvidenceCloseFenceOwnerKind && lease.OwnerID == reviewEvidenceCloseFenceToken(pin) {
+				if _, err := tx.ExecContext(ctx, `UPDATE issue_coordination_leases
+					SET owner_id=?,owner_kind=?
+					WHERE issue_id=? AND purpose=? AND owner_id=? AND owner_kind=?`, reviewerID, "orchestrator",
+					issueID, domain.CoordinationLeaseReview, lease.OwnerID, legacyReviewEvidenceCloseFenceOwnerKind); err != nil {
 					return c.wrapError("begin-review-evidence-close", issueID, err)
 				}
+			} else {
+				return c.wrapError("begin-review-evidence-close", issueID, fmt.Errorf("%w: review lease owned by %s", domain.ErrConflict, lease.OwnerID))
 			}
 			if err := tx.Commit(); err != nil {
 				return c.wrapError("begin-review-evidence-close", issueID, err)
@@ -254,30 +266,7 @@ func (c *Client) BeginReviewEvidenceClose(ctx context.Context, issueID string, p
 	if err != nil {
 		return "", err
 	}
-	return token, nil
-}
-
-// ReleaseReviewEvidenceClose removes a matching fence after a failed close.
-// A successful fenced terminal write consumes the fence atomically instead.
-func (c *Client) ReleaseReviewEvidenceClose(ctx context.Context, issueID, token string) error {
-	issueID, token = strings.TrimSpace(issueID), strings.TrimSpace(token)
-	if issueID == "" || token == "" {
-		return nil
-	}
-	return c.retrySQLiteBusy(ctx, func() error {
-		return c.withMutationLock(ctx, func(ctx context.Context) error {
-			db, err := c.dbHandle()
-			if err != nil {
-				return err
-			}
-			_, err = db.ExecContext(ctx, `DELETE FROM issue_coordination_leases
-				WHERE issue_id=? AND purpose=? AND owner_id=? AND owner_kind=?`, issueID, domain.CoordinationLeaseReview, token, reviewEvidenceCloseFenceOwnerKind)
-			if err != nil {
-				return c.wrapError("release-review-evidence-close", issueID, err)
-			}
-			return nil
-		})
-	})
+	return reviewerID, nil
 }
 
 type IssueObservationEventParams struct {
@@ -1745,7 +1734,7 @@ func (c *Client) insertIssueObservationEvent(ctx context.Context, execer sqlIssu
 				ORDER BY claimed_at DESC
 				LIMIT 1
 			`, issueID, domain.CoordinationLeaseReview, time.Now().UTC().Format(time.RFC3339Nano)).Scan(&ownerKind)
-			if leaseErr == nil && ownerKind == reviewEvidenceCloseFenceOwnerKind {
+			if leaseErr == nil && ownerKind == legacyReviewEvidenceCloseFenceOwnerKind {
 				return 0, fmt.Errorf("%w: accepted review evidence is fenced for authoritative close", domain.ErrConflict)
 			}
 			return 0, fmt.Errorf("%w: active review admission lease fences evidence replacement", domain.ErrConflict)

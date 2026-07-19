@@ -166,6 +166,102 @@ func TestAcceptedReviewAndPublicationReturnsCommittedReceiptAfterCallerCancellat
 	// rejected. Returning transaction-derived IDs locks out that ambiguity.
 }
 
+func TestAcceptedReviewPublicationFencePreservesReviewerIdentity(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".azedarach"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(repo, nil)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	queueStore := operationstore.New(repo, nil)
+	t.Cleanup(func() { _ = queueStore.Close() })
+	if _, err := queueStore.PublicationOperations(ctx, "project", "", false); err != nil {
+		t.Fatal(err)
+	}
+	issueID, err := client.Create(ctx, CreateTaskParams{Title: "publish", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := client.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{
+		Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: map[string]any{
+			"schema": "worker_evidence.v1", "summary": "reviewed", "commands_run": []any{"go test ./..."},
+			"key_assertions": []any{"publication is exact"}, "files_changed": []any{"consumer.go"},
+			"review": map[string]any{"status": "clean", "findings": []any{"none"}}, "risks": []any{"none"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission, err := client.CaptureReviewAdmissionPin(ctx, issueID)
+	if err != nil || admission.Evidence == nil || admission.Evidence.EventID != evidence.ID {
+		t.Fatalf("review admission = %+v err=%v", admission, err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{
+		OwnerID: "reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview,
+		ExpectedReviewAdmission: &admission, ReviewSourceOID: "source",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	operation := domain.PublicationOperation{
+		OperationID: "publication-reviewer-fence", ProjectID: "project", IssueID: issueID, IntentKey: "accept-reviewer-fence",
+		RequestFingerprint: "fingerprint", ActorID: "reviewer", TargetID: "base", TargetBranch: "main",
+		SourceRevision: "source", BaseRevision: "base", PolicyVersion: "policy", EnvironmentFingerprint: "toolchain",
+		ValidationCommand: "make verify", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
+	}
+	params := IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", Payload: map[string]any{
+		"outcome": string(domain.ReviewOutcomeAccepted), "intent_key": operation.IntentKey, "request_fingerprint": operation.RequestFingerprint,
+	}}
+	if _, err := client.AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx, issueID, params, operation, "candidate", admission, "", "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.BeginReviewEvidenceClose(ctx, issueID, *admission.Evidence, "other-reviewer"); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("mismatched accepted reviewer error = %v, want conflict", err)
+	}
+	if _, err := client.BeginReviewEvidenceClose(ctx, issueID, *admission.Evidence, "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reviewLease *domain.CoordinationLease
+	for i := range task.CoordinationLeases {
+		if task.CoordinationLeases[i].Purpose == domain.CoordinationLeaseReview {
+			reviewLease = &task.CoordinationLeases[i]
+			break
+		}
+	}
+	if reviewLease == nil || reviewLease.OwnerID != "reviewer" {
+		t.Fatalf("accepted publication review lease = %+v, want authoritative reviewer identity", reviewLease)
+	}
+	db, err := client.dbHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE issue_coordination_leases SET owner_id=?,owner_kind=? WHERE issue_id=? AND purpose=?`,
+		reviewEvidenceCloseFenceToken(*admission.Evidence), legacyReviewEvidenceCloseFenceOwnerKind, issueID, domain.CoordinationLeaseReview); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.BeginReviewEvidenceClose(ctx, issueID, *admission.Evidence, "reviewer"); err != nil {
+		t.Fatalf("recover legacy synthetic fence: %v", err)
+	}
+	task, err = client.GetWithRuntime(ctx, "project", issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewLease = nil
+	for i := range task.CoordinationLeases {
+		if task.CoordinationLeases[i].Purpose == domain.CoordinationLeaseReview {
+			reviewLease = &task.CoordinationLeases[i]
+			break
+		}
+	}
+	if reviewLease == nil || reviewLease.OwnerID != "reviewer" || reviewLease.OwnerKind != "orchestrator" {
+		t.Fatalf("recovered legacy publication review lease = %+v, want authoritative reviewer identity", reviewLease)
+	}
+}
+
 func TestAcceptedReviewAndPublicationIntentCommitAtomically(t *testing.T) {
 	ctx := context.Background()
 	repo := t.TempDir()

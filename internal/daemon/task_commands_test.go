@@ -8683,6 +8683,15 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 		t.Fatalf("marshal reviewed evidence: %v", err)
 	}
 	evidencePin := &issues.ReviewEvidencePin{Source: "issue_event", EventID: evidenceEvent.ID, Digest: fmt.Sprintf("%x", sha256.Sum256(evidenceBody))}
+	admission, err := issuesClient.CaptureReviewAdmissionPin(ctx, taskID)
+	if err != nil {
+		t.Fatalf("capture review admission: %v", err)
+	}
+	if _, err := issuesClient.ClaimOwnershipWithRuntime(ctx, projectID, taskID, issues.OwnershipClaimParams{
+		OwnerID: "reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview, ExpectedReviewAdmission: &admission,
+	}); err != nil {
+		t.Fatalf("claim reviewer lease: %v", err)
+	}
 	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
 	if err := os.MkdirAll(sourceWorktree, 0o755); err != nil {
 		t.Fatalf("mkdir source worktree: %v", err)
@@ -8786,7 +8795,7 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	})
 
 	body, err := json.Marshal(taskCloseRequest{
-		TaskID: taskID, IntegrateBeforeClose: true, ExpectedReviewEvidence: evidencePin,
+		TaskID: taskID, IntegrateBeforeClose: true, ExpectedReviewEvidence: evidencePin, ExpectedReviewerID: "reviewer",
 	})
 	if err != nil {
 		t.Fatalf("marshal task close request: %v", err)
@@ -8815,8 +8824,8 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	if !result.IntegrationRequested || result.Integrated {
 		t.Fatalf("close integration result = %+v, want requested no-op integration", result)
 	}
-	if lateEvidenceErr == nil || !strings.Contains(lateEvidenceErr.Error(), "accepted review evidence is fenced") {
-		t.Fatalf("late git-runner evidence error = %v, want durable close-fence conflict", lateEvidenceErr)
+	if lateEvidenceErr == nil || !strings.Contains(lateEvidenceErr.Error(), "active review admission lease fences evidence replacement") {
+		t.Fatalf("late git-runner evidence error = %v, want reviewer-owned durable close-fence conflict", lateEvidenceErr)
 	}
 	if !result.WorktreeRemoved {
 		t.Fatalf("close integration result = %+v, want worktree cleanup", result)
