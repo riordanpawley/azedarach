@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -23,6 +22,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/processgroup"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
@@ -996,14 +996,30 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 	)
 	rollbackIssueLifecycle := originalIssueStatus != domain.StatusInProgress
 	defer func() {
-		if rollbackIssueLifecycle && (err != nil || !resp.OK) {
+		if err != nil || !resp.OK {
+			cleanupNote := ""
 			if worktreeProjectionPersisted && !startedWorktreeReused && startedWorktreePath != "" {
-				if _, projectionErr := d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(ctx, cmd.ProjectID, cmd.IssueID); projectionErr != nil && d.cfg.Logger != nil {
-					d.cfg.Logger.Warn("rollback session-start worktree projection failed", "project_id", cmd.ProjectID, "issue_id", cmd.IssueID, "error", projectionErr)
+				if projectionErr := d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+					_, stageErr := d.runtimeProjectionStateWriter().DeleteWorktreeProjectionAndPublish(stageCtx, cmd.ProjectID, cmd.IssueID)
+					return stageErr
+				}); projectionErr != nil {
+					cleanupNote += fmt.Sprintf("; failed-start worktree projection cleanup also failed: %v", projectionErr)
+					if d.cfg.Logger != nil {
+						d.cfg.Logger.Warn("rollback session-start worktree projection failed", "project_id", cmd.ProjectID, "issue_id", cmd.IssueID, "error", projectionErr)
+					}
 				}
-				_ = d.cleanupNewWorktreeAfterInitFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, startedWorktreePath, startedWorktreeReused)
+				cleanupNote += d.cleanupNewWorktreeAfterInitFailure(ctx, cmd.ProjectID, worktreeManager, cmd.IssueID, startedWorktreePath, startedWorktreeReused)
 			}
-			d.rollbackSessionStartIssueLifecycle(ctx, issueClient, cmd.IssueID, originalIssueStatus)
+			if rollbackIssueLifecycle {
+				if lifecycleErr := d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+					return d.rollbackSessionStartIssueLifecycle(stageCtx, issueClient, cmd.IssueID, originalIssueStatus)
+				}); lifecycleErr != nil {
+					cleanupNote += fmt.Sprintf("; failed-start issue lifecycle rollback also failed: %v", lifecycleErr)
+				}
+			}
+			if cleanupNote != "" && resp.Error != nil {
+				resp.Error.Message += cleanupNote
+			}
 		}
 	}()
 	task.Status = domain.StatusInProgress
@@ -1333,6 +1349,23 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 	return d.commandOutput(req, output), nil
 }
 
+func (d *Daemon) newSessionStartCompensationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if d != nil && d.sessionStartCompensationContext != nil {
+		return d.sessionStartCompensationContext(ctx)
+	}
+	// A failed launch must return its concrete cause to the operation manager
+	// even when a best-effort rollback dependency stops making progress. Keep
+	// cleanup independent of request cancellation so cancellation cannot strand
+	// physical or durable resources, but bound the entire compensation unit.
+	return context.WithTimeout(context.WithoutCancel(ctx), sessionStartCompensationTimeout)
+}
+
+func (d *Daemon) runSessionStartCompensationStage(ctx context.Context, run func(context.Context) error) error {
+	stageCtx, cancel := d.newSessionStartCompensationContext(ctx)
+	defer cancel()
+	return run(stageCtx)
+}
+
 func (d *Daemon) acquireRootedOrchestratorLease(ctx context.Context, projectID, issueID, sessionID string) error {
 	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
 	if store == nil || d.tmux == nil {
@@ -1363,17 +1396,21 @@ func (d *Daemon) ensureSessionStartIssueLifecycle(ctx context.Context, issueClie
 	return nil
 }
 
-func (d *Daemon) rollbackSessionStartIssueLifecycle(ctx context.Context, issueClient sessionStartIssueLifecycleUpdater, issueID string, previousStatus domain.Status) {
+func (d *Daemon) rollbackSessionStartIssueLifecycle(ctx context.Context, issueClient sessionStartIssueLifecycleUpdater, issueID string, previousStatus domain.Status) error {
 	if issueClient == nil || previousStatus == "" || previousStatus == domain.StatusInProgress {
-		return
+		return nil
 	}
-	if err := issueClient.Update(ctx, issueID, previousStatus); err != nil && d.cfg.Logger != nil {
-		d.cfg.Logger.Warn("rollback session start issue lifecycle failed",
-			"issue_id", issueID,
-			"status", previousStatus,
-			"error", err,
-		)
+	if err := issueClient.Update(ctx, issueID, previousStatus); err != nil {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.Warn("rollback session start issue lifecycle failed",
+				"issue_id", issueID,
+				"status", previousStatus,
+				"error", err,
+			)
+		}
+		return err
 	}
+	return nil
 }
 
 func (d *Daemon) rollbackSessionStartLifecycle(projectID, sessionID, issueID string) {
@@ -1395,7 +1432,12 @@ func (d *Daemon) compensateSessionStartFailure(ctx context.Context, req protocol
 }
 
 func (d *Daemon) reconcileAmbiguousSessionStartCreateError(ctx context.Context, req protocol.RequestEnvelope, cmd resolvedSessionTarget, resourceCtx issueResourceLifecycleContext, liveActivity, liveActivitySource string, selector sessionIntentSelector) string {
-	live, probeErr := d.tmux.HasSession(ctx, cmd.SessionID)
+	var live bool
+	probeErr := d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+		var stageErr error
+		live, stageErr = d.tmux.HasSession(stageCtx, cmd.SessionID)
+		return stageErr
+	})
 	if probeErr != nil {
 		note := d.issueResourceFailedStartCleanupNote(ctx, cmd.ProjectID, resourceCtx)
 		return note + fmt.Sprintf("; failed-start tmux creation reconciliation also failed: %v", probeErr)
@@ -1405,12 +1447,16 @@ func (d *Daemon) reconcileAmbiguousSessionStartCreateError(ctx context.Context, 
 	}
 
 	note := ""
-	if err := d.applyTypedSessionLifecycleTransition(ctx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonhandlers.CommandSessionStart, liveActivity, liveActivitySource, selector); err != nil {
+	if err := d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+		return d.applyTypedSessionLifecycleTransition(stageCtx, req, cmd.ProjectID, cmd.SessionID, cmd.IssueID, daemonhandlers.CommandSessionStart, liveActivity, liveActivitySource, selector)
+	}); err != nil {
 		note += fmt.Sprintf("; ambiguous tmux creation durable intent recording also failed: %v", err)
 	}
-	if err := d.persistObservedRuntimeProjection(ctx, cmd.ProjectID, req.Meta, daemonstate.Session{
-		ID: cmd.SessionID, ObservedState: daemonstate.SessionStateRunning,
-		Activity: liveActivity, ActivitySource: liveActivitySource, UpdatedAt: time.Now().UTC(),
+	if err := d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+		return d.persistObservedRuntimeProjection(stageCtx, cmd.ProjectID, req.Meta, daemonstate.Session{
+			ID: cmd.SessionID, ObservedState: daemonstate.SessionStateRunning,
+			Activity: liveActivity, ActivitySource: liveActivitySource, UpdatedAt: time.Now().UTC(),
+		})
 	}); err != nil {
 		note += fmt.Sprintf("; ambiguous tmux creation runtime observation also failed: %v", err)
 	}
@@ -1421,11 +1467,19 @@ func (d *Daemon) compensateSessionStartFailureWithSelector(ctx context.Context, 
 	note := d.issueResourceFailedStartCleanupNote(ctx, projectID, resourceCtx)
 	live := true
 	if d != nil && d.tmux != nil {
-		if err := d.tmux.KillSession(ctx, sessionID); err == nil {
+		if err := d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+			return d.tmux.KillSession(stageCtx, sessionID)
+		}); err == nil {
 			live = false
 		} else {
 			note += fmt.Sprintf("; failed-start tmux cleanup also failed: %v", err)
-			if present, probeErr := d.tmux.HasSession(ctx, sessionID); probeErr == nil {
+			var present bool
+			probeErr := d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+				var stageErr error
+				present, stageErr = d.tmux.HasSession(stageCtx, sessionID)
+				return stageErr
+			})
+			if probeErr == nil {
 				live = present
 			} else {
 				note += fmt.Sprintf("; failed-start tmux reconciliation also failed: %v", probeErr)
@@ -1443,10 +1497,24 @@ func (d *Daemon) compensateSessionStartFailureWithSelector(ctx context.Context, 
 	alignTransient := false
 	if store != nil {
 		intent := daemonstate.Session{ID: sessionID, IssueID: issueID, Role: selector.Role, ScopeKind: selector.ScopeKind, ScopeID: selector.ScopeID}
-		rows, winner, applied, err := store.ApplySessionCompensation(ctx, projectID, intent, desired, observed, activity, source, updatedAt)
+		var rows []daemonstate.Session
+		var winner daemonstate.SessionState
+		var applied bool
+		err := d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+			var stageErr error
+			rows, winner, applied, stageErr = store.ApplySessionCompensation(stageCtx, projectID, intent, desired, observed, activity, source, updatedAt)
+			return stageErr
+		})
 		if err != nil {
 			note += fmt.Sprintf("; failed-start durable session compensation also failed: %v", err)
-			if durable, found, loadErr := store.GetSessionIntent(ctx, projectID, selector.Role, selector.ScopeKind, selector.ScopeID); loadErr == nil && found {
+			var durable daemonstate.Session
+			var found bool
+			loadErr := d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+				var stageErr error
+				durable, found, stageErr = store.GetSessionIntent(stageCtx, projectID, selector.Role, selector.ScopeKind, selector.ScopeID)
+				return stageErr
+			})
+			if loadErr == nil && found {
 				desired = durable.State
 				alignTransient = true
 			} else if loadErr != nil {
@@ -1459,7 +1527,10 @@ func (d *Daemon) compensateSessionStartFailureWithSelector(ctx context.Context, 
 			}
 			writer := d.runtimeProjectionStateWriter()
 			for _, row := range rows {
-				if _, publishErr := writer.PublishSessionProjectionEvent(ctx, projectID, req.Meta, row); publishErr != nil {
+				if publishErr := d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+					_, stageErr := writer.PublishSessionProjectionEvent(stageCtx, projectID, req.Meta, row)
+					return stageErr
+				}); publishErr != nil {
 					note += fmt.Sprintf("; failed-start session compensation publication also failed: %v", publishErr)
 				}
 			}
@@ -2490,9 +2561,14 @@ func (d *Daemon) cleanupNewWorktreeAfterInitFailure(ctx context.Context, project
 	if reusedWorktree || worktreeManager == nil {
 		return ""
 	}
-	removedWorktree, err := worktreeManager.DeleteWithOptions(ctx, issueID, git.WorktreeDeleteOptions{
-		Force:         true,
-		BranchCleanup: git.WorktreeBranchCleanupRequired,
+	var removedWorktree *git.Worktree
+	err := d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+		var stageErr error
+		removedWorktree, stageErr = worktreeManager.DeleteWithOptions(stageCtx, issueID, git.WorktreeDeleteOptions{
+			Force:         true,
+			BranchCleanup: git.WorktreeBranchCleanupRequired,
+		})
+		return stageErr
 	})
 	if err != nil {
 		if d.cfg.Logger != nil {
@@ -2504,7 +2580,9 @@ func (d *Daemon) cleanupNewWorktreeAfterInitFailure(ctx context.Context, project
 		}
 		return fmt.Sprintf(" (cleanup failed for worktree %s: %v)", worktreePath, err)
 	}
-	if err := finalizeDeletedWorktree(ctx, projectID, issueID, worktreeManager, removedWorktree, d.runtimeProjectionStateWriter()); err != nil {
+	if err := d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+		return finalizeDeletedWorktree(stageCtx, projectID, issueID, worktreeManager, removedWorktree, d.runtimeProjectionStateWriter())
+	}); err != nil {
 		return fmt.Sprintf(" (cleaned up worktree %s; %v)", worktreePath, err)
 	}
 	if d.cfg.Logger != nil {
@@ -2520,9 +2598,14 @@ func (d *Daemon) cleanupWorktreeAfterCreateFailure(ctx context.Context, projectI
 	if worktreeManager == nil {
 		return ""
 	}
-	removedWorktree, err := worktreeManager.DeleteWithOptions(ctx, issueID, git.WorktreeDeleteOptions{
-		Force:         true,
-		BranchCleanup: git.WorktreeBranchCleanupRequired,
+	var removedWorktree *git.Worktree
+	err := d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+		var stageErr error
+		removedWorktree, stageErr = worktreeManager.DeleteWithOptions(stageCtx, issueID, git.WorktreeDeleteOptions{
+			Force:         true,
+			BranchCleanup: git.WorktreeBranchCleanupRequired,
+		})
+		return stageErr
 	})
 	if err != nil {
 		if d.cfg.Logger != nil {
@@ -2534,7 +2617,9 @@ func (d *Daemon) cleanupWorktreeAfterCreateFailure(ctx context.Context, projectI
 		}
 		return fmt.Sprintf(" (rollback failed for worktree %s: %v)", worktreePath, err)
 	}
-	if err := finalizeDeletedWorktree(ctx, projectID, issueID, worktreeManager, removedWorktree, d.runtimeProjectionStateWriter()); err != nil {
+	if err := d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+		return finalizeDeletedWorktree(stageCtx, projectID, issueID, worktreeManager, removedWorktree, d.runtimeProjectionStateWriter())
+	}); err != nil {
 		return fmt.Sprintf(" (rolled back worktree %s; %v)", worktreePath, err)
 	}
 	if d.cfg.Logger != nil {
@@ -5529,7 +5614,9 @@ func (d *Daemon) runIssueResourceFailedStartCleanupCommands(ctx context.Context,
 }
 
 func (d *Daemon) issueResourceFailedStartCleanupNote(ctx context.Context, projectID string, resourceCtx issueResourceLifecycleContext) string {
-	if err := d.runIssueResourceFailedStartCleanupCommands(ctx, projectID, resourceCtx); err != nil {
+	if err := d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+		return d.runIssueResourceFailedStartCleanupCommands(stageCtx, projectID, resourceCtx)
+	}); err != nil {
 		return fmt.Sprintf("; failed-start cleanup also failed: %v", err)
 	}
 	return ""
@@ -5540,7 +5627,9 @@ func (d *Daemon) issueResourceFailedStartRollbackNote(ctx context.Context, proje
 	if d == nil || d.tmux == nil {
 		return note
 	}
-	if err := d.tmux.KillSession(ctx, sessionID); err != nil {
+	if err := d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+		return d.tmux.KillSession(stageCtx, sessionID)
+	}); err != nil {
 		return note + fmt.Sprintf("; failed-start tmux cleanup also failed: %v", err)
 	}
 	return note
@@ -5861,10 +5950,7 @@ func (d *Daemon) runSessionShell(ctx context.Context, shell, workdir, command st
 	if d != nil && d.sessionShellRun != nil {
 		return d.sessionShellRun(ctx, shell, workdir, command, env)
 	}
-	cmd := exec.CommandContext(ctx, shell, "-lc", command)
-	cmd.Dir = workdir
-	cmd.Env = env
-	return cmd.CombinedOutput()
+	return processgroup.RunCombined(ctx, workdir, env, shell, "-lc", command)
 }
 
 func worktreeInitCommandEnv(initCtx worktreeInitContext, phase string) []string {

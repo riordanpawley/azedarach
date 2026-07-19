@@ -10,12 +10,15 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -156,6 +159,154 @@ func TestSessionStartFailureCompensationMatchesActualRuntime(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSessionStartFailureCompensationGivesLaterStagesIndependentContexts(t *testing.T) {
+	runner := &sessionStartCompensationTmuxRunner{live: true}
+	contextCalls := 0
+	cleanupEntered := false
+	d := &Daemon{
+		cfg: Config{
+			RepoDir: t.TempDir(),
+			IssueResources: appconfig.IssueResourcesConfig{
+				FailedStartCleanupCommands: []string{"blocked cleanup"},
+			},
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		tmux: tmux.NewClient(runner, slog.Default()),
+		sessionStartCompensationContext: func(parent context.Context) (context.Context, context.CancelFunc) {
+			contextCalls++
+			stageCtx, cancel := context.WithCancel(context.WithoutCancel(parent))
+			if contextCalls == 1 {
+				cancel()
+			}
+			return stageCtx, cancel
+		},
+		sessionShellRun: func(ctx context.Context, _, _, command string, _ []string) ([]byte, error) {
+			if command != "blocked cleanup" {
+				t.Fatalf("cleanup command = %q", command)
+			}
+			cleanupEntered = true
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+
+	note := d.compensateSessionStartFailure(
+		context.Background(),
+		protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: protocol.DefaultProjectID}},
+		protocol.DefaultProjectID, "az-a", "a", issueResourceLifecycleContext{}, "busy", "hooks",
+	)
+	if !cleanupEntered || !strings.Contains(note, "context canceled") {
+		t.Fatalf("early cleanup note = %q entered=%t", note, cleanupEntered)
+	}
+	if runner.live {
+		t.Fatal("later tmux cleanup did not execute after the early stage exhausted its context")
+	}
+	if contextCalls < 2 {
+		t.Fatalf("compensation context calls = %d, want independent contexts for later stages", contextCalls)
+	}
+}
+
+func TestRunSessionShellCancellationDrainsDescendantOutputPipes(t *testing.T) {
+	ready := make(chan os.Signal, 1)
+	signal.Notify(ready, syscall.SIGUSR1)
+	t.Cleanup(func() { signal.Stop(ready) })
+
+	pidFile := strings.TrimSpace(os.Getenv("AZEDARACH_DTV_TEST_PID_FILE"))
+	if pidFile == "" {
+		pidFile = filepath.Join(t.TempDir(), "cleanup-child.pid")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	d := &Daemon{}
+	type runResult struct {
+		output []byte
+		err    error
+	}
+	done := make(chan runResult, 1)
+	workdir := t.TempDir()
+	command := `/bin/sh -c 'trap "" TERM; printf "%s" "$$" > "$AZEDARACH_TEST_CHILD_PID_FILE"; kill -USR1 "$AZEDARACH_TEST_PARENT_PID"; while :; do sleep 60; done' & wait`
+	go func() {
+		output, err := d.runSessionShell(ctx, "/bin/sh", workdir, command, append(os.Environ(),
+			"AZEDARACH_TEST_PARENT_PID="+strconv.Itoa(os.Getpid()),
+			"AZEDARACH_TEST_CHILD_PID_FILE="+pidFile,
+		))
+		done <- runResult{output: output, err: err}
+	}()
+
+	<-ready
+	cancel()
+	result := <-done
+	if !errors.Is(result.err, context.Canceled) {
+		t.Fatalf("runSessionShell error = %v, want context cancellation; output=%q", result.err, result.output)
+	}
+	childPID, err := os.ReadFile(pidFile)
+	if err != nil || strings.TrimSpace(string(childPID)) == "" {
+		t.Fatalf("managed cleanup descendant pid = %q err=%v", childPID, err)
+	}
+}
+
+func TestRunSessionShellNormalExitCleansRetainedDescendantGroup(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "cleanup-worker.pid")
+	cleanupNeeded := true
+	t.Cleanup(func() {
+		if !cleanupNeeded {
+			return
+		}
+		pidBytes, err := os.ReadFile(pidFile)
+		if err != nil {
+			return
+		}
+		for _, field := range strings.Fields(string(pidBytes)) {
+			pid, err := strconv.Atoi(field)
+			if err == nil {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+	d := &Daemon{}
+	workdir := t.TempDir()
+	readyFIFO := filepath.Join(workdir, "retained-descendant-ready")
+	if err := syscall.Mkfifo(readyFIFO, 0o600); err != nil {
+		t.Fatalf("create retained descendant readiness fifo: %v", err)
+	}
+	supervisor := filepath.Join(workdir, "retained-descendant.sh")
+	if err := os.WriteFile(supervisor, []byte(`#!/bin/sh
+trap 'kill -TERM "$worker" 2>/dev/null; wait "$worker"; exit 0' TERM
+/bin/sh -c 'trap "exit 0" TERM; while :; do sleep 60; done' &
+worker=$!
+printf '%s %s' "$$" "$worker" > "$AZEDARACH_TEST_CHILD_PID_FILE"
+printf 'ready\n' > "$AZEDARACH_TEST_READY_FIFO"
+wait "$worker"
+`), 0o700); err != nil {
+		t.Fatalf("write retained descendant supervisor: %v", err)
+	}
+	command := `/bin/sh "$AZEDARACH_TEST_SUPERVISOR" & read ready < "$AZEDARACH_TEST_READY_FIFO"`
+	output, err := d.runSessionShell(context.Background(), "/bin/sh", workdir, command, append(os.Environ(),
+		"AZEDARACH_TEST_CHILD_PID_FILE="+pidFile,
+		"AZEDARACH_TEST_READY_FIFO="+readyFIFO,
+		"AZEDARACH_TEST_SUPERVISOR="+supervisor,
+	))
+	if err != nil {
+		t.Fatalf("runSessionShell error = %v, want successful direct-shell exit; output=%q", err, output)
+	}
+	pidBytes, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read retained descendant pid: %v", err)
+	}
+	pidFields := strings.Fields(string(pidBytes))
+	if len(pidFields) != 2 {
+		t.Fatalf("retained descendant pid file = %q, want supervisor and worker pids", pidBytes)
+	}
+	pid, err := strconv.Atoi(pidFields[1])
+	if err != nil {
+		t.Fatalf("parse retained descendant pid %q: %v", pidBytes, err)
+	}
+	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("retained descendant %d still exists after direct shell exit: %v", pid, err)
+	}
+	cleanupNeeded = false
 }
 
 func TestCodexAppServerLaunchUsesStockRemoteTUIAndSupervisedResume(t *testing.T) {
@@ -464,6 +615,7 @@ type worktreeCreateRunner struct {
 	worktreeAddCalls int
 	worktreeRemoved  bool
 	branchDeleted    bool
+	onWorktreeRemove func()
 }
 
 func (r *worktreeCreateRunner) Run(_ context.Context, args ...string) (string, error) {
@@ -490,6 +642,7 @@ func (r *worktreeCreateRunner) Run(_ context.Context, args ...string) (string, e
 	}
 	if len(args) >= 3 && args[0] == "worktree" && args[1] == "add" && args[2] == "-b" {
 		r.worktreeAddCalls++
+		r.worktreeRemoved = false
 		_ = os.MkdirAll(r.worktreePath, 0o755)
 		if r.failCreate {
 			return "", fmt.Errorf("git worktree add -b failed: exit status 1: hook failed")
@@ -499,6 +652,9 @@ func (r *worktreeCreateRunner) Run(_ context.Context, args ...string) (string, e
 	if len(args) >= 3 && args[0] == "worktree" && args[1] == "remove" {
 		r.worktreeRemoved = true
 		_ = os.RemoveAll(r.worktreePath)
+		if r.onWorktreeRemove != nil {
+			r.onWorktreeRemove()
+		}
 		return "", nil
 	}
 	if len(args) >= 3 && args[0] == "branch" && args[1] == "-D" {
@@ -1495,6 +1651,7 @@ type sessionStartTmuxRunner struct {
 	newSessionErr               error
 	createBeforeNewSessionError bool
 	onNewSession                func(string)
+	onNewSessionCommand         func(context.Context, string) error
 	onNewWindow                 func(string, string)
 	newWindowErr                error
 	createBeforeNewWindowError  bool
@@ -1763,6 +1920,11 @@ func (r *sessionStartTmuxRunner) Run(ctx context.Context, args ...string) (strin
 		}
 		if r.maxNewSessionCommand > 0 && len(args) > 4 && len(args[len(args)-1]) > r.maxNewSessionCommand {
 			return "", errors.New("command too long")
+		}
+		if r.onNewSessionCommand != nil {
+			if err := r.onNewSessionCommand(ctx, args[3]); err != nil {
+				return "", err
+			}
 		}
 		if len(args) > 4 {
 			command := args[len(args)-1]

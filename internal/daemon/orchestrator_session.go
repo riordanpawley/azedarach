@@ -108,37 +108,64 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 		result.Lifecycle = acquired.Lease.Lifecycle
 		preserveLeaseOnFailure := acquired.Disposition == daemonstate.OrchestratorLeaseAttached
 		previousLifecycle := acquired.Lease.Lifecycle
-		restoreRootedProjectionAfterFailure := func() {
+		restoreRootedProjectionAfterFailure := func() error {
 			if body.Scope.Kind != domain.OrchestrationScopeRooted {
-				return
+				return nil
 			}
 			if previousRootedProjectionFound {
-				_ = d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, previousRootedProjection)
-				return
+				return d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+					return d.runtimeProjectionStateWriter().PersistSessionProjection(stageCtx, projectID, previousRootedProjection)
+				})
 			}
-			_ = d.transitionRootedOrchestratorSessionIntent(ctx, projectID, body.Scope.RootIssueID.String(), acquired.Lease.SessionID, daemonstate.SessionStateStopped)
+			return d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+				return d.transitionRootedOrchestratorSessionIntent(stageCtx, projectID, body.Scope.RootIssueID.String(), acquired.Lease.SessionID, daemonstate.SessionStateStopped)
+			})
 		}
-		restoreLeaseAfterProbeFailure := func() {
-			restoreRootedProjectionAfterFailure()
+		restoreLeaseAfterProbeFailure := func() error {
+			projectionErr := restoreRootedProjectionAfterFailure()
+			var leaseErr error
 			if preserveLeaseOnFailure {
-				_, _ = authority.SetLifecycle(ctx, identity, acquired.Lease.SessionID, previousLifecycle)
-				return
+				leaseErr = d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+					_, stageErr := authority.SetLifecycle(stageCtx, identity, acquired.Lease.SessionID, previousLifecycle)
+					return stageErr
+				})
+			} else {
+				leaseErr = d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+					return authority.Release(stageCtx, identity, acquired.Lease.SessionID)
+				})
 			}
-			_ = authority.Release(ctx, identity, acquired.Lease.SessionID)
+			return errors.Join(projectionErr, leaseErr)
 		}
-		pauseOrReleaseLease := func() {
-			restoreRootedProjectionAfterFailure()
+		pauseOrReleaseLease := func() error {
+			projectionErr := restoreRootedProjectionAfterFailure()
+			var leaseErr error
 			if preserveLeaseOnFailure {
-				_, _ = authority.SetLifecycle(ctx, identity, acquired.Lease.SessionID, domain.OrchestratorPaused)
-				return
+				leaseErr = d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+					_, stageErr := authority.SetLifecycle(stageCtx, identity, acquired.Lease.SessionID, domain.OrchestratorPaused)
+					return stageErr
+				})
+			} else {
+				leaseErr = d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+					return authority.Release(stageCtx, identity, acquired.Lease.SessionID)
+				})
 			}
-			_ = authority.Release(ctx, identity, acquired.Lease.SessionID)
+			return errors.Join(projectionErr, leaseErr)
+		}
+		cleanupNote := func(cleanupErr error) string {
+			if cleanupErr == nil {
+				return ""
+			}
+			return fmt.Sprintf("; failed-start rooted cleanup also failed: %v", cleanupErr)
+		}
+		killStartedSession := func() error {
+			return d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+				return d.tmux.KillSession(stageCtx, acquired.Lease.SessionID)
+			})
 		}
 		if acquired.Lease.Lifecycle == domain.OrchestratorPaused {
 			acquired.Lease, err = authority.SetLifecycle(ctx, identity, acquired.Lease.SessionID, domain.OrchestratorWorking)
 			if err != nil {
-				restoreRootedProjectionAfterFailure()
-				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("resume orchestrator session lease: %v", err)), nil
+				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("resume orchestrator session lease: %v%s", err, cleanupNote(restoreRootedProjectionAfterFailure()))), nil
 			}
 			result.Disposition = "resumed"
 			result.Lifecycle = acquired.Lease.Lifecycle
@@ -146,8 +173,7 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 		launchedHere := false
 		live, probeErr := d.tmux.HasSession(ctx, acquired.Lease.SessionID)
 		if probeErr != nil {
-			restoreLeaseAfterProbeFailure()
-			return d.errorResponse(req, protocol.ErrorCodeInternal, probeErr.Error()), nil
+			return d.errorResponse(req, protocol.ErrorCodeInternal, probeErr.Error()+cleanupNote(restoreLeaseAfterProbeFailure())), nil
 		}
 		if !live {
 			if acquired.Disposition == daemonstate.OrchestratorLeaseAttached && result.Disposition != "resumed" {
@@ -171,11 +197,11 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 						result.Disposition = string(daemonstate.OrchestratorLeaseAttached)
 						live = true
 					} else {
-						pauseOrReleaseLease()
+						leaseCleanupNote := cleanupNote(pauseOrReleaseLease())
 						if startErr != nil {
-							return d.errorResponse(req, protocol.ErrorCodeInternal, startErr.Error()), nil
+							return d.errorResponse(req, protocol.ErrorCodeInternal, startErr.Error()+leaseCleanupNote), nil
 						}
-						return d.errorResponse(req, startResp.Error.Code, startResp.Error.Message), nil
+						return d.errorResponse(req, startResp.Error.Code, startResp.Error.Message+leaseCleanupNote), nil
 					}
 				} else {
 					launchedHere = true
@@ -185,23 +211,20 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 				prompt := "You are the project orchestrator for this Azedarach project. Run `az prime`, then remain in the active orchestration loop until project completion."
 				plannedIncarnation, incarnationErr := newRestartIncarnation()
 				if incarnationErr != nil {
-					pauseOrReleaseLease()
-					return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("plan project orchestrator managed agent incarnation: %v", incarnationErr)), nil
+					return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("plan project orchestrator managed agent incarnation: %v%s", incarnationErr, cleanupNote(pauseOrReleaseLease()))), nil
 				}
 				artifact, artifactErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{
 					Mode: sessionLaunchInitial, ProjectID: projectID, SessionID: acquired.Lease.SessionID,
 					Prompt: prompt, LogicalPaneID: "agent", AgentIncarnation: plannedIncarnation,
 				})
 				if artifactErr != nil {
-					pauseOrReleaseLease()
-					return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare project orchestrator launch artifact: %v", artifactErr)), nil
+					return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare project orchestrator launch artifact: %v%s", artifactErr, cleanupNote(pauseOrReleaseLease()))), nil
 				}
 				if launchErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, acquired.Lease.SessionID, workdir, artifact.Command, nil); launchErr != nil {
 					appeared, _ := d.tmux.HasSession(ctx, acquired.Lease.SessionID)
 					if !appeared {
 						artifact.remove()
-						pauseOrReleaseLease()
-						return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("start project orchestrator session: %v", launchErr)), nil
+						return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("start project orchestrator session: %v%s", launchErr, cleanupNote(pauseOrReleaseLease()))), nil
 					}
 					result.Disposition = string(daemonstate.OrchestratorLeaseAttached)
 					live = true
@@ -210,19 +233,17 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 					launchedHere = true
 				}
 				if err := d.setSessionContextEnv(ctx, projectID, "", acquired.Lease.SessionID); err != nil {
+					var failureCleanupErr error
 					if launchedHere {
 						artifact.remove()
-						_ = d.tmux.KillSession(ctx, acquired.Lease.SessionID)
-						pauseOrReleaseLease()
+						failureCleanupErr = errors.Join(killStartedSession(), pauseOrReleaseLease())
 					}
-					return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("set project orchestrator session context: %v", err)), nil
+					return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("set project orchestrator session context: %v%s", err, cleanupNote(failureCleanupErr))), nil
 				}
 				if launchedHere {
 					if err := d.waitForInitialManagedAgentAcknowledgement(ctx, projectID, acquired.Lease.SessionID, plannedIncarnation, artifact.PromptHandoff); err != nil {
 						artifact.remove()
-						_ = d.tmux.KillSession(ctx, acquired.Lease.SessionID)
-						pauseOrReleaseLease()
-						return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("confirm project orchestrator managed agent bootstrap: %v", err)), nil
+						return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("confirm project orchestrator managed agent bootstrap: %v%s", err, cleanupNote(errors.Join(killStartedSession(), pauseOrReleaseLease())))), nil
 					}
 				}
 			}
@@ -230,43 +251,51 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 		if body.Scope.Kind == domain.OrchestrationScopeRooted {
 			if !launchedHere {
 				if err := d.validateExistingManagedAgentReadiness(ctx, projectID, acquired.Lease.SessionID, "agent"); err != nil {
-					_ = d.tmux.KillSession(ctx, acquired.Lease.SessionID)
-					_ = d.persistStoppedOrchestratorSessionProjection(ctx, req.Meta, projectID, body.Scope, acquired.Lease.SessionID, daemonstate.SessionStateStopped)
+					killErr := d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+						return d.tmux.KillSession(stageCtx, acquired.Lease.SessionID)
+					})
+					projectionErr := d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+						return d.persistStoppedOrchestratorSessionProjection(stageCtx, req.Meta, projectID, body.Scope, acquired.Lease.SessionID, daemonstate.SessionStateStopped)
+					})
+					var leaseErr error
 					if preserveLeaseOnFailure {
-						_, _ = authority.SetLifecycle(ctx, identity, acquired.Lease.SessionID, domain.OrchestratorPaused)
+						leaseErr = d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+							_, stageErr := authority.SetLifecycle(stageCtx, identity, acquired.Lease.SessionID, domain.OrchestratorPaused)
+							return stageErr
+						})
 					} else {
-						_ = authority.Release(ctx, identity, acquired.Lease.SessionID)
+						leaseErr = d.runSessionStartCompensationStage(ctx, func(stageCtx context.Context) error {
+							return authority.Release(stageCtx, identity, acquired.Lease.SessionID)
+						})
 					}
-					return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("validate existing rooted orchestrator managed agent: %v", err)), nil
+					return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("validate existing rooted orchestrator managed agent: %v%s", err, cleanupNote(errors.Join(killErr, projectionErr, leaseErr)))), nil
 				}
 			}
 			bootstrapDisposition, bootstrapErr := d.ensureRootedOrchestratorBootstrap(ctx, projectID, body.Scope, acquired.Lease.SessionID, rootedPrompt, launchedHere)
 			err = bootstrapErr
 			if err != nil {
+				var leaseCleanupErr error
 				if launchedHere {
-					_ = d.tmux.KillSession(ctx, acquired.Lease.SessionID)
-					pauseOrReleaseLease()
+					leaseCleanupErr = errors.Join(killStartedSession(), pauseOrReleaseLease())
 				} else {
-					restoreLeaseAfterProbeFailure()
+					leaseCleanupErr = restoreLeaseAfterProbeFailure()
 				}
-				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+				return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote(leaseCleanupErr)), nil
 			}
 			if d.cfg.Logger != nil {
 				d.cfg.Logger.Info("rooted orchestrator bootstrap confirmed", "project_id", projectID, "root_id", body.Scope.RootIssueID, "session_id", acquired.Lease.SessionID, "disposition", bootstrapDisposition)
 			}
 		} else if !launchedHere {
 			if err := d.validateExistingManagedAgentReadiness(ctx, projectID, acquired.Lease.SessionID, "agent"); err != nil {
-				_ = d.tmux.KillSession(ctx, acquired.Lease.SessionID)
-				pauseOrReleaseLease()
-				return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("validate existing project orchestrator managed agent: %v", err)), nil
+				return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("validate existing project orchestrator managed agent: %v%s", err, cleanupNote(errors.Join(killStartedSession(), pauseOrReleaseLease())))), nil
 			}
 		}
 		if err := d.persistOrchestratorSessionProjection(ctx, req.Meta, projectID, body.Scope, acquired.Lease.SessionID); err != nil {
+			leaseCleanupErr := error(nil)
 			if launchedHere {
-				_ = d.tmux.KillSession(ctx, acquired.Lease.SessionID)
-				pauseOrReleaseLease()
+				leaseCleanupErr = errors.Join(killStartedSession(), pauseOrReleaseLease())
 			}
-			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()+cleanupNote(leaseCleanupErr)), nil
 		}
 		acquired.Lease, err = authority.SetLifecycle(ctx, identity, acquired.Lease.SessionID, domain.OrchestratorWorking)
 		if err != nil {

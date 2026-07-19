@@ -181,6 +181,7 @@ type Daemon struct {
 	sessionStore                         *daemonstate.Store
 	runtimeProjectionWriter              runtimeProjectionWriter
 	sessionLongRunning                   SessionLongRunningExecutor
+	sessionStartCompensationContext      func(context.Context) (context.Context, context.CancelFunc)
 	sessionShellRun                      func(context.Context, string, string, string, []string) ([]byte, error)
 	runtimeReconciler                    runtimeReconciler
 	runtimeReconcileQueue                *reconcileQueue[protocol.RuntimeReconcileResponseBody]

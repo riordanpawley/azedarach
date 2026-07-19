@@ -364,6 +364,71 @@ func TestRootedOrchestratorSessionRetryRejectsStaleShellRuntime(t *testing.T) {
 	}
 }
 
+func TestRootedOrchestratorSessionCancelledLaunchCleansDurableStateAndRetries(t *testing.T) {
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	rootID, err := issuesClient.Create(context.Background(), issues.CreateTaskParams{Title: "Cancelled rooted start", Type: domain.TypeEpic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	runner := newSessionStartTmuxRunner()
+	manager := git.NewWorktreeManager(&worktreeCreateRunner{
+		worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+rootID),
+		branchName:   "test/" + rootID,
+	}, repoDir, slog.Default())
+	memoryStore := daemonstate.NewStore()
+	d := &Daemon{
+		cfg:    Config{RepoDir: repoDir, BaseBranch: "main", CLITool: "codex", SessionShell: "zsh", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issues: issuesClient, tmux: tmux.NewClient(runner, slog.Default()), session: daemonhandlers.NewSessionHandler(memoryStore), sessionStore: memoryStore,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{repoDir: store}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{repoDir: manager}, worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager}, revision: map[string]uint64{},
+	}
+	scope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(protocol.OrchestratorSessionRequest{Scope: scope})
+	request := protocol.RequestEnvelope{Command: protocol.CommandOrchestratorSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body}
+
+	startCtx, cancelStart := context.WithCancel(context.Background())
+	runner.onNewSessionCommand = func(context.Context, string) error {
+		cancelStart()
+		return context.Canceled
+	}
+	failed, err := d.handleOrchestratorSession(startCtx, request)
+	if err != nil || failed.Error == nil || !strings.Contains(failed.Error.Message, context.Canceled.Error()) {
+		t.Fatalf("cancelled rooted start response=%+v err=%v", failed.Error, err)
+	}
+	if lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(store).Get(context.Background(), identity); err != nil || found {
+		t.Fatalf("rooted lease after cancellation=%+v found=%t err=%v", lease, found, err)
+	}
+	sessionID := d.orchestratorSessionID(projectID, scope)
+	if runner.sessions[sessionID] {
+		t.Fatalf("cancelled rooted runtime %s survived", sessionID)
+	}
+	if projection, found, err := store.GetSessionIntent(context.Background(), projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, rootID); err != nil || (found && projection.State != daemonstate.SessionStateStopped) {
+		t.Fatalf("rooted projection after cancellation=%+v found=%t err=%v", projection, found, err)
+	}
+
+	runner.onNewSessionCommand = nil
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, projectID)
+	retried, err := d.handleOrchestratorSession(context.Background(), request)
+	if err != nil || retried.Error != nil || !runner.sessions[sessionID] {
+		t.Fatalf("rooted retry response=%+v err=%v live=%t", retried.Error, err, runner.sessions[sessionID])
+	}
+}
+
 func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()

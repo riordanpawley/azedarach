@@ -579,7 +579,7 @@ func (m *Manager) finish(op *managedOp) {
 		}
 	}
 	m.clearDedupeLocked(op)
-	if op.record.DedupeKey != "" && op.recentWindow > 0 {
+	if op.record.State == daemonops.StateDone && op.record.DedupeKey != "" && op.recentWindow > 0 {
 		m.recentDedupe[dedupeMapKey(op.record.ProjectID, op.record.DedupeKey)] = recentEntry{
 			operationID: op.record.ID,
 			expiresAt:   m.now().UTC().Add(op.recentWindow),
