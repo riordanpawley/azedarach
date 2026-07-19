@@ -42,7 +42,7 @@ func TestWorkflowContextExcludesSensitiveLocalAndIrrelevantSources(t *testing.T)
 	packet, err := BuildWorkflowContextPacket(WorkflowContextInput{
 		Role: WorkflowRoleWorker, IssueID: "npm-7", SourceRevision: "deadbeef",
 		Summary: "portable consumer", Requirements: []string{"npm test", "token=secret", "inspect /Users/alice/private"},
-		ArtifactLinks: []WorkflowArtifactReference{{Label: "CI", Reference: "https://ci.example.test/run/7"}, {Label: "local", Reference: "/tmp/output.log"}},
+		ArtifactLinks: []WorkflowArtifactReference{{Label: "CI", Reference: "https://ci.example.test/run/7"}, {Label: "local", Reference: "/tmp/output.log"}, {Label: "token=secret", Reference: "https://ci.example.test/private"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -58,6 +58,24 @@ func TestWorkflowContextExcludesSensitiveLocalAndIrrelevantSources(t *testing.T)
 	}
 	if len(packet.Omitted) == 0 {
 		t.Fatal("excluded fields were not explained")
+	}
+}
+
+func TestWorkflowResultCompactionRetainsAnArtifactReference(t *testing.T) {
+	artifacts := make([]WorkflowArtifactReference, 80)
+	for i := range artifacts {
+		artifacts[i] = WorkflowArtifactReference{Label: "complete output", Reference: "artifact:validation-output/" + strings.Repeat(string(rune('a'+i%20)), 1800)}
+	}
+	result, err := BuildWorkflowResultSummary(WorkflowResultInput{
+		Role: WorkflowRoleValidator, ScopeID: "repository:consumer", SourceRevision: "abc123", Status: "failed",
+		FailureSummary: strings.Repeat("actionable failure ", 1000), ArtifactLinks: artifacts, OutputPresent: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(result)
+	if len(body) > WorkflowResultSummaryMaxBytes || result.OutputRetention != "retained" || len(result.ArtifactLinks) == 0 {
+		t.Fatalf("bytes=%d retention=%q artifacts=%d", len(body), result.OutputRetention, len(result.ArtifactLinks))
 	}
 }
 

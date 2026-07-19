@@ -100,6 +100,9 @@ func BuildWorkflowContextPacket(input WorkflowContextInput) (WorkflowContextPack
 	if !input.Role.Valid() {
 		return WorkflowContextPacket{}, fmt.Errorf("unsupported workflow role %q", input.Role)
 	}
+	if workflowUnsafePacketValue(input.IssueID) || workflowUnsafePacketValue(input.ScopeID) || workflowUnsafePacketValue(input.SourceRevision) {
+		return WorkflowContextPacket{}, fmt.Errorf("workflow context provenance contains a sensitive or local value")
+	}
 	issueID := workflowSafeInline(input.IssueID, 200)
 	scopeID := workflowSafeInline(input.ScopeID, 200)
 	revision := workflowSafeInline(input.SourceRevision, 200)
@@ -108,9 +111,6 @@ func BuildWorkflowContextPacket(input WorkflowContextInput) (WorkflowContextPack
 	}
 	if input.Role != WorkflowRoleValidator && issueID == "" {
 		return WorkflowContextPacket{}, fmt.Errorf("%s workflow context requires exact issue provenance", input.Role)
-	}
-	if workflowUnsafePacketValue(issueID) || workflowUnsafePacketValue(scopeID) || workflowUnsafePacketValue(revision) {
-		return WorkflowContextPacket{}, fmt.Errorf("workflow context provenance contains a sensitive or local value")
 	}
 	packet := WorkflowContextPacket{
 		Schema: WorkflowContextPacketSchema,
@@ -171,7 +171,7 @@ func MarshalWorkflowContextPacket(packet WorkflowContextPacket) ([]byte, error) 
 		}
 	}
 	for _, artifact := range packet.ArtifactLinks {
-		if artifact.Label == "" || !workflowArtifactReferenceAllowed(artifact.Reference) || workflowSensitive(artifact.Digest) {
+		if artifact.Label == "" || workflowUnsafePacketValue(artifact.Label) || !workflowArtifactReferenceAllowed(artifact.Reference) || workflowUnsafePacketValue(artifact.Digest) {
 			return nil, fmt.Errorf("workflow context contains an invalid artifact reference")
 		}
 	}
@@ -269,10 +269,14 @@ func workflowCanonicalArtifacts(values []WorkflowArtifactReference, omissions ma
 	seen := map[string]struct{}{}
 	out := make([]WorkflowArtifactReference, 0, len(values))
 	for _, value := range values {
+		if workflowUnsafePacketValue(value.Label) || workflowUnsafePacketValue(value.Digest) || len(strings.TrimSpace(value.Reference)) > 2048 {
+			workflowOmit(omissions, "artifact_links", "sensitive_local_or_oversized_reference", 1)
+			continue
+		}
 		value.Label = workflowSafeInline(value.Label, 160)
 		value.Reference = strings.TrimSpace(value.Reference)
 		value.Digest = workflowSafeInline(value.Digest, 160)
-		if value.Label == "" || !workflowArtifactReferenceAllowed(value.Reference) || workflowSensitive(value.Digest) {
+		if value.Label == "" || !workflowArtifactReferenceAllowed(value.Reference) {
 			workflowOmit(omissions, "artifact_links", "sensitive_or_local_reference", 1)
 			continue
 		}
@@ -396,7 +400,7 @@ func workflowFitContextPacket(packet *WorkflowContextPacket, omissions map[strin
 }
 
 func workflowRemoveContextTail(packet *WorkflowContextPacket) (string, bool) {
-	if n := len(packet.ArtifactLinks); n > 0 {
+	if n := len(packet.ArtifactLinks); n > 1 {
 		packet.ArtifactLinks = packet.ArtifactLinks[:n-1]
 		return "artifact_links", true
 	}
@@ -416,6 +420,10 @@ func workflowRemoveContextTail(packet *WorkflowContextPacket) (string, bool) {
 		packet.Summary = ""
 		return "summary", true
 	}
+	if len(packet.ArtifactLinks) == 1 {
+		packet.ArtifactLinks = nil
+		return "artifact_links", true
+	}
 	return "", false
 }
 
@@ -426,11 +434,6 @@ func workflowFitResultSummary(result *WorkflowResultSummary, omissions map[strin
 		if len(encoded) <= WorkflowResultSummaryMaxBytes {
 			return
 		}
-		if n := len(result.ArtifactLinks); n > 0 {
-			result.ArtifactLinks = result.ArtifactLinks[:n-1]
-			workflowOmit(omissions, "artifact_links", "summary_byte_limit", 1)
-			continue
-		}
 		if result.FailureSummary != "" {
 			result.FailureSummary = ""
 			workflowOmit(omissions, "failure_summary", "summary_byte_limit", 1)
@@ -439,6 +442,11 @@ func workflowFitResultSummary(result *WorkflowResultSummary, omissions map[strin
 		if result.Outcome != "" {
 			result.Outcome = ""
 			workflowOmit(omissions, "outcome", "summary_byte_limit", 1)
+			continue
+		}
+		if n := len(result.ArtifactLinks); n > 1 {
+			result.ArtifactLinks = result.ArtifactLinks[:n-1]
+			workflowOmit(omissions, "artifact_links", "summary_byte_limit", 1)
 			continue
 		}
 		return

@@ -369,6 +369,8 @@ func (a daemonOrchestrationAuthority) reviewInspection(ctx context.Context, proj
 		inspection.ReviewContext = &contextPacket
 		if integrationPacket, integrationErr := buildReviewWorkflowContext(task, inspection, domain.WorkflowRoleIntegrator); integrationErr == nil {
 			inspection.IntegrationContext = &integrationPacket
+		} else {
+			inspection.Reasons = append(inspection.Reasons, "inspect-bounded-integration-context: "+integrationErr.Error())
 		}
 	}
 	inspection.Reasons = uniqueNonEmpty(inspection.Reasons)
