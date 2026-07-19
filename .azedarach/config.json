@@ -12,6 +12,7 @@
   },
   "gate": {
     "command": "just review-gate",
+    "environmentFingerprint": "azedarach-go-review-v1",
     "failureArtifactPaths": [
       ".tmp/test-timing"
     ]

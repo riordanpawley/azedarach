@@ -292,8 +292,19 @@ type OrchestrationIntentRequest struct {
 	BaseBranch          string                               `json:"base_branch,omitempty"`
 	OverrideBoardHealth bool                                 `json:"override_board_health,omitempty"`
 	Findings            []OrchestrationReviewFinding         `json:"findings,omitempty"`
+	ReviewPass          *OrchestrationReviewPass             `json:"review_pass,omitempty"`
 	RestartWorker       bool                                 `json:"restart_worker,omitempty"`
 	Routes              []domain.OrchestrationCandidateRoute `json:"routes,omitempty"`
+}
+
+type OrchestrationReviewPass struct {
+	Verdict             string                            `json:"verdict"`
+	Angle               string                            `json:"angle"`
+	ReusedLayers        []string                          `json:"reused_layers,omitempty"`
+	Matrix              domain.WorkerEvidenceReviewMatrix `json:"matrix"`
+	ExtraPassReason     string                            `json:"extra_pass_reason,omitempty"`
+	AffectedInvariants  []string                          `json:"affected_invariants,omitempty"`
+	BroaderInvalidation bool                              `json:"broader_invalidation,omitempty"`
 }
 
 type OrchestrationIntentResult struct {

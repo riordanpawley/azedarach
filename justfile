@@ -87,7 +87,7 @@ merge-gate:
 # Reviewer-owned exact-revision evidence. The daemon additionally requires the
 # current durable review lease and review epoch before admitting this purpose.
 review-gate:
-    ./scripts/with-machine-validation-lease --class aggregate --scope ticket --purpose review_evidence --profile merge-gate -- just _merge-gate-unleased
+    AZEDARACH_VALIDATION_ENVIRONMENT_FINGERPRINT=azedarach-go-review-v1 ./scripts/with-machine-validation-lease --class aggregate --scope ticket --purpose review_evidence --profile merge-gate --command-identity "just review-gate" --isolation-identity synthetic-worktree -- just _merge-gate-unleased
 
 _merge-gate-unleased:
     just build

@@ -124,7 +124,12 @@ func TestReviewInspectionUsesVerifiedReturnedCheckpoint(t *testing.T) {
 		Payload: map[string]any{
 			"outcome": "returned", "actor_id": "reviewer", "review_diff_base_revision": "base-revision",
 			"review_head_revision": "head-revision-1", "review_diff_scope": oldScope,
-			"findings": []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "repair", Validation: []string{"session.activity_convergence"}}},
+			"findings":       []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "repair", Validation: []string{"session.activity_convergence"}}},
+			"review_verdict": "returned", "review_angle": "state and recovery", "review_broader_invalidation": false,
+			"review_unique_findings":     []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "repair", Validation: []string{"session.activity_convergence"}}},
+			"review_reused_layers":       []string{},
+			"review_matrix":              domain.WorkerEvidenceReviewMatrix{Type: "stateful", CoveredCells: []string{"recovery"}},
+			"review_affected_invariants": []string{"session.activity_convergence"},
 		},
 	}, admission, "", "reviewer")
 	if err != nil || returned == 0 {
@@ -151,6 +156,52 @@ func TestReviewInspectionUsesVerifiedReturnedCheckpoint(t *testing.T) {
 	}
 	if len(inspection.PriorFindings) != 1 || !slices.Contains(inspection.AffectedInvariants, "session.activity_convergence") {
 		t.Fatalf("checkpoint context = findings:%+v invariants:%v", inspection.PriorFindings, inspection.AffectedInvariants)
+	}
+}
+
+func TestReviewCheckpointSemanticsFailClosed(t *testing.T) {
+	valid := func() map[string]any {
+		return map[string]any{
+			"review_verdict": "returned", "review_angle": "state and recovery", "review_broader_invalidation": false,
+			"review_unique_findings":     []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "repair"}},
+			"review_reused_layers":       []string{},
+			"review_matrix":              domain.WorkerEvidenceReviewMatrix{Type: "stateful", CoveredCells: []string{"recovery"}},
+			"review_affected_invariants": []string{"task.publication_queue"},
+		}
+	}
+	tests := []struct {
+		name, fallback string
+		mutate         func(map[string]any)
+	}{
+		{name: "missing angle", fallback: "checkpoint_missing_semantics", mutate: func(p map[string]any) { delete(p, "review_angle") }},
+		{name: "broader invalidation", fallback: "checkpoint_broader_invalidation", mutate: func(p map[string]any) { p["review_broader_invalidation"] = true }},
+		{name: "malformed findings", fallback: "checkpoint_malformed", mutate: func(p map[string]any) { p["review_unique_findings"] = "not-findings" }},
+		{name: "missing reused layers", fallback: "checkpoint_malformed", mutate: func(p map[string]any) { delete(p, "review_reused_layers") }},
+		{name: "duplicate reused layers", fallback: "checkpoint_malformed", mutate: func(p map[string]any) { p["review_reused_layers"] = []string{"patch", "PATCH"} }},
+		{name: "duplicate findings", fallback: "checkpoint_malformed", mutate: func(p map[string]any) {
+			p["review_unique_findings"] = []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "same"}, {Severity: "HIGH", Finding: "same"}}
+		}},
+		{name: "duplicate covered cell", fallback: "checkpoint_malformed", mutate: func(p map[string]any) {
+			p["review_matrix"] = domain.WorkerEvidenceReviewMatrix{Type: "stateful", CoveredCells: []string{"recovery", "RECOVERY"}}
+		}},
+		{name: "covered and skipped overlap", fallback: "checkpoint_malformed", mutate: func(p map[string]any) {
+			p["review_matrix"] = domain.WorkerEvidenceReviewMatrix{Type: "stateful", CoveredCells: []string{"recovery"}, SkippedCells: []domain.WorkerEvidenceReviewSkippedMatrix{{Cell: "RECOVERY", Reason: "covered elsewhere"}}}
+		}},
+		{name: "unexplained skip", fallback: "checkpoint_malformed", mutate: func(p map[string]any) {
+			p["review_matrix"] = domain.WorkerEvidenceReviewMatrix{Type: "stateful", SkippedCells: []domain.WorkerEvidenceReviewSkippedMatrix{{Cell: "recovery"}}}
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := valid()
+			tc.mutate(payload)
+			if _, _, got := reviewCheckpointSemantics(payload); got != tc.fallback {
+				t.Fatalf("fallback = %q, want %q", got, tc.fallback)
+			}
+		})
+	}
+	if findings, affected, fallback := reviewCheckpointSemantics(valid()); fallback != "" || len(findings) != 1 || !slices.Contains(affected, "task.publication_queue") {
+		t.Fatalf("valid checkpoint = findings:%+v affected:%v fallback:%q", findings, affected, fallback)
 	}
 }
 

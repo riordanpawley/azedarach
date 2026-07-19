@@ -65,7 +65,7 @@ func TestParseOrchestrateReviewArgsEnforcesDecisionShape(t *testing.T) {
 	if accept.Action != "accept" || accept.RootIssueID != "az-root" || accept.IntentKey != "accept-1" || !accept.JSON || len(accept.IssueIDs) != 2 || accept.IssueIDs[0] != "az-1" {
 		t.Fatalf("accept options = %+v", accept)
 	}
-	returned, err := ParseOrchestrateReviewArgs("return", []string{"--issue", "az-2", "--finding", "fix race", "--finding", "add regression", "--severity", "medium", "--restart-worker"})
+	returned, err := ParseOrchestrateReviewArgs("return", []string{"--issue", "az-2", "--finding", "fix race", "--finding", "add regression", "--severity", "medium", "--review-pass", `{"verdict":"returned","angle":"concurrency","affected_invariants":[],"matrix":{"type":"stateful","covered_cells":["recovery"],"skipped_cells":[]}}`, "--restart-worker"})
 	if err != nil {
 		t.Fatal(err)
 	}

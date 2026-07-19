@@ -450,6 +450,11 @@ func (a daemonOrchestrationAuthority) applyReviewRangeCheckpoint(ctx context.Con
 		inspection.ReviewFallback = "checkpoint_missing"
 		return
 	}
+	priorFindings, affected, semanticFallback := reviewCheckpointSemantics(checkpoint.Payload)
+	if semanticFallback != "" {
+		inspection.ReviewFallback = semanticFallback
+		return
+	}
 	if base != inspection.DiffBaseRevision {
 		inspection.ReviewFallback = "checkpoint_base_changed"
 		return
@@ -472,14 +477,80 @@ func (a daemonOrchestrationAuthority) applyReviewRangeCheckpoint(ctx context.Con
 	inspection.DeltaBaseRevision = head
 	inspection.DiffRange = head + ".." + inspection.HeadRevision
 	inspection.ReviewFallback = ""
-	if raw, ok := checkpoint.Payload["findings"]; ok {
-		encoded, _ := json.Marshal(raw)
-		_ = json.Unmarshal(encoded, &inspection.PriorFindings)
-		for _, finding := range inspection.PriorFindings {
-			inspection.AffectedInvariants = append(inspection.AffectedInvariants, finding.Validation...)
-		}
-		inspection.AffectedInvariants = uniqueNonEmpty(inspection.AffectedInvariants)
+	inspection.PriorFindings = priorFindings
+	inspection.AffectedInvariants = uniqueNonEmpty(affected)
+}
+
+func reviewCheckpointSemantics(payload map[string]any) ([]protocol.OrchestrationReviewFinding, []string, string) {
+	if observationPayloadString(payload, "review_verdict") != string(domain.ReviewOutcomeReturned) || observationPayloadString(payload, "review_angle") == "" {
+		return nil, nil, "checkpoint_missing_semantics"
 	}
+	if broader, ok := payload["review_broader_invalidation"].(bool); !ok || broader {
+		return nil, nil, "checkpoint_broader_invalidation"
+	}
+	var findings []protocol.OrchestrationReviewFinding
+	var matrix domain.WorkerEvidenceReviewMatrix
+	var reused []string
+	var affected []string
+	findingsOK := decodeReviewCheckpointValue(payload["review_unique_findings"], &findings) && len(findings) > 0
+	matrixOK := decodeReviewCheckpointValue(payload["review_matrix"], &matrix) && strings.TrimSpace(matrix.Type) != "" && len(matrix.CoveredCells)+len(matrix.SkippedCells) > 0
+	reusedOK := decodeReviewCheckpointValue(payload["review_reused_layers"], &reused)
+	affectedOK := decodeReviewCheckpointValue(payload["review_affected_invariants"], &affected)
+	seenFindings := make(map[string]struct{}, len(findings))
+	for _, finding := range findings {
+		key := strings.ToLower(strings.TrimSpace(finding.Severity)) + "\x00" + strings.TrimSpace(finding.Finding)
+		if strings.TrimSpace(finding.Finding) == "" {
+			findingsOK = false
+		}
+		if _, exists := seenFindings[key]; exists {
+			findingsOK = false
+		}
+		seenFindings[key] = struct{}{}
+	}
+	seenLayers := make(map[string]struct{}, len(reused))
+	for _, layer := range reused {
+		key := strings.ToLower(strings.TrimSpace(layer))
+		if key == "" {
+			reusedOK = false
+		}
+		if _, exists := seenLayers[key]; exists {
+			reusedOK = false
+		}
+		seenLayers[key] = struct{}{}
+	}
+	seenCells := make(map[string]struct{}, len(matrix.CoveredCells)+len(matrix.SkippedCells))
+	for _, covered := range matrix.CoveredCells {
+		key := strings.ToLower(strings.TrimSpace(covered))
+		if key == "" {
+			matrixOK = false
+		}
+		if _, exists := seenCells[key]; exists {
+			matrixOK = false
+		}
+		seenCells[key] = struct{}{}
+	}
+	for _, skipped := range matrix.SkippedCells {
+		key := strings.ToLower(strings.TrimSpace(skipped.Cell))
+		if key == "" || strings.TrimSpace(skipped.Reason) == "" {
+			matrixOK = false
+		}
+		if _, exists := seenCells[key]; exists {
+			matrixOK = false
+		}
+		seenCells[key] = struct{}{}
+	}
+	if !findingsOK || !matrixOK || !reusedOK || !affectedOK {
+		return nil, nil, "checkpoint_malformed"
+	}
+	return findings, uniqueNonEmpty(affected), ""
+}
+
+func decodeReviewCheckpointValue(raw any, target any) bool {
+	if raw == nil {
+		return false
+	}
+	encoded, err := json.Marshal(raw)
+	return err == nil && json.Unmarshal(encoded, target) == nil
 }
 
 // reviewReturnQueue reads only the exact durable issues named by the return
@@ -1385,55 +1456,77 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 }
 
 func (d *Daemon) recordAcceptedPatchReviewEvidence(ctx context.Context, projectID, reviewerID string, inspection protocol.OrchestrationReview) error {
-	configured, err := d.publicationEvidenceConfigured(projectID)
-	if err != nil || !configured {
+	evidence, err := d.acceptedPatchReviewEvidence(ctx, projectID, reviewerID, inspection)
+	if err != nil {
 		return err
 	}
+	if strings.TrimSpace(evidence.EvidenceID) == "" {
+		return nil
+	}
+	store, err := d.publicationEvidenceProjectionStore()
+	if err != nil {
+		return err
+	}
+	_, err = store.RecordPublicationEvidence(ctx, evidence)
+	if err == nil {
+		_, err = d.publicationEvidenceSnapshot(ctx, projectID, inspection.IssueID)
+	}
+	return err
+}
+
+func (d *Daemon) acceptedPatchReviewEvidence(ctx context.Context, projectID, reviewerID string, inspection protocol.OrchestrationReview) (domain.PublicationEvidence, error) {
+	configured, err := d.publicationEvidenceConfigured(projectID)
+	if err != nil || !configured {
+		if err != nil {
+			return domain.PublicationEvidence{}, err
+		}
+		return domain.PublicationEvidence{}, nil
+	}
 	if d.git == nil {
-		return fmt.Errorf("Git authority is unavailable")
+		return domain.PublicationEvidence{}, fmt.Errorf("Git authority is unavailable")
 	}
 	worktree := strings.TrimSpace(inspection.WorktreePath)
 	head := strings.TrimSpace(inspection.SourceOID)
 	base := strings.TrimSpace(inspection.DiffBaseRevision)
 	if worktree == "" || head == "" || base == "" {
-		return fmt.Errorf("accepted review requires exact worktree, source, and diff-base identity")
+		return domain.PublicationEvidence{}, fmt.Errorf("accepted review requires exact worktree, source, and diff-base identity (worktree=%t source=%t diff_base=%t)", worktree != "", head != "", base != "")
 	}
 	liveHead, err := d.git.HeadRevision(ctx, worktree)
 	if err != nil || liveHead != head {
-		return fmt.Errorf("accepted review source changed before evidence record: expected=%s actual=%s error=%v", head, liveHead, err)
+		return domain.PublicationEvidence{}, fmt.Errorf("accepted review source changed before evidence record: expected=%s actual=%s error=%v", head, liveHead, err)
 	}
 	status, err := d.git.Status(ctx, worktree)
 	if err != nil {
-		return err
+		return domain.PublicationEvidence{}, err
 	}
 	if status.HasChanges || status.HasConflicts {
-		return fmt.Errorf("accepted patch-review evidence requires a clean conflict-free worktree")
+		return domain.PublicationEvidence{}, fmt.Errorf("accepted patch-review evidence requires a clean conflict-free worktree")
 	}
 	patchDigest, err := d.git.PatchDigest(ctx, worktree, base, head)
 	if err != nil {
-		return err
+		return domain.PublicationEvidence{}, err
 	}
 	paths, err := d.git.ChangedFilesBetweenRefTrees(ctx, worktree, base, head)
 	if err != nil {
-		return err
+		return domain.PublicationEvidence{}, err
 	}
 	policy, capability, err := d.publicationEvidenceProjectPolicy(projectID)
 	if err != nil {
-		return err
+		return domain.PublicationEvidence{}, err
 	}
 	coverage, err := publicationCoverageForPaths(paths, capability)
 	if err != nil {
-		return err
+		return domain.PublicationEvidence{}, err
 	}
 	repoDir := strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID))
 	cfg, err := appconfig.LoadConfig(repoDir)
 	if err != nil {
-		return err
+		return domain.PublicationEvidence{}, err
 	}
 	environment := publicationEnvironmentFingerprint(cfg)
 	store, err := d.publicationEvidenceProjectionStore()
 	if err != nil {
-		return err
+		return domain.PublicationEvidence{}, err
 	}
 	evidenceID := fmt.Sprintf("review-%x", sha256.Sum256([]byte(strings.Join([]string{projectID, inspection.IssueID, fmt.Sprint(inspection.ReviewEpochEventID), head, strings.ToLower(strings.TrimSpace(reviewerID)), policy.Version}, "\x00"))))
 	evidence := domain.PublicationEvidence{
@@ -1443,25 +1536,21 @@ func (d *Daemon) recordAcceptedPatchReviewEvidence(ctx context.Context, projectI
 	}
 	snapshot, err := store.PublicationEvidenceSnapshot(ctx, projectID, inspection.IssueID)
 	if err != nil {
-		return err
+		return domain.PublicationEvidence{}, err
 	}
 	for _, prior := range snapshot.Evidence {
 		if prior.EvidenceID == evidence.EvidenceID {
 			if prior.ProjectID == evidence.ProjectID && prior.IssueID == evidence.IssueID && prior.Layer == evidence.Layer && prior.PatchDigest == evidence.PatchDigest && prior.SourceRevision == evidence.SourceRevision && prior.BaseRevision == evidence.BaseRevision && prior.Producer == evidence.Producer && prior.PolicyVersion == evidence.PolicyVersion && prior.EnvironmentFingerprint == evidence.EnvironmentFingerprint && publicationCoverageEqual(prior.Coverage, evidence.Coverage) {
-				return nil
+				return prior, nil
 			}
-			return fmt.Errorf("accepted patch-review evidence %s conflicts with its immutable record", evidence.EvidenceID)
+			return domain.PublicationEvidence{}, fmt.Errorf("accepted patch-review evidence %s conflicts with its immutable record", evidence.EvidenceID)
 		}
 		if prior.Layer == domain.PublicationEvidencePatchReview && prior.PatchDigest == evidence.PatchDigest && prior.PolicyVersion == evidence.PolicyVersion && prior.EnvironmentFingerprint == evidence.EnvironmentFingerprint && publicationCoverageEqual(prior.Coverage, evidence.Coverage) {
 			evidence.ReusedFromEvidenceID = prior.EvidenceID
 			break
 		}
 	}
-	_, err = store.RecordPublicationEvidence(ctx, evidence)
-	if err == nil {
-		_, err = d.publicationEvidenceSnapshot(ctx, projectID, inspection.IssueID)
-	}
-	return err
+	return evidence, nil
 }
 
 func publicationCoverageEqual(left, right domain.PublicationEvidenceCoverage) bool {
@@ -1826,6 +1915,16 @@ func (a daemonOrchestrationAuthority) recordReviewOutcomeWithRestart(ctx context
 		metadata["review_delta_base_revision"] = strings.TrimSpace(inspection.DeltaBaseRevision)
 		metadata["review_fallback_reason"] = strings.TrimSpace(inspection.ReviewFallback)
 	}
+	if request.ReviewPass != nil {
+		metadata["review_verdict"] = strings.TrimSpace(request.ReviewPass.Verdict)
+		metadata["review_angle"] = strings.TrimSpace(request.ReviewPass.Angle)
+		metadata["review_unique_findings"] = request.Findings
+		metadata["review_reused_layers"] = uniqueNonEmpty(request.ReviewPass.ReusedLayers)
+		metadata["review_matrix"] = request.ReviewPass.Matrix
+		metadata["review_extra_pass_reason"] = strings.TrimSpace(request.ReviewPass.ExtraPassReason)
+		metadata["review_affected_invariants"] = uniqueNonEmpty(request.ReviewPass.AffectedInvariants)
+		metadata["review_broader_invalidation"] = request.ReviewPass.BroaderInvalidation
+	}
 	fingerprint := reviewRequestFingerprint(request)
 	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}, NewestFirst: true})
 	if err != nil {
@@ -1891,7 +1990,8 @@ func reviewRequestFingerprint(request protocol.OrchestrationIntentRequest) strin
 		RepoDir       string                                `json:"repo_dir,omitempty"`
 		Findings      []protocol.OrchestrationReviewFinding `json:"findings,omitempty"`
 		RestartWorker bool                                  `json:"restart_worker,omitempty"`
-	}{Scope: request.Scope, Kind: request.Kind, ActorID: strings.TrimSpace(request.ActorID), RepoDir: strings.TrimSpace(request.RepoDir), Findings: request.Findings, RestartWorker: request.RestartWorker})
+		ReviewPass    *protocol.OrchestrationReviewPass     `json:"review_pass,omitempty"`
+	}{Scope: request.Scope, Kind: request.Kind, ActorID: strings.TrimSpace(request.ActorID), RepoDir: strings.TrimSpace(request.RepoDir), Findings: request.Findings, RestartWorker: request.RestartWorker, ReviewPass: request.ReviewPass})
 	return fmt.Sprintf("%x", sha256.Sum256(body))
 }
 

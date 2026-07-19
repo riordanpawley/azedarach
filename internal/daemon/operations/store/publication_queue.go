@@ -12,7 +12,7 @@ import (
 )
 
 const publicationOperationSelect = `SELECT
-operation_id,project_id,issue_id,intent_key,request_fingerprint,actor_id,target_id,target_branch,
+operation_id,project_id,issue_id,intent_key,request_fingerprint,actor_id,reviewer_kind,review_epoch_event_id,accepted_review_event_id,patch_evidence_id,target_id,target_branch,
 source_revision,base_revision,candidate_revision,policy_version,environment_fingerprint,
 validation_command,evidence_source,evidence_event_id,evidence_seq,evidence_digest,state,lease_owner,
 claim_token,claim_expires_at,
@@ -144,12 +144,13 @@ func (s *SQLiteStore) EnqueuePublication(ctx context.Context, operation domain.P
 		return domain.PublicationOperation{}, false, err
 	}
 	_, err = db.ExecContext(ctx, `INSERT INTO daemon_publication_operations(
-		operation_id,project_id,issue_id,intent_key,request_fingerprint,actor_id,target_id,target_branch,
+		operation_id,project_id,issue_id,intent_key,request_fingerprint,actor_id,reviewer_kind,review_epoch_event_id,accepted_review_event_id,patch_evidence_id,target_id,target_branch,
 		source_revision,base_revision,candidate_revision,policy_version,environment_fingerprint,
 		validation_command,evidence_source,evidence_event_id,evidence_seq,evidence_digest,coalesce_key,state,created_at,updated_at
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		operation.OperationID, operation.ProjectID, operation.IssueID, operation.IntentKey, operation.RequestFingerprint,
-		operation.ActorID, operation.TargetID, operation.TargetBranch, operation.SourceRevision, operation.BaseRevision,
+		operation.ActorID, operation.ReviewerKind, operation.ReviewEpochEventID, operation.AcceptedReviewEventID, operation.PatchEvidenceID,
+		operation.TargetID, operation.TargetBranch, operation.SourceRevision, operation.BaseRevision,
 		operation.CandidateRevision, operation.PolicyVersion, operation.EnvironmentFingerprint, operation.ValidationCommand, operation.EvidenceSource,
 		operation.EvidenceEventID, operation.EvidenceSeq, operation.EvidenceDigest, coalesceKey, operation.State,
 		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
@@ -323,11 +324,13 @@ func (s *SQLiteStore) TerminalizePublicationWithSuccessor(ctx context.Context, o
 	}
 	_, insertErr := tx.ExecContext(ctx, `INSERT INTO daemon_publication_operations(
 		operation_id,project_id,issue_id,intent_key,request_fingerprint,actor_id,target_id,target_branch,
+		reviewer_kind,review_epoch_event_id,accepted_review_event_id,patch_evidence_id,
 		source_revision,base_revision,candidate_revision,policy_version,environment_fingerprint,
 		validation_command,evidence_source,evidence_event_id,evidence_seq,evidence_digest,coalesce_key,state,created_at,updated_at
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		successor.OperationID, successor.ProjectID, successor.IssueID, successor.IntentKey, successor.RequestFingerprint,
-		successor.ActorID, successor.TargetID, successor.TargetBranch, successor.SourceRevision, successor.BaseRevision,
+		successor.ActorID, successor.TargetID, successor.TargetBranch, successor.ReviewerKind, successor.ReviewEpochEventID, successor.AcceptedReviewEventID, successor.PatchEvidenceID,
+		successor.SourceRevision, successor.BaseRevision,
 		successor.CandidateRevision, successor.PolicyVersion, successor.EnvironmentFingerprint, successor.ValidationCommand, successor.EvidenceSource,
 		successor.EvidenceEventID, successor.EvidenceSeq, successor.EvidenceDigest, coalesceKey, domain.PublicationOperationQueued,
 		createdAt.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
@@ -374,7 +377,7 @@ func scanPublicationOperation(scanner validationScanner) (domain.PublicationOper
 	var created, updated string
 	var started, finished sql.NullString
 	var claimExpiresAt sql.NullInt64
-	err := scanner.Scan(&operation.OperationID, &operation.ProjectID, &operation.IssueID, &operation.IntentKey, &operation.RequestFingerprint, &operation.ActorID, &operation.TargetID, &operation.TargetBranch, &operation.SourceRevision, &operation.BaseRevision, &operation.CandidateRevision, &operation.PolicyVersion, &operation.EnvironmentFingerprint, &operation.ValidationCommand, &operation.EvidenceSource, &operation.EvidenceEventID, &operation.EvidenceSeq, &operation.EvidenceDigest, &operation.State, &operation.LeaseOwner, &operation.ClaimToken, &claimExpiresAt, &operation.ValidationRequestID, &operation.ReusedEvidenceID, &operation.FailureKind, &operation.FailureDetail, &operation.FailureArtifact, &created, &updated, &started, &finished)
+	err := scanner.Scan(&operation.OperationID, &operation.ProjectID, &operation.IssueID, &operation.IntentKey, &operation.RequestFingerprint, &operation.ActorID, &operation.ReviewerKind, &operation.ReviewEpochEventID, &operation.AcceptedReviewEventID, &operation.PatchEvidenceID, &operation.TargetID, &operation.TargetBranch, &operation.SourceRevision, &operation.BaseRevision, &operation.CandidateRevision, &operation.PolicyVersion, &operation.EnvironmentFingerprint, &operation.ValidationCommand, &operation.EvidenceSource, &operation.EvidenceEventID, &operation.EvidenceSeq, &operation.EvidenceDigest, &operation.State, &operation.LeaseOwner, &operation.ClaimToken, &claimExpiresAt, &operation.ValidationRequestID, &operation.ReusedEvidenceID, &operation.FailureKind, &operation.FailureDetail, &operation.FailureArtifact, &created, &updated, &started, &finished)
 	if err != nil {
 		return domain.PublicationOperation{}, err
 	}
@@ -412,5 +415,6 @@ func publicationIntentCompatible(left, right domain.PublicationOperation) bool {
 		left.RequestFingerprint == right.RequestFingerprint && left.TargetID == right.TargetID &&
 		left.TargetBranch == right.TargetBranch && left.SourceRevision == right.SourceRevision &&
 		left.BaseRevision == right.BaseRevision && left.PolicyVersion == right.PolicyVersion &&
-		left.EnvironmentFingerprint == right.EnvironmentFingerprint && left.ValidationCommand == right.ValidationCommand && left.EvidenceDigest == right.EvidenceDigest
+		left.EnvironmentFingerprint == right.EnvironmentFingerprint && left.ValidationCommand == right.ValidationCommand && left.EvidenceDigest == right.EvidenceDigest &&
+		strings.EqualFold(left.ActorID, right.ActorID) && left.ReviewerKind == right.ReviewerKind && left.ReviewEpochEventID == right.ReviewEpochEventID && left.PatchEvidenceID == right.PatchEvidenceID
 }

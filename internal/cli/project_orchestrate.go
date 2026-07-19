@@ -162,9 +162,25 @@ func OrchestrateReviewCommand(deps *Dependencies, opts OrchestrateReviewOptions)
 	for _, finding := range opts.Findings {
 		findings = append(findings, protocol.OrchestrationReviewFinding{Severity: opts.Severity, Finding: finding})
 	}
+	var reviewPass *protocol.OrchestrationReviewPass
+	if raw := strings.TrimSpace(opts.ReviewPassJSON); raw != "" {
+		var parsed protocol.OrchestrationReviewPass
+		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+			return fmt.Errorf("decode --review-pass: %w", err)
+		}
+		if opts.Action == "return" && (strings.TrimSpace(parsed.Verdict) != "returned" || strings.TrimSpace(parsed.Angle) == "" || strings.TrimSpace(parsed.Matrix.Type) == "" || len(parsed.Matrix.CoveredCells)+len(parsed.Matrix.SkippedCells) == 0 || parsed.ReusedLayers == nil || parsed.AffectedInvariants == nil) {
+			return fmt.Errorf("--review-pass must record returned verdict, angle, reused layers, affected invariants, and covered or deliberately skipped matrix cells")
+		}
+		for _, skipped := range parsed.Matrix.SkippedCells {
+			if strings.TrimSpace(skipped.Cell) == "" || strings.TrimSpace(skipped.Reason) == "" {
+				return fmt.Errorf("--review-pass skipped matrix cells require cell and reason")
+			}
+		}
+		reviewPass = &parsed
+	}
 	request := protocol.OrchestrationIntentRequest{
 		Scope: scope, Kind: kind, IntentKey: intentKey, ActorID: orchestrateOwnerID(),
-		IssueIDs: opts.IssueIDs, RepoDir: deps.RepoDir, Findings: findings, RestartWorker: opts.RestartWorker,
+		IssueIDs: opts.IssueIDs, RepoDir: deps.RepoDir, Findings: findings, ReviewPass: reviewPass, RestartWorker: opts.RestartWorker,
 	}
 	result, err := deps.DaemonClient.ApplyOrchestrationIntent(ctx, request)
 	if err != nil {

@@ -240,6 +240,16 @@ func (d *Daemon) acceptAndEnqueueReviewPublication(ctx context.Context, projectI
 	if err != nil {
 		return domain.PublicationOperation{}, err
 	}
+	patchEvidence, err := d.acceptedPatchReviewEvidence(ctx, projectID, request.ActorID, inspection)
+	if err != nil {
+		return domain.PublicationOperation{}, fmt.Errorf("prepare accepted patch-review evidence: %w", err)
+	}
+	if strings.TrimSpace(patchEvidence.EvidenceID) == "" {
+		return domain.PublicationOperation{}, fmt.Errorf("publication evidence capability absent: configure publicationEvidence.policyVersion for accepted patch authority")
+	}
+	operation.ReviewerKind = "orchestrator"
+	operation.ReviewEpochEventID = inspection.ReviewEpochEventID
+	operation.PatchEvidenceID = patchEvidence.EvidenceID
 	admission, err := reviewAdmissionPinFromInspection(inspection)
 	if err != nil {
 		return domain.PublicationOperation{}, err
@@ -270,16 +280,12 @@ func (d *Daemon) acceptAndEnqueueReviewPublication(ctx context.Context, projectI
 	}
 	receipt, err := issueClient.AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx, issueID, issues.IssueObservationEventParams{
 		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(request.Kind), Payload: payload,
-	}, operation, publicationCoalesceKey(operation), admission, inspection.ParentIssueID, request.ActorID)
+	}, operation, patchEvidence, publicationCoalesceKey(operation), admission, inspection.ParentIssueID, request.ActorID)
 	if err != nil {
 		return domain.PublicationOperation{}, err
 	}
 	operation.OperationID = receipt.PublicationOperationID
-	if inspection.Evidence != nil {
-		if err := d.recordAcceptedPatchReviewEvidence(ctx, projectID, request.ActorID, inspection); err != nil {
-			return operation, fmt.Errorf("record accepted patch-review evidence: %w", err)
-		}
-	}
+	operation.AcceptedReviewEventID = receipt.EventID
 	read := func(_ string, readCtx context.Context, projectID, operationID string) (domain.PublicationOperation, bool, error) {
 		return store.PublicationOperation(readCtx, operationID)
 	}
@@ -551,6 +557,12 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 	}
 	stopClaimHeartbeat := d.startPublicationClaimHeartbeat(store, operationID, claimToken, claimTTL)
 	defer stopClaimHeartbeat()
+	var reviewAuthorityErr error
+	// Test-only execution hooks replace the durable close/identity boundaries;
+	// production and active-path tests always validate the persisted authority.
+	if d.publicationClose == nil && d.publicationIdentityCheck == nil {
+		reviewAuthorityErr = d.validatePublicationReviewAuthority(ctx, operation)
+	}
 	ticketID, ticketIdentityErr := naming.ParseTicketID(operation.IssueID)
 	identityCheck := d.publicationIdentityCheck
 	appliedRecovery := false
@@ -563,9 +575,12 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 			identityCheck = d.validatePublicationOperationIdentity
 		}
 	}
-	if identityCheck != nil || ticketIdentityErr != nil {
-		identityErr := ticketIdentityErr
+	if reviewAuthorityErr != nil || identityCheck != nil || ticketIdentityErr != nil {
+		identityErr := reviewAuthorityErr
 		if identityErr != nil {
+			identityErr = fmt.Errorf("bind accepted-review publication authority: %w", identityErr)
+		} else if ticketIdentityErr != nil {
+			identityErr = ticketIdentityErr
 			identityErr = fmt.Errorf("bind accepted-review publication ticket identity: %w", identityErr)
 		} else {
 			identityErr = identityCheck(ctx, operation)
@@ -692,6 +707,45 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 	d.ensurePublicationTargetContinuation(store, current)
 	_ = daemonops.ReportProgress(ctx, daemonops.Progress{Phase: "merged", Message: "exact candidate merged and accepted issue closed", Current: 100, Total: 100, Unit: "percent", Percent: 100})
 	return json.Marshal(current)
+}
+
+func (d *Daemon) validatePublicationReviewAuthority(ctx context.Context, operation domain.PublicationOperation) error {
+	if err := operation.ValidateReviewAuthority(); err != nil {
+		return err
+	}
+	store, err := d.publicationStoreForProject(operation.ProjectID)
+	if err != nil {
+		return err
+	}
+	snapshot, err := store.PublicationEvidenceSnapshot(ctx, operation.ProjectID, operation.IssueID)
+	if err != nil {
+		return fmt.Errorf("read patch-review prerequisite: %w", err)
+	}
+	foundEvidence := false
+	for _, evidence := range snapshot.Evidence {
+		if evidence.EvidenceID == operation.PatchEvidenceID && evidence.Layer == domain.PublicationEvidencePatchReview && evidence.SourceRevision == operation.SourceRevision && evidence.PolicyVersion == operation.PolicyVersion && evidence.EnvironmentFingerprint == operation.EnvironmentFingerprint && strings.EqualFold(strings.TrimPrefix(evidence.Producer, "reviewer:"), operation.ActorID) {
+			foundEvidence = true
+			break
+		}
+	}
+	if !foundEvidence {
+		return fmt.Errorf("publication patch-review prerequisite %s is missing or incompatible", operation.PatchEvidenceID)
+	}
+	issueClient := d.issueClientForProject(operation.ProjectID)
+	if issueClient == nil {
+		return fmt.Errorf("issue store unavailable for accepted-review authority")
+	}
+	events, err := issueClient.ListIssueObservationEvents(ctx, operation.IssueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}, NewestIDFirst: true})
+	if err != nil {
+		return fmt.Errorf("read accepted-review authority: %w", err)
+	}
+	for _, event := range events {
+		outcome, trusted := domain.TrustedReviewOutcome(event)
+		if event.ID == operation.AcceptedReviewEventID && trusted && outcome == domain.ReviewOutcomeAccepted && strings.EqualFold(observationPayloadString(event.Payload, "actor_id"), operation.ActorID) && observationPayloadString(event.Payload, "publication_operation_id") == operation.OperationID && reviewPayloadInt64(event.Payload["review_epoch_event_id"]) == operation.ReviewEpochEventID {
+			return nil
+		}
+	}
+	return fmt.Errorf("publication accepted-review event %d is missing or incompatible", operation.AcceptedReviewEventID)
 }
 
 func (d *Daemon) publicationOperationAlreadyApplied(ctx context.Context, operation domain.PublicationOperation) (bool, error) {
@@ -951,11 +1005,12 @@ func (d *Daemon) publicationValidationProfile(ctx context.Context, operation dom
 	if err != nil || review == nil || review.State != domain.ValidationRequestCompleted || !review.Evidence.Present {
 		return fallback
 	}
-	if review.SourceRevision != strings.TrimSpace(candidateRevision) ||
+	if operation.ValidateReviewAuthority() != nil || review.SourceRevision != strings.TrimSpace(candidateRevision) ||
 		strings.Join(strings.Fields(review.Command), " ") != strings.Join(strings.Fields(operation.ValidationCommand), " ") ||
 		review.EnvironmentFingerprint != operation.EnvironmentFingerprint || review.Override == domain.ValidationOverrideEmergency ||
 		review.Scope != domain.ValidationScopeTicket || review.Purpose != domain.ValidationPurposeReviewEvidence ||
-		strings.TrimSpace(review.ReviewerID) == "" || review.ReviewEpochEventID <= 0 {
+		!strings.EqualFold(strings.TrimSpace(review.ReviewerID), strings.TrimSpace(operation.ActorID)) ||
+		review.ReviewEpochEventID != operation.ReviewEpochEventID {
 		return fallback
 	}
 	return review.Profile

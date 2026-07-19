@@ -14,6 +14,15 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func acceptedPublicationTestEvidence(operation domain.PublicationOperation) domain.PublicationEvidence {
+	return domain.PublicationEvidence{
+		EvidenceID: operation.PatchEvidenceID, ProjectID: operation.ProjectID, IssueID: operation.IssueID,
+		Layer: domain.PublicationEvidencePatchReview, PatchDigest: "patch-digest", SourceRevision: operation.SourceRevision,
+		BaseRevision: operation.BaseRevision, Producer: "reviewer:" + operation.ActorID, PolicyVersion: operation.PolicyVersion,
+		EnvironmentFingerprint: operation.EnvironmentFingerprint, CreatedAt: operation.CreatedAt,
+	}
+}
+
 func TestAcceptedReviewAndPublicationRejectsReplacedEpochBeforeAnySideEffect(t *testing.T) {
 	for _, rooted := range []bool{false, true} {
 		name := "project"
@@ -76,10 +85,12 @@ func TestAcceptedReviewAndPublicationRejectsReplacedEpochBeforeAnySideEffect(t *
 				SourceRevision: "source", BaseRevision: "base", PolicyVersion: "policy", EnvironmentFingerprint: "toolchain",
 				ValidationCommand: "npm test", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
 			}
+			operation.ReviewerKind, operation.ReviewEpochEventID, operation.PatchEvidenceID = "orchestrator", stale.ReviewEpochEventID, "patch-replaced-"+name
+			patchEvidence := acceptedPublicationTestEvidence(operation)
 			params := IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{
-				"outcome": string(domain.ReviewOutcomeAccepted), "intent_key": operation.IntentKey, "request_fingerprint": operation.RequestFingerprint,
+				"outcome": string(domain.ReviewOutcomeAccepted), "intent_key": operation.IntentKey, "request_fingerprint": operation.RequestFingerprint, "actor_id": operation.ActorID, "review_epoch_event_id": operation.ReviewEpochEventID,
 			}}
-			if _, err := client.AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx, issueID, params, operation, "candidate-"+name, stale, parentID, "reviewer"); !errors.Is(err, domain.ErrConflict) {
+			if _, err := client.AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx, issueID, params, operation, patchEvidence, "candidate-"+name, stale, parentID, "reviewer"); !errors.Is(err, domain.ErrConflict) {
 				t.Fatalf("replaced review epoch error = %v, want conflict", err)
 			}
 			events, err := client.ListIssueObservationEvents(ctx, issueID, IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
@@ -134,12 +145,14 @@ func TestAcceptedReviewAndPublicationReturnsCommittedReceiptAfterCallerCancellat
 		SourceRevision: "source", BaseRevision: "base", PolicyVersion: "policy", EnvironmentFingerprint: "toolchain",
 		ValidationCommand: "npm test", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
 	}
+	operation.ReviewerKind, operation.ReviewEpochEventID, operation.PatchEvidenceID = "orchestrator", admission.ReviewEpochEventID, "patch-cancelled-receipt"
+	patchEvidence := acceptedPublicationTestEvidence(operation)
 	params := IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", Payload: map[string]any{
-		"outcome": string(domain.ReviewOutcomeAccepted), "intent_key": operation.IntentKey, "request_fingerprint": operation.RequestFingerprint,
+		"outcome": string(domain.ReviewOutcomeAccepted), "intent_key": operation.IntentKey, "request_fingerprint": operation.RequestFingerprint, "actor_id": operation.ActorID, "review_epoch_event_id": operation.ReviewEpochEventID,
 	}}
 	ctx, cancel := context.WithCancel(baseCtx)
 	ctx = WithAcceptedReviewPublicationCommitHookForTest(ctx, cancel)
-	receipt, err := client.AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx, issueID, params, operation, "candidate", admission, parentID, "reviewer")
+	receipt, err := client.AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx, issueID, params, operation, patchEvidence, "candidate", admission, parentID, "reviewer")
 	if err != nil || receipt.EventID == 0 || receipt.PublicationOperationID != operation.OperationID {
 		t.Fatalf("committed receipt after cancellation = (%+v,%v)", receipt, err)
 	}
@@ -151,8 +164,12 @@ func TestAcceptedReviewAndPublicationReturnsCommittedReceiptAfterCallerCancellat
 		t.Fatalf("durable accepted event = (%+v,%v), want receipt event %d", events, err, receipt.EventID)
 	}
 	queued, found, err := queueStore.PublicationOperation(baseCtx, receipt.PublicationOperationID)
-	if err != nil || !found || queued.State != domain.PublicationOperationQueued {
+	if err != nil || !found || queued.State != domain.PublicationOperationQueued || queued.AcceptedReviewEventID != receipt.EventID || queued.ReviewEpochEventID != admission.ReviewEpochEventID || queued.ReviewerKind != "orchestrator" || queued.PatchEvidenceID != patchEvidence.EvidenceID {
 		t.Fatalf("durable queue after cancellation = (%+v,%t,%v)", queued, found, err)
+	}
+	evidenceSnapshot, err := queueStore.PublicationEvidenceSnapshot(baseCtx, "project", issueID)
+	if err != nil || len(evidenceSnapshot.Evidence) != 1 || evidenceSnapshot.Evidence[0].EvidenceID != queued.PatchEvidenceID {
+		t.Fatalf("atomic patch evidence after cancellation = (%+v,%v)", evidenceSnapshot, err)
 	}
 	parentMutationCtx := WithParentChildOrphanConfirmation(WithDependencyRemovalConfirmation(baseCtx))
 	if err := client.RemoveDependency(parentMutationCtx, issueID, parentID, string(domain.DependencyParentChild)); !errors.Is(err, domain.ErrConflict) {
@@ -201,7 +218,7 @@ func TestAcceptedReviewAndPublicationIntentCommitAtomically(t *testing.T) {
 	if _, err := db.Exec(`CREATE TRIGGER reject_publication_intent BEFORE INSERT ON daemon_publication_operations BEGIN SELECT RAISE(ABORT,'injected publication failure'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.appendAcceptedReviewAndPublication(ctx, task, params, operation, "candidate", nil, "", ""); err == nil {
+	if _, err := client.appendAcceptedReviewAndPublication(ctx, task, params, operation, nil, "candidate", nil, "", ""); err == nil {
 		t.Fatal("injected queue failure committed accepted review")
 	}
 	events, err := client.ListIssueObservationEvents(ctx, task, IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
@@ -211,7 +228,7 @@ func TestAcceptedReviewAndPublicationIntentCommitAtomically(t *testing.T) {
 	if _, err := db.Exec(`DROP TRIGGER reject_publication_intent`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.appendAcceptedReviewAndPublication(ctx, task, params, operation, "candidate", nil, "", ""); err != nil {
+	if _, err := client.appendAcceptedReviewAndPublication(ctx, task, params, operation, nil, "candidate", nil, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	events, err = client.ListIssueObservationEvents(ctx, task, IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
@@ -252,14 +269,14 @@ func TestAcceptedReviewAndPublicationCoalescesCanonicalOperation(t *testing.T) {
 			"outcome": string(domain.ReviewOutcomeAccepted), "intent_key": operation.IntentKey, "request_fingerprint": operation.RequestFingerprint,
 		}}
 	}
-	firstReceipt, err := client.appendAcceptedReviewAndPublication(ctx, task, params(first), first, "candidate", nil, "", "")
+	firstReceipt, err := client.appendAcceptedReviewAndPublication(ctx, task, params(first), first, nil, "candidate", nil, "", "")
 	if err != nil || firstReceipt.PublicationOperationID != first.OperationID {
 		t.Fatalf("first canonical publication = (%q,%v)", firstReceipt.PublicationOperationID, err)
 	}
 	second := first
 	second.OperationID = "publication-second"
 	second.IntentKey = "accept-2"
-	receipt, err := client.appendAcceptedReviewAndPublication(ctx, task, params(second), second, "candidate", nil, "", "")
+	receipt, err := client.appendAcceptedReviewAndPublication(ctx, task, params(second), second, nil, "candidate", nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +284,7 @@ func TestAcceptedReviewAndPublicationCoalescesCanonicalOperation(t *testing.T) {
 		t.Fatalf("coalesced publication receipt = %+v", receipt)
 	}
 	events, err := client.ListIssueObservationEvents(ctx, task, IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
-	if err != nil || len(events) != 2 || events[0].Payload["publication_operation_id"] != first.OperationID || events[1].Payload["publication_operation_id"] != first.OperationID {
+	if err != nil || len(events) != 1 || events[0].ID != receipt.EventID || events[0].Payload["publication_operation_id"] != first.OperationID {
 		t.Fatalf("coalesced publication events = (%+v,%v)", events, err)
 	}
 	operations, err := queueStore.PublicationOperations(ctx, "project", task, false)
@@ -303,8 +320,9 @@ func TestAcceptedReviewAndPublicationConcurrentClientsCoalesceOneExecution(t *te
 		}
 	}
 	type result struct {
-		id  string
-		err error
+		id      string
+		eventID int64
+		err     error
 	}
 	start := make(chan struct{})
 	results := make(chan result, 2)
@@ -315,8 +333,8 @@ func TestAcceptedReviewAndPublicationConcurrentClientsCoalesceOneExecution(t *te
 			params := IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "test", Payload: map[string]any{
 				"outcome": string(domain.ReviewOutcomeAccepted), "intent_key": op.IntentKey, "request_fingerprint": op.RequestFingerprint,
 			}}
-			receipt, appendErr := client.appendAcceptedReviewAndPublication(ctx, task, params, op, "concurrent-candidate", nil, "", "")
-			results <- result{id: receipt.PublicationOperationID, err: appendErr}
+			receipt, appendErr := client.appendAcceptedReviewAndPublication(ctx, task, params, op, nil, "concurrent-candidate", nil, "", "")
+			results <- result{id: receipt.PublicationOperationID, eventID: receipt.EventID, err: appendErr}
 		}(client, op)
 	}
 	close(start)
@@ -329,7 +347,7 @@ func TestAcceptedReviewAndPublicationConcurrentClientsCoalesceOneExecution(t *te
 		t.Fatalf("concurrent operations = (%+v,%v)", operations, err)
 	}
 	events, err := firstClient.ListIssueObservationEvents(ctx, task, IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
-	if err != nil || len(events) != 2 {
+	if err != nil || len(events) != 1 || events[0].ID != firstResult.eventID || events[0].ID != secondResult.eventID {
 		t.Fatalf("concurrent accepted review events = (%+v,%v)", events, err)
 	}
 }

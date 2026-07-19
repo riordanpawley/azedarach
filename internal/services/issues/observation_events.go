@@ -852,16 +852,24 @@ func WithAcceptedReviewPublicationCommitHookForTest(ctx context.Context, hook fu
 // AppendAcceptedReviewAndPublicationWithReviewAdmission atomically requires
 // the immutable exported review episode and its reviewer lease while recording
 // both the accepted outcome and publication continuation.
-func (c *Client) AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx context.Context, issueID string, params IssueObservationEventParams, operation domain.PublicationOperation, coalesceKey string, expected ReviewAdmissionPin, expectedParentID, reviewerID string) (AcceptedReviewPublicationCommit, error) {
-	return c.appendAcceptedReviewAndPublication(ctx, issueID, params, operation, coalesceKey, &expected, expectedParentID, reviewerID)
+func (c *Client) AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx context.Context, issueID string, params IssueObservationEventParams, operation domain.PublicationOperation, patchEvidence domain.PublicationEvidence, coalesceKey string, expected ReviewAdmissionPin, expectedParentID, reviewerID string) (AcceptedReviewPublicationCommit, error) {
+	return c.appendAcceptedReviewAndPublication(ctx, issueID, params, operation, &patchEvidence, coalesceKey, &expected, expectedParentID, reviewerID)
 }
 
-func (c *Client) appendAcceptedReviewAndPublication(ctx context.Context, issueID string, params IssueObservationEventParams, operation domain.PublicationOperation, coalesceKey string, expected *ReviewAdmissionPin, expectedParentID, reviewerID string) (AcceptedReviewPublicationCommit, error) {
+func (c *Client) appendAcceptedReviewAndPublication(ctx context.Context, issueID string, params IssueObservationEventParams, operation domain.PublicationOperation, patchEvidence *domain.PublicationEvidence, coalesceKey string, expected *ReviewAdmissionPin, expectedParentID, reviewerID string) (AcceptedReviewPublicationCommit, error) {
 	if params.Type != domain.IssueEventReviewCompleted || strings.TrimSpace(fmt.Sprint(params.Payload["outcome"])) != string(domain.ReviewOutcomeAccepted) {
 		return AcceptedReviewPublicationCommit{}, c.wrapError("append-accepted-review-publication", issueID, errors.New("accepted review publication requires accepted review.completed event"))
 	}
 	if err := operation.ValidateIntent(); err != nil {
 		return AcceptedReviewPublicationCommit{}, c.wrapError("append-accepted-review-publication", issueID, err)
+	}
+	if expected != nil {
+		if patchEvidence == nil || patchEvidence.Validate() != nil || patchEvidence.EvidenceID != operation.PatchEvidenceID {
+			return AcceptedReviewPublicationCommit{}, c.wrapError("append-accepted-review-publication", issueID, errors.New("accepted publication requires matching valid patch-review evidence"))
+		}
+		if operation.ReviewerKind != "orchestrator" || !strings.EqualFold(operation.ActorID, reviewerID) || operation.ReviewEpochEventID != expected.ReviewEpochEventID {
+			return AcceptedReviewPublicationCommit{}, c.wrapError("append-accepted-review-publication", issueID, errors.New("accepted publication review authority does not match admission"))
+		}
 	}
 	coalesceKey = strings.TrimSpace(coalesceKey)
 	if coalesceKey == "" {
@@ -898,17 +906,44 @@ func (c *Client) appendAcceptedReviewAndPublication(ctx context.Context, issueID
 					return c.wrapError("append-accepted-review-publication", issueID, fmt.Errorf("%w: matching active review lease is required", domain.ErrConflict))
 				}
 			}
+			if patchEvidence != nil {
+				coverageJSON, marshalErr := json.Marshal(patchEvidence.Coverage)
+				if marshalErr != nil {
+					return c.wrapError("append-accepted-review-publication", issueID, marshalErr)
+				}
+				costJSON, marshalErr := json.Marshal(patchEvidence.Cost)
+				if marshalErr != nil {
+					return c.wrapError("append-accepted-review-publication", issueID, marshalErr)
+				}
+				_, err = tx.ExecContext(ctx, `INSERT INTO daemon_publication_evidence(
+					evidence_id,project_id,issue_id,layer,patch_digest,source_revision,base_revision,result_revision,producer,policy_version,environment_fingerprint,reused_from_evidence_id,coverage_json,cost_json,created_at
+				) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(evidence_id) DO NOTHING`,
+					patchEvidence.EvidenceID, patchEvidence.ProjectID, patchEvidence.IssueID, patchEvidence.Layer, patchEvidence.PatchDigest,
+					patchEvidence.SourceRevision, patchEvidence.BaseRevision, patchEvidence.ResultRevision, patchEvidence.Producer, patchEvidence.PolicyVersion,
+					patchEvidence.EnvironmentFingerprint, nullableReviewEvidenceID(patchEvidence.ReusedFromEvidenceID), string(coverageJSON), string(costJSON), patchEvidence.CreatedAt.UTC().Format(time.RFC3339Nano))
+				if err != nil {
+					return c.wrapError("append-accepted-review-publication", issueID, err)
+				}
+				var matchingEvidence int
+				if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_publication_evidence WHERE evidence_id=? AND project_id=? AND issue_id=? AND layer=? AND patch_digest=? AND source_revision=? AND base_revision=? AND result_revision=? AND producer=? AND policy_version=? AND environment_fingerprint=? AND COALESCE(reused_from_evidence_id,'')=? AND coverage_json=? AND cost_json=?`,
+					patchEvidence.EvidenceID, patchEvidence.ProjectID, patchEvidence.IssueID, patchEvidence.Layer, patchEvidence.PatchDigest,
+					patchEvidence.SourceRevision, patchEvidence.BaseRevision, patchEvidence.ResultRevision, patchEvidence.Producer, patchEvidence.PolicyVersion,
+					patchEvidence.EnvironmentFingerprint, strings.TrimSpace(patchEvidence.ReusedFromEvidenceID), string(coverageJSON), string(costJSON)).Scan(&matchingEvidence); err != nil || matchingEvidence != 1 {
+					return c.wrapError("append-accepted-review-publication", issueID, errors.New("patch-review evidence conflicts with immutable authority"))
+				}
+			}
 			now := operation.CreatedAt.UTC()
 			if now.IsZero() {
 				now = time.Now().UTC()
 			}
 			_, err = tx.ExecContext(ctx, `INSERT INTO daemon_publication_operations(
-				operation_id,project_id,issue_id,intent_key,request_fingerprint,actor_id,target_id,target_branch,
+				operation_id,project_id,issue_id,intent_key,request_fingerprint,actor_id,reviewer_kind,review_epoch_event_id,accepted_review_event_id,patch_evidence_id,target_id,target_branch,
 				source_revision,base_revision,candidate_revision,policy_version,environment_fingerprint,validation_command,
 				evidence_source,evidence_event_id,evidence_seq,evidence_digest,coalesce_key,state,created_at,updated_at
-			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`,
+			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`,
 				operation.OperationID, operation.ProjectID, operation.IssueID, operation.IntentKey, operation.RequestFingerprint,
-				operation.ActorID, operation.TargetID, operation.TargetBranch, operation.SourceRevision, operation.BaseRevision,
+				operation.ActorID, operation.ReviewerKind, operation.ReviewEpochEventID, 0, operation.PatchEvidenceID,
+				operation.TargetID, operation.TargetBranch, operation.SourceRevision, operation.BaseRevision,
 				operation.CandidateRevision, operation.PolicyVersion, operation.EnvironmentFingerprint, operation.ValidationCommand,
 				operation.EvidenceSource, operation.EvidenceEventID, operation.EvidenceSeq, operation.EvidenceDigest, coalesceKey,
 				string(domain.PublicationOperationQueued), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
@@ -919,35 +954,53 @@ func (c *Client) appendAcceptedReviewAndPublication(ctx context.Context, issueID
 			// identical request may have won the coalesce key with a different
 			// intent/operation ID; the accepted event must point at that durable
 			// continuation rather than a row that does not exist.
-			err = tx.QueryRowContext(ctx, `SELECT operation_id FROM daemon_publication_operations
+			err = tx.QueryRowContext(ctx, `SELECT operation_id,accepted_review_event_id FROM daemon_publication_operations
 				WHERE project_id=? AND (coalesce_key=? OR (issue_id=? AND intent_key=?))
 				  AND issue_id=? AND request_fingerprint=? AND target_id=? AND target_branch=?
 				  AND source_revision=? AND base_revision=? AND policy_version=?
 				  AND environment_fingerprint=? AND validation_command=? AND evidence_digest=?
+				  AND LOWER(actor_id)=LOWER(?) AND reviewer_kind=? AND review_epoch_event_id=? AND patch_evidence_id=?
 				ORDER BY created_at,operation_id LIMIT 1`,
 				operation.ProjectID, coalesceKey, operation.IssueID, operation.IntentKey,
 				operation.IssueID, operation.RequestFingerprint, operation.TargetID, operation.TargetBranch,
 				operation.SourceRevision, operation.BaseRevision, operation.PolicyVersion,
 				operation.EnvironmentFingerprint, operation.ValidationCommand, operation.EvidenceDigest,
-			).Scan(&publicationOperationID)
+				operation.ActorID, operation.ReviewerKind, operation.ReviewEpochEventID, operation.PatchEvidenceID,
+			).Scan(&publicationOperationID, &eventID)
 			if errors.Is(err, sql.ErrNoRows) {
 				return c.wrapError("append-accepted-review-publication", issueID, errors.New("publication intent conflicts with an existing operation"))
 			}
 			if err != nil {
 				return c.wrapError("append-accepted-review-publication", issueID, err)
 			}
-			if params.Payload == nil {
-				params.Payload = make(map[string]any)
+			if eventID == 0 {
+				if params.Payload == nil {
+					params.Payload = make(map[string]any)
+				}
+				params.Payload["publication_operation_id"] = publicationOperationID
+				intentKey := strings.TrimSpace(fmt.Sprint(params.Payload["intent_key"]))
+				fingerprint := strings.TrimSpace(fmt.Sprint(params.Payload["request_fingerprint"]))
+				err = tx.QueryRowContext(ctx, `SELECT id FROM issue_observation_events WHERE issue_id=? AND event_type=? AND json_extract(payload_json,'$.outcome')=? AND json_extract(payload_json,'$.intent_key')=? AND json_extract(payload_json,'$.request_fingerprint')=? ORDER BY id DESC LIMIT 1`, issueID, string(domain.IssueEventReviewCompleted), string(domain.ReviewOutcomeAccepted), intentKey, fingerprint).Scan(&eventID)
+				if errors.Is(err, sql.ErrNoRows) {
+					eventID, err = c.insertIssueObservationEvent(ctx, tx, issueID, params)
+				}
+				if err != nil {
+					return c.wrapError("append-accepted-review-publication", issueID, err)
+				}
 			}
-			params.Payload["publication_operation_id"] = publicationOperationID
-			intentKey := strings.TrimSpace(fmt.Sprint(params.Payload["intent_key"]))
-			fingerprint := strings.TrimSpace(fmt.Sprint(params.Payload["request_fingerprint"]))
-			err = tx.QueryRowContext(ctx, `SELECT id FROM issue_observation_events WHERE issue_id=? AND event_type=? AND json_extract(payload_json,'$.outcome')=? AND json_extract(payload_json,'$.intent_key')=? AND json_extract(payload_json,'$.request_fingerprint')=? ORDER BY id DESC LIMIT 1`, issueID, string(domain.IssueEventReviewCompleted), string(domain.ReviewOutcomeAccepted), intentKey, fingerprint).Scan(&eventID)
-			if errors.Is(err, sql.ErrNoRows) {
-				eventID, err = c.insertIssueObservationEvent(ctx, tx, issueID, params)
+			if expected != nil {
+				var matchingEvent int
+				if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_observation_events WHERE id=? AND issue_id=? AND event_type=? AND json_extract(payload_json,'$.outcome')=? AND LOWER(json_extract(payload_json,'$.actor_id'))=LOWER(?) AND json_extract(payload_json,'$.publication_operation_id')=? AND CAST(json_extract(payload_json,'$.review_epoch_event_id') AS INTEGER)=?`,
+					eventID, issueID, string(domain.IssueEventReviewCompleted), string(domain.ReviewOutcomeAccepted), operation.ActorID, publicationOperationID, operation.ReviewEpochEventID).Scan(&matchingEvent); err != nil || matchingEvent != 1 {
+					return c.wrapError("append-accepted-review-publication", issueID, errors.New("accepted-review event conflicts with immutable publication authority"))
+				}
 			}
-			if err != nil {
-				return c.wrapError("append-accepted-review-publication", issueID, err)
+			result, updateErr := tx.ExecContext(ctx, `UPDATE daemon_publication_operations SET accepted_review_event_id=? WHERE operation_id=? AND accepted_review_event_id IN (0,?)`, eventID, publicationOperationID, eventID)
+			if updateErr != nil {
+				return c.wrapError("append-accepted-review-publication", issueID, updateErr)
+			}
+			if changed, _ := result.RowsAffected(); changed != 1 {
+				return c.wrapError("append-accepted-review-publication", issueID, errors.New("publication operation accepted-review event conflicts with immutable authority"))
 			}
 			if err := tx.Commit(); err != nil {
 				return c.wrapError("append-accepted-review-publication", issueID, err)
@@ -966,6 +1019,13 @@ func (c *Client) appendAcceptedReviewAndPublication(ctx context.Context, issueID
 	// cancellation or a transient projection read must not turn durable queue
 	// ownership into an apparent acceptance failure.
 	return AcceptedReviewPublicationCommit{EventID: eventID, PublicationOperationID: publicationOperationID}, nil
+}
+
+func nullableReviewEvidenceID(value string) any {
+	if value = strings.TrimSpace(value); value != "" {
+		return value
+	}
+	return nil
 }
 
 // IssueObservationMailEventExists supports idempotent filesystem-mail mirroring

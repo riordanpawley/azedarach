@@ -52,6 +52,10 @@ type PublicationOperation struct {
 	IntentKey              string                    `json:"intent_key"`
 	RequestFingerprint     string                    `json:"request_fingerprint"`
 	ActorID                string                    `json:"actor_id"`
+	ReviewerKind           string                    `json:"reviewer_kind"`
+	ReviewEpochEventID     int64                     `json:"review_epoch_event_id"`
+	AcceptedReviewEventID  int64                     `json:"accepted_review_event_id"`
+	PatchEvidenceID        string                    `json:"patch_evidence_id"`
 	TargetID               string                    `json:"target_id"`
 	TargetBranch           string                    `json:"target_branch"`
 	SourceRevision         string                    `json:"source_revision"`
@@ -92,6 +96,9 @@ func (o PublicationOperation) ValidateIntent() error {
 			return fmt.Errorf("publication operation requires %s", name)
 		}
 	}
+	if o.AcceptedReviewEventID < 0 || o.ReviewEpochEventID < 0 {
+		return fmt.Errorf("publication operation review event identities cannot be negative")
+	}
 	if !strings.EqualFold(strings.TrimSpace(o.TargetID), "base") {
 		return fmt.Errorf("publication operation target must be configured base")
 	}
@@ -100,6 +107,13 @@ func (o PublicationOperation) ValidateIntent() error {
 	}
 	if !o.State.Valid() {
 		return fmt.Errorf("invalid publication operation state %q", o.State)
+	}
+	return nil
+}
+
+func (o PublicationOperation) ValidateReviewAuthority() error {
+	if strings.TrimSpace(o.ActorID) == "" || !strings.EqualFold(strings.TrimSpace(o.ReviewerKind), "orchestrator") || o.ReviewEpochEventID <= 0 || o.AcceptedReviewEventID <= 0 || strings.TrimSpace(o.PatchEvidenceID) == "" {
+		return fmt.Errorf("publication operation requires exact orchestrator, review epoch, accepted event, and patch evidence authority")
 	}
 	return nil
 }

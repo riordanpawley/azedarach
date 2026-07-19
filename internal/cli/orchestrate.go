@@ -79,15 +79,16 @@ type OrchestrateCompleteCheckOptions struct {
 }
 
 type OrchestrateReviewOptions struct {
-	Project       string
-	RootIssueID   string
-	Action        string
-	IntentKey     string
-	IssueIDs      []string
-	Severity      string
-	Findings      []string
-	RestartWorker bool
-	JSON          bool
+	Project        string
+	RootIssueID    string
+	Action         string
+	IntentKey      string
+	IssueIDs       []string
+	Severity       string
+	Findings       []string
+	ReviewPassJSON string
+	RestartWorker  bool
+	JSON           bool
 }
 
 type OrchestratePromptOptions struct {
@@ -726,6 +727,7 @@ func ParseOrchestrateReviewArgs(action string, args []string) (OrchestrateReview
 		opts.Findings = append(opts.Findings, trimmed)
 		return nil
 	})
+	fs.StringVar(&opts.ReviewPassJSON, "review-pass", "", "structured JSON review checkpoint facts")
 	fs.BoolVar(&opts.RestartWorker, "restart-worker", false, "restart an inactive owned worker after returning findings")
 	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
 	if err := fs.Parse(args); err != nil {
@@ -753,6 +755,9 @@ func ParseOrchestrateReviewArgs(action string, args []string) (OrchestrateReview
 	}
 	if len(opts.Findings) == 0 {
 		return OrchestrateReviewOptions{}, fmt.Errorf("review return requires at least one --finding")
+	}
+	if strings.TrimSpace(opts.ReviewPassJSON) == "" {
+		return OrchestrateReviewOptions{}, fmt.Errorf("review return requires --review-pass with revision-bound checkpoint facts")
 	}
 	if opts.Severity == "" {
 		return OrchestrateReviewOptions{}, fmt.Errorf("severity cannot be empty")
