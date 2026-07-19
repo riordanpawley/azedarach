@@ -3283,7 +3283,7 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 	issueID := task.ID.String()
 	contextPacket, contextErr := domain.BuildWorkflowContextPacket(domain.WorkflowContextInput{
 		Role: domain.WorkflowRoleWorker, IssueID: issueID, SourceRevision: domain.WorkflowIssueContextRevision(task), Summary: task.Title,
-		Requirements: []string{task.Description, task.Design, task.Acceptance},
+		Requirements: domain.WorkflowIssueRequirements(task),
 	})
 	if contextErr != nil {
 		return orchestratePromptResult{}, fmt.Errorf("build bounded worker context: %w", contextErr)

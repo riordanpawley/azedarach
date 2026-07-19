@@ -63,6 +63,21 @@ func WorkflowIssueContextRevision(task Task) string {
 	return "issue-context-sha256:" + hex.EncodeToString(sum[:])
 }
 
+// WorkflowIssueRequirements preserves the meaning of issue fields even though
+// packet values are canonically sorted for deterministic serialization.
+func WorkflowIssueRequirements(task Task) []string {
+	values := make([]string, 0, 3)
+	for _, field := range []struct {
+		label string
+		value string
+	}{{"description", task.Description}, {"design", task.Design}, {"acceptance", task.Acceptance}} {
+		if value := strings.TrimSpace(field.value); value != "" {
+			values = append(values, field.label+": "+value)
+		}
+	}
+	return values
+}
+
 type WorkflowArtifactReference struct {
 	Label     string `json:"label"`
 	Reference string `json:"reference"`

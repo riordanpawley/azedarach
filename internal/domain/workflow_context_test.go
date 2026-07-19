@@ -152,6 +152,18 @@ func TestWorkflowIssueContextRevisionIgnoresLifecycleChanges(t *testing.T) {
 	}
 }
 
+func TestWorkflowIssueRequirementsRemainLabeledAfterCanonicalSort(t *testing.T) {
+	got := WorkflowIssueRequirements(Task{Description: "what", Design: "how", Acceptance: "proof"})
+	packet, err := BuildWorkflowContextPacket(WorkflowContextInput{Role: WorkflowRoleWorker, IssueID: "consumer-13", SourceRevision: "abc123", Requirements: got})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"acceptance: proof", "description: what", "design: how"}
+	if strings.Join(packet.Requirements, "|") != strings.Join(want, "|") {
+		t.Fatalf("requirements=%v want=%v", packet.Requirements, want)
+	}
+}
+
 func TestWorkflowContextRejectsOversizedExactProvenance(t *testing.T) {
 	_, err := BuildWorkflowContextPacket(WorkflowContextInput{Role: WorkflowRoleWorker, IssueID: "consumer-12", SourceRevision: strings.Repeat("a", 201)})
 	if err == nil {

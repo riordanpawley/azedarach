@@ -6155,7 +6155,7 @@ func buildStartWorkPromptWithContext(task domain.Task, sourceRevision string, or
 	}
 	packet, err := domain.BuildWorkflowContextPacket(domain.WorkflowContextInput{
 		Role: role, IssueID: task.ID.String(), SourceRevision: sourceRevision, Summary: task.Title,
-		Requirements: []string{task.Description, task.Design, task.Acceptance},
+		Requirements: domain.WorkflowIssueRequirements(task),
 	})
 	if err != nil {
 		return "", err

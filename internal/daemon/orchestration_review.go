@@ -403,7 +403,7 @@ func buildReviewWorkflowContext(task domain.Task, inspection protocol.Orchestrat
 	}
 	return domain.BuildWorkflowContextPacket(domain.WorkflowContextInput{
 		Role: role, IssueID: task.ID.String(), SourceRevision: revision, Summary: task.Title,
-		Requirements: []string{task.Description, task.Design, task.Acceptance}, UnresolvedFindings: findings,
+		Requirements: domain.WorkflowIssueRequirements(task), UnresolvedFindings: findings,
 		AffectedInvariants: invariants, ArtifactLinks: artifacts,
 	})
 }

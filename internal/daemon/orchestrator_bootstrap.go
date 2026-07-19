@@ -28,7 +28,7 @@ func (d *Daemon) rootedOrchestratorBootstrapPrompt(ctx context.Context, projectI
 	}
 	packet, err := domain.BuildWorkflowContextPacket(domain.WorkflowContextInput{
 		Role: domain.WorkflowRoleIntegrator, IssueID: rootID, SourceRevision: domain.WorkflowIssueContextRevision(task), Summary: task.Title,
-		Requirements: []string{task.Description, task.Design, task.Acceptance},
+		Requirements: domain.WorkflowIssueRequirements(task),
 	})
 	if err != nil {
 		return "", fmt.Errorf("build rooted orchestrator bounded context: %w", err)
