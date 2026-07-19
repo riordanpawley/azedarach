@@ -5,7 +5,7 @@ type Version uint16
 
 const (
 	// CurrentVersion is the latest protocol contract supported by this build.
-	CurrentVersion Version = 58
+	CurrentVersion Version = 59
 )
 
 // DaemonExecutablePreflight is the machine-readable compatibility contract

@@ -374,6 +374,29 @@ func TestClient_KillSession(t *testing.T) {
 	}
 }
 
+func TestClient_KillWindowTargetsExactSessionWindow(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(runner, slog.Default())
+	if err := client.KillWindow(context.Background(), "worker", "resolve-conflict"); err != nil {
+		t.Fatal(err)
+	}
+	require.Equal(t, [][]string{{"kill-window", "-t", "worker:resolve-conflict"}}, runner.commands)
+
+	if err := client.KillWindow(context.Background(), "worker", " "); err == nil {
+		t.Fatal("blank window target unexpectedly accepted")
+	}
+}
+
+func TestClient_HasWindowMatchesExactName(t *testing.T) {
+	runner := &recordingOutputRunner{outputs: []string{"shell\nresolve-conflict-old\nresolve-conflict\n"}}
+	client := NewClient(runner, slog.Default())
+	found, err := client.HasWindow(context.Background(), "worker", "resolve-conflict")
+	if err != nil || !found {
+		t.Fatalf("exact window found=%t err=%v", found, err)
+	}
+	require.Equal(t, [][]string{{"list-windows", "-t", "worker", "-F", "#{window_name}"}}, runner.commands)
+}
+
 func TestClient_SendKeys(t *testing.T) {
 	tests := []struct {
 		name    string
