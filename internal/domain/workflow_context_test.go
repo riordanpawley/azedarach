@@ -42,7 +42,7 @@ func TestWorkflowContextExcludesSensitiveLocalAndIrrelevantSources(t *testing.T)
 	packet, err := BuildWorkflowContextPacket(WorkflowContextInput{
 		Role: WorkflowRoleWorker, IssueID: "npm-7", SourceRevision: "deadbeef",
 		Summary: "portable consumer", Requirements: []string{"npm test", "token=secret", "inspect /Users/alice/private", `inspect D:\private\output`},
-		ArtifactLinks: []WorkflowArtifactReference{{Label: "CI", Reference: "https://ci.example.test/run/7"}, {Label: "local", Reference: "/tmp/output.log"}, {Label: "token=secret", Reference: "https://ci.example.test/private"}},
+		ArtifactLinks: []WorkflowArtifactReference{{Label: "CI", Reference: "https://ci.example.test/run/7"}, {Label: "local", Reference: "/tmp/output.log"}, {Label: "token=secret", Reference: "https://ci.example.test/private"}, {Label: "credentials", Reference: "https://user:credential@ci.example.test/private"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -56,8 +56,22 @@ func TestWorkflowContextExcludesSensitiveLocalAndIrrelevantSources(t *testing.T)
 	if !strings.Contains(string(body), "npm test") || !strings.Contains(string(body), "ci.example.test") {
 		t.Fatalf("non-Azedarach consumer context missing: %s", body)
 	}
+	if len(packet.ArtifactLinks) != 1 {
+		t.Fatalf("unsafe artifact references survived: %+v", packet.ArtifactLinks)
+	}
 	if len(packet.Omitted) == 0 {
 		t.Fatal("excluded fields were not explained")
+	}
+}
+
+func TestMarshalWorkflowContextRejectsProvenanceMutation(t *testing.T) {
+	packet, err := BuildWorkflowContextPacket(WorkflowContextInput{Role: WorkflowRoleWorker, IssueID: "consumer-14", SourceRevision: "abc123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet.Provenance.SourceRevision = "different"
+	if _, err := MarshalWorkflowContextPacket(packet); err == nil {
+		t.Fatal("mutated source revision retained a valid provenance hash")
 	}
 }
 

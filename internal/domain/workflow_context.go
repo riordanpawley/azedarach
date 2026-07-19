@@ -364,6 +364,9 @@ func workflowArtifactReferenceAllowed(value string) bool {
 	if err != nil {
 		return false
 	}
+	if parsed.User != nil {
+		return false
+	}
 	if parsed.Scheme == "" {
 		return !strings.Contains(value, "..")
 	}
@@ -418,7 +421,7 @@ func workflowTruncateBytes(value string, max int) string {
 
 func workflowSensitive(value string) bool {
 	lower := strings.ToLower(value)
-	for _, marker := range []string{"begin private key", "authorization: bearer", "bearer ", "password=", "passwd=", "token=", "secret=", "client_secret", "api_key=", "api-key:", "private_key", "aws_secret_access_key", "ghp_", "github_pat_", "sk-proj-"} {
+	for _, marker := range []string{"begin private key", "authorization:", "bearer ", "password=", "password:", "passwd=", "token=", "secret=", "secret:", "client_secret", "api_key=", "api-key:", "private_key", "aws_secret_access_key", "ghp_", "github_pat_", "sk-proj-"} {
 		if strings.Contains(lower, marker) {
 			return true
 		}
