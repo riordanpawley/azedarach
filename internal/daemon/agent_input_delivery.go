@@ -322,21 +322,23 @@ func (s *agentInputDeliveryService) RetryPending(ctx context.Context, projectID 
 	if err != nil {
 		return fmt.Errorf("list pending agent input intents: %w", err)
 	}
+	var retryErrors []error
 	for _, intent := range intents {
 		if s.retryEligible != nil {
 			eligible, eligibilityErr := s.retryEligible(ctx, intent.Request)
 			if eligibilityErr != nil {
-				return fmt.Errorf("validate pending agent input intent %s: %w", intent.Request.IntentKey, eligibilityErr)
+				retryErrors = append(retryErrors, fmt.Errorf("validate pending agent input intent %s: %w", intent.Request.IntentKey, eligibilityErr))
+				continue
 			}
 			if !eligible {
 				continue
 			}
 		}
 		if _, err := s.Deliver(ctx, intent.Request); err != nil && !errors.Is(err, errAuthoritativeAgentInputUnavailable) {
-			return fmt.Errorf("retry agent input intent %s: %w", intent.Request.IntentKey, err)
+			retryErrors = append(retryErrors, fmt.Errorf("retry agent input intent %s: %w", intent.Request.IntentKey, err))
 		}
 	}
-	return nil
+	return errors.Join(retryErrors...)
 }
 
 func (s *agentInputDeliveryService) observeIdentity(ctx context.Context, request domain.AgentInputDeliveryRequest) (domain.ManagedAgentRuntimeIdentity, domain.AgentInputDeliveryResult, error) {

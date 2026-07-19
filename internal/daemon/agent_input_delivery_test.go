@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -175,6 +176,34 @@ func TestAgentInputDeliveryFailsClosedWithoutAuthoritativeReceiver(t *testing.T)
 	result, err = restarted.Deliver(context.Background(), request)
 	if err != nil || result.Outcome != domain.AgentInputWaitingNotReady {
 		t.Fatalf("restart result=%+v err=%v", result, err)
+	}
+}
+
+func TestAgentInputRetryContinuesAfterUnrelatedEligibilityFailure(t *testing.T) {
+	runtimeStore, client, first := agentInputFixture(t)
+	second := first
+	second.IntentKey = "intent-2"
+	second.Payload = "second"
+	ctx := context.Background()
+	for _, request := range []domain.AgentInputDeliveryRequest{first, second} {
+		if _, err := client.EnsureAgentInputDeliveryIntent(ctx, request); err != nil {
+			t.Fatal(err)
+		}
+	}
+	receiver := &recordingAuthoritativeReceiver{accepted: map[string]string{}}
+	service := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, receiver, "retry")
+	service.retryEligible = func(_ context.Context, request domain.AgentInputDeliveryRequest) (bool, error) {
+		if request.IntentKey == first.IntentKey {
+			return false, errors.New("projection unavailable")
+		}
+		return true, nil
+	}
+	err := service.RetryPending(ctx, first.ProjectID, 10)
+	if err == nil || !strings.Contains(err.Error(), first.IntentKey) {
+		t.Fatalf("retry error = %v, want fail-visible first intent", err)
+	}
+	if receiver.calls != 1 || len(receiver.payloads) != 1 || receiver.payloads[0] != second.Payload {
+		t.Fatalf("receiver calls=%d payloads=%v, want unrelated second intent delivered", receiver.calls, receiver.payloads)
 	}
 }
 
