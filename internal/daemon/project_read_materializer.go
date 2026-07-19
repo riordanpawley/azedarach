@@ -97,6 +97,9 @@ type projectReadMaterializer struct {
 	worktrees                             map[string]git.Worktree
 	metadata                              protocol.MaterializedSnapshotMetadata
 	retryableFailure                      bool
+	baseHealth                            string
+	baseRetryableFailure                  bool
+	authoritativeRefreshFailures          map[authoritativeReadRefreshComponent]string
 	healthEpoch                           uint64
 	runtimeRefreshSequence                uint64
 	runtimeRefreshEpoch                   map[string]uint64
@@ -152,6 +155,7 @@ func newProjectReadMaterializer(projectID string, authority *ProjectionDeltaAuth
 		projectID: strings.TrimSpace(projectID), authority: authority, hydrate: hydrate,
 		canonical: map[string]domain.Task{}, tasks: map[string]domain.Task{}, worktrees: map[string]git.Worktree{},
 		runtimeRefreshEpoch: map[string]uint64{}, runtimePublishedEpoch: map[string]uint64{}, runtimeRefreshOwners: map[string]map[uint64]struct{}{},
+		baseHealth: "healthy", authoritativeRefreshFailures: map[authoritativeReadRefreshComponent]string{},
 	}
 }
 
@@ -482,7 +486,9 @@ func (m *projectReadMaterializer) applyCanonicalBatch(ctx context.Context, batch
 	m.issueKeys, m.runtimeKeys = issueKeys, runtimeKeys
 	sources := mergeRootProjectionSources(m.metadata.SourceVector, batch.SourceVector)
 	m.metadata = materializedMetadata(batch.DeliveryToCursor, batch.HeadCursor, batch.Projector, sources, issueKeys.sum(), runtimeKeys.sum(), batch.Health)
-	m.retryableFailure = false
+	m.baseHealth = batch.Health
+	m.baseRetryableFailure = false
+	m.aggregateHealthLocked()
 	m.healthEpoch++
 	m.mu.Unlock()
 	ids := make([]string, 0, len(affected))
@@ -613,14 +619,17 @@ func (m *projectReadMaterializer) replaceBootstrapAfterConvergenceResult(canonic
 	for issueID, worktree := range m.worktrees {
 		runtimeKeys.add("worktree", issueID, worktree)
 	}
-	if m.mutationConvergenceResult > convergenceResult && strings.HasPrefix(m.metadata.Health, "stale: committed mutation convergence:") {
-		metadata.Health = m.metadata.Health
+	if m.mutationConvergenceResult > convergenceResult && strings.HasPrefix(m.baseHealth, "stale: committed mutation convergence:") {
+		metadata.Health = m.baseHealth
 	}
 	metadata.IssueChecksum = issueKeys.sum()
 	metadata.RuntimeChecksum = runtimeKeys.sum()
 	metadata.SemanticChecksum = joinedMaterializedChecksum(metadata)
 	m.canonical, m.tasks, m.metadata, m.issueKeys, m.runtimeKeys = canonical, tasks, metadata, issueKeys, runtimeKeys
-	m.retryableFailure = false
+	m.baseHealth = metadata.Health
+	m.baseRetryableFailure = false
+	m.authoritativeRefreshFailures = map[authoritativeReadRefreshComponent]string{}
+	m.aggregateHealthLocked()
 	m.healthEpoch++
 	m.runtimeRefreshSequence++
 	m.runtimeRefreshEpoch = make(map[string]uint64, len(tasks))
@@ -635,9 +644,9 @@ func (m *projectReadMaterializer) replaceBootstrapAfterConvergenceResult(canonic
 
 func (m *projectReadMaterializer) markUnhealthy(err error, serveLastGood bool) {
 	m.mu.Lock()
-	m.metadata.Health = "stale: " + err.Error()
-	m.retryableFailure = serveLastGood
-	m.metadata.SemanticChecksum = joinedMaterializedChecksum(m.metadata)
+	m.baseHealth = "stale: " + err.Error()
+	m.baseRetryableFailure = serveLastGood
+	m.aggregateHealthLocked()
 	m.healthEpoch++
 	m.mu.Unlock()
 }
@@ -657,6 +666,37 @@ const (
 
 func authoritativeReadRefreshHealthPrefix(component authoritativeReadRefreshComponent) string {
 	return "stale: authoritative " + string(component) + " refresh:"
+}
+
+func (m *projectReadMaterializer) aggregateHealthLocked() {
+	baseHealth := strings.TrimSpace(m.baseHealth)
+	if baseHealth == "" {
+		baseHealth = "healthy"
+	}
+	canonicalFailure := strings.TrimSpace(m.authoritativeRefreshFailures[authoritativeReadRefreshCanonical])
+	runtimeFailure := strings.TrimSpace(m.authoritativeRefreshFailures[authoritativeReadRefreshRuntime])
+	switch {
+	case baseHealth == "healthy" && canonicalFailure == "" && runtimeFailure == "":
+		m.metadata.Health = "healthy"
+	case baseHealth == "healthy" && canonicalFailure != "" && runtimeFailure == "":
+		m.metadata.Health = authoritativeReadRefreshHealthPrefix(authoritativeReadRefreshCanonical) + " " + canonicalFailure
+	case baseHealth == "healthy" && canonicalFailure == "" && runtimeFailure != "":
+		m.metadata.Health = authoritativeReadRefreshHealthPrefix(authoritativeReadRefreshRuntime) + " " + runtimeFailure
+	default:
+		parts := make([]string, 0, 3)
+		if baseHealth != "healthy" {
+			parts = append(parts, "base="+baseHealth)
+		}
+		if canonicalFailure != "" {
+			parts = append(parts, "canonical="+canonicalFailure)
+		}
+		if runtimeFailure != "" {
+			parts = append(parts, "runtime="+runtimeFailure)
+		}
+		m.metadata.Health = "stale: materializer component health: " + strings.Join(parts, "; ")
+	}
+	m.retryableFailure = m.baseRetryableFailure && canonicalFailure == "" && runtimeFailure == ""
+	m.metadata.SemanticChecksum = joinedMaterializedChecksum(m.metadata)
 }
 
 func (m *projectReadMaterializer) authoritativeReadRefreshSequence(component authoritativeReadRefreshComponent) *uint64 {
@@ -680,22 +720,30 @@ func (m *projectReadMaterializer) finishAuthoritativeReadRefresh(attempt authori
 	if attempt.sequence != *m.authoritativeReadRefreshSequence(attempt.component) || m.healthEpoch != attempt.healthEpoch {
 		return false
 	}
-	prefix := authoritativeReadRefreshHealthPrefix(attempt.component)
-	healthChanged := false
+	if m.authoritativeRefreshFailures == nil {
+		m.authoritativeRefreshFailures = map[authoritativeReadRefreshComponent]string{}
+	}
 	if err != nil {
-		m.metadata.Health = prefix + " " + err.Error()
-		m.retryableFailure = false
-		healthChanged = true
-	} else if strings.HasPrefix(m.metadata.Health, prefix) || (attempt.component == authoritativeReadRefreshCanonical && (m.retryableFailure || strings.HasPrefix(m.metadata.Health, "stale: committed mutation convergence:"))) {
-		m.metadata.Health = "healthy"
-		m.retryableFailure = false
-		healthChanged = true
+		m.authoritativeRefreshFailures[attempt.component] = err.Error()
+	} else {
+		delete(m.authoritativeRefreshFailures, attempt.component)
+		if attempt.component == authoritativeReadRefreshCanonical && (m.baseRetryableFailure || strings.HasPrefix(m.baseHealth, "stale: committed mutation convergence:")) {
+			m.baseHealth = "healthy"
+			m.baseRetryableFailure = false
+		}
 	}
-	if healthChanged {
-		m.metadata.SemanticChecksum = joinedMaterializedChecksum(m.metadata)
-		m.healthEpoch++
-	}
+	m.aggregateHealthLocked()
 	return true
+}
+
+func (m *projectReadMaterializer) canonicalReadHealthAvailable() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	baseHealth := strings.TrimSpace(m.baseHealth)
+	if baseHealth == "" {
+		baseHealth = "healthy"
+	}
+	return baseHealth == "healthy" && m.authoritativeRefreshFailures[authoritativeReadRefreshCanonical] == ""
 }
 
 func (m *projectReadMaterializer) beginMutationConvergence(revision uint64) uint64 {
@@ -719,13 +767,13 @@ func (m *projectReadMaterializer) finishMutationConvergence(revision, attempt ui
 	m.mutationConvergenceResult++
 	m.healthEpoch++
 	if convergenceErr != nil {
-		m.metadata.Health = "stale: committed mutation convergence: " + convergenceErr.Error()
-		m.retryableFailure = false
-	} else if strings.HasPrefix(m.metadata.Health, "stale: committed mutation convergence:") {
-		m.metadata.Health = "healthy"
-		m.retryableFailure = false
+		m.baseHealth = "stale: committed mutation convergence: " + convergenceErr.Error()
+		m.baseRetryableFailure = false
+	} else if strings.HasPrefix(m.baseHealth, "stale: committed mutation convergence:") {
+		m.baseHealth = "healthy"
+		m.baseRetryableFailure = false
 	}
-	m.metadata.SemanticChecksum = joinedMaterializedChecksum(m.metadata)
+	m.aggregateHealthLocked()
 	return true
 }
 
@@ -787,7 +835,8 @@ func (m *projectReadMaterializer) snapshotIssuesForAuthoritativeRefresh(issueIDs
 		attempt.sequence == *m.authoritativeReadRefreshSequence(attempt.component) &&
 		attempt.healthEpoch == m.healthEpoch &&
 		attempt.component == authoritativeReadRefreshRuntime &&
-		strings.HasPrefix(m.metadata.Health, authoritativeReadRefreshHealthPrefix(authoritativeReadRefreshRuntime))
+		(strings.TrimSpace(m.baseHealth) == "" || m.baseHealth == "healthy") &&
+		m.authoritativeRefreshFailures[authoritativeReadRefreshRuntime] != ""
 	return cloneTasks(tasks), cloneMaterializedMetadata(m.metadata), recoveryAuthorized
 }
 
@@ -1241,7 +1290,7 @@ func (d *Daemon) convergedCanonicalProjectReadSnapshot(ctx context.Context, proj
 	}
 	materializer.finishAuthoritativeReadRefresh(attempt, nil)
 	tasks, metadata := materializer.snapshotCanonical()
-	if metadata.Health != "healthy" && !strings.HasPrefix(metadata.Health, authoritativeReadRefreshHealthPrefix(authoritativeReadRefreshRuntime)) {
+	if !materializer.canonicalReadHealthAvailable() {
 		return nil, metadata, newProjectReadUnavailableError("project read materialization unhealthy for %s: %s", projectID, metadata.Health)
 	}
 	return tasks, metadata, nil

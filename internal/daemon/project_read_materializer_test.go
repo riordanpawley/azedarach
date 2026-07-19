@@ -224,6 +224,83 @@ func TestCanonicalReadDoesNotLoseConcurrentRuntimeFailure(t *testing.T) {
 	}
 }
 
+func TestAuthoritativeComponentFailuresAggregateInBothOverlapOrders(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		first authoritativeReadRefreshComponent
+	}{
+		{name: "canonical finishes first", first: authoritativeReadRefreshCanonical},
+		{name: "runtime finishes first", first: authoritativeReadRefreshRuntime},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			materializer := newProjectReadMaterializer("project", nil, nil)
+			canonical := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+			runtime := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+			finish := map[authoritativeReadRefreshComponent]func() bool{
+				authoritativeReadRefreshCanonical: func() bool {
+					return materializer.finishAuthoritativeReadRefresh(canonical, errors.New("canonical unavailable"))
+				},
+				authoritativeReadRefreshRuntime: func() bool {
+					return materializer.finishAuthoritativeReadRefresh(runtime, errors.New("runtime unavailable"))
+				},
+			}
+			second := authoritativeReadRefreshRuntime
+			if tc.first == authoritativeReadRefreshRuntime {
+				second = authoritativeReadRefreshCanonical
+			}
+			if !finish[tc.first]() || !finish[second]() {
+				t.Fatal("overlapping component failure was discarded")
+			}
+			if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "canonical unavailable") || !strings.Contains(got, "runtime unavailable") {
+				t.Fatalf("aggregate health = %q, want both component failures", got)
+			}
+		})
+	}
+}
+
+func TestSequentialAuthoritativeComponentFailuresAggregate(t *testing.T) {
+	materializer := newProjectReadMaterializer("project", nil, nil)
+	canonical := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+	materializer.finishAuthoritativeReadRefresh(canonical, errors.New("canonical unavailable"))
+	runtime := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	materializer.finishAuthoritativeReadRefresh(runtime, errors.New("runtime unavailable"))
+
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "canonical unavailable") || !strings.Contains(got, "runtime unavailable") {
+		t.Fatalf("aggregate health = %q, want sequential component failures retained", got)
+	}
+}
+
+func TestAuthoritativeComponentsRecoverIndependently(t *testing.T) {
+	for _, firstRecovery := range []authoritativeReadRefreshComponent{authoritativeReadRefreshCanonical, authoritativeReadRefreshRuntime} {
+		t.Run(string(firstRecovery)+" first", func(t *testing.T) {
+			materializer := newProjectReadMaterializer("project", nil, nil)
+			canonical := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+			materializer.finishAuthoritativeReadRefresh(canonical, errors.New("canonical unavailable"))
+			runtime := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+			materializer.finishAuthoritativeReadRefresh(runtime, errors.New("runtime unavailable"))
+
+			first := materializer.beginAuthoritativeReadRefresh(firstRecovery)
+			materializer.finishAuthoritativeReadRefresh(first, nil)
+			remaining := authoritativeReadRefreshRuntime
+			remainingMessage := "runtime unavailable"
+			clearedMessage := "canonical unavailable"
+			if firstRecovery == authoritativeReadRefreshRuntime {
+				remaining = authoritativeReadRefreshCanonical
+				remainingMessage, clearedMessage = "canonical unavailable", "runtime unavailable"
+			}
+			if got := materializer.snapshotMetadata().Health; !strings.Contains(got, remainingMessage) || strings.Contains(got, clearedMessage) || got == "healthy" {
+				t.Fatalf("independent recovery health = %q, want only %q", got, remainingMessage)
+			}
+
+			second := materializer.beginAuthoritativeReadRefresh(remaining)
+			materializer.finishAuthoritativeReadRefresh(second, nil)
+			if got := materializer.snapshotMetadata().Health; got != "healthy" {
+				t.Fatalf("complete recovery health = %q, want healthy", got)
+			}
+		})
+	}
+}
+
 func TestProjectReadMaterializerGapWatchPerformsVerifiedBootstrapRecovery(t *testing.T) {
 	client, _ := newTestIssueClient(t)
 	ctx := context.Background()
