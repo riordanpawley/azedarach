@@ -4683,7 +4683,7 @@ func TestMaterializedTaskReadsFailUnavailableWithoutStalePayload(t *testing.T) {
 	if err := materializer.bootstrap(ctx); err != nil {
 		t.Fatal(err)
 	}
-	materializer.metadata.Health = "stale: injected structural failure"
+	materializer.markUnhealthy(errors.New("injected structural failure"), false)
 	d := &Daemon{
 		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
 		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
