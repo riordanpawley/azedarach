@@ -272,6 +272,16 @@ func TestRuntimeStateStoreManagedAgentNewIncarnationClearsAcknowledgementAndFenc
 	if acknowledged, err := store.AcknowledgeManagedAgentIdentity(ctx, old, observedAt.Add(time.Millisecond)); err != nil || !acknowledged {
 		t.Fatalf("acknowledge old identity=%t err=%v", acknowledged, err)
 	}
+	reused := old
+	reused.PanePID = 101
+	reused.ObservedAt = observedAt.Add(500 * time.Millisecond)
+	if err := store.UpsertManagedAgentIdentity(ctx, reused); !errors.Is(err, ErrStaleManagedAgentIdentity) {
+		t.Fatalf("same-incarnation process replacement error=%v", err)
+	}
+	preserved, found, err := store.GetManagedAgentIdentity(ctx, old.ProjectID, old.SessionID, old.LogicalPaneID)
+	if err != nil || !found || preserved.PanePID != old.PanePID || !preserved.UpdatedAt.After(preserved.ObservedAt) {
+		t.Fatalf("same-incarnation process replacement changed authority: %+v found=%t err=%v", preserved, found, err)
+	}
 	current := old
 	current.PanePID = 200
 	current.AgentIncarnation = "restart-new"
