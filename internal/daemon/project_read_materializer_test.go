@@ -131,20 +131,36 @@ func TestProjectReadMaterializerTransientWatchErrorRetainsLastGoodWithoutLegacyE
 
 func TestAuthoritativeReadResultCannotClearNewerMutationConvergenceFailure(t *testing.T) {
 	materializer := newProjectReadMaterializer("project", nil, nil)
-	readHealthEpoch := materializer.healthResultEpoch()
+	readAttempt := materializer.beginAuthoritativeReadRefresh()
 	mutationAttempt := materializer.beginMutationConvergence(7)
 	if !materializer.finishMutationConvergence(7, mutationAttempt, errors.New("newer mutation failure")) {
 		t.Fatal("newer mutation convergence result was not recorded")
 	}
-	if materializer.finishAuthoritativeReadRefresh(readHealthEpoch, nil, false) {
+	if materializer.finishAuthoritativeReadRefresh(readAttempt, nil, false) {
 		t.Fatal("older authoritative read result cleared a newer health result")
 	}
-	if materializer.finishAuthoritativeReadRefresh(readHealthEpoch, errors.New("older runtime failure"), true) {
+	if materializer.finishAuthoritativeReadRefresh(readAttempt, errors.New("older runtime failure"), true) {
 		t.Fatal("older authoritative read failure overwrote a newer health result")
 	}
 	metadata := materializer.snapshotMetadata()
 	if !strings.Contains(metadata.Health, "newer mutation failure") {
 		t.Fatalf("health = %q, want newer mutation failure retained", metadata.Health)
+	}
+}
+
+func TestNewestAuthoritativeReadFailureWinsOlderConcurrentSuccess(t *testing.T) {
+	materializer := newProjectReadMaterializer("project", nil, nil)
+	materializer.metadata.Health = "healthy"
+	older := materializer.beginAuthoritativeReadRefresh()
+	newer := materializer.beginAuthoritativeReadRefresh()
+	if materializer.finishAuthoritativeReadRefresh(older, nil, true) {
+		t.Fatal("older authoritative success published while newer refresh owned completion")
+	}
+	if !materializer.finishAuthoritativeReadRefresh(newer, errors.New("newer runtime failure"), true) {
+		t.Fatal("newer authoritative failure was not published")
+	}
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "newer runtime failure") {
+		t.Fatalf("health = %q, want newer runtime failure", got)
 	}
 }
 
@@ -892,6 +908,224 @@ func TestProjectReadMaterializerNewerRuntimeRefreshSupersedesBlockedOlderResult(
 	}
 }
 
+func TestProjectReadMaterializerFailedNewerRefreshReleasesOwnershipToOlderResult(t *testing.T) {
+	const issueID = "az-refresh-failed-owner"
+	canonical := map[string]domain.Task{issueID: {ID: issueID, Title: "failed refresh owner", Type: domain.TypeTask}}
+	olderEntered := make(chan struct{})
+	releaseOlder := make(chan struct{})
+	var hydrateCalls atomic.Int32
+	materializer := newProjectReadMaterializer("project", nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		if hydrateCalls.Add(1) == 1 {
+			close(olderEntered)
+			<-releaseOlder
+			tasks[0].Session = &domain.Session{Activity: "older-completed"}
+			return tasks, nil
+		}
+		return nil, errors.New("newer hydration failed")
+	})
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, canonical)
+	materializer.replaceBootstrap(canonical, canonical, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+
+	olderDone := make(chan error, 1)
+	go func() { olderDone <- materializer.refreshRuntime(context.Background(), []string{issueID}) }()
+	<-olderEntered
+	if err := materializer.refreshRuntime(context.Background(), []string{issueID}); err == nil || !strings.Contains(err.Error(), "newer hydration failed") {
+		t.Fatalf("newer refresh error = %v, want hydration failure", err)
+	}
+	close(releaseOlder)
+	if err := <-olderDone; err != nil {
+		t.Fatalf("older refresh after newer owner failed: %v", err)
+	}
+	tasks, _ := materializer.snapshot()
+	if len(tasks) != 1 || tasks[0].Session == nil || tasks[0].Session.Activity != "older-completed" {
+		t.Fatalf("snapshot after failed newer owner = %+v, want completed older result", tasks)
+	}
+}
+
+func TestProjectReadMaterializerFailedOwnerChainReturnsToOldestLiveRefresh(t *testing.T) {
+	const issueID = "az-refresh-failed-owner-chain"
+	canonical := map[string]domain.Task{issueID: {ID: issueID, Title: "failed refresh owner chain", Type: domain.TypeTask}}
+	entered := []chan struct{}{make(chan struct{}), make(chan struct{}), make(chan struct{})}
+	release := []chan struct{}{make(chan struct{}), make(chan struct{}), make(chan struct{})}
+	var hydrateCalls atomic.Int32
+	materializer := newProjectReadMaterializer("project", nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		call := int(hydrateCalls.Add(1)) - 1
+		close(entered[call])
+		<-release[call]
+		if call > 0 {
+			return nil, fmt.Errorf("failed owner %d", call)
+		}
+		tasks[0].Session = &domain.Session{Activity: "oldest-live"}
+		return tasks, nil
+	})
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, canonical)
+	materializer.replaceBootstrap(canonical, canonical, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+
+	done := []chan error{make(chan error, 1), make(chan error, 1), make(chan error, 1)}
+	for i := range done {
+		go func(index int) { done[index] <- materializer.refreshRuntime(context.Background(), []string{issueID}) }(i)
+		<-entered[i]
+	}
+	close(release[1])
+	if err := <-done[1]; err == nil || !strings.Contains(err.Error(), "failed owner 1") {
+		t.Fatalf("middle owner error = %v", err)
+	}
+	close(release[2])
+	if err := <-done[2]; err == nil || !strings.Contains(err.Error(), "failed owner 2") {
+		t.Fatalf("newest owner error = %v", err)
+	}
+	close(release[0])
+	if err := <-done[0]; err != nil {
+		t.Fatalf("oldest live owner completion: %v", err)
+	}
+	tasks, _ := materializer.snapshot()
+	if len(tasks) != 1 || tasks[0].Session == nil || tasks[0].Session.Activity != "oldest-live" {
+		t.Fatalf("snapshot after failed owner chain = %+v, want oldest live result", tasks)
+	}
+}
+
+func TestProjectReadMaterializerLiveNewerOwnerDoesNotMakeOlderCompletionUnhealthy(t *testing.T) {
+	const issueID = "az-refresh-live-owner"
+	canonical := map[string]domain.Task{issueID: {ID: issueID, Title: "live refresh owner", Type: domain.TypeTask}}
+	olderEntered := make(chan struct{})
+	newerEntered := make(chan struct{})
+	releaseOlder := make(chan struct{})
+	releaseNewer := make(chan struct{})
+	var hydrateCalls atomic.Int32
+	materializer := newProjectReadMaterializer("project", nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		switch hydrateCalls.Add(1) {
+		case 1:
+			close(olderEntered)
+			<-releaseOlder
+			tasks[0].Session = &domain.Session{Activity: "older"}
+		case 2:
+			close(newerEntered)
+			<-releaseNewer
+			tasks[0].Session = &domain.Session{Activity: "newer"}
+		}
+		return tasks, nil
+	})
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, canonical)
+	materializer.replaceBootstrap(canonical, canonical, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+
+	olderDone := make(chan error, 1)
+	newerDone := make(chan error, 1)
+	go func() { olderDone <- materializer.refreshRuntime(context.Background(), []string{issueID}) }()
+	<-olderEntered
+	go func() { newerDone <- materializer.refreshRuntime(context.Background(), []string{issueID}) }()
+	<-newerEntered
+	close(releaseOlder)
+	if err := <-olderDone; err != nil {
+		t.Fatalf("older completion while newer owner is live: %v", err)
+	}
+	close(releaseNewer)
+	if err := <-newerDone; err != nil {
+		t.Fatalf("newer owner completion: %v", err)
+	}
+	tasks, _ := materializer.snapshot()
+	if len(tasks) != 1 || tasks[0].Session == nil || tasks[0].Session.Activity != "newer" {
+		t.Fatalf("snapshot after live newer owner = %+v, want newer result", tasks)
+	}
+}
+
+func TestProjectReadMaterializerPerIssueOwnerConvergesWithOlderBulkRefresh(t *testing.T) {
+	const (
+		firstID  = "az-refresh-bulk-first"
+		secondID = "az-refresh-bulk-second"
+	)
+	canonical := map[string]domain.Task{
+		firstID:  {ID: firstID, Title: "bulk first", Type: domain.TypeTask},
+		secondID: {ID: secondID, Title: "bulk second", Type: domain.TypeTask},
+	}
+	bulkEntered := make(chan struct{})
+	issueEntered := make(chan struct{})
+	releaseBulk := make(chan struct{})
+	releaseIssue := make(chan struct{})
+	var hydrateCalls atomic.Int32
+	materializer := newProjectReadMaterializer("project", nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		switch hydrateCalls.Add(1) {
+		case 1:
+			close(bulkEntered)
+			<-releaseBulk
+			for i := range tasks {
+				tasks[i].Session = &domain.Session{Activity: "bulk"}
+			}
+		case 2:
+			close(issueEntered)
+			<-releaseIssue
+			tasks[0].Session = &domain.Session{Activity: "per-issue"}
+		}
+		return tasks, nil
+	})
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, canonical)
+	materializer.replaceBootstrap(canonical, canonical, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+
+	bulkDone := make(chan error, 1)
+	issueDone := make(chan error, 1)
+	go func() { bulkDone <- materializer.refreshRuntime(context.Background(), []string{firstID, secondID}) }()
+	<-bulkEntered
+	go func() { issueDone <- materializer.refreshRuntime(context.Background(), []string{firstID}) }()
+	<-issueEntered
+	close(releaseBulk)
+	if err := <-bulkDone; err != nil {
+		t.Fatalf("bulk refresh while per-issue owner is live: %v", err)
+	}
+	close(releaseIssue)
+	if err := <-issueDone; err != nil {
+		t.Fatalf("per-issue refresh: %v", err)
+	}
+	tasks, _ := materializer.snapshot()
+	byID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID.String()] = task
+	}
+	if byID[firstID].Session == nil || byID[firstID].Session.Activity != "per-issue" {
+		t.Fatalf("first task runtime = %+v, want per-issue result", byID[firstID])
+	}
+	if byID[secondID].Session == nil || byID[secondID].Session.Activity != "bulk" {
+		t.Fatalf("second task runtime = %+v, want bulk result", byID[secondID])
+	}
+}
+
+func TestProjectReadMaterializerDeleteRetiresBlockedRuntimeOwner(t *testing.T) {
+	const issueID = "az-refresh-deleted-owner"
+	canonical := map[string]domain.Task{issueID: {ID: issueID, Title: "deleted refresh owner", Type: domain.TypeTask}}
+	hydrateEntered := make(chan struct{})
+	releaseHydrate := make(chan struct{})
+	materializer := newProjectReadMaterializer("project", nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		close(hydrateEntered)
+		<-releaseHydrate
+		return tasks, nil
+	})
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, canonical)
+	materializer.replaceBootstrap(canonical, canonical, materializedMetadata(0, 0, issueProjectionProjector(), nil, issueKeys.sum(), runtimeKeys.sum(), "healthy"), issueKeys, runtimeKeys)
+
+	refreshDone := make(chan error, 1)
+	go func() { refreshDone <- materializer.refreshRuntime(context.Background(), []string{issueID}) }()
+	<-hydrateEntered
+	batch := protocol.ProjectionDeltaBatch{
+		SchemaVersion: protocol.ProjectionDeltaSchemaVersion, ProjectID: "project", AfterCursor: 0, HeadCursor: 1, DeliveryToCursor: 1,
+		DeliveryContract: protocol.ProjectionDeliveryContract, DeliveryCursorTransitional: true, Projector: issueProjectionProjector(), Health: "healthy",
+		Deltas: []protocol.ProjectionDelta{{Cursor: 1, Kind: protocol.ProjectionKind(domain.ProjectionKindIssue), Key: issueID, Operation: protocol.ProjectionDeltaDelete}},
+	}
+	protocol.FinalizeProjectionDeltaBatch(&batch)
+	if _, err := materializer.applyCanonical(context.Background(), batch); err != nil {
+		t.Fatalf("delete canonical issue: %v", err)
+	}
+	close(releaseHydrate)
+	if err := <-refreshDone; err != nil {
+		t.Fatalf("blocked refresh after delete: %v", err)
+	}
+	materializer.mu.RLock()
+	_, hasRefreshEpoch := materializer.runtimeRefreshEpoch[issueID]
+	_, hasPublishedEpoch := materializer.runtimePublishedEpoch[issueID]
+	_, hasOwners := materializer.runtimeRefreshOwners[issueID]
+	materializer.mu.RUnlock()
+	if hasRefreshEpoch || hasPublishedEpoch || hasOwners {
+		t.Fatalf("deleted issue retained runtime ownership: refresh=%t published=%t owners=%t", hasRefreshEpoch, hasPublishedEpoch, hasOwners)
+	}
+}
+
 func TestProjectReadSnapshotIsPureAtDeclaredChecksum(t *testing.T) {
 	client, repoDir := newTestIssueClient(t)
 	if _, err := client.Create(context.Background(), issues.CreateTaskParams{Title: "pure", Type: domain.TypeTask}); err != nil {
@@ -1185,6 +1419,76 @@ func TestSyncUserProjectionMaterializedIssuesPropagatesBoundedCurrentState(t *te
 	}
 	if len(snapshot.Projects) != 1 || snapshot.Projects[0].DeltaCursor != 4 || len(snapshot.Projects[0].Tasks) != 1 || snapshot.Projects[0].Tasks[0].Session == nil || !snapshot.Projects[0].Tasks[0].HasTmuxSession {
 		t.Fatalf("bounded current-state propagation = %+v", snapshot.Projects)
+	}
+}
+
+func TestRefreshActiveProjectReadRuntimeRecoversAuthoritativeHealthBeforeUserProjectionSync(t *testing.T) {
+	ctx := context.Background()
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	now := time.Now().UTC()
+	canonical := domain.Task{ID: "issue", Title: "canonical", Status: domain.StatusInProgress, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}
+	state := userstore.ProjectDeltaState{ProjectID: "p", Cursor: 4, Hash: "four", Initialized: true, Projector: issueProjectionProjector()}
+	if err := store.ReplaceProject(ctx, userstore.ProjectInput{ProjectID: "p", Name: "P", Path: "/p", DBPath: "/p/db", Tasks: []domain.Task{canonical}, Delta: &state}); err != nil {
+		t.Fatal(err)
+	}
+
+	var hydrateCalls atomic.Int32
+	reader := newProjectReadMaterializer("p", nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		if hydrateCalls.Add(1) == 1 {
+			return nil, errors.New("transient runtime hydration failure")
+		}
+		tasks[0].Session = &domain.Session{IssueID: "issue", State: domain.SessionBusy, Activity: "recovered", UpdatedAt: now.Add(time.Second)}
+		tasks[0].HasTmuxSession = true
+		return tasks, nil
+	})
+	canonicalByID := map[string]domain.Task{canonical.ID.String(): canonical}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonicalByID, canonicalByID)
+	reader.replaceBootstrap(canonicalByID, canonicalByID, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+	d := &Daemon{cfg: Config{}, userStore: store, materializers: map[string]*projectReadMaterializer{"p": reader}}
+
+	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, "p", reader, []string{"issue"}); err == nil || !strings.Contains(err.Error(), "transient runtime hydration failure") {
+		t.Fatalf("failed refresh error = %v", err)
+	}
+	if got := reader.snapshotMetadata().Health; !strings.Contains(got, "stale: authoritative read refresh:") {
+		t.Fatalf("failed refresh health = %q, want authoritative stale health", got)
+	}
+	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, "p", reader, []string{"issue"}); err != nil {
+		t.Fatalf("recovered refresh: %v", err)
+	}
+	if got := reader.snapshotMetadata().Health; got != "healthy" {
+		t.Fatalf("recovered refresh health = %q, want healthy", got)
+	}
+	snapshot, err := store.Snapshot(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Projects) != 1 || len(snapshot.Projects[0].Tasks) != 1 || snapshot.Projects[0].Tasks[0].Session == nil || snapshot.Projects[0].Tasks[0].Session.Activity != "recovered" {
+		t.Fatalf("recovered user projection = %+v", snapshot.Projects)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, "p", reader, []string{"issue"}); err == nil || !strings.Contains(err.Error(), "sync user projection issues") {
+		t.Fatalf("failed user projection sync error = %v", err)
+	}
+	if got := reader.snapshotMetadata().Health; !strings.Contains(got, "stale: authoritative read refresh:") {
+		t.Fatalf("failed user projection sync health = %q, want authoritative stale health", got)
+	}
+	reader.markUnhealthy(errors.New("structural projection failure"), false)
+	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, "p", reader, []string{"issue"}); err == nil || !strings.Contains(err.Error(), "structural projection failure") {
+		t.Fatalf("unrelated unhealthy refresh error = %v", err)
+	}
+	if got := reader.snapshotMetadata().Health; !strings.Contains(got, "structural projection failure") {
+		t.Fatalf("unrelated health was cleared: %q", got)
+	}
+	d.materializers = map[string]*projectReadMaterializer{}
+	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, "p", reader, []string{"issue"}); err == nil || !strings.Contains(err.Error(), "no longer active") {
+		t.Fatalf("removed materializer refresh error = %v", err)
 	}
 }
 
