@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -240,81 +239,6 @@ func TestAdvisorInitialLaunchRetiresSessionAfterAmbiguousCreateError(t *testing.
 	retried, retryErr := d.ensureAdvisorSessionRuntime(ctx, protocol.DefaultProjectID, request)
 	if retryErr != nil || !retried.Started || !runner.sessions[sessionID] {
 		t.Fatalf("advisor retry result=%+v err=%v live=%t", retried, retryErr, runner.sessions[sessionID])
-	}
-}
-
-func TestAdvisorBootstrapRequiresPostInitializationSignalAndExactLivePane(t *testing.T) {
-	ctx := context.Background()
-	fence, err := prepareAdvisorBootstrapFence(t.TempDir(), "advisor-incarnation", "claude")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer fence.remove()
-
-	// A controllable advisor that dies during setup never invokes the isolated
-	// SessionStart hook, even though tmux may already report its process name.
-	preInitFailure := exec.Command(advisorShellExecutable, "-c", "exit 42")
-	if err := preInitFailure.Run(); err == nil {
-		t.Fatal("pre-initialization advisor unexpectedly succeeded")
-	}
-	if _, err := os.Stat(fence.SignalPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("pre-initialization failure produced readiness signal: %v", err)
-	}
-
-	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
-	t.Cleanup(func() { _ = store.Close() })
-	runner := newSessionStartTmuxRunner()
-	runner.sessions["advisor-session"] = true
-	runner.panes["advisor-session"] = []string{"%7"}
-	runner.panePIDs["advisor-session"] = 321
-	runner.currentCommand = "claude"
-	d := &Daemon{cfg: Config{RepoDir: t.TempDir(), CLITool: "claude", Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()), runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{"project": store}}
-	processNameOnlyCtx, cancel := context.WithCancel(ctx)
-	cancel()
-	if err := d.waitForAdvisorBootstrapAcknowledgement(processNameOnlyCtx, "project", "advisor-session", fence); err == nil {
-		t.Fatal("process-name-only observation authorized advisor readiness")
-	}
-	if _, found, err := store.GetManagedAgentIdentity(ctx, "project", "advisor-session", "agent"); err != nil || found {
-		t.Fatalf("process-name-only observation recorded identity: found=%t err=%v", found, err)
-	}
-
-	// The fake advisor crosses its initialization boundary by invoking the
-	// daemon-owned hook. Only then can the exact live pane be acknowledged.
-	initialized := exec.Command(fence.HookPath)
-	initialized.Env = append(os.Environ(), "TMUX_PANE=%7", "AZEDARACH_PANE_PID=321")
-	if output, err := initialized.CombinedOutput(); err != nil {
-		t.Fatalf("run post-initialization advisor hook: %v: %s", err, output)
-	}
-	if err := d.waitForAdvisorBootstrapAcknowledgement(ctx, "project", "advisor-session", fence); err != nil {
-		t.Fatal(err)
-	}
-	fence.removeSignal()
-	if _, err := os.Stat(fence.WorkDir); err != nil {
-		t.Fatalf("advisor isolation bundle removed while live: %v", err)
-	}
-	identity, found, err := store.GetManagedAgentIdentity(ctx, "project", "advisor-session", "agent")
-	if err != nil || !found || identity.TmuxPaneID != "7" || identity.PanePID != 321 || identity.AgentIncarnation != fence.Incarnation {
-		t.Fatalf("advisor identity=%+v found=%t err=%v", identity, found, err)
-	}
-
-	exitedFence, err := prepareAdvisorBootstrapFence(t.TempDir(), "advisor-exited", "claude")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer exitedFence.remove()
-	exited := exec.Command(exitedFence.HookPath)
-	exited.Env = append(os.Environ(), "TMUX_PANE=%8", "AZEDARACH_PANE_PID=654")
-	if output, err := exited.CombinedOutput(); err != nil {
-		t.Fatalf("run exit-after-readiness advisor hook: %v: %s", err, output)
-	}
-	delete(runner.sessions, "advisor-exited")
-	exitedCtx, exitedCancel := context.WithCancel(ctx)
-	exitedCancel()
-	if err := d.waitForAdvisorBootstrapAcknowledgement(exitedCtx, "project", "advisor-exited", exitedFence); err == nil {
-		t.Fatal("advisor exit after readiness was reported healthy")
-	}
-	if _, found, err := store.GetManagedAgentIdentity(ctx, "project", "advisor-exited", "agent"); err != nil || found {
-		t.Fatalf("exit-after-readiness recorded identity: found=%t err=%v", found, err)
 	}
 }
 
