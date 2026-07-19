@@ -105,6 +105,7 @@ type projectReadMaterializer struct {
 	baseRetryableFailure                  bool
 	authoritativeRefreshFailures          map[authoritativeReadRefreshComponent]string
 	authoritativeRuntimeIssueSequence     map[string]uint64
+	authoritativeRuntimePending           map[string]uint64
 	authoritativeRuntimeFailures          map[string]string
 	authoritativeRuntimeUnscopedFailure   string
 	healthEpoch                           uint64
@@ -171,7 +172,7 @@ func newProjectReadMaterializer(projectID string, authority *ProjectionDeltaAuth
 		canonical: map[string]domain.Task{}, tasks: map[string]domain.Task{}, worktrees: map[string]git.Worktree{},
 		runtimeRefreshEpoch: map[string]uint64{}, runtimePublishedEpoch: map[string]uint64{}, runtimeRefreshOwners: map[string]map[uint64]struct{}{},
 		baseHealth: "healthy", authoritativeRefreshFailures: map[authoritativeReadRefreshComponent]string{},
-		authoritativeRuntimeIssueSequence: map[string]uint64{}, authoritativeRuntimeFailures: map[string]string{},
+		authoritativeRuntimeIssueSequence: map[string]uint64{}, authoritativeRuntimePending: map[string]uint64{}, authoritativeRuntimeFailures: map[string]string{},
 	}
 }
 
@@ -657,6 +658,7 @@ func (m *projectReadMaterializer) replaceBootstrapAfterConvergenceResult(canonic
 	m.baseRetryableFailure = false
 	m.authoritativeRefreshFailures = map[authoritativeReadRefreshComponent]string{}
 	m.authoritativeRuntimeIssueSequence = map[string]uint64{}
+	m.authoritativeRuntimePending = map[string]uint64{}
 	m.authoritativeRuntimeFailures = map[string]string{}
 	m.authoritativeRuntimeUnscopedFailure = ""
 	m.aggregateHealthLocked()
@@ -756,8 +758,12 @@ func (m *projectReadMaterializer) beginAuthoritativeReadRefreshForIssues(compone
 		if m.authoritativeRuntimeIssueSequence == nil {
 			m.authoritativeRuntimeIssueSequence = map[string]uint64{}
 		}
+		if m.authoritativeRuntimePending == nil {
+			m.authoritativeRuntimePending = map[string]uint64{}
+		}
 		for _, issueID := range normalizedIssueIDs {
 			m.authoritativeRuntimeIssueSequence[issueID] = *sequence
+			m.authoritativeRuntimePending[issueID] = *sequence
 		}
 	}
 	return authoritativeReadRefreshAttempt{sequence: *sequence, healthEpoch: m.healthEpoch, canonicalGeneration: m.canonicalGeneration, component: component, runtimeIssueIDs: normalizedIssueIDs}
@@ -794,6 +800,7 @@ func (m *projectReadMaterializer) finishAuthoritativeReadRefreshLocked(attempt a
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.healthEpoch != attempt.healthEpoch {
+		m.finishAuthoritativeRuntimePendingLocked(attempt)
 		return false
 	}
 	if attempt.component == authoritativeReadRefreshRuntime && attempt.canonicalGeneration != m.canonicalGeneration {
@@ -810,6 +817,7 @@ func (m *projectReadMaterializer) finishAuthoritativeReadRefreshLocked(attempt a
 			}
 			for _, issueID := range ownedIssueIDs {
 				m.authoritativeRuntimeFailures[issueID] = "canonical generation advanced during runtime refresh"
+				delete(m.authoritativeRuntimePending, issueID)
 			}
 			m.syncAuthoritativeRuntimeFailureLocked()
 			m.aggregateHealthLocked()
@@ -836,6 +844,7 @@ func (m *projectReadMaterializer) finishAuthoritativeReadRefreshLocked(attempt a
 			} else {
 				delete(m.authoritativeRuntimeFailures, issueID)
 			}
+			delete(m.authoritativeRuntimePending, issueID)
 		}
 		m.syncAuthoritativeRuntimeFailureLocked()
 		m.aggregateHealthLocked()
@@ -868,6 +877,29 @@ func (m *projectReadMaterializer) finishAuthoritativeReadRefreshLocked(attempt a
 	}
 	m.aggregateHealthLocked()
 	return true
+}
+
+func (m *projectReadMaterializer) finishAuthoritativeRuntimePendingLocked(attempt authoritativeReadRefreshAttempt) {
+	if attempt.component != authoritativeReadRefreshRuntime {
+		return
+	}
+	for _, issueID := range attempt.runtimeIssueIDs {
+		if m.authoritativeRuntimePending[issueID] == attempt.sequence {
+			delete(m.authoritativeRuntimePending, issueID)
+		}
+	}
+}
+
+func (m *projectReadMaterializer) authoritativeRuntimeRefreshRetryIssueIDs(issueIDs []string) []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	retryIssueIDs := make([]string, 0, len(issueIDs))
+	for _, issueID := range normalizeAuthoritativeRuntimeIssueIDs(issueIDs) {
+		if strings.TrimSpace(m.authoritativeRuntimeFailures[issueID]) != "" && m.authoritativeRuntimePending[issueID] == 0 {
+			retryIssueIDs = append(retryIssueIDs, issueID)
+		}
+	}
+	return retryIssueIDs
 }
 
 func (m *projectReadMaterializer) ownedAuthoritativeRuntimeIssueIDsLocked(attempt authoritativeReadRefreshAttempt) []string {
@@ -905,6 +937,7 @@ func (m *projectReadMaterializer) syncAuthoritativeRuntimeFailureLocked() {
 
 func (m *projectReadMaterializer) retireAuthoritativeRuntimeIssueLocked(issueID string) {
 	delete(m.authoritativeRuntimeIssueSequence, issueID)
+	delete(m.authoritativeRuntimePending, issueID)
 	delete(m.authoritativeRuntimeFailures, issueID)
 }
 
@@ -1634,6 +1667,15 @@ func (d *Daemon) refreshProjectReadRuntime(ctx context.Context, projectID string
 	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, projectID, materializer, issueIDs); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Warn("refresh project read runtime materialization", "project_id", d.canonicalProjectID(projectID), "issue_ids", uniqueStrings(issueIDs), "error", err)
 	}
+}
+
+func (d *Daemon) projectReadRuntimeRefreshRetryIssueIDs(projectID string, issueIDs ...string) []string {
+	projectID = d.canonicalProjectID(projectID)
+	materializer := d.activeProjectReadMaterializer(projectID)
+	if materializer == nil {
+		return nil
+	}
+	return materializer.authoritativeRuntimeRefreshRetryIssueIDs(issueIDs)
 }
 
 func (d *Daemon) refreshProjectReadRuntimeForIssues(ctx context.Context, projectID string, issueIDs []string) error {

@@ -423,6 +423,13 @@ func (w *daemonRuntimeProjectionWriter) ReplaceWorktreeProjectionSnapshot(ctx co
 	persistStartedAt := time.Now()
 	previous, err := store.ListWorktreeStates(ctx, projectID)
 	unchanged := err == nil && sameWorktreeProjectionIdentity(previous, rows)
+	issueIDs := make([]string, 0, len(previous)+len(rows))
+	for _, row := range previous {
+		issueIDs = append(issueIDs, row.IssueID)
+	}
+	for _, row := range rows {
+		issueIDs = append(issueIDs, row.IssueID)
+	}
 	if err == nil {
 		if unchanged {
 			err = store.TouchWorktreeStates(ctx, projectID, latestWorktreeObservation(rows))
@@ -432,16 +439,13 @@ func (w *daemonRuntimeProjectionWriter) ReplaceWorktreeProjectionSnapshot(ctx co
 	}
 	unlock()
 	w.logPhase(ctx, projectID, operation, "persist", persistStartedAt, err)
-	if err == nil && !unchanged {
-		issueIDs := make([]string, 0, len(previous)+len(rows))
-		for _, row := range previous {
-			issueIDs = append(issueIDs, row.IssueID)
-		}
-		for _, row := range rows {
-			issueIDs = append(issueIDs, row.IssueID)
-		}
+	refreshIssueIDs := issueIDs
+	if unchanged {
+		refreshIssueIDs = w.d.projectReadRuntimeRefreshRetryIssueIDs(projectID, issueIDs...)
+	}
+	if err == nil && len(refreshIssueIDs) > 0 {
 		refreshStartedAt := time.Now()
-		w.d.refreshProjectReadRuntime(ctx, projectID, issueIDs...)
+		w.d.refreshProjectReadRuntime(ctx, projectID, refreshIssueIDs...)
 		w.logPhase(ctx, projectID, operation, "refresh", refreshStartedAt, nil)
 	}
 	return err
@@ -568,7 +572,7 @@ func (w *daemonRuntimeProjectionWriter) PersistGitStatusProjectionAndPublish(
 	if !persisted {
 		return 0, persistErr
 	}
-	if !changed && !forcePublish {
+	if !changed && !forcePublish && len(w.d.projectReadRuntimeRefreshRetryIssueIDs(projectID, projection.IssueID)) == 0 {
 		return 0, nil
 	}
 	refreshStartedAt := time.Now()

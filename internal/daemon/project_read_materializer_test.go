@@ -2027,9 +2027,10 @@ func TestProjectReadMaterializerDeleteRetiresBlockedRuntimeOwner(t *testing.T) {
 	_, hasRefreshEpoch := materializer.runtimeRefreshEpoch[issueID]
 	_, hasPublishedEpoch := materializer.runtimePublishedEpoch[issueID]
 	_, hasOwners := materializer.runtimeRefreshOwners[issueID]
+	_, hasAuthoritativePending := materializer.authoritativeRuntimePending[issueID]
 	materializer.mu.RUnlock()
-	if hasRefreshEpoch || hasPublishedEpoch || hasOwners {
-		t.Fatalf("deleted issue retained runtime ownership: refresh=%t published=%t owners=%t", hasRefreshEpoch, hasPublishedEpoch, hasOwners)
+	if hasRefreshEpoch || hasPublishedEpoch || hasOwners || hasAuthoritativePending {
+		t.Fatalf("deleted issue retained runtime ownership: refresh=%t published=%t owners=%t authoritative_pending=%t", hasRefreshEpoch, hasPublishedEpoch, hasOwners, hasAuthoritativePending)
 	}
 }
 
