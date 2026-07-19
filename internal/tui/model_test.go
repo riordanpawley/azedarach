@@ -4340,7 +4340,7 @@ func TestTaskWorkspaceGraphNavigationOpensAndRefreshesOffBoardRelatedTask(t *tes
 	})
 	next = updated.(Model)
 	workspace = next.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
-	view := workspace.View()
+	view := ansi.Strip(workspace.View())
 	if !strings.Contains(view, "Related off-board task refreshed") || !strings.Contains(view, "Full off-board details") {
 		t.Fatalf("workspace did not apply full refresh for off-board relation, got %q", view)
 	}

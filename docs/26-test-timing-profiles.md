@@ -45,6 +45,14 @@ non-compiling commands remain eligible and aggregate capacity execution remains
 exclusive from shared capacity work. This policy does not gate ordinary
 development or delay push/review publication.
 
+Ticket-scoped capacity requests also carry the daemon-authoritative issue
+priority. Admission is priority-first and FIFO within equal priority. Once a
+later higher-priority request has overtaken an older request, that durable
+bypass debt protects the older request at the next compatible admission point;
+daemon replacement and concurrent clients cannot reset it. `az validation
+status` reports the effective queue position, issue priority, bypass count, and
+whether ordering follows `priority_fifo` or `bounded_fairness`.
+
 The runner establishes the mandatory database-isolation boundary before any
 test binary starts. It snapshots the configured root-user database, the current
 project database, and every registered project database into a pre-open refusal

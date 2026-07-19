@@ -45,11 +45,11 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("decode validation acquire: %v", err)), nil
 		}
 		ttl := validationTTL(body.TTLSeconds)
-		reviewerID, reviewEpochEventID, err := d.validationReviewAssignment(ctx, projectID, body)
+		authority, err := d.validationIssueAuthority(ctx, projectID, body)
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeConflict, err.Error()), nil
 		}
-		acquire := domain.ValidationAcquire{RequestID: strings.TrimSpace(body.RequestID), LeaseToken: strings.TrimSpace(body.LeaseToken), ProjectID: projectID, IssueID: strings.TrimSpace(body.IssueID), Class: body.Class, Scope: body.Scope, Purpose: body.Purpose, IsolationMode: strings.TrimSpace(body.IsolationMode), EnvironmentFingerprint: strings.TrimSpace(body.EnvironmentFingerprint), Override: body.Override, OverrideActor: strings.TrimSpace(body.OverrideActor), OverrideReason: strings.TrimSpace(body.OverrideReason), Profile: strings.TrimSpace(body.Profile), Command: strings.TrimSpace(body.Command), SourceRevision: strings.TrimSpace(body.SourceRevision), ReviewerID: reviewerID, ReviewEpochEventID: reviewEpochEventID, TTL: ttl}
+		acquire := domain.ValidationAcquire{RequestID: strings.TrimSpace(body.RequestID), LeaseToken: strings.TrimSpace(body.LeaseToken), ProjectID: projectID, IssueID: strings.TrimSpace(body.IssueID), IssuePriority: authority.issuePriority, IssuePriorityResolved: true, Class: body.Class, Scope: body.Scope, Purpose: body.Purpose, IsolationMode: strings.TrimSpace(body.IsolationMode), EnvironmentFingerprint: strings.TrimSpace(body.EnvironmentFingerprint), Override: body.Override, OverrideActor: strings.TrimSpace(body.OverrideActor), OverrideReason: strings.TrimSpace(body.OverrideReason), Profile: strings.TrimSpace(body.Profile), Command: strings.TrimSpace(body.Command), SourceRevision: strings.TrimSpace(body.SourceRevision), ReviewerID: authority.reviewerID, ReviewEpochEventID: authority.reviewEpochEventID, TTL: ttl}
 		if err := acquire.Validate(); err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
 		}
@@ -770,58 +770,70 @@ func publicationAssessmentInvalidation(evidenceID string, reason domain.Publicat
 	}
 }
 
-func (d *Daemon) validationReviewAssignment(ctx context.Context, projectID string, body protocol.ValidationAcquireRequest) (string, int64, error) {
+type validationIssueAuthority struct {
+	issuePriority      domain.Priority
+	reviewerID         string
+	reviewEpochEventID int64
+}
+
+func (d *Daemon) validationIssueAuthority(ctx context.Context, projectID string, body protocol.ValidationAcquireRequest) (validationIssueAuthority, error) {
 	if body.Scope == domain.ValidationScopeRepository {
 		if strings.TrimSpace(body.IssueID) != "" {
-			return "", 0, fmt.Errorf("repository-scoped validation must not identify a ticket")
+			return validationIssueAuthority{}, fmt.Errorf("repository-scoped validation must not identify a ticket")
 		}
-		return "", 0, nil
+		return validationIssueAuthority{issuePriority: domain.P2}, nil
 	}
 	if body.Scope != domain.ValidationScopeTicket {
-		return "", 0, fmt.Errorf("validation requires explicit repository or ticket scope")
+		return validationIssueAuthority{}, fmt.Errorf("validation requires explicit repository or ticket scope")
 	}
 	issueClient := d.issueClientForProject(projectID)
 	if issueClient == nil {
-		return "", 0, fmt.Errorf("ticket-scoped validation requires issue store")
+		return validationIssueAuthority{}, fmt.Errorf("ticket-scoped validation requires issue store")
 	}
 	issueID := strings.TrimSpace(body.IssueID)
 	if issueID == "" {
-		return "", 0, fmt.Errorf("ticket-scoped validation requires ticket identity")
+		return validationIssueAuthority{}, fmt.Errorf("ticket-scoped validation requires ticket identity")
 	}
 	task, err := issueClient.GetWithRuntime(ctx, projectID, issueID)
 	if err != nil {
-		return "", 0, fmt.Errorf("resolve ticket-scoped validation %s: %w", issueID, err)
+		return validationIssueAuthority{}, fmt.Errorf("resolve ticket-scoped validation %s: %w", issueID, err)
+	}
+	authority := validationIssueAuthority{issuePriority: task.Priority}
+	if task.Priority < domain.P0 || task.Priority > domain.P4 {
+		return validationIssueAuthority{}, fmt.Errorf("ticket-scoped validation %s has invalid priority %d", issueID, task.Priority)
 	}
 	if body.Purpose != domain.ValidationPurposeReviewEvidence {
-		return "", 0, nil
+		return authority, nil
 	}
 	if body.Class != domain.ValidationClassAggregate {
-		return "", 0, fmt.Errorf("review evidence requires aggregate class and ticket scope")
+		return validationIssueAuthority{}, fmt.Errorf("review evidence requires aggregate class and ticket scope")
 	}
 	if task.Status != domain.StatusInReview {
-		return "", 0, nil
+		return authority, nil
 	}
 	reviewerID := strings.TrimSpace(body.ReviewerID)
 	if reviewerID == "" {
-		return "", 0, fmt.Errorf("review-assigned aggregate validation requires reviewer identity")
+		return validationIssueAuthority{}, fmt.Errorf("review-assigned aggregate validation requires reviewer identity")
 	}
 	reviewLease := coordinationLease(task, domain.CoordinationLeaseReview)
 	if reviewLease == nil || reviewLease.IsExpired(time.Now().UTC()) {
-		return "", 0, fmt.Errorf("review-assigned aggregate validation requires an active durable review lease")
+		return validationIssueAuthority{}, fmt.Errorf("review-assigned aggregate validation requires an active durable review lease")
 	}
 	if !strings.EqualFold(strings.TrimSpace(reviewLease.OwnerID), reviewerID) {
-		return "", 0, fmt.Errorf("review-assigned aggregate validation reviewer %s does not own review lease held by %s", reviewerID, reviewLease.OwnerID)
+		return validationIssueAuthority{}, fmt.Errorf("review-assigned aggregate validation reviewer %s does not own review lease held by %s", reviewerID, reviewLease.OwnerID)
 	}
 	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventIssueStatusChanged}, NewestIDFirst: true})
 	if err != nil {
-		return "", 0, err
+		return validationIssueAuthority{}, err
 	}
 	for _, event := range events {
 		if domain.IsReviewRequestTransition(event) {
-			return reviewerID, event.ID, nil
+			authority.reviewerID = reviewerID
+			authority.reviewEpochEventID = event.ID
+			return authority, nil
 		}
 	}
-	return "", 0, fmt.Errorf("review-assigned aggregate validation has no current review epoch")
+	return validationIssueAuthority{}, fmt.Errorf("review-assigned aggregate validation has no current review epoch")
 }
 
 func (d *Daemon) validationProjectionStore() (*operationstore.SQLiteStore, error) {
