@@ -3052,7 +3052,17 @@ func (d *Daemon) persistTaskCloseIntegrationPublication(ctx context.Context, pro
 		gateCommand := strings.TrimSpace(projectCfg.Gate.Command)
 		operation, _, provenanceErr := d.taskClosePublicationProvenance(ctx, projectID, taskID, integration, publicationPolicyVersion(projectCfg, gateCommand), gateCommand, publicationEnvironmentFingerprint(projectCfg))
 		if provenanceErr != nil {
-			return fmt.Errorf("recover merge-result publication binding: %w", provenanceErr)
+			if !errors.Is(provenanceErr, errHistoricalPublicationOperationIdentityMissing) {
+				return fmt.Errorf("recover merge-result publication binding: %w", provenanceErr)
+			}
+			if _, historicalErr := d.recoverHistoricalTaskClosePublication(ctx, projectID, taskID, targetWorktree, integration); historicalErr != nil {
+				return fmt.Errorf("recover merge-result publication binding: modern authority: %v; historical authority: %w", provenanceErr, historicalErr)
+			}
+			// Historical integrations predate publication operations and merge-
+			// result evidence. Their append-only binding is the durable authority;
+			// every replay revalidates its exact review/validation events and live
+			// typed-target containment before returning here.
+			return nil
 		}
 		integration.PublicationOperationID = strings.TrimSpace(operation.OperationID)
 		issueClient := d.issueClientForProject(projectID)

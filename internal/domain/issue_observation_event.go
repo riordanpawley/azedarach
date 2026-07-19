@@ -43,6 +43,12 @@ const (
 	IssueEventOrchestrationRouted      IssueObservationEventType = "orchestration.candidate_routed"
 	IssueEventDecisionChanged          IssueObservationEventType = "decision.changed"
 	IssueEventDecisionAcknowledged     IssueObservationEventType = "decision.acknowledged"
+	// These legacy evidence types predate daemon-owned review publication.
+	// They remain readable only for the fail-closed historical integration
+	// recovery path; new review acceptance uses IssueEventReviewCompleted.
+	IssueEventHistoricalReviewAccepted      IssueObservationEventType = "review.accepted"
+	IssueEventHistoricalReviewReturned      IssueObservationEventType = "review.returned"
+	IssueEventHistoricalValidationCompleted IssueObservationEventType = "validation.completed"
 )
 
 // IssueObservationEvent is an append-only fact associated with one issue.
