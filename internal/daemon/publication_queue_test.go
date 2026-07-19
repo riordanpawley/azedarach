@@ -1109,6 +1109,76 @@ func TestPublicationQueueRecoveryResubmitsNonterminalIntent(t *testing.T) {
 	}
 }
 
+func TestPublicationQueueRestartRecoveryPreservesTicketIdentity(t *testing.T) {
+	repo := t.TempDir()
+	runDaemonTestGit(t, repo, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repo, "config", "user.email", "test@example.com")
+	runDaemonTestGit(t, repo, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte(".azedarach/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDaemonTestGit(t, repo, "add", "base.txt", ".gitignore")
+	runDaemonTestGit(t, repo, "commit", "-q", "-m", "base")
+	runDaemonTestGit(t, repo, "checkout", "-q", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(repo, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDaemonTestGit(t, repo, "add", "feature.txt")
+	runDaemonTestGit(t, repo, "commit", "-q", "-m", "feature")
+	runDaemonTestGit(t, repo, "checkout", "-q", "main")
+	if err := os.WriteFile(filepath.Join(repo, "main.txt"), []byte("main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDaemonTestGit(t, repo, "add", "main.txt")
+	runDaemonTestGit(t, repo, "commit", "-q", "-m", "main")
+
+	firstRuntime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	operation := daemonTestPublicationOperation(firstRuntime.canonicalProject, "publication-ticket-recovery", "issue-recovery", "intent", "source", time.Now().UTC())
+	operation.ValidationCommand = `test "$AZEDARACH_TICKET_ID" = issue-recovery && test "$AZEDARACH_ISSUE_ID" = issue-recovery`
+	if _, _, err := firstRuntime.store.EnqueuePublication(context.Background(), operation, "candidate-ticket-recovery"); err != nil {
+		t.Fatal(err)
+	}
+	if err := firstRuntime.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	t.Cleanup(func() { _ = restarted.Close() })
+	recovered, found, err := restarted.store.PublicationOperation(context.Background(), operation.OperationID)
+	if err != nil || !found || recovered.IssueID != "issue-recovery" {
+		t.Fatalf("reopened ticket publication = (%+v,%t,%v)", recovered, found, err)
+	}
+	gitClient := gitservice.NewClient(gitservice.NewExecRunner(repo), slog.Default())
+	d := &Daemon{
+		operationRuntime: restarted,
+		cfg:              Config{RepoDir: repo},
+		git:              gitClient,
+		publicationIdentityCheck: func(context.Context, domain.PublicationOperation) error {
+			return nil
+		},
+	}
+	d.publicationClose = func(ctx context.Context, _ domain.PublicationOperation) error {
+		result, err := gitClient.MergeCleanlyTransactional(ctx, repo, "feature")
+		if err != nil {
+			return err
+		}
+		if result == nil || !result.Success || len(result.ValidationAttempts) != 1 {
+			return fmt.Errorf("recovered candidate validation = %+v", result)
+		}
+		return nil
+	}
+	if _, err := d.runPublicationOperation(context.Background(), operation.ProjectID, operation.OperationID); err != nil {
+		t.Fatal(err)
+	}
+	recovered, found, err = restarted.store.PublicationOperation(context.Background(), operation.OperationID)
+	if err != nil || !found || recovered.State != domain.PublicationOperationMerged || recovered.ValidationRequestID == "" {
+		t.Fatalf("recovered ticket publication = (%+v,%t,%v)", recovered, found, err)
+	}
+}
+
 func TestPublicationCandidateAdmissionRecordsAndReusesExactEvidence(t *testing.T) {
 	repo := t.TempDir()
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
