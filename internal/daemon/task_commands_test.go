@@ -6780,18 +6780,28 @@ func TestTaskCloseExactReceiptAcceptsAndRepairsMissingProjectionIdempotentlyInRe
 	runDaemonTestGit(t, repoDir, "init", "-q", "-b", "main")
 	runDaemonTestGit(t, repoDir, "config", "user.name", "Azedarach Test")
 	runDaemonTestGit(t, repoDir, "config", "user.email", "azedarach@example.com")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir project config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, ".azedarach", "config.json"), []byte(`{"publicationEvidence":{"policyVersion":"portable-v1"}}`), 0o644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(repoDir, "tracked.txt"), []byte("seed\n"), 0o644); err != nil {
 		t.Fatalf("write seed: %v", err)
 	}
 	runDaemonTestGit(t, repoDir, "add", "tracked.txt")
 	runDaemonTestGit(t, repoDir, "commit", "-q", "-m", "chore: seed")
+	baseOID := runDaemonTestGitOutput(t, repoDir, "rev-parse", "HEAD")
 
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	issuesClient := newMigratedIssueClientAtPath(t, dbPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
-	projectID := "proj-real-repair"
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("resolve project id: %v", err)
+	}
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "Repair exact receipt retry", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInReview,
 	})
@@ -6817,7 +6827,11 @@ func TestTaskCloseExactReceiptAcceptsAndRepairsMissingProjectionIdempotentlyInRe
 	}
 	if _, err := issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
 		Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close", SourceCommand: "integrate-before-close",
-		Payload: map[string]any{"project_id": projectID, "source_branch": sourceBranch, "target_branch": "main", "source_oid": sourceOID, "target_oid": targetOID},
+		Payload: map[string]any{
+			"project_id": projectID, "source_branch": sourceBranch, "target_branch": "main",
+			"integrated": true, "configured_base_target": true, "target_id": "base",
+			"base_oid": baseOID, "source_oid": sourceOID, "target_oid": targetOID, "publication_operation_id": "",
+		},
 	}); err != nil {
 		t.Fatalf("seed exact integration receipt: %v", err)
 	}
@@ -6835,6 +6849,13 @@ func TestTaskCloseExactReceiptAcceptsAndRepairsMissingProjectionIdempotentlyInRe
 		managerForProject:           func(string) *git.WorktreeManager { return manager },
 		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore { return runtimeStore },
 		logger:                      logger,
+	}
+	recovered, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, true, "", "")
+	if err != nil {
+		t.Fatalf("recover configured-base receipt with removed source: %v", err)
+	}
+	if !recovered.ReceiptRecovered || recovered.TargetOID != targetOID || recovered.PublicationOperationID != "" {
+		t.Fatalf("recovered configured-base receipt = %+v, want exact empty-operation receipt", recovered)
 	}
 	receipt, found, err := d.latestTaskCloseIntegrationReceipt(ctx, projectID, taskID, sourceBranch, "main")
 	if err != nil || !found {

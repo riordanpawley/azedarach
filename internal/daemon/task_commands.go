@@ -3265,15 +3265,6 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 		}
 		return d.taskCloseNoChangesIntegrationResult(ctx, targetWorktree, target.TargetID, source.Branch, targetBranch, sourceOID, targetOID, configuredBaseTarget)
 	}
-	if configuredBaseTarget {
-		publicationConfigured, publicationErr := d.publicationEvidenceConfigured(projectID)
-		if publicationErr != nil {
-			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve configured-base publication authority before integration: %w", publicationErr)
-		}
-		if _, bound := taskClosePublicationBindingFromContext(ctx); publicationConfigured && !bound {
-			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("configured-base integration requires an accepted publication operation before synthetic merge or apply")
-		}
-	}
 	sourcePathMissing, statErr := taskCloseWorktreePathMissing(source.Path)
 	if statErr != nil {
 		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("inspect source worktree path %s before close integration: %w", source.Path, statErr)
@@ -3359,6 +3350,15 @@ func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID
 			reasons = append(reasons, "unknown")
 		}
 		return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("merge preflight failed: predicted conflicts %s", strings.Join(reasons, ", "))
+	}
+	if configuredBaseTarget {
+		publicationConfigured, publicationErr := d.publicationEvidenceConfigured(projectID)
+		if publicationErr != nil {
+			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("resolve configured-base publication authority before integration: %w", publicationErr)
+		}
+		if _, bound := taskClosePublicationBindingFromContext(ctx); publicationConfigured && !bound {
+			return taskCloseIntegrationResult{Requested: true}, fmt.Errorf("configured-base integration requires an accepted publication operation before synthetic merge or apply")
+		}
 	}
 	if !branchAttached {
 		if err := d.git.WithWorktreeLock(ctx, targetWorktree, func(ctx context.Context) error {
