@@ -6,12 +6,25 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
 
 func observeProcessExit(pid int) (<-chan error, error) {
+	return selectProcessExitObserver(
+		func() (<-chan error, error) { return observeProcessExitByPIDFD(pid) },
+		func() (<-chan error, error) {
+			// /proc state observation preserves the unreaped leader when pidfds
+			// are unavailable on an otherwise supported Linux host.
+			return observeProcessExitByState(pid, readLinuxProcessState, func() {
+				time.Sleep(terminationPoll)
+			}), nil
+		},
+	)
+}
+
+func observeProcessExitByPIDFD(pid int) (<-chan error, error) {
 	fd, err := unix.PidfdOpen(pid, 0)
 	if err != nil {
 		return nil, err
@@ -38,6 +51,15 @@ func observeProcessExit(pid int) (<-chan error, error) {
 	return exited, nil
 }
 
+func readLinuxProcessState(pid int) (byte, error) {
+	stat, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return 0, err
+	}
+	state, _, err := parseLinuxProcStat(stat)
+	return state, err
+}
+
 func processGroupHasLiveDescendants(pgid, leaderPID int) (bool, error) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -55,16 +77,11 @@ func processGroupHasLiveDescendants(pgid, leaderPID int) (bool, error) {
 			}
 			return false, err
 		}
-		closeParen := strings.LastIndexByte(string(stat), ')')
-		if closeParen < 0 || closeParen+2 >= len(stat) {
+		state, processGroup, err := parseLinuxProcStat(stat)
+		if err != nil {
 			continue
 		}
-		fields := strings.Fields(string(stat[closeParen+2:]))
-		if len(fields) < 3 {
-			continue
-		}
-		processGroup, err := strconv.Atoi(fields[2])
-		if err == nil && processGroup == pgid && fields[0] != "Z" {
+		if processGroup == pgid && state != 'Z' {
 			return true, nil
 		}
 	}
