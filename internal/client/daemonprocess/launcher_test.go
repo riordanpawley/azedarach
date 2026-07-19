@@ -3365,11 +3365,7 @@ func TestLauncherVerifyCapturedPredecessorFailsClosed(t *testing.T) {
 			name: "linked worktree scope",
 			mutate: func(t *testing.T, launcher *Launcher, _ *processIdentity, _ *daemonCommand) {
 				t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
-				worktree, err := os.Getwd()
-				if err != nil {
-					t.Fatal(err)
-				}
-				launcher.RepoDir = worktree
+				launcher.RepoDir = newLauncherTestWorktree(t)
 			},
 			wantErr: "outside the canonical global runtime",
 		},
