@@ -248,10 +248,6 @@ func TestRunSessionShellCancellationDrainsDescendantOutputPipes(t *testing.T) {
 }
 
 func TestRunSessionShellNormalExitCleansRetainedDescendantGroup(t *testing.T) {
-	ready := make(chan os.Signal, 1)
-	signal.Notify(ready, syscall.SIGUSR1)
-	t.Cleanup(func() { signal.Stop(ready) })
-
 	pidFile := filepath.Join(t.TempDir(), "cleanup-worker.pid")
 	cleanupNeeded := true
 	t.Cleanup(func() {
@@ -270,11 +266,6 @@ func TestRunSessionShellNormalExitCleansRetainedDescendantGroup(t *testing.T) {
 		}
 	})
 	d := &Daemon{}
-	type runResult struct {
-		output []byte
-		err    error
-	}
-	done := make(chan runResult, 1)
 	workdir := t.TempDir()
 	readyFIFO := filepath.Join(workdir, "retained-descendant-ready")
 	if err := syscall.Mkfifo(readyFIFO, 0o600); err != nil {
@@ -287,31 +278,18 @@ trap 'kill -TERM "$worker" 2>/dev/null; wait "$worker"; exit 0' TERM
 worker=$!
 printf '%s %s' "$$" "$worker" > "$AZEDARACH_TEST_CHILD_PID_FILE"
 printf 'ready\n' > "$AZEDARACH_TEST_READY_FIFO"
-kill -USR1 "$AZEDARACH_TEST_PARENT_PID"
 wait "$worker"
 `), 0o700); err != nil {
 		t.Fatalf("write retained descendant supervisor: %v", err)
 	}
 	command := `/bin/sh "$AZEDARACH_TEST_SUPERVISOR" & read ready < "$AZEDARACH_TEST_READY_FIFO"`
-	go func() {
-		output, err := d.runSessionShell(context.Background(), "/bin/sh", workdir, command, append(os.Environ(),
-			"AZEDARACH_TEST_PARENT_PID="+strconv.Itoa(os.Getpid()),
-			"AZEDARACH_TEST_CHILD_PID_FILE="+pidFile,
-			"AZEDARACH_TEST_READY_FIFO="+readyFIFO,
-			"AZEDARACH_TEST_SUPERVISOR="+supervisor,
-		))
-		done <- runResult{output: output, err: err}
-	}()
-
-	var result runResult
-	select {
-	case <-ready:
-		result = <-done
-	case result = <-done:
-		t.Fatalf("runSessionShell returned before retained descendant readiness: err=%v output=%q", result.err, result.output)
-	}
-	if result.err != nil {
-		t.Fatalf("runSessionShell error = %v, want successful direct-shell exit; output=%q", result.err, result.output)
+	output, err := d.runSessionShell(context.Background(), "/bin/sh", workdir, command, append(os.Environ(),
+		"AZEDARACH_TEST_CHILD_PID_FILE="+pidFile,
+		"AZEDARACH_TEST_READY_FIFO="+readyFIFO,
+		"AZEDARACH_TEST_SUPERVISOR="+supervisor,
+	))
+	if err != nil {
+		t.Fatalf("runSessionShell error = %v, want successful direct-shell exit; output=%q", err, output)
 	}
 	pidBytes, err := os.ReadFile(pidFile)
 	if err != nil {
