@@ -12,7 +12,6 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
-	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
 
 var ErrProjectDeltaConflict = errors.New("project delta component changed concurrently")
@@ -52,14 +51,14 @@ func (s *Store) ApplyProjectMaterializedIssues(ctx context.Context, projectID st
 	if projectID == "" || len(changes) == 0 {
 		return nil
 	}
-	return sqliteutil.WithWriteLock(s.dbPath, func() error {
-		tx, err := s.db.BeginTx(ctx, nil)
+	return s.withWrite(ctx, "apply_project_materialized_issues", func(lockCtx context.Context) error {
+		tx, err := s.db.BeginTx(lockCtx, nil)
 		if err != nil {
 			return fmt.Errorf("begin project materialized issue apply: %w", err)
 		}
 		defer tx.Rollback()
 		var exists int
-		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM projects WHERE project_id=?`, projectID).Scan(&exists); err != nil {
+		if err := tx.QueryRowContext(lockCtx, `SELECT 1 FROM projects WHERE project_id=?`, projectID).Scan(&exists); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil
 			}
@@ -71,7 +70,7 @@ func (s *Store) ApplyProjectMaterializedIssues(ctx context.Context, projectID st
 				return errors.New("project materialized issue ID is empty")
 			}
 			if change.Delete {
-				if err := deleteProjectedIssue(ctx, tx, projectID, issueID); err != nil {
+				if err := deleteProjectedIssue(lockCtx, tx, projectID, issueID); err != nil {
 					return err
 				}
 				continue
@@ -80,7 +79,7 @@ func (s *Store) ApplyProjectMaterializedIssues(ctx context.Context, projectID st
 				return fmt.Errorf("project materialized issue payload key mismatch for %q", issueID)
 			}
 			issue := *change.Issue
-			current, err := s.tasks(ctx, tx, projectID, "", nil, nil, []string{issueID})
+			current, err := s.tasks(lockCtx, tx, projectID, "", nil, nil, []string{issueID})
 			if err != nil {
 				return fmt.Errorf("read canonical projected issue %s: %w", issueID, err)
 			}
@@ -89,10 +88,10 @@ func (s *Store) ApplyProjectMaterializedIssues(ctx context.Context, projectID st
 				preserveRuntimeProjection(&canonical, issue)
 				issue = canonical
 			}
-			if err := deleteProjectedIssue(ctx, tx, projectID, issueID); err != nil {
+			if err := deleteProjectedIssue(lockCtx, tx, projectID, issueID); err != nil {
 				return err
 			}
-			if err := insertTask(ctx, tx, projectID, issue); err != nil {
+			if err := insertTask(lockCtx, tx, projectID, issue); err != nil {
 				return fmt.Errorf("apply materialized issue %s: %w", issueID, err)
 			}
 		}
@@ -131,13 +130,13 @@ func (s *Store) ApplyProjectDelta(ctx context.Context, apply ProjectDeltaApply) 
 	if !apply.Next.Initialized || strings.TrimSpace(apply.Next.Projector.ID) == "" {
 		return errors.New("next project delta component is uninitialized")
 	}
-	return sqliteutil.WithWriteLock(s.dbPath, func() error {
-		tx, err := s.db.BeginTx(ctx, nil)
+	return s.withWrite(ctx, "apply_project_delta", func(lockCtx context.Context) error {
+		tx, err := s.db.BeginTx(lockCtx, nil)
 		if err != nil {
 			return fmt.Errorf("begin project delta apply: %w", err)
 		}
 		defer tx.Rollback()
-		current, err := readProjectDeltaState(ctx, tx, projectID)
+		current, err := readProjectDeltaState(lockCtx, tx, projectID)
 		if err != nil {
 			return fmt.Errorf("read project delta component: %w", err)
 		}
@@ -151,7 +150,7 @@ func (s *Store) ApplyProjectDelta(ctx context.Context, apply ProjectDeltaApply) 
 			return fmt.Errorf("project delta cursor did not advance: current=%d next=%d", current.Cursor, apply.Next.Cursor)
 		}
 		for _, change := range apply.Changes {
-			if err := s.applyProjectIssueChange(ctx, tx, projectID, change); err != nil {
+			if err := s.applyProjectIssueChange(lockCtx, tx, projectID, change); err != nil {
 				return err
 			}
 		}
@@ -160,7 +159,7 @@ func (s *Store) ApplyProjectDelta(ctx context.Context, apply ProjectDeltaApply) 
 			return fmt.Errorf("encode project delta source vector: %w", err)
 		}
 		now := s.now().UTC().Format(time.RFC3339Nano)
-		result, err := tx.ExecContext(ctx, `UPDATE projects SET name=?,path=?,db_path=?,projection_version=?,delta_cursor=?,delta_hash=?,delta_source_vector_json=?,delta_projector_id=?,delta_projector_schema=?,delta_projector_build=?,delta_projector_checksum=?,freshness='fresh',refreshed_at=?,last_attempt_at=?,last_error='',registered=1 WHERE project_id=?`,
+		result, err := tx.ExecContext(lockCtx, `UPDATE projects SET name=?,path=?,db_path=?,projection_version=?,delta_cursor=?,delta_hash=?,delta_source_vector_json=?,delta_projector_id=?,delta_projector_schema=?,delta_projector_build=?,delta_projector_checksum=?,freshness='fresh',refreshed_at=?,last_attempt_at=?,last_error='',registered=1 WHERE project_id=?`,
 			apply.Project.Name, cleanCatalogPath(apply.Project.Path), cleanCatalogPath(apply.Project.DBPath), projectionVersion,
 			apply.Next.Cursor, apply.Next.Hash, sourceVector, apply.Next.Projector.ID, apply.Next.Projector.SchemaVersion, apply.Next.Projector.Build, apply.Next.Projector.Checksum,
 			now, now, projectID)
@@ -289,8 +288,8 @@ func (s *Store) MarkProjectDeltaStale(ctx context.Context, projectID string, cau
 	if cause != nil {
 		message = cause.Error()
 	}
-	return sqliteutil.WithWriteLock(s.dbPath, func() error {
-		_, err := s.db.ExecContext(ctx, `UPDATE projects SET freshness='stale',last_attempt_at=?,last_error=? WHERE project_id=?`, s.now().UTC().Format(time.RFC3339Nano), message, strings.TrimSpace(projectID))
+	return s.withWrite(ctx, "mark_project_delta_stale", func(lockCtx context.Context) error {
+		_, err := s.db.ExecContext(lockCtx, `UPDATE projects SET freshness='stale',last_attempt_at=?,last_error=? WHERE project_id=?`, s.now().UTC().Format(time.RFC3339Nano), message, strings.TrimSpace(projectID))
 		return err
 	})
 }

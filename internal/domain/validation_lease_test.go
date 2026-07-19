@@ -45,3 +45,18 @@ func TestValidationDevelopmentDoesNotUseDaemonAdmission(t *testing.T) {
 	a.Scope, a.Purpose, a.IssueID = ValidationScopeTicket, ValidationPurposeDevelopment, "dnb"
 	require.ErrorContains(t, a.Validate(), "development validation does not use daemon admission")
 }
+
+func TestOrderValidationQueueUsesPriorityFIFOAndBoundedFairness(t *testing.T) {
+	requests := []ValidationRequest{
+		{Sequence: 1, RequestID: "protected-p4", IssuePriority: P4, PriorityBypassCount: ValidationPriorityBypassLimit},
+		{Sequence: 2, RequestID: "p1-first", IssuePriority: P1},
+		{Sequence: 3, RequestID: "p0-first", IssuePriority: P0},
+		{Sequence: 4, RequestID: "p0-second", IssuePriority: P0},
+	}
+
+	ordered := OrderValidationQueue(requests)
+	assert.Equal(t, []string{"protected-p4", "p0-first", "p0-second", "p1-first"}, []string{ordered[0].RequestID, ordered[1].RequestID, ordered[2].RequestID, ordered[3].RequestID})
+	assert.Equal(t, ValidationOrderingBoundedFairness, ordered[0].OrderingReason)
+	assert.Equal(t, ValidationOrderingPriorityFIFO, ordered[1].OrderingReason)
+	assert.Equal(t, []int{1, 2, 3, 4}, []int{ordered[0].QueuePosition, ordered[1].QueuePosition, ordered[2].QueuePosition, ordered[3].QueuePosition})
+}
