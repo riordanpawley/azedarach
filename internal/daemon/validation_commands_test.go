@@ -80,7 +80,26 @@ func TestValidationAcquireBindsReviewAssignmentToDurableLease(t *testing.T) {
 	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	issueID := createReviewTask(t, ctx, client, domain.P1, "worker-a")
-	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: "assigned-reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview}); err != nil {
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t)}); err != nil {
+		t.Fatal(err)
+	}
+	admission, err := client.CaptureReviewAdmissionPin(ctx, issueID)
+	if err != nil || admission.Evidence == nil {
+		t.Fatalf("capture review admission = %+v err=%v", admission, err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: "assigned-reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview, ExpectedReviewAdmission: &admission, ReviewSourceOID: "candidate-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{
+			"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "assigned-reviewer",
+			"reviewed_evidence_source": admission.Evidence.Source, "reviewed_evidence_event_id": admission.Evidence.EventID,
+			"reviewed_evidence_seq": admission.Evidence.Seq, "reviewed_evidence_digest": admission.Evidence.Digest,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.BeginReviewEvidenceClose(ctx, issueID, *admission.Evidence, "assigned-reviewer"); err != nil {
 		t.Fatal(err)
 	}
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
