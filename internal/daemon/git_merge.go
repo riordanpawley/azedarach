@@ -139,16 +139,18 @@ func (d *Daemon) mergeTypedGitBranches(ctx context.Context, projectID string, re
 		return d.mergeTypedConfiguredBaseThroughPublication(ctx, projectID, sourceID, source, targetWorktree, targetBranch, sourceOID, baseOID)
 	}
 
-	if receipt, found, err := d.latestTaskCloseIntegrationReceipt(ctx, projectID, sourceID, source.Branch, targetBranch); err != nil {
+	if receipt, found, err := d.latestTaskCloseIntegrationReceipt(ctx, projectID, sourceID, source.Branch); err != nil {
 		return nil, err
-	} else if found && receipt.SourceOID == sourceOID && receipt.TargetOID == baseOID {
-		if err := validateTaskCloseIntegrationReceiptTarget(receipt, targetID, configuredBaseTarget); err != nil {
+	} else if found {
+		if err := validateTaskCloseIntegrationReceiptIdentity(receipt, projectID, targetID, targetBranch, configuredBaseTarget); err != nil {
 			return nil, err
 		}
-		if err := verifyTaskCloseIntegrationReceipt(ctx, d.git, targetWorktree, receipt, projectID, source.Branch, targetBranch); err != nil {
-			return nil, fmt.Errorf("replay exact git.merge receipt: %w", err)
+		if receipt.SourceOID == sourceOID && receipt.TargetOID == baseOID {
+			if err := verifyTaskCloseIntegrationReceipt(ctx, d.git, targetWorktree, receipt, projectID, source.Branch, targetBranch); err != nil {
+				return nil, fmt.Errorf("replay exact git.merge receipt: %w", err)
+			}
+			return typedMergeResponse(sourceID, targetID, targetWorktree, source.Branch, configuredBaseTarget, receipt.BaseOID, sourceOID, baseOID, true, git.MergeResult{Success: true, Message: "exact integration receipt already applied"}), nil
 		}
-		return typedMergeResponse(sourceID, targetID, targetWorktree, source.Branch, configuredBaseTarget, receipt.BaseOID, sourceOID, baseOID, true, git.MergeResult{Success: true, Message: "exact integration receipt already applied"}), nil
 	}
 
 	contained, err := d.git.CommitContainedInRef(ctx, targetWorktree, sourceOID, targetBranch)

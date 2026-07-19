@@ -425,9 +425,8 @@ func (d *Daemon) recordTaskCloseMergeResultEvidence(ctx context.Context, project
 	if err != nil {
 		return err
 	}
-	identity := sha256.Sum256([]byte(strings.Join([]string{projectID, issueID, operation.OperationID, validation.RequestID, integration.BaseOID, integration.SourceOID, integration.TargetOID, policy.Version, validation.EnvironmentFingerprint}, "\x00")))
 	evidence := domain.PublicationEvidence{
-		EvidenceID: "merge-" + fmt.Sprintf("%x", identity[:16]), ProjectID: projectID, IssueID: issueID, Layer: domain.PublicationEvidenceMergeResult,
+		EvidenceID: taskCloseMergeResultEvidenceID(projectID, issueID, operation.OperationID, validation.RequestID, integration, policy.Version, validation.EnvironmentFingerprint), ProjectID: projectID, IssueID: issueID, Layer: domain.PublicationEvidenceMergeResult,
 		PatchDigest: patchDigest, SourceRevision: strings.TrimSpace(integration.SourceOID), BaseRevision: strings.TrimSpace(integration.BaseOID),
 		ResultRevision: strings.TrimSpace(integration.TargetOID), Producer: "daemon:task.close", PolicyVersion: policy.Version,
 		EnvironmentFingerprint: validation.EnvironmentFingerprint, Coverage: coverage, CreatedAt: validation.FinishedAt.UTC(),
@@ -441,6 +440,65 @@ func (d *Daemon) recordTaskCloseMergeResultEvidence(ctx context.Context, project
 	}
 	_, err = d.publicationEvidenceSnapshot(ctx, projectID, issueID)
 	return err
+}
+
+func (d *Daemon) verifyRecoveredTaskClosePublication(ctx context.Context, projectID, issueID string, integration taskCloseIntegrationResult) error {
+	canonical := false
+	for _, attempt := range integration.ValidationAttempts {
+		if attempt.Canonical && attempt.Status == domain.IntegrationCandidateValidationPassed && strings.TrimSpace(attempt.CandidateHead) == strings.TrimSpace(integration.TargetOID) {
+			canonical = true
+			break
+		}
+	}
+	if !canonical {
+		return fmt.Errorf("exact synthetic merge %s has no passed canonical validation", integration.TargetOID)
+	}
+	policy, _, err := d.publicationEvidenceProjectPolicy(projectID)
+	if err != nil {
+		return err
+	}
+	targetWorktree := strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID))
+	if targetWorktree == "" {
+		return fmt.Errorf("exact synthetic merge target worktree unavailable without exact project routing")
+	}
+	projectCfg, err := appconfig.LoadConfig(targetWorktree)
+	if err != nil {
+		return fmt.Errorf("load exact synthetic merge publication capability: %w", err)
+	}
+	gateCommand := strings.TrimSpace(projectCfg.Gate.Command)
+	if gateCommand == "" {
+		return fmt.Errorf("exact synthetic merge requires configured repository push gate command")
+	}
+	policyVersion := publicationPolicyVersion(projectCfg, gateCommand)
+	environmentFingerprint := publicationEnvironmentFingerprint(projectCfg)
+	operation, validation, err := d.taskClosePublicationProvenance(ctx, projectID, issueID, integration, policyVersion, gateCommand, environmentFingerprint)
+	if err != nil {
+		return err
+	}
+	wantEvidenceID := taskCloseMergeResultEvidenceID(projectID, issueID, operation.OperationID, validation.RequestID, integration, policy.Version, validation.EnvironmentFingerprint)
+	snapshot, err := d.publicationEvidenceSnapshot(ctx, projectID, issueID)
+	if err != nil {
+		return err
+	}
+	for _, evidence := range snapshot.Evidence {
+		if evidence.EvidenceID == wantEvidenceID && evidence.Layer == domain.PublicationEvidenceMergeResult &&
+			strings.TrimSpace(evidence.SourceRevision) == strings.TrimSpace(integration.SourceOID) &&
+			strings.TrimSpace(evidence.BaseRevision) == strings.TrimSpace(integration.BaseOID) &&
+			strings.TrimSpace(evidence.ResultRevision) == strings.TrimSpace(integration.TargetOID) &&
+			strings.TrimSpace(evidence.PolicyVersion) == strings.TrimSpace(policy.Version) &&
+			strings.TrimSpace(evidence.EnvironmentFingerprint) == strings.TrimSpace(validation.EnvironmentFingerprint) {
+			return nil
+		}
+	}
+	return fmt.Errorf("exact synthetic merge %s is missing authoritative merge-result evidence %s", integration.TargetOID, wantEvidenceID)
+}
+
+func taskCloseMergeResultEvidenceID(projectID, issueID, operationID, validationRequestID string, integration taskCloseIntegrationResult, policyVersion, environmentFingerprint string) string {
+	identity := sha256.Sum256([]byte(strings.Join([]string{
+		projectID, issueID, operationID, validationRequestID, integration.BaseOID, integration.SourceOID,
+		integration.TargetOID, policyVersion, environmentFingerprint,
+	}, "\x00")))
+	return "merge-" + fmt.Sprintf("%x", identity[:16])
 }
 
 func (d *Daemon) taskClosePublicationProvenance(ctx context.Context, projectID, issueID string, integration taskCloseIntegrationResult, policyVersion, gateCommand, environmentFingerprint string) (domain.PublicationOperation, domain.ValidationRequest, error) {

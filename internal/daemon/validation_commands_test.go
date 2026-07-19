@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -482,6 +483,52 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 	require.NoError(t, err)
 	require.Len(t, assessments, 1)
 	assert.True(t, assessments[0].Retained, "exact synthetic merge must remain active after the issue worktree is gone: %+v", assessments[0])
+	for _, name := range []string{"later-main-a.txt", "later-main-b.txt"} {
+		require.NoError(t, os.WriteFile(filepath.Join(repoDir, name), []byte("unrelated\n"), 0o644))
+		runPublicationGit(t, repoDir, "add", name)
+		runPublicationGit(t, repoDir, "commit", "-m", "unrelated main advancement")
+	}
+	advancedTargetOID := runPublicationGit(t, repoDir, "rev-parse", "main")
+	var advancedWG sync.WaitGroup
+	advancedErrs := make(chan error, 2)
+	for range 2 {
+		advancedWG.Add(1)
+		go func() {
+			defer advancedWG.Done()
+			recovered, found, recoverErr := d.recoverPublishedTaskCloseIntegration(ctx, projectID, issueID, repoDir, "base", "feature", "main", sourceOID, advancedTargetOID)
+			if recoverErr != nil {
+				advancedErrs <- recoverErr
+				return
+			}
+			if !found || !recovered.ReceiptRecovered || recovered.TargetOID != targetOID || recovered.PublicationOperationID != publication.OperationID {
+				advancedErrs <- fmt.Errorf("advanced recovery = (%+v, %t), want original exact publication", recovered, found)
+				return
+			}
+			advancedErrs <- d.persistTaskCloseIntegrationPublication(ctx, projectID, issueID, repoDir, recovered)
+		}()
+	}
+	advancedWG.Wait()
+	close(advancedErrs)
+	for advancedErr := range advancedErrs {
+		require.NoError(t, advancedErr)
+	}
+	afterAdvance, err := runtime.store.PublicationEvidenceSnapshot(ctx, projectID, issueID)
+	require.NoError(t, err)
+	require.Len(t, afterAdvance.Evidence, 1, "cleanup retries after base advancement must not fabricate publication evidence")
+	recoveredBeforeRewrite, found, err := d.recoverPublishedTaskCloseIntegration(ctx, projectID, issueID, repoDir, "base", "feature", "main", sourceOID, advancedTargetOID)
+	require.NoError(t, err)
+	require.True(t, found)
+	runPublicationGit(t, repoDir, "checkout", "--orphan", "rewritten-main")
+	runPublicationGit(t, repoDir, "read-tree", "--empty")
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "rewritten.txt"), []byte("divergent\n"), 0o644))
+	runPublicationGit(t, repoDir, "add", "rewritten.txt")
+	runPublicationGit(t, repoDir, "commit", "-m", "rewrite configured base")
+	rewrittenOID := runPublicationGit(t, repoDir, "rev-parse", "HEAD")
+	runPublicationGit(t, repoDir, "branch", "-f", "main", rewrittenOID)
+	_, found, err = d.recoverPublishedTaskCloseIntegration(ctx, projectID, issueID, repoDir, "base", "feature", "main", sourceOID, rewrittenOID)
+	require.ErrorContains(t, err, "exact integrated receipt is not valid")
+	require.False(t, found, "divergent configured-base history must not reuse the stale receipt")
+	require.ErrorContains(t, d.persistTaskCloseIntegrationPublication(ctx, projectID, issueID, repoDir, recoveredBeforeRewrite), "target ancestry", "pre-cleanup retry must recheck target history after recovery")
 }
 
 func TestTaskClosePublicationDistinguishesTypedBaseFromNonBaseComposition(t *testing.T) {

@@ -6857,7 +6857,7 @@ func TestTaskCloseExactReceiptAcceptsAndRepairsMissingProjectionIdempotentlyInRe
 	if !recovered.ReceiptRecovered || recovered.TargetOID != targetOID || recovered.PublicationOperationID != "" {
 		t.Fatalf("recovered configured-base receipt = %+v, want exact empty-operation receipt", recovered)
 	}
-	receipt, found, err := d.latestTaskCloseIntegrationReceipt(ctx, projectID, taskID, sourceBranch, "main")
+	receipt, found, err := d.latestTaskCloseIntegrationReceipt(ctx, projectID, taskID, sourceBranch)
 	if err != nil || !found {
 		t.Fatalf("load exact integration receipt found=%v err=%v", found, err)
 	}
@@ -8116,55 +8116,173 @@ func TestTaskCloseIntegrationReceiptRequiresExactFreshTypedTarget(t *testing.T) 
 	tests := []struct {
 		name                  string
 		receipt               taskCloseIntegrationReceipt
+		currentProject        string
 		currentTargetID       string
+		currentTargetBranch   string
 		currentConfiguredBase bool
 		wantError             string
 	}{
 		{
-			name:            "matching non-base target",
-			receipt:         taskCloseIntegrationReceipt{TargetID: "parent-a", TargetBranch: "shared", ConfiguredBaseTarget: false},
-			currentTargetID: "parent-a",
+			name:                "matching non-base target",
+			receipt:             taskCloseIntegrationReceipt{ProjectID: "project", TargetID: "parent-a", TargetBranch: "shared", ConfiguredBaseTarget: false},
+			currentProject:      "project",
+			currentTargetID:     "parent-a",
+			currentTargetBranch: "shared",
 		},
 		{
-			name:            "same branch different non-base target",
-			receipt:         taskCloseIntegrationReceipt{TargetID: "parent-a", TargetBranch: "shared", ConfiguredBaseTarget: false},
-			currentTargetID: "parent-b",
-			wantError:       "target identity changed",
+			name:                "same branch different non-base target",
+			receipt:             taskCloseIntegrationReceipt{ProjectID: "project", TargetID: "parent-a", TargetBranch: "shared", ConfiguredBaseTarget: false},
+			currentProject:      "project",
+			currentTargetID:     "parent-b",
+			currentTargetBranch: "shared",
+			wantError:           "target identity changed",
 		},
 		{
-			name:            "base retargeted to non-base with reused branch",
-			receipt:         taskCloseIntegrationReceipt{TargetID: "base", TargetBranch: "shared", ConfiguredBaseTarget: true},
-			currentTargetID: "parent-a",
-			wantError:       "target identity changed",
+			name:                "base retargeted to non-base with reused branch",
+			receipt:             taskCloseIntegrationReceipt{ProjectID: "project", TargetID: "base", TargetBranch: "shared", ConfiguredBaseTarget: true},
+			currentProject:      "project",
+			currentTargetID:     "parent-a",
+			currentTargetBranch: "shared",
+			wantError:           "target identity changed",
 		},
 		{
 			name:                  "non-base retargeted to base with reused branch",
-			receipt:               taskCloseIntegrationReceipt{TargetID: "parent-a", TargetBranch: "shared", ConfiguredBaseTarget: false},
+			receipt:               taskCloseIntegrationReceipt{ProjectID: "project", TargetID: "parent-a", TargetBranch: "shared", ConfiguredBaseTarget: false},
+			currentProject:        "project",
 			currentTargetID:       "base",
+			currentTargetBranch:   "shared",
 			currentConfiguredBase: true,
 			wantError:             "target identity changed",
 		},
 		{
 			name:                  "legacy receipt missing target identity",
-			receipt:               taskCloseIntegrationReceipt{TargetBranch: "shared", ConfiguredBaseTarget: true},
+			receipt:               taskCloseIntegrationReceipt{ProjectID: "project", TargetBranch: "shared", ConfiguredBaseTarget: true},
+			currentProject:        "project",
 			currentTargetID:       "base",
+			currentTargetBranch:   "shared",
 			currentConfiguredBase: true,
 			wantError:             "missing authoritative typed target identity",
+		},
+		{
+			name:                  "configured base branch retargeted",
+			receipt:               taskCloseIntegrationReceipt{ProjectID: "project", TargetID: "base", TargetBranch: "main", ConfiguredBaseTarget: true},
+			currentProject:        "project",
+			currentTargetID:       "base",
+			currentTargetBranch:   "release",
+			currentConfiguredBase: true,
+			wantError:             "target branch changed",
+		},
+		{
+			name:                  "receipt project retargeted",
+			receipt:               taskCloseIntegrationReceipt{ProjectID: "project-a", TargetID: "base", TargetBranch: "main", ConfiguredBaseTarget: true},
+			currentProject:        "project-b",
+			currentTargetID:       "base",
+			currentTargetBranch:   "main",
+			currentConfiguredBase: true,
+			wantError:             "project identity changed",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateTaskCloseIntegrationReceiptTarget(tt.receipt, tt.currentTargetID, tt.currentConfiguredBase)
+			err := validateTaskCloseIntegrationReceiptIdentity(tt.receipt, tt.currentProject, tt.currentTargetID, tt.currentTargetBranch, tt.currentConfiguredBase)
 			if tt.wantError == "" {
 				if err != nil {
-					t.Fatalf("validateTaskCloseIntegrationReceiptTarget() error = %v", err)
+					t.Fatalf("validateTaskCloseIntegrationReceiptIdentity() error = %v", err)
 				}
 				return
 			}
 			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
-				t.Fatalf("validateTaskCloseIntegrationReceiptTarget() error = %v, want %q", err, tt.wantError)
+				t.Fatalf("validateTaskCloseIntegrationReceiptIdentity() error = %v, want %q", err, tt.wantError)
 			}
 		})
+	}
+}
+
+func TestTaskCloseRejectsConfiguredBaseBranchRetargetBeforeNoChangeFallback(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	runDaemonTestGit(t, repoDir, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repoDir, "config", "user.email", "test@example.com")
+	runDaemonTestGit(t, repoDir, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repoDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDaemonTestGit(t, repoDir, "add", "base.txt")
+	runDaemonTestGit(t, repoDir, "commit", "-q", "-m", "base")
+
+	issuesClient := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	projectID := "proj-configured-base-retarget"
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Retargeted configured base", Type: domain.TypeBug, Status: domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceBranch := "riordan/" + taskID + "/retarget-source"
+	sourceWorktree := filepath.Join(t.TempDir(), "source")
+	runDaemonTestGit(t, repoDir, "worktree", "add", "-q", "-b", sourceBranch, sourceWorktree)
+	if err := os.WriteFile(filepath.Join(sourceWorktree, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDaemonTestGit(t, sourceWorktree, "add", "feature.txt")
+	runDaemonTestGit(t, sourceWorktree, "commit", "-q", "-m", "feature")
+	sourceOID := runDaemonTestGitOutput(t, sourceWorktree, "rev-parse", "HEAD")
+	runDaemonTestGit(t, repoDir, "merge", "-q", "--ff-only", sourceBranch)
+	mainOID := runDaemonTestGitOutput(t, repoDir, "rev-parse", "main")
+	runDaemonTestGit(t, repoDir, "branch", "release", mainOID)
+	runDaemonTestGit(t, repoDir, "checkout", "-q", "release")
+
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID, IssueID: taskID, Path: sourceWorktree, Branch: sourceBranch, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close", SourceCommand: "integrate-before-close",
+		Payload: map[string]any{
+			"project_id": projectID, "source_branch": sourceBranch, "target_branch": "main",
+			"target_id": "base", "configured_base_target": true, "integrated": true,
+			"base_oid": mainOID, "source_oid": sourceOID, "target_oid": mainOID,
+			"publication_operation_id": "publication-main",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := git.NewExecRunner(repoDir)
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "release", Logger: logger}, git: git.NewClient(runner, logger),
+		issueClientsByProject:     map[string]*issues.Client{projectID: issuesClient},
+		runtimeStoresByProject:    map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager},
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject:           func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore { return runtimeStore },
+		logger:                      logger,
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "", "")
+	if err == nil || !strings.Contains(err.Error(), "target branch changed: recorded=main current=release") {
+		t.Fatalf("integrateTaskBeforeClose() = (%+v, %v), want configured-base branch retarget rejection", result, err)
+	}
+	events, listErr := issuesClient.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{
+		Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted}, Limit: 10,
+	})
+	if listErr != nil || len(events) != 1 {
+		t.Fatalf("integration receipts after rejection = %+v, err=%v; want only original main receipt", events, listErr)
 	}
 }
 
