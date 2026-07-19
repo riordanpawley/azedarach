@@ -566,6 +566,95 @@ func TestRefreshOwnedSyncAuthorizationMatrix(t *testing.T) {
 	})
 }
 
+func TestRefreshOwnedSyncFencesMutationAndStructuralHealthTransitions(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		healthMessage string
+		prepare       func(*projectReadMaterializer) func()
+	}{
+		{
+			name:          "mutation failure",
+			healthMessage: "concurrent mutation failure",
+			prepare: func(reader *projectReadMaterializer) func() {
+				attempt := reader.beginMutationConvergence(7)
+				return func() { reader.finishMutationConvergence(7, attempt, errors.New("concurrent mutation failure")) }
+			},
+		},
+		{
+			name:          "structural failure",
+			healthMessage: "concurrent structural failure",
+			prepare: func(reader *projectReadMaterializer) func() {
+				return func() { reader.markUnhealthy(errors.New("concurrent structural failure"), false) }
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			task := domain.Task{ID: "issue", Title: "canonical", Status: domain.StatusOpen, Type: domain.TypeTask}
+			reader := newProjectReadMaterializer("project", nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) { return tasks, nil })
+			canonical := map[string]domain.Task{task.ID.String(): task}
+			issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, canonical)
+			reader.replaceBootstrap(canonical, canonical, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+			transition := tc.prepare(reader)
+			store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			state := userstore.ProjectDeltaState{ProjectID: "project", Cursor: 1, Hash: "initial", Initialized: true, Projector: issueProjectionProjector()}
+			if err := store.ReplaceProject(ctx, userstore.ProjectInput{ProjectID: "project", Name: "Project", Path: "/project", DBPath: "/project/db", Tasks: []domain.Task{task}, Delta: &state}); err != nil {
+				t.Fatal(err)
+			}
+			syncEntered := make(chan struct{})
+			releaseSync := make(chan struct{})
+			d := &Daemon{
+				cfg:           Config{},
+				userStore:     store,
+				materializers: map[string]*projectReadMaterializer{"project": reader},
+				projectReadUserProjectionSync: func(context.Context, string, []string) error {
+					close(syncEntered)
+					<-releaseSync
+					return errors.New("external sync aborted")
+				},
+			}
+			refreshDone := make(chan error, 1)
+			go func() {
+				refreshDone <- d.refreshActiveProjectReadRuntimeForIssues(ctx, "project", reader, []string{"issue"})
+			}()
+			<-syncEntered
+
+			transitionQueued := make(chan struct{})
+			reader.transitionQueued = func() { close(transitionQueued) }
+			transitionDone := make(chan struct{})
+			go func() {
+				transition()
+				close(transitionDone)
+			}()
+			<-transitionQueued
+			select {
+			case <-transitionDone:
+				t.Fatal("health transition crossed blocked external sync")
+			default:
+			}
+			close(releaseSync)
+			if err := <-refreshDone; err == nil || !strings.Contains(err.Error(), "external sync aborted") {
+				t.Fatalf("refresh error = %v, want external sync failure", err)
+			}
+			<-transitionDone
+			snapshot, err := store.Snapshot(ctx, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(snapshot.Projects) != 1 || len(snapshot.Projects[0].Tasks) != 1 || snapshot.Projects[0].Tasks[0].ID.String() != "issue" {
+				t.Fatalf("failed sync changed global projection: %+v", snapshot.Projects)
+			}
+			if got := reader.snapshotMetadata().Health; !strings.Contains(got, tc.healthMessage) || !strings.Contains(got, "external sync aborted") {
+				t.Fatalf("final health = %q, want transition and sync failures", got)
+			}
+		})
+	}
+}
+
 func TestProjectReadMaterializerGapWatchPerformsVerifiedBootstrapRecovery(t *testing.T) {
 	client, _ := newTestIssueClient(t)
 	ctx := context.Background()

@@ -78,6 +78,8 @@ func withoutSynchronousProjectReadRuntimeRefresh(ctx context.Context) context.Co
 // revision and is never written back to the project database.
 type projectReadMaterializer struct {
 	mu                                    sync.RWMutex
+	transitionMu                          sync.Mutex
+	transitionQueued                      func()
 	updateMu                              contextOperationLock
 	canonicalMu                           contextOperationLock
 	mutationConvergenceSequence           uint64
@@ -110,6 +112,13 @@ type projectReadMaterializer struct {
 	runtimeKeys                           keyedCheckpoint
 	cancel                                context.CancelFunc
 	done                                  chan struct{}
+}
+
+func (m *projectReadMaterializer) lockTransition() {
+	if m.transitionQueued != nil {
+		m.transitionQueued()
+	}
+	m.transitionMu.Lock()
 }
 
 type keyedCheckpoint struct {
@@ -618,6 +627,8 @@ func (m *projectReadMaterializer) replaceBootstrap(canonical, tasks map[string]d
 }
 
 func (m *projectReadMaterializer) replaceBootstrapAfterConvergenceResult(canonical, tasks map[string]domain.Task, metadata protocol.MaterializedSnapshotMetadata, issueKeys, runtimeKeys keyedCheckpoint, convergenceResult uint64) {
+	m.lockTransition()
+	defer m.transitionMu.Unlock()
 	m.mu.Lock()
 	for issueID, worktree := range m.worktrees {
 		runtimeKeys.add("worktree", issueID, worktree)
@@ -646,6 +657,8 @@ func (m *projectReadMaterializer) replaceBootstrapAfterConvergenceResult(canonic
 }
 
 func (m *projectReadMaterializer) markUnhealthy(err error, serveLastGood bool) {
+	m.lockTransition()
+	defer m.transitionMu.Unlock()
 	m.mu.Lock()
 	m.baseHealth = "stale: " + err.Error()
 	m.baseRetryableFailure = serveLastGood
@@ -711,6 +724,8 @@ func (m *projectReadMaterializer) authoritativeReadRefreshSequence(component aut
 }
 
 func (m *projectReadMaterializer) beginAuthoritativeReadRefresh(component authoritativeReadRefreshComponent) authoritativeReadRefreshAttempt {
+	m.lockTransition()
+	defer m.transitionMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	sequence := m.authoritativeReadRefreshSequence(component)
@@ -719,6 +734,15 @@ func (m *projectReadMaterializer) beginAuthoritativeReadRefresh(component author
 }
 
 func (m *projectReadMaterializer) finishAuthoritativeReadRefresh(attempt authoritativeReadRefreshAttempt, err error) bool {
+	m.lockTransition()
+	defer m.transitionMu.Unlock()
+	return m.finishAuthoritativeReadRefreshLocked(attempt, err)
+}
+
+// finishAuthoritativeReadRefreshLocked requires transitionMu. Refresh-owned
+// external sync uses it so authorization, side effect, and completion are one
+// transition with respect to every token and health writer.
+func (m *projectReadMaterializer) finishAuthoritativeReadRefreshLocked(attempt authoritativeReadRefreshAttempt, err error) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if attempt.sequence != *m.authoritativeReadRefreshSequence(attempt.component) || m.healthEpoch != attempt.healthEpoch {
@@ -761,6 +785,8 @@ func (m *projectReadMaterializer) canonicalReadHealthAvailable() bool {
 }
 
 func (m *projectReadMaterializer) beginMutationConvergence(revision uint64) uint64 {
+	m.lockTransition()
+	defer m.transitionMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.mutationConvergenceSequence++
@@ -773,6 +799,8 @@ func (m *projectReadMaterializer) beginMutationConvergence(revision uint64) uint
 }
 
 func (m *projectReadMaterializer) finishMutationConvergence(revision, attempt uint64, convergenceErr error) bool {
+	m.lockTransition()
+	defer m.transitionMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if revision != m.mutationConvergenceRevision || attempt != m.mutationConvergenceAttempt {
@@ -1443,11 +1471,13 @@ func (d *Daemon) refreshActiveProjectReadRuntimeForIssues(ctx context.Context, p
 		return fmt.Errorf("lock runtime projection sync: %w", err)
 	}
 	defer unlockCanonical()
+	materializer.transitionMu.Lock()
+	defer materializer.transitionMu.Unlock()
 	if err := d.syncUserProjectionMaterializedIssuesForRefresh(ctx, projectID, issueIDs, materializer, attempt); err != nil {
-		materializer.finishAuthoritativeReadRefresh(attempt, err)
+		materializer.finishAuthoritativeReadRefreshLocked(attempt, err)
 		return fmt.Errorf("sync user projection issues: %w", err)
 	}
-	if !materializer.finishAuthoritativeReadRefresh(attempt, nil) {
+	if !materializer.finishAuthoritativeReadRefreshLocked(attempt, nil) {
 		return newProjectReadUnavailableError("runtime refresh ownership changed before completion for %s", projectID)
 	}
 	return nil
