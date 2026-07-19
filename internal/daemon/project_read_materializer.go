@@ -101,6 +101,7 @@ type projectReadMaterializer struct {
 	baseRetryableFailure                  bool
 	authoritativeRefreshFailures          map[authoritativeReadRefreshComponent]string
 	healthEpoch                           uint64
+	canonicalGeneration                   uint64
 	runtimeRefreshSequence                uint64
 	runtimeRefreshEpoch                   map[string]uint64
 	runtimePublishedEpoch                 map[string]uint64
@@ -489,10 +490,9 @@ func (m *projectReadMaterializer) applyCanonicalBatch(ctx context.Context, batch
 	m.baseHealth = batch.Health
 	m.baseRetryableFailure = false
 	m.aggregateHealthLocked()
-	// Applying a verified canonical delta is part of an authoritative canonical
-	// read, not a competing health result. Mutation convergence, structural
-	// failures, and materializer replacement advance healthEpoch separately and
-	// still fence an in-flight read completion.
+	// Canonical reads may accept the deltas they converge, while runtime reads
+	// must be fenced because their hydration began from the prior generation.
+	m.canonicalGeneration++
 	m.mu.Unlock()
 	ids := make([]string, 0, len(affected))
 	for issueID := range affected {
@@ -655,9 +655,10 @@ func (m *projectReadMaterializer) markUnhealthy(err error, serveLastGood bool) {
 }
 
 type authoritativeReadRefreshAttempt struct {
-	sequence    uint64
-	healthEpoch uint64
-	component   authoritativeReadRefreshComponent
+	sequence            uint64
+	healthEpoch         uint64
+	canonicalGeneration uint64
+	component           authoritativeReadRefreshComponent
 }
 
 type authoritativeReadRefreshComponent string
@@ -714,13 +715,16 @@ func (m *projectReadMaterializer) beginAuthoritativeReadRefresh(component author
 	defer m.mu.Unlock()
 	sequence := m.authoritativeReadRefreshSequence(component)
 	*sequence++
-	return authoritativeReadRefreshAttempt{sequence: *sequence, healthEpoch: m.healthEpoch, component: component}
+	return authoritativeReadRefreshAttempt{sequence: *sequence, healthEpoch: m.healthEpoch, canonicalGeneration: m.canonicalGeneration, component: component}
 }
 
 func (m *projectReadMaterializer) finishAuthoritativeReadRefresh(attempt authoritativeReadRefreshAttempt, err error) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if attempt.sequence != *m.authoritativeReadRefreshSequence(attempt.component) || m.healthEpoch != attempt.healthEpoch {
+		return false
+	}
+	if attempt.component == authoritativeReadRefreshRuntime && attempt.canonicalGeneration != m.canonicalGeneration {
 		return false
 	}
 	if m.authoritativeRefreshFailures == nil {
@@ -837,6 +841,7 @@ func (m *projectReadMaterializer) snapshotIssuesForAuthoritativeRefresh(issueIDs
 	recoveryAuthorized := attempt.sequence != 0 &&
 		attempt.sequence == *m.authoritativeReadRefreshSequence(attempt.component) &&
 		attempt.healthEpoch == m.healthEpoch &&
+		attempt.canonicalGeneration == m.canonicalGeneration &&
 		attempt.component == authoritativeReadRefreshRuntime &&
 		(strings.TrimSpace(m.baseHealth) == "" || m.baseHealth == "healthy") &&
 		m.authoritativeRefreshFailures[authoritativeReadRefreshCanonical] == "" &&

@@ -372,6 +372,67 @@ func TestCanonicalFailureRecoversAfterCommittedDeltaInSingleRead(t *testing.T) {
 	}
 }
 
+func TestCanonicalDeltaFencesConcurrentRuntimeRecoveryExport(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestIssueClient(t)
+	if _, err := client.Create(ctx, issues.CreateTaskParams{Title: "existing", Type: domain.TypeTask}); err != nil {
+		t.Fatal(err)
+	}
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(client), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		return tasks, nil
+	})
+	materializer.legacy = func(exportCtx context.Context) ([]domain.Task, error) {
+		return client.ListCanonicalArchiveMode(exportCtx, issues.ArchiveInclude)
+	}
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	initial, initialMetadata := materializer.snapshotCanonical()
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	state := userstore.ProjectDeltaState{ProjectID: "project", Cursor: initialMetadata.DeliveryCursor, Hash: "initial", Initialized: true, Projector: issueProjectionProjector()}
+	if err := store.ReplaceProject(ctx, userstore.ProjectInput{ProjectID: "project", Name: "Project", Path: "/project", DBPath: "/project/db", Tasks: initial, Delta: &state}); err != nil {
+		t.Fatal(err)
+	}
+
+	failed := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	materializer.finishAuthoritativeReadRefresh(failed, errors.New("runtime projection unavailable"))
+	recovery := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	created, err := client.Create(ctx, issues.CreateTaskParams{Title: "new canonical", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := materializer.convergeCanonical(ctx); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{}, userStore: store, materializers: map[string]*projectReadMaterializer{"project": materializer}}
+
+	err = d.syncUserProjectionMaterializedIssuesForRefresh(ctx, "project", []string{created}, materializer, recovery)
+	if err == nil || !strings.Contains(err.Error(), "runtime projection unavailable") {
+		t.Fatalf("generation-fenced runtime export error = %v, want retained runtime failure", err)
+	}
+	if materializer.finishAuthoritativeReadRefresh(recovery, nil) {
+		t.Fatal("stale runtime recovery cleared health after canonical generation advanced")
+	}
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "runtime projection unavailable") {
+		t.Fatalf("generation-fenced health = %q, want runtime failure retained", got)
+	}
+	snapshot, err := store.Snapshot(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, project := range snapshot.Projects {
+		for _, task := range project.Tasks {
+			if task.ID.String() == created {
+				t.Fatalf("stale runtime recovery exported new canonical issue %s globally", created)
+			}
+		}
+	}
+}
+
 func TestProjectReadMaterializerGapWatchPerformsVerifiedBootstrapRecovery(t *testing.T) {
 	client, _ := newTestIssueClient(t)
 	ctx := context.Background()
