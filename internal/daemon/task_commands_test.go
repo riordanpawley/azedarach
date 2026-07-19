@@ -7094,6 +7094,9 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(projectRepo, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir project .azedarach: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(projectRepo, ".azedarach", "config.json"), []byte(`{"publicationEvidence":{"policyVersion":"portable-v1"}}`), 0o644); err != nil {
+		t.Fatalf("write project publication config: %v", err)
+	}
 	if err := appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{
 		Projects: []appconfig.Project{{Name: "other", Path: projectRepo}},
 	}); err != nil {
@@ -7212,6 +7215,14 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 	})
 
 	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "", "")
+	if err == nil || !strings.Contains(err.Error(), "requires an accepted publication operation before synthetic merge or apply") {
+		t.Fatalf("unbound integrateTaskBeforeClose = (%+v, %v), want pre-integration publication authority failure", result, err)
+	}
+	if joined := strings.Join(commands, "\n"); strings.Contains(joined, "worktree add --detach") || strings.Contains(joined, "reset --hard") {
+		t.Fatalf("unbound configured-base close reached synthetic merge or apply:\n%s", joined)
+	}
+	ctx = withTaskClosePublicationBinding(ctx, "publication-test", "claim-test")
+	result, err = d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "", "")
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
