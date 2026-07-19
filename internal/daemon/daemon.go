@@ -1813,7 +1813,13 @@ func (d *Daemon) compensateInterruptedSessionStart(ctx context.Context, store *d
 			rootedProjection.State = daemonstate.SessionStateStarting
 			rootedProjection.UpdatedAt = time.Now().UTC()
 		}
-		if _, err := daemonstate.NewOrchestratorLeaseAuthority(store).AcquireRooted(cleanupCtx, rootedIdentity, rootedProjection, func(context.Context, string) (bool, error) { return true, nil }); err != nil {
+		probe := func(probeCtx context.Context, candidateSessionID string) (bool, error) {
+			if d == nil || d.tmux == nil {
+				return false, nil
+			}
+			return d.tmux.HasSession(probeCtx, candidateSessionID)
+		}
+		if _, err := daemonstate.NewOrchestratorLeaseAuthority(store).AcquireRooted(cleanupCtx, rootedIdentity, rootedProjection, probe); err != nil {
 			note += fmt.Sprintf("; failed-start rooted projection retirement preparation also failed: %v", err)
 		}
 	}
