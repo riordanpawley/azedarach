@@ -340,7 +340,7 @@ type ManagedAgentIdentity struct {
 // cannot replace the current binding.
 func (s *RuntimeStateStore) UpsertManagedAgentIdentity(ctx context.Context, identity ManagedAgentIdentity) error {
 	return s.withRetryingWriteLock(ctx, "upsert_managed_agent_identity", func(writeCtx context.Context) error {
-		db, err := s.dbHandle()
+		db, err := s.managedIdentityDBHandle()
 		if err != nil {
 			return err
 		}
@@ -400,7 +400,7 @@ func normalizeManagedAgentIdentity(identity ManagedAgentIdentity) (ManagedAgentI
 }
 
 func (s *RuntimeStateStore) GetManagedAgentIdentity(ctx context.Context, projectID, sessionID, logicalPaneID string) (ManagedAgentIdentity, bool, error) {
-	db, err := s.dbHandle()
+	db, err := s.managedIdentityDBHandle()
 	if err != nil {
 		return ManagedAgentIdentity{}, false, err
 	}
@@ -433,7 +433,7 @@ func (s *RuntimeStateStore) GetManagedAgentIdentity(ctx context.Context, project
 func (s *RuntimeStateStore) AcknowledgeManagedAgentIdentity(ctx context.Context, identity ManagedAgentIdentity, acknowledgedAt time.Time) (bool, error) {
 	acknowledged := false
 	err := s.withRetryingWriteLock(ctx, "acknowledge_managed_agent_identity", func(writeCtx context.Context) error {
-		db, err := s.dbHandle()
+		db, err := s.managedIdentityDBHandle()
 		if err != nil {
 			return err
 		}
@@ -501,7 +501,7 @@ func (s *RuntimeStateStore) AcknowledgeManagedAgentIdentity(ctx context.Context,
 }
 
 func (s *RuntimeStateStore) ListManagedAgentIdentities(ctx context.Context, projectID, sessionID string) ([]ManagedAgentIdentity, error) {
-	db, err := s.dbHandle()
+	db, err := s.managedIdentityDBHandle()
 	if err != nil {
 		return nil, err
 	}
@@ -926,6 +926,9 @@ type RuntimeStateStore struct {
 
 	mu sync.Mutex
 	db *sql.DB
+	// managedIdentityDB isolates session-start acknowledgement authority from
+	// disposable projection readers that can occupy the bounded general pool.
+	managedIdentityDB *sql.DB
 }
 
 type runtimeOrphanKey struct{ table, projectID, sessionID, issueID string }
@@ -1064,12 +1067,16 @@ func resolveRuntimeStateDBPath(repoDir string) (string, error) {
 func (s *RuntimeStateStore) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		return nil
+	var errs []error
+	if s.managedIdentityDB != nil {
+		errs = append(errs, s.managedIdentityDB.Close())
+		s.managedIdentityDB = nil
 	}
-	err := s.db.Close()
-	s.db = nil
-	return err
+	if s.db != nil {
+		errs = append(errs, s.db.Close())
+		s.db = nil
+	}
+	return errors.Join(errs...)
 }
 
 // StoreResourceDiagnostics reports the runtime store's process-owned pool
@@ -1080,6 +1087,22 @@ func (s *RuntimeStateStore) StoreResourceDiagnostics() (string, bool, sql.DBStat
 	}
 	s.mu.Lock()
 	db := s.db
+	dbPath := s.dbPath
+	s.mu.Unlock()
+	if db == nil {
+		return dbPath, false, sql.DBStats{}
+	}
+	return dbPath, true, db.Stats()
+}
+
+// ManagedIdentityResourceDiagnostics reports the separately pooled durable
+// managed-agent authority without opening it as a diagnostic side effect.
+func (s *RuntimeStateStore) ManagedIdentityResourceDiagnostics() (string, bool, sql.DBStats) {
+	if s == nil {
+		return "", false, sql.DBStats{}
+	}
+	s.mu.Lock()
+	db := s.managedIdentityDB
 	dbPath := s.dbPath
 	s.mu.Unlock()
 	if db == nil {
@@ -2803,6 +2826,31 @@ func (s *RuntimeStateStore) dbHandle() (*sql.DB, error) {
 	}
 	s.db = db
 	return s.db, nil
+}
+
+func (s *RuntimeStateStore) managedIdentityDBHandle() (*sql.DB, error) {
+	// The general handle owns schema initialization. Complete that before
+	// opening the identity authority handle so the latter never races startup
+	// migration/repair work.
+	if _, err := s.dbHandle(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.managedIdentityDB != nil {
+		return s.managedIdentityDB, nil
+	}
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_txlock=immediate", filepath.ToSlash(s.dbPath))
+	db, err := tracesqlite.Open(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open managed identity sqlite database: %w", err)
+	}
+	db.SetMaxOpenConns(runtimeStateMaxOpenConns)
+	db.SetMaxIdleConns(runtimeStateMaxOpenConns)
+	db.SetConnMaxLifetime(0)
+	db.SetConnMaxIdleTime(0)
+	s.managedIdentityDB = db
+	return s.managedIdentityDB, nil
 }
 
 func (s *RuntimeStateStore) withWriteLock(ctx context.Context, fn func() error) error {

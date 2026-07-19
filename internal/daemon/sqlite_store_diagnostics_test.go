@@ -37,13 +37,15 @@ func TestSQLiteStoreDiagnosticsEnumeratesUniqueRegisteredOwners(t *testing.T) {
 	}
 
 	got := d.sqliteStoreDiagnostics()
-	require.Len(t, got, 4)
+	require.Len(t, got, 6)
 	require.Equal(t, []string{"consumer-a", "consumer-a-alias"}, got[0].ProjectIDs)
 	require.Equal(t, "issues", got[0].Owner)
 	require.Equal(t, "runtime", got[1].Owner)
-	require.Equal(t, []string{"consumer-b"}, got[2].ProjectIDs)
-	require.Equal(t, "issues", got[2].Owner)
-	require.Equal(t, "runtime", got[3].Owner)
+	require.Equal(t, "runtime-managed-identity", got[2].Owner)
+	require.Equal(t, []string{"consumer-b"}, got[3].ProjectIDs)
+	require.Equal(t, "issues", got[3].Owner)
+	require.Equal(t, "runtime", got[4].Owner)
+	require.Equal(t, "runtime-managed-identity", got[5].Owner)
 	for _, diagnostic := range got {
 		require.Equal(t, 0, diagnostic.InUse)
 		require.GreaterOrEqual(t, diagnostic.OpenConnections, diagnostic.Idle)

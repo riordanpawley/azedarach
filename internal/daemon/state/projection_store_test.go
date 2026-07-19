@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -141,6 +142,77 @@ func TestRuntimeStateStoreManagedAgentIdentityAcknowledgementIsExactAndDurable(t
 	replayed, _, err := store.GetManagedAgentIdentity(ctx, "project", "az-dtl", "agent")
 	if err != nil || !replayed.UpdatedAt.Equal(acknowledgedAt) {
 		t.Fatalf("clock-rollback acknowledgement regressed timestamp: %+v err=%v", replayed, err)
+	}
+}
+
+func TestRuntimeStateStoreManagedAgentIdentityReadDoesNotWaitForProjectionPool(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	identity := ManagedAgentIdentity{
+		ProjectID: "project", SessionID: "az-dtl", LogicalPaneID: "agent",
+		TmuxPaneID: "1355", PanePID: 97371, AgentIncarnation: "restart-controlled",
+		ObservedAt: time.Date(2026, time.July, 19, 4, 51, 8, 0, time.UTC),
+	}
+	projectionDB, err := store.dbHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	connections := make([]*sql.Conn, 0, runtimeStateMaxOpenConns)
+	for range runtimeStateMaxOpenConns {
+		connection, err := projectionDB.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		connections = append(connections, connection)
+		defer connection.Close()
+	}
+	waitsBefore := projectionDB.Stats().WaitCount
+
+	type result struct {
+		identity ManagedAgentIdentity
+		found    bool
+		err      error
+	}
+	readCtx, cancelRead := context.WithCancel(ctx)
+	defer cancelRead()
+	resultCh := make(chan result, 1)
+	go func() {
+		if err := store.UpsertManagedAgentIdentity(readCtx, identity); err != nil {
+			resultCh <- result{err: err}
+			return
+		}
+		acknowledged, err := store.AcknowledgeManagedAgentIdentity(readCtx, identity, identity.ObservedAt.Add(time.Millisecond))
+		if err != nil {
+			resultCh <- result{err: err}
+			return
+		}
+		if !acknowledged {
+			resultCh <- result{err: errors.New("exact managed identity was not acknowledged")}
+			return
+		}
+		got, found, err := store.GetManagedAgentIdentity(readCtx, identity.ProjectID, identity.SessionID, identity.LogicalPaneID)
+		resultCh <- result{identity: got, found: found, err: err}
+	}()
+
+	for {
+		select {
+		case got := <-resultCh:
+			if got.err != nil || !got.found || got.identity.AgentIncarnation != identity.AgentIncarnation || !got.identity.UpdatedAt.After(got.identity.ObservedAt) {
+				t.Fatalf("managed identity read = %+v found=%t err=%v", got.identity, got.found, got.err)
+			}
+			if waits := projectionDB.Stats().WaitCount; waits != waitsBefore {
+				t.Fatalf("managed identity read waited for disposable projection pool: before=%d after=%d", waitsBefore, waits)
+			}
+			return
+		default:
+			if waits := projectionDB.Stats().WaitCount; waits != waitsBefore {
+				cancelRead()
+				<-resultCh
+				t.Fatalf("managed identity read queued behind exhausted projection pool: before=%d after=%d", waitsBefore, waits)
+			}
+			runtime.Gosched()
+		}
 	}
 }
 

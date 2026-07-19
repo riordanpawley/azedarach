@@ -72,7 +72,7 @@ func (d *Daemon) runtimeStoreDiagnostics() []protocol.TaskSQLiteStoreInfo {
 	}
 	d.runtimeStoresMu.Unlock()
 
-	out := make([]protocol.TaskSQLiteStoreInfo, 0, len(projects))
+	out := make([]protocol.TaskSQLiteStoreInfo, 0, len(projects)*2)
 	for store, projectIDs := range projects {
 		sort.Strings(projectIDs)
 		dbPath, open, stats := store.StoreResourceDiagnostics()
@@ -81,6 +81,8 @@ func (d *Daemon) runtimeStoreDiagnostics() []protocol.TaskSQLiteStoreInfo {
 		info.SQLiteWriteHolder = writeLock.Holder
 		info.SQLiteWriteHeldMillisecond = writeLock.HeldFor.Milliseconds()
 		out = append(out, info)
+		identityPath, identityOpen, identityStats := store.ManagedIdentityResourceDiagnostics()
+		out = append(out, sqlitePoolInfo("runtime-managed-identity", projectIDs, identityPath, identityOpen, identityStats))
 	}
 	return out
 }
