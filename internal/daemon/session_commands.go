@@ -2357,7 +2357,8 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 	reusedWindow, err := d.tmux.EnsureWindowWithCommandAndEnvironment(ctx, sessionName, sessionConflictWindowName, worktreePath, artifact.Command, nil)
 	if err != nil {
 		artifact.remove()
-		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("launch conflict resolver window: %v", err)), nil
+		cleanupNote := d.retireAmbiguousConflictResolverWindow(ctx, sessionName, sessionConflictWindowName)
+		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("launch conflict resolver window: %v%s", err, cleanupNote)), nil
 	}
 	if err := d.waitForInitialManagedAgentAcknowledgementForPane(ctx, projectID, canonicalSessionID, conflictLogicalPaneID, incarnation, artifact.PromptHandoff); err != nil {
 		artifact.remove()
@@ -2394,6 +2395,22 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 		)
 	}
 	return resp, nil
+}
+
+func (d *Daemon) retireAmbiguousConflictResolverWindow(ctx context.Context, sessionName, windowName string) string {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+	defer cancel()
+	appeared, err := d.tmux.HasWindow(cleanupCtx, sessionName, windowName)
+	if err != nil {
+		return fmt.Sprintf("; exact conflict window reconciliation failed: %v", err)
+	}
+	if !appeared {
+		return ""
+	}
+	if err := d.tmux.KillWindow(cleanupCtx, sessionName, windowName); err != nil {
+		return fmt.Sprintf("; appeared conflict window cleanup failed: %v", err)
+	}
+	return "; appeared conflict window was removed"
 }
 
 func (d *Daemon) ensureConflictWorktree(ctx context.Context, projectID, issueID, issueTitle, requestedWorktree string) (path, branch string, reused bool, err error) {

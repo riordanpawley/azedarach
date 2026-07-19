@@ -285,6 +285,85 @@ func TestProjectOrchestratorSessionRetryRejectsCrashOrphanedShell(t *testing.T) 
 	}
 }
 
+func TestRootedOrchestratorSessionRetryRejectsStaleShellRuntime(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root retry fence", Type: domain.TypeEpic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	runner := newSessionStartTmuxRunner()
+	manager := git.NewWorktreeManager(&worktreeCreateRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+rootID), branchName: "test/" + rootID}, repoDir, slog.Default())
+	memoryStore := daemonstate.NewStore()
+	d := &Daemon{
+		cfg:    Config{RepoDir: repoDir, BaseBranch: "main", CLITool: "codex", SessionShell: "zsh", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issues: issuesClient, tmux: tmux.NewClient(runner, slog.Default()), session: daemonhandlers.NewSessionHandler(memoryStore), sessionStore: memoryStore,
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{repoDir: store}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+		worktreeManagersByRoot: map[string]*git.WorktreeManager{repoDir: manager}, worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager}, revision: map[string]uint64{},
+	}
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, projectID)
+	scope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(protocol.OrchestratorSessionRequest{Scope: scope})
+	request := protocol.RequestEnvelope{Command: protocol.CommandOrchestratorSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body}
+	started, err := d.handleOrchestratorSession(ctx, request)
+	if err != nil || started.Error != nil {
+		t.Fatalf("initial rooted start response=%+v err=%v", started.Error, err)
+	}
+	sessionID := d.orchestratorSessionID(projectID, scope)
+	runner.currentCommand = "zsh"
+	failed, err := d.handleOrchestratorSession(ctx, request)
+	if err != nil || failed.Error == nil || failed.Error.Code != protocol.ErrorCodeUnavailable {
+		t.Fatalf("rooted shell retry response=%+v err=%v", failed.Error, err)
+	}
+	if runner.sessions[sessionID] {
+		t.Fatalf("stale rooted shell %s survived", sessionID)
+	}
+	identity, _ := domain.NewOrchestratorIdentity(projectID, scope)
+	lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(store).Get(ctx, identity)
+	if err != nil || !found || lease.Lifecycle != domain.OrchestratorPaused {
+		t.Fatalf("rooted shell lease=%+v found=%t err=%v", lease, found, err)
+	}
+	projection, found, err := store.GetSessionState(ctx, projectID, sessionID)
+	if err != nil || !found || projection.State != daemonstate.SessionStateStopped || projection.ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("rooted shell projection=%+v found=%t err=%v", projection, found, err)
+	}
+
+	runner.currentCommand = "codex"
+	retried, err := d.handleOrchestratorSession(ctx, request)
+	if err != nil || retried.Error != nil {
+		t.Fatalf("rooted retry response=%+v err=%v", retried.Error, err)
+	}
+	if !runner.sessions[sessionID] {
+		t.Fatalf("rooted retry did not recreate %s", sessionID)
+	}
+
+	// A reused pane identity must fail even when the visible command still
+	// looks like the expected agent executable.
+	runner.panePIDs[sessionID] = 999
+	stale, err := d.handleOrchestratorSession(ctx, request)
+	if err != nil || stale.Error == nil || stale.Error.Code != protocol.ErrorCodeUnavailable {
+		t.Fatalf("rooted stale-identity retry response=%+v err=%v", stale.Error, err)
+	}
+	if runner.sessions[sessionID] {
+		t.Fatalf("stale rooted pane identity survived for %s", sessionID)
+	}
+	finalRetry, err := d.handleOrchestratorSession(ctx, request)
+	if err != nil || finalRetry.Error != nil || !runner.sessions[sessionID] {
+		t.Fatalf("rooted final retry response=%+v err=%v live=%t", finalRetry.Error, err, runner.sessions[sessionID])
+	}
+}
+
 func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()

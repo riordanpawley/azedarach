@@ -1496,6 +1496,10 @@ type sessionStartTmuxRunner struct {
 	createBeforeNewSessionError bool
 	onNewSession                func(string)
 	onNewWindow                 func(string, string)
+	newWindowErr                error
+	createBeforeNewWindowError  bool
+	respawnWindowErr            error
+	respawnBeforeWindowError    bool
 	maxNewSessionCommand        int
 	launchScriptPaths           map[string]string
 	launchScriptContents        map[string]string
@@ -1632,6 +1636,20 @@ func acknowledgeManagedAgentOnInitialLaunch(t *testing.T, d *Daemon, runner *ses
 		panePID := runner.panePIDs[sessionID]
 		if panePID == 0 {
 			panePID = 123
+		}
+		if signal := regexp.MustCompile(`'([^']*advisor-bootstrap-[^']+\.signal)'`).FindStringSubmatch(script); len(signal) == 2 {
+			runner.currentCommand = strings.ToLower(strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool))
+			if runner.currentCommand == "" {
+				runner.currentCommand = "claude"
+			}
+			paneID := "%1"
+			if panes := runner.panes[sessionID]; len(panes) > 0 {
+				paneID = panes[0]
+			}
+			if err := os.WriteFile(signal[1], []byte(fmt.Sprintf("%s\t%s\t%d\n", incarnation[1], paneID, panePID)), 0o600); err != nil {
+				t.Errorf("write advisor bootstrap signal: %v", err)
+			}
+			return
 		}
 		if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{
 			ProjectID: d.canonicalProjectID(projectID), SessionID: sessionID, LogicalPaneID: "agent",
@@ -1830,9 +1848,32 @@ func (r *sessionStartTmuxRunner) Run(ctx context.Context, args ...string) (strin
 		if r.windows[session] == nil {
 			r.windows[session] = map[string]bool{}
 		}
-		r.windows[session][window] = true
+		if r.newWindowErr == nil || r.createBeforeNewWindowError {
+			r.windows[session][window] = true
+		}
 		if r.onNewWindow != nil {
 			r.onNewWindow(session, args[len(args)-1])
+		}
+		if r.newWindowErr != nil {
+			return "", r.newWindowErr
+		}
+		return "", nil
+	case "respawn-window":
+		if len(args) < 4 {
+			return "", errors.New("missing respawn window target")
+		}
+		parts := strings.SplitN(args[3], ":", 2)
+		if len(parts) == 2 && (r.respawnWindowErr == nil || r.respawnBeforeWindowError) {
+			if r.windows[parts[0]] == nil {
+				r.windows[parts[0]] = map[string]bool{}
+			}
+			r.windows[parts[0]][parts[1]] = true
+			if r.onNewWindow != nil {
+				r.onNewWindow(parts[0], args[len(args)-1])
+			}
+		}
+		if r.respawnWindowErr != nil {
+			return "", r.respawnWindowErr
 		}
 		return "", nil
 	case "kill-window":
@@ -4639,6 +4680,63 @@ func TestSessionResolveConflictRejectsUnacknowledgedInitialWindow(t *testing.T) 
 	sessionID := naming.CanonicalSessionID(projectID, issueID)
 	if runner.windows[sessionID][sessionConflictWindowName] {
 		t.Fatalf("unacknowledged conflict window survived: %+v", runner.windows[sessionID])
+	}
+}
+
+func TestSessionResolveConflictRetiresWindowAfterAmbiguousCreateErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		respawn bool
+	}{
+		{name: "new window create then error"},
+		{name: "respawn window then error", respawn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			repoDir := t.TempDir()
+			projectID := "proj-conflict-ambiguous"
+			issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+			t.Cleanup(func() { _ = issuesClient.CloseDB() })
+			issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Ambiguous conflict launch", Type: domain.TypeTask})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := newSessionStartTmuxRunner()
+			sessionID := naming.CanonicalSessionID(projectID, issueID)
+			if tc.respawn {
+				runner.sessions[sessionID] = true
+				runner.windows[sessionID] = map[string]bool{"shell": true, sessionConflictWindowName: true}
+				runner.respawnBeforeWindowError = true
+				runner.respawnWindowErr = errors.New("respawn returned after replacement")
+			} else {
+				runner.createBeforeNewWindowError = true
+				runner.newWindowErr = errors.New("create returned after window appeared")
+			}
+			memoryStore := daemonstate.NewStore()
+			d := &Daemon{
+				cfg:  Config{RepoDir: repoDir, BaseBranch: "main", CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+				tmux: tmux.NewClient(runner, slog.Default()), issues: issuesClient,
+				session: daemonhandlers.NewSessionHandler(memoryStore), sessionStore: memoryStore, revision: map[string]uint64{},
+			}
+			attachIsolatedRuntimeStore(t, d, projectID)
+			request := protocol.RequestEnvelope{
+				ProtocolVersion: protocol.CurrentVersion, RequestID: "conflict-ambiguous", Kind: protocol.EnvelopeKindCommand,
+				Command: protocol.CommandSessionResolveConflict, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+				Body: marshalJSON(protocol.SessionResolveConflictRequestBody{
+					ProjectID: naming.ProjectID(projectID), IssueID: naming.IssueID(issueID), Worktree: t.TempDir(), Prompt: "resolve",
+				}),
+			}
+			response, err := d.handleSessionResolveConflictDirect(ctx, request)
+			if err != nil || response.OK || response.Error == nil || response.Error.Code != protocol.ErrorCodeInternal {
+				t.Fatalf("ambiguous conflict response=%+v err=%v", response, err)
+			}
+			if runner.windows[sessionID][sessionConflictWindowName] {
+				t.Fatalf("ambiguous conflict window survived: %+v", runner.windows[sessionID])
+			}
+			if !runner.sessions[sessionID] {
+				t.Fatalf("cleanup removed the containing session %s", sessionID)
+			}
+		})
 	}
 }
 

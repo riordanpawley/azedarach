@@ -366,6 +366,23 @@ func (c *Client) EnsureWindowWithCommandAndEnvironment(ctx context.Context, sess
 	return c.ensureWindow(ctx, sessionName, windowName, workdir, command, environment)
 }
 
+// HasWindow reports whether one exact named window currently exists.
+func (c *Client) HasWindow(ctx context.Context, sessionName, windowName string) (bool, error) {
+	if strings.TrimSpace(sessionName) == "" || strings.TrimSpace(windowName) == "" {
+		return false, &domain.TmuxError{Op: "list-windows", Session: sessionName, Err: errors.New("session and window are required")}
+	}
+	out, err := c.runner.Run(ctx, "list-windows", "-t", sessionName, "-F", "#{window_name}")
+	if err != nil {
+		return false, &domain.TmuxError{Op: "list-windows", Session: sessionName, Err: err}
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == strings.TrimSpace(windowName) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // KillWindow removes one exact window without terminating unrelated panes in the session.
 func (c *Client) KillWindow(ctx context.Context, sessionName, windowName string) error {
 	target := strings.TrimSpace(sessionName) + ":" + strings.TrimSpace(windowName)

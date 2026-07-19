@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,18 @@ type advisorSessionRuntimeResult struct {
 type advisorLaunchCommand struct {
 	Executable string
 	Args       []string
+}
+
+type advisorBootstrapFence struct {
+	SignalPath      string
+	Incarnation     string
+	ExpectedCommand string
+}
+
+func (f advisorBootstrapFence) remove() {
+	if strings.TrimSpace(f.SignalPath) != "" {
+		_ = os.Remove(f.SignalPath)
+	}
 }
 
 func (c advisorLaunchCommand) String() string {
@@ -92,30 +105,45 @@ func (d *Daemon) ensureAdvisorSessionRuntime(ctx context.Context, projectID stri
 				return fmt.Errorf("build advisor context pack: %w", packErr)
 			}
 			prompt := buildAdvisorSessionPrompt(request, pack)
-			command, commandErr := d.buildAdvisorLaunchCommand(projectID, advisor, prompt)
-			if commandErr != nil {
-				return commandErr
-			}
-			if len(command.Args) == 0 {
-				return errors.New("advisor launch command has no payload")
-			}
+			var commandErr error
 			plannedIncarnation, commandErr = newRestartIncarnation()
 			if commandErr != nil {
 				return fmt.Errorf("plan advisor managed agent incarnation: %w", commandErr)
 			}
+			fence, fenceErr := prepareAdvisorBootstrapFence(d.sessionLaunchArtifactDir(), plannedIncarnation)
+			if fenceErr != nil {
+				return fmt.Errorf("prepare advisor bootstrap fence: %w", fenceErr)
+			}
+			fence.ExpectedCommand = strings.ToLower(strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool))
+			if fence.ExpectedCommand == "" {
+				fence.ExpectedCommand = "claude"
+			}
+			command, commandErr := d.buildAdvisorLaunchCommandWithFence(projectID, advisor, prompt, fence)
+			if commandErr != nil {
+				fence.remove()
+				return commandErr
+			}
+			if len(command.Args) == 0 {
+				fence.remove()
+				return errors.New("advisor launch command has no payload")
+			}
 			artifact, commandErr = d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: projectID, SessionID: advisor.SessionID, CommandPayload: command.Args[len(command.Args)-1], Shell: advisorShellExecutable, SanitizeEnvironment: true, LogicalPaneID: "agent", AgentIncarnation: plannedIncarnation})
 			if commandErr != nil {
+				fence.remove()
 				return fmt.Errorf("prepare advisor launch artifact: %w", commandErr)
 			}
 			if launchErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, advisor.SessionID, workdir, artifact.Command, nil); launchErr != nil {
 				artifact.remove()
-				return launchErr
+				fence.remove()
+				return fmt.Errorf("%w%s", launchErr, d.retireAmbiguousAdvisorSession(ctx, advisor.SessionID))
 			}
-			if ackErr := d.waitForInitialManagedAgentAcknowledgement(ctx, projectID, advisor.SessionID, plannedIncarnation, artifact.PromptHandoff); ackErr != nil {
+			if ackErr := d.waitForAdvisorBootstrapAcknowledgement(ctx, projectID, advisor.SessionID, fence); ackErr != nil {
 				artifact.remove()
+				fence.remove()
 				_ = d.tmux.KillSession(ctx, advisor.SessionID)
 				return fmt.Errorf("confirm advisor managed agent bootstrap: %w", ackErr)
 			}
+			fence.remove()
 			return nil
 		})
 	if err != nil {
@@ -132,7 +160,27 @@ func (d *Daemon) ensureAdvisorSessionRuntime(ctx context.Context, projectID stri
 	return advisorSessionRuntimeResult{Session: advisor, Started: !attached, Attached: attached, Resumed: attached && resumed}, nil
 }
 
+func (d *Daemon) retireAmbiguousAdvisorSession(ctx context.Context, sessionID string) string {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+	defer cancel()
+	appeared, err := d.tmux.HasSession(cleanupCtx, sessionID)
+	if err != nil {
+		return fmt.Sprintf("; exact advisor session reconciliation failed: %v", err)
+	}
+	if !appeared {
+		return ""
+	}
+	if err := d.tmux.KillSession(cleanupCtx, sessionID); err != nil {
+		return fmt.Sprintf("; appeared advisor session cleanup failed: %v", err)
+	}
+	return "; appeared advisor session was removed"
+}
+
 func (d *Daemon) buildAdvisorLaunchCommand(projectID string, advisor daemonstate.AdvisorSession, prompt string) (advisorLaunchCommand, error) {
+	return d.buildAdvisorLaunchCommandWithFence(projectID, advisor, prompt, advisorBootstrapFence{})
+}
+
+func (d *Daemon) buildAdvisorLaunchCommandWithFence(projectID string, advisor daemonstate.AdvisorSession, prompt string, fence advisorBootstrapFence) (advisorLaunchCommand, error) {
 	projectCfg := d.runtimeConfigForProject(projectID)
 	tool := strings.ToLower(strings.TrimSpace(projectCfg.CLITool))
 	if tool == "" {
@@ -146,6 +194,9 @@ func (d *Daemon) buildAdvisorLaunchCommand(projectID string, advisor daemonstate
 	toolPath, err := resolveAdvisorExecutable(tool)
 	if err != nil {
 		return advisorLaunchCommand{}, err
+	}
+	if strings.TrimSpace(fence.SignalPath) != "" {
+		fence.ExpectedCommand = filepath.Base(toolPath)
 	}
 	promptAssignment := initialPromptShellAssignment(prompt)
 	promptArg := `"$` + initialPromptShellVariable + `"`
@@ -184,7 +235,7 @@ func (d *Daemon) buildAdvisorLaunchCommand(projectID string, advisor daemonstate
 	// tmux must receive this as a multi-argument command. That makes it exec env
 	// directly rather than starting the configured default shell with -c. env
 	// removes non-interactive startup hooks before the minimal POSIX shell starts.
-	inner := toolCommand + "; " + sessionAgentProcessExitCommand(projectCfg.CLITool)
+	inner := advisorBootstrapObserverCommand(fence) + toolCommand + "; " + sessionAgentProcessExitCommand(projectCfg.CLITool)
 	return advisorLaunchCommand{
 		Executable: advisorEnvExecutable,
 		Args: []string{
@@ -196,6 +247,77 @@ func (d *Daemon) buildAdvisorLaunchCommand(projectID string, advisor daemonstate
 			advisorShellExecutable, "-c", inner,
 		},
 	}, nil
+}
+
+func prepareAdvisorBootstrapFence(dir, incarnation string) (advisorBootstrapFence, error) {
+	if err := ensureSessionLaunchArtifactDir(dir); err != nil {
+		return advisorBootstrapFence{}, err
+	}
+	file, err := os.CreateTemp(dir, "advisor-bootstrap-*.signal")
+	if err != nil {
+		return advisorBootstrapFence{}, err
+	}
+	path := file.Name()
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return advisorBootstrapFence{}, err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return advisorBootstrapFence{}, err
+	}
+	return advisorBootstrapFence{SignalPath: path, Incarnation: strings.TrimSpace(incarnation)}, nil
+}
+
+func advisorBootstrapObserverCommand(fence advisorBootstrapFence) string {
+	if strings.TrimSpace(fence.SignalPath) == "" || strings.TrimSpace(fence.Incarnation) == "" || strings.TrimSpace(fence.ExpectedCommand) == "" {
+		return ""
+	}
+	expected := singleQuoteForShell(filepath.Base(fence.ExpectedCommand))
+	return "( _az_attempt=0; while [ \"$_az_attempt\" -lt 160 ]; do " +
+		"_az_current=$(tmux display-message -p -t \"$TMUX_PANE\" '#{pane_current_command}' 2>/dev/null || true); " +
+		"if [ \"$_az_current\" = " + expected + " ]; then umask 077; printf '%s\\t%s\\t%s\\n' \"$AZEDARACH_AGENT_INCARNATION\" \"$TMUX_PANE\" \"$AZEDARACH_PANE_PID\" > " + singleQuoteForShell(fence.SignalPath) + "; exit 0; fi; " +
+		"_az_attempt=$((_az_attempt + 1)); sleep 0.05; done ) & "
+}
+
+func (d *Daemon) waitForAdvisorBootstrapAcknowledgement(ctx context.Context, projectID, sessionID string, fence advisorBootstrapFence) error {
+	waitCtx, cancel := context.WithTimeout(ctx, sessionStartAcknowledgementTimeout)
+	defer cancel()
+	ticker := time.NewTicker(sessionStartAcknowledgementPoll)
+	defer ticker.Stop()
+	for {
+		body, err := os.ReadFile(fence.SignalPath)
+		if err == nil && len(body) > 0 {
+			parts := strings.Split(strings.TrimSpace(string(body)), "\t")
+			if len(parts) == 3 && strings.TrimSpace(parts[0]) == strings.TrimSpace(fence.Incarnation) {
+				panePID, parseErr := strconv.Atoi(strings.TrimSpace(parts[2]))
+				if parseErr == nil && panePID > 0 {
+					panes, paneErr := d.tmux.ListPaneInfos(waitCtx)
+					if paneErr != nil {
+						return paneErr
+					}
+					for _, pane := range panes {
+						if pane.SessionName != sessionID || sanitizeRuntimePaneID(pane.PaneID) != sanitizeRuntimePaneID(parts[1]) || pane.PanePID != panePID || filepath.Base(strings.TrimSpace(pane.CurrentCommand)) != filepath.Base(strings.TrimSpace(fence.ExpectedCommand)) {
+							continue
+						}
+						store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+						if store == nil {
+							return errors.New("advisor managed agent identity store unavailable")
+						}
+						return store.UpsertManagedAgentIdentity(waitCtx, daemonstate.ManagedAgentIdentity{ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: sanitizeRuntimePaneID(parts[1]), PanePID: panePID, AgentIncarnation: fence.Incarnation, ObservedAt: time.Now().UTC()})
+					}
+				}
+			}
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("read advisor bootstrap signal: %w", err)
+		}
+		select {
+		case <-waitCtx.Done():
+			return &sessionStartBootstrapError{Reason: sessionStartBootstrapAcknowledgementLost, SessionID: sessionID, Incarnation: fence.Incarnation, Cause: waitCtx.Err()}
+		case <-ticker.C:
+		}
+	}
 }
 
 func resolveAdvisorExecutable(name string) (string, error) {

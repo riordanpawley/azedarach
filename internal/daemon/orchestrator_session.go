@@ -228,6 +228,18 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 			}
 		}
 		if body.Scope.Kind == domain.OrchestrationScopeRooted {
+			if !launchedHere {
+				if err := d.validateExistingManagedAgentReadiness(ctx, projectID, acquired.Lease.SessionID, "agent"); err != nil {
+					_ = d.tmux.KillSession(ctx, acquired.Lease.SessionID)
+					_ = d.persistStoppedOrchestratorSessionProjection(ctx, req.Meta, projectID, body.Scope, acquired.Lease.SessionID, daemonstate.SessionStateStopped)
+					if preserveLeaseOnFailure {
+						_, _ = authority.SetLifecycle(ctx, identity, acquired.Lease.SessionID, domain.OrchestratorPaused)
+					} else {
+						_ = authority.Release(ctx, identity, acquired.Lease.SessionID)
+					}
+					return d.errorResponse(req, protocol.ErrorCodeUnavailable, fmt.Sprintf("validate existing rooted orchestrator managed agent: %v", err)), nil
+				}
+			}
 			bootstrapDisposition, bootstrapErr := d.ensureRootedOrchestratorBootstrap(ctx, projectID, body.Scope, acquired.Lease.SessionID, rootedPrompt, launchedHere)
 			err = bootstrapErr
 			if err != nil {

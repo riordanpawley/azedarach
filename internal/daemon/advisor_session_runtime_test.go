@@ -195,6 +195,81 @@ func TestAdvisorInitialLaunchRejectsImmediateExitAndRetries(t *testing.T) {
 	}
 }
 
+func TestAdvisorInitialLaunchRetiresSessionAfterAmbiguousCreateError(t *testing.T) {
+	ctx := withDaemonProjectIDContext(context.Background(), protocol.DefaultProjectID)
+	repoDir := t.TempDir()
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "advisor ambiguous create", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	request := domain.InteractionRequest{ID: "request-advisor-ambiguous", IssueID: issueID, DecisionKey: "choice", OrchestrationScope: "project", Question: "Which option?", Why: "Human judgment", Options: []domain.InteractionOption{{Key: "a", Label: "A"}}, Significance: domain.InteractionSignificanceRoutine, Respondent: "human", DecisionPacket: domain.InteractionDecisionPacket{Summary: "Choose"}, State: domain.InteractionDiscussing, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := client.CreateInteraction(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	runner := newSessionStartTmuxRunner()
+	runner.createBeforeNewSessionError = true
+	runner.newSessionErr = fmt.Errorf("tmux returned after advisor appeared")
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore()}
+	result, err := d.ensureAdvisorSessionRuntime(ctx, protocol.DefaultProjectID, request)
+	if err == nil {
+		t.Fatalf("ambiguous advisor result=%+v, want error", result)
+	}
+	sessionID := advisorSessionID(request.ID)
+	if runner.sessions[sessionID] {
+		t.Fatalf("ambiguous advisor session %s survived", sessionID)
+	}
+
+	runner.newSessionErr = nil
+	runner.createBeforeNewSessionError = false
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, protocol.DefaultProjectID)
+	retried, retryErr := d.ensureAdvisorSessionRuntime(ctx, protocol.DefaultProjectID, request)
+	if retryErr != nil || !retried.Started || !runner.sessions[sessionID] {
+		t.Fatalf("advisor retry result=%+v err=%v live=%t", retried, retryErr, runner.sessions[sessionID])
+	}
+}
+
+func TestAdvisorBootstrapWrapperSignalsExactLivePane(t *testing.T) {
+	ctx := context.Background()
+	binDir := t.TempDir()
+	tmuxPath := filepath.Join(binDir, "tmux")
+	if err := os.WriteFile(tmuxPath, []byte("#!/bin/sh\nprintf 'claude\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fence, err := prepareAdvisorBootstrapFence(t.TempDir(), "advisor-incarnation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fence.remove()
+	fence.ExpectedCommand = "claude"
+	command := exec.Command(advisorShellExecutable, "-c", advisorBootstrapObserverCommand(fence)+"wait")
+	command.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"), "TMUX_PANE=%7", "AZEDARACH_AGENT_INCARNATION="+fence.Incarnation, "AZEDARACH_PANE_PID=321")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("run advisor bootstrap wrapper: %v: %s", err, output)
+	}
+	body, err := os.ReadFile(fence.SignalPath)
+	if err != nil || strings.TrimSpace(string(body)) != "advisor-incarnation\t%7\t321" {
+		t.Fatalf("advisor bootstrap signal=%q err=%v", body, err)
+	}
+
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	runner := newSessionStartTmuxRunner()
+	runner.sessions["advisor-session"] = true
+	runner.panes["advisor-session"] = []string{"%7"}
+	runner.panePIDs["advisor-session"] = 321
+	runner.currentCommand = "claude"
+	d := &Daemon{cfg: Config{RepoDir: t.TempDir(), CLITool: "claude", Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()), runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{"project": store}}
+	if err := d.waitForAdvisorBootstrapAcknowledgement(ctx, "project", "advisor-session", fence); err != nil {
+		t.Fatal(err)
+	}
+	identity, found, err := store.GetManagedAgentIdentity(ctx, "project", "advisor-session", "agent")
+	if err != nil || !found || identity.TmuxPaneID != "7" || identity.PanePID != 321 || identity.AgentIncarnation != fence.Incarnation {
+		t.Fatalf("advisor identity=%+v found=%t err=%v", identity, found, err)
+	}
+}
+
 func TestRuntimeReconcileRecoversAndCleansAdvisorSessionsFromDurableRequests(t *testing.T) {
 	ctx := withDaemonProjectIDContext(context.Background(), protocol.DefaultProjectID)
 	repoDir := t.TempDir()
