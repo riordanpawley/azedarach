@@ -1443,7 +1443,7 @@ func (d *Daemon) compensateSessionStartFailureWithSelector(ctx context.Context, 
 	alignTransient := false
 	if store != nil {
 		intent := daemonstate.Session{ID: sessionID, IssueID: issueID, Role: selector.Role, ScopeKind: selector.ScopeKind, ScopeID: selector.ScopeID}
-		rows, winner, err := store.ApplySessionCompensation(ctx, projectID, intent, desired, observed, activity, source, updatedAt)
+		rows, winner, applied, err := store.ApplySessionCompensation(ctx, projectID, intent, desired, observed, activity, source, updatedAt)
 		if err != nil {
 			note += fmt.Sprintf("; failed-start durable session compensation also failed: %v", err)
 			if durable, found, loadErr := store.GetSessionIntent(ctx, projectID, selector.Role, selector.ScopeKind, selector.ScopeID); loadErr == nil && found {
@@ -1453,8 +1453,10 @@ func (d *Daemon) compensateSessionStartFailureWithSelector(ctx context.Context, 
 				note += fmt.Sprintf("; failed-start durable session reload also failed: %v", loadErr)
 			}
 		} else {
-			desired = winner
-			alignTransient = true
+			if applied {
+				desired = winner
+				alignTransient = true
+			}
 			writer := d.runtimeProjectionStateWriter()
 			for _, row := range rows {
 				if _, publishErr := writer.PublishSessionProjectionEvent(ctx, projectID, req.Meta, row); publishErr != nil {

@@ -1512,6 +1512,8 @@ type sessionStartTmuxRunner struct {
 	sendKeysErrOnCall           int
 	captureOutput               string
 	currentCommand              string
+	listPanesCalls              int
+	onListPanes                 func(int)
 	onSendKeys                  func(string, string)
 	onRunWithInput              func(context.Context, string, []string) (string, error)
 	onRespawnPane               func(context.Context, []string) error
@@ -1935,6 +1937,10 @@ func (r *sessionStartTmuxRunner) Run(ctx context.Context, args ...string) (strin
 		}
 		return strings.Join(names, "\n"), nil
 	case "list-panes":
+		r.listPanesCalls++
+		if r.onListPanes != nil {
+			r.onListPanes(r.listPanesCalls)
+		}
 		lines := make([]string, 0, len(r.sessions))
 		for name := range r.sessions {
 			if r.sessionsWithoutPanes[name] {
@@ -4339,8 +4345,19 @@ func TestSessionStartImmediateAgentExitCompensatesAndRetries(t *testing.T) {
 		Body: marshalJSON(map[string]string{"project_id": projectID, "session_id": issueID}),
 	}
 	sessionID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), issueID)
+	removePaneOnListCall := 0
 	tmuxRunner.onNewSession = func(startedSessionID string) {
-		tmuxRunner.sessionsWithoutPanes[startedSessionID] = true
+		delete(tmuxRunner.sessionsWithoutPanes, startedSessionID)
+		tmuxRunner.panes[startedSessionID] = []string{"%1"}
+		tmuxRunner.panePIDs[startedSessionID] = 123
+		removePaneOnListCall = tmuxRunner.listPanesCalls + 2
+		promptPath := tmuxRunner.launchPromptPaths[startedSessionID]
+		prompt := tmuxRunner.launchPromptContents[startedSessionID]
+		if promptPath == "" || prompt == "" {
+			t.Errorf("launch prompt artifact missing for %s", startedSessionID)
+		} else if writeErr := os.WriteFile(promptPath, []byte(prompt), 0o600); writeErr != nil {
+			t.Errorf("restore pending launch prompt: %v", writeErr)
+		}
 		now := time.Now().UTC()
 		if projectionErr := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
 			ID: startedSessionID, IssueID: issueID, State: daemonstate.SessionStateStarting, UpdatedAt: now,
@@ -4354,6 +4371,12 @@ func TestSessionStartImmediateAgentExitCompensatesAndRetries(t *testing.T) {
 			t.Errorf("seed concurrent tmux observation: %v", observationErr)
 		}
 	}
+	tmuxRunner.onListPanes = func(call int) {
+		if removePaneOnListCall > 0 && call == removePaneOnListCall {
+			tmuxRunner.sessionsWithoutPanes[sessionID] = true
+		}
+	}
+	acknowledgeManagedAgentOnInitialLaunch(t, d, tmuxRunner, projectID)
 
 	failed, err := d.handleSessionStartDirect(ctx, req)
 	if err != nil {
@@ -4370,6 +4393,7 @@ func TestSessionStartImmediateAgentExitCompensatesAndRetries(t *testing.T) {
 	}
 
 	tmuxRunner.onNewSession = nil
+	tmuxRunner.onListPanes = nil
 	delete(tmuxRunner.sessionsWithoutPanes, sessionID)
 	acknowledgeManagedAgentOnInitialLaunch(t, d, tmuxRunner, projectID)
 	retried, retryErr := d.handleSessionStartDirect(ctx, req)

@@ -102,6 +102,130 @@ func TestInitialManagedAgentAcknowledgementRequiresExactIncarnationAndConsumedPr
 	}
 }
 
+func TestInitialManagedAgentAcknowledgementAcceptsExactCodexPromptSubmissionBeforeHandoffConsumption(t *testing.T) {
+	d, store, runner := newSessionStartAcknowledgementTestDaemon(t)
+	runner.sessions["az-1"] = true
+	runner.panes["az-1"] = []string{"%7"}
+	runner.panePIDs["az-1"] = 123
+	runner.currentCommand = "codex"
+	boundAt := time.Date(2026, time.July, 19, 2, 46, 6, 531478000, time.UTC)
+	identity := daemonstate.ManagedAgentIdentity{
+		ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "7",
+		PanePID: 123, AgentIncarnation: "planned", ObservedAt: boundAt,
+	}
+	if err := store.UpsertManagedAgentIdentity(context.Background(), identity); err != nil {
+		t.Fatal(err)
+	}
+	acknowledged, err := store.AcknowledgeManagedAgentIdentity(context.Background(), identity, boundAt.Add(150*time.Millisecond))
+	if err != nil || !acknowledged {
+		t.Fatalf("acknowledge exact generated Codex prompt submission: acknowledged=%t err=%v", acknowledged, err)
+	}
+	prompt := filepath.Join(t.TempDir(), "still-present.prompt")
+	if err := os.WriteFile(prompt, []byte("real Codex bootstrap prompt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.waitForInitialManagedAgentAcknowledgement(context.Background(), "project", "az-1", "planned", sessionPromptHandoff{PromptPath: prompt}); err != nil {
+		t.Fatalf("exact hook-backed prompt submission rejected: %v", err)
+	}
+	if _, err := os.Stat(prompt); err != nil {
+		t.Fatalf("acknowledgement should not remove the owner-only handoff: %v", err)
+	}
+}
+
+func TestInitialManagedAgentAcknowledgementDoesNotTreatFirstInventoryOmissionAsExit(t *testing.T) {
+	d, store, runner := newSessionStartAcknowledgementTestDaemon(t)
+	runner.sessions["az-1"] = true
+	runner.sessionsWithoutPanes["az-1"] = true
+	runner.currentCommand = "codex"
+	observedAt := time.Date(2026, time.July, 19, 4, 13, 45, 0, time.UTC)
+	identity := daemonstate.ManagedAgentIdentity{
+		ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "7",
+		PanePID: 123, AgentIncarnation: "planned", ObservedAt: observedAt,
+	}
+	if err := store.UpsertManagedAgentIdentity(context.Background(), identity); err != nil {
+		t.Fatal(err)
+	}
+	acknowledged, err := store.AcknowledgeManagedAgentIdentity(context.Background(), identity, observedAt.Add(time.Second))
+	if err != nil || !acknowledged {
+		t.Fatalf("seed exact acknowledgement: acknowledged=%t err=%v", acknowledged, err)
+	}
+	runner.onListPanes = func(call int) {
+		if call != 2 {
+			return
+		}
+		delete(runner.sessionsWithoutPanes, "az-1")
+		runner.panes["az-1"] = []string{"%7"}
+		runner.panePIDs["az-1"] = 123
+	}
+	poll := make(chan time.Time, 1)
+	poll <- observedAt
+	err = d.waitForInitialManagedAgentAcknowledgementWithPoll(context.Background(), store, "project", "az-1", "agent", "planned", sessionPromptHandoff{PromptPath: filepath.Join(t.TempDir(), "consumed.prompt")}, poll)
+	if err != nil {
+		t.Fatalf("first inventory omission rejected before exact acknowledgement: %v", err)
+	}
+	if runner.listPanesCalls != 2 {
+		t.Fatalf("list pane calls = %d, want deterministic second sample", runner.listPanesCalls)
+	}
+}
+
+func TestInitialManagedAgentAcknowledgementTreatsAbsenceAfterExactPresenceAsExit(t *testing.T) {
+	d, store, runner := newSessionStartAcknowledgementTestDaemon(t)
+	runner.sessions["az-1"] = true
+	runner.panes["az-1"] = []string{"%7"}
+	runner.panePIDs["az-1"] = 123
+	runner.currentCommand = "codex"
+	observedAt := time.Date(2026, time.July, 19, 4, 13, 45, 0, time.UTC)
+	if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{
+		ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "7",
+		PanePID: 123, AgentIncarnation: "planned", ObservedAt: observedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runner.onListPanes = func(call int) {
+		if call == 2 {
+			runner.sessionsWithoutPanes["az-1"] = true
+		}
+	}
+	prompt := filepath.Join(t.TempDir(), "pending.prompt")
+	if err := os.WriteFile(prompt, []byte("worker prompt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	poll := make(chan time.Time, 1)
+	poll <- observedAt
+	err := d.waitForInitialManagedAgentAcknowledgementWithPoll(context.Background(), store, "project", "az-1", "agent", "planned", sessionPromptHandoff{PromptPath: prompt}, poll)
+	var bootstrapErr *sessionStartBootstrapError
+	if !errors.As(err, &bootstrapErr) || bootstrapErr.Reason != sessionStartBootstrapAgentExited {
+		t.Fatalf("error = %#v, want exact observed pane disappearance", err)
+	}
+	if runner.listPanesCalls != 2 {
+		t.Fatalf("list pane calls = %d, want deterministic disappearance sample", runner.listPanesCalls)
+	}
+}
+
+func TestInitialManagedAgentAcknowledgementTreatsNeverObservedInventoryAbsenceAsLost(t *testing.T) {
+	d, store, runner := newSessionStartAcknowledgementTestDaemon(t)
+	runner.sessions["az-1"] = true
+	runner.sessionsWithoutPanes["az-1"] = true
+	prompt := filepath.Join(t.TempDir(), "pending.prompt")
+	if err := os.WriteFile(prompt, []byte("worker prompt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	poll := make(chan time.Time)
+	err := d.waitForInitialManagedAgentAcknowledgementWithPoll(ctx, store, "project", "az-1", "agent", "planned", sessionPromptHandoff{PromptPath: prompt}, poll)
+	var bootstrapErr *sessionStartBootstrapError
+	if !errors.As(err, &bootstrapErr) || bootstrapErr.Reason != sessionStartBootstrapAcknowledgementLost {
+		t.Fatalf("error = %#v, want never-observed inventory absence classified as acknowledgement loss", err)
+	}
+	if runner.listPanesCalls != 1 {
+		t.Fatalf("list pane calls = %d, want one explicit never-observed sample", runner.listPanesCalls)
+	}
+	if identity, found, err := store.GetManagedAgentIdentity(context.Background(), "project", "az-1", "agent"); err != nil || found {
+		t.Fatalf("managed identity = %+v found=%t err=%v, want absent", identity, found, err)
+	}
+}
+
 func TestInitialManagedAgentAcknowledgementRejectsExactIdentityAfterShellFallback(t *testing.T) {
 	d, store, runner := newSessionStartAcknowledgementTestDaemon(t)
 	runner.sessions["az-1"] = true
@@ -131,12 +255,6 @@ func TestInitialManagedAgentAcknowledgementClassifiesBootstrapFailuresDeterminis
 		wantReason    sessionStartBootstrapFailureReason
 		wantText      string
 	}{
-		{
-			name: "immediate agent exit", configure: func(r *sessionStartTmuxRunner) {
-				r.sessions["az-1"] = true
-				r.sessionsWithoutPanes["az-1"] = true
-			}, wantReason: sessionStartBootstrapAgentExited,
-		},
 		{
 			name: "MCP bootstrap error and shell fallback", configure: func(r *sessionStartTmuxRunner) {
 				r.sessions["az-1"] = true
