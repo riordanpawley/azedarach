@@ -72,6 +72,7 @@ const (
 	ValidationOrderingSafe            ValidationOrderingReason = "safe_parallel"
 	ValidationOrderingAggregate       ValidationOrderingReason = "aggregate_exclusive"
 	ValidationOrderingShared          ValidationOrderingReason = "shared_capacity"
+	ValidationOrderingJoinedSource    ValidationOrderingReason = "joined_source"
 
 	ValidationPriorityBypassLimit = 1
 )

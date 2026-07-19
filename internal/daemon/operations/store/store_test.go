@@ -662,7 +662,7 @@ func TestPublicationValidationPriorityMigrationRejectsLedgerSchemaDrift(t *testi
 
 func TestValidationPriorityFairnessMigrationUpgradesRowsAndReopens(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
-	seedOperationsMigrations(t, dbPath, 6)
+	seedOperationsMigrations(t, dbPath, 7)
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
@@ -712,12 +712,12 @@ func TestValidationPriorityFairnessMigrationUpgradesRowsAndReopens(t *testing.T)
 
 func TestValidationPriorityFairnessMigrationRollsBackAtomically(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
-	seedOperationsMigrations(t, dbPath, 6)
+	seedOperationsMigrations(t, dbPath, 7)
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = db.Exec(`CREATE TRIGGER reject_validation_priority_ledger BEFORE INSERT ON schema_migrations WHEN NEW.id='daemon_operations_0007_validation_priority_fairness' BEGIN SELECT RAISE(ABORT, 'injected validation priority ledger failure'); END`); err != nil {
+	if _, err = db.Exec(`CREATE TRIGGER reject_validation_priority_ledger BEFORE INSERT ON schema_migrations WHEN NEW.id='daemon_operations_0008_validation_priority_fairness' BEGIN SELECT RAISE(ABORT, 'injected validation priority ledger failure'); END`); err != nil {
 		t.Fatal(err)
 	}
 	if err = db.Close(); err != nil {
@@ -740,7 +740,7 @@ func TestValidationPriorityFairnessMigrationRollsBackAtomically(t *testing.T) {
 	if err = raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_daemon_validation_priority_queue'`).Scan(&indexRows); err != nil {
 		t.Fatal(err)
 	}
-	if err = raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='daemon_operations_0007_validation_priority_fairness'`).Scan(&ledgerRows); err != nil {
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='daemon_operations_0008_validation_priority_fairness'`).Scan(&ledgerRows); err != nil {
 		t.Fatal(err)
 	}
 	if columns != 0 || indexRows != 0 || ledgerRows != 0 {
@@ -761,7 +761,7 @@ func TestValidationPriorityFairnessMigrationRollsBackAtomically(t *testing.T) {
 
 func TestValidationPriorityFairnessMigrationRejectsLedgerSchemaDrift(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
-	seedOperationsMigrations(t, dbPath, 6)
+	seedOperationsMigrations(t, dbPath, 7)
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)

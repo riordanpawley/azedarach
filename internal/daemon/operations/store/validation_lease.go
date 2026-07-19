@@ -401,7 +401,7 @@ func queryValidationSnapshot(ctx context.Context, queryer validationSnapshotQuer
 	if err := rows.Close(); err != nil {
 		return domain.ValidationSnapshot{}, fmt.Errorf("close validation snapshot rows: %w", err)
 	}
-	snapshot.Queued = domain.OrderValidationQueue(snapshot.Queued)
+	snapshot.Queued = orderValidationSnapshotQueue(snapshot.Queued)
 	for i := range snapshot.Active {
 		snapshot.Active[i].OrderingReason = activeValidationOrderingReason(snapshot.Active[i])
 	}
@@ -409,6 +409,26 @@ func queryValidationSnapshot(ctx context.Context, queryer validationSnapshotQuer
 		return domain.ValidationSnapshot{}, fmt.Errorf("read validation snapshot revision: %w", err)
 	}
 	return snapshot, nil
+}
+
+func orderValidationSnapshotQueue(requests []domain.ValidationRequest) []domain.ValidationRequest {
+	runnable := make([]domain.ValidationRequest, 0, len(requests))
+	joined := make([]domain.ValidationRequest, 0, len(requests))
+	for _, request := range requests {
+		request.QueuePosition = 0
+		request.OrderingReason = ""
+		if request.Execution == domain.ValidationExecutionJoined {
+			request.OrderingReason = domain.ValidationOrderingJoinedSource
+			joined = append(joined, request)
+			continue
+		}
+		if request.Execution == domain.ValidationExecutionExecuted && request.Purpose == domain.ValidationPurposeCapacity {
+			runnable = append(runnable, request)
+			continue
+		}
+		joined = append(joined, request)
+	}
+	return append(domain.OrderValidationQueue(runnable), joined...)
 }
 
 func unavailableValidationSnapshot(now time.Time, err error) domain.ValidationSnapshot {

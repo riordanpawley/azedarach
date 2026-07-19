@@ -657,6 +657,39 @@ func TestValidationLeaseCoalescesConcurrentCompatibleRequests(t *testing.T) {
 	assert.Equal(t, evidence.SourceRevision, follower.Evidence.SourceRevision)
 }
 
+func TestValidationSnapshotExcludesJoinedFollowersFromRunnablePositions(t *testing.T) {
+	ctx := context.Background()
+	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 7, 19, 0, 0, 0, 0, time.UTC)
+	owner := reusableValidationAcquire("owner")
+	owner.Command = "just test-owner"
+	_, err := store.AcquireValidation(ctx, owner, now)
+	require.NoError(t, err)
+
+	sourceAcquire := reusableValidationAcquire("source")
+	source, err := store.AcquireValidation(ctx, sourceAcquire, now.Add(time.Second))
+	require.NoError(t, err)
+	require.Equal(t, domain.ValidationRequestQueued, source.State)
+	follower, err := store.AcquireValidation(ctx, reusableValidationAcquire("follower"), now.Add(2*time.Second))
+	require.NoError(t, err)
+	require.Equal(t, domain.ValidationExecutionJoined, follower.Execution)
+	runnableAcquire := reusableValidationAcquire("runnable")
+	runnableAcquire.Command = "just test-runnable"
+	runnable, err := store.AcquireValidation(ctx, runnableAcquire, now.Add(3*time.Second))
+	require.NoError(t, err)
+	require.Equal(t, domain.ValidationRequestQueued, runnable.State)
+
+	snapshot, err := store.ValidationSnapshot(ctx, "project", now.Add(3*time.Second), time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, []string{"source", "runnable", "follower"}, validationRequestIDs(snapshot.Queued))
+	assert.Equal(t, 1, snapshot.Queued[0].QueuePosition)
+	assert.Equal(t, 2, snapshot.Queued[1].QueuePosition)
+	assert.Zero(t, snapshot.Queued[2].QueuePosition)
+	assert.Equal(t, domain.ValidationOrderingJoinedSource, snapshot.Queued[2].OrderingReason)
+	assert.Equal(t, source.RequestID, snapshot.Queued[2].AuthoritativeRequestID)
+}
+
 func TestValidationLeaseOverridesCannotManufactureEvidence(t *testing.T) {
 	ctx := context.Background()
 	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)

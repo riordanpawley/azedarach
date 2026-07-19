@@ -28,8 +28,8 @@ var orderedMigrations = []migration{
 	{id: "daemon_operations_0004_review_validation_assignment", path: "migrations/0004_review_validation_assignment.sql"},
 	{id: "daemon_operations_0005_validation_scope_purpose", path: "migrations/0005_validation_scope_purpose.sql"},
 	{id: "daemon_operations_0006_publication_validation_priority", path: "migrations/0006_publication_validation_priority.sql"},
-	{id: "daemon_operations_0007_validation_priority_fairness", path: "migrations/0007_validation_priority_fairness.sql"},
 	{id: "daemon_operations_0007_layered_publication_evidence", path: "migrations/0007_layered_publication_evidence.sql"},
+	{id: "daemon_operations_0008_validation_priority_fairness", path: "migrations/0008_validation_priority_fairness.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -39,8 +39,8 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "daemon_operations_0004_review_validation_assignment", Path: "migrations/0004_review_validation_assignment.sql", Checksum: "6f5d54a3f27937ae9adcdd6a0b3f9b79ddd2814f32635eb2c3e5ca051c3268ca"},
 	{ID: "daemon_operations_0005_validation_scope_purpose", Path: "migrations/0005_validation_scope_purpose.sql", Checksum: "6cb59febaf88ccc7948f5289cbdc040bfa041fbd639ea88eb77766dfff15a192"},
 	{ID: "daemon_operations_0006_publication_validation_priority", Path: "migrations/0006_publication_validation_priority.sql", Checksum: "bbbf9fd51c2d9289a295a6aeb7427d65d04d3d3a897cc995d2d91ea4577713fd"},
-	{ID: "daemon_operations_0007_validation_priority_fairness", Path: "migrations/0007_validation_priority_fairness.sql", Checksum: "9f6a4ae4af768b433880a310b1d4c5bb79453224c1c93bd9c7b7696d4cf476bf"},
 	{ID: "daemon_operations_0007_layered_publication_evidence", Path: "migrations/0007_layered_publication_evidence.sql", Checksum: "59182365b3d9dd89464e1fdb2f0e5818d6d91bbcf0625bcfd4c3898f888a10ef"},
+	{ID: "daemon_operations_0008_validation_priority_fairness", Path: "migrations/0008_validation_priority_fairness.sql", Checksum: "9f6a4ae4af768b433880a310b1d4c5bb79453224c1c93bd9c7b7696d4cf476bf"},
 }
 
 const migrationArtifactAuthority sqlitemigration.Authority = "project.daemon_operations"
