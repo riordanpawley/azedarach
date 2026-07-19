@@ -16,6 +16,11 @@ const (
 	EventOrchestrationLoopUpdated          = "orchestration.loop.updated"
 	EventPublicationOperationUpdated       = "publication.operation.updated"
 	OrchestrationProjectionAuthoritySQLite = "sqlite"
+	// OrchestratorSessionStartAcknowledgementBudget bounds the daemon's wait for
+	// hook-backed managed-agent readiness. The client budget must remain larger
+	// so transport callers cannot cancel a valid cold start first.
+	OrchestratorSessionStartAcknowledgementBudget = 30 * time.Second
+	OrchestratorSessionStartClientBudget          = OrchestratorSessionStartAcknowledgementBudget + 5*time.Second
 )
 
 type OrchestrationLoopEventBody struct {
