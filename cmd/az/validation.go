@@ -217,6 +217,10 @@ func printValidationValue(value any, asJSON bool) error {
 	switch value := value.(type) {
 	case protocol.ValidationRequestResponse:
 		fmt.Printf("%s %s %s priority=%s order=%s scope=%s purpose=%s execution=%s source=%s override=%s ticket=%s\n", value.Request.RequestID, value.Request.State, value.Request.Profile, value.Request.IssuePriority.String(), value.Request.OrderingReason, value.Request.Scope, value.Request.Purpose, value.Request.Execution, value.Request.AuthoritativeRequestID, value.Request.Override, value.Request.IssueID)
+		if value.Summary.FailureSummary != "" {
+			fmt.Printf("failure=%s\n", value.Summary.FailureSummary)
+		}
+		fmt.Printf("context_schema=%s output_retention=%s artifacts=%d summary_schema=%s\n", value.Context.Schema, value.Summary.OutputRetention, len(value.Summary.ArtifactLinks), value.Summary.Schema)
 	case domain.ValidationSnapshot:
 		fmt.Printf("active=%d queued=%d revision=%d\n", len(value.Active), len(value.Queued), value.Revision)
 		for _, request := range append(append(append([]domain.ValidationRequest{}, value.Active...), value.Queued...), value.Recent...) {

@@ -93,6 +93,21 @@ func TestReviewInspectionKeepsStableScopeAcrossCandidateRevisions(t *testing.T) 
 	if first.DiffRange != "base-revision..head-revision-1" || second.DiffRange != "base-revision..head-revision-2" {
 		t.Fatalf("diff ranges = first:%q second:%q", first.DiffRange, second.DiffRange)
 	}
+	if first.ReviewContext == nil || first.IntegrationContext == nil {
+		t.Fatalf("bounded contexts missing: review=%+v integration=%+v", first.ReviewContext, first.IntegrationContext)
+	}
+	if first.ReviewContext.Role != domain.WorkflowRoleReviewer || first.IntegrationContext.Role != domain.WorkflowRoleIntegrator || first.ReviewContext.Provenance.SourceRevision != "head-revision-1" {
+		t.Fatalf("bounded contexts = review:%+v integration:%+v", first.ReviewContext, first.IntegrationContext)
+	}
+	for _, packet := range []*domain.WorkflowContextPacket{first.ReviewContext, first.IntegrationContext} {
+		encoded, err := domain.MarshalWorkflowContextPacket(*packet)
+		if err != nil || len(encoded) > domain.WorkflowContextPacketMaxBytes {
+			t.Fatalf("bounded context bytes=%d err=%v", len(encoded), err)
+		}
+		if strings.Contains(string(encoded), repoDir) {
+			t.Fatalf("bounded context leaked local worktree path: %s", encoded)
+		}
+	}
 	if incremental := first.HeadRevision + ".." + second.HeadRevision; incremental != "head-revision-1..head-revision-2" {
 		t.Fatalf("incremental range = %q, want prior reviewed head through current head", incremental)
 	}

@@ -121,6 +121,8 @@ type OrchestrationConstraints struct {
 type OrchestrationReview struct {
 	IssueID            string                         `json:"issue_id"`
 	ParentIssueID      string                         `json:"parent_issue_id,omitempty"`
+	ReviewContext      *domain.WorkflowContextPacket  `json:"review_context_packet,omitempty"`
+	IntegrationContext *domain.WorkflowContextPacket  `json:"integration_context_packet,omitempty"`
 	Actionable         bool                           `json:"actionable"`
 	Reasons            []string                       `json:"reasons,omitempty"`
 	Evidence           *domain.WorkerEvidencePacket   `json:"evidence,omitempty"`

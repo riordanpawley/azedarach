@@ -66,6 +66,55 @@ func TestValidationCommandStartsPublicationWithoutAggregateQueueing(t *testing.T
 	}
 }
 
+func TestValidationFinishReturnsBoundedPortableFailureSummary(t *testing.T) {
+	repoDir := t.TempDir()
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = runtime.Close() })
+	d := &Daemon{operationRuntime: runtime, revision: map[string]uint64{"consumer-project": 1}}
+	ctx := context.Background()
+	acquireBody, err := json.Marshal(protocol.ValidationAcquireRequest{
+		RequestID: "npm-check", LeaseToken: "secret", Class: domain.ValidationClassAggregate,
+		Scope: domain.ValidationScopeRepository, Purpose: domain.ValidationPurposePushGate,
+		IsolationMode: "consumer-runner", EnvironmentFingerprint: "node-22", Override: domain.ValidationOverrideNone,
+		Profile: "consumer-check", Command: "npm test", SourceRevision: "candidate-123", TTLSeconds: 30,
+	})
+	require.NoError(t, err)
+	acquired, err := d.handleValidationCommand(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "acquire", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandValidationAcquire, Meta: protocol.Metadata{ProjectID: "consumer-project"}, Body: acquireBody})
+	require.NoError(t, err)
+	require.True(t, acquired.OK, "response=%+v", acquired)
+
+	retainedOutput := filepath.Join(repoDir, "full-output.log")
+	require.NoError(t, os.WriteFile(retainedOutput, []byte("complete npm output\n"), 0o600))
+	finishBody, err := json.Marshal(protocol.ValidationFinishRequest{
+		RequestID: "npm-check", LeaseToken: "secret", State: domain.ValidationRequestFailed, Outcome: "exit 1",
+		Evidence: domain.ValidationEvidence{
+			Held: true, RequestID: "npm-check", Class: domain.ValidationClassAggregate,
+			Scope: domain.ValidationScopeRepository, Purpose: domain.ValidationPurposePushGate,
+			Profile: "consumer-check", SourceRevision: "candidate-123", Present: true,
+			FailureSummary: strings.Repeat("npm assertion failed ", 2000), ReportPaths: []string{retainedOutput},
+		},
+	})
+	require.NoError(t, err)
+	finished, err := d.handleValidationCommand(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "finish", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandValidationFinish, Meta: protocol.Metadata{ProjectID: "consumer-project"}, Body: finishBody})
+	require.NoError(t, err)
+	require.True(t, finished.OK, "response=%+v error=%+v", finished, finished.Error)
+	var result protocol.ValidationRequestResponse
+	require.NoError(t, json.Unmarshal(finished.Body, &result))
+	summary, err := json.Marshal(result.Summary)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(summary), domain.WorkflowResultSummaryMaxBytes)
+	assert.Equal(t, domain.WorkflowRoleValidator, result.Summary.Role)
+	assert.Equal(t, domain.WorkflowRoleValidator, result.Context.Role)
+	assert.Equal(t, "repository:consumer-project", result.Context.Provenance.ScopeID)
+	assert.Contains(t, result.Context.Requirements, "command: npm test")
+	assert.Equal(t, "repository:consumer-project", result.Summary.Provenance.ScopeID)
+	assert.Empty(t, result.Summary.Provenance.IssueID, "repository validation must not fabricate a ticket")
+	assert.Equal(t, "candidate-123", result.Summary.Provenance.SourceRevision)
+	assert.Equal(t, "retained", result.Summary.OutputRetention)
+	assert.NotContains(t, string(summary), retainedOutput)
+	assert.Contains(t, result.Summary.ArtifactLinks[0].Reference, "validation:npm-check/report/")
+}
+
 func TestPublicationCoverageForPathsRejectsNonRepoRelativeGitPaths(t *testing.T) {
 	for _, candidate := range []string{"../escape.txt", "src/../../escape.txt", "/absolute.txt", `C:/absolute.txt`, `back\\slash.txt`} {
 		if coverage, err := publicationCoverageForPaths([]string{candidate}, publicationEvidenceCapability{}); err == nil {

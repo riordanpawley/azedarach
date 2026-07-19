@@ -57,7 +57,9 @@ type ValidationFinishRequest struct {
 type ValidationStatusRequest struct{}
 
 type ValidationRequestResponse struct {
-	Request domain.ValidationRequest `json:"request"`
+	Request domain.ValidationRequest     `json:"request"`
+	Context domain.WorkflowContextPacket `json:"context_packet"`
+	Summary domain.WorkflowResultSummary `json:"summary"`
 }
 
 type ValidationStatusResponse struct {

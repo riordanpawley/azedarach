@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -57,7 +58,7 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeConflict, err.Error()), nil
 		}
-		return d.validationSuccessResponse(req, protocol.ValidationRequestResponse{Request: result})
+		return d.validationRequestSuccessResponse(req, result)
 	case protocol.CommandValidationHeartbeat:
 		var body protocol.ValidationHeartbeatRequest
 		if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -67,7 +68,7 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeConflict, err.Error()), nil
 		}
-		return d.validationSuccessResponse(req, protocol.ValidationRequestResponse{Request: result})
+		return d.validationRequestSuccessResponse(req, result)
 	case protocol.CommandValidationNested:
 		var body protocol.ValidationAuthorizeNestedRequest
 		if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -77,7 +78,7 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeConflict, err.Error()), nil
 		}
-		return d.validationSuccessResponse(req, protocol.ValidationRequestResponse{Request: result})
+		return d.validationRequestSuccessResponse(req, result)
 	case protocol.CommandValidationFinish:
 		var body protocol.ValidationFinishRequest
 		if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -87,7 +88,7 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 		if err != nil {
 			return d.errorResponse(req, protocol.ErrorCodeConflict, err.Error()), nil
 		}
-		return d.validationSuccessResponse(req, protocol.ValidationRequestResponse{Request: result})
+		return d.validationRequestSuccessResponse(req, result)
 	case protocol.CommandValidationStatus:
 		snapshot, err := store.ValidationSnapshot(ctx, projectID, now, defaultValidationLeaseTTL)
 		if err != nil {
@@ -139,6 +140,50 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 	default:
 		return d.errorResponse(req, protocol.ErrorCodeUnsupportedCommand, "unsupported validation command"), nil
 	}
+}
+
+func (d *Daemon) validationRequestSuccessResponse(req protocol.RequestEnvelope, request domain.ValidationRequest) (protocol.ResponseEnvelope, error) {
+	issueID := strings.TrimSpace(request.IssueID)
+	scopeID := ""
+	if issueID == "" {
+		scopeID = "repository:" + strings.TrimSpace(request.ProjectID)
+	}
+	artifacts := make([]domain.WorkflowArtifactReference, 0, len(request.Evidence.ReportPaths)+1)
+	paths := append([]string(nil), request.Evidence.ReportPaths...)
+	if request.Evidence.ReportPath != "" {
+		paths = append(paths, request.Evidence.ReportPath)
+	}
+	retainedPaths := make([]string, 0, len(paths))
+	for _, path := range uniqueNonEmpty(paths) {
+		info, statErr := os.Stat(path)
+		if statErr != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		retainedPaths = append(retainedPaths, path)
+	}
+	for index := range retainedPaths {
+		artifacts = append(artifacts, domain.WorkflowArtifactReference{
+			Label: "validation report", Reference: fmt.Sprintf("validation:%s/report/%d", request.RequestID, index+1),
+		})
+	}
+	contextPacket, err := domain.BuildWorkflowContextPacket(domain.WorkflowContextInput{
+		Role: domain.WorkflowRoleValidator, IssueID: issueID, ScopeID: scopeID, SourceRevision: request.SourceRevision,
+		Summary:            "validation " + strings.TrimSpace(request.Profile),
+		Requirements:       []string{"profile: " + request.Profile, "command: " + request.Command},
+		AffectedInvariants: []string{"class: " + string(request.Class), "scope: " + string(request.Scope), "purpose: " + string(request.Purpose)},
+	})
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "build bounded validation context: "+err.Error()), nil
+	}
+	summary, err := domain.BuildWorkflowResultSummary(domain.WorkflowResultInput{
+		Role: domain.WorkflowRoleValidator, IssueID: issueID, ScopeID: scopeID, SourceRevision: request.SourceRevision,
+		Status: string(request.State), Outcome: request.Outcome, FailureSummary: request.Evidence.FailureSummary,
+		ArtifactLinks: artifacts, OutputPresent: request.Evidence.FailureSummary != "" || len(paths) > 0,
+	})
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "build bounded validation result: "+err.Error()), nil
+	}
+	return d.validationSuccessResponse(req, protocol.ValidationRequestResponse{Request: request, Context: contextPacket, Summary: summary})
 }
 
 func (d *Daemon) validatePublicationEvidenceIssue(ctx context.Context, projectID, issueID string) error {
