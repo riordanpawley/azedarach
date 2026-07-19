@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -484,6 +485,10 @@ func TestManagedAgentSignalIdentityRejectsStaleAndReusedIncarnations(t *testing.
 	if err != nil || !accepted {
 		t.Fatalf("bind initial identity accepted=%v err=%v", accepted, err)
 	}
+	projected, found := d.projectedManagedAgentIdentity("p", "az-1", "agent")
+	if !found || projected.acknowledged || projected.identity.AgentIncarnation != "old" {
+		t.Fatalf("initial identity projection = %+v found=%t", projected, found)
+	}
 	runner.pid = 200
 	start.PanePID = 200
 	start.AgentIncarnation = "new"
@@ -497,9 +502,26 @@ func TestManagedAgentSignalIdentityRejectsStaleAndReusedIncarnations(t *testing.
 	if err != nil || !accepted || !strings.Contains(message, "prompt submission acknowledged") {
 		t.Fatalf("prompt acknowledgement accepted=%v message=%q err=%v", accepted, message, err)
 	}
+	projected, found = d.projectedManagedAgentIdentity("p", "az-1", "agent")
+	if !found || !projected.acknowledged || projected.identity.AgentIncarnation != "new" {
+		t.Fatalf("acknowledged identity projection = %+v found=%t", projected, found)
+	}
+	accepted, _, err = d.validateManagedAgentSignalIdentity(ctx, "p", "az-1.pane-12", start)
+	if err != nil || !accepted {
+		t.Fatalf("duplicate session start accepted=%v err=%v", accepted, err)
+	}
+	projected, found = d.projectedManagedAgentIdentity("p", "az-1", "agent")
+	if !found || !projected.acknowledged {
+		t.Fatalf("duplicate session start downgraded acknowledged projection = %+v found=%t", projected, found)
+	}
 	identity, found, err := d.sessionRuntimeStateStore("p").GetManagedAgentIdentity(ctx, "p", "az-1", "agent")
 	if err != nil || !found || !identity.UpdatedAt.After(identity.ObservedAt) {
 		t.Fatalf("durable prompt acknowledgement = %+v found=%t err=%v", identity, found, err)
+	}
+	for _, args := range runner.calls {
+		if slices.Contains(args, "-a") || !slices.Contains(args, "-s") || !slices.Contains(args, "az-1") {
+			t.Fatalf("managed identity used non-targeted pane inventory: %v", args)
+		}
 	}
 	stale := start
 	stale.AgentIncarnation = "old"
@@ -614,10 +636,12 @@ type managedIdentityTmuxRunner struct {
 	session string
 	pane    string
 	pid     int
+	calls   [][]string
 }
 
 func (r *managedIdentityTmuxRunner) Run(_ context.Context, args ...string) (string, error) {
 	if len(args) > 0 && args[0] == "list-panes" {
+		r.calls = append(r.calls, append([]string(nil), args...))
 		return fmt.Sprintf("%s\t%s\t%d\n", r.session, r.pane, r.pid), nil
 	}
 	return "", nil

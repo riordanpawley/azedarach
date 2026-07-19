@@ -137,6 +137,48 @@ func TestInitialManagedAgentAcknowledgementAcceptsExactCodexPromptSubmissionBefo
 	}
 }
 
+func TestInitialManagedAgentAcknowledgementConvergesFromProjectionWhenDurableReadIsBlocked(t *testing.T) {
+	d, store, runner := newSessionStartAcknowledgementTestDaemon(t)
+	runner.sessions["az-1"] = true
+	runner.panes["az-1"] = []string{"%7"}
+	runner.panePIDs["az-1"] = 123
+	runner.currentCommand = "codex"
+	boundAt := time.Date(2026, time.July, 19, 10, 0, 0, 0, time.UTC)
+	identity := daemonstate.ManagedAgentIdentity{
+		ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "7",
+		PanePID: 123, AgentIncarnation: "planned", ObservedAt: boundAt,
+	}
+	if err := store.UpsertManagedAgentIdentity(context.Background(), identity); err != nil {
+		t.Fatal(err)
+	}
+	d.recordManagedAgentIdentityProjection(identity, false)
+	readEntered := make(chan struct{})
+	releaseRead := make(chan struct{})
+	d.managedAgentIdentityRead = func(context.Context, *daemonstate.RuntimeStateStore, string, string, string) (daemonstate.ManagedAgentIdentity, bool, error) {
+		close(readEntered)
+		<-releaseRead
+		return daemonstate.ManagedAgentIdentity{}, false, context.DeadlineExceeded
+	}
+	poll := make(chan time.Time, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- d.waitForInitialManagedAgentAcknowledgementWithPoll(context.Background(), store, "project", "az-1", "agent", "planned", sessionPromptHandoff{PromptPath: filepath.Join(t.TempDir(), "consumed.prompt")}, poll)
+	}()
+	<-readEntered
+	close(releaseRead)
+	acknowledgedAt := boundAt.Add(time.Second)
+	acknowledged, err := store.AcknowledgeManagedAgentIdentity(context.Background(), identity, acknowledgedAt)
+	if err != nil || !acknowledged {
+		t.Fatalf("durable acknowledgement: acknowledged=%t err=%v", acknowledged, err)
+	}
+	identity.UpdatedAt = acknowledgedAt
+	d.recordManagedAgentIdentityProjection(identity, true)
+	poll <- acknowledgedAt
+	if err := <-done; err != nil {
+		t.Fatalf("projection-backed acknowledgement rejected after blocked durable read: %v", err)
+	}
+}
+
 func TestInitialManagedAgentAcknowledgementDoesNotTreatFirstInventoryOmissionAsExit(t *testing.T) {
 	d, store, runner := newSessionStartAcknowledgementTestDaemon(t)
 	runner.sessions["az-1"] = true

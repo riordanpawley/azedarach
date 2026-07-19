@@ -340,7 +340,7 @@ func (d *Daemon) validateManagedAgentSignalIdentity(ctx context.Context, project
 	if parent, _, ok := agentScopedSessionParentAndPane(sessionID); ok {
 		physicalSessionID = parent
 	}
-	panes, err := d.tmux.ListPaneInfos(ctx)
+	panes, err := d.tmux.ListPaneInfosForSession(ctx, physicalSessionID)
 	if err != nil {
 		return false, "", fmt.Errorf("list managed agent panes: %w", err)
 	}
@@ -368,6 +368,7 @@ func (d *Daemon) validateManagedAgentSignalIdentity(ctx context.Context, project
 		if err := store.UpsertManagedAgentIdentity(ctx, identity); err != nil {
 			return false, "", err
 		}
+		d.recordManagedAgentIdentityProjection(identity, false)
 		return true, "managed agent incarnation bound", nil
 	}
 	matched, err := store.MatchManagedAgentIdentity(ctx, identity)
@@ -378,13 +379,16 @@ func (d *Daemon) validateManagedAgentSignalIdentity(ctx context.Context, project
 		return false, "stale or reused managed agent incarnation", nil
 	}
 	if strings.TrimSpace(cmd.Event) == "user_prompt_submit" {
-		acknowledged, acknowledgeErr := store.AcknowledgeManagedAgentIdentity(ctx, identity, time.Now().UTC())
+		acknowledgedAt := time.Now().UTC()
+		acknowledged, acknowledgeErr := store.AcknowledgeManagedAgentIdentity(ctx, identity, acknowledgedAt)
 		if acknowledgeErr != nil {
 			return false, "", acknowledgeErr
 		}
 		if !acknowledged {
 			return false, "stale or reused managed agent incarnation", nil
 		}
+		identity.UpdatedAt = acknowledgedAt
+		d.recordManagedAgentIdentityProjection(identity, true)
 		return true, "managed agent prompt submission acknowledged", nil
 	}
 	return true, "managed agent incarnation matched", nil

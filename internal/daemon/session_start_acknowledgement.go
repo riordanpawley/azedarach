@@ -14,9 +14,10 @@ import (
 )
 
 const (
-	sessionStartAcknowledgementTimeout = 8 * time.Second
-	sessionStartAcknowledgementPoll    = 50 * time.Millisecond
-	sessionStartCompensationTimeout    = 8 * time.Second
+	sessionStartAcknowledgementTimeout       = 8 * time.Second
+	sessionStartAcknowledgementPoll          = 50 * time.Millisecond
+	sessionStartAcknowledgementSampleTimeout = 500 * time.Millisecond
+	sessionStartCompensationTimeout          = 8 * time.Second
 )
 
 type sessionStartBootstrapFailureReason string
@@ -66,6 +67,54 @@ type sessionStartAcknowledgementSample struct {
 	paneFound       bool
 }
 
+type managedAgentIdentityProjection struct {
+	identity     daemonstate.ManagedAgentIdentity
+	acknowledged bool
+}
+
+func managedAgentIdentityProjectionKey(projectID, sessionID, logicalPaneID string) string {
+	return strings.Join([]string{strings.TrimSpace(projectID), strings.TrimSpace(sessionID), strings.TrimSpace(logicalPaneID)}, "\x00")
+}
+
+func (d *Daemon) recordManagedAgentIdentityProjection(identity daemonstate.ManagedAgentIdentity, acknowledged bool) {
+	if d == nil {
+		return
+	}
+	key := managedAgentIdentityProjectionKey(identity.ProjectID, identity.SessionID, identity.LogicalPaneID)
+	d.managedAgentIdentityMu.Lock()
+	if d.managedAgentIdentityProjection == nil {
+		d.managedAgentIdentityProjection = map[string]managedAgentIdentityProjection{}
+	}
+	current, found := d.managedAgentIdentityProjection[key]
+	if found && current.identity.AgentIncarnation == identity.AgentIncarnation && current.identity.TmuxPaneID == identity.TmuxPaneID && current.identity.PanePID == identity.PanePID {
+		if current.acknowledged {
+			acknowledged = true
+			identity = current.identity
+		} else if acknowledged {
+			identity.ObservedAt = current.identity.ObservedAt
+		}
+	}
+	d.managedAgentIdentityProjection[key] = managedAgentIdentityProjection{identity: identity, acknowledged: acknowledged}
+	d.managedAgentIdentityMu.Unlock()
+}
+
+func (d *Daemon) projectedManagedAgentIdentity(projectID, sessionID, logicalPaneID string) (managedAgentIdentityProjection, bool) {
+	if d == nil {
+		return managedAgentIdentityProjection{}, false
+	}
+	d.managedAgentIdentityMu.RLock()
+	projection, found := d.managedAgentIdentityProjection[managedAgentIdentityProjectionKey(projectID, sessionID, logicalPaneID)]
+	d.managedAgentIdentityMu.RUnlock()
+	return projection, found
+}
+
+func (d *Daemon) readManagedAgentIdentity(ctx context.Context, store *daemonstate.RuntimeStateStore, projectID, sessionID, logicalPaneID string) (daemonstate.ManagedAgentIdentity, bool, error) {
+	if d != nil && d.managedAgentIdentityRead != nil {
+		return d.managedAgentIdentityRead(ctx, store, projectID, sessionID, logicalPaneID)
+	}
+	return store.GetManagedAgentIdentity(ctx, projectID, sessionID, logicalPaneID)
+}
+
 func (d *Daemon) validateRecoveredSessionStartPromptHandoff(path string) (sessionPromptHandoff, error) {
 	required := strings.TrimSpace(path) != ""
 	handoffType := sessionRestartPromptHandoffTypeNone
@@ -100,19 +149,32 @@ func (d *Daemon) waitForInitialManagedAgentAcknowledgementForPane(ctx context.Co
 
 func (d *Daemon) waitForInitialManagedAgentAcknowledgementWithPoll(waitCtx context.Context, store *daemonstate.RuntimeStateStore, projectID, sessionID, logicalPaneID, incarnation string, handoff sessionPromptHandoff, poll <-chan time.Time) error {
 	var last sessionStartAcknowledgementSample
+	var lastSampleErr error
 	exactPaneObserved := false
+	finalSample := false
 	for {
-		sampleCtx := waitCtx
-		var sampleCancel context.CancelFunc
+		sampleParent := waitCtx
 		if waitCtx.Err() != nil {
-			sampleCtx, sampleCancel = context.WithTimeout(context.WithoutCancel(waitCtx), time.Second)
+			if finalSample {
+				return d.initialSessionBootstrapFailure(context.WithoutCancel(waitCtx), sessionID, incarnation, last, sessionStartBootstrapAcknowledgementLost, errors.Join(waitCtx.Err(), lastSampleErr))
+			}
+			finalSample = true
+			sampleParent = context.WithoutCancel(waitCtx)
 		}
+		sampleCtx, sampleCancel := context.WithTimeout(sampleParent, sessionStartAcknowledgementSampleTimeout)
 		sample, err := d.sampleInitialManagedAgentAcknowledgement(sampleCtx, store, projectID, sessionID, logicalPaneID, incarnation, handoff)
-		if sampleCancel != nil {
-			sampleCancel()
-		}
+		sampleCancel()
 		if err != nil {
-			return &sessionStartBootstrapError{Reason: sessionStartBootstrapAcknowledgementLost, SessionID: sessionID, Incarnation: incarnation, Cause: err}
+			lastSampleErr = err
+			if finalSample {
+				continue
+			}
+			select {
+			case <-waitCtx.Done():
+				continue
+			case <-poll:
+				continue
+			}
 		}
 		last = sample
 		exactPane := sample.identityFound && sample.paneFound && managedAgentIdentityMatchesPane(sample.identity, sample.pane, incarnation)
@@ -145,15 +207,27 @@ func (d *Daemon) sampleInitialManagedAgentAcknowledgement(ctx context.Context, s
 	if err != nil {
 		return sessionStartAcknowledgementSample{}, err
 	}
-	identity, found, err := store.GetManagedAgentIdentity(ctx, projectID, sessionID, strings.TrimSpace(logicalPaneID))
-	if err != nil {
-		return sessionStartAcknowledgementSample{}, fmt.Errorf("load managed agent acknowledgement: %w", err)
+	logicalPaneID = strings.TrimSpace(logicalPaneID)
+	projection, projected := d.projectedManagedAgentIdentity(projectID, sessionID, logicalPaneID)
+	identity, found, submitted := projection.identity, projected, projection.acknowledged
+	if !projected || !projection.acknowledged {
+		durableIdentity, durableFound, err := d.readManagedAgentIdentity(ctx, store, projectID, sessionID, logicalPaneID)
+		if err != nil {
+			if !projected {
+				return sessionStartAcknowledgementSample{}, fmt.Errorf("load managed agent acknowledgement: %w", err)
+			}
+		} else if durableFound {
+			identity, found = durableIdentity, true
+			submitted = durableIdentity.UpdatedAt.After(durableIdentity.ObservedAt)
+			if submitted {
+				d.recordManagedAgentIdentityProjection(durableIdentity, true)
+			}
+		}
 	}
 	panes, err := d.tmux.ListPaneInfosForSession(ctx, sessionID)
 	if err != nil {
 		return sessionStartAcknowledgementSample{}, fmt.Errorf("inspect managed agent pane: %w", err)
 	}
-	submitted := found && identity.UpdatedAt.After(identity.ObservedAt)
 	sample := sessionStartAcknowledgementSample{promptConsumed: consumed, promptSubmitted: submitted, identity: identity, identityFound: found}
 	for _, pane := range panes {
 		if strings.TrimSpace(pane.SessionName) == strings.TrimSpace(sessionID) &&
