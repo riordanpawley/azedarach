@@ -98,14 +98,15 @@ func TestSessionStartFailureCompensationMatchesActualRuntime(t *testing.T) {
 			runtimeDBPath := filepath.Join(t.TempDir(), "runtime.db")
 			runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(runtimeDBPath, slog.Default())
 			t.Cleanup(func() { _ = runtimeStore.Close() })
-			seed := daemonstate.Session{ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateStarting, UpdatedAt: time.Now().UTC().Add(-time.Second)}
+			seedAt := time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
+			seed := daemonstate.Session{ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateStarting, UpdatedAt: seedAt}
 			if err := runtimeStore.UpsertSessionState(ctx, projectID, seed); err != nil {
 				t.Fatal(err)
 			}
 			if tc.seedPhysical {
-				physicalAt := time.Now().UTC().Add(-500 * time.Millisecond)
+				physicalAt := seedAt.Add(time.Second)
 				if tc.winnerAhead {
-					physicalAt = time.Now().UTC().Add(time.Hour)
+					physicalAt = time.Date(2200, time.January, 1, 0, 0, 0, 0, time.UTC)
 				}
 				if _, _, err := runtimeStore.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{ProjectID: projectID, SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "session", UpdatedAt: physicalAt}); err != nil {
 					t.Fatal(err)
