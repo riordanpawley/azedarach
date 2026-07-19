@@ -63,7 +63,7 @@ func TestBindTaskIntegrationPublicationOperationConvergesAcrossClients(t *testin
 		BaseOID: "base-a", SourceOID: "source-a", TargetOID: "result-a", PublicationOperationID: "publication-a",
 	}
 	if _, err := clients[0].AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{
-		Type: domain.IssueEventTaskIntegrationCompleted, Source: "test",
+		Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close", SourceCommand: "integrate-before-close",
 		Payload: map[string]any{
 			"project_id": binding.ProjectID, "source_branch": binding.SourceBranch, "target_branch": binding.TargetBranch,
 			"target_id": binding.TargetID, "configured_base_target": true, "integrated": true,
@@ -113,6 +113,93 @@ func TestBindTaskIntegrationPublicationOperationConvergesAcrossClients(t *testin
 	mismatch.TargetOID = "result-other"
 	if _, err := clients[0].BindTaskIntegrationPublicationOperation(ctx, issueID, mismatch); err == nil {
 		t.Fatal("exact revision mismatch unexpectedly rebound integration receipt")
+	}
+	mixedPayload := map[string]any{
+		"project_id": binding.ProjectID, "source_branch": binding.SourceBranch, "target_branch": binding.TargetBranch,
+		"target_id": binding.TargetID, "configured_base_target": true, "integrated": true,
+		"base_oid": binding.BaseOID, "source_oid": binding.SourceOID, "target_oid": binding.TargetOID,
+		"publication_operation_id": binding.PublicationOperationID, "historical_recovery_binding_id": "historical-a",
+	}
+	if _, err := clients[0].AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close", SourceCommand: "integrate-before-close", Payload: mixedPayload}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := clients[0].BindTaskIntegrationPublicationOperation(ctx, issueID, binding); err == nil || !strings.Contains(err.Error(), "mixed modern and historical authority") {
+		t.Fatalf("mixed authority error = %v, want rejection", err)
+	}
+}
+
+func TestBindTaskIntegrationHistoricalRecoveryOriginalReceiptRejectsCompetingAuthorizationAcrossClients(t *testing.T) {
+	parallelIssueStoreTest(t)
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "issues.db")
+	clients := []*Client{newTestClientAtPath(t, path, slog.Default()), newTestClientAtPath(t, path, slog.Default())}
+	t.Cleanup(func() {
+		for _, client := range clients {
+			_ = client.CloseDB()
+		}
+	})
+	issueID, err := clients[0].Create(ctx, CreateTaskParams{Title: "historical recovery", Type: domain.TypeBug, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	validation, err := clients[0].AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{Type: domain.IssueEventHistoricalValidationCompleted, Source: "agent", SourceCommand: "az issue record", Payload: map[string]any{"base_revision": "base-a", "candidate_revision": "result-a", "result": "clean"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := clients[0].AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{Type: domain.IssueEventHistoricalReviewAccepted, Source: "agent", SourceCommand: "az issue record", Payload: map[string]any{"base_revision": "base-a", "candidate_revision": "result-a", "review_result": "accepted"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := clients[0].AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close", SourceCommand: "integrate-before-close", Payload: map[string]any{"project_id": "project", "source_branch": "feature", "target_branch": "main", "target_id": "base", "configured_base_target": true, "integrated": true, "base_oid": "base-a", "source_oid": "source-a", "target_oid": "result-a", "publication_operation_id": ""}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseAuthorization := domain.HistoricalPublicationAuthorization{ValidationEventID: validation.ID, ReviewEventID: review.ID, ReceiptEventID: receipt.ID, ReviewerID: "reviewer-a", AuthoritativeEvidenceID: "evidence-a", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeRepository, Purpose: domain.ValidationPurposePushGate, Execution: domain.ValidationExecutionExecuted, Override: domain.ValidationOverrideNone, EvidencePresent: true, AttestsMissingLegacySemantics: true}
+	bindings := []TaskIntegrationHistoricalBinding{
+		{ProjectID: "project", SourceBranch: "feature", TargetBranch: "main", TargetID: "base", BaseOID: "base-a", SourceOID: "source-a", TargetOID: "result-a", BindingID: "binding-a", Authorization: baseAuthorization},
+		{ProjectID: "project", SourceBranch: "feature", TargetBranch: "main", TargetID: "base", BaseOID: "base-a", SourceOID: "source-a", TargetOID: "result-a", BindingID: "binding-b", Authorization: baseAuthorization},
+	}
+	bindings[1].Authorization.ReviewerID = "reviewer-b"
+	bindings[1].Authorization.AuthoritativeEvidenceID = "evidence-b"
+	ready := make(chan struct{}, len(clients))
+	start := make(chan struct{})
+	results := make(chan error, len(clients))
+	for i, client := range clients {
+		i, client := i, client
+		go func() {
+			ready <- struct{}{}
+			<-start
+			_, bindErr := client.BindTaskIntegrationHistoricalRecovery(ctx, issueID, bindings[i])
+			results <- bindErr
+		}()
+	}
+	for range clients {
+		<-ready
+	}
+	close(start)
+	var succeeded, rejected int
+	for range clients {
+		if bindErr := <-results; bindErr == nil {
+			succeeded++
+		} else if strings.Contains(bindErr.Error(), "competing historical authorization") {
+			rejected++
+		} else {
+			t.Fatalf("unexpected bind error: %v", bindErr)
+		}
+	}
+	if succeeded != 1 || rejected != 1 {
+		t.Fatalf("results succeeded=%d rejected=%d, want one authoritative winner and one competing rejection", succeeded, rejected)
+	}
+	authorizations, err := clients[0].ListIssueObservationEvents(ctx, issueID, IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationHistoricalAuthorized}, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipts, err := clients[0].ListIssueObservationEvents(ctx, issueID, IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted}, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(authorizations) != 1 || len(receipts) != 2 {
+		t.Fatalf("authorizations=%d receipts=%d, want one authorization and original plus one correction", len(authorizations), len(receipts))
 	}
 }
 

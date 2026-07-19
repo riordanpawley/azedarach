@@ -638,7 +638,7 @@ func (c *Client) BindTaskIntegrationHistoricalRecovery(ctx context.Context, issu
 			}
 
 			var correctedPayloadJSON, correctedSource, correctedCommand string
-			err = tx.QueryRowContext(ctx, `SELECT payload_json, source, source_command FROM issue_observation_events WHERE issue_id=? AND event_type=? AND json_extract(payload_json,'$.historical_recovery_binding_id')=? ORDER BY id DESC LIMIT 1`, issueID, string(domain.IssueEventTaskIntegrationCompleted), binding.BindingID).Scan(&correctedPayloadJSON, &correctedSource, &correctedCommand)
+			err = tx.QueryRowContext(ctx, `SELECT payload_json, source, source_command FROM issue_observation_events WHERE issue_id=? AND event_type=? AND json_extract(payload_json,'$.historical_original_receipt_event_id')=? ORDER BY id DESC LIMIT 1`, issueID, string(domain.IssueEventTaskIntegrationCompleted), receiptID).Scan(&correctedPayloadJSON, &correctedSource, &correctedCommand)
 			if err == nil {
 				var corrected map[string]any
 				if err := json.Unmarshal([]byte(correctedPayloadJSON), &corrected); err != nil {
@@ -651,6 +651,17 @@ func (c *Client) BindTaskIntegrationHistoricalRecovery(ctx context.Context, issu
 				correctedConfiguredBase, _ := corrected["configured_base_target"].(bool)
 				if correctedSource != "daemon-task-close" || correctedCommand != "historical-integration-recovery" || !correctedIntegrated || !correctedConfiguredBase || payloadString(corrected, "project_id") != binding.ProjectID || payloadString(corrected, "source_branch") != binding.SourceBranch || payloadString(corrected, "target_branch") != binding.TargetBranch || payloadString(corrected, "target_id") != binding.TargetID || payloadString(corrected, "base_oid") != binding.BaseOID || payloadString(corrected, "source_oid") != binding.SourceOID || payloadString(corrected, "target_oid") != binding.TargetOID {
 					return c.wrapError("bind-task-integration-historical", issueID, errors.New("historical correction provenance or exact integration identity is invalid"))
+				}
+				var correctionCount int
+				err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_observation_events WHERE issue_id=? AND event_type=? AND json_extract(payload_json,'$.historical_original_receipt_event_id')=?`, issueID, string(domain.IssueEventTaskIntegrationCompleted), receiptID).Scan(&correctionCount)
+				if err != nil {
+					return c.wrapError("bind-task-integration-historical", issueID, err)
+				}
+				if correctionCount > 1 {
+					return c.wrapError("bind-task-integration-historical", issueID, fmt.Errorf("original receipt %d has multiple competing historical corrections", receiptID))
+				}
+				if existingBindingID := payloadString(corrected, "historical_recovery_binding_id"); existingBindingID != binding.BindingID {
+					return c.wrapError("bind-task-integration-historical", issueID, fmt.Errorf("original receipt %d already has competing historical authorization %s", receiptID, existingBindingID))
 				}
 				if payloadString(corrected, "historical_original_receipt_event_id") != strconv.FormatInt(receiptID, 10) || payloadString(corrected, "historical_review_event_id") != strconv.FormatInt(binding.Authorization.ReviewEventID, 10) || payloadString(corrected, "historical_validation_event_id") != strconv.FormatInt(binding.Authorization.ValidationEventID, 10) {
 					return c.wrapError("bind-task-integration-historical", issueID, errors.New("historical correction does not match pinned authorization"))
@@ -771,7 +782,13 @@ func (c *Client) BindTaskIntegrationPublicationOperation(ctx context.Context, is
 			if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 				return c.wrapError("bind-task-integration-publication", issueID, fmt.Errorf("decode exact task integration receipt: %w", err))
 			}
-			payloadString := func(key string) string { return strings.TrimSpace(fmt.Sprint(payload[key])) }
+			payloadString := func(key string) string {
+				value, ok := payload[key]
+				if !ok || value == nil {
+					return ""
+				}
+				return strings.TrimSpace(fmt.Sprint(value))
+			}
 			integrated, _ := payload["integrated"].(bool)
 			configuredBase, _ := payload["configured_base_target"].(bool)
 			if !integrated || !configuredBase ||
