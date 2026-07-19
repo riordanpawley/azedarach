@@ -742,8 +742,7 @@ func (m *projectReadMaterializer) beginAuthoritativeReadRefreshForIssues(compone
 	defer m.mu.Unlock()
 	sequence := m.authoritativeReadRefreshSequence(component)
 	*sequence++
-	normalizedIssueIDs := uniqueStrings(issueIDs)
-	sort.Strings(normalizedIssueIDs)
+	normalizedIssueIDs := normalizeAuthoritativeRuntimeIssueIDs(issueIDs)
 	if component == authoritativeReadRefreshRuntime && len(normalizedIssueIDs) > 0 {
 		if m.authoritativeRuntimeIssueSequence == nil {
 			m.authoritativeRuntimeIssueSequence = map[string]uint64{}
@@ -753,6 +752,24 @@ func (m *projectReadMaterializer) beginAuthoritativeReadRefreshForIssues(compone
 		}
 	}
 	return authoritativeReadRefreshAttempt{sequence: *sequence, healthEpoch: m.healthEpoch, canonicalGeneration: m.canonicalGeneration, component: component, runtimeIssueIDs: normalizedIssueIDs}
+}
+
+func normalizeAuthoritativeRuntimeIssueIDs(issueIDs []string) []string {
+	seen := make(map[string]struct{}, len(issueIDs))
+	normalized := make([]string, 0, len(issueIDs))
+	for _, issueID := range issueIDs {
+		issueID = strings.TrimSpace(issueID)
+		if issueID == "" {
+			continue
+		}
+		if _, exists := seen[issueID]; exists {
+			continue
+		}
+		seen[issueID] = struct{}{}
+		normalized = append(normalized, issueID)
+	}
+	sort.Strings(normalized)
+	return normalized
 }
 
 func (m *projectReadMaterializer) finishAuthoritativeReadRefresh(attempt authoritativeReadRefreshAttempt, err error) bool {
@@ -1563,7 +1580,7 @@ func (d *Daemon) refreshProjectReadRuntimeForIssues(ctx context.Context, project
 }
 
 func (d *Daemon) refreshActiveProjectReadRuntimeForIssues(ctx context.Context, projectID string, materializer *projectReadMaterializer, issueIDs []string) error {
-	issueIDs = uniqueStrings(issueIDs)
+	issueIDs = normalizeAuthoritativeRuntimeIssueIDs(issueIDs)
 	attempt := materializer.beginAuthoritativeReadRefreshForIssues(authoritativeReadRefreshRuntime, issueIDs)
 	if err := materializer.refreshRuntime(ctx, issueIDs); err != nil {
 		materializer.finishAuthoritativeReadRefresh(attempt, err)

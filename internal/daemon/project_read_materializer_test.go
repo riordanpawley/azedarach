@@ -606,7 +606,7 @@ func TestConcurrentDisjointRuntimeRefreshesBothSyncUserProjection(t *testing.T) 
 
 	aDone := make(chan error, 1)
 	go func() {
-		aDone <- d.refreshActiveProjectReadRuntimeForIssues(ctx, projectID, reader, []string{issueA})
+		aDone <- d.refreshActiveProjectReadRuntimeForIssues(ctx, projectID, reader, []string{" " + issueA + " ", issueA, issueA})
 	}()
 	<-aEntered
 	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, projectID, reader, []string{issueB}); err != nil {
