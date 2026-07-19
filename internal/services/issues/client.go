@@ -51,6 +51,8 @@ type OrchestrationProjectionExport struct {
 	InvestigationAcceptances map[string]domain.InvestigationAcceptance
 	ObservationEvents        ProjectIssueObservationCapture
 	CompletionEvents         map[string]domain.IssueObservationEvent
+	DecisionEvents           map[string][]domain.IssueObservationEvent
+	TrustedReviewOutcomes    map[string]domain.ReviewOutcome
 }
 
 // ExportOrchestrationProjection reads a bounded project graph plus its durable
@@ -111,6 +113,31 @@ func (c *Client) ExportOrchestrationProjection(ctx context.Context, projectID st
 	if err != nil {
 		return OrchestrationProjectionExport{}, err
 	}
+	decisionEvents, err := c.listIssueDecisionObservationEventsByIssue(ctx, tx, issueIDs)
+	if err != nil {
+		return OrchestrationProjectionExport{}, err
+	}
+	trustedReviewEvents, err := c.listLatestIssueObservationEventsByIssue(ctx, tx, LatestIssueObservationEventOptions{
+		IssueIDs:       issueIDs,
+		Type:           domain.IssueEventReviewCompleted,
+		Source:         "daemon-orchestration",
+		SourceCommands: []string{"review-accept", "review-return"},
+		CommandOutcomePairs: []IssueObservationCommandOutcomePair{
+			{SourceCommand: "review-accept", Outcomes: []string{string(domain.ReviewOutcomeAccepted), string(domain.ReviewOutcomeIntegrationFailed)}},
+			{SourceCommand: "review-return", Outcomes: []string{string(domain.ReviewOutcomeReturned)}},
+		},
+		RequiredPayloadTextKeys: []string{"actor_id"},
+		CurrentReviewEpoch:      true,
+	})
+	if err != nil {
+		return OrchestrationProjectionExport{}, err
+	}
+	trustedReviewOutcomes := make(map[string]domain.ReviewOutcome, len(trustedReviewEvents))
+	for issueID, event := range trustedReviewEvents {
+		if outcome, trusted := domain.TrustedReviewOutcome(event); trusted {
+			trustedReviewOutcomes[issueID] = outcome
+		}
+	}
 	var openIssueCount int
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM issues
@@ -139,6 +166,8 @@ func (c *Client) ExportOrchestrationProjection(ctx context.Context, projectID st
 		InvestigationAcceptances: investigationAcceptances,
 		ObservationEvents:        observationEvents,
 		CompletionEvents:         completionEvents,
+		DecisionEvents:           decisionEvents,
+		TrustedReviewOutcomes:    trustedReviewOutcomes,
 	}, nil
 }
 

@@ -1121,6 +1121,10 @@ func (c *Client) ListIssueDecisionObservationEventsByIssue(ctx context.Context, 
 	if err != nil {
 		return nil, err
 	}
+	return c.listIssueDecisionObservationEventsByIssue(ctx, db, issueIDs)
+}
+
+func (c *Client) listIssueDecisionObservationEventsByIssue(ctx context.Context, q sqlIssueDBTX, issueIDs []string) (map[string][]domain.IssueObservationEvent, error) {
 	issueIDs = normalizeOrderedIDs(issueIDs)
 	out := make(map[string][]domain.IssueObservationEvent, len(issueIDs))
 	if len(issueIDs) == 0 {
@@ -1130,7 +1134,7 @@ func (c *Client) ListIssueDecisionObservationEventsByIssue(ctx context.Context, 
 	if err != nil {
 		return nil, c.wrapError("list-decision-observation-events-batch", "", err)
 	}
-	rows, err := db.QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 		WITH requested(issue_id) AS (SELECT value FROM json_each(?))
 		SELECT e.id, e.issue_id, e.event_type, e.observed_at, e.source, e.source_command, e.operation_id, e.session_id, e.worktree_path, e.payload_json
 		FROM issue_observation_events e

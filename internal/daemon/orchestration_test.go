@@ -2343,6 +2343,69 @@ func TestProjectOrchestrationSnapshotCapturesPostPreparationReviewEvidence(t *te
 	}
 }
 
+func TestProjectOrchestrationSnapshotExcludesPostCursorDecisionAndReviewOutcomes(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	path := filepath.Join(repoDir, "issues.db")
+	reader := newMigratedIssueClientAtPath(t, path, slog.Default())
+	writer := newMigratedIssueClientAtPath(t, path, slog.Default())
+	t.Cleanup(func() { _ = reader.CloseDB(); _ = writer.CloseDB() })
+	decisionIssue, err := reader.Create(ctx, issues.CreateTaskParams{Title: "decision candidate", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewIssue := createReviewTask(t, ctx, reader, domain.P1, "orchestrator")
+	d := newOrchestrationReviewTestDaemon(repoDir, reader)
+	d.orchestrationSnapshotAuxiliaryRead = func(context.Context) error {
+		d.orchestrationSnapshotAuxiliaryRead = nil
+		if _, appendErr := writer.AppendIssueObservationEvent(ctx, decisionIssue, issues.IssueObservationEventParams{
+			Type: domain.IssueEventDecisionChanged, Source: "daemon-decision", SourceCommand: protocol.CommandDecisionUpdate,
+			Payload: map[string]any{"decision_id": "decision-after-cursor", "revision": int64(1), "material": true},
+		}); appendErr != nil {
+			return appendErr
+		}
+		_, appendErr := writer.AppendIssueObservationEvent(ctx, reviewIssue, issues.IssueObservationEventParams{
+			Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
+			Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer"},
+		})
+		return appendErr
+	}
+
+	current, err := d.orchestrationAuthority().Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", RepoDir: repoDir, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending := current.PendingDecisions[decisionIssue]; len(pending) != 0 {
+		t.Fatalf("current cursor pending decisions = %+v, want post-cursor decision excluded", pending)
+	}
+	if review := reviewByIssueID(current.ReviewQueue, reviewIssue); slices.Contains(review.Reasons, "accepted-close-pending") {
+		t.Fatalf("current cursor review = %+v, want post-cursor trusted outcome excluded", review)
+	}
+
+	next, err := d.orchestrationAuthority().Snapshot(ctx, "project", protocol.OrchestrationSnapshotRequest{Scope: domain.ProjectOrchestrationScope(), ActorID: "orchestrator", RepoDir: repoDir, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending := next.PendingDecisions[decisionIssue]; len(pending) != 1 || pending[0].DecisionID != "decision-after-cursor" {
+		t.Fatalf("next cursor pending decisions = %+v, want appended decision", pending)
+	}
+	if review := reviewByIssueID(next.ReviewQueue, reviewIssue); !slices.Contains(review.Reasons, "accepted-close-pending") {
+		t.Fatalf("next cursor review = %+v, want appended trusted outcome", review)
+	}
+	if next.ProjectionRevision == current.ProjectionRevision {
+		t.Fatalf("projection revision did not advance: current=%d next=%d", current.ProjectionRevision, next.ProjectionRevision)
+	}
+}
+
+func reviewByIssueID(queue []protocol.OrchestrationReview, issueID string) protocol.OrchestrationReview {
+	for _, review := range queue {
+		if review.IssueID == issueID {
+			return review
+		}
+	}
+	return protocol.OrchestrationReview{}
+}
+
 func TestProjectOrchestrationSnapshotRemainsAvailableDuringPostExportRevisionChurn(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "issues.db")

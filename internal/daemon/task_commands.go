@@ -5126,9 +5126,14 @@ func (d *Daemon) taskReadiness(ctx context.Context, projectID, issueID, repoDir 
 			return taskIntegrationReadinessResult{}, fmt.Errorf("reconcile issue decision propagation: %w", err)
 		}
 	}
-	decisionEvents, err := issueClient.ListIssueDecisionObservationEvents(ctx, task.ID.String())
-	if err != nil {
-		return taskIntegrationReadinessResult{}, fmt.Errorf("inspect issue decision acknowledgements: %w", err)
+	var decisionEvents []domain.IssueObservationEvent
+	if projection, prepared := orchestrationSnapshotProjection(ctx); prepared {
+		decisionEvents = projection.DecisionEvents[task.ID.String()]
+	} else {
+		decisionEvents, err = issueClient.ListIssueDecisionObservationEvents(ctx, task.ID.String())
+		if err != nil {
+			return taskIntegrationReadinessResult{}, fmt.Errorf("inspect issue decision acknowledgements: %w", err)
+		}
 	}
 	pendingDecisions := domain.ReducePendingDecisionChanges(decisionEvents)
 	decisionReasons := pendingDecisionReadinessReasons(pendingDecisions)

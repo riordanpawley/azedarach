@@ -1166,9 +1166,15 @@ func (a daemonOrchestrationAuthority) enrichPendingDecisions(ctx context.Context
 			issueIDs = append(issueIDs, task.ID.String())
 		}
 	}
-	eventsByIssue, err := issueClient.ListIssueDecisionObservationEventsByIssue(ctx, issueIDs)
-	if err != nil {
-		return fmt.Errorf("load pending decisions: %w", err)
+	eventsByIssue := map[string][]domain.IssueObservationEvent{}
+	if projection, prepared := orchestrationSnapshotProjection(ctx); prepared {
+		eventsByIssue = projection.DecisionEvents
+	} else {
+		var err error
+		eventsByIssue, err = issueClient.ListIssueDecisionObservationEventsByIssue(ctx, issueIDs)
+		if err != nil {
+			return fmt.Errorf("load pending decisions: %w", err)
+		}
 	}
 	for _, issueID := range issueIDs {
 		pending := domain.ReducePendingDecisionChanges(eventsByIssue[issueID])

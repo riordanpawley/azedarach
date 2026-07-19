@@ -45,6 +45,7 @@ var migrationRegistrations = []sqlitemigration.Artifact{
 const projectionVersion = 2
 const DefaultProjectionMaxAge = 2 * time.Minute
 const migrationArtifactAuthority sqlitemigration.Authority = "user.projection"
+const userProjectionMaxOpenConns = 4
 
 type Store struct {
 	db                    *sql.DB
@@ -114,6 +115,8 @@ func Open(path string, options ...Option) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	db.SetMaxOpenConns(userProjectionMaxOpenConns)
+	db.SetMaxIdleConns(userProjectionMaxOpenConns)
 	s := &Store{db: db, dbPath: path, maxProjectionAge: DefaultProjectionMaxAge, now: func() time.Time { return time.Now().UTC() }}
 	for _, option := range options {
 		if option != nil {

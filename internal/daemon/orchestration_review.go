@@ -225,6 +225,15 @@ func reviewOutcomeLookupCandidate(task domain.Task) bool {
 }
 
 func (a daemonOrchestrationAuthority) latestTrustedReviewOutcomes(ctx context.Context, projectID string, issueIDs []string) (map[string]string, error) {
+	if projection, prepared := orchestrationSnapshotProjection(ctx); prepared {
+		outcomes := make(map[string]string, len(issueIDs))
+		for _, issueID := range issueIDs {
+			if outcome := projection.TrustedReviewOutcomes[issueID]; outcome != "" {
+				outcomes[issueID] = string(outcome)
+			}
+		}
+		return outcomes, nil
+	}
 	issueClient := a.daemon.issueClientForProject(projectID)
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")
