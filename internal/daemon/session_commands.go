@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -23,6 +22,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/attachment"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/services/processgroup"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
 )
 
@@ -5950,10 +5950,7 @@ func (d *Daemon) runSessionShell(ctx context.Context, shell, workdir, command st
 	if d != nil && d.sessionShellRun != nil {
 		return d.sessionShellRun(ctx, shell, workdir, command, env)
 	}
-	cmd := exec.CommandContext(ctx, shell, "-lc", command)
-	cmd.Dir = workdir
-	cmd.Env = env
-	return cmd.CombinedOutput()
+	return processgroup.RunCombined(ctx, workdir, env, shell, "-lc", command)
 }
 
 func worktreeInitCommandEnv(initCtx worktreeInitContext, phase string) []string {

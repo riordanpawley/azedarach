@@ -10,12 +10,15 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -202,6 +205,45 @@ func TestSessionStartFailureCompensationGivesLaterStagesIndependentContexts(t *t
 	}
 	if contextCalls < 2 {
 		t.Fatalf("compensation context calls = %d, want independent contexts for later stages", contextCalls)
+	}
+}
+
+func TestRunSessionShellCancellationDrainsDescendantOutputPipes(t *testing.T) {
+	ready := make(chan os.Signal, 1)
+	signal.Notify(ready, syscall.SIGUSR1)
+	t.Cleanup(func() { signal.Stop(ready) })
+
+	pidFile := strings.TrimSpace(os.Getenv("AZEDARACH_DTV_TEST_PID_FILE"))
+	if pidFile == "" {
+		pidFile = filepath.Join(t.TempDir(), "cleanup-child.pid")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	d := &Daemon{}
+	type runResult struct {
+		output []byte
+		err    error
+	}
+	done := make(chan runResult, 1)
+	workdir := t.TempDir()
+	command := `/bin/sh -c 'trap "" TERM; printf "%s" "$$" > "$AZEDARACH_TEST_CHILD_PID_FILE"; kill -USR1 "$AZEDARACH_TEST_PARENT_PID"; while :; do sleep 60; done' & wait`
+	go func() {
+		output, err := d.runSessionShell(ctx, "/bin/sh", workdir, command, append(os.Environ(),
+			"AZEDARACH_TEST_PARENT_PID="+strconv.Itoa(os.Getpid()),
+			"AZEDARACH_TEST_CHILD_PID_FILE="+pidFile,
+		))
+		done <- runResult{output: output, err: err}
+	}()
+
+	<-ready
+	cancel()
+	result := <-done
+	if !errors.Is(result.err, context.Canceled) {
+		t.Fatalf("runSessionShell error = %v, want context cancellation; output=%q", result.err, result.output)
+	}
+	childPID, err := os.ReadFile(pidFile)
+	if err != nil || strings.TrimSpace(string(childPID)) == "" {
+		t.Fatalf("managed cleanup descendant pid = %q err=%v", childPID, err)
 	}
 }
 

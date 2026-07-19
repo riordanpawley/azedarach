@@ -3,15 +3,12 @@ package git
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
+	"github.com/riordanpawley/azedarach/internal/services/processgroup"
 )
 
 // CommandRunner executes git commands and returns their output.
@@ -33,8 +30,10 @@ type ExecRunner struct {
 	outputObserver processOutputObserver
 }
 
-type processOutputObserver func(stream string, output []byte)
+type processOutputObserver = processgroup.OutputObserver
 
+// processOutputWriter remains as the focused observer contract seam. Process
+// lifecycle ownership lives in processgroup.Run.
 type processOutputWriter struct {
 	stream   string
 	dst      *bytes.Buffer
@@ -124,44 +123,8 @@ func runProcessGroupCommandWithObserver(ctx context.Context, dir string, env []s
 }
 
 func runProcessGroupCommandRawWithObserver(ctx context.Context, dir string, env []string, observer processOutputObserver, name string, args ...string) (stdoutText, stderrText string, err error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir = dir
-	cmd.Env = env
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.WaitDelay = 2 * time.Second
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return os.ErrProcessDone
-		}
-		pid := cmd.Process.Pid
-		if signalErr := syscall.Kill(-pid, syscall.SIGTERM); signalErr != nil {
-			if errors.Is(signalErr, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return signalErr
-		}
-		timer := time.NewTimer(500 * time.Millisecond)
-		defer timer.Stop()
-		<-timer.C
-		if syscall.Kill(-pid, 0) == nil {
-			_ = syscall.Kill(-pid, syscall.SIGKILL)
-		}
-		return nil
-	}
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = processOutputWriter{stream: "stdout", dst: &stdout, observer: observer}
-	cmd.Stderr = processOutputWriter{stream: "stderr", dst: &stderr, observer: observer}
-	err = cmd.Run()
-	stdoutText = stdout.String()
-	stderrText = strings.TrimSpace(stderr.String())
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		err = ctxErr
-	}
-	return stdoutText, stderrText, err
+	stdoutText, stderrText, err = processgroup.Run(ctx, dir, env, observer, name, args...)
+	return stdoutText, strings.TrimSpace(stderrText), err
 }
 
 func gitOperation(args []string) string {
