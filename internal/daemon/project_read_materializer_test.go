@@ -790,6 +790,195 @@ func TestConcurrentSameIssueOlderRuntimeFailureIsSuperseded(t *testing.T) {
 	}
 }
 
+func TestConcurrentPartialOverlapPublishesOnlySettledOwnedKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		releaseNewerFirst bool
+		olderErr          error
+		newerErr          error
+		wantSync          [][]string
+		wantHealth        string
+	}{
+		{name: "newer pending older succeeds", wantSync: [][]string{{"issue-b"}, {"issue-a"}}},
+		{name: "newer succeeds before older", releaseNewerFirst: true, wantSync: [][]string{{"issue-a"}, {"issue-b"}}},
+		{name: "newer fails before older succeeds", releaseNewerFirst: true, newerErr: errors.New("issue-a newer failed"), wantSync: [][]string{{"issue-b"}}, wantHealth: "issue-a newer failed"},
+		{name: "newer succeeds before older fails", releaseNewerFirst: true, olderErr: errors.New("issue-b older failed"), wantSync: [][]string{{"issue-a"}}, wantHealth: "issue-b older failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			const (
+				projectID = "project"
+				issueA    = "issue-a"
+				issueB    = "issue-b"
+			)
+			tasks := map[string]domain.Task{
+				issueA: {ID: issueA, Title: "A", Status: domain.StatusInProgress, Type: domain.TypeTask},
+				issueB: {ID: issueB, Title: "B", Status: domain.StatusInProgress, Type: domain.TypeTask},
+			}
+			olderEntered, newerEntered := make(chan struct{}), make(chan struct{})
+			releaseOlder, releaseNewer := make(chan struct{}), make(chan struct{})
+			reader := newProjectReadMaterializer(projectID, nil, func(_ context.Context, hydrated []domain.Task) ([]domain.Task, error) {
+				if len(hydrated) == 2 {
+					close(olderEntered)
+					<-releaseOlder
+					return hydrated, tc.olderErr
+				}
+				close(newerEntered)
+				<-releaseNewer
+				return hydrated, tc.newerErr
+			})
+			issueKeys, runtimeKeys := checkpointMaterializedTasks(tasks, tasks)
+			reader.replaceBootstrap(tasks, tasks, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+			var (
+				syncMu    sync.Mutex
+				syncCalls [][]string
+			)
+			d := &Daemon{
+				cfg:           Config{},
+				materializers: map[string]*projectReadMaterializer{projectID: reader},
+				projectReadUserProjectionSync: func(_ context.Context, _ string, issueIDs []string) error {
+					copied := append([]string(nil), issueIDs...)
+					slices.Sort(copied)
+					syncMu.Lock()
+					syncCalls = append(syncCalls, copied)
+					syncMu.Unlock()
+					return nil
+				},
+			}
+
+			olderDone := make(chan error, 1)
+			go func() {
+				olderDone <- d.refreshActiveProjectReadRuntimeForIssues(ctx, projectID, reader, []string{issueA, issueB})
+			}()
+			<-olderEntered
+			newerDone := make(chan error, 1)
+			go func() {
+				newerDone <- d.refreshActiveProjectReadRuntimeForIssues(ctx, projectID, reader, []string{issueA})
+			}()
+			<-newerEntered
+			if tc.releaseNewerFirst {
+				close(releaseNewer)
+				if err := <-newerDone; (err != nil) != (tc.newerErr != nil) {
+					t.Fatalf("newer error = %v, configured=%v", err, tc.newerErr)
+				}
+			}
+			close(releaseOlder)
+			if err := <-olderDone; (err != nil) != (tc.olderErr != nil) {
+				t.Fatalf("older error = %v, configured=%v", err, tc.olderErr)
+			}
+			if !tc.releaseNewerFirst {
+				close(releaseNewer)
+				if err := <-newerDone; (err != nil) != (tc.newerErr != nil) {
+					t.Fatalf("newer error = %v, configured=%v", err, tc.newerErr)
+				}
+			}
+			syncMu.Lock()
+			gotSync := append([][]string(nil), syncCalls...)
+			syncMu.Unlock()
+			if !reflect.DeepEqual(gotSync, tc.wantSync) {
+				t.Fatalf("sync calls = %v, want %v", gotSync, tc.wantSync)
+			}
+			health := reader.snapshotMetadata().Health
+			if tc.wantHealth == "" && health != "healthy" {
+				t.Fatalf("health = %q, want healthy", health)
+			}
+			if tc.wantHealth != "" && !strings.Contains(health, tc.wantHealth) {
+				t.Fatalf("health = %q, want %q", health, tc.wantHealth)
+			}
+		})
+	}
+}
+
+func TestCanonicalChangeRetiresOnlyAffectedRuntimeHealth(t *testing.T) {
+	for _, operation := range []string{"delete", "replace"} {
+		for _, unrelatedFailure := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/unrelated=%t", operation, unrelatedFailure), func(t *testing.T) {
+				const (
+					issueA = "issue-a"
+					issueB = "issue-b"
+				)
+				canonical := map[string]domain.Task{
+					issueA: {ID: issueA, Title: "A", Status: domain.StatusOpen, Type: domain.TypeTask},
+					issueB: {ID: issueB, Title: "B", Status: domain.StatusOpen, Type: domain.TypeTask},
+				}
+				issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, canonical)
+				reader := newProjectReadMaterializer("project", nil, nil)
+				reader.replaceBootstrap(canonical, canonical, materializedMetadata(0, 1, issueProjectionProjector(), nil, issueKeys.sum(), runtimeKeys.sum(), "healthy"), issueKeys, runtimeKeys)
+				failedA := reader.beginAuthoritativeReadRefreshForIssues(authoritativeReadRefreshRuntime, []string{issueA})
+				reader.finishAuthoritativeReadRefresh(failedA, errors.New("issue-a stale failure"))
+				if unrelatedFailure {
+					failedB := reader.beginAuthoritativeReadRefreshForIssues(authoritativeReadRefreshRuntime, []string{issueB})
+					reader.finishAuthoritativeReadRefresh(failedB, errors.New("issue-b retained failure"))
+				}
+
+				var batch protocol.ProjectionDeltaBatch
+				if operation == "delete" {
+					batch = protocol.ProjectionDeltaBatch{
+						SchemaVersion: protocol.ProjectionDeltaSchemaVersion, ProjectID: "project", AfterCursor: 0, HeadCursor: 1, DeliveryToCursor: 1,
+						DeliveryContract: protocol.ProjectionDeliveryContract, DeliveryCursorTransitional: true, Projector: issueProjectionProjector(), Health: "healthy",
+						Deltas: []protocol.ProjectionDelta{{Cursor: 1, Kind: protocol.ProjectionKind(domain.ProjectionKindIssue), Key: issueA, Operation: protocol.ProjectionDeltaDelete}},
+					}
+					protocol.FinalizeProjectionDeltaBatch(&batch)
+				} else {
+					replacement := canonical[issueA]
+					replacement.Title = "A replaced"
+					batch = productionMaterializerBatch(t, replacement, 0)
+				}
+				if _, err := reader.applyCanonicalBatch(context.Background(), batch); err != nil {
+					t.Fatalf("apply canonical %s: %v", operation, err)
+				}
+
+				reader.mu.RLock()
+				_, hasSequenceA := reader.authoritativeRuntimeIssueSequence[issueA]
+				_, hasSequenceB := reader.authoritativeRuntimeIssueSequence[issueB]
+				_, hasFailureA := reader.authoritativeRuntimeFailures[issueA]
+				_, hasFailureB := reader.authoritativeRuntimeFailures[issueB]
+				reader.mu.RUnlock()
+				if hasSequenceA || hasFailureA {
+					t.Fatalf("%s retained issue-a runtime state: sequence=%t failure=%t", operation, hasSequenceA, hasFailureA)
+				}
+				health := reader.snapshotMetadata().Health
+				if unrelatedFailure {
+					if !hasSequenceB || !hasFailureB || !strings.Contains(health, "issue-b retained failure") || strings.Contains(health, "issue-a stale failure") {
+						t.Fatalf("%s health = %q sequenceB=%t failureB=%t, want only issue-b state", operation, health, hasSequenceB, hasFailureB)
+					}
+				} else if health != "healthy" {
+					t.Fatalf("%s health = %q, want healthy after retiring final failure", operation, health)
+				}
+			})
+		}
+	}
+}
+
+func TestEmptyNormalizedRuntimeRefreshDoesNotBeginAttemptOrMutateHealth(t *testing.T) {
+	reader := newProjectReadMaterializer("project", nil, nil)
+	failed := reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	reader.finishAuthoritativeReadRefresh(failed, errors.New("existing runtime failure"))
+	before := reader.snapshotMetadata()
+	beforeSequence := reader.authoritativeRuntimeRefreshSequence
+	var syncCalls atomic.Int32
+	d := &Daemon{
+		cfg:           Config{},
+		materializers: map[string]*projectReadMaterializer{"project": reader},
+		projectReadUserProjectionSync: func(context.Context, string, []string) error {
+			syncCalls.Add(1)
+			return nil
+		},
+	}
+	if err := d.refreshActiveProjectReadRuntimeForIssues(context.Background(), "project", reader, []string{"", "  "}); err != nil {
+		t.Fatalf("empty normalized refresh: %v", err)
+	}
+	if got := reader.authoritativeRuntimeRefreshSequence; got != beforeSequence {
+		t.Fatalf("runtime attempt sequence = %d, want unchanged %d", got, beforeSequence)
+	}
+	if after := reader.snapshotMetadata(); after.Health != before.Health || after.SemanticChecksum != before.SemanticChecksum {
+		t.Fatalf("empty refresh mutated metadata: before=%+v after=%+v", before, after)
+	}
+	if got := syncCalls.Load(); got != 0 {
+		t.Fatalf("empty refresh sync calls = %d, want 0", got)
+	}
+}
+
 func TestRefreshOwnedSyncFencesMutationAndStructuralHealthTransitions(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
