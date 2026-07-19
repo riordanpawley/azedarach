@@ -202,6 +202,30 @@ func TestInitialManagedAgentAcknowledgementTreatsAbsenceAfterExactPresenceAsExit
 	}
 }
 
+func TestInitialManagedAgentAcknowledgementTreatsNeverObservedInventoryAbsenceAsLost(t *testing.T) {
+	d, store, runner := newSessionStartAcknowledgementTestDaemon(t)
+	runner.sessions["az-1"] = true
+	runner.sessionsWithoutPanes["az-1"] = true
+	prompt := filepath.Join(t.TempDir(), "pending.prompt")
+	if err := os.WriteFile(prompt, []byte("worker prompt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	poll := make(chan time.Time)
+	err := d.waitForInitialManagedAgentAcknowledgementWithPoll(ctx, store, "project", "az-1", "agent", "planned", sessionPromptHandoff{PromptPath: prompt}, poll)
+	var bootstrapErr *sessionStartBootstrapError
+	if !errors.As(err, &bootstrapErr) || bootstrapErr.Reason != sessionStartBootstrapAcknowledgementLost {
+		t.Fatalf("error = %#v, want never-observed inventory absence classified as acknowledgement loss", err)
+	}
+	if runner.listPanesCalls != 1 {
+		t.Fatalf("list pane calls = %d, want one explicit never-observed sample", runner.listPanesCalls)
+	}
+	if identity, found, err := store.GetManagedAgentIdentity(context.Background(), "project", "az-1", "agent"); err != nil || found {
+		t.Fatalf("managed identity = %+v found=%t err=%v, want absent", identity, found, err)
+	}
+}
+
 func TestInitialManagedAgentAcknowledgementRejectsExactIdentityAfterShellFallback(t *testing.T) {
 	d, store, runner := newSessionStartAcknowledgementTestDaemon(t)
 	runner.sessions["az-1"] = true
