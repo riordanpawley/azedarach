@@ -1595,6 +1595,52 @@ func (d *Daemon) recoverInterruptedOperation(ctx context.Context, record daemono
 		return interruptedOperationRecovery{}, false
 	}
 	canonicalID := naming.CanonicalSessionID(d.sessionNamingScope(projectID), record.IssueID)
+	plannedIncarnation := ""
+	promptHandoffPath := ""
+	agentLaunchRequired := true
+	if record.Progress != nil {
+		plannedIncarnation = strings.TrimSpace(record.Progress.AgentIncarnation)
+		promptHandoffPath = record.Progress.PromptHandoffPath
+		agentLaunchRequired = interruptedSessionStartAgentLaunchRequired(record.Progress)
+	}
+	if !agentLaunchRequired {
+		if d.tmux == nil {
+			return interruptedOperationRecovery{State: daemonops.StateFailed, ErrorMessage: "recover tmux-only session start: tmux adapter unavailable"}, true
+		}
+		live, liveErr := d.tmux.HasSession(ctx, canonicalID)
+		if liveErr != nil || !live {
+			cleanupNote := d.compensateInterruptedSessionStart(ctx, store, projectID, canonicalID, record.IssueID)
+			if liveErr != nil {
+				return interruptedOperationRecovery{State: daemonops.StateFailed, ErrorMessage: fmt.Sprintf("recover tmux-only session start: inspect tmux session: %v%s", liveErr, cleanupNote)}, true
+			}
+			return interruptedOperationRecovery{State: daemonops.StateFailed, ErrorMessage: "recover tmux-only session start: tmux session disappeared" + cleanupNote}, true
+		}
+	} else {
+		if plannedIncarnation == "" {
+			cleanupNote := d.compensateInterruptedSessionStart(ctx, store, projectID, canonicalID, record.IssueID)
+			return interruptedOperationRecovery{
+				State:        daemonops.StateFailed,
+				ErrorMessage: "session.start interrupted before durable managed-agent incarnation planning" + cleanupNote,
+			}, true
+		}
+		handoff, handoffErr := d.validateRecoveredSessionStartPromptHandoff(promptHandoffPath)
+		if handoffErr != nil {
+			cleanupNote := d.compensateInterruptedSessionStart(ctx, store, projectID, canonicalID, record.IssueID)
+			return interruptedOperationRecovery{
+				State:        daemonops.StateFailed,
+				ErrorMessage: fmt.Sprintf("validate recovered session start prompt handoff: %v%s", handoffErr, cleanupNote),
+			}, true
+		}
+		ackErr := d.waitForInitialManagedAgentAcknowledgement(ctx, projectID, canonicalID, plannedIncarnation, handoff)
+		if ackErr != nil {
+			handoff.remove()
+			cleanupNote := d.compensateInterruptedSessionStart(ctx, store, projectID, canonicalID, record.IssueID)
+			return interruptedOperationRecovery{
+				State:        daemonops.StateFailed,
+				ErrorMessage: fmt.Sprintf("recover managed agent bootstrap: %v%s", ackErr, cleanupNote),
+			}, true
+		}
+	}
 	rootedScope, scopeErr := domain.RootedOrchestrationScope(record.IssueID)
 	if scopeErr != nil {
 		return interruptedOperationRecovery{}, false
@@ -1615,6 +1661,47 @@ func (d *Daemon) recoverInterruptedOperation(ctx context.Context, record daemono
 			)
 		}
 		return interruptedOperationRecovery{}, false
+	}
+	rootedExpected := rootedOwned
+	if !rootedExpected {
+		if _, found, loadErr := store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, record.IssueID); loadErr != nil {
+			return interruptedOperationRecovery{}, false
+		} else if found {
+			rootedExpected = true
+		} else if issueClient := d.issueClientForProject(projectID); issueClient != nil {
+			if task, taskErr := issueClient.GetWithRuntime(ctx, projectID, record.IssueID); taskErr == nil && task.Type == domain.TypeEpic {
+				rootedExpected = true
+			}
+		}
+	}
+	selector := normalizeSessionIntentSelector(sessionIntentSelector{}, record.IssueID)
+	if rootedExpected {
+		selector = sessionIntentSelector{Role: daemonstate.SessionRoleOrchestrator, ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: record.IssueID}
+	}
+	projected, projectedFound, projectedErr := store.GetSessionIntent(ctx, projectID, selector.Role, selector.ScopeKind, selector.ScopeID)
+	if projectedErr != nil {
+		return interruptedOperationRecovery{}, false
+	}
+	if !projectedFound || !interruptedSessionStartCompleted(projected) {
+		req := protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}}
+		if err := d.applyTypedSessionLifecycleTransition(ctx, req, projectID, canonicalID, record.IssueID, daemonhandlers.CommandSessionStart, "busy", "hooks", selector); err != nil {
+			return interruptedOperationRecovery{}, false
+		}
+		if err := d.persistObservedRuntimeProjection(ctx, projectID, req.Meta, daemonstate.Session{
+			ID: canonicalID, ObservedState: daemonstate.SessionStateRunning,
+			Activity: "busy", ActivitySource: "hooks", UpdatedAt: time.Now().UTC(),
+		}); err != nil {
+			return interruptedOperationRecovery{}, false
+		}
+	}
+	if rootedExpected && !rootedOwned {
+		if err := d.acquireRootedOrchestratorLease(ctx, projectID, record.IssueID, canonicalID); err != nil {
+			return interruptedOperationRecovery{}, false
+		}
+		lease, rootedOwned, err = authority.Get(ctx, rootedIdentity)
+		if err != nil || !rootedOwned {
+			return interruptedOperationRecovery{}, false
+		}
 	}
 	var session daemonstate.Session
 	var found bool
@@ -1700,6 +1787,103 @@ func (d *Daemon) recoverInterruptedOperation(ctx context.Context, record daemono
 		State:         daemonops.StateDone,
 		ResultPayload: result,
 	}, true
+}
+
+func interruptedSessionStartAgentLaunchRequired(progress *daemonops.Progress) bool {
+	if progress == nil {
+		return true
+	}
+	if progress.AgentLaunchRequired != nil {
+		return *progress.AgentLaunchRequired
+	}
+	// Protocols before v59 could only identify a completed tmux-only launch by
+	// its final production progress message. Keep that exact compatibility path
+	// so an upgraded daemon does not mistake the valid shell for a dead agent.
+	return !(strings.TrimSpace(progress.Phase) == "tmux_launch" &&
+		progress.Percent >= 90 &&
+		strings.TrimSpace(progress.Message) == "tmux session created without agent launch")
+}
+
+func (d *Daemon) compensateInterruptedSessionStart(ctx context.Context, store *daemonstate.RuntimeStateStore, projectID, sessionID, issueID string) string {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionStartAcknowledgementTimeout)
+	defer cancel()
+	worktree, _, _ := store.GetWorktreeStateByIssueID(cleanupCtx, projectID, issueID)
+	resourceCtx := d.issueResourceLifecycleContext(projectID, issueID, sessionID, worktree.Path, worktree.Branch)
+	req := protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}}
+	selector, rootedIdentity, rooted, resolveErr := d.interruptedSessionStartIntent(cleanupCtx, store, projectID, sessionID, issueID)
+	note := ""
+	if resolveErr != nil {
+		note = fmt.Sprintf("; failed-start rooted ownership resolution also failed: %v", resolveErr)
+	}
+	if rooted {
+		rootedProjection := daemonstate.Session{
+			ID: sessionID, IssueID: issueID, Role: daemonstate.SessionRoleOrchestrator,
+			ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: issueID,
+			State: daemonstate.SessionStateStarting, UpdatedAt: time.Now().UTC(),
+		}
+		if existing, found, err := store.GetSessionIntent(cleanupCtx, projectID, selector.Role, selector.ScopeKind, selector.ScopeID); err == nil && found {
+			rootedProjection = existing
+			rootedProjection.State = daemonstate.SessionStateStarting
+			rootedProjection.UpdatedAt = time.Now().UTC()
+		}
+		probe := func(probeCtx context.Context, candidateSessionID string) (bool, error) {
+			if d == nil || d.tmux == nil {
+				return false, nil
+			}
+			return d.tmux.HasSession(probeCtx, candidateSessionID)
+		}
+		if _, err := daemonstate.NewOrchestratorLeaseAuthority(store).AcquireRooted(cleanupCtx, rootedIdentity, rootedProjection, probe); err != nil {
+			note += fmt.Sprintf("; failed-start rooted projection retirement preparation also failed: %v", err)
+		}
+	}
+	note += d.compensateSessionStartFailureWithSelector(cleanupCtx, req, projectID, sessionID, issueID, resourceCtx, "busy", "hooks", selector)
+	if rooted {
+		if err := daemonstate.NewOrchestratorLeaseAuthority(store).Release(cleanupCtx, rootedIdentity, sessionID); err != nil {
+			note += fmt.Sprintf("; failed-start rooted lease retirement also failed: %v", err)
+		}
+	}
+	return note
+}
+
+func (d *Daemon) interruptedSessionStartIntent(ctx context.Context, store *daemonstate.RuntimeStateStore, projectID, sessionID, issueID string) (sessionIntentSelector, domain.OrchestratorIdentity, bool, error) {
+	worker := normalizeSessionIntentSelector(sessionIntentSelector{}, issueID)
+	scope, err := domain.RootedOrchestrationScope(issueID)
+	if err != nil {
+		return worker, domain.OrchestratorIdentity{}, false, err
+	}
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		return worker, domain.OrchestratorIdentity{}, false, err
+	}
+	rooted := false
+	lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(store).Get(ctx, identity)
+	if err != nil {
+		return worker, identity, false, err
+	}
+	if found {
+		if strings.TrimSpace(lease.SessionID) != strings.TrimSpace(sessionID) {
+			return worker, identity, false, fmt.Errorf("rooted scope belongs to session %s, not interrupted session %s", lease.SessionID, sessionID)
+		}
+		rooted = true
+	}
+	if !rooted {
+		projection, projectionFound, loadErr := store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, issueID)
+		if loadErr != nil {
+			return worker, identity, false, loadErr
+		}
+		rooted = projectionFound && strings.TrimSpace(projection.ID) == strings.TrimSpace(sessionID)
+	}
+	if !rooted {
+		if issueClient := d.issueClientForProject(projectID); issueClient != nil {
+			if task, taskErr := issueClient.GetWithRuntime(ctx, projectID, issueID); taskErr == nil {
+				rooted = task.Type == domain.TypeEpic
+			}
+		}
+	}
+	if !rooted {
+		return worker, identity, false, nil
+	}
+	return sessionIntentSelector{Role: daemonstate.SessionRoleOrchestrator, ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: issueID}, identity, true, nil
 }
 
 func (d *Daemon) recoverInterruptedSessionRestart(ctx context.Context, record daemonops.Record) (interruptedOperationRecovery, bool) {

@@ -18,6 +18,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 var (
@@ -176,6 +177,7 @@ const (
 type candidateValidationObserverKey struct{}
 type candidateValidationCommandKey struct{}
 type candidateValidationAdmissionKey struct{}
+type candidateValidationTicketKey struct{}
 
 type CandidateValidationObserver func(CandidateValidationAttempt)
 
@@ -202,6 +204,17 @@ func WithCandidateValidationCommand(ctx context.Context, command string) context
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, candidateValidationCommandKey{}, strings.TrimSpace(command))
+}
+
+// WithCandidateValidationTicket binds the durable ticket attribution for a
+// ticket-owned synthetic candidate. Repository-owned candidates omit this
+// binding and execute without ticket identity, regardless of caller shell
+// state.
+func WithCandidateValidationTicket(ctx context.Context, ticketID naming.TicketID) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, candidateValidationTicketKey{}, ticketID)
 }
 
 func WithCandidateValidationAdmission(ctx context.Context, admission CandidateValidationAdmission) context.Context {

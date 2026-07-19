@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 // mockRunner is a test implementation of CommandRunner.
@@ -1300,7 +1301,13 @@ func TestRealProcessProfileMergeCleanlyTransactionalUsesTargetGateAuthority(t *t
 func TestRealProcessProfileMergeCleanlyTransactionalRunsConfiguredConsumerGate(t *testing.T) {
 	repo := initDivergedRepo(t)
 	client := NewClient(NewExecRunner(repo), slog.Default())
-	ctx := WithCandidateValidationCommand(context.Background(), `test "$AZEDARACH_CANDIDATE_HEAD" = "$(git rev-parse HEAD)"`)
+	t.Setenv("AZEDARACH_TICKET_ID", "outer-ticket-must-not-leak")
+	t.Setenv("AZEDARACH_ISSUE_ID", "outer-issue-must-not-leak")
+	ctx := WithCandidateValidationCommand(context.Background(), `
+		test "$AZEDARACH_CANDIDATE_HEAD" = "$(git rev-parse HEAD)"
+		test "${AZEDARACH_TICKET_ID+x}" != x
+		test "${AZEDARACH_ISSUE_ID+x}" != x
+	`)
 	result, err := client.MergeCleanlyTransactional(ctx, repo, "feature")
 	if err != nil {
 		t.Fatalf("configured candidate merge: %v", err)
@@ -1311,6 +1318,46 @@ func TestRealProcessProfileMergeCleanlyTransactionalRunsConfiguredConsumerGate(t
 	attempt := result.ValidationAttempts[0]
 	if attempt.Status != CandidateValidationPassed || !attempt.Canonical || attempt.CandidateHead == "" {
 		t.Fatalf("configured candidate validation = %+v", attempt)
+	}
+}
+
+func TestRealProcessProfileTicketCandidateUsesDurableIdentity(t *testing.T) {
+	repo := initDivergedRepo(t)
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	t.Setenv("AZEDARACH_TICKET_ID", "conflicting-caller-ticket")
+	t.Setenv("AZEDARACH_ISSUE_ID", "conflicting-caller-issue")
+	ctx := WithCandidateValidationCommand(context.Background(), `
+		test "$AZEDARACH_CANDIDATE_HEAD" = "$(git rev-parse HEAD)"
+		test "$AZEDARACH_TICKET_ID" = consumer-42
+		test "$AZEDARACH_ISSUE_ID" = consumer-42
+	`)
+	ctx = WithCandidateValidationTicket(ctx, naming.TicketID("consumer-42"))
+	result, err := client.MergeCleanlyTransactional(ctx, repo, "feature")
+	if err != nil {
+		t.Fatalf("ticket candidate merge: %v", err)
+	}
+	if result == nil || !result.Success || len(result.ValidationAttempts) != 1 {
+		t.Fatalf("ticket candidate merge = %+v", result)
+	}
+	if attempt := result.ValidationAttempts[0]; attempt.Status != CandidateValidationPassed || !attempt.Canonical {
+		t.Fatalf("ticket candidate validation = %+v", attempt)
+	}
+}
+
+func TestRealProcessProfileTicketCandidateRejectsMissingDurableIdentity(t *testing.T) {
+	repo := initDivergedRepo(t)
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	ctx := WithCandidateValidationCommand(context.Background(), `true`)
+	ctx = WithCandidateValidationTicket(ctx, naming.TicketID(""))
+	result, err := client.MergeCleanlyTransactional(ctx, repo, "feature")
+	if err != nil {
+		t.Fatalf("missing ticket candidate merge: %v", err)
+	}
+	if result == nil || result.Success || len(result.ValidationAttempts) != 1 {
+		t.Fatalf("missing ticket candidate merge = %+v, want rejected validation", result)
+	}
+	if attempt := result.ValidationAttempts[0]; attempt.Status != CandidateValidationFailed || !strings.Contains(attempt.Message, "valid durable ticket identity") {
+		t.Fatalf("missing ticket candidate validation = %+v", attempt)
 	}
 }
 

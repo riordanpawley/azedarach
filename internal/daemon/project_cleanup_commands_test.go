@@ -65,6 +65,7 @@ func TestProjectCleanupAdvisorSessionsStopsRuntimeBeforeProjectRemoval(t *testin
 	}
 	runner := newSessionStartTmuxRunner()
 	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore(), hub: publish.NewHub(16, 8, slog.Default()), revision: map[string]uint64{}}
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, protocol.DefaultProjectID)
 	discussed, err := (issueInteractionService{daemon: d}).MutateInteraction(ctx, protocol.CommandInteractionDiscuss, protocol.InteractionMutationRequestBody{ID: request.ID, ExpectedRevision: 1, Actor: "human"})
 	if err != nil {
 		t.Fatal(err)

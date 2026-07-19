@@ -81,17 +81,13 @@ func (s *RuntimeStateStore) EnsureAdvisorSession(ctx context.Context, projectID,
 	if requestID == "" || issueID == "" || candidateSessionID == "" {
 		return session, false, fmt.Errorf("ensure advisor session: project, request, issue, and session ids are required")
 	}
-	err = s.withWriteLock(ctx, func() error {
-		db, openErr := s.dbHandle()
-		if openErr != nil {
-			return openErr
-		}
-		reserved, _, acquireErr := s.acquireAdvisorSessionLocked(ctx, db, projectID, requestID, issueID, candidateSessionID)
+	err = s.WithAdvisorSessionTransition(ctx, projectID, requestID, func(lockCtx context.Context) error {
+		reserved, _, acquireErr := s.AcquireAdvisorSession(lockCtx, projectID, requestID, issueID, candidateSessionID)
 		if acquireErr != nil {
 			return acquireErr
 		}
 		session = reserved
-		live, probeErr := probe(ctx, reserved.SessionID)
+		live, probeErr := probe(lockCtx, reserved.SessionID)
 		if probeErr != nil {
 			return fmt.Errorf("probe advisor runtime: %w", probeErr)
 		}
@@ -99,7 +95,7 @@ func (s *RuntimeStateStore) EnsureAdvisorSession(ctx context.Context, projectID,
 			attached = true
 			return nil
 		}
-		if launchErr := launch(ctx, reserved); launchErr != nil {
+		if launchErr := launch(lockCtx, reserved); launchErr != nil {
 			return fmt.Errorf("launch advisor runtime: %w", launchErr)
 		}
 		return nil
