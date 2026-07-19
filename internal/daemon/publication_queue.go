@@ -546,6 +546,7 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 	}
 	stopClaimHeartbeat := d.startPublicationClaimHeartbeat(store, operationID, claimToken, claimTTL)
 	defer stopClaimHeartbeat()
+	ticketID, ticketIdentityErr := naming.ParseTicketID(operation.IssueID)
 	identityCheck := d.publicationIdentityCheck
 	appliedRecovery := false
 	if identityCheck == nil && d.publicationClose == nil {
@@ -557,8 +558,14 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 			identityCheck = d.validatePublicationOperationIdentity
 		}
 	}
-	if identityCheck != nil {
-		if identityErr := identityCheck(ctx, operation); identityErr != nil {
+	if identityCheck != nil || ticketIdentityErr != nil {
+		identityErr := ticketIdentityErr
+		if identityErr != nil {
+			identityErr = fmt.Errorf("bind accepted-review publication ticket identity: %w", identityErr)
+		} else {
+			identityErr = identityCheck(ctx, operation)
+		}
+		if identityErr != nil {
 			finished := time.Now().UTC()
 			state, kind := classifyPublicationFailure(identityErr)
 			artifact := d.writePublicationFailureArtifact(operation, state, identityErr)
@@ -603,6 +610,7 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 		_ = daemonops.ReportProgress(ctx, daemonops.Progress{Phase: phase, Message: strings.TrimSpace(attempt.Message), Current: percent, Total: 100, Unit: "percent", Percent: int(percent)})
 	})
 	ctx = git.WithCandidateValidationCommand(ctx, operation.ValidationCommand)
+	ctx = git.WithCandidateValidationTicket(ctx, ticketID)
 	ctx = git.WithCandidateValidationAdmission(ctx, d.publicationCandidateAdmission(operation.ProjectID, operationID, claimToken, claimTTL))
 
 	request := protocol.OrchestrationIntentRequest{
