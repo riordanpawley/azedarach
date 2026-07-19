@@ -32,8 +32,8 @@ type WorkerEvidenceReview struct {
 	Matrix          *WorkerEvidenceReviewMatrix `json:"matrix,omitempty"`
 	ExtraPassReason string                      `json:"extra_pass_reason,omitempty"`
 	FallbackReason  string                      `json:"fallback_reason,omitempty"`
-	CleanPass       int                         `json:"clean_pass,omitempty"`
-	CleanPassTarget int                         `json:"clean_pass_target,omitempty"`
+	CleanPass       *int                        `json:"clean_pass,omitempty"`
+	CleanPassTarget *int                        `json:"clean_pass_target,omitempty"`
 }
 
 type WorkerEvidenceReviewMatrix struct {
@@ -258,8 +258,8 @@ func WorkerEvidencePacketTemplate() WorkerEvidencePacket {
 			Angle:           "complete worker review",
 			ReusedLayers:    []string{"none"},
 			Matrix:          &WorkerEvidenceReviewMatrix{Type: "general", CoveredCells: []string{"requested behavior", "integration points", "error paths", "affected consumers"}, SkippedCells: []WorkerEvidenceReviewSkippedMatrix{}},
-			CleanPass:       1,
-			CleanPassTarget: 1,
+			CleanPass:       workerEvidenceInt(1),
+			CleanPassTarget: workerEvidenceInt(1),
 		},
 		Risks: []string{"none"},
 	}
@@ -405,19 +405,33 @@ func validateWorkerEvidenceReviewDetails(review WorkerEvidenceReview, fields map
 			}
 		}
 	}
-	if review.CleanPass < 0 {
+	if review.CleanPass == nil {
+		missing = appendMissing(missing, "review.clean_pass")
+	}
+	if review.CleanPassTarget == nil {
+		missing = appendMissing(missing, "review.clean_pass_target")
+	}
+	cleanPass := 0
+	if review.CleanPass != nil {
+		cleanPass = *review.CleanPass
+	}
+	cleanPassTarget := 0
+	if review.CleanPassTarget != nil {
+		cleanPassTarget = *review.CleanPassTarget
+	}
+	if cleanPass < 0 {
 		invalid = append(invalid, "review.clean_pass cannot be negative")
 	}
-	if strings.EqualFold(strings.TrimSpace(review.Status), "clean") && review.CleanPass < 1 {
+	if strings.EqualFold(strings.TrimSpace(review.Status), "clean") && cleanPass < 1 {
 		invalid = append(invalid, "review.clean_pass must be at least 1 for a clean review")
 	}
-	if review.CleanPassTarget < 1 {
+	if cleanPassTarget < 1 {
 		invalid = append(invalid, "review.clean_pass_target must be at least 1")
 	}
-	if review.CleanPass > review.CleanPassTarget && review.CleanPassTarget > 0 {
+	if cleanPass > cleanPassTarget && cleanPassTarget > 0 {
 		invalid = append(invalid, "review.clean_pass cannot exceed review.clean_pass_target")
 	}
-	if review.CleanPassTarget > 1 && strings.TrimSpace(review.ExtraPassReason) == "" {
+	if cleanPassTarget > 1 && strings.TrimSpace(review.ExtraPassReason) == "" {
 		missing = appendMissing(missing, "review.extra_pass_reason")
 	}
 	return missing, invalid
@@ -446,6 +460,10 @@ func firstDuplicateNonEmptyString(values []string) string {
 		seen[key] = struct{}{}
 	}
 	return ""
+}
+
+func workerEvidenceInt(value int) *int {
+	return &value
 }
 
 func validateWorkerEvidenceRawShape(fields map[string]json.RawMessage) []string {

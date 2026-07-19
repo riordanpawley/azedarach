@@ -15,7 +15,7 @@ func TestWorkerEvidencePacketTemplateIsProjectAgnostic(t *testing.T) {
 	if len(packet.FilesChanged) != 1 || packet.FilesChanged[0] != "path/to/changed-file" {
 		t.Fatalf("files_changed = %v, want project-agnostic placeholder", packet.FilesChanged)
 	}
-	if packet.Review.Revision == "" || packet.Review.Angle == "" || packet.Review.CleanPassTarget != 1 {
+	if packet.Review.Revision == "" || packet.Review.Angle == "" || packet.Review.CleanPassTarget == nil || *packet.Review.CleanPassTarget != 1 {
 		t.Fatalf("review = %+v, want default one-pass revision-bound review", packet.Review)
 	}
 	if packet.Review.Matrix == nil || len(packet.Review.Matrix.CoveredCells) == 0 || packet.Review.Matrix.SkippedCells == nil {
@@ -87,6 +87,30 @@ func TestParseWorkerEvidencePacketBodyRejectsDuplicateStructuredFindings(t *test
 	}
 	if problems := strings.Join(result.Problems(), "\n"); !strings.Contains(problems, "review.findings must be deduplicated") {
 		t.Fatalf("problems = %q, want duplicate-finding diagnostic", problems)
+	}
+}
+
+func TestParseWorkerEvidencePacketBodyPreservesExplicitZeroCleanPass(t *testing.T) {
+	body := `{
+		"schema":"worker_evidence.v1","summary":"Review found work","commands_run":["just test"],
+		"key_assertions":["review completed"],"files_changed":["file.go"],"risks":["finding unresolved"],
+		"review":{"status":"findings","findings":["stale cache"],"revision":"abc","angle":"state review","reused_layers":["none"],"clean_pass":0,"clean_pass_target":1,"matrix":{"type":"stateful/concurrent","covered_cells":["state"],"skipped_cells":[]}}
+	}`
+
+	packet, result := ParseWorkerEvidencePacketBody(body)
+	if !result.Complete || packet.Review.CleanPass == nil || *packet.Review.CleanPass != 0 {
+		t.Fatalf("packet=%+v result=%+v, want explicit zero clean pass", packet, result)
+	}
+	encoded, err := json.Marshal(packet)
+	if err != nil {
+		t.Fatalf("marshal structured packet: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"clean_pass":0`) {
+		t.Fatalf("structured packet lost explicit zero clean pass: %s", encoded)
+	}
+	_, reparsed := ParseWorkerEvidencePacketBody(string(encoded))
+	if !reparsed.Complete {
+		t.Fatalf("reparsed result = %+v, want complete round trip", reparsed)
 	}
 }
 
