@@ -295,6 +295,13 @@ func TestOrchestratorActionableContinuationChangesWithReviewEpochAndIgnoresBusyN
 	if !actionable || second.Revision == first.Revision {
 		t.Fatalf("new review epoch reused revision %q", first.Revision)
 	}
+	snapshot.ReviewQueue = append(snapshot.ReviewQueue, protocol.OrchestrationReview{IssueID: "another", Actionable: true, ReviewEpochEventID: 3, EvidenceDigest: "other", HeadRevision: "other-head"})
+	ordered, _ := orchestratorActionableContinuation(scope, snapshot)
+	snapshot.ReviewQueue[0], snapshot.ReviewQueue[1] = snapshot.ReviewQueue[1], snapshot.ReviewQueue[0]
+	reordered, _ := orchestratorActionableContinuation(scope, snapshot)
+	if reordered.Revision != ordered.Revision {
+		t.Fatalf("equivalent reordered review state changed revision: %q != %q", reordered.Revision, ordered.Revision)
+	}
 	snapshot.ReviewQueue = nil
 	if action, actionable := orchestratorActionableContinuation(scope, snapshot); actionable {
 		t.Fatalf("busy nested root produced duplicate parent action: %+v", action)

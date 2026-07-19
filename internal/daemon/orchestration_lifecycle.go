@@ -209,7 +209,7 @@ func (d *Daemon) wakePausedOrchestratorsForRecovery(ctx context.Context, project
 				return loadErr
 			}
 			// Rooted leases are resumed by the full continuation guard so a durable
-			// wake record is never written without delivering its cursor-bearing prompt.
+			// wake record is paired with its scope-bound semantic continuation.
 			if current.Identity.Scope.Kind == domain.OrchestrationScopeRooted || current.Lifecycle != domain.OrchestratorPaused {
 				return nil
 			}

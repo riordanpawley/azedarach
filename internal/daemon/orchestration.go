@@ -425,6 +425,31 @@ func orchestratorActionableContinuation(scope domain.OrchestrationScope, snapsho
 			issueIDs = append(issueIDs, item.IssueID)
 		}
 	}
+	sort.Slice(reviews, func(i, j int) bool {
+		if reviews[i].IssueID != reviews[j].IssueID {
+			return reviews[i].IssueID < reviews[j].IssueID
+		}
+		if reviews[i].Epoch != reviews[j].Epoch {
+			return reviews[i].Epoch < reviews[j].Epoch
+		}
+		if reviews[i].Digest != reviews[j].Digest {
+			return reviews[i].Digest < reviews[j].Digest
+		}
+		return reviews[i].Head < reviews[j].Head
+	})
+	sort.Strings(runnable)
+	sort.Slice(nested, func(i, j int) bool {
+		if nested[i].IssueID != nested[j].IssueID {
+			return nested[i].IssueID < nested[j].IssueID
+		}
+		if nested[i].Status != nested[j].Status {
+			return nested[i].Status < nested[j].Status
+		}
+		if nested[i].IssueStatus != nested[j].IssueStatus {
+			return nested[i].IssueStatus < nested[j].IssueStatus
+		}
+		return nested[i].Failure < nested[j].Failure
+	})
 	if len(reviews) == 0 && len(runnable) == 0 && len(nested) == 0 {
 		return orchestratorActionableState{}, false
 	}
