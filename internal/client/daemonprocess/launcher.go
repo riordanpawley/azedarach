@@ -93,6 +93,7 @@ type daemonProcessSpec struct {
 	stdout                   io.Writer
 	stderr                   io.Writer
 	requireGroupCleanupProof bool
+	waitForGroupExit         func(context.Context, int) error
 }
 
 type daemonProcess interface {
@@ -155,10 +156,22 @@ func startExecDaemonProcessWithObserver(spec daemonProcessSpec, observe func(int
 		}
 		// The leader has not been reaped, so its PID still reserves the process
 		// group ID and makes this numeric group signal safe. Fail the launch
-		// closed rather than running without an exit-observation fence.
-		killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		// closed and prove cleanup before allowing rollback or stage retirement.
+		pid := cmd.Process.Pid
+		killErr := ignoreAbsentProcessGroupSignal(syscall.Kill(-pid, syscall.SIGKILL))
 		waitErr := cmd.Wait()
-		return nil, fmt.Errorf("establish kernel-bound daemon exit observation: %w (cleanup: %v)", err, errors.Join(killErr, waitErr))
+		proof := spec.waitForGroupExit
+		if proof == nil {
+			proof = waitForNumericProcessGroupExit
+		}
+		proofCtx, proofCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		groupErr := proof(proofCtx, pid)
+		proofCancel()
+		cleanupErr := errors.Join(killErr, waitErr, groupErr)
+		if groupErr != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("%w: %v", errReplacementCandidateCleanupUnproven, groupErr))
+		}
+		return nil, errors.Join(fmt.Errorf("establish kernel-bound daemon exit observation: %w", err), cleanupErr)
 	}
 	process := &execDaemonProcess{
 		cmd:         cmd,

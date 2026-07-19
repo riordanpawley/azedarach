@@ -76,6 +76,60 @@ func TestStartExecDaemonProcessFallsBackWhenExitObservationIsUnsupported(t *test
 	if err == nil || !errors.Is(err, errProcessExitObservationUnsupported) {
 		t.Fatalf("replacement start error = %v, want fail-closed unsupported observation", err)
 	}
+
+	t.Run("replacement descendant cleanup is proven", func(t *testing.T) {
+		executable := filepath.Join(t.TempDir(), "unsupported-observer-azd")
+		writeOwnedExecutableWrapper(t, executable)
+		identityPath := configureOwnedExecutableHelper(t, "probe-descendant")
+		descendantIdentityPath := filepath.Join(t.TempDir(), "descendant-identity.json")
+		t.Setenv(ownedExecutableDescendantPathEnv, descendantIdentityPath)
+		controlDir, err := os.MkdirTemp("/tmp", "azedarach-observer-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(controlDir) })
+		controlPath := filepath.Join(controlDir, "ready.sock")
+		listener, err := net.Listen("unix", controlPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+		t.Setenv(ownedExecutableControlSocketEnv, controlPath)
+		observerAfterDescendant := func(int) (<-chan error, error) {
+			connection, err := listener.Accept()
+			if err != nil {
+				return nil, err
+			}
+			defer connection.Close()
+			var ready [1]byte
+			if _, err := io.ReadFull(connection, ready[:]); err != nil {
+				return nil, err
+			}
+			return nil, errProcessExitObservationUnsupported
+		}
+		_, err = startExecDaemonProcessWithObserver(daemonProcessSpec{
+			command:                  daemonCommand{executable: executable},
+			requireGroupCleanupProof: true,
+		}, observerAfterDescendant)
+		if err == nil || !errors.Is(err, errProcessExitObservationUnsupported) || errors.Is(err, errReplacementCandidateCleanupUnproven) {
+			t.Fatalf("replacement descendant cleanup error = %v, want unsupported but proven cleanup", err)
+		}
+		assertOwnedExecutableRetired(t, identityPath)
+		assertOwnedExecutableRetired(t, descendantIdentityPath)
+	})
+
+	t.Run("replacement proof failure is unproven", func(t *testing.T) {
+		_, err := startExecDaemonProcessWithObserver(daemonProcessSpec{
+			command:                  daemonCommand{executable: "/usr/bin/true"},
+			requireGroupCleanupProof: true,
+			waitForGroupExit: func(context.Context, int) error {
+				return errors.New("group still live")
+			},
+		}, observer)
+		if err == nil || !errors.Is(err, errReplacementCandidateCleanupUnproven) {
+			t.Fatalf("replacement proof error = %v, want unproven cleanup sentinel", err)
+		}
+	})
 }
 
 func TestExecDaemonProcessStopAndWaitAcceptsProvenReapAfterKill(t *testing.T) {
@@ -225,6 +279,16 @@ func TestLauncherOwnedExecutableHelper(t *testing.T) {
 		os.Exit(23)
 	}
 	if os.Getenv(ownedExecutableDescendantEnv) == "1" {
+		if controlPath := os.Getenv(ownedExecutableControlSocketEnv); controlPath != "" {
+			connection, err := net.Dial("unix", controlPath)
+			if err != nil {
+				os.Exit(32)
+			}
+			if _, err := connection.Write([]byte{1}); err != nil {
+				os.Exit(33)
+			}
+			_ = connection.Close()
+		}
 		parent, err := strconv.Atoi(os.Getenv("AZEDARACH_TEST_OWNED_EXECUTABLE_LEADER_PID"))
 		if err != nil || syscall.Kill(parent, syscall.SIGUSR1) != nil {
 			os.Exit(28)
@@ -1212,6 +1276,43 @@ func TestLauncherRollbackRefusesRestoreWhenExactCandidateCleanupFails(t *testing
 	}
 	if _, err := os.Stat(rollbackStage); err != nil {
 		t.Fatalf("unproven-cleanup rollback stage stat error = %v, want retained recovery authority", err)
+	}
+}
+
+func TestLauncherUnsupportedReplacementCleanupProofRetainsBothStages(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
+	repoDir := newLauncherTestWorktree(t)
+	launcher := NewLauncher(repoDir, config.ScopedDaemonSocketPath(repoDir))
+	launcher.openLogFile = func(string) (io.WriteCloser, error) { return &trackingWriteCloser{}, nil }
+	candidateStage, candidateExecutable, err := launcher.newScopedExecutableStage("candidate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollbackStage, rollbackExecutable, err := launcher.newScopedExecutableStage("predecessor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	launcher.waitForReady = func(context.Context, string) error { return context.DeadlineExceeded }
+	starts := 0
+	launcher.startProcess = func(daemonProcessSpec) (daemonProcess, error) {
+		starts++
+		return nil, fmt.Errorf("unsupported observation cleanup: %w", errReplacementCandidateCleanupUnproven)
+	}
+	candidateCmd := daemonCommand{executable: candidateExecutable, candidateStage: candidateStage}
+	predecessorCmd := daemonCommand{executable: rollbackExecutable, rollbackStage: rollbackStage}
+
+	err = launcher.startReplacementWithRollback(context.Background(), candidateCmd, predecessorCmd, true)
+	if err == nil || !errors.Is(err, errReplacementCandidateCleanupUnproven) {
+		t.Fatalf("startReplacementWithRollback() error = %v, want unproven cleanup refusal", err)
+	}
+	if starts != 1 {
+		t.Fatalf("daemon starts = %d, want candidate only", starts)
+	}
+	for _, stage := range []string{candidateStage, rollbackStage} {
+		if _, err := os.Stat(stage); err != nil {
+			t.Fatalf("retained authority stage %s stat error = %v", stage, err)
+		}
 	}
 }
 
