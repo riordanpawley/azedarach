@@ -111,13 +111,19 @@ func (d *Daemon) enforceOrchestratorContinuation(ctx context.Context, authority 
 		return fmt.Errorf("build orchestrator continuation snapshot: %w", err)
 	}
 	action, actionable := orchestratorActionableContinuation(lease.Identity.Scope, snapshot)
+	if lease.Identity.Scope.Kind == domain.OrchestrationScopeRooted {
+		generation, checkpointErr := checkpointRootedOrchestratorAction(ctx, store, lease, action, actionable, now)
+		if checkpointErr != nil {
+			return checkpointErr
+		}
+		if actionable {
+			action.Revision = fmt.Sprintf("%d-%s", generation, action.Revision)
+		}
+	}
 	if !actionable {
 		return nil
 	}
-	applyOrchestratorContinuationProjection(&snapshot, lease)
-	if !snapshot.ContinuationRequired {
-		return nil
-	}
+	setOrchestratorContinuationProjection(&snapshot, lease.Identity.Scope, action)
 	reason := domain.OrchestratorWakeOpenWork
 	if action.Kind == "review" {
 		reason = domain.OrchestratorWakeReviewRequest
@@ -126,7 +132,6 @@ func (d *Daemon) enforceOrchestratorContinuation(ctx context.Context, authority 
 	if err != nil {
 		return fmt.Errorf("record orchestrator continuation wake: %w", err)
 	}
-	applyOrchestratorContinuationProjection(&snapshot, woken)
 	target, found, err := d.currentAgentInputTarget(ctx, projectID, woken.SessionID)
 	if err != nil {
 		return fmt.Errorf("resolve orchestrator continuation target: %w", err)
@@ -149,6 +154,34 @@ func (d *Daemon) enforceOrchestratorContinuation(ctx context.Context, authority 
 	return nil
 }
 
+func checkpointRootedOrchestratorAction(ctx context.Context, store *daemonstate.RuntimeStateStore, lease daemonstate.OrchestratorScopeLease, action orchestratorActionableState, actionable bool, now time.Time) (int64, error) {
+	desiredKey, desiredKind, desiredStatus := "", "observe", "idle"
+	if actionable {
+		desiredKey, desiredKind, desiredStatus = action.Revision, action.Kind, "actionable"
+	}
+	for attempts := 0; attempts < 3; attempts++ {
+		checkpoint, _, err := store.GetOrchestratorLoopCheckpoint(ctx, lease.Identity)
+		if err != nil {
+			return 0, fmt.Errorf("refresh rooted orchestrator action checkpoint: %w", err)
+		}
+		if checkpoint.LastActionKey == desiredKey && checkpoint.LastActionKind == desiredKind && checkpoint.LastActionStatus == desiredStatus {
+			return checkpoint.WatchCursor, nil
+		}
+		next := daemonstate.OrchestratorLoopCheckpoint{
+			Identity: lease.Identity, WatchCursor: checkpoint.WatchCursor + 1,
+			LastActionKey: desiredKey, LastActionKind: desiredKind, LastActionStatus: desiredStatus, UpdatedAt: now,
+		}
+		advanced, err := store.AdvanceOrchestratorLoopCheckpoint(ctx, next, checkpoint.WatchCursor)
+		if err != nil {
+			return 0, fmt.Errorf("advance rooted orchestrator action checkpoint: %w", err)
+		}
+		if advanced {
+			return next.WatchCursor, nil
+		}
+	}
+	return 0, fmt.Errorf("advance rooted orchestrator action checkpoint: concurrent transition did not converge")
+}
+
 func orchestratorActivityWakeRequired(activity string) bool {
 	switch strings.ToLower(strings.TrimSpace(activity)) {
 	case "idle", "done", "paused":
@@ -158,7 +191,7 @@ func orchestratorActivityWakeRequired(activity string) bool {
 	}
 }
 
-func (d *Daemon) agentInputRetryEligible(ctx context.Context, request domain.AgentInputDeliveryRequest) (bool, error) {
+func (d *Daemon) agentInputDeliveryEligible(ctx context.Context, request domain.AgentInputDeliveryRequest) (bool, error) {
 	if request.Kind != domain.AgentInputMessageOrchestratorWake {
 		return true, nil
 	}
@@ -183,7 +216,24 @@ func (d *Daemon) agentInputRetryEligible(ctx context.Context, request domain.Age
 		return false, err
 	}
 	action, actionable := orchestratorActionableContinuation(lease.Identity.Scope, snapshot)
-	return actionable && action.Revision == parts[2], nil
+	if !actionable {
+		return false, nil
+	}
+	if lease.Identity.Scope.Kind == domain.OrchestrationScopeRooted {
+		store := d.sessionRuntimeStateStoreIfConfigured(request.ProjectID)
+		if store == nil {
+			return false, nil
+		}
+		checkpoint, found, checkpointErr := store.GetOrchestratorLoopCheckpoint(ctx, lease.Identity)
+		if checkpointErr != nil || !found {
+			return false, checkpointErr
+		}
+		if checkpoint.LastActionStatus != "actionable" || checkpoint.LastActionKey != action.Revision || checkpoint.LastActionKind != action.Kind {
+			return false, nil
+		}
+		action.Revision = fmt.Sprintf("%d-%s", checkpoint.WatchCursor, action.Revision)
+	}
+	return action.Revision == parts[2], nil
 }
 
 func (d *Daemon) wakePausedOrchestratorsForRecovery(ctx context.Context, projectID string, now time.Time) error {

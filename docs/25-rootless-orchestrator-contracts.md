@@ -21,7 +21,10 @@ recovery events. The daemon derives a scope-local semantic revision from the
 actionable projection, enqueues one durable managed-agent input intent for that
 revision, and coalesces equivalent state. Busy agents keep the intent queued;
 restart recovery retries an unacknowledged intent without creating a second
-turn. The debounce remains a lifecycle-write guard, not prompt identity.
+turn. Rooted scopes advance a durable generation on each action/idle semantic
+transition, so the same action may recur after quiescence without duplicating an
+equivalent active revision. The debounce remains a lifecycle-write guard, not
+prompt identity.
 
 The exact-scope lease persists `complete_since`, `last_wake_at`, and the last
 wake reason. The existing durable input-intent ledger persists pending wake

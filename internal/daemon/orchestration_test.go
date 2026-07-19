@@ -116,18 +116,19 @@ func TestRootedOrchestratorBusyWakeQueuesAndEquivalentStateDeliversOnce(t *testi
 	if len(runner.inputPayloads) != 0 {
 		t.Fatalf("superseded actionable revision delivered %d payloads, want 0", len(runner.inputPayloads))
 	}
-	if err := issueClient.Update(ctx, nestedID, domain.StatusInProgress); err != nil {
+	replacementNestedID, err := issueClient.Create(ctx, issues.CreateTaskParams{Title: "Replacement nested", Type: domain.TypeEpic, Status: domain.StatusInProgress, ParentID: &rootID})
+	if err != nil {
 		t.Fatal(err)
 	}
 	d.nextRevision(projectID)
-	if err := d.agentInput.RetryPending(ctx, projectID, 10); err != nil {
+	if err := d.reconcileOrchestratorLifecycles(ctx, projectID, idleAt.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.inputPayloads) != 1 {
 		t.Fatalf("continuation payloads = %d, want 1", len(runner.inputPayloads))
 	}
 	prompt := runner.inputPayloads[0]
-	for _, want := range []string{"scope=rooted", "revision=", nestedID, "bounded snapshot"} {
+	for _, want := range []string{"scope=rooted", "revision=", replacementNestedID, "bounded snapshot"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q: %s", want, prompt)
 		}
@@ -146,6 +147,77 @@ func TestRootedOrchestratorBusyWakeQueuesAndEquivalentStateDeliversOnce(t *testi
 	}
 	if len(runner.inputPayloads) != 1 {
 		t.Fatalf("equivalent actionable state delivered %d payloads, want exactly 1", len(runner.inputPayloads))
+	}
+}
+
+func TestRootedOrchestratorActionCheckpointAdvancesOnlyOnSemanticTransitions(t *testing.T) {
+	ctx := context.Background()
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	scope, _ := domain.RootedOrchestrationScope("root")
+	identity, _ := domain.NewOrchestratorIdentity("project", scope)
+	lease := daemonstate.OrchestratorScopeLease{Identity: identity, SessionID: "orchestrator"}
+	action := orchestratorActionableState{Kind: "start", Revision: "semantic"}
+	now := time.Date(2026, 7, 20, 2, 0, 0, 0, time.UTC)
+	first, err := checkpointRootedOrchestratorAction(ctx, store, lease, action, true, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	equivalent, err := checkpointRootedOrchestratorAction(ctx, store, lease, action, true, now.Add(time.Second))
+	if err != nil || equivalent != first {
+		t.Fatalf("equivalent generation=%d want=%d err=%v", equivalent, first, err)
+	}
+	idle, err := checkpointRootedOrchestratorAction(ctx, store, lease, orchestratorActionableState{}, false, now.Add(2*time.Second))
+	if err != nil || idle <= first {
+		t.Fatalf("idle generation=%d first=%d err=%v", idle, first, err)
+	}
+	reappeared, err := checkpointRootedOrchestratorAction(ctx, store, lease, action, true, now.Add(3*time.Second))
+	if err != nil || reappeared <= idle {
+		t.Fatalf("reappeared generation=%d idle=%d err=%v", reappeared, idle, err)
+	}
+}
+
+func TestRootedOrchestratorActionCheckpointCoalescesAcrossDaemons(t *testing.T) {
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "runtime.db")
+	firstStore := daemonstate.NewRuntimeStateStoreAtPath(databasePath, slog.Default())
+	t.Cleanup(func() { _ = firstStore.Close() })
+	secondStore := daemonstate.NewRuntimeStateStoreAtPath(databasePath, slog.Default())
+	t.Cleanup(func() { _ = secondStore.Close() })
+	scope, _ := domain.RootedOrchestrationScope("root")
+	identity, _ := domain.NewOrchestratorIdentity("project", scope)
+	lease := daemonstate.OrchestratorScopeLease{Identity: identity, SessionID: "orchestrator"}
+	action := orchestratorActionableState{Kind: "start", Revision: "semantic"}
+	now := time.Date(2026, 7, 20, 2, 0, 0, 0, time.UTC)
+	start := make(chan struct{})
+	results := make(chan struct {
+		generation int64
+		err        error
+	}, 2)
+	var workers sync.WaitGroup
+	for _, store := range []*daemonstate.RuntimeStateStore{firstStore, secondStore} {
+		workers.Add(1)
+		go func(runtimeStore *daemonstate.RuntimeStateStore) {
+			defer workers.Done()
+			<-start
+			generation, err := checkpointRootedOrchestratorAction(ctx, runtimeStore, lease, action, true, now)
+			results <- struct {
+				generation int64
+				err        error
+			}{generation: generation, err: err}
+		}(store)
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+	for result := range results {
+		if result.err != nil || result.generation != 1 {
+			t.Fatalf("generation=%d want=1 err=%v", result.generation, result.err)
+		}
+	}
+	checkpoint, found, err := firstStore.GetOrchestratorLoopCheckpoint(ctx, identity)
+	if err != nil || !found || checkpoint.WatchCursor != 1 {
+		t.Fatalf("checkpoint found=%t generation=%d want=1 err=%v", found, checkpoint.WatchCursor, err)
 	}
 }
 

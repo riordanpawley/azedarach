@@ -1819,7 +1819,7 @@ func seedReadyAgentInput(t *testing.T, d *Daemon, runner *sessionStartTmuxRunner
 		runner.inputPayloads = append(runner.inputPayloads, payload)
 	}}
 	d.agentInput = newAgentInputDeliveryService(d.sessionRuntimeStateStoreIfConfigured, d.issueClientForProject, receiver, "test-daemon")
-	d.agentInput.retryEligible = d.agentInputRetryEligible
+	d.agentInput.deliveryEligible = d.agentInputDeliveryEligible
 }
 
 func seedManagedRestartIdentity(t *testing.T, d *Daemon, runner *sessionStartTmuxRunner, projectID, sessionID string) func(context.Context, []string) error {

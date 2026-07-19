@@ -75,7 +75,7 @@ type agentInputDeliveryService struct {
 	now                   func() time.Time
 	sessionLeaseDuration  time.Duration
 	sessionLeaseHeartbeat time.Duration
-	retryEligible         func(context.Context, domain.AgentInputDeliveryRequest) (bool, error)
+	deliveryEligible      func(context.Context, domain.AgentInputDeliveryRequest) (bool, error)
 }
 
 func newAgentInputDeliveryService(stores func(string) *state.RuntimeStateStore, issueClients func(string) *issues.Client, receiver authoritativeAgentInputReceiver, owner string) *agentInputDeliveryService {
@@ -128,6 +128,17 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 	}
 	release := func(stale bool) {
 		_ = client.ReleaseAgentInputDeliveryIntent(context.WithoutCancel(ctx), request.ProjectID, request.IntentKey, claimed.LeaseToken, stale, s.now())
+	}
+	if s.deliveryEligible != nil {
+		eligible, eligibilityErr := s.deliveryEligible(ctx, request)
+		if eligibilityErr != nil {
+			release(false)
+			return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputFailed, Reason: "validate delivery eligibility"}, eligibilityErr
+		}
+		if !eligible {
+			release(true)
+			return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputRejectedStaleTarget, Reason: "delivery action is no longer current"}, nil
+		}
 	}
 	leaseNow := s.now()
 	sessionLease, sessionLeaseAcquired, err := client.ClaimAgentInputDeliverySessionLease(ctx, request.ProjectID, request.SessionID, request.Target.AgentIncarnation, s.owner, leaseNow, s.sessionLeaseDuration)
@@ -219,6 +230,15 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 		return takeoverLease, nil
 	}
 	beginSubmission := func(beginCtx context.Context) (time.Time, error) {
+		if s.deliveryEligible != nil {
+			eligible, eligibilityErr := s.deliveryEligible(beginCtx, request)
+			if eligibilityErr != nil {
+				return time.Time{}, fmt.Errorf("validate delivery eligibility before submission: %w", eligibilityErr)
+			}
+			if !eligible {
+				return time.Time{}, agentInputRefusalError{outcome: "superseded", safeToRetry: true}
+			}
+		}
 		currentAgain, result, err := s.observeIdentity(beginCtx, request)
 		if err != nil {
 			return time.Time{}, err
@@ -242,6 +262,15 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 		return expires, nil
 	}
 	revalidateSubmissionFence := func(revalidateCtx context.Context) (time.Time, error) {
+		if s.deliveryEligible != nil {
+			eligible, eligibilityErr := s.deliveryEligible(revalidateCtx, request)
+			if eligibilityErr != nil {
+				return time.Time{}, fmt.Errorf("revalidate delivery eligibility: %w", eligibilityErr)
+			}
+			if !eligible {
+				return time.Time{}, agentInputRefusalError{outcome: "superseded", safeToRetry: true}
+			}
+		}
 		currentAgain, result, err := s.observeIdentity(revalidateCtx, request)
 		if err != nil {
 			return time.Time{}, err
@@ -272,18 +301,19 @@ func (s *agentInputDeliveryService) Deliver(ctx context.Context, request domain.
 		}
 		var refusal agentInputRefusalError
 		if errors.As(err, &refusal) {
+			stale := refusal.outcome == "stale_incarnation" || refusal.outcome == "superseded"
 			if refusal.safeToRetry && submissionBegun {
-				_ = client.ResolveAgentInputDeliverySubmissionRefusal(context.WithoutCancel(ctx), request.ProjectID, request.IntentKey, claimed.LeaseToken, refusal.outcome == "stale_incarnation", s.now())
+				_ = client.ResolveAgentInputDeliverySubmissionRefusal(context.WithoutCancel(ctx), request.ProjectID, request.IntentKey, claimed.LeaseToken, stale, s.now())
 			} else if !submissionBegun {
-				release(refusal.outcome == "stale_incarnation")
+				release(stale)
 			}
 			switch refusal.outcome {
 			case "composer_nonempty":
 				return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputWaitingInputNonempty, Reason: "managed input gate reports local input is not empty; intent remains queued"}, nil
 			case "human_attached":
 				return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputWaitingHumanAttached, Reason: "managed tmux gate could not exclude attached human input; intent remains queued"}, nil
-			case "stale_incarnation":
-				return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputRejectedStaleTarget, Reason: "app-server gate rejected stale incarnation"}, nil
+			case "stale_incarnation", "superseded":
+				return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputRejectedStaleTarget, Reason: "app-server gate rejected stale delivery authority"}, nil
 			default:
 				return domain.AgentInputDeliveryResult{Outcome: domain.AgentInputWaitingNotReady, Reason: "app-server turn is not ready; intent remains queued"}, nil
 			}
@@ -324,16 +354,6 @@ func (s *agentInputDeliveryService) RetryPending(ctx context.Context, projectID 
 	}
 	var retryErrors []error
 	for _, intent := range intents {
-		if s.retryEligible != nil {
-			eligible, eligibilityErr := s.retryEligible(ctx, intent.Request)
-			if eligibilityErr != nil {
-				retryErrors = append(retryErrors, fmt.Errorf("validate pending agent input intent %s: %w", intent.Request.IntentKey, eligibilityErr))
-				continue
-			}
-			if !eligible {
-				continue
-			}
-		}
 		if _, err := s.Deliver(ctx, intent.Request); err != nil && !errors.Is(err, errAuthoritativeAgentInputUnavailable) {
 			retryErrors = append(retryErrors, fmt.Errorf("retry agent input intent %s: %w", intent.Request.IntentKey, err))
 		}

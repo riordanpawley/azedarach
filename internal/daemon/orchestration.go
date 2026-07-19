@@ -361,9 +361,13 @@ func applyOrchestratorContinuationProjection(snapshot *protocol.OrchestrationSna
 	if !actionable {
 		return
 	}
+	setOrchestratorContinuationProjection(snapshot, lease.Identity.Scope, action)
+}
+
+func setOrchestratorContinuationProjection(snapshot *protocol.OrchestrationSnapshot, scope domain.OrchestrationScope, action orchestratorActionableState) {
 	snapshot.ContinuationRequired = true
 	snapshot.ContinuationReason = action.Reason
-	snapshot.ContinuationContract = orchestratorContinuationPrompt(lease.Identity.Scope, action)
+	snapshot.ContinuationContract = orchestratorContinuationPrompt(scope, action)
 }
 
 func rootedOrchestratorContinuationRequired(completeCheckPassed bool, snapshot protocol.OrchestrationSnapshot) bool {

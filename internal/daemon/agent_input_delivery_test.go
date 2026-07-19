@@ -192,7 +192,7 @@ func TestAgentInputRetryContinuesAfterUnrelatedEligibilityFailure(t *testing.T) 
 	}
 	receiver := &recordingAuthoritativeReceiver{accepted: map[string]string{}}
 	service := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, receiver, "retry")
-	service.retryEligible = func(_ context.Context, request domain.AgentInputDeliveryRequest) (bool, error) {
+	service.deliveryEligible = func(_ context.Context, request domain.AgentInputDeliveryRequest) (bool, error) {
 		if request.IntentKey == first.IntentKey {
 			return false, errors.New("projection unavailable")
 		}
@@ -204,6 +204,31 @@ func TestAgentInputRetryContinuesAfterUnrelatedEligibilityFailure(t *testing.T) 
 	}
 	if receiver.calls != 1 || len(receiver.payloads) != 1 || receiver.payloads[0] != second.Payload {
 		t.Fatalf("receiver calls=%d payloads=%v, want unrelated second intent delivered", receiver.calls, receiver.payloads)
+	}
+}
+
+func TestAgentInputDeliveryRejectsSupersededActionAtFinalFence(t *testing.T) {
+	runtimeStore, client, request := agentInputFixture(t)
+	receiver := &recordingAuthoritativeReceiver{accepted: map[string]string{}}
+	service := newAgentInputDeliveryService(func(string) *daemonstate.RuntimeStateStore { return runtimeStore }, func(string) *issues.Client { return client }, receiver, "supersede")
+	checks := 0
+	service.deliveryEligible = func(context.Context, domain.AgentInputDeliveryRequest) (bool, error) {
+		checks++
+		return checks < 3, nil
+	}
+	result, err := service.Deliver(context.Background(), request)
+	if err != nil || result.Outcome != domain.AgentInputRejectedStaleTarget {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if receiver.calls != 0 {
+		t.Fatalf("superseded action reached receiver %d times", receiver.calls)
+	}
+	intent, err := client.EnsureAgentInputDeliveryIntent(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if intent.State != "stale" {
+		t.Fatalf("superseded intent state=%q, want stale", intent.State)
 	}
 }
 
