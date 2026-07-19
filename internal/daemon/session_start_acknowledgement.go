@@ -94,7 +94,12 @@ func (d *Daemon) waitForInitialManagedAgentAcknowledgementForPane(ctx context.Co
 	defer cancel()
 	ticker := time.NewTicker(sessionStartAcknowledgementPoll)
 	defer ticker.Stop()
+	return d.waitForInitialManagedAgentAcknowledgementWithPoll(waitCtx, store, projectID, sessionID, logicalPaneID, incarnation, handoff, ticker.C)
+}
+
+func (d *Daemon) waitForInitialManagedAgentAcknowledgementWithPoll(waitCtx context.Context, store *daemonstate.RuntimeStateStore, projectID, sessionID, logicalPaneID, incarnation string, handoff sessionPromptHandoff, poll <-chan time.Time) error {
 	var last sessionStartAcknowledgementSample
+	exactPaneObserved := false
 	for {
 		sampleCtx := waitCtx
 		var sampleCancel context.CancelFunc
@@ -109,13 +114,17 @@ func (d *Daemon) waitForInitialManagedAgentAcknowledgementForPane(ctx context.Co
 			return &sessionStartBootstrapError{Reason: sessionStartBootstrapAcknowledgementLost, SessionID: sessionID, Incarnation: incarnation, Cause: err}
 		}
 		last = sample
-		if (sample.promptConsumed || sample.promptSubmitted) && sample.identityFound && sample.paneFound && managedAgentIdentityMatchesPane(sample.identity, sample.pane, incarnation) {
+		exactPane := sample.identityFound && sample.paneFound && managedAgentIdentityMatchesPane(sample.identity, sample.pane, incarnation)
+		if exactPane {
+			exactPaneObserved = true
+		}
+		if (sample.promptConsumed || sample.promptSubmitted) && exactPane {
 			if sessionStartPaneIsShellFallback(d.runtimeConfigForProject(projectID).SessionShell, sample.pane.CurrentCommand) {
 				return d.initialSessionBootstrapFailure(waitCtx, sessionID, incarnation, sample, sessionStartBootstrapShellFallback, errors.New("managed agent exited to a shell before acknowledgement"))
 			}
 			return nil
 		}
-		if !sample.paneFound {
+		if exactPaneObserved && !sample.paneFound {
 			return d.initialSessionBootstrapFailure(waitCtx, sessionID, incarnation, sample, sessionStartBootstrapAgentExited, errors.New("managed tmux pane disappeared before acknowledgement"))
 		}
 		select {
@@ -125,7 +134,7 @@ func (d *Daemon) waitForInitialManagedAgentAcknowledgementForPane(ctx context.Co
 				reason = sessionStartBootstrapShellFallback
 			}
 			return d.initialSessionBootstrapFailure(context.WithoutCancel(waitCtx), sessionID, incarnation, last, reason, waitCtx.Err())
-		case <-ticker.C:
+		case <-poll:
 		}
 	}
 }
