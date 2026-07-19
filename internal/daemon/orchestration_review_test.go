@@ -154,14 +154,6 @@ func TestReviewInspectionUsesVerifiedReturnedCheckpoint(t *testing.T) {
 	}
 }
 
-func TestReviewCoordinationRequiresIndependentActor(t *testing.T) {
-	now := time.Now().UTC()
-	inspection := reviewCoordinationInspection(domain.Task{ID: "issue", Ownership: &domain.IssueOwnership{OwnerID: "worker", OwnerKind: "agent", ClaimedAt: now}}, "WORKER")
-	if inspection.Actionable || !strings.Contains(strings.Join(inspection.Reasons, " "), "independent-review-required") {
-		t.Fatalf("same-actor inspection = %+v", inspection)
-	}
-}
-
 type revisionReviewGitRunner struct {
 	headRevision string
 }

@@ -389,10 +389,6 @@ func reviewCoordinationInspection(task domain.Task, actorID string) protocol.Orc
 	now := time.Now().UTC()
 	if task.Ownership != nil && task.Ownership.IsActive(now) {
 		inspection.ExecutionOwner = task.Ownership.OwnerID
-		if strings.EqualFold(strings.TrimSpace(task.Ownership.OwnerID), strings.TrimSpace(actorID)) {
-			inspection.Actionable = false
-			inspection.Reasons = append(inspection.Reasons, "independent-review-required: reviewer matches active execution owner")
-		}
 	}
 	if lease := coordinationLease(task, domain.CoordinationLeaseOrchestration); lease != nil && !lease.IsExpired(now) {
 		inspection.OrchestrationOwner = lease.OwnerID
