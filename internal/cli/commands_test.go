@@ -4770,7 +4770,7 @@ func TestParseExportArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseExportArgs() error = %v", err)
 			}
-			if got != tt.want {
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("ParseExportArgs() = %+v, want %+v", got, tt.want)
 			}
 		})
@@ -6275,6 +6275,7 @@ func TestParseIssueSplitArgsRequiresParent(t *testing.T) {
 }
 
 func TestParseIssueCloseArgs(t *testing.T) {
+	historicalAuthorization := domain.HistoricalPublicationAuthorization{ReviewEventID: 10, ValidationEventID: 9, ReceiptEventID: 11, ReviewerID: "reviewer", AuthoritativeEvidenceID: "gate-report", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeRepository, Purpose: domain.ValidationPurposePushGate, Execution: domain.ValidationExecutionExecuted, Override: domain.ValidationOverrideNone, EvidencePresent: true, AttestsMissingLegacySemantics: true}
 	tests := []struct {
 		name        string
 		args        []string
@@ -6287,6 +6288,16 @@ func TestParseIssueCloseArgs(t *testing.T) {
 			want: IssueCloseOptions{IssueID: "az-1"},
 		},
 		{
+			name: "typed historical authorization",
+			args: []string{"--historical-authorization", `{"review_event_id":10,"validation_event_id":9,"receipt_event_id":11,"reviewer_id":"reviewer","authoritative_evidence_id":"gate-report","validation_class":"aggregate","validation_scope":"repository","validation_purpose":"push_gate","validation_execution":"executed","validation_override":"none","evidence_present":true,"attests_missing_legacy_semantics":true}`, "az-1"},
+			want: IssueCloseOptions{IssueID: "az-1", HistoricalAuthorization: &historicalAuthorization},
+		},
+		{
+			name:        "focused historical authorization rejected",
+			args:        []string{"--historical-authorization", `{"review_event_id":10,"validation_event_id":9,"receipt_event_id":11,"reviewer_id":"reviewer","authoritative_evidence_id":"gate-report","validation_class":"safe","validation_scope":"repository","validation_purpose":"push_gate","validation_execution":"executed","validation_override":"none","evidence_present":true,"attests_missing_legacy_semantics":true}`, "az-1"},
+			errContains: "aggregate repository push-gate",
+		},
+		{
 			name:        "forbid impl",
 			args:        []string{"--impl", "go-bubbletea", "az-1"},
 			errContains: "--impl is not supported for issue close",
@@ -6294,12 +6305,12 @@ func TestParseIssueCloseArgs(t *testing.T) {
 		{
 			name:        "missing id",
 			args:        []string{},
-			errContains: "usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]",
+			errContains: "usage: az ticket close",
 		},
 		{
 			name:        "extra args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]",
+			errContains: "usage: az ticket close",
 		},
 		{
 			name: "named id",
@@ -6350,7 +6361,7 @@ func TestParseIssueCloseArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseIssueCloseArgs() error = %v", err)
 			}
-			if got != tt.want {
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("ParseIssueCloseArgs() = %+v, want %+v", got, tt.want)
 			}
 		})

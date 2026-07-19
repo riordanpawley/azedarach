@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -475,17 +476,16 @@ type TaskIntegrationPublicationBinding struct {
 // validation observations that authorize recovery of a configured-base
 // integration created before publication operations existed.
 type TaskIntegrationHistoricalBinding struct {
-	ProjectID         string
-	SourceBranch      string
-	TargetBranch      string
-	TargetID          string
-	BaseOID           string
-	SourceOID         string
-	TargetOID         string
-	BindingID         string
-	ReviewEventID     int64
-	ValidationEventID int64
-	WorktreePath      string
+	ProjectID     string
+	SourceBranch  string
+	TargetBranch  string
+	TargetID      string
+	BaseOID       string
+	SourceOID     string
+	TargetOID     string
+	BindingID     string
+	Authorization domain.HistoricalPublicationAuthorization
+	WorktreePath  string
 }
 
 // BindTaskIntegrationHistoricalRecovery appends one historical correction.
@@ -503,8 +503,11 @@ func (c *Client) BindTaskIntegrationHistoricalRecovery(ctx context.Context, issu
 	binding.BindingID = strings.TrimSpace(binding.BindingID)
 	binding.WorktreePath = strings.TrimSpace(binding.WorktreePath)
 	if issueID == "" || binding.ProjectID == "" || binding.SourceBranch == "" || binding.TargetBranch == "" || binding.TargetID == "" ||
-		binding.BaseOID == "" || binding.SourceOID == "" || binding.TargetOID == "" || binding.BindingID == "" || binding.ReviewEventID <= 0 || binding.ValidationEventID <= 0 {
+		binding.BaseOID == "" || binding.SourceOID == "" || binding.TargetOID == "" || binding.BindingID == "" {
 		return false, errors.New("exact task integration historical binding is incomplete")
+	}
+	if err := binding.Authorization.Validate(); err != nil {
+		return false, fmt.Errorf("invalid historical publication authorization: %w", err)
 	}
 	appended := false
 	err := c.retrySQLiteBusy(ctx, func() error {
@@ -564,11 +567,11 @@ func (c *Client) BindTaskIntegrationHistoricalRecovery(ctx context.Context, issu
 				}
 				return domain.IssueObservationEvent{ID: id, Type: eventType, Source: source, SourceCommand: sourceCommand, Payload: payload}, nil
 			}
-			review, err := readEvent(binding.ReviewEventID, domain.IssueEventHistoricalReviewAccepted)
+			review, err := readEvent(binding.Authorization.ReviewEventID, domain.IssueEventHistoricalReviewAccepted)
 			if err != nil {
 				return c.wrapError("bind-task-integration-historical", issueID, err)
 			}
-			validation, err := readEvent(binding.ValidationEventID, domain.IssueEventHistoricalValidationCompleted)
+			validation, err := readEvent(binding.Authorization.ValidationEventID, domain.IssueEventHistoricalValidationCompleted)
 			if err != nil {
 				return c.wrapError("bind-task-integration-historical", issueID, err)
 			}
@@ -586,35 +589,37 @@ func (c *Client) BindTaskIntegrationHistoricalRecovery(ctx context.Context, issu
 				return c.wrapError("bind-task-integration-historical", issueID, err)
 			}
 			var laterReviewID int64
-			err = tx.QueryRowContext(ctx, `SELECT id FROM issue_observation_events WHERE issue_id=? AND id>? AND event_type IN (?,?) ORDER BY id DESC LIMIT 1`, issueID, binding.ReviewEventID, string(domain.IssueEventHistoricalReviewAccepted), string(domain.IssueEventHistoricalReviewReturned)).Scan(&laterReviewID)
+			err = tx.QueryRowContext(ctx, `SELECT id FROM issue_observation_events WHERE issue_id=? AND id>? AND event_type IN (?,?) ORDER BY id DESC LIMIT 1`, issueID, binding.Authorization.ReviewEventID, string(domain.IssueEventHistoricalReviewAccepted), string(domain.IssueEventHistoricalReviewReturned)).Scan(&laterReviewID)
 			if err == nil {
-				return c.wrapError("bind-task-integration-historical", issueID, fmt.Errorf("historical review evidence %d was superseded by review event %d", binding.ReviewEventID, laterReviewID))
+				return c.wrapError("bind-task-integration-historical", issueID, fmt.Errorf("historical review evidence %d was superseded by review event %d", binding.Authorization.ReviewEventID, laterReviewID))
 			}
 			if !errors.Is(err, sql.ErrNoRows) {
 				return c.wrapError("bind-task-integration-historical", issueID, err)
 			}
 			var laterValidationID int64
-			err = tx.QueryRowContext(ctx, `SELECT id FROM issue_observation_events WHERE issue_id=? AND id>? AND event_type IN (?,?) ORDER BY id DESC LIMIT 1`, issueID, binding.ValidationEventID, string(domain.IssueEventHistoricalValidationCompleted), string(domain.IssueEventValidationFailed)).Scan(&laterValidationID)
+			err = tx.QueryRowContext(ctx, `SELECT id FROM issue_observation_events WHERE issue_id=? AND id>? AND event_type IN (?,?) ORDER BY id DESC LIMIT 1`, issueID, binding.Authorization.ValidationEventID, string(domain.IssueEventHistoricalValidationCompleted), string(domain.IssueEventValidationFailed)).Scan(&laterValidationID)
 			if err == nil {
-				return c.wrapError("bind-task-integration-historical", issueID, fmt.Errorf("historical validation evidence %d was superseded by validation event %d", binding.ValidationEventID, laterValidationID))
+				return c.wrapError("bind-task-integration-historical", issueID, fmt.Errorf("historical validation evidence %d was superseded by validation event %d", binding.Authorization.ValidationEventID, laterValidationID))
 			}
 			if !errors.Is(err, sql.ErrNoRows) {
 				return c.wrapError("bind-task-integration-historical", issueID, err)
 			}
 
 			var receiptID int64
-			var payloadJSON string
-			err = tx.QueryRowContext(ctx, `SELECT id, payload_json FROM issue_observation_events
-				WHERE issue_id=? AND event_type=? AND json_extract(payload_json,'$.project_id')=? AND json_extract(payload_json,'$.source_branch')=? AND json_extract(payload_json,'$.target_branch')=?
-				ORDER BY id DESC LIMIT 1`, issueID, string(domain.IssueEventTaskIntegrationCompleted), binding.ProjectID, binding.SourceBranch, binding.TargetBranch).Scan(&receiptID, &payloadJSON)
+			var payloadJSON, receiptSource, receiptCommand string
+			err = tx.QueryRowContext(ctx, `SELECT id, source, source_command, payload_json FROM issue_observation_events
+				WHERE id=? AND issue_id=? AND event_type=?`, binding.Authorization.ReceiptEventID, issueID, string(domain.IssueEventTaskIntegrationCompleted)).Scan(&receiptID, &receiptSource, &receiptCommand, &payloadJSON)
 			if errors.Is(err, sql.ErrNoRows) {
 				return c.wrapError("bind-task-integration-historical", issueID, errors.New("exact task integration receipt is absent"))
 			}
 			if err != nil {
 				return c.wrapError("bind-task-integration-historical", issueID, err)
 			}
-			if binding.ValidationEventID >= binding.ReviewEventID || binding.ReviewEventID >= receiptID {
-				return c.wrapError("bind-task-integration-historical", issueID, fmt.Errorf("historical evidence must be validation then acceptance before integration receipt: validation=%d review=%d receipt=%d", binding.ValidationEventID, binding.ReviewEventID, receiptID))
+			if receiptSource != "daemon-task-close" || receiptCommand != "integrate-before-close" {
+				return c.wrapError("bind-task-integration-historical", issueID, fmt.Errorf("historical receipt %d has untrusted provenance %s/%s", receiptID, receiptSource, receiptCommand))
+			}
+			if binding.Authorization.ValidationEventID >= binding.Authorization.ReviewEventID || binding.Authorization.ReviewEventID >= receiptID {
+				return c.wrapError("bind-task-integration-historical", issueID, fmt.Errorf("historical evidence must be validation then acceptance before integration receipt: validation=%d review=%d receipt=%d", binding.Authorization.ValidationEventID, binding.Authorization.ReviewEventID, receiptID))
 			}
 			var receipt map[string]any
 			if err := json.Unmarshal([]byte(payloadJSON), &receipt); err != nil {
@@ -622,18 +627,71 @@ func (c *Client) BindTaskIntegrationHistoricalRecovery(ctx context.Context, issu
 			}
 			integrated, _ := receipt["integrated"].(bool)
 			configuredBase, _ := receipt["configured_base_target"].(bool)
-			if !integrated || !configuredBase || payloadString(receipt, "target_id") != binding.TargetID || payloadString(receipt, "base_oid") != binding.BaseOID || payloadString(receipt, "source_oid") != binding.SourceOID || payloadString(receipt, "target_oid") != binding.TargetOID {
-				return c.wrapError("bind-task-integration-historical", issueID, errors.New("latest task integration receipt does not match exact historical revisions and target identity"))
-			}
-			existingID := payloadString(receipt, "historical_recovery_binding_id")
-			if existingID != "" {
-				if existingID != binding.BindingID {
-					return c.wrapError("bind-task-integration-historical", issueID, fmt.Errorf("task integration receipt is already bound to historical recovery %s", existingID))
-				}
-				return nil
+			if !integrated || !configuredBase || payloadString(receipt, "project_id") != binding.ProjectID || payloadString(receipt, "source_branch") != binding.SourceBranch || payloadString(receipt, "target_branch") != binding.TargetBranch || payloadString(receipt, "target_id") != binding.TargetID || payloadString(receipt, "base_oid") != binding.BaseOID || payloadString(receipt, "source_oid") != binding.SourceOID || payloadString(receipt, "target_oid") != binding.TargetOID {
+				return c.wrapError("bind-task-integration-historical", issueID, errors.New("pinned task integration receipt does not match exact historical revisions and target identity"))
 			}
 			if payloadString(receipt, "publication_operation_id") != "" {
 				return c.wrapError("bind-task-integration-historical", issueID, errors.New("task integration receipt already has publication operation authority"))
+			}
+			if payloadString(receipt, "historical_recovery_binding_id") != "" {
+				return c.wrapError("bind-task-integration-historical", issueID, errors.New("pinned original receipt is already a historical correction"))
+			}
+
+			var correctedPayloadJSON, correctedSource, correctedCommand string
+			err = tx.QueryRowContext(ctx, `SELECT payload_json, source, source_command FROM issue_observation_events WHERE issue_id=? AND event_type=? AND json_extract(payload_json,'$.historical_recovery_binding_id')=? ORDER BY id DESC LIMIT 1`, issueID, string(domain.IssueEventTaskIntegrationCompleted), binding.BindingID).Scan(&correctedPayloadJSON, &correctedSource, &correctedCommand)
+			if err == nil {
+				var corrected map[string]any
+				if err := json.Unmarshal([]byte(correctedPayloadJSON), &corrected); err != nil {
+					return c.wrapError("bind-task-integration-historical", issueID, err)
+				}
+				if payloadString(corrected, "publication_operation_id") != "" {
+					return c.wrapError("bind-task-integration-historical", issueID, errors.New("historical correction contains mixed modern publication authority"))
+				}
+				correctedIntegrated, _ := corrected["integrated"].(bool)
+				correctedConfiguredBase, _ := corrected["configured_base_target"].(bool)
+				if correctedSource != "daemon-task-close" || correctedCommand != "historical-integration-recovery" || !correctedIntegrated || !correctedConfiguredBase || payloadString(corrected, "project_id") != binding.ProjectID || payloadString(corrected, "source_branch") != binding.SourceBranch || payloadString(corrected, "target_branch") != binding.TargetBranch || payloadString(corrected, "target_id") != binding.TargetID || payloadString(corrected, "base_oid") != binding.BaseOID || payloadString(corrected, "source_oid") != binding.SourceOID || payloadString(corrected, "target_oid") != binding.TargetOID {
+					return c.wrapError("bind-task-integration-historical", issueID, errors.New("historical correction provenance or exact integration identity is invalid"))
+				}
+				if payloadString(corrected, "historical_original_receipt_event_id") != strconv.FormatInt(receiptID, 10) || payloadString(corrected, "historical_review_event_id") != strconv.FormatInt(binding.Authorization.ReviewEventID, 10) || payloadString(corrected, "historical_validation_event_id") != strconv.FormatInt(binding.Authorization.ValidationEventID, 10) {
+					return c.wrapError("bind-task-integration-historical", issueID, errors.New("historical correction does not match pinned authorization"))
+				}
+				authorizationID, parseErr := strconv.ParseInt(payloadString(corrected, "historical_authorization_event_id"), 10, 64)
+				if parseErr != nil || authorizationID <= 0 {
+					return c.wrapError("bind-task-integration-historical", issueID, errors.New("historical correction is missing its authorization event"))
+				}
+				var authorizationSource, authorizationCommand, authorizationPayloadJSON string
+				err = tx.QueryRowContext(ctx, `SELECT source, source_command, payload_json FROM issue_observation_events WHERE id=? AND issue_id=? AND event_type=?`, authorizationID, issueID, string(domain.IssueEventTaskIntegrationHistoricalAuthorized)).Scan(&authorizationSource, &authorizationCommand, &authorizationPayloadJSON)
+				if err != nil || authorizationSource != "daemon-task-close" || authorizationCommand != "historical-integration-authorize" {
+					return c.wrapError("bind-task-integration-historical", issueID, errors.New("historical correction authorization provenance is invalid"))
+				}
+				var authorized map[string]any
+				if err := json.Unmarshal([]byte(authorizationPayloadJSON), &authorized); err != nil {
+					return c.wrapError("bind-task-integration-historical", issueID, err)
+				}
+				evidencePresent, _ := authorized["evidence_present"].(bool)
+				attestsMissingLegacySemantics, _ := authorized["attests_missing_legacy_semantics"].(bool)
+				if payloadString(authorized, "binding_id") != binding.BindingID || payloadString(authorized, "project_id") != binding.ProjectID || payloadString(authorized, "source_branch") != binding.SourceBranch || payloadString(authorized, "target_branch") != binding.TargetBranch || payloadString(authorized, "target_id") != binding.TargetID || payloadString(authorized, "base_oid") != binding.BaseOID || payloadString(authorized, "source_oid") != binding.SourceOID || payloadString(authorized, "target_oid") != binding.TargetOID || payloadString(authorized, "review_event_id") != strconv.FormatInt(binding.Authorization.ReviewEventID, 10) || payloadString(authorized, "validation_event_id") != strconv.FormatInt(binding.Authorization.ValidationEventID, 10) || payloadString(authorized, "reviewer_id") != strings.TrimSpace(binding.Authorization.ReviewerID) || payloadString(authorized, "authoritative_evidence_id") != strings.TrimSpace(binding.Authorization.AuthoritativeEvidenceID) || payloadString(authorized, "original_receipt_event_id") != strconv.FormatInt(receiptID, 10) || payloadString(authorized, "validation_class") != string(binding.Authorization.Class) || payloadString(authorized, "validation_scope") != string(binding.Authorization.Scope) || payloadString(authorized, "validation_purpose") != string(binding.Authorization.Purpose) || payloadString(authorized, "validation_execution") != string(binding.Authorization.Execution) || payloadString(authorized, "validation_override") != string(binding.Authorization.Override) || evidencePresent != binding.Authorization.EvidencePresent || attestsMissingLegacySemantics != binding.Authorization.AttestsMissingLegacySemantics {
+					return c.wrapError("bind-task-integration-historical", issueID, errors.New("historical correction authorization does not match exact attestation"))
+				}
+				return nil
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return c.wrapError("bind-task-integration-historical", issueID, err)
+			}
+
+			authorizationEventID, err := c.insertIssueObservationEvent(ctx, tx, issueID, IssueObservationEventParams{
+				Type: domain.IssueEventTaskIntegrationHistoricalAuthorized, Source: "daemon-task-close", SourceCommand: "historical-integration-authorize", WorktreePath: binding.WorktreePath,
+				Payload: map[string]any{
+					"binding_id": binding.BindingID, "project_id": binding.ProjectID, "source_branch": binding.SourceBranch, "target_branch": binding.TargetBranch, "target_id": binding.TargetID,
+					"base_oid": binding.BaseOID, "source_oid": binding.SourceOID, "target_oid": binding.TargetOID,
+					"review_event_id": binding.Authorization.ReviewEventID, "validation_event_id": binding.Authorization.ValidationEventID, "original_receipt_event_id": receiptID,
+					"reviewer_id": strings.TrimSpace(binding.Authorization.ReviewerID), "authoritative_evidence_id": strings.TrimSpace(binding.Authorization.AuthoritativeEvidenceID),
+					"validation_class": binding.Authorization.Class, "validation_scope": binding.Authorization.Scope, "validation_purpose": binding.Authorization.Purpose,
+					"validation_execution": binding.Authorization.Execution, "validation_override": binding.Authorization.Override, "evidence_present": binding.Authorization.EvidencePresent, "attests_missing_legacy_semantics": binding.Authorization.AttestsMissingLegacySemantics,
+				},
+			})
+			if err != nil {
+				return c.wrapError("bind-task-integration-historical", issueID, err)
 			}
 			_, err = c.insertIssueObservationEvent(ctx, tx, issueID, IssueObservationEventParams{
 				Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close", SourceCommand: "historical-integration-recovery", WorktreePath: binding.WorktreePath,
@@ -642,7 +700,8 @@ func (c *Client) BindTaskIntegrationHistoricalRecovery(ctx context.Context, issu
 					"integrated": true, "configured_base_target": true, "target_id": binding.TargetID,
 					"base_oid": binding.BaseOID, "source_oid": binding.SourceOID, "target_oid": binding.TargetOID,
 					"publication_operation_id": "", "historical_recovery_binding_id": binding.BindingID,
-					"historical_review_event_id": binding.ReviewEventID, "historical_validation_event_id": binding.ValidationEventID,
+					"historical_authorization_event_id": authorizationEventID, "historical_original_receipt_event_id": receiptID,
+					"historical_review_event_id": binding.Authorization.ReviewEventID, "historical_validation_event_id": binding.Authorization.ValidationEventID,
 				},
 			})
 			if err != nil {
@@ -692,18 +751,21 @@ func (c *Client) BindTaskIntegrationPublicationOperation(ctx context.Context, is
 			if err := c.requireIssueExists(ctx, tx, issueID, "bind-task-integration-publication"); err != nil {
 				return err
 			}
-			var payloadJSON string
-			err = tx.QueryRowContext(ctx, `SELECT payload_json FROM issue_observation_events
+			var payloadJSON, receiptSource, receiptCommand string
+			err = tx.QueryRowContext(ctx, `SELECT payload_json, source, source_command FROM issue_observation_events
 				WHERE issue_id=? AND event_type=?
 				  AND json_extract(payload_json,'$.project_id')=?
 				  AND json_extract(payload_json,'$.source_branch')=?
 				  AND json_extract(payload_json,'$.target_branch')=?
-				ORDER BY id DESC LIMIT 1`, issueID, string(domain.IssueEventTaskIntegrationCompleted), binding.ProjectID, binding.SourceBranch, binding.TargetBranch).Scan(&payloadJSON)
+				ORDER BY id DESC LIMIT 1`, issueID, string(domain.IssueEventTaskIntegrationCompleted), binding.ProjectID, binding.SourceBranch, binding.TargetBranch).Scan(&payloadJSON, &receiptSource, &receiptCommand)
 			if errors.Is(err, sql.ErrNoRows) {
 				return c.wrapError("bind-task-integration-publication", issueID, errors.New("exact task integration receipt is absent"))
 			}
 			if err != nil {
 				return c.wrapError("bind-task-integration-publication", issueID, err)
+			}
+			if receiptSource != "daemon-task-close" || receiptCommand != "integrate-before-close" {
+				return c.wrapError("bind-task-integration-publication", issueID, fmt.Errorf("task integration receipt has untrusted provenance %s/%s", receiptSource, receiptCommand))
 			}
 			var payload map[string]any
 			if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
@@ -718,6 +780,9 @@ func (c *Client) BindTaskIntegrationPublicationOperation(ctx context.Context, is
 				return c.wrapError("bind-task-integration-publication", issueID, errors.New("latest task integration receipt does not match exact publication revisions and target identity"))
 			}
 			existingOperationID := payloadString("publication_operation_id")
+			if existingOperationID != "" && payloadString("historical_recovery_binding_id") != "" {
+				return c.wrapError("bind-task-integration-publication", issueID, errors.New("task integration receipt contains mixed modern and historical authority"))
+			}
 			if existingOperationID != "" {
 				if existingOperationID != binding.PublicationOperationID {
 					return c.wrapError("bind-task-integration-publication", issueID, fmt.Errorf("task integration receipt is already bound to publication operation %s", existingOperationID))

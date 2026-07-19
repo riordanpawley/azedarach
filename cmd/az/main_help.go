@@ -479,7 +479,7 @@ const (
 	issueCheckUsage               = "Usage: az ticket check [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>]"
 	issueDoctorUsage              = "Usage: az ticket doctor [--project <project-id>] [--id <ticket-id>] [--checkpoint-wal] [--truncate-wal] [--json] [<ticket-id>]"
 	issueUpdateUsage              = "Usage: az ticket update [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>] [--title text] [--description text] [--notes text] [--append-notes text] [--status backlog|open|in_progress|in_review|closed|cancelled] [--cascade-children] [--force-worktree] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--update-impl <impl> ...]"
-	issueCloseUsage               = "Usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]"
+	issueCloseUsage               = "Usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [--historical-authorization <json>] [<ticket-id>]"
 	issueDeleteUsage              = "Usage: az ticket delete [--project <project-id>] --confirm [--id <ticket-id>] [--json] [<ticket-id>]"
 	issueUnarchiveUsage           = "Usage: az ticket unarchive [--project <project-id>] [--id <ticket-id>] [--json] [--with-parents] [--cascade-children] [<ticket-id>]"
 	issueImageAddUsage            = "Usage: az ticket image add [--project <project-id>] [--ticket-id <ticket-id>] [--path <file>] [<ticket-id> <file>] [--json]"

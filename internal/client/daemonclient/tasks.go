@@ -118,13 +118,14 @@ type TaskOwnershipRequest struct {
 
 // TaskStatusOptions controls client-side status transition behavior.
 type TaskStatusOptions struct {
-	ForceWorktree        bool
-	IgnoreAhead          bool
-	IntegrateBeforeClose bool
-	CloseCleanChildren   bool
-	CascadeChildren      bool
-	AllowActiveSession   bool
-	CloseOutcome         domain.IssueCloseOutcome
+	ForceWorktree           bool
+	IgnoreAhead             bool
+	IntegrateBeforeClose    bool
+	CloseCleanChildren      bool
+	CascadeChildren         bool
+	AllowActiveSession      bool
+	CloseOutcome            domain.IssueCloseOutcome
+	HistoricalAuthorization *domain.HistoricalPublicationAuthorization
 }
 
 type TaskDeleteOptions struct {
@@ -140,13 +141,14 @@ type TaskUnarchiveOptions struct {
 }
 
 type taskCloseRequest struct {
-	TaskID               naming.IssueID `json:"task_id"`
-	ForceWorktree        bool           `json:"force_worktree,omitempty"`
-	IgnoreAhead          bool           `json:"ignore_ahead,omitempty"`
-	IntegrateBeforeClose bool           `json:"integrate_before_close,omitempty"`
-	CloseCleanChildren   bool           `json:"close_clean_children,omitempty"`
-	AllowActiveSession   bool           `json:"allow_active_session,omitempty"`
-	CloseOutcome         string         `json:"closed_outcome,omitempty"`
+	TaskID                  naming.IssueID                             `json:"task_id"`
+	ForceWorktree           bool                                       `json:"force_worktree,omitempty"`
+	IgnoreAhead             bool                                       `json:"ignore_ahead,omitempty"`
+	IntegrateBeforeClose    bool                                       `json:"integrate_before_close,omitempty"`
+	CloseCleanChildren      bool                                       `json:"close_clean_children,omitempty"`
+	AllowActiveSession      bool                                       `json:"allow_active_session,omitempty"`
+	CloseOutcome            string                                     `json:"closed_outcome,omitempty"`
+	HistoricalAuthorization *domain.HistoricalPublicationAuthorization `json:"historical_authorization,omitempty"`
 }
 
 type taskDeleteRequest struct {
@@ -1043,13 +1045,14 @@ func (c *Client) CloseTask(ctx context.Context, taskID string, opts TaskStatusOp
 	}
 	var out TaskCloseResult
 	if err := c.commandJSON(ctx, CommandTaskClose, taskCloseRequest{
-		TaskID:               parsedTaskID,
-		ForceWorktree:        opts.ForceWorktree,
-		IgnoreAhead:          opts.IgnoreAhead,
-		IntegrateBeforeClose: opts.IntegrateBeforeClose,
-		CloseCleanChildren:   opts.CloseCleanChildren,
-		AllowActiveSession:   opts.AllowActiveSession,
-		CloseOutcome:         string(opts.CloseOutcome),
+		TaskID:                  parsedTaskID,
+		ForceWorktree:           opts.ForceWorktree,
+		IgnoreAhead:             opts.IgnoreAhead,
+		IntegrateBeforeClose:    opts.IntegrateBeforeClose,
+		CloseCleanChildren:      opts.CloseCleanChildren,
+		AllowActiveSession:      opts.AllowActiveSession,
+		CloseOutcome:            string(opts.CloseOutcome),
+		HistoricalAuthorization: opts.HistoricalAuthorization,
 	}, &out); err != nil {
 		return TaskCloseResult{}, err
 	}

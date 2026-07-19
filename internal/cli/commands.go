@@ -274,11 +274,12 @@ func (e issueCreatePartialError) Unwrap() error {
 }
 
 type IssueCloseOptions struct {
-	Project            string
-	IssueID            string
-	JSON               bool
-	ForceWorktree      bool
-	CloseCleanChildren bool
+	Project                 string
+	IssueID                 string
+	JSON                    bool
+	ForceWorktree           bool
+	CloseCleanChildren      bool
+	HistoricalAuthorization *domain.HistoricalPublicationAuthorization
 }
 
 type IssueCleanupOptions struct {
@@ -4044,6 +4045,7 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 	opts := IssueCloseOptions{}
 	issueIDFlag := ""
 	implFlag := ""
+	historicalAuthorizationJSON := ""
 	fs := flag.NewFlagSet("issue close", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
@@ -4053,11 +4055,12 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 	fs.BoolVar(&opts.JSON, "json", false, "output issue close result as JSON")
 	fs.BoolVar(&opts.ForceWorktree, "force-worktree", false, "force worktree removal after integration")
 	fs.BoolVar(&opts.CloseCleanChildren, "close-clean-children", false, "also close clean unresolved child issues after confirmation")
+	fs.StringVar(&historicalAuthorizationJSON, "historical-authorization", "", "typed operator authorization JSON for a pre-publication-operation integration")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueCloseOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueCloseOptions{}, fmt.Errorf("usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]")
+		return IssueCloseOptions{}, fmt.Errorf("usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [--historical-authorization <json>] [<ticket-id>]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueCloseOptions{}, fmt.Errorf("--impl is not supported for issue close; issue implementations are already assigned")
@@ -4069,7 +4072,17 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueCloseOptions{}, fmt.Errorf("usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]")
+		return IssueCloseOptions{}, fmt.Errorf("usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [--historical-authorization <json>] [<ticket-id>]")
+	}
+	if strings.TrimSpace(historicalAuthorizationJSON) != "" {
+		var authorization domain.HistoricalPublicationAuthorization
+		if err := json.Unmarshal([]byte(historicalAuthorizationJSON), &authorization); err != nil {
+			return IssueCloseOptions{}, fmt.Errorf("decode --historical-authorization: %w", err)
+		}
+		if err := authorization.Validate(); err != nil {
+			return IssueCloseOptions{}, fmt.Errorf("invalid --historical-authorization: %w", err)
+		}
+		opts.HistoricalAuthorization = &authorization
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -6827,7 +6840,9 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 		return err
 	}
 
-	result, err := deps.DaemonClient.CloseTask(ctx, opts.IssueID, cleanupCloseTaskStatusOptions(opts.ForceWorktree, opts.CloseCleanChildren))
+	closeOpts := cleanupCloseTaskStatusOptions(opts.ForceWorktree, opts.CloseCleanChildren)
+	closeOpts.HistoricalAuthorization = opts.HistoricalAuthorization
+	result, err := deps.DaemonClient.CloseTask(ctx, opts.IssueID, closeOpts)
 	if err != nil {
 		if strings.Contains(err.Error(), "context risk is high") {
 			if contextRisk, riskErr := loadIssueContextRiskForCloseout(ctx, deps, opts.IssueID); riskErr == nil && contextRisk != nil {

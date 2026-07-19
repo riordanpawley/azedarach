@@ -12,37 +12,38 @@ import (
 type IssueObservationEventType string
 
 const (
-	IssueEventIssueCreated             IssueObservationEventType = "issue.created"
-	IssueEventIssueStatusChanged       IssueObservationEventType = "issue.status_changed"
-	IssueEventIssueDetailsChanged      IssueObservationEventType = "issue.details_changed"
-	IssueEventIssueNotesAppended       IssueObservationEventType = "issue.notes_appended"
-	IssueEventIssueDependencyAdded     IssueObservationEventType = "issue.dependency_added"
-	IssueEventIssueDependencyRemoved   IssueObservationEventType = "issue.dependency_removed"
-	IssueEventIssueOwnershipChanged    IssueObservationEventType = "issue.ownership_changed"
-	IssueEventIssueArchived            IssueObservationEventType = "issue.archived"
-	IssueEventIssueUnarchived          IssueObservationEventType = "issue.unarchived"
-	IssueEventIssueDeleted             IssueObservationEventType = "issue.deleted"
-	IssueEventProgressRecorded         IssueObservationEventType = "progress.recorded"
-	IssueEventFollowupCreated          IssueObservationEventType = "follow_up.created"
-	IssueEventSessionLifecycleChanged  IssueObservationEventType = "session.lifecycle_changed"
-	IssueEventAgentActivityChanged     IssueObservationEventType = "agent.activity_changed"
-	IssueEventWorktreeGitChanged       IssueObservationEventType = "worktree.git_changed"
-	IssueEventCommandStarted           IssueObservationEventType = "command.started"
-	IssueEventCommandFinished          IssueObservationEventType = "command.finished"
-	IssueEventValidationPassed         IssueObservationEventType = "validation.passed"
-	IssueEventValidationFailed         IssueObservationEventType = "validation.failed"
-	IssueEventEvidenceSubmitted        IssueObservationEventType = "evidence.submitted"
-	IssueEventReviewCompleted          IssueObservationEventType = "review.completed"
-	IssueEventReviewCloseFailed        IssueObservationEventType = "review.close_failed"
-	IssueEventTaskIntegrationCompleted IssueObservationEventType = "task.integration_completed"
-	IssueEventRiskRecorded             IssueObservationEventType = "risk.recorded"
-	IssueEventBlockerReported          IssueObservationEventType = "blocker.reported"
-	IssueEventHumanInputRequested      IssueObservationEventType = "human.input_requested"
-	IssueEventHumanInputProvided       IssueObservationEventType = "human.input_provided"
-	IssueEventInvestigationDisposition IssueObservationEventType = "investigation.disposition_declared"
-	IssueEventOrchestrationRouted      IssueObservationEventType = "orchestration.candidate_routed"
-	IssueEventDecisionChanged          IssueObservationEventType = "decision.changed"
-	IssueEventDecisionAcknowledged     IssueObservationEventType = "decision.acknowledged"
+	IssueEventIssueCreated                        IssueObservationEventType = "issue.created"
+	IssueEventIssueStatusChanged                  IssueObservationEventType = "issue.status_changed"
+	IssueEventIssueDetailsChanged                 IssueObservationEventType = "issue.details_changed"
+	IssueEventIssueNotesAppended                  IssueObservationEventType = "issue.notes_appended"
+	IssueEventIssueDependencyAdded                IssueObservationEventType = "issue.dependency_added"
+	IssueEventIssueDependencyRemoved              IssueObservationEventType = "issue.dependency_removed"
+	IssueEventIssueOwnershipChanged               IssueObservationEventType = "issue.ownership_changed"
+	IssueEventIssueArchived                       IssueObservationEventType = "issue.archived"
+	IssueEventIssueUnarchived                     IssueObservationEventType = "issue.unarchived"
+	IssueEventIssueDeleted                        IssueObservationEventType = "issue.deleted"
+	IssueEventProgressRecorded                    IssueObservationEventType = "progress.recorded"
+	IssueEventFollowupCreated                     IssueObservationEventType = "follow_up.created"
+	IssueEventSessionLifecycleChanged             IssueObservationEventType = "session.lifecycle_changed"
+	IssueEventAgentActivityChanged                IssueObservationEventType = "agent.activity_changed"
+	IssueEventWorktreeGitChanged                  IssueObservationEventType = "worktree.git_changed"
+	IssueEventCommandStarted                      IssueObservationEventType = "command.started"
+	IssueEventCommandFinished                     IssueObservationEventType = "command.finished"
+	IssueEventValidationPassed                    IssueObservationEventType = "validation.passed"
+	IssueEventValidationFailed                    IssueObservationEventType = "validation.failed"
+	IssueEventEvidenceSubmitted                   IssueObservationEventType = "evidence.submitted"
+	IssueEventReviewCompleted                     IssueObservationEventType = "review.completed"
+	IssueEventReviewCloseFailed                   IssueObservationEventType = "review.close_failed"
+	IssueEventTaskIntegrationCompleted            IssueObservationEventType = "task.integration_completed"
+	IssueEventTaskIntegrationHistoricalAuthorized IssueObservationEventType = "task.integration_historical_authorized"
+	IssueEventRiskRecorded                        IssueObservationEventType = "risk.recorded"
+	IssueEventBlockerReported                     IssueObservationEventType = "blocker.reported"
+	IssueEventHumanInputRequested                 IssueObservationEventType = "human.input_requested"
+	IssueEventHumanInputProvided                  IssueObservationEventType = "human.input_provided"
+	IssueEventInvestigationDisposition            IssueObservationEventType = "investigation.disposition_declared"
+	IssueEventOrchestrationRouted                 IssueObservationEventType = "orchestration.candidate_routed"
+	IssueEventDecisionChanged                     IssueObservationEventType = "decision.changed"
+	IssueEventDecisionAcknowledged                IssueObservationEventType = "decision.acknowledged"
 	// These legacy evidence types predate daemon-owned review publication.
 	// They remain readable only for the fail-closed historical integration
 	// recovery path; new review acceptance uses IssueEventReviewCompleted.
@@ -119,6 +120,7 @@ func IssueObservationEventTypeRequiresAuthority(eventType IssueObservationEventT
 		IssueEventReviewCompleted,
 		IssueEventReviewCloseFailed,
 		IssueEventTaskIntegrationCompleted,
+		IssueEventTaskIntegrationHistoricalAuthorized,
 		IssueEventOrchestrationRouted,
 		IssueEventDecisionChanged,
 		IssueEventDecisionAcknowledged:

@@ -43,6 +43,12 @@ func TestRecoverHistoricalTaskClosePublicationConvergesAcrossDaemonsAfterSourceR
 		SourceBranch: "feature-removed", TargetBranch: "main", BaseOID: baseOID, SourceOID: sourceOID, TargetOID: sourceOID,
 	}
 	require.NoError(t, (&Daemon{issueClientsByProject: map[string]*issues.Client{projectID: clients[0]}}).persistTaskCloseIntegrationReceipt(ctx, projectID, issueID, repoDir, integration))
+	originalReceipts, err := clients[0].ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted}, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, originalReceipts, 1)
+	integration.ReceiptEventID = originalReceipts[0].ID
+	authorization := validHistoricalAuthorization(validation.ID, review.ID, integration.ReceiptEventID)
+	authorizedCtx := withTaskCloseHistoricalAuthorization(ctx, authorization)
 
 	daemons := []*Daemon{
 		historicalPublicationDaemon(t, repoDir, projectID, clients[0]),
@@ -58,7 +64,7 @@ func TestRecoverHistoricalTaskClosePublicationConvergesAcrossDaemonsAfterSourceR
 			defer wg.Done()
 			ready <- struct{}{}
 			<-start
-			errs <- d.persistTaskCloseIntegrationPublication(ctx, projectID, issueID, repoDir, integration)
+			errs <- d.persistTaskCloseIntegrationPublication(authorizedCtx, projectID, issueID, repoDir, integration)
 		}(d)
 	}
 	for range daemons {
@@ -78,11 +84,30 @@ func TestRecoverHistoricalTaskClosePublicationConvergesAcrossDaemonsAfterSourceR
 	require.Equal(t, wantID, observationPayloadString(receipts[1].Payload, "historical_recovery_binding_id"))
 	require.EqualValues(t, review.ID, receipts[1].Payload["historical_review_event_id"])
 	require.EqualValues(t, validation.ID, receipts[1].Payload["historical_validation_event_id"])
+	authorizations, err := clients[0].ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationHistoricalAuthorized}, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, authorizations, 1, "concurrent recovery must append one daemon authorization")
+	require.EqualValues(t, originalReceipts[0].ID, authorizations[0].Payload["original_receipt_event_id"])
 
-	require.NoError(t, daemons[1].persistTaskCloseIntegrationPublication(ctx, projectID, issueID, repoDir, integration))
+	replayed, found, err := daemons[1].recoverPublishedTaskCloseIntegration(ctx, projectID, issueID, repoDir, "base", "feature-removed", "main", sourceOID, currentOID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.NoError(t, daemons[1].persistTaskCloseIntegrationPublication(ctx, projectID, issueID, repoDir, replayed))
 	receipts, err = clients[1].ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted}, Limit: 10})
 	require.NoError(t, err)
 	require.Len(t, receipts, 2, "idempotent replay must not append another binding")
+
+	mixedPayload := historicalReceiptPayload(projectID, integration)
+	mixedPayload["publication_operation_id"] = "modern-operation"
+	mixedPayload["historical_recovery_binding_id"] = wantID
+	mixedPayload["historical_authorization_event_id"] = authorizations[0].ID
+	mixedPayload["historical_original_receipt_event_id"] = originalReceipts[0].ID
+	mixedPayload["historical_review_event_id"] = review.ID
+	mixedPayload["historical_validation_event_id"] = validation.ID
+	_, err = clients[0].AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close", SourceCommand: "historical-integration-recovery", WorktreePath: repoDir, Payload: mixedPayload})
+	require.NoError(t, err)
+	_, err = clients[0].BindTaskIntegrationHistoricalRecovery(ctx, issueID, issues.TaskIntegrationHistoricalBinding{ProjectID: projectID, SourceBranch: integration.SourceBranch, TargetBranch: integration.TargetBranch, TargetID: "base", BaseOID: integration.BaseOID, SourceOID: integration.SourceOID, TargetOID: integration.TargetOID, BindingID: wantID, Authorization: authorization, WorktreePath: repoDir})
+	require.ErrorContains(t, err, "mixed modern publication authority")
 }
 
 func TestRecoverHistoricalTaskClosePublicationFailsClosed(t *testing.T) {
@@ -100,59 +125,74 @@ func TestRecoverHistoricalTaskClosePublicationFailsClosed(t *testing.T) {
 	runPublicationGit(t, repoDir, "branch", "-D", "divergent")
 
 	for _, tc := range []struct {
-		name       string
-		review     string
-		validation string
-		mutate     func(*taskCloseIntegrationResult, *Daemon)
-		after      func(*testing.T, *issues.Client, string)
+		name          string
+		mutate        func(*taskCloseIntegrationResult, *Daemon, *domain.HistoricalPublicationAuthorization)
+		forgedReceipt bool
+		laterReview   bool
+		withoutAuth   bool
 	}{
-		{name: "missing review", validation: "clean"},
-		{name: "returned review", review: "returned", validation: "clean"},
-		{name: "missing validation", review: "accepted"},
-		{name: "failed validation", review: "accepted", validation: "failed"},
-		{name: "retarget", review: "accepted", validation: "clean", mutate: func(_ *taskCloseIntegrationResult, d *Daemon) { d.cfg.BaseBranch = "release" }},
-		{name: "typed target changed", review: "accepted", validation: "clean", mutate: func(integration *taskCloseIntegrationResult, _ *Daemon) { integration.TargetID = "ancestor" }},
-		{name: "source not contained", review: "accepted", validation: "clean", mutate: func(integration *taskCloseIntegrationResult, _ *Daemon) { integration.SourceOID = uncontainedOID }},
-		{name: "later returned review", review: "accepted", validation: "clean", after: func(t *testing.T, client *issues.Client, issueID string) {
-			appendHistoricalReview(t, ctx, client, issueID, baseOID, sourceOID, "returned")
+		{name: "generic agent records without authorization", withoutAuth: true},
+		{name: "pinned forged agent receipt", forgedReceipt: true},
+		{name: "wrong receipt pin", mutate: func(_ *taskCloseIntegrationResult, _ *Daemon, authorization *domain.HistoricalPublicationAuthorization) {
+			authorization.ReceiptEventID++
 		}},
-		{name: "later failed validation", review: "accepted", validation: "clean", after: func(t *testing.T, client *issues.Client, issueID string) {
-			appendHistoricalValidation(t, ctx, client, issueID, baseOID, sourceOID, "failed")
+		{name: "retarget", mutate: func(integration *taskCloseIntegrationResult, _ *Daemon, _ *domain.HistoricalPublicationAuthorization) {
+			integration.TargetBranch = "release"
 		}},
-		{name: "validation after acceptance", review: "accepted", validation: "clean", after: func(t *testing.T, client *issues.Client, issueID string) {
-			appendHistoricalValidation(t, ctx, client, issueID, baseOID, sourceOID, "clean")
+		{name: "typed target changed", mutate: func(integration *taskCloseIntegrationResult, _ *Daemon, _ *domain.HistoricalPublicationAuthorization) {
+			integration.TargetID = "ancestor"
 		}},
-		{name: "daemon review authority exists", review: "accepted", validation: "clean", after: func(t *testing.T, client *issues.Client, issueID string) {
-			_, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
-				Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept",
-				Payload: map[string]any{"actor_id": "reviewer", "outcome": "accepted"},
-			})
-			require.NoError(t, err)
+		{name: "source not contained", mutate: func(integration *taskCloseIntegrationResult, _ *Daemon, _ *domain.HistoricalPublicationAuthorization) {
+			integration.SourceOID = uncontainedOID
 		}},
+		{name: "mixed modern and historical authority", mutate: func(integration *taskCloseIntegrationResult, _ *Daemon, _ *domain.HistoricalPublicationAuthorization) {
+			integration.PublicationOperationID = "modern-operation"
+			integration.HistoricalBindingID = "historical-binding"
+		}},
+		{name: "later returned review", laterReview: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
 			t.Cleanup(func() { _ = client.CloseDB() })
 			issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: tc.name, Type: domain.TypeBug, Status: domain.StatusInReview})
 			require.NoError(t, err)
-			if tc.validation != "" {
-				appendHistoricalValidation(t, ctx, client, issueID, baseOID, sourceOID, tc.validation)
-			}
-			if tc.review != "" {
-				appendHistoricalReview(t, ctx, client, issueID, baseOID, sourceOID, tc.review)
-			}
-			if tc.after != nil {
-				tc.after(t, client, issueID)
-			}
+			validation := appendHistoricalValidation(t, ctx, client, issueID, baseOID, sourceOID, "clean")
+			review := appendHistoricalReview(t, ctx, client, issueID, baseOID, sourceOID, "accepted")
 			integration := taskCloseIntegrationResult{Requested: true, Integrated: true, ReceiptRecovered: true, ConfiguredBaseTarget: true, TargetID: "base", SourceBranch: "feature-removed", TargetBranch: "main", BaseOID: baseOID, SourceOID: sourceOID, TargetOID: sourceOID}
 			d := historicalPublicationDaemon(t, repoDir, projectID, client)
-			if tc.mutate != nil {
-				tc.mutate(&integration, d)
+			if tc.forgedReceipt {
+				event, appendErr := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventTaskIntegrationCompleted, Source: "agent", SourceCommand: "az issue record", WorktreePath: repoDir, Payload: historicalReceiptPayload(projectID, integration)})
+				require.NoError(t, appendErr)
+				integration.ReceiptEventID = event.ID
+			} else {
+				require.NoError(t, d.persistTaskCloseIntegrationReceipt(ctx, projectID, issueID, repoDir, integration))
+				events, listErr := client.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted}, Limit: 10})
+				require.NoError(t, listErr)
+				integration.ReceiptEventID = events[len(events)-1].ID
 			}
-			_, err = d.recoverHistoricalTaskClosePublication(ctx, projectID, issueID, repoDir, integration)
+			authorization := validHistoricalAuthorization(validation.ID, review.ID, integration.ReceiptEventID)
+			if tc.laterReview {
+				appendHistoricalReview(t, ctx, client, issueID, baseOID, sourceOID, "returned")
+			}
+			if tc.mutate != nil {
+				tc.mutate(&integration, d, &authorization)
+			}
+			recoveryCtx := ctx
+			if !tc.withoutAuth {
+				recoveryCtx = withTaskCloseHistoricalAuthorization(ctx, authorization)
+			}
+			_, err = d.recoverHistoricalTaskClosePublication(recoveryCtx, projectID, issueID, repoDir, integration)
 			require.Error(t, err)
 		})
 	}
+}
+
+func validHistoricalAuthorization(validationID, reviewID, receiptID int64) domain.HistoricalPublicationAuthorization {
+	return domain.HistoricalPublicationAuthorization{ValidationEventID: validationID, ReviewEventID: reviewID, ReceiptEventID: receiptID, ReviewerID: "independent-reviewer", AuthoritativeEvidenceID: "legacy-repository-push-gate", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeRepository, Purpose: domain.ValidationPurposePushGate, Execution: domain.ValidationExecutionExecuted, Override: domain.ValidationOverrideNone, EvidencePresent: true, AttestsMissingLegacySemantics: true}
+}
+
+func historicalReceiptPayload(projectID string, integration taskCloseIntegrationResult) map[string]any {
+	return map[string]any{"project_id": projectID, "source_branch": integration.SourceBranch, "target_branch": integration.TargetBranch, "integrated": true, "configured_base_target": true, "target_id": integration.TargetID, "base_oid": integration.BaseOID, "source_oid": integration.SourceOID, "target_oid": integration.TargetOID, "publication_operation_id": ""}
 }
 
 func historicalPublicationRepo(t *testing.T) string {
