@@ -85,10 +85,11 @@ func TestSessionStartFailureCompensationMatchesActualRuntime(t *testing.T) {
 		noEvent       bool
 		killErr       error
 		want          daemonstate.SessionState
+		wantDesired   daemonstate.SessionState
 	}{
 		{name: "physical write failure cleanup succeeds", failure: "physical-write", want: daemonstate.SessionStateStopped},
 		{name: "post-observation lease failure cleanup fails", failure: "lease", seedPhysical: true, killErr: errors.New("kill failed"), want: daemonstate.SessionStateRunning},
-		{name: "newer physical winner defeats stopped compensation", failure: "higher-version-race", seedPhysical: true, winnerAhead: true, want: daemonstate.SessionStateRunning},
+		{name: "newer physical winner defeats stopped compensation", failure: "higher-version-race", seedPhysical: true, winnerAhead: true, want: daemonstate.SessionStateRunning, wantDesired: daemonstate.SessionStateStopped},
 		{name: "durable transaction failure reloads existing desired", failure: "transaction-failure", seedPhysical: true, durableFail: true, noEvent: true, want: daemonstate.SessionStateStarting},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -129,11 +130,15 @@ func TestSessionStartFailureCompensationMatchesActualRuntime(t *testing.T) {
 			defer cancel()
 			d.compensateSessionStartFailure(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: projectID}}, projectID, sessionID, issueID, issueResourceLifecycleContext{}, "busy", "session")
 			intent, found, err := runtimeStore.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, issueID)
+			wantDesired := tc.wantDesired
+			if wantDesired == "" {
+				wantDesired = tc.want
+			}
 			wantObserved := tc.want
 			if tc.durableFail {
 				wantObserved = daemonstate.SessionStateRunning
 			}
-			if err != nil || !found || intent.State != tc.want || intent.ObservedState != wantObserved {
+			if err != nil || !found || intent.State != wantDesired || intent.ObservedState != wantObserved {
 				t.Fatalf("%s durable intent=%+v found=%v err=%v", tc.failure, intent, found, err)
 			}
 			physical, found, err := runtimeStore.GetPhysicalSessionObservation(ctx, projectID, sessionID)
@@ -154,7 +159,7 @@ func TestSessionStartFailureCompensationMatchesActualRuntime(t *testing.T) {
 			}
 			events := collectSessionProjectionEvents(t, ch, 1)
 			var body protocol.SessionProjectionEventBody
-			if len(events) != 1 || json.Unmarshal(events[0].Body, &body) != nil || daemonstate.SessionState(body.Session.State) != tc.want {
+			if len(events) != 1 || json.Unmarshal(events[0].Body, &body) != nil || daemonstate.SessionState(body.Session.State) != wantDesired {
 				t.Fatalf("%s final events=%+v", tc.failure, events)
 			}
 		})
