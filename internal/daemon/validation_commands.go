@@ -183,7 +183,12 @@ func (d *Daemon) validationRequestSuccessResponse(req protocol.RequestEnvelope, 
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "build bounded validation result: "+err.Error()), nil
 	}
-	return d.validationSuccessResponse(req, protocol.ValidationRequestResponse{Request: request, Context: contextPacket, Summary: summary})
+	responseRequest := request
+	responseRequest.Command = ""
+	responseRequest.OverrideReason = ""
+	responseRequest.Outcome = ""
+	responseRequest.Evidence = domain.ValidationEvidence{}
+	return d.validationSuccessResponse(req, protocol.ValidationRequestResponse{Request: responseRequest, Context: contextPacket, Summary: summary})
 }
 
 func (d *Daemon) validatePublicationEvidenceIssue(ctx context.Context, projectID, issueID string) error {

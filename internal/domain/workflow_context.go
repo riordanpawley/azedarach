@@ -251,7 +251,7 @@ func BuildWorkflowResultSummary(input WorkflowResultInput) (WorkflowResultSummar
 		Schema: WorkflowResultSummarySchema, Role: input.Role, Provenance: contextPacket.Provenance,
 		Status:          workflowSafeValue("status", input.Status, 120, omissions),
 		Outcome:         workflowSafeValue("outcome", input.Outcome, 2048, omissions),
-		FailureSummary:  workflowSafeValue("failure_summary", input.FailureSummary, 8192, omissions),
+		FailureSummary:  workflowSafeFailureSummary(input.FailureSummary, omissions),
 		ArtifactLinks:   workflowCanonicalArtifacts(input.ArtifactLinks, omissions),
 		OutputRetention: "not_provided",
 	}
@@ -272,6 +272,34 @@ func BuildWorkflowResultSummary(input WorkflowResultInput) (WorkflowResultSummar
 		return WorkflowResultSummary{}, fmt.Errorf("workflow result summary is %d bytes after deterministic compaction", len(encoded))
 	}
 	return result, nil
+}
+
+func workflowSafeFailureSummary(value string, omissions map[string]map[string]int) string {
+	value = workflowSafeInline(value, 0)
+	if value == "" {
+		return ""
+	}
+	if workflowSensitive(value) {
+		workflowOmit(omissions, "failure_summary", "sensitive_value", 1)
+		return ""
+	}
+	fields := strings.Fields(value)
+	redacted := 0
+	for i, field := range fields {
+		if workflowContainsLocalPath(field) {
+			fields[i] = "[local-path]"
+			redacted++
+		}
+	}
+	if redacted > 0 {
+		workflowOmit(omissions, "failure_summary", "local_path_redacted", redacted)
+	}
+	value = strings.Join(fields, " ")
+	if len(value) <= 8192 {
+		return value
+	}
+	workflowOmit(omissions, "failure_summary", "value_byte_limit", 1)
+	return workflowTruncateBytes(value, 8192)
 }
 
 func workflowProvenanceHash(issueID, scopeID, revision string) string {

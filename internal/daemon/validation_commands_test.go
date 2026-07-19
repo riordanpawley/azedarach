@@ -100,6 +100,10 @@ func TestValidationFinishReturnsBoundedPortableFailureSummary(t *testing.T) {
 	require.True(t, finished.OK, "response=%+v error=%+v", finished, finished.Error)
 	var result protocol.ValidationRequestResponse
 	require.NoError(t, json.Unmarshal(finished.Body, &result))
+	assert.LessOrEqual(t, len(finished.Body), domain.WorkflowResultSummaryMaxBytes)
+	assert.NotContains(t, string(finished.Body), retainedOutput)
+	assert.Empty(t, result.Request.Command)
+	assert.Empty(t, result.Request.Evidence.ReportPaths)
 	summary, err := json.Marshal(result.Summary)
 	require.NoError(t, err)
 	assert.LessOrEqual(t, len(summary), domain.WorkflowResultSummaryMaxBytes)

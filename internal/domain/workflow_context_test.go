@@ -80,7 +80,7 @@ func TestWorkflowResultCompactionRetainsAnArtifactReference(t *testing.T) {
 }
 
 func TestWorkflowResultSummaryReportsUnavailableOutputRetention(t *testing.T) {
-	result, err := BuildWorkflowResultSummary(WorkflowResultInput{Role: WorkflowRoleValidator, IssueID: "consumer-9", SourceRevision: "abc123", Status: "failed", FailureSummary: strings.Repeat("failure ", 4000), OutputPresent: true})
+	result, err := BuildWorkflowResultSummary(WorkflowResultInput{Role: WorkflowRoleValidator, IssueID: "consumer-9", SourceRevision: "abc123", Status: "failed", FailureSummary: "npm failed at /Users/alice/private/test.js:4 " + strings.Repeat("failure ", 4000), OutputPresent: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,6 +90,9 @@ func TestWorkflowResultSummaryReportsUnavailableOutputRetention(t *testing.T) {
 	}
 	if result.OutputRetention != "unavailable" {
 		t.Fatalf("output retention=%q", result.OutputRetention)
+	}
+	if strings.Contains(result.FailureSummary, "/Users/") || !strings.Contains(result.FailureSummary, "npm failed at [local-path]") {
+		t.Fatalf("failure summary was not actionably redacted: %q", result.FailureSummary)
 	}
 }
 
