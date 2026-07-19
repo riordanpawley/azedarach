@@ -513,7 +513,7 @@ func TestOrchestratorActionableContinuationIncludesOnlyNewScopedBlockers(t *test
 		t.Run(string(scope.Kind), func(t *testing.T) {
 			blocked := protocol.OrchestrationSnapshot{}
 			if scope.Kind == domain.OrchestrationScopeProject {
-				blocked.RecentEvents = []protocol.MailEvent{{IssueID: "worker", Seq: 11, Type: "worker-blocked"}}
+				blocked.RecentEvents = []protocol.MailEvent{{ParentIssue: "worker", IssueID: "worker", Seq: 11, Type: "worker-blocked"}}
 			} else {
 				blocked.WorkerObservations = []domain.WorkerObservation{{IssueID: "worker", LastEvent: &domain.WorkerObservationEventSummary{Seq: 11, Type: "worker-blocked"}}}
 			}
@@ -536,7 +536,7 @@ func TestOrchestratorActionableContinuationIncludesOnlyNewScopedBlockers(t *test
 			}
 			progress := protocol.OrchestrationSnapshot{}
 			if scope.Kind == domain.OrchestrationScopeProject {
-				progress.RecentEvents = []protocol.MailEvent{{IssueID: "worker", Seq: 12, Type: "worker-progress"}}
+				progress.RecentEvents = []protocol.MailEvent{{ParentIssue: "worker", IssueID: "worker", Seq: 12, Type: "worker-progress"}}
 			} else {
 				progress.WorkerObservations = []domain.WorkerObservation{{IssueID: "worker", LastEvent: &domain.WorkerObservationEventSummary{Seq: 12, Type: "worker-progress"}}}
 			}
@@ -565,10 +565,15 @@ func TestOrchestratorBlockerWakeUsesDurableScopeFilteredObservations(t *testing.
 	}
 	rootA, workerA := createRoot("root a")
 	rootB, workerB := createRoot("root b")
+	directProjectWorker, err := client.Create(ctx, issues.CreateTaskParams{Title: "direct project worker", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
 	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issues: client, issueClientsByProject: map[string]*issues.Client{"project": client}}
 	for _, event := range []protocol.MailSendCommandBody{
 		{RepoDir: repoDir, ParentIssue: rootA, IssueID: naming.IssueID(workerA), Type: "worker-blocked", From: "worker", To: "orchestrator", Body: "blocked on authority"},
 		{RepoDir: repoDir, ParentIssue: rootB, IssueID: naming.IssueID(workerB), Type: "worker-progress", From: "worker", To: "orchestrator", Body: "still working"},
+		{RepoDir: repoDir, ParentIssue: directProjectWorker, IssueID: naming.IssueID(directProjectWorker), Type: "worker-blocked", From: "worker", To: "orchestrator", Body: "project blocker"},
 	} {
 		response, err := d.handleMailSend(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: "project"}, Body: mustMarshal(t, event)})
 		if err != nil || !response.OK {
@@ -582,9 +587,10 @@ func TestOrchestratorBlockerWakeUsesDurableScopeFilteredObservations(t *testing.
 		name       string
 		scope      domain.OrchestrationScope
 		wantAction bool
+		wantIssue  string
 	}{
-		{name: "project", scope: domain.ProjectOrchestrationScope(), wantAction: true},
-		{name: "root-a", scope: rootAScope, wantAction: true},
+		{name: "project", scope: domain.ProjectOrchestrationScope(), wantAction: true, wantIssue: directProjectWorker},
+		{name: "root-a", scope: rootAScope, wantAction: true, wantIssue: workerA},
 		{name: "root-b", scope: rootBScope, wantAction: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -596,7 +602,7 @@ func TestOrchestratorBlockerWakeUsesDurableScopeFilteredObservations(t *testing.
 			if actionable != tt.wantAction {
 				t.Fatalf("action = %+v actionable=%t, want %t; observations=%+v", action, actionable, tt.wantAction, snapshot.WorkerObservations)
 			}
-			if actionable && (!slices.Contains(action.IssueIDs, workerA) || slices.Contains(action.IssueIDs, workerB)) {
+			if actionable && (!slices.Contains(action.IssueIDs, tt.wantIssue) || slices.Contains(action.IssueIDs, workerB) || (tt.scope.Kind == domain.OrchestrationScopeProject && slices.Contains(action.IssueIDs, workerA))) {
 				t.Fatalf("scope-filtered blocker action = %+v", action)
 			}
 		})

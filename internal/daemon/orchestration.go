@@ -451,7 +451,9 @@ func orchestratorActionableContinuation(scope domain.OrchestrationScope, snapsho
 	if scope.Kind == domain.OrchestrationScopeProject {
 		for _, event := range snapshot.RecentEvents {
 			projectedType, visible := projectStewardshipEventType(domain.IssueObservationEventType(event.Type))
-			if visible && projectedType == "worker-blocked" {
+			// Project orchestration owns only unparented/direct issues. Descendant
+			// blocker events belong to their exact rooted orchestrator.
+			if visible && projectedType == "worker-blocked" && naming.IssueIDsEqual(event.ParentIssue, event.IssueID.String()) {
 				addBlocker(event.IssueID.String(), event.Seq)
 			}
 		}
