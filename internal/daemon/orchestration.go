@@ -701,6 +701,16 @@ func (a daemonOrchestrationAuthority) buildSnapshotAttempt(ctx context.Context, 
 		}
 	} else {
 		var source protocol.MaterializedSnapshotMetadata
+		// Converge durable issue facts first, but do not authorize rooted
+		// classification while runtime/worktree health is stale: the joined
+		// materialization still retains those overlays until their own refresh.
+		_, source, err = a.daemon.convergedCanonicalProjectReadSnapshot(ctx, projectID)
+		if err != nil {
+			return protocol.OrchestrationSnapshot{}, err
+		}
+		if source.Health != "healthy" {
+			return protocol.OrchestrationSnapshot{}, newProjectReadUnavailableError("rooted orchestration runtime projection unhealthy for %s: %s", projectID, source.Health)
+		}
 		materializedTasks, source, err = a.daemon.projectReadSnapshot(projectID)
 		if err != nil {
 			return protocol.OrchestrationSnapshot{}, err
@@ -1437,7 +1447,7 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 		requested = stableRequestedCandidates(requested, snapshot.Runnable)
 	}
 	result.Requested = requested
-	scopeTasks, _, err := a.daemon.projectReadSnapshot(projectID)
+	scopeTasks, _, err := a.daemon.convergedProjectReadSnapshot(ctx, projectID)
 	if err != nil {
 		return protocol.OrchestrationIntentResult{}, completeRequestedOrchestrationStarts(ctx, issueClient, requestedIntents, fmt.Errorf("refresh orchestration scope projection: %w", err))
 	}

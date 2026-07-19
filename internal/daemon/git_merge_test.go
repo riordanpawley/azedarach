@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -155,6 +156,22 @@ func TestTypedGitMergeChildToParentComposesNoFFWithoutPublicationAndReplaysRecei
 	events, err := f.issues.ListIssueObservationEvents(f.ctx, childID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted}, Limit: 10})
 	if err != nil || len(events) != 1 {
 		t.Fatalf("integration receipts = %+v err=%v, want exactly one", events, err)
+	}
+}
+
+func TestTypedGitMergeDoesNotDependOnUnrelatedRuntimeReconciliation(t *testing.T) {
+	f := newTypedMergeFixture(t, false)
+	parentID := f.createIssue("parent", nil)
+	childID := f.createIssue("child", &parentID)
+	f.commit(childID, "child.txt")
+	f.daemon.runtimeReconciler = &runtimeReconcileRecorder{err: errors.New("unrelated runtime inventory unavailable")}
+
+	if _, err := f.daemon.mergeTypedGitBranches(f.ctx, f.projectID, daemonhandlers.GitMergeRequest{SourceID: childID, TargetID: parentID}); err != nil {
+		t.Fatalf("projection-authoritative typed merge inherited runtime failure: %v", err)
+	}
+	calls, _ := f.daemon.runtimeReconciler.(*runtimeReconcileRecorder).snapshot()
+	if calls != 0 {
+		t.Fatalf("typed merge runtime reconcile calls = %d, want projection-only freshness", calls)
 	}
 }
 

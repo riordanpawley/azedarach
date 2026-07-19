@@ -679,6 +679,25 @@ func TestClient_ListPaneInfos(t *testing.T) {
 	}
 }
 
+func TestClient_ListPaneInfosForSessionTargetsOnlyRequestedSession(t *testing.T) {
+	runner := &recordingOutputRunner{outputs: []string{"az-1\t%7\t123\tcodex\n"}}
+	client := NewClient(runner, slog.Default())
+
+	panes, err := client.ListPaneInfosForSession(context.Background(), "az-1")
+	require.NoError(t, err)
+	require.Equal(t, []PaneInfo{{SessionName: "az-1", PaneID: "7", PanePID: 123, CurrentCommand: "codex"}}, panes)
+	require.Equal(t, [][]string{{"list-panes", "-s", "-t", "az-1", "-F", "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}"}}, runner.commands)
+}
+
+func TestClient_ListPaneInfosForSessionReturnsEmptyWhenTargetDisappears(t *testing.T) {
+	runner := &recordingOutputRunner{err: errors.New("can't find session: az-1")}
+	client := NewClient(runner, slog.Default())
+
+	panes, err := client.ListPaneInfosForSession(context.Background(), "az-1")
+	require.NoError(t, err)
+	require.Empty(t, panes)
+}
+
 func TestClient_ListSessionInfos(t *testing.T) {
 	createdOne := time.Unix(1775209200, 0).UTC()
 	attachedOne := time.Unix(1775212800, 0).UTC()

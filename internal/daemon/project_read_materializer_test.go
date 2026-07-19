@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -131,15 +132,15 @@ func TestProjectReadMaterializerTransientWatchErrorRetainsLastGoodWithoutLegacyE
 
 func TestAuthoritativeReadResultCannotClearNewerMutationConvergenceFailure(t *testing.T) {
 	materializer := newProjectReadMaterializer("project", nil, nil)
-	readAttempt := materializer.beginAuthoritativeReadRefresh()
+	readAttempt := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
 	mutationAttempt := materializer.beginMutationConvergence(7)
 	if !materializer.finishMutationConvergence(7, mutationAttempt, errors.New("newer mutation failure")) {
 		t.Fatal("newer mutation convergence result was not recorded")
 	}
-	if materializer.finishAuthoritativeReadRefresh(readAttempt, nil, false) {
+	if materializer.finishAuthoritativeReadRefresh(readAttempt, nil) {
 		t.Fatal("older authoritative read result cleared a newer health result")
 	}
-	if materializer.finishAuthoritativeReadRefresh(readAttempt, errors.New("older runtime failure"), true) {
+	if materializer.finishAuthoritativeReadRefresh(readAttempt, errors.New("older canonical failure")) {
 		t.Fatal("older authoritative read failure overwrote a newer health result")
 	}
 	metadata := materializer.snapshotMetadata()
@@ -148,19 +149,509 @@ func TestAuthoritativeReadResultCannotClearNewerMutationConvergenceFailure(t *te
 	}
 }
 
+func TestAuthoritativeReadResultCannotClearConcurrentStructuralFailure(t *testing.T) {
+	materializer := newProjectReadMaterializer("project", nil, nil)
+	attempt := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+	materializer.markUnhealthy(errors.New("structural projection failure"), false)
+	if materializer.finishAuthoritativeReadRefresh(attempt, nil) {
+		t.Fatal("authoritative read cleared a concurrent structural failure")
+	}
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "structural projection failure") {
+		t.Fatalf("health = %q, want structural failure retained", got)
+	}
+}
+
 func TestNewestAuthoritativeReadFailureWinsOlderConcurrentSuccess(t *testing.T) {
 	materializer := newProjectReadMaterializer("project", nil, nil)
 	materializer.metadata.Health = "healthy"
-	older := materializer.beginAuthoritativeReadRefresh()
-	newer := materializer.beginAuthoritativeReadRefresh()
-	if materializer.finishAuthoritativeReadRefresh(older, nil, true) {
+	older := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	newer := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	if materializer.finishAuthoritativeReadRefresh(older, nil) {
 		t.Fatal("older authoritative success published while newer refresh owned completion")
 	}
-	if !materializer.finishAuthoritativeReadRefresh(newer, errors.New("newer runtime failure"), true) {
+	if !materializer.finishAuthoritativeReadRefresh(newer, errors.New("newer runtime failure")) {
 		t.Fatal("newer authoritative failure was not published")
 	}
 	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "newer runtime failure") {
 		t.Fatalf("health = %q, want newer runtime failure", got)
+	}
+}
+
+func TestCanonicalRefreshDoesNotClearRuntimeRefreshFailure(t *testing.T) {
+	materializer := newProjectReadMaterializer("project", nil, nil)
+	materializer.metadata.Health = "healthy"
+
+	runtimeAttempt := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	if !materializer.finishAuthoritativeReadRefresh(runtimeAttempt, errors.New("runtime projection unavailable")) {
+		t.Fatal("runtime refresh failure was not published")
+	}
+	canonicalAttempt := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+	if !materializer.finishAuthoritativeReadRefresh(canonicalAttempt, nil) {
+		t.Fatal("canonical refresh success was not published")
+	}
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "runtime projection unavailable") {
+		t.Fatalf("canonical refresh cleared runtime health: %q", got)
+	}
+
+	runtimeRecovery := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	if !materializer.finishAuthoritativeReadRefresh(runtimeRecovery, nil) {
+		t.Fatal("runtime refresh recovery was not published")
+	}
+	if got := materializer.snapshotMetadata().Health; got != "healthy" {
+		t.Fatalf("runtime recovery health = %q, want healthy", got)
+	}
+}
+
+func TestCanonicalReadDoesNotStrandConcurrentRuntimeRecovery(t *testing.T) {
+	materializer := newProjectReadMaterializer("project", nil, nil)
+	runtimeFailure := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	materializer.finishAuthoritativeReadRefresh(runtimeFailure, errors.New("runtime projection unavailable"))
+
+	runtimeRecovery := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	canonicalRead := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+	if !materializer.finishAuthoritativeReadRefresh(canonicalRead, nil) {
+		t.Fatal("canonical read completion was not accepted")
+	}
+	if !materializer.finishAuthoritativeReadRefresh(runtimeRecovery, nil) {
+		t.Fatal("canonical read invalidated concurrent runtime recovery")
+	}
+	if got := materializer.snapshotMetadata().Health; got != "healthy" {
+		t.Fatalf("runtime recovery health = %q, want healthy", got)
+	}
+}
+
+func TestCanonicalReadDoesNotLoseConcurrentRuntimeFailure(t *testing.T) {
+	materializer := newProjectReadMaterializer("project", nil, nil)
+	materializer.metadata.Health = "healthy"
+
+	runtimeFailure := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	canonicalRead := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+	if !materializer.finishAuthoritativeReadRefresh(canonicalRead, nil) {
+		t.Fatal("canonical read completion was not accepted")
+	}
+	if !materializer.finishAuthoritativeReadRefresh(runtimeFailure, errors.New("runtime projection unavailable")) {
+		t.Fatal("canonical read invalidated concurrent runtime failure")
+	}
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "runtime projection unavailable") {
+		t.Fatalf("runtime failure health = %q, want failure retained", got)
+	}
+}
+
+func TestAuthoritativeComponentFailuresAggregateInBothOverlapOrders(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		first authoritativeReadRefreshComponent
+	}{
+		{name: "canonical finishes first", first: authoritativeReadRefreshCanonical},
+		{name: "runtime finishes first", first: authoritativeReadRefreshRuntime},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			materializer := newProjectReadMaterializer("project", nil, nil)
+			canonical := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+			runtime := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+			finish := map[authoritativeReadRefreshComponent]func() bool{
+				authoritativeReadRefreshCanonical: func() bool {
+					return materializer.finishAuthoritativeReadRefresh(canonical, errors.New("canonical unavailable"))
+				},
+				authoritativeReadRefreshRuntime: func() bool {
+					return materializer.finishAuthoritativeReadRefresh(runtime, errors.New("runtime unavailable"))
+				},
+			}
+			second := authoritativeReadRefreshRuntime
+			if tc.first == authoritativeReadRefreshRuntime {
+				second = authoritativeReadRefreshCanonical
+			}
+			if !finish[tc.first]() || !finish[second]() {
+				t.Fatal("overlapping component failure was discarded")
+			}
+			if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "canonical unavailable") || !strings.Contains(got, "runtime unavailable") {
+				t.Fatalf("aggregate health = %q, want both component failures", got)
+			}
+		})
+	}
+}
+
+func TestSequentialAuthoritativeComponentFailuresAggregate(t *testing.T) {
+	materializer := newProjectReadMaterializer("project", nil, nil)
+	canonical := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+	materializer.finishAuthoritativeReadRefresh(canonical, errors.New("canonical unavailable"))
+	runtime := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	materializer.finishAuthoritativeReadRefresh(runtime, errors.New("runtime unavailable"))
+
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "canonical unavailable") || !strings.Contains(got, "runtime unavailable") {
+		t.Fatalf("aggregate health = %q, want sequential component failures retained", got)
+	}
+}
+
+func TestAuthoritativeComponentsRecoverIndependently(t *testing.T) {
+	for _, firstRecovery := range []authoritativeReadRefreshComponent{authoritativeReadRefreshCanonical, authoritativeReadRefreshRuntime} {
+		t.Run(string(firstRecovery)+" first", func(t *testing.T) {
+			materializer := newProjectReadMaterializer("project", nil, nil)
+			canonical := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+			materializer.finishAuthoritativeReadRefresh(canonical, errors.New("canonical unavailable"))
+			runtime := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+			materializer.finishAuthoritativeReadRefresh(runtime, errors.New("runtime unavailable"))
+
+			first := materializer.beginAuthoritativeReadRefresh(firstRecovery)
+			materializer.finishAuthoritativeReadRefresh(first, nil)
+			remaining := authoritativeReadRefreshRuntime
+			remainingMessage := "runtime unavailable"
+			clearedMessage := "canonical unavailable"
+			if firstRecovery == authoritativeReadRefreshRuntime {
+				remaining = authoritativeReadRefreshCanonical
+				remainingMessage, clearedMessage = "canonical unavailable", "runtime unavailable"
+			}
+			if got := materializer.snapshotMetadata().Health; !strings.Contains(got, remainingMessage) || strings.Contains(got, clearedMessage) || got == "healthy" {
+				t.Fatalf("independent recovery health = %q, want only %q", got, remainingMessage)
+			}
+
+			second := materializer.beginAuthoritativeReadRefresh(remaining)
+			materializer.finishAuthoritativeReadRefresh(second, nil)
+			if got := materializer.snapshotMetadata().Health; got != "healthy" {
+				t.Fatalf("complete recovery health = %q, want healthy", got)
+			}
+		})
+	}
+}
+
+func TestRuntimeRecoveryExportFailsClosedWhileCanonicalComponentIsUnhealthy(t *testing.T) {
+	ctx := context.Background()
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	task := domain.Task{ID: "issue", Title: "canonical", Status: domain.StatusOpen, Type: domain.TypeTask}
+	reader := newProjectReadMaterializer("p", nil, nil)
+	canonical := map[string]domain.Task{task.ID.String(): task}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, canonical)
+	reader.replaceBootstrap(canonical, canonical, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+	canonicalFailure := reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+	reader.finishAuthoritativeReadRefresh(canonicalFailure, errors.New("canonical projection unavailable"))
+	runtimeFailure := reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	reader.finishAuthoritativeReadRefresh(runtimeFailure, errors.New("runtime projection unavailable"))
+	runtimeRecovery := reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	d := &Daemon{cfg: Config{}, userStore: store, materializers: map[string]*projectReadMaterializer{"p": reader}}
+
+	err = d.syncUserProjectionMaterializedIssuesForRefresh(ctx, "p", []string{"issue"}, reader, runtimeRecovery)
+	if err == nil || !strings.Contains(err.Error(), "canonical projection unavailable") {
+		t.Fatalf("dual-failure runtime export error = %v, want canonical health fence", err)
+	}
+}
+
+func TestCanonicalFailureRecoversAfterCommittedDeltaInSingleRead(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestIssueClient(t)
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(client), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		return tasks, nil
+	})
+	materializer.legacy = func(exportCtx context.Context) ([]domain.Task, error) {
+		return client.ListCanonicalArchiveMode(exportCtx, issues.ArchiveInclude)
+	}
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	failed := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+	materializer.finishAuthoritativeReadRefresh(failed, errors.New("canonical projection unavailable"))
+	created, err := client.Create(ctx, issues.CreateTaskParams{Title: "committed", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{materializers: map[string]*projectReadMaterializer{"project": materializer}, materializersStarted: true}
+
+	tasks, metadata, err := d.convergedCanonicalProjectReadSnapshot(ctx, "project")
+	if err != nil {
+		t.Fatalf("single canonical recovery read: %v", err)
+	}
+	if metadata.Health != "healthy" {
+		t.Fatalf("single canonical recovery health = %q, want healthy", metadata.Health)
+	}
+	if !slices.Contains(taskIDsFromTasks(tasks), created) {
+		t.Fatalf("canonical recovery tasks = %v, want committed issue %s", taskIDsFromTasks(tasks), created)
+	}
+}
+
+func TestCanonicalDeltaFencesConcurrentRuntimeRecoveryExport(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestIssueClient(t)
+	if _, err := client.Create(ctx, issues.CreateTaskParams{Title: "existing", Type: domain.TypeTask}); err != nil {
+		t.Fatal(err)
+	}
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(client), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		return tasks, nil
+	})
+	materializer.legacy = func(exportCtx context.Context) ([]domain.Task, error) {
+		return client.ListCanonicalArchiveMode(exportCtx, issues.ArchiveInclude)
+	}
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	initial, initialMetadata := materializer.snapshotCanonical()
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	state := userstore.ProjectDeltaState{ProjectID: "project", Cursor: initialMetadata.DeliveryCursor, Hash: "initial", Initialized: true, Projector: issueProjectionProjector()}
+	if err := store.ReplaceProject(ctx, userstore.ProjectInput{ProjectID: "project", Name: "Project", Path: "/project", DBPath: "/project/db", Tasks: initial, Delta: &state}); err != nil {
+		t.Fatal(err)
+	}
+
+	failed := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	materializer.finishAuthoritativeReadRefresh(failed, errors.New("runtime projection unavailable"))
+	recovery := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	created, err := client.Create(ctx, issues.CreateTaskParams{Title: "new canonical", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := materializer.convergeCanonical(ctx); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{}, userStore: store, materializers: map[string]*projectReadMaterializer{"project": materializer}}
+
+	err = d.syncUserProjectionMaterializedIssuesForRefresh(ctx, "project", []string{created}, materializer, recovery)
+	if err == nil || !strings.Contains(err.Error(), "runtime projection unavailable") {
+		t.Fatalf("generation-fenced runtime export error = %v, want retained runtime failure", err)
+	}
+	if materializer.finishAuthoritativeReadRefresh(recovery, nil) {
+		t.Fatal("stale runtime recovery cleared health after canonical generation advanced")
+	}
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "runtime projection unavailable") {
+		t.Fatalf("generation-fenced health = %q, want runtime failure retained", got)
+	}
+	snapshot, err := store.Snapshot(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, project := range snapshot.Projects {
+		for _, task := range project.Tasks {
+			if task.ID.String() == created {
+				t.Fatalf("stale runtime recovery exported new canonical issue %s globally", created)
+			}
+		}
+	}
+}
+
+func TestHealthyRuntimeRefreshFailsClosedAcrossCanonicalDelta(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestIssueClient(t)
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "existing", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hydrateEntered := make(chan struct{})
+	releaseHydrate := make(chan struct{})
+	var hydrateCalls atomic.Int32
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(client), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		if hydrateCalls.Add(1) == 1 {
+			return tasks, nil
+		}
+		close(hydrateEntered)
+		<-releaseHydrate
+		return tasks, nil
+	})
+	materializer.legacy = func(exportCtx context.Context) ([]domain.Task, error) {
+		return client.ListCanonicalArchiveMode(exportCtx, issues.ArchiveInclude)
+	}
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	initial, initialMetadata := materializer.snapshotCanonical()
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	state := userstore.ProjectDeltaState{ProjectID: "project", Cursor: initialMetadata.DeliveryCursor, Hash: "initial", Initialized: true, Projector: issueProjectionProjector()}
+	if err := store.ReplaceProject(ctx, userstore.ProjectInput{ProjectID: "project", Name: "Project", Path: "/project", DBPath: "/project/db", Tasks: initial, Delta: &state}); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{}, userStore: store, materializers: map[string]*projectReadMaterializer{"project": materializer}}
+	done := make(chan error, 1)
+	go func() {
+		done <- d.refreshActiveProjectReadRuntimeForIssues(ctx, "project", materializer, []string{issueID})
+	}()
+	<-hydrateEntered
+	if err := client.Update(ctx, issueID, domain.StatusInProgress); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := materializer.convergeCanonical(ctx); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseHydrate)
+
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "ownership changed") {
+		t.Fatalf("healthy stale runtime refresh error = %v, want ownership failure", err)
+	}
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "canonical generation advanced during runtime refresh") {
+		t.Fatalf("healthy stale runtime refresh health = %q, want generation failure", got)
+	}
+	snapshot, err := store.Snapshot(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Projects) != 1 || len(snapshot.Projects[0].Tasks) != 1 || snapshot.Projects[0].Tasks[0].Status != domain.StatusOpen {
+		t.Fatalf("healthy stale runtime refresh exported canonical delta globally: %+v", snapshot.Projects)
+	}
+}
+
+func TestRefreshOwnedSyncAuthorizationMatrix(t *testing.T) {
+	newReader := func() *projectReadMaterializer {
+		task := domain.Task{ID: "issue", Title: "canonical", Status: domain.StatusOpen, Type: domain.TypeTask}
+		reader := newProjectReadMaterializer("project", nil, nil)
+		canonical := map[string]domain.Task{task.ID.String(): task}
+		issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, canonical)
+		reader.replaceBootstrap(canonical, canonical, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+		return reader
+	}
+	authorized := func(reader *projectReadMaterializer, attempt authoritativeReadRefreshAttempt) bool {
+		_, _, allowed := reader.snapshotIssuesForAuthoritativeRefresh(map[string]struct{}{"issue": {}}, attempt)
+		return allowed
+	}
+
+	t.Run("healthy exact runtime normal", func(t *testing.T) {
+		reader := newReader()
+		if !authorized(reader, reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)) {
+			t.Fatal("healthy exact runtime refresh was rejected")
+		}
+	})
+	t.Run("healthy exact runtime recovery", func(t *testing.T) {
+		reader := newReader()
+		failed := reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+		reader.finishAuthoritativeReadRefresh(failed, errors.New("runtime unavailable"))
+		if !authorized(reader, reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)) {
+			t.Fatal("exact runtime recovery was rejected")
+		}
+	})
+	t.Run("base unhealthy", func(t *testing.T) {
+		reader := newReader()
+		attempt := reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+		reader.markUnhealthy(errors.New("structural failure"), false)
+		if authorized(reader, attempt) {
+			t.Fatal("structurally unhealthy refresh was authorized")
+		}
+	})
+	t.Run("canonical component unhealthy", func(t *testing.T) {
+		reader := newReader()
+		failed := reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+		reader.finishAuthoritativeReadRefresh(failed, errors.New("canonical unavailable"))
+		if authorized(reader, reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)) {
+			t.Fatal("runtime refresh bypassed canonical failure")
+		}
+	})
+	t.Run("canonical generation mismatch", func(t *testing.T) {
+		reader := newReader()
+		attempt := reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+		reader.mu.Lock()
+		reader.canonicalGeneration++
+		reader.mu.Unlock()
+		if authorized(reader, attempt) {
+			t.Fatal("stale canonical generation was authorized")
+		}
+	})
+	t.Run("wrong component", func(t *testing.T) {
+		reader := newReader()
+		if authorized(reader, reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)) {
+			t.Fatal("canonical component was authorized for runtime sync")
+		}
+	})
+	t.Run("superseded runtime sequence", func(t *testing.T) {
+		reader := newReader()
+		older := reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+		reader.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+		if authorized(reader, older) {
+			t.Fatal("superseded runtime sequence was authorized")
+		}
+	})
+}
+
+func TestRefreshOwnedSyncFencesMutationAndStructuralHealthTransitions(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		healthMessage string
+		prepare       func(*projectReadMaterializer) func()
+	}{
+		{
+			name:          "mutation failure",
+			healthMessage: "concurrent mutation failure",
+			prepare: func(reader *projectReadMaterializer) func() {
+				attempt := reader.beginMutationConvergence(7)
+				return func() { reader.finishMutationConvergence(7, attempt, errors.New("concurrent mutation failure")) }
+			},
+		},
+		{
+			name:          "structural failure",
+			healthMessage: "concurrent structural failure",
+			prepare: func(reader *projectReadMaterializer) func() {
+				return func() { reader.markUnhealthy(errors.New("concurrent structural failure"), false) }
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			task := domain.Task{ID: "issue", Title: "canonical", Status: domain.StatusOpen, Type: domain.TypeTask}
+			reader := newProjectReadMaterializer("project", nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) { return tasks, nil })
+			canonical := map[string]domain.Task{task.ID.String(): task}
+			issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, canonical)
+			reader.replaceBootstrap(canonical, canonical, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+			transition := tc.prepare(reader)
+			store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			state := userstore.ProjectDeltaState{ProjectID: "project", Cursor: 1, Hash: "initial", Initialized: true, Projector: issueProjectionProjector()}
+			if err := store.ReplaceProject(ctx, userstore.ProjectInput{ProjectID: "project", Name: "Project", Path: "/project", DBPath: "/project/db", Tasks: []domain.Task{task}, Delta: &state}); err != nil {
+				t.Fatal(err)
+			}
+			syncEntered := make(chan struct{})
+			releaseSync := make(chan struct{})
+			d := &Daemon{
+				cfg:           Config{},
+				userStore:     store,
+				materializers: map[string]*projectReadMaterializer{"project": reader},
+				projectReadUserProjectionSync: func(context.Context, string, []string) error {
+					close(syncEntered)
+					<-releaseSync
+					return errors.New("external sync aborted")
+				},
+			}
+			refreshDone := make(chan error, 1)
+			go func() {
+				refreshDone <- d.refreshActiveProjectReadRuntimeForIssues(ctx, "project", reader, []string{"issue"})
+			}()
+			<-syncEntered
+
+			transitionQueued := make(chan struct{})
+			reader.transitionQueued = func() { close(transitionQueued) }
+			transitionDone := make(chan struct{})
+			go func() {
+				transition()
+				close(transitionDone)
+			}()
+			<-transitionQueued
+			select {
+			case <-transitionDone:
+				t.Fatal("health transition crossed blocked external sync")
+			default:
+			}
+			close(releaseSync)
+			if err := <-refreshDone; err == nil || !strings.Contains(err.Error(), "external sync aborted") {
+				t.Fatalf("refresh error = %v, want external sync failure", err)
+			}
+			<-transitionDone
+			snapshot, err := store.Snapshot(ctx, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(snapshot.Projects) != 1 || len(snapshot.Projects[0].Tasks) != 1 || snapshot.Projects[0].Tasks[0].ID.String() != "issue" {
+				t.Fatalf("failed sync changed global projection: %+v", snapshot.Projects)
+			}
+			if got := reader.snapshotMetadata().Health; !strings.Contains(got, tc.healthMessage) || !strings.Contains(got, "external sync aborted") {
+				t.Fatalf("final health = %q, want transition and sync failures", got)
+			}
+		})
 	}
 }
 
@@ -1454,7 +1945,7 @@ func TestRefreshActiveProjectReadRuntimeRecoversAuthoritativeHealthBeforeUserPro
 	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, "p", reader, []string{"issue"}); err == nil || !strings.Contains(err.Error(), "transient runtime hydration failure") {
 		t.Fatalf("failed refresh error = %v", err)
 	}
-	if got := reader.snapshotMetadata().Health; !strings.Contains(got, "stale: authoritative read refresh:") {
+	if got := reader.snapshotMetadata().Health; !strings.Contains(got, "stale: authoritative runtime refresh:") {
 		t.Fatalf("failed refresh health = %q, want authoritative stale health", got)
 	}
 	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, "p", reader, []string{"issue"}); err != nil {
@@ -1476,7 +1967,7 @@ func TestRefreshActiveProjectReadRuntimeRecoversAuthoritativeHealthBeforeUserPro
 	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, "p", reader, []string{"issue"}); err == nil || !strings.Contains(err.Error(), "sync user projection issues") {
 		t.Fatalf("failed user projection sync error = %v", err)
 	}
-	if got := reader.snapshotMetadata().Health; !strings.Contains(got, "stale: authoritative read refresh:") {
+	if got := reader.snapshotMetadata().Health; !strings.Contains(got, "stale: authoritative runtime refresh:") {
 		t.Fatalf("failed user projection sync health = %q, want authoritative stale health", got)
 	}
 	reader.markUnhealthy(errors.New("structural projection failure"), false)

@@ -701,6 +701,54 @@ func TestRootedOrchestrationReviewQueueStopsAtDirectChildren(t *testing.T) {
 	}
 }
 
+func TestRootedOrchestrationSnapshotRejectsStaleRuntimeOverlayAfterCanonicalConvergence(t *testing.T) {
+	ctx := context.Background()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	rootID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Child", Description: "ready", Acceptance: "done", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"proj": client}}
+	materializer, err := d.bootstrapEmbeddedProjectReadMaterializer(ctx, "proj", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materializer.mu.Lock()
+	staleChild := materializer.tasks[childID]
+	materializer.runtimeKeys.remove("task-runtime", childID, staleChild)
+	staleChild.HasTmuxSession = true
+	staleChild.Session = &domain.Session{IssueID: naming.IssueID(childID), State: domain.SessionBusy, Activity: "stale-live", UpdatedAt: time.Now().UTC()}
+	materializer.tasks[childID] = staleChild
+	materializer.runtimeKeys.add("task-runtime", childID, staleChild)
+	materializer.metadata.RuntimeChecksum = materializer.runtimeKeys.sum()
+	materializer.metadata.SemanticChecksum = joinedMaterializedChecksum(materializer.metadata)
+	materializer.mu.Unlock()
+	failedRefresh := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	materializer.finishAuthoritativeReadRefresh(failedRefresh, errors.New("unrelated runtime refresh deadline"))
+	d.materializers = map[string]*projectReadMaterializer{"proj": materializer}
+	d.materializersStarted = true
+	scope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := d.orchestrationAuthority().Snapshot(ctx, "proj", protocol.OrchestrationSnapshotRequest{Scope: scope, ActorID: "parent-orchestrator", Limit: 20})
+	if err == nil || !strings.Contains(err.Error(), "runtime refresh deadline") {
+		t.Fatalf("rooted orchestration snapshot = %+v err=%v, want fail-visible stale runtime health", snapshot, err)
+	}
+	if len(snapshot.Runnable) != 0 || len(snapshot.Active) != 0 {
+		t.Fatalf("stale runtime overlay produced classification: runnable=%v active=%v", snapshot.Runnable, snapshot.Active)
+	}
+	if got := materializer.snapshotMetadata().Health; !strings.Contains(got, "runtime refresh deadline") {
+		t.Fatalf("canonical convergence falsely cleared runtime health: %q", got)
+	}
+}
+
 func TestProjectOrchestrationExplicitIssueRoutesOnlyRequestedRoot(t *testing.T) {
 	ctx := context.Background()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
