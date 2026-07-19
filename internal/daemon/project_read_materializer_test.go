@@ -189,6 +189,24 @@ func TestCanonicalRefreshDoesNotClearRuntimeRefreshFailure(t *testing.T) {
 	}
 }
 
+func TestCanonicalReadDoesNotStrandConcurrentRuntimeRecovery(t *testing.T) {
+	materializer := newProjectReadMaterializer("project", nil, nil)
+	runtimeFailure := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	materializer.finishAuthoritativeReadRefresh(runtimeFailure, errors.New("runtime projection unavailable"))
+
+	runtimeRecovery := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshRuntime)
+	canonicalRead := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+	if !materializer.finishAuthoritativeReadRefresh(canonicalRead, nil) {
+		t.Fatal("canonical read completion was not accepted")
+	}
+	if !materializer.finishAuthoritativeReadRefresh(runtimeRecovery, nil) {
+		t.Fatal("canonical read invalidated concurrent runtime recovery")
+	}
+	if got := materializer.snapshotMetadata().Health; got != "healthy" {
+		t.Fatalf("runtime recovery health = %q, want healthy", got)
+	}
+}
+
 func TestProjectReadMaterializerGapWatchPerformsVerifiedBootstrapRecovery(t *testing.T) {
 	client, _ := newTestIssueClient(t)
 	ctx := context.Background()

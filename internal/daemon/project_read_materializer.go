@@ -77,34 +77,35 @@ func withoutSynchronousProjectReadRuntimeRefresh(ctx context.Context) context.Co
 // is the upstream transitional delivery position; it is not an authority
 // revision and is never written back to the project database.
 type projectReadMaterializer struct {
-	mu                           sync.RWMutex
-	updateMu                     contextOperationLock
-	canonicalMu                  contextOperationLock
-	mutationConvergenceSequence  uint64
-	mutationConvergenceRevision  uint64
-	mutationConvergenceAttempt   uint64
-	mutationConvergenceResult    uint64
-	authoritativeRefreshSequence uint64
-	projectID                    string
-	authority                    *ProjectionDeltaAuthority
-	hydrate                      func(context.Context, []domain.Task) ([]domain.Task, error)
-	hydrateDegraded              func(context.Context, []domain.Task) ([]domain.Task, error)
-	affected                     func(context.Context, protocol.ProjectionDeltaBatch) ([]string, error)
-	legacy                       func(context.Context) ([]domain.Task, error)
-	canonical                    map[string]domain.Task
-	tasks                        map[string]domain.Task
-	worktrees                    map[string]git.Worktree
-	metadata                     protocol.MaterializedSnapshotMetadata
-	retryableFailure             bool
-	healthEpoch                  uint64
-	runtimeRefreshSequence       uint64
-	runtimeRefreshEpoch          map[string]uint64
-	runtimePublishedEpoch        map[string]uint64
-	runtimeRefreshOwners         map[string]map[uint64]struct{}
-	issueKeys                    keyedCheckpoint
-	runtimeKeys                  keyedCheckpoint
-	cancel                       context.CancelFunc
-	done                         chan struct{}
+	mu                                    sync.RWMutex
+	updateMu                              contextOperationLock
+	canonicalMu                           contextOperationLock
+	mutationConvergenceSequence           uint64
+	mutationConvergenceRevision           uint64
+	mutationConvergenceAttempt            uint64
+	mutationConvergenceResult             uint64
+	authoritativeCanonicalRefreshSequence uint64
+	authoritativeRuntimeRefreshSequence   uint64
+	projectID                             string
+	authority                             *ProjectionDeltaAuthority
+	hydrate                               func(context.Context, []domain.Task) ([]domain.Task, error)
+	hydrateDegraded                       func(context.Context, []domain.Task) ([]domain.Task, error)
+	affected                              func(context.Context, protocol.ProjectionDeltaBatch) ([]string, error)
+	legacy                                func(context.Context) ([]domain.Task, error)
+	canonical                             map[string]domain.Task
+	tasks                                 map[string]domain.Task
+	worktrees                             map[string]git.Worktree
+	metadata                              protocol.MaterializedSnapshotMetadata
+	retryableFailure                      bool
+	healthEpoch                           uint64
+	runtimeRefreshSequence                uint64
+	runtimeRefreshEpoch                   map[string]uint64
+	runtimePublishedEpoch                 map[string]uint64
+	runtimeRefreshOwners                  map[string]map[uint64]struct{}
+	issueKeys                             keyedCheckpoint
+	runtimeKeys                           keyedCheckpoint
+	cancel                                context.CancelFunc
+	done                                  chan struct{}
 }
 
 type keyedCheckpoint struct {
@@ -658,29 +659,42 @@ func authoritativeReadRefreshHealthPrefix(component authoritativeReadRefreshComp
 	return "stale: authoritative " + string(component) + " refresh:"
 }
 
+func (m *projectReadMaterializer) authoritativeReadRefreshSequence(component authoritativeReadRefreshComponent) *uint64 {
+	if component == authoritativeReadRefreshRuntime {
+		return &m.authoritativeRuntimeRefreshSequence
+	}
+	return &m.authoritativeCanonicalRefreshSequence
+}
+
 func (m *projectReadMaterializer) beginAuthoritativeReadRefresh(component authoritativeReadRefreshComponent) authoritativeReadRefreshAttempt {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.authoritativeRefreshSequence++
-	return authoritativeReadRefreshAttempt{sequence: m.authoritativeRefreshSequence, healthEpoch: m.healthEpoch, component: component}
+	sequence := m.authoritativeReadRefreshSequence(component)
+	*sequence++
+	return authoritativeReadRefreshAttempt{sequence: *sequence, healthEpoch: m.healthEpoch, component: component}
 }
 
 func (m *projectReadMaterializer) finishAuthoritativeReadRefresh(attempt authoritativeReadRefreshAttempt, err error) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if attempt.sequence != m.authoritativeRefreshSequence || m.healthEpoch != attempt.healthEpoch {
+	if attempt.sequence != *m.authoritativeReadRefreshSequence(attempt.component) || m.healthEpoch != attempt.healthEpoch {
 		return false
 	}
 	prefix := authoritativeReadRefreshHealthPrefix(attempt.component)
+	healthChanged := false
 	if err != nil {
 		m.metadata.Health = prefix + " " + err.Error()
 		m.retryableFailure = false
+		healthChanged = true
 	} else if strings.HasPrefix(m.metadata.Health, prefix) || (attempt.component == authoritativeReadRefreshCanonical && (m.retryableFailure || strings.HasPrefix(m.metadata.Health, "stale: committed mutation convergence:"))) {
 		m.metadata.Health = "healthy"
 		m.retryableFailure = false
+		healthChanged = true
 	}
-	m.metadata.SemanticChecksum = joinedMaterializedChecksum(m.metadata)
-	m.healthEpoch++
+	if healthChanged {
+		m.metadata.SemanticChecksum = joinedMaterializedChecksum(m.metadata)
+		m.healthEpoch++
+	}
 	return true
 }
 
@@ -770,7 +784,7 @@ func (m *projectReadMaterializer) snapshotIssuesForAuthoritativeRefresh(issueIDs
 	}
 	sortTasksDeterministically(tasks)
 	recoveryAuthorized := attempt.sequence != 0 &&
-		attempt.sequence == m.authoritativeRefreshSequence &&
+		attempt.sequence == *m.authoritativeReadRefreshSequence(attempt.component) &&
 		attempt.healthEpoch == m.healthEpoch &&
 		attempt.component == authoritativeReadRefreshRuntime &&
 		strings.HasPrefix(m.metadata.Health, authoritativeReadRefreshHealthPrefix(authoritativeReadRefreshRuntime))
