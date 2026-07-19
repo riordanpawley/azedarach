@@ -727,6 +727,12 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 				result.Failed[issueID] = failure
 				continue
 			}
+			if inspection.Evidence != nil {
+				if err := a.daemon.recordAcceptedPatchReviewEvidence(ctx, projectID, request.ActorID, inspection); err != nil {
+					result.Failed[issueID] = "repair accepted patch-review evidence: " + err.Error()
+					continue
+				}
+			}
 			var target taskMergeBaseTargetResult
 			queueAvailable := integrateBeforeClose && a.daemon.operationRuntime != nil && a.daemon.operationRuntime.store != nil && a.daemon.operationRuntime.manager != nil && a.daemon.worktreeAdapter != nil && a.daemon.git != nil
 			if queueAvailable {
@@ -1343,11 +1349,6 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 	if err != nil {
 		return false, err
 	}
-	if inspection.Evidence != nil {
-		if err := a.daemon.recordAcceptedPatchReviewEvidence(ctx, projectID, request.ActorID, inspection); err != nil {
-			return false, fmt.Errorf("record accepted patch-review evidence: %w", err)
-		}
-	}
 	var target taskMergeBaseTargetResult
 	queueAvailable := integrateBeforeClose && a.daemon.operationRuntime != nil && a.daemon.operationRuntime.store != nil && a.daemon.operationRuntime.manager != nil && a.daemon.worktreeAdapter != nil && a.daemon.git != nil
 	if queueAvailable {
@@ -1359,7 +1360,9 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 	if queueAvailable && strings.EqualFold(strings.TrimSpace(target.TargetID), "base") {
 		publication, err := a.daemon.acceptAndEnqueueReviewPublication(ctx, projectID, request, inspection.IssueID, pin, inspection)
 		if err != nil {
-			return false, fmt.Errorf("enqueue accepted review publication: %w", err)
+			// A populated operation ID means the accepted review and queue row are
+			// already durable. Keep the review lease for accepted_pending recovery.
+			return strings.TrimSpace(publication.OperationID) != "", fmt.Errorf("enqueue accepted review publication: %w", err)
 		}
 		result.Publications = append(result.Publications, publication)
 		// The durable review lease remains owned by the queue until its runner
@@ -1372,6 +1375,11 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 	}
 	if err := a.recordAcceptedReviewOutcome(ctx, projectID, inspection.IssueID, request, pin, inspection); err != nil {
 		return false, err
+	}
+	if inspection.Evidence != nil {
+		if err := a.daemon.recordAcceptedPatchReviewEvidence(ctx, projectID, request.ActorID, inspection); err != nil {
+			return true, fmt.Errorf("record accepted patch-review evidence: %w", err)
+		}
 	}
 	return a.releaseAndCloseAcceptedReview(ctx, projectID, request, inspection.IssueID, integrateBeforeClose, pin, "", result)
 }

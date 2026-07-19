@@ -275,6 +275,11 @@ func (d *Daemon) acceptAndEnqueueReviewPublication(ctx context.Context, projectI
 		return domain.PublicationOperation{}, err
 	}
 	operation.OperationID = receipt.PublicationOperationID
+	if inspection.Evidence != nil {
+		if err := d.recordAcceptedPatchReviewEvidence(ctx, projectID, request.ActorID, inspection); err != nil {
+			return operation, fmt.Errorf("record accepted patch-review evidence: %w", err)
+		}
+	}
 	read := func(_ string, readCtx context.Context, projectID, operationID string) (domain.PublicationOperation, bool, error) {
 		return store.PublicationOperation(readCtx, operationID)
 	}
