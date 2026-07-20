@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +27,8 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/git"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/riordanpawley/azedarach/internal/services/tmux"
+	"github.com/riordanpawley/azedarach/internal/testutil/issuefixture"
+	_ "modernc.org/sqlite"
 )
 
 func TestProjectOrchestratorSessionStartAttachesExactScopeSingleton(t *testing.T) {
@@ -1169,6 +1173,378 @@ func TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap(t *
 	}
 	if worker, found, err := runtimeStore.GetWorkerSessionStateByIssueID(ctx, projectID, rootID, started.SessionID); err != nil || found {
 		t.Fatalf("paused rooted worker intent = %+v found=%t err=%v", worker, found, err)
+	}
+}
+
+func TestBlockedRootRejectsWorkerAndOrchestratorStartWithoutSideEffects(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	blockerID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Blocking migration", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Blocked epic", Type: domain.TypeEpic, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := issuesClient.AddDependency(ctx, rootID, blockerID, string(domain.DependencyBlocks)); err != nil {
+		t.Fatal(err)
+	}
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	tmuxRunner := newSessionStartTmuxRunner()
+	worktreeRunner := &worktreeCreateRunner{worktreePath: filepath.Join(t.TempDir(), rootID)}
+	manager := git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default())
+	d := &Daemon{
+		cfg:                       Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issues:                    issuesClient,
+		tmux:                      tmux.NewClient(tmuxRunner, slog.Default()),
+		session:                   daemonhandlers.NewSessionHandler(daemonstate.NewStore()),
+		sessionStore:              daemonstate.NewStore(),
+		runtimeStoresByRoot:       map[string]*daemonstate.RuntimeStateStore{repoDir: runtimeStore},
+		runtimeStoresByProject:    map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+		worktreeManagersByRoot:    map[string]*git.WorktreeManager{repoDir: manager},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager},
+		revision:                  map[string]uint64{},
+	}
+
+	workerBody, _ := json.Marshal(sessionCommandBody{ProjectID: projectID, IssueID: rootID, SessionID: "az-" + rootID})
+	workerResp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{Command: daemonhandlers.CommandSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: workerBody})
+	if err != nil || workerResp.Error == nil || workerResp.Error.Code != protocol.ErrorCodeConflict || !strings.Contains(workerResp.Error.Message, "root="+rootID) || !strings.Contains(workerResp.Error.Message, "blockers="+blockerID) {
+		t.Fatalf("worker response=%+v err=%v", workerResp.Error, err)
+	}
+
+	scope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orchestratorBody, _ := json.Marshal(protocol.OrchestratorSessionRequest{Scope: scope})
+	orchestratorResp, err := d.handleOrchestratorSession(ctx, protocol.RequestEnvelope{Command: protocol.CommandOrchestratorSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: orchestratorBody})
+	if err != nil || orchestratorResp.Error == nil || orchestratorResp.Error.Code != protocol.ErrorCodeConflict || !strings.Contains(orchestratorResp.Error.Message, "root="+rootID) || !strings.Contains(orchestratorResp.Error.Message, "blockers="+blockerID) {
+		t.Fatalf("orchestrator response=%+v err=%v", orchestratorResp.Error, err)
+	}
+
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(runtimeStore).Get(ctx, identity); err != nil || found {
+		t.Fatalf("lease=%+v found=%t err=%v", lease, found, err)
+	}
+	intents, err := runtimeStore.ListSessionIntentStates(ctx, projectID)
+	if err != nil || len(intents) != 0 {
+		t.Fatalf("intents=%+v err=%v", intents, err)
+	}
+	for _, command := range tmuxRunner.commands {
+		if len(command) > 0 && command[0] == "new-session" {
+			t.Fatalf("runtime side effect: tmux=%v", tmuxRunner.commands)
+		}
+	}
+	if worktreeRunner.worktreeAddCalls != 0 {
+		t.Fatalf("worktree side effect: git=%+v", worktreeRunner)
+	}
+	root, err := issuesClient.GetWithRuntime(ctx, projectID, rootID)
+	if err != nil || root.Status != domain.StatusOpen {
+		t.Fatalf("root lifecycle=%s err=%v", root.Status, err)
+	}
+}
+
+func TestRootedStartRejectsUnsupportedAdmissionSourceWithoutSideEffects(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuesClient := newMigratedIssueClient(t, repoDir, slog.Default())
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	rootID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Root with unsupported admission source", Type: domain.TypeEpic, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	tmuxRunner := newSessionStartTmuxRunner()
+	worktreeRunner := &worktreeCreateRunner{worktreePath: filepath.Join(t.TempDir(), rootID)}
+	manager := git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default())
+	d := &Daemon{
+		cfg:                       Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issues:                    issuesClient,
+		tmux:                      tmux.NewClient(tmuxRunner, slog.Default()),
+		session:                   daemonhandlers.NewSessionHandler(daemonstate.NewStore()),
+		sessionStore:              daemonstate.NewStore(),
+		runtimeStoresByRoot:       map[string]*daemonstate.RuntimeStateStore{repoDir: runtimeStore},
+		runtimeStoresByProject:    map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+		worktreeManagersByRoot:    map[string]*git.WorktreeManager{repoDir: manager},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager},
+		revision:                  map[string]uint64{},
+		taskInvariantSourceOverride: func(invariant daemonInvariantID) daemonInvariantSource {
+			if invariant == daemonInvariantOrchestrationRootBlockerGate {
+				return daemonInvariantSourceHybrid
+			}
+			return sourceForInvariant(invariant)
+		},
+	}
+
+	workerBody, _ := json.Marshal(sessionCommandBody{ProjectID: projectID, IssueID: rootID, SessionID: "az-" + rootID})
+	workerResp, err := d.handleSessionStartDirect(ctx, protocol.RequestEnvelope{Command: daemonhandlers.CommandSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: workerBody})
+	if err != nil || workerResp.Error == nil || workerResp.Error.Code != protocol.ErrorCodeInternal || !strings.Contains(workerResp.Error.Message, "unsupported rooted dependency admission invariant source: hybrid") {
+		t.Fatalf("worker response=%+v err=%v", workerResp.Error, err)
+	}
+	scope, err := domain.RootedOrchestrationScope(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orchestratorBody, _ := json.Marshal(protocol.OrchestratorSessionRequest{Scope: scope})
+	orchestratorResp, err := d.handleOrchestratorSession(ctx, protocol.RequestEnvelope{Command: protocol.CommandOrchestratorSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: orchestratorBody})
+	if err != nil || orchestratorResp.Error == nil || orchestratorResp.Error.Code != protocol.ErrorCodeInternal || !strings.Contains(orchestratorResp.Error.Message, "unsupported rooted dependency admission invariant source: hybrid") {
+		t.Fatalf("orchestrator response=%+v err=%v", orchestratorResp.Error, err)
+	}
+
+	identity, err := domain.NewOrchestratorIdentity(projectID, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(runtimeStore).Get(ctx, identity); err != nil || found {
+		t.Fatalf("lease=%+v found=%t err=%v", lease, found, err)
+	}
+	if intents, err := runtimeStore.ListSessionIntentStates(ctx, projectID); err != nil || len(intents) != 0 {
+		t.Fatalf("intents=%+v err=%v", intents, err)
+	}
+	if worktreeRunner.worktreeAddCalls != 0 || len(tmuxRunner.commands) != 0 {
+		t.Fatalf("unsupported source created side effects: worktree=%d tmux=%v", worktreeRunner.worktreeAddCalls, tmuxRunner.commands)
+	}
+	root, err := issuesClient.GetWithRuntime(ctx, projectID, rootID)
+	if err != nil || root.Status != domain.StatusOpen {
+		t.Fatalf("root lifecycle=%s err=%v", root.Status, err)
+	}
+}
+
+func TestAncestorRootBlockerPropagatesThroughSharedAuthorityAndActiveStartPaths(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
+	writer := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
+	t.Cleanup(func() { _ = writer.CloseDB() })
+	if _, err := issuefixture.SeedPath(ctx, dbPath, issuefixture.Fixture{
+		Issues: []issuefixture.Issue{
+			{ID: "upstream-blocker", Title: "Active upstream blocker", Type: domain.TypeEpic, Status: domain.StatusInProgress},
+			{ID: "parent-root", Title: "Blocked parent root", Type: domain.TypeEpic, Status: domain.StatusOpen},
+			{ID: "nested-root", Title: "Nested root", Type: domain.TypeEpic, Status: domain.StatusOpen},
+			{ID: "runnable-child", Title: "Otherwise runnable child", Type: domain.TypeTask, Status: domain.StatusOpen},
+		},
+		Dependencies: []issuefixture.Dependency{
+			{IssueID: "nested-root", DependsOnID: "parent-root", Type: domain.DependencyParentChild},
+			{IssueID: "runnable-child", DependsOnID: "parent-root", Type: domain.DependencyParentChild},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reader := issues.NewClientAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = reader.CloseDB() })
+	if err := reader.OpenProjectionDeltaStore(); err != nil {
+		t.Fatal(err)
+	}
+	watchStore := &watchBarrierProjectionStore{projectionDeltaStore: reader, entered: make(chan struct{}), release: make(chan struct{})}
+	materializer := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(watchStore), nil)
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	tmuxRunner := newSessionStartTmuxRunner()
+	worktreeRunner := &worktreeCreateRunner{worktreePath: filepath.Join(t.TempDir(), "parent-root")}
+	manager := git.NewWorktreeManager(worktreeRunner, repoDir, slog.Default())
+	reconciler := &runtimeReconcileRecorder{}
+	dReader := &Daemon{
+		cfg:                       Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issues:                    reader,
+		tmux:                      tmux.NewClient(tmuxRunner, slog.Default()),
+		session:                   daemonhandlers.NewSessionHandler(daemonstate.NewStore()),
+		sessionStore:              daemonstate.NewStore(),
+		runtimeStoresByRoot:       map[string]*daemonstate.RuntimeStateStore{repoDir: runtimeStore},
+		runtimeStoresByProject:    map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+		worktreeManagersByRoot:    map[string]*git.WorktreeManager{repoDir: manager},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager},
+		runtimeReconciler:         reconciler,
+		materializers:             map[string]*projectReadMaterializer{projectID: materializer},
+		materializersStarted:      true,
+		revision:                  map[string]uint64{},
+		taskGraphReadinessCache:   map[string]taskGraphReadinessCacheEntry{},
+		taskGraphReadinessLoads:   map[string]*taskGraphReadinessLoad{},
+	}
+	acknowledgeManagedAgentOnInitialLaunch(t, dReader, tmuxRunner, projectID)
+	dReader.configureProjectReadMaterializer(materializer, projectID, reader)
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	materializer.done = make(chan struct{})
+	go func() {
+		defer close(materializer.done)
+		materializer.run(ctx, nil)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-materializer.done
+	})
+	<-watchStore.entered
+
+	dWriter := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, issues: writer, revision: map[string]uint64{}, hub: publish.NewHub(16, 8, slog.Default())}
+	dependencyBody, _ := json.Marshal(map[string]any{"task_id": "parent-root", "depends_on_id": "upstream-blocker", "dependency_type": string(domain.DependencyBlocks)})
+	dependencyResp, err := dWriter.handleTaskDependencyAdd(ctx, protocol.RequestEnvelope{Command: "task.dependency.add", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: dependencyBody})
+	if err != nil || dependencyResp.Error != nil {
+		t.Fatalf("second daemon dependency write: response=%+v err=%v", dependencyResp.Error, err)
+	}
+
+	readinessBody, _ := json.Marshal(map[string]string{"task_id": "parent-root"})
+	readinessResp, _ := dReader.handleTaskGraphReadiness(ctx, protocol.RequestEnvelope{Command: "task.graph_readiness", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: readinessBody})
+	close(watchStore.release)
+	if readinessResp.Error != nil {
+		t.Fatalf("readiness response = %+v", readinessResp.Error)
+	}
+	var readiness taskGraphReadinessResult
+	if err := json.Unmarshal(readinessResp.Body, &readiness); err != nil {
+		t.Fatal(err)
+	}
+	if len(readiness.Runnable) != 0 || !slices.Equal(readiness.RootBlockers, []string{"upstream-blocker"}) || !strings.Contains(readiness.Blocked["runnable-child"], "root waiting on upstream-blocker") || !strings.Contains(readiness.Blocked["nested-root"], "root waiting on upstream-blocker") {
+		t.Fatalf("ancestor-blocked readiness = %+v", readiness)
+	}
+
+	nestedScope, err := domain.RootedOrchestrationScope("nested-root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nestedBody, _ := json.Marshal(protocol.OrchestratorSessionRequest{Scope: nestedScope})
+	nestedWorkerBody, _ := json.Marshal(sessionCommandBody{ProjectID: projectID, IssueID: "nested-root", SessionID: "az-nested-root"})
+	nestedWorkerResp, err := dReader.handleSessionStartDirect(ctx, protocol.RequestEnvelope{Command: daemonhandlers.CommandSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: nestedWorkerBody})
+	if err != nil || nestedWorkerResp.Error == nil || nestedWorkerResp.Error.Code != protocol.ErrorCodeConflict || !strings.Contains(nestedWorkerResp.Error.Message, "requested=nested-root root=parent-root blockers=upstream-blocker") {
+		t.Fatalf("nested worker response=%+v err=%v", nestedWorkerResp.Error, err)
+	}
+	nestedResp, err := dReader.handleOrchestratorSession(ctx, protocol.RequestEnvelope{Command: protocol.CommandOrchestratorSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: nestedBody})
+	if err != nil || nestedResp.Error == nil || nestedResp.Error.Code != protocol.ErrorCodeConflict || !strings.Contains(nestedResp.Error.Message, "requested=nested-root root=parent-root blockers=upstream-blocker") {
+		t.Fatalf("nested orchestrator response=%+v err=%v", nestedResp.Error, err)
+	}
+	nestedIdentity, err := domain.NewOrchestratorIdentity(projectID, nestedScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(runtimeStore).Get(ctx, nestedIdentity); err != nil || found {
+		t.Fatalf("blocked nested lease=%+v found=%t err=%v", lease, found, err)
+	}
+	if intents, err := runtimeStore.ListSessionIntentStates(ctx, projectID); err != nil || len(intents) != 0 {
+		t.Fatalf("blocked nested intents=%+v err=%v", intents, err)
+	}
+	nestedTask, err := reader.GetWithRuntime(ctx, projectID, "nested-root")
+	if err != nil || nestedTask.Status != domain.StatusOpen {
+		t.Fatalf("blocked nested lifecycle=%s err=%v", nestedTask.Status, err)
+	}
+	rootTask, err := reader.GetWithRuntime(ctx, projectID, "parent-root")
+	if err != nil || rootTask.Status != domain.StatusOpen {
+		t.Fatalf("blocked ancestor lifecycle=%s err=%v", rootTask.Status, err)
+	}
+	if worktreeRunner.worktreeAddCalls != 0 || len(tmuxRunner.commands) != 0 {
+		t.Fatalf("blocked nested start created side effects: worktree=%d tmux=%v", worktreeRunner.worktreeAddCalls, tmuxRunner.commands)
+	}
+
+	workerBody, _ := json.Marshal(sessionCommandBody{ProjectID: projectID, IssueID: "parent-root", SessionID: "az-parent-root"})
+	workerResp, err := dReader.handleSessionStartDirect(ctx, protocol.RequestEnvelope{Command: daemonhandlers.CommandSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: workerBody})
+	if err != nil || workerResp.Error == nil || workerResp.Error.Code != protocol.ErrorCodeConflict || !strings.Contains(workerResp.Error.Message, "root=parent-root blockers=upstream-blocker") {
+		t.Fatalf("worker response=%+v err=%v", workerResp.Error, err)
+	}
+	scope, _ := domain.RootedOrchestrationScope("parent-root")
+	orchestratorBody, _ := json.Marshal(protocol.OrchestratorSessionRequest{Scope: scope})
+	orchestratorResp, err := dReader.handleOrchestratorSession(ctx, protocol.RequestEnvelope{Command: protocol.CommandOrchestratorSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: orchestratorBody})
+	if err != nil || orchestratorResp.Error == nil || orchestratorResp.Error.Code != protocol.ErrorCodeConflict || !strings.Contains(orchestratorResp.Error.Message, "root=parent-root blockers=upstream-blocker") {
+		t.Fatalf("orchestrator response=%+v err=%v", orchestratorResp.Error, err)
+	}
+	if worktreeRunner.worktreeAddCalls != 0 || len(tmuxRunner.commands) != 0 {
+		t.Fatalf("blocked starts created side effects: worktree=%d tmux=%v", worktreeRunner.worktreeAddCalls, tmuxRunner.commands)
+	}
+	if calls, _ := reconciler.snapshot(); calls != 0 {
+		t.Fatalf("blocked starts entered runtime reconciliation %d time(s)", calls)
+	}
+	if err := writer.Update(ctx, "upstream-blocker", domain.StatusDone); err != nil {
+		t.Fatal(err)
+	}
+	settledResp, err := dReader.handleTaskGraphReadiness(ctx, protocol.RequestEnvelope{Command: "task.graph_readiness", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: readinessBody})
+	if err != nil || settledResp.Error != nil {
+		t.Fatalf("settled readiness response=%+v err=%v", settledResp.Error, err)
+	}
+	var settled taskGraphReadinessResult
+	if err := json.Unmarshal(settledResp.Body, &settled); err != nil {
+		t.Fatal(err)
+	}
+	if len(settled.RootBlockers) != 0 || !slices.Equal(settled.Runnable, []string{"runnable-child"}) {
+		t.Fatalf("settled ancestor-blocked readiness = %+v", settled)
+	}
+	nestedWorkerResp, err = dReader.handleSessionStartDirect(ctx, protocol.RequestEnvelope{Command: daemonhandlers.CommandSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: nestedWorkerBody})
+	if err != nil || nestedWorkerResp.Error != nil {
+		t.Fatalf("settled nested start response=%+v err=%v", nestedWorkerResp.Error, err)
+	}
+	if lease, found, err := daemonstate.NewOrchestratorLeaseAuthority(runtimeStore).Get(ctx, nestedIdentity); err != nil || !found || lease.SessionID == "" {
+		t.Fatalf("settled nested lease=%+v found=%t err=%v", lease, found, err)
+	}
+}
+
+func TestRootedStartFailsClosedForUnavailableForeignProjectBlocker(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
+	client := newMigratedIssueClientAtPath(t, dbPath, slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	if _, err := issuefixture.SeedPath(ctx, dbPath, issuefixture.Fixture{Issues: []issuefixture.Issue{
+		{ID: "local-root", Title: "Local root", Type: domain.TypeEpic, Status: domain.StatusOpen},
+		{ID: "local-child", Title: "Local child", Type: domain.TypeTask, Status: domain.StatusOpen},
+	}, Dependencies: []issuefixture.Dependency{{IssueID: "local-child", DependsOnID: "local-root", Type: domain.DependencyParentChild}}}); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=foreign_keys(0)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO issue_dependencies(issue_id,depends_on_id,dependency_type,tombstoned_at) VALUES('local-root','foreign-project-blocker','blocks',NULL)`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	materializer := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(client), nil)
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, issues: client, tmux: tmux.NewClient(newSessionStartTmuxRunner(), slog.Default()), materializers: map[string]*projectReadMaterializer{projectID: materializer}, materializersStarted: true, runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{repoDir: runtimeStore}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore}, revision: map[string]uint64{}, taskGraphReadinessCache: map[string]taskGraphReadinessCacheEntry{}, taskGraphReadinessLoads: map[string]*taskGraphReadinessLoad{}}
+	d.configureProjectReadMaterializer(materializer, projectID, client)
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	readinessBody, _ := json.Marshal(map[string]string{"task_id": "local-root"})
+	readinessResp, err := d.handleTaskGraphReadiness(ctx, protocol.RequestEnvelope{Command: "task.graph_readiness", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: readinessBody})
+	if err != nil || readinessResp.Error != nil {
+		t.Fatalf("readiness response=%+v err=%v", readinessResp.Error, err)
+	}
+	var readiness taskGraphReadinessResult
+	if err := json.Unmarshal(readinessResp.Body, &readiness); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(readiness.RootBlockers, []string{"foreign-project-blocker(missing)"}) || !strings.Contains(readiness.Blocked["local-child"], "foreign-project-blocker(missing)") {
+		t.Fatalf("foreign unavailable readiness = %+v", readiness)
+	}
+	scope, _ := domain.RootedOrchestrationScope("local-root")
+	body, _ := json.Marshal(protocol.OrchestratorSessionRequest{Scope: scope})
+	resp, err := d.handleOrchestratorSession(ctx, protocol.RequestEnvelope{Command: protocol.CommandOrchestratorSessionStart, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body})
+	if err != nil || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeConflict || !strings.Contains(resp.Error.Message, "foreign-project-blocker(missing)") {
+		t.Fatalf("foreign unavailable start response=%+v err=%v", resp.Error, err)
 	}
 }
 

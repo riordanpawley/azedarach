@@ -165,7 +165,8 @@ func newProjectReadMaterializer(projectID string, authority *ProjectionDeltaAuth
 		projectID: strings.TrimSpace(projectID), authority: authority, hydrate: hydrate,
 		canonical: map[string]domain.Task{}, tasks: map[string]domain.Task{}, worktrees: map[string]git.Worktree{},
 		runtimeRefreshEpoch: map[string]uint64{}, runtimePublishedEpoch: map[string]uint64{}, runtimeRefreshOwners: map[string]map[uint64]struct{}{},
-		baseHealth: "healthy", authoritativeRefreshFailures: map[authoritativeReadRefreshComponent]string{},
+		baseHealth:                   "healthy",
+		authoritativeRefreshFailures: map[authoritativeReadRefreshComponent]string{},
 	}
 }
 
@@ -1372,6 +1373,19 @@ func (d *Daemon) convergedProjectReadSnapshotMode(ctx context.Context, projectID
 	return d.projectReadSnapshot(projectID)
 }
 
+// projectReadSnapshotCurrent synchronously converges the daemon-local durable
+// issue projection before returning it. Rooted admission and graph readiness
+// use this boundary so cross-daemon writes cannot be hidden by local cache
+// state, while runtime enrichment remains outside this projection invariant.
+func (d *Daemon) projectReadSnapshotCurrent(ctx context.Context, projectID string) ([]domain.Task, protocol.MaterializedSnapshotMetadata, error) {
+	// Preserve the normal lazy materializer initialization contract for
+	// project-scoped clients before entering the stricter convergence path.
+	if _, metadata, err := d.projectReadSnapshot(projectID); err != nil {
+		return nil, metadata, err
+	}
+	return d.convergedCanonicalProjectReadSnapshot(ctx, projectID)
+}
+
 func (d *Daemon) hydrateProjectReadTasks(ctx context.Context, projectID string, client *issues.Client, tasks []domain.Task) ([]domain.Task, error) {
 	hydrate := client.HydrateRuntime
 	if d.projectReadRuntimeHydrate != nil {
@@ -1738,6 +1752,51 @@ func materializedParentChildClosure(tasks []domain.Task, rootID string) []domain
 				}
 			}
 		}
+	}
+	out := make([]domain.Task, 0, len(selected))
+	for _, task := range tasks {
+		if _, ok := selected[task.ID.String()]; ok {
+			out = append(out, task)
+		}
+	}
+	return out
+}
+
+// materializedRootedGraphContext extends the requested rooted subtree with its
+// ancestor containment chain and each ancestor's direct dependencies. Rooted
+// admission needs that context to inherit blockers from enclosing roots.
+func materializedRootedGraphContext(tasks []domain.Task, rootID string) []domain.Task {
+	rootID = strings.TrimSpace(rootID)
+	if rootID == "" {
+		return tasks
+	}
+	byID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID.String()] = task
+	}
+	selected := make(map[string]struct{})
+	for _, task := range materializedParentChildClosure(tasks, rootID) {
+		selected[task.ID.String()] = struct{}{}
+	}
+	seen := map[string]struct{}{rootID: {}}
+	for task, ok := byID[rootID]; ok; {
+		parentID := strings.TrimSpace(domain.TaskParentIssueID(task))
+		if parentID == "" {
+			break
+		}
+		selected[parentID] = struct{}{}
+		if _, cycle := seen[parentID]; cycle {
+			break
+		}
+		seen[parentID] = struct{}{}
+		parent, exists := byID[parentID]
+		if !exists {
+			break
+		}
+		for _, dependency := range parent.Dependencies {
+			selected[dependency.ID.String()] = struct{}{}
+		}
+		task = parent
 	}
 	out := make([]domain.Task, 0, len(selected))
 	for _, task := range tasks {

@@ -64,6 +64,15 @@ func (d *Daemon) handleOrchestratorSessionLocked(ctx context.Context, req protoc
 	result := protocol.OrchestratorSessionResult{Scope: body.Scope, SessionID: sessionID}
 	switch req.Command {
 	case protocol.CommandOrchestratorSessionStart:
+		if body.Scope.Kind == domain.OrchestrationScopeRooted {
+			admission, gateErr := d.rootedOrchestrationAdmission(ctx, projectID, body.Scope.RootIssueID.String())
+			if gateErr != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, gateErr.Error()), nil
+			}
+			if admission.Blocked() {
+				return d.errorResponse(req, protocol.ErrorCodeConflict, rootedOrchestrationBlockedMessage(admission)), nil
+			}
+		}
 		rootedPrompt := ""
 		if body.Scope.Kind == domain.OrchestrationScopeRooted {
 			rootedPrompt, err = d.rootedOrchestratorBootstrapPrompt(ctx, projectID, body.Scope)

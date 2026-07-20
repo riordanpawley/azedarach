@@ -939,6 +939,34 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 		)
 	}
 	reportSessionStartProgress(ctx, "preflight", "checking runtime state and existing session", 5)
+	startConflictSource := d.sourceForSessionInvariant(sessionInvariantSessionStartConflict)
+	exists, err := d.issueSessionExistsForInvariant(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, startConflictSource)
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if exists {
+		return d.errorResponse(req, protocol.ErrorCodeConflict, fmt.Sprintf("session already exists: %s (use 'az attach %s' to connect)", cmd.IssueID, cmd.IssueID)), nil
+	}
+	issueClient := d.issueClientForProject(cmd.ProjectID)
+	if issueClient == nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
+	}
+	task, err := issueClient.GetWithRuntime(ctx, cmd.ProjectID, cmd.IssueID)
+	if errors.Is(err, domain.ErrNotFound) {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("issue not found: %s", cmd.IssueID)), nil
+	}
+	if err != nil {
+		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
+	}
+	if task.Type == domain.TypeEpic {
+		admission, gateErr := d.rootedOrchestrationAdmission(ctx, cmd.ProjectID, cmd.IssueID)
+		if gateErr != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, gateErr.Error()), nil
+		}
+		if admission.Blocked() {
+			return d.errorResponse(req, protocol.ErrorCodeConflict, rootedOrchestrationBlockedMessage(admission)), nil
+		}
+	}
 	if err := d.ensureFreshRuntimeForIssueMutation(ctx, cmd.ProjectID, cmd.IssueID, daemonhandlers.CommandSessionStart); err != nil {
 		if d.cfg.Logger != nil {
 			if errors.Is(err, context.Canceled) {
@@ -964,26 +992,7 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 			return d.mutationFreshnessErrorResponse(req, err), nil
 		}
 	}
-	startConflictSource := d.sourceForSessionInvariant(sessionInvariantSessionStartConflict)
-	exists, err := d.issueSessionExistsForInvariant(ctx, cmd.ProjectID, cmd.IssueID, cmd.SessionID, startConflictSource)
-	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-	}
-	if exists {
-		return d.errorResponse(req, protocol.ErrorCodeConflict, fmt.Sprintf("session already exists: %s (use 'az attach %s' to connect)", cmd.IssueID, cmd.IssueID)), nil
-	}
 	reportSessionStartProgress(ctx, "worktree_preflight", "loading issue and preparing worktree", 15)
-	issueClient := d.issueClientForProject(cmd.ProjectID)
-	if issueClient == nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, "issue store unavailable"), nil
-	}
-	task, err := issueClient.GetWithRuntime(ctx, cmd.ProjectID, cmd.IssueID)
-	if errors.Is(err, domain.ErrNotFound) {
-		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("issue not found: %s", cmd.IssueID)), nil
-	}
-	if err != nil {
-		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
-	}
 	originalIssueStatus := task.Status
 	if err := d.ensureSessionStartIssueLifecycle(ctx, issueClient, cmd.IssueID, originalIssueStatus); err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare issue lifecycle for session start: %v", err)), nil

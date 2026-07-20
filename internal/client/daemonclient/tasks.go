@@ -173,6 +173,7 @@ type TaskGraphReadiness struct {
 	Revision               uint64                                `json:"revision,omitempty"`
 	Source                 protocol.MaterializedSnapshotMetadata `json:"source,omitempty"`
 	RootIssueID            string                                `json:"root_issue_id"`
+	RootBlockers           []string                              `json:"root_blockers,omitempty"`
 	Capacity               TaskCapacitySummary                   `json:"capacity"`
 	Runnable               []string                              `json:"runnable"`
 	NestedRoots            []TaskNestedRoot                      `json:"nested_roots,omitempty"`

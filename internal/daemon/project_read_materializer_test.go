@@ -1879,6 +1879,67 @@ func TestProjectReadMaterializerBootstrapCannotClearCanceledQueuedConvergence(t 
 	}
 }
 
+func TestProjectReadSnapshotCurrentConvergesExternalDependencyDelta(t *testing.T) {
+	ctx := context.Background()
+	writer, repoDir := newTestIssueClient(t)
+	reader := issues.NewClient(repoDir, slog.Default())
+	t.Cleanup(func() { _ = reader.CloseDB() })
+	if err := reader.OpenProjectionDeltaStore(); err != nil {
+		t.Fatal(err)
+	}
+	rootID, err := writer.Create(ctx, issues.CreateTaskParams{Title: "Root", Type: domain.TypeEpic, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockerID, err := writer.Create(ctx, issues.CreateTaskParams{Title: "Blocker", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := writer.Create(ctx, issues.CreateTaskParams{Title: "Child", Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &rootID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(reader), nil)
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{issues: reader, materializers: map[string]*projectReadMaterializer{"project": materializer}, materializersStarted: true, revision: map[string]uint64{}, taskGraphReadinessCache: map[string]taskGraphReadinessCacheEntry{}, taskGraphReadinessLoads: map[string]*taskGraphReadinessLoad{}}
+	before, err := d.taskGraphReadiness(ctx, "project", rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before.Runnable) != 1 || before.Runnable[0] != childID {
+		t.Fatalf("before external blocker = %+v", before)
+	}
+
+	// This write represents a second daemon/process advancing the shared
+	// authority after this daemon's disposable read model was bootstrapped.
+	if err := writer.AddDependency(ctx, rootID, blockerID, string(domain.DependencyBlocks)); err != nil {
+		t.Fatal(err)
+	}
+	tasks, source, err := d.projectReadSnapshotCurrent(ctx, "project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.DeliveryCursor == 0 || source.DeliveryCursor < source.DeliveryHead {
+		t.Fatalf("source not current: %+v", source)
+	}
+	byID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID.String()] = task
+	}
+	if len(byID[rootID].Dependencies) != 1 || byID[rootID].Dependencies[0].ID.String() != blockerID {
+		t.Fatalf("root after current barrier = %+v", byID[rootID])
+	}
+	after, err := d.taskGraphReadiness(ctx, "project", rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Runnable) != 0 || len(after.RootBlockers) != 1 || after.RootBlockers[0] != blockerID || !strings.Contains(after.Blocked[childID], blockerID) {
+		t.Fatalf("after external blocker = %+v", after)
+	}
+}
+
 func TestSyncUserProjectionMaterializedIssuesPropagatesBoundedCurrentState(t *testing.T) {
 	ctx := context.Background()
 	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
@@ -2024,6 +2085,23 @@ func TestMaterializedTaskContextMatchesDirectStoreExpansion(t *testing.T) {
 	sort.Strings(metadataIDs)
 	if want := []string{"requested", "root"}; !reflect.DeepEqual(metadataIDs, want) {
 		t.Fatalf("metadata context IDs = %v, want %v", metadataIDs, want)
+	}
+}
+
+func TestMaterializedRootedGraphContextIncludesAncestorBlockers(t *testing.T) {
+	tasks := []domain.Task{
+		{ID: "root", Type: domain.TypeEpic, Status: domain.StatusOpen, Dependencies: []domain.Dependency{{ID: "root-blocker", Type: domain.DependencyBlocks}}},
+		{ID: "root-blocker", Status: domain.StatusInProgress},
+		{ID: "nested", Type: domain.TypeEpic, Status: domain.StatusOpen, ParentID: issueIDPointer("root")},
+		{ID: "nested-child", Status: domain.StatusOpen, ParentID: issueIDPointer("nested")},
+		{ID: "unrelated", Status: domain.StatusOpen},
+	}
+	got := materializedRootedGraphContext(tasks, "nested")
+	ids := taskIDsFromTasks(got)
+	sort.Strings(ids)
+	want := []string{"nested", "nested-child", "root", "root-blocker"}
+	if !reflect.DeepEqual(ids, want) {
+		t.Fatalf("rooted context IDs = %v, want %v", ids, want)
 	}
 }
 

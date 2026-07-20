@@ -254,6 +254,7 @@ type Daemon struct {
 	taskGraphRuntimeValidationMu         sync.Mutex
 	taskGraphRuntimeValidations          map[string]taskGraphRuntimeValidationEntry
 	taskGraphRuntimeValidationLoads      map[string]*taskGraphRuntimeValidationLoad
+	taskInvariantSourceOverride          func(daemonInvariantID) daemonInvariantSource
 	orchestrationMu                      sync.Mutex
 	orchestrationSnapshotLoadMu          sync.Mutex
 	orchestrationSnapshotLoads           map[string]*orchestrationSnapshotLoad

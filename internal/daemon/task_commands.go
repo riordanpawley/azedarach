@@ -236,6 +236,7 @@ type taskGraphReadinessResult struct {
 	Revision               uint64                                `json:"revision,omitempty"`
 	Source                 protocol.MaterializedSnapshotMetadata `json:"source,omitempty"`
 	RootIssueID            string                                `json:"root_issue_id"`
+	RootBlockers           []string                              `json:"root_blockers,omitempty"`
 	Capacity               taskGraphCapacitySummary              `json:"capacity"`
 	Runnable               []string                              `json:"runnable"`
 	NestedRoots            []taskGraphNestedRoot                 `json:"nested_roots,omitempty"`
@@ -393,6 +394,9 @@ type taskFollowOnMergeCandidateItem struct {
 }
 
 func (d *Daemon) sourceForTaskInvariant(invariant daemonInvariantID) daemonInvariantSource {
+	if d != nil && d.taskInvariantSourceOverride != nil {
+		return d.taskInvariantSourceOverride(invariant)
+	}
 	return sourceForInvariant(invariant)
 }
 
@@ -5809,16 +5813,24 @@ func (d *Daemon) taskGraphReadinessForActor(ctx context.Context, projectID, root
 	rootIssueID = strings.TrimSpace(rootIssueID)
 	actorID = strings.TrimSpace(actorID)
 	cacheKey := taskGraphReadinessLoadKey(projectID, rootIssueID, actorID)
+	var currentDeliveryCursor uint64
+	if d.materializedReadsEnabled() {
+		_, source, err := d.projectReadSnapshotCurrent(ctx, projectID)
+		if err != nil {
+			return taskGraphReadinessResult{}, fmt.Errorf("refresh issue graph readiness projection: %w", err)
+		}
+		currentDeliveryCursor = source.DeliveryCursor
+	}
 
 	for {
 		revision := d.currentRevision(projectID)
-		loadKey := fmt.Sprintf("%s\x00%d", cacheKey, revision)
+		loadKey := fmt.Sprintf("%s\x00%d\x00%d", cacheKey, revision, currentDeliveryCursor)
 
 		d.taskGraphReadinessMu.Lock()
 		if d.taskGraphReadinessCache == nil {
 			d.taskGraphReadinessCache = map[string]taskGraphReadinessCacheEntry{}
 		}
-		if cached, ok := d.taskGraphReadinessCache[cacheKey]; ok && cached.revision == revision && (cached.expiresAt.IsZero() || time.Now().Before(cached.expiresAt)) {
+		if cached, ok := d.taskGraphReadinessCache[cacheKey]; ok && cached.revision == revision && cached.result.Source.DeliveryCursor == currentDeliveryCursor && (cached.expiresAt.IsZero() || time.Now().Before(cached.expiresAt)) {
 			d.taskGraphReadinessMu.Unlock()
 			if !d.materializedReadsEnabled() {
 				if err := d.validateTaskGraphRuntime(ctx, projectID, cached.result.scopeIssueIDs, revision); err != nil && d.cfg.Logger != nil {
@@ -5937,8 +5949,8 @@ func (d *Daemon) buildTaskGraphReadinessForActor(ctx context.Context, projectID,
 	)
 	if d.materializedReadsEnabled() {
 		var materialized []domain.Task
-		materialized, source, err = d.projectReadSnapshot(projectID)
-		tasks = materializedParentChildClosure(materialized, rootIssueID)
+		materialized, source, err = d.projectReadSnapshotCurrent(ctx, projectID)
+		tasks = materializedRootedGraphContext(materialized, rootIssueID)
 	} else {
 		tasks, err = d.loadTaskGraphReadinessDomainTasks(ctx, projectID, rootIssueID)
 	}
@@ -6183,11 +6195,11 @@ func (d *Daemon) taskGraphReadinessCacheExpiry(projectID, rootIssueID, actorID s
 
 func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectID, rootIssueID string) ([]domain.Task, error) {
 	if d.materializedReadsEnabled() {
-		tasks, _, err := d.projectReadSnapshot(projectID)
+		tasks, _, err := d.projectReadSnapshotCurrent(ctx, projectID)
 		if err != nil {
 			return nil, err
 		}
-		return materializedParentChildClosure(tasks, rootIssueID), nil
+		return materializedRootedGraphContext(tasks, rootIssueID), nil
 	}
 	// Explicit compatibility exception: production starts project materializers
 	// before serving commands. This direct indexed read exists only for embedded
@@ -6210,6 +6222,26 @@ func (d *Daemon) loadTaskGraphReadinessDomainTasks(ctx context.Context, projectI
 		}
 	}
 	return d.enrichTasksWithSessionState(ctx, projectID, tasks), nil
+}
+
+func (d *Daemon) rootedOrchestrationAdmission(ctx context.Context, projectID, rootIssueID string) (domain.RootedOrchestrationAdmission, error) {
+	source := d.sourceForTaskInvariant(daemonInvariantOrchestrationRootBlockerGate)
+	if source != daemonInvariantSourceProjection {
+		return domain.RootedOrchestrationAdmission{}, fmt.Errorf("unsupported rooted dependency admission invariant source: %s", source)
+	}
+	tasks, err := d.loadTaskGraphReadinessDomainTasks(ctx, projectID, rootIssueID)
+	if err != nil {
+		return domain.RootedOrchestrationAdmission{}, fmt.Errorf("refresh rooted orchestration graph: %w", err)
+	}
+	rootID, byID, _, err := daemonTaskGraphIndexes(rootIssueID, tasks)
+	if err != nil {
+		return domain.RootedOrchestrationAdmission{}, err
+	}
+	return domain.AssessRootedOrchestrationAdmission(rootID, byID)
+}
+
+func rootedOrchestrationBlockedMessage(admission domain.RootedOrchestrationAdmission) string {
+	return fmt.Sprintf("root orchestration blocked: requested=%s root=%s blockers=%s", admission.RequestedRootID, admission.BlockingRootID, strings.Join(admission.Blockers, ","))
 }
 
 func (result *taskGraphReadinessResult) applySessionStartProgress(progressByIssue map[string]taskGraphSessionStartProgress) {
@@ -6279,6 +6311,11 @@ func daemonTaskGraphReadinessFromIndexesWithCompletionEvidence(rootID naming.Iss
 
 func daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID naming.IssueID, byID map[naming.IssueID]domain.Task, children map[naming.IssueID][]naming.IssueID, actorID string, now time.Time, completionEvidence map[string]taskDurableCompletionEvidence) (taskGraphReadinessResult, error) {
 	rootBacklog := byID[rootID].IssueFacts().LifecycleState == domain.IssueWorkflowBacklog
+	admission, err := domain.AssessRootedOrchestrationAdmission(rootID, byID)
+	if err != nil {
+		return taskGraphReadinessResult{}, err
+	}
+	rootBlockers := admission.Blockers
 	leafIDs := daemonTaskGraphDirectWorkerLeafIDs(rootID, byID, children)
 	leaves := make([]string, 0, len(leafIDs))
 	for _, id := range leafIDs {
@@ -6290,11 +6327,28 @@ func daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID na
 	}
 	sort.Strings(leaves)
 	result := taskGraphReadinessResult{
-		RootIssueID: rootID.String(),
-		Runnable:    make([]string, 0, len(leaves)),
-		NestedRoots: daemonTaskGraphNestedRootSummaries(rootID, byID, children, actorID, now),
-		Active:      make([]string, 0),
-		Blocked:     make(map[string]string),
+		RootIssueID:  rootID.String(),
+		RootBlockers: append([]string(nil), rootBlockers...),
+		Runnable:     make([]string, 0, len(leaves)),
+		NestedRoots:  daemonTaskGraphNestedRootSummaries(rootID, byID, children, actorID, now),
+		Active:       make([]string, 0),
+		Blocked:      make(map[string]string),
+	}
+	if len(rootBlockers) > 0 {
+		for i := range result.NestedRoots {
+			reason := "root waiting on " + strings.Join(rootBlockers, ",")
+			if nestedID, err := naming.ParseIssueID(result.NestedRoots[i].IssueID); err == nil {
+				if local := domain.UnresolvedBlockers(byID[nestedID], byID); len(local) > 0 {
+					reason += "; issue waiting on " + strings.Join(local, ",")
+				}
+			}
+			result.Blocked[result.NestedRoots[i].IssueID] = reason
+			result.NestedRoots[i].Status = "blocked_root_dependency"
+			result.NestedRoots[i].Classification = string(domain.OrchestrationCandidateBlocked)
+			result.NestedRoots[i].ExclusionReasons = uniqueNonEmpty(append(result.NestedRoots[i].ExclusionReasons, "root-dependency-blocked"))
+			result.NestedRoots[i].FallbackPolicy = "wait_for_root_blockers"
+			result.NestedRoots[i].Advice = fmt.Sprintf("settle root %s blockers before starting nested root %s: %s", rootID, result.NestedRoots[i].IssueID, strings.Join(rootBlockers, ","))
+		}
 	}
 	if rootBacklog {
 		for i := range result.NestedRoots {
@@ -6320,11 +6374,19 @@ func daemonTaskGraphReadinessFromIndexesForActorWithCompletionEvidence(rootID na
 			result.Active = append(result.Active, idRaw)
 			continue
 		}
+		blockers := daemonTaskGraphUnresolvedBlockers(task, byID)
+		if len(rootBlockers) > 0 && id != rootID {
+			reason := "root waiting on " + strings.Join(rootBlockers, ",")
+			if len(blockers) > 0 {
+				reason += "; issue waiting on " + strings.Join(blockers, ",")
+			}
+			result.Blocked[idRaw] = reason
+			continue
+		}
 		if rootBacklog && id != rootID {
 			result.Blocked[idRaw] = "lifecycle-backlog"
 			continue
 		}
-		blockers := daemonTaskGraphUnresolvedBlockers(task, byID)
 		if daemonTaskStaleCloseableCandidate(task, completionEvidence[task.ID.String()]) {
 			continue
 		}
@@ -6774,6 +6836,7 @@ func daemonTaskGraphCapacitySummary(ready taskGraphReadinessResult) taskGraphCap
 }
 
 func cloneTaskGraphReadinessResult(result taskGraphReadinessResult) taskGraphReadinessResult {
+	result.RootBlockers = append([]string(nil), result.RootBlockers...)
 	result.Runnable = append([]string(nil), result.Runnable...)
 	result.Pending = append([]taskGraphPendingStart(nil), result.Pending...)
 	result.Active = append([]string(nil), result.Active...)
@@ -7609,22 +7672,7 @@ func daemonTaskGraphRequiresNestedRootOrchestration(root, id naming.IssueID, tas
 }
 
 func daemonTaskGraphUnresolvedBlockers(task domain.Task, byID map[naming.IssueID]domain.Task) []string {
-	out := make([]string, 0, 4)
-	for _, dep := range task.Dependencies {
-		if dep.Type != domain.DependencyBlocks {
-			continue
-		}
-		depTask, ok := byID[dep.ID]
-		if !ok {
-			out = append(out, dep.ID.String()+"(missing)")
-			continue
-		}
-		if !depTask.IssueClosed() {
-			out = append(out, dep.ID.String())
-		}
-	}
-	sort.Strings(out)
-	return out
+	return domain.UnresolvedBlockers(task, byID)
 }
 
 func daemonTaskGraphActiveSessions(activeIDs []string, byID map[naming.IssueID]domain.Task, progressByIssue map[string]taskGraphSessionStartProgress, captured taskGraphReadinessContext) []taskGraphActiveSession {
