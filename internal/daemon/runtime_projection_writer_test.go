@@ -367,6 +367,41 @@ func TestWriteSessionStopProjectionPurgesOnlyExactManagedAgentSession(t *testing
 	}
 }
 
+func TestWriteSessionStopProjectionPreservesRootedOrchestratorOwnership(t *testing.T) {
+	store := newRuntimeProjectionStore(t)
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{
+		cfg: Config{RepoDir: ".", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{
+			".": store,
+		},
+	}
+	ctx := context.Background()
+	updatedAt := time.Date(2026, time.July, 20, 7, 0, 0, 0, time.UTC)
+	rooted := daemonstate.Session{
+		ID: "az-root", IssueID: "root", Role: daemonstate.SessionRoleOrchestrator,
+		ScopeKind: daemonstate.SessionScopeOrchestration, ScopeID: "root",
+		State: daemonstate.SessionStateRunning, UpdatedAt: updatedAt,
+	}
+	if err := store.UpsertSessionState(ctx, "project", rooted); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.writeSessionStopProjection("project", rooted.ID, rooted.IssueID); err != nil {
+		t.Fatalf("write rooted stop projection: %v", err)
+	}
+
+	got, found, err := store.GetSessionIntent(ctx, "project", daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, "root")
+	if err != nil || !found {
+		t.Fatalf("rooted intent=%+v found=%v err=%v", got, found, err)
+	}
+	if got.State != daemonstate.SessionStateStopped || got.Role != rooted.Role || got.ScopeKind != rooted.ScopeKind || got.ScopeID != rooted.ScopeID {
+		t.Fatalf("rooted stop projection changed ownership or missed desired stop: %+v", got)
+	}
+	if worker, found, err := store.GetSessionIntent(ctx, "project", daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, "root"); err != nil || found {
+		t.Fatalf("stop projection recreated legacy worker: %+v found=%v err=%v", worker, found, err)
+	}
+}
+
 func TestPersistObservedStoppedSessionPurgesManagedAgentIdentityProjection(t *testing.T) {
 	store := newRuntimeProjectionStore(t)
 	t.Cleanup(func() { _ = store.Close() })
