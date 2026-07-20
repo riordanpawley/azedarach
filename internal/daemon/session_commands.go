@@ -6245,7 +6245,8 @@ func codexAppServerSupervisedCommand(tool, stableDir, firstCommand, resumeComman
 		"[ \"$__az_codex_recovery_lock\" -ef \"$__az_codex_recovery_stale\" ]; then rm -f \"$__az_codex_recovery_lock\"; fi; " +
 		"rm -f \"$__az_codex_recovery_stale\"; fi;; esac; sleep 1; done; " +
 		"__az_codex_recovery_cleanup='if [ \"$__az_codex_recovery_lock\" -ef \"$__az_codex_recovery_owner\" ]; then rm -f \"$__az_codex_recovery_lock\"; fi; rm -f \"$__az_codex_recovery_owner\" \"$__az_codex_recovery_stale\"'; " +
-		"trap 'eval \"$__az_codex_recovery_cleanup\"' EXIT HUP INT TERM; " +
+		"trap 'eval \"$__az_codex_recovery_cleanup\"' EXIT; " +
+		"trap 'eval \"$__az_codex_recovery_cleanup\"; trap - EXIT HUP INT TERM; exit 1' HUP INT TERM; " +
 		"if ! " + healthDaemon + "; then " + restartDaemon + " || exit $?; fi; " +
 		"eval \"$__az_codex_recovery_cleanup\"; trap - EXIT HUP INT TERM"
 	steps := []string{
