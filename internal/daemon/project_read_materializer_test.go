@@ -2103,7 +2103,7 @@ func TestProjectReadMaterializerPublishesDeltaWhileRuntimeRefreshHydrationIsBloc
 func TestProjectReadMaterializerPublishesCommittedCanonicalBeforeRuntimeEnrichment(t *testing.T) {
 	client, _ := newTestIssueClient(t)
 	ctx := context.Background()
-	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "committed lifecycle", Type: domain.TypeTask, Status: domain.StatusInReview})
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "committed lifecycle", Type: domain.TypeTask, Status: domain.StatusOpen})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2121,7 +2121,7 @@ func TestProjectReadMaterializerPublishesCommittedCanonicalBeforeRuntimeEnrichme
 		t.Fatal(err)
 	}
 	before := materializer.snapshotMetadata().DeliveryCursor
-	if _, err := client.CloseWithRuntime(ctx, "project", issueID, domain.StatusDone); err != nil {
+	if err := client.Update(ctx, issueID, domain.StatusInProgress); err != nil {
 		t.Fatal(err)
 	}
 	batch, err := materializer.authority.List(ctx, protocol.DefaultProjectID, before, projectReadMaterializerBatchSize)
@@ -2133,8 +2133,8 @@ func TestProjectReadMaterializerPublishesCommittedCanonicalBeforeRuntimeEnrichme
 	<-hydrateEntered
 
 	tasks, metadata := materializer.snapshot()
-	if len(tasks) != 1 || tasks[0].Status != domain.StatusDone {
-		t.Fatalf("snapshot during blocked enrichment = %+v, want committed closed lifecycle", tasks)
+	if len(tasks) != 1 || tasks[0].Status != domain.StatusInProgress {
+		t.Fatalf("snapshot during blocked enrichment = %+v, want committed active lifecycle", tasks)
 	}
 	if metadata.DeliveryCursor != batch.DeliveryToCursor {
 		t.Fatalf("delivery cursor during blocked enrichment = %d, want %d", metadata.DeliveryCursor, batch.DeliveryToCursor)
