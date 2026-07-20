@@ -130,6 +130,35 @@ func TestProjectReadMaterializerTransientWatchErrorRetainsLastGoodWithoutLegacyE
 	<-done
 }
 
+func TestProjectReadSnapshotServesCanonicalStateDuringRuntimeRefreshFailure(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestIssueClient(t)
+	created, err := client.Create(ctx, issues.CreateTaskParams{Title: "canonical", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(client), nil)
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	attempt := materializer.beginAuthoritativeReadRefreshForIssues(authoritativeReadRefreshRuntime, []string{created})
+	materializer.finishAuthoritativeReadRefresh(attempt, context.DeadlineExceeded)
+	d := &Daemon{materializers: map[string]*projectReadMaterializer{"project": materializer}, materializersStarted: true}
+
+	tasks, metadata, err := d.projectReadSnapshot("project")
+	if err != nil {
+		t.Fatalf("canonical snapshot during runtime failure: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].ID.String() != created || !strings.Contains(metadata.Health, "stale: authoritative runtime refresh:") {
+		t.Fatalf("canonical snapshot = %+v metadata=%+v, want last-good task with stale runtime health", tasks, metadata)
+	}
+
+	tasks, metadata, err = d.convergedProjectReadSnapshotForInvariant(ctx, "project")
+	if err == nil || tasks != nil || !strings.Contains(metadata.Health, "stale: authoritative runtime refresh:") {
+		t.Fatalf("invariant snapshot = %+v metadata=%+v err=%v, want fail-closed runtime health", tasks, metadata, err)
+	}
+}
+
 func TestAuthoritativeReadResultCannotClearNewerMutationConvergenceFailure(t *testing.T) {
 	materializer := newProjectReadMaterializer("project", nil, nil)
 	readAttempt := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)

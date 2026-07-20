@@ -171,8 +171,8 @@ func newProjectReadMaterializer(projectID string, authority *ProjectionDeltaAuth
 		projectID: strings.TrimSpace(projectID), authority: authority, hydrate: hydrate,
 		canonical: map[string]domain.Task{}, tasks: map[string]domain.Task{}, worktrees: map[string]git.Worktree{},
 		runtimeRefreshEpoch: map[string]uint64{}, runtimePublishedEpoch: map[string]uint64{}, runtimeRefreshOwners: map[string]map[uint64]struct{}{},
-		baseHealth:                   "healthy",
-		authoritativeRefreshFailures: map[authoritativeReadRefreshComponent]string{},
+		baseHealth:                        "healthy",
+		authoritativeRefreshFailures:      map[authoritativeReadRefreshComponent]string{},
 		authoritativeRuntimeIssueSequence: map[string]uint64{}, authoritativeRuntimePending: map[string]uint64{}, authoritativeRuntimeFailures: map[string]string{},
 	}
 }
@@ -1505,7 +1505,12 @@ func (d *Daemon) projectReadSnapshot(projectID string) ([]domain.Task, protocol.
 		return tasks, metadata, nil
 	}
 	tasks, metadata, retryableFailure := materializer.snapshotWithFailureDisposition()
-	if !strings.HasPrefix(metadata.Health, "healthy") && !retryableFailure {
+	// Runtime enrichment is disposable and repaired independently from the
+	// canonical issue projection. A failed background runtime refresh must not
+	// make canonical task reads unavailable project-wide; callers still receive
+	// the stale health metadata, while invariant paths use the stricter
+	// convergedProjectReadSnapshotForInvariant boundary below.
+	if !strings.HasPrefix(metadata.Health, "healthy") && !retryableFailure && !materializer.canonicalReadHealthAvailable() {
 		return nil, metadata, newProjectReadUnavailableError("project read materialization unhealthy: %s", metadata.Health)
 	}
 	return tasks, metadata, nil
@@ -1615,7 +1620,14 @@ func (d *Daemon) convergedProjectReadSnapshotMode(ctx context.Context, projectID
 		return nil, metadata, newProjectReadUnavailableError("project read convergence unavailable for %s: %w", projectID, err)
 	}
 	materializer.finishAuthoritativeReadRefresh(attempt, nil)
-	return d.projectReadSnapshot(projectID)
+	tasks, metadata, err := d.projectReadSnapshot(projectID)
+	if err != nil {
+		return nil, metadata, err
+	}
+	if includeEmbeddedRuntime && !strings.HasPrefix(metadata.Health, "healthy") {
+		return nil, metadata, newProjectReadUnavailableError("project read materialization unhealthy for invariant evaluation: %s", metadata.Health)
+	}
+	return tasks, metadata, nil
 }
 
 // projectReadSnapshotCurrent synchronously converges the daemon-local durable
