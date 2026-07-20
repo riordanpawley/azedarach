@@ -648,6 +648,13 @@ func TestProjectOrchestrationRejectsDirectStartOfParentedTicket(t *testing.T) {
 	}
 }
 
+func TestBuildOrchestrationResultSummariesFailsClosedForMissingIssueInput(t *testing.T) {
+	_, err := buildOrchestrationResultSummaries(protocol.OrchestrationIntentResult{Requested: []string{"missing"}}, nil, domain.WorkflowRoleWorker, nil)
+	if err == nil || !strings.Contains(err.Error(), "result input unavailable") {
+		t.Fatalf("missing bounded result input error = %v", err)
+	}
+}
+
 func TestRootedOrchestrationReviewQueueStopsAtDirectChildren(t *testing.T) {
 	ctx := context.Background()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())

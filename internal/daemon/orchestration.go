@@ -1389,9 +1389,11 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	}
 	requestedTasks := make([]domain.Task, 0, len(result.Requested))
 	for _, issueID := range result.Requested {
-		if task, taskErr := issueClient.GetWithRuntime(ctx, projectID, issueID); taskErr == nil {
-			requestedTasks = append(requestedTasks, task)
+		task, taskErr := issueClient.GetWithRuntime(ctx, projectID, issueID)
+		if taskErr != nil {
+			return protocol.OrchestrationIntentResult{}, fmt.Errorf("load bounded worker result input for %s: %w", issueID, taskErr)
 		}
+		requestedTasks = append(requestedTasks, task)
 	}
 	requestedIntents := make([]issues.RequestedOrchestrationStart, 0, len(result.Requested))
 	requestDigest, err := orchestrationStartRequestDigest(request, result.Requested)
@@ -1420,7 +1422,10 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 				}
 				result.Pending = append(result.Pending, protocol.OrchestrationPending{IssueID: requested.IssueID, Phase: phase, Message: err.Error(), Retryable: true})
 			}
-			result.Results = buildOrchestrationResultSummaries(result, requestedTasks, domain.WorkflowRoleWorker, nil)
+			result.Results, err = buildOrchestrationResultSummaries(result, requestedTasks, domain.WorkflowRoleWorker, nil)
+			if err != nil {
+				return protocol.OrchestrationIntentResult{}, err
+			}
 			return result, nil
 		}
 		return protocol.OrchestrationIntentResult{}, completeRequestedOrchestrationStarts(ctx, issueClient, requestedIntents, err)
@@ -1556,11 +1561,14 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	if err := completeRequestedOrchestrationStarts(ctx, issueClient, requestedIntents, nil); err != nil {
 		return protocol.OrchestrationIntentResult{}, err
 	}
-	result.Results = buildOrchestrationResultSummaries(result, scopeTasks, domain.WorkflowRoleWorker, nil)
+	result.Results, err = buildOrchestrationResultSummaries(result, scopeTasks, domain.WorkflowRoleWorker, nil)
+	if err != nil {
+		return protocol.OrchestrationIntentResult{}, err
+	}
 	return result, nil
 }
 
-func buildOrchestrationResultSummaries(result protocol.OrchestrationIntentResult, tasks []domain.Task, defaultRole domain.WorkflowRole, revisions map[string]string) []protocol.WorkflowPhaseResult {
+func buildOrchestrationResultSummaries(result protocol.OrchestrationIntentResult, tasks []domain.Task, defaultRole domain.WorkflowRole, revisions map[string]string) ([]protocol.WorkflowPhaseResult, error) {
 	taskByID := make(map[string]domain.Task, len(tasks))
 	for _, task := range tasks {
 		taskByID[task.ID.String()] = task
@@ -1572,7 +1580,7 @@ func buildOrchestrationResultSummaries(result protocol.OrchestrationIntentResult
 	for _, issueID := range result.Requested {
 		task, ok := taskByID[issueID]
 		if !ok {
-			continue
+			return nil, fmt.Errorf("bounded %s result input unavailable for %s", defaultRole, issueID)
 		}
 		role := defaultRole
 		if defaultRole == domain.WorkflowRoleWorker && task.Type == domain.TypeEpic {
@@ -1595,11 +1603,12 @@ func buildOrchestrationResultSummaries(result protocol.OrchestrationIntentResult
 			revision = exact
 		}
 		summary, err := domain.BuildWorkflowResultSummary(domain.WorkflowResultInput{Role: role, IssueID: issueID, SourceRevision: revision, Status: status, Outcome: outcome, FailureSummary: failure})
-		if err == nil {
-			out = append(out, protocol.WorkflowPhaseResult{IssueID: issueID, Summary: summary})
+		if err != nil {
+			return nil, fmt.Errorf("build bounded %s result for %s: %w", role, issueID, err)
 		}
+		out = append(out, protocol.WorkflowPhaseResult{IssueID: issueID, Summary: summary})
 	}
-	return out
+	return out, nil
 }
 
 func pendingForIssue(values []protocol.OrchestrationPending, issueID string) bool {

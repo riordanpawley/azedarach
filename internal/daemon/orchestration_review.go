@@ -622,9 +622,11 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 	}
 	summaryTasks := make([]domain.Task, 0, len(requested))
 	for _, issueID := range requested {
-		if task, err := issueClient.GetWithRuntime(ctx, projectID, issueID); err == nil {
-			summaryTasks = append(summaryTasks, task)
+		task, summaryErr := issueClient.GetWithRuntime(ctx, projectID, issueID)
+		if summaryErr != nil {
+			return protocol.OrchestrationIntentResult{}, fmt.Errorf("load bounded review result input for %s: %w", issueID, summaryErr)
 		}
+		summaryTasks = append(summaryTasks, task)
 	}
 	for _, issueID := range requested {
 		if request.Scope.Kind == domain.OrchestrationScopeRooted {
@@ -811,7 +813,10 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 	if request.Kind == protocol.OrchestrationIntentReviewAccept {
 		role = domain.WorkflowRoleIntegrator
 	}
-	result.Results = buildOrchestrationResultSummaries(result, summaryTasks, role, revisions)
+	result.Results, err = buildOrchestrationResultSummaries(result, summaryTasks, role, revisions)
+	if err != nil {
+		return protocol.OrchestrationIntentResult{}, err
+	}
 	return result, nil
 }
 
