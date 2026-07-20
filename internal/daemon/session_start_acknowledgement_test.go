@@ -386,3 +386,30 @@ func TestInitialManagedAgentAcknowledgementClassifiesBootstrapFailuresDeterminis
 		})
 	}
 }
+
+func TestInitialManagedAgentAcknowledgementRetainsShellClassificationAfterCancelledFinalSampleFailures(t *testing.T) {
+	d, store, runner := newSessionStartAcknowledgementTestDaemon(t)
+	runner.sessions["az-1"] = true
+	runner.currentCommand = "zsh"
+	runner.listPanesErrAfter = 2
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.onListPanes = func(call int) {
+		if call == 2 {
+			cancel()
+		}
+	}
+	poll := make(chan time.Time, 1)
+	poll <- time.Now()
+	prompt := filepath.Join(t.TempDir(), "launch.prompt")
+	if err := os.WriteFile(prompt, []byte("worker prompt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := d.waitForInitialManagedAgentAcknowledgementWithPoll(ctx, store, "project", "az-1", "agent", "planned", sessionPromptHandoff{PromptPath: prompt}, poll)
+	var bootstrapErr *sessionStartBootstrapError
+	if !errors.As(err, &bootstrapErr) || bootstrapErr.Reason != sessionStartBootstrapShellFallback {
+		t.Fatalf("error = %#v, want retained shell fallback after cancelled final sample failures", err)
+	}
+	if runner.listPanesCalls != 3 {
+		t.Fatalf("list pane calls = %d, want initial sample plus two failed final samples", runner.listPanesCalls)
+	}
+}

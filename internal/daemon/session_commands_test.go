@@ -1954,6 +1954,7 @@ type sessionStartTmuxRunner struct {
 	captureOutput               string
 	currentCommand              string
 	listPanesCalls              int
+	listPanesErrAfter           int
 	onListPanes                 func(int)
 	onSendKeys                  func(string, string)
 	onRunWithInput              func(context.Context, string, []string) (string, error)
@@ -2389,6 +2390,9 @@ func (r *sessionStartTmuxRunner) Run(ctx context.Context, args ...string) (strin
 		r.listPanesCalls++
 		if r.onListPanes != nil {
 			r.onListPanes(r.listPanesCalls)
+		}
+		if r.listPanesErrAfter > 0 && r.listPanesCalls >= r.listPanesErrAfter {
+			return "", errors.New("injected list-panes failure")
 		}
 		lines := make([]string, 0, len(r.sessions))
 		for name := range r.sessions {
