@@ -17,9 +17,12 @@ my $stage;
 my $openat_syscall;
 my ($mkdirat_syscall, $renameat_syscall, $unlinkat_syscall);
 my ($stage_parent_handle, $stage_name);
+my $stage_attachment;
 my $destination_attachment;
 END {
-    remove_tree_at($stage_parent_handle, $stage_name) if $stage_parent_handle && defined($stage_name);
+    remove_tree_at($stage_parent_handle, $stage_name,
+        $stage_attachment->{device}, $stage_attachment->{inode}, undef, $stage_attachment)
+        if $stage_parent_handle && defined($stage_name) && $stage_attachment;
 }
 while (@ARGV) {
     my $flag = shift @ARGV;
@@ -96,7 +99,7 @@ $stage_parent_handle = $revision_handle;
 $stage = File::Spec->catdir($revision_dir, $stage_name);
 mkdirat_component($revision_handle, $stage_name, 0700) or die "create artifact staging directory: $!\n";
 my $stage_handle = openat_directory_nofollow($revision_handle, $stage_name) or die "open artifact staging directory: $!\n";
-register_destination_link($revision_handle, $stage_name, $stage_handle);
+$stage_attachment = register_destination_link($revision_handle, $stage_name, $stage_handle);
 destination_test_barrier('stage');
 die "forced validation artifact stage failure\n"
     if delete($ENV{AZEDARACH_VALIDATION_TEST_FAIL_AFTER_STAGE});
@@ -177,9 +180,11 @@ write_json_exclusive_at($stage_handle, 'manifest.json', $manifest, 0600);
 
 if (!renameat_component($revision_handle, $stage_name, $revision_handle, $request)) {
     my $rename_error = $!;
-    remove_tree_at($revision_handle, $stage_name);
+    remove_tree_at($revision_handle, $stage_name,
+        $stage_attachment->{device}, $stage_attachment->{inode}, $stage_handle, $stage_attachment);
     undef $stage;
     undef $stage_name;
+    undef $stage_attachment;
     my $final_handle = openat_directory_nofollow($revision_handle, $request);
     die "publish validation artifact directory: $rename_error\n" unless $final_handle;
     recover_existing($final_dir, $final_handle, $evidence, $evidence_path, $request, $revision, 0 + $arg{'exit-code'}, $publication_nonce);
@@ -187,6 +192,8 @@ if (!renameat_component($revision_handle, $stage_name, $revision_handle, $reques
 }
 undef $stage;
 undef $stage_name;
+unregister_destination_link($stage_attachment);
+undef $stage_attachment;
 my $final_handle = openat_directory_nofollow($revision_handle, $request) or die "open committed artifact directory: $!\n";
 print STDERR "[gate] committed validation artifacts=$final_dir\n";
 validate_existing_manifest($final_dir, $final_handle, $request, $revision, 0 + $arg{'exit-code'}, $publication_nonce);
@@ -474,22 +481,28 @@ sub destination_test_barrier {
 }
 
 sub remove_tree_at {
-    my ($parent, $name) = @_;
+    my ($parent, $name, $expected_device, $expected_inode, $directory, $attachment) = @_;
     return unless $parent && defined($name);
     validate_destination_attachment();
-    my $directory = openat_directory_nofollow($parent, $name);
+    $directory ||= openat_directory_nofollow($parent, $name);
     unless ($directory) {
         validate_destination_attachment();
         unlinkat_component($parent, $name, 0);
         return;
     }
-    my $attachment = register_destination_link($parent, $name, $directory);
+    my @directory_stat = stat($directory);
+    die "validation artifact deletion identity changed at $name\n"
+        if defined($expected_device) && (!@directory_stat
+            || $directory_stat[0] != $expected_device || $directory_stat[1] != $expected_inode);
+    $attachment ||= register_destination_link($parent, $name, $directory);
     destination_test_barrier('remove-tree');
     validate_destination_attachment();
     opendir(my $entries, fd_directory_path($directory)) or die "enumerate artifact directory: $!\n";
     for my $entry (grep { $_ ne '.' && $_ ne '..' } readdir($entries)) {
-        if (openat_directory_nofollow($directory, $entry)) {
-            remove_tree_at($directory, $entry);
+        if (my $child = openat_directory_nofollow($directory, $entry)) {
+            my @child_stat = stat($child);
+            die "inspect recursive artifact directory $entry: $!\n" unless @child_stat;
+            remove_tree_at($directory, $entry, $child_stat[0], $child_stat[1], $child);
         } else {
             validate_destination_attachment();
             unlinkat_component($directory, $entry, 0) or die "remove artifact file $entry: $!\n";
@@ -1042,6 +1055,9 @@ sub prune_unreferenced {
         validate_destination_attachment();
         validate_directory_identity($orphans[$index]{parent}, $orphans[$index]{name},
             $orphans[$index]{device}, $orphans[$index]{inode});
-        remove_tree_at($orphans[$index]{parent}, $orphans[$index]{name});
+        my $selected = openat_directory_nofollow($orphans[$index]{parent}, $orphans[$index]{name});
+        die "validation artifact prune target detached at $orphans[$index]{name}\n" unless $selected;
+        remove_tree_at($orphans[$index]{parent}, $orphans[$index]{name},
+            $orphans[$index]{device}, $orphans[$index]{inode}, $selected);
     }
 }
