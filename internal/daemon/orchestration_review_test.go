@@ -377,7 +377,7 @@ func TestProjectStartIntentRoutesPrematureWorkWhileReviewRemainsQueued(t *testin
 }
 
 func TestReviewIntentValidationRejectsNonActionableOrConflictingOutcomes(t *testing.T) {
-	noBroaderInvalidation := false
+	validPass := validReturnedReviewPass()
 	tests := []struct {
 		name    string
 		request protocol.OrchestrationIntentRequest
@@ -386,9 +386,28 @@ func TestReviewIntentValidationRejectsNonActionableOrConflictingOutcomes(t *test
 		{name: "return without findings", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn}, want: "requires at least one"},
 		{name: "empty finding", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Severity: "high"}}}, want: "requires finding text"},
 		{name: "missing broader invalidation", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: &protocol.OrchestrationReviewPass{AffectedInvariants: []string{"task.publication_queue"}}}, want: "explicit broader-invalidation"},
-		{name: "empty affected invariants", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: &protocol.OrchestrationReviewPass{BroaderInvalidation: &noBroaderInvalidation}}, want: "at least one canonical invariant"},
-		{name: "unknown affected invariant", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: &protocol.OrchestrationReviewPass{AffectedInvariants: []string{"unknown.invariant"}, BroaderInvalidation: &noBroaderInvalidation}}, want: "unknown invariant"},
-		{name: "mixed affected invariants", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: &protocol.OrchestrationReviewPass{AffectedInvariants: []string{"task.publication_queue", "unknown.invariant"}, BroaderInvalidation: &noBroaderInvalidation}}, want: "unknown invariant"},
+		{name: "empty affected invariants", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: func() *protocol.OrchestrationReviewPass {
+			pass := *validPass
+			pass.AffectedInvariants = nil
+			return &pass
+		}()}, want: "at least one canonical"},
+		{name: "unknown affected invariant", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: func() *protocol.OrchestrationReviewPass {
+			pass := *validPass
+			pass.AffectedInvariants = []string{"unknown.invariant"}
+			return &pass
+		}()}, want: "not canonical"},
+		{name: "mixed affected invariants", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: func() *protocol.OrchestrationReviewPass {
+			pass := *validPass
+			pass.AffectedInvariants = []string{"task.publication_queue", "unknown.invariant"}
+			return &pass
+		}()}, want: "not canonical"},
+		{name: "empty angle", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: func() *protocol.OrchestrationReviewPass { pass := *validPass; pass.Angle = ""; return &pass }()}, want: "angle"},
+		{name: "omitted reused layers", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: func() *protocol.OrchestrationReviewPass { pass := *validPass; pass.ReusedLayers = nil; return &pass }()}, want: "reused layers"},
+		{name: "empty matrix", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewReturn, Findings: []protocol.OrchestrationReviewFinding{{Finding: "repair"}}, ReviewPass: func() *protocol.OrchestrationReviewPass {
+			pass := *validPass
+			pass.Matrix = domain.WorkerEvidenceReviewMatrix{}
+			return &pass
+		}()}, want: "matrix"},
 		{name: "accept with findings", request: protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewAccept, Findings: []protocol.OrchestrationReviewFinding{{Finding: "conflict"}}}, want: "cannot include findings"},
 	}
 	for _, tt := range tests {

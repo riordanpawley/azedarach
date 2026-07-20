@@ -95,6 +95,38 @@ func TestProtocolV61PreservesCombinedOrchestrationViewProjectionDecisionLearning
 	}
 }
 
+func TestValidateReturnedReviewPassRejectsIncompleteProtocolPayloads(t *testing.T) {
+	broaderInvalidation := false
+	valid := OrchestrationReviewPass{
+		Verdict: "returned", Angle: "authority review", ReusedLayers: []string{},
+		Matrix:             domain.WorkerEvidenceReviewMatrix{Type: "stateful", CoveredCells: []string{"authorization"}},
+		AffectedInvariants: []string{"orchestration.project_review"}, BroaderInvalidation: &broaderInvalidation,
+	}
+	if err := ValidateReturnedReviewPass(valid); err != nil {
+		t.Fatalf("valid review pass: %v", err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*OrchestrationReviewPass)
+	}{
+		{name: "empty verdict", mutate: func(pass *OrchestrationReviewPass) { pass.Verdict = "" }},
+		{name: "empty angle", mutate: func(pass *OrchestrationReviewPass) { pass.Angle = "" }},
+		{name: "omitted reused layers", mutate: func(pass *OrchestrationReviewPass) { pass.ReusedLayers = nil }},
+		{name: "empty matrix type", mutate: func(pass *OrchestrationReviewPass) { pass.Matrix.Type = "" }},
+		{name: "empty matrix coverage", mutate: func(pass *OrchestrationReviewPass) { pass.Matrix.CoveredCells = nil }},
+		{name: "missing judgment", mutate: func(pass *OrchestrationReviewPass) { pass.BroaderInvalidation = nil }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			invalid := valid
+			tt.mutate(&invalid)
+			if err := ValidateReturnedReviewPass(invalid); err == nil {
+				t.Fatal("incomplete review pass succeeded")
+			}
+		})
+	}
+}
+
 func TestOrchestrationReviewPassPreservesBroaderInvalidationPresence(t *testing.T) {
 	broaderInvalidation := false
 	encoded, err := json.Marshal(OrchestrationReviewPass{BroaderInvalidation: &broaderInvalidation})

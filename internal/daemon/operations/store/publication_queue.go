@@ -416,5 +416,6 @@ func publicationIntentCompatible(left, right domain.PublicationOperation) bool {
 		left.TargetBranch == right.TargetBranch && left.SourceRevision == right.SourceRevision &&
 		left.BaseRevision == right.BaseRevision && left.PolicyVersion == right.PolicyVersion &&
 		left.EnvironmentFingerprint == right.EnvironmentFingerprint && left.ValidationCommand == right.ValidationCommand && left.EvidenceDigest == right.EvidenceDigest &&
-		strings.EqualFold(left.ActorID, right.ActorID) && left.ReviewerKind == right.ReviewerKind && left.ReviewEpochEventID == right.ReviewEpochEventID && left.PatchEvidenceID == right.PatchEvidenceID
+		strings.EqualFold(left.ActorID, right.ActorID) && left.ReviewerKind == right.ReviewerKind && left.ReviewEpochEventID == right.ReviewEpochEventID &&
+		left.AcceptedReviewEventID == right.AcceptedReviewEventID && left.PatchEvidenceID == right.PatchEvidenceID
 }

@@ -224,23 +224,9 @@ func OrchestrateReviewCommand(deps *Dependencies, opts OrchestrateReviewOptions)
 	return nil
 }
 
-func containsNonEmptyString(values []string) bool {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return true
-		}
-	}
-	return false
-}
-
 func validateReturnedReviewPass(reviewPass protocol.OrchestrationReviewPass) error {
-	if strings.TrimSpace(reviewPass.Verdict) != "returned" || strings.TrimSpace(reviewPass.Angle) == "" || strings.TrimSpace(reviewPass.Matrix.Type) == "" || len(reviewPass.Matrix.CoveredCells)+len(reviewPass.Matrix.SkippedCells) == 0 || reviewPass.ReusedLayers == nil || !containsNonEmptyString(reviewPass.AffectedInvariants) || reviewPass.BroaderInvalidation == nil {
-		return fmt.Errorf("--review-pass must record returned verdict, angle, reused layers, affected invariants, explicit broader_invalidation, and covered or deliberately skipped matrix cells")
-	}
-	for _, invariant := range reviewPass.AffectedInvariants {
-		if value := strings.TrimSpace(invariant); value == "" || !protocol.KnownDaemonInvariant(value) {
-			return fmt.Errorf("--review-pass affected invariant %q is not canonical", invariant)
-		}
+	if err := protocol.ValidateReturnedReviewPass(reviewPass); err != nil {
+		return fmt.Errorf("--review-pass: %w", err)
 	}
 	return nil
 }

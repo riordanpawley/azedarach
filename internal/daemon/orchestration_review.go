@@ -75,8 +75,8 @@ func validateOrchestrationReviewIntent(request protocol.OrchestrationIntentReque
 		if request.ReviewPass == nil || request.ReviewPass.BroaderInvalidation == nil {
 			return fmt.Errorf("review-return intent requires an explicit broader-invalidation judgment")
 		}
-		if err := validateReviewAffectedInvariants(request.ReviewPass.AffectedInvariants); err != nil {
-			return fmt.Errorf("review-return intent affected invariants: %w", err)
+		if err := protocol.ValidateReturnedReviewPass(*request.ReviewPass); err != nil {
+			return fmt.Errorf("review-return intent: %w", err)
 		}
 		return nil
 	default:

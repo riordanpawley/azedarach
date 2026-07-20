@@ -1,6 +1,8 @@
 package protocol
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -305,6 +307,30 @@ type OrchestrationReviewPass struct {
 	ExtraPassReason     string                            `json:"extra_pass_reason,omitempty"`
 	AffectedInvariants  []string                          `json:"affected_invariants,omitempty"`
 	BroaderInvalidation *bool                             `json:"broader_invalidation"`
+}
+
+// ValidateReturnedReviewPass enforces the complete semantic checkpoint shape at
+// the shared protocol boundary so every client receives the same admission
+// contract. An explicitly empty reused_layers list is valid; omission is not.
+func ValidateReturnedReviewPass(reviewPass OrchestrationReviewPass) error {
+	if strings.TrimSpace(reviewPass.Verdict) != "returned" ||
+		strings.TrimSpace(reviewPass.Angle) == "" ||
+		strings.TrimSpace(reviewPass.Matrix.Type) == "" ||
+		len(reviewPass.Matrix.CoveredCells)+len(reviewPass.Matrix.SkippedCells) == 0 ||
+		reviewPass.ReusedLayers == nil ||
+		reviewPass.BroaderInvalidation == nil {
+		return fmt.Errorf("review pass must record returned verdict, angle, reused layers, explicit broader_invalidation, and covered or deliberately skipped matrix cells")
+	}
+	if len(reviewPass.AffectedInvariants) == 0 {
+		return fmt.Errorf("review pass requires at least one canonical affected invariant")
+	}
+	for _, invariant := range reviewPass.AffectedInvariants {
+		value := strings.TrimSpace(invariant)
+		if value == "" || !KnownDaemonInvariant(value) {
+			return fmt.Errorf("review pass affected invariant %q is not canonical", invariant)
+		}
+	}
+	return nil
 }
 
 type OrchestrationIntentResult struct {
