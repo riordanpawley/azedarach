@@ -17,6 +17,7 @@ my $stage;
 my $openat_syscall;
 my ($mkdirat_syscall, $renameat_syscall, $unlinkat_syscall);
 my ($stage_parent_handle, $stage_name);
+my $destination_attachment;
 END {
     remove_tree_at($stage_parent_handle, $stage_name) if $stage_parent_handle && defined($stage_name);
 }
@@ -39,7 +40,8 @@ my $project_root = canonical_directory($arg{'project-root'} // die "--project-ro
 $openat_syscall = require_openat_capability(native_platform());
 initialize_at_syscalls(native_platform());
 verify_openat_capability($openat_syscall, native_platform());
-my (undef, $project_root_handle) = canonical_directory_handle($project_root);
+my ($project_root_handle, $project_attachment) = attached_directory_handle($project_root);
+$destination_attachment = $project_attachment;
 if ($arg{'prune-only'}) {
     my ($artifact_root, $artifact_handle) = safe_directory_chain_at($project_root, $project_root_handle, qw(.azedarach validation-artifacts));
     my ($failure_root, $failure_handle) = safe_directory_chain_at($artifact_root, $artifact_handle, 'failures');
@@ -52,6 +54,7 @@ for my $required (qw(candidate-root control-root evidence gate-output request re
 }
 my ($artifact_root, $artifact_root_handle) = safe_directory_chain_at($project_root, $project_root_handle, qw(.azedarach validation-artifacts));
 my ($failure_root, $failure_root_handle) = safe_directory_chain_at($artifact_root, $artifact_root_handle, 'failures');
+destination_test_barrier('artifact-root');
 prune_unreferenced($failure_root, $failure_root_handle);
 my ($candidate_root, $candidate_root_handle) = canonical_directory_handle($arg{'candidate-root'});
 if (my $ready = delete($ENV{AZEDARACH_VALIDATION_TEST_CANDIDATE_ROOTFD_READY_FILE})) {
@@ -80,6 +83,7 @@ $evidence->{fatal_phase} = $arg{'fatal-phase'} if ($arg{'fatal-phase'} // '') ne
 $evidence->{fatal_detail} = $arg{'fatal-detail'} if ($arg{'fatal-detail'} // '') ne '';
 
 my ($revision_dir, $revision_handle) = safe_directory_chain_at($failure_root, $failure_root_handle, $revision);
+destination_test_barrier('revision');
 my $final_dir = File::Spec->catdir($revision_dir, $request);
 if (my $final_handle = openat_directory_nofollow($revision_handle, $request)) {
     recover_existing($final_dir, $final_handle, $evidence, $evidence_path, $request, $revision, 0 + $arg{'exit-code'}, $publication_nonce);
@@ -92,6 +96,8 @@ $stage_parent_handle = $revision_handle;
 $stage = File::Spec->catdir($revision_dir, $stage_name);
 mkdirat_component($revision_handle, $stage_name, 0700) or die "create artifact staging directory: $!\n";
 my $stage_handle = openat_directory_nofollow($revision_handle, $stage_name) or die "open artifact staging directory: $!\n";
+register_destination_link($revision_handle, $stage_name, $stage_handle);
+destination_test_barrier('stage');
 my ($reports_root, $reports_handle) = safe_directory_chain_at($stage, $stage_handle, 'reports');
 
 my @candidate_report_paths = ref($evidence->{report_paths}) eq 'ARRAY'
@@ -350,18 +356,21 @@ sub initialize_at_syscalls {
 sub mkdirat_component {
     my ($parent, $name, $mode) = @_;
     safe_at_name($name);
+    validate_destination_attachment();
     return syscall($mkdirat_syscall, fileno($parent), $name, $mode) == 0;
 }
 
 sub renameat_component {
     my ($from_parent, $from, $to_parent, $to) = @_;
     safe_at_name($from); safe_at_name($to);
+    validate_destination_attachment();
     return syscall($renameat_syscall, fileno($from_parent), $from, fileno($to_parent), $to) == 0;
 }
 
 sub unlinkat_component {
     my ($parent, $name, $flags) = @_;
     safe_at_name($name);
+    validate_destination_attachment();
     return syscall($unlinkat_syscall, fileno($parent), $name, $flags || 0) == 0;
 }
 
@@ -390,15 +399,65 @@ sub safe_directory_chain_at {
             }
             $next = openat_directory_nofollow($handle, $component) or die "open artifact directory $path/$component: $!\n";
         }
+        register_destination_link($handle, $component, $next);
         $path = File::Spec->catdir($path, $component);
         $handle = $next;
     }
     return ($path, $handle);
 }
 
+sub attached_directory_handle {
+    my ($path) = @_;
+    die "attached directory path must be absolute\n" unless File::Spec->file_name_is_absolute($path);
+    sysopen(my $handle, File::Spec->rootdir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        or die "open filesystem root for destination attachment: $!\n";
+    my $attachment = {links => []};
+    for my $component (grep { $_ ne '' && $_ ne '.' } File::Spec->splitdir($path)) {
+        safe_at_name($component);
+        my $next = openat_directory_nofollow($handle, $component)
+            or die "open attached destination component $component: $!\n";
+        my @stat = stat($next);
+        push @{$attachment->{links}}, {parent => $handle, name => $component, device => $stat[0], inode => $stat[1]};
+        $handle = $next;
+    }
+    return ($handle, $attachment);
+}
+
+sub register_destination_link {
+    my ($parent, $name, $child) = @_;
+    return unless $destination_attachment;
+    my @stat = stat($child);
+    die "inspect destination attachment $name: $!\n" unless @stat;
+    push @{$destination_attachment->{links}}, {parent => $parent, name => $name, device => $stat[0], inode => $stat[1]};
+}
+
+sub validate_destination_attachment {
+    return unless $destination_attachment;
+    for my $link (@{$destination_attachment->{links}}) {
+        my $current = openat_directory_nofollow($link->{parent}, $link->{name});
+        die "validation artifact destination detached from trusted project root at $link->{name}\n" unless $current;
+        my @stat = stat($current);
+        die "validation artifact destination attachment changed at $link->{name}\n"
+            unless @stat && $stat[0] == $link->{device} && $stat[1] == $link->{inode};
+    }
+}
+
+sub destination_test_barrier {
+    my ($phase) = @_;
+    return unless (($ENV{AZEDARACH_VALIDATION_TEST_DESTINATION_PHASE} || '') eq $phase);
+    my $ready = delete($ENV{AZEDARACH_VALIDATION_TEST_DESTINATION_READY_FILE}) || '';
+    my $release = delete($ENV{AZEDARACH_VALIDATION_TEST_DESTINATION_RELEASE_FILE}) || '';
+    return if $ready eq '' || $release eq '';
+    sysopen(my $ready_fh, $ready, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
+        or die "create destination attachment test marker: $!\n";
+    close $ready_fh or die "close destination attachment test marker: $!\n";
+    sleep 0.01 until -e $release;
+}
+
 sub remove_tree_at {
     my ($parent, $name) = @_;
     return unless $parent && defined($name);
+    validate_destination_attachment();
     my $directory = openat_directory_nofollow($parent, $name);
     unless ($directory) {
         unlinkat_component($parent, $name, 0);
@@ -432,7 +491,9 @@ sub fd_directory_path {
 sub directory_entry_exists {
     my ($directory, $name) = @_;
     safe_at_name($name);
-    return scalar lstat(File::Spec->catfile(fd_directory_path($directory), $name));
+    my $entry = openat_handle($directory, $name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    return 1 if $entry;
+    return !$!{ENOENT};
 }
 
 sub verify_openat_capability {
@@ -550,6 +611,7 @@ sub read_json_at {
 sub create_at {
     my ($directory, $name, $mode) = @_;
     safe_at_name($name);
+    validate_destination_attachment();
     my $fd = syscall($openat_syscall, fileno($directory), $name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, $mode);
     die "create artifact $name exclusively: $!\n" if $fd < 0;
     open(my $handle, '>&=', $fd) or die "adopt artifact output descriptor for $name: $!\n";

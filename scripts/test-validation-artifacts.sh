@@ -262,6 +262,62 @@ fi
 grep -q 'existing artifact destination is unsafe' "$fixture/destination-symlink.stderr"
 test -z "$(find "$unsafe_target" -mindepth 1 -print -quit)"
 
+# A destination directory that is renamed out of the trusted project after its
+# handle is acquired must never receive later writes or END-block cleanup. Test
+# every retained destination layer used by publication.
+for destination_phase in artifact-root revision stage; do
+  detach_project="$fixture/detach-$destination_phase-project"
+  detach_control="$fixture/detach-$destination_phase-control"
+  detach_outside="$fixture/detach-$destination_phase-outside"
+  detach_request="dov-detach-$destination_phase"
+  detach_evidence="$detach_control/evidence.json"
+  detach_ready="$fixture/detach-$destination_phase-ready"
+  detach_release="$fixture/detach-$destination_phase-release"
+  mkdir -p "$detach_project" "$detach_control" "$detach_outside"
+  cp "$control_root/gate-output.log" "$detach_control/gate-output.log"
+  cat >"$detach_evidence" <<EOF
+{"request_id":"$detach_request","source_revision":"$revision","publication_nonce":"detach-$destination_phase-nonce","issue_id":"dov","report_path":"$report_dir/report.json"}
+EOF
+
+  AZEDARACH_VALIDATION_TEST_DESTINATION_PHASE="$destination_phase" \
+  AZEDARACH_VALIDATION_TEST_DESTINATION_READY_FILE="$detach_ready" \
+  AZEDARACH_VALIDATION_TEST_DESTINATION_RELEASE_FILE="$detach_release" \
+    "$publisher" --project-root "$detach_project" --candidate-root "$scratch_root" \
+    --control-root "$detach_control" --evidence "$detach_evidence" \
+    --gate-output "$detach_control/gate-output.log" --request "$detach_request" \
+    --revision "$revision" --exit-code 1 >"$fixture/detach-$destination_phase.stdout" \
+    2>"$fixture/detach-$destination_phase.stderr" &
+  detach_pid=$!
+  while [[ ! -e "$detach_ready" ]]; do kill -0 "$detach_pid"; done
+
+  case "$destination_phase" in
+    artifact-root)
+      detach_path="$detach_project/.azedarach/validation-artifacts"
+      replacement_path="$detach_project/.azedarach/validation-artifacts"
+      ;;
+    revision)
+      detach_path="$detach_project/.azedarach/validation-artifacts/failures/$revision"
+      replacement_path="$detach_path"
+      ;;
+    stage)
+      detach_path="$(find "$detach_project/.azedarach/validation-artifacts/failures/$revision" -maxdepth 1 -type d -name ".$detach_request.tmp.*" -print -quit)"
+      replacement_path="$detach_path"
+      ;;
+  esac
+  detached_tree="$detach_outside/relocated"
+  mv "$detach_path" "$detached_tree"
+  mkdir -p "$replacement_path"
+  printf 'outside sentinel\n' >"$detached_tree/sentinel"
+  : >"$detach_release"
+  if wait "$detach_pid"; then
+    echo "detached $destination_phase destination unexpectedly accepted" >&2
+    exit 1
+  fi
+  grep -Eq 'destination (detached from trusted project root|attachment changed)' "$fixture/detach-$destination_phase.stderr"
+  test -f "$detached_tree/sentinel"
+  test -z "$(find "$detached_tree" -type f ! -name sentinel -print -quit)"
+done
+
 # Existing destinations are checksum-validated on retry.
 printf 'tampered\n' >>"$artifact_dir/reports/001/stderr.txt"
 if $publisher --project-root "$project_root" --candidate-root "$scratch_root" \
