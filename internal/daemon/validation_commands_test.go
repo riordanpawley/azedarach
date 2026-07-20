@@ -695,6 +695,12 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 		update.ReusedEvidenceID = push.AuthoritativeRequestID
 	})
 	require.NoError(t, err)
+	foreignRuntime := newOperationRuntime(operationRuntimeConfig{repoDir: t.TempDir()})
+	t.Cleanup(func() { _ = foreignRuntime.Close() })
+	d.operationRuntime = foreignRuntime
+	t.Cleanup(d.closePublicationStores)
+	_, foreignValidationErr := foreignRuntime.store.ValidationRequest(ctx, projectID, push.RequestID)
+	require.Error(t, foreignValidationErr, "the daemon-canonical store must not contain routed project validation evidence")
 	_, _, err = d.taskClosePublicationProvenance(ctx, projectID, issueID, integration, "portable-v1", "npm run verify-publication", "node-consumer")
 	require.Error(t, err, "an unbound close must not adopt another in-flight publication")
 	for name, binding := range map[string]taskClosePublicationBinding{
@@ -762,6 +768,7 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 	assert.Equal(t, domain.ValidationExecutionReused, resolvedValidation.Execution)
 	_, _, fallbackErr := d.taskClosePublicationProvenance(ctx, "unrouted-project", issueID, integration, "portable-v1", "npm run verify-publication", "node-consumer")
 	require.Error(t, fallbackErr, "unrouted project fallback must not authorize publication provenance")
+	d.operationRuntime = runtime
 	// Model the durable state after integration receipt succeeds but publication
 	// identity/evidence persistence fails. Concurrent retries must append one
 	// corrected binding and one merge-result evidence record without reapplying.
