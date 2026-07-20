@@ -434,6 +434,9 @@ func validateWorkerEvidenceReviewDetails(review WorkerEvidenceReview, fields map
 	if cleanPass > cleanPassTarget && cleanPassTarget > 0 {
 		invalid = append(invalid, "review.clean_pass cannot exceed review.clean_pass_target")
 	}
+	if strings.EqualFold(strings.TrimSpace(review.Status), "clean") && cleanPassTarget > 0 && cleanPass < cleanPassTarget {
+		invalid = append(invalid, "review.clean_pass must meet review.clean_pass_target for a clean review")
+	}
 	if cleanPassTarget > 1 && strings.TrimSpace(review.ExtraPassReason) == "" {
 		missing = appendMissing(missing, "review.extra_pass_reason")
 	}

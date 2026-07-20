@@ -47,7 +47,7 @@ func TestReviewAcceptRetainsLeaseAcrossCommittedPublicationContinuationFailures(
 			if err := os.MkdirAll(filepath.Join(repo, ".azedarach"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(repo, ".azedarach", "config.json"), []byte(`{"gate":{"command":"go test ./consumer/...","environmentFingerprint":"consumer-go"}}`), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(repo, ".azedarach", "config.json"), []byte(`{"gate":{"command":"go test ./consumer/...","environmentFingerprint":"consumer-go"},"publicationEvidence":{"policyVersion":"consumer-v1"}}`), 0o644); err != nil {
 				t.Fatal(err)
 			}
 
@@ -69,6 +69,16 @@ func TestReviewAcceptRetainsLeaseAcrossCommittedPublicationContinuationFailures(
 			if _, err := issueClient.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t)}); err != nil {
 				t.Fatal(err)
 			}
+			worktreeManager := gitservice.NewWorktreeManager(gitservice.NewExecRunner(repo), repo, slog.Default())
+			reviewedWorktree, err := worktreeManager.Create(ctx, issueID, "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(reviewedWorktree.Path, "change.txt"), []byte("reviewed patch\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			runDaemonTestGit(t, reviewedWorktree.Path, "add", "change.txt")
+			runDaemonTestGit(t, reviewedWorktree.Path, "commit", "-q", "-m", "reviewed patch")
 
 			gitClient := gitservice.NewClient(gitservice.NewExecRunner(repo), slog.Default())
 			d := newOrchestrationReviewTestDaemon(repo, issueClient)
@@ -77,10 +87,16 @@ func TestReviewAcceptRetainsLeaseAcrossCommittedPublicationContinuationFailures(
 			}
 			d.cfg.BaseBranch = "main"
 			d.issueClientsByProject = map[string]*issues.Client{projectID: issueClient}
+			runtimeStateStore := daemonstate.NewRuntimeStateStore(repo, slog.Default())
+			t.Cleanup(func() { _ = runtimeStateStore.Close() })
+			d.runtimeStoresByProject = map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStateStore}
 			d.operationRuntime = runtime
 			d.git = gitClient
-			d.worktreeAdapter = &worktreeServiceAdapter{manager: gitservice.NewWorktreeManager(gitservice.NewExecRunner(repo), repo, slog.Default())}
-			sourceOID := runDaemonTestGitOutput(t, repo, "rev-parse", "HEAD")
+			d.worktreeAdapter = &worktreeServiceAdapter{manager: worktreeManager, runtimeStateStore: runtimeStateStore}
+			if err := runtimeStateStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{ProjectID: projectID, IssueID: issueID, Path: reviewedWorktree.Path, Branch: reviewedWorktree.Branch}); err != nil {
+				t.Fatalf("seed reviewed worktree projection: %v", err)
+			}
+			sourceOID := runDaemonTestGitOutput(t, reviewedWorktree.Path, "rev-parse", "HEAD")
 			d.reviewAcceptedSourceOID = func(context.Context, string, string) (string, error) { return sourceOID, nil }
 			if resolved := d.resolveRepoDirForProjectExact(projectID); resolved != repo {
 				t.Fatalf("project %q resolved repo %q, want %q", projectID, resolved, repo)
@@ -358,7 +374,15 @@ func TestPublicationRecoversCrashAfterExactApplyBeforeTaskReceipt(t *testing.T) 
 	}
 	evidence, err := restartedRuntime.store.PublicationEvidenceSnapshot(ctx, projectID, issueID)
 	requireNoError(t, err)
-	if len(evidence.Evidence) != 1 || evidence.Evidence[0].Layer != domain.PublicationEvidenceMergeResult || evidence.Evidence[0].BaseRevision != original.BaseRevision || evidence.Evidence[0].SourceRevision != original.SourceRevision || evidence.Evidence[0].ResultRevision != original.CandidateRevision {
+	var mergeEvidence domain.PublicationEvidence
+	found := false
+	for _, candidate := range evidence.Evidence {
+		if candidate.Layer == domain.PublicationEvidenceMergeResult {
+			mergeEvidence, found = candidate, true
+			break
+		}
+	}
+	if !found || mergeEvidence.BaseRevision != original.BaseRevision || mergeEvidence.SourceRevision != original.SourceRevision || mergeEvidence.ResultRevision != original.CandidateRevision {
 		t.Fatalf("recovered merge-result evidence = %+v, want exact publication identity", evidence.Evidence)
 	}
 }
@@ -675,7 +699,15 @@ func TestPublicationQueueFailureIsTypedAndRetainsArtifact(t *testing.T) {
 	d.publicationClose = func(context.Context, domain.PublicationOperation) error {
 		return errors.New("candidate validation failed: npm test: unit suite failed")
 	}
-	operation := daemonTestPublicationOperation(runtime.canonicalProject, "publication-failed", "issue", "intent", "source", time.Now().UTC())
+	issueClient := issues.NewClient(repo, nil)
+	t.Cleanup(func() { _ = issueClient.CloseDB() })
+	issueID, err := issueClient.Create(context.Background(), issues.CreateTaskParams{Title: "publish", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation := daemonTestPublicationOperation(runtime.canonicalProject, "publication-failed", issueID, "intent", "source", time.Now().UTC())
+	request := protocol.OrchestrationIntentRequest{Kind: protocol.OrchestrationIntentReviewAccept, IntentKey: operation.IntentKey, ActorID: operation.ActorID, IssueIDs: []string{issueID}}
+	operation.RequestFingerprint = reviewRequestFingerprint(request)
 	if _, _, err := runtime.store.EnqueuePublication(context.Background(), operation, "candidate-failed"); err != nil {
 		t.Fatal(err)
 	}
@@ -691,6 +723,9 @@ func TestPublicationQueueFailureIsTypedAndRetainsArtifact(t *testing.T) {
 	}
 	if _, err := os.Stat(failed.FailureArtifact); err != nil {
 		t.Fatalf("retained failure artifact: %v", err)
+	}
+	if outcome, err := (daemonOrchestrationAuthority{daemon: d}).reviewIntentTerminalOutcome(context.Background(), operation.ProjectID, issueID, request); err != nil || outcome != "superseded" {
+		t.Fatalf("terminal review outcome=(%q,%v), want superseded", outcome, err)
 	}
 }
 
@@ -1347,6 +1382,36 @@ func TestPublicationValidationWaitReconcilesExpiredPriorExecutor(t *testing.T) {
 	}
 }
 
+func TestPublicationValidationProfileReusesCompatibleExactReviewEvidence(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	t.Cleanup(func() { _ = runtime.Close() })
+	now := time.Now().UTC()
+	request, err := runtime.store.AcquireValidation(ctx, domain.ValidationAcquire{
+		RequestID: "review-exact", LeaseToken: "review-token", ProjectID: runtime.canonicalProject, IssueID: "issue",
+		IssuePriority: domain.P1, IssuePriorityResolved: true, Class: domain.ValidationClassAggregate,
+		Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence,
+		IsolationMode: "synthetic-worktree", EnvironmentFingerprint: "portable-env", Override: domain.ValidationOverrideNone,
+		Profile: "portable-review", Command: "npm run verify", SourceRevision: "candidate", ReviewerID: "reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: 42, PublicationOperationID: "publication", AcceptedReviewEventID: 43, AcceptedPublicationOperationID: "patch", TTL: time.Minute,
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := domain.ValidationEvidence{Held: true, Present: true, RequestID: request.RequestID, Class: request.Class, Scope: request.Scope, Purpose: request.Purpose, Execution: request.Execution, Profile: request.Profile, SourceRevision: request.SourceRevision}
+	if _, err := runtime.store.FinishValidation(ctx, request.RequestID, "review-token", domain.ValidationRequestCompleted, "clean", evidence, now.Add(time.Second), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{operationRuntime: runtime}
+	operation := domain.PublicationOperation{OperationID: "publication", ProjectID: runtime.canonicalProject, IssueID: "issue", ActorID: "reviewer", ReviewerKind: "orchestrator", ReviewEpochEventID: 42, AcceptedReviewEventID: 43, PatchEvidenceID: "patch", PolicyVersion: "v1", ValidationCommand: "npm run verify", EnvironmentFingerprint: "portable-env"}
+	if got := d.publicationValidationProfile(ctx, operation, "candidate"); got != "portable-review" {
+		t.Fatalf("compatible profile = %q, want portable-review", got)
+	}
+	if got := d.publicationValidationProfile(ctx, operation, "different"); got != "publication:v1" {
+		t.Fatalf("incompatible revision profile = %q, want publication:v1", got)
+	}
+}
+
 func TestPublicationTransitionInvalidatesSnapshotsAndPublishesWatchEvent(t *testing.T) {
 	repo := t.TempDir()
 	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
@@ -1448,7 +1513,10 @@ func TestPublicationStoreRoutesRegisteredProjectIntentAtomically(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := issueClient.AppendAcceptedReviewAndPublicationWithReviewAdmission(context.Background(), issueID, params, operation, "registered-candidate", admission, "", "reviewer")
+	operation.ReviewerKind, operation.ReviewEpochEventID, operation.PatchEvidenceID = "orchestrator", admission.ReviewEpochEventID, "registered-patch-evidence"
+	params.Payload["actor_id"], params.Payload["review_epoch_event_id"] = operation.ActorID, operation.ReviewEpochEventID
+	patchEvidence := domain.PublicationEvidence{EvidenceID: operation.PatchEvidenceID, ProjectID: operation.ProjectID, IssueID: operation.IssueID, Layer: domain.PublicationEvidencePatchReview, PatchDigest: "patch", SourceRevision: operation.SourceRevision, BaseRevision: operation.BaseRevision, Producer: "reviewer:reviewer", PolicyVersion: operation.PolicyVersion, EnvironmentFingerprint: operation.EnvironmentFingerprint, CreatedAt: operation.CreatedAt}
+	receipt, err := issueClient.AppendAcceptedReviewAndPublicationWithReviewAdmission(context.Background(), issueID, params, operation, patchEvidence, "registered-candidate", admission, "", "reviewer")
 	if err != nil || receipt.PublicationOperationID != operation.OperationID {
 		t.Fatalf("registered atomic enqueue = (%q,%v)", receipt.PublicationOperationID, err)
 	}
@@ -1463,8 +1531,7 @@ func TestPublicationStoreRoutesRegisteredProjectIntentAtomically(t *testing.T) {
 func daemonTestPublicationOperation(projectID, operationID, issueID, intent, source string, created time.Time) domain.PublicationOperation {
 	return domain.PublicationOperation{
 		OperationID: operationID, ProjectID: projectID, IssueID: issueID, IntentKey: intent,
-		RequestFingerprint: "fingerprint", ActorID: "reviewer", ActorKind: domain.ReviewerOwnerKindOrchestrator,
-		ReviewEpochEventID: 1, AcceptedReviewEventID: 2, AcceptedPublicationOperationID: operationID, TargetID: "base", TargetBranch: "main",
+		RequestFingerprint: "fingerprint", ActorID: "reviewer", ReviewerKind: "orchestrator", ReviewEpochEventID: 42, AcceptedReviewEventID: 43, PatchEvidenceID: "patch-evidence", TargetID: "base", TargetBranch: "main",
 		SourceRevision: source, BaseRevision: "base", PolicyVersion: "policy", EnvironmentFingerprint: "go:test",
 		ValidationCommand: "npm test", EvidenceDigest: "evidence", State: domain.PublicationOperationQueued, CreatedAt: created,
 	}

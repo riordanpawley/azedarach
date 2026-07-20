@@ -46,42 +46,42 @@ func (s PublicationOperationState) Valid() bool {
 // independently from merge-result evidence so unrelated base movement does not
 // erase the accepted review decision.
 type PublicationOperation struct {
-	OperationID                    string                    `json:"operation_id"`
-	ProjectID                      string                    `json:"project_id"`
-	IssueID                        string                    `json:"issue_id"`
-	IntentKey                      string                    `json:"intent_key"`
-	RequestFingerprint             string                    `json:"request_fingerprint"`
-	ActorID                        string                    `json:"actor_id"`
-	ActorKind                      string                    `json:"actor_kind"`
-	ReviewEpochEventID             int64                     `json:"review_epoch_event_id"`
-	AcceptedReviewEventID          int64                     `json:"accepted_review_event_id"`
-	AcceptedPublicationOperationID string                    `json:"accepted_publication_operation_id"`
-	TargetID                       string                    `json:"target_id"`
-	TargetBranch                   string                    `json:"target_branch"`
-	SourceRevision                 string                    `json:"source_revision"`
-	BaseRevision                   string                    `json:"base_revision"`
-	CandidateRevision              string                    `json:"candidate_revision,omitempty"`
-	PolicyVersion                  string                    `json:"policy_version,omitempty"`
-	EnvironmentFingerprint         string                    `json:"environment_fingerprint,omitempty"`
-	ValidationCommand              string                    `json:"validation_command"`
-	EvidenceSource                 string                    `json:"evidence_source,omitempty"`
-	EvidenceEventID                int64                     `json:"evidence_event_id,omitempty"`
-	EvidenceSeq                    int64                     `json:"evidence_seq,omitempty"`
-	EvidenceDigest                 string                    `json:"evidence_digest,omitempty"`
-	State                          PublicationOperationState `json:"state"`
-	LeaseOwner                     string                    `json:"lease_owner,omitempty"`
-	ClaimToken                     string                    `json:"-"`
-	ClaimExpiresAt                 *time.Time                `json:"claim_expires_at,omitempty"`
-	ValidationRequestID            string                    `json:"validation_request_id,omitempty"`
-	ReusedEvidenceID               string                    `json:"reused_evidence_id,omitempty"`
-	FailureKind                    string                    `json:"failure_kind,omitempty"`
-	FailureDetail                  string                    `json:"failure_detail,omitempty"`
-	FailureArtifact                string                    `json:"failure_artifact,omitempty"`
-	QueuePosition                  int                       `json:"queue_position,omitempty"`
-	CreatedAt                      time.Time                 `json:"created_at"`
-	UpdatedAt                      time.Time                 `json:"updated_at"`
-	StartedAt                      *time.Time                `json:"started_at,omitempty"`
-	FinishedAt                     *time.Time                `json:"finished_at,omitempty"`
+	OperationID            string                    `json:"operation_id"`
+	ProjectID              string                    `json:"project_id"`
+	IssueID                string                    `json:"issue_id"`
+	IntentKey              string                    `json:"intent_key"`
+	RequestFingerprint     string                    `json:"request_fingerprint"`
+	ActorID                string                    `json:"actor_id"`
+	ReviewEpochEventID     int64                     `json:"review_epoch_event_id"`
+	AcceptedReviewEventID  int64                     `json:"accepted_review_event_id"`
+	ReviewerKind           string                    `json:"reviewer_kind"`
+	PatchEvidenceID        string                    `json:"patch_evidence_id"`
+	TargetID               string                    `json:"target_id"`
+	TargetBranch           string                    `json:"target_branch"`
+	SourceRevision         string                    `json:"source_revision"`
+	BaseRevision           string                    `json:"base_revision"`
+	CandidateRevision      string                    `json:"candidate_revision,omitempty"`
+	PolicyVersion          string                    `json:"policy_version,omitempty"`
+	EnvironmentFingerprint string                    `json:"environment_fingerprint,omitempty"`
+	ValidationCommand      string                    `json:"validation_command"`
+	EvidenceSource         string                    `json:"evidence_source,omitempty"`
+	EvidenceEventID        int64                     `json:"evidence_event_id,omitempty"`
+	EvidenceSeq            int64                     `json:"evidence_seq,omitempty"`
+	EvidenceDigest         string                    `json:"evidence_digest,omitempty"`
+	State                  PublicationOperationState `json:"state"`
+	LeaseOwner             string                    `json:"lease_owner,omitempty"`
+	ClaimToken             string                    `json:"-"`
+	ClaimExpiresAt         *time.Time                `json:"claim_expires_at,omitempty"`
+	ValidationRequestID    string                    `json:"validation_request_id,omitempty"`
+	ReusedEvidenceID       string                    `json:"reused_evidence_id,omitempty"`
+	FailureKind            string                    `json:"failure_kind,omitempty"`
+	FailureDetail          string                    `json:"failure_detail,omitempty"`
+	FailureArtifact        string                    `json:"failure_artifact,omitempty"`
+	QueuePosition          int                       `json:"queue_position,omitempty"`
+	CreatedAt              time.Time                 `json:"created_at"`
+	UpdatedAt              time.Time                 `json:"updated_at"`
+	StartedAt              *time.Time                `json:"started_at,omitempty"`
+	FinishedAt             *time.Time                `json:"finished_at,omitempty"`
 }
 
 func (o PublicationOperation) ValidateIntent() error {
@@ -96,7 +96,7 @@ func (o PublicationOperation) ValidateIntent() error {
 			return fmt.Errorf("publication operation requires %s", name)
 		}
 	}
-	if _, err := CanonicalReviewerIdentity(o.ActorID, o.ActorKind); err != nil {
+	if _, err := CanonicalReviewerIdentity(o.ActorID, o.ReviewerKind); err != nil {
 		return fmt.Errorf("publication operation reviewer identity: %w", err)
 	}
 	if o.ReviewEpochEventID <= 0 {
@@ -105,8 +105,8 @@ func (o PublicationOperation) ValidateIntent() error {
 	if o.AcceptedReviewEventID <= 0 {
 		return fmt.Errorf("publication operation requires positive accepted_review_event_id")
 	}
-	if strings.TrimSpace(o.AcceptedPublicationOperationID) == "" {
-		return fmt.Errorf("publication operation requires accepted_publication_operation_id")
+	if strings.TrimSpace(o.PatchEvidenceID) == "" {
+		return fmt.Errorf("publication operation requires patch_evidence_id")
 	}
 	if !strings.EqualFold(strings.TrimSpace(o.TargetID), "base") {
 		return fmt.Errorf("publication operation target must be configured base")
@@ -116,6 +116,13 @@ func (o PublicationOperation) ValidateIntent() error {
 	}
 	if !o.State.Valid() {
 		return fmt.Errorf("invalid publication operation state %q", o.State)
+	}
+	return nil
+}
+
+func (o PublicationOperation) ValidateReviewAuthority() error {
+	if strings.TrimSpace(o.ActorID) == "" || !strings.EqualFold(strings.TrimSpace(o.ReviewerKind), "orchestrator") || o.ReviewEpochEventID <= 0 || o.AcceptedReviewEventID <= 0 || strings.TrimSpace(o.PatchEvidenceID) == "" {
+		return fmt.Errorf("publication operation requires exact orchestrator, review epoch, accepted event, and patch evidence authority")
 	}
 	return nil
 }

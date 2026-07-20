@@ -47,6 +47,27 @@ func TestPublicationQueuePersistsOrdersAndCoalescesExactCandidate(t *testing.T) 
 	}
 }
 
+func TestPublicationQueueRejectsCoalescingAcrossAcceptedReviewEvents(t *testing.T) {
+	ctx := context.Background()
+	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
+	t.Cleanup(func() { _ = store.Close() })
+	operation := testPublicationOperation("publication-1", "issue-1", "intent-1", "source-1", time.Now().UTC())
+	operation.ReviewerKind = "orchestrator"
+	operation.ReviewEpochEventID = 41
+	operation.AcceptedReviewEventID = 42
+	operation.PatchEvidenceID = "patch-1"
+	if _, created, err := store.EnqueuePublication(ctx, operation, "candidate-1"); err != nil || !created {
+		t.Fatalf("first enqueue created=%t err=%v", created, err)
+	}
+	conflict := operation
+	conflict.OperationID = "publication-2"
+	conflict.IntentKey = "intent-2"
+	conflict.AcceptedReviewEventID = 43
+	if _, _, err := store.EnqueuePublication(ctx, conflict, "candidate-1"); err == nil {
+		t.Fatal("publication with a different accepted review event coalesced")
+	}
+}
+
 func TestPublicationQueueTransitionsAreCASAndIdentityIsImmutable(t *testing.T) {
 	ctx := context.Background()
 	store := NewAtPath(filepath.Join(t.TempDir(), "project.db"), nil)
@@ -150,8 +171,8 @@ func TestTerminalizePublicationWithSuccessorRollsBackPredecessorWhenInsertFails(
 func testPublicationOperation(id, issueID, intent, source string, created time.Time) domain.PublicationOperation {
 	return domain.PublicationOperation{
 		OperationID: id, ProjectID: "project", IssueID: issueID, IntentKey: intent,
-		RequestFingerprint: "fingerprint", ActorID: "reviewer", ActorKind: domain.ReviewerOwnerKindOrchestrator,
-		ReviewEpochEventID: 41, AcceptedReviewEventID: 42, AcceptedPublicationOperationID: id, TargetID: "base", TargetBranch: "main",
+		RequestFingerprint: "fingerprint", ActorID: "reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator,
+		ReviewEpochEventID: 41, AcceptedReviewEventID: 42, PatchEvidenceID: id, TargetID: "base", TargetBranch: "main",
 		SourceRevision: source, BaseRevision: "base", PolicyVersion: "policy", EnvironmentFingerprint: "toolchain",
 		ValidationCommand: "npm test",
 		EvidenceSource:    "mailbox", EvidenceEventID: 1, EvidenceSeq: 2, EvidenceDigest: "digest",
