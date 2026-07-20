@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
@@ -102,8 +103,9 @@ func runCandidateValidationDAG(ctx context.Context, root string, env []string, s
 				used[strings.TrimSpace(resource)] = true
 			}
 			go func(stage CandidateValidationStage) {
+				startedAt := time.Now().UTC()
 				base, mkErr := os.MkdirTemp("", "az-validation-"+stage.ID+"-")
-				result := CandidateValidationStageResult{ID: stage.ID, Status: "failed", OutputRoot: filepath.Join(base, "output"), TempRoot: filepath.Join(base, "tmp"), ArtifactPaths: append([]string(nil), stage.ArtifactPaths...)}
+				result := CandidateValidationStageResult{ID: stage.ID, Status: "failed", Resources: append([]string(nil), stage.Resources...), OutputRoot: filepath.Join(base, "output"), TempRoot: filepath.Join(base, "tmp"), ArtifactPaths: append([]string(nil), stage.ArtifactPaths...), StartedAt: startedAt}
 				if mkErr == nil {
 					mkErr = os.MkdirAll(result.OutputRoot, 0o700)
 				}
@@ -120,6 +122,8 @@ func runCandidateValidationDAG(ctx context.Context, root string, env []string, s
 				} else if runCtx.Err() != nil {
 					result.Status = "cancelled"
 				}
+				result.FinishedAt = time.Now().UTC()
+				result.WallSeconds = result.FinishedAt.Sub(result.StartedAt).Seconds()
 				done <- completion{result: result, err: mkErr}
 			}(stage)
 		}

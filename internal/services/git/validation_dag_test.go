@@ -24,6 +24,9 @@ func TestCandidateValidationDAGRunsPortableCommandsWithIsolatedRoots(t *testing.
 		require.NoError(t, readErr)
 		assert.NotEmpty(t, body)
 		assert.Equal(t, "passed", stage.Status)
+		assert.False(t, stage.StartedAt.IsZero())
+		assert.False(t, stage.FinishedAt.IsZero())
+		assert.GreaterOrEqual(t, stage.WallSeconds, float64(0))
 	}
 }
 
