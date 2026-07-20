@@ -781,6 +781,15 @@ func (c *Client) runMigrations(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	}
+	managedThreadIdentityApplied, err := isMigrationApplied(ctx, db, managedAgentThreadIdentityMigrationID)
+	if err != nil {
+		return fmt.Errorf("check managed agent thread identity migration: %w", err)
+	}
+	if managedThreadIdentityApplied {
+		if err := validateManagedAgentThreadIdentitySchema(ctx, db); err != nil {
+			return err
+		}
+	}
 	decisionIdempotencyApplied, err := isMigrationApplied(ctx, db, decisionIdempotencyMigrationID)
 	if err != nil {
 		return fmt.Errorf("check decision idempotency migration: %w", err)
@@ -2342,6 +2351,59 @@ func applyOrchestratorLifecycleClockMigration(ctx context.Context, db *sql.DB, i
 	return nil
 }
 
+func validateManagedAgentThreadIdentitySchema(ctx context.Context, q sqlIssueQueryer) error {
+	columns := []struct {
+		table, name, columnType, check string
+	}{
+		{"daemon_managed_agent_incarnations", "agent_thread_id", "TEXT", "check (agent_thread_id is null or trim(agent_thread_id) <> '')"},
+		{"agent_input_delivery_intents", "agent_thread_id", "TEXT", "check (agent_thread_id is null or trim(agent_thread_id) <> '')"},
+		{"daemon_rooted_bootstrap_acknowledgements", "tmux_pane_id", "TEXT", ""},
+		{"daemon_rooted_bootstrap_acknowledgements", "pane_pid", "INTEGER", ""},
+		{"daemon_rooted_bootstrap_acknowledgements", "agent_incarnation", "TEXT", ""},
+		{"daemon_rooted_bootstrap_acknowledgements", "agent_thread_id", "TEXT", ""},
+	}
+	for _, want := range columns {
+		rows, err := q.QueryContext(ctx, `PRAGMA table_info(`+want.table+`)`)
+		if err != nil {
+			return fmt.Errorf("inspect managed thread identity column %s.%s: %w", want.table, want.name, err)
+		}
+		found := false
+		for rows.Next() {
+			var cid, notNull, primaryKey int
+			var name, columnType string
+			var defaultSQL sql.NullString
+			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultSQL, &primaryKey); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan managed thread identity column %s.%s: %w", want.table, want.name, err)
+			}
+			if name == want.name {
+				found = true
+				if !strings.EqualFold(strings.TrimSpace(columnType), want.columnType) || notNull != 0 || defaultSQL.Valid || primaryKey != 0 {
+					rows.Close()
+					return fmt.Errorf("managed thread identity column %s.%s has wrong definition", want.table, want.name)
+				}
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close managed thread identity column inspection %s.%s: %w", want.table, want.name, err)
+		}
+		if !found {
+			return fmt.Errorf("managed thread identity column %s.%s is missing", want.table, want.name)
+		}
+		if want.check != "" {
+			var tableSQL string
+			if err := q.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, want.table).Scan(&tableSQL); err != nil {
+				return fmt.Errorf("inspect managed thread identity table %s: %w", want.table, err)
+			}
+			normalized := strings.ToLower(strings.Join(strings.Fields(tableSQL), " "))
+			if !strings.Contains(normalized, want.check) {
+				return fmt.Errorf("managed thread identity column %s.%s has wrong definition", want.table, want.name)
+			}
+		}
+	}
+	return nil
+}
+
 func applyContextualLearningActivationMigration(ctx context.Context, db *sql.DB, id string) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -2600,6 +2662,9 @@ func (c *Client) applyManagedAgentThreadIdentityMigration(ctx context.Context, d
 		if _, err := tx.ExecContext(ctx, `ALTER TABLE `+column.table+` ADD COLUMN `+column.name+` `+column.definition); err != nil {
 			return fmt.Errorf("apply migration %s column %s.%s: %w", id, column.table, column.name, err)
 		}
+	}
+	if err := validateManagedAgentThreadIdentitySchema(ctx, tx); err != nil {
+		return fmt.Errorf("validate migration %s: %w", id, err)
 	}
 	if err := recordAppliedMigration(ctx, tx, id); err != nil {
 		return fmt.Errorf("record migration %s: %w", id, err)

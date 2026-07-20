@@ -819,6 +819,9 @@ func runGitCommandIsolated(repoDir string, args ...string) error {
 func TestAIHookRunCommandRoutesCodexAgentThroughRuntimeSignalPort(t *testing.T) {
 	projectDir := t.TempDir()
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-port-1")
+	t.Setenv("AZEDARACH_AGENT_INCARNATION", "launch-incarnation-1")
+	t.Setenv("AZEDARACH_LOGICAL_PANE_ID", "agent")
+	t.Setenv("AZEDARACH_PANE_PID", "4242")
 	t.Setenv("TMUX_PANE", "%12")
 
 	var signals []protocol.RuntimeSignalIngestCommandBody
@@ -884,6 +887,29 @@ func TestAIHookRunCommandRoutesCodexAgentThroughRuntimeSignalPort(t *testing.T) 
 		signal.SessionID != "pr-az-port-1.pane-12" ||
 		!signal.Log {
 		t.Fatalf("runtime signal = %+v", signal)
+	}
+	if signal.AgentIncarnation != "launch-incarnation-1" || signal.AgentThreadID != "t-port-1" || signal.PanePID != 4242 || signal.LogicalPaneID != "agent" {
+		t.Fatalf("managed identity signal = %+v, want distinct launch incarnation and native thread", signal)
+	}
+}
+
+func TestAgentHookThreadIDUsesOnlyNativeThreadKeys(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload map[string]any
+		want    string
+	}{
+		{name: "exact thread", payload: map[string]any{"thread_id": " thread-native ", "session_id": "session-other"}, want: "thread-native"},
+		{name: "alternate exact thread", payload: map[string]any{"thread-id": "thread-alt", "conversation_id": "conversation-other"}, want: "thread-alt"},
+		{name: "missing thread", payload: map[string]any{"session_id": "session-only", "conversation_id": "conversation-only"}},
+		{name: "wrong type", payload: map[string]any{"thread_id": 42, "session_id": "session-only"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := agentHookThreadID(tt.payload); got != tt.want {
+				t.Fatalf("agentHookThreadID() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

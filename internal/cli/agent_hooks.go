@@ -196,7 +196,7 @@ func ingestAgentHookRuntimeSignalBestEffort(ctx context.Context, deps *Dependenc
 		Worktree:         strings.TrimSpace(hookCtx.ProjectDir),
 		TmuxPane:         strings.TrimSpace(os.Getenv("TMUX_PANE")),
 		AgentIncarnation: agentHookIncarnation(hookCtx.Payload),
-		AgentThreadID:    agentHookIncarnation(hookCtx.Payload),
+		AgentThreadID:    agentHookThreadID(hookCtx.Payload),
 		Agent:            string(hookCtx.Agent),
 		Hook:             event,
 		Event:            event,
@@ -231,6 +231,15 @@ func ingestAgentHookRuntimeSignalBestEffort(ctx context.Context, deps *Dependenc
 
 func agentHookIncarnation(payload map[string]any) string {
 	for _, key := range []string{"session_id", "conversation_id", "thread_id", "thread-id"} {
+		if value, ok := payload[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func agentHookThreadID(payload map[string]any) string {
+	for _, key := range []string{"thread_id", "thread-id"} {
 		if value, ok := payload[key].(string); ok && strings.TrimSpace(value) != "" {
 			return strings.TrimSpace(value)
 		}
