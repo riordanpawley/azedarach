@@ -1,425 +1,198 @@
 ---
 name: go-testing
-description: "Go Testing Skill"
+description: Design, write, review, debug, and organize robust Go tests and test suites. Use for Go unit, component, integration, subprocess, concurrent, race, fuzz, property, benchmark, coverage, table-driven, golden, or Bubble Tea tests; for choosing what to test; for safe t.Parallel adoption; for eliminating flaky timing-based tests; or for structuring Go validation profiles and CI commands.
 ---
 
-# Go Testing Skill
+# Go Testing
 
-**Version:** 1.0
-**Purpose:** Test-Driven Development for Go/Bubbletea
+Treat tests as executable specifications of observable behavior and durable invariants. Match the test layer to the production boundary, and prefer deterministic evidence over scheduler or wall-clock luck.
 
-## Overview
+## Start with the repository contract
 
-TDD with Go uses the built-in `testing` package. This skill covers patterns for testing Bubbletea models, services, and concurrent code.
+1. Read the applicable `AGENTS.md` and project test documentation.
+2. Inspect analogous tests, helpers, fixtures, and validation commands before adding a new pattern.
+3. Identify the behavior, invariant, regression, or risk the test must protect.
+4. Select the narrowest layer that can prove it without bypassing the active production path.
+5. Follow repository commands for broad validation; do not substitute a raw or focused command for a stronger named profile.
 
-**Core Principle:** Tests are **specifications**, not just coverage metrics.
+Repository instructions override generic examples in this skill.
 
-## TDD Cycle
+## Choose what to test
 
-### 1. Write Failing Test (RED)
+Prioritize:
 
-```go
-func TestTaskCardTitle(t *testing.T) {
-    card := TaskCard{Title: "Test Task"}
-    want := "Test Task"
-    got := card.GetTitle()
+- domain rules and state transitions;
+- public and cross-package contracts;
+- parsing, serialization, persistence, protocol, and subprocess boundaries;
+- error, cancellation, rollback, cleanup, recovery, and restart behavior;
+- concurrency ownership and ordering invariants;
+- previously observed regressions;
+- properties with large input spaces;
+- performance only where a regression would matter operationally.
 
-    if got != want {
-        t.Errorf("GetTitle() = %q, want %q", got, want)
-    }
-}
+Usually avoid tests for trivial accessors, Go language behavior, third-party implementation details, or private call sequences with no observable contract.
 
-// Run: go test
-// Expected: FAIL (red) - no implementation exists yet
-```
+Use coverage to locate untested risk, not as a quality target. A high percentage with weak assertions is not strong evidence.
 
-### 2. Write Minimal Implementation (GREEN)
+## Select the test layer
 
-**CRITICAL:** Write ONLY enough code to make test pass. Don't over-engineer.
+- **Domain/unit:** Pure rules, transformations, validation, and state transitions. Prefer direct inputs and outputs.
+- **Component/store:** Persistence, adapters, lifecycle boundaries, and small collaborations. Exercise real storage when storage semantics matter.
+- **Black-box package:** Put tests in `package foo_test` when the exported API or architectural boundary is the contract.
+- **Integration/active path:** Exercise real wiring, processes, filesystems, protocols, or commands when isolated tests cannot prove production behavior.
+- **Race:** Run shared-state and lifecycle-heavy paths with `-race`; remember it only detects races on executed paths.
+- **Fuzz/property:** Use for parsers, codecs, normalization, import/export, graph transforms, and other broad input spaces.
+- **Benchmark:** Measure important operations separately from correctness. Compare repeated samples statistically in a controlled environment.
 
-```go
-type TaskCard struct {
-    Title string
-}
+Do not mock away the behavior under test. Accept narrow interfaces at boundaries and prefer small handwritten fakes over expectation-heavy mocks.
 
-func (c TaskCard) GetTitle() string {
-    return c.Title
-}
+## Structure tests around behavior
 
-// Run: go test
-// Expected: PASS (green)
-```
-
-### 3. Refactor (if needed)
-
-Only refactor AFTER tests pass:
+Name tests for the contract and condition, for example `TestStartSessionRejectsStoppedIssue`. Use table-driven subtests when cases share setup and assertion shape but represent meaningful behaviors.
 
 ```go
-// Extract common method if needed
-func (c TaskCard) String() string {
-    return fmt.Sprintf("Task: %s", c.Title)
-}
+func TestNormalizeStatus(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want Status
+	}{
+		{name: "ready", in: "ready", want: StatusReady},
+		{name: "trimmed", in: " ready ", want: StatusReady},
+	}
 
-// Run: go test
-// Expected: Still PASS (green)
-```
-
-## Testing Bubbletea Models
-
-### Testing Init
-
-```go
-func TestBoardModelInit(t *testing.T) {
-    m := NewBoardModel()
-    cmd := m.Init()
-
-    if cmd != nil {
-        t.Errorf("Init() should return nil, got %v", cmd)
-    }
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := NormalizeStatus(tt.in)
+			if got != tt.want {
+				t.Fatalf("NormalizeStatus(%q) = %q; want %q", tt.in, got, tt.want)
+			}
+		})
+	}
 }
 ```
 
-### Testing Update with Messages
+Keep failures diagnostic:
 
-```go
-func TestBoardModelUpdate_KeyPress(t *testing.T) {
-    m := NewBoardModel()
-    msg := tea.KeyMsg{Type: tea.KeyDown}
+- report operation, inputs, `got`, and `want`;
+- use `Fatal` only when continuing would be meaningless;
+- mark reusable helpers with `t.Helper()`;
+- keep fixtures minimal and model the intended production lifecycle state;
+- put opaque reusable inputs beneath `testdata/`;
+- use `t.Cleanup`, `t.TempDir`, `t.Setenv`, and `t.Context` for scoped resources;
+- prefer structural assertions over snapshots, and use goldens for intentionally stable rendered or serialized output.
 
-    newModel, cmd := m.Update(msg)
-    updated := newModel.(BoardModel)
+Write a regression test that fails for the demonstrated defect before fixing it when practical. Do not force test-first sequencing when discovery, refactoring, or existing behavior makes characterization tests more honest.
 
-    if updated.cursor != 1 {
-        t.Errorf("cursor = %d, want 1", updated.cursor)
-    }
-    if cmd != nil {
-        t.Errorf("cmd should be nil")
-    }
-}
-```
+## Parallelize only isolated tests
 
-### Testing State Transitions
+Distinguish the two controls:
 
-```go
-func TestBoardModel_EnterTask(t *testing.T) {
-    m := NewBoardModel()
-    m.tasks = []Task{{ID: "az-1", Title: "Test"}}
+- `go test -p=N` controls concurrent package build/test processes.
+- `go test -parallel=N` limits parallel tests inside each test binary.
 
-    msg := tea.KeyMsg{Type: tea.KeyEnter}
-    newModel, _ := m.Update(msg)
-    updated := newModel.(BoardModel)
+Call `t.Parallel()` only after proving isolation from:
 
-    if updated.state != StateDetail {
-        t.Errorf("state = %v, want StateDetail", updated.state)
-    }
-}
-```
+- package globals and singleton caches;
+- environment variables and working directory;
+- shared database files, fixtures, and migration authorities;
+- fixed ports, sockets, process names, tmux sessions, and external services;
+- shared mock state, log collectors, output buffers, and mutable test data.
 
-### Testing View Output
+Do not use `t.Setenv` or `t.Chdir` in a parallel test or below a parallel ancestor. Copy loop values and mutable inputs when required by the Go version and test shape. Group parallel subtests under a parent when teardown must wait for the entire group.
 
-```go
-func TestBoardModelView(t *testing.T) {
-    m := NewBoardModel()
-    m.tasks = []Task{{ID: "az-1", Title: "Test Task"}}
+Use `-shuffle=on` diagnostically to expose order dependence and retain the reported seed for reproduction. Never add parallelism solely to shorten an already contention-heavy suite; measure the whole suite and preserve resource isolation first.
 
-    view := m.View()
+## Test concurrent code deterministically
 
-    if !strings.Contains(view, "Test Task") {
-        t.Errorf("View() should contain task title")
-    }
-}
-```
+Do not use sleeps, short deadlines, elapsed-time assertions, scheduler fairness, CPU throughput, or reduced `GOMAXPROCS` to prove correctness.
 
-## Testing Services with Mocks
+Prefer:
 
-### Interface-Based Mocking
+- explicit start, progress, and completion barriers;
+- controlled channels and acknowledgements;
+- fake clocks and injected timers;
+- context cancellation with observable cleanup;
+- hooks or probes at durable state transitions;
+- `testing/synctest` for eligible goroutine, timer, and context behavior.
 
-```go
-// Define interface
-type CommandRunner interface {
-    Run(ctx context.Context, name string, args ...string) ([]byte, error)
-}
+Use operational test-command timeouts only to contain hangs and obtain goroutine stacks. Do not treat the timeout duration as semantic evidence.
 
-// Mock implementation
-type mockRunner struct {
-    output []byte
-    err    error
-}
+With current Go releases, `testing/synctest.Test` creates an isolated bubble with virtual time, and `synctest.Wait` waits for goroutines in that bubble to block durably. Prefer it when all relevant concurrency stays inside the bubble; use explicit barriers for subprocesses, syscalls, or external runtimes it cannot control.
 
-func (m *mockRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-    return m.output, m.err
-}
+Always verify relevant concurrent paths with the race detector. A green race run is evidence only for executed paths, not proof of race freedom.
 
-// Test using mock
-func TestBeadsClientList(t *testing.T) {
-    runner := &mockRunner{output: []byte(`[{"id":"az-1","title":"Test"}]`)}
-    client := NewClient(runner, slog.Default())
+## Use fuzzing and properties deliberately
 
-    tasks, err := client.List(context.Background())
+Define a durable property rather than merely asserting “does not panic.” Examples:
 
-    if err != nil {
-        t.Fatalf("List() error = %v", err)
-    }
-    if len(tasks) != 1 {
-        t.Errorf("len(tasks) = %d, want 1", len(tasks))
-    }
-}
-```
+- decode(encode(x)) preserves x;
+- normalization is idempotent;
+- parse/render round trips preserve semantics;
+- invalid input cannot escape validation or corrupt state;
+- output ordering remains deterministic.
 
-### Testing Error Scenarios
+Seed empty, minimal, boundary, Unicode, malformed, and previously failing cases. Keep each fuzz invocation independent of persistent global state because fuzz workers execute concurrently and nondeterministically. Commit minimized failures as regression corpus entries when appropriate.
 
-```go
-func TestBeadsClientList_Error(t *testing.T) {
-    runner := &mockRunner{err: errors.New("command failed")}
-    client := NewClient(runner, slog.Default())
+## Test Bubble Tea models
 
-    _, err := client.List(context.Background())
+Exercise `Init`, `Update`, nested message routing, command emission, and `View` separately where that separation clarifies the contract.
 
-    if err == nil {
-        t.Error("expected error, got nil")
-    }
-}
-```
+- Assert state transitions after concrete messages.
+- Execute returned commands only when command behavior is part of the test.
+- Keep shared state explicit when testing nested models.
+- Use structural assertions for model state and targeted assertions for view content.
+- Use goldens for stable full rendering, including required default and constrained viewport cases.
+- Avoid terminal-size globals and real input loops in model tests.
 
-## Testing Concurrent Code
+## Diagnose failures as a batch
 
-### Using Race Detector
+For a focused failure, run the exact package or test uncached. For a hang, add a short command-level `-timeout` to obtain goroutine stacks and inspect the blocked call.
+
+For a broad failure:
+
+1. Preserve the complete machine-readable run, normally with `go test -json ... -count=1` or the repository wrapper.
+2. Extract every failed package and test before editing.
+3. Classify failures by shared root cause.
+4. Fix coherent classes together, preferring a production-boundary or shared-fixture correction.
+5. Rerun the complete relevant suite; focused green tests do not replace broad evidence.
+6. Classify unrelated or flaky failures explicitly instead of silently rerunning until green.
+
+## Choose commands honestly
+
+Use repository-provided commands when available. Otherwise adapt these patterns:
 
 ```bash
-go test -race ./...
+go test -count=1 ./path/to/pkg -run '^TestName$/case$'
+go test -json -count=1 ./... > /tmp/go-test-events.jsonl
+go test -race -count=1 ./path/to/concurrent/packages/...
+go test -shuffle=on -count=1 ./...
+go test -fuzz '^FuzzName$' -run '^$' ./path/to/pkg
+go test -bench '^BenchmarkName$' -run '^$' ./path/to/pkg
 ```
 
-### Testing with Contexts
+Treat focused, cached, race, fuzz, integration, benchmark, and full correctness profiles as different evidence. Never present one as another.
 
-```go
-func TestServiceWithContext(t *testing.T) {
-    ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-    defer cancel()
+## Review checklist
 
-    svc := NewService()
-    result, err := svc.DoWork(ctx)
+- Does the test prove a requirement, invariant, regression, or meaningful risk?
+- Is it at the model-correct layer and wired through the real boundary when required?
+- Can it fail for the intended reason, with useful diagnostics?
+- Are success, failure, cancellation, cleanup, and recovery cases covered where relevant?
+- Is all mutable state isolated, especially under `t.Parallel` or fuzzing?
+- Is concurrency controlled by state transitions instead of time?
+- Are helpers smaller and clearer than the behavior they hide?
+- Did the test fail before the fix when practical and pass afterward?
+- Were targeted checks followed by the complete relevant repository profile?
+- Were race, fuzz, integration, migration, golden, or benchmark profiles run when their risk applies?
 
-    if err != nil {
-        t.Errorf("DoWork() error = %v", err)
-    }
-    if result != "expected" {
-        t.Errorf("result = %v, want expected", result)
-    }
-}
-```
+## Authoritative references
 
-### Testing Channel Behavior
+Consult current official documentation when Go-version behavior matters:
 
-```go
-func TestWorkerPool(t *testing.T) {
-    jobs := make(chan int, 3)
-    results := make(chan int, 3)
-
-    go worker(jobs, results)
-
-    jobs <- 1
-    jobs <- 2
-    close(jobs)
-
-    got := []int{<-results, <-results}
-    want := []int{1, 2}
-
-    if !reflect.DeepEqual(got, want) {
-        t.Errorf("results = %v, want %v", got, want)
-    }
-}
-```
-
-## Debugging Hanging Tests
-
-When a test or package appears to stall, do not stop at wall-clock timing. Timeouts and stack traces are usually more useful than elapsed durations alone.
-
-Recommended workflow:
-
-1. Re-run the suspicious test or package with a short timeout, for example `go test ./internal/daemon -run '^TestName$' -count=1 -timeout 10s`.
-2. Use the panic stack trace to find the exact blocked call.
-3. Check whether the fixture is modeling the correct lifecycle state for the path under test.
-4. Be suspicious of recovery/reconcile tests that seed the wrong intent state. A durable `stopped` row can legitimately force stop-enforcement logic instead of recovery logic and create misleading hangs in fake tmux runners.
-5. Prefer a minimal fixture that matches the production scenario being asserted. For recovery coverage, seed live runtime plus empty daemon cache; for stop coverage, seed desired-stop intent before runtime cleanup.
-
-## AI Guardrails
-
-### CRITICAL: Human Verification Required
-
-**NEVER trust AI-generated tests uncritically.**
-
-After AI generates tests or implementation code:
-
-1. **Review the test** - Does it actually test the requirement?
-2. **Run the test** - Verify it fails before implementing
-3. **Review implementation** - Is it minimal? Does it match the test intent?
-4. **Run again** - Verify test now passes
-5. **Check edge cases** - Did we miss any scenarios?
-
-### Anti-Patterns to Avoid
-
-**❌ Write tests AFTER implementation:**
-```go
-// BAD: Implementation exists, test written to pass
-func CalculateDiscount(price float64) float64 {
-    return price * 0.9
-}
-
-// Test written to match implementation (wrong order!)
-func TestDiscount(t *testing.T) {
-    got := CalculateDiscount(100)
-    if got != 90 {
-        t.Errorf("wrong")  // Locks in bug
-    }
-}
-```
-
-**✅ CORRECT: Write test FIRST as spec:**
-```go
-// GOOD: Test specifies behavior first
-func TestCalculateDiscount_AppliesTenPercent(t *testing.T) {
-    got := CalculateDiscount(100)
-    want := 90.0
-    if got != want {
-        t.Errorf("CalculateDiscount(100) = %v, want %v", got, want)
-    }
-}
-
-// Implementation written to satisfy spec
-func CalculateDiscount(price float64) float64 {
-    return price * 0.9
-}
-```
-
-### Never Delete Failing Tests
-
-```go
-// ❌ WRONG: Delete test to "fix" build
-func TestEdgeCase(t *testing.T) {
-    got := handleEdgeCase()
-    if got != "expected" {
-        t.Errorf("wrong")
-    }
-}
-
-// ✅ CORRECT: Fix implementation to satisfy test
-func handleEdgeCase() string {
-    return "expected"  // Actually implement the logic
-}
-```
-
-## Test Quality Guidelines
-
-### Table-Driven Tests
-
-```go
-func TestCalculateDiscount(t *testing.T) {
-    tests := []struct {
-        name  string
-        price float64
-        want  float64
-    }{
-        {"normal price", 100, 90},
-        {"zero price", 0, 0},
-        {"large price", 1000000, 900000},
-    }
-
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            got := CalculateDiscount(tt.price)
-            if got != tt.want {
-                t.Errorf("CalculateDiscount(%v) = %v, want %v",
-                    tt.price, got, tt.want)
-            }
-        })
-    }
-}
-```
-
-### Clear Error Messages
-
-```go
-// ❌ BAD: Unhelpful
-if got != want {
-    t.Error("wrong")
-}
-
-// ✅ GOOD: Clear and informative
-if got != want {
-    t.Errorf("CreateWorktree(%q) = %v, want %v", input, got, want)
-}
-```
-
-### Test Helpers
-
-```go
-func TestBoardModel(t *testing.T) {
-    // Helper for creating test model
-    newTestModel := func(t *testing.T) BoardModel {
-        t.Helper()
-        m := NewBoardModel()
-        m.tasks = []Task{{ID: "az-1", Title: "Test"}}
-        return m
-    }
-
-    t.Run("displays tasks", func(t *testing.T) {
-        m := newTestModel(t)
-        view := m.View()
-        if !strings.Contains(view, "Test") {
-            t.Error("view should contain task title")
-        }
-    })
-}
-```
-
-## Running Tests
-
-```bash
-# Run all tests
-go test ./...
-
-# Run specific package
-go test ./internal/app
-
-# Run with race detector
-go test -race ./...
-
-# Run with coverage
-go test -cover ./...
-
-# Verbose output
-go test -v ./...
-
-# Run specific test
-go test -run TestBoardModel ./internal/app
-
-# Run subtests
-go test -run TestBoardModel/displays_tasks ./internal/app
-
-# Coverage report
-go test -coverprofile=coverage.out ./...
-go tool cover -html=coverage.out
-```
-
-## Checklist: AI-Generated Code
-
-Before accepting AI-generated tests or implementation:
-
-- [ ] Test **fails** before I implement the feature
-- [ ] Test **passes** after minimal implementation
-- [ ] Test name describes **behavior**, not implementation
-- [ ] Error messages are **clear** (got/want pattern)
-- [ ] Edge cases are **covered** (zero, nil, large values)
-- [ ] Test is **independent** (doesn't rely on other tests)
-- [ ] Implementation is **minimal** (only what test requires)
-- [ ] **Race detector** passes (`go test -race`)
-- [ ] Tests run **successfully** in CI
-
-**If ANY fail:** Ask AI to fix before proceeding.
-
-## References
-
-- [Go Testing Package](https://go.dev/pkg/testing)
-- [Table-Driven Tests](https://go.dev/wiki/TableDrivenTests)
-- [Subtests and Sub-benchmarks](https://go.dev/blog/subtests)
-- [Race Detector](https://go.dev/doc/articles/race_detector)
+- `https://pkg.go.dev/testing`
+- `https://pkg.go.dev/testing/synctest`
+- `https://pkg.go.dev/cmd/go`
+- `https://go.dev/doc/articles/race_detector`
+- `https://go.dev/doc/security/fuzz/`
+- `https://go.dev/doc/build-cover`
