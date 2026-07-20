@@ -281,6 +281,11 @@ if ($execution eq 'reused' || $execution eq 'joined' || $execution eq 'skipped')
 die "validation request became $acquired->{state} before execution\n" unless $acquired->{state} eq 'active';
 my $publication_evidence_path = delete($ENV{AZEDARACH_VALIDATION_PUBLICATION_EVIDENCE}) || '';
 my $candidate_issue_id = delete($ENV{AZEDARACH_CANDIDATE_ISSUE_ID}) || ($acquired->{issue_id} || '');
+my $failure_publisher = delete($ENV{AZEDARACH_VALIDATION_FAILURE_PUBLISHER}) || '';
+my $failure_project_root = delete($ENV{AZEDARACH_VALIDATION_FAILURE_PROJECT_ROOT}) || '';
+my $failure_candidate_root = delete($ENV{AZEDARACH_VALIDATION_FAILURE_CANDIDATE_ROOT}) || '';
+my $failure_control_root = delete($ENV{AZEDARACH_VALIDATION_FAILURE_CONTROL_ROOT}) || '';
+my $failure_gate_output = delete($ENV{AZEDARACH_VALIDATION_FAILURE_GATE_OUTPUT}) || '';
 $ENV{AZEDARACH_VALIDATION_REQUEST_ID} = $request_id;
 $ENV{AZEDARACH_VALIDATION_CLASS} = $class;
 $ENV{AZEDARACH_VALIDATION_PROFILE} = $profile;
@@ -290,7 +295,8 @@ $ENV{AZEDARACH_VALIDATION_PURPOSE} = $purpose;
 $ENV{AZEDARACH_VALIDATION_EXECUTION} = 'executed';
 $ENV{AZEDARACH_VALIDATION_AUTHORITATIVE_REQUEST_ID} = $request_id;
 $ENV{AZEDARACH_VALIDATION_OVERRIDE} = $override;
-my ($evidence_fh, $evidence_file) = tempfile('azedarach-validation-evidence-XXXXXX', TMPDIR => 1, UNLINK => 0);
+my %evidence_temp_location = $failure_control_root ne '' ? (DIR => $failure_control_root) : (TMPDIR => 1);
+my ($evidence_fh, $evidence_file) = tempfile('azedarach-validation-evidence-XXXXXX', %evidence_temp_location, UNLINK => 0);
 close $evidence_fh;
 $ENV{AZEDARACH_VALIDATION_EVIDENCE_FILE} = $evidence_file;
 my ($fatal_evidence_fh, $fatal_evidence_file) = tempfile('azedarach-validation-fatal-XXXXXX', TMPDIR => 1, UNLINK => 0);
@@ -499,11 +505,29 @@ merge_whole_gate_evidence($evidence_file, {
     review_epoch_event_id => 0 + ($ENV{AZEDARACH_REVIEW_EPOCH_EVENT_ID} || $acquired->{review_epoch_event_id} || 0),
     publication_nonce => sha256_hex(join(':', $request_id, $revision, $$, time(), rand())),
 });
-write_publication_evidence($evidence_file, $publication_evidence_path) if $publication_evidence_path ne '';
 if ($purpose eq 'capacity' && $class eq 'aggregate' && $overlap_detected && $exit_code == 0) {
     warn "aggregate validation overlapped $max_external_go unleased Go process(es)\n";
     $exit_code = 75;
 }
+if ($exit_code != 0 && $failure_publisher ne '') {
+    die "incomplete validation failure publication configuration\n"
+        unless $failure_project_root ne '' && $failure_candidate_root ne '' &&
+            $failure_control_root ne '' && $failure_gate_output ne '';
+    my @publish = ($failure_publisher,
+        '--project-root', $failure_project_root,
+        '--candidate-root', $failure_candidate_root,
+        '--control-root', $failure_control_root,
+        '--evidence', $evidence_file,
+        '--gate-output', $failure_gate_output,
+        '--request', $request_id,
+        '--revision', $revision,
+        '--exit-code', $exit_code);
+    my $publish_status = system(@publish);
+    die "publish validation failure evidence before terminal finish: " .
+        ($publish_status == -1 ? $! : 'exit ' . wait_status_code($publish_status)) . "\n"
+        if $publish_status != 0;
+}
+write_publication_evidence($evidence_file, $publication_evidence_path) if $publication_evidence_path ne '';
 my $terminal = $interrupted ? 'cancelled' : ($exit_code == 0 ? 'completed' : 'failed');
 kill 'TERM', $heartbeat;
 waitpid($heartbeat, 0);

@@ -117,6 +117,10 @@ publish_failure() {
   ensure_failure_evidence "$phase" "$detail"
   request_id="$(evidence_field request_id)"
   source_revision="$(evidence_field source_revision)"
+  artifact_exit_code="$(evidence_field artifact_exit_code)"
+  if [ -n "$artifact_exit_code" ]; then
+    status="$artifact_exit_code"
+  fi
   set +e
   publication_output="$(
     "$artifact_publisher" \
@@ -186,6 +190,11 @@ validation_timeout="${AZEDARACH_MERGE_GATE_TIMEOUT:-10m}"
 (
   set +e
   AZEDARACH_VALIDATION_PUBLICATION_EVIDENCE="$validation_evidence" \
+  AZEDARACH_VALIDATION_FAILURE_PUBLISHER="$artifact_publisher" \
+  AZEDARACH_VALIDATION_FAILURE_PROJECT_ROOT="$project_root" \
+  AZEDARACH_VALIDATION_FAILURE_CANDIDATE_ROOT="$repo_root" \
+  AZEDARACH_VALIDATION_FAILURE_CONTROL_ROOT="$control_dir" \
+  AZEDARACH_VALIDATION_FAILURE_GATE_OUTPUT="$validation_gate_output" \
   AZEDARACH_CANDIDATE_ISSUE_ID="${AZEDARACH_CANDIDATE_ISSUE_ID:-}" \
     "$timeout_cmd" --signal=TERM --kill-after=15s "$validation_timeout" \
     "$validation_wrapper" --class aggregate --profile merge-gate -- "$validation_body" &

@@ -139,7 +139,7 @@ if (!rename($stage, $final_dir)) {
 undef $stage;
 print STDERR "[gate] committed validation artifacts=$final_dir\n";
 validate_existing_manifest($final_dir, $request, $revision, 0 + $arg{'exit-code'}, $publication_nonce);
-finish_publication($final_dir, $evidence, $evidence_path, $request, $revision, $summary);
+finish_publication($final_dir, $evidence, $evidence_path, $request, $revision, $summary, 0 + $arg{'exit-code'});
 
 sub canonical_directory {
     my ($path) = @_;
@@ -456,17 +456,19 @@ sub recover_existing {
     my ($directory, $evidence_value, $evidence_output, $request_id, $candidate_revision, $exit_code, $nonce) = @_;
     my $manifest = validate_existing_manifest($directory, $request_id, $candidate_revision, $exit_code, $nonce);
     print STDERR "[gate] recovered committed validation artifacts=$directory\n";
-    finish_publication($directory, $evidence_value, $evidence_output, $request_id, $candidate_revision, $manifest->{failure_summary} || 'validation failed');
+    finish_publication($directory, $evidence_value, $evidence_output, $request_id, $candidate_revision,
+        $manifest->{failure_summary} || 'validation failed', $manifest->{exit_code});
 }
 
 sub finish_publication {
-    my ($directory, $evidence_value, $evidence_output, $request_id, $candidate_revision, $summary) = @_;
+    my ($directory, $evidence_value, $evidence_output, $request_id, $candidate_revision, $summary, $exit_code) = @_;
     my @reports = grep { safe_existing_file($directory, $_) }
         sort glob(File::Spec->catfile($directory, 'reports', '*', 'report.json'));
     @reports = (File::Spec->catfile($directory, 'manifest.json')) unless @reports;
     $evidence_value->{report_path} = $reports[0];
     $evidence_value->{report_paths} = \@reports;
     $evidence_value->{failure_summary} = $summary;
+    $evidence_value->{artifact_exit_code} = 0 + $exit_code;
     atomic_write_json($evidence_output, $evidence_value, 0600);
     print join(' ', '[gate]', 'validation_request=' . $request_id,
         'candidate_head=' . $candidate_revision, 'failure=' . one_line($summary),

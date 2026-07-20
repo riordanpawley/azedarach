@@ -237,19 +237,37 @@ test -e "$repository_payload"
 publication_control="$fixture/publication-control"
 mkdir -m 700 "$publication_control"
 publication_evidence="$publication_control/evidence.json"
+terminal_evidence="$publication_control/terminal-evidence.json"
+publication_gate_output="$publication_control/gate-output.log"
+publication_fixture_root="$(cd "$fixture" && pwd -P)"
+: >"$publication_gate_output"
 if env "${fresh_validation_environment[@]}" \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
   AZEDARACH_VALIDATION_PUBLICATION_EVIDENCE="$publication_evidence" \
+  AZEDARACH_VALIDATION_FAILURE_PUBLISHER="$fixture/scripts/publish-validation-artifacts" \
+  AZEDARACH_VALIDATION_FAILURE_PROJECT_ROOT="$publication_fixture_root" \
+  AZEDARACH_VALIDATION_FAILURE_CANDIDATE_ROOT="$publication_fixture_root" \
+  AZEDARACH_VALIDATION_FAILURE_CONTROL_ROOT="$publication_control" \
+  AZEDARACH_VALIDATION_FAILURE_GATE_OUTPUT="$publication_gate_output" \
+  FAKE_AZ_FINISH_EVIDENCE_FILE="$terminal_evidence" \
   AZEDARACH_CANDIDATE_ISSUE_ID=dov \
   AZEDARACH_TICKET_ID=fixture \
   "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile failed-candidate -- \
-  sh -c 'test -z "${AZEDARACH_VALIDATION_PUBLICATION_EVIDENCE:-}"; test -z "${AZEDARACH_CANDIDATE_ISSUE_ID:-}"; report_dir="$1/.tmp/test-timing/failed-candidate"; mkdir -p "$report_dir"; printf '\''{"failures":[{"package":"example/broken","test":"TestRetained","output":"assertion failed"}]}\n'\'' >"$report_dir/report.json"; printf '\''{"request_id":"%s","source_revision":"%s","report_path":"%s/report.json","report_paths":["%s/report.json"]}\n'\'' "$AZEDARACH_VALIDATION_REQUEST_ID" "$AZEDARACH_VALIDATION_SOURCE_REVISION" "$report_dir" "$report_dir" >"$AZEDARACH_VALIDATION_EVIDENCE_FILE"; exit 1' sh "$fixture"; then
+  sh -c 'test -z "${AZEDARACH_VALIDATION_PUBLICATION_EVIDENCE:-}"; test -z "${AZEDARACH_CANDIDATE_ISSUE_ID:-}"; report_dir="$1/.tmp/test-timing/failed-candidate"; mkdir -p "$report_dir"; printf '\''{"failures":[{"package":"example/broken","test":"TestRetained","output":"assertion failed"}]}\n'\'' >"$report_dir/report.json"; printf '\''{"request_id":"%s","source_revision":"%s","report_path":"%s/report.json","report_paths":["%s/report.json"]}\n'\'' "$AZEDARACH_VALIDATION_REQUEST_ID" "$AZEDARACH_VALIDATION_SOURCE_REVISION" "$report_dir" "$report_dir" >"$AZEDARACH_VALIDATION_EVIDENCE_FILE"; exit 1' sh "$publication_fixture_root"; then
   echo "failed candidate validation unexpectedly passed" >&2
   exit 1
 fi
 grep -q '"issue_id":"dov"' "$publication_evidence"
 grep -q '"source_revision":"fixture-sha"' "$publication_evidence"
-grep -q 'failed-candidate/report.json' "$publication_evidence"
+retained_report="$(perl -MJSON::PP -e 'local $/; $v=decode_json(<>); print $v->{report_path}' <"$terminal_evidence")"
+case "$retained_report" in
+  "$publication_fixture_root/.azedarach/validation-artifacts/failures/fixture-sha/"*/reports/001/report.json) ;;
+  *) echo "terminal validation evidence did not resolve to retained report: $retained_report" >&2; exit 1 ;;
+esac
+test -s "$retained_report"
+rm -rf "$fixture/.tmp/test-timing/failed-candidate"
+test -s "$retained_report"
+grep -Fq "$retained_report" "$publication_evidence"
 
 fatal_publication_evidence="$publication_control/fatal-evidence.json"
 if env "${fresh_validation_environment[@]}" \
