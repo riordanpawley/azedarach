@@ -512,6 +512,6 @@ const (
 	orchestrateCaptureUsage       = "Usage: az orchestrate capture --issue <issue-id> [--project <project-id>] [--lines N] [--raw] [--json]"
 	orchestrateCompleteCheckUsage = "Usage: az orchestrate complete-check [--root <issue-id>] [--project <project-id>] [--json]"
 	orchestratorSessionUsage      = "Usage: az orchestrator-session <start|attach|stop|status> [--root <issue-id>] [--project <project-id>] [--json]"
-	orchestrateIntegrateUsage     = "Usage: az orchestrate integrate --issue <issue-id> [--apply] [--project <project-id>] [--json]"
+	orchestrateIntegrateUsage     = "Usage: az orchestrate integrate --issue <issue-id> [--external-integrated-revision <commit>] [--apply] [--project <project-id>] [--json]"
 	orchestrateCloseSessionUsage  = "Usage: az orchestrate close-session --issue <issue-id> [--project <project-id>] [--json]"
 )

@@ -8900,6 +8900,61 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	}
 }
 
+func TestVerifyExternalTaskIntegrationRequiresAncestryAndCandidateTreeIdentity(t *testing.T) {
+	operation := domain.PublicationOperation{
+		OperationID: "publication", TargetID: "base", TargetBranch: "main", BaseRevision: "base-oid",
+		SourceRevision: "source-oid", CandidateRevision: "candidate-oid",
+	}
+	tests := []struct {
+		name            string
+		integrationTree string
+		failAncestry    string
+		wantErr         string
+	}{
+		{name: "success", integrationTree: "tree-exact"},
+		{name: "candidate tree mismatch", integrationTree: "tree-other", wantErr: "does not match accepted candidate tree"},
+		{name: "reviewed source missing", integrationTree: "tree-exact", failAncestry: "source-oid", wantErr: "reviewed source source-oid is not reachable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+				joined := strings.Join(args, " ")
+				switch {
+				case strings.Contains(joined, "rev-parse --verify integrated^{commit}"):
+					return "integrated-oid", nil
+				case strings.Contains(joined, "rev-parse --verify main^{commit}"):
+					return "main-oid", nil
+				case strings.Contains(joined, "merge-base --is-ancestor"):
+					if tt.failAncestry != "" && strings.Contains(joined, tt.failAncestry) {
+						return "", fmt.Errorf("exit status 1")
+					}
+					return "", nil
+				case strings.Contains(joined, "rev-parse --verify candidate-oid^{tree}"):
+					return "tree-exact", nil
+				case strings.Contains(joined, "rev-parse --verify integrated-oid^{tree}"):
+					return tt.integrationTree, nil
+				default:
+					return "", fmt.Errorf("unexpected git args: %s", joined)
+				}
+			}}
+			d := &Daemon{git: git.NewClient(runner, slog.Default())}
+			got, err := d.verifyExternalTaskIntegration(context.Background(), t.TempDir(), "issue-1", "integrated", operation)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("verify error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("verify external integration: %v", err)
+			}
+			if !got.ExternalReconciled || got.TargetOID != "integrated-oid" || got.SourceOID != operation.SourceRevision || got.PublicationOperationID != operation.OperationID {
+				t.Fatalf("integration = %+v, want exact reconciled identity", got)
+			}
+		})
+	}
+}
+
 func TestTaskCloseCommandForceRemovesDirtyAlreadyIntegratedWorktree(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()

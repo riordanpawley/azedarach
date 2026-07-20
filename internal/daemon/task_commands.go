@@ -151,12 +151,84 @@ type taskCloseRequest struct {
 	ExpectedPublicationOperationID         string                                     `json:"expected_publication_operation_id,omitempty"`
 	ExpectedAcceptedPublicationOperationID string                                     `json:"expected_accepted_publication_operation_id,omitempty"`
 	HistoricalAuthorization                *domain.HistoricalPublicationAuthorization `json:"historical_authorization,omitempty"`
+	ExternalIntegratedRevision             string                                     `json:"external_integrated_revision,omitempty"`
 	PromoteBacklogBeforeClose              bool                                       `json:"-"`
 }
 
 type taskCloseExpectedBaseStaleError struct {
 	Expected string
 	Actual   string
+}
+
+type externalTaskIntegrationContextKey struct{}
+
+func (d *Daemon) reconcileExternalTaskIntegration(ctx context.Context, projectID, taskID, integratedRevision string) (domain.PublicationOperation, taskCloseIntegrationResult, error) {
+	if d.git == nil {
+		return domain.PublicationOperation{}, taskCloseIntegrationResult{}, fmt.Errorf("git adapter unavailable")
+	}
+	store, err := d.publicationStoreForProject(projectID)
+	if err != nil {
+		return domain.PublicationOperation{}, taskCloseIntegrationResult{}, fmt.Errorf("load publication authority: %w", err)
+	}
+	operations, err := store.PublicationOperations(ctx, projectID, taskID, false)
+	if err != nil {
+		return domain.PublicationOperation{}, taskCloseIntegrationResult{}, fmt.Errorf("list publication authority: %w", err)
+	}
+	var operation domain.PublicationOperation
+	for i := len(operations) - 1; i >= 0; i-- {
+		if operations[i].AcceptedReviewEventID > 0 {
+			operation = operations[i]
+			break
+		}
+	}
+	if operation.OperationID == "" || operation.CandidateRevision == "" {
+		return domain.PublicationOperation{}, taskCloseIntegrationResult{}, fmt.Errorf("exact accepted publication candidate is unavailable")
+	}
+	if !strings.EqualFold(strings.TrimSpace(operation.TargetID), "base") {
+		return domain.PublicationOperation{}, taskCloseIntegrationResult{}, fmt.Errorf("accepted publication target %q is not the configured base", operation.TargetID)
+	}
+	repoDir := strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID))
+	if repoDir == "" {
+		return domain.PublicationOperation{}, taskCloseIntegrationResult{}, fmt.Errorf("exact project repository routing is unavailable")
+	}
+	integration, err := d.verifyExternalTaskIntegration(ctx, repoDir, taskID, integratedRevision, operation)
+	return operation, integration, err
+}
+
+func (d *Daemon) verifyExternalTaskIntegration(ctx context.Context, repoDir, taskID, integratedRevision string, operation domain.PublicationOperation) (taskCloseIntegrationResult, error) {
+	targetOID, err := d.git.ResolveCommit(ctx, repoDir, integratedRevision)
+	if err != nil {
+		return taskCloseIntegrationResult{}, fmt.Errorf("resolve supplied integrated revision: %w", err)
+	}
+	currentTargetOID, err := d.git.ResolveCommit(ctx, repoDir, operation.TargetBranch)
+	if err != nil {
+		return taskCloseIntegrationResult{}, fmt.Errorf("resolve configured target branch: %w", err)
+	}
+	contained, err := d.git.CommitContainedInRef(ctx, repoDir, targetOID, currentTargetOID)
+	if err != nil || !contained {
+		return taskCloseIntegrationResult{}, fmt.Errorf("supplied integrated revision %s is not reachable from configured target %s", targetOID, currentTargetOID)
+	}
+	contained, err = d.git.CommitContainedInRef(ctx, repoDir, operation.SourceRevision, targetOID)
+	if err != nil || !contained {
+		return taskCloseIntegrationResult{}, fmt.Errorf("reviewed source %s is not reachable from supplied integrated revision %s", operation.SourceRevision, targetOID)
+	}
+	candidateTree, err := d.git.ResolveTree(ctx, repoDir, operation.CandidateRevision)
+	if err != nil {
+		return taskCloseIntegrationResult{}, fmt.Errorf("resolve accepted candidate tree: %w", err)
+	}
+	targetTree, err := d.git.ResolveTree(ctx, repoDir, targetOID)
+	if err != nil {
+		return taskCloseIntegrationResult{}, fmt.Errorf("resolve supplied integration tree: %w", err)
+	}
+	if candidateTree != targetTree {
+		return taskCloseIntegrationResult{}, fmt.Errorf("supplied integration tree %s does not match accepted candidate tree %s", targetTree, candidateTree)
+	}
+	return taskCloseIntegrationResult{
+		Requested: true, Integrated: true, ExternalReconciled: true, ConfiguredBaseTarget: true,
+		TargetID: "base", SourceBranch: "external/" + taskID, TargetBranch: operation.TargetBranch,
+		BaseOID: operation.BaseRevision, SourceOID: operation.SourceRevision, TargetOID: targetOID,
+		PublicationOperationID: operation.OperationID,
+	}, nil
 }
 
 func (e *taskCloseExpectedBaseStaleError) Error() string {
@@ -2190,6 +2262,31 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	}
 	if closeOutcome == domain.IssueCloseCancelled {
 		cmd.IntegrateBeforeClose = false
+		if strings.TrimSpace(cmd.ExternalIntegratedRevision) != "" {
+			return taskCloseResult{}, fmt.Errorf("external integration reconciliation is valid only for completed close")
+		}
+	}
+	if strings.TrimSpace(cmd.ExternalIntegratedRevision) != "" {
+		var operation domain.PublicationOperation
+		var integration taskCloseIntegrationResult
+		operation, integration, err = d.reconcileExternalTaskIntegration(ctx, projectID, taskID, cmd.ExternalIntegratedRevision)
+		if err != nil {
+			return taskCloseResult{}, fmt.Errorf("reconcile externally completed integration for issue %s: %w", taskID, err)
+		}
+		cmd.IntegrateBeforeClose = true
+		cmd.ExpectedSourceOID = operation.SourceRevision
+		cmd.ExpectedBaseOID = operation.BaseRevision
+		cmd.ExpectedReviewerID = operation.ActorID
+		cmd.ExpectedReviewerKind = operation.ReviewerKind
+		cmd.ExpectedReviewEpochEventID = operation.ReviewEpochEventID
+		cmd.ExpectedAcceptedReviewEventID = operation.AcceptedReviewEventID
+		cmd.ExpectedPublicationOperationID = operation.OperationID
+		cmd.ExpectedAcceptedPublicationOperationID = operation.OperationID
+		if operation.EvidenceDigest != "" {
+			cmd.ExpectedReviewEvidence = &issues.ReviewEvidencePin{Source: operation.EvidenceSource, EventID: operation.EvidenceEventID, Seq: operation.EvidenceSeq, Digest: operation.EvidenceDigest}
+		}
+		ctx = withTaskClosePublicationBinding(ctx, operation.OperationID, "external-reconciliation")
+		ctx = context.WithValue(ctx, externalTaskIntegrationContextKey{}, integration)
 	}
 	if cmd.HistoricalAuthorization != nil {
 		if !cmd.IntegrateBeforeClose || closeOutcome != domain.IssueCloseCompleted {
@@ -2937,6 +3034,7 @@ func (d *Daemon) liveTmuxSessionSet(ctx context.Context) (map[string]struct{}, b
 type taskCloseIntegrationResult struct {
 	Requested                        bool
 	Integrated                       bool
+	ExternalReconciled               bool
 	NoChanges                        bool
 	ReceiptRecovered                 bool
 	ConfiguredBaseTarget             bool
@@ -3064,6 +3162,20 @@ func (d *Daemon) persistTaskCloseIntegrationPublication(ctx context.Context, pro
 		}
 	}
 	if !integration.ConfiguredBaseTarget || (!integration.Integrated && !integration.ReceiptRecovered) {
+		return nil
+	}
+	if integration.ExternalReconciled {
+		issueClient := d.issueClientForProject(projectID)
+		if issueClient == nil {
+			return fmt.Errorf("record external integration reconciliation: issue store unavailable")
+		}
+		_, err := issueClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
+			Type: domain.IssueObservationEventType("task.integration_reconciled"), Source: "daemon:task.close", SourceCommand: "task.close",
+			Payload: map[string]any{"publication_operation_id": integration.PublicationOperationID, "base_oid": integration.BaseOID, "source_oid": integration.SourceOID, "target_oid": integration.TargetOID, "target_branch": integration.TargetBranch, "candidate_tree_verified": true, "source_ancestry_verified": true},
+		})
+		if err != nil {
+			return fmt.Errorf("record external integration reconciliation evidence: %w", err)
+		}
 		return nil
 	}
 	configured, err := d.publicationEvidenceConfigured(projectID)
@@ -3289,6 +3401,9 @@ func observationPayloadBool(payload map[string]any, key string) bool {
 func (d *Daemon) integrateTaskBeforeClose(ctx context.Context, projectID, taskID string, requested, allowMissingSource bool, expectedSourceOID, expectedBaseOID string) (taskCloseIntegrationResult, error) {
 	if !requested {
 		return taskCloseIntegrationResult{}, nil
+	}
+	if reconciled, ok := ctx.Value(externalTaskIntegrationContextKey{}).(taskCloseIntegrationResult); ok {
+		return reconciled, nil
 	}
 	expectedSourceOID = strings.TrimSpace(expectedSourceOID)
 	expectedBaseOID = strings.TrimSpace(expectedBaseOID)

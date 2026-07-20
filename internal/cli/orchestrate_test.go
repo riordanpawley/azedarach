@@ -1852,11 +1852,11 @@ func TestParseOrchestratePromptArgs(t *testing.T) {
 }
 
 func TestParseOrchestrateIntegrateAndCloseSessionArgs(t *testing.T) {
-	integrate, err := ParseOrchestrateIntegrateArgs([]string{"--issue", "az-2", "--apply", "--json"})
+	integrate, err := ParseOrchestrateIntegrateArgs([]string{"--issue", "az-2", "--external-integrated-revision", "abc123", "--apply", "--json"})
 	if err != nil {
 		t.Fatalf("ParseOrchestrateIntegrateArgs error = %v", err)
 	}
-	if integrate.IssueID != "az-2" || !integrate.Apply || !integrate.JSON {
+	if integrate.IssueID != "az-2" || integrate.ExternalIntegratedRevision != "abc123" || !integrate.Apply || !integrate.JSON {
 		t.Fatalf("integrate opts = %+v", integrate)
 	}
 

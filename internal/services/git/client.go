@@ -1297,6 +1297,23 @@ func (c *Client) ResolveCommit(ctx context.Context, worktree, ref string) (strin
 	return oid, nil
 }
 
+// ResolveTree resolves a commit-ish to its exact tree object ID.
+func (c *Client) ResolveTree(ctx context.Context, worktree, ref string) (string, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return "", fmt.Errorf("ref is required")
+	}
+	oid, err := c.revParseVerify(ctx, worktree, ref+"^{tree}")
+	if err != nil {
+		return "", fmt.Errorf("resolve tree %s: %w", ref, err)
+	}
+	oid = strings.TrimSpace(oid)
+	if oid == "" {
+		return "", fmt.Errorf("resolve tree %s returned an empty object ID", ref)
+	}
+	return oid, nil
+}
+
 // IssueEvidenceCommits returns commits on ref whose subject starts with
 // "<issueID>:". Az close/integration commits use that convention as durable
 // code evidence for closed child issues.
