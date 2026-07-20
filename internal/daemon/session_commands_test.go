@@ -5188,6 +5188,9 @@ func TestSessionResolveConflictRetiresWindowAfterAmbiguousCreateErrors(t *testin
 		{name: "respawn window then error", respawn: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.respawn {
+				t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
+			}
 			ctx := context.Background()
 			repoDir := t.TempDir()
 			projectID := "proj-conflict-ambiguous"
@@ -5210,7 +5213,7 @@ func TestSessionResolveConflictRetiresWindowAfterAmbiguousCreateErrors(t *testin
 			}
 			memoryStore := daemonstate.NewStore()
 			d := &Daemon{
-				cfg:  Config{RepoDir: repoDir, BaseBranch: "main", CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+				cfg:  Config{RepoDir: repoDir, BaseBranch: "main", CLITool: "codex", SessionShell: "zsh", Logger: slog.Default(), ScopedRuntime: tc.respawn},
 				tmux: tmux.NewClient(runner, slog.Default()), issues: issuesClient,
 				session: daemonhandlers.NewSessionHandler(memoryStore), sessionStore: memoryStore, revision: map[string]uint64{},
 			}
@@ -5231,6 +5234,18 @@ func TestSessionResolveConflictRetiresWindowAfterAmbiguousCreateErrors(t *testin
 			}
 			if !runner.sessions[sessionID] {
 				t.Fatalf("cleanup removed the containing session %s", sessionID)
+			}
+			if tc.respawn {
+				var respawnCommand []string
+				for _, command := range runner.commands {
+					if len(command) > 0 && command[0] == "respawn-window" {
+						respawnCommand = command
+						break
+					}
+				}
+				if got, ok := tmuxCommandEnvironmentValue(respawnCommand, "AZEDARACH_DAEMON_SCOPE"); !ok || got != "worktree" {
+					t.Fatalf("respawn window scope = %q, present=%t; command=%v", got, ok, respawnCommand)
+				}
 			}
 		})
 	}
@@ -7883,6 +7898,7 @@ func TestUntargetedReconcilePreservesProjectOrchestratorRuntime(t *testing.T) {
 }
 
 func TestReconcileRecoversRootedOrchestratorThroughOrchestratorAuthority(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")
 	for _, target := range []string{"targeted", "full", "batched"} {
 		t.Run(target, func(t *testing.T) {
 			repoDir := t.TempDir()
@@ -7905,7 +7921,7 @@ func TestReconcileRecoversRootedOrchestratorThroughOrchestratorAuthority(t *test
 			runner := newSessionStartTmuxRunner()
 			store := daemonstate.NewStore()
 			manager := git.NewWorktreeManager(&testGitRunner{worktreePath: filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-"+issueID), branchName: "riordan/" + issueID + "/root"}, repoDir, slog.Default())
-			d := &Daemon{cfg: Config{RepoDir: repoDir, CLITool: "codex", Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()), session: daemonhandlers.NewSessionHandler(store), sessionStore: store, runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{repoDir: runtimeStore}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore}, worktreeManagersByRoot: map[string]*git.WorktreeManager{repoDir: manager}, worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager}}
+			d := &Daemon{cfg: Config{RepoDir: repoDir, CLITool: "codex", CodexAppServer: true, Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()), session: daemonhandlers.NewSessionHandler(store), sessionStore: store, runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{repoDir: runtimeStore}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore}, worktreeManagersByRoot: map[string]*git.WorktreeManager{repoDir: manager}, worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager}}
 			acknowledgeManagedAgentOnInitialLaunch(t, d, runner, projectID)
 			targetIssue := issueID
 			if target == "full" {
@@ -7939,6 +7955,16 @@ func TestReconcileRecoversRootedOrchestratorThroughOrchestratorAuthority(t *test
 			contract := requireNewSessionLaunchCommand(t, runner, sessionID) + "\n" + requireNewSessionLaunchScript(t, runner, sessionID) + "\n" + runner.launchPromptContents[sessionID] + "\n" + strings.Join(runner.inputPayloads, "\n") + "\n" + strings.Join(runner.sendKeysPayloads, "\n")
 			if !strings.Contains(contract, "Role: orchestrator") || strings.Contains(contract, "Role: worker") {
 				t.Fatalf("rooted orchestrator launch contract=%q", contract)
+			}
+			var launchArgs []string
+			for _, command := range runner.commands {
+				if len(command) > 0 && command[0] == "new-session" {
+					launchArgs = command
+					break
+				}
+			}
+			if got, ok := tmuxCommandEnvironmentValue(launchArgs, "AZEDARACH_DAEMON_SCOPE"); !ok || got != "global" {
+				t.Fatalf("rooted orchestrator scope = %q, present=%t; command=%v", got, ok, launchArgs)
 			}
 		})
 	}
@@ -8021,7 +8047,17 @@ func TestManagedRuntimeLifecycleEvaluationConsultsInvariantPolicy(t *testing.T) 
 }
 
 func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
-	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
+	priorScope, hadPriorScope := os.LookupEnv("AZEDARACH_DAEMON_SCOPE")
+	if err := os.Unsetenv("AZEDARACH_DAEMON_SCOPE"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if hadPriorScope {
+			_ = os.Setenv("AZEDARACH_DAEMON_SCOPE", priorScope)
+		} else {
+			_ = os.Unsetenv("AZEDARACH_DAEMON_SCOPE")
+		}
+	})
 	repoDir := t.TempDir()
 	managedDir := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.current")
 	t.Setenv("PATH", filepath.Join(repoDir, "bin")+string(os.PathListSeparator)+"/usr/bin:/bin")
@@ -8059,10 +8095,10 @@ func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 	daemon := &Daemon{
 		cfg: Config{
 			RepoDir:                 repoDir,
-			CLITool:                 "claude",
+			CLITool:                 "codex",
+			CodexAppServer:          true,
 			ManagedGenerationBinDir: managedDir,
 			Logger:                  slog.Default(),
-			ScopedRuntime:           true,
 		},
 		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
 		session:      daemonhandlers.NewSessionHandler(store),
@@ -8109,7 +8145,7 @@ func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 	if got, ok := tmuxCommandEnvironmentValue(recreatedCommand, "PATH"); ok || got != "" {
 		t.Fatalf("recreated session injected PATH = %q, %t; command=%v", got, ok, recreatedCommand)
 	}
-	if got, ok := tmuxCommandEnvironmentValue(recreatedCommand, "AZEDARACH_DAEMON_SCOPE"); !ok || got != "worktree" {
+	if got, ok := tmuxCommandEnvironmentValue(recreatedCommand, "AZEDARACH_DAEMON_SCOPE"); !ok || got != "global" {
 		t.Fatalf("recreated session scope = %q, present=%t; command=%v", got, ok, recreatedCommand)
 	}
 	launchCommand := recreatedCommand[len(recreatedCommand)-1]
