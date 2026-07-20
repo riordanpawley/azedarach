@@ -31,7 +31,7 @@
       {
         "id": "artifact-install-contract",
         "command": "just test-build-contract",
-        "resources": ["go-build-cache"]
+        "resources": ["go-build-cache", "go-test-cache"]
       },
       {
         "id": "local-tracing-contract",
