@@ -8021,6 +8021,7 @@ func TestManagedRuntimeLifecycleEvaluationConsultsInvariantPolicy(t *testing.T) 
 }
 
 func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
 	repoDir := t.TempDir()
 	managedDir := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.current")
 	t.Setenv("PATH", filepath.Join(repoDir, "bin")+string(os.PathListSeparator)+"/usr/bin:/bin")
@@ -8061,6 +8062,7 @@ func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 			CLITool:                 "claude",
 			ManagedGenerationBinDir: managedDir,
 			Logger:                  slog.Default(),
+			ScopedRuntime:           true,
 		},
 		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
 		session:      daemonhandlers.NewSessionHandler(store),
@@ -8106,6 +8108,9 @@ func TestReconcileRecoversFromDurableSessionProjection(t *testing.T) {
 	}
 	if got, ok := tmuxCommandEnvironmentValue(recreatedCommand, "PATH"); ok || got != "" {
 		t.Fatalf("recreated session injected PATH = %q, %t; command=%v", got, ok, recreatedCommand)
+	}
+	if got, ok := tmuxCommandEnvironmentValue(recreatedCommand, "AZEDARACH_DAEMON_SCOPE"); !ok || got != "worktree" {
+		t.Fatalf("recreated session scope = %q, present=%t; command=%v", got, ok, recreatedCommand)
 	}
 	launchCommand := recreatedCommand[len(recreatedCommand)-1]
 	if !strings.Contains(launchCommand, "session-launch") || strings.Contains(launchCommand, "export PATH=") || strings.Contains(launchCommand, managedDir) {
