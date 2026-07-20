@@ -185,6 +185,7 @@ func (d *Daemon) reconcileExternalTaskIntegration(ctx context.Context, projectID
 		return domain.PublicationOperation{}, taskCloseIntegrationResult{}, fmt.Errorf("read accepted publication authority: %w", err)
 	}
 	var acceptedRootID string
+	var acceptedReviewEventID int64
 	for _, event := range events {
 		outcome, trusted := domain.TrustedReviewOutcome(event)
 		if !trusted {
@@ -194,6 +195,7 @@ func (d *Daemon) reconcileExternalTaskIntegration(ctx context.Context, projectID
 			return domain.PublicationOperation{}, taskCloseIntegrationResult{}, fmt.Errorf("latest authoritative review outcome for %s is %s, not accepted", taskID, outcome)
 		}
 		acceptedRootID = observationPayloadString(event.Payload, "publication_operation_id")
+		acceptedReviewEventID = event.ID
 		break
 	}
 	if acceptedRootID == "" {
@@ -208,6 +210,10 @@ func (d *Daemon) reconcileExternalTaskIntegration(ctx context.Context, projectID
 	}
 	if strings.TrimSpace(operation.AcceptedPublicationOperationID) != acceptedRootID {
 		return domain.PublicationOperation{}, taskCloseIntegrationResult{}, fmt.Errorf("accepted publication operation %s is not the immutable publication root", acceptedRootID)
+	}
+	if protocol.NormalizeProjectID(operation.ProjectID) != protocol.NormalizeProjectID(projectID) ||
+		!naming.IssueIDsEqual(operation.IssueID, taskID) || operation.AcceptedReviewEventID != acceptedReviewEventID {
+		return domain.PublicationOperation{}, taskCloseIntegrationResult{}, fmt.Errorf("accepted publication root %s has stale project, issue, or review identity", acceptedRootID)
 	}
 	if !strings.EqualFold(strings.TrimSpace(operation.TargetID), "base") {
 		return domain.PublicationOperation{}, taskCloseIntegrationResult{}, fmt.Errorf("accepted publication target %q is not the configured base", operation.TargetID)
