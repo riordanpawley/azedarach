@@ -111,6 +111,24 @@ func runValidationCommand(cfg *config.Config, args []string) error {
 			}
 			return printValidationValue(result, *jsonOutput)
 		})
+	case "artifact-read":
+		flags := flag.NewFlagSet("validation artifact-read", flag.ContinueOnError)
+		reference := flags.String("reference", "", "opaque artifact reference")
+		output := flags.String("output", "", "write content to this file instead of stdout")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		return runCommand(cfg, func(deps *cli.Dependencies) error {
+			result, err := deps.DaemonClient.ValidationArtifactRead(context.Background(), protocol.ValidationArtifactReadRequest{Reference: *reference})
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(*output) == "" {
+				_, err = os.Stdout.Write(result.Content)
+				return err
+			}
+			return os.WriteFile(*output, result.Content, 0o600)
+		})
 	case "evidence-record":
 		flags := flag.NewFlagSet("validation evidence-record", flag.ContinueOnError)
 		evidenceID := flags.String("id", "", "stable evidence id")
@@ -251,11 +269,12 @@ func printValidationValue(value any, asJSON bool) error {
 }
 
 func printValidationUsage() {
-	fmt.Println(strings.TrimSpace(`Usage: az validation <acquire|heartbeat|authorize-nested|finish|status|watch|evidence-record|evidence-status|evidence-evaluate> [flags]
+	fmt.Println(strings.TrimSpace(`Usage: az validation <acquire|heartbeat|authorize-nested|finish|artifact-read|status|watch|evidence-record|evidence-status|evidence-evaluate> [flags]
   acquire --request <id> --token <secret> --scope repository|ticket --purpose capacity|development|push_gate|review_evidence --isolation <mode> --environment-fingerprint <hash> --override none|no_reuse|force_rerun|emergency_skip [--override-actor <id> --override-reason <text>] [--issue <id>] --class aggregate|shared|safe --profile <name> --command <text> --revision <sha> [--wait] [--json]
   heartbeat --request <id> --token <secret> [--ttl 30]
   authorize-nested --request <id> --token <secret> --class aggregate|shared|safe
   finish --request <id> --token <secret> --state completed|cancelled|failed [--outcome text] [--evidence-json object] [--json]
+  artifact-read --reference artifact:sha256/<digest> [--output <path>]
   evidence-record --id <id> --issue <id> --layer patch_review|active_path --validation-request <id> [--reused-from <id>] [--json]
   evidence-status [--issue <id>] [--json]
   evidence-evaluate --issue <id> [--json]

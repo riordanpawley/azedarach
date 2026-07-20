@@ -8,6 +8,7 @@ const (
 	CommandValidationNested            = "validation.authorize_nested"
 	CommandValidationFinish            = "validation.finish"
 	CommandValidationStatus            = "validation.status"
+	CommandValidationArtifactRead      = "validation.artifact.read"
 	CommandPublicationEvidenceRecord   = "validation.publication_evidence.record"
 	CommandPublicationEvidenceStatus   = "validation.publication_evidence.status"
 	CommandPublicationEvidenceEvaluate = "validation.publication_evidence.evaluate"
@@ -55,6 +56,16 @@ type ValidationFinishRequest struct {
 }
 
 type ValidationStatusRequest struct{}
+
+type ValidationArtifactReadRequest struct {
+	Reference string `json:"reference"`
+}
+
+type ValidationArtifactReadResponse struct {
+	Reference string `json:"reference"`
+	Digest    string `json:"digest"`
+	Content   []byte `json:"content"`
+}
 
 type ValidationRequestResponse struct {
 	Request domain.ValidationRequest     `json:"request"`

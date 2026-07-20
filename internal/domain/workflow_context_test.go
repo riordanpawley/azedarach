@@ -42,7 +42,7 @@ func TestWorkflowContextExcludesSensitiveLocalAndIrrelevantSources(t *testing.T)
 	packet, err := BuildWorkflowContextPacket(WorkflowContextInput{
 		Role: WorkflowRoleWorker, IssueID: "npm-7", SourceRevision: "deadbeef",
 		Summary: "portable consumer", Requirements: []string{"npm test", "token=secret", "inspect /Users/alice/private", `inspect D:\private\output`},
-		ArtifactLinks: []WorkflowArtifactReference{{Label: "CI", Reference: "https://ci.example.test/run/7"}, {Label: "local", Reference: "/tmp/output.log"}, {Label: "token=secret", Reference: "https://ci.example.test/private"}, {Label: "credentials", Reference: "https://user:credential@ci.example.test/private"}},
+		ArtifactLinks: []WorkflowArtifactReference{{Label: "CI", Reference: "https://ci.example.test/run/7"}, {Label: "local", Reference: "/tmp/output.log"}, {Label: "token=secret", Reference: "https://ci.example.test/private"}, {Label: "credentials", Reference: "https://user:credential@ci.example.test/private"}, {Label: "presigned", Reference: "https://storage.example.test/report?X-Amz-Credential=key&X-Amz-Signature=sig"}, {Label: "query-token", Reference: "https://ci.example.test/report?access_token=secret"}, {Label: "fragment-token", Reference: "https://ci.example.test/report#token=secret"}},
 	})
 	if err != nil {
 		t.Fatal(err)

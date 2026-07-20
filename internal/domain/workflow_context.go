@@ -367,6 +367,12 @@ func workflowArtifactReferenceAllowed(value string) bool {
 	if parsed.User != nil {
 		return false
 	}
+	// Artifact references are copied into prompts and durable workflow records.
+	// Query strings and fragments are not needed for the supported reference
+	// schemes and commonly carry presigned credentials or bearer tokens.
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
 	if parsed.Scheme == "" {
 		return !strings.Contains(value, "..")
 	}

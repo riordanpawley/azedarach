@@ -119,7 +119,7 @@ func TestValidationFinishReturnsBoundedPortableFailureSummary(t *testing.T) {
 	reference := result.Summary.ArtifactLinks[0]
 	assert.Contains(t, reference.Reference, "artifact:sha256/")
 	assert.Contains(t, reference.Digest, "sha256:")
-	retainedPath, err := d.resolveValidationArtifact(reference.Reference)
+	retainedPath, err := d.resolveValidationArtifact("consumer-project", reference.Reference)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(retainedOutput, []byte("mutated caller output\n"), 0o600))
 	retained, err := os.ReadFile(retainedPath)
@@ -131,8 +131,39 @@ func TestValidationFinishReturnsBoundedPortableFailureSummary(t *testing.T) {
 	assert.Equal(t, "complete npm output\n", string(retained), "retained artifact must survive source deletion")
 	require.NoError(t, os.Chmod(retainedPath, 0o600))
 	require.NoError(t, os.WriteFile(retainedPath, []byte("corrupt"), 0o600))
-	_, err = d.resolveValidationArtifact(reference.Reference)
+	_, err = d.resolveValidationArtifact("consumer-project", reference.Reference)
 	assert.ErrorContains(t, err, "digest mismatch")
+}
+
+func TestValidationArtifactReadCommandIsProjectScopedAndDigestVerified(t *testing.T) {
+	root := t.TempDir()
+	d := &Daemon{cfg: Config{WorkflowArtifactDir: filepath.Join(root, "artifacts")}}
+	source := filepath.Join(root, "output.log")
+	require.NoError(t, os.WriteFile(source, []byte("complete output\n"), 0o600))
+	reference, err := d.retainValidationArtifact("project-a", source)
+	require.NoError(t, err)
+	body, err := json.Marshal(protocol.ValidationArtifactReadRequest{Reference: reference.Reference})
+	require.NoError(t, err)
+
+	read, err := d.handleValidationCommand(context.Background(), protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "read", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandValidationArtifactRead, Meta: protocol.Metadata{ProjectID: "project-a"}, Body: body})
+	require.NoError(t, err)
+	require.True(t, read.OK, "response=%+v", read)
+	var result protocol.ValidationArtifactReadResponse
+	require.NoError(t, json.Unmarshal(read.Body, &result))
+	assert.Equal(t, "complete output\n", string(result.Content))
+	assert.Equal(t, reference.Digest, result.Digest)
+
+	unauthorized, err := d.handleValidationCommand(context.Background(), protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "read-other", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandValidationArtifactRead, Meta: protocol.Metadata{ProjectID: "project-b"}, Body: body})
+	require.NoError(t, err)
+	assert.False(t, unauthorized.OK)
+	assert.Contains(t, unauthorized.Error.Message, "unavailable")
+
+	badBody, err := json.Marshal(protocol.ValidationArtifactReadRequest{Reference: "artifact:sha256/../../secret"})
+	require.NoError(t, err)
+	bad, err := d.handleValidationCommand(context.Background(), protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "read-bad", Kind: protocol.EnvelopeKindCommand, Command: protocol.CommandValidationArtifactRead, Meta: protocol.Metadata{ProjectID: "project-a"}, Body: badBody})
+	require.NoError(t, err)
+	assert.False(t, bad.OK)
+	assert.Contains(t, bad.Error.Message, "invalid validation artifact")
 }
 
 func TestRetainValidationArtifactFailsClosedWhenStorageUnavailable(t *testing.T) {
@@ -142,7 +173,7 @@ func TestRetainValidationArtifactFailsClosedWhenStorageUnavailable(t *testing.T)
 	source := filepath.Join(root, "output.log")
 	require.NoError(t, os.WriteFile(source, []byte("output"), 0o600))
 	d := &Daemon{cfg: Config{WorkflowArtifactDir: blocked}}
-	_, err := d.retainValidationArtifact(source)
+	_, err := d.retainValidationArtifact("project", source)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not a directory")
 }

@@ -30,6 +30,9 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 	var store *operationstore.SQLiteStore
 	var storeErr error
 	switch req.Command {
+	case protocol.CommandValidationArtifactRead:
+		// Artifact reads are project-authorized by their project-scoped storage
+		// namespace and do not require the validation projection store.
 	case protocol.CommandPublicationEvidenceRecord,
 		protocol.CommandPublicationEvidenceStatus, protocol.CommandPublicationEvidenceEvaluate:
 		store, storeErr = d.publicationEvidenceProjectionStore()
@@ -97,6 +100,16 @@ func (d *Daemon) handleValidationCommand(ctx context.Context, req protocol.Reque
 			return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
 		}
 		return d.validationSuccessResponse(req, protocol.ValidationStatusResponse{Snapshot: snapshot})
+	case protocol.CommandValidationArtifactRead:
+		var body protocol.ValidationArtifactReadRequest
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("decode validation artifact read: %v", err)), nil
+		}
+		content, digest, err := d.readValidationArtifact(projectID, body.Reference)
+		if err != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, err.Error()), nil
+		}
+		return d.validationSuccessResponse(req, protocol.ValidationArtifactReadResponse{Reference: strings.TrimSpace(body.Reference), Digest: "sha256:" + digest, Content: content})
 	case protocol.CommandPublicationEvidenceRecord:
 		var body protocol.PublicationEvidenceRecordRequest
 		if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -157,7 +170,7 @@ func (d *Daemon) validationRequestSuccessResponse(req protocol.RequestEnvelope, 
 	}
 	outputPresent := request.Evidence.FailureSummary != "" || len(paths) > 0
 	for _, path := range uniqueNonEmpty(paths) {
-		artifact, retainErr := d.retainValidationArtifact(path)
+		artifact, retainErr := d.retainValidationArtifact(request.ProjectID, path)
 		if retainErr != nil {
 			continue
 		}
@@ -188,20 +201,22 @@ func (d *Daemon) validationRequestSuccessResponse(req protocol.RequestEnvelope, 
 	return d.validationSuccessResponse(req, protocol.ValidationRequestResponse{Request: responseRequest, Context: contextPacket, Summary: summary})
 }
 
-func (d *Daemon) validationArtifactRoot() string {
+func (d *Daemon) validationArtifactRoot(projectID string) string {
+	projectDigest := sha256.Sum256([]byte(strings.TrimSpace(projectID)))
+	projectKey := fmt.Sprintf("%x", projectDigest[:])
 	if configured := strings.TrimSpace(d.cfg.WorkflowArtifactDir); configured != "" {
-		return filepath.Join(configured, "validation", "sha256")
+		return filepath.Join(configured, "validation", projectKey, "sha256")
 	}
 	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
-		return filepath.Join(home, ".azedarach", "artifacts", "validation", "sha256")
+		return filepath.Join(home, ".azedarach", "artifacts", "validation", projectKey, "sha256")
 	}
-	return filepath.Join(os.TempDir(), "azedarach", "artifacts", "validation", "sha256")
+	return filepath.Join(os.TempDir(), "azedarach", "artifacts", "validation", projectKey, "sha256")
 }
 
 // retainValidationArtifact creates an immutable, content-addressed copy before
 // a result claims that command output was retained. The opaque reference is
 // resolvable independently of the caller-owned source path.
-func (d *Daemon) retainValidationArtifact(source string) (domain.WorkflowArtifactReference, error) {
+func (d *Daemon) retainValidationArtifact(projectID, source string) (domain.WorkflowArtifactReference, error) {
 	in, err := os.Open(strings.TrimSpace(source))
 	if err != nil {
 		return domain.WorkflowArtifactReference{}, err
@@ -211,7 +226,7 @@ func (d *Daemon) retainValidationArtifact(source string) (domain.WorkflowArtifac
 	if err != nil || !info.Mode().IsRegular() {
 		return domain.WorkflowArtifactReference{}, fmt.Errorf("validation artifact source is not a regular file")
 	}
-	root := d.validationArtifactRoot()
+	root := d.validationArtifactRoot(projectID)
 	if err = os.MkdirAll(root, 0o700); err != nil {
 		return domain.WorkflowArtifactReference{}, err
 	}
@@ -251,7 +266,7 @@ func (d *Daemon) retainValidationArtifact(source string) (domain.WorkflowArtifac
 	return domain.WorkflowArtifactReference{Label: "validation report", Reference: "artifact:sha256/" + digest, Digest: "sha256:" + digest}, nil
 }
 
-func (d *Daemon) resolveValidationArtifact(reference string) (string, error) {
+func (d *Daemon) resolveValidationArtifact(projectID, reference string) (string, error) {
 	const prefix = "artifact:sha256/"
 	digest := strings.TrimPrefix(strings.TrimSpace(reference), prefix)
 	if len(digest) != sha256.Size*2 || prefix+digest != strings.TrimSpace(reference) {
@@ -262,7 +277,12 @@ func (d *Daemon) resolveValidationArtifact(reference string) (string, error) {
 			return "", fmt.Errorf("invalid validation artifact digest")
 		}
 	}
-	path := filepath.Join(d.validationArtifactRoot(), digest)
+	root := d.validationArtifactRoot(projectID)
+	path := filepath.Join(root, digest)
+	rel, relErr := filepath.Rel(root, path)
+	if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("invalid validation artifact path")
+	}
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() {
 		return "", fmt.Errorf("validation artifact unavailable")
@@ -278,6 +298,19 @@ func (d *Daemon) resolveValidationArtifact(reference string) (string, error) {
 		return "", fmt.Errorf("validation artifact digest mismatch")
 	}
 	return path, nil
+}
+
+func (d *Daemon) readValidationArtifact(projectID, reference string) ([]byte, string, error) {
+	path, err := d.resolveValidationArtifact(projectID, reference)
+	if err != nil {
+		return nil, "", err
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("validation artifact unavailable")
+	}
+	digest := strings.TrimPrefix(strings.TrimSpace(reference), "artifact:sha256/")
+	return content, digest, nil
 }
 
 func (d *Daemon) validatePublicationEvidenceIssue(ctx context.Context, projectID, issueID string) error {

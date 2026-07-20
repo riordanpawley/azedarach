@@ -1589,14 +1589,14 @@ func buildOrchestrationResultSummaries(result protocol.OrchestrationIntentResult
 		status, outcome, failure := "skipped", result.Skipped[issueID], result.Failed[issueID]
 		if failure != "" {
 			status = "failed"
+		} else if pendingForIssue(result.Pending, issueID) {
+			status = "pending"
 		} else if _, ok := started[issueID]; ok {
 			status = "started"
 		} else if _, ok := returned[issueID]; ok {
 			status = "returned"
 		} else if _, ok := closed[issueID]; ok {
 			status = "completed"
-		} else if pendingForIssue(result.Pending, issueID) {
-			status = "pending"
 		}
 		revision := domain.WorkflowIssueContextRevision(task)
 		if exact := strings.TrimSpace(revisions[issueID]); exact != "" {

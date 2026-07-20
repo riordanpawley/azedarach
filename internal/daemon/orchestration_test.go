@@ -655,6 +655,21 @@ func TestBuildOrchestrationResultSummariesFailsClosedForMissingIssueInput(t *tes
 	}
 }
 
+func TestBuildOrchestrationResultSummariesReportsSubmittedOperationPending(t *testing.T) {
+	task := domain.Task{ID: "child", Type: domain.TypeTask, Title: "Child", Status: domain.StatusInProgress}
+	result, err := buildOrchestrationResultSummaries(protocol.OrchestrationIntentResult{
+		Requested: []string{"child"},
+		Started:   []string{"child"},
+		Pending:   []protocol.OrchestrationPending{{IssueID: "child", OperationID: "op-1", OperationState: string(protocol.OperationStateRunning)}},
+	}, []domain.Task{task}, domain.WorkflowRoleWorker, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result) != 1 || result[0].Summary.Status != "pending" {
+		t.Fatalf("bounded result = %+v, want pending", result)
+	}
+}
+
 func TestRootedOrchestrationReviewQueueStopsAtDirectChildren(t *testing.T) {
 	ctx := context.Background()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())
