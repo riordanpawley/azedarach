@@ -8863,6 +8863,7 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 		hub:          d.hub,
 		nextRevision: d.nextRevision,
 	})
+	t.Cleanup(func() { _ = d.operationRuntime.Close() })
 	d.gitStatusAdapter = &gitServiceAdapter{
 		client:            git.NewClient(runner, logger),
 		runtimeStateStore: runtimeStore,
@@ -9272,6 +9273,7 @@ func TestTaskCloseCommandForceRemovesDirtyAlreadyIntegratedWorktree(t *testing.T
 		hub:          d.hub,
 		nextRevision: d.nextRevision,
 	})
+	t.Cleanup(func() { _ = d.operationRuntime.Close() })
 	d.gitStatusAdapter = &gitServiceAdapter{
 		client:            git.NewClient(runner, logger),
 		runtimeStateStore: runtimeStore,
@@ -9547,6 +9549,7 @@ func TestTaskCloseDeferredWorktreeCleanupCancelledWhenIssueReopens(t *testing.T)
 		hub:          d.hub,
 		nextRevision: d.nextRevision,
 	})
+	t.Cleanup(func() { _ = d.operationRuntime.Close() })
 	d.gitStatusAdapter = &gitServiceAdapter{
 		client:            git.NewClient(runner, logger),
 		runtimeStateStore: runtimeStore,
