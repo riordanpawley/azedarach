@@ -399,6 +399,16 @@ func retrieveValidationArtifactWithOps(ctx context.Context, reference, output st
 		return fmt.Errorf("close validation artifact destination directory: %w", err)
 	}
 	dirClosed = true
+	if backupPath != "" {
+		if err = fileOps.remove(backupPath); err != nil {
+			if restoreErr := fileOps.rename(backupPath, output); restoreErr != nil {
+				return fmt.Errorf("remove validation artifact destination backup: %w (restore destination: %v)", err, restoreErr)
+			}
+			backupPath = ""
+			return fmt.Errorf("remove validation artifact destination backup: %w", err)
+		}
+		backupPath = ""
+	}
 	stagedPath = ""
 	return nil
 }

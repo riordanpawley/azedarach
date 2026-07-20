@@ -139,7 +139,7 @@ func TestRetrieveValidationArtifactPreservesDestinationOnStageDurabilityFailures
 }
 
 func TestRetrieveValidationArtifactPreservesDestinationOnPublishDurabilityFailures(t *testing.T) {
-	for _, failure := range []string{"directory-open", "rename", "directory-sync", "directory-close"} {
+	for _, failure := range []string{"directory-open", "rename", "directory-sync", "directory-close", "backup-remove"} {
 		t.Run(failure, func(t *testing.T) {
 			content := []byte("complete retained output")
 			reference, digest := testValidationArtifactIdentity(content)
@@ -159,6 +159,15 @@ func TestRetrieveValidationArtifactPreservesDestinationOnPublishDurabilityFailur
 			case "directory-close":
 				ops.openDirectory = func(string) (validationArtifactDirectory, error) {
 					return &failingValidationArtifactDirectory{failure: "close"}, nil
+				}
+			case "backup-remove":
+				removeCalls := 0
+				ops.remove = func(path string) error {
+					removeCalls++
+					if removeCalls == 1 {
+						return fmt.Errorf("remove failed")
+					}
+					return os.Remove(path)
 				}
 			}
 			err := retrieveValidationArtifactWithOps(context.Background(), reference, destination, nil, testValidationArtifactReader(reference, digest, content, 5, nil), func(dir, pattern string) (validationArtifactStage, error) {
