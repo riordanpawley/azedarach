@@ -1956,16 +1956,24 @@ func (d *Daemon) handleSessionRestartAllDirect(ctx context.Context, req protocol
 		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("invalid command body: %v", err)), nil
 	}
 	projectID := protocol.TrimProjectID(body.ProjectID.String())
-	if projectID == "" {
-		projectID = req.Meta.ProjectID.String()
+	metaProjectID := protocol.TrimProjectID(req.Meta.ProjectID.String())
+	if projectID == "" || metaProjectID == "" {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "missing required field: project_id"), nil
 	}
 	projectID = d.canonicalProjectID(projectID)
+	metaProjectID = d.canonicalProjectID(metaProjectID)
+	if projectID != metaProjectID {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, "request project_id conflicts with routed project_id"), nil
+	}
+	if strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID)) == "" {
+		return d.errorResponse(req, protocol.ErrorCodeInvalidRequest, fmt.Sprintf("unknown project_id: %s", projectID)), nil
+	}
 	body.ProjectID = naming.ProjectID(projectID)
 	if d.tmux == nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, "tmux client unavailable"), nil
 	}
 
-	projectIDs := d.sessionRestartAllProjectIDs(projectID)
+	projectIDs := []string{projectID}
 	liveSessions, err := d.tmux.ListSessions(ctx)
 	if err != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, err.Error()), nil
@@ -2018,11 +2026,11 @@ func (d *Daemon) handleSessionRestartAllDirect(ctx context.Context, req protocol
 					target.ScopeID = orchestrationScopeID(lease.Identity.Scope)
 					target.IssueID = lease.Identity.Scope.RootIssueID.String()
 					target.ClassificationError = "orchestrator lease authority has no matching durable session role/scope projection"
-				} else if issueID, ok := naming.ParseIssueIDFromSessionName(sessionID, namingScope); ok {
-					target.IssueID = issueID
-					target.ClassificationError = "durable session role/scope projection is missing"
 				} else {
-					target.ClassificationError = "durable session role/scope projection is missing"
+					// Tmux naming scopes are human-readable and can collide between
+					// projects. Without requested-project durable authority, a prefix
+					// match cannot authorize this live session as a restart target.
+					continue
 				}
 			case 1:
 				target = sessionRestartTargetFromProjection(target, projected[0])
@@ -2086,6 +2094,13 @@ func (d *Daemon) executeSessionRestartBatch(
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist restart batch plan: %v", err)), nil
 	}
 	for batch.Cursor < len(batch.Targets) {
+		if ctx.Err() != nil {
+			appendCancelledSessionRestartTargets(&batch)
+			if err := persistCancelledSessionRestartBatch(ctx, batch); err != nil {
+				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist cancelled restart batch completion: %v", err)), nil
+			}
+			break
+		}
 		target := batch.Targets[batch.Cursor]
 		batch.Current = nil
 		batch.Stage = sessionRestartLifecycleRequested
@@ -2101,37 +2116,22 @@ func (d *Daemon) executeSessionRestartBatch(
 			batch.Recoverable = append(batch.Recoverable, sessionRestartBatchRecovery{Index: batch.Cursor - 1, Plan: *currentPlan})
 		}
 		batch.Stage = restartItemTerminalStage(item)
-		checkpointCtx := ctx
-		cancelCheckpoint := func() {}
-		if currentPlan != nil && currentPlan.Stage == "complete" {
-			// A complete per-pane checkpoint proves the destructive replacement
-			// crossed its acknowledgement boundary. Persist the aggregate cursor
-			// independently of caller cancellation so the terminal operation cannot
-			// lose that result and invite an automatic retry of the new pane.
-			checkpointCtx, cancelCheckpoint = context.WithTimeout(context.WithoutCancel(ctx), sessionRestartPreflightTimeout)
+		cancelledAfterDispatch := ctx.Err() != nil
+		if cancelledAfterDispatch {
+			appendCancelledSessionRestartTargets(&batch)
 		}
+		// Once a target has been dispatched, its terminal outcome is recovery
+		// authority even when replacement or observation ended under caller
+		// cancellation. Persist that outcome, together with every undispatched
+		// cancellation, independently of the caller so recovery cannot retry the
+		// current pane or dispatch a remaining target.
+		checkpointCtx, cancelCheckpoint := context.WithTimeout(context.WithoutCancel(ctx), sessionRestartPreflightTimeout)
 		checkpointErr := reportSessionRestartBatchProgress(checkpointCtx, batch)
 		cancelCheckpoint()
 		if checkpointErr != nil {
 			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist restart target completion: %v", checkpointErr)), nil
 		}
-		if ctx.Err() != nil && item.Restarted {
-			for batch.Cursor < len(batch.Targets) {
-				cancelled := sessionRestartAllItem(batch.Targets[batch.Cursor])
-				cancelled.Skipped = true
-				cancelled.Outcome = "cancelled"
-				cancelled.Reason = "batch_cancelled_before_dispatch"
-				cancelled.Stages = append(cancelled.Stages, restartStage(sessionRestartLifecycleCompensated, "refused", cancelled.Reason, 0))
-				batch.Results = append(batch.Results, cancelled)
-				batch.Cursor++
-			}
-			batch.Stage = sessionRestartLifecycleCompleted
-			finalCtx, cancelFinal := context.WithTimeout(context.WithoutCancel(ctx), sessionRestartPreflightTimeout)
-			finalErr := reportSessionRestartBatchProgress(finalCtx, batch)
-			cancelFinal()
-			if finalErr != nil {
-				return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("persist cancelled restart batch completion: %v", finalErr)), nil
-			}
+		if cancelledAfterDispatch {
 			break
 		}
 	}
@@ -2153,6 +2153,25 @@ func (d *Daemon) executeSessionRestartBatch(
 	}
 	resp.Body = encoded
 	return resp, nil
+}
+
+func appendCancelledSessionRestartTargets(batch *sessionRestartBatchPlan) {
+	for batch.Cursor < len(batch.Targets) {
+		cancelled := sessionRestartAllItem(batch.Targets[batch.Cursor])
+		cancelled.Skipped = true
+		cancelled.Outcome = "cancelled"
+		cancelled.Reason = "batch_cancelled_before_dispatch"
+		cancelled.Stages = append(cancelled.Stages, restartStage(sessionRestartLifecycleCompensated, "refused", cancelled.Reason, 0))
+		batch.Results = append(batch.Results, cancelled)
+		batch.Cursor++
+	}
+	batch.Stage = sessionRestartLifecycleCompleted
+}
+
+func persistCancelledSessionRestartBatch(ctx context.Context, batch sessionRestartBatchPlan) error {
+	finalCtx, cancelFinal := context.WithTimeout(context.WithoutCancel(ctx), sessionRestartPreflightTimeout)
+	defer cancelFinal()
+	return reportSessionRestartBatchProgress(finalCtx, batch)
 }
 
 func (d *Daemon) executeSessionRestartTarget(ctx context.Context, target sessionRestartAllTarget, body protocol.SessionRestartAllRequestBody) protocol.SessionRestartAllItem {
@@ -2442,58 +2461,6 @@ func sessionRestartActiveIntent(activity string) bool {
 	default:
 		return false
 	}
-}
-
-func (d *Daemon) sessionRestartAllProjectIDs(requestProjectID string) []string {
-	seen := map[string]struct{}{}
-	var projectIDs []string
-	addProjectID := func(projectID string) {
-		projectID = d.canonicalProjectID(projectID)
-		if strings.TrimSpace(projectID) == "" {
-			return
-		}
-		if _, exists := seen[projectID]; exists {
-			return
-		}
-		seen[projectID] = struct{}{}
-		projectIDs = append(projectIDs, projectID)
-	}
-	addProjectID(requestProjectID)
-	if repoDir := strings.TrimSpace(d.cfg.RepoDir); repoDir != "" {
-		if baseProjectID, err := appconfig.ProjectIDForRoot(repoDir); err == nil {
-			addProjectID(baseProjectID)
-		}
-	}
-	var runtimeProjectIDs []string
-	d.runtimeStoresMu.Lock()
-	for projectID := range d.runtimeStoresByProject {
-		runtimeProjectIDs = append(runtimeProjectIDs, projectID)
-	}
-	d.runtimeStoresMu.Unlock()
-	for _, projectID := range runtimeProjectIDs {
-		addProjectID(projectID)
-	}
-	if d.sessionStore != nil {
-		for _, projectID := range d.sessionStore.ProjectIDs() {
-			addProjectID(projectID)
-		}
-	}
-	if registry, err := appconfig.LoadProjectsRegistry(); err == nil && registry != nil {
-		for _, project := range registry.Projects {
-			repoDir := strings.TrimSpace(project.Path)
-			if repoDir != "" {
-				if projectID, hashErr := appconfig.ProjectIDForRoot(repoDir); hashErr == nil {
-					addProjectID(projectID)
-					continue
-				}
-			}
-			if strings.TrimSpace(project.Name) != "" {
-				addProjectID(project.Name)
-			}
-		}
-	}
-	sort.Strings(projectIDs)
-	return projectIDs
 }
 
 func (d *Daemon) persistRestartedSessionProjection(ctx context.Context, projectID, sessionID, issueID string) error {

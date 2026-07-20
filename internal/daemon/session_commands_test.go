@@ -1578,7 +1578,7 @@ func TestSessionRestartAllUsesRefreshedHookActivityForBusyGate(t *testing.T) {
 	}
 }
 
-func TestSessionRestartAllDiscoversKnownProjectSessionsAndReportsNoAgent(t *testing.T) {
+func TestSessionRestartAllScopesTargetsAndResultsToRequestedProject(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	repoA := filepath.Join(root, "qaalpha")
@@ -1631,8 +1631,6 @@ func TestSessionRestartAllDiscoversKnownProjectSessionsAndReportsNoAgent(t *test
 	tmuxRunner := newSessionStartTmuxRunner()
 	tmuxRunner.sessions[sessionA] = true
 	tmuxRunner.sessions[sessionB] = true
-	tmuxRunner.sendKeysErr = errors.New("send-keys failed")
-	tmuxRunner.sendKeysErrOnCall = 4
 	stateStore := daemonstate.NewStore()
 	daemon := &Daemon{
 		cfg:          Config{RepoDir: repoA, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
@@ -1648,6 +1646,19 @@ func TestSessionRestartAllDiscoversKnownProjectSessionsAndReportsNoAgent(t *test
 			projectA: newMigratedIssueClient(t, repoA, slog.Default()),
 			projectB: newMigratedIssueClient(t, repoB, slog.Default()),
 		},
+	}
+	restartA := seedManagedRestartIdentity(t, daemon, tmuxRunner, projectA, sessionA)
+	restartB := seedManagedRestartIdentity(t, daemon, tmuxRunner, projectB, sessionB)
+	tmuxRunner.onRespawnPane = func(ctx context.Context, args []string) error {
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, repoA):
+			return restartA(ctx, args)
+		case strings.Contains(joined, repoB):
+			return restartB(ctx, args)
+		default:
+			return fmt.Errorf("unexpected restart target: %v", args)
+		}
 	}
 
 	resp, err := daemon.handleSessionRestartAll(ctx, protocol.RequestEnvelope{
@@ -1670,15 +1681,136 @@ func TestSessionRestartAllDiscoversKnownProjectSessionsAndReportsNoAgent(t *test
 	if err := json.Unmarshal(resp.Body, &result); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
-	if result.Restarted != 0 || result.Skipped != 2 || result.Failed != 0 {
-		t.Fatalf("result = %+v, want two typed no-agent refusals", result)
+	if result.Restarted != 1 || result.Skipped != 0 || result.Failed != 0 {
+		t.Fatalf("result = %+v, want one project-scoped restart", result)
 	}
-	seenProjects := map[string]bool{}
-	for _, session := range result.Sessions {
-		seenProjects[session.ProjectID.String()] = true
+	if got, want := result.ProjectIDs, []naming.ProjectID{naming.ProjectID(projectA)}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("result project ids = %v, want %v", got, want)
 	}
-	if !seenProjects[projectA] || !seenProjects[projectB] {
-		t.Fatalf("session projects = %+v, want %s and %s", seenProjects, projectA, projectB)
+	if len(result.Sessions) != 1 || result.Sessions[0].ProjectID.String() != projectA || result.Sessions[0].SessionID.String() != sessionA {
+		t.Fatalf("session results = %+v, want only %s/%s", result.Sessions, projectA, sessionA)
+	}
+	if got := tmuxRunner.panePIDs[sessionA]; got != 124 {
+		t.Fatalf("requested project pane pid = %d, want restarted pid 124", got)
+	}
+	if got := tmuxRunner.panePIDs[sessionB]; got != 123 {
+		t.Fatalf("unrelated project pane pid = %d, want untouched pid 123", got)
+	}
+}
+
+func TestSessionRestartAllRequiresMatchingTypedProjectScope(t *testing.T) {
+	d := &Daemon{}
+	tests := []struct {
+		name string
+		meta string
+		body string
+	}{
+		{name: "missing payload", meta: "project-a"},
+		{name: "missing route", body: "project-a"},
+		{name: "conflicting route", meta: "project-a", body: "project-b"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, err := d.handleSessionRestartAllDirect(context.Background(), protocol.RequestEnvelope{
+				Meta: protocol.Metadata{ProjectID: naming.ProjectID(tt.meta)},
+				Body: marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(tt.body)}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest {
+				t.Fatalf("response = %+v, want invalid request", resp)
+			}
+		})
+	}
+	t.Run("unknown matching project", func(t *testing.T) {
+		resp, err := d.handleSessionRestartAllDirect(context.Background(), protocol.RequestEnvelope{
+			Meta: protocol.Metadata{ProjectID: "unknown-project"},
+			Body: marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: "unknown-project"}),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeInvalidRequest || !strings.Contains(resp.Error.Message, "unknown project_id") {
+			t.Fatalf("response = %+v, want unknown-project invalid request", resp)
+		}
+	})
+}
+
+func TestSessionRestartAllCancellationStopsBeforeRemainingDispatch(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	writes := 0
+	ctx = daemonops.WithProgressReporter(ctx, func(context.Context, daemonops.Progress) error {
+		writes++
+		if writes == 1 {
+			cancel()
+		}
+		return nil
+	})
+	targets := []sessionRestartAllTarget{
+		{ProjectID: "project-a", SessionID: "session-a", IssueID: "issue-a"},
+		{ProjectID: "project-a", SessionID: "session-b", IssueID: "issue-b"},
+	}
+	result := protocol.SessionRestartAllResponseBody{ProjectID: "project-a", ProjectIDs: []naming.ProjectID{"project-a"}}
+	resp, err := (&Daemon{}).executeSessionRestartBatch(ctx, protocol.RequestEnvelope{}, "project-a", []string{"project-a"}, protocol.SessionRestartAllRequestBody{ProjectID: "project-a"}, targets, result)
+	if err != nil || !resp.OK {
+		t.Fatalf("response=%+v err=%v", resp, err)
+	}
+	var got protocol.SessionRestartAllResponseBody
+	if err := json.Unmarshal(resp.Body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Sessions) != 2 || got.Skipped != 2 || got.Failed != 0 {
+		t.Fatalf("result = %+v, want both remaining targets cancelled", got)
+	}
+	for _, item := range got.Sessions {
+		if item.Outcome != "cancelled" || item.Reason != "batch_cancelled_before_dispatch" {
+			t.Fatalf("cancelled item = %+v", item)
+		}
+	}
+}
+
+func TestSessionRestartAllCancellationAfterDispatchPersistsCurrentAndRemainingOutcomes(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	writes := 0
+	var checkpoints []sessionRestartBatchPlan
+	ctx = daemonops.WithProgressReporter(ctx, func(writeCtx context.Context, progress daemonops.Progress) error {
+		if err := writeCtx.Err(); err != nil {
+			return err
+		}
+		writes++
+		var checkpoint sessionRestartBatchPlan
+		if err := json.Unmarshal([]byte(progress.Message), &checkpoint); err != nil {
+			t.Fatalf("decode checkpoint: %v", err)
+		}
+		checkpoints = append(checkpoints, checkpoint)
+		if writes == 2 {
+			// The requested checkpoint is the dispatch boundary: cancellation
+			// after it must not prevent the current terminal outcome and every
+			// undispatched cancellation from reaching durable progress.
+			cancel()
+		}
+		return nil
+	})
+	targets := []sessionRestartAllTarget{
+		{ProjectID: "project-a", SessionID: "session-a", IssueID: "issue-a"},
+		{ProjectID: "project-a", SessionID: "session-b", IssueID: "issue-b"},
+	}
+	result := protocol.SessionRestartAllResponseBody{ProjectID: "project-a", ProjectIDs: []naming.ProjectID{"project-a"}}
+	resp, err := (&Daemon{}).executeSessionRestartBatch(ctx, protocol.RequestEnvelope{}, "project-a", []string{"project-a"}, protocol.SessionRestartAllRequestBody{ProjectID: "project-a"}, targets, result)
+	if err != nil || !resp.OK {
+		t.Fatalf("response=%+v err=%v", resp, err)
+	}
+	var got protocol.SessionRestartAllResponseBody
+	if err := json.Unmarshal(resp.Body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Sessions) != 2 || got.Sessions[0].Reason != "no_tmux_pane" || got.Sessions[1].Outcome != "cancelled" {
+		t.Fatalf("result = %+v, want current outcome plus remaining cancellation", got)
+	}
+	last := checkpoints[len(checkpoints)-1]
+	if last.Cursor != 2 || last.Stage != sessionRestartLifecycleCompleted || !reflect.DeepEqual(last.Results, got.Sessions) {
+		t.Fatalf("final checkpoint = %+v, want combined terminal result %+v", last, got.Sessions)
 	}
 }
 

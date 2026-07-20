@@ -1184,6 +1184,8 @@ func TestDecodeSessionRestartBatchPlanRejectsTargetAuthorityMismatch(t *testing.
 		mutate func(*sessionRestartBatchPlan)
 	}{
 		{name: "current session", mutate: func(plan *sessionRestartBatchPlan) { plan.Current.SessionID = "az-other" }},
+		{name: "cross project target", mutate: func(plan *sessionRestartBatchPlan) { plan.Targets[0].ProjectID = "other-project" }},
+		{name: "cross project scope list", mutate: func(plan *sessionRestartBatchPlan) { plan.ProjectIDs = append(plan.ProjectIDs, "other-project") }},
 		{name: "duplicate target", mutate: func(plan *sessionRestartBatchPlan) { plan.Targets = append(plan.Targets, plan.Targets[0]) }},
 		{name: "completed result", mutate: func(plan *sessionRestartBatchPlan) {
 			plan.Cursor, plan.Current = 1, nil

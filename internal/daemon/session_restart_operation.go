@@ -677,10 +677,14 @@ func decodeSessionRestartBatchPlan(record daemonops.Record) (sessionRestartBatch
 	if !validSessionRestartLifecycleStage(plan.Stage) || protocol.NormalizeProjectID(plan.Request.ProjectID.String()) != protocol.NormalizeProjectID(plan.ProjectID) {
 		return sessionRestartBatchPlan{}, false
 	}
+	canonicalProjectID := protocol.NormalizeProjectID(plan.ProjectID)
+	if len(plan.ProjectIDs) != 1 || protocol.NormalizeProjectID(plan.ProjectIDs[0]) != canonicalProjectID {
+		return sessionRestartBatchPlan{}, false
+	}
 	targetKeys := make(map[string]struct{}, len(plan.Targets))
 	for index, target := range plan.Targets {
 		key := strings.TrimSpace(target.ProjectID) + "\x00" + strings.TrimSpace(target.SessionID)
-		if strings.TrimSpace(target.ProjectID) == "" || strings.TrimSpace(target.SessionID) == "" {
+		if protocol.NormalizeProjectID(target.ProjectID) != canonicalProjectID || strings.TrimSpace(target.SessionID) == "" {
 			return sessionRestartBatchPlan{}, false
 		}
 		if _, duplicate := targetKeys[key]; duplicate {
