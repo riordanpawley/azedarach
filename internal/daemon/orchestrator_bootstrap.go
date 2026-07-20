@@ -91,6 +91,10 @@ func (d *Daemon) ensureRootedOrchestratorBootstrap(ctx context.Context, projectI
 			return "", fmt.Errorf("confirm rooted orchestrator bootstrap repair: %w", err)
 		}
 	}
+	managedIdentity, managedFound, managedErr = store.GetManagedAgentIdentity(ctx, d.canonicalProjectID(projectID), sessionID, "agent")
+	if managedErr != nil {
+		return "", fmt.Errorf("refresh rooted managed-agent identity before acknowledgement: %w", managedErr)
+	}
 	now := time.Now().UTC()
 	acknowledgement := daemonstate.RootedBootstrapAcknowledgement{
 		Identity: identity, SessionID: sessionID, PromptHash: promptHash,
