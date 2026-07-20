@@ -551,20 +551,21 @@ func TestCodexAppServerSupervisorRequiresExplicitGlobalDaemonScope(t *testing.T)
 	}
 }
 
-func TestDaemonScopeTmuxEnvironmentNormalizesTrustedMarker(t *testing.T) {
+func TestDaemonScopeTmuxEnvironmentUsesAuthoritativeConfig(t *testing.T) {
 	for _, test := range []struct {
-		input string
-		want  string
+		name          string
+		ambientScope  string
+		scopedRuntime bool
+		want          string
 	}{
-		{input: "", want: "global"},
-		{input: "shared", want: "global"},
-		{input: "worktree", want: "worktree"},
-		{input: "scoped", want: "worktree"},
-		{input: "unexpected", want: "invalid"},
+		{name: "global config ignores worktree ambient", ambientScope: "worktree", want: "global"},
+		{name: "scoped config ignores global ambient", ambientScope: "global", scopedRuntime: true, want: "worktree"},
+		{name: "scoped config ignores absent ambient", scopedRuntime: true, want: "worktree"},
 	} {
-		t.Run(test.input, func(t *testing.T) {
-			t.Setenv("AZEDARACH_DAEMON_SCOPE", test.input)
-			if got := daemonScopeTmuxEnvironment()["AZEDARACH_DAEMON_SCOPE"]; got != test.want {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("AZEDARACH_DAEMON_SCOPE", test.ambientScope)
+			d := &Daemon{cfg: Config{ScopedRuntime: test.scopedRuntime}}
+			if got := d.daemonScopeTmuxEnvironment()["AZEDARACH_DAEMON_SCOPE"]; got != test.want {
 				t.Fatalf("scope marker = %q, want %q", got, test.want)
 			}
 		})
@@ -4206,6 +4207,7 @@ func TestSessionStartLargeCodexPromptUsesFileBootstrap(t *testing.T) {
 			CodexAppServer: true,
 			SessionShell:   "zsh",
 			Logger:         slog.Default(),
+			ScopedRuntime:  true,
 		},
 		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
 		issues:       issuesClient,
@@ -4956,6 +4958,7 @@ func TestSessionStartTmuxCreateFailureIncludesDiagnostics(t *testing.T) {
 
 func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing.T) {
 	ctx := context.Background()
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
 	repoDir := t.TempDir()
 	managedDir := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.current")
 	t.Setenv("PATH", filepath.Join(repoDir, "bin")+string(os.PathListSeparator)+"/usr/bin:/bin")
@@ -4986,6 +4989,7 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 			SessionShell:            "zsh",
 			ManagedGenerationBinDir: managedDir,
 			Logger:                  slog.Default(),
+			ScopedRuntime:           true,
 		},
 		tmux:         tmux.NewClient(tmuxRunner, slog.Default()),
 		issues:       issuesClient,
@@ -5071,6 +5075,18 @@ func TestSessionResolveConflictCreatesDedicatedWindowAndLaunchesAgent(t *testing
 	}
 	if !tmuxRunner.windows[sessionID][sessionConflictWindowName] {
 		t.Fatalf("expected conflict window to be created in session %q", sessionID)
+	}
+	for _, commandName := range []string{"new-session", "new-window"} {
+		var commandArgs []string
+		for _, command := range tmuxRunner.commands {
+			if len(command) > 0 && command[0] == commandName {
+				commandArgs = command
+				break
+			}
+		}
+		if got, ok := tmuxCommandEnvironmentValue(commandArgs, "AZEDARACH_DAEMON_SCOPE"); !ok || got != "worktree" {
+			t.Fatalf("%s scope = %q, present=%t; command=%v", commandName, got, ok, commandArgs)
+		}
 	}
 	if tmuxRunner.sendKeysCalls != 0 || len(tmuxRunner.inputPayloads) != 0 {
 		t.Fatalf("conflict launch bypassed artifact transport: send-keys=%d inputs=%d", tmuxRunner.sendKeysCalls, len(tmuxRunner.inputPayloads))
@@ -10287,6 +10303,7 @@ func TestSessionLaunchAtomicallyBootstrapsSlowAgentsAcrossToolsAndStartModes(t *
 				}
 				t.Cleanup(func() { _ = os.Remove(scriptPath) })
 				command := exec.Command("/bin/sh", "-c", tmuxCommand)
+				command.Env = append(os.Environ(), "AZEDARACH_DAEMON_SCOPE="+d.daemonScopeTmuxEnvironment()["AZEDARACH_DAEMON_SCOPE"])
 				output, err := command.CombinedOutput()
 				if err != nil {
 					t.Fatalf("execute slow %s %s launch: %v (%s)", tool, mode, err, output)

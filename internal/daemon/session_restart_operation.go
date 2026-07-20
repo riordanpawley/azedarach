@@ -484,7 +484,7 @@ func (d *Daemon) respawnManagedAgentPane(ctx context.Context, paneTarget, worktr
 		return d.sessionRestartRespawn(ctx, paneTarget, worktree, command)
 	}
 	return runRestartRespawnStage(ctx, sessionRestartReplaceTimeout, func(stageCtx context.Context) error {
-		return d.tmux.RespawnPane(stageCtx, paneTarget, worktree, command)
+		return d.tmux.RespawnPaneWithEnvironment(stageCtx, paneTarget, worktree, command, d.daemonScopeTmuxEnvironment())
 	})
 }
 

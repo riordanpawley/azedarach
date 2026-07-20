@@ -1230,7 +1230,7 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 	}
 	initialActivity, initialActivitySource := initialSessionStartActivity(cmd.StartWork)
 	if cmd.StartWork {
-		if err := d.tmux.NewSessionWithCommandAndEnvironment(ctx, cmd.SessionID, worktree.Path, launchCommand, daemonScopeTmuxEnvironment()); err != nil {
+		if err := d.tmux.NewSessionWithCommandAndEnvironment(ctx, cmd.SessionID, worktree.Path, launchCommand, d.daemonScopeTmuxEnvironment()); err != nil {
 			cleanupNote := d.reconcileAmbiguousSessionStartCreateError(ctx, req, cmd, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, sessionStartLaunchFailureMessage("tmux_launch", cmd, worktree.Path, launchCommand, true, err, cleanupNote)), nil
 		}
@@ -2578,7 +2578,7 @@ func (d *Daemon) handleSessionResolveConflictDirect(ctx context.Context, req pro
 	if artifactErr != nil {
 		return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("prepare conflict resolver launch artifact: %v", artifactErr)), nil
 	}
-	reusedWindow, err := d.tmux.EnsureWindowWithCommandAndEnvironment(ctx, sessionName, sessionConflictWindowName, worktreePath, artifact.Command, nil)
+	reusedWindow, err := d.tmux.EnsureWindowWithCommandAndEnvironment(ctx, sessionName, sessionConflictWindowName, worktreePath, artifact.Command, d.daemonScopeTmuxEnvironment())
 	if err != nil {
 		artifact.remove()
 		cleanupNote := d.retireAmbiguousConflictResolverWindow(ctx, sessionName, sessionConflictWindowName)
@@ -2798,7 +2798,7 @@ func (d *Daemon) ensureConflictSession(ctx context.Context, projectID, issueID, 
 	if d.tmux == nil {
 		return "", false, errors.New("tmux service unavailable")
 	}
-	if err := d.tmux.NewSessionWithEnvironment(ctx, canonicalSessionID, worktreePath, nil); err != nil {
+	if err := d.tmux.NewSessionWithEnvironment(ctx, canonicalSessionID, worktreePath, d.daemonScopeTmuxEnvironment()); err != nil {
 		return "", false, err
 	}
 	return canonicalSessionID, false, nil
@@ -4045,7 +4045,7 @@ func (d *Daemon) reconcileTmuxAndDaemonSessionsForIssues(ctx context.Context, pr
 			}
 			continue
 		}
-		if newErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, canonicalSessionID, wt.Path, launchArtifact.Command, daemonScopeTmuxEnvironment()); newErr != nil {
+		if newErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, canonicalSessionID, wt.Path, launchArtifact.Command, d.daemonScopeTmuxEnvironment()); newErr != nil {
 			launchArtifact.remove()
 			if live, probeErr := d.tmux.HasSession(ctx, canonicalSessionID); probeErr == nil && live {
 				_ = d.tmux.KillSession(ctx, canonicalSessionID)
@@ -6264,15 +6264,10 @@ func codexAppServerSupervisedCommand(tool, stableDir, firstCommand, resumeComman
 	return scopeGuard + "; " + codexFloopFailOpenProbe(tool) + "; " + startDaemon + " || exit $?; __az_codex_remote_first=1; __az_codex_remote_failures=0; while :; do " + strings.Join(steps, "; ") + "; done"
 }
 
-func daemonScopeTmuxEnvironment() map[string]string {
-	scope := strings.TrimSpace(strings.ToLower(os.Getenv("AZEDARACH_DAEMON_SCOPE")))
-	switch scope {
-	case "worktree", "scoped", "local":
+func (d *Daemon) daemonScopeTmuxEnvironment() map[string]string {
+	scope := "global"
+	if d != nil && d.cfg.ScopedRuntime {
 		scope = "worktree"
-	case "", "global", "shared", "user", "off", "none":
-		scope = "global"
-	default:
-		scope = "invalid"
 	}
 	return map[string]string{"AZEDARACH_DAEMON_SCOPE": scope}
 }
