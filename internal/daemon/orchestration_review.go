@@ -620,6 +620,12 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 	if issueClient == nil {
 		return protocol.OrchestrationIntentResult{}, fmt.Errorf("issue store unavailable")
 	}
+	summaryTasks := make([]domain.Task, 0, len(requested))
+	for _, issueID := range requested {
+		if task, err := issueClient.GetWithRuntime(ctx, projectID, issueID); err == nil {
+			summaryTasks = append(summaryTasks, task)
+		}
+	}
 	for _, issueID := range requested {
 		if request.Scope.Kind == domain.OrchestrationScopeRooted {
 			task, err := issueClient.GetWithRuntime(ctx, projectID, issueID)
@@ -792,12 +798,8 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 			result.Failed[issueID] = actionErr.Error()
 		}
 	}
-	tasks := make([]domain.Task, 0, len(requested))
 	revisions := make(map[string]string, len(requested))
 	for _, issueID := range requested {
-		if task, err := issueClient.GetWithRuntime(ctx, projectID, issueID); err == nil {
-			tasks = append(tasks, task)
-		}
 		if inspection, ok := queue[issueID]; ok {
 			revisions[issueID] = strings.TrimSpace(inspection.HeadRevision)
 			if revisions[issueID] == "" {
@@ -809,7 +811,7 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 	if request.Kind == protocol.OrchestrationIntentReviewAccept {
 		role = domain.WorkflowRoleIntegrator
 	}
-	result.Results = buildOrchestrationResultSummaries(result, tasks, role, revisions)
+	result.Results = buildOrchestrationResultSummaries(result, summaryTasks, role, revisions)
 	return result, nil
 }
 
