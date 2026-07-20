@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -113,15 +114,26 @@ func runCandidateValidationDAG(ctx context.Context, root string, env []string, s
 			go func(stage CandidateValidationStage) {
 				startedAt := time.Now().UTC()
 				base, mkErr := os.MkdirTemp(stageRoot, "stage-")
-				result := CandidateValidationStageResult{ID: stage.ID, Status: "failed", Resources: append([]string(nil), stage.Resources...), OutputRoot: filepath.Join(base, "output"), TempRoot: filepath.Join(base, "tmp"), ArtifactPaths: append([]string(nil), stage.ArtifactPaths...), StartedAt: &startedAt}
+				tempBase := os.TempDir()
+				if runtime.GOOS == "darwin" {
+					tempBase = "/tmp"
+				}
+				shortTemp, tempErr := os.MkdirTemp(tempBase, "azv-")
+				if mkErr == nil {
+					mkErr = tempErr
+				}
+				result := CandidateValidationStageResult{ID: stage.ID, Status: "failed", Resources: append([]string(nil), stage.Resources...), OutputRoot: filepath.Join(base, "output"), TempRoot: shortTemp, ArtifactPaths: append([]string(nil), stage.ArtifactPaths...), StartedAt: &startedAt}
 				if mkErr == nil {
 					mkErr = os.MkdirAll(result.OutputRoot, 0o700)
 				}
-				if mkErr == nil {
-					mkErr = os.MkdirAll(result.TempRoot, 0o700)
+				for _, dir := range []string{"cache", "config", "runtime"} {
+					if mkErr == nil {
+						mkErr = os.MkdirAll(filepath.Join(result.TempRoot, dir), 0o700)
+					}
 				}
 				if mkErr == nil {
-					result.Stdout, result.Stderr, mkErr = runProcessGroupCommand(runCtx, root, gitEnvWithOverrides(env, []string{"AZEDARACH_VALIDATION_STAGE_ID=" + stage.ID, "AZEDARACH_VALIDATION_OUTPUT_ROOT=" + result.OutputRoot, "TMPDIR=" + result.TempRoot}), "/bin/sh", "-lc", stage.Command)
+					stageEnv := hermeticCandidateValidationStageEnv(env, result.TempRoot)
+					result.Stdout, result.Stderr, mkErr = runProcessGroupCommand(runCtx, root, gitEnvWithOverrides(stageEnv, []string{"AZEDARACH_VALIDATION_STAGE_ID=" + stage.ID, "AZEDARACH_VALIDATION_OUTPUT_ROOT=" + result.OutputRoot}), "/bin/sh", "-lc", stage.Command)
 					result.Stdout = boundedCandidateValidationDetail(result.Stdout)
 					result.Stderr = boundedCandidateValidationDetail(result.Stderr)
 				}
@@ -133,6 +145,9 @@ func runCandidateValidationDAG(ctx context.Context, root string, env []string, s
 				finishedAt := time.Now().UTC()
 				result.FinishedAt = &finishedAt
 				result.WallSeconds = finishedAt.Sub(startedAt).Seconds()
+				if shortTemp != "" {
+					_ = os.RemoveAll(shortTemp)
+				}
 				done <- completion{result: result, err: mkErr}
 			}(stage)
 		}
@@ -175,6 +190,27 @@ func runCandidateValidationDAG(ctx context.Context, root string, env []string, s
 		return CandidateValidationDAGResult{Stages: results}, firstErr
 	}
 	return CandidateValidationDAGResult{Stages: results}, nil
+}
+
+func hermeticCandidateValidationStageEnv(base []string, tempRoot string) []string {
+	filtered := make([]string, 0, len(base)+4)
+	for _, entry := range base {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && strings.HasPrefix(key, "AZEDARACH_") &&
+			key != "AZEDARACH_REAL_GO_BIN" &&
+			!strings.HasPrefix(key, "AZEDARACH_GO_CACHE_") &&
+			!strings.HasPrefix(key, "AZEDARACH_TIMING_") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return gitEnvWithOverrides(filtered, []string{
+		"HOME=" + tempRoot,
+		"TMPDIR=" + tempRoot,
+		"XDG_CACHE_HOME=" + filepath.Join(tempRoot, "cache"),
+		"XDG_CONFIG_HOME=" + filepath.Join(tempRoot, "config"),
+		"XDG_RUNTIME_DIR=" + filepath.Join(tempRoot, "runtime"),
+	})
 }
 
 func validateCandidateValidationDAG(stages map[string]CandidateValidationStage) error {

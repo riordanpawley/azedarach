@@ -30,6 +30,35 @@ func TestCandidateValidationDAGRunsPortableCommandsWithIsolatedRoots(t *testing.
 	}
 }
 
+func TestCandidateValidationDAGUsesHermeticProductStateAndPreservesConsumerEnvironment(t *testing.T) {
+	root := t.TempDir()
+	env := append(os.Environ(),
+		"EXAMPLE_CONSUMER_TOOLCHAIN=zig",
+		"AZEDARACH_DAEMON_BIN=/candidate/azd",
+		"AZEDARACH_CANDIDATE_HEAD=outer-revision",
+		"AZEDARACH_VALIDATION_REQUEST_ID=outer-request",
+		"AZEDARACH_REAL_GO_BIN=/toolchain/go",
+		"AZEDARACH_GO_CACHE_NAMESPACE=validation/test",
+	)
+	result, err := runCandidateValidationDAG(context.Background(), root, env, []CandidateValidationStage{{
+		ID: "example-consumer",
+		Command: `test "$EXAMPLE_CONSUMER_TOOLCHAIN" = zig &&
+			test -z "${AZEDARACH_DAEMON_BIN:-}" &&
+			test -z "${AZEDARACH_CANDIDATE_HEAD:-}" &&
+			test -z "${AZEDARACH_VALIDATION_REQUEST_ID:-}" &&
+			test "$AZEDARACH_REAL_GO_BIN" = /toolchain/go &&
+			test "$AZEDARACH_GO_CACHE_NAMESPACE" = validation/test &&
+			test "$HOME" = "$TMPDIR" &&
+			test -d "$XDG_CACHE_HOME" && test -d "$XDG_CONFIG_HOME" && test -d "$XDG_RUNTIME_DIR" &&
+			test ${#TMPDIR} -lt 80`,
+		Required: true,
+	}})
+	require.NoError(t, err)
+	require.Len(t, result.Stages, 1)
+	assert.Equal(t, "passed", result.Stages[0].Status)
+	assert.NoDirExists(t, result.Stages[0].TempRoot)
+}
+
 func TestCandidateValidationDAGFailsClosedAndRetainsEveryStartedStageResult(t *testing.T) {
 	result, err := runCandidateValidationDAG(context.Background(), t.TempDir(), os.Environ(), []CandidateValidationStage{
 		{ID: "failure", Command: `printf diagnostic >&2; exit 23`, Required: true},
