@@ -113,6 +113,22 @@ func TestReviewInspectionKeepsStableScopeAcrossCandidateRevisions(t *testing.T) 
 	}
 }
 
+func TestBuildReviewWorkflowContextUsesRecordedInvariantNotReviewMatrixLabels(t *testing.T) {
+	task := domain.Task{ID: "review-invariant", Title: "Review", Type: domain.TypeTask}
+	inspection := protocol.OrchestrationReview{
+		IssueID: "review-invariant", HeadRevision: "candidate-1",
+		Evidence:    &domain.WorkerEvidencePacket{Review: domain.WorkerEvidenceReview{ReusedLayers: []string{"daemon packet builder"}, Matrix: &domain.WorkerEvidenceReviewMatrix{CoveredCells: []string{"state transitions"}}}},
+		ContextRisk: &domain.IssueContextRiskPacket{Evidence: []domain.IssueContextRiskEvidence{{Invariant: "workflow results remain revision-bound"}}},
+	}
+	packet, err := buildReviewWorkflowContext(task, inspection, domain.WorkflowRoleReviewer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(packet.AffectedInvariants, []string{"workflow results remain revision-bound"}) {
+		t.Fatalf("affected invariants = %v", packet.AffectedInvariants)
+	}
+}
+
 type revisionReviewGitRunner struct {
 	headRevision string
 }

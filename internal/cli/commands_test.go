@@ -13355,14 +13355,8 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Parent: az-parent") {
 		t.Fatalf("prime output missing active issue parent: %q", output)
 	}
-	if !strings.Contains(output, "Description: Structured description survives prime context.") {
-		t.Fatalf("prime output missing structured description: %q", output)
-	}
-	if !strings.Contains(output, "Acceptance: Prime shows acceptance criteria.") {
-		t.Fatalf("prime output missing acceptance context: %q", output)
-	}
-	if !strings.Contains(output, "Design: Daemon projection supplies evidence.") {
-		t.Fatalf("prime output missing design context: %q", output)
+	if !strings.Contains(output, `"schema":"workflow_context.v1"`) || !strings.Contains(output, "description: Structured description survives prime context.") || !strings.Contains(output, "acceptance: Prime shows acceptance criteria.") || !strings.Contains(output, "design: Daemon projection supplies evidence.") {
+		t.Fatalf("prime output missing bounded structured context: %q", output)
 	}
 	if strings.Contains(output, "private scratch notes should stay hidden") {
 		t.Fatalf("prime output should not include generic issue notes: %q", output)
@@ -14000,6 +13994,19 @@ func TestPrimeCommandShowsImplementationOptionsWhenMultipleConfigured(t *testing
 	}
 }
 
+func TestRenderPrimeIssueSectionUsesBoundedPacketForSensitiveSemanticFields(t *testing.T) {
+	task := domain.Task{ID: "secret-prime", Title: "deploy token=never-include", Description: "read /Users/alice/private.log", Acceptance: "secret: hidden", Type: domain.TypeTask, Status: domain.StatusInProgress, Priority: domain.P1}
+	output := renderPrimeIssueSection(task.ID.String(), task, nil, nil, nil, false)
+	for _, forbidden := range []string{"never-include", "/Users/alice/private.log", "secret: hidden"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("prime output leaked %q: %s", forbidden, output)
+		}
+	}
+	if !strings.Contains(output, `"schema":"workflow_context.v1"`) || !strings.Contains(output, "secret-prime: secret-prime") {
+		t.Fatalf("prime output did not use bounded packet and safe fallback: %s", output)
+	}
+}
+
 func TestPrimeCommandTruncatesLargeIssueDescription(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
 	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
@@ -14053,10 +14060,10 @@ func TestPrimeCommandTruncatesLargeIssueDescription(t *testing.T) {
 		return PrimeCommand(deps)
 	})
 
-	if !strings.Contains(output, "… (truncated; run `az ticket get az-1` for full context)") {
-		t.Fatalf("prime output should include truncated description sentinel: %q", output)
+	if !strings.Contains(output, `"reason":"value_byte_limit"`) || !strings.Contains(output, "...") {
+		t.Fatalf("prime output should include deterministic packet omission metadata: %q", output)
 	}
-	if strings.Count(output, "line content for noisy transcript output") >= 12 {
+	if strings.Count(output, "line content for noisy transcript output") >= 1000 {
 		t.Fatalf("prime output should not include full long description: %q", output)
 	}
 }

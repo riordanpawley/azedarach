@@ -9454,7 +9454,25 @@ func renderPrimeImplementationSection(implementations []string) string {
 }
 
 func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Task, observations []domain.WorkerObservation, containmentRisks []daemonclient.TaskContainmentRisk, tmuxAvailable bool) string {
-	structuredContext := renderPrimeStructuredIssueContext(issueID, task)
+	role := domain.WorkflowRoleWorker
+	if task.Type == domain.TypeEpic {
+		role = domain.WorkflowRoleIntegrator
+	}
+	packet, packetErr := domain.BuildWorkflowContextPacket(domain.WorkflowContextInput{
+		Role: role, IssueID: task.ID.String(), SourceRevision: domain.WorkflowIssueContextRevision(task),
+		Summary: task.Title, Requirements: domain.WorkflowIssueRequirements(task),
+	})
+	packetJSON := []byte(`{"schema":"workflow_context.v1","omitted":[{"field":"context","count":1,"reason":"construction_failed"}]}`)
+	if packetErr == nil {
+		if encoded, err := domain.MarshalWorkflowContextPacket(packet); err == nil {
+			packetJSON = encoded
+		}
+	}
+	safeTitle := packet.Summary
+	if safeTitle == "" {
+		safeTitle = task.ID.String()
+	}
+	structuredContext := "\nBounded semantic workflow context (authoritative; do not reconstruct from inherited workflow scrollback):\n" + string(packetJSON)
 	implementations := formatPrimeImplementations(task.Implementations)
 	parent := ""
 	mailbox := ""
@@ -9471,7 +9489,7 @@ func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Ta
 		issueID,
 		issueID,
 		task.ID,
-		task.Title,
+		safeTitle,
 		task.Status,
 		task.Priority.String(),
 		task.Type,
@@ -9622,20 +9640,6 @@ func primeIssueDiffersFromRoot(rootIssueID, issueID string) bool {
 	rootIssueID = strings.TrimSpace(rootIssueID)
 	issueID = strings.TrimSpace(issueID)
 	return issueID != "" && !strings.EqualFold(issueID, rootIssueID)
-}
-
-func renderPrimeStructuredIssueContext(issueID string, task domain.Task) string {
-	var b strings.Builder
-	if strings.TrimSpace(task.Description) != "" {
-		fmt.Fprintf(&b, "\nDescription: %s", summarizePrimeDescription(issueID, task.Description))
-	}
-	if strings.TrimSpace(task.Acceptance) != "" {
-		fmt.Fprintf(&b, "\nAcceptance: %s", summarizePrimeDescription(issueID, task.Acceptance))
-	}
-	if strings.TrimSpace(task.Design) != "" {
-		fmt.Fprintf(&b, "\nDesign: %s", summarizePrimeDescription(issueID, task.Design))
-	}
-	return b.String()
 }
 
 func renderPrimeWorkerObservationSection(observations []domain.WorkerObservation) string {

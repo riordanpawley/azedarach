@@ -393,12 +393,15 @@ func buildReviewWorkflowContext(task domain.Task, inspection protocol.Orchestrat
 	artifacts := []domain.WorkflowArtifactReference(nil)
 	if inspection.Evidence != nil {
 		findings = append(findings, inspection.Evidence.Review.Findings...)
-		invariants = append(invariants, inspection.Evidence.Review.ReusedLayers...)
-		if inspection.Evidence.Review.Matrix != nil {
-			invariants = append(invariants, inspection.Evidence.Review.Matrix.CoveredCells...)
-		}
 		for _, link := range inspection.Evidence.ArtifactLinks {
 			artifacts = append(artifacts, domain.WorkflowArtifactReference{Label: link.Label, Reference: link.URL})
+		}
+	}
+	if inspection.ContextRisk != nil {
+		for _, evidence := range inspection.ContextRisk.Evidence {
+			if invariant := strings.TrimSpace(evidence.Invariant); invariant != "" {
+				invariants = append(invariants, invariant)
+			}
 		}
 	}
 	return domain.BuildWorkflowContextPacket(domain.WorkflowContextInput{
