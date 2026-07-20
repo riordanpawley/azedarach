@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -115,6 +116,14 @@ func (d *Daemon) enforceOrchestratorContinuation(ctx context.Context, authority 
 		return fmt.Errorf("build orchestrator continuation snapshot: %w", err)
 	}
 	action, actionable := orchestratorActionableContinuation(lease.Identity.Scope, snapshot)
+	var reviewPrompt appconfig.ResolvedReviewPrompt
+	if actionable && action.Kind == "review" {
+		reviewPrompt, err = d.resolvedReviewPrompt(projectID)
+		if err != nil {
+			return err
+		}
+		action = bindReviewActionPrompt(action, reviewPrompt)
+	}
 	if lease.Identity.Scope.Kind == domain.OrchestrationScopeRooted {
 		generation, checkpointErr := checkpointRootedOrchestratorAction(ctx, store, lease, action, actionable, now)
 		if checkpointErr != nil {
@@ -129,11 +138,7 @@ func (d *Daemon) enforceOrchestratorContinuation(ctx context.Context, authority 
 	}
 	setOrchestratorContinuationProjection(&snapshot, lease.Identity.Scope, action)
 	if action.Kind == "review" {
-		prompt, promptErr := d.resolvedReviewPrompt(projectID)
-		if promptErr != nil {
-			return promptErr
-		}
-		snapshot.ContinuationContract = composeReviewWakePrompt(snapshot.ContinuationContract, prompt, reviewEpochManifest(snapshot.ReviewQueue))
+		snapshot.ContinuationContract = composeReviewWakePrompt(snapshot.ContinuationContract, reviewPrompt, reviewEpochManifest(snapshot.ReviewQueue))
 	}
 	reason := domain.OrchestratorWakeOpenWork
 	if action.Kind == "review" {
@@ -235,6 +240,13 @@ func (d *Daemon) agentInputDeliveryEligible(ctx context.Context, request domain.
 		return false, err
 	}
 	action, actionable := orchestratorActionableContinuation(lease.Identity.Scope, snapshot)
+	if actionable && action.Kind == "review" {
+		prompt, promptErr := d.resolvedReviewPrompt(request.ProjectID)
+		if promptErr != nil {
+			return false, promptErr
+		}
+		action = bindReviewActionPrompt(action, prompt)
+	}
 	if lease.Identity.Scope.Kind == domain.OrchestrationScopeRooted {
 		store := d.sessionRuntimeStateStoreIfConfigured(request.ProjectID)
 		if store == nil {

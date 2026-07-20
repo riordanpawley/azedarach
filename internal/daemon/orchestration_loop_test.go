@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -63,6 +64,16 @@ func TestProjectOrchestratorReviewWakeUsesDurableInputAndCoalescesEquivalentStat
 		if !strings.Contains(prompt, required) {
 			t.Errorf("project review prompt missing %q: %q", required, prompt)
 		}
+	}
+}
+
+func TestReviewPromptDigestChangesSemanticWakeRevision(t *testing.T) {
+	action := orchestratorActionableState{Kind: "review", Revision: "snapshot-revision"}
+	first := bindReviewActionPrompt(action, appconfig.ResolvedReviewPrompt{Digest: strings.Repeat("a", 64)})
+	equivalent := bindReviewActionPrompt(action, appconfig.ResolvedReviewPrompt{Digest: strings.Repeat("a", 64)})
+	changed := bindReviewActionPrompt(action, appconfig.ResolvedReviewPrompt{Digest: strings.Repeat("b", 64)})
+	if first.Revision != equivalent.Revision || first.Revision == changed.Revision {
+		t.Fatalf("prompt-bound revisions first=%q equivalent=%q changed=%q", first.Revision, equivalent.Revision, changed.Revision)
 	}
 }
 

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"sort"
 	"strings"
@@ -8,6 +9,12 @@ import (
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 )
+
+func bindReviewActionPrompt(action orchestratorActionableState, prompt appconfig.ResolvedReviewPrompt) orchestratorActionableState {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(action.Revision) + "\x00" + prompt.Digest))
+	action.Revision = fmt.Sprintf("%x", digest[:12])
+	return action
+}
 
 func (d *Daemon) resolvedReviewPrompt(projectID string) (appconfig.ResolvedReviewPrompt, error) {
 	repoDir := strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID))
