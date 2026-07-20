@@ -368,7 +368,11 @@ func TestInitialManagedAgentAcknowledgementClassifiesBootstrapFailuresDeterminis
 			ctx := context.Background()
 			if tc.cancel {
 				cancelled, cancel := context.WithCancel(ctx)
-				cancel()
+				runner.onListPanes = func(call int) {
+					if call == 1 {
+						cancel()
+					}
+				}
 				ctx = cancelled
 			}
 			err := d.waitForInitialManagedAgentAcknowledgement(ctx, "project", "az-1", "planned", sessionPromptHandoff{PromptPath: prompt})
