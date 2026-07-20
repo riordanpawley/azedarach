@@ -519,6 +519,8 @@ func (c *Client) AppendTaskIntegrationReceiptIfAbsent(ctx context.Context, issue
 			_, inserted, err = c.insertIssueObservationEventConditional(ctx, tx, issueID, params, `NOT EXISTS (
 				SELECT 1 FROM issue_observation_events
 				WHERE issue_id=? AND event_type=?
+				  AND source='daemon-task-close'
+				  AND source_command='integrate-before-close'
 				  AND COALESCE(NULLIF(TRIM(json_extract(payload_json,'$.project_id')),''),'default')=?
 				  AND TRIM(COALESCE(json_extract(payload_json,'$.source_branch'),''))=?
 				  AND TRIM(COALESCE(json_extract(payload_json,'$.target_branch'),''))=?

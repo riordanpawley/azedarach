@@ -43,6 +43,26 @@ func TestAppendTaskIntegrationReceiptIfAbsentIsAtomicAcrossClientsAndUnbounded(t
 	if !inserted {
 		t.Fatal("original receipt inserted = false, want true")
 	}
+	if _, err := first.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{
+		Type: domain.IssueEventTaskIntegrationCompleted, Source: "agent", SourceCommand: "fabricated",
+		Payload: map[string]any{
+			"project_id": receipt.ProjectID, "source_branch": receipt.SourceBranch, "target_branch": receipt.TargetBranch,
+			"integrated": receipt.Integrated, "configured_base_target": receipt.ConfiguredBaseTarget, "target_id": receipt.TargetID,
+			"base_oid": receipt.BaseOID, "source_oid": "untrusted-source", "target_oid": receipt.TargetOID,
+			"publication_operation_id": receipt.PublicationOperationID,
+		},
+	}); err != nil {
+		t.Fatalf("append untrusted matching receipt: %v", err)
+	}
+	untrusted := receipt
+	untrusted.SourceOID = "untrusted-source"
+	inserted, err = first.AppendTaskIntegrationReceiptIfAbsent(ctx, issueID, untrusted, "/tmp/worktree")
+	if err != nil {
+		t.Fatalf("append trusted receipt after untrusted match: %v", err)
+	}
+	if !inserted {
+		t.Fatal("trusted receipt was suppressed by untrusted matching payload")
+	}
 	for i := 0; i < defaultIssueObservationEventLimit+1; i++ {
 		other := receipt
 		other.SourceOID = fmt.Sprintf("other-%d", i)
@@ -91,7 +111,7 @@ func TestAppendTaskIntegrationReceiptIfAbsentIsAtomicAcrossClientsAndUnbounded(t
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_observation_events WHERE issue_id=? AND event_type=? AND json_extract(payload_json, '$.source_oid')=?`, issueID, domain.IssueEventTaskIntegrationCompleted, receipt.SourceOID).Scan(&exactCount); err != nil {
 		t.Fatalf("count exact receipts: %v", err)
 	}
-	want := defaultIssueObservationEventLimit + 2
+	want := defaultIssueObservationEventLimit + 4
 	if receiptCount != want || exactCount != 1 {
 		t.Fatalf("receipt count = %d exact count = %d, want total %d exact 1", receiptCount, exactCount, want)
 	}
