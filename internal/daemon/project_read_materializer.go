@@ -1871,6 +1871,14 @@ func (d *Daemon) syncUserProjectionMaterializedIssuesForRefresh(ctx context.Cont
 		changes = append(changes, userstore.ProjectDeltaChange{IssueID: issueID, Issue: &task})
 		delete(wanted, issueID)
 	}
+	for issueID := range wanted {
+		// The requested key came from a previously materialized root-user read,
+		// but is absent from the authoritative project materializer. Propagate
+		// that absence explicitly so stale deleted issues cannot survive bounded
+		// runtime refreshes and repeatedly poison unrelated invariant preflights.
+		changes = append(changes, userstore.ProjectDeltaChange{IssueID: issueID, Delete: true})
+	}
+	sort.Slice(changes, func(i, j int) bool { return changes[i].IssueID < changes[j].IssueID })
 	return d.userStore.ApplyProjectMaterializedIssues(ctx, d.canonicalProjectID(projectID), changes)
 }
 
