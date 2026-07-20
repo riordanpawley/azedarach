@@ -72,7 +72,7 @@ container memory use, and fails if the collector exits or is OOM-killed.
 Build and link without starting interactive TUI:
 
 ```bash
-just build-install-run --no-run
+just build-install
 ```
 
 Then verify:
