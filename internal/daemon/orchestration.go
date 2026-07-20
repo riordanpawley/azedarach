@@ -1590,9 +1590,12 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 }
 
 func (a daemonOrchestrationAuthority) reconcileCompletedOrchestrationStart(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, requested issues.RequestedOrchestrationStart, attempt issues.OrchestrationStartAttempt) (bool, string, error) {
+	if requested.Phase == "runtime_recovered" {
+		return true, string(protocol.OperationStateDone), nil
+	}
 	state := string(protocol.OperationStateQueued)
 	if a.daemon.operationRuntime == nil || a.daemon.operationRuntime.manager == nil {
-		return true, state, nil
+		return false, "", fmt.Errorf("reconcile completed orchestration start %s: operation runtime unavailable", attempt.IssueID)
 	}
 	record, getErr := a.daemon.operationRuntime.manager.Get(ctx, attempt.OperationID)
 	if getErr == nil {
@@ -1617,6 +1620,13 @@ func (a daemonOrchestrationAuthority) reconcileCompletedOrchestrationStart(ctx c
 		return false, "", fmt.Errorf("reconcile completed orchestration start %s runtime: %w", attempt.IssueID, probeErr)
 	}
 	if live {
+		issueClient := a.daemon.issueClientForProject(projectID)
+		if issueClient == nil {
+			return false, "", fmt.Errorf("reconcile completed orchestration start %s: issue store unavailable", attempt.IssueID)
+		}
+		if err := issueClient.RecoverCompletedOrchestrationStart(ctx, requested, attempt); err != nil {
+			return false, "", fmt.Errorf("repair live completed orchestration start %s: %w", attempt.IssueID, err)
+		}
 		return true, string(protocol.OperationStateDone), nil
 	}
 	cause := fmt.Errorf("submitted session start operation %s is terminal or missing", attempt.OperationID)

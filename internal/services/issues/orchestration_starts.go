@@ -103,6 +103,44 @@ func (c *Client) UpdateRequestedOrchestrationStart(ctx context.Context, requeste
 	})
 }
 
+// RecoverCompletedOrchestrationStart records that live runtime proved a
+// submitted start succeeded even though its operation record was lost or
+// terminal. The request and attempt are repaired atomically so daemon restart
+// never repeats the ambiguous operation lookup.
+func (c *Client) RecoverCompletedOrchestrationStart(ctx context.Context, requested RequestedOrchestrationStart, attempt OrchestrationStartAttempt) error {
+	return c.withMutationLock(ctx, func(ctx context.Context) error {
+		db, err := c.dbHandle()
+		if err != nil {
+			return err
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		current, err := orchestrationStartAttemptForUpdate(ctx, tx, attempt.ProjectID, attempt.IssueID, attempt.IntentKey)
+		if err != nil {
+			return err
+		}
+		if current.State != "submitted" || current.OperationID != attempt.OperationID || current.ActorID != attempt.ActorID || current.DedupeKey != attempt.DedupeKey {
+			return fmt.Errorf("%w: orchestration start changed during live-runtime recovery", domain.ErrConflict)
+		}
+		nowRaw := time.Now().UTC().Format(time.RFC3339Nano)
+		res, err := tx.ExecContext(ctx, `UPDATE orchestration_start_intents SET state='completed', phase='runtime_recovered', last_error=NULL, updated_at=? WHERE project_id=? AND issue_id=? AND intent_key=? AND actor_id=? AND dedupe_key=? AND request_digest=?`, nowRaw, requested.ProjectID, requested.IssueID, requested.IntentKey, requested.ActorID, requested.DedupeKey, requested.RequestDigest)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return sql.ErrNoRows
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE orchestration_start_attempts SET last_error=NULL, updated_at=? WHERE project_id=? AND issue_id=? AND intent_key=?`, nowRaw, current.ProjectID, current.IssueID, current.IntentKey)
+		if err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+}
+
 func (c *Client) PendingRequestedOrchestrationStarts(ctx context.Context, projectID string) ([]RequestedOrchestrationStart, error) {
 	db, err := c.dbHandle()
 	if err != nil {

@@ -4344,14 +4344,14 @@ func TestTaskCreateIntentReplaysCanonicalChildAndRejectsConflictingReuse(t *test
 		t.Fatal(err)
 	}
 	d := &Daemon{cfg: Config{Logger: logger}, issues: client, revision: map[string]uint64{}, hub: publish.NewHub(8, 4, logger)}
-	request := func(title string) protocol.RequestEnvelope {
-		body, marshalErr := json.Marshal(map[string]any{"intent_key": "split", "title": title, "type": domain.TypeTask, "parent_id": parent, "created_from_id": parent})
+	request := func(intentKey, title string) protocol.RequestEnvelope {
+		body, marshalErr := json.Marshal(map[string]any{"intent_key": intentKey, "title": title, "type": domain.TypeTask, "parent_id": parent, "created_from_id": parent})
 		if marshalErr != nil {
 			t.Fatal(marshalErr)
 		}
 		return protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "split-create", Kind: protocol.EnvelopeKindCommand, Command: daemonclient.CommandTaskCreate, Meta: protocol.Metadata{ProjectID: "project"}, Body: body}
 	}
-	first, err := d.handleTaskCreate(ctx, request("child"))
+	first, err := d.handleTaskCreate(ctx, request("split-1", "child"))
 	if err != nil || !first.OK {
 		t.Fatalf("first response=%+v err=%v", first, err)
 	}
@@ -4359,7 +4359,7 @@ func TestTaskCreateIntentReplaysCanonicalChildAndRejectsConflictingReuse(t *test
 	if err := json.Unmarshal(first.Body, &firstBody); err != nil || !firstBody.Created {
 		t.Fatalf("first body=%+v err=%v", firstBody, err)
 	}
-	replay, err := d.handleTaskCreate(ctx, request("child"))
+	replay, err := d.handleTaskCreate(ctx, request("split-1", "child"))
 	if err != nil || !replay.OK {
 		t.Fatalf("replay response=%+v err=%v", replay, err)
 	}
@@ -4367,9 +4367,17 @@ func TestTaskCreateIntentReplaysCanonicalChildAndRejectsConflictingReuse(t *test
 	if err := json.Unmarshal(replay.Body, &replayBody); err != nil || replayBody.Created || replayBody.TaskID != firstBody.TaskID || replay.Revision != 0 {
 		t.Fatalf("replay body=%+v revision=%d err=%v", replayBody, replay.Revision, err)
 	}
-	conflict, err := d.handleTaskCreate(ctx, request("different"))
+	conflict, err := d.handleTaskCreate(ctx, request("split-1", "different"))
 	if err != nil || conflict.OK || conflict.Error == nil || conflict.Error.Code != protocol.ErrorCodeConflict {
 		t.Fatalf("conflict=%+v err=%v", conflict, err)
+	}
+	distinct, err := d.handleTaskCreate(ctx, request("split-2", "child"))
+	if err != nil || !distinct.OK {
+		t.Fatalf("distinct response=%+v err=%v", distinct, err)
+	}
+	var distinctBody daemonclient.TaskIDResponse
+	if err := json.Unmarshal(distinct.Body, &distinctBody); err != nil || !distinctBody.Created || distinctBody.TaskID == firstBody.TaskID {
+		t.Fatalf("byte-identical distinct invocation body=%+v first=%+v err=%v", distinctBody, firstBody, err)
 	}
 }
 
