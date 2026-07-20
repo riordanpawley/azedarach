@@ -415,6 +415,59 @@ test ! -e "$post_publish_copy"
 test "$(wc -l <"$post_publish_finish" | tr -d ' ')" -eq 1
 grep -q -- '--state failed' "$post_publish_finish"
 
+# Payload leaders may exit while background group members survive. The wrapper
+# must terminate and drain the exact payload group on success and failure, and
+# the failure publisher must observe the group already gone.
+payload_success_pid="$fixture/payload-success-descendant.pid"
+env "${fresh_validation_environment[@]}" \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" AZEDARACH_TICKET_ID=fixture \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile descendant-success -- \
+  sh -c '(trap "" TERM; while :; do :; done) & echo $! >"$1"; exit 0' sh "$payload_success_pid"
+! kill -0 "$(cat "$payload_success_pid")" 2>/dev/null
+
+cat >"$fixture/fake-bin/descendant-checking-publisher" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if kill -0 "$(cat "${DESCENDANT_PID_FILE:?}")" 2>/dev/null; then
+  echo "payload descendant survived into publisher" >&2
+  exit 93
+fi
+evidence=''
+while (($# > 0)); do
+  if [[ "$1" == "--evidence" ]]; then evidence="$2"; break; fi
+  shift
+done
+printf '{"publisher":"descendant-drained"}\n' >"$evidence"
+EOF
+chmod +x "$fixture/fake-bin/descendant-checking-publisher"
+payload_failure_pid="$fixture/payload-failure-descendant.pid"
+if env "${fresh_validation_environment[@]}" \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" AZEDARACH_TICKET_ID=fixture \
+  AZEDARACH_VALIDATION_FAILURE_PUBLISHER="$fixture/fake-bin/descendant-checking-publisher" \
+  AZEDARACH_VALIDATION_FAILURE_PROJECT_ROOT="$publication_fixture_root" \
+  AZEDARACH_VALIDATION_FAILURE_CANDIDATE_ROOT="$publication_fixture_root" \
+  AZEDARACH_VALIDATION_FAILURE_CONTROL_ROOT="$publication_control" \
+  AZEDARACH_VALIDATION_FAILURE_GATE_OUTPUT="$publication_gate_output" \
+  DESCENDANT_PID_FILE="$payload_failure_pid" \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile descendant-failure -- \
+  sh -c '(trap "" TERM; while :; do :; done) & echo $! >"$1"; exit 17' sh "$payload_failure_pid"; then
+  echo "failing descendant payload unexpectedly passed" >&2
+  exit 1
+fi
+! kill -0 "$(cat "$payload_failure_pid")" 2>/dev/null
+
+payload_cancel_pid="$fixture/payload-cancel-descendant.pid"
+payload_cancel_ready="$fixture/payload-cancel-ready"
+env "${fresh_validation_environment[@]}" \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" AZEDARACH_TICKET_ID=fixture \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile descendant-cancel -- \
+  sh -c '(trap "" TERM; while :; do :; done) & echo $! >"$1"; : >"$2"; wait' sh "$payload_cancel_pid" "$payload_cancel_ready" &
+payload_cancel_wrapper=$!
+while [[ ! -e "$payload_cancel_ready" ]]; do kill -0 "$payload_cancel_wrapper"; done
+kill -TERM "$payload_cancel_wrapper"
+wait "$payload_cancel_wrapper" 2>/dev/null || true
+! kill -0 "$(cat "$payload_cancel_pid")" 2>/dev/null
+
 # The remaining lease-control fixtures exercise the controlled-capacity path.
 # Ordinary ticket development bypasses this wrapper entirely.
 

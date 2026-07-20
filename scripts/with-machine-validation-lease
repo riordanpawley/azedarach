@@ -405,22 +405,48 @@ if ($supervisor == 0) {
     local $SIG{TERM} = sub { $forward->('TERM') };
     local $SIG{INT} = sub { $forward->('INT') };
     local $SIG{HUP} = sub { $forward->('HUP') };
+    my $payload_status;
     while (1) {
         my $waited = waitpid($payload, WNOHANG);
-        exit wait_status_code($?) if $waited == $payload;
+        if ($waited == $payload) {
+            $payload_status = $?;
+            last;
+        }
         if (getppid() != $parent) {
             kill 'TERM', -$payload;
             for (1..20) {
                 $waited = waitpid($payload, WNOHANG);
-                exit wait_status_code($?) if $waited == $payload;
+                if ($waited == $payload) {
+                    $payload_status = $?;
+                    last;
+                }
                 sleep 0.1;
             }
-            kill 'KILL', -$payload;
-            waitpid($payload, 0);
-            exit 137;
+            if (!defined $payload_status) {
+                kill 'KILL', -$payload;
+                waitpid($payload, 0);
+                $payload_status = $?;
+            }
+            last;
         }
         sleep 0.1;
     }
+    # The leader may exit while background descendants retain the payload
+    # process group. Quiesce that exact group before trusted publication reads.
+    # This never targets unrelated processes: the payload created the group and
+    # its stable PGID is the leader PID retained by this supervisor.
+    kill 'TERM', -$payload;
+    for (1..20) {
+        last unless kill 0, -$payload;
+        sleep 0.1;
+    }
+    kill 'KILL', -$payload if kill 0, -$payload;
+    for (1..20) {
+        last unless kill 0, -$payload;
+        sleep 0.1;
+    }
+    die "validation payload process group did not drain\n" if kill 0, -$payload;
+    exit wait_status_code($payload_status);
 }
 close $broker_child;
 

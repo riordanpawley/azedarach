@@ -1,6 +1,7 @@
 #!/usr/bin/env perl
 use strict;
 use warnings;
+use Config;
 use Cwd qw(abs_path);
 use Digest::SHA;
 use Fcntl qw(:DEFAULT O_NOFOLLOW);
@@ -72,15 +73,20 @@ push @candidate_report_paths, $evidence->{report_path}
 my @source_reports = unique_nonempty(@candidate_report_paths);
 my (@measurements, @report_dirs);
 for my $source_report (@source_reports) {
-    my $source = safe_candidate_file($candidate_root, $source_report);
-    next unless $source;
-    my $source_dir = dirname($source);
+    my $source_dir = open_candidate_report_directory($candidate_root, $source_report);
+    next unless $source_dir;
     my $index = @report_dirs + 1;
     my $destination = safe_directory_chain($reports_root, sprintf('%03d', $index));
+    if (my $ready = delete($ENV{AZEDARACH_VALIDATION_TEST_CANDIDATE_DIRFD_READY_FILE})) {
+        sysopen(my $ready_fh, $ready, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
+            or die "create candidate dirfd test marker: $!\n";
+        close $ready_fh or die "close candidate dirfd test marker: $!\n";
+        my $release = delete($ENV{AZEDARACH_VALIDATION_TEST_CANDIDATE_DIRFD_RELEASE_FILE}) || '';
+        sleep 0.01 until $release ne '' && -e $release;
+    }
     for my $name (qw(report.json report.md events.jsonl stderr.txt)) {
-        my $candidate = File::Spec->catfile($source_dir, $name);
-        my $safe = safe_existing_file($candidate_root, $candidate);
-        copy_nofollow($safe, File::Spec->catfile($destination, $name)) if $safe;
+        my $source = openat_regular_nofollow($source_dir, $name);
+        copy_handle($source, File::Spec->catfile($destination, $name)) if $source;
     }
     my $measurement = eval { read_json_nofollow(File::Spec->catfile($destination, 'report.json'), 'timing report') };
     push @measurements, $measurement if $measurement;
@@ -241,6 +247,64 @@ sub safe_candidate_file {
     return safe_existing_file($root, File::Spec->canonpath($path));
 }
 
+sub openat_syscall_number {
+    return 463 if $^O eq 'darwin';
+    return 257 if $^O eq 'linux' && $Config{archname} =~ /(?:x86_64|amd64)/;
+    return 56 if $^O eq 'linux' && $Config{archname} =~ /(?:aarch64|arm64)/;
+    die "openat is unsupported on $^O/$Config{archname}\n";
+}
+
+sub openat_handle {
+    my ($directory, $name, $flags) = @_;
+    die "unsafe openat component\n"
+        unless defined($name) && $name ne '' && $name ne '.' && $name ne '..' && $name !~ m{[\\/]};
+    my $fd = syscall(openat_syscall_number(), fileno($directory), $name, $flags, 0);
+    return undef if $fd < 0;
+    open(my $handle, '<&=', $fd) or die "adopt openat descriptor for $name: $!\n";
+    return $handle;
+}
+
+sub candidate_relative_components {
+    my ($root, $path) = @_;
+    return unless defined($path) && $path ne '';
+    my $absolute = File::Spec->file_name_is_absolute($path)
+        ? File::Spec->canonpath($path)
+        : File::Spec->catfile($root, $path);
+    my $relative = File::Spec->abs2rel($absolute, $root);
+    return if File::Spec->file_name_is_absolute($relative);
+    my @parts = grep { $_ ne '' && $_ ne '.' } File::Spec->splitdir($relative);
+    return if !@parts || grep { $_ eq '..' || $_ =~ m{[\\/]} } @parts;
+    return @parts;
+}
+
+sub open_candidate_report_directory {
+    my ($root, $report_path) = @_;
+    my @parts = candidate_relative_components($root, $report_path);
+    return unless @parts && pop(@parts) eq 'report.json';
+    sysopen(my $directory, $root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        or die "open candidate root without symlink following: $!\n";
+    stat($directory) or die "inspect candidate root handle: $!\n";
+    die "candidate root handle is not a directory\n" unless -d _;
+    for my $component (@parts) {
+        my $next = openat_handle($directory, $component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        return undef unless $next;
+        stat($next) or die "inspect candidate directory handle: $!\n";
+        return undef unless -d _;
+        $directory = $next;
+    }
+    my $report = openat_regular_nofollow($directory, 'report.json');
+    return undef unless $report;
+    return $directory;
+}
+
+sub openat_regular_nofollow {
+    my ($directory, $name) = @_;
+    my $file = openat_handle($directory, $name, O_RDONLY | O_NOFOLLOW);
+    return undef unless $file;
+    stat($file) or die "inspect candidate artifact handle: $!\n";
+    return -f _ ? $file : undef;
+}
+
 sub unique_nonempty {
     my %seen;
     return grep { defined($_) && $_ ne '' && !$seen{$_}++ } @_;
@@ -299,6 +363,26 @@ sub copy_nofollow {
         }
     }
     close $in;
+    close $out or die "close artifact $target: $!\n";
+}
+
+sub copy_handle {
+    my ($in, $target) = @_;
+    sysopen(my $out, $target, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)
+        or die "create artifact $target exclusively: $!\n";
+    my $buffer;
+    while (1) {
+        my $read = sysread($in, $buffer, 64 * 1024);
+        die "read candidate artifact handle: $!\n" unless defined $read;
+        last if $read == 0;
+        my $offset = 0;
+        while ($offset < $read) {
+            my $written = syswrite($out, $buffer, $read - $offset, $offset);
+            die "write artifact $target: $!\n" unless defined $written;
+            $offset += $written;
+        }
+    }
+    close $in or die "close candidate artifact handle: $!\n";
     close $out or die "close artifact $target: $!\n";
 }
 

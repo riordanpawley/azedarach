@@ -100,6 +100,46 @@ $publisher --project-root "$project_root" --candidate-root "$scratch_root" \
 symlink_bundle="$project_root/.azedarach/validation-artifacts/failures/$revision/$symlink_request/reports/001"
 ! grep -R -q 'must-not-copy' "$symlink_bundle"
 
+# Candidate parent replacement after traversal cannot redirect any report
+# artifact: every source open is relative to the already-verified directory
+# handle, not to the replaced pathname.
+race_report_dir="$scratch_root/.tmp/test-timing/parent-race"
+race_original_dir="$scratch_root/.tmp/test-timing/parent-race-original"
+race_outside_dir="$outside/parent-race"
+mkdir -p "$race_report_dir" "$race_outside_dir"
+printf '{"exit_code":1,"failures":[]}\n' >"$race_report_dir/report.json"
+printf 'trusted report markdown\n' >"$race_report_dir/report.md"
+printf 'trusted events\n' >"$race_report_dir/events.jsonl"
+printf 'trusted stderr\n' >"$race_report_dir/stderr.txt"
+printf '{"exit_code":1,"failures":[{"output":"must-not-copy-report"}]}\n' >"$race_outside_dir/report.json"
+printf 'must-not-copy-markdown\n' >"$race_outside_dir/report.md"
+printf 'must-not-copy-events\n' >"$race_outside_dir/events.jsonl"
+printf 'must-not-copy-stderr\n' >"$race_outside_dir/stderr.txt"
+race_request="dov-parent-race"
+race_evidence="$control_root/parent-race-evidence.json"
+race_ready="$fixture/parent-race-ready"
+race_release="$fixture/parent-race-release"
+cat >"$race_evidence" <<EOF
+{"request_id":"$race_request","source_revision":"$revision","publication_nonce":"parent-race-nonce","issue_id":"dov","report_path":"$race_report_dir/report.json"}
+EOF
+AZEDARACH_VALIDATION_TEST_CANDIDATE_DIRFD_READY_FILE="$race_ready" \
+AZEDARACH_VALIDATION_TEST_CANDIDATE_DIRFD_RELEASE_FILE="$race_release" \
+  "$publisher" --project-root "$project_root" --candidate-root "$scratch_root" \
+  --control-root "$control_root" --evidence "$race_evidence" \
+  --gate-output "$control_root/gate-output.log" --request "$race_request" \
+  --revision "$revision" --exit-code 1 >/dev/null &
+race_publisher_pid=$!
+while [[ ! -e "$race_ready" ]]; do kill -0 "$race_publisher_pid"; done
+mv "$race_report_dir" "$race_original_dir"
+ln -s "$race_outside_dir" "$race_report_dir"
+: >"$race_release"
+wait "$race_publisher_pid"
+race_bundle="$project_root/.azedarach/validation-artifacts/failures/$revision/$race_request/reports/001"
+grep -q 'trusted report markdown' "$race_bundle/report.md"
+grep -q 'trusted events' "$race_bundle/events.jsonl"
+grep -q 'trusted stderr' "$race_bundle/stderr.txt"
+! grep -R -q 'must-not-copy' "$race_bundle"
+
 # Trusted control inputs reject symlinks rather than following them.
 printf 'outside-evidence\n' >"$outside/evidence.json"
 ln -s "$outside/evidence.json" "$control_root/evidence-link.json"
