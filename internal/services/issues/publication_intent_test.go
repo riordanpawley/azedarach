@@ -52,7 +52,7 @@ func TestReviewPublicationAuthorityFencesTypedOwnerAndExactEpoch(t *testing.T) {
 			OperationID: operationID, ProjectID: "project", IssueID: issueID, IntentKey: intent,
 			RequestFingerprint: "fingerprint-" + intent, ActorID: reviewer.OwnerID, ReviewerKind: reviewer.OwnerKind,
 			ReviewEpochEventID: admission.ReviewEpochEventID, TargetID: "base", TargetBranch: "main",
-			SourceRevision: "source", BaseRevision: "base", ValidationCommand: "go test ./...", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
+			SourceRevision: "source", BaseRevision: "base", PolicyVersion: "policy", EnvironmentFingerprint: "toolchain", ValidationCommand: "go test ./...", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
 		}
 		operation.PatchEvidenceID = operation.OperationID
 		receipt, err := client.AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx, issueID, IssueObservationEventParams{

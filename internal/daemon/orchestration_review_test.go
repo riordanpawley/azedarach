@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	daemonstate "github.com/riordanpawley/azedarach/internal/daemon/state"
@@ -104,10 +105,14 @@ func TestReviewInspectionKeepsStableScopeAcrossCandidateRevisions(t *testing.T) 
 func TestReviewInspectionUsesVerifiedReturnedCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
 	t.Cleanup(func() { _ = client.CloseDB() })
 	issueID := createReviewTask(t, ctx, client, domain.P1, "worker")
-	task, err := client.GetWithRuntime(ctx, "project", issueID)
+	task, err := client.GetWithRuntime(ctx, projectID, issueID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,14 +120,14 @@ func TestReviewInspectionUsesVerifiedReturnedCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: "reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview, ExpectedReviewAdmission: &admission, ReviewSourceOID: "head-revision-1"}); err != nil {
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: "reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview, ExpectedReviewAdmission: &admission, ReviewSourceOID: "head-revision-1"}); err != nil {
 		t.Fatal(err)
 	}
 	oldScope := "issue:" + issueID + ":base:main@base-revision"
 	returned, err := client.AppendIssueObservationEventWithReviewAdmission(ctx, issueID, issues.IssueObservationEventParams{
 		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-return",
 		Payload: map[string]any{
-			"outcome": "returned", "actor_id": "reviewer", "review_diff_base_revision": "base-revision",
+			"outcome": "returned", "actor_id": "reviewer", "actor_kind": "orchestrator", "review_diff_base_revision": "base-revision",
 			"review_head_revision": "head-revision-1", "review_diff_scope": oldScope,
 			"findings":       []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "repair", Validation: []string{"session.activity_convergence"}}},
 			"review_verdict": "returned", "review_angle": "state and recovery", "review_broader_invalidation": false,
@@ -135,7 +140,7 @@ func TestReviewInspectionUsesVerifiedReturnedCheckpoint(t *testing.T) {
 	if err != nil || returned == 0 {
 		t.Fatalf("record returned review = (%+v,%v)", returned, err)
 	}
-	if _, err := client.ReleaseOwnershipWithRuntime(ctx, "project", issueID, issues.OwnershipClaimParams{OwnerID: "reviewer", Purpose: domain.CoordinationLeaseReview}); err != nil {
+	if _, err := client.ReleaseOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: "reviewer", Purpose: domain.CoordinationLeaseReview}); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.Update(ctx, issueID, domain.StatusInProgress); err != nil {
@@ -144,13 +149,14 @@ func TestReviewInspectionUsesVerifiedReturnedCheckpoint(t *testing.T) {
 	if err := client.Update(ctx, issueID, domain.StatusInReview); err != nil {
 		t.Fatal(err)
 	}
-	task, err = client.GetWithRuntime(ctx, "project", issueID)
+	task, err = client.GetWithRuntime(ctx, projectID, issueID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	d := newOrchestrationReviewTestDaemon(repoDir, client)
+	d.issueClientsByProject[projectID] = client
 	d.git = git.NewClient(&revisionReviewGitRunner{headRevision: "head-revision-2"}, slog.Default())
-	inspection := (daemonOrchestrationAuthority{daemon: d}).reviewInspection(ctx, "project", repoDir, "reviewer", task, map[string]domain.Task{issueID: task}, map[string]git.Worktree{issueID: {IssueID: issueID, Path: repoDir, Branch: "feature/review"}})
+	inspection := (daemonOrchestrationAuthority{daemon: d}).reviewInspection(ctx, projectID, repoDir, "reviewer", task, map[string]domain.Task{issueID: task}, map[string]git.Worktree{issueID: {IssueID: issueID, Path: repoDir, Branch: "feature/review"}})
 	if inspection.ReviewMode != "incremental" || inspection.DeltaBaseRevision != "head-revision-1" || inspection.DiffRange != "head-revision-1..head-revision-2" || inspection.ReviewFallback != "" {
 		t.Fatalf("incremental selection = %+v", inspection)
 	}

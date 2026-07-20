@@ -94,7 +94,7 @@ func TestValidationAcquireBindsReviewAssignmentToDurableLease(t *testing.T) {
 		OperationID: "publication-validation-authority", ProjectID: "project", IssueID: issueID, IntentKey: "accepted-validation",
 		RequestFingerprint: "fingerprint", ActorID: "assigned-reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator,
 		ReviewEpochEventID: admission.ReviewEpochEventID, TargetID: "base", TargetBranch: "main", SourceRevision: "candidate-a",
-		BaseRevision: "base", ValidationCommand: "just test", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
+		BaseRevision: "base", PolicyVersion: "policy", EnvironmentFingerprint: "toolchain", ValidationCommand: "just test", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
 	}
 	publication.PatchEvidenceID = publication.OperationID
 	patchEvidence := domain.PublicationEvidence{EvidenceID: publication.PatchEvidenceID, ProjectID: publication.ProjectID, IssueID: publication.IssueID, Layer: domain.PublicationEvidencePatchReview, PatchDigest: "patch", SourceRevision: publication.SourceRevision, BaseRevision: publication.BaseRevision, Producer: "reviewer:" + publication.ActorID, PolicyVersion: publication.PolicyVersion, EnvironmentFingerprint: publication.EnvironmentFingerprint, CreatedAt: publication.CreatedAt}
