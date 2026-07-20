@@ -2278,7 +2278,8 @@ func (d *Daemon) handleTaskReviewLeaseRecovery(ctx context.Context, req protocol
 	}
 	task, err := issueClient.ReleaseOwnershipWithRuntime(ctx, projectID, cmd.TaskID, issues.OwnershipClaimParams{
 		OwnerID: reviewer.OwnerID, OwnerKind: reviewer.OwnerKind, Purpose: domain.CoordinationLeaseReview,
-		ExpectedReviewAdmission: &admission,
+		ExpectedReviewAdmission:       &admission,
+		ExpectedAcceptedReviewEventID: pin.AcceptedReviewEventID, ExpectedReviewSourceOID: pin.SourceOID,
 	})
 	if err != nil {
 		return d.errorResponse(req, taskOwnershipErrorCode(err), err.Error()), nil
@@ -2589,9 +2590,11 @@ func (d *Daemon) closeTask(ctx context.Context, projectID string, cmd taskCloseR
 	} else if strings.TrimSpace(cmd.ExpectedPublicationOperationID) != "" {
 		task, err = issueClient.CloseWithRuntimeReviewPublicationAuthority(ctx, projectID, taskID, closeStatus, reviewAuthority, cmd.ExpectedReviewEvidence)
 	} else if cmd.ExpectedReviewEvidence != nil {
-		task, err = issueClient.CloseWithRuntimeReviewEvidenceFence(ctx, projectID, taskID, closeStatus, *cmd.ExpectedReviewEvidence, reviewEvidenceFence)
+		task, err = issueClient.CloseWithRuntimeReviewEvidenceFence(ctx, projectID, taskID, closeStatus, *cmd.ExpectedReviewEvidence, reviewEvidenceFence, reviewAuthority)
 	} else if strings.TrimSpace(cmd.ExpectedReviewerID) != "" {
-		task, err = issueClient.CloseWithRuntimeReviewLease(ctx, projectID, taskID, closeStatus, cmd.ExpectedReviewerID)
+		task, err = issueClient.CloseWithRuntimeReviewLease(ctx, projectID, taskID, closeStatus,
+			domain.ReviewerIdentity{OwnerID: cmd.ExpectedReviewerID, OwnerKind: cmd.ExpectedReviewerKind},
+			cmd.ExpectedReviewEpochEventID, cmd.ExpectedAcceptedReviewEventID, cmd.ExpectedSourceOID)
 	} else {
 		task, err = issueClient.CloseWithRuntime(ctx, projectID, taskID, closeStatus)
 	}

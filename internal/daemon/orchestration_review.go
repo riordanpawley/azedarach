@@ -1083,13 +1083,19 @@ func (a daemonOrchestrationAuthority) validateIntegratedAcceptedReviewRecovery(c
 	acceptedMatches := false
 	for _, event := range reviewEvents {
 		outcome, trusted := domain.TrustedReviewOutcome(event)
-		if event.ID == pin.AcceptedReviewEventID && trusted && outcome == domain.ReviewOutcomeAccepted &&
+		if !trusted || outcome == domain.ReviewOutcomeIntegrationFailed {
+			continue
+		}
+		// The first authoritative material decision is current. Never let an
+		// older acceptance in the same review-request epoch recover a lease
+		// belonging to a newer review decision.
+		if event.ID == pin.AcceptedReviewEventID && outcome == domain.ReviewOutcomeAccepted &&
 			reviewPayloadInt64(event.Payload["review_epoch_event_id"]) == pin.ReviewEpochEventID &&
 			strings.TrimSpace(observationPayloadString(event.Payload, "reviewed_source_oid")) == strings.TrimSpace(pin.SourceOID) &&
 			pin.Reviewer.Matches(observationPayloadString(event.Payload, "actor_id"), observationPayloadString(event.Payload, "actor_kind")) {
 			acceptedMatches = true
-			break
 		}
+		break
 	}
 	if !acceptedMatches {
 		return fmt.Errorf("exact accepted review actor, epoch, event, or source provenance is unavailable")

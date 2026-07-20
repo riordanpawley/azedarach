@@ -3326,7 +3326,7 @@ func (c *Client) CloseWithRuntimeReviewEvidence(ctx context.Context, projectID, 
 // CloseWithRuntimeReviewLease consumes the accepted reviewer's durable lease
 // in the same transaction as terminal state for accepted reviews that do not
 // carry worker evidence (for example accepted internal-review investigations).
-func (c *Client) CloseWithRuntimeReviewLease(ctx context.Context, projectID, id string, status domain.Status, reviewerID string) (domain.Task, error) {
+func (c *Client) CloseWithRuntimeReviewLease(ctx context.Context, projectID, id string, status domain.Status, reviewer domain.ReviewerIdentity, reviewEpochEventID, acceptedReviewEventID int64, sourceOID string) (domain.Task, error) {
 	nextState, err := issueStateFromStatus(status)
 	if err != nil {
 		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), err)
@@ -3334,17 +3334,17 @@ func (c *Client) CloseWithRuntimeReviewLease(ctx context.Context, projectID, id 
 	if nextState.Workflow() != domain.IssueWorkflowClosed {
 		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), fmt.Errorf("status %s is not terminal", status))
 	}
-	reviewerID = strings.TrimSpace(reviewerID)
-	if reviewerID == "" {
-		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), errors.New("accepted reviewer id is required"))
+	canonical, identityErr := domain.CanonicalReviewerIdentity(reviewer.OwnerID, reviewer.OwnerKind)
+	if identityErr != nil || reviewEpochEventID <= 0 || acceptedReviewEventID <= 0 || strings.TrimSpace(sourceOID) == "" {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), errors.New("complete accepted review close authority is required"))
 	}
 	if err := c.retrySQLiteBusy(ctx, func() error {
 		return c.withMutationLock(ctx, func(ctx context.Context) error {
 			return c.updateLockedWithPrecondition(ctx, id, status, true, func(ctx context.Context, tx *sql.Tx) error {
-				if err := validateAcceptedReviewerOutcome(ctx, tx, id, reviewerID, nil); err != nil {
+				if err := validateAcceptedReviewerAuthority(ctx, tx, id, canonical.OwnerID, canonical.OwnerKind, reviewEpochEventID, acceptedReviewEventID, sourceOID, nil); err != nil {
 					return err
 				}
-				return consumeAcceptedReviewerLease(ctx, tx, id, reviewerID)
+				return consumeAcceptedReviewerLease(ctx, tx, id, canonical.OwnerID)
 			})
 		})
 	}); err != nil {
@@ -3355,7 +3355,7 @@ func (c *Client) CloseWithRuntimeReviewLease(ctx context.Context, projectID, id 
 
 // CloseWithRuntimeReviewEvidenceFence consumes the matching durable evidence
 // fence in the same transaction as final pin validation and terminal state.
-func (c *Client) CloseWithRuntimeReviewEvidenceFence(ctx context.Context, projectID, id string, status domain.Status, pin ReviewEvidencePin, reviewerID string) (domain.Task, error) {
+func (c *Client) CloseWithRuntimeReviewEvidenceFence(ctx context.Context, projectID, id string, status domain.Status, pin ReviewEvidencePin, reviewerID string, authority ReviewPublicationAuthority) (domain.Task, error) {
 	nextState, err := issueStateFromStatus(status)
 	if err != nil {
 		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), err)
@@ -3364,7 +3364,8 @@ func (c *Client) CloseWithRuntimeReviewEvidenceFence(ctx context.Context, projec
 		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), fmt.Errorf("status %s is not terminal", status))
 	}
 	reviewerID = strings.TrimSpace(reviewerID)
-	if strings.TrimSpace(pin.Source) != "issue_event" || pin.EventID <= 0 || pin.Seq != 0 || strings.TrimSpace(pin.Digest) == "" || reviewerID == "" {
+	canonical, identityErr := domain.CanonicalReviewerIdentity(authority.Reviewer.OwnerID, authority.Reviewer.OwnerKind)
+	if strings.TrimSpace(pin.Source) != "issue_event" || pin.EventID <= 0 || pin.Seq != 0 || strings.TrimSpace(pin.Digest) == "" || reviewerID == "" || identityErr != nil || authority.ReviewEpochEventID <= 0 || authority.AcceptedReviewEventID <= 0 {
 		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), errors.New("review evidence close requires one durable issue-event pin and fence"))
 	}
 	if err := c.retrySQLiteBusy(ctx, func() error {
@@ -3373,7 +3374,7 @@ func (c *Client) CloseWithRuntimeReviewEvidenceFence(ctx context.Context, projec
 				if err := validateTerminalReviewEvidencePin(ctx, tx, id, pin); err != nil {
 					return err
 				}
-				if err := validateAcceptedReviewerOutcome(ctx, tx, id, reviewerID, &pin); err != nil {
+				if err := validateAcceptedReviewerAuthority(ctx, tx, id, canonical.OwnerID, canonical.OwnerKind, authority.ReviewEpochEventID, authority.AcceptedReviewEventID, "", &pin); err != nil {
 					return err
 				}
 				return consumeAcceptedReviewerLease(ctx, tx, id, reviewerID)
@@ -3551,15 +3552,17 @@ func validateTerminalReviewEvidencePin(ctx context.Context, tx *sql.Tx, issueID 
 }
 
 type OwnershipClaimParams struct {
-	OwnerID                 string
-	OwnerKind               string
-	TTL                     time.Duration
-	Force                   bool
-	ReleasedBy              string
-	Purpose                 domain.CoordinationLeasePurpose
-	ExpectedReviewAdmission *ReviewAdmissionPin
-	ExpectedParentIssueID   string
-	ReviewSourceOID         string
+	OwnerID                       string
+	OwnerKind                     string
+	TTL                           time.Duration
+	Force                         bool
+	ReleasedBy                    string
+	Purpose                       domain.CoordinationLeasePurpose
+	ExpectedReviewAdmission       *ReviewAdmissionPin
+	ExpectedAcceptedReviewEventID int64
+	ExpectedReviewSourceOID       string
+	ExpectedParentIssueID         string
+	ReviewSourceOID               string
 }
 
 func (c *Client) ClaimOwnershipWithRuntime(ctx context.Context, projectID, issueID string, params OwnershipClaimParams) (domain.Task, error) {
@@ -3792,6 +3795,9 @@ func (c *Client) releaseOwnership(ctx context.Context, issueID string, params Ow
 	if params.ExpectedReviewAdmission != nil && purpose != domain.CoordinationLeaseReview {
 		return c.wrapError("release-ownership", issueID, errors.New("review admission pin requires review lease purpose"))
 	}
+	if params.ExpectedAcceptedReviewEventID > 0 && (params.ExpectedReviewAdmission == nil || strings.TrimSpace(params.ExpectedReviewSourceOID) == "") {
+		return c.wrapError("release-ownership", issueID, errors.New("accepted review release authority requires admission and source pins"))
+	}
 	return c.withMutationLock(ctx, func(ctx context.Context) error {
 		db, err := c.dbHandle()
 		if err != nil {
@@ -3813,6 +3819,11 @@ func (c *Client) releaseOwnership(ctx context.Context, issueID string, params Ow
 		}
 		if params.ExpectedReviewAdmission != nil {
 			if err := validateReviewAdmissionPin(ctx, tx, issueID, *params.ExpectedReviewAdmission); err != nil {
+				return c.wrapError("release-ownership", issueID, err)
+			}
+		}
+		if params.ExpectedAcceptedReviewEventID > 0 {
+			if err := validateAcceptedReviewerAuthority(ctx, tx, issueID, actorID, actorKind, params.ExpectedReviewAdmission.ReviewEpochEventID, params.ExpectedAcceptedReviewEventID, params.ExpectedReviewSourceOID, nil); err != nil {
 				return c.wrapError("release-ownership", issueID, err)
 			}
 		}

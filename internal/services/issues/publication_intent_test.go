@@ -586,17 +586,18 @@ func TestCloseWithRuntimeReviewLeaseRequiresTrustedAcceptedActor(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.CloseWithRuntimeReviewLease(ctx, "project", issueID, domain.StatusDone, "reviewer"); !errors.Is(err, domain.ErrConflict) {
+	if _, err := client.CloseWithRuntimeReviewLease(ctx, "project", issueID, domain.StatusDone, domain.ReviewerIdentity{OwnerID: "reviewer", OwnerKind: domain.ReviewerOwnerKindOrchestrator}, admission.ReviewEpochEventID, 1, "source"); !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("close without accepted outcome error = %v, want conflict", err)
 	}
 	for _, actor := range []string{"other-reviewer", "reviewer"} {
-		if _, err := client.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{
+		acceptedEventID, err := client.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{
 			Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept",
-			Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": actor, "actor_kind": domain.ReviewerOwnerKindOrchestrator},
-		}); err != nil {
+			Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": actor, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "review_epoch_event_id": admission.ReviewEpochEventID, "reviewed_source_oid": "source"},
+		})
+		if err != nil {
 			t.Fatal(err)
 		}
-		closed, closeErr := client.CloseWithRuntimeReviewLease(ctx, "project", issueID, domain.StatusDone, "reviewer")
+		closed, closeErr := client.CloseWithRuntimeReviewLease(ctx, "project", issueID, domain.StatusDone, domain.ReviewerIdentity{OwnerID: "reviewer", OwnerKind: domain.ReviewerOwnerKindOrchestrator}, admission.ReviewEpochEventID, acceptedEventID.ID, "source")
 		if actor == "other-reviewer" {
 			if !errors.Is(closeErr, domain.ErrConflict) {
 				t.Fatalf("mismatched accepted actor error = %v, want conflict", closeErr)

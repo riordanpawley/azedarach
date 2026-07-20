@@ -236,6 +236,9 @@ func validateReviewPublicationAuthority(ctx context.Context, tx *sql.Tx, issueID
 	if current.ReviewEpochEventID != authority.ReviewEpochEventID {
 		return fmt.Errorf("%w: publication review epoch changed", domain.ErrConflict)
 	}
+	if err := validateAcceptedReviewerAuthority(ctx, tx, issueID, reviewer.OwnerID, reviewer.OwnerKind, authority.ReviewEpochEventID, authority.AcceptedReviewEventID, "", nil); err != nil {
+		return err
+	}
 	var event domain.IssueObservationEvent
 	event, err = scanIssueObservationEvent(tx.QueryRowContext(ctx, `
 		SELECT id,issue_id,event_type,observed_at,source,source_command,operation_id,session_id,worktree_path,payload_json
@@ -360,6 +363,13 @@ func (c *Client) BeginReviewEvidenceClose(ctx context.Context, issueID string, p
 }
 
 func validateAcceptedReviewerOutcome(ctx context.Context, tx *sql.Tx, issueID, reviewerID string, pin *ReviewEvidencePin) error {
+	return validateAcceptedReviewerAuthority(ctx, tx, issueID, reviewerID, "", 0, 0, "", pin)
+}
+
+// validateAcceptedReviewerAuthority requires the latest authoritative decision
+// in the current review epoch to be the exact acceptance carried by the caller.
+// Integration-failed observations are retry diagnostics, not newer decisions.
+func validateAcceptedReviewerAuthority(ctx context.Context, tx *sql.Tx, issueID, reviewerID, reviewerKind string, reviewEpochEventID, acceptedReviewEventID int64, sourceOID string, pin *ReviewEvidencePin) error {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, issue_id, event_type, observed_at, source, source_command, operation_id, session_id, worktree_path, payload_json
 		FROM issue_observation_events
@@ -388,8 +398,20 @@ func validateAcceptedReviewerOutcome(ctx context.Context, tx *sql.Tx, issueID, r
 		if outcome != domain.ReviewOutcomeAccepted {
 			return fmt.Errorf("%w: current review outcome is %s", domain.ErrConflict, outcome)
 		}
+		if acceptedReviewEventID > 0 && event.ID != acceptedReviewEventID {
+			return fmt.Errorf("%w: accepted review event changed from %d to %d", domain.ErrConflict, acceptedReviewEventID, event.ID)
+		}
 		if !strings.EqualFold(strings.TrimSpace(fmt.Sprint(event.Payload["actor_id"])), strings.TrimSpace(reviewerID)) {
 			return fmt.Errorf("%w: accepted review actor does not match reviewer lease", domain.ErrConflict)
+		}
+		if reviewerKind != "" && !strings.EqualFold(strings.TrimSpace(fmt.Sprint(event.Payload["actor_kind"])), strings.TrimSpace(reviewerKind)) {
+			return fmt.Errorf("%w: accepted review actor kind does not match reviewer lease", domain.ErrConflict)
+		}
+		if reviewEpochEventID > 0 && reviewAuthorityPayloadInt64(event.Payload["review_epoch_event_id"]) != reviewEpochEventID {
+			return fmt.Errorf("%w: accepted review epoch does not match close authority", domain.ErrConflict)
+		}
+		if sourceOID != "" && strings.TrimSpace(fmt.Sprint(event.Payload["reviewed_source_oid"])) != strings.TrimSpace(sourceOID) {
+			return fmt.Errorf("%w: accepted review source does not match close authority", domain.ErrConflict)
 		}
 		if pin != nil && (strings.TrimSpace(fmt.Sprint(event.Payload["reviewed_evidence_source"])) != strings.TrimSpace(pin.Source) ||
 			strings.TrimSpace(fmt.Sprint(event.Payload["reviewed_evidence_event_id"])) != strconv.FormatInt(pin.EventID, 10) ||

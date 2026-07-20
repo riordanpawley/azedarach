@@ -2428,20 +2428,22 @@ func TestIntegratedAcceptedReviewRecoveryProofIsActorAndEpochFenced(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	recoveryResp, err := d.handleTaskReviewLeaseRecovery(ctx, protocol.RequestEnvelope{RequestID: "recover-review", Body: recoveryBody, Meta: protocol.Metadata{ProjectID: naming.ProjectID("project")}})
-	if err != nil || !recoveryResp.OK {
-		message := ""
-		if recoveryResp.Error != nil {
-			message = recoveryResp.Error.Message
-		}
-		t.Fatalf("typed recovery response = %+v message=%q err=%v", recoveryResp, message, err)
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
+		Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": request.ActorID, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "review_epoch_event_id": pin.ReviewEpochEventID, "reviewed_source_oid": "newer-reviewed-source"},
+	}); err != nil {
+		t.Fatal(err)
 	}
-	recovered, err := client.GetWithRuntime(ctx, "project", issueID)
+	staleResp, err := d.handleTaskReviewLeaseRecovery(ctx, protocol.RequestEnvelope{RequestID: "recover-stale-acceptance", Body: recoveryBody, Meta: protocol.Metadata{ProjectID: naming.ProjectID("project")}})
+	if err != nil || staleResp.OK || staleResp.Error == nil || !strings.Contains(staleResp.Error.Message, "accepted review") {
+		t.Fatalf("older acceptance recovery response = %+v err=%v, want fail-closed conflict", staleResp, err)
+	}
+	stillLeased, err := client.GetWithRuntime(ctx, "project", issueID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lease := coordinationLease(recovered, domain.CoordinationLeaseReview); lease != nil {
-		t.Fatalf("review lease after typed recovery = %+v, want released", lease)
+	if lease := coordinationLease(stillLeased, domain.CoordinationLeaseReview); lease == nil || !pin.Reviewer.Matches(lease.OwnerID, lease.OwnerKind) {
+		t.Fatalf("review lease after stale recovery = %+v, want newer live review preserved", lease)
 	}
 }
 
