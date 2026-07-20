@@ -1688,6 +1688,13 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 	if err := a.recordAcceptedReviewOutcome(ctx, projectID, inspection.IssueID, request, pin, inspection); err != nil {
 		return false, err
 	}
+	// Close authority is the immutable event that was just committed, not the
+	// pre-write inspection. Reload it so source-less internal reviews carry the
+	// same exact epoch/event/actor fence as source-backed review acceptance.
+	pin, err = a.acceptedReviewPinForIntent(ctx, projectID, inspection.IssueID, request, integrateBeforeClose)
+	if err != nil {
+		return true, fmt.Errorf("reload accepted review close authority: %w", err)
+	}
 	if inspection.Evidence != nil {
 		if err := a.daemon.recordAcceptedPatchReviewEvidence(ctx, projectID, request.ActorID, inspection); err != nil {
 			return true, fmt.Errorf("record accepted patch-review evidence: %w", err)
