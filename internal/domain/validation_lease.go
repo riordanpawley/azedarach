@@ -117,21 +117,22 @@ type ValidationRequest struct {
 }
 
 type ValidationEvidence struct {
-	Held                   bool                `json:"held"`
-	RequestID              string              `json:"request_id,omitempty"`
-	Class                  ValidationClass     `json:"class,omitempty"`
-	Scope                  ValidationScope     `json:"scope,omitempty"`
-	Purpose                ValidationPurpose   `json:"purpose,omitempty"`
-	Execution              ValidationExecution `json:"execution,omitempty"`
-	AuthoritativeRequestID string              `json:"authoritative_request_id,omitempty"`
-	Profile                string              `json:"profile,omitempty"`
-	SourceRevision         string              `json:"source_revision,omitempty"`
-	Present                bool                `json:"present"`
-	ReportPath             string              `json:"report_path,omitempty"`
-	ReportPaths            []string            `json:"report_paths,omitempty"`
-	FailureSummary         string              `json:"failure_summary,omitempty"`
-	OverlapDetected        bool                `json:"overlap_detected"`
-	ExternalGoProcesses    int                 `json:"external_go_processes"`
+	Held                   bool                      `json:"held"`
+	RequestID              string                    `json:"request_id,omitempty"`
+	Class                  ValidationClass           `json:"class,omitempty"`
+	Scope                  ValidationScope           `json:"scope,omitempty"`
+	Purpose                ValidationPurpose         `json:"purpose,omitempty"`
+	Execution              ValidationExecution       `json:"execution,omitempty"`
+	AuthoritativeRequestID string                    `json:"authoritative_request_id,omitempty"`
+	Profile                string                    `json:"profile,omitempty"`
+	SourceRevision         string                    `json:"source_revision,omitempty"`
+	Present                bool                      `json:"present"`
+	ReportPath             string                    `json:"report_path,omitempty"`
+	ReportPaths            []string                  `json:"report_paths,omitempty"`
+	FailureSummary         string                    `json:"failure_summary,omitempty"`
+	OverlapDetected        bool                      `json:"overlap_detected"`
+	ExternalGoProcesses    int                       `json:"external_go_processes"`
+	Stages                 []ValidationStageEvidence `json:"stages,omitempty"`
 }
 
 type ValidationNestedAuthorization struct {

@@ -687,7 +687,7 @@ func (d *Daemon) recordTaskCloseMergeResultEvidence(ctx context.Context, project
 	if err != nil {
 		return fmt.Errorf("load exact synthetic merge publication capability: %w", err)
 	}
-	gateCommand := strings.TrimSpace(projectCfg.Gate.Command)
+	gateCommand := publicationValidationIdentity(projectCfg)
 	if gateCommand == "" {
 		return fmt.Errorf("exact synthetic merge requires configured repository push gate command")
 	}
@@ -790,7 +790,7 @@ func (d *Daemon) verifyRecoveredTaskClosePublication(ctx context.Context, projec
 	if err != nil {
 		return fmt.Errorf("load exact synthetic merge publication capability: %w", err)
 	}
-	gateCommand := strings.TrimSpace(projectCfg.Gate.Command)
+	gateCommand := publicationValidationIdentity(projectCfg)
 	if gateCommand == "" {
 		return fmt.Errorf("exact synthetic merge requires configured repository push gate command")
 	}

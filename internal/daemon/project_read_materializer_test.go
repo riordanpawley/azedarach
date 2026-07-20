@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+	"github.com/riordanpawley/azedarach/internal/daemon/publish"
 	"github.com/riordanpawley/azedarach/internal/daemon/userstore"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
@@ -130,7 +131,7 @@ func TestProjectReadMaterializerTransientWatchErrorRetainsLastGoodWithoutLegacyE
 	<-done
 }
 
-func TestProjectReadSnapshotServesCanonicalStateDuringRuntimeRefreshFailure(t *testing.T) {
+func TestProjectReadSnapshotRecoversRuntimeFailureBeforeInvariantRead(t *testing.T) {
 	ctx := context.Background()
 	client, _ := newTestIssueClient(t)
 	created, err := client.Create(ctx, issues.CreateTaskParams{Title: "canonical", Type: domain.TypeTask})
@@ -154,8 +155,336 @@ func TestProjectReadSnapshotServesCanonicalStateDuringRuntimeRefreshFailure(t *t
 	}
 
 	tasks, metadata, err = d.convergedProjectReadSnapshotForInvariant(ctx, "project")
-	if err == nil || tasks != nil || !strings.Contains(metadata.Health, "stale: authoritative runtime refresh:") {
-		t.Fatalf("invariant snapshot = %+v metadata=%+v err=%v, want fail-closed runtime health", tasks, metadata, err)
+	if err != nil || len(tasks) != 1 || metadata.Health != "healthy" {
+		t.Fatalf("recovered invariant snapshot = %+v metadata=%+v err=%v", tasks, metadata, err)
+	}
+}
+
+func TestInvariantReadPropagatesAuthoritativeRuntimeRecoveryFailure(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestIssueClient(t)
+	created, err := client.Create(ctx, issues.CreateTaskParams{Title: "canonical", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	materializer := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(client), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) { return tasks, nil })
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	failed := materializer.beginAuthoritativeReadRefreshForIssues(authoritativeReadRefreshRuntime, []string{created})
+	materializer.finishAuthoritativeReadRefresh(failed, context.DeadlineExceeded)
+	recoveryFailure := errors.New("root projection remains unavailable")
+	d := &Daemon{
+		cfg: Config{}, materializers: map[string]*projectReadMaterializer{"project": materializer}, materializersStarted: true,
+		projectReadUserProjectionSync: func(context.Context, string, []string) error { return recoveryFailure },
+	}
+
+	tasks, metadata, err := d.convergedProjectReadSnapshotForInvariant(ctx, "project")
+	if err == nil || tasks != nil || !errors.Is(err, recoveryFailure) || !strings.Contains(metadata.Health, recoveryFailure.Error()) {
+		t.Fatalf("failed invariant recovery = tasks=%+v metadata=%+v err=%v", tasks, metadata, err)
+	}
+}
+
+func TestInvariantReadRecoversFailedAbsentProjection(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestIssueClient(t)
+	liveID, err := client.Create(ctx, issues.CreateTaskParams{Title: "unrelated lifecycle target", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	live := domain.Task{ID: naming.IssueID(liveID), Title: "unrelated lifecycle target", Status: domain.StatusInProgress, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}
+	stale := domain.Task{ID: "stale", Title: "deleted authoritative issue", Status: domain.StatusCancelled, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}
+	state := userstore.ProjectDeltaState{ProjectID: "project", Cursor: 1, Hash: "one", Initialized: true, Projector: issueProjectionProjector()}
+	if err := store.ReplaceProject(ctx, userstore.ProjectInput{ProjectID: "project", Name: "Project", Path: "/project", DBPath: "/project/db", Tasks: []domain.Task{live, stale}, Delta: &state}); err != nil {
+		t.Fatal(err)
+	}
+	canonical := map[string]domain.Task{live.ID.String(): live}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, canonical)
+	reader := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(client), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) { return tasks, nil })
+	reader.replaceBootstrap(canonical, canonical, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+	failed := reader.beginAuthoritativeReadRefreshForIssues(authoritativeReadRefreshRuntime, []string{stale.ID.String()})
+	reader.finishAuthoritativeReadRefresh(failed, context.DeadlineExceeded)
+
+	d := &Daemon{cfg: Config{}, userStore: store, materializers: map[string]*projectReadMaterializer{"project": reader}, materializersStarted: true}
+	tasks, metadata, err := d.convergedProjectReadSnapshotForInvariant(ctx, "project")
+	if err != nil {
+		t.Fatalf("invariant recovery: %v", err)
+	}
+	if metadata.Health != "healthy" || len(tasks) != 1 || tasks[0].ID.String() != live.ID.String() {
+		t.Fatalf("recovered invariant snapshot = %+v metadata=%+v", tasks, metadata)
+	}
+	snapshot, err := store.Snapshot(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Projects) != 1 || len(snapshot.Projects[0].Tasks) != 1 || snapshot.Projects[0].Tasks[0].ID.String() != live.ID.String() {
+		t.Fatalf("root projection after absent-key recovery = %+v", snapshot.Projects)
+	}
+}
+
+func TestConcurrentDaemonInvariantReadsConvergeFailedAbsentProjection(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestIssueClient(t)
+	liveID, err := client.Create(ctx, issues.CreateTaskParams{Title: "unrelated lifecycle target", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "user.db")
+	stores := make([]*userstore.Store, 2)
+	for i := range stores {
+		var err error
+		stores[i], err = userstore.Open(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		store := stores[i]
+		t.Cleanup(func() { _ = store.Close() })
+	}
+	now := time.Now().UTC()
+	live := domain.Task{ID: naming.IssueID(liveID), Title: "unrelated lifecycle target", Status: domain.StatusInProgress, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}
+	stale := domain.Task{ID: "stale", Title: "deleted authoritative issue", Status: domain.StatusCancelled, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}
+	state := userstore.ProjectDeltaState{ProjectID: "project", Cursor: 1, Hash: "one", Initialized: true, Projector: issueProjectionProjector()}
+	if err := stores[0].ReplaceProject(ctx, userstore.ProjectInput{ProjectID: "project", Name: "Project", Path: "/project", DBPath: "/project/db", Tasks: []domain.Task{live, stale}, Delta: &state}); err != nil {
+		t.Fatal(err)
+	}
+
+	daemons := make([]*Daemon, 2)
+	projectionWritesEntered := make(chan struct{}, len(daemons))
+	releaseProjectionWrites := make(chan struct{})
+	for i := range daemons {
+		canonical := map[string]domain.Task{live.ID.String(): live}
+		issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, canonical)
+		reader := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(client), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) { return tasks, nil })
+		reader.replaceBootstrap(canonical, canonical, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+		failed := reader.beginAuthoritativeReadRefreshForIssues(authoritativeReadRefreshRuntime, []string{stale.ID.String()})
+		reader.finishAuthoritativeReadRefresh(failed, context.DeadlineExceeded)
+		store := stores[i]
+		daemons[i] = &Daemon{
+			cfg: Config{}, userStore: store, materializers: map[string]*projectReadMaterializer{"project": reader}, materializersStarted: true,
+			projectReadUserProjectionSync: func(syncCtx context.Context, projectID string, issueIDs []string) error {
+				projectionWritesEntered <- struct{}{}
+				select {
+				case <-releaseProjectionWrites:
+				case <-syncCtx.Done():
+					return syncCtx.Err()
+				}
+				changes := make([]userstore.ProjectDeltaChange, 0, len(issueIDs))
+				for _, issueID := range issueIDs {
+					changes = append(changes, userstore.ProjectDeltaChange{IssueID: issueID, Delete: true})
+				}
+				return store.ApplyProjectMaterializedIssues(syncCtx, projectID, changes)
+			},
+		}
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, len(daemons))
+	for _, daemon := range daemons {
+		go func() {
+			<-start
+			tasks, metadata, err := daemon.convergedProjectReadSnapshotForInvariant(ctx, "project")
+			if err == nil && (metadata.Health != "healthy" || len(tasks) != 1 || tasks[0].ID.String() != live.ID.String()) {
+				err = fmt.Errorf("snapshot=%+v metadata=%+v", tasks, metadata)
+			}
+			results <- err
+		}()
+	}
+	close(start)
+	for range daemons {
+		<-projectionWritesEntered
+	}
+	close(releaseProjectionWrites)
+	for range daemons {
+		if err := <-results; err != nil {
+			t.Fatalf("concurrent daemon recovery: %v", err)
+		}
+	}
+	snapshot, err := stores[0].Snapshot(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Projects) != 1 || len(snapshot.Projects[0].Tasks) != 1 || snapshot.Projects[0].Tasks[0].ID.String() != live.ID.String() {
+		t.Fatalf("shared root projection after concurrent recovery = %+v", snapshot.Projects)
+	}
+}
+
+func TestInvariantReadDoesNotDuplicatePendingRuntimeRecovery(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestIssueClient(t)
+	liveID, err := client.Create(ctx, issues.CreateTaskParams{Title: "lifecycle target", Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	live := domain.Task{ID: naming.IssueID(liveID), Title: "lifecycle target", Status: domain.StatusOpen, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}
+	byID := map[string]domain.Task{liveID: live}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(byID, byID)
+	reader := newProjectReadMaterializer("project", NewProjectionDeltaAuthority(client), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) { return tasks, nil })
+	reader.replaceBootstrap(byID, byID, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+	failed := reader.beginAuthoritativeReadRefreshForIssues(authoritativeReadRefreshRuntime, []string{"stale"})
+	reader.finishAuthoritativeReadRefresh(failed, context.DeadlineExceeded)
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	stale := domain.Task{ID: "stale", Title: "deleted authoritative issue", Status: domain.StatusCancelled, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}
+	state := userstore.ProjectDeltaState{ProjectID: "project", Cursor: 1, Hash: "one", Initialized: true, Projector: issueProjectionProjector()}
+	if err := store.ReplaceProject(ctx, userstore.ProjectInput{ProjectID: "project", Name: "Project", Path: "/project", DBPath: "/project/db", Tasks: []domain.Task{live, stale}, Delta: &state}); err != nil {
+		t.Fatal(err)
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	d := &Daemon{
+		cfg: Config{}, userStore: store, materializers: map[string]*projectReadMaterializer{"project": reader}, materializersStarted: true,
+		projectReadUserProjectionSync: func(syncCtx context.Context, projectID string, issueIDs []string) error {
+			if calls.Add(1) != 1 {
+				return fmt.Errorf("duplicate projection recovery")
+			}
+			close(entered)
+			select {
+			case <-release:
+			case <-syncCtx.Done():
+				return syncCtx.Err()
+			}
+			changes := make([]userstore.ProjectDeltaChange, 0, len(issueIDs))
+			for _, issueID := range issueIDs {
+				changes = append(changes, userstore.ProjectDeltaChange{IssueID: issueID, Delete: true})
+			}
+			return store.ApplyProjectMaterializedIssues(syncCtx, projectID, changes)
+		},
+	}
+	first := make(chan error, 1)
+	go func() {
+		_, _, err := d.convergedProjectReadSnapshotForInvariant(ctx, "project")
+		first <- err
+	}()
+	<-entered
+	if issueIDs := reader.authoritativeRuntimeFailedIssueIDs(); len(issueIDs) != 0 {
+		t.Fatalf("retry decision during owned recovery = %v, want pending key excluded", issueIDs)
+	}
+	close(release)
+	if err := <-first; err != nil {
+		t.Fatalf("first recovery: %v", err)
+	}
+	decisionReached := make(chan []string, 1)
+	secondCtx := withAuthoritativeRuntimeRecoveryDecisionHookForTest(ctx, func(issueIDs []string) {
+		decisionReached <- issueIDs
+	})
+	second := make(chan error, 1)
+	go func() {
+		_, _, err := d.convergedProjectReadSnapshotForInvariant(secondCtx, "project")
+		second <- err
+	}()
+	if issueIDs := <-decisionReached; len(issueIDs) != 0 {
+		t.Fatalf("second recovery decision after serialized delete = %v, want no failed keys", issueIDs)
+	}
+	if err := <-second; err != nil {
+		t.Fatalf("serialized invariant read: %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("projection recovery calls = %d, want 1", got)
+	}
+	snapshot, err := store.Snapshot(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Projects) != 1 || len(snapshot.Projects[0].Tasks) != 1 || snapshot.Projects[0].Tasks[0].ID.String() != liveID {
+		t.Fatalf("root projection after pending recovery = %+v", snapshot.Projects)
+	}
+	tasks, metadata, err := d.convergedProjectReadSnapshotForInvariant(ctx, "project")
+	if err != nil || metadata.Health != "healthy" || len(tasks) != 1 || tasks[0].ID.String() != liveID {
+		t.Fatalf("settled recovery = tasks=%+v metadata=%+v err=%v", tasks, metadata, err)
+	}
+}
+
+func TestTaskLifecycleRecoversAbsentProjectionAfterCanceledRuntimeRefresh(t *testing.T) {
+	ctx := context.Background()
+	const projectID = "project"
+	client, _ := newTestIssueClient(t)
+	targetID, err := client.Create(ctx, issues.CreateTaskParams{Title: "unrelated lifecycle target", Type: domain.TypeTask, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	target := domain.Task{ID: naming.IssueID(targetID), Title: "unrelated lifecycle target", Status: domain.StatusInProgress, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}
+	stale := domain.Task{ID: "stale", Title: "deleted authoritative issue", Status: domain.StatusCancelled, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}
+	state := userstore.ProjectDeltaState{ProjectID: projectID, Cursor: 1, Hash: "one", Initialized: true, Projector: issueProjectionProjector()}
+	if err := store.ReplaceProject(ctx, userstore.ProjectInput{ProjectID: projectID, Name: "Project", Path: "/project", DBPath: "/project/db", Tasks: []domain.Task{target, stale}, Delta: &state}); err != nil {
+		t.Fatal(err)
+	}
+	canonical := map[string]domain.Task{targetID: target}
+	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, canonical)
+	reader := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(client), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) { return tasks, nil })
+	reader.replaceBootstrap(canonical, canonical, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
+
+	canceledWriteEntered := make(chan struct{})
+	d := &Daemon{
+		cfg: Config{RepoDir: t.TempDir(), Logger: slog.Default()}, userStore: store,
+		issueClientsByProject: map[string]*issues.Client{projectID: client},
+		materializers:         map[string]*projectReadMaterializer{projectID: reader}, materializersStarted: true,
+		revision: map[string]uint64{projectID: 1}, hub: publish.NewHub(16, 8, slog.Default()),
+		projectReadUserProjectionSync: func(syncCtx context.Context, _ string, _ []string) error {
+			close(canceledWriteEntered)
+			<-syncCtx.Done()
+			return syncCtx.Err()
+		},
+	}
+	canceledCtx, cancel := context.WithCancel(ctx)
+	failed := make(chan error, 1)
+	go func() {
+		failed <- d.refreshActiveProjectReadRuntimeForIssues(canceledCtx, projectID, reader, []string{stale.ID.String()})
+	}()
+	<-canceledWriteEntered
+	cancel()
+	if err := <-failed; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled runtime refresh error = %v, want context canceled", err)
+	}
+	if metadata := reader.snapshotMetadata(); !strings.Contains(metadata.Health, "stale: authoritative runtime refresh:") {
+		t.Fatalf("health after canceled refresh = %+v, want keyed stale failure", metadata)
+	}
+	d.projectReadUserProjectionSync = nil
+
+	body, err := json.Marshal(map[string]any{"task_id": targetID, "status": domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := d.command(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion, RequestID: "req-recover-lifecycle", Kind: protocol.EnvelopeKindCommand,
+		Command: "task.update_status", Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.OK {
+		t.Fatalf("task.update_status response = %+v", resp)
+	}
+	updated, err := client.GetWithRuntime(ctx, projectID, targetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != domain.StatusInReview {
+		t.Fatalf("updated status = %s, want in_review", updated.Status)
+	}
+	snapshot, err := store.Snapshot(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Projects) != 1 || len(snapshot.Projects[0].Tasks) != 1 || snapshot.Projects[0].Tasks[0].ID.String() != targetID {
+		t.Fatalf("root projection after lifecycle recovery = %+v", snapshot.Projects)
 	}
 }
 

@@ -3288,7 +3288,7 @@ func (d *Daemon) persistTaskCloseIntegrationPublication(ctx context.Context, pro
 		if configErr != nil {
 			return fmt.Errorf("recover merge-result publication binding: load publication capability: %w", configErr)
 		}
-		gateCommand := strings.TrimSpace(projectCfg.Gate.Command)
+		gateCommand := publicationValidationIdentity(projectCfg)
 		operation, _, provenanceErr := d.taskClosePublicationProvenance(ctx, projectID, taskID, integration, publicationPolicyVersion(projectCfg, gateCommand), gateCommand, publicationEnvironmentFingerprint(projectCfg))
 		if provenanceErr != nil {
 			if !errors.Is(provenanceErr, errHistoricalPublicationOperationIdentityMissing) {

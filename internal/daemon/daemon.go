@@ -73,8 +73,8 @@ type Config struct {
 	SocketPath    string
 	LockPath      string
 	ScopedRuntime bool
-	// ManagedGenerationBinDir is retained for source compatibility only.
-	// Agent launches intentionally ignore it and inherit the project PATH.
+	// ManagedGenerationBinDir pins daemon-owned commands while allowing agent
+	// session PATHs to resolve through the stable installer control directory.
 	ManagedGenerationBinDir    string
 	BaseBranch                 string
 	GitWorkflowMode            string

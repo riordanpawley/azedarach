@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -771,5 +773,95 @@ func TestAcceptedReviewAndPublicationConcurrentClientsCoalesceOneExecution(t *te
 	events, err := firstClient.ListIssueObservationEvents(ctx, task, IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}})
 	if err != nil || len(events) != 1 || events[0].ID != firstResult.eventID || events[0].ID != secondResult.eventID {
 		t.Fatalf("concurrent accepted review events = (%+v,%v)", events, err)
+	}
+}
+
+func TestAcceptedReviewPublicationConcurrentCrossBaseEvidenceReusesFirstProof(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".azedarach"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	firstClient, secondClient := NewClient(repo, nil), NewClient(repo, nil)
+	t.Cleanup(func() { _ = firstClient.CloseDB(); _ = secondClient.CloseDB() })
+	queueStore := operationstore.New(repo, nil)
+	t.Cleanup(func() { _ = queueStore.Close() })
+	if _, err := queueStore.PublicationOperations(context.Background(), "project", "", false); err != nil {
+		t.Fatal(err)
+	}
+	issueID, err := firstClient.Create(context.Background(), CreateTaskParams{Title: "cross-base publish", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Open and migrate both independent clients before exercising concurrency.
+	if _, err := secondClient.dbHandle(); err != nil {
+		t.Fatal(err)
+	}
+	admission, err := firstClient.CaptureReviewAdmissionPin(context.Background(), issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := firstClient.ClaimOwnershipWithRuntime(context.Background(), "project", issueID, OwnershipClaimParams{
+		OwnerID: "reviewer", OwnerKind: domain.ReviewerOwnerKindOrchestrator, Purpose: domain.CoordinationLeaseReview,
+		ExpectedReviewAdmission: &admission, ReviewSourceOID: "source",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var ready sync.WaitGroup
+	ready.Add(2)
+	release := make(chan struct{})
+	ctx := WithAcceptedReviewPublicationBeginHookForTest(context.Background(), func() {
+		ready.Done()
+		<-release
+	})
+	type result struct{ err error }
+	results := make(chan result, 2)
+	for i, client := range []*Client{firstClient, secondClient} {
+		op := domain.PublicationOperation{
+			OperationID: fmt.Sprintf("cross-base-%d", i), ProjectID: "project", IssueID: issueID,
+			IntentKey: fmt.Sprintf("accept-cross-base-%d", i), RequestFingerprint: fmt.Sprintf("fingerprint-%d", i),
+			ActorID: "reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: admission.ReviewEpochEventID,
+			PatchEvidenceID: "review-deterministic", AcceptedPublicationOperationID: fmt.Sprintf("cross-base-%d", i),
+			TargetID: "base", TargetBranch: "main", SourceRevision: "source", BaseRevision: fmt.Sprintf("base-%d", i),
+			PolicyVersion: "policy", EnvironmentFingerprint: "toolchain", ValidationCommand: "go test ./...",
+			EvidenceDigest: "decision-provenance", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
+		}
+		evidence := acceptedPublicationTestEvidence(op)
+		evidence.PatchDigest = fmt.Sprintf("base-relative-digest-%d", i)
+		evidence.Coverage.Paths = []string{fmt.Sprintf("provider-%d.go", i)}
+		go func(client *Client, op domain.PublicationOperation, evidence domain.PublicationEvidence) {
+			params := IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{
+				"outcome": string(domain.ReviewOutcomeAccepted), "intent_key": op.IntentKey, "request_fingerprint": op.RequestFingerprint,
+			}}
+			_, appendErr := client.AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx, issueID, params, op, evidence, "candidate-"+op.OperationID, admission, "", "reviewer")
+			results <- result{err: appendErr}
+		}(client, op, evidence)
+	}
+	ready.Wait()
+	close(release)
+	for range 2 {
+		if got := <-results; got.err != nil {
+			t.Fatalf("cross-base accepted publication: %v", got.err)
+		}
+	}
+	snapshot, err := queueStore.PublicationEvidenceSnapshot(context.Background(), "project", issueID)
+	if err != nil || len(snapshot.Evidence) != 1 {
+		t.Fatalf("immutable evidence snapshot = (%+v,%v)", snapshot.Evidence, err)
+	}
+
+	conflict := snapshot.Evidence[0]
+	conflict.SourceRevision = "changed-source"
+	op := domain.PublicationOperation{
+		OperationID: "cross-base-conflict", ProjectID: "project", IssueID: issueID, IntentKey: "accept-conflict", RequestFingerprint: "conflict",
+		ActorID: "reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: admission.ReviewEpochEventID, PatchEvidenceID: conflict.EvidenceID,
+		AcceptedPublicationOperationID: "cross-base-conflict", TargetID: "base", TargetBranch: "main", SourceRevision: conflict.SourceRevision,
+		BaseRevision: "base-conflict", PolicyVersion: "policy", EnvironmentFingerprint: "toolchain", ValidationCommand: "go test ./...",
+		EvidenceDigest: "decision-provenance", State: domain.PublicationOperationQueued, CreatedAt: time.Now().UTC(),
+	}
+	params := IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{
+		"outcome": string(domain.ReviewOutcomeAccepted), "intent_key": op.IntentKey, "request_fingerprint": op.RequestFingerprint,
+	}}
+	if _, err := firstClient.AppendAcceptedReviewAndPublicationWithReviewAdmission(context.Background(), issueID, params, op, conflict, "candidate-conflict", admission, "", "reviewer"); err == nil {
+		t.Fatal("changed source reused immutable accepted proof")
 	}
 }

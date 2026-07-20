@@ -79,7 +79,8 @@ func main() {
 		os.Exit(1)
 	}
 	scopedRuntime := config.UseScopedDaemonRuntimeFor(repoDir)
-	if _, err := managedDaemonGenerationBinDir(scopedRuntime); err != nil {
+	managedGenerationBinDir, err := managedDaemonGenerationBinDir(scopedRuntime)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
@@ -105,6 +106,7 @@ func main() {
 		SocketPath:                 socketPath,
 		LockPath:                   lockPath,
 		ScopedRuntime:              scopedRuntime,
+		ManagedGenerationBinDir:    managedGenerationBinDir,
 		BaseBranch:                 cfg.Git.BaseBranch,
 		GitWorkflowMode:            cfg.Git.WorkflowMode,
 		CLITool:                    cfg.CLITool,

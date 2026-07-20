@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -34,9 +35,22 @@ type Config struct {
 
 // GateConfig selects the project-owned command run by `az gate`.
 type GateConfig struct {
-	Command                string `json:"command"`
-	EnvironmentFingerprint string `json:"environmentFingerprint,omitempty"`
-	FailureArtifactPaths []string `json:"failureArtifactPaths"`
+	Command                string            `json:"command"`
+	EnvironmentFingerprint string            `json:"environmentFingerprint,omitempty"`
+	FailureArtifactPaths   []string          `json:"failureArtifactPaths"`
+	Stages                 []GateStageConfig `json:"stages,omitempty"`
+}
+
+// GateStageConfig describes one consumer-owned authoritative validation stage.
+// Resource names are opaque project capabilities; stages sharing a resource
+// never overlap. An empty Required value defaults to true.
+type GateStageConfig struct {
+	ID            string   `json:"id"`
+	Command       string   `json:"command"`
+	DependsOn     []string `json:"dependsOn,omitempty"`
+	Resources     []string `json:"resources,omitempty"`
+	ArtifactPaths []string `json:"artifactPaths,omitempty"`
+	Required      *bool    `json:"required,omitempty"`
 }
 
 type IssueTrackerConfig struct {
@@ -476,6 +490,62 @@ func validateGateConfig(cfg GateConfig) error {
 		path = strings.TrimSpace(path)
 		if path == "" || path == "." || !filepath.IsLocal(path) {
 			return fmt.Errorf("gate.failureArtifactPaths[%d] must be a non-empty project-relative path below the project root", index)
+		}
+	}
+	ids := make(map[string]struct{}, len(cfg.Stages))
+	for index, stage := range cfg.Stages {
+		stage.ID = strings.TrimSpace(stage.ID)
+		if stage.ID == "" || strings.TrimSpace(stage.Command) == "" {
+			return fmt.Errorf("gate.stages[%d] requires non-empty id and command", index)
+		}
+		if _, exists := ids[stage.ID]; exists {
+			return fmt.Errorf("gate.stages contains duplicate id %q", stage.ID)
+		}
+		ids[stage.ID] = struct{}{}
+		for artifactIndex, path := range stage.ArtifactPaths {
+			path = strings.TrimSpace(path)
+			if path == "" || path == "." || !filepath.IsLocal(path) {
+				return fmt.Errorf("gate.stages[%d].artifactPaths[%d] must be a project-relative path", index, artifactIndex)
+			}
+		}
+	}
+	for _, stage := range cfg.Stages {
+		for _, dependency := range stage.DependsOn {
+			if _, exists := ids[strings.TrimSpace(dependency)]; !exists {
+				return fmt.Errorf("gate stage %q depends on unknown stage %q", stage.ID, dependency)
+			}
+		}
+	}
+	state := make(map[string]uint8, len(cfg.Stages))
+	byID := make(map[string]GateStageConfig, len(cfg.Stages))
+	for _, stage := range cfg.Stages {
+		byID[strings.TrimSpace(stage.ID)] = stage
+	}
+	var visit func(string) error
+	visit = func(id string) error {
+		switch state[id] {
+		case 1:
+			return fmt.Errorf("gate stage graph contains a cycle at %q", id)
+		case 2:
+			return nil
+		}
+		state[id] = 1
+		for _, dependency := range byID[id].DependsOn {
+			if err := visit(strings.TrimSpace(dependency)); err != nil {
+				return err
+			}
+		}
+		state[id] = 2
+		return nil
+	}
+	stageIDs := make([]string, 0, len(byID))
+	for id := range byID {
+		stageIDs = append(stageIDs, id)
+	}
+	sort.Strings(stageIDs)
+	for _, id := range stageIDs {
+		if err := visit(id); err != nil {
+			return err
 		}
 	}
 	return nil

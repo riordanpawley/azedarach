@@ -1273,7 +1273,7 @@ func (d *Daemon) handleSessionStartDirectWithOptions(ctx context.Context, req pr
 			)
 		}
 	} else {
-		if err := d.tmux.NewSessionWithEnvironment(ctx, cmd.SessionID, worktree.Path, nil); err != nil {
+		if err := d.tmux.NewSessionWithEnvironment(ctx, cmd.SessionID, worktree.Path, d.daemonScopeTmuxEnvironment()); err != nil {
 			cleanupNote := d.reconcileAmbiguousSessionStartCreateError(ctx, req, cmd, resourceCtx, initialActivity, initialActivitySource, options.intent)
 			return d.errorResponse(req, protocol.ErrorCodeInternal, sessionStartLaunchFailureMessage("tmux_launch", cmd, worktree.Path, "", false, err, cleanupNote)), nil
 		}
@@ -6275,7 +6275,13 @@ func (d *Daemon) daemonScopeTmuxEnvironment() map[string]string {
 	if d != nil && d.cfg.ScopedRuntime {
 		scope = "worktree"
 	}
-	return map[string]string{"AZEDARACH_DAEMON_SCOPE": scope}
+	environment := map[string]string{"AZEDARACH_DAEMON_SCOPE": scope}
+	if d != nil && !d.cfg.ScopedRuntime && strings.TrimSpace(d.cfg.ManagedGenerationBinDir) != "" {
+		if sessionPath := appconfig.ManagedSessionPath(os.Getenv("PATH"), d.cfg.ManagedGenerationBinDir); sessionPath != os.Getenv("PATH") {
+			environment["PATH"] = sessionPath
+		}
+	}
+	return environment
 }
 
 const initialPromptShellVariable = "__AZEDARACH_INITIAL_PROMPT"

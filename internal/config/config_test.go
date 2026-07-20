@@ -111,6 +111,34 @@ func TestLoadConfigReadsPortableGateFailureArtifactPaths(t *testing.T) {
 	assert.Equal(t, []string{"build/test-results", "coverage/raw"}, cfg.Gate.FailureArtifactPaths)
 }
 
+func TestLoadConfigReadsConsumerNeutralGateStageDAG(t *testing.T) {
+	root := t.TempDir()
+	writeConfigFile(t, root, `{"$version":11,"gate":{"stages":[{"id":"lint","command":"acme-check","resources":["workspace"]},{"id":"package","command":"acme-pack","dependsOn":["lint"],"artifactPaths":["out/report"]}]}}`)
+	cfg, err := LoadConfig(root)
+	require.NoError(t, err)
+	require.Len(t, cfg.Gate.Stages, 2)
+	assert.Equal(t, []string{"lint"}, cfg.Gate.Stages[1].DependsOn)
+}
+
+func TestLoadConfigRejectsAbsentGateStageCapability(t *testing.T) {
+	root := t.TempDir()
+	writeConfigFile(t, root, `{"$version":11,"gate":{"stages":[{"id":"package","command":"acme-pack","dependsOn":["missing"]}]}}`)
+	_, err := LoadConfig(root)
+	require.ErrorContains(t, err, `depends on unknown stage "missing"`)
+}
+
+func TestLoadConfigRejectsGateStageCycles(t *testing.T) {
+	for _, stages := range []string{
+		`[{"id":"self","command":"acme-check","dependsOn":["self"]}]`,
+		`[{"id":"independent","command":"acme-safe"},{"id":"one","command":"acme-one","dependsOn":["two"]},{"id":"two","command":"acme-two","dependsOn":["one"]}]`,
+	} {
+		root := t.TempDir()
+		writeConfigFile(t, root, `{"$version":11,"gate":{"stages":`+stages+`}}`)
+		_, err := LoadConfig(root)
+		require.ErrorContains(t, err, "gate stage graph contains a cycle")
+	}
+}
+
 func TestLoadConfigRejectsUnsafeGateFailureArtifactPaths(t *testing.T) {
 	for _, path := range []string{"", ".", "../outside", "/absolute"} {
 		t.Run(path, func(t *testing.T) {

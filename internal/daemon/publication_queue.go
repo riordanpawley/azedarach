@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -365,9 +366,9 @@ func (d *Daemon) prepareAcceptedReviewPublication(ctx context.Context, projectID
 	if err != nil {
 		return domain.PublicationOperation{}, fmt.Errorf("load publication capability: %w", err)
 	}
-	gateCommand := strings.TrimSpace(projectCfg.Gate.Command)
+	gateCommand := publicationValidationIdentity(projectCfg)
 	if gateCommand == "" {
-		return domain.PublicationOperation{}, fmt.Errorf("publication capability absent: configure gate.command for exact synthetic-candidate validation")
+		return domain.PublicationOperation{}, fmt.Errorf("publication capability absent: configure gate.command or gate.stages for exact synthetic-candidate validation")
 	}
 	policyVersion := publicationPolicyVersion(projectCfg, gateCommand)
 	reviewer := pin.Reviewer
@@ -680,6 +681,16 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 		_ = daemonops.ReportProgress(ctx, daemonops.Progress{Phase: phase, Message: strings.TrimSpace(attempt.Message), Current: percent, Total: 100, Unit: "percent", Percent: int(percent)})
 	})
 	ctx = git.WithCandidateValidationCommand(ctx, operation.ValidationCommand)
+	if projectCfg, configErr := appconfig.LoadConfig(d.resolveRepoDirForProjectExact(operation.ProjectID)); configErr != nil {
+		return nil, fmt.Errorf("load publication validation stages: %w", configErr)
+	} else if stages := publicationValidationStagesForOperation(projectCfg, operation.ValidationCommand); len(stages) > 0 {
+		ctx = git.WithCandidateValidationDAG(ctx, stages)
+		artifactPaths := append([]string(nil), d.runtimeConfigForProject(operation.ProjectID).GateFailureArtifactPaths...)
+		for _, stage := range stages {
+			artifactPaths = append(artifactPaths, stage.ArtifactPaths...)
+		}
+		ctx = git.WithIntegrationFailureArtifactPaths(ctx, artifactPaths)
+	}
 	ctx = git.WithCandidateValidationTicket(ctx, ticketID)
 	ctx = git.WithCandidateValidationReviewAuthority(ctx, git.CandidateValidationReviewAuthority{
 		ReviewerID: operation.ActorID, ReviewerKind: operation.ReviewerKind,
@@ -762,6 +773,14 @@ func (d *Daemon) runPublicationOperation(ctx context.Context, projectID, operati
 	d.ensurePublicationTargetContinuation(store, current)
 	_ = daemonops.ReportProgress(ctx, daemonops.Progress{Phase: "merged", Message: "exact candidate merged and accepted issue closed", Current: 100, Total: 100, Unit: "percent", Percent: 100})
 	return json.Marshal(current)
+}
+
+func publicationValidationStagesForOperation(cfg *appconfig.Config, operationIdentity string) []git.CandidateValidationStage {
+	operationIdentity = strings.TrimSpace(operationIdentity)
+	if !strings.HasPrefix(operationIdentity, "stage-dag:") || operationIdentity != publicationValidationIdentity(cfg) {
+		return nil
+	}
+	return publicationValidationStages(cfg)
 }
 
 func (d *Daemon) terminalizeAcceptedReviewPublication(ctx context.Context, current domain.PublicationOperation, claimToken string, state domain.PublicationOperationState, failureKind, failureDetail, failureArtifact string, finished time.Time) (domain.PublicationOperation, error) {
@@ -853,7 +872,7 @@ func (d *Daemon) publicationOperationAlreadyApplied(ctx context.Context, operati
 	if err != nil {
 		return false, fmt.Errorf("reload project capability: %w", err)
 	}
-	gateCommand := strings.TrimSpace(cfg.Gate.Command)
+	gateCommand := publicationValidationIdentity(cfg)
 	if gateCommand != operation.ValidationCommand || publicationPolicyVersion(cfg, gateCommand) != operation.PolicyVersion || publicationEnvironmentFingerprint(cfg) != operation.EnvironmentFingerprint {
 		return false, nil
 	}
@@ -869,6 +888,45 @@ func publicationPolicyVersion(cfg *appconfig.Config, gateCommand string) string 
 		return version
 	}
 	return "gate-command:" + fmt.Sprintf("%x", sha256.Sum256([]byte(strings.TrimSpace(gateCommand))))[:16]
+}
+
+func publicationValidationIdentity(cfg *appconfig.Config) string {
+	if cfg == nil || len(cfg.Gate.Stages) == 0 {
+		if cfg == nil {
+			return ""
+		}
+		return strings.TrimSpace(cfg.Gate.Command)
+	}
+	type identityStage struct {
+		ID            string   `json:"id"`
+		Command       string   `json:"command"`
+		DependsOn     []string `json:"depends_on,omitempty"`
+		Resources     []string `json:"resources,omitempty"`
+		ArtifactPaths []string `json:"artifact_paths,omitempty"`
+		Required      bool     `json:"required"`
+	}
+	stages := make([]identityStage, 0, len(cfg.Gate.Stages))
+	for _, stage := range cfg.Gate.Stages {
+		required := stage.Required == nil || *stage.Required
+		item := identityStage{ID: strings.TrimSpace(stage.ID), Command: strings.TrimSpace(stage.Command), DependsOn: append([]string(nil), stage.DependsOn...), Resources: append([]string(nil), stage.Resources...), ArtifactPaths: append([]string(nil), stage.ArtifactPaths...), Required: required}
+		sort.Strings(item.DependsOn)
+		sort.Strings(item.Resources)
+		sort.Strings(item.ArtifactPaths)
+		stages = append(stages, item)
+	}
+	sort.Slice(stages, func(i, j int) bool { return stages[i].ID < stages[j].ID })
+	encoded, _ := json.Marshal(stages)
+	return "stage-dag:" + fmt.Sprintf("%x", sha256.Sum256(encoded))
+}
+
+func publicationValidationStages(cfg *appconfig.Config) []git.CandidateValidationStage {
+	stages := make([]git.CandidateValidationStage, 0, len(cfg.Gate.Stages))
+	for _, stage := range cfg.Gate.Stages {
+		required := stage.Required == nil || *stage.Required
+		stages = append(stages, git.CandidateValidationStage{ID: stage.ID, Command: stage.Command, DependsOn: append([]string(nil), stage.DependsOn...), Resources: append([]string(nil), stage.Resources...), ArtifactPaths: append([]string(nil), stage.ArtifactPaths...), Required: true})
+		stages[len(stages)-1].Required = required
+	}
+	return stages
 }
 
 func publicationEnvironmentFingerprint(cfg *appconfig.Config) string {
@@ -893,7 +951,7 @@ func (d *Daemon) validatePublicationOperationIdentity(ctx context.Context, opera
 	if err != nil {
 		return fmt.Errorf("inspect publication identity: reload project capability: %w", err)
 	}
-	gateCommand := strings.TrimSpace(cfg.Gate.Command)
+	gateCommand := publicationValidationIdentity(cfg)
 	currentBase = strings.TrimSpace(currentBase)
 	currentPolicy := publicationPolicyVersion(cfg, gateCommand)
 	currentEnvironment := publicationEnvironmentFingerprint(cfg)
@@ -1046,6 +1104,7 @@ func (d *Daemon) publicationCandidateAdmission(projectID, operationID, claimToke
 					Held: true, Present: true, RequestID: validation.RequestID, Class: validation.Class,
 					Scope: validation.Scope, Purpose: validation.Purpose, Execution: domain.ValidationExecutionExecuted,
 					AuthoritativeRequestID: validation.RequestID, Profile: validation.Profile, SourceRevision: candidateRevision,
+					Stages: append([]domain.ValidationStageEvidence(nil), attempt.Stages...),
 				}
 				if state == domain.ValidationRequestFailed {
 					evidence.FailureSummary = attempt.Message

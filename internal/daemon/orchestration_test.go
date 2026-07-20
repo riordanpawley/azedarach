@@ -384,9 +384,13 @@ func TestOrchestratorReplacementReceivesUnchangedActionableWake(t *testing.T) {
 				t.Fatal(err)
 			}
 			seedReadyAgentInput(t, d, runner, projectID, "old-orchestrator")
-			base := time.Date(2026, 7, 20, 4, 0, 0, 0, time.UTC)
-			if _, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{ProjectID: projectID, SessionID: "old-orchestrator", ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: base, ObservedVersion: base.UnixNano()}); err != nil {
-				t.Fatal(err)
+			seededActivity, found, err := store.GetPhysicalSessionObservation(ctx, projectID, "old-orchestrator")
+			if err != nil || !found {
+				t.Fatalf("read seeded original activity: found=%t err=%v", found, err)
+			}
+			base := seededActivity.UpdatedAt.Add(time.Second)
+			if _, applied, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{ProjectID: projectID, SessionID: "old-orchestrator", ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "hooks", UpdatedAt: base, ObservedVersion: base.UnixNano()}); err != nil || !applied {
+				t.Fatalf("apply busy original activity: applied=%t err=%v", applied, err)
 			}
 			policy, err := domain.ParseOrchestratorLifecyclePolicy("", "")
 			if err != nil {
@@ -411,8 +415,8 @@ func TestOrchestratorReplacementReceivesUnchangedActionableWake(t *testing.T) {
 			if err := store.UpsertManagedAgentIdentity(ctx, replacementTarget); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{ProjectID: projectID, SessionID: "replacement-orchestrator", ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: base.Add(time.Second), ObservedVersion: base.Add(time.Second).UnixNano()}); err != nil {
-				t.Fatal(err)
+			if _, applied, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{ProjectID: projectID, SessionID: "replacement-orchestrator", ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: base.Add(time.Second), ObservedVersion: base.Add(time.Second).UnixNano()}); err != nil || !applied {
+				t.Fatalf("apply idle replacement activity: applied=%t err=%v", applied, err)
 			}
 			receiver := &recordingAuthoritativeReceiver{accepted: map[string]string{}, sink: func(payload string) {
 				runner.inputPayloads = append(runner.inputPayloads, payload)

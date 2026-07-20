@@ -584,7 +584,16 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 	env = candidateValidationTicketEnv(env, ctx)
 	var stdout, stderr string
 	var runErr error
-	if configuredCommand != "" {
+	if stages, ok := ctx.Value(candidateValidationDAGKey{}).([]CandidateValidationStage); ok {
+		var dagResult CandidateValidationDAGResult
+		dagResult, runErr = runCandidateValidationDAG(ctx, scratchPath, env, stages)
+		attempt.Stages = append([]CandidateValidationStageResult(nil), dagResult.Stages...)
+		parts := make([]string, 0, len(dagResult.Stages))
+		for _, stage := range dagResult.Stages {
+			parts = append(parts, fmt.Sprintf("%s=%s", stage.ID, stage.Status))
+		}
+		stdout = strings.Join(parts, ", ")
+	} else if configuredCommand != "" {
 		stdout, stderr, runErr = runProcessGroupCommand(ctx, scratchPath, env, "/bin/sh", "-lc", configuredCommand)
 	} else {
 		stdout, stderr, runErr = runProcessGroupCommand(ctx, scratchPath, env, gatePath)
