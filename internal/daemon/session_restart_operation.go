@@ -49,6 +49,7 @@ type sessionRestartRecoveryPlan struct {
 	SessionID             string                           `json:"session_id"`
 	IssueID               string                           `json:"issue_id,omitempty"`
 	Activity              string                           `json:"activity"`
+	AgentTool             string                           `json:"agent_tool,omitempty"`
 	Old                   daemonstate.ManagedAgentIdentity `json:"old"`
 	PlannedIncarnation    string                           `json:"planned_incarnation"`
 	PromptHandoffRequired bool                             `json:"prompt_handoff_required"`
@@ -282,9 +283,11 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 	if promptHandoffRequired {
 		promptHandoffType = sessionRestartPromptHandoffTypeOwnerOnlyArtifact
 	}
+	agentTool := strings.TrimSpace(d.runtimeConfigForProject(target.ProjectID).CLITool)
 	plan := sessionRestartRecoveryPlan{
 		ProjectID: target.ProjectID, SessionID: target.SessionID, IssueID: target.IssueID, Activity: target.Activity,
-		Old: old, PlannedIncarnation: incarnation, PromptHandoffRequired: promptHandoffRequired,
+		AgentTool: agentTool,
+		Old:       old, PlannedIncarnation: incarnation, PromptHandoffRequired: promptHandoffRequired,
 		PromptHandoffType: promptHandoffType, Role: target.Role, ScopeKind: target.ScopeKind, ScopeID: target.ScopeID, Stage: "prepare",
 	}
 	if orchestratorIdentity != nil {
@@ -300,7 +303,7 @@ func (d *Daemon) restartManagedAgentPaneLocked(ctx context.Context, store *daemo
 		worktree string
 	}
 	prepared, err, timedOut := runRestartStage(ctx, sessionRestartPrepareTimeout, func(stageCtx context.Context) (preparedRestart, error) {
-		if strings.EqualFold(strings.TrimSpace(d.runtimeConfigForProject(target.ProjectID).CLITool), "codex") && strings.TrimSpace(old.AgentThreadID) == "" {
+		if strings.EqualFold(agentTool, "codex") && strings.TrimSpace(old.AgentThreadID) == "" {
 			return preparedRestart{}, errors.New("managed Codex restart requires an exact durable thread id")
 		}
 		artifact, prepareErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchResume, ProjectID: target.ProjectID, IssueID: target.IssueID, SessionID: target.SessionID, Yolo: body.Yolo, ImagePaths: body.ImagePaths, Prompt: launchPrompt, LogicalPaneID: old.LogicalPaneID, AgentIncarnation: incarnation, AgentThreadID: old.AgentThreadID})

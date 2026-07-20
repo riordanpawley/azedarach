@@ -2073,6 +2073,20 @@ func (d *Daemon) recoverInterruptedSessionRestartBatch(ctx context.Context, batc
 }
 
 func (d *Daemon) recoverInterruptedSessionRestartLocked(ctx context.Context, store *daemonstate.RuntimeStateStore, plan sessionRestartRecoveryPlan) (interruptedOperationRecovery, bool) {
+	tool := strings.TrimSpace(plan.AgentTool)
+	if tool == "" {
+		// Plans written before agent_tool was persisted retain compatibility for
+		// non-Codex agents, while the configured Codex path still fails closed.
+		tool = strings.TrimSpace(d.runtimeConfigForProject(plan.ProjectID).CLITool)
+	}
+	requiresExactThread := strings.EqualFold(tool, "codex")
+	if requiresExactThread && strings.TrimSpace(plan.Old.AgentThreadID) == "" {
+		item := sessionRestartRecoveryItem(plan)
+		item.Outcome = "partial_failure"
+		item.Error = "recover managed Codex restart: durable recovery plan is missing exact thread identity"
+		item.Stages = []protocol.SessionRestartStage{restartStage("recover_"+plan.Stage, "failed", item.Error, sessionRestartObservationTimeout)}
+		return sessionRestartRecoveryResult(item), true
+	}
 	recoveryCtx, cancel := context.WithTimeout(ctx, sessionRestartObservationTimeout)
 	defer cancel()
 	item := sessionRestartRecoveryItem(plan)
@@ -2085,6 +2099,12 @@ func (d *Daemon) recoverInterruptedSessionRestartLocked(ctx context.Context, sto
 		panes, panesErr := d.tmux.ListPaneInfos(recoveryCtx)
 		if identityErr == nil && panesErr == nil {
 			if found && current.AgentIncarnation == plan.PlannedIncarnation && current.PanePID != plan.Old.PanePID && managedRestartIdentityLive(plan.SessionID, current, panes) {
+				if requiresExactThread && strings.TrimSpace(current.AgentThreadID) != strings.TrimSpace(plan.Old.AgentThreadID) {
+					item.Outcome = "partial_failure"
+					item.Error = "recover managed Codex restart: replacement thread identity does not match durable recovery plan"
+					item.Stages = []protocol.SessionRestartStage{restartStage("recover_"+plan.Stage, "failed", item.Error, sessionRestartObservationTimeout)}
+					return sessionRestartRecoveryResult(item), true
+				}
 				handoff, handoffValidationErr := d.validateRecoveredSessionRestartPromptHandoff(plan)
 				if handoffValidationErr != nil {
 					item.Outcome = "partial_failure"

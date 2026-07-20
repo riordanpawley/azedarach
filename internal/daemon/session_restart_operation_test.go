@@ -511,7 +511,7 @@ func TestRestartManagedAgentPaneObserveProgressFailureRemainsFencedAcrossDaemons
 	storeB := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
 	t.Cleanup(func() { _ = storeB.Close() })
 	t.Cleanup(func() { _ = storeA.Close() })
-	old := daemonstate.ManagedAgentIdentity{ProjectID: project, SessionID: session, LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old", ObservedAt: time.Now()}
+	old := daemonstate.ManagedAgentIdentity{ProjectID: project, SessionID: session, LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old", AgentThreadID: exactRestartAgentThreadID, ObservedAt: time.Now()}
 	if err := storeA.UpsertManagedAgentIdentity(ctx, old); err != nil {
 		t.Fatal(err)
 	}
@@ -1231,10 +1231,10 @@ func TestRecoverInterruptedSessionRestartMatrix(t *testing.T) {
 		runner.mu.Lock()
 		runner.pid = 101
 		runner.mu.Unlock()
-		if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 101, AgentIncarnation: "planned", ObservedAt: time.Now()}); err != nil {
+		if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 101, AgentIncarnation: "planned", AgentThreadID: exactRestartAgentThreadID, ObservedAt: time.Now()}); err != nil {
 			t.Fatal(err)
 		}
-		plan := sessionRestartRecoveryPlan{ProjectID: target.ProjectID, SessionID: target.SessionID, IssueID: target.IssueID, Activity: target.Activity, Old: daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old"}, PlannedIncarnation: "planned", PromptHandoffRequired: true, PromptHandoffType: sessionRestartPromptHandoffTypeOwnerOnlyArtifact, PromptPath: promptPath, Stage: "observe"}
+		plan := sessionRestartRecoveryPlan{ProjectID: target.ProjectID, SessionID: target.SessionID, IssueID: target.IssueID, Activity: target.Activity, AgentTool: "custom-agent", Old: daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old"}, PlannedIncarnation: "planned", PromptHandoffRequired: true, PromptHandoffType: sessionRestartPromptHandoffTypeOwnerOnlyArtifact, PromptPath: promptPath, Stage: "observe"}
 		body, err := json.Marshal(plan)
 		if err != nil {
 			t.Fatal(err)
@@ -1276,7 +1276,7 @@ func TestRecoverInterruptedSessionRestartMatrix(t *testing.T) {
 		runner.mu.Lock()
 		runner.pid = 101
 		runner.mu.Unlock()
-		if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 101, AgentIncarnation: "planned", ObservedAt: time.Now()}); err != nil {
+		if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 101, AgentIncarnation: "planned", AgentThreadID: exactRestartAgentThreadID, ObservedAt: time.Now()}); err != nil {
 			t.Fatal(err)
 		}
 		close(listPanesRelease)
@@ -1308,7 +1308,7 @@ func TestRecoverInterruptedSessionRestartMatrix(t *testing.T) {
 			resultCh <- recoveryResult{recovery: recovery, ok: ok}
 		}()
 		<-listPanesEntered
-		if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 101, AgentIncarnation: "planned", ObservedAt: time.Now()}); err != nil {
+		if err := store.UpsertManagedAgentIdentity(context.Background(), daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 101, AgentIncarnation: "planned", AgentThreadID: exactRestartAgentThreadID, ObservedAt: time.Now()}); err != nil {
 			t.Fatal(err)
 		}
 		close(listPanesRelease)
@@ -1513,16 +1513,40 @@ func TestRecoverInterruptedRootedRestartRepairsBootstrapAcrossCrashWindows(t *te
 	}
 }
 
+func TestRecoverInterruptedCodexRestartRejectsMissingDurableThread(t *testing.T) {
+	d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+	seedRecoveredReplacement(t, store, runner, "planned")
+	plan := recoveryPlanForTarget(target, "observe")
+	plan.Old.AgentThreadID = ""
+
+	result := decodeRestartRecoveryResult(t, mustRecoverRestartPlan(t, d, plan))
+	if result.Failed != 1 || !strings.Contains(result.Sessions[0].Error, "missing exact thread identity") {
+		t.Fatalf("recovery result=%+v", result)
+	}
+}
+
+func TestRecoverInterruptedCodexRestartRejectsStaleReplacementThread(t *testing.T) {
+	d, store, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+	runner.agentThreadID = "stale-thread"
+	seedRecoveredReplacement(t, store, runner, "planned")
+	plan := recoveryPlanForTarget(target, "observe")
+
+	result := decodeRestartRecoveryResult(t, mustRecoverRestartPlan(t, d, plan))
+	if result.Failed != 1 || !strings.Contains(result.Sessions[0].Error, "does not match durable recovery plan") {
+		t.Fatalf("recovery result=%+v", result)
+	}
+}
+
 func TestRecoverInterruptedRootedRestartHoldsRootedThenPaneLocksAgainstLiveRestart(t *testing.T) {
 	base := t.TempDir()
 	dbPath := filepath.Join(base, "runtime.db")
 	store := daemonstate.NewRuntimeStateStoreAtPath(dbPath, slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
-	old := daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old", ObservedAt: time.Now()}
+	old := daemonstate.ManagedAgentIdentity{ProjectID: "project", SessionID: "az-1", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old", AgentThreadID: exactRestartAgentThreadID, ObservedAt: time.Now()}
 	if err := store.UpsertManagedAgentIdentity(context.Background(), old); err != nil {
 		t.Fatal(err)
 	}
-	runner := &exactRestartRunner{store: store, project: "project", session: "az-1", pid: 100}
+	runner := &exactRestartRunner{store: store, project: "project", session: "az-1", pid: 100, agentThreadID: old.AgentThreadID}
 	d := &Daemon{cfg: Config{RepoDir: base, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()}, tmux: tmux.NewClient(runner, slog.Default()), runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{"project": store}}
 	target := sessionRestartAllTarget{ProjectID: "project", SessionID: "az-1", IssueID: "one", Activity: "idle", TmuxReady: true}
 	scope, err := domain.RootedOrchestrationScope(target.IssueID)
@@ -1653,12 +1677,12 @@ func TestRecoverInterruptedProjectOrchestratorRestartDoesNotRespawnAgain(t *test
 	sessionID := naming.CanonicalSessionID(repoDir, "orchestrator-project")
 	old := daemonstate.ManagedAgentIdentity{
 		ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: "12",
-		PanePID: 100, AgentIncarnation: "old", ObservedAt: time.Now(),
+		PanePID: 100, AgentIncarnation: "old", AgentThreadID: exactRestartAgentThreadID, ObservedAt: time.Now(),
 	}
 	if err := store.UpsertManagedAgentIdentity(ctx, old); err != nil {
 		t.Fatal(err)
 	}
-	runner := &exactRestartRunner{store: store, project: projectID, session: sessionID, pid: 100}
+	runner := &exactRestartRunner{store: store, project: projectID, session: sessionID, pid: 100, agentThreadID: old.AgentThreadID}
 	d := &Daemon{
 		cfg:                    Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
 		tmux:                   tmux.NewClient(runner, slog.Default()),
@@ -1757,6 +1781,7 @@ func seedRecoveredReplacement(t *testing.T, store *daemonstate.RuntimeStateStore
 func recoveryPlanForTarget(target sessionRestartAllTarget, stage string) sessionRestartRecoveryPlan {
 	return sessionRestartRecoveryPlan{
 		ProjectID: target.ProjectID, SessionID: target.SessionID, IssueID: target.IssueID, Activity: target.Activity,
+		AgentTool:          "codex",
 		Old:                daemonstate.ManagedAgentIdentity{ProjectID: target.ProjectID, SessionID: target.SessionID, LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "old", AgentThreadID: exactRestartAgentThreadID},
 		PlannedIncarnation: "planned", PromptHandoffType: sessionRestartPromptHandoffTypeNone, Stage: stage,
 	}
