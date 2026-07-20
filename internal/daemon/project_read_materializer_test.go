@@ -2401,7 +2401,7 @@ func TestProjectReadSnapshotCurrentConvergesExternalDependencyDelta(t *testing.T
 	}
 }
 
-func TestSyncUserProjectionMaterializedIssuesPropagatesBoundedCurrentState(t *testing.T) {
+func TestSyncUserProjectionMaterializedIssuesPropagatesCurrentStateAndDeletedKeysAfterError(t *testing.T) {
 	ctx := context.Background()
 	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"))
 	if err != nil {
@@ -2410,8 +2410,9 @@ func TestSyncUserProjectionMaterializedIssuesPropagatesBoundedCurrentState(t *te
 	t.Cleanup(func() { _ = store.Close() })
 	now := time.Now().UTC()
 	canonical := domain.Task{ID: "issue", Title: "canonical", Status: domain.StatusInProgress, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}
+	deleted := domain.Task{ID: "deleted", Title: "stale cancelled projection", Status: domain.StatusCancelled, Type: domain.TypeTask, CreatedAt: now, UpdatedAt: now}
 	state := userstore.ProjectDeltaState{ProjectID: "p", Cursor: 4, Hash: "four", Initialized: true, Projector: issueProjectionProjector()}
-	if err := store.ReplaceProject(ctx, userstore.ProjectInput{ProjectID: "p", Name: "P", Path: "/p", DBPath: "/p/db", Tasks: []domain.Task{canonical}, Delta: &state}); err != nil {
+	if err := store.ReplaceProject(ctx, userstore.ProjectInput{ProjectID: "p", Name: "P", Path: "/p", DBPath: "/p/db", Tasks: []domain.Task{canonical, deleted}, Delta: &state}); err != nil {
 		t.Fatal(err)
 	}
 	materialized := canonical
@@ -2422,15 +2423,29 @@ func TestSyncUserProjectionMaterializedIssuesPropagatesBoundedCurrentState(t *te
 	materializedByID := map[string]domain.Task{canonical.ID.String(): materialized}
 	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonicalByID, materializedByID)
 	reader.replaceBootstrap(canonicalByID, materializedByID, protocol.MaterializedSnapshotMetadata{Health: "healthy"}, issueKeys, runtimeKeys)
-	d := &Daemon{cfg: Config{}, userStore: store, materializers: map[string]*projectReadMaterializer{"p": reader}}
-	if err := d.syncUserProjectionMaterializedIssues(ctx, "p", []string{"issue"}); err != nil {
+	d := &Daemon{
+		cfg: Config{}, userStore: store, materializers: map[string]*projectReadMaterializer{"p": reader},
+		projectReadUserProjectionSync: func(context.Context, string, []string) error { return context.DeadlineExceeded },
+	}
+	if err := d.syncUserProjectionMaterializedIssues(ctx, "p", []string{"deleted", "issue"}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first bounded sync error = %v, want context deadline exceeded", err)
+	}
+	beforeRetry, err := store.Snapshot(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(beforeRetry.Projects) != 1 || len(beforeRetry.Projects[0].Tasks) != 2 {
+		t.Fatalf("failed sync mutated projected tasks = %+v", beforeRetry.Projects)
+	}
+	d.projectReadUserProjectionSync = nil
+	if err := d.syncUserProjectionMaterializedIssues(ctx, "p", []string{"deleted", "issue"}); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err := store.Snapshot(ctx, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Projects) != 1 || snapshot.Projects[0].DeltaCursor != 4 || len(snapshot.Projects[0].Tasks) != 1 || snapshot.Projects[0].Tasks[0].Session == nil || !snapshot.Projects[0].Tasks[0].HasTmuxSession {
+	if len(snapshot.Projects) != 1 || snapshot.Projects[0].DeltaCursor != 4 || len(snapshot.Projects[0].Tasks) != 1 || snapshot.Projects[0].Tasks[0].ID.String() != "issue" || snapshot.Projects[0].Tasks[0].Session == nil || !snapshot.Projects[0].Tasks[0].HasTmuxSession {
 		t.Fatalf("bounded current-state propagation = %+v", snapshot.Projects)
 	}
 }
