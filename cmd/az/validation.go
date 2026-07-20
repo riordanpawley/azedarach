@@ -372,40 +372,34 @@ func retrieveValidationArtifactWithOps(ctx context.Context, reference, output st
 	if backupPath != "" {
 		defer func() { _ = fileOps.remove(backupPath) }()
 	}
+	rollbackPublish := func(operation string, cause error) error {
+		if hadDestination {
+			recoveryBackup := backupPath
+			backupPath = ""
+			if restoreErr := fileOps.rename(recoveryBackup, output); restoreErr != nil {
+				return fmt.Errorf("%s: %w (restore destination: %v; recovery backup retained at %s)", operation, cause, restoreErr, recoveryBackup)
+			}
+			return fmt.Errorf("%s: %w", operation, cause)
+		}
+		if removeErr := fileOps.remove(output); removeErr != nil {
+			return fmt.Errorf("%s: %w (remove published output: %v)", operation, cause, removeErr)
+		}
+		return fmt.Errorf("%s: %w", operation, cause)
+	}
 	if err = fileOps.rename(stagedPath, output); err != nil {
 		return fmt.Errorf("publish validation artifact: %w", err)
 	}
 	if err = dir.Sync(); err != nil {
-		if hadDestination {
-			if restoreErr := fileOps.rename(backupPath, output); restoreErr != nil {
-				return fmt.Errorf("sync validation artifact destination: %w (restore destination: %v)", err, restoreErr)
-			}
-			backupPath = ""
-		} else {
-			_ = fileOps.remove(output)
-		}
-		return fmt.Errorf("sync validation artifact destination: %w", err)
+		return rollbackPublish("sync validation artifact destination", err)
 	}
 	if err = dir.Close(); err != nil {
 		dirClosed = true
-		if hadDestination {
-			if restoreErr := fileOps.rename(backupPath, output); restoreErr != nil {
-				return fmt.Errorf("close validation artifact destination directory: %w (restore destination: %v)", err, restoreErr)
-			}
-			backupPath = ""
-		} else {
-			_ = fileOps.remove(output)
-		}
-		return fmt.Errorf("close validation artifact destination directory: %w", err)
+		return rollbackPublish("close validation artifact destination directory", err)
 	}
 	dirClosed = true
 	if backupPath != "" {
 		if err = fileOps.remove(backupPath); err != nil {
-			if restoreErr := fileOps.rename(backupPath, output); restoreErr != nil {
-				return fmt.Errorf("remove validation artifact destination backup: %w (restore destination: %v)", err, restoreErr)
-			}
-			backupPath = ""
-			return fmt.Errorf("remove validation artifact destination backup: %w", err)
+			return rollbackPublish("remove validation artifact destination backup", err)
 		}
 		backupPath = ""
 	}

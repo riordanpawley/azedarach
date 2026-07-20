@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
@@ -175,6 +176,81 @@ func TestRetrieveValidationArtifactPreservesDestinationOnPublishDurabilityFailur
 			}, ops)
 			require.Error(t, err)
 			assertValidationArtifactDestinationUnchanged(t, dir, destination)
+		})
+	}
+}
+
+func TestRetrieveValidationArtifactRetainsBackupWhenRollbackRestoreFails(t *testing.T) {
+	for _, failure := range []string{"directory-sync", "directory-close", "backup-remove"} {
+		t.Run(failure, func(t *testing.T) {
+			content := []byte("complete retained output")
+			reference, digest := testValidationArtifactIdentity(content)
+			dir := t.TempDir()
+			destination := filepath.Join(dir, "result.log")
+			backup := filepath.Join(dir, ".az-validation-artifact-backup-recovery")
+			require.NoError(t, os.WriteFile(destination, []byte("existing"), 0o600))
+			ops := defaultValidationArtifactFileOps()
+			ops.backup = func(string) (string, bool, error) {
+				require.NoError(t, os.WriteFile(backup, []byte("existing"), 0o600))
+				return backup, true, nil
+			}
+			realRename := ops.rename
+			ops.rename = func(oldPath, newPath string) error {
+				if oldPath == backup {
+					return fmt.Errorf("restore failed")
+				}
+				return realRename(oldPath, newPath)
+			}
+			switch failure {
+			case "directory-sync":
+				ops.openDirectory = func(string) (validationArtifactDirectory, error) {
+					return &failingValidationArtifactDirectory{failure: "sync"}, nil
+				}
+			case "directory-close":
+				ops.openDirectory = func(string) (validationArtifactDirectory, error) {
+					return &failingValidationArtifactDirectory{failure: "close"}, nil
+				}
+			case "backup-remove":
+				ops.remove = func(path string) error {
+					if path == backup {
+						return fmt.Errorf("remove failed")
+					}
+					return os.Remove(path)
+				}
+			}
+
+			err := retrieveValidationArtifactWithOps(context.Background(), reference, destination, nil, testValidationArtifactReader(reference, digest, content, 5, nil), func(dir, pattern string) (validationArtifactStage, error) {
+				return os.CreateTemp(dir, pattern)
+			}, ops)
+			require.ErrorContains(t, err, "restore destination: restore failed")
+			got, readErr := os.ReadFile(backup)
+			require.NoError(t, readErr)
+			assert.Equal(t, []byte("existing"), got)
+		})
+	}
+}
+
+func TestRetrieveValidationArtifactReportsRollbackCleanupFailureWithoutPriorDestination(t *testing.T) {
+	for _, failure := range []string{"directory-sync", "directory-close"} {
+		t.Run(failure, func(t *testing.T) {
+			content := []byte("complete retained output")
+			reference, digest := testValidationArtifactIdentity(content)
+			destination := filepath.Join(t.TempDir(), "result.log")
+			ops := defaultValidationArtifactFileOps()
+			ops.openDirectory = func(string) (validationArtifactDirectory, error) {
+				return &failingValidationArtifactDirectory{failure: strings.TrimPrefix(failure, "directory-")}, nil
+			}
+			ops.remove = func(path string) error {
+				if path == destination {
+					return fmt.Errorf("cleanup failed")
+				}
+				return os.Remove(path)
+			}
+
+			err := retrieveValidationArtifactWithOps(context.Background(), reference, destination, nil, testValidationArtifactReader(reference, digest, content, 5, nil), func(dir, pattern string) (validationArtifactStage, error) {
+				return os.CreateTemp(dir, pattern)
+			}, ops)
+			require.ErrorContains(t, err, "remove published output: cleanup failed")
 		})
 	}
 }
