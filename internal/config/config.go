@@ -235,13 +235,14 @@ type SpecConfig struct {
 }
 
 type OrchestrationConfig struct {
-	Via            string `json:"via"`
-	CompleteGrace  string `json:"completeGrace"`
-	WakeDebounce   string `json:"wakeDebounce"`
-	InspectLimit   int    `json:"inspectLimit"`
-	StartLimit     int    `json:"startLimit"`
-	AgentCapacity  int    `json:"agentCapacity"`
-	OpenIssueLimit int    `json:"openIssueLimit"`
+	Via              string `json:"via"`
+	ReviewPromptFile string `json:"reviewPromptFile,omitempty"`
+	CompleteGrace    string `json:"completeGrace"`
+	WakeDebounce     string `json:"wakeDebounce"`
+	InspectLimit     int    `json:"inspectLimit"`
+	StartLimit       int    `json:"startLimit"`
+	AgentCapacity    int    `json:"agentCapacity"`
+	OpenIssueLimit   int    `json:"openIssueLimit"`
 }
 
 // PublicationEvidenceConfig is project-owned capability discovery for
@@ -481,6 +482,9 @@ func LoadConfig(projectPath string) (*Config, error) {
 	cfg = MergeWithDefaults(cfg)
 	if err := validateGateConfig(cfg.Gate); err != nil {
 		return nil, err
+	}
+	if path := strings.TrimSpace(cfg.Orchestration.ReviewPromptFile); path != "" && (path == "." || !filepath.IsLocal(path)) {
+		return nil, fmt.Errorf("orchestration.reviewPromptFile must be a project-relative file below the project root")
 	}
 	return cfg, nil
 }

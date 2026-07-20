@@ -2052,6 +2052,17 @@ func (a daemonOrchestrationAuthority) recordReviewOutcomeWithRestart(ctx context
 		metadata["review_delta_base_revision"] = strings.TrimSpace(inspection.DeltaBaseRevision)
 		metadata["review_fallback_reason"] = strings.TrimSpace(inspection.ReviewFallback)
 	}
+	if metadata == nil {
+		metadata = make(map[string]any)
+	}
+	prompt, promptErr := a.daemon.resolvedReviewPrompt(projectID)
+	if promptErr != nil {
+		return promptErr
+	}
+	metadata["review_prompt_source"] = prompt.Source
+	metadata["review_prompt_digest"] = prompt.Digest
+	metadata["review_prompt_composition_mode"] = prompt.CompositionMode
+	metadata["review_coverage_contract"] = prompt.CoverageContract
 	if request.ReviewPass != nil {
 		if metadata == nil {
 			metadata = make(map[string]any)

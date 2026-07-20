@@ -128,6 +128,13 @@ func (d *Daemon) enforceOrchestratorContinuation(ctx context.Context, authority 
 		return nil
 	}
 	setOrchestratorContinuationProjection(&snapshot, lease.Identity.Scope, action)
+	if action.Kind == "review" {
+		prompt, promptErr := d.resolvedReviewPrompt(projectID)
+		if promptErr != nil {
+			return promptErr
+		}
+		snapshot.ContinuationContract = composeReviewWakePrompt(snapshot.ContinuationContract, prompt, reviewEpochManifest(snapshot.ReviewQueue))
+	}
 	reason := domain.OrchestratorWakeOpenWork
 	if action.Kind == "review" {
 		reason = domain.OrchestratorWakeReviewRequest

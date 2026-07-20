@@ -1162,6 +1162,18 @@ func TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings(t *testing.T
 	if len(reviewEvents) != 1 || reviewEvents[0].Payload["outcome"] != "returned" {
 		t.Fatalf("review events = %+v", reviewEvents)
 	}
+	for key, want := range map[string]string{
+		"review_prompt_source":           "builtin:portable-v1",
+		"review_prompt_composition_mode": "builtin",
+		"review_coverage_contract":       appconfig.ReviewCoverageContract,
+	} {
+		if got := strings.TrimSpace(fmt.Sprint(reviewEvents[0].Payload[key])); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+	if got := strings.TrimSpace(fmt.Sprint(reviewEvents[0].Payload["review_prompt_digest"])); len(got) != 64 {
+		t.Errorf("review_prompt_digest = %q", got)
+	}
 	replayed, err := d.orchestrationAuthority().Apply(ctx, "project", protocol.OrchestrationIntentRequest{
 		Scope:         domain.ProjectOrchestrationScope(),
 		Kind:          protocol.OrchestrationIntentReviewReturn,

@@ -106,6 +106,12 @@ type Config struct {
 }
 ```
 
+Projects may set `orchestration.reviewPromptFile` to a project-relative UTF-8
+file. Its content specializes AI review instructions and is composed before the
+built-in mandatory portable review and structured-evidence contract. With no
+file configured, the built-in prompt is used. Invalid, missing, unreadable, or
+out-of-project files fail closed.
+
 ### Git Config
 
 ```go

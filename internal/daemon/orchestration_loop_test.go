@@ -59,6 +59,11 @@ func TestProjectOrchestratorReviewWakeUsesDurableInputAndCoalescesEquivalentStat
 	if strings.Contains(prompt, "orchestrate watch") {
 		t.Fatalf("project review prompt retained model watch: %q", prompt)
 	}
+	for _, required := range []string{"source=builtin:portable-v1", "digest=", "composition_mode=builtin", "review_epoch=" + issueID + ":", "coverage_contract=", "full diff", "analogous or sibling", "lifecycle ending", "trust and authority boundary", "every instance"} {
+		if !strings.Contains(prompt, required) {
+			t.Errorf("project review prompt missing %q: %q", required, prompt)
+		}
+	}
 }
 
 func TestProjectOrchestratorLoopPrioritizesReviewAndPersistsCursor(t *testing.T) {

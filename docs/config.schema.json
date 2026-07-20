@@ -539,6 +539,11 @@
           "enum": ["az", "native"],
           "default": "az"
         },
+        "reviewPromptFile": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional project-relative UTF-8 file prepended to the portable mandatory AI code-review contract."
+        },
         "completeGrace": {
           "type": "string",
           "description": "Duration a complete project orchestrator remains wakeable before pausing.",
