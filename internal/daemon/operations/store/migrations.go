@@ -32,6 +32,7 @@ var orderedMigrations = []migration{
 	{id: "daemon_operations_0008_validation_priority_fairness", path: "migrations/0008_validation_priority_fairness.sql"},
 	{id: "daemon_operations_0009_publication_review_authority", path: "migrations/0009_publication_review_authority.sql"},
 	{id: "daemon_operations_0010_publication_evidence_authority", path: "migrations/0010_publication_evidence_authority.sql"},
+	{id: "daemon_operations_0011_publication_root_authority", path: "migrations/0011_publication_root_authority.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -45,6 +46,7 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "daemon_operations_0008_validation_priority_fairness", Path: "migrations/0008_validation_priority_fairness.sql", Checksum: "9f6a4ae4af768b433880a310b1d4c5bb79453224c1c93bd9c7b7696d4cf476bf"},
 	{ID: "daemon_operations_0009_publication_review_authority", Path: "migrations/0009_publication_review_authority.sql", Checksum: "645af760b30317d26d72ddcccf7a3a5934c009923c8f77260a503e48a39565b2"},
 	{ID: "daemon_operations_0010_publication_evidence_authority", Path: "migrations/0010_publication_evidence_authority.sql", Checksum: "69054f7d354374035f9012209b707a9b9ab629254f53f0fc12f0afa3eb5a7ff0"},
+	{ID: "daemon_operations_0011_publication_root_authority", Path: "migrations/0011_publication_root_authority.sql", Checksum: "7fe4bffc475905251802527eff5a71704885d2261a3abadce59e337768f4698e"},
 }
 
 const migrationArtifactAuthority sqlitemigration.Authority = "project.daemon_operations"
@@ -128,6 +130,13 @@ func validatePublicationQueueSchema(ctx context.Context, db *sql.DB) error {
 	}
 	if _, err = canonicalDB.ExecContext(ctx, evidenceAuthority); err != nil {
 		return fmt.Errorf("build canonical publication evidence authority schema: %w", err)
+	}
+	rootAuthority, err := loadMigrationSQL("migrations/0011_publication_root_authority.sql")
+	if err != nil {
+		return fmt.Errorf("load canonical publication root authority schema: %w", err)
+	}
+	if _, err = canonicalDB.ExecContext(ctx, rootAuthority); err != nil {
+		return fmt.Errorf("build canonical publication root authority schema: %w", err)
 	}
 	for _, object := range []struct{ typeName, name string }{
 		{"table", "daemon_publication_operations"},
@@ -370,7 +379,23 @@ func applyMigration(ctx context.Context, db *sql.DB, id, sqlText string) error {
 			_ = tx.Rollback()
 		}
 	}()
-	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+	if id == "daemon_operations_0011_publication_root_authority" {
+		const boundary = "-- GO_ASSISTED_BACKFILL_BOUNDARY:"
+		parts := strings.SplitN(sqlText, boundary, 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("apply migration %s: missing Go-assisted backfill boundary", id)
+		}
+		if _, err := tx.ExecContext(ctx, parts[0]); err != nil {
+			return fmt.Errorf("apply migration %s schema: %w", id, err)
+		}
+		if err := backfillAcceptedPublicationRoots(ctx, tx); err != nil {
+			return fmt.Errorf("backfill migration %s: %w", id, err)
+		}
+		triggerSQL := strings.TrimSpace(strings.SplitN(parts[1], "\n", 2)[1])
+		if _, err := tx.ExecContext(ctx, triggerSQL); err != nil {
+			return fmt.Errorf("apply migration %s guard: %w", id, err)
+		}
+	} else if _, err := tx.ExecContext(ctx, sqlText); err != nil {
 		return fmt.Errorf("apply migration %s: %w", id, err)
 	}
 	if err := sqlitemigration.RecordApplied(ctx, tx, migrationArtifacts, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
@@ -381,4 +406,39 @@ func applyMigration(ctx context.Context, db *sql.DB, id, sqlText string) error {
 	}
 	tx = nil
 	return nil
+}
+
+func backfillAcceptedPublicationRoots(ctx context.Context, tx *sql.Tx) error {
+	var eventTableExists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='issue_observation_events')`).Scan(&eventTableExists); err != nil {
+		return err
+	}
+	if !eventTableExists {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE daemon_publication_operations AS operation
+		SET accepted_publication_operation_id = COALESCE(NULLIF((
+			SELECT json_extract(event.payload_json, '$.publication_operation_id')
+			FROM issue_observation_events AS event
+			JOIN daemon_publication_operations AS root
+			  ON root.operation_id = json_extract(event.payload_json, '$.publication_operation_id')
+			 AND root.project_id = operation.project_id
+			 AND root.issue_id = operation.issue_id
+			 AND root.actor_id = operation.actor_id COLLATE NOCASE
+			 AND root.reviewer_kind = operation.reviewer_kind
+			 AND root.review_epoch_event_id = operation.review_epoch_event_id
+			 AND root.accepted_review_event_id = operation.accepted_review_event_id
+			 AND root.source_revision = operation.source_revision
+			WHERE event.id = operation.accepted_review_event_id
+			  AND event.issue_id = operation.issue_id
+			  AND event.event_type = 'review.completed'
+			  AND event.source = 'daemon-orchestration'
+			  AND event.source_command = 'review-accept'
+			  AND json_valid(event.payload_json)
+			  AND json_extract(event.payload_json, '$.outcome') = 'accepted'
+			  AND json_extract(event.payload_json, '$.actor_id') = operation.actor_id COLLATE NOCASE
+			  AND json_extract(event.payload_json, '$.actor_kind') = operation.reviewer_kind
+			  AND CAST(json_extract(event.payload_json, '$.review_epoch_event_id') AS INTEGER) = operation.review_epoch_event_id
+		), ''), operation.operation_id)`)
+	return err
 }

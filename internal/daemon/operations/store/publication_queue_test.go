@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -63,8 +64,8 @@ func TestPublicationQueueRejectsCoalescingAcrossAcceptedReviewEvents(t *testing.
 	conflict.OperationID = "publication-2"
 	conflict.IntentKey = "intent-2"
 	conflict.AcceptedReviewEventID = 43
-	if _, _, err := store.EnqueuePublication(ctx, conflict, "candidate-1"); err == nil {
-		t.Fatal("publication with a different accepted review event coalesced")
+	if _, _, err := store.EnqueuePublication(ctx, conflict, "candidate-1"); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("publication with a different accepted review event error = %v, want conflict", err)
 	}
 }
 
@@ -172,7 +173,7 @@ func testPublicationOperation(id, issueID, intent, source string, created time.T
 	return domain.PublicationOperation{
 		OperationID: id, ProjectID: "project", IssueID: issueID, IntentKey: intent,
 		RequestFingerprint: "fingerprint", ActorID: "reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator,
-		ReviewEpochEventID: 41, AcceptedReviewEventID: 42, PatchEvidenceID: id, TargetID: "base", TargetBranch: "main",
+		ReviewEpochEventID: 41, AcceptedReviewEventID: 42, PatchEvidenceID: id, AcceptedPublicationOperationID: id, TargetID: "base", TargetBranch: "main",
 		SourceRevision: source, BaseRevision: "base", PolicyVersion: "policy", EnvironmentFingerprint: "toolchain",
 		ValidationCommand: "npm test",
 		EvidenceSource:    "mailbox", EvidenceEventID: 1, EvidenceSeq: 2, EvidenceDigest: "digest",
