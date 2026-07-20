@@ -7,6 +7,27 @@ fixture="$(mktemp -d "${TMPDIR:-/tmp}/azedarach-validation-artifacts.XXXXXX")"
 fixture="$(cd "$fixture" && pwd -P)"
 trap 'rm -rf "$fixture"' EXIT
 
+# Capability discovery is consumer-facing and deterministic: an unrelated
+# consumer can install the publisher outside Azedarach's repository layout and
+# determine whether secure publication is supported on every release platform.
+consumer_tools="$fixture/example-consumer/tools"
+mkdir -p "$consumer_tools"
+cp "$publisher" "$consumer_tools/publish-validation-artifacts"
+consumer_publisher="$consumer_tools/publish-validation-artifacts"
+for platform in darwin/amd64 darwin/arm64 linux/amd64; do
+  capability="$($consumer_publisher --capability-check --platform "$platform")"
+  grep -q '"schema":"azedarach.validation_artifact_capability.v1"' <<<"$capability"
+  grep -q '"available":true' <<<"$capability"
+done
+if "$consumer_publisher" --capability-check --platform plan9/mips >"$fixture/absent-capability.json"; then
+  echo "absent publication capability unexpectedly reported available" >&2
+  exit 1
+else
+  test "$?" -eq 78
+fi
+grep -q '"available":false' "$fixture/absent-capability.json"
+grep -q 'descriptor-relative openat syscall is not registered' "$fixture/absent-capability.json"
+
 project_root="$fixture/project"
 scratch_root="$fixture/scratch"
 control_root="$fixture/control"
