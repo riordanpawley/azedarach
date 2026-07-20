@@ -8969,7 +8969,7 @@ func TestReplayCompletedExternalTaskCloseIsIdempotentAndRepublishesDurableState(
 	}
 	operation := domain.PublicationOperation{OperationID: "publication-replayed", ProjectID: "project", IssueID: issueID, State: domain.PublicationOperationMerged, TargetBranch: "main"}
 	published := 0
-	d := &Daemon{publicationStateChanged: func(got domain.PublicationOperation) {
+	d := &Daemon{hub: publish.NewHub(16, 8, slog.Default()), revision: map[string]uint64{}, publicationStateChanged: func(got domain.PublicationOperation) {
 		published++
 		if got.OperationID != operation.OperationID || got.State != domain.PublicationOperationMerged {
 			t.Fatalf("published operation = %+v", got)

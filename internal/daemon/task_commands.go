@@ -176,19 +176,38 @@ func (d *Daemon) reconcileExternalTaskIntegration(ctx context.Context, projectID
 	if err != nil {
 		return domain.PublicationOperation{}, taskCloseIntegrationResult{}, fmt.Errorf("load publication authority: %w", err)
 	}
-	operations, err := store.PublicationOperations(ctx, projectID, taskID, false)
+	issueClient := d.issueClientForProject(projectID)
+	if issueClient == nil {
+		return domain.PublicationOperation{}, taskCloseIntegrationResult{}, fmt.Errorf("issue store unavailable")
+	}
+	events, err := issueClient.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}, NewestFirst: true})
 	if err != nil {
-		return domain.PublicationOperation{}, taskCloseIntegrationResult{}, fmt.Errorf("list publication authority: %w", err)
+		return domain.PublicationOperation{}, taskCloseIntegrationResult{}, fmt.Errorf("read accepted publication authority: %w", err)
 	}
-	var operation domain.PublicationOperation
-	for i := len(operations) - 1; i >= 0; i-- {
-		if operations[i].AcceptedReviewEventID > 0 {
-			operation = operations[i]
-			break
+	var acceptedRootID string
+	for _, event := range events {
+		outcome, trusted := domain.TrustedReviewOutcome(event)
+		if !trusted {
+			continue
 		}
+		if outcome != domain.ReviewOutcomeAccepted {
+			return domain.PublicationOperation{}, taskCloseIntegrationResult{}, fmt.Errorf("latest authoritative review outcome for %s is %s, not accepted", taskID, outcome)
+		}
+		acceptedRootID = observationPayloadString(event.Payload, "publication_operation_id")
+		break
 	}
-	if operation.OperationID == "" || operation.CandidateRevision == "" {
+	if acceptedRootID == "" {
 		return domain.PublicationOperation{}, taskCloseIntegrationResult{}, fmt.Errorf("exact accepted publication candidate is unavailable")
+	}
+	operation, found, err := store.PublicationOperation(ctx, acceptedRootID)
+	if err != nil {
+		return domain.PublicationOperation{}, taskCloseIntegrationResult{}, fmt.Errorf("read accepted publication root %s: %w", acceptedRootID, err)
+	}
+	if !found || operation.OperationID == "" || operation.CandidateRevision == "" {
+		return domain.PublicationOperation{}, taskCloseIntegrationResult{}, fmt.Errorf("exact accepted publication candidate is unavailable")
+	}
+	if strings.TrimSpace(operation.AcceptedPublicationOperationID) != acceptedRootID {
+		return domain.PublicationOperation{}, taskCloseIntegrationResult{}, fmt.Errorf("accepted publication operation %s is not the immutable publication root", acceptedRootID)
 	}
 	if !strings.EqualFold(strings.TrimSpace(operation.TargetID), "base") {
 		return domain.PublicationOperation{}, taskCloseIntegrationResult{}, fmt.Errorf("accepted publication target %q is not the configured base", operation.TargetID)
