@@ -1412,11 +1412,13 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 				pendingIssueIDs = append(pendingIssueIDs, issueID)
 				continue
 			}
-			state := string(protocol.OperationStateQueued)
-			if a.daemon.operationRuntime != nil && a.daemon.operationRuntime.manager != nil {
-				if record, getErr := a.daemon.operationRuntime.manager.Get(ctx, attempt.OperationID); getErr == nil {
-					state = string(record.State)
-				}
+			reuse, state, reconcileErr := a.reconcileCompletedOrchestrationStart(ctx, projectID, request, requested, attempt)
+			if reconcileErr != nil {
+				return protocol.OrchestrationIntentResult{}, reconcileErr
+			}
+			if !reuse {
+				pendingIssueIDs = append(pendingIssueIDs, issueID)
+				continue
 			}
 			sessionID := issueID
 			if parsed, parseErr := naming.ParseIssueID(issueID); parseErr == nil && strings.TrimSpace(request.RepoDir) != "" {
@@ -1585,6 +1587,47 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 		return protocol.OrchestrationIntentResult{}, err
 	}
 	return result, nil
+}
+
+func (a daemonOrchestrationAuthority) reconcileCompletedOrchestrationStart(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, requested issues.RequestedOrchestrationStart, attempt issues.OrchestrationStartAttempt) (bool, string, error) {
+	state := string(protocol.OperationStateQueued)
+	if a.daemon.operationRuntime == nil || a.daemon.operationRuntime.manager == nil {
+		return true, state, nil
+	}
+	record, getErr := a.daemon.operationRuntime.manager.Get(ctx, attempt.OperationID)
+	if getErr == nil {
+		state = string(record.State)
+	}
+	terminalOrMissing := errors.Is(getErr, daemonops.ErrNotFound) || (getErr == nil && (record.State == daemonops.StateFailed || record.State == daemonops.StateCancelled))
+	if !terminalOrMissing {
+		if getErr != nil {
+			return false, "", fmt.Errorf("read completed orchestration start %s operation: %w", attempt.IssueID, getErr)
+		}
+		return true, state, nil
+	}
+	sessionID := attempt.IssueID
+	if parsed, parseErr := naming.ParseIssueID(attempt.IssueID); parseErr == nil && strings.TrimSpace(request.RepoDir) != "" {
+		sessionID = naming.CanonicalSessionIDForIssue(request.RepoDir, parsed).String()
+	}
+	if a.daemon.tmux == nil {
+		return false, "", fmt.Errorf("reconcile completed orchestration start %s: tmux runtime unavailable", attempt.IssueID)
+	}
+	live, probeErr := a.daemon.tmux.HasSession(ctx, sessionID)
+	if probeErr != nil {
+		return false, "", fmt.Errorf("reconcile completed orchestration start %s runtime: %w", attempt.IssueID, probeErr)
+	}
+	if live {
+		return true, string(protocol.OperationStateDone), nil
+	}
+	cause := fmt.Errorf("submitted session start operation %s is terminal or missing", attempt.OperationID)
+	issueClient := a.daemon.issueClientForProject(projectID)
+	if _, err := issueClient.CompensateOrchestrationStartOperation(ctx, projectID, attempt.DedupeKey, attempt.OperationID, cause); err != nil {
+		return false, "", fmt.Errorf("compensate completed orchestration start %s: %w", attempt.IssueID, err)
+	}
+	if err := issueClient.UpdateRequestedOrchestrationStart(ctx, requested, "queued", "retry_terminal_operation", cause); err != nil {
+		return false, "", fmt.Errorf("requeue terminal orchestration start %s: %w", attempt.IssueID, err)
+	}
+	return false, "", nil
 }
 
 func completeRequestedOrchestrationStarts(ctx context.Context, issueClient *issues.Client, requestedIntents []issues.RequestedOrchestrationStart, cause error) error {

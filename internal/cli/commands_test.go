@@ -6254,7 +6254,7 @@ func TestParseIssueCreateArgs(t *testing.T) {
 
 func TestParseIssueSplitArgsDefaultsParentFromEnv(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-parent")
-	opts, err := ParseIssueSplitArgs([]string{"--description", "do this elsewhere", "--priority", "P1", "Child work"})
+	opts, err := ParseIssueSplitArgs([]string{"--intent-key", "split-invocation-1", "--description", "do this elsewhere", "--priority", "P1", "Child work"})
 	if err != nil {
 		t.Fatalf("ParseIssueSplitArgs error = %v", err)
 	}
@@ -6263,6 +6263,14 @@ func TestParseIssueSplitArgsDefaultsParentFromEnv(t *testing.T) {
 	}
 	if opts.Priority != domain.P1 || !opts.PriorityExplicit {
 		t.Fatalf("priority = %s explicit=%v, want P1 explicit", opts.Priority, opts.PriorityExplicit)
+	}
+}
+
+func TestParseIssueSplitArgsRequiresExplicitInvocationIdentity(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-parent")
+	_, err := ParseIssueSplitArgs([]string{"Child work"})
+	if err == nil || !strings.Contains(err.Error(), "missing split intent key") {
+		t.Fatalf("error = %v, want explicit split intent identity requirement", err)
 	}
 }
 
@@ -10041,6 +10049,7 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	output := captureStdout(t, func() error {
 		return IssueSplitCommand(deps, IssueSplitOptions{
 			ParentIssueID: root.String(),
+			IntentKey:     "split-invocation-1",
 			Title:         "Child work",
 			Type:          domain.TypeTask,
 			Priority:      domain.P2,
@@ -10087,6 +10096,7 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	textOutput := captureStdout(t, func() error {
 		return IssueSplitCommand(deps, IssueSplitOptions{
 			ParentIssueID: root.String(),
+			IntentKey:     "split-invocation-1",
 			Title:         "Child work",
 			Type:          domain.TypeTask,
 			Priority:      domain.P2,

@@ -559,6 +559,53 @@ func TestTerminalSessionStartFailurePreservesClaimForLiveRuntime(t *testing.T) {
 	}
 }
 
+func TestCompletedStartReplayRequeuesCrashGapWithMissingOperation(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "Worker", Status: domain.StatusOpen, Type: domain.TypeTask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requested, err := client.QueueRequestedOrchestrationStart(ctx, "project", issueID, "split-retry", "orchestrator", "dedupe", "digest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.UpdateRequestedOrchestrationStart(ctx, requested, "completed", "complete", nil); err != nil {
+		t.Fatal(err)
+	}
+	requested.State = "completed"
+	attempt, err := client.BeginOrchestrationStart(ctx, "project", issueID, "split-retry", "orchestrator", "dedupe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CompleteOrchestrationStart(ctx, attempt, "lost-operation"); err != nil {
+		t.Fatal(err)
+	}
+	attempt.State, attempt.OperationID = "submitted", "lost-operation"
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = runtime.Close() })
+	d := &Daemon{
+		cfg:                   Config{RepoDir: repoDir, Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{"project": client},
+		operationRuntime:      runtime,
+		tmux:                  tmux.NewClient(&sessionStartCompensationTmuxRunner{live: false}, slog.Default()),
+	}
+	reuse, _, err := (daemonOrchestrationAuthority{daemon: d}).reconcileCompletedOrchestrationStart(ctx, "project", protocol.OrchestrationIntentRequest{RepoDir: repoDir}, requested, attempt)
+	if err != nil || reuse {
+		t.Fatalf("reconcile reuse=%v err=%v, want durable requeue", reuse, err)
+	}
+	gotAttempt, err := client.OrchestrationStartAttempt(ctx, "project", issueID, "split-retry")
+	if err != nil || gotAttempt.State != "compensated" {
+		t.Fatalf("attempt=%+v err=%v, want compensated", gotAttempt, err)
+	}
+	pending, err := client.PendingRequestedOrchestrationStarts(ctx, "project")
+	if err != nil || len(pending) != 1 || pending[0].IssueID != issueID || pending[0].Phase != "retry_terminal_operation" {
+		t.Fatalf("pending=%+v err=%v, want exact retry queued", pending, err)
+	}
+}
+
 func TestProjectOrchestrationApplyAutomaticallyBacklogsPrematureCandidate(t *testing.T) {
 	ctx := context.Background()
 	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), slog.Default())

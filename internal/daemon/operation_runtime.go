@@ -1299,6 +1299,9 @@ func (s *operationStoreAdapter) Create(ctx context.Context, record daemonops.Rec
 func (s *operationStoreAdapter) Get(ctx context.Context, operationID string) (daemonops.Record, error) {
 	record, err := s.repo.Get(ctx, operationID)
 	if err != nil {
+		if errors.Is(err, opstore.ErrNotFound) {
+			return daemonops.Record{}, fmt.Errorf("get operation %s: %w", operationID, daemonops.ErrNotFound)
+		}
 		return daemonops.Record{}, err
 	}
 	return fromStoreRecord(record), nil

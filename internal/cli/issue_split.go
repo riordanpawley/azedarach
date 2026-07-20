@@ -2,8 +2,6 @@ package cli
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
@@ -70,7 +68,7 @@ func ParseIssueSplitArgs(args []string) (IssueSplitOptions, error) {
 		return IssueSplitOptions{}, err
 	}
 	if fs.NArg() != 1 {
-		return IssueSplitOptions{}, fmt.Errorf("usage: az ticket split [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--intent-key <stable-key>] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>")
+		return IssueSplitOptions{}, fmt.Errorf("usage: az ticket split --intent-key <unique-invocation-key> [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>")
 	}
 	opts.Title = fs.Arg(0)
 	taskType, err := parseTaskType(typeRaw)
@@ -97,20 +95,14 @@ func ParseIssueSplitArgs(args []string) (IssueSplitOptions, error) {
 	opts.Project = normalizeIssueProject(opts.Project)
 	opts.IntentKey = strings.TrimSpace(opts.IntentKey)
 	if opts.IntentKey == "" {
-		opts.IntentKey = deriveIssueSplitIntentKey(opts)
+		return IssueSplitOptions{}, fmt.Errorf("missing split intent key: pass --intent-key with a unique invocation key and reuse it only for exact retries")
 	}
 	return opts, nil
 }
 
-func deriveIssueSplitIntentKey(opts IssueSplitOptions) string {
-	parts := []string{normalizeIssueProject(opts.Project), strings.TrimSpace(opts.ParentIssueID), strings.TrimSpace(opts.Title), opts.Description, string(opts.Type), opts.Priority.String(), fmt.Sprint(opts.PriorityExplicit), strings.Join(dedupeOrderedIDs(opts.Implementations), "\x1f")}
-	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
-	return "ticket-split:" + hex.EncodeToString(digest[:])
-}
-
 func IssueSplitCommand(deps *Dependencies, opts IssueSplitOptions) error {
 	if strings.TrimSpace(opts.IntentKey) == "" {
-		opts.IntentKey = deriveIssueSplitIntentKey(opts)
+		return fmt.Errorf("missing split intent key: pass --intent-key with a unique invocation key and reuse it only for exact retries")
 	}
 	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
 	if err != nil {
