@@ -489,7 +489,16 @@ func (m *projectReadMaterializer) applyCanonicalBatch(ctx context.Context, batch
 	}
 	for issueID, task := range canonical {
 		if _, authoritativeReplacement := replaced[issueID]; authoritativeReplacement {
-			m.retireSettledAuthoritativeRuntimeIssueLocked(issueID)
+			if task.IssueClosed() {
+				// Terminal issues have no healthy worker runtime to hydrate. Retire
+				// any keyed failure from their final cleanup and keep them out of
+				// the disposable runtime refresh batch; otherwise an orphaned
+				// projection can poison unrelated invariant reads indefinitely.
+				m.retireAuthoritativeRuntimeIssueLocked(issueID)
+				delete(affected, issueID)
+			} else {
+				m.retireSettledAuthoritativeRuntimeIssueLocked(issueID)
+			}
 		}
 		m.runtimeRefreshEpoch[issueID] = canonicalEpoch
 		m.runtimePublishedEpoch[issueID] = canonicalEpoch
@@ -1176,10 +1185,24 @@ func (m *projectReadMaterializer) refreshRuntimeWith(ctx context.Context, issueI
 	if len(canonical) == 0 {
 		return nil
 	}
-	hydrated, _, err := hydrate(ctx, canonical)
-	if err != nil {
-		m.releaseRuntimeRefreshOwnership(refreshEpoch, canonical)
-		return err
+	hydratable := make(map[string]domain.Task, len(canonical))
+	hydrated := make(map[string]domain.Task, len(canonical))
+	for issueID, task := range canonical {
+		if task.IssueClosed() {
+			hydrated[issueID] = task
+			continue
+		}
+		hydratable[issueID] = task
+	}
+	if len(hydratable) > 0 {
+		hydratedActive, _, err := hydrate(ctx, hydratable)
+		if err != nil {
+			m.releaseRuntimeRefreshOwnership(refreshEpoch, canonical)
+			return err
+		}
+		for issueID, task := range hydratedActive {
+			hydrated[issueID] = task
+		}
 	}
 	unlock, err := m.lockUpdate(ctx, "project_read.runtime_refresh")
 	if err != nil {
