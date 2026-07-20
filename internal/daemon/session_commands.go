@@ -5213,8 +5213,7 @@ func (d *Daemon) buildCodexResumeCommand(projectID, issueID, threadID string, yo
 	if threadID = strings.TrimSpace(threadID); threadID != "" {
 		parts = append(parts, singleQuoteForShell(threadID))
 	} else {
-		// A missing exact thread must not open Codex's interactive picker.
-		parts = append(parts, "--last")
+		return "false # managed Codex resume refused: missing exact durable thread id"
 	}
 	command := strings.Join(parts, " ")
 	command = codexFloopFailOpenProbe(tool) + "; " + command
@@ -6179,8 +6178,7 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 		}
 		command := promptAssignment + "; " + strings.Join(parts, " ")
 		if strings.EqualFold(tool, "codex") && projectCfg.CodexAppServer {
-			resume := d.codexAppServerResumeCommand(projectID, issueID, yolo)
-			return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), command, resume)
+			return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), command, command)
 		}
 		if strings.EqualFold(tool, "codex") {
 			return codexFloopFailOpenProbe(tool) + "; " + command
@@ -6190,17 +6188,12 @@ func (d *Daemon) buildCLIToolCommandWithPromptPolicy(projectID, issueID, session
 
 	command := strings.Join(parts, " ")
 	if strings.EqualFold(tool, "codex") && projectCfg.CodexAppServer {
-		resume := d.codexAppServerResumeCommand(projectID, issueID, yolo)
-		return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), command, resume)
+		return codexAppServerSupervisedCommand(tool, appconfig.GlobalDaemonRuntimeDir(), command, command)
 	}
 	if strings.EqualFold(tool, "codex") {
 		return codexFloopFailOpenProbe(tool) + "; " + command
 	}
 	return command
-}
-
-func (d *Daemon) codexAppServerResumeCommand(projectID, issueID string, yolo bool) string {
-	return d.codexAppServerResumeCommandForThread(projectID, issueID, "", yolo)
 }
 
 func (d *Daemon) codexAppServerResumeCommandForThread(projectID, issueID, threadID string, yolo bool) string {
@@ -6219,7 +6212,7 @@ func (d *Daemon) codexAppServerResumeCommandForThread(projectID, issueID, thread
 	if threadID = strings.TrimSpace(threadID); threadID != "" {
 		parts = append(parts, singleQuoteForShell(threadID))
 	} else {
-		parts = append(parts, "--last")
+		return "false # managed Codex resume refused: missing exact durable thread id"
 	}
 	return strings.Join(parts, " ")
 }

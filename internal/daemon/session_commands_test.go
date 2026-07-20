@@ -409,7 +409,6 @@ func TestCodexAppServerLaunchUsesStockRemoteTUIAndSupervisedResume(t *testing.T)
 	for _, want := range []string{
 		"codex " + codexFloopFailOpenConfigExpansion + " app-server daemon start",
 		"codex " + codexFloopFailOpenConfigExpansion + " --remote unix:// --dangerously-bypass-approvals-and-sandbox",
-		"codex " + codexFloopFailOpenConfigExpansion + " resume --remote unix:// --dangerously-bypass-approvals-and-sandbox --last",
 		"codex mcp get --json floop",
 		"codex " + codexFloopFailOpenConfigExpansion + " --remote unix:// --dangerously-bypass-approvals-and-sandbox --",
 		codexFloopFailOpenConfig,
@@ -466,6 +465,14 @@ func TestCodexManagedResumeUsesExactDurableThreadWithoutPickerFallback(t *testin
 	}
 	if strings.Contains(command, "--last") || strings.Contains(command, "send-keys") || strings.Contains(command, "paste") {
 		t.Fatalf("exact-thread resume permits ambiguous/picker delivery = %q", command)
+	}
+}
+
+func TestCodexManagedResumeWithoutDurableThreadFailsClosed(t *testing.T) {
+	d := &Daemon{cfg: Config{CLITool: "codex", CodexAppServer: true}}
+	command := d.buildCodexResumeCommand(protocol.DefaultProjectID, "root", "", false, nil)
+	if !strings.Contains(command, "false # managed Codex resume refused") || strings.Contains(command, "--last") {
+		t.Fatalf("missing-thread resume command = %q", command)
 	}
 }
 
