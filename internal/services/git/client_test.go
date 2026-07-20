@@ -680,9 +680,18 @@ esac
 	if err := os.WriteFile(filepath.Join(fakeBin, "git"), []byte(fakeGit), 0o755); err != nil {
 		t.Fatalf("write fake git: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(fakeBin, "go"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake go: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBin, "just"), []byte("#!/bin/sh\nexec \"$AZEDARACH_TEST_REPO/scripts/with-machine-validation-lease\"\n"), 0o755); err != nil {
+		t.Fatalf("write fake just: %v", err)
+	}
 	scriptsDir := filepath.Join(repo, "scripts")
 	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
 		t.Fatalf("mkdir scripts: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "justfile"), []byte("_merge-gate-unleased:\n\ttrue\n"), 0o644); err != nil {
+		t.Fatalf("write justfile: %v", err)
 	}
 	fakeLeaseWrapper := `#!/bin/sh
 if [ "${AZEDARACH_CANDIDATE_HEAD+x}" = x ] ||
@@ -1129,7 +1138,7 @@ func TestRealProcessProfileMergeCleanlyTransactionalAppliesScratchMergeToCleanTa
 	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
 		t.Fatalf("mkdir scripts: %v", err)
 	}
-	gate := "#!/bin/sh\nset -eu\nif [ \"${AZEDARACH_SKIP_MERGE_REBASE_GATE:-0}\" = 1 ]; then exit 0; fi\nprintf 'head=%s\\nstatus=%s\\nexpected=%s\\nissue=%s\\n' \"$(git rev-parse HEAD)\" \"$(git status --porcelain)\" \"${AZEDARACH_CANDIDATE_HEAD:-}\" \"${AZEDARACH_CANDIDATE_ISSUE_ID:-}\" >\"$AZEDARACH_TEST_GATE_EVIDENCE\"\n"
+	gate := "#!/bin/sh\nset -eu\nif [ \"${AZEDARACH_SKIP_MERGE_REBASE_GATE:-0}\" = 1 ]; then exit 0; fi\nprintf 'head=%s\\nstatus=%s\\nexpected=%s\\nissue=%s\\n' \"$(git rev-parse HEAD)\" \"$(git status --porcelain)\" \"${AZEDARACH_CANDIDATE_HEAD:-}\" \"${AZEDARACH_TICKET_ID:-}\" >\"$AZEDARACH_TEST_GATE_EVIDENCE\"\n"
 	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"), []byte(gate), 0o755); err != nil {
 		t.Fatalf("write candidate gate: %v", err)
 	}
@@ -1140,7 +1149,7 @@ func TestRealProcessProfileMergeCleanlyTransactionalAppliesScratchMergeToCleanTa
 	t.Setenv("AZEDARACH_SKIP_MERGE_REBASE_GATE", "1")
 
 	client := NewClient(NewExecRunner(repo), slog.Default())
-	ctx := WithCandidateValidationIssue(context.Background(), "dov")
+	ctx := WithCandidateValidationTicket(context.Background(), naming.TicketID("dov"))
 	result, err := client.MergeCleanlyTransactional(ctx, repo, "feature")
 	if err != nil {
 		t.Fatalf("MergeCleanlyTransactional() error = %v", err)
