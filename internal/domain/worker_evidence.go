@@ -24,8 +24,27 @@ type WorkerEvidencePacket struct {
 }
 
 type WorkerEvidenceReview struct {
-	Status   string   `json:"status"`
-	Findings []string `json:"findings"`
+	Status          string                      `json:"status"`
+	Findings        []string                    `json:"findings"`
+	Revision        string                      `json:"revision,omitempty"`
+	Angle           string                      `json:"angle,omitempty"`
+	ReusedLayers    []string                    `json:"reused_layers,omitempty"`
+	Matrix          *WorkerEvidenceReviewMatrix `json:"matrix,omitempty"`
+	ExtraPassReason string                      `json:"extra_pass_reason,omitempty"`
+	FallbackReason  string                      `json:"fallback_reason,omitempty"`
+	CleanPass       *int                        `json:"clean_pass,omitempty"`
+	CleanPassTarget *int                        `json:"clean_pass_target,omitempty"`
+}
+
+type WorkerEvidenceReviewMatrix struct {
+	Type         string                              `json:"type,omitempty"`
+	CoveredCells []string                            `json:"covered_cells,omitempty"`
+	SkippedCells []WorkerEvidenceReviewSkippedMatrix `json:"skipped_cells"`
+}
+
+type WorkerEvidenceReviewSkippedMatrix struct {
+	Cell   string `json:"cell"`
+	Reason string `json:"reason"`
 }
 
 type WorkerEvidenceArtifactLink struct {
@@ -233,8 +252,14 @@ func WorkerEvidencePacketTemplate() WorkerEvidencePacket {
 		KeyAssertions: []string{"validation passed"},
 		FilesChanged:  []string{"path/to/changed-file"},
 		Review: WorkerEvidenceReview{
-			Status:   "clean",
-			Findings: []string{},
+			Status:          "clean",
+			Findings:        []string{},
+			Revision:        "<exact candidate revision>",
+			Angle:           "complete worker review",
+			ReusedLayers:    []string{"none"},
+			Matrix:          &WorkerEvidenceReviewMatrix{Type: "general", CoveredCells: []string{"requested behavior", "integration points", "error paths", "affected consumers"}, SkippedCells: []WorkerEvidenceReviewSkippedMatrix{}},
+			CleanPass:       workerEvidenceInt(1),
+			CleanPassTarget: workerEvidenceInt(1),
 		},
 		Risks: []string{"none"},
 	}
@@ -277,6 +302,9 @@ func validateWorkerEvidencePacket(packet WorkerEvidencePacket, fields map[string
 			if _, ok := reviewFields["findings"]; !ok {
 				missing = appendMissing(missing, "review.findings")
 			}
+			detailMissing, detailInvalid := validateWorkerEvidenceReviewDetails(packet.Review, reviewFields)
+			missing = append(missing, detailMissing...)
+			invalid = append(invalid, detailInvalid...)
 		}
 	}
 	if strings.EqualFold(strings.TrimSpace(packet.Review.Status), "findings") && len(nonEmptyStrings(packet.Review.Findings)) == 0 {
@@ -317,6 +345,128 @@ func validateWorkerEvidencePacket(packet WorkerEvidencePacket, fields map[string
 	}
 	sort.Strings(missing)
 	return missing, invalid
+}
+
+func validateWorkerEvidenceReviewDetails(review WorkerEvidenceReview, fields map[string]json.RawMessage) ([]string, []string) {
+	detailFields := []string{"revision", "angle", "reused_layers", "matrix", "extra_pass_reason", "fallback_reason", "clean_pass", "clean_pass_target"}
+	structured := false
+	for _, field := range detailFields {
+		if _, ok := fields[field]; ok {
+			structured = true
+			break
+		}
+	}
+	if !structured {
+		return nil, nil // Historical worker_evidence.v1 packets remain valid.
+	}
+
+	var missing []string
+	var invalid []string
+	for _, field := range []string{"revision", "angle", "reused_layers", "matrix", "clean_pass", "clean_pass_target"} {
+		if _, ok := fields[field]; !ok {
+			missing = appendMissing(missing, "review."+field)
+		}
+	}
+	if strings.TrimSpace(review.Revision) == "" {
+		missing = appendMissing(missing, "review.revision")
+	}
+	if strings.TrimSpace(review.Angle) == "" {
+		missing = appendMissing(missing, "review.angle")
+	}
+	if len(nonEmptyStrings(review.ReusedLayers)) == 0 {
+		missing = appendMissing(missing, "review.reused_layers")
+	}
+	if duplicate := firstDuplicateNonEmptyString(review.Findings); duplicate != "" {
+		invalid = append(invalid, fmt.Sprintf("review.findings must be deduplicated; repeated %q", duplicate))
+	}
+	if review.Matrix == nil || strings.TrimSpace(review.Matrix.Type) == "" {
+		missing = appendMissing(missing, "review.matrix.type")
+	} else if !validWorkerEvidenceReviewMatrixType(review.Matrix.Type) {
+		invalid = append(invalid, "review.matrix.type must be one of general, stateful/concurrent, subprocess, or persistence")
+	}
+	if review.Matrix == nil || len(nonEmptyStrings(review.Matrix.CoveredCells)) == 0 {
+		missing = appendMissing(missing, "review.matrix.covered_cells")
+	}
+	if matrixRaw, ok := fields["matrix"]; ok {
+		var matrixFields map[string]json.RawMessage
+		if err := json.Unmarshal(matrixRaw, &matrixFields); err == nil {
+			if skippedRaw, ok := matrixFields["skipped_cells"]; !ok || strings.TrimSpace(string(skippedRaw)) == "null" {
+				missing = appendMissing(missing, "review.matrix.skipped_cells")
+			}
+		}
+	}
+	if _, ok := fields["fallback_reason"]; ok && strings.TrimSpace(review.FallbackReason) == "" {
+		missing = appendMissing(missing, "review.fallback_reason")
+	}
+	if review.Matrix != nil {
+		for i, skipped := range review.Matrix.SkippedCells {
+			if strings.TrimSpace(skipped.Cell) == "" {
+				missing = appendMissing(missing, fmt.Sprintf("review.matrix.skipped_cells[%d].cell", i))
+			}
+			if strings.TrimSpace(skipped.Reason) == "" {
+				missing = appendMissing(missing, fmt.Sprintf("review.matrix.skipped_cells[%d].reason", i))
+			}
+		}
+	}
+	if review.CleanPass == nil {
+		missing = appendMissing(missing, "review.clean_pass")
+	}
+	if review.CleanPassTarget == nil {
+		missing = appendMissing(missing, "review.clean_pass_target")
+	}
+	cleanPass := 0
+	if review.CleanPass != nil {
+		cleanPass = *review.CleanPass
+	}
+	cleanPassTarget := 0
+	if review.CleanPassTarget != nil {
+		cleanPassTarget = *review.CleanPassTarget
+	}
+	if cleanPass < 0 {
+		invalid = append(invalid, "review.clean_pass cannot be negative")
+	}
+	if strings.EqualFold(strings.TrimSpace(review.Status), "clean") && cleanPass < 1 {
+		invalid = append(invalid, "review.clean_pass must be at least 1 for a clean review")
+	}
+	if cleanPassTarget < 1 {
+		invalid = append(invalid, "review.clean_pass_target must be at least 1")
+	}
+	if cleanPass > cleanPassTarget && cleanPassTarget > 0 {
+		invalid = append(invalid, "review.clean_pass cannot exceed review.clean_pass_target")
+	}
+	if cleanPassTarget > 1 && strings.TrimSpace(review.ExtraPassReason) == "" {
+		missing = appendMissing(missing, "review.extra_pass_reason")
+	}
+	return missing, invalid
+}
+
+func validWorkerEvidenceReviewMatrixType(matrixType string) bool {
+	switch strings.ToLower(strings.TrimSpace(matrixType)) {
+	case "general", "stateful/concurrent", "subprocess", "persistence":
+		return true
+	default:
+		return false
+	}
+}
+
+func firstDuplicateNonEmptyString(values []string) string {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToLower(trimmed)
+		if _, ok := seen[key]; ok {
+			return trimmed
+		}
+		seen[key] = struct{}{}
+	}
+	return ""
+}
+
+func workerEvidenceInt(value int) *int {
+	return &value
 }
 
 func validateWorkerEvidenceRawShape(fields map[string]json.RawMessage) []string {
@@ -627,11 +777,32 @@ func diagnosticsForInvalidWorkerEvidence(invalid []string) []WorkerEvidenceDiagn
 			Message:    reason,
 			Suggestion: "run `az mail validate-evidence --fix` to preview a canonical packet when the mismatch is repairable",
 		}
+		switch reason {
+		case "review.clean_pass cannot be negative":
+			diagnostic.Path = "/review/clean_pass"
+			diagnostic.Suggestion = "use 0 before a clean pass or a positive completed-pass count"
+		case "review.clean_pass must be at least 1 for a clean review":
+			diagnostic.Path = "/review/clean_pass"
+			diagnostic.Suggestion = "set clean_pass to at least 1, or use findings, not_run, or blocked until the review is clean"
+		case "review.clean_pass_target must be at least 1":
+			diagnostic.Path = "/review/clean_pass_target"
+			diagnostic.Suggestion = "set clean_pass_target to the required worker review-pass count"
+		case "review.clean_pass cannot exceed review.clean_pass_target":
+			diagnostic.Path = "/review/clean_pass"
+			diagnostic.Suggestion = "lower clean_pass or increase clean_pass_target so completed passes do not exceed the required target"
+		}
 		switch {
 		case strings.Contains(reason, "review.status"):
 			diagnostic.Path = "/review/status"
 			diagnostic.AllowedValues = allowedWorkerEvidenceReviewStatuses()
 			diagnostic.Suggestion = "use one of clean, findings, not_run, or blocked; pass is normalized to clean"
+		case strings.Contains(reason, "review.matrix.type"):
+			diagnostic.Path = "/review/matrix/type"
+			diagnostic.AllowedValues = []string{"general", "stateful/concurrent", "subprocess", "persistence"}
+			diagnostic.Suggestion = "select the smallest applicable typed risk matrix"
+		case strings.Contains(reason, "review.findings"):
+			diagnostic.Path = "/review/findings"
+			diagnostic.Suggestion = "record each actionable finding once"
 		case strings.Contains(reason, "artifact_links["):
 			diagnostic.Path = workerEvidenceJSONPointer(strings.TrimSpace(strings.Split(reason, " ")[0]))
 			diagnostic.Suggestion = `omit artifact_links unless needed, or use [{"label":"CI","url":"https://example.test/run"}]`
@@ -673,6 +844,26 @@ func workerEvidenceSuggestionForField(field string) string {
 		return "use one of clean, findings, not_run, or blocked"
 	case "review.findings":
 		return "use an empty array when there are no review findings"
+	case "review.revision":
+		return "record the exact candidate revision reviewed"
+	case "review.angle":
+		return "name the review angle applied"
+	case "review.reused_layers":
+		return `use ["none"] when no unchanged review layer was reused`
+	case "review.matrix.type":
+		return "name the selected general, stateful/concurrent, subprocess, or persistence matrix"
+	case "review.matrix.covered_cells":
+		return "list the risk-matrix cells inspected"
+	case "review.matrix.skipped_cells":
+		return "use an empty array or objects with cell and reason"
+	case "review.extra_pass_reason":
+		return "name the explicit high-risk contract requiring more than one worker pass"
+	case "review.clean_pass":
+		return "record the completed worker review-pass count, using 0 before the first clean pass"
+	case "review.clean_pass_target":
+		return "record the required worker review-pass count, which must be at least 1"
+	case "review.fallback_reason":
+		return "describe why repair review widened from the local delta to the complete affected invariant"
 	case "risks":
 		return `use ["none"] when there are no known risks`
 	case "summary":

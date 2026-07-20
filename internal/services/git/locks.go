@@ -41,6 +41,14 @@ func (c *Client) WithWorktreeLock(ctx context.Context, worktree string, fn func(
 	return fn(ctx)
 }
 
+// WithIntegrationTransactionLock serializes a target identity check and its
+// durable integration side effect across client instances and daemon
+// processes. Callers must not invoke another integration transaction while
+// holding this lock.
+func (c *Client) WithIntegrationTransactionLock(ctx context.Context, worktree string, fn func(context.Context) error) error {
+	return c.withIntegrationTransactionLock(ctx, worktree, fn)
+}
+
 // withIntegrationTransactionLock serializes target integration publication
 // across Client instances and daemon processes. The common-directory lock file
 // is intentionally retained so contenders always coordinate on the same inode.

@@ -164,6 +164,7 @@ var commandSpecRegistry = map[string]CommandSpec{
 	CommandGitPullBase:                      {Command: CommandGitPullBase, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
 	CommandGitPush:                          {Command: CommandGitPush, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
 	CommandGitMerge:                         {Command: CommandGitMerge, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
+	CommandGitMergeRef:                      {Command: CommandGitMergeRef, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
 	CommandGitCheckout:                      {Command: CommandGitCheckout, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
 	CommandGitAbortMerge:                    {Command: CommandGitAbortMerge, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
 	CommandGitDiffStat:                      {Command: CommandGitDiffStat, DispatchTarget: CommandDispatchGit, RequiresProjectID: true},
@@ -246,6 +247,16 @@ var commandSpecRegistry = map[string]CommandSpec{
 	protocol.CommandLearnSuggest:            {Command: protocol.CommandLearnSuggest, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	protocol.CommandLearnConsolidate:        {Command: protocol.CommandLearnConsolidate, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
 	protocol.CommandLearnSuggestionReject:   {Command: protocol.CommandLearnSuggestionReject, DispatchTarget: CommandDispatchLearn, RequiresProjectID: true},
+}
+
+func init() {
+	for _, command := range []string{
+		protocol.CommandPublicationEvidenceRecord,
+		protocol.CommandPublicationEvidenceStatus,
+		protocol.CommandPublicationEvidenceEvaluate,
+	} {
+		commandSpecRegistry[command] = CommandSpec{Command: command, RequiresProjectID: true}
+	}
 }
 
 // LookupCommandSpec returns the typed command specification for a command.

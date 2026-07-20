@@ -107,6 +107,11 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 			errs = append(errs, fmt.Errorf("reconcile interaction staleness: %w", err))
 		}
 	}
+	if d.agentInputService() != nil {
+		if err := d.agentInputService().RetryPending(ctx, result.ProjectID.String(), 100); err != nil {
+			errs = append(errs, fmt.Errorf("reconcile agent input delivery: %w", err))
+		}
+	}
 	if !hasSessionRuntime {
 		return result, errors.Join(errs...)
 	}
@@ -140,7 +145,9 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 		return result, nil
 	}
 	ctx = withDaemonProjectIDContext(ctx, result.ProjectID.String())
-	defer d.readCrossProjectProjectionHealth(ctx, result.ProjectID.String(), &result)
+	if !isSessionStartRuntimeFreshnessRequest(ctx) {
+		defer d.readCrossProjectProjectionHealth(ctx, result.ProjectID.String(), &result)
+	}
 	shouldReconcileInteractionStaleness := d.reconcileInteractionStalenessFn != nil || d.hasConfiguredInteractionStore()
 	issueIDs = normalizeRuntimeReconcileIssueIDs(issueIDs)
 	if len(issueIDs) == 0 {
@@ -167,6 +174,13 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 				errs = append(errs, fmt.Errorf("reconcile issue sessions (%d targets): %w", end-start, err))
 			}
 		}
+	}
+	// Session start needs only the target issue's durable worktree/session intent
+	// reconciled with live tmux. Interaction aging, activity convergence, and
+	// resource hooks are unrelated maintenance and must not make bootstrap
+	// unavailable when those subsystems are busy or degraded.
+	if isSessionStartRuntimeFreshnessRequest(ctx) {
+		return result, errors.Join(errs...)
 	}
 	if shouldReconcileInteractionStaleness && d.tmux != nil && d.sessionRuntimeStateStoreIfConfigured(result.ProjectID.String()) != nil {
 		recovered, cleaned, err := d.reconcileAdvisorSessionRuntimes(ctx, result.ProjectID.String(), issueIDs)
@@ -241,8 +255,12 @@ func (d *Daemon) hasConfiguredInteractionStore() bool {
 }
 
 func shouldRunIssueResourceReconcileForRuntimeRequest(ctx context.Context) bool {
+	return !isSessionStartRuntimeFreshnessRequest(ctx)
+}
+
+func isSessionStartRuntimeFreshnessRequest(ctx context.Context) bool {
 	request := runtimeReconcileRequestFromContext(ctx)
-	return strings.TrimSpace(request.Reason) != "mutation-issue:"+daemonhandlers.CommandSessionStart
+	return strings.TrimSpace(request.Reason) == "mutation-issue:"+daemonhandlers.CommandSessionStart
 }
 
 func (d *Daemon) reconcileIssueResourcesPresent(ctx context.Context, projectID string, issueIDs []string) error {

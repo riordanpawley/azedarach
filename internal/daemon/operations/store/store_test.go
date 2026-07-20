@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/testisolation"
 )
 
@@ -68,23 +69,50 @@ func TestRealProjectOperationsDatabaseMigrationClones(t *testing.T) {
 				t.Fatalf("validation authority migration checksum = %q", checksum)
 			}
 			var authorityColumns int
-			if err = store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_validation_requests') WHERE name IN ('scope','purpose','execution','authoritative_request_id','compatibility_key','isolation_mode','environment_fingerprint','override_kind','override_actor','override_reason')`).Scan(&authorityColumns); err != nil {
+			if err = store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_validation_requests') WHERE name IN ('scope','purpose','execution','authoritative_request_id','compatibility_key','isolation_mode','environment_fingerprint','override_kind','override_actor','override_reason','issue_priority','priority_bypass_count')`).Scan(&authorityColumns); err != nil {
 				t.Fatal(err)
 			}
-			if authorityColumns != 10 {
-				t.Fatalf("validation authority columns = %d, want 10", authorityColumns)
+			if authorityColumns != 12 {
+				t.Fatalf("validation authority columns = %d, want 12", authorityColumns)
 			}
 			var objects, afterOperations int
 			if err = store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name IN (
 				'daemon_validation_requests','daemon_validation_state',
 				'idx_daemon_validation_one_active_aggregate','idx_daemon_validation_project_queue','idx_daemon_validation_expiry',
-				'idx_daemon_validation_review_evidence','idx_daemon_validation_compatibility',
+				'idx_daemon_validation_review_evidence','idx_daemon_validation_compatibility','idx_daemon_validation_priority_queue',
 				'daemon_validation_requests_insert_revision','daemon_validation_requests_update_revision'
 			)`).Scan(&objects); err != nil {
 				t.Fatal(err)
 			}
-			if objects != 9 {
-				t.Fatalf("validation migration objects = %d, want 9", objects)
+			if objects != 10 {
+				t.Fatalf("validation migration objects = %d, want 10", objects)
+			}
+			var evidenceObjects int
+			if err = store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name IN (
+				'daemon_publication_evidence','daemon_publication_evidence_invalidations','daemon_publication_evidence_state',
+				'idx_daemon_publication_evidence_issue_layer','idx_daemon_publication_evidence_invalidations',
+				'daemon_publication_evidence_immutable_update','daemon_publication_evidence_immutable_delete',
+				'daemon_publication_invalidation_immutable_update','daemon_publication_invalidation_immutable_delete',
+				'daemon_publication_evidence_insert_revision','daemon_publication_invalidation_insert_revision'
+			)`).Scan(&evidenceObjects); err != nil {
+				t.Fatal(err)
+			}
+			if evidenceObjects != 11 {
+				t.Fatalf("publication evidence migration objects = %d, want 11", evidenceObjects)
+			}
+			var queueObjects int
+			if err = store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name IN (
+				'daemon_publication_operations','idx_daemon_publication_operations_queue',
+				'idx_daemon_publication_operations_issue','idx_daemon_publication_operations_claim',
+				'daemon_publication_operation_identity_immutable'
+			)`).Scan(&queueObjects); err != nil {
+				t.Fatal(err)
+			}
+			if queueObjects != 5 {
+				t.Fatalf("publication queue migration objects = %d, want 5", queueObjects)
+			}
+			if _, err = store.PublicationOperations(ctx, "migration-review", "", false); err != nil {
+				t.Fatal(err)
 			}
 			if err = store.db.QueryRow(`SELECT COUNT(*) FROM daemon_operations`).Scan(&afterOperations); err != nil {
 				t.Fatal(err)
@@ -105,6 +133,9 @@ func TestRealProjectOperationsDatabaseMigrationClones(t *testing.T) {
 
 			reopened := NewAtPath(path, slog.Default())
 			if _, err = reopened.ValidationSnapshot(ctx, "migration-review", time.Now().UTC(), time.Minute); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = reopened.PublicationOperations(ctx, "migration-review", "", false); err != nil {
 				t.Fatal(err)
 			}
 			var ledgerRows int
@@ -614,7 +645,7 @@ func TestPublicationValidationPriorityMigrationRejectsLedgerSchemaDrift(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifact := migrationArtifacts[len(migrationArtifacts)-1]
+	artifact := migrationArtifacts[5]
 	if _, err = db.Exec(`INSERT INTO schema_migrations(id,applied_at,artifact_checksum) VALUES(?, 'drifted', ?)`, artifact.ID, artifact.Checksum); err != nil {
 		t.Fatal(err)
 	}
@@ -625,6 +656,270 @@ func TestPublicationValidationPriorityMigrationRejectsLedgerSchemaDrift(t *testi
 	drifted := NewAtPath(dbPath, slog.Default())
 	defer drifted.Close()
 	if _, err = drifted.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err == nil || !strings.Contains(err.Error(), "purpose = 'capacity'") {
+		t.Fatalf("schema drift error = %v", err)
+	}
+}
+
+func TestValidationPriorityFairnessMigrationUpgradesRowsAndReopens(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 7)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO daemon_validation_requests(request_id,lease_token_hash,project_id,issue_id,class,profile,command,source_revision,state,queued_at) VALUES('legacy', ?, 'project', 'issue', 'shared', 'focused', 'go test', 'abc123', 'queued', '2026-07-18T00:00:00Z')`, strings.Repeat("a", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewAtPath(dbPath, slog.Default())
+	if _, err = store.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	var priority, bypasses int
+	if err = store.db.QueryRow(`SELECT issue_priority,priority_bypass_count FROM daemon_validation_requests WHERE request_id='legacy'`).Scan(&priority, &bypasses); err != nil {
+		t.Fatal(err)
+	}
+	if priority != int(domain.P2) || bypasses != 0 {
+		t.Fatalf("legacy priority state = %d/%d, want P2/0", priority, bypasses)
+	}
+	latest := migrationArtifacts[len(migrationArtifacts)-1]
+	var ledgerRows int
+	if err = store.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id=? AND artifact_checksum=?`, latest.ID, latest.Checksum).Scan(&ledgerRows); err != nil {
+		t.Fatal(err)
+	}
+	if ledgerRows != 1 {
+		t.Fatalf("priority migration ledger rows = %d, want 1", ledgerRows)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := NewAtPath(dbPath, slog.Default())
+	defer reopened.Close()
+	if _, err = reopened.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err = reopened.db.QueryRow(`SELECT issue_priority,priority_bypass_count FROM daemon_validation_requests WHERE request_id='legacy'`).Scan(&priority, &bypasses); err != nil {
+		t.Fatal(err)
+	}
+	if priority != int(domain.P2) || bypasses != 0 {
+		t.Fatalf("reopened priority state = %d/%d, want P2/0", priority, bypasses)
+	}
+}
+
+func TestValidationPriorityFairnessMigrationRollsBackAtomically(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 7)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TRIGGER reject_validation_priority_ledger BEFORE INSERT ON schema_migrations WHEN NEW.id='daemon_operations_0008_validation_priority_fairness' BEGIN SELECT RAISE(ABORT, 'injected validation priority ledger failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	failed := NewAtPath(dbPath, slog.Default())
+	if _, err = failed.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err == nil || !strings.Contains(err.Error(), "injected validation priority ledger failure") {
+		t.Fatalf("migration error = %v", err)
+	}
+	_ = failed.Close()
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var columns, indexRows, ledgerRows int
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('daemon_validation_requests') WHERE name IN ('issue_priority','priority_bypass_count')`).Scan(&columns); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_daemon_validation_priority_queue'`).Scan(&indexRows); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE id='daemon_operations_0008_validation_priority_fairness'`).Scan(&ledgerRows); err != nil {
+		t.Fatal(err)
+	}
+	if columns != 0 || indexRows != 0 || ledgerRows != 0 {
+		t.Fatalf("failed priority migration residue columns=%d index=%d ledger=%d", columns, indexRows, ledgerRows)
+	}
+	if _, err = raw.Exec(`DROP TRIGGER reject_validation_priority_ledger`); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	retried := NewAtPath(dbPath, slog.Default())
+	defer retried.Close()
+	if _, err = retried.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidationPriorityFairnessMigrationRejectsLedgerSchemaDrift(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 7)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := migrationArtifacts[len(migrationArtifacts)-1]
+	if _, err = db.Exec(`INSERT INTO schema_migrations(id,applied_at,artifact_checksum) VALUES(?, 'drifted', ?)`, artifact.ID, artifact.Checksum); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	drifted := NewAtPath(dbPath, slog.Default())
+	defer drifted.Close()
+	if _, err = drifted.ValidationSnapshot(context.Background(), "project", time.Now().UTC(), time.Minute); err == nil || !strings.Contains(err.Error(), "issue_priority") {
+		t.Fatalf("schema drift error = %v", err)
+	}
+}
+
+func TestLayeredPublicationEvidenceMigrationRollsBackAndRetries(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 6)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TRIGGER reject_layered_evidence_ledger BEFORE INSERT ON schema_migrations WHEN NEW.id='daemon_operations_0007_layered_publication_evidence' BEGIN SELECT RAISE(ABORT, 'injected layered evidence ledger failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	failed := NewAtPath(dbPath, slog.Default())
+	if _, err = failed.PublicationEvidenceSnapshot(context.Background(), "project", ""); err == nil || !strings.Contains(err.Error(), "injected layered evidence ledger failure") {
+		t.Fatalf("migration error = %v", err)
+	}
+	_ = failed.Close()
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tables int
+	if err = raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('daemon_publication_evidence','daemon_publication_operations')`).Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if tables != 0 {
+		t.Fatal("failed migration left publication evidence or queue table")
+	}
+	if _, err = raw.Exec(`DROP TRIGGER reject_layered_evidence_ledger`); err != nil {
+		t.Fatal(err)
+	}
+	if err = raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	retried := NewAtPath(dbPath, slog.Default())
+	defer retried.Close()
+	if _, err = retried.PublicationEvidenceSnapshot(context.Background(), "project", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = retried.PublicationOperations(context.Background(), "project", "", false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLayeredPublicationEvidenceMigrationRejectsAppliedSchemaDrift(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 7)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`DROP TRIGGER daemon_publication_evidence_immutable_update`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	drifted := NewAtPath(dbPath, slog.Default())
+	defer drifted.Close()
+	if _, err = drifted.PublicationEvidenceSnapshot(context.Background(), "project", ""); err == nil || !strings.Contains(err.Error(), "missing trigger daemon_publication_evidence_immutable_update") {
+		t.Fatalf("schema drift error = %v", err)
+	}
+}
+
+func TestLayeredPublicationEvidenceMigrationRejectsCanonicalDefinitionDrift(t *testing.T) {
+	tests := []struct {
+		name, objectType, objectName, old, replacement string
+	}{
+		{
+			name: "invalidation enum removal", objectType: "table", objectName: "daemon_publication_evidence_invalidations",
+			old: ",'capability_absent','impact_unknown'", replacement: ",'capability_absent'",
+		},
+		{
+			name: "merge result constraint removal", objectType: "table", objectName: "daemon_publication_evidence",
+			old: "CHECK (layer != 'merge_result' OR (length(base_revision) > 0 AND length(result_revision) > 0)),", replacement: "",
+		},
+		{
+			name: "reuse foreign key removal", objectType: "table", objectName: "daemon_publication_evidence",
+			old: " REFERENCES daemon_publication_evidence(evidence_id)", replacement: "",
+		},
+		{
+			name: "revision trigger semantic change", objectType: "trigger", objectName: "daemon_publication_evidence_insert_revision",
+			old: "revision = revision + 1", replacement: "revision = revision + 2",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+			seedOperationsMigrations(t, dbPath, 7)
+			db, err := sql.Open("sqlite", dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var definition string
+			if err = db.QueryRow(`SELECT sql FROM sqlite_master WHERE type=? AND name=?`, tc.objectType, tc.objectName).Scan(&definition); err != nil {
+				t.Fatal(err)
+			}
+			driftedDefinition := strings.Replace(definition, tc.old, tc.replacement, 1)
+			if driftedDefinition == definition {
+				t.Fatalf("fixture did not alter %s %s: %q absent", tc.objectType, tc.objectName, tc.old)
+			}
+			if _, err = db.Exec(`PRAGMA writable_schema=ON`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.Exec(`UPDATE sqlite_master SET sql=? WHERE type=? AND name=?`, driftedDefinition, tc.objectType, tc.objectName); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.Exec(`PRAGMA schema_version=9876`); err != nil {
+				t.Fatal(err)
+			}
+			if err = db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			drifted := NewAtPath(dbPath, slog.Default())
+			defer drifted.Close()
+			if _, err = drifted.PublicationEvidenceSnapshot(context.Background(), "project", ""); err == nil || !strings.Contains(err.Error(), "differs from immutable artifact") {
+				t.Fatalf("schema drift error = %v", err)
+			}
+		})
+	}
+}
+
+func TestPublicationQueueMigrationRejectsAppliedSchemaDrift(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	seedOperationsMigrations(t, dbPath, 7)
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`DROP TRIGGER daemon_publication_operation_identity_immutable`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	drifted := NewAtPath(dbPath, slog.Default())
+	defer drifted.Close()
+	if _, err = drifted.PublicationOperations(context.Background(), "project", "", false); err == nil || !strings.Contains(err.Error(), "missing trigger daemon_publication_operation_identity_immutable") {
 		t.Fatalf("schema drift error = %v", err)
 	}
 }

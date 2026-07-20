@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -110,6 +111,269 @@ func TestRuntimeStateStoreManagedAgentIdentityRejectsStaleAcrossStores(t *testin
 	got, found, err := second.GetManagedAgentIdentity(ctx, "p", "az-1", "agent")
 	if err != nil || !found || got.PanePID != 200 || got.AgentIncarnation != "new" {
 		t.Fatalf("identity after stale replay = %+v found=%v err=%v", got, found, err)
+	}
+}
+
+func TestRuntimeStateStoreManagedAgentIdentityAcknowledgementIsExactAndDurable(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	observedAt := time.Date(2026, time.July, 19, 2, 46, 6, 531478000, time.UTC)
+	identity := ManagedAgentIdentity{ProjectID: "project", SessionID: "az-dtl", LogicalPaneID: "agent", TmuxPaneID: "1355", PanePID: 97371, AgentIncarnation: "restart-exact", ObservedAt: observedAt}
+	if err := store.UpsertManagedAgentIdentity(ctx, identity); err != nil {
+		t.Fatal(err)
+	}
+	stale := identity
+	stale.PanePID++
+	if acknowledged, err := store.AcknowledgeManagedAgentIdentity(ctx, stale, observedAt.Add(time.Millisecond)); err != nil || acknowledged {
+		t.Fatalf("stale acknowledgement = %t err=%v", acknowledged, err)
+	}
+	acknowledgedAt := observedAt.Add(155 * time.Millisecond)
+	if acknowledged, err := store.AcknowledgeManagedAgentIdentity(ctx, identity, acknowledgedAt); err != nil || !acknowledged {
+		t.Fatalf("exact acknowledgement = %t err=%v", acknowledged, err)
+	}
+	got, found, err := store.GetManagedAgentIdentity(ctx, "project", "az-dtl", "agent")
+	if err != nil || !found || !got.ObservedAt.Equal(observedAt) || !got.UpdatedAt.Equal(acknowledgedAt) {
+		t.Fatalf("durable acknowledgement = %+v found=%t err=%v", got, found, err)
+	}
+	if acknowledged, err := store.AcknowledgeManagedAgentIdentity(ctx, identity, observedAt.Add(-time.Hour)); err != nil || !acknowledged {
+		t.Fatalf("idempotent clock-rollback acknowledgement = %t err=%v", acknowledged, err)
+	}
+	replayed, _, err := store.GetManagedAgentIdentity(ctx, "project", "az-dtl", "agent")
+	if err != nil || !replayed.UpdatedAt.Equal(acknowledgedAt) {
+		t.Fatalf("clock-rollback acknowledgement regressed timestamp: %+v err=%v", replayed, err)
+	}
+}
+
+func TestRuntimeStateStoreManagedAgentIdentityReadDoesNotWaitForProjectionPool(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	identity := ManagedAgentIdentity{
+		ProjectID: "project", SessionID: "az-dtl", LogicalPaneID: "agent",
+		TmuxPaneID: "1355", PanePID: 97371, AgentIncarnation: "restart-controlled",
+		ObservedAt: time.Date(2026, time.July, 19, 4, 51, 8, 0, time.UTC),
+	}
+	projectionDB, err := store.dbHandle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	connections := make([]*sql.Conn, 0, runtimeStateMaxOpenConns)
+	for range runtimeStateMaxOpenConns {
+		connection, err := projectionDB.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		connections = append(connections, connection)
+		defer connection.Close()
+	}
+	waitsBefore := projectionDB.Stats().WaitCount
+
+	type result struct {
+		identity ManagedAgentIdentity
+		found    bool
+		err      error
+	}
+	readCtx, cancelRead := context.WithCancel(ctx)
+	defer cancelRead()
+	resultCh := make(chan result, 1)
+	go func() {
+		if err := store.UpsertManagedAgentIdentity(readCtx, identity); err != nil {
+			resultCh <- result{err: err}
+			return
+		}
+		acknowledged, err := store.AcknowledgeManagedAgentIdentity(readCtx, identity, identity.ObservedAt.Add(time.Millisecond))
+		if err != nil {
+			resultCh <- result{err: err}
+			return
+		}
+		if !acknowledged {
+			resultCh <- result{err: errors.New("exact managed identity was not acknowledged")}
+			return
+		}
+		got, found, err := store.GetManagedAgentIdentity(readCtx, identity.ProjectID, identity.SessionID, identity.LogicalPaneID)
+		resultCh <- result{identity: got, found: found, err: err}
+	}()
+
+	for {
+		select {
+		case got := <-resultCh:
+			if got.err != nil || !got.found || got.identity.AgentIncarnation != identity.AgentIncarnation || !got.identity.UpdatedAt.After(got.identity.ObservedAt) {
+				t.Fatalf("managed identity read = %+v found=%t err=%v", got.identity, got.found, got.err)
+			}
+			if waits := projectionDB.Stats().WaitCount; waits != waitsBefore {
+				t.Fatalf("managed identity read waited for disposable projection pool: before=%d after=%d", waitsBefore, waits)
+			}
+			return
+		default:
+			if waits := projectionDB.Stats().WaitCount; waits != waitsBefore {
+				cancelRead()
+				<-resultCh
+				t.Fatalf("managed identity read queued behind exhausted projection pool: before=%d after=%d", waitsBefore, waits)
+			}
+			runtime.Gosched()
+		}
+	}
+}
+
+func TestRuntimeStateStoreManagedAgentIdentityAcknowledgementConvergesAcrossStores(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	first := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	second := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = first.Close(); _ = second.Close() })
+	observedAt := time.Date(2026, time.July, 19, 2, 46, 6, 531478000, time.UTC)
+	identity := ManagedAgentIdentity{ProjectID: "project", SessionID: "az-dtl", LogicalPaneID: "agent", TmuxPaneID: "1355", PanePID: 97371, AgentIncarnation: "restart-exact", ObservedAt: observedAt}
+	if err := first.UpsertManagedAgentIdentity(ctx, identity); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	type result struct {
+		acknowledged bool
+		err          error
+	}
+	results := make(chan result, 2)
+	for _, store := range []*RuntimeStateStore{first, second} {
+		store := store
+		go func() {
+			<-start
+			acknowledged, err := store.AcknowledgeManagedAgentIdentity(ctx, identity, observedAt.Add(155*time.Millisecond))
+			results <- result{acknowledged: acknowledged, err: err}
+		}()
+	}
+	close(start)
+	for range 2 {
+		got := <-results
+		if got.err != nil || !got.acknowledged {
+			t.Fatalf("concurrent acknowledgement = %t err=%v", got.acknowledged, got.err)
+		}
+	}
+	identity, found, err := second.GetManagedAgentIdentity(ctx, "project", "az-dtl", "agent")
+	if err != nil || !found || !identity.UpdatedAt.After(identity.ObservedAt) {
+		t.Fatalf("converged acknowledgement = %+v found=%t err=%v", identity, found, err)
+	}
+}
+
+func TestRuntimeStateStoreManagedAgentExactBindReplayPreservesAcknowledgement(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	first := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	second := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = first.Close(); _ = second.Close() })
+	observedAt := time.Date(2026, time.July, 19, 3, 24, 0, 0, time.UTC)
+	identity := ManagedAgentIdentity{ProjectID: "project", SessionID: "az-dtp", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "restart-exact", ObservedAt: observedAt}
+	if err := first.UpsertManagedAgentIdentity(ctx, identity); err != nil {
+		t.Fatal(err)
+	}
+	acknowledgedAt := observedAt.Add(time.Millisecond)
+	if acknowledged, err := first.AcknowledgeManagedAgentIdentity(ctx, identity, acknowledgedAt); err != nil || !acknowledged {
+		t.Fatalf("acknowledge identity=%t err=%v", acknowledged, err)
+	}
+	replay := identity
+	replay.ObservedAt = observedAt.Add(time.Second)
+	if err := second.UpsertManagedAgentIdentity(ctx, replay); err != nil {
+		t.Fatalf("replay exact bind: %v", err)
+	}
+	got, found, err := second.GetManagedAgentIdentity(ctx, identity.ProjectID, identity.SessionID, identity.LogicalPaneID)
+	if err != nil || !found || !got.ObservedAt.Equal(observedAt) || !got.UpdatedAt.Equal(acknowledgedAt) || !got.UpdatedAt.After(got.ObservedAt) {
+		t.Fatalf("exact replay regressed acknowledgement: %+v found=%t err=%v", got, found, err)
+	}
+}
+
+func TestRuntimeStateStoreManagedAgentReplayOverlappingAcknowledgementStaysReady(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "runtime.db")
+	first := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	second := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = first.Close(); _ = second.Close() })
+	observedAt := time.Date(2026, time.July, 19, 3, 24, 0, 0, time.UTC)
+	identity := ManagedAgentIdentity{ProjectID: "project", SessionID: "az-dtp", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "restart-exact", ObservedAt: observedAt}
+	if err := first.UpsertManagedAgentIdentity(context.Background(), identity); err != nil {
+		t.Fatal(err)
+	}
+
+	ackEntered := make(chan struct{})
+	releaseAck := make(chan struct{})
+	ackCtx := WithSQLiteWriteAttemptHookForTest(context.Background(), func(operation string, _ int) error {
+		if operation == "acknowledge_managed_agent_identity" {
+			close(ackEntered)
+			<-releaseAck
+		}
+		return nil
+	})
+	type result struct {
+		acknowledged bool
+		err          error
+	}
+	ackResult := make(chan result, 1)
+	go func() {
+		acknowledged, err := first.AcknowledgeManagedAgentIdentity(ackCtx, identity, observedAt.Add(time.Millisecond))
+		ackResult <- result{acknowledged: acknowledged, err: err}
+	}()
+	<-ackEntered
+	replayStarted := make(chan struct{})
+	replayResult := make(chan error, 1)
+	go func() {
+		close(replayStarted)
+		replay := identity
+		replay.ObservedAt = observedAt.Add(time.Second)
+		replayResult <- second.UpsertManagedAgentIdentity(context.Background(), replay)
+	}()
+	<-replayStarted
+	close(releaseAck)
+	if got := <-ackResult; got.err != nil || !got.acknowledged {
+		t.Fatalf("overlapped acknowledgement=%t err=%v", got.acknowledged, got.err)
+	}
+	if err := <-replayResult; err != nil {
+		t.Fatalf("overlapped exact replay: %v", err)
+	}
+	got, found, err := second.GetManagedAgentIdentity(context.Background(), identity.ProjectID, identity.SessionID, identity.LogicalPaneID)
+	if err != nil || !found || !got.UpdatedAt.After(got.ObservedAt) {
+		t.Fatalf("overlapped replay erased readiness: %+v found=%t err=%v", got, found, err)
+	}
+}
+
+func TestRuntimeStateStoreManagedAgentNewIncarnationClearsAcknowledgementAndFencesStale(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	observedAt := time.Date(2026, time.July, 19, 3, 24, 0, 0, time.UTC)
+	old := ManagedAgentIdentity{ProjectID: "project", SessionID: "az-dtp", LogicalPaneID: "agent", TmuxPaneID: "12", PanePID: 100, AgentIncarnation: "restart-old", ObservedAt: observedAt}
+	if err := store.UpsertManagedAgentIdentity(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	if acknowledged, err := store.AcknowledgeManagedAgentIdentity(ctx, old, observedAt.Add(time.Millisecond)); err != nil || !acknowledged {
+		t.Fatalf("acknowledge old identity=%t err=%v", acknowledged, err)
+	}
+	reused := old
+	reused.PanePID = 101
+	reused.ObservedAt = observedAt.Add(500 * time.Millisecond)
+	if err := store.UpsertManagedAgentIdentity(ctx, reused); !errors.Is(err, ErrStaleManagedAgentIdentity) {
+		t.Fatalf("same-incarnation process replacement error=%v", err)
+	}
+	preserved, found, err := store.GetManagedAgentIdentity(ctx, old.ProjectID, old.SessionID, old.LogicalPaneID)
+	if err != nil || !found || preserved.PanePID != old.PanePID || !preserved.UpdatedAt.After(preserved.ObservedAt) {
+		t.Fatalf("same-incarnation process replacement changed authority: %+v found=%t err=%v", preserved, found, err)
+	}
+	current := old
+	current.PanePID = 200
+	current.AgentIncarnation = "restart-new"
+	current.ObservedAt = observedAt.Add(time.Second)
+	current.UpdatedAt = time.Time{}
+	if err := store.UpsertManagedAgentIdentity(ctx, current); err != nil {
+		t.Fatalf("bind new incarnation: %v", err)
+	}
+	got, found, err := store.GetManagedAgentIdentity(ctx, current.ProjectID, current.SessionID, current.LogicalPaneID)
+	if err != nil || !found || got.AgentIncarnation != current.AgentIncarnation || !got.UpdatedAt.Equal(got.ObservedAt) {
+		t.Fatalf("new incarnation should be unacknowledged: %+v found=%t err=%v", got, found, err)
+	}
+	stale := old
+	stale.ObservedAt = observedAt.Add(500 * time.Millisecond)
+	if err := store.UpsertManagedAgentIdentity(ctx, stale); !errors.Is(err, ErrStaleManagedAgentIdentity) {
+		t.Fatalf("stale identity replay error=%v", err)
+	}
+	after, found, err := store.GetManagedAgentIdentity(ctx, current.ProjectID, current.SessionID, current.LogicalPaneID)
+	if err != nil || !found || after.AgentIncarnation != current.AgentIncarnation || after.PanePID != current.PanePID {
+		t.Fatalf("stale replay replaced current identity: %+v found=%t err=%v", after, found, err)
 	}
 }
 
@@ -770,15 +1034,128 @@ func TestApplySessionCompensationPreservesRootedOrchestratorIntent(t *testing.T)
 	if err := store.ReplaceSessionStates(ctx, "project", []Session{rooted}); err != nil {
 		t.Fatal(err)
 	}
-	changed, winner, err := store.ApplySessionCompensation(ctx, "project", rooted, SessionStateStopped, SessionStateStopped, "", "", now.Add(time.Second))
+	changed, winner, applied, err := store.ApplySessionCompensation(ctx, "project", rooted, SessionStateStopped, SessionStateStopped, "", "", now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if winner != SessionStateStopped || len(changed) != 1 || changed[0].Role != SessionRoleOrchestrator || changed[0].State != SessionStateStopped || changed[0].ObservedState != SessionStateStopped {
-		t.Fatalf("typed compensation changed=%+v winner=%s", changed, winner)
+	if !applied || winner != SessionStateStopped || len(changed) != 1 || changed[0].Role != SessionRoleOrchestrator || changed[0].State != SessionStateStopped || changed[0].ObservedState != SessionStateStopped {
+		t.Fatalf("typed compensation changed=%+v winner=%s applied=%t", changed, winner, applied)
 	}
 	if worker, found, err := store.GetWorkerSessionStateByIssueID(ctx, "project", "root", "az-root"); err != nil || found {
 		t.Fatalf("typed compensation worker=%+v found=%t err=%v", worker, found, err)
+	}
+}
+
+func TestApplySessionCompensationSeparatesDesiredWriteFromPhysicalWinner(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		desired          SessionState
+		observed         SessionState
+		seedNewerRunning bool
+		wantWinner       SessionState
+	}{
+		{name: "physical write wins", desired: SessionStateStopped, observed: SessionStateRunning, wantWinner: SessionStateRunning},
+		{name: "stored physical observation wins", desired: SessionStatePaused, observed: SessionStateStopped, seedNewerRunning: true, wantWinner: SessionStateRunning},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+			t.Cleanup(func() { _ = store.Close() })
+			base := time.Date(2026, time.July, 19, 4, 0, 0, 0, time.UTC)
+			intent := Session{
+				ID: "az-divergent", IssueID: "divergent", Role: SessionRoleWorker,
+				ScopeKind: SessionScopeIssue, ScopeID: "divergent", State: SessionStateStarting, UpdatedAt: base,
+			}
+			if err := store.UpsertSessionState(ctx, "project", intent); err != nil {
+				t.Fatal(err)
+			}
+			if tc.seedNewerRunning {
+				if _, _, err := store.ApplyPhysicalSessionObservation(ctx, PhysicalSessionObservation{
+					ProjectID: "project", SessionID: intent.ID, ObservedState: SessionStateRunning,
+					Activity: "busy", ActivitySource: "session", UpdatedAt: base.Add(2 * time.Second),
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			activity, source := "busy", "session"
+			if tc.observed == SessionStateStopped {
+				activity, source = "", ""
+			}
+			changed, winner, applied, err := store.ApplySessionCompensation(ctx, "project", intent, tc.desired, tc.observed, activity, source, base.Add(time.Second))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !applied || winner != tc.wantWinner || len(changed) != 1 {
+				t.Fatalf("compensation changed=%+v winner=%s applied=%t", changed, winner, applied)
+			}
+			if changed[0].State != tc.desired || changed[0].ObservedState != tc.wantWinner {
+				t.Fatalf("desired/observed row = %s/%s, want %s/%s", changed[0].State, changed[0].ObservedState, tc.desired, tc.wantWinner)
+			}
+			got, found, err := store.GetSessionIntent(ctx, "project", SessionRoleWorker, SessionScopeIssue, "divergent")
+			if err != nil || !found || got.State != tc.desired || got.ObservedState != tc.wantWinner {
+				t.Fatalf("durable desired/observed = %+v found=%t err=%v, want %s/%s", got, found, err, tc.desired, tc.wantWinner)
+			}
+		})
+	}
+}
+
+func TestApplySessionCompensationIsIdempotentWhenDesiredIntentAlreadyAbsent(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.July, 19, 2, 46, 14, 0, time.UTC)
+	intent := Session{
+		ID: "az-dtl", IssueID: "dtl", Role: SessionRoleWorker,
+		ScopeKind: SessionScopeIssue, ScopeID: "dtl", State: SessionStateStarting, UpdatedAt: now,
+	}
+	changed, winner, applied, err := store.ApplySessionCompensation(ctx, "project", intent, SessionStateStopped, SessionStateStopped, "", "", now)
+	if err != nil {
+		t.Fatalf("idempotent compensation for absent desired intent: %v", err)
+	}
+	if applied || len(changed) != 0 || winner != SessionStateStopped {
+		t.Fatalf("absent compensation changed=%+v winner=%s applied=%t", changed, winner, applied)
+	}
+	observation, found, err := store.GetPhysicalSessionObservation(ctx, "project", "az-dtl")
+	if err != nil || !found || observation.ObservedState != SessionStateStopped {
+		t.Fatalf("physical compensation = %+v found=%t err=%v", observation, found, err)
+	}
+	if _, _, applied, err := store.ApplySessionCompensation(ctx, "project", intent, SessionStateStopped, SessionStateStopped, "", "", now); err != nil || applied {
+		t.Fatalf("replayed absent compensation: %v", err)
+	}
+}
+
+func TestApplySessionCompensationAbsentTargetFansOnlyPhysicalObservationToLinkedIntent(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.July, 19, 3, 43, 20, 0, time.UTC)
+	rooted := Session{
+		ID: "az-root", IssueID: "root", Role: SessionRoleOrchestrator,
+		ScopeKind: SessionScopeOrchestration, ScopeID: "root", State: SessionStateStarting, UpdatedAt: now,
+	}
+	if err := store.ReplaceSessionStates(ctx, "project", []Session{rooted}); err != nil {
+		t.Fatal(err)
+	}
+	absentWorker := Session{
+		ID: "az-root", IssueID: "root", Role: SessionRoleWorker,
+		ScopeKind: SessionScopeIssue, ScopeID: "root", State: SessionStateStarting, UpdatedAt: now,
+	}
+	changed, winner, applied, err := store.ApplySessionCompensation(ctx, "project", absentWorker, SessionStateStopped, SessionStateStopped, "", "", now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied || winner != SessionStateStopped || len(changed) != 1 {
+		t.Fatalf("absent target changed=%+v winner=%s applied=%t", changed, winner, applied)
+	}
+	if changed[0].Role != SessionRoleOrchestrator || changed[0].State != SessionStateStarting || changed[0].ObservedState != SessionStateStopped {
+		t.Fatalf("linked publication row=%+v", changed[0])
+	}
+	got, found, loadErr := store.GetSessionIntent(ctx, "project", SessionRoleOrchestrator, SessionScopeOrchestration, "root")
+	if loadErr != nil || !found || got.State != SessionStateStarting || got.ObservedState != SessionStateStopped {
+		t.Fatalf("linked rooted intent=%+v found=%t err=%v", got, found, loadErr)
+	}
+	if observation, found, loadErr := store.GetPhysicalSessionObservation(ctx, "project", "az-root"); loadErr != nil || !found || observation.ObservedState != SessionStateStopped {
+		t.Fatalf("physical cleanup=%+v found=%t err=%v", observation, found, loadErr)
 	}
 }
 
@@ -1216,13 +1593,42 @@ func TestRuntimeStateStoreRealProjectDatabaseMigrationClones(t *testing.T) {
 				t.Fatalf("open project database clone read-only: %v", err)
 			}
 			rowCounts := make(map[string]int)
+			retirableWorkers := 0
 			for _, table := range []string{sessionStateTable, sessionObservationTable} {
+				var exists int
+				if err := before.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&exists); err != nil {
+					_ = before.Close()
+					t.Fatalf("inspect %s before runtime-store open: %v", table, err)
+				}
+				if exists == 0 {
+					rowCounts[table] = 0
+					continue
+				}
 				var count int
 				if err := before.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
 					_ = before.Close()
 					t.Fatalf("count %s before runtime-store open: %v", table, err)
 				}
 				rowCounts[table] = count
+			}
+			var rootedRoleColumns int
+			if err := before.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('` + sessionStateTable + `') WHERE name IN ('role','scope_kind','scope_id')`).Scan(&rootedRoleColumns); err != nil {
+				_ = before.Close()
+				t.Fatalf("inspect rooted role columns before runtime-store open: %v", err)
+			}
+			if rootedRoleColumns == 3 {
+				if err := before.QueryRow(`SELECT COUNT(*) FROM ` + sessionStateTable + ` AS worker
+				WHERE worker.role='worker' AND worker.scope_kind='issue' AND instr(worker.session_id,'.pane-')=0
+					AND EXISTS (
+						SELECT 1 FROM ` + sessionStateTable + ` AS rooted
+						WHERE rooted.project_id=worker.project_id AND rooted.session_id=worker.session_id
+							AND rooted.role='orchestrator' AND rooted.scope_kind='orchestration'
+							AND rooted.scope_id<>'project' AND rooted.scope_id=worker.issue_id
+							AND worker.scope_id=worker.issue_id
+					)`).Scan(&retirableWorkers); err != nil {
+					_ = before.Close()
+					t.Fatalf("count retirable rooted worker intents: %v", err)
+				}
 			}
 			if err := before.Close(); err != nil {
 				t.Fatalf("close project database clone read-only: %v", err)
@@ -1251,9 +1657,13 @@ func TestRuntimeStateStoreRealProjectDatabaseMigrationClones(t *testing.T) {
 						_ = store.Close()
 						t.Fatalf("count %s after runtime-store open: %v", table, err)
 					}
-					if count != rowCounts[table] {
+					want := rowCounts[table]
+					if table == sessionStateTable {
+						want -= retirableWorkers
+					}
+					if count != want {
 						_ = store.Close()
-						t.Fatalf("%s rows = %d after runtime-store open, want %d", table, count, rowCounts[table])
+						t.Fatalf("%s rows = %d after runtime-store open, want %d (retirable workers=%d)", table, count, want, retirableWorkers)
 					}
 				}
 				if err := store.Close(); err != nil {
@@ -2092,6 +2502,57 @@ func TestRuntimeStateStoreGitHookPublicationBindsGenerationToExactWorktree(t *te
 	}
 }
 
+func TestRuntimeStateStoreRetireGitHookRefreshConsumesOnlyAcceptedGenerations(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	projectID := "proj-retire"
+	worktree := "/repo/retired"
+	first, err := store.AcceptGitHookRefresh(ctx, projectID, worktree, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retired, err := store.RetireGitHookRefreshIfIneligible(ctx, projectID, worktree, time.Now().UTC()); err != nil || !retired {
+		t.Fatalf("retired=%t err=%v", retired, err)
+	}
+	if _, found, err := store.GetPendingGitHookRefresh(ctx, projectID, worktree); err != nil || found {
+		t.Fatalf("pending after retirement found=%t err=%v", found, err)
+	}
+	second, err := store.AcceptGitHookRefresh(ctx, projectID, worktree, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.RequestedGeneration != first.RequestedGeneration+1 || second.CompletedGeneration != first.RequestedGeneration {
+		t.Fatalf("post-retirement intent=%+v first=%+v", second, first)
+	}
+	if pending, found, err := store.GetPendingGitHookRefresh(ctx, projectID, worktree); err != nil || !found || pending.RequestedGeneration != second.RequestedGeneration {
+		t.Fatalf("new generation pending=%+v found=%t err=%v", pending, found, err)
+	}
+}
+
+func TestRuntimeStateStoreDoesNotRetireGitHookRefreshForConcurrentRegistration(t *testing.T) {
+	ctx := context.Background()
+	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	projectID := "proj-register"
+	issueID := "az-register"
+	worktree := "/repo/registered"
+	if _, err := store.AcceptGitHookRefresh(ctx, projectID, worktree, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertWorktreeState(ctx, WorktreeState{
+		ProjectID: projectID, IssueID: issueID, Path: worktree, Branch: "az/register", UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if retired, err := store.RetireGitHookRefreshIfIneligible(ctx, projectID, worktree, time.Now().UTC()); err != nil || retired {
+		t.Fatalf("retired after registration=%t err=%v", retired, err)
+	}
+	if pending, found, err := store.GetPendingGitHookRefresh(ctx, projectID, worktree); err != nil || !found || pending.CompletedGeneration != 0 {
+		t.Fatalf("registered pending intent=%+v found=%t err=%v", pending, found, err)
+	}
+}
+
 func TestRuntimeStateStoreGitStatusRoundTrip(t *testing.T) {
 	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
 	t.Cleanup(func() {
@@ -2229,7 +2690,7 @@ func TestRuntimeStateStoreTmuxAttachmentObservationIsOptionalAndPreservedAcrossH
 	}
 }
 
-func TestRuntimeStateStoreUntypedSharedRuntimeMutationFailsClosed(t *testing.T) {
+func TestRuntimeStateStoreRootedTransitionRetiresWorkerAndUntypedMutationPreservesRole(t *testing.T) {
 	store := NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "azedarach.db"), slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
 	ctx := context.Background()
@@ -2242,8 +2703,46 @@ func TestRuntimeStateStoreUntypedSharedRuntimeMutationFailsClosed(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	if err := store.UpsertSessionState(ctx, "p", Session{ID: "az-root", IssueID: "root", State: SessionStatePaused, UpdatedAt: now}); err == nil {
-		t.Fatal("untyped mutation of shared physical runtime succeeded")
+	if worker, found, err := store.GetSessionIntent(ctx, "p", SessionRoleWorker, SessionScopeIssue, "root"); err != nil || found {
+		t.Fatalf("worker intent survived rooted transition: %+v found=%v err=%v", worker, found, err)
+	}
+	if err := store.UpsertSessionState(ctx, "p", Session{ID: "az-root", IssueID: "root", State: SessionStatePaused, UpdatedAt: now.Add(time.Second)}); err != nil {
+		t.Fatalf("untyped mutation of single rooted runtime failed: %v", err)
+	}
+	rooted, found, err := store.GetSessionIntent(ctx, "p", SessionRoleOrchestrator, SessionScopeOrchestration, "root")
+	if err != nil || !found || rooted.State != SessionStatePaused {
+		t.Fatalf("rooted intent=%+v found=%v err=%v", rooted, found, err)
+	}
+}
+
+func TestRuntimeStateStoreRootedTransitionRejectsStaleWorkerAcrossStores(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	first := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	second := NewRuntimeStateStoreAtPath(dbPath, slog.Default())
+	t.Cleanup(func() { _ = first.Close() })
+	t.Cleanup(func() { _ = second.Close() })
+	ctx := context.Background()
+	now := time.Now().UTC()
+	worker := Session{ID: "az-root", IssueID: "root", Role: SessionRoleWorker, ScopeKind: SessionScopeIssue, ScopeID: "root", State: SessionStateRunning, UpdatedAt: now}
+	if err := first.UpsertSessionState(ctx, "p", worker); err != nil {
+		t.Fatal(err)
+	}
+	staleWorker, found, err := second.GetSessionIntent(ctx, "p", SessionRoleWorker, SessionScopeIssue, "root")
+	if err != nil || !found {
+		t.Fatalf("stale worker snapshot=%+v found=%v err=%v", staleWorker, found, err)
+	}
+	rooted := Session{ID: "az-root", IssueID: "root", Role: SessionRoleOrchestrator, ScopeKind: SessionScopeOrchestration, ScopeID: "root", State: SessionStateRunning, UpdatedAt: now.Add(time.Second)}
+	if err := first.UpsertSessionState(ctx, "p", rooted); err != nil {
+		t.Fatal(err)
+	}
+	staleWorker.State = SessionStatePaused
+	staleWorker.UpdatedAt = now.Add(2 * time.Second)
+	if err := second.UpsertSessionState(ctx, "p", staleWorker); err == nil {
+		t.Fatal("stale worker writer recreated a second role for rooted runtime")
+	}
+	rows, err := second.ListSessionIntentStates(ctx, "p")
+	if err != nil || len(rows) != 1 || !rootedOrchestratorSessionIntent(rows[0]) {
+		t.Fatalf("final intents=%+v err=%v", rows, err)
 	}
 }
 
@@ -2287,18 +2786,12 @@ func TestRuntimeStateStorePhysicalObservationFanoutIsMonotonicAcrossStores(t *te
 	if err != nil || !found || observation.ObservedState != SessionStateRunning || observation.Activity != "busy" {
 		t.Fatalf("physical observation=%+v found=%v err=%v", observation, found, err)
 	}
-	for _, role := range []SessionRole{SessionRoleWorker, SessionRoleOrchestrator} {
-		scope := SessionScopeIssue
-		if role == SessionRoleOrchestrator {
-			scope = SessionScopeOrchestration
-		}
-		intent, found, err := stores[0].GetSessionIntent(ctx, "p", role, scope, "root")
-		if err != nil || !found || intent.ObservedState != SessionStateRunning || intent.Activity != "busy" || !intent.UpdatedAt.Equal(newer.UpdatedAt) {
-			t.Fatalf("%s intent=%+v found=%v err=%v", role, intent, found, err)
-		}
-		if role == SessionRoleWorker && intent.State != SessionStateStopped {
-			t.Fatalf("worker desired state changed: %+v", intent)
-		}
+	if worker, found, err := stores[0].GetSessionIntent(ctx, "p", SessionRoleWorker, SessionScopeIssue, "root"); err != nil || found {
+		t.Fatalf("worker intent survived rooted transition: %+v found=%v err=%v", worker, found, err)
+	}
+	intent, found, err := stores[0].GetSessionIntent(ctx, "p", SessionRoleOrchestrator, SessionScopeOrchestration, "root")
+	if err != nil || !found || intent.ObservedState != SessionStateRunning || intent.Activity != "busy" || !intent.UpdatedAt.Equal(newer.UpdatedAt) {
+		t.Fatalf("rooted intent=%+v found=%v err=%v", intent, found, err)
 	}
 	changed, applied, err := stores[0].ApplyPhysicalSessionObservation(ctx, older)
 	if err != nil || applied || len(changed) != 0 {
@@ -2463,15 +2956,11 @@ func TestRuntimeStateStorePhysicalObservationFanoutRollsBackTogether(t *testing.
 	if observation, found, err := store.GetPhysicalSessionObservation(ctx, "p", "az-root"); err != nil || found {
 		t.Fatalf("physical observation escaped rollback: %+v found=%v err=%v", observation, found, err)
 	}
-	for _, role := range []SessionRole{SessionRoleWorker, SessionRoleOrchestrator} {
-		scope := SessionScopeIssue
-		wantObserved := SessionState("")
-		if role == SessionRoleOrchestrator {
-			scope = SessionScopeOrchestration
-		}
-		intent, found, err := store.GetSessionIntent(ctx, "p", role, scope, "root")
-		if err != nil || !found || intent.ObservedState != wantObserved {
-			t.Fatalf("%s intent escaped rollback: %+v found=%v err=%v", role, intent, found, err)
-		}
+	if worker, found, err := store.GetSessionIntent(ctx, "p", SessionRoleWorker, SessionScopeIssue, "root"); err != nil || found {
+		t.Fatalf("worker intent survived rooted transition: %+v found=%v err=%v", worker, found, err)
+	}
+	intent, found, err := store.GetSessionIntent(ctx, "p", SessionRoleOrchestrator, SessionScopeOrchestration, "root")
+	if err != nil || !found || intent.ObservedState != SessionState("") {
+		t.Fatalf("rooted intent escaped rollback: %+v found=%v err=%v", intent, found, err)
 	}
 }

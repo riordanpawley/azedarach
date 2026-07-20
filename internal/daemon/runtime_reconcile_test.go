@@ -490,6 +490,9 @@ func TestCommandRuntimeReconcileRoutesToManualRepair(t *testing.T) {
 	if got := out.InvariantSources[string(daemonInvariantTaskListFreshness)]; got != string(daemonInvariantSourceProjection) {
 		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantTaskListFreshness, got, daemonInvariantSourceProjection)
 	}
+	if got := out.InvariantSources[string(daemonInvariantTaskReadAfterWrite)]; got != string(daemonInvariantSourceProjection) {
+		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantTaskReadAfterWrite, got, daemonInvariantSourceProjection)
+	}
 	if got := out.InvariantSources[string(daemonInvariantOrchestrationScope)]; got != string(daemonInvariantSourceProjection) {
 		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantOrchestrationScope, got, daemonInvariantSourceProjection)
 	}
@@ -514,8 +517,17 @@ func TestCommandRuntimeReconcileRoutesToManualRepair(t *testing.T) {
 	if got := out.InvariantSources[string(daemonInvariantManagedAgentIdentity)]; got != string(daemonInvariantSourceHybrid) {
 		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantManagedAgentIdentity, got, daemonInvariantSourceHybrid)
 	}
+	if got := out.InvariantSources[string(daemonInvariantManagedAgentRestart)]; got != string(daemonInvariantSourceHybrid) {
+		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantManagedAgentRestart, got, daemonInvariantSourceHybrid)
+	}
+	if got := out.InvariantSources[string(daemonInvariantAgentInputDelivery)]; got != string(daemonInvariantSourceHybrid) {
+		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantAgentInputDelivery, got, daemonInvariantSourceHybrid)
+	}
 	if got := out.InvariantSources[string(daemonInvariantValidationCapacity)]; got != string(daemonInvariantSourceProjection) {
 		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantValidationCapacity, got, daemonInvariantSourceProjection)
+	}
+	if got := out.InvariantSources[string(daemonInvariantPublicationEvidence)]; got != string(daemonInvariantSourceProjection) {
+		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantPublicationEvidence, got, daemonInvariantSourceProjection)
 	}
 
 	calls, projectIDs := recorder.snapshot()
@@ -1948,6 +1960,65 @@ func TestRuntimeReconcileIssuesSkipsIssueResourceHookForSessionStartFreshness(t 
 	}
 	if strings.TrimSpace(string(data)) != "ran" {
 		t.Fatalf("marker = %q, want ran", strings.TrimSpace(string(data)))
+	}
+}
+
+func TestRuntimeReconcileIssuesSessionStartSkipsUnrelatedMaintenance(t *testing.T) {
+	called := false
+	d := &Daemon{
+		cfg: Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		reconcileInteractionStalenessFn: func(context.Context, string) error {
+			called = true
+			return errors.New("unrelated interaction maintenance unavailable")
+		},
+	}
+	ctx := context.WithValue(context.Background(), runtimeReconcileRequestContextKey{}, runtimeReconcileRequestContext{
+		Priority: reconcilePriorityManual,
+		Reason:   "mutation-issue:" + daemonhandlers.CommandSessionStart,
+	})
+
+	if _, err := newRuntimeReconcileService(d).ReconcileIssues(ctx, "project", []string{"az-1"}); err != nil {
+		t.Fatalf("session.start scoped reconciliation inherited unrelated failure: %v", err)
+	}
+	if called {
+		t.Fatal("session.start scoped reconciliation ran unrelated interaction maintenance")
+	}
+}
+
+func TestRuntimeReconcileIssuesSessionStartReturnsWithoutCrossProjectHealthRead(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"), userstore.WithSnapshotAfterProjectsForTest(func() {
+		close(entered)
+		<-release
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{
+		cfg:       Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		userStore: store,
+	}
+	ctx := context.WithValue(context.Background(), runtimeReconcileRequestContextKey{}, runtimeReconcileRequestContext{
+		Priority: reconcilePriorityManual,
+		Reason:   "mutation-issue:" + daemonhandlers.CommandSessionStart,
+	})
+	done := make(chan error, 1)
+	go func() {
+		_, reconcileErr := newRuntimeReconcileService(d).ReconcileIssues(ctx, "project", []string{"az-1"})
+		done <- reconcileErr
+	}()
+
+	select {
+	case reconcileErr := <-done:
+		if reconcileErr != nil {
+			t.Fatalf("session.start scoped reconciliation: %v", reconcileErr)
+		}
+	case <-entered:
+		close(release)
+		<-done
+		t.Fatal("session.start scoped reconciliation entered unrelated cross-project health read")
 	}
 }
 

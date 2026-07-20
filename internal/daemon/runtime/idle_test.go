@@ -7,6 +7,26 @@ import (
 	"time"
 )
 
+type manualIdleTimer struct {
+	callback   func()
+	resetCalls int
+	resetAfter time.Duration
+}
+
+func (t *manualIdleTimer) Reset(after time.Duration) bool {
+	t.resetCalls++
+	t.resetAfter = after
+	return true
+}
+
+func manualIdleTimerOption(target **manualIdleTimer) IdleSupervisorOption {
+	return WithIdleTimerFactory(func(_ time.Duration, callback func()) IdleTimer {
+		timer := &manualIdleTimer{callback: callback}
+		*target = timer
+		return timer
+	})
+}
+
 func TestIdleTimeoutTriggersGracefulShutdownOrder(t *testing.T) {
 	var mu sync.Mutex
 	steps := make([]string, 0, 3)
@@ -16,6 +36,7 @@ func TestIdleTimeoutTriggersGracefulShutdownOrder(t *testing.T) {
 		steps = append(steps, step)
 	}
 
+	var timer *manualIdleTimer
 	s := NewIdleSupervisor(25*time.Millisecond, ShutdownHooks{
 		StopIntake: func() error { addStep("stop_intake"); return nil },
 		DrainInFlight: func(context.Context) error {
@@ -23,12 +44,11 @@ func TestIdleTimeoutTriggersGracefulShutdownOrder(t *testing.T) {
 			return nil
 		},
 		CloseTransport: func() error { addStep("close_transport"); return nil },
-	})
+	}, manualIdleTimerOption(&timer))
 	s.Start()
+	timer.callback()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := s.WaitStopped(ctx); err != nil {
+	if err := s.WaitStopped(context.Background()); err != nil {
 		t.Fatalf("WaitStopped: %v", err)
 	}
 
@@ -48,8 +68,10 @@ func TestIdleTimeoutTriggersGracefulShutdownOrder(t *testing.T) {
 
 func TestShutdownWaitsForInFlightOperations(t *testing.T) {
 	reachedClose := make(chan struct{}, 1)
+	stopping := make(chan struct{})
+	var timer *manualIdleTimer
 	s := NewIdleSupervisor(20*time.Millisecond, ShutdownHooks{
-		StopIntake: func() error { return nil },
+		StopIntake: func() error { close(stopping); return nil },
 		DrainInFlight: func(context.Context) error {
 			return nil
 		},
@@ -57,13 +79,14 @@ func TestShutdownWaitsForInFlightOperations(t *testing.T) {
 			reachedClose <- struct{}{}
 			return nil
 		},
-	})
+	}, manualIdleTimerOption(&timer))
 	s.Start()
 	if err := s.BeginOperation(); err != nil {
 		t.Fatalf("BeginOperation: %v", err)
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	go timer.callback()
+	<-stopping
 	select {
 	case <-reachedClose:
 		t.Fatal("shutdown closed transport before in-flight operation ended")
@@ -71,48 +94,37 @@ func TestShutdownWaitsForInFlightOperations(t *testing.T) {
 	}
 
 	s.EndOperation()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := s.WaitStopped(ctx); err != nil {
+	if err := s.WaitStopped(context.Background()); err != nil {
 		t.Fatalf("WaitStopped after EndOperation: %v", err)
 	}
 }
 
 func TestRecordActivityResetsIdleShutdownTimer(t *testing.T) {
-	reachedClose := make(chan struct{}, 1)
+	var timer *manualIdleTimer
 	s := NewIdleSupervisor(200*time.Millisecond, ShutdownHooks{
 		StopIntake: func() error { return nil },
 		DrainInFlight: func(context.Context) error {
 			return nil
 		},
-		CloseTransport: func() error {
-			reachedClose <- struct{}{}
-			return nil
-		},
-	})
+		CloseTransport: func() error { return nil },
+	}, manualIdleTimerOption(&timer))
 	s.Start()
-
-	time.Sleep(25 * time.Millisecond)
 	s.RecordActivity()
-
-	time.Sleep(100 * time.Millisecond)
-	select {
-	case <-reachedClose:
-		t.Fatal("shutdown fired before refreshed idle deadline")
-	default:
+	if timer.resetCalls != 1 || timer.resetAfter != 200*time.Millisecond {
+		t.Fatalf("timer reset = %d calls after %v, want one call after 200ms", timer.resetCalls, timer.resetAfter)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := s.WaitStopped(ctx); err != nil {
+	timer.callback()
+	if err := s.WaitStopped(context.Background()); err != nil {
 		t.Fatalf("WaitStopped after RecordActivity: %v", err)
 	}
 }
 
 func TestBeginOperationRejectedWhenStopping(t *testing.T) {
-	s := NewIdleSupervisor(10*time.Millisecond, ShutdownHooks{})
+	var timer *manualIdleTimer
+	s := NewIdleSupervisor(10*time.Millisecond, ShutdownHooks{}, manualIdleTimerOption(&timer))
 	s.Start()
-	time.Sleep(40 * time.Millisecond)
+	timer.callback()
 
 	err := s.BeginOperation()
 	if err == nil {

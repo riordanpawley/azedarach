@@ -45,6 +45,14 @@ non-compiling commands remain eligible and aggregate capacity execution remains
 exclusive from shared capacity work. This policy does not gate ordinary
 development or delay push/review publication.
 
+Ticket-scoped capacity requests also carry the daemon-authoritative issue
+priority. Admission is priority-first and FIFO within equal priority. Once a
+later higher-priority request has overtaken an older request, that durable
+bypass debt protects the older request at the next compatible admission point;
+daemon replacement and concurrent clients cannot reset it. `az validation
+status` reports the effective queue position, issue priority, bypass count, and
+whether ordering follows `priority_fifo` or `bounded_fairness`.
+
 The runner establishes the mandatory database-isolation boundary before any
 test binary starts. It snapshots the configured root-user database, the current
 project database, and every registered project database into a pre-open refusal
@@ -193,7 +201,7 @@ and hardware differences, so a local budget violation is written to
 
 `.github/workflows/controlled-timing.yml` is deliberately manual and targets
 the versioned self-hosted label `azedarach-timing-v1`. The runner must be a
-dedicated 8-vCPU/16-GiB machine image with Go 1.24.7, no concurrent Go
+dedicated 8-vCPU/16-GiB machine image with Go 1.25.7, no concurrent Go
 validation, and a clean Go test-result cache before each sample. The daemon
 timing-capacity lease supplies exclusive capacity admission and rejects
 observed overlapping Go work.

@@ -10,6 +10,7 @@ func TestIssueObservationEventTypeRequiresAuthority(t *testing.T) {
 		{eventType: IssueEventReviewCompleted, want: true},
 		{eventType: IssueEventReviewCloseFailed, want: true},
 		{eventType: IssueEventTaskIntegrationCompleted, want: true},
+		{eventType: IssueEventTaskIntegrationHistoricalAuthorized, want: true},
 		{eventType: IssueEventProgressRecorded, want: false},
 	}
 	for _, tt := range tests {

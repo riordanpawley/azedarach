@@ -27,14 +27,24 @@ type idleRecoveryDaemon struct {
 	store *daemonstate.Store
 	hub   *publish.Hub
 
-	idleMu sync.Mutex
-	idle   *daemonruntime.IdleSupervisor
+	idleMu     sync.Mutex
+	idle       *daemonruntime.IdleSupervisor
+	idleTimer  *idleRecoveryTimer
+	stoppingCh chan struct{}
 
 	startCalls   atomic.Int32
 	closeCalls   atomic.Int32
 	handshakeOK  atomic.Int32
 	requestCount atomic.Int32
 }
+
+type idleRecoveryTimer struct {
+	callback func()
+}
+
+func (t *idleRecoveryTimer) Reset(time.Duration) bool { return true }
+
+func (t *idleRecoveryTimer) Fire() { go t.callback() }
 
 func newIdleRecoveryDaemon(h *Harness, projectID string, idleTimeout time.Duration) *idleRecoveryDaemon {
 	return &idleRecoveryDaemon{
@@ -80,8 +90,10 @@ func (d *idleRecoveryDaemon) Start(ctx context.Context) error {
 		return err
 	}
 
+	stoppingCh := make(chan struct{})
 	idle := daemonruntime.NewIdleSupervisor(d.idleTimeout, daemonruntime.ShutdownHooks{
 		StopIntake: func() error {
+			close(stoppingCh)
 			return d.harness.appendEvent("daemon.idle.stop_intake", map[string]any{
 				"project_id": d.projectID,
 				"starts":     d.startCalls.Load(),
@@ -103,7 +115,14 @@ func (d *idleRecoveryDaemon) Start(ctx context.Context) error {
 			}
 			return d.harness.Shutdown()
 		},
-	})
+	}, daemonruntime.WithIdleTimerFactory(func(_ time.Duration, callback func()) daemonruntime.IdleTimer {
+		timer := &idleRecoveryTimer{callback: callback}
+		d.idleMu.Lock()
+		d.idleTimer = timer
+		d.stoppingCh = stoppingCh
+		d.idleMu.Unlock()
+		return timer
+	}))
 
 	d.idleMu.Lock()
 	d.idle = idle
@@ -117,6 +136,18 @@ func (d *idleRecoveryDaemon) currentIdle() *daemonruntime.IdleSupervisor {
 	d.idleMu.Lock()
 	defer d.idleMu.Unlock()
 	return d.idle
+}
+
+func (d *idleRecoveryDaemon) triggerIdleShutdown() <-chan struct{} {
+	d.idleMu.Lock()
+	timer := d.idleTimer
+	stoppingCh := d.stoppingCh
+	d.idleMu.Unlock()
+	if timer == nil {
+		panic("idle timer unavailable")
+	}
+	timer.Fire()
+	return stoppingCh
 }
 
 func (d *idleRecoveryDaemon) attachAndSnapshot(ctx context.Context, orch *autoclient.AutostartOrchestrator, hello protocol.Hello) (protocol.HelloAck, daemonstate.Snapshot, error) {
@@ -247,47 +278,6 @@ func idleCountEvent(names []string, event string) int {
 	return count
 }
 
-func waitForStatus(t *testing.T, idle *daemonruntime.IdleSupervisor, want string, timeout time.Duration) {
-	t.Helper()
-
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if idle.Status() == want {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("idle status = %s, want %s", idle.Status(), want)
-}
-
-func waitForRevision(t *testing.T, store *daemonstate.Store, projectID string, want uint64, timeout time.Duration) daemonstate.Snapshot {
-	t.Helper()
-
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		snap := store.ReadSnapshot(projectID)
-		if snap.Revision == want {
-			return snap
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	snap := store.ReadSnapshot(projectID)
-	t.Fatalf("snapshot revision = %d, want %d", snap.Revision, want)
-	return snap
-}
-
-func waitForEvent(t *testing.T, ch <-chan protocol.EventEnvelope, timeout time.Duration) protocol.EventEnvelope {
-	t.Helper()
-
-	select {
-	case evt := <-ch:
-		return evt
-	case <-time.After(timeout):
-		t.Fatal("timed out waiting for event")
-		return protocol.EventEnvelope{}
-	}
-}
-
 func TestIdleShutdownRecoveryScenarioAC(t *testing.T) {
 	base := t.TempDir()
 	h := New(Config{
@@ -297,8 +287,7 @@ func TestIdleShutdownRecoveryScenarioAC(t *testing.T) {
 	})
 
 	daemon := newIdleRecoveryDaemon(h, "proj-afo", 25*time.Millisecond)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
+	ctx := context.Background()
 
 	firstOrch := autoclient.NewAutostartOrchestrator(daemon, daemon)
 	hello := protocol.Hello{
@@ -326,13 +315,12 @@ func TestIdleShutdownRecoveryScenarioAC(t *testing.T) {
 		requestErr <- daemon.runSessionMutation(ctx, "sess-1", daemonstate.SessionStateStarting, "issue-1", requestStarted, requestRelease)
 	}()
 
-	select {
-	case <-requestStarted:
-	case <-ctx.Done():
-		t.Fatal("timed out waiting for request to start")
-	}
+	<-requestStarted
 
-	firstRevision := waitForRevision(t, daemon.store, daemon.projectID, 1, 500*time.Millisecond)
+	firstRevision := daemon.store.ReadSnapshot(daemon.projectID)
+	if firstRevision.Revision != 1 {
+		t.Fatalf("snapshot revision = %d, want 1", firstRevision.Revision)
+	}
 	if firstRevision.Sessions["sess-1"].State != daemonstate.SessionStateStarting {
 		t.Fatalf("snapshot session state = %s, want starting", firstRevision.Sessions["sess-1"].State)
 	}
@@ -341,7 +329,10 @@ func TestIdleShutdownRecoveryScenarioAC(t *testing.T) {
 	if firstIdle == nil {
 		t.Fatal("expected idle supervisor")
 	}
-	waitForStatus(t, firstIdle, "stopping", 500*time.Millisecond)
+	<-daemon.triggerIdleShutdown()
+	if got := firstIdle.Status(); got != "stopping" {
+		t.Fatalf("idle status = %s, want stopping", got)
+	}
 	if got := daemon.closeCalls.Load(); got != 0 {
 		t.Fatalf("close transport before drain = %d, want 0", got)
 	}
@@ -350,7 +341,7 @@ func TestIdleShutdownRecoveryScenarioAC(t *testing.T) {
 	if err := <-requestErr; err != nil {
 		t.Fatalf("in-flight request: %v", err)
 	}
-	if err := firstIdle.WaitStopped(ctx); err != nil {
+	if err := firstIdle.WaitStopped(context.Background()); err != nil {
 		t.Fatalf("first wait stopped: %v", err)
 	}
 	if err := firstIdle.BeginOperation(); err != daemonruntime.ErrShuttingDown {
@@ -390,18 +381,17 @@ func TestIdleShutdownRecoveryScenarioAC(t *testing.T) {
 		postRestartErr <- daemon.runSessionMutation(ctx, "sess-1", daemonstate.SessionStateAttached, "issue-1", postRestartStarted, postRestartRelease)
 	}()
 
-	select {
-	case <-postRestartStarted:
-	case <-ctx.Done():
-		t.Fatal("timed out waiting for restarted request to start")
-	}
+	<-postRestartStarted
 
-	postRestartSnap := waitForRevision(t, daemon.store, daemon.projectID, 2, 500*time.Millisecond)
+	postRestartSnap := daemon.store.ReadSnapshot(daemon.projectID)
+	if postRestartSnap.Revision != 2 {
+		t.Fatalf("post-restart snapshot revision = %d, want 2", postRestartSnap.Revision)
+	}
 	if postRestartSnap.Sessions["sess-1"].State != daemonstate.SessionStateAttached {
 		t.Fatalf("post-restart state = %s, want attached", postRestartSnap.Sessions["sess-1"].State)
 	}
 
-	evt := waitForEvent(t, backlogCh, 500*time.Millisecond)
+	evt := <-backlogCh
 	if evt.Revision != 2 {
 		t.Fatalf("backlog event revision = %d, want 2", evt.Revision)
 	}
@@ -415,7 +405,8 @@ func TestIdleShutdownRecoveryScenarioAC(t *testing.T) {
 	if secondIdle == nil {
 		t.Fatal("expected restarted idle supervisor")
 	}
-	if err := secondIdle.WaitStopped(ctx); err != nil {
+	<-daemon.triggerIdleShutdown()
+	if err := secondIdle.WaitStopped(context.Background()); err != nil {
 		t.Fatalf("second wait stopped: %v", err)
 	}
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/buildinfo"
 	"github.com/riordanpawley/azedarach/internal/config"
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon"
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
 	"github.com/riordanpawley/azedarach/internal/logging"
@@ -28,13 +30,22 @@ func main() {
 	var lockPath string
 	var repoDir string
 	var showVersion bool
+	var showPreflight bool
 
 	flag.StringVar(&socketPath, "socket", "", "unix socket path")
 	flag.StringVar(&lockPath, "lock", "", "lock file path")
 	flag.StringVar(&repoDir, "repo", "", "repository root")
 	flag.BoolVar(&showVersion, "version", false, "print version")
 	flag.BoolVar(&showVersion, "v", false, "print version")
+	flag.BoolVar(&showPreflight, "preflight", false, "print daemon compatibility report")
 	flag.Parse()
+	if showPreflight {
+		if err := json.NewEncoder(os.Stdout).Encode(protocol.CurrentDaemonExecutablePreflight(buildinfo.VersionString())); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to encode daemon compatibility report: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if showVersion || (len(flag.Args()) == 1 && flag.Args()[0] == "version") {
 		fmt.Println(buildinfo.VersionString())
@@ -105,6 +116,7 @@ func main() {
 		Logger:                     logger,
 		WorktreeInitCommands:       cfg.Worktree.SyncInitCommands,
 		WorktreeAsyncInitCommands:  cfg.Worktree.AsyncInitCommands,
+		GateFailureArtifactPaths:   cfg.Gate.FailureArtifactPaths,
 		IssueResources:             cfg.IssueResources,
 		IssueAutoArchive:           cfg.Issues.AutoArchive,
 		ScheduledScripts:           cfg.ScheduledScripts,

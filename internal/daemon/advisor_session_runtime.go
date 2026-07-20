@@ -2,11 +2,13 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +35,34 @@ type advisorSessionRuntimeResult struct {
 type advisorLaunchCommand struct {
 	Executable string
 	Args       []string
+}
+
+type advisorBootstrapFence struct {
+	SignalPath      string
+	Incarnation     string
+	ExpectedCommand string
+	BundleDir       string
+	WorkDir         string
+	CodexHome       string
+	ClaudeSettings  string
+	HookPath        string
+}
+
+func (f advisorBootstrapFence) remove() {
+	if strings.TrimSpace(f.BundleDir) != "" {
+		_ = os.RemoveAll(f.BundleDir)
+		return
+	}
+	if strings.TrimSpace(f.SignalPath) != "" {
+		_ = os.Remove(f.SignalPath)
+	}
+}
+
+func (f advisorBootstrapFence) removeSignal() {
+	if strings.TrimSpace(f.SignalPath) != "" {
+		_ = os.Remove(f.SignalPath)
+		_ = os.Remove(f.SignalPath + ".tmp")
+	}
 }
 
 func (c advisorLaunchCommand) String() string {
@@ -70,32 +100,86 @@ func (d *Daemon) ensureAdvisorSessionRuntime(ctx context.Context, projectID stri
 	if err := d.runtimeProjectionStateWriter().PersistSessionProjection(ctx, projectID, starting); err != nil {
 		return advisorSessionRuntimeResult{}, err
 	}
+	var plannedIncarnation string
+	var artifact sessionLaunchArtifact
 	advisor, attached, err := store.EnsureAdvisorSession(ctx, projectID, request.ID, request.IssueID, sessionID,
-		func(ctx context.Context, sessionID string) (bool, error) { return d.tmux.HasSession(ctx, sessionID) },
+		func(ctx context.Context, sessionID string) (bool, error) {
+			live, liveErr := d.tmux.HasSession(ctx, sessionID)
+			if liveErr != nil || !live {
+				return live, liveErr
+			}
+			if readinessErr := d.validateExistingManagedAgentReadiness(ctx, projectID, sessionID, "agent"); readinessErr == nil {
+				return true, nil
+			}
+			if killErr := d.tmux.KillSession(ctx, sessionID); killErr != nil {
+				return false, fmt.Errorf("retire unready advisor runtime: %w", killErr)
+			}
+			return false, nil
+		},
 		func(ctx context.Context, advisor daemonstate.AdvisorSession) error {
 			pack, packErr := d.buildAdvisorContextPack(ctx, projectID, request)
 			if packErr != nil {
 				return fmt.Errorf("build advisor context pack: %w", packErr)
 			}
 			prompt := buildAdvisorSessionPrompt(request, pack)
-			command, buildErr := d.buildAdvisorLaunchCommand(projectID, advisor, prompt)
-			if buildErr != nil {
-				return buildErr
+			var commandErr error
+			plannedIncarnation, commandErr = newRestartIncarnation()
+			if commandErr != nil {
+				return fmt.Errorf("plan advisor managed agent incarnation: %w", commandErr)
+			}
+			tool := strings.ToLower(strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool))
+			if tool == "" {
+				tool = "claude"
+			}
+			fence, fenceErr := prepareAdvisorBootstrapFence(d.sessionLaunchArtifactDir(), plannedIncarnation, tool)
+			if fenceErr != nil {
+				return fmt.Errorf("prepare advisor bootstrap fence: %w", fenceErr)
+			}
+			command, commandErr := d.buildAdvisorLaunchCommandWithFence(projectID, advisor, prompt, fence)
+			if commandErr != nil {
+				fence.remove()
+				return commandErr
 			}
 			if len(command.Args) == 0 {
+				fence.remove()
 				return errors.New("advisor launch command has no payload")
 			}
-			artifact, artifactErr := d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: projectID, SessionID: advisor.SessionID, CommandPayload: command.Args[len(command.Args)-1], Shell: advisorShellExecutable, SanitizeEnvironment: true})
-			if artifactErr != nil {
-				return fmt.Errorf("prepare advisor launch artifact: %w", artifactErr)
+			artifact, commandErr = d.prepareSessionLaunchArtifact(sessionLaunchSpec{Mode: sessionLaunchInitial, ProjectID: projectID, SessionID: advisor.SessionID, CommandPayload: command.Args[len(command.Args)-1], Shell: advisorShellExecutable, SanitizeEnvironment: true, LogicalPaneID: "agent", AgentIncarnation: plannedIncarnation})
+			if commandErr != nil {
+				fence.remove()
+				return fmt.Errorf("prepare advisor launch artifact: %w", commandErr)
 			}
 			if launchErr := d.tmux.NewSessionWithCommandAndEnvironment(ctx, advisor.SessionID, workdir, artifact.Command, nil); launchErr != nil {
 				artifact.remove()
-				return launchErr
+				fence.remove()
+				return fmt.Errorf("%w%s", launchErr, d.retireAmbiguousAdvisorSession(ctx, advisor.SessionID))
 			}
+			if ackErr := d.waitForAdvisorBootstrapAcknowledgement(ctx, projectID, advisor.SessionID, fence); ackErr != nil {
+				artifact.remove()
+				fence.remove()
+				cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+				defer cancelCleanup()
+				if killErr := d.tmux.KillSession(cleanupCtx, advisor.SessionID); killErr != nil {
+					return errors.Join(fmt.Errorf("confirm advisor managed agent bootstrap: %w", ackErr), fmt.Errorf("retire failed advisor bootstrap runtime: %w", killErr))
+				}
+				return fmt.Errorf("confirm advisor managed agent bootstrap: %w", ackErr)
+			}
+			fence.removeSignal()
 			return nil
 		})
 	if err != nil {
+		artifact.remove()
+		stopped := starting
+		stopped.State = daemonstate.SessionStateStopped
+		stopped.ObservedState = daemonstate.SessionStateStopped
+		stopped.Activity = "idle"
+		stopped.ActivitySource = "runtime"
+		stopped.UpdatedAt = time.Now().UTC()
+		compensationCtx, cancelCompensation := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		defer cancelCompensation()
+		if projectionErr := d.runtimeProjectionStateWriter().PersistSessionProjection(compensationCtx, projectID, stopped); projectionErr != nil {
+			err = errors.Join(err, fmt.Errorf("compensate failed advisor bootstrap projection: %w", projectionErr))
+		}
 		return advisorSessionRuntimeResult{Session: advisor, Attached: attached}, err
 	}
 	projection := daemonstate.Session{ID: advisor.SessionID, IssueID: advisor.IssueID, Role: daemonstate.SessionRoleAdvisor, ScopeKind: daemonstate.SessionScopeInteraction, ScopeID: advisor.RequestID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning, Activity: "busy", ActivitySource: "runtime", UpdatedAt: time.Now().UTC()}
@@ -108,7 +192,23 @@ func (d *Daemon) ensureAdvisorSessionRuntime(ctx context.Context, projectID stri
 	return advisorSessionRuntimeResult{Session: advisor, Started: !attached, Attached: attached, Resumed: attached && resumed}, nil
 }
 
-func (d *Daemon) buildAdvisorLaunchCommand(projectID string, advisor daemonstate.AdvisorSession, prompt string) (advisorLaunchCommand, error) {
+func (d *Daemon) retireAmbiguousAdvisorSession(ctx context.Context, sessionID string) string {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+	defer cancel()
+	appeared, err := d.tmux.HasSession(cleanupCtx, sessionID)
+	if err != nil {
+		return fmt.Sprintf("; exact advisor session reconciliation failed: %v", err)
+	}
+	if !appeared {
+		return ""
+	}
+	if err := d.tmux.KillSession(cleanupCtx, sessionID); err != nil {
+		return fmt.Sprintf("; appeared advisor session cleanup failed: %v", err)
+	}
+	return "; appeared advisor session was removed"
+}
+
+func (d *Daemon) buildAdvisorLaunchCommandWithFence(projectID string, advisor daemonstate.AdvisorSession, prompt string, fence advisorBootstrapFence) (advisorLaunchCommand, error) {
 	projectCfg := d.runtimeConfigForProject(projectID)
 	tool := strings.ToLower(strings.TrimSpace(projectCfg.CLITool))
 	if tool == "" {
@@ -123,6 +223,9 @@ func (d *Daemon) buildAdvisorLaunchCommand(projectID string, advisor daemonstate
 	if err != nil {
 		return advisorLaunchCommand{}, err
 	}
+	if strings.TrimSpace(fence.SignalPath) != "" {
+		fence.ExpectedCommand = filepath.Base(toolPath)
+	}
 	promptAssignment := initialPromptShellAssignment(prompt)
 	promptArg := `"$` + initialPromptShellVariable + `"`
 	envPrefix := "AZEDARACH_SESSION_ROLE=advisor AZEDARACH_INTERACTION_ID=" + singleQuoteForShell(advisor.RequestID) + " AZEDARACH_SESSION_ID=" + singleQuoteForShell(advisor.SessionID) + ` AZEDARACH_ISSUE_ID="" `
@@ -135,10 +238,11 @@ func (d *Daemon) buildAdvisorLaunchCommand(projectID string, advisor daemonstate
 		// The filesystem sandbox does not govern MCP servers, apps, hooks, or
 		// other extension surfaces. Disable those separately so a user's normal
 		// Codex configuration cannot give an advisor external mutation authority.
-		toolCommand = promptAssignment + `; ` + envPrefix + toolInvocation + ` --sandbox read-only --ask-for-approval never` +
+		toolCommand = promptAssignment + `; ` + envPrefix + `CODEX_HOME=` + singleQuoteForShell(fence.CodexHome) + ` ` + toolInvocation +
+			` --dangerously-bypass-hook-trust -C ` + singleQuoteForShell(fence.WorkDir) + ` --sandbox read-only --ask-for-approval never` +
 			` --disable plugins --disable remote_plugin --disable plugin_sharing` +
 			` --disable apps --disable computer_use --disable browser_use --disable browser_use_external --disable browser_use_full_cdp_access --disable in_app_browser` +
-			` --disable hooks --disable multi_agent --disable goals --disable image_generation` +
+			` --disable multi_agent --disable goals --disable image_generation` +
 			` --disable workspace_dependencies --disable skill_mcp_dependency_install` +
 			` -c 'mcp_servers={}' -c 'web_search="disabled"' -c 'history.persistence="none"'` +
 			` -c 'project_doc_max_bytes=0' -c 'project_doc_fallback_filenames=[]' -- ` + promptArg
@@ -147,10 +251,10 @@ func (d *Daemon) buildAdvisorLaunchCommand(projectID string, advisor daemonstate
 		// plugins, and connected services from bypassing the built-in tool list.
 		toolCommand = promptAssignment + `; ` + envPrefix + toolInvocation + ` --permission-mode plan --tools "Read,Glob,Grep"` +
 			` --disallowed-tools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task,Agent,mcp__*"` +
-			` --setting-sources "" --strict-mcp-config --mcp-config '{"mcpServers":{}}'` +
+			` --setting-sources "" --settings ` + singleQuoteForShell(fence.ClaudeSettings) + ` --strict-mcp-config --mcp-config '{"mcpServers":{}}'` +
 			` --disable-slash-commands --no-chrome ` + promptArg
 	case "opencode":
-		toolCommand = promptAssignment + `; ` + buildIsolatedOpenCodeAdvisorCommand(envPrefix+toolInvocation+` --pure --agent advisor --prompt `+promptArg)
+		toolCommand = promptAssignment + `; ` + buildIsolatedOpenCodeAdvisorCommand(fence, envPrefix+toolInvocation+` --agent advisor --prompt `+promptArg)
 	}
 	for _, path := range []string{advisorEnvExecutable, advisorShellExecutable} {
 		if err := requireAdvisorSystemExecutable(path); err != nil {
@@ -160,7 +264,9 @@ func (d *Daemon) buildAdvisorLaunchCommand(projectID string, advisor daemonstate
 	// tmux must receive this as a multi-argument command. That makes it exec env
 	// directly rather than starting the configured default shell with -c. env
 	// removes non-interactive startup hooks before the minimal POSIX shell starts.
-	inner := toolCommand + "; " + sessionAgentProcessExitCommand(projectCfg.CLITool)
+	inner := "__azedarach_advisor_bundle=" + singleQuoteForShell(fence.BundleDir) +
+		`; trap 'command rm -rf -- "$__azedarach_advisor_bundle"' EXIT; ` +
+		toolCommand + "; " + sessionAgentProcessExitCommand(projectCfg.CLITool)
 	return advisorLaunchCommand{
 		Executable: advisorEnvExecutable,
 		Args: []string{
@@ -172,6 +278,159 @@ func (d *Daemon) buildAdvisorLaunchCommand(projectID string, advisor daemonstate
 			advisorShellExecutable, "-c", inner,
 		},
 	}, nil
+}
+
+func prepareAdvisorBootstrapFence(dir, incarnation, tool string) (advisorBootstrapFence, error) {
+	if err := ensureSessionLaunchArtifactDir(dir); err != nil {
+		return advisorBootstrapFence{}, err
+	}
+	bundleDir, err := os.MkdirTemp(dir, "advisor-bootstrap-*")
+	if err != nil {
+		return advisorBootstrapFence{}, err
+	}
+	cleanup := func() { _ = os.RemoveAll(bundleDir) }
+	if err := os.Chmod(bundleDir, 0o700); err != nil {
+		cleanup()
+		return advisorBootstrapFence{}, err
+	}
+	fence := advisorBootstrapFence{
+		SignalPath:      filepath.Join(bundleDir, "ready.signal"),
+		Incarnation:     strings.TrimSpace(incarnation),
+		ExpectedCommand: filepath.Base(strings.TrimSpace(tool)),
+		BundleDir:       bundleDir,
+		WorkDir:         filepath.Join(bundleDir, "work"),
+		CodexHome:       filepath.Join(bundleDir, "codex-home"),
+		ClaudeSettings:  filepath.Join(bundleDir, "claude-settings.json"),
+		HookPath:        filepath.Join(bundleDir, "signal-ready.sh"),
+	}
+	if fence.Incarnation == "" || fence.ExpectedCommand == "" {
+		cleanup()
+		return advisorBootstrapFence{}, errors.New("advisor bootstrap fence requires an incarnation and tool")
+	}
+	if err := os.MkdirAll(fence.WorkDir, 0o700); err != nil {
+		cleanup()
+		return advisorBootstrapFence{}, err
+	}
+	hookBody := "#!/bin/sh\nset -eu\numask 077\nprintf '%s\\t%s\\t%s\\n' " + singleQuoteForShell(fence.Incarnation) +
+		" \"${TMUX_PANE:?}\" \"${AZEDARACH_PANE_PID:?}\" > " + singleQuoteForShell(fence.SignalPath+".tmp") + "\n" +
+		"mv " + singleQuoteForShell(fence.SignalPath+".tmp") + " " + singleQuoteForShell(fence.SignalPath) + "\nprintf '{}\\n'\n"
+	if err := os.WriteFile(fence.HookPath, []byte(hookBody), 0o700); err != nil {
+		cleanup()
+		return advisorBootstrapFence{}, err
+	}
+	hookCommand := singleQuoteForShell(fence.HookPath)
+	hooks := map[string]any{"hooks": map[string]any{"SessionStart": []any{map[string]any{
+		"matcher": "startup|resume", "hooks": []any{map[string]any{"type": "command", "command": hookCommand}},
+	}}}}
+	hooksJSON, err := json.Marshal(hooks)
+	if err != nil {
+		cleanup()
+		return advisorBootstrapFence{}, err
+	}
+	if err := os.WriteFile(fence.ClaudeSettings, hooksJSON, 0o600); err != nil {
+		cleanup()
+		return advisorBootstrapFence{}, err
+	}
+	if err := os.MkdirAll(filepath.Join(fence.WorkDir, ".codex"), 0o700); err != nil {
+		cleanup()
+		return advisorBootstrapFence{}, err
+	}
+	if err := os.MkdirAll(fence.CodexHome, 0o700); err != nil {
+		cleanup()
+		return advisorBootstrapFence{}, err
+	}
+	for _, path := range []string{filepath.Join(fence.WorkDir, ".codex", "hooks.json"), filepath.Join(fence.CodexHome, "hooks.json")} {
+		if err := os.WriteFile(path, hooksJSON, 0o600); err != nil {
+			cleanup()
+			return advisorBootstrapFence{}, err
+		}
+	}
+	if err := linkAdvisorCodexAuthentication(fence.CodexHome); err != nil {
+		cleanup()
+		return advisorBootstrapFence{}, err
+	}
+	if err := prepareOpenCodeAdvisorReadinessPlugin(fence); err != nil {
+		cleanup()
+		return advisorBootstrapFence{}, err
+	}
+	return fence, nil
+}
+
+func linkAdvisorCodexAuthentication(isolatedHome string) error {
+	sourceHome := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if sourceHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		sourceHome = filepath.Join(home, ".codex")
+	}
+	source := filepath.Join(sourceHome, "auth.json")
+	if _, err := os.Stat(source); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err := os.Symlink(source, filepath.Join(isolatedHome, "auth.json")); err != nil {
+		return fmt.Errorf("link isolated Codex authentication: %w", err)
+	}
+	return nil
+}
+
+func prepareOpenCodeAdvisorReadinessPlugin(fence advisorBootstrapFence) error {
+	pluginDir := filepath.Join(fence.WorkDir, ".opencode", "plugins")
+	if err := os.MkdirAll(pluginDir, 0o700); err != nil {
+		return err
+	}
+	incarnation, _ := json.Marshal(fence.Incarnation)
+	signalPath, _ := json.Marshal(fence.SignalPath)
+	plugin := "export const AdvisorReadiness = async () => ({ event: async ({ event }) => {\n" +
+		"  if (event.type !== 'session.created') return;\n" +
+		"  const body = " + string(incarnation) + " + '\\t' + process.env.TMUX_PANE + '\\t' + process.env.AZEDARACH_PANE_PID + '\\n';\n" +
+		"  await Bun.write(" + string(signalPath) + " + '.tmp', body, { mode: 0o600 });\n" +
+		"  await Bun.file(" + string(signalPath) + " + '.tmp').exists();\n" +
+		"  await Bun.write(" + string(signalPath) + ", body, { mode: 0o600 });\n" +
+		"} });\n"
+	return os.WriteFile(filepath.Join(pluginDir, "advisor-readiness.js"), []byte(plugin), 0o600)
+}
+
+func (d *Daemon) waitForAdvisorBootstrapAcknowledgement(ctx context.Context, projectID, sessionID string, fence advisorBootstrapFence) error {
+	waitCtx, cancel := context.WithTimeout(ctx, sessionStartAcknowledgementTimeout)
+	defer cancel()
+	ticker := time.NewTicker(sessionStartAcknowledgementPoll)
+	defer ticker.Stop()
+	for {
+		body, err := os.ReadFile(fence.SignalPath)
+		if err == nil && len(body) > 0 {
+			parts := strings.Split(strings.TrimSpace(string(body)), "\t")
+			if len(parts) == 3 && strings.TrimSpace(parts[0]) == strings.TrimSpace(fence.Incarnation) {
+				panePID, parseErr := strconv.Atoi(strings.TrimSpace(parts[2]))
+				if parseErr == nil && panePID > 0 {
+					panes, paneErr := d.tmux.ListPaneInfos(waitCtx)
+					if paneErr != nil {
+						return paneErr
+					}
+					for _, pane := range panes {
+						if pane.SessionName != sessionID || sanitizeRuntimePaneID(pane.PaneID) != sanitizeRuntimePaneID(parts[1]) || pane.PanePID != panePID || filepath.Base(strings.TrimSpace(pane.CurrentCommand)) != filepath.Base(strings.TrimSpace(fence.ExpectedCommand)) {
+							continue
+						}
+						store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+						if store == nil {
+							return errors.New("advisor managed agent identity store unavailable")
+						}
+						return store.UpsertManagedAgentIdentity(waitCtx, daemonstate.ManagedAgentIdentity{ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: sanitizeRuntimePaneID(parts[1]), PanePID: panePID, AgentIncarnation: fence.Incarnation, ObservedAt: time.Now().UTC()})
+					}
+				}
+			}
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("read advisor bootstrap signal: %w", err)
+		}
+		select {
+		case <-waitCtx.Done():
+			return &sessionStartBootstrapError{Reason: sessionStartBootstrapAcknowledgementLost, SessionID: sessionID, Incarnation: fence.Incarnation, Cause: waitCtx.Err()}
+		case <-ticker.C:
+		}
+	}
 }
 
 func resolveAdvisorExecutable(name string) (string, error) {
@@ -198,12 +457,11 @@ func requireAdvisorSystemExecutable(path string) error {
 }
 
 // buildIsolatedOpenCodeAdvisorCommand keeps OpenCode outside the repository
-// tree while it loads configuration. OpenCode merges project and user config
-// even in --pure mode, so permissions alone cannot prevent invalid or
-// authority-expanding project configuration from affecting advisor startup.
-func buildIsolatedOpenCodeAdvisorCommand(invocation string) string {
-	return `__azedarach_advisor_dir="$(command mktemp -d "${TMPDIR:-/tmp}/azedarach-opencode.XXXXXX")" || exit 1` +
-		`; trap 'command rm -rf "$__azedarach_advisor_dir"' EXIT` +
+// tree while it loads configuration. The isolated tree contains only the
+// daemon-owned readiness plugin; user/project plugins and configuration are
+// unreachable, while the readiness event is emitted after session creation.
+func buildIsolatedOpenCodeAdvisorCommand(fence advisorBootstrapFence, invocation string) string {
+	return `__azedarach_advisor_dir=` + singleQuoteForShell(fence.WorkDir) +
 		`; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM` +
 		`; command mkdir -p "$__azedarach_advisor_dir/config/opencode" || exit 1` +
 		`; printf '%s\n' '{}' > "$__azedarach_advisor_dir/config/opencode.json" || exit 1` +

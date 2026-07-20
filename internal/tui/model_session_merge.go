@@ -567,7 +567,7 @@ func (m Model) mergeToBaseCmdWithOptions(sourceWorktree, sourceID string, refres
 			return mergeResultMsg{sourceID: sourceID, targetID: mergeBaseTargetID, project: project, err: err}
 		}
 
-		result, err := m.daemonClient.GitMerge(ctx, baseWorktree, branch)
+		result, err := m.daemonClient.GitMergeTyped(ctx, sourceID, targetID)
 		if pending, ok := pendingOperationDetails(err); ok {
 			return mergeResultMsg{
 				sourceID:    sourceID,
@@ -615,31 +615,8 @@ func (m Model) mergeFeatureIntoFeatureCmdWithOptions(sourceWorktree, targetWorkt
 			return *preflight
 		}
 
-		if opts.stopTargetBeforeMerge && shouldStopBeforeFollowOnMerge(opts.targetState) {
-			ctx, cancel := context.WithTimeout(context.Background(), m.daemonCommandTimeout())
-			defer cancel()
-			m.sessionMonitor.Stop(targetID)
-			if _, err := m.daemonClient.StopSession(ctx, targetID); err != nil {
-				if pending, ok := pendingOperationDetails(err); ok {
-					return mergeResultMsg{
-						sourceID:    sourceID,
-						targetID:    targetID,
-						project:     project,
-						stage:       "stop_session",
-						state:       pending.State,
-						operationID: pending.OperationID,
-					}
-				}
-				return mergeResultMsg{
-					sourceID: sourceID,
-					targetID: targetID,
-					project:  project,
-					err:      fmt.Errorf("stop target session %s before merge: %w", targetID, err),
-				}
-			}
-		}
-
-		result, err := m.daemonClient.GitMerge(ctx, targetWorktree, sourceBranch)
+		stopTargetSession := opts.stopTargetBeforeMerge && shouldStopBeforeFollowOnMerge(opts.targetState)
+		result, err := m.daemonClient.GitMergeTypedWithOptions(ctx, sourceID, targetID, stopTargetSession)
 		if pending, ok := pendingOperationDetails(err); ok {
 			return mergeResultMsg{
 				sourceID:    sourceID,

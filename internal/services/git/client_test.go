@@ -1,8 +1,10 @@
 package git
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +21,7 @@ import (
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 // mockRunner is a test implementation of CommandRunner.
@@ -45,6 +48,20 @@ func (m *rawMockRunner) Run(ctx context.Context, args ...string) (string, error)
 		return m.runFunc(ctx, args...)
 	}
 	return "", nil
+}
+
+type patchDigestRawRunner struct {
+	rawOutput string
+	rawArgs   []string
+}
+
+func (r *patchDigestRawRunner) Run(context.Context, ...string) (string, error) {
+	return "normalized output must not be used", nil
+}
+
+func (r *patchDigestRawRunner) RunRaw(_ context.Context, args ...string) (string, error) {
+	r.rawArgs = append([]string(nil), args...)
+	return r.rawOutput, nil
 }
 
 func clientTestArgsForWorktree(args []string, worktree string, want ...string) bool {
@@ -614,6 +631,64 @@ func TestMergeGateBudgetLeavesFinalizationReserve(t *testing.T) {
 	}
 }
 
+func TestMergeGateBodySanitizesOuterCandidateEnvironment(t *testing.T) {
+	repo := t.TempDir()
+	fakeBin := filepath.Join(repo, "fake-bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	evidence := filepath.Join(repo, "sanitized")
+	fakeGit := `#!/bin/sh
+case "$*" in
+  "rev-parse --show-toplevel") printf '%s\n' "$AZEDARACH_TEST_REPO" ;;
+  "rev-parse --verify HEAD") printf '%s\n' candidate ;;
+  *) echo "unexpected git command: $*" >&2; exit 64 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "git"), []byte(fakeGit), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	scriptsDir := filepath.Join(repo, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	fakeLeaseWrapper := `#!/bin/sh
+if [ "${AZEDARACH_CANDIDATE_HEAD+x}" = x ] ||
+   [ "${AZEDARACH_MERGE_GATE_BODY+x}" = x ] ||
+   [ "${AZEDARACH_SKIP_MERGE_REBASE_GATE+x}" = x ]; then
+  echo "outer candidate environment leaked into nested validation" >&2
+  exit 65
+fi
+printf sanitized >"$AZEDARACH_TEST_EVIDENCE"
+`
+	if err := os.WriteFile(filepath.Join(scriptsDir, "with-machine-validation-lease"), []byte(fakeLeaseWrapper), 0o755); err != nil {
+		t.Fatalf("write fake validation wrapper: %v", err)
+	}
+
+	bodyPath, err := filepath.Abs(filepath.Join("..", "..", "..", "scripts", "git-merge-rebase-gate-body.sh"))
+	if err != nil {
+		t.Fatalf("resolve merge gate body: %v", err)
+	}
+	cmd := exec.Command(bodyPath)
+	cmd.Dir = repo
+	cmd.Env = gitEnvWithOverrides(os.Environ(), []string{
+		"PATH=" + fakeBin + string(os.PathListSeparator) + "/usr/bin:/bin",
+		"AZEDARACH_TEST_REPO=" + repo,
+		"AZEDARACH_TEST_EVIDENCE=" + evidence,
+		"AZEDARACH_CANDIDATE_HEAD=outer-candidate",
+		"AZEDARACH_MERGE_GATE_BODY=/outer/body",
+		"AZEDARACH_SKIP_MERGE_REBASE_GATE=0",
+	})
+	if output, runErr := cmd.CombinedOutput(); runErr != nil {
+		t.Fatalf("run merge gate body: %v\n%s", runErr, output)
+	}
+	if contents, readErr := os.ReadFile(evidence); readErr != nil {
+		t.Fatalf("read sanitization evidence: %v", readErr)
+	} else if string(contents) != "sanitized" {
+		t.Fatalf("sanitization evidence = %q, want sanitized", contents)
+	}
+}
+
 func TestMergeGateWallTimeoutRetainsChildOutput(t *testing.T) {
 	// A direct synthetic body isolates wrapper timeout/output semantics from
 	// task-runner and Go startup scheduling. Use a long safety budget, then
@@ -1020,6 +1095,56 @@ func TestRealProcessProfileMergeCleanlyTransactionalAppliesScratchMergeToCleanTa
 	}
 }
 
+func TestMergeCleanlyTransactionalAtBaseFencesMovementBetweenOuterCheckAndLockedSnapshot(t *testing.T) {
+	repo := initDivergedRepo(t)
+	inner := NewExecRunner(repo)
+	lockedSnapshotPending := make(chan struct{})
+	releaseLockedSnapshot := make(chan struct{})
+	var barrierOnce sync.Once
+	var scratchAdds int
+	runner := &rawMockRunner{runFunc: func(ctx context.Context, args ...string) (string, error) {
+		if len(args) >= 3 && args[0] == "-C" && args[1] == repo && args[2] == "status" {
+			barrierOnce.Do(func() {
+				close(lockedSnapshotPending)
+				<-releaseLockedSnapshot
+			})
+		}
+		if len(args) >= 4 && args[0] == "-C" && args[1] == repo && args[2] == "worktree" && args[3] == "add" {
+			scratchAdds++
+		}
+		return inner.Run(ctx, args...)
+	}}
+	client := NewClient(runner, slog.Default())
+	expectedBase, err := client.ResolveCommit(context.Background(), repo, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type mergeOutcome struct {
+		result *MergeResult
+		err    error
+	}
+	outcome := make(chan mergeOutcome, 1)
+	go func() {
+		result, mergeErr := client.MergeCleanlyTransactionalAtBase(context.Background(), repo, "feature", expectedBase)
+		outcome <- mergeOutcome{result: result, err: mergeErr}
+	}()
+	<-lockedSnapshotPending
+	runClientTestGit(t, repo, "commit", "-q", "--allow-empty", "-m", "move target between outer check and locked snapshot")
+	actualBase := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+	close(releaseLockedSnapshot)
+	got := <-outcome
+	var stale *IntegrationTargetStaleError
+	if !errors.As(got.err, &stale) || stale.ExpectedHead != expectedBase || stale.ActualHead != actualBase {
+		t.Fatalf("locked snapshot outcome = (%+v,%v), want typed stale %s -> %s", got.result, got.err, expectedBase, actualBase)
+	}
+	if got.result != nil {
+		t.Fatalf("locked snapshot stale result = %+v, want nil before candidate creation", got.result)
+	}
+	if scratchAdds != 0 {
+		t.Fatalf("scratch candidate creations = %d, want 0", scratchAdds)
+	}
+}
+
 func TestCandidateValidationOutputRetainsStdoutWhenGateAlsoWritesStderr(t *testing.T) {
 	got := candidateValidationOutput("FAIL example.test/pkg::TestActionable\nexact assertion", "[gate] status=failed exit_status=1")
 	for _, want := range []string{"TestActionable", "exact assertion", "status=failed"} {
@@ -1035,7 +1160,7 @@ func TestRealProcessProfileCandidateFailureRetainsActionableStdoutAndStderr(t *t
 	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
 		t.Fatalf("mkdir scripts: %v", err)
 	}
-	gate := "#!/bin/sh\necho 'FAIL make-verify::consumer-check'\necho 'exact consumer failure'\necho '[gate] status=failed exit_status=1' >&2\nexit 1\n"
+	gate := "#!/bin/sh\necho 'FAIL consumer-suite::check'\necho 'exact consumer failure'\necho '[gate] status=failed exit_status=1' >&2\nexit 1\n"
 	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"), []byte(gate), 0o755); err != nil {
 		t.Fatalf("write candidate gate: %v", err)
 	}
@@ -1050,7 +1175,7 @@ func TestRealProcessProfileCandidateFailureRetainsActionableStdoutAndStderr(t *t
 	if result == nil || result.Success || len(result.ValidationAttempts) != 1 {
 		t.Fatalf("MergeCleanlyTransactional() = %+v, want typed candidate failure", result)
 	}
-	for _, want := range []string{"FAIL make-verify::consumer-check", "exact consumer failure", "status=failed"} {
+	for _, want := range []string{"FAIL consumer-suite::check", "exact consumer failure", "status=failed"} {
 		if !strings.Contains(result.Message, want) || !strings.Contains(result.ValidationAttempts[0].Message, want) {
 			t.Fatalf("candidate failure = %+v, want %q", result, want)
 		}
@@ -1173,6 +1298,386 @@ func TestRealProcessProfileMergeCleanlyTransactionalUsesTargetGateAuthority(t *t
 	}
 }
 
+func TestRealProcessProfileMergeCleanlyTransactionalRunsConfiguredConsumerGate(t *testing.T) {
+	repo := initDivergedRepo(t)
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	t.Setenv("AZEDARACH_TICKET_ID", "outer-ticket-must-not-leak")
+	t.Setenv("AZEDARACH_ISSUE_ID", "outer-issue-must-not-leak")
+	ctx := WithCandidateValidationCommand(context.Background(), `
+		test "$AZEDARACH_CANDIDATE_HEAD" = "$(git rev-parse HEAD)"
+		test "${AZEDARACH_TICKET_ID+x}" != x
+		test "${AZEDARACH_ISSUE_ID+x}" != x
+	`)
+	result, err := client.MergeCleanlyTransactional(ctx, repo, "feature")
+	if err != nil {
+		t.Fatalf("configured candidate merge: %v", err)
+	}
+	if result == nil || !result.Success || len(result.ValidationAttempts) != 1 {
+		t.Fatalf("configured candidate merge = %+v", result)
+	}
+	attempt := result.ValidationAttempts[0]
+	if attempt.Status != CandidateValidationPassed || !attempt.Canonical || attempt.CandidateHead == "" {
+		t.Fatalf("configured candidate validation = %+v", attempt)
+	}
+}
+
+func TestRealProcessProfileTicketCandidateUsesDurableIdentity(t *testing.T) {
+	repo := initDivergedRepo(t)
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	t.Setenv("AZEDARACH_TICKET_ID", "conflicting-caller-ticket")
+	t.Setenv("AZEDARACH_ISSUE_ID", "conflicting-caller-issue")
+	ctx := WithCandidateValidationCommand(context.Background(), `
+		test "$AZEDARACH_CANDIDATE_HEAD" = "$(git rev-parse HEAD)"
+		test "$AZEDARACH_TICKET_ID" = consumer-42
+		test "$AZEDARACH_ISSUE_ID" = consumer-42
+	`)
+	ctx = WithCandidateValidationTicket(ctx, naming.TicketID("consumer-42"))
+	result, err := client.MergeCleanlyTransactional(ctx, repo, "feature")
+	if err != nil {
+		t.Fatalf("ticket candidate merge: %v", err)
+	}
+	if result == nil || !result.Success || len(result.ValidationAttempts) != 1 {
+		t.Fatalf("ticket candidate merge = %+v", result)
+	}
+	if attempt := result.ValidationAttempts[0]; attempt.Status != CandidateValidationPassed || !attempt.Canonical {
+		t.Fatalf("ticket candidate validation = %+v", attempt)
+	}
+}
+
+func TestRealProcessProfileTicketCandidateRejectsMissingDurableIdentity(t *testing.T) {
+	repo := initDivergedRepo(t)
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	ctx := WithCandidateValidationCommand(context.Background(), `true`)
+	ctx = WithCandidateValidationTicket(ctx, naming.TicketID(""))
+	result, err := client.MergeCleanlyTransactional(ctx, repo, "feature")
+	if err != nil {
+		t.Fatalf("missing ticket candidate merge: %v", err)
+	}
+	if result == nil || result.Success || len(result.ValidationAttempts) != 1 {
+		t.Fatalf("missing ticket candidate merge = %+v, want rejected validation", result)
+	}
+	if attempt := result.ValidationAttempts[0]; attempt.Status != CandidateValidationFailed || !strings.Contains(attempt.Message, "valid durable ticket identity") {
+		t.Fatalf("missing ticket candidate validation = %+v", attempt)
+	}
+}
+
+func TestRealProcessProfileConfiguredConsumerGateFailurePreservesArtifacts(t *testing.T) {
+	repo := initDivergedRepo(t)
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	ctx := WithCandidateValidationCommand(context.Background(), `
+		mkdir -p build/junit/failed-run
+		printf '# configured gate report\n' > build/junit/failed-run/report.md
+		echo configured consumer gate failed >&2
+		exit 42
+	`)
+	ctx = WithIntegrationFailureArtifactPaths(ctx, []string{"build/junit"})
+
+	result, err := client.MergeCleanlyTransactional(ctx, repo, "feature")
+	if err != nil {
+		t.Fatalf("configured candidate merge: %v", err)
+	}
+	if result == nil || result.Success || len(result.ValidationAttempts) != 1 {
+		t.Fatalf("configured candidate merge = %+v, want failed validation", result)
+	}
+	if !strings.Contains(result.ValidationAttempts[0].Message, "configured consumer gate failed") {
+		t.Fatalf("configured candidate attempt = %+v, want gate failure detail", result.ValidationAttempts[0])
+	}
+	const marker = "preserved integration failure artifacts at "
+	markerIndex := strings.Index(result.Message, marker)
+	if markerIndex < 0 {
+		t.Fatalf("configured candidate message = %q, want preserved artifact path", result.Message)
+	}
+	preserved := strings.TrimSpace(result.Message[markerIndex+len(marker):])
+	t.Cleanup(func() { _ = os.RemoveAll(preserved) })
+	content, readErr := os.ReadFile(filepath.Join(preserved, "build", "junit", "failed-run", "report.md"))
+	if readErr != nil {
+		t.Fatalf("read configured gate artifact: %v", readErr)
+	}
+	if got, want := string(content), "# configured gate report\n"; got != want {
+		t.Fatalf("configured gate artifact = %q, want %q", got, want)
+	}
+}
+
+func TestPreserveCandidateValidationFailureArtifactsSkipsCancellation(t *testing.T) {
+	scratch, err := os.MkdirTemp("", integrationScratchPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(scratch) })
+	artifactDir := filepath.Join(scratch, "build", "junit")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactDir, "partial.txt"), []byte("partial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithIntegrationFailureArtifactPaths(context.Background(), []string{"build/junit"})
+	client := NewClient(NewExecRunner(scratch), slog.Default())
+	for _, validationErr := range []error{context.Canceled, context.DeadlineExceeded} {
+		if preserved := client.preserveCandidateValidationFailureArtifacts(ctx, scratch, &MergeResult{Success: false}, validationErr); preserved != "" {
+			t.Cleanup(func() { _ = os.RemoveAll(preserved) })
+			t.Fatalf("preserved cancellation artifacts at %q for %v", preserved, validationErr)
+		}
+	}
+}
+
+func TestPreserveIntegrationFailureArtifactsSkipsCanceledMergeOrHook(t *testing.T) {
+	scratch, err := os.MkdirTemp("", integrationScratchPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(scratch) })
+	artifactDir := filepath.Join(scratch, "build", "junit")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactDir, "partial.txt"), []byte("partial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	baseCtx := WithIntegrationFailureArtifactPaths(context.Background(), []string{"build/junit"})
+	ctx, cancel := context.WithCancel(baseCtx)
+	cancel()
+	client := NewClient(NewExecRunner(scratch), slog.Default())
+	if preserved := client.preserveIntegrationFailureArtifacts(ctx, scratch, nil, errors.New("merge hook canceled")); preserved != "" {
+		t.Cleanup(func() { _ = os.RemoveAll(preserved) })
+		t.Fatalf("preserved canceled merge or hook artifacts at %q", preserved)
+	}
+}
+
+func TestPreserveIntegrationFailureArtifactsCancelsAfterCopyBegins(t *testing.T) {
+	scratchParent := t.TempDir()
+	scratch, err := os.MkdirTemp(scratchParent, integrationScratchPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactDir := filepath.Join(scratch, "build", "junit")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactDir, "large.bin"), bytes.Repeat([]byte("x"), 3*32*1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	failureRoot := t.TempDir()
+	copyStarted := make(chan struct{})
+	releaseCopy := make(chan struct{})
+	var firstChunk sync.Once
+	client := NewClient(NewExecRunner(scratch), slog.Default())
+	client.artifactFailureTempDir = failureRoot
+	client.artifactCopyChunk = func(string, int) {
+		firstChunk.Do(func() {
+			close(copyStarted)
+			<-releaseCopy
+		})
+	}
+	baseCtx := WithIntegrationFailureArtifactPaths(context.Background(), []string{"build/junit"})
+	ctx, cancel := context.WithCancel(baseCtx)
+	resultCh := make(chan string, 1)
+	go func() {
+		resultCh <- client.preserveIntegrationFailureArtifacts(ctx, scratch, nil, errors.New("merge hook failed"))
+	}()
+
+	<-copyStarted
+	cancel()
+	close(releaseCopy)
+	if preserved := <-resultCh; preserved != "" {
+		t.Cleanup(func() { _ = os.RemoveAll(preserved) })
+		t.Fatalf("preserved canceled in-flight artifacts at %q", preserved)
+	}
+	matches, err := filepath.Glob(filepath.Join(failureRoot, integrationFailureArtifactsPrefix+"*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("partial preservation destinations remain after cancellation: %v", matches)
+	}
+}
+
+func TestRealProcessProfileMergeCleanlyTransactionalReusesAdmittedExactCandidate(t *testing.T) {
+	repo := initDivergedRepo(t)
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	var admitted string
+	ctx := WithCandidateValidationCommand(context.Background(), `echo should-not-run >&2; exit 77`)
+	ctx = WithCandidateValidationAdmission(ctx, func(_ context.Context, candidate string) (bool, func(CandidateValidationAttempt) error, error) {
+		admitted = candidate
+		return true, nil, nil
+	})
+	result, err := client.MergeCleanlyTransactional(ctx, repo, "feature")
+	if err != nil || result == nil || !result.Success {
+		t.Fatalf("reused candidate merge = (%+v,%v)", result, err)
+	}
+	if admitted == "" || len(result.ValidationAttempts) != 1 || result.ValidationAttempts[0].CandidateHead != admitted || !result.ValidationAttempts[0].Canonical {
+		t.Fatalf("reused candidate validation = admitted %q attempts %+v", admitted, result.ValidationAttempts)
+	}
+}
+
+func TestRealProcessProfileMergeCleanlyTransactionalPublishesPassedAfterDurableAdmission(t *testing.T) {
+	repo := initDivergedRepo(t)
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	durable := false
+	sawPassed := false
+	ctx := WithCandidateValidationCommand(context.Background(), `true`)
+	ctx = WithCandidateValidationAdmission(ctx, func(_ context.Context, _ string) (bool, func(CandidateValidationAttempt) error, error) {
+		return false, func(CandidateValidationAttempt) error {
+			durable = true
+			return nil
+		}, nil
+	})
+	ctx = WithCandidateValidationObserver(ctx, func(attempt CandidateValidationAttempt) {
+		if attempt.Status == CandidateValidationPassed {
+			sawPassed = true
+			if !durable {
+				t.Error("passed candidate was published before durable validation completion")
+			}
+		}
+	})
+	result, err := client.MergeCleanlyTransactional(ctx, repo, "feature")
+	if err != nil || result == nil || !result.Success || !sawPassed {
+		t.Fatalf("durably admitted candidate merge = (%+v,%v), saw_passed=%t", result, err, sawPassed)
+	}
+}
+
+func TestRealProcessProfileMergeCleanlyTransactionalCompositionSkipsPublicationGate(t *testing.T) {
+	repo := t.TempDir()
+	runClientTestGit(t, repo, "init", "-q", "-b", "main")
+	runClientTestGit(t, repo, "config", "user.email", "test@example.com")
+	runClientTestGit(t, repo, "config", "user.name", "Test User")
+	requireDir := filepath.Join(repo, "scripts")
+	if err := os.MkdirAll(requireDir, 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	gateMarker := filepath.Join(t.TempDir(), "gate-ran")
+	gate := "#!/bin/sh\nprintf ran >\"$AZEDARACH_TEST_GATE_MARKER\"\nexit 91\n"
+	if err := os.WriteFile(filepath.Join(requireDir, "git-merge-rebase-gate.sh"), []byte(gate), 0o755); err != nil {
+		t.Fatalf("write publication gate: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	runClientTestGit(t, repo, "add", ".")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "base")
+	runClientTestGit(t, repo, "checkout", "-q", "-b", "child")
+	if err := os.WriteFile(filepath.Join(repo, "child.txt"), []byte("child\n"), 0o644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+	runClientTestGit(t, repo, "add", "child.txt")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "child")
+	runClientTestGit(t, repo, "checkout", "-q", "main")
+	t.Setenv("AZEDARACH_TEST_GATE_MARKER", gateMarker)
+
+	result, err := NewClient(NewExecRunner(repo), slog.Default()).MergeCleanlyTransactionalComposition(context.Background(), repo, "child")
+	if err != nil || result == nil || !result.Success {
+		t.Fatalf("MergeCleanlyTransactionalComposition() = (%+v, %v), want clean composition", result, err)
+	}
+	if len(result.ValidationAttempts) != 0 {
+		t.Fatalf("composition validation attempts = %+v, want none", result.ValidationAttempts)
+	}
+	if _, err := os.Stat(gateMarker); !os.IsNotExist(err) {
+		t.Fatalf("non-base composition invoked publication gate: %v", err)
+	}
+}
+
+func TestMergeCleanlyTransactionalCompositionAtBaseRejectsStaleTargetBeforeScratchMerge(t *testing.T) {
+	repo := t.TempDir()
+	runClientTestGit(t, repo, "init", "-q", "-b", "main")
+	runClientTestGit(t, repo, "config", "user.email", "test@example.com")
+	runClientTestGit(t, repo, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runClientTestGit(t, repo, "add", ".")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "base")
+	staleBase := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+	runClientTestGit(t, repo, "checkout", "-q", "-b", "child")
+	if err := os.WriteFile(filepath.Join(repo, "child.txt"), []byte("child\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runClientTestGit(t, repo, "add", "child.txt")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "child")
+	runClientTestGit(t, repo, "checkout", "-q", "main")
+	if err := os.WriteFile(filepath.Join(repo, "advanced.txt"), []byte("advanced\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runClientTestGit(t, repo, "add", "advanced.txt")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "advance target")
+	current := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+
+	_, err := NewClient(NewExecRunner(repo), slog.Default()).MergeCleanlyTransactionalCompositionAtBase(context.Background(), repo, "child", staleBase)
+	var stale *IntegrationTargetStaleError
+	if !errors.As(err, &stale) || stale.ExpectedHead != staleBase || stale.ActualHead != current {
+		t.Fatalf("stale composition error = %v (%+v), want expected=%s actual=%s", err, stale, staleBase, current)
+	}
+	if got := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); got != current {
+		t.Fatalf("stale composition mutated target: got=%s want=%s", got, current)
+	}
+}
+
+func TestMergeCleanlyTransactionalCompositionAtTargetRejectsBranchSwitchAtSameHead(t *testing.T) {
+	repo := t.TempDir()
+	runClientTestGit(t, repo, "init", "-q", "-b", "main")
+	runClientTestGit(t, repo, "config", "user.email", "test@example.com")
+	runClientTestGit(t, repo, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runClientTestGit(t, repo, "add", ".")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "base")
+	targetHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+	runClientTestGit(t, repo, "checkout", "-q", "-b", "source")
+	if err := os.WriteFile(filepath.Join(repo, "source.txt"), []byte("source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runClientTestGit(t, repo, "add", "source.txt")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "source")
+	runClientTestGit(t, repo, "checkout", "-q", "-b", "wrong-target", targetHead)
+
+	_, err := NewClient(NewExecRunner(repo), slog.Default()).MergeCleanlyTransactionalCompositionAtTarget(context.Background(), repo, "source", targetHead, "main")
+	var stale *IntegrationTargetBranchStaleError
+	if !errors.As(err, &stale) || stale.ExpectedBranch != "main" || stale.ActualBranch != "wrong-target" {
+		t.Fatalf("stale target branch error = %v (%+v)", err, stale)
+	}
+	if got := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); got != targetHead {
+		t.Fatalf("branch-switched target mutated: got=%s want=%s", got, targetHead)
+	}
+}
+
+func TestMergeCleanlyTransactionalAtTargetRejectsBranchSwitchBeforeFinalApply(t *testing.T) {
+	repo := t.TempDir()
+	runClientTestGit(t, repo, "init", "-q", "-b", "main")
+	runClientTestGit(t, repo, "config", "user.email", "test@example.com")
+	runClientTestGit(t, repo, "config", "user.name", "Test User")
+	if err := os.MkdirAll(filepath.Join(repo, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gate := "#!/bin/sh\ngit -C \"$AZEDARACH_TEST_TARGET_REPO\" checkout -q wrong-target\n"
+	if err := os.WriteFile(filepath.Join(repo, "scripts", "git-merge-rebase-gate.sh"), []byte(gate), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runClientTestGit(t, repo, "add", ".")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "base")
+	targetHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
+	runClientTestGit(t, repo, "branch", "wrong-target", targetHead)
+	runClientTestGit(t, repo, "checkout", "-q", "-b", "source")
+	if err := os.WriteFile(filepath.Join(repo, "source.txt"), []byte("source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runClientTestGit(t, repo, "add", "source.txt")
+	runClientTestGit(t, repo, "commit", "-q", "-m", "source")
+	runClientTestGit(t, repo, "checkout", "-q", "main")
+	t.Setenv("AZEDARACH_TEST_TARGET_REPO", repo)
+
+	_, err := NewClient(NewExecRunner(repo), slog.Default()).MergeCleanlyTransactionalAtTarget(context.Background(), repo, "source", targetHead, "main")
+	var stale *IntegrationTargetBranchStaleError
+	if !errors.As(err, &stale) || stale.ExpectedBranch != "main" || stale.ActualBranch != "wrong-target" {
+		t.Fatalf("final-apply target branch error = %v (%+v)", err, stale)
+	}
+	if got := runClientTestGitOutput(t, repo, "rev-parse", "HEAD"); got != targetHead {
+		t.Fatalf("branch-switched target mutated: got=%s want=%s", got, targetHead)
+	}
+}
+
 func TestRealProcessProfileMergeCleanlyTransactionalRunsScratchHooksAndKeepsTargetCleanWhenHookFails(t *testing.T) {
 	repo := initDivergedRepo(t)
 	originalHead := runClientTestGitOutput(t, repo, "rev-parse", "HEAD")
@@ -1213,6 +1718,83 @@ func TestRealProcessProfileMergeCleanlyTransactionalRunsScratchHooksAndKeepsTarg
 	}
 	if status.HasChanges {
 		t.Fatalf("status = %+v, want clean target after scratch merge failure", status)
+	}
+}
+
+func TestRealProcessProfileMergeCleanlyTransactionalPreservesConfiguredFailureArtifacts(t *testing.T) {
+	repo := initDivergedRepo(t)
+	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
+	hook := "#!/bin/sh\nset -eu\nartifact=build/junit/failed-run\nmkdir -p \"$artifact\"\nprintf '# sentinel report\\n' > \"$artifact/report.md\"\nprintf '{\"Action\":\"fail\"}\\n' > \"$artifact/events.jsonl\"\necho merge gate failed >&2\nexit 1\n"
+	if err := os.WriteFile(hookPath, []byte(hook), 0o755); err != nil {
+		t.Fatalf("write commit-msg hook: %v", err)
+	}
+
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	ctx := WithIntegrationFailureArtifactPaths(context.Background(), []string{"build/junit"})
+	result, err := client.MergeCleanlyTransactional(ctx, repo, "feature")
+	if err != nil {
+		t.Fatalf("MergeCleanlyTransactional() error = %v", err)
+	}
+	if result == nil || result.Success {
+		t.Fatalf("MergeCleanlyTransactional() result = %+v, want failed gate", result)
+	}
+	const marker = "preserved integration failure artifacts at "
+	markerIndex := strings.Index(result.Message, marker)
+	if markerIndex < 0 {
+		t.Fatalf("MergeCleanlyTransactional() message = %q, want preserved artifact path", result.Message)
+	}
+	preserved := strings.TrimSpace(result.Message[markerIndex+len(marker):])
+	t.Cleanup(func() { _ = os.RemoveAll(preserved) })
+	for name, want := range map[string]string{
+		"report.md":    "# sentinel report\n",
+		"events.jsonl": "{\"Action\":\"fail\"}\n",
+	} {
+		content, readErr := os.ReadFile(filepath.Join(preserved, "build", "junit", "failed-run", name))
+		if readErr != nil {
+			t.Fatalf("read preserved %s: %v", name, readErr)
+		}
+		if string(content) != want {
+			t.Fatalf("preserved %s = %q, want %q", name, content, want)
+		}
+	}
+}
+
+func TestRealProcessProfileMergeCleanlyTransactionalDoesNotInferFailureArtifacts(t *testing.T) {
+	repo := initDivergedRepo(t)
+	hookPath := filepath.Join(repo, ".git", "hooks", "commit-msg")
+	hook := "#!/bin/sh\nset -eu\nmkdir -p build/junit\nprintf failure > build/junit/report.txt\necho merge gate failed >&2\nexit 1\n"
+	if err := os.WriteFile(hookPath, []byte(hook), 0o755); err != nil {
+		t.Fatalf("write commit-msg hook: %v", err)
+	}
+
+	client := NewClient(NewExecRunner(repo), slog.Default())
+	result, err := client.MergeCleanlyTransactional(context.Background(), repo, "feature")
+	if err != nil {
+		t.Fatalf("MergeCleanlyTransactional() error = %v", err)
+	}
+	if result == nil || result.Success {
+		t.Fatalf("MergeCleanlyTransactional() result = %+v, want failed gate", result)
+	}
+	if strings.Contains(result.Message, "preserved integration failure artifacts") {
+		t.Fatalf("MergeCleanlyTransactional() message = %q, inferred an unconfigured artifact layout", result.Message)
+	}
+}
+
+func TestPreserveIntegrationFailureArtifactsRejectsSymlinkEscape(t *testing.T) {
+	scratch, err := os.MkdirTemp("", "azedarach-integration-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(scratch) })
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(scratch, "reports")); err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithIntegrationFailureArtifactPaths(context.Background(), []string{"reports"})
+	client := NewClient(NewExecRunner(scratch), slog.Default())
+	if preserved := client.preserveIntegrationFailureArtifacts(ctx, scratch, &MergeResult{Success: false}, nil); preserved != "" {
+		t.Cleanup(func() { _ = os.RemoveAll(preserved) })
+		t.Fatalf("preserved path = %q, want symlink escape rejected", preserved)
 	}
 }
 
@@ -2158,17 +2740,22 @@ func TestRealProcessProfileMergeCleanlyTransactionalSerializesTwoClientsAndPrese
 	runClientTestGit(t, repo, "checkout", "-q", "main")
 
 	gateSyncDir := t.TempDir()
+	readyPath := filepath.Join(gateSyncDir, "ready")
+	if err := syscall.Mkfifo(readyPath, 0o600); err != nil {
+		t.Fatalf("create integration gate readiness FIFO: %v", err)
+	}
 	scriptsDir := filepath.Join(repo, "scripts")
 	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
 		t.Fatalf("mkdir scripts: %v", err)
 	}
 	gate := `#!/bin/sh
 set -eu
-marker="$AZEDARACH_TEST_GATE_SYNC/$AZEDARACH_CANDIDATE_HEAD"
-: >"$marker"
-while [ "$(find "$AZEDARACH_TEST_GATE_SYNC" -type f | wc -l | tr -d ' ')" -lt 2 ]; do
-  sleep 0.01
-done
+release="$AZEDARACH_TEST_GATE_SYNC/release-$AZEDARACH_CANDIDATE_HEAD"
+mkfifo "$release"
+exec 3>"$AZEDARACH_TEST_GATE_SYNC/ready"
+printf '%s\n' "$AZEDARACH_CANDIDATE_HEAD" >&3
+IFS= read -r _ <"$release"
+exec 3>&-
 `
 	if err := os.WriteFile(filepath.Join(scriptsDir, "git-merge-rebase-gate.sh"), []byte(gate), 0o755); err != nil {
 		t.Fatalf("write integration gate: %v", err)
@@ -2185,8 +2772,7 @@ done
 		t.Fatalf("write victim sentinel: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	ctx := t.Context()
 	type mergeOutcome struct {
 		branch string
 		result *MergeResult
@@ -2201,15 +2787,37 @@ done
 			outcomes <- mergeOutcome{branch: branch, result: result, err: err}
 		}()
 	}
+	ready, err := os.Open(readyPath)
+	if err != nil {
+		t.Fatalf("open integration gate readiness FIFO: %v", err)
+	}
+	readyReader := bufio.NewReader(ready)
+	candidateHeads := make([]string, 0, 2)
+	for len(candidateHeads) < 2 {
+		head, err := readyReader.ReadString('\n')
+		if err != nil {
+			_ = ready.Close()
+			t.Fatalf("wait for integration gate readiness: %v", err)
+		}
+		candidateHeads = append(candidateHeads, strings.TrimSpace(head))
+	}
+	_ = ready.Close()
+	for _, head := range candidateHeads {
+		releasePath := filepath.Join(gateSyncDir, "release-"+head)
+		release, err := os.OpenFile(releasePath, os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatalf("open integration gate release FIFO for %s: %v", head, err)
+		}
+		if _, err := release.Write([]byte("release\n")); err != nil {
+			_ = release.Close()
+			t.Fatalf("release integration gate for %s: %v", head, err)
+		}
+		_ = release.Close()
+	}
 
 	var got []mergeOutcome
 	for len(got) < 2 {
-		select {
-		case outcome := <-outcomes:
-			got = append(got, outcome)
-		case <-ctx.Done():
-			t.Fatalf("timed out waiting for two-client integration outcomes: %v", ctx.Err())
-		}
+		got = append(got, <-outcomes)
 	}
 	var winner, loser *mergeOutcome
 	for i := range got {
@@ -3576,6 +4184,26 @@ func TestMergeBase(t *testing.T) {
 	}
 }
 
+func TestMergeBaseForRevisionPinsCandidateHead(t *testing.T) {
+	runner := &mockRunner{
+		runFunc: func(ctx context.Context, args ...string) (string, error) {
+			if len(args) >= 3 && args[0] == "merge-base" && args[1] == "main" && args[2] == "candidate-123" {
+				return "base-456\n", nil
+			}
+			return "", fmt.Errorf("unexpected command: %v", args)
+		},
+	}
+
+	client := NewClient(runner, slog.Default())
+	mergeBase, err := client.MergeBaseForRevision(context.Background(), "/fake/worktree", "main", "candidate-123")
+	if err != nil {
+		t.Fatalf("MergeBaseForRevision() error = %v", err)
+	}
+	if mergeBase != "base-456" {
+		t.Fatalf("MergeBaseForRevision() = %q, want base-456", mergeBase)
+	}
+}
+
 func TestChangedFiles(t *testing.T) {
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {
@@ -3648,8 +4276,8 @@ func TestChangedFilesBetweenRefTreesDoesNotUseMergeBase(t *testing.T) {
 	runner := &mockRunner{
 		runFunc: func(ctx context.Context, args ...string) (string, error) {
 			gotArgs = append([]string(nil), args...)
-			if len(args) >= 5 && args[0] == "diff" && args[1] == "--name-only" && args[2] == "origin/preview" && args[3] == "feature" {
-				return "main.go\ninternal/app.go\n", nil
+			if len(args) >= 6 && args[0] == "diff" && args[1] == "--name-only" && args[2] == "-z" && args[3] == "origin/preview" && args[4] == "feature" {
+				return "portable/雪\nline.txt\x00 leading-space.txt\x00trailing-space.txt \x00", nil
 			}
 			return "", fmt.Errorf("unexpected command: %v", args)
 		},
@@ -3660,12 +4288,47 @@ func TestChangedFilesBetweenRefTreesDoesNotUseMergeBase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ChangedFilesBetweenRefTrees() error = %v", err)
 	}
-	if !reflect.DeepEqual(files, []string{"main.go", "internal/app.go"}) {
+	if !reflect.DeepEqual(files, []string{"portable/雪\nline.txt", " leading-space.txt", "trailing-space.txt "}) {
 		t.Fatalf("ChangedFilesBetweenRefTrees() = %v", files)
 	}
 	joined := strings.Join(gotArgs, " ")
 	if strings.Contains(joined, "...") || strings.Contains(joined, "merge-base") {
 		t.Fatalf("ChangedFilesBetweenRefTrees() used ancestry comparison: %v", gotArgs)
+	}
+}
+
+func TestPatchDigestHashesRawGitDiffBytes(t *testing.T) {
+	raw := "diff --git a/text.txt b/text.txt\n+line with trailing space \n" +
+		"diff --git a/image.bin b/image.bin\nGIT binary patch\nliteral 3\n\x00\xff\x7f\n"
+	runner := &patchDigestRawRunner{rawOutput: raw}
+	digest, err := NewClient(runner, slog.Default()).PatchDigest(context.Background(), "/worktree", "base", "head")
+	if err != nil {
+		t.Fatalf("PatchDigest() error = %v", err)
+	}
+	want := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(raw)))
+	if digest != want {
+		t.Fatalf("PatchDigest() = %q, want raw-byte digest %q", digest, want)
+	}
+	wantArgs := []string{"-C", "/worktree", "diff", "--binary", "--no-ext-diff", "base", "head", "--"}
+	if !reflect.DeepEqual(runner.rawArgs, wantArgs) {
+		t.Fatalf("PatchDigest() args = %v, want %v", runner.rawArgs, wantArgs)
+	}
+
+	trimmedRunner := &patchDigestRawRunner{rawOutput: strings.TrimSpace(raw)}
+	trimmedDigest, err := NewClient(trimmedRunner, slog.Default()).PatchDigest(context.Background(), "/worktree", "base", "head")
+	if err != nil {
+		t.Fatalf("PatchDigest(trimmed) error = %v", err)
+	}
+	if trimmedDigest == digest {
+		t.Fatal("PatchDigest() ignored trailing whitespace in raw Git output")
+	}
+}
+
+func TestParseNULTerminatedGitPathsRejectsAmbiguousOutput(t *testing.T) {
+	for _, output := range []string{"newline-delimited\n", "path\x00\x00"} {
+		if paths, err := parseNULTerminatedGitPaths(output); err == nil {
+			t.Fatalf("parseNULTerminatedGitPaths(%q) = %q, want error", output, paths)
+		}
 	}
 }
 

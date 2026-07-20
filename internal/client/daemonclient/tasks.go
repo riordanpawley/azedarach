@@ -63,6 +63,10 @@ type TaskBulkCleanupResult = protocol.TaskBulkCleanupResult
 type TaskCloseResult = protocol.TaskCloseResult
 type TaskClosePhaseTiming = protocol.TaskClosePhaseTiming
 
+type TaskEventsRequest = protocol.TaskEventsRequest
+type TaskEventPayloadFilter = protocol.TaskEventPayloadFilter
+type TaskEventsPage = protocol.TaskEventsPage
+
 // TaskCreateParams contains the payload used to create a task through the shared daemon client.
 type TaskCreateParams struct {
 	Title           string               `json:"title"`
@@ -114,13 +118,14 @@ type TaskOwnershipRequest struct {
 
 // TaskStatusOptions controls client-side status transition behavior.
 type TaskStatusOptions struct {
-	ForceWorktree        bool
-	IgnoreAhead          bool
-	IntegrateBeforeClose bool
-	CloseCleanChildren   bool
-	CascadeChildren      bool
-	AllowActiveSession   bool
-	CloseOutcome         domain.IssueCloseOutcome
+	ForceWorktree           bool
+	IgnoreAhead             bool
+	IntegrateBeforeClose    bool
+	CloseCleanChildren      bool
+	CascadeChildren         bool
+	AllowActiveSession      bool
+	CloseOutcome            domain.IssueCloseOutcome
+	HistoricalAuthorization *domain.HistoricalPublicationAuthorization
 }
 
 type TaskDeleteOptions struct {
@@ -136,13 +141,14 @@ type TaskUnarchiveOptions struct {
 }
 
 type taskCloseRequest struct {
-	TaskID               naming.IssueID `json:"task_id"`
-	ForceWorktree        bool           `json:"force_worktree,omitempty"`
-	IgnoreAhead          bool           `json:"ignore_ahead,omitempty"`
-	IntegrateBeforeClose bool           `json:"integrate_before_close,omitempty"`
-	CloseCleanChildren   bool           `json:"close_clean_children,omitempty"`
-	AllowActiveSession   bool           `json:"allow_active_session,omitempty"`
-	CloseOutcome         string         `json:"closed_outcome,omitempty"`
+	TaskID                  naming.IssueID                             `json:"task_id"`
+	ForceWorktree           bool                                       `json:"force_worktree,omitempty"`
+	IgnoreAhead             bool                                       `json:"ignore_ahead,omitempty"`
+	IntegrateBeforeClose    bool                                       `json:"integrate_before_close,omitempty"`
+	CloseCleanChildren      bool                                       `json:"close_clean_children,omitempty"`
+	AllowActiveSession      bool                                       `json:"allow_active_session,omitempty"`
+	CloseOutcome            string                                     `json:"closed_outcome,omitempty"`
+	HistoricalAuthorization *domain.HistoricalPublicationAuthorization `json:"historical_authorization,omitempty"`
 }
 
 type taskDeleteRequest struct {
@@ -171,6 +177,7 @@ type TaskGraphReadiness struct {
 	Runnable               []string                              `json:"runnable"`
 	NestedRoots            []TaskNestedRoot                      `json:"nested_roots,omitempty"`
 	Pending                []TaskPendingStart                    `json:"pending,omitempty"`
+	PublicationQueue       []domain.PublicationOperation         `json:"publication_queue,omitempty"`
 	Active                 []string                              `json:"active,omitempty"`
 	ActiveSessions         []TaskActiveSession                   `json:"active_sessions,omitempty"`
 	SessionStartProgress   []TaskSessionStartProgress            `json:"session_start_progress,omitempty"`
@@ -373,10 +380,6 @@ type TaskIDsRequest struct {
 	DirectDependents  bool             `json:"direct_dependents,omitempty"`
 	MetadataOnly      bool             `json:"metadata_only,omitempty"`
 }
-
-type TaskEventsRequest = protocol.TaskEventsRequest
-type TaskEventPayloadFilter = protocol.TaskEventPayloadFilter
-type TaskEventsPage = protocol.TaskEventsPage
 
 // TaskEventAppendRequest contains the payload used to append one issue observation event.
 type TaskEventAppendRequest struct {
@@ -1042,13 +1045,14 @@ func (c *Client) CloseTask(ctx context.Context, taskID string, opts TaskStatusOp
 	}
 	var out TaskCloseResult
 	if err := c.commandJSON(ctx, CommandTaskClose, taskCloseRequest{
-		TaskID:               parsedTaskID,
-		ForceWorktree:        opts.ForceWorktree,
-		IgnoreAhead:          opts.IgnoreAhead,
-		IntegrateBeforeClose: opts.IntegrateBeforeClose,
-		CloseCleanChildren:   opts.CloseCleanChildren,
-		AllowActiveSession:   opts.AllowActiveSession,
-		CloseOutcome:         string(opts.CloseOutcome),
+		TaskID:                  parsedTaskID,
+		ForceWorktree:           opts.ForceWorktree,
+		IgnoreAhead:             opts.IgnoreAhead,
+		IntegrateBeforeClose:    opts.IntegrateBeforeClose,
+		CloseCleanChildren:      opts.CloseCleanChildren,
+		AllowActiveSession:      opts.AllowActiveSession,
+		CloseOutcome:            string(opts.CloseOutcome),
+		HistoricalAuthorization: opts.HistoricalAuthorization,
 	}, &out); err != nil {
 		return TaskCloseResult{}, err
 	}

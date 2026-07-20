@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -126,6 +127,7 @@ func TestRuntimeSignalIngestGitHookQueuesWriteThroughProjection(t *testing.T) {
 	useDeterministicRuntimeSignalGitClient(d)
 	t.Cleanup(func() { cleanupRuntimeSignalTestDaemon(d) })
 	projectID := "proj-signals"
+	seedRuntimeSignalHookWorktree(t, d, projectID, repoDir)
 
 	resp, err := d.command(context.Background(), protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
@@ -195,6 +197,7 @@ func TestRuntimeSignalIngestGitHookDoesNotPersistOnRequestContext(t *testing.T) 
 	d.gitStatusAdapter.runtimeProjectionWriter = writer
 	ctx := context.WithValue(context.Background(), runtimeSignalForegroundProjectionMarker{}, true)
 	projectID := "proj-hook-admission"
+	seedRuntimeSignalHookWorktree(t, d, projectID, repoDir)
 	resp, err := d.command(ctx, protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "runtime-signal-git-detached",
@@ -230,11 +233,52 @@ func TestRuntimeSignalIngestGitHookDoesNotPersistOnRequestContext(t *testing.T) 
 	}
 }
 
+func TestRuntimeSignalIngestGitHookIgnoresUnmanagedWorktreeWithoutEnrichment(t *testing.T) {
+	repoDir := initRuntimeSignalGitRepo(t)
+	d := New(Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	useDeterministicRuntimeSignalGitClient(d)
+	t.Cleanup(func() { cleanupRuntimeSignalTestDaemon(d) })
+	projectID := "proj-hook-unmanaged"
+	resp, err := d.command(context.Background(), protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "runtime-signal-git-unmanaged",
+		Kind:            protocol.EnvelopeKindCommand,
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Command:         protocol.CommandRuntimeSignalIngest,
+		Body: mustMarshal(t, protocol.RuntimeSignalIngestCommandBody{
+			Source: protocol.RuntimeSignalSourceGitHook, Kind: protocol.RuntimeSignalKindGitWorktreeChanged,
+			Worktree: repoDir, Hook: "post-commit", Event: "post-commit",
+		}),
+	})
+	if err != nil || !resp.OK {
+		t.Fatalf("runtime signal response=%+v err=%v", resp, err)
+	}
+	var body protocol.RuntimeSignalIngestResponseBody
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Accepted || body.EnrichmentQueued {
+		t.Fatalf("unmanaged runtime signal body=%+v", body)
+	}
+	if len(body.Stages) == 0 || body.Stages[len(body.Stages)-1].Message != "ineligible worktree ignored" {
+		t.Fatalf("unmanaged runtime signal stages=%+v", body.Stages)
+	}
+	store := d.worktreeRuntimeStateStore(projectID)
+	if pending, err := store.ListPendingGitHookRefreshes(context.Background()); err != nil || len(pending) != 0 {
+		t.Fatalf("unmanaged pending intents=%+v err=%v, want none", pending, err)
+	}
+	if snapshot := d.gitStatusAdapter.ensureStatusRefreshQueue().snapshot(); len(snapshot.Pending) != 0 || len(snapshot.Running) != 0 {
+		t.Fatalf("unmanaged status queue=%+v, want empty", snapshot)
+	}
+}
+
 func TestRuntimeSignalIngestGitHookAcknowledgesWhileWriterContended(t *testing.T) {
 	repoDir := initRuntimeSignalGitRepo(t)
 	d := New(Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	useDeterministicRuntimeSignalGitClient(d)
 	t.Cleanup(func() { cleanupRuntimeSignalTestDaemon(d) })
+	projectID := "proj-hook-contention"
+	seedRuntimeSignalHookWorktree(t, d, projectID, repoDir)
 
 	writer, ok := d.runtimeProjectionStateWriter().(*daemonRuntimeProjectionWriter)
 	if !ok {
@@ -252,7 +296,6 @@ func TestRuntimeSignalIngestGitHookAcknowledgesWhileWriterContended(t *testing.T
 		}
 	}()
 
-	projectID := "proj-hook-contention"
 	resp, err := d.command(context.Background(), protocol.RequestEnvelope{
 		ProtocolVersion: protocol.CurrentVersion,
 		RequestID:       "runtime-signal-git-contended",
@@ -437,22 +480,54 @@ func TestManagedAgentSignalIdentityRejectsStaleAndReusedIncarnations(t *testing.
 	d.tmux = tmux.NewClient(runner, slog.Default())
 	t.Cleanup(d.closeRuntimeStateStores)
 	ctx := context.Background()
-	start := protocol.RuntimeSignalIngestCommandBody{TmuxPane: "%12", LogicalPaneID: "agent", AgentIncarnation: "old", Event: "session_start"}
+	start := protocol.RuntimeSignalIngestCommandBody{TmuxPane: "%12", LogicalPaneID: "agent", PanePID: 100, AgentIncarnation: "old", Event: "session_start"}
 	accepted, _, err := d.validateManagedAgentSignalIdentity(ctx, "p", "az-1.pane-12", start)
 	if err != nil || !accepted {
 		t.Fatalf("bind initial identity accepted=%v err=%v", accepted, err)
 	}
+	projected, found := d.projectedManagedAgentIdentity("p", "az-1", "agent")
+	if !found || projected.acknowledged || projected.identity.AgentIncarnation != "old" {
+		t.Fatalf("initial identity projection = %+v found=%t", projected, found)
+	}
 	runner.pid = 200
+	start.PanePID = 200
 	start.AgentIncarnation = "new"
 	accepted, _, err = d.validateManagedAgentSignalIdentity(ctx, "p", "az-1.pane-12", start)
 	if err != nil || !accepted {
 		t.Fatalf("bind replacement identity accepted=%v err=%v", accepted, err)
 	}
+	prompt := start
+	prompt.Event = "user_prompt_submit"
+	accepted, message, err := d.validateManagedAgentSignalIdentity(ctx, "p", "az-1.pane-12", prompt)
+	if err != nil || !accepted || !strings.Contains(message, "prompt submission acknowledged") {
+		t.Fatalf("prompt acknowledgement accepted=%v message=%q err=%v", accepted, message, err)
+	}
+	projected, found = d.projectedManagedAgentIdentity("p", "az-1", "agent")
+	if !found || !projected.acknowledged || projected.identity.AgentIncarnation != "new" {
+		t.Fatalf("acknowledged identity projection = %+v found=%t", projected, found)
+	}
+	accepted, _, err = d.validateManagedAgentSignalIdentity(ctx, "p", "az-1.pane-12", start)
+	if err != nil || !accepted {
+		t.Fatalf("duplicate session start accepted=%v err=%v", accepted, err)
+	}
+	projected, found = d.projectedManagedAgentIdentity("p", "az-1", "agent")
+	if !found || !projected.acknowledged {
+		t.Fatalf("duplicate session start downgraded acknowledged projection = %+v found=%t", projected, found)
+	}
+	identity, found, err := d.sessionRuntimeStateStore("p").GetManagedAgentIdentity(ctx, "p", "az-1", "agent")
+	if err != nil || !found || !identity.UpdatedAt.After(identity.ObservedAt) {
+		t.Fatalf("durable prompt acknowledgement = %+v found=%t err=%v", identity, found, err)
+	}
+	for _, args := range runner.calls {
+		if slices.Contains(args, "-a") || !slices.Contains(args, "-s") || !slices.Contains(args, "az-1") {
+			t.Fatalf("managed identity used non-targeted pane inventory: %v", args)
+		}
+	}
 	stale := start
 	stale.AgentIncarnation = "old"
 	stale.PanePID = 100
 	stale.Event = "idle_prompt"
-	accepted, message, err := d.validateManagedAgentSignalIdentity(ctx, "p", "az-1.pane-12", stale)
+	accepted, message, err = d.validateManagedAgentSignalIdentity(ctx, "p", "az-1.pane-12", stale)
 	if err != nil {
 		t.Fatalf("validate stale identity: %v", err)
 	}
@@ -461,14 +536,112 @@ func TestManagedAgentSignalIdentityRejectsStaleAndReusedIncarnations(t *testing.
 	}
 }
 
+func TestManagedAgentSignalAdmissionRequiresCompleteIdentityAfterBinding(t *testing.T) {
+	tests := []struct {
+		name       string
+		managed    bool
+		mutate     func(*protocol.RuntimeSignalIngestCommandBody)
+		wantAccept bool
+	}{
+		{name: "managed exact tuple", managed: true, wantAccept: true},
+		{name: "managed mismatched incarnation", managed: true, mutate: func(cmd *protocol.RuntimeSignalIngestCommandBody) { cmd.AgentIncarnation = "restart-stale" }},
+		{name: "managed whole tuple omitted", managed: true, mutate: func(cmd *protocol.RuntimeSignalIngestCommandBody) {
+			cmd.LogicalPaneID, cmd.TmuxPane, cmd.PanePID, cmd.AgentIncarnation = "", "", 0, ""
+		}},
+		{name: "managed logical pane omitted", managed: true, mutate: func(cmd *protocol.RuntimeSignalIngestCommandBody) { cmd.LogicalPaneID = "" }},
+		{name: "managed tmux pane omitted", managed: true, mutate: func(cmd *protocol.RuntimeSignalIngestCommandBody) { cmd.TmuxPane = "" }},
+		{name: "managed pane pid omitted", managed: true, mutate: func(cmd *protocol.RuntimeSignalIngestCommandBody) { cmd.PanePID = 0 }},
+		{name: "managed incarnation omitted", managed: true, mutate: func(cmd *protocol.RuntimeSignalIngestCommandBody) { cmd.AgentIncarnation = "" }},
+		{name: "unmanaged absent capability", wantAccept: true, mutate: func(cmd *protocol.RuntimeSignalIngestCommandBody) {
+			cmd.LogicalPaneID, cmd.TmuxPane, cmd.PanePID, cmd.AgentIncarnation = "", "", 0, ""
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := newRuntimeProjectionStore(t)
+			t.Cleanup(func() { _ = store.Close() })
+			const projectID, sessionID, issueID = "project", "az-managed", "managed"
+			boundAt := time.Date(2026, time.July, 19, 3, 24, 0, 0, time.UTC)
+			if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
+				ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning,
+				ObservedState: daemonstate.SessionStateRunning, Activity: "idle", ActivitySource: "hooks", UpdatedAt: boundAt,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if tt.managed {
+				if err := store.UpsertManagedAgentIdentity(ctx, daemonstate.ManagedAgentIdentity{
+					ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: "12",
+					PanePID: 100, AgentIncarnation: "restart-current", ObservedAt: boundAt,
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runner := &managedIdentityTmuxRunner{session: sessionID, pane: "%12", pid: 100}
+			d := &Daemon{
+				cfg:          Config{RepoDir: ".", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+				sessionStore: daemonstate.NewStore(), runtimeStoresByRoot: map[string]*daemonstate.RuntimeStateStore{".": store},
+			}
+			d.tmux = tmux.NewClient(runner, slog.Default())
+			d.runtimeProjectionWriter = newRuntimeProjectionWriter(d)
+			cmd := protocol.RuntimeSignalIngestCommandBody{
+				Source: protocol.RuntimeSignalSourceAgentHook, Kind: protocol.RuntimeSignalKindAgentActivityChanged,
+				ProjectID: projectID, IssueID: issueID, SessionID: sessionID, Agent: "codex", Event: "pre_tool_use",
+				LogicalPaneID: "agent", TmuxPane: "%12", PanePID: 100, AgentIncarnation: "restart-current",
+			}
+			if tt.mutate != nil {
+				tt.mutate(&cmd)
+			}
+			out := protocol.RuntimeSignalIngestResponseBody{Accepted: true}
+			d.ingestAgentActivitySignal(ctx, protocol.RequestEnvelope{Meta: protocol.Metadata{ProjectID: projectID}}, projectID, cmd, &out)
+
+			identityStageFound := false
+			identityStageOK := false
+			for _, stage := range out.Stages {
+				if stage.Name == "managed_agent_identity" {
+					identityStageFound, identityStageOK = true, stage.OK
+				}
+			}
+			observation, observationFound, err := store.GetPhysicalSessionObservation(ctx, projectID, sessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			session, sessionFound, err := store.GetSessionState(ctx, projectID, sessionID)
+			if err != nil || !sessionFound {
+				t.Fatalf("session found=%t err=%v", sessionFound, err)
+			}
+			if tt.wantAccept {
+				if !runtimeSignalStageOK(out.Stages, "agent_activity") || !observationFound || observation.Activity != "busy" || session.Activity != "busy" {
+					t.Fatalf("accepted stages=%+v observation=%+v found=%t session=%+v", out.Stages, observation, observationFound, session)
+				}
+				if tt.managed && (!identityStageFound || !identityStageOK) {
+					t.Fatalf("managed exact identity stage found=%t ok=%t stages=%+v", identityStageFound, identityStageOK, out.Stages)
+				}
+				if !tt.managed && identityStageFound {
+					t.Fatalf("unmanaged hook unexpectedly entered identity gate: %+v", out.Stages)
+				}
+				return
+			}
+			if !identityStageFound || identityStageOK || runtimeSignalStageOK(out.Stages, "agent_activity") {
+				t.Fatalf("rejected identity stages=%+v", out.Stages)
+			}
+			if !observationFound || observation.Activity != "idle" || session.Activity != "idle" {
+				t.Fatalf("rejected identity mutated observation=%+v found=%t session=%+v", observation, observationFound, session)
+			}
+		})
+	}
+}
+
 type managedIdentityTmuxRunner struct {
 	session string
 	pane    string
 	pid     int
+	calls   [][]string
 }
 
 func (r *managedIdentityTmuxRunner) Run(_ context.Context, args ...string) (string, error) {
 	if len(args) > 0 && args[0] == "list-panes" {
+		r.calls = append(r.calls, append([]string(nil), args...))
 		return fmt.Sprintf("%s\t%s\t%d\n", r.session, r.pane, r.pid), nil
 	}
 	return "", nil
@@ -804,7 +977,7 @@ func TestRuntimeSignalIngestAgentHookStoresObservationWithoutCreatingIntent(t *t
 	}
 }
 
-func TestRuntimeSignalIngestFansPhysicalObservationAcrossSharedLogicalIntents(t *testing.T) {
+func TestRuntimeSignalIngestUpdatesExclusiveRootedIntent(t *testing.T) {
 	repoDir := initRuntimeSignalGitRepo(t)
 	d := New(Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	ctx := context.Background()
@@ -863,25 +1036,19 @@ func TestRuntimeSignalIngestFansPhysicalObservationAcrossSharedLogicalIntents(t 
 	if observation.ObservedState != daemonstate.SessionStateRunning || observation.Activity != "busy" {
 		t.Fatalf("physical observation = %+v", observation)
 	}
-	for _, want := range []struct {
-		role      daemonstate.SessionRole
-		scopeKind daemonstate.SessionScopeKind
-		state     daemonstate.SessionState
-	}{
-		{daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, daemonstate.SessionStateStopped},
-		{daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, daemonstate.SessionStatePaused},
-	} {
-		got, found, err := store.GetSessionIntent(ctx, projectID, want.role, want.scopeKind, issueID)
-		if err != nil || !found {
-			t.Fatalf("load %s intent found=%v err=%v", want.role, found, err)
-		}
-		if got.State != want.state || got.ObservedState != daemonstate.SessionStateRunning || got.Activity != "busy" || got.ActivitySource != "hooks" {
-			t.Fatalf("%s intent = %+v; desired state must remain %s", want.role, got, want.state)
-		}
+	if _, found, err := store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleWorker, daemonstate.SessionScopeIssue, issueID); err != nil || found {
+		t.Fatalf("retired worker intent found=%v err=%v", found, err)
+	}
+	got, found, err := store.GetSessionIntent(ctx, projectID, daemonstate.SessionRoleOrchestrator, daemonstate.SessionScopeOrchestration, issueID)
+	if err != nil || !found {
+		t.Fatalf("load rooted intent found=%v err=%v", found, err)
+	}
+	if got.State != daemonstate.SessionStatePaused || got.ObservedState != daemonstate.SessionStateRunning || got.Activity != "busy" || got.ActivitySource != "hooks" {
+		t.Fatalf("rooted intent = %+v; desired state must remain paused", got)
 	}
 	published := projectionWriter.sessionSnapshot()
-	if len(published) != 2 {
-		t.Fatalf("published sessions = %+v, want both shared intents", published)
+	if len(published) != 1 {
+		t.Fatalf("published sessions = %+v, want exclusive rooted intent", published)
 	}
 	for _, eventSession := range published {
 		persisted, found, err := store.GetSessionIntent(ctx, projectID, eventSession.Role, eventSession.ScopeKind, eventSession.ScopeID)
@@ -1341,6 +1508,19 @@ func initRuntimeSignalGitRepo(t *testing.T) string {
 	runRuntimeSignalGitCommand(t, repoDir, "-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-m", "seed")
 	runRuntimeSignalGitCommand(t, repoDir, "checkout", "-b", "riordan/az-42/runtime-signal")
 	return repoDir
+}
+
+func seedRuntimeSignalHookWorktree(t *testing.T, d *Daemon, projectID, worktree string) {
+	t.Helper()
+	if err := d.worktreeRuntimeStateStore(projectID).UpsertWorktreeState(context.Background(), daemonstate.WorktreeState{
+		ProjectID: projectID,
+		IssueID:   "az-42",
+		Path:      worktree,
+		Branch:    "tester/az-42/runtime-signal",
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed hook worktree projection: %v", err)
+	}
 }
 
 func runRuntimeSignalGitCommand(t *testing.T, repoDir string, args ...string) {

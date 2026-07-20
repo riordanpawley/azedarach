@@ -35,6 +35,11 @@ runtime marker with live tmux before trusting the attached agent.
 `orchestration.project_completion` is hybrid: refresh durable issue, review,
 interaction, orchestration, and session projections, then compare runtime
 presence with live tmux. `runtime.reconcile` exposes both mappings.
+`session.managed_agent_restart` is hybrid: refresh the durable logical pane,
+tmux pane, pane PID, and agent incarnation binding, then compare it with live
+tmux before exact-pane replacement and again with hook-backed replacement
+evidence before reporting success. Tmux command acceptance is never restart
+acknowledgement.
 
 ## Client and authority boundary
 
@@ -67,14 +72,23 @@ The supported operator surfaces are:
 and returns its tmux target. The CLI may then exec the user's terminal attach;
 the daemon handler must never perform a blocking terminal attach.
 
-Rooted startup is scope-authoritative rather than ticket-type-derived. The
+Rooted startup is scope-authoritative rather than ticket-type-derived. A
+ticket-session start for an epic delegates before any worker lifecycle write to
+the same exact rooted `OrchestratorSession` start handler. Ticket-session attach
+and stop also delegate when the durable rooted lease owns that physical session.
+The
 daemon acquires the rooted lease before agent launch, supplies an explicit
 orchestrator-only prompt whose first commands are `az prime`, rooted status,
 and rooted watch, and does not report startup success until the complete
 file-backed prompt has been acknowledged. The launcher writes the rooted
 orchestrator desired-session product directly; it never leaves a generic worker
 desired-running product for the same root, and exact-scope startup retires any
-legacy dual worker intent before accepting or recovering the runtime. A durable SQLite projection binds
+legacy dual worker intent in the same SQLite transaction that writes the rooted
+intent before accepting or recovering the runtime. A unique physical-session
+guard prevents stale worker writers, runtime observation/activity ingestion,
+recovery, or restart from recreating a second top-level role. Migration 0051
+converges historical running/running, stopped/stopped, and stopped/running
+worker/rooted pairs while failing closed for ambiguous duplicate roles. A durable SQLite projection binds
 that acknowledgement to the exact project, root, session, prompt hash, and a
 cryptographically random marker in the live tmux environment. The marker is
 not itself a process identity; trust comes from comparing it with the refreshed
@@ -109,6 +123,7 @@ paths rather than transitional adapters:
 | --- | --- |
 | Exact-scope singleton start, attach, stale-runtime recovery | `TestProjectOrchestratorSessionStartAttachesExactScopeSingleton` |
 | Rooted role bootstrap, first action, and attached-session repair | `TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap` |
+| Epic start delegation and mutually exclusive physical-session role | `TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap`, `TestRuntimeStateStoreRootedTransitionRejectsStaleWorkerAcrossStores`, `TestRootedSessionRoleExclusivityMigrationConvergesRequiredStatePairs` |
 | Bounded project scheduling and stable ordering | `TestOrchestrationCandidateOrderingIsStable`, `TestProjectOrchestratorLoopPrioritizesReviewAndPersistsCursor`, `TestProjectOrchestratorSnapshotKeepsStartsActionableAlongsideReview`, `TestProjectStartIntentDoesNotGloballyBlockOnActionableReview` |
 | Foreign ownership exclusion and claim races | `TestProjectOrchestrationSnapshotRefreshesCrossProcessOwnership`, `TestProjectReviewQueueRefreshesCrossProcessReviewLease` |
 | Human request, advisor discussion, edited/direct answer, atomic resolution | `TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifecycle`, `TestInteractionStructuredProposalCanBeHumanEditedAndAtomicallyResolved` |

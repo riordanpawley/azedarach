@@ -25,11 +25,16 @@ func TestAppendTaskIntegrationReceiptIfAbsentIsAtomicAcrossClientsAndUnbounded(t
 		t.Fatalf("create issue: %v", err)
 	}
 	receipt := TaskIntegrationReceipt{
-		ProjectID:    "project-a",
-		SourceBranch: "feature/atomic-receipt",
-		TargetBranch: "main",
-		SourceOID:    "source-exact",
-		TargetOID:    "target-exact",
+		ProjectID:              "project-a",
+		SourceBranch:           "feature/atomic-receipt",
+		TargetBranch:           "main",
+		Integrated:             true,
+		ConfiguredBaseTarget:   true,
+		TargetID:               "base",
+		BaseOID:                "base-exact",
+		SourceOID:              "source-exact",
+		TargetOID:              "target-exact",
+		PublicationOperationID: "publication-exact",
 	}
 	inserted, err := first.AppendTaskIntegrationReceiptIfAbsent(ctx, issueID, receipt, "/tmp/worktree")
 	if err != nil {
@@ -103,25 +108,7 @@ func TestAppendTaskIntegrationReceiptIfAbsentIsAtomicAcrossClientsAndUnbounded(t
 		go func(client *Client) {
 			defer wg.Done()
 			<-start
-			params := IssueObservationEventParams{
-				Type:          domain.IssueEventTaskIntegrationCompleted,
-				Source:        "daemon-task-close",
-				SourceCommand: "integrate-before-close",
-				WorktreePath:  "/tmp/worktree",
-				Payload: map[string]any{
-					"project_id":    receipt.ProjectID,
-					"source_branch": receipt.SourceBranch,
-					"target_branch": receipt.TargetBranch,
-					"source_oid":    receipt.SourceOID,
-					"target_oid":    receipt.TargetOID,
-				},
-			}
-			var inserted bool
-			appendErr := client.retrySQLiteBusy(ctx, func() error {
-				var err error
-				inserted, err = client.appendTaskIntegrationReceiptTransaction(ctx, concurrentIssueID, receipt, params)
-				return err
-			})
+			inserted, appendErr := client.AppendTaskIntegrationReceiptIfAbsent(ctx, concurrentIssueID, receipt, "/tmp/worktree")
 			results <- inserted
 			errs <- appendErr
 		}(client)

@@ -890,6 +890,15 @@ func (f *fakeDaemonTransport) Handshake(ctx context.Context, hello protocol.Hell
 
 func (f *fakeDaemonTransport) Command(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	if req.Command == protocol.CommandOrchestrationIntent && !f.passOrchestrationIntent {
+		if len(f.lastGraphReadiness.Runnable) == 0 && len(f.lastGraphReadiness.Active) == 0 && len(f.lastGraphReadiness.NestedRoots) == 0 && len(f.lastGraphReadiness.Blocked) == 0 && f.commandFn != nil {
+			readinessReq := req
+			readinessReq.Command = daemonclient.CommandTaskGraphReadiness
+			if resp, err := f.commandFn(ctx, readinessReq); err != nil {
+				return protocol.ResponseEnvelope{}, err
+			} else if resp.OK {
+				_ = json.Unmarshal(resp.Body, &f.lastGraphReadiness)
+			}
+		}
 		return f.emulateOrchestrationIntent(ctx, req)
 	}
 	if f.commandFn != nil {
@@ -1870,7 +1879,7 @@ func TestSessionRestartAllCommandPrintsFailuresBeforeReturningError(t *testing.T
 						IssueID:   naming.IssueID("az-1"),
 						SessionID: naming.SessionID("proj-az-1"),
 						Activity:  "idle",
-						Error:     "send-keys failed",
+						Error:     "replacement incarnation was not observed",
 					}},
 				})
 				if err != nil {
@@ -1900,8 +1909,35 @@ func TestSessionRestartAllCommandPrintsFailuresBeforeReturningError(t *testing.T
 	if commandErr == nil || !strings.Contains(commandErr.Error(), "failed to restart 1 session") {
 		t.Fatalf("error = %v, want failed restart error", commandErr)
 	}
-	if !strings.Contains(output, "az-1") || !strings.Contains(output, "failed: send-keys failed") {
+	if !strings.Contains(output, "az-1") || !strings.Contains(output, "failed: replacement incarnation was not observed") {
 		t.Fatalf("output = %q, want failed session detail", output)
+	}
+}
+
+func TestSessionRestartAllCommandDoesNotPrintSuccessAfterCheckpointFailure(t *testing.T) {
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID,
+					Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: false,
+					Error: &protocol.ErrorEnvelope{Code: protocol.ErrorCodeInternal, Message: "persist restart target completion: checkpoint unavailable"},
+				}, nil
+			},
+		}).WithProjectID("proj"),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), ProjectID: "proj",
+	}
+	var commandErr error
+	output := captureStdout(t, func() error {
+		commandErr = SessionRestartAllCommand(deps, SessionRestartAllOptions{})
+		return nil
+	})
+	if commandErr == nil || !strings.Contains(commandErr.Error(), "checkpoint unavailable") {
+		t.Fatalf("error=%v", commandErr)
+	}
+	if strings.Contains(output, "Restarted") {
+		t.Fatalf("false success output=%q", output)
 	}
 }
 
@@ -2873,7 +2909,7 @@ func TestBranchMergeToBaseCommandUsesAttachedTargetBranchWorktree(t *testing.T) 
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal git merge body: %v", err)
 					}
-					if body.Worktree != targetWorktree || body.Branch != "riordan/az-123/some-change" {
+					if body.SourceID != "az-123" || body.TargetID != "base" || body.Worktree != "" || body.Branch != "" {
 						t.Fatalf("merge body = %+v", body)
 					}
 					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
@@ -2950,8 +2986,11 @@ func TestBranchMergeCommandExplicitDescendantTargetIgnoresCallerWorktree(t *test
 	if err := BranchMergeToBaseCommandWithOptions(deps, BranchMergeToBaseOptions{IssueID: "ancestor", Target: "descendant"}); err != nil {
 		t.Fatalf("explicit descendant merge: %v", err)
 	}
-	if mergeBody.Worktree != descendantWorktree || mergeBody.Branch != "riordan/ancestor/work" {
-		t.Fatalf("merge body = %+v, want source branch merged in named descendant worktree %q", mergeBody, descendantWorktree)
+	if mergeBody.SourceID != "ancestor" || mergeBody.TargetID != "descendant" {
+		t.Fatalf("merge body = %+v, want authoritative typed ancestor-to-descendant target", mergeBody)
+	}
+	if mergeBody.Worktree != "" || mergeBody.Branch != "" {
+		t.Fatalf("merge body = %+v, want daemon-resolved worktree and branch identities", mergeBody)
 	}
 }
 
@@ -3275,7 +3314,10 @@ func TestBranchMergeToBaseCommandUsesNearestNonClosedAncestorBranch(t *testing.T
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal git merge body: %v", err)
 					}
-					mergedIn = body.Worktree
+					if body.SourceID != "az-child" {
+						t.Fatalf("merge source = %+v", body)
+					}
+					mergedIn = body.TargetID
 					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
 						Worktree: body.Worktree,
 						Branch:   "riordan/az-child/work",
@@ -3294,8 +3336,8 @@ func TestBranchMergeToBaseCommandUsesNearestNonClosedAncestorBranch(t *testing.T
 	if err := BranchMergeToBaseCommand(deps, "az-child"); err != nil {
 		t.Fatalf("BranchMergeToBaseCommand error = %v", err)
 	}
-	if mergedIn != "/tmp/az-parent" {
-		t.Fatalf("merge worktree = %q, want /tmp/az-parent", mergedIn)
+	if mergedIn != "az-parent" {
+		t.Fatalf("merge target = %q, want az-parent", mergedIn)
 	}
 }
 
@@ -4728,7 +4770,7 @@ func TestParseExportArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseExportArgs() error = %v", err)
 			}
-			if got != tt.want {
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("ParseExportArgs() = %+v, want %+v", got, tt.want)
 			}
 		})
@@ -6233,6 +6275,7 @@ func TestParseIssueSplitArgsRequiresParent(t *testing.T) {
 }
 
 func TestParseIssueCloseArgs(t *testing.T) {
+	historicalAuthorization := domain.HistoricalPublicationAuthorization{ReviewEventID: 10, ValidationEventID: 9, ReceiptEventID: 11, ReviewerID: "reviewer", AuthoritativeEvidenceID: "gate-report", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeRepository, Purpose: domain.ValidationPurposePushGate, Execution: domain.ValidationExecutionExecuted, Override: domain.ValidationOverrideNone, EvidencePresent: true, AttestsMissingLegacySemantics: true}
 	tests := []struct {
 		name        string
 		args        []string
@@ -6245,6 +6288,16 @@ func TestParseIssueCloseArgs(t *testing.T) {
 			want: IssueCloseOptions{IssueID: "az-1"},
 		},
 		{
+			name: "typed historical authorization",
+			args: []string{"--historical-authorization", `{"review_event_id":10,"validation_event_id":9,"receipt_event_id":11,"reviewer_id":"reviewer","authoritative_evidence_id":"gate-report","validation_class":"aggregate","validation_scope":"repository","validation_purpose":"push_gate","validation_execution":"executed","validation_override":"none","evidence_present":true,"attests_missing_legacy_semantics":true}`, "az-1"},
+			want: IssueCloseOptions{IssueID: "az-1", HistoricalAuthorization: &historicalAuthorization},
+		},
+		{
+			name:        "focused historical authorization rejected",
+			args:        []string{"--historical-authorization", `{"review_event_id":10,"validation_event_id":9,"receipt_event_id":11,"reviewer_id":"reviewer","authoritative_evidence_id":"gate-report","validation_class":"safe","validation_scope":"repository","validation_purpose":"push_gate","validation_execution":"executed","validation_override":"none","evidence_present":true,"attests_missing_legacy_semantics":true}`, "az-1"},
+			errContains: "aggregate repository push-gate",
+		},
+		{
 			name:        "forbid impl",
 			args:        []string{"--impl", "go-bubbletea", "az-1"},
 			errContains: "--impl is not supported for issue close",
@@ -6252,12 +6305,12 @@ func TestParseIssueCloseArgs(t *testing.T) {
 		{
 			name:        "missing id",
 			args:        []string{},
-			errContains: "usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]",
+			errContains: "usage: az ticket close",
 		},
 		{
 			name:        "extra args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]",
+			errContains: "usage: az ticket close",
 		},
 		{
 			name: "named id",
@@ -6308,7 +6361,7 @@ func TestParseIssueCloseArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseIssueCloseArgs() error = %v", err)
 			}
-			if got != tt.want {
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("ParseIssueCloseArgs() = %+v, want %+v", got, tt.want)
 			}
 		})

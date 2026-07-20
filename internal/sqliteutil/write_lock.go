@@ -19,6 +19,7 @@ type writeLock struct {
 	mu          sync.RWMutex
 	holder      string
 	holderSince time.Time
+	waiters     int
 }
 
 func newWriteLock() *writeLock {
@@ -32,9 +33,30 @@ func (l *writeLock) acquire(ctx context.Context, operation string) error {
 		return err
 	}
 	select {
+	case <-l.token:
+		l.mu.Lock()
+		l.holder = operation
+		l.holderSince = time.Now()
+		l.mu.Unlock()
+		return nil
+	default:
+	}
+	l.mu.Lock()
+	l.waiters++
+	l.mu.Unlock()
+	defer func() {
+		l.mu.Lock()
+		l.waiters--
+		l.mu.Unlock()
+	}()
+	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-l.token:
+		if err := ctx.Err(); err != nil {
+			l.token <- struct{}{}
+			return err
+		}
 		l.mu.Lock()
 		l.holder = operation
 		l.holderSince = time.Now()
@@ -54,7 +76,7 @@ func (l *writeLock) release() {
 func (l *writeLock) diagnostics(now time.Time) WriteLockDiagnostics {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	diagnostic := WriteLockDiagnostics{Holder: l.holder}
+	diagnostic := WriteLockDiagnostics{Holder: l.holder, Waiters: l.waiters}
 	if l.holder != "" && !l.holderSince.IsZero() && !now.Before(l.holderSince) {
 		diagnostic.HeldFor = now.Sub(l.holderSince)
 	}
@@ -66,6 +88,7 @@ func (l *writeLock) diagnostics(now time.Time) WriteLockDiagnostics {
 type WriteLockDiagnostics struct {
 	Holder  string
 	HeldFor time.Duration
+	Waiters int
 }
 
 // ContextWithWriteOperation attaches stable provenance to a shared SQLite

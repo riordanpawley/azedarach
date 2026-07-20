@@ -65,6 +65,7 @@ type Task struct {
 	RuntimeUpdatedAt      time.Time           `json:"runtime_updated_at,omitempty,omitzero"`
 	Ownership             *IssueOwnership     `json:"ownership,omitempty"`
 	CoordinationLeases    []CoordinationLease `json:"coordination_leases,omitempty"`
+	PublicationEvidence   *EvidenceDiagnostic `json:"publication_evidence,omitempty"`
 	CreatedAt             time.Time           `json:"created_at"`
 	UpdatedAt             time.Time           `json:"updated_at"`
 }

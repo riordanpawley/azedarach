@@ -1243,6 +1243,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 	})
 
 	t.Run("close task command", func(t *testing.T) {
+		authorization := domain.HistoricalPublicationAuthorization{ReviewEventID: 10, ValidationEventID: 9, ReceiptEventID: 11, ReviewerID: "reviewer", AuthoritativeEvidenceID: "gate-report", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeRepository, Purpose: domain.ValidationPurposePushGate, Execution: domain.ValidationExecutionExecuted, Override: domain.ValidationOverrideNone, EvidencePresent: true, AttestsMissingLegacySemantics: true}
 		transport := &taskRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 				assertTaskProjectID(t, req, wantProjectID)
@@ -1255,6 +1256,9 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 				}
 				if body.TaskID != "az-3" || !body.ForceWorktree || !body.IgnoreAhead || !body.IntegrateBeforeClose || !body.AllowActiveSession {
 					t.Fatalf("close body = %+v", body)
+				}
+				if body.HistoricalAuthorization == nil || *body.HistoricalAuthorization != authorization {
+					t.Fatalf("historical authorization = %+v, want %+v", body.HistoricalAuthorization, authorization)
 				}
 				return responseWithJSON(t, req, TaskCloseResult{
 					TaskID:                 "az-3",
@@ -1272,7 +1276,7 @@ func TestTaskListCreateAndMutationCommands(t *testing.T) {
 		}
 
 		client := New(transport).WithProjectID(wantProjectID)
-		got, err := client.CloseTask(context.Background(), "az-3", TaskStatusOptions{ForceWorktree: true, IgnoreAhead: true, IntegrateBeforeClose: true, AllowActiveSession: true})
+		got, err := client.CloseTask(context.Background(), "az-3", TaskStatusOptions{ForceWorktree: true, IgnoreAhead: true, IntegrateBeforeClose: true, AllowActiveSession: true, HistoricalAuthorization: &authorization})
 		if err != nil {
 			t.Fatalf("CloseTask error: %v", err)
 		}
