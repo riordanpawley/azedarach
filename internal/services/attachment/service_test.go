@@ -110,6 +110,9 @@ func TestList(t *testing.T) {
 	if len(attachments) != 0 {
 		t.Errorf("expected 0 attachments, got %d", len(attachments))
 	}
+	if _, err := os.Stat(service.dbPath); !os.IsNotExist(err) {
+		t.Fatalf("read-only empty list created attachment database: %v", err)
+	}
 
 	// Create test files
 	testFile1 := filepath.Join(tmpDir, "test1.png")
@@ -199,6 +202,9 @@ func TestServiceMigratesLegacyBlobAttachmentSchema(t *testing.T) {
 		t.Fatalf("failed to close seed db: %v", err)
 	}
 
+	if err := service.MigrateLegacy(ctx, "az-123"); err != nil {
+		t.Fatalf("failed to migrate legacy attachment schema: %v", err)
+	}
 	attachments, err := service.List(ctx, "az-123")
 	if err != nil {
 		t.Fatalf("failed to list migrated attachments: %v", err)
@@ -267,6 +273,67 @@ func TestServiceMigratesLegacyBlobAttachmentSchema(t *testing.T) {
 	}
 }
 
+func TestListRejectsLegacySchemaWithoutMutatingIt(t *testing.T) {
+	issuesPath := filepath.Join(t.TempDir(), "issues")
+	service := NewService(issuesPath, slog.Default())
+	if err := os.MkdirAll(filepath.Dir(service.dbPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s", filepath.ToSlash(service.dbPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE issue_attachments (issue_id TEXT, attachment_id TEXT, content_blob BLOB)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.List(context.Background(), "az-1"); err == nil || !strings.Contains(err.Error(), "run project database migrations") {
+		t.Fatalf("List error = %v, want migration-required read-only failure", err)
+	}
+	db, err = sql.Open("sqlite", fmt.Sprintf("file:%s?mode=ro", filepath.ToSlash(service.dbPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	columns, err := issueAttachmentColumns(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !columns["content_blob"] || columns["relative_path"] {
+		t.Fatalf("List mutated legacy schema: %+v", columns)
+	}
+}
+
+func TestListReadsLegacyImageWithoutMigratingOrCreatingDatabase(t *testing.T) {
+	issuesPath := filepath.Join(t.TempDir(), "issues")
+	service := NewUnifiedService(issuesPath, slog.Default())
+	legacyDir := filepath.Join(issuesPath, legacyImageCollection, "az-1")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(legacyDir, "legacyid-shot.png")
+	if err := os.WriteFile(legacyPath, []byte{0x89, 0x50, 0x4e, 0x47}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	attachments, err := service.List(context.Background(), "az-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attachments) != 1 || attachments[0].ID != "legacyid" || attachments[0].Path != legacyPath {
+		t.Fatalf("legacy attachments = %+v", attachments)
+	}
+	if _, err := os.Stat(legacyPath); err != nil {
+		t.Fatalf("List migrated or removed legacy file: %v", err)
+	}
+	if _, err := os.Stat(service.dbPath); !os.IsNotExist(err) {
+		t.Fatalf("List created attachment database: %v", err)
+	}
+}
+
 func TestUnifiedServiceMigratesLegacyImageAttachments(t *testing.T) {
 	tmpDir := t.TempDir()
 	issuesPath := filepath.Join(tmpDir, "issues")
@@ -319,6 +386,9 @@ func TestUnifiedServiceMigratesLegacyImageAttachments(t *testing.T) {
 		t.Fatalf("document relative path = %q, should not include issue id", report.Relative)
 	}
 
+	if err := unifiedService.MigrateLegacy(ctx, "az-123"); err != nil {
+		t.Fatalf("failed to migrate legacy image attachments: %v", err)
+	}
 	attachments, err := unifiedService.List(ctx, "az-123")
 	if err != nil {
 		t.Fatalf("failed to list unified attachments: %v", err)

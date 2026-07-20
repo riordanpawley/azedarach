@@ -5,8 +5,8 @@ import "testing"
 func TestEvaluateInvestigationAcceptance(t *testing.T) {
 	task := Task{Type: TypeInvestigation}
 	declaration := IssueObservationEvent{ID: 1, Type: IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}}
-	accepted := IssueObservationEvent{ID: 3, Type: IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}}
-	returned := IssueObservationEvent{ID: 4, Type: IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-return", Payload: map[string]any{"outcome": "returned", "actor_id": "reviewer"}}
+	accepted := IssueObservationEvent{ID: 3, Type: IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer", "actor_kind": ReviewerOwnerKindOrchestrator}}
+	returned := IssueObservationEvent{ID: 4, Type: IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-return", Payload: map[string]any{"outcome": "returned", "actor_id": "reviewer", "actor_kind": ReviewerOwnerKindOrchestrator}}
 	reviewEpoch := IssueObservationEvent{ID: 2, Type: IssueEventIssueStatusChanged, Source: "issue-store", Payload: map[string]any{"to_status": "in_review"}}
 	newReviewEpoch := IssueObservationEvent{ID: 5, Type: IssueEventIssueStatusChanged, Source: "issue-store", Payload: map[string]any{"to_status": "in_review"}}
 	tests := []struct {
@@ -60,14 +60,17 @@ func TestTrustedReviewOutcomeRequiresCommandOutcomePair(t *testing.T) {
 		name    string
 		command string
 		outcome string
+		kind    string
 		want    bool
 	}{
-		{name: "accepted", command: "review-accept", outcome: "accepted", want: true},
-		{name: "accept integration failed", command: "review-accept", outcome: "integration_failed", want: true},
-		{name: "returned", command: "review-return", outcome: "returned", want: true},
-		{name: "return cannot accept", command: "review-return", outcome: "accepted"},
-		{name: "accept cannot return", command: "review-accept", outcome: "returned"},
-		{name: "return cannot record integration failure", command: "review-return", outcome: "integration_failed"},
+		{name: "accepted", command: "review-accept", outcome: "accepted", kind: ReviewerOwnerKindOrchestrator, want: true},
+		{name: "accept integration failed", command: "review-accept", outcome: "integration_failed", kind: ReviewerOwnerKindOrchestrator, want: true},
+		{name: "returned", command: "review-return", outcome: "returned", kind: ReviewerOwnerKindOrchestrator, want: true},
+		{name: "legacy untyped actor", command: "review-accept", outcome: "accepted"},
+		{name: "same id wrong actor kind", command: "review-accept", outcome: "accepted", kind: "agent"},
+		{name: "return cannot accept", command: "review-return", outcome: "accepted", kind: ReviewerOwnerKindOrchestrator},
+		{name: "accept cannot return", command: "review-accept", outcome: "returned", kind: ReviewerOwnerKindOrchestrator},
+		{name: "return cannot record integration failure", command: "review-return", outcome: "integration_failed", kind: ReviewerOwnerKindOrchestrator},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -75,7 +78,7 @@ func TestTrustedReviewOutcomeRequiresCommandOutcomePair(t *testing.T) {
 				Type:          IssueEventReviewCompleted,
 				Source:        "daemon-orchestration",
 				SourceCommand: tt.command,
-				Payload:       map[string]any{"outcome": tt.outcome, "actor_id": "reviewer"},
+				Payload:       map[string]any{"outcome": tt.outcome, "actor_id": "reviewer", "actor_kind": tt.kind},
 			}
 			_, got := TrustedReviewOutcome(event)
 			if got != tt.want {

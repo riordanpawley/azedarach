@@ -340,7 +340,7 @@ type ManagedAgentIdentity struct {
 // cannot replace the current binding.
 func (s *RuntimeStateStore) UpsertManagedAgentIdentity(ctx context.Context, identity ManagedAgentIdentity) error {
 	return s.withRetryingWriteLock(ctx, "upsert_managed_agent_identity", func(writeCtx context.Context) error {
-		db, err := s.dbHandle()
+		db, err := s.managedIdentityDBHandle()
 		if err != nil {
 			return err
 		}
@@ -354,7 +354,8 @@ func (s *RuntimeStateStore) UpsertManagedAgentIdentity(ctx context.Context, iden
 			ON CONFLICT(project_id,session_id,logical_pane_id) DO UPDATE SET
 				tmux_pane_id=excluded.tmux_pane_id,pane_pid=excluded.pane_pid,
 				agent_incarnation=excluded.agent_incarnation,observed_at=excluded.observed_at,updated_at=excluded.updated_at
-			WHERE excluded.observed_at > `+managedAgentIdentityTable+`.observed_at`,
+			WHERE excluded.observed_at > `+managedAgentIdentityTable+`.observed_at
+				AND excluded.agent_incarnation <> `+managedAgentIdentityTable+`.agent_incarnation`,
 			identity.ProjectID, identity.SessionID, identity.LogicalPaneID, identity.TmuxPaneID,
 			identity.PanePID, identity.AgentIncarnation, identity.ObservedAt.Format(time.RFC3339Nano), identity.UpdatedAt.Format(time.RFC3339Nano))
 		if err != nil {
@@ -399,7 +400,7 @@ func normalizeManagedAgentIdentity(identity ManagedAgentIdentity) (ManagedAgentI
 }
 
 func (s *RuntimeStateStore) GetManagedAgentIdentity(ctx context.Context, projectID, sessionID, logicalPaneID string) (ManagedAgentIdentity, bool, error) {
-	db, err := s.dbHandle()
+	db, err := s.managedIdentityDBHandle()
 	if err != nil {
 		return ManagedAgentIdentity{}, false, err
 	}
@@ -424,8 +425,83 @@ func (s *RuntimeStateStore) GetManagedAgentIdentity(ctx context.Context, project
 	return identity, true, err
 }
 
+// AcknowledgeManagedAgentIdentity records prompt acceptance by the exact
+// current managed pane/PID/incarnation. observed_at remains the binding time;
+// updated_at advances only after an exact match so start and crash recovery can
+// distinguish binding from prompt acceptance without a disposable activity
+// projection.
+func (s *RuntimeStateStore) AcknowledgeManagedAgentIdentity(ctx context.Context, identity ManagedAgentIdentity, acknowledgedAt time.Time) (bool, error) {
+	acknowledged := false
+	err := s.withRetryingWriteLock(ctx, "acknowledge_managed_agent_identity", func(writeCtx context.Context) error {
+		db, err := s.managedIdentityDBHandle()
+		if err != nil {
+			return err
+		}
+		identity, err = normalizeManagedAgentIdentity(identity)
+		if err != nil {
+			return err
+		}
+		tx, err := db.BeginTx(writeCtx, nil)
+		if err != nil {
+			return fmt.Errorf("begin managed agent identity acknowledgement: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		var current ManagedAgentIdentity
+		var observedAt, updatedAt string
+		err = tx.QueryRowContext(writeCtx, `SELECT project_id,session_id,logical_pane_id,tmux_pane_id,pane_pid,agent_incarnation,observed_at,updated_at
+			FROM `+managedAgentIdentityTable+` WHERE project_id=? AND session_id=? AND logical_pane_id=?`,
+			identity.ProjectID, identity.SessionID, identity.LogicalPaneID).Scan(
+			&current.ProjectID, &current.SessionID, &current.LogicalPaneID, &current.TmuxPaneID, &current.PanePID,
+			&current.AgentIncarnation, &observedAt, &updatedAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("load managed agent identity for acknowledgement: %w", err)
+		}
+		current.ObservedAt, err = parseRuntimeStateTime(observedAt)
+		if err != nil {
+			return err
+		}
+		current.UpdatedAt, err = parseRuntimeStateTime(updatedAt)
+		if err != nil {
+			return err
+		}
+		if current.TmuxPaneID != identity.TmuxPaneID || current.PanePID != identity.PanePID || current.AgentIncarnation != identity.AgentIncarnation {
+			return nil
+		}
+		if current.UpdatedAt.After(current.ObservedAt) {
+			acknowledged = true
+			return nil
+		}
+		if acknowledgedAt.IsZero() || !acknowledgedAt.After(current.ObservedAt) {
+			acknowledgedAt = current.ObservedAt.Add(time.Nanosecond)
+		}
+		result, err := tx.ExecContext(writeCtx, `UPDATE `+managedAgentIdentityTable+` SET updated_at=?
+			WHERE project_id=? AND session_id=? AND logical_pane_id=? AND tmux_pane_id=? AND pane_pid=? AND agent_incarnation=? AND observed_at=? AND updated_at=?`,
+			acknowledgedAt.UTC().Format(time.RFC3339Nano), identity.ProjectID, identity.SessionID, identity.LogicalPaneID,
+			identity.TmuxPaneID, identity.PanePID, identity.AgentIncarnation, observedAt, updatedAt)
+		if err != nil {
+			return fmt.Errorf("acknowledge managed agent identity %s/%s/%s: %w", identity.ProjectID, identity.SessionID, identity.LogicalPaneID, err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("inspect managed agent identity acknowledgement: %w", err)
+		}
+		if affected != 1 {
+			return nil
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit managed agent identity acknowledgement: %w", err)
+		}
+		acknowledged = true
+		return nil
+	})
+	return acknowledged, err
+}
+
 func (s *RuntimeStateStore) ListManagedAgentIdentities(ctx context.Context, projectID, sessionID string) ([]ManagedAgentIdentity, error) {
-	db, err := s.dbHandle()
+	db, err := s.managedIdentityDBHandle()
 	if err != nil {
 		return nil, err
 	}
@@ -559,13 +635,20 @@ func (s *RuntimeStateStore) ApplyPhysicalSessionObservation(ctx context.Context,
 }
 
 // ApplySessionCompensation atomically aligns one typed desired intent and its
-// physical runtime observation after a failed start cleanup attempt.
-func (s *RuntimeStateStore) ApplySessionCompensation(ctx context.Context, projectID string, intent Session, desiredState, observedState SessionState, activity, activitySource string, updatedAt time.Time) ([]Session, SessionState, error) {
+// physical runtime observation after a failed start cleanup attempt. The
+// returned state reports the effective physical winner. The returned bool
+// separately reports whether the transaction produced a durable desired
+// winner; an absent desired intent is an idempotent success without one.
+func (s *RuntimeStateStore) ApplySessionCompensation(ctx context.Context, projectID string, intent Session, desiredState, observedState SessionState, activity, activitySource string, updatedAt time.Time) ([]Session, SessionState, bool, error) {
 	var changed []Session
-	effectiveState := NormalizeSessionState(desiredState)
+	desiredWriteState := NormalizeSessionState(desiredState)
+	physicalWinner := NormalizeSessionState(observedState)
+	applied := false
 	err := s.withRetryingWriteLock(ctx, "apply_session_compensation", func(writeCtx context.Context) error {
 		changed = nil
-		effectiveState = NormalizeSessionState(desiredState)
+		desiredWriteState = NormalizeSessionState(desiredState)
+		physicalWinner = NormalizeSessionState(observedState)
+		applied = false
 		db, err := s.dbHandle()
 		if err != nil {
 			return err
@@ -577,9 +660,8 @@ func (s *RuntimeStateStore) ApplySessionCompensation(ctx context.Context, projec
 		if err != nil {
 			return err
 		}
-		desiredState = NormalizeSessionState(desiredState)
-		if !validSessionProductState(desiredState, false) {
-			return fmt.Errorf("session compensation: invalid desired state %q", desiredState)
+		if !validSessionProductState(desiredWriteState, false) {
+			return fmt.Errorf("session compensation: invalid desired state %q", desiredWriteState)
 		}
 		tx, err := db.BeginTx(writeCtx, nil)
 		if err != nil {
@@ -612,17 +694,41 @@ func (s *RuntimeStateStore) ApplySessionCompensation(ctx context.Context, projec
 			if err != nil {
 				return fmt.Errorf("parse winning compensated physical observation: %w", err)
 			}
-			effectiveState = observation.ObservedState
+			physicalWinner = observation.ObservedState
 		}
 		intent = NormalizeSessionMetadata(intent)
 		logicalID := logicalSessionIntentID(intent)
 		result, err = tx.ExecContext(writeCtx, `UPDATE `+sessionStateTable+` SET state=?,updated_at=? WHERE project_id=? AND logical_id=?`,
-			effectiveState, observation.UpdatedAt.Format(time.RFC3339Nano), observation.ProjectID, logicalID)
+			desiredWriteState, observation.UpdatedAt.Format(time.RFC3339Nano), observation.ProjectID, logicalID)
 		if err != nil {
 			return fmt.Errorf("update compensated desired session: %w", err)
 		}
 		if affected, err := result.RowsAffected(); err != nil || affected != 1 {
-			return fmt.Errorf("update compensated desired session: affected=%d err=%v", affected, err)
+			if err != nil {
+				return fmt.Errorf("update compensated desired session: affected=%d err=%v", affected, err)
+			}
+			// Failed-start cleanup may already have removed the exact desired
+			// intent before the physical-runtime compensation is replayed. The
+			// observation and any remaining linked typed intents still need to
+			// converge, so an absent target row is an idempotent success.
+			if affected != 0 {
+				return fmt.Errorf("update compensated desired session: affected=%d err=%v", affected, err)
+			}
+			var durableState string
+			loadErr := tx.QueryRowContext(writeCtx, `SELECT state FROM `+sessionStateTable+` WHERE project_id=? AND logical_id=?`, observation.ProjectID, logicalID).Scan(&durableState)
+			switch {
+			case errors.Is(loadErr, sql.ErrNoRows):
+				// There is no durable desired winner to project into transient
+				// state. Physical cleanup and any real linked-intent observation
+				// fan-out remain idempotent and commit below. Preserve the
+				// effective physical winner for callers that own runtime cleanup.
+			case loadErr != nil:
+				return fmt.Errorf("load compensated desired session winner: %w", loadErr)
+			default:
+				applied = true
+			}
+		} else {
+			applied = true
 		}
 		linked, err := listSessionIntentsByPhysicalIDTx(writeCtx, tx, observation.ProjectID, observation.SessionID)
 		if err != nil {
@@ -642,7 +748,7 @@ func (s *RuntimeStateStore) ApplySessionCompensation(ctx context.Context, projec
 		}
 		return tx.Commit()
 	})
-	return changed, effectiveState, err
+	return changed, physicalWinner, applied, err
 }
 
 func normalizePhysicalSessionObservation(observation PhysicalSessionObservation) (PhysicalSessionObservation, error) {
@@ -821,6 +927,9 @@ type RuntimeStateStore struct {
 
 	mu sync.Mutex
 	db *sql.DB
+	// managedIdentityDB isolates session-start acknowledgement authority from
+	// disposable projection readers that can occupy the bounded general pool.
+	managedIdentityDB *sql.DB
 }
 
 type runtimeOrphanKey struct{ table, projectID, sessionID, issueID string }
@@ -890,6 +999,7 @@ type WorktreeStateWriter interface {
 	UpsertWorktreeState(context.Context, WorktreeState) error
 	DeleteWorktreeState(context.Context, string, string) error
 	ReplaceWorktreeStates(context.Context, string, []WorktreeState) error
+	TouchWorktreeStates(context.Context, string, time.Time) error
 	UpsertWorktreeStateGitStatus(context.Context, string, string, json.RawMessage, time.Time) error
 }
 
@@ -959,12 +1069,16 @@ func resolveRuntimeStateDBPath(repoDir string) (string, error) {
 func (s *RuntimeStateStore) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db == nil {
-		return nil
+	var errs []error
+	if s.managedIdentityDB != nil {
+		errs = append(errs, s.managedIdentityDB.Close())
+		s.managedIdentityDB = nil
 	}
-	err := s.db.Close()
-	s.db = nil
-	return err
+	if s.db != nil {
+		errs = append(errs, s.db.Close())
+		s.db = nil
+	}
+	return errors.Join(errs...)
 }
 
 // StoreResourceDiagnostics reports the runtime store's process-owned pool
@@ -975,6 +1089,22 @@ func (s *RuntimeStateStore) StoreResourceDiagnostics() (string, bool, sql.DBStat
 	}
 	s.mu.Lock()
 	db := s.db
+	dbPath := s.dbPath
+	s.mu.Unlock()
+	if db == nil {
+		return dbPath, false, sql.DBStats{}
+	}
+	return dbPath, true, db.Stats()
+}
+
+// ManagedIdentityResourceDiagnostics reports the separately pooled durable
+// managed-agent authority without opening it as a diagnostic side effect.
+func (s *RuntimeStateStore) ManagedIdentityResourceDiagnostics() (string, bool, sql.DBStats) {
+	if s == nil {
+		return "", false, sql.DBStats{}
+	}
+	s.mu.Lock()
+	db := s.managedIdentityDB
 	dbPath := s.dbPath
 	s.mu.Unlock()
 	if db == nil {
@@ -1081,6 +1211,36 @@ func (s *RuntimeStateStore) upsertSessionStateLocked(ctx context.Context, projec
 	}
 	defer func() { _ = tx.Rollback() }()
 	logicalID := logicalSessionIntentID(session)
+	if targetTable == sessionStateTable {
+		var physicalOwner Session
+		var roleRaw, scopeKindRaw, updatedAtRaw string
+		err := tx.QueryRowContext(ctx, `SELECT session_id,issue_id,role,scope_kind,scope_id,state,updated_at
+			FROM `+sessionStateTable+` WHERE project_id=? AND session_id=?`, projectID, session.ID).
+			Scan(&physicalOwner.ID, &physicalOwner.IssueID, &roleRaw, &scopeKindRaw, &physicalOwner.ScopeID, &physicalOwner.State, &updatedAtRaw)
+		if err == nil {
+			physicalOwner.Role = SessionRole(roleRaw)
+			physicalOwner.ScopeKind = SessionScopeKind(scopeKindRaw)
+			physicalOwner.UpdatedAt, err = parseRuntimeStateTime(updatedAtRaw)
+			if err != nil {
+				return fmt.Errorf("parse physical session owner freshness for %s/%s: %w", projectID, session.ID, err)
+			}
+			if logicalSessionIntentID(physicalOwner) != logicalID {
+				switch {
+				case rootedOrchestratorSessionIntent(session) && matchingRootedWorkerIntent(session, physicalOwner):
+					// The rooted transition below atomically retires the legacy worker.
+				case rootedOrchestratorSessionIntent(physicalOwner) && matchingRootedWorkerIntent(physicalOwner, session):
+					// A stale daemon may replay the retired worker after rooted ownership
+					// has committed. The physical owner is authoritative regardless of
+					// the replay's timestamp, so convergence is an idempotent no-op.
+					return tx.Commit()
+				default:
+					return fmt.Errorf("upsert session state %s/%s: physical runtime is owned by %s/%s scope %s", projectID, session.ID, physicalOwner.Role, physicalOwner.ScopeKind, physicalOwner.ScopeID)
+				}
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("read physical session owner for %s/%s: %w", projectID, session.ID, err)
+		}
+	}
 	var currentState SessionState
 	var currentUpdatedAtRaw string
 	if err := tx.QueryRowContext(ctx, `SELECT state,updated_at FROM `+targetTable+` WHERE project_id=? AND logical_id=?`, projectID, logicalID).Scan(&currentState, &currentUpdatedAtRaw); err == nil {
@@ -2321,6 +2481,29 @@ func (s *RuntimeStateStore) ReplaceWorktreeStates(ctx context.Context, projectID
 	})
 }
 
+// TouchWorktreeStates records a successful unchanged inventory observation in
+// one statement without rewriting every projected worktree identity.
+func (s *RuntimeStateStore) TouchWorktreeStates(ctx context.Context, projectID string, observedAt time.Time) error {
+	return s.withRetryingWriteLock(ctx, "touch_worktree_states", func(writeCtx context.Context) error {
+		db, err := s.dbHandle()
+		if err != nil {
+			return err
+		}
+		projectID = normalizedProjectID(projectID)
+		if observedAt.IsZero() {
+			observedAt = time.Now().UTC()
+		}
+		if _, err := db.ExecContext(writeCtx, `
+			UPDATE `+worktreeStateTable+`
+			SET updated_at = ?
+			WHERE project_id = ?
+		`, observedAt.UTC().Format(time.RFC3339Nano), projectID); err != nil {
+			return fmt.Errorf("touch worktree state rows %s: %w", projectID, err)
+		}
+		return nil
+	})
+}
+
 func (s *RuntimeStateStore) replaceWorktreeStatesLocked(ctx context.Context, projectID string, worktreeStates []WorktreeState) error {
 	db, err := s.dbHandle()
 	if err != nil {
@@ -2698,6 +2881,31 @@ func (s *RuntimeStateStore) dbHandle() (*sql.DB, error) {
 	}
 	s.db = db
 	return s.db, nil
+}
+
+func (s *RuntimeStateStore) managedIdentityDBHandle() (*sql.DB, error) {
+	// The general handle owns schema initialization. Complete that before
+	// opening the identity authority handle so the latter never races startup
+	// migration/repair work.
+	if _, err := s.dbHandle(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.managedIdentityDB != nil {
+		return s.managedIdentityDB, nil
+	}
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_txlock=immediate", filepath.ToSlash(s.dbPath))
+	db, err := tracesqlite.Open(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open managed identity sqlite database: %w", err)
+	}
+	db.SetMaxOpenConns(runtimeStateMaxOpenConns)
+	db.SetMaxIdleConns(runtimeStateMaxOpenConns)
+	db.SetConnMaxLifetime(0)
+	db.SetConnMaxIdleTime(0)
+	s.managedIdentityDB = db
+	return s.managedIdentityDB, nil
 }
 
 func (s *RuntimeStateStore) withWriteLock(ctx context.Context, fn func() error) error {

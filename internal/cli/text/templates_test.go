@@ -21,7 +21,7 @@ func TestRenderIssueHelpPrefersNamedFlagForms(t *testing.T) {
 		"check [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>]",
 		"doctor [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>]",
 		"create [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--deferred]",
-		"split [--project <project-id>] [--parent <ticket-id>]",
+		"split --intent-key <unique-invocation-key> [--project <project-id>] [--parent <ticket-id>]",
 		"close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [<ticket-id>]",
 		"delete [--project <project-id>] [--id <ticket-id>] [--json] [<ticket-id>] --confirm [--cleanup|--stop-session] [--remove-worktree] [--force-worktree]",
 		"unarchive [--project <project-id>] [--id <ticket-id>] [--json] [--with-parents] [--cascade-children] [<ticket-id>]  Restore archived tickets to active reads",
@@ -60,5 +60,8 @@ func TestRenderRootUsageUsesCanonicalTicketFlags(t *testing.T) {
 		if strings.Contains(output, legacy) {
 			t.Fatalf("root_usage contains legacy ticket flag %q: %q", legacy, output)
 		}
+	}
+	if !strings.Contains(output, "Optional external observer only") || strings.Contains(output, "Leave compact orchestrate watch running") {
+		t.Fatalf("root_usage retained model-mediated watch guidance: %q", output)
 	}
 }

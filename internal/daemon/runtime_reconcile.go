@@ -107,6 +107,11 @@ func (s *runtimeReconcileService) Reconcile(ctx context.Context, projectID strin
 			errs = append(errs, fmt.Errorf("reconcile interaction staleness: %w", err))
 		}
 	}
+	if d.agentInputService() != nil {
+		if err := d.agentInputService().RetryPending(ctx, result.ProjectID.String(), 100); err != nil {
+			errs = append(errs, fmt.Errorf("reconcile agent input delivery: %w", err))
+		}
+	}
 	if !hasSessionRuntime {
 		return result, errors.Join(errs...)
 	}
@@ -140,7 +145,9 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 		return result, nil
 	}
 	ctx = withDaemonProjectIDContext(ctx, result.ProjectID.String())
-	defer d.readCrossProjectProjectionHealth(ctx, result.ProjectID.String(), &result)
+	if !isSessionStartRuntimeFreshnessRequest(ctx) {
+		defer d.readCrossProjectProjectionHealth(ctx, result.ProjectID.String(), &result)
+	}
 	shouldReconcileInteractionStaleness := d.reconcileInteractionStalenessFn != nil || d.hasConfiguredInteractionStore()
 	issueIDs = normalizeRuntimeReconcileIssueIDs(issueIDs)
 	if len(issueIDs) == 0 {
@@ -167,6 +174,13 @@ func (s *runtimeReconcileService) ReconcileIssues(ctx context.Context, projectID
 				errs = append(errs, fmt.Errorf("reconcile issue sessions (%d targets): %w", end-start, err))
 			}
 		}
+	}
+	// Session start needs only the target issue's durable worktree/session intent
+	// reconciled with live tmux. Interaction aging, activity convergence, and
+	// resource hooks are unrelated maintenance and must not make bootstrap
+	// unavailable when those subsystems are busy or degraded.
+	if isSessionStartRuntimeFreshnessRequest(ctx) {
+		return result, errors.Join(errs...)
 	}
 	if shouldReconcileInteractionStaleness && d.tmux != nil && d.sessionRuntimeStateStoreIfConfigured(result.ProjectID.String()) != nil {
 		recovered, cleaned, err := d.reconcileAdvisorSessionRuntimes(ctx, result.ProjectID.String(), issueIDs)
@@ -241,8 +255,12 @@ func (d *Daemon) hasConfiguredInteractionStore() bool {
 }
 
 func shouldRunIssueResourceReconcileForRuntimeRequest(ctx context.Context) bool {
+	return !isSessionStartRuntimeFreshnessRequest(ctx)
+}
+
+func isSessionStartRuntimeFreshnessRequest(ctx context.Context) bool {
 	request := runtimeReconcileRequestFromContext(ctx)
-	return strings.TrimSpace(request.Reason) != "mutation-issue:"+daemonhandlers.CommandSessionStart
+	return strings.TrimSpace(request.Reason) == "mutation-issue:"+daemonhandlers.CommandSessionStart
 }
 
 func (d *Daemon) reconcileIssueResourcesPresent(ctx context.Context, projectID string, issueIDs []string) error {
@@ -433,6 +451,8 @@ func (d *Daemon) queueRuntimeReconcile(ctx context.Context, projectID string, pr
 		Reason:      reason,
 		ExecContext: ctx,
 		Work: func(workCtx context.Context) (protocol.RuntimeReconcileResponseBody, error) {
+			workCtx, cancel := d.runtimeReconcileExecutionContext(workCtx, priority)
+			defer cancel()
 			workCtx = context.WithValue(workCtx, runtimeReconcileRequestContextKey{}, runtimeReconcileRequestContext{
 				Priority: priority,
 				Reason:   reason,
@@ -442,6 +462,21 @@ func (d *Daemon) queueRuntimeReconcile(ctx context.Context, projectID string, pr
 			return result, err
 		},
 	})
+}
+
+func (d *Daemon) runtimeReconcileExecutionContext(parent context.Context, priority reconcileQueuePriority) (context.Context, context.CancelFunc) {
+	if priority > reconcilePriorityBackground {
+		return parent, func() {}
+	}
+	timeout := d.runtimeReconcileTimeout()
+	if timeout <= 0 {
+		timeout = defaultRuntimeReconcileTimeout
+	}
+	withTimeout := d.runtimeReconcileWorkContext
+	if withTimeout == nil {
+		withTimeout = context.WithTimeout
+	}
+	return withTimeout(parent, timeout)
 }
 
 func (d *Daemon) ensureFreshRuntimeForMutation(ctx context.Context, projectID string, reason string) error {
@@ -544,6 +579,8 @@ func (d *Daemon) refreshRuntimeForIssueMutationAsync(projectID string, issueID s
 		Reason:      "mutation-issue:" + reason,
 		ExecContext: context.Background(),
 		Work: func(workCtx context.Context) (protocol.RuntimeReconcileResponseBody, error) {
+			workCtx, cancel := d.runtimeReconcileExecutionContext(workCtx, reconcilePriorityBackground)
+			defer cancel()
 			workCtx = context.WithValue(workCtx, runtimeReconcileRequestContextKey{}, runtimeReconcileRequestContext{
 				Priority: reconcilePriorityBackground,
 				Reason:   "mutation-issue:" + reason,
@@ -720,9 +757,13 @@ func (d *Daemon) runStartupRuntimeReconcile(ctx context.Context) (protocol.Runti
 	if timeout <= 0 {
 		timeout = defaultRuntimeReconcileTimeout
 	}
-	reconcileCtx, cancel := context.WithTimeout(ctx, timeout)
+	withTimeout := d.runtimeReconcilePhaseContext
+	if withTimeout == nil {
+		withTimeout = context.WithTimeout
+	}
+	reconcileCtx, cancel := withTimeout(ctx, timeout)
 	defer cancel()
-	results, _, err := d.runRuntimeReconcileSweepWithPriority(reconcileCtx, reconcilePriorityBackground, "startup")
+	results, _, err := d.runRuntimeReconcileSweepWithContexts(reconcileCtx, ctx, reconcilePriorityBackground, "startup")
 	return summarizeRuntimeReconcileSweep(results), err
 }
 
@@ -757,14 +798,9 @@ func (d *Daemon) runRuntimeReconcileCycle(ctx context.Context) {
 	if d == nil {
 		return
 	}
-	timeout := d.runtimeReconcileTimeout()
-	if timeout <= 0 {
-		timeout = defaultRuntimeReconcileTimeout
-	}
-	reconcileCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	results, metrics, err := d.runRuntimeReconcileSweepWithPriority(reconcileCtx, reconcilePriorityBackground, "periodic")
+	// Each queued project owns its deadline. A single slow project must not
+	// expire every other project in the periodic sweep.
+	results, metrics, err := d.runRuntimeReconcileSweepWithPriority(ctx, reconcilePriorityBackground, "periodic")
 	result := summarizeRuntimeReconcileSweep(results)
 	projectCount := len(results)
 	if projectCount == 0 {
@@ -823,7 +859,11 @@ func (d *Daemon) runRuntimeReconcileSweep(ctx context.Context) ([]protocol.Runti
 }
 
 func (d *Daemon) runRuntimeReconcileSweepWithPriority(ctx context.Context, priority reconcileQueuePriority, reason string) ([]protocol.RuntimeReconcileResponseBody, runtimeReconcileSweepMetrics, error) {
-	projectIDs, err := d.runtimeReconcileKnownProjectIDs(ctx)
+	return d.runRuntimeReconcileSweepWithContexts(ctx, ctx, priority, reason)
+}
+
+func (d *Daemon) runRuntimeReconcileSweepWithContexts(waitCtx, execCtx context.Context, priority reconcileQueuePriority, reason string) ([]protocol.RuntimeReconcileResponseBody, runtimeReconcileSweepMetrics, error) {
+	projectIDs, err := d.runtimeReconcileKnownProjectIDs(execCtx)
 	if err != nil {
 		return nil, runtimeReconcileSweepMetrics{}, err
 	}
@@ -838,7 +878,7 @@ func (d *Daemon) runRuntimeReconcileSweepWithPriority(ctx context.Context, prior
 	throttle := d.ensureRuntimeReconcileThrottle()
 	force := priority >= reconcilePriorityManual
 	for _, projectID := range projectIDs {
-		if d.shouldDeferBackgroundScanForHeavySessionStart(ctx, projectID, "runtime_reconcile", priority) {
+		if d.shouldDeferBackgroundScanForHeavySessionStart(execCtx, projectID, "runtime_reconcile", priority) {
 			metrics.Deferred++
 			continue
 		}
@@ -854,7 +894,7 @@ func (d *Daemon) runRuntimeReconcileSweepWithPriority(ctx context.Context, prior
 				continue
 			}
 		}
-		submission, submitErr := d.queueRuntimeReconcile(ctx, projectID, priority, reason)
+		submission, submitErr := d.queueRuntimeReconcile(execCtx, projectID, priority, reason)
 		if submitErr != nil {
 			throttle.Refund(admission)
 			submitErrs = append(submitErrs, fmt.Errorf("%s: %w", projectID, submitErr))
@@ -877,7 +917,7 @@ func (d *Daemon) runRuntimeReconcileSweepWithPriority(ctx context.Context, prior
 	var errs []error
 	errs = append(errs, submitErrs...)
 	for _, item := range queued {
-		outcome, waitErr := item.submission.Wait(ctx)
+		outcome, waitErr := item.submission.Wait(waitCtx)
 		if waitErr != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", item.projectID, waitErr))
 			metrics.Failed++

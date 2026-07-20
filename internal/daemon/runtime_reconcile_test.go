@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -272,6 +273,7 @@ type scriptedRuntimeReconciler struct {
 	current       int
 	maxConcurrent int
 	resultsByID   map[string]protocol.RuntimeReconcileResponseBody
+	requestsByID  map[string][]runtimeReconcileRequestContext
 }
 
 func (r *scriptedRuntimeReconciler) Reconcile(ctx context.Context, projectID string) (protocol.RuntimeReconcileResponseBody, error) {
@@ -280,6 +282,10 @@ func (r *scriptedRuntimeReconciler) Reconcile(ctx context.Context, projectID str
 		r.callCountByID = map[string]int{}
 	}
 	r.callCountByID[projectID]++
+	if r.requestsByID == nil {
+		r.requestsByID = map[string][]runtimeReconcileRequestContext{}
+	}
+	r.requestsByID[projectID] = append(r.requestsByID[projectID], runtimeReconcileRequestFromContext(ctx))
 	r.startOrder = append(r.startOrder, projectID)
 	r.current++
 	if r.current > r.maxConcurrent {
@@ -337,6 +343,12 @@ func (r *scriptedRuntimeReconciler) snapshot() (order []string, callCount map[st
 		outCounts[key] = value
 	}
 	return append([]string(nil), r.startOrder...), outCounts, r.maxConcurrent
+}
+
+func (r *scriptedRuntimeReconciler) requests(projectID string) []runtimeReconcileRequestContext {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]runtimeReconcileRequestContext(nil), r.requestsByID[projectID]...)
 }
 
 type dedupedTimeoutRuntimeReconciler struct {
@@ -490,6 +502,9 @@ func TestCommandRuntimeReconcileRoutesToManualRepair(t *testing.T) {
 	if got := out.InvariantSources[string(daemonInvariantTaskListFreshness)]; got != string(daemonInvariantSourceProjection) {
 		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantTaskListFreshness, got, daemonInvariantSourceProjection)
 	}
+	if got := out.InvariantSources[string(daemonInvariantTaskReadAfterWrite)]; got != string(daemonInvariantSourceProjection) {
+		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantTaskReadAfterWrite, got, daemonInvariantSourceProjection)
+	}
 	if got := out.InvariantSources[string(daemonInvariantOrchestrationScope)]; got != string(daemonInvariantSourceProjection) {
 		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantOrchestrationScope, got, daemonInvariantSourceProjection)
 	}
@@ -514,8 +529,17 @@ func TestCommandRuntimeReconcileRoutesToManualRepair(t *testing.T) {
 	if got := out.InvariantSources[string(daemonInvariantManagedAgentIdentity)]; got != string(daemonInvariantSourceHybrid) {
 		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantManagedAgentIdentity, got, daemonInvariantSourceHybrid)
 	}
+	if got := out.InvariantSources[string(daemonInvariantManagedAgentRestart)]; got != string(daemonInvariantSourceHybrid) {
+		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantManagedAgentRestart, got, daemonInvariantSourceHybrid)
+	}
+	if got := out.InvariantSources[string(daemonInvariantAgentInputDelivery)]; got != string(daemonInvariantSourceHybrid) {
+		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantAgentInputDelivery, got, daemonInvariantSourceHybrid)
+	}
 	if got := out.InvariantSources[string(daemonInvariantValidationCapacity)]; got != string(daemonInvariantSourceProjection) {
 		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantValidationCapacity, got, daemonInvariantSourceProjection)
+	}
+	if got := out.InvariantSources[string(daemonInvariantPublicationEvidence)]; got != string(daemonInvariantSourceProjection) {
+		t.Fatalf("invariant_sources[%q] = %q, want %q", daemonInvariantPublicationEvidence, got, daemonInvariantSourceProjection)
 	}
 
 	calls, projectIDs := recorder.snapshot()
@@ -953,6 +977,10 @@ func TestCommandRuntimeReconcileReprioritizesPendingQueuedProject(t *testing.T) 
 			t.Fatalf("reconcile calls for %s = %d, want 1", projectID, got)
 		}
 	}
+	requests := recorder.requests("proj-runtime")
+	if len(requests) != 1 || requests[0].Priority != reconcilePriorityManual || requests[0].Reason != "manual" {
+		t.Fatalf("reprioritized request context = %+v, want one manual request", requests)
+	}
 }
 
 func TestCommandRuntimeReconcileRetriesQueuedWhenDedupedBackgroundTimesOut(t *testing.T) {
@@ -1032,6 +1060,204 @@ func TestCommandRuntimeReconcileRetriesQueuedWhenDedupedBackgroundTimesOut(t *te
 	}
 	if !errors.Is(outcome.Err, context.DeadlineExceeded) {
 		t.Fatalf("background outcome error = %v, want context deadline exceeded", outcome.Err)
+	}
+}
+
+func TestBackgroundRuntimeReconcileDeadlineStartsWhenQueuedWorkBegins(t *testing.T) {
+	queue := newReconcileQueue[protocol.RuntimeReconcileResponseBody](reconcileQueueConfig{
+		Name:    "runtime_reconcile_deadline_start_test",
+		Workers: 1,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	t.Cleanup(func() { _ = queue.Close() })
+
+	busyStarted := make(chan struct{})
+	releaseBusy := make(chan struct{})
+	busy, err := queue.Enqueue(reconcileQueueRequest[protocol.RuntimeReconcileResponseBody]{
+		Key:      "busy",
+		Priority: reconcilePriorityManual,
+		Work: func(context.Context) (protocol.RuntimeReconcileResponseBody, error) {
+			close(busyStarted)
+			<-releaseBusy
+			return protocol.RuntimeReconcileResponseBody{ProjectID: "busy"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("enqueue busy reconcile: %v", err)
+	}
+	<-busyStarted
+
+	deadlineStarted := make(chan struct{})
+	var deadlineCalls atomic.Int32
+	wantTimeout := 37 * time.Second
+	d := &Daemon{
+		cfg: Config{
+			Logger:                  slog.New(slog.NewTextHandler(io.Discard, nil)),
+			RuntimeReconcileTimeout: wantTimeout,
+		},
+		runtimeReconciler:     &runtimeReconcileRecorder{},
+		runtimeReconcileQueue: queue,
+		runtimeReconcileWorkContext: func(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+			if timeout != wantTimeout {
+				t.Errorf("runtime reconcile timeout = %s, want %s", timeout, wantTimeout)
+			}
+			deadlineCalls.Add(1)
+			close(deadlineStarted)
+			return context.WithCancel(parent)
+		},
+	}
+	background, err := d.queueRuntimeReconcile(context.Background(), "later", reconcilePriorityBackground, "periodic")
+	if err != nil {
+		t.Fatalf("queue background reconcile: %v", err)
+	}
+	if got := deadlineCalls.Load(); got != 0 {
+		t.Fatalf("background deadline started while work was pending: calls=%d", got)
+	}
+	if snapshot := queue.snapshot(); len(snapshot.Pending) != 1 || snapshot.Pending[0] != "later" {
+		t.Fatalf("pending reconciles = %v, want [later]", snapshot.Pending)
+	}
+
+	close(releaseBusy)
+	<-deadlineStarted
+	if _, err := busy.Wait(context.Background()); err != nil {
+		t.Fatalf("wait busy reconcile: %v", err)
+	}
+	result, err := background.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("wait background reconcile: %v", err)
+	}
+	if result.Err != nil {
+		t.Fatalf("background reconcile: %v", result.Err)
+	}
+	if got := deadlineCalls.Load(); got != 1 {
+		t.Fatalf("background deadline calls = %d, want 1", got)
+	}
+}
+
+func TestStartupRuntimeReconcileSeparatesPhaseCapFromQueuedExecutionDeadline(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	queue := newReconcileQueue[protocol.RuntimeReconcileResponseBody](reconcileQueueConfig{
+		Name:    "runtime_reconcile_startup_deadline_test",
+		Workers: 1,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	t.Cleanup(func() { _ = queue.Close() })
+	busyStarted := make(chan struct{})
+	releaseBusy := make(chan struct{})
+	busy, err := queue.Enqueue(reconcileQueueRequest[protocol.RuntimeReconcileResponseBody]{
+		Key:      "busy",
+		Priority: reconcilePriorityManual,
+		Work: func(context.Context) (protocol.RuntimeReconcileResponseBody, error) {
+			close(busyStarted)
+			<-releaseBusy
+			return protocol.RuntimeReconcileResponseBody{ProjectID: "busy"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("enqueue busy reconcile: %v", err)
+	}
+	<-busyStarted
+
+	deadlineStarted := make(chan struct{})
+	finished := make(chan struct{}, 1)
+	var deadlineCalls atomic.Int32
+	d := &Daemon{
+		cfg:                   Config{RepoDir: repoDir, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeReconciler:     &runtimeReconcileRecorder{finished: finished},
+		runtimeReconcileQueue: queue,
+		runtimeReconcilePhaseContext: func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+			phaseCtx, cancel := context.WithCancel(parent)
+			cancel()
+			return phaseCtx, func() {}
+		},
+		runtimeReconcileWorkContext: func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+			if err := parent.Err(); err != nil {
+				t.Errorf("queued startup execution inherited expired phase context: %v", err)
+			}
+			deadlineCalls.Add(1)
+			close(deadlineStarted)
+			return context.WithCancel(parent)
+		},
+	}
+	if _, err := d.runStartupRuntimeReconcile(context.Background()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("startup phase error = %v, want canceled phase cap", err)
+	}
+	if got := deadlineCalls.Load(); got != 0 {
+		t.Fatalf("startup project deadline started while queued: calls=%d", got)
+	}
+	if snapshot := queue.snapshot(); len(snapshot.Pending) != 1 {
+		t.Fatalf("startup pending jobs = %v, want one project", snapshot.Pending)
+	}
+
+	close(releaseBusy)
+	<-deadlineStarted
+	<-finished
+	if _, err := busy.Wait(context.Background()); err != nil {
+		t.Fatalf("wait busy reconcile: %v", err)
+	}
+	if got := deadlineCalls.Load(); got != 1 {
+		t.Fatalf("startup project deadline calls = %d, want 1", got)
+	}
+}
+
+func TestAsyncIssueRuntimeReconcileDeadlineStartsWhenQueuedWorkBegins(t *testing.T) {
+	queue := newReconcileQueue[protocol.RuntimeReconcileResponseBody](reconcileQueueConfig{
+		Name:    "runtime_reconcile_issue_deadline_test",
+		Workers: 1,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	t.Cleanup(func() { _ = queue.Close() })
+	busyStarted := make(chan struct{})
+	releaseBusy := make(chan struct{})
+	busy, err := queue.Enqueue(reconcileQueueRequest[protocol.RuntimeReconcileResponseBody]{
+		Key:      "busy",
+		Priority: reconcilePriorityManual,
+		Work: func(context.Context) (protocol.RuntimeReconcileResponseBody, error) {
+			close(busyStarted)
+			<-releaseBusy
+			return protocol.RuntimeReconcileResponseBody{ProjectID: "busy"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("enqueue busy reconcile: %v", err)
+	}
+	<-busyStarted
+
+	deadlineStarted := make(chan struct{})
+	finished := make(chan struct{}, 1)
+	var deadlineCalls atomic.Int32
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		runtimeReconciler:     &runtimeReconcileRecorder{finished: finished},
+		runtimeReconcileQueue: queue,
+		runtimeReconcileWorkContext: func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+			deadlineCalls.Add(1)
+			close(deadlineStarted)
+			return context.WithCancel(parent)
+		},
+	}
+	d.refreshRuntimeForIssueMutationAsync("project", "issue", "mutation")
+	if got := deadlineCalls.Load(); got != 0 {
+		t.Fatalf("async issue deadline started while queued: calls=%d", got)
+	}
+	if snapshot := queue.snapshot(); len(snapshot.Pending) != 1 || snapshot.Pending[0] != runtimeReconcileIssueQueueKey("project", []string{"issue"}) {
+		t.Fatalf("async issue pending jobs = %v, want issue-scoped job", snapshot.Pending)
+	}
+
+	close(releaseBusy)
+	<-deadlineStarted
+	<-finished
+	if _, err := busy.Wait(context.Background()); err != nil {
+		t.Fatalf("wait busy reconcile: %v", err)
+	}
+	if got := deadlineCalls.Load(); got != 1 {
+		t.Fatalf("async issue deadline calls = %d, want 1", got)
+	}
+	if got := d.runtimeReconciler.(*runtimeReconcileRecorder).issueSnapshot(); !reflect.DeepEqual(got, [][]string{{"issue"}}) {
+		t.Fatalf("async issue reconcile calls = %v, want [[issue]]", got)
 	}
 }
 
@@ -1948,6 +2174,65 @@ func TestRuntimeReconcileIssuesSkipsIssueResourceHookForSessionStartFreshness(t 
 	}
 	if strings.TrimSpace(string(data)) != "ran" {
 		t.Fatalf("marker = %q, want ran", strings.TrimSpace(string(data)))
+	}
+}
+
+func TestRuntimeReconcileIssuesSessionStartSkipsUnrelatedMaintenance(t *testing.T) {
+	called := false
+	d := &Daemon{
+		cfg: Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		reconcileInteractionStalenessFn: func(context.Context, string) error {
+			called = true
+			return errors.New("unrelated interaction maintenance unavailable")
+		},
+	}
+	ctx := context.WithValue(context.Background(), runtimeReconcileRequestContextKey{}, runtimeReconcileRequestContext{
+		Priority: reconcilePriorityManual,
+		Reason:   "mutation-issue:" + daemonhandlers.CommandSessionStart,
+	})
+
+	if _, err := newRuntimeReconcileService(d).ReconcileIssues(ctx, "project", []string{"az-1"}); err != nil {
+		t.Fatalf("session.start scoped reconciliation inherited unrelated failure: %v", err)
+	}
+	if called {
+		t.Fatal("session.start scoped reconciliation ran unrelated interaction maintenance")
+	}
+}
+
+func TestRuntimeReconcileIssuesSessionStartReturnsWithoutCrossProjectHealthRead(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	store, err := userstore.Open(filepath.Join(t.TempDir(), "user.db"), userstore.WithSnapshotAfterProjectsForTest(func() {
+		close(entered)
+		<-release
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	d := &Daemon{
+		cfg:       Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		userStore: store,
+	}
+	ctx := context.WithValue(context.Background(), runtimeReconcileRequestContextKey{}, runtimeReconcileRequestContext{
+		Priority: reconcilePriorityManual,
+		Reason:   "mutation-issue:" + daemonhandlers.CommandSessionStart,
+	})
+	done := make(chan error, 1)
+	go func() {
+		_, reconcileErr := newRuntimeReconcileService(d).ReconcileIssues(ctx, "project", []string{"az-1"})
+		done <- reconcileErr
+	}()
+
+	select {
+	case reconcileErr := <-done:
+		if reconcileErr != nil {
+			t.Fatalf("session.start scoped reconciliation: %v", reconcileErr)
+		}
+	case <-entered:
+		close(release)
+		<-done
+		t.Fatal("session.start scoped reconciliation entered unrelated cross-project health read")
 	}
 }
 

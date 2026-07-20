@@ -45,7 +45,7 @@ Commands:
   ticket check [--project <project-id>] [--id <id>] [--json] [<id>]  Alias for ticket get
   ticket doctor [--project <project-id>] [--id <id>] [--json] [<id>]  Run integrity checks for one ticket
   ticket create [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--deferred] [--type ...] [--priority ...] [--title ...] [--description ...] [--json] [<title>]  Create a ticket (auto-parent when AZEDARACH_ISSUE_ID is set; --parent selects parentage; --impl is not parentage)
-  ticket split [--project <project-id>] [--parent <id>] [--impl <implementation> ...] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create an isolated child ticket/session for later parent-side merge
+  ticket split --intent-key <unique-invocation-key> [--project <project-id>] [--parent <id>] [--impl <implementation> ...] [--type ...] [--priority ...] [--description ...] [--json] <title>  Create an isolated child; reuse the key only for exact retries
   ticket update [--project <project-id>] [--id <id>] [--json] [<id>] [--title ...] [--description ...] [--notes ...] [--append-notes ...] [--status ...] [--force-worktree] [--type ...] [--priority ...] [--update-impl <impl> ...]  Update ticket fields and durable lifecycle actions (backlog/open/active/review/closed/cancelled)
   ticket close [--project <project-id>] [--id <id>|-i <id>] [--json] [--force-worktree] [<id>]  Integrate, clean up, and close a ticket
   ticket cleanup [--project <project-id>] [--id <id> ...|--ids a,b] [--status <status> ...] [--query text] [--updated-before date] [--limit N] [--action closed|cancelled] [--dry-run] [--per-ticket-timeout duration] [--json]  Safely clean up ticket lifecycles
@@ -111,7 +111,7 @@ Examples:
   az ticket create "Follow-up task"                # child under AZEDARACH_ISSUE_ID; no --impl needed for parentage
   az ticket dep add --ticket-id az-456 --depends-on-id az-123 --type parent-child  # attach an existing ticket to another parent/root
   az ticket create --impl go-bubbletea "Implementation-specific task"  # only assigns implementation metadata; still not parentage
-  az ticket split "Implement child task"           # auto-parent and launch isolated child worktree; merge explicitly later
+  az ticket split --intent-key split-123 "Implement child task"  # reuse this key only when retrying this invocation
   az ticket create --deferred "Investigate later"  # deferred follow-up (defaults priority to P4)
   az ticket update --id az-123 --status in_progress --title "Renamed task" --priority P1
   az ticket update --id az-123 --status backlog    # move to backlog lifecycle
@@ -153,7 +153,7 @@ Examples:
   az orchestrate prompt --root az-123 --issue az-456 --coordination mailbox
   az orchestrate start --root az-123 --limit 4
   az orchestrate watch --root az-123 --since 41 --jsonl
-  # Leave compact orchestrate watch running in another pane/session while workers are active; use --verbose/--full for debugging and --once only for diagnostic single polls.
+  # Optional external observer only; model turns should use bounded status/action steps and yield for daemon-delivered continuations.
   az orchestrate integrate --issue az-456      # Inspect worker evidence / repair guidance
   az orchestrate close-session --issue az-456  # Repair-only daemon stop; normal accepted-worker cleanup uses az ticket close
   az orchestrate complete-check --root az-123

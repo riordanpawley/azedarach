@@ -235,6 +235,7 @@ type IssueCheckOptions struct {
 }
 
 type IssueCreateOptions struct {
+	IntentKey              string
 	Project                string
 	JSON                   bool
 	Title                  string
@@ -258,6 +259,7 @@ type issueCreateResult struct {
 	CreatedFromID string
 	Deferred      bool
 	Message       string
+	Created       bool
 }
 
 type issueCreatePartialError struct {
@@ -274,11 +276,12 @@ func (e issueCreatePartialError) Unwrap() error {
 }
 
 type IssueCloseOptions struct {
-	Project            string
-	IssueID            string
-	JSON               bool
-	ForceWorktree      bool
-	CloseCleanChildren bool
+	Project                 string
+	IssueID                 string
+	JSON                    bool
+	ForceWorktree           bool
+	CloseCleanChildren      bool
+	HistoricalAuthorization *domain.HistoricalPublicationAuthorization
 }
 
 type IssueCleanupOptions struct {
@@ -2274,7 +2277,7 @@ func runBranchMergeToBase(deps *Dependencies, opts BranchMergeToBaseOptions) (br
 		recordPhase("checkout", phaseStartedAt)
 	}
 	phaseStartedAt = time.Now()
-	result, err := deps.DaemonClient.GitMerge(ctx, baseWorktree, source.Branch)
+	result, err := deps.DaemonClient.GitMergeTyped(ctx, source.IssueID, target.TargetID)
 	if err != nil {
 		recordPhase("merge", phaseStartedAt)
 		return branchMergeToBaseCommandResult{}, wrapPhaseErr("merge", wrapPendingGitOperation("merge", err))
@@ -4044,6 +4047,7 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 	opts := IssueCloseOptions{}
 	issueIDFlag := ""
 	implFlag := ""
+	historicalAuthorizationJSON := ""
 	fs := flag.NewFlagSet("issue close", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
@@ -4053,11 +4057,12 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 	fs.BoolVar(&opts.JSON, "json", false, "output issue close result as JSON")
 	fs.BoolVar(&opts.ForceWorktree, "force-worktree", false, "force worktree removal after integration")
 	fs.BoolVar(&opts.CloseCleanChildren, "close-clean-children", false, "also close clean unresolved child issues after confirmation")
+	fs.StringVar(&historicalAuthorizationJSON, "historical-authorization", "", "typed operator authorization JSON for a pre-publication-operation integration")
 	if err := parseWithInterspersedFlags(fs, args); err != nil {
 		return IssueCloseOptions{}, err
 	}
 	if fs.NArg() > 1 {
-		return IssueCloseOptions{}, fmt.Errorf("usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]")
+		return IssueCloseOptions{}, fmt.Errorf("usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [--historical-authorization <json>] [<ticket-id>]")
 	}
 	if strings.TrimSpace(implFlag) != "" {
 		return IssueCloseOptions{}, fmt.Errorf("--impl is not supported for issue close; issue implementations are already assigned")
@@ -4069,7 +4074,17 @@ func ParseIssueCloseArgs(args []string) (IssueCloseOptions, error) {
 		opts.IssueID = strings.TrimSpace(issueIDFlag)
 	}
 	if strings.TrimSpace(opts.IssueID) == "" {
-		return IssueCloseOptions{}, fmt.Errorf("usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]")
+		return IssueCloseOptions{}, fmt.Errorf("usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [--historical-authorization <json>] [<ticket-id>]")
+	}
+	if strings.TrimSpace(historicalAuthorizationJSON) != "" {
+		var authorization domain.HistoricalPublicationAuthorization
+		if err := json.Unmarshal([]byte(historicalAuthorizationJSON), &authorization); err != nil {
+			return IssueCloseOptions{}, fmt.Errorf("decode --historical-authorization: %w", err)
+		}
+		if err := authorization.Validate(); err != nil {
+			return IssueCloseOptions{}, fmt.Errorf("invalid --historical-authorization: %w", err)
+		}
+		opts.HistoricalAuthorization = &authorization
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
 	return opts, nil
@@ -6727,25 +6742,38 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 		}
 	}
 
-	taskID, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (string, error) {
-		return deps.DaemonClient.CreateTask(callCtx, daemonclient.TaskCreateParams{
+	createResponse, err := commandWithDaemonAutostartRetry(ctx, deps, func(callCtx context.Context) (daemonclient.TaskIDResponse, error) {
+		var createdFromID *naming.IssueID
+		if strings.TrimSpace(opts.IntentKey) != "" && opts.AutoCreatedFromIssueID != nil && strings.TrimSpace(*opts.AutoCreatedFromIssueID) != "" {
+			parsed, parseErr := naming.ParseIssueID(strings.TrimSpace(*opts.AutoCreatedFromIssueID))
+			if parseErr != nil {
+				return daemonclient.TaskIDResponse{}, parseErr
+			}
+			createdFromID = &parsed
+		}
+		return deps.DaemonClient.CreateTaskWithResult(callCtx, daemonclient.TaskCreateParams{
+			IntentKey:       strings.TrimSpace(opts.IntentKey),
 			Title:           opts.Title,
 			Description:     opts.Description,
 			Type:            opts.Type,
 			Priority:        opts.Priority,
 			Lifecycle:       opts.Lifecycle,
 			ParentID:        parentID,
+			CreatedFromID:   createdFromID,
 			Implementations: dedupeOrderedIDs(implementations),
 		})
 	})
 	if err != nil {
 		return issueCreateResult{}, fmt.Errorf("failed to create issue: %w", err)
 	}
+	taskID := createResponse.TaskID.String()
 
 	createdFromIDValue := ""
 	projectIDValue := strings.TrimSpace(deps.ProjectID)
-	if opts.AutoCreatedFromIssueID != nil && strings.TrimSpace(*opts.AutoCreatedFromIssueID) != "" {
+	if opts.AutoCreatedFromIssueID != nil {
 		createdFromIDValue = strings.TrimSpace(*opts.AutoCreatedFromIssueID)
+	}
+	if strings.TrimSpace(opts.IntentKey) == "" && createdFromIDValue != "" {
 		createdIssueID, parseErr := naming.ParseIssueID(taskID)
 		if parseErr != nil {
 			return issueCreateResult{}, fmt.Errorf("failed to parse created issue id %s: %w", formatProjectIssueRef(projectIDValue, taskID), parseErr)
@@ -6811,6 +6839,7 @@ func createIssue(parentCtx context.Context, deps *Dependencies, opts IssueCreate
 		CreatedFromID: createdFromIDValue,
 		Deferred:      opts.Deferred,
 		Message:       message,
+		Created:       createResponse.Created,
 	}, nil
 }
 
@@ -6827,7 +6856,9 @@ func IssueCloseCommand(deps *Dependencies, opts IssueCloseOptions) error {
 		return err
 	}
 
-	result, err := deps.DaemonClient.CloseTask(ctx, opts.IssueID, cleanupCloseTaskStatusOptions(opts.ForceWorktree, opts.CloseCleanChildren))
+	closeOpts := cleanupCloseTaskStatusOptions(opts.ForceWorktree, opts.CloseCleanChildren)
+	closeOpts.HistoricalAuthorization = opts.HistoricalAuthorization
+	result, err := deps.DaemonClient.CloseTask(ctx, opts.IssueID, closeOpts)
 	if err != nil {
 		if strings.Contains(err.Error(), "context risk is high") {
 			if contextRisk, riskErr := loadIssueContextRiskForCloseout(ctx, deps, opts.IssueID); riskErr == nil && contextRisk != nil {
@@ -9439,7 +9470,25 @@ func renderPrimeImplementationSection(implementations []string) string {
 }
 
 func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Task, observations []domain.WorkerObservation, containmentRisks []daemonclient.TaskContainmentRisk, tmuxAvailable bool) string {
-	structuredContext := renderPrimeStructuredIssueContext(issueID, task)
+	role := domain.WorkflowRoleWorker
+	if task.Type == domain.TypeEpic {
+		role = domain.WorkflowRoleIntegrator
+	}
+	packet, packetErr := domain.BuildWorkflowContextPacket(domain.WorkflowContextInput{
+		Role: role, IssueID: task.ID.String(), SourceRevision: domain.WorkflowIssueContextRevision(task),
+		Summary: task.Title, Requirements: domain.WorkflowIssueRequirements(task),
+	})
+	packetJSON := []byte(`{"schema":"workflow_context.v1","omitted":[{"field":"context","count":1,"reason":"construction_failed"}]}`)
+	if packetErr == nil {
+		if encoded, err := domain.MarshalWorkflowContextPacket(packet); err == nil {
+			packetJSON = encoded
+		}
+	}
+	safeTitle := packet.Summary
+	if safeTitle == "" {
+		safeTitle = task.ID.String()
+	}
+	structuredContext := "\nBounded semantic workflow context (authoritative; do not reconstruct from inherited workflow scrollback):\n" + string(packetJSON)
 	implementations := formatPrimeImplementations(task.Implementations)
 	parent := ""
 	mailbox := ""
@@ -9456,7 +9505,7 @@ func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Ta
 		issueID,
 		issueID,
 		task.ID,
-		task.Title,
+		safeTitle,
 		task.Status,
 		task.Priority.String(),
 		task.Type,
@@ -9473,11 +9522,11 @@ func renderPrimeIssueSection(issueID string, task domain.Task, tasks []domain.Ta
 
 func renderPrimeOrchestratorExitContract(rootIssueID string) string {
 	return fmt.Sprintf(`Orchestrator Exit Contract (root %s):
-- Remain in the active orchestration turn/loop after starting workers, nested orchestrators, or a background watch; startup is not a completed handoff to the human.
-- Continuously consume the root watch and react to worker/nested-orchestrator progress, blocked, and integration-ready evidence while graph work remains.
+- Process the current bounded orchestration snapshot and its immediate actions, then checkpoint and yield when the scope is quiescent.
+- Do not run a continuous watch or polling loop inside a model turn. The daemon observes scope changes and delivers one deduplicated revision-bound continuation when judgment or mutation is actionable.
 - Chain of command is strict: coordinate only direct children. Never launch, message, review, integrate, stop, or take over grandchildren or deeper descendants.
 - Supervise nested epic/root orchestrators as direct children while they exclusively own their descendants.
-- Resolve each review through `+"`az orchestrate review accept --root %s --issue <review-issue>`"+` or `+"`az orchestrate review return ...`"+`; accepted close must finish before using or presenting dependent results. Then advance newly unblocked work and repeat status/start/watch/review until `+"`az orchestrate complete-check --root %s`"+` passes; then run root validation.
+- Resolve each review through `+"`az orchestrate review accept --root %s --issue <review-issue>`"+` or `+"`az orchestrate review return ...`"+`; accepted close must finish before using or presenting dependent results. Then advance newly unblocked work and repeat bounded status/start/review steps while immediate work remains until `+"`az orchestrate complete-check --root %s`"+` passes; then run root validation.
 - Set the root `+"`in_review`"+` and report to the human without stopping its session or cleaning its worktree.
 - Close/integrate the root only after explicit human acceptance.
 `, rootIssueID, rootIssueID, rootIssueID)
@@ -9607,20 +9656,6 @@ func primeIssueDiffersFromRoot(rootIssueID, issueID string) bool {
 	rootIssueID = strings.TrimSpace(rootIssueID)
 	issueID = strings.TrimSpace(issueID)
 	return issueID != "" && !strings.EqualFold(issueID, rootIssueID)
-}
-
-func renderPrimeStructuredIssueContext(issueID string, task domain.Task) string {
-	var b strings.Builder
-	if strings.TrimSpace(task.Description) != "" {
-		fmt.Fprintf(&b, "\nDescription: %s", summarizePrimeDescription(issueID, task.Description))
-	}
-	if strings.TrimSpace(task.Acceptance) != "" {
-		fmt.Fprintf(&b, "\nAcceptance: %s", summarizePrimeDescription(issueID, task.Acceptance))
-	}
-	if strings.TrimSpace(task.Design) != "" {
-		fmt.Fprintf(&b, "\nDesign: %s", summarizePrimeDescription(issueID, task.Design))
-	}
-	return b.String()
 }
 
 func renderPrimeWorkerObservationSection(observations []domain.WorkerObservation) string {

@@ -13,6 +13,7 @@ const (
 	CommandGitPullBase          = "git.pull_base"
 	CommandGitPush              = "git.push"
 	CommandGitMerge             = "git.merge"
+	CommandGitMergeRef          = "git.merge_ref"
 	CommandGitCheckout          = "git.checkout"
 	CommandGitAbortMerge        = "git.abort_merge"
 	CommandGitDiffStat          = "git.diff_stat"
@@ -32,14 +33,17 @@ type GitSyncMsg = git.GitSyncMsg
 
 // GitCommandRequest captures the daemon request body for git workflow commands.
 type GitCommandRequest struct {
-	Worktree      string                    `json:"worktree"`
-	Remote        string                    `json:"remote,omitempty"`
-	Branch        string                    `json:"branch,omitempty"`
-	BaseBranch    string                    `json:"base_branch,omitempty"`
-	Targets       []GitRuntimeSignalsTarget `json:"targets,omitempty"`
-	CompareRemote bool                      `json:"compare_remote,omitempty"`
-	Refresh       bool                      `json:"refresh,omitempty"`
-	HookTriggered bool                      `json:"hook_triggered,omitempty"`
+	Worktree          string                    `json:"worktree"`
+	SourceID          string                    `json:"source_id,omitempty"`
+	TargetID          string                    `json:"target_id,omitempty"`
+	StopTargetSession bool                      `json:"stop_target_session,omitempty"`
+	Remote            string                    `json:"remote,omitempty"`
+	Branch            string                    `json:"branch,omitempty"`
+	BaseBranch        string                    `json:"base_branch,omitempty"`
+	Targets           []GitRuntimeSignalsTarget `json:"targets,omitempty"`
+	CompareRemote     bool                      `json:"compare_remote,omitempty"`
+	Refresh           bool                      `json:"refresh,omitempty"`
+	HookTriggered     bool                      `json:"hook_triggered,omitempty"`
 }
 
 // GitCommandResponse captures the daemon response body for git workflow commands.
@@ -58,9 +62,16 @@ type GitWorktreeForBranchResponse struct {
 
 // GitMergeCommandResponse captures the daemon response body for merge commands.
 type GitMergeCommandResponse struct {
-	Worktree string          `json:"worktree"`
-	Branch   string          `json:"branch"`
-	Result   git.MergeResult `json:"result"`
+	Worktree             string          `json:"worktree"`
+	Branch               string          `json:"branch"`
+	SourceID             string          `json:"source_id,omitempty"`
+	TargetID             string          `json:"target_id,omitempty"`
+	ConfiguredBaseTarget bool            `json:"configured_base_target,omitempty"`
+	BaseOID              string          `json:"base_oid,omitempty"`
+	SourceOID            string          `json:"source_oid,omitempty"`
+	TargetOID            string          `json:"target_oid,omitempty"`
+	ReceiptRecorded      bool            `json:"receipt_recorded,omitempty"`
+	Result               git.MergeResult `json:"result"`
 }
 
 type gitOutputBody struct {
@@ -186,9 +197,31 @@ func (c *Client) GitPush(ctx context.Context, worktree, remote, branch string) (
 
 // GitMerge asks the daemon to merge a branch into the requested worktree.
 func (c *Client) GitMerge(ctx context.Context, worktree, branch string) (GitMergeCommandResponse, error) {
-	raw, err := c.commandJSONResponse(ctx, CommandGitMerge, GitCommandRequest{
+	raw, err := c.commandJSONResponse(ctx, CommandGitMergeRef, GitCommandRequest{
 		Worktree: worktree,
 		Branch:   branch,
+	})
+	if err != nil {
+		return GitMergeCommandResponse{}, err
+	}
+	var resp GitMergeCommandResponse
+	if err := decodeLongRunningJSON(CommandGitMergeRef, raw.Body, &resp); err != nil {
+		return GitMergeCommandResponse{}, err
+	}
+	return resp, nil
+}
+
+// GitMergeTyped asks the daemon to resolve and merge an exact issue source into
+// an authoritative issue or configured-base target.
+func (c *Client) GitMergeTyped(ctx context.Context, sourceID, targetID string) (GitMergeCommandResponse, error) {
+	return c.GitMergeTypedWithOptions(ctx, sourceID, targetID, false)
+}
+
+// GitMergeTypedWithOptions asks daemon authority to coordinate optional target
+// session shutdown only after resolving the typed relationship.
+func (c *Client) GitMergeTypedWithOptions(ctx context.Context, sourceID, targetID string, stopTargetSession bool) (GitMergeCommandResponse, error) {
+	raw, err := c.commandJSONResponse(ctx, CommandGitMerge, GitCommandRequest{
+		SourceID: sourceID, TargetID: targetID, StopTargetSession: stopTargetSession,
 	})
 	if err != nil {
 		return GitMergeCommandResponse{}, err

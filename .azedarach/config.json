@@ -11,7 +11,39 @@
     "latencyTrace": true
   },
   "gate": {
-    "command": "just review-gate"
+    "command": "just review-gate",
+    "environmentFingerprint": "azedarach-go-review-v1",
+    "failureArtifactPaths": [
+      ".tmp/test-timing"
+    ],
+    "stages": [
+      {
+        "id": "build",
+        "command": "just build",
+        "resources": ["go-build-cache"]
+      },
+      {
+        "id": "cold-semantic-suite",
+        "command": "just test",
+        "resources": ["go-test-cache"],
+        "artifactPaths": [".tmp/test-timing"]
+      },
+      {
+        "id": "artifact-install-contract",
+        "command": "just test-build-contract",
+        "resources": ["go-build-cache"]
+      },
+      {
+        "id": "local-tracing-contract",
+        "command": "just test-jaeger-contract",
+        "resources": ["container-engine", "loopback-ports"]
+      },
+      {
+        "id": "static-boundary-contract",
+        "command": "just check-boundaries",
+        "resources": ["go-build-cache"]
+      }
+    ]
   },
   "git": {
     "baseBranch": "main",
@@ -105,12 +137,52 @@
     "draftByDefault": true,
     "notifyAfterCreate": true
   },
+  "publicationEvidence": {
+    "activePathProfiles": [
+      "merge-gate",
+      "cold"
+    ],
+    "dependencies": {
+      "daemon-operations-store": [
+        "internal/daemon/operations/store"
+      ],
+      "protocol-contract": [
+        "internal/contracts/protocol"
+      ]
+    },
+    "exactBaseSurfaces": {
+      "authority_boundary": [
+        "internal/client",
+        "internal/daemon",
+        "internal/tui"
+      ],
+      "generated_artifact": [
+        "internal/contracts/protocol/testdata",
+        "internal/ipc/codec/testdata"
+      ],
+      "migration": [
+        "internal/daemon/operations/store/migrations",
+        "internal/services/issues/migrations"
+      ],
+      "protocol": [
+        "internal/contracts/protocol"
+      ],
+      "schema": [
+        "docs/config.schema.json"
+      ],
+      "shared_invariant": [
+        "internal/daemon/invariant_policy.go"
+      ]
+    },
+    "policyVersion": "azedarach-publication-evidence-v1"
+  },
   "scheduledScripts": {
     "env": {},
     "scripts": []
   },
   "session": {
     "asyncInitCommands": [],
+    "codexAppServer": false,
     "dangerouslySkipPermissions": true,
     "logDir": "/Users/riordan/.azedarach/logs",
     "shell": "zsh",

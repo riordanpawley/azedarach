@@ -45,6 +45,14 @@ non-compiling commands remain eligible and aggregate capacity execution remains
 exclusive from shared capacity work. This policy does not gate ordinary
 development or delay push/review publication.
 
+Ticket-scoped capacity requests also carry the daemon-authoritative issue
+priority. Admission is priority-first and FIFO within equal priority. Once a
+later higher-priority request has overtaken an older request, that durable
+bypass debt protects the older request at the next compatible admission point;
+daemon replacement and concurrent clients cannot reset it. `az validation
+status` reports the effective queue position, issue priority, bypass count, and
+whether ordering follows `priority_fifo` or `bounded_fairness`.
+
 The runner establishes the mandatory database-isolation boundary before any
 test binary starts. It snapshots the configured root-user database, the current
 project database, and every registered project database into a pre-open refusal
@@ -54,7 +62,15 @@ not substitute a bare `go test ./...` when claiming the safe broad-suite
 contract. Real-database migration checks require explicit
 `AZEDARACH_USER_DB_CLONE` or `AZEDARACH_PROJECT_DB_CLONES` paths to safe
 temporary clones. Configured originals remain refused even if one is supplied
-through a clone variable.
+through a clone variable. The `migration-clone` profile snapshots every supplied
+clone independently for each package before starting package processes, then
+runs those processes in parallel with package-local HOME, config, and default
+database roots. Its status line and v5 report identify the
+`package-isolated-parallel` mode and the exact package-local clone paths. Clone
+authority mappings fail closed for unknown packages, invalid authorities, and
+configured user or project sources without a consuming package. The focused
+contract reproduces the former shared-identity `SQLITE_BUSY` failure before
+proving that concurrent private snapshots succeed without changing the source.
 
 ## Commands
 
@@ -100,6 +116,16 @@ Artifacts are written beneath `.tmp/test-timing/<profile>-<UTC timestamp>/`:
 - `report.json` is the versioned machine-readable measurement and comparison.
 - `report.md` is the same result rendered for review, sorted slowest first.
 
+When a transactional merge candidate fails its repository push gate, the lease
+wrapper copies these files plus the whole-gate output before the disposable
+integration worktree is removed. The durable location is
+`.azedarach/validation-artifacts/failures/<candidate-revision>/<request-id>/`
+under the canonical project root. Its manifest binds request, revision, exit
+status, concise failure, content hashes, and durable references; validation
+evidence is rewritten to the published paths before the daemon records the
+terminal request. Successful gates publish nothing. Cleanup retains referenced
+evidence and bounds only orphaned data to 30 days and the newest 20 directories.
+
 Controlled CI timing reports sample the host process tree and separate the
 validator's own Go compiler, linker, vet, and test processes from external Go
 load. The daemon retains that capacity-run overlap evidence. Local semantic
@@ -113,7 +139,7 @@ replayed package/test durations are reported but excluded from current pathology
 budgets; the cached profile's current wall time remains budgeted. The raw stream
 remains authoritative.
 
-Every v4 report records `test_result_cache_mode` as `cleared-and-bypassed`,
+Every v5 report records `test_result_cache_mode` as `cleared-and-bypassed`,
 `bypassed`, or `permitted`. The compatibility `cache_mode` field has the same
 test-result meaning. Neither field describes compiled build objects. The
 `build_cache` object separately records its namespace and retention policy,
@@ -126,6 +152,15 @@ The runner writes all artifacts before returning the test command's exit status
 or a budget failure. Do not replace it with a shell pipeline that loses earlier
 failures or reports only the last failing package.
 
+The command root handles interrupt and SIGTERM through context cancellation.
+Managed Go commands join a runner-owned anchor process group. When the direct
+leader exits, the still-live anchor preserves the exact group identity while
+the runner kills surviving descendants, drains lifecycle and output pipes, and
+reaps the anchor. The same sequence handles cancellation and partial startup;
+there is no process-table polling. Temporary private database roots are removed
+only after supervision completes, and cleanup failures are returned rather than
+ignored.
+
 ## Profile semantics
 
 | Profile | Test-result cache | Build-cache namespace | Scope | Purpose |
@@ -135,7 +170,7 @@ failures or reports only the last failing package.
 | `cached` | explicitly permitted | normal / lifecycle owner | `./...` | Measures normal repeat developer feedback; cached packages remain visible in the JSON stream. |
 | `focused` | bypassed with `-count=1` | normal / lifecycle owner | defaults to `./internal/testtiming`; override with repeated `--package` | Fast development checks without pretending to be complete coverage. |
 | `integration` | bypassed with `-count=1` | normal / lifecycle owner | daemon, daemon-process, Git, and tmux tests named `RealProcessProfile…` | Real subprocess and lifecycle contracts only. |
-| `migration-clone` | bypassed with `-count=1` | normal / lifecycle owner | issue, user-store, runtime-state, and daemon migration/repair tests | Fresh, historical-upgrade, rollback, drift, repair, reopen, and clone-isolation execution paths. |
+| `migration-clone` | bypassed with `-count=1` | normal / lifecycle owner | issue, user-store, runtime-state, operations-store, and daemon migration/repair tests in package-isolated parallel processes | Fresh, historical-upgrade, rollback, drift, repair, reopen, and clone-isolation execution paths without sharing mutable clone identity. |
 | `race` | bypassed with `-count=1` | race / lifecycle owner | selected SQLite-clone, daemon-process, and concurrent Git contracts under `-race` | Focused shared-state validation that remains useful on ordinary developer hosts. |
 | `boundary` | bypassed with `-count=1` | normal / lifecycle owner | CLI/TUI executable boundary guards | Thin-client, transport-shim, and session-projection regressions; static graph checks remain in `just check-boundaries`. |
 
@@ -193,7 +228,7 @@ and hardware differences, so a local budget violation is written to
 
 `.github/workflows/controlled-timing.yml` is deliberately manual and targets
 the versioned self-hosted label `azedarach-timing-v1`. The runner must be a
-dedicated 8-vCPU/16-GiB machine image with Go 1.24.7, no concurrent Go
+dedicated 8-vCPU/16-GiB machine image with Go 1.25.7, no concurrent Go
 validation, and a clean Go test-result cache before each sample. The daemon
 timing-capacity lease supplies exclusive capacity admission and rejects
 observed overlapping Go work.

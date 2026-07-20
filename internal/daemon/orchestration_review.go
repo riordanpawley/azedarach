@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
@@ -19,11 +21,15 @@ import (
 )
 
 type acceptedReviewPin struct {
-	SourceOID       string
-	EvidenceSource  string
-	EvidenceEventID int64
-	EvidenceSeq     int64
-	EvidenceDigest  string
+	Reviewer                       domain.ReviewerIdentity
+	ReviewEpochEventID             int64
+	AcceptedReviewEventID          int64
+	AcceptedPublicationOperationID string
+	SourceOID                      string
+	EvidenceSource                 string
+	EvidenceEventID                int64
+	EvidenceSeq                    int64
+	EvidenceDigest                 string
 }
 
 func validOrchestrationIntentKind(kind protocol.OrchestrationIntentKind) bool {
@@ -70,17 +76,39 @@ func validateOrchestrationReviewIntent(request protocol.OrchestrationIntentReque
 		if total > 3000 {
 			return fmt.Errorf("review findings exceed the 3000 character delivery limit")
 		}
+		if request.ReviewPass == nil || request.ReviewPass.BroaderInvalidation == nil {
+			return fmt.Errorf("review-return intent requires an explicit broader-invalidation judgment")
+		}
+		if err := protocol.ValidateReturnedReviewPass(*request.ReviewPass); err != nil {
+			return fmt.Errorf("review-return intent: %w", err)
+		}
 		return nil
 	default:
 		return fmt.Errorf("unsupported orchestration intent %q", request.Kind)
 	}
 }
 
+func validateReviewAffectedInvariants(values []string) error {
+	if len(values) == 0 {
+		return fmt.Errorf("require at least one canonical invariant")
+	}
+	for _, value := range values {
+		invariant := strings.TrimSpace(value)
+		if invariant == "" {
+			return fmt.Errorf("must not contain an empty invariant")
+		}
+		if !protocol.KnownDaemonInvariant(invariant) {
+			return fmt.Errorf("unknown invariant %q", invariant)
+		}
+	}
+	return nil
+}
+
 func (a daemonOrchestrationAuthority) reviewQueue(ctx context.Context, projectID string, request protocol.OrchestrationSnapshotRequest, tasks []domain.Task) ([]protocol.OrchestrationReview, error) {
 	if !usesProjectionSource(sourceForInvariant(daemonInvariantOrchestrationReview)) {
 		return nil, nil
 	}
-	actionableTasks := orchestrationReviewScopeTasks(tasks, request.Scope)
+	actionableTasks := orchestrationReviewScopeTasks(tasks, request.Scope, request.ReviewIssueIDs)
 	acceptedCloseCandidates := make([]string, 0)
 	for _, task := range actionableTasks {
 		if reviewOutcomeLookupCandidate(task) {
@@ -108,26 +136,6 @@ func (a daemonOrchestrationAuthority) reviewQueue(ctx context.Context, projectID
 	if request.Limit > 0 && len(reviewTasks) > request.Limit {
 		reviewTasks = reviewTasks[:request.Limit]
 	}
-	if a.daemon.materializedReadsEnabled() && len(reviewTasks) > 0 {
-		issueIDs := reviewWorktreeRefreshIssueIDs(reviewTasks, tasks)
-		if err := a.daemon.refreshFiniteWorktreeGitFacts(ctx, projectID, issueIDs); err != nil {
-			return nil, fmt.Errorf("refresh review worktree git facts: %w", err)
-		}
-		refreshed, _, err := a.daemon.projectReadSnapshot(projectID)
-		if err != nil {
-			return nil, fmt.Errorf("reload refreshed review projection: %w", err)
-		}
-		refreshedByID := make(map[string]domain.Task, len(refreshed))
-		for _, task := range refreshed {
-			refreshedByID[task.ID.String()] = task
-		}
-		for i := range reviewTasks {
-			if task, ok := refreshedByID[reviewTasks[i].ID.String()]; ok {
-				reviewTasks[i] = task
-			}
-		}
-	}
-
 	worktrees := map[string]git.Worktree{}
 	if a.daemon.materializedReadsEnabled() {
 		worktrees = a.daemon.projectReadWorktrees(projectID)
@@ -180,17 +188,62 @@ func reviewWorktreeRefreshIssueIDs(reviewTasks, allTasks []domain.Task) []string
 	return ids
 }
 
-func orchestrationReviewScopeTasks(tasks []domain.Task, scope domain.OrchestrationScope) []domain.Task {
-	if scope.Kind != domain.OrchestrationScopeRooted {
-		return tasks
+func orchestrationReviewScopeTasks(tasks []domain.Task, scope domain.OrchestrationScope, requestedIssueIDs []string) []domain.Task {
+	requested := make(map[string]struct{}, len(requestedIssueIDs))
+	for _, issueID := range requestedIssueIDs {
+		requested[naming.CanonicalIssueIDKey(issueID)] = struct{}{}
 	}
 	out := make([]domain.Task, 0)
 	for _, task := range tasks {
-		if task.ParentID != nil && !task.ParentID.IsZero() && naming.IssueIDsEqual(task.ParentID.String(), scope.RootIssueID.String()) {
-			out = append(out, task)
+		if len(requested) > 0 {
+			if _, ok := requested[naming.CanonicalIssueIDKey(task.ID.String())]; !ok {
+				continue
+			}
 		}
+		if scope.Kind == domain.OrchestrationScopeRooted && (task.ParentID == nil || task.ParentID.IsZero() || !naming.IssueIDsEqual(task.ParentID.String(), scope.RootIssueID.String())) {
+			continue
+		}
+		out = append(out, task)
 	}
 	return out
+}
+
+func stableRequestedReviewCandidates(requested, ordered []string) []string {
+	wanted := make(map[string]struct{}, len(requested))
+	for _, issueID := range requested {
+		if key := naming.CanonicalIssueIDKey(issueID); key != "" {
+			wanted[key] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(wanted))
+	seen := make(map[string]struct{}, len(wanted))
+	for _, issueID := range ordered {
+		key := naming.CanonicalIssueIDKey(issueID)
+		if _, requested := wanted[key]; !requested {
+			continue
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, issueID)
+	}
+	remainder := make([]string, 0, len(wanted)-len(seen))
+	for _, issueID := range requested {
+		key := naming.CanonicalIssueIDKey(issueID)
+		if key == "" {
+			continue
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		remainder = append(remainder, strings.TrimSpace(issueID))
+	}
+	sort.SliceStable(remainder, func(i, j int) bool {
+		return naming.CanonicalIssueIDKey(remainder[i]) < naming.CanonicalIssueIDKey(remainder[j])
+	})
+	return append(out, remainder...)
 }
 
 func reviewOutcomeLookupCandidate(task domain.Task) bool {
@@ -199,6 +252,15 @@ func reviewOutcomeLookupCandidate(task domain.Task) bool {
 }
 
 func (a daemonOrchestrationAuthority) latestTrustedReviewOutcomes(ctx context.Context, projectID string, issueIDs []string) (map[string]string, error) {
+	if projection, prepared := orchestrationSnapshotProjection(ctx); prepared {
+		outcomes := make(map[string]string, len(issueIDs))
+		for _, issueID := range issueIDs {
+			if outcome := projection.TrustedReviewOutcomes[issueID]; outcome != "" {
+				outcomes[issueID] = string(outcome)
+			}
+		}
+		return outcomes, nil
+	}
 	issueClient := a.daemon.issueClientForProject(projectID)
 	if issueClient == nil {
 		return nil, fmt.Errorf("issue store unavailable")
@@ -228,34 +290,14 @@ func (a daemonOrchestrationAuthority) latestTrustedReviewOutcomes(ctx context.Co
 }
 
 func (a daemonOrchestrationAuthority) reviewInspection(ctx context.Context, projectID, repoDir, actorID string, task domain.Task, tasks map[string]domain.Task, worktrees map[string]git.Worktree) protocol.OrchestrationReview {
-	inspection := protocol.OrchestrationReview{IssueID: task.ID.String(), Actionable: true}
-	if task.ParentID != nil {
-		inspection.ParentIssueID = task.ParentID.String()
-	}
-	if task.Ownership != nil && task.Ownership.IsActive(time.Now().UTC()) {
-		inspection.ExecutionOwner = task.Ownership.OwnerID
-	}
-	if lease := coordinationLease(task, domain.CoordinationLeaseOrchestration); lease != nil && !lease.IsExpired(time.Now().UTC()) {
-		inspection.OrchestrationOwner = lease.OwnerID
-		if !strings.EqualFold(strings.TrimSpace(lease.OwnerID), strings.TrimSpace(actorID)) {
-			inspection.Actionable = false
-			inspection.Reasons = append(inspection.Reasons, "orchestration-owned-by-"+lease.OwnerID)
-		}
-	}
-	if lease := coordinationLease(task, domain.CoordinationLeaseReview); lease != nil && !lease.IsExpired(time.Now().UTC()) {
-		inspection.ReviewOwner = lease.OwnerID
-		if !strings.EqualFold(strings.TrimSpace(lease.OwnerID), strings.TrimSpace(actorID)) {
-			inspection.Actionable = false
-			inspection.Reasons = append(inspection.Reasons, "review-owned-by-"+lease.OwnerID)
-		}
-	}
+	inspection := reviewCoordinationInspection(task, actorID)
 	candidatePath := ""
 	if candidate, ok := worktrees[task.ID.String()]; ok {
 		candidatePath = strings.TrimSpace(candidate.Path)
 	} else {
 		inspection.Reasons = append(inspection.Reasons, "inspect-candidate: candidate_projection_missing: issue has no durable worktree projection")
 	}
-	readiness, err := a.daemon.taskIntegrationReadiness(ctx, projectID, task.ID.String(), candidatePath)
+	readiness, err := a.daemon.taskReviewAcceptanceReadiness(ctx, projectID, task.ID.String(), candidatePath)
 	if err != nil {
 		inspection.Reasons = append(inspection.Reasons, "inspect-evidence: "+err.Error())
 	} else {
@@ -272,6 +314,22 @@ func (a daemonOrchestrationAuthority) reviewInspection(ctx context.Context, proj
 		inspection.WorktreePath = strings.TrimSpace(worktree.Path)
 		inspection.Branch = strings.TrimSpace(worktree.Branch)
 		inspection.BaseBranch = a.daemon.runtimeDiffBaseBranchForIssue(task.ID.String(), a.daemon.baseBranchForProject(projectID), tasks, worktrees)
+		if a.daemon.git != nil && inspection.WorktreePath != "" && inspection.BaseBranch != "" {
+			headRevision, headErr := a.daemon.git.HeadRevision(ctx, inspection.WorktreePath)
+			if headErr != nil {
+				inspection.Reasons = append(inspection.Reasons, "inspect-head-revision: "+headErr.Error())
+			} else {
+				baseRevision, baseErr := a.daemon.git.MergeBaseForRevision(ctx, inspection.WorktreePath, inspection.BaseBranch, headRevision)
+				if baseErr != nil {
+					inspection.Reasons = append(inspection.Reasons, "inspect-diff-base-revision: "+baseErr.Error())
+				} else {
+					inspection.DiffBaseRevision = strings.TrimSpace(baseRevision)
+					inspection.HeadRevision = strings.TrimSpace(headRevision)
+					inspection.DiffScope = fmt.Sprintf("issue:%s:base:%s@%s", task.ID.String(), inspection.BaseBranch, inspection.DiffBaseRevision)
+					inspection.DiffRange = inspection.DiffBaseRevision + ".." + inspection.HeadRevision
+				}
+			}
+		}
 		if a.daemon.materializedReadsEnabled() {
 			if task.GitAdditions != 0 || task.GitDeletions != 0 {
 				inspection.DiffStat = fmt.Sprintf("%d additions, %d deletions", task.GitAdditions, task.GitDeletions)
@@ -284,14 +342,347 @@ func (a daemonOrchestrationAuthority) reviewInspection(ctx context.Context, proj
 			}
 		}
 	}
+	if inspection.Evidence != nil {
+		review := inspection.Evidence.Review
+		if !strings.EqualFold(strings.TrimSpace(review.Status), "clean") {
+			inspection.Actionable = false
+			inspection.Reasons = append(inspection.Reasons, "inspect-worker-review: worker review status is not clean")
+		}
+		if revision := strings.TrimSpace(review.Revision); revision != "" && inspection.HeadRevision != "" && revision != inspection.HeadRevision {
+			inspection.Actionable = false
+			inspection.Reasons = append(inspection.Reasons, "inspect-worker-review: review revision does not match exact candidate HEAD")
+		}
+	}
+	if task.Status == domain.StatusInReview {
+		issueClient := a.daemon.issueClientForProject(projectID)
+		if issueClient == nil {
+			inspection.Actionable = false
+			inspection.Reasons = append(inspection.Reasons, "inspect-review-admission: issue store unavailable")
+		} else if admission, err := issueClient.CaptureReviewAdmissionPin(ctx, task.ID.String()); err != nil {
+			inspection.Actionable = false
+			inspection.Reasons = append(inspection.Reasons, "inspect-review-admission: "+err.Error())
+		} else {
+			inspection.ReviewEpochEventID = admission.ReviewEpochEventID
+			if admission.Evidence != nil {
+				inspection.EvidenceSource = admission.Evidence.Source
+				inspection.EvidenceEventID = admission.Evidence.EventID
+				inspection.EvidenceSeq = admission.Evidence.Seq
+				inspection.EvidenceDigest = admission.Evidence.Digest
+			}
+			if readiness.EvidencePacket != nil {
+				readinessPin, pinErr := reviewEvidencePinFromReadiness(readiness)
+				if pinErr != nil || admission.Evidence == nil || readinessPin != *admission.Evidence {
+					inspection.Actionable = false
+					inspection.Reasons = append(inspection.Reasons, "inspect-review-admission: exported evidence identity changed")
+				}
+			} else if admission.Evidence != nil {
+				inspection.Actionable = false
+				inspection.Reasons = append(inspection.Reasons, "inspect-review-admission: exported evidence is unavailable")
+			}
+			if inspection.WorktreePath != "" || inspection.Evidence != nil {
+				oid, oidErr := a.resolveAcceptedReviewSourceOID(ctx, projectID, task.ID.String())
+				if oidErr != nil || strings.TrimSpace(oid) == "" {
+					inspection.Actionable = false
+					reason := "empty object ID"
+					if oidErr != nil {
+						reason = oidErr.Error()
+					}
+					inspection.Reasons = append(inspection.Reasons, "inspect-review-admission: exact candidate unavailable: "+reason)
+				} else {
+					inspection.SourceOID = strings.TrimSpace(oid)
+				}
+			}
+		}
+	}
+	if inspection.DiffRange != "" {
+		a.applyReviewRangeCheckpoint(ctx, projectID, &inspection)
+	}
 	if outcome, err := a.latestTrustedReviewOutcome(ctx, projectID, task.ID.String()); err != nil {
 		inspection.Reasons = append(inspection.Reasons, "inspect-review-outcome: "+err.Error())
 	} else if outcome == "accepted" {
 		inspection.Actionable = false
 		inspection.Reasons = append(inspection.Reasons, "accepted-close-pending")
 	}
+	contextPacket, contextErr := buildReviewWorkflowContext(task, inspection, domain.WorkflowRoleReviewer)
+	if contextErr != nil {
+		inspection.Reasons = append(inspection.Reasons, "inspect-bounded-context: "+contextErr.Error())
+	} else {
+		inspection.ReviewContext = &contextPacket
+		if integrationPacket, integrationErr := buildReviewWorkflowContext(task, inspection, domain.WorkflowRoleIntegrator); integrationErr == nil {
+			inspection.IntegrationContext = &integrationPacket
+		} else {
+			inspection.Reasons = append(inspection.Reasons, "inspect-bounded-integration-context: "+integrationErr.Error())
+		}
+	}
 	inspection.Reasons = uniqueNonEmpty(inspection.Reasons)
 	return inspection
+}
+
+func buildReviewWorkflowContext(task domain.Task, inspection protocol.OrchestrationReview, role domain.WorkflowRole) (domain.WorkflowContextPacket, error) {
+	revision := strings.TrimSpace(inspection.HeadRevision)
+	if revision == "" {
+		revision = strings.TrimSpace(inspection.SourceOID)
+	}
+	if revision == "" && inspection.ReviewEpochEventID > 0 {
+		revision = fmt.Sprintf("issue-event:%d", inspection.ReviewEpochEventID)
+	}
+	if revision == "" {
+		revision = domain.WorkflowIssueContextRevision(task)
+	}
+	findings := []string(nil)
+	invariants := []string(nil)
+	artifacts := []domain.WorkflowArtifactReference(nil)
+	if inspection.Evidence != nil {
+		findings = append(findings, inspection.Evidence.Review.Findings...)
+		for _, link := range inspection.Evidence.ArtifactLinks {
+			artifacts = append(artifacts, domain.WorkflowArtifactReference{Label: link.Label, Reference: link.URL})
+		}
+	}
+	if inspection.ContextRisk != nil {
+		for _, evidence := range inspection.ContextRisk.Evidence {
+			if invariant := strings.TrimSpace(evidence.Invariant); invariant != "" {
+				invariants = append(invariants, invariant)
+			}
+		}
+	}
+	return domain.BuildWorkflowContextPacket(domain.WorkflowContextInput{
+		Role: role, IssueID: task.ID.String(), SourceRevision: revision, Summary: task.Title,
+		Requirements: domain.WorkflowIssueRequirements(task), UnresolvedFindings: findings,
+		AffectedInvariants: invariants, ArtifactLinks: artifacts,
+	})
+}
+
+func reviewCoordinationInspection(task domain.Task, actorID string) protocol.OrchestrationReview {
+	inspection := protocol.OrchestrationReview{IssueID: task.ID.String(), Actionable: true}
+	if task.ParentID != nil {
+		inspection.ParentIssueID = task.ParentID.String()
+	}
+	now := time.Now().UTC()
+	if task.Ownership != nil && task.Ownership.IsActive(now) {
+		inspection.ExecutionOwner = task.Ownership.OwnerID
+	}
+	if lease := coordinationLease(task, domain.CoordinationLeaseOrchestration); lease != nil && !lease.IsExpired(now) {
+		inspection.OrchestrationOwner = lease.OwnerID
+		if !strings.EqualFold(strings.TrimSpace(lease.OwnerID), strings.TrimSpace(actorID)) {
+			inspection.Actionable = false
+			inspection.Reasons = append(inspection.Reasons, "orchestration-owned-by-"+lease.OwnerID)
+		}
+	}
+	if lease := coordinationLease(task, domain.CoordinationLeaseReview); lease != nil && !lease.IsExpired(now) {
+		inspection.ReviewOwner = lease.OwnerID
+		if !strings.EqualFold(strings.TrimSpace(lease.OwnerID), strings.TrimSpace(actorID)) {
+			inspection.Actionable = false
+			inspection.Reasons = append(inspection.Reasons, "review-owned-by-"+lease.OwnerID)
+		}
+	}
+	return inspection
+}
+
+func (a daemonOrchestrationAuthority) applyReviewRangeCheckpoint(ctx context.Context, projectID string, inspection *protocol.OrchestrationReview) {
+	if inspection == nil {
+		return
+	}
+	inspection.ReviewMode = "full"
+	inspection.ReviewFallback = "initial_review"
+	if inspection.ReviewEpochEventID <= 0 || a.daemon.git == nil || strings.TrimSpace(inspection.WorktreePath) == "" {
+		return
+	}
+	issueClient := a.daemon.issueClientForProject(projectID)
+	if issueClient == nil {
+		inspection.ReviewFallback = "checkpoint_unavailable"
+		return
+	}
+	events, err := issueClient.ListIssueObservationEvents(ctx, inspection.IssueID, issues.IssueObservationEventListOptions{
+		Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}, NewestIDFirst: true,
+	})
+	if err != nil {
+		inspection.ReviewFallback = "checkpoint_unavailable"
+		return
+	}
+	var checkpoint *domain.IssueObservationEvent
+	for i := range events {
+		event := events[i]
+		if event.ID >= inspection.ReviewEpochEventID {
+			continue
+		}
+		outcome, trusted := domain.TrustedReviewOutcome(event)
+		if trusted && outcome == domain.ReviewOutcomeReturned {
+			checkpoint = &event
+			break
+		}
+	}
+	if checkpoint == nil {
+		return
+	}
+	base := observationPayloadString(checkpoint.Payload, "review_diff_base_revision")
+	head := observationPayloadString(checkpoint.Payload, "review_head_revision")
+	scope := observationPayloadString(checkpoint.Payload, "review_diff_scope")
+	if base == "" || head == "" || scope == "" {
+		inspection.ReviewFallback = "checkpoint_missing"
+		return
+	}
+	priorFindings, affected, semanticFallback := reviewCheckpointSemantics(checkpoint.Payload)
+	if semanticFallback != "" {
+		inspection.ReviewFallback = semanticFallback
+		return
+	}
+	if base != inspection.DiffBaseRevision {
+		inspection.ReviewFallback = "checkpoint_base_changed"
+		return
+	}
+	if scope != inspection.DiffScope {
+		inspection.ReviewFallback = "checkpoint_scope_changed"
+		return
+	}
+	resolved, err := a.daemon.git.ResolveCommit(ctx, inspection.WorktreePath, head)
+	if err != nil || strings.TrimSpace(resolved) != head {
+		inspection.ReviewFallback = "checkpoint_unresolvable"
+		return
+	}
+	ancestor, err := a.daemon.git.CommitContainedInRef(ctx, inspection.WorktreePath, head, inspection.HeadRevision)
+	if err != nil || !ancestor {
+		inspection.ReviewFallback = "checkpoint_not_ancestor"
+		return
+	}
+	inspection.ReviewMode = "incremental"
+	inspection.DeltaBaseRevision = head
+	inspection.DiffRange = head + ".." + inspection.HeadRevision
+	inspection.ReviewFallback = ""
+	inspection.PriorFindings = priorFindings
+	inspection.AffectedInvariants = uniqueNonEmpty(affected)
+}
+
+func reviewCheckpointSemantics(payload map[string]any) ([]protocol.OrchestrationReviewFinding, []string, string) {
+	if observationPayloadString(payload, "review_verdict") != string(domain.ReviewOutcomeReturned) || observationPayloadString(payload, "review_angle") == "" {
+		return nil, nil, "checkpoint_missing_semantics"
+	}
+	if broader, ok := payload["review_broader_invalidation"].(bool); !ok || broader {
+		return nil, nil, "checkpoint_broader_invalidation"
+	}
+	var findings []protocol.OrchestrationReviewFinding
+	var matrix domain.WorkerEvidenceReviewMatrix
+	var reused []string
+	var affected []string
+	findingsOK := decodeReviewCheckpointValue(payload["review_unique_findings"], &findings) && len(findings) > 0
+	matrixOK := decodeReviewCheckpointValue(payload["review_matrix"], &matrix) && strings.TrimSpace(matrix.Type) != "" && len(matrix.CoveredCells)+len(matrix.SkippedCells) > 0
+	reusedOK := decodeReviewCheckpointValue(payload["review_reused_layers"], &reused)
+	affectedOK := decodeReviewCheckpointValue(payload["review_affected_invariants"], &affected) && validateReviewAffectedInvariants(affected) == nil
+	seenFindings := make(map[string]struct{}, len(findings))
+	for _, finding := range findings {
+		key := strings.ToLower(strings.TrimSpace(finding.Severity)) + "\x00" + strings.TrimSpace(finding.Finding)
+		if strings.TrimSpace(finding.Finding) == "" {
+			findingsOK = false
+		}
+		if _, exists := seenFindings[key]; exists {
+			findingsOK = false
+		}
+		seenFindings[key] = struct{}{}
+	}
+	seenLayers := make(map[string]struct{}, len(reused))
+	for _, layer := range reused {
+		key := strings.ToLower(strings.TrimSpace(layer))
+		if key == "" {
+			reusedOK = false
+		}
+		if _, exists := seenLayers[key]; exists {
+			reusedOK = false
+		}
+		seenLayers[key] = struct{}{}
+	}
+	seenCells := make(map[string]struct{}, len(matrix.CoveredCells)+len(matrix.SkippedCells))
+	for _, covered := range matrix.CoveredCells {
+		key := strings.ToLower(strings.TrimSpace(covered))
+		if key == "" {
+			matrixOK = false
+		}
+		if _, exists := seenCells[key]; exists {
+			matrixOK = false
+		}
+		seenCells[key] = struct{}{}
+	}
+	for _, skipped := range matrix.SkippedCells {
+		key := strings.ToLower(strings.TrimSpace(skipped.Cell))
+		if key == "" || strings.TrimSpace(skipped.Reason) == "" {
+			matrixOK = false
+		}
+		if _, exists := seenCells[key]; exists {
+			matrixOK = false
+		}
+		seenCells[key] = struct{}{}
+	}
+	if !findingsOK || !matrixOK || !reusedOK || !affectedOK {
+		return nil, nil, "checkpoint_malformed"
+	}
+	return findings, uniqueNonEmpty(affected), ""
+}
+
+func decodeReviewCheckpointValue(raw any, target any) bool {
+	if raw == nil {
+		return false
+	}
+	encoded, err := json.Marshal(raw)
+	return err == nil && json.Unmarshal(encoded, target) == nil
+}
+
+// reviewReturnQueue reads only the exact durable issues named by the return
+// intent. Returning findings does not accept or integrate a Git candidate, so
+// it must not depend on a whole-project snapshot or synchronous candidate and
+// ancestor Git refreshes. The review lease claim below remains the atomic
+// current-review-state gate before any return side effect is published.
+func (a daemonOrchestrationAuthority) reviewReturnQueue(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest) ([]protocol.OrchestrationReview, error) {
+	issueClient := a.daemon.issueClientForProject(projectID)
+	if issueClient == nil {
+		return nil, fmt.Errorf("issue store unavailable")
+	}
+	queue := make([]protocol.OrchestrationReview, 0, len(request.IssueIDs))
+	for _, issueID := range stableRequestedReviewCandidates(request.IssueIDs, nil) {
+		task, err := issueClient.GetWithRuntime(ctx, projectID, issueID)
+		if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				continue
+			}
+			return nil, fmt.Errorf("load review return issue %s: %w", issueID, err)
+		}
+		if request.Scope.Kind == domain.OrchestrationScopeRooted && (task.ParentID == nil || task.ParentID.IsZero() || !naming.IssueIDsEqual(task.ParentID.String(), request.Scope.RootIssueID.String())) {
+			continue
+		}
+		reviewRequested, err := currentReviewRequested(ctx, issueClient, task)
+		if err != nil {
+			return nil, fmt.Errorf("load review return epoch %s: %w", issueID, err)
+		}
+		if !reviewRequested {
+			continue
+		}
+		inspection := reviewCoordinationInspection(task, request.ActorID)
+		if outcome, err := a.latestTrustedReviewOutcome(ctx, projectID, task.ID.String()); err != nil {
+			inspection.Actionable = false
+			inspection.Reasons = append(inspection.Reasons, "inspect-review-outcome: "+err.Error())
+		} else if outcome == "accepted" {
+			inspection.Actionable = false
+			inspection.Reasons = append(inspection.Reasons, "accepted-close-pending")
+		}
+		inspection.Reasons = uniqueNonEmpty(inspection.Reasons)
+		queue = append(queue, inspection)
+	}
+	return queue, nil
+}
+
+func currentReviewRequested(ctx context.Context, issueClient *issues.Client, task domain.Task) (bool, error) {
+	events, err := issueClient.ListIssueObservationEvents(ctx, task.ID.String(), issues.IssueObservationEventListOptions{
+		Types:         []domain.IssueObservationEventType{domain.IssueEventIssueStatusChanged},
+		NewestIDFirst: true,
+	})
+	if err != nil {
+		return false, err
+	}
+	for _, event := range events {
+		if strings.TrimSpace(event.Source) != "issue-store" {
+			continue
+		}
+		return domain.IsReviewRequestTransition(event), nil
+	}
+	facts := task.IssueFacts()
+	return task.Status == domain.StatusInReview || task.State.Review() == domain.IssueReviewRequested || facts.ReviewState == domain.IssueReviewRequested, nil
 }
 
 func (a daemonOrchestrationAuthority) latestTrustedReviewOutcome(ctx context.Context, projectID, issueID string) (string, error) {
@@ -311,6 +702,75 @@ func coordinationLease(task domain.Task, purpose domain.CoordinationLeasePurpose
 	return nil
 }
 
+func reviewAdmissionPinFromInspection(inspection protocol.OrchestrationReview) (issues.ReviewAdmissionPin, error) {
+	if inspection.ReviewEpochEventID <= 0 {
+		return issues.ReviewAdmissionPin{}, fmt.Errorf("exported review admission has no epoch identity")
+	}
+	pin := issues.ReviewAdmissionPin{ReviewEpochEventID: inspection.ReviewEpochEventID}
+	if inspection.EvidenceEventID != 0 || inspection.EvidenceSeq != 0 || strings.TrimSpace(inspection.EvidenceDigest) != "" {
+		if inspection.EvidenceEventID <= 0 || strings.TrimSpace(inspection.EvidenceDigest) == "" {
+			return issues.ReviewAdmissionPin{}, fmt.Errorf("exported review admission has incomplete evidence identity")
+		}
+		pin.Evidence = &issues.ReviewEvidencePin{
+			Source: strings.TrimSpace(inspection.EvidenceSource), EventID: inspection.EvidenceEventID,
+			Seq: inspection.EvidenceSeq, Digest: strings.TrimSpace(inspection.EvidenceDigest),
+		}
+	}
+	return pin, nil
+}
+
+func (a daemonOrchestrationAuthority) validateReviewAdmissionInspection(ctx context.Context, projectID string, inspection protocol.OrchestrationReview) error {
+	expected, err := reviewAdmissionPinFromInspection(inspection)
+	if err != nil {
+		return err
+	}
+	issueClient := a.daemon.issueClientForProject(projectID)
+	if issueClient == nil {
+		return fmt.Errorf("issue store unavailable")
+	}
+	current, err := issueClient.CaptureReviewAdmissionPin(ctx, inspection.IssueID)
+	if err != nil {
+		return fmt.Errorf("validate review admission: %w", err)
+	}
+	if current.ReviewEpochEventID != expected.ReviewEpochEventID || (current.Evidence == nil) != (expected.Evidence == nil) || (current.Evidence != nil && *current.Evidence != *expected.Evidence) {
+		return fmt.Errorf("review admission epoch or evidence identity changed")
+	}
+	task, err := issueClient.GetWithRuntime(ctx, projectID, inspection.IssueID)
+	if err != nil {
+		return fmt.Errorf("validate review parent: %w", err)
+	}
+	currentParent := ""
+	if task.ParentID != nil {
+		currentParent = task.ParentID.String()
+	}
+	if (currentParent == "") != (strings.TrimSpace(inspection.ParentIssueID) == "") || (currentParent != "" && !naming.IssueIDsEqual(currentParent, inspection.ParentIssueID)) {
+		return fmt.Errorf("review parent changed from %q to %q", inspection.ParentIssueID, currentParent)
+	}
+	if strings.TrimSpace(inspection.SourceOID) == "" {
+		if strings.TrimSpace(inspection.WorktreePath) != "" {
+			return fmt.Errorf("exported review admission has no exact candidate pin")
+		}
+		return nil
+	}
+	if strings.TrimSpace(inspection.WorktreePath) != "" {
+		path, err := a.daemon.exactReviewCandidateWorktree(ctx, projectID, inspection.IssueID)
+		if err != nil {
+			return fmt.Errorf("validate exact review candidate: %w", err)
+		}
+		if filepath.Clean(path) != filepath.Clean(strings.TrimSpace(inspection.WorktreePath)) {
+			return fmt.Errorf("review candidate path changed from %q to %q", inspection.WorktreePath, path)
+		}
+	}
+	oid, err := a.resolveAcceptedReviewSourceOID(ctx, projectID, inspection.IssueID)
+	if err != nil {
+		return fmt.Errorf("validate exact review candidate: %w", err)
+	}
+	if strings.TrimSpace(oid) != strings.TrimSpace(inspection.SourceOID) {
+		return fmt.Errorf("review candidate changed from %s to %s", inspection.SourceOID, strings.TrimSpace(oid))
+	}
+	return nil
+}
+
 func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest) (protocol.OrchestrationIntentResult, error) {
 	if strings.TrimSpace(request.ActorID) == "" {
 		return protocol.OrchestrationIntentResult{}, fmt.Errorf("review orchestration intent requires actor_id")
@@ -320,33 +780,55 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 	}
 	a.daemon.orchestrationMu.Lock()
 	defer a.daemon.orchestrationMu.Unlock()
-	snapshot, err := a.Snapshot(ctx, projectID, protocol.OrchestrationSnapshotRequest{Scope: request.Scope, ActorID: request.ActorID, RepoDir: request.RepoDir})
+	var reviews []protocol.OrchestrationReview
+	var err error
+	if request.Kind == protocol.OrchestrationIntentReviewReturn {
+		reviews, err = a.reviewReturnQueue(ctx, projectID, request)
+	} else {
+		var snapshot protocol.OrchestrationSnapshot
+		snapshot, err = a.Snapshot(ctx, projectID, protocol.OrchestrationSnapshotRequest{Scope: request.Scope, ActorID: request.ActorID, RepoDir: request.RepoDir, ReviewIssueIDs: request.IssueIDs})
+		reviews = snapshot.ReviewQueue
+	}
 	if err != nil {
 		return protocol.OrchestrationIntentResult{}, err
 	}
-	queue := make(map[string]protocol.OrchestrationReview, len(snapshot.ReviewQueue))
-	ordered := make([]string, 0, len(snapshot.ReviewQueue))
-	for _, review := range snapshot.ReviewQueue {
+	if hook := a.daemon.reviewAdmissionSnapshotLoaded; hook != nil {
+		hook()
+	}
+	queue := make(map[string]protocol.OrchestrationReview, len(reviews))
+	ordered := make([]string, 0, len(reviews))
+	for _, review := range reviews {
 		queue[review.IssueID] = review
 		ordered = append(ordered, review.IssueID)
 	}
-	requested := stableRequestedCandidates(request.IssueIDs, ordered)
+	requested := stableRequestedReviewCandidates(request.IssueIDs, ordered)
 	if len(request.IssueIDs) == 0 {
 		requested = ordered
 	}
 	result := protocol.OrchestrationIntentResult{Scope: request.Scope, Kind: request.Kind, IntentKey: request.IntentKey, Requested: requested, Skipped: map[string]string{}, Failed: map[string]string{}}
-	scopeTasks, _, err := a.daemon.projectReadSnapshot(projectID)
-	if err != nil {
-		return protocol.OrchestrationIntentResult{}, fmt.Errorf("refresh orchestration scope projection: %w", err)
-	}
 	issueClient := a.daemon.issueClientForProject(projectID)
 	if issueClient == nil {
 		return protocol.OrchestrationIntentResult{}, fmt.Errorf("issue store unavailable")
 	}
+	summaryTasks := make([]domain.Task, 0, len(requested))
 	for _, issueID := range requested {
-		if request.Scope.Kind == domain.OrchestrationScopeRooted && !directOrchestrationTarget(scopeTasks, request.Scope.RootIssueID.String(), issueID) {
-			result.Skipped[issueID] = "outside-root-direct-child-scope: delegate descendants to their direct parent orchestrator"
-			continue
+		task, summaryErr := issueClient.GetWithRuntime(ctx, projectID, issueID)
+		if summaryErr != nil {
+			return protocol.OrchestrationIntentResult{}, fmt.Errorf("load bounded review result input for %s: %w", issueID, summaryErr)
+		}
+		summaryTasks = append(summaryTasks, task)
+	}
+	for _, issueID := range requested {
+		if request.Scope.Kind == domain.OrchestrationScopeRooted {
+			task, err := issueClient.GetWithRuntime(ctx, projectID, issueID)
+			if err != nil {
+				result.Failed[issueID] = "refresh rooted review scope: " + err.Error()
+				continue
+			}
+			if task.ParentID == nil || task.ParentID.IsZero() || !naming.IssueIDsEqual(task.ParentID.String(), request.Scope.RootIssueID.String()) {
+				result.Skipped[issueID] = "outside-root-direct-child-scope: delegate descendants to their direct parent orchestrator"
+				continue
+			}
 		}
 		terminal, err := a.reviewIntentTerminalOutcome(ctx, projectID, issueID, request)
 		if err != nil {
@@ -395,7 +877,46 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 				result.Failed[issueID] = failure
 				continue
 			}
-			if _, err := a.releaseAndCloseAcceptedReview(ctx, projectID, request, issueID, integrateBeforeClose, storedPin, &result); err != nil {
+			admission, admissionErr := reviewAdmissionPinFromInspection(inspection)
+			if admissionErr != nil || admission.ReviewEpochEventID != storedPin.ReviewEpochEventID {
+				result.Failed[issueID] = "restore accepted reviewer lease: accepted review epoch no longer matches current admission"
+				continue
+			}
+			acceptedTask, taskErr := issueClient.GetWithRuntime(ctx, projectID, issueID)
+			if taskErr != nil {
+				result.Failed[issueID] = "inspect accepted reviewer lease: " + taskErr.Error()
+				continue
+			}
+			lease := coordinationLease(acceptedTask, domain.CoordinationLeaseReview)
+			if lease == nil || lease.IsExpired(time.Now().UTC()) || !storedPin.Reviewer.Matches(lease.OwnerID, lease.OwnerKind) {
+				result.Failed[issueID] = "restore accepted reviewer lease: exact typed accepted reviewer lease is unavailable"
+				continue
+			}
+			if inspection.Evidence != nil {
+				if err := a.daemon.recordAcceptedPatchReviewEvidence(ctx, projectID, request.ActorID, inspection); err != nil {
+					result.Failed[issueID] = "repair accepted patch-review evidence: " + err.Error()
+					continue
+				}
+			}
+			var target taskMergeBaseTargetResult
+			queueAvailable := integrateBeforeClose && a.daemon.operationRuntime != nil && a.daemon.operationRuntime.store != nil && a.daemon.operationRuntime.manager != nil && a.daemon.worktreeAdapter != nil && a.daemon.git != nil
+			if queueAvailable {
+				target, err = a.daemon.taskMergeBaseTarget(ctx, projectID, issueID, a.daemon.baseBranchForProject(projectID), false)
+				if err != nil {
+					result.Failed[issueID] = err.Error()
+					continue
+				}
+			}
+			if queueAvailable && strings.EqualFold(strings.TrimSpace(target.TargetID), "base") {
+				publication, enqueueErr := a.daemon.enqueueAcceptedReviewPublication(ctx, projectID, request, issueID, storedPin)
+				if enqueueErr != nil {
+					result.Failed[issueID] = enqueueErr.Error()
+					continue
+				}
+				result.Publications = append(result.Publications, publication)
+				continue
+			}
+			if _, err := a.releaseAndCloseAcceptedReview(ctx, projectID, request, issueID, integrateBeforeClose, storedPin, "", &result); err != nil {
 				result.Failed[issueID] = err.Error()
 			}
 			continue
@@ -432,7 +953,22 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 			continue
 		}
 		if !activeValidationReturn {
-			if _, err := issueClient.ClaimOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: request.ActorID, OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview}); err != nil {
+			claim := issues.OwnershipClaimParams{OwnerID: request.ActorID, OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview}
+			if request.Kind == protocol.OrchestrationIntentReviewAccept {
+				admission, admissionErr := reviewAdmissionPinFromInspection(inspection)
+				if admissionErr != nil {
+					result.Skipped[issueID] = "claim-review: " + admissionErr.Error()
+					continue
+				}
+				if err := a.validateReviewAdmissionInspection(ctx, projectID, inspection); err != nil {
+					result.Skipped[issueID] = "claim-review: " + err.Error()
+					continue
+				}
+				claim.ExpectedReviewAdmission = &admission
+				claim.ExpectedParentIssueID = inspection.ParentIssueID
+				claim.ReviewSourceOID = inspection.SourceOID
+			}
+			if _, err := issueClient.ClaimOwnershipWithRuntime(ctx, projectID, issueID, claim); err != nil {
 				result.Skipped[issueID] = "claim-review: " + err.Error()
 				continue
 			}
@@ -474,6 +1010,23 @@ func (a daemonOrchestrationAuthority) applyReviewIntent(ctx context.Context, pro
 		if actionErr != nil {
 			result.Failed[issueID] = actionErr.Error()
 		}
+	}
+	revisions := make(map[string]string, len(requested))
+	for _, issueID := range requested {
+		if inspection, ok := queue[issueID]; ok {
+			revisions[issueID] = strings.TrimSpace(inspection.HeadRevision)
+			if revisions[issueID] == "" {
+				revisions[issueID] = strings.TrimSpace(inspection.SourceOID)
+			}
+		}
+	}
+	role := domain.WorkflowRoleReviewer
+	if request.Kind == protocol.OrchestrationIntentReviewAccept {
+		role = domain.WorkflowRoleIntegrator
+	}
+	result.Results, err = buildOrchestrationResultSummaries(result, summaryTasks, role, revisions)
+	if err != nil {
+		return protocol.OrchestrationIntentResult{}, err
 	}
 	return result, nil
 }
@@ -550,11 +1103,25 @@ func (a daemonOrchestrationAuthority) activeValidationReviewReturn(ctx context.C
 	}
 	worktrees := a.daemon.projectReadWorktrees(projectID)
 	inspection := a.reviewInspection(ctx, projectID, request.RepoDir, request.ActorID, task, byID, worktrees)
+	if inspection.ReviewContext == nil {
+		inspection.HeadRevision = strings.TrimSpace(gate.SourceRevision)
+		if packet, packetErr := buildReviewWorkflowContext(task, inspection, domain.WorkflowRoleReviewer); packetErr == nil {
+			inspection.ReviewContext = &packet
+			if integrationPacket, integrationErr := buildReviewWorkflowContext(task, inspection, domain.WorkflowRoleIntegrator); integrationErr == nil {
+				inspection.IntegrationContext = &integrationPacket
+			}
+		}
+	}
 	inspection.Reasons = uniqueNonEmpty(append(inspection.Reasons, "active-validation-return:"+gate.RequestID))
 	return inspection, true, nil
 }
 
 func (a daemonOrchestrationAuthority) returnReviewFindings(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, inspection protocol.OrchestrationReview, result *protocol.OrchestrationIntentResult) error {
+	if inspection.ReviewEpochEventID > 0 {
+		if err := a.validateReviewAdmissionInspection(ctx, projectID, inspection); err != nil {
+			return fmt.Errorf("return review admission changed: %w", err)
+		}
+	}
 	body, err := json.Marshal(map[string]any{"type": "review-finding", "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request), "findings": request.Findings})
 	if err != nil {
 		return err
@@ -585,12 +1152,24 @@ func (a daemonOrchestrationAuthority) returnReviewFindings(ctx context.Context, 
 			return fmt.Errorf("persist review findings: %s", responseErrorMessage(mailResp))
 		}
 	}
-	message := formatReviewFindingMessage(inspection.IssueID, parent, request.Findings)
+	message, err := formatReviewFindingMessage(inspection, parent, request.Findings)
+	if err != nil {
+		return fmt.Errorf("build bounded review finding handoff: %w", err)
+	}
+	if inspection.ReviewEpochEventID > 0 {
+		if err := a.validateReviewAdmissionInspection(ctx, projectID, inspection); err != nil {
+			return fmt.Errorf("return review admission changed before delivery: %w", err)
+		}
+	}
 	deliveryTimeout := a.reviewDeliveryTimeout
 	if deliveryTimeout <= 0 {
 		deliveryTimeout = orchestrationReviewDeliveryTimeout
 	}
-	deliveryCtx, cancelDelivery := context.WithTimeout(ctx, deliveryTimeout)
+	withTimeout := a.reviewDeliveryContext
+	if withTimeout == nil {
+		withTimeout = context.WithTimeout
+	}
+	deliveryCtx, cancelDelivery := withTimeout(ctx, deliveryTimeout)
 	if a.daemon.cfg.Logger != nil {
 		a.daemon.cfg.Logger.Info("orchestration review return stage started", "project_id", projectID, "issue_id", inspection.IssueID, "intent_key", request.IntentKey, "stage", "live_delivery", "target", inspection.IssueID, "timeout", deliveryTimeout)
 	}
@@ -605,6 +1184,11 @@ func (a daemonOrchestrationAuthority) returnReviewFindings(ctx context.Context, 
 		a.daemon.cfg.Logger.Info("orchestration review return stage completed", "project_id", projectID, "issue_id", inspection.IssueID, "intent_key", request.IntentKey, "stage", "live_delivery", "target", inspection.IssueID)
 	}
 	if deliveryErr != nil && request.RestartWorker {
+		if inspection.ReviewEpochEventID > 0 {
+			if err := a.validateReviewAdmissionInspection(ctx, projectID, inspection); err != nil {
+				return fmt.Errorf("return review admission changed before restart: %w", err)
+			}
+		}
 		allowed, ownershipErr := a.reviewWorkerRestartAllowed(ctx, projectID, inspection.IssueID, request.ActorID)
 		if ownershipErr != nil {
 			return fmt.Errorf("review findings recorded but delivery failed: %v; inspect restart ownership: %w", deliveryErr, ownershipErr)
@@ -620,7 +1204,7 @@ func (a daemonOrchestrationAuthority) returnReviewFindings(ctx context.Context, 
 		switch protocol.OperationState(launch.OperationState) {
 		case protocol.OperationStateQueued, protocol.OperationStateRunning:
 			result.Pending = append(result.Pending, protocol.OrchestrationPending{IssueID: inspection.IssueID, OperationID: launch.OperationID, OperationState: launch.OperationState})
-			if err := a.recordReviewRestartSubmitted(ctx, projectID, inspection.IssueID, request, launch); err != nil {
+			if err := a.recordReviewRestartSubmitted(ctx, projectID, inspection.IssueID, request, launch, inspection); err != nil {
 				return err
 			}
 			return nil
@@ -628,7 +1212,7 @@ func (a daemonOrchestrationAuthority) returnReviewFindings(ctx context.Context, 
 			delivered = true
 		case protocol.OperationStateFailed, protocol.OperationStateCancelled:
 			failure := fmt.Sprintf("restart operation %s reached terminal %s", launch.OperationID, launch.OperationState)
-			if err := a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "delivery_failed", failure); err != nil {
+			if err := a.recordReviewOutcomePinned(ctx, projectID, inspection.IssueID, request, "delivery_failed", failure, inspection); err != nil {
 				return fmt.Errorf("review findings recorded but delivery failed: %v; %s; record failure: %w", deliveryErr, failure, err)
 			}
 			return fmt.Errorf("review findings recorded but delivery failed: %v; %s", deliveryErr, failure)
@@ -638,12 +1222,22 @@ func (a daemonOrchestrationAuthority) returnReviewFindings(ctx context.Context, 
 	}
 	if !delivered {
 		failure := deliveryFailureMessage(deliveryErr, inspection.IssueID)
-		if err := a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "delivery_failed", failure); err != nil {
+		if inspection.ReviewEpochEventID > 0 {
+			if err := a.validateReviewAdmissionInspection(ctx, projectID, inspection); err != nil {
+				return fmt.Errorf("return review admission changed before failure outcome: %w", err)
+			}
+		}
+		if err := a.recordReviewOutcomePinned(ctx, projectID, inspection.IssueID, request, "delivery_failed", failure, inspection); err != nil {
 			return fmt.Errorf("review findings recorded but active delivery failed: %s; publish durable failure: %w", failure, err)
 		}
 		return fmt.Errorf("review findings recorded but active delivery failed: %s", failure)
 	}
-	if err := a.recordReviewOutcome(ctx, projectID, inspection.IssueID, request, "returned", ""); err != nil {
+	if inspection.ReviewEpochEventID > 0 {
+		if err := a.validateReviewAdmissionInspection(ctx, projectID, inspection); err != nil {
+			return fmt.Errorf("return review admission changed before outcome: %w", err)
+		}
+	}
+	if err := a.recordReviewOutcomePinned(ctx, projectID, inspection.IssueID, request, "returned", "", inspection); err != nil {
 		return err
 	}
 	return nil
@@ -879,6 +1473,20 @@ func (a daemonOrchestrationAuthority) reviewWorkerRestartAllowed(ctx context.Con
 }
 
 func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, inspection protocol.OrchestrationReview, result *protocol.OrchestrationIntentResult) (bool, error) {
+	if hook := a.daemon.reviewAcceptanceBeforeCandidateCheck; hook != nil {
+		hook()
+	}
+	candidatePath := ""
+	if inspection.Evidence != nil || strings.TrimSpace(inspection.WorktreePath) != "" {
+		var candidateErr error
+		candidatePath, _, candidateErr = a.daemon.exactReviewedCandidateRevision(ctx, projectID, inspection)
+		if candidateErr != nil {
+			return false, fmt.Errorf("revalidate accepted review candidate: %w", candidateErr)
+		}
+	}
+	if err := a.validateReviewAdmissionInspection(ctx, projectID, inspection); err != nil {
+		return false, fmt.Errorf("accept review admission changed: %w", err)
+	}
 	if len(inspection.PendingDecisions) > 0 {
 		return false, fmt.Errorf("accepted review rejected by stale material decisions: %s", strings.Join(pendingDecisionReadinessReasons(inspection.PendingDecisions), "; "))
 	}
@@ -907,37 +1515,172 @@ func (a daemonOrchestrationAuthority) acceptReview(ctx context.Context, projectI
 			return false, fmt.Errorf("accepted review requires complete worker_evidence.v1 or a declared internal_review investigation with a durable accepted/ratified review artifact")
 		}
 	}
-	if inspection.Evidence != nil && inspection.Evidence.AggregateValidation != nil {
-		// Snapshot inspection can race with a checkout mutation. Resolve the durable
-		// issue-worktree identity again and re-run exact revision/cleanliness binding
-		// immediately before recording the trusted acceptance decision.
-		candidatePath, err := a.daemon.exactReviewCandidateWorktree(ctx, projectID, inspection.IssueID)
-		if err != nil {
-			return false, fmt.Errorf("accepted review candidate rejected: %w", err)
-		}
-		refreshed, err := a.daemon.taskIntegrationReadiness(ctx, projectID, inspection.IssueID, candidatePath)
+	if inspection.Evidence != nil {
+		// Snapshot inspection can race with new evidence or decisions. Re-read the
+		// immutable patch-review inputs immediately before acceptance, while leaving
+		// exact aggregate validation to the durable publication continuation.
+		refreshed, err := a.daemon.taskReviewAcceptanceReadiness(ctx, projectID, inspection.IssueID, candidatePath)
 		if err != nil {
 			return false, fmt.Errorf("revalidate accepted review candidate: %w", err)
 		}
 		if !refreshed.Ready {
-			return false, fmt.Errorf("accepted review candidate is not integration-ready: %s", strings.Join(refreshed.Reasons, "; "))
+			return false, fmt.Errorf("accepted review candidate is not patch-review-ready: %s", strings.Join(refreshed.Reasons, "; "))
 		}
-		inspection.Evidence = refreshed.EvidencePacket
-		inspection.ContextRisk = refreshed.ContextRisk
-		inspection.PendingDecisions = refreshed.PendingDecisions
+		refreshedPin, err := reviewEvidencePinFromReadiness(refreshed)
+		if err != nil {
+			return false, fmt.Errorf("revalidate accepted review evidence identity: %w", err)
+		}
+		expectedPin, err := reviewAdmissionPinFromInspection(inspection)
+		if err != nil || expectedPin.Evidence == nil || refreshedPin != *expectedPin.Evidence {
+			return false, fmt.Errorf("revalidate accepted review evidence identity: exported evidence changed")
+		}
 	}
 	if inspection.ContextRisk != nil && domain.IssueContextRiskRequiresStructuredCloseout(*inspection.ContextRisk) {
 		return false, fmt.Errorf("accepted review requires structured high-context-risk closeout evidence")
 	}
 	integrateBeforeClose := inspection.Evidence != nil || strings.TrimSpace(inspection.WorktreePath) != ""
-	pin, err := a.captureAcceptedReviewPin(ctx, projectID, request.RepoDir, inspection, integrateBeforeClose)
+	pin, err := a.captureAcceptedReviewPin(ctx, projectID, candidatePath, inspection, integrateBeforeClose, request.ActorID)
 	if err != nil {
 		return false, err
 	}
-	if err := a.recordAcceptedReviewOutcome(ctx, projectID, inspection.IssueID, request, pin); err != nil {
+	var target taskMergeBaseTargetResult
+	queueAvailable := integrateBeforeClose && a.daemon.operationRuntime != nil && a.daemon.operationRuntime.store != nil && a.daemon.operationRuntime.manager != nil && a.daemon.worktreeAdapter != nil && a.daemon.git != nil
+	if queueAvailable {
+		target, err = a.daemon.taskMergeBaseTarget(ctx, projectID, inspection.IssueID, a.daemon.baseBranchForProject(projectID), false)
+		if err != nil {
+			return false, err
+		}
+	}
+	if queueAvailable && strings.EqualFold(strings.TrimSpace(target.TargetID), "base") {
+		publication, err := a.daemon.acceptAndEnqueueReviewPublication(ctx, projectID, request, inspection.IssueID, pin, inspection)
+		if err != nil {
+			// A populated operation ID means the accepted review and queue row are
+			// already durable. Keep the review lease for accepted_pending recovery.
+			return strings.TrimSpace(publication.OperationID) != "", fmt.Errorf("enqueue accepted review publication: %w", err)
+		}
+		result.Publications = append(result.Publications, publication)
+		// The durable review lease remains owned by the queue until its runner
+		// enters authoritative close. Returning true prevents the outer intent
+		// loop from releasing it while this accepted patch is queued.
+		return true, nil
+	}
+	if err := a.validateReviewAdmissionInspection(ctx, projectID, inspection); err != nil {
+		return false, fmt.Errorf("accept review admission changed before outcome: %w", err)
+	}
+	if err := a.recordAcceptedReviewOutcome(ctx, projectID, inspection.IssueID, request, pin, inspection); err != nil {
 		return false, err
 	}
-	return a.releaseAndCloseAcceptedReview(ctx, projectID, request, inspection.IssueID, integrateBeforeClose, pin, result)
+	if inspection.Evidence != nil {
+		if err := a.daemon.recordAcceptedPatchReviewEvidence(ctx, projectID, request.ActorID, inspection); err != nil {
+			return true, fmt.Errorf("record accepted patch-review evidence: %w", err)
+		}
+	}
+	return a.releaseAndCloseAcceptedReview(ctx, projectID, request, inspection.IssueID, integrateBeforeClose, pin, "", result)
+}
+
+func (d *Daemon) recordAcceptedPatchReviewEvidence(ctx context.Context, projectID, reviewerID string, inspection protocol.OrchestrationReview) error {
+	evidence, err := d.acceptedPatchReviewEvidence(ctx, projectID, reviewerID, inspection)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(evidence.EvidenceID) == "" {
+		return nil
+	}
+	store, err := d.publicationEvidenceProjectionStore()
+	if err != nil {
+		return err
+	}
+	_, err = store.RecordAcceptedPatchReviewEvidence(ctx, evidence)
+	if err == nil {
+		_, err = d.publicationEvidenceSnapshot(ctx, projectID, inspection.IssueID)
+	}
+	return err
+}
+
+func (d *Daemon) acceptedPatchReviewEvidence(ctx context.Context, projectID, reviewerID string, inspection protocol.OrchestrationReview) (domain.PublicationEvidence, error) {
+	configured, err := d.publicationEvidenceConfigured(projectID)
+	if err != nil || !configured {
+		if err != nil {
+			return domain.PublicationEvidence{}, err
+		}
+		return domain.PublicationEvidence{}, nil
+	}
+	if d.git == nil {
+		return domain.PublicationEvidence{}, fmt.Errorf("Git authority is unavailable")
+	}
+	worktree := strings.TrimSpace(inspection.WorktreePath)
+	head := strings.TrimSpace(inspection.SourceOID)
+	base := strings.TrimSpace(inspection.DiffBaseRevision)
+	if worktree == "" || head == "" || base == "" {
+		return domain.PublicationEvidence{}, fmt.Errorf("accepted review requires exact worktree, source, and diff-base identity (worktree=%t source=%t diff_base=%t)", worktree != "", head != "", base != "")
+	}
+	liveHead, err := d.git.HeadRevision(ctx, worktree)
+	if err != nil || liveHead != head {
+		return domain.PublicationEvidence{}, fmt.Errorf("accepted review source changed before evidence record: expected=%s actual=%s error=%v", head, liveHead, err)
+	}
+	status, err := d.git.Status(ctx, worktree)
+	if err != nil {
+		return domain.PublicationEvidence{}, err
+	}
+	if status.HasChanges || status.HasConflicts {
+		return domain.PublicationEvidence{}, fmt.Errorf("accepted patch-review evidence requires a clean conflict-free worktree")
+	}
+	policy, capability, err := d.publicationEvidenceProjectPolicy(projectID)
+	if err != nil {
+		return domain.PublicationEvidence{}, err
+	}
+	repoDir := strings.TrimSpace(d.resolveRepoDirForProjectExact(projectID))
+	cfg, err := appconfig.LoadConfig(repoDir)
+	if err != nil {
+		return domain.PublicationEvidence{}, err
+	}
+	environment := publicationEnvironmentFingerprint(cfg)
+	store, err := d.publicationEvidenceProjectionStore()
+	if err != nil {
+		return domain.PublicationEvidence{}, err
+	}
+	evidenceID := fmt.Sprintf("review-%x", sha256.Sum256([]byte(strings.Join([]string{projectID, inspection.IssueID, fmt.Sprint(inspection.ReviewEpochEventID), head, strings.ToLower(strings.TrimSpace(reviewerID)), policy.Version}, "\x00"))))
+	snapshot, err := store.PublicationEvidenceSnapshot(ctx, projectID, inspection.IssueID)
+	if err != nil {
+		return domain.PublicationEvidence{}, err
+	}
+	for _, prior := range snapshot.Evidence {
+		if prior.EvidenceID != evidenceID {
+			continue
+		}
+		if prior.ProjectID == projectID && prior.IssueID == inspection.IssueID && prior.Layer == domain.PublicationEvidencePatchReview && prior.SourceRevision == head && prior.Producer == "reviewer:"+strings.TrimSpace(reviewerID) && prior.PolicyVersion == policy.Version && prior.EnvironmentFingerprint == environment {
+			return prior, nil
+		}
+		return domain.PublicationEvidence{}, fmt.Errorf("accepted patch-review evidence %s conflicts with its immutable record", evidenceID)
+	}
+	patchDigest, err := d.git.PatchDigest(ctx, worktree, base, head)
+	if err != nil {
+		return domain.PublicationEvidence{}, err
+	}
+	paths, err := d.git.ChangedFilesBetweenRefTrees(ctx, worktree, base, head)
+	if err != nil {
+		return domain.PublicationEvidence{}, err
+	}
+	coverage, err := publicationCoverageForPaths(paths, capability)
+	if err != nil {
+		return domain.PublicationEvidence{}, err
+	}
+	evidence := domain.PublicationEvidence{
+		EvidenceID: evidenceID, ProjectID: projectID, IssueID: inspection.IssueID, Layer: domain.PublicationEvidencePatchReview,
+		PatchDigest: patchDigest, SourceRevision: head, BaseRevision: base, Producer: "reviewer:" + strings.TrimSpace(reviewerID),
+		PolicyVersion: policy.Version, EnvironmentFingerprint: environment, Coverage: coverage, CreatedAt: time.Now().UTC(),
+	}
+	for _, prior := range snapshot.Evidence {
+		if prior.Layer == domain.PublicationEvidencePatchReview && prior.PatchDigest == evidence.PatchDigest && prior.PolicyVersion == evidence.PolicyVersion && prior.EnvironmentFingerprint == evidence.EnvironmentFingerprint && publicationCoverageEqual(prior.Coverage, evidence.Coverage) {
+			evidence.ReusedFromEvidenceID = prior.EvidenceID
+			break
+		}
+	}
+	return evidence, nil
+}
+
+func publicationCoverageEqual(left, right domain.PublicationEvidenceCoverage) bool {
+	return slices.Equal(left.Paths, right.Paths) && slices.Equal(left.Dependencies, right.Dependencies) && slices.Equal(left.Surfaces, right.Surfaces)
 }
 
 // exactReviewCandidateWorktree implements the hybrid project-review invariant:
@@ -947,7 +1690,7 @@ func (d *Daemon) exactReviewCandidateWorktree(ctx context.Context, projectID, is
 	if d == nil || d.worktreeAdapter == nil {
 		return "", fmt.Errorf("candidate_worktree_unavailable: worktree projection authority is unavailable")
 	}
-	if err := d.refreshFiniteWorktreeGitFacts(ctx, projectID, []string{issueID}); err != nil {
+	if err := d.refreshExactReviewWorktreeGitFacts(ctx, projectID, []string{issueID}); err != nil {
 		return "", fmt.Errorf("candidate_git_facts_refresh_failed: %w", err)
 	}
 	projected, found, err := d.worktreeAdapter.projectedWorktreeForIssue(ctx, projectID, issueID)
@@ -986,35 +1729,69 @@ func (d *Daemon) exactReviewCandidateWorktree(ctx context.Context, projectID, is
 	return "", fmt.Errorf("candidate_projection_stale: projected worktree %s for issue %s is absent from the live Git worktree registry", projectedPath, issueID)
 }
 
-func (a daemonOrchestrationAuthority) captureAcceptedReviewPin(ctx context.Context, projectID, repoDir string, inspection protocol.OrchestrationReview, integrateBeforeClose bool) (acceptedReviewPin, error) {
-	pin := acceptedReviewPin{}
+func (d *Daemon) exactReviewedCandidateRevision(ctx context.Context, projectID string, inspection protocol.OrchestrationReview) (string, string, error) {
+	if d.reviewCandidateCheck != nil {
+		return d.reviewCandidateCheck(ctx, projectID, inspection)
+	}
+	candidatePath, err := d.exactReviewCandidateWorktree(ctx, projectID, inspection.IssueID)
+	if err != nil {
+		return "", "", err
+	}
+	inspectedPath := strings.TrimSpace(inspection.WorktreePath)
+	if inspectedPath == "" || filepath.Clean(inspectedPath) != candidatePath {
+		return "", "", fmt.Errorf("candidate_path_changed: inspected path %q does not match current exact path %q", inspectedPath, candidatePath)
+	}
+	inspectedHead := strings.TrimSpace(inspection.HeadRevision)
+	if inspectedHead == "" {
+		return "", "", fmt.Errorf("reviewed_patch_identity_missing: inspection has no immutable HEAD revision")
+	}
+	if d.git == nil {
+		return "", "", fmt.Errorf("candidate_git_unavailable: Git authority is unavailable")
+	}
+	var currentHead string
+	if err := d.git.WithWorktreeLock(ctx, candidatePath, func(lockCtx context.Context) error {
+		status, statusErr := d.git.Status(lockCtx, candidatePath)
+		if statusErr != nil {
+			return fmt.Errorf("inspect reviewed candidate tree: %w", statusErr)
+		}
+		if status.HasChanges {
+			return fmt.Errorf("reviewed candidate worktree is dirty and no longer matches immutable revision %s", inspectedHead)
+		}
+		currentHead, statusErr = d.git.HeadRevision(lockCtx, candidatePath)
+		if statusErr != nil {
+			return fmt.Errorf("resolve reviewed candidate revision: %w", statusErr)
+		}
+		return nil
+	}); err != nil {
+		return "", "", err
+	}
+	currentHead = strings.TrimSpace(currentHead)
+	if currentHead != inspectedHead {
+		return "", "", fmt.Errorf("reviewed candidate revision changed from %s to %s after inspection", inspectedHead, currentHead)
+	}
+	return candidatePath, currentHead, nil
+}
+
+func (a daemonOrchestrationAuthority) captureAcceptedReviewPin(ctx context.Context, projectID, repoDir string, inspection protocol.OrchestrationReview, integrateBeforeClose bool, reviewerID string) (acceptedReviewPin, error) {
+	reviewer, err := domain.CanonicalReviewerIdentity(reviewerID, domain.ReviewerOwnerKindOrchestrator)
+	if err != nil {
+		return acceptedReviewPin{}, fmt.Errorf("capture accepted reviewer authority: %w", err)
+	}
+	pin := acceptedReviewPin{Reviewer: reviewer, ReviewEpochEventID: inspection.ReviewEpochEventID}
+	if pin.ReviewEpochEventID <= 0 {
+		return pin, fmt.Errorf("capture accepted review authority: review epoch is missing")
+	}
 	if inspection.Evidence != nil {
-		repoDir = strings.TrimSpace(repoDir)
-		if repoDir == "" {
-			repoDir = strings.TrimSpace(a.daemon.cfg.RepoDir)
+		pin.EvidenceSource = strings.TrimSpace(inspection.EvidenceSource)
+		pin.EvidenceEventID = inspection.EvidenceEventID
+		pin.EvidenceSeq = inspection.EvidenceSeq
+		pin.EvidenceDigest = strings.TrimSpace(inspection.EvidenceDigest)
+		if pin.EvidenceEventID <= 0 || pin.EvidenceDigest == "" {
+			return pin, fmt.Errorf("capture reviewed evidence identity: exported evidence pin is incomplete")
 		}
-		readiness, err := a.daemon.taskIntegrationReadiness(ctx, projectID, inspection.IssueID, repoDir)
-		if err != nil {
-			return pin, fmt.Errorf("capture reviewed evidence identity: %w", err)
-		}
-		if readiness.EvidencePacket == nil {
-			return pin, fmt.Errorf("capture reviewed evidence identity: current evidence is unavailable")
-		}
-		evidencePin, err := reviewEvidencePinFromReadiness(readiness)
-		if err != nil {
-			return pin, fmt.Errorf("capture reviewed evidence identity: %w", err)
-		}
-		pin.EvidenceSource = evidencePin.Source
-		pin.EvidenceEventID = evidencePin.EventID
-		pin.EvidenceSeq = evidencePin.Seq
-		pin.EvidenceDigest = evidencePin.Digest
 	}
 	if integrateBeforeClose {
-		oid, err := a.resolveAcceptedReviewSourceOID(ctx, projectID, inspection.IssueID)
-		if err != nil {
-			return pin, fmt.Errorf("capture reviewed source commit: %w", err)
-		}
-		pin.SourceOID = strings.TrimSpace(oid)
+		pin.SourceOID = strings.TrimSpace(inspection.SourceOID)
 		if pin.SourceOID == "" {
 			return pin, fmt.Errorf("capture reviewed source commit: empty object ID")
 		}
@@ -1092,11 +1869,18 @@ func (a daemonOrchestrationAuthority) acceptedReviewPinForIntent(ctx context.Con
 			continue
 		}
 		pin := acceptedReviewPin{
-			SourceOID:       observationPayloadString(event.Payload, "reviewed_source_oid"),
-			EvidenceSource:  observationPayloadString(event.Payload, "reviewed_evidence_source"),
-			EvidenceEventID: reviewPayloadInt64(event.Payload["reviewed_evidence_event_id"]),
-			EvidenceSeq:     reviewPayloadInt64(event.Payload["reviewed_evidence_seq"]),
-			EvidenceDigest:  observationPayloadString(event.Payload, "reviewed_evidence_digest"),
+			ReviewEpochEventID:             reviewPayloadInt64(event.Payload["review_epoch_event_id"]),
+			AcceptedReviewEventID:          event.ID,
+			AcceptedPublicationOperationID: observationPayloadString(event.Payload, "publication_operation_id"),
+			SourceOID:                      observationPayloadString(event.Payload, "reviewed_source_oid"),
+			EvidenceSource:                 observationPayloadString(event.Payload, "reviewed_evidence_source"),
+			EvidenceEventID:                reviewPayloadInt64(event.Payload["reviewed_evidence_event_id"]),
+			EvidenceSeq:                    reviewPayloadInt64(event.Payload["reviewed_evidence_seq"]),
+			EvidenceDigest:                 observationPayloadString(event.Payload, "reviewed_evidence_digest"),
+		}
+		pin.Reviewer, err = domain.CanonicalReviewerIdentity(observationPayloadString(event.Payload, "actor_id"), observationPayloadString(event.Payload, "actor_kind"))
+		if err != nil || pin.ReviewEpochEventID <= 0 {
+			return acceptedReviewPin{}, fmt.Errorf("accepted review has incomplete typed epoch authority; fresh review required")
 		}
 		if requireSourceOID && pin.SourceOID == "" {
 			return acceptedReviewPin{}, fmt.Errorf("accepted review is missing an exact reviewed source commit; fresh review required")
@@ -1126,41 +1910,38 @@ func reviewPayloadInt64(value any) int64 {
 	}
 }
 
-func (a daemonOrchestrationAuthority) releaseAndCloseAcceptedReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, integrateBeforeClose bool, pin acceptedReviewPin, result *protocol.OrchestrationIntentResult) (bool, error) {
+func (a daemonOrchestrationAuthority) releaseAndCloseAcceptedReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, integrateBeforeClose bool, pin acceptedReviewPin, expectedBaseOID string, result *protocol.OrchestrationIntentResult) (bool, error) {
 	issueClient := a.daemon.issueClientForProject(projectID)
 	if issueClient == nil {
 		return false, fmt.Errorf("issue store unavailable")
-	}
-	var evidencePin *issues.ReviewEvidencePin
-	if strings.TrimSpace(pin.EvidenceDigest) != "" {
-		evidencePin = &issues.ReviewEvidencePin{Source: pin.EvidenceSource, EventID: pin.EvidenceEventID, Seq: pin.EvidenceSeq, Digest: pin.EvidenceDigest}
 	}
 	task, err := issueClient.GetWithRuntime(ctx, projectID, issueID)
 	if err != nil {
 		return false, fmt.Errorf("inspect review lease before authoritative close: %w", err)
 	}
 	reviewLease := coordinationLease(task, domain.CoordinationLeaseReview)
-	resumingEvidenceFence := evidencePin != nil && issues.ReviewEvidenceCloseFenceMatches(reviewLease, *evidencePin)
-	if reviewLease != nil && !resumingEvidenceFence {
-		if _, err := issueClient.ReleaseOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: request.ActorID, Purpose: domain.CoordinationLeaseReview}); err != nil {
-			return false, fmt.Errorf("release review lease before authoritative close: %w", err)
-		}
+	if reviewLease == nil || !pin.Reviewer.Matches(reviewLease.OwnerID, reviewLease.OwnerKind) {
+		return false, fmt.Errorf("accepted reviewer %s does not own the durable review lease", request.ActorID)
 	}
-	if hook := a.daemon.reviewLeaseReleasedBeforeClose; hook != nil {
+	if hook := a.daemon.reviewLeaseFencedBeforeClose; hook != nil {
 		if err := hook(ctx, projectID, issueID); err != nil {
-			return true, fmt.Errorf("after review lease release: %w", err)
+			return true, fmt.Errorf("after review lease fence: %w", err)
 		}
 	}
-	return true, a.closeAcceptedReview(ctx, projectID, request, issueID, integrateBeforeClose, pin, result)
+	return true, a.closeAcceptedReview(ctx, projectID, request, issueID, integrateBeforeClose, pin, expectedBaseOID, result)
 }
 
-func (a daemonOrchestrationAuthority) closeAcceptedReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, integrateBeforeClose bool, pin acceptedReviewPin, result *protocol.OrchestrationIntentResult) error {
+func (a daemonOrchestrationAuthority) closeAcceptedReview(ctx context.Context, projectID string, request protocol.OrchestrationIntentRequest, issueID string, integrateBeforeClose bool, pin acceptedReviewPin, expectedBaseOID string, result *protocol.OrchestrationIntentResult) error {
 	var evidencePin *issues.ReviewEvidencePin
 	if strings.TrimSpace(pin.EvidenceDigest) != "" {
 		evidencePin = &issues.ReviewEvidencePin{Source: pin.EvidenceSource, EventID: pin.EvidenceEventID, Seq: pin.EvidenceSeq, Digest: pin.EvidenceDigest}
 	}
+	publicationBinding, _ := taskClosePublicationBindingFromContext(ctx)
 	body, err := json.Marshal(taskCloseRequest{
-		TaskID: issueID, IntegrateBeforeClose: integrateBeforeClose, ExpectedSourceOID: strings.TrimSpace(pin.SourceOID), ExpectedReviewEvidence: evidencePin,
+		TaskID: issueID, IntegrateBeforeClose: integrateBeforeClose, ExpectedSourceOID: strings.TrimSpace(pin.SourceOID), ExpectedBaseOID: strings.TrimSpace(expectedBaseOID), ExpectedReviewEvidence: evidencePin,
+		ExpectedReviewerID: pin.Reviewer.OwnerID, ExpectedReviewerKind: pin.Reviewer.OwnerKind,
+		ExpectedReviewEpochEventID: pin.ReviewEpochEventID, ExpectedAcceptedReviewEventID: pin.AcceptedReviewEventID,
+		ExpectedPublicationOperationID: publicationBinding.operationID, ExpectedAcceptedPublicationOperationID: pin.AcceptedPublicationOperationID,
 	})
 	if err != nil {
 		return err
@@ -1209,10 +1990,17 @@ func (a daemonOrchestrationAuthority) recordReviewCloseFailure(ctx context.Conte
 }
 
 func (a daemonOrchestrationAuthority) recordReviewOutcome(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, outcome, failure string) error {
-	return a.recordReviewOutcomeWithRestart(ctx, projectID, issueID, request, outcome, failure, nil, nil)
+	return a.recordReviewOutcomeWithRestart(ctx, projectID, issueID, request, outcome, failure, nil, nil, nil)
 }
 
-func (a daemonOrchestrationAuthority) recordAcceptedReviewOutcome(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, pin acceptedReviewPin) error {
+func (a daemonOrchestrationAuthority) recordReviewOutcomePinned(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, outcome, failure string, inspection protocol.OrchestrationReview) error {
+	if inspection.ReviewEpochEventID <= 0 {
+		return a.recordReviewOutcome(ctx, projectID, issueID, request, outcome, failure)
+	}
+	return a.recordReviewOutcomeWithRestart(ctx, projectID, issueID, request, outcome, failure, nil, nil, &inspection)
+}
+
+func (a daemonOrchestrationAuthority) recordAcceptedReviewOutcome(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, pin acceptedReviewPin, inspection protocol.OrchestrationReview) error {
 	metadata := map[string]any{
 		"reviewed_source_oid":        pin.SourceOID,
 		"reviewed_evidence_source":   pin.EvidenceSource,
@@ -1220,10 +2008,10 @@ func (a daemonOrchestrationAuthority) recordAcceptedReviewOutcome(ctx context.Co
 		"reviewed_evidence_seq":      pin.EvidenceSeq,
 		"reviewed_evidence_digest":   pin.EvidenceDigest,
 	}
-	return a.recordReviewOutcomeWithRestart(ctx, projectID, issueID, request, string(domain.ReviewOutcomeAccepted), "", nil, metadata)
+	return a.recordReviewOutcomeWithRestart(ctx, projectID, issueID, request, string(domain.ReviewOutcomeAccepted), "", nil, metadata, &inspection)
 }
 
-func (a daemonOrchestrationAuthority) recordReviewRestartSubmitted(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, launch protocol.OrchestrationLaunch) error {
+func (a daemonOrchestrationAuthority) recordReviewRestartSubmitted(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, launch protocol.OrchestrationLaunch, inspection protocol.OrchestrationReview) error {
 	operationID, err := naming.ParseOperationID(launch.OperationID)
 	if err != nil {
 		return fmt.Errorf("record restart submission operation: %w", err)
@@ -1233,13 +2021,49 @@ func (a daemonOrchestrationAuthority) recordReviewRestartSubmitted(ctx context.C
 		return fmt.Errorf("record restart submission operation %s with non-pending state %q", operationID, state)
 	}
 	restart := &domain.ReviewRestartSubmission{OperationID: operationID, State: domain.ReviewRestartOperationState(state), SessionID: strings.TrimSpace(launch.SessionID), ActorID: strings.TrimSpace(request.ActorID)}
-	return a.recordReviewOutcomeWithRestart(ctx, projectID, issueID, request, "restart_submitted", "", restart, nil)
+	var admission *protocol.OrchestrationReview
+	if inspection.ReviewEpochEventID > 0 {
+		admission = &inspection
+	}
+	return a.recordReviewOutcomeWithRestart(ctx, projectID, issueID, request, "restart_submitted", "", restart, nil, admission)
 }
 
-func (a daemonOrchestrationAuthority) recordReviewOutcomeWithRestart(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, outcome, failure string, restart *domain.ReviewRestartSubmission, metadata map[string]any) error {
+func (a daemonOrchestrationAuthority) recordReviewOutcomeWithRestart(ctx context.Context, projectID, issueID string, request protocol.OrchestrationIntentRequest, outcome, failure string, restart *domain.ReviewRestartSubmission, metadata map[string]any, inspection *protocol.OrchestrationReview) error {
 	issueClient := a.daemon.issueClientForProject(projectID)
 	if issueClient == nil {
 		return fmt.Errorf("issue store unavailable")
+	}
+	if inspection != nil {
+		if metadata == nil {
+			metadata = make(map[string]any)
+		}
+		metadata["review_epoch_event_id"] = inspection.ReviewEpochEventID
+		metadata["review_parent_issue_id"] = strings.TrimSpace(inspection.ParentIssueID)
+		metadata["review_source_oid"] = strings.TrimSpace(inspection.SourceOID)
+		metadata["review_evidence_source"] = strings.TrimSpace(inspection.EvidenceSource)
+		metadata["review_evidence_event_id"] = inspection.EvidenceEventID
+		metadata["review_evidence_seq"] = inspection.EvidenceSeq
+		metadata["review_evidence_digest"] = strings.TrimSpace(inspection.EvidenceDigest)
+		metadata["review_diff_base_revision"] = strings.TrimSpace(inspection.DiffBaseRevision)
+		metadata["review_head_revision"] = strings.TrimSpace(inspection.HeadRevision)
+		metadata["review_diff_scope"] = strings.TrimSpace(inspection.DiffScope)
+		metadata["review_diff_range"] = strings.TrimSpace(inspection.DiffRange)
+		metadata["review_mode"] = strings.TrimSpace(inspection.ReviewMode)
+		metadata["review_delta_base_revision"] = strings.TrimSpace(inspection.DeltaBaseRevision)
+		metadata["review_fallback_reason"] = strings.TrimSpace(inspection.ReviewFallback)
+	}
+	if request.ReviewPass != nil {
+		if metadata == nil {
+			metadata = make(map[string]any)
+		}
+		metadata["review_verdict"] = strings.TrimSpace(request.ReviewPass.Verdict)
+		metadata["review_angle"] = strings.TrimSpace(request.ReviewPass.Angle)
+		metadata["review_unique_findings"] = request.Findings
+		metadata["review_reused_layers"] = uniqueNonEmpty(request.ReviewPass.ReusedLayers)
+		metadata["review_matrix"] = request.ReviewPass.Matrix
+		metadata["review_extra_pass_reason"] = strings.TrimSpace(request.ReviewPass.ExtraPassReason)
+		metadata["review_affected_invariants"] = uniqueNonEmpty(request.ReviewPass.AffectedInvariants)
+		metadata["review_broader_invalidation"] = *request.ReviewPass.BroaderInvalidation
 	}
 	fingerprint := reviewRequestFingerprint(request)
 	events, err := issueClient.ListIssueObservationEvents(ctx, issueID, issues.IssueObservationEventListOptions{Types: []domain.IssueObservationEventType{domain.IssueEventReviewCompleted}, NewestFirst: true})
@@ -1269,7 +2093,7 @@ func (a daemonOrchestrationAuthority) recordReviewOutcomeWithRestart(ctx context
 	if err != nil {
 		return err
 	}
-	payload := map[string]any{"outcome": outcome, "actor_id": request.ActorID, "intent_key": request.IntentKey, "request_fingerprint": fingerprint, "findings": request.Findings}
+	payload := map[string]any{"outcome": outcome, "actor_id": request.ActorID, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "intent_key": request.IntentKey, "request_fingerprint": fingerprint, "findings": request.Findings}
 	for key, value := range metadata {
 		payload[key] = value
 	}
@@ -1283,7 +2107,15 @@ func (a daemonOrchestrationAuthority) recordReviewOutcomeWithRestart(ctx context
 		payload["operation_id"] = restart.OperationID.String()
 		payload["operation_state"] = string(restart.State)
 	}
-	_, err = issueClient.AppendIssueObservationEvent(ctx, parsed.String(), params)
+	if inspection != nil {
+		admission, admissionErr := reviewAdmissionPinFromInspection(*inspection)
+		if admissionErr != nil {
+			return admissionErr
+		}
+		_, err = issueClient.AppendIssueObservationEventWithReviewAdmission(ctx, parsed.String(), params, admission, inspection.ParentIssueID, request.ActorID)
+	} else {
+		_, err = issueClient.AppendIssueObservationEvent(ctx, parsed.String(), params)
+	}
 	if err != nil {
 		return fmt.Errorf("record review outcome: %w", err)
 	}
@@ -1298,7 +2130,8 @@ func reviewRequestFingerprint(request protocol.OrchestrationIntentRequest) strin
 		RepoDir       string                                `json:"repo_dir,omitempty"`
 		Findings      []protocol.OrchestrationReviewFinding `json:"findings,omitempty"`
 		RestartWorker bool                                  `json:"restart_worker,omitempty"`
-	}{Scope: request.Scope, Kind: request.Kind, ActorID: strings.TrimSpace(request.ActorID), RepoDir: strings.TrimSpace(request.RepoDir), Findings: request.Findings, RestartWorker: request.RestartWorker})
+		ReviewPass    *protocol.OrchestrationReviewPass     `json:"review_pass,omitempty"`
+	}{Scope: request.Scope, Kind: request.Kind, ActorID: strings.TrimSpace(request.ActorID), RepoDir: strings.TrimSpace(request.RepoDir), Findings: request.Findings, RestartWorker: request.RestartWorker, ReviewPass: request.ReviewPass})
 	return fmt.Sprintf("%x", sha256.Sum256(body))
 }
 
@@ -1322,24 +2155,56 @@ func (a daemonOrchestrationAuthority) deliverReviewMessage(ctx context.Context, 
 	return true, nil
 }
 
-func formatReviewFindingMessage(issueID, parent string, findings []protocol.OrchestrationReviewFinding) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Orchestrator review findings for issue %s under root %s:\n", issueID, parent)
-	for i, finding := range findings {
-		fmt.Fprintf(&b, "\n%d. [%s]", i+1, strings.TrimSpace(finding.Severity))
-		if finding.File != "" {
-			fmt.Fprintf(&b, " %s", finding.File)
-			if finding.Line > 0 {
-				fmt.Fprintf(&b, ":%d", finding.Line)
-			}
-		}
-		fmt.Fprintf(&b, " — %s", strings.TrimSpace(finding.Finding))
-		if finding.SuggestedFix != "" {
-			fmt.Fprintf(&b, "\n   Fix: %s", strings.TrimSpace(finding.SuggestedFix))
-		}
+func formatReviewFindingMessage(inspection protocol.OrchestrationReview, parent string, findings []protocol.OrchestrationReviewFinding) (string, error) {
+	revision := strings.TrimSpace(inspection.HeadRevision)
+	if revision == "" {
+		revision = strings.TrimSpace(inspection.SourceOID)
 	}
-	b.WriteString("\n\nAddress the findings, rerun validation and the required review loop, then report updated worker-integration-ready evidence without stopping this session.")
-	return b.String()
+	if revision == "" && inspection.ReviewEpochEventID > 0 {
+		revision = fmt.Sprintf("issue-event:%d", inspection.ReviewEpochEventID)
+	}
+	unresolved := make([]string, 0, len(findings))
+	invariants := make([]string, 0)
+	for _, finding := range findings {
+		parts := []string{strings.TrimSpace(finding.Severity)}
+		if file := strings.TrimSpace(finding.File); file != "" && !filepath.IsAbs(file) {
+			if finding.Line > 0 {
+				file = fmt.Sprintf("%s:%d", file, finding.Line)
+			}
+			parts = append(parts, file)
+		}
+		parts = append(parts, strings.TrimSpace(finding.Finding))
+		if finding.SuggestedFix != "" {
+			parts = append(parts, "fix: "+strings.TrimSpace(finding.SuggestedFix))
+		}
+		unresolved = append(unresolved, strings.Join(parts, " — "))
+		invariants = append(invariants, finding.Validation...)
+	}
+	if revision == "" {
+		material, err := json.Marshal(struct {
+			IssueID  string                                `json:"issue_id"`
+			ParentID string                                `json:"parent_id"`
+			Findings []protocol.OrchestrationReviewFinding `json:"findings"`
+		}{IssueID: inspection.IssueID, ParentID: parent, Findings: findings})
+		if err != nil {
+			return "", fmt.Errorf("marshal review finding provenance: %w", err)
+		}
+		sum := sha256.Sum256(material)
+		revision = fmt.Sprintf("review-findings-sha256:%x", sum)
+	}
+	packet, err := domain.BuildWorkflowContextPacket(domain.WorkflowContextInput{
+		Role: domain.WorkflowRoleWorker, IssueID: inspection.IssueID, SourceRevision: revision,
+		Summary:            "Address returned review findings under root " + parent,
+		UnresolvedFindings: unresolved, AffectedInvariants: invariants,
+	})
+	if err != nil {
+		return "", err
+	}
+	encoded, err := domain.MarshalWorkflowContextPacket(packet)
+	if err != nil {
+		return "", err
+	}
+	return "Orchestrator review return for issue " + inspection.IssueID + ". Consume only this bounded semantic packet for the repair phase; do not reconstruct context from workflow scrollback:\n" + string(encoded) + "\n\nAddress the findings, rerun validation and the required review loop, then report updated worker-integration-ready evidence without stopping this session.", nil
 }
 
 func responseErrorMessage(resp protocol.ResponseEnvelope) string {

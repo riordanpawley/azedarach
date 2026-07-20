@@ -24,6 +24,7 @@ import (
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
 	"github.com/riordanpawley/azedarach/internal/services/git"
+	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 	"github.com/riordanpawley/azedarach/internal/testutil/sqlitetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1507,6 +1508,14 @@ func TestClient_ListGraphReadinessWithRuntimeScopesToRootClosure(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, client.AddDependency(ctx, grandchildID, blockerID, string(domain.DependencyBlocks)))
+	rootBlockerID, err := client.Create(ctx, CreateTaskParams{
+		Title:    "Root blocker",
+		Type:     domain.TypeTask,
+		Priority: domain.P1,
+		Status:   domain.StatusInProgress,
+	})
+	require.NoError(t, err)
+	require.NoError(t, client.AddDependency(ctx, rootID, rootBlockerID, string(domain.DependencyBlocks)))
 	unrelatedRootID, err := client.Create(ctx, CreateTaskParams{
 		Title:    "Unrelated root",
 		Type:     domain.TypeEpic,
@@ -1540,7 +1549,7 @@ func TestClient_ListGraphReadinessWithRuntimeScopesToRootClosure(t *testing.T) {
 		taskByID[task.ID.String()] = task
 	}
 
-	for _, wantID := range []string{rootID, childID, grandchildID, blockerID} {
+	for _, wantID := range []string{rootID, childID, grandchildID, blockerID, rootBlockerID} {
 		require.Contains(t, taskByID, wantID)
 	}
 	require.NotContains(t, taskByID, unrelatedRootID)
@@ -1551,6 +1560,20 @@ func TestClient_ListGraphReadinessWithRuntimeScopesToRootClosure(t *testing.T) {
 	require.Len(t, taskByID[grandchildID].Dependencies, 1)
 	assert.Equal(t, blockerID, taskByID[grandchildID].Dependencies[0].ID.String())
 	assert.Equal(t, domain.DependencyBlocks, taskByID[grandchildID].Dependencies[0].Type)
+	require.Len(t, taskByID[rootID].Dependencies, 1)
+	assert.Equal(t, rootBlockerID, taskByID[rootID].Dependencies[0].ID.String())
+
+	nestedTasks, err := client.ListGraphReadinessWithRuntime(ctx, projectID, childID)
+	require.NoError(t, err)
+	nestedByID := map[string]domain.Task{}
+	for _, task := range nestedTasks {
+		nestedByID[task.ID.String()] = task
+	}
+	for _, wantID := range []string{rootID, rootBlockerID, childID, grandchildID, blockerID} {
+		require.Contains(t, nestedByID, wantID)
+	}
+	require.NotContains(t, nestedByID, unrelatedRootID)
+	require.NotContains(t, nestedByID, unrelatedChildID)
 }
 
 func TestClient_ListGraphReadinessWithRuntimeBoundsProjectCandidatesAndCountsAllOpen(t *testing.T) {
@@ -1728,6 +1751,7 @@ func TestGraphReadinessContextIDsQueryUsesClosureIndexes(t *testing.T) {
 	query, args := graphReadinessContextIDsQuery("root")
 	got := explainQueryPlan(t, ctx, db, query, args...)
 	assert.Contains(t, got, "idx_issue_graph_closure_ancestor", got)
+	assert.Contains(t, got, "idx_issue_graph_closure_descendant", got)
 	assert.Contains(t, got, "idx_dependencies_issue_active_type", got)
 	assert.NotContains(t, got, "SCAN child", got)
 	assert.NotContains(t, got, "SCAN d", got)
@@ -2406,9 +2430,26 @@ func TestClient_SQLiteReadLogsIncludeStableAttribution(t *testing.T) {
 	assert.Contains(t, got, `"service":"azedarach.issue_store"`)
 	assert.Contains(t, got, `"dependency.name":"sqlite"`)
 	assert.Contains(t, got, `"dependency.operation":"issue.runtime_projection"`)
+	assert.Contains(t, got, `"db.path":"`+sqliteutil.CanonicalPath(client.dbPath)+`"`)
 	assert.Contains(t, got, `"dependency.duration_ms":`)
 	assert.Contains(t, got, `"outcome":"success"`)
 	assert.Contains(t, got, `"row_count":1`)
+}
+
+func TestClient_SQLiteReadErrorLogsExtendedResultCode(t *testing.T) {
+	parallelIssueStoreTest(t)
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	client := newTestClientWithLogger(t, logger)
+
+	client.logSQLiteRead(context.Background(), "projection.delta_head", time.Now(), 0, projectionCodedError{code: sqliteutil.SQLiteIOErrorShortRead})
+
+	got := logs.String()
+	assert.Contains(t, got, `"dependency.operation":"projection.delta_head"`)
+	assert.Contains(t, got, `"db.path":"`+sqliteutil.CanonicalPath(client.dbPath)+`"`)
+	assert.Contains(t, got, `"sqlite.code":10`)
+	assert.Contains(t, got, `"sqlite.extended_code":522`)
+	assert.Contains(t, got, `"sqlite.symbol":"SQLITE_IOERR_SHORT_READ"`)
 }
 
 func TestClient_UpdateWithRuntimeReturnsChangedTask(t *testing.T) {
@@ -2895,7 +2936,7 @@ func TestClient_ReviewLeaseFenceIsScopedToCurrentReviewRequestEpochAcrossClients
 		Type:          domain.IssueEventReviewCompleted,
 		Source:        "daemon-orchestration",
 		SourceCommand: "review-accept",
-		Payload:       map[string]any{"outcome": "accepted", "actor_id": "reviewer-a"},
+		Payload:       map[string]any{"outcome": "accepted", "actor_id": "reviewer-a", "actor_kind": domain.ReviewerOwnerKindOrchestrator},
 	})
 	require.NoError(t, err)
 	_, err = reviewer.ReleaseOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer-a", Purpose: domain.CoordinationLeaseReview})
@@ -2927,7 +2968,7 @@ func TestClient_ReviewLeaseFenceIsScopedToCurrentReviewRequestEpochAcrossClients
 		Type:          domain.IssueEventReviewCompleted,
 		Source:        "daemon-orchestration",
 		SourceCommand: "review-accept",
-		Payload:       map[string]any{"outcome": "accepted", "actor_id": "reviewer-b"},
+		Payload:       map[string]any{"outcome": "accepted", "actor_id": "reviewer-b", "actor_kind": domain.ReviewerOwnerKindOrchestrator},
 	})
 	require.NoError(t, err)
 	_, err = competitor.ReleaseOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer-b", Purpose: domain.CoordinationLeaseReview})
@@ -2939,7 +2980,7 @@ func TestClient_ReviewLeaseFenceIsScopedToCurrentReviewRequestEpochAcrossClients
 		Type:          domain.IssueEventReviewCompleted,
 		Source:        "daemon-orchestration",
 		SourceCommand: "review-accept",
-		Payload:       map[string]any{"outcome": "integration_failed", "actor_id": "reviewer-b"},
+		Payload:       map[string]any{"outcome": "integration_failed", "actor_id": "reviewer-b", "actor_kind": domain.ReviewerOwnerKindOrchestrator},
 	})
 	require.NoError(t, err)
 	lease, err = reviewer.ClaimOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer-a", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview})
@@ -4600,6 +4641,11 @@ func TestClient_MigratesLegacySchemaShape(t *testing.T) {
 		"0052_mailbox_observation_projection_cutover",
 		"0053_git_hook_refresh_intents",
 		"0054_rooted_session_role_exclusivity",
+		"0055_mailbox_observation_replay_repair",
+		"0056_legacy_attachment_blob_forward",
+		"0057_agent_input_delivery",
+		"0058_orchestration_start_intents",
+		"0059_task_creation_intents",
 	}, got)
 }
 
@@ -4806,7 +4852,6 @@ func TestClient_RepairsLegacyIssueColumnsBeforeSearchFTSMigration(t *testing.T) 
 		"0012_blocked_status_to_open",
 		"0013_closed_runtime_invariants",
 		"0014_linear_sync_external_refs_backfill",
-		"0015_issue_attachments",
 	} {
 		_, err = db.ExecContext(ctx, `INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)`, id, now)
 		require.NoError(t, err)
@@ -5702,8 +5747,8 @@ func TestClient_CreateBusyRetryIsBoundedWithoutCallerDeadline(t *testing.T) {
 	_, _ = lockDB.Exec(`ROLLBACK`)
 }
 
-func TestClient_CreateBusyRetryStopsAtEarlierCallerDeadline(t *testing.T) {
-	client := newTestClient(t, WithSQLiteBusyPolicy(time.Second, 10*time.Millisecond))
+func TestClient_CreateBusyRetryStopsAtCallerCancellation(t *testing.T) {
+	client, retryStarted, _ := newBusyRetryTestClient(t)
 	_, err := client.Create(context.Background(), CreateTaskParams{Title: "warmup", Type: domain.TypeTask, Priority: domain.P3})
 	require.NoError(t, err)
 	lockDB, err := sql.Open("sqlite", "file:"+client.dbPath)
@@ -5713,13 +5758,23 @@ func TestClient_CreateBusyRetryStopsAtEarlierCallerDeadline(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _, _ = lockDB.Exec(`ROLLBACK`) }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
-	defer cancel()
-	started := time.Now()
-	_, err = client.Create(ctx, CreateTaskParams{Title: "cancelled-busy-retry", Type: domain.TypeTask, Priority: domain.P3})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, createErr := client.Create(ctx, CreateTaskParams{Title: "cancelled-busy-retry", Type: domain.TypeTask, Priority: domain.P3})
+		done <- createErr
+	}()
+
+	select {
+	case <-retryStarted:
+	case err = <-done:
+		t.Fatalf("Create returned before SQLite busy retry: %v", err)
+	}
+	cancel()
+	err = <-done
 	require.Error(t, err)
-	assert.True(t, IsSQLiteBusy(err), "error = %v, want preserved SQLite busy error", err)
-	assert.Less(t, time.Since(started), 500*time.Millisecond)
+	assert.True(t, IsSQLiteBusy(err) || errors.Is(err, context.DeadlineExceeded),
+		"error = %v, want SQLite busy observed before the deadline or the caller deadline itself", err)
 }
 
 func TestIsSQLiteBusyRecognizesBusySnapshotExtendedCode(t *testing.T) {

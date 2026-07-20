@@ -3,20 +3,21 @@ package git
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/riordanpawley/azedarach/internal/latencytrace"
+	"github.com/riordanpawley/azedarach/internal/services/processgroup"
 )
 
 // CommandRunner executes git commands and returns their output.
 type CommandRunner interface {
 	Run(ctx context.Context, args ...string) (string, error)
+}
+
+type rawCommandRunner interface {
+	RunRaw(ctx context.Context, args ...string) (string, error)
 }
 
 type envCommandRunner interface {
@@ -29,8 +30,10 @@ type ExecRunner struct {
 	outputObserver processOutputObserver
 }
 
-type processOutputObserver func(stream string, output []byte)
+type processOutputObserver = processgroup.OutputObserver
 
+// processOutputWriter remains as the focused observer contract seam. Process
+// lifecycle ownership lives in processgroup.Run.
 type processOutputWriter struct {
 	stream   string
 	dst      *bytes.Buffer
@@ -54,14 +57,21 @@ func NewExecRunner(workDir string) *ExecRunner {
 
 // Run executes a git command with the given arguments.
 func (e *ExecRunner) Run(ctx context.Context, args ...string) (out string, err error) {
-	return e.run(ctx, nil, args...)
+	return e.run(ctx, nil, false, args...)
+}
+
+// RunRaw preserves stdout byte-for-byte for machine-delimited Git output.
+// Callers must opt in explicitly; ordinary text commands retain Run's
+// whitespace normalization contract.
+func (e *ExecRunner) RunRaw(ctx context.Context, args ...string) (out string, err error) {
+	return e.run(ctx, nil, true, args...)
 }
 
 func (e *ExecRunner) RunWithEnv(ctx context.Context, extraEnv []string, args ...string) (out string, err error) {
-	return e.run(ctx, extraEnv, args...)
+	return e.run(ctx, extraEnv, false, args...)
 }
 
-func (e *ExecRunner) run(ctx context.Context, extraEnv []string, args ...string) (out string, err error) {
+func (e *ExecRunner) run(ctx context.Context, extraEnv []string, preserveStdout bool, args ...string) (out string, err error) {
 	operation := gitOperation(args)
 	ctx, endSpan := latencytrace.StartSpan(ctx, "dependency", "git",
 		"dependency.name", "git",
@@ -70,7 +80,7 @@ func (e *ExecRunner) run(ctx context.Context, extraEnv []string, args ...string)
 	)
 	defer func() { endSpan(err) }()
 
-	stdoutText, stderrText, err := runProcessGroupCommandWithObserver(
+	stdoutText, stderrText, err := runProcessGroupCommandRawWithObserver(
 		ctx,
 		e.workDir,
 		gitEnvWithOverrides(sanitizedGitEnv(os.Environ()), extraEnv),
@@ -78,6 +88,9 @@ func (e *ExecRunner) run(ctx context.Context, extraEnv []string, args ...string)
 		"git",
 		args...,
 	)
+	if !preserveStdout {
+		stdoutText = strings.TrimSpace(stdoutText)
+	}
 	if err != nil {
 		detail := stderrText
 		if detail == "" {
@@ -100,45 +113,18 @@ func runProcessGroupCommand(ctx context.Context, dir string, env []string, name 
 	return runProcessGroupCommandWithObserver(ctx, dir, env, nil, name, args...)
 }
 
-func runProcessGroupCommandWithObserver(ctx context.Context, dir string, env []string, observer processOutputObserver, name string, args ...string) (stdoutText, stderrText string, err error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir = dir
-	cmd.Env = env
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.WaitDelay = 2 * time.Second
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return os.ErrProcessDone
-		}
-		pid := cmd.Process.Pid
-		if signalErr := syscall.Kill(-pid, syscall.SIGTERM); signalErr != nil {
-			if errors.Is(signalErr, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return signalErr
-		}
-		timer := time.NewTimer(500 * time.Millisecond)
-		defer timer.Stop()
-		<-timer.C
-		if syscall.Kill(-pid, 0) == nil {
-			_ = syscall.Kill(-pid, syscall.SIGKILL)
-		}
-		return nil
-	}
+func runProcessGroupCommandRaw(ctx context.Context, dir string, env []string, name string, args ...string) (stdoutText, stderrText string, err error) {
+	return runProcessGroupCommandRawWithObserver(ctx, dir, env, nil, name, args...)
+}
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = processOutputWriter{stream: "stdout", dst: &stdout, observer: observer}
-	cmd.Stderr = processOutputWriter{stream: "stderr", dst: &stderr, observer: observer}
-	err = cmd.Run()
-	stdoutText = strings.TrimSpace(stdout.String())
-	stderrText = strings.TrimSpace(stderr.String())
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		err = ctxErr
-	}
-	return stdoutText, stderrText, err
+func runProcessGroupCommandWithObserver(ctx context.Context, dir string, env []string, observer processOutputObserver, name string, args ...string) (stdoutText, stderrText string, err error) {
+	stdoutText, stderrText, err = runProcessGroupCommandRawWithObserver(ctx, dir, env, observer, name, args...)
+	return strings.TrimSpace(stdoutText), stderrText, err
+}
+
+func runProcessGroupCommandRawWithObserver(ctx context.Context, dir string, env []string, observer processOutputObserver, name string, args ...string) (stdoutText, stderrText string, err error) {
+	stdoutText, stderrText, err = processgroup.Run(ctx, dir, env, observer, name, args...)
+	return stdoutText, strings.TrimSpace(stderrText), err
 }
 
 func gitOperation(args []string) string {

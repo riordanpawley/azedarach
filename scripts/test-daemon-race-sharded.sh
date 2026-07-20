@@ -106,6 +106,10 @@ fi
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
+if [ -n "${AZEDARACH_DAEMON_RACE_TEST_INNER_READY_FIFO:-}" ]; then
+	printf '%s\n' "$$" >"$AZEDARACH_DAEMON_RACE_TEST_INNER_READY_FIFO"
+fi
+
 # Race instrumentation must never populate the normal development namespace.
 common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
 cache_root="${AZEDARACH_GO_CACHE_ROOT:-$(dirname "$common_dir")/.azedarach/go}"
@@ -141,18 +145,29 @@ else
 	tmpdir="$(mktemp -d -t azedarach-daemon-race.XXXXXX)"
 	owns_tmpdir=1
 fi
+timeout_hold="$tmpdir/timeout-hold"
+mkfifo "$timeout_hold"
 cleanup_inner() {
 	if [ "$owns_tmpdir" -eq 1 ]; then
 		rm -rf "$tmpdir"
 	fi
 }
 mark_timeout() {
-	# Remain the process-group leader's supervised child until GNU timeout sends
-	# its delayed KILL. If we returned/exited here, TERM-ignoring grandchildren
-	# could outlive timeout and late diagnostics could race output collection.
-	while :; do
-		sleep 1
+	# Reap shard children that completed their TERM handling before remaining the
+	# process-group leader's supervised child until GNU timeout sends its delayed
+	# KILL. This preserves late diagnostics without leaving completed shard
+	# processes as zombies while the aggregate timeout escalates.
+	for pid_file in "$tmpdir"/pid-*; do
+		[ -s "$pid_file" ] || continue
+		pid="$(cat "$pid_file")"
+		wait "$pid" 2>/dev/null || true
 	done
+	if [ -n "${AZEDARACH_DAEMON_RACE_TEST_DESCENDANTS_REAPED_FIFO:-}" ]; then
+		printf 'reaped\n' >"$AZEDARACH_DAEMON_RACE_TEST_DESCENDANTS_REAPED_FIFO"
+	fi
+	# Block in this shell without spawning another descriptor-inheriting child
+	# across the process-group KILL boundary.
+	read -r _ <"$timeout_hold"
 }
 trap cleanup_inner EXIT
 trap mark_timeout TERM

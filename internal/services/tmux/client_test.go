@@ -111,6 +111,30 @@ func TestClient_NewSession(t *testing.T) {
 	}
 }
 
+func TestClientRespawnPaneTargetsOnlyExactPane(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(runner, slog.Default())
+	if err := client.RespawnPane(context.Background(), "%12", "/tmp/worktree", "exec /tmp/restart.sh"); err != nil {
+		t.Fatalf("RespawnPane: %v", err)
+	}
+	want := [][]string{{"respawn-pane", "-k", "-t", "%12", "-c", "/tmp/worktree", "exec /tmp/restart.sh"}}
+	if !reflect.DeepEqual(runner.commands, want) {
+		t.Fatalf("commands = %#v, want %#v", runner.commands, want)
+	}
+}
+
+func TestClientRespawnPaneWithEnvironmentTargetsOnlyReplacementPane(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(runner, slog.Default())
+	if err := client.RespawnPaneWithEnvironment(context.Background(), "%12", "/tmp/worktree", "exec /tmp/restart.sh", map[string]string{"AZEDARACH_DAEMON_SCOPE": "worktree"}); err != nil {
+		t.Fatalf("RespawnPaneWithEnvironment: %v", err)
+	}
+	want := [][]string{{"respawn-pane", "-k", "-t", "%12", "-c", "/tmp/worktree", "-e", "AZEDARACH_DAEMON_SCOPE=worktree", "exec /tmp/restart.sh"}}
+	if !reflect.DeepEqual(runner.commands, want) {
+		t.Fatalf("commands = %#v, want %#v", runner.commands, want)
+	}
+}
+
 func TestClient_NewSessionWithCommand(t *testing.T) {
 	runner := &recordingRunner{}
 	client := NewClient(runner, slog.Default())
@@ -360,6 +384,29 @@ func TestClient_KillSession(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestClient_KillWindowTargetsExactSessionWindow(t *testing.T) {
+	runner := &recordingRunner{}
+	client := NewClient(runner, slog.Default())
+	if err := client.KillWindow(context.Background(), "worker", "resolve-conflict"); err != nil {
+		t.Fatal(err)
+	}
+	require.Equal(t, [][]string{{"kill-window", "-t", "worker:resolve-conflict"}}, runner.commands)
+
+	if err := client.KillWindow(context.Background(), "worker", " "); err == nil {
+		t.Fatal("blank window target unexpectedly accepted")
+	}
+}
+
+func TestClient_HasWindowMatchesExactName(t *testing.T) {
+	runner := &recordingOutputRunner{outputs: []string{"shell\nresolve-conflict-old\nresolve-conflict\n"}}
+	client := NewClient(runner, slog.Default())
+	found, err := client.HasWindow(context.Background(), "worker", "resolve-conflict")
+	if err != nil || !found {
+		t.Fatalf("exact window found=%t err=%v", found, err)
+	}
+	require.Equal(t, [][]string{{"list-windows", "-t", "worker", "-F", "#{window_name}"}}, runner.commands)
 }
 
 func TestClient_SendKeys(t *testing.T) {
@@ -642,6 +689,25 @@ func TestClient_ListPaneInfos(t *testing.T) {
 			assert.Equal(t, tt.want, panes)
 		})
 	}
+}
+
+func TestClient_ListPaneInfosForSessionTargetsOnlyRequestedSession(t *testing.T) {
+	runner := &recordingOutputRunner{outputs: []string{"az-1\t%7\t123\tcodex\n"}}
+	client := NewClient(runner, slog.Default())
+
+	panes, err := client.ListPaneInfosForSession(context.Background(), "az-1")
+	require.NoError(t, err)
+	require.Equal(t, []PaneInfo{{SessionName: "az-1", PaneID: "7", PanePID: 123, CurrentCommand: "codex"}}, panes)
+	require.Equal(t, [][]string{{"list-panes", "-s", "-t", "az-1", "-F", "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}"}}, runner.commands)
+}
+
+func TestClient_ListPaneInfosForSessionReturnsEmptyWhenTargetDisappears(t *testing.T) {
+	runner := &recordingOutputRunner{err: errors.New("can't find session: az-1")}
+	client := NewClient(runner, slog.Default())
+
+	panes, err := client.ListPaneInfosForSession(context.Background(), "az-1")
+	require.NoError(t, err)
+	require.Empty(t, panes)
 }
 
 func TestClient_ListSessionInfos(t *testing.T) {

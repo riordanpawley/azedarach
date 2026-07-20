@@ -5,35 +5,52 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
 // Config represents the full Azedarach configuration
 type Config struct {
-	CLITool          string                 `json:"cliTool"`
-	IssueTracker     IssueTrackerConfig     `json:"issueTracker"`
-	Gate             GateConfig             `json:"gate"`
-	Git              GitConfig              `json:"git"`
-	GitHooks         GitHooksConfig         `json:"githooks"`
-	Keyboard         KeyboardConfig         `json:"keyboard"`
-	Session          SessionConfig          `json:"session"`
-	PR               PRConfig               `json:"pr"`
-	Merge            MergeConfig            `json:"merge"`
-	Notifications    NotifyConfig           `json:"notifications"`
-	Issues           IssuesConfig           `json:"issues"`
-	Network          NetworkConfig          `json:"network"`
-	DevServer        DevServerConfig        `json:"devServer"`
-	Worktree         WorktreeConfig         `json:"worktree"`
-	IssueResources   IssueResourcesConfig   `json:"issueResources"`
-	ScheduledScripts ScheduledScriptsConfig `json:"scheduledScripts"`
-	Spec             SpecConfig             `json:"spec"`
-	Orchestration    OrchestrationConfig    `json:"orchestration"`
-	Diagnostics      DiagnosticsConfig      `json:"diagnostics"`
+	CLITool             string                    `json:"cliTool"`
+	IssueTracker        IssueTrackerConfig        `json:"issueTracker"`
+	Gate                GateConfig                `json:"gate"`
+	Git                 GitConfig                 `json:"git"`
+	GitHooks            GitHooksConfig            `json:"githooks"`
+	Keyboard            KeyboardConfig            `json:"keyboard"`
+	Session             SessionConfig             `json:"session"`
+	PR                  PRConfig                  `json:"pr"`
+	Merge               MergeConfig               `json:"merge"`
+	Notifications       NotifyConfig              `json:"notifications"`
+	Issues              IssuesConfig              `json:"issues"`
+	Network             NetworkConfig             `json:"network"`
+	DevServer           DevServerConfig           `json:"devServer"`
+	Worktree            WorktreeConfig            `json:"worktree"`
+	IssueResources      IssueResourcesConfig      `json:"issueResources"`
+	ScheduledScripts    ScheduledScriptsConfig    `json:"scheduledScripts"`
+	Spec                SpecConfig                `json:"spec"`
+	Orchestration       OrchestrationConfig       `json:"orchestration"`
+	PublicationEvidence PublicationEvidenceConfig `json:"publicationEvidence"`
+	Diagnostics         DiagnosticsConfig         `json:"diagnostics"`
 }
 
 // GateConfig selects the project-owned command run by `az gate`.
 type GateConfig struct {
-	Command string `json:"command"`
+	Command                string            `json:"command"`
+	EnvironmentFingerprint string            `json:"environmentFingerprint,omitempty"`
+	FailureArtifactPaths   []string          `json:"failureArtifactPaths"`
+	Stages                 []GateStageConfig `json:"stages,omitempty"`
+}
+
+// GateStageConfig describes one consumer-owned authoritative validation stage.
+// Resource names are opaque project capabilities; stages sharing a resource
+// never overlap. An empty Required value defaults to true.
+type GateStageConfig struct {
+	ID            string   `json:"id"`
+	Command       string   `json:"command"`
+	DependsOn     []string `json:"dependsOn,omitempty"`
+	Resources     []string `json:"resources,omitempty"`
+	ArtifactPaths []string `json:"artifactPaths,omitempty"`
+	Required      *bool    `json:"required,omitempty"`
 }
 
 type IssueTrackerConfig struct {
@@ -227,6 +244,17 @@ type OrchestrationConfig struct {
 	OpenIssueLimit int    `json:"openIssueLimit"`
 }
 
+// PublicationEvidenceConfig is project-owned capability discovery for
+// authoritative layered publication evidence. Path prefixes use canonical
+// repository-relative slash form and are never inferred from Azedarach's own
+// repository layout.
+type PublicationEvidenceConfig struct {
+	PolicyVersion      string              `json:"policyVersion"`
+	ActivePathProfiles []string            `json:"activePathProfiles"`
+	ExactBaseSurfaces  map[string][]string `json:"exactBaseSurfaces"`
+	Dependencies       map[string][]string `json:"dependencies"`
+}
+
 type DiagnosticsConfig struct {
 	LatencyTrace bool `json:"latencyTrace"`
 }
@@ -333,7 +361,7 @@ func DefaultConfig() *Config {
 			SyncInitCommands:  []string{},
 			AsyncInitCommands: []string{},
 		},
-		Gate: GateConfig{},
+		Gate: GateConfig{FailureArtifactPaths: []string{}},
 		IssueResources: IssueResourcesConfig{
 			Env:                        map[string]string{},
 			PrepareCommands:            []string{},
@@ -356,6 +384,11 @@ func DefaultConfig() *Config {
 			StartLimit:     3,
 			AgentCapacity:  12,
 			OpenIssueLimit: 100,
+		},
+		PublicationEvidence: PublicationEvidenceConfig{
+			ActivePathProfiles: []string{},
+			ExactBaseSurfaces:  map[string][]string{},
+			Dependencies:       map[string][]string{},
 		},
 		Diagnostics: DiagnosticsConfig{
 			LatencyTrace: false,
@@ -445,7 +478,77 @@ func LoadConfig(projectPath string) (*Config, error) {
 		}
 	}
 
-	return MergeWithDefaults(cfg), nil
+	cfg = MergeWithDefaults(cfg)
+	if err := validateGateConfig(cfg.Gate); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func validateGateConfig(cfg GateConfig) error {
+	for index, path := range cfg.FailureArtifactPaths {
+		path = strings.TrimSpace(path)
+		if path == "" || path == "." || !filepath.IsLocal(path) {
+			return fmt.Errorf("gate.failureArtifactPaths[%d] must be a non-empty project-relative path below the project root", index)
+		}
+	}
+	ids := make(map[string]struct{}, len(cfg.Stages))
+	for index, stage := range cfg.Stages {
+		stage.ID = strings.TrimSpace(stage.ID)
+		if stage.ID == "" || strings.TrimSpace(stage.Command) == "" {
+			return fmt.Errorf("gate.stages[%d] requires non-empty id and command", index)
+		}
+		if _, exists := ids[stage.ID]; exists {
+			return fmt.Errorf("gate.stages contains duplicate id %q", stage.ID)
+		}
+		ids[stage.ID] = struct{}{}
+		for artifactIndex, path := range stage.ArtifactPaths {
+			path = strings.TrimSpace(path)
+			if path == "" || path == "." || !filepath.IsLocal(path) {
+				return fmt.Errorf("gate.stages[%d].artifactPaths[%d] must be a project-relative path", index, artifactIndex)
+			}
+		}
+	}
+	for _, stage := range cfg.Stages {
+		for _, dependency := range stage.DependsOn {
+			if _, exists := ids[strings.TrimSpace(dependency)]; !exists {
+				return fmt.Errorf("gate stage %q depends on unknown stage %q", stage.ID, dependency)
+			}
+		}
+	}
+	state := make(map[string]uint8, len(cfg.Stages))
+	byID := make(map[string]GateStageConfig, len(cfg.Stages))
+	for _, stage := range cfg.Stages {
+		byID[strings.TrimSpace(stage.ID)] = stage
+	}
+	var visit func(string) error
+	visit = func(id string) error {
+		switch state[id] {
+		case 1:
+			return fmt.Errorf("gate stage graph contains a cycle at %q", id)
+		case 2:
+			return nil
+		}
+		state[id] = 1
+		for _, dependency := range byID[id].DependsOn {
+			if err := visit(strings.TrimSpace(dependency)); err != nil {
+				return err
+			}
+		}
+		state[id] = 2
+		return nil
+	}
+	stageIDs := make([]string, 0, len(byID))
+	for id := range byID {
+		stageIDs = append(stageIDs, id)
+	}
+	sort.Strings(stageIDs)
+	for _, id := range stageIDs {
+		if err := visit(id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func loadConfigLayer(cfg *Config, configPath string) error {
@@ -680,6 +783,9 @@ func MergeWithDefaults(cfg *Config) *Config {
 	}
 	if cfg.IssueTracker.Linear.Webhooks.Events == nil {
 		cfg.IssueTracker.Linear.Webhooks.Events = defaults.IssueTracker.Linear.Webhooks.Events
+	}
+	if cfg.Gate.FailureArtifactPaths == nil {
+		cfg.Gate.FailureArtifactPaths = defaults.Gate.FailureArtifactPaths
 	}
 
 	// Merge Git config

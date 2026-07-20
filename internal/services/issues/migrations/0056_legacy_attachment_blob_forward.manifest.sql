@@ -1,0 +1,63 @@
+-- Migration: 0056_legacy_attachment_blob_forward
+--
+-- Immutable manifest for a Go-assisted forward migration. It is not executed as
+-- SQL because legacy bytes must be materialized in the canonical project storage.
+--
+-- Accepted preconditions are the exact 0015 reference schema or the exact
+-- historical content_blob schema. Absent, partial, and unknown shapes fail closed.
+--
+-- Historical source schema:
+--   CREATE TABLE issue_attachments (
+--     issue_id TEXT NOT NULL,
+--     attachment_id TEXT NOT NULL,
+--     filename TEXT NOT NULL,
+--     original_path TEXT NOT NULL,
+--     mime_type TEXT NOT NULL,
+--     size_bytes INTEGER NOT NULL,
+--     created_at TEXT NOT NULL,
+--     content_blob BLOB NOT NULL,
+--     PRIMARY KEY (issue_id, attachment_id)
+--   );
+--   CREATE INDEX idx_issue_attachments_attachment_id
+--     ON issue_attachments(attachment_id);
+--   CREATE INDEX idx_issue_attachments_issue
+--     ON issue_attachments(issue_id, created_at, attachment_id);
+--
+-- Current target schema:
+--   CREATE TABLE issue_attachments (
+--     issue_id TEXT NOT NULL,
+--     attachment_id TEXT NOT NULL,
+--     filename TEXT NOT NULL,
+--     relative_path TEXT NOT NULL,
+--     mime_type TEXT NOT NULL,
+--     size INTEGER NOT NULL DEFAULT 0,
+--     created_at TEXT NOT NULL,
+--     PRIMARY KEY (issue_id, attachment_id)
+--   );
+--   CREATE INDEX idx_issue_attachments_attachment_id
+--     ON issue_attachments(attachment_id);
+--
+-- Source and target validation tokenizes sqlite_master DDL and requires the exact
+-- table/index token stream above. PRAGMA index_list plus index_xinfo must also match
+-- exact uniqueness, origin, partial, CID, collation, ordering, and key metadata.
+-- The implicit composite-primary-key autoindex is required. Any CHECK, foreign key,
+-- WITHOUT ROWID/STRICT option, trigger, additional index, expression, collation, or
+-- descending term not declared above is unknown drift and fails closed.
+--
+-- Each blob is installed beneath the canonical .azedarach/attachments directory
+-- with a content-derived name. Existing files must be byte-identical. IDs, MIME
+-- type, stored size, timestamp, and content are preserved verbatim, including
+-- historically tolerated empty metadata and size mismatches. The obsolete
+-- original_path is used only as a safe filename fallback. The content-hash prefix
+-- and UTF-8-safe basename are deterministically truncated to at most 255 bytes, so
+-- valid legacy basenames cannot exceed NAME_MAX. File conflicts fail closed.
+--
+-- Schema inspection, row reads, replacement, validation, and ledger insertion use
+-- one immediate transaction. File installation is no-clobber and retry-safe. Before
+-- blob installation, the .azedarach parent directory is synchronized after creating
+-- or observing the canonical attachments directory. After file links or cleanup,
+-- the attachments directory is synchronized before schema and ledger commit. Files
+-- created by ordinary pre-commit failure are removed; complete crash leftovers are
+-- validated and reused. The ledger records this artifact's pinned checksum only
+-- after the target validates. Startup revalidates the applied immutable schema.
+SELECT 1;

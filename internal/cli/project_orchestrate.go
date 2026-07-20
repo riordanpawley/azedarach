@@ -83,9 +83,13 @@ func projectOrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOpt
 	if err := ensureDaemon(ctx, deps, "cli"); err != nil {
 		return err
 	}
-	intentKey, err := newCLIOrchestrationStartIntentKey()
-	if err != nil {
-		return err
+	intentKey := strings.TrimSpace(opts.IntentKey)
+	if intentKey == "" {
+		generated, keyErr := newCLIOrchestrationStartIntentKey()
+		if keyErr != nil {
+			return keyErr
+		}
+		intentKey = generated
 	}
 	request := protocol.OrchestrationIntentRequest{
 		Scope: scope, Kind: protocol.OrchestrationIntentStart,
@@ -105,6 +109,9 @@ func projectOrchestrateStartCommand(deps *Dependencies, opts OrchestrateStartOpt
 		fmt.Printf("Project orchestration start: requested=%d started=%d limit=%d\n", len(result.Requested), len(result.Started), opts.Limit)
 		for _, id := range result.Started {
 			fmt.Printf("- started: %s\n", id)
+		}
+		for _, pending := range result.Pending {
+			fmt.Printf("- queued %s: phase=%s retryable=%t intent=%s message=%s\n", pending.IssueID, pending.Phase, pending.Retryable, result.IntentKey, pending.Message)
 		}
 		for _, id := range sortedKeys(result.Skipped) {
 			fmt.Printf("- skipped %s: %s\n", id, result.Skipped[id])
@@ -155,9 +162,27 @@ func OrchestrateReviewCommand(deps *Dependencies, opts OrchestrateReviewOptions)
 	for _, finding := range opts.Findings {
 		findings = append(findings, protocol.OrchestrationReviewFinding{Severity: opts.Severity, Finding: finding})
 	}
+	var reviewPass *protocol.OrchestrationReviewPass
+	if raw := strings.TrimSpace(opts.ReviewPassJSON); raw != "" {
+		var parsed protocol.OrchestrationReviewPass
+		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+			return fmt.Errorf("decode --review-pass: %w", err)
+		}
+		if opts.Action == "return" {
+			if err := validateReturnedReviewPass(parsed); err != nil {
+				return err
+			}
+		}
+		for _, skipped := range parsed.Matrix.SkippedCells {
+			if strings.TrimSpace(skipped.Cell) == "" || strings.TrimSpace(skipped.Reason) == "" {
+				return fmt.Errorf("--review-pass skipped matrix cells require cell and reason")
+			}
+		}
+		reviewPass = &parsed
+	}
 	request := protocol.OrchestrationIntentRequest{
 		Scope: scope, Kind: kind, IntentKey: intentKey, ActorID: orchestrateOwnerID(),
-		IssueIDs: opts.IssueIDs, RepoDir: deps.RepoDir, Findings: findings, RestartWorker: opts.RestartWorker,
+		IssueIDs: opts.IssueIDs, RepoDir: deps.RepoDir, Findings: findings, ReviewPass: reviewPass, RestartWorker: opts.RestartWorker,
 	}
 	result, err := deps.DaemonClient.ApplyOrchestrationIntent(ctx, request)
 	if err != nil {
@@ -175,6 +200,12 @@ func OrchestrateReviewCommand(deps *Dependencies, opts OrchestrateReviewOptions)
 		for _, id := range result.Returned {
 			fmt.Printf("- findings returned: %s\n", id)
 		}
+		for _, publication := range result.Publications {
+			fmt.Printf("- publication queued %s: operation=%s intent=%s state=%s position=%d source=%s base=%s candidate=%s lease=%s evidence=%s validation=%s reused=%s\n",
+				publication.IssueID, publication.OperationID, publication.IntentKey, publication.State, publication.QueuePosition,
+				publication.SourceRevision, publication.BaseRevision, publication.CandidateRevision, publication.LeaseOwner,
+				publication.EvidenceSource, publication.ValidationRequestID, publication.ReusedEvidenceID)
+		}
 		for _, id := range sortedKeys(result.Skipped) {
 			fmt.Printf("- skipped %s: %s\n", id, result.Skipped[id])
 		}
@@ -189,6 +220,13 @@ func OrchestrateReviewCommand(deps *Dependencies, opts OrchestrateReviewOptions)
 	}
 	if len(result.Failed) > 0 || len(result.Pending) > 0 || len(result.Skipped) > 0 {
 		return fmt.Errorf("review %s incomplete; retry the same decision with --intent-key %s", opts.Action, result.IntentKey)
+	}
+	return nil
+}
+
+func validateReturnedReviewPass(reviewPass protocol.OrchestrationReviewPass) error {
+	if err := protocol.ValidateReturnedReviewPass(reviewPass); err != nil {
+		return fmt.Errorf("--review-pass: %w", err)
 	}
 	return nil
 }

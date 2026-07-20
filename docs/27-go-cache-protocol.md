@@ -65,7 +65,7 @@ install exclusion; production-sensitive aggregate push/review gates do.
 The cache lock has a narrower role. Validators hold it shared while cache
 maintenance holds it exclusively, so
 `go clean -cache` never runs concurrently with managed validation. Reports use schema
-`azedarach.test_timing_report.v4` and distinguish test-result cache policy from
+`azedarach.test_timing_report.v5` and distinguish test-result cache policy from
 the retained build cache. The `build_cache` object includes namespace, path,
 policy, bytes/files before and after, deltas, total family bytes, configured
 limits, and the resulting decision.

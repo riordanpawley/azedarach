@@ -24,6 +24,7 @@ cp "$repo_root/justfile" "$fixture/justfile"
 mkdir -p "$fixture/scripts"
 cp "$repo_root/scripts/build-install-run.sh" "$fixture/scripts/build-install-run.sh"
 cp "$repo_root/scripts/with-machine-validation-lease" "$fixture/scripts/with-machine-validation-lease"
+cp "$repo_root/scripts/publish-validation-artifacts" "$fixture/scripts/publish-validation-artifacts"
 cp "$repo_root/scripts/with-production-install-admission" "$fixture/scripts/with-production-install-admission"
 chmod +x "$fixture/scripts/with-production-install-admission"
 cat >"$fixture/scripts/jaeger-local.sh" <<'EOF'
@@ -169,6 +170,9 @@ if [[ "${1:-}" == "validation" && "${2:-}" == "heartbeat" ]]; then
   exit 0
 fi
 if [[ "${1:-}" == "validation" && "${2:-}" == "finish" ]]; then
+  if [[ -n "${FAKE_AZ_FINISH_MARKER_FILE:-}" ]]; then
+    printf '%s\n' "$*" >>"$FAKE_AZ_FINISH_MARKER_FILE"
+  fi
   if [[ -n "${FAKE_AZ_FINISH_EVIDENCE_FILE:-}" ]]; then
     while (($# > 0)); do
       if [[ "$1" == "--evidence-json" ]]; then
@@ -197,6 +201,10 @@ if [[ "${1:-}" == "status" && "${2:-}" == "--porcelain" ]]; then
 fi
 if [[ "${1:-}" == "rev-parse" && "${2:-}" == "--path-format=absolute" && "${3:-}" == "--git-common-dir" ]]; then
   printf '%s/.git\n' "${FAKE_GIT_COMMON_ROOT:?}"
+  exit 0
+fi
+if [[ "${1:-}" == "rev-parse" && "${2:-}" == "--show-toplevel" ]]; then
+  printf '%s\n' "${FAKE_GIT_COMMON_ROOT:?}"
   exit 0
 fi
 echo "stub validation git: unsupported arguments: $*" >&2
@@ -229,6 +237,55 @@ env "${fresh_validation_environment[@]}" \
   sh -c 'touch "$1"' sh "$repository_payload"
 test -e "$repository_payload"
 
+publication_control="$fixture/publication-control"
+mkdir -m 700 "$publication_control"
+publication_evidence="$publication_control/evidence.json"
+terminal_evidence="$publication_control/terminal-evidence.json"
+publication_gate_output="$publication_control/gate-output.log"
+publication_fixture_root="$(cd "$fixture" && pwd -P)"
+: >"$publication_gate_output"
+if env "${fresh_validation_environment[@]}" \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  AZEDARACH_VALIDATION_PUBLICATION_EVIDENCE="$publication_evidence" \
+  AZEDARACH_VALIDATION_FAILURE_PUBLISHER="$fixture/scripts/publish-validation-artifacts" \
+  AZEDARACH_VALIDATION_FAILURE_PROJECT_ROOT="$publication_fixture_root" \
+  AZEDARACH_VALIDATION_FAILURE_CANDIDATE_ROOT="$publication_fixture_root" \
+  AZEDARACH_VALIDATION_FAILURE_CONTROL_ROOT="$publication_control" \
+  AZEDARACH_VALIDATION_FAILURE_GATE_OUTPUT="$publication_gate_output" \
+  FAKE_AZ_FINISH_EVIDENCE_FILE="$terminal_evidence" \
+  AZEDARACH_CANDIDATE_ISSUE_ID=dov \
+  AZEDARACH_TICKET_ID=fixture \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile failed-candidate -- \
+  sh -c 'test -z "${AZEDARACH_VALIDATION_PUBLICATION_EVIDENCE:-}"; test -z "${AZEDARACH_CANDIDATE_ISSUE_ID:-}"; report_dir="$1/.tmp/test-timing/failed-candidate"; mkdir -p "$report_dir"; printf '\''{"failures":[{"package":"example/broken","test":"TestRetained","output":"assertion failed"}]}\n'\'' >"$report_dir/report.json"; printf '\''{"request_id":"%s","source_revision":"%s","report_path":"%s/report.json","report_paths":["%s/report.json"]}\n'\'' "$AZEDARACH_VALIDATION_REQUEST_ID" "$AZEDARACH_VALIDATION_SOURCE_REVISION" "$report_dir" "$report_dir" >"$AZEDARACH_VALIDATION_EVIDENCE_FILE"; exit 1' sh "$publication_fixture_root"; then
+  echo "failed candidate validation unexpectedly passed" >&2
+  exit 1
+fi
+grep -q '"issue_id":"dov"' "$publication_evidence"
+grep -q '"source_revision":"fixture-sha"' "$publication_evidence"
+retained_report="$(perl -MJSON::PP -e 'local $/; $v=decode_json(<>); print $v->{report_path}' <"$terminal_evidence")"
+case "$retained_report" in
+  "$publication_fixture_root/.azedarach/validation-artifacts/failures/fixture-sha/"*/reports/001/report.json) ;;
+  *) echo "terminal validation evidence did not resolve to retained report: $retained_report" >&2; exit 1 ;;
+esac
+test -s "$retained_report"
+rm -rf "$fixture/.tmp/test-timing/failed-candidate"
+test -s "$retained_report"
+grep -Fq "$retained_report" "$publication_evidence"
+
+fatal_publication_evidence="$publication_control/fatal-evidence.json"
+if env "${fresh_validation_environment[@]}" \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  AZEDARACH_VALIDATION_PUBLICATION_EVIDENCE="$fatal_publication_evidence" \
+  AZEDARACH_CANDIDATE_ISSUE_ID=dov \
+  AZEDARACH_TICKET_ID=fixture \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile fatal-candidate -- \
+  sh -c 'test -z "${AZEDARACH_VALIDATION_PUBLICATION_EVIDENCE:-}"; printf '\''{"fatal_phase":"toolchain_configuration","fatal_detail":"required Go toolchain unavailable"}\n'\'' >"$AZEDARACH_VALIDATION_FATAL_EVIDENCE_FILE"; exit 76'; then
+  echo "fatal candidate validation unexpectedly passed" >&2
+  exit 1
+fi
+grep -q '"fatal_phase":"toolchain_configuration"' "$fatal_publication_evidence"
+grep -q 'required Go toolchain unavailable' "$fatal_publication_evidence"
+
 failure_evidence="$fixture/failure-evidence.json"
 if env "${fresh_validation_environment[@]}" \
   AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
@@ -240,6 +297,201 @@ if env "${fresh_validation_environment[@]}" \
 fi
 grep -q 'FAIL make-verify::consumer-check' "$failure_evidence"
 grep -q 'exact consumer failure' "$failure_evidence"
+
+symlink_swap_target="$fixture/symlink-swap-target.json"
+symlink_swap_expected="$fixture/symlink-swap-expected.json"
+symlink_swap_terminal="$fixture/symlink-swap-terminal.json"
+printf '{"untouched":true}\n' >"$symlink_swap_target"
+cp "$symlink_swap_target" "$symlink_swap_expected"
+if env "${fresh_validation_environment[@]}" \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  FAKE_AZ_FINISH_EVIDENCE_FILE="$symlink_swap_terminal" \
+  SYMLINK_SWAP_TARGET="$symlink_swap_target" \
+  "$fixture/scripts/with-machine-validation-lease" --class aggregate --scope repository --purpose push_gate --profile repository-push -- \
+  sh -c 'rm "$AZEDARACH_VALIDATION_EVIDENCE_FILE"; ln -s "$SYMLINK_SWAP_TARGET" "$AZEDARACH_VALIDATION_EVIDENCE_FILE"; exit 1'; then
+  echo "symlink-swapping validation payload unexpectedly passed" >&2
+  exit 1
+fi
+cmp "$symlink_swap_expected" "$symlink_swap_target"
+grep -q '"fatal_phase":"evidence_identity"' "$symlink_swap_terminal"
+grep -q 'candidate replaced validation evidence file' "$symlink_swap_terminal"
+
+cat >"$fixture/fake-bin/failing-publisher" <<'EOF'
+#!/usr/bin/env bash
+exit 19
+EOF
+chmod +x "$fixture/fake-bin/failing-publisher"
+publisher_failure_finish="$fixture/publisher-failure-finish.log"
+if env "${fresh_validation_environment[@]}" \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  AZEDARACH_VALIDATION_FAILURE_PUBLISHER="$fixture/fake-bin/failing-publisher" \
+  AZEDARACH_VALIDATION_FAILURE_PROJECT_ROOT="$publication_fixture_root" \
+  AZEDARACH_VALIDATION_FAILURE_CANDIDATE_ROOT="$publication_fixture_root" \
+  AZEDARACH_VALIDATION_FAILURE_CONTROL_ROOT="$publication_control" \
+  AZEDARACH_VALIDATION_FAILURE_GATE_OUTPUT="$publication_gate_output" \
+  FAKE_AZ_FINISH_MARKER_FILE="$publisher_failure_finish" \
+  AZEDARACH_TICKET_ID=fixture \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile publisher-failure -- false; then
+  echo "publisher failure validation unexpectedly passed" >&2
+  exit 1
+fi
+test "$(wc -l <"$publisher_failure_finish" | tr -d ' ')" -eq 1
+grep -q -- '--state failed' "$publisher_failure_finish"
+
+cat >"$fixture/fake-bin/malformed-publisher" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+evidence=''
+while (($# > 0)); do
+  if [[ "$1" == "--evidence" ]]; then evidence="$2"; break; fi
+  shift
+done
+printf 'not-json\n' >"$evidence"
+EOF
+chmod +x "$fixture/fake-bin/malformed-publisher"
+malformed_finish="$fixture/malformed-publisher-finish.log"
+if env "${fresh_validation_environment[@]}" \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  AZEDARACH_VALIDATION_FAILURE_PUBLISHER="$fixture/fake-bin/malformed-publisher" \
+  AZEDARACH_VALIDATION_FAILURE_PROJECT_ROOT="$publication_fixture_root" \
+  AZEDARACH_VALIDATION_FAILURE_CANDIDATE_ROOT="$publication_fixture_root" \
+  AZEDARACH_VALIDATION_FAILURE_CONTROL_ROOT="$publication_control" \
+  AZEDARACH_VALIDATION_FAILURE_GATE_OUTPUT="$publication_gate_output" \
+  FAKE_AZ_FINISH_MARKER_FILE="$malformed_finish" \
+  AZEDARACH_TICKET_ID=fixture \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile malformed-publisher -- false; then
+  echo "malformed publisher validation unexpectedly passed" >&2
+  exit 1
+fi
+test "$(wc -l <"$malformed_finish" | tr -d ' ')" -eq 1
+grep -q -- '--state failed' "$malformed_finish"
+
+cat >"$fixture/fake-bin/swapping-publisher" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+evidence=''
+while (($# > 0)); do
+  if [[ "$1" == "--evidence" ]]; then evidence="$2"; break; fi
+  shift
+done
+printf '{"publisher":"trusted"}\n' >"$evidence"
+(
+  while [[ ! -e "${POST_PUBLISH_READY:?}" ]]; do sleep 0.01; done
+  rm "$evidence"
+  ln -s "${POST_PUBLISH_SWAP_TARGET:?}" "$evidence"
+  : >"${POST_PUBLISH_RELEASE:?}"
+) &
+EOF
+chmod +x "$fixture/fake-bin/swapping-publisher"
+post_publish_ready="$fixture/post-publish-ready"
+post_publish_release="$fixture/post-publish-release"
+post_publish_target="$fixture/post-publish-target.json"
+post_publish_expected="$fixture/post-publish-expected.json"
+post_publish_finish="$fixture/post-publish-finish.log"
+post_publish_copy="$publication_control/post-publish-copy.json"
+printf '{"must_remain":"untouched"}\n' >"$post_publish_target"
+cp "$post_publish_target" "$post_publish_expected"
+if env "${fresh_validation_environment[@]}" \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  AZEDARACH_VALIDATION_PUBLICATION_EVIDENCE="$post_publish_copy" \
+  AZEDARACH_VALIDATION_FAILURE_PUBLISHER="$fixture/fake-bin/swapping-publisher" \
+  AZEDARACH_VALIDATION_FAILURE_PROJECT_ROOT="$publication_fixture_root" \
+  AZEDARACH_VALIDATION_FAILURE_CANDIDATE_ROOT="$publication_fixture_root" \
+  AZEDARACH_VALIDATION_FAILURE_CONTROL_ROOT="$publication_control" \
+  AZEDARACH_VALIDATION_FAILURE_GATE_OUTPUT="$publication_gate_output" \
+  AZEDARACH_VALIDATION_TEST_POST_PUBLISH_READY_FILE="$post_publish_ready" \
+  AZEDARACH_VALIDATION_TEST_POST_PUBLISH_RELEASE_FILE="$post_publish_release" \
+  POST_PUBLISH_READY="$post_publish_ready" \
+  POST_PUBLISH_RELEASE="$post_publish_release" \
+  POST_PUBLISH_SWAP_TARGET="$post_publish_target" \
+  FAKE_AZ_FINISH_MARKER_FILE="$post_publish_finish" \
+  AZEDARACH_TICKET_ID=fixture \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile post-publisher-swap -- false; then
+  echo "post-publisher swap validation unexpectedly passed" >&2
+  exit 1
+fi
+cmp "$post_publish_expected" "$post_publish_target"
+test ! -e "$post_publish_copy"
+test "$(wc -l <"$post_publish_finish" | tr -d ' ')" -eq 1
+grep -q -- '--state failed' "$post_publish_finish"
+
+# Payload leaders may exit while background group members survive. The wrapper
+# must terminate and drain the exact payload group on success and failure, and
+# the failure publisher must observe the group already gone.
+payload_success_pid="$fixture/payload-success-descendant.pid"
+env "${fresh_validation_environment[@]}" \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" AZEDARACH_TICKET_ID=fixture \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile descendant-success -- \
+  sh -c '(trap "" TERM; while :; do :; done) & echo $! >"$1"; exit 0' sh "$payload_success_pid"
+! kill -0 "$(cat "$payload_success_pid")" 2>/dev/null
+
+cat >"$fixture/fake-bin/descendant-checking-publisher" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if kill -0 "$(cat "${DESCENDANT_PID_FILE:?}")" 2>/dev/null; then
+  echo "payload descendant survived into publisher" >&2
+  exit 93
+fi
+evidence=''
+while (($# > 0)); do
+  if [[ "$1" == "--evidence" ]]; then evidence="$2"; break; fi
+  shift
+done
+printf '{"publisher":"descendant-drained"}\n' >"$evidence"
+EOF
+chmod +x "$fixture/fake-bin/descendant-checking-publisher"
+payload_failure_pid="$fixture/payload-failure-descendant.pid"
+if env "${fresh_validation_environment[@]}" \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" AZEDARACH_TICKET_ID=fixture \
+  AZEDARACH_VALIDATION_FAILURE_PUBLISHER="$fixture/fake-bin/descendant-checking-publisher" \
+  AZEDARACH_VALIDATION_FAILURE_PROJECT_ROOT="$publication_fixture_root" \
+  AZEDARACH_VALIDATION_FAILURE_CANDIDATE_ROOT="$publication_fixture_root" \
+  AZEDARACH_VALIDATION_FAILURE_CONTROL_ROOT="$publication_control" \
+  AZEDARACH_VALIDATION_FAILURE_GATE_OUTPUT="$publication_gate_output" \
+  DESCENDANT_PID_FILE="$payload_failure_pid" \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile descendant-failure -- \
+  sh -c '(trap "" TERM; while :; do :; done) & echo $! >"$1"; exit 17' sh "$payload_failure_pid"; then
+  echo "failing descendant payload unexpectedly passed" >&2
+  exit 1
+fi
+! kill -0 "$(cat "$payload_failure_pid")" 2>/dev/null
+
+# The group leader remains live and unreaped after the command result is known,
+# fencing its PID/PGID against reuse until group-wide cleanup has completed.
+payload_anchor_ready="$fixture/payload-anchor-ready"
+payload_anchor_release="$fixture/payload-anchor-release"
+unrelated_ready="$fixture/unrelated-ready"
+sh -c ': >"$1"; exec sleep 30' sh "$unrelated_ready" &
+unrelated_pid=$!
+env "${fresh_validation_environment[@]}" \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" AZEDARACH_TICKET_ID=fixture \
+  AZEDARACH_VALIDATION_TEST_GROUP_ANCHOR_READY_FILE="$payload_anchor_ready" \
+  AZEDARACH_VALIDATION_TEST_GROUP_ANCHOR_RELEASE_FILE="$payload_anchor_release" \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile pgid-anchor -- \
+  sh -c 'exit 0' &
+payload_anchor_wrapper=$!
+while [[ ! -s "$payload_anchor_ready" ]]; do kill -0 "$payload_anchor_wrapper"; done
+payload_anchor_pid="$(cat "$payload_anchor_ready")"
+kill -0 "$payload_anchor_pid"
+test "$(ps -o pgid= -p "$payload_anchor_pid" | tr -d ' ')" = "$payload_anchor_pid"
+kill -0 "$unrelated_pid"
+: >"$payload_anchor_release"
+wait "$payload_anchor_wrapper"
+kill -0 "$unrelated_pid"
+kill "$unrelated_pid"
+wait "$unrelated_pid" 2>/dev/null || true
+
+payload_cancel_pid="$fixture/payload-cancel-descendant.pid"
+payload_cancel_ready="$fixture/payload-cancel-ready"
+env "${fresh_validation_environment[@]}" \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" AZEDARACH_TICKET_ID=fixture \
+  "$fixture/scripts/with-machine-validation-lease" --class shared --scope ticket --purpose capacity --profile descendant-cancel -- \
+  sh -c '(trap "" TERM; while :; do :; done) & echo $! >"$1"; : >"$2"; wait' sh "$payload_cancel_pid" "$payload_cancel_ready" &
+payload_cancel_wrapper=$!
+while [[ ! -e "$payload_cancel_ready" ]]; do kill -0 "$payload_cancel_wrapper"; done
+kill -TERM "$payload_cancel_wrapper"
+wait "$payload_cancel_wrapper" 2>/dev/null || true
+! kill -0 "$(cat "$payload_cancel_pid")" 2>/dev/null
 
 # The remaining lease-control fixtures exercise the controlled-capacity path.
 # Ordinary ticket development bypasses this wrapper entirely.
@@ -484,6 +736,10 @@ if [[ "${1:-}" == "rev-parse" && ( "${2:-}" == "--git-dir" || "${3:-}" == "--git
 fi
 if [[ "${1:-}" == "rev-parse" && ( "${2:-}" == "--git-common-dir" || "${3:-}" == "--git-common-dir" ) ]]; then
   printf '%s/.git\n' "${FAKE_GIT_COMMON_ROOT:?}"
+  exit 0
+fi
+if [[ "${1:-}" == "rev-parse" && "${2:-}" == "--show-toplevel" ]]; then
+  printf '%s\n' "${FAKE_GIT_COMMON_ROOT:?}"
   exit 0
 fi
 echo "stub git: unsupported arguments: $*" >&2

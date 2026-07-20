@@ -46,6 +46,7 @@ func TestDefaultConfig(t *testing.T) {
 	assert.True(t, cfg.Git.PushEnabled)
 	assert.True(t, cfg.Git.FetchEnabled)
 	assert.Empty(t, cfg.Gate.Command)
+	assert.Empty(t, cfg.Gate.FailureArtifactPaths)
 
 	assert.Equal(t, DefaultSessionShell(), cfg.Session.Shell)
 	assert.False(t, cfg.Session.DangerouslySkipPermissions)
@@ -95,10 +96,60 @@ func TestDefaultConfig(t *testing.T) {
 
 func TestLoadConfigReadsProjectGateCommand(t *testing.T) {
 	root := t.TempDir()
-	writeConfigFile(t, root, `{"$version":11,"gate":{"command":"npm run review"}}`)
+	writeConfigFile(t, root, `{"$version":11,"gate":{"command":"npm run review","environmentFingerprint":"node-22-lock-a1"}}`)
 	cfg, err := LoadConfig(root)
 	require.NoError(t, err)
 	assert.Equal(t, "npm run review", cfg.Gate.Command)
+	assert.Equal(t, "node-22-lock-a1", cfg.Gate.EnvironmentFingerprint)
+}
+
+func TestLoadConfigReadsPortableGateFailureArtifactPaths(t *testing.T) {
+	root := t.TempDir()
+	writeConfigFile(t, root, `{"$version":11,"gate":{"command":"npm test","failureArtifactPaths":["build/test-results","coverage/raw"]}}`)
+	cfg, err := LoadConfig(root)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"build/test-results", "coverage/raw"}, cfg.Gate.FailureArtifactPaths)
+}
+
+func TestLoadConfigReadsConsumerNeutralGateStageDAG(t *testing.T) {
+	root := t.TempDir()
+	writeConfigFile(t, root, `{"$version":11,"gate":{"stages":[{"id":"lint","command":"acme-check","resources":["workspace"]},{"id":"package","command":"acme-pack","dependsOn":["lint"],"artifactPaths":["out/report"]}]}}`)
+	cfg, err := LoadConfig(root)
+	require.NoError(t, err)
+	require.Len(t, cfg.Gate.Stages, 2)
+	assert.Equal(t, []string{"lint"}, cfg.Gate.Stages[1].DependsOn)
+}
+
+func TestLoadConfigRejectsAbsentGateStageCapability(t *testing.T) {
+	root := t.TempDir()
+	writeConfigFile(t, root, `{"$version":11,"gate":{"stages":[{"id":"package","command":"acme-pack","dependsOn":["missing"]}]}}`)
+	_, err := LoadConfig(root)
+	require.ErrorContains(t, err, `depends on unknown stage "missing"`)
+}
+
+func TestLoadConfigRejectsGateStageCycles(t *testing.T) {
+	for _, stages := range []string{
+		`[{"id":"self","command":"acme-check","dependsOn":["self"]}]`,
+		`[{"id":"independent","command":"acme-safe"},{"id":"one","command":"acme-one","dependsOn":["two"]},{"id":"two","command":"acme-two","dependsOn":["one"]}]`,
+	} {
+		root := t.TempDir()
+		writeConfigFile(t, root, `{"$version":11,"gate":{"stages":`+stages+`}}`)
+		_, err := LoadConfig(root)
+		require.ErrorContains(t, err, "gate stage graph contains a cycle")
+	}
+}
+
+func TestLoadConfigRejectsUnsafeGateFailureArtifactPaths(t *testing.T) {
+	for _, path := range []string{"", ".", "../outside", "/absolute"} {
+		t.Run(path, func(t *testing.T) {
+			root := t.TempDir()
+			body, err := json.Marshal(map[string]any{"$version": CurrentConfigVersion, "gate": map[string]any{"failureArtifactPaths": []string{path}}})
+			require.NoError(t, err)
+			writeConfigFile(t, root, string(body))
+			_, err = LoadConfig(root)
+			require.ErrorContains(t, err, "gate.failureArtifactPaths[0]")
+		})
+	}
 }
 
 func TestLoadConfigEnablesCodexAppServer(t *testing.T) {

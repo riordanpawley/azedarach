@@ -44,6 +44,7 @@ func TestInteractionStalenessReconcilePersistsAndPublishesOnce(t *testing.T) {
 	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, hub: hub, revision: map[string]uint64{}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore()}
 	projectID = d.canonicalProjectID(projectID)
 	d.issueClientsByProject = map[string]*issues.Client{projectID: client}
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, projectID)
 	service := issueInteractionService{daemon: d}
 	ctx = withDaemonProjectIDContext(ctx, projectID)
 	first, err := service.ListInteractions(ctx, protocol.InteractionListRequestBody{})

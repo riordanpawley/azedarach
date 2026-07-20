@@ -323,6 +323,140 @@ func TestMailSendReconcilesSQLiteFirstCrashWithoutSequenceReuse(t *testing.T) {
 	}
 }
 
+func TestMailboxReplayTreatsParserDerivedPayloadDriftAsEquivalent(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(repoDir, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	root, err := client.Create(ctx, issues.CreateTaskParams{Title: "root", Type: domain.TypeEpic, Priority: domain.P1, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := client.Create(ctx, issues.CreateTaskParams{Title: "child", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInReview, ParentID: &root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(mustWorkerEvidencePayload(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdAt := time.Date(2026, time.July, 15, 7, 24, 25, 711794000, time.UTC)
+	filesystemEvent := daemonMailEvent{
+		Seq: 8, ParentIssue: root, IssueID: child, Type: "worker-integration-ready",
+		From: reviewReadyReplaySender, Body: string(body), CreatedAt: createdAt,
+		Payload: map[string]interface{}{
+			"publication":     reviewReadyReplayPublication,
+			"publication_key": "project:7526",
+			"source_event_id": float64(7526),
+		},
+	}
+	// Migration 0052 persisted an older envelope shape before parser-derived
+	// worker evidence was added to protocol payloads. The immutable top-level
+	// observation still carries the producer-authored publication identity.
+	durablePayload := map[string]any{
+		"publication":     reviewReadyReplayPublication,
+		"publication_key": "project:7526",
+		"source_event_id": float64(7526),
+		"worker_evidence": mustWorkerEvidencePayload(t),
+		"worker_evidence_validation": map[string]any{
+			"found": true, "complete": true, "storage": "issue_event_payload_json_v1",
+		},
+	}
+	durableEnvelope := mailEventToProtocol(filesystemEvent)
+	durableEnvelope.Payload = nil
+	durablePayload["mail_event"] = durableEnvelope
+	if _, err := client.AppendIssueObservationEvent(ctx, child, issues.IssueObservationEventParams{
+		Type: domain.IssueObservationEventType("worker-integration-ready"), ObservedAt: createdAt,
+		Source: reviewReadyReplaySender, SourceCommand: "mailbox.cutover", WorktreePath: repoDir,
+		Payload: durablePayload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendMailboxEvent(repoDir, filesystemEvent); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issueClientsByProject: map[string]*issues.Client{"project": client}}
+	existing, err := readMailboxEvents(repoDir, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := d.reconcileProjectedMailboxEvents(ctx, "project", repoDir, root, existing)
+	if err != nil {
+		t.Fatalf("equivalent parser-derived payload drift blocked replay: %v", err)
+	}
+	if !reflect.DeepEqual(replayed, existing) {
+		t.Fatalf("replayed = %+v, want immutable filesystem event unchanged", replayed)
+	}
+}
+
+func TestMailboxReplayConflictDoesNotBlockAnotherProjectMailWrite(t *testing.T) {
+	ctx := context.Background()
+	conflictedRepo := t.TempDir()
+	conflicted := newMigratedIssueClientAtPath(t, filepath.Join(conflictedRepo, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = conflicted.CloseDB() })
+	conflictedRoot, err := conflicted.Create(ctx, issues.CreateTaskParams{Title: "conflicted root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflictedChild, err := conflicted.Create(ctx, issues.CreateTaskParams{Title: "conflicted child", Type: domain.TypeTask, Status: domain.StatusInProgress, ParentID: &conflictedRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdAt := time.Date(2026, time.July, 15, 7, 24, 25, 0, time.UTC)
+	durable := daemonMailEvent{Seq: 1, ParentIssue: conflictedRoot, IssueID: conflictedChild, Type: "worker-progress", Body: "durable", CreatedAt: createdAt}
+	if _, err := conflicted.AppendIssueObservationEvent(ctx, conflictedChild, issues.IssueObservationEventParams{
+		Type: "worker-progress", ObservedAt: createdAt, SourceCommand: "mailbox.cutover", Payload: projectedMailObservationPayload(durable),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	filesystem := durable
+	filesystem.Body = "different producer message"
+	if err := appendMailboxEvent(conflictedRepo, filesystem); err != nil {
+		t.Fatal(err)
+	}
+
+	healthyRepo := t.TempDir()
+	healthy := newMigratedIssueClientAtPath(t, filepath.Join(healthyRepo, "issues.db"), slog.Default())
+	t.Cleanup(func() { _ = healthy.CloseDB() })
+	healthyRoot, err := healthy.Create(ctx, issues.CreateTaskParams{Title: "healthy root", Type: domain.TypeEpic, Status: domain.StatusInProgress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	healthyChild, err := healthy.Create(ctx, issues.CreateTaskParams{Title: "healthy child", Type: domain.TypeTask, Status: domain.StatusInProgress, ParentID: &healthyRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{
+		cfg: Config{RepoDir: healthyRepo, Logger: slog.Default()},
+		issueClientsByProject: map[string]*issues.Client{
+			"conflicted": conflicted,
+			"healthy":    healthy,
+		},
+	}
+	existing, err := readMailboxEvents(conflictedRepo, conflictedRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.reconcileProjectedMailboxEvents(ctx, "conflicted", conflictedRepo, conflictedRoot, existing); err == nil || !strings.Contains(err.Error(), "conflicts with durable observation") {
+		t.Fatalf("conflicted replay error = %v, want exact project-local diagnosis", err)
+	}
+
+	resp, err := d.handleMailSend(ctx, protocol.RequestEnvelope{
+		RequestID: "healthy-delivery",
+		Meta:      protocol.Metadata{ProjectID: "healthy"},
+		Body: mustMarshal(t, protocol.MailSendCommandBody{
+			RepoDir: healthyRepo, ParentIssue: healthyRoot, IssueID: naming.IssueID(healthyChild), Type: "worker-progress", Body: "healthy",
+		}),
+	})
+	if err != nil || !resp.OK {
+		t.Fatalf("healthy project mail send = %+v err=%v, want unrelated write availability", resp, err)
+	}
+	if err := healthy.Update(ctx, healthyChild, domain.StatusInReview); err != nil {
+		t.Fatalf("healthy project issue update blocked by other project conflict: %v", err)
+	}
+}
+
 func TestValidateCanonicalMailOutboxObservationRejectsSpoofedIdentity(t *testing.T) {
 	createdAt := time.Date(2026, 7, 15, 1, 2, 3, 0, time.UTC)
 	canonical := domain.IssueObservationEvent{

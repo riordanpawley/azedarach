@@ -23,6 +23,155 @@ type OrchestrationStartAttempt struct {
 	LastError     string
 }
 
+type RequestedOrchestrationStart struct {
+	ProjectID     string
+	IssueID       string
+	IntentKey     string
+	ActorID       string
+	DedupeKey     string
+	RequestDigest string
+	State         string
+	Phase         string
+	LastError     string
+}
+
+// QueueRequestedOrchestrationStart durably records explicit caller intent
+// before snapshot admission. It deliberately does not claim execution
+// authority; lifecycle, graph, ownership, worktree, and session checks remain
+// at their owning admission boundaries.
+func (c *Client) QueueRequestedOrchestrationStart(ctx context.Context, projectID, issueID, intentKey, actorID, dedupeKey, requestDigest string) (RequestedOrchestrationStart, error) {
+	projectID, issueID, intentKey, actorID, dedupeKey, requestDigest = strings.TrimSpace(projectID), strings.TrimSpace(issueID), strings.TrimSpace(intentKey), strings.TrimSpace(actorID), strings.TrimSpace(dedupeKey), strings.TrimSpace(requestDigest)
+	if projectID == "" || issueID == "" || intentKey == "" || actorID == "" || dedupeKey == "" || requestDigest == "" {
+		return RequestedOrchestrationStart{}, errors.New("project, issue, intent, actor, dedupe key, and request digest are required")
+	}
+	var result RequestedOrchestrationStart
+	err := c.withMutationLock(ctx, func(ctx context.Context) error {
+		db, err := c.dbHandle()
+		if err != nil {
+			return err
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		err = tx.QueryRowContext(ctx, `SELECT project_id, issue_id, intent_key, actor_id, dedupe_key, request_digest, state, phase, COALESCE(last_error,'') FROM orchestration_start_intents WHERE project_id=? AND issue_id=? AND intent_key=?`, projectID, issueID, intentKey).Scan(&result.ProjectID, &result.IssueID, &result.IntentKey, &result.ActorID, &result.DedupeKey, &result.RequestDigest, &result.State, &result.Phase, &result.LastError)
+		if err == nil {
+			if !strings.EqualFold(result.ActorID, actorID) || result.DedupeKey != dedupeKey || result.RequestDigest != requestDigest {
+				return fmt.Errorf("%w: orchestration start intent identity changed", domain.ErrConflict)
+			}
+			return tx.Commit()
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO orchestration_start_intents (project_id, issue_id, intent_key, actor_id, dedupe_key, request_digest, state, phase, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'queued', 'snapshot_admission', ?, ?)`, projectID, issueID, intentKey, actorID, dedupeKey, requestDigest, now, now); err != nil {
+			return err
+		}
+		result = RequestedOrchestrationStart{ProjectID: projectID, IssueID: issueID, IntentKey: intentKey, ActorID: actorID, DedupeKey: dedupeKey, RequestDigest: requestDigest, State: "queued", Phase: "snapshot_admission"}
+		return tx.Commit()
+	})
+	if err != nil {
+		return RequestedOrchestrationStart{}, c.wrapError("queue-orchestration-start", issueID, err)
+	}
+	return result, nil
+}
+
+func (c *Client) UpdateRequestedOrchestrationStart(ctx context.Context, requested RequestedOrchestrationStart, state, phase string, cause error) error {
+	state, phase = strings.TrimSpace(state), strings.TrimSpace(phase)
+	if state != "queued" && state != "completed" {
+		return fmt.Errorf("invalid requested orchestration start state %q", state)
+	}
+	message := ""
+	if cause != nil {
+		message = cause.Error()
+	}
+	return c.withMutationLock(ctx, func(ctx context.Context) error {
+		db, err := c.dbHandle()
+		if err != nil {
+			return err
+		}
+		res, err := db.ExecContext(ctx, `UPDATE orchestration_start_intents SET state=?, phase=?, last_error=NULLIF(?, ''), updated_at=? WHERE project_id=? AND issue_id=? AND intent_key=? AND actor_id=? AND dedupe_key=? AND request_digest=?`, state, phase, message, time.Now().UTC().Format(time.RFC3339Nano), requested.ProjectID, requested.IssueID, requested.IntentKey, requested.ActorID, requested.DedupeKey, requested.RequestDigest)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return sql.ErrNoRows
+		}
+		return nil
+	})
+}
+
+// RecoverCompletedOrchestrationStart records that live runtime proved a
+// submitted start succeeded even though its operation record was lost or
+// terminal. The request and attempt are repaired atomically so daemon restart
+// never repeats the ambiguous operation lookup.
+func (c *Client) RecoverCompletedOrchestrationStart(ctx context.Context, requested RequestedOrchestrationStart, attempt OrchestrationStartAttempt) error {
+	return c.withMutationLock(ctx, func(ctx context.Context) error {
+		db, err := c.dbHandle()
+		if err != nil {
+			return err
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		current, err := orchestrationStartAttemptForUpdate(ctx, tx, attempt.ProjectID, attempt.IssueID, attempt.IntentKey)
+		if err != nil {
+			return err
+		}
+		if current.State != "submitted" || current.OperationID != attempt.OperationID || current.ActorID != attempt.ActorID || current.DedupeKey != attempt.DedupeKey {
+			return fmt.Errorf("%w: orchestration start changed during live-runtime recovery", domain.ErrConflict)
+		}
+		nowRaw := time.Now().UTC().Format(time.RFC3339Nano)
+		res, err := tx.ExecContext(ctx, `UPDATE orchestration_start_intents SET state='completed', phase='runtime_recovered', last_error=NULL, updated_at=? WHERE project_id=? AND issue_id=? AND intent_key=? AND actor_id=? AND dedupe_key=? AND request_digest=?`, nowRaw, requested.ProjectID, requested.IssueID, requested.IntentKey, requested.ActorID, requested.DedupeKey, requested.RequestDigest)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return sql.ErrNoRows
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE orchestration_start_attempts SET last_error=NULL, updated_at=? WHERE project_id=? AND issue_id=? AND intent_key=?`, nowRaw, current.ProjectID, current.IssueID, current.IntentKey)
+		if err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+}
+
+func (c *Client) PendingRequestedOrchestrationStarts(ctx context.Context, projectID string) ([]RequestedOrchestrationStart, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT project_id, issue_id, intent_key, actor_id, dedupe_key, request_digest, state, phase, COALESCE(last_error,'') FROM orchestration_start_intents WHERE project_id=? AND state='queued' ORDER BY created_at, issue_id`, strings.TrimSpace(projectID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RequestedOrchestrationStart
+	for rows.Next() {
+		var requested RequestedOrchestrationStart
+		if err := rows.Scan(&requested.ProjectID, &requested.IssueID, &requested.IntentKey, &requested.ActorID, &requested.DedupeKey, &requested.RequestDigest, &requested.State, &requested.Phase, &requested.LastError); err != nil {
+			return nil, err
+		}
+		out = append(out, requested)
+	}
+	return out, rows.Err()
+}
+
+func (c *Client) OrchestrationStartAttempt(ctx context.Context, projectID, issueID, intentKey string) (OrchestrationStartAttempt, error) {
+	db, err := c.dbHandle()
+	if err != nil {
+		return OrchestrationStartAttempt{}, err
+	}
+	var attempt OrchestrationStartAttempt
+	err = db.QueryRowContext(ctx, `SELECT project_id,issue_id,intent_key,actor_id,dedupe_key,state,claim_acquired,COALESCE(operation_id,''),COALESCE(last_error,'') FROM orchestration_start_attempts WHERE project_id=? AND issue_id=? AND intent_key=?`, strings.TrimSpace(projectID), strings.TrimSpace(issueID), strings.TrimSpace(intentKey)).Scan(&attempt.ProjectID, &attempt.IssueID, &attempt.IntentKey, &attempt.ActorID, &attempt.DedupeKey, &attempt.State, &attempt.ClaimAcquired, &attempt.OperationID, &attempt.LastError)
+	return attempt, err
+}
+
 // BeginOrchestrationStart atomically reserves an issue for one orchestrator and
 // records the durable saga step that must either submit a session start or be
 // compensated. Existing ownership by the same actor is preserved and is never
@@ -49,10 +198,17 @@ func (c *Client) BeginOrchestrationStart(ctx context.Context, projectID, issueID
 			if !strings.EqualFold(result.ActorID, actorID) {
 				return fmt.Errorf("%w: orchestration intent owned by %s", domain.ErrConflict, result.ActorID)
 			}
-			if result.State == "compensated" {
-				return fmt.Errorf("%w: orchestration intent was compensated after %s", domain.ErrConflict, result.LastError)
+			if result.DedupeKey != dedupeKey {
+				return fmt.Errorf("%w: orchestration intent dedupe identity changed", domain.ErrConflict)
 			}
-			return tx.Commit()
+			if result.State == "compensated" {
+				if _, err := tx.ExecContext(ctx, `DELETE FROM orchestration_start_attempts WHERE project_id=? AND issue_id=? AND intent_key=? AND state='compensated'`, projectID, issueID, intentKey); err != nil {
+					return err
+				}
+				err = sql.ErrNoRows
+			} else {
+				return tx.Commit()
+			}
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err

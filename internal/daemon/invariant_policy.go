@@ -21,9 +21,12 @@ const (
 	daemonInvariantSessionIssueLifecycle   daemonInvariantID = "session.issue_lifecycle_runtime"
 	daemonInvariantSessionActivityConverge daemonInvariantID = "session.activity_convergence"
 	daemonInvariantManagedAgentIdentity    daemonInvariantID = "session.managed_agent_identity"
+	daemonInvariantManagedAgentRestart     daemonInvariantID = "session.managed_agent_restart"
+	daemonInvariantAgentInputDelivery      daemonInvariantID = "session.agent_input_delivery"
 	daemonInvariantAdvisorSingleton        daemonInvariantID = "session.advisor_singleton"
 
 	daemonInvariantTaskListFreshness    daemonInvariantID = "task.list_freshness"
+	daemonInvariantTaskReadAfterWrite   daemonInvariantID = "task.read_committed_revision"
 	daemonInvariantTaskClose            daemonInvariantID = "task.close"
 	daemonInvariantTaskClosePreflight   daemonInvariantID = "task.close_preflight"
 	daemonInvariantTaskDelete           daemonInvariantID = "task.delete"
@@ -35,6 +38,8 @@ const (
 	daemonInvariantTaskContextRisk      daemonInvariantID = "task.context_risk_closeout"
 	daemonInvariantTaskMergeBaseTarget  daemonInvariantID = "task.merge_base_target"
 	daemonInvariantTaskFollowOnMerge    daemonInvariantID = "task.follow_on_merge_candidates"
+	daemonInvariantTaskSplitIntent      daemonInvariantID = "task.split_intent"
+	daemonInvariantTaskPublicationQueue daemonInvariantID = "task.publication_queue"
 	daemonInvariantWorkerObservation    daemonInvariantID = "worker.observation_projection"
 	daemonInvariantInteractionWaiting   daemonInvariantID = "interaction.waiting_human"
 	daemonInvariantInvestigationWaiting daemonInvariantID = "investigation.waiting_human"
@@ -48,6 +53,7 @@ const (
 	daemonInvariantOrchestrationScope           daemonInvariantID = "orchestration.scope_identity"
 	daemonInvariantOrchestrationSingleton       daemonInvariantID = "orchestration.scope_singleton"
 	daemonInvariantOrchestrationRootedBootstrap daemonInvariantID = "orchestration.rooted_bootstrap_delivery"
+	daemonInvariantOrchestrationRootBlockerGate daemonInvariantID = "orchestration.root_dependency_gate"
 	daemonInvariantOrchestrationCompletion      daemonInvariantID = "orchestration.project_completion"
 	daemonInvariantOrchestrationCandidates      daemonInvariantID = "orchestration.project_candidates"
 	daemonInvariantOrchestrationParentWake      daemonInvariantID = "orchestration.parent_continuation"
@@ -57,6 +63,7 @@ const (
 	daemonInvariantProjectionDeltaStream        daemonInvariantID = "projection.delta_stream"
 	daemonInvariantTmuxObservation              daemonInvariantID = "external.tmux_observation"
 	daemonInvariantValidationCapacity           daemonInvariantID = "validation.machine_capacity"
+	daemonInvariantPublicationEvidence          daemonInvariantID = "validation.publication_evidence"
 )
 
 var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
@@ -67,6 +74,9 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantSessionReconcile:             daemonInvariantSourceHybrid,
 	daemonInvariantSessionIssueLifecycle:        daemonInvariantSourceHybrid,
 	daemonInvariantSessionActivityConverge:      daemonInvariantSourceHybrid,
+	daemonInvariantManagedAgentIdentity:         daemonInvariantSourceHybrid,
+	daemonInvariantManagedAgentRestart:          daemonInvariantSourceHybrid,
+	daemonInvariantAgentInputDelivery:           daemonInvariantSourceHybrid,
 	daemonInvariantTaskListFreshness:            daemonInvariantSourceProjection,
 	daemonInvariantTaskClose:                    daemonInvariantSourceHybrid,
 	daemonInvariantTaskClosePreflight:           daemonInvariantSourceHybrid,
@@ -79,13 +89,13 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantTaskContextRisk:              daemonInvariantSourceProjection,
 	daemonInvariantTaskMergeBaseTarget:          daemonInvariantSourceProjection,
 	daemonInvariantTaskFollowOnMerge:            daemonInvariantSourceProjection,
+	daemonInvariantTaskSplitIntent:              daemonInvariantSourceHybrid,
 	daemonInvariantWorkerObservation:            daemonInvariantSourceHybrid,
 	daemonInvariantRuntimeKnownProjectIDs:       daemonInvariantSourceProjection,
 	daemonInvariantCrossProjectViews:            daemonInvariantSourceProjection,
 	daemonInvariantIssueResourceLifecycle:       daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationScope:           daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationSingleton:       daemonInvariantSourceHybrid,
-	daemonInvariantOrchestrationRootedBootstrap: daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationCompletion:      daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationCandidates:      daemonInvariantSourceProjection,
 	daemonInvariantOrchestrationParentWake:      daemonInvariantSourceHybrid,
@@ -98,10 +108,14 @@ var daemonInvariantSourceMatrix = map[daemonInvariantID]daemonInvariantSource{
 	daemonInvariantOrchestrationReview:          daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationClaimStart:      daemonInvariantSourceHybrid,
 	daemonInvariantOrchestrationLoop:            daemonInvariantSourceProjection,
-	daemonInvariantValidationCapacity:           daemonInvariantSourceProjection,
-	daemonInvariantManagedAgentIdentity:         daemonInvariantSourceHybrid,
 	daemonInvariantProjectionDeltaStream:        daemonInvariantSourceProjection,
 	daemonInvariantTmuxObservation:              daemonInvariantSourceTmux,
+	daemonInvariantValidationCapacity:           daemonInvariantSourceProjection,
+	daemonInvariantOrchestrationRootedBootstrap: daemonInvariantSourceHybrid,
+	daemonInvariantTaskReadAfterWrite:           daemonInvariantSourceProjection,
+	daemonInvariantTaskPublicationQueue:         daemonInvariantSourceHybrid,
+	daemonInvariantPublicationEvidence:          daemonInvariantSourceProjection,
+	daemonInvariantOrchestrationRootBlockerGate: daemonInvariantSourceProjection,
 }
 
 func sourceForInvariant(id daemonInvariantID) daemonInvariantSource {

@@ -199,6 +199,20 @@ func IssueIDsEqual(left, right string) bool {
 	return strings.EqualFold(strings.TrimSpace(left), strings.TrimSpace(right))
 }
 
+// CanonicalIssueIDKey returns one stable representation for issue identity.
+// It follows the same Unicode simple-fold equivalence as strings.EqualFold.
+func CanonicalIssueIDKey(value string) string {
+	return strings.Map(func(r rune) rune {
+		canonical := r
+		for folded := unicode.SimpleFold(r); folded != r; folded = unicode.SimpleFold(folded) {
+			if folded < canonical {
+				canonical = folded
+			}
+		}
+		return canonical
+	}, strings.TrimSpace(value))
+}
+
 func ExtractIssueIDFromBranchName(branchName string) (string, bool) {
 	trimmed := strings.TrimSpace(branchName)
 	if trimmed == "" {

@@ -21,11 +21,13 @@ type IssueSplitOptions struct {
 	Priority         domain.Priority
 	PriorityExplicit bool
 	Implementations  []string
+	IntentKey        string
 }
 
 type issueSplitResult struct {
 	ParentIssueID string                 `json:"parent_issue_id"`
 	ChildIssueID  string                 `json:"child_issue_id"`
+	IntentKey     string                 `json:"intent_key"`
 	Created       bool                   `json:"created"`
 	Start         orchestrateStartResult `json:"start"`
 	Advice        issueSplitAdvice       `json:"advice"`
@@ -58,6 +60,7 @@ func ParseIssueSplitArgs(args []string) (IssueSplitOptions, error) {
 		return nil
 	})
 	fs.StringVar(&opts.Description, "description", "", "child issue description")
+	fs.StringVar(&opts.IntentKey, "intent-key", "", "stable logical split key (exact retries must reuse it)")
 	fs.StringVar(&priorityRaw, "priority", "", "child issue priority (P0-P4)")
 	fs.StringVar(&typeRaw, "type", string(domain.TypeTask), "child issue type (task|bug|feature|epic|chore|investigation)")
 	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
@@ -65,7 +68,7 @@ func ParseIssueSplitArgs(args []string) (IssueSplitOptions, error) {
 		return IssueSplitOptions{}, err
 	}
 	if fs.NArg() != 1 {
-		return IssueSplitOptions{}, fmt.Errorf("usage: az ticket split [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>")
+		return IssueSplitOptions{}, fmt.Errorf("usage: az ticket split --intent-key <unique-invocation-key> [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>")
 	}
 	opts.Title = fs.Arg(0)
 	taskType, err := parseTaskType(typeRaw)
@@ -90,10 +93,17 @@ func ParseIssueSplitArgs(args []string) (IssueSplitOptions, error) {
 		return IssueSplitOptions{}, fmt.Errorf("missing parent issue: pass --parent or set AZEDARACH_ISSUE_ID")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
+	opts.IntentKey = strings.TrimSpace(opts.IntentKey)
+	if opts.IntentKey == "" {
+		return IssueSplitOptions{}, fmt.Errorf("missing split intent key: pass --intent-key with a unique invocation key and reuse it only for exact retries")
+	}
 	return opts, nil
 }
 
 func IssueSplitCommand(deps *Dependencies, opts IssueSplitOptions) error {
+	if strings.TrimSpace(opts.IntentKey) == "" {
+		return fmt.Errorf("missing split intent key: pass --intent-key with a unique invocation key and reuse it only for exact retries")
+	}
 	restoreProject, err := applyExplicitProjectOverride(deps, opts.Project)
 	if err != nil {
 		return err
@@ -102,6 +112,7 @@ func IssueSplitCommand(deps *Dependencies, opts IssueSplitOptions) error {
 
 	parentIssueID := strings.TrimSpace(opts.ParentIssueID)
 	createResult, err := createIssue(context.Background(), deps, IssueCreateOptions{
+		IntentKey:              opts.IntentKey,
 		Title:                  opts.Title,
 		Description:            opts.Description,
 		Type:                   opts.Type,
@@ -127,6 +138,7 @@ func IssueSplitCommand(deps *Dependencies, opts IssueSplitOptions) error {
 		Limit:              1,
 		IssueIDs:           []string{createResult.IssueID},
 		BaseBranchOverride: baseBranch,
+		IntentKey:          "ticket-split-start:" + opts.IntentKey,
 	})
 	if err != nil {
 		return err
@@ -134,7 +146,8 @@ func IssueSplitCommand(deps *Dependencies, opts IssueSplitOptions) error {
 	result := issueSplitResult{
 		ParentIssueID: parentIssueID,
 		ChildIssueID:  createResult.IssueID,
-		Created:       true,
+		IntentKey:     opts.IntentKey,
+		Created:       createResult.Created,
 		Start:         startResult,
 		Advice: issueSplitAdvice{
 			StatusCommand:    fmt.Sprintf("az orchestrate status --root %s", parentIssueID),
@@ -142,7 +155,7 @@ func IssueSplitCommand(deps *Dependencies, opts IssueSplitOptions) error {
 			IntegrateCommand: issueCloseCommand(createResult.IssueID),
 			MergeCommand:     fmt.Sprintf("az branch merge --source %s --target %s", createResult.IssueID, parentIssueID),
 			CloseCommand:     issueCloseCommand(createResult.IssueID),
-			Summary:          "Child work runs in an isolated session/worktree. Keep the parent/orchestrator watching with az orchestrate watch in another pane/session while workers are active; do not use --once for orchestration monitoring. It is not merged at creation; the parent/orchestrator should review, then close the child issue to integrate, record stopped session state, clean up, and mark it closed. Use merge_command only for manual repair.",
+			Summary:          "Child work runs in an isolated session/worktree. The parent/orchestrator should process one bounded status/action step, then yield until the daemon delivers a revision-bound actionable continuation; watch_command is for an external human observer, not a model turn. It is not merged at creation; the parent/orchestrator should review, then close the child issue to integrate, record stopped session state, clean up, and mark it closed. Use merge_command only for manual repair.",
 		},
 	}
 	if opts.JSON {
@@ -155,7 +168,11 @@ func IssueSplitCommand(deps *Dependencies, opts IssueSplitOptions) error {
 		return nil
 	}
 
-	fmt.Printf("Created child issue: %s (parent: %s)\n", result.ChildIssueID, result.ParentIssueID)
+	childResult := "Created child issue"
+	if !result.Created {
+		childResult = "Reused canonical child issue"
+	}
+	fmt.Printf("%s: %s (parent: %s)\n", childResult, result.ChildIssueID, result.ParentIssueID)
 	fmt.Println("Integration model:")
 	fmt.Println("- Child work runs in its own az/tmux session/worktree.")
 	fmt.Println("- It is not merged at creation; review it from the parent/orchestrator session, then close it to integrate and clean up.")

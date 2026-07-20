@@ -7,13 +7,13 @@ description: Run an iterative code review and fix cycle until findings stabilize
 
 ## Overview
 
-Drive code review as a closed loop: inspect the change, fix actionable findings, validate, then review again. Continue until the configured clean-pass target is reached or a genuine blocker prevents progress.
+Drive code review as a closed loop: inspect the change, fix actionable findings, validate, then review the invalidated layer again. Continue until the risk-tiered pass target is reached or a genuine blocker prevents progress.
 
 ## Pre-Completion Gate
 
 Use this skill automatically when implementation appears complete. Do not wait for the user to say "code review" or "fix em" after an implementation pass.
 
-Before saying the task is done, ready for review, ready to merge, or moving a tracked issue to `in_review`, run the review loop against the actual change set. If the review finds actionable issues, fix them, validate, and restart the clean-pass count. Only hand off after the clean-pass target is met or after preserving an explicit blocker with evidence.
+Before saying the task is done, ready for review, ready to merge, or moving a tracked issue to `in_review`, run the review loop against the actual change set. If the review finds actionable issues, fix them, validate, and rerun the affected review layer. Only hand off after the risk-tiered target is met or after preserving an explicit blocker with evidence.
 
 Skip this gate only for tasks that did not change code or executable behavior, such as pure explanation, read-only investigation, or issue-tracker updates. If docs, tests, config, or scripts changed in a way that can affect users or developers, run the gate.
 
@@ -21,13 +21,57 @@ Skip this gate only for tasks that did not change code or executable behavior, s
 
 Default clean-pass target:
 
-- Use 2 consecutive clean review passes for small or medium-risk changes.
-- Use 3 consecutive clean review passes for high-risk changes, shared infrastructure, security/privacy/auth paths, data migrations, concurrency, persistence, public APIs, or release-critical code.
-- If the user specifies a pass count, use that count.
+- Use 1 complete worker review pass for a non-migration change. Fix its findings and bind the clean result to the exact candidate revision before handoff.
+- Do not count mechanized build, test, static-analysis, or boundary gates as semantic review passes.
+- Require extra worker passes only when the user, issue/spec, repository instructions, or a domain review skill explicitly names a high-risk class and its pass target. Do not infer extra generic passes merely from change size, shared infrastructure, concurrency, persistence, public API, or release labels; use the typed risk matrix below to deepen the one pass.
+- Database migrations, schema ensure/repair logic, trigger/index changes, and persistence-authority changes retain 3 clean passes after the final migration-affecting edit.
+- The later independent integrator review is a separate layer. It does not increase the worker pass target and cannot be satisfied by worker self-review.
 
 A pass is clean only when it finds no new actionable correctness, regression, security, reliability, data-loss, compatibility, or missing-test issue in the requested scope. Style-only preferences, speculative rewrites, and unrelated pre-existing problems do not reset the clean-pass count unless the user asked for them.
 
-Reset the clean-pass count to 0 after any code or test change. Do not reset it for notes, issue metadata, or formatting of the final report unless those edits change executable behavior or tests.
+A material code or test edit invalidates the affected worker-review layer. Rerun that layer after the edit; do not discard unchanged independent or specialized layers unless their assumptions were affected. Actionable independent findings similarly invalidate the affected layer. Notes, issue metadata, and final-report formatting do not invalidate executable review evidence.
+
+## Revision Checkpoints
+
+Treat the review loop as revision-incremental, not as repeated full rereads.
+
+Before each pass, resolve and retain:
+
+- the exact current candidate `HEAD`
+- the exact merge-base revision and configured task scope
+- the last completed review checkpoint, if one exists
+- unresolved findings and the contracts or invariants they affect
+
+When this skill's helper is available, select the safe range with:
+
+```bash
+.codex/skills/code-review-loop/scripts/review-range --repo <worktree> --base-revision <exact-base> --head-revision <exact-head> --scope <configured-scope> [--checkpoint-head <reviewed-head> --checkpoint-base <reviewed-base> --checkpoint-scope <reviewed-scope>] [--broader-invalidated]
+```
+
+The helper only verifies and selects an intra-candidate Git range. It does not persist evidence or decide cross-base reuse.
+
+The first verifiable pass reviews the complete task diff from the resolved merge base to candidate `HEAD`. After every completed pass, retain a checkpoint in the task's existing review-fact channel (for example its issue record or native result channel) with:
+
+- `head_revision`, `diff_base_revision`, and stable `scope`
+- `mode` (`full` or `incremental`) and `delta_base_revision` for incremental passes
+- `verdict`, deduplicated `unique_findings`, and `affected_invariants`
+- `review_angle`, `reused_layers`, and the selected risk-matrix type
+- `covered_cells` and deliberately `skipped_cells` with a reason for each skip
+- `clean_pass` and `clean_pass_target`
+- `extra_pass_reason` whenever the target exceeds the default one worker pass
+- `fallback_reason` when a full pass replaced an unsafe incremental pass
+
+Do not invent a persistence or evidence schema for this skill. If the current workflow cannot recover a complete checkpoint from its existing review facts, treat it as absent and run a full pass.
+
+A later pass may inspect only `last-reviewed-revision..current-HEAD`, plus:
+
+- every unresolved finding
+- contracts and invariants affected by the delta
+- callers or tests whose assumptions the delta may have changed
+
+Use a full task-diff pass when the checkpoint is missing or malformed, the checkpoint revision cannot be resolved or is not an ancestor of current `HEAD`, the merge base or task scope changed, the local delta cannot establish completeness for the affected invariant, or the delta invalidates assumptions outside its changed lines. Re-resolve an invalid current base or head before reviewing; if either remains unverifiable, stop rather than emitting an unusable range. Record the reason; never silently widen or narrow the review.
+
+Incremental passes count toward an explicitly configured multi-pass target when they inspect a new delta or apply a distinct required review angle to unresolved findings and affected contracts. An empty delta does not justify rereading unchanged lines: record reuse of the unchanged layer instead of manufacturing another pass.
 
 ## Review Loop
 
@@ -37,12 +81,19 @@ Reset the clean-pass count to 0 after any code or test change. Do not reset it f
    - If the task is issue-tracked, keep status and notes current with concise evidence.
 
 2. Build a review baseline.
-   - Read the relevant diffs and nearby code before judging.
+   - Resolve the exact task diff base and candidate `HEAD` before judging.
+   - Select full or incremental mode using the checkpoint rules above and state the exact range.
+   - Read that range, unresolved findings, affected contracts, and nearby code before judging.
    - Run or identify the smallest meaningful validation command if the repo provides one.
    - Prefer direct evidence from code, tests, logs, and contracts over broad guesses.
 
 3. Review in code-review stance.
    - Lead with bugs, regressions, security issues, data loss, race conditions, lifecycle leaks, broken contracts, and missing tests.
+   - Select the smallest applicable typed risk matrix and cover it completely enough to justify the verdict:
+     - stateful or concurrent: state, attempt/completion ordering, success/failure combinations, authorization/bypass paths, side effects, recovery, and adjacent consumers
+     - subprocess: startup, normal exit, error exit, cancellation, timeout/kill, partial output, cleanup, and platform/shell portability
+     - persistence: use the database-migration review gate rather than a generic matrix
+   - Record every covered cell and every deliberately skipped cell with its reason.
    - Ground each finding in a file and line when possible.
    - Avoid low-value comments about taste unless they hide a maintainability risk that will matter.
 
@@ -61,19 +112,15 @@ Reset the clean-pass count to 0 after any code or test change. Do not reset it f
    - Record commands and key assertions for the final report and issue notes.
 
 6. Repeat.
-   - Start a fresh review pass after every fix.
+   - Start a fresh revision-bound review of the affected layer after every fix.
+   - When a fix advances `HEAD`, review the prior checkpoint revision through the new `HEAD`; uncommitted changes cannot form a verifiable incremental checkpoint and require a full task-diff pass.
+   - Persist the completed checkpoint before starting the next pass or handing off.
    - Count consecutive clean passes only after validation succeeds or the remaining unrun validation is explicitly justified.
-   - Stop only when the clean-pass target is met, a blocker is genuine, or the user explicitly pauses the loop.
+   - Stop only when the risk-tiered target is met, a blocker is genuine, or the user explicitly pauses the loop.
 
 ## Review Angles
 
-Rotate emphasis across passes so the loop does not repeat the same shallow inspection:
-
-- Pass 1: requested behavior, obvious regressions, integration points, and tests.
-- Pass 2: edge cases, error paths, lifecycle/cancellation, concurrency, persistence, and compatibility.
-- Pass 3 when needed: security/privacy, operational failure modes, migration/release risk, and whether earlier fixes created new behavior.
-
-Use the repo's domain-specific review skills when they apply, but keep this loop responsible for convergence.
+The default single worker pass is complete, not shallow: inspect requested behavior, regressions, integration points, tests, applicable matrix cells, and affected consumers in that pass. If an explicitly named high-risk contract requires additional passes, give each pass a distinct angle and record why it was required. Use the repo's domain-specific review skills when they apply, but keep this loop responsible for convergence.
 
 ## Migration Review Gate
 
@@ -90,7 +137,8 @@ During an active loop, keep user updates short and evidence-oriented. Do not rep
 
 Final response:
 
-- State the number of clean review passes achieved.
+- State the risk tier and number of clean worker review passes achieved.
+- State the exact reviewed revision, review angle, covered/skipped cells, reused layers, and reason for any extra pass.
 - Summarize fixes made and files changed.
 - List validation commands and results.
 - Call out any residual risk or validation that could not be run.
@@ -106,4 +154,4 @@ Stop and ask or mark blocked only when:
 - validation requires unavailable credentials, services, hardware, or production access
 - further fixes would require a product decision that local evidence cannot answer
 
-When stopping early, preserve the loop state: findings fixed, findings remaining, validation status, clean-pass count, and exact blocker.
+When stopping early, preserve the loop state: findings fixed, findings remaining, validation status, reviewed revision, invalidated layer, matrix coverage, pass count, and exact blocker.

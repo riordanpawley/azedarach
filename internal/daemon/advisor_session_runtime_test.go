@@ -22,6 +22,7 @@ import (
 )
 
 func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifecycle(t *testing.T) {
+	t.Setenv("AZEDARACH_DAEMON_SCOPE", "global")
 	ctx := withDaemonProjectIDContext(context.Background(), protocol.DefaultProjectID)
 	repoDir := t.TempDir()
 	client := newMigratedIssueClient(t, repoDir, slog.Default())
@@ -37,7 +38,8 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 	runner := newSessionStartTmuxRunner()
 	managedDir := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.current")
 	t.Setenv("PATH", filepath.Join(repoDir, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
-	d := &Daemon{cfg: Config{RepoDir: repoDir, ManagedGenerationBinDir: managedDir, Logger: slog.Default()}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore()}
+	d := &Daemon{cfg: Config{RepoDir: repoDir, ManagedGenerationBinDir: managedDir, Logger: slog.Default(), ScopedRuntime: true}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore()}
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, protocol.DefaultProjectID)
 	service := issueInteractionService{daemon: d}
 
 	first, err := service.MutateInteraction(ctx, protocol.CommandInteractionDiscuss, protocol.InteractionMutationRequestBody{ID: request.ID, ExpectedRevision: 1, Actor: "human"})
@@ -55,11 +57,10 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 	if len(quoted) < 4 {
 		t.Fatalf("advisor launch does not use artifact: %s", launch)
 	}
-	body, err := os.ReadFile(quoted[len(quoted)-2])
-	if err != nil {
-		t.Fatal(err)
+	launchPayload := runner.launchScriptContents[first.Request.SessionID]
+	if launchPayload == "" {
+		t.Fatalf("advisor launch artifact was not captured: %s", quoted[len(quoted)-2])
 	}
-	launchPayload := string(body)
 	if !strings.Contains(launchPayload, "AZEDARACH_SESSION_ROLE=advisor") || !strings.Contains(launchPayload, "AZEDARACH_INTERACTION_ID") || !strings.Contains(launchPayload, "AZEDARACH_ISSUE_ID=\"\"") {
 		t.Fatalf("advisor launch payload = %s", launchPayload)
 	}
@@ -72,6 +73,9 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 		}
 		if got, ok := tmuxCommandEnvironmentValue(command, "PATH"); ok || got != "" {
 			t.Fatalf("advisor tmux injected PATH = %q, %t; command=%v", got, ok, command)
+		}
+		if got, ok := tmuxCommandEnvironmentValue(command, "AZEDARACH_DAEMON_SCOPE"); !ok || got != "worktree" {
+			t.Fatalf("advisor scope = %q, present=%t; command=%v", got, ok, command)
 		}
 	}
 	if err := d.persistTmuxSessionRuntimeState(ctx, protocol.DefaultProjectID, []tmux.SessionInfo{{Name: first.Request.SessionID}}, nil); err != nil {
@@ -102,6 +106,9 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 		t.Fatalf("human CLI without advisor session metadata rejected: %v", err)
 	}
 
+	// Attaching an already-live, exactly acknowledged advisor must not rebuild a
+	// launch artifact or revalidate launch-tool configuration.
+	d.cfg.CLITool = "unsupported-live-attach"
 	second, err := service.MutateInteraction(ctx, protocol.CommandInteractionDiscuss, protocol.InteractionMutationRequestBody{ID: request.ID, ExpectedRevision: first.Request.Revision, Actor: "human"})
 	if err != nil {
 		t.Fatal(err)
@@ -124,6 +131,7 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 	if !resumed.SessionAttached || !resumed.SessionResumed || resumed.SessionStarted {
 		t.Fatalf("paused discuss = %+v", resumed)
 	}
+	d.cfg.CLITool = "claude"
 	delete(runner.sessions, first.Request.SessionID)
 	restarted, err := service.MutateInteraction(ctx, protocol.CommandInteractionDiscuss, protocol.InteractionMutationRequestBody{ID: request.ID, ExpectedRevision: second.Request.Revision, Actor: "human"})
 	if err != nil {
@@ -158,6 +166,86 @@ func TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifec
 	}
 }
 
+func TestAdvisorInitialLaunchRejectsImmediateExitAndRetries(t *testing.T) {
+	ctx := withDaemonProjectIDContext(context.Background(), protocol.DefaultProjectID)
+	repoDir := t.TempDir()
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "advisor immediate exit", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	request := domain.InteractionRequest{ID: "request-advisor-exit", IssueID: issueID, DecisionKey: "choice", OrchestrationScope: "project", Question: "Which option?", Why: "Human judgment", Options: []domain.InteractionOption{{Key: "a", Label: "A"}}, Significance: domain.InteractionSignificanceRoutine, Respondent: "human", DecisionPacket: domain.InteractionDecisionPacket{Summary: "Choose"}, State: domain.InteractionDiscussing, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := client.CreateInteraction(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	runner := newSessionStartTmuxRunner()
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore()}
+	failureCtx, cancelFailure := context.WithCancel(ctx)
+	runner.onNewSession = func(sessionID string) {
+		runner.sessionsWithoutPanes[sessionID] = true
+		cancelFailure()
+	}
+	if result, err := d.ensureAdvisorSessionRuntime(failureCtx, protocol.DefaultProjectID, request); err == nil {
+		t.Fatalf("immediate-exit advisor result=%+v, want error", result)
+	}
+	sessionID := advisorSessionID(request.ID)
+	if runner.sessions[sessionID] {
+		t.Fatalf("immediate-exit advisor session %s survived", sessionID)
+	}
+	store := d.sessionRuntimeStateStore(protocol.DefaultProjectID)
+	if _, found, err := store.GetManagedAgentIdentity(ctx, d.canonicalProjectID(protocol.DefaultProjectID), sessionID, "agent"); err != nil || found {
+		t.Fatalf("pre-readiness failure recorded advisor identity: found=%t err=%v", found, err)
+	}
+	projection, found, err := store.GetSessionIntent(ctx, d.canonicalProjectID(protocol.DefaultProjectID), daemonstate.SessionRoleAdvisor, daemonstate.SessionScopeInteraction, request.ID)
+	if err != nil || !found || projection.State != daemonstate.SessionStateStopped {
+		t.Fatalf("pre-readiness compensation projection=%+v found=%t err=%v", projection, found, err)
+	}
+
+	runner.onNewSession = nil
+	delete(runner.sessionsWithoutPanes, sessionID)
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, protocol.DefaultProjectID)
+	result, err := d.ensureAdvisorSessionRuntime(ctx, protocol.DefaultProjectID, request)
+	if err != nil || !result.Started || !runner.sessions[sessionID] {
+		t.Fatalf("advisor retry result=%+v err=%v live=%t", result, err, runner.sessions[sessionID])
+	}
+}
+
+func TestAdvisorInitialLaunchRetiresSessionAfterAmbiguousCreateError(t *testing.T) {
+	ctx := withDaemonProjectIDContext(context.Background(), protocol.DefaultProjectID)
+	repoDir := t.TempDir()
+	client := newMigratedIssueClient(t, repoDir, slog.Default())
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "advisor ambiguous create", Type: domain.TypeTask, Status: domain.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	request := domain.InteractionRequest{ID: "request-advisor-ambiguous", IssueID: issueID, DecisionKey: "choice", OrchestrationScope: "project", Question: "Which option?", Why: "Human judgment", Options: []domain.InteractionOption{{Key: "a", Label: "A"}}, Significance: domain.InteractionSignificanceRoutine, Respondent: "human", DecisionPacket: domain.InteractionDecisionPacket{Summary: "Choose"}, State: domain.InteractionDiscussing, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := client.CreateInteraction(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	runner := newSessionStartTmuxRunner()
+	runner.createBeforeNewSessionError = true
+	runner.newSessionErr = fmt.Errorf("tmux returned after advisor appeared")
+	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore()}
+	result, err := d.ensureAdvisorSessionRuntime(ctx, protocol.DefaultProjectID, request)
+	if err == nil {
+		t.Fatalf("ambiguous advisor result=%+v, want error", result)
+	}
+	sessionID := advisorSessionID(request.ID)
+	if runner.sessions[sessionID] {
+		t.Fatalf("ambiguous advisor session %s survived", sessionID)
+	}
+
+	runner.newSessionErr = nil
+	runner.createBeforeNewSessionError = false
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, protocol.DefaultProjectID)
+	retried, retryErr := d.ensureAdvisorSessionRuntime(ctx, protocol.DefaultProjectID, request)
+	if retryErr != nil || !retried.Started || !runner.sessions[sessionID] {
+		t.Fatalf("advisor retry result=%+v err=%v live=%t", retried, retryErr, runner.sessions[sessionID])
+	}
+}
+
 func TestRuntimeReconcileRecoversAndCleansAdvisorSessionsFromDurableRequests(t *testing.T) {
 	ctx := withDaemonProjectIDContext(context.Background(), protocol.DefaultProjectID)
 	repoDir := t.TempDir()
@@ -173,6 +261,7 @@ func TestRuntimeReconcileRecoversAndCleansAdvisorSessionsFromDurableRequests(t *
 	}
 	runner := newSessionStartTmuxRunner()
 	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore(), hub: publish.NewHub(32, 8, slog.Default()), revision: map[string]uint64{}}
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, protocol.DefaultProjectID)
 	service := issueInteractionService{daemon: d}
 	discussed, err := service.MutateInteraction(ctx, protocol.CommandInteractionDiscuss, protocol.InteractionMutationRequestBody{ID: request.ID, ExpectedRevision: 1, Actor: "human"})
 	if err != nil {
@@ -245,6 +334,7 @@ func TestRuntimeReconcileIssuesLeavesUnrelatedAdvisorSessionsUntouched(t *testin
 	unrelated := createRequest("unrelated advisor cleanup", "request-unrelated-reconcile")
 	runner := newSessionStartTmuxRunner()
 	d := &Daemon{cfg: Config{RepoDir: repoDir, Logger: slog.Default()}, issues: client, tmux: tmux.NewClient(runner, slog.Default()), sessionStore: daemonstate.NewStore(), hub: publish.NewHub(32, 8, slog.Default()), revision: map[string]uint64{}}
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, protocol.DefaultProjectID)
 	service := issueInteractionService{daemon: d}
 	targetDiscussed, err := service.MutateInteraction(ctx, protocol.CommandInteractionDiscuss, protocol.InteractionMutationRequestBody{ID: target.ID, ExpectedRevision: target.Revision, Actor: "human"})
 	if err != nil {
@@ -342,6 +432,7 @@ func TestAdvisorRecoveryCleansRuntimeWhenTerminalRequestWinsCrossDaemonRace(t *t
 			t.Errorf("persist racing interaction: %v", updateErr)
 		}
 	}
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, projectID)
 
 	recovered, cleaned, err := d.reconcileAdvisorSessionRuntimes(ctx, projectID, nil)
 	if err != nil {
@@ -405,6 +496,7 @@ func TestAdvisorRecoveryRetriesWhenNonTerminalMutationWinsCrossDaemonRace(t *tes
 			t.Errorf("persist racing interaction: %v", updateErr)
 		}
 	}
+	acknowledgeManagedAgentOnInitialLaunch(t, d, runner, projectID)
 
 	recovered, cleaned, err := d.reconcileAdvisorSessionRuntimes(ctx, projectID, nil)
 	if err != nil {
@@ -436,6 +528,20 @@ func TestAdvisorSessionIDDoesNotCollideAfterSanitization(t *testing.T) {
 	}
 }
 
+func buildAdvisorLaunchCommandForTest(t *testing.T, d *Daemon, projectID string, advisor daemonstate.AdvisorSession, prompt string) (advisorLaunchCommand, error) {
+	t.Helper()
+	tool := strings.ToLower(strings.TrimSpace(d.runtimeConfigForProject(projectID).CLITool))
+	if tool == "" {
+		tool = "claude"
+	}
+	fence, err := prepareAdvisorBootstrapFence(t.TempDir(), "test-advisor-incarnation", tool)
+	if err != nil {
+		return advisorLaunchCommand{}, err
+	}
+	t.Cleanup(fence.remove)
+	return d.buildAdvisorLaunchCommandWithFence(projectID, advisor, prompt, fence)
+}
+
 func TestBuildAdvisorLaunchCommandForcesReadOnlyPermissions(t *testing.T) {
 	advisor := daemonstate.AdvisorSession{RequestID: "request-1", SessionID: "advisor-request-1"}
 	for _, test := range []struct {
@@ -444,9 +550,9 @@ func TestBuildAdvisorLaunchCommandForcesReadOnlyPermissions(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		{name: "codex", tool: "codex", want: []string{"codex", "--sandbox read-only", "--ask-for-approval never", "--disable plugins", "--disable apps", "--disable hooks", "--disable multi_agent", "--disable computer_use", "--disable browser_use", "--disable goals", "--disable workspace_dependencies", "mcp_servers={}", `web_search="disabled"`, `history.persistence="none"`, "project_doc_max_bytes=0", "project_doc_fallback_filenames=[]"}},
-		{name: "claude", tool: "claude", want: []string{"claude", "--permission-mode plan", `--tools "Read,Glob,Grep"`, `--disallowed-tools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task,Agent,mcp__*"`, `--setting-sources ""`, "--strict-mcp-config", `--mcp-config`, `{"mcpServers":{}}`, "--disable-slash-commands", "--no-chrome"}},
-		{name: "opencode", tool: "opencode", want: []string{"command mktemp -d", "XDG_CONFIG_HOME=", "OPENCODE_CONFIG=", "OPENCODE_CONFIG_DIR=", "OPENCODE_TUI_CONFIG=", "OPENCODE_CONFIG_CONTENT=", `cd "$__azedarach_advisor_dir"`, "command rm -rf", "opencode", `"*":"deny"`, `"read":"allow"`, `"edit":"deny"`, `"bash":"deny"`, `"advisor"`, `"mode":"primary"`, "--pure", "--agent advisor", "--prompt"}},
+		{name: "codex", tool: "codex", want: []string{"codex", "--sandbox read-only", "--ask-for-approval never", "--disable plugins", "--disable apps", "--dangerously-bypass-hook-trust", "CODEX_HOME=", "--disable multi_agent", "--disable computer_use", "--disable browser_use", "--disable goals", "--disable workspace_dependencies", "mcp_servers={}", `web_search="disabled"`, `history.persistence="none"`, "project_doc_max_bytes=0", "project_doc_fallback_filenames=[]"}},
+		{name: "claude", tool: "claude", want: []string{"claude", "--permission-mode plan", `--tools "Read,Glob,Grep"`, `--disallowed-tools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task,Agent,mcp__*"`, `--setting-sources ""`, "--settings", "claude-settings.json", "--strict-mcp-config", `--mcp-config`, `{"mcpServers":{}}`, "--disable-slash-commands", "--no-chrome"}},
+		{name: "opencode", tool: "opencode", want: []string{"advisor-bootstrap-", "XDG_CONFIG_HOME=", "OPENCODE_CONFIG=", "OPENCODE_CONFIG_DIR=", "OPENCODE_TUI_CONFIG=", "OPENCODE_CONFIG_CONTENT=", `cd "$__azedarach_advisor_dir"`, "opencode", `"*":"deny"`, `"read":"allow"`, `"edit":"deny"`, `"bash":"deny"`, `"advisor"`, `"mode":"primary"`, "--agent advisor", "--prompt"}},
 		{name: "unsupported", tool: "unknown", wantErr: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -458,7 +564,7 @@ func TestBuildAdvisorLaunchCommandForcesReadOnlyPermissions(t *testing.T) {
 				t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			}
 			d := &Daemon{cfg: Config{CLITool: test.tool, DangerouslySkipPermissions: true, CodexAppServer: true, SessionShell: "sh"}}
-			command, err := d.buildAdvisorLaunchCommand(protocol.DefaultProjectID, advisor, "prompt")
+			command, err := buildAdvisorLaunchCommandForTest(t, d, protocol.DefaultProjectID, advisor, "prompt")
 			if test.wantErr {
 				if err == nil {
 					t.Fatalf("buildAdvisorLaunchCommand() command = %q, want error", command)
@@ -474,7 +580,7 @@ func TestBuildAdvisorLaunchCommandForcesReadOnlyPermissions(t *testing.T) {
 					t.Fatalf("command = %q, want %q", commandText, want)
 				}
 			}
-			for _, forbidden := range []string{"dangerously-bypass", "dangerously-skip", "--remote", "--chrome", "; exec sh", "; exec zsh"} {
+			for _, forbidden := range []string{"dangerously-bypass-approvals-and-sandbox", "dangerously-skip-permissions", "--remote", "--chrome", "; exec sh", "; exec zsh"} {
 				if strings.Contains(commandText, forbidden) {
 					t.Fatalf("command = %q, contains forbidden %q", commandText, forbidden)
 				}
@@ -577,7 +683,7 @@ func TestRealProcessProfileAdvisorExactLaunchDoesNotSourceStartupFiles(t *testin
 						t.Fatal(err)
 					}
 					d := &Daemon{cfg: Config{RepoDir: repoDir, CLITool: tool, SessionShell: shellCase.path}}
-					command, err := d.buildAdvisorLaunchCommand(protocol.DefaultProjectID, daemonstate.AdvisorSession{RequestID: "request-1", SessionID: "advisor-request-1"}, "prompt")
+					command, err := buildAdvisorLaunchCommandForTest(t, d, protocol.DefaultProjectID, daemonstate.AdvisorSession{RequestID: "request-1", SessionID: "advisor-request-1"}, "prompt")
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -646,7 +752,7 @@ func TestRealProcessProfileOpenCodeAdvisorExactLaunchIgnoresInvalidProjectAndInh
 	hookCalled := filepath.Join(t.TempDir(), "az-hook-called")
 	// Execute the exact generated launch shell while replacing only the final
 	// interactive process with the installed CLI's config/agent parser.
-	wrapper := "#!/bin/sh\nexec " + singleQuoteForShell(opencode) + " --pure agent list\n"
+	wrapper := "#!/bin/sh\nexec " + singleQuoteForShell(opencode) + " agent list\n"
 	if err := os.WriteFile(filepath.Join(binDir, "opencode"), []byte(wrapper), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -659,7 +765,7 @@ func TestRealProcessProfileOpenCodeAdvisorExactLaunchIgnoresInvalidProjectAndInh
 	t.Setenv("OPENCODE_TUI_CONFIG", inheritedConfig)
 
 	d := &Daemon{cfg: Config{RepoDir: repoDir, CLITool: "opencode", SessionShell: "sh"}}
-	command, err := d.buildAdvisorLaunchCommand(protocol.DefaultProjectID, daemonstate.AdvisorSession{RequestID: "request-1", SessionID: "advisor-request-1"}, "prompt")
+	command, err := buildAdvisorLaunchCommandForTest(t, d, protocol.DefaultProjectID, daemonstate.AdvisorSession{RequestID: "request-1", SessionID: "advisor-request-1"}, "prompt")
 	if err != nil {
 		t.Fatal(err)
 	}

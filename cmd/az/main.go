@@ -810,7 +810,7 @@ func main() {
 		case "close":
 			opts, err := cli.ParseIssueCloseArgs(issueArgs)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [--historical-authorization <json>] [<ticket-id>]\n")
 				fmt.Fprintf(os.Stderr, "Note: close integrates the issue branch, cleans session/worktree attachments, then writes closed status.\n")
 				fmt.Fprintf(os.Stderr, "Note: --force-worktree forces worktree removal after integration.\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -1347,7 +1347,7 @@ func main() {
 		case "integrate":
 			opts, err := cli.ParseOrchestrateIntegrateArgs(commandArgs[1:])
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Usage: az orchestrate integrate --issue <issue-id> [--apply] [--project <project-id>] [--json]\n")
+				fmt.Fprintf(os.Stderr, "Usage: az orchestrate integrate --issue <issue-id> [--external-integrated-revision <commit>] [--apply] [--project <project-id>] [--json]\n")
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -1596,7 +1596,7 @@ func printSessionUsage() {
 	fmt.Println("  status [issue-id]     Show all sessions or one issue session status")
 	fmt.Println("  capture <issue-id>    Capture recent pane output through the daemon")
 	fmt.Println("  diagnose <issue-id>   Collect session, worktree, operation, hook, and log diagnostics")
-	fmt.Println("  restart-all           Restart idle AI sessions and tell them to continue; use --force-busy to include busy sessions")
+	fmt.Println("  restart-all           Supervise exact managed-agent replacement; use --force-busy to include busy sessions")
 	fmt.Println("  resolve-conflict <issue-id> [--worktree <path>] [--file <path> ...] [--prompt <text>]")
 	fmt.Println("                        Launch conflict-resolution agent")
 	fmt.Println()
@@ -1624,7 +1624,7 @@ func printIssueCreateUsage(w io.Writer) {
 }
 
 func printIssueSplitUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: az ticket split [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>")
+	fmt.Fprintln(w, "Usage: az ticket split --intent-key <unique-invocation-key> [--project <project-id>] [--parent <ticket-id>] [--impl <implementation> ...] [--type task|bug|feature|epic|chore|investigation] [--priority P0|P1|P2|P3|P4] [--description text] [--json] <title>")
 	fmt.Fprintln(w, "Note: use --parent or AZEDARACH_ISSUE_ID for parentage; --impl only assigns implementation/spec variant metadata.")
 }
 

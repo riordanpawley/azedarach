@@ -162,6 +162,24 @@ func (e *Environment) Close() error {
 	if e == nil || !e.removeOnDone {
 		return nil
 	}
+	// Go's module cache deliberately makes directories read-only. Tests that
+	// bootstrap a toolchain below the isolated HOME can therefore leave a
+	// perfectly disposable tree that os.RemoveAll cannot traverse on platforms
+	// such as macOS. Restore owner traversal/write permission only on directories
+	// in the runner-owned isolation root; WalkDir does not follow symlinks.
+	if err := filepath.WalkDir(e.Root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if err := os.Chmod(path, 0o700); err != nil {
+				return fmt.Errorf("make isolated directory removable %s: %w", path, err)
+			}
+		}
+		return nil
+	}); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	return os.RemoveAll(e.Root)
 }
 
