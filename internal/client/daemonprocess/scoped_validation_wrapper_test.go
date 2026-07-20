@@ -68,8 +68,15 @@ func TestScopedValidationDaemonProcess(t *testing.T) {
 		var marker [1]byte
 		for {
 			if _, err := owner.Read(marker[:]); err != nil {
-				if runtimeDir := os.Getenv("AZEDARACH_SCOPED_VALIDATION_RUNTIME"); runtimeDir != "" {
-					if err := os.RemoveAll(runtimeDir); err != nil {
+				for _, path := range []string{
+					os.Getenv("AZEDARACH_SCOPED_VALIDATION_RUNTIME"),
+					os.Getenv("AZEDARACH_SCOPED_VALIDATION_READY"),
+					os.Getenv("AZEDARACH_SCOPED_VALIDATION_PID"),
+				} {
+					if path == "" {
+						continue
+					}
+					if err := os.RemoveAll(path); err != nil {
 						os.Exit(96)
 					}
 				}
@@ -305,8 +312,18 @@ func TestRealProcessProfileScopedValidationFixtureReapsDaemonAfterParentGroupTer
 		t.Fatalf("await exact scoped validation daemon exit: data=%q err=%v; output:\n%s", observed, err, output.String())
 	}
 	daemonRunning = false
-	if _, err := os.Stat(filepath.Join(root, "runtime")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("scoped validation runtime survived owner death: %v; output:\n%s", err, output.String())
+	for _, path := range []string{
+		filepath.Join(root, "ready"),
+		filepath.Join(root, "pid"),
+		filepath.Join(root, "runtime", "session-launch"),
+		filepath.Join(root, "runtime", "daemon.sock"),
+		filepath.Join(root, "runtime", "daemon.lock"),
+		filepath.Join(root, "runtime", "daemon.lock.start"),
+		filepath.Join(root, "runtime"),
+	} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("scoped validation artifact %s survived owner death: %v; output:\n%s", path, err, output.String())
+		}
 	}
 }
 
