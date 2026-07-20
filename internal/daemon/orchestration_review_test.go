@@ -2190,7 +2190,7 @@ func TestReviewAcceptClosesMultipleInternalReviewsBeforeDependentCompletion(t *t
 	}
 	params := issues.IssueObservationEventParams{
 		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: string(protocol.OrchestrationIntentReviewAccept),
-		Payload: map[string]any{"outcome": "accepted", "actor_id": request.ActorID, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request), "review_epoch_event_id": admission.ReviewEpochEventID},
+		Payload: map[string]any{"outcome": "accepted", "actor_id": request.ActorID, "actor_kind": domain.ReviewerOwnerKindOrchestrator, "intent_key": request.IntentKey, "request_fingerprint": reviewRequestFingerprint(request), "review_epoch_event_id": admission.ReviewEpochEventID, "reviewed_source_oid": ""},
 	}
 	if _, err := client.AppendIssueObservationEventWithReviewAdmission(ctx, ids[0], params, admission, rootID, request.ActorID); err != nil {
 		t.Fatal(err)

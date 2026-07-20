@@ -366,6 +366,14 @@ func validateAcceptedReviewerOutcome(ctx context.Context, tx *sql.Tx, issueID, r
 	return validateAcceptedReviewerAuthority(ctx, tx, issueID, reviewerID, "", 0, 0, "", false, pin)
 }
 
+func observationPayloadString(payload map[string]any, key string) string {
+	if payload == nil {
+		return ""
+	}
+	value, _ := payload[key].(string)
+	return strings.TrimSpace(value)
+}
+
 // validateAcceptedReviewerAuthority requires the latest authoritative decision
 // in the current review epoch to be the exact acceptance carried by the caller.
 // Integration-failed observations are retry diagnostics, not newer decisions.
@@ -401,16 +409,16 @@ func validateAcceptedReviewerAuthority(ctx context.Context, tx *sql.Tx, issueID,
 		if acceptedReviewEventID > 0 && event.ID != acceptedReviewEventID {
 			return fmt.Errorf("%w: accepted review event changed from %d to %d", domain.ErrConflict, acceptedReviewEventID, event.ID)
 		}
-		if !strings.EqualFold(strings.TrimSpace(fmt.Sprint(event.Payload["actor_id"])), strings.TrimSpace(reviewerID)) {
+		if !strings.EqualFold(observationPayloadString(event.Payload, "actor_id"), strings.TrimSpace(reviewerID)) {
 			return fmt.Errorf("%w: accepted review actor does not match reviewer lease", domain.ErrConflict)
 		}
-		if reviewerKind != "" && !strings.EqualFold(strings.TrimSpace(fmt.Sprint(event.Payload["actor_kind"])), strings.TrimSpace(reviewerKind)) {
+		if reviewerKind != "" && !strings.EqualFold(observationPayloadString(event.Payload, "actor_kind"), strings.TrimSpace(reviewerKind)) {
 			return fmt.Errorf("%w: accepted review actor kind does not match reviewer lease", domain.ErrConflict)
 		}
 		if reviewEpochEventID > 0 && reviewAuthorityPayloadInt64(event.Payload["review_epoch_event_id"]) != reviewEpochEventID {
 			return fmt.Errorf("%w: accepted review epoch does not match close authority", domain.ErrConflict)
 		}
-		if exactSource && strings.TrimSpace(fmt.Sprint(event.Payload["reviewed_source_oid"])) != strings.TrimSpace(sourceOID) {
+		if exactSource && observationPayloadString(event.Payload, "reviewed_source_oid") != strings.TrimSpace(sourceOID) {
 			return fmt.Errorf("%w: accepted review source does not match close authority", domain.ErrConflict)
 		}
 		if pin != nil && (strings.TrimSpace(fmt.Sprint(event.Payload["reviewed_evidence_source"])) != strings.TrimSpace(pin.Source) ||

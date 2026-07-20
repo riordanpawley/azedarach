@@ -618,10 +618,13 @@ func TestCloseWithRuntimeReviewLeaseSourceLessAuthorityFailsClosed(t *testing.T)
 		closeKind     string
 		acceptedKind  string
 		acceptedSrc   string
+		sourceForm    string
 		newerAccept   bool
 		wantConflict  bool
 	}{
-		{name: "exact source-less authority", closeKind: domain.ReviewerOwnerKindOrchestrator, acceptedKind: domain.ReviewerOwnerKindOrchestrator},
+		{name: "exact source-less authority empty", closeKind: domain.ReviewerOwnerKindOrchestrator, acceptedKind: domain.ReviewerOwnerKindOrchestrator, sourceForm: "empty"},
+		{name: "exact source-less authority absent", closeKind: domain.ReviewerOwnerKindOrchestrator, acceptedKind: domain.ReviewerOwnerKindOrchestrator, sourceForm: "absent"},
+		{name: "exact source-less authority null", closeKind: domain.ReviewerOwnerKindOrchestrator, acceptedKind: domain.ReviewerOwnerKindOrchestrator, sourceForm: "null"},
 		{name: "wrong epoch", closeEpochOff: 1, closeKind: domain.ReviewerOwnerKindOrchestrator, acceptedKind: domain.ReviewerOwnerKindOrchestrator, wantConflict: true},
 		{name: "wrong accepted event", closeEventOff: 1, closeKind: domain.ReviewerOwnerKindOrchestrator, acceptedKind: domain.ReviewerOwnerKindOrchestrator, wantConflict: true},
 		{name: "wrong accepted actor kind", closeKind: domain.ReviewerOwnerKindOrchestrator, acceptedKind: "agent", wantConflict: true},
@@ -648,9 +651,17 @@ func TestCloseWithRuntimeReviewLeaseSourceLessAuthorityFailsClosed(t *testing.T)
 			if _, err := client.ClaimOwnershipWithRuntime(ctx, "project", issueID, OwnershipClaimParams{OwnerID: "reviewer", OwnerKind: domain.ReviewerOwnerKindOrchestrator, Purpose: domain.CoordinationLeaseReview, ExpectedReviewAdmission: &admission}); err != nil {
 				t.Fatal(err)
 			}
+			payload := map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "actor_kind": tt.acceptedKind, "review_epoch_event_id": admission.ReviewEpochEventID}
+			switch tt.sourceForm {
+			case "null":
+				payload["reviewed_source_oid"] = nil
+			case "absent":
+			default:
+				payload["reviewed_source_oid"] = tt.acceptedSrc
+			}
 			accepted, err := client.AppendIssueObservationEvent(ctx, issueID, IssueObservationEventParams{
 				Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept",
-				Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "actor_kind": tt.acceptedKind, "review_epoch_event_id": admission.ReviewEpochEventID, "reviewed_source_oid": tt.acceptedSrc},
+				Payload: payload,
 			})
 			if err != nil {
 				t.Fatal(err)
