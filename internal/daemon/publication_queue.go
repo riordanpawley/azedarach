@@ -831,9 +831,13 @@ func (d *Daemon) validatePublicationReviewAuthority(ctx context.Context, operati
 	}
 	for _, event := range events {
 		outcome, trusted := domain.TrustedReviewOutcome(event)
-		if event.ID == operation.AcceptedReviewEventID && trusted && outcome == domain.ReviewOutcomeAccepted && strings.EqualFold(observationPayloadString(event.Payload, "actor_id"), operation.ActorID) && observationPayloadString(event.Payload, "publication_operation_id") == operation.AcceptedPublicationOperationID && reviewPayloadInt64(event.Payload["review_epoch_event_id"]) == operation.ReviewEpochEventID {
+		if !trusted || outcome == domain.ReviewOutcomeIntegrationFailed {
+			continue
+		}
+		if event.ID == operation.AcceptedReviewEventID && outcome == domain.ReviewOutcomeAccepted && strings.EqualFold(observationPayloadString(event.Payload, "actor_id"), operation.ActorID) && observationPayloadString(event.Payload, "publication_operation_id") == operation.AcceptedPublicationOperationID && reviewPayloadInt64(event.Payload["review_epoch_event_id"]) == operation.ReviewEpochEventID {
 			return nil
 		}
+		return fmt.Errorf("publication accepted-review event %d was superseded by authoritative event %d", operation.AcceptedReviewEventID, event.ID)
 	}
 	return fmt.Errorf("publication accepted-review event %d is missing or incompatible", operation.AcceptedReviewEventID)
 }

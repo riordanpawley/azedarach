@@ -26,6 +26,50 @@ import (
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
+func TestPublicationReviewAuthorityRejectsSupersededAcceptance(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repo})
+	t.Cleanup(func() { _ = runtime.Close() })
+	client := newMigratedIssueClient(t, repo, slog.Default())
+	t.Cleanup(func() { _ = client.CloseDB() })
+	issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "superseded publication", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation := daemonTestPublicationOperation(runtime.canonicalProject, "publication-old", issueID, "accept-old", "source", time.Now().UTC())
+	operation.ActorID = "reviewer"
+	operation.ReviewerKind = domain.ReviewerOwnerKindOrchestrator
+	operation.ReviewEpochEventID = 17
+	operation.PatchEvidenceID = "patch-old"
+	operation.AcceptedPublicationOperationID = operation.OperationID
+	if _, err := runtime.store.RecordPublicationEvidence(ctx, domain.PublicationEvidence{
+		EvidenceID: operation.PatchEvidenceID, ProjectID: operation.ProjectID, IssueID: issueID,
+		Layer: domain.PublicationEvidencePatchReview, PatchDigest: "patch", SourceRevision: operation.SourceRevision,
+		BaseRevision: operation.BaseRevision, Producer: "reviewer:" + operation.ActorID,
+		PolicyVersion: operation.PolicyVersion, EnvironmentFingerprint: operation.EnvironmentFingerprint, CreatedAt: operation.CreatedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	appendAcceptance := func(publicationID string) int64 {
+		event, appendErr := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{
+			Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept",
+			Payload: map[string]any{"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": operation.ActorID, "actor_kind": operation.ReviewerKind, "publication_operation_id": publicationID, "review_epoch_event_id": operation.ReviewEpochEventID},
+		})
+		if appendErr != nil {
+			t.Fatal(appendErr)
+		}
+		return event.ID
+	}
+	operation.AcceptedReviewEventID = appendAcceptance(operation.OperationID)
+	newestID := appendAcceptance("publication-new")
+	d := &Daemon{cfg: Config{RepoDir: repo, Logger: slog.Default()}, operationRuntime: runtime, issues: client, issueClientsByProject: map[string]*issues.Client{runtime.canonicalProject: client}}
+	err = d.validatePublicationReviewAuthority(ctx, operation)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("superseded by authoritative event %d", newestID)) {
+		t.Fatalf("superseded publication authority error = %v", err)
+	}
+}
+
 func TestReviewAcceptRetainsLeaseAcrossCommittedPublicationContinuationFailures(t *testing.T) {
 	for _, failureStage := range []string{"post-commit-cancellation", "initial-submit", "committed-queue-read", "post-submit-refresh"} {
 		t.Run(failureStage, func(t *testing.T) {
