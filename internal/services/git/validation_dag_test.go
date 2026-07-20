@@ -20,9 +20,7 @@ func TestCandidateValidationDAGRunsPortableCommandsWithIsolatedRoots(t *testing.
 	require.Len(t, result.Stages, 2)
 	assert.NotEqual(t, result.Stages[0].OutputRoot, result.Stages[1].OutputRoot)
 	for _, stage := range result.Stages {
-		body, readErr := os.ReadFile(filepath.Join(stage.OutputRoot, "result"))
-		require.NoError(t, readErr)
-		assert.NotEmpty(t, body)
+		assert.NoDirExists(t, filepath.Dir(stage.OutputRoot))
 		assert.Equal(t, "passed", stage.Status)
 		require.NotNil(t, stage.StartedAt)
 		require.NotNil(t, stage.FinishedAt)
@@ -52,6 +50,18 @@ func TestCandidateValidationDAGRejectsAbsentCapabilityAndCycle(t *testing.T) {
 	require.ErrorContains(t, err, "absent capability")
 	_, err = runCandidateValidationDAG(context.Background(), t.TempDir(), os.Environ(), []CandidateValidationStage{{ID: "one", Command: "true", DependsOn: []string{"two"}}, {ID: "two", Command: "true", DependsOn: []string{"one"}}})
 	require.ErrorContains(t, err, "contains a cycle")
+}
+
+func TestCandidateValidationDAGRejectsPartialCycleBeforeLaunchingCommands(t *testing.T) {
+	root := t.TempDir()
+	marker := filepath.Join(root, "launched")
+	_, err := runCandidateValidationDAG(context.Background(), root, os.Environ(), []CandidateValidationStage{
+		{ID: "independent", Command: `touch launched`, Required: true},
+		{ID: "one", Command: "true", DependsOn: []string{"two"}, Required: true},
+		{ID: "two", Command: "true", DependsOn: []string{"one"}, Required: true},
+	})
+	require.ErrorContains(t, err, "contains a cycle")
+	assert.NoFileExists(t, marker)
 }
 
 func TestCandidateValidationDAGFailsClosedForInjectedFailureInEveryRequiredStage(t *testing.T) {
@@ -89,6 +99,15 @@ func TestCandidateValidationDAGCancellationFailsClosedEvenForOptionalStage(t *te
 	require.Error(t, err)
 	require.Len(t, result.Stages, 1)
 	assert.Equal(t, "cancelled", result.Stages[0].Status)
+	assert.NoDirExists(t, filepath.Dir(result.Stages[0].OutputRoot))
+}
+
+func TestCandidateValidationDAGCleansTransientRootsAfterFailure(t *testing.T) {
+	result, err := runCandidateValidationDAG(context.Background(), t.TempDir(), os.Environ(), []CandidateValidationStage{{ID: "failure", Command: `printf retained >&2; exit 1`, Required: true}})
+	require.Error(t, err)
+	require.Len(t, result.Stages, 1)
+	assert.Contains(t, result.Stages[0].Stderr, "retained")
+	assert.NoDirExists(t, filepath.Dir(result.Stages[0].OutputRoot))
 }
 
 func TestCandidateValidationDAGSerializesSharedOpaqueResource(t *testing.T) {

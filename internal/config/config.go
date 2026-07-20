@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -513,6 +514,38 @@ func validateGateConfig(cfg GateConfig) error {
 			if _, exists := ids[strings.TrimSpace(dependency)]; !exists {
 				return fmt.Errorf("gate stage %q depends on unknown stage %q", stage.ID, dependency)
 			}
+		}
+	}
+	state := make(map[string]uint8, len(cfg.Stages))
+	byID := make(map[string]GateStageConfig, len(cfg.Stages))
+	for _, stage := range cfg.Stages {
+		byID[strings.TrimSpace(stage.ID)] = stage
+	}
+	var visit func(string) error
+	visit = func(id string) error {
+		switch state[id] {
+		case 1:
+			return fmt.Errorf("gate stage graph contains a cycle at %q", id)
+		case 2:
+			return nil
+		}
+		state[id] = 1
+		for _, dependency := range byID[id].DependsOn {
+			if err := visit(strings.TrimSpace(dependency)); err != nil {
+				return err
+			}
+		}
+		state[id] = 2
+		return nil
+	}
+	stageIDs := make([]string, 0, len(byID))
+	for id := range byID {
+		stageIDs = append(stageIDs, id)
+	}
+	sort.Strings(stageIDs)
+	for _, id := range stageIDs {
+		if err := visit(id); err != nil {
+			return err
 		}
 	}
 	return nil

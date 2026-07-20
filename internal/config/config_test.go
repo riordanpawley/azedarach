@@ -127,6 +127,18 @@ func TestLoadConfigRejectsAbsentGateStageCapability(t *testing.T) {
 	require.ErrorContains(t, err, `depends on unknown stage "missing"`)
 }
 
+func TestLoadConfigRejectsGateStageCycles(t *testing.T) {
+	for _, stages := range []string{
+		`[{"id":"self","command":"acme-check","dependsOn":["self"]}]`,
+		`[{"id":"independent","command":"acme-safe"},{"id":"one","command":"acme-one","dependsOn":["two"]},{"id":"two","command":"acme-two","dependsOn":["one"]}]`,
+	} {
+		root := t.TempDir()
+		writeConfigFile(t, root, `{"$version":11,"gate":{"stages":`+stages+`}}`)
+		_, err := LoadConfig(root)
+		require.ErrorContains(t, err, "gate stage graph contains a cycle")
+	}
+}
+
 func TestLoadConfigRejectsUnsafeGateFailureArtifactPaths(t *testing.T) {
 	for _, path := range []string{"", ".", "../outside", "/absolute"} {
 		t.Run(path, func(t *testing.T) {

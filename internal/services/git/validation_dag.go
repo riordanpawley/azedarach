@@ -54,6 +54,14 @@ func runCandidateValidationDAG(ctx context.Context, root string, env []string, s
 			}
 		}
 	}
+	if err := validateCandidateValidationDAG(byID); err != nil {
+		return CandidateValidationDAGResult{}, err
+	}
+	stageRoot, err := os.MkdirTemp("", "az-validation-stages-")
+	if err != nil {
+		return CandidateValidationDAGResult{}, fmt.Errorf("create validation stage root: %w", err)
+	}
+	defer os.RemoveAll(stageRoot)
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -104,7 +112,7 @@ func runCandidateValidationDAG(ctx context.Context, root string, env []string, s
 			}
 			go func(stage CandidateValidationStage) {
 				startedAt := time.Now().UTC()
-				base, mkErr := os.MkdirTemp("", "az-validation-"+stage.ID+"-")
+				base, mkErr := os.MkdirTemp(stageRoot, "stage-")
 				result := CandidateValidationStageResult{ID: stage.ID, Status: "failed", Resources: append([]string(nil), stage.Resources...), OutputRoot: filepath.Join(base, "output"), TempRoot: filepath.Join(base, "tmp"), ArtifactPaths: append([]string(nil), stage.ArtifactPaths...), StartedAt: &startedAt}
 				if mkErr == nil {
 					mkErr = os.MkdirAll(result.OutputRoot, 0o700)
@@ -167,4 +175,41 @@ func runCandidateValidationDAG(ctx context.Context, root string, env []string, s
 		return CandidateValidationDAGResult{Stages: results}, firstErr
 	}
 	return CandidateValidationDAGResult{Stages: results}, nil
+}
+
+func validateCandidateValidationDAG(stages map[string]CandidateValidationStage) error {
+	const (
+		unvisited = iota
+		visiting
+		visited
+	)
+	state := make(map[string]int, len(stages))
+	var visit func(string) error
+	visit = func(id string) error {
+		switch state[id] {
+		case visiting:
+			return fmt.Errorf("validation stage graph contains a cycle at %q", id)
+		case visited:
+			return nil
+		}
+		state[id] = visiting
+		for _, dependency := range stages[id].DependsOn {
+			if err := visit(strings.TrimSpace(dependency)); err != nil {
+				return err
+			}
+		}
+		state[id] = visited
+		return nil
+	}
+	ids := make([]string, 0, len(stages))
+	for id := range stages {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if err := visit(id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
