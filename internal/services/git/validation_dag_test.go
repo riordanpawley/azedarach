@@ -24,6 +24,8 @@ func TestCandidateValidationDAGRunsPortableCommandsWithIsolatedRoots(t *testing.
 		require.NoError(t, readErr)
 		assert.NotEmpty(t, body)
 		assert.Equal(t, "passed", stage.Status)
+		require.NotNil(t, stage.StartedAt)
+		require.NotNil(t, stage.FinishedAt)
 		assert.False(t, stage.StartedAt.IsZero())
 		assert.False(t, stage.FinishedAt.IsZero())
 		assert.GreaterOrEqual(t, stage.WallSeconds, float64(0))
@@ -39,6 +41,8 @@ func TestCandidateValidationDAGFailsClosedAndRetainsEveryStartedStageResult(t *t
 	require.Len(t, result.Stages, 2)
 	assert.Equal(t, "downstream", result.Stages[0].ID)
 	assert.Equal(t, "blocked", result.Stages[0].Status)
+	assert.Nil(t, result.Stages[0].StartedAt)
+	assert.Nil(t, result.Stages[0].FinishedAt)
 	assert.Equal(t, "failure", result.Stages[1].ID)
 	assert.Contains(t, result.Stages[1].Stderr, "diagnostic")
 }

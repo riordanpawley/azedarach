@@ -23,17 +23,17 @@ type IntegrationCandidateValidationAttempt struct {
 }
 
 type ValidationStageEvidence struct {
-	ID            string    `json:"id"`
-	Status        string    `json:"status"`
-	Resources     []string  `json:"resources,omitempty"`
-	OutputRoot    string    `json:"output_root,omitempty"`
-	TempRoot      string    `json:"temp_root,omitempty"`
-	ArtifactPaths []string  `json:"artifact_paths,omitempty"`
-	Stdout        string    `json:"stdout,omitempty"`
-	Stderr        string    `json:"stderr,omitempty"`
-	StartedAt     time.Time `json:"started_at,omitempty"`
-	FinishedAt    time.Time `json:"finished_at,omitempty"`
-	WallSeconds   float64   `json:"wall_seconds"`
+	ID            string     `json:"id"`
+	Status        string     `json:"status"`
+	Resources     []string   `json:"resources,omitempty"`
+	OutputRoot    string     `json:"output_root,omitempty"`
+	TempRoot      string     `json:"temp_root,omitempty"`
+	ArtifactPaths []string   `json:"artifact_paths,omitempty"`
+	Stdout        string     `json:"stdout,omitempty"`
+	Stderr        string     `json:"stderr,omitempty"`
+	StartedAt     *time.Time `json:"started_at,omitempty"`
+	FinishedAt    *time.Time `json:"finished_at,omitempty"`
+	WallSeconds   float64    `json:"wall_seconds,omitempty"`
 }
 
 // Integration validation and lifecycle budgets are deliberately layered. The
