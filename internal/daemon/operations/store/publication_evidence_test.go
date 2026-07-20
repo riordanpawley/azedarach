@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"path/filepath"
+	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -126,6 +128,71 @@ func TestPatchReviewEvidenceReplayRetainsFirstBaseAcrossConcurrentStores(t *test
 				t.Fatal("semantic identity mismatch replay succeeded")
 			}
 		})
+	}
+}
+
+func TestAcceptedPatchReviewEvidenceConcurrentCrossBaseInsertRetainsOneProof(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	storeA := NewAtPath(dbPath, slog.Default())
+	defer storeA.Close()
+	storeB := NewAtPath(dbPath, slog.Default())
+	defer storeB.Close()
+
+	first := storedPublicationEvidence()
+	second := first
+	second.BaseRevision = "advanced-base"
+	second.PatchDigest = "advanced-base-relative-digest"
+	second.Coverage.Paths = []string{"advanced-base-relative.go"}
+	second.CreatedAt = first.CreatedAt.Add(time.Hour)
+
+	start := make(chan struct{})
+	results := make(chan domain.PublicationEvidence, 2)
+	errs := make(chan error, 2)
+	var ready sync.WaitGroup
+	ready.Add(2)
+	for _, attempt := range []struct {
+		store    *SQLiteStore
+		evidence domain.PublicationEvidence
+	}{{storeA, first}, {storeB, second}} {
+		go func() {
+			ready.Done()
+			<-start
+			got, err := attempt.store.RecordAcceptedPatchReviewEvidence(ctx, attempt.evidence)
+			results <- got
+			errs <- err
+		}()
+	}
+	ready.Wait()
+	close(start)
+
+	gotA, gotB := <-results, <-results
+	if err := <-errs; err != nil {
+		t.Fatalf("first concurrent record: %v", err)
+	}
+	if err := <-errs; err != nil {
+		t.Fatalf("second concurrent record: %v", err)
+	}
+	if !reflect.DeepEqual(gotA, gotB) {
+		t.Fatalf("concurrent callers observed different authority: first=%+v second=%+v", gotA, gotB)
+	}
+	snapshot, err := storeA.PublicationEvidenceSnapshot(ctx, "project", "issue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Evidence) != 1 || !reflect.DeepEqual(snapshot.Evidence[0], gotA) {
+		t.Fatalf("expected one coherent immutable proof: snapshot=%+v result=%+v", snapshot.Evidence, gotA)
+	}
+
+	sameBaseDigestMismatch := gotA
+	sameBaseDigestMismatch.PatchDigest = "fabricated-digest"
+	if _, err := storeB.RecordAcceptedPatchReviewEvidence(ctx, sameBaseDigestMismatch); err == nil {
+		t.Fatal("same-base digest mismatch succeeded")
+	}
+	identityMismatch := second
+	identityMismatch.SourceRevision = "different-source"
+	if _, err := storeB.RecordAcceptedPatchReviewEvidence(ctx, identityMismatch); err == nil {
+		t.Fatal("cross-base accepted-review identity mismatch succeeded")
 	}
 }
 

@@ -1590,7 +1590,7 @@ func (d *Daemon) recordAcceptedPatchReviewEvidence(ctx context.Context, projectI
 	if err != nil {
 		return err
 	}
-	_, err = store.RecordPublicationEvidence(ctx, evidence)
+	_, err = store.RecordAcceptedPatchReviewEvidence(ctx, evidence)
 	if err == nil {
 		_, err = d.publicationEvidenceSnapshot(ctx, projectID, inspection.IssueID)
 	}

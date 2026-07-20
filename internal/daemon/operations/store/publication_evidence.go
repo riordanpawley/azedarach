@@ -13,6 +13,22 @@ import (
 )
 
 func (s *SQLiteStore) RecordPublicationEvidence(ctx context.Context, evidence domain.PublicationEvidence) (domain.PublicationEvidence, error) {
+	return s.recordPublicationEvidence(ctx, evidence, false)
+}
+
+// RecordAcceptedPatchReviewEvidence records the deterministic proof for an
+// accepted review. If another daemon wins the insert after both callers have
+// observed the proof as absent, a base-relative candidate may differ in digest
+// and coverage. In that one cross-base race, the first immutable proof remains
+// authoritative when the accepted review identity is otherwise exact.
+func (s *SQLiteStore) RecordAcceptedPatchReviewEvidence(ctx context.Context, evidence domain.PublicationEvidence) (domain.PublicationEvidence, error) {
+	if evidence.Layer != domain.PublicationEvidencePatchReview {
+		return domain.PublicationEvidence{}, fmt.Errorf("accepted patch-review record requires patch_review evidence")
+	}
+	return s.recordPublicationEvidence(ctx, evidence, true)
+}
+
+func (s *SQLiteStore) recordPublicationEvidence(ctx context.Context, evidence domain.PublicationEvidence, reconcileAcceptedReviewRace bool) (domain.PublicationEvidence, error) {
 	if evidence.CreatedAt.IsZero() {
 		evidence.CreatedAt = time.Now().UTC()
 	}
@@ -57,13 +73,28 @@ func (s *SQLiteStore) RecordPublicationEvidence(ctx context.Context, evidence do
 	}
 	_ = tx.Rollback()
 	existing, getErr := s.publicationEvidenceByID(ctx, evidence.EvidenceID)
-	if getErr == nil && (publicationEvidenceSemanticallyEqual(existing, evidence) || domain.SamePatchReviewIdentity(existing, evidence)) {
+	if getErr == nil && (publicationEvidenceSemanticallyEqual(existing, evidence) || domain.SamePatchReviewIdentity(existing, evidence) || (reconcileAcceptedReviewRace && acceptedPatchReviewRaceIdentityEqual(existing, evidence))) {
 		return existing, nil
 	}
 	if getErr == nil {
 		return domain.PublicationEvidence{}, fmt.Errorf("publication evidence %s conflicts with immutable record", evidence.EvidenceID)
 	}
 	return domain.PublicationEvidence{}, fmt.Errorf("record publication evidence: %w", err)
+}
+
+func acceptedPatchReviewRaceIdentityEqual(existing, candidate domain.PublicationEvidence) bool {
+	return existing.Layer == domain.PublicationEvidencePatchReview &&
+		candidate.Layer == domain.PublicationEvidencePatchReview &&
+		existing.BaseRevision != candidate.BaseRevision &&
+		existing.EvidenceID == candidate.EvidenceID &&
+		existing.ProjectID == candidate.ProjectID &&
+		existing.IssueID == candidate.IssueID &&
+		existing.SourceRevision == candidate.SourceRevision &&
+		existing.Producer == candidate.Producer &&
+		existing.PolicyVersion == candidate.PolicyVersion &&
+		existing.EnvironmentFingerprint == candidate.EnvironmentFingerprint &&
+		existing.ReusedFromEvidenceID == candidate.ReusedFromEvidenceID &&
+		existing.Cost == candidate.Cost
 }
 
 func (s *SQLiteStore) RecordPublicationEvidenceInvalidation(ctx context.Context, invalidation domain.PublicationEvidenceInvalidation) (domain.PublicationEvidenceInvalidation, error) {
