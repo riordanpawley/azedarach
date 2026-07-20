@@ -36,4 +36,23 @@ grep -q 'with-machine-validation-lease --class aggregate --scope repository --pu
 grep -q 'with-machine-validation-lease --class aggregate --profile merge-gate' "$repo_root/justfile"
 grep -q 'with-machine-validation-lease --class aggregate --scope ticket --purpose review_evidence' "$repo_root/justfile"
 
+cat >"$fixture/bin/az" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"$REVIEW_GATE_ACQUIRE_ARGS"
+printf '%s\n' '{"request":{"state":"completed","execution":"reused","authoritative_request_id":"existing-review-gate"}}'
+EOF
+chmod +x "$fixture/bin/az"
+review_gate_args="$fixture/review-gate-acquire.args"
+real_just="$(command -v just)"
+env -u AZEDARACH_VALIDATION_REQUEST_ID -u AZEDARACH_VALIDATION_NESTED_FD \
+  PATH="$fixture/bin:$PATH" AZEDARACH_TICKET_ID=identity-contract \
+  AZEDARACH_VALIDATION_CONTROL_AZ_BIN="$fixture/bin/az" REVIEW_GATE_ACQUIRE_ARGS="$review_gate_args" \
+  "$real_just" --justfile "$repo_root/justfile" --working-directory "$repo_root" review-gate
+grep -Fxq -- '--command' "$review_gate_args"
+grep -Fxq -- 'just review-gate' "$review_gate_args"
+grep -Fxq -- '--isolation' "$review_gate_args"
+grep -Fxq -- 'synthetic-worktree' "$review_gate_args"
+grep -Fxq -- '--environment-fingerprint' "$review_gate_args"
+grep -Fxq -- 'azedarach-go-review-v1' "$review_gate_args"
+
 echo "go development bypass regression passed"

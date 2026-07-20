@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -66,8 +67,8 @@ func IsImage(att Attachment) bool {
 }
 
 // NewService creates a generic attachment service. Images use the same shared
-// attachment storage as documents; old .azedarach/images/<issue-id> files are
-// imported on access.
+// attachment storage as documents. Legacy imports are explicit write-side
+// operations; reads preserve legacy visibility without mutating storage.
 func NewService(issuesPath string, logger *slog.Logger) *Service {
 	return newService(issuesPath, logger)
 }
@@ -171,21 +172,92 @@ func (s *Service) List(ctx context.Context, issueID string) ([]Attachment, error
 		return nil, err
 	}
 	s.logger.Debug("listing attachments", "issue_id", issueID)
-
-	if err := s.migrateLegacyImages(ctx, issueID); err != nil {
-		return nil, err
-	}
 	attachments, err := s.listAttachmentReferences(ctx, issueID)
 	if err != nil {
 		return nil, err
 	}
+	legacy, err := s.listLegacyImageReferences(issueID)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(attachments))
+	for _, attachment := range attachments {
+		seen[attachment.ID] = struct{}{}
+	}
+	for _, attachment := range legacy {
+		if _, found := seen[attachment.ID]; found {
+			continue
+		}
+		attachments = append(attachments, attachment)
+	}
+	sort.SliceStable(attachments, func(i, j int) bool {
+		if attachments[i].Created.Equal(attachments[j].Created) {
+			return attachments[i].Filename < attachments[j].Filename
+		}
+		return attachments[i].Created.Before(attachments[j].Created)
+	})
 	s.logger.Debug("found attachments", "count", len(attachments))
 	return attachments, nil
 }
 
-func (s *Service) listAttachmentReferences(ctx context.Context, issueID string) ([]Attachment, error) {
+func (s *Service) listLegacyImageReferences(issueID string) ([]Attachment, error) {
+	dir := s.getIssueCollectionDir(issueID, legacyImageCollection)
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read legacy image attachments: %w", err)
+	}
+	attachments := make([]Attachment, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("inspect legacy image attachment %q: %w", entry.Name(), err)
+		}
+		attachmentID, filename := parseLegacyAttachmentFilename(entry.Name())
+		if attachmentID == "" {
+			sum := sha256.Sum256([]byte(entry.Name()))
+			attachmentID = "legacy-" + hex.EncodeToString(sum[:4])
+		}
+		attachments = append(attachments, Attachment{
+			ID: attachmentID, IssueID: issueID, Filename: filename,
+			Path: filepath.Join(dir, entry.Name()), MimeType: detectMimeType(nil, filename),
+			Size: info.Size(), Created: info.ModTime().UTC(),
+			Relative: filepath.ToSlash(filepath.Join(".azedarach", legacyImageCollection, issueID, entry.Name())),
+		})
+	}
+	return attachments, nil
+}
+
+// MigrateLegacy performs the explicit write-side compatibility migration for
+// legacy attachment schemas and image files. Read paths must never call it.
+func (s *Service) MigrateLegacy(ctx context.Context, issueID string) error {
+	if err := s.checkReady(); err != nil {
+		return err
+	}
 	db, err := s.openDB()
 	if err != nil {
+		return err
+	}
+	if err := db.Close(); err != nil {
+		return fmt.Errorf("close attachment database after schema migration: %w", err)
+	}
+	return s.migrateLegacyImages(ctx, issueID)
+}
+
+func (s *Service) listAttachmentReferences(ctx context.Context, issueID string) ([]Attachment, error) {
+	db, err := s.openReadOnlyDB()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return []Attachment{}, nil
+		}
 		return nil, err
 	}
 	defer db.Close()
@@ -251,6 +323,39 @@ func (s *Service) listAttachmentReferences(ctx context.Context, issueID string) 
 	}
 
 	return attachments, nil
+}
+
+func (s *Service) openReadOnlyDB() (*sql.DB, error) {
+	if err := s.checkReady(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(s.dbPath) == "" {
+		return nil, fmt.Errorf("attachment database path is empty")
+	}
+	if err := dbpathguard.Check(s.dbPath); err != nil {
+		return nil, fmt.Errorf("refuse attachment database: %w", err)
+	}
+	if _, err := os.Stat(s.dbPath); err != nil {
+		return nil, err
+	}
+	dsn := fmt.Sprintf(
+		"file:%s?mode=ro&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_pragma=query_only(ON)",
+		filepath.ToSlash(s.dbPath),
+	)
+	db, err := tracesqlite.Open(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open attachment database read-only: %w", err)
+	}
+	columns, err := issueAttachmentColumns(db)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("inspect issue attachment schema: %w", err)
+	}
+	if !issueAttachmentSchemaIsCurrent(columns) {
+		_ = db.Close()
+		return nil, fmt.Errorf("issue attachment schema is unavailable or incompatible; run project database migrations")
+	}
+	return db, nil
 }
 
 // Delete removes an attachment by ID

@@ -8,11 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/riordanpawley/azedarach/internal/naming"
 )
 
 const (
@@ -21,6 +24,47 @@ const (
 	integrationJournalVersion   = integrationJournalVersionV2
 	integrationReceiptVersion   = 1
 )
+
+const (
+	integrationScratchPrefix          = "azedarach-integration-"
+	integrationScratchPattern         = integrationScratchPrefix + "*"
+	integrationFailureArtifactsPrefix = "azedarach-integration-failure-"
+)
+
+type integrationFailureArtifactPathsKey struct{}
+
+// WithIntegrationFailureArtifactPaths configures project-owned relative
+// directories that may be preserved from a failed transactional merge.
+func WithIntegrationFailureArtifactPaths(ctx context.Context, paths []string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cleaned := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		path = filepath.Clean(strings.TrimSpace(path))
+		if path == "." || !filepath.IsLocal(path) {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		cleaned = append(cleaned, path)
+	}
+	if len(cleaned) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, integrationFailureArtifactPathsKey{}, cleaned)
+}
+
+func integrationFailureArtifactPaths(ctx context.Context) []string {
+	if ctx == nil {
+		return nil
+	}
+	paths, _ := ctx.Value(integrationFailureArtifactPathsKey{}).([]string)
+	return paths
+}
 
 type integrationJournal struct {
 	Version         int                         `json:"version"`
@@ -48,9 +92,69 @@ type integrationValidationReceipt struct {
 	AppliedAt      time.Time                  `json:"applied_at"`
 }
 
+// IntegrationTargetStaleError reports that the target HEAD observed under the
+// integration transaction lock no longer matches the caller's publication
+// identity. No scratch candidate has been created when this error is returned.
+type IntegrationTargetStaleError struct {
+	ExpectedHead string
+	ActualHead   string
+}
+
+// IntegrationTargetBranchStaleError reports that the target worktree is no
+// longer attached to the authoritative branch selected by daemon policy.
+type IntegrationTargetBranchStaleError struct {
+	ExpectedBranch string
+	ActualBranch   string
+}
+
+func (e *IntegrationTargetBranchStaleError) Error() string {
+	return fmt.Sprintf("integration target branch changed: expected=%s actual=%s", e.ExpectedBranch, e.ActualBranch)
+}
+
+func (e *IntegrationTargetStaleError) Error() string {
+	return fmt.Sprintf("integration target HEAD changed before candidate creation: expected=%s actual=%s", e.ExpectedHead, e.ActualHead)
+}
+
 // MergeCleanlyTransactional performs the merge in a disposable worktree and only
 // locks the target worktree for the base snapshot and final publication phases.
 func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch string) (*MergeResult, error) {
+	return c.mergeCleanlyTransactional(ctx, worktree, branch, true, "", "", false)
+}
+
+// MergeCleanlyTransactionalAtBase binds candidate creation to expectedBase.
+// The comparison is made under the same integration transaction lock as the
+// target HEAD snapshot, closing the gap between daemon preflight and scratch
+// creation.
+func (c *Client) MergeCleanlyTransactionalAtBase(ctx context.Context, worktree, branch, expectedBase string) (*MergeResult, error) {
+	return c.mergeCleanlyTransactional(ctx, worktree, branch, true, strings.TrimSpace(expectedBase), "", false)
+}
+
+// MergeCleanlyTransactionalAtTarget binds publication to the exact target HEAD
+// and attached branch selected by daemon authority.
+func (c *Client) MergeCleanlyTransactionalAtTarget(ctx context.Context, worktree, branch, expectedBase, expectedTargetBranch string) (*MergeResult, error) {
+	return c.mergeCleanlyTransactional(ctx, worktree, branch, true, strings.TrimSpace(expectedBase), strings.TrimSpace(expectedTargetBranch), false)
+}
+
+// MergeCleanlyTransactionalComposition performs exact clean conflict-safe
+// compare/apply composition without invoking repository publication validation.
+// It is reserved for typed non-base integration targets.
+func (c *Client) MergeCleanlyTransactionalComposition(ctx context.Context, worktree, branch string) (*MergeResult, error) {
+	return c.mergeCleanlyTransactional(ctx, worktree, branch, false, "", "", true)
+}
+
+// MergeCleanlyTransactionalCompositionAtBase binds no-ff composition to the
+// exact target identity resolved by daemon authority.
+func (c *Client) MergeCleanlyTransactionalCompositionAtBase(ctx context.Context, worktree, branch, expectedBase string) (*MergeResult, error) {
+	return c.mergeCleanlyTransactional(ctx, worktree, branch, false, strings.TrimSpace(expectedBase), "", true)
+}
+
+// MergeCleanlyTransactionalCompositionAtTarget binds no-ff composition to the
+// exact target HEAD and attached branch selected by daemon authority.
+func (c *Client) MergeCleanlyTransactionalCompositionAtTarget(ctx context.Context, worktree, branch, expectedBase, expectedTargetBranch string) (*MergeResult, error) {
+	return c.mergeCleanlyTransactional(ctx, worktree, branch, false, strings.TrimSpace(expectedBase), strings.TrimSpace(expectedTargetBranch), true)
+}
+
+func (c *Client) mergeCleanlyTransactional(ctx context.Context, worktree, branch string, validatePublication bool, expectedBase, expectedTargetBranch string, forceNoFF bool) (*MergeResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -92,10 +196,16 @@ func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch
 			}
 			return nil
 		}
+		if err := c.requireIntegrationTargetBranch(ctx, worktree, expectedTargetBranch); err != nil {
+			return err
+		}
 
 		targetHead, err = c.revParseVerify(ctx, worktree, "HEAD")
 		if err != nil {
 			return fmt.Errorf("resolve target HEAD before transactional merge: %w", err)
+		}
+		if expectedBase != "" && targetHead != expectedBase {
+			return &IntegrationTargetStaleError{ExpectedHead: expectedBase, ActualHead: targetHead}
 		}
 		return nil
 	}); err != nil {
@@ -104,7 +214,7 @@ func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch
 	if earlyResult != nil {
 		return earlyResult, nil
 	}
-	scratchPath, err := os.MkdirTemp("", "azedarach-integration-*")
+	scratchPath, err := os.MkdirTemp("", integrationScratchPattern)
 	if err != nil {
 		return nil, fmt.Errorf("create scratch integration directory: %w", err)
 	}
@@ -145,7 +255,7 @@ func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch
 		return nil, fmt.Errorf("persist scratch integration ownership: %w", err)
 	}
 
-	result, err := c.mergeCleanlyWithEnv(ctx, scratchPath, branch, []string{"AZEDARACH_SKIP_MERGE_REBASE_GATE=1"})
+	result, err := c.mergeCleanlyWithEnv(ctx, scratchPath, branch, []string{"AZEDARACH_SKIP_MERGE_REBASE_GATE=1"}, forceNoFF)
 	if err != nil {
 		return nil, fmt.Errorf("scratch merge %s: %w", branch, err)
 	}
@@ -172,22 +282,220 @@ func (c *Client) MergeCleanlyTransactional(ctx context.Context, worktree, branch
 	if desiredHead == targetHead {
 		return result, nil
 	}
-	attempt, configured, validationErr := c.validateIntegrationCandidate(ctx, worktree, scratchPath, desiredHead)
-	if configured {
-		result.ValidationAttempts = append(result.ValidationAttempts, attempt)
-	}
-	if validationErr != nil {
-		if errors.Is(validationErr, context.Canceled) || errors.Is(validationErr, context.DeadlineExceeded) {
-			return nil, validationErr
+	if validatePublication {
+		attempt, configured, validationErr := c.validateIntegrationCandidate(ctx, worktree, scratchPath, desiredHead)
+		if configured {
+			result.ValidationAttempts = append(result.ValidationAttempts, attempt)
 		}
-		result.Success = false
-		result.Message = appendMergeResultDetail(result.Message, validationErr.Error())
-		return result, nil
+		if validationErr != nil {
+			if errors.Is(validationErr, context.Canceled) || errors.Is(validationErr, context.DeadlineExceeded) {
+				// Cancellation is not a completed gate failure. Return the context
+				// error and let deferred scratch cleanup discard partial output.
+				return nil, validationErr
+			}
+			result.Success = false
+			result.Message = appendMergeResultDetail(result.Message, validationErr.Error())
+			if preservedArtifacts := c.preserveCandidateValidationFailureArtifacts(ctx, scratchPath, result, validationErr); preservedArtifacts != "" {
+				result.Message = appendMergeResultDetail(result.Message, "preserved integration failure artifacts at "+preservedArtifacts)
+			}
+			return result, nil
+		}
 	}
 
-	applied, cleanupHandled, err := c.applyValidatedScratchMerge(ctx, worktree, scratchPath, targetHead, desiredHead, scratchOwner, result)
+	applied, cleanupHandled, err := c.applyValidatedScratchMerge(ctx, worktree, scratchPath, targetHead, desiredHead, expectedTargetBranch, scratchOwner, result)
 	scratchCleanupHandled = cleanupHandled
 	return applied, err
+}
+
+func (c *Client) preserveIntegrationFailureArtifacts(ctx context.Context, scratchPath string, result *MergeResult, mergeErr error) string {
+	if ctx != nil && ctx.Err() != nil {
+		return ""
+	}
+	if mergeErr == nil && (result == nil || result.Success) {
+		return ""
+	}
+	if !strings.HasPrefix(filepath.Base(scratchPath), integrationScratchPrefix) {
+		return ""
+	}
+	configuredPaths := integrationFailureArtifactPaths(ctx)
+	if len(configuredPaths) == 0 {
+		return ""
+	}
+	evaluatedScratch, err := filepath.EvalSymlinks(scratchPath)
+	if err != nil {
+		return ""
+	}
+	type artifactSource struct {
+		path     string
+		relative string
+	}
+	sources := make([]artifactSource, 0, len(configuredPaths))
+	for _, relative := range configuredPaths {
+		source := filepath.Join(scratchPath, relative)
+		info, statErr := os.Stat(source)
+		if statErr != nil || !info.IsDir() {
+			continue
+		}
+		evaluatedSource, evalErr := filepath.EvalSymlinks(source)
+		if evalErr != nil || !pathWithinRoot(evaluatedScratch, evaluatedSource) {
+			if c.logger != nil {
+				c.logger.Warn("refusing integration failure artifact path outside scratch worktree", "source", source, "error", evalErr)
+			}
+			continue
+		}
+		sources = append(sources, artifactSource{path: evaluatedSource, relative: relative})
+	}
+	if len(sources) == 0 {
+		return ""
+	}
+	destination, err := os.MkdirTemp(c.artifactFailureTempDir, integrationFailureArtifactsPrefix)
+	if err != nil {
+		if c.logger != nil {
+			c.logger.Warn("failed to create integration failure artifact directory", "error", err)
+		}
+		return ""
+	}
+	for _, source := range sources {
+		target := filepath.Join(destination, source.relative)
+		if err := c.copyDirectory(ctx, source.path, target); err != nil {
+			_ = os.RemoveAll(destination)
+			if c.logger != nil {
+				c.logger.Warn("failed to preserve integration failure artifacts", "source", source.path, "error", err)
+			}
+			return ""
+		}
+	}
+	return destination
+}
+
+func (c *Client) preserveCandidateValidationFailureArtifacts(ctx context.Context, scratchPath string, result *MergeResult, validationErr error) string {
+	if errors.Is(validationErr, context.Canceled) || errors.Is(validationErr, context.DeadlineExceeded) {
+		return ""
+	}
+	return c.preserveIntegrationFailureArtifacts(ctx, scratchPath, result, validationErr)
+}
+
+func pathWithinRoot(root, candidate string) bool {
+	relative, err := filepath.Rel(root, candidate)
+	return err == nil && (relative == "." || filepath.IsLocal(relative))
+}
+
+func (c *Client) copyDirectory(ctx context.Context, source, destination string) error {
+	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return fmt.Errorf("resolve artifact path %s: %w", path, err)
+		}
+		target := filepath.Join(destination, relative)
+		if entry.IsDir() {
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return fmt.Errorf("create artifact directory %s: %w", target, err)
+			}
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return nil
+		}
+		return c.copyArtifactFile(ctx, path, target)
+	})
+}
+
+func (c *Client) copyArtifactFile(ctx context.Context, source, destination string) error {
+	input, err := os.Open(source)
+	if err != nil {
+		return fmt.Errorf("open artifact %s: %w", source, err)
+	}
+	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		_ = input.Close()
+		return fmt.Errorf("create preserved artifact %s: %w", destination, err)
+	}
+	buffer := make([]byte, 32*1024)
+	var copyErr error
+	for copyErr == nil {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				copyErr = err
+				break
+			}
+		}
+		readCount, readErr := input.Read(buffer)
+		for written := 0; written < readCount; {
+			if ctx != nil {
+				if err := ctx.Err(); err != nil {
+					copyErr = err
+					break
+				}
+			}
+			writeCount, writeErr := output.Write(buffer[written:readCount])
+			if writeErr != nil {
+				copyErr = writeErr
+				break
+			}
+			if writeCount == 0 {
+				copyErr = io.ErrShortWrite
+				break
+			}
+			written += writeCount
+			if c.artifactCopyChunk != nil {
+				c.artifactCopyChunk(source, writeCount)
+			}
+			if ctx != nil {
+				if err := ctx.Err(); err != nil {
+					copyErr = err
+					break
+				}
+			}
+		}
+		if copyErr != nil {
+			break
+		}
+		switch {
+		case errors.Is(readErr, io.EOF):
+			copyErr = nil
+			goto copyComplete
+		case readErr != nil:
+			copyErr = readErr
+		}
+	}
+
+copyComplete:
+	inputCloseErr := input.Close()
+	closeErr := output.Close()
+	if copyErr != nil {
+		return fmt.Errorf("copy artifact %s: %w", source, copyErr)
+	}
+	if inputCloseErr != nil {
+		return fmt.Errorf("close artifact %s: %w", source, inputCloseErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close preserved artifact %s: %w", destination, closeErr)
+	}
+	return nil
+}
+
+func (c *Client) requireIntegrationTargetBranch(ctx context.Context, worktree, expectedBranch string) error {
+	expectedBranch = strings.TrimSpace(expectedBranch)
+	if expectedBranch == "" {
+		return nil
+	}
+	actualBranch, err := c.CurrentBranch(ctx, worktree)
+	if err != nil {
+		return fmt.Errorf("resolve integration target branch: %w", err)
+	}
+	actualBranch = strings.TrimSpace(actualBranch)
+	if actualBranch != expectedBranch {
+		return &IntegrationTargetBranchStaleError{ExpectedBranch: expectedBranch, ActualBranch: actualBranch}
+	}
+	return nil
 }
 
 func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scratchPath, candidateHead string) (CandidateValidationAttempt, bool, error) {
@@ -195,64 +503,110 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 		return CandidateValidationAttempt{}, false, fmt.Errorf("target gate authority path must be absolute: %s", gateRoot)
 	}
 	gateRoot = filepath.Clean(gateRoot)
-	canonicalGateRoot, err := filepath.EvalSymlinks(gateRoot)
-	if err != nil {
-		return CandidateValidationAttempt{}, false, fmt.Errorf("resolve target gate root: %w", err)
-	}
-	gateRoot = canonicalGateRoot
+	configuredCommand, _ := ctx.Value(candidateValidationCommandKey{}).(string)
+	configuredCommand = strings.TrimSpace(configuredCommand)
 	gatePath := filepath.Join(gateRoot, "scripts", "git-merge-rebase-gate.sh")
-	if err := rejectTrustedPathComponents(filepath.Clean(gateRoot)); err != nil {
-		return CandidateValidationAttempt{}, false, fmt.Errorf("reject unsafe target gate root: %w", err)
-	}
 	attempt := CandidateValidationAttempt{
 		CandidateHead: candidateHead,
 		Status:        CandidateValidationRunning,
 		Canonical:     false,
 	}
-	gateInfo, err := os.Lstat(gatePath)
-	if err != nil {
-		if os.IsNotExist(err) {
+	if ticketID, ticketScoped := ctx.Value(candidateValidationTicketKey{}).(naming.TicketID); ticketScoped {
+		if _, err := naming.ParseTicketID(ticketID.String()); err != nil {
 			attempt.Status = CandidateValidationFailed
-			attempt.Message = "candidate validation gate is unavailable"
+			attempt.Message = "ticket-scoped candidate validation requires a valid durable ticket identity"
 			notifyCandidateValidation(ctx, attempt)
-			return CandidateValidationAttempt{}, false, nil
+			return attempt, true, fmt.Errorf("%s: %w", attempt.Message, err)
 		}
-		attempt.Status = CandidateValidationFailed
-		attempt.Message = "candidate validation gate could not be inspected"
-		notifyCandidateValidation(ctx, attempt)
-		pubErr := publishCandidateValidationFailure(ctx, gateRoot, scratchPath, candidateHead, "gate_inspection", attempt.Message)
-		return attempt, true, fmt.Errorf("inspect candidate validation gate: %w (publication: %v)", err, pubErr)
 	}
-	if !gateInfo.Mode().IsRegular() {
-		attempt.Status = CandidateValidationFailed
-		attempt.Message = "candidate validation gate is not a regular trusted file"
-		notifyCandidateValidation(ctx, attempt)
-		pubErr := publishCandidateValidationFailure(ctx, gateRoot, scratchPath, candidateHead, "gate_inspection", attempt.Message)
-		return attempt, true, fmt.Errorf("%s (publication: %v)", attempt.Message, pubErr)
+	if configuredCommand == "" {
+		if _, err := os.Stat(gatePath); err != nil {
+			if os.IsNotExist(err) {
+				return CandidateValidationAttempt{}, false, nil
+			}
+			attempt.Status = CandidateValidationFailed
+			attempt.Message = "candidate validation gate could not be inspected"
+			notifyCandidateValidation(ctx, attempt)
+			return attempt, true, fmt.Errorf("inspect candidate validation gate: %w", err)
+		}
 	}
 	notifyCandidateValidation(ctx, attempt)
+
+	actualHead, err := c.revParseVerify(ctx, scratchPath, "HEAD")
+	if err != nil {
+		attempt.Status = CandidateValidationFailed
+		attempt.Message = "candidate HEAD could not be resolved before validation"
+		notifyCandidateValidation(ctx, attempt)
+		return attempt, true, fmt.Errorf("resolve candidate HEAD before validation: %w", err)
+	}
+	if actualHead != candidateHead {
+		attempt.Status = CandidateValidationSuperseded
+		attempt.Message = fmt.Sprintf("candidate HEAD changed before validation: expected %s, found %s", candidateHead, actualHead)
+		notifyCandidateValidation(ctx, attempt)
+		return attempt, true, errors.New(attempt.Message)
+	}
+	status, err := c.Status(ctx, scratchPath)
+	if err != nil {
+		attempt.Status = CandidateValidationFailed
+		attempt.Message = "candidate status could not be read before validation"
+		notifyCandidateValidation(ctx, attempt)
+		return attempt, true, fmt.Errorf("inspect candidate status before validation: %w", err)
+	}
+	if gitStatusDirty(status) {
+		attempt.Status = CandidateValidationFailed
+		attempt.Message = "candidate worktree was dirty before validation: " + gitStatusSummary(status)
+		notifyCandidateValidation(ctx, attempt)
+		return attempt, true, errors.New(attempt.Message)
+	}
+	var finishAdmission func(CandidateValidationAttempt) error
+	if admission, _ := ctx.Value(candidateValidationAdmissionKey{}).(CandidateValidationAdmission); admission != nil {
+		reused, finish, admissionErr := admission(ctx, candidateHead)
+		if admissionErr != nil {
+			attempt.Status = CandidateValidationFailed
+			attempt.Message = "candidate validation admission failed: " + admissionErr.Error()
+			notifyCandidateValidation(ctx, attempt)
+			return attempt, true, errors.New(attempt.Message)
+		}
+		finishAdmission = finish
+		if reused {
+			attempt.Status = CandidateValidationPassed
+			attempt.Message = "compatible exact candidate validation reused; awaiting exact apply"
+			notifyCandidateValidation(ctx, attempt)
+			return attempt, true, nil
+		}
+	}
 
 	env := gitEnvWithOverrides(sanitizedGitEnv(os.Environ()), []string{
 		"AZEDARACH_CANDIDATE_HEAD=" + candidateHead,
 		"AZEDARACH_MERGE_GATE_BODY=" + filepath.Join(gateRoot, "scripts", "git-merge-rebase-gate-body.sh"),
-		"AZEDARACH_TARGET_GATE_ROOT=" + gateRoot,
 		"AZEDARACH_SKIP_MERGE_REBASE_GATE=0",
 	})
-	review := candidateValidationReview(ctx)
-	env = gitEnvWithOverrides(env, []string{
-		"AZEDARACH_REVIEWER_ID=" + review.ReviewerID,
-		fmt.Sprintf("AZEDARACH_REVIEW_EPOCH_EVENT_ID=%d", review.ReviewEpochEventID),
-	})
-	if issueID := candidateValidationIssue(ctx); issueID != "" {
-		env = gitEnvWithOverrides(env, []string{"AZEDARACH_CANDIDATE_ISSUE_ID=" + issueID})
+	env = candidateValidationTicketEnv(env, ctx)
+	var stdout, stderr string
+	var runErr error
+	if stages, ok := ctx.Value(candidateValidationDAGKey{}).([]CandidateValidationStage); ok {
+		var dagResult CandidateValidationDAGResult
+		dagResult, runErr = runCandidateValidationDAG(ctx, scratchPath, env, stages)
+		attempt.Stages = append([]CandidateValidationStageResult(nil), dagResult.Stages...)
+		parts := make([]string, 0, len(dagResult.Stages))
+		for _, stage := range dagResult.Stages {
+			parts = append(parts, fmt.Sprintf("%s=%s", stage.ID, stage.Status))
+		}
+		stdout = strings.Join(parts, ", ")
+	} else if configuredCommand != "" {
+		stdout, stderr, runErr = runProcessGroupCommand(ctx, scratchPath, env, "/bin/sh", "-lc", configuredCommand)
+	} else {
+		stdout, stderr, runErr = runProcessGroupCommand(ctx, scratchPath, env, gatePath)
 	}
-	stdout, stderr, runErr := runProcessGroupCommand(ctx, scratchPath, env, gatePath)
 	if runErr != nil {
 		attempt.Status = CandidateValidationFailed
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			attempt.Status = CandidateValidationCancelled
 			attempt.Message = "candidate validation cancelled; evidence is noncanonical"
 			notifyCandidateValidation(ctx, attempt)
+			if finishAdmission != nil {
+				_ = finishAdmission(attempt)
+			}
 			return attempt, true, fmt.Errorf("validate candidate %s: %w", candidateHead, ctxErr)
 		}
 		detail := candidateValidationOutput(stdout, stderr)
@@ -262,122 +616,92 @@ func (c *Client) validateIntegrationCandidate(ctx context.Context, gateRoot, scr
 			attempt.Message += ": " + detail
 		}
 		notifyCandidateValidation(ctx, attempt)
+		if finishAdmission != nil {
+			if finishErr := finishAdmission(attempt); finishErr != nil {
+				return attempt, true, fmt.Errorf("record failed candidate validation: %w", finishErr)
+			}
+		}
 		return attempt, true, fmt.Errorf("validate candidate %s: %s", candidateHead, attempt.Message)
 	}
 
-	actualHead, err := c.revParseVerify(ctx, scratchPath, "HEAD")
+	actualHead, err = c.revParseVerify(ctx, scratchPath, "HEAD")
 	if err != nil || actualHead != candidateHead {
 		attempt.Status = CandidateValidationSuperseded
 		attempt.Message = fmt.Sprintf("candidate HEAD changed during validation: expected %s, found %s", candidateHead, actualHead)
 		notifyCandidateValidation(ctx, attempt)
-		if err != nil {
-			pubErr := publishCandidateValidationFailure(ctx, gateRoot, scratchPath, candidateHead, "post_head", attempt.Message)
-			return attempt, true, fmt.Errorf("resolve candidate HEAD after validation: %w (publication: %v)", err, pubErr)
+		if finishAdmission != nil {
+			_ = finishAdmission(attempt)
 		}
-		pubErr := publishCandidateValidationFailure(ctx, gateRoot, scratchPath, candidateHead, "post_head", attempt.Message)
-		return attempt, true, fmt.Errorf("%s (publication: %v)", attempt.Message, pubErr)
+		if err != nil {
+			return attempt, true, fmt.Errorf("resolve candidate HEAD after validation: %w", err)
+		}
+		return attempt, true, errors.New(attempt.Message)
 	}
-	status, err := c.Status(ctx, scratchPath)
+	status, err = c.Status(ctx, scratchPath)
 	if err != nil || gitStatusDirty(status) {
 		attempt.Status = CandidateValidationFailed
 		attempt.Message = "candidate worktree was not clean after validation"
 		notifyCandidateValidation(ctx, attempt)
-		if err != nil {
-			pubErr := publishCandidateValidationFailure(ctx, gateRoot, scratchPath, candidateHead, "post_status", attempt.Message)
-			return attempt, true, fmt.Errorf("inspect candidate status after validation: %w (publication: %v)", err, pubErr)
+		if finishAdmission != nil {
+			_ = finishAdmission(attempt)
 		}
-		pubErr := publishCandidateValidationFailure(ctx, gateRoot, scratchPath, candidateHead, "post_status", attempt.Message)
-		return attempt, true, fmt.Errorf("%s: %s (publication: %v)", attempt.Message, gitStatusSummary(status), pubErr)
+		if err != nil {
+			return attempt, true, fmt.Errorf("inspect candidate status after validation: %w", err)
+		}
+		return attempt, true, fmt.Errorf("%s: %s", attempt.Message, gitStatusSummary(status))
 	}
 	attempt.Status = CandidateValidationPassed
 	attempt.Message = "candidate validation passed; awaiting exact apply"
+	if finishAdmission != nil {
+		if finishErr := finishAdmission(attempt); finishErr != nil {
+			attempt.Status = CandidateValidationFailed
+			attempt.Message = "candidate validation passed but durable evidence recording failed: " + finishErr.Error()
+			notifyCandidateValidation(ctx, attempt)
+			return attempt, true, errors.New(attempt.Message)
+		}
+	}
+	// Publish "passed" only after the daemon has durably completed the exact
+	// validation lease. A crash after this notification can then recover by
+	// reusing completed evidence instead of executing the same gate again.
 	notifyCandidateValidation(ctx, attempt)
 	return attempt, true, nil
 }
 
-func publishCandidateValidationFailure(ctx context.Context, gateRoot, candidateRoot, revision, phase, detail string) error {
-	controlRoot, err := os.MkdirTemp("", "azedarach-candidate-validation-")
-	if err != nil {
-		return fmt.Errorf("create trusted control bundle: %w", err)
-	}
-	keepControl := true
-	defer func() {
-		if !keepControl {
-			_ = os.RemoveAll(controlRoot)
-		}
-	}()
-	review := candidateValidationReview(ctx)
-	request := "preflight-" + revision
-	nonceBytes := make([]byte, 16)
-	if _, err := rand.Read(nonceBytes); err != nil {
-		return fmt.Errorf("create publication nonce: %w", err)
-	}
-	evidence := map[string]any{
-		"held": false, "present": true, "synthetic_request": true,
-		"request_id": request, "authoritative_request_id": request,
-		"source_revision": revision, "publication_nonce": hex.EncodeToString(nonceBytes),
-		"fatal_phase": phase, "fatal_detail": detail,
-		"reviewer_id": review.ReviewerID, "review_epoch_event_id": review.ReviewEpochEventID,
-	}
-	evidencePath := filepath.Join(controlRoot, "evidence.json")
-	evidenceJSON, err := json.Marshal(evidence)
-	if err != nil {
-		return fmt.Errorf("encode publication evidence: %w", err)
-	}
-	if err := os.WriteFile(evidencePath, append(evidenceJSON, '\n'), 0o600); err != nil {
-		return fmt.Errorf("write publication evidence: %w", err)
-	}
-	gateOutput := filepath.Join(controlRoot, "gate-output.log")
-	if err := os.WriteFile(gateOutput, []byte("[gate] "+phase+": "+detail+"\n"), 0o600); err != nil {
-		return fmt.Errorf("write publication gate output: %w", err)
-	}
-	publisher := filepath.Join(gateRoot, "scripts", "publish-validation-artifacts")
-	info, err := os.Lstat(publisher)
-	if err != nil || !info.Mode().IsRegular() {
-		return fmt.Errorf("trusted artifact publisher unavailable: %w (control bundle %s)", err, controlRoot)
-	}
-	gitCommonCmd := exec.CommandContext(ctx, "git", "-C", gateRoot, "rev-parse", "--path-format=absolute", "--git-common-dir")
-	gitCommonOutput, err := gitCommonCmd.Output()
-	if err != nil {
-		return fmt.Errorf("resolve trusted project root: %w", err)
-	}
-	projectRoot := filepath.Dir(strings.TrimSpace(string(gitCommonOutput)))
-	cmd := exec.CommandContext(ctx, publisher,
-		"--project-root", projectRoot, "--candidate-root", candidateRoot,
-		"--control-root", controlRoot, "--evidence", evidencePath,
-		"--gate-output", gateOutput, "--request", request,
-		"--revision", revision, "--exit-code", "1",
-		"--fatal-phase", phase, "--fatal-detail", detail)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("publish candidate failure: %w: %s (control bundle %s)", err, strings.TrimSpace(string(output)), controlRoot)
-	}
-	keepControl = false
-	return nil
-}
-
-func rejectTrustedPathComponents(path string) error {
-	path = filepath.Clean(path)
-	if !filepath.IsAbs(path) {
-		return fmt.Errorf("path must be absolute")
-	}
-	cur := string(filepath.Separator)
-	for _, part := range strings.Split(strings.TrimPrefix(path, cur), string(filepath.Separator)) {
-		if part == "" {
+func candidateValidationTicketEnv(env []string, ctx context.Context) []string {
+	filtered := make([]string, 0, len(env)+2)
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && (key == "AZEDARACH_TICKET_ID" || key == "AZEDARACH_ISSUE_ID" || strings.HasPrefix(key, "AZEDARACH_REVIEW_") || key == "AZEDARACH_REVIEWER_ID" || key == "AZEDARACH_REVIEWER_KIND" || key == "AZEDARACH_PUBLICATION_OPERATION_ID" || key == "AZEDARACH_ACCEPTED_REVIEW_EVENT_ID" || key == "AZEDARACH_ACCEPTED_PUBLICATION_OPERATION_ID") {
 			continue
 		}
-		cur = filepath.Join(cur, part)
-		info, err := os.Lstat(cur)
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			if cur == "/var" {
-				continue
-			}
-			return fmt.Errorf("path component is symlink: %s", cur)
-		}
+		filtered = append(filtered, entry)
 	}
-	return nil
+	ticketID, ticketScoped := ctx.Value(candidateValidationTicketKey{}).(naming.TicketID)
+	if !ticketScoped {
+		return filtered
+	}
+	identity := strings.TrimSpace(ticketID.String())
+	if identity == "" {
+		return gitEnvWithOverrides(filtered, []string{
+			"AZEDARACH_TICKET_ID=",
+			"AZEDARACH_ISSUE_ID=",
+		})
+	}
+	overrides := []string{
+		"AZEDARACH_TICKET_ID=" + identity,
+		"AZEDARACH_ISSUE_ID=" + identity,
+	}
+	if authority, ok := ctx.Value(candidateValidationReviewAuthorityKey{}).(CandidateValidationReviewAuthority); ok {
+		overrides = append(overrides,
+			"AZEDARACH_REVIEWER_ID="+authority.ReviewerID,
+			"AZEDARACH_REVIEWER_KIND="+authority.ReviewerKind,
+			fmt.Sprintf("AZEDARACH_REVIEW_EPOCH_EVENT_ID=%d", authority.ReviewEpochEventID),
+			"AZEDARACH_PUBLICATION_OPERATION_ID="+authority.PublicationOperationID,
+			fmt.Sprintf("AZEDARACH_ACCEPTED_REVIEW_EVENT_ID=%d", authority.AcceptedReviewEventID),
+			"AZEDARACH_ACCEPTED_PUBLICATION_OPERATION_ID="+authority.AcceptedPublicationOperationID,
+		)
+	}
+	return gitEnvWithOverrides(filtered, overrides)
 }
 
 func candidateValidationOutput(stdout, stderr string) string {
@@ -395,7 +719,7 @@ func candidateValidationOutput(stdout, stderr string) string {
 
 func boundedCandidateValidationDetail(detail string) string {
 	// Keep the same practical envelope as durable validation failure summaries
-	// so task.close can surface every failed test retained by test-timing.
+	// so task.close can surface actionable output alongside configured artifacts.
 	const maxRunes = 32 * 1024
 	detail = strings.TrimSpace(detail)
 	runes := []rune(detail)
@@ -424,7 +748,7 @@ func setCandidateValidationDisposition(ctx context.Context, result *MergeResult,
 	}
 }
 
-func (c *Client) applyValidatedScratchMerge(ctx context.Context, worktree, scratchPath, targetHead, desiredHead string, scratchOwner integrationScratchOwnership, result *MergeResult) (*MergeResult, bool, error) {
+func (c *Client) applyValidatedScratchMerge(ctx context.Context, worktree, scratchPath, targetHead, desiredHead, expectedTargetBranch string, scratchOwner integrationScratchOwnership, result *MergeResult) (*MergeResult, bool, error) {
 	var out *MergeResult
 	cleanupHandled := false
 	if err := c.withIntegrationTransactionLock(ctx, worktree, func(ctx context.Context) error {
@@ -445,6 +769,10 @@ func (c *Client) applyValidatedScratchMerge(ctx context.Context, worktree, scrat
 				ValidationAttempts: append([]CandidateValidationAttempt(nil), result.ValidationAttempts...),
 			}
 			return nil
+		}
+		if err := c.requireIntegrationTargetBranch(ctx, worktree, expectedTargetBranch); err != nil {
+			setCandidateValidationDisposition(ctx, result, desiredHead, CandidateValidationSuperseded, false, "target branch changed after candidate validation; evidence is noncanonical")
+			return err
 		}
 		currentHead, err := c.revParseVerify(ctx, worktree, "HEAD")
 		if err != nil {
@@ -674,7 +1002,7 @@ func (c *Client) proveIntegrationScratchWorktree(ctx context.Context, worktree, 
 	scratchPath = normalizeWorktreeLockKey(scratchPath)
 	tempRoot := normalizeWorktreeLockKey(os.TempDir())
 	scratchParent := normalizeWorktreeLockKey(filepath.Dir(scratchPath))
-	if scratchParent != tempRoot || !strings.HasPrefix(filepath.Base(scratchPath), "azedarach-integration-") {
+	if scratchParent != tempRoot || !strings.HasPrefix(filepath.Base(scratchPath), integrationScratchPrefix) {
 		return "", fmt.Errorf("scratch path %s is outside the managed integration temp namespace", scratchPath)
 	}
 	if scratchPath == normalizeWorktreeLockKey(worktree) {

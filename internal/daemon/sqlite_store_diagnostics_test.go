@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/daemon/state"
+	"github.com/riordanpawley/azedarach/internal/daemon/userstore"
 	"github.com/riordanpawley/azedarach/internal/services/issues"
 	"github.com/stretchr/testify/require"
 )
@@ -24,9 +26,12 @@ func TestSQLiteStoreDiagnosticsEnumeratesUniqueRegisteredOwners(t *testing.T) {
 	})
 	firstRuntime := state.NewRuntimeStateStoreAtPath(firstPath, slog.Default())
 	secondRuntime := state.NewRuntimeStateStoreAtPath(secondPath, slog.Default())
+	userProjection, err := userstore.Open(filepath.Join(dir, "user.db"))
+	require.NoError(t, err)
 	t.Cleanup(func() {
 		require.NoError(t, firstRuntime.Close())
 		require.NoError(t, secondRuntime.Close())
+		require.NoError(t, userProjection.Close())
 	})
 
 	d := &Daemon{
@@ -34,16 +39,26 @@ func TestSQLiteStoreDiagnosticsEnumeratesUniqueRegisteredOwners(t *testing.T) {
 		issueClientsByRoot:     map[string]*issues.Client{"/consumer/a": firstIssues, "/consumer/b": secondIssues},
 		runtimeStoresByProject: map[string]*state.RuntimeStateStore{"consumer-a": firstRuntime, "consumer-a-alias": firstRuntime, "consumer-b": secondRuntime},
 		runtimeStoresByRoot:    map[string]*state.RuntimeStateStore{"/consumer/a": firstRuntime, "/consumer/b": secondRuntime},
+		userStore:              userProjection,
 	}
 
 	got := d.sqliteStoreDiagnostics()
-	require.Len(t, got, 4)
-	require.Equal(t, []string{"consumer-a", "consumer-a-alias"}, got[0].ProjectIDs)
-	require.Equal(t, "issues", got[0].Owner)
-	require.Equal(t, "runtime", got[1].Owner)
-	require.Equal(t, []string{"consumer-b"}, got[2].ProjectIDs)
-	require.Equal(t, "issues", got[2].Owner)
-	require.Equal(t, "runtime", got[3].Owner)
+	require.Len(t, got, 7)
+	byKey := make(map[string]protocol.TaskSQLiteStoreInfo, len(got))
+	for _, diagnostic := range got {
+		byKey[diagnostic.DBPath+"\x00"+diagnostic.Owner] = diagnostic
+	}
+	require.Equal(t, []string{"consumer-a", "consumer-a-alias"}, byKey[firstPath+"\x00issues"].ProjectIDs)
+	require.Equal(t, []string{"consumer-a", "consumer-a-alias"}, byKey[firstPath+"\x00runtime"].ProjectIDs)
+	require.Equal(t, []string{"consumer-a", "consumer-a-alias"}, byKey[firstPath+"\x00runtime-managed-identity"].ProjectIDs)
+	require.Equal(t, []string{"consumer-b"}, byKey[secondPath+"\x00issues"].ProjectIDs)
+	require.Equal(t, []string{"consumer-b"}, byKey[secondPath+"\x00runtime"].ProjectIDs)
+	require.Equal(t, []string{"consumer-b"}, byKey[secondPath+"\x00runtime-managed-identity"].ProjectIDs)
+	userProjectionFound := false
+	for _, diagnostic := range got {
+		userProjectionFound = userProjectionFound || diagnostic.Owner == "user_projection" && filepath.Base(diagnostic.DBPath) == "user.db"
+	}
+	require.True(t, userProjectionFound)
 	for _, diagnostic := range got {
 		require.Equal(t, 0, diagnostic.InUse)
 		require.GreaterOrEqual(t, diagnostic.OpenConnections, diagnostic.Idle)

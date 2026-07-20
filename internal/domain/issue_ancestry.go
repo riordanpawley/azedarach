@@ -27,7 +27,7 @@ func TaskParentIssueID(task Task) string {
 		return strings.TrimSpace(task.ParentID.String())
 	}
 	for _, dep := range task.Dependencies {
-		if dep.Type == DependencyParentChild || string(dep.Type) == "parent_child" {
+		if DependencyAuthority(dep.Type).Hierarchy {
 			if parentID := strings.TrimSpace(dep.ID.String()); parentID != "" {
 				return parentID
 			}

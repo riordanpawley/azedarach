@@ -63,8 +63,13 @@ type TaskBulkCleanupResult = protocol.TaskBulkCleanupResult
 type TaskCloseResult = protocol.TaskCloseResult
 type TaskClosePhaseTiming = protocol.TaskClosePhaseTiming
 
+type TaskEventsRequest = protocol.TaskEventsRequest
+type TaskEventPayloadFilter = protocol.TaskEventPayloadFilter
+type TaskEventsPage = protocol.TaskEventsPage
+
 // TaskCreateParams contains the payload used to create a task through the shared daemon client.
 type TaskCreateParams struct {
+	IntentKey       string               `json:"intent_key,omitempty"`
 	Title           string               `json:"title"`
 	Description     string               `json:"description"`
 	Type            domain.TaskType      `json:"type"`
@@ -79,6 +84,7 @@ type TaskCreateParams struct {
 	Acceptance      string               `json:"acceptance,omitempty"`
 	Estimate        *int                 `json:"estimate,omitempty"`
 	ParentID        *naming.IssueID      `json:"parent_id,omitempty"`
+	CreatedFromID   *naming.IssueID      `json:"created_from_id,omitempty"`
 }
 
 // TaskUpdateParams contains the payload used to update task details through the shared daemon client.
@@ -114,13 +120,15 @@ type TaskOwnershipRequest struct {
 
 // TaskStatusOptions controls client-side status transition behavior.
 type TaskStatusOptions struct {
-	ForceWorktree        bool
-	IgnoreAhead          bool
-	IntegrateBeforeClose bool
-	CloseCleanChildren   bool
-	CascadeChildren      bool
-	AllowActiveSession   bool
-	CloseOutcome         domain.IssueCloseOutcome
+	ForceWorktree              bool
+	IgnoreAhead                bool
+	IntegrateBeforeClose       bool
+	CloseCleanChildren         bool
+	CascadeChildren            bool
+	AllowActiveSession         bool
+	CloseOutcome               domain.IssueCloseOutcome
+	HistoricalAuthorization    *domain.HistoricalPublicationAuthorization
+	ExternalIntegratedRevision string
 }
 
 type TaskDeleteOptions struct {
@@ -136,13 +144,15 @@ type TaskUnarchiveOptions struct {
 }
 
 type taskCloseRequest struct {
-	TaskID               naming.IssueID `json:"task_id"`
-	ForceWorktree        bool           `json:"force_worktree,omitempty"`
-	IgnoreAhead          bool           `json:"ignore_ahead,omitempty"`
-	IntegrateBeforeClose bool           `json:"integrate_before_close,omitempty"`
-	CloseCleanChildren   bool           `json:"close_clean_children,omitempty"`
-	AllowActiveSession   bool           `json:"allow_active_session,omitempty"`
-	CloseOutcome         string         `json:"closed_outcome,omitempty"`
+	TaskID                     naming.IssueID                             `json:"task_id"`
+	ForceWorktree              bool                                       `json:"force_worktree,omitempty"`
+	IgnoreAhead                bool                                       `json:"ignore_ahead,omitempty"`
+	IntegrateBeforeClose       bool                                       `json:"integrate_before_close,omitempty"`
+	CloseCleanChildren         bool                                       `json:"close_clean_children,omitempty"`
+	AllowActiveSession         bool                                       `json:"allow_active_session,omitempty"`
+	CloseOutcome               string                                     `json:"closed_outcome,omitempty"`
+	HistoricalAuthorization    *domain.HistoricalPublicationAuthorization `json:"historical_authorization,omitempty"`
+	ExternalIntegratedRevision string                                     `json:"external_integrated_revision,omitempty"`
 }
 
 type taskDeleteRequest struct {
@@ -167,10 +177,12 @@ type TaskGraphReadiness struct {
 	Revision               uint64                                `json:"revision,omitempty"`
 	Source                 protocol.MaterializedSnapshotMetadata `json:"source,omitempty"`
 	RootIssueID            string                                `json:"root_issue_id"`
+	RootBlockers           []string                              `json:"root_blockers,omitempty"`
 	Capacity               TaskCapacitySummary                   `json:"capacity"`
 	Runnable               []string                              `json:"runnable"`
 	NestedRoots            []TaskNestedRoot                      `json:"nested_roots,omitempty"`
 	Pending                []TaskPendingStart                    `json:"pending,omitempty"`
+	PublicationQueue       []domain.PublicationOperation         `json:"publication_queue,omitempty"`
 	Active                 []string                              `json:"active,omitempty"`
 	ActiveSessions         []TaskActiveSession                   `json:"active_sessions,omitempty"`
 	SessionStartProgress   []TaskSessionStartProgress            `json:"session_start_progress,omitempty"`
@@ -374,10 +386,6 @@ type TaskIDsRequest struct {
 	MetadataOnly      bool             `json:"metadata_only,omitempty"`
 }
 
-type TaskEventsRequest = protocol.TaskEventsRequest
-type TaskEventPayloadFilter = protocol.TaskEventPayloadFilter
-type TaskEventsPage = protocol.TaskEventsPage
-
 // TaskEventAppendRequest contains the payload used to append one issue observation event.
 type TaskEventAppendRequest struct {
 	TaskID        naming.IssueID `json:"task_id"`
@@ -411,7 +419,8 @@ type TaskDependencyRemoveParams struct {
 
 // TaskIDResponse is returned by commands that allocate a new task identifier.
 type TaskIDResponse struct {
-	TaskID naming.IssueID `json:"task_id"`
+	TaskID  naming.IssueID `json:"task_id"`
+	Created bool           `json:"created,omitempty"`
 }
 
 // TaskSnapshot captures a task list snapshot and the revision it was read at.
@@ -991,14 +1000,21 @@ func boardSnapshotProjectionToDomain(payload protocol.BoardSnapshotPayload) doma
 
 // CreateTask creates a task through the daemon client boundary.
 func (c *Client) CreateTask(ctx context.Context, params TaskCreateParams) (string, error) {
+	result, err := c.CreateTaskWithResult(ctx, params)
+	return result.TaskID.String(), err
+}
+
+// CreateTaskWithResult returns whether this request allocated the task or
+// replayed a canonical task bound to the supplied intent key.
+func (c *Client) CreateTaskWithResult(ctx context.Context, params TaskCreateParams) (TaskIDResponse, error) {
 	var resp TaskIDResponse
 	if err := c.commandJSON(ctx, CommandTaskCreate, params, &resp); err != nil {
-		return "", err
+		return TaskIDResponse{}, err
 	}
 	if resp.TaskID == "" {
-		return "", fmt.Errorf("%s returned empty task id", CommandTaskCreate)
+		return TaskIDResponse{}, fmt.Errorf("%s returned empty task id", CommandTaskCreate)
 	}
-	return resp.TaskID.String(), nil
+	return resp, nil
 }
 
 // UpdateTaskStatus updates a task's status through the daemon client boundary.
@@ -1042,15 +1058,32 @@ func (c *Client) CloseTask(ctx context.Context, taskID string, opts TaskStatusOp
 	}
 	var out TaskCloseResult
 	if err := c.commandJSON(ctx, CommandTaskClose, taskCloseRequest{
-		TaskID:               parsedTaskID,
-		ForceWorktree:        opts.ForceWorktree,
-		IgnoreAhead:          opts.IgnoreAhead,
-		IntegrateBeforeClose: opts.IntegrateBeforeClose,
-		CloseCleanChildren:   opts.CloseCleanChildren,
-		AllowActiveSession:   opts.AllowActiveSession,
-		CloseOutcome:         string(opts.CloseOutcome),
+		TaskID:                     parsedTaskID,
+		ForceWorktree:              opts.ForceWorktree,
+		IgnoreAhead:                opts.IgnoreAhead,
+		IntegrateBeforeClose:       opts.IntegrateBeforeClose,
+		CloseCleanChildren:         opts.CloseCleanChildren,
+		AllowActiveSession:         opts.AllowActiveSession,
+		CloseOutcome:               string(opts.CloseOutcome),
+		HistoricalAuthorization:    opts.HistoricalAuthorization,
+		ExternalIntegratedRevision: opts.ExternalIntegratedRevision,
 	}, &out); err != nil {
 		return TaskCloseResult{}, err
+	}
+	expectedStatus := string(domain.StatusDone)
+	if opts.CloseOutcome == domain.IssueCloseCancelled {
+		expectedStatus = string(domain.StatusCancelled)
+	}
+	if out.TaskID != parsedTaskID.String() || out.Status != expectedStatus || out.Revision == 0 {
+		return TaskCloseResult{}, fmt.Errorf(
+			"%s returned invalid successful response: task_id=%q status=%q revision=%d, want task_id=%q status=%q with nonzero revision",
+			CommandTaskClose,
+			out.TaskID,
+			out.Status,
+			out.Revision,
+			parsedTaskID,
+			expectedStatus,
+		)
 	}
 	return out, nil
 }

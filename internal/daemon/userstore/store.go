@@ -45,6 +45,7 @@ var migrationRegistrations = []sqlitemigration.Artifact{
 const projectionVersion = 2
 const DefaultProjectionMaxAge = 2 * time.Minute
 const migrationArtifactAuthority sqlitemigration.Authority = "user.projection"
+const userProjectionMaxOpenConns = 4
 
 type Store struct {
 	db                    *sql.DB
@@ -55,6 +56,12 @@ type Store struct {
 	seedBeforeCommit      func() error
 	snapshotAfterProjects func()
 }
+
+func (s *Store) withWrite(ctx context.Context, operation string, fn func(context.Context) error) error {
+	ctx = sqliteutil.ContextWithWriteOperation(ctx, "user_projection."+strings.TrimSpace(operation))
+	return sqliteutil.WithWriteLockContext(ctx, s.dbPath, fn)
+}
+
 type queryer interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
@@ -76,6 +83,12 @@ func withSeedBeforeCommit(hook func() error) Option {
 }
 func withSnapshotAfterProjects(hook func()) Option {
 	return func(s *Store) { s.snapshotAfterProjects = hook }
+}
+
+// WithSnapshotAfterProjectsForTest installs a deterministic snapshot barrier.
+// Production callers must not use this option.
+func WithSnapshotAfterProjectsForTest(hook func()) Option {
+	return withSnapshotAfterProjects(hook)
 }
 
 func DefaultPath() string {
@@ -108,6 +121,8 @@ func Open(path string, options ...Option) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	db.SetMaxOpenConns(userProjectionMaxOpenConns)
+	db.SetMaxIdleConns(userProjectionMaxOpenConns)
 	s := &Store{db: db, dbPath: path, maxProjectionAge: DefaultProjectionMaxAge, now: func() time.Time { return time.Now().UTC() }}
 	for _, option := range options {
 		if option != nil {
@@ -126,6 +141,13 @@ func (s *Store) Close() error {
 		return nil
 	}
 	return s.db.Close()
+}
+
+func (s *Store) ResourceDiagnostics() (string, bool, sql.DBStats) {
+	if s == nil || s.db == nil {
+		return "", false, sql.DBStats{}
+	}
+	return s.dbPath, true, s.db.Stats()
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -601,7 +623,11 @@ func (s *Store) ListViewSelections(ctx context.Context) (map[protocol.GlobalView
 
 func (s *Store) SaveView(ctx context.Context, view domain.BoardView) (domain.BoardViewRecord, error) {
 	var record domain.BoardViewRecord
-	err := sqliteutil.WithWriteLock(s.dbPath, func() error { var err error; record, err = s.saveView(ctx, view); return err })
+	err := s.withWrite(ctx, "save_view", func(lockCtx context.Context) error {
+		var err error
+		record, err = s.saveView(lockCtx, view)
+		return err
+	})
 	return record, err
 }
 
@@ -610,9 +636,9 @@ func (s *Store) SaveGlobalView(ctx context.Context, record protocol.GlobalViewRe
 		return protocol.GlobalViewRecord{}, err
 	}
 	var saved domain.BoardViewRecord
-	err := sqliteutil.WithWriteLock(s.dbPath, func() error {
+	err := s.withWrite(ctx, "save_global_view", func(lockCtx context.Context) error {
 		var err error
-		saved, err = s.saveViewWithScope(ctx, record.View, record.Scope)
+		saved, err = s.saveViewWithScope(lockCtx, record.View, record.Scope)
 		return err
 	})
 	if err != nil {
@@ -686,7 +712,7 @@ func decodeViewScope(kind protocol.GlobalViewScopeKind, raw []byte) (protocol.Gl
 }
 
 func (s *Store) DeleteView(ctx context.Context, viewID string) error {
-	return sqliteutil.WithWriteLock(s.dbPath, func() error { return s.deleteView(ctx, viewID) })
+	return s.withWrite(ctx, "delete_view", func(lockCtx context.Context) error { return s.deleteView(lockCtx, viewID) })
 }
 func (s *Store) deleteView(ctx context.Context, viewID string) error {
 	viewID = domain.NormalizeBoardViewID(viewID)
@@ -714,7 +740,7 @@ func (s *Store) deleteView(ctx context.Context, viewID string) error {
 }
 
 func (s *Store) SelectView(ctx context.Context, consumer, viewID string) error {
-	return sqliteutil.WithWriteLock(s.dbPath, func() error { return s.selectView(ctx, consumer, viewID) })
+	return s.withWrite(ctx, "select_view", func(lockCtx context.Context) error { return s.selectView(lockCtx, consumer, viewID) })
 }
 func (s *Store) selectView(ctx context.Context, consumer, viewID string) error {
 	if _, err := s.ResolveView(ctx, viewID, ""); err != nil {
@@ -743,9 +769,9 @@ func (s *Store) BeginProjectRefresh(ctx context.Context, project CatalogProject)
 	if project.ProjectID == "" {
 		return 0, fmt.Errorf("catalog project ID is empty")
 	}
-	err := sqliteutil.WithWriteLock(s.dbPath, func() error {
+	err := s.withWrite(ctx, "begin_project_refresh", func(lockCtx context.Context) error {
 		now := s.now().UTC().Format(time.RFC3339Nano)
-		return s.db.QueryRowContext(ctx, `INSERT INTO projects(project_id,name,path,db_path,projection_version,refresh_generation,freshness,last_attempt_at,last_error,registered) VALUES(?,?,?,?,?,1,'stale',?,'refresh in progress',1)
+		return s.db.QueryRowContext(lockCtx, `INSERT INTO projects(project_id,name,path,db_path,projection_version,refresh_generation,freshness,last_attempt_at,last_error,registered) VALUES(?,?,?,?,?,1,'stale',?,'refresh in progress',1)
 ON CONFLICT(project_id) DO UPDATE SET name=excluded.name,path=excluded.path,db_path=excluded.db_path,projection_version=excluded.projection_version,refresh_generation=projects.refresh_generation+1,freshness='stale',last_attempt_at=excluded.last_attempt_at,last_error='refresh in progress',registered=1
 RETURNING refresh_generation`, project.ProjectID, project.Name, cleanCatalogPath(project.Path), cleanCatalogPath(project.DBPath), projectionVersion, now).Scan(&generation)
 	})
@@ -753,7 +779,7 @@ RETURNING refresh_generation`, project.ProjectID, project.Name, cleanCatalogPath
 }
 
 func (s *Store) ReplaceProject(ctx context.Context, in ProjectInput) error {
-	return sqliteutil.WithWriteLock(s.dbPath, func() error { return s.replaceProject(ctx, in) })
+	return s.withWrite(ctx, "replace_project", func(lockCtx context.Context) error { return s.replaceProject(lockCtx, in) })
 }
 
 func (s *Store) replaceProject(ctx context.Context, in ProjectInput) error {
@@ -979,7 +1005,9 @@ func (s *Store) MarkUnavailable(ctx context.Context, projectID, name, path, dbPa
 	return s.MarkUnavailableGeneration(ctx, projectID, name, path, dbPath, 0, cause)
 }
 func (s *Store) MarkUnavailableGeneration(ctx context.Context, projectID, name, path, dbPath string, generation uint64, cause error) error {
-	return sqliteutil.WithWriteLock(s.dbPath, func() error { return s.markUnavailable(ctx, projectID, name, path, dbPath, generation, cause) })
+	return s.withWrite(ctx, "mark_unavailable", func(lockCtx context.Context) error {
+		return s.markUnavailable(lockCtx, projectID, name, path, dbPath, generation, cause)
+	})
 }
 func (s *Store) markUnavailable(ctx context.Context, projectID, name, path, dbPath string, generation uint64, cause error) error {
 	msg := ""
@@ -996,7 +1024,7 @@ func (s *Store) markUnavailable(ctx context.Context, projectID, name, path, dbPa
 }
 
 func (s *Store) ReconcileCatalog(ctx context.Context, projectIDs []string) error {
-	return sqliteutil.WithWriteLock(s.dbPath, func() error { return s.reconcileCatalog(ctx, projectIDs) })
+	return s.withWrite(ctx, "reconcile_catalog", func(lockCtx context.Context) error { return s.reconcileCatalog(lockCtx, projectIDs) })
 }
 func (s *Store) reconcileCatalog(ctx context.Context, projectIDs []string) error {
 	if len(projectIDs) == 0 {
@@ -1022,8 +1050,8 @@ type CatalogProject struct {
 }
 
 func (s *Store) ReconcileProjects(ctx context.Context, projects []CatalogProject) error {
-	return sqliteutil.WithWriteLock(s.dbPath, func() error {
-		tx, err := s.db.BeginTx(ctx, nil)
+	return s.withWrite(ctx, "reconcile_projects", func(lockCtx context.Context) error {
+		tx, err := s.db.BeginTx(lockCtx, nil)
 		if err != nil {
 			return err
 		}
@@ -1035,21 +1063,21 @@ func (s *Store) ReconcileProjects(ctx context.Context, projects []CatalogProject
 				return fmt.Errorf("catalog project ID is empty")
 			}
 			ids = append(ids, project.ProjectID)
-			_, err = tx.ExecContext(ctx, `INSERT INTO projects(project_id,name,path,db_path,projection_version,freshness,last_error,registered) VALUES(?,?,?,?,?,'stale','project has not been projected',1)
+			_, err = tx.ExecContext(lockCtx, `INSERT INTO projects(project_id,name,path,db_path,projection_version,freshness,last_error,registered) VALUES(?,?,?,?,?,'stale','project has not been projected',1)
 ON CONFLICT(project_id) DO UPDATE SET name=excluded.name,path=excluded.path,db_path=excluded.db_path,freshness=CASE WHEN projects.registered=0 THEN 'stale' ELSE projects.freshness END,last_error=CASE WHEN projects.registered=0 THEN 'project re-registered; refresh required' ELSE projects.last_error END,registered=1`, project.ProjectID, project.Name, cleanCatalogPath(project.Path), cleanCatalogPath(project.DBPath), projectionVersion)
 			if err != nil {
 				return err
 			}
 		}
 		if len(ids) == 0 {
-			_, err = tx.ExecContext(ctx, `UPDATE projects SET registered=0,freshness='unavailable',last_error='project is no longer registered'`)
+			_, err = tx.ExecContext(lockCtx, `UPDATE projects SET registered=0,freshness='unavailable',last_error='project is no longer registered'`)
 		} else {
 			marks := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
 			args := make([]any, len(ids))
 			for i, id := range ids {
 				args[i] = id
 			}
-			_, err = tx.ExecContext(ctx, `UPDATE projects SET registered=0,freshness='unavailable',last_error='project is no longer registered' WHERE project_id NOT IN (`+marks+`)`, args...)
+			_, err = tx.ExecContext(lockCtx, `UPDATE projects SET registered=0,freshness='unavailable',last_error='project is no longer registered' WHERE project_id NOT IN (`+marks+`)`, args...)
 		}
 		if err != nil {
 			return err

@@ -49,6 +49,10 @@ type OrchestrationProjectionExport struct {
 	UnresolvedInteractionIDs map[string]struct{}
 	Interactions             []domain.InteractionRequest
 	InvestigationAcceptances map[string]domain.InvestigationAcceptance
+	ObservationEvents        ProjectIssueObservationCapture
+	CompletionEvents         map[string]domain.IssueObservationEvent
+	DecisionEvents           map[string][]domain.IssueObservationEvent
+	TrustedReviewOutcomes    map[string]domain.ReviewOutcome
 }
 
 // ExportOrchestrationProjection reads a bounded project graph plus its durable
@@ -94,6 +98,46 @@ func (c *Client) ExportOrchestrationProjection(ctx context.Context, projectID st
 	if err != nil {
 		return OrchestrationProjectionExport{}, err
 	}
+	observationEvents, err := c.captureProjectIssueObservationEvents(ctx, tx, issueIDs, 50, 20)
+	if err != nil {
+		return OrchestrationProjectionExport{}, err
+	}
+	completionEvents, err := c.listLatestIssueObservationEventsByIssue(ctx, tx, LatestIssueObservationEventOptions{
+		IssueIDs:                issueIDs,
+		Type:                    domain.IssueEventTaskIntegrationCompleted,
+		Source:                  "daemon-task-close",
+		SourceCommands:          []string{"integrate-before-close"},
+		RequiredPayloadTextKeys: []string{"project_id", "source_branch", "target_branch", "source_oid", "target_oid"},
+		InvalidatedByStatuses:   []domain.Status{domain.StatusOpen, domain.StatusInProgress},
+	})
+	if err != nil {
+		return OrchestrationProjectionExport{}, err
+	}
+	decisionEvents, err := c.listIssueDecisionObservationEventsByIssue(ctx, tx, issueIDs)
+	if err != nil {
+		return OrchestrationProjectionExport{}, err
+	}
+	trustedReviewEvents, err := c.listLatestIssueObservationEventsByIssue(ctx, tx, LatestIssueObservationEventOptions{
+		IssueIDs:       issueIDs,
+		Type:           domain.IssueEventReviewCompleted,
+		Source:         "daemon-orchestration",
+		SourceCommands: []string{"review-accept", "review-return"},
+		CommandOutcomePairs: []IssueObservationCommandOutcomePair{
+			{SourceCommand: "review-accept", Outcomes: []string{string(domain.ReviewOutcomeAccepted), string(domain.ReviewOutcomeIntegrationFailed)}},
+			{SourceCommand: "review-return", Outcomes: []string{string(domain.ReviewOutcomeReturned)}},
+		},
+		RequiredPayloadTextKeys: []string{"actor_id"},
+		CurrentReviewEpoch:      true,
+	})
+	if err != nil {
+		return OrchestrationProjectionExport{}, err
+	}
+	trustedReviewOutcomes := make(map[string]domain.ReviewOutcome, len(trustedReviewEvents))
+	for issueID, event := range trustedReviewEvents {
+		if outcome, trusted := domain.TrustedReviewOutcome(event); trusted {
+			trustedReviewOutcomes[issueID] = outcome
+		}
+	}
 	var openIssueCount int
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM issues
@@ -120,6 +164,10 @@ func (c *Client) ExportOrchestrationProjection(ctx context.Context, projectID st
 		UnresolvedInteractionIDs: unresolvedInteractionIDs,
 		Interactions:             interactions,
 		InvestigationAcceptances: investigationAcceptances,
+		ObservationEvents:        observationEvents,
+		CompletionEvents:         completionEvents,
+		DecisionEvents:           decisionEvents,
+		TrustedReviewOutcomes:    trustedReviewOutcomes,
 	}, nil
 }
 
@@ -826,12 +874,22 @@ func hasParentChildOrphanConfirmation(ctx context.Context) bool {
 const (
 	nextAlphaIssueIndexMetaKey  = "issue:id_next_alpha_index"
 	sqliteBusyPrimaryCode       = 5
+	sqliteCorruptPrimaryCode    = 11
 	defaultSQLiteBusyTimeout    = 5 * time.Second
 	defaultSQLiteBusyRetryDelay = 100 * time.Millisecond
 	// Keep at least one foreground reader available while Linear sync owns a write connection.
 	sqliteMaxOpenConns         = 4
 	issueGraphClosureProjectID = "default"
 )
+
+// ErrSQLiteCorrupt marks structural SQLite damage. Callers must preserve the
+// database and WAL and recover through a consistent clone instead of retrying
+// writes against the damaged authority.
+var ErrSQLiteCorrupt = errors.New("issue database structural corruption")
+
+type sqliteCorruptionState struct {
+	err error
+}
 
 // Client wraps local SQLite task store operations.
 type Client struct {
@@ -844,24 +902,41 @@ type Client struct {
 
 	mu             sync.Mutex
 	db             *sql.DB
+	dbGeneration   uint64
 	walMu          sync.Mutex
 	lastWALCheckAt time.Time
 
-	stateModelV2MigrationFailureHook   func(stage string) error
-	boardViewsMigrationFailureHook     func(stage string) error
-	humanAuthorityMigrationFailureHook func(stage string) error
-	mailboxProjectionFailureHook       func(stage string) error
-	projectionDeltaChecksumRepairHook  func(stage string) error
-	projectionDeltaReadHook            func()
-	projectionWatchActive              atomic.Int64
-	projectionWatchStarted             atomic.Uint64
-	projectionWatchCompleted           atomic.Uint64
-	decisionOutboxMigrationFailureHook func(stage string) error
-	decisionIdempotencyFailureHook     func(stage string) error
-	eventSearchMigrationFailureHook    func(stage string) error
-	requireExistingDB                  bool
-	interactionMu                      sync.RWMutex
-	interactionCache                   map[string]domain.InteractionRequest
+	stateModelV2MigrationFailureHook     func(stage string) error
+	boardViewsMigrationFailureHook       func(stage string) error
+	humanAuthorityMigrationFailureHook   func(stage string) error
+	mailboxProjectionFailureHook         func(stage string) error
+	mailboxReplayRepairFailureHook       func(stage string) error
+	projectionDeltaChecksumRepairHook    func(stage string) error
+	projectionDeltaReadHook              func()
+	projectionWatchBeforeSubscribeHook   func()
+	projectionNotifierBeforeCloseHook    func()
+	projectionNotifierAfterClearHook     func()
+	projectionSnapshotSourceRowsHook     func(projectionDeltaRows) projectionDeltaRows
+	projectionWatchActive                atomic.Int64
+	projectionWatchStarted               atomic.Uint64
+	projectionWatchCompleted             atomic.Uint64
+	corruption                           atomic.Pointer[sqliteCorruptionState]
+	projectionNotifierMu                 sync.Mutex
+	projectionNotifier                   projectionDeltaNotifier
+	projectionNotifierClose              *projectionDeltaNotifierCloseState
+	projectionNotifierSubscriptions      map[*projectionDeltaSubscription]struct{}
+	projectionNotifierWG                 sync.WaitGroup
+	decisionOutboxMigrationFailureHook   func(stage string) error
+	agentInputMigrationFailureHook       func(stage string) error
+	migrationCeiling                     string // test-only historical startup seam; empty in production
+	decisionIdempotencyFailureHook       func(stage string) error
+	eventSearchMigrationFailureHook      func(stage string) error
+	legacyAttachmentMigrationFailureHook func(stage string) error
+	legacyAttachmentDirectorySyncHook    func(path string) error
+	taskCreationIntentFailureHook        func(stage string) error
+	requireExistingDB                    bool
+	interactionMu                        sync.RWMutex
+	interactionCache                     map[string]domain.InteractionRequest
 }
 
 // ClientOption configures optional issue-store behavior while preserving
@@ -984,6 +1059,9 @@ func (c *Client) withMutationLock(ctx context.Context, fn func(context.Context) 
 		spanErr = c.WithMutationLock(ctx, runWrite)
 	}
 	if spanErr == nil {
+		if err := signalProjectionDeltaNotification(c.dbPath); err != nil && c.logger != nil {
+			c.logger.Warn("failed to signal projection delta watchers after committed issue mutation", "db_path", sqliteutil.CanonicalPath(c.dbPath), "error", err)
+		}
 		c.maybeMaintainSQLiteWAL(ctx)
 	}
 	return spanErr
@@ -1044,6 +1122,9 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if err := c.corruptionError(); err != nil {
+		return nil, &domain.TaskStoreError{Op: "open-db", Err: err}
+	}
 	if c.db != nil {
 		return c.db, nil
 	}
@@ -1052,6 +1133,7 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 	}
 
 	dbDir := filepath.Dir(c.dbPath)
+	var existingDB bool
 	if c.requireExistingDB {
 		info, err := os.Stat(c.dbPath)
 		if err != nil {
@@ -1060,9 +1142,25 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		if !info.Mode().IsRegular() {
 			return nil, c.wrapError("open-db", "", fmt.Errorf("require existing database: %s is not a regular file", c.dbPath))
 		}
-	} else if dbDir != "" && dbDir != "." {
-		if err := os.MkdirAll(dbDir, 0o755); err != nil {
-			return nil, c.wrapError("open-db", "", fmt.Errorf("create db directory: %w", err))
+		existingDB = true
+	} else {
+		if info, err := os.Stat(c.dbPath); err == nil {
+			if !info.Mode().IsRegular() {
+				return nil, c.wrapError("open-db", "", fmt.Errorf("issue database path %s is not a regular file", c.dbPath))
+			}
+			existingDB = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, c.wrapError("open-db", "", fmt.Errorf("inspect issue database: %w", err))
+		}
+		if dbDir != "" && dbDir != "." {
+			if err := os.MkdirAll(dbDir, 0o755); err != nil {
+				return nil, c.wrapError("open-db", "", fmt.Errorf("create db directory: %w", err))
+			}
+		}
+	}
+	if existingDB {
+		if err := checkSQLitePathStructuralIntegrity(c.dbPath, c.sqliteBusyTimeout); err != nil {
+			return nil, c.wrapError("open-db", "", err)
 		}
 	}
 
@@ -1141,6 +1239,7 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 	specAuditDoneAt := time.Now()
 
 	c.db = db
+	c.dbGeneration++
 	if c.logger != nil {
 		c.logger.Info(
 			"issue store init timings",
@@ -1155,6 +1254,39 @@ func (c *Client) dbHandle() (*sql.DB, error) {
 		)
 	}
 	return c.db, nil
+}
+
+func checkSQLiteStructuralIntegrity(db *sql.DB) error {
+	var result string
+	if err := db.QueryRow(`PRAGMA quick_check(1)`).Scan(&result); err != nil {
+		return fmt.Errorf("pre-write SQLite integrity check: %w", err)
+	}
+	result = strings.TrimSpace(result)
+	if !strings.EqualFold(result, "ok") {
+		return fmt.Errorf("%w: pre-write SQLite integrity check returned %q", ErrSQLiteCorrupt, result)
+	}
+	return nil
+}
+
+// checkSQLitePathStructuralIntegrity validates an existing authority through a
+// read-only connection before any read-write pool exists. In WAL mode SQLite
+// reads the committed database and WAL snapshot without checkpointing or
+// recovering either authority file.
+func checkSQLitePathStructuralIntegrity(dbPath string, busyTimeout time.Duration) error {
+	busyTimeoutMillis := max(busyTimeout.Milliseconds(), int64(1))
+	dsn := fmt.Sprintf(
+		"file:%s?mode=ro&_pragma=query_only(ON)&_pragma=busy_timeout(%d)",
+		filepath.ToSlash(dbPath),
+		busyTimeoutMillis,
+	)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return fmt.Errorf("open read-only SQLite integrity preflight: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	defer db.Close()
+	return checkSQLiteStructuralIntegrity(db)
 }
 
 func (c *Client) ensureRuntimeProjectionSchema(db *sql.DB) error {
@@ -1358,13 +1490,24 @@ func (c *Client) CloseDB() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.db == nil {
-		return nil
+	var dbErr error
+	if c.db != nil {
+		dbErr = c.db.Close()
+		c.db = nil
 	}
-	err := c.db.Close()
-	c.db = nil
-	if err != nil {
-		return c.wrapError("close-db", "", err)
+
+	// The descriptor-safe notifier watches only its dedicated signal sidecar.
+	// Keep the client lifecycle boundary held through notifier shutdown so a new
+	// pool generation cannot open while the previous notifier is closing.
+	if c.projectionNotifierBeforeCloseHook != nil {
+		c.projectionNotifierBeforeCloseHook()
+	}
+	notifierErr := c.closeProjectionDeltaNotifier()
+	if dbErr != nil {
+		return c.wrapError("close-db", "", dbErr)
+	}
+	if notifierErr != nil {
+		return c.wrapError("close-projection-notifier", "", notifierErr)
 	}
 	return nil
 }
@@ -1387,6 +1530,7 @@ type StoreResourceDiagnostics struct {
 	MutationHeldFor          time.Duration
 	SQLiteWriteHolder        string
 	SQLiteWriteHeldFor       time.Duration
+	SQLiteWriteWaiters       int
 	ProjectionWatchesActive  int64
 	ProjectionWatchesStarted uint64
 	ProjectionWatchesDone    uint64
@@ -1415,6 +1559,7 @@ func (c *Client) ResourceDiagnostics() StoreResourceDiagnostics {
 	writeLock := sqliteutil.WriteLockResourceDiagnostics(dbPath)
 	diagnostic.SQLiteWriteHolder = writeLock.Holder
 	diagnostic.SQLiteWriteHeldFor = writeLock.HeldFor
+	diagnostic.SQLiteWriteWaiters = writeLock.Waiters
 	return diagnostic
 }
 
@@ -1768,11 +1913,17 @@ func isLinearDisplayKeyIssueID(id string) bool {
 
 // List fetches all active issues from local SQLite store.
 func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
+	return c.ListCanonicalArchiveMode(ctx, ArchiveExclude)
+}
+
+// ListCanonicalArchiveMode fetches full issue bodies and dependency edges
+// without joining disposable runtime, session, or worktree projections.
+func (c *Client) ListCanonicalArchiveMode(ctx context.Context, archiveMode ArchiveMode) ([]domain.Task, error) {
 	db, err := c.dbHandle()
 	if err != nil {
 		return nil, err
 	}
-	tasks, err := c.queryTasks(ctx, db, `
+	tasks, err := c.queryTasks(ctx, db, fmt.Sprintf(`
 		SELECT
 			id,
 			title,
@@ -1793,12 +1944,12 @@ func (c *Client) List(ctx context.Context) ([]domain.Task, error) {
 			COALESCE(implementations_json, '[]'),
 			created_at,
 			updated_at
-		FROM issues
-		WHERE visibility = 'live'
+		FROM issues i
+		WHERE %s
 		ORDER BY updated_at DESC
-	`)
+	`, archiveWhere("i", archiveMode)))
 	if err != nil {
-		return nil, c.wrapError("list", "", err)
+		return nil, c.wrapError("list-canonical", "", err)
 	}
 	return tasks, nil
 }
@@ -2498,13 +2649,28 @@ func graphReadinessContextIDsQuery(rootID string) (string, []any) {
 				AND closure.dependency_type = ?
 				AND closure.ancestor_id = ?
 		),
-		context(id) AS (
+		ancestors(id) AS (
+			SELECT closure.ancestor_id
+			FROM issue_graph_closure closure INDEXED BY idx_issue_graph_closure_descendant
+			INNER JOIN issues ancestor
+				ON ancestor.id = closure.ancestor_id
+				AND ancestor.visibility = 'live'
+			WHERE closure.project_id = ?
+				AND closure.dependency_type = ?
+				AND closure.descendant_id = ?
+		),
+		contained(id) AS (
 			SELECT id FROM graph
+			UNION
+			SELECT id FROM ancestors
+		),
+		context(id) AS (
+			SELECT id FROM contained
 
 			UNION
 
 			SELECT dep.depends_on_id
-			FROM graph graph_issue
+			FROM contained graph_issue
 			CROSS JOIN issue_dependencies dep INDEXED BY idx_dependencies_issue_active_type
 			CROSS JOIN issues dep_issue
 			WHERE dep.issue_id = graph_issue.id
@@ -2516,6 +2682,9 @@ func graphReadinessContextIDsQuery(rootID string) (string, []any) {
 		FROM context
 	`
 	return query, []any{
+		strings.TrimSpace(rootID),
+		issueGraphClosureProjectID,
+		string(domain.DependencyParentChild),
 		strings.TrimSpace(rootID),
 		issueGraphClosureProjectID,
 		string(domain.DependencyParentChild),
@@ -2998,6 +3167,19 @@ func (c *Client) updateLockedWithPrecondition(ctx context.Context, id string, st
 			return c.wrapError("update", id, err)
 		}
 	}
+	if oldState.Engagement == domain.IssueEngagementReviewRequested && nextState.Engagement != domain.IssueEngagementReviewRequested {
+		var activeReviewLeases int
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM issue_coordination_leases
+			WHERE issue_id=? AND purpose=? AND (expires_at IS NULL OR expires_at>?)
+		`, id, domain.CoordinationLeaseReview, now).Scan(&activeReviewLeases); err != nil {
+			return c.wrapError("update", id, err)
+		}
+		if activeReviewLeases > 0 {
+			return c.wrapError("update", id, fmt.Errorf("%w: active review admission lease fences the current review epoch", domain.ErrConflict))
+		}
+	}
 	if nextState.Workflow() == domain.IssueWorkflowBacklog {
 		hasAdmittedAncestor, err := c.hasLiveAdmittedAncestor(ctx, tx, id)
 		if err != nil {
@@ -3141,9 +3323,10 @@ func (c *Client) CloseWithRuntimeReviewEvidence(ctx context.Context, projectID, 
 	return c.GetWithRuntime(ctx, projectID, id)
 }
 
-// CloseWithRuntimeReviewEvidenceFence consumes the matching durable evidence
-// fence in the same transaction as final pin validation and terminal state.
-func (c *Client) CloseWithRuntimeReviewEvidenceFence(ctx context.Context, projectID, id string, status domain.Status, pin ReviewEvidencePin, fenceToken string) (domain.Task, error) {
+// CloseWithRuntimeReviewLease consumes the accepted reviewer's durable lease
+// in the same transaction as terminal state for accepted reviews that do not
+// carry worker evidence (for example accepted internal-review investigations).
+func (c *Client) CloseWithRuntimeReviewLease(ctx context.Context, projectID, id string, status domain.Status, reviewerID string) (domain.Task, error) {
 	nextState, err := issueStateFromStatus(status)
 	if err != nil {
 		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), err)
@@ -3151,8 +3334,37 @@ func (c *Client) CloseWithRuntimeReviewEvidenceFence(ctx context.Context, projec
 	if nextState.Workflow() != domain.IssueWorkflowClosed {
 		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), fmt.Errorf("status %s is not terminal", status))
 	}
-	fenceToken = strings.TrimSpace(fenceToken)
-	if strings.TrimSpace(pin.Source) != "issue_event" || pin.EventID <= 0 || pin.Seq != 0 || strings.TrimSpace(pin.Digest) == "" || fenceToken == "" {
+	reviewerID = strings.TrimSpace(reviewerID)
+	if reviewerID == "" {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), errors.New("accepted reviewer id is required"))
+	}
+	if err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			return c.updateLockedWithPrecondition(ctx, id, status, true, func(ctx context.Context, tx *sql.Tx) error {
+				if err := validateAcceptedReviewerOutcome(ctx, tx, id, reviewerID, nil); err != nil {
+					return err
+				}
+				return consumeAcceptedReviewerLease(ctx, tx, id, reviewerID)
+			})
+		})
+	}); err != nil {
+		return domain.Task{}, err
+	}
+	return c.GetWithRuntime(ctx, projectID, id)
+}
+
+// CloseWithRuntimeReviewEvidenceFence consumes the matching durable evidence
+// fence in the same transaction as final pin validation and terminal state.
+func (c *Client) CloseWithRuntimeReviewEvidenceFence(ctx context.Context, projectID, id string, status domain.Status, pin ReviewEvidencePin, reviewerID string) (domain.Task, error) {
+	nextState, err := issueStateFromStatus(status)
+	if err != nil {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), err)
+	}
+	if nextState.Workflow() != domain.IssueWorkflowClosed {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), fmt.Errorf("status %s is not terminal", status))
+	}
+	reviewerID = strings.TrimSpace(reviewerID)
+	if strings.TrimSpace(pin.Source) != "issue_event" || pin.EventID <= 0 || pin.Seq != 0 || strings.TrimSpace(pin.Digest) == "" || reviewerID == "" {
 		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), errors.New("review evidence close requires one durable issue-event pin and fence"))
 	}
 	if err := c.retrySQLiteBusy(ctx, func() error {
@@ -3161,17 +3373,48 @@ func (c *Client) CloseWithRuntimeReviewEvidenceFence(ctx context.Context, projec
 				if err := validateTerminalReviewEvidencePin(ctx, tx, id, pin); err != nil {
 					return err
 				}
+				if err := validateAcceptedReviewerOutcome(ctx, tx, id, reviewerID, &pin); err != nil {
+					return err
+				}
+				return consumeAcceptedReviewerLease(ctx, tx, id, reviewerID)
+			})
+		})
+	}); err != nil {
+		return domain.Task{}, err
+	}
+	return c.GetWithRuntime(ctx, projectID, id)
+}
+
+// CloseWithRuntimeReviewPublicationAuthority atomically revalidates and
+// consumes the exact typed review/publication authority with terminal state.
+func (c *Client) CloseWithRuntimeReviewPublicationAuthority(ctx context.Context, projectID, id string, status domain.Status, authority ReviewPublicationAuthority, pin *ReviewEvidencePin) (domain.Task, error) {
+	nextState, err := issueStateFromStatus(status)
+	if err != nil {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), err)
+	}
+	if nextState.Workflow() != domain.IssueWorkflowClosed {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), fmt.Errorf("status %s is not terminal", status))
+	}
+	if err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			return c.updateLockedWithPrecondition(ctx, id, status, true, func(ctx context.Context, tx *sql.Tx) error {
+				if pin != nil {
+					if err := validateTerminalReviewEvidencePin(ctx, tx, id, *pin); err != nil {
+						return err
+					}
+				}
+				if err := validateReviewPublicationAuthority(ctx, tx, id, authority); err != nil {
+					return err
+				}
 				result, err := tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases
-					WHERE issue_id=? AND purpose=? AND owner_id=? AND owner_kind=?`, strings.TrimSpace(id), domain.CoordinationLeaseReview, fenceToken, reviewEvidenceCloseFenceOwnerKind)
+					WHERE issue_id=? AND purpose=? AND LOWER(owner_id)=? AND owner_kind=?`,
+					strings.TrimSpace(id), domain.CoordinationLeaseReview, strings.ToLower(strings.TrimSpace(authority.Reviewer.OwnerID)), authority.Reviewer.OwnerKind)
 				if err != nil {
 					return err
 				}
-				removed, err := result.RowsAffected()
-				if err != nil {
-					return err
-				}
+				removed, _ := result.RowsAffected()
 				if removed != 1 {
-					return fmt.Errorf("%w: accepted review evidence close fence is missing or changed", domain.ErrConflict)
+					return fmt.Errorf("%w: exact typed reviewer lease is missing or changed", domain.ErrConflict)
 				}
 				return nil
 			})
@@ -3180,6 +3423,81 @@ func (c *Client) CloseWithRuntimeReviewEvidenceFence(ctx context.Context, projec
 		return domain.Task{}, err
 	}
 	return c.GetWithRuntime(ctx, projectID, id)
+}
+
+// CloseWithRuntimeExternalReviewPublicationAuthority atomically closes an issue,
+// consumes its exact typed review lease, and retires the accepted publication
+// operation after an externally completed integration has been verified.
+func (c *Client) CloseWithRuntimeExternalReviewPublicationAuthority(ctx context.Context, projectID, id string, status domain.Status, authority ReviewPublicationAuthority, pin *ReviewEvidencePin, operation domain.PublicationOperation, finishedAt time.Time) (domain.Task, error) {
+	nextState, err := issueStateFromStatus(status)
+	if err != nil {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), err)
+	}
+	if nextState.Workflow() != domain.IssueWorkflowClosed {
+		return domain.Task{}, c.wrapError("close", strings.TrimSpace(id), fmt.Errorf("status %s is not terminal", status))
+	}
+	finishedAt = finishedAt.UTC()
+	if finishedAt.IsZero() {
+		finishedAt = time.Now().UTC()
+	}
+	if err := c.retrySQLiteBusy(ctx, func() error {
+		return c.withMutationLock(ctx, func(ctx context.Context) error {
+			return c.updateLockedWithPrecondition(ctx, id, status, true, func(ctx context.Context, tx *sql.Tx) error {
+				if pin != nil {
+					if err := validateTerminalReviewEvidencePin(ctx, tx, id, *pin); err != nil {
+						return err
+					}
+				}
+				if err := validateReviewPublicationAuthority(ctx, tx, id, authority); err != nil {
+					return err
+				}
+				if strings.TrimSpace(operation.OperationID) != strings.TrimSpace(authority.PublicationOperationID) {
+					return fmt.Errorf("%w: external reconciliation requires the exact accepted publication operation", domain.ErrConflict)
+				}
+				result, err := tx.ExecContext(ctx, `UPDATE daemon_publication_operations
+					SET state=?,lease_owner='',claim_token='',claim_expires_at=NULL,
+						failure_kind='',failure_detail='',failure_artifact='',finished_at=?,updated_at=?
+					WHERE operation_id=? AND issue_id=? AND state=? AND claim_token=?`,
+					string(domain.PublicationOperationMerged), finishedAt.Format(time.RFC3339Nano), finishedAt.Format(time.RFC3339Nano),
+					operation.OperationID, strings.TrimSpace(id), string(operation.State), strings.TrimSpace(operation.ClaimToken))
+				if err != nil {
+					return fmt.Errorf("terminalize externally reconciled publication operation: %w", err)
+				}
+				if changed, _ := result.RowsAffected(); changed != 1 {
+					return fmt.Errorf("%w: publication operation changed concurrently", domain.ErrConflict)
+				}
+				result, err = tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases
+					WHERE issue_id=? AND purpose=? AND LOWER(owner_id)=? AND owner_kind=?`,
+					strings.TrimSpace(id), domain.CoordinationLeaseReview, strings.ToLower(strings.TrimSpace(authority.Reviewer.OwnerID)), authority.Reviewer.OwnerKind)
+				if err != nil {
+					return err
+				}
+				if removed, _ := result.RowsAffected(); removed != 1 {
+					return fmt.Errorf("%w: exact typed reviewer lease is missing or changed", domain.ErrConflict)
+				}
+				return nil
+			})
+		})
+	}); err != nil {
+		return domain.Task{}, err
+	}
+	return c.GetWithRuntime(ctx, projectID, id)
+}
+
+func consumeAcceptedReviewerLease(ctx context.Context, tx *sql.Tx, issueID, reviewerID string) error {
+	result, err := tx.ExecContext(ctx, `DELETE FROM issue_coordination_leases
+		WHERE issue_id=? AND purpose=? AND LOWER(owner_id)=LOWER(?)`, strings.TrimSpace(issueID), domain.CoordinationLeaseReview, strings.TrimSpace(reviewerID))
+	if err != nil {
+		return err
+	}
+	removed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if removed != 1 {
+		return fmt.Errorf("%w: accepted reviewer lease is missing or changed", domain.ErrConflict)
+	}
+	return nil
 }
 
 func validateTerminalReviewEvidencePin(ctx context.Context, tx *sql.Tx, issueID string, pin ReviewEvidencePin) error {
@@ -3233,12 +3551,15 @@ func validateTerminalReviewEvidencePin(ctx context.Context, tx *sql.Tx, issueID 
 }
 
 type OwnershipClaimParams struct {
-	OwnerID    string
-	OwnerKind  string
-	TTL        time.Duration
-	Force      bool
-	ReleasedBy string
-	Purpose    domain.CoordinationLeasePurpose
+	OwnerID                 string
+	OwnerKind               string
+	TTL                     time.Duration
+	Force                   bool
+	ReleasedBy              string
+	Purpose                 domain.CoordinationLeasePurpose
+	ExpectedReviewAdmission *ReviewAdmissionPin
+	ExpectedParentIssueID   string
+	ReviewSourceOID         string
 }
 
 func (c *Client) ClaimOwnershipWithRuntime(ctx context.Context, projectID, issueID string, params OwnershipClaimParams) (domain.Task, error) {
@@ -3272,6 +3593,9 @@ func (c *Client) claimOwnership(ctx context.Context, issueID string, params Owne
 	if !purpose.Valid() {
 		return c.wrapError("claim-ownership", issueID, fmt.Errorf("invalid ownership purpose %q", purpose))
 	}
+	if params.ExpectedReviewAdmission != nil && purpose != domain.CoordinationLeaseReview {
+		return c.wrapError("claim-ownership", issueID, errors.New("review admission pin requires review lease purpose"))
+	}
 	return c.withMutationLock(ctx, func(ctx context.Context) error {
 		db, err := c.dbHandle()
 		if err != nil {
@@ -3293,6 +3617,14 @@ func (c *Client) claimOwnership(ctx context.Context, issueID string, params Owne
 		}
 		if err := issueLeaseEligibilityForUpdate(ctx, tx, issueID, purpose); err != nil {
 			return c.wrapError("claim-ownership", issueID, err)
+		}
+		if params.ExpectedReviewAdmission != nil {
+			if err := validateReviewAdmissionPin(ctx, tx, issueID, *params.ExpectedReviewAdmission); err != nil {
+				return c.wrapError("claim-ownership", issueID, err)
+			}
+			if err := validateReviewAdmissionParent(ctx, tx, issueID, params.ExpectedParentIssueID); err != nil {
+				return c.wrapError("claim-ownership", issueID, err)
+			}
 		}
 		now := time.Now().UTC()
 		var lease *domain.CoordinationLease
@@ -3319,14 +3651,24 @@ func (c *Client) claimOwnership(ctx context.Context, issueID string, params Owne
 			issueID, purpose, ownerID, ownerKind, nowRaw, expiresAt); err != nil {
 			return c.wrapError("claim-ownership", issueID, err)
 		}
-		if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueOwnershipChanged, map[string]any{
+		claimPayload := map[string]any{
 			"action":           "claimed",
 			"owner_id":         ownerID,
 			"owner_kind":       ownerKind,
 			"owner_expires_at": expiresPayload,
 			"forced":           params.Force,
 			"purpose":          purpose,
-		}); err != nil {
+		}
+		if params.ExpectedReviewAdmission != nil {
+			claimPayload["review_epoch_event_id"] = params.ExpectedReviewAdmission.ReviewEpochEventID
+			claimPayload["review_parent_issue_id"] = strings.TrimSpace(params.ExpectedParentIssueID)
+			claimPayload["review_source_oid"] = strings.TrimSpace(params.ReviewSourceOID)
+			if params.ExpectedReviewAdmission.Evidence != nil {
+				claimPayload["review_evidence_event_id"] = params.ExpectedReviewAdmission.Evidence.EventID
+				claimPayload["review_evidence_digest"] = params.ExpectedReviewAdmission.Evidence.Digest
+			}
+		}
+		if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueOwnershipChanged, claimPayload); err != nil {
 			return c.wrapError("claim-ownership", issueID, err)
 		}
 		if err := tx.Commit(); err != nil {
@@ -3335,6 +3677,39 @@ func (c *Client) claimOwnership(ctx context.Context, issueID string, params Owne
 		tx = nil
 		return nil
 	})
+}
+
+func validateReviewAdmissionParent(ctx context.Context, tx *sql.Tx, issueID, expectedParentID string) error {
+	expectedParentID = strings.TrimSpace(expectedParentID)
+	rows, err := tx.QueryContext(ctx, `
+		SELECT depends_on_id
+		FROM issue_dependencies
+		WHERE issue_id=? AND tombstoned_at IS NULL
+		  AND dependency_type IN ('parent-child','parent_child')
+		ORDER BY depends_on_id
+	`, strings.TrimSpace(issueID))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	parents := make([]string, 0, 1)
+	for rows.Next() {
+		var parentID string
+		if err := rows.Scan(&parentID); err != nil {
+			return err
+		}
+		parents = append(parents, strings.TrimSpace(parentID))
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if expectedParentID == "" && len(parents) == 0 {
+		return nil
+	}
+	if len(parents) == 1 && naming.IssueIDsEqual(parents[0], expectedParentID) {
+		return nil
+	}
+	return fmt.Errorf("%w: review parent changed from %q to %v", domain.ErrConflict, expectedParentID, parents)
 }
 
 func issueLeaseEligibilityForUpdate(ctx context.Context, tx *sql.Tx, issueID string, purpose domain.CoordinationLeasePurpose) error {
@@ -3521,6 +3896,9 @@ func (c *Client) countOpenChildren(ctx context.Context, db sqlIssueQueryer, pare
 
 // CreateTaskParams contains parameters for creating a new issue.
 type CreateTaskParams struct {
+	ProjectID       string
+	IntentKey       string
+	RequestDigest   string
 	Title           string
 	Description     string
 	Type            domain.TaskType
@@ -3535,6 +3913,7 @@ type CreateTaskParams struct {
 	Acceptance      string
 	Estimate        *int
 	ParentID        *string
+	CreatedFromID   *string
 }
 
 type UpsertExternalIssueRefParams struct {
@@ -3549,63 +3928,91 @@ type UpsertExternalIssueRefParams struct {
 
 // Create inserts a new issue and returns its generated id.
 func (c *Client) Create(ctx context.Context, params CreateTaskParams) (string, error) {
-	var issueID string
-	err := c.retrySQLiteBusy(ctx, func() error {
-		var err error
-		issueID, err = c.createOnce(ctx, params)
-		return err
-	})
-	if err != nil {
-		return "", err
-	}
-	return issueID, nil
-}
-
-func (c *Client) createOnce(ctx context.Context, params CreateTaskParams) (string, error) {
-	var issueID string
-	err := c.withMutationLock(ctx, func(ctx context.Context) error {
-		var err error
-		issueID, err = c.createOnceLocked(ctx, params)
-		return err
-	})
+	issueID, _, err := c.createWithDisposition(ctx, params)
 	return issueID, err
 }
 
-func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) (string, error) {
+func (c *Client) createWithDisposition(ctx context.Context, params CreateTaskParams) (string, bool, error) {
+	var issueID string
+	var created bool
+	err := c.retrySQLiteBusy(ctx, func() error {
+		var err error
+		issueID, created, err = c.createOnce(ctx, params)
+		return err
+	})
+	if err != nil {
+		return "", false, err
+	}
+	return issueID, created, nil
+}
+
+func (c *Client) createOnce(ctx context.Context, params CreateTaskParams) (string, bool, error) {
+	var issueID string
+	var created bool
+	err := c.withMutationLock(ctx, func(ctx context.Context) error {
+		var err error
+		issueID, created, err = c.createOnceLocked(ctx, params)
+		return err
+	})
+	return issueID, created, err
+}
+
+func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) (string, bool, error) {
 	db, err := c.dbHandle()
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if strings.TrimSpace(params.Title) == "" {
-		return "", c.wrapError("create", "", errors.New("title is required"))
+		return "", false, c.wrapError("create", "", errors.New("title is required"))
+	}
+	projectID, intentKey, requestDigest := strings.TrimSpace(params.ProjectID), strings.TrimSpace(params.IntentKey), strings.TrimSpace(params.RequestDigest)
+	if (intentKey == "") != (requestDigest == "") || (intentKey != "" && projectID == "") {
+		return "", false, c.wrapError("create", "", errors.New("project, intent key, and request digest must be supplied together"))
 	}
 
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", c.wrapError("create", "", err)
+		return "", false, c.wrapError("create", "", err)
 	}
 	defer func() {
 		if tx != nil {
 			_ = tx.Rollback()
 		}
 	}()
+	if intentKey != "" {
+		var existingID, existingDigest string
+		err := tx.QueryRowContext(ctx, `SELECT issue_id, request_digest FROM task_creation_intents WHERE project_id=? AND intent_key=?`, projectID, intentKey).Scan(&existingID, &existingDigest)
+		if err == nil {
+			if existingDigest != requestDigest {
+				return "", false, c.wrapError("create", existingID, fmt.Errorf("%w: task creation intent %q reused with different request", domain.ErrConflict, intentKey))
+			}
+			if err := tx.Commit(); err != nil {
+				return "", false, c.wrapError("create", existingID, err)
+			}
+			tx = nil
+			return existingID, false, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", false, c.wrapError("create", "", err)
+		}
+	}
 
 	nextIndex := 0
 	if raw, err := c.getMetaValue(ctx, tx, nextAlphaIssueIndexMetaKey); err == nil {
 		nextIndex = parseNextAlphaIssueIndex(raw)
 	} else if !errors.Is(err, sql.ErrNoRows) {
-		return "", c.wrapError("create", "", err)
+		return "", false, c.wrapError("create", "", err)
 	}
 
 	existing, err := c.loadAllocatedIssueIDs(ctx, tx)
 	if err != nil {
-		return "", c.wrapError("create", "", err)
+		return "", false, c.wrapError("create", "", err)
 	}
 
 	issueID, nextReserved := allocateNextAlphaIssueID(nextIndex, existing)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if err := c.reserveIssueID(ctx, tx, issueID, now, "issue.create"); err != nil {
-		return "", c.wrapError("create", issueID, err)
+		return "", false, c.wrapError("create", issueID, err)
 	}
 	issueType := params.Type
 	if issueType == "" {
@@ -3617,25 +4024,25 @@ func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) 
 	}
 	state, err := issueStateFromStatus(status)
 	if err != nil {
-		return "", c.wrapError("create", issueID, err)
+		return "", false, c.wrapError("create", issueID, err)
 	}
 	if params.Lifecycle != "" {
 		if state.Workflow() != domain.IssueWorkflowBacklog && state.Workflow() != domain.IssueWorkflowOpen {
-			return "", c.wrapError("create", issueID, fmt.Errorf("lifecycle %s cannot be combined with status %s", params.Lifecycle, status))
+			return "", false, c.wrapError("create", issueID, fmt.Errorf("lifecycle %s cannot be combined with status %s", params.Lifecycle, status))
 		}
 		state, err = issueStateWithLifecycle(state, params.Lifecycle)
 		if err != nil {
-			return "", c.wrapError("create", issueID, err)
+			return "", false, c.wrapError("create", issueID, err)
 		}
 	}
 	writeState := issueStateWriteValuesFromState(state, nil)
 	labelsJSON, err := marshalOptionalStringSlice(params.Labels)
 	if err != nil {
-		return "", c.wrapError("create", issueID, err)
+		return "", false, c.wrapError("create", issueID, err)
 	}
 	implementationsJSON, err := marshalOptionalStringSlice(params.Implementations)
 	if err != nil {
-		return "", c.wrapError("create", issueID, err)
+		return "", false, c.wrapError("create", issueID, err)
 	}
 	var closedAt any
 	if state.Workflow() == domain.IssueWorkflowClosed {
@@ -3675,7 +4082,7 @@ func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) 
 		)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, issueID, params.Title, nullableString(params.Description), writeState.LegacyStatus, writeState.Disposition, writeState.Engagement, writeState.Visibility, int(params.Priority), string(issueType), now, now, closedAt, nullableString(params.Assignee), labelsJSON, implementationsJSON, nullableString(params.Design), nullableString(params.Notes), nullableString(params.Acceptance), estimate, writeState.ArchivedAt, writeState.Lifecycle, writeState.ClosedOutcome, writeState.Review, writeState.ArchivedAt); err != nil {
-		return "", c.wrapError("create", issueID, err)
+		return "", false, c.wrapError("create", issueID, err)
 	}
 	createPayload := map[string]any{
 		"title":      params.Title,
@@ -3687,20 +4094,25 @@ func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) 
 		createPayload["parent_id"] = strings.TrimSpace(*params.ParentID)
 	}
 	if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueCreated, createPayload); err != nil {
-		return "", c.wrapError("create", issueID, err)
+		return "", false, c.wrapError("create", issueID, err)
+	}
+	if intentKey != "" && c.taskCreationIntentFailureHook != nil {
+		if err := c.taskCreationIntentFailureHook("after_issue"); err != nil {
+			return "", false, c.wrapError("create", issueID, err)
+		}
 	}
 
 	if params.ParentID != nil && strings.TrimSpace(*params.ParentID) != "" {
 		parentID := strings.TrimSpace(*params.ParentID)
 		parentExists, err := c.issueExists(ctx, tx, parentID)
 		if err != nil {
-			return "", c.wrapError("create", issueID, err)
+			return "", false, c.wrapError("create", issueID, err)
 		}
 		if !parentExists {
-			return "", c.wrapError("create", issueID, domain.ErrNotFound)
+			return "", false, c.wrapError("create", issueID, domain.ErrNotFound)
 		}
 		if err := c.reopenClosedParentForActiveChild(ctx, tx, issueID, parentID); err != nil {
-			return "", c.wrapError("create", issueID, err)
+			return "", false, c.wrapError("create", issueID, err)
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO issue_dependencies (issue_id, depends_on_id, dependency_type, tombstoned_at)
@@ -3708,19 +4120,53 @@ func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) 
 			ON CONFLICT(issue_id, depends_on_id, dependency_type)
 			DO UPDATE SET tombstoned_at = NULL
 		`, issueID, parentID, string(domain.DependencyParentChild)); err != nil {
-			return "", c.wrapError("create", issueID, err)
+			return "", false, c.wrapError("create", issueID, err)
 		}
 		if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueDependencyAdded, map[string]any{
 			"depends_on_id":   parentID,
 			"dependency_type": string(domain.DependencyParentChild),
 		}); err != nil {
-			return "", c.wrapError("create", issueID, err)
+			return "", false, c.wrapError("create", issueID, err)
 		}
 		if err := c.rebuildIssueGraphClosure(ctx, tx); err != nil {
-			return "", c.wrapError("create", issueID, err)
+			return "", false, c.wrapError("create", issueID, err)
 		}
 		if err := c.enforceAncestorLifecycleFloor(ctx, tx, issueID, "ancestor_lifecycle_floor_create"); err != nil {
-			return "", c.wrapError("create", issueID, err)
+			return "", false, c.wrapError("create", issueID, err)
+		}
+		if intentKey != "" && c.taskCreationIntentFailureHook != nil {
+			if err := c.taskCreationIntentFailureHook("after_parent_edge"); err != nil {
+				return "", false, c.wrapError("create", issueID, err)
+			}
+		}
+	}
+	if params.CreatedFromID != nil && strings.TrimSpace(*params.CreatedFromID) != "" {
+		createdFromID := strings.TrimSpace(*params.CreatedFromID)
+		if createdFromID == issueID {
+			return "", false, c.wrapError("create", issueID, domain.ErrConflict)
+		}
+		exists, err := c.issueExists(ctx, tx, createdFromID)
+		if err != nil {
+			return "", false, c.wrapError("create", issueID, err)
+		}
+		if !exists {
+			return "", false, c.wrapError("create", issueID, domain.ErrNotFound)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issue_dependencies(issue_id,depends_on_id,dependency_type,tombstoned_at) VALUES(?,?,?,NULL) ON CONFLICT(issue_id,depends_on_id,dependency_type) DO UPDATE SET tombstoned_at=NULL`, issueID, createdFromID, string(domain.DependencyCreatedIn)); err != nil {
+			return "", false, c.wrapError("create", issueID, err)
+		}
+		if err := c.appendIssueObservationEvent(ctx, tx, issueID, domain.IssueEventIssueDependencyAdded, map[string]any{"depends_on_id": createdFromID, "dependency_type": string(domain.DependencyCreatedIn)}); err != nil {
+			return "", false, c.wrapError("create", issueID, err)
+		}
+		if intentKey != "" && c.taskCreationIntentFailureHook != nil {
+			if err := c.taskCreationIntentFailureHook("after_created_in_edge"); err != nil {
+				return "", false, c.wrapError("create", issueID, err)
+			}
+		}
+	}
+	if intentKey != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO task_creation_intents(project_id,intent_key,request_digest,issue_id,created_at) VALUES(?,?,?,?,?)`, projectID, intentKey, requestDigest, issueID, now); err != nil {
+			return "", false, c.wrapError("create", issueID, err)
 		}
 	}
 
@@ -3728,14 +4174,14 @@ func (c *Client) createOnceLocked(ctx context.Context, params CreateTaskParams) 
 		INSERT INTO meta (key, value) VALUES (?, ?)
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value
 	`, nextAlphaIssueIndexMetaKey, strconv.Itoa(nextReserved)); err != nil {
-		return "", c.wrapError("create", issueID, err)
+		return "", false, c.wrapError("create", issueID, err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return "", c.wrapError("create", issueID, err)
+		return "", false, c.wrapError("create", issueID, err)
 	}
 	tx = nil
-	return issueID, nil
+	return issueID, true, nil
 }
 
 // CreateWithRuntime inserts a new issue and returns the created task with runtime projection fields.
@@ -3754,6 +4200,19 @@ func (c *Client) CreateWithRuntime(ctx context.Context, projectID string, params
 		return domain.Task{}, err
 	}
 	return task, nil
+}
+
+// CreateIdempotentWithRuntime creates a task once for a project-scoped intent.
+// Exact replays return the canonical task with created=false; conflicting reuse
+// fails with domain.ErrConflict.
+func (c *Client) CreateIdempotentWithRuntime(ctx context.Context, projectID string, params CreateTaskParams) (domain.Task, bool, error) {
+	params.ProjectID = projectID
+	id, created, err := c.createWithDisposition(ctx, params)
+	if err != nil {
+		return domain.Task{}, false, err
+	}
+	task, err := c.GetWithRuntime(ctx, projectID, id)
+	return task, created, err
 }
 
 func (c *Client) retrySQLiteBusy(ctx context.Context, fn func() error) error {
@@ -3792,6 +4251,22 @@ func IsSQLiteBusy(err error) bool {
 	for err != nil {
 		var sqliteErr *sqlite.Error
 		if errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == sqliteBusyPrimaryCode {
+			return true
+		}
+		err = errors.Unwrap(err)
+	}
+	return false
+}
+
+// IsSQLiteCorrupt reports whether err is a typed store quarantine or wraps a
+// SQLite result with primary code SQLITE_CORRUPT (11).
+func IsSQLiteCorrupt(err error) bool {
+	if errors.Is(err, ErrSQLiteCorrupt) {
+		return true
+	}
+	for err != nil {
+		var coded interface{ Code() int }
+		if errors.As(err, &coded) && coded.Code()&0xff == sqliteCorruptPrimaryCode {
 			return true
 		}
 		err = errors.Unwrap(err)
@@ -4059,6 +4534,11 @@ func (c *Client) addDependency(ctx context.Context, issueID, dependsOnID, depend
 			_ = tx.Rollback()
 		}
 	}()
+	if canonicalType == string(domain.DependencyParentChild) {
+		if err := rejectActiveReviewAdmissionLease(ctx, tx, issueID); err != nil {
+			return c.wrapError("add-dependency", issueID, err)
+		}
+	}
 
 	if tombstoneOldParent != "" {
 		if _, err := tx.ExecContext(ctx, `
@@ -4437,6 +4917,11 @@ func (c *Client) removeDependency(ctx context.Context, issueID, dependsOnID, dep
 			_ = tx.Rollback()
 		}
 	}()
+	if canonicalType == string(domain.DependencyParentChild) {
+		if err := rejectActiveReviewAdmissionLease(ctx, tx, issueID); err != nil {
+			return c.wrapError("remove-dependency", issueID, err)
+		}
+	}
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE issue_dependencies
@@ -4467,6 +4952,23 @@ func (c *Client) removeDependency(ctx context.Context, issueID, dependsOnID, dep
 		return c.wrapError("remove-dependency", issueID, err)
 	}
 	committed = true
+	return nil
+}
+
+func rejectActiveReviewAdmissionLease(ctx context.Context, queryer sqlIssueQueryer, issueID string) error {
+	var active bool
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := queryer.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM issue_coordination_leases
+			WHERE issue_id=? AND purpose=? AND (expires_at IS NULL OR expires_at>?)
+		)
+	`, strings.TrimSpace(issueID), domain.CoordinationLeaseReview, now).Scan(&active); err != nil {
+		return err
+	}
+	if active {
+		return fmt.Errorf("%w: active review admission lease fences parent identity", domain.ErrConflict)
+	}
 	return nil
 }
 
@@ -5938,6 +6440,7 @@ func (c *Client) logSQLiteRead(ctx context.Context, operation string, startedAt 
 		"service", "azedarach.issue_store",
 		"dependency.name", "sqlite",
 		"dependency.operation", operation,
+		"db.path", sqliteutil.CanonicalPath(c.dbPath),
 		"dependency.duration_ms", time.Since(startedAt).Milliseconds(),
 		"outcome", outcome,
 		"row_count", rowCount,
@@ -5945,6 +6448,13 @@ func (c *Client) logSQLiteRead(ctx context.Context, operation string, startedAt 
 	base = append(base, attrs...)
 	if err != nil {
 		base = append(base, "error_class", "sqlite_query")
+		if details, ok := sqliteutil.Details(err); ok {
+			base = append(base,
+				"sqlite.code", details.PrimaryCode,
+				"sqlite.extended_code", details.ExtendedCode,
+				"sqlite.symbol", details.Symbol,
+			)
+		}
 	}
 	latencytrace.LogPhaseContext(ctx, nil, "dependency", "sqlite."+operation, startedAt, base...)
 	if c.logger == nil {
@@ -6659,6 +7169,9 @@ func resolveDBPath(repoDir string) (string, error) {
 }
 
 func (c *Client) wrapError(op string, issueID string, err error) error {
+	if IsSQLiteCorrupt(err) {
+		err = c.markSQLiteCorrupt(err)
+	}
 	storeErr := &domain.TaskStoreError{
 		Op:  op,
 		Err: err,
@@ -6667,4 +7180,37 @@ func (c *Client) wrapError(op string, issueID string, err error) error {
 		storeErr.TaskID = issueID
 	}
 	return storeErr
+}
+
+func (c *Client) markSQLiteCorrupt(cause error) error {
+	if existing := c.corruption.Load(); existing != nil {
+		return existing.err
+	}
+	quarantineErr := fmt.Errorf(
+		"%w detected; this issue store is quarantined in the current process. Preserve the database and WAL, create a consistent online-backup clone, and recover or replace the authority from validated clone evidence before retrying: %w",
+		ErrSQLiteCorrupt,
+		cause,
+	)
+	state := &sqliteCorruptionState{err: quarantineErr}
+	if c.corruption.CompareAndSwap(nil, state) {
+		return quarantineErr
+	}
+	return c.corruption.Load().err
+}
+
+func (c *Client) corruptionError() error {
+	state := c.corruption.Load()
+	if state == nil {
+		return nil
+	}
+	return state.err
+}
+
+// CorruptionError reports the process-local corruption quarantine, if any.
+// It does not open or inspect the database.
+func (c *Client) CorruptionError() error {
+	if c == nil {
+		return nil
+	}
+	return c.corruptionError()
 }

@@ -1,6 +1,10 @@
 package daemon
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
+)
 
 func TestInvariantSourceMatrixIncludesExpectedRuntimeInvariants(t *testing.T) {
 	matrix := invariantSourceMatrix()
@@ -12,8 +16,10 @@ func TestInvariantSourceMatrixIncludesExpectedRuntimeInvariants(t *testing.T) {
 		daemonInvariantSessionReconcile:             daemonInvariantSourceHybrid,
 		daemonInvariantSessionIssueLifecycle:        daemonInvariantSourceHybrid,
 		daemonInvariantSessionActivityConverge:      daemonInvariantSourceHybrid,
+		daemonInvariantManagedAgentRestart:          daemonInvariantSourceHybrid,
 		daemonInvariantAdvisorSingleton:             daemonInvariantSourceHybrid,
 		daemonInvariantTaskListFreshness:            daemonInvariantSourceProjection,
+		daemonInvariantTaskReadAfterWrite:           daemonInvariantSourceProjection,
 		daemonInvariantTaskClose:                    daemonInvariantSourceHybrid,
 		daemonInvariantTaskClosePreflight:           daemonInvariantSourceHybrid,
 		daemonInvariantTaskDelete:                   daemonInvariantSourceHybrid,
@@ -25,6 +31,8 @@ func TestInvariantSourceMatrixIncludesExpectedRuntimeInvariants(t *testing.T) {
 		daemonInvariantTaskContextRisk:              daemonInvariantSourceProjection,
 		daemonInvariantTaskMergeBaseTarget:          daemonInvariantSourceProjection,
 		daemonInvariantTaskFollowOnMerge:            daemonInvariantSourceProjection,
+		daemonInvariantTaskSplitIntent:              daemonInvariantSourceHybrid,
+		daemonInvariantTaskPublicationQueue:         daemonInvariantSourceHybrid,
 		daemonInvariantWorkerObservation:            daemonInvariantSourceHybrid,
 		daemonInvariantInteractionWaiting:           daemonInvariantSourceProjection,
 		daemonInvariantInvestigationWaiting:         daemonInvariantSourceProjection,
@@ -35,15 +43,17 @@ func TestInvariantSourceMatrixIncludesExpectedRuntimeInvariants(t *testing.T) {
 		daemonInvariantOrchestrationScope:           daemonInvariantSourceProjection,
 		daemonInvariantOrchestrationSingleton:       daemonInvariantSourceHybrid,
 		daemonInvariantOrchestrationRootedBootstrap: daemonInvariantSourceHybrid,
+		daemonInvariantOrchestrationRootBlockerGate: daemonInvariantSourceProjection,
 		daemonInvariantOrchestrationCompletion:      daemonInvariantSourceHybrid,
 		daemonInvariantOrchestrationCandidates:      daemonInvariantSourceProjection,
 		daemonInvariantOrchestrationParentWake:      daemonInvariantSourceHybrid,
-		daemonInvariantOrchestrationReview:     daemonInvariantSourceHybrid,
+		daemonInvariantOrchestrationReview:          daemonInvariantSourceHybrid,
 		daemonInvariantOrchestrationClaimStart:      daemonInvariantSourceHybrid,
 		daemonInvariantOrchestrationLoop:            daemonInvariantSourceProjection,
-		daemonInvariantProjectionDeltaStream:   daemonInvariantSourceProjection,
-		daemonInvariantTmuxObservation:         daemonInvariantSourceTmux,
+		daemonInvariantProjectionDeltaStream:        daemonInvariantSourceProjection,
+		daemonInvariantTmuxObservation:              daemonInvariantSourceTmux,
 		daemonInvariantValidationCapacity:           daemonInvariantSourceProjection,
+		daemonInvariantPublicationEvidence:          daemonInvariantSourceProjection,
 	}
 	for id, want := range expected {
 		got, ok := matrix[id]
@@ -52,6 +62,17 @@ func TestInvariantSourceMatrixIncludesExpectedRuntimeInvariants(t *testing.T) {
 		}
 		if got != want {
 			t.Fatalf("source matrix[%q] = %q, want %q", id, got, want)
+		}
+	}
+}
+
+func TestInvariantSourceMatrixUsesReviewCheckpointVocabulary(t *testing.T) {
+	if got, want := protocol.KnownDaemonInvariantCount(), len(daemonInvariantSourceMatrix); got != want {
+		t.Fatalf("review checkpoint vocabulary has %d invariants, source matrix has %d", got, want)
+	}
+	for id := range daemonInvariantSourceMatrix {
+		if !protocol.KnownDaemonInvariant(string(id)) {
+			t.Errorf("invariant %q is missing from review checkpoint vocabulary", id)
 		}
 	}
 }

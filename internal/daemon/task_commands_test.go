@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/riordanpawley/azedarach/internal/client/daemonclient"
 	appconfig "github.com/riordanpawley/azedarach/internal/config"
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	daemonhandlers "github.com/riordanpawley/azedarach/internal/daemon/handlers"
@@ -1323,6 +1325,48 @@ func TestHandleTaskListConsumesAsynchronousMissingTmuxObservation(t *testing.T) 
 	}
 	if row.ObservedState != daemonstate.SessionStateStopped {
 		t.Fatalf("observed state = %s, want stopped", row.ObservedState)
+	}
+}
+
+func TestTaskRuntimeCleanupRepairsPurgeManagedIdentityForMissingSession(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		repair func(*Daemon, context.Context, string, string) error
+	}{
+		{name: "close preflight", repair: (*Daemon).repairStaleSessionRuntimeProjections},
+		{name: "post cleanup", repair: (*Daemon).repairStaleRuntimeProjections},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			const projectID, taskID, sessionID = "cleanup-project", "az-1", "cleanup-session"
+			store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+			t.Cleanup(func() { _ = store.Close() })
+			observedAt := time.Date(2026, time.January, 1, 12, 30, 0, 0, time.UTC)
+			if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
+				ID: sessionID, IssueID: taskID, State: daemonstate.SessionStateRunning,
+				ObservedState: daemonstate.SessionStateRunning, UpdatedAt: observedAt,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			d := &Daemon{
+				cfg: Config{Logger: slog.Default()}, tmux: tmux.NewClient(&testTmuxRunner{sessions: map[string]bool{}}, slog.Default()),
+				runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+			}
+			d.recordManagedAgentIdentityProjection(daemonstate.ManagedAgentIdentity{
+				ProjectID: projectID, SessionID: sessionID, LogicalPaneID: "agent", TmuxPaneID: "7",
+				PanePID: 123, AgentIncarnation: "cleanup-incarnation", ObservedAt: observedAt,
+			}, true)
+			if err := tt.repair(d, ctx, projectID, taskID); err != nil {
+				t.Fatalf("repair missing task session: %v", err)
+			}
+			projected, found, err := store.GetSessionState(ctx, projectID, sessionID)
+			if err != nil || !found || projected.ObservedState != daemonstate.SessionStateStopped {
+				t.Fatalf("terminal task session projection = %+v found=%t err=%v", projected, found, err)
+			}
+			if _, found := d.projectedManagedAgentIdentity(projectID, sessionID, "agent"); found {
+				t.Fatal("task runtime cleanup retained managed-agent identity projection")
+			}
+		})
 	}
 }
 
@@ -3030,19 +3074,19 @@ func TestTaskClosePreflightEnforcesInvestigationDispositionAcceptance(t *testing
 		{name: "human facing remains gated", wantReason: "human-facing investigation lacks explicit issue-specific findings acceptance"},
 		{name: "internal accepted", events: []issues.IssueObservationEventParams{
 			{Type: domain.IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}},
-			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
+			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator}},
 		}},
 		{name: "internal returned findings remain blocked", events: []issues.IssueObservationEventParams{
 			{Type: domain.IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}},
-			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
-			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-return", Payload: map[string]any{"outcome": "returned", "actor_id": "reviewer"}},
+			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator}},
+			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-return", Payload: map[string]any{"outcome": "returned", "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator}},
 		}, wantReason: "unresolved returned findings"},
 		{name: "new review epoch rejects stale human acceptance", events: []issues.IssueObservationEventParams{
 			{Type: domain.IssueEventHumanInputProvided, Source: "human", Payload: map[string]any{"investigation_findings_accepted": true}},
 		}, newEpoch: true, wantReason: "human-facing investigation lacks explicit issue-specific findings acceptance"},
 		{name: "new review epoch rejects stale internal acceptance", events: []issues.IssueObservationEventParams{
 			{Type: domain.IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}},
-			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
+			{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator}},
 		}, newEpoch: true, wantReason: "internal review lacks durable accepted reviewer outcome"},
 	}
 	for _, tt := range tests {
@@ -4167,6 +4211,861 @@ func TestTaskCloseRepairsLegacyProjectRuntimeProjectionBeforeFinalStatusUpdate(t
 	}
 }
 
+func TestCommittedCloseAdvancesMaterializedTaskReadsWhileRuntimeEnrichmentIsBlocked(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	projectID := "proj-committed-close-read-floor"
+	issuesClient, repoDir := newTestIssueClient(t)
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "committed close read floor", Type: domain.TypeTask, Priority: domain.P2, Status: domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hydrateCalls atomic.Int32
+	hydrateEntered := make(chan struct{})
+	releaseHydrate := make(chan struct{})
+	materializer := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(issuesClient), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		if hydrateCalls.Add(1) == 2 {
+			close(hydrateEntered)
+			<-releaseHydrate
+		}
+		return tasks, nil
+	})
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	refreshDone := make(chan error, 1)
+	go func() { refreshDone <- materializer.refreshRuntime(ctx, []string{taskID}) }()
+	<-hydrateEntered
+
+	d := &Daemon{
+		cfg:                   Config{RepoDir: repoDir, Logger: logger, BaseBranch: "main"},
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		materializers:        map[string]*projectReadMaterializer{projectID: materializer},
+		materializersStarted: true,
+		revision:             map[string]uint64{},
+		hub:                  publish.NewHub(16, 8, logger),
+	}
+	closeBody, err := json.Marshal(taskCloseRequest{TaskID: taskID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeResp, err := d.handleTaskClose(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-task-close-read-floor",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.close",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            closeBody,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !closeResp.OK {
+		t.Fatalf("task.close response = %+v", closeResp.Error)
+	}
+
+	assertRead := func(name string, resp protocol.ResponseEnvelope) {
+		t.Helper()
+		if !resp.OK {
+			t.Fatalf("%s response = %+v", name, resp.Error)
+		}
+		payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+		if err != nil {
+			t.Fatalf("decode %s: %v", name, err)
+		}
+		found := false
+		for _, task := range payload.Tasks {
+			if task.ID.String() == taskID {
+				found = true
+				if task.Status != domain.StatusDone {
+					t.Fatalf("%s task status = %s, want %s", name, task.Status, domain.StatusDone)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("%s omitted committed issue %s", name, taskID)
+		}
+	}
+	request := func(command string, body any) protocol.RequestEnvelope {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: naming.RequestID("req-" + command), Kind: protocol.EnvelopeKindCommand, Command: command, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: encoded}
+	}
+	getResp, err := d.handleTaskGet(ctx, request("task.get", map[string]any{"task_id": taskID}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRead("task.get", getResp)
+	getManyResp, err := d.handleTaskGetMany(ctx, request("task.get-many", map[string]any{"task_ids": []string{taskID}, "metadata_only": true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRead("task.get-many", getManyResp)
+	listResp, err := d.handleTaskList(ctx, request("task.list", map[string]any{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRead("task.list", listResp)
+	searchResp, err := d.handleTaskList(ctx, request("task.search", map[string]any{"query": "committed close"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRead("task.search", searchResp)
+	projectTasks, _, err := d.projectReadSnapshot(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projectTasks) != 1 || projectTasks[0].Status != domain.StatusDone {
+		t.Fatalf("orchestration project snapshot source = %+v, want committed closed lifecycle", projectTasks)
+	}
+
+	close(releaseHydrate)
+	if err := <-refreshDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTaskCreateIntentReplaysCanonicalChildAndRejectsConflictingReuse(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	client := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), logger)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	parent, err := client.Create(ctx, issues.CreateTaskParams{Title: "parent", Type: domain.TypeEpic})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{cfg: Config{Logger: logger}, issues: client, revision: map[string]uint64{}, hub: publish.NewHub(8, 4, logger)}
+	request := func(intentKey, title string) protocol.RequestEnvelope {
+		body, marshalErr := json.Marshal(map[string]any{"intent_key": intentKey, "title": title, "type": domain.TypeTask, "parent_id": parent, "created_from_id": parent})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		return protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: "split-create", Kind: protocol.EnvelopeKindCommand, Command: daemonclient.CommandTaskCreate, Meta: protocol.Metadata{ProjectID: "project"}, Body: body}
+	}
+	first, err := d.handleTaskCreate(ctx, request("split-1", "child"))
+	if err != nil || !first.OK {
+		t.Fatalf("first response=%+v err=%v", first, err)
+	}
+	var firstBody daemonclient.TaskIDResponse
+	if err := json.Unmarshal(first.Body, &firstBody); err != nil || !firstBody.Created {
+		t.Fatalf("first body=%+v err=%v", firstBody, err)
+	}
+	replay, err := d.handleTaskCreate(ctx, request("split-1", "child"))
+	if err != nil || !replay.OK {
+		t.Fatalf("replay response=%+v err=%v", replay, err)
+	}
+	var replayBody daemonclient.TaskIDResponse
+	if err := json.Unmarshal(replay.Body, &replayBody); err != nil || replayBody.Created || replayBody.TaskID != firstBody.TaskID || replay.Revision != 0 {
+		t.Fatalf("replay body=%+v revision=%d err=%v", replayBody, replay.Revision, err)
+	}
+	conflict, err := d.handleTaskCreate(ctx, request("split-1", "different"))
+	if err != nil || conflict.OK || conflict.Error == nil || conflict.Error.Code != protocol.ErrorCodeConflict {
+		t.Fatalf("conflict=%+v err=%v", conflict, err)
+	}
+	distinct, err := d.handleTaskCreate(ctx, request("split-2", "child"))
+	if err != nil || !distinct.OK {
+		t.Fatalf("distinct response=%+v err=%v", distinct, err)
+	}
+	var distinctBody daemonclient.TaskIDResponse
+	if err := json.Unmarshal(distinct.Body, &distinctBody); err != nil || !distinctBody.Created || distinctBody.TaskID == firstBody.TaskID {
+		t.Fatalf("byte-identical distinct invocation body=%+v first=%+v err=%v", distinctBody, firstBody, err)
+	}
+}
+
+func TestCommittedCreateSurvivesConcurrentWorktreeRefreshAndAdvancesMaterializedReads(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	projectID := "proj-committed-create-read-floor"
+	issuesClient, repoDir := newTestIssueClient(t)
+	dbPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "create read floor parent", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var hydrateCalls atomic.Int32
+	hydrateEntered := make(chan struct{})
+	releaseHydrate := make(chan struct{})
+	var releaseHydrateOnce sync.Once
+	release := func() { releaseHydrateOnce.Do(func() { close(releaseHydrate) }) }
+	t.Cleanup(release)
+	materializer := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(issuesClient), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		if hydrateCalls.Add(1) == 2 {
+			close(hydrateEntered)
+			<-releaseHydrate
+		}
+		return tasks, nil
+	})
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{
+		cfg:                   Config{RepoDir: repoDir, Logger: logger, BaseBranch: "main"},
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
+			projectID: runtimeStore,
+		},
+		materializers:        map[string]*projectReadMaterializer{projectID: materializer},
+		materializersStarted: true,
+		revision:             map[string]uint64{},
+		hub:                  publish.NewHub(16, 8, logger),
+	}
+
+	refreshDone := make(chan error, 1)
+	go func() {
+		refreshDone <- newRuntimeProjectionWriter(d).ReplaceWorktreeProjectionSnapshot(ctx, projectID, []daemonstate.WorktreeState{{
+			ProjectID: projectID,
+			IssueID:   parentID,
+			Path:      filepath.Join(repoDir, "parent-worktree"),
+			Branch:    "issue/" + parentID,
+			UpdatedAt: time.Date(2026, time.July, 18, 1, 0, 0, 0, time.UTC),
+		}})
+	}()
+	<-hydrateEntered
+
+	request := func(command string, body any) protocol.RequestEnvelope {
+		encoded, marshalErr := json.Marshal(body)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		return protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       naming.RequestID("req-" + command),
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         command,
+			Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+			Body:            encoded,
+		}
+	}
+	createResp, err := d.handleTaskCreate(ctx, request("task.create", map[string]any{
+		"title": "created during worktree refresh", "type": domain.TypeBug, "priority": domain.P1, "parent_id": parentID,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !createResp.OK {
+		t.Fatalf("task.create response = %+v", createResp.Error)
+	}
+	var created struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(createResp.Body, &created); err != nil {
+		t.Fatal(err)
+	}
+	dependencyResp, err := d.handleTaskDependencyAdd(ctx, request("task.dependency.add", map[string]any{
+		"task_id": created.TaskID, "depends_on_id": parentID, "dependency_type": domain.DependencyCreatedIn,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dependencyResp.OK {
+		t.Fatalf("task.dependency.add response = %+v", dependencyResp.Error)
+	}
+
+	independentDB, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = independentDB.Close() })
+	var issueCount, dependencyCount, eventCount int
+	if err := independentDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id=?`, created.TaskID).Scan(&issueCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := independentDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_dependencies WHERE issue_id=?`, created.TaskID).Scan(&dependencyCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := independentDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_observation_events WHERE issue_id=?`, created.TaskID).Scan(&eventCount); err != nil {
+		t.Fatal(err)
+	}
+	if issueCount != 1 || dependencyCount != 2 || eventCount < 3 {
+		t.Fatalf("independent durable read = issue:%d dependencies:%d events:%d, want 1/2/at least 3", issueCount, dependencyCount, eventCount)
+	}
+
+	assertCreatedRead := func(name string, resp protocol.ResponseEnvelope) {
+		t.Helper()
+		if !resp.OK {
+			t.Fatalf("%s response = %+v", name, resp.Error)
+		}
+		payload, decodeErr := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+		if decodeErr != nil {
+			t.Fatalf("decode %s: %v", name, decodeErr)
+		}
+		for _, task := range payload.Tasks {
+			if task.ID.String() == created.TaskID {
+				return
+			}
+		}
+		t.Fatalf("%s omitted committed create %s", name, created.TaskID)
+	}
+	getResp, err := d.handleTaskGet(ctx, request("task.get", map[string]any{"task_id": created.TaskID}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCreatedRead("task.get", getResp)
+	getManyResp, err := d.handleTaskGetMany(ctx, request("task.get-many", map[string]any{"task_ids": []string{created.TaskID}, "metadata_only": true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCreatedRead("task.get-many", getManyResp)
+	listResp, err := d.handleTaskList(ctx, request("task.list", map[string]any{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCreatedRead("task.list", listResp)
+	projectTasks, _, err := d.projectReadSnapshot(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found := findDaemonTaskByID(projectTasks, created.TaskID); !found {
+		t.Fatalf("orchestration project snapshot source omitted committed create %s", created.TaskID)
+	}
+
+	release()
+	if err := <-refreshDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCrossDaemonReadsConvergeCommittedLifecycleWithoutRuntimeRefresh(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	const projectID = "proj-cross-daemon-close-preflight"
+	issuesClient, repoDir := newTestIssueClient(t)
+	dbPath := filepath.Join(repoDir, ".azedarach", "azedarach.db")
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "parent ready to close", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "terminal child", Type: domain.TypeTask, Priority: domain.P2, Status: domain.StatusInReview, ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := naming.CanonicalSessionID(projectID, childID)
+	if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID: sessionID, IssueID: childID, State: daemonstate.SessionStateAttached,
+		ObservedState: daemonstate.SessionStateAttached, Activity: "busy", ActivitySource: "hooks",
+		UpdatedAt: time.Date(2026, time.July, 19, 1, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := &Daemon{
+		cfg:                    Config{RepoDir: repoDir, Logger: logger, BaseBranch: "main"},
+		issueClientsByProject:  map[string]*issues.Client{projectID: issuesClient},
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+		materializers:          map[string]*projectReadMaterializer{},
+		materializersStarted:   true,
+		revision:               map[string]uint64{projectID: 1},
+		hub:                    publish.NewHub(16, 8, logger),
+	}
+	var readerHydrateCalls atomic.Int32
+	readerMaterializer := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(issuesClient), func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		readerHydrateCalls.Add(1)
+		return reader.hydrateProjectReadTasks(hydrateCtx, projectID, issuesClient, tasks)
+	})
+	reader.configureProjectReadMaterializer(readerMaterializer, projectID, issuesClient)
+	if err := readerMaterializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	reader.materializers[projectID] = readerMaterializer
+	readerHydrateCalls.Store(0)
+	var readerUserSyncCalls atomic.Int32
+	reader.projectReadUserProjectionSync = func(context.Context, string, []string) error {
+		readerUserSyncCalls.Add(1)
+		return nil
+	}
+
+	tmuxRunner := newTestTmuxRunner(sessionID)
+	close(tmuxRunner.killRelease)
+	sessionStore := daemonstate.NewStore()
+	if _, err := sessionStore.ForceUpsertSession(projectID, sessionID, childID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatal(err)
+	}
+	writer := &Daemon{
+		cfg:                    Config{RepoDir: repoDir, Logger: logger, BaseBranch: "main"},
+		tmux:                   tmux.NewClient(tmuxRunner, logger),
+		issues:                 issuesClient,
+		issueClientsByProject:  map[string]*issues.Client{projectID: issuesClient},
+		session:                daemonhandlers.NewSessionHandler(sessionStore),
+		sessionStore:           sessionStore,
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+		revision:               map[string]uint64{projectID: 1},
+		hub:                    publish.NewHub(16, 8, logger),
+	}
+
+	request := func(command string, body any) protocol.RequestEnvelope {
+		encoded, marshalErr := json.Marshal(body)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		return protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion, RequestID: naming.RequestID("req-" + command),
+			Kind: protocol.EnvelopeKindCommand, Command: command,
+			Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: encoded,
+		}
+	}
+	stopResp, err := writer.handleSessionStopDirect(ctx, request("session.stop", map[string]string{
+		"project_id": projectID, "session_id": childID,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stopResp.OK {
+		t.Fatalf("session.stop response = %+v", stopResp.Error)
+	}
+	removeResp, err := writer.handleTaskDependencyRemove(ctx, request("task.dependency.remove", map[string]any{
+		"task_id": childID, "depends_on_id": parentID, "dependency_type": domain.DependencyParentChild,
+		"confirm": true, "confirm_parent_orphan": true,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !removeResp.OK {
+		t.Fatalf("task.dependency.remove response = %+v", removeResp.Error)
+	}
+
+	assertDetachedTerminalChild := func(name string, resp protocol.ResponseEnvelope, callErr error) {
+		t.Helper()
+		if callErr != nil {
+			t.Fatal(callErr)
+		}
+		if !resp.OK {
+			t.Fatalf("cross-daemon %s response = %+v", name, resp.Error)
+		}
+		payload, decodeErr := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+		if decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		child, found := findDaemonTaskByID(payload.Tasks, childID)
+		if !found {
+			t.Fatalf("cross-daemon %s omitted %s", name, childID)
+		}
+		if child.ParentID != nil {
+			t.Fatalf("cross-daemon %s child parent = %v, want committed parent removal from canonical delta", name, child.ParentID)
+		}
+	}
+	getResp, getErr := reader.handleTaskGet(ctx, request("task.get", map[string]any{"task_id": childID}))
+	assertDetachedTerminalChild("task.get", getResp, getErr)
+	getManyResp, getManyErr := reader.handleTaskGetMany(ctx, request("task.get-many", map[string]any{"task_ids": []string{childID}, "metadata_only": true}))
+	assertDetachedTerminalChild("task.get-many", getManyResp, getManyErr)
+	listResp, listErr := reader.handleTaskList(ctx, request("task.list", map[string]any{}))
+	assertDetachedTerminalChild("task.list", listResp, listErr)
+	searchResp, searchErr := reader.handleTaskList(ctx, request("task.search", map[string]any{"query": "terminal child"}))
+	assertDetachedTerminalChild("task.search", searchResp, searchErr)
+	if got := readerHydrateCalls.Load(); got != 0 {
+		t.Fatalf("ordinary cross-daemon reads invoked runtime hydration %d times", got)
+	}
+	if got := readerUserSyncCalls.Load(); got != 0 {
+		t.Fatalf("ordinary cross-daemon reads invoked user projection sync %d times", got)
+	}
+
+	preflightResp, err := reader.handleTaskClosePreflight(ctx, request("task.close_preflight", map[string]any{"task_id": parentID}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preflightResp.OK {
+		t.Fatalf("cross-daemon close preflight response = %+v, want removed child/session facts refreshed", preflightResp.Error)
+	}
+	if readerHydrateCalls.Load() == 0 || readerUserSyncCalls.Load() == 0 {
+		t.Fatalf("strict close preflight did not refresh runtime/user projections: hydration=%d user_sync=%d", readerHydrateCalls.Load(), readerUserSyncCalls.Load())
+	}
+}
+
+func TestCommittedSessionStopFailsUnavailableWhenTaskRuntimeRefreshFails(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	const projectID = "proj-session-stop-refresh-failure"
+	issuesClient, repoDir := newTestIssueClient(t)
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "stop refresh failure", Type: domain.TypeTask, Priority: domain.P1, Status: domain.StatusInProgress,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := naming.CanonicalSessionID(projectID, issueID)
+	if err := runtimeStore.UpsertSessionState(ctx, projectID, daemonstate.Session{
+		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateAttached,
+		ObservedState: daemonstate.SessionStateAttached, UpdatedAt: time.Date(2026, time.July, 19, 2, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sessionStore := daemonstate.NewStore()
+	if _, err := sessionStore.ForceUpsertSession(projectID, sessionID, issueID, daemonstate.SessionStateAttached); err != nil {
+		t.Fatal(err)
+	}
+	tmuxRunner := newTestTmuxRunner(sessionID)
+	close(tmuxRunner.killRelease)
+	d := &Daemon{
+		cfg:                    Config{RepoDir: repoDir, Logger: logger},
+		tmux:                   tmux.NewClient(tmuxRunner, logger),
+		issues:                 issuesClient,
+		issueClientsByProject:  map[string]*issues.Client{projectID: issuesClient},
+		session:                daemonhandlers.NewSessionHandler(sessionStore),
+		sessionStore:           sessionStore,
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+		materializers:          map[string]*projectReadMaterializer{},
+		materializersStarted:   true,
+		projectReadRuntimeHydrate: func(_ context.Context, _ string, tasks []domain.Task) ([]domain.Task, error) {
+			return nil, errors.New("injected runtime refresh failure")
+		},
+		revision: map[string]uint64{projectID: 1},
+		hub:      publish.NewHub(16, 8, logger),
+	}
+	body, err := json.Marshal(map[string]string{"project_id": projectID, "session_id": issueID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := d.handleSessionStopDirect(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion, RequestID: "req-stop-refresh-failure",
+		Kind: protocol.EnvelopeKindCommand, Command: "session.stop",
+		Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeUnavailable || !resp.Error.Retryable {
+		t.Fatalf("session.stop response = %+v, want retryable unavailable after committed stop", resp)
+	}
+	if !strings.Contains(resp.Error.Message, "injected runtime refresh failure") || len(resp.Body) != 0 {
+		t.Fatalf("session.stop error/body = %+v/%q, want injected refresh failure and no success payload", resp.Error, resp.Body)
+	}
+	row, found, err := runtimeStore.GetSessionState(ctx, projectID, sessionID)
+	if err != nil || !found || row.State != daemonstate.SessionStateStopped || row.ObservedState != daemonstate.SessionStateStopped {
+		t.Fatalf("durable session after unavailable = %+v found=%t err=%v, want committed stopped state", row, found, err)
+	}
+}
+
+func TestMaterializedTaskReadsFailUnavailableWithoutStalePayload(t *testing.T) {
+	ctx := context.Background()
+	const (
+		projectID = "proj-materializer-unavailable"
+	)
+	issuesClient, _ := newTestIssueClient(t)
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "stale payload must not escape", Status: domain.StatusInProgress, Type: domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	materializer := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(issuesClient), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) { return tasks, nil })
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	materializer.markUnhealthy(errors.New("injected structural failure"), false)
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		materializersStarted:  true,
+		materializers:         map[string]*projectReadMaterializer{projectID: materializer},
+		revision:              map[string]uint64{projectID: 7},
+	}
+	request := func(command string, body any) protocol.RequestEnvelope {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion,
+			RequestID:       naming.RequestID("req-unavailable-" + command),
+			Kind:            protocol.EnvelopeKindCommand,
+			Command:         command,
+			Meta:            protocol.Metadata{ProjectID: projectID},
+			Body:            encoded,
+		}
+	}
+	tests := []struct {
+		name   string
+		invoke func() (protocol.ResponseEnvelope, error)
+	}{
+		{name: "list", invoke: func() (protocol.ResponseEnvelope, error) {
+			return d.handleTaskList(ctx, request("task.list", map[string]any{}))
+		}},
+		{name: "search", invoke: func() (protocol.ResponseEnvelope, error) {
+			return d.handleTaskList(ctx, request("task.search", map[string]any{"query": "stale"}))
+		}},
+		{name: "get", invoke: func() (protocol.ResponseEnvelope, error) {
+			return d.handleTaskGet(ctx, request("task.get", map[string]any{"task_id": taskID}))
+		}},
+		{name: "get-many", invoke: func() (protocol.ResponseEnvelope, error) {
+			return d.handleTaskGetMany(ctx, request("task.get-many", map[string]any{"task_ids": []string{taskID}, "metadata_only": true}))
+		}},
+		{name: "close-preflight", invoke: func() (protocol.ResponseEnvelope, error) {
+			return d.handleTaskClosePreflight(ctx, request("task.close_preflight", map[string]any{"task_id": taskID}))
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			resp, err := test.invoke()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.OK || resp.Error == nil {
+				t.Fatalf("response = %+v, want materializer-unavailable error", resp)
+			}
+			if resp.Error.Code != protocol.ErrorCodeUnavailable || !resp.Error.Retryable {
+				t.Fatalf("error = %+v, want retryable unavailable", resp.Error)
+			}
+			if !strings.Contains(resp.Error.Message, "injected structural failure") {
+				t.Fatalf("error message = %q, want injected structural failure", resp.Error.Message)
+			}
+			if len(resp.Body) != 0 {
+				t.Fatalf("body = %q, want no stale payload", resp.Body)
+			}
+		})
+	}
+}
+
+func TestProductionRuntimeHydrationFailureDoesNotBlockOrdinaryReads(t *testing.T) {
+	ctx := context.Background()
+	const projectID = "proj-production-runtime-unavailable"
+	issuesClient, _ := newTestIssueClient(t)
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "runtime failure must fail closed", Status: domain.StatusInReview, Type: domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failHydration atomic.Bool
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issues:                issuesClient,
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		materializersStarted:  true,
+		materializers:         map[string]*projectReadMaterializer{},
+		projectReadRuntimeHydrate: func(_ context.Context, _ string, tasks []domain.Task) ([]domain.Task, error) {
+			if failHydration.Load() {
+				return nil, errors.New("injected production runtime hydration failure")
+			}
+			return tasks, nil
+		},
+		revision: map[string]uint64{projectID: 7},
+	}
+	if _, err := d.ensureProjectReadMaterializer(ctx, projectID, issuesClient); err != nil {
+		t.Fatalf("bootstrap production materializer: %v", err)
+	}
+	failHydration.Store(true)
+	request := func(command string, body any) protocol.RequestEnvelope {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return protocol.RequestEnvelope{
+			ProtocolVersion: protocol.CurrentVersion, RequestID: naming.RequestID("req-production-unavailable-" + command),
+			Kind: protocol.EnvelopeKindCommand, Command: command,
+			Meta: protocol.Metadata{ProjectID: projectID}, Body: encoded,
+		}
+	}
+	ordinaryReads := []struct {
+		name   string
+		invoke func() (protocol.ResponseEnvelope, error)
+	}{
+		{name: "list", invoke: func() (protocol.ResponseEnvelope, error) {
+			return d.handleTaskList(ctx, request("task.list", map[string]any{}))
+		}},
+		{name: "search", invoke: func() (protocol.ResponseEnvelope, error) {
+			return d.handleTaskList(ctx, request("task.search", map[string]any{"query": "runtime failure"}))
+		}},
+		{name: "get", invoke: func() (protocol.ResponseEnvelope, error) {
+			return d.handleTaskGet(ctx, request("task.get", map[string]any{"task_id": taskID}))
+		}},
+		{name: "get-many", invoke: func() (protocol.ResponseEnvelope, error) {
+			return d.handleTaskGetMany(ctx, request("task.get-many", map[string]any{"task_ids": []string{taskID}, "metadata_only": true}))
+		}},
+	}
+	for _, test := range ordinaryReads {
+		t.Run(test.name, func(t *testing.T) {
+			resp, err := test.invoke()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !resp.OK || resp.Error != nil || len(resp.Body) == 0 {
+				t.Fatalf("response = %+v, want last verified projected payload without synchronous hydration", resp)
+			}
+		})
+	}
+	preflight, err := d.handleTaskClosePreflight(ctx, request("task.close_preflight", map[string]any{"task_id": taskID}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preflight.OK || preflight.Error == nil || preflight.Error.Code != protocol.ErrorCodeUnavailable || !preflight.Error.Retryable {
+		t.Fatalf("close preflight response = %+v, want strict invariant refresh failure", preflight)
+	}
+	if !strings.Contains(preflight.Error.Message, "injected production runtime hydration failure") || len(preflight.Body) != 0 {
+		t.Fatalf("close preflight error/body = %+v/%q, want strict hydration failure", preflight.Error, preflight.Body)
+	}
+	deletePreflight, err := d.handleTaskDeletePreflight(ctx, request("task.delete_preflight", map[string]any{"task_id": taskID}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deletePreflight.OK || deletePreflight.Error == nil || deletePreflight.Error.Code != protocol.ErrorCodeUnavailable || !deletePreflight.Error.Retryable || len(deletePreflight.Body) != 0 {
+		t.Fatalf("delete preflight response = %+v, want retryable unavailable without payload", deletePreflight)
+	}
+	deleteResp, err := d.handleTaskDelete(ctx, request("task.delete", taskDeleteRequest{TaskID: taskID}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleteResp.OK || deleteResp.Error == nil || deleteResp.Error.Code != protocol.ErrorCodeUnavailable || !deleteResp.Error.Retryable || len(deleteResp.Body) != 0 {
+		t.Fatalf("task.delete response = %+v, want retryable unavailable without payload", deleteResp)
+	}
+	if _, err := issuesClient.GetWithRuntime(ctx, projectID, taskID); err != nil {
+		t.Fatalf("task mutated after unavailable delete preflight: %v", err)
+	}
+}
+
+func TestEmbeddedOrdinaryReadUsesCanonicalBootstrapOnly(t *testing.T) {
+	ctx := context.Background()
+	const projectID = "proj-embedded-canonical-only"
+	issuesClient, repoDir := newTestIssueClient(t)
+	parentID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "embedded canonical row", Status: domain.StatusInProgress, Type: domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "archived canonical child", Status: domain.StatusOpen, Type: domain.TypeTask, ParentID: &parentID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := issuesClient.Archive(ctx, childID); err != nil {
+		t.Fatal(err)
+	}
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
+		ID: naming.CanonicalSessionID(projectID, parentID), IssueID: parentID,
+		State: daemonstate.SessionStateAttached, ObservedState: daemonstate.SessionStateAttached, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var hydrateCalls atomic.Int32
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issues:                issuesClient,
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		materializers:         map[string]*projectReadMaterializer{},
+		projectReadRuntimeHydrate: func(_ context.Context, _ string, tasks []domain.Task) ([]domain.Task, error) {
+			hydrateCalls.Add(1)
+			return nil, errors.New("ordinary embedded read invoked runtime hydration")
+		},
+		revision: map[string]uint64{projectID: 1},
+	}
+	tasks, _, err := d.convergedProjectReadSnapshot(ctx, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hydrateCalls.Load(); got != 0 {
+		t.Fatalf("embedded ordinary read hydration calls = %d, want 0", got)
+	}
+	byID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID.String()] = task
+	}
+	parent, parentFound := byID[parentID]
+	child, childFound := byID[childID]
+	if !parentFound || !childFound || !child.State.IsArchived() || child.ParentID == nil || child.ParentID.String() != parentID {
+		t.Fatalf("canonical bootstrap tasks = %+v, want active parent plus archived dependent child", tasks)
+	}
+	if parent.Session != nil || parent.HasTmuxSession || parent.HasWorktree {
+		t.Fatalf("canonical bootstrap leaked runtime projection: %+v", parent)
+	}
+}
+
+func TestOrdinaryReadDoesNotInitializeMissingProductionMaterializer(t *testing.T) {
+	ctx := context.Background()
+	const projectID = "proj-missing-production-materializer"
+	issuesClient, _ := newTestIssueClient(t)
+	if _, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "durable but not initialized", Status: domain.StatusInProgress, Type: domain.TypeTask,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var hydrateCalls atomic.Int32
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		materializersStarted:  true,
+		materializers:         map[string]*projectReadMaterializer{},
+		projectReadRuntimeHydrate: func(_ context.Context, _ string, tasks []domain.Task) ([]domain.Task, error) {
+			hydrateCalls.Add(1)
+			return tasks, nil
+		},
+		revision: map[string]uint64{projectID: 1},
+	}
+	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-missing-production-materializer",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.list",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.OK || resp.Error == nil || resp.Error.Code != protocol.ErrorCodeUnavailable {
+		t.Fatalf("task.list response = %+v, want unavailable materializer", resp)
+	}
+	if got := hydrateCalls.Load(); got != 0 {
+		t.Fatalf("ordinary read initialized runtime projection %d times, want 0", got)
+	}
+}
+
+func TestEmbeddedInvariantReadUsesStrictHydrationAfterBootstrap(t *testing.T) {
+	ctx := context.Background()
+	const projectID = "proj-embedded-runtime-unavailable"
+	issuesClient, _ := newTestIssueClient(t)
+	_, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "embedded strict runtime", Status: domain.StatusInProgress, Type: domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hydrateCalls atomic.Int32
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issues:                issuesClient,
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		materializers:         map[string]*projectReadMaterializer{},
+		projectReadRuntimeHydrate: func(_ context.Context, _ string, tasks []domain.Task) ([]domain.Task, error) {
+			if hydrateCalls.Add(1) > 1 {
+				return nil, errors.New("injected embedded strict hydration failure")
+			}
+			return tasks, nil
+		},
+		revision: map[string]uint64{projectID: 1},
+	}
+	tasks, _, err := d.convergedProjectReadSnapshotForInvariant(ctx, projectID)
+	if err == nil || !isProjectReadUnavailableError(err) {
+		t.Fatalf("tasks/error = %+v/%v, want project-read unavailable", tasks, err)
+	}
+	if !strings.Contains(err.Error(), "injected embedded strict hydration failure") {
+		t.Fatalf("error = %v, want embedded strict failure", err)
+	}
+}
+
 func TestTaskCloseRepairsVerifiedStaleLegacyProjectSessionProjection(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
@@ -5083,6 +5982,8 @@ func TestTaskCloseCommandIntegratesThroughDaemon(t *testing.T) {
 			return integrationTestWorktreeList(worktreeListOutput, scratchWorktree, "merged-sha"), nil
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
 			return "", nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "branch" && args[3] == "--show-current":
+			return "main", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
 			return filepath.Join(repoDir, ".git"), nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == sourceBranch+"^{commit}":
@@ -5317,6 +6218,8 @@ func TestTaskCloseCommandIntegrationIgnoresDuplicateIssueTargetWorktreeFromOther
 			return "A  domain/commerce/tsconfig.json\n", nil
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
 			return "", nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "branch" && args[3] == "--show-current":
+			return "main", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
 			return filepath.Join(repoDir, ".git"), nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == sourceBranch+"^{commit}":
@@ -5429,7 +6332,7 @@ func TestTaskCloseCommandIntegrationIgnoresDuplicateIssueTargetWorktreeFromOther
 	}
 }
 
-func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved(t *testing.T) {
+func TestTaskCloseCommandRetryRepairsProjectionAndReleasesLeaseAfterIntegratedWorktreeWasRemoved(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	projectID := "proj-close-integrate-cleanup-fail-retry"
@@ -5448,6 +6351,13 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 	})
 	if err != nil {
 		t.Fatalf("create task: %v", err)
+	}
+	if _, err := issuesClient.ClaimOwnershipWithRuntime(ctx, projectID, taskID, issues.OwnershipClaimParams{
+		OwnerID:   "worker-a",
+		OwnerKind: "agent",
+		Purpose:   domain.CoordinationLeaseExecution,
+	}); err != nil {
+		t.Fatalf("claim execution lease: %v", err)
 	}
 	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
 	if err := os.MkdirAll(sourceWorktree, 0o755); err != nil {
@@ -5499,6 +6409,8 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 			return "", fmt.Errorf("cannot change to %s: no such file or directory", sourceWorktree)
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
 			return "", nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "branch" && args[3] == "--show-current":
+			return "main", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
 			return filepath.Join(repoDir, ".git"), nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == sourceBranch+"^{commit}":
@@ -5663,6 +6575,9 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 	if task.Status != domain.StatusInReview {
 		t.Fatalf("task status after failed close = %s, want %s", task.Status, domain.StatusInReview)
 	}
+	if task.Ownership == nil || task.Ownership.OwnerID != "worker-a" {
+		t.Fatalf("task ownership after failed close = %+v, want execution lease preserved", task.Ownership)
+	}
 	receipts, err := issuesClient.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{
 		Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted},
 	})
@@ -5672,6 +6587,7 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 	if len(receipts) != 1 || observationPayloadString(receipts[0].Payload, "source_oid") != "source-sha" || observationPayloadString(receipts[0].Payload, "target_oid") != "merged-sha" {
 		t.Fatalf("exact integration receipts = %+v, want one source-sha/merged-sha receipt before destructive cleanup", receipts)
 	}
+	originalReceipt := receipts[0]
 	if _, err := os.Stat(sourceWorktree); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("source worktree after failed close stat error = %v, want removed path", err)
 	}
@@ -5716,6 +6632,18 @@ func TestTaskCloseCommandRetryRepairsProjectionAfterIntegratedWorktreeWasRemoved
 	}
 	if closed.Status != domain.StatusDone {
 		t.Fatalf("task status after retry = %s, want %s", closed.Status, domain.StatusDone)
+	}
+	if closed.Ownership != nil || len(closed.CoordinationLeases) != 0 {
+		t.Fatalf("closed task leases = %+v ownership = %+v, want terminal retry to release execution lease", closed.CoordinationLeases, closed.Ownership)
+	}
+	receipts, err = issuesClient.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{
+		Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted},
+	})
+	if err != nil {
+		t.Fatalf("list exact integration receipts after retry: %v", err)
+	}
+	if len(receipts) != 1 || receipts[0].ID != originalReceipt.ID || !reflect.DeepEqual(receipts[0].Payload, originalReceipt.Payload) {
+		t.Fatalf("exact integration receipts after retry = %+v, want only original receipt id=%d payload=%+v", receipts, originalReceipt.ID, originalReceipt.Payload)
 	}
 	joined := strings.Join(commands, "\n")
 	if got := strings.Count(joined, "merge --no-edit "+sourceBranch); got != 1 {
@@ -5965,18 +6893,28 @@ func TestTaskCloseExactReceiptAcceptsAndRepairsMissingProjectionIdempotentlyInRe
 	runDaemonTestGit(t, repoDir, "init", "-q", "-b", "main")
 	runDaemonTestGit(t, repoDir, "config", "user.name", "Azedarach Test")
 	runDaemonTestGit(t, repoDir, "config", "user.email", "azedarach@example.com")
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatalf("mkdir project config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, ".azedarach", "config.json"), []byte(`{"publicationEvidence":{"policyVersion":"portable-v1"}}`), 0o644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(repoDir, "tracked.txt"), []byte("seed\n"), 0o644); err != nil {
 		t.Fatalf("write seed: %v", err)
 	}
 	runDaemonTestGit(t, repoDir, "add", "tracked.txt")
 	runDaemonTestGit(t, repoDir, "commit", "-q", "-m", "chore: seed")
+	baseOID := runDaemonTestGitOutput(t, repoDir, "rev-parse", "HEAD")
 
 	dbPath := filepath.Join(t.TempDir(), "issues.db")
 	issuesClient := newMigratedIssueClientAtPath(t, dbPath, logger)
 	t.Cleanup(func() { _ = issuesClient.CloseDB() })
 	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(dbPath, logger)
 	t.Cleanup(func() { _ = runtimeStore.Close() })
-	projectID := "proj-real-repair"
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("resolve project id: %v", err)
+	}
 	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
 		Title: "Repair exact receipt retry", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInReview,
 	})
@@ -6002,7 +6940,11 @@ func TestTaskCloseExactReceiptAcceptsAndRepairsMissingProjectionIdempotentlyInRe
 	}
 	if _, err := issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
 		Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close", SourceCommand: "integrate-before-close",
-		Payload: map[string]any{"project_id": projectID, "source_branch": sourceBranch, "target_branch": "main", "source_oid": sourceOID, "target_oid": targetOID},
+		Payload: map[string]any{
+			"project_id": projectID, "source_branch": sourceBranch, "target_branch": "main",
+			"integrated": true, "configured_base_target": true, "target_id": "base",
+			"base_oid": baseOID, "source_oid": sourceOID, "target_oid": targetOID, "publication_operation_id": "",
+		},
 	}); err != nil {
 		t.Fatalf("seed exact integration receipt: %v", err)
 	}
@@ -6021,7 +6963,14 @@ func TestTaskCloseExactReceiptAcceptsAndRepairsMissingProjectionIdempotentlyInRe
 		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore { return runtimeStore },
 		logger:                      logger,
 	}
-	receipt, found, err := d.latestTaskCloseIntegrationReceipt(ctx, projectID, taskID, sourceBranch, "main")
+	recovered, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, true, "", "")
+	if err != nil {
+		t.Fatalf("recover configured-base receipt with removed source: %v", err)
+	}
+	if !recovered.ReceiptRecovered || recovered.TargetOID != targetOID || recovered.PublicationOperationID != "" {
+		t.Fatalf("recovered configured-base receipt = %+v, want exact empty-operation receipt", recovered)
+	}
+	receipt, found, err := d.latestTaskCloseIntegrationReceipt(ctx, projectID, taskID, sourceBranch)
 	if err != nil || !found {
 		t.Fatalf("load exact integration receipt found=%v err=%v", found, err)
 	}
@@ -6083,6 +7032,8 @@ func TestTaskCloseIntegrationRetriesRepeatedlyWhenTargetHeadMovesAfterScratchVal
 			return integrationTestWorktreeList(worktreeListOutput, scratchWorktree, scratchDesiredHeads[scratchWorktree]), nil
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
 			return "", nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "branch" && args[3] == "--show-current":
+			return "main", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--git-common-dir":
 			return filepath.Join(repoDir, ".git"), nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == repoDir && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
@@ -6164,7 +7115,7 @@ func TestTaskCloseIntegrationRetriesRepeatedlyWhenTargetHeadMovesAfterScratchVal
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "", "")
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6183,6 +7134,88 @@ func TestTaskCloseIntegrationRetriesRepeatedlyWhenTargetHeadMovesAfterScratchVal
 	}
 }
 
+func TestTaskCloseExpectedBaseFenceRejectsPostCheckMovement(t *testing.T) {
+	repo := t.TempDir()
+	runDaemonTestGit(t, repo, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repo, "config", "user.email", "test@example.com")
+	runDaemonTestGit(t, repo, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDaemonTestGit(t, repo, "add", "tracked.txt")
+	runDaemonTestGit(t, repo, "commit", "-q", "-m", "base")
+	expectedBase := runDaemonTestGitOutput(t, repo, "rev-parse", "main")
+	runDaemonTestGit(t, repo, "checkout", "-q", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDaemonTestGit(t, repo, "commit", "-q", "-am", "feature")
+	runDaemonTestGit(t, repo, "checkout", "-q", "main")
+	baseChecked := make(chan struct{})
+	baseMoved := make(chan struct{})
+	moveErr := make(chan error, 1)
+	go func() {
+		<-baseChecked
+		output, err := exec.Command("git", "-C", repo, "commit", "-q", "--allow-empty", "-m", "move base after publication check").CombinedOutput()
+		if err != nil {
+			err = fmt.Errorf("move base: %w: %s", err, strings.TrimSpace(string(output)))
+		}
+		moveErr <- err
+		close(baseMoved)
+	}()
+	close(baseChecked)
+	<-baseMoved
+	if err := <-moveErr; err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{git: git.NewClient(git.NewExecRunner(repo), slog.Default())}
+	_, err := d.mergeTaskBranchBeforeClose(context.Background(), "project", "issue", repo, "main", "feature", true, expectedBase)
+	var stale *taskCloseExpectedBaseStaleError
+	if !errors.As(err, &stale) || stale.Expected != expectedBase || stale.Actual == expectedBase {
+		t.Fatalf("expected-base fence error = %#v, want typed stale after post-check movement", err)
+	}
+}
+
+func TestTaskCloseExpectedBaseFenceRejectsMovementDuringCandidateValidation(t *testing.T) {
+	repo := t.TempDir()
+	runDaemonTestGit(t, repo, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repo, "config", "user.email", "test@example.com")
+	runDaemonTestGit(t, repo, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDaemonTestGit(t, repo, "add", "tracked.txt")
+	runDaemonTestGit(t, repo, "commit", "-q", "-m", "base")
+	expectedBase := runDaemonTestGitOutput(t, repo, "rev-parse", "main")
+	runDaemonTestGit(t, repo, "checkout", "-q", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDaemonTestGit(t, repo, "commit", "-q", "-am", "feature")
+	runDaemonTestGit(t, repo, "checkout", "-q", "main")
+	d := &Daemon{git: git.NewClient(git.NewExecRunner(repo), slog.Default())}
+	var moveOnce sync.Once
+	ctx := git.WithCandidateValidationCommand(context.Background(), "true")
+	ctx = git.WithCandidateValidationObserver(ctx, func(attempt git.CandidateValidationAttempt) {
+		if attempt.Status == git.CandidateValidationPassed {
+			moveOnce.Do(func() {
+				runDaemonTestGit(t, repo, "commit", "-q", "--allow-empty", "-m", "move base during validation")
+			})
+		}
+	})
+	_, err := d.mergeTaskBranchBeforeClose(ctx, "project", "issue", repo, "main", "feature", true, expectedBase)
+	var stale *taskCloseExpectedBaseStaleError
+	if !errors.As(err, &stale) || stale.Expected != expectedBase || stale.Actual == expectedBase {
+		t.Fatalf("merge error = %#v, want typed stale after during-validation movement", err)
+	}
+	if runDaemonTestGitOutput(t, repo, "rev-parse", "main") != stale.Actual {
+		t.Fatalf("typed stale actual = %s, want current target", stale.Actual)
+	}
+	if count := runDaemonTestGitOutput(t, repo, "rev-list", "--count", "main..feature"); count != "1" {
+		t.Fatalf("feature commits remaining after fenced apply = %s, want 1", count)
+	}
+}
+
 func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ctx := context.Background()
@@ -6194,6 +7227,9 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 	}
 	if err := os.MkdirAll(filepath.Join(projectRepo, ".azedarach"), 0o755); err != nil {
 		t.Fatalf("mkdir project .azedarach: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectRepo, ".azedarach", "config.json"), []byte(`{"publicationEvidence":{"policyVersion":"portable-v1"}}`), 0o644); err != nil {
+		t.Fatalf("write project publication config: %v", err)
 	}
 	if err := appconfig.SaveProjectsRegistry(&appconfig.ProjectsRegistry{
 		Projects: []appconfig.Project{{Name: "other", Path: projectRepo}},
@@ -6240,6 +7276,8 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 			return integrationTestWorktreeList(worktreeListOutput, scratchWorktree, "merged-sha"), nil
 		case len(args) >= 4 && args[0] == "-C" && args[2] == "status":
 			return "", nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == projectRepo && args[2] == "branch" && args[3] == "--show-current":
+			return "main", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == projectRepo && args[2] == "rev-parse" && args[3] == "--git-common-dir":
 			return filepath.Join(projectRepo, ".git"), nil
 		case len(args) >= 5 && args[0] == "-C" && args[1] == projectRepo && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == "HEAD":
@@ -6310,7 +7348,15 @@ func TestTaskCloseIntegrationBaseFallbackUsesProjectRepo(t *testing.T) {
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "", "")
+	if err == nil || !strings.Contains(err.Error(), "requires an accepted publication operation before synthetic merge or apply") {
+		t.Fatalf("unbound integrateTaskBeforeClose = (%+v, %v), want pre-integration publication authority failure", result, err)
+	}
+	if joined := strings.Join(commands, "\n"); strings.Contains(joined, "worktree add --detach") || strings.Contains(joined, "reset --hard") {
+		t.Fatalf("unbound configured-base close reached synthetic merge or apply:\n%s", joined)
+	}
+	ctx = withTaskClosePublicationBinding(ctx, "publication-test", "claim-test")
+	result, err = d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "", "")
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6372,7 +7418,7 @@ func TestTaskCloseIntegrationOriginBaseSkipsLocalMergeWhenRemoteTreeMatches(t *t
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "fetch" && args[3] == "origin":
 			fetchedOrigin = true
 			return "", nil
-		case len(args) >= 7 && args[0] == "-C" && args[1] == repoDir && args[2] == "diff" && args[3] == "--name-only" && args[4] == "origin/preview" && args[5] == sourceBranch:
+		case len(args) >= 8 && args[0] == "-C" && args[1] == repoDir && args[2] == "diff" && args[3] == "--name-only" && args[4] == "-z" && args[5] == "origin/preview" && args[6] == sourceBranch:
 			if !fetchedOrigin {
 				t.Fatal("origin close diff ran before fetching origin")
 			}
@@ -6421,7 +7467,7 @@ func TestTaskCloseIntegrationOriginBaseSkipsLocalMergeWhenRemoteTreeMatches(t *t
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "", "")
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6489,11 +7535,11 @@ func TestTaskCloseIntegrationOriginBaseAllowsRemoteAheadWhenSourceContained(t *t
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "fetch" && args[3] == "origin":
 			fetchedOrigin = true
 			return "", nil
-		case len(args) >= 7 && args[0] == "-C" && args[1] == repoDir && args[2] == "diff" && args[3] == "--name-only" && args[4] == "origin/preview" && args[5] == sourceBranch:
+		case len(args) >= 8 && args[0] == "-C" && args[1] == repoDir && args[2] == "diff" && args[3] == "--name-only" && args[4] == "-z" && args[5] == "origin/preview" && args[6] == sourceBranch:
 			if !fetchedOrigin {
 				t.Fatal("origin close diff ran before fetching origin")
 			}
-			return "docs/alchemy-infra.md\nops/infra/src/stacks/chefy-fly.test.ts\nops/infra/src/stacks/fly-configs.ts\n", nil
+			return "docs/alchemy-infra.md\x00ops/infra/src/stacks/chefy-fly.test.ts\x00ops/infra/src/stacks/fly-configs.ts\x00", nil
 		case len(args) >= 6 && args[0] == "-C" && args[1] == repoDir && args[2] == "merge-base" && args[3] == "--is-ancestor" && args[4] == sourceBranch && args[5] == "origin/preview":
 			checkedContainment = true
 			return "", nil
@@ -6541,7 +7587,7 @@ func TestTaskCloseIntegrationOriginBaseAllowsRemoteAheadWhenSourceContained(t *t
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "", "")
 	if err != nil {
 		t.Fatalf("integrateTaskBeforeClose error: %v", err)
 	}
@@ -6577,11 +7623,11 @@ func TestTaskCloseIntegrationOriginBaseRetryUsesExactReceiptAfterSourceRemoval(t
 	}
 	sourceBranch := "riordan/" + taskID + "/origin-retry"
 	receipt := taskCloseIntegrationReceipt{
-		ProjectID: projectID, SourceBranch: sourceBranch, TargetBranch: "origin/preview", SourceOID: "source-oid", TargetOID: "target-oid",
+		ProjectID: projectID, SourceBranch: sourceBranch, TargetBranch: "origin/preview", TargetID: "base", ConfiguredBaseTarget: true, SourceOID: "source-oid", TargetOID: "target-oid",
 	}
 	if _, err := issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
 		Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close", SourceCommand: "integrate-before-close",
-		Payload: map[string]any{"project_id": receipt.ProjectID, "source_branch": receipt.SourceBranch, "target_branch": receipt.TargetBranch, "source_oid": receipt.SourceOID, "target_oid": receipt.TargetOID},
+		Payload: map[string]any{"project_id": receipt.ProjectID, "source_branch": receipt.SourceBranch, "target_branch": receipt.TargetBranch, "target_id": receipt.TargetID, "configured_base_target": receipt.ConfiguredBaseTarget, "source_oid": receipt.SourceOID, "target_oid": receipt.TargetOID},
 	}); err != nil {
 		t.Fatalf("seed integration receipt: %v", err)
 	}
@@ -6609,7 +7655,7 @@ func TestTaskCloseIntegrationOriginBaseRetryUsesExactReceiptAfterSourceRemoval(t
 	}
 	result, err := d.integrateTaskBeforeCloseOriginBase(ctx, projectID, taskID, git.Worktree{
 		IssueID: taskID, Path: filepath.Join(repoDir, "removed-worktree"), Branch: sourceBranch,
-	}, repoDir, "preview", true, "")
+	}, repoDir, "preview", true, "", "")
 	if err != nil {
 		t.Fatalf("origin retry exact receipt error: %v", err)
 	}
@@ -6664,11 +7710,11 @@ func TestTaskCloseIntegrationOriginBaseRefusesLocalMergeWhenRemoteDiffRemains(t 
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "fetch" && args[3] == "origin":
 			fetchedOrigin = true
 			return "", nil
-		case len(args) >= 7 && args[0] == "-C" && args[1] == repoDir && args[2] == "diff" && args[3] == "--name-only" && args[4] == "origin/preview" && args[5] == sourceBranch:
+		case len(args) >= 8 && args[0] == "-C" && args[1] == repoDir && args[2] == "diff" && args[3] == "--name-only" && args[4] == "-z" && args[5] == "origin/preview" && args[6] == sourceBranch:
 			if !fetchedOrigin {
 				t.Fatal("origin close diff ran before fetching origin")
 			}
-			return "main.go\n", nil
+			return "main.go\x00", nil
 		case len(args) >= 6 && args[0] == "-C" && args[1] == repoDir && args[2] == "merge-base" && args[3] == "--is-ancestor" && args[4] == sourceBranch && args[5] == "origin/preview":
 			return "", fmt.Errorf("exit status 1")
 		case slices.Contains(args, "merge") || slices.Contains(args, "checkout") || slices.Contains(args, "reset"):
@@ -6715,7 +7761,7 @@ func TestTaskCloseIntegrationOriginBaseRefusesLocalMergeWhenRemoteDiffRemains(t 
 		}
 	})
 
-	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "")
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "", "")
 	if err == nil {
 		t.Fatalf("integrateTaskBeforeClose error = nil, result = %+v; want origin-mode refusal", result)
 	}
@@ -6806,6 +7852,8 @@ func TestTaskCloseCommandKeepsTargetCleanWhenScratchMergeDirties(t *testing.T) {
 			return "", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "status":
 			return "", nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == repoDir && args[2] == "branch" && args[3] == "--show-current":
+			return "main", nil
 		case len(args) >= 4 && args[0] == "-C" && args[1] == scratchWorktree && args[2] == "status":
 			scratchStatusReads++
 			if scratchStatusReads >= 2 {
@@ -7164,7 +8212,7 @@ func TestTaskCloseNoChangesIntegrationResultCarriesRecoveredCanonicalValidation(
 	}
 	targetOID := runDaemonTestGitOutput(t, repo, "rev-parse", "HEAD")
 	d := &Daemon{git: client}
-	result, err := d.taskCloseNoChangesIntegrationResult(ctx, repo, "feature", "main", sourceOID, targetOID)
+	result, err := d.taskCloseNoChangesIntegrationResult(ctx, repo, "base", "feature", "main", sourceOID, targetOID, true)
 	if err != nil {
 		t.Fatalf("taskCloseNoChangesIntegrationResult() error = %v", err)
 	}
@@ -7174,6 +8222,297 @@ func TestTaskCloseNoChangesIntegrationResultCarriesRecoveredCanonicalValidation(
 	attempt := result.ValidationAttempts[0]
 	if attempt.CandidateHead != targetOID || attempt.Status != domain.IntegrationCandidateValidationPassed || !attempt.Canonical {
 		t.Fatalf("validation attempt = %+v, want canonical exact target %s", attempt, targetOID)
+	}
+}
+
+func TestTaskCloseIntegrationReceiptRequiresExactFreshTypedTarget(t *testing.T) {
+	tests := []struct {
+		name                  string
+		receipt               taskCloseIntegrationReceipt
+		currentProject        string
+		currentTargetID       string
+		currentTargetBranch   string
+		currentConfiguredBase bool
+		wantError             string
+	}{
+		{
+			name:                "matching non-base target",
+			receipt:             taskCloseIntegrationReceipt{ProjectID: "project", TargetID: "parent-a", TargetBranch: "shared", ConfiguredBaseTarget: false},
+			currentProject:      "project",
+			currentTargetID:     "parent-a",
+			currentTargetBranch: "shared",
+		},
+		{
+			name:                "same branch different non-base target",
+			receipt:             taskCloseIntegrationReceipt{ProjectID: "project", TargetID: "parent-a", TargetBranch: "shared", ConfiguredBaseTarget: false},
+			currentProject:      "project",
+			currentTargetID:     "parent-b",
+			currentTargetBranch: "shared",
+			wantError:           "target identity changed",
+		},
+		{
+			name:                "base retargeted to non-base with reused branch",
+			receipt:             taskCloseIntegrationReceipt{ProjectID: "project", TargetID: "base", TargetBranch: "shared", ConfiguredBaseTarget: true},
+			currentProject:      "project",
+			currentTargetID:     "parent-a",
+			currentTargetBranch: "shared",
+			wantError:           "target identity changed",
+		},
+		{
+			name:                  "non-base retargeted to base with reused branch",
+			receipt:               taskCloseIntegrationReceipt{ProjectID: "project", TargetID: "parent-a", TargetBranch: "shared", ConfiguredBaseTarget: false},
+			currentProject:        "project",
+			currentTargetID:       "base",
+			currentTargetBranch:   "shared",
+			currentConfiguredBase: true,
+			wantError:             "target identity changed",
+		},
+		{
+			name:                  "legacy receipt missing target identity",
+			receipt:               taskCloseIntegrationReceipt{ProjectID: "project", TargetBranch: "shared", ConfiguredBaseTarget: true},
+			currentProject:        "project",
+			currentTargetID:       "base",
+			currentTargetBranch:   "shared",
+			currentConfiguredBase: true,
+			wantError:             "missing authoritative typed target identity",
+		},
+		{
+			name:                  "configured base branch retargeted",
+			receipt:               taskCloseIntegrationReceipt{ProjectID: "project", TargetID: "base", TargetBranch: "main", ConfiguredBaseTarget: true},
+			currentProject:        "project",
+			currentTargetID:       "base",
+			currentTargetBranch:   "release",
+			currentConfiguredBase: true,
+			wantError:             "target branch changed",
+		},
+		{
+			name:                  "receipt project retargeted",
+			receipt:               taskCloseIntegrationReceipt{ProjectID: "project-a", TargetID: "base", TargetBranch: "main", ConfiguredBaseTarget: true},
+			currentProject:        "project-b",
+			currentTargetID:       "base",
+			currentTargetBranch:   "main",
+			currentConfiguredBase: true,
+			wantError:             "project identity changed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateTaskCloseIntegrationReceiptIdentity(tt.receipt, tt.currentProject, tt.currentTargetID, tt.currentTargetBranch, tt.currentConfiguredBase)
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("validateTaskCloseIntegrationReceiptIdentity() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("validateTaskCloseIntegrationReceiptIdentity() error = %v, want %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestTaskCloseRejectsConfiguredBaseBranchRetargetBeforeNoChangeFallback(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	repoDir := t.TempDir()
+	runDaemonTestGit(t, repoDir, "init", "-q", "-b", "main")
+	runDaemonTestGit(t, repoDir, "config", "user.email", "test@example.com")
+	runDaemonTestGit(t, repoDir, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repoDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDaemonTestGit(t, repoDir, "add", "base.txt")
+	runDaemonTestGit(t, repoDir, "commit", "-q", "-m", "base")
+
+	issuesClient := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	projectID := "proj-configured-base-retarget"
+	taskID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "Retargeted configured base", Type: domain.TypeBug, Status: domain.StatusInReview,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceBranch := "riordan/" + taskID + "/retarget-source"
+	sourceWorktree := filepath.Join(t.TempDir(), "source")
+	runDaemonTestGit(t, repoDir, "worktree", "add", "-q", "-b", sourceBranch, sourceWorktree)
+	if err := os.WriteFile(filepath.Join(sourceWorktree, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runDaemonTestGit(t, sourceWorktree, "add", "feature.txt")
+	runDaemonTestGit(t, sourceWorktree, "commit", "-q", "-m", "feature")
+	sourceOID := runDaemonTestGitOutput(t, sourceWorktree, "rev-parse", "HEAD")
+	runDaemonTestGit(t, repoDir, "merge", "-q", "--ff-only", sourceBranch)
+	mainOID := runDaemonTestGitOutput(t, repoDir, "rev-parse", "main")
+	runDaemonTestGit(t, repoDir, "branch", "release", mainOID)
+	runDaemonTestGit(t, repoDir, "checkout", "-q", "release")
+
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID, IssueID: taskID, Path: sourceWorktree, Branch: sourceBranch, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close", SourceCommand: "integrate-before-close",
+		Payload: map[string]any{
+			"project_id": projectID, "source_branch": sourceBranch, "target_branch": "main",
+			"target_id": "base", "configured_base_target": true, "integrated": true,
+			"base_oid": mainOID, "source_oid": sourceOID, "target_oid": mainOID,
+			"publication_operation_id": "publication-main",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := git.NewExecRunner(repoDir)
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg: Config{RepoDir: repoDir, BaseBranch: "release", Logger: logger}, git: git.NewClient(runner, logger),
+		issueClientsByProject:     map[string]*issues.Client{projectID: issuesClient},
+		runtimeStoresByProject:    map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager},
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject:           func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore { return runtimeStore },
+		logger:                      logger,
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, taskID, true, false, "", "")
+	if err == nil || !strings.Contains(err.Error(), "target branch changed: recorded=main current=release") {
+		t.Fatalf("integrateTaskBeforeClose() = (%+v, %v), want configured-base branch retarget rejection", result, err)
+	}
+	events, listErr := issuesClient.ListIssueObservationEvents(ctx, taskID, issues.IssueObservationEventListOptions{
+		Types: []domain.IssueObservationEventType{domain.IssueEventTaskIntegrationCompleted}, Limit: 10,
+	})
+	if listErr != nil || len(events) != 1 {
+		t.Fatalf("integration receipts after rejection = %+v, err=%v; want only original main receipt", events, listErr)
+	}
+}
+
+func TestTaskCloseRemovedWorktreeRejectsStaleReceiptAfterSameBranchAncestorRetarget(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.Default()
+	projectID := "proj-close-retarget"
+	repoDir := t.TempDir()
+	issuesClient := newMigratedIssueClientAtPath(t, filepath.Join(t.TempDir(), "issues.db"), logger)
+	t.Cleanup(func() { _ = issuesClient.CloseDB() })
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+
+	parentA, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Original ancestor", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatalf("create original ancestor: %v", err)
+	}
+	parentB, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Current ancestor", Type: domain.TypeTask, Status: domain.StatusInReview})
+	if err != nil {
+		t.Fatalf("create current ancestor: %v", err)
+	}
+	childID, err := issuesClient.Create(ctx, issues.CreateTaskParams{Title: "Retargeted child", Type: domain.TypeTask, Status: domain.StatusInReview, ParentID: &parentB})
+	if err != nil {
+		t.Fatalf("create retargeted child: %v", err)
+	}
+	sharedBranch := "riordan/" + parentB + "/shared-parent-branch"
+	childBranch := "riordan/" + childID + "/retargeted"
+	missingChildWorktree := filepath.Join(t.TempDir(), "removed-child")
+	currentParentWorktree := filepath.Join(t.TempDir(), "parent-b")
+	for _, projection := range []daemonstate.WorktreeState{
+		{ProjectID: projectID, IssueID: childID, Path: missingChildWorktree, Branch: childBranch, UpdatedAt: time.Now().UTC()},
+		{ProjectID: projectID, IssueID: parentB, Path: currentParentWorktree, Branch: sharedBranch, UpdatedAt: time.Now().UTC()},
+	} {
+		if err := runtimeStore.UpsertWorktreeState(ctx, projection); err != nil {
+			t.Fatalf("seed worktree projection for %s: %v", projection.IssueID, err)
+		}
+	}
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, childID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close", SourceCommand: "integrate-before-close",
+		Payload: map[string]any{
+			"project_id": projectID, "source_branch": childBranch, "target_branch": sharedBranch,
+			"target_id": parentA, "configured_base_target": false, "integrated": true,
+			"base_oid": "parent-a-before", "source_oid": "child-source", "target_oid": "parent-a-result",
+		},
+	}); err != nil {
+		t.Fatalf("seed stale ancestor integration receipt: %v", err)
+	}
+
+	var ancestryReuseReached atomic.Bool
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		if slices.Contains(args, "merge-base") {
+			ancestryReuseReached.Store(true)
+		}
+		switch {
+		case len(args) >= 5 && args[0] == "-C" && args[1] == currentParentWorktree && args[2] == "merge-base" && args[3] == "--is-ancestor":
+			return "", nil
+		case len(args) >= 3 && args[0] == "worktree" && args[1] == "list":
+			return fmt.Sprintf("worktree %s\nHEAD parent-b-head\nbranch refs/heads/%s\n\n", currentParentWorktree, sharedBranch), nil
+		case len(args) >= 5 && args[0] == "-C" && args[1] == currentParentWorktree && args[2] == "rev-parse" && args[3] == "--verify" && args[4] == childBranch+"^{commit}":
+			return "", fmt.Errorf("unknown revision")
+		case len(args) >= 5 && args[0] == "-C" && args[1] == currentParentWorktree && args[2] == "rev-list":
+			return "", fmt.Errorf("unknown revision")
+		default:
+			return "", fmt.Errorf("unexpected git command: %s", strings.Join(args, " "))
+		}
+	}}
+	manager := git.NewWorktreeManager(runner, repoDir, logger)
+	d := &Daemon{
+		cfg:                       Config{RepoDir: repoDir, BaseBranch: "main", Logger: logger},
+		git:                       git.NewClient(runner, logger),
+		issueClientsByProject:     map[string]*issues.Client{projectID: issuesClient},
+		runtimeStoresByProject:    map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
+		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: manager},
+	}
+	d.worktreeAdapter = &worktreeServiceAdapter{
+		managerForProject:           func(string) *git.WorktreeManager { return manager },
+		runtimeStateStoreForProject: func(string) *daemonstate.RuntimeStateStore { return runtimeStore },
+		logger:                      logger,
+		pollInterval:                time.Hour,
+	}
+	t.Cleanup(func() {
+		d.worktreeAdapter.mu.Lock()
+		defer d.worktreeAdapter.mu.Unlock()
+		for _, cancel := range d.worktreeAdapter.pollers {
+			cancel()
+		}
+	})
+
+	result, err := d.integrateTaskBeforeClose(ctx, projectID, childID, true, true, "", "")
+	if err == nil || !strings.Contains(err.Error(), "target identity changed: recorded="+parentA+" current="+parentB) {
+		t.Fatalf("integrateTaskBeforeClose() = (%+v, %v), want stale same-branch target identity rejection", result, err)
+	}
+	if ancestryReuseReached.Load() {
+		t.Fatal("stale receipt reached ancestry reuse before typed target rejection")
+	}
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, childID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventTaskIntegrationCompleted, Source: "daemon-task-close", SourceCommand: "integrate-before-close",
+		Payload: map[string]any{
+			"project_id": projectID, "source_branch": childBranch, "target_branch": sharedBranch,
+			"target_id": parentB, "configured_base_target": false, "integrated": true,
+			"base_oid": "parent-b-before", "source_oid": "child-source", "target_oid": "parent-b-result",
+			"publication_operation_id": "publication-parent-b",
+		},
+	}); err != nil {
+		t.Fatalf("seed current ancestor integration receipt: %v", err)
+	}
+	if err := runtimeStore.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
+		ProjectID: projectID, IssueID: childID, Path: missingChildWorktree, Branch: childBranch, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("restore removed child projection for receipt retry: %v", err)
+	}
+	recovered, err := d.integrateTaskBeforeClose(ctx, projectID, childID, true, true, "", "")
+	if err != nil {
+		t.Fatalf("integrateTaskBeforeClose() current receipt error = %v", err)
+	}
+	if !recovered.ReceiptRecovered || recovered.PublicationOperationID != "publication-parent-b" {
+		t.Fatalf("recovered integration = %+v, want exact publication operation identity", recovered)
 	}
 }
 
@@ -7400,6 +8739,13 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
+	if _, err := issuesClient.ClaimOwnershipWithRuntime(ctx, projectID, taskID, issues.OwnershipClaimParams{
+		OwnerID:   "worker-a",
+		OwnerKind: "agent",
+		Purpose:   domain.CoordinationLeaseExecution,
+	}); err != nil {
+		t.Fatalf("claim execution lease: %v", err)
+	}
 	evidenceEvent, err := issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
 		Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t),
 	})
@@ -7415,6 +8761,24 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 		t.Fatalf("marshal reviewed evidence: %v", err)
 	}
 	evidencePin := &issues.ReviewEvidencePin{Source: "issue_event", EventID: evidenceEvent.ID, Digest: fmt.Sprintf("%x", sha256.Sum256(evidenceBody))}
+	admission, err := issuesClient.CaptureReviewAdmissionPin(ctx, taskID)
+	if err != nil {
+		t.Fatalf("capture review admission: %v", err)
+	}
+	if _, err := issuesClient.ClaimOwnershipWithRuntime(ctx, projectID, taskID, issues.OwnershipClaimParams{
+		OwnerID: "reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview, ExpectedReviewAdmission: &admission,
+	}); err != nil {
+		t.Fatalf("claim reviewer lease: %v", err)
+	}
+	if _, err := issuesClient.AppendIssueObservationEvent(ctx, taskID, issues.IssueObservationEventParams{
+		Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{
+			"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator,
+			"reviewed_evidence_source": evidencePin.Source, "reviewed_evidence_event_id": evidencePin.EventID,
+			"reviewed_evidence_seq": evidencePin.Seq, "reviewed_evidence_digest": evidencePin.Digest,
+		},
+	}); err != nil {
+		t.Fatalf("record accepted review: %v", err)
+	}
 	sourceWorktree := filepath.Join(repoDir, "wt-"+taskID)
 	if err := os.MkdirAll(sourceWorktree, 0o755); err != nil {
 		t.Fatalf("mkdir source worktree: %v", err)
@@ -7518,7 +8882,7 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	})
 
 	body, err := json.Marshal(taskCloseRequest{
-		TaskID: taskID, IntegrateBeforeClose: true, ExpectedReviewEvidence: evidencePin,
+		TaskID: taskID, IntegrateBeforeClose: true, ExpectedReviewEvidence: evidencePin, ExpectedReviewerID: "reviewer",
 	})
 	if err != nil {
 		t.Fatalf("marshal task close request: %v", err)
@@ -7547,8 +8911,8 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	if !result.IntegrationRequested || result.Integrated {
 		t.Fatalf("close integration result = %+v, want requested no-op integration", result)
 	}
-	if lateEvidenceErr == nil || !strings.Contains(lateEvidenceErr.Error(), "accepted review evidence is fenced") {
-		t.Fatalf("late git-runner evidence error = %v, want durable close-fence conflict", lateEvidenceErr)
+	if lateEvidenceErr == nil || !strings.Contains(lateEvidenceErr.Error(), "active review admission lease fences evidence replacement") {
+		t.Fatalf("late git-runner evidence error = %v, want reviewer-owned durable close-fence conflict", lateEvidenceErr)
 	}
 	if !result.WorktreeRemoved {
 		t.Fatalf("close integration result = %+v, want worktree cleanup", result)
@@ -7559,6 +8923,9 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 	}
 	if closed.Status != domain.StatusDone {
 		t.Fatalf("task status = %s, want %s", closed.Status, domain.StatusDone)
+	}
+	if closed.Ownership != nil || len(closed.CoordinationLeases) != 0 {
+		t.Fatalf("closed task leases = %+v ownership = %+v, want already-contained close to release execution lease", closed.CoordinationLeases, closed.Ownership)
 	}
 	joined := strings.Join(commands, "\n")
 	for _, blocked := range []string{
@@ -7578,6 +8945,226 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceAlreadyReachableFromTarget(t 
 		if !strings.Contains(joined, want) {
 			t.Fatalf("git commands missing %q:\n%s", want, joined)
 		}
+	}
+}
+
+func TestVerifyExternalTaskIntegrationRequiresAncestryAndCandidateTreeIdentity(t *testing.T) {
+	operation := domain.PublicationOperation{
+		OperationID: "publication", TargetID: "base", TargetBranch: "main", BaseRevision: "base-oid",
+		SourceRevision: "source-oid", CandidateRevision: "candidate-oid",
+	}
+	tests := []struct {
+		name            string
+		integrationTree string
+		failAncestry    string
+		wantErr         string
+	}{
+		{name: "success", integrationTree: "tree-exact"},
+		{name: "candidate tree mismatch", integrationTree: "tree-other", wantErr: "does not match accepted candidate tree"},
+		{name: "reviewed source missing", integrationTree: "tree-exact", failAncestry: "source-oid", wantErr: "reviewed source source-oid is not reachable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+				joined := strings.Join(args, " ")
+				switch {
+				case strings.Contains(joined, "rev-parse --verify integrated^{commit}"):
+					return "integrated-oid", nil
+				case strings.Contains(joined, "rev-parse --verify main^{commit}"):
+					return "main-oid", nil
+				case strings.Contains(joined, "merge-base --is-ancestor"):
+					if tt.failAncestry != "" && strings.Contains(joined, tt.failAncestry) {
+						return "", fmt.Errorf("exit status 1")
+					}
+					return "", nil
+				case strings.Contains(joined, "rev-parse --verify candidate-oid^{tree}"):
+					return "tree-exact", nil
+				case strings.Contains(joined, "rev-parse --verify integrated-oid^{tree}"):
+					return tt.integrationTree, nil
+				default:
+					return "", fmt.Errorf("unexpected git args: %s", joined)
+				}
+			}}
+			d := &Daemon{git: git.NewClient(runner, slog.Default())}
+			got, err := d.verifyExternalTaskIntegration(context.Background(), t.TempDir(), "issue-1", "integrated", operation)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("verify error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("verify external integration: %v", err)
+			}
+			if !got.ExternalReconciled || got.TargetOID != "integrated-oid" || got.SourceOID != operation.SourceRevision || got.PublicationOperationID != operation.OperationID {
+				t.Fatalf("integration = %+v, want exact reconciled identity", got)
+			}
+		})
+	}
+}
+
+func TestTaskCloseCommandReplaysCompletedExternalIntegrationAndRepublishesDurableState(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, ".azedarach"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.Default()
+	client := newMigratedIssueClient(t, repoDir, logger)
+	t.Cleanup(func() { _ = client.CloseDB() })
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir, logger: logger})
+	t.Cleanup(func() { _ = runtime.Close() })
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID = protocol.NormalizeProjectID(projectID)
+	issueID := createReviewTask(t, ctx, client, domain.P1, "worker")
+	if _, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventEvidenceSubmitted, Source: "worker", Payload: mustWorkerEvidencePayload(t)}); err != nil {
+		t.Fatal(err)
+	}
+	admission, err := client.CaptureReviewAdmissionPin(ctx, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ClaimOwnershipWithRuntime(ctx, projectID, issueID, issues.OwnershipClaimParams{OwnerID: "reviewer", OwnerKind: "orchestrator", Purpose: domain.CoordinationLeaseReview, ExpectedReviewAdmission: &admission, ReviewSourceOID: "source-oid"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	operation := domain.PublicationOperation{
+		OperationID: "publication-replayed", ProjectID: projectID, IssueID: issueID, IntentKey: "accepted-external", RequestFingerprint: "fingerprint",
+		ActorID: "reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: admission.ReviewEpochEventID,
+		PatchEvidenceID: "publication-replayed", AcceptedPublicationOperationID: "publication-replayed", TargetID: "base", TargetBranch: "main",
+		SourceRevision: "source-oid", BaseRevision: "base-oid", CandidateRevision: "candidate-oid", PolicyVersion: "policy", EnvironmentFingerprint: "test", ValidationCommand: "just test", CreatedAt: now,
+	}
+	patchEvidence := domain.PublicationEvidence{EvidenceID: operation.PatchEvidenceID, ProjectID: projectID, IssueID: issueID, Layer: domain.PublicationEvidencePatchReview, PatchDigest: "patch", SourceRevision: operation.SourceRevision, BaseRevision: operation.BaseRevision, Producer: "reviewer:reviewer", PolicyVersion: operation.PolicyVersion, EnvironmentFingerprint: operation.EnvironmentFingerprint, CreatedAt: now}
+	receipt, err := client.AppendAcceptedReviewAndPublicationWithReviewAdmission(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{
+		"outcome": string(domain.ReviewOutcomeAccepted), "intent_key": operation.IntentKey, "request_fingerprint": operation.RequestFingerprint,
+	}}, operation, patchEvidence, "accepted-external", admission, "", "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation.AcceptedReviewEventID = receipt.EventID
+	storedRoot, found, err := runtime.store.PublicationOperation(ctx, operation.OperationID)
+	if err != nil || !found {
+		t.Fatalf("accepted publication root found=%t err=%v", found, err)
+	}
+	if storedRoot.ProjectID != projectID || !naming.IssueIDsEqual(storedRoot.IssueID, issueID) || storedRoot.AcceptedReviewEventID != receipt.EventID {
+		t.Fatalf("accepted publication root identity = %+v receipt=%+v project=%s issue=%s", storedRoot, receipt, projectID, issueID)
+	}
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "rev-parse --verify integrated^{commit}"):
+			return "integrated-oid", nil
+		case strings.Contains(joined, "rev-parse --verify main^{commit}"):
+			return "main-oid", nil
+		case strings.Contains(joined, "merge-base --is-ancestor"):
+			return "", nil
+		case strings.Contains(joined, "rev-parse --verify candidate-oid^{tree}"), strings.Contains(joined, "rev-parse --verify integrated-oid^{tree}"):
+			return "tree-exact", nil
+		default:
+			return "", fmt.Errorf("unexpected git args: %s", joined)
+		}
+	}}
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), logger)
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	published := 0
+	d := &Daemon{cfg: Config{RepoDir: repoDir, BaseBranch: "main", Logger: logger}, git: git.NewClient(runner, logger), operationRuntime: runtime, hub: publish.NewHub(16, 8, logger), revision: map[string]uint64{},
+		issueClientsByProject: map[string]*issues.Client{projectID: client}, runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore}, publicationStateChanged: func(got domain.PublicationOperation) {
+			published++
+			if got.OperationID != operation.OperationID || got.State != domain.PublicationOperationMerged {
+				t.Fatalf("published operation = %+v", got)
+			}
+		}}
+	body, err := json.Marshal(taskCloseRequest{TaskID: issueID, ExternalIntegratedRevision: "integrated"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replayEvents <-chan protocol.EventEnvelope
+	var cancelReplayEvents func()
+	for attempt := 1; attempt <= 2; attempt++ {
+		resp, closeErr := d.handleTaskClose(ctx, protocol.RequestEnvelope{ProtocolVersion: protocol.CurrentVersion, RequestID: naming.RequestID(fmt.Sprintf("external-close-%d", attempt)), Kind: protocol.EnvelopeKindCommand, Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Command: "task.close", Body: body})
+		if closeErr != nil || !resp.OK {
+			message := ""
+			if resp.Error != nil {
+				message = resp.Error.Message
+			}
+			t.Fatalf("close %d: response=%+v message=%q err=%v", attempt, resp, message, closeErr)
+		}
+		var result taskCloseResult
+		if err := json.Unmarshal(resp.Body, &result); err != nil {
+			t.Fatal(err)
+		}
+		if !result.Integrated || !result.IntegrationRequested || result.IntegratedTargetBranch != "main" || result.Revision == 0 {
+			t.Fatalf("close %d result = %+v", attempt, result)
+		}
+		if attempt == 1 {
+			replayEvents, cancelReplayEvents = d.hub.Subscribe(projectID, d.currentRevision(projectID))
+			defer cancelReplayEvents()
+		}
+	}
+	if published != 2 {
+		t.Fatalf("publication convergence notifications = %d, want 2", published)
+	}
+	gotEvents := map[string]bool{}
+	for len(gotEvents) < 2 {
+		event := <-replayEvents
+		gotEvents[event.Event] = true
+	}
+	for _, eventType := range []string{protocol.EventPublicationOperationUpdated, protocol.EventTaskUpdated} {
+		if !gotEvents[eventType] {
+			t.Fatalf("replay events = %+v, missing %s", gotEvents, eventType)
+		}
+	}
+	stored, found, err := runtime.store.PublicationOperation(ctx, operation.OperationID)
+	if err != nil || !found || stored.State != domain.PublicationOperationMerged {
+		t.Fatalf("terminal publication = %+v found=%t err=%v", stored, found, err)
+	}
+	closed, err := client.GetWithRuntime(ctx, projectID, issueID)
+	if err != nil || closed.Status != domain.StatusDone || len(closed.CoordinationLeases) != 0 {
+		t.Fatalf("terminal issue = %+v err=%v", closed, err)
+	}
+}
+
+func TestReconcileExternalTaskIntegrationRejectsStaleAcceptedRootIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*domain.PublicationOperation)
+	}{
+		{name: "project", mutate: func(op *domain.PublicationOperation) { op.ProjectID = "other-project" }},
+		{name: "issue", mutate: func(op *domain.PublicationOperation) { op.IssueID = "other-issue" }},
+		{name: "accepted event", mutate: func(op *domain.PublicationOperation) { op.AcceptedReviewEventID = 999999 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			repoDir := t.TempDir()
+			client := newMigratedIssueClient(t, repoDir, slog.Default())
+			t.Cleanup(func() { _ = client.CloseDB() })
+			projectID := protocol.NormalizeProjectID(filepath.Base(repoDir))
+			issueID, err := client.Create(ctx, issues.CreateTaskParams{Title: "authority mismatch", Type: domain.TypeBug, Priority: domain.P1, Status: domain.StatusInReview})
+			if err != nil {
+				t.Fatal(err)
+			}
+			accepted, err := client.AppendIssueObservationEvent(ctx, issueID, issues.IssueObservationEventParams{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{
+				"outcome": string(domain.ReviewOutcomeAccepted), "actor_id": "reviewer", "actor_kind": "orchestrator", "reviewer_kind": "orchestrator",
+				"intent_key": "stale-root", "request_fingerprint": "fingerprint", "review_epoch_event_id": int64(1), "publication_operation_id": "stale-root",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			op := domain.PublicationOperation{OperationID: "stale-root", ProjectID: projectID, IssueID: issueID, IntentKey: "stale-root", RequestFingerprint: "fingerprint", ActorID: "reviewer", ReviewerKind: "orchestrator", ReviewEpochEventID: 1, AcceptedReviewEventID: accepted.ID, PatchEvidenceID: "patch", AcceptedPublicationOperationID: "stale-root", TargetID: "base", TargetBranch: "main", SourceRevision: "source", BaseRevision: "base", CandidateRevision: "candidate", PolicyVersion: "policy", EnvironmentFingerprint: "test", ValidationCommand: "just test", CreatedAt: time.Now().UTC()}
+			tc.mutate(&op)
+			runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+			t.Cleanup(func() { _ = runtime.Close() })
+			if _, _, err := runtime.store.EnqueuePublication(ctx, op, "stale-root-"+tc.name); err != nil {
+				t.Fatal(err)
+			}
+			d := &Daemon{cfg: Config{RepoDir: repoDir}, git: git.NewClient(&recordingGitRunner{runFn: func(args ...string) (string, error) { return "", fmt.Errorf("git must not run") }}, slog.Default()), operationRuntime: runtime, issueClientsByProject: map[string]*issues.Client{projectID: client}}
+			if _, _, err := d.reconcileExternalTaskIntegration(ctx, projectID, issueID, "integrated"); err == nil || !strings.Contains(err.Error(), "stale project, issue, or review identity") {
+				t.Fatalf("reconcile error = %v", err)
+			}
+		})
 	}
 }
 
@@ -8510,6 +10097,59 @@ func TestTaskGraphReadinessDependencyGating(t *testing.T) {
 	}
 	if len(gotAfter.Runnable) != 1 || gotAfter.Runnable[0] != b.String() {
 		t.Fatalf("after runnable = %v, want [%s]", gotAfter.Runnable, b.String())
+	}
+}
+
+func TestTaskGraphReadinessPropagatesRootBlockersToDescendantsAndNestedRoots(t *testing.T) {
+	root := naming.IssueID("az-root")
+	blocker := naming.IssueID("az-blocker")
+	leaf := naming.IssueID("az-leaf")
+	nested := naming.IssueID("az-nested")
+	leafParent := root
+	nestedParent := root
+	tasks := []domain.Task{
+		{ID: root, Type: domain.TypeEpic, Status: domain.StatusInProgress, Dependencies: []domain.Dependency{{ID: blocker, Type: domain.DependencyBlocks}}},
+		{ID: blocker, Type: domain.TypeTask, Status: domain.StatusInProgress},
+		{ID: leaf, Type: domain.TypeTask, Status: domain.StatusOpen, ParentID: &leafParent, Dependencies: []domain.Dependency{{ID: "az-missing", Type: domain.DependencyBlocks}}},
+		{ID: nested, Type: domain.TypeEpic, Status: domain.StatusOpen, ParentID: &nestedParent},
+	}
+
+	rootID, byID, children, err := daemonTaskGraphIndexes(root.String(), tasks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocked.Runnable) != 0 || !slices.Equal(blocked.RootBlockers, []string{blocker.String()}) {
+		t.Fatalf("blocked readiness = %+v", blocked)
+	}
+	if got := blocked.Blocked[leaf.String()]; !strings.Contains(got, "root waiting on "+blocker.String()) {
+		t.Fatalf("leaf blocker = %q", got)
+	} else if !strings.Contains(got, "az-missing(missing)") {
+		t.Fatalf("leaf-local blocker was hidden by root gate: %q", got)
+	}
+	if len(blocked.NestedRoots) != 1 || blocked.NestedRoots[0].Status != "blocked_root_dependency" || blocked.NestedRoots[0].Classification != string(domain.OrchestrationCandidateBlocked) {
+		t.Fatalf("nested roots = %+v", blocked.NestedRoots)
+	}
+
+	byID[blocker] = domain.Task{ID: blocker, Type: domain.TypeTask, Status: domain.StatusDone}
+	ready, err := daemonTaskGraphReadinessFromIndexes(rootID, byID, children)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ready.Runnable) != 0 || !strings.Contains(ready.Blocked[leaf.String()], "az-missing(missing)") || len(ready.RootBlockers) != 0 || ready.NestedRoots[0].Status != "startable" {
+		t.Fatalf("settled readiness = %+v", ready)
+	}
+}
+
+func TestCloneTaskGraphReadinessResultCopiesRootBlockers(t *testing.T) {
+	original := taskGraphReadinessResult{RootBlockers: []string{"upstream-blocker"}}
+	cloned := cloneTaskGraphReadinessResult(original)
+	cloned.RootBlockers[0] = "changed"
+	if original.RootBlockers[0] != "upstream-blocker" {
+		t.Fatalf("clone mutated cached root blockers: %v", original.RootBlockers)
 	}
 }
 
@@ -10031,39 +11671,47 @@ func TestTaskGraphReadinessReportsStaleChildBranchContainmentRisk(t *testing.T) 
 	activeBranch := "riordan/" + activeID.String() + "/reconcile"
 
 	repoDir := t.TempDir()
-	runDaemonTestGit(t, repoDir, "init", "-q", "-b", "main")
-	runDaemonTestGit(t, repoDir, "config", "user.email", "test@example.com")
-	runDaemonTestGit(t, repoDir, "config", "user.name", "Test User")
-	if err := os.WriteFile(filepath.Join(repoDir, "rpc.go"), []byte("package rpc\n\nfunc materialize() string { return \"base\" }\n"), 0o644); err != nil {
-		t.Fatalf("write base file: %v", err)
+	tasks, err := issuesClient.GetManyWithRuntime(ctx, projectID, []string{rootID.String(), closedID.String(), activeID.String()})
+	if err != nil {
+		t.Fatalf("load projected tasks: %v", err)
 	}
-	runDaemonTestGit(t, repoDir, "add", "rpc.go")
-	runDaemonTestGit(t, repoDir, "commit", "-q", "-m", "base")
-	runDaemonTestGit(t, repoDir, "checkout", "-q", "-b", activeBranch)
-	if err := os.WriteFile(filepath.Join(repoDir, "rpc.go"), []byte("package rpc\n\nfunc materialize() string { return \"generic\" }\n"), 0o644); err != nil {
-		t.Fatalf("write active file: %v", err)
+	materializer := newProjectReadMaterializer(projectID, nil, nil)
+	materializer.authority = NewProjectionDeltaAuthority(listErrorProjectionStore{list: func(context.Context, string, uint64, int) ([]domain.ProjectionDelta, uint64, error) {
+		return nil, 0, nil
+	}})
+	for i := range tasks {
+		task := tasks[i]
+		switch task.ID {
+		case rootID:
+			task.HasWorktree = true
+		case activeID:
+			task.HasWorktree = true
+			task.GitBehindCount = 1
+		}
+		materializer.canonical[task.ID.String()] = task
+		materializer.tasks[task.ID.String()] = task
 	}
-	runDaemonTestGit(t, repoDir, "commit", "-am", activeID.String()+": keep generic materializer")
-	runDaemonTestGit(t, repoDir, "checkout", "-q", "main")
-	runDaemonTestGit(t, repoDir, "checkout", "-q", "-b", rootBranch)
-	if err := os.WriteFile(filepath.Join(repoDir, "rpc.go"), []byte("package rpc\n\nfunc materializeTyped() string { return \"typed\" }\n"), 0o644); err != nil {
-		t.Fatalf("write evidence file: %v", err)
-	}
-	runDaemonTestGit(t, repoDir, "commit", "-am", closedID.String()+": generate typed materializer rpc")
-	evidenceCommit := runDaemonTestGitOutput(t, repoDir, "rev-parse", "HEAD")
-
+	materializer.metadata.Health = "healthy"
+	materializer.replaceWorktrees(map[string]git.Worktree{
+		rootID.String():   {IssueID: rootID.String(), Path: repoDir, Branch: rootBranch},
+		activeID.String(): {IssueID: activeID.String(), Path: repoDir, Branch: activeBranch},
+	})
+	gitCalls := 0
 	d := &Daemon{
 		cfg: Config{RepoDir: repoDir, Logger: logger},
-		git: git.NewClient(git.NewExecRunner(repoDir), logger),
+		git: git.NewClient(&recordingGitRunner{runFn: func(args ...string) (string, error) {
+			gitCalls++
+			return "", errors.New("Git must not run from graph readiness")
+		}}, logger),
 		issueClientsByProject: map[string]*issues.Client{
 			projectID: issuesClient,
 		},
+		materializersStarted: true,
+		materializers:        map[string]*projectReadMaterializer{projectID: materializer},
 	}
 	d.taskGraphWorktrees = func(context.Context, string) ([]git.Worktree, error) {
-		return []git.Worktree{
-			{IssueID: rootID.String(), Path: repoDir, Branch: rootBranch},
-			{IssueID: activeID.String(), Path: repoDir, Branch: activeBranch},
-		}, nil
+		t.Fatal("graph readiness must consume projected worktrees")
+		return nil, nil
 	}
 
 	ready, err := d.taskGraphReadiness(ctx, projectID, rootID.String())
@@ -10074,20 +11722,17 @@ func TestTaskGraphReadinessReportsStaleChildBranchContainmentRisk(t *testing.T) 
 		t.Fatalf("containment risks = %+v, want one stale child risk", ready.ContainmentRisks)
 	}
 	risk := ready.ContainmentRisks[0]
-	if risk.Classification != "stale_child_branch" || risk.IssueID != activeID.String() || risk.ClosedChildIssueID != closedID.String() {
-		t.Fatalf("risk identity = %+v, want stale child risk for active %s closed %s", risk, activeID, closedID)
+	if risk.Classification != "stale_child_branch" || risk.IssueID != activeID.String() || risk.RootBranch != rootBranch {
+		t.Fatalf("risk identity = %+v, want projected stale child risk for active %s", risk, activeID)
 	}
-	if !risk.RootContainsEvidence || risk.ActiveContainsEvidence {
-		t.Fatalf("risk containment = root:%t active:%t, want root true active false", risk.RootContainsEvidence, risk.ActiveContainsEvidence)
+	if risk.ClosedChildIssueID != "" || risk.EvidenceCommit != "" || risk.RootContainsEvidence || risk.ActiveContainsEvidence {
+		t.Fatalf("risk = %+v, must not fabricate exact Git containment evidence", risk)
 	}
-	if risk.EvidenceCommit != evidenceCommit {
-		t.Fatalf("evidence commit = %s, want %s", risk.EvidenceCommit, evidenceCommit)
+	if !strings.Contains(risk.Message, "behind ancestor branch") || !strings.Contains(risk.Message, "mutation preflight") {
+		t.Fatalf("risk message = %q, want projected authority wording", risk.Message)
 	}
-	if !slices.Contains(risk.OverlapFiles, "rpc.go") {
-		t.Fatalf("overlap files = %+v, want rpc.go", risk.OverlapFiles)
-	}
-	if !strings.Contains(risk.Message, "stale child branch") || !strings.Contains(risk.Message, "parent branch") {
-		t.Fatalf("risk message = %q, want stale child branch parent wording", risk.Message)
+	if gitCalls != 0 {
+		t.Fatalf("Git calls = %d, want zero from graph readiness", gitCalls)
 	}
 }
 
@@ -10937,7 +12582,7 @@ func TestTaskCompleteCheckClassifiesInvestigationChildrenByAcceptance(t *testing
 	}
 	for _, event := range []issues.IssueObservationEventParams{
 		{Type: domain.IssueEventInvestigationDisposition, Payload: map[string]any{"disposition": "internal_review"}},
-		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer"}},
+		{Type: domain.IssueEventReviewCompleted, Source: "daemon-orchestration", SourceCommand: "review-accept", Payload: map[string]any{"outcome": "accepted", "actor_id": "reviewer", "actor_kind": domain.ReviewerOwnerKindOrchestrator}},
 	} {
 		if _, err := issuesClient.AppendIssueObservationEvent(ctx, internalID, event); err != nil {
 			t.Fatalf("append internal review event: %v", err)
@@ -11046,7 +12691,7 @@ func reviewValidationAcquire(requestID, token, projectID, issueID, revision stri
 		RequestID: requestID, LeaseToken: token, ProjectID: projectID, IssueID: issueID,
 		Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeTicket, Purpose: domain.ValidationPurposeReviewEvidence,
 		IsolationMode: "repository-family", EnvironmentFingerprint: "test-toolchain", Override: domain.ValidationOverrideNone,
-		Profile: "cold", Command: "just test", SourceRevision: revision, ReviewerID: "reviewer", ReviewEpochEventID: 1, TTL: time.Minute,
+		Profile: "cold", Command: "just test", SourceRevision: revision, ReviewerID: "reviewer", ReviewerKind: domain.ReviewerOwnerKindOrchestrator, ReviewEpochEventID: 1, PublicationOperationID: "publication", AcceptedReviewEventID: 2, AcceptedPublicationOperationID: "publication", TTL: time.Minute,
 	}
 }
 
@@ -14051,7 +15696,7 @@ func TestRefreshWorktreeRuntimeStateForIssuesDoesNotPublishUnchangedGitStatus(t 
 	}
 }
 
-func TestRefreshFiniteWorktreeGitFactsConvergesStaleDirtyAndStaleCleanBoundedly(t *testing.T) {
+func TestRefreshExactReviewWorktreeGitFactsConvergesStaleDirtyAndStaleCleanBoundedly(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.Default()
 	const projectID = "proj-finite-refresh"
@@ -14126,7 +15771,7 @@ func TestRefreshFiniteWorktreeGitFactsConvergesStaleDirtyAndStaleCleanBoundedly(
 	}
 
 	initialRevision := d.currentRevision(projectID)
-	if err := d.refreshFiniteWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
+	if err := d.refreshExactReviewWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
 		t.Fatal(err)
 	}
 	assertConverged(cleanID, false)
@@ -14136,7 +15781,7 @@ func TestRefreshFiniteWorktreeGitFactsConvergesStaleDirtyAndStaleCleanBoundedly(
 		t.Fatalf("first refresh revision delta = %d, want one changed status update per worktree", got)
 	}
 
-	if err := d.refreshFiniteWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
+	if err := d.refreshExactReviewWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
 		t.Fatal(err)
 	}
 	if got := d.currentRevision(projectID) - firstRevision; got != 0 {
@@ -14152,7 +15797,7 @@ func TestRefreshFiniteWorktreeGitFactsConvergesStaleDirtyAndStaleCleanBoundedly(
 		worktreeManagersByProject: map[string]*git.WorktreeManager{projectID: git.NewWorktreeManager(runner, ".", logger)},
 		git:                       git.NewClient(runner, logger),
 	}
-	if err := restarted.refreshFiniteWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
+	if err := restarted.refreshExactReviewWorktreeGitFacts(ctx, projectID, []string{cleanID, dirtyID}); err != nil {
 		t.Fatal(err)
 	}
 	assertConverged(cleanID, false)
@@ -14702,7 +16347,7 @@ func TestHandleTaskSnapshotExportUsesProjectionSessions(t *testing.T) {
 	}
 }
 
-func TestHandleTaskGetDoesNotEnqueueWorktreeRefresh(t *testing.T) {
+func TestHandleTaskReadsDoNotEnqueueWorktreeRefresh(t *testing.T) {
 	ctx := context.Background()
 	projectID := protocol.DefaultProjectID
 	repoDir := t.TempDir()
@@ -14775,37 +16420,46 @@ func TestHandleTaskGetDoesNotEnqueueWorktreeRefresh(t *testing.T) {
 			projectID: store,
 		},
 	}
-	reqBody, err := json.Marshal(map[string]string{"task_id": targetID})
-	if err != nil {
-		t.Fatalf("marshal task get request: %v", err)
+	reads := []struct {
+		name    string
+		command string
+		body    any
+		handle  func(context.Context, protocol.RequestEnvelope) (protocol.ResponseEnvelope, error)
+	}{
+		{name: "get", command: "task.get", body: map[string]string{"task_id": targetID}, handle: d.handleTaskGet},
+		{name: "get many", command: "task.get_many", body: map[string]any{"task_ids": []string{targetID}}, handle: d.handleTaskGetMany},
 	}
-	resp, err := d.handleTaskGet(ctx, protocol.RequestEnvelope{
-		ProtocolVersion: protocol.CurrentVersion,
-		RequestID:       "req-task-get-projection-only",
-		Kind:            protocol.EnvelopeKindCommand,
-		Command:         "task.get",
-		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
-		Body:            reqBody,
-	})
-	if err != nil {
-		t.Fatalf("handleTaskGet returned error: %v", err)
-	}
-	if !resp.OK {
-		t.Fatalf("task.get response not OK: %+v", resp.Error)
-	}
-
-	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
-	if err != nil {
-		t.Fatalf("decode task.get body: %v", err)
-	}
-	if len(payload.Tasks) != 1 {
-		t.Fatalf("response task count = %d, want 1", len(payload.Tasks))
+	for _, read := range reads {
+		t.Run(read.name, func(t *testing.T) {
+			reqBody, err := json.Marshal(read.body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := read.handle(ctx, protocol.RequestEnvelope{
+				ProtocolVersion: protocol.CurrentVersion,
+				RequestID:       "req-task-read-projection-only",
+				Kind:            protocol.EnvelopeKindCommand,
+				Command:         read.command,
+				Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+				Body:            reqBody,
+			})
+			if err != nil || !resp.OK {
+				t.Fatalf("%s response = %+v, err = %v", read.command, resp.Error, err)
+			}
+			payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(payload.Tasks) == 0 || payload.Tasks[0].ID.String() != targetID {
+				t.Fatalf("%s tasks = %+v, want target %s", read.command, payload.Tasks, targetID)
+			}
+		})
 	}
 	if counters := queue.snapshotCounters(); counters.Enqueued != 0 {
-		t.Fatalf("task.get enqueued worktree refresh: %+v", counters)
+		t.Fatalf("task reads enqueued worktree refresh: %+v", counters)
 	}
 	if statusCalls != 0 {
-		t.Fatalf("task.get invoked git status %d times", statusCalls)
+		t.Fatalf("task reads invoked git status %d times", statusCalls)
 	}
 }
 
@@ -14813,11 +16467,25 @@ func TestHandleTaskGetMaterializedReadDoesNotRefreshRuntimeOrGit(t *testing.T) {
 	ctx := context.Background()
 	const (
 		projectID = "proj-detail-read"
-		issueID   = "az-1"
-		worktree  = "/tmp/proj-detail-read-az-1"
 	)
+	issuesClient, repoDir := newTestIssueClient(t)
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title:       "Durable detail",
+		Description: "Return without external Git",
+		Status:      domain.StatusInProgress,
+		Type:        domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatalf("create durable detail: %v", err)
+	}
+	worktree := filepath.Join(repoDir, "worktrees", issueID)
+	if err := os.WriteFile(filepath.Join(repoDir, ".azedarach", "config.json"), []byte(`{
+		"publicationEvidence": {"policyVersion":"portable-v1","activePathProfiles":["consumer-integration"]}
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
-	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "projection.db"), slog.Default())
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(repoDir, ".azedarach", "azedarach.db"), slog.Default())
 	t.Cleanup(func() { _ = store.Close() })
 	if err := store.UpsertWorktreeState(ctx, daemonstate.WorktreeState{
 		ProjectID: projectID,
@@ -14842,23 +16510,40 @@ func TestHandleTaskGetMaterializedReadDoesNotRefreshRuntimeOrGit(t *testing.T) {
 		},
 	}
 	hydrateCalls := 0
-	materializer := newProjectReadMaterializer(projectID, nil, func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+	materializer := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(issuesClient), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
 		hydrateCalls++
 		return tasks, nil
 	})
-	detailTask := domain.Task{
-		ID:          issueID,
-		Title:       "Durable detail",
-		Description: "Return without external Git",
-		Status:      domain.StatusInProgress,
-		Type:        domain.TypeTask,
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatalf("bootstrap materializer: %v", err)
 	}
-	materializer.canonical[issueID] = detailTask
-	materializer.tasks[issueID] = detailTask
-	materializer.metadata.Health = "healthy"
+	hydrateCalls = 0
+	operationRuntime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = operationRuntime.Close() })
+	evidence := domain.PublicationEvidence{
+		EvidenceID: "merge-detail", ProjectID: projectID, IssueID: issueID, Layer: domain.PublicationEvidenceMergeResult,
+		SourceRevision: "source", BaseRevision: "base", ResultRevision: "result", Producer: "reviewer",
+		PolicyVersion: "portable-v1", EnvironmentFingerprint: "env", CreatedAt: time.Unix(1, 0).UTC(),
+	}
+	if _, err := operationRuntime.store.RecordPublicationEvidence(ctx, evidence); err != nil {
+		t.Fatal(err)
+	}
+	beforeEvidence, err := operationRuntime.store.PublicationEvidenceSnapshot(ctx, projectID, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var publicationGitCalls atomic.Int32
 	d := &Daemon{
-		cfg:              Config{BaseBranch: "main", Logger: slog.Default()},
+		cfg:              Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.Default()},
+		operationRuntime: operationRuntime,
+		git: git.NewClient(&recordingGitRunner{runFn: func(args ...string) (string, error) {
+			publicationGitCalls.Add(1)
+			return "", errors.New("task.get publication diagnostic must not invoke Git")
+		}}, slog.Default()),
 		gitStatusAdapter: gitAdapter,
+		issueClientsByProject: map[string]*issues.Client{
+			projectID: issuesClient,
+		},
 		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{
 			projectID: store,
 		},
@@ -14895,6 +16580,275 @@ func TestHandleTaskGetMaterializedReadDoesNotRefreshRuntimeOrGit(t *testing.T) {
 	}
 	if len(payload.Tasks) != 1 || payload.Tasks[0].Description != "Return without external Git" {
 		t.Fatalf("task.get payload = %+v, want durable detail", payload.Tasks)
+	}
+	if payload.Tasks[0].PublicationEvidence == nil || payload.Tasks[0].PublicationEvidence.State != "recorded" {
+		t.Fatalf("task.get publication diagnostic = %+v, want recorded projection", payload.Tasks[0].PublicationEvidence)
+	}
+	if got := publicationGitCalls.Load(); got != 0 {
+		t.Fatalf("task.get publication diagnostic Git calls = %d, want 0", got)
+	}
+	afterEvidence, err := operationRuntime.store.PublicationEvidenceSnapshot(ctx, projectID, issueID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(afterEvidence, beforeEvidence) {
+		t.Fatalf("task.get wrote publication evidence: before=%+v after=%+v", beforeEvidence, afterEvidence)
+	}
+}
+
+func TestHandleTaskListMaterializedReadDoesNotRefreshRuntime(t *testing.T) {
+	ctx := context.Background()
+	const projectID = "proj-list-projection-only"
+	issuesClient, _ := newTestIssueClient(t)
+	if _, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "durable list row", Status: domain.StatusInProgress, Type: domain.TypeTask,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	hydrateCalls := 0
+	materializer := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(issuesClient), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		hydrateCalls++
+		return tasks, nil
+	})
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	hydrateCalls = 0
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		materializersStarted:  true,
+		materializers:         map[string]*projectReadMaterializer{projectID: materializer},
+		revision:              map[string]uint64{projectID: 1},
+	}
+	resp, err := d.handleTaskList(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-list-projection-only",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.list",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:            []byte(`{}`),
+	})
+	if err != nil || !resp.OK {
+		t.Fatalf("task.list response = %+v, err = %v", resp.Error, err)
+	}
+	if hydrateCalls != 0 {
+		t.Fatalf("task.list synchronously refreshed runtime enrichment %d times, want projection-only read", hydrateCalls)
+	}
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Tasks) != 1 || payload.Tasks[0].Title != "durable list row" {
+		t.Fatalf("task.list tasks = %+v, want durable projected row", payload.Tasks)
+	}
+}
+
+func TestHandleBoardFetchMaterializedReadBypassesLegacyRuntimeCache(t *testing.T) {
+	ctx := context.Background()
+	const projectID = "proj-board-projection-only"
+	issuesClient, _ := newTestIssueClient(t)
+	issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+		Title: "canonical board row", Status: domain.StatusInProgress, Type: domain.TypeTask,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hydrateCalls := 0
+	materializer := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(issuesClient), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		hydrateCalls++
+		return tasks, nil
+	})
+	if err := materializer.bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	hydrateCalls = 0
+	d := &Daemon{
+		cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+		materializersStarted:  true,
+		materializers:         map[string]*projectReadMaterializer{projectID: materializer},
+		revision:              map[string]uint64{projectID: 1},
+	}
+	d.storeTaskListSnapshotCache(projectID, 1, time.Now().UTC(), protocol.TaskListFreshnessFresh, []domain.Task{{
+		ID: naming.IssueID(issueID), Title: "legacy cached row", Status: domain.StatusOpen, Type: domain.TypeTask,
+	}}, false)
+
+	resp, err := d.handleBoardFetch(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-board-projection-only",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "board.fetch",
+		Meta:            protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+	})
+	if err != nil || !resp.OK {
+		t.Fatalf("board.fetch response = %+v, err = %v", resp.Error, err)
+	}
+	if hydrateCalls != 0 {
+		t.Fatalf("board.fetch synchronously refreshed runtime enrichment %d times, want projection-only read", hydrateCalls)
+	}
+	payload, err := protocol.DecodeBoardSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := payload.Projection.TaskSummaries()
+	if len(tasks) != 1 || tasks[0].Title != "canonical board row" {
+		t.Fatalf("board.fetch tasks = %+v, want canonical materialized row", tasks)
+	}
+}
+
+func TestOrdinaryTaskReadsBypassBlockedRuntimeAndUserProjection(t *testing.T) {
+	for _, command := range []string{"task.list", "task.get"} {
+		for _, blockedPhase := range []string{"runtime hydration", "user projection sync"} {
+			t.Run(command+"/"+blockedPhase, func(t *testing.T) {
+				ctx := context.Background()
+				projectID := "proj-blocked-read-" + strings.NewReplacer(".", "-", " ", "-").Replace(command+"-"+blockedPhase)
+				issuesClient, _ := newTestIssueClient(t)
+				issueID, err := issuesClient.Create(ctx, issues.CreateTaskParams{
+					Title: "projected while writers are blocked", Status: domain.StatusInProgress, Type: domain.TypeTask,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				var blockRuntime atomic.Bool
+				runtimeEntered, releaseRuntime := make(chan struct{}, 1), make(chan struct{})
+				materializer := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(issuesClient), func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+					if blockRuntime.Load() {
+						runtimeEntered <- struct{}{}
+						<-releaseRuntime
+					}
+					return tasks, nil
+				})
+				if err := materializer.bootstrap(ctx); err != nil {
+					t.Fatal(err)
+				}
+				userSyncEntered, releaseUserSync := make(chan struct{}, 1), make(chan struct{})
+				d := &Daemon{
+					cfg:                   Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+					issueClientsByProject: map[string]*issues.Client{projectID: issuesClient},
+					materializersStarted:  true,
+					materializers:         map[string]*projectReadMaterializer{projectID: materializer},
+					projectReadUserProjectionSync: func(context.Context, string, []string) error {
+						userSyncEntered <- struct{}{}
+						<-releaseUserSync
+						return nil
+					},
+					revision: map[string]uint64{projectID: 1},
+				}
+				if blockedPhase == "runtime hydration" {
+					blockRuntime.Store(true)
+				}
+				body := []byte(`{}`)
+				if command == "task.get" {
+					body, err = json.Marshal(map[string]string{"task_id": issueID})
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				type readResult struct {
+					resp protocol.ResponseEnvelope
+					err  error
+				}
+				result := make(chan readResult, 1)
+				go func() {
+					req := protocol.RequestEnvelope{
+						ProtocolVersion: protocol.CurrentVersion, RequestID: "req-blocked-projection-read",
+						Kind: protocol.EnvelopeKindCommand, Command: command,
+						Meta: protocol.Metadata{ProjectID: naming.ProjectID(projectID)}, Body: body,
+					}
+					var resp protocol.ResponseEnvelope
+					var callErr error
+					if command == "task.list" {
+						resp, callErr = d.handleTaskList(ctx, req)
+					} else {
+						resp, callErr = d.handleTaskGet(ctx, req)
+					}
+					result <- readResult{resp: resp, err: callErr}
+				}()
+
+				var got readResult
+				if blockedPhase == "runtime hydration" {
+					select {
+					case got = <-result:
+					case <-runtimeEntered:
+						close(releaseRuntime)
+						<-result
+						t.Fatal("ordinary read entered blocked runtime hydration")
+					}
+				} else {
+					select {
+					case got = <-result:
+					case <-userSyncEntered:
+						close(releaseUserSync)
+						<-result
+						t.Fatal("ordinary read entered blocked user projection sync")
+					}
+				}
+				if got.err != nil || !got.resp.OK {
+					t.Fatalf("%s response = %+v, err = %v", command, got.resp.Error, got.err)
+				}
+			})
+		}
+	}
+}
+
+func TestHandleTaskGetManyMaterializedReadDoesNotInvokeGit(t *testing.T) {
+	ctx := context.Background()
+	const projectID = "portable-go-consumer"
+	issueID := naming.IssueID("go-1")
+	materializer := newProjectReadMaterializer(projectID, nil, nil)
+	materializer.authority = NewProjectionDeltaAuthority(listErrorProjectionStore{
+		list: func(_ context.Context, _ string, after uint64, _ int) ([]domain.ProjectionDelta, uint64, error) {
+			return nil, after, nil
+		},
+	})
+	for i := 0; i < 800; i++ {
+		id := naming.IssueID(fmt.Sprintf("go-%d", i+1))
+		task := domain.Task{ID: id, Title: "portable durable task " + id.String(), Status: domain.StatusOpen, Type: domain.TypeTask}
+		materializer.canonical[id.String()] = task
+		materializer.tasks[id.String()] = task
+	}
+	materializer.metadata.Health = "healthy"
+
+	gitCalls := 0
+	runner := &recordingGitRunner{runFn: func(args ...string) (string, error) {
+		gitCalls++
+		return "", errors.New("Git must not run from task.get_many")
+	}}
+	d := &Daemon{
+		cfg:                  Config{Logger: slog.Default()},
+		git:                  git.NewClient(runner, slog.Default()),
+		materializersStarted: true,
+		materializers:        map[string]*projectReadMaterializer{projectID: materializer},
+		revision:             map[string]uint64{projectID: 4},
+	}
+	body, err := json.Marshal(map[string]any{"task_ids": []string{issueID.String()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := d.handleTaskGetMany(ctx, protocol.RequestEnvelope{
+		ProtocolVersion: protocol.CurrentVersion,
+		RequestID:       "req-projection-only-get-many",
+		Kind:            protocol.EnvelopeKindCommand,
+		Command:         "task.get_many",
+		Meta:            protocol.Metadata{ProjectID: projectID},
+		Body:            body,
+	})
+	if err != nil || !resp.OK {
+		t.Fatalf("task.get_many response = %+v, err = %v", resp.Error, err)
+	}
+	payload, err := protocol.DecodeTaskListSnapshotPayload(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Tasks) != 1 || payload.Tasks[0].Title != "portable durable task go-1" {
+		t.Fatalf("tasks = %+v, want durable portable task", payload.Tasks)
+	}
+	if gitCalls != 0 {
+		t.Fatalf("Git calls = %d, want 0", gitCalls)
 	}
 }
 
@@ -15952,4 +17906,48 @@ func integrationTestWorktreeList(base, scratch, head string) string {
 func integrationTestIsWorktreeList(args []string) bool {
 	return len(args) >= 3 && args[0] == "worktree" && args[1] == "list" ||
 		len(args) >= 5 && args[0] == "-C" && args[2] == "worktree" && args[3] == "list"
+}
+
+func TestTaskDetailAttachesPublicationEvidenceDiagnostic(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	runtime := newOperationRuntime(operationRuntimeConfig{repoDir: repoDir})
+	t.Cleanup(func() { _ = runtime.Close() })
+	var gitCalls atomic.Int32
+	d := &Daemon{
+		cfg:              Config{RepoDir: repoDir, BaseBranch: "main", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+		operationRuntime: runtime,
+		git: git.NewClient(&recordingGitRunner{runFn: func(args ...string) (string, error) {
+			gitCalls.Add(1)
+			return "", errors.New("publication diagnostic must not invoke Git")
+		}}, slog.New(slog.NewTextHandler(io.Discard, nil))),
+	}
+	evidence := domain.PublicationEvidence{
+		EvidenceID: "merge-1", ProjectID: "project", IssueID: "issue", Layer: domain.PublicationEvidenceMergeResult,
+		SourceRevision: "source", BaseRevision: "base", ResultRevision: "result", Producer: "reviewer", PolicyVersion: "policy", EnvironmentFingerprint: "env", CreatedAt: time.Unix(1, 0).UTC(),
+	}
+	if _, err := runtime.store.RecordPublicationEvidence(ctx, evidence); err != nil {
+		t.Fatal(err)
+	}
+	before, err := runtime.store.PublicationEvidenceSnapshot(ctx, "project", "issue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := d.attachPublicationEvidenceDiagnostic(ctx, "project", "issue", []domain.Task{{ID: "issue"}, {ID: "related"}})
+	if tasks[0].PublicationEvidence == nil || tasks[0].PublicationEvidence.State != "recorded" || tasks[0].PublicationEvidence.PatchReview != 0 || !strings.Contains(tasks[0].PublicationEvidence.Detail, "authoritative current assessment unavailable") {
+		t.Fatalf("publication diagnostic = %+v", tasks[0].PublicationEvidence)
+	}
+	if tasks[1].PublicationEvidence != nil {
+		t.Fatalf("related task received selected-task publication diagnostic: %+v", tasks[1].PublicationEvidence)
+	}
+	if got := gitCalls.Load(); got != 0 {
+		t.Fatalf("publication diagnostic Git calls = %d, want 0", got)
+	}
+	after, err := runtime.store.PublicationEvidenceSnapshot(ctx, "project", "issue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("publication evidence changed during task detail read: before=%+v after=%+v", before, after)
+	}
 }

@@ -21,6 +21,8 @@ my $purpose = '';
 my $override = 'none';
 my $override_actor = '';
 my $override_reason = '';
+my $command_identity = '';
+my $isolation_identity = '';
 my $interval = 1;
 while (@ARGV && $ARGV[0] ne '--') {
     my $flag = shift @ARGV;
@@ -34,6 +36,8 @@ while (@ARGV && $ARGV[0] ne '--') {
     if ($flag eq '--force-rerun') { die "validation override already selected\n" unless $override eq 'none'; $override = 'force_rerun'; next; }
     if ($flag eq '--emergency-skip') { die "validation override already selected\n" unless $override eq 'none'; $override = 'emergency_skip'; $override_reason = shift(@ARGV) // die "--emergency-skip requires a reason\n"; next; }
     if ($flag eq '--override-actor') { $override_actor = shift(@ARGV) // die "--override-actor requires a value\n"; next; }
+    if ($flag eq '--command-identity') { $command_identity = shift(@ARGV) // die "--command-identity requires a value\n"; next; }
+    if ($flag eq '--isolation-identity') { $isolation_identity = shift(@ARGV) // die "--isolation-identity requires a value\n"; next; }
     if ($flag eq '--label' || $flag eq '--profile') { $profile = shift(@ARGV) // die "$flag requires a value\n"; next; }
     die "unknown option $flag\n";
 }
@@ -186,7 +190,7 @@ my $revision = capture($git, 'rev-parse', 'HEAD');
 $revision =~ s/\s+\z//;
 die "resolve validation source revision\n" unless $revision;
 $profile ||= $class;
-my $isolation_mode = $daemon_scope eq 'worktree' ? 'worktree' : 'repository-family';
+my $isolation_mode = $isolation_identity || ($daemon_scope eq 'worktree' ? 'worktree' : 'repository-family');
 my $environment_fingerprint = $ENV{AZEDARACH_VALIDATION_ENVIRONMENT_FINGERPRINT} || sha256_hex(join("\0", map { $_ . '=' . ($ENV{$_} || '') } qw(PATH GOROOT GOFLAGS GOOS GOARCH GOTOOLCHAIN CGO_ENABLED CC CXX AZEDARACH_REAL_GO_BIN NIX_PROFILES)));
 my $lease_token = random_token();
 my $request_id = sprintf('%s-%d-%d-%s', $issue, $$, int(time() * 1_000_000), substr(random_token(), 0, 12));
@@ -251,7 +255,7 @@ END {
     remove_tree($validation_pending) if defined($validation_pending) && -d $validation_pending;
 }
 $ENV{AZEDARACH_VALIDATION_LEASE_TOKEN} = $lease_token;
-my $command_text = join(' ', @ARGV);
+my $command_text = $command_identity || join(' ', @ARGV);
 my @acquire = ($control_az, 'validation', 'acquire', '--request', $request_id, '--issue', $issue,
     '--class', $class, '--scope', $scope, '--purpose', $purpose, '--profile', $profile, '--command', $command_text,
     '--revision', $revision, '--isolation', $isolation_mode, '--environment-fingerprint', $environment_fingerprint,

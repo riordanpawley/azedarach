@@ -33,7 +33,7 @@ func TestBuildAttachmentPreviewRendersMarkdownSnippet(t *testing.T) {
 		t.Fatalf("buildAttachmentPreview markdown: %v", err)
 	}
 
-	rendered := strings.Join(preview.lines, "\n")
+	rendered := ansi.Strip(strings.Join(preview.lines, "\n"))
 	if preview.title != "Markdown Preview" {
 		t.Fatalf("preview title = %q, want Markdown Preview", preview.title)
 	}

@@ -1,6 +1,8 @@
 package protocol
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/riordanpawley/azedarach/internal/domain"
@@ -14,7 +16,13 @@ const (
 	CommandOrchestratorSessionStop         = "orchestration.session.stop"
 	CommandOrchestratorSessionStatus       = "orchestration.session.status"
 	EventOrchestrationLoopUpdated          = "orchestration.loop.updated"
+	EventPublicationOperationUpdated       = "publication.operation.updated"
 	OrchestrationProjectionAuthoritySQLite = "sqlite"
+	// OrchestratorSessionStartAcknowledgementBudget bounds the daemon's wait for
+	// hook-backed managed-agent readiness. The client budget must remain larger
+	// so transport callers cannot cancel a valid cold start first.
+	OrchestratorSessionStartAcknowledgementBudget = 30 * time.Second
+	OrchestratorSessionStartClientBudget          = OrchestratorSessionStartAcknowledgementBudget + 5*time.Second
 )
 
 type OrchestrationLoopEventBody struct {
@@ -49,6 +57,9 @@ type OrchestrationSnapshotRequest struct {
 	Limit          int    `json:"limit,omitempty"`
 	ObservedCursor int64  `json:"observed_cursor,omitempty"`
 	RepoDir        string `json:"repo_dir,omitempty"`
+	// ReviewIssueIDs is the daemon-internal admission selector derived from an
+	// intent's authoritative IssueIDs. Snapshot clients cannot set it directly.
+	ReviewIssueIDs []string `json:"-"`
 }
 
 type OrchestrationSnapshot struct {
@@ -57,13 +68,14 @@ type OrchestrationSnapshot struct {
 	Lifecycle              domain.OrchestratorLifecycle              `json:"lifecycle,omitempty"`
 	Scope                  domain.OrchestrationScope                 `json:"scope"`
 	Revision               uint64                                    `json:"revision"`
-	ProjectionRevision     uint64                       `json:"projection_revision,omitempty"`
-	ProjectionAuthority    string                       `json:"projection_authority,omitempty"`
-	Source                 MaterializedSnapshotMetadata `json:"source"`
+	ProjectionRevision     uint64                                    `json:"projection_revision,omitempty"`
+	ProjectionAuthority    string                                    `json:"projection_authority,omitempty"`
+	Source                 MaterializedSnapshotMetadata              `json:"source"`
 	GeneratedAt            time.Time                                 `json:"generated_at"`
 	Roots                  []string                                  `json:"roots,omitempty"`
 	Capacity               OrchestrationCapacity                     `json:"capacity"`
-	ValidationCapacity     *domain.ValidationSnapshot   `json:"validation_capacity,omitempty"`
+	ValidationCapacity     *domain.ValidationSnapshot                `json:"validation_capacity,omitempty"`
+	PublicationQueue       []domain.PublicationOperation             `json:"publication_queue,omitempty"`
 	Runnable               []string                                  `json:"runnable"`
 	NestedRoots            []OrchestrationNestedRoot                 `json:"nested_roots,omitempty"`
 	Pending                []OrchestrationPending                    `json:"pending,omitempty"`
@@ -73,6 +85,7 @@ type OrchestrationSnapshot struct {
 	StaleCloseableChildren []OrchestrationCloseable                  `json:"stale_closeable_children,omitempty"`
 	ContainmentRisks       []OrchestrationRisk                       `json:"containment_risks,omitempty"`
 	WorkerObservations     []domain.WorkerObservation                `json:"worker_observations,omitempty"`
+	ActionableBlockers     []OrchestrationActionableBlocker          `json:"actionable_blockers,omitempty"`
 	Blocked                map[string]string                         `json:"blocked"`
 	Candidates             []OrchestrationCandidate                  `json:"candidates,omitempty"`
 	Reviews                []OrchestrationCandidate                  `json:"reviews,omitempty"`
@@ -88,6 +101,13 @@ type OrchestrationSnapshot struct {
 	PendingDecisions       map[string][]domain.PendingDecisionChange `json:"pending_decisions,omitempty"`
 	Health                 OrchestrationHealth                       `json:"health"`
 	Completion             OrchestrationCompletion                   `json:"completion"`
+}
+
+// OrchestrationActionableBlocker identifies the latest durable worker-blocked
+// observation for one direct issue in the exact orchestration scope.
+type OrchestrationActionableBlocker struct {
+	IssueID string `json:"issue_id"`
+	EventID int64  `json:"event_id"`
 }
 
 type OrchestrationCompletion struct {
@@ -111,14 +131,30 @@ type OrchestrationConstraints struct {
 type OrchestrationReview struct {
 	IssueID            string                         `json:"issue_id"`
 	ParentIssueID      string                         `json:"parent_issue_id,omitempty"`
+	ReviewContext      *domain.WorkflowContextPacket  `json:"review_context_packet,omitempty"`
+	IntegrationContext *domain.WorkflowContextPacket  `json:"integration_context_packet,omitempty"`
 	Actionable         bool                           `json:"actionable"`
 	Reasons            []string                       `json:"reasons,omitempty"`
 	Evidence           *domain.WorkerEvidencePacket   `json:"evidence,omitempty"`
 	ContextRisk        *domain.IssueContextRiskPacket `json:"context_risk,omitempty"`
 	EvidenceSource     string                         `json:"evidence_source,omitempty"`
+	ReviewEpochEventID int64                          `json:"review_epoch_event_id,omitempty"`
+	EvidenceEventID    int64                          `json:"evidence_event_id,omitempty"`
+	EvidenceSeq        int64                          `json:"evidence_seq,omitempty"`
+	EvidenceDigest     string                         `json:"evidence_digest,omitempty"`
+	SourceOID          string                         `json:"source_oid,omitempty"`
 	WorktreePath       string                         `json:"worktree_path,omitempty"`
 	Branch             string                         `json:"branch,omitempty"`
 	BaseBranch         string                         `json:"base_branch,omitempty"`
+	DiffBaseRevision   string                         `json:"diff_base_revision,omitempty"`
+	HeadRevision       string                         `json:"head_revision,omitempty"`
+	DiffScope          string                         `json:"diff_scope,omitempty"`
+	DiffRange          string                         `json:"diff_range,omitempty"`
+	ReviewMode         string                         `json:"review_mode,omitempty"`
+	DeltaBaseRevision  string                         `json:"delta_base_revision,omitempty"`
+	ReviewFallback     string                         `json:"review_fallback_reason,omitempty"`
+	PriorFindings      []OrchestrationReviewFinding   `json:"prior_findings,omitempty"`
+	AffectedInvariants []string                       `json:"affected_invariants,omitempty"`
 	DiffStat           string                         `json:"diff_stat,omitempty"`
 	ExecutionOwner     string                         `json:"execution_owner,omitempty"`
 	OrchestrationOwner string                         `json:"orchestration_owner,omitempty"`
@@ -177,10 +213,23 @@ type OrchestrationStartFailure struct {
 	OperationState string `json:"operation_state,omitempty"`
 	Message        string `json:"message,omitempty"`
 }
+
+type OrchestrationAdmissionPhase string
+
+const (
+	OrchestrationAdmissionSnapshot              OrchestrationAdmissionPhase = "snapshot_admission"
+	OrchestrationAdmissionProjectionCheckpoint  OrchestrationAdmissionPhase = "projection_source_checkpoint"
+	OrchestrationAdmissionOperationsStore       OrchestrationAdmissionPhase = "operations_store"
+	OrchestrationAdmissionObservationProjection OrchestrationAdmissionPhase = "project_observation_projection"
+)
+
 type OrchestrationPending struct {
-	IssueID        string `json:"issue_id"`
-	OperationID    string `json:"operation_id,omitempty"`
-	OperationState string `json:"operation_state,omitempty"`
+	IssueID        string                      `json:"issue_id"`
+	OperationID    string                      `json:"operation_id,omitempty"`
+	OperationState string                      `json:"operation_state,omitempty"`
+	Phase          OrchestrationAdmissionPhase `json:"phase,omitempty"`
+	Message        string                      `json:"message,omitempty"`
+	Retryable      bool                        `json:"retryable,omitempty"`
 }
 type OrchestrationSession struct {
 	IssueID           string                 `json:"issue_id"`
@@ -255,24 +304,105 @@ type OrchestrationIntentRequest struct {
 	BaseBranch          string                               `json:"base_branch,omitempty"`
 	OverrideBoardHealth bool                                 `json:"override_board_health,omitempty"`
 	Findings            []OrchestrationReviewFinding         `json:"findings,omitempty"`
+	ReviewPass          *OrchestrationReviewPass             `json:"review_pass,omitempty"`
 	RestartWorker       bool                                 `json:"restart_worker,omitempty"`
 	Routes              []domain.OrchestrationCandidateRoute `json:"routes,omitempty"`
 }
 
+type OrchestrationReviewPass struct {
+	Verdict             string                            `json:"verdict"`
+	Angle               string                            `json:"angle"`
+	ReusedLayers        []string                          `json:"reused_layers,omitempty"`
+	Matrix              domain.WorkerEvidenceReviewMatrix `json:"matrix"`
+	ExtraPassReason     string                            `json:"extra_pass_reason,omitempty"`
+	AffectedInvariants  []string                          `json:"affected_invariants,omitempty"`
+	BroaderInvalidation *bool                             `json:"broader_invalidation"`
+}
+
+// ValidateReturnedReviewPass enforces the complete semantic checkpoint shape at
+// the shared protocol boundary so every client receives the same admission
+// contract. An explicitly empty reused_layers list is valid; omission is not.
+func ValidateReturnedReviewPass(reviewPass OrchestrationReviewPass) error {
+	if strings.TrimSpace(reviewPass.Verdict) != "returned" ||
+		strings.TrimSpace(reviewPass.Angle) == "" ||
+		strings.TrimSpace(reviewPass.Matrix.Type) == "" ||
+		len(reviewPass.Matrix.CoveredCells)+len(reviewPass.Matrix.SkippedCells) == 0 ||
+		reviewPass.ReusedLayers == nil ||
+		reviewPass.BroaderInvalidation == nil {
+		return fmt.Errorf("review pass must record returned verdict, angle, reused layers, explicit broader_invalidation, and covered or deliberately skipped matrix cells")
+	}
+	if len(reviewPass.AffectedInvariants) == 0 {
+		return fmt.Errorf("review pass requires at least one canonical affected invariant")
+	}
+	seenLayers := make(map[string]struct{}, len(reviewPass.ReusedLayers))
+	for _, layer := range reviewPass.ReusedLayers {
+		key := strings.ToLower(strings.TrimSpace(layer))
+		if key == "" {
+			return fmt.Errorf("review pass reused layers must not contain an empty value")
+		}
+		if _, exists := seenLayers[key]; exists {
+			return fmt.Errorf("review pass reused layers must not contain duplicate %q", layer)
+		}
+		seenLayers[key] = struct{}{}
+	}
+	seenCells := make(map[string]struct{}, len(reviewPass.Matrix.CoveredCells)+len(reviewPass.Matrix.SkippedCells))
+	for _, cell := range reviewPass.Matrix.CoveredCells {
+		key := strings.ToLower(strings.TrimSpace(cell))
+		if key == "" {
+			return fmt.Errorf("review pass covered matrix cells must not contain an empty value")
+		}
+		if _, exists := seenCells[key]; exists {
+			return fmt.Errorf("review pass matrix cells must not contain duplicate %q", cell)
+		}
+		seenCells[key] = struct{}{}
+	}
+	for _, skipped := range reviewPass.Matrix.SkippedCells {
+		key := strings.ToLower(strings.TrimSpace(skipped.Cell))
+		if key == "" || strings.TrimSpace(skipped.Reason) == "" {
+			return fmt.Errorf("review pass skipped matrix cells require cell and reason")
+		}
+		if _, exists := seenCells[key]; exists {
+			return fmt.Errorf("review pass matrix cells must not contain duplicate %q", skipped.Cell)
+		}
+		seenCells[key] = struct{}{}
+	}
+	seenInvariants := make(map[string]struct{}, len(reviewPass.AffectedInvariants))
+	for _, invariant := range reviewPass.AffectedInvariants {
+		value := strings.TrimSpace(invariant)
+		if value == "" || !KnownDaemonInvariant(value) {
+			return fmt.Errorf("review pass affected invariant %q is not canonical", invariant)
+		}
+		if _, exists := seenInvariants[value]; exists {
+			return fmt.Errorf("review pass affected invariants must not contain duplicate %q", invariant)
+		}
+		seenInvariants[value] = struct{}{}
+	}
+	return nil
+}
+
 type OrchestrationIntentResult struct {
-	Scope     domain.OrchestrationScope  `json:"scope"`
-	Kind      OrchestrationIntentKind    `json:"kind"`
-	IntentKey string                     `json:"intent_key"`
-	Revision  uint64                     `json:"revision"`
-	Requested []string                   `json:"requested"`
-	Started   []string                   `json:"started,omitempty"`
-	Returned  []string                   `json:"returned,omitempty"`
-	Closed    []string                   `json:"closed,omitempty"`
-	Launched  []OrchestrationLaunch      `json:"launched,omitempty"`
-	Pending   []OrchestrationPending     `json:"pending,omitempty"`
-	Routed    []OrchestrationRouteResult `json:"routed,omitempty"`
-	Skipped   map[string]string          `json:"skipped,omitempty"`
-	Failed    map[string]string          `json:"failed,omitempty"`
+	Scope        domain.OrchestrationScope     `json:"scope"`
+	Kind         OrchestrationIntentKind       `json:"kind"`
+	IntentKey    string                        `json:"intent_key"`
+	Revision     uint64                        `json:"revision"`
+	Requested    []string                      `json:"requested"`
+	Started      []string                      `json:"started,omitempty"`
+	Returned     []string                      `json:"returned,omitempty"`
+	Closed       []string                      `json:"closed,omitempty"`
+	Launched     []OrchestrationLaunch         `json:"launched,omitempty"`
+	Pending      []OrchestrationPending        `json:"pending,omitempty"`
+	Publications []domain.PublicationOperation `json:"publications,omitempty"`
+	Routed       []OrchestrationRouteResult    `json:"routed,omitempty"`
+	Skipped      map[string]string             `json:"skipped,omitempty"`
+	Failed       map[string]string             `json:"failed,omitempty"`
+	Results      []WorkflowPhaseResult         `json:"result_summaries,omitempty"`
+}
+
+// WorkflowPhaseResult binds a bounded phase result to the issue whose raw
+// orchestration fields were deliberately excluded from the response.
+type WorkflowPhaseResult struct {
+	IssueID string                       `json:"issue_id"`
+	Summary domain.WorkflowResultSummary `json:"summary"`
 }
 
 type OrchestrationRouteResult struct {

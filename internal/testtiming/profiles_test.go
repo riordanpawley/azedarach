@@ -46,6 +46,14 @@ func TestCanonicalProfilesMakeCacheAndScopeExplicit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, cold.GoTestArgs, "-timeout=8m")
 	assert.Contains(t, cold.GoTestArgs, "-p=4")
+	migrationClone, err := ResolveProfile("migration-clone", nil, "")
+	require.NoError(t, err)
+	assert.True(t, migrationClone.PackageIsolatedDBClones)
+	assert.Equal(t, []CloneAuthority{CloneAuthorityUser}, migrationClone.PackageCloneAuthorities["./internal/daemon/userstore"])
+	assert.Equal(t, []CloneAuthority{CloneAuthorityProject}, migrationClone.PackageCloneAuthorities["./internal/services/issues"])
+	assert.Equal(t, []CloneAuthority{CloneAuthorityProject}, migrationClone.PackageCloneAuthorities["./internal/daemon/state"])
+	assert.Equal(t, []CloneAuthority{CloneAuthorityProject}, migrationClone.PackageCloneAuthorities["./internal/daemon/operations/store"])
+	assert.NotContains(t, migrationClone.PackageCloneAuthorities, "./internal/daemon")
 }
 
 func TestFocusedProfileOverridesAreRecordedInExactCommand(t *testing.T) {

@@ -5,6 +5,9 @@ default:
 build-install-run *ARGS:
     ./scripts/build-install-run.sh {{ARGS}}
 
+build-install:
+    ./scripts/build-install-run.sh --no-run
+
 jaeger-inventory:
     ./scripts/jaeger-local.sh inventory
 
@@ -63,6 +66,11 @@ test-integration:
 test-migration-clone:
     just test-timing migration-clone
 
+# Safely discover, online-backup, and validate the root user database plus every
+# existing registered project database. Candidate code opens clones only.
+test-migration-clone-real:
+    ./scripts/test-real-database-migration-clones.sh
+
 test-race:
     just test-timing race
 
@@ -75,7 +83,8 @@ test-build-contract:
     ./scripts/test-validation-artifacts.sh
 
 test-jaeger-contract:
-    ./scripts/test-jaeger-local.sh
+    ./scripts/test-jaeger-local-termination.sh
+    ./scripts/test-jaeger-local-concurrent.sh
 
 # Requires a healthy local Docker/Podman engine and the pinned Jaeger image.
 test-jaeger-workload:
@@ -87,7 +96,7 @@ merge-gate:
 # Reviewer-owned exact-revision evidence. The daemon additionally requires the
 # current durable review lease and review epoch before admitting this purpose.
 review-gate:
-    ./scripts/with-machine-validation-lease --class aggregate --scope ticket --purpose review_evidence --profile merge-gate -- just _merge-gate-unleased
+    AZEDARACH_VALIDATION_ENVIRONMENT_FINGERPRINT=azedarach-go-review-v1 ./scripts/with-machine-validation-lease --class aggregate --scope ticket --purpose review_evidence --profile merge-gate --command-identity "just review-gate" --isolation-identity synthetic-worktree -- just _merge-gate-unleased
 
 _merge-gate-unleased:
     just build
@@ -133,7 +142,7 @@ clean:
     rm -rf .tmp/az-test/ .tmp/cli-smoke/ coverage.out coverage.html
 
 install:
-    @echo "Refusing unpaired install: run 'just build-install-run --no-run' from the primary worktree" >&2
+    @echo "Refusing unpaired install: run 'just build-install' from the primary worktree" >&2
     @exit 1
 
 lint:

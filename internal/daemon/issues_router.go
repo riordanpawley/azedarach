@@ -77,6 +77,19 @@ func (d *Daemon) issueClientForProject(projectID string) *issues.Client {
 	return client
 }
 
+// existingIssueClientForProject returns only an already-resolved client. It is
+// used at the command boundary to observe a corruption latch without creating
+// a project directory, database, or client as a side effect of error handling.
+func (d *Daemon) existingIssueClientForProject(projectID string) *issues.Client {
+	if d == nil {
+		return nil
+	}
+	projectID = protocol.NormalizeProjectID(projectID)
+	d.issueClientsMu.Lock()
+	defer d.issueClientsMu.Unlock()
+	return d.issueClientsByProject[projectID]
+}
+
 // issueClientForExistingProjectStore resolves a registry project without
 // creating its root, .azedarach directory, or database. It is reserved for
 // background discovery paths where a stale registry entry must remain
@@ -295,7 +308,19 @@ func (d *Daemon) openProjectionDeltaStores(ctx context.Context) error {
 		}
 		seen[store.client] = struct{}{}
 		if err := store.client.OpenProjectionDeltaStore(); err != nil {
-			return fmt.Errorf("open projection delta store for project %q: %w", store.projectID, err)
+			wrapped := fmt.Errorf("open projection delta store for project %q: %w", store.projectID, err)
+			if !issues.IsSQLiteCorrupt(err) {
+				return wrapped
+			}
+			projectID := d.canonicalProjectID(store.projectID)
+			healthErr := d.recordProjectIssueStoreFailure(projectID, wrapped)
+			if d.cfg.Logger != nil {
+				d.cfg.Logger.WarnContext(ctx, "registered project issue store quarantined during startup",
+					"project_id", projectID,
+					"error", healthErr,
+				)
+			}
+			continue
 		}
 	}
 	return nil

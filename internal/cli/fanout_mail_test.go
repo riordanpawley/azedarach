@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"path/filepath"
@@ -14,6 +15,20 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 )
+
+func TestPrintIssueFanoutReadySurfacesRootBlockers(t *testing.T) {
+	var out bytes.Buffer
+	printIssueFanoutReady(&out, daemonclient.TaskGraphReadiness{
+		RootIssueID:  "az-root",
+		RootBlockers: []string{"az-blocker"},
+		Blocked:      map[string]string{"az-leaf": "root waiting on az-blocker"},
+	})
+	for _, want := range []string{"Root blockers: az-blocker", "Runnable leaves:\n- (none)", "az-leaf: root waiting on az-blocker"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output missing %q:\n%s", want, out.String())
+		}
+	}
+}
 
 func TestFlattenFanoutAndPlan(t *testing.T) {
 	spec := fanoutSpec{

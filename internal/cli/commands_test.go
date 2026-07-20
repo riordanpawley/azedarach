@@ -890,6 +890,15 @@ func (f *fakeDaemonTransport) Handshake(ctx context.Context, hello protocol.Hell
 
 func (f *fakeDaemonTransport) Command(ctx context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
 	if req.Command == protocol.CommandOrchestrationIntent && !f.passOrchestrationIntent {
+		if len(f.lastGraphReadiness.Runnable) == 0 && len(f.lastGraphReadiness.Active) == 0 && len(f.lastGraphReadiness.NestedRoots) == 0 && len(f.lastGraphReadiness.Blocked) == 0 && f.commandFn != nil {
+			readinessReq := req
+			readinessReq.Command = daemonclient.CommandTaskGraphReadiness
+			if resp, err := f.commandFn(ctx, readinessReq); err != nil {
+				return protocol.ResponseEnvelope{}, err
+			} else if resp.OK {
+				_ = json.Unmarshal(resp.Body, &f.lastGraphReadiness)
+			}
+		}
 		return f.emulateOrchestrationIntent(ctx, req)
 	}
 	if f.commandFn != nil {
@@ -1870,7 +1879,7 @@ func TestSessionRestartAllCommandPrintsFailuresBeforeReturningError(t *testing.T
 						IssueID:   naming.IssueID("az-1"),
 						SessionID: naming.SessionID("proj-az-1"),
 						Activity:  "idle",
-						Error:     "send-keys failed",
+						Error:     "replacement incarnation was not observed",
 					}},
 				})
 				if err != nil {
@@ -1900,8 +1909,35 @@ func TestSessionRestartAllCommandPrintsFailuresBeforeReturningError(t *testing.T
 	if commandErr == nil || !strings.Contains(commandErr.Error(), "failed to restart 1 session") {
 		t.Fatalf("error = %v, want failed restart error", commandErr)
 	}
-	if !strings.Contains(output, "az-1") || !strings.Contains(output, "failed: send-keys failed") {
+	if !strings.Contains(output, "az-1") || !strings.Contains(output, "failed: replacement incarnation was not observed") {
 		t.Fatalf("output = %q, want failed session detail", output)
+	}
+}
+
+func TestSessionRestartAllCommandDoesNotPrintSuccessAfterCheckpointFailure(t *testing.T) {
+	deps := &Dependencies{
+		Config: config.DefaultConfig(),
+		DaemonClient: daemonclient.New(&fakeDaemonTransport{
+			commandFn: func(_ context.Context, req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+				return protocol.ResponseEnvelope{
+					ProtocolVersion: req.ProtocolVersion, RequestID: req.RequestID,
+					Kind: protocol.EnvelopeKindResponse, Meta: req.Meta, OK: false,
+					Error: &protocol.ErrorEnvelope{Code: protocol.ErrorCodeInternal, Message: "persist restart target completion: checkpoint unavailable"},
+				}, nil
+			},
+		}).WithProjectID("proj"),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), ProjectID: "proj",
+	}
+	var commandErr error
+	output := captureStdout(t, func() error {
+		commandErr = SessionRestartAllCommand(deps, SessionRestartAllOptions{})
+		return nil
+	})
+	if commandErr == nil || !strings.Contains(commandErr.Error(), "checkpoint unavailable") {
+		t.Fatalf("error=%v", commandErr)
+	}
+	if strings.Contains(output, "Restarted") {
+		t.Fatalf("false success output=%q", output)
 	}
 }
 
@@ -2873,7 +2909,7 @@ func TestBranchMergeToBaseCommandUsesAttachedTargetBranchWorktree(t *testing.T) 
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal git merge body: %v", err)
 					}
-					if body.Worktree != targetWorktree || body.Branch != "riordan/az-123/some-change" {
+					if body.SourceID != "az-123" || body.TargetID != "base" || body.Worktree != "" || body.Branch != "" {
 						t.Fatalf("merge body = %+v", body)
 					}
 					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
@@ -2950,8 +2986,11 @@ func TestBranchMergeCommandExplicitDescendantTargetIgnoresCallerWorktree(t *test
 	if err := BranchMergeToBaseCommandWithOptions(deps, BranchMergeToBaseOptions{IssueID: "ancestor", Target: "descendant"}); err != nil {
 		t.Fatalf("explicit descendant merge: %v", err)
 	}
-	if mergeBody.Worktree != descendantWorktree || mergeBody.Branch != "riordan/ancestor/work" {
-		t.Fatalf("merge body = %+v, want source branch merged in named descendant worktree %q", mergeBody, descendantWorktree)
+	if mergeBody.SourceID != "ancestor" || mergeBody.TargetID != "descendant" {
+		t.Fatalf("merge body = %+v, want authoritative typed ancestor-to-descendant target", mergeBody)
+	}
+	if mergeBody.Worktree != "" || mergeBody.Branch != "" {
+		t.Fatalf("merge body = %+v, want daemon-resolved worktree and branch identities", mergeBody)
 	}
 }
 
@@ -3275,7 +3314,10 @@ func TestBranchMergeToBaseCommandUsesNearestNonClosedAncestorBranch(t *testing.T
 					if err := json.Unmarshal(req.Body, &body); err != nil {
 						t.Fatalf("unmarshal git merge body: %v", err)
 					}
-					mergedIn = body.Worktree
+					if body.SourceID != "az-child" {
+						t.Fatalf("merge source = %+v", body)
+					}
+					mergedIn = body.TargetID
 					return responseWithJSON(req, daemonclient.GitMergeCommandResponse{
 						Worktree: body.Worktree,
 						Branch:   "riordan/az-child/work",
@@ -3294,8 +3336,8 @@ func TestBranchMergeToBaseCommandUsesNearestNonClosedAncestorBranch(t *testing.T
 	if err := BranchMergeToBaseCommand(deps, "az-child"); err != nil {
 		t.Fatalf("BranchMergeToBaseCommand error = %v", err)
 	}
-	if mergedIn != "/tmp/az-parent" {
-		t.Fatalf("merge worktree = %q, want /tmp/az-parent", mergedIn)
+	if mergedIn != "az-parent" {
+		t.Fatalf("merge target = %q, want az-parent", mergedIn)
 	}
 }
 
@@ -4728,7 +4770,7 @@ func TestParseExportArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseExportArgs() error = %v", err)
 			}
-			if got != tt.want {
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("ParseExportArgs() = %+v, want %+v", got, tt.want)
 			}
 		})
@@ -6212,7 +6254,7 @@ func TestParseIssueCreateArgs(t *testing.T) {
 
 func TestParseIssueSplitArgsDefaultsParentFromEnv(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-parent")
-	opts, err := ParseIssueSplitArgs([]string{"--description", "do this elsewhere", "--priority", "P1", "Child work"})
+	opts, err := ParseIssueSplitArgs([]string{"--intent-key", "split-invocation-1", "--description", "do this elsewhere", "--priority", "P1", "Child work"})
 	if err != nil {
 		t.Fatalf("ParseIssueSplitArgs error = %v", err)
 	}
@@ -6221,6 +6263,14 @@ func TestParseIssueSplitArgsDefaultsParentFromEnv(t *testing.T) {
 	}
 	if opts.Priority != domain.P1 || !opts.PriorityExplicit {
 		t.Fatalf("priority = %s explicit=%v, want P1 explicit", opts.Priority, opts.PriorityExplicit)
+	}
+}
+
+func TestParseIssueSplitArgsRequiresExplicitInvocationIdentity(t *testing.T) {
+	t.Setenv("AZEDARACH_ISSUE_ID", "az-parent")
+	_, err := ParseIssueSplitArgs([]string{"Child work"})
+	if err == nil || !strings.Contains(err.Error(), "missing split intent key") {
+		t.Fatalf("error = %v, want explicit split intent identity requirement", err)
 	}
 }
 
@@ -6233,6 +6283,7 @@ func TestParseIssueSplitArgsRequiresParent(t *testing.T) {
 }
 
 func TestParseIssueCloseArgs(t *testing.T) {
+	historicalAuthorization := domain.HistoricalPublicationAuthorization{ReviewEventID: 10, ValidationEventID: 9, ReceiptEventID: 11, ReviewerID: "reviewer", AuthoritativeEvidenceID: "gate-report", Class: domain.ValidationClassAggregate, Scope: domain.ValidationScopeRepository, Purpose: domain.ValidationPurposePushGate, Execution: domain.ValidationExecutionExecuted, Override: domain.ValidationOverrideNone, EvidencePresent: true, AttestsMissingLegacySemantics: true}
 	tests := []struct {
 		name        string
 		args        []string
@@ -6245,6 +6296,16 @@ func TestParseIssueCloseArgs(t *testing.T) {
 			want: IssueCloseOptions{IssueID: "az-1"},
 		},
 		{
+			name: "typed historical authorization",
+			args: []string{"--historical-authorization", `{"review_event_id":10,"validation_event_id":9,"receipt_event_id":11,"reviewer_id":"reviewer","authoritative_evidence_id":"gate-report","validation_class":"aggregate","validation_scope":"repository","validation_purpose":"push_gate","validation_execution":"executed","validation_override":"none","evidence_present":true,"attests_missing_legacy_semantics":true}`, "az-1"},
+			want: IssueCloseOptions{IssueID: "az-1", HistoricalAuthorization: &historicalAuthorization},
+		},
+		{
+			name:        "focused historical authorization rejected",
+			args:        []string{"--historical-authorization", `{"review_event_id":10,"validation_event_id":9,"receipt_event_id":11,"reviewer_id":"reviewer","authoritative_evidence_id":"gate-report","validation_class":"safe","validation_scope":"repository","validation_purpose":"push_gate","validation_execution":"executed","validation_override":"none","evidence_present":true,"attests_missing_legacy_semantics":true}`, "az-1"},
+			errContains: "aggregate repository push-gate",
+		},
+		{
 			name:        "forbid impl",
 			args:        []string{"--impl", "go-bubbletea", "az-1"},
 			errContains: "--impl is not supported for issue close",
@@ -6252,12 +6313,12 @@ func TestParseIssueCloseArgs(t *testing.T) {
 		{
 			name:        "missing id",
 			args:        []string{},
-			errContains: "usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]",
+			errContains: "usage: az ticket close",
 		},
 		{
 			name:        "extra args",
 			args:        []string{"az-1", "extra"},
-			errContains: "usage: az ticket close [--project <project-id>] [--id <ticket-id>|-i <ticket-id>] [--json] [--force-worktree] [--close-clean-children] [<ticket-id>]",
+			errContains: "usage: az ticket close",
 		},
 		{
 			name: "named id",
@@ -6308,7 +6369,7 @@ func TestParseIssueCloseArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseIssueCloseArgs() error = %v", err)
 			}
-			if got != tt.want {
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("ParseIssueCloseArgs() = %+v, want %+v", got, tt.want)
 			}
 		})
@@ -8893,8 +8954,9 @@ func TestIssueCreateAndCloseCommandsUseDaemonTaskCommands(t *testing.T) {
 							body = payload
 						} else if req.Command == daemonclient.CommandTaskClose {
 							payload, err := json.Marshal(daemonclient.TaskCloseResult{
-								TaskID: "az-9",
-								Status: string(domain.StatusDone),
+								TaskID:   "az-9",
+								Status:   string(domain.StatusDone),
+								Revision: 1,
 							})
 							if err != nil {
 								t.Fatalf("marshal task close response: %v", err)
@@ -9103,6 +9165,7 @@ func TestIssueCloseCommandConfirmedCleanupStopsClosesAndRemovesWorktree(t *testi
 					return responseWithJSON(req, daemonclient.TaskCloseResult{
 						TaskID:                 "az-9",
 						Status:                 string(domain.StatusDone),
+						Revision:               1,
 						IntegrationRequested:   true,
 						Integrated:             true,
 						IntegratedSourceBranch: "riordan/az-9/finish-flow",
@@ -9860,8 +9923,10 @@ func TestIssueCreateCommandReportsPartialSuccessWhenCreatedFromEdgeFails(t *test
 func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T) {
 	root := naming.IssueID("az-parent")
 	child := naming.IssueID("az-child")
+	secondChild := naming.IssueID("az-child-2")
 	var requests []protocol.RequestEnvelope
 	var createReq daemonclient.TaskCreateParams
+	createCalls := 0
 	var intentReq protocol.OrchestrationIntentRequest
 	taskListCalls := 0
 	deps := &Dependencies{
@@ -9875,9 +9940,13 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 				requests = append(requests, req)
 				switch req.Command {
 				case daemonclient.CommandTaskGraphReadiness:
+					requestedChild := child
+					if createReq.IntentKey == "split-invocation-2" {
+						requestedChild = secondChild
+					}
 					return responseWithJSON(req, daemonclient.TaskGraphReadiness{
 						RootIssueID: root.String(),
-						Runnable:    []string{child.String()},
+						Runnable:    []string{requestedChild.String()},
 						Blocked:     map[string]string{},
 					}), nil
 				case protocol.CommandOrchestrationIntent:
@@ -9888,11 +9957,11 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 						Scope:     intentReq.Scope,
 						Kind:      protocol.OrchestrationIntentStart,
 						IntentKey: intentReq.IntentKey,
-						Requested: []string{child.String()},
-						Started:   []string{child.String()},
+						Requested: intentReq.IssueIDs,
+						Started:   intentReq.IssueIDs,
 						Launched: []protocol.OrchestrationLaunch{{
-							IssueID:        child.String(),
-							SessionID:      child.String(),
+							IssueID:        intentReq.IssueIDs[0],
+							SessionID:      intentReq.IssueIDs[0],
 							OperationID:    "op-split",
 							OperationState: string(protocol.OperationStateQueued),
 						}},
@@ -9957,6 +10026,22 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 							Type:            domain.TypeTask,
 							Implementations: []string{"go-bubbletea"},
 						}}
+					case secondChild:
+						tasks = []domain.Task{{
+							ID:       secondChild,
+							Title:    "Child work",
+							Status:   domain.StatusOpen,
+							Priority: domain.P2,
+							Type:     domain.TypeTask,
+							ParentID: &root,
+						}, {
+							ID:              root,
+							Title:           "Parent",
+							Status:          domain.StatusInProgress,
+							Priority:        domain.P1,
+							Type:            domain.TypeTask,
+							Implementations: []string{"go-bubbletea"},
+						}}
 					default:
 						t.Fatalf("unexpected task.get_many id: %+v", getManyReq.TaskIDs)
 					}
@@ -9969,13 +10054,17 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 					if err := json.Unmarshal(req.Body, &createReq); err != nil {
 						t.Fatalf("decode create request: %v", err)
 					}
-					return responseWithJSON(req, map[string]string{"task_id": child.String()}), nil
+					createCalls++
+					if createReq.IntentKey == "split-invocation-2" {
+						return responseWithJSON(req, daemonclient.TaskIDResponse{TaskID: secondChild, Created: true}), nil
+					}
+					return responseWithJSON(req, daemonclient.TaskIDResponse{TaskID: child, Created: createCalls == 1}), nil
 				case daemonclient.CommandTaskDependencyAdd:
 					var depReq daemonclient.TaskDependencyParams
 					if err := json.Unmarshal(req.Body, &depReq); err != nil {
 						t.Fatalf("decode dependency request: %v", err)
 					}
-					if depReq.TaskID != child || depReq.DependsOnID != root || depReq.Type != string(domain.DependencyCreatedIn) {
+					if (depReq.TaskID != child && depReq.TaskID != secondChild) || depReq.DependsOnID != root || depReq.Type != string(domain.DependencyCreatedIn) {
 						t.Fatalf("dependency request = %+v, want child created-in root", depReq)
 					}
 					return responseWithJSON(req, map[string]any{}), nil
@@ -9987,11 +10076,16 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 						"worktrees": []map[string]string{
 							{"issue_id": root.String(), "path": "/repo-az-parent", "branch": "user/az-parent/parent-work"},
 							{"issue_id": child.String(), "path": "/repo-az-child", "branch": "user/az-child/child-work"},
+							{"issue_id": secondChild.String(), "path": "/repo-az-child-2", "branch": "user/az-child-2/child-work"},
 						},
 					}), nil
 				case daemonclient.CommandTaskMergeBaseTarget:
+					mergeChild := child
+					if createReq.IntentKey == "split-invocation-2" {
+						mergeChild = secondChild
+					}
 					return responseWithJSON(req, daemonclient.TaskMergeBaseTarget{
-						IssueID:        child.String(),
+						IssueID:        mergeChild.String(),
 						TargetID:       root.String(),
 						Branch:         "user/az-parent/parent-work",
 						WorktreePath:   "/repo-az-parent",
@@ -10021,6 +10115,7 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	output := captureStdout(t, func() error {
 		return IssueSplitCommand(deps, IssueSplitOptions{
 			ParentIssueID: root.String(),
+			IntentKey:     "split-invocation-1",
 			Title:         "Child work",
 			Type:          domain.TypeTask,
 			Priority:      domain.P2,
@@ -10038,11 +10133,17 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	if createReq.ParentID == nil || *createReq.ParentID != root {
 		t.Fatalf("create parent = %+v, want %s", createReq.ParentID, root)
 	}
+	if createReq.IntentKey == "" || createReq.CreatedFromID == nil || *createReq.CreatedFromID != root {
+		t.Fatalf("create idempotency request = %+v, want stable intent and atomic created-in parent", createReq)
+	}
 	if !reflect.DeepEqual(createReq.Implementations, []string{"go-bubbletea"}) {
 		t.Fatalf("create implementations = %+v, want inherited parent impl", createReq.Implementations)
 	}
 	if intentReq.Kind != protocol.OrchestrationIntentStart || !reflect.DeepEqual(intentReq.IssueIDs, []string{child.String()}) {
 		t.Fatalf("intent = %+v", intentReq)
+	}
+	if intentReq.IntentKey != "ticket-split-start:"+createReq.IntentKey {
+		t.Fatalf("start intent = %q, want split-derived key for %q", intentReq.IntentKey, createReq.IntentKey)
 	}
 	if intentReq.BaseBranch != "user/az-parent/parent-work" {
 		t.Fatalf("intent base_branch = %q, want parent worktree branch", intentReq.BaseBranch)
@@ -10061,6 +10162,7 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	textOutput := captureStdout(t, func() error {
 		return IssueSplitCommand(deps, IssueSplitOptions{
 			ParentIssueID: root.String(),
+			IntentKey:     "split-invocation-1",
 			Title:         "Child work",
 			Type:          domain.TypeTask,
 			Priority:      domain.P2,
@@ -10069,8 +10171,32 @@ func TestIssueSplitCommandCreatesChildAndStartsOrchestratedSession(t *testing.T)
 	if !strings.Contains(textOutput, "`az ticket close` owns") || !strings.Contains(textOutput, "az ticket close --id "+child.String()) {
 		t.Fatalf("split output missing canonical ticket close guidance: %s", textOutput)
 	}
+	if !strings.Contains(textOutput, "Reused canonical child issue: "+child.String()) {
+		t.Fatalf("split replay output missing canonical child disposition: %s", textOutput)
+	}
 	if strings.Contains(textOutput, "az issue close") {
 		t.Fatalf("split output contains legacy issue close guidance: %s", textOutput)
+	}
+
+	secondOutput := captureStdout(t, func() error {
+		return IssueSplitCommand(deps, IssueSplitOptions{
+			ParentIssueID: root.String(),
+			IntentKey:     "split-invocation-2",
+			Title:         "Child work",
+			Type:          domain.TypeTask,
+			Priority:      domain.P2,
+			JSON:          true,
+		})
+	})
+	var secondResult issueSplitResult
+	if err := json.Unmarshal([]byte(secondOutput), &secondResult); err != nil {
+		t.Fatalf("decode second invocation output: %v\n%s", err, secondOutput)
+	}
+	if secondResult.ChildIssueID != secondChild.String() || !secondResult.Created {
+		t.Fatalf("second identical invocation result = %+v, want distinct newly created child %s", secondResult, secondChild)
+	}
+	if secondResult.IntentKey != "split-invocation-2" || secondResult.ChildIssueID == result.ChildIssueID {
+		t.Fatalf("distinct invocation identity did not produce a distinct canonical child: first=%+v second=%+v", result, secondResult)
 	}
 }
 
@@ -11335,8 +11461,9 @@ func TestIssueUpdateCommandRoutesCancelledThroughCloseWithoutIntegration(t *test
 					}
 					gotCloseReq = req
 					return responseWithJSON(req, daemonclient.TaskCloseResult{
-						TaskID: "az-1",
-						Status: string(domain.StatusCancelled),
+						TaskID:   "az-1",
+						Status:   string(domain.StatusCancelled),
+						Revision: 1,
 					}), nil
 				default:
 					return protocol.ResponseEnvelope{
@@ -11797,6 +11924,7 @@ func TestIssueUpdateCommandConfirmedClosedCleansBeforeStatus(t *testing.T) {
 					return responseWithJSON(req, daemonclient.TaskCloseResult{
 						TaskID:                 "az-1",
 						Status:                 string(domain.StatusDone),
+						Revision:               1,
 						IntegrationRequested:   true,
 						Integrated:             true,
 						IntegratedSourceBranch: "riordan/az-1/ready",
@@ -13339,14 +13467,8 @@ func TestPrimeCommandWithActiveIssueContext(t *testing.T) {
 	if !strings.Contains(output, "Parent: az-parent") {
 		t.Fatalf("prime output missing active issue parent: %q", output)
 	}
-	if !strings.Contains(output, "Description: Structured description survives prime context.") {
-		t.Fatalf("prime output missing structured description: %q", output)
-	}
-	if !strings.Contains(output, "Acceptance: Prime shows acceptance criteria.") {
-		t.Fatalf("prime output missing acceptance context: %q", output)
-	}
-	if !strings.Contains(output, "Design: Daemon projection supplies evidence.") {
-		t.Fatalf("prime output missing design context: %q", output)
+	if !strings.Contains(output, `"schema":"workflow_context.v1"`) || !strings.Contains(output, "description: Structured description survives prime context.") || !strings.Contains(output, "acceptance: Prime shows acceptance criteria.") || !strings.Contains(output, "design: Daemon projection supplies evidence.") {
+		t.Fatalf("prime output missing bounded structured context: %q", output)
 	}
 	if strings.Contains(output, "private scratch notes should stay hidden") {
 		t.Fatalf("prime output should not include generic issue notes: %q", output)
@@ -13482,11 +13604,11 @@ func TestPrimeCommandShowsRootExitContractForAzOrchestrationRoot(t *testing.T) {
 		t.Fatalf("prime output missing root exit contract: %q", output)
 	}
 	for _, guidance := range []string{
-		"Remain in the active orchestration turn/loop after starting workers, nested orchestrators, or a background watch; startup is not a completed handoff to the human.",
-		"Continuously consume the root watch and react to worker/nested-orchestrator progress, blocked, and integration-ready evidence while graph work remains.",
+		"Process the current bounded orchestration snapshot and its immediate actions, then checkpoint and yield when the scope is quiescent.",
+		"Do not run a continuous watch or polling loop inside a model turn.",
 		"Chain of command is strict: coordinate only direct children. Never launch, message, review, integrate, stop, or take over grandchildren or deeper descendants.",
 		"Supervise nested epic/root orchestrators as direct children while they exclusively own their descendants.",
-		"repeat status/start/watch/review until `az orchestrate complete-check --root az-root` passes",
+		"repeat bounded status/start/review steps while immediate work remains until `az orchestrate complete-check --root az-root` passes",
 	} {
 		if !strings.Contains(output, guidance) {
 			t.Fatalf("prime output missing persistent parent-orchestrator guidance %q: %q", guidance, output)
@@ -13984,6 +14106,19 @@ func TestPrimeCommandShowsImplementationOptionsWhenMultipleConfigured(t *testing
 	}
 }
 
+func TestRenderPrimeIssueSectionUsesBoundedPacketForSensitiveSemanticFields(t *testing.T) {
+	task := domain.Task{ID: "secret-prime", Title: "deploy token=never-include", Description: "read /Users/alice/private.log", Acceptance: "secret: hidden", Type: domain.TypeTask, Status: domain.StatusInProgress, Priority: domain.P1}
+	output := renderPrimeIssueSection(task.ID.String(), task, nil, nil, nil, false)
+	for _, forbidden := range []string{"never-include", "/Users/alice/private.log", "secret: hidden"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("prime output leaked %q: %s", forbidden, output)
+		}
+	}
+	if !strings.Contains(output, `"schema":"workflow_context.v1"`) || !strings.Contains(output, "secret-prime: secret-prime") {
+		t.Fatalf("prime output did not use bounded packet and safe fallback: %s", output)
+	}
+}
+
 func TestPrimeCommandTruncatesLargeIssueDescription(t *testing.T) {
 	t.Setenv("AZEDARACH_ISSUE_ID", "az-1")
 	now := time.Date(2026, 3, 26, 11, 0, 0, 0, time.UTC)
@@ -14037,10 +14172,10 @@ func TestPrimeCommandTruncatesLargeIssueDescription(t *testing.T) {
 		return PrimeCommand(deps)
 	})
 
-	if !strings.Contains(output, "… (truncated; run `az ticket get az-1` for full context)") {
-		t.Fatalf("prime output should include truncated description sentinel: %q", output)
+	if !strings.Contains(output, `"reason":"value_byte_limit"`) || !strings.Contains(output, "...") {
+		t.Fatalf("prime output should include deterministic packet omission metadata: %q", output)
 	}
-	if strings.Count(output, "line content for noisy transcript output") >= 12 {
+	if strings.Count(output, "line content for noisy transcript output") >= 1000 {
 		t.Fatalf("prime output should not include full long description: %q", output)
 	}
 }

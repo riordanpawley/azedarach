@@ -57,8 +57,12 @@ func TestListTasksSnapshot_UsesSQLiteIssueStore(t *testing.T) {
 	stop := startDaemonForTest(t, repoDir, socketPath, lockPath)
 	defer stop()
 
+	projectID, err := config.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatalf("derive fixture project ID: %v", err)
+	}
 	client := New(transport.NewClient(socketPath).WithTimeout(20 * time.Second)).
-		WithProjectID("proj-sqlite").
+		WithProjectID(projectID).
 		WithReadWaitPolicy(ReadWaitPolicy{
 			Default:  15 * time.Second,
 			Explicit: 20 * time.Second,
@@ -241,32 +245,16 @@ func startDaemonForTest(t *testing.T, repoDir, socketPath, lockPath string) func
 		errCh <- d.Run(ctx)
 	}()
 
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		select {
-		case err := <-errCh:
-			if isSocketPermissionError(err) {
-				t.Skipf("sandbox does not permit unix socket bind: %v", err)
-			}
-			if err != nil {
-				t.Fatalf("daemon failed to start: %v", err)
-			}
-			t.Fatalf("daemon exited before socket became ready")
-		default:
+	select {
+	case <-d.Ready():
+	case err := <-errCh:
+		if isSocketPermissionError(err) {
+			t.Skipf("sandbox does not permit unix socket bind: %v", err)
 		}
-		if _, err := os.Stat(socketPath); err == nil {
-			break
+		if err != nil {
+			t.Fatalf("daemon failed to start: %v", err)
 		}
-		if time.Now().After(deadline) {
-			cancel()
-			select {
-			case err := <-errCh:
-				t.Fatalf("daemon failed to start (socket timeout): %v", err)
-			default:
-				t.Fatalf("daemon socket not ready at %s", socketPath)
-			}
-		}
-		time.Sleep(20 * time.Millisecond)
+		t.Fatalf("daemon exited before socket became ready")
 	}
 
 	return func() {
@@ -276,11 +264,6 @@ func startDaemonForTest(t *testing.T, repoDir, socketPath, lockPath string) func
 			if err != nil {
 				t.Fatalf("daemon shutdown error: %v", err)
 			}
-		// The server starts accepting requests before startup reconciliation
-		// completes. Race instrumentation can leave that in-flight startup work
-		// draining for longer than the normal request budget.
-		case <-time.After(30 * time.Second):
-			t.Fatalf("daemon shutdown timed out")
 		}
 	}
 }

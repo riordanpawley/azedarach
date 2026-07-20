@@ -8,16 +8,18 @@ import (
 
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
+	"github.com/riordanpawley/azedarach/internal/services/issues"
 )
 
 const projectIssueStoreHealthBackoff = 5 * time.Minute
 
 type projectIssueStoreHealthState struct {
-	Message       string
-	FirstFailedAt time.Time
-	LastFailedAt  time.Time
-	RetryAfter    time.Time
-	FailureCount  int
+	Message         string
+	FirstFailedAt   time.Time
+	LastFailedAt    time.Time
+	RetryAfter      time.Time
+	FailureCount    int
+	RequiresRestart bool
 }
 
 func (d *Daemon) projectIssueStoreHealthError(projectID string) (error, bool) {
@@ -33,7 +35,7 @@ func (d *Daemon) projectIssueStoreHealthError(projectID string) (error, bool) {
 	if !ok {
 		return nil, false
 	}
-	if !now.Before(state.RetryAfter) {
+	if !state.RequiresRestart && !now.Before(state.RetryAfter) {
 		delete(d.projectIssueStoreHealthByProject, projectID)
 		return nil, false
 	}
@@ -44,10 +46,14 @@ func (d *Daemon) recordProjectIssueStoreFailure(projectID string, err error) err
 	if err == nil || !isDeterministicProjectIssueStoreOpenFailure(err) {
 		return err
 	}
-	return d.recordProjectIssueStoreUnavailable(projectID, err)
+	return d.recordProjectIssueStoreUnavailableWithPolicy(projectID, err, issues.IsSQLiteCorrupt(err))
 }
 
 func (d *Daemon) recordProjectIssueStoreUnavailable(projectID string, err error) error {
+	return d.recordProjectIssueStoreUnavailableWithPolicy(projectID, err, false)
+}
+
+func (d *Daemon) recordProjectIssueStoreUnavailableWithPolicy(projectID string, err error, requiresRestart bool) error {
 	if err == nil {
 		return nil
 	}
@@ -67,6 +73,7 @@ func (d *Daemon) recordProjectIssueStoreUnavailable(projectID string, err error)
 	state.RetryAfter = now.Add(projectIssueStoreHealthBackoff)
 	state.FailureCount++
 	state.Message = strings.TrimSpace(err.Error())
+	state.RequiresRestart = state.RequiresRestart || requiresRestart
 	d.projectIssueStoreHealthByProject[projectID] = state
 
 	if d.cfg.Logger != nil {
@@ -100,6 +107,13 @@ func (d *Daemon) projectIssueStoreHealthMessageLocked(projectID string, state pr
 	if detail == "" {
 		detail = "schema migration/open failed"
 	}
+	if state.RequiresRestart {
+		return fmt.Sprintf("%s for project %s: %s; suppressing issue-store access until daemon restart. Preserve and repair the project database through validated clones, then restart the daemon; elapsed backoff alone cannot clear the in-process corruption quarantine.",
+			prefix,
+			protocol.NormalizeProjectID(projectID),
+			detail,
+		)
+	}
 	return fmt.Sprintf("%s for project %s: %s; suppressing repeated polling until %s. Repair the project database, then retry after the backoff or restart the daemon to clear cached health.",
 		prefix,
 		protocol.NormalizeProjectID(projectID),
@@ -111,6 +125,9 @@ func (d *Daemon) projectIssueStoreHealthMessageLocked(projectID string, state pr
 func isDeterministicProjectIssueStoreOpenFailure(err error) bool {
 	if err == nil {
 		return false
+	}
+	if issues.IsSQLiteCorrupt(err) {
+		return true
 	}
 	var storeErr *domain.TaskStoreError
 	if !errors.As(err, &storeErr) || strings.TrimSpace(storeErr.Op) != "open-db" {
@@ -131,6 +148,12 @@ func isCachedProjectIssueStoreHealthErrorMessage(message string) bool {
 }
 
 func projectIssueStoreHealthErrorCode(err error) protocol.ErrorCode {
+	if isProjectReadUnavailableError(err) {
+		return protocol.ErrorCodeUnavailable
+	}
+	if issues.IsSQLiteCorrupt(err) {
+		return protocol.ErrorCodeUnavailable
+	}
 	if err != nil && strings.HasPrefix(strings.TrimSpace(err.Error()), "project issue store unhealthy") {
 		return protocol.ErrorCodeUnavailable
 	}

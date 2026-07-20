@@ -130,7 +130,7 @@ func (d *Daemon) observeTmuxProject(ctx context.Context, projectID string, live 
 		if daemonstate.NormalizeSessionState(session.ObservedState) == daemonstate.SessionStateStopped {
 			activity, activitySource = "", ""
 		}
-		changed, applied, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+		changed, applied, err := d.applyPhysicalSessionObservationWithProjectionCleanup(ctx, store, projectID, projectID, daemonstate.PhysicalSessionObservation{
 			ProjectID: projectID, SessionID: session.ID, ObservedState: session.ObservedState,
 			Activity: activity, ActivitySource: activitySource, UpdatedAt: provenance.ObservedAt,
 			TmuxAttachedCount: &session.TmuxAttachedCount, StartedAt: session.StartedAt,

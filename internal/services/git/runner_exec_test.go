@@ -9,12 +9,59 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 )
+
+func TestRealProcessProfileExecRunnerPreservesNULTerminatedPaths(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-q", "-b", "main")
+	runGit(t, repo, "config", "user.name", "Azedarach Test")
+	runGit(t, repo, "config", "user.email", "azedarach@example.com")
+	runGit(t, repo, "commit", "--allow-empty", "-q", "-m", "base")
+	baseOID := strings.TrimSpace(runGitOutput(t, repo, "rev-parse", "HEAD"))
+
+	want := []string{
+		" leading.txt",
+		"tab\tname.txt",
+		"back\\slash.txt",
+		"new\nline.txt",
+		"trailing.txt ",
+		"雪.txt",
+	}
+	for _, name := range want {
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(name), 0o644); err != nil {
+			t.Fatalf("write portable-path fixture %q: %v", name, err)
+		}
+		runGit(t, repo, "add", "--", name)
+	}
+	runGit(t, repo, "commit", "-q", "-m", "portable paths")
+	headOID := strings.TrimSpace(runGitOutput(t, repo, "rev-parse", "HEAD"))
+
+	runner := NewExecRunner(repo)
+	files, err := NewClient(runner, nil).ChangedFilesBetweenRefTrees(context.Background(), repo, baseOID, headOID)
+	if err != nil {
+		t.Fatalf("ChangedFilesBetweenRefTrees() error = %v", err)
+	}
+	sort.Strings(files)
+	sort.Strings(want)
+	if strings.Join(files, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("ChangedFilesBetweenRefTrees() = %q, want %q", files, want)
+	}
+
+	runGit(t, repo, "config", "azedarach.runner-whitespace", " padded ")
+	text, err := runner.Run(context.Background(), "config", "--get", "azedarach.runner-whitespace")
+	if err != nil {
+		t.Fatalf("Run(text command) error = %v", err)
+	}
+	if text != "padded" {
+		t.Fatalf("Run(text command) = %q, want normalized text", text)
+	}
+}
 
 type testProcessResult struct {
 	stdout string

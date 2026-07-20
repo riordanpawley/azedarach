@@ -4340,7 +4340,7 @@ func TestTaskWorkspaceGraphNavigationOpensAndRefreshesOffBoardRelatedTask(t *tes
 	})
 	next = updated.(Model)
 	workspace = next.overlayStack.Current().(*overlay.TaskWorkspaceOverlay)
-	view := workspace.View()
+	view := ansi.Strip(workspace.View())
 	if !strings.Contains(view, "Related off-board task refreshed") || !strings.Contains(view, "Full off-board details") {
 		t.Fatalf("workspace did not apply full refresh for off-board relation, got %q", view)
 	}
@@ -8638,6 +8638,19 @@ func TestProjectOrchestratorStopActionUsesProjectTarget(t *testing.T) {
 	msg, ok := cmd().(projectOrchestratorActionMsg)
 	if !ok || msg.err != nil || msg.result.Disposition != "stopped" || gotAction != "stop" {
 		t.Fatalf("message=%+v action=%q", msg, gotAction)
+	}
+}
+
+func TestProjectOrchestratorStartActionOutlivesDaemonAcknowledgementBudget(t *testing.T) {
+	startBudget := projectOrchestratorActionTimeout("start")
+	if startBudget != protocol.OrchestratorSessionStartClientBudget {
+		t.Fatalf("start action budget = %s, want shared client budget %s", startBudget, protocol.OrchestratorSessionStartClientBudget)
+	}
+	if startBudget <= protocol.OrchestratorSessionStartAcknowledgementBudget {
+		t.Fatalf("start action budget = %s, must exceed daemon acknowledgement budget %s", startBudget, protocol.OrchestratorSessionStartAcknowledgementBudget)
+	}
+	if got := projectOrchestratorActionTimeout("stop"); got != 12*time.Second {
+		t.Fatalf("stop action budget = %s, want 12s", got)
 	}
 }
 

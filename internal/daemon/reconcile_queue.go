@@ -258,6 +258,7 @@ func (q *reconcileQueue[T]) Enqueue(req reconcileQueueRequest[T]) (reconcileQueu
 			existing.priority = priority
 			existing.reason = reason
 			existing.execContext = req.ExecContext
+			existing.work = req.Work
 			q.sortPendingLocked()
 			q.counters.reprioritized.Add(1)
 			reprioritized = true

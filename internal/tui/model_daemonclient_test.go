@@ -1907,8 +1907,9 @@ func TestTaskStatusDoneRequiresCloseCleanupConfirmation(t *testing.T) {
 				t.Fatalf("unmarshal close request: %v", err)
 			}
 			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-				TaskID: "az-4",
-				Status: string(domain.StatusDone),
+				TaskID:   "az-4",
+				Status:   string(domain.StatusDone),
+				Revision: 1,
 			})
 			if err != nil {
 				t.Fatalf("marshal close response: %v", err)
@@ -1996,8 +1997,9 @@ func TestTaskStatusCancelledRequiresCloseCleanupConfirmation(t *testing.T) {
 				t.Fatalf("unmarshal close request: %v", err)
 			}
 			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-				TaskID: "az-4",
-				Status: string(domain.StatusCancelled),
+				TaskID:   "az-4",
+				Status:   string(domain.StatusCancelled),
+				Revision: 1,
 			})
 			if err != nil {
 				t.Fatalf("marshal close response: %v", err)
@@ -2081,6 +2083,7 @@ func TestTaskStatusDoneCloseCleanChildrenConfirmationSetsDaemonOption(t *testing
 			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
 				TaskID:             "az-4",
 				Status:             string(domain.StatusDone),
+				Revision:           1,
 				AutoClosedChildren: []string{"az-child"},
 			})
 			if err != nil {
@@ -2143,6 +2146,7 @@ func TestTaskStatusDoneWithUnresolvedChildRejectsTargetOnlyConfirmation(t *testi
 			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
 				TaskID:             "az-4",
 				Status:             string(domain.StatusDone),
+				Revision:           1,
 				AutoClosedChildren: []string{"az-child"},
 			})
 			if err != nil {
@@ -2218,8 +2222,9 @@ func TestTaskStatusDoneUsesExtendedCloseTimeout(t *testing.T) {
 				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskClose)
 			}
 			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-				TaskID: "az-4",
-				Status: string(domain.StatusDone),
+				TaskID:   "az-4",
+				Status:   string(domain.StatusDone),
+				Revision: 1,
 			})
 			if err != nil {
 				t.Fatalf("marshal close response: %v", err)
@@ -2286,8 +2291,9 @@ func TestTaskStatusDoneSuccessKeepsOptimisticOverlayAcrossStaleHydration(t *test
 				}, nil
 			case daemonclient.CommandTaskClose:
 				respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-					TaskID: "az-4",
-					Status: string(domain.StatusDone),
+					TaskID:   "az-4",
+					Status:   string(domain.StatusDone),
+					Revision: 1,
 				})
 				if err != nil {
 					t.Fatalf("marshal close response: %v", err)
@@ -2377,8 +2383,9 @@ func TestSpaceFourYDoneKeepsOptimisticStatusAcrossStaleHydration(t *testing.T) {
 				t.Fatalf("command = %q, want %q", req.Command, daemonclient.CommandTaskClose)
 			}
 			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-				TaskID: "az-4",
-				Status: string(domain.StatusDone),
+				TaskID:   "az-4",
+				Status:   string(domain.StatusDone),
+				Revision: 1,
 			})
 			if err != nil {
 				t.Fatalf("marshal close response: %v", err)
@@ -2745,8 +2752,9 @@ func TestTaskStatusDoneFailureShowsRecoveryDialogWithRetryActions(t *testing.T) 
 				}, nil
 			}
 			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-				TaskID: "az-4",
-				Status: string(domain.StatusDone),
+				TaskID:   "az-4",
+				Status:   string(domain.StatusDone),
+				Revision: 1,
 			})
 			if err != nil {
 				t.Fatalf("marshal close response: %v", err)
@@ -2870,8 +2878,9 @@ func TestTaskStatusDoneFailureCanOverrideActiveSessionBlock(t *testing.T) {
 				}, nil
 			}
 			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-				TaskID: "az-4",
-				Status: string(domain.StatusDone),
+				TaskID:   "az-4",
+				Status:   string(domain.StatusDone),
+				Revision: 1,
 			})
 			if err != nil {
 				t.Fatalf("marshal close response: %v", err)
@@ -2958,8 +2967,9 @@ func TestCloseFailureRetryUsesFailedOperationProjectAfterProjectSwitch(t *testin
 			}
 			closeProjects = append(closeProjects, req.Meta.ProjectID.String())
 			respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-				TaskID: "az-4",
-				Status: string(domain.StatusDone),
+				TaskID:   "az-4",
+				Status:   string(domain.StatusDone),
+				Revision: 1,
 			})
 			if err != nil {
 				t.Fatalf("marshal close response: %v", err)
@@ -3044,7 +3054,7 @@ func TestCloseFailureCreatesAncestorThenRetriesClose(t *testing.T) {
 					"worktree": map[string]any{"path": "/tmp/gat", "branch": "user/gat/parent", "issue_id": "gat"},
 				}
 			case daemonclient.CommandTaskClose:
-				body = daemonclient.TaskCloseResult{TaskID: "gav", Status: string(domain.StatusDone)}
+				body = daemonclient.TaskCloseResult{TaskID: "gav", Status: string(domain.StatusDone), Revision: 1}
 			default:
 				t.Fatalf("unexpected command: %s", req.Command)
 			}
@@ -3134,7 +3144,7 @@ func TestCloseFailureAcceptsInvestigationFindingsThenRetriesClose(t *testing.T) 
 					ID: 17, IssueID: "dhb", Type: domain.IssueEventHumanInputProvided, Source: "human", Payload: request.Payload,
 				}}
 			case daemonclient.CommandTaskClose:
-				body = daemonclient.TaskCloseResult{TaskID: "dhb", Status: string(domain.StatusDone)}
+				body = daemonclient.TaskCloseResult{TaskID: "dhb", Status: string(domain.StatusDone), Revision: 1}
 			default:
 				t.Fatalf("unexpected command: %s", req.Command)
 			}
@@ -5069,7 +5079,7 @@ func TestMergeAttachSelectionAttachesAfterMerge(t *testing.T) {
 					OK:              true,
 					Body:            respBody,
 				}, nil
-			case daemonclient.CommandGitMerge:
+			case daemonclient.CommandGitMergeRef:
 				var body daemonclient.GitCommandRequest
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal merge request: %v", err)
@@ -5164,7 +5174,7 @@ func TestMergeAttachSelectionAttachesAfterMerge(t *testing.T) {
 	if attachedMsg.issueID != "az-1" {
 		t.Fatalf("attached issue = %q, want az-1", attachedMsg.issueID)
 	}
-	if got := transport.requests; len(got) != 3 || got[0] != daemonclient.CommandGitFetch || got[1] != daemonclient.CommandGitMerge || got[2] != daemonclient.CommandSessionAttach {
+	if got := transport.requests; len(got) != 3 || got[0] != daemonclient.CommandGitFetch || got[1] != daemonclient.CommandGitMergeRef || got[2] != daemonclient.CommandSessionAttach {
 		t.Fatalf("requests = %v", got)
 	}
 }
@@ -5255,7 +5265,7 @@ func TestFollowOnMergeSelectionDirectMergeFromPausedTarget(t *testing.T) {
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal merge request: %v", err)
 				}
-				if body.Worktree != "/tmp/child" || body.Branch != "az/az-parent" {
+				if body.SourceID != parentID || body.TargetID != childID || body.StopTargetSession || body.Worktree != "" || body.Branch != "" {
 					t.Fatalf("merge body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
@@ -5443,7 +5453,7 @@ func TestFollowOnMergeSelectionBusyOrWaitingStopsBeforeMerge(t *testing.T) {
 						if err := json.Unmarshal(req.Body, &body); err != nil {
 							t.Fatalf("unmarshal merge request: %v", err)
 						}
-						if body.Worktree != "/tmp/child" || body.Branch != "az/az-parent" {
+						if body.SourceID != parentID || body.TargetID != childID || !body.StopTargetSession || body.Worktree != "" || body.Branch != "" {
 							t.Fatalf("merge body = %+v", body)
 						}
 						respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
@@ -5508,7 +5518,7 @@ func TestFollowOnMergeSelectionBusyOrWaitingStopsBeforeMerge(t *testing.T) {
 			if mergeMsg.err != nil {
 				t.Fatalf("merge err = %v", mergeMsg.err)
 			}
-			if got := transport.requests; len(got) != 8 || got[0] != daemonclient.CommandTaskFollowOnMerge || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandRuntimeReconcileIssue || got[3] != daemonclient.CommandGitStatus || got[4] != daemonclient.CommandGitStatus || got[5] != daemonclient.CommandGitMergePreflight || got[6] != daemonclient.CommandSessionStop || got[7] != daemonclient.CommandGitMerge {
+			if got := transport.requests; len(got) != 7 || got[0] != daemonclient.CommandTaskFollowOnMerge || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandRuntimeReconcileIssue || got[3] != daemonclient.CommandGitStatus || got[4] != daemonclient.CommandGitStatus || got[5] != daemonclient.CommandGitMergePreflight || got[6] != daemonclient.CommandGitMerge {
 				t.Fatalf("requests = %v", got)
 			}
 		})
@@ -5650,7 +5660,7 @@ func TestFollowOnMergeSelectionUsesDaemonSnapshotStateWhenProjectionMissing(t *t
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal merge request: %v", err)
 				}
-				if body.Worktree != "/tmp/child" || body.Branch != "az/az-parent" {
+				if body.SourceID != parentID || body.TargetID != childID || !body.StopTargetSession || body.Worktree != "" || body.Branch != "" {
 					t.Fatalf("merge body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
@@ -5715,7 +5725,7 @@ func TestFollowOnMergeSelectionUsesDaemonSnapshotStateWhenProjectionMissing(t *t
 	if mergeMsg.err != nil {
 		t.Fatalf("merge err = %v", mergeMsg.err)
 	}
-	if got := transport.requests; len(got) != 11 || got[0] != daemonclient.CommandTaskFollowOnMerge || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandWorktreeList || got[3] != daemonclient.CommandBoardFetch || got[4] != daemonclient.CommandWorktreeList || got[5] != daemonclient.CommandRuntimeReconcileIssue || got[6] != daemonclient.CommandGitStatus || got[7] != daemonclient.CommandGitStatus || got[8] != daemonclient.CommandGitMergePreflight || got[9] != daemonclient.CommandSessionStop || got[10] != daemonclient.CommandGitMerge {
+	if got := transport.requests; len(got) != 10 || got[0] != daemonclient.CommandTaskFollowOnMerge || got[1] != daemonclient.CommandWorktreeList || got[2] != daemonclient.CommandWorktreeList || got[3] != daemonclient.CommandBoardFetch || got[4] != daemonclient.CommandWorktreeList || got[5] != daemonclient.CommandRuntimeReconcileIssue || got[6] != daemonclient.CommandGitStatus || got[7] != daemonclient.CommandGitStatus || got[8] != daemonclient.CommandGitMergePreflight || got[9] != daemonclient.CommandGitMerge {
 		t.Fatalf("requests = %v", got)
 	}
 }
@@ -5954,7 +5964,7 @@ func TestHandleMergeTargetSelectionToBaseUsesWorktreeLookupFallback(t *testing.T
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal merge request: %v", err)
 				}
-				if body.Worktree != baseWorktree || body.Branch != "az/az-source" {
+				if body.SourceID != sourceID || body.TargetID != "base" || body.Worktree != "" || body.Branch != "" {
 					t.Fatalf("merge body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
@@ -6262,7 +6272,7 @@ func TestActionModeMergeKeyDoesNotStopBusyParentSession(t *testing.T) {
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal merge request: %v", err)
 				}
-				if body.Worktree != "/tmp/parent" || body.Branch != "az/az-child" {
+				if body.SourceID != childID || body.TargetID != parentID || body.Worktree != "" || body.Branch != "" {
 					t.Fatalf("merge body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
@@ -6583,7 +6593,7 @@ func TestActionModeMergeKeyIgnoreSourceDirtyMergesChildIntoBusyParent(t *testing
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal merge request: %v", err)
 				}
-				if body.Worktree != "/tmp/parent" || body.Branch != "az/az-child" {
+				if body.SourceID != childID || body.TargetID != parentID || body.Worktree != "" || body.Branch != "" {
 					t.Fatalf("merge body = %+v", body)
 				}
 				respBody, err := json.Marshal(daemonclient.GitMergeCommandResponse{
@@ -8842,8 +8852,9 @@ func TestSpaceOpensWorkspaceImmediatelyAndRefreshesInBackground(t *testing.T) {
 	if !strings.Contains(refreshedView, "Task fresh") {
 		t.Fatalf("workspace should refresh from daemon snapshot, got %q", refreshedView)
 	}
-	if !strings.Contains(refreshedView, "persisted description") {
-		t.Fatalf("workspace should render full task details after refresh, got %q", refreshedView)
+	refreshedTask, found := refreshed.TaskByID(issueID)
+	if !found || refreshedTask.Description != "persisted description" {
+		t.Fatalf("workspace full task after refresh = (%+v, %v), want persisted description", refreshedTask, found)
 	}
 	if !strings.Contains(refreshedView, "Related off-board task") {
 		t.Fatalf("workspace should render graph context omitted from the board projection, got %q", refreshedView)
@@ -9610,7 +9621,7 @@ func TestHandleSelectionUpdateFromMainResolvesWorktreeWithoutSession(t *testing.
 					OK:              true,
 					Body:            respBody,
 				}, nil
-			case daemonclient.CommandGitMerge:
+			case daemonclient.CommandGitMergeRef:
 				var body daemonclient.GitCommandRequest
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal merge request: %v", err)
@@ -9670,7 +9681,7 @@ func TestHandleSelectionUpdateFromMainResolvesWorktreeWithoutSession(t *testing.
 	if got := transport.requests; len(got) != 3 ||
 		got[0] != daemonclient.CommandWorktreeList ||
 		got[1] != daemonclient.CommandGitFetch ||
-		got[2] != daemonclient.CommandGitMerge {
+		got[2] != daemonclient.CommandGitMergeRef {
 		t.Fatalf("requests = %v", got)
 	}
 }
@@ -9722,7 +9733,7 @@ func TestHandleSelectionUpdateFromMainUsesLocalBaseBranchInLocalWorkflowMode(t *
 					OK:              true,
 					Body:            respBody,
 				}, nil
-			case daemonclient.CommandGitMerge:
+			case daemonclient.CommandGitMergeRef:
 				var body daemonclient.GitCommandRequest
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal merge request: %v", err)
@@ -9884,7 +9895,7 @@ func TestAsyncRecoveryRetryUpdateUsesFailedOperationProject(t *testing.T) {
 					OK:              true,
 					Body:            respBody,
 				}, nil
-			case daemonclient.CommandGitMerge:
+			case daemonclient.CommandGitMergeRef:
 				if err := json.Unmarshal(req.Body, &mergeBody); err != nil {
 					t.Fatalf("unmarshal merge request: %v", err)
 				}
@@ -10117,8 +10128,8 @@ func TestAsyncRecoveryRetryMergeUsesFailedOperationProject(t *testing.T) {
 	if checkoutBody.Worktree != projectRoot || checkoutBody.Branch != "develop" {
 		t.Fatalf("checkout body = %+v, want project A root/base", checkoutBody)
 	}
-	if mergeBody.Worktree != projectRoot || mergeBody.Branch != "az/az-1" {
-		t.Fatalf("merge body = %+v, want project A root/source branch", mergeBody)
+	if mergeBody.SourceID != "az-1" || mergeBody.TargetID != "base" || mergeBody.Worktree != "" || mergeBody.Branch != "" {
+		t.Fatalf("merge body = %+v, want project A typed root-to-base identity", mergeBody)
 	}
 }
 
@@ -10176,7 +10187,7 @@ func TestHandleSelectionUpdateFromMainUsesTaskWorkspaceTaskWhenCursorUnavailable
 					OK:              true,
 					Body:            respBody,
 				}, nil
-			case daemonclient.CommandGitMerge:
+			case daemonclient.CommandGitMergeRef:
 				var body daemonclient.GitCommandRequest
 				if err := json.Unmarshal(req.Body, &body); err != nil {
 					t.Fatalf("unmarshal merge request: %v", err)
@@ -10237,7 +10248,7 @@ func TestHandleSelectionUpdateFromMainUsesTaskWorkspaceTaskWhenCursorUnavailable
 	if got := transport.requests; len(got) != 3 ||
 		got[0] != daemonclient.CommandWorktreeList ||
 		got[1] != daemonclient.CommandGitFetch ||
-		got[2] != daemonclient.CommandGitMerge {
+		got[2] != daemonclient.CommandGitMergeRef {
 		t.Fatalf("requests = %v", got)
 	}
 }
@@ -11689,7 +11700,7 @@ func TestFetchAndMergeCommandReturnsPendingOperationToast(t *testing.T) {
 					OK:              true,
 					Body:            respBody,
 				}, nil
-			case daemonclient.CommandGitMerge:
+			case daemonclient.CommandGitMergeRef:
 				respBody, _ := json.Marshal(map[string]any{
 					"operation_id": "op-merge",
 					"state":        string(protocol.OperationStateRunning),
@@ -12902,8 +12913,9 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 						t.Fatalf("close body = %+v, want integrate_before_close", body)
 					}
 					respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-						TaskID: body.TaskID,
-						Status: string(domain.StatusDone),
+						TaskID:   body.TaskID,
+						Status:   string(domain.StatusDone),
+						Revision: 1,
 					})
 					if err != nil {
 						t.Fatalf("marshal close response: %v", err)
@@ -13074,8 +13086,9 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 					t.Fatalf("close body = %+v, want az-1 cancelled without integration", body)
 				}
 				respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-					TaskID: "az-1",
-					Status: string(domain.StatusCancelled),
+					TaskID:   "az-1",
+					Status:   string(domain.StatusCancelled),
+					Revision: 1,
 				})
 				if err != nil {
 					t.Fatalf("marshal cancelled close response: %v", err)
@@ -13383,8 +13396,9 @@ func TestBulkTaskCommandsUseDaemonClient(t *testing.T) {
 				}
 				closeBodies = append(closeBodies, body)
 				respBody, err := json.Marshal(daemonclient.TaskCloseResult{
-					TaskID: body.TaskID,
-					Status: string(domain.StatusDone),
+					TaskID:   body.TaskID,
+					Status:   string(domain.StatusDone),
+					Revision: 1,
 				})
 				if err != nil {
 					t.Fatalf("marshal close response: %v", err)

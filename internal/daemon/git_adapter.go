@@ -31,21 +31,23 @@ var (
 const runtimeSignalProjectionTTL = 15 * time.Second
 
 type gitServiceAdapter struct {
-	client                      *git.Client
-	runtimeStateStore           *daemonstate.RuntimeStateStore
-	runtimeStateStoreForProject func(string) *daemonstate.RuntimeStateStore
-	runtimeProjectionWriter     runtimeProjectionWriter
-	statusRefreshQueue          *reconcileQueue[*git.GitStatus]
-	statusRefreshThrottle       *reconcileThrottle
-	logger                      *slog.Logger
-	pollInterval                time.Duration
-	onStatusUpdate              func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus)
-	baseBranch                  string
-	workflowMode                string
-	baseBranchForProject        func(string) string
-	workflowModeForProject      func(string) string
-	baseBranchForWorktree       func(context.Context, string, string) string
-	heavySessionStartActive     func(context.Context, string) bool
+	client                         *git.Client
+	runtimeStateStore              *daemonstate.RuntimeStateStore
+	runtimeStateStoreForProject    func(string) *daemonstate.RuntimeStateStore
+	runtimeProjectionWriter        runtimeProjectionWriter
+	statusRefreshQueue             *reconcileQueue[*git.GitStatus]
+	statusRefreshThrottle          *reconcileThrottle
+	logger                         *slog.Logger
+	pollInterval                   time.Duration
+	onStatusUpdate                 func(ctx context.Context, projectID, issueID, worktree string, status *git.GitStatus)
+	baseBranch                     string
+	workflowMode                   string
+	baseBranchForProject           func(string) string
+	workflowModeForProject         func(string) string
+	baseBranchForWorktree          func(context.Context, string, string) string
+	heavySessionStartActive        func(context.Context, string) bool
+	mergeTyped                  func(context.Context, string, daemonhandlers.GitMergeRequest) (*daemonhandlers.GitMergeResult, error)
+	failureArtifactPathsForProject func(string) []string
 
 	refreshMu      sync.Mutex
 	refreshRunning map[string]bool
@@ -89,6 +91,7 @@ type runtimeSignalProjection struct {
 
 var (
 	_ daemonhandlers.GitService                  = (*gitServiceAdapter)(nil)
+	_ daemonhandlers.GitTypedMergeService        = (*gitServiceAdapter)(nil)
 	_ daemonhandlers.GitMergePreflightService    = (*gitServiceAdapter)(nil)
 	_ daemonhandlers.GitStatusHookRefreshService = (*gitServiceAdapter)(nil)
 	_ daemonhandlers.GitDiscardChangesService    = (*gitServiceAdapter)(nil)
@@ -132,6 +135,9 @@ func (a *gitServiceAdapter) Push(ctx context.Context, projectID, worktree, remot
 }
 
 func (a *gitServiceAdapter) Merge(ctx context.Context, projectID, worktree, branch string) (*git.MergeResult, error) {
+	if a.failureArtifactPathsForProject != nil {
+		ctx = git.WithIntegrationFailureArtifactPaths(ctx, a.failureArtifactPathsForProject(projectID))
+	}
 	ctx = a.withCandidateValidationProgress(ctx, projectID, worktree)
 	result, err := a.client.MergeCleanlyTransactional(ctx, worktree, branch)
 	if err != nil {
@@ -140,6 +146,23 @@ func (a *gitServiceAdapter) Merge(ctx context.Context, projectID, worktree, bran
 	// Merge completion should always trigger an update notification so clients
 	// refresh runtime git signals even when porcelain status stays clean.
 	if _, refreshErr := a.refreshGitStatusWriteThroughResult(ctx, projectID, worktree, true, true); refreshErr != nil {
+		return nil, refreshErr
+	}
+	return result, nil
+}
+
+func (a *gitServiceAdapter) MergeTyped(ctx context.Context, projectID string, req daemonhandlers.GitMergeRequest) (*daemonhandlers.GitMergeResult, error) {
+	if a.mergeTyped == nil {
+		return nil, fmt.Errorf("typed git merge authority unavailable")
+	}
+	result, err := a.mergeTyped(ctx, projectID, req)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, fmt.Errorf("typed git merge returned no result")
+	}
+	if _, refreshErr := a.refreshGitStatusWriteThroughResult(ctx, projectID, result.Worktree, true, true); refreshErr != nil {
 		return nil, refreshErr
 	}
 	return result, nil

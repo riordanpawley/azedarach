@@ -37,6 +37,7 @@ type OrchestrateStartOptions struct {
 	JSON                bool
 	BaseBranchOverride  string
 	OverrideBoardHealth bool
+	IntentKey           string
 }
 
 type OrchestrateGroupOptions struct {
@@ -78,15 +79,16 @@ type OrchestrateCompleteCheckOptions struct {
 }
 
 type OrchestrateReviewOptions struct {
-	Project       string
-	RootIssueID   string
-	Action        string
-	IntentKey     string
-	IssueIDs      []string
-	Severity      string
-	Findings      []string
-	RestartWorker bool
-	JSON          bool
+	Project        string
+	RootIssueID    string
+	Action         string
+	IntentKey      string
+	IssueIDs       []string
+	Severity       string
+	Findings       []string
+	ReviewPassJSON string
+	RestartWorker  bool
+	JSON           bool
 }
 
 type OrchestratePromptOptions struct {
@@ -98,10 +100,11 @@ type OrchestratePromptOptions struct {
 }
 
 type OrchestrateIntegrateOptions struct {
-	Project string
-	IssueID string
-	Apply   bool
-	JSON    bool
+	Project                    string
+	IssueID                    string
+	ExternalIntegratedRevision string
+	Apply                      bool
+	JSON                       bool
 }
 
 type OrchestrateCloseSessionOptions struct {
@@ -179,6 +182,7 @@ type orchestrateStatusResult struct {
 	Runnable               []string                             `json:"runnable"`
 	NestedRoots            []orchestrateNestedRoot              `json:"nested_roots,omitempty"`
 	Pending                []orchestratePendingStart            `json:"pending,omitempty"`
+	PublicationQueue       []domain.PublicationOperation        `json:"publication_queue,omitempty"`
 	Active                 []string                             `json:"active,omitempty"`
 	ActiveSessions         []orchestrateActiveSession           `json:"active_sessions,omitempty"`
 	SessionStartProgress   []orchestrateSessionStartProgress    `json:"session_start_progress,omitempty"`
@@ -235,6 +239,7 @@ type orchestrateObservationGroup struct {
 
 type orchestrateStartResult struct {
 	RootIssueID string                    `json:"root_issue_id"`
+	IntentKey   string                    `json:"intent_key"`
 	Limit       int                       `json:"limit"`
 	Requested   []string                  `json:"requested"`
 	NestedRoots []string                  `json:"nested_roots,omitempty"`
@@ -310,6 +315,7 @@ type orchestrateWatchFrame struct {
 	Runnable               []string                             `json:"runnable"`
 	NestedRoots            []orchestrateNestedRoot              `json:"nested_roots,omitempty"`
 	Pending                []orchestratePendingStart            `json:"pending,omitempty"`
+	PublicationQueue       []domain.PublicationOperation        `json:"publication_queue,omitempty"`
 	Active                 []string                             `json:"active,omitempty"`
 	ActiveSessions         []orchestrateActiveSession           `json:"active_sessions,omitempty"`
 	SessionStartProgress   []orchestrateSessionStartProgress    `json:"session_start_progress,omitempty"`
@@ -345,6 +351,7 @@ type orchestrateCompactReadiness struct {
 	Active                 []orchestrateCompactActiveSession    `json:"active,omitempty"`
 	Blocked                map[string]string                    `json:"blocked,omitempty"`
 	Pending                []orchestratePendingStart            `json:"pending,omitempty"`
+	PublicationQueue       []domain.PublicationOperation        `json:"publication_queue,omitempty"`
 	NestedRoots            []orchestrateCompactNestedRoot       `json:"nested_roots,omitempty"`
 	SessionStartProgress   []orchestrateCompactSessionProgress  `json:"session_start_progress,omitempty"`
 	StaleCloseableChildren []orchestrateStaleCloseableCandidate `json:"stale_closeable_children,omitempty"`
@@ -466,12 +473,13 @@ type orchestrateContainmentRisk struct {
 }
 
 type orchestratePromptResult struct {
-	RootIssueID  string   `json:"root_issue_id"`
-	IssueID      string   `json:"issue_id"`
-	ParentIssue  string   `json:"parent_issue"`
-	Coordination string   `json:"coordination"`
-	Prompt       string   `json:"prompt"`
-	Commands     []string `json:"commands"`
+	RootIssueID  string                       `json:"root_issue_id"`
+	IssueID      string                       `json:"issue_id"`
+	ParentIssue  string                       `json:"parent_issue"`
+	Coordination string                       `json:"coordination"`
+	Context      domain.WorkflowContextPacket `json:"context_packet"`
+	Prompt       string                       `json:"prompt"`
+	Commands     []string                     `json:"commands"`
 }
 
 type orchestrateIntegrateResult struct {
@@ -544,6 +552,7 @@ func ParseOrchestrateStartArgs(args []string) (OrchestrateStartOptions, error) {
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&opts.RootIssueID, "root", "", "root issue id")
 	fs.IntVar(&opts.Limit, "limit", 3, "maximum runnable issues to start")
+	fs.StringVar(&opts.IntentKey, "intent-key", "", "stable key to reuse when retrying the same start request")
 	fs.BoolVar(&opts.OverrideBoardHealth, "override-board-health", false, "allow project-wide start despite board health refusal")
 	fs.Func("issue", "specific runnable issue id (repeatable)", func(value string) error {
 		trimmed := strings.TrimSpace(value)
@@ -564,6 +573,7 @@ func ParseOrchestrateStartArgs(args []string) (OrchestrateStartOptions, error) {
 		return OrchestrateStartOptions{}, fmt.Errorf("limit must be >= 1")
 	}
 	opts.Project = normalizeIssueProject(opts.Project)
+	opts.IntentKey = strings.TrimSpace(opts.IntentKey)
 	opts.IssueIDs = dedupeSortedStrings(opts.IssueIDs)
 	return opts, nil
 }
@@ -719,6 +729,7 @@ func ParseOrchestrateReviewArgs(action string, args []string) (OrchestrateReview
 		opts.Findings = append(opts.Findings, trimmed)
 		return nil
 	})
+	fs.StringVar(&opts.ReviewPassJSON, "review-pass", "", "structured JSON review checkpoint facts")
 	fs.BoolVar(&opts.RestartWorker, "restart-worker", false, "restart an inactive owned worker after returning findings")
 	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
 	if err := fs.Parse(args); err != nil {
@@ -746,6 +757,9 @@ func ParseOrchestrateReviewArgs(action string, args []string) (OrchestrateReview
 	}
 	if len(opts.Findings) == 0 {
 		return OrchestrateReviewOptions{}, fmt.Errorf("review return requires at least one --finding")
+	}
+	if strings.TrimSpace(opts.ReviewPassJSON) == "" {
+		return OrchestrateReviewOptions{}, fmt.Errorf("review return requires --review-pass with revision-bound checkpoint facts")
 	}
 	if opts.Severity == "" {
 		return OrchestrateReviewOptions{}, fmt.Errorf("severity cannot be empty")
@@ -790,6 +804,7 @@ func ParseOrchestrateIntegrateArgs(args []string) (OrchestrateIntegrateOptions, 
 	fs.SetOutput(io.Discard)
 	addIssueProjectFlag(fs, &opts.Project)
 	fs.StringVar(&opts.IssueID, "issue", "", "worker issue id to integrate")
+	fs.StringVar(&opts.ExternalIntegratedRevision, "external-integrated-revision", "", "reconcile an explicitly authorized integration already present on the configured target")
 	fs.BoolVar(&opts.Apply, "apply", false, "apply integration instead of printing advisory guidance")
 	fs.BoolVar(&opts.JSON, "json", false, "output JSON")
 	if err := fs.Parse(args); err != nil {
@@ -905,6 +920,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		Runnable:               ready.Runnable,
 		NestedRoots:            orchestrateNestedRootsFromDaemon(ready.NestedRoots),
 		Pending:                orchestratePendingStartsFromDaemon(ready.Pending),
+		PublicationQueue:       append([]domain.PublicationOperation(nil), ready.PublicationQueue...),
 		Active:                 ready.Active,
 		ActiveSessions:         orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
 		SessionStartProgress:   orchestrateSessionStartProgressFromDaemon(ready.SessionStartProgress),
@@ -916,8 +932,8 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		Warnings:               orchestrateStatusWarnings(ctx, deps, ready, len(ready.Runnable)),
 		Advice: map[string]interface{}{
 			"watch":             fmt.Sprintf("az orchestrate watch --root %s --since %d --jsonl", ready.RootIssueID, nextMailboxSeq(events, opts.SinceSeq)),
-			"watch_instruction": "Start this watch command in another pane/session and leave it running while workers are active; use active_sessions activity before considering pane capture. Do not add --once for orchestration monitoring.",
-			"persistence_guard": "Daemon-enforced: parent idle/turn completion is wake-required while direct nested roots remain and complete-check has not passed; the durable cursor is resumed after restart or session replacement.",
+			"watch_instruction": "Optional external observer only; do not run this continuous watch inside a model turn. Agents should complete one bounded status/action step and yield for the daemon's revision-bound continuation.",
+			"persistence_guard": "Daemon-enforced: actionable scope transitions enqueue one deduplicated durable continuation; busy agents defer delivery and pending intents recover after restart.",
 		},
 	}
 	if opts.Summary {
@@ -948,6 +964,22 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 		fmt.Println("Pending starts:")
 		for _, pending := range result.Pending {
 			fmt.Printf("- %s operation=%s state=%s\n", pending.IssueID, pending.OperationID, pending.OperationState)
+		}
+	}
+	if len(result.PublicationQueue) > 0 {
+		fmt.Println("Publication queue:")
+		for _, publication := range result.PublicationQueue {
+			fmt.Printf("- %s issue=%s intent=%s state=%s position=%d source=%s base=%s candidate=%s lease=%s evidence=%s validation=%s reused=%s",
+				publication.OperationID, publication.IssueID, publication.IntentKey, publication.State, publication.QueuePosition,
+				publication.SourceRevision, publication.BaseRevision, publication.CandidateRevision, publication.LeaseOwner,
+				publication.EvidenceSource, publication.ValidationRequestID, publication.ReusedEvidenceID)
+			if publication.FailureKind != "" {
+				fmt.Printf(" failure=%s", publication.FailureKind)
+			}
+			if publication.FailureArtifact != "" {
+				fmt.Printf(" artifact=%s", publication.FailureArtifact)
+			}
+			fmt.Println()
 		}
 	}
 	if len(result.NestedRoots) > 0 {
@@ -1059,7 +1091,7 @@ func OrchestrateStatusCommand(deps *Dependencies, opts OrchestrateStatusOptions)
 			fmt.Printf("- %s\n", warning)
 		}
 	}
-	fmt.Println("Next watch command (leave running while workers are active; do not add --once):")
+	fmt.Println("Optional external observer command (do not run inside a model turn):")
 	fmt.Printf("- %s\n", result.Advice["watch"])
 	fmt.Printf("- %s\n", result.Advice["watch_instruction"])
 	return nil
@@ -1313,17 +1345,20 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	if err != nil {
 		return orchestrateStartResult{}, err
 	}
-	ready, err := deps.DaemonClient.TaskGraphReadinessForActor(ctx, opts.RootIssueID, ownerID)
-	if err != nil {
-		return orchestrateStartResult{}, err
-	}
-	intentKey, err := newCLIOrchestrationStartIntentKey()
-	if err != nil {
-		return orchestrateStartResult{}, err
+	intentKey := strings.TrimSpace(opts.IntentKey)
+	if intentKey == "" {
+		intentKey, err = newCLIOrchestrationStartIntentKey()
+		if err != nil {
+			return orchestrateStartResult{}, err
+		}
 	}
 	applied, err := deps.DaemonClient.ApplyOrchestrationIntent(ctx, protocol.OrchestrationIntentRequest{Scope: scope, Kind: protocol.OrchestrationIntentStart, IntentKey: intentKey, ActorID: ownerID, IssueIDs: opts.IssueIDs, Limit: opts.Limit, RepoDir: deps.RepoDir, BaseBranch: opts.BaseBranchOverride, OverrideBoardHealth: opts.OverrideBoardHealth})
 	if err != nil {
 		return orchestrateStartResult{}, err
+	}
+	ready, readinessErr := deps.DaemonClient.TaskGraphReadinessForActor(ctx, opts.RootIssueID, ownerID)
+	if readinessErr != nil && len(applied.Pending) == 0 {
+		return orchestrateStartResult{}, readinessErr
 	}
 	nestedRootIDs := make([]string, 0, len(ready.NestedRoots))
 	for _, nested := range ready.NestedRoots {
@@ -1332,6 +1367,7 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 
 	result := orchestrateStartResult{
 		RootIssueID: opts.RootIssueID,
+		IntentKey:   intentKey,
 		Limit:       opts.Limit,
 		Requested:   append([]string(nil), applied.Requested...),
 		NestedRoots: nestedRootIDs,
@@ -1339,12 +1375,27 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 		Launched:    make([]orchestrateStartLaunch, 0, len(applied.Launched)),
 		Skipped:     cloneOrchestrateStartDetails(applied.Skipped),
 		Failed:      cloneOrchestrateStartDetails(applied.Failed),
-		Warnings:    orchestrateStartWarnings(ctx, deps, ready, len(applied.Launched)),
 		Advice: orchestrateStartAdvice{
 			WatchCommand:     fmt.Sprintf("az orchestrate watch --root %s --since 0 --jsonl", opts.RootIssueID),
 			StatusCommand:    fmt.Sprintf("az orchestrate status --root %s --json", opts.RootIssueID),
-			WatchInstruction: "Start this watch command in another pane/session and leave it running while workers are active; use active_sessions activity before considering pane capture. Do not add --once for orchestration monitoring.",
+			WatchInstruction: "Optional external observer only; agents should yield after a bounded status/action step and wait for the daemon's revision-bound continuation.",
 		},
+	}
+	if readinessErr == nil {
+		result.Warnings = orchestrateStartWarnings(ctx, deps, ready, len(applied.Launched))
+	} else {
+		result.Warnings = append(result.Warnings, "durable start intent is queued; readiness projection remains unavailable: "+readinessErr.Error())
+	}
+	for _, pending := range applied.Pending {
+		reason := strings.TrimSpace(string(pending.Phase))
+		if pending.Message != "" {
+			if reason != "" {
+				reason += ": "
+			}
+			reason += pending.Message
+		}
+		retry := orchestrateStartRetryCommand(opts, intentKey)
+		result.Pending = append(result.Pending, orchestrateStartPending{IssueID: pending.IssueID, OperationID: pending.OperationID, OperationState: pending.OperationState, Reason: reason, FollowUpCommands: []string{retry}})
 	}
 
 	for _, daemonLaunch := range applied.Launched {
@@ -1373,6 +1424,24 @@ func orchestrateStart(deps *Dependencies, opts OrchestrateStartOptions) (orchest
 	}
 
 	return result, nil
+}
+
+func orchestrateStartRetryCommand(opts OrchestrateStartOptions, intentKey string) string {
+	parts := []string{"az", "orchestrate", "start"}
+	if opts.Project != "" {
+		parts = append(parts, "--project", shellSingleQuote(opts.Project))
+	}
+	if opts.RootIssueID != "" {
+		parts = append(parts, "--root", shellSingleQuote(opts.RootIssueID))
+	}
+	parts = append(parts, "--limit", fmt.Sprintf("%d", opts.Limit), "--intent-key", shellSingleQuote(intentKey))
+	for _, issueID := range opts.IssueIDs {
+		parts = append(parts, "--issue", shellSingleQuote(issueID))
+	}
+	if opts.OverrideBoardHealth {
+		parts = append(parts, "--override-board-health")
+	}
+	return strings.Join(parts, " ")
 }
 
 func cloneOrchestrateStartDetails(in map[string]string) map[string]string {
@@ -1956,6 +2025,7 @@ func formatMillisDuration(ms int64) string {
 
 func printOrchestrateStartResult(result orchestrateStartResult) {
 	fmt.Printf("Root issue: %s\n", result.RootIssueID)
+	fmt.Printf("Intent key: %s\n", result.IntentKey)
 	fmt.Printf("Start limit: %d\n", result.Limit)
 	fmt.Println("Started sessions:")
 	if len(result.Started) == 0 {
@@ -1995,7 +2065,7 @@ func printOrchestrateStartResult(result orchestrateStartResult) {
 		}
 	}
 	if result.Advice.WatchCommand != "" {
-		fmt.Println("Next watch command (leave running while workers are active; do not add --once):")
+		fmt.Println("Optional external observer command (do not run inside a model turn):")
 		fmt.Printf("- %s\n", result.Advice.WatchCommand)
 		if result.Advice.WatchInstruction != "" {
 			fmt.Printf("- %s\n", result.Advice.WatchInstruction)
@@ -2174,6 +2244,7 @@ func orchestrateWatchFrameFromReadiness(ready daemonclient.TaskGraphReadiness, e
 		Runnable:               ready.Runnable,
 		NestedRoots:            orchestrateNestedRootsFromDaemon(ready.NestedRoots),
 		Pending:                orchestratePendingStartsFromDaemon(ready.Pending),
+		PublicationQueue:       append([]domain.PublicationOperation(nil), ready.PublicationQueue...),
 		Active:                 ready.Active,
 		ActiveSessions:         orchestrateActiveSessionsFromDaemon(ready.ActiveSessions),
 		SessionStartProgress:   orchestrateSessionStartProgressFromDaemon(ready.SessionStartProgress),
@@ -2191,6 +2262,7 @@ func orchestrateWatchFrameSnapshotKey(frame orchestrateWatchFrame) string {
 		Runnable               []string                             `json:"runnable"`
 		NestedRoots            []orchestrateNestedRoot              `json:"nested_roots,omitempty"`
 		Pending                []orchestratePendingStart            `json:"pending,omitempty"`
+		PublicationQueue       []domain.PublicationOperation        `json:"publication_queue,omitempty"`
 		Active                 []string                             `json:"active,omitempty"`
 		ActiveSessions         []orchestrateActiveSession           `json:"active_sessions,omitempty"`
 		SessionStartProgress   []orchestrateSessionStartProgress    `json:"session_start_progress,omitempty"`
@@ -2216,6 +2288,7 @@ func orchestrateWatchFrameSnapshotKey(frame orchestrateWatchFrame) string {
 		Runnable:               frame.Runnable,
 		NestedRoots:            nestedRoots,
 		Pending:                frame.Pending,
+		PublicationQueue:       frame.PublicationQueue,
 		Active:                 frame.Active,
 		ActiveSessions:         activeSessions,
 		SessionStartProgress:   sessionStartProgress,
@@ -2379,7 +2452,10 @@ func OrchestratePromptCommand(deps *Dependencies, opts OrchestratePromptOptions)
 	if coordination == "" {
 		coordination = "native"
 	}
-	result := buildOrchestratePromptResult(rootIssueID, parentIssueID, task, coordination)
+	result, err := buildOrchestratePromptResult(rootIssueID, parentIssueID, task, coordination)
+	if err != nil {
+		return err
+	}
 	if opts.JSON {
 		return printJSON(result)
 	}
@@ -2414,7 +2490,7 @@ func OrchestrateIntegrateCommand(deps *Dependencies, opts OrchestrateIntegrateOp
 	if err != nil {
 		return finishOrchestrateIntegratePreflightFailure(opts, &result, err)
 	}
-	mergeReady := readiness.Ready
+	mergeReady := readiness.Ready || strings.TrimSpace(opts.ExternalIntegratedRevision) != ""
 	contextRiskBlocked := readiness.ContextRisk != nil && domain.IssueContextRiskRequiresStructuredCloseout(*readiness.ContextRisk)
 	closeoutReady := mergeReady && !contextRiskBlocked
 	commands := orchestrateIntegrationCommands(opts.IssueID, opts.Project, wt, found, closeoutReady)
@@ -2431,7 +2507,7 @@ func OrchestrateIntegrateCommand(deps *Dependencies, opts OrchestrateIntegrateOp
 		result.Branch = wt.Branch
 	}
 	if opts.Apply {
-		applyErr := applyOrchestrateIntegration(deps, opts.IssueID, opts.Project, mergeReady, &result)
+		applyErr := applyOrchestrateIntegration(deps, opts.IssueID, opts.Project, opts.ExternalIntegratedRevision, mergeReady, &result)
 		if opts.JSON {
 			if err := printJSON(result); err != nil {
 				return err
@@ -2505,7 +2581,7 @@ func finishOrchestrateIntegratePreflightFailure(opts OrchestrateIntegrateOptions
 	return wrapped
 }
 
-func applyOrchestrateIntegration(deps *Dependencies, issueID, projectID string, mergeReady bool, result *orchestrateIntegrateResult) error {
+func applyOrchestrateIntegration(deps *Dependencies, issueID, projectID, externalIntegratedRevision string, mergeReady bool, result *orchestrateIntegrateResult) error {
 	if !mergeReady {
 		result.Steps = append(result.Steps, orchestrateIntegrateStep{
 			Name:   "completion_evidence",
@@ -2530,7 +2606,7 @@ func applyOrchestrateIntegration(deps *Dependencies, issueID, projectID string, 
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), issueCloseCleanupTimeout)
 	defer cancel()
 	closeResult, err := deps.DaemonClient.CloseTask(cleanupCtx, issueID, daemonclient.TaskStatusOptions{
-		IntegrateBeforeClose: true,
+		IntegrateBeforeClose: true, ExternalIntegratedRevision: strings.TrimSpace(externalIntegratedRevision),
 	})
 	if err != nil {
 		wrapped := fmt.Errorf("phase integrate_and_close for issue %s: %w", issueID, err)
@@ -2552,6 +2628,9 @@ func applyOrchestrateIntegration(deps *Dependencies, issueID, projectID string, 
 	})
 
 	note := fmt.Sprintf("Integrated by `%s`: daemon task.close integrated the branch, stopped session/worktree runtime if present, and closed the issue.", orchestrateIntegrateApplyCommandForProject(issueID, projectID))
+	if strings.TrimSpace(externalIntegratedRevision) != "" {
+		note = fmt.Sprintf("Reconciled externally completed integration %s through daemon task.close: exact accepted authority, ancestry, and candidate tree were verified; runtime was cleaned up and the issue was closed.", strings.TrimSpace(externalIntegratedRevision))
+	}
 	if err := deps.DaemonClient.AppendTaskNotes(cleanupCtx, issueID, note); err != nil {
 		result.Steps = append(result.Steps, orchestrateIntegrateStep{Name: "append_evidence", Status: "failed", Error: err.Error()})
 		result.Recovery = orchestrateIntegrationRecovery(issueID, projectID, "post_close_failed")
@@ -2763,6 +2842,7 @@ func compactFrameFromStatusResult(result orchestrateStatusResult, since, nextSin
 		Runnable:               result.Runnable,
 		NestedRoots:            result.NestedRoots,
 		Pending:                result.Pending,
+		PublicationQueue:       result.PublicationQueue,
 		Active:                 result.Active,
 		ActiveSessions:         result.ActiveSessions,
 		SessionStartProgress:   result.SessionStartProgress,
@@ -2804,6 +2884,7 @@ func compactFrameFromWatchFrame(frame orchestrateWatchFrame) orchestrateCompactF
 			Active:                 compactActiveSessions(frame.ActiveSessions),
 			Blocked:                compactBlocked(frame.Blocked),
 			Pending:                append([]orchestratePendingStart(nil), frame.Pending...),
+			PublicationQueue:       append([]domain.PublicationOperation(nil), frame.PublicationQueue...),
 			NestedRoots:            compactNestedRoots(frame.NestedRoots),
 			SessionStartProgress:   compactSessionStartProgress(frame.SessionStartProgress),
 			StaleCloseableChildren: append([]orchestrateStaleCloseableCandidate(nil), frame.StaleCloseableChildren...),
@@ -3208,8 +3289,19 @@ func printCompactOrchestrateFrame(frame orchestrateCompactFrame) {
 	}
 }
 
-func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain.Task, coordination string) orchestratePromptResult {
+func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain.Task, coordination string) (orchestratePromptResult, error) {
 	issueID := task.ID.String()
+	contextPacket, contextErr := domain.BuildWorkflowContextPacket(domain.WorkflowContextInput{
+		Role: domain.WorkflowRoleWorker, IssueID: issueID, SourceRevision: domain.WorkflowIssueContextRevision(task), Summary: task.Title,
+		Requirements: domain.WorkflowIssueRequirements(task),
+	})
+	if contextErr != nil {
+		return orchestratePromptResult{}, fmt.Errorf("build bounded worker context: %w", contextErr)
+	}
+	contextJSON, err := domain.MarshalWorkflowContextPacket(contextPacket)
+	if err != nil {
+		return orchestratePromptResult{}, fmt.Errorf("marshal bounded worker context: %w", err)
+	}
 	commands := []string{
 		"az prime",
 		fmt.Sprintf("az issue get %s", issueID),
@@ -3228,7 +3320,11 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 		)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Work on issue %s: %s\n\n", issueID, task.Title)
+	safeTitle := contextPacket.Summary
+	if safeTitle == "" {
+		safeTitle = issueID
+	}
+	fmt.Fprintf(&b, "Work on issue %s: %s\n\n", issueID, safeTitle)
 	fmt.Fprintf(&b, "Start by running `az prime`, then continue this worker task using the issue context without waiting for further instruction.\n\n")
 	fmt.Fprintf(&b, "Root issue: %s\n", rootIssueID)
 	fmt.Fprintf(&b, "Coordination mode: %s\n", coordination)
@@ -3242,15 +3338,7 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 	if len(task.Implementations) > 0 {
 		fmt.Fprintf(&b, "Implementations: %s\n", strings.Join(task.Implementations, ", "))
 	}
-	if strings.TrimSpace(task.Description) != "" {
-		fmt.Fprintf(&b, "\nDescription:\n%s\n", strings.TrimSpace(task.Description))
-	}
-	if strings.TrimSpace(task.Design) != "" {
-		fmt.Fprintf(&b, "\nDesign:\n%s\n", strings.TrimSpace(task.Design))
-	}
-	if strings.TrimSpace(task.Acceptance) != "" {
-		fmt.Fprintf(&b, "\nAcceptance:\n%s\n", strings.TrimSpace(task.Acceptance))
-	}
+	fmt.Fprintf(&b, "\nBounded semantic workflow context (authoritative for this phase; do not reconstruct it from inherited transcript or workflow scrollback):\n%s\n", contextJSON)
 	if strings.TrimSpace(task.Notes) != "" {
 		fmt.Fprintf(&b, "\nCurrent notes: present but omitted from worker prompt. Run `az issue get %s --with-notes` only if full note history is necessary.\n", issueID)
 	}
@@ -3283,9 +3371,10 @@ func buildOrchestratePromptResult(rootIssueID, parentIssueID string, task domain
 		IssueID:      issueID,
 		ParentIssue:  parentIssueID,
 		Coordination: coordination,
+		Context:      contextPacket,
 		Prompt:       b.String(),
 		Commands:     commands,
-	}
+	}, nil
 }
 
 func orchestrateStartWarnings(ctx context.Context, deps *Dependencies, ready daemonclient.TaskGraphReadiness, launchCount int) []string {

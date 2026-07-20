@@ -18,6 +18,9 @@ import (
 func (s *SQLiteStore) AcquireValidation(ctx context.Context, request domain.ValidationAcquire, now time.Time) (domain.ValidationRequest, error) {
 	// Preserve source compatibility for internal callers while all transport
 	// callers are required to provide the explicit authority dimensions.
+	if !request.IssuePriorityResolved {
+		request.IssuePriority = domain.P2
+	}
 	if request.Scope == "" {
 		request.Scope = domain.ValidationScopeTicket
 	}
@@ -104,10 +107,10 @@ func (s *SQLiteStore) AcquireValidation(ctx context.Context, request domain.Vali
 		outcome = "emergency skip: " + request.OverrideReason
 	}
 	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO daemon_validation_requests
-		(request_id,lease_token_hash,project_id,issue_id,class,scope,purpose,execution,authoritative_request_id,compatibility_key,isolation_mode,environment_fingerprint,override_kind,override_actor,override_reason,profile,command,source_revision,reviewer_id,review_epoch_event_id,state,queued_at,heartbeat_at,expires_at,finished_at,outcome,evidence_json)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, request.RequestID, validationTokenHash(request.LeaseToken), request.ProjectID, request.IssueID, request.Class, request.Scope, request.Purpose,
+		(request_id,lease_token_hash,project_id,issue_id,issue_priority,priority_bypass_count,class,scope,purpose,execution,authoritative_request_id,compatibility_key,isolation_mode,environment_fingerprint,override_kind,override_actor,override_reason,profile,command,source_revision,reviewer_id,reviewer_kind,review_epoch_event_id,publication_operation_id,accepted_review_event_id,accepted_publication_operation_id,state,queued_at,heartbeat_at,expires_at,finished_at,outcome,evidence_json)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, request.RequestID, validationTokenHash(request.LeaseToken), request.ProjectID, request.IssueID, request.IssuePriority, 0, request.Class, request.Scope, request.Purpose,
 		execution, authoritativeRequestID, compatibilityKey, request.IsolationMode, request.EnvironmentFingerprint, request.Override, request.OverrideActor, request.OverrideReason,
-		request.Profile, request.Command, request.SourceRevision, request.ReviewerID, request.ReviewEpochEventID, state, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), nullableValidationExpiry(execution, now, request.TTL), finishedAt, outcome, evidenceJSON)
+		request.Profile, request.Command, request.SourceRevision, request.ReviewerID, request.ReviewerKind, request.ReviewEpochEventID, request.PublicationOperationID, request.AcceptedReviewEventID, request.AcceptedPublicationOperationID, state, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), nullableValidationExpiry(execution, now, request.TTL), finishedAt, outcome, evidenceJSON)
 	if err != nil {
 		return domain.ValidationRequest{}, fmt.Errorf("queue validation request: %w", err)
 	}
@@ -118,7 +121,7 @@ func (s *SQLiteStore) AcquireValidation(ctx context.Context, request domain.Vali
 	if err := authenticateValidationRequestTx(ctx, tx, request.RequestID, request.LeaseToken); err != nil {
 		return domain.ValidationRequest{}, err
 	}
-	if current.ProjectID != request.ProjectID || current.IssueID != request.IssueID || current.Class != request.Class || current.Scope != request.Scope || current.Purpose != request.Purpose || current.Profile != request.Profile || current.Command != request.Command || current.SourceRevision != request.SourceRevision || current.ReviewerID != request.ReviewerID || current.ReviewEpochEventID != request.ReviewEpochEventID || current.IsolationMode != request.IsolationMode || current.EnvironmentFingerprint != request.EnvironmentFingerprint || current.Override != request.Override || current.OverrideActor != request.OverrideActor || current.OverrideReason != request.OverrideReason {
+	if current.ProjectID != request.ProjectID || current.IssueID != request.IssueID || current.IssuePriority != request.IssuePriority || current.Class != request.Class || current.Scope != request.Scope || current.Purpose != request.Purpose || current.Profile != request.Profile || current.Command != request.Command || current.SourceRevision != request.SourceRevision || current.ReviewerID != request.ReviewerID || current.ReviewerKind != request.ReviewerKind || current.ReviewEpochEventID != request.ReviewEpochEventID || current.PublicationOperationID != request.PublicationOperationID || current.AcceptedReviewEventID != request.AcceptedReviewEventID || current.AcceptedPublicationOperationID != request.AcceptedPublicationOperationID || current.IsolationMode != request.IsolationMode || current.EnvironmentFingerprint != request.EnvironmentFingerprint || current.Override != request.Override || current.OverrideActor != request.OverrideActor || current.OverrideReason != request.OverrideReason {
 		return domain.ValidationRequest{}, fmt.Errorf("validation request id %s already exists with different identity", request.RequestID)
 	}
 	if current.State == domain.ValidationRequestQueued {
@@ -371,7 +374,7 @@ func queryValidationSnapshot(ctx context.Context, queryer validationSnapshotQuer
 	}
 	defer rows.Close()
 	snapshot := domain.ValidationSnapshot{
-		Schema: "azedarach.validation_lease_status.v2", Active: []domain.ValidationRequest{}, Queued: []domain.ValidationRequest{}, Recent: []domain.ValidationRequest{},
+		Schema: "azedarach.validation_lease_status.v3", Active: []domain.ValidationRequest{}, Queued: []domain.ValidationRequest{}, Recent: []domain.ValidationRequest{},
 		Freshness: domain.ValidationSnapshotFresh, ObservedAt: now,
 	}
 	for rows.Next() {
@@ -398,16 +401,54 @@ func queryValidationSnapshot(ctx context.Context, queryer validationSnapshotQuer
 	if err := rows.Close(); err != nil {
 		return domain.ValidationSnapshot{}, fmt.Errorf("close validation snapshot rows: %w", err)
 	}
+	snapshot.Queued = orderValidationSnapshotQueue(snapshot.Queued)
+	for i := range snapshot.Active {
+		snapshot.Active[i].OrderingReason = activeValidationOrderingReason(snapshot.Active[i])
+	}
 	if err := queryer.QueryRowContext(ctx, `SELECT COALESCE((SELECT revision FROM daemon_validation_state WHERE project_id=?),0)`, projectID).Scan(&snapshot.Revision); err != nil {
 		return domain.ValidationSnapshot{}, fmt.Errorf("read validation snapshot revision: %w", err)
 	}
 	return snapshot, nil
 }
 
+func orderValidationSnapshotQueue(requests []domain.ValidationRequest) []domain.ValidationRequest {
+	runnable := make([]domain.ValidationRequest, 0, len(requests))
+	joined := make([]domain.ValidationRequest, 0, len(requests))
+	for _, request := range requests {
+		request.QueuePosition = 0
+		request.OrderingReason = ""
+		if request.Execution == domain.ValidationExecutionJoined {
+			request.OrderingReason = domain.ValidationOrderingJoinedSource
+			joined = append(joined, request)
+			continue
+		}
+		if request.Execution == domain.ValidationExecutionExecuted && request.Purpose == domain.ValidationPurposeCapacity {
+			runnable = append(runnable, request)
+			continue
+		}
+		joined = append(joined, request)
+	}
+	return append(domain.OrderValidationQueue(runnable), joined...)
+}
+
 func unavailableValidationSnapshot(now time.Time, err error) domain.ValidationSnapshot {
 	return domain.ValidationSnapshot{
-		Schema: "azedarach.validation_lease_status.v2", Active: []domain.ValidationRequest{}, Queued: []domain.ValidationRequest{}, Recent: []domain.ValidationRequest{},
+		Schema: "azedarach.validation_lease_status.v3", Active: []domain.ValidationRequest{}, Queued: []domain.ValidationRequest{}, Recent: []domain.ValidationRequest{},
 		Freshness: domain.ValidationSnapshotUnavailable, ObservedAt: now, DegradedReason: "validation capacity projection unavailable: " + err.Error(),
+	}
+}
+
+func activeValidationOrderingReason(request domain.ValidationRequest) domain.ValidationOrderingReason {
+	if request.Purpose == domain.ValidationPurposePushGate || request.Purpose == domain.ValidationPurposeReviewEvidence {
+		return domain.ValidationOrderingPublication
+	}
+	switch request.Class {
+	case domain.ValidationClassSafe:
+		return domain.ValidationOrderingSafe
+	case domain.ValidationClassAggregate:
+		return domain.ValidationOrderingAggregate
+	default:
+		return domain.ValidationOrderingShared
 	}
 }
 
@@ -429,20 +470,47 @@ func (s *SQLiteStore) LatestReviewValidation(ctx context.Context, projectID, iss
 	if err := expireAndReconcileValidationTx(ctx, tx, strings.TrimSpace(projectID), now.UTC(), ttl); err != nil {
 		return nil, err
 	}
-	request, err := scanValidationRequest(tx.QueryRowContext(ctx, validationSelect+` WHERE project_id=? AND issue_id=? AND class='aggregate' AND scope='ticket' AND purpose='review_evidence' ORDER BY sequence DESC LIMIT 1`, strings.TrimSpace(projectID), strings.TrimSpace(issueID)))
-	if errors.Is(err, sql.ErrNoRows) {
+	rows, err := tx.QueryContext(ctx, validationSelect+` WHERE project_id=? AND issue_id=? AND class='aggregate' AND scope='ticket' AND purpose='review_evidence' ORDER BY sequence DESC`, strings.TrimSpace(projectID), strings.TrimSpace(issueID))
+	if err != nil {
+		return nil, fmt.Errorf("query latest review validation: %w", err)
+	}
+	defer rows.Close()
+	var latest *domain.ValidationRequest
+	for rows.Next() {
+		request, scanErr := scanValidationRequest(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		if request.HasCompleteReviewAuthority() {
+			latest = &request
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if latest == nil {
 		if commitErr := tx.Commit(); commitErr != nil {
 			return nil, fmt.Errorf("commit latest aggregate validation reconciliation: %w", commitErr)
 		}
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
-	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit latest aggregate validation reconciliation: %w", err)
 	}
-	return &request, nil
+	return latest, nil
+}
+
+func (s *SQLiteStore) ValidationRequest(ctx context.Context, projectID, requestID string) (domain.ValidationRequest, error) {
+	db, err := s.dbHandle()
+	if err != nil {
+		return domain.ValidationRequest{}, err
+	}
+	request, err := scanValidationRequest(db.QueryRowContext(ctx, validationSelect+` WHERE project_id=? AND request_id=?`, strings.TrimSpace(projectID), strings.TrimSpace(requestID)))
+	if err != nil {
+		return domain.ValidationRequest{}, fmt.Errorf("resolve validation request %s: %w", requestID, err)
+	}
+	return request, nil
 }
 
 // LatestAggregateValidation remains as a compatibility name for callers that
@@ -529,26 +597,25 @@ func reconcileValidationQueueTx(ctx context.Context, tx *sql.Tx, projectID strin
 	if activeAggregate > 0 {
 		return nil
 	}
-	var firstSequence int64
-	var firstClass domain.ValidationClass
-	err := tx.QueryRowContext(ctx, `SELECT sequence,class FROM daemon_validation_requests WHERE project_id=? AND state='queued' AND execution='executed' AND purpose='capacity' AND class!='safe' ORDER BY sequence LIMIT 1`, projectID).Scan(&firstSequence, &firstClass)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
+	queued, err := queuedValidationRequestsTx(ctx, tx, projectID)
 	if err != nil {
 		return err
 	}
-	if firstClass == domain.ValidationClassAggregate {
+	if len(queued) == 0 {
+		return nil
+	}
+	ordered := domain.OrderValidationQueue(queued)
+	head := ordered[0]
+	if head.Class == domain.ValidationClassAggregate {
 		var activeShared int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_validation_requests WHERE project_id=? AND state='active' AND purpose='capacity' AND class='shared'`, projectID).Scan(&activeShared); err != nil {
 			return err
 		}
 		if activeShared == 0 {
-			_, err = tx.ExecContext(ctx, `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE sequence=? AND state='queued'`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), firstSequence)
-			return err
+			return activateValidationRequestsTx(ctx, tx, projectID, []domain.ValidationRequest{head}, now, ttl)
 		}
 		var bypassedShared int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_validation_requests WHERE project_id=? AND purpose='capacity' AND class='shared' AND sequence>? AND started_at IS NOT NULL`, projectID, firstSequence).Scan(&bypassedShared); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM daemon_validation_requests WHERE project_id=? AND purpose='capacity' AND class='shared' AND sequence>? AND started_at IS NOT NULL`, projectID, head.Sequence).Scan(&bypassedShared); err != nil {
 			return err
 		}
 		if bypassedShared >= validationAggregateSharedBypassLimit {
@@ -558,26 +625,63 @@ func reconcileValidationQueueTx(ctx context.Context, tx *sql.Tx, projectID strin
 		// ownership. Let one later focused request join the current shared
 		// generation, then drain shared owners for the aggregate. Counting
 		// durable started requests makes the bound survive daemon replacement.
-		_, err = tx.ExecContext(ctx, `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE sequence=(SELECT sequence FROM daemon_validation_requests WHERE project_id=? AND state='queued' AND execution='executed' AND purpose='capacity' AND class='shared' AND sequence>? ORDER BY sequence LIMIT 1) AND state='queued'`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), projectID, firstSequence)
-		return err
+		for _, candidate := range ordered[1:] {
+			if candidate.Class == domain.ValidationClassShared && candidate.Sequence > head.Sequence {
+				return activateValidationRequestsTx(ctx, tx, projectID, []domain.ValidationRequest{candidate}, now, ttl)
+			}
+		}
+		return nil
 	}
-	var nextAggregate sql.NullInt64
-	if err := tx.QueryRowContext(ctx, `SELECT MIN(sequence) FROM daemon_validation_requests WHERE project_id=? AND state='queued' AND execution='executed' AND purpose='capacity' AND class='aggregate'`, projectID).Scan(&nextAggregate); err != nil {
-		return err
+	shared := make([]domain.ValidationRequest, 0, len(ordered))
+	for _, candidate := range ordered {
+		if candidate.Class == domain.ValidationClassAggregate {
+			break
+		}
+		if candidate.Class == domain.ValidationClassShared {
+			shared = append(shared, candidate)
+		}
 	}
-	query := `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE project_id=? AND state='queued' AND execution='executed' AND purpose='capacity' AND class='shared'`
-	args := []any{now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), projectID}
-	if nextAggregate.Valid {
-		query += ` AND sequence < ?`
-		args = append(args, nextAggregate.Int64)
+	return activateValidationRequestsTx(ctx, tx, projectID, shared, now, ttl)
+}
+
+func queuedValidationRequestsTx(ctx context.Context, tx *sql.Tx, projectID string) ([]domain.ValidationRequest, error) {
+	rows, err := tx.QueryContext(ctx, validationSelect+` WHERE project_id=? AND state='queued' AND execution='executed' AND purpose='capacity' AND class!='safe' ORDER BY sequence`, projectID)
+	if err != nil {
+		return nil, err
 	}
-	_, err = tx.ExecContext(ctx, query, args...)
-	return err
+	defer rows.Close()
+	var requests []domain.ValidationRequest
+	for rows.Next() {
+		request, scanErr := scanValidationRequest(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		requests = append(requests, request)
+	}
+	return requests, rows.Err()
+}
+
+func activateValidationRequestsTx(ctx context.Context, tx *sql.Tx, projectID string, requests []domain.ValidationRequest, now time.Time, ttl time.Duration) error {
+	for _, request := range requests {
+		if _, err := tx.ExecContext(ctx, `UPDATE daemon_validation_requests SET priority_bypass_count=priority_bypass_count+1 WHERE project_id=? AND state='queued' AND execution='executed' AND purpose='capacity' AND sequence<? AND issue_priority>? AND priority_bypass_count<?`, projectID, request.Sequence, request.IssuePriority, domain.ValidationPriorityBypassLimit); err != nil {
+			return fmt.Errorf("record validation priority bypass: %w", err)
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE daemon_validation_requests SET state='active',started_at=?,heartbeat_at=?,expires_at=? WHERE project_id=? AND sequence=? AND state='queued'`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(ttl).Format(time.RFC3339Nano), projectID, request.Sequence)
+		if err != nil {
+			return fmt.Errorf("activate validation request %s: %w", request.RequestID, err)
+		}
+		if changed, rowsErr := result.RowsAffected(); rowsErr != nil {
+			return rowsErr
+		} else if changed != 1 {
+			return fmt.Errorf("activate validation request %s: request is no longer queued", request.RequestID)
+		}
+	}
+	return nil
 }
 
 const validationAggregateSharedBypassLimit = 1
 
-const validationSelect = `SELECT sequence,request_id,project_id,issue_id,class,scope,purpose,execution,authoritative_request_id,compatibility_key,isolation_mode,environment_fingerprint,override_kind,override_actor,override_reason,profile,command,source_revision,reviewer_id,review_epoch_event_id,state,queued_at,started_at,heartbeat_at,expires_at,finished_at,outcome,evidence_json FROM daemon_validation_requests`
+const validationSelect = `SELECT sequence,request_id,project_id,issue_id,issue_priority,priority_bypass_count,class,scope,purpose,execution,authoritative_request_id,compatibility_key,isolation_mode,environment_fingerprint,override_kind,override_actor,override_reason,profile,command,source_revision,reviewer_id,reviewer_kind,review_epoch_event_id,publication_operation_id,accepted_review_event_id,accepted_publication_operation_id,state,queued_at,started_at,heartbeat_at,expires_at,finished_at,outcome,evidence_json FROM daemon_validation_requests`
 
 type validationScanner interface{ Scan(...any) error }
 
@@ -613,7 +717,7 @@ func scanValidationRequest(scanner validationScanner) (domain.ValidationRequest,
 	var queued string
 	var started, heartbeat, expires, finished sql.NullString
 	var evidenceJSON string
-	if err := scanner.Scan(&request.Sequence, &request.RequestID, &request.ProjectID, &request.IssueID, &request.Class, &request.Scope, &request.Purpose, &request.Execution, &request.AuthoritativeRequestID, &request.CompatibilityKey, &request.IsolationMode, &request.EnvironmentFingerprint, &request.Override, &request.OverrideActor, &request.OverrideReason, &request.Profile, &request.Command, &request.SourceRevision, &request.ReviewerID, &request.ReviewEpochEventID, &request.State, &queued, &started, &heartbeat, &expires, &finished, &request.Outcome, &evidenceJSON); err != nil {
+	if err := scanner.Scan(&request.Sequence, &request.RequestID, &request.ProjectID, &request.IssueID, &request.IssuePriority, &request.PriorityBypassCount, &request.Class, &request.Scope, &request.Purpose, &request.Execution, &request.AuthoritativeRequestID, &request.CompatibilityKey, &request.IsolationMode, &request.EnvironmentFingerprint, &request.Override, &request.OverrideActor, &request.OverrideReason, &request.Profile, &request.Command, &request.SourceRevision, &request.ReviewerID, &request.ReviewerKind, &request.ReviewEpochEventID, &request.PublicationOperationID, &request.AcceptedReviewEventID, &request.AcceptedPublicationOperationID, &request.State, &queued, &started, &heartbeat, &expires, &finished, &request.Outcome, &evidenceJSON); err != nil {
 		return request, err
 	}
 	if err := json.Unmarshal([]byte(evidenceJSON), &request.Evidence); err != nil {

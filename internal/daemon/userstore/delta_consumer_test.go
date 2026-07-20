@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -16,7 +17,94 @@ import (
 	"github.com/riordanpawley/azedarach/internal/contracts/protocol"
 	"github.com/riordanpawley/azedarach/internal/domain"
 	"github.com/riordanpawley/azedarach/internal/naming"
+	"github.com/riordanpawley/azedarach/internal/sqliteutil"
 )
+
+func TestRootProjectionWritersDropCanceledLockWaitersBeforeFreshWork(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "user.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	issue := domain.Task{ID: "issue", Title: "Issue", Status: domain.StatusOpen, Type: domain.TypeTask, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	states := make(map[string]ProjectDeltaState, 4)
+	projects := make([]CatalogProject, 0, 4)
+	for index := range 4 {
+		projectID := fmt.Sprintf("p%d", index)
+		state := testDeltaState(projectID, 1, "initial")
+		states[projectID] = state
+		project := CatalogProject{ProjectID: projectID, Name: projectID, Path: "/" + projectID, DBPath: "/" + projectID + "/db"}
+		projects = append(projects, project)
+		if err := store.ReplaceProject(ctx, ProjectInput{ProjectID: projectID, Name: project.Name, Path: project.Path, DBPath: project.DBPath, Tasks: []domain.Task{issue}, Delta: &state}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	holderEntered := make(chan struct{})
+	releaseHolder := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderCtx := sqliteutil.ContextWithWriteOperation(ctx, "test.root_projection_holder")
+		holderDone <- sqliteutil.WithWriteLockContext(holderCtx, store.dbPath, func(context.Context) error {
+			close(holderEntered)
+			<-releaseHolder
+			return nil
+		})
+	}()
+	<-holderEntered
+
+	next := testDeltaState("p1", 2, "next")
+	runners := []func(context.Context) error{
+		func(waitCtx context.Context) error {
+			return store.ApplyProjectMaterializedIssues(waitCtx, "p0", []ProjectDeltaChange{{IssueID: issue.ID.String(), Issue: &issue}})
+		},
+		func(waitCtx context.Context) error {
+			return store.ApplyProjectDelta(waitCtx, ProjectDeltaApply{Project: projects[1], Expected: states["p1"], Next: next, Changes: []ProjectDeltaChange{{IssueID: issue.ID.String(), Issue: &issue}}})
+		},
+		func(waitCtx context.Context) error {
+			return store.MarkProjectDeltaStale(waitCtx, "p2", errors.New("stale"))
+		},
+		func(waitCtx context.Context) error {
+			return store.ReconcileProjects(waitCtx, projects)
+		},
+	}
+	cancels := make([]context.CancelFunc, len(runners))
+	results := make(chan error, len(runners))
+	started := make(chan struct{}, len(runners))
+	for index, run := range runners {
+		waitCtx, cancel := context.WithCancel(ctx)
+		cancels[index] = cancel
+		go func() {
+			started <- struct{}{}
+			results <- run(waitCtx)
+		}()
+	}
+	for range runners {
+		<-started
+	}
+	for sqliteutil.WriteLockResourceDiagnostics(store.dbPath).Waiters != len(runners) {
+		runtime.Gosched()
+	}
+	for _, cancel := range cancels {
+		cancel()
+	}
+	for range runners {
+		if err := <-results; !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled root projection writer = %v, want context canceled", err)
+		}
+	}
+	if diagnostic := sqliteutil.WriteLockResourceDiagnostics(store.dbPath); diagnostic.Waiters != 0 || diagnostic.Holder != "test.root_projection_holder" {
+		t.Fatalf("post-cancel lock diagnostics = %+v, want holder with no stale waiters", diagnostic)
+	}
+	close(releaseHolder)
+	if err := <-holderDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkProjectDeltaStale(ctx, "p3", errors.New("fresh work")); err != nil {
+		t.Fatalf("fresh root projection write after canceled backlog: %v", err)
+	}
+}
 
 func BenchmarkProjectDeltaApplyProductionSized(b *testing.B) {
 	store, err := Open(filepath.Join(b.TempDir(), "user.db"))

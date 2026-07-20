@@ -17,11 +17,23 @@ all live issues are closed or backlog and there are no active sessions, review
 requests, open/active issues, or unresolved interactions. After the configurable
 `orchestration.completeGrace`, the singleton becomes `paused`, not destroyed.
 Wake events are new open work, review requests, accepted human answers, and
-recovery events. They are idempotent and coalesced by
-`orchestration.wakeDebounce`.
+recovery events. The daemon derives a scope-local semantic revision from the
+actionable projection, enqueues one durable managed-agent input intent for that
+revision, and coalesces equivalent state. Direct scoped `worker-blocked`
+observations contribute their exact durable event identity; progress-only
+observations do not wake a model turn. The delivery key also binds the current
+orchestrator session and managed-agent incarnation, so a replacement can receive
+an unchanged actionable semantic revision without conflicting with its prior
+target. Busy agents keep the intent queued; restart recovery retries an
+unacknowledged intent without creating a second turn. Rooted scopes advance a
+durable generation on each action/idle semantic
+transition, so the same action may recur after quiescence without duplicating an
+equivalent active revision. The debounce remains a lifecycle-write guard, not
+prompt identity.
 
 The exact-scope lease persists `complete_since`, `last_wake_at`, and the last
-wake reason. Completion changes clear and restart `complete_since`; daemon
+wake reason. The existing durable input-intent ledger persists pending wake
+delivery, so no schema migration is required. Completion changes clear and restart `complete_since`; daemon
 restart therefore cannot shorten or extend grace. Wake updates are serialized
 under the SQLite project write lock, so duplicate events from multiple daemons
 are suppressed by the durable debounce timestamp.
@@ -35,6 +47,15 @@ runtime marker with live tmux before trusting the attached agent.
 `orchestration.project_completion` is hybrid: refresh durable issue, review,
 interaction, orchestration, and session projections, then compare runtime
 presence with live tmux. `runtime.reconcile` exposes both mappings.
+`session.managed_agent_restart` is hybrid: classify each live target from the
+refreshed durable session role/scope and exact orchestrator lease when
+applicable, then refresh the durable logical pane, tmux pane, pane PID, and
+agent incarnation binding. Compare those authorities with the canonical live
+tmux session before exact-pane replacement and again with hook-backed
+replacement evidence before reporting success. Project-wide and rooted
+orchestrators hold their exact scope transition lock and preserve session ID,
+lifecycle, projection role/scope, and lease identity through replacement.
+Tmux command acceptance is never restart acknowledgement.
 
 ## Client and authority boundary
 
@@ -57,7 +78,9 @@ available.
 The supported operator surfaces are:
 
 - `az orchestrator-session start|attach|stop|status [--root <issue>] [--project <project>]`
-- `az orchestrate status|start|watch|complete-check [--root <issue>]`
+- `az orchestrate status|start|watch|complete-check [--root <issue>]` (`watch`
+  is an optional external observer surface, never an instruction for a model
+  turn)
 - `az interaction list|get|discuss|answer|resolve|withdraw`
 - the TUI project overview for project-level start, attach, status, and health
 - the TUI Waiting Human overlay for direct answers, proposal review, advisor
@@ -73,8 +96,9 @@ the same exact rooted `OrchestratorSession` start handler. Ticket-session attach
 and stop also delegate when the durable rooted lease owns that physical session.
 The
 daemon acquires the rooted lease before agent launch, supplies an explicit
-orchestrator-only prompt whose first commands are `az prime`, rooted status,
-and rooted watch, and does not report startup success until the complete
+orchestrator-only prompt whose first commands are `az prime` and one bounded
+rooted status/action step, requires the agent to yield at quiescence rather than
+run a watch loop, and does not report startup success until the complete
 file-backed prompt has been acknowledged. The launcher writes the rooted
 orchestrator desired-session product directly; it never leaves a generic worker
 desired-running product for the same root, and exact-scope startup retires any
@@ -119,7 +143,7 @@ paths rather than transitional adapters:
 | Exact-scope singleton start, attach, stale-runtime recovery | `TestProjectOrchestratorSessionStartAttachesExactScopeSingleton` |
 | Rooted role bootstrap, first action, and attached-session repair | `TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap` |
 | Epic start delegation and mutually exclusive physical-session role | `TestRootedOrchestratorSessionStartupSeedsRoleAndRepairsMissingBootstrap`, `TestRuntimeStateStoreRootedTransitionRejectsStaleWorkerAcrossStores`, `TestRootedSessionRoleExclusivityMigrationConvergesRequiredStatePairs` |
-| Bounded project scheduling and stable ordering | `TestOrchestrationCandidateOrderingIsStable`, `TestProjectOrchestratorLoopPrioritizesReviewAndPersistsCursor`, `TestProjectOrchestratorSnapshotKeepsStartsActionableAlongsideReview`, `TestProjectStartIntentDoesNotGloballyBlockOnActionableReview` |
+| Bounded project scheduling, stable ordering, and quiescent review wake | `TestOrchestrationCandidateOrderingIsStable`, `TestProjectOrchestratorLoopPrioritizesReviewAndPersistsCursor`, `TestProjectOrchestratorReviewWakeUsesDurableInputAndCoalescesEquivalentState`, `TestProjectOrchestratorSnapshotKeepsStartsActionableAlongsideReview`, `TestProjectStartIntentDoesNotGloballyBlockOnActionableReview` |
 | Foreign ownership exclusion and claim races | `TestProjectOrchestrationSnapshotRefreshesCrossProcessOwnership`, `TestProjectReviewQueueRefreshesCrossProcessReviewLease` |
 | Human request, advisor discussion, edited/direct answer, atomic resolution | `TestInteractionDiscussStartsAndAttachesLiveAdvisorWithoutMutatingIssueLifecycle`, `TestInteractionStructuredProposalCanBeHumanEditedAndAtomicallyResolved` |
 | Review return and authoritative accepted close | `TestReviewReturnPreservesWorkerOwnerAndDurablyDeliversFindings`, `TestReviewAcceptSurfacesAuthoritativeCloseFailureAndKeepsReviewState`, `TestReviewAcceptClosesMultipleInternalReviewsBeforeDependentCompletion` |

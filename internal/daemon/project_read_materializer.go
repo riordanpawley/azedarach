@@ -23,7 +23,39 @@ import (
 
 const projectReadMaterializerBatchSize = 500
 
+const projectReadMutationConvergenceTimeout = 5 * time.Second
+
+type projectReadUnavailableError struct {
+	cause error
+}
+
+var errProjectReadRuntimeRefreshSuperseded = errors.New("project read runtime refresh superseded")
+
+func (e *projectReadUnavailableError) Error() string {
+	if e == nil || e.cause == nil {
+		return "project read materialization unavailable"
+	}
+	return e.cause.Error()
+}
+
+func (e *projectReadUnavailableError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func newProjectReadUnavailableError(format string, args ...any) error {
+	return &projectReadUnavailableError{cause: fmt.Errorf(format, args...)}
+}
+
+func isProjectReadUnavailableError(err error) bool {
+	var unavailable *projectReadUnavailableError
+	return errors.As(err, &unavailable)
+}
+
 type suppressSynchronousProjectReadRuntimeRefreshKey struct{}
+type authoritativeRuntimeRecoveryDecisionHookKey struct{}
 
 func withProjectReadUpdateWaitHookForTest(ctx context.Context, hook func(string, string)) context.Context {
 	return withContextOperationLockWaitHookForTest(ctx, hook)
@@ -31,6 +63,14 @@ func withProjectReadUpdateWaitHookForTest(ctx context.Context, hook func(string,
 
 func withProjectReadUpdateQueuedHookForTest(ctx context.Context, hook func(string)) context.Context {
 	return withContextOperationLockQueuedHookForTest(ctx, hook)
+}
+
+func withProjectReadCanonicalQueuedHookForTest(ctx context.Context, hook func(string)) context.Context {
+	return withContextOperationLockQueuedHookForTest(ctx, hook)
+}
+
+func withAuthoritativeRuntimeRecoveryDecisionHookForTest(ctx context.Context, hook func([]string)) context.Context {
+	return context.WithValue(ctx, authoritativeRuntimeRecoveryDecisionHookKey{}, hook)
 }
 
 func withoutSynchronousProjectReadRuntimeRefresh(ctx context.Context) context.Context {
@@ -44,21 +84,52 @@ func withoutSynchronousProjectReadRuntimeRefresh(ctx context.Context) context.Co
 // is the upstream transitional delivery position; it is not an authority
 // revision and is never written back to the project database.
 type projectReadMaterializer struct {
-	mu          sync.RWMutex
-	updateMu    contextOperationLock
-	projectID   string
-	authority   *ProjectionDeltaAuthority
-	hydrate     func(context.Context, []domain.Task) ([]domain.Task, error)
-	affected    func(context.Context, protocol.ProjectionDeltaBatch) ([]string, error)
-	legacy      func(context.Context) ([]domain.Task, error)
-	canonical   map[string]domain.Task
-	tasks       map[string]domain.Task
-	worktrees   map[string]git.Worktree
-	metadata    protocol.MaterializedSnapshotMetadata
-	issueKeys   keyedCheckpoint
-	runtimeKeys keyedCheckpoint
-	cancel      context.CancelFunc
-	done        chan struct{}
+	mu                                    sync.RWMutex
+	transitionMu                          sync.Mutex
+	transitionQueued                      func()
+	updateMu                              contextOperationLock
+	canonicalMu                           contextOperationLock
+	mutationConvergenceSequence           uint64
+	mutationConvergenceRevision           uint64
+	mutationConvergenceAttempt            uint64
+	mutationConvergenceResult             uint64
+	authoritativeCanonicalRefreshSequence uint64
+	authoritativeRuntimeRefreshSequence   uint64
+	projectID                             string
+	authority                             *ProjectionDeltaAuthority
+	hydrate                               func(context.Context, []domain.Task) ([]domain.Task, error)
+	hydrateDegraded                       func(context.Context, []domain.Task) ([]domain.Task, error)
+	affected                              func(context.Context, protocol.ProjectionDeltaBatch) ([]string, error)
+	legacy                                func(context.Context) ([]domain.Task, error)
+	canonical                             map[string]domain.Task
+	tasks                                 map[string]domain.Task
+	worktrees                             map[string]git.Worktree
+	metadata                              protocol.MaterializedSnapshotMetadata
+	retryableFailure                      bool
+	baseHealth                            string
+	baseRetryableFailure                  bool
+	authoritativeRefreshFailures          map[authoritativeReadRefreshComponent]string
+	authoritativeRuntimeIssueSequence     map[string]uint64
+	authoritativeRuntimePending           map[string]uint64
+	authoritativeRuntimeFailures          map[string]string
+	authoritativeRuntimeUnscopedFailure   string
+	healthEpoch                           uint64
+	canonicalGeneration                   uint64
+	runtimeRefreshSequence                uint64
+	runtimeRefreshEpoch                   map[string]uint64
+	runtimePublishedEpoch                 map[string]uint64
+	runtimeRefreshOwners                  map[string]map[uint64]struct{}
+	issueKeys                             keyedCheckpoint
+	runtimeKeys                           keyedCheckpoint
+	cancel                                context.CancelFunc
+	done                                  chan struct{}
+}
+
+func (m *projectReadMaterializer) lockTransition() {
+	if m.transitionQueued != nil {
+		m.transitionQueued()
+	}
+	m.transitionMu.Lock()
 }
 
 type keyedCheckpoint struct {
@@ -101,7 +172,14 @@ func checksumEntry(namespace, key string, value any) [sha256.Size]byte {
 }
 
 func newProjectReadMaterializer(projectID string, authority *ProjectionDeltaAuthority, hydrate func(context.Context, []domain.Task) ([]domain.Task, error)) *projectReadMaterializer {
-	return &projectReadMaterializer{projectID: strings.TrimSpace(projectID), authority: authority, hydrate: hydrate, canonical: map[string]domain.Task{}, tasks: map[string]domain.Task{}, worktrees: map[string]git.Worktree{}}
+	return &projectReadMaterializer{
+		projectID: strings.TrimSpace(projectID), authority: authority, hydrate: hydrate,
+		canonical: map[string]domain.Task{}, tasks: map[string]domain.Task{}, worktrees: map[string]git.Worktree{},
+		runtimeRefreshEpoch: map[string]uint64{}, runtimePublishedEpoch: map[string]uint64{}, runtimeRefreshOwners: map[string]map[uint64]struct{}{},
+		baseHealth:                        "healthy",
+		authoritativeRefreshFailures:      map[authoritativeReadRefreshComponent]string{},
+		authoritativeRuntimeIssueSequence: map[string]uint64{}, authoritativeRuntimePending: map[string]uint64{}, authoritativeRuntimeFailures: map[string]string{},
+	}
 }
 
 func (m *projectReadMaterializer) lockUpdate(ctx context.Context, fallbackOperation string) (func(), error) {
@@ -120,15 +198,37 @@ func (m *projectReadMaterializer) lockUpdate(ctx context.Context, fallbackOperat
 	return m.updateMu.release, nil
 }
 
+func (m *projectReadMaterializer) lockCanonical(ctx context.Context, fallbackOperation string) (func(), error) {
+	operation := runtimeProjectionWriterOperationFromContext(ctx, fallbackOperation)
+	holderOperation := m.canonicalMu.currentHolder()
+	ctx, endSpan := latencytrace.StartSpanWithEndAttributes(ctx, "daemon", "project_read.canonical_admission",
+		"canonical.waiter_operation", operation,
+		"canonical.holder_operation", holderOperation,
+	)
+	holderOperation, err := m.canonicalMu.acquire(ctx, operation)
+	if err != nil {
+		endSpan(err, "canonical.holder_operation", holderOperation)
+		return nil, err
+	}
+	endSpan(nil, "canonical.holder_operation", holderOperation)
+	return m.canonicalMu.release, nil
+}
+
 func (m *projectReadMaterializer) bootstrap(ctx context.Context) error {
 	if m == nil {
 		return errors.New("project read materializer authority unavailable")
 	}
+	convergenceResult := m.mutationConvergenceResultEpoch()
 	unlock, err := m.lockUpdate(ctx, "project_read.bootstrap")
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	canonicalUnlock, err := m.lockCanonical(ctx, "project_read.bootstrap")
+	if err != nil {
+		return err
+	}
+	defer canonicalUnlock()
 	if m.authority == nil {
 		return errors.New("project read materializer authority unavailable")
 	}
@@ -164,13 +264,13 @@ func (m *projectReadMaterializer) bootstrap(ctx context.Context) error {
 		}
 		sources = append(sources, protocol.ProjectionSourceRange{Authority: "legacy_bootstrap_export", SourceFrom: "full-export", SourceTo: "full-export", Transitional: true})
 	}
-	hydrated, _, err := m.hydrateTasks(ctx, canonical)
+	hydrated, _, err := m.hydrateTasksDegraded(ctx, canonical)
 	if err != nil {
 		return fmt.Errorf("hydrate projection bootstrap: %w", err)
 	}
 	issueKeys, runtimeKeys := checkpointMaterializedTasks(canonical, hydrated)
 	metadata := materializedMetadata(snapshot.Cursor, snapshot.HeadCursor, snapshot.Projector, sources, issueKeys.sum(), runtimeKeys.sum(), snapshot.Health)
-	m.replaceBootstrap(canonical, hydrated, metadata, issueKeys, runtimeKeys)
+	m.replaceBootstrapAfterConvergenceResult(canonical, hydrated, metadata, issueKeys, runtimeKeys, convergenceResult)
 	return nil
 }
 
@@ -191,7 +291,7 @@ func (m *projectReadMaterializer) run(ctx context.Context, advanced func(protoco
 					continue
 				}
 			}
-			m.markUnhealthy(fmt.Errorf("watch projection deltas: %w", err))
+			m.markUnhealthy(fmt.Errorf("watch projection deltas: %w", err), errors.Is(err, domain.ErrProjectionRetryable))
 			if advanced != nil {
 				advanced(m.snapshotMetadata())
 			}
@@ -200,8 +300,12 @@ func (m *projectReadMaterializer) run(ctx context.Context, advanced func(protoco
 			}
 			continue
 		}
-		if err := m.apply(ctx, batch); err != nil {
+		affected, err := m.applyCanonical(ctx, batch)
+		if err != nil {
 			var verification *protocol.ProjectionVerificationError
+			if errors.As(err, &verification) && verification.Kind == protocol.ProjectionVerificationOverlap && m.snapshotMetadata().DeliveryCursor > batch.AfterCursor {
+				continue
+			}
 			if errors.As(err, &verification) && projectionVerificationRequiresRecovery(verification.Kind) {
 				if bootstrapErr := m.bootstrap(ctx); bootstrapErr == nil {
 					if advanced != nil {
@@ -210,7 +314,7 @@ func (m *projectReadMaterializer) run(ctx context.Context, advanced func(protoco
 					continue
 				}
 			}
-			m.markUnhealthy(err)
+			m.markUnhealthy(err, false)
 			if advanced != nil {
 				advanced(m.snapshotMetadata())
 			}
@@ -221,6 +325,12 @@ func (m *projectReadMaterializer) run(ctx context.Context, advanced func(protoco
 		}
 		if advanced != nil {
 			advanced(m.snapshotMetadata())
+		}
+		if err := m.refreshRuntimeDegraded(ctx, affected); err != nil {
+			m.markUnhealthy(fmt.Errorf("refresh runtime enrichment: %w", err), false)
+			if advanced != nil {
+				advanced(m.snapshotMetadata())
+			}
 		}
 	}
 }
@@ -235,20 +345,86 @@ func projectionVerificationRequiresRecovery(kind protocol.ProjectionVerification
 }
 
 func (m *projectReadMaterializer) apply(ctx context.Context, batch protocol.ProjectionDeltaBatch) error {
-	unlock, err := m.lockUpdate(ctx, "project_read.delta_apply")
+	affected, err := m.applyCanonical(ctx, batch)
 	if err != nil {
 		return err
 	}
+	// Runtime enrichment is disposable and may be slow or unavailable. The
+	// canonical issue delta is already visible before this work begins so it
+	// can never hide or roll back a committed lifecycle mutation.
+	return m.refreshRuntime(ctx, affected)
+}
+
+func (m *projectReadMaterializer) applyCanonical(ctx context.Context, batch protocol.ProjectionDeltaBatch) ([]string, error) {
+	unlock, err := m.lockCanonical(ctx, "project_read.delta_apply")
+	if err != nil {
+		return nil, err
+	}
 	defer unlock()
+	return m.applyCanonicalBatch(ctx, batch)
+}
+
+func (m *projectReadMaterializer) convergeCanonical(ctx context.Context) (protocol.MaterializedSnapshotMetadata, error) {
+	if m == nil || m.authority == nil {
+		return protocol.MaterializedSnapshotMetadata{}, errors.New("project read materializer authority unavailable")
+	}
+	unlock, err := m.lockCanonical(ctx, "project_read.converge")
+	if err != nil {
+		return m.snapshotMetadata(), err
+	}
+	defer unlock()
+	return m.convergeCanonicalLocked(ctx)
+}
+
+func (m *projectReadMaterializer) convergeCanonicalLocked(ctx context.Context) (protocol.MaterializedSnapshotMetadata, error) {
+	for {
+		cursor := m.snapshotMetadata().DeliveryCursor
+		batch, err := m.authority.List(ctx, protocol.DefaultProjectID, cursor, projectReadMaterializerBatchSize)
+		if err != nil {
+			return m.snapshotMetadata(), fmt.Errorf("read committed projection deltas: %w", err)
+		}
+		if batch.DeliveryToCursor == cursor {
+			return m.snapshotMetadata(), nil
+		}
+		if _, err := m.applyCanonicalBatch(ctx, batch); err != nil {
+			var verification *protocol.ProjectionVerificationError
+			if errors.As(err, &verification) && verification.Kind == protocol.ProjectionVerificationOverlap && m.snapshotMetadata().DeliveryCursor > cursor {
+				continue
+			}
+			return m.snapshotMetadata(), fmt.Errorf("apply committed projection deltas: %w", err)
+		}
+		if m.snapshotMetadata().DeliveryCursor >= batch.HeadCursor {
+			return m.snapshotMetadata(), nil
+		}
+	}
+}
+
+func (m *projectReadMaterializer) convergeMutation(ctx context.Context, revision uint64) (protocol.MaterializedSnapshotMetadata, string, error) {
+	attempt := m.beginMutationConvergence(revision)
+	before := m.snapshotMetadata().DeliveryCursor
+	metadata, err := m.convergeCanonical(ctx)
+	outcome := "current"
+	if err != nil {
+		outcome = "unavailable"
+	} else if metadata.DeliveryCursor > before {
+		outcome = "advanced"
+	}
+	if !m.finishMutationConvergence(revision, attempt, err) {
+		outcome = "superseded"
+	}
+	return metadata, outcome, err
+}
+
+func (m *projectReadMaterializer) applyCanonicalBatch(ctx context.Context, batch protocol.ProjectionDeltaBatch) ([]string, error) {
 	expected := m.snapshotMetadata().DeliveryCursor
 	if err := protocol.VerifyProjectionDeltaBatch(batch, expected, issueProjectionProjector()); err != nil {
-		return err
+		return nil, err
 	}
 	affected := make(map[string]struct{}, len(batch.Deltas)+len(batch.EmptyAdvances))
 	if m.affected != nil {
 		ids, err := m.affected(ctx, batch)
 		if err != nil {
-			return fmt.Errorf("resolve affected projection keys: %w", err)
+			return nil, fmt.Errorf("resolve affected projection keys: %w", err)
 		}
 		for _, issueID := range ids {
 			if issueID = strings.TrimSpace(issueID); issueID != "" {
@@ -258,9 +434,10 @@ func (m *projectReadMaterializer) apply(ctx context.Context, batch protocol.Proj
 	}
 	canonical := make(map[string]domain.Task, len(affected)+len(batch.Deltas))
 	deleted := make(map[string]struct{}, len(batch.Deltas))
+	replaced := make(map[string]struct{}, len(batch.Deltas))
 	for _, delta := range batch.Deltas {
 		if delta.Kind != protocol.ProjectionKind(domain.ProjectionKindIssue) {
-			return &protocol.ProjectionVerificationError{Kind: protocol.ProjectionVerificationIncompatible, Message: "unknown projection kind " + string(delta.Kind)}
+			return nil, &protocol.ProjectionVerificationError{Kind: protocol.ProjectionVerificationIncompatible, Message: "unknown projection kind " + string(delta.Kind)}
 		}
 		if delta.Operation == protocol.ProjectionDeltaDelete {
 			deleted[delta.Key] = struct{}{}
@@ -269,12 +446,13 @@ func (m *projectReadMaterializer) apply(ctx context.Context, batch protocol.Proj
 		}
 		var payload domain.IssueProjectionDeltaPayload
 		if err := json.Unmarshal(delta.Payload, &payload); err != nil {
-			return fmt.Errorf("decode issue projection %s: %w", delta.Key, err)
+			return nil, fmt.Errorf("decode issue projection %s: %w", delta.Key, err)
 		}
 		if payload.SchemaVersion != domain.IssueProjectionDeltaSchemaVersion || payload.Deleted || payload.Issue == nil || payload.Issue.ID.String() != delta.Key {
-			return &protocol.ProjectionVerificationError{Kind: protocol.ProjectionVerificationIncompatible, Message: "invalid complete issue value for " + delta.Key}
+			return nil, &protocol.ProjectionVerificationError{Kind: protocol.ProjectionVerificationIncompatible, Message: "invalid complete issue value for " + delta.Key}
 		}
 		canonical[delta.Key] = domain.CanonicalIssueProjectionTask(*payload.Issue)
+		replaced[delta.Key] = struct{}{}
 		affected[delta.Key] = struct{}{}
 	}
 	m.mu.RLock()
@@ -287,12 +465,19 @@ func (m *projectReadMaterializer) apply(ctx context.Context, batch protocol.Proj
 		}
 	}
 	m.mu.RUnlock()
-	hydrated, _, err := m.hydrateTasks(ctx, canonical)
-	if err != nil {
-		return err
-	}
 	m.mu.Lock()
 	issueKeys, runtimeKeys := m.issueKeys, m.runtimeKeys
+	if m.runtimeRefreshEpoch == nil {
+		m.runtimeRefreshEpoch = map[string]uint64{}
+	}
+	if m.runtimePublishedEpoch == nil {
+		m.runtimePublishedEpoch = map[string]uint64{}
+	}
+	if m.runtimeRefreshOwners == nil {
+		m.runtimeRefreshOwners = map[string]map[uint64]struct{}{}
+	}
+	m.runtimeRefreshSequence++
+	canonicalEpoch := m.runtimeRefreshSequence
 	for issueID := range deleted {
 		if current, exists := m.canonical[issueID]; exists {
 			issueKeys.remove("issue", issueID, current)
@@ -302,24 +487,100 @@ func (m *projectReadMaterializer) apply(ctx context.Context, batch protocol.Proj
 			runtimeKeys.remove("task-runtime", issueID, current)
 			delete(m.tasks, issueID)
 		}
+		delete(m.runtimeRefreshEpoch, issueID)
+		delete(m.runtimePublishedEpoch, issueID)
+		delete(m.runtimeRefreshOwners, issueID)
+		m.retireAuthoritativeRuntimeIssueLocked(issueID)
 	}
-	for issueID, task := range hydrated {
+	for issueID, task := range canonical {
+		if _, authoritativeReplacement := replaced[issueID]; authoritativeReplacement {
+			if task.IssueClosed() {
+				// Terminal issues have no healthy worker runtime to hydrate. Retire
+				// any keyed failure from their final cleanup and keep them out of
+				// the disposable runtime refresh batch; otherwise an orphaned
+				// projection can poison unrelated invariant reads indefinitely.
+				m.retireAuthoritativeRuntimeIssueLocked(issueID)
+				delete(affected, issueID)
+			} else {
+				m.retireSettledAuthoritativeRuntimeIssueLocked(issueID)
+			}
+		}
+		m.runtimeRefreshEpoch[issueID] = canonicalEpoch
+		m.runtimePublishedEpoch[issueID] = canonicalEpoch
+		delete(m.runtimeRefreshOwners, issueID)
 		if current, exists := m.canonical[issueID]; exists {
 			issueKeys.remove("issue", issueID, current)
 		}
+		materialized := task
 		if current, exists := m.tasks[issueID]; exists {
 			runtimeKeys.remove("task-runtime", issueID, current)
+			materialized = taskWithRuntimeOverlay(task, current)
 		}
-		issueKeys.add("issue", issueID, canonical[issueID])
-		runtimeKeys.add("task-runtime", issueID, task)
-		m.canonical[issueID] = canonical[issueID]
-		m.tasks[issueID] = task
+		issueKeys.add("issue", issueID, task)
+		runtimeKeys.add("task-runtime", issueID, materialized)
+		m.canonical[issueID] = task
+		m.tasks[issueID] = materialized
 	}
 	m.issueKeys, m.runtimeKeys = issueKeys, runtimeKeys
 	sources := mergeRootProjectionSources(m.metadata.SourceVector, batch.SourceVector)
 	m.metadata = materializedMetadata(batch.DeliveryToCursor, batch.HeadCursor, batch.Projector, sources, issueKeys.sum(), runtimeKeys.sum(), batch.Health)
+	m.baseHealth = batch.Health
+	m.baseRetryableFailure = false
+	m.syncAuthoritativeRuntimeFailureLocked()
+	m.aggregateHealthLocked()
+	// Canonical reads may accept the deltas they converge, while runtime reads
+	// must be fenced because their hydration began from the prior generation.
+	m.canonicalGeneration++
 	m.mu.Unlock()
-	return nil
+	ids := make([]string, 0, len(affected))
+	for issueID := range affected {
+		ids = append(ids, issueID)
+	}
+	sort.Strings(ids)
+	return ids, nil
+}
+
+func taskWithRuntimeOverlay(canonical, runtime domain.Task) domain.Task {
+	canonical.Session = cloneSession(runtime.Session)
+	canonical.HasTmuxSession = runtime.HasTmuxSession
+	canonical.HasWorktree = runtime.HasWorktree
+	canonical.GitAheadCount = runtime.GitAheadCount
+	canonical.GitBehindCount = runtime.GitBehindCount
+	canonical.HasUncommittedChanges = runtime.HasUncommittedChanges
+	canonical.HasConflicts = runtime.HasConflicts
+	canonical.ConflictFiles = append([]string(nil), runtime.ConflictFiles...)
+	canonical.GitAdditions = runtime.GitAdditions
+	canonical.GitDeletions = runtime.GitDeletions
+	canonical.Origin = runtime.Origin
+	canonical.PullRequest = clonePullRequest(runtime.PullRequest)
+	canonical.RuntimeUpdatedAt = runtime.RuntimeUpdatedAt
+	canonical.Ownership = cloneIssueOwnership(runtime.Ownership)
+	canonical.CoordinationLeases = append([]domain.CoordinationLease(nil), runtime.CoordinationLeases...)
+	return canonical
+}
+
+func cloneSession(session *domain.Session) *domain.Session {
+	if session == nil {
+		return nil
+	}
+	cloned := *session
+	return &cloned
+}
+
+func clonePullRequest(pr *domain.PullRequest) *domain.PullRequest {
+	if pr == nil {
+		return nil
+	}
+	cloned := *pr
+	return &cloned
+}
+
+func cloneIssueOwnership(ownership *domain.IssueOwnership) *domain.IssueOwnership {
+	if ownership == nil {
+		return nil
+	}
+	cloned := *ownership
+	return &cloned
 }
 
 func decodeProjectionValues(values []protocol.ProjectionValue) (map[string]domain.Task, error) {
@@ -341,14 +602,26 @@ func decodeProjectionValues(values []protocol.ProjectionValue) (map[string]domai
 }
 
 func (m *projectReadMaterializer) hydrateTasks(ctx context.Context, canonical map[string]domain.Task) (map[string]domain.Task, string, error) {
+	return m.hydrateTasksWith(ctx, canonical, m.hydrate)
+}
+
+func (m *projectReadMaterializer) hydrateTasksDegraded(ctx context.Context, canonical map[string]domain.Task) (map[string]domain.Task, string, error) {
+	hydrate := m.hydrateDegraded
+	if hydrate == nil {
+		hydrate = m.hydrate
+	}
+	return m.hydrateTasksWith(ctx, canonical, hydrate)
+}
+
+func (m *projectReadMaterializer) hydrateTasksWith(ctx context.Context, canonical map[string]domain.Task, hydrate func(context.Context, []domain.Task) ([]domain.Task, error)) (map[string]domain.Task, string, error) {
 	tasks := make([]domain.Task, 0, len(canonical))
 	for _, task := range canonical {
 		tasks = append(tasks, task)
 	}
 	sortTasksDeterministically(tasks)
-	if m.hydrate != nil {
+	if hydrate != nil {
 		var err error
-		tasks, err = m.hydrate(ctx, tasks)
+		tasks, err = hydrate(ctx, tasks)
 		if err != nil {
 			return nil, "", err
 		}
@@ -379,21 +652,402 @@ func checkpointMaterializedTasks(canonical, hydrated map[string]domain.Task) (ke
 }
 
 func (m *projectReadMaterializer) replaceBootstrap(canonical, tasks map[string]domain.Task, metadata protocol.MaterializedSnapshotMetadata, issueKeys, runtimeKeys keyedCheckpoint) {
+	m.replaceBootstrapAfterConvergenceResult(canonical, tasks, metadata, issueKeys, runtimeKeys, m.mutationConvergenceResultEpoch())
+}
+
+func (m *projectReadMaterializer) replaceBootstrapAfterConvergenceResult(canonical, tasks map[string]domain.Task, metadata protocol.MaterializedSnapshotMetadata, issueKeys, runtimeKeys keyedCheckpoint, convergenceResult uint64) {
+	m.lockTransition()
+	defer m.transitionMu.Unlock()
 	m.mu.Lock()
 	for issueID, worktree := range m.worktrees {
 		runtimeKeys.add("worktree", issueID, worktree)
+	}
+	if m.mutationConvergenceResult > convergenceResult && strings.HasPrefix(m.baseHealth, "stale: committed mutation convergence:") {
+		metadata.Health = m.baseHealth
 	}
 	metadata.IssueChecksum = issueKeys.sum()
 	metadata.RuntimeChecksum = runtimeKeys.sum()
 	metadata.SemanticChecksum = joinedMaterializedChecksum(metadata)
 	m.canonical, m.tasks, m.metadata, m.issueKeys, m.runtimeKeys = canonical, tasks, metadata, issueKeys, runtimeKeys
+	m.baseHealth = metadata.Health
+	m.baseRetryableFailure = false
+	m.authoritativeRefreshFailures = map[authoritativeReadRefreshComponent]string{}
+	m.authoritativeRuntimeIssueSequence = map[string]uint64{}
+	m.authoritativeRuntimePending = map[string]uint64{}
+	m.authoritativeRuntimeFailures = map[string]string{}
+	m.authoritativeRuntimeUnscopedFailure = ""
+	m.aggregateHealthLocked()
+	m.healthEpoch++
+	m.runtimeRefreshSequence++
+	m.runtimeRefreshEpoch = make(map[string]uint64, len(tasks))
+	m.runtimePublishedEpoch = make(map[string]uint64, len(tasks))
+	m.runtimeRefreshOwners = make(map[string]map[uint64]struct{}, len(tasks))
+	for issueID := range tasks {
+		m.runtimeRefreshEpoch[issueID] = m.runtimeRefreshSequence
+		m.runtimePublishedEpoch[issueID] = m.runtimeRefreshSequence
+	}
 	m.mu.Unlock()
 }
 
-func (m *projectReadMaterializer) markUnhealthy(err error) {
+func (m *projectReadMaterializer) markUnhealthy(err error, serveLastGood bool) {
+	m.lockTransition()
+	defer m.transitionMu.Unlock()
 	m.mu.Lock()
-	m.metadata.Health = "stale: " + err.Error()
+	m.baseHealth = "stale: " + err.Error()
+	m.baseRetryableFailure = serveLastGood
+	m.aggregateHealthLocked()
+	m.healthEpoch++
 	m.mu.Unlock()
+}
+
+type authoritativeReadRefreshAttempt struct {
+	sequence            uint64
+	healthEpoch         uint64
+	canonicalGeneration uint64
+	component           authoritativeReadRefreshComponent
+	runtimeIssueIDs     []string
+}
+
+type authoritativeReadRefreshComponent string
+
+const (
+	authoritativeReadRefreshCanonical authoritativeReadRefreshComponent = "canonical"
+	authoritativeReadRefreshRuntime   authoritativeReadRefreshComponent = "runtime"
+	authoritativeRuntimeRecoveryLimit                                   = 5 * time.Second
+)
+
+func authoritativeReadRefreshHealthPrefix(component authoritativeReadRefreshComponent) string {
+	return "stale: authoritative " + string(component) + " refresh:"
+}
+
+func (m *projectReadMaterializer) aggregateHealthLocked() {
+	baseHealth := strings.TrimSpace(m.baseHealth)
+	if baseHealth == "" {
+		baseHealth = "healthy"
+	}
+	canonicalFailure := strings.TrimSpace(m.authoritativeRefreshFailures[authoritativeReadRefreshCanonical])
+	runtimeFailure := strings.TrimSpace(m.authoritativeRefreshFailures[authoritativeReadRefreshRuntime])
+	switch {
+	case baseHealth == "healthy" && canonicalFailure == "" && runtimeFailure == "":
+		m.metadata.Health = "healthy"
+	case baseHealth == "healthy" && canonicalFailure != "" && runtimeFailure == "":
+		m.metadata.Health = authoritativeReadRefreshHealthPrefix(authoritativeReadRefreshCanonical) + " " + canonicalFailure
+	case baseHealth == "healthy" && canonicalFailure == "" && runtimeFailure != "":
+		m.metadata.Health = authoritativeReadRefreshHealthPrefix(authoritativeReadRefreshRuntime) + " " + runtimeFailure
+	default:
+		parts := make([]string, 0, 3)
+		if baseHealth != "healthy" {
+			parts = append(parts, "base="+baseHealth)
+		}
+		if canonicalFailure != "" {
+			parts = append(parts, "canonical="+canonicalFailure)
+		}
+		if runtimeFailure != "" {
+			parts = append(parts, "runtime="+runtimeFailure)
+		}
+		m.metadata.Health = "stale: materializer component health: " + strings.Join(parts, "; ")
+	}
+	m.retryableFailure = m.baseRetryableFailure && canonicalFailure == "" && runtimeFailure == ""
+	m.metadata.SemanticChecksum = joinedMaterializedChecksum(m.metadata)
+}
+
+func (m *projectReadMaterializer) authoritativeReadRefreshSequence(component authoritativeReadRefreshComponent) *uint64 {
+	if component == authoritativeReadRefreshRuntime {
+		return &m.authoritativeRuntimeRefreshSequence
+	}
+	return &m.authoritativeCanonicalRefreshSequence
+}
+
+func (m *projectReadMaterializer) beginAuthoritativeReadRefresh(component authoritativeReadRefreshComponent) authoritativeReadRefreshAttempt {
+	return m.beginAuthoritativeReadRefreshForIssues(component, nil)
+}
+
+func (m *projectReadMaterializer) beginAuthoritativeReadRefreshForIssues(component authoritativeReadRefreshComponent, issueIDs []string) authoritativeReadRefreshAttempt {
+	m.lockTransition()
+	defer m.transitionMu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sequence := m.authoritativeReadRefreshSequence(component)
+	*sequence++
+	normalizedIssueIDs := normalizeAuthoritativeRuntimeIssueIDs(issueIDs)
+	if component == authoritativeReadRefreshRuntime && len(normalizedIssueIDs) > 0 {
+		if m.authoritativeRuntimeIssueSequence == nil {
+			m.authoritativeRuntimeIssueSequence = map[string]uint64{}
+		}
+		if m.authoritativeRuntimePending == nil {
+			m.authoritativeRuntimePending = map[string]uint64{}
+		}
+		for _, issueID := range normalizedIssueIDs {
+			m.authoritativeRuntimeIssueSequence[issueID] = *sequence
+			m.authoritativeRuntimePending[issueID] = *sequence
+		}
+	}
+	return authoritativeReadRefreshAttempt{sequence: *sequence, healthEpoch: m.healthEpoch, canonicalGeneration: m.canonicalGeneration, component: component, runtimeIssueIDs: normalizedIssueIDs}
+}
+
+func normalizeAuthoritativeRuntimeIssueIDs(issueIDs []string) []string {
+	seen := make(map[string]struct{}, len(issueIDs))
+	normalized := make([]string, 0, len(issueIDs))
+	for _, issueID := range issueIDs {
+		issueID = strings.TrimSpace(issueID)
+		if issueID == "" {
+			continue
+		}
+		if _, exists := seen[issueID]; exists {
+			continue
+		}
+		seen[issueID] = struct{}{}
+		normalized = append(normalized, issueID)
+	}
+	sort.Strings(normalized)
+	return normalized
+}
+
+func (m *projectReadMaterializer) finishAuthoritativeReadRefresh(attempt authoritativeReadRefreshAttempt, err error) bool {
+	m.lockTransition()
+	defer m.transitionMu.Unlock()
+	return m.finishAuthoritativeReadRefreshLocked(attempt, err)
+}
+
+// finishAuthoritativeReadRefreshLocked requires transitionMu. Refresh-owned
+// external sync uses it so authorization, side effect, and completion are one
+// transition with respect to every token and health writer.
+func (m *projectReadMaterializer) finishAuthoritativeReadRefreshLocked(attempt authoritativeReadRefreshAttempt, err error) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.healthEpoch != attempt.healthEpoch {
+		m.finishAuthoritativeRuntimePendingLocked(attempt)
+		return false
+	}
+	if attempt.component == authoritativeReadRefreshRuntime && attempt.canonicalGeneration != m.canonicalGeneration {
+		if m.authoritativeRefreshFailures == nil {
+			m.authoritativeRefreshFailures = map[authoritativeReadRefreshComponent]string{}
+		}
+		if len(attempt.runtimeIssueIDs) > 0 {
+			ownedIssueIDs := m.ownedAuthoritativeRuntimeIssueIDsLocked(attempt)
+			if len(ownedIssueIDs) == 0 {
+				return false
+			}
+			if m.authoritativeRuntimeFailures == nil {
+				m.authoritativeRuntimeFailures = map[string]string{}
+			}
+			for _, issueID := range ownedIssueIDs {
+				m.authoritativeRuntimeFailures[issueID] = "canonical generation advanced during runtime refresh"
+				delete(m.authoritativeRuntimePending, issueID)
+			}
+			m.syncAuthoritativeRuntimeFailureLocked()
+			m.aggregateHealthLocked()
+			return false
+		}
+		if m.authoritativeRuntimeUnscopedFailure == "" {
+			m.authoritativeRuntimeUnscopedFailure = "canonical generation advanced during runtime refresh"
+		}
+		m.syncAuthoritativeRuntimeFailureLocked()
+		m.aggregateHealthLocked()
+		return false
+	}
+	if attempt.component == authoritativeReadRefreshRuntime && len(attempt.runtimeIssueIDs) > 0 {
+		ownedIssueIDs := m.ownedAuthoritativeRuntimeIssueIDsLocked(attempt)
+		if len(ownedIssueIDs) == 0 {
+			return false
+		}
+		if m.authoritativeRuntimeFailures == nil {
+			m.authoritativeRuntimeFailures = map[string]string{}
+		}
+		for _, issueID := range ownedIssueIDs {
+			if err != nil {
+				m.authoritativeRuntimeFailures[issueID] = err.Error()
+			} else {
+				delete(m.authoritativeRuntimeFailures, issueID)
+			}
+			delete(m.authoritativeRuntimePending, issueID)
+		}
+		m.syncAuthoritativeRuntimeFailureLocked()
+		m.aggregateHealthLocked()
+		return true
+	}
+	if attempt.sequence != *m.authoritativeReadRefreshSequence(attempt.component) {
+		return false
+	}
+	if m.authoritativeRefreshFailures == nil {
+		m.authoritativeRefreshFailures = map[authoritativeReadRefreshComponent]string{}
+	}
+	if err != nil {
+		if attempt.component == authoritativeReadRefreshRuntime {
+			m.authoritativeRuntimeUnscopedFailure = err.Error()
+			m.syncAuthoritativeRuntimeFailureLocked()
+		} else {
+			m.authoritativeRefreshFailures[attempt.component] = err.Error()
+		}
+	} else {
+		if attempt.component == authoritativeReadRefreshRuntime {
+			m.authoritativeRuntimeUnscopedFailure = ""
+			m.syncAuthoritativeRuntimeFailureLocked()
+		} else {
+			delete(m.authoritativeRefreshFailures, attempt.component)
+		}
+		if attempt.component == authoritativeReadRefreshCanonical && (m.baseRetryableFailure || strings.HasPrefix(m.baseHealth, "stale: committed mutation convergence:")) {
+			m.baseHealth = "healthy"
+			m.baseRetryableFailure = false
+		}
+	}
+	m.aggregateHealthLocked()
+	return true
+}
+
+func (m *projectReadMaterializer) finishAuthoritativeRuntimePendingLocked(attempt authoritativeReadRefreshAttempt) {
+	if attempt.component != authoritativeReadRefreshRuntime {
+		return
+	}
+	for _, issueID := range attempt.runtimeIssueIDs {
+		if m.authoritativeRuntimePending[issueID] == attempt.sequence {
+			delete(m.authoritativeRuntimePending, issueID)
+		}
+	}
+}
+
+func (m *projectReadMaterializer) authoritativeRuntimeRefreshRetryIssueIDs(issueIDs []string) []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	retryIssueIDs := make([]string, 0, len(issueIDs))
+	for _, issueID := range normalizeAuthoritativeRuntimeIssueIDs(issueIDs) {
+		if strings.TrimSpace(m.authoritativeRuntimeFailures[issueID]) != "" && m.authoritativeRuntimePending[issueID] == 0 {
+			retryIssueIDs = append(retryIssueIDs, issueID)
+		}
+	}
+	return retryIssueIDs
+}
+
+func (m *projectReadMaterializer) authoritativeRuntimeFailedIssueIDs() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	issueIDs := make([]string, 0, len(m.authoritativeRuntimeFailures))
+	for issueID, failure := range m.authoritativeRuntimeFailures {
+		if strings.TrimSpace(failure) != "" && m.authoritativeRuntimePending[issueID] == 0 {
+			issueIDs = append(issueIDs, issueID)
+		}
+	}
+	sort.Strings(issueIDs)
+	return issueIDs
+}
+
+func (m *projectReadMaterializer) ownedAuthoritativeRuntimeIssueIDsLocked(attempt authoritativeReadRefreshAttempt) []string {
+	ownedIssueIDs := make([]string, 0, len(attempt.runtimeIssueIDs))
+	for _, issueID := range attempt.runtimeIssueIDs {
+		if m.authoritativeRuntimeIssueSequence[issueID] == attempt.sequence {
+			ownedIssueIDs = append(ownedIssueIDs, issueID)
+		}
+	}
+	return ownedIssueIDs
+}
+
+func (m *projectReadMaterializer) syncAuthoritativeRuntimeFailureLocked() {
+	if m.authoritativeRefreshFailures == nil {
+		m.authoritativeRefreshFailures = map[authoritativeReadRefreshComponent]string{}
+	}
+	issueIDs := make([]string, 0, len(m.authoritativeRuntimeFailures))
+	for issueID := range m.authoritativeRuntimeFailures {
+		issueIDs = append(issueIDs, issueID)
+	}
+	sort.Strings(issueIDs)
+	parts := make([]string, 0, len(issueIDs)+1)
+	if failure := strings.TrimSpace(m.authoritativeRuntimeUnscopedFailure); failure != "" {
+		parts = append(parts, failure)
+	}
+	for _, issueID := range issueIDs {
+		parts = append(parts, issueID+": "+m.authoritativeRuntimeFailures[issueID])
+	}
+	if len(parts) == 0 {
+		delete(m.authoritativeRefreshFailures, authoritativeReadRefreshRuntime)
+		return
+	}
+	m.authoritativeRefreshFailures[authoritativeReadRefreshRuntime] = strings.Join(parts, "; ")
+}
+
+func (m *projectReadMaterializer) retireAuthoritativeRuntimeIssueLocked(issueID string) {
+	delete(m.authoritativeRuntimeIssueSequence, issueID)
+	delete(m.authoritativeRuntimePending, issueID)
+	delete(m.authoritativeRuntimeFailures, issueID)
+}
+
+// retireSettledAuthoritativeRuntimeIssueLocked clears completed ownership while
+// preserving failures and in-flight attempts that still require an exact-
+// generation retry. Deletion uses the stronger retirement above because a
+// removed issue has no future runtime projection to converge.
+func (m *projectReadMaterializer) retireSettledAuthoritativeRuntimeIssueLocked(issueID string) {
+	if m.authoritativeRuntimePending[issueID] != 0 {
+		return
+	}
+	delete(m.authoritativeRuntimeIssueSequence, issueID)
+}
+
+func (m *projectReadMaterializer) runtimeRefreshAttemptSuperseded(attempt authoritativeReadRefreshAttempt) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if attempt.component != authoritativeReadRefreshRuntime || attempt.sequence == 0 ||
+		attempt.healthEpoch != m.healthEpoch || attempt.canonicalGeneration != m.canonicalGeneration {
+		return false
+	}
+	if len(attempt.runtimeIssueIDs) == 0 {
+		return attempt.sequence < m.authoritativeRuntimeRefreshSequence
+	}
+	for _, issueID := range attempt.runtimeIssueIDs {
+		if m.authoritativeRuntimeIssueSequence[issueID] <= attempt.sequence {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *projectReadMaterializer) canonicalReadHealthAvailable() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	baseHealth := strings.TrimSpace(m.baseHealth)
+	if baseHealth == "" {
+		baseHealth = "healthy"
+	}
+	return baseHealth == "healthy" && m.authoritativeRefreshFailures[authoritativeReadRefreshCanonical] == ""
+}
+
+func (m *projectReadMaterializer) beginMutationConvergence(revision uint64) uint64 {
+	m.lockTransition()
+	defer m.transitionMu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.mutationConvergenceSequence++
+	attempt := m.mutationConvergenceSequence
+	if revision >= m.mutationConvergenceRevision {
+		m.mutationConvergenceRevision = revision
+		m.mutationConvergenceAttempt = attempt
+	}
+	return attempt
+}
+
+func (m *projectReadMaterializer) finishMutationConvergence(revision, attempt uint64, convergenceErr error) bool {
+	m.lockTransition()
+	defer m.transitionMu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if revision != m.mutationConvergenceRevision || attempt != m.mutationConvergenceAttempt {
+		return false
+	}
+	m.mutationConvergenceResult++
+	m.healthEpoch++
+	if convergenceErr != nil {
+		m.baseHealth = "stale: committed mutation convergence: " + convergenceErr.Error()
+		m.baseRetryableFailure = false
+	} else if strings.HasPrefix(m.baseHealth, "stale: committed mutation convergence:") {
+		m.baseHealth = "healthy"
+		m.baseRetryableFailure = false
+	}
+	m.aggregateHealthLocked()
+	return true
+}
+
+func (m *projectReadMaterializer) mutationConvergenceResultEpoch() uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.mutationConvergenceResult
 }
 
 func (m *projectReadMaterializer) snapshotMetadata() protocol.MaterializedSnapshotMetadata {
@@ -403,6 +1057,22 @@ func (m *projectReadMaterializer) snapshotMetadata() protocol.MaterializedSnapsh
 }
 
 func (m *projectReadMaterializer) snapshot() ([]domain.Task, protocol.MaterializedSnapshotMetadata) {
+	tasks, metadata, _ := m.snapshotWithFailureDisposition()
+	return tasks, metadata
+}
+
+func (m *projectReadMaterializer) snapshotCanonical() ([]domain.Task, protocol.MaterializedSnapshotMetadata) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	tasks := make([]domain.Task, 0, len(m.canonical))
+	for _, task := range m.canonical {
+		tasks = append(tasks, task)
+	}
+	sortTasksDeterministically(tasks)
+	return cloneTasks(tasks), cloneMaterializedMetadata(m.metadata)
+}
+
+func (m *projectReadMaterializer) snapshotWithFailureDisposition() ([]domain.Task, protocol.MaterializedSnapshotMetadata, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	tasks := make([]domain.Task, 0, len(m.tasks))
@@ -410,10 +1080,15 @@ func (m *projectReadMaterializer) snapshot() ([]domain.Task, protocol.Materializ
 		tasks = append(tasks, task)
 	}
 	sortTasksDeterministically(tasks)
-	return cloneTasks(tasks), cloneMaterializedMetadata(m.metadata)
+	return cloneTasks(tasks), cloneMaterializedMetadata(m.metadata), m.retryableFailure
 }
 
 func (m *projectReadMaterializer) snapshotIssues(issueIDs map[string]struct{}) ([]domain.Task, protocol.MaterializedSnapshotMetadata) {
+	tasks, metadata, _ := m.snapshotIssuesForAuthoritativeRefresh(issueIDs, authoritativeReadRefreshAttempt{})
+	return tasks, metadata
+}
+
+func (m *projectReadMaterializer) snapshotIssuesForAuthoritativeRefresh(issueIDs map[string]struct{}, attempt authoritativeReadRefreshAttempt) ([]domain.Task, protocol.MaterializedSnapshotMetadata, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	tasks := make([]domain.Task, 0, len(issueIDs))
@@ -423,15 +1098,74 @@ func (m *projectReadMaterializer) snapshotIssues(issueIDs map[string]struct{}) (
 		}
 	}
 	sortTasksDeterministically(tasks)
-	return cloneTasks(tasks), cloneMaterializedMetadata(m.metadata)
+	refreshAuthorized := attempt.sequence != 0 &&
+		attempt.healthEpoch == m.healthEpoch &&
+		attempt.canonicalGeneration == m.canonicalGeneration &&
+		attempt.component == authoritativeReadRefreshRuntime &&
+		(strings.TrimSpace(m.baseHealth) == "" || m.baseHealth == "healthy") &&
+		m.authoritativeRefreshFailures[authoritativeReadRefreshCanonical] == "" &&
+		m.runtimeRefreshOwnedAndSettledLocked(issueIDs, attempt)
+	return cloneTasks(tasks), cloneMaterializedMetadata(m.metadata), refreshAuthorized
+}
+
+func (m *projectReadMaterializer) runtimeRefreshOwnedAndSettledLocked(issueIDs map[string]struct{}, attempt authoritativeReadRefreshAttempt) bool {
+	if !m.runtimeRefreshSettledLocked(issueIDs) {
+		return false
+	}
+	if len(attempt.runtimeIssueIDs) == 0 {
+		return true
+	}
+	for issueID := range issueIDs {
+		if m.authoritativeRuntimeIssueSequence[issueID] != attempt.sequence {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *projectReadMaterializer) runtimeRefreshSettledLocked(issueIDs map[string]struct{}) bool {
+	for issueID := range issueIDs {
+		if len(m.runtimeRefreshOwners[issueID]) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *projectReadMaterializer) runtimeRefreshPublishableIssues(issueIDs map[string]struct{}, attempt authoritativeReadRefreshAttempt) (map[string]struct{}, bool, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if attempt.sequence == 0 || attempt.component != authoritativeReadRefreshRuntime ||
+		attempt.healthEpoch != m.healthEpoch || attempt.canonicalGeneration != m.canonicalGeneration ||
+		(strings.TrimSpace(m.baseHealth) != "" && m.baseHealth != "healthy") ||
+		m.authoritativeRefreshFailures[authoritativeReadRefreshCanonical] != "" {
+		return nil, false, false
+	}
+	publishable := make(map[string]struct{}, len(issueIDs))
+	superseded := false
+	for issueID := range issueIDs {
+		sequence, exists := m.authoritativeRuntimeIssueSequence[issueID]
+		switch {
+		case exists && sequence == attempt.sequence && len(m.runtimeRefreshOwners[issueID]) == 0:
+			publishable[issueID] = struct{}{}
+		case exists && sequence > attempt.sequence:
+			superseded = true
+		default:
+			return nil, superseded, false
+		}
+	}
+	return publishable, superseded, true
 }
 
 func (m *projectReadMaterializer) refreshRuntime(ctx context.Context, issueIDs []string) error {
-	unlock, err := m.lockUpdate(ctx, "project_read.runtime_refresh")
-	if err != nil {
-		return err
-	}
-	defer unlock()
+	return m.refreshRuntimeWith(ctx, issueIDs, m.hydrateTasks)
+}
+
+func (m *projectReadMaterializer) refreshRuntimeDegraded(ctx context.Context, issueIDs []string) error {
+	return m.refreshRuntimeWith(ctx, issueIDs, m.hydrateTasksDegraded)
+}
+
+func (m *projectReadMaterializer) refreshRuntimeWith(ctx context.Context, issueIDs []string, hydrate func(context.Context, map[string]domain.Task) (map[string]domain.Task, string, error)) error {
 	wanted := make(map[string]struct{}, len(issueIDs))
 	for _, issueID := range issueIDs {
 		if issueID = strings.TrimSpace(issueID); issueID != "" {
@@ -441,35 +1175,115 @@ func (m *projectReadMaterializer) refreshRuntime(ctx context.Context, issueIDs [
 	if len(wanted) == 0 {
 		return nil
 	}
-	m.mu.RLock()
+	m.mu.Lock()
+	if m.runtimeRefreshEpoch == nil {
+		m.runtimeRefreshEpoch = map[string]uint64{}
+	}
+	if m.runtimePublishedEpoch == nil {
+		m.runtimePublishedEpoch = map[string]uint64{}
+	}
+	if m.runtimeRefreshOwners == nil {
+		m.runtimeRefreshOwners = map[string]map[uint64]struct{}{}
+	}
+	m.runtimeRefreshSequence++
+	refreshEpoch := m.runtimeRefreshSequence
 	canonical := make(map[string]domain.Task, len(wanted))
 	for issueID := range wanted {
 		if task, exists := m.canonical[issueID]; exists {
 			canonical[issueID] = task
+			owners := m.runtimeRefreshOwners[issueID]
+			if owners == nil {
+				owners = map[uint64]struct{}{}
+				m.runtimeRefreshOwners[issueID] = owners
+			}
+			owners[refreshEpoch] = struct{}{}
+			m.runtimeRefreshEpoch[issueID] = refreshEpoch
 		}
 	}
-	m.mu.RUnlock()
+	m.mu.Unlock()
 	if len(canonical) == 0 {
 		return nil
 	}
-	hydrated, _, err := m.hydrateTasks(ctx, canonical)
+	hydratable := make(map[string]domain.Task, len(canonical))
+	hydrated := make(map[string]domain.Task, len(canonical))
+	for issueID, task := range canonical {
+		if task.IssueClosed() {
+			hydrated[issueID] = task
+			continue
+		}
+		hydratable[issueID] = task
+	}
+	if len(hydratable) > 0 {
+		hydratedActive, _, err := hydrate(ctx, hydratable)
+		if err != nil {
+			m.releaseRuntimeRefreshOwnership(refreshEpoch, canonical)
+			return err
+		}
+		for issueID, task := range hydratedActive {
+			hydrated[issueID] = task
+		}
+	}
+	unlock, err := m.lockUpdate(ctx, "project_read.runtime_refresh")
 	if err != nil {
+		m.releaseRuntimeRefreshOwnership(refreshEpoch, canonical)
 		return err
 	}
+	defer unlock()
 	m.mu.Lock()
 	runtimeKeys := m.runtimeKeys
-	for issueID, task := range hydrated {
+	for issueID, runtime := range hydrated {
+		if currentEpoch := m.runtimeRefreshEpoch[issueID]; currentEpoch != refreshEpoch {
+			m.releaseRuntimeRefreshOwnershipLocked(issueID, refreshEpoch)
+			continue
+		}
 		if current, exists := m.tasks[issueID]; exists {
 			runtimeKeys.remove("task-runtime", issueID, current)
 		}
+		canonical, exists := m.canonical[issueID]
+		if !exists {
+			continue
+		}
+		task := taskWithRuntimeOverlay(canonical, runtime)
 		runtimeKeys.add("task-runtime", issueID, task)
 		m.tasks[issueID] = task
+		m.runtimePublishedEpoch[issueID] = refreshEpoch
+		m.runtimeRefreshEpoch[issueID] = refreshEpoch
+		delete(m.runtimeRefreshOwners, issueID)
 	}
 	m.runtimeKeys = runtimeKeys
 	m.metadata.RuntimeChecksum = runtimeKeys.sum()
 	m.metadata.SemanticChecksum = joinedMaterializedChecksum(m.metadata)
 	m.mu.Unlock()
 	return nil
+}
+
+func (m *projectReadMaterializer) releaseRuntimeRefreshOwnership(refreshEpoch uint64, canonical map[string]domain.Task) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for issueID := range canonical {
+		m.releaseRuntimeRefreshOwnershipLocked(issueID, refreshEpoch)
+	}
+}
+
+func (m *projectReadMaterializer) releaseRuntimeRefreshOwnershipLocked(issueID string, refreshEpoch uint64) {
+	owners := m.runtimeRefreshOwners[issueID]
+	delete(owners, refreshEpoch)
+	if len(owners) == 0 {
+		delete(m.runtimeRefreshOwners, issueID)
+		if published, exists := m.runtimePublishedEpoch[issueID]; exists {
+			m.runtimeRefreshEpoch[issueID] = published
+		} else {
+			delete(m.runtimeRefreshEpoch, issueID)
+		}
+		return
+	}
+	var newest uint64
+	for owner := range owners {
+		if owner > newest {
+			newest = owner
+		}
+	}
+	m.runtimeRefreshEpoch[issueID] = newest
 }
 
 func (m *projectReadMaterializer) replaceWorktrees(worktrees map[string]git.Worktree) {
@@ -569,12 +1383,22 @@ func (d *Daemon) startProjectReadMaterializers(ctx context.Context) error {
 	if d.issues == nil {
 		return nil
 	}
-	_, err := d.ensureProjectReadMaterializer(ctx, d.canonicalProjectID(protocol.DefaultProjectID), d.issues)
+	projectID := d.canonicalProjectID(protocol.DefaultProjectID)
+	if healthErr, unhealthy := d.projectIssueStoreHealthError(projectID); unhealthy {
+		if d.cfg.Logger != nil {
+			d.cfg.Logger.WarnContext(ctx, "project read materializer skipped for quarantined startup store", "project_id", projectID, "error", healthErr)
+		}
+		return nil
+	}
+	_, err := d.ensureProjectReadMaterializer(ctx, projectID, d.issues)
 	return err
 }
 
 func (d *Daemon) ensureProjectReadMaterializer(ctx context.Context, projectID string, client *issues.Client) (*projectReadMaterializer, error) {
 	projectID = d.canonicalProjectID(projectID)
+	if healthErr, unhealthy := d.projectIssueStoreHealthError(projectID); unhealthy {
+		return nil, fmt.Errorf("project read materialization unavailable for %s: %w", projectID, healthErr)
+	}
 	d.materializersInitMu.Lock()
 	defer d.materializersInitMu.Unlock()
 	d.materializersMu.Lock()
@@ -596,8 +1420,11 @@ func (d *Daemon) ensureProjectReadMaterializer(ctx context.Context, projectID st
 		return nil, fmt.Errorf("project read materialization unavailable for %s", projectID)
 	}
 	materializer = newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(client), func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
-		return d.hydrateProjectReadTasks(hydrateCtx, projectID, client, tasks), nil
+		return d.hydrateProjectReadTasks(hydrateCtx, projectID, client, tasks)
 	})
+	materializer.hydrateDegraded = func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		return d.hydrateProjectReadTasksDegraded(hydrateCtx, projectID, client, tasks), nil
+	}
 	d.configureProjectReadMaterializer(materializer, projectID, client)
 	if err := materializer.bootstrap(ctx); err != nil {
 		return nil, fmt.Errorf("bootstrap project %s: %w", projectID, err)
@@ -702,38 +1529,183 @@ func (d *Daemon) projectReadSnapshot(projectID string) ([]domain.Task, protocol.
 		}
 		materializer, err = d.ensureProjectReadMaterializer(materializerCtx, projectID, nil)
 		if err != nil {
-			return nil, protocol.MaterializedSnapshotMetadata{}, err
+			return nil, protocol.MaterializedSnapshotMetadata{}, newProjectReadUnavailableError("project read materialization unavailable for %s: %w", projectID, err)
 		}
 	}
 	if materializer == nil {
 		// Embedded/unit daemons do not execute Run's startup boundary. Bootstrap
 		// their disposable read model on first use so tests and library users keep
 		// the same verified semantics. Production IPC cannot reach this path.
-		client := d.issueClientForProject(projectID)
-		if client == nil {
-			return nil, protocol.MaterializedSnapshotMetadata{}, fmt.Errorf("project read materialization unavailable for %s", projectID)
-		}
-		candidate := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(client), func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
-			return d.hydrateProjectReadTasks(hydrateCtx, projectID, client, tasks), nil
-		})
-		d.configureProjectReadMaterializer(candidate, projectID, client)
-		if err := candidate.bootstrap(context.Background()); err != nil {
-			return nil, protocol.MaterializedSnapshotMetadata{}, fmt.Errorf("bootstrap embedded project read materialization for %s: %w", projectID, err)
+		candidate, err := d.bootstrapEmbeddedProjectReadMaterializer(context.Background(), projectID, false)
+		if err != nil {
+			return nil, protocol.MaterializedSnapshotMetadata{}, err
 		}
 		tasks, metadata := candidate.snapshot()
 		if !strings.HasPrefix(metadata.Health, "healthy") {
-			return nil, metadata, fmt.Errorf("project read materialization unhealthy: %s", metadata.Health)
+			return nil, metadata, newProjectReadUnavailableError("project read materialization unhealthy: %s", metadata.Health)
 		}
 		return tasks, metadata, nil
 	}
-	tasks, metadata := materializer.snapshot()
-	if !strings.HasPrefix(metadata.Health, "healthy") {
-		return nil, metadata, fmt.Errorf("project read materialization unhealthy: %s", metadata.Health)
+	tasks, metadata, retryableFailure := materializer.snapshotWithFailureDisposition()
+	// Runtime enrichment is disposable and repaired independently from the
+	// canonical issue projection. A failed background runtime refresh must not
+	// make canonical task reads unavailable project-wide; callers still receive
+	// the stale health metadata, while invariant paths use the stricter
+	// convergedProjectReadSnapshotForInvariant boundary below.
+	if !strings.HasPrefix(metadata.Health, "healthy") && !retryableFailure && !materializer.canonicalReadHealthAvailable() {
+		return nil, metadata, newProjectReadUnavailableError("project read materialization unhealthy: %s", metadata.Health)
 	}
 	return tasks, metadata, nil
 }
 
-func (d *Daemon) hydrateProjectReadTasks(ctx context.Context, projectID string, client *issues.Client, tasks []domain.Task) []domain.Task {
+func (d *Daemon) bootstrapEmbeddedProjectReadMaterializer(ctx context.Context, projectID string, includeRuntime bool) (*projectReadMaterializer, error) {
+	client := d.issueClientForProject(projectID)
+	if client == nil {
+		return nil, newProjectReadUnavailableError("project read materialization unavailable for %s", projectID)
+	}
+	hydrate := func(_ context.Context, tasks []domain.Task) ([]domain.Task, error) {
+		return tasks, nil
+	}
+	hydrateDegraded := hydrate
+	if includeRuntime {
+		hydrate = func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
+			return d.hydrateProjectReadTasks(hydrateCtx, projectID, client, tasks)
+		}
+		hydrateDegraded = func(hydrateCtx context.Context, tasks []domain.Task) ([]domain.Task, error) {
+			return d.hydrateProjectReadTasksDegraded(hydrateCtx, projectID, client, tasks), nil
+		}
+	}
+	candidate := newProjectReadMaterializer(projectID, NewProjectionDeltaAuthority(client), hydrate)
+	candidate.hydrateDegraded = hydrateDegraded
+	d.configureProjectReadMaterializer(candidate, projectID, client)
+	if !includeRuntime {
+		candidate.legacy = func(exportCtx context.Context) ([]domain.Task, error) {
+			return client.ListCanonicalArchiveMode(exportCtx, issues.ArchiveInclude)
+		}
+	}
+	if err := candidate.bootstrap(ctx); err != nil {
+		return nil, newProjectReadUnavailableError("bootstrap embedded project read materialization for %s: %w", projectID, err)
+	}
+	return candidate, nil
+}
+
+func (d *Daemon) convergedProjectReadSnapshot(ctx context.Context, projectID string) ([]domain.Task, protocol.MaterializedSnapshotMetadata, error) {
+	return d.convergedProjectReadSnapshotMode(ctx, projectID, false)
+}
+
+func (d *Daemon) convergedProjectReadSnapshotForInvariant(ctx context.Context, projectID string) ([]domain.Task, protocol.MaterializedSnapshotMetadata, error) {
+	return d.convergedProjectReadSnapshotMode(ctx, projectID, true)
+}
+
+// convergedCanonicalProjectReadSnapshot refreshes and returns only durable issue
+// facts. Runtime and worktree overlays are intentionally excluded, and a stale
+// runtime health result is preserved so callers must explicitly decide whether
+// their operation can proceed without those components.
+func (d *Daemon) convergedCanonicalProjectReadSnapshot(ctx context.Context, projectID string) ([]domain.Task, protocol.MaterializedSnapshotMetadata, error) {
+	projectID = d.canonicalProjectID(projectID)
+	materializer := d.activeProjectReadMaterializer(projectID)
+	if materializer == nil {
+		d.materializersMu.RLock()
+		started := d.materializersStarted
+		d.materializersMu.RUnlock()
+		if started {
+			return nil, protocol.MaterializedSnapshotMetadata{}, newProjectReadUnavailableError("project read materialization not initialized for %s", projectID)
+		}
+		candidate, err := d.bootstrapEmbeddedProjectReadMaterializer(ctx, projectID, false)
+		if err != nil {
+			return nil, protocol.MaterializedSnapshotMetadata{}, err
+		}
+		tasks, metadata := candidate.snapshotCanonical()
+		return tasks, metadata, nil
+	}
+	attempt := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+	metadata, err := materializer.convergeCanonical(ctx)
+	if err != nil {
+		materializer.finishAuthoritativeReadRefresh(attempt, err)
+		return nil, metadata, newProjectReadUnavailableError("project read convergence unavailable for %s: %w", projectID, err)
+	}
+	materializer.finishAuthoritativeReadRefresh(attempt, nil)
+	tasks, metadata := materializer.snapshotCanonical()
+	if !materializer.canonicalReadHealthAvailable() {
+		return nil, metadata, newProjectReadUnavailableError("project read materialization unhealthy for %s: %s", projectID, metadata.Health)
+	}
+	return tasks, metadata, nil
+}
+
+func (d *Daemon) convergedProjectReadSnapshotMode(ctx context.Context, projectID string, includeEmbeddedRuntime bool) ([]domain.Task, protocol.MaterializedSnapshotMetadata, error) {
+	projectID = d.canonicalProjectID(projectID)
+	materializer := d.activeProjectReadMaterializer(projectID)
+	if materializer == nil {
+		d.materializersMu.RLock()
+		started := d.materializersStarted
+		d.materializersMu.RUnlock()
+		if started {
+			return nil, protocol.MaterializedSnapshotMetadata{}, newProjectReadUnavailableError("project read materialization not initialized for %s", projectID)
+		}
+		candidate, err := d.bootstrapEmbeddedProjectReadMaterializer(ctx, projectID, includeEmbeddedRuntime)
+		if err != nil {
+			return nil, protocol.MaterializedSnapshotMetadata{}, err
+		}
+		tasks, metadata := candidate.snapshot()
+		if includeEmbeddedRuntime {
+			if err := candidate.refreshRuntime(ctx, taskIDsFromTasks(tasks)); err != nil {
+				return nil, metadata, newProjectReadUnavailableError("refresh embedded project runtime facts for %s: %w", projectID, err)
+			}
+			tasks, metadata = candidate.snapshot()
+		}
+		return tasks, metadata, nil
+	}
+	attempt := materializer.beginAuthoritativeReadRefresh(authoritativeReadRefreshCanonical)
+	metadata, err := materializer.convergeCanonical(ctx)
+	if err != nil {
+		materializer.finishAuthoritativeReadRefresh(attempt, err)
+		return nil, metadata, newProjectReadUnavailableError("project read convergence unavailable for %s: %w", projectID, err)
+	}
+	materializer.finishAuthoritativeReadRefresh(attempt, nil)
+	if includeEmbeddedRuntime {
+		// Runtime refresh failures are keyed and recoverable. Invariant reads must
+		// retry those exact keys before rejecting the last-good cache; otherwise a
+		// request deadline that expires during root-user projection publication can
+		// permanently block every later lifecycle transition. Give the repair its
+		// own bounded lifetime because it converges daemon-owned projection state,
+		// while still propagating a real retry failure strictly to this caller.
+		retryIssueIDs := materializer.authoritativeRuntimeFailedIssueIDs()
+		if hook, ok := ctx.Value(authoritativeRuntimeRecoveryDecisionHookKey{}).(func([]string)); ok && hook != nil {
+			hook(append([]string(nil), retryIssueIDs...))
+		}
+		if len(retryIssueIDs) > 0 {
+			recoveryCtx, cancelRecovery := context.WithTimeout(context.WithoutCancel(ctx), authoritativeRuntimeRecoveryLimit)
+			err := d.refreshActiveProjectReadRuntimeForIssues(recoveryCtx, projectID, materializer, retryIssueIDs)
+			cancelRecovery()
+			if err != nil {
+				return nil, materializer.snapshotMetadata(), newProjectReadUnavailableError("recover authoritative runtime projection for invariant evaluation: %w", err)
+			}
+		}
+	}
+	tasks, metadata, err := d.projectReadSnapshot(projectID)
+	if err != nil {
+		return nil, metadata, err
+	}
+	if includeEmbeddedRuntime && !strings.HasPrefix(metadata.Health, "healthy") {
+		return nil, metadata, newProjectReadUnavailableError("project read materialization unhealthy for invariant evaluation: %s", metadata.Health)
+	}
+	return tasks, metadata, nil
+}
+
+// projectReadSnapshotCurrent synchronously converges the daemon-local durable
+// issue projection before returning it. Rooted admission and graph readiness
+// use this boundary so cross-daemon writes cannot be hidden by local cache
+// state, while runtime enrichment remains outside this projection invariant.
+func (d *Daemon) projectReadSnapshotCurrent(ctx context.Context, projectID string) ([]domain.Task, protocol.MaterializedSnapshotMetadata, error) {
+	// Preserve the normal lazy materializer initialization contract for
+	// project-scoped clients before entering the stricter convergence path.
+	if _, metadata, err := d.projectReadSnapshot(projectID); err != nil {
+		return nil, metadata, err
+	}
+	return d.convergedCanonicalProjectReadSnapshot(ctx, projectID)
+}
+
+func (d *Daemon) hydrateProjectReadTasks(ctx context.Context, projectID string, client *issues.Client, tasks []domain.Task) ([]domain.Task, error) {
 	hydrate := client.HydrateRuntime
 	if d.projectReadRuntimeHydrate != nil {
 		hydrate = func(ctx context.Context, projectID string, tasks []domain.Task) ([]domain.Task, error) {
@@ -743,16 +1715,24 @@ func (d *Daemon) hydrateProjectReadTasks(ctx context.Context, projectID string, 
 	hydrateCtx, endHydration := latencytrace.StartSpanWithEndAttributes(ctx, "daemon", "project_read.runtime_hydration", "project_id", projectID, "task_count", len(tasks))
 	hydrated, err := hydrate(hydrateCtx, projectID, tasks)
 	if err != nil {
-		endHydration(err, "outcome", "degraded")
-		_, endFallback := latencytrace.StartSpanWithEndAttributes(ctx, "daemon", "project_read.degraded_fallback", "project_id", projectID, "reason", "session_hydration")
-		endFallback(nil, "outcome", "ticket_only")
-		if d.cfg.Logger != nil {
-			d.cfg.Logger.WarnContext(ctx, "project read materializer continuing without runtime session enrichment", "project_id", projectID, "error", err)
-		}
-		return tasks
+		endHydration(err, "outcome", "unavailable")
+		return nil, fmt.Errorf("hydrate project runtime: %w", err)
 	}
 	endHydration(nil, "outcome", "enriched")
-	return d.enrichTasksWithSessionState(ctx, projectID, hydrated)
+	return d.enrichTasksWithSessionState(ctx, projectID, hydrated), nil
+}
+
+func (d *Daemon) hydrateProjectReadTasksDegraded(ctx context.Context, projectID string, client *issues.Client, tasks []domain.Task) []domain.Task {
+	hydrated, err := d.hydrateProjectReadTasks(ctx, projectID, client, tasks)
+	if err == nil {
+		return hydrated
+	}
+	_, endFallback := latencytrace.StartSpanWithEndAttributes(ctx, "daemon", "project_read.degraded_fallback", "project_id", projectID, "reason", "session_hydration")
+	endFallback(nil, "outcome", "ticket_only")
+	if d.cfg.Logger != nil {
+		d.cfg.Logger.WarnContext(ctx, "project read materializer continuing without runtime session enrichment", "project_id", projectID, "error", err)
+	}
+	return tasks
 }
 
 func (d *Daemon) refreshProjectReadWorktreesForBootstrap(ctx context.Context, projectID string, materializer *projectReadMaterializer) error {
@@ -778,28 +1758,76 @@ func (d *Daemon) refreshProjectReadRuntime(ctx context.Context, projectID string
 	if suppressed, _ := ctx.Value(suppressSynchronousProjectReadRuntimeRefreshKey{}).(bool); suppressed {
 		return
 	}
-	if err := d.refreshProjectReadRuntimeForIssues(ctx, projectID, issueIDs); err != nil && d.cfg.Logger != nil {
+	projectID = d.canonicalProjectID(projectID)
+	materializer := d.activeProjectReadMaterializer(projectID)
+	if materializer == nil {
+		return
+	}
+	if err := d.refreshActiveProjectReadRuntimeForIssues(ctx, projectID, materializer, issueIDs); err != nil && d.cfg.Logger != nil {
 		d.cfg.Logger.Warn("refresh project read runtime materialization", "project_id", d.canonicalProjectID(projectID), "issue_ids", uniqueStrings(issueIDs), "error", err)
 	}
+}
+
+func (d *Daemon) projectReadRuntimeRefreshRetryIssueIDs(projectID string, issueIDs ...string) []string {
+	projectID = d.canonicalProjectID(projectID)
+	materializer := d.activeProjectReadMaterializer(projectID)
+	if materializer == nil {
+		return nil
+	}
+	return materializer.authoritativeRuntimeRefreshRetryIssueIDs(issueIDs)
 }
 
 func (d *Daemon) refreshProjectReadRuntimeForIssues(ctx context.Context, projectID string, issueIDs []string) error {
 	projectID = d.canonicalProjectID(projectID)
 	d.materializersMu.RLock()
 	materializer := d.materializers[projectID]
+	started := d.materializersStarted
 	d.materializersMu.RUnlock()
 	if materializer == nil {
+		if !started {
+			return nil
+		}
+		var err error
+		materializer, err = d.ensureProjectReadMaterializer(ctx, projectID, nil)
+		if err != nil {
+			return newProjectReadUnavailableError("ensure authoritative project read materialization for %s: %w", projectID, err)
+		}
+	}
+	return d.refreshActiveProjectReadRuntimeForIssues(ctx, projectID, materializer, issueIDs)
+}
+
+func (d *Daemon) refreshActiveProjectReadRuntimeForIssues(ctx context.Context, projectID string, materializer *projectReadMaterializer, issueIDs []string) error {
+	issueIDs = normalizeAuthoritativeRuntimeIssueIDs(issueIDs)
+	if len(issueIDs) == 0 {
 		return nil
 	}
-	issueIDs = uniqueStrings(issueIDs)
+	attempt := materializer.beginAuthoritativeReadRefreshForIssues(authoritativeReadRefreshRuntime, issueIDs)
 	if err := materializer.refreshRuntime(ctx, issueIDs); err != nil {
+		materializer.finishAuthoritativeReadRefresh(attempt, err)
 		return fmt.Errorf("refresh runtime issues: %w", err)
 	}
 	if err := d.refreshProjectReadWorktreesForIssues(ctx, projectID, materializer, issueIDs); err != nil {
+		materializer.finishAuthoritativeReadRefresh(attempt, err)
 		return fmt.Errorf("refresh runtime worktrees: %w", err)
 	}
-	if err := d.syncUserProjectionMaterializedIssues(ctx, projectID, issueIDs); err != nil {
+	unlockCanonical, err := materializer.lockCanonical(ctx, "project_read.runtime_projection_sync")
+	if err != nil {
+		materializer.finishAuthoritativeReadRefresh(attempt, err)
+		return fmt.Errorf("lock runtime projection sync: %w", err)
+	}
+	defer unlockCanonical()
+	materializer.transitionMu.Lock()
+	defer materializer.transitionMu.Unlock()
+	if err := d.syncUserProjectionMaterializedIssuesForRefresh(ctx, projectID, issueIDs, materializer, attempt); err != nil {
+		if errors.Is(err, errProjectReadRuntimeRefreshSuperseded) {
+			materializer.finishAuthoritativeReadRefreshLocked(attempt, nil)
+			return nil
+		}
+		materializer.finishAuthoritativeReadRefreshLocked(attempt, err)
 		return fmt.Errorf("sync user projection issues: %w", err)
+	}
+	if !materializer.finishAuthoritativeReadRefreshLocked(attempt, nil) && !materializer.runtimeRefreshAttemptSuperseded(attempt) {
+		return newProjectReadUnavailableError("runtime refresh ownership changed before completion for %s", projectID)
 	}
 	return nil
 }
@@ -835,7 +1863,11 @@ func (d *Daemon) refreshProjectReadWorktreesForIssues(ctx context.Context, proje
 }
 
 func (d *Daemon) syncUserProjectionMaterializedIssues(ctx context.Context, projectID string, issueIDs []string) error {
-	if d == nil || d.userStore == nil || d.cfg.ScopedRuntime || len(issueIDs) == 0 {
+	return d.syncUserProjectionMaterializedIssuesForRefresh(ctx, projectID, issueIDs, nil, authoritativeReadRefreshAttempt{})
+}
+
+func (d *Daemon) syncUserProjectionMaterializedIssuesForRefresh(ctx context.Context, projectID string, issueIDs []string, refreshMaterializer *projectReadMaterializer, attempt authoritativeReadRefreshAttempt) error {
+	if d == nil || d.cfg.ScopedRuntime || len(issueIDs) == 0 {
 		return nil
 	}
 	wanted := make(map[string]struct{}, len(issueIDs))
@@ -849,11 +1881,47 @@ func (d *Daemon) syncUserProjectionMaterializedIssues(ctx context.Context, proje
 	}
 	materializer := d.activeProjectReadMaterializer(projectID)
 	if materializer == nil {
+		if refreshMaterializer != nil {
+			return newProjectReadUnavailableError("project read materializer is no longer active during authoritative refresh")
+		}
+		if d.projectReadUserProjectionSync != nil {
+			return d.projectReadUserProjectionSync(ctx, projectID, issueIDs)
+		}
 		return nil
 	}
-	tasks, metadata := materializer.snapshotIssues(wanted)
-	if !strings.HasPrefix(metadata.Health, "healthy") {
-		return fmt.Errorf("project read materialization unhealthy: %s", metadata.Health)
+	if refreshMaterializer != nil && materializer != refreshMaterializer {
+		return newProjectReadUnavailableError("project read materializer changed during authoritative refresh")
+	}
+	if refreshMaterializer != nil {
+		publishable, superseded, authorized := materializer.runtimeRefreshPublishableIssues(wanted, attempt)
+		if !authorized {
+			return newProjectReadUnavailableError("project read refresh ownership changed before user projection sync: %s", materializer.snapshotMetadata().Health)
+		}
+		if len(publishable) == 0 {
+			if superseded {
+				return errProjectReadRuntimeRefreshSuperseded
+			}
+			return newProjectReadUnavailableError("project read refresh has no publishable issue keys")
+		}
+		wanted = publishable
+		issueIDs = issueIDs[:0]
+		for issueID := range wanted {
+			issueIDs = append(issueIDs, issueID)
+		}
+		sort.Strings(issueIDs)
+	}
+	tasks, metadata, refreshAuthorized := materializer.snapshotIssuesForAuthoritativeRefresh(wanted, attempt)
+	if refreshMaterializer != nil && !refreshAuthorized {
+		return newProjectReadUnavailableError("project read refresh ownership changed before user projection sync: %s", metadata.Health)
+	}
+	if refreshMaterializer == nil && !strings.HasPrefix(metadata.Health, "healthy") {
+		return newProjectReadUnavailableError("project read materialization unhealthy: %s", metadata.Health)
+	}
+	if d.projectReadUserProjectionSync != nil {
+		return d.projectReadUserProjectionSync(ctx, projectID, issueIDs)
+	}
+	if d.userStore == nil {
+		return nil
 	}
 	changes := make([]userstore.ProjectDeltaChange, 0, len(wanted))
 	for i := range tasks {
@@ -865,6 +1933,14 @@ func (d *Daemon) syncUserProjectionMaterializedIssues(ctx context.Context, proje
 		changes = append(changes, userstore.ProjectDeltaChange{IssueID: issueID, Issue: &task})
 		delete(wanted, issueID)
 	}
+	for issueID := range wanted {
+		// The requested key came from a previously materialized root-user read,
+		// but is absent from the authoritative project materializer. Propagate
+		// that absence explicitly so stale deleted issues cannot survive bounded
+		// runtime refreshes and repeatedly poison unrelated invariant preflights.
+		changes = append(changes, userstore.ProjectDeltaChange{IssueID: issueID, Delete: true})
+	}
+	sort.Slice(changes, func(i, j int) bool { return changes[i].IssueID < changes[j].IssueID })
 	return d.userStore.ApplyProjectMaterializedIssues(ctx, d.canonicalProjectID(projectID), changes)
 }
 
@@ -1037,6 +2113,51 @@ func materializedParentChildClosure(tasks []domain.Task, rootID string) []domain
 				}
 			}
 		}
+	}
+	out := make([]domain.Task, 0, len(selected))
+	for _, task := range tasks {
+		if _, ok := selected[task.ID.String()]; ok {
+			out = append(out, task)
+		}
+	}
+	return out
+}
+
+// materializedRootedGraphContext extends the requested rooted subtree with its
+// ancestor containment chain and each ancestor's direct dependencies. Rooted
+// admission needs that context to inherit blockers from enclosing roots.
+func materializedRootedGraphContext(tasks []domain.Task, rootID string) []domain.Task {
+	rootID = strings.TrimSpace(rootID)
+	if rootID == "" {
+		return tasks
+	}
+	byID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID.String()] = task
+	}
+	selected := make(map[string]struct{})
+	for _, task := range materializedParentChildClosure(tasks, rootID) {
+		selected[task.ID.String()] = struct{}{}
+	}
+	seen := map[string]struct{}{rootID: {}}
+	for task, ok := byID[rootID]; ok; {
+		parentID := strings.TrimSpace(domain.TaskParentIssueID(task))
+		if parentID == "" {
+			break
+		}
+		selected[parentID] = struct{}{}
+		if _, cycle := seen[parentID]; cycle {
+			break
+		}
+		seen[parentID] = struct{}{}
+		parent, exists := byID[parentID]
+		if !exists {
+			break
+		}
+		for _, dependency := range parent.Dependencies {
+			selected[dependency.ID.String()] = struct{}{}
+		}
+		task = parent
 	}
 	out := make([]domain.Task, 0, len(selected))
 	for _, task := range tasks {

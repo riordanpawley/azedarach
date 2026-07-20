@@ -74,3 +74,17 @@ func TestExtractIssueIDFromBranchName(t *testing.T) {
 		t.Fatalf("ExtractIssueIDFromBranchName(legacy) = %q, %v", issueID, ok)
 	}
 }
+
+func TestCanonicalIssueIDKeyMatchesIssueIdentity(t *testing.T) {
+	for _, pair := range [][2]string{
+		{" drw ", "DRW"},
+		{"Σ", "ς"},
+	} {
+		if !IssueIDsEqual(pair[0], pair[1]) {
+			t.Fatalf("IssueIDsEqual(%q, %q) = false", pair[0], pair[1])
+		}
+		if left, right := CanonicalIssueIDKey(pair[0]), CanonicalIssueIDKey(pair[1]); left != right {
+			t.Fatalf("canonical keys for %q and %q differ: %q != %q", pair[0], pair[1], left, right)
+		}
+	}
+}

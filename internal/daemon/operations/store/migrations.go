@@ -28,6 +28,11 @@ var orderedMigrations = []migration{
 	{id: "daemon_operations_0004_review_validation_assignment", path: "migrations/0004_review_validation_assignment.sql"},
 	{id: "daemon_operations_0005_validation_scope_purpose", path: "migrations/0005_validation_scope_purpose.sql"},
 	{id: "daemon_operations_0006_publication_validation_priority", path: "migrations/0006_publication_validation_priority.sql"},
+	{id: "daemon_operations_0007_layered_publication_evidence", path: "migrations/0007_layered_publication_evidence.sql"},
+	{id: "daemon_operations_0008_validation_priority_fairness", path: "migrations/0008_validation_priority_fairness.sql"},
+	{id: "daemon_operations_0009_publication_review_authority", path: "migrations/0009_publication_review_authority.sql"},
+	{id: "daemon_operations_0010_publication_evidence_authority", path: "migrations/0010_publication_evidence_authority.sql"},
+	{id: "daemon_operations_0011_publication_root_authority", path: "migrations/0011_publication_root_authority.sql"},
 }
 
 var migrationArtifacts = []sqlitemigration.Artifact{
@@ -37,6 +42,11 @@ var migrationArtifacts = []sqlitemigration.Artifact{
 	{ID: "daemon_operations_0004_review_validation_assignment", Path: "migrations/0004_review_validation_assignment.sql", Checksum: "6f5d54a3f27937ae9adcdd6a0b3f9b79ddd2814f32635eb2c3e5ca051c3268ca"},
 	{ID: "daemon_operations_0005_validation_scope_purpose", Path: "migrations/0005_validation_scope_purpose.sql", Checksum: "6cb59febaf88ccc7948f5289cbdc040bfa041fbd639ea88eb77766dfff15a192"},
 	{ID: "daemon_operations_0006_publication_validation_priority", Path: "migrations/0006_publication_validation_priority.sql", Checksum: "bbbf9fd51c2d9289a295a6aeb7427d65d04d3d3a897cc995d2d91ea4577713fd"},
+	{ID: "daemon_operations_0007_layered_publication_evidence", Path: "migrations/0007_layered_publication_evidence.sql", Checksum: "59182365b3d9dd89464e1fdb2f0e5818d6d91bbcf0625bcfd4c3898f888a10ef"},
+	{ID: "daemon_operations_0008_validation_priority_fairness", Path: "migrations/0008_validation_priority_fairness.sql", Checksum: "9f6a4ae4af768b433880a310b1d4c5bb79453224c1c93bd9c7b7696d4cf476bf"},
+	{ID: "daemon_operations_0009_publication_review_authority", Path: "migrations/0009_publication_review_authority.sql", Checksum: "645af760b30317d26d72ddcccf7a3a5934c009923c8f77260a503e48a39565b2"},
+	{ID: "daemon_operations_0010_publication_evidence_authority", Path: "migrations/0010_publication_evidence_authority.sql", Checksum: "69054f7d354374035f9012209b707a9b9ab629254f53f0fc12f0afa3eb5a7ff0"},
+	{ID: "daemon_operations_0011_publication_root_authority", Path: "migrations/0011_publication_root_authority.sql", Checksum: "7fe4bffc475905251802527eff5a71704885d2261a3abadce59e337768f4698e"},
 }
 
 const migrationArtifactAuthority sqlitemigration.Authority = "project.daemon_operations"
@@ -77,7 +87,121 @@ func runMigrations(ctx context.Context, db *sql.DB) error {
 	if err := sqlitemigration.EnsureLedgerChecksumsAtomic(ctx, db, migrationArtifactAuthority, migrationArtifacts); err != nil {
 		return err
 	}
-	return validateValidationLeaseSchema(ctx, db)
+	if err := validateValidationLeaseSchema(ctx, db); err != nil {
+		return err
+	}
+	if err := validatePublicationEvidenceSchema(ctx, db); err != nil {
+		return err
+	}
+	return validatePublicationQueueSchema(ctx, db)
+}
+
+func validatePublicationQueueSchema(ctx context.Context, db *sql.DB) error {
+	artifact, err := loadMigrationSQL("migrations/0007_layered_publication_evidence.sql")
+	if err != nil {
+		return fmt.Errorf("load canonical publication queue schema: %w", err)
+	}
+	canonicalDB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		return fmt.Errorf("open canonical publication queue schema: %w", err)
+	}
+	defer canonicalDB.Close()
+	canonicalDB.SetMaxOpenConns(1)
+	if _, err = canonicalDB.ExecContext(ctx, artifact); err != nil {
+		return fmt.Errorf("build canonical publication queue schema: %w", err)
+	}
+	if _, err = canonicalDB.ExecContext(ctx, `
+		CREATE TABLE issue_observation_events(id INTEGER PRIMARY KEY, issue_id TEXT, event_type TEXT, source TEXT, source_command TEXT, payload_json TEXT);
+		CREATE TABLE issue_coordination_leases(issue_id TEXT, purpose TEXT, owner_id TEXT, owner_kind TEXT);
+		CREATE TABLE daemon_validation_requests(request_id TEXT PRIMARY KEY);
+	`); err != nil {
+		return fmt.Errorf("build canonical publication authority dependencies: %w", err)
+	}
+	authorityArtifact, err := loadMigrationSQL("migrations/0009_publication_review_authority.sql")
+	if err != nil {
+		return fmt.Errorf("load canonical publication review authority schema: %w", err)
+	}
+	if _, err = canonicalDB.ExecContext(ctx, authorityArtifact); err != nil {
+		return fmt.Errorf("build canonical publication review authority schema: %w", err)
+	}
+	evidenceAuthority, err := loadMigrationSQL("migrations/0010_publication_evidence_authority.sql")
+	if err != nil {
+		return fmt.Errorf("load canonical publication evidence authority schema: %w", err)
+	}
+	if _, err = canonicalDB.ExecContext(ctx, evidenceAuthority); err != nil {
+		return fmt.Errorf("build canonical publication evidence authority schema: %w", err)
+	}
+	rootAuthority, err := loadMigrationSQL("migrations/0011_publication_root_authority.sql")
+	if err != nil {
+		return fmt.Errorf("load canonical publication root authority schema: %w", err)
+	}
+	if _, err = canonicalDB.ExecContext(ctx, rootAuthority); err != nil {
+		return fmt.Errorf("build canonical publication root authority schema: %w", err)
+	}
+	for _, object := range []struct{ typeName, name string }{
+		{"table", "daemon_publication_operations"},
+		{"index", "idx_daemon_publication_operations_queue"},
+		{"index", "idx_daemon_publication_operations_issue"},
+		{"index", "idx_daemon_publication_operations_claim"},
+		{"trigger", "daemon_publication_operation_identity_immutable"},
+	} {
+		var expected, actual string
+		if err = canonicalDB.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type=? AND name=?`, object.typeName, object.name).Scan(&expected); err != nil {
+			return fmt.Errorf("read canonical publication queue %s %s: %w", object.typeName, object.name, err)
+		}
+		if err = db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type=? AND name=?`, object.typeName, object.name).Scan(&actual); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("publication queue schema drift: missing %s %s", object.typeName, object.name)
+			}
+			return fmt.Errorf("validate publication queue %s %s: %w", object.typeName, object.name, err)
+		}
+		if normalizeSQLiteDefinition(actual) != normalizeSQLiteDefinition(expected) {
+			return fmt.Errorf("publication queue schema drift: %s %s differs from immutable artifact", object.typeName, object.name)
+		}
+	}
+	return nil
+}
+
+func validatePublicationEvidenceSchema(ctx context.Context, db *sql.DB) error {
+	artifact, err := loadMigrationSQL("migrations/0007_layered_publication_evidence.sql")
+	if err != nil {
+		return fmt.Errorf("load canonical publication evidence schema: %w", err)
+	}
+	canonicalDB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		return fmt.Errorf("open canonical publication evidence schema: %w", err)
+	}
+	defer canonicalDB.Close()
+	canonicalDB.SetMaxOpenConns(1)
+	if _, err = canonicalDB.ExecContext(ctx, artifact); err != nil {
+		return fmt.Errorf("build canonical publication evidence schema: %w", err)
+	}
+	for _, object := range []struct{ typeName, name string }{
+		{"table", "daemon_publication_evidence"}, {"table", "daemon_publication_evidence_invalidations"}, {"table", "daemon_publication_evidence_state"},
+		{"index", "idx_daemon_publication_evidence_issue_layer"}, {"index", "idx_daemon_publication_evidence_invalidations"},
+		{"trigger", "daemon_publication_evidence_immutable_update"}, {"trigger", "daemon_publication_evidence_immutable_delete"},
+		{"trigger", "daemon_publication_invalidation_immutable_update"}, {"trigger", "daemon_publication_invalidation_immutable_delete"},
+		{"trigger", "daemon_publication_evidence_insert_revision"}, {"trigger", "daemon_publication_invalidation_insert_revision"},
+	} {
+		var expected, actual string
+		if err = canonicalDB.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type=? AND name=?`, object.typeName, object.name).Scan(&expected); err != nil {
+			return fmt.Errorf("read canonical publication evidence %s %s: %w", object.typeName, object.name, err)
+		}
+		if err = db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type=? AND name=?`, object.typeName, object.name).Scan(&actual); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("publication evidence schema drift: missing %s %s", object.typeName, object.name)
+			}
+			return fmt.Errorf("validate publication evidence %s %s: %w", object.typeName, object.name, err)
+		}
+		if normalizeSQLiteDefinition(actual) != normalizeSQLiteDefinition(expected) {
+			return fmt.Errorf("publication evidence schema drift: %s %s differs from immutable artifact", object.typeName, object.name)
+		}
+	}
+	return nil
+}
+
+func normalizeSQLiteDefinition(value string) string {
+	return strings.ToLower(strings.Join(strings.Fields(value), " "))
 }
 
 func validateValidationLeaseSchema(ctx context.Context, db *sql.DB) error {
@@ -93,12 +217,22 @@ func validateValidationLeaseSchema(ctx context.Context, db *sql.DB) error {
 			"lease_token_hash text not null check (length(lease_token_hash) = 64)",
 			"project_id text not null",
 			"issue_id text not null",
+			"issue_priority integer not null default 2 check (issue_priority between 0 and 4)",
+			"priority_bypass_count integer not null default 0 check (priority_bypass_count >= 0)",
 			"class text not null check (class in ('aggregate','shared','safe'))",
 			"profile text not null",
 			"command text not null",
 			"source_revision text not null",
 			"reviewer_id text not null default ''",
+			"reviewer_kind text not null default ''",
 			"review_epoch_event_id integer not null default 0 check (review_epoch_event_id >= 0)",
+			"reviewer_kind text not null default ''",
+			"publication_operation_id text not null default ''",
+			"accepted_review_event_id integer not null default 0 check (accepted_review_event_id >= 0)",
+			"accepted_publication_operation_id text not null default ''",
+			"publication_operation_id text not null default ''",
+			"accepted_review_event_id integer not null default 0 check (accepted_review_event_id >= 0)",
+			"accepted_publication_operation_id text not null default ''",
 			"scope text not null default 'ticket' check (scope in ('repository','ticket'))",
 			"purpose text not null default 'legacy' check (purpose in ('legacy','capacity','development','push_gate','review_evidence'))",
 			"execution text not null default 'executed' check (execution in ('executed','joined','reused','skipped'))",
@@ -145,6 +279,10 @@ func validateValidationLeaseSchema(ctx context.Context, db *sql.DB) error {
 			"create index idx_daemon_validation_compatibility",
 			"on daemon_validation_requests(project_id, compatibility_key, state, sequence)",
 		}},
+		{typeName: "index", name: "idx_daemon_validation_priority_queue", fragments: []string{
+			"create index idx_daemon_validation_priority_queue",
+			"on daemon_validation_requests( project_id, state, purpose, priority_bypass_count, issue_priority, sequence )",
+		}},
 		{typeName: "trigger", name: "daemon_validation_requests_insert_revision", fragments: []string{
 			"create trigger daemon_validation_requests_insert_revision",
 			"after insert on daemon_validation_requests",
@@ -173,6 +311,20 @@ func validateValidationLeaseSchema(ctx context.Context, db *sql.DB) error {
 			if !strings.Contains(normalized, fragment) {
 				return fmt.Errorf("validation lease schema drift: %s %s is missing %q", object.typeName, object.name, fragment)
 			}
+		}
+	}
+	for _, column := range []string{
+		"reviewer_kind",
+		"publication_operation_id",
+		"accepted_review_event_id",
+		"accepted_publication_operation_id",
+	} {
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('daemon_validation_requests') WHERE name=?`, column).Scan(&count); err != nil {
+			return fmt.Errorf("validate validation lease column %s: %w", column, err)
+		}
+		if count != 1 {
+			return fmt.Errorf("validation lease schema drift: table daemon_validation_requests is missing exact column %q", column)
 		}
 	}
 	return nil
@@ -227,7 +379,23 @@ func applyMigration(ctx context.Context, db *sql.DB, id, sqlText string) error {
 			_ = tx.Rollback()
 		}
 	}()
-	if _, err := tx.ExecContext(ctx, sqlText); err != nil {
+	if id == "daemon_operations_0011_publication_root_authority" {
+		const boundary = "-- GO_ASSISTED_BACKFILL_BOUNDARY:"
+		parts := strings.SplitN(sqlText, boundary, 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("apply migration %s: missing Go-assisted backfill boundary", id)
+		}
+		if _, err := tx.ExecContext(ctx, parts[0]); err != nil {
+			return fmt.Errorf("apply migration %s schema: %w", id, err)
+		}
+		if err := backfillAcceptedPublicationRoots(ctx, tx); err != nil {
+			return fmt.Errorf("backfill migration %s: %w", id, err)
+		}
+		triggerSQL := strings.TrimSpace(strings.SplitN(parts[1], "\n", 2)[1])
+		if _, err := tx.ExecContext(ctx, triggerSQL); err != nil {
+			return fmt.Errorf("apply migration %s guard: %w", id, err)
+		}
+	} else if _, err := tx.ExecContext(ctx, sqlText); err != nil {
 		return fmt.Errorf("apply migration %s: %w", id, err)
 	}
 	if err := sqlitemigration.RecordApplied(ctx, tx, migrationArtifacts, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
@@ -238,4 +406,39 @@ func applyMigration(ctx context.Context, db *sql.DB, id, sqlText string) error {
 	}
 	tx = nil
 	return nil
+}
+
+func backfillAcceptedPublicationRoots(ctx context.Context, tx *sql.Tx) error {
+	var eventTableExists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='issue_observation_events')`).Scan(&eventTableExists); err != nil {
+		return err
+	}
+	if !eventTableExists {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE daemon_publication_operations AS operation
+		SET accepted_publication_operation_id = COALESCE(NULLIF((
+			SELECT json_extract(event.payload_json, '$.publication_operation_id')
+			FROM issue_observation_events AS event
+			JOIN daemon_publication_operations AS root
+			  ON root.operation_id = json_extract(event.payload_json, '$.publication_operation_id')
+			 AND root.project_id = operation.project_id
+			 AND root.issue_id = operation.issue_id
+			 AND root.actor_id = operation.actor_id COLLATE NOCASE
+			 AND root.reviewer_kind = operation.reviewer_kind
+			 AND root.review_epoch_event_id = operation.review_epoch_event_id
+			 AND root.accepted_review_event_id = operation.accepted_review_event_id
+			 AND root.source_revision = operation.source_revision
+			WHERE event.id = operation.accepted_review_event_id
+			  AND event.issue_id = operation.issue_id
+			  AND event.event_type = 'review.completed'
+			  AND event.source = 'daemon-orchestration'
+			  AND event.source_command = 'review-accept'
+			  AND json_valid(event.payload_json)
+			  AND json_extract(event.payload_json, '$.outcome') = 'accepted'
+			  AND json_extract(event.payload_json, '$.actor_id') = operation.actor_id COLLATE NOCASE
+			  AND json_extract(event.payload_json, '$.actor_kind') = operation.reviewer_kind
+			  AND CAST(json_extract(event.payload_json, '$.review_epoch_event_id') AS INTEGER) = operation.review_epoch_event_id
+		), ''), operation.operation_id)`)
+	return err
 }

@@ -34,8 +34,15 @@ var profiles = map[string]Profile{
 	},
 	"migration-clone": {
 		Name: "migration-clone", Description: "fresh, historical, repair, drift, rollback, and clone isolation contracts",
-		Packages:   []string{"./internal/services/issues", "./internal/daemon/userstore", "./internal/daemon/state", "./internal/daemon/operations/store", "./internal/daemon"},
-		GoTestArgs: []string{"-json", "-count=1", "-timeout=15m", "-run", "(Migration|Migrate|Migrates|Migrated|Repair|SchemaDrift)"},
+		Packages:                []string{"./internal/services/issues", "./internal/daemon/userstore", "./internal/daemon/state", "./internal/daemon/operations/store", "./internal/daemon"},
+		GoTestArgs:              []string{"-json", "-count=1", "-timeout=15m", "-run", "(Migration|Migrate|Migrates|Migrated|Repair|SchemaDrift)"},
+		PackageIsolatedDBClones: true,
+		PackageCloneAuthorities: map[string][]CloneAuthority{
+			"./internal/services/issues":         {CloneAuthorityProject},
+			"./internal/daemon/userstore":        {CloneAuthorityUser},
+			"./internal/daemon/state":            {CloneAuthorityProject},
+			"./internal/daemon/operations/store": {CloneAuthorityProject},
+		},
 	},
 	"boundary": {
 		Name: "boundary", Description: "thin-client and session-projection executable boundary guards",
@@ -63,6 +70,7 @@ func ResolveProfile(name string, packages []string, run string) (Profile, error)
 	}
 	p.Packages = slices.Clone(p.Packages)
 	p.GoTestArgs = slices.Clone(p.GoTestArgs)
+	p.PackageCloneAuthorities = cloneAuthorityMap(p.PackageCloneAuthorities)
 	if len(packages) > 0 {
 		p.Packages = slices.Clone(packages)
 	}
@@ -72,10 +80,27 @@ func ResolveProfile(name string, packages []string, run string) (Profile, error)
 	return p, nil
 }
 
+func cloneAuthorityMap(source map[string][]CloneAuthority) map[string][]CloneAuthority {
+	if source == nil {
+		return nil
+	}
+	result := make(map[string][]CloneAuthority, len(source))
+	for packageName, authorities := range source {
+		result[packageName] = slices.Clone(authorities)
+	}
+	return result
+}
+
 func (p Profile) Command() []string {
 	command := []string{"go", "test"}
 	command = append(command, p.GoTestArgs...)
 	return append(command, p.Packages...)
+}
+
+func (p Profile) commandForPackage(packageName string) []string {
+	command := []string{"go", "test"}
+	command = append(command, p.GoTestArgs...)
+	return append(command, packageName)
 }
 
 func (p Profile) CachePolicy() string {

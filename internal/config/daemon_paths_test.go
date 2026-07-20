@@ -292,6 +292,28 @@ func TestPrependPathEntryDeduplicatesSymlinkedFilesystemIdentity(t *testing.T) {
 	}
 }
 
+func TestManagedSessionPathReplacesGenerationWithStableControlDirectory(t *testing.T) {
+	installDir := t.TempDir()
+	generationDir := filepath.Join(installDir, ".azedarach-generations", "generation.current")
+	if err := os.MkdirAll(generationDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(t.TempDir(), "bin")
+	pathValue := strings.Join([]string{generationDir, other, installDir, generationDir}, string(os.PathListSeparator))
+	want := strings.Join([]string{installDir, other}, string(os.PathListSeparator))
+	if got := ManagedSessionPath(pathValue, generationDir); got != want {
+		t.Fatalf("ManagedSessionPath() = %q, want %q", got, want)
+	}
+}
+
+func TestManagedSessionPathPreservesUnmanagedPath(t *testing.T) {
+	pathValue := strings.Join([]string{"/custom/bin", "/usr/bin", "/bin"}, string(os.PathListSeparator))
+	generationDir := filepath.Join(t.TempDir(), ".azedarach-generations", "generation.current")
+	if got := ManagedSessionPath(pathValue, generationDir); got != pathValue {
+		t.Fatalf("ManagedSessionPath() = %q, want unchanged %q", got, pathValue)
+	}
+}
+
 func TestDaemonPathsUseScopedWhenEnabledInAzedarachDevelopmentWorktree(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(t.TempDir(), "xdg-runtime"))
 	t.Setenv("AZEDARACH_DAEMON_SCOPE", "worktree")

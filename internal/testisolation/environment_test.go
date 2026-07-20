@@ -90,6 +90,28 @@ func TestApplyRollsBackPartialEnvironmentOnFailure(t *testing.T) {
 	}
 }
 
+func TestTemporaryEnvironmentCloseRemovesReadOnlyModuleTree(t *testing.T) {
+	root := t.TempDir()
+	moduleDir := filepath.Join(root, "home", "go", "pkg", "mod", "example.test", "module@v1.0.0")
+	if err := os.MkdirAll(moduleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(moduleDir, "module.go"), []byte("package module\n"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(moduleDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+
+	environment := &Environment{Root: root, removeOnDone: true}
+	if err := environment.Close(); err != nil {
+		t.Fatalf("Close() read-only module tree: %v", err)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("isolation root remains after Close(): %v", err)
+	}
+}
+
 func TestCheckDatabaseCloneRejectsConfiguredOriginalWithoutRunnerEnvironment(t *testing.T) {
 	home := t.TempDir()
 	project := filepath.Join(t.TempDir(), "registered")

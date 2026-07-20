@@ -217,8 +217,8 @@ func TestGitFetchCheckoutAndMergeCommandsRouteThroughDaemon(t *testing.T) {
 	t.Run("merge", func(t *testing.T) {
 		transport := &gitRecordingTransport{
 			replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
-				if req.Command != CommandGitMerge {
-					t.Fatalf("command = %q, want %q", req.Command, CommandGitMerge)
+				if req.Command != CommandGitMergeRef {
+					t.Fatalf("command = %q, want %q", req.Command, CommandGitMergeRef)
 				}
 				var body GitCommandRequest
 				if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -263,6 +263,26 @@ func TestGitFetchCheckoutAndMergeCommandsRouteThroughDaemon(t *testing.T) {
 		}
 		if transport.lastReq.Meta.ProjectID != wantProjectID {
 			t.Fatalf("project_id = %q, want %q", transport.lastReq.Meta.ProjectID, wantProjectID)
+		}
+	})
+
+	t.Run("typed merge", func(t *testing.T) {
+		transport := &gitRecordingTransport{replyFn: func(req protocol.RequestEnvelope) (protocol.ResponseEnvelope, error) {
+			if req.Command != CommandGitMerge {
+				t.Fatalf("command = %q, want %q", req.Command, CommandGitMerge)
+			}
+			var body GitCommandRequest
+			if err := json.Unmarshal(req.Body, &body); err != nil {
+				t.Fatal(err)
+			}
+			if body.SourceID != "child" || body.TargetID != "parent" || body.Worktree != "" || body.Branch != "" {
+				t.Fatalf("typed merge request = %+v", body)
+			}
+			return responseWithJSON(t, req, GitMergeCommandResponse{SourceID: "child", TargetID: "parent", ReceiptRecorded: true, Result: git.MergeResult{Success: true}}), nil
+		}}
+		resp, err := New(transport).WithProjectID(wantProjectID).GitMergeTyped(context.Background(), "child", "parent")
+		if err != nil || resp.SourceID != "child" || resp.TargetID != "parent" || !resp.ReceiptRecorded {
+			t.Fatalf("GitMergeTyped() = (%+v, %v)", resp, err)
 		}
 	})
 
