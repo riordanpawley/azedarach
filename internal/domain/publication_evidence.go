@@ -3,6 +3,7 @@ package domain
 import (
 	"fmt"
 	"path"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -20,6 +21,50 @@ const (
 
 func (l PublicationEvidenceLayer) Valid() bool {
 	return l == PublicationEvidencePatchReview || l == PublicationEvidenceActivePath || l == PublicationEvidenceMergeResult
+}
+
+// SamePatchReviewIdentity reports whether two records describe the same
+// immutable reviewed patch. BaseRevision and CreatedAt are deliberately not
+// identity: an accepted patch remains the same proof when its integration base
+// advances, and an idempotent replay retains the first writer's timestamp.
+func SamePatchReviewIdentity(left, right PublicationEvidence) bool {
+	if left.Layer != PublicationEvidencePatchReview || right.Layer != PublicationEvidencePatchReview {
+		return false
+	}
+	leftCoverage, leftErr := CanonicalizePublicationCoverage(left.Coverage)
+	rightCoverage, rightErr := CanonicalizePublicationCoverage(right.Coverage)
+	return leftErr == nil && rightErr == nil &&
+		left.EvidenceID == right.EvidenceID &&
+		left.ProjectID == right.ProjectID &&
+		left.IssueID == right.IssueID &&
+		left.PatchDigest == right.PatchDigest &&
+		left.SourceRevision == right.SourceRevision &&
+		left.Producer == right.Producer &&
+		left.PolicyVersion == right.PolicyVersion &&
+		left.EnvironmentFingerprint == right.EnvironmentFingerprint &&
+		left.ReusedFromEvidenceID == right.ReusedFromEvidenceID &&
+		left.Cost == right.Cost &&
+		reflect.DeepEqual(leftCoverage, rightCoverage)
+}
+
+// SameAcceptedPatchReviewAuthority reports whether two base-relative evidence
+// candidates belong to the same accepted immutable review authority. Digest
+// and coverage may differ only when the base differs: they are recomputed from
+// that base before the first durable proof is discovered. The first proof then
+// remains authoritative for the accepted source/reviewer/epoch-derived ID.
+func SameAcceptedPatchReviewAuthority(left, right PublicationEvidence) bool {
+	return left.Layer == PublicationEvidencePatchReview &&
+		right.Layer == PublicationEvidencePatchReview &&
+		left.BaseRevision != right.BaseRevision &&
+		left.EvidenceID == right.EvidenceID &&
+		left.ProjectID == right.ProjectID &&
+		left.IssueID == right.IssueID &&
+		left.SourceRevision == right.SourceRevision &&
+		left.Producer == right.Producer &&
+		left.PolicyVersion == right.PolicyVersion &&
+		left.EnvironmentFingerprint == right.EnvironmentFingerprint &&
+		left.ReusedFromEvidenceID == right.ReusedFromEvidenceID &&
+		left.Cost == right.Cost
 }
 
 type PublicationEvidenceCost struct {

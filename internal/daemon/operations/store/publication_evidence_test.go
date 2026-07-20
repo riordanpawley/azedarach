@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"path/filepath"
+	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,6 +79,128 @@ func TestPublicationEvidenceWritesAreImmutableAndIdempotent(t *testing.T) {
 	}
 	if _, err := store.db.ExecContext(ctx, `UPDATE daemon_publication_evidence SET producer='mutated' WHERE evidence_id=?`, evidence.EvidenceID); err == nil {
 		t.Fatal("immutable evidence update succeeded")
+	}
+}
+
+func TestPatchReviewEvidenceReplayRetainsFirstBaseAcrossConcurrentStores(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	storeA := NewAtPath(dbPath, slog.Default())
+	defer storeA.Close()
+	storeB := NewAtPath(dbPath, slog.Default())
+	defer storeB.Close()
+	original := storedPublicationEvidence()
+	if _, err := storeA.RecordPublicationEvidence(ctx, original); err != nil {
+		t.Fatal(err)
+	}
+	retry := original
+	retry.BaseRevision = "advanced-base"
+	retry.CreatedAt = original.CreatedAt.Add(time.Hour)
+	got, err := storeB.RecordPublicationEvidence(ctx, retry)
+	if err != nil {
+		t.Fatalf("base-advanced retry: %v", err)
+	}
+	if got.BaseRevision != original.BaseRevision || !got.CreatedAt.Equal(original.CreatedAt) {
+		t.Fatalf("retry replaced first immutable record: got=%+v original=%+v", got, original)
+	}
+	for name, mutate := range map[string]func(*domain.PublicationEvidence){
+		"review_epoch_identity": func(e *domain.PublicationEvidence) { e.EvidenceID = "different-review-epoch" },
+		"source":                func(e *domain.PublicationEvidence) { e.SourceRevision = "different-source" },
+		"reviewer":              func(e *domain.PublicationEvidence) { e.Producer = "reviewer:different" },
+		"digest":                func(e *domain.PublicationEvidence) { e.PatchDigest = "different-digest" },
+		"policy":                func(e *domain.PublicationEvidence) { e.PolicyVersion = "different-policy" },
+		"environment":           func(e *domain.PublicationEvidence) { e.EnvironmentFingerprint = "different-environment" },
+		"coverage":              func(e *domain.PublicationEvidence) { e.Coverage.Paths = []string{"different.go"} },
+		"cost":                  func(e *domain.PublicationEvidence) { e.Cost.Tokens++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			conflict := retry
+			mutate(&conflict)
+			if name == "review_epoch_identity" {
+				// A different epoch has a different deterministic evidence ID and
+				// therefore cannot reuse or overwrite the accepted proof.
+				if _, err := storeB.RecordPublicationEvidence(ctx, conflict); err != nil {
+					t.Fatalf("independent epoch record: %v", err)
+				}
+				return
+			}
+			if _, err := storeB.RecordPublicationEvidence(ctx, conflict); err == nil {
+				t.Fatal("semantic identity mismatch replay succeeded")
+			}
+		})
+	}
+}
+
+func TestAcceptedPatchReviewEvidenceConcurrentCrossBaseInsertRetainsOneProof(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "azedarach.db")
+	storeA := NewAtPath(dbPath, slog.Default())
+	defer storeA.Close()
+	storeB := NewAtPath(dbPath, slog.Default())
+	defer storeB.Close()
+	// Complete lazy open/migration sequentially so this test isolates evidence
+	// insertion concurrency instead of racing database initialization.
+	if _, err := storeA.dbHandle(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storeB.dbHandle(); err != nil {
+		t.Fatal(err)
+	}
+
+	first := storedPublicationEvidence()
+	second := first
+	second.BaseRevision = "advanced-base"
+	second.PatchDigest = "advanced-base-relative-digest"
+	second.Coverage.Paths = []string{"advanced-base-relative.go"}
+	second.CreatedAt = first.CreatedAt.Add(time.Hour)
+
+	start := make(chan struct{})
+	results := make(chan domain.PublicationEvidence, 2)
+	errs := make(chan error, 2)
+	var ready sync.WaitGroup
+	ready.Add(2)
+	for _, attempt := range []struct {
+		store    *SQLiteStore
+		evidence domain.PublicationEvidence
+	}{{storeA, first}, {storeB, second}} {
+		go func() {
+			ready.Done()
+			<-start
+			got, err := attempt.store.RecordAcceptedPatchReviewEvidence(ctx, attempt.evidence)
+			results <- got
+			errs <- err
+		}()
+	}
+	ready.Wait()
+	close(start)
+
+	gotA, gotB := <-results, <-results
+	if err := <-errs; err != nil {
+		t.Fatalf("first concurrent record: %v", err)
+	}
+	if err := <-errs; err != nil {
+		t.Fatalf("second concurrent record: %v", err)
+	}
+	if !reflect.DeepEqual(gotA, gotB) {
+		t.Fatalf("concurrent callers observed different authority: first=%+v second=%+v", gotA, gotB)
+	}
+	snapshot, err := storeA.PublicationEvidenceSnapshot(ctx, "project", "issue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Evidence) != 1 || !reflect.DeepEqual(snapshot.Evidence[0], gotA) {
+		t.Fatalf("expected one coherent immutable proof: snapshot=%+v result=%+v", snapshot.Evidence, gotA)
+	}
+
+	sameBaseDigestMismatch := gotA
+	sameBaseDigestMismatch.PatchDigest = "fabricated-digest"
+	if _, err := storeB.RecordAcceptedPatchReviewEvidence(ctx, sameBaseDigestMismatch); err == nil {
+		t.Fatal("same-base digest mismatch succeeded")
+	}
+	identityMismatch := second
+	identityMismatch.SourceRevision = "different-source"
+	if _, err := storeB.RecordAcceptedPatchReviewEvidence(ctx, identityMismatch); err == nil {
+		t.Fatal("cross-base accepted-review identity mismatch succeeded")
 	}
 }
 

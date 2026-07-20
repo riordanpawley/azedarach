@@ -13,6 +13,22 @@ import (
 )
 
 func (s *SQLiteStore) RecordPublicationEvidence(ctx context.Context, evidence domain.PublicationEvidence) (domain.PublicationEvidence, error) {
+	return s.recordPublicationEvidence(ctx, evidence, false)
+}
+
+// RecordAcceptedPatchReviewEvidence records the deterministic proof for an
+// accepted review. If another daemon wins the insert after both callers have
+// observed the proof as absent, a base-relative candidate may differ in digest
+// and coverage. In that one cross-base race, the first immutable proof remains
+// authoritative when the accepted review identity is otherwise exact.
+func (s *SQLiteStore) RecordAcceptedPatchReviewEvidence(ctx context.Context, evidence domain.PublicationEvidence) (domain.PublicationEvidence, error) {
+	if evidence.Layer != domain.PublicationEvidencePatchReview {
+		return domain.PublicationEvidence{}, fmt.Errorf("accepted patch-review record requires patch_review evidence")
+	}
+	return s.recordPublicationEvidence(ctx, evidence, true)
+}
+
+func (s *SQLiteStore) recordPublicationEvidence(ctx context.Context, evidence domain.PublicationEvidence, reconcileAcceptedReviewRace bool) (domain.PublicationEvidence, error) {
 	if evidence.CreatedAt.IsZero() {
 		evidence.CreatedAt = time.Now().UTC()
 	}
@@ -57,7 +73,7 @@ func (s *SQLiteStore) RecordPublicationEvidence(ctx context.Context, evidence do
 	}
 	_ = tx.Rollback()
 	existing, getErr := s.publicationEvidenceByID(ctx, evidence.EvidenceID)
-	if getErr == nil && publicationEvidenceSemanticallyEqual(existing, evidence) {
+	if getErr == nil && (publicationEvidenceSemanticallyEqual(existing, evidence) || domain.SamePatchReviewIdentity(existing, evidence) || (reconcileAcceptedReviewRace && domain.SameAcceptedPatchReviewAuthority(existing, evidence))) {
 		return existing, nil
 	}
 	if getErr == nil {
