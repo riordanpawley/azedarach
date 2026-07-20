@@ -691,7 +691,8 @@ func TestRootedOrchestrationReviewQueueStopsAtDirectChildren(t *testing.T) {
 	}
 	reviewResult, err := d.orchestrationAuthority().Apply(ctx, "proj", protocol.OrchestrationIntentRequest{
 		Scope: scope, Kind: protocol.OrchestrationIntentReviewReturn, IntentKey: "reject-grandchild-review", ActorID: "parent-orchestrator", IssueIDs: []string{grandchildID},
-		Findings: []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "nested worker finding"}},
+		ReviewPass: validReturnedReviewPass(),
+		Findings:   []protocol.OrchestrationReviewFinding{{Severity: "high", Finding: "nested worker finding"}},
 	})
 	if err != nil {
 		t.Fatal(err)

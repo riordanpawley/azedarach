@@ -1922,6 +1922,9 @@ func (a daemonOrchestrationAuthority) recordReviewOutcomeWithRestart(ctx context
 		metadata["review_fallback_reason"] = strings.TrimSpace(inspection.ReviewFallback)
 	}
 	if request.ReviewPass != nil {
+		if metadata == nil {
+			metadata = make(map[string]any)
+		}
 		metadata["review_verdict"] = strings.TrimSpace(request.ReviewPass.Verdict)
 		metadata["review_angle"] = strings.TrimSpace(request.ReviewPass.Angle)
 		metadata["review_unique_findings"] = request.Findings
