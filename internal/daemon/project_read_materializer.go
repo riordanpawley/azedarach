@@ -699,6 +699,7 @@ type authoritativeReadRefreshComponent string
 const (
 	authoritativeReadRefreshCanonical authoritativeReadRefreshComponent = "canonical"
 	authoritativeReadRefreshRuntime   authoritativeReadRefreshComponent = "runtime"
+	authoritativeRuntimeRecoveryLimit                                   = 5 * time.Second
 )
 
 func authoritativeReadRefreshHealthPrefix(component authoritativeReadRefreshComponent) string {
@@ -901,6 +902,19 @@ func (m *projectReadMaterializer) authoritativeRuntimeRefreshRetryIssueIDs(issue
 		}
 	}
 	return retryIssueIDs
+}
+
+func (m *projectReadMaterializer) authoritativeRuntimeFailedIssueIDs() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	issueIDs := make([]string, 0, len(m.authoritativeRuntimeFailures))
+	for issueID, failure := range m.authoritativeRuntimeFailures {
+		if strings.TrimSpace(failure) != "" && m.authoritativeRuntimePending[issueID] == 0 {
+			issueIDs = append(issueIDs, issueID)
+		}
+	}
+	sort.Strings(issueIDs)
+	return issueIDs
 }
 
 func (m *projectReadMaterializer) ownedAuthoritativeRuntimeIssueIDsLocked(attempt authoritativeReadRefreshAttempt) []string {
@@ -1620,6 +1634,23 @@ func (d *Daemon) convergedProjectReadSnapshotMode(ctx context.Context, projectID
 		return nil, metadata, newProjectReadUnavailableError("project read convergence unavailable for %s: %w", projectID, err)
 	}
 	materializer.finishAuthoritativeReadRefresh(attempt, nil)
+	if includeEmbeddedRuntime {
+		// Runtime refresh failures are keyed and recoverable. Invariant reads must
+		// retry those exact keys before rejecting the last-good cache; otherwise a
+		// request deadline that expires during root-user projection publication can
+		// permanently block every later lifecycle transition. Give the repair its
+		// own bounded lifetime because it converges daemon-owned projection state,
+		// while still propagating a real retry failure strictly to this caller.
+		retryIssueIDs := materializer.authoritativeRuntimeFailedIssueIDs()
+		if len(retryIssueIDs) > 0 {
+			recoveryCtx, cancelRecovery := context.WithTimeout(context.WithoutCancel(ctx), authoritativeRuntimeRecoveryLimit)
+			err := d.refreshActiveProjectReadRuntimeForIssues(recoveryCtx, projectID, materializer, retryIssueIDs)
+			cancelRecovery()
+			if err != nil {
+				return nil, materializer.snapshotMetadata(), newProjectReadUnavailableError("recover authoritative runtime projection for invariant evaluation: %w", err)
+			}
+		}
+	}
 	tasks, metadata, err := d.projectReadSnapshot(projectID)
 	if err != nil {
 		return nil, metadata, err
