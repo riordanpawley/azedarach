@@ -295,6 +295,24 @@ fi
 grep -q 'FAIL make-verify::consumer-check' "$failure_evidence"
 grep -q 'exact consumer failure' "$failure_evidence"
 
+symlink_swap_target="$fixture/symlink-swap-target.json"
+symlink_swap_expected="$fixture/symlink-swap-expected.json"
+symlink_swap_terminal="$fixture/symlink-swap-terminal.json"
+printf '{"untouched":true}\n' >"$symlink_swap_target"
+cp "$symlink_swap_target" "$symlink_swap_expected"
+if env "${fresh_validation_environment[@]}" \
+  AZEDARACH_VALIDATION_AZ_BIN="$fixture/fake-bin/az" \
+  FAKE_AZ_FINISH_EVIDENCE_FILE="$symlink_swap_terminal" \
+  SYMLINK_SWAP_TARGET="$symlink_swap_target" \
+  "$fixture/scripts/with-machine-validation-lease" --class aggregate --scope repository --purpose push_gate --profile repository-push -- \
+  sh -c 'rm "$AZEDARACH_VALIDATION_EVIDENCE_FILE"; ln -s "$SYMLINK_SWAP_TARGET" "$AZEDARACH_VALIDATION_EVIDENCE_FILE"; exit 1'; then
+  echo "symlink-swapping validation payload unexpectedly passed" >&2
+  exit 1
+fi
+cmp "$symlink_swap_expected" "$symlink_swap_target"
+grep -q '"fatal_phase":"evidence_identity"' "$symlink_swap_terminal"
+grep -q 'candidate replaced validation evidence file' "$symlink_swap_terminal"
+
 # The remaining lease-control fixtures exercise the controlled-capacity path.
 # Ordinary ticket development bypasses this wrapper entirely.
 
