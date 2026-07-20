@@ -1387,6 +1387,12 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 	if issueClient == nil {
 		return protocol.OrchestrationIntentResult{}, fmt.Errorf("issue store unavailable")
 	}
+	requestedTasks := make([]domain.Task, 0, len(result.Requested))
+	for _, issueID := range result.Requested {
+		if task, taskErr := issueClient.GetWithRuntime(ctx, projectID, issueID); taskErr == nil {
+			requestedTasks = append(requestedTasks, task)
+		}
+	}
 	requestedIntents := make([]issues.RequestedOrchestrationStart, 0, len(result.Requested))
 	requestDigest, err := orchestrationStartRequestDigest(request, result.Requested)
 	if err != nil {
@@ -1414,6 +1420,7 @@ func (a daemonOrchestrationAuthority) Apply(ctx context.Context, projectID strin
 				}
 				result.Pending = append(result.Pending, protocol.OrchestrationPending{IssueID: requested.IssueID, Phase: phase, Message: err.Error(), Retryable: true})
 			}
+			result.Results = buildOrchestrationResultSummaries(result, requestedTasks, domain.WorkflowRoleWorker, nil)
 			return result, nil
 		}
 		return protocol.OrchestrationIntentResult{}, completeRequestedOrchestrationStarts(ctx, issueClient, requestedIntents, err)
@@ -1580,6 +1587,8 @@ func buildOrchestrationResultSummaries(result protocol.OrchestrationIntentResult
 			status = "returned"
 		} else if _, ok := closed[issueID]; ok {
 			status = "completed"
+		} else if pendingForIssue(result.Pending, issueID) {
+			status = "pending"
 		}
 		revision := domain.WorkflowIssueContextRevision(task)
 		if exact := strings.TrimSpace(revisions[issueID]); exact != "" {
@@ -1591,6 +1600,15 @@ func buildOrchestrationResultSummaries(result protocol.OrchestrationIntentResult
 		}
 	}
 	return out
+}
+
+func pendingForIssue(values []protocol.OrchestrationPending, issueID string) bool {
+	for _, value := range values {
+		if naming.IssueIDsEqual(value.IssueID, issueID) {
+			return true
+		}
+	}
+	return false
 }
 
 func workflowStringSet(values []string) map[string]struct{} {

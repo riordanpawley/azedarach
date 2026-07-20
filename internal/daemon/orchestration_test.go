@@ -802,6 +802,9 @@ func TestProjectOrchestrationExplicitStartQueuesBeforeSnapshotAdmissionContentio
 	if len(result.Pending) != 1 || result.Pending[0].IssueID != issueID || result.Pending[0].Phase != "projection_source_checkpoint" || !result.Pending[0].Retryable {
 		t.Fatalf("queued progress = %+v", result.Pending)
 	}
+	if len(result.Results) != 1 || result.Results[0].Summary.Role != domain.WorkflowRoleWorker || result.Results[0].Summary.Status != "pending" {
+		t.Fatalf("bounded pending worker result = %+v", result.Results)
+	}
 	queued, err := client.PendingRequestedOrchestrationStarts(ctx, "proj")
 	if err != nil || len(queued) != 1 || queued[0].IssueID != issueID || queued[0].IntentKey != request.IntentKey {
 		t.Fatalf("durable requested starts = %+v err=%v", queued, err)
