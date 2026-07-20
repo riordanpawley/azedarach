@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
@@ -10001,31 +10002,50 @@ func TestManagedSessionPathFollowsInSessionControlLinkSwitch(t *testing.T) {
 	if sessionPath != appconfig.ManagedSessionPath(inherited, oldGeneration) {
 		t.Fatalf("session PATH = %q, want stable control path derived from %q", sessionPath, inherited)
 	}
-	run := func(binary string) string {
-		t.Helper()
-		cmd := exec.Command("/bin/sh", "-c", binary)
-		cmd.Env = append(os.Environ(), "PATH="+sessionPath)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("run %s: %v (%s)", binary, err, output)
-		}
-		return strings.TrimSpace(string(output))
-	}
-	if got := run("az"); got != "old-az" {
-		t.Fatalf("az before switch = %q, want old-az", got)
-	}
 	nextControl := control + ".next"
 	if err := os.Symlink(filepath.Join(".azedarach-generations", "generation.new"), nextControl); err != nil {
 		t.Fatal(err)
 	}
+	cmd := exec.Command("/bin/sh")
+	cmd.Env = append(os.Environ(), "PATH="+sessionPath)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(stdout)
+	if _, err := io.WriteString(stdin, "az\nhash az azd 2>/dev/null || true\necho ready\n"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, err := reader.ReadString('\n')
+	if err != nil || strings.TrimSpace(ready) != "ready" {
+		t.Fatalf("wait for cached shell: marker=%q err=%v", ready, err)
+	}
 	if err := os.Rename(nextControl, control); err != nil {
 		t.Fatal(err)
 	}
-	if got := run("az"); got != "new-az" {
-		t.Fatalf("az after switch = %q, want new-az", got)
+	if _, err := io.WriteString(stdin, "az\nazd\nexit\n"); err != nil {
+		t.Fatal(err)
 	}
-	if got := run("azd"); got != "new-azd" {
-		t.Fatalf("azd after switch = %q, want new-azd", got)
+	after, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("run cached shell across control-link switch: %v", err)
+	}
+	if got, want := strings.Fields(before+string(after)), []string{"old-az", "new-az", "new-azd"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("commands across control-link switch = %q, want %q", got, want)
 	}
 }
 
