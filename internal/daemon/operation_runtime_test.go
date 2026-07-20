@@ -1018,7 +1018,13 @@ func TestOperationRuntimeCancelMapsCancelledErrorResponseToCancelled(t *testing.
 }
 
 func TestOperationRuntimeCancelAfterRestartDispatchPersistsTerminalAggregate(t *testing.T) {
-	d, _, runner, target := newExactRestartDaemon(t, "project", "az-1", "", "idle")
+	d, runtimeStore, runner, target := newExactRestartDaemon(t, "project", "az-1", "one", "idle")
+	if err := upsertSessionStateFixture(runtimeStore, context.Background(), target.ProjectID, daemonstate.Session{
+		ID: target.SessionID, IssueID: target.IssueID, Role: daemonstate.SessionRoleWorker,
+		ScopeKind: daemonstate.SessionScopeIssue, ScopeID: target.IssueID, State: daemonstate.SessionStateRunning,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	dispatched := make(chan struct{})
 	releaseDispatch := make(chan struct{})
 	d.sessionRestartRespawn = func(_ context.Context, paneTarget, worktree, command string) (error, bool) {

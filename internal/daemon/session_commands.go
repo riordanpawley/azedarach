@@ -1975,7 +1975,10 @@ func (d *Daemon) handleSessionRestartAllDirect(ctx context.Context, req protocol
 	restartTargetsBySession := make(map[string]sessionRestartAllTarget, len(liveSessions))
 	for _, targetProjectID := range projectIDs {
 		activityByIssueKey := d.sessionRestartActivityByIssueKey(ctx, targetProjectID)
-		projectedSessions := d.sessionRestartAllProjectedSessionIDs(ctx, targetProjectID)
+		projectedBySession, projectionErr := d.sessionRestartAllProjectedSessions(ctx, targetProjectID)
+		if projectionErr != nil {
+			return d.errorResponse(req, protocol.ErrorCodeInternal, fmt.Sprintf("refresh restart session authority for %s: %v", targetProjectID, projectionErr)), nil
+		}
 		namingScope := d.sessionNamingScope(targetProjectID)
 		for _, sessionID := range liveSessions {
 			sessionID = strings.TrimSpace(sessionID)
@@ -1985,30 +1988,51 @@ func (d *Daemon) handleSessionRestartAllDirect(ctx context.Context, req protocol
 			if !strings.HasPrefix(sessionID, naming.ProjectSessionPrefix(namingScope)+"-") {
 				continue
 			}
-			issueID, ok := naming.ParseIssueIDFromSessionName(sessionID, namingScope)
-			if !ok {
-				continue
-			}
-			activity := "unknown"
-			if display, found := activityByIssueKey[sessionKey(issueID)]; found && strings.TrimSpace(display.Activity) != "" {
-				activity = display.Activity
-			}
 			target := sessionRestartAllTarget{
 				ProjectID: targetProjectID,
 				SessionID: sessionID,
-				IssueID:   issueID,
-				Activity:  activity,
+				Activity:  "unknown",
 			}
-			if display, found := activityByIssueKey[sessionKey(issueID)]; found {
-				target.ActivitySource = display.Source
+			projected := projectedBySession[sessionID]
+			switch len(projected) {
+			case 0:
+				lease, leaseFound, leaseErr := daemonstate.NewOrchestratorLeaseAuthority(d.sessionRuntimeStateStoreIfConfigured(targetProjectID)).FindBySession(ctx, targetProjectID, sessionID)
+				if leaseErr != nil {
+					target.ClassificationError = fmt.Sprintf("refresh orchestrator lease authority: %v", leaseErr)
+				} else if leaseFound {
+					target.Role = daemonstate.SessionRoleOrchestrator
+					target.ScopeKind = daemonstate.SessionScopeOrchestration
+					target.ScopeID = orchestrationScopeID(lease.Identity.Scope)
+					target.IssueID = lease.Identity.Scope.RootIssueID.String()
+					target.ClassificationError = "orchestrator lease authority has no matching durable session role/scope projection"
+				} else if issueID, ok := naming.ParseIssueIDFromSessionName(sessionID, namingScope); ok {
+					target.IssueID = issueID
+					target.ClassificationError = "durable session role/scope projection is missing"
+				} else {
+					target.ClassificationError = "durable session role/scope projection is missing"
+				}
+			case 1:
+				target = sessionRestartTargetFromProjection(target, projected[0])
+			default:
+				target.ClassificationError = "multiple durable session role/scope projections claim the live session"
 			}
-			if _, projected := projectedSessions[sessionID]; projected {
-				target.Projected = true
+			if target.IssueID != "" {
+				if display, found := activityByIssueKey[sessionKey(target.IssueID)]; found {
+					if strings.TrimSpace(display.Activity) != "" {
+						target.Activity = display.Activity
+					}
+					target.ActivitySource = display.Source
+				}
 			}
 			if _, tmuxReady := livePaneSessions[sessionID]; tmuxReady {
 				target.TmuxReady = true
 			}
 			target.ActiveIntent = sessionRestartActiveIntent(target.Activity)
+			if target.ClassificationError == "" {
+				if authorityErr := d.validateSessionRestartTargetAuthority(ctx, target); authorityErr != nil {
+					target.ClassificationError = authorityErr.Error()
+				}
+			}
 			if existing, found := restartTargetsBySession[sessionID]; !found || sessionRestartAllTargetPreferred(target, existing) {
 				restartTargetsBySession[sessionID] = target
 			}
@@ -2119,51 +2143,76 @@ func (d *Daemon) executeSessionRestartBatch(
 }
 
 func (d *Daemon) executeSessionRestartTarget(ctx context.Context, target sessionRestartAllTarget, body protocol.SessionRestartAllRequestBody) protocol.SessionRestartAllItem {
-	var item protocol.SessionRestartAllItem
-	var rootedIdentity *domain.OrchestratorIdentity
-	serialized := false
-	if store := d.sessionRuntimeStateStoreIfConfigured(target.ProjectID); store != nil && strings.TrimSpace(target.IssueID) != "" {
-		scope, scopeErr := domain.RootedOrchestrationScope(target.IssueID)
-		if scopeErr != nil {
-			item = sessionRestartAllItem(target)
-			item.Error = fmt.Sprintf("resolve potential rooted restart scope: %v", scopeErr)
-		} else if identity, identityErr := domain.NewOrchestratorIdentity(target.ProjectID, scope); identityErr != nil {
-			item = sessionRestartAllItem(target)
-			item.Error = fmt.Sprintf("resolve potential rooted restart identity: %v", identityErr)
-		} else {
-			serialized = true
-			lockErr := store.WithOrchestratorScopeTransition(ctx, identity, func(lockCtx context.Context) error {
-				item = sessionRestartAllItem(target)
-				if !item.TmuxReady {
-					return nil
-				}
-				lease, found, leaseErr := daemonstate.NewOrchestratorLeaseAuthority(store).FindBySession(lockCtx, target.ProjectID, target.SessionID)
-				if leaseErr != nil {
-					return fmt.Errorf("refresh orchestrator lease inside restart transition: %w", leaseErr)
-				}
-				if found && lease.Identity == identity {
-					rootedIdentity = &identity
-				}
-				item = d.restartManagedAgentPane(lockCtx, target, body, item, rootedIdentity)
-				return nil
-			})
-			if lockErr != nil {
-				item = sessionRestartAllItem(target)
-				item.Error = fmt.Sprintf("serialize potential rooted orchestrator replacement: %v", lockErr)
-			}
-		}
+	target = normalizeSessionRestartTargetAuthority(target)
+	item := sessionRestartAllItem(target)
+	if target.ClassificationError != "" {
+		item.Error = target.ClassificationError
 	}
-	if !serialized && item.Error == "" {
-		item = sessionRestartAllItem(target)
-		if item.TmuxReady {
-			item = d.restartManagedAgentPane(ctx, target, body, item, nil)
-		}
-	}
-	if !item.TmuxReady && item.Error == "" {
+	if item.Error == "" && !item.TmuxReady {
 		item.Skipped = true
 		item.Reason = "no_tmux_pane"
 		item.Outcome = "crashed"
 		item.Stages = append(item.Stages, restartStage(sessionRestartLifecycleCompensated, "complete", item.Reason, 0))
+		return item
+	}
+	var orchestratorIdentity *domain.OrchestratorIdentity
+	if item.Error == "" && target.Role == daemonstate.SessionRoleOrchestrator {
+		scope, scopeErr := sessionRestartOrchestrationScope(target.ScopeID)
+		if scopeErr != nil {
+			item.Error = scopeErr.Error()
+		} else if identity, identityErr := domain.NewOrchestratorIdentity(target.ProjectID, scope); identityErr != nil {
+			item.Error = fmt.Sprintf("resolve orchestrator restart identity: %v", identityErr)
+		} else if store := d.sessionRuntimeStateStoreIfConfigured(target.ProjectID); store == nil {
+			item.Error = "session projection store unavailable"
+		} else {
+			lockErr := store.WithOrchestratorScopeTransition(ctx, identity, func(lockCtx context.Context) error {
+				if authorityErr := d.validateSessionRestartTargetAuthority(lockCtx, target); authorityErr != nil {
+					item.Error = authorityErr.Error()
+					return nil
+				}
+				orchestratorIdentity = &identity
+				if item.TmuxReady {
+					item = d.restartManagedAgentPane(lockCtx, target, body, item, orchestratorIdentity)
+					if item.Restarted {
+						projectionCtx, cancelProjection := context.WithTimeout(context.WithoutCancel(lockCtx), sessionRestartPreflightTimeout)
+						defer cancelProjection()
+						if persistErr := d.persistOrchestratorSessionProjection(projectionCtx, protocol.Metadata{ProjectID: naming.ProjectID(target.ProjectID)}, target.ProjectID, identity.Scope, target.SessionID); persistErr != nil {
+							item.Restarted = false
+							item.Error = fmt.Sprintf("persist restarted orchestrator projection: %v", persistErr)
+						}
+					}
+				}
+				return nil
+			})
+			if lockErr != nil {
+				item.Error = fmt.Sprintf("serialize exact orchestrator scope replacement: %v", lockErr)
+			}
+		}
+	} else if item.Error == "" && target.Role == daemonstate.SessionRoleWorker {
+		scope, scopeErr := domain.RootedOrchestrationScope(target.IssueID)
+		if scopeErr != nil {
+			item.Error = fmt.Sprintf("resolve potential rooted restart scope: %v", scopeErr)
+		} else if identity, identityErr := domain.NewOrchestratorIdentity(target.ProjectID, scope); identityErr != nil {
+			item.Error = fmt.Sprintf("resolve potential rooted restart identity: %v", identityErr)
+		} else if store := d.sessionRuntimeStateStoreIfConfigured(target.ProjectID); store == nil {
+			item.Error = "session projection store unavailable"
+		} else {
+			lockErr := store.WithOrchestratorScopeTransition(ctx, identity, func(lockCtx context.Context) error {
+				if authorityErr := d.validateSessionRestartTargetAuthority(lockCtx, target); authorityErr != nil {
+					item.Error = authorityErr.Error()
+					return nil
+				}
+				if item.TmuxReady {
+					item = d.restartManagedAgentPane(lockCtx, target, body, item, nil)
+				}
+				return nil
+			})
+			if lockErr != nil {
+				item.Error = fmt.Sprintf("serialize potential rooted scope replacement: %v", lockErr)
+			}
+		}
+	} else if item.Error == "" {
+		item.Error = fmt.Sprintf("unsupported durable session role %q", target.Role)
 	}
 	if item.Error != "" && len(item.Stages) == 0 {
 		item.Stages = append(item.Stages, restartStage(sessionRestartLifecycleFailed, "failed", item.Error, 0))
@@ -2171,13 +2220,7 @@ func (d *Daemon) executeSessionRestartTarget(ctx context.Context, target session
 	if item.Restarted {
 		projectionCtx, cancelProjection := context.WithTimeout(context.WithoutCancel(ctx), sessionRestartPreflightTimeout)
 		defer cancelProjection()
-		if rootedIdentity != nil {
-			if err := d.persistOrchestratorSessionProjection(projectionCtx, protocol.Metadata{ProjectID: naming.ProjectID(target.ProjectID)}, target.ProjectID, rootedIdentity.Scope, target.SessionID); err != nil {
-				item.Restarted = false
-				item.Error = fmt.Sprintf("persist restarted rooted orchestrator projection: %v", err)
-				return item
-			}
-		} else if target.IssueID != "" {
+		if orchestratorIdentity == nil && target.Role == daemonstate.SessionRoleWorker && target.IssueID != "" {
 			if err := d.persistRestartedSessionProjection(projectionCtx, target.ProjectID, target.SessionID, target.IssueID); err != nil {
 				item.Restarted = false
 				item.Error = fmt.Sprintf("persist restarted worker projection: %v", err)
@@ -2186,6 +2229,16 @@ func (d *Daemon) executeSessionRestartTarget(ctx context.Context, target session
 		}
 	}
 	return item
+}
+
+func normalizeSessionRestartTargetAuthority(target sessionRestartAllTarget) sessionRestartAllTarget {
+	target.Role = restartTargetRole(target)
+	target.ScopeKind = restartTargetScopeKind(target)
+	target.ScopeID = restartTargetScopeID(target)
+	if target.Role == daemonstate.SessionRoleWorker && strings.TrimSpace(target.IssueID) == "" {
+		target.IssueID = target.ScopeID
+	}
+	return target
 }
 
 func restartItemTerminalStage(item protocol.SessionRestartAllItem) string {
@@ -2216,14 +2269,121 @@ func sessionRestartCounts(items []protocol.SessionRestartAllItem) (restarted, sk
 }
 
 type sessionRestartAllTarget struct {
-	ProjectID      string `json:"project_id"`
-	SessionID      string `json:"session_id"`
-	IssueID        string `json:"issue_id,omitempty"`
-	Activity       string `json:"activity"`
-	ActivitySource string `json:"activity_source,omitempty"`
-	Projected      bool   `json:"projected"`
-	TmuxReady      bool   `json:"tmux_ready"`
-	ActiveIntent   bool   `json:"active_intent"`
+	ProjectID           string                       `json:"project_id"`
+	SessionID           string                       `json:"session_id"`
+	IssueID             string                       `json:"issue_id,omitempty"`
+	Role                daemonstate.SessionRole      `json:"role,omitempty"`
+	ScopeKind           daemonstate.SessionScopeKind `json:"scope_kind,omitempty"`
+	ScopeID             string                       `json:"scope_id,omitempty"`
+	Activity            string                       `json:"activity"`
+	ActivitySource      string                       `json:"activity_source,omitempty"`
+	Projected           bool                         `json:"projected"`
+	TmuxReady           bool                         `json:"tmux_ready"`
+	ActiveIntent        bool                         `json:"active_intent"`
+	ClassificationError string                       `json:"classification_error,omitempty"`
+}
+
+func sessionRestartTargetFromProjection(target sessionRestartAllTarget, projection daemonstate.Session) sessionRestartAllTarget {
+	target.IssueID = strings.TrimSpace(projection.IssueID)
+	target.Role = projection.Role
+	target.ScopeKind = projection.ScopeKind
+	target.ScopeID = strings.TrimSpace(projection.ScopeID)
+	target.Activity = strings.TrimSpace(projection.Activity)
+	if target.Activity == "" {
+		target.Activity = "unknown"
+	}
+	target.ActivitySource = strings.TrimSpace(projection.ActivitySource)
+	target.Projected = true
+	return target
+}
+
+func (d *Daemon) sessionRestartAllProjectedSessions(ctx context.Context, projectID string) (map[string][]daemonstate.Session, error) {
+	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
+	if store == nil {
+		return nil, errors.New("session projection store unavailable")
+	}
+	rows, err := store.ListSessionIntentStates(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	bySession := make(map[string][]daemonstate.Session, len(rows))
+	for _, row := range rows {
+		sessionID := strings.TrimSpace(row.ID)
+		if sessionID == "" {
+			continue
+		}
+		bySession[sessionID] = append(bySession[sessionID], row)
+	}
+	return bySession, nil
+}
+
+func (d *Daemon) validateSessionRestartTargetAuthority(ctx context.Context, target sessionRestartAllTarget) error {
+	target = normalizeSessionRestartTargetAuthority(target)
+	store := d.sessionRuntimeStateStoreIfConfigured(target.ProjectID)
+	if store == nil {
+		return errors.New("session projection store unavailable")
+	}
+	projection, found, err := store.GetSessionIntent(ctx, target.ProjectID, target.Role, target.ScopeKind, target.ScopeID)
+	if err != nil {
+		return fmt.Errorf("refresh durable session role/scope: %w", err)
+	}
+	if !found || strings.TrimSpace(projection.ID) != strings.TrimSpace(target.SessionID) ||
+		strings.TrimSpace(projection.IssueID) != strings.TrimSpace(target.IssueID) ||
+		projection.Role != target.Role || projection.ScopeKind != target.ScopeKind || strings.TrimSpace(projection.ScopeID) != strings.TrimSpace(target.ScopeID) {
+		return errors.New("durable session role/scope changed or no longer claims the live session")
+	}
+	if err := daemonstate.ValidateSessionProduct(projection); err != nil {
+		return fmt.Errorf("invalid durable session role/scope: %w", err)
+	}
+	authority := daemonstate.NewOrchestratorLeaseAuthority(store)
+	lease, leaseFound, err := authority.FindBySession(ctx, target.ProjectID, target.SessionID)
+	if err != nil {
+		return fmt.Errorf("refresh orchestrator lease authority: %w", err)
+	}
+	switch target.Role {
+	case daemonstate.SessionRoleWorker:
+		if target.ScopeKind != daemonstate.SessionScopeIssue || strings.TrimSpace(target.ScopeID) == "" || strings.TrimSpace(target.IssueID) != strings.TrimSpace(target.ScopeID) {
+			return errors.New("worker restart target has invalid durable issue scope")
+		}
+		if leaseFound {
+			return errors.New("worker session projection conflicts with orchestrator lease authority")
+		}
+	case daemonstate.SessionRoleOrchestrator:
+		if target.ScopeKind != daemonstate.SessionScopeOrchestration {
+			return errors.New("orchestrator restart target has invalid durable scope kind")
+		}
+		scope, scopeErr := sessionRestartOrchestrationScope(target.ScopeID)
+		if scopeErr != nil {
+			return scopeErr
+		}
+		identity, identityErr := domain.NewOrchestratorIdentity(target.ProjectID, scope)
+		if identityErr != nil {
+			return fmt.Errorf("resolve orchestrator restart identity: %w", identityErr)
+		}
+		if !leaseFound || lease.Identity != identity || strings.TrimSpace(lease.SessionID) != strings.TrimSpace(target.SessionID) {
+			return errors.New("durable orchestrator session projection conflicts with exact scope lease authority")
+		}
+		if lease.Lifecycle == domain.OrchestratorPaused {
+			return errors.New("paused orchestrator lease conflicts with live restart target")
+		}
+		if expected := d.orchestratorSessionID(target.ProjectID, scope); expected != target.SessionID {
+			return fmt.Errorf("live tmux session %s does not match canonical orchestrator scope session %s", target.SessionID, expected)
+		}
+	default:
+		return fmt.Errorf("unsupported durable session role %q", target.Role)
+	}
+	return nil
+}
+
+func sessionRestartOrchestrationScope(scopeID string) (domain.OrchestrationScope, error) {
+	if strings.TrimSpace(scopeID) == string(domain.OrchestrationScopeProject) {
+		return domain.ProjectOrchestrationScope(), nil
+	}
+	scope, err := domain.RootedOrchestrationScope(scopeID)
+	if err != nil {
+		return domain.OrchestrationScope{}, fmt.Errorf("resolve rooted orchestrator restart scope: %w", err)
+	}
+	return scope, nil
 }
 
 func sessionRestartAllItem(target sessionRestartAllTarget) protocol.SessionRestartAllItem {
@@ -2269,30 +2429,6 @@ func sessionRestartActiveIntent(activity string) bool {
 	default:
 		return false
 	}
-}
-
-func (d *Daemon) sessionRestartAllProjectedSessionIDs(ctx context.Context, projectID string) map[string]struct{} {
-	projectID = d.canonicalProjectID(projectID)
-	store := d.sessionRuntimeStateStoreIfConfigured(projectID)
-	if store == nil {
-		return nil
-	}
-	sessions, err := store.ListSessionStates(ctx, projectID)
-	if err != nil {
-		if d != nil && d.cfg.Logger != nil {
-			d.cfg.Logger.Debug("load restart-all session projections failed", "project_id", projectID, "error", err)
-		}
-		return nil
-	}
-	ids := make(map[string]struct{}, len(sessions))
-	for _, session := range sessions {
-		sessionID := strings.TrimSpace(session.ID)
-		if sessionID == "" {
-			continue
-		}
-		ids[sessionID] = struct{}{}
-	}
-	return ids
 }
 
 func (d *Daemon) sessionRestartAllProjectIDs(requestProjectID string) []string {

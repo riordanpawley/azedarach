@@ -1271,6 +1271,7 @@ func TestSessionRestartAllRefusesSessionsWithoutManagedIdentity(t *testing.T) {
 }
 
 func TestSessionRestartAllCompletionCheckpointFailureReturnsProtocolError(t *testing.T) {
+	ctx := context.Background()
 	repoDir := t.TempDir()
 	projectID, err := appconfig.ProjectIDForRoot(repoDir)
 	if err != nil {
@@ -1279,12 +1280,20 @@ func TestSessionRestartAllCompletionCheckpointFailureReturnsProtocolError(t *tes
 	sessionID := naming.CanonicalSessionID(repoDir, "cph")
 	runner := newSessionStartTmuxRunner()
 	runner.sessions[sessionID] = true
+	runtimeStore := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = runtimeStore.Close() })
+	if err := upsertSessionStateFixture(runtimeStore, ctx, projectID, daemonstate.Session{
+		ID: sessionID, IssueID: "cph", State: daemonstate.SessionStateRunning,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	d := &Daemon{
-		cfg:  Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
-		tmux: tmux.NewClient(runner, slog.Default()),
+		cfg:                    Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+		tmux:                   tmux.NewClient(runner, slog.Default()),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: runtimeStore},
 	}
 	writes := 0
-	ctx := daemonops.WithProgressReporter(context.Background(), func(context.Context, daemonops.Progress) error {
+	ctx = daemonops.WithProgressReporter(ctx, func(context.Context, daemonops.Progress) error {
 		writes++
 		if writes == 3 {
 			return errors.New("completion checkpoint unavailable")
@@ -1378,6 +1387,60 @@ func TestSessionRestartAllForceBusyStillRequiresManagedIdentity(t *testing.T) {
 	}
 	if tmuxRunner.sendKeysCalls != 0 {
 		t.Fatalf("send-keys calls = %d, want no legacy terminal input", tmuxRunner.sendKeysCalls)
+	}
+}
+
+func TestSessionRestartAllUsesRefreshedHookActivityForBusyGate(t *testing.T) {
+	ctx := context.Background()
+	repoDir := t.TempDir()
+	projectID, err := appconfig.ProjectIDForRoot(repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := daemonstate.NewRuntimeStateStoreAtPath(filepath.Join(t.TempDir(), "runtime.db"), slog.Default())
+	t.Cleanup(func() { _ = store.Close() })
+	issueID := "busy-hook"
+	sessionID := naming.CanonicalSessionID(repoDir, issueID)
+	base := time.Now().UTC()
+	if err := upsertSessionStateFixture(store, ctx, projectID, daemonstate.Session{
+		ID: sessionID, IssueID: issueID, State: daemonstate.SessionStateRunning, ObservedState: daemonstate.SessionStateRunning,
+		Activity: "idle", ActivitySource: "session", UpdatedAt: base,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ApplyPhysicalSessionObservation(ctx, daemonstate.PhysicalSessionObservation{
+		ProjectID: projectID, SessionID: sessionID, ObservedState: daemonstate.SessionStateRunning,
+		Activity: "busy", ActivitySource: "hooks", UpdatedAt: base.Add(time.Second), ObservedVersion: base.Add(time.Second).UnixNano(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runner := newSessionStartTmuxRunner()
+	runner.sessions[sessionID] = true
+	d := &Daemon{
+		cfg:                    Config{RepoDir: repoDir, CLITool: "codex", SessionShell: "zsh", Logger: slog.Default()},
+		tmux:                   tmux.NewClient(runner, slog.Default()),
+		runtimeStoresByProject: map[string]*daemonstate.RuntimeStateStore{projectID: store},
+	}
+	runner.onRespawnPane = seedManagedRestartIdentity(t, d, runner, projectID, sessionID)
+	resp, err := d.handleSessionRestartAll(ctx, protocol.RequestEnvelope{
+		Command: protocol.CommandSessionRestartAll,
+		Meta:    protocol.Metadata{ProjectID: naming.ProjectID(projectID)},
+		Body:    marshalJSON(protocol.SessionRestartAllRequestBody{ProjectID: naming.ProjectID(projectID)}),
+	})
+	if err != nil || resp.Error != nil {
+		t.Fatalf("restart-all response=%+v err=%v", resp.Error, err)
+	}
+	var result protocol.SessionRestartAllResponseBody
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Restarted != 0 || result.Skipped != 1 || len(result.Sessions) != 1 || result.Sessions[0].Reason != "busy_requires_force" || result.Sessions[0].Activity != "busy" || result.Sessions[0].ActivitySource != "hooks" {
+		t.Fatalf("hook-busy restart result = %+v", result)
+	}
+	for _, command := range runner.commands {
+		if len(command) > 0 && command[0] == "respawn-pane" {
+			t.Fatalf("hook-busy session bypassed force gate: %v", command)
+		}
 	}
 }
 
@@ -1842,6 +1905,8 @@ func seedManagedRestartIdentity(t *testing.T, d *Daemon, runner *sessionStartTmu
 			if err != nil {
 				continue
 			}
+			runner.launchScriptPaths[sessionID] = matches[1]
+			runner.launchScriptContents[sessionID] = string(body)
 			incarnation := regexp.MustCompile(`AZEDARACH_AGENT_INCARNATION='([^']+)'`).FindStringSubmatch(string(body))
 			if len(incarnation) != 2 {
 				continue

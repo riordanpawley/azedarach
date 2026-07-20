@@ -1909,6 +1909,15 @@ func (d *Daemon) recoverInterruptedSessionRestartPlan(ctx context.Context, plan 
 	var recovery interruptedOperationRecovery
 	var recovered bool
 	recoverWithPaneLock := func(lockCtx context.Context) error {
+		target := sessionRestartAllTarget{
+			ProjectID: plan.ProjectID, SessionID: plan.SessionID, IssueID: plan.IssueID,
+			Role: restartPlanRole(plan), ScopeKind: restartPlanScopeKind(plan), ScopeID: restartPlanScopeID(plan), Activity: plan.Activity,
+		}
+		if plan.Role != "" || plan.ScopeKind != "" || plan.ScopeID != "" || plan.OrchestratorIdentity != nil {
+			if authorityErr := d.validateSessionRestartTargetAuthority(lockCtx, target); authorityErr != nil {
+				return fmt.Errorf("revalidate interrupted restart authority: %w", authorityErr)
+			}
+		}
 		return store.WithManagedAgentRestartTransition(lockCtx, plan.ProjectID, plan.SessionID, plan.Old.LogicalPaneID, func(paneCtx context.Context) error {
 			recovery, recovered = d.recoverInterruptedSessionRestartLocked(paneCtx, store, plan)
 			if recovered && recovery.State == daemonops.StateDone {
@@ -1920,8 +1929,11 @@ func (d *Daemon) recoverInterruptedSessionRestartPlan(ctx context.Context, plan 
 		})
 	}
 	var lockErr error
-	if plan.RootedIdentity != nil {
-		lockErr = store.WithOrchestratorScopeTransition(ctx, *plan.RootedIdentity, recoverWithPaneLock)
+	transitionIdentity, transitionErr := sessionRestartPlanTransitionIdentity(plan)
+	if transitionErr != nil {
+		lockErr = transitionErr
+	} else if transitionIdentity != nil {
+		lockErr = store.WithOrchestratorScopeTransition(ctx, *transitionIdentity, recoverWithPaneLock)
 	} else {
 		lockErr = recoverWithPaneLock(ctx)
 	}
@@ -1948,9 +1960,9 @@ func (d *Daemon) persistRecoveredSessionRestartProjection(ctx context.Context, p
 	}
 	projectionCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionRestartPreflightTimeout)
 	defer cancel()
-	if plan.RootedIdentity != nil {
-		if err := d.persistOrchestratorSessionProjection(projectionCtx, protocol.Metadata{ProjectID: naming.ProjectID(plan.ProjectID)}, plan.ProjectID, plan.RootedIdentity.Scope, plan.SessionID); err != nil {
-			return fmt.Errorf("persist recovered rooted orchestrator projection: %w", err)
+	if identity := sessionRestartPlanOrchestratorIdentity(plan); identity != nil {
+		if err := d.persistOrchestratorSessionProjection(projectionCtx, protocol.Metadata{ProjectID: naming.ProjectID(plan.ProjectID)}, plan.ProjectID, identity.Scope, plan.SessionID); err != nil {
+			return fmt.Errorf("persist recovered orchestrator projection: %w", err)
 		}
 		return nil
 	}
@@ -2101,7 +2113,7 @@ func (d *Daemon) recoverInterruptedSessionRestartLocked(ctx context.Context, sto
 			oldIdentityLive := managedRestartIdentityLive(plan.SessionID, plan.Old, panes)
 			lastOldIdentityLive = oldIdentityLive
 			if oldIdentityLive && plan.Stage == sessionRestartStageRootedInvalidateReady {
-				if plan.RootedIdentity == nil {
+				if !isRootedRestartIdentity(sessionRestartPlanOrchestratorIdentity(plan)) {
 					item.Outcome = "partial_failure"
 					item.Error = "rooted invalidation recovery is missing rooted orchestrator identity"
 					item.Stages = []protocol.SessionRestartStage{restartStage("recover_rooted_bootstrap", "failed", item.Error, sessionRestartObservationTimeout)}
@@ -2149,7 +2161,7 @@ func (d *Daemon) recoverInterruptedSessionRestartLocked(ctx context.Context, sto
 
 		select {
 		case <-recoveryCtx.Done():
-			if lastOldIdentityLive && plan.Stage == "replace_ready" && plan.RootedIdentity != nil {
+			if lastOldIdentityLive && plan.Stage == "replace_ready" && isRootedRestartIdentity(sessionRestartPlanOrchestratorIdentity(plan)) {
 				rootedCtx, cancelRooted := context.WithTimeout(ctx, sessionRestartObservationTimeout)
 				rootedErr := d.repairRecoveredSessionRestartRootedBootstrap(rootedCtx, plan)
 				cancelRooted()
