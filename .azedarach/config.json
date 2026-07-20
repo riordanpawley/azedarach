@@ -153,7 +153,7 @@
   },
   "session": {
     "asyncInitCommands": [],
-    "codexAppServer": true,
+    "codexAppServer": false,
     "dangerouslySkipPermissions": true,
     "logDir": "/Users/riordan/.azedarach/logs",
     "shell": "zsh",
