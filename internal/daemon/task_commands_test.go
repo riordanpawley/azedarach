@@ -8072,6 +8072,7 @@ func TestTaskCloseCommandSkipsIntegrationWhenSourceHasNoChangesEvenIfTargetDirty
 		hub:          d.hub,
 		nextRevision: d.nextRevision,
 	})
+	t.Cleanup(func() { _ = d.operationRuntime.Close() })
 	d.gitStatusAdapter = &gitServiceAdapter{
 		client:            git.NewClient(runner, logger),
 		runtimeStateStore: runtimeStore,

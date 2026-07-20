@@ -662,10 +662,7 @@ func TestTaskCloseRetryRecoversReceiptAndRecordsExactSyntheticMergeEvidence(t *t
 		SourceRevision: sourceOID, BaseRevision: baseOID, PolicyVersion: "portable-v1", EnvironmentFingerprint: "node-consumer",
 		ValidationCommand: "npm run verify-publication", State: domain.PublicationOperationQueued, CreatedAt: started,
 	}
-	mergedA := publication
-	mergedA.OperationID = "publication-merged-a"
-	mergedA.PatchEvidenceID = mergedA.OperationID
-	mergedA.IntentKey = "review-accept-a"
+	mergedA := refreshedPublicationOperationAttempt(publication, publication.BaseRevision, publication.ValidationCommand, publication.PolicyVersion, publication.EnvironmentFingerprint)
 	storedMergedA, _, err := runtime.store.EnqueuePublication(ctx, mergedA, "publication-merged-a")
 	require.NoError(t, err)
 	claimedMergedA, acquired, err := runtime.store.ClaimPublicationOperation(ctx, storedMergedA.OperationID, operationstore.PublicationOperationClaim{
